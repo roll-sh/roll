@@ -37,8 +37,8 @@ pub(crate) struct AnalyzerInner {
     /// The name `_analyze` explain reports (Elasticsearch reports null for analyzers it built
     /// on the fly without naming them).
     pub explain_name: Option<String>,
-    pool: Mutex<Vec<Chain>>,
-    norm_pool: Mutex<Vec<Chain>>,
+    pool: ChainPool,
+    norm_pool: ChainPool,
 }
 
 impl AnalyzerInner {
@@ -141,8 +141,8 @@ impl AnalyzerSpec {
                 offset_gap: self.offset_gap,
                 explain_pos_gap,
                 mode,
-                pool: Mutex::new(Vec::new()),
-                norm_pool: Mutex::new(Vec::new()),
+                pool: ChainPool::new(),
+                norm_pool: ChainPool::new(),
             }),
         })
     }
@@ -171,16 +171,43 @@ fn check_shingle_size(size: usize) -> Result<(), AnalysisError> {
     Ok(())
 }
 
+/// Chain instances kept for reuse, in shards picked by thread: indexing threads analyze
+/// every text value of every document through the same few analyzers, and one shared list
+/// made them queue on its lock (a quarter of the indexing threads' context switches under an
+/// 8-client bulk load). A thread keeps to its shard, so it mostly gets back its own chain;
+/// shards fill only when used.
+struct ChainPool {
+    shards: Box<[Mutex<Vec<Chain>>]>,
+}
+
+const POOL_SHARDS: usize = 16;
+
+impl ChainPool {
+    fn new() -> ChainPool {
+        ChainPool { shards: (0..POOL_SHARDS).map(|_| Mutex::new(Vec::new())).collect() }
+    }
+
+    fn shard(&self) -> &Mutex<Vec<Chain>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        thread_local! {
+            static SHARD: usize = NEXT.fetch_add(1, Ordering::Relaxed);
+        }
+        &self.shards[SHARD.with(|s| *s) % self.shards.len()]
+    }
+}
+
 /// Runs `f` with a pooled chain.
 fn with_pool<R>(
-    pool: &Mutex<Vec<Chain>>,
+    pool: &ChainPool,
     make: impl FnOnce() -> Chain,
     f: impl FnOnce(&mut Chain) -> R,
 ) -> R {
-    let pooled = pool.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    let shard = pool.shard();
+    let pooled = shard.lock().unwrap_or_else(|e| e.into_inner()).pop();
     let mut chain = pooled.unwrap_or_else(make);
     let r = f(&mut chain);
-    pool.lock().unwrap_or_else(|e| e.into_inner()).push(chain);
+    shard.lock().unwrap_or_else(|e| e.into_inner()).push(chain);
     r
 }
 
@@ -284,7 +311,21 @@ fn clamp(v: i64) -> u32 {
     v.clamp(0, u32::MAX as i64) as u32
 }
 
+/// The sizes of an analyzer's `shingle` token filter ([`Analyzer::shingle`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShingleInfo {
+    pub min_shingle_size: usize,
+    pub max_shingle_size: usize,
+    pub output_unigrams: bool,
+}
+
 impl Analyzer {
+    /// The first `shingle` token filter of the chain (`PhraseSuggestionBuilder`'s
+    /// `getShingleFilterFactory`), if any.
+    pub fn shingle(&self) -> Option<ShingleInfo> {
+        self.inner.filters.iter().find_map(|f| f.factory.shingle())
+    }
+
     /// The same analyzer reported without a name in `_analyze` explain.
     pub(crate) fn anonymous(mut self) -> Analyzer {
         match Arc::get_mut(&mut self.inner) {
@@ -304,8 +345,8 @@ impl Analyzer {
                     explain_pos_gap: i.explain_pos_gap,
                     mode: i.mode,
                     explain_name: None,
-                    pool: Mutex::new(Vec::new()),
-                    norm_pool: Mutex::new(Vec::new()),
+                    pool: ChainPool::new(),
+                    norm_pool: ChainPool::new(),
                 });
             }
         }
@@ -336,8 +377,8 @@ impl Analyzer {
                 explain_pos_gap: pos_gap,
                 mode: i.mode,
                 explain_name: i.explain_name.clone(),
-                pool: Mutex::new(Vec::new()),
-                norm_pool: Mutex::new(Vec::new()),
+                pool: ChainPool::new(),
+                norm_pool: ChainPool::new(),
             }),
         }
     }

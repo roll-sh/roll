@@ -97,18 +97,29 @@ fn named_analyzer(ctx: &QueryCtx, name: &str, query: &str) -> EsResult<Analyzer>
 fn has_text_search(f: &FieldInfo) -> bool {
     !matches!(
         f.kind,
-        Kind::GeoPoint | Kind::GeoShape | Kind::Point | Kind::Shape | Kind::DenseVector | Kind::SparseVector | Kind::Binary | Kind::Completion | Kind::RankFeature | Kind::RankFeatures | Kind::Histogram | Kind::AggregateMetric | Kind::Percolator
+        Kind::GeoPoint | Kind::GeoShape | Kind::Point | Kind::Shape | Kind::DenseVector | Kind::Binary | Kind::RankFeature | Kind::Histogram | Kind::AggregateMetric | Kind::Percolator
     ) && !f.kind.is_range()
 }
 
 /// `MatchQueryParser.parse(type, field, value)`.
 pub fn field_query(ctx: &QueryCtx, field: &str, value: &Value, ty: MatchType, o: &MatchOpts, query_name: &str) -> EsResult<Option<QueryRef>> {
+    // Runtime fields (which shadow mapped ones) have no analysis: the text is one term.
+    if let Some(rf) = ctx.runtime_target(field, query_name)? {
+        return ctx.runtime_match(rf, value, ty, o.lenient).map(Some);
+    }
+    // The `match*` builders check a named analyzer before looking the field up.
+    if let Some(n) = o.analyzer
+        && ctx.field(field).is_none()
+    {
+        named_analyzer(ctx, n, query_name)?;
+    }
     let Some(f) = ctx.field(field) else {
         // Keyword-like metadata fields match their whole value (`TermBasedFieldType`).
         if matches!(field, "_id" | "_index" | "_routing" | "_ignored" | "_tier") && matches!(ty, MatchType::Boolean | MatchType::Phrase) {
-            return Ok(Some(ctx.unmapped_or_meta_term(field, std::slice::from_ref(value), false)?));
+            return Ok(Some(ctx.unmapped_or_meta_term(field, std::slice::from_ref(value), false, "term")?));
         }
-        return Ok(Some(match_none(&format!("unmapped field [{field}]"))));
+        // `Queries.newUnmappedFieldsQuery`.
+        return Ok(Some(match_none(&format!("unmapped fields [{field}]"))));
     };
     if !has_text_search(&f) {
         let e = EsError::illegal_argument(format!("Field [{}] of type [{}] does not support match queries", f.name, f.ty));
@@ -118,6 +129,25 @@ pub fn field_query(ctx: &QueryCtx, field: &str, value: &Value, ty: MatchType, o:
         return Err(e);
     }
     let text = value_text(value);
+    // `CompletionFieldType` is term based, searched through its `CompletionAnalyzer`: the whole
+    // text becomes one token, the analyzed tokens joined like the suggester's keys (which the
+    // field also indexes as terms).
+    if f.kind == Kind::Completion && o.analyzer.is_none() {
+        let not_text = |what: &str| {
+            let e = EsError::illegal_argument(format!("Can only use {what} queries on text fields - not on [{}] which is of type [{}]", f.name, f.ty));
+            if o.lenient { Ok(Some(lenient_none(&f.name, &e))) } else { Err(e) }
+        };
+        match ty {
+            MatchType::PhrasePrefix => return not_text("phrase prefix"),
+            MatchType::BooleanPrefix => return ctx.prefix_query(&f.name, &text, false, None).map(Some),
+            MatchType::Boolean | MatchType::Phrase => {}
+        }
+        let key = crate::engine::completion::analyzed_key(&f, &text, f.search_analyzer.as_ref().or(f.analyzer.as_ref()));
+        if key.is_empty() {
+            return Ok(None);
+        }
+        return term_or_lenient(ctx, &f, &Value::Str(String::from_utf8_lossy(&key).into_owned()), o).map(Some);
+    }
     let quoted = matches!(ty, MatchType::Phrase | MatchType::PhrasePrefix);
     // Fields with no analysis (keyword-like, numbers, dates…): one term.
     let analyzer: Option<Analyzer> = match o.analyzer {
@@ -126,11 +156,20 @@ pub fn field_query(ctx: &QueryCtx, field: &str, value: &Value, ty: MatchType, o:
             if f.kind.is_text() {
                 if quoted { f.quote_analyzer().cloned() } else { f.query_analyzer().cloned() }
             } else {
-                None
+                f.whitespace_analyzer.clone()
             }
         }
     };
     let Some(analyzer) = analyzer else {
+        // `version` fields have no phrase support (`MappedFieldType.phrasePrefixQuery`).
+        if ty == MatchType::PhrasePrefix && f.kind == Kind::Version {
+            return Err(EsError::illegal_argument(format!("Can only use phrase prefix queries on text fields - not on [{}] which is of type [version]", f.name)));
+        }
+        // `MatchQueryParser`: a keyword-analyzed `bool_prefix` is a prefix query only on text
+        // and keyword fields; any other type gets a term query.
+        if ty == MatchType::BooleanPrefix && f.kind == Kind::Version {
+            return term_or_lenient(ctx, &f, value, o).map(Some);
+        }
         if ty == MatchType::PhrasePrefix && f.kind.is_keyword_like() {
             let t = normalize(&f, &text);
             return Ok(Some(arc(MultiTermQuery::prefix(f.number, t.into_bytes()))));
@@ -147,7 +186,14 @@ pub fn field_query(ctx: &QueryCtx, field: &str, value: &Value, ty: MatchType, o:
     }
     let q = match ty {
         MatchType::Boolean => boolean(ctx, &f, &toks, o)?,
-        MatchType::BooleanPrefix => boolean_prefix(ctx, &f, &toks, o)?,
+        MatchType::BooleanPrefix => {
+            // `analyzeTerm` / `analyzeMultiBoolean`: the last term is a prefix only when it ends
+            // where the analyzed text does (not before trailing punctuation or stop words).
+            let mut last_end = 0;
+            analyzer.analyze(&text, &mut |t| last_end = t.end_offset);
+            let prefix_last = last_end as usize == text.encode_utf16().count();
+            boolean_prefix(ctx, &f, &toks, o, prefix_last)?
+        }
         MatchType::Phrase => phrase(ctx, &f, &toks, o.slop, o.auto_generate_synonyms_phrase_query)?,
         MatchType::PhrasePrefix => phrase_prefix(ctx, &f, &toks, o.slop, o.max_expansions)?,
     };
@@ -180,13 +226,28 @@ fn fuzzy_term(ctx: &QueryCtx, f: &FieldInfo, term: &str, z: &Fuzziness, fz: &Fuz
     }
     let t = if f.kind.is_text() { term.to_string() } else { normalize(f, term) };
     let edits = fuzzy_edits(z, &t);
+    if f.kind == Kind::Version {
+        // `VersionStringFieldType.fuzzyQuery` casts its value to a `BytesRef`; the match query
+        // passes a `String`.
+        return Err(EsError::java(
+            400,
+            "class_cast_exception",
+            "class java.lang.String cannot be cast to class org.apache.lucene.util.BytesRef (java.lang.String is in module java.base of loader 'bootstrap'; org.apache.lucene.util.BytesRef is in module org.apache.lucene.core@10.5.1 of loader 'app')",
+        ));
+    }
     let mut q = MultiTermQuery::fuzzy(f.number, &t, edits, fz.prefix_length.max(0) as usize, fz.max_expansions.max(1) as usize, fz.fuzzy_transpositions);
     if let Some(r) = &fz.fuzzy_rewrite
         && let Some(m) = RewriteMethod::parse(r)
     {
         q = q.with_rewrite(m);
     }
-    Ok(arc(q))
+    Ok(unscored_if_match_only(f, arc(q)))
+}
+
+/// `MatchOnlyTextFieldType` disables scoring of its term and fuzzy queries
+/// (`ConstantScoreQuery`): the field keeps no frequencies or norms worth scoring with.
+fn unscored_if_match_only(f: &FieldInfo, q: QueryRef) -> QueryRef {
+    if f.kind == Kind::MatchOnlyText { arc(search_index::query::ConstantScoreQuery::new(q)) } else { q }
 }
 
 /// One analyzed term: a term query, or a fuzzy one.
@@ -196,7 +257,7 @@ fn term_q(ctx: &QueryCtx, f: &FieldInfo, term: &str, o: &MatchOpts) -> EsResult<
     {
         return fuzzy_term(ctx, f, term, z, fz);
     }
-    Ok(arc(TermQuery::new(f.number, term.as_bytes().to_vec())))
+    Ok(unscored_if_match_only(f, crate::opensearch::keyword_term(f, arc(TermQuery::new(f.number, term.as_bytes().to_vec())))))
 }
 
 /// Groups tokens by position.
@@ -224,7 +285,7 @@ fn synonym_q(ctx: &QueryCtx, f: &FieldInfo, terms: &[&Tok], o: &MatchOpts) -> Es
     let mut v: Vec<Vec<u8>> = terms.iter().map(|t| t.term.as_bytes().to_vec()).collect();
     v.dedup();
     if v.len() == 1 {
-        return Ok(arc(TermQuery::new(f.number, v.remove(0))));
+        return Ok(crate::opensearch::keyword_term(f, arc(TermQuery::new(f.number, v.remove(0)))));
     }
     Ok(arc(SynonymQuery::new(f.number, v)))
 }
@@ -347,7 +408,7 @@ fn check_positions(f: &FieldInfo, what: &str) -> EsResult<()> {
 fn phrase(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], slop: i32, auto_syn: bool) -> EsResult<QueryRef> {
     let _ = ctx;
     if toks.len() == 1 {
-        return Ok(arc(TermQuery::new(f.number, toks[0].term.as_bytes().to_vec())));
+        return Ok(unscored_if_match_only(f, crate::opensearch::keyword_term(f, arc(TermQuery::new(f.number, toks[0].term.as_bytes().to_vec())))));
     }
     let groups = positions(toks);
     if groups.len() == 1 {
@@ -358,7 +419,8 @@ fn phrase(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], slop: i32, auto_syn: bool
         let o = MatchOpts { operator: Operator::And, auto_generate_synonyms_phrase_query: auto_syn, ..Default::default() };
         return graph_boolean(ctx, f, toks, &o);
     }
-    check_positions(f, &format!("PhraseQuery (phrase={}:\"{}\")", f.name, toks.iter().map(|t| t.term.as_str()).collect::<Vec<_>>().join(" ")))?;
+    // `TextFieldType.phraseQuery` / `multiPhraseQuery`.
+    check_positions(f, if groups.iter().any(|(_, g)| g.len() > 1) { "MultiPhraseQuery" } else { "PhraseQuery" })?;
     // `index_phrases`: exact two-term shingles.
     if let Some(pf) = f.phrase_field
         && slop == 0
@@ -412,7 +474,11 @@ fn phrase_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], slop: i32, max_exp
         let mp = MultiPhrasePrefixQuery::new(f.number, vec![vec![t.as_bytes().to_vec()]], vec![0], slop.max(0) as u32, max_expansions.max(1) as usize).map_err(index_err)?;
         return Ok(arc(mp));
     }
-    check_positions(f, "MultiPhrasePrefixQuery")?;
+    if is_graph(toks) {
+        return graph_phrase_prefix(f, toks, slop, max_expansions);
+    }
+    // `TextFieldType.phrasePrefixQuery` names the plain phrase query.
+    check_positions(f, "PhraseQuery")?;
     let base = groups[0].0;
     let terms: Vec<Vec<Vec<u8>>> = groups.iter().map(|(_, g)| g.iter().map(|t| t.term.as_bytes().to_vec()).collect()).collect();
     let pos: Vec<u32> = groups.iter().map(|(p, _)| p - base).collect();
@@ -420,8 +486,87 @@ fn phrase_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], slop: i32, max_exp
     Ok(confirm_match_only(ctx, f, q))
 }
 
-/// `createBooleanPrefixQuery`: terms, the last one a prefix.
-fn boolean_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts) -> EsResult<QueryRef> {
+/// `analyzeGraphPhrase` for `match_phrase_prefix`: Elasticsearch joins the graph's
+/// articulation points with a span near query whose last clause is a span prefix. Every path
+/// through the graph as a phrase whose last term is a prefix, any of them matching, finds the
+/// same documents.
+fn graph_phrase_prefix(f: &FieldInfo, toks: &[Tok], slop: i32, max_expansions: i32) -> EsResult<QueryRef> {
+    const MAX_CLAUSES: usize = 4096;
+    if slop <= 0 {
+        return graph_span_phrase(f, toks, true);
+    }
+    let mut full: Vec<Vec<String>> = vec![Vec::new()];
+    for seg in graph_segments(toks) {
+        let paths = graph_paths(&seg);
+        let mut next = Vec::with_capacity(full.len() * paths.len());
+        for head in &full {
+            for p in &paths {
+                if next.len() >= MAX_CLAUSES {
+                    return Err(EsError::new(400, "too_many_nested_clauses", format!("Query contains too many nested clauses; maxClauseCount is set to {MAX_CLAUSES}")));
+                }
+                let mut v = head.clone();
+                v.extend(p.iter().cloned());
+                next.push(v);
+            }
+        }
+        full = next;
+    }
+    let mut alts: Vec<QueryRef> = Vec::with_capacity(full.len());
+    for path in full.into_iter().filter(|p| !p.is_empty()) {
+        let terms: Vec<Vec<Vec<u8>>> = path.iter().map(|t| vec![t.as_bytes().to_vec()]).collect();
+        let pos: Vec<u32> = (0..terms.len() as u32).collect();
+        alts.push(arc(MultiPhrasePrefixQuery::new(f.number, terms, pos, slop.max(0) as u32, max_expansions.max(1) as usize).map_err(index_err)?));
+    }
+    if alts.len() == 1 {
+        return Ok(alts.remove(0));
+    }
+    let mut b = BooleanQuery::new();
+    for q in alts {
+        b = b.add(Occur::Should, q);
+    }
+    Ok(arc(b))
+}
+
+/// `analyzeGraphPhrase` without slop: a span near query over the graph's articulation
+/// points, each a span or of its paths (`createSpanQuery`) or of the terms at that position
+/// (`newSpanQuery`); with `prefix`, the last point's final terms are span prefixes.
+fn graph_span_phrase(f: &FieldInfo, toks: &[Tok], prefix: bool) -> EsResult<QueryRef> {
+    use search_index::query::{SpanNode, SpanQuery};
+    let leaf = |t: &str, pre: bool| -> SpanNode {
+        if pre {
+            SpanNode::Multi(Box::new(MultiTermQuery::prefix(f.number, t.as_bytes().to_vec())))
+        } else {
+            SpanNode::Term { field: f.number, term: t.as_bytes().to_vec() }
+        }
+    };
+    let segs = graph_segments(toks);
+    let last = segs.len().saturating_sub(1);
+    let mut clauses: Vec<SpanNode> = Vec::with_capacity(segs.len());
+    for (i, seg) in segs.iter().enumerate() {
+        let pre = prefix && i == last;
+        let paths = graph_paths(seg);
+        let side_path = paths.iter().any(|p| p.len() > 1);
+        let node = if !side_path {
+            let mut terms: Vec<SpanNode> = paths.iter().filter_map(|p| p.first()).map(|t| leaf(t, pre)).collect();
+            if terms.len() == 1 { terms.remove(0) } else { SpanNode::Or(terms) }
+        } else {
+            let mut alts: Vec<SpanNode> = Vec::with_capacity(paths.len());
+            for p in &paths {
+                let n = p.len();
+                let mut parts: Vec<SpanNode> = p.iter().enumerate().map(|(j, t)| leaf(t, pre && j + 1 == n)).collect();
+                alts.push(if parts.len() == 1 { parts.remove(0) } else { SpanNode::Near { clauses: parts, slop: 0, in_order: true } });
+            }
+            if alts.len() == 1 { alts.remove(0) } else { SpanNode::Or(alts) }
+        };
+        clauses.push(node);
+    }
+    let node = if clauses.len() == 1 { clauses.remove(0) } else { SpanNode::Near { clauses, slop: 0, in_order: true } };
+    Ok(arc(SpanQuery::new(node).map_err(index_err)?))
+}
+
+/// `createBooleanPrefixQuery`: terms, the last one a prefix (when `prefix_last`; synonyms at
+/// the last position stay a synonym query, Elasticsearch applies no prefix to them).
+fn boolean_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts, prefix_last: bool) -> EsResult<QueryRef> {
     let groups = positions(toks);
     let prefix = |t: &str| -> QueryRef {
         if let Some((pf, min, max)) = f.prefix_field {
@@ -433,22 +578,14 @@ fn boolean_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts) ->
         arc(MultiTermQuery::prefix(f.number, t.as_bytes().to_vec()))
     };
     if groups.len() == 1 && groups[0].1.len() == 1 {
-        return Ok(prefix(&groups[0].1[0].term));
+        return if prefix_last { Ok(prefix(&groups[0].1[0].term)) } else { term_q(ctx, f, &groups[0].1[0].term, o) };
     }
     let occur = if o.operator == Operator::And { Occur::Must } else { Occur::Should };
     let mut b = BooleanQuery::new();
     let last = groups.len() - 1;
     for (i, (_, g)) in groups.iter().enumerate() {
-        let q = if i == last {
-            if g.len() == 1 {
-                prefix(&g[0].term)
-            } else {
-                let mut s = BooleanQuery::new();
-                for t in g {
-                    s = s.add(Occur::Should, prefix(&t.term));
-                }
-                arc(s)
-            }
+        let q = if i == last && prefix_last && g.len() == 1 {
+            prefix(&g[0].term)
         } else if g.len() == 1 {
             term_q(ctx, f, &g[0].term, o)?
         } else {
@@ -463,10 +600,9 @@ fn boolean_prefix(ctx: &QueryCtx, f: &FieldInfo, toks: &[Tok], o: &MatchOpts) ->
 pub fn apply_msm(q: QueryRef, msm: Option<&str>) -> EsResult<QueryRef> {
     let Some(msm) = msm else { return Ok(q) };
     let Some(b) = q.as_any().downcast_ref::<BooleanQuery>() else { return Ok(q) };
+    // Applied with no optional clauses too: an integer `minimum_should_match` on
+    // `operator: and` (all clauses required) makes the query match nothing, as in Elasticsearch.
     let optional = b.clauses.iter().filter(|c| c.occur == Occur::Should).count() as i32;
-    if optional == 0 {
-        return Ok(q);
-    }
     let n = calculate_msm(optional, msm)?;
     if n <= 0 {
         return Ok(q);
@@ -486,10 +622,18 @@ pub fn match_query(ctx: &QueryCtx, m: &Match) -> EsResult<QueryRef> {
         auto_generate_synonyms_phrase_query: m.auto_generate_synonyms_phrase_query,
         ..Default::default()
     };
-    match field_query(ctx, &m.field, &m.query, MatchType::Boolean, &o, "match")? {
-        Some(q) => apply_msm(q, m.minimum_should_match.as_deref()),
-        None => Ok(zero_terms_query(m.zero_terms_query)),
+    let q = match field_query(ctx, &m.field, &m.query, MatchType::Boolean, &o, "match")? {
+        Some(q) => apply_msm(q, m.minimum_should_match.as_deref())?,
+        None => zero_terms_query(m.zero_terms_query),
+    };
+    // `MatchQueryBuilder.doIndexMetadataRewrite`: neither fuzzy nor lenient, with a keyword
+    // analyzer (a constant field's), the query is rewritten to a `term` query first.
+    if m.fuzzy.fuzziness.is_none() && !m.lenient && m.analyzer.as_deref().is_none_or(|a| a == "keyword")
+        && let Some(f) = ctx.field(&m.field)
+    {
+        return Ok(super::query::constant_rewritten(&f, q));
     }
+    Ok(q)
 }
 
 pub fn match_phrase(ctx: &QueryCtx, m: &MatchPhrase) -> EsResult<QueryRef> {
@@ -527,6 +671,9 @@ pub fn resolve_fields(ctx: &QueryCtx, fields: &[(String, f32)]) -> Vec<(String, 
                 if (!f.index && !f.doc_values) || (all && columnar && !f.index) {
                     continue;
                 }
+                if !may_exist_in_index(ctx, &f) {
+                    continue;
+                }
                 match out.iter_mut().find(|(n, _)| *n == name) {
                     Some(e) => e.1 *= boost,
                     None => out.push((name, *boost)),
@@ -542,6 +689,25 @@ pub fn resolve_fields(ctx: &QueryCtx, fields: &[(String, f32)]) -> Vec<(String, 
     out
 }
 
+/// `MappedFieldType.mayExistInIndex`, which pattern expansion consults: a mapped field exists
+/// only once a segment of the shard holds it (`SearchExecutionContext.fieldExistsInIndex`,
+/// the segments' field infos). Every indexed field type overrides it so; `constant_keyword`
+/// and runtime fields keep the default (always may).
+fn may_exist_in_index(ctx: &QueryCtx, f: &FieldInfo) -> bool {
+    // Only mapped fields have field infos (runtime fields always may exist).
+    if f.kind == Kind::ConstantKeyword || ctx.table.by_number.get(&f.number).is_none_or(|m| m.name != f.name) {
+        return true;
+    }
+    ctx.searcher.segments().iter().any(|s| s.reader.field_info(f.number).is_some())
+}
+
+/// Resolved fields in the iteration order of the `HashMap` `QueryParserHelper` collects them
+/// into, which orders per-field queries.
+pub fn hash_ordered(fields: Vec<(String, f32)>) -> Vec<(String, f32)> {
+    let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+    crate::json::java_hash_order(&names, 16).into_iter().map(|i| fields[i].clone()).collect()
+}
+
 /// The default fields of an index (`index.query.default_field`, `*`).
 pub fn default_fields(ctx: &QueryCtx) -> Vec<(String, f32)> {
     let v = ctx.idx.settings.get("index.query.default_field").unwrap_or("*");
@@ -553,6 +719,10 @@ fn boosted(q: QueryRef, boost: f32) -> QueryRef {
 }
 
 pub fn multi_match(ctx: &QueryCtx, m: &MultiMatch) -> EsResult<QueryRef> {
+    // `MultiMatchQueryBuilder.doToQuery` checks the analyzer before resolving any field.
+    if let Some(n) = &m.analyzer {
+        named_analyzer(ctx, n, "multi_match")?;
+    }
     let explicit = !m.fields.is_empty();
     let fields = if explicit { resolve_fields(ctx, &m.fields) } else { resolve_fields(ctx, &default_fields(ctx)) };
     // `QueryParserHelper.resolveMappingFields` collects into a `HashMap`: its iteration order
@@ -563,7 +733,8 @@ pub fn multi_match(ctx: &QueryCtx, m: &MultiMatch) -> EsResult<QueryRef> {
     };
     let lenient = m.lenient.unwrap_or(!explicit);
     let ty = m.ty;
-    let tie = m.tie_breaker.unwrap_or(if ty == MultiMatchType::MostFields { 1.0 } else { 0.0 });
+    // `MultiMatchQueryBuilder.Type.tieBreaker()`: `bool_prefix` scores like `most_fields`.
+    let tie = m.tie_breaker.unwrap_or(if matches!(ty, MultiMatchType::MostFields | MultiMatchType::BoolPrefix) { 1.0 } else { 0.0 });
     if fields.is_empty() {
         return Ok(match_none("No fields to search"));
     }
@@ -723,6 +894,10 @@ fn blend(ctx: &QueryCtx, fields: &[(Arc<FieldInfo>, f32)], mut stats: Vec<TermSt
 }
 
 pub fn combined_fields(ctx: &QueryCtx, c: &crate::query::full_text::CombinedFields) -> EsResult<QueryRef> {
+    // `CombinedFieldsQueryBuilder.doToQuery`: no default fields.
+    if c.fields.is_empty() {
+        return Err(EsError::illegal_argument("In [combined_fields] query, at least one field must be provided"));
+    }
     let fields = resolve_fields(ctx, &c.fields);
     let mut infos: Vec<(Arc<FieldInfo>, f32)> = Vec::new();
     let mut analyzer: Option<Analyzer> = None;

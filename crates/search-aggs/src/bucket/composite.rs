@@ -190,6 +190,9 @@ fn parse_source(p: &mut XParser<'_>) -> Result<SourceSpec> {
                 Field::new("offset", Tokens::LONG),
                 Field::new("time_zone", Tokens::LONG),
             ]);
+            if crate::dialect::opensearch() {
+                fields.push(Field::new("interval", Tokens::LONG));
+            }
         }
         SourceKind::GeoTile { .. } => {
             fields.push(Field::new("precision", Tokens::INT));
@@ -223,6 +226,11 @@ fn parse_source(p: &mut XParser<'_>) -> Result<SourceSpec> {
                     "DESC" => true,
                     other => return Err(AggError::illegal_argument(format!("No enum constant org.elasticsearch.search.sort.SortOrder.{other}"))),
                 };
+            }
+            "interval" if matches!(spec.kind, SourceKind::DateHistogram { .. }) => {
+                if let SourceKind::DateHistogram { interval, .. } = &mut spec.kind {
+                    crate::bucket::histogram::set_legacy_interval(interval, p)?;
+                }
             }
             "interval" => {
                 let v = p.double_value()?;
@@ -834,6 +842,11 @@ impl BoundSource {
                 _ => format.parse_double(&text(), false, now)?,
             }));
         }
+        // `unsigned_long` keys are sign-flipped longs: a numeric `after` goes through the
+        // format like a string one.
+        if matches!(format, DocValueFormat::UnsignedLongShifted) && matches!(v, Json::Int(_) | Json::UInt(_)) {
+            return Ok(KeyPart::Long(format.parse_long(&text(), false, now)?));
+        }
         Ok(KeyPart::Long(match v {
             Json::Int(i) => *i,
             Json::UInt(u) => *u as i64,
@@ -847,7 +860,9 @@ impl BoundSource {
 
 /// Binds `composite`.
 pub fn create(def: &AggDef, spec: &CompositeSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
-    if let Some(p) = ctx.parents.iter().rev().find(|t| !matches!(**t, "nested" | "filter" | "random_sampler")) {
+    // OpenSearch's `checkParentIsSafe` also lets `reverse_nested` through.
+    let os = crate::dialect::opensearch();
+    if let Some(p) = ctx.parents.iter().rev().find(|t| !(matches!(**t, "nested" | "filter") || if os { **t == "reverse_nested" } else { **t == "random_sampler" })) {
         return Err(AggError::illegal_argument(format!(
             "[composite] aggregation cannot be used with a parent aggregation of type: [{}]",
             factory_class(p)
@@ -953,7 +968,25 @@ pub fn create(def: &AggDef, spec: &CompositeSpec, ctx: &mut BindCtx<'_>) -> Resu
     let subs = Subs::bind(def, ctx);
     ctx.sized = saved;
     let subs = subs?;
+    // Profiled opensearch-dialect requests: OpenSearch's `CompositeAggregatorBridge` counts a
+    // lone date histogram source without sub-aggregations from the points tree.
+    let os_rewrite = match (sources.as_slice(), crate::dialect::opensearch() && subs.is_empty()) {
+        ([s], true) if !s.spec.missing_bucket => match (&s.rounding, after.as_ref().map(|k| k.first())) {
+            (Some(r), None) | (Some(r), Some(Some(KeyPart::Long(_)))) => {
+                let after = match after.as_ref().and_then(|k| k.first()) {
+                    Some(KeyPart::Long(v)) => Some(*v),
+                    _ => None,
+                };
+                let nanos = s.vs.field.as_ref().is_some_and(|f| f.type_name == "date_nanos");
+                let buckets = crate::filter_rewrite::DateBuckets { rounding: r.clone(), hard: (None, None), after, nanos, auto: Vec::new(), target: 1 };
+                crate::filter_rewrite::FilterRewrite::date(ctx, &s.vs, buckets, false, spec.size.max(0) as usize).map(Box::new)
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     Ok(Box::new(CompositeAgg {
+        os_rewrite,
         rate_starts,
         names: Arc::new(spec.sources.iter().map(|s| s.name.clone()).collect()),
         formats: Arc::new(sources.iter().map(|s| s.vs.format.clone()).collect()),
@@ -1056,6 +1089,8 @@ struct CompositeAgg {
     /// For a leading ordinals source: the segment ordinal bound a doc's ordinals must reach to
     /// compete with the full queue's largest key, and the queue version it was computed at.
     ord_bound: Option<(u64, Option<u64>)>,
+    /// OpenSearch's filter rewrite replay (profiled opensearch-dialect requests).
+    os_rewrite: Option<Box<crate::filter_rewrite::FilterRewrite>>,
 }
 
 impl CompositeAgg {
@@ -1140,7 +1175,7 @@ impl CompositeAgg {
                     KeyPart::Bytes(t) => match dv {
                         crate::values::DvOrds::Single(d) => Some(d.lookup_term(t)),
                         crate::values::DvOrds::Multi(d) => Some(d.lookup_term(t)),
-                        crate::values::DvOrds::None => None,
+                        crate::values::DvOrds::None | crate::values::DvOrds::Keyed(_) => None,
                     }
                     .map(|r| match r {
                         // Ascending: the doc needs an ordinal <= the bound; descending: >=.
@@ -1300,7 +1335,20 @@ impl CompositeAgg {
 }
 
 impl Aggregator for CompositeAgg {
+    fn profile_type(&self) -> &'static str {
+        "CompositeAggregator"
+    }
+    fn profile_debug(&self) -> Json {
+        let mut o = Json::obj();
+        if let Some(r) = &self.os_rewrite {
+            r.debug_into(&mut o);
+        }
+        o
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        if let Some(r) = &mut self.os_rewrite {
+            r.try_segment(seg);
+        }
         self.open_sources(seg)?;
         self.ord_bound = None;
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);

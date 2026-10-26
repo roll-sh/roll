@@ -211,9 +211,11 @@ impl Download {
 /// Which parts of a download are in, taken, or wanted first.
 struct Parts {
     size: u64,
-    /// Length of part 0; every later part is [`FETCH_PART`] long, so the last one is the
-    /// suffix the first request read.
+    /// Length of part 0; every later part is `part` long, so the last one is the suffix the
+    /// first request read.
     head: u64,
+    /// The part size ([`FETCH_PART`] unless configured: `StoreConfig::fetch_part_bytes`).
+    part: u64,
     done: Vec<bool>,
     taken: Vec<bool>,
     done_count: usize,
@@ -224,10 +226,16 @@ struct Parts {
 }
 
 impl Parts {
+    #[cfg(test)]
     fn new(size: u64) -> Self {
-        let n = size.div_ceil(FETCH_PART).max(1) as usize;
-        let head = size - (n as u64 - 1) * FETCH_PART;
-        Parts { size, head, done: vec![false; n], taken: vec![false; n], done_count: 0, done_bytes: 0, urgent: Default::default(), next: 0 }
+        Self::with_part(size, FETCH_PART)
+    }
+
+    fn with_part(size: u64, part: u64) -> Self {
+        let part = part.max(1);
+        let n = size.div_ceil(part).max(1) as usize;
+        let head = size - (n as u64 - 1) * part;
+        Parts { size, head, part, done: vec![false; n], taken: vec![false; n], done_count: 0, done_bytes: 0, urgent: Default::default(), next: 0 }
     }
 
     fn count(&self) -> usize {
@@ -235,12 +243,12 @@ impl Parts {
     }
 
     fn range(&self, k: usize) -> std::ops::Range<u64> {
-        let end = self.head + k as u64 * FETCH_PART;
-        if k == 0 { 0..self.head } else { end - FETCH_PART..end }
+        let end = self.head + k as u64 * self.part;
+        if k == 0 { 0..self.head } else { end - self.part..end }
     }
 
     fn part_of(&self, offset: u64) -> usize {
-        if offset < self.head { 0 } else { 1 + ((offset - self.head) / FETCH_PART) as usize }
+        if offset < self.head { 0 } else { 1 + ((offset - self.head) / self.part) as usize }
     }
 
     /// Parts overlapping `range` (non-empty, inside the object).
@@ -445,7 +453,8 @@ impl std::fmt::Debug for SegmentFetch {
 
 /// Once eviction starts it frees down to this fraction of the budget (in 1/64ths: 61/64 ≈ 95%).
 const LOW_WATER: u64 = 61;
-/// Downloads read objects in ranges of this size; smaller objects take one request.
+/// Downloads read objects in ranges of this size by default (`StoreConfig::fetch_part_bytes`);
+/// smaller objects take one request.
 pub const FETCH_PART: u64 = 8 << 20;
 /// Ranged reads in flight (and so buffered) at once across the node.
 pub const FETCH_PARTS: usize = 8;
@@ -496,6 +505,12 @@ pub(crate) struct Cache {
     fetches: Mutex<HashMap<String, Arc<Download>>>,
     /// Permits for ranged reads in flight ([`FETCH_PARTS`]).
     parts: tokio::sync::Semaphore,
+    /// Ranged-read size of downloads ([`FETCH_PART`] by default).
+    part: AtomicU64,
+    /// Tests: downloads share a link of this many bytes per second (0: unlimited), and when
+    /// it is next free.
+    throttle: AtomicU64,
+    link_free: Mutex<Option<std::time::Instant>>,
     counters: Counters,
 }
 
@@ -533,11 +548,47 @@ impl Cache {
             st: Mutex::new(st),
             fetches: Mutex::new(HashMap::new()),
             parts: tokio::sync::Semaphore::new(FETCH_PARTS),
+            part: AtomicU64::new(FETCH_PART),
+            throttle: AtomicU64::new(0),
+            link_free: Mutex::new(None),
             counters: Counters::default(),
         });
         let evicted = cache.make_room(&mut cache.st.lock(), 0);
         unlink(evicted);
         Ok(cache)
+    }
+
+    /// Sets the ranged-read size of later downloads (at least 64 KiB, so a part always holds a
+    /// segment's footer).
+    pub(crate) fn set_fetch_part(&self, bytes: u64) {
+        self.part.store(bytes.max(64 << 10), Relaxed);
+    }
+
+    pub(crate) fn fetch_part(&self) -> u64 {
+        self.part.load(Relaxed)
+    }
+
+    /// Tests: makes downloads share a link of `bytes_per_sec` (0: unlimited), as a slow object
+    /// store would.
+    pub(crate) fn set_throttle(&self, bytes_per_sec: u64) {
+        self.throttle.store(bytes_per_sec, Relaxed);
+    }
+
+    /// With a throttle, waits until `bytes` would have come over the shared link.
+    async fn throttled(&self, bytes: u64) {
+        let bw = self.throttle.load(Relaxed);
+        if bw == 0 {
+            return;
+        }
+        let done = {
+            let mut free = self.link_free.lock();
+            let now = std::time::Instant::now();
+            let start = free.map_or(now, |f| f.max(now));
+            let done = start + std::time::Duration::from_secs_f64(bytes as f64 / bw as f64);
+            *free = Some(done);
+            done
+        };
+        tokio::time::sleep_until(done.into()).await;
     }
 
     pub(crate) fn set_budget(&self, bytes: u64) {
@@ -713,12 +764,15 @@ impl Cache {
     /// Download `key` into `file`: a suffix read tells the size and brings the last part, then
     /// the rest come in parallel, parts readers wait for first.
     async fn download(&self, key: &str, file: &Arc<File>, dl: &Download) -> anyhow::Result<u64> {
+        let part = self.fetch_part();
         let (tail, size) = {
             let _permit = self.parts.acquire().await?;
-            self.objects.get_suffix(key, FETCH_PART).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?
+            let r = self.objects.get_suffix(key, part).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+            self.throttled(r.0.len() as u64).await;
+            r
         };
         anyhow::ensure!(size > 0, "object {key} is empty");
-        anyhow::ensure!(tail.len() as u64 == size.min(FETCH_PART), "short read of {key}");
+        anyhow::ensure!(tail.len() as u64 == size.min(part), "short read of {key}");
         // Room for the whole file now: its blocks fill in from here on.
         let evicted = {
             let mut st = self.st.lock();
@@ -731,7 +785,7 @@ impl Cache {
         {
             // Sparse until the parts land: the whole object can be mapped from now on.
             let f = file.clone();
-            let at = size - size.min(FETCH_PART);
+            let at = size - size.min(part);
             tokio::task::spawn_blocking(move || {
                 use std::os::unix::fs::FileExt;
                 f.set_len(size)?;
@@ -740,7 +794,7 @@ impl Cache {
             .await??;
         }
         let workers = {
-            let mut parts = Parts::new(size);
+            let mut parts = Parts::with_part(size, part);
             let last = parts.count() - 1;
             parts.finish(last);
             let left = parts.count() - parts.done_count;
@@ -753,6 +807,7 @@ impl Cache {
                 let permit = self.parts.acquire().await?;
                 let Some((k, range)) = dl.parts.lock().as_mut().and_then(|p| p.take().map(|k| (k, p.range(k)))) else { return anyhow::Ok(()) };
                 let (data, now) = self.objects.get_range(key, range.clone()).await?.ok_or_else(|| anyhow::anyhow!("object {key} is missing"))?;
+                self.throttled(data.len() as u64).await;
                 anyhow::ensure!(now == size && data.len() as u64 == range.end - range.start, "{key} changed while being read");
                 write_at(file, data, range.start).await?;
                 drop(permit);

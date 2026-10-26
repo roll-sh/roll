@@ -191,3 +191,20 @@ impl Query for DocValuesDistanceFeatureQuery {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// search-painless keeps its own copy of SloppyMath (it does not depend on search-index):
+    /// both must carry the same JVM table patches and so give the same distances.
+    #[test]
+    fn painless_sloppy_math_matches_the_index() {
+        assert_eq!(search_painless::es::score::JAVA_COS, search_index::util::geo::JAVA_COS);
+        assert_eq!(search_painless::es::score::JAVA_SIN, search_index::util::geo::JAVA_SIN);
+        for i in 0..2000 {
+            let (lat, lon) = ((i * 37 % 1800) as f64 / 10.0 - 90.0, (i * 91 % 3600) as f64 / 10.0 - 180.0);
+            let a = search_painless::es::score::haversin_meters(lat, lon, 12.5, -33.25);
+            let b = search_index::util::geo::haversin_meters(lat, lon, 12.5, -33.25);
+            assert_eq!(a.to_bits(), b.to_bits(), "({lat}, {lon})");
+        }
+    }
+}

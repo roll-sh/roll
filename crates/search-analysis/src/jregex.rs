@@ -38,18 +38,18 @@ use std::sync::{Arc, OnceLock};
 use crate::dfa::{self, Ranges};
 use crate::error::{AnalysisError, Result};
 
-pub(crate) const UNIX_LINES: u32 = 0x01;
-pub(crate) const CASE_INSENSITIVE: u32 = 0x02;
-pub(crate) const COMMENTS: u32 = 0x04;
-pub(crate) const MULTILINE: u32 = 0x08;
-pub(crate) const LITERAL: u32 = 0x10;
-pub(crate) const DOTALL: u32 = 0x20;
-pub(crate) const UNICODE_CASE: u32 = 0x40;
-pub(crate) const CANON_EQ: u32 = 0x80;
-pub(crate) const UNICODE_CHARACTER_CLASS: u32 = 0x100;
+pub const UNIX_LINES: u32 = 0x01;
+pub const CASE_INSENSITIVE: u32 = 0x02;
+pub const COMMENTS: u32 = 0x04;
+pub const MULTILINE: u32 = 0x08;
+pub const LITERAL: u32 = 0x10;
+pub const DOTALL: u32 = 0x20;
+pub const UNICODE_CASE: u32 = 0x40;
+pub const CANON_EQ: u32 = 0x80;
+pub const UNICODE_CHARACTER_CLASS: u32 = 0x100;
 
 /// Elasticsearch's `Regex.flagsFromString` (`|`-separated, case-insensitive names).
-pub(crate) fn flags_from_string(flags: &str) -> Result<u32> {
+pub fn flags_from_string(flags: &str) -> Result<u32> {
     let mut f = 0;
     for s in flags.split('|') {
         if s.is_empty() {
@@ -245,7 +245,7 @@ struct Features {
 // Compiled patterns.
 
 /// A compiled Java pattern.
-pub(crate) struct JavaRegex {
+pub struct JavaRegex {
     source: String,
     root: Node,
     fast: Option<Fast>,
@@ -270,7 +270,7 @@ impl std::fmt::Debug for JavaRegex {
 }
 
 /// `Pattern.compile(pattern, flags)`.
-pub(crate) fn compile(pattern: &str, flags: u32) -> Result<JavaRegex> {
+pub fn compile(pattern: &str, flags: u32) -> Result<JavaRegex> {
     // Parsing and the passes over the tree recurse per nesting level.
     let opens = if flags & LITERAL != 0 {
         0
@@ -286,7 +286,38 @@ pub(crate) fn compile(pattern: &str, flags: u32) -> Result<JavaRegex> {
     })
 }
 
+/// `Pattern.producePermutations`' pre-check (JDK-8300207): with `CANON_EQ`, Java normalizes
+/// the pattern to NFD and expands every base character's run of non-spacing marks into all
+/// their orders; more than 12 code points in one run (the marks plus the character that ends the
+/// run) would overflow `n!`, so Java gives up with `OutOfMemoryError("Pattern too complex")`,
+/// which Elasticsearch's `Regex.compile` reports as an `IllegalArgumentException`.
+fn check_canon_eq_permutations(pattern: &str) -> Result<()> {
+    use unicode_normalization::UnicodeNormalization;
+    let nfd: Vec<char> = pattern.nfd().collect();
+    let is_mark = |c: char| crate::unicode::get_type(c) == crate::unicode::gc::NON_SPACING_MARK;
+    let mut i = 0;
+    while i < nfd.len() {
+        if i > 0 && is_mark(nfd[i]) {
+            let start = i;
+            while i < nfd.len() && is_mark(nfd[i]) {
+                i += 1;
+            }
+            // The character that ends the run goes along with the marks (`normalize`).
+            let n = i - start + usize::from(i < nfd.len());
+            if n > 12 {
+                return Err(AnalysisError::illegal("Too complex regex pattern").with_cause(AnalysisError::other("out_of_memory_error", 500, "Pattern too complex")));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
 fn compile_here(pattern: &str, flags: u32) -> Result<JavaRegex> {
+    if flags & CANON_EQ != 0 && flags & LITERAL == 0 {
+        check_canon_eq_permutations(pattern)?;
+    }
     let mut p = Parser::new(pattern, flags);
     let root = if flags & LITERAL != 0 {
         literal_node(pattern, Flags::from(flags))
@@ -344,6 +375,11 @@ fn is_terminator(c: char, unix: bool) -> bool {
 }
 
 impl JavaRegex {
+    /// The pattern as compiled (`Pattern.pattern()`).
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+
     /// The group number of a named group.
     pub fn group_index(&self, name: &str) -> Option<usize> {
         self.names.iter().find(|(n, _)| n == name).map(|&(_, i)| i)
@@ -461,7 +497,7 @@ impl JavaRegex {
 
 /// Match groups as byte ranges (Java's `start(i)`/`end(i)`), plus both engines' scratch, so
 /// a component that keeps its `Captures` matches without allocating.
-pub(crate) struct Captures {
+pub struct Captures {
     slots: Vec<Option<usize>>,
     locs: Option<regex::CaptureLocations>,
     scratch: Scratch,
@@ -486,9 +522,15 @@ impl Captures {
 
 /// `Matcher.find()` iteration: the next search starts at the end of the previous match, or one
 /// character after it when that match was empty.
-pub(crate) struct Finder {
+pub struct Finder {
     next: usize,
     done: bool,
+}
+
+impl Default for Finder {
+    fn default() -> Finder {
+        Finder::new()
+    }
 }
 
 impl Finder {
@@ -558,7 +600,7 @@ enum RepPart {
 /// A replacement string in `Matcher.appendReplacement` syntax. Java parses it while appending,
 /// so a bad replacement only fails once something matched; the error is kept until then.
 #[derive(Clone, Debug)]
-pub(crate) struct Replacement {
+pub struct Replacement {
     parts: std::result::Result<Vec<RepPart>, AnalysisError>,
 }
 
@@ -2499,6 +2541,17 @@ impl Parser {
                     // A range `a-b` (a `-` followed by `]` or `[` is literal).
                     if let Some(lo) = lo_set.1
                         && self.peek() == Some('-')
+                        && self.peek_at(1).is_none()
+                    {
+                        // `[a-` at the end: Java reads the terminating NUL as the range's end,
+                        // which is below any start but NUL itself.
+                        if lo > '\0' {
+                            return err("Illegal character range", self.len16());
+                        }
+                        return err("Unclosed character class", self.len16());
+                    }
+                    if let Some(lo) = lo_set.1
+                        && self.peek() == Some('-')
                         && !matches!(self.peek_at(1), Some(']') | Some('[') | None)
                     {
                         self.i += 1;
@@ -3386,7 +3439,25 @@ mod tests {
             syntax("[ab"),
             "Unclosed character class near index 2\n[ab\n  ^"
         );
+        // Java reads the pattern's NUL terminator as the end of the range (and prints no caret
+        // past the end of the pattern).
+        assert_eq!(
+            syntax("[a-"),
+            "Illegal character range near index 3\n[a-"
+        );
+        assert_eq!(
+            syntax("x[ab-"),
+            "Illegal character range near index 5\nx[ab-"
+        );
         assert_eq!(syntax("a)"), "Unmatched closing ')' near index 0\na)\n^");
+        // `CANON_EQ` with more than 12 combining code points in a row: Java's pre-check fails
+        // before the pattern is parsed (Elasticsearch's 50_char_filters).
+        let marks = "\u{36D}".repeat(15);
+        let e = compile(&format!("(\\d+)-(?=\\d\n{marks}"), CANON_EQ).unwrap_err();
+        assert_eq!(e.reason, "Too complex regex pattern");
+        assert_eq!(e.kind, "illegal_argument_exception");
+        assert!(compile(&format!("a{}", "\u{36D}".repeat(11)), CANON_EQ).is_ok());
+        assert!(compile(&format!("(\\d+{marks}"), 0).is_err());
         assert_eq!(
             syntax("*a"),
             "Dangling meta character '*' near index 0\n*a\n^"

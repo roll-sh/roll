@@ -1,0 +1,592 @@
+{
+  "description" : "SQL: fields without doc values in GROUP BY/aggregates/ORDER BY fail like ES, SHOW FUNCTIONS LIKE is SQL LIKE; ES|QL and SQL async routes validate ids",
+  "steps" : [
+    {
+      "req" : "PUT /xpack-ndv?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "kw" : {
+              "type" : "keyword",
+              "doc_values" : false
+            },
+            "num" : {
+              "type" : "long",
+              "doc_values" : false
+            },
+            "n2" : {
+              "type" : "long"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /xpack-ndv/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{}}\n{\"kw\":\"a\",\"num\":1,\"n2\":1}\n{\"index\":{}}\n{\"kw\":\"b\",\"num\":5,\"n2\":2}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT kw, COUNT(*) c FROM \"xpack-ndv\" GROUP BY kw"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "xpack-ndv",
+              "node" : "MCtCIdghTD2is_3rAMHDFQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT HISTOGRAM(num, 2) h, COUNT(*) c FROM \"xpack-ndv\" GROUP BY h"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "xpack-ndv",
+              "node" : "MCtCIdghTD2is_3rAMHDFQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT HISTOGRAM(n2, 2) h, COUNT(*) c FROM \"xpack-ndv\" GROUP BY h"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "h",
+            "type" : "long"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            0.0,
+            1
+          ],
+          [
+            2.0,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT MAX(num) FROM \"xpack-ndv\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "xpack-ndv",
+              "node" : "MCtCIdghTD2is_3rAMHDFQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [num] because fielddata is unsupported on fields of type [long]. Use doc values instead."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT kw FROM \"xpack-ndv\" ORDER BY kw"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "xpack-ndv",
+              "node" : "MCtCIdghTD2is_3rAMHDFQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT COUNT(kw) FROM \"xpack-ndv\""
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "COUNT(kw)",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT COUNT(DISTINCT kw) FROM \"xpack-ndv\""
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+            }
+          ],
+          "type" : "search_phase_execution_exception",
+          "reason" : "all shards failed",
+          "phase" : "query",
+          "grouped" : true,
+          "failed_shards" : [
+            {
+              "shard" : 0,
+              "index" : "xpack-ndv",
+              "node" : "MCtCIdghTD2is_3rAMHDFQ",
+              "reason" : {
+                "type" : "illegal_argument_exception",
+                "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+              }
+            }
+          ],
+          "caused_by" : {
+            "type" : "illegal_argument_exception",
+            "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead.",
+            "caused_by" : {
+              "type" : "illegal_argument_exception",
+              "reason" : "Can't load fielddata on [kw] because fielddata is unsupported on fields of type [keyword]. Use doc values instead."
+            }
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SELECT n2, COUNT(*) FROM \"xpack-ndv\" GROUP BY n2 ORDER BY n2"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "n2",
+            "type" : "long"
+          },
+          {
+            "name" : "COUNT(*)",
+            "type" : "long"
+          }
+        ],
+        "rows" : [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SHOW FUNCTIONS LIKE 'DAY_%'"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "type",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "DAYNAME",
+            "SCALAR"
+          ],
+          [
+            "DAYOFMONTH",
+            "SCALAR"
+          ],
+          [
+            "DAYOFWEEK",
+            "SCALAR"
+          ],
+          [
+            "DAYOFYEAR",
+            "SCALAR"
+          ],
+          [
+            "DAY_NAME",
+            "SCALAR"
+          ],
+          [
+            "DAY_OF_MONTH",
+            "SCALAR"
+          ],
+          [
+            "DAY_OF_WEEK",
+            "SCALAR"
+          ],
+          [
+            "DAY_OF_YEAR",
+            "SCALAR"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SHOW FUNCTIONS LIKE 'A*'"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "type",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : []
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SHOW FUNCTIONS LIKE '_VG'"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "type",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "AVG",
+            "AGGREGATE"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_sql?format=json&filter_path=columns,rows,error",
+      "body" : {
+        "query" : "SHOW FUNCTIONS LIKE '%MONTH%'"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "name",
+            "type" : "keyword"
+          },
+          {
+            "name" : "type",
+            "type" : "keyword"
+          }
+        ],
+        "rows" : [
+          [
+            "DAYOFMONTH",
+            "SCALAR"
+          ],
+          [
+            "DAY_OF_MONTH",
+            "SCALAR"
+          ],
+          [
+            "MONTH",
+            "SCALAR"
+          ],
+          [
+            "MONTHNAME",
+            "SCALAR"
+          ],
+          [
+            "MONTH_NAME",
+            "SCALAR"
+          ],
+          [
+            "MONTH_OF_YEAR",
+            "SCALAR"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "GET /_query/async/abc?filter_path=error",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid id: [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "invalid id: [abc]",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /_query/async/abc?filter_path=error",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid id: [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "invalid id: [abc]",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query/async/abc/stop?filter_path=error",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid id: [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "invalid id: [abc]",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_sql/async/abc?filter_path=error",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "Invalid request content type: Accept=[null], Content-Type=[null], format=[null]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "Invalid request content type: Accept=[null], Content-Type=[null], format=[null]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "GET /_sql/async/status/abc?filter_path=error",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid id: [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "invalid id: [abc]",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /_sql/async/delete/abc?filter_path=error",
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "illegal_argument_exception",
+              "reason" : "invalid id: [abc]"
+            }
+          ],
+          "type" : "illegal_argument_exception",
+          "reason" : "invalid id: [abc]",
+          "caused_by" : {
+            "type" : "e_o_f_exception",
+            "reason" : "tried to read: 105 bytes but only 1 remaining"
+          }
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /xpack-ndv?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

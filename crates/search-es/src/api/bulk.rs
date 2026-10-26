@@ -211,29 +211,65 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
-    let mut out_items = Vec::with_capacity(items.len());
+    // The ids index/create items are written with: auto ids are generated here, in item
+    // order, so documents can be prepared ahead (in parallel) before their turn.
+    let auto: Vec<bool> = items.iter().map(|it| matches!(it.action, Action::Index | Action::Create) && it.args.id.is_none()).collect();
+    let ids: Vec<Option<String>> = items
+        .iter()
+        .zip(&auto)
+        .map(|(it, &a)| if a { Some(crate::meta::names::time_based_id()) } else { it.args.id.clone() })
+        .collect();
+    let mut ahead = super::bulk_ahead::Ahead::new(ctx.cluster, &items, &ids);
+    // Items are written straight into one pre-rendered JSON array (`json::raw`): about 200
+    // bytes each, instead of a tree of maps per item.
+    let mut out_items = crate::json::raw::buffer(items.len() * 200 + 2);
+    out_items.push(b'[');
     let mut errors = false;
     let mut written: Vec<(String, u32)> = Vec::new();
-    for it in items {
+    for (i, it) in items.iter().enumerate() {
         let name = it.action.name();
         let expr = it.index.clone().unwrap_or_default();
-        let r = run_item(ctx, &it, &expr).await;
+        let mut take = |idx: &std::sync::Arc<crate::meta::IndexMeta>| ahead.take(ctx.cluster, &items, &ids, i, idx);
+        let generated = auto[i].then(|| ids[i].clone()).flatten();
+        let r = run_item(ctx, it, &expr, generated, &mut take).await;
+        if i > 0 {
+            out_items.push(b',');
+        }
         let mut m = Map::new();
         match r {
-            Ok((mut body, uuid, shard, ok)) => {
+            Ok((body, uuid, shard, ok)) => {
+                let forced = refresh == RefreshPolicy::Immediate && ok;
                 if refresh != RefreshPolicy::None && ok {
                     written.push((uuid, shard));
-                    if refresh == RefreshPolicy::Immediate
-                        && let Value::Obj(b) = &mut body
-                    {
-                        insert_after(b, "result", "forced_refresh", Value::Bool(true));
+                }
+                match body {
+                    ItemBody::Write(o) => {
+                        o.write_bulk_item(&mut out_items, name, forced);
+                        continue;
+                    }
+                    ItemBody::Tree(mut body) => {
+                        if forced && let Value::Obj(b) = &mut body {
+                            insert_after(b, "result", "forced_refresh", Value::Bool(true));
+                        }
+                        m.insert(name.into(), body);
                     }
                 }
-                m.insert(name.into(), body);
             }
             Err(b) => {
                 let (e, index, id, fs) = *b;
                 errors = true;
+                // An item that failed on its shard still sent that shard a request, which
+                // `refresh` refreshes (`TransportWriteAction`), failed items or not.
+                if refresh != RefreshPolicy::None
+                    && matches!(
+                        e.kind.as_ref(),
+                        "version_conflict_engine_exception" | "document_missing_exception" | "document_parsing_exception" | "mapper_parsing_exception" | "strict_dynamic_mapping_exception"
+                    )
+                    && let Some(id) = &id
+                    && let Some(idx) = write::resolve_existing(&ctx.state(), &index)
+                {
+                    written.push((idx.uuid.clone(), crate::meta::routing::shard_for(&idx, id, it.args.routing.as_deref())));
+                }
                 let mut im = Map::new();
                 im.insert("_index".into(), Value::from(index));
                 im.insert("_id".into(), id.map(Value::from).unwrap_or(Value::Null));
@@ -241,12 +277,13 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 if let Some(f) = fs {
                     im.insert("failure_store".into(), Value::from(f));
                 }
-                im.insert("error".into(), e.to_value(false));
+                im.insert("error".into(), crate::opensearch::item_error(ctx, &e, false));
                 m.insert(name.into(), Value::Obj(im));
             }
         }
-        out_items.push(Value::Obj(m));
+        crate::json::write::write_json(&mut out_items, &Value::Obj(m), false);
     }
+    out_items.push(b']');
     if !written.is_empty() {
         write::refresh_shards(ctx.cluster, &written)?;
     }
@@ -258,7 +295,13 @@ pub async fn bulk(ctx: &Ctx<'_>) -> EsResult<Reply> {
     if ingest > 0 {
         resp.insert("ingest_took".into(), Value::from((ingest / 1_000_000) as i64));
     }
-    resp.insert("items".into(), Value::Arr(out_items));
+    // OpenSearch's `BulkResponse.toXContent` writes `took` (and `ingest_took`) before `errors`.
+    if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch
+        && let Some(e) = resp.shift_remove("errors")
+    {
+        resp.insert("errors".into(), e);
+    }
+    resp.insert("items".into(), crate::json::raw::from_buffer(out_items));
     Reply::ok(Value::Obj(resp))
 }
 
@@ -274,23 +317,46 @@ fn before_routing(e: &EsError) -> bool {
         || e.reason().starts_with("only write ops with an op_type of create are allowed in data streams")
 }
 
-/// An item's error: the exception, the index and id it names, and its `failure_store` status.
-type ItemResult = Result<(Value, String, u32, bool), Box<(EsError, String, Option<String>, Option<&'static str>)>>;
+/// A succeeded item's response: an index, create or delete outcome (rendered straight to
+/// JSON, [`write::WriteOutcome::write_bulk_item`]) or an update's tree.
+enum ItemBody {
+    Write(write::WriteOutcome),
+    Tree(Value),
+}
 
-async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
+/// An item's response, the uuid and shard it was written to and whether it changed anything;
+/// or its error: the exception, the index and id it names, and its `failure_store` status.
+type ItemResult = Result<(ItemBody, String, u32, bool), Box<(EsError, String, Option<String>, Option<&'static str>)>>;
+
+/// Runs one item; `generated`: the auto id of an index/create item without one, `ahead`: its
+/// document prepared ahead, if any.
+async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str, generated: Option<String>, ahead: document::PreparedAhead<'_>) -> ItemResult {
     let fail = |e: EsError, index: &str, id: Option<String>| Err(Box::new((e, index.to_string(), id, None)));
     let target_name = |e: &EsError| -> String {
-        // Errors on a resolved index name it; others the expression.
+        // Errors on a resolved index name it (an ingest failure after a pipeline re-targeted
+        // the document names the new target); others the expression.
+        if let Some(i) = e.hidden("item_index").and_then(Value::as_str) {
+            return i.to_string();
+        }
         e.meta().iter().find(|(k, _)| k == "index").and_then(|(_, v)| v.as_str().map(str::to_string)).unwrap_or_else(|| expr.to_string())
     };
     match it.action {
         Action::Index | Action::Create => {
             let mut args = it.args.clone();
             let auto_id = args.id.is_none();
+            if let Some(e) = crate::xpack::streams::check_item(ctx, expr, args.pipeline.as_deref()) {
+                return fail(e, expr, args.id.clone());
+            }
+            if it.action == Action::Index
+                && !args.create
+                && let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), expr, "INDEX", args.id.as_deref())
+            {
+                return fail(e, expr, args.id.clone());
+            }
             if auto_id {
                 // Auto ids are unique, so `index` behaves as `create` without forcing it: time
                 // series ids are generated from the document and an `index` overwrites.
-                args.id = Some(crate::meta::names::time_based_id());
+                args.id = Some(generated.unwrap_or_else(crate::meta::names::time_based_id));
             }
             let id = args.id.clone();
             if id.as_deref() == Some("") {
@@ -304,13 +370,11 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
             if !errs.is_empty() {
                 return fail(EsError::action_request_validation(&errs), expr, id);
             }
-            match document::index_one(ctx, expr, args, it.data.clone(), auto_id).await {
-                Ok(o) => {
-                    let mut m = Map::new();
-                    o.write_into(&mut m);
-                    m.insert("status".into(), Value::from(o.status() as i64));
+            match document::index_one_ahead(ctx, expr, args, it.data.clone(), auto_id, Some(ahead)).await {
+                Ok(mut o) => {
                     let ok = o.result != "noop";
-                    Ok((Value::Obj(m), o.uuid, o.shard, ok))
+                    let (uuid, shard) = (std::mem::take(&mut o.uuid), o.shard);
+                    Ok((ItemBody::Write(o), uuid, shard, ok))
                 }
                 Err(e) => {
                     let idx = target_name(&e);
@@ -341,6 +405,9 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
         Action::Delete => {
             let args = it.args.clone();
             let id = args.id.clone().unwrap_or_default();
+            if let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), expr, "DELETE", Some(&id)) {
+                return fail(e, expr, Some(id));
+            }
             let errs = write::validate_args(&args, Action::Delete);
             if !errs.is_empty() {
                 return fail(EsError::action_request_validation(&errs), expr, Some(id));
@@ -350,20 +417,16 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
                 return fail(EsError::illegal_argument("only write ops with an op_type of create are allowed in data streams"), expr, Some(id));
             }
             let r = async {
-                let mut a = args.clone();
-                a.create = true;
-                let target = write::resolve_target(ctx.cluster, expr, &a, ctx.now_ms).await?;
+                let target = write::resolve_delete_target(ctx.cluster, expr, &args, ctx.now_ms).await?;
                 let routing = write::effective_routing(&target, args.routing.as_deref(), &id)?;
                 write::check_routing(&target.index, &id, routing.as_deref())?;
                 write::apply_delete(ctx.cluster, &target.index, &id, routing.as_deref(), &args)
             }
             .await;
             match r {
-                Ok(o) => {
-                    let mut m = Map::new();
-                    o.write_into(&mut m);
-                    m.insert("status".into(), Value::from(o.status() as i64));
-                    Ok((Value::Obj(m), o.uuid, o.shard, true))
+                Ok(mut o) => {
+                    let (uuid, shard) = (std::mem::take(&mut o.uuid), o.shard);
+                    Ok((ItemBody::Write(o), uuid, shard, true))
                 }
                 Err(e) => {
                     let idx = target_name(&e);
@@ -373,6 +436,9 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
         }
         Action::Update => {
             let id = it.args.id.clone().unwrap_or_default();
+            if let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), expr, "UPDATE", Some(&id)) {
+                return fail(e, expr, Some(id));
+            }
             let body = match crate::json::parse(&it.data) {
                 Ok(Some(v)) => v,
                 Ok(None) => Value::Obj(Map::new()),
@@ -403,7 +469,7 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
                     let pos = m.get_index_of("get").unwrap_or(m.len());
                     m.shift_insert(pos, "status".into(), Value::from(status as i64));
                     let ok = o.write.result != "noop";
-                    Ok((Value::Obj(m), o.write.uuid, o.write.shard, ok))
+                    Ok((ItemBody::Tree(Value::Obj(m)), o.write.uuid, o.write.shard, ok))
                 }
                 Err(e) => {
                     let idx = target_name(&e);
@@ -411,5 +477,101 @@ async fn run_item(ctx: &Ctx<'_>, it: &Item, expr: &str) -> ItemResult {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::json::write::write_json;
+
+    /// The item as the handler built it before: `write_into`, `status`, `forced_refresh` after
+    /// `result`, under the action name.
+    fn tree_item(o: &write::WriteOutcome, action: &str, forced: bool) -> Vec<u8> {
+        let mut b = Map::new();
+        o.write_into(&mut b);
+        b.insert("status".into(), Value::from(o.status() as i64));
+        if forced {
+            insert_after(&mut b, "result", "forced_refresh", Value::Bool(true));
+        }
+        let mut m = Map::new();
+        m.insert(action.into(), Value::Obj(b));
+        let mut out = Vec::new();
+        write_json(&mut out, &Value::Obj(m), false);
+        out
+    }
+
+    #[test]
+    fn direct_bulk_items_match_the_tree_rendering() {
+        let base = write::WriteOutcome {
+            index: "idx".into(),
+            uuid: "u".into(),
+            id: "1".into(),
+            shard: 0,
+            version: 1,
+            result: "created",
+            seq_no: 0,
+            primary_term: 1,
+            total: 2,
+            forced_refresh: false,
+            failure_store: None,
+        };
+        let mut cases = vec![base.clone()];
+        for result in ["updated", "deleted", "not_found", "noop"] {
+            cases.push(write::WriteOutcome { result, version: 7, seq_no: 41, primary_term: 3, ..base.clone() });
+        }
+        // Unassigned and dropped sequence numbers.
+        cases.push(write::WriteOutcome { result: "noop", seq_no: -2, ..base.clone() });
+        cases.push(write::WriteOutcome { result: "created", seq_no: -2, primary_term: 0, ..base.clone() });
+        cases.push(write::WriteOutcome { failure_store: Some("used"), ..base.clone() });
+        cases.push(write::WriteOutcome { forced_refresh: true, ..base.clone() });
+        cases.push(write::WriteOutcome { index: "ü\"\\\n\u{1}x".into(), id: "\u{7f}\u{2028}é/\t".into(), version: i64::MAX, seq_no: i64::MAX, primary_term: i64::MAX, total: u32::MAX, ..base.clone() });
+        cases.push(write::WriteOutcome { id: String::new(), version: -1, ..base.clone() });
+        for o in &cases {
+            for action in ["index", "create", "delete"] {
+                for forced in [false, true] {
+                    let mut direct = Vec::new();
+                    o.write_bulk_item(&mut direct, action, forced);
+                    assert_eq!(String::from_utf8(direct).unwrap(), String::from_utf8(tree_item(o, action, forced)).unwrap(), "{o:?} {action} {forced}");
+                }
+            }
+        }
+    }
+
+    /// A raw items array reads back (pretty output, other formats, `filter_path`) as the tree
+    /// it replaces.
+    #[test]
+    fn raw_items_materialize_to_the_tree() {
+        let o = write::WriteOutcome {
+            index: "i".into(),
+            uuid: "u".into(),
+            id: "a\"b".into(),
+            shard: 0,
+            version: 2,
+            result: "updated",
+            seq_no: 5,
+            primary_term: 1,
+            total: 1,
+            forced_refresh: false,
+            failure_store: None,
+        };
+        let mut b = crate::json::raw::buffer(0);
+        b.push(b'[');
+        o.write_bulk_item(&mut b, "index", false);
+        b.push(b',');
+        o.write_bulk_item(&mut b, "delete", true);
+        b.push(b']');
+        let mut v = crate::json::raw::from_buffer(b);
+        let mut compact = Vec::new();
+        write_json(&mut compact, &v, false);
+        crate::json::raw::materialize(&mut v);
+        let tree = crate::json::parse(&compact).unwrap().unwrap();
+        assert_eq!(v, tree);
+        let Value::Arr(a) = &v else { panic!() };
+        assert_eq!(a.len(), 2);
+        let mut t = Vec::new();
+        write_json(&mut t, &v, false);
+        assert_eq!(t, compact);
+        assert_eq!(compact, [b"[".to_vec(), tree_item(&o, "index", false), b",".to_vec(), tree_item(&o, "delete", true), b"]".to_vec()].concat());
     }
 }

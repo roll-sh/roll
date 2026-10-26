@@ -22,6 +22,12 @@ pub trait FilterScript: Send + Sync {
     fn leaf(&self, seg: &SegmentContext) -> Result<Box<dyn LeafFilterScript>>;
     /// The script's `toString` (`Script{type=inline, lang='painless', idOrCode='…', …}`).
     fn describe(&self) -> String;
+    /// A runtime field query (`AbstractScriptFieldQuery`) rather than a `script` query: its
+    /// description is [`describe`](Self::describe) itself, and explanations break the
+    /// constant score down as `boost * runtime_field_score`.
+    fn runtime_field(&self) -> bool {
+        false
+    }
 }
 
 /// A filter script bound to a segment.
@@ -48,6 +54,15 @@ struct ScriptWeight {
     script: Arc<dyn FilterScript>,
     score: f32,
     desc: String,
+}
+
+/// `AbstractScriptFieldQuery.explainMatch`.
+fn explain_runtime(score: f32, desc: String) -> Explanation {
+    Explanation::matched(
+        score,
+        desc,
+        vec![Explanation::matched(score, "boost * runtime_field_score", vec![Explanation::leaf(score, "boost"), Explanation::leaf(1.0, "runtime_field_score is always 1")])],
+    )
 }
 
 struct ScriptScorer {
@@ -123,7 +138,11 @@ impl Weight for ScriptWeight {
         Ok(Some(Box::new(ScriptScorer { leaf, max_doc: seg.reader.max_doc(), doc: u32::MAX, score: self.score })))
     }
     fn explain(&self, seg: &SegmentContext, doc: u32) -> Result<Explanation> {
-        explain_const(self, seg, doc, &self.desc, self.score)
+        let e = explain_const(self, seg, doc, &self.desc, self.score)?;
+        if self.script.runtime_field() && e.is_match() {
+            return Ok(explain_runtime(self.score, e.description));
+        }
+        Ok(e)
     }
 }
 
@@ -134,6 +153,9 @@ impl Query for ScriptQuery {
     }
 
     fn lucene_string(&self, _schema: &Schema) -> String {
+        if self.script.runtime_field() {
+            return self.script.describe();
+        }
         format!("ScriptQuery({})", self.script.describe())
     }
 

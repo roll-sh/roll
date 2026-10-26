@@ -21,6 +21,22 @@ use crate::types::cls;
 use crate::value::{JList, JMap, Value};
 use crate::vm::{Throw, Thrown, Vm, VR};
 
+/// `runtime_fields.grok.watchdog.max_execution_time` in milliseconds (a static node setting the
+/// embedder sets once, [`set_runtime_grok_watchdog`]); `u64::MAX` is no limit, 1000 the default.
+static RUNTIME_GROK_WATCHDOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
+
+/// Sets the grok watchdog of runtime-field scripts (`None`: no limit, Elasticsearch's
+/// `MatcherWatchdog.noop()` for a zero or negative setting). Applies to scripts compiled after.
+pub fn set_runtime_grok_watchdog(max: Option<std::time::Duration>) {
+    let ms = max.map_or(u64::MAX, |d| d.as_millis().min(u64::MAX as u128 - 1) as u64);
+    RUNTIME_GROK_WATCHDOG_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn runtime_grok_watchdog() -> Option<std::time::Duration> {
+    let ms = RUNTIME_GROK_WATCHDOG_MS.load(std::sync::atomic::Ordering::Relaxed);
+    (ms != u64::MAX).then(|| std::time::Duration::from_millis(ms))
+}
+
 /// A compiled `NamedGroupExtractor`.
 #[derive(Debug)]
 pub enum Extractor {
@@ -36,7 +52,7 @@ pub fn build(function: &str, args: &[String]) -> Result<Arc<Extractor>, Json> {
             let pattern = &args[0];
             let fail = |reason: String, cause: Json| json!({ "type": "illegal_argument_exception", "reason": format!("error compiling grok pattern [{pattern}]: {reason}"), "caused_by": cause });
             match Grok::new(PatternBank::legacy(), pattern) {
-                Ok(g) if g.warnings().is_empty() => Ok(Arc::new(Extractor::Grok(g))),
+                Ok(g) if g.warnings().is_empty() => Ok(Arc::new(Extractor::Grok(g.with_max_execution_time(runtime_grok_watchdog())))),
                 Ok(g) => {
                     let msg = format!("emitted warnings: [{}]", g.warnings().join(", "));
                     Err(fail(msg.clone(), json!({ "type": "illegal_argument_exception", "reason": msg })))

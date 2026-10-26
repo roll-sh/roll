@@ -8,6 +8,12 @@
 //! [`AnalysisCache`] keeps the built chain per index and rebuilds it only when the settings it
 //! was built from (or the synonym sets) change.
 //!
+//! A chain keeps the synonym rules it loaded until something reloads it, as Elasticsearch's
+//! analyzers do (a set changed with `refresh=false`, or replaced by rules the chain can't build,
+//! leaves them as they were). The cache records those rules ([`AnalysisCache::loaded_synonyms`])
+//! so a durable server can carry them across an unload ([`AnalysisCache::seed_loaded_synonyms`]):
+//! a wake is not a restart.
+//!
 //! `search-analysis` speaks `serde_json`; its settings input is the `index.analysis` group with
 //! dotted keys, which is exactly what [`Settings::by_prefix`] gives.
 
@@ -122,12 +128,39 @@ struct Entry {
     inputs: Settings,
     synonyms_generation: u64,
     analysis: Analysis,
+    /// The synonym sets the chain loaded, with their rules then (`None`: the set was missing).
+    synonyms: Arc<LoadedSynonyms>,
+}
+
+/// Synonym sets an analysis chain loaded, by name, with the rules it loaded (`None`: missing).
+pub type LoadedSynonyms = std::collections::BTreeMap<String, Option<Vec<String>>>;
+
+/// Records which sets a build reads; answers from `seed` first (the rules a chain had loaded
+/// before an unload).
+struct Recording {
+    inner: Arc<dyn SynonymSets>,
+    seed: Option<Arc<LoadedSynonyms>>,
+    read: Mutex<LoadedSynonyms>,
+}
+
+impl SynonymSets for Recording {
+    fn rules(&self, set: &str) -> Option<Vec<String>> {
+        let rules = match self.seed.as_ref().and_then(|s| s.get(set)) {
+            Some(seeded) => seeded.clone(),
+            None => self.inner.rules(set),
+        };
+        self.read.lock().insert(set.to_string(), rules.clone());
+        rules
+    }
 }
 
 /// Built analysis chains per index uuid.
 #[derive(Default)]
 pub struct AnalysisCache {
     entries: Mutex<HashMap<String, Arc<Entry>>>,
+    /// Synonym rules to build an index's next chain with, valid at a synonyms generation
+    /// ([`AnalysisCache::seed_loaded_synonyms`]).
+    seeds: Mutex<HashMap<String, (u64, Arc<LoadedSynonyms>)>>,
 }
 
 impl AnalysisCache {
@@ -154,8 +187,17 @@ impl AnalysisCache {
         {
             return Ok(e.analysis.clone());
         }
+        // A chain an unload left with rules the sets no longer have: build it with those, as
+        // long as nothing reloaded it since.
+        let seed = match previous {
+            None => self.seeds.lock().remove(uuid).filter(|(g, _)| *g == synonyms_generation).map(|(_, s)| s),
+            Some(_) => None,
+        };
+        let recording = synonyms.map(|inner| Arc::new(Recording { inner, seed, read: Mutex::new(LoadedSynonyms::new()) }));
         // Build outside the lock: building can take milliseconds.
-        let analysis = match index_analysis(settings, Some(name), synonyms) {
+        let built = index_analysis(settings, Some(name), recording.clone().map(|r| r as Arc<dyn SynonymSets>));
+        let loaded = Arc::new(recording.map(|r| std::mem::take(&mut *r.read.lock())).unwrap_or_default());
+        let analysis = match built {
             Ok(a) => a,
             // A synonym set update that doesn't build (a rule the chain eliminates, with
             // `lenient: false`) fails the reload in Elasticsearch, which keeps serving the
@@ -163,7 +205,7 @@ impl AnalysisCache {
             Err(_) if previous.as_ref().is_some_and(|p| p.inputs == inputs) => {
                 let p = previous.expect("checked");
                 let analysis = p.analysis.clone();
-                self.entries.lock().insert(uuid.to_string(), Arc::new(Entry { inputs, synonyms_generation, analysis: analysis.clone() }));
+                self.entries.lock().insert(uuid.to_string(), Arc::new(Entry { inputs, synonyms_generation, analysis: analysis.clone(), synonyms: p.synonyms.clone() }));
                 return Ok(analysis);
             }
             Err(e) => return Err(e),
@@ -173,8 +215,22 @@ impl AnalysisCache {
             let live = live();
             entries.retain(|k, _| live.contains(k));
         }
-        entries.insert(uuid.to_string(), Arc::new(Entry { inputs, synonyms_generation, analysis: analysis.clone() }));
+        entries.insert(uuid.to_string(), Arc::new(Entry { inputs, synonyms_generation, analysis: analysis.clone(), synonyms: loaded }));
         Ok(analysis)
+    }
+
+    /// The synonym sets the cached chain of an index loaded, with the synonyms generation it is
+    /// current for.
+    pub fn loaded_synonyms(&self, uuid: &str) -> Option<(u64, Arc<LoadedSynonyms>)> {
+        let e = self.entries.lock().get(uuid).cloned()?;
+        Some((e.synonyms_generation, e.synonyms.clone()))
+    }
+
+    /// Builds the next chain of an index (none is cached) with these rules for the sets they
+    /// name, if the synonyms generation is still `generation` then: what
+    /// [`AnalysisCache::loaded_synonyms`] reported before an unload.
+    pub fn seed_loaded_synonyms(&self, uuid: &str, generation: u64, sets: LoadedSynonyms) {
+        self.seeds.lock().insert(uuid.to_string(), (generation, Arc::new(sets)));
     }
 
     pub fn len(&self) -> usize {
@@ -189,10 +245,12 @@ impl AnalysisCache {
     /// Elasticsearch's shards do).
     pub fn forget(&self, uuid: &str) {
         self.entries.lock().remove(uuid);
+        self.seeds.lock().remove(uuid);
     }
 
     pub fn clear(&self) {
         self.entries.lock().clear();
+        self.seeds.lock().clear();
     }
 }
 
@@ -303,6 +361,47 @@ mod tests {
             cache.get(&format!("x{i}"), "j", &s2, 0, None, 1, || ["x19".to_string()].into_iter().collect()).unwrap();
         }
         assert!(cache.len() < 20);
+    }
+
+    #[test]
+    fn chains_keep_the_synonym_rules_they_loaded_across_a_seed() {
+        struct Sets(Mutex<HashMap<String, Vec<String>>>);
+        impl SynonymSets for Sets {
+            fn rules(&self, set: &str) -> Option<Vec<String>> {
+                self.0.lock().get(set).cloned()
+            }
+        }
+        let tk = "tokenizer";
+        let s = settings(&format!(
+            r#"{{"analysis":{{"filter":{{"syn":{{"type":"synonym","synonyms_set":"set1","updateable":true}}}},"analyzer":{{"a":{{"type":"custom","{tk}":"whitespace","filter":["syn"]}}}}}}}}"#
+        ));
+        let sets = Arc::new(Sets(Mutex::new([("set1".to_string(), vec!["foo => bar".to_string()])].into_iter().collect())));
+        let all = || ["u1".to_string()].into_iter().collect();
+        let cache = AnalysisCache::default();
+        cache.get("u1", "i", &s, 3, Some(sets.clone()), 1, all).unwrap();
+        let (generation, loaded) = cache.loaded_synonyms("u1").unwrap();
+        assert_eq!(generation, 3);
+        assert_eq!(*loaded, [("set1".to_string(), Some(vec!["foo => bar".to_string()]))].into_iter().collect::<LoadedSynonyms>());
+        // The set changes without a reload; a fresh cache (a wake) seeded with what the chain
+        // had loaded builds with those rules while the generation is the same…
+        sets.0.lock().insert("set1".into(), vec!["foo => baz".into()]);
+        let woken = AnalysisCache::default();
+        woken.seed_loaded_synonyms("u1", 3, (*loaded).clone());
+        woken.get("u1", "i", &s, 3, Some(sets.clone()), 1, all).unwrap();
+        assert_eq!(woken.loaded_synonyms("u1").unwrap().1, loaded);
+        // …and a reload (a new generation) loads the current rules.
+        woken.get("u1", "i", &s, 4, Some(sets.clone()), 1, all).unwrap();
+        assert_eq!(woken.loaded_synonyms("u1").unwrap().1.get("set1"), Some(&Some(vec!["foo => baz".to_string()])));
+        // A seed for an older generation, or for an index that closed since, is ignored.
+        let stale = AnalysisCache::default();
+        stale.seed_loaded_synonyms("u1", 2, (*loaded).clone());
+        stale.get("u1", "i", &s, 3, Some(sets.clone()), 1, all).unwrap();
+        assert_eq!(stale.loaded_synonyms("u1").unwrap().1.get("set1"), Some(&Some(vec!["foo => baz".to_string()])));
+        let closed = AnalysisCache::default();
+        closed.seed_loaded_synonyms("u1", 3, (*loaded).clone());
+        closed.forget("u1");
+        closed.get("u1", "i", &s, 3, Some(sets), 1, all).unwrap();
+        assert_eq!(closed.loaded_synonyms("u1").unwrap().1.get("set1"), Some(&Some(vec!["foo => baz".to_string()])));
     }
 
     #[test]

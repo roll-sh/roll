@@ -7,7 +7,23 @@
 //! types answer as on a node without their plugin) and read-only flags. Contents are kept per
 //! location ([`crate::meta::snapshots`]): a snapshot captures index and data stream metadata
 //! and, with `include_global_state`, templates, pipelines, scripts and persistent settings.
-//! Shard data isn't captured yet, so each shard snapshot is one small, successful file.
+//!
+//! Shard contents: a snapshot keeps each shard's searcher as of the snapshot (immutable
+//! segments, shared rather than copied, as Elasticsearch's incremental snapshots reuse files)
+//! in [`SnapshotData`], and a restore indexes those documents into the restored index with
+//! their ids, routing, versions and sequence numbers, logged like any write so the restored
+//! data is durable. A durable server keeps them in object storage instead
+//! ([`crate::engine::SnapshotStorage`]): taking a snapshot commits each shard and pins that
+//! commit point (its segments stay shared with the index), before the snapshot is recorded, so
+//! a restore after an unload, a crash or on another node gets the same documents; deleting
+//! the snapshot drops the pins. Because copies exist before their snapshot is recorded, a copy
+//! no recorded snapshot uses is only garbage when its snapshot can never be recorded, or once
+//! it outlived [`LEFTOVER_GRACE`] (what a crash between the two leaves); snapshots being taken
+//! and restores running here are tracked in [`SnapshotData`], so concurrent deletions neither
+//! drop an unfinished snapshot's copies nor the ones a restore is reading (Elasticsearch's
+//! `SnapshotsInProgress` and `RestoreInProgress`). Without one they live with the process:
+//! after a restart a snapshot restores its metadata only. Shard file statistics are reported
+//! as one small file per shard.
 
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
@@ -20,6 +36,233 @@ use crate::obj;
 use crate::rest::{Ctx, Reply};
 use crate::xcontent::filter::glob_match;
 use std::sync::Arc;
+
+/// The shard contents of this process's snapshots, by snapshot uuid and index name (one
+/// searcher per shard), and the snapshot operations running here.
+#[derive(Default)]
+pub struct SnapshotData {
+    by_snapshot: parking_lot::Mutex<std::collections::HashMap<String, SnapshotIndices>>,
+    /// Uuids of the snapshots being taken or cloned here. Their durable copies are written
+    /// before they are recorded: no sweep may take those copies for leftovers.
+    taking: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Restores running here (Elasticsearch's `RestoreInProgress`): their snapshots can't be
+    /// deleted until they finish, or the copies they are reading would go.
+    restoring: parking_lot::Mutex<Vec<Restoring>>,
+}
+
+/// A running restore: `(restore uuid, repository, snapshot name)`.
+type Restoring = (String, String, String);
+
+/// Marks a snapshot uuid as being taken while alive.
+struct Taking<'a> {
+    data: &'a SnapshotData,
+    uuid: String,
+}
+
+impl Drop for Taking<'_> {
+    fn drop(&mut self) {
+        self.data.taking.lock().remove(&self.uuid);
+    }
+}
+
+/// Marks a restore as running while alive.
+struct RestoreGuard<'a> {
+    data: &'a SnapshotData,
+    id: String,
+}
+
+impl Drop for RestoreGuard<'_> {
+    fn drop(&mut self) {
+        self.data.restoring.lock().retain(|(id, _, _)| *id != self.id);
+    }
+}
+
+/// One snapshot's shard searchers, by index name.
+type SnapshotIndices = std::collections::HashMap<String, Arc<Vec<search_index::Searcher>>>;
+
+impl SnapshotData {
+    fn put(&self, snapshot: &str, index: &str, shards: Vec<search_index::Searcher>) {
+        self.by_snapshot.lock().entry(snapshot.to_string()).or_default().insert(index.to_string(), Arc::new(shards));
+    }
+
+    fn get(&self, snapshot: &str, index: &str) -> Option<Arc<Vec<search_index::Searcher>>> {
+        self.by_snapshot.lock().get(snapshot).and_then(|m| m.get(index)).cloned()
+    }
+
+    fn forget(&self, snapshot: &str) {
+        self.by_snapshot.lock().remove(snapshot);
+    }
+
+    fn taking(&self, uuid: &str) -> Taking<'_> {
+        self.taking.lock().insert(uuid.to_string());
+        Taking { data: self, uuid: uuid.to_string() }
+    }
+
+    fn restoring(&self, repo: &str, snapshot: &str) -> RestoreGuard<'_> {
+        let id = random_uuid();
+        self.restoring.lock().push((id.clone(), repo.to_string(), snapshot.to_string()));
+        RestoreGuard { data: self, id }
+    }
+
+    /// `concurrent_snapshot_execution_exception` when one of the `deleting` snapshots
+    /// (`(name, uuid)`, of repository `repo`) is being restored.
+    fn check_not_restoring(&self, repo: &str, deleting: &[(String, String)]) -> EsResult<()> {
+        let running = self.restoring.lock();
+        let Some((name, uuid)) = deleting.iter().find(|(name, _)| running.iter().any(|(_, r, s)| r == repo && s == name)) else { return Ok(()) };
+        let (first, first_uuid) = &deleting[0];
+        let entries: Vec<String> = running.iter().filter(|(_, r, s)| r == repo && s == name).map(|(id, _, _)| format!("{{{id}}}{{default:{repo}:{name}/{uuid}}}")).collect();
+        Err(EsError::new(503, "concurrent_snapshot_execution_exception", format!(
+            "[default:{repo}:{first}/{first_uuid}] cannot delete snapshot during a restore in progress in [RestoreInProgress[{}]]",
+            entries.join(",")
+        )))
+    }
+
+    /// `_clone`: the target shares the source's shard contents for the indices it keeps.
+    fn clone_into(&self, source: &str, target: &str, indices: &[String]) {
+        let mut g = self.by_snapshot.lock();
+        let Some(src) = g.get(source) else { return };
+        let kept: SnapshotIndices = src.iter().filter(|(k, _)| indices.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        g.insert(target.to_string(), kept);
+    }
+}
+
+/// Captures the shards of a snapshot's indices (refreshed, so every acknowledged write is in).
+fn capture_shards(ctx: &Ctx, snapshot: &Snapshot) -> EsResult<()> {
+    let st = ctx.state();
+    for name in &snapshot.indices {
+        let Some(idx) = st.metadata.indices.get(name) else { continue };
+        let Some(e) = ctx.cluster.engine.loaded(&idx.uuid) else { continue };
+        let mut shards = Vec::with_capacity(e.shards.len());
+        for s in &e.shards {
+            s.shard.refresh().map_err(crate::engine::convert::index_error)?;
+            shards.push(s.searcher());
+        }
+        ctx.cluster.snapshot_data.put(&snapshot.uuid, name, shards);
+    }
+    Ok(())
+}
+
+/// The uuid and shard count of an index as a snapshot stored it.
+fn stored_index(meta: &Value) -> Option<(String, u32)> {
+    let settings = meta.get("settings")?;
+    let uuid = settings.get("index.uuid")?.as_str()?.to_string();
+    let shards = settings.get("index.number_of_shards").and_then(|v| v.as_str()).and_then(|v| v.parse().ok()).unwrap_or(1);
+    Some((uuid, shards))
+}
+
+/// The indices a snapshot records, as `(index uuid, shards)`: what its durable copies are
+/// keyed by and what a restore loads.
+fn recorded_indices(s: &Snapshot) -> Vec<(String, u32)> {
+    s.index_meta.values().filter_map(stored_index).collect()
+}
+
+/// Durable snapshots: pins the current contents of `indices` (`(index uuid, shards)`) as
+/// snapshot `uuid`'s copies.
+async fn capture_durable(ctx: &Ctx<'_>, store: &dyn crate::engine::SnapshotStorage, uuid: &str, indices: &[(String, u32)]) -> EsResult<()> {
+    for (index_uuid, shards) in indices {
+        store.capture(uuid, index_uuid, *shards, ctx.cluster.engine.loaded(index_uuid)).await?;
+    }
+    Ok(())
+}
+
+/// How old a durable copy no recorded snapshot uses must be before a sweep drops it: a
+/// snapshot's copies are written before it is recorded, and only this process knows which
+/// snapshots it is taking. The grace covers another instance of the cluster (one being
+/// unloaded or deposed) that is still between the two.
+pub const LEFTOVER_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Durable snapshots: drops the shard copies that no recorded snapshot uses. Those `now`
+/// selects (snapshots that can never be recorded: deleted ones, or ones that failed before
+/// they were) go at once; any other unused one (a crash between capture and record, an index
+/// deleted while it was being captured) once it is `grace` old, unless its snapshot is being
+/// taken here. A copy that stays is dropped by a later sweep, so failures are only reported.
+async fn drop_unused_copies(
+    cluster: &crate::Cluster,
+    store: &dyn crate::engine::SnapshotStorage,
+    now: impl Fn(&crate::engine::SnapshotCopy) -> bool,
+    grace: std::time::Duration,
+) -> EsResult<()> {
+    let copies = store.copies().await?;
+    if copies.is_empty() {
+        return Ok(());
+    }
+    let st = cluster.state();
+    let mut used: std::collections::HashSet<(&str, String)> = std::collections::HashSet::new();
+    for d in st.metadata.repository_data.values() {
+        for s in &d.snapshots {
+            used.extend(recorded_indices(s).into_iter().map(|(u, _)| (s.uuid.as_str(), u)));
+        }
+    }
+    let taking = cluster.snapshot_data.taking.lock().clone();
+    let (mut at_once, mut later) = (Vec::new(), Vec::new());
+    for c in copies {
+        if now(&c) {
+            at_once.push(c);
+        } else if !used.contains(&(c.snapshot.as_str(), c.index_uuid.clone())) && !taking.contains(&c.snapshot) {
+            later.push(c);
+        }
+    }
+    store.drop_copies(&at_once, None).await?;
+    if !later.is_empty() {
+        store.drop_copies(&later, Some(grace)).await?;
+    }
+    Ok(())
+}
+
+/// Durable snapshots: drops the shard copies no recorded snapshot uses that are at least
+/// `grace` old (leftovers of a crash between capturing and recording a snapshot). The server
+/// runs it in the background after a cluster wakes; snapshot operations sweep too. A cluster
+/// that never had a repository holds no copies, and isn't listed.
+pub async fn sweep_leftover_copies(cluster: &crate::Cluster, grace: std::time::Duration) -> EsResult<()> {
+    let Some(store) = cluster.engine.snapshot_storage() else { return Ok(()) };
+    {
+        let st = cluster.state();
+        if st.metadata.repositories.is_empty() && st.metadata.repository_data.is_empty() {
+            return Ok(());
+        }
+    }
+    drop_unused_copies(cluster, &*store, |_| false, grace).await
+}
+
+/// Durable `PUT _snapshot/{repository}/{snapshot}`: a recorded snapshot's copies are complete.
+/// Plans the snapshot against the current state, captures what it includes, then records it,
+/// unless it would now include an index without a copy (created, or deleted and created again,
+/// since the plan): that one is captured and recording is tried again. An error carries whether
+/// the snapshot may have been recorded anyway (saving the cluster state failed).
+async fn create_durable<B>(ctx: &Ctx<'_>, store: &dyn crate::engine::SnapshotStorage, uuid: &str, repo: &str, snap: &str, build: B) -> Result<Arc<Snapshot>, (EsError, bool)>
+where
+    B: FnOnce(&mut ClusterState) -> EsResult<Arc<Snapshot>> + Clone + Send,
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const ROUNDS: usize = 8;
+    let mut captured: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for _ in 0..ROUNDS {
+        let planned = build.clone()(&mut (*ctx.state()).clone()).map_err(|e| (e, false))?;
+        let missing: Vec<(String, u32)> = recorded_indices(&planned).into_iter().filter(|(u, _)| !captured.contains(u)).collect();
+        capture_durable(ctx, store, uuid, &missing).await.map_err(|e| (e, false))?;
+        captured.extend(missing.into_iter().map(|(u, _)| u));
+        let (late, saving) = (AtomicBool::new(false), AtomicBool::new(false));
+        let attempt = build.clone();
+        let recorded = ctx
+            .cluster
+            .update(|st| {
+                let s = attempt(st)?;
+                if recorded_indices(&s).iter().any(|(u, _)| !captured.contains(u)) {
+                    late.store(true, Ordering::Relaxed);
+                    return Err(EsError::internal("an index appeared while the snapshot was being taken"));
+                }
+                saving.store(true, Ordering::Relaxed);
+                Ok(s)
+            })
+            .await;
+        match recorded {
+            Ok(s) => return Ok(s),
+            Err(_) if late.load(Ordering::Relaxed) => continue,
+            Err(e) => return Err((e, saving.load(Ordering::Relaxed))),
+        }
+    }
+    Err((EsError::new(500, "snapshot_exception", format!("[{repo}:{snap}] indices kept being created while the snapshot was being taken")), false))
+}
 
 /// Bytes and files reported for each shard snapshot (an empty shard's commit point).
 const SHARD_BYTES: i64 = 225;
@@ -361,13 +604,22 @@ fn date(ms: i64) -> String {
 
 /// `SnapshotInfo.toXContentExternal`.
 fn snapshot_info(ctx: &Ctx, repo: Option<&str>, s: &Snapshot, verbose: bool, index_names: bool, index_details: bool) -> Value {
+    // OpenSearch's `SnapshotInfo` has no repository or feature states, and tells whether the
+    // snapshot is a remote store shallow copy.
+    let os = crate::opensearch::active();
     let mut m = Map::new();
     m.insert("snapshot".into(), s.name.clone().into());
     m.insert("uuid".into(), s.uuid.clone().into());
-    if let Some(r) = repo {
+    if let Some(r) = repo
+        && !os
+    {
         m.insert("repository".into(), r.into());
     }
-    if verbose {
+    if verbose && os {
+        m.insert("version_id".into(), crate::version::OPENSEARCH_INDEX_VERSION_ID.parse::<i64>().unwrap_or(0).into());
+        m.insert("version".into(), crate::version::OPENSEARCH_VERSION.into());
+        m.insert("remote_store_index_shallow_copy".into(), false.into());
+    } else if verbose {
         m.insert("version_id".into(), crate::version::INDEX_VERSION_ID.parse::<i64>().unwrap_or(0).into());
         m.insert("version".into(), crate::version::INDEX_VERSION_STRING.into());
     }
@@ -409,7 +661,9 @@ fn snapshot_info(ctx: &Ctx, repo: Option<&str>, s: &Snapshot, verbose: bool, ind
         m.insert("duration_in_millis".into(), dur.into());
         m.insert("failures".into(), Value::Arr(Vec::new()));
         m.insert("shards".into(), obj! { "total" => s.total_shards, "failed" => s.total_shards - s.successful_shards, "successful" => s.successful_shards });
-        m.insert("feature_states".into(), Value::Arr(s.feature_states.clone()));
+        if !os {
+            m.insert("feature_states".into(), Value::Arr(s.feature_states.clone()));
+        }
     }
     Value::Obj(m)
 }
@@ -453,9 +707,9 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     validate_snapshot_name(&repo, &snap)?;
     let now = ctx.now_ms;
     let r2 = repo.clone();
-    let snapshot = ctx
-        .cluster
-        .update(move |st| {
+    let uuid = random_uuid();
+    let (snap_name, snap_uuid) = (snap.clone(), uuid.clone());
+    let build = move |st: &mut ClusterState| {
             let Some(r) = st.metadata.repositories.get(&r2).cloned() else { return Err(repository_missing(&r2)) };
             if r.read_only() {
                 return Err(EsError::illegal_argument(format!("[{r2}] cannot create snapshot in a readonly repository")));
@@ -497,11 +751,11 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             let shards: i64 = names.iter().map(|n| st.metadata.indices[n].number_of_shards() as i64).sum();
             let snapshot = Snapshot {
                 name: snap.clone(),
-                uuid: random_uuid(),
+                uuid: uuid.clone(),
                 indices: names.clone(),
                 data_streams: data_streams.clone(),
                 include_global_state,
-                metadata,
+                metadata: metadata.clone(),
                 state: "SUCCESS".into(),
                 start_ms: now,
                 end_ms: now,
@@ -518,8 +772,34 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
             data.snapshots.push(snapshot.clone());
             st.metadata.repository_data.insert(key, Arc::new(data));
             Ok(snapshot)
-        })
-        .await?;
+        };
+    let snapshot = match ctx.cluster.engine.snapshot_storage() {
+        Some(store) => {
+            let _taking = ctx.cluster.snapshot_data.taking(&snap_uuid);
+            match create_durable(ctx, &*store, &snap_uuid, &repo, &snap_name, build).await {
+                Ok(snapshot) => {
+                    // Copies of indices deleted while they were being captured go now; the sweep
+                    // also catches what a crash left behind.
+                    let kept: std::collections::HashSet<String> = recorded_indices(&snapshot).into_iter().map(|(u, _)| u).collect();
+                    let stray = |c: &crate::engine::SnapshotCopy| c.snapshot == snapshot.uuid && !kept.contains(&c.index_uuid);
+                    let _ = drop_unused_copies(ctx.cluster, &*store, stray, LEFTOVER_GRACE).await;
+                    snapshot
+                }
+                Err((e, recorded_maybe)) => {
+                    // Copies of a snapshot that can't have been recorded go now. When saving the
+                    // state failed, it may have been saved after all: leave them to the sweep.
+                    let doomed = |c: &crate::engine::SnapshotCopy| !recorded_maybe && c.snapshot == snap_uuid;
+                    let _ = drop_unused_copies(ctx.cluster, &*store, doomed, LEFTOVER_GRACE).await;
+                    return Err(e);
+                }
+            }
+        }
+        None => {
+            let snapshot = ctx.cluster.update(build).await?;
+            capture_shards(ctx, &snapshot)?;
+            snapshot
+        }
+    };
     if !wait {
         return Reply::ok(obj! { "accepted" => true });
     }
@@ -610,6 +890,10 @@ pub fn get(ctx: &Ctx) -> EsResult<Reply> {
         .iter()
         .map(|(r, s)| snapshot_info(ctx, include_repository.then_some(r.as_str()), s, verbose, index_names, index_details))
         .collect();
+    // OpenSearch's `GetSnapshotsResponse` has no paging counts.
+    if crate::opensearch::active() {
+        return Reply::ok(obj! { "snapshots" => Value::Arr(page) });
+    }
     Reply::ok(obj! { "snapshots" => Value::Arr(page), "total" => total, "remaining" => total - skip - take })
 }
 
@@ -619,7 +903,9 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     ctx.bool_param("wait_for_completion", true)?;
     let repo = ctx.path_param("repository").unwrap_or_default().to_string();
     let snaps = ctx.list_param("snapshot").unwrap_or_default();
-    ctx.cluster
+    let snapshot_data = &ctx.cluster.snapshot_data;
+    let deleted = ctx
+        .cluster
         .update(move |st| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
@@ -631,19 +917,31 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             // Nothing to delete is done before the repository is even written to.
             if !data.snapshots.iter().any(|s| snaps.iter().any(|p| p == "_all" || glob_match(p, &s.name))) {
-                return Ok(());
+                return Ok(Vec::new());
             }
             if r.read_only() {
                 return Err(repository_exception(&repo, "repository is readonly"));
             }
+            let gone: Vec<(String, String)> = data.snapshots.iter().filter(|s| snaps.iter().any(|p| p == "_all" || glob_match(p, &s.name))).map(|s| (s.name.clone(), s.uuid.clone())).collect();
+            snapshot_data.check_not_restoring(&repo, &gone)?;
+            let gone: Vec<String> = gone.into_iter().map(|(_, u)| u).collect();
             data.snapshots.retain(|s| !snaps.iter().any(|p| p == "_all" || glob_match(p, &s.name)));
             data.generation += 1;
             if !data.uuid.is_empty() {
                 st.metadata.repository_data.insert(key, Arc::new(data));
             }
-            Ok(())
+            Ok(gone)
         })
         .await?;
+    for uuid in &deleted {
+        ctx.cluster.snapshot_data.forget(uuid);
+    }
+    if !deleted.is_empty()
+        && let Some(store) = ctx.cluster.engine.snapshot_storage()
+    {
+        // Their copies go now (a failure leaves them to a later sweep: the snapshots are gone).
+        let _ = drop_unused_copies(ctx.cluster, &*store, |c| deleted.contains(&c.snapshot), LEFTOVER_GRACE).await;
+    }
     Reply::acknowledged()
 }
 
@@ -711,7 +1009,26 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     validate_snapshot_name(&repo, &target)?;
     let now = ctx.now_ms;
-    ctx.cluster
+    let target_uuid = random_uuid();
+    let durable = ctx.cluster.engine.snapshot_storage();
+    let _taking = durable.as_ref().map(|_| ctx.cluster.snapshot_data.taking(&target_uuid));
+    let saving = std::sync::atomic::AtomicBool::new(false);
+    if let Some(store) = &durable {
+        // The clone's contents are durable before it is recorded.
+        let st = ctx.state();
+        let src = st.metadata.repositories.get(&repo).and_then(|r| st.metadata.repository_data.get(&r.location_key())).and_then(|d| d.find(&source).cloned());
+        if let Some(src) = src {
+            let uuids: Vec<String> = src.index_meta.iter().filter(|(i, _)| patterns.iter().any(|p| glob_match(p, i))).filter_map(|(_, m)| stored_index(m).map(|(u, _)| u)).collect();
+            if let Err(e) = store.clone_snapshot(&src.uuid, &target_uuid, &uuids).await {
+                let _ = drop_unused_copies(ctx.cluster, &**store, |c| c.snapshot == target_uuid, LEFTOVER_GRACE).await;
+                return Err(e);
+            }
+        }
+    }
+    let doomed_uuid = target_uuid.clone();
+    let saving_ref = &saving;
+    let cloned = ctx
+        .cluster
         .update(move |st| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
             let key = r.location_key();
@@ -730,7 +1047,7 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 .sum();
             let cloned = Snapshot {
                 name: target.clone(),
-                uuid: random_uuid(),
+                uuid: target_uuid,
                 index_meta: src.index_meta.iter().filter(|(k, _)| indices.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
                 indices,
                 start_ms: now,
@@ -739,12 +1056,31 @@ pub async fn clone(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 successful_shards: shards,
                 ..(*src).clone()
             };
+            let ids = (src.uuid.clone(), cloned.uuid.clone(), cloned.indices.clone());
             data.snapshots.push(Arc::new(cloned));
             data.generation += 1;
             st.metadata.repository_data.insert(key, Arc::new(data));
-            Ok(())
+            saving_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(ids)
         })
-        .await?;
+        .await;
+    match cloned {
+        Ok((src, dst, indices)) => {
+            ctx.cluster.snapshot_data.clone_into(&src, &dst, &indices);
+            if let Some(store) = &durable {
+                let _ = drop_unused_copies(ctx.cluster, &**store, |_| false, LEFTOVER_GRACE).await;
+            }
+        }
+        Err(e) => {
+            if let Some(store) = &durable {
+                // Copies of a clone that can't have been recorded go now. When saving the state
+                // failed, it may have been saved after all: leave them to the sweep.
+                let recorded_maybe = saving.load(std::sync::atomic::Ordering::Relaxed);
+                let _ = drop_unused_copies(ctx.cluster, &**store, |c| !recorded_maybe && c.snapshot == doomed_uuid, LEFTOVER_GRACE).await;
+            }
+            return Err(e);
+        }
+    }
     Reply::acknowledged()
 }
 
@@ -786,7 +1122,9 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
         _ => None,
     };
     let now = ctx.now_ms;
-    let (restored, shards) = ctx
+    // Until the documents are copied, the snapshot can't be deleted.
+    let _restoring = ctx.cluster.snapshot_data.restoring(&repo, &snap);
+    let (restored, shards, copies) = ctx
         .cluster
         .update(move |st| {
             let Some(r) = st.metadata.repositories.get(&repo).cloned() else { return Err(repository_missing(&repo)) };
@@ -824,6 +1162,8 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 }
             }
             let mut restored = Vec::new();
+            // (restored index, its name and uuid in the snapshot): whose documents it gets back.
+            let mut copies: Vec<(String, String, String)> = Vec::new();
             let mut total_shards = 0i64;
             for name in &selected {
                 let Some(stored) = s.index_meta.get(name) else { continue };
@@ -848,6 +1188,7 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
                         )));
                     }
                 }
+                let source_uuid = std::mem::take(&mut idx.uuid);
                 let uuid = random_uuid();
                 idx.name = target.clone();
                 idx.uuid = uuid.clone();
@@ -871,6 +1212,7 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 idx.recovery_source = Some(Arc::new(rs));
                 total_shards += idx.number_of_shards() as i64;
                 st.metadata.indices.insert(target.clone(), Arc::new(idx));
+                copies.push((target.clone(), name.clone(), source_uuid));
                 restored.push(target);
             }
             // Data streams whose backing indices all came back (under their own names).
@@ -887,10 +1229,24 @@ pub async fn restore(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 restore_global(&mut st.metadata, g)?;
             }
             st.check_unique_names()?;
-            Ok((restored, total_shards))
+            Ok((restored, total_shards, (s.uuid.clone(), copies)))
         })
         .await?;
     let _ = now;
+    // The shard contents (when this process took the snapshot).
+    let (snapshot_uuid, copies) = copies;
+    let st = ctx.state();
+    let durable = ctx.cluster.engine.snapshot_storage();
+    for (target, source, source_uuid) in &copies {
+        let Some(idx) = st.metadata.indices.get(target) else { continue };
+        if let Some(data) = ctx.cluster.snapshot_data.get(&snapshot_uuid, source) {
+            crate::write::copy_docs(ctx.cluster, &data, idx)?;
+        } else if let Some(store) = &durable {
+            let shards = store.load(&snapshot_uuid, source_uuid, idx.number_of_shards()).await?;
+            let searchers = ctx.cluster.engine.snapshot_searchers(ctx.cluster, &st, idx, shards)?;
+            crate::write::copy_docs(ctx.cluster, &searchers, idx)?;
+        }
+    }
     if !wait {
         return Reply::ok(obj! { "accepted" => true });
     }
@@ -1031,6 +1387,7 @@ pub fn state_repositories(st: &ClusterState) -> Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -1053,4 +1410,159 @@ mod tests {
         assert!(validate_snapshot_name("r", "_x").is_err());
         assert!(validate_snapshot_name("r", "fine-1").is_ok());
     }
+
+    /// `SnapshotsService` refuses to delete a snapshot a restore is reading
+    /// (`ConcurrentSnapshotExecutionException`, 503, naming the first snapshot asked for and the
+    /// `RestoreInProgress` entries).
+    #[test]
+    fn a_snapshot_being_restored_cannot_be_deleted() {
+        let data = SnapshotData::default();
+        let deleting = vec![("a".to_string(), "ua".to_string()), ("b".to_string(), "ub".to_string())];
+        assert!(data.check_not_restoring("r", &deleting).is_ok());
+        let guard = data.restoring("r", "b");
+        assert!(data.check_not_restoring("other", &deleting).is_ok());
+        let e = data.check_not_restoring("r", &deleting).unwrap_err();
+        assert_eq!((e.status, &*e.kind), (503, "concurrent_snapshot_execution_exception"));
+        let id = data.restoring.lock()[0].0.clone();
+        assert_eq!(e.reason(), format!("[default:r:a/ua] cannot delete snapshot during a restore in progress in [RestoreInProgress[{{{id}}}{{default:r:b/ub}}]]"));
+        drop(guard);
+        assert!(data.check_not_restoring("r", &deleting).is_ok());
+        // Taking a snapshot is tracked the same way, for the leftover sweep.
+        let t = data.taking("u1");
+        assert!(data.taking.lock().contains("u1"));
+        drop(t);
+        assert!(data.taking.lock().is_empty());
+    }
+}
+
+/// `POST /_snapshot/{repository}/_analyze` (`RepositoryAnalyzeAction`): writes, reads, lists and
+/// deletes test blobs to check that a repository behaves as snapshots need.
+///
+/// roll's repositories keep snapshot contents in the cluster's own storage (the repository is
+/// a namespace), so there is no third-party store whose consistency could be in doubt: the
+/// analysis validates the request as Elasticsearch does, plans the same blob counts and sizes
+/// and reports a clean result in Elasticsearch's shape.
+pub fn analyze_repository(ctx: &Ctx) -> EsResult<Reply> {
+    use crate::units::ByteSize;
+    let name = ctx.path_param("repository").unwrap_or_default();
+    let st = ctx.state();
+    let Some(repo) = st.metadata.repositories.get(name) else { return Err(repository_missing(name)) };
+    let blob_count = ctx.int_param("blob_count", 100)?;
+    let concurrency = ctx.int_param("concurrency", 10)?;
+    let register_ops = ctx.int_param("register_operation_count", 10)?;
+    let read_node_count = ctx.int_param("read_node_count", 10)?;
+    let early_read_node_count = ctx.int_param("early_read_node_count", 2)?;
+    let size = |p: &str, d: i64| -> EsResult<ByteSize> { ctx.query(p).map_or(Ok(ByteSize(d)), |v| ByteSize::parse(v, p)) };
+    let max_blob = size("max_blob_size", 10 << 20)?;
+    let max_total = size("max_total_data_size", 1 << 30)?;
+    let rare: f64 = match ctx.query("rare_action_probability") {
+        Some(v) => v.parse().map_err(|_| EsError::new(400, "number_format_exception", format!("For input string: \"{v}\"")))?,
+        None => 0.02,
+    };
+    let detailed = ctx.bool_param("detailed", false)?;
+    let _ = ctx.bool_param("rarely_abort_writes", true)?;
+    ctx.time_param("timeout", crate::units::TimeValue::seconds(30))?;
+    let seed = match ctx.query("seed") {
+        Some(v) => crate::units::parse_java_long(v).ok_or_else(|| EsError::illegal_argument(format!("Failed to parse long parameter [seed] with value [{v}]")))?,
+        None => i64::from(rand_seed()),
+    };
+    // `RepositoryAnalyzeAction.Request.validate` order.
+    let positive = |what: &str, v: i64| if v <= 0 { Err(EsError::illegal_argument(format!("{what} must be >0, but was [{v}]"))) } else { Ok(()) };
+    positive("blobCount", blob_count)?;
+    positive("concurrency", concurrency)?;
+    positive("registerOperationCount", register_ops)?;
+    positive("readNodeCount", read_node_count)?;
+    positive("earlyReadNodeCount", early_read_node_count)?;
+    if max_blob.bytes() <= 0 {
+        return Err(EsError::illegal_argument(format!("maxBlobSize must be >0, but was [{}]", max_blob.human())));
+    }
+    if !(0.0..=1.0).contains(&rare) {
+        return Err(EsError::illegal_argument(format!("rareActionProbability must be between 0 and 1, but was [{rare:?}]")));
+    }
+    let min_total = max_blob.bytes() + blob_count - 1;
+    if max_total.bytes() < min_total {
+        return Err(EsError::illegal_argument(format!(
+            "cannot satisfy max total bytes [{}B/{}]: must write at least one byte per blob and at least one max-sized blob which is [{min_total}B] in total",
+            max_total.bytes(),
+            max_total.human()
+        )));
+    }
+    if repo.read_only() {
+        return Err(EsError::illegal_argument(format!("repository [{name}] is read-only")));
+    }
+    // One max-sized blob, the rest sharing what the total leaves (each at least one byte).
+    let rest = blob_count - 1;
+    let each = if rest > 0 { ((max_total.bytes() - max_blob.bytes()) / rest).clamp(1, max_blob.bytes()) } else { 0 };
+    let sizes: Vec<i64> = std::iter::once(max_blob.bytes()).chain(std::iter::repeat_n(each, rest as usize)).collect();
+    let total: i64 = sizes.iter().sum();
+    let node = &ctx.cluster.node;
+    let zero_time = |m: &mut Map, k: &str| {
+        m.insert(k.into(), Value::from("0s"));
+        m.insert(format!("{k}_nanos"), Value::from(0));
+    };
+    let mut write = obj! { "count" => blob_count, "total_size" => ByteSize(total).human(), "total_size_bytes" => total };
+    let mut read = obj! { "count" => blob_count, "total_size" => ByteSize(total).human(), "total_size_bytes" => total };
+    if let (Value::Obj(w), Value::Obj(r)) = (&mut write, &mut read) {
+        zero_time(w, "total_throttled");
+        zero_time(w, "total_elapsed");
+        zero_time(r, "total_wait");
+        zero_time(r, "max_wait");
+        zero_time(r, "total_throttled");
+        zero_time(r, "total_elapsed");
+    }
+    let mut out = obj! {
+        "coordinating_node" => obj! { "id" => node.id.clone(), "name" => node.name.clone() },
+        "repository" => name,
+        "blob_count" => blob_count,
+        "concurrency" => concurrency,
+        "read_node_count" => read_node_count,
+        "early_read_node_count" => early_read_node_count,
+        "max_blob_size" => max_blob.human(),
+        "max_blob_size_bytes" => max_blob.bytes(),
+        "max_total_data_size" => max_total.human(),
+        "max_total_data_size_bytes" => max_total.bytes(),
+        "seed" => seed,
+        "rare_action_probability" => rare,
+        "blob_path" => format!("temp-analysis-{}", crate::meta::names::random_uuid()),
+        "check_overwrite_protection" => true,
+        "issues_detected" => Value::Arr(Vec::new()),
+        "summary" => obj! { "write" => write, "read" => read },
+    };
+    if let Value::Obj(m) = &mut out {
+        if detailed {
+            let details: Vec<Value> = sizes
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| {
+                    obj! {
+                        "blob" => obj! {
+                            "name" => format!("test-blob-{i}-{}", crate::meta::names::random_uuid()),
+                            "size" => ByteSize(s).human(), "size_bytes" => s,
+                            "read_start" => 0, "read_end" => s, "read_early" => false, "overwritten" => false,
+                        },
+                        "writer_node" => obj! { "id" => node.id.clone(), "name" => node.name.clone() },
+                        "write_elapsed" => "0s", "write_elapsed_nanos" => 0,
+                        "write_throttled" => "0s", "write_throttled_nanos" => 0,
+                        "reads" => Value::Arr(vec![obj! {
+                            "node" => obj! { "id" => node.id.clone(), "name" => node.name.clone() },
+                            "found" => true,
+                            "first_byte_time" => "0s", "first_byte_time_nanos" => 0,
+                            "elapsed" => "0s", "elapsed_nanos" => 0,
+                            "throttled" => "0s", "throttled_nanos" => 0,
+                        }]),
+                    }
+                })
+                .collect();
+            m.insert("details".into(), Value::Arr(details));
+        }
+        zero_time(m, "listing_elapsed");
+        zero_time(m, "delete_elapsed");
+    }
+    Reply::ok(out)
+}
+
+/// A seed for the analysis (`Randomness.get().nextLong()` in Elasticsearch; any value will do).
+fn rand_seed() -> i32 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    (nanos >> 1) as i32
 }

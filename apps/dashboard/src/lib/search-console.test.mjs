@@ -183,3 +183,60 @@ test("console requests keep their body text", () => {
   assert.throws(() => parseConsole("FETCH /a"), /Unsupported method/);
   assert.throws(() => parseConsole("/a"), /Start with a method/);
 });
+
+test("URL query parameters", async () => {
+  const { complete, applyCompletion, apiParams } = await import("./search-console.ts");
+  const { PARAMS, COMMON_PARAMS, API_PATHS } = await import("./search-params.generated.ts");
+  const params = { params: PARAMS, common: COMMON_PARAMS, apis: API_PATHS };
+  const src = { indices: ["products"], fields: [], params };
+  const names = (c) => c.items.map((i) => i.label);
+  // The search API's parameters and the common ones.
+  const search = apiParams("GET", "/products/_search", params).map((p) => p[0]);
+  for (const n of ["size", "from", "q", "track_total_hits", "pretty", "filter_path", "expand_wildcards"]) assert.ok(search.includes(n), n);
+  assert.ok(!search.includes("op_type"));
+  // A document write: refresh, routing, op_type.
+  const put = apiParams("PUT", "/products/_doc/1", params).map((p) => p[0]);
+  for (const n of ["refresh", "routing", "op_type", "if_seq_no"]) assert.ok(put.includes(n), n);
+  // _cat APIs: v, h, s, format.
+  const cat = apiParams("GET", "/_cat/indices", params).map((p) => p[0]);
+  for (const n of ["v", "h", "s", "format", "health"]) assert.ok(cat.includes(n), n);
+  // An unknown path still offers the common parameters.
+  assert.deepEqual(apiParams("GET", "/nope/_nothing/a/b/c", params).map((p) => p[0]).sort(), ["error_trace", "filter_path", "human", "pretty", "source"]);
+
+  let line = "GET /products/_search?si";
+  let c = complete(line, line.length, src);
+  assert.ok(names(c).includes("size"), names(c).join());
+  let r = applyCompletion(line, c, c.items.find((i) => i.label === "size"));
+  assert.equal(r.text, "GET /products/_search?size=");
+  // Boolean parameters go in bare (Elasticsearch reads an empty value as true).
+  line = "GET /products/_search?size=5&pre";
+  c = complete(line, line.length, src);
+  r = applyCompletion(line, c, c.items.find((i) => i.label === "pretty"));
+  assert.equal(r.text, "GET /products/_search?size=5&pretty");
+  // Parameters already given aren't offered again.
+  line = "GET /products/_search?size=5&";
+  c = complete(line, line.length, src);
+  assert.ok(!names(c).includes("size") && names(c).includes("from"));
+  // Values: enums and booleans.
+  line = "PUT /products/_doc/1?refresh=";
+  c = complete(line, line.length, src);
+  assert.deepEqual(names(c).sort(), ["false", "true", "wait_for"]);
+  line = "GET /products/_search?expand_wildcards=open,hi";
+  c = complete(line, line.length, src);
+  assert.deepEqual(names(c), ["hidden"]);
+  r = applyCompletion(line, c, c.items[0]);
+  assert.equal(r.text, "GET /products/_search?expand_wildcards=open,hidden");
+  line = "GET /products/_search?track_scores=";
+  c = complete(line, line.length, src);
+  assert.deepEqual(names(c), ["true", "false"]);
+  // Free-form values get nothing; neither does a body line.
+  line = "GET /products/_search?q=";
+  assert.equal(complete(line, line.length, src), null);
+  // In the middle of the line: replaces the name only.
+  line = "GET /products/_search?siz&from=1 ";
+  c = complete(line, "GET /products/_search?siz".length, src);
+  r = applyCompletion(line, c, c.items.find((i) => i.label === "size"));
+  assert.equal(r.text, "GET /products/_search?size=&from=1 ");
+  // Without a table, nothing (the old behaviour).
+  assert.equal(complete("GET /_search?si", 15, { indices: [], fields: [] }), null);
+});

@@ -178,15 +178,29 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
     let mut slots: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut queries: HashMap<u32, crate::query::Query> = HashMap::new();
     let mut named: HashMap<u32, Vec<(u32, Vec<String>)>> = HashMap::new();
+    // Stored queries whose extracted terms the documents lack can't match: verify only the
+    // candidates (see `percolate_candidates`).
+    let all = super::percolate_candidates::adds_fields(ctx.table, &mem_table);
+    let key = candidates_key(ctx, f.number);
     for seg in ctx.searcher.segments() {
-        let Some(dv) = seg.reader.binary(f.number) else { continue };
-        for d in 0..seg.reader.max_doc() {
+        if seg.reader.binary(f.number).is_none() {
+            continue;
+        }
+        let stored = match seg.core.cache_get::<super::percolate_candidates::StoredQueries>("percolator", key) {
+            Some(s) => s,
+            None => {
+                let s = Arc::new(super::percolate_candidates::StoredQueries::build(ctx, seg, f.number));
+                seg.core.cache_put("percolator", key, s.clone(), s.heap_bytes(), 4);
+                s
+            }
+        };
+        for i in stored.candidates(&mem_searcher, all) {
+            let entry = &stored.queries[i as usize];
+            let d = entry.doc;
             if !seg.is_live(d) {
                 continue;
             }
-            let Some(bytes) = dv.get(d) else { continue };
-            let Ok(Some(v)) = crate::json::parse(bytes) else { continue };
-            let Ok((parsed, _)) = crate::query::parse_query(&v, None, &[]) else { continue };
+            let parsed = entry.query.clone();
             let qctx = QueryCtx::new(ctx.cluster, ctx.st, &mem.meta, &mem_table, &mem_searcher, ctx.now_ms);
             let Ok(stored_q) = qctx.to_query(&parsed) else { continue };
             let q: QueryRef = arc(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Must, stored_q).add(search_index::query::Occur::Filter, root.clone()));
@@ -239,6 +253,15 @@ pub fn percolate(ctx: &QueryCtx, p: &Percolate) -> EsResult<QueryRef> {
         return Ok(super::query::match_none("no stored query matches"));
     }
     Ok(arc(search_index::query::ScoreDocQuery::lucene(matches)))
+}
+
+/// The segment cache key of a percolator field's stored queries: their conversion depends on
+/// the index's mapping, analysis settings and synonym sets.
+fn candidates_key(ctx: &QueryCtx, field: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (field, &ctx.idx.uuid, ctx.idx.mapping_version, ctx.idx.settings_version, ctx.st.metadata.synonyms_version).hash(&mut h);
+    h.finish()
 }
 
 /// The coordinator's rewrite of `percolate` queries naming an indexed document

@@ -51,7 +51,7 @@ pub fn parse_long_value(v: &Value) -> EsResult<i64> {
 }
 
 /// The double of a query value (`parseDouble` / `Number.doubleValue`).
-fn parse_double_value(v: &Value) -> EsResult<f64> {
+pub(crate) fn parse_double_value(v: &Value) -> EsResult<f64> {
     match v {
         Value::Num(n) => Ok(n.as_f64()),
         Value::Str(s) => crate::units::parse_java_double(s.trim()).ok_or_else(|| EsError::number_format(s)),
@@ -59,7 +59,7 @@ fn parse_double_value(v: &Value) -> EsResult<f64> {
     }
 }
 
-fn has_decimal(v: &Value) -> bool {
+pub(crate) fn has_decimal(v: &Value) -> bool {
     match v {
         Value::Num(Number::Float(f)) => f.fract() != 0.0,
         Value::Str(s) => s.trim().parse::<f64>().map(|f| f.fract() != 0.0).unwrap_or(false),
@@ -67,7 +67,7 @@ fn has_decimal(v: &Value) -> bool {
     }
 }
 
-fn signum(v: &Value) -> f64 {
+pub(crate) fn signum(v: &Value) -> f64 {
     parse_double_value(v).map(|d| d.signum()).unwrap_or(0.0)
 }
 
@@ -184,7 +184,8 @@ fn half_range(f: &FieldInfo, lo: f32, hi: f32) -> EsResult<QueryRef> {
     })
 }
 
-/// Rounds to the nearest half float and steps (`HalfFloatPoint.nextUp/nextDown`).
+/// `HalfFloatPoint.nextUp/nextDown`: the first half float above (below) `v`. A `v` between
+/// two half floats has its neighbour on that side as the answer, whichever is nearer.
 fn half_step(v: f32, up: bool) -> f32 {
     // Infinities step no further outward (Lucene's `nextUp(+inf)` / `nextDown(-inf)`).
     if v.is_nan() || (up && v == f32::INFINITY) || (!up && v == f32::NEG_INFINITY) {
@@ -192,6 +193,9 @@ fn half_step(v: f32, up: bool) -> f32 {
     }
     let bits = encode::f16_bits(v);
     let h = encode::f16_to_f32(bits);
+    if (up && h > v) || (!up && h < v) {
+        return h;
+    }
     let s = encode::f16_sortable(h);
     let n = if up { s.saturating_add(1) } else { s.saturating_sub(1) };
     encode::sortable_f16(n)
@@ -213,7 +217,7 @@ pub fn numeric_term(_ctx: &QueryCtx, f: &FieldInfo, v: &Value) -> EsResult<Query
                 return Ok(match_none(&format!("Value [{}] has a decimal part", value_text(v))));
             }
             let l = integral(k, v)?;
-            long_range(f, k, l, l)?
+            index_sorted_exact(f, l, long_range(f, k, l, l)?)
         }
         Kind::UnsignedLong => {
             let s = value_text(v);
@@ -229,7 +233,8 @@ pub fn numeric_term(_ctx: &QueryCtx, f: &FieldInfo, v: &Value) -> EsResult<Query
                 },
             };
             let l = (u ^ (1 << 63)) as i64;
-            long_range(f, Kind::Long, l, l)?
+            // `UnsignedLongFieldType.termQuery`: the point query alone when indexed.
+            if f.index && !crate::opensearch::active() { arc(PointRangeQuery::long(f.number, l, l)) } else { long_range(f, Kind::Long, l, l)? }
         }
         Kind::Double => {
             let d = parse_double_value(v)?;
@@ -246,11 +251,22 @@ pub fn numeric_term(_ctx: &QueryCtx, f: &FieldInfo, v: &Value) -> EsResult<Query
         Kind::ScaledFloat(sf) => {
             let d = parse_double_value(v)?;
             let l = (d * sf).round() as i64;
-            long_range(f, Kind::Long, l, l)?
+            index_sorted_exact(f, l, long_range(f, Kind::Long, l, l)?)
         }
         _ => return Err(EsError::illegal_argument(format!("field [{}] is not numeric", f.name))),
     };
     Ok(q)
+}
+
+/// Lucene's `LongField.newExactQuery` / `IntField.newExactQuery`, which Elasticsearch's
+/// integral `term` queries on indexed fields with doc values are: the point-or-doc-values
+/// query inside `IndexSortSortedNumericDocValuesRangeQuery` (a doc range on segments sorted
+/// by the field; it is what explanations and profiles show, `f:[5 TO 5]`).
+fn index_sorted_exact(f: &FieldInfo, v: i64, q: QueryRef) -> QueryRef {
+    if !(f.index && f.doc_values) || !q.as_any().is::<IndexOrDocValuesQuery>() || crate::opensearch::active() {
+        return q;
+    }
+    arc(search_index::query::IndexSortRangeQuery { field: f.number, lower: v, upper: v, fallback: q })
 }
 
 /// `terms` on numbers: a point set (indexed) or doc-values set.
@@ -309,7 +325,8 @@ pub fn numeric_terms(ctx: &QueryCtx, f: &FieldInfo, values: &[Value]) -> EsResul
     }
     let (pt, _) = point_kind(if k.is_date() || k == Kind::UnsignedLong || matches!(k, Kind::ScaledFloat(_)) { Kind::Long } else { k });
     if f.index {
-        Ok(arc(ConstantScoreQuery::new(arc(PointInSetQuery::new(f.number, pts, pt)))))
+        // `PointInSetQuery` scores constantly itself (explanations read `f:{1 2}`).
+        Ok(arc(PointInSetQuery::new(f.number, pts, pt)))
     } else if f.doc_values {
         let mut b = search_index::query::BooleanQuery::new();
         for l in dvs {
@@ -364,6 +381,22 @@ pub fn ip_term(_ctx: &QueryCtx, f: &FieldInfo, v: &Value) -> EsResult<QueryRef> 
     ip_range_q(f, lo, hi)
 }
 
+/// The smallest and largest value a shard indexes for a date field (Lucene's
+/// `PointValues.getMinPackedValue` / `getMaxPackedValue` over every segment); `None`
+/// without points.
+fn date_point_bounds(ctx: &QueryCtx, field: u32) -> Option<(i64, i64)> {
+    let mut out: Option<(i64, i64)> = None;
+    for seg in ctx.searcher.segments() {
+        let Some(p) = seg.reader.points(field) else { continue };
+        let (lo, hi) = (encode::i64_from(p.min_packed_value()), encode::i64_from(p.max_packed_value()));
+        out = Some(match out {
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+            None => (lo, hi),
+        });
+    }
+    out
+}
+
 fn ip_range_q(f: &FieldInfo, lo: [u8; 16], hi: [u8; 16]) -> EsResult<QueryRef> {
     if lo > hi {
         return Ok(match_none("empty range"));
@@ -380,7 +413,7 @@ fn ip_range_q(f: &FieldInfo, lo: [u8; 16], hi: [u8; 16]) -> EsResult<QueryRef> {
     })
 }
 
-fn ip_step(b: [u8; 16], up: bool) -> Option<[u8; 16]> {
+pub(crate) fn ip_step(b: [u8; 16], up: bool) -> Option<[u8; 16]> {
     let mut b = b;
     for i in (0..16).rev() {
         if up {
@@ -406,10 +439,27 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
         ctx.check_seq_no_queryable()?;
     }
     let Some(f) = ctx.field(&r.field) else {
-        return Ok(match_none(&format!("unmapped field [{}]", r.field)));
+        // `RangeQueryBuilder.doRewrite`: `DISJOINT` on a shard without the field.
+        return Ok(match_none("The \"range\" query was rewritten to a \"match_none\" query."));
     };
     let from = r.from.as_ref().filter(|v| !v.is_null());
     let to = r.to.as_ref().filter(|v| !v.is_null());
+    // `RangeQueryBuilder.doToQuery`: open on both sides it is an `exists` query (whatever the
+    // field type, relation or format), which Lucene rewrites to `*:*` when every doc has it.
+    if from.is_none() && to.is_none() && r.field != "_seq_no" {
+        return ctx.exists_query(&r.field);
+    }
+    // `AggregateMetricDoubleFieldType.rangeQuery`: the single metric's numeric range, the
+    // average of `sum` and `value_count`, or nothing.
+    let f = if f.kind == Kind::AggregateMetric {
+        match super::aggregate_metric::delegate(&f) {
+            super::aggregate_metric::Delegate::Single(m) => std::sync::Arc::new(*m),
+            super::aggregate_metric::Delegate::Avg { sum, count } => return super::aggregate_metric::avg_range(&f, sum, count, from, to, r.include_lower, r.include_upper),
+            super::aggregate_metric::Delegate::None => return Ok(match_none("aggregate_metric_double without a single metric or [sum, value_count]")),
+        }
+    } else {
+        f
+    };
     if let Some(rel) = r.relation
         && !f.kind.is_range()
         && rel != Relation::Intersects
@@ -424,11 +474,14 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
     let k = f.kind;
     match k {
         Kind::Long | Kind::Integer | Kind::Short | Kind::Byte | Kind::TokenCount => {
-            let (min, max, _) = int_bounds(k);
+            // `SHORT` and `BYTE` ranges are `INTEGER.rangeQuery`: integer bounds (an open
+            // range prints `[83 TO 2147483647]`).
+            let rk = if matches!(k, Kind::Short | Kind::Byte) { Kind::Integer } else { k };
+            let (min, max, _) = int_bounds(rk);
             let mut l = min;
             let mut u = max;
             if let Some(v) = from {
-                l = integral_clamped(k, v)?;
+                l = integral_clamped(rk, v)?;
                 let dec = has_decimal(v);
                 if (!dec && !r.include_lower) || (dec && signum(v) > 0.0) {
                     if l == max {
@@ -438,7 +491,7 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
                 }
             }
             if let Some(v) = to {
-                u = integral_clamped(k, v)?;
+                u = integral_clamped(rk, v)?;
                 let dec = has_decimal(v);
                 if (!dec && !r.include_upper) || (dec && signum(v) < 0.0) {
                     if u == min {
@@ -579,6 +632,19 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
                     u -= 1;
                 }
             }
+            // `RangeQueryBuilder.doRewrite` with `DateFieldType.isFieldWithinQuery`: the shard's
+            // smallest and largest indexed values (deleted docs' too) decide first — no
+            // values or none in range match nothing, all of them in range is the field's
+            // `exists` query.
+            if f.index && !crate::opensearch::active() {
+                let rewritten = || match_none("The \"range\" query was rewritten to a \"match_none\" query.");
+                match date_point_bounds(ctx, f.number) {
+                    None => return Ok(rewritten()),
+                    Some((min, max)) if max < l || min > u => return Ok(rewritten()),
+                    Some((min, max)) if min >= l && max <= u => return ctx.exists_query(&f.name),
+                    Some(_) => {}
+                }
+            }
             long_range(&f, Kind::Long, l, u)
         }
         Kind::Ip => {
@@ -608,11 +674,19 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
             }
             ip_range_q(&f, lo, hi)
         }
-        Kind::Keyword | Kind::Version | Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType | Kind::Flattened | Kind::CountedKeyword | Kind::Wildcard => {
+        // `VersionStringFieldType.rangeQuery`: a term range over the encoded bounds (no
+        // expensive-query check, unlike keyword ranges).
+        Kind::Version => {
+            let b = |v: &Value| super::version_field::encode(&value_text(v));
+            let lo = from.map(b).transpose()?;
+            let hi = to.map(b).transpose()?;
+            Ok(arc(ConstantScoreQuery::new(arc(MultiTermQuery::range(f.number, lo, hi, r.include_lower, r.include_upper)))))
+        }
+        Kind::Keyword | Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType | Kind::Flattened | Kind::CountedKeyword | Kind::Wildcard => {
             if !ctx.allow_expensive {
                 return Err(EsError::new(
                     400,
-                    "elasticsearch_exception",
+                    "exception",
                     "[range] queries on [text] or [keyword] fields cannot be executed when 'search.allow_expensive_queries' is set to false.",
                 ));
             }
@@ -635,7 +709,10 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
                 }
             }
             let r = crate::query::term_level::Range { include_lower, include_upper, ..r.clone() };
-            if f.index {
+            if f.index && f.kind == Kind::Wildcard {
+                let q = arc(ConstantScoreQuery::new(arc(MultiTermQuery::range(f.number, lo.clone(), hi.clone(), r.include_lower, r.include_upper))));
+                Ok(super::extra::wildcard_range(&f, q, lo.as_deref(), hi.as_deref(), r.include_lower, r.include_upper))
+            } else if f.index {
                 Ok(arc(ConstantScoreQuery::new(arc(MultiTermQuery::range(f.number, lo, hi, r.include_lower, r.include_upper)))))
             } else if f.doc_values && !f.kind.is_text() {
                 // Text doc values (`doc_values: true`) serve multi-term queries, not ranges.
@@ -681,6 +758,11 @@ pub fn range_query(ctx: &QueryCtx, r: &Range) -> EsResult<QueryRef> {
             }
             if lo > hi {
                 return Ok(match_none("empty"));
+            }
+            // Without doc values, the indexed `F` / `T` terms (`TermRangeQuery` over them).
+            if !f.doc_values && f.index {
+                let terms = (lo..=hi).map(|v| if v == 1 { b"T".to_vec() } else { b"F".to_vec() });
+                return Ok(arc(ConstantScoreQuery::new(arc(search_index::query::MultiTermQuery::set(f.number, terms)))));
             }
             Ok(arc(ConstantScoreQuery::new(arc(DocValuesRangeQuery { field: f.number, range: DvRange::Long { lower: lo, upper: hi } }))))
         }

@@ -135,8 +135,10 @@ pub static KEYWORD: &[ParamDef] = &[
     TS_DIMENSION,
 ];
 
+/// True only for the built-in `lowercase` normalizer: an index's own normalizer named
+/// `lowercase` shadows it, and then an explicit `true` must be serialized (and persisted).
 fn default_skip_store(f: &FieldMapper, ctx: &MappingCtx) -> Value {
-    Value::Bool(f.effective("normalizer", ctx).as_str() == Some("lowercase"))
+    Value::Bool(f.effective("normalizer", ctx).as_str() == Some("lowercase") && !ctx.normalizers.contains("lowercase"))
 }
 
 pub static TEXT: &[ParamDef] = &[
@@ -874,10 +876,28 @@ pub static OS_XY_SHAPE: &[ParamDef] = &[
 /// OpenSearch's `constant_keyword`: `value` is required and can't change.
 pub static OS_CONSTANT_KEYWORD: &[ParamDef] = &[p("value", Str, Dv::Null, Fixed).nullable().ser(Ser::NonNull), META];
 
+/// The k-NN plugin's `knn_vector` (`KNNVectorFieldMapper.Builder.getParameters` order).
+/// `opensearch::knn::normalize_mapping` parses and validates the free-form ones and keeps them
+/// in the form OpenSearch prints.
+pub static OS_KNN_VECTOR: &[ParamDef] = &[
+    STORE,
+    p("doc_values", Bool, FALSE, Fixed),
+    p("dimension", Json, Dv::Null, Fixed).ser(Ser::WhenSet),
+    p("data_type", Json, Dv::Null, Fixed).ser(Ser::WhenSet).nullable(),
+    META,
+    p("method", Json, Dv::Null, Fixed).ser(Ser::WhenSet).nullable(),
+    p("model_id", Str, Dv::Null, Fixed).ser(Ser::WhenSet).nullable(),
+    p("mode", Json, Dv::Null, Fixed).ser(Ser::WhenSet).nullable(),
+    p("compression_level", Json, Dv::Null, Fixed).ser(Ser::WhenSet).nullable(),
+    p("space_type", Json, Dv::Null, Fixed).ser(Ser::WhenSet).nullable(),
+    p("engine", Json, Dv::Null, Fixed).ser(Ser::WhenSet).nullable(),
+];
+
 /// Types whose OpenSearch definition differs from Elasticsearch's, or that only OpenSearch has.
 pub static OS_TYPES: &[TypeDef] = &[
     TypeDef { multi_fields: false, validate: Some(validate_os_constant_keyword), ..def!("constant_keyword", OS_CONSTANT_KEYWORD, Family::Keyword) },
     TypeDef { multi_fields: false, in_multi_field: false, ..def!("flat_object", OS_FLAT_OBJECT, Family::Other) },
+    TypeDef { in_multi_field: false, ..def!("knn_vector", OS_KNN_VECTOR, Family::Vector) },
     TypeDef { validate: Some(validate_os_match_only_text), ..def!("match_only_text", OS_MATCH_ONLY_TEXT, Family::Text) },
     def!("wildcard", OS_WILDCARD, Family::Keyword),
     def!("xy_point", OS_XY_POINT, Family::Geo),

@@ -33,7 +33,7 @@ mod component;
 mod dfa;
 mod error;
 mod filter;
-mod jregex;
+pub mod jregex;
 mod lregexp;
 mod registry;
 mod settings;
@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 pub use analysis::Analysis;
 pub use analyze::{AnalyzeLimits, AnalyzeRequest, NameOrDefinition};
-pub use analyzer::{Analyzer, CharFilteredText, Explain, ExplainToken, Normalizer, TokenList};
+pub use analyzer::{Analyzer, CharFilteredText, Explain, ExplainToken, Normalizer, ShingleInfo, TokenList};
 pub use component::AnalysisMode;
 pub use error::{AnalysisError, is_java_exception};
 pub use token::Token;

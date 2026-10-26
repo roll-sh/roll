@@ -233,6 +233,10 @@ enum Mode {
 
 const MODES: [Mode; 4] = [Mode::ExplicitOnly, Mode::WildcardRoot, Mode::WildcardLeaf, Mode::WildcardAny];
 
+/// Methods Elasticsearch's handlers accept beyond what the REST spec lists
+/// (`RestExecuteEnrichPolicyAction` also routes `POST`).
+const EXTRA_ES_ROUTES: &[(Api, &str, Method)] = &[(Api::EnrichExecutePolicy, "/_enrich/policy/{name}/_execute", Method::Post)];
+
 fn is_wildcard(seg: &str) -> bool {
     seg.len() >= 2 && seg.starts_with('{') && seg.ends_with('}')
 }
@@ -256,6 +260,11 @@ impl Trie {
                         t.insert(p.path, m, Handler { api, pattern: p.path });
                     }
                 }
+            }
+        }
+        if d == Dialect::Elasticsearch {
+            for (api, path, m) in EXTRA_ES_ROUTES {
+                t.insert(path, *m, Handler { api: *api, pattern: path });
             }
         }
         // Children were pushed unsorted; sort once.
@@ -575,6 +584,18 @@ mod tests {
         assert_eq!(Api::by_name("indices.create"), Some(Api::IndicesCreate));
         assert_eq!(Api::IndicesCreate.param("timeout").unwrap().ty, ParamType::Time);
         assert_eq!(Api::Info.spec().paths[0].path, "/");
+    }
+
+    #[test]
+    fn extra_methods_beyond_the_spec() {
+        for m in [Method::Put, Method::Post] {
+            let (api, params) = found(m, "/_enrich/policy/p/_execute");
+            assert_eq!((api, params), (Api::EnrichExecutePolicy, vec![("name", "p".to_string())]));
+        }
+        match route(Method::Get, "/_enrich/policy/p/_execute") {
+            Routed::MethodNotAllowed(ms) => assert_eq!(ms, vec![Method::Post, Method::Put]),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

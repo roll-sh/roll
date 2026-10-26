@@ -206,6 +206,23 @@ pub fn claim(p: &Presented, host_cluster: Option<&str>) -> Option<Claim> {
     }
 }
 
+/// The `Authorization` header to authenticate inside the cluster when `claim` doesn't match
+/// the cluster's own credentials: the cluster's security may know the user (native or file
+/// realm), API key or access token. The cluster qualifier (`<user>@<cluster>`,
+/// `<key id>@<cluster>`) is stripped so the cluster sees the credentials Elasticsearch clients
+/// send. `None` when the claim can't name such credentials (Basic or ApiKey whose user/id is
+/// the cluster itself, a Bearer token that isn't routed by host).
+pub fn native_authorization(p: &Presented, claim: &Claim, host_cluster: Option<&str>) -> Option<String> {
+    use base64::Engine;
+    let b64 = |s: String| base64::engine::general_purpose::STANDARD.encode(s);
+    match p {
+        Presented::Basic { password, .. } => claim.user.as_ref().map(|u| format!("Basic {}", b64(format!("{u}:{password}")))),
+        Presented::ApiKey { secret, .. } => claim.api_key_id.as_ref().map(|k| format!("ApiKey {}", b64(format!("{k}:{secret}")))),
+        Presented::Bearer(token) => (host_cluster == Some(claim.cluster.as_str()) && claim.secret.as_ref() == Some(token)).then(|| format!("Bearer {token}")),
+        Presented::None => None,
+    }
+}
+
 /// Whether `claim` proves access to `spec`. A spec without credentials is open.
 pub fn verify(spec: &ClusterSpec, claim: &Claim) -> bool {
     if spec.credentials.is_empty() {
@@ -284,6 +301,23 @@ mod tests {
         assert_eq!(java_base64(b"YWJjZ").unwrap_err(), "Last unit does not have enough valid bits");
         assert_eq!(java_base64(b"YQ==YQ").unwrap_err(), "Input byte array has incorrect ending byte at 4");
         assert_eq!(java_base64(b"").unwrap(), b"");
+    }
+
+    #[test]
+    fn native_authorizations() {
+        let basic = |u: &str| Presented::Basic { user: u.into(), password: "pw".into() };
+        let native = |p: &Presented, host: Option<&str>| native_authorization(p, &claim(p, host).unwrap(), host);
+        assert_eq!(native(&basic("bob@c1"), None), Some(format!("Basic {}", b64("bob:pw"))));
+        assert_eq!(native(&basic("bob"), Some("c1")), Some(format!("Basic {}", b64("bob:pw"))));
+        // The cluster's own name as the user: only the cluster's credentials apply.
+        assert_eq!(native(&basic("c1"), None), None);
+        let key = |id: &str| Presented::ApiKey { id: id.into(), secret: "s".into() };
+        assert_eq!(native(&key("k1@c1"), None), Some(format!("ApiKey {}", b64("k1:s"))));
+        assert_eq!(native(&key("k1"), Some("c1")), Some(format!("ApiKey {}", b64("k1:s"))));
+        assert_eq!(native(&key("c1"), None), None);
+        assert_eq!(native(&Presented::Bearer("dGtu".into()), Some("c1")), Some("Bearer dGtu".into()));
+        assert_eq!(native(&Presented::Bearer("c1_s".into()), None), None);
+        assert_eq!(native(&Presented::None, Some("c1")), None);
     }
 
     #[test]

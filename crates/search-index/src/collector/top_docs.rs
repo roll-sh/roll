@@ -229,6 +229,55 @@ impl TopScoreLeaf<'_> {
 }
 
 impl LeafCollector for TopScoreLeaf<'_> {
+    /// A pure hit count (`size: 0`, no `min_score`, one slice) counts the block at once,
+    /// stopping one past the threshold exactly where per-doc collection would.
+    ///
+    /// Top hits collect per doc, and the segment ends once the announced minimum competitive
+    /// score passes the block's constant score: every later doc of the segment scores the
+    /// same and comes after the queue's worst, so none can enter (Lucene's
+    /// `ConstantScoreScorer` turns empty there). That point is only reached past the
+    /// `track_total_hits` threshold, where the total is a lower bound already.
+    ///
+    /// Exact totals (`track_total_hits: true`, every scroll's first page) never announce a
+    /// minimum, so the segment can't end early; but once the queue is full and its worst ties
+    /// or beats the block's score, no later doc of the block can enter it and the rest only
+    /// counts (each would add one to the total and nothing else).
+    fn collect_block(&mut self, docs: &[u32], score: f32) -> Result<()> {
+        if self.c.n != 0 && self.c.threshold == u64::MAX && self.c.min_score.is_none_or(|m| score >= m) {
+            let mut sv = crate::search::ScoreValue(score);
+            let mut i = 0;
+            while i < docs.len() && !(self.c.heap.len() >= self.c.n && self.c.heap.peek().is_some_and(|w| w.score >= score)) {
+                self.collect(docs[i], &mut sv)?;
+                i += 1;
+            }
+            self.c.total += (docs.len() - i) as u64;
+            if self.c.shared.is_some() && self.c.total - self.c.flushed >= SHARED_FLUSH {
+                self.c.flush_hits();
+            }
+            return Ok(());
+        }
+        if self.c.n != 0 || self.c.min_score.is_some() || self.c.shared.is_some() {
+            let mut sv = crate::search::ScoreValue(score);
+            for &d in docs {
+                self.collect(d, &mut sv)?;
+                if self.min_announced > score {
+                    return Err(crate::error::Error::CollectionTerminated);
+                }
+            }
+            return Ok(());
+        }
+        if self.min_announced < 0.0 {
+            self.min_announced = 0.0;
+        }
+        let room = self.c.threshold.saturating_add(1).saturating_sub(self.c.total);
+        self.c.total += (docs.len() as u64).min(room);
+        if self.c.total > self.c.threshold {
+            self.c.relation = TotalRelation::GreaterThanOrEqualTo;
+            return Err(crate::error::Error::CollectionTerminated);
+        }
+        Ok(())
+    }
+
     #[inline]
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()> {
         if self.min_announced < 0.0 {
@@ -236,7 +285,9 @@ impl LeafCollector for TopScoreLeaf<'_> {
             self.update_min(scorer);
             self.read_shared(scorer);
         }
-        let score = scorer.score();
+        // A pure hit count (`size: 0`) never asks for the score: scoring may fail (a function
+        // score returning NaN) where Elasticsearch, which doesn't score there, succeeds.
+        let score = if self.c.n == 0 && self.c.min_score.is_none() { 0.0 } else { scorer.score() };
         if let Some(m) = self.c.min_score
             && score < m
         {
@@ -285,6 +336,11 @@ impl LeafCollector for TopScoreLeaf<'_> {
 
 impl Collector for TopScoreCollector {
     fn score_mode(&self) -> ScoreMode {
+        // No top docs: only counting (Elasticsearch's size-0 hit count collectors), so the
+        // query is built without scoring (a `function_score` evaluates no functions).
+        if self.n == 0 && self.min_score.is_none() {
+            return ScoreMode::CompleteNoScores;
+        }
         if self.threshold == u64::MAX || self.min_score.is_some() { ScoreMode::Complete } else { ScoreMode::TopScores }
     }
 

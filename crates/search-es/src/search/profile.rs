@@ -60,6 +60,29 @@ pub fn search_entry(p: &Profiler, top_collector: &str, nanos: u64, agg_names: &[
     }
 }
 
+/// The `dfs.statistics` entry of a `dfs_query_then_fetch` shard (`DfsProfiler`): the term and
+/// collection statistics collection, timed as one weight creation.
+pub fn dfs_statistics(nanos: u64, terms: u64) -> Value {
+    let n = nanos.max(1) as i64;
+    obj! {
+        "statistics" => obj! {
+            "type" => "statistics",
+            "description" => "collect term statistics",
+            "time_in_nanos" => n,
+            "breakdown" => obj! {
+                "rewrite" => 0i64,
+                "rewrite_count" => 0i64,
+                "create_weight" => n / 2,
+                "create_weight_count" => 1i64,
+                "term_statistics" => if terms > 0 { n / 4 } else { 0 },
+                "term_statistics_count" => terms as i64,
+                "collection_statistics" => n / 4,
+                "collection_statistics_count" => 1i64,
+            },
+        },
+    }
+}
+
 /// The dfs entry of a top-level `knn` search.
 pub fn knn_dfs_entry(p: &Profiler, nanos: u64, vector_ops: u64) -> Value {
     let (query, rewrite) = queries(p);
@@ -221,6 +244,118 @@ pub fn aggregations(aggs: &Map, field_type: &dyn Fn(&str) -> Option<String>, nan
     out
 }
 
+/// Names the aggregators the engine's profiler left without a class (an aggregator that
+/// doesn't report one) after their request definitions, as [`aggregations`] would.
+pub fn fill_types(nodes: &mut [Value], aggs: &Map, field_type: &dyn Fn(&str) -> Option<String>) {
+    for node in nodes {
+        let Value::Obj(m) = node else { continue };
+        let Some(Value::Obj(def)) = m.get("description").and_then(Value::as_str).and_then(|d| aggs.get(d)) else { continue };
+        let subs = def.get("aggs").or_else(|| def.get("aggregations")).and_then(Value::as_object);
+        if m.get("type").and_then(Value::as_str).is_some_and(str::is_empty)
+            && let Some((ty, body)) = def.iter().find(|(k, _)| !matches!(k.as_str(), "aggs" | "aggregations" | "meta"))
+        {
+            let body = body.as_object().cloned().unwrap_or_default();
+            let fty = body.get("field").and_then(Value::as_str).and_then(field_type);
+            let class = aggregator_class(ty, &body, fty.as_deref(), subs.is_some_and(|s| !s.is_empty()));
+            m.insert("type".into(), Value::Str(class.into()));
+        }
+        if let (Some(subs), Some(Value::Arr(children))) = (subs, m.get_mut("children")) {
+            fill_types(children, subs, field_type);
+        }
+    }
+}
+
+/// `profile.request`: the coordinator's view of the request (`SearchProfileResults`): the
+/// requested index expressions and the search source as `SearchSourceBuilder.toXContent`
+/// prints it, in its field order (queries normalized, the other sections as given).
+pub fn request(src: &crate::search_source::SearchSource, indices: &[String]) -> Value {
+    use crate::search_source::{Sort, SortOrder, TrackTotalHits};
+    let mut m = Map::new();
+    if let Some(v) = src.from {
+        m.insert("from".into(), Value::from(v as i64));
+    }
+    if let Some(v) = src.size {
+        m.insert("size".into(), Value::from(v as i64));
+    }
+    if let Some(t) = &src.timeout {
+        m.insert("timeout".into(), Value::Str(t.string_rep()));
+    }
+    if let Some(v) = src.terminate_after {
+        m.insert("terminate_after".into(), Value::from(v as i64));
+    }
+    if let Some(q) = &src.query {
+        m.insert("query".into(), q.to_value());
+    }
+    if let Some(q) = &src.post_filter {
+        m.insert("post_filter".into(), q.to_value());
+    }
+    if let Some(v) = src.min_score {
+        m.insert("min_score".into(), Value::from(v as f64));
+    }
+    for (k, v) in [("version", src.version), ("seq_no_primary_term", src.seq_no_primary_term), ("explain", src.explain)] {
+        if let Some(b) = v {
+            m.insert(k.into(), Value::Bool(b));
+        }
+    }
+    if src.profile {
+        m.insert("profile".into(), Value::Bool(true));
+    }
+    if let Some(fs) = &src.source {
+        let v = if fs.includes.is_empty() && fs.excludes.is_empty() {
+            Value::Bool(fs.fetch)
+        } else {
+            let list = |l: &[String]| Value::Arr(l.iter().map(|s| Value::Str(s.clone())).collect());
+            obj! { "includes" => list(&fs.includes), "excludes" => list(&fs.excludes) }
+        };
+        m.insert("_source".into(), v);
+    }
+    if !src.sort.is_empty() {
+        let order = |o: &SortOrder| if matches!(o, SortOrder::Asc) { "asc" } else { "desc" };
+        let sorts: Vec<Value> = src
+            .sort
+            .iter()
+            .filter_map(|s| match s {
+                Sort::Score { order: o } => Some(obj! { "_score" => obj! { "order" => order(o) } }),
+                Sort::Field { field, order: o, .. } => {
+                    let o = o.as_ref().map(order).unwrap_or(if field == "_score" { "desc" } else { "asc" });
+                    Some(obj! { field.as_str() => obj! { "order" => o } })
+                }
+                _ => None,
+            })
+            .collect();
+        m.insert("sort".into(), Value::Arr(sorts));
+    }
+    if src.track_scores {
+        m.insert("track_scores".into(), Value::Bool(true));
+    }
+    // `SearchSourceBuilder` keeps the setting as an int: `true` is `Integer.MAX_VALUE`,
+    // `false` is -1.
+    match &src.track_total_hits {
+        Some(TrackTotalHits::Accurate) => {
+            m.insert("track_total_hits".into(), Value::from(i64::from(i32::MAX)));
+        }
+        Some(TrackTotalHits::Disabled) => {
+            m.insert("track_total_hits".into(), Value::from(-1i64));
+        }
+        Some(TrackTotalHits::UpTo(n)) => {
+            m.insert("track_total_hits".into(), Value::from(*n as i64));
+        }
+        None => {}
+    }
+    if let Some(sa) = &src.search_after {
+        m.insert("search_after".into(), Value::Arr(sa.clone()));
+    }
+    for (k, v) in [("highlight", &src.highlight), ("aggregations", &src.aggs), ("suggest", &src.suggest), ("ext", &src.ext), ("runtime_mappings", &src.runtime_mappings), ("retriever", &src.retriever)] {
+        if let Some(v) = v {
+            m.insert(k.into(), Value::Obj(v.clone()));
+        }
+    }
+    obj! {
+        "source" => Value::Obj(m),
+        "indices" => Value::Arr(indices.iter().map(|s| Value::Str(s.clone())).collect()),
+    }
+}
+
 /// Timings of the fetch phase of one shard.
 #[derive(Clone, Debug, Default)]
 pub struct FetchTimes {
@@ -274,6 +409,143 @@ pub fn fetch(t: &FetchTimes, stored_none: bool, phases: &[&str]) -> Value {
         }
     }
     m
+}
+
+/// What OpenSearch's fetch profile (`FetchProfiler`, 3.3+) reports for one shard: the
+/// sub-phases that ran (in `SearchModule`'s registration order), whether stored fields and
+/// `_source` were loaded, the inner hits fetched per hit and the `top_hits` aggregations.
+#[derive(Clone, Debug, Default)]
+pub struct OsFetch<'a> {
+    pub phases: Vec<&'static str>,
+    pub stored: bool,
+    pub source: bool,
+    pub inner_hits: Vec<&'a str>,
+    pub top_hits: Vec<String>,
+    /// The shard matched documents: its `top_hits` aggregations fetched some (even with
+    /// `size: 0`, which fetches no hits of its own).
+    pub matched: bool,
+}
+
+/// The `fetch` sub-phases OpenSearch registers, in order, and when each one runs.
+pub const OS_FETCH_PHASES: [&str; 10] = [
+    "ExplainPhase",
+    "FetchDocValuesPhase",
+    "ScriptFieldsPhase",
+    "FetchSourcePhase",
+    "FetchFieldsPhase",
+    "FetchVersionPhase",
+    "SeqNoPrimaryTermPhase",
+    "MatchedQueriesPhase",
+    "HighlightPhase",
+    "FetchScorePhase",
+];
+
+/// One OpenSearch fetch profile entry (`type` = `description`).
+fn os_fetch_entry(name: &str, nanos: i64, hits: i64, stored: bool, source: bool, phases: &[&str]) -> Value {
+    let t = (nanos / 8).max(1);
+    let mut b = Map::new();
+    let mut put = |k: &str, v: i64, c: i64| {
+        b.insert(k.into(), Value::from(if c == 0 { 0 } else { v }));
+        b.insert(format!("{k}_count"), Value::from(c));
+    };
+    put("build_sub_phase_processors", t, 1);
+    put("create_stored_fields_visitor", t, 1);
+    put("get_next_reader", t, 1);
+    put("load_source", t, if source { hits } else { 0 });
+    put("load_stored_fields", t, if stored { hits } else { 0 });
+    let mut m = obj! { "type" => name, "description" => name, "time_in_nanos" => nanos.max(1), "breakdown" => Value::Obj(b) };
+    if !phases.is_empty() {
+        let per = (t / 2).max(1);
+        let children: Vec<Value> = phases
+            .iter()
+            .map(|p| {
+                obj! {
+                    "type" => *p,
+                    "description" => *p,
+                    "time_in_nanos" => per * 2,
+                    "breakdown" => obj! { "process" => per, "process_count" => hits, "set_next_reader" => per, "set_next_reader_count" => 1i64 },
+                }
+            })
+            .collect();
+        if let Value::Obj(mm) = &mut m {
+            mm.insert("children".into(), Value::Arr(children));
+        }
+    }
+    m
+}
+
+/// OpenSearch's `fetch` profile of a shard: an array with one entry per `top_hits`
+/// aggregation (when the shard matched anything), the main `fetch` and one per inner hits
+/// definition (when it fetched hits); empty when it fetched nothing.
+pub fn fetch_os(t: &FetchTimes, f: &OsFetch) -> Value {
+    if t.hits == 0 && !(f.matched && !f.top_hits.is_empty()) {
+        return Value::Arr(Vec::new());
+    }
+    let n = t.nanos.max(8) as i64;
+    let hits = t.hits as i64;
+    let mut out = Vec::new();
+    if f.matched {
+        for name in &f.top_hits {
+            out.push(os_fetch_entry(&format!("fetch_top_hits_aggregation[{name}]"), n / 4, 1, true, true, &["FetchSourcePhase"]));
+        }
+    }
+    if t.hits == 0 {
+        return Value::Arr(out);
+    }
+    out.push(os_fetch_entry("fetch", n, hits, f.stored, f.source, &f.phases));
+    for name in &f.inner_hits {
+        out.push(os_fetch_entry(&format!("fetch_inner_hits[{name}]"), n / 4, 1, false, true, &["FetchSourcePhase"]));
+    }
+    Value::Arr(out)
+}
+
+/// The names of the `top_hits` aggregations of a request, depth first.
+pub fn top_hits_names(aggs: &Map, out: &mut Vec<String>) {
+    for (name, def) in aggs {
+        let Value::Obj(def) = def else { continue };
+        if def.contains_key("top_hits") {
+            out.push(name.clone());
+        }
+        if let Some(subs) = def.get("aggs").or_else(|| def.get("aggregations")).and_then(Value::as_object) {
+            top_hits_names(subs, out);
+        }
+    }
+}
+
+/// One shard's entry of OpenSearch's `profile.shards` (`ProfileShardResult`): no node, shard
+/// or cluster fields, network times (0 on one node) and `fetch` always present.
+pub fn shard_os(node: &str, index: &str, shard: usize, p: &ShardProfile, fetch: Value) -> Value {
+    let mut m = Map::new();
+    m.insert("id".into(), Value::Str(format!("[{node}][{index}][{shard}]")));
+    m.insert("inbound_network_time_in_millis".into(), Value::from(0i64));
+    m.insert("outbound_network_time_in_millis".into(), Value::from(0i64));
+    m.insert("searches".into(), Value::Arr(p.searches.clone()));
+    let mut aggs = p.aggregations.clone();
+    aggs.iter_mut().for_each(os_debug_order);
+    m.insert("aggregations".into(), Value::Arr(aggs));
+    m.insert("fetch".into(), fetch);
+    Value::Obj(m)
+}
+
+/// OpenSearch prints an aggregation's `debug` map from a `HashMap`: its keys come in that
+/// map's iteration order (children too).
+fn os_debug_order(agg: &mut Value) {
+    let Value::Obj(m) = agg else { return };
+    if let Some(Value::Obj(d)) = m.get_mut("debug") {
+        let keys: Vec<String> = d.keys().cloned().collect();
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let order: Vec<String> = crate::opensearch::java_hashmap_order(&refs, refs.len()).into_iter().map(str::to_string).collect();
+        let mut sorted = Map::new();
+        for k in order {
+            if let Some(v) = d.shift_remove(&k) {
+                sorted.insert(k, v);
+            }
+        }
+        *d = sorted;
+    }
+    if let Some(Value::Arr(children)) = m.get_mut("children") {
+        children.iter_mut().for_each(os_debug_order);
+    }
 }
 
 /// One shard's entry of `profile.shards`.

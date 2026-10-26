@@ -579,6 +579,16 @@ pub fn validate_composable(md: &Metadata, name: &str, t: &ComposableTemplate, cr
         crate::api::indices::data_stream_index_settings(md, "validate-index-name", &mut effective, &composed.mappings, crate::time::now_millis())?;
     }
     let mode = super::index_mode::IndexMode::of(&effective);
+    // A time series data stream derives `index.routing_path` from the pass-through
+    // dimensions, which parses the mappings before any setting is checked: conflicting
+    // pass-through priorities fail first, unwrapped.
+    if t.data_stream.is_some()
+        && mode == super::index_mode::IndexMode::TimeSeries
+        && let Err(e) = compose_mappings(&composed.mappings, &MappingCtx::from_settings_in(md.dialect, &effective))
+        && e.kind == "mapper_exception"
+    {
+        return Err(e);
+    }
     if let Err(e) = mode.validate_settings(&effective) {
         if mode == super::index_mode::IndexMode::TimeSeries {
             // Data stream templates are validated twice (as a template and as a data stream).

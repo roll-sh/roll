@@ -271,6 +271,11 @@ impl BucketOrder {
         let Some(key) = key else { return Err(p.parsing_error("Must specify at least one field for [order]")) };
         Ok(match key.as_str() {
             "_key" => BucketOrder::Key { asc },
+            // OpenSearch still takes the 6.x key names, with a deprecation warning.
+            "_term" | "_time" if crate::dialect::opensearch() => {
+                p.warnings.push(format!("Deprecated aggregation order key [{key}] used, replaced by [_key]"));
+                BucketOrder::Key { asc }
+            }
             "_count" => BucketOrder::Count { asc },
             other => BucketOrder::Agg { path: AggPath::parse(other)?, asc },
         })

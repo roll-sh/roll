@@ -327,8 +327,83 @@ pub fn create(def: &AggDef, spec: &CardinalitySpec, ctx: &mut BindCtx<'_>) -> Re
         global_ords: false,
         direct: false,
         collectors: [0; 5],
+        os: OsCollectors::new(ctx, spec.execution_hint.as_deref()),
     }
     .with_hint(spec.execution_hint.as_deref())))
+}
+
+/// OpenSearch 3.9's `CardinalityAggregator.pickCollector` counts for the profile: empty,
+/// numeric, ordinals, hybrid, ordinals overhead too high, string hashing, and the segments
+/// dynamic pruning answered (`dynamic_pruned_segments`: a top-level aggregation over a
+/// segment with at most `search.dynamic_pruning.cardinality_aggregation.max_allowed_cardinality`
+/// (100) terms that the query matches).
+struct OsCollectors {
+    counts: [u64; 7],
+    hint: Option<String>,
+    prune: bool,
+    matches_all: bool,
+    weight: Option<Box<dyn search_index::search::Weight>>,
+}
+
+impl OsCollectors {
+    fn new(ctx: &BindCtx<'_>, hint: Option<&str>) -> Option<Box<OsCollectors>> {
+        if !crate::dialect::opensearch() || ctx.profiler.is_none() {
+            return None;
+        }
+        let weight = if ctx.matches_all {
+            None
+        } else {
+            ctx.query.as_ref().and_then(|q| ctx.searcher.create_weight(q, search_index::search::ScoreMode::CompleteNoScores).ok())
+        };
+        Some(Box::new(OsCollectors { counts: [0; 7], hint: hint.map(str::to_lowercase), prune: ctx.parents.is_empty(), matches_all: ctx.matches_all, weight }))
+    }
+
+    fn segment(&mut self, vs: &BoundVs, seg: &SegmentContext) {
+        const PRUNING_THRESHOLD: u64 = 100;
+        let field = vs.field.as_ref().map(|f| f.number);
+        if vs.unmapped && vs.missing.is_none() {
+            self.counts[0] += 1;
+            return;
+        }
+        if vs.vs_type.is_numeric() {
+            self.counts[1] += 1;
+            return;
+        }
+        if vs.has_ordinals() {
+            if DvOrds::open(seg, field.unwrap_or(0)).value_count() == 0 {
+                self.counts[0] += 1;
+                return;
+            }
+            match self.hint.as_deref() {
+                Some("ordinals") => self.counts[2] += 1,
+                Some("direct") => self.counts[5] += 1,
+                _ => self.counts[3] += 1,
+            }
+        } else {
+            self.counts[5] += 1;
+        }
+        let prunable = self.prune && vs.missing.is_none() && vs.script.is_none();
+        let Some(terms) = field.filter(|_| prunable).and_then(|f| seg.reader.terms(f)) else { return };
+        if terms.stats().num_terms > PRUNING_THRESHOLD {
+            return;
+        }
+        let scored = self.matches_all || self.weight.as_ref().is_some_and(|w| w.scorer(seg).ok().flatten().is_some());
+        if scored {
+            self.counts[6] += 1;
+        }
+    }
+
+    fn debug(&self) -> crate::json::Json {
+        let c = |i: usize| crate::json::Json::from(self.counts[i]);
+        crate::json::Json::obj()
+            .with("empty_collectors_used", c(0))
+            .with("numeric_collectors_used", c(1))
+            .with("ordinals_collectors_used", c(2))
+            .with("hybrid_collectors_used", c(3))
+            .with("ordinals_collectors_overhead_too_high", c(4))
+            .with("string_hashing_collectors_used", c(5))
+            .with("dynamic_pruned_segments", c(6))
+    }
 }
 
 impl CardinalityAgg {
@@ -384,6 +459,8 @@ struct CardinalityAgg {
     global_ords: bool,
     direct: bool,
     collectors: [u64; 5],
+    /// Profiled opensearch-dialect requests: what OpenSearch's collectors would have been.
+    os: Option<Box<OsCollectors>>,
 }
 
 impl CardinalityAgg {
@@ -409,11 +486,15 @@ impl CardinalityAgg {
 
 impl Aggregator for CardinalityAgg {
     fn profile_type(&self) -> &'static str {
-        if self.global_ords { "GlobalOrdCardinalityAggregator" } else { "CardinalityAggregator" }
+        // OpenSearch has no global-ordinals cardinality aggregator.
+        if self.global_ords && !crate::dialect::opensearch() { "GlobalOrdCardinalityAggregator" } else { "CardinalityAggregator" }
     }
 
     fn profile_debug(&self) -> crate::json::Json {
         use crate::json::Json;
+        if let Some(os) = &self.os {
+            return os.debug();
+        }
         if self.global_ords {
             return Json::obj();
         }
@@ -438,6 +519,9 @@ impl Aggregator for CardinalityAgg {
             4
         };
         self.collectors[slot] += 1;
+        if let Some(os) = &mut self.os {
+            os.segment(&self.vs, seg);
+        }
         self.reader = if self.vs.unmapped && self.vs.missing.is_none() {
             Reader::None
         } else if self.vs.has_ordinals() && self.vs.missing.is_none() {

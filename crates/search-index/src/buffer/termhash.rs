@@ -2,8 +2,8 @@
 //!
 //! Terms are appended once to a byte arena and identified by a dense `u32` id in insertion
 //! order; the table stores only ids (4 bytes per slot) and a side array keeps each id's hash so
-//! growing never re-hashes term bytes. Lookups compare the stored hash first, so a probe touches
-//! term bytes only for a likely match.
+//! growing never re-hashes term bytes. Lookups rely on the table's tag bytes to pick likely
+//! matches and then compare term bytes.
 
 use std::hash::BuildHasher;
 
@@ -51,10 +51,12 @@ impl TermHash {
     #[inline]
     pub fn add(&mut self, term: &[u8]) -> (u32, bool) {
         let h = hash_bytes(term);
-        let (bytes, starts, hashes) = (&self.bytes, &self.starts, &self.hashes);
+        // The table's 7-bit tags already filter candidates; comparing the stored hash too would
+        // cost one more cache miss on every hit in a large dictionary.
+        let (bytes, starts) = (&self.bytes, &self.starts);
         let eq = |&id: &u32| {
             let i = id as usize;
-            hashes[i] == h && &bytes[starts[i] as usize..starts[i + 1] as usize] == term
+            &bytes[starts[i] as usize..starts[i + 1] as usize] == term
         };
         if let Some(&id) = self.table.find(h, eq) {
             return (id, false);
@@ -110,5 +112,55 @@ mod tests {
         for i in 0..10_000u32 {
             assert!(h.find(&i.to_le_bytes()).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    /// Random terms (with heavy repetition, empty terms and long ones) against a std map:
+    /// ids are dense in first-seen order, `get`/`find` agree, growth keeps everything.
+    #[test]
+    fn matches_a_map_over_random_terms() {
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut h = TermHash::new();
+        let mut want: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
+        let mut order: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..200_000 {
+            let r = next();
+            let len = match r % 7 {
+                0 => 0,
+                1 => (r >> 8) as usize % 300,
+                _ => 1 + (r >> 8) as usize % 6,
+            };
+            // A small alphabet makes repeats and shared prefixes common.
+            let t: Vec<u8> = (0..len).map(|i| b'a' + ((r >> (i % 40)) as u8 % 5)).collect();
+            let (id, new) = h.add(&t);
+            match want.get(&t) {
+                Some(&w) => assert_eq!((id, new), (w, false)),
+                None => {
+                    assert_eq!((id, new), (order.len() as u32, true));
+                    want.insert(t.clone(), id);
+                    order.push(t.clone());
+                }
+            }
+        }
+        assert_eq!(h.len(), order.len());
+        for (i, t) in order.iter().enumerate() {
+            assert_eq!(h.get(i as u32), &t[..]);
+            assert_eq!(h.find(t), Some(i as u32));
+        }
+        assert_eq!(h.find(b"zzzz"), None);
+        assert_eq!(TermHash::new().find(b""), None);
+        let sorted = h.sorted_ids();
+        assert!(sorted.windows(2).all(|w| h.get(w[0]) < h.get(w[1])));
+        assert!(h.ram_bytes() >= h.len() * 12);
     }
 }

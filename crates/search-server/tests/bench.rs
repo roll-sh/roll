@@ -172,13 +172,24 @@ async fn idle_node_rss() {
     child.wait().unwrap();
 }
 
-/// Indexing throughput with every write durable (WAL cut records) against the same node in
-/// memory: single-document writes from 1 and 16 clients, and 1000-document bulks.
+/// Indexing throughput with every write durable (one WAL record per operation, acknowledged
+/// once group-committed) against the same node in memory: single-document writes from 1 and
+/// 16 clients, and 1000-document bulks. `TMPDIR` picks the disk (a tmpfs makes fsync free).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore]
 async fn durable_indexing_throughput() {
-    async fn run(n: &Arc<Node>, label: &str) {
+    fn wal_line(s: Option<&search_store::Store>, before: &mut (u64, u64, u64), what: &str) {
+        let Some(s) = s else { return };
+        let w = s.wal().stats();
+        let (appends, commits, fsync) = (w.appends - before.0, w.commits - before.1, w.fsync_nanos - before.2);
+        *before = (w.appends, w.commits, w.fsync_nanos);
+        let avg = if commits > 0 { fsync as f64 / commits as f64 / 1e6 } else { 0.0 };
+        println!("  {what}: {appends} appends, {commits} group commits, {avg:.2} ms per fsync");
+    }
+    async fn run(n: &Arc<Node>, label: &str, store: Option<&search_store::Store>) {
         let c = "c0";
+        let mut wal = (0, 0, 0);
+        wal_line(store, &mut wal, "index creation");
         ok(n, c, "PUT", "/t", r#"{"mappings":{"properties":{"tag":{"type":"keyword"}}}}"#).await;
         let docs = 2000;
         let t = Instant::now();
@@ -186,6 +197,7 @@ async fn durable_indexing_throughput() {
             ok(n, c, "PUT", &format!("/t/_doc/s{i}"), &format!(r#"{{"title":"doc {i}","tag":"x","n":{i}}}"#)).await;
         }
         let one = docs as f64 / t.elapsed().as_secs_f64();
+        wal_line(store, &mut wal, "1 client");
         let t = Instant::now();
         let mut tasks = Vec::new();
         for w in 0..16 {
@@ -200,22 +212,33 @@ async fn durable_indexing_throughput() {
             t.await.unwrap();
         }
         let sixteen = 8000.0 / t.elapsed().as_secs_f64();
+        wal_line(store, &mut wal, "16 clients");
         let body = bulk(1000);
         let t = Instant::now();
         for _ in 0..20 {
             ok(n, c, "POST", "/t/_bulk", &body).await;
         }
         let bulk_rate = 20_000.0 / t.elapsed().as_secs_f64();
+        wal_line(store, &mut wal, "bulk");
         println!("{label}: single docs {one:.0}/s (1 client), {sixteen:.0}/s (16 clients); bulk {bulk_rate:.0} docs/s");
     }
-    let dir = tempfile::tempdir().unwrap();
-    let objects = search_store::Objects::new(&search_store::StorageConfig::Local(dir.path().join("objects"))).unwrap();
-    let s = store(&objects, &dir.path().join("cache")).await;
-    run(&node(&s, 1), "durable (WAL fsync per group commit)").await;
+    // `ROLL_BENCH_DIR`: where the WAL and cache live (a real disk vs tmpfs).
+    let dir = match std::env::var_os("ROLL_BENCH_DIR") {
+        Some(d) => tempfile::tempdir_in(d).unwrap(),
+        None => tempfile::tempdir().unwrap(),
+    };
+    for leader in [false, true] {
+        let objects = search_store::Objects::new(&search_store::StorageConfig::Local(dir.path().join(format!("objects-{leader}")))).unwrap();
+        let mut cfg = search_store::StoreConfig { verify: Some(search_server::persist::segment_verifier()), ..Default::default() };
+        cfg.wal.leader_commits = leader;
+        let s = search_store::Store::open(objects, &dir.path().join(format!("cache-{leader}")), cfg).await.unwrap();
+        let label = if leader { "durable, leader commits" } else { "durable, flusher thread only" };
+        run(&node(&s, 1), label, Some(&s)).await;
+    }
     let catalog = Arc::new(StaticCatalog::new());
     catalog.insert(ClusterSpec::new("c0").with_password("pw"));
     let mem = Node::new(catalog, Arc::new(search_server::MemoryStores::new()), NodeConfig::default());
-    run(&mem, "in memory").await;
+    run(&mem, "in memory", None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,4 +257,55 @@ async fn store_open_memory() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let after_cycle = rss_kib("self");
     println!("RSS KiB: start {before}, objects +{}, store +{}, one load/unload cycle +{}", after_objects - before, after_store - after_objects, after_cycle.saturating_sub(after_store));
+}
+
+/// Acknowledgements on an object-storage WAL (`sync_objects`, a leased cluster) with and
+/// without the ownership check each acknowledgement batch adds (one object-store listing,
+/// shared by concurrent writers). Runs on S3 with `ROLL_E2E_S3_BUCKET`, on a local directory
+/// otherwise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore]
+async fn sync_objects_ownership_check_cost() {
+    async fn run(n: &Arc<Node>, verify: bool) -> (f64, f64, u64) {
+        ok(n, "c0", "PUT", "/t", "{}").await;
+        let l = n.get_loaded("c0").unwrap();
+        let d = l.data.clone().unwrap();
+        d.set_verify_owner(verify);
+        let checks = d.store().stats().owner_checks;
+        let docs = 200;
+        let t = Instant::now();
+        for i in 0..docs {
+            ok(n, "c0", "PUT", &format!("/t/_doc/s{i}"), r#"{"f":"x"}"#).await;
+        }
+        let one = docs as f64 / t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let mut tasks = Vec::new();
+        for w in 0..16 {
+            let n = n.clone();
+            tasks.push(tokio::spawn(async move {
+                for i in 0..50 {
+                    ok(&n, "c0", "PUT", &format!("/t/_doc/p{w}-{i}"), r#"{"f":"y"}"#).await;
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let sixteen = 800.0 / t.elapsed().as_secs_f64();
+        (one, sixteen, d.store().stats().owner_checks - checks)
+    }
+    for verify in [false, true] {
+        let objects = search_store::test_objects("bench-owner");
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = search_store::StoreConfig { node: "bench".into(), ..Default::default() };
+        cfg.wal.sync_objects = true;
+        let s = search_store::Store::open(objects, dir.path(), cfg).await.unwrap();
+        let catalog = Arc::new(StaticCatalog::new());
+        catalog.insert(ClusterSpec::new("c0").with_password("pw"));
+        let n = Node::new(catalog, Arc::new(ObjectStores::new(s)), NodeConfig { idle_unload: None, ..NodeConfig::default() });
+        n.set_leases(search_server::lease::MemoryLeases::new());
+        let (one, sixteen, checks) = run(&n, verify).await;
+        println!("sync_objects, ownership check {}: {one:.0} docs/s (1 client), {sixteen:.0} docs/s (16 clients), {checks} checks", if verify { "on" } else { "off" });
+        n.shutdown(Duration::from_secs(10)).await.unwrap();
+    }
 }

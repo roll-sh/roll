@@ -668,7 +668,7 @@ impl Aggregator for PercentilesAgg {
                 PctState::Hdr(h) => {
                     for &v in vals {
                         if v < 0.0 {
-                            return Err(AggError::illegal_argument("Negative values are not supported by HDR aggregation"));
+                            return Err(hdr_negative(v));
                         }
                         h.record(v)?;
                     }
@@ -724,3 +724,47 @@ impl Aggregator for PercentilesAgg {
         }
     }
 }
+
+/// A negative value reaching an HDR histogram. Elasticsearch checks first; OpenSearch lets
+/// HdrHistogram's `DoubleHistogram` fail (a fresh one at the default 3 significant digits
+/// reports this covered range).
+fn hdr_negative(v: f64) -> AggError {
+    if crate::dialect::opensearch() {
+        return AggError::new(
+            500,
+            "array_index_out_of_bounds_exception",
+            format!(
+                "The value {} is out of bounds for histogram, current covered range [6.668014432879854E240, 5.334411546303884E241) cannot be extended any further.\nCaused by: java.lang.ArrayIndexOutOfBoundsException: Negative values cannot be recorded",
+                crate::json::java_double(v)
+            ),
+        );
+    }
+    AggError::illegal_argument("Negative values are not supported by HDR aggregation")
+}
+
+/// The percentiles a `moving_percentiles` `buckets_path` names in bucket `i`
+/// (`resolvePercentileConfig` / `resolveTDigestBucketValue` / `resolveHDRBucketValue`):
+/// `method` is the first bucket's (`None` while resolving it).
+pub fn bucket_percentiles<'a, M: crate::internal::MultiBuckets + ?Sized>(m: &'a M, agg_name: &str, i: usize, path: &[String], method: Option<PctKind>) -> Result<&'a Percentiles> {
+    let wanted = match method {
+        None => "percentiles",
+        Some(PctKind::TDigest) => "TDigest",
+        Some(PctKind::Hdr) => "HDR",
+    };
+    let prop = match crate::internal::bucket_property(agg_name, m.doc_count(i), || m.key(i), m.aggs(i), path) {
+        Ok(p) => p,
+        Err(e) if e.kind == "invalid_aggregation_path_exception" => return Err(AggError::illegal_argument(format!("buckets_path must reference a {wanted} percentile aggregation"))),
+        Err(e) => return Err(e),
+    };
+    let found = match prop {
+        crate::internal::Prop::Agg(a) => match &a.value {
+            crate::internal::AggValue::Percentiles(p) if !p.ranks && method.is_none_or(|k| k == p.kind) => return Ok(p),
+            other => other.class_name().to_string(),
+        },
+        _ => "Double".to_string(),
+    };
+    let at = path.first().cloned().unwrap_or_else(|| agg_name.to_string());
+    Err(AggError::illegal_argument(format!("buckets_path must reference a {wanted} percentiles aggregation, got: [{found}] at aggregation [{at}]")))
+}
+
+

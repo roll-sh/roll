@@ -54,8 +54,9 @@ pub fn validate_query(ctx: &Ctx) -> EsResult<Reply> {
     let mut valid = true;
     let mut explanations = Vec::new();
     let mut seen: Vec<String> = Vec::new();
+    let all_shards = ctx.bool_param("all_shards", false)?;
     for t in &targets {
-        if seen.contains(&t.idx.name) && !ctx.bool_param("all_shards", false)? {
+        if seen.contains(&t.idx.name) && !all_shards {
             continue;
         }
         seen.push(t.idx.name.clone());
@@ -64,13 +65,27 @@ pub fn validate_query(ctx: &Ctx) -> EsResult<Reply> {
         let qctx = QueryCtx::new(ctx.cluster, &st, &t.idx, &table, &searcher, ctx.now_ms);
         let r = match &req.source.query {
             Some(q) => qctx.to_query(q),
+            None if crate::opensearch::active() => Ok(crate::opensearch::approximate::ApproximateScoreQuery::match_all()),
             None => Ok(super::query::arc(search_index::query::MatchAllQuery)),
         };
+        // `QueryExplanation`: the shard id only under `all_shards`.
+        let shard_id = if all_shards { Some(Value::from(i64::from(t.shard.id))) } else { None };
+        // `SearchContext.preProcess` adds the non-nested and alias filters.
+        let r = r.and_then(|q| Ok((super::shard_query_main(&qctx, t, q.clone())?, q)));
         match r {
-            Ok(q) => {
-                let q = if rewrite { searcher.rewrite(&q).map_err(crate::engine::convert::index_error)? } else { q };
+            Ok((q, parsed)) => {
+                // `explain`: a rewrite to match-none shows the parsed query instead.
+                let q = if rewrite {
+                    let r = searcher.rewrite(&q).map_err(crate::engine::convert::index_error)?;
+                    if r.as_any().is::<search_index::query::MatchNoneQuery>() { parsed } else { r }
+                } else {
+                    q
+                };
                 let mut e = Map::new();
                 e.insert("index".into(), Value::Str(t.idx.name.clone()));
+                if let Some(s) = shard_id {
+                    e.insert("shard".into(), s);
+                }
                 e.insert("valid".into(), Value::Bool(true));
                 e.insert("explanation".into(), Value::Str(q.lucene_string(searcher.schema())));
                 explanations.push(Value::Obj(e));
@@ -80,18 +95,27 @@ pub fn validate_query(ctx: &Ctx) -> EsResult<Reply> {
                 let err = super::query::shard_exception(&t.idx, err);
                 let mut e = Map::new();
                 e.insert("index".into(), Value::Str(t.idx.name.clone()));
+                if let Some(s) = shard_id {
+                    e.insert("shard".into(), s);
+                }
                 e.insert("valid".into(), Value::Bool(false));
-                let cause = err.caused_by.as_ref().map(|c| format!("; {}: {}", java_class(&c.kind), c.reason())).unwrap_or_default();
-                e.insert("error".into(), Value::Str(format!("[{}/{}] org.elasticsearch.index.query.QueryShardException: {}{cause}", t.idx.name, t.idx.uuid, err.reason())));
+                // Lucene's query parser exceptions aren't Elasticsearch's `parse_exception`.
+                let class = |c: &EsError| if !c.es && c.kind == "parse_exception" { "org.apache.lucene.queryparser.classic.ParseException".to_string() } else { java_class(&c.kind) };
+                let cause = err.caused_by.as_ref().map(|c| format!("; {}: {}", class(c), c.reason())).unwrap_or_default();
+                // Only the "failed to create query" wrapper (`SearchExecutionContext.toQuery`)
+                // prints its index; the query builders' own exceptions print none.
+                let prefix = if err.caused_by.is_some() { format!("[{}/{}] ", t.idx.name, t.idx.uuid) } else { String::new() };
+                e.insert("error".into(), Value::Str(format!("{prefix}org.elasticsearch.index.query.QueryShardException: {}{cause}", err.reason())));
                 explanations.push(Value::Obj(e));
             }
         }
     }
-    let n = targets.len() as i64;
+    // `TransportValidateQueryAction.shards`: one (random) shard per index unless `all_shards`.
+    let n = if all_shards { targets.len() } else { seen.len() } as i64;
     let mut m = Map::new();
     m.insert("_shards".into(), obj! { "total" => n, "successful" => n, "failed" => 0 });
     m.insert("valid".into(), Value::Bool(valid));
-    if explain || rewrite {
+    if explain || rewrite || all_shards {
         m.insert("explanations".into(), Value::Arr(explanations));
     }
     Reply::ok(Value::Obj(m))
@@ -116,6 +140,9 @@ fn java_class(kind: &str) -> String {
     match kind {
         "number_format_exception" => "java.lang.NumberFormatException".into(),
         "illegal_argument_exception" => "java.lang.IllegalArgumentException".into(),
+        "illegal_state_exception" => "java.lang.IllegalStateException".into(),
+        "unsupported_operation_exception" => "java.lang.UnsupportedOperationException".into(),
+        "arithmetic_exception" => "java.lang.ArithmeticException".into(),
         "parsing_exception" => "org.elasticsearch.common.ParsingException".into(),
         "named_object_not_found_exception" => "org.elasticsearch.xcontent.NamedObjectNotFoundException".into(),
         "x_content_parse_exception" => "org.elasticsearch.xcontent.XContentParseException".into(),
@@ -249,15 +276,172 @@ fn computed_vector(f: &FieldInfo, values: &[String], positions: bool, offsets: b
     }
 }
 
-fn render_vector(name: &str, tv: &FieldTermVector, positions: bool, offsets: bool, payloads: bool) -> (String, Value) {
+/// `TermVectorsRequest.FilterSettings`: which terms the `filter` keeps (`TermVectorsFilter`).
+struct FilterSettings {
+    max_num_terms: i64,
+    min_term_freq: i64,
+    max_term_freq: i64,
+    min_doc_freq: i64,
+    max_doc_freq: i64,
+    min_word_length: i64,
+    max_word_length: i64,
+}
+
+impl FilterSettings {
+    fn parse(m: &Map) -> EsResult<FilterSettings> {
+        let mut f = FilterSettings {
+            max_num_terms: 25,
+            min_term_freq: 0,
+            max_term_freq: i64::from(i32::MAX),
+            min_doc_freq: 0,
+            max_doc_freq: i64::from(i32::MAX),
+            min_word_length: 0,
+            max_word_length: 0,
+        };
+        for (k, v) in m {
+            let slot = match k.as_str() {
+                "max_num_terms" => &mut f.max_num_terms,
+                "min_term_freq" => &mut f.min_term_freq,
+                "max_term_freq" => &mut f.max_term_freq,
+                "min_doc_freq" => &mut f.min_doc_freq,
+                "max_doc_freq" => &mut f.max_doc_freq,
+                "min_word_length" => &mut f.min_word_length,
+                "max_word_length" => &mut f.max_word_length,
+                other => return Err(EsError::illegal_argument(format!("The parameter {other} is not valid for filter parameter for term vector request!"))),
+            };
+            *slot = match v {
+                Value::Num(n) => n.as_f64() as i32 as i64,
+                other => crate::units::parse_java_int(&other.to_es_string()).map(i64::from).ok_or_else(|| EsError::number_format(&other.to_es_string()))?,
+            };
+        }
+        Ok(f)
+    }
+}
+
+/// `TermVectorsFilter.selectBestTerms` for one field: each term's tf-idf score
+/// (`ClassicSimilarity`), `None` for the terms the filter drops. The statistics come from the
+/// shard, or from the document's own vector when the shard has no terms for the field; the
+/// best terms are kept in a Lucene `PriorityQueue` replica, so ties at the cut fall as in
+/// Elasticsearch.
+fn best_terms(searcher: &search_index::Searcher, field: u32, tv: &TermVector, f: &FilterSettings) -> Vec<Option<f32>> {
+    let shard_stats = searcher.collection_stats(field);
+    let num_docs = shard_stats.map_or(1, |s| s.doc_count) as f64;
+    let limit = (f.max_num_terms.min(tv.terms.len() as i64)).max(0) as usize;
+    let single = {
+        let mut dicts = searcher.segments().iter().filter_map(|s| s.reader.terms(field));
+        match (dicts.next(), dicts.next()) {
+            (Some(d), None) => Some(d),
+            _ => None,
+        }
+    };
+    // 1-based binary heap of (score, term index), smallest score on top.
+    let mut heap: Vec<(f32, usize)> = vec![(0.0, usize::MAX)];
+    for (i, t) in tv.terms.iter().enumerate() {
+        let freq = i64::from(t.freq);
+        let len = String::from_utf8_lossy(&t.term).encode_utf16().count() as i64;
+        let noise = (f.min_word_length > 0 && len < f.min_word_length)
+            || (f.max_word_length > 0 && len > f.max_word_length)
+            || (f.min_term_freq > 0 && freq < f.min_term_freq)
+            || freq > f.max_term_freq;
+        if noise {
+            continue;
+        }
+        let doc_freq = match shard_stats {
+            None => 1,
+            Some(_) => match searcher.term_stats(field, &t.term).doc_freq {
+                // A term the shard lacks (`assert foundTerm` is off in production): a lone
+                // segment's terms enum reports the stale frequency of the term its failed seek
+                // stopped at (the next one, or the block's last); a multi-segment enum reports 0.
+                0 => single.map_or(0, |tr| {
+                    let mut it = tr.seek_ceil(&t.term);
+                    if it.next().is_some() {
+                        i64::from(it.doc_freq())
+                    } else {
+                        let mut all = tr.iter();
+                        let mut last = 0;
+                        while all.next().is_some() {
+                            last = i64::from(all.doc_freq());
+                        }
+                        last
+                    }
+                }),
+                df => df as i64,
+            },
+        };
+        if (f.min_doc_freq > 0 && doc_freq < f.min_doc_freq) || doc_freq > f.max_doc_freq || doc_freq == 0 {
+            continue;
+        }
+        let idf = (((num_docs + 1.0) / (doc_freq as f64 + 1.0)).ln() + 1.0) as f32;
+        let score = t.freq as f32 * idf;
+        if heap.len() - 1 < limit {
+            heap.push((score, i));
+            up_heap(&mut heap);
+        } else if limit > 0 && heap[1].0 < score {
+            heap[1] = (score, i);
+            down_heap(&mut heap);
+        }
+    }
+    let mut out = vec![None; tv.terms.len()];
+    for &(score, i) in &heap[1..] {
+        out[i] = Some(score);
+    }
+    out
+}
+
+/// Lucene `PriorityQueue.upHeap` on the last element.
+fn up_heap(h: &mut [(f32, usize)]) {
+    let mut i = h.len() - 1;
+    let node = h[i];
+    let mut j = i >> 1;
+    while j > 0 && node.0 < h[j].0 {
+        h[i] = h[j];
+        i = j;
+        j >>= 1;
+    }
+    h[i] = node;
+}
+
+/// Lucene `PriorityQueue.downHeap` from the top.
+fn down_heap(h: &mut [(f32, usize)]) {
+    let size = h.len() - 1;
+    let mut i = 1;
+    let node = h[i];
+    let mut j = i << 1;
+    let mut k = j + 1;
+    if k <= size && h[k].0 < h[j].0 {
+        j = k;
+    }
+    while j <= size && h[j].0 < node.0 {
+        h[i] = h[j];
+        i = j;
+        j = i << 1;
+        k = j + 1;
+        if k <= size && h[k].0 < h[j].0 {
+            j = k;
+        }
+    }
+    h[i] = node;
+}
+
+fn render_vector(name: &str, tv: &FieldTermVector, positions: bool, offsets: bool, payloads: bool, scores: Option<&[Option<f32>]>, field_stats: bool) -> (String, Value) {
     let mut m = Map::new();
-    if let Some(fs) = &tv.field_stats {
-        m.insert("field_statistics".into(), obj! { "sum_doc_freq" => fs.sum_doc_freq as i64, "doc_count" => fs.doc_count as i64, "sum_ttf" => fs.sum_total_term_freq as i64 });
+    if field_stats {
+        // A field the shard has no terms for reports zeros (`TermVectorsWriter.EMPTY_TERMS`).
+        let (sdf, dc, sttf) = tv.field_stats.as_ref().map_or((0, 0, 0), |fs| (fs.sum_doc_freq as i64, fs.doc_count as i64, fs.sum_total_term_freq as i64));
+        m.insert("field_statistics".into(), obj! { "sum_doc_freq" => sdf, "doc_count" => dc, "sum_ttf" => sttf });
     }
     let mut terms = Map::new();
     for (i, t) in tv.vector.terms.iter().enumerate() {
+        let score = match scores {
+            Some(s) => match s.get(i).copied().flatten() {
+                Some(x) => Some(x),
+                None => continue,
+            },
+            None => None,
+        };
         let mut tm = Map::new();
-        if let Some(st) = tv.term_stats.get(i) {
+        // Terms the shard doesn't hold print no statistics (`buildTermStatistics`).
+        if let Some(st) = tv.term_stats.get(i).filter(|st| st.doc_freq > 0) {
             tm.insert("doc_freq".into(), Value::from(st.doc_freq as i64));
             tm.insert("ttf".into(), Value::from(st.total_term_freq as i64));
         }
@@ -289,6 +473,9 @@ fn render_vector(name: &str, tv: &FieldTermVector, positions: bool, offsets: boo
             if !toks.is_empty() {
                 tm.insert("tokens".into(), Value::Arr(toks));
             }
+        }
+        if let Some(x) = score {
+            tm.insert("score".into(), Value::Num(crate::json::Number::Float(crate::fetch::java_float_as_double(x))));
         }
         terms.insert(String::from_utf8_lossy(&t.term).into_owned(), Value::Obj(tm));
     }
@@ -322,16 +509,22 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
         crate::write::check_routing(&idx, id, routing.as_deref())?;
     }
     let shard = engine.shard(crate::meta::routing::shard_for(&idx, id.unwrap_or(""), routing.as_deref())).clone();
-    let searcher = shard.searcher();
+    let mut searcher = shard.searcher();
     let mut m = Map::new();
     m.insert("_index".into(), Value::Str(idx.name.clone()));
     let (source, stored, version): (Option<Value>, Vec<(u32, search_codec::stored::OwnedStoredValue)>, i64) = match (doc, id) {
         (Some(d), _) => (Some(d.clone()), Vec::new(), 0),
         (None, Some(id)) => {
             m.insert("_id".into(), Value::Str(id.to_string()));
-            let got = shard.shard.get(id.as_bytes(), flag("realtime", true)).map_err(crate::engine::convert::index_error)?;
+            let realtime = flag("realtime", true);
+            let got = shard.shard.get(id.as_bytes(), realtime).map_err(crate::engine::convert::index_error)?;
             match got {
                 Some(g) => {
+                    // A realtime get reads through Elasticsearch's internal reader (refreshed
+                    // for a buffered document), which the statistics then come from.
+                    if realtime {
+                        searcher = shard.shard.realtime_searcher(id.as_bytes()).map_err(crate::engine::convert::index_error)?;
+                    }
                     let src = crate::fetch::source_bytes(&g.fields).map(crate::fetch::parse_source).transpose()?;
                     (src, g.fields, g.version)
                 }
@@ -352,6 +545,11 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
     }
     m.insert("found".into(), Value::Bool(true));
     m.insert("took".into(), Value::from(started.elapsed().as_millis() as i64));
+    let filter = match opts.get("filter") {
+        Some(Value::Obj(fm)) => Some(FilterSettings::parse(fm)?),
+        Some(Value::Null) | None => None,
+        Some(_) => return Err(EsError::illegal_argument("Failed to parse filter settings")),
+    };
     let stored_vectors = search_index::termvectors::from_stored(&stored, None).map_err(crate::engine::convert::index_error)?;
     let requested: Vec<String> = match opts.get("fields") {
         Some(Value::Arr(a)) => a.iter().flat_map(|v| table.matching(&v.to_es_string())).collect(),
@@ -371,13 +569,17 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
         }
     };
     let mut out = Map::new();
+    let mut usage = super::field_usage::Notes::default();
     for name in requested {
         let Some(f) = table.get(&name) else { continue };
         if !(f.kind.is_text() || f.kind.is_keyword_like()) {
             continue;
         }
         let vector = match stored_vectors.iter().find(|(n, _)| *n == f.number) {
-            Some((_, v)) => v.clone(),
+            Some((_, v)) => {
+                usage.note(&f.name, super::field_usage::U_TERM_VECTORS);
+                v.clone()
+            }
             None => {
                 let Some(Value::Obj(src)) = &source else { continue };
                 let mut raw = Vec::new();
@@ -392,11 +594,13 @@ fn termvectors_one(ctx: &Ctx, index: &str, id: Option<&str>, doc: Option<&Value>
         if vector.terms.is_empty() {
             continue;
         }
+        let scores = filter.as_ref().map(|fs| best_terms(&searcher, f.number, &vector, fs));
         let ftv = searcher.with_stats(f.number, vector, term_stats, field_stats);
-        let (k, v) = render_vector(&name, &ftv, positions, offsets, payloads);
+        let (k, v) = render_vector(&name, &ftv, positions, offsets, payloads, scores.as_deref(), field_stats);
         out.insert(k, v);
     }
     m.insert("term_vectors".into(), Value::Obj(out));
+    shard.counters.field_usage.lock().record(&usage.used);
     Ok(Value::Obj(m))
 }
 
@@ -487,9 +691,43 @@ pub fn mtermvectors(ctx: &Ctx) -> EsResult<Reply> {
             Ok(v) => out.push(v),
             Err(e) => {
                 let shown = crate::api::document::single_index(ctx, &index).map(|i| i.name.clone()).unwrap_or(index);
-                out.push(obj! { "_index" => shown, "_id" => id.unwrap_or_default(), "error" => e.to_value_with_root(false) })
+                out.push(obj! { "_index" => shown, "_id" => id.unwrap_or_default(), "error" => crate::opensearch::item_error(ctx, &e, true) })
             }
         }
     }
     Reply::ok(obj! { "docs" => Value::Arr(out) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lucene's `PriorityQueue` replaces its top only for a strictly better entry, and which
+    /// of several tied entries is on top follows the heap's layout.
+    #[test]
+    fn best_terms_queue_breaks_ties_like_lucene() {
+        let mut heap: Vec<(f32, usize)> = vec![(0.0, usize::MAX)];
+        let limit = 2;
+        for (i, score) in [1.0f32, 1.0, 1.0, 2.0].into_iter().enumerate() {
+            if heap.len() - 1 < limit {
+                heap.push((score, i));
+                up_heap(&mut heap);
+            } else if heap[1].0 < score {
+                heap[1] = (score, i);
+                down_heap(&mut heap);
+            }
+        }
+        let mut kept: Vec<usize> = heap[1..].iter().map(|e| e.1).collect();
+        kept.sort();
+        assert_eq!(kept, vec![1, 3]);
+    }
+
+    #[test]
+    fn filter_settings_defaults_and_errors() {
+        let f = FilterSettings::parse(&Map::new()).unwrap();
+        assert_eq!((f.max_num_terms, f.min_term_freq, f.max_doc_freq), (25, 0, i64::from(i32::MAX)));
+        let mut m = Map::new();
+        m.insert("bogus".into(), Value::from(1i64));
+        assert!(FilterSettings::parse(&m).is_err());
+    }
 }

@@ -54,35 +54,44 @@ pub struct DocMeta {
     pub primary_term: i64,
 }
 
-/// Per-term postings state, struct of arrays indexed by term id.
+/// Per-term postings state, indexed by term id. What every occurrence of a term touches sits
+/// together ([`DocState`], 16 bytes; [`PosState`] for positions): a field with a large
+/// vocabulary takes one or two cache misses per token instead of one per array.
 #[derive(Default)]
 struct Postings {
+    doc: Vec<DocState>,
+    pos: Vec<PosState>,
+    /// Where each term's doc stream starts (read at flush only).
     doc_start: Vec<u32>,
-    doc_w: Vec<u32>,
+    /// Where each term's position stream starts (positions only; read at flush only).
     pos_start: Vec<u32>,
-    pos_w: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DocState {
     /// Doc of the pending (last) doc of the term.
-    last_doc: Vec<u32>,
+    last_doc: u32,
     /// Delta of the pending doc from the one before it.
-    last_code: Vec<u32>,
+    last_code: u32,
     /// Frequency in the pending doc.
-    freq: Vec<u32>,
-    last_pos: Vec<u32>,
-    last_off: Vec<u32>,
+    freq: u32,
+    /// Write position of the doc stream.
+    doc_w: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PosState {
+    /// Write position of the position stream.
+    pos_w: u32,
+    last_pos: u32,
+    last_off: u32,
 }
 
 impl Postings {
     fn ram_bytes(&self) -> usize {
-        (self.doc_start.capacity()
-            + self.doc_w.capacity()
-            + self.pos_start.capacity()
-            + self.pos_w.capacity()
-            + self.last_doc.capacity()
-            + self.last_code.capacity()
-            + self.freq.capacity()
-            + self.last_pos.capacity()
-            + self.last_off.capacity())
-            * 4
+        self.doc.capacity() * std::mem::size_of::<DocState>()
+            + self.pos.capacity() * std::mem::size_of::<PosState>()
+            + (self.doc_start.capacity() + self.pos_start.capacity()) * 4
     }
 }
 
@@ -491,6 +500,10 @@ impl Buffer {
     fn add_field(&mut self, d: u32, f: &IndexableField) -> Result<()> {
         match f {
             IndexableField::Text { field, analyzer, values } => {
+                // Most text fields have one value: no list of borrowed values for those.
+                if let [one] = values.as_slice() {
+                    return self.add_text(d, *field, analyzer, &[one.as_str()]);
+                }
                 let refs: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
                 self.add_text(d, *field, analyzer, &refs)
             }
@@ -583,7 +596,9 @@ impl Buffer {
         let mut err: Option<Error> = None;
         let mut last_abs: i64 = -1;
         let mut any = false;
-        let r = analyzer.try_analyze_values(values, &mut |t| {
+        // The field's name goes into Lucene's position errors (`IndexingChain.invertTokenStream`).
+        let name = self.schema.field(number).map_or("", |f| f.name.as_str());
+        let r = analyzer.try_analyze_field(name, values, &mut |t| {
             if err.is_some() {
                 return;
             }
@@ -893,29 +908,23 @@ fn invert_token(
     let (start, end) = (start.max(0) as u32, end.max(0) as u32);
     let (id, new) = fb.terms.add(term);
     let p = &mut fb.post;
+    let i = id as usize;
     if new {
         let ds = pool.new_stream();
         p.doc_start.push(ds);
-        p.doc_w.push(ds);
+        p.doc.push(DocState { last_doc: d, last_code: d, freq: 0, doc_w: ds });
         if fb.positions {
             let ps = pool.new_stream();
             p.pos_start.push(ps);
-            p.pos_w.push(ps);
-            p.last_pos.push(0);
-            if fb.offsets {
-                p.last_off.push(0);
-            }
+            p.pos.push(PosState { pos_w: ps, last_pos: 0, last_off: 0 });
         }
-        p.last_doc.push(d);
-        p.last_code.push(d);
-        p.freq.push(0);
         fb.inv.unique_terms += 1;
-    } else if p.last_doc[id as usize] != d {
-        let i = id as usize;
-        let code = p.last_code[i];
-        let mut w = p.doc_w[i];
+    } else if p.doc[i].last_doc != d {
+        let st = &mut p.doc[i];
+        let code = st.last_code;
+        let mut w = st.doc_w;
         if fb.freqs {
-            let f = p.freq[i];
+            let f = st.freq;
             if f == 1 {
                 pool.write_vu32(&mut w, code << 1 | 1);
             } else {
@@ -925,24 +934,24 @@ fn invert_token(
         } else {
             pool.write_vu32(&mut w, code);
         }
-        p.doc_w[i] = w;
-        p.last_code[i] = d - p.last_doc[i];
-        p.last_doc[i] = d;
-        p.freq[i] = 0;
+        st.doc_w = w;
+        st.last_code = d - st.last_doc;
+        st.last_doc = d;
+        st.freq = 0;
         if fb.positions {
-            p.last_pos[i] = 0;
-            if fb.offsets {
-                p.last_off[i] = 0;
-            }
+            let ps = &mut p.pos[i];
+            ps.last_pos = 0;
+            ps.last_off = 0;
         }
         fb.inv.unique_terms += 1;
     }
-    let i = id as usize;
-    p.freq[i] = p.freq[i].saturating_add(freq);
+    let st = &mut p.doc[i];
+    st.freq = st.freq.saturating_add(freq);
     if fb.positions {
-        let mut w = p.pos_w[i];
-        let delta = pos - p.last_pos[i];
-        p.last_pos[i] = pos;
+        let ps = &mut p.pos[i];
+        let mut w = ps.pos_w;
+        let delta = pos - ps.last_pos;
+        ps.last_pos = pos;
         match payload {
             Some(pl) if fb.payloads && !pl.is_empty() => {
                 pool.write_vu32(&mut w, delta << 1 | 1);
@@ -953,11 +962,11 @@ fn invert_token(
             _ => pool.write_vu32(&mut w, delta),
         }
         if fb.offsets {
-            pool.write_vu32(&mut w, start - p.last_off[i]);
+            pool.write_vu32(&mut w, start - ps.last_off);
             pool.write_vu32(&mut w, end - start);
-            p.last_off[i] = start;
+            ps.last_off = start;
         }
-        p.pos_w[i] = w;
+        ps.pos_w = w;
     }
     if fb.schema.term_vectors.is_some() {
         let ps = fb.tv_payloads.len() as u32;
@@ -971,15 +980,15 @@ fn invert_token(
 impl FieldBuf {
     pub(crate) fn doc_stream(&self, id: u32) -> (u32, u32) {
         let i = id as usize;
-        (self.post.doc_start[i], self.post.doc_w[i])
+        (self.post.doc_start[i], self.post.doc[i].doc_w)
     }
     pub(crate) fn pos_stream(&self, id: u32) -> Option<(u32, u32)> {
         let i = id as usize;
-        self.positions.then(|| (self.post.pos_start[i], self.post.pos_w[i]))
+        self.positions.then(|| (self.post.pos_start[i], self.post.pos[i].pos_w))
     }
     pub(crate) fn pending(&self, id: u32) -> (u32, u32) {
         let i = id as usize;
-        (self.post.last_doc[i], self.post.freq[i])
+        (self.post.doc[i].last_doc, self.post.doc[i].freq)
     }
     pub(crate) fn flags(&self) -> (bool, bool, bool, bool) {
         (self.freqs, self.positions, self.offsets, self.payloads)

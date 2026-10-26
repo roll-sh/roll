@@ -1,0 +1,40 @@
+{
+  "ism.get_policy": {
+    "documentation": {
+      "url": "https://docs.opensearch.org/latest/im-plugin/ism/api/",
+      "description": "Gets an ISM policy."
+    },
+    "stability": "stable",
+    "url": {
+      "paths": [
+        {
+          "path": "/_plugins/_ism/policies/{policy_id}",
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "parts": {
+            "policy_id": {
+              "type": "string",
+              "description": "policy_id"
+            }
+          }
+        },
+        {
+          "path": "/_opendistro/_ism/policies/{policy_id}",
+          "methods": [
+            "GET",
+            "HEAD"
+          ],
+          "parts": {
+            "policy_id": {
+              "type": "string",
+              "description": "policy_id"
+            }
+          }
+        }
+      ]
+    },
+    "params": {}
+  }
+}

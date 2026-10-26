@@ -280,9 +280,12 @@ pub struct SingleAgg {
 pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
     let (kind, mode) = match spec {
         SingleSpec::Filter(q) => {
+            // Sub-aggregations bind before the filter's query is built (Elasticsearch's
+            // factory order): their validation errors win.
+            let subs = Subs::bind(def, ctx)?;
             let query = ctx.lookup.query(q)?;
             let weight = ctx.searcher.create_weight(&query, ScoreMode::CompleteNoScores)?;
-            (SingleKind::Filter, Mode::Filter { weight, scorer: None, last: (u32::MAX, false) })
+            return finish(SingleKind::Filter, Mode::Filter { weight, scorer: None, last: (u32::MAX, false) }, subs, ctx);
         }
         SingleSpec::Global => {
             if !ctx.parents.is_empty() {
@@ -354,7 +357,7 @@ pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<
         SingleSpec::Sampler { shard_size } => {
             let subs = Subs::bind(def, ctx)?;
             crate::collect::check_time_series_deferral(ctx, &def.name, &subs)?;
-            return Ok(Box::new(SamplerAgg::new(*shard_size, None, 0, subs, ctx)));
+            return Ok(Box::new(SamplerAgg::new(*shard_size, None, 0, None, subs, ctx)));
         }
         SingleSpec::Diversified { vs, shard_size, max_docs_per_value, execution_hint } => {
             if let Some(h) = execution_hint
@@ -370,7 +373,7 @@ pub fn create(def: &AggDef, spec: &SingleSpec, ctx: &mut BindCtx<'_>) -> Result<
             }
             let subs = Subs::bind(def, ctx)?;
             crate::collect::check_time_series_deferral(ctx, &def.name, &subs)?;
-            return Ok(Box::new(SamplerAgg::new(*shard_size, Some(b), *max_docs_per_value, subs, ctx)));
+            return Ok(Box::new(SamplerAgg::new(*shard_size, Some(b), *max_docs_per_value, execution_hint.as_deref(), subs, ctx)));
         }
     };
     let subs = Subs::bind(def, ctx)?;
@@ -667,12 +670,31 @@ struct BucketSample {
     per_key: hashbrown::HashMap<i64, HitQueue>,
 }
 
+/// How `diversified_sampler` keys a doc by a bytes value (`DiversifiedAggregatorFactory`'s
+/// execution modes). A doc without a value has key 0 (Lucene's `DiversifiedTopDocsCollector`),
+/// so it shares the slots of whichever value has key 0 too.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BytesKeys {
+    /// `global_ordinals` (the default for fields with ordinals): the shard's global ordinal,
+    /// so missing docs share the smallest term's slots.
+    Ordinals,
+    /// `map` (and scripts): ids in first-seen order, so missing docs share the first value's.
+    Map,
+    /// `bytes_hash`: the value's hash.
+    Hash,
+}
+
 /// `sampler` / `diversified_sampler`.
 struct SamplerAgg {
     shard_size: usize,
     /// The diversifying values source (`diversified_sampler`).
     diversify: Option<BoundVs>,
     max_per_value: usize,
+    bytes_keys: BytesKeys,
+    /// [`BytesKeys::Ordinals`]: the key of the shard's smallest term, once looked up.
+    min_term_key: Option<i64>,
+    /// [`BytesKeys::Map`]: each value's id.
+    ids: hashbrown::HashMap<Vec<u8>, i64>,
     samples: Vec<Option<BucketSample>>,
     subs: Subs,
     searcher: Searcher,
@@ -683,11 +705,21 @@ struct SamplerAgg {
 }
 
 impl SamplerAgg {
-    fn new(shard_size: i32, diversify: Option<BoundVs>, max_per_value: i32, subs: Subs, ctx: &BindCtx<'_>) -> SamplerAgg {
+    fn new(shard_size: i32, diversify: Option<BoundVs>, max_per_value: i32, hint: Option<&str>, subs: Subs, ctx: &BindCtx<'_>) -> SamplerAgg {
+        let with_ordinals = diversify.as_ref().is_some_and(|vs| vs.script.is_none() && vs.field.is_some());
+        let bytes_keys = match hint {
+            Some("bytes_hash") => BytesKeys::Hash,
+            Some("map") => BytesKeys::Map,
+            _ if with_ordinals => BytesKeys::Ordinals,
+            _ => BytesKeys::Map,
+        };
         SamplerAgg {
             shard_size: shard_size.max(0) as usize,
             diversify,
             max_per_value: max_per_value.max(0) as usize,
+            bytes_keys,
+            min_term_key: None,
+            ids: hashbrown::HashMap::new(),
             samples: Vec::new(),
             subs,
             searcher: ctx.searcher.clone(),
@@ -711,13 +743,44 @@ impl SamplerAgg {
             if n > 1 {
                 return Err(AggError::illegal_argument("Sample diversifying key must be a single valued-field"));
             }
-            if n == 0 {
-                return Ok(0);
-            }
-            let (h1, _) = crate::util::murmur3_x64_128(r.value(0), 0);
-            return Ok(h1 as i64);
+            return Ok(match (self.bytes_keys, n) {
+                (BytesKeys::Ordinals, 0) => self.min_term_key()?,
+                (BytesKeys::Map | BytesKeys::Hash, 0) => 0,
+                (BytesKeys::Map, _) => {
+                    let next = self.ids.len() as i64;
+                    *self.ids.entry(r.value(0).to_vec()).or_insert(next)
+                }
+                _ => Self::hash_key(r.value(0)),
+            });
         }
         Ok(0)
+    }
+
+    fn hash_key(v: &[u8]) -> i64 {
+        crate::util::murmur3_x64_128(v, 0).0 as i64
+    }
+
+    /// The key of global ordinal 0: the smallest term among the shard's segments.
+    fn min_term_key(&mut self) -> Result<i64> {
+        if let Some(k) = self.min_term_key {
+            return Ok(k);
+        }
+        let mut min: Option<Vec<u8>> = None;
+        if let Some(f) = self.diversify.as_ref().and_then(|vs| vs.field.as_ref()) {
+            let mut term = Vec::new();
+            for seg in self.searcher.segments() {
+                let ords = crate::values::DvOrds::for_field(seg, f);
+                if ords.value_count() > 0 {
+                    ords.lookup(0, &mut term);
+                    if min.as_ref().is_none_or(|m| term < *m) {
+                        min = Some(term.clone());
+                    }
+                }
+            }
+        }
+        let k = min.as_deref().map_or(0, Self::hash_key);
+        self.min_term_key = Some(k);
+        Ok(k)
     }
 }
 
@@ -725,9 +788,22 @@ impl Aggregator for SamplerAgg {
     fn profile_type(&self) -> &'static str {
         if self.diversify.is_some() { "DiversifiedSamplerAggregator" } else { "SamplerAggregator" }
     }
+    fn profile_debug(&self) -> Json {
+        // OpenSearch's `DeferableBucketAggregator.collectDebugInfo`: a sampler defers every
+        // sub-aggregation. (Checked against OpenSearch only; the elasticsearch dialect keeps
+        // its debug as it was.)
+        let mut o = Json::obj();
+        if crate::dialect::opensearch() {
+            o.push("deferred_aggregators", Json::Arr(self.subs.nodes.iter().map(|n| Json::Str(n.def.name.clone())).collect()));
+        }
+        o
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         if self.subs.is_empty() {
-            return Err(AggError::illegal_argument("Sampler aggregation must be used with child aggregations."));
+            // OpenSearch still throws the `AggregationExecutionException` Elasticsearch made an
+            // `IllegalArgumentException` (a 400) in 8.x.
+            let reason = "Sampler aggregation must be used with child aggregations.";
+            return Err(if crate::dialect::opensearch() { AggError::execution(reason) } else { AggError::illegal_argument(reason) });
         }
         self.seg_base = seg.base;
         if let Some(vs) = &self.diversify {

@@ -51,7 +51,16 @@ struct State {
 
 fn pool() -> &'static Pool {
     static P: OnceLock<Pool> = OnceLock::new();
-    P.get_or_init(|| Pool::new(std::thread::available_parallelism().map_or(4, |n| n.get()).max(2), IDLE))
+    P.get_or_init(|| Pool::new(cores().max(2), IDLE))
+}
+
+/// The CPUs this process may use (`std::thread::available_parallelism`), looked up once.
+/// The std call re-reads the cgroup's `cpu.max` and the mount table on every call (a few
+/// `open`/`read`/`statx` per call): called per search, it was more than a quarter of the CPU
+/// time of a `size: 0` search.
+pub fn cores() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
 
 thread_local! {
@@ -77,6 +86,81 @@ pub fn execute(job: Job) {
 /// instead of whichever parked earlier (results arrive before a worker gets back).
 pub fn execute_held(job: Job, hold: Box<dyn Send + 'static>) {
     pool().execute(job, Some(hold));
+}
+
+/// Runs `f(0)`, …, `f(n - 1)` on the calling thread and up to `helpers` pool workers, and
+/// returns once every call has returned; a panic in any call is resumed here afterwards.
+///
+/// `f` may borrow from the caller (unlike [`execute`]'s `'static` jobs): workers reach it
+/// through a pointer in shared state and claim indices from an atomic counter, and the caller
+/// returns only after every claimed index has finished. A worker that starts late finds no
+/// index left and never touches `f`, so the pointer is never used once this returns. The
+/// caller claims indices too, so the call completes even when every worker is busy with
+/// searches (it then runs everything itself). Inside a worker, everything runs inline.
+pub fn for_each_index(n: usize, helpers: usize, f: &(dyn Fn(usize) + Sync)) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    if n == 0 {
+        return;
+    }
+    if n == 1 || helpers == 0 || in_worker() {
+        (0..n).for_each(f);
+        return;
+    }
+    struct Shared {
+        /// `f`, lifetime erased: dereferenced only for a claimed index below `n`.
+        f: *const (dyn Fn(usize) + Sync + 'static),
+        n: usize,
+        next: AtomicUsize,
+        done: Mutex<(usize, Option<Box<dyn std::any::Any + Send>>)>,
+        caller: Thread,
+    }
+    // SAFETY: `f` is `Sync`, and it is only called while `for_each_index` waits (see below).
+    unsafe impl Send for Shared {}
+    unsafe impl Sync for Shared {}
+    impl Shared {
+        /// Claims and runs indices until none is left.
+        fn drain(&self) {
+            loop {
+                let i = self.next.fetch_add(1, Ordering::AcqRel);
+                if i >= self.n {
+                    return;
+                }
+                // SAFETY: `i < n` was claimed before the caller saw `done == n`, so the caller
+                // is still waiting and `f` is alive.
+                let f = unsafe { &*self.f };
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(i)));
+                let mut d = self.done.lock();
+                d.0 += 1;
+                if let Err(p) = r {
+                    d.1.get_or_insert(p);
+                }
+                if d.0 == self.n {
+                    self.caller.unpark();
+                }
+            }
+        }
+    }
+    // SAFETY: only the lifetime is erased; see `Shared::f`.
+    let f: *const (dyn Fn(usize) + Sync + 'static) = unsafe { std::mem::transmute(f as *const (dyn Fn(usize) + Sync)) };
+    let shared = Arc::new(Shared { f, n, next: AtomicUsize::new(0), done: Mutex::new((0, None)), caller: std::thread::current() });
+    for _ in 0..helpers.min(n - 1) {
+        let s = shared.clone();
+        execute(Box::new(move || s.drain()));
+    }
+    shared.drain();
+    loop {
+        let mut d = shared.done.lock();
+        if d.0 == n {
+            if let Some(p) = d.1.take() {
+                drop(d);
+                std::panic::resume_unwind(p);
+            }
+            return;
+        }
+        drop(d);
+        std::thread::park();
+    }
 }
 
 /// Live worker threads (for tests and stats).
@@ -265,5 +349,41 @@ mod tests {
         execute_held(Box::new(move || tx.send(in_worker()).unwrap()), Box::new(held));
         assert!(rx.recv().unwrap());
         assert!(rx.recv().is_err());
+    }
+
+    /// Borrowed state, every index exactly once, across threads, back to back.
+    #[test]
+    fn for_each_index_runs_every_index_once() {
+        for n in [0usize, 1, 2, 7, 64, 1000] {
+            let hits: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
+            let threads = Mutex::new(std::collections::HashSet::new());
+            for_each_index(n, 8, &|i| {
+                hits[i].fetch_add(1, Ordering::Relaxed);
+                threads.lock().insert(std::thread::current().id());
+                if n == 1000 {
+                    std::thread::sleep(Duration::from_micros(50));
+                }
+            });
+            assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1), "n {n}");
+            if n == 1000 {
+                assert!(threads.lock().len() > 1);
+            }
+        }
+    }
+
+    /// A panicking index still lets every other index finish, then reaches the caller.
+    #[test]
+    fn for_each_index_resumes_panics() {
+        let done = AtomicUsize::new(0);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for_each_index(50, 4, &|i| {
+                if i == 17 {
+                    panic!("index 17");
+                }
+                done.fetch_add(1, Ordering::Relaxed);
+            })
+        }));
+        assert_eq!(*r.unwrap_err().downcast::<&str>().unwrap(), "index 17");
+        assert_eq!(done.load(Ordering::Relaxed), 49);
     }
 }

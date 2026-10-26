@@ -83,6 +83,23 @@ const METADATA: &[(&str, &str, bool, bool)] = &[
     ("_field_names", "_field_names", true, false),
 ];
 
+/// OpenSearch's metadata fields (no `_tier`, `_index_mode` or inference fields; `_doc_count`
+/// is a `long`, `_ignored` and `_version` don't aggregate, `_id` does).
+const OS_METADATA: &[(&str, &str, bool, bool)] = &[
+    ("_routing", "_routing", true, false),
+    ("_doc_count", "long", false, false),
+    ("_index", "_index", true, true),
+    ("_feature", "_feature", false, false),
+    ("_ignored", "_ignored", true, false),
+    ("_seq_no", "_seq_no", true, true),
+    ("_nested_path", "_nested_path", true, false),
+    ("_field_names", "_field_names", true, false),
+    ("_data_stream_timestamp", "_data_stream_timestamp", false, false),
+    ("_source", "_source", false, false),
+    ("_id", "_id", true, true),
+    ("_version", "_version", false, false),
+];
+
 /// The family type field caps report for a mapper type.
 fn family(ty: &str) -> &str {
     match ty {
@@ -123,9 +140,11 @@ fn index_fields(idx: &IndexMeta, runtime_request: &Map) -> Vec<(String, Cap)> {
     let ctx = idx.mapping_ctx();
     let mapping: &Mapping = &idx.mapping;
     let mut out: Vec<(String, Cap)> = Vec::new();
-    for (name, ty, s, a) in METADATA {
+    let os = ctx.opensearch();
+    for (name, ty, s, a) in if os { OS_METADATA } else { METADATA } {
         // `_routing` and `_id` aggregate when kept in doc values.
         let a = match *name {
+            _ if os => *a,
             "_routing" => mapping.routing_doc_values.unwrap_or(ctx.columnar.is_some()),
             "_id" => mapping.id_mode.as_deref() == Some("columnar") || (mapping.id_mode.is_none() && ctx.columnar.is_some()),
             _ => *a,
@@ -246,6 +265,11 @@ fn index_fields(idx: &IndexMeta, runtime_request: &Map) -> Vec<(String, Cap)> {
             out.push((name, Cap::new(&ty, true, true)));
         }
     }
+    // OpenSearch meets the mapped fields before the metadata fields, which decides the order
+    // of fields sharing a bucket of its `HashMap`s.
+    if os {
+        out.sort_by_key(|(_, c)| c.metadata);
+    }
     out
 }
 
@@ -314,7 +338,7 @@ fn select(fields: Vec<(String, Cap)>, patterns: &[String], filters: &Filters, ty
 /// Whether an index can match `index_filter` (the coordinating `can_match` check): queries on
 /// `_index`, `_index_mode` and `_tier` are decided from metadata, a query on a field the index
 /// doesn't map matches nothing, and anything else may match (deciding it needs the data).
-fn can_match(q: &Value, idx: &IndexMeta) -> bool {
+pub(crate) fn can_match(q: &Value, idx: &IndexMeta) -> bool {
     let Some((kind, body)) = q.as_object().and_then(|m| m.iter().next()) else { return true };
     let meta_value = |field: &str| -> Option<String> {
         match field {
@@ -361,7 +385,9 @@ fn can_match(q: &Value, idx: &IndexMeta) -> bool {
         "term" | "match" | "match_phrase" => match field_and_value() {
             Some((f, v)) => match meta_value(&f) {
                 Some(actual) => actual == v.to_es_string(),
-                None => mapped(&f),
+                // Full-text queries don't rewrite to `match_none` on an unmapped field (their
+                // builders have no such rewrite); term queries do.
+                None => kind != "term" || mapped(&f),
             },
             None => true,
         },
@@ -391,7 +417,13 @@ fn can_match(q: &Value, idx: &IndexMeta) -> bool {
 /// The shards' `can_match` (`SearchService.canMatch`): an index whose every shard rewrites
 /// the filter to match nothing (ranges outside a field's values, terms it doesn't hold) is
 /// left out. Indices whose engine isn't loaded, or a filter that doesn't convert, may match.
-fn shards_can_match(ctx: &Ctx, st: &crate::meta::ClusterState, filter: &Value, idx: &IndexMeta) -> bool {
+pub(crate) fn shards_can_match(ctx: &Ctx, st: &crate::meta::ClusterState, filter: &Value, idx: &IndexMeta) -> bool {
+    // `SearchService.canMatch` rewrites query builders: full-text queries have no rewrite to
+    // `match_none`, whatever the shard holds.
+    const FULL_TEXT: &[&str] = &["match", "match_phrase", "match_phrase_prefix", "match_bool_prefix", "multi_match", "combined_fields", "query_string", "simple_query_string"];
+    if filter.as_object().and_then(|m| m.keys().next()).is_some_and(|k| FULL_TEXT.contains(&k.as_str())) {
+        return true;
+    }
     // Metadata-only fields (`_index_mode`, `_tier`) are decided by [`can_match`].
     let text = filter.to_json();
     if idx.is_closed() || text.contains("\"_index_mode\"") || text.contains("\"_tier\"") {
@@ -432,7 +464,46 @@ fn hash_map_for(m: Map) -> Map {
     crate::json::java_hash_map(m, (n as f64 / 0.75) as usize + 1)
 }
 
+/// The `HashMap`s OpenSearch merges field caps in are created with the default capacity.
+fn os_hash_map(m: Map) -> Map {
+    crate::json::java_hash_map(m, 16)
+}
+
+/// OpenSearch reads only `index_filter` from the body (`RestActions.getQueryContent`); fields
+/// come from the `fields` parameter alone.
+fn os_body(ctx: &Ctx) -> EsResult<Option<Value>> {
+    let body = match ctx.body()? {
+        None => return Ok(None),
+        Some(Value::Obj(m)) => m,
+        Some(Value::Arr(_)) => return Err(EsError::parsing(1, 1, "Expected [START_OBJECT] but found [START_ARRAY]")),
+        Some(_) => return Err(EsError::parsing(1, 1, "Expected [START_OBJECT] but found [VALUE_STRING]")),
+    };
+    let mut filter = None;
+    for (k, v) in &body {
+        let (l, c) = ctx.raw_json().and_then(|src| crate::json::locate::key_location(src, &[], k)).unwrap_or((1, 1));
+        match k.as_str() {
+            "index_filter" if v.as_object().is_some() => filter = Some(v.clone()),
+            "index_filter" => {
+                let (l, c) = ctx.raw_json().and_then(|r| locate(r, &[crate::json::locate::Seg::Key("index_filter")], Target::Value)).unwrap_or((l, c));
+                return Err(EsError::parsing(l, c, "[_na] query malformed, must start with start_object"));
+            }
+            other => return Err(EsError::parsing(l, c, format!("request does not support [{other}]"))),
+        }
+    }
+    Ok(filter)
+}
+
 pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
+    let os = ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch;
+    if os {
+        let patterns: Vec<String> = ctx.query("fields").map(|q| q.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+        if patterns.is_empty() {
+            return Err(EsError::illegal_argument("specified fields can't be null or empty"));
+        }
+        let filter = os_body(ctx)?;
+        let include_unmapped = ctx.bool_param("include_unmapped", false)?;
+        return respond(ctx, patterns, Map::new(), filter, Filters::default(), Vec::new(), include_unmapped, true, true);
+    }
     let body = ctx.body_map()?;
     let mut patterns: Vec<String> = Vec::new();
     let mut runtime_request = Map::new();
@@ -472,6 +543,23 @@ pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
     let types: Vec<String> = ctx.query("types").map(|t| t.split(',').map(str::to_string).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
     let include_unmapped = ctx.bool_param("include_unmapped", false)?;
     let include_empty = ctx.bool_param("include_empty_fields", true)?;
+    respond(ctx, patterns, runtime_request, index_filter, filters, types, include_unmapped, include_empty, false)
+}
+
+/// Collects and merges the capabilities of `patterns` over the target indices. OpenSearch
+/// (`os`) prints neither `metadata_field` nor `inference` and merges in default-sized maps.
+#[allow(clippy::too_many_arguments)]
+fn respond(
+    ctx: &Ctx,
+    patterns: Vec<String>,
+    runtime_request: Map,
+    index_filter: Option<Value>,
+    filters: Filters,
+    types: Vec<String>,
+    include_unmapped: bool,
+    include_empty: bool,
+    os: bool,
+) -> EsResult<Reply> {
     let names = super::resolve_indices(ctx, IndicesOptions::STRICT_EXPAND_OPEN)?;
     let st = ctx.state();
     let indices: Vec<&IndexMeta> = names
@@ -523,10 +611,14 @@ pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
             };
             let mut m = Map::new();
             m.insert("type".into(), Value::from(ty.clone()));
-            m.insert("metadata_field".into(), all(|c| c.metadata).into());
+            if !os {
+                m.insert("metadata_field".into(), all(|c| c.metadata).into());
+            }
             m.insert("searchable".into(), searchable.into());
             m.insert("aggregatable".into(), aggregatable.into());
-            m.insert("inference".into(), false.into());
+            if !os {
+                m.insert("inference".into(), false.into());
+            }
             let dims = entries.iter().filter(|(_, c)| c.dimension).count();
             if dims == entries.len() {
                 m.insert("time_series_dimension".into(), true.into());
@@ -568,15 +660,18 @@ pub fn field_caps(ctx: &Ctx) -> EsResult<Reply> {
             types_out.insert(ty.clone(), Value::Obj(m));
         }
         if !unmapped.is_empty() {
-            types_out.insert(
-                "unmapped".into(),
+            let u = if os {
+                obj! { "type" => "unmapped", "searchable" => false, "aggregatable" => false, "indices" => unmapped }
+            } else {
                 obj! {
                     "type" => "unmapped", "metadata_field" => false, "searchable" => false, "aggregatable" => false,
                     "inference" => false, "indices" => unmapped,
-                },
-            );
+                }
+            };
+            types_out.insert("unmapped".into(), u);
         }
-        fields.insert(name, Value::Obj(hash_map_for(types_out)));
+        fields.insert(name, Value::Obj(if os { os_hash_map(types_out) } else { hash_map_for(types_out) }));
     }
-    Reply::ok(obj! { "indices" => index_names, "fields" => Value::Obj(hash_map_for(fields)) })
+    let fields = if os { os_hash_map(fields) } else { hash_map_for(fields) };
+    Reply::ok(obj! { "indices" => index_names, "fields" => Value::Obj(fields) })
 }

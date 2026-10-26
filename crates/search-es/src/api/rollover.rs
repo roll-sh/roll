@@ -306,6 +306,18 @@ fn stats_of(cluster: &crate::Cluster, idx: &IndexMeta, now_ms: i64) -> Stats {
 }
 
 fn rollover_response(old: &str, new: &str, rolled: bool, dry_run: bool, lazy: bool, acknowledged: bool, results: Map) -> Value {
+    // OpenSearch has no lazy rollover (an Elasticsearch 8.13 addition): no `lazy` field.
+    if crate::opensearch::active() {
+        return obj! {
+            "acknowledged" => acknowledged,
+            "shards_acknowledged" => acknowledged,
+            "old_index" => old,
+            "new_index" => new,
+            "rolled_over" => rolled,
+            "dry_run" => dry_run,
+            "conditions" => Value::Obj(results),
+        };
+    }
     obj! {
         "acknowledged" => acknowledged,
         // A lazy rollover creates no index, so no shards are waited for.

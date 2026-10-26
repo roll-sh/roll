@@ -100,6 +100,14 @@ impl QueryVisitor for Flatten<'_> {
         }
     }
 
+    /// Elasticsearch's `CustomFieldQuery.flatten` takes a `span_term` as its term; the other
+    /// span queries highlight nothing in the fast vector highlighter.
+    fn span(&mut self, node: &crate::query::SpanNode) {
+        if let crate::query::SpanNode::Term { field, term } = node {
+            self.term(*field, term);
+        }
+    }
+
     fn multi_term(&mut self, field: u32, matcher: TermMatcher) {
         if self.ok(field) {
             let boost = self.boost();

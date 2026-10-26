@@ -6,7 +6,10 @@
 //! missing values the way Elasticsearch does (`_last` ascending is the type's maximum, so the
 //! printed sort value of such a hit is that maximum); keyword and ip fields compare term bytes
 //! and keep missing values `null`, first or last whatever the order. Ties fall back to the
-//! global doc id (shards) or to shard and position order (reduce).
+//! global doc id (shards) or to shard and position order (reduce). A key on a field inside
+//! `nested` objects reads the values of the hit's nested children (the docs of the path
+//! between the previous parent and the hit, matching the sort's `filter`), as Lucene's
+//! block-join sort fields do.
 
 use std::cmp::Ordering;
 
@@ -18,6 +21,9 @@ use crate::field::{HitSort, SortMissing, SortMode, SourceType};
 use crate::format::{ip_to_string, parse_ip};
 use crate::json::Json;
 use crate::values::{Decode, DvNum, DvOrds};
+use search_index::collector::top_field::NestedSort;
+use search_codec::NO_MORE_DOCS;
+use search_index::util::bitset::FixedBitSet;
 
 /// One value of a sort key.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,23 +56,28 @@ enum KeySpec {
     Doc,
     Num { field: u32, decode: Decode, kind: NumKind, mode: SortMode, missing: f64, missing_long: i64 },
     Bytes { field: u32, ip: bool, mode: SortMode, missing_first: bool, missing_value: Option<Vec<u8>> },
+    Computed(std::sync::Arc<dyn crate::field::ComputedSort>),
 }
 
 /// A sort bound to an index: what each key reads and how it orders.
 #[derive(Clone, Debug)]
 pub struct DocSort {
     keys: Vec<(KeySpec, bool)>,
+    /// Per key: the nested level its values come from.
+    nested: Vec<Option<NestedSort>>,
 }
 
 impl DocSort {
     /// Resolves keys (`missing` values parsed, defaults applied).
     pub fn new(sorts: &[HitSort]) -> Result<DocSort> {
         let mut keys = Vec::with_capacity(sorts.len());
+        let nested = sorts.iter().map(|s| if let HitSort::Field { nested, .. } = s { nested.clone() } else { None }).collect();
         for s in sorts {
             keys.push(match s {
                 HitSort::Score { reverse } => (KeySpec::Score, *reverse),
                 HitSort::Doc { reverse } => (KeySpec::Doc, *reverse),
-                HitSort::Field { field, reverse, missing, mode } => {
+                HitSort::Computed { sort, reverse } => (KeySpec::Computed(sort.clone()), *reverse),
+                HitSort::Field { field, reverse, missing, mode, .. } => {
                     let reverse = *reverse;
                     let mode = mode.unwrap_or(if reverse { SortMode::Max } else { SortMode::Min });
                     match field.source {
@@ -122,6 +133,11 @@ impl DocSort {
                                     (d, d as i64)
                                 }
                                 _ => match kind {
+                                    // `integer`, `short` and `byte` sort as Lucene `INT`s.
+                                    NumKind::Long if matches!(src, SourceType::Numeric(crate::field::NumericType::Integer | crate::field::NumericType::Short | crate::field::NumericType::Byte)) => {
+                                        let l = if high { i64::from(i32::MAX) } else { i64::from(i32::MIN) };
+                                        (l as f64, l)
+                                    }
                                     NumKind::Long => {
                                         let l = if high { i64::MAX } else { i64::MIN };
                                         (l as f64, l)
@@ -136,7 +152,7 @@ impl DocSort {
                 }
             });
         }
-        Ok(DocSort { keys })
+        Ok(DocSort { keys, nested })
     }
 
     /// Whether this is the default score order (`[_score]` descending): `top_hits` then sorts
@@ -146,7 +162,11 @@ impl DocSort {
     }
 
     pub fn needs_scores(&self) -> bool {
-        self.keys.iter().any(|(k, _)| matches!(k, KeySpec::Score))
+        self.keys.iter().any(|(k, _)| match k {
+            KeySpec::Score => true,
+            KeySpec::Computed(c) => c.needs_score(),
+            _ => false,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -157,8 +177,30 @@ impl DocSort {
         self.keys.is_empty()
     }
 
-    /// Opens the per-segment readers.
+    /// Opens the per-segment readers (keys with a nested level read no values; see
+    /// [`segment_in`](Self::segment_in)).
     pub fn segment(&self, seg: &SegmentContext) -> SegmentSort {
+        let nested = self.keys.iter().map(|_| None).collect();
+        self.open(seg, nested)
+    }
+
+    /// Opens the per-segment readers, with the parent and child bit sets of nested keys.
+    pub fn segment_in(&self, searcher: &search_index::Searcher, seg: &SegmentContext) -> Result<SegmentSort> {
+        let mut nested = Vec::with_capacity(self.keys.len());
+        for n in &self.nested {
+            nested.push(match n {
+                None => None,
+                Some(n) => {
+                    let parents = search_index::query::nested::segment_bits(searcher, seg, &n.parent_filter).map_err(AggError::from)?;
+                    let children = search_index::query::nested::segment_bits(searcher, seg, &n.child_filter).map_err(AggError::from)?;
+                    Some(NestedBits { parents, children, max_children: n.max_children })
+                }
+            });
+        }
+        Ok(self.open(seg, nested))
+    }
+
+    fn open(&self, seg: &SegmentContext, nested: Vec<Option<NestedBits>>) -> SegmentSort {
         let readers = self
             .keys
             .iter()
@@ -167,9 +209,16 @@ impl DocSort {
                 KeySpec::Doc => Reader::Doc,
                 KeySpec::Num { field, .. } => Reader::Num(DvNum::open(seg, *field)),
                 KeySpec::Bytes { field, .. } => Reader::Ords(DvOrds::open(seg, *field)),
+                KeySpec::Computed(c) => match c.segment(seg) {
+                    Ok(s) => Reader::Computed(s),
+                    Err(e) => {
+                        search_index::search::defer_error(search_index::Error::Es { kind: e.kind.clone(), reason: e.reason.clone(), status: e.status });
+                        Reader::Doc
+                    }
+                },
             })
             .collect();
-        SegmentSort { readers, base: seg.base, nums: Vec::new(), bytes: Vec::new() }
+        SegmentSort { readers, nested, base: seg.base, nums: Vec::new(), bytes: Vec::new(), children: Vec::new() }
     }
 
     /// Orders two keys (`Less` sorts first).
@@ -212,6 +261,7 @@ impl DocSort {
                 SortVal::Float(f) => Json::Float32(*f),
                 SortVal::Bytes(b) => match spec {
                     KeySpec::Bytes { ip: true, .. } => Json::Str(ip_to_string(b)),
+                    KeySpec::Computed(c) => c.render_bytes(b),
                     _ => Json::Str(String::from_utf8_lossy(b).into_owned()),
                 },
                 SortVal::Null => Json::Null,
@@ -245,39 +295,88 @@ enum Reader {
     Doc,
     Num(DvNum),
     Ords(DvOrds),
+    Computed(Box<dyn crate::field::SegmentComputedSort>),
+}
+
+/// A nested key's bit sets in one segment.
+struct NestedBits {
+    parents: std::sync::Arc<FixedBitSet>,
+    children: std::sync::Arc<FixedBitSet>,
+    max_children: Option<usize>,
 }
 
 /// Sort readers of one segment.
 pub struct SegmentSort {
     readers: Vec<Reader>,
+    nested: Vec<Option<NestedBits>>,
     base: u32,
     nums: Vec<i64>,
     bytes: Vec<u8>,
+    children: Vec<u32>,
+}
+
+/// The nested children of parent `parent` (they precede it, after the previous parent) that
+/// match the child filter, at most `max_children`.
+fn children_of(n: &NestedBits, parent: u32, out: &mut Vec<u32>) {
+    out.clear();
+    if parent == 0 {
+        return;
+    }
+    let start = n.parents.prev_set_bit(parent - 1).map_or(0, |p| p + 1);
+    let limit = n.max_children.unwrap_or(usize::MAX);
+    let mut c = n.children.next_set_bit(start);
+    while c != NO_MORE_DOCS && c < parent && out.len() < limit {
+        out.push(c);
+        c = if c + 1 >= n.children.len() { NO_MORE_DOCS } else { n.children.next_set_bit(c + 1) };
+    }
 }
 
 impl SegmentSort {
     /// The key of segment doc `doc`.
     pub fn key(&mut self, sort: &DocSort, doc: u32, score: f32) -> SortKey {
         let mut key = SortKey::new();
-        for (r, (spec, _)) in self.readers.iter().zip(&sort.keys) {
+        for ((r, (spec, _)), nested) in self.readers.iter_mut().zip(&sort.keys).zip(&self.nested) {
+            // A nested key reads the values of every matching child (`MultiValueMode.select`
+            // over the children's values).
+            match nested {
+                Some(n) => children_of(n, doc, &mut self.children),
+                None => {
+                    self.children.clear();
+                    self.children.push(doc);
+                }
+            }
             key.push(match (r, spec) {
+                (Reader::Computed(c), _) => c.value(doc, score),
                 (Reader::Score, _) => SortVal::Score(score),
                 (Reader::Doc, _) => SortVal::Doc(self.base + doc),
                 (Reader::Num(dv), KeySpec::Num { decode, kind, mode, missing, missing_long, .. }) => {
                     self.nums.clear();
                     let nums = &mut self.nums;
-                    dv.for_each(doc, |v| nums.push(v));
+                    for &c in &self.children {
+                        dv.for_each(c, |v| nums.push(v));
+                    }
+                    if self.children.len() > 1 {
+                        // Values of several docs: `num_value` expects them in ascending order.
+                        let d = *decode;
+                        if *kind == NumKind::Long {
+                            nums.sort_unstable_by_key(|&v| d.to_i64(v));
+                        } else {
+                            nums.sort_unstable_by(|&a, &b| java_double_cmp(d.to_f64(a), d.to_f64(b)));
+                        }
+                    }
                     num_value(&self.nums, *decode, *kind, *mode, *missing, *missing_long)
                 }
                 (Reader::Ords(ords), KeySpec::Bytes { mode, missing_value, .. }) => {
                     let mut pick: Option<u64> = None;
-                    ords.for_each(doc, |o| {
-                        pick = Some(match (pick, mode) {
-                            (None, _) => o,
-                            (Some(p), SortMode::Max) => p.max(o),
-                            (Some(p), _) => p.min(o),
-                        })
-                    });
+                    for &c in &self.children {
+                        ords.for_each(c, |o| {
+                            pick = Some(match (pick, mode) {
+                                (None, _) => o,
+                                (Some(p), SortMode::Max) => p.max(o),
+                                (Some(p), _) => p.min(o),
+                            })
+                        });
+                    }
                     match pick {
                         Some(o) => {
                             ords.lookup(o, &mut self.bytes);

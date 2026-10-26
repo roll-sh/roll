@@ -125,8 +125,8 @@ pub fn recovery(ctx: &Ctx) -> EsResult<Reply> {
 }
 
 /// `GET _remote/info`: no remote clusters.
-pub fn remote_info(_ctx: &Ctx) -> EsResult<Reply> {
-    Reply::ok(obj! {})
+pub fn remote_info(ctx: &Ctx) -> EsResult<Reply> {
+    Reply::ok(crate::remote::remote_info(ctx.cluster, &ctx.state()))
 }
 
 /// The feature states roll clusters have (none of the system features of a full Elasticsearch

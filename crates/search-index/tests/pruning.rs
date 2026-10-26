@@ -179,6 +179,103 @@ fn pruned_top_k_equals_exhaustive() {
     }
 }
 
+/// Constant-score top hits (`match_all`, a filter in `constant_score`) stop a segment once
+/// the queue is full past the total-hits threshold: every later doc ties and loses on doc id.
+/// The hits are the exhaustive ones, and the total shows the collection stopped early.
+#[test]
+fn constant_score_top_k_stops_past_the_threshold() {
+    use search_index::query::{ConstantScoreQuery, MatchAllQuery};
+    for deletes in [false, true] {
+        let s = corpus_in(5, 12_000, deletes, 4).searcher();
+        let qs: [QueryRef; 2] = [Arc::new(MatchAllQuery), Arc::new(ConstantScoreQuery::new(tq(BODY, word(0))))];
+        for q in qs {
+            let mut all = TopScoreCollector::new(s.num_docs() as usize + 1, u64::MAX);
+            s.search(&q, &mut all).unwrap();
+            let all = all.top_docs();
+            for (k, threshold) in [(1usize, 1u64), (10, 10), (10, 1000), (100, 100)] {
+                let mut c = TopScoreCollector::new(k, threshold);
+                s.search(&q, &mut c).unwrap();
+                let got = c.top_docs();
+                let want: Vec<(u32, f32)> = all.hits.iter().take(k).map(|h| (h.doc, h.score)).collect();
+                let have: Vec<(u32, f32)> = got.hits.iter().map(|h| (h.doc, h.score)).collect();
+                assert_eq!(have, want, "top-{k} threshold {threshold} of {}", q.lucene_string(s.schema()));
+                assert_eq!(got.relation, TotalRelation::GreaterThanOrEqualTo);
+                assert!(got.total_hits > threshold && got.total_hits < all.total_hits, "{} of {}", got.total_hits, all.total_hits);
+            }
+        }
+    }
+}
+
+/// Forwards only per-doc `collect`, hiding the inner leaf's `collect_block` shortcuts.
+struct PerDoc<'c>(&'c mut TopScoreCollector);
+
+struct PerDocLeaf<'a>(Box<dyn search_index::search::LeafCollector + 'a>);
+
+impl search_index::search::LeafCollector for PerDocLeaf<'_> {
+    fn collect(&mut self, doc: u32, scorer: &mut dyn search_index::search::Scorable) -> search_index::Result<()> {
+        self.0.collect(doc, scorer)
+    }
+    fn finish(&mut self) -> search_index::Result<()> {
+        self.0.finish()
+    }
+}
+
+impl search_index::search::Collector for PerDoc<'_> {
+    fn score_mode(&self) -> search_index::search::ScoreMode {
+        self.0.score_mode()
+    }
+    fn leaf<'a>(&'a mut self, seg: &search_index::search::SegmentContext) -> search_index::Result<Box<dyn search_index::search::LeafCollector + 'a>> {
+        Ok(Box::new(PerDocLeaf(self.0.leaf(seg)?)))
+    }
+}
+
+/// Exact totals (`track_total_hits: true`, a scroll's first page) over constant-score blocks
+/// count the tail of a block once the queue can't change; hits and totals must equal per-doc
+/// collection, also with `search_after`, `min_score` and concurrent slices.
+#[test]
+fn constant_score_exact_totals_match_per_doc_collection() {
+    use search_index::SearchControl;
+    use search_index::collector::{ScoreDoc, TopScoreManager};
+    use search_index::query::{ConstantScoreQuery, MatchAllQuery};
+    use search_index::search::SearchLimits;
+    for deletes in [false, true] {
+        let s = corpus_in(9, 12_000, deletes, 5).searcher();
+        let par = s.with_limits(SearchLimits { parallel_min_docs: 500, parallelism: 4, ..SearchLimits::default() });
+        let qs: [QueryRef; 2] = [Arc::new(MatchAllQuery), Arc::new(ConstantScoreQuery::new(tq(BODY, word(0))))];
+        for q in qs {
+            for k in [1usize, 10, 1000, 20_000] {
+                for after in [None, Some(ScoreDoc { doc: 3_000, score: 1.0 }), Some(ScoreDoc { doc: 50, score: 2.0 })] {
+                    for min_score in [None, Some(0.5f32), Some(1.5)] {
+                        let make = || {
+                            let mut c = TopScoreCollector::new(k, u64::MAX);
+                            if let Some(a) = after {
+                                c = c.with_after(a);
+                            }
+                            if let Some(m) = min_score {
+                                c = c.with_min_score(m);
+                            }
+                            c
+                        };
+                        let mut slow = make();
+                        s.search(&q, &mut PerDoc(&mut slow)).unwrap();
+                        let slow = slow.top_docs();
+                        let mut fast = make();
+                        s.search(&q, &mut fast).unwrap();
+                        let fast = fast.top_docs();
+                        let key = |t: &search_index::collector::TopDocs| (t.total_hits, t.relation, t.hits.iter().map(|h| (h.doc, h.score.to_bits())).collect::<Vec<_>>());
+                        let what = format!("k {k} after {after:?} min {min_score:?} of {}", q.lucene_string(s.schema()));
+                        assert_eq!(key(&fast), key(&slow), "{what}");
+                        assert_eq!(slow.relation, TotalRelation::EqualTo, "{what}");
+                        let m = TopScoreManager { n: k, threshold: u64::MAX, after, min_score };
+                        let conc = par.search_concurrent(&q, &m, &SearchControl::default()).unwrap();
+                        assert_eq!(key(&conc), key(&slow), "concurrent {what}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// `distance_feature` swaps its iterator for the docs near the origin once a minimum
 /// competitive score is known: the top hits must not change.
 #[test]

@@ -41,7 +41,7 @@ pub use geo::{GeoDistanceQuery, GeoDvKind, GeoPointDvQuery, GeoPointShapeQuery, 
 pub use knn::{KnnQuery, QueryVector, ScoreDocQuery};
 pub use span::{SpanNode, SpanQuery};
 pub use covering::{CoveringQuery, MinMatch};
-pub use intervals::{IntervalQuery, IntervalsSource};
+pub use intervals::{IntervalQuery, IntervalScript, IntervalsSource};
 pub use mlt::{MoreLikeThis, MoreLikeThisQuery};
 pub use feature::{FeatureFunction, FeatureQuery};
 pub use combined::CombinedFieldQuery;

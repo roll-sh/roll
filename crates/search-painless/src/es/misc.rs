@@ -1064,6 +1064,8 @@ pub fn register(b: &mut Builder) {
     b.c(IP_ADDRESS, "(String)", ip_new);
     b.m(IP_ADDRESS, "boolean isV4()", ip_v4);
     b.m(IP_ADDRESS, "boolean isV6()", ip_v6);
+    b.supers(VERSION_OBJ, &[OBJECT]);
+    b.c(VERSION_OBJ, "(String)", |_, a| Ok(es_value(EsObj::Version(Rc::from(a[0].to_java_string().as_str())))));
 
     b.supers(BYTE_ORDER, &[OBJECT]);
     b.sf(BYTE_ORDER, "ByteOrder BIG_ENDIAN", |_, _| Ok(es_value(EsObj::ByteOrder(true))));

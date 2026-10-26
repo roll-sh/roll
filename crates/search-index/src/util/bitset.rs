@@ -112,6 +112,26 @@ impl FixedBitSet {
         self.words[ew] |= emask;
     }
 
+    /// Clears bits `start..end`.
+    pub fn clear_range(&mut self, start: u32, end: u32) {
+        if start >= end {
+            return;
+        }
+        let (s, e) = (start as usize, end as usize);
+        let (sw, ew) = (s >> 6, (e - 1) >> 6);
+        let smask = u64::MAX << (s & 63);
+        let emask = u64::MAX >> (63 - ((e - 1) & 63));
+        if sw == ew {
+            self.words[sw] &= !(smask & emask);
+            return;
+        }
+        self.words[sw] &= !smask;
+        for w in &mut self.words[sw + 1..ew] {
+            *w = 0;
+        }
+        self.words[ew] &= !emask;
+    }
+
     /// Number of set bits.
     pub fn cardinality(&self) -> u32 {
         self.words.iter().map(|w| w.count_ones()).sum()

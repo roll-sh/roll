@@ -23,6 +23,37 @@ pub struct FieldSpec {
 pub struct Spec {
     pub global: Map,
     pub fields: Vec<FieldSpec>,
+    /// Whether the unified highlighter may use weight matches for this search
+    /// (`CustomUnifiedHighlighter.weightMatchesUnsupported`): not with knn, nested or join
+    /// queries. Set by the caller from the search source ([`weight_matches_supported`]).
+    pub weight_matches: bool,
+}
+
+/// Whether a search's queries support Lucene's matches API, which weight matches need:
+/// Elasticsearch turns them off for knn (`KnnScoreDocQuery`), nested
+/// (`ESToParentBlockJoinQuery`) and join (`LateParsingQuery`) queries, also under `must_not`.
+pub fn weight_matches_supported(src: &crate::search_source::SearchSource) -> bool {
+    fn unsupported(v: &Value) -> bool {
+        let Value::Obj(m) = v else { return false };
+        let Some((k, body)) = m.iter().next() else { return false };
+        match k.as_str() {
+            "nested" | "has_child" | "has_parent" | "knn" | "parent_id" => true,
+            "bool" => ["must", "should", "filter", "must_not"].iter().any(|c| match body.get(c) {
+                Some(Value::Arr(a)) => a.iter().any(unsupported),
+                Some(q) => unsupported(q),
+                None => false,
+            }),
+            "dis_max" => matches!(body.get("queries"), Some(Value::Arr(a)) if a.iter().any(unsupported)),
+            "constant_score" => body.get("filter").is_some_and(unsupported),
+            "function_score" | "script_score" => body.get("query").is_some_and(unsupported),
+            "boosting" => body.get("positive").is_some_and(unsupported) || body.get("negative").is_some_and(unsupported),
+            _ => false,
+        }
+    }
+    if !src.knn.is_empty() || src.retriever.is_some() {
+        return false;
+    }
+    !src.query.as_ref().is_some_and(|q| unsupported(&q.to_value()))
 }
 
 const OPTIONS: &[&str] = &[
@@ -36,7 +67,13 @@ impl Spec {
         let mut global = Map::new();
         let mut fields = Vec::new();
         for (k, v) in m {
-            if !OPTIONS.contains(&k.as_str()) {
+            // OpenSearch names the offset limit `max_analyzer_offset` (its own option, with
+            // its own rules) and doesn't know Elasticsearch's `max_analyzed_offset`.
+            if crate::opensearch::active() && (k == "max_analyzer_offset" || k == "max_analyzed_offset") {
+                if k == "max_analyzed_offset" {
+                    return Err(EsError::parse("[highlight] unknown field [max_analyzed_offset] did you mean [max_analyzer_offset]?"));
+                }
+            } else if !OPTIONS.contains(&k.as_str()) {
                 return Err(EsError::parse(format!("[highlight] unknown field [{k}]")));
             }
             if k == "fields" {
@@ -62,7 +99,7 @@ impl Spec {
                 global.insert(k.clone(), v.clone());
             }
         }
-        Ok(Spec { global, fields })
+        Ok(Spec { global, fields, weight_matches: true })
     }
 }
 
@@ -98,6 +135,7 @@ fn options(f: &FieldInfo, field: &Map, global: &Map, index: &crate::meta::IndexM
         )));
     }
     o.term_vectors_with_offsets = tv_offsets;
+    o.offsets_indexed = tv_offsets || f.index_options == search_codec::IndexOptions::DocsAndFreqsAndPositionsAndOffsets;
     if get(field, global, "tags_schema").and_then(Value::as_str) == Some("styled") {
         let (pre, post) = HighlightOptions::styled_tags();
         o.pre_tags = pre;
@@ -150,6 +188,23 @@ fn options(f: &FieldInfo, field: &Map, global: &Map, index: &crate::meta::IndexM
             v if v > 0 => Some(v as usize),
             _ => None,
         });
+    if crate::opensearch::active() {
+        o.opensearch_offsets = true;
+        o.max_analyzed_offset = match get(field, global, "max_analyzer_offset") {
+            None => None,
+            Some(v) => {
+                let n = match v {
+                    Value::Str(s) => crate::units::parse_java_int(s.trim()).map(i64::from),
+                    other => other.as_f64().map(|d| d as i64),
+                };
+                match n {
+                    Some(n) if n > 0 => Some(n as usize),
+                    Some(n) => return Err(EsError::illegal_argument(format!("the value [{n}] of max_analyzer_offset is invalid"))),
+                    None => return Err(EsError::number_format(&v.to_es_string())),
+                }
+            }
+        };
+    }
     o.tokenized = f.kind.is_text();
     // The unified highlighter reads offsets from postings or term vectors when the field has
     // them: nothing is re-analyzed, so the index limit doesn't apply.
@@ -192,13 +247,16 @@ pub fn highlight_hit(qctx: &QueryCtx, spec: &Spec, query: &QueryRef, source: Opt
                 continue;
             }
             let mut o = options(&f, &fs.opts, &spec.global, qctx.idx)?;
+            o.weight_matches = spec.weight_matches && o.require_field_match && qctx.idx.settings.get("index.highlight.weight_matches_mode.enabled") != Some("false");
             // The unified highlighter names the Lucene doc in its errors, the others the `_id`.
             o.doc_id = match (o.kind, doc.and_then(|d| searcher.segment_of(d))) {
                 (search_index::highlight::HighlighterType::Unified, Some((_, local))) => local.to_string(),
                 _ => doc_id.to_string(),
             };
             if let Some(Value::Arr(mf)) = get(&fs.opts, &spec.global, "matched_fields") {
-                o.matched_fields = mf.iter().filter_map(|v| v.as_str()).filter_map(|n| qctx.field(n)).map(|x| x.number).collect();
+                let mfs: Vec<_> = mf.iter().filter_map(|v| v.as_str()).filter_map(|n| qctx.field(n)).collect();
+                o.matched_fields = mfs.iter().map(|x| x.number).collect();
+                o.matched_analyzers = mfs.iter().map(|x| x.analyzer.clone()).collect();
             }
             let q: QueryRef = match get(&fs.opts, &spec.global, "highlight_query") {
                 Some(hq) => {
@@ -206,6 +264,15 @@ pub fn highlight_hit(qctx: &QueryCtx, spec: &Spec, query: &QueryRef, source: Opt
                     qctx.to_query(&parsed)?
                 }
                 None => query.clone(),
+            };
+            let q = match doc.and_then(|d| searcher.segment_of(d)) {
+                Some((seg, local)) if o.weight_matches && o.kind == search_index::highlight::HighlighterType::Unified => {
+                    // A `highlight_query` that misses the hit highlights nothing in it.
+                    matching_part(searcher, &q, seg, local)
+                        .map_err(crate::engine::convert::index_error)?
+                        .unwrap_or_else(|| Arc::new(search_index::query::MatchNoneQuery::default()))
+                }
+                _ => q,
             };
             let values: Vec<String> = match &stored {
                 Some(st) if f.store => st
@@ -220,12 +287,24 @@ pub fn highlight_hit(qctx: &QueryCtx, spec: &Spec, query: &QueryRef, source: Opt
                     let path = f.parent.as_deref().unwrap_or(&f.name);
                     let mut raw = Vec::new();
                     crate::engine::source::extract_values(src, path, &mut raw);
-                    raw.into_iter().filter(|v| !v.is_null()).map(super::query::value_text).collect()
+                    let values: Vec<String> = raw.into_iter().filter(|v| !v.is_null()).map(super::query::value_text).collect();
+                    // `SourceSimpleFragmentsBuilder`: term vector offsets point into the values
+                    // in indexing order, which synthetic `_source` doesn't keep.
+                    if o.kind == search_index::highlight::HighlighterType::Fvh
+                        && values.len() > 1
+                        && crate::engine::synthetic::source_mode(qctx.idx) == crate::engine::synthetic::SourceMode::Synthetic
+                    {
+                        return Err(EsError::illegal_argument(format!(
+                            "The fast vector highlighter doesn't support loading multi-valued fields from _source in index [{}] because _source can reorder field values",
+                            qctx.idx.name
+                        )));
+                    }
+                    values
                 }
             };
             // Values past `ignore_above` were never indexed: nothing to highlight in them.
             let values: Vec<String> = match f.ignore_above {
-                Some(n) => values.into_iter().filter(|v| v.chars().count() <= n).collect(),
+                Some(n) => values.into_iter().filter(|v| !crate::document::exceeds_ignore_above(v, n)).collect(),
                 None => values,
             };
             if values.is_empty() {
@@ -241,4 +320,70 @@ pub fn highlight_hit(qctx: &QueryCtx, spec: &Spec, query: &QueryRef, source: Opt
     }
     let _ = Arc::<()>::new(());
     Ok(out)
+}
+
+/// The part of `q` that matches the doc, as Lucene's `Weight.matches` sees it in the unified
+/// highlighter's weight matches mode: a `bool` whose required clause misses the doc (or with
+/// too few matching `should`s) contributes nothing, nor do `should` / `dis_max` clauses that
+/// miss it, nor `must_not` clauses; the rest keep their structure. `None` when nothing of `q`
+/// matches. Only terms of the remaining clauses are highlighted.
+fn matching_part(searcher: &search_index::Searcher, q: &QueryRef, seg: &search_index::SegmentContext, local: u32) -> search_index::Result<Option<QueryRef>> {
+    use search_index::query::{BooleanQuery, BoostQuery, ConstantScoreQuery, DisMaxQuery, FunctionScoreQuery, Occur};
+    let any = q.as_any();
+    if let Some(b) = any.downcast_ref::<BooleanQuery>() {
+        let mut kept = BooleanQuery::new();
+        kept.minimum_should_match = b.minimum_should_match;
+        let (mut shoulds, mut matched_shoulds, mut required) = (0usize, 0usize, false);
+        for c in &b.clauses {
+            match c.occur {
+                Occur::MustNot => {}
+                Occur::Must | Occur::Filter => {
+                    required = true;
+                    match matching_part(searcher, &c.query, seg, local)? {
+                        Some(p) => kept = kept.add(c.occur, p),
+                        None => return Ok(None),
+                    }
+                }
+                Occur::Should => {
+                    shoulds += 1;
+                    if let Some(p) = matching_part(searcher, &c.query, seg, local)? {
+                        matched_shoulds += 1;
+                        kept = kept.add(Occur::Should, p);
+                    }
+                }
+            }
+        }
+        if matched_shoulds < b.minimum_should_match || (!required && shoulds > 0 && matched_shoulds == 0) {
+            return Ok(None);
+        }
+        return Ok(Some(Arc::new(kept)));
+    }
+    if let Some(d) = any.downcast_ref::<DisMaxQuery>() {
+        let mut kept = Vec::new();
+        for q in &d.disjuncts {
+            if let Some(p) = matching_part(searcher, q, seg, local)? {
+                kept.push(p);
+            }
+        }
+        return Ok((!kept.is_empty()).then(|| Arc::new(DisMaxQuery::new(kept, d.tie_breaker)) as QueryRef));
+    }
+    if let Some(c) = any.downcast_ref::<ConstantScoreQuery>() {
+        return Ok(matching_part(searcher, &c.query, seg, local)?.map(|p| Arc::new(ConstantScoreQuery::new(p)) as QueryRef));
+    }
+    if let Some(b) = any.downcast_ref::<BoostQuery>() {
+        return Ok(matching_part(searcher, &b.query, seg, local)?.map(|p| Arc::new(BoostQuery { query: p, boost: b.boost }) as QueryRef));
+    }
+    if let Some(f) = any.downcast_ref::<FunctionScoreQuery>() {
+        // Its functions don't take part in matches; `min_score` filtering is the search's.
+        return matching_part(searcher, &f.query, seg, local);
+    }
+    let w = searcher.create_weight(q, search_index::ScoreMode::CompleteNoScores)?;
+    if !search_index::query::basic::matches_doc(&*w, seg, local)? {
+        return Ok(None);
+    }
+    // A phrase prefix matches as the phrase of its expansions (one span per match).
+    if any.is::<search_index::query::MultiPhrasePrefixQuery>() {
+        return Ok(Some(searcher.rewrite(q)?));
+    }
+    Ok(Some(q.clone()))
 }

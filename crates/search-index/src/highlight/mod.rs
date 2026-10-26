@@ -20,6 +20,7 @@
 pub mod breaks;
 pub mod fvh;
 pub mod plain;
+pub mod spans;
 pub mod unified;
 
 use std::collections::HashSet;
@@ -115,6 +116,9 @@ pub struct HighlightOptions {
     pub phrase_limit: usize,
     /// The field has term vectors with positions and offsets (fvh requires them).
     pub term_vectors_with_offsets: bool,
+    /// Offsets are indexed (postings with offsets, or term vectors with offsets): Lucene's
+    /// unified highlighter reads them instead of re-analyzing (see [`find_matches`]).
+    pub offsets_indexed: bool,
     /// The field's analyzer produces offsets out of order (n-grams, word delimiters):
     /// Elasticsearch's `containsBrokenAnalysis`, which makes fvh sort matches by offset.
     pub fix_broken_analysis: bool,
@@ -122,16 +126,28 @@ pub struct HighlightOptions {
     pub require_field_match: bool,
     /// Other fields whose matches also highlight this one (`matched_fields`).
     pub matched_fields: Vec<u32>,
+    /// The index analyzers of `matched_fields` (same order). When set, the unified
+    /// highlighter analyzes the values with each of them and finds that field's matches in
+    /// its tokens; otherwise their terms match in the highlighted field's own tokens.
+    pub matched_analyzers: Vec<Option<Analyzer>>,
     /// `index.highlight.max_analyzed_offset` (1 000 000).
     pub index_max_analyzed_offset: usize,
     /// The query's `max_analyzed_offset` (truncates instead of failing).
     pub max_analyzed_offset: Option<usize>,
+    /// OpenSearch's offset limits (its field option `max_analyzer_offset`, carried in
+    /// `max_analyzed_offset`): a limit above the index's fails outright, the plain highlighter
+    /// cuts each value at the limit, and the errors use OpenSearch's texts.
+    pub opensearch_offsets: bool,
     /// Whether the field is tokenized (keyword fields highlight whole values).
     pub tokenized: bool,
     /// For error messages: field name, doc id and index name.
     pub field_name: String,
     pub doc_id: String,
     pub index_name: String,
+    /// Lucene's weight matches mode (`index.highlight.weight_matches_mode.enabled`): a
+    /// phrase highlights as one span. Elasticsearch turns it off for `require_field_match:
+    /// false` and for queries the matches API can't serve (knn, nested, joins, runtime fields).
+    pub weight_matches: bool,
 }
 
 impl HighlightOptions {
@@ -169,17 +185,80 @@ impl Default for HighlightOptions {
             fragment_offset: None,
             phrase_limit: 256,
             term_vectors_with_offsets: false,
+            offsets_indexed: false,
             fix_broken_analysis: false,
             require_field_match: true,
             matched_fields: Vec::new(),
+            matched_analyzers: Vec::new(),
             index_max_analyzed_offset: 1_000_000,
             max_analyzed_offset: None,
+            opensearch_offsets: false,
             tokenized: true,
             field_name: String::new(),
             doc_id: String::new(),
             index_name: String::new(),
+            weight_matches: true,
         }
     }
+}
+
+/// OpenSearch's `max_analyzer_offset` rules (`PlainHighlighter` and
+/// `CustomUnifiedHighlighter`): a field limit above `index.highlight.max_analyzed_offset`
+/// fails; the plain highlighter cuts each value at the field limit (Java's `substring`, in
+/// UTF-16 units) and otherwise fails on a value longer than the index limit; the unified
+/// highlighter analyzes only up to the field limit and fails on a too long field only without
+/// one (offsets from postings or term vectors lift the index limit, see the caller).
+/// `None` when the unified highlighter may go ahead (the caller runs it, with any
+/// `matched_fields`); the plain highlighter's result otherwise.
+fn opensearch_limited(values: &[&str], analyzer: Option<&Analyzer>, terms: &HighlightTerms, opts: &HighlightOptions) -> Result<Option<Vec<String>>> {
+    const SETTING: &str = "index.highlight.max_analyzed_offset";
+    let max = opts.index_max_analyzed_offset;
+    let field_max = opts.max_analyzed_offset;
+    if let Some(l) = field_max
+        && l > max
+    {
+        return Err(Error::illegal(format!(
+            "max_analyzer_offset has exceeded [{max}] - maximum allowed to be analyzed for highlighting. This maximum can be set by changing the [{SETTING}] index level setting. For large texts, indexing with offsets or term vectors is recommended!"
+        )));
+    }
+    if opts.kind == HighlighterType::Plain {
+        let mut cut: Vec<&str> = Vec::with_capacity(values.len());
+        for v in values {
+            let len = v.encode_utf16().count();
+            match field_max {
+                Some(l) if len > l => cut.push(prefix_utf16(v, l)),
+                None if len > max => {
+                    return Err(Error::illegal(format!(
+                        "The length of [{}] field of [{}] doc of [{}] index has exceeded [{max}] - maximum allowed to be analyzed for highlighting. This maximum can be set by changing the [{SETTING}] index level setting. For large texts, indexing with offsets or term vectors, and highlighting with unified or fvh highlighter is recommended!",
+                        opts.field_name, opts.doc_id, opts.index_name
+                    )));
+                }
+                _ => cut.push(v),
+            }
+        }
+        return plain::highlight(&cut, analyzer, terms, opts).map(Some);
+    }
+    let total: usize = values.iter().map(|v| v.encode_utf16().count()).sum::<usize>() + values.len().saturating_sub(1);
+    if field_max.is_none() && total > max && opts.tokenized {
+        return Err(Error::illegal(format!(
+            "The length of [{}] field of [{}] doc of [{}] index has exceeded [{max}] - maximum allowed to be analyzed for highlighting. This maximum can be set by changing the [{SETTING}] index level setting. For large texts, indexing with offsets or term vectors is recommended!",
+            opts.field_name, opts.doc_id, opts.index_name
+        )));
+    }
+    Ok(None)
+}
+
+/// The longest prefix of `s` of at most `units` UTF-16 code units (a surrogate pair the cut
+/// would split is left out whole).
+fn prefix_utf16(s: &str, units: usize) -> &str {
+    let mut n = 0;
+    for (i, c) in s.char_indices() {
+        n += c.len_utf16();
+        if n > units {
+            return &s[..i];
+        }
+    }
+    s
 }
 
 /// A phrase's slots: relative position and the terms accepted there.
@@ -192,6 +271,9 @@ pub struct HighlightTerms {
     pub multi: Vec<TermMatcher>,
     /// Phrases: `(relative position, accepted terms)` slots and slop.
     pub phrases: Vec<(PhraseSlots, u32)>,
+    /// Span queries: only their terms inside a match of the whole tree highlight
+    /// ([`spans::leaves`]).
+    pub spans: Vec<crate::query::SpanNode>,
 }
 
 impl HighlightTerms {
@@ -222,6 +304,11 @@ impl HighlightTerms {
                     self.out.phrases.push((slots.to_vec(), slop));
                 }
             }
+            fn span(&mut self, node: &crate::query::SpanNode) {
+                if self.ok(node.field()) {
+                    self.out.spans.push(node.clone());
+                }
+            }
         }
         let mut v = V { fields, out: HighlightTerms::default() };
         query.visit(&mut v);
@@ -229,7 +316,16 @@ impl HighlightTerms {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.terms.is_empty() && self.multi.is_empty() && self.phrases.is_empty()
+        self.terms.is_empty() && self.multi.is_empty() && self.phrases.is_empty() && self.spans.is_empty()
+    }
+
+    /// The (position, term) occurrences of the span queries' matches in `tokens`.
+    pub fn span_leaves(&self, tokens: &[HlToken]) -> HashSet<(u32, Vec<u8>)> {
+        let mut out = HashSet::new();
+        for n in &self.spans {
+            out.extend(spans::leaves(n, tokens));
+        }
+        out
     }
 }
 
@@ -284,8 +380,13 @@ pub fn analyze(values: &[&str], analyzer: Option<&Analyzer>, limit: Option<usize
     out
 }
 
-/// Match intervals in the tokens, in offset order (weight matches: phrases as one span).
-pub fn find_matches(tokens: &[HlToken], q: &HighlightTerms) -> Vec<HlMatch> {
+/// Match intervals in the tokens, in offset order (weight matches: phrases as one span;
+/// without them, each term of a phrase match on its own).
+///
+/// `analysis`: offsets come from re-analysis (no offsets in postings or term vectors), where
+/// Lucene's unified highlighter indexes only the tokens of terms the query extracts — so a
+/// `span_not` exclude whose terms the query reads nowhere else excludes nothing.
+pub fn find_matches(tokens: &[HlToken], q: &HighlightTerms, weight_matches: bool, analysis: bool) -> Vec<HlMatch> {
     let mut out = Vec::new();
     for t in tokens {
         if q.terms.contains(&t.term) {
@@ -301,7 +402,38 @@ pub fn find_matches(tokens: &[HlToken], q: &HighlightTerms) -> Vec<HlMatch> {
         }
         let key = format!("\u{0}phrase{pi}").into_bytes();
         for (lo, hi) in phrase_match_offsets(tokens, slots, *slop) {
-            out.push(HlMatch { start: lo, end: hi, key: key.clone() });
+            if weight_matches {
+                out.push(HlMatch { start: lo, end: hi, key: key.clone() });
+                continue;
+            }
+            // Lucene's `PhraseHelper`: the phrase's terms inside the match, one by one.
+            for t in tokens.iter().filter(|t| t.start >= lo && t.end <= hi && slots.iter().any(|(_, ts)| ts.contains(&t.term))) {
+                out.push(HlMatch { start: t.start, end: t.end, key: t.term.clone() });
+            }
+        }
+    }
+    // Span queries: each term occurrence a match of the tree uses, on its own (Lucene's
+    // sub-matches / `PhraseHelper`).
+    if !q.spans.is_empty() {
+        let extracted: Vec<HlToken>;
+        let tokens = if analysis {
+            extracted = tokens
+                .iter()
+                .filter(|t| {
+                    q.terms.contains(&t.term)
+                        || q.multi.iter().any(|m| m(&t.term))
+                        || q.phrases.iter().any(|(slots, _)| slots.iter().any(|(_, ts)| ts.contains(&t.term)))
+                        || q.spans.iter().any(|n| spans::extracts(n, &t.term))
+                })
+                .cloned()
+                .collect();
+            &extracted[..]
+        } else {
+            tokens
+        };
+        let leaves = q.span_leaves(tokens);
+        for t in tokens.iter().filter(|t| leaves.contains(&(t.position, t.term.clone()))) {
+            out.push(HlMatch { start: t.start, end: t.end, key: t.term.clone() });
         }
     }
     out.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
@@ -373,16 +505,95 @@ fn highlight_impl(
         return Err(Error::illegal("Invalid boundary scanner type: chars"));
     }
     let terms = HighlightTerms::of(query, only);
-    let total: usize = values.iter().map(|v| v.encode_utf16().count()).sum::<usize>() + values.len().saturating_sub(1);
-    let limit = opts.max_analyzed_offset;
-    if limit.is_none_or(|l| l > opts.index_max_analyzed_offset) && total > opts.index_max_analyzed_offset && opts.tokenized {
-        return Err(Error::illegal(format!(
-            "The length [{total}] of field [{}] in doc[{}]/index[{}] exceeds the [index.highlight.max_analyzed_offset] limit [{}]. To avoid this error, set the query parameter [max_analyzed_offset] to a value less than index setting [{}] and this will tolerate long field values by truncating them.",
-            opts.field_name, opts.doc_id, opts.index_name, opts.index_max_analyzed_offset, opts.index_max_analyzed_offset
-        )));
+    if opts.opensearch_offsets {
+        if let Some(out) = opensearch_limited(values, analyzer, &terms, opts)? {
+            return Ok(out);
+        }
+    } else {
+        let total: usize = values.iter().map(|v| v.encode_utf16().count()).sum::<usize>() + values.len().saturating_sub(1);
+        let limit = opts.max_analyzed_offset;
+        if limit.is_none_or(|l| l > opts.index_max_analyzed_offset) && total > opts.index_max_analyzed_offset && opts.tokenized {
+            return Err(Error::illegal(format!(
+                "The length [{total}] of field [{}] in doc[{}]/index[{}] exceeds the [index.highlight.max_analyzed_offset] limit [{}]. To avoid this error, set the query parameter [max_analyzed_offset] to a value less than index setting [{}] and this will tolerate long field values by truncating them.",
+                opts.field_name, opts.doc_id, opts.index_name, opts.index_max_analyzed_offset, opts.index_max_analyzed_offset
+            )));
+        }
+    }
+    if opts.kind == HighlighterType::Unified && opts.require_field_match && !opts.matched_analyzers.is_empty() {
+        let own = HighlightTerms::of(query, Some(&[field]));
+        let others: Vec<HighlightTerms> = opts.matched_fields.iter().map(|f| HighlightTerms::of(query, Some(std::slice::from_ref(f)))).collect();
+        let mut sources: Vec<(Option<&Analyzer>, &HighlightTerms)> = vec![(analyzer, &own)];
+        for (i, t) in others.iter().enumerate() {
+            let a = opts.matched_analyzers.get(i).and_then(|a| a.as_ref()).or(analyzer);
+            sources.push((a, t));
+        }
+        return unified::highlight_sources(values, &sources, opts);
     }
     match opts.kind {
         HighlighterType::Plain => plain::highlight(values, analyzer, &terms, opts),
         _ => unified::highlight(values, analyzer, &terms, opts),
+    }
+}
+
+#[cfg(test)]
+mod opensearch_offset_tests {
+    use super::*;
+
+    fn opts(kind: HighlighterType, index_max: usize, field_max: Option<usize>) -> HighlightOptions {
+        HighlightOptions {
+            kind,
+            index_max_analyzed_offset: index_max,
+            max_analyzed_offset: field_max,
+            opensearch_offsets: true,
+            field_name: "f".into(),
+            doc_id: "1".into(),
+            index_name: "i".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn utf16_prefix_never_splits_a_char() {
+        assert_eq!(prefix_utf16("abcdef", 3), "abc");
+        assert_eq!(prefix_utf16("abc", 10), "abc");
+        assert_eq!(prefix_utf16("", 0), "");
+        // U+1F600 is two UTF-16 units: a cut through it leaves it out.
+        assert_eq!(prefix_utf16("a\u{1F600}b", 2), "a");
+        assert_eq!(prefix_utf16("a\u{1F600}b", 3), "a\u{1F600}");
+        assert_eq!(prefix_utf16("é漢x", 2), "é漢");
+    }
+
+    #[test]
+    fn field_limit_above_the_index_limit_fails() {
+        let terms = HighlightTerms::default();
+        for kind in [HighlighterType::Plain, HighlighterType::Unified] {
+            let e = opensearch_limited(&["short"], None, &terms, &opts(kind, 10, Some(11))).unwrap_err();
+            assert!(e.to_string().contains("max_analyzer_offset has exceeded [10] - maximum allowed to be analyzed for highlighting."), "{e}");
+        }
+    }
+
+    #[test]
+    fn plain_without_a_field_limit_fails_on_a_long_value() {
+        let terms = HighlightTerms::default();
+        let e = opensearch_limited(&["0123456789ab"], None, &terms, &opts(HighlighterType::Plain, 10, None)).unwrap_err();
+        assert!(e.to_string().contains("The length of [f] field of [1] doc of [i] index has exceeded [10]"), "{e}");
+        assert!(e.to_string().ends_with("highlighting with unified or fvh highlighter is recommended!"), "{e}");
+        // Exactly the limit is fine.
+        assert!(opensearch_limited(&["0123456789"], None, &terms, &opts(HighlighterType::Plain, 10, None)).is_ok());
+    }
+
+    #[test]
+    fn unified_with_a_field_limit_tolerates_long_values() {
+        let terms = HighlightTerms::default();
+        // The unified highlighter itself is left to the caller (which adds `matched_fields`).
+        assert!(opensearch_limited(&["0123456789abcdef"], None, &terms, &opts(HighlighterType::Unified, 10, Some(10))).unwrap().is_none());
+        // The plain one is run here, on the cut values.
+        assert!(opensearch_limited(&["0123456789abcdef"], None, &terms, &opts(HighlighterType::Plain, 10, Some(10))).unwrap().is_some());
+        let mut o = opts(HighlighterType::Unified, 10, None);
+        let e = opensearch_limited(&["0123456789abcdef"], None, &terms, &o).unwrap_err();
+        assert!(e.to_string().ends_with("For large texts, indexing with offsets or term vectors is recommended!"), "{e}");
+        // Untokenized fields are never re-analyzed.
+        o.tokenized = false;
+        assert!(opensearch_limited(&["0123456789abcdef"], None, &terms, &o).is_ok());
     }
 }

@@ -1,0 +1,201 @@
+{
+  "description" : "ES|QL aggregations (WEIGHTED_AVG, VARIANCE, PRESENT, ABSENT) and DATE_FORMAT locales",
+  "steps" : [
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [1, 2, 4], w = [1, 1, 2] | MV_EXPAND a | STATS wa = WEIGHTED_AVG(a, 2), v = VARIANCE(a), p = PRESENT(a), ab = ABSENT(a), sd = STD_DEV(a), pn = PRESENT(null), c = COUNT(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "wa",
+            "type" : "double"
+          },
+          {
+            "name" : "v",
+            "type" : "double"
+          },
+          {
+            "name" : "p",
+            "type" : "boolean"
+          },
+          {
+            "name" : "ab",
+            "type" : "boolean"
+          },
+          {
+            "name" : "sd",
+            "type" : "double"
+          },
+          {
+            "name" : "pn",
+            "type" : "boolean"
+          },
+          {
+            "name" : "c",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            2.3333333333333335,
+            1.5555555555555554,
+            true,
+            false,
+            1.247219128924647,
+            false,
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = 1 | WHERE a > 5 | STATS wa = WEIGHTED_AVG(a, a), v = VARIANCE(a), p = PRESENT(a), ab = ABSENT(a)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "wa",
+            "type" : "double"
+          },
+          {
+            "name" : "v",
+            "type" : "double"
+          },
+          {
+            "name" : "p",
+            "type" : "boolean"
+          },
+          {
+            "name" : "ab",
+            "type" : "boolean"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            null,
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [1, 2, 4] | MV_EXPAND a | EVAL w = a * 2 | STATS wa = WEIGHTED_AVG(a, w)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "wa",
+            "type" : "double"
+          }
+        ],
+        "values" : [
+          [
+            3.0
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW a = [1, 2, 4] | MV_EXPAND a | EVAL g = a % 2 | STATS v = VARIANCE(a), p = PRESENT(a) BY g | SORT g"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "v",
+            "type" : "double"
+          },
+          {
+            "name" : "p",
+            "type" : "boolean"
+          },
+          {
+            "name" : "g",
+            "type" : "integer"
+          }
+        ],
+        "values" : [
+          [
+            1.0,
+            true,
+            0
+          ],
+          [
+            0.0,
+            true,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW d = TO_DATETIME(\"2023-06-20\") | EVAL f = DATE_FORMAT(\"MMMM\", d), g = DATE_FORMAT(\"EEEE\", d)"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          },
+          {
+            "name" : "f",
+            "type" : "keyword"
+          },
+          {
+            "name" : "g",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "2023-06-20T00:00:00.000Z",
+            "June",
+            "Tuesday"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error",
+      "body" : {
+        "query" : "ROW d = TO_DATETIME(\"2023-06-20\") | EVAL f = DATE_FORMAT(\"MMMM\", d)",
+        "locale" : "it-IT"
+      },
+      "status" : 200,
+      "response" : {
+        "columns" : [
+          {
+            "name" : "d",
+            "type" : "date"
+          },
+          {
+            "name" : "f",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "2023-06-20T00:00:00.000Z",
+            "giugno"
+          ]
+        ]
+      }
+    }
+  ]
+}

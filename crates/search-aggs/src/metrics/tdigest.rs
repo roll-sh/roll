@@ -458,6 +458,146 @@ impl MergingDigest {
     }
 }
 
+/// OpenSearch 3.x's rank (`com.tdunning.math.stats.MergingDigest.cdf`, t-digest 3.3) over
+/// sorted centroids: a unit-weight centroid's whole weight sits at its mean, so between two of
+/// them the rank doesn't interpolate (`[-1, 1.5, 2.5]` ranks `1` at a third).
+pub fn opensearch_cdf(centroids: &[(f64, u64)], total: f64, min: f64, max: f64, x: f64) -> f64 {
+    let n = centroids.len();
+    if n == 0 || x.is_nan() {
+        return f64::NAN;
+    }
+    let mean = |i: usize| centroids[i].0;
+    let weight = |i: usize| centroids[i].1 as f64;
+    if n == 1 {
+        let width = max - min;
+        return if x < min {
+            0.0
+        } else if x > max {
+            1.0
+        } else if x - min <= width {
+            0.5
+        } else {
+            (x - min) / width
+        };
+    }
+    if x < min {
+        return 0.0;
+    }
+    if x > max {
+        return 1.0;
+    }
+    if x < mean(0) {
+        if mean(0) - min > 0.0 {
+            if x == min {
+                return 0.5 / total;
+            }
+            return (1.0 + (x - min) / (mean(0) - min) * (weight(0) / 2.0 - 1.0)) / total;
+        }
+        return 0.0;
+    }
+    if x > mean(n - 1) {
+        if max - mean(n - 1) > 0.0 {
+            if x == max {
+                return 1.0 - 0.5 / total;
+            }
+            let dq = (1.0 + (max - x) / (max - mean(n - 1)) * (weight(n - 1) / 2.0 - 1.0)) / total;
+            return 1.0 - dq;
+        }
+        return 1.0;
+    }
+    let mut so_far = 0.0;
+    let mut i = 0;
+    while i < n - 1 {
+        if mean(i) == x {
+            let mut dw = 0.0;
+            while i < n && mean(i) == x {
+                dw += weight(i);
+                i += 1;
+            }
+            return (so_far + dw / 2.0) / total;
+        } else if mean(i) <= x && x < mean(i + 1) {
+            if mean(i + 1) - mean(i) > 0.0 {
+                let (mut left_excluded, mut right_excluded) = (0.0, 0.0);
+                if weight(i) == 1.0 {
+                    if weight(i + 1) == 1.0 {
+                        return (so_far + 1.0) / total;
+                    }
+                    left_excluded = 0.5;
+                } else if weight(i + 1) == 1.0 {
+                    right_excluded = 0.5;
+                }
+                let dw = (weight(i) + weight(i + 1)) / 2.0;
+                let (left, right) = (mean(i), mean(i + 1));
+                let dw_no_singleton = dw - left_excluded - right_excluded;
+                let base = so_far + weight(i) / 2.0 + left_excluded;
+                return (base + dw_no_singleton * (x - left) / (right - left)) / total;
+            }
+            let dw = (weight(i) + weight(i + 1)) / 2.0;
+            return (so_far + dw) / total;
+        } else {
+            so_far += weight(i);
+        }
+        i += 1;
+    }
+    // `x` is the last centroid's mean.
+    1.0 - 0.5 / total
+}
+
+/// OpenSearch 3.x's quantile (`com.tdunning.math.stats.MergingDigest.quantile`, t-digest 3.3)
+/// over sorted centroids: unlike Elasticsearch's, a unit-weight centroid owns the half unit of
+/// rank around it, so small samples answer with sample values instead of interpolating
+/// between them (`[1, 51, 101, 151]` has its median at `101`, not `76`).
+pub fn opensearch_quantile(centroids: &[(f64, u64)], total: f64, min: f64, max: f64, q: f64) -> f64 {
+    let n = centroids.len();
+    match n {
+        0 => return f64::NAN,
+        1 => return centroids[0].0,
+        _ => {}
+    }
+    let mean = |i: usize| centroids[i].0;
+    let weight = |i: usize| centroids[i].1 as f64;
+    let index = q * total;
+    if index < 1.0 {
+        return min;
+    }
+    if weight(0) > 1.0 && index < weight(0) / 2.0 {
+        return min + (index - 1.0) / (weight(0) / 2.0 - 1.0) * (mean(0) - min);
+    }
+    if index > total - 1.0 {
+        return max;
+    }
+    if weight(n - 1) > 1.0 && total - index <= weight(n - 1) / 2.0 {
+        return max - (total - index - 1.0) / (weight(n - 1) / 2.0 - 1.0) * (max - mean(n - 1));
+    }
+    let mut so_far = weight(0) / 2.0;
+    for i in 0..n - 1 {
+        let dw = (weight(i) + weight(i + 1)) / 2.0;
+        if so_far + dw > index {
+            let mut left_unit = 0.0;
+            if weight(i) == 1.0 {
+                if index - so_far < 0.5 {
+                    return mean(i);
+                }
+                left_unit = 0.5;
+            }
+            let mut right_unit = 0.0;
+            if weight(i + 1) == 1.0 {
+                if so_far + dw - index <= 0.5 {
+                    return mean(i + 1);
+                }
+                right_unit = 0.5;
+            }
+            let z1 = index - so_far - left_unit;
+            let z2 = so_far + dw - index - right_unit;
+            return weighted_average(mean(i), z2, mean(i + 1), z1);
+        }
+        so_far += dw;
+    }
+    let z1 = index - total - weight(n - 1) / 2.0;
+    let z2 = weight(n - 1) / 2.0 - z1;
+    weighted_average(mean(n - 1), z1, max, z2)
+}
+
 /// `java.util.Random` (48-bit LCG), for the AVL tree digest.
 #[derive(Clone, Debug)]
 struct JavaRandom {
@@ -874,6 +1014,9 @@ impl TDigest {
     }
 
     pub fn quantile(&mut self, q: f64) -> f64 {
+        if crate::dialect::opensearch() {
+            return self.quantile_compressed(q);
+        }
         match self {
             TDigest::Hybrid(h) => match (&mut h.merging, &mut h.sorting) {
                 (Some(m), _) => m.quantile(q),
@@ -888,6 +1031,10 @@ impl TDigest {
     }
 
     pub fn cdf(&mut self, x: f64) -> Result<f64> {
+        if crate::dialect::opensearch() {
+            let size = self.size();
+            return Ok(opensearch_cdf(&self.centroids_compressed(), size as f64, self.min(), self.max(), x));
+        }
         match self {
             TDigest::Hybrid(h) => match (&mut h.merging, &mut h.sorting) {
                 (Some(m), _) => m.cdf(x),
@@ -905,6 +1052,13 @@ impl TDigest {
     /// reduced states), whose reads don't change them. Anything still pending is read from a
     /// compressed copy.
     pub fn quantile_compressed(&self, q: f64) -> f64 {
+        if crate::dialect::opensearch() {
+            let size = self.size();
+            if size == 0 {
+                return f64::NAN;
+            }
+            return opensearch_quantile(&self.centroids_compressed(), size as f64, self.min(), self.max(), q);
+        }
         match self {
             TDigest::Hybrid(h) => match (&h.merging, &h.sorting) {
                 (Some(m), _) if m.unmerged_weight == 0.0 => m.quantile_merged(q),
@@ -929,6 +1083,9 @@ impl TDigest {
 
     /// `cdf` for compressed digests (see [`TDigest::quantile_compressed`]).
     pub fn cdf_compressed(&self, x: f64) -> Result<f64> {
+        if crate::dialect::opensearch() {
+            return Ok(opensearch_cdf(&self.centroids_compressed(), self.size() as f64, self.min(), self.max(), x));
+        }
         check_value(x)?;
         match self {
             TDigest::Hybrid(h) => match (&h.merging, &h.sorting) {
@@ -974,6 +1131,34 @@ impl TDigest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opensearch_quantiles_match_tdigest_3_3() {
+        // OpenSearch 3.9.0, percentiles of [1, 51, 101, 151] (180_percentiles_tdigest_metric).
+        let mut d = TDigest::new(100.0, false);
+        for v in [1.0, 51.0, 101.0, 151.0] {
+            d.add(v).unwrap();
+        }
+        d.compress();
+        let got: Vec<f64> = crate::dialect::with(true, || [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99].iter().map(|&q| d.quantile(q)).collect());
+        assert_eq!(got, vec![1.0, 1.0, 51.0, 101.0, 151.0, 151.0, 151.0]);
+        // The elasticsearch dialect interpolates.
+        assert_eq!(d.quantile(0.5), 76.0);
+        // Heavier centroids interpolate between their means.
+        let c = [(1.0, 1), (10.0, 4), (20.0, 4), (30.0, 1)];
+        assert_eq!(opensearch_quantile(&c, 10.0, 1.0, 30.0, 0.0), 1.0);
+        assert_eq!(opensearch_quantile(&c, 10.0, 1.0, 30.0, 1.0), 30.0);
+        assert_eq!(opensearch_quantile(&c, 10.0, 1.0, 30.0, 0.5), 15.0);
+        assert!(opensearch_quantile(&[], 0.0, 0.0, 0.0, 0.5).is_nan());
+        // Ranks OpenSearch 3.9.0 answered for the values [-1, 1.5, 2.5].
+        let c = [(-1.0, 1), (1.5, 1), (2.5, 1)];
+        let r = |x: f64| opensearch_cdf(&c, 3.0, -1.0, 2.5, x) * 100.0;
+        assert_eq!(r(1.0), 33.33333333333333);
+        assert_eq!(r(-2.0), 0.0);
+        assert_eq!(r(3.0), 100.0);
+        assert!(opensearch_cdf(&[], 0.0, 0.0, 0.0, 1.0).is_nan());
+        assert_eq!(opensearch_quantile(&[(7.0, 3)], 3.0, 7.0, 7.0, 0.5), 7.0);
+    }
 
     #[test]
     fn sorting_phase_is_exact() {

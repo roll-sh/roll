@@ -72,7 +72,7 @@ pub use merge::{MergeInput, MergeSource};
 pub use norms::{NormsReader, byte4_to_int, int_to_byte4};
 pub use points::{PointVisitor, PointsReader, Relation};
 pub use postings::{Impact, PostingsCursor, PostingsFlags, TermState};
-pub use reader::{DocValuesReader, SegmentReader};
+pub use reader::{DocValuesReader, SegmentReader, UNINVERTED};
 pub use slice::Slice;
 pub use sort::sort_doc_map;
 pub use spill::SpillOptions;
@@ -82,7 +82,7 @@ pub use source::{
 };
 pub use stored::{StoredDocWriter, StoredReader, StoredValue, StoredVisitor, VisitStatus};
 pub use suggest::{Completion, Completions, SuggestEntry, SuggestRange, SuggestReader, SuggestSource};
-pub use terms::{TermsIter, TermsReader, TermsStats};
+pub use terms::{SortedLookup, TermsIter, TermsReader, TermsStats};
 pub use vectors::{KnnHit, KnnResult, PreparedQuery, VectorQuery, VectorsReader};
 pub use writer::{WriteOptions, write_segment, write_segment_with};
 

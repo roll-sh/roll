@@ -132,8 +132,8 @@ fn build_forward(src: &dyn SegmentSource, opts: &BpOptions) -> Result<Option<For
         if !f.index.is_indexed() || opts.fields.as_ref().is_some_and(|fs| !fs.contains(&f.number)) {
             continue;
         }
-        let Some(mut terms) = src.terms(f.number)? else { continue };
-        while terms.next_term()?.is_some() {
+        let Some(mut terms) = src.terms_docs_only(f.number)? else { continue };
+        while terms.next_term_min_doc_freq(u64::from(opts.min_doc_freq))?.is_some() {
             let p = terms.postings()?;
             let start = flat.len();
             loop {

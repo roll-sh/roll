@@ -16,33 +16,53 @@ use crate::json::Json;
 /// A byte budget shared by concurrent aggregations.
 #[derive(Debug)]
 pub struct MemoryBudget {
-    limit: u64,
+    /// The limit; a node-wide breaker follows its (dynamic) setting through [`set_limit`](Self::set_limit).
+    limit: AtomicU64,
     used: AtomicU64,
+    /// Reservations refused (`tripped` in node stats).
+    tripped: AtomicU64,
     /// The breaker name in messages (`request`).
     name: &'static str,
 }
 
 impl MemoryBudget {
     pub fn new(limit: u64) -> Arc<MemoryBudget> {
-        Arc::new(MemoryBudget { limit, used: AtomicU64::new(0), name: "request" })
+        Arc::new(MemoryBudget { limit: AtomicU64::new(limit), used: AtomicU64::new(0), tripped: AtomicU64::new(0), name: "request" })
     }
 
     pub fn limit(&self) -> u64 {
-        self.limit
+        self.limit.load(Ordering::Relaxed)
+    }
+
+    /// Changes the limit; reservations already held stay.
+    pub fn set_limit(&self, limit: u64) {
+        self.limit.store(limit, Ordering::Relaxed);
     }
 
     pub fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
 
+    /// How many reservations failed.
+    pub fn tripped(&self) -> u64 {
+        self.tripped.load(Ordering::Relaxed)
+    }
+
     /// Reserves `bytes` for `label`, failing like Elasticsearch's `CircuitBreakingException`.
     pub fn reserve(&self, bytes: u64, label: &str) -> Result<()> {
         let new = self.used.fetch_add(bytes, Ordering::Relaxed) + bytes;
-        if new > self.limit {
+        let limit = self.limit();
+        if new > limit {
             self.used.fetch_sub(bytes, Ordering::Relaxed);
-            return Err(breaking_error(self.name, label, new, self.limit));
+            self.tripped.fetch_add(1, Ordering::Relaxed);
+            return Err(breaking_error(self.name, label, new, limit));
         }
         Ok(())
+    }
+
+    /// Adds `bytes` without checking the limit (`addWithoutBreaking`).
+    pub fn force(&self, bytes: u64) {
+        self.used.fetch_add(bytes, Ordering::Relaxed);
     }
 
     pub fn release(&self, bytes: u64) {

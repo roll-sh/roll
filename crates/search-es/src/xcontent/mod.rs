@@ -165,6 +165,16 @@ pub fn parse_accept(header: &str) -> Result<Option<MediaType>, String> {
 /// Serializes a response body.
 pub fn render(v: &Value, ty: XContentType, pretty: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
+    // Pre-rendered JSON (`json::raw`) is read back for the other formats.
+    let materialized;
+    let v = if ty != XContentType::Json && ty != XContentType::Smile && json::raw::contains_raw(v) {
+        let mut c = v.clone();
+        json::raw::materialize(&mut c);
+        materialized = c;
+        &materialized
+    } else {
+        v
+    };
     match ty {
         XContentType::Json | XContentType::Smile => {
             json::write::write_json(&mut out, v, pretty);

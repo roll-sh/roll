@@ -203,3 +203,15 @@ fn completion_is_layout_independent_and_complete() {
         }
     }
 }
+
+/// `FuzzyCompletionWeight.setNextMatch`: the boost is the longest common prefix with an
+/// analyzed form, counting stops at the first difference.
+#[test]
+fn fuzzy_prefix_boost_is_the_longest_common_prefix() {
+    let forms = vec![b"score".to_vec(), b"scope".to_vec()];
+    assert_eq!(fuzzy_prefix_boost(b"scor", &forms), 4.0);
+    assert_eq!(fuzzy_prefix_boost(b"sxore", &forms), 1.0);
+    assert_eq!(fuzzy_prefix_boost(b"core", &forms), 0.0);
+    assert_eq!(fuzzy_prefix_boost(b"scop", &forms), 4.0);
+    assert_eq!(fuzzy_prefix_boost(b"", &forms), 0.0);
+}

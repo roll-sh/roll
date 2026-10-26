@@ -222,3 +222,41 @@ pub fn disk_usage(ctx: &Ctx) -> EsResult<Reply> {
     }
     Reply::ok(Value::Obj(out))
 }
+
+/// `GET /{index}/_field_usage_stats`: what searches read of each field, per shard (see
+/// [`crate::search::field_usage`]), filtered by `fields`.
+pub fn field_usage_stats(ctx: &Ctx) -> EsResult<Reply> {
+    let expr: Vec<String> = ctx.list_param("index").unwrap_or_default();
+    let filter: Vec<String> = ctx.list_param("fields").unwrap_or_default();
+    let st = ctx.state();
+    let opts = ctx.indices_options(crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN)?;
+    let names = crate::meta::resolve::resolve(&st, &expr, &opts, ctx.now_ms)?;
+    let mut total = 0u64;
+    let mut per = Map::new();
+    for name in &names {
+        let Some(idx) = st.metadata.indices.get(name).cloned() else { continue };
+        if idx.is_closed() {
+            continue;
+        }
+        let engine = ctx.cluster.engine.index(ctx.cluster, &st, &idx)?;
+        let mut shards = Vec::new();
+        for s in &engine.shards {
+            total += 1;
+            let mut usage = s.counters.field_usage.lock();
+            let (id, started) = usage.tracking();
+            shards.push(crate::obj! {
+                "tracking_id" => id,
+                "tracking_started_at_millis" => started,
+                "routing" => crate::obj! { "state" => "STARTED", "primary" => true, "node" => ctx.cluster.node.id.as_str(), "relocating_node" => Value::Null },
+                "stats" => usage.to_value(&filter),
+            });
+        }
+        per.insert(name.clone(), crate::obj! { "shards" => Value::Arr(shards) });
+    }
+    let mut out = Map::new();
+    out.insert("_shards".into(), crate::obj! { "total" => total as i64, "successful" => total as i64, "failed" => 0 });
+    for (k, v) in per {
+        out.insert(k, v);
+    }
+    Reply::ok(Value::Obj(out))
+}

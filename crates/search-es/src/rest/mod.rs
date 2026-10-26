@@ -125,6 +125,8 @@ pub struct Ctx<'a> {
     /// Time spent in ingest pipelines by this request's writes (nanoseconds + 1, so 0 means
     /// no pipeline ran): `_bulk`'s `ingest_took`.
     pub ingest_nanos: std::sync::atomic::AtomicU64,
+    /// Who sent the request, once authenticated (`crate::xpack::security`).
+    pub principal: std::sync::OnceLock<crate::xpack::security::Principal>,
 }
 
 impl<'a> Ctx<'a> {
@@ -143,6 +145,11 @@ impl<'a> Ctx<'a> {
 
     pub fn has_query(&self, name: &str) -> bool {
         self.params.iter().any(|(k, _)| k == name)
+    }
+
+    /// The query parameter names in request order (repeats included).
+    pub fn query_names(&self) -> impl Iterator<Item = &str> {
+        self.params.iter().map(|(k, _)| k.as_str())
     }
 
     pub fn warn(&self, msg: impl Into<String>) {
@@ -223,7 +230,11 @@ impl<'a> Ctx<'a> {
 
 /// Handles one request.
 pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse {
-    let mut resp = handle_inner(cluster, &req).await;
+    let mut resp = match cluster.dialect {
+        Dialect::Elasticsearch => handle_inner(cluster, &req).await,
+        // Parsers whose grammar differs between the dialects read `opensearch::active()`.
+        Dialect::OpenSearch => crate::opensearch::Scoped::new(handle_inner(cluster, &req)).await,
+    };
     finish_headers(&mut resp, &req, cluster.dialect);
     resp
 }
@@ -261,10 +272,11 @@ fn finish_headers(resp: &mut EsResponse, req: &EsRequest, dialect: Dialect) {
     }
 }
 
-/// OpenSearch prints exception metadata in another order than Elasticsearch: the index first,
-/// then the resource, then the index UUID.
-fn opensearch_error_order(v: &mut Value) {
-    const FIRST: &[&str] = &["root_cause", "type", "reason", "index", "resource.id", "resource.type", "index_uuid"];
+/// OpenSearch prints exception metadata in another order than Elasticsearch: the bucket order
+/// of the `HashMap` it keeps `opensearch.<key>` metadata in (index, resource.id, shard,
+/// resource.type, index_uuid).
+pub(crate) fn opensearch_error_order(v: &mut Value) {
+    const FIRST: &[&str] = &["root_cause", "type", "reason", "index", "resource.id", "shard", "resource.type", "index_uuid"];
     match v {
         Value::Obj(m) => {
             if m.contains_key("type") && m.contains_key("reason") {
@@ -531,17 +543,24 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
         response_compat: compat_of(Some(&neg)),
         warnings: Mutex::new(Vec::new()),
         ingest_nanos: std::sync::atomic::AtomicU64::new(0),
+        principal: std::sync::OnceLock::new(),
         now_ms: crate::time::now_millis(),
         human,
     };
 
-    let result = match params::check_params(&ctx) {
+    // Authentication comes first (Elasticsearch's security REST filter), authorization after
+    // the request was parsed (its transport action).
+    let result = match crate::xpack::security::authenticate(&ctx).and_then(|_| params::check_params(&ctx)) {
         Err(e) => Err(e),
         Ok(()) => {
-            if !req.body.is_empty() && ctx.api.spec_in(cluster.dialect).body == BodySpec::None && !body_ignorable(ctx.api) {
+            // OpenSearch (forked before Elasticsearch added this check) ignores a body an API
+            // doesn't read.
+            if !req.body.is_empty() && cluster.dialect != Dialect::OpenSearch && ctx.api.spec_in(cluster.dialect).body == BodySpec::None && !body_ignorable(ctx.api) {
                 Err(EsError::illegal_argument(format!("request [{} {}] does not support having a body", method, path)))
+            } else if let Err(e) = crate::xpack::security::authorize(&ctx) {
+                Err(e)
             } else {
-                crate::api::dispatch(&ctx).await
+                dispatch_off_reactor(&ctx).await
             }
         }
     };
@@ -553,6 +572,103 @@ async fn handle_inner(cluster: &Cluster, req: &EsRequest) -> EsResponse {
             render_reply(&ctx, &neg, reply, pretty, warnings, head_req)
         }
         Err(e) => render_error(&e, Some(&neg), pretty, error_trace, warnings, head_req, cluster.dialect),
+    }
+}
+
+/// APIs whose handlers run queries, scripts or aggregations synchronously, for as long as
+/// the search takes (Elasticsearch runs them on its `search` thread pool, off the network
+/// threads).
+fn runs_searches(api: Api) -> bool {
+    matches!(
+        api,
+        Api::Search
+            | Api::Msearch
+            | Api::Count
+            | Api::Explain
+            | Api::Scroll
+            | Api::SearchTemplate
+            | Api::MsearchTemplate
+            | Api::KnnSearch
+            | Api::Termvectors
+            | Api::Mtermvectors
+            | Api::IndicesValidateQuery
+            | Api::TermsEnum
+            | Api::RankEval
+            | Api::SearchMvt
+            | Api::FleetSearch
+            | Api::FleetMsearch
+            | Api::RollupRollupSearch
+            | Api::SearchApplicationSearch
+            | Api::GraphExplore
+            | Api::EqlSearch
+            | Api::EsqlQuery
+            | Api::SqlQuery
+            | Api::OpenPointInTime
+    )
+}
+
+/// Whether this thread is a tokio worker that may hand its other tasks to another thread.
+fn can_block_in_place() -> bool {
+    tokio::runtime::Handle::try_current().is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+}
+
+/// Runs the API handler. A search runs with its worker thread taken out of the reactor
+/// (`block_in_place`): the worker's other connections move to another thread, so a long
+/// search doesn't stall `GET /`, `_cluster/health` or other searches behind it.
+async fn dispatch_off_reactor(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    if runs_searches(ctx.api) && can_block_in_place() {
+        return tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(crate::api::dispatch(ctx)));
+    }
+    crate::api::dispatch(ctx).await
+}
+
+/// Sets a search's cancellation flag when dropped without [`CancelOnDrop::disarm`]: the
+/// request's future was dropped because its client disconnected.
+struct CancelOnDrop(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+
+impl CancelOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(c) = &self.0 {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// [`handle`] for a cluster the caller shares: a search runs on a blocking thread and is
+/// cancelled when this future is dropped (the client closed the connection), as
+/// Elasticsearch cancels a search task whose REST channel closed
+/// (`RestCancellableNodeClient`). Its scripts and collectors poll the flag, so a script that
+/// loops forever stops instead of burning a core.
+pub async fn handle_shared(cluster: &std::sync::Arc<Cluster>, req: EsRequest) -> EsResponse {
+    let raw_path = req.uri.split_once('?').map(|(p, _)| p).unwrap_or(&req.uri);
+    let searches = Method::parse(&req.method.to_ascii_uppercase())
+        .is_some_and(|m| matches!(routes::route_in(cluster.dialect, m, if raw_path.is_empty() { "/" } else { raw_path }), Routed::Found(r) if runs_searches(r.api)));
+    if !searches || !can_block_in_place() {
+        return handle(cluster, req).await;
+    }
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut guard = CancelOnDrop(Some(flag.clone()));
+    let cluster = cluster.clone();
+    let rt = tokio::runtime::Handle::current();
+    let task = tokio::task::spawn_blocking(move || {
+        let ctl = search_index::search::SearchControl { deadline: None, cancelled: Some(flag), ext: None };
+        let _ambient = search_index::search::set_ambient_control(Some(ctl));
+        rt.block_on(handle(&cluster, req))
+    });
+    let r = task.await;
+    guard.disarm();
+    match r {
+        Ok(resp) => resp,
+        Err(e) => {
+            let e = EsError::new(500, "exception", format!("the search failed: {e}"));
+            render_error(&e, None, false, false, Vec::new(), false, Dialect::Elasticsearch)
+        }
     }
 }
 
@@ -632,7 +748,12 @@ fn render_reply(ctx: &Ctx, neg: &Negotiated, reply: Reply, pretty: bool, warning
             let ty = response_type(ctx.query("format"), Some(neg));
             let ty = if ty == XContentType::Smile { XContentType::Json } else { ty };
             let v = match ctx.query("filter_path").map(FilterPath::parse) {
-                Some(Ok(Some(fp))) => fp.apply(v),
+                Some(Ok(Some(fp))) => {
+                    // Filters look inside pre-rendered JSON (`json::raw`).
+                    let mut v = v;
+                    crate::json::raw::materialize(&mut v);
+                    fp.apply(v)
+                }
                 Some(Err(msg)) => return render_error(&EsError::illegal_argument(msg), Some(neg), pretty, false, warnings, head, ctx.cluster.dialect),
                 _ => v,
             };

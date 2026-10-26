@@ -1,10 +1,27 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, X } from "lucide-react";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Columns3, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatBytes } from "@/lib/roll-api";
 import { esJson, esRaw, formatCount, indexPath, type SearchCluster, type SearchIndex } from "@/lib/search-api";
-import { cellText, columnsOf, deleteRequest, formatJson, hitSources, parseDocument, sourceCells, writeRequest } from "@/lib/search-docs";
+import { mappingFields } from "@/lib/search-console";
+import {
+  cellText,
+  columnsOf,
+  deleteRequest,
+  formatJson,
+  hitSources,
+  nextSort,
+  parseDocument,
+  sortClause,
+  sortField,
+  sourceCells,
+  toggleColumn,
+  visibleColumns,
+  writeRequest,
+  type MappedField,
+  type TableSort,
+} from "@/lib/search-docs";
 import { Segmented } from "../redis/shared";
 import { btn, Confirm, CopyButton, input, Panel, primary, useCopy } from "../ui";
 import { JsonText } from "./json-view";
@@ -35,9 +52,91 @@ interface SearchResult {
 }
 
 /** The request the documents view sends, also offered as a console request. */
-export function documentsQuery(q: string, from: number) {
+export function documentsQuery(q: string, from: number, sort: TableSort | null = null) {
   const query = q.trim() ? { query_string: { query: q.trim() } } : { match_all: {} };
-  return { query, from, size: PAGE, track_total_hits: true };
+  const s = sortClause(sort);
+  return s ? { query, from, size: PAGE, track_total_hits: true, sort: s } : { query, from, size: PAGE, track_total_hits: true };
+}
+
+/** Columns picked for an index's table, kept in the browser per cluster and index. */
+function columnsKey(cluster: string, index: string) {
+  return `roll.search.columns.${cluster}/${index}`;
+}
+
+function loadColumns(key: string): string[] | null {
+  try {
+    const v = JSON.parse(window.localStorage.getItem(key) ?? "null");
+    return Array.isArray(v) && v.every((c) => typeof c === "string") ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveColumns(key: string, cols: string[] | null) {
+  try {
+    if (cols && cols.length) window.localStorage.setItem(key, JSON.stringify(cols));
+    else window.localStorage.removeItem(key);
+  } catch {
+    // Storage full or disabled: the pick lasts for this view only.
+  }
+}
+
+/** The column picker: every path of the page and every mapped leaf field, the shown ones first. */
+function ColumnPicker({ shown, available, onChange, onReset }: { shown: string[]; available: string[]; onChange: (cols: string[]) => void; onReset: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  const all = [...shown, ...available.filter((c) => !shown.includes(c))];
+  const f = filter.trim().toLowerCase();
+  const list = f ? all.filter((c) => c.toLowerCase().includes(f)) : all;
+  return (
+    <div ref={ref} className="relative">
+      <button type="button" onClick={() => setOpen((o) => !o)} className={btn} aria-expanded={open} title="Choose the table's columns">
+        <Columns3 className="size-3.5" strokeWidth={1.5} /> Columns
+      </button>
+      {open && (
+        <div className="rise absolute right-0 z-20 mt-1 w-64 rounded-lg border border-line bg-panel p-2 text-[12px]">
+          <input
+            autoFocus
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter fields"
+            spellCheck={false}
+            className={`${input} mb-1.5 w-full font-mono text-[11px]`}
+          />
+          <ul className="max-h-64 overflow-y-auto">
+            {list.map((c) => (
+              <li key={c}>
+                <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 transition hover:bg-panel-2">
+                  <input type="checkbox" checked={shown.includes(c)} onChange={() => onChange(toggleColumn(shown, c))} className="accent-accent" />
+                  <span className="truncate font-mono text-[11px]" title={c}>
+                    {c}
+                  </span>
+                </label>
+              </li>
+            ))}
+            {list.length === 0 && <li className="px-1.5 py-1 text-subtle">No field matches.</li>}
+          </ul>
+          <button type="button" onClick={onReset} className="mt-1.5 w-full rounded px-1.5 py-1 text-left text-muted transition hover:bg-panel-2 hover:text-fg">
+            Reset to the most common fields
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** One index: its documents (paged `_search`), mapping and settings, refresh and delete. */
@@ -223,11 +322,33 @@ function Documents({
   const [open, setOpen] = useState<string | null>(null);
   const [layout, setLayout] = useState<Layout>("rows");
   const [adding, setAdding] = useState(false);
+  const [sort, setSort] = useState<TableSort | null>(null);
+  const [fields, setFields] = useState<MappedField[]>([]);
+  const colKey = columnsKey(cluster.id, index);
+  const [picked, setPicked] = useState<string[] | null>(null);
+
+  // The pick is the browser's, so read it after mounting (the server render has none).
+  useEffect(() => {
+    setPicked(loadColumns(colKey));
+  }, [colKey]);
+
+  // The mapping says which columns can sort (and by which field), and offers fields the page lacks.
+  useEffect(() => {
+    if (layout !== "table") return;
+    let live = true;
+    esJson(cluster.id, "GET", `${indexPath(index)}/_mapping`).then(
+      (m) => live && setFields(mappingFields(m)),
+      () => live && setFields([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [cluster.id, index, layout]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await esRaw<SearchResponse>(cluster.id, "POST", `${indexPath(index)}/_search`, documentsQuery(applied, from));
+      const r = await esRaw<SearchResponse>(cluster.id, "POST", `${indexPath(index)}/_search`, documentsQuery(applied, from, sort));
       const sources = hitSources(r.text);
       setResult({ took: r.value.took, total: r.value.hits.total, hits: r.value.hits.hits.map((h, i) => ({ ...h, source: sources[i] })) });
       setErr(null);
@@ -237,7 +358,7 @@ function Documents({
     } finally {
       setLoading(false);
     }
-  }, [cluster.id, index, applied, from]);
+  }, [cluster.id, index, applied, from, sort]);
 
   useEffect(() => {
     load();
@@ -246,9 +367,32 @@ function Documents({
   const total = result?.total;
   const hits = result?.hits ?? [];
   const last = from + hits.length;
-  const consoleText = `POST ${indexPath(index)}/_search\n${JSON.stringify(documentsQuery(applied, from), null, 2)}`;
+  const consoleText = `POST ${indexPath(index)}/_search\n${JSON.stringify(documentsQuery(applied, from, sort), null, 2)}`;
   const cells = useMemo(() => (layout === "table" ? hits.map((h) => sourceCells(h.source)) : []), [layout, hits]);
-  const columns = useMemo(() => columnsOf(cells.map((c) => c.keys())), [cells]);
+  const pagePaths = useMemo(() => columnsOf(cells.map((c) => c.keys()), Infinity), [cells]);
+  const columns = visibleColumns(picked, pagePaths);
+  // Mapped leaves the page has no value for yet. Objects aren't columns, and neither are
+  // multi-fields (`title.keyword`): they index the parent's value, `_source` has none of their own.
+  const available = useMemo(() => {
+    const leafTypes = new Map(fields.map((f) => [f.name, f.type]));
+    const isMultiField = (name: string) => {
+      for (let i = name.lastIndexOf("."); i > 0; i = name.lastIndexOf(".", i - 1)) {
+        const t = leafTypes.get(name.slice(0, i));
+        if (t && t !== "object" && t !== "nested") return true;
+      }
+      return false;
+    };
+    const mapped = fields.filter((f) => f.type !== "object" && f.type !== "nested" && !pagePaths.includes(f.name) && !isMultiField(f.name)).map((f) => f.name);
+    return [...pagePaths, ...mapped];
+  }, [pagePaths, fields]);
+  const pick = (cols: string[] | null) => {
+    setPicked(cols && cols.length ? cols : null);
+    saveColumns(colKey, cols);
+  };
+  const sortBy = (column: string, field: string) => {
+    setFrom(0);
+    setSort((s) => nextSort(s, column, field));
+  };
 
   const expanded = (h: Hit) => (
     <SourceView
@@ -297,6 +441,7 @@ function Documents({
             onChange={setLayout}
           />
         </div>
+        {layout === "table" && <ColumnPicker shown={columns} available={available} onChange={pick} onReset={() => pick(null)} />}
         <button type="button" onClick={() => setAdding((a) => !a)} className={btn} title="Index a new document">
           <Plus className="size-3.5" /> Add
         </button>
@@ -335,11 +480,30 @@ function Documents({
             <thead>
               <tr className="border-b border-line text-left text-subtle">
                 <th className="px-5 py-2 font-normal">_id</th>
-                {columns.map((c) => (
-                  <th key={c} className="max-w-56 truncate px-3 py-2 font-normal" title={c}>
-                    {c}
-                  </th>
-                ))}
+                {columns.map((c) => {
+                  const field = sortField(c, fields);
+                  const active = sort?.column === c ? sort.order : null;
+                  return (
+                    <th key={c} className="max-w-56 px-3 py-2 font-normal" aria-sort={active === "asc" ? "ascending" : active === "desc" ? "descending" : undefined}>
+                      {field ? (
+                        <button
+                          type="button"
+                          onClick={() => sortBy(c, field)}
+                          className={`flex max-w-full items-center gap-1 truncate transition hover:text-fg ${active ? "text-accent" : ""}`}
+                          title={active === "desc" ? `${c}: sorted descending (click for relevance)` : active === "asc" ? `${c}: sorted ascending` : `Sort by ${field}`}
+                        >
+                          <span className="truncate">{c}</span>
+                          {active === "asc" && <ArrowUp className="size-3 shrink-0" strokeWidth={1.5} />}
+                          {active === "desc" && <ArrowDown className="size-3 shrink-0" strokeWidth={1.5} />}
+                        </button>
+                      ) : (
+                        <span className="block truncate" title={fields.length ? `${c} (not sortable)` : c}>
+                          {c}
+                        </span>
+                      )}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>

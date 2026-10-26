@@ -52,9 +52,45 @@ fn mask(v: &mut Value, keys: &[String]) {
             }
         }
         Value::Arr(a) => a.iter_mut().for_each(|x| mask(x, keys)),
-        Value::Str(s) => *s = mask_uuids(s),
+        Value::Str(s) => *s = mask_backing_dates(&mask_uuids(s)),
         _ => {}
     }
+}
+
+/// Data stream backing indices embed the day they were created (`.ds-<name>-2026.10.22-000001`),
+/// which differs between capture and replay: `yyyy.MM.dd-` followed by six digits becomes `<date>-`.
+fn mask_backing_dates(s: &str) -> String {
+    let b = s.as_bytes();
+    let digits = |r: std::ops::Range<usize>| r.end <= b.len() && b[r].iter().all(u8::is_ascii_digit);
+    let is_date = |i: usize| {
+        i + 17 <= b.len()
+            && digits(i..i + 4)
+            && b[i + 4] == b'.'
+            && digits(i + 5..i + 7)
+            && b[i + 7] == b'.'
+            && digits(i + 8..i + 10)
+            && b[i + 10] == b'-'
+            && digits(i + 11..i + 17)
+            && (i == 0 || b[i - 1] == b'-')
+    };
+    if !s.contains(".ds-") {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    let mut i = 0;
+    while i < b.len() {
+        if is_date(i) {
+            out.push_str(&s[last..i]);
+            out.push_str("<date>");
+            i += 10;
+            last = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&s[last..]);
+    out
 }
 
 /// Replaces 20–22 character URL-safe base64 tokens with mixed case (auto-generated ids, UUIDs).

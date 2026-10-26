@@ -181,7 +181,7 @@ export function CredentialsOnce({ cluster, onDone, title = "Save the password" }
         <div className="space-y-3">
           <div className="space-y-1">
             <p className="text-[11px] text-subtle">URL with credentials</p>
-            <SecretField id="full" value={full} masked={urlWithPassword(cluster.url, cluster.username, "••••••••")} copied={copied} onCopy={copy} />
+            <SecretField id="full" value={full} masked={urlWithPassword(cluster.url, cluster.username, "").replace(":@", ":••••••••@")} copied={copied} onCopy={copy} />
           </div>
           <p className="text-[12px] text-muted">
             roll keeps no way to show this password again: rotate it in Settings if it&apos;s lost. Clients may also send

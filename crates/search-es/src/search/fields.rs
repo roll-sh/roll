@@ -48,6 +48,10 @@ pub fn check_formats(table: &FieldTable, specs: &[FieldAndFormat]) -> EsResult<(
 
 /// Metadata fields the `fields` option refuses (`Cannot fetch values for internal field`).
 pub fn check_internal(specs: &[FieldAndFormat]) -> EsResult<()> {
+    // OpenSearch's `FieldFetcher` skips metadata fields instead.
+    if crate::opensearch::active() {
+        return Ok(());
+    }
     const INTERNAL: &[&str] = &["_seq_no", "_source", "_feature", "_nested_path", "_field_names"];
     for s in specs {
         if INTERNAL.contains(&s.field.as_str()) {
@@ -59,8 +63,12 @@ pub fn check_internal(specs: &[FieldAndFormat]) -> EsResult<()> {
 }
 
 /// Metadata fields requested by name (or through an alias): `(output name, metadata field)`.
-/// Patterns never match metadata fields.
+/// Patterns never match metadata fields. (Elasticsearch only.)
 pub fn metadata_requests(table: &FieldTable, specs: &[FieldAndFormat]) -> Vec<(String, String)> {
+    // OpenSearch's `FieldFetcher` skips metadata fields (`isMetadataField`): none answer.
+    if crate::opensearch::active() {
+        return Vec::new();
+    }
     const META: &[&str] = &["_id", "_index", "_ignored", "_tier", "_ts_routing_hash", "_tsid", "_version", "_doc_count"];
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push = |name: String, meta: String| {
@@ -120,6 +128,14 @@ fn requested(table: &FieldTable, specs: &[FieldAndFormat]) -> Vec<(String, Optio
 
 /// One source value parsed for a field (`parseSourceValue`); `Err(v)` = ignored (`ignore_above`,
 /// malformed) with the value to report.
+/// A float vector's component as the float it was indexed as.
+fn vector_component(v: &Value) -> Value {
+    match v {
+        Value::Num(n) => Value::Num(crate::json::Number::Float(crate::fetch::java_float_as_double(n.as_f64() as f32))),
+        other => other.clone(),
+    }
+}
+
 fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<Value>, Value> {
     let text = |v: &Value| -> String {
         match v {
@@ -131,7 +147,7 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
         Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType => Value::Str(text(v)),
         Kind::Keyword | Kind::Version | Kind::Wildcard | Kind::CountedKeyword => {
             let s = text(v);
-            if f.ignore_above.is_some_and(|m| s.chars().count() > m) {
+            if f.ignore_above.is_some_and(|m| crate::document::exceeds_ignore_above(&s, m)) {
                 return Err(v.clone());
             }
             Value::Str(match &f.normalizer {
@@ -140,6 +156,13 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
             })
         }
         Kind::ConstantKeyword => Value::Str(f.constant_value.clone().unwrap_or_else(|| text(v))),
+        // A `DocValueFetcher`: the indexed count (nothing without doc values).
+        Kind::TokenCount => {
+            if !f.doc_values {
+                return Ok(None);
+            }
+            Value::from(crate::engine::convert::token_count(f, &text(v)))
+        }
         Kind::Boolean => match v {
             Value::Bool(b) => Value::Bool(*b),
             Value::Str(s) if s == "true" => Value::Bool(true),
@@ -196,7 +219,7 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
             };
             let inst = fmt.parse(&s, None, false).map_err(|_| v.clone())?;
             let out_fmt = match format {
-                Some(p) => std::sync::Arc::new(crate::time::DateFormatter::new(p).map_err(|_| v.clone())?),
+                Some(p) => std::sync::Arc::new(fmt.derive(p).map_err(|_| v.clone())?),
                 None => fmt,
             };
             Value::Str(out_fmt.format(inst, &crate::time::Zone::UTC))
@@ -223,7 +246,8 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
                 _ => {
                     let mut p = crate::query::XParser::from_value(v);
                     p.next_token();
-                    crate::query::geo::parse_point(&mut p).ok()
+                    // Indexed values passed the field's parser, which drops z values.
+                    if crate::opensearch::active() { crate::query::geo::parse_point(&mut p).ok() } else { crate::query::geo::parse_field_point(&mut p, crate::query::geo::PointKind::Geo, true).ok() }
                 }
             };
             let Some(mut pt) = parsed else { return Err(v.clone()) };
@@ -248,7 +272,37 @@ fn parse_value(f: &FieldInfo, v: &Value, format: Option<&str>) -> Result<Option<
             },
             None => v.clone(),
         },
+        // Float vectors come back as the floats they were indexed as (`[1]` reads `[1.0]`).
+        Kind::DenseVector if f.vector.is_none_or(|s| !matches!(s.element, search_codec::VectorElement::Byte | search_codec::VectorElement::Bit)) => match v {
+            Value::Arr(a) => Value::Arr(a.iter().map(vector_component).collect()),
+            other => vector_component(other),
+        },
         Kind::Binary | Kind::DenseVector | Kind::SparseVector | Kind::RankFeatures | Kind::RankFeature | Kind::Completion => v.clone(),
+        // Cartesian points read as GeoJSON (or WKT), without their z value.
+        Kind::Point => {
+            let parsed = match v {
+                // `[x, y]` reads numbers through Jackson's accessors (numeric strings coerce).
+                Value::Arr(a) if a.first().is_some_and(|x| matches!(x, Value::Num(_))) && a.len() >= 2 => {
+                    let num = |x: &Value| match x {
+                        Value::Num(n) => Some(n.as_f64()),
+                        Value::Str(s) => crate::units::parse_java_double(s.trim()),
+                        _ => None,
+                    };
+                    num(&a[0]).zip(num(&a[1])).map(|(lon, lat)| crate::query::geo::GeoPoint { lat, lon })
+                }
+                _ => {
+                    let mut p = crate::query::XParser::from_value(v);
+                    p.next_token();
+                    crate::query::geo::parse_field_point(&mut p, crate::query::geo::PointKind::Cartesian, true).ok()
+                }
+            };
+            let Some(pt) = parsed else { return Err(v.clone()) };
+            if format == Some("wkt") {
+                Value::Str(format!("POINT ({} {})", crate::json::write::java_double(pt.lon), crate::json::write::java_double(pt.lat)))
+            } else {
+                crate::obj! { "coordinates" => Value::Arr(vec![Value::Num(Number::Float(pt.lon)), Value::Num(Number::Float(pt.lat))]), "type" => "Point" }
+            }
+        }
         // Shapes that don't parse were ignored (malformed) at index time.
         Kind::GeoShape | Kind::Shape => {
             let mut p = crate::query::XParser::from_value(v);
@@ -277,7 +331,7 @@ fn drop_long_leaves(v: &Value, max: usize) -> Option<Value> {
                 _ => Some(Value::Arr(out)),
             }
         }
-        Value::Str(s) if s.chars().count() > max => None,
+        Value::Str(s) if crate::document::exceeds_ignore_above(s, max) => None,
         Value::Null => None,
         other => Some(other.clone()),
     }
@@ -305,6 +359,10 @@ fn collect_unmapped(table: &FieldTable, patterns: &[&str], src: &Map, prefix: &s
     for (k, v) in src {
         let path = format!("{prefix}{k}");
         if table.get(&path).is_some_and(|f| f.parent.is_none()) {
+            continue;
+        }
+        // Nested objects report their unmapped values inside their own entries.
+        if table.objects.get(&path).is_some_and(|o| o.nested) {
             continue;
         }
         match v {
@@ -419,7 +477,7 @@ pub fn fetch_fields(table: &FieldTable, source: Option<&Value>, specs: &[FieldAn
     for p in nested_paths {
         let mut objs = Vec::new();
         crate::engine::source::extract_values(src, &p, &mut objs);
-        if let Some(v) = nested_values(table, &wanted, &p, &objs) {
+        if let Some(v) = nested_values(table, &wanted, &unmapped_patterns, &p, &objs) {
             fields.insert(p, v);
         }
     }
@@ -428,10 +486,10 @@ pub fn fetch_fields(table: &FieldTable, source: Option<&Value>, specs: &[FieldAn
 
 /// The `fields` of the nested objects `objs` at nested path `path`: one object per nested
 /// object, keyed relative to it, with deeper nested objects grouped the same way.
-fn nested_values(table: &FieldTable, wanted: &[(String, Option<String>, bool)], path: &str, objs: &[&Value]) -> Option<Value> {
+fn nested_values(table: &FieldTable, wanted: &[(String, Option<String>, bool)], unmapped: &[&str], path: &str, objs: &[&Value]) -> Option<Value> {
     let prefix = format!("{path}.");
     let inner: Vec<&(String, Option<String>, bool)> = wanted.iter().filter(|(n, _, _)| n.starts_with(&prefix)).collect();
-    if inner.is_empty() {
+    if inner.is_empty() && unmapped.is_empty() {
         return None;
     }
     let mut children: Vec<String> = table.nested_paths().filter(|o| o.parent_nested.as_deref() == Some(path)).map(|o| o.path.clone()).collect();
@@ -467,8 +525,16 @@ fn nested_values(table: &FieldTable, wanted: &[(String, Option<String>, bool)], 
             let rel = &c[prefix.len()..];
             let mut sub = Vec::new();
             crate::engine::source::extract_values(om, rel, &mut sub);
-            if let Some(v) = nested_values(table, wanted, c, &sub) {
+            if let Some(v) = nested_values(table, wanted, unmapped, c, &sub) {
                 m.insert(rel.to_string(), v);
+            }
+        }
+        // `include_unmapped` source values of this nested object, keyed relative to it.
+        if !unmapped.is_empty() {
+            let mut found = Vec::new();
+            collect_unmapped(table, unmapped, om, &prefix, &mut found);
+            for (p, v) in found {
+                m.insert(p[prefix.len()..].to_string(), Value::Arr(v));
             }
         }
         if !m.is_empty() {

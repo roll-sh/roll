@@ -19,6 +19,8 @@ async fn root_info_and_product_header() {
     assert_eq!(r.header("X-elastic-product"), Some("Elasticsearch"));
     assert!(r.text().contains("\"cluster_name\" : \"dev\""), "{}", r.text());
     assert!(r.text().contains("\"tagline\" : \"You Know, for Search\""));
+    // Elasticsearch and OpenSearch send no `Date` header.
+    assert_eq!(r.header("date"), None);
 }
 
 #[tokio::test]
@@ -509,6 +511,62 @@ async fn auth_matrix() {
 }
 
 const ANON: &str = "unable to authenticate with provided credentials and anonymous access is not allowed for this request";
+
+/// Users, API keys and access tokens of a cluster's own security authenticate through the node
+/// (`<user>@<cluster>`, `<key id>@<cluster>`, or routed by host), as their principal.
+#[tokio::test]
+async fn native_users_api_keys_and_tokens() {
+    use base64::Engine;
+    let t = start(NodeConfig { domain: Some("search.test".into()), ..NodeConfig::default() }, ListenOptions::default()).await;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let owner = basic("c1", "pw1");
+    let json = |r: &Resp| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap();
+    let ct = ("Content-Type", "application/json");
+    // `send` names `localhost`; routing by host needs the request's only Host header.
+    async fn by_host(addr: std::net::SocketAddr, path: &str, auth: &str) -> Resp {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let raw = format!("GET {path} HTTP/1.1\r\nHost: c1.search.test\r\nAuthorization: {auth}\r\n\r\n");
+        s.write_all(raw.as_bytes()).await.unwrap();
+        read_response(&mut s, &mut Vec::new(), false).await
+    }
+    let r = send(t.addr, "PUT", "/_security/role/reader", &[("Authorization", &owner), ct], br#"{"cluster":["monitor","manage_own_api_key"],"indices":[{"names":["logs*"],"privileges":["read"]}]}"#).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let r = send(t.addr, "PUT", "/_security/user/alice", &[("Authorization", &owner), ct], br#"{"password":"alicepw1","roles":["reader"]}"#).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    // A native user, qualified by cluster or routed by host.
+    let alice = basic("alice@c1", "alicepw1");
+    let r = send(t.addr, "GET", "/_security/_authenticate", &[("Authorization", &alice)], b"").await;
+    assert_eq!((r.status, json(&r)["username"].as_str()), (200, Some("alice")), "{}", r.text());
+    assert_eq!(json(&r)["authentication_realm"]["type"], "native");
+    let r = by_host(t.addr, "/_security/_authenticate", &basic("alice", "alicepw1")).await;
+    assert_eq!((r.status, json(&r)["username"].as_str()), (200, Some("alice")), "{}", r.text());
+    // Authorized by its roles: no index creation.
+    let r = send(t.addr, "PUT", "/logs-1", &[("Authorization", &alice)], b"").await;
+    assert_eq!((r.status, json(&r)["error"]["type"].as_str()), (403, Some("security_exception")), "{}", r.text());
+    // A wrong password and another cluster's user fail like unknown credentials.
+    for (u, p) in [("alice@c1", "nope"), ("alice@c2", "alicepw1")] {
+        let r = send(t.addr, "GET", "/_security/_authenticate", &[("Authorization", &basic(u, p))], b"").await;
+        assert_eq!(r.status, 401, "{u}: {}", r.text());
+    }
+    // `elastic` without a password of its own is the dev-mode owner: never through the node.
+    let r = send(t.addr, "GET", "/", &[("Authorization", &basic("elastic@c1", "anything"))], b"").await;
+    assert_eq!(r.status, 401, "{}", r.text());
+    // An API key the user created.
+    let r = send(t.addr, "POST", "/_security/api_key", &[("Authorization", &alice), ct], br#"{"name":"k"}"#).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let key = json(&r);
+    let (id, secret) = (key["id"].as_str().unwrap().to_string(), key["api_key"].as_str().unwrap().to_string());
+    let r = send(t.addr, "GET", "/_security/_authenticate", &[("Authorization", &format!("ApiKey {}", b64(&format!("{id}@c1:{secret}"))))], b"").await;
+    assert_eq!((r.status, json(&r)["api_key"]["id"].as_str()), (200, Some(id.as_str())), "{}", r.text());
+    let r = send(t.addr, "GET", "/_security/_authenticate", &[("Authorization", &format!("ApiKey {}", b64(&format!("{id}@c1:wrong"))))], b"").await;
+    assert_eq!(r.status, 401, "{}", r.text());
+    // An access token, routed by host.
+    let r = send(t.addr, "POST", "/_security/oauth2/token", &[("Authorization", &owner), ct], br#"{"grant_type":"password","username":"alice","password":"alicepw1"}"#).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let token = json(&r)["access_token"].as_str().unwrap().to_string();
+    let r = by_host(t.addr, "/_security/_authenticate", &format!("Bearer {token}")).await;
+    assert_eq!((r.status, json(&r)["username"].as_str()), (200, Some("alice")), "{}", r.text());
+}
 
 /// `serve_until` stops accepting, lets the request in flight finish (its connection then
 /// closes) and returns once every connection is gone.

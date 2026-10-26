@@ -152,7 +152,7 @@ pub(crate) fn approximate_intervals(field: u32, src: &IntervalsSource) -> Option
         S::MultiTerm { query, .. } => Some(Arc::new(query.as_ref().clone().with_rewrite(crate::query::RewriteMethod::ConstantScoreBlended))),
         S::Block(v) | S::Ordered(v) | S::Unordered(v) => all(&v.iter().collect::<Vec<_>>()),
         S::Or(v, _) | S::AtLeast(v, _) => any(&v.iter().collect::<Vec<_>>()),
-        S::Repeating(x, ..) | S::MaxGaps(x, _) | S::MaxWidth(x, _) | S::Extend(x, ..) | S::Offset(x, _) => approximate_intervals(field, x),
+        S::Repeating(x, ..) | S::MaxGaps(x, _) | S::MaxWidth(x, _) | S::Extend(x, ..) | S::Offset(x, _) | S::Scripted(x, _) => approximate_intervals(field, x),
         S::Containing(a, b) | S::ContainedBy(a, b) | S::Overlapping(a, b) => all(&[a, b]),
         S::NotContaining(a, _) | S::NotContainedBy(a, _) | S::NonOverlapping(a, _) => approximate_intervals(field, a),
         S::NoMatch(r) => Some(Arc::new(MatchNoneQuery::new(r.clone()))),
@@ -611,7 +611,7 @@ fn confirm_sources(src: &IntervalsSource, spec: &Arc<SourceSpec>) -> IntervalsSo
         match s {
             S::Field(..) | S::Source(..) => true,
             S::Block(v) | S::Ordered(v) | S::Unordered(v) | S::Or(v, _) | S::AtLeast(v, _) => v.iter().any(reads_other_field),
-            S::Repeating(x, ..) | S::MaxGaps(x, _) | S::MaxWidth(x, _) | S::Extend(x, ..) | S::Offset(x, _) => reads_other_field(x),
+            S::Repeating(x, ..) | S::MaxGaps(x, _) | S::MaxWidth(x, _) | S::Extend(x, ..) | S::Offset(x, _) | S::Scripted(x, _) => reads_other_field(x),
             S::Containing(a, b)
             | S::ContainedBy(a, b)
             | S::NotContaining(a, b)
@@ -641,6 +641,7 @@ fn confirm_sources(src: &IntervalsSource, spec: &Arc<SourceSpec>) -> IntervalsSo
         S::MaxWidth(x, n) => S::MaxWidth(b(x), *n),
         S::Extend(x, l, r) => S::Extend(b(x), *l, *r),
         S::Offset(x, before) => S::Offset(b(x), *before),
+        S::Scripted(x, script) => S::Scripted(b(x), script.clone()),
         S::Containing(x, y) => S::Containing(b(x), b(y)),
         S::ContainedBy(x, y) => S::ContainedBy(b(x), b(y)),
         S::NotContaining(x, y) => S::NotContaining(b(x), b(y)),

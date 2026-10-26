@@ -72,10 +72,57 @@ pub fn geohash_decode(hash: &str) -> EsResult<GeoPoint> {
 
 /// `GeoPoint.resetFromString` (no z values): `lat,lon`, `POINT (lon lat)` or a geohash.
 pub fn point_from_string(s: &str) -> EsResult<GeoPoint> {
+    point_from_string_z(s, false)
+}
+
+/// Java's `String.split(",")`: trailing empty strings are dropped.
+fn java_split_commas(s: &str) -> Vec<&str> {
+    let mut parts: Vec<&str> = s.split(',').collect();
+    while parts.last().is_some_and(|p| p.is_empty()) {
+        parts.pop();
+    }
+    parts
+}
+
+/// `failed to parse [[a, b, c, d]], expected 2 or 3 coordinates but found: [4]` (the message
+/// formats the split values as a Java array).
+fn coordinate_count_error(parts: &[&str]) -> EsError {
+    parse_err(format!("failed to parse [[{}]], expected 2 or 3 coordinates but found: [{}]", parts.join(", "), parts.len()))
+}
+
+/// A WKT point string for a point field (`resetFromWKT`): parse failures and rejected z values
+/// are wrapped as `Invalid WKT format`.
+fn wkt_point(s: &str, map_type: &str, ignore_z: bool) -> EsResult<(f64, f64)> {
+    // The causes are plain Java exceptions (`ParseException`, `IllegalArgumentException`), so
+    // the wrapper is the root cause.
+    fn plain(e: EsError) -> EsError {
+        let out = EsError::java(e.status, e.kind.to_string(), e.reason().to_string());
+        match e.caused_by {
+            Some(c) => out.caused_by(plain(*c)),
+            None => out,
+        }
+    }
+    let invalid = |inner: EsError| parse_err("Invalid WKT format").caused_by(plain(inner));
+    let parsed = parse_wkt(s).map_err(|e| invalid(if e.kind == "i_o_exception" { e.caused_by.map(|c| *c).unwrap_or_else(|| EsError::parse("")) } else { e }))?;
+    match parsed {
+        Geometry::Point(c) => {
+            if let Some(z) = c.get(2).filter(|_| !ignore_z) {
+                return Err(invalid(EsError::illegal_argument(format!("found Z value [{}] but [ignore_z_value] parameter is [false]", crate::json::write::java_double(*z)))));
+            }
+            Ok((c.first().copied().unwrap_or(f64::NAN), c.get(1).copied().unwrap_or(f64::NAN)))
+        }
+        other => Err(parse_err(format!("[{map_type}] supports only POINT among WKT primitives, but found {}", other.wkt_name()))),
+    }
+}
+
+/// `GeoPoint.resetFromString`: `lat,lon[,z]`, `POINT (lon lat [z])` or a geohash; a z value is
+/// dropped when `ignore_z` (the mapping's `ignore_z_value`, true by default) and rejected
+/// otherwise.
+pub fn point_from_string_z(s: &str, ignore_z: bool) -> EsResult<GeoPoint> {
     if s.contains(',') {
-        let parts: Vec<&str> = s.split(',').collect();
-        if parts.len() > 3 {
-            return Err(parse_err(format!("failed to parse [{s}], expected 2 or 3 coordinates but found: [{}]", parts.len())));
+        let parts = java_split_commas(s);
+        if parts.len() > 3 || parts.len() < 2 {
+            return Err(coordinate_count_error(&parts));
         }
         let num = |t: &str, what: &str| {
             crate::units::parse_java_double(t.trim()).ok_or_else(|| parse_err(format!("{what} must be a number")))
@@ -83,30 +130,245 @@ pub fn point_from_string(s: &str) -> EsResult<GeoPoint> {
         let lat = num(parts[0], "latitude")?;
         let lon = num(parts[1], "longitude")?;
         if parts.len() == 3 {
-            return Err(z_error(num(parts[2], "altitude")?));
+            let z = num(parts[2], "altitude")?;
+            if !ignore_z {
+                return Err(z_error(z));
+            }
         }
         return Ok(GeoPoint { lat, lon });
     }
     if s.trim().to_ascii_uppercase().starts_with("POINT") {
-        return match parse_wkt(s)? {
-            Geometry::Point(c) => {
-                if c.len() > 2 {
-                    return Err(z_error(c[2]));
-                }
-                Ok(GeoPoint { lat: c.get(1).copied().unwrap_or(f64::NAN), lon: c.first().copied().unwrap_or(f64::NAN) })
-            }
-            other => Err(parse_err(format!("[geo_point] supports only POINT among WKT primitives, but found {}", other.wkt_name()))),
-        };
+        let (lon, lat) = wkt_point(s, "geo_point", ignore_z)?;
+        return Ok(GeoPoint { lat, lon });
     }
     geohash_decode(s)
+}
+
+/// `CartesianPoint.resetFromString`: `POINT (x y [z])` (anything containing `point`), `x,y[,z]`;
+/// other strings fail like a geohash would. Returned with `lon = x`, `lat = y`.
+pub fn cartesian_from_string(s: &str, ignore_z: bool) -> EsResult<GeoPoint> {
+    if s.to_ascii_lowercase().contains("point") {
+        let (x, y) = wkt_point(s, "point", ignore_z)?;
+        return Ok(GeoPoint { lon: x, lat: y });
+    }
+    if s.contains(',') {
+        let parts = java_split_commas(s);
+        if parts.len() > 3 || parts.len() < 2 {
+            return Err(coordinate_count_error(&parts));
+        }
+        let coord = |t: &str, name: &str| -> EsResult<f64> {
+            let v = crate::units::parse_java_double(t.trim()).ok_or_else(|| parse_err(format!("[{name}] must be a number")))?;
+            if !v.is_finite() {
+                return Err(not_finite(name, v));
+            }
+            Ok(v)
+        };
+        let x = coord(parts[0], "x")?;
+        let y = coord(parts[1], "y")?;
+        if parts.len() == 3 {
+            // Elasticsearch names `y` for an unparsable z.
+            let z = crate::units::parse_java_double(parts[2].trim()).ok_or_else(|| parse_err("[y] must be a number"))?;
+            cartesian_z(z, ignore_z)?;
+        }
+        return Ok(GeoPoint { lon: x, lat: y });
+    }
+    if s.contains('.') {
+        return Err(parse_err(format!("failed to parse [{s}], expected 2 or 3 coordinates but found: [1]")));
+    }
+    let first = s.chars().next().map(String::from).unwrap_or_default();
+    Err(parse_err(format!("unsupported symbol [{first}] in point [{s}]")))
+}
+
+fn not_finite(name: &str, v: f64) -> EsError {
+    parse_err(format!("invalid [{name}] value [{}]; must be between -3.4028234663852886E38 and 3.4028234663852886E38", crate::json::write::java_double(v)))
+}
+
+/// `CartesianPoint.assertZValue`: rejected unless ignored, and then it must be finite.
+fn cartesian_z(z: f64, ignore_z: bool) -> EsResult<()> {
+    if !ignore_z {
+        return Err(z_error(z));
+    }
+    if !z.is_finite() {
+        return Err(not_finite("z", z));
+    }
+    Ok(())
+}
+
+/// The point type a [`parse_field_point`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointKind {
+    /// `geo_point`: `lon`/`lat`, strings are `lat,lon`, WKT or a geohash.
+    Geo,
+    /// `point`: `x`/`y`, strings are `x,y` or WKT.
+    Cartesian,
+}
+
+impl PointKind {
+    fn map_type(self) -> &'static str {
+        match self {
+            PointKind::Geo => "geo_point",
+            PointKind::Cartesian => "point",
+        }
+    }
+}
+
+/// `GenericPointParser.parseValidDouble`: numbers, or strings Java parses as a double.
+fn valid_double(p: &XParser<'_>, desc: &str) -> EsResult<f64> {
+    match p.token() {
+        Token::Number => p.double_value(),
+        Token::String => {
+            let t = p.text()?;
+            crate::units::parse_java_double(&t).ok_or_else(|| {
+                let cause = if t.is_empty() { "empty String".to_string() } else { format!("For input string: \"{t}\"") };
+                parse_err(format!("[{desc}] must be a valid double value")).caused_by(EsError::java(400, "number_format_exception", cause))
+            })
+        }
+        _ => Err(parse_err(format!("{desc} must be a number"))),
+    }
+}
+
+/// A point field value in a document (`GenericPointParser.parsePoint`, Elasticsearch's parser
+/// for `geo_point` and `point` values): an object with the two coordinate fields, `z`, or a
+/// GeoJSON `type`/`coordinates` pair; an array `[x, y(, z)]`; or a string. Returned with
+/// `lon = x`, `lat = y`. A failure inside an object is reported once the object has been read
+/// (Elasticsearch's sub-parser skips to its end), so error locations match.
+pub fn parse_field_point(p: &mut XParser<'_>, kind: PointKind, ignore_z: bool) -> EsResult<GeoPoint> {
+    let z_check = |z: f64| if kind == PointKind::Cartesian { cartesian_z(z, ignore_z) } else if ignore_z { Ok(()) } else { Err(z_error(z)) };
+    match p.token() {
+        Token::StartObject => {
+            let (xf, yf, xd, yd) = match kind {
+                PointKind::Geo => ("lon", "lat", "longitude", "latitude"),
+                PointKind::Cartesian => ("x", "y", "x", "y"),
+            };
+            let (mut x, mut y) = (f64::NAN, f64::NAN);
+            let mut geojson_type: Option<String> = None;
+            let mut coordinates: Option<Vec<f64>> = None;
+            let mut read = |p: &mut XParser<'_>| -> EsResult<()> {
+                while let Some(t) = p.next_token() {
+                    if t == Token::EndObject {
+                        return Ok(());
+                    }
+                    let field = p.current_name().unwrap_or("").to_string();
+                    p.next_token();
+                    match field.as_str() {
+                        f if f == xf => x = valid_double(p, xd)?,
+                        f if f == yf => y = valid_double(p, yd)?,
+                        "z" => z_check(valid_double(p, "z")?)?,
+                        "type" => {
+                            if p.token() != Token::String {
+                                return Err(parse_err("[type] must be a string"));
+                            }
+                            geojson_type = Some(p.text()?);
+                        }
+                        "coordinates" => {
+                            if p.token() != Token::StartArray {
+                                return Err(parse_err("[coordinates] must be an array"));
+                            }
+                            let mut c = Vec::new();
+                            while let Some(t) = p.next_token() {
+                                if t == Token::EndArray {
+                                    break;
+                                }
+                                c.push(valid_double(p, "coordinates")?);
+                            }
+                            coordinates = Some(c);
+                        }
+                        other => return Err(parse_err(format!("field [{other}] not supported - must be one of: {xf}, {yf}, z, type, coordinates"))),
+                    }
+                }
+                Ok(())
+            };
+            if let Err(e) = read(p) {
+                // Skip the rest of the object, so the error is located at its end.
+                if matches!(p.token(), Token::StartObject | Token::StartArray) {
+                    p.skip_children();
+                }
+                while let Some(t) = p.next_token() {
+                    match t {
+                        Token::EndObject => break,
+                        Token::StartObject | Token::StartArray => p.skip_children(),
+                        _ => {}
+                    }
+                }
+                return Err(e);
+            }
+            let (has_x, has_y) = (!x.is_nan(), !y.is_nan());
+            let (xy, geojson) = (has_x && has_y, coordinates.is_some() && geojson_type.is_some());
+            if xy && geojson {
+                return Err(parse_err("fields matching more than one point format"));
+            }
+            if !xy && !geojson {
+                return Err(parse_err(if has_x {
+                    format!("Required [{yf}]")
+                } else if has_y {
+                    format!("Required [{xf}]")
+                } else if coordinates.is_some() {
+                    "Required [type]".to_string()
+                } else if geojson_type.is_some() {
+                    "Required [coordinates]".to_string()
+                } else if kind == PointKind::Geo {
+                    "field must be either lat/lon, geohash string or type/coordinates".to_string()
+                } else {
+                    "field must be either lat/lon or type/coordinates".to_string()
+                }));
+            }
+            if let Some(c) = coordinates {
+                if !geojson_type.is_some_and(|t| t.eq_ignore_ascii_case("point")) {
+                    return Err(parse_err(format!("[type] for {} can only be 'Point'", kind.map_type())));
+                }
+                if c.len() < 2 {
+                    return Err(parse_err("[coordinates] must contain at least two values"));
+                }
+                if c.len() == 3 {
+                    z_check(c[2])?;
+                }
+                if c.len() > 3 {
+                    return Err(parse_err(format!("[{}] field type does not accept > 3 dimensions", kind.map_type())));
+                }
+                return Ok(GeoPoint { lon: c[0], lat: c[1] });
+            }
+            Ok(GeoPoint { lon: x, lat: y })
+        }
+        Token::StartArray => {
+            let (mut x, mut y) = (f64::NAN, f64::NAN);
+            let mut n = 0;
+            while let Some(t) = p.next_token() {
+                if t == Token::EndArray {
+                    break;
+                }
+                if t != Token::Number {
+                    return Err(parse_err("numeric value expected"));
+                }
+                n += 1;
+                match n {
+                    1 => x = p.double_value()?,
+                    2 => y = p.double_value()?,
+                    3 => z_check(p.double_value()?)?,
+                    _ => return Err(parse_err(format!("[{}] field type does not accept > 3 dimensions", kind.map_type()))),
+                }
+            }
+            Ok(GeoPoint { lon: x, lat: y })
+        }
+        Token::String => {
+            let s = p.text()?;
+            match kind {
+                PointKind::Geo => point_from_string_z(&s, ignore_z),
+                PointKind::Cartesian => cartesian_from_string(&s, ignore_z),
+            }
+        }
+        _ => Err(parse_err(format!("{} expected", kind.map_type()))),
+    }
 }
 
 /// `GeoUtils.parseGeoPoint(parser)`: an object, an array `[lon, lat]` or a string.
 pub fn parse_point(p: &mut XParser<'_>) -> EsResult<GeoPoint> {
     match p.token() {
+        Token::StartObject if crate::opensearch::active() => crate::opensearch::geo::parse_point_object(p),
         Token::StartObject => {
             let mut pt = GeoPoint::NAN;
             let mut geohash = None;
+            let mut geojson_type: Option<String> = None;
+            let mut coordinates: Option<Vec<f64>> = None;
             let mut current = String::new();
             while let Some(t) = p.next_token() {
                 match t {
@@ -115,11 +377,45 @@ pub fn parse_point(p: &mut XParser<'_>) -> EsResult<GeoPoint> {
                     _ => match current.as_str() {
                         "lat" => pt.lat = p.double_value().map_err(|_| parse_err("latitude must be a number"))?,
                         "lon" => pt.lon = p.double_value().map_err(|_| parse_err("longitude must be a number"))?,
+                        // A GeoJSON point (`{"type": "Point", "coordinates": [lon, lat]}`).
+                        "type" => {
+                            if t != Token::String {
+                                return Err(parse_err("[type] must be a string"));
+                            }
+                            geojson_type = Some(p.text()?);
+                        }
+                        "coordinates" => {
+                            if t != Token::StartArray {
+                                return Err(parse_err("[coordinates] must be an array"));
+                            }
+                            let mut c = Vec::new();
+                            while let Some(t) = p.next_token() {
+                                if t == Token::EndArray {
+                                    break;
+                                }
+                                if t != Token::Number {
+                                    return Err(parse_err("coordinates must be a number"));
+                                }
+                                c.push(p.double_value()?);
+                            }
+                            coordinates = Some(c);
+                        }
                         "geohash" => geohash = Some(p.text()?),
                         "z" => return Err(z_error(p.double_value()?)),
                         _ => return Err(parse_err("field must be either [lat], [lon] or [geohash]")),
                     },
                 }
+            }
+            if geojson_type.is_some() || coordinates.is_some() {
+                let Some(ty) = geojson_type else { return Err(parse_err("Required [type]")) };
+                let Some(c) = coordinates else { return Err(parse_err("Required [coordinates]")) };
+                if !ty.eq_ignore_ascii_case("point") {
+                    return Err(parse_err("[type] for geo_point can only be 'Point'"));
+                }
+                if c.len() < 2 {
+                    return Err(parse_err("[coordinates] must contain at least two values"));
+                }
+                return Ok(GeoPoint { lon: c[0], lat: c[1] });
             }
             if let Some(h) = geohash {
                 if !pt.lat.is_nan() || !pt.lon.is_nan() {
@@ -1169,6 +1465,41 @@ impl GeoGrid {
         }
         let field = field.ok_or_else(|| EsError::illegal_argument("[geo_grid] requires a field"))?;
         let (grid, cell) = grid.ok_or_else(|| EsError::illegal_argument("[geo_grid] requires a grid"))?;
+        // `Grid.validate` runs as the id is set: hashes and hex addresses fail parsing (tiles
+        // only when the query is built).
+        match grid {
+            "geohash" => {
+                const BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+                if let Some(c) = cell.chars().take(12).find(|c| !c.is_ascii() || !BASE32.contains(&(*c as u8))) {
+                    return Err(EsError::illegal_argument(format!("unsupported symbol [{c}] in geohash [{cell}]")));
+                }
+                // `Geohash.mortonEncode` (it reads the first 12 characters).
+                if cell.is_empty() {
+                    return Err(EsError::illegal_argument("empty geohash"));
+                }
+            }
+            // `GeoTileUtils.longEncode`: three Java ints (their range is checked when built).
+            "geotile" => {
+                let bad = || EsError::illegal_argument(format!("Invalid geotile_grid hash string of {cell}. Must be three integers in a form \"zoom/x/y\"."));
+                let parts: Vec<&str> = cell.splitn(4, '/').collect();
+                if parts.len() != 3 {
+                    return Err(bad());
+                }
+                if let Some(p) = parts.iter().find(|p| crate::units::parse_java_int(p).is_none()) {
+                    return Err(bad().caused_by(EsError::java(400, "number_format_exception", format!("For input string: \"{p}\""))));
+                }
+            }
+            "geohex" if search_aggs::h3::string_to_h3(&cell).is_none() => {
+                let e = EsError::illegal_argument(format!("Invalid h3 address [{cell}]"));
+                // `Long.parseUnsignedLong(address, 16)` fails first on non-hex text.
+                return Err(if cell.is_empty() || !cell.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    e.caused_by(EsError::java(400, "number_format_exception", format!("For input string: \"{cell}\" under radix 16")))
+                } else {
+                    e
+                });
+            }
+            _ => {}
+        }
         let mut q = GeoGrid { field, grid, cell, ignore_unmapped, common: Common::default() };
         q.common.name = name;
         q.common.boost = check_boost(boost, || q.clone().into())?;
@@ -1181,5 +1512,71 @@ impl GeoGrid {
         m.insert("ignore_unmapped".into(), self.ignore_unmapped.into());
         self.common.write_if_set(&mut m);
         Value::Obj(m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parses `json` as a point field value; the point or the error's reason (and its cause).
+    fn field_point(json: &str, kind: PointKind, ignore_z: bool) -> Result<(f64, f64), String> {
+        let v = crate::json::parse(json.as_bytes()).unwrap().unwrap();
+        let mut p = XParser::from_value(&v);
+        p.next_token();
+        parse_field_point(&mut p, kind, ignore_z).map(|pt| (pt.lon, pt.lat)).map_err(|e| match &e.caused_by {
+            Some(c) => format!("{} <- {}: {}", e.reason(), c.kind, c.reason()),
+            None => e.reason().to_string(),
+        })
+    }
+
+    // Expected values and messages are Elasticsearch 9.5.5's for documents indexed into `point`
+    // and `geo_point` fields.
+    #[test]
+    fn point_fields_drop_z_values_unless_ignore_z_value_is_false() {
+        use PointKind::*;
+        for json in [r#"{"x":1.5,"y":2.5,"z":3}"#, "[1.5,2.5,3.5]", r#""POINT (1.5 2.5 3)""#, r#""1.5,2.5,3.5""#, r#"{"type":"Point","coordinates":[1.5,2.5,3]}"#] {
+            assert_eq!(field_point(json, Cartesian, true), Ok((1.5, 2.5)), "{json}");
+        }
+        assert_eq!(field_point(r#"{"x":1.5,"y":2.5,"z":3}"#, Cartesian, false), Err("Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]".into()));
+        assert_eq!(
+            field_point(r#""POINT (1 2 3)""#, Cartesian, false),
+            Err("Invalid WKT format <- illegal_argument_exception: found Z value [3.0] but [ignore_z_value] parameter is [false]".into())
+        );
+        assert_eq!(field_point(r#"{"lat":1,"lon":2,"z":3}"#, Geo, true), Ok((2.0, 1.0)));
+        assert_eq!(field_point(r#""1,2,3""#, Geo, true), Ok((2.0, 1.0)));
+        assert_eq!(field_point(r#""POINT (1 2 3)""#, Geo, true), Ok((1.0, 2.0)));
+        assert_eq!(field_point(r#""1,2,3""#, Geo, false), Err("Exception parsing coordinates: found Z value [3.0] but [ignore_z_value] parameter is [false]".into()));
+    }
+
+    #[test]
+    fn point_field_errors_match_elasticsearch() {
+        use PointKind::*;
+        let cases: &[(&str, PointKind, &str)] = &[
+            (r#""u0vt""#, Cartesian, "unsupported symbol [u] in point [u0vt]"),
+            (r#""1.5""#, Cartesian, "failed to parse [1.5], expected 2 or 3 coordinates but found: [1]"),
+            (r#""1,2,3,4""#, Cartesian, "failed to parse [[1, 2, 3, 4]], expected 2 or 3 coordinates but found: [4]"),
+            (r#""a,b""#, Cartesian, "[x] must be a number"),
+            (r#""1,a""#, Cartesian, "[y] must be a number"),
+            (r#""1,2,a""#, Cartesian, "[y] must be a number"),
+            (r#""Infinity,2""#, Cartesian, "invalid [x] value [Infinity]; must be between -3.4028234663852886E38 and 3.4028234663852886E38"),
+            (r#"{"x":"a","y":1}"#, Cartesian, "[x] must be a valid double value <- number_format_exception: For input string: \"a\""),
+            (r#"{"x":true,"y":1}"#, Cartesian, "x must be a number"),
+            (r#"{"x":1,"y":2,"q":1}"#, Cartesian, "field [q] not supported - must be one of: x, y, z, type, coordinates"),
+            (r#"{"x":1,"y":2,"type":"Point","coordinates":[1,2]}"#, Cartesian, "fields matching more than one point format"),
+            (r#"{"type":"Point","coordinates":[1,2,3,4]}"#, Cartesian, "[point] field type does not accept > 3 dimensions"),
+            ("{}", Cartesian, "field must be either lat/lon or type/coordinates"),
+            ("{}", Geo, "field must be either lat/lon, geohash string or type/coordinates"),
+            ("true", Cartesian, "point expected"),
+            (r#"{"geohash":"u0"}"#, Geo, "field [geohash] not supported - must be one of: lon, lat, z, type, coordinates"),
+            (r#"{"lat":"a","lon":1}"#, Geo, "[latitude] must be a valid double value <- number_format_exception: For input string: \"a\""),
+            (r#""POINT (1""#, Geo, "Invalid WKT format <- parse_exception: expected number but found: END-OF-STREAM"),
+        ];
+        for (json, kind, msg) in cases {
+            assert_eq!(field_point(json, *kind, true), Err(msg.to_string()), "{json}");
+        }
+        // Numeric strings coerce in objects; `[x, "y"]` is handled by the field mapper's array path.
+        assert_eq!(field_point(r#"{"x":"1.5","y":"2"}"#, Cartesian, true), Ok((1.5, 2.0)));
+        assert_eq!(field_point(r#""  1 , 2 ""#, Cartesian, true), Ok((1.0, 2.0)));
     }
 }

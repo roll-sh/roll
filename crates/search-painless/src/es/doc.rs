@@ -204,7 +204,9 @@ impl Sdv {
         self.get_with(i, &[])
     }
 
-    fn get_with(&self, i: i32, outer: &[String]) -> VR {
+    /// `get(i)` reached through the caller frames `outer` (`(method, line)` of this class),
+    /// which are only formatted when the call fails: scripts call this once per document.
+    fn get_with(&self, i: i32, outer: &[(&str, u32)]) -> VR {
         if self.kind == DocKind::DenseVector {
             return Err(vector_get_error());
         }
@@ -223,7 +225,8 @@ impl Sdv {
                 v => v.clone(),
             });
         }
-        Err(get_error(self.class, self.kind, self.vals.len(), i, outer))
+        let outer: Vec<String> = outer.iter().map(|&(m, l)| frame(self.class, m, l)).collect();
+        Err(get_error(self.class, self.kind, self.vals.len(), i, &outer))
     }
 
     /// `get(i)` called through `List` (`x[i]` on a `def`, a `List`-typed variable): the call
@@ -239,14 +242,14 @@ impl Sdv {
             cls::SDV_BYTES_REFS => 494,
             _ => return self.get(i),
         };
-        self.get_with(i, &[frame(self.class, "get", decl)])
+        self.get_with(i, &[("get", decl)])
     }
 
     /// `getValue()`.
     pub fn value(&self) -> VR {
-        let gv = frame(self.class, "getValue", get_value_line(self.class));
+        let gv = ("getValue", get_value_line(self.class));
         if matches!(self.class, cls::SDV_BOOLEANS | cls::SDV_BYTES_REFS) && self.vals.is_empty() {
-            return Err(empty_error(self.class, &[gv]));
+            return Err(empty_error(self.class, &[frame(self.class, gv.0, gv.1)]));
         }
         self.get_with(0, &[gv])
     }
@@ -401,8 +404,24 @@ pub fn doc_fast(vm: &mut Vm, field: u32, what: DocWhat) -> VR {
         DocWhat::Empty => Ok(Value::Bool(dv.is_empty())),
         DocWhat::Value => {
             let class = sdv_class(dv.kind);
-            if matches!(class, cls::SDV_UNSIGNED_LONG | cls::SDV_VERSION | cls::SDV_DENSE_VECTOR | cls::SDV_RANK_VECTORS) {
+            if matches!(class, cls::SDV_DENSE_VECTOR | cls::SDV_RANK_VECTORS)
+                || (class == cls::SDV_VERSION && !vm.prog.version_allowlist)
+                || (class == cls::SDV_UNSIGNED_LONG && !vm.prog.unsigned_long_allowlist)
+            {
                 return Err(crate::vm::iae("Illegal list shortcut value [value]."));
+            }
+            if dv.is_empty() && class == cls::SDV_VERSION {
+                // x-pack's `VersionScriptDocValues.get` throws by itself (a plugin class: no
+                // server module prefix).
+                let mut t = crate::vm::Throw::new(
+                    cls::ILLEGAL_STATE_EXCEPTION,
+                    Some("A document doesn't have a value for a field! Use doc[<field>].size()==0 to check if a document is missing a field!".into()),
+                );
+                t.frames = vec![
+                    "org.elasticsearch.xpack.versionfield.VersionScriptDocValues.get(VersionScriptDocValues.java:25)".into(),
+                    "org.elasticsearch.xpack.versionfield.VersionScriptDocValues.getValue(VersionScriptDocValues.java:19)".into(),
+                ];
+                return Err(t);
             }
             if dv.is_empty() {
                 let gv = frame(class, "getValue", get_value_line(class));
@@ -411,7 +430,7 @@ pub fn doc_fast(vm: &mut Vm, field: u32, what: DocWhat) -> VR {
                 }
                 return Err(get_error(class, dv.kind, 0, 0, &[gv]));
             }
-            if matches!(dv.kind, DocKind::String | DocKind::Ip) {
+            if matches!(dv.kind, DocKind::String | DocKind::Ip | DocKind::Version) {
                 return Ok(reuse_str(&mut vm.st.doc_strs[i], &vm.st.doc_bufs[i].strings()[0]));
             }
             Ok(doc_value(dv, 0))
@@ -518,6 +537,10 @@ fn field_value(dv: &DocValues, i: usize) -> (Value, Value) {
             (ip, Value::str(s))
         }
         Binary => (super::misc::nio(super::misc::NioBuf::wrap(Rc::from(dv.bytes[i].as_slice()))), Value::Null),
+        Version => {
+            let s = &dv.strings()[i];
+            (es_value(EsObj::Version(Rc::from(s.as_str()))), Value::str(s))
+        }
         _ => (doc_value(dv, i), Value::Null),
     }
 }
@@ -575,13 +598,21 @@ fn f_field(vm: &mut Vm, a: &mut [Value]) -> VR {
     Ok(es_value(EsObj::Field(field_of(vm, &name)?)))
 }
 
-/// `$('field', default)`: `field('field').get(default)`.
+/// `$('field', default)`: `field('field').get(default)` (a vector field's value is its
+/// `DenseVector`, as `DenseVectorDocValuesField.get(DenseVector)` returns it).
 fn f_dollar(vm: &mut Vm, a: &mut [Value]) -> VR {
     let name = a[0].to_java_string();
     let f = field_of(vm, &name)?;
-    Ok(match f.vals.first() {
-        Some(v) if !matches!(f.kind, Some(DocKind::DenseVector | DocKind::RankVectors)) => v.clone(),
-        _ => a[1].clone(),
+    Ok(match f.kind {
+        Some(DocKind::DenseVector) => match &f.vector {
+            Some(v) => es_value(EsObj::Vector(Some(v.clone()))),
+            None => a[1].clone(),
+        },
+        Some(DocKind::RankVectors) => match &f.rank {
+            Some(r) => es_value(EsObj::RankVectors(Some(r.clone()))),
+            None => a[1].clone(),
+        },
+        _ => f.vals.first().cloned().unwrap_or_else(|| a[1].clone()),
     })
 }
 
@@ -746,9 +777,7 @@ fn geo_of(v: &Value) -> Result<(f64, f64), Thrown> {
 }
 
 fn geo_value_with(s: &Sdv, outer: &str, line: u32) -> Result<(f64, f64), Thrown> {
-    let gv = frame(s.class, "getValue", get_value_line(s.class));
-    let extra = frame(s.class, outer, line);
-    let v = s.get_with(0, &[gv, extra])?;
+    let v = s.get_with(0, &[("getValue", get_value_line(s.class)), (outer, line)])?;
     geo_of(&v)
 }
 
@@ -1138,7 +1167,11 @@ pub fn register(b: &mut Builder) {
     b.m(SDV_BYTES_REFS, "BytesRef get(int)", sdv_get);
     b.m(SDV_BYTES_REFS, "BytesRef getValue()", sdv_value);
     b.m(SDV_UNSIGNED_LONG, "def get(int)", sdv_get);
+    // x-pack's `UnsignedLongScriptDocValues.getValue`: the raw long (values past
+    // `Long.MAX_VALUE` read negative).
+    b.m(SDV_UNSIGNED_LONG, "long getValue()", sdv_value);
     b.m(SDV_VERSION, "String get(int)", sdv_get);
+    b.m(SDV_VERSION, "String getValue()", sdv_value);
     b.m(SDV_DENSE_VECTOR, "def get(int)", sdv_get);
     b.m(SDV_DENSE_VECTOR, "float[] getVectorValue()", dv_vector_value);
     b.m(SDV_DENSE_VECTOR, "float getMagnitude()", dv_magnitude);
@@ -1268,9 +1301,17 @@ pub fn register(b: &mut Builder) {
     b.m(HALF_FLOAT_DOC_VALUES_FIELD, "List asDoubles()", fl_alts);
     b.m(HALF_FLOAT_DOC_VALUES_FIELD, "double asDouble(double)", fl_alt1);
     b.m(HALF_FLOAT_DOC_VALUES_FIELD, "double asDouble(int,double)", fl_alt2);
+    // x-pack spatial's `GeoShapeDocValuesField`: the doc's `GeoShapeValue` or the default.
+    b.m(GEO_SHAPE_DOC_VALUES_FIELD, "def get(def)", fl_get1);
+    b.m(GEO_SHAPE_DOC_VALUES_FIELD, "def get(int,def)", fl_get2);
     b.m(IP_DOC_VALUES_FIELD, "List asStrings()", fl_alts);
     b.m(IP_DOC_VALUES_FIELD, "String asString(String)", fl_alt1);
     b.m(IP_DOC_VALUES_FIELD, "String asString(int,String)", fl_alt2);
+    b.m(VERSION_STRING_DOC_VALUES_FIELD, "Version get(Version)", fl_get1);
+    b.m(VERSION_STRING_DOC_VALUES_FIELD, "Version get(int,Version)", fl_get2);
+    b.m(VERSION_STRING_DOC_VALUES_FIELD, "List asStrings()", fl_alts);
+    b.m(VERSION_STRING_DOC_VALUES_FIELD, "String asString(String)", fl_alt1);
+    b.m(VERSION_STRING_DOC_VALUES_FIELD, "String asString(int,String)", fl_alt2);
     b.m(RANK_VECTORS_DOC_VALUES_FIELD, "RankVectors get()", fl_rank);
     b.m(RANK_VECTORS_DOC_VALUES_FIELD, "RankVectors get(RankVectors)", fl_rank_or);
     b.m(DENSE_VECTOR_DOC_VALUES_FIELD, "DenseVector get()", fl_vector);

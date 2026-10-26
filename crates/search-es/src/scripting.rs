@@ -99,6 +99,7 @@ impl ScriptService {
         let l = match lang.as_str() {
             "painless" => Lang::Painless,
             "mustache" => Lang::Mustache,
+            "expression" => Lang::Expression,
             other => return Err(EsError::illegal_argument(format!("script_lang not supported [{other}]"))),
         };
         let opts: Vec<(String, String)> = options.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_json()))).collect();
@@ -106,7 +107,17 @@ impl ScriptService {
             ScriptType::Inline => self.engine.compile_lang(l, &source, ctx, &opts),
             ScriptType::Stored => self.engine.compile_stored(l, &source, ctx, &opts),
         }
-        .map_err(script_error)?;
+        .map_err(|e| {
+            // An engine that rejects the context throws a plain IllegalArgumentException, which
+            // `ScriptService.compile` wraps.
+            if l == Lang::Expression && e.plain && e.cause_type == "illegal_argument_exception" {
+                let ty = if s.ty == ScriptType::Inline { "inline" } else { "stored" };
+                let what = if s.ty == ScriptType::Inline { source.as_str() } else { s.id_or_code.as_str() };
+                let cause = script_error(e);
+                return EsError::new(cause.status, "general_script_exception", format!("Failed to compile {ty} script [{what}] using lang [expression]")).caused_by(cause);
+            }
+            script_error(e)
+        })?;
         Ok(Bound { compiled, params: to_serde(&Value::Obj(s.params.clone())), describe: describe(s) })
     }
 }
@@ -117,7 +128,12 @@ pub fn script_error(e: ScriptError) -> EsError {
     let status = e.status;
     let roots: Vec<EsError> = e.root_causes().iter().map(|r| from_json_error(r, status)).collect();
     let mut out = from_json_error(&e.to_json(), status);
-    if roots.len() == 1 && !e.plain && e.cause_is_root {
+    // An expression's cause is a `java.text.ParseException` (`parse_exception`, which reads like
+    // Elasticsearch's own parse exception): the script exception itself is the root cause.
+    if !e.plain && e.lang == "expression" && !e.cause_is_root {
+        let full = out.clone();
+        out = out.with_root_causes(vec![full]);
+    } else if roots.len() == 1 && !e.plain && e.cause_is_root {
         out = out.with_root_causes(roots);
     }
     out
@@ -160,6 +176,14 @@ pub fn from_json_error(j: &serde_json::Value, status: u16) -> EsError {
                     }
                 }
                 val = Value::Obj(pm);
+            }
+            // A host that threw with OpenSearch's frames (the opensearch dialect) owns the whole
+            // stack: the Elasticsearch lookup frames the interpreter appends don't exist there.
+            if k == "script_stack"
+                && let Value::Arr(a) = &mut val
+                && a.iter().any(|f| f.as_str().is_some_and(|f| f.starts_with("org.opensearch.")))
+            {
+                a.retain(|f| !f.as_str().is_some_and(|f| f.starts_with(search_painless::es::SERVER)));
             }
             e = e.with_meta(k.clone(), val);
         }

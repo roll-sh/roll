@@ -44,7 +44,9 @@ pub const NESTED_PATH_FIELD: u32 = 11;
 pub const DOC_COUNT_FIELD: u32 = 12;
 /// `_tsid`: time series ids (sorted doc values).
 pub const TSID_FIELD: u32 = 13;
-/// `_feature`: `rank_feature` values as term frequencies.
+/// `_feature`: `rank_feature` values as term frequencies, keyed by field name. It also holds
+/// the `_field_names` entries (the field name, frequency 1) of fields nothing else marks as
+/// present: `binary` without doc values.
 pub const FEATURE_FIELD: u32 = 14;
 /// `_ts_routing_hash`: the routing hash of time series documents (sorted doc values).
 pub const TS_ROUTING_HASH_FIELD: u32 = 15;
@@ -137,7 +139,7 @@ impl Kind {
             "double_range" => Kind::DoubleRange,
             "date_range" => Kind::DateRange,
             "ip_range" => Kind::IpRange,
-            "dense_vector" => Kind::DenseVector,
+            "dense_vector" | "knn_vector" => Kind::DenseVector,
             "sparse_vector" => Kind::SparseVector,
             "rank_feature" => Kind::RankFeature,
             "rank_features" => Kind::RankFeatures,
@@ -240,8 +242,9 @@ pub struct FieldInfo {
     pub vector: Option<VectorSpec>,
     /// `dense_vector` similarity name as mapped.
     pub vector_similarity: Option<String>,
-    /// `split_queries_on_whitespace` keyword normalizer.
-    pub whitespace_normalizer: Option<Normalizer>,
+    /// `split_queries_on_whitespace`: the keyword field's search analyzer (a whitespace
+    /// tokenizer plus the normalizer's filters, or Lucene's whitespace analyzer).
+    pub whitespace_analyzer: Option<Analyzer>,
     /// `constant_keyword` value.
     pub constant_value: Option<String>,
     /// A multi-field (or subfield) of another field: the parent's path.
@@ -264,7 +267,8 @@ impl std::fmt::Debug for FieldInfo {
 impl FieldInfo {
     /// A vector field `index.mapping.exclude_source_vectors` keeps out of `_source`.
     pub fn is_source_vector(&self) -> bool {
-        self.parent.is_none() && (matches!(self.kind, Kind::DenseVector | Kind::SparseVector) || self.ty == "rank_vectors")
+        // OpenSearch's `knn_vector` stays in `_source` (`opensearch::knn::derive_source`).
+        self.parent.is_none() && self.ty != "knn_vector" && (matches!(self.kind, Kind::DenseVector | Kind::SparseVector) || self.ty == "rank_vectors")
     }
 
     /// The analyzer queries run their text through (`search_analyzer`, else the index one).
@@ -342,12 +346,23 @@ impl Numbers {
 pub struct Similarities {
     pub default: Similarity,
     pub named: HashMap<String, Similarity>,
+    /// The built-in `BM25` is Lucene's plain `BM25Similarity` (the opensearch dialect), not
+    /// Elasticsearch's legacy one.
+    pub plain_bm25: bool,
 }
 
 impl Similarities {
+    /// The built-in `BM25` similarity of a dialect.
+    pub fn builtin_bm25(plain: bool) -> Similarity {
+        match Similarity::bm25() {
+            Similarity::Bm25 { k1, b, discount_overlaps, .. } if plain => Similarity::Bm25 { k1, b, discount_overlaps, legacy: false },
+            s => s,
+        }
+    }
+
     pub fn get(&self, name: &str) -> Option<Similarity> {
         match name {
-            "BM25" => Some(Similarity::bm25()),
+            "BM25" => Some(Self::builtin_bm25(self.plain_bm25)),
             "boolean" => Some(Similarity::Boolean),
             n => self.named.get(n).cloned(),
         }
@@ -357,8 +372,9 @@ impl Similarities {
 /// Every engine field of an index, built from its mapping.
 pub struct FieldTable {
     pub schema: Schema,
-    pub fields: HashMap<String, Arc<FieldInfo>>,
-    pub by_number: HashMap<u32, Arc<FieldInfo>>,
+    /// Looked up for every field of every indexed document: a fast fixed-seed hash.
+    pub fields: HashMap<String, Arc<FieldInfo>, foldhash::fast::FixedState>,
+    pub by_number: HashMap<u32, Arc<FieldInfo>, foldhash::fast::FixedState>,
     /// Field aliases: alias path → target path.
     pub aliases: HashMap<String, String>,
     pub objects: HashMap<String, ObjectInfo>,
@@ -382,6 +398,34 @@ impl std::fmt::Debug for FieldTable {
 
 fn internal(e: search_index::Error) -> EsError {
     EsError::internal(e.to_string())
+}
+
+/// `(priority, leaf name, full path)` of every leaf that resolves at the root through a
+/// pass-through container: `passthrough` objects and `flattened` fields with `passthrough`.
+fn passthrough_leaves(o: &ObjectMapper, prefix: &str, out: &mut Vec<(i64, String, String)>) {
+    for (k, c) in &o.children {
+        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+        match c {
+            Mapper::Object(child) => {
+                if let ObjectKind::PassThrough { priority, .. } = child.kind {
+                    for (lk, lc) in &child.children {
+                        if let Mapper::Field(_) = lc {
+                            out.push((priority, lk.clone(), format!("{path}.{lk}")));
+                        }
+                    }
+                }
+                crate::stack::maybe_grow(|| passthrough_leaves(child, &path, out));
+            }
+            Mapper::Field(f) if f.ty == "flattened" => {
+                if let Some(priority) = f.raw("passthrough").and_then(|p| p.get("priority")).and_then(Value::as_i64) {
+                    for pk in f.props.keys() {
+                        out.push((priority, pk.clone(), format!("{path}.{pk}")));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl FieldTable {
@@ -443,8 +487,8 @@ impl FieldTable {
     pub fn build(mapping: Arc<Mapping>, analysis: Arc<Analysis>, ctx: &MappingCtx, numbers: &Numbers, sims: &Similarities) -> EsResult<FieldTable> {
         let mut t = FieldTable {
             schema: Schema::new().with_similarity(sims.default.clone()),
-            fields: HashMap::new(),
-            by_number: HashMap::new(),
+            fields: HashMap::default(),
+            by_number: HashMap::default(),
             aliases: HashMap::new(),
             objects: HashMap::new(),
             mapping: mapping.clone(),
@@ -466,6 +510,15 @@ impl FieldTable {
         s.add_field(FieldSchema::new(TS_ROUTING_HASH_FIELD, "_ts_routing_hash").with_doc_values(DocValuesType::Sorted)).map_err(internal)?;
         let root = mapping.root.clone();
         t.walk(&root, "", None, ctx, numbers, sims)?;
+        // Pass-through leaves also resolve by their name without the prefix; when several
+        // pass-through containers have one, the highest `priority` wins (the mapping rejects
+        // equal priorities).
+        let mut pass = Vec::new();
+        passthrough_leaves(&root, "", &mut pass);
+        pass.sort_by_key(|p| std::cmp::Reverse(p.0));
+        for (_, name, target) in pass {
+            t.aliases.entry(name).or_insert(target);
+        }
         t.has_vectors = t.fields.values().any(|f| f.is_source_vector());
         let mut copies: Vec<(String, String)> =
             t.fields.values().flat_map(|f| f.mapper.copy_to.iter().map(|target| (target.clone(), f.name.clone()))).collect();
@@ -494,20 +547,19 @@ impl FieldTable {
                     );
                     let inner = if is_nested { Some(path.clone()) } else { nested.map(str::to_string) };
                     crate::stack::maybe_grow(|| self.walk(child, &path, inner.as_deref(), ctx, numbers, sims))?;
-                    if let ObjectKind::PassThrough { .. } = child.kind {
-                        // Pass-through leaves also resolve by their name without the prefix.
-                        for (lk, lc) in &child.children {
-                            if let Mapper::Field(_) = lc {
-                                self.aliases.entry(lk.clone()).or_insert_with(|| format!("{path}.{lk}"));
-                            }
-                        }
-                    }
                 }
                 Mapper::Field(f) => {
                     self.add_field(f, &path, nested, None, ctx, numbers, sims)?;
                     for (mk, mf) in &f.fields {
                         let mpath = format!("{path}.{mk}");
                         self.add_field(mf, &mpath, nested, Some(&path), ctx, numbers, sims)?;
+                    }
+                    // Mapped sub-fields of a `flattened` field are fields of their own
+                    // (`<path>.<key>`).
+                    if f.ty == "flattened" {
+                        for (pk, pf) in &f.props {
+                            self.add_field(pf, &format!("{path}.{pk}"), nested, None, ctx, numbers, sims)?;
+                        }
                     }
                 }
                 Mapper::Alias(a) => {
@@ -606,7 +658,7 @@ impl FieldTable {
             metric: f.effective("time_series_metric", ctx).as_str().map(str::to_string),
             vector: None,
             vector_similarity: None,
-            whitespace_normalizer: None,
+            whitespace_analyzer: None,
             constant_value: None,
             parent: parent.map(str::to_string),
             similarity: f.effective("similarity", ctx).as_str().map(str::to_string),
@@ -707,7 +759,13 @@ impl FieldTable {
                 }
             }
             Kind::MatchOnlyText => {
-                let a = self.analysis.default_analyzer();
+                // OpenSearch's `match_only_text` takes text's analyzers and `fielddata`
+                // (its definition has the parameters); Elasticsearch's is always standard.
+                let os = f.def().param_index("analyzer").is_some();
+                let a = match f.raw("analyzer").and_then(Value::as_str) {
+                    Some(n) if os => self.analyzer(n)?,
+                    _ => self.analysis.default_analyzer(),
+                };
                 info.index_options = if index { IndexOptions::Docs } else { IndexOptions::None };
                 if index {
                     fs = fs.indexed(IndexOptions::Docs, false);
@@ -715,9 +773,20 @@ impl FieldTable {
                 if doc_values {
                     fs = fs.with_doc_values(DocValuesType::SortedSet);
                 }
+                let sa = match f.raw("search_analyzer").and_then(Value::as_str) {
+                    Some(n) if os => self.search_analyzer(n)?,
+                    _ if os && f.raw("analyzer").is_some() => a.clone(),
+                    _ => self.analysis.default_search_analyzer().unwrap_or_else(|| a.clone()),
+                };
                 info.analyzer = Some(a.clone());
-                info.search_analyzer = Some(self.analysis.default_search_analyzer().unwrap_or_else(|| a.clone()));
+                info.search_analyzer = Some(sa);
                 info.search_quote_analyzer = info.search_analyzer.clone();
+                if os && info.fielddata {
+                    let sub = format!("{path}._fielddata");
+                    let n = numbers.of(&sub);
+                    self.schema.add_field(FieldSchema::new(n, sub).with_doc_values(DocValuesType::SortedSet)).map_err(internal)?;
+                    info.subfields.push(("fielddata".into(), n));
+                }
             }
             Kind::Keyword | Kind::Version | Kind::CountedKeyword => {
                 let opts = match f.effective("index_options", ctx).as_str() {
@@ -732,6 +801,14 @@ impl FieldTable {
                 if doc_values {
                     fs = fs.with_doc_values(DocValuesType::SortedSet);
                 }
+                // `counted_keyword`: each doc's occurrence count per distinct value (the
+                // mapper's `<name>_count` binary doc values).
+                if info.kind == Kind::CountedKeyword {
+                    let sub = format!("{path}\u{0}count");
+                    let n = numbers.of(&sub);
+                    self.schema.add_field(FieldSchema::new(n, sub).with_doc_values(DocValuesType::Binary)).map_err(internal)?;
+                    info.subfields.push(("count".into(), n));
+                }
                 if let Some(s) = sim.clone() {
                     fs = fs.with_similarity(s);
                 }
@@ -739,10 +816,10 @@ impl FieldTable {
                     info.normalizer =
                         Some(self.analysis.normalizer(n).ok_or_else(|| EsError::illegal_argument(format!("normalizer [{n}] not found for field [{path}]")))?);
                     if b("split_queries_on_whitespace", false) {
-                        info.whitespace_normalizer = self.analysis.whitespace_normalizer(n);
+                        info.whitespace_analyzer = self.analysis.whitespace_normalizer(n).map(|w| w.analyzer().clone());
                     }
                 } else if b("split_queries_on_whitespace", false) {
-                    info.whitespace_normalizer = self.analysis.whitespace_normalizer("default");
+                    info.whitespace_analyzer = self.analysis.analyzer("whitespace");
                 }
                 info.ignore_above = ignore_above();
                 if let Some(tv) = term_vector(f, ctx) {
@@ -758,6 +835,11 @@ impl FieldTable {
                 info.index = true;
                 info.doc_values = true;
                 info.ignore_above = ignore_above();
+                // OpenSearch's `wildcard` takes a normalizer (`default` is none).
+                if let Some(n) = f.raw("normalizer").and_then(Value::as_str).filter(|n| *n != "default") {
+                    info.normalizer =
+                        Some(self.analysis.normalizer(n).ok_or_else(|| EsError::illegal_argument(format!("normalizer [{n}] not found for field [{path}]")))?);
+                }
             }
             Kind::Long | Kind::Date | Kind::DateNanos | Kind::ScaledFloat(_) | Kind::UnsignedLong | Kind::Double => {
                 if index {
@@ -825,6 +907,12 @@ impl FieldTable {
                 }
                 if doc_values {
                     fs = fs.with_doc_values(DocValuesType::Binary);
+                    // The doc's centroid, computed from its original coordinates (Elasticsearch
+                    // keeps it in the doc value's header); `\0` keeps it out of field listings.
+                    let sub = format!("{path}\u{0}centroid");
+                    let n = numbers.of(&sub);
+                    self.schema.add_field(FieldSchema::new(n, sub).with_doc_values(DocValuesType::Binary)).map_err(internal)?;
+                    info.subfields.push(("centroid".into(), n));
                 }
             }
             Kind::IntegerRange | Kind::FloatRange => {
@@ -859,7 +947,11 @@ impl FieldTable {
                 if spec.dims > 0 && index {
                     info.vector_layouts = numbers.with_prefix(&format!("{path}\u{0}")).into_iter().filter(|n| *n != number).collect();
                 }
-                info.vector_similarity = f.effective("similarity", ctx).as_str().map(str::to_string);
+                info.vector_similarity = if f.ty == "knn_vector" {
+                    crate::opensearch::knn::similarity_name(f, ctx)
+                } else {
+                    f.effective("similarity", ctx).as_str().map(str::to_string)
+                };
                 info.vector = Some(spec);
                 info.doc_values = false;
                 if spec.dims > 0 {
@@ -879,7 +971,10 @@ impl FieldTable {
                 info.doc_values = false;
             }
             Kind::Completion => {
-                fs = fs.with_suggest();
+                // Docs-only postings of the analyzed keys, next to the suggester's FST
+                // (`CompletionFieldMapper`: `IndexOptions.DOCS`, with norms: one token per input).
+                fs = fs.with_suggest().indexed(IndexOptions::Docs, true);
+                info.index_options = IndexOptions::Docs;
                 info.doc_values = false;
                 let a = self.analyzer(f.effective("analyzer", ctx).as_str().unwrap_or("simple"))?;
                 let sa = match f.raw("search_analyzer").and_then(Value::as_str) {
@@ -987,6 +1082,9 @@ impl FieldTable {
 /// The vector index layout of a `dense_vector` mapping (Elasticsearch's defaults: `int8_hnsw`
 /// for floats under 384 dims, `bbq_hnsw` from 384, `hnsw` for bytes and bits).
 pub fn vector_spec(f: &FieldMapper, ctx: &MappingCtx) -> VectorSpec {
+    if f.ty == "knn_vector" {
+        return crate::opensearch::knn::vector_spec(f, ctx);
+    }
     let dims = f.effective("dims", ctx).as_i64().unwrap_or(0).max(0) as u32;
     let element = match f.effective("element_type", ctx).as_str() {
         Some("byte") => VectorElement::Byte,

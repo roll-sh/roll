@@ -167,6 +167,39 @@ impl EsError {
     fn trace_head(&self) -> String {
         let meta = |k: &str| self.meta().iter().find(|(mk, _)| mk == k).map(|(_, v)| v.to_es_string());
         let mut out = String::new();
+        if self.es && crate::opensearch::active() {
+            // `OpenSearchException.toString()`: the index, the shard id (`[[index][n]]`), then
+            // `ExceptionsHelper.detailedMessage` (simple class names, causes nested).
+            if let Some(index) = meta("index") {
+                match meta("index_uuid").filter(|u| u != "_na_") {
+                    Some(uuid) => out.push_str(&format!("[{index}/{uuid}]")),
+                    None => out.push_str(&format!("[{index}]")),
+                }
+                if let Some(shard) = meta("shard") {
+                    out.push_str(&format!("[[{index}][{shard}]]"));
+                }
+                out.push(' ');
+            }
+            let simple = |e: &EsError| java_class(&e.kind).rsplit('.').next().unwrap_or_default().to_string();
+            if self.caused_by.is_none() {
+                out.push_str(&format!("{}[{}]", simple(self), self.reason()));
+            } else {
+                let mut cur = Some(self);
+                while let Some(e) = cur {
+                    out.push_str(&simple(e));
+                    if e.reason.is_some() {
+                        out.push_str(&format!("[{}]", e.reason()));
+                    }
+                    out.push_str("; ");
+                    cur = e.caused_by.as_deref();
+                    if cur.is_some() {
+                        out.push_str("nested: ");
+                    }
+                }
+                out.truncate(out.trim_end().len());
+            }
+            return out;
+        }
         if self.es
             && let Some(index) = meta("index")
         {
@@ -215,9 +248,13 @@ impl EsError {
         if !self.es {
             return vec![self];
         }
+        // `XContentParseException` is not an `ElasticsearchException`: a chain of those stops
+        // before one, while a top-level one unwraps through parse and Elasticsearch causes
+        // (the static `ElasticsearchException.guessRootCauses(Throwable)`).
+        let xc = |e: &EsError| matches!(&*e.kind, "x_content_parse_exception" | "x_content_e_o_f_exception");
         let mut cur = self;
         while let Some(c) = &cur.caused_by {
-            if !c.es {
+            if !c.es || (xc(c) && !xc(cur)) {
                 break;
             }
             if let Some(rc) = c.root_causes() {
@@ -357,7 +394,14 @@ impl EsError {
         EsError::new(400, "mapper_parsing_exception", reason)
     }
 
+    /// Elasticsearch's `DocumentParsingException` (`[line:col] reason`). OpenSearch never
+    /// split it from `MapperParsingException` and gives it no location, so in the opensearch
+    /// dialect the `[line:col] ` prefix is dropped and the type is `mapper_parsing_exception`.
     pub fn document_parsing(reason: impl Into<String>) -> EsError {
+        let reason = reason.into();
+        if crate::opensearch::active() {
+            return EsError::new(400, "mapper_parsing_exception", crate::opensearch::strip_location(&reason).to_string());
+        }
         EsError::new(400, "document_parsing_exception", reason)
     }
 

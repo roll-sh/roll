@@ -28,7 +28,10 @@
 //! internal refresh). A flush writes segments as files into the shard directory (when one is
 //! configured) and returns the commit for `search-store` to upload: segment files, live docs and
 //! the local checkpoint covered, all captured in one critical section with no write in flight,
-//! so a commit holds every operation whole or not at all. Callers apply operations here first
+//! so a commit holds every operation whole or not at all. The commit also says what the
+//! published searcher showed of it ([`PublishedView`]: segments written since the last refresh,
+//! docs deleted since), so a shard reopened on it ([`Shard::open_published`]) searches what it
+//! searched before and the next refresh publishes the rest, as if it had never closed. Callers apply operations here first
 //! and then append them to the WAL with the returned sequence numbers (a write that fails
 //! after getting one returns [`Error::Rejected`] with it, for a no-op record); replay uses
 //! [`Origin::Replay`], which tolerates any order and duplicates.
@@ -83,6 +86,12 @@ pub use ops::{
 };
 
 const STRIPES: usize = 64;
+
+/// Merged segments smaller than this keep their merge order instead of being BP-reordered
+/// (Lucene's `BPReorderingMergePolicy` default `minNaturalMergeNumDocs`, 2^16). Reordering
+/// small segments buys little search speed and, while indexing, BP was ~40% of all merge CPU
+/// (geonames, 8 clients): every level of the merge tree reordered the same docs again.
+const BP_MIN_MERGE_DOCS: u32 = 1 << 16;
 /// Segment attribute marking segments that contain nested blocks.
 pub const NESTED_ATTR: &str = "roll.nested";
 
@@ -126,7 +135,7 @@ const MAX_DOCS_LIMIT_DOCS: &str = "https://www.elastic.co/docs/deploy-manage/pro
 
 impl Default for ShardConfig {
     fn default() -> Self {
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let cores = crate::search::pool::cores();
         ShardConfig {
             primary_term: 1,
             dir: None,
@@ -224,7 +233,31 @@ pub struct FlushOutcome {
     /// Every operation with a seq no up to this is in `segments`.
     pub local_checkpoint: i64,
     pub primary_term: i64,
+    /// What the published searcher showed of the commit, when that is less than all of it.
+    /// `None`: everything (or something a view over the commit can't express, such as a doc
+    /// the searcher showed that a merge since dropped; reopening then shows everything, as
+    /// Elasticsearch does after a restart).
+    pub published: Option<PublishedView>,
 }
+
+/// The searcher published when a commit was taken, relative to that commit: what a refresh
+/// had not published yet ([`FlushOutcome::published`], [`Shard::open_published`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PublishedView {
+    /// Positions (in the commit's segment list) of segments written since the last refresh,
+    /// ascending.
+    pub hidden: Vec<u32>,
+    /// Per position (ascending), the docs deleted since the last refresh: live in the searcher,
+    /// deleted in the commit's live docs. Ascending, never empty.
+    pub deleted: Vec<(u32, Vec<u32>)>,
+    /// Per position (ascending), segments merged since the last refresh from segments the
+    /// searcher showed: the docs it did not show (written since the refresh), ascending. The
+    /// view shows every other doc, deleted in the commit or not.
+    pub merged: Vec<(u32, Vec<u32>)>,
+}
+
+/// Most deletes a [`PublishedView`] lists; past it the commit counts as all published.
+pub const MAX_VIEW_DELETES: usize = 100_000;
 
 /// A document read by id.
 #[derive(Clone, Debug, PartialEq)]
@@ -316,6 +349,87 @@ struct SegEntry {
     nested: bool,
     /// Opened while its file was downloading: the store's already (never persisted here).
     fetching: bool,
+    /// Retained deletes as last counted: (live-docs generation, retained from, count).
+    retained: Mutex<Option<(u64, i64, u32)>>,
+    /// For a segment merged since the last refresh: what it was merged from, so a commit can
+    /// still describe the searcher, which shows the sources ([`PublishedView::merged`]).
+    origin: Mutex<Option<Arc<MergeOrigin>>>,
+}
+
+/// Where a merged segment's docs came from, kept until a refresh publishes it.
+struct MergeOrigin {
+    /// The merged segments, in merge order.
+    sources: Vec<OriginSource>,
+    /// The reorder of their concatenation (index sort, BP), if any.
+    map: Option<search_codec::DocMap>,
+}
+
+struct OriginSource {
+    uid: u64,
+    max_doc: u32,
+    /// Its live docs when the merge started (`None`: all): the docs the merge kept.
+    live: Option<Arc<LiveDocs>>,
+    /// Where its kept docs start in the concatenation.
+    base: u32,
+    /// Its own origin, when it was itself merged since the last refresh.
+    origin: Option<Arc<MergeOrigin>>,
+}
+
+/// Merges past this many docs keep no [`MergeOrigin`] (its doc map would stay in memory until
+/// the next refresh): a commit before that refresh shows everything on reopen.
+const MAX_ORIGIN_DOCS: u32 = 2 << 20;
+
+impl MergeOrigin {
+    fn reorder(&self, concat: u32) -> Option<u32> {
+        match &self.map {
+            Some(m) => m.old_to_new(concat),
+            None => Some(concat),
+        }
+    }
+
+    /// Calls `emit` with the doc of the merged segment of every doc the searcher showed
+    /// (`shown`: the live docs it showed, by segment uid), adding the shown segments reached
+    /// to `reached`. False when a shown doc is not in the merged segment (deleted after the
+    /// refresh, before the merge: no view over the commit can show it) or `emit` refuses.
+    fn shown_docs(&self, shown: &HashMap<u64, Option<&LiveDocs>>, reached: &mut HashSet<u64>, emit: &mut dyn FnMut(u32) -> bool) -> bool {
+        for s in &self.sources {
+            let kept = |d: u32| s.live.as_ref().is_none_or(|l| l.is_live(d));
+            if let Some(&shown_live) = shown.get(&s.uid) {
+                reached.insert(s.uid);
+                let mut rank = 0u32;
+                for d in 0..s.max_doc {
+                    let k = kept(d);
+                    if shown_live.is_none_or(|l| l.is_live(d)) {
+                        let Some(nd) = k.then(|| self.reorder(s.base + rank)).flatten() else { return false };
+                        if !emit(nd) {
+                            return false;
+                        }
+                    }
+                    rank += k as u32;
+                }
+            } else if let Some(inner) = &s.origin {
+                let mut ranks = Vec::with_capacity(s.max_doc as usize);
+                let mut rank = 0u32;
+                for d in 0..s.max_doc {
+                    ranks.push(rank);
+                    rank += kept(d) as u32;
+                }
+                let ok = inner.shown_docs(shown, reached, &mut |d| {
+                    if !kept(d) {
+                        return false;
+                    }
+                    match self.reorder(s.base + ranks[d as usize]) {
+                        Some(nd) => emit(nd),
+                        None => false,
+                    }
+                });
+                if !ok {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Drop for SegEntry {
@@ -355,6 +469,8 @@ impl SegEntry {
             merging: AtomicBool::new(false),
             reported: AtomicBool::new(false),
             nested,
+            retained: Mutex::new(None),
+            origin: Mutex::new(None),
         }
     }
 
@@ -378,6 +494,60 @@ impl SegEntry {
 
     fn del_count(&self) -> u32 {
         self.live.lock().live.as_ref().map_or(0, |l| l.num_deleted())
+    }
+
+    /// Deleted docs the soft-deletes retention keeps: those of operations with seq no at least
+    /// `from` (a nested child goes with its root). Counted once per live-docs generation.
+    fn retained_deletes(&self, from: i64) -> u32 {
+        let (live, lgen) = {
+            let st = self.live.lock();
+            match &st.live {
+                Some(l) => (l.clone(), st.lgen),
+                None => return 0,
+            }
+        };
+        if let Some((g, f, n)) = *self.retained.lock()
+            && g == lgen
+            && f == from
+        {
+            return n;
+        }
+        let n = if from <= 0 || (self.fetching && !self.is_complete()) {
+            // Every operation is retained (or the doc values aren't here yet: count them all).
+            live.num_deleted()
+        } else {
+            let r = self.reader();
+            match r.numeric(SEQ_NO_FIELD) {
+                None => 0,
+                Some(seq) => {
+                    let mut n = 0u32;
+                    for (wi, w) in live.words().iter().enumerate() {
+                        let mut dead = !w;
+                        while dead != 0 {
+                            let d = (wi * 64) as u32 + dead.trailing_zeros();
+                            dead &= dead - 1;
+                            if d >= self.max_doc {
+                                break;
+                            }
+                            // Children of a nested block carry no seq no: their root (the
+                            // block's last doc) does.
+                            let mut root = d;
+                            let s = loop {
+                                match seq.get(root) {
+                                    Some(v) => break v,
+                                    None if root + 1 < self.max_doc => root += 1,
+                                    None => break i64::MAX,
+                                }
+                            };
+                            n += u32::from(s >= from);
+                        }
+                    }
+                    n
+                }
+            }
+        };
+        *self.retained.lock() = Some((lgen, from, n));
+        n
     }
 
 
@@ -448,6 +618,20 @@ struct VersionValue {
     doc: u32,
 }
 
+/// Elasticsearch's peer-recovery retention lease of the primary: operations from `from` on are
+/// retained (their deleted docs stay in segments, and merges don't count them as deletes); the
+/// lease moves to the checkpoint once per [`RETENTION_SYNC`], as
+/// `index.soft_deletes.retention_lease.sync_interval` renews it.
+struct Retention {
+    from: i64,
+    /// The checkpoint seen at `next_at`: the lease's next position.
+    next: i64,
+    next_at: Instant,
+}
+
+/// `index.soft_deletes.retention_lease.sync_interval` (30 s).
+pub const RETENTION_SYNC: Duration = Duration::from_secs(30);
+
 /// A delete, remembered for `index.gc_deletes` (and until the checkpoint passes it).
 struct Tombstone {
     seq_no: i64,
@@ -488,6 +672,9 @@ struct State {
     buffers: Mutex<Vec<Arc<BufferSlot>>>,
     frozen: Vec<Arc<BufferSlot>>,
     query_cache: Option<Arc<crate::search::cache::QueryCachePolicy>>,
+    /// [`Shard::set_leaf_sort`]: searchers list segments by this point field's max value,
+    /// descending.
+    leaf_sort: Option<u32>,
 }
 
 #[derive(Default)]
@@ -502,6 +689,9 @@ struct MergeState {
     total_time: Duration,
     error: Option<String>,
 }
+
+/// [`Inner::locations_from`] before a realtime get asked for translog locations.
+const NOT_TRACKED: i64 = i64::MAX;
 
 struct Inner {
     cfg: ShardConfig,
@@ -519,6 +709,9 @@ struct Inner {
     generation: AtomicU64,
     merges: Mutex<MergeState>,
     merge_done: Condvar,
+    /// The first sequence number Elasticsearch's version map would hold a translog location
+    /// for ([`Shard::note_realtime_get`]); [`NOT_TRACKED`] until a realtime get asks.
+    locations_from: AtomicI64,
     closed: AtomicBool,
     refreshes: AtomicU64,
     refresh_calls: AtomicU64,
@@ -534,6 +727,10 @@ struct Inner {
     vm_tombstone_bytes: AtomicUsize,
     /// When tombstones were last pruned (ms since `epoch`).
     last_prune_ms: AtomicU64,
+    /// `index.gc_deletes` in ms (dynamic: [`Shard::set_gc_deletes`]).
+    gc_deletes_ms: AtomicU64,
+    /// The soft-deletes retention lease ([`Shard::retained_from`]).
+    retention: Mutex<Retention>,
     epoch: Instant,
     forced: Mutex<Forced>,
     weak: Mutex<Weak<Inner>>,
@@ -568,6 +765,8 @@ struct CommitView {
     converted: Vec<(Arc<SegEntry>, Option<Arc<LiveDocs>>, u64)>,
     checkpoint: i64,
     max_seq_no: i64,
+    /// The searcher published at the view.
+    published: Searcher,
 }
 
 /// One shard: the writer and its reader manager. Cheap to clone (`Arc` inside).
@@ -605,6 +804,14 @@ pub fn hex_id(id: &[u8; 16]) -> String {
 impl Shard {
     /// Opens a shard over existing segments (empty for a new shard).
     pub fn open(cfg: ShardConfig, schema: Schema, segments: Vec<SegmentHandle>) -> Result<Shard> {
+        Shard::open_published(cfg, schema, segments, None)
+    }
+
+    /// Opens on a commit whose searcher showed only part of it (`published`, from the
+    /// commit's [`FlushOutcome::published`]): searches see what they saw when it was taken, and
+    /// the next refresh publishes the rest ([`Shard::has_pending_changes`] says so meanwhile).
+    /// Realtime reads see everything.
+    pub fn open_published(cfg: ShardConfig, schema: Schema, segments: Vec<SegmentHandle>, published: Option<PublishedView>) -> Result<Shard> {
         let schema = Arc::new(schema);
         let mut entries = Vec::with_capacity(segments.len());
         let mut max_seq = -1i64;
@@ -632,6 +839,7 @@ impl Shard {
             uid += 1;
         }
         let checkpoint = cfg.local_checkpoint.unwrap_or(max_seq);
+        let cfg_gc_ms = cfg.gc_deletes.as_millis() as u64;
         let docs: u64 = entries.iter().map(|e| e.max_doc as u64).sum();
         if docs > cfg.max_docs {
             return Err(Error::illegal_state(format!(
@@ -647,8 +855,12 @@ impl Shard {
             buffers: Mutex::new(Vec::new()),
             frozen: Vec::new(),
             query_cache: cfg.query_cache.then(|| Arc::new(crate::search::cache::QueryCachePolicy::default())),
+            leaf_sort: None,
         };
-        let searcher = Self::make_searcher(&state, 0);
+        let searcher = match &published {
+            None => Self::make_searcher(&state, 0),
+            Some(v) => Self::view_searcher(&state, v)?,
+        };
         let inner = Arc::new(Inner {
             cfg,
             state: RwLock::new(state),
@@ -659,13 +871,14 @@ impl Shard {
             max_seq: AtomicI64::new(max_seq.max(checkpoint)),
             refresh_lock: Mutex::new(()),
             published: RwLock::new(searcher),
-            dirty: AtomicBool::new(false),
+            dirty: AtomicBool::new(published.is_some()),
             ram: AtomicUsize::new(0),
             uids: AtomicU64::new(uid),
             generation: AtomicU64::new(1),
             merges: Mutex::new(MergeState::default()),
             merge_done: Condvar::new(),
             closed: AtomicBool::new(false),
+            locations_from: AtomicI64::new(NOT_TRACKED),
             refreshes: AtomicU64::new(0),
             refresh_calls: AtomicU64::new(0),
             refresh_nanos: AtomicU64::new(0),
@@ -676,6 +889,8 @@ impl Shard {
             vm_live_bytes: AtomicUsize::new(0),
             vm_tombstone_bytes: AtomicUsize::new(0),
             last_prune_ms: AtomicU64::new(0),
+            gc_deletes_ms: AtomicU64::new(cfg_gc_ms),
+            retention: Mutex::new(Retention { from: checkpoint + 1, next: checkpoint, next_at: Instant::now() }),
             epoch: Instant::now(),
             forced: Mutex::new(Forced::default()),
             weak: Mutex::new(Weak::new()),
@@ -693,12 +908,97 @@ impl Shard {
         &self.inner.cfg
     }
 
+    /// Orders the segments of every searcher from now on by the maximum value of the
+    /// one-dimensional point field `field`, descending (segments without it last), so that
+    /// searches over time-based data visit the newest segments first (Elasticsearch sorts the
+    /// leaves of an index whose mapping has a `@timestamp` date field when the shard opens).
+    /// `None` restores segment order. Publishes a new searcher.
+    pub fn set_leaf_sort(&self, field: Option<u32>) {
+        let inner = &self.inner;
+        let mut st = inner.state.write();
+        if st.leaf_sort == field {
+            return;
+        }
+        st.leaf_sort = field;
+        let g = inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        // The same segments and live docs, only reordered: what isn't refreshed stays hidden.
+        let pos: HashMap<u64, usize> = st.segments.iter().enumerate().map(|(i, e)| (e.uid, i)).collect();
+        let mut published = inner.published.write();
+        let mut segs: Vec<(Arc<SegmentCore>, Option<Arc<LiveDocs>>)> =
+            published.segments().iter().map(|c| (c.core.clone(), c.live.clone())).collect();
+        segs.sort_by_key(|(c, _)| pos.get(&c.uid).copied().unwrap_or(usize::MAX));
+        *published = Self::searcher_over(&st, segs, g);
+    }
+
+    /// The field [`Shard::set_leaf_sort`] last set.
+    pub fn leaf_sort(&self) -> Option<u32> {
+        self.inner.state.read().leaf_sort
+    }
+
     fn make_searcher(st: &State, generation: u64) -> Searcher {
-        let segs = st
+        let segs: Vec<(Arc<SegmentCore>, Option<Arc<LiveDocs>>)> = st
             .segments
             .iter()
             .map(|e| (e.core.read().clone(), e.live.lock().live.clone()))
             .collect();
+        Self::searcher_over(st, segs, generation)
+    }
+
+    /// The searcher a [`PublishedView`] describes over the segments a shard opened with.
+    fn view_searcher(st: &State, v: &PublishedView) -> Result<Searcher> {
+        let n = st.segments.len() as u32;
+        let mismatch = || Error::illegal_state("the published view does not match the commit's segments");
+        if v.hidden.iter().chain(v.deleted.iter().map(|(p, _)| p)).chain(v.merged.iter().map(|(p, _)| p)).any(|&p| p >= n) {
+            return Err(mismatch());
+        }
+        let hidden: HashSet<u32> = v.hidden.iter().copied().collect();
+        let deleted: HashMap<u32, &[u32]> = v.deleted.iter().map(|(p, d)| (*p, d.as_slice())).collect();
+        let merged: HashMap<u32, &[u32]> = v.merged.iter().map(|(p, d)| (*p, d.as_slice())).collect();
+        if merged.keys().any(|p| hidden.contains(p) || deleted.contains_key(p)) {
+            return Err(mismatch());
+        }
+        let mut segs = Vec::with_capacity(st.segments.len());
+        for (pos, e) in st.segments.iter().enumerate() {
+            let pos = pos as u32;
+            if hidden.contains(&pos) {
+                continue;
+            }
+            if let Some(unshown) = merged.get(&pos) {
+                if unshown.iter().any(|&d| d >= e.max_doc) {
+                    return Err(mismatch());
+                }
+                let live = (!unshown.is_empty()).then(|| {
+                    let mut l = LiveDocs::all_live(e.max_doc);
+                    for &d in *unshown {
+                        l.delete(d);
+                    }
+                    Arc::new(l)
+                });
+                segs.push((e.core.read().clone(), live));
+                continue;
+            }
+            let live = e.live.lock().live.clone();
+            let live = match deleted.get(&pos) {
+                None => live,
+                Some(since) => {
+                    let Some(l) = live else { return Err(mismatch()) };
+                    if since.iter().any(|&d| l.is_live(d)) {
+                        return Err(mismatch());
+                    }
+                    Some(Arc::new(undeleted(&l, since)))
+                }
+            };
+            segs.push((e.core.read().clone(), live));
+        }
+        Ok(Self::searcher_over(st, segs, 0))
+    }
+
+    fn searcher_over(st: &State, mut segs: Vec<(Arc<SegmentCore>, Option<Arc<LiveDocs>>)>, generation: u64) -> Searcher {
+        if let Some(field) = st.leaf_sort {
+            // Elasticsearch's `DataStream.TIMESERIES_LEAF_READERS_SORTER`: newest data first,
+            // segments without the field last, ties in segment order (a stable sort).
+            segs.sort_by_cached_key(|(core, _)| std::cmp::Reverse(core.reader.points(field).map(|p| p.max_packed_value().to_vec())));
+        }
         let s = Searcher::new(segs, st.schema.clone(), generation);
         if st.query_cache.is_some() { s.with_query_cache(st.query_cache.clone()) } else { s }
     }
@@ -738,7 +1038,10 @@ impl Shard {
         Ok(())
     }
 
-    fn resolve(st: &State, stripe: &Stripe, id: &[u8], hash: u64) -> Current {
+    /// The current state of `id`. With `gc_cutoff`, a tombstone from before it no longer
+    /// counts (Elasticsearch ignores deletes older than `index.gc_deletes` when a primary
+    /// checks versions, pruned or not); replayed operations see every tombstone.
+    fn resolve(st: &State, stripe: &Stripe, id: &[u8], hash: u64, gc_cutoff: Option<Instant>) -> Current {
         if let Some(v) = stripe.map.get(id) {
             return Current::Live {
                 seq_no: v.seq_no,
@@ -748,6 +1051,9 @@ impl Shard {
             };
         }
         if let Some(t) = stripe.tombstones.get(id) {
+            if gc_cutoff.is_some_and(|c| t.at < c) {
+                return Current::NotFound;
+            }
             return Current::Deleted { seq_no: t.seq_no, version: t.version };
         }
         for e in st.segments.iter().rev() {
@@ -867,7 +1173,7 @@ impl Shard {
     fn prune_version_map(&self, converted: Option<&HashSet<u64>>) {
         let inner = &self.inner;
         let now = Instant::now();
-        let gc = inner.cfg.gc_deletes;
+        let gc = self.gc_deletes();
         let checkpoint = inner.tracker.lock().checkpoint();
         let (mut live, mut dead) = (0usize, 0usize);
         for s in inner.stripes.iter() {
@@ -900,7 +1206,7 @@ impl Shard {
     /// `gc_deletes` worth of tombstones.
     fn maybe_prune_deletes(&self) {
         let inner = &self.inner;
-        let every = (inner.cfg.gc_deletes / 4).max(Duration::from_millis(100)).as_millis() as u64;
+        let every = (self.gc_deletes() / 4).max(Duration::from_millis(100)).as_millis() as u64;
         let now = inner.epoch.elapsed().as_millis() as u64;
         let last = inner.last_prune_ms.load(Ordering::Relaxed);
         if now.saturating_sub(last) > every
@@ -929,7 +1235,8 @@ impl Shard {
             crate::buffer::precheck(&st.schema, &op.doc)?;
             let mut stripe = self.inner.stripes[si].lock();
             let skip_lookup = op.auto_generated_id && matches!(op.origin, Origin::Primary);
-            let cur = if skip_lookup { Current::NotFound } else { Self::resolve(&st, &stripe, &id, hash) };
+            let cutoff = matches!(op.origin, Origin::Primary).then(|| self.gc_cutoff()).flatten();
+            let cur = if skip_lookup { Current::NotFound } else { Self::resolve(&st, &stripe, &id, hash, cutoff) };
             let (cur_seq, cur_version, deleted) = match &cur {
                 Current::NotFound => (ops::UNASSIGNED_SEQ_NO, NOT_FOUND, true),
                 Current::Deleted { seq_no, version } => (*seq_no, *version, true),
@@ -1030,7 +1337,8 @@ impl Shard {
         let r = {
             let st = self.inner.state.read();
             let mut stripe = self.inner.stripes[si].lock();
-            let cur = Self::resolve(&st, &stripe, &id, hash);
+            let cutoff = matches!(op.origin, Origin::Primary).then(|| self.gc_cutoff()).flatten();
+            let cur = Self::resolve(&st, &stripe, &id, hash, cutoff);
             let (cur_seq, cur_version, deleted) = match &cur {
                 Current::NotFound => (ops::UNASSIGNED_SEQ_NO, NOT_FOUND, true),
                 Current::Deleted { seq_no, version } => (*seq_no, *version, true),
@@ -1104,6 +1412,76 @@ impl Shard {
         self.mark_processed(seq_no);
     }
 
+    /// `index.gc_deletes`: how long a delete is remembered for version checks (negative values
+    /// of the setting mean 0).
+    pub fn set_gc_deletes(&self, gc: Duration) {
+        self.inner.gc_deletes_ms.store(gc.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn gc_deletes(&self) -> Duration {
+        Duration::from_millis(self.inner.gc_deletes_ms.load(Ordering::Relaxed))
+    }
+
+    /// Tombstones from before this no longer count for a primary's version checks.
+    fn gc_cutoff(&self) -> Option<Instant> {
+        Instant::now().checked_sub(self.gc_deletes())
+    }
+
+    /// Marks every sequence number up to the max seq no processed (Elasticsearch's
+    /// `fillSeqNoGaps` when a primary is promoted or recovered): numbers handed to writes that
+    /// never reached the log become no-ops, so the local checkpoint catches up. Returns how
+    /// many gaps were filled.
+    pub fn fill_seq_no_gaps(&self) -> u64 {
+        let max = self.inner.max_seq.load(Ordering::Acquire);
+        let mut t = self.inner.tracker.lock();
+        let mut filled = 0;
+        while t.checkpoint() < max {
+            let next = t.checkpoint() + 1;
+            t.mark(next);
+            filled += 1;
+        }
+        filled
+    }
+
+    /// Delete tombstones of the version map with seq no at most `up_to`: `(id, seq_no, version,
+    /// age)`. A commit point keeps them so that a reopened shard still knows recent deletes
+    /// (external versions, `op_type=create` after a delete) for the rest of `index.gc_deletes`.
+    pub fn tombstones(&self, up_to: i64) -> Vec<(Bytes, i64, i64, Duration)> {
+        let now = Instant::now();
+        let gc = self.gc_deletes();
+        let mut out = Vec::new();
+        for s in self.inner.stripes.iter() {
+            let s = s.lock();
+            for (id, t) in &s.tombstones {
+                let age = now.saturating_duration_since(t.at);
+                if t.seq_no <= up_to && age < gc {
+                    out.push((id.clone(), t.seq_no, t.version, age));
+                }
+            }
+        }
+        out
+    }
+
+    /// Restores tombstones of a commit point ([`Shard::tombstones`]) when the shard opens: each
+    /// lives for what remained of its `gc_deletes`. An id the shard already knows from a later
+    /// operation (a buffered doc, a newer tombstone) keeps that.
+    pub fn seed_tombstones(&self, tombstones: impl IntoIterator<Item = (Bytes, i64, i64, Duration)>) {
+        let now = Instant::now();
+        let gc = self.gc_deletes();
+        for (id, seq_no, version, age) in tombstones {
+            if age >= gc {
+                continue;
+            }
+            let (si, _) = stripe_of(&id);
+            let mut stripe = self.inner.stripes[si].lock();
+            if stripe.map.contains_key(&id[..]) || stripe.tombstones.get(&id[..]).is_some_and(|t| t.seq_no >= seq_no) {
+                continue;
+            }
+            let at = now.checked_sub(age).unwrap_or(now);
+            self.put_tombstone(&mut stripe, &id, Tombstone { seq_no, version, at });
+        }
+    }
+
     /// Reads a document by id: realtime (latest written state, buffers included) or from
     /// the last published searcher.
     pub fn get(&self, id: &[u8], realtime: bool) -> Result<Option<StoredDoc>> {
@@ -1113,7 +1491,7 @@ impl Shard {
         let (si, hash) = stripe_of(id);
         let st = self.inner.state.read();
         let stripe = self.inner.stripes[si].lock();
-        match Self::resolve(&st, &stripe, id, hash) {
+        match Self::resolve(&st, &stripe, id, hash, None) {
             Current::NotFound | Current::Deleted { .. } => Ok(None),
             Current::Live { seq_no, term, version, loc } => {
                 drop(stripe);
@@ -1143,7 +1521,7 @@ impl Shard {
         let (si, hash) = stripe_of(id);
         let st = self.inner.state.read();
         let stripe = self.inner.stripes[si].lock();
-        match Self::resolve(&st, &stripe, id, hash) {
+        match Self::resolve(&st, &stripe, id, hash, None) {
             Current::Live { seq_no, term, version, .. } => Some((seq_no, term, version)),
             _ => None,
         }
@@ -1184,6 +1562,55 @@ impl Shard {
     /// refresh, e.g. to free indexing memory).
     pub fn write_buffers(&self) -> Result<()> {
         self.convert(true, false).map(|_| ())
+    }
+
+    /// The searcher a realtime get of `id` reads through: Elasticsearch's internal reader,
+    /// which holds every segment written so far, published or not, and which the get refreshes
+    /// (converting the buffers, unpublished) when `id`'s latest version is still buffered.
+    /// Term vectors take their statistics from it.
+    pub fn realtime_searcher(&self, id: &[u8]) -> Result<Searcher> {
+        self.check_open()?;
+        let buffered = {
+            let (si, hash) = stripe_of(id);
+            let st = self.inner.state.read();
+            let stripe = self.inner.stripes[si].lock();
+            matches!(Self::resolve(&st, &stripe, id, hash, None), Current::Live { loc: Loc::Buffer(..), .. })
+        };
+        if buffered {
+            self.write_buffers()?;
+        }
+        let st = self.inner.state.read();
+        Ok(Self::make_searcher(&st, 0))
+    }
+
+    /// The internal refresh a realtime get of `id` makes Elasticsearch do (the get, mget and
+    /// source APIs), before it reads: its live version map holds the translog location of a
+    /// buffered document only once a get asked for locations (`trackTranslogLocation`), so the
+    /// first get of a buffered document, and later gets of documents written before that one,
+    /// refresh the internal reader (`refreshIfNeeded`, "realtime_get") instead of reading the
+    /// translog. Here that converts the buffers into unpublished segments: term vector
+    /// statistics ([`realtime_searcher`](Self::realtime_searcher)) count those documents, a
+    /// search does not see them.
+    pub fn note_realtime_get(&self, id: &[u8]) -> Result<()> {
+        let buffered_seq = {
+            let (si, hash) = stripe_of(id);
+            let st = self.inner.state.read();
+            let stripe = self.inner.stripes[si].lock();
+            match Self::resolve(&st, &stripe, id, hash, None) {
+                Current::Live { loc: Loc::Buffer(..), seq_no, .. } => Some(seq_no),
+                _ => None,
+            }
+        };
+        let Some(seq_no) = buffered_seq else { return Ok(()) };
+        let from = self.inner.locations_from.load(Ordering::Acquire);
+        if from == NOT_TRACKED {
+            // Documents written from now on carry their location.
+            let next = self.inner.next_seq.load(Ordering::Acquire);
+            let _ = self.inner.locations_from.compare_exchange(NOT_TRACKED, next, Ordering::AcqRel, Ordering::Acquire);
+        } else if seq_no >= from {
+            return Ok(());
+        }
+        self.write_buffers()
     }
 
     fn convert(&self, all: bool, publish: bool) -> Result<bool> {
@@ -1241,6 +1668,7 @@ impl Shard {
                     // Every seq no given or replayed so far; ops that applied but are not yet
                     // marked processed are in the commit too.
                     max_seq_no: inner.next_seq.load(Ordering::Acquire) - 1,
+                    published: inner.published.read().clone(),
                 });
             }
             (selected, st.schema.clone())
@@ -1336,6 +1764,10 @@ impl Shard {
                     let g = inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
                     *inner.published.write() = Self::make_searcher(&st, g);
                     inner.refreshes.fetch_add(1, Ordering::Relaxed);
+                    // The searcher shows them now: nothing needs their sources any more.
+                    for e in &st.segments {
+                        e.origin.lock().take();
+                    }
                 }
                 dirty
             } else {
@@ -1408,6 +1840,7 @@ impl Shard {
             self.convert_locked(g, true, false, Some(&mut view))?;
         }
         let view = view.expect("captured by the conversion");
+        let published = published_view(&view);
         let mut out = Vec::with_capacity(view.segments.len() + view.converted.len());
         // Segments merged away since the view are still the commit's (the caller keeps their
         // files until a later commit drops them).
@@ -1438,6 +1871,7 @@ impl Shard {
             max_seq_no: view.max_seq_no,
             local_checkpoint: view.checkpoint,
             primary_term: self.inner.cfg.primary_term,
+            published,
         })
     }
 
@@ -1477,12 +1911,60 @@ impl Shard {
             .collect()
     }
 
+    /// The first seq no whose deleted docs the soft-deletes retention keeps. The lease
+    /// follows the local checkpoint with a delay of one [`RETENTION_SYNC`] (Elasticsearch
+    /// renews it when it syncs retention leases), checked lazily: no timer runs.
+    pub fn retained_from(&self) -> i64 {
+        let mut r = self.inner.retention.lock();
+        let now = Instant::now();
+        if now.duration_since(r.next_at) >= RETENTION_SYNC {
+            r.from = r.from.max(r.next + 1);
+            r.next = self.inner.tracker.lock().checkpoint();
+            r.next_at = now;
+        }
+        r.from
+    }
+
+    /// The soft-deletes retention lease, to keep with a commit (Elasticsearch persists its
+    /// retention leases in the commit's user data): the first retained seq no, the position the
+    /// lease moves to at its next sync, and how long ago that position was taken.
+    pub fn retention_lease(&self) -> (i64, i64, Duration) {
+        let r = self.inner.retention.lock();
+        (r.from, r.next, r.next_at.elapsed())
+    }
+
+    /// Restores a lease [`Shard::retention_lease`] reported, when the shard opens (it would
+    /// start at the commit's checkpoint, which releases deletes a running Elasticsearch shard
+    /// still retains, and lets merges reclaim them at once). Never moves the lease backwards
+    /// past what the shard retains already.
+    pub fn seed_retention_lease(&self, from: i64, next: i64, age: Duration) {
+        let mut r = self.inner.retention.lock();
+        let now = Instant::now();
+        if from < r.from {
+            r.from = from;
+            r.next = next.max(from - 1);
+            r.next_at = now.checked_sub(age).unwrap_or(now);
+        }
+    }
+
+    /// Segments as natural merges see them: deletes the retention keeps don't count
+    /// (Lucene's `SoftDeletesRetentionMergePolicy`), so a small segment with fresh deletes is
+    /// not rewritten right after a refresh, and a fully deleted one is kept while retained.
+    fn natural_infos(&self, st: &State) -> Vec<SegInfo> {
+        let from = self.retained_from();
+        let mut infos = Self::seg_infos(st);
+        for i in infos.iter_mut().filter(|i| i.del_count > 0) {
+            i.del_count -= st.segments[i.id].retained_deletes(from).min(i.del_count);
+        }
+        infos
+    }
+
     /// Asks the merge policy for work and starts it (background threads, or inline with
     /// `merge_threads == 0`).
     pub fn maybe_merge(&self) -> Result<usize> {
         let groups = {
             let st = self.inner.state.read();
-            let infos = Self::seg_infos(&st);
+            let infos = self.natural_infos(&st);
             let picks = self.inner.cfg.merge_policy.find_merges(&infos);
             let mut groups = Vec::new();
             for g in picks {
@@ -1701,7 +2183,7 @@ impl Shard {
                     write_segment_with(&r, &mut sink, &opts)?;
                     Some(m)
                 }
-            } else if inner.cfg.bp_reorder && search_codec::SegmentSource::max_doc(&ms) >= 4096 * 4 {
+            } else if inner.cfg.bp_reorder && search_codec::SegmentSource::max_doc(&ms) >= BP_MIN_MERGE_DOCS {
                 let bp = BpOptions { parents: parents.as_ref().map(|p| p.words().to_vec()), ..Default::default() };
                 match bp_reorder(&ms, &bp)? {
                     Some(m) => {
@@ -1748,7 +2230,21 @@ impl Shard {
         // Deleted docs merged away free room under `max_docs`.
         let dropped = docs_of(group) - reader.max_doc() as u64;
         inner.pending_docs.fetch_sub(dropped, Ordering::AcqRel);
+        let origin = (reader.max_doc() <= MAX_ORIGIN_DOCS).then(|| {
+            let mut base = 0u32;
+            let sources = group
+                .iter()
+                .zip(&snapshots)
+                .map(|(e, l)| {
+                    let s = OriginSource { uid: e.uid, max_doc: e.max_doc, live: l.clone(), base, origin: e.origin.lock().clone() };
+                    base += e.max_doc - l.as_ref().map_or(0, |l| l.num_deleted());
+                    s
+                })
+                .collect();
+            Arc::new(MergeOrigin { sources, map })
+        });
         let entry = Arc::new(SegEntry::new(uid, reader, live, path, owned));
+        *entry.origin.lock() = origin;
         {
             // Cascade a running force merge (Lucene's `segmentsToMerge` update in commitMerge):
             // any merge of a tracked segment yields a tracked segment.
@@ -1872,6 +2368,114 @@ impl Shard {
     }
 }
 
+/// The commit's [`PublishedView`] (see [`FlushOutcome::published`]).
+fn published_view(view: &CommitView) -> Option<PublishedView> {
+    let shown: HashMap<u64, Option<&LiveDocs>> = view.published.segments().iter().map(|c| (c.core.uid, c.live.as_deref())).collect();
+    let mut out = PublishedView::default();
+    let mut listed = 0usize;
+    // The searcher's segments the commit's segments account for.
+    let mut reached: HashSet<u64> = HashSet::with_capacity(shown.len());
+    for (pos, (e, live, _)) in view.segments.iter().chain(view.converted.iter()).enumerate() {
+        let Some(&shown_live) = shown.get(&e.uid) else {
+            // Merged since the refresh: the docs it took from what the searcher showed.
+            let origin = e.origin.lock().clone();
+            if let Some(o) = origin {
+                let before = reached.len();
+                let mut vis = vec![false; e.max_doc as usize];
+                let ok = o.shown_docs(&shown, &mut reached, &mut |d| match vis.get_mut(d as usize) {
+                    Some(v) if !*v => {
+                        *v = true;
+                        true
+                    }
+                    _ => false,
+                });
+                if !ok {
+                    return None;
+                }
+                if reached.len() > before {
+                    let unshown: Vec<u32> = (0..e.max_doc).filter(|&d| !vis[d as usize]).collect();
+                    // Everything shown and nothing deleted since: as good as shown.
+                    if unshown.is_empty() && live.as_ref().is_none_or(|l| l.num_deleted() == 0) {
+                        continue;
+                    }
+                    listed += unshown.len();
+                    if listed > MAX_VIEW_DELETES {
+                        return None;
+                    }
+                    out.merged.push((pos as u32, unshown));
+                    continue;
+                }
+            }
+            out.hidden.push(pos as u32);
+            continue;
+        };
+        reached.insert(e.uid);
+        let since = deleted_since(shown_live, live.as_deref(), e.max_doc)?;
+        if !since.is_empty() {
+            listed += since.len();
+            if listed > MAX_VIEW_DELETES {
+                return None;
+            }
+            out.deleted.push((pos as u32, since));
+        }
+    }
+    // The searcher still shows segments merged away since the refresh into nothing the commit
+    // can trace back to them.
+    if reached.len() != shown.len() {
+        return None;
+    }
+    (!out.hidden.is_empty() || !out.deleted.is_empty() || !out.merged.is_empty()).then_some(out)
+}
+
+/// Docs live in `shown` (the searcher's live docs of a segment; `None`: all) and deleted in
+/// `committed`, ascending; `None` when `committed` isn't a later state of `shown` (a doc
+/// deleted there is live in the commit).
+fn deleted_since(shown: Option<&LiveDocs>, committed: Option<&LiveDocs>, max_doc: u32) -> Option<Vec<u32>> {
+    let mut out = Vec::new();
+    let Some(c) = committed else {
+        return shown.is_none_or(|s| s.num_deleted() == 0).then_some(out);
+    };
+    if shown.is_some_and(|s| s.max_doc() != c.max_doc()) {
+        return None;
+    }
+    let words = c.words();
+    for (i, &w) in words.iter().enumerate() {
+        let s = shown.map_or(u64::MAX, |s| s.words()[i]);
+        if w & !s != 0 {
+            return None;
+        }
+        let mut since = s & !w;
+        while since != 0 {
+            let d = i as u32 * 64 + since.trailing_zeros();
+            if d >= max_doc {
+                break;
+            }
+            out.push(d);
+            since &= since - 1;
+        }
+    }
+    Some(out)
+}
+
+/// `live` with the (deleted, ascending) docs `since` live again.
+fn undeleted(live: &LiveDocs, since: &[u32]) -> LiveDocs {
+    let mut out = LiveDocs::all_live(live.max_doc());
+    for (i, &w) in live.words().iter().enumerate() {
+        let mut dead = !w;
+        while dead != 0 {
+            let d = i as u32 * 64 + dead.trailing_zeros();
+            if d >= live.max_doc() {
+                break;
+            }
+            if since.binary_search(&d).is_err() {
+                out.delete(d);
+            }
+            dead &= dead - 1;
+        }
+    }
+    out
+}
+
 fn docs_of(group: &[Arc<SegEntry>]) -> u64 {
     group.iter().map(|e| e.max_doc as u64).sum()
 }
@@ -1955,7 +2559,7 @@ impl Shard {
     fn queue_more_merges(&self) -> Result<()> {
         let groups = {
             let st = self.inner.state.read();
-            let infos = Self::seg_infos(&st);
+            let infos = self.natural_infos(&st);
             let mut groups = Vec::new();
             for g in self.inner.cfg.merge_policy.find_merges(&infos) {
                 let segs: Vec<Arc<SegEntry>> = g.iter().map(|&i| st.segments[i].clone()).collect();
@@ -2088,4 +2692,63 @@ pub fn get_from_searcher(s: &Searcher, id: &[u8]) -> Result<Option<StoredDoc>> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    fn src(uid: u64, max_doc: u32, deleted: &[u32], base: u32, origin: Option<Arc<MergeOrigin>>) -> OriginSource {
+        let live = (!deleted.is_empty()).then(|| {
+            let mut l = LiveDocs::all_live(max_doc);
+            for &d in deleted {
+                l.delete(d);
+            }
+            Arc::new(l)
+        });
+        OriginSource { uid, max_doc, live, base, origin }
+    }
+
+    fn collect(o: &MergeOrigin, shown: &HashMap<u64, Option<&LiveDocs>>) -> Option<(Vec<u32>, Vec<u64>)> {
+        let mut docs = Vec::new();
+        let mut reached = HashSet::new();
+        o.shown_docs(shown, &mut reached, &mut |d| {
+            docs.push(d);
+            true
+        })
+        .then(|| {
+            let mut r: Vec<u64> = reached.into_iter().collect();
+            r.sort_unstable();
+            docs.sort_unstable();
+            (docs, r)
+        })
+    }
+
+    #[test]
+    fn merges_of_merges_trace_back_to_the_shown_segments() {
+        // M1 = merge(1: 2 docs, 2: 3 docs with doc 0 deleted before the merge); M2 = merge(M1, 3: 1 doc).
+        let m1 = Arc::new(MergeOrigin { sources: vec![src(1, 2, &[], 0, None), src(2, 3, &[0], 2, None)], map: None });
+        let m2 = MergeOrigin { sources: vec![src(10, 4, &[], 0, Some(m1.clone())), src(3, 1, &[], 4, None)], map: None };
+        let mut gone = LiveDocs::all_live(3);
+        gone.delete(0);
+        // The searcher showed 1, 2 (doc 0 deleted already) and 3.
+        let shown: HashMap<u64, Option<&LiveDocs>> = [(1, None), (2, Some(&gone)), (3, None)].into_iter().collect();
+        assert_eq!(collect(&m2, &shown), Some(((0..5).collect(), vec![1, 2, 3])));
+        // Only 3 shown (1 and 2 were written since the refresh): M2's docs 0..4 stay hidden.
+        let only3: HashMap<u64, Option<&LiveDocs>> = [(3, None)].into_iter().collect();
+        assert_eq!(collect(&m2, &only3), Some((vec![4], vec![3])));
+        // The searcher showed doc 0 of segment 2, which the merge dropped: no view.
+        let all: HashMap<u64, Option<&LiveDocs>> = [(1, None), (2, None)].into_iter().collect();
+        assert_eq!(collect(&m1, &all), None);
+        // A reorder of the concatenation (index sort) maps every doc.
+        let sorted = MergeOrigin { sources: vec![src(1, 2, &[], 0, None), src(3, 1, &[], 2, None)], map: Some(search_codec::DocMap::from_new_to_old(vec![2, 0, 1], 3).unwrap()) };
+        let both: HashMap<u64, Option<&LiveDocs>> = [(1, None), (3, None)].into_iter().collect();
+        assert_eq!(collect(&sorted, &both), Some((vec![0, 1, 2], vec![1, 3])));
+        let mut d = Vec::new();
+        assert!(sorted.shown_docs(&[(3, None)].into_iter().collect(), &mut HashSet::new(), &mut |x| {
+            d.push(x);
+            true
+        }));
+        assert_eq!(d, vec![0], "old doc 2 (segment 3's) is new doc 0");
+    }
 }

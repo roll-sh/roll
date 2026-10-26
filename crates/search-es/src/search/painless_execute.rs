@@ -93,7 +93,8 @@ pub fn execute(ctx: &Ctx) -> EsResult<Reply> {
         return Err(EsError::illegal_state("the document was not indexed"));
     };
     let local = 0u32;
-    let host = || DocHost::new(table.clone(), seg.clone(), 0, idx.name.clone());
+    let id_fielddata = super::id_fielddata::scripts(&st);
+    let host = || DocHost::new(table.clone(), seg.clone(), 0, idx.name.clone()).with_id_fielddata(id_fielddata).without_cancellation();
     let script_err = crate::scripting::script_error;
     match context {
         Context::Filter => {
@@ -133,7 +134,8 @@ pub fn execute(ctx: &Ctx) -> EsResult<Reply> {
             defs.insert(format!("{}_field", ty), obj! { "type" => ty, "script" => script_value(&script) });
             let rt = super::runtime::RuntimeFields::of(&idx.mapping, Some(&defs))?;
             let Some(f) = rt.get(&format!("{ty}_field")).cloned() else { return Reply::ok(obj! { "result" => Value::Arr(Vec::new()) }) };
-            let ev = super::runtime::Evaluator::new(&ctx.cluster.scripts, &st, &table, 0, &idx.name, f.clone())?;
+            let mut ev = super::runtime::Evaluator::new(&ctx.cluster.scripts, &st, &table, 0, &idx.name, f.clone())?;
+            ev.cancellable = false;
             let vals = ev.leaf(&seg)?.values(local)?;
             Reply::ok(obj! { "result" => Value::Arr(super::runtime::render(&f, &vals, None)?) })
         }

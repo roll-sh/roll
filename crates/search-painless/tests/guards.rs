@@ -197,6 +197,53 @@ fn cancellable_loops_poll_instead_of_counting() {
     assert!(host.polls >= 3000, "{}", host.polls);
 }
 
+#[test]
+fn library_driven_lambdas_poll_for_cancellation() {
+    let e = engine();
+    // `each` / `findAll` / stream reductions iterate in library code: no script loop counts
+    // them, so the lambda calls themselves poll every 1,000 calls (`$cancelPoll`).
+    let script = e
+        .compile("List a = new ArrayList(); for (int i = 0; i < 1000; i++) { a.add(i); } a.each(x -> a.each(y -> a.each(z -> z.hashCode()))); return 1", Context::Score)
+        .unwrap();
+    let mut inst = script.instance();
+    inst.set_cancellable(true);
+    let err = inst.execute(&mut Cancelling { polls: 0, cancel_after: 5 }).unwrap_err().to_response();
+    assert_eq!(err["error"]["caused_by"]["type"], "task_cancelled_exception");
+    let stream = e.compile("IntStream.range(0, 5000).reduce(0, (x, y) -> x + y)", Context::Score).unwrap();
+    let mut inst = stream.instance();
+    inst.set_cancellable(true);
+    let mut host = Cancelling { polls: 0, cancel_after: u32::MAX };
+    assert_eq!(inst.execute_f64(&mut host).unwrap(), 12497500.0);
+    assert_eq!(host.polls, 5);
+    // outside a search nothing polls
+    let mut inst = stream.instance();
+    let mut host = Cancelling { polls: 0, cancel_after: 0 };
+    assert_eq!(inst.execute_f64(&mut host).unwrap(), 12497500.0);
+    assert_eq!(host.polls, 0);
+}
+
+#[test]
+fn scripts_cannot_catch_cancellation() {
+    let e = engine();
+    // Elasticsearch's `TimeExceededException` can't be caught from Painless: a script that
+    // catches `Exception` around a loop must still stop once the search is cancelled.
+    let script = e
+        .compile("int n = 0; while (true) { try { for (long i = 0; ; i++) {} } catch (Exception e) { n++; } }", Context::Score)
+        .unwrap();
+    let mut inst = script.instance();
+    inst.set_cancellable(true);
+    let mut host = Cancelling { polls: 0, cancel_after: 3 };
+    let err = inst.execute(&mut host).unwrap_err().to_response();
+    assert_eq!(err["error"]["caused_by"]["type"], "task_cancelled_exception");
+    assert_eq!(host.polls, 4);
+    // the same through a library-driven lambda
+    let script = e.compile("List a = [1, 2]; int n = 0; while (true) { try { a.removeIf(x -> { long k = 0; for (long i = 0; i < 100000000000L; i++) { k++; } return k > 0; }); } catch (Exception t) { n++; } }", Context::Score).unwrap();
+    let mut inst = script.instance();
+    inst.set_cancellable(true);
+    let err = inst.execute(&mut Cancelling { polls: 0, cancel_after: 2 }).unwrap_err().to_response();
+    assert_eq!(err["error"]["caused_by"]["type"], "task_cancelled_exception");
+}
+
 /// A host that panics while reading doc values.
 struct Panicking;
 

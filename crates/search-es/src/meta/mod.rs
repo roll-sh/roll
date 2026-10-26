@@ -25,6 +25,7 @@ pub mod resolve;
 pub mod routing;
 pub mod settings;
 pub mod snapshots;
+pub mod stack_templates;
 pub mod synonyms;
 pub mod templates;
 
@@ -251,6 +252,8 @@ pub struct Metadata {
     pub transient: Settings,
     pub scripts: BTreeMap<String, StoredScript>,
     pub pipelines: BTreeMap<String, Value>,
+    /// OpenSearch search pipelines (`/_search/pipeline`), stored as given.
+    pub search_pipelines: BTreeMap<String, Value>,
     /// Voting configuration exclusions `(node_id, node_name)` (`_absent_` for the unknown one).
     pub voting_exclusions: Vec<(String, String)>,
     /// Data streams by name.
@@ -269,6 +272,8 @@ pub struct Metadata {
     pub repository_data: BTreeMap<String, Arc<snapshots::RepositoryData>>,
     /// The cluster's dialect (not persisted; the same as [`ClusterState::dialect`]).
     pub dialect: crate::cluster::Dialect,
+    /// The stored objects of the x-pack APIs (users, roles, ML jobs, transforms, ...).
+    pub xpack: Arc<crate::xpack::store::XpackState>,
 }
 
 impl Metadata {
@@ -440,6 +445,7 @@ impl ClusterState {
             "transient_settings" => md.transient.to_flat_json(),
             "scripts" => Value::Obj(scripts),
             "pipelines" => Value::Obj(pipelines),
+            "search_pipelines" => Value::Obj(md.search_pipelines.iter().map(|(k, p)| (k.clone(), p.clone())).collect()),
             "voting_exclusions" => Value::Arr(md.voting_exclusions.iter().map(|(i, n)| obj! { "node_id" => i.clone(), "node_name" => n.clone() }).collect()),
             "data_streams" => Value::Obj(md.data_streams.iter().map(|(k, d)| (k.clone(), d.to_stored())).collect()),
             "data_stream_aliases" => Value::Obj(md.data_stream_aliases.iter().map(|(k, a)| (k.clone(), a.to_stored())).collect()),
@@ -448,6 +454,7 @@ impl ClusterState {
             "desired_nodes" => md.desired_nodes.as_ref().map(|d| d.to_value(true)).unwrap_or(Value::Null),
             "repositories" => Value::Obj(md.repositories.iter().map(|(k, r)| (k.clone(), r.to_stored())).collect()),
             "repository_data" => Value::Obj(md.repository_data.iter().map(|(k, d)| (k.clone(), d.to_stored())).collect()),
+            "xpack" => md.xpack.to_stored(),
         }
     }
 
@@ -510,6 +517,9 @@ impl ClusterState {
                 md.pipelines.insert(k.clone(), p.clone());
             }
         }
+        if let Some(Value::Obj(m)) = v.get("search_pipelines") {
+            md.search_pipelines = m.iter().map(|(k, p)| (k.clone(), p.clone())).collect();
+        }
         if let Some(Value::Obj(m)) = v.get("data_streams") {
             for (k, d) in m {
                 md.data_streams.insert(k.clone(), Arc::new(data_streams::DataStream::from_stored(k, d)?));
@@ -531,6 +541,7 @@ impl ClusterState {
         if let Some(Value::Obj(m)) = v.get("repository_data") {
             md.repository_data = m.iter().filter_map(|(k, d)| snapshots::RepositoryData::from_stored(d).map(|d| (k.clone(), Arc::new(d)))).collect();
         }
+        md.xpack = Arc::new(crate::xpack::store::XpackState::from_stored(v.get("xpack")));
         Ok(ClusterState {
             dialect,
             version: v.get("version").and_then(Value::as_i64).unwrap_or(1) as u64,

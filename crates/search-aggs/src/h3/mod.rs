@@ -28,12 +28,31 @@ pub fn h3_to_string(h: u64) -> String {
     format!("{h:x}")
 }
 
-/// `H3.stringToH3` (`Long.parseUnsignedLong(address, 16)`).
+/// `H3.stringToH3` (`Long.parseUnsignedLong(address, 16)`) of a valid cell
+/// ([`is_valid`]): `None` for anything else, so no caller hands peer input that isn't a cell
+/// to the functions below (they index tables by its fields).
 pub fn string_to_h3(address: &str) -> Option<u64> {
     if address.is_empty() || address.starts_with('+') {
         return None;
     }
-    u64::from_str_radix(address, 16).ok()
+    u64::from_str_radix(address, 16).ok().filter(|h| is_valid(*h))
+}
+
+/// `H3.h3IsValid`: whether `h` is a cell index.
+pub fn is_valid(h: u64) -> bool {
+    core::is_valid_cell(h)
+}
+
+/// `Long.parseUnsignedLong(address, 16)` of an address that may not be a valid cell but that
+/// the functions below can still read: a base cell and digits `0..=6` down to its
+/// resolution (mode, reserved and unused digit bits ignored, as Elasticsearch's processor
+/// reads `"0"` as base cell 0). `None` for anything else.
+pub fn string_to_h3_lenient(address: &str) -> Option<u64> {
+    if address.is_empty() || address.starts_with('+') {
+        return None;
+    }
+    let h = u64::from_str_radix(address, 16).ok()?;
+    core::is_readable_cell(h).then_some(h)
 }
 
 /// The cell's resolution.

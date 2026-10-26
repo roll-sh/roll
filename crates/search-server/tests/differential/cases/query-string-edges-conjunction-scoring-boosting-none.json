@@ -1,0 +1,2786 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "PUT",
+      "path": "fxqs-a",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "t": {
+              "type": "text"
+            },
+            "k": {
+              "type": "keyword"
+            },
+            "o": {
+              "properties": {
+                "a": {
+                  "type": "text"
+                }
+              }
+            },
+            "s": {
+              "type": "long"
+            },
+            "m": {
+              "type": "keyword"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxqs-a"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "0"
+          }
+        },
+        {
+          "t": "quick fox",
+          "k": "k0",
+          "o": {
+            "a": "lazy dog"
+          },
+          "s": 0
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "1"
+          }
+        },
+        {
+          "t": "lazy dog",
+          "k": "k1",
+          "o": {
+            "a": "quick brown fox"
+          },
+          "s": 1
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "2"
+          }
+        },
+        {
+          "t": "quick brown fox",
+          "k": "k2",
+          "o": {
+            "a": "> quick"
+          },
+          "s": 2
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "3"
+          }
+        },
+        {
+          "t": "> quick",
+          "k": "k3",
+          "o": {
+            "a": "dog fox!"
+          },
+          "s": 3
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "4"
+          }
+        },
+        {
+          "t": "dog fox!",
+          "k": "k0",
+          "o": {
+            "a": "quick fox"
+          },
+          "s": 4
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "5"
+          }
+        },
+        {
+          "t": "quick fox",
+          "k": "k1",
+          "o": {
+            "a": "lazy dog"
+          },
+          "s": 5
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "6"
+          }
+        },
+        {
+          "t": "lazy dog",
+          "k": "k2",
+          "o": {
+            "a": "quick brown fox"
+          },
+          "s": 6
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "7"
+          }
+        },
+        {
+          "t": "quick brown fox",
+          "k": "k3",
+          "o": {
+            "a": "> quick"
+          },
+          "s": 7
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "8"
+          }
+        },
+        {
+          "t": "> quick",
+          "k": "k0",
+          "o": {
+            "a": "dog fox!"
+          },
+          "s": 8
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "9"
+          }
+        },
+        {
+          "t": "dog fox!",
+          "k": "k1",
+          "o": {
+            "a": "quick fox"
+          },
+          "s": 9
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "10"
+          }
+        },
+        {
+          "t": "quick fox",
+          "k": "k2",
+          "o": {
+            "a": "lazy dog"
+          },
+          "s": 10
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "11"
+          }
+        },
+        {
+          "t": "lazy dog",
+          "k": "k3",
+          "o": {
+            "a": "quick brown fox"
+          },
+          "s": 11
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "12"
+          }
+        },
+        {
+          "t": "quick brown fox",
+          "k": "k0",
+          "o": {
+            "a": "> quick"
+          },
+          "s": 12
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "13"
+          }
+        },
+        {
+          "t": "> quick",
+          "k": "k1",
+          "o": {
+            "a": "dog fox!"
+          },
+          "s": 13
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "14"
+          }
+        },
+        {
+          "t": "dog fox!",
+          "k": "k2",
+          "o": {
+            "a": "quick fox"
+          },
+          "s": 14
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "15"
+          }
+        },
+        {
+          "t": "quick fox",
+          "k": "k3",
+          "o": {
+            "a": "lazy dog"
+          },
+          "s": 15
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "16"
+          }
+        },
+        {
+          "t": "lazy dog",
+          "k": "k0",
+          "o": {
+            "a": "quick brown fox"
+          },
+          "s": 16
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "17"
+          }
+        },
+        {
+          "t": "quick brown fox",
+          "k": "k1",
+          "o": {
+            "a": "> quick"
+          },
+          "s": 17
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "18"
+          }
+        },
+        {
+          "t": "> quick",
+          "k": "k2",
+          "o": {
+            "a": "dog fox!"
+          },
+          "s": 18
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "19"
+          }
+        },
+        {
+          "t": "dog fox!",
+          "k": "k3",
+          "o": {
+            "a": "quick fox"
+          },
+          "s": 19
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "20"
+          }
+        },
+        {
+          "t": "quick fox",
+          "k": "k0",
+          "o": {
+            "a": "lazy dog"
+          },
+          "s": 20
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "21"
+          }
+        },
+        {
+          "t": "lazy dog",
+          "k": "k1",
+          "o": {
+            "a": "quick brown fox"
+          },
+          "s": 21
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "22"
+          }
+        },
+        {
+          "t": "quick brown fox",
+          "k": "k2",
+          "o": {
+            "a": "> quick"
+          },
+          "s": 22
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "23"
+          }
+        },
+        {
+          "t": "> quick",
+          "k": "k3",
+          "o": {
+            "a": "dog fox!"
+          },
+          "s": 23
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "24"
+          }
+        },
+        {
+          "t": "dog fox!",
+          "k": "k0",
+          "o": {
+            "a": "quick fox"
+          },
+          "s": 24
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "25"
+          }
+        },
+        {
+          "t": "quick fox",
+          "k": "k1",
+          "o": {
+            "a": "lazy dog"
+          },
+          "s": 25
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "26"
+          }
+        },
+        {
+          "t": "lazy dog",
+          "k": "k2",
+          "o": {
+            "a": "quick brown fox"
+          },
+          "s": 26
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "27"
+          }
+        },
+        {
+          "t": "quick brown fox",
+          "k": "k3",
+          "o": {
+            "a": "> quick"
+          },
+          "s": 27
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "28"
+          }
+        },
+        {
+          "t": "> quick",
+          "k": "k0",
+          "o": {
+            "a": "dog fox!"
+          },
+          "s": 28
+        },
+        {
+          "index": {
+            "_index": "fxqs-a",
+            "_id": "29"
+          }
+        },
+        {
+          "t": "dog fox!",
+          "k": "k1",
+          "o": {
+            "a": "quick fox"
+          },
+          "s": 29
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "0",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "4",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "5",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "6",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "7",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "8",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 3,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "9",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 4,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "10",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "11",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "12",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 5,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "13",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 7,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "14",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 6,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "15",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 8,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "16",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 7,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "17",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 8,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "18",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 9,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "19",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 9,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "20",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 10,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "21",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 10,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "22",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 11,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "23",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 12,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "24",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 11,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "25",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 12,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "26",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 13,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "27",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 14,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "28",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 13,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-a",
+                "_id": "29",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 14,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "t:>",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 18,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "k:>",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "o.a:>",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "t:> quick",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 18,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "t:>=",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 10,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 30,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "k:<",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 6,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "fox!",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [fox!]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [fox!]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'fox!': Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "a!",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a!]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a!]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a!': Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "\u00e9!",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [\u00e9!]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [\u00e9!]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '\u00e9!': Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \"<EOF>\" at line 1, column 2.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    \"*\" ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "()",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [()]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [()]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '()': Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "(())",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [(())]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [(())]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '(())': Encountered \" \")\" \") \"\" at line 1, column 2.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 2.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "t:()",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [t:()]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [t:()]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 't:()': Encountered \" \")\" \") \"\" at line 1, column 3.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 3.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "() fox",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [() fox]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [() fox]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '() fox': Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "fox ()",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [fox ()]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [fox ()]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'fox ()': Encountered \" \")\" \") \"\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \")\" \") \"\" at line 1, column 5.\nWas expecting one of:\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    <TERM> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "a~~",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a~~]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a~~]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a~~': Encountered \" <FUZZY_SLOP> \"~ \"\" at line 1, column 2.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" <FUZZY_SLOP> \"~ \"\" at line 1, column 2.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    \"^\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "a^2^3",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a^2^3]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a^2^3]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a^2^3': Encountered \" \"^\" \"^ \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    ",
+                    "caused_by": {
+                      "type": "parse_exception",
+                      "reason": "Encountered \" \"^\" \"^ \"\" at line 1, column 3.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    <OR> ...\n    <NOT> ...\n    \"+\" ...\n    \"-\" ...\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <FUZZY_SLOP> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "a^x",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [a^x]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [a^x]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse 'a^x': Lexical error at line 1, column 4.  Encountered: <EOF>",
+                    "caused_by": {
+                      "type": "token_mgr_error",
+                      "reason": "Lexical error at line 1, column 4.  Encountered: <EOF>"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "\"a b",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "query_shard_exception",
+                "reason": "Failed to parse query [\"a b]",
+                "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                "index": "fxqs-a"
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "Failed to parse query [\"a b]",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "parse_exception",
+                    "reason": "Cannot parse '\"a b': Lexical error at line 1, column 5.  Encountered: <EOF> after prefix \"\\\"a b\" (in lexical state 2)",
+                    "caused_by": {
+                      "type": "token_mgr_error",
+                      "reason": "Lexical error at line 1, column 5.  Encountered: <EOF> after prefix \"\\\"a b\" (in lexical state 2)"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "query_string": {
+            "query": "t:quick^2~",
+            "default_field": "t"
+          }
+        },
+        "size": 0,
+        "track_total_hits": true
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 7,
+          "timed_out": false,
+          "terminated_early": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 18,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "fxqs-b",
+      "body": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 0
+        },
+        "mappings": {
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "s": {
+              "type": "long"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "fxqs-b"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "fxqs-b",
+            "_id": "0"
+          }
+        },
+        {
+          "k": "x",
+          "s": 257
+        },
+        {
+          "index": {
+            "_index": "fxqs-b",
+            "_id": "1"
+          }
+        },
+        {
+          "k": "y",
+          "s": -91
+        },
+        {
+          "index": {
+            "_index": "fxqs-b",
+            "_id": "2"
+          }
+        },
+        {
+          "k": "y",
+          "s": 4
+        },
+        {
+          "index": {
+            "_index": "fxqs-b",
+            "_id": "3"
+          }
+        },
+        {
+          "k": "x",
+          "s": 9
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "fxqs-b",
+                "_id": "0",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-b",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-b",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "fxqs-b",
+                "_id": "3",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 1,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must": [
+              {
+                "function_score": {
+                  "query": {
+                    "ids": {
+                      "values": [
+                        "1",
+                        "2",
+                        "3"
+                      ]
+                    }
+                  },
+                  "field_value_factor": {
+                    "field": "s",
+                    "modifier": "sqrt"
+                  }
+                }
+              },
+              {
+                "term": {
+                  "k": "x"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 13,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 3.1823215,
+            "hits": [
+              {
+                "_index": "fxqs-b",
+                "_id": "3",
+                "_score": 3.1823215,
+                "_source": {
+                  "k": "x",
+                  "s": 9
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must": [
+              {
+                "term": {
+                  "k": "x"
+                }
+              },
+              {
+                "function_score": {
+                  "query": {
+                    "ids": {
+                      "values": [
+                        "1",
+                        "2",
+                        "3"
+                      ]
+                    }
+                  },
+                  "field_value_factor": {
+                    "field": "s",
+                    "modifier": "sqrt"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 11,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 3.1823215,
+            "hits": [
+              {
+                "_index": "fxqs-b",
+                "_id": "3",
+                "_score": 3.1823215,
+                "_source": {
+                  "k": "x",
+                  "s": 9
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "must": [
+              {
+                "function_score": {
+                  "query": {
+                    "ids": {
+                      "values": [
+                        "1",
+                        "2",
+                        "3"
+                      ]
+                    }
+                  },
+                  "field_value_factor": {
+                    "field": "s",
+                    "modifier": "sqrt"
+                  }
+                }
+              }
+            ],
+            "filter": [
+              {
+                "term": {
+                  "k": "x"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 5,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 3.0,
+            "hits": [
+              {
+                "_index": "fxqs-b",
+                "_id": "3",
+                "_score": 3.0,
+                "_source": {
+                  "k": "x",
+                  "s": 9
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "boosting": {
+            "positive": {
+              "match_none": {}
+            },
+            "negative": {
+              "combined_fields": {
+                "query": "fox"
+              }
+            },
+            "negative_boost": 0.2
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "boosting": {
+            "positive": {
+              "function_score": {
+                "query": {
+                  "boosting": {
+                    "positive": {
+                      "match_none": {}
+                    },
+                    "negative": {
+                      "term": {
+                        "k": "x"
+                      }
+                    },
+                    "negative_boost": 0.2
+                  }
+                },
+                "functions": [
+                  {
+                    "weight": 0.5
+                  }
+                ]
+              }
+            },
+            "negative": {
+              "combined_fields": {
+                "query": "fox"
+              }
+            },
+            "negative_boost": 0.2
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "boosting": {
+            "positive": {
+              "bool": {
+                "must": [
+                  {
+                    "match_none": {}
+                  }
+                ]
+              }
+            },
+            "negative": {
+              "combined_fields": {
+                "query": "fox"
+              }
+            },
+            "negative_boost": 0.2
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "function_score": {
+            "query": {
+              "match_none": {}
+            },
+            "functions": [
+              {
+                "filter": {
+                  "combined_fields": {
+                    "query": "fox"
+                  }
+                },
+                "weight": 2
+              }
+            ]
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 2,
+            "successful": 2,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 0,
+              "relation": "eq"
+            },
+            "max_score": null,
+            "hits": []
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-b/_search",
+      "body": {
+        "query": {
+          "function_score": {
+            "field_value_factor": {
+              "field": "nope"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "exception",
+                "reason": "Unable to find a field mapper for field [nope]. No 'missing' value defined."
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-b",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: Unable to find a field mapper for field [nope]. No 'missing' value defined.",
+                  "index_uuid": "tQeTbEBlR0-5hpSpmZ6_Ow",
+                  "index": "fxqs-b",
+                  "caused_by": {
+                    "type": "exception",
+                    "reason": "Unable to find a field mapper for field [nope]. No 'missing' value defined."
+                  }
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "exception",
+              "reason": "Unable to find a field mapper for field [nope]. No 'missing' value defined."
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/_cluster/settings",
+      "body": {
+        "transient": {
+          "search.allow_expensive_queries": false
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "persistent": {},
+          "transient": {
+            "search": {
+              "allow_expensive_queries": "false"
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "range": {
+            "t": {
+              "gte": "a"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "exception",
+                "reason": "[range] queries on [text] or [keyword] fields cannot be executed when 'search.allow_expensive_queries' is set to false."
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: [range] queries on [text] or [keyword] fields cannot be executed when 'search.allow_expensive_queries' is set to false.",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "exception",
+                    "reason": "[range] queries on [text] or [keyword] fields cannot be executed when 'search.allow_expensive_queries' is set to false."
+                  }
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "exception",
+              "reason": "[range] queries on [text] or [keyword] fields cannot be executed when 'search.allow_expensive_queries' is set to false."
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/fxqs-a/_search",
+      "body": {
+        "query": {
+          "prefix": {
+            "t": "qu"
+          }
+        }
+      },
+      "es": {
+        "status": 400,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "error": {
+            "root_cause": [
+              {
+                "type": "exception",
+                "reason": "[prefix] queries cannot be executed when 'search.allow_expensive_queries' is set to false. For optimised prefix queries on text fields please enable [index_prefixes]."
+              }
+            ],
+            "type": "search_phase_execution_exception",
+            "reason": "all shards failed",
+            "phase": "query",
+            "grouped": true,
+            "failed_shards": [
+              {
+                "shard": 0,
+                "index": "fxqs-a",
+                "node": "iPknGr17TNK6v_G09UMnUA",
+                "reason": {
+                  "type": "query_shard_exception",
+                  "reason": "failed to create query: [prefix] queries cannot be executed when 'search.allow_expensive_queries' is set to false. For optimised prefix queries on text fields please enable [index_prefixes].",
+                  "index_uuid": "cd9c-MyGTO294tZ6pMPzPA",
+                  "index": "fxqs-a",
+                  "caused_by": {
+                    "type": "exception",
+                    "reason": "[prefix] queries cannot be executed when 'search.allow_expensive_queries' is set to false. For optimised prefix queries on text fields please enable [index_prefixes]."
+                  }
+                }
+              }
+            ],
+            "caused_by": {
+              "type": "exception",
+              "reason": "[prefix] queries cannot be executed when 'search.allow_expensive_queries' is set to false. For optimised prefix queries on text fields please enable [index_prefixes]."
+            }
+          },
+          "status": 400
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/_cluster/settings",
+      "body": {
+        "transient": {
+          "search.allow_expensive_queries": null
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "persistent": {},
+          "transient": {}
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/fxqs-a,fxqs-b",
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

@@ -6,9 +6,14 @@
 //! record:
 //!   u32 body length | u32 crc32c(length bytes ++ body) | body
 //! body:
-//!   u64 unix ms | i64 seq_no | u32 shard | u16 cluster length | u16 index uuid length |
-//!   cluster | index uuid | payload (opaque operation bytes from search-index)
+//!   u64 unix ms | i64 seq_no | u32 shard (bit 31: an epoch follows) | u16 cluster length |
+//!   u16 index uuid length | [u64 epoch] | cluster | index uuid | payload (opaque operation bytes)
 //! ```
+//!
+//! The epoch is the cluster's ownership epoch (its lease) when the record was appended: a
+//! shard's WAL range is replayed only for the epoch that opened it, so records a deposed owner
+//! appended can't become part of the history whatever their timing. Clusters without leases
+//! (epoch 0) write no epoch; records from before epochs existed read as epoch 0.
 //!
 //! Files are always freshly created and only appended to, so whatever follows the last record
 //! that checks out is a torn tail from a crash in the middle of a group commit: readers stop
@@ -22,6 +27,8 @@ pub const MAGIC: [u8; 8] = *b"RSWAL\0\0\x01";
 pub const FILE_HEADER: usize = 32;
 pub const RECORD_HEADER: usize = 8;
 const BODY_FIXED: usize = 8 + 8 + 4 + 2 + 2;
+/// Set in the shard field when an epoch follows the fixed part of the body.
+const EPOCH_FLAG: u32 = 1 << 31;
 /// Largest record body. Elasticsearch caps a request at `http.max_content_length` (100 MB);
 /// an operation is at most that plus framing.
 pub const MAX_RECORD: usize = 256 << 20;
@@ -32,6 +39,8 @@ pub struct WalRecord<'a> {
     /// When it was appended (Unix ms). Non-decreasing in log order on a node.
     pub at_ms: u64,
     pub seq_no: i64,
+    /// The cluster's ownership epoch when it was appended (0: none).
+    pub epoch: u64,
     pub cluster: &'a str,
     pub index_uuid: &'a str,
     pub shard: u32,
@@ -64,24 +73,36 @@ impl FileHeader {
     }
 }
 
-/// Size of a record with these fields on disk.
+/// Size of a record with these fields on disk (without an epoch).
 pub fn encoded_len(cluster: &str, index_uuid: &str, payload: &[u8]) -> usize {
     RECORD_HEADER + BODY_FIXED + cluster.len() + index_uuid.len() + payload.len()
 }
 
-/// Append one record to `buf`. The caller has validated the lengths (see [`check_lengths`]).
+/// The fixed part of a body, then the epoch when there is one.
 #[inline]
-pub fn encode(buf: &mut Vec<u8>, at_ms: u64, seq_no: i64, cluster: &str, index_uuid: &str, shard: u32, payload: &[u8]) {
-    let body = BODY_FIXED + cluster.len() + index_uuid.len() + payload.len();
+fn fixed(buf: &mut Vec<u8>, at_ms: u64, seq_no: i64, epoch: u64, cluster: &str, index_uuid: &str, shard: u32) {
+    buf.extend_from_slice(&at_ms.to_le_bytes());
+    buf.extend_from_slice(&seq_no.to_le_bytes());
+    let flags = if epoch > 0 { EPOCH_FLAG } else { 0 };
+    buf.extend_from_slice(&(shard | flags).to_le_bytes());
+    buf.extend_from_slice(&(cluster.len() as u16).to_le_bytes());
+    buf.extend_from_slice(&(index_uuid.len() as u16).to_le_bytes());
+    if epoch > 0 {
+        buf.extend_from_slice(&epoch.to_le_bytes());
+    }
+}
+
+/// Append one record to `buf`. The caller has validated the lengths (see [`check_lengths`]);
+/// shard numbers are below 2^31.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn encode(buf: &mut Vec<u8>, at_ms: u64, seq_no: i64, epoch: u64, cluster: &str, index_uuid: &str, shard: u32, payload: &[u8]) {
+    let body = BODY_FIXED + if epoch > 0 { 8 } else { 0 } + cluster.len() + index_uuid.len() + payload.len();
     let start = buf.len();
     buf.reserve(RECORD_HEADER + body);
     buf.extend_from_slice(&(body as u32).to_le_bytes());
     buf.extend_from_slice(&[0; 4]);
-    buf.extend_from_slice(&at_ms.to_le_bytes());
-    buf.extend_from_slice(&seq_no.to_le_bytes());
-    buf.extend_from_slice(&shard.to_le_bytes());
-    buf.extend_from_slice(&(cluster.len() as u16).to_le_bytes());
-    buf.extend_from_slice(&(index_uuid.len() as u16).to_le_bytes());
+    fixed(buf, at_ms, seq_no, epoch, cluster, index_uuid, shard);
     buf.extend_from_slice(cluster.as_bytes());
     buf.extend_from_slice(index_uuid.as_bytes());
     buf.extend_from_slice(payload);
@@ -89,11 +110,38 @@ pub fn encode(buf: &mut Vec<u8>, at_ms: u64, seq_no: i64, cluster: &str, index_u
     buf[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
 }
 
+/// [`encode`] with the payload given in parts (concatenated), so callers framing an operation
+/// need not copy it into one buffer first.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_parts(buf: &mut Vec<u8>, at_ms: u64, seq_no: i64, epoch: u64, cluster: &str, index_uuid: &str, shard: u32, parts: &[&[u8]]) {
+    let payload: usize = parts.iter().map(|p| p.len()).sum();
+    let body = BODY_FIXED + if epoch > 0 { 8 } else { 0 } + cluster.len() + index_uuid.len() + payload;
+    let start = buf.len();
+    buf.reserve(RECORD_HEADER + body);
+    buf.extend_from_slice(&(body as u32).to_le_bytes());
+    buf.extend_from_slice(&[0; 4]);
+    fixed(buf, at_ms, seq_no, epoch, cluster, index_uuid, shard);
+    buf.extend_from_slice(cluster.as_bytes());
+    buf.extend_from_slice(index_uuid.as_bytes());
+    for p in parts {
+        buf.extend_from_slice(p);
+    }
+    let crc = crc(&buf[start..start + 4], &buf[start + RECORD_HEADER..]);
+    buf[start + 4..start + 8].copy_from_slice(&crc.to_le_bytes());
+}
+
 pub fn check_lengths(cluster: &str, index_uuid: &str, payload: &[u8]) -> anyhow::Result<()> {
+    check_payload_len(cluster, index_uuid, payload.len())
+}
+
+/// [`check_lengths`] for a payload of `payload` bytes.
+pub fn check_payload_len(cluster: &str, index_uuid: &str, payload: usize) -> anyhow::Result<()> {
     anyhow::ensure!(cluster.len() <= u16::MAX as usize, "cluster name too long");
     anyhow::ensure!(index_uuid.len() <= u16::MAX as usize, "index uuid too long");
-    let body = BODY_FIXED + cluster.len() + index_uuid.len() + payload.len();
-    anyhow::ensure!(body <= MAX_RECORD, "operation of {} bytes exceeds the WAL record limit of {MAX_RECORD} bytes", payload.len());
+    // (+ 8: the epoch, when there is one.)
+    let body = BODY_FIXED + 8 + cluster.len() + index_uuid.len() + payload;
+    anyhow::ensure!(body <= MAX_RECORD, "operation of {payload} bytes exceeds the WAL record limit of {MAX_RECORD} bytes");
     Ok(())
 }
 
@@ -112,13 +160,18 @@ fn parse_body(body: &[u8]) -> Option<WalRecord<'_>> {
     let shard = u32::from_le_bytes(body[16..20].try_into().unwrap());
     let clen = u16::from_le_bytes(body[20..22].try_into().unwrap()) as usize;
     let ulen = u16::from_le_bytes(body[22..24].try_into().unwrap()) as usize;
-    let rest = &body[BODY_FIXED..];
+    let mut rest = &body[BODY_FIXED..];
+    let mut epoch = 0;
+    if shard & EPOCH_FLAG != 0 {
+        epoch = u64::from_le_bytes(rest.get(..8)?.try_into().unwrap());
+        rest = &rest[8..];
+    }
     if rest.len() < clen + ulen {
         return None;
     }
     let cluster = std::str::from_utf8(&rest[..clen]).ok()?;
     let index_uuid = std::str::from_utf8(&rest[clen..clen + ulen]).ok()?;
-    Some(WalRecord { at_ms, seq_no, cluster, index_uuid, shard, payload: &rest[clen + ulen..] })
+    Some(WalRecord { at_ms, seq_no, epoch, cluster, index_uuid, shard: shard & !EPOCH_FLAG, payload: &rest[clen + ulen..] })
 }
 
 /// Iterates the records of a file held in memory (header excluded), stopping at the first one
@@ -246,9 +299,10 @@ mod tests {
 
     fn sample() -> Vec<u8> {
         let mut buf = Vec::new();
-        encode(&mut buf, 10, 0, "c1", "u1", 0, b"first");
-        encode(&mut buf, 11, 1, "c2", "uuid-2", 7, b"");
-        encode(&mut buf, 12, -1, "c1", "u1", 0, &[0xff; 1000]);
+        encode(&mut buf, 10, 0, 0, "c1", "u1", 0, b"first");
+        encode(&mut buf, 11, 1, 0, "c2", "uuid-2", 7, b"");
+        encode(&mut buf, 12, -1, 0, "c1", "u1", 0, &[0xff; 1000]);
+        encode(&mut buf, 13, 2, 7, "c1", "u1", 1023, b"epoch");
         buf
     }
 
@@ -256,9 +310,10 @@ mod tests {
     fn round_trip() {
         let buf = sample();
         let recs: Vec<_> = Records::new(&buf).collect();
-        assert_eq!(recs.len(), 3);
-        assert_eq!(recs[0], WalRecord { at_ms: 10, seq_no: 0, cluster: "c1", index_uuid: "u1", shard: 0, payload: b"first" });
-        assert_eq!(recs[1], WalRecord { at_ms: 11, seq_no: 1, cluster: "c2", index_uuid: "uuid-2", shard: 7, payload: b"" });
+        assert_eq!(recs.len(), 4);
+        assert_eq!(recs[0], WalRecord { at_ms: 10, seq_no: 0, epoch: 0, cluster: "c1", index_uuid: "u1", shard: 0, payload: b"first" });
+        assert_eq!(recs[1], WalRecord { at_ms: 11, seq_no: 1, epoch: 0, cluster: "c2", index_uuid: "uuid-2", shard: 7, payload: b"" });
+        assert_eq!(recs[3], WalRecord { at_ms: 13, seq_no: 2, epoch: 7, cluster: "c1", index_uuid: "u1", shard: 1023, payload: b"epoch" });
         assert_eq!(recs[2].payload.len(), 1000);
         assert_eq!(recs[2].seq_no, -1);
         assert_eq!(encoded_len("c1", "u1", b"first"), 8 + 24 + 4 + 5);
@@ -309,7 +364,7 @@ mod tests {
             assert!(rec.cluster.starts_with('c'));
             n += 1;
         }
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
         assert!(!r.torn());
         assert_eq!(r.valid_len(), file.len() as u64);
 

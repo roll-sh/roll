@@ -12,6 +12,9 @@
 //! newest retained parent commit point written at or before the time and replays the parent's
 //! WAL from there up to the time; commit points older than retention allows are an error.
 //!
+//! Pins (snapshot contents) are copied: they are small and name the same shared segments. A
+//! point-in-time branch gets those written at or before its time.
+//!
 //! The branch becomes visible (its cluster state is written) only after all its manifests are,
 //! so a crash midway leaves no half-made cluster; a retry clears the leftovers.
 
@@ -86,6 +89,7 @@ impl Store {
                 base: Some(BranchBase { cluster: parent.to_string(), generation: base.generation, at_ms, branched_ms: now }),
                 ..base
             };
+            m.user_data.retain(|k, _| !k.starts_with(crate::manifest::INSTANCE_DATA_PREFIX));
             for s in &mut m.wal {
                 s.until_ms = Some(s.until_ms.map_or(cut, |u| u.min(cut)));
                 if s.to.is_none() && s.node == self.node() {
@@ -103,6 +107,8 @@ impl Store {
         .buffer_unordered(16)
         .try_collect::<Vec<()>>()
         .await?;
+        // Snapshot contents the branch's metadata may name.
+        self.copy_pins(parent, child, point).await?;
         self.write_cluster(child, &ClusterState::new(state.json.clone())).await?;
         self.inner.counters.branches.fetch_add(1, Relaxed);
         Ok(())
@@ -181,9 +187,13 @@ fn merge_sources(sources: Vec<WalSource>) -> Vec<WalSource> {
             Some(Some(c)) => s.from = s.from.max(c + 1),
             None => {}
         }
+        // A range that starts at an attachment (`since_ms`) stays apart: folded, it would read
+        // the records before it in its first file.
         if let Some(o) = out.last_mut()
             && o.node == s.node
             && o.cluster == s.cluster
+            && o.epoch == s.epoch
+            && s.since_ms.is_none()
             && o.to.is_some_and(|to| s.from <= to.saturating_add(1))
         {
             o.to = s.to;

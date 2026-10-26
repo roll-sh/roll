@@ -46,13 +46,51 @@ struct FieldReaders {
     points: Option<PointsReader>,
     vectors: Option<VectorsReader>,
     suggest: Option<SuggestReader>,
+    /// Sorted doc values rebuilt from the terms on first use ([`UNINVERTED`]); boxed so a
+    /// field that never needs them costs one pointer.
+    uninverted: std::sync::OnceLock<Option<Box<Uninverted>>>,
 }
+
+/// Built [`UNINVERTED`] doc values and the bytes they hold (fielddata memory stats).
+#[derive(Clone, Debug)]
+struct Uninverted {
+    reader: DocValuesReader,
+    bytes: usize,
+}
+
+/// Set on a field number passed to [`SegmentReader::doc_values`] to read the field's
+/// *uninverted* terms instead: sorted doc values rebuilt from the terms index the first time
+/// they are asked for and kept for the reader's life (Lucene's `PagedBytesIndexFieldData`,
+/// the fielddata of `_id`). Each document gets the smallest term whose postings hold it, so
+/// the field should be single-valued (an id). Fields without terms have none.
+pub const UNINVERTED: u32 = 1 << 31;
 
 struct Inner {
     container: ContainerReader,
     info: SegmentInfo,
     fields: Vec<FieldReaders>,
     stored: StoredFields,
+    /// Field number -> index into `fields` (`u32::MAX`: absent), when numbers are dense
+    /// enough; otherwise empty and lookups binary-search `info.fields`. Per-document readers
+    /// (scripts, value sources) look fields up on hot paths, where the search's dependent
+    /// loads over 88-byte infos showed up in profiles.
+    slots: Box<[u32]>,
+}
+
+/// Field numbers up to this bound (and at most a few times the field count) get a direct slot
+/// table.
+const MAX_SLOT_TABLE: u32 = 1 << 16;
+
+fn slot_table(info: &SegmentInfo) -> Box<[u32]> {
+    let Some(max) = info.fields.iter().map(|f| f.number).max() else { return Box::default() };
+    if max >= MAX_SLOT_TABLE || max as usize > 8 * info.fields.len() + 1024 {
+        return Box::default();
+    }
+    let mut t = vec![u32::MAX; max as usize + 1];
+    for (i, f) in info.fields.iter().enumerate() {
+        t[f.number as usize] = i as u32;
+    }
+    t.into_boxed_slice()
 }
 
 /// A read-only segment. Cheap to clone; `Send + Sync`.
@@ -105,6 +143,7 @@ impl SegmentReader {
         Ok(SegmentReader {
             inner: Arc::new(Inner {
                 container,
+                slots: slot_table(&info),
                 info,
                 fields,
                 stored,
@@ -187,14 +226,15 @@ impl SegmentReader {
         self.inner.info.field(field)
     }
 
+    #[inline]
     fn field(&self, number: u32) -> Option<&FieldReaders> {
-        let i = self
-            .inner
-            .info
-            .fields
-            .binary_search_by_key(&number, |f| f.number)
-            .ok()?;
-        Some(&self.inner.fields[i])
+        let inner = &*self.inner;
+        if !inner.slots.is_empty() {
+            let i = *inner.slots.get(number as usize)?;
+            return inner.fields.get(i as usize);
+        }
+        let i = inner.info.fields.binary_search_by_key(&number, |f| f.number).ok()?;
+        Some(&inner.fields[i])
     }
 
     /// The term dictionary of an inverted field.
@@ -215,7 +255,25 @@ impl SegmentReader {
     }
 
     pub fn doc_values(&self, field: u32) -> Option<&DocValuesReader> {
-        self.field(field)?.doc_values.as_ref()
+        match self.field(field) {
+            Some(f) => f.doc_values.as_ref(),
+            // Numbers this large are never real fields (`u32::MAX` sentinels included).
+            None if field & UNINVERTED != 0 => self.uninverted(field & !UNINVERTED),
+            None => None,
+        }
+    }
+
+    /// The [`UNINVERTED`] doc values of `field`.
+    #[cold]
+    fn uninverted(&self, field: u32) -> Option<&DocValuesReader> {
+        let fr = self.field(field)?;
+        let terms = fr.terms.as_ref()?;
+        fr.uninverted.get_or_init(|| uninvert(terms, self.max_doc()).map(Box::new)).as_deref().map(|u| &u.reader)
+    }
+
+    /// The memory the [`UNINVERTED`] doc values of `field` hold once built (0 before).
+    pub fn uninverted_bytes(&self, field: u32) -> usize {
+        self.field(field).and_then(|f| f.uninverted.get()).and_then(|u| u.as_deref()).map_or(0, |u| u.bytes)
     }
 
     pub fn numeric(&self, field: u32) -> Option<&NumericDocValues> {
@@ -275,6 +333,46 @@ impl SegmentReader {
     pub fn stored(&self) -> StoredReader {
         self.inner.stored.reader()
     }
+}
+
+/// Sorted doc values holding, for each document with a term of `terms`, its smallest term.
+fn uninvert(terms: &TermsReader, max_doc: u32) -> Option<Uninverted> {
+    // u32 ordinals (half the transient memory of u64 ones).
+    const NONE: u32 = u32::MAX;
+    let mut ord_of = vec![NONE; max_doc as usize];
+    let mut dict = crate::docvalues::ByteList::new();
+    let mut it = terms.iter();
+    let mut cursor = PostingsCursor::empty();
+    let mut ord = 0u32;
+    while let Some(t) = it.next() {
+        dict.push(t);
+        it.postings_reset(PostingsFlags::DOCS, &mut cursor);
+        loop {
+            let d = cursor.next();
+            if d == crate::NO_MORE_DOCS {
+                break;
+            }
+            let slot = ord_of.get_mut(d as usize)?;
+            if *slot == NONE {
+                *slot = ord;
+            }
+        }
+        // `NONE` stays free: more terms than that can't be ordinals here.
+        ord = ord.checked_add(1).filter(|&o| o != NONE)?;
+    }
+    let mut docs = Vec::new();
+    let mut ords = Vec::new();
+    for (d, &o) in ord_of.iter().enumerate() {
+        if o != NONE {
+            docs.push(d as u32);
+            ords.push(o);
+        }
+    }
+    drop(ord_of);
+    let mut out = Vec::new();
+    crate::docvalues::write_sorted_dv_with(&docs, |i| u64::from(ords[i]), &mut dict, max_doc, &mut out).ok()?;
+    let bytes = out.len();
+    SortedDocValues::open(Slice::from(out), max_doc).ok().map(|dv| Uninverted { reader: DocValuesReader::Sorted(dv), bytes })
 }
 
 fn open_field(c: &ContainerReader, f: &FieldInfo, max_doc: u32) -> Result<FieldReaders> {

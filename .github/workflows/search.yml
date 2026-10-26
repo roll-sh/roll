@@ -17,6 +17,7 @@ on:
       - "scripts/search-yaml-suites.sh"
       - ".github/workflows/search.yml"
       - "apps/dashboard/src/lib/search-*"
+      - "tests/search/**"
   workflow_dispatch:
   # Pull requests and the merge queue run this through ci.yml.
   workflow_call:
@@ -72,6 +73,55 @@ jobs:
         with:
           name: search-yaml-reports
           path: target/search-yaml/roll*.json
+          if-no-files-found: ignore
+
+  # The differential suite: seeded random workloads against roll (in process) and a real
+  # Elasticsearch 9.5.5, compared response by response; new differences are minimized into
+  # replayable fixtures (uploaded as an artifact).
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Elasticsearch 9.5.5
+        run: |
+          docker run -d --name roll-es-clients -m 3g -p 127.0.0.1:9200:9200 \
+            -e discovery.type=single-node -e xpack.security.enabled=false \
+            -e xpack.license.self_generated.type=trial -e "ES_JAVA_OPTS=-Xms1g -Xmx1g" \
+            -e action.destructive_requires_name=false \
+            -e cluster.routing.allocation.disk.threshold_enabled=false \
+            docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+          for i in $(seq 120); do curl -s -o /dev/null http://127.0.0.1:9200 && break; sleep 2; done
+      - name: Differential suite
+        env:
+          ROLL_DIFF_ES: http://127.0.0.1:9200
+        run: cargo test -p search-server --test differential -- --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: search-differential
+          path: target/differential
+          if-no-files-found: ignore
+
+  # Unmodified official clients (Python, JavaScript, Java, Go, Ruby, PHP, the OpenSearch
+  # clients, django-elasticsearch-dsl, Laravel Scout, searchkick's own suite) in Docker
+  # against search-dev.
+  clients:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Client matrix
+        run: tests/search/clients/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: search-clients
+          path: target/search-clients
           if-no-files-found: ignore
 
   s3:

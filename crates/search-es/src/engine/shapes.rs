@@ -107,3 +107,31 @@ fn collect(g: &Geometry, cartesian: bool, out: &mut Vec<PackedTriangle>) -> EsRe
     }
     Ok(())
 }
+
+/// The value as the centroid calculator sees it ([`search_aggs::shape_field::Geometry`]):
+/// `(x, y)` coordinates (`(lon, lat)` for `geo_shape`) as the document gives them.
+pub fn centroid_geometry(g: &Geometry) -> search_aggs::shape_field::Geometry {
+    use search_aggs::shape_field::Geometry as A;
+    let pts = |cs: &[Vec<f64>]| -> Vec<(f64, f64)> { cs.iter().map(|c| xy(c)).collect() };
+    match g {
+        Geometry::Point(c) => {
+            let (x, y) = xy(c);
+            A::Point(x, y)
+        }
+        Geometry::MultiPoint(ps) => A::MultiPoint(pts(ps)),
+        Geometry::LineString(cs) => A::Line(pts(cs)),
+        Geometry::MultiLineString(ls) => A::MultiLine(ls.iter().map(|l| pts(l)).collect()),
+        Geometry::Polygon(rings) => match rings.split_first() {
+            Some((shell, holes)) => A::Polygon(pts(shell), holes.iter().map(|h| pts(h)).collect()),
+            None => A::Collection(Vec::new()),
+        },
+        Geometry::MultiPolygon(ps) => A::MultiPolygon(
+            ps.iter()
+                .filter_map(|rings| rings.split_first().map(|(shell, holes)| (pts(shell), holes.iter().map(|h| pts(h)).collect())))
+                .collect(),
+        ),
+        Geometry::GeometryCollection(gs) => A::Collection(gs.iter().map(centroid_geometry).collect()),
+        Geometry::Envelope { min_x, max_x, max_y, min_y } => A::Rectangle { min_x: *min_x, max_x: *max_x, min_y: *min_y, max_y: *max_y },
+        Geometry::Circle { .. } => A::Circle,
+    }
+}

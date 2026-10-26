@@ -28,7 +28,10 @@
 //!
 //! [`StoredReader`] is a per-thread cursor: it keeps the last decompressed chunk, so fetching
 //! hits that are close in doc order (the common case after sorting by doc id) decompresses each
-//! chunk once.
+//! chunk once. Readers are cheap to create: the zstd decompression context (about 100 KiB of
+//! tables and buffers) is borrowed from a small process-wide pool for the duration of one chunk
+//! decompression, so a fetch phase that opens a reader per hit allocates and faults in no
+//! context memory per hit.
 
 use std::sync::Arc;
 
@@ -450,11 +453,10 @@ impl StoredFields {
         self.num_docs
     }
 
-    /// A reader with its own decompression context and chunk cache.
+    /// A reader with its own chunk cache (decompression contexts come from a shared pool).
     pub fn reader(&self) -> StoredReader {
         StoredReader {
             fields: self.clone(),
-            dctx: zstd::zstd_safe::DCtx::create(),
             chunk: u32::MAX,
             buf: Vec::new(),
             starts: Vec::new(),
@@ -485,10 +487,26 @@ impl StoredFields {
     }
 }
 
+/// Decompression contexts kept for reuse: about one per core is enough (a context is held
+/// only while one chunk decompresses), and the cap bounds what an idle process keeps.
+static DCTX_POOL: std::sync::Mutex<Vec<zstd::zstd_safe::DCtx<'static>>> = std::sync::Mutex::new(Vec::new());
+const DCTX_POOL_MAX: usize = 8;
+
+/// Runs `f` with a pooled decompression context.
+fn with_dctx<R>(f: impl FnOnce(&mut zstd::zstd_safe::DCtx<'static>) -> R) -> R {
+    let pool = || DCTX_POOL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut dctx = pool().pop().unwrap_or_else(zstd::zstd_safe::DCtx::create);
+    let r = f(&mut dctx);
+    let mut pool = pool();
+    if pool.len() < DCTX_POOL_MAX {
+        pool.push(dctx);
+    }
+    r
+}
+
 /// Random access to documents, caching the last decompressed chunk.
 pub struct StoredReader {
     fields: StoredFields,
-    dctx: zstd::zstd_safe::DCtx<'static>,
     chunk: u32,
     buf: Vec<u8>,
     /// Start of each doc of the cached chunk within `buf`, plus the end.
@@ -513,12 +531,11 @@ impl StoredReader {
         }
         self.buf.clear();
         self.buf.reserve(raw_len);
-        let n = match &f.dict {
-            Some(d) => self
-                .dctx
-                .decompress_using_ddict(&mut self.buf, comp, d.0.as_ddict()),
-            None => self.dctx.decompress(&mut self.buf, comp),
-        }
+        let buf = &mut self.buf;
+        let n = with_dctx(|dctx| match &f.dict {
+            Some(d) => dctx.decompress_using_ddict(buf, comp, d.0.as_ddict()),
+            None => dctx.decompress(buf, comp),
+        })
         .map_err(|code| {
             corrupt(format!(
                 "stored chunk decompression failed ({})",
@@ -564,6 +581,21 @@ impl StoredReader {
         self.load(c)?;
         let i = (doc - self.fields.chunk_first(c)) as usize;
         Ok((self.starts[i], self.starts[i + 1]))
+    }
+
+    /// Whether `doc` is in the chunk this reader has decompressed (reading it costs no
+    /// decompression). Lets a pool of readers hand out the one that holds a doc.
+    pub fn holds(&self, doc: u32) -> bool {
+        if self.chunk == u32::MAX || doc >= self.fields.num_docs || self.chunk_ok().is_none() {
+            return false;
+        }
+        let first = self.fields.chunk_first(self.chunk);
+        let end = if self.chunk + 1 < self.fields.nchunks { self.fields.chunk_first(self.chunk + 1) } else { self.fields.num_docs };
+        first <= doc && doc < end
+    }
+
+    fn chunk_ok(&self) -> Option<()> {
+        (self.chunk < self.fields.nchunks).then_some(())
     }
 
     /// The serialized bytes of `doc` (see [`decode_doc`]).
@@ -650,6 +682,26 @@ mod tests {
             assert!(open_range(len - 1, &bytes[bytes.len() - 16..]).is_err());
             assert!(open_range(len, &bytes[..15]).is_err());
         }
+    }
+
+    #[test]
+    fn holds_reports_the_decompressed_chunk() {
+        let (f, docs) = build(3000, StoredOptions::default());
+        let mut r = f.reader();
+        assert!(!r.holds(0), "nothing decompressed yet");
+        for &d in &[0u32, 1, 1500, 2999] {
+            r.raw(d).unwrap();
+            assert!(r.holds(d));
+            // exactly the docs of the same chunk: reading them decompresses nothing new
+            let held: Vec<u32> = (0..3000).filter(|&x| r.holds(x)).collect();
+            assert!(held.contains(&d) && held.len() < 3000);
+            assert_eq!(held.last().unwrap() - held[0] + 1, held.len() as u32, "a contiguous range");
+            for &x in &held {
+                assert_eq!(r.raw(x).unwrap(), &docs[x as usize][..]);
+                assert!(r.holds(d), "same chunk still cached");
+            }
+        }
+        assert!(!r.holds(3000));
     }
 
     #[test]

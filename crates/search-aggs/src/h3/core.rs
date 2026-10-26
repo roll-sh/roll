@@ -402,6 +402,53 @@ const H3_BC_OFFSET: u32 = 45;
 const H3_RES_OFFSET: u32 = 52;
 const H3_DIGIT_MASK: u64 = 7;
 
+/// `H3.h3IsValid`: a cell index (mode 1, no high or reserved bits, a base cell, digits
+/// `0..=6` down to its resolution and `7` below it, no deleted pentagon subsequence). The
+/// rest of this module indexes tables by these fields, so peer input is checked first.
+pub(super) fn is_valid_cell(h: u64) -> bool {
+    if h >> 63 != 0 || (h >> H3_MODE_OFFSET) & 15 != 1 || (h >> 56) & 7 != 0 {
+        return false;
+    }
+    let bc = get_base_cell(h);
+    if bc >= NUM_BASE_CELLS {
+        return false;
+    }
+    let res = get_resolution(h);
+    let mut leading = true;
+    for r in 1..=res {
+        let d = get_digit(h, r);
+        if leading && d != 0 {
+            leading = false;
+            // The K axis digit is deleted from a pentagon's subsequences.
+            if is_base_cell_pentagon(bc) && d == 1 {
+                return false;
+            }
+        }
+        if d >= 7 {
+            return false;
+        }
+    }
+    (res + 1..=MAX_H3_RES).all(|r| get_digit(h, r) == 7)
+}
+
+/// What the cell functions read of an index is in range: the base cell, and the digits down
+/// to the resolution (no deleted pentagon subsequence).
+pub(super) fn is_readable_cell(h: u64) -> bool {
+    let bc = get_base_cell(h);
+    if bc >= NUM_BASE_CELLS {
+        return false;
+    }
+    let mut leading = true;
+    for r in 1..=get_resolution(h) {
+        let d = get_digit(h, r);
+        if d >= 7 || (leading && d == 1 && is_base_cell_pentagon(bc)) {
+            return false;
+        }
+        leading &= d == 0;
+    }
+    true
+}
+
 #[inline]
 pub(super) fn get_base_cell(h: u64) -> i32 {
     ((h >> H3_BC_OFFSET) & 127) as i32

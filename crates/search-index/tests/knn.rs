@@ -208,3 +208,43 @@ fn knn_explanations_match_elasticsearch() {
     assert_eq!(s.explain(&top, 2).unwrap().description, "not in top k documents");
     assert_eq!(top.lucene_string(s.schema()), "ScoreAndDocQuery");
 }
+
+/// `per_segment` keeps every segment's best `k` (OpenSearch's native engines), while the
+/// default keeps the best `k` over all segments (Lucene's `AbstractKnnVectorQuery`).
+#[test]
+fn per_segment_knn_keeps_k_hits_per_segment() {
+    let schema = Schema::new()
+        .with_field(FieldSchema::new(V, "v").with_vectors(VectorSpec {
+            dims: 2,
+            element: VectorElement::Float32,
+            similarity: VectorSimilarity::L2Norm,
+            hnsw: Some(HnswParams::default()),
+            quantization: VectorQuantization::None,
+        }))
+        .unwrap();
+    let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema, Vec::new()).unwrap();
+    // Three segments of two documents each.
+    for seg in 0..3u32 {
+        for j in 0..2u32 {
+            let i = seg * 2 + j;
+            let v = [i as f32, 0.0f32];
+            let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            let doc = IndexableDoc::new(format!("{i}").into_bytes()).field(IndexableField::Vector { field: V, value: bytes.into() });
+            shard.index(IndexOp::new(doc)).unwrap();
+        }
+        shard.refresh().unwrap();
+    }
+    let s = shard.searcher();
+    let q = |per_segment: bool| {
+        let mut k = KnnQuery::new(V, QueryVector::Float(vec![0.0, 0.0]), 1, 10);
+        k.per_segment = per_segment;
+        k.search(&s).unwrap()
+    };
+    let global = q(false);
+    assert_eq!(global.len(), 1);
+    assert_eq!(global[0].1, 1.0);
+    let per = q(true);
+    // The best of each segment: docs 0, 2 and 4 (scores 1/(1+d²)).
+    let scores: Vec<f32> = per.iter().map(|x| x.1).collect();
+    assert_eq!(scores, vec![1.0, 1.0 / 5.0, 1.0 / 17.0]);
+}

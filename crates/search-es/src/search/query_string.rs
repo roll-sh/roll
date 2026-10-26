@@ -42,17 +42,167 @@ enum Tk {
     Tilde(Option<String>),
 }
 
+/// `QueryParserBase.parse`: Lucene's `ParseException` (or `TokenMgrError`, for lexical
+/// errors) wrapped in a `ParseException` naming the query. Neither is an Elasticsearch
+/// exception, so the root cause stays the `query_shard_exception` around them.
 fn parse_error(q: &str, msg: &str) -> EsError {
-    EsError::new(400, "parse_exception", format!("Cannot parse '{q}': {msg}"))
+    let inner = if msg.starts_with("Lexical error") { "token_mgr_error" } else { "parse_exception" };
+    EsError::java(400, "parse_exception", format!("Cannot parse '{q}': {msg}")).caused_by(EsError::java(400, inner, msg))
+}
+
+// Lucene's `QueryParserConstants` token kinds, the ones syntax errors name.
+const K_EOF: u8 = 0;
+const K_AND: u8 = 8;
+const K_OR: u8 = 9;
+const K_NOT: u8 = 10;
+const K_PLUS: u8 = 11;
+const K_MINUS: u8 = 12;
+const K_BAREOPER: u8 = 13;
+const K_LPAREN: u8 = 14;
+const K_RPAREN: u8 = 15;
+const K_COLON: u8 = 16;
+const K_STAR: u8 = 17;
+const K_CARAT: u8 = 18;
+const K_QUOTED: u8 = 19;
+const K_TERM: u8 = 20;
+const K_FUZZY_SLOP: u8 = 21;
+const K_PREFIXTERM: u8 = 22;
+const K_WILDTERM: u8 = 23;
+const K_REGEXPTERM: u8 = 24;
+const K_RANGEIN_START: u8 = 25;
+const K_RANGEEX_START: u8 = 26;
+const K_NUMBER: u8 = 27;
+const K_RANGE_TO: u8 = 28;
+const K_RANGEIN_END: u8 = 29;
+const K_RANGEEX_END: u8 = 30;
+const K_RANGE_QUOTED: u8 = 31;
+const K_RANGE_GOOP: u8 = 32;
+
+/// `QueryParserConstants.tokenImage`.
+fn token_image(kind: u8) -> &'static str {
+    match kind {
+        K_EOF => "<EOF>",
+        K_AND => "<AND>",
+        K_OR => "<OR>",
+        K_NOT => "<NOT>",
+        K_PLUS => "\"+\"",
+        K_MINUS => "\"-\"",
+        K_BAREOPER => "<BAREOPER>",
+        K_LPAREN => "\"(\"",
+        K_RPAREN => "\")\"",
+        K_COLON => "\":\"",
+        K_STAR => "\"*\"",
+        K_CARAT => "\"^\"",
+        K_QUOTED => "<QUOTED>",
+        K_TERM => "<TERM>",
+        K_FUZZY_SLOP => "<FUZZY_SLOP>",
+        K_PREFIXTERM => "<PREFIXTERM>",
+        K_WILDTERM => "<WILDTERM>",
+        K_REGEXPTERM => "<REGEXPTERM>",
+        K_RANGEIN_START => "\"[\"",
+        K_RANGEEX_START => "\"{\"",
+        K_NUMBER => "<NUMBER>",
+        K_RANGE_TO => "\"TO\"",
+        K_RANGEIN_END => "\"]\"",
+        K_RANGEEX_END => "\"}\"",
+        K_RANGE_QUOTED => "<RANGE_QUOTED>",
+        _ => "<RANGE_GOOP>",
+    }
+}
+
+/// The tokens a clause can start with once its field prefix is read (`Clause` → `Term` or
+/// a group).
+const CLAUSE_BODY: &[u8] = &[K_BAREOPER, K_LPAREN, K_STAR, K_QUOTED, K_TERM, K_PREFIXTERM, K_WILDTERM, K_REGEXPTERM, K_RANGEIN_START, K_RANGEEX_START, K_NUMBER];
+
+/// JavaCC's `ParseException.initialise` message for an unexpected token: the token (kind and
+/// image) or `<EOF>`, its column (`FastCharStream` reports the offset in the query, always on
+/// line 1) and the expected token kinds, one sequence per line.
+fn syntax_message(found: Option<(u8, &str)>, column: usize, expected: &[u8]) -> String {
+    let mut m = String::from("Encountered \"");
+    match found {
+        None => m.push_str("<EOF>"),
+        Some((kind, image)) => {
+            m.push(' ');
+            m.push_str(token_image(kind));
+            m.push_str(" \"");
+            m.push_str(&java_cc_escapes(image));
+            m.push_str(" \"");
+        }
+    }
+    m.push_str(&format!("\" at line 1, column {column}.\n"));
+    m.push_str(if expected.len() == 1 { "Was expecting:\n    " } else { "Was expecting one of:\n    " });
+    for &k in expected {
+        m.push_str(token_image(k));
+        m.push(' ');
+        if k != K_EOF {
+            m.push_str("...");
+        }
+        m.push_str("\n    ");
+    }
+    m
+}
+
+/// JavaCC's `TokenMgrError.LexicalErr` for the char at `i` that can't start a boost `NUMBER`
+/// (the `Boost` state, lexical state 0, which the message doesn't name). When it is the last
+/// UTF-16 unit, JavaCC's look past it hits the end: the column moves on and names `<EOF>`.
+fn boost_lexical_error(chars: &[char], u16_at: &[usize], i: usize) -> String {
+    let unit = chars[i].encode_utf16(&mut [0u16; 2])[0];
+    if u16_at[i] + 1 == u16_at[chars.len()] {
+        format!("Lexical error at line 1, column {}.  Encountered: <EOF>", u16_at[i] + 2)
+    } else {
+        format!("Lexical error at line 1, column {}.  Encountered: '{unit}' ({unit}),", u16_at[i] + 1)
+    }
+}
+
+/// JavaCC's `add_escapes`.
+fn java_cc_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for u in s.encode_utf16() {
+        match u {
+            0 => {}
+            8 => out.push_str("\\b"),
+            9 => out.push_str("\\t"),
+            10 => out.push_str("\\n"),
+            12 => out.push_str("\\f"),
+            13 => out.push_str("\\r"),
+            0x22 => out.push_str("\\\""),
+            0x27 => out.push_str("\\'"),
+            0x5c => out.push_str("\\\\"),
+            u if !(0x20..=0x7e).contains(&u) => out.push_str(&format!("\\u{u:04x}")),
+            u => out.push(u as u8 as char),
+        }
+    }
+    out
 }
 
 /// Lucene's `QueryParserTokenManager`, roughly: the classic syntax as tokens.
+#[cfg(test)]
 fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
+    tokenize_spanned(q).map(|(t, _)| t)
+}
+
+/// Each token's `(start, end)` offsets in UTF-16 units of the query (Lucene's columns).
+type Spans = Vec<(usize, usize)>;
+
+/// [`tokenize`], with the tokens' [`Spans`].
+fn tokenize_spanned(q: &str) -> EsResult<(Vec<Tk>, Spans)> {
     let chars: Vec<char> = q.chars().collect();
+    let mut u16_at = Vec::with_capacity(chars.len() + 1);
+    let mut off = 0;
+    for c in &chars {
+        u16_at.push(off);
+        off += c.len_utf16();
+    }
+    u16_at.push(off);
     let mut i = 0;
     let mut out = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut token_start = 0;
     let special = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{3000}' | '+' | '-' | '!' | '(' | ')' | ':' | '^' | '[' | ']' | '"' | '{' | '}' | '~' | '\\' | '/');
     while i < chars.len() {
+        // The tokens the last step pushed span from where it started to where it stopped.
+        spans.resize(out.len(), (u16_at[token_start], u16_at[i]));
+        token_start = i;
         let c = chars[i];
         match c {
             ' ' | '\t' | '\n' | '\r' | '\u{3000}' => i += 1,
@@ -85,10 +235,21 @@ fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
                 i += 2;
             }
             '^' => {
+                // `^` switches to the `Boost` lexical state, where only a `NUMBER`
+                // (`digits ["." digits]`) may follow.
                 i += 1;
                 let s = i;
-                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                if i < chars.len() && !chars[i].is_ascii_digit() {
+                    return Err(parse_error(q, &boost_lexical_error(&chars, &u16_at, i)));
+                }
+                while i < chars.len() && chars[i].is_ascii_digit() {
                     i += 1;
+                }
+                if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
+                    i += 1;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
                 }
                 out.push(Tk::Caret(chars[s..i].iter().collect()));
             }
@@ -119,7 +280,10 @@ fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
                     i += 1;
                 }
                 if !closed {
-                    return Err(parse_error(q, "Lexical error at line 1, column {}.  Encountered: <EOF> after : \"\\\"\"".replace("{}", &(chars.len() + 1).to_string()).as_str()));
+                    // JavaCC names the token read so far when it is longer than one char.
+                    let image: String = chars[token_start..].iter().collect();
+                    let after = if chars.len() - token_start > 1 { format!(" after prefix \"{}\"", java_cc_escapes(&image)) } else { String::new() };
+                    return Err(parse_error(q, &format!("Lexical error at line 1, column {}.  Encountered: <EOF>{after} (in lexical state 2)", u16_at[chars.len()] + 1)));
                 }
                 out.push(Tk::Phrase(s));
             }
@@ -142,7 +306,8 @@ fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
                     i += 1;
                 }
                 if !closed {
-                    return Err(parse_error(q, "Lexical error: unterminated regular expression"));
+                    let prefix: String = chars[token_start..].iter().collect();
+                    return Err(parse_error(q, &format!("Lexical error at line 1, column {}.  Encountered: <EOF> after prefix \"{prefix}\" (in lexical state 2)", u16_at[chars.len()] + 1)));
                 }
                 out.push(Tk::Regex(s));
             }
@@ -185,6 +350,15 @@ fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
                 if !cur.is_empty() {
                     parts.push(cur);
                 }
+                // The input ends inside the range: what Lucene's `Term` production wanted next.
+                if !closed && (parts.len() != 2 || parts[1] == "TO") && parts.len() <= 3 {
+                    let expected: &[u8] = match parts.len() {
+                        1 => &[K_RANGE_TO],
+                        3 => &[K_RANGEIN_END, K_RANGEEX_END],
+                        _ => &[K_RANGE_TO, K_RANGE_QUOTED, K_RANGE_GOOP],
+                    };
+                    return Err(parse_error(q, &syntax_message(None, u16_at[chars.len()], expected)));
+                }
                 if !closed || parts.len() != 3 || parts[1] != "TO" {
                     return Err(parse_error(q, "Encountered: range syntax error"));
                 }
@@ -202,9 +376,10 @@ fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
                             i += 2;
                             continue;
                         }
-                        return Err(parse_error(q, "Lexical error: Term can not end with escape character."));
+                        return Err(parse_error(q, &format!("Lexical error at line 1, column {}.  Encountered: <EOF> (in lexical state 2)", u16_at[chars.len()] + 1)));
                     }
-                    if special(ch) && !(ch == '-' && !s.is_empty()) && !(ch == '+' && !s.is_empty()) && !(ch == '!' && !s.is_empty()) {
+                    // `_TERM_CHAR` adds `-` and `+` after the first character, but not `!`.
+                    if special(ch) && !(ch == '-' && !s.is_empty()) && !(ch == '+' && !s.is_empty()) {
                         break;
                     }
                     if ch == '*' || ch == '?' {
@@ -223,10 +398,13 @@ fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
                     "OR" => out.push(Tk::Or),
                     "NOT" => out.push(Tk::Not),
                     _ => {
-                        // `>=x`, `<y`: Elasticsearch's range shortcuts.
-                        if let Some(rest) = s.strip_prefix(">=") {
+                        // `>=x`, `<y`: Elasticsearch's range shortcuts, for text longer than
+                        // the operator (a bare `>` is a term; `>=` is `>` of `=`).
+                        if s.len() <= 1 {
+                            out.push(Tk::Term(s, wild));
+                        } else if let Some(rest) = s.strip_prefix(">=").filter(|r| !r.is_empty()) {
                             out.push(Tk::Range { lo: rest.to_string(), hi: "*".into(), il: true, iu: true });
-                        } else if let Some(rest) = s.strip_prefix("<=") {
+                        } else if let Some(rest) = s.strip_prefix("<=").filter(|r| !r.is_empty()) {
                             out.push(Tk::Range { lo: "*".into(), hi: rest.to_string(), il: true, iu: true });
                         } else if let Some(rest) = s.strip_prefix('>') {
                             out.push(Tk::Range { lo: rest.to_string(), hi: "*".into(), il: false, iu: true });
@@ -240,7 +418,8 @@ fn tokenize(q: &str) -> EsResult<Vec<Tk>> {
             }
         }
     }
-    Ok(out)
+    spans.resize(out.len(), (u16_at[token_start], u16_at[i.min(chars.len())]));
+    Ok((out, spans))
 }
 
 fn unescape(s: &str) -> String {
@@ -272,12 +451,36 @@ enum Mods {
     Not,
 }
 
+/// Where a clause starts, for the tokens a syntax error lists as expected.
+#[derive(Clone, Copy, PartialEq)]
+enum ClausePos {
+    /// The first clause of a query or group.
+    First,
+    /// After `+`, `-` or `NOT`.
+    AfterMods,
+    /// After `AND` / `OR`.
+    AfterConj,
+    /// After another clause, with no operator in between.
+    Implicit,
+}
+
 struct Parser<'c, 'q> {
     ctx: &'c QueryCtx<'q>,
     qs: &'c QueryString,
     toks: Vec<Tk>,
     pos: usize,
     src: String,
+    /// Each token's `(start, end)` in UTF-16 units of the query.
+    spans: Vec<(usize, usize)>,
+    /// Group nesting depth.
+    depth: usize,
+    /// Where the clause being parsed starts.
+    at: ClausePos,
+    /// Whether a `^` boost / a `~` fuzzy slop could still follow the last clause.
+    tails: (bool, bool),
+    /// Consecutive bare terms in the current query: two or more parse as Lucene's
+    /// `MultiTerm`, which takes neither tail.
+    bare_run: usize,
 }
 
 impl Parser<'_, '_> {
@@ -292,14 +495,94 @@ impl Parser<'_, '_> {
     }
 
     fn top(&mut self) -> EsResult<Option<QueryRef>> {
+        let start = self.pos;
         let q = self.query(None)?;
         if self.pos < self.toks.len() {
-            return Err(parse_error(&self.src, "Encountered \" \")\" \") \"\" at line 1"));
+            // Only a `)` stops the top-level query early.
+            let expected = if self.pos == start { Self::first_clause() } else { self.after_clause() };
+            return Err(self.unexpected(self.pos, &expected));
         }
         Ok(q)
     }
 
+    /// The tokens the first clause of a query or group may start with.
+    fn first_clause() -> Vec<u8> {
+        let mut e = vec![K_NOT, K_PLUS, K_MINUS];
+        e.extend_from_slice(CLAUSE_BODY);
+        e.push(K_TERM);
+        e
+    }
+
+    /// The tokens that may follow a complete clause at the current depth.
+    fn after_clause(&self) -> Vec<u8> {
+        self.after_clause_with(if self.bare_run >= 2 { (false, false) } else { self.tails })
+    }
+
+    fn after_clause_with(&self, (caret, fuzzy): (bool, bool)) -> Vec<u8> {
+        let mut e = Vec::with_capacity(20);
+        if self.depth == 0 {
+            e.push(K_EOF);
+        }
+        e.extend_from_slice(&[K_AND, K_OR, K_NOT, K_PLUS, K_MINUS, K_BAREOPER, K_LPAREN]);
+        if self.depth > 0 {
+            e.push(K_RPAREN);
+        }
+        e.push(K_STAR);
+        if caret {
+            e.push(K_CARAT);
+        }
+        e.extend_from_slice(&[K_QUOTED, K_TERM]);
+        if fuzzy {
+            e.push(K_FUZZY_SLOP);
+        }
+        e.extend_from_slice(&[K_PREFIXTERM, K_WILDTERM, K_REGEXPTERM, K_RANGEIN_START, K_RANGEEX_START, K_NUMBER]);
+        e
+    }
+
+    /// The `ParseException` for token `i` (end of input past the last one).
+    fn unexpected(&self, i: usize, expected: &[u8]) -> EsError {
+        let end = self.spans.last().map_or(0, |s| s.1).max(self.src.encode_utf16().count());
+        let msg = match self.toks.get(i) {
+            None => syntax_message(None, end, expected),
+            Some(t) => {
+                let (a, b) = self.spans[i];
+                let image: String = String::from_utf16_lossy(&self.src.encode_utf16().skip(a).take(b - a).collect::<Vec<u16>>());
+                let kind = match t {
+                    Tk::RParen => K_RPAREN,
+                    Tk::LParen => K_LPAREN,
+                    Tk::And => K_AND,
+                    Tk::Or => K_OR,
+                    Tk::Not => K_NOT,
+                    Tk::Plus => K_PLUS,
+                    Tk::Minus => K_MINUS,
+                    Tk::Caret(_) => K_CARAT,
+                    Tk::Tilde(_) => K_FUZZY_SLOP,
+                    Tk::Field(_) => K_TERM,
+                    Tk::Phrase(_) => K_QUOTED,
+                    Tk::Regex(_) => K_REGEXPTERM,
+                    Tk::Range { .. } if image.starts_with('[') => K_RANGEIN_START,
+                    Tk::Range { .. } if image.starts_with('{') => K_RANGEEX_START,
+                    Tk::Range { .. } => K_TERM,
+                    Tk::Term(t, _) if t == "*" => K_STAR,
+                    Tk::Term(t, true) if t.ends_with('*') && !t[..t.len() - 1].contains(['*', '?']) => K_PREFIXTERM,
+                    Tk::Term(_, true) => K_WILDTERM,
+                    Tk::Term(..) => K_TERM,
+                };
+                // Lucene's `CARAT` and `FUZZY_SLOP` / range-start tokens stop at the operator.
+                let image = match t {
+                    Tk::Caret(_) => "^".to_string(),
+                    Tk::Range { .. } if kind != K_TERM => image[..1].to_string(),
+                    Tk::Field(f) => f.clone(),
+                    _ => image,
+                };
+                syntax_message(Some((kind, &image)), a, expected)
+            }
+        };
+        parse_error(&self.src, &msg)
+    }
+
     fn query(&mut self, field: Option<&str>) -> EsResult<Option<QueryRef>> {
+        self.bare_run = 0;
         let mut clauses: Vec<(Occur, QueryRef)> = Vec::new();
         let mut first: Option<QueryRef> = None;
         let mut count = 0;
@@ -308,6 +591,11 @@ impl Parser<'_, '_> {
             match self.peek() {
                 None | Some(Tk::RParen) => break,
                 _ => {}
+            }
+            // A `^` or `~` the last clause can't take: the loop ends there, and the caller
+            // wanted whatever may follow a clause.
+            if !first_conj && matches!(self.peek(), Some(Tk::Caret(_) | Tk::Tilde(_))) {
+                return Err(self.unexpected(self.pos, &self.after_clause()));
             }
             let conj = if first_conj {
                 Conj::None
@@ -335,7 +623,22 @@ impl Parser<'_, '_> {
                 }
                 _ => Mods::None,
             };
+            self.at = if mods != Mods::None {
+                ClausePos::AfterMods
+            } else if conj != Conj::None {
+                ClausePos::AfterConj
+            } else if first_conj {
+                ClausePos::First
+            } else {
+                ClausePos::Implicit
+            };
+            let body = self.pos;
             let q = self.clause(field)?;
+            let bare = mods == Mods::None
+                && conj == Conj::None
+                && self.pos == body + 1
+                && matches!(&self.toks[body], Tk::Term(t, false) if t != "*");
+            self.bare_run = if bare { self.bare_run + 1 } else { 0 };
             self.add_clause(&mut clauses, conj, mods, q.clone());
             if first_conj && mods == Mods::None {
                 first = q;
@@ -392,54 +695,147 @@ impl Parser<'_, '_> {
     }
 
     fn boost(&mut self, q: Option<QueryRef>) -> EsResult<Option<QueryRef>> {
+        let b = self.caret()?;
+        self.apply_boost(q, b)
+    }
+
+    /// An optional `^NUMBER`: the boost.
+    fn caret(&mut self) -> EsResult<Option<f32>> {
         if let Some(Tk::Caret(b)) = self.peek().cloned() {
             self.pos += 1;
+            // `^` at the end: the parser wanted the boost's `NUMBER`.
+            if b.is_empty() && self.pos == self.toks.len() && self.spans.get(self.pos - 1).is_some_and(|s| s.1 == self.src.encode_utf16().count()) {
+                return Err(self.unexpected(self.pos, &[K_NUMBER]));
+            }
             let v: f32 = b.parse().map_err(|_| parse_error(&self.src, "Encountered \"^\""))?;
-            return Ok(q.map(|q| if v == 1.0 { q } else { arc(BoostQuery::new(q, v)) as QueryRef }));
+            return Ok(Some(v));
         }
-        Ok(q)
+        Ok(None)
+    }
+
+    fn apply_boost(&self, q: Option<QueryRef>, boost: Option<f32>) -> EsResult<Option<QueryRef>> {
+        Ok(match boost {
+            Some(v) if v != 1.0 => q.map(|q| arc(BoostQuery::new(q, v)) as QueryRef),
+            _ => q,
+        })
+    }
+
+    /// A term's or phrase's tails, `[^n [~]] | [~ [^n]]` (read before the query is built, as
+    /// Lucene's `Term` production does): its fuzzy slop (`Some(None)` for a bare `~`) and boost.
+    fn tails_of_term(&mut self) -> EsResult<(Option<Option<String>>, Option<f32>)> {
+        if let Some(Tk::Tilde(n)) = self.peek().cloned() {
+            self.pos += 1;
+            return Ok((Some(n), self.caret()?));
+        }
+        let boost = self.caret()?;
+        let mut fuzzy = None;
+        if boost.is_some()
+            && let Some(Tk::Tilde(n)) = self.peek().cloned()
+        {
+            self.pos += 1;
+            fuzzy = Some(n);
+        }
+        Ok((fuzzy, boost))
+    }
+
+    /// The `ParseException` for a token that can't start the clause body at `i`.
+    fn bad_clause_start(&self, i: usize, prefixed: bool) -> EsError {
+        // A `field:` token where the body goes: Lucene read the name as the body's term and
+        // trips over the colon.
+        if let Some(Tk::Field(_)) = self.toks.get(i) {
+            let (_, b) = self.spans[i];
+            let expected = self.after_clause_with((true, true));
+            let msg = syntax_message(Some((K_COLON, ":")), b - 1, &expected);
+            return parse_error(&self.src, &msg);
+        }
+        let mut expected = Vec::with_capacity(16);
+        if !prefixed && matches!(self.at, ClausePos::First | ClausePos::AfterConj | ClausePos::Implicit) {
+            if self.at == ClausePos::Implicit {
+                expected.extend_from_slice(&[K_AND, K_OR]);
+            }
+            expected.extend_from_slice(&[K_NOT, K_PLUS, K_MINUS]);
+        }
+        expected.extend_from_slice(CLAUSE_BODY);
+        if !prefixed {
+            // The `field:` lookaheads (`<TERM> ":"`, `"*" ":"`).
+            expected.push(K_TERM);
+            if self.at != ClausePos::First {
+                expected.push(K_STAR);
+            }
+        }
+        self.unexpected(i, &expected)
     }
 
     fn clause(&mut self, field: Option<&str>) -> EsResult<Option<QueryRef>> {
         let mut field: Option<String> = field.map(str::to_string);
+        let mut prefixed = false;
         if let Some(Tk::Field(f)) = self.peek().cloned() {
             self.pos += 1;
             field = Some(f);
+            prefixed = true;
         }
+        let body = self.pos;
+        let r = self.clause_body(field.as_deref(), prefixed)?;
+        // What may still follow: Lucene's `Term` takes `[^n [~]] | [~ [^n]]` after a term or
+        // a phrase, `[^n]` after a range or group.
+        let tail = &self.toks[(body + 1).min(self.pos)..self.pos];
+        let caret = tail.iter().any(|t| matches!(t, Tk::Caret(_)));
+        let tilde = tail.iter().any(|t| matches!(t, Tk::Tilde(_)));
+        self.tails = match &self.toks[body] {
+            Tk::Term(..) | Tk::Regex(_) | Tk::Phrase(_) => (!caret, !tilde),
+            _ => (!matches!(self.toks.get(self.pos - 1), Some(Tk::Caret(_))), false),
+        };
+        Ok(r)
+    }
+
+    fn clause_body(&mut self, field: Option<&str>, prefixed: bool) -> EsResult<Option<QueryRef>> {
+        let field: Option<String> = field.map(str::to_string);
         match self.next() {
             Some(Tk::LParen) => {
+                self.depth += 1;
+                let start = self.pos;
                 let q = self.query(field.as_deref())?;
-                match self.next() {
-                    Some(Tk::RParen) => {}
-                    _ => return Err(parse_error(&self.src, "Encountered \"<EOF>\" at line 1. Was expecting \")\"")),
+                match self.peek() {
+                    // A group holds at least one clause.
+                    Some(Tk::RParen) if self.pos > start => self.pos += 1,
+                    // The group's query stops only at `)` or the end.
+                    _ => {
+                        let expected = if self.pos == start { Self::first_clause() } else { self.after_clause() };
+                        return Err(self.unexpected(self.pos, &expected));
+                    }
                 }
+                self.depth -= 1;
                 self.boost(q)
             }
             Some(Tk::Term(t, wild)) => {
-                let mut fuzzy = None;
-                if let Some(Tk::Tilde(n)) = self.peek().cloned() {
-                    self.pos += 1;
-                    fuzzy = Some(n);
-                }
+                let (fuzzy, boost) = self.tails_of_term()?;
                 let q = self.term(field.as_deref(), &t, wild, fuzzy)?;
-                self.boost(q)
+                self.apply_boost(q, boost)
             }
             Some(Tk::Phrase(p)) => {
-                let mut slop = self.qs.phrase_slop;
-                if let Some(Tk::Tilde(n)) = self.peek().cloned() {
-                    self.pos += 1;
-                    slop = n.and_then(|s| s.parse::<f32>().ok()).map(|f| f as i32).unwrap_or(slop);
-                }
+                let (fuzzy, boost) = self.tails_of_term()?;
+                let slop = fuzzy.flatten().and_then(|s| s.parse::<f32>().ok()).map(|f| f as i32).unwrap_or(self.qs.phrase_slop);
                 let q = self.phrase(field.as_deref(), &p, slop)?;
-                self.boost(q)
+                self.apply_boost(q, boost)
             }
             Some(Tk::Regex(r)) => {
+                // A regex takes a term's tails; its fuzzy slop means nothing.
+                let (_, boost) = self.tails_of_term()?;
                 // The length limit is not lenient.
                 self.ctx.check_regex_length(&r, "Regexp")?;
                 let q = self.each_field(field.as_deref(), &mut |ctx, f| {
+                    // OpenSearch 3.x normalizes the regex with the text field's analyzer
+                    // (`/UPPERCASE/` finds `uppercase`); Elasticsearch keeps it as written.
+                    let value = match ctx.field(f) {
+                        Some(fi) if crate::opensearch::active() && fi.kind.is_text() => match fi.query_analyzer() {
+                            Some(a) => a.normalize(&r),
+                            None => r.clone(),
+                        },
+                        _ => r.clone(),
+                    };
                     let rq = crate::query::term_level::Regexp {
                         field: f.to_string(),
-                        value: r.clone(),
+                        value,
                         flags: crate::query::term_level::regexp_flags::LUCENE_ALL,
                         max_determinized_states: 10000,
                         rewrite: None,
@@ -448,7 +844,7 @@ impl Parser<'_, '_> {
                     };
                     ctx.to_query(&crate::query::Query::Regexp(Box::new(rq))).map(Some)
                 })?;
-                self.boost(q)
+                self.apply_boost(q, boost)
             }
             Some(Tk::Range { lo, hi, il, iu }) => {
                 let q = self.each_field(field.as_deref(), &mut |ctx, f| {
@@ -468,13 +864,17 @@ impl Parser<'_, '_> {
                 })?;
                 self.boost(q)
             }
-            Some(other) => Err(parse_error(&self.src, &format!("Encountered \"{}\" at line 1", tk_text(&other)))),
-            None => Err(parse_error(&self.src, "Encountered \"<EOF>\" at line 1")),
+            Some(_) | None => Err(self.bad_clause_start(self.pos - 1, prefixed)),
         }
     }
 
-    /// The fields a clause runs on (its own, or the default ones), with boosts.
+    /// The fields a clause runs on (its own, or the default ones), with boosts, in
+    /// `HashMap` order (see [`text::hash_ordered`]).
     fn fields_of(&self, field: Option<&str>) -> Vec<(String, f32)> {
+        text::hash_ordered(self.fields_unordered(field))
+    }
+
+    fn fields_unordered(&self, field: Option<&str>) -> Vec<(String, f32)> {
         match field {
             Some(f) => {
                 if f.contains('*') {
@@ -496,11 +896,17 @@ impl Parser<'_, '_> {
     }
 
     fn lenient(&self, field: Option<&str>) -> bool {
-        // All-fields mode (no `fields`, the default field `*`) is lenient by default, for every
-        // clause, its own fields included.
+        // `QueryStringQueryBuilder.doToQuery`: all-fields mode (`default_field: *`, a `*` among
+        // `fields`, or the index's default fields holding `*`) is lenient by default, for
+        // every clause, its own fields included; otherwise `index.query_string.lenient`.
         let _ = field;
         self.qs.lenient.unwrap_or_else(|| {
-            self.qs.fields.is_empty() && self.qs.default_field.as_deref().is_none_or(|d| d == "*") && text::default_fields(self.ctx).iter().any(|(f, _)| f == "*")
+            let all_fields = match &self.qs.default_field {
+                Some(d) => d == "*",
+                None if !self.qs.fields.is_empty() => self.qs.fields.iter().any(|(f, _)| f == "*"),
+                None => text::default_fields(self.ctx).iter().any(|(f, _)| f == "*"),
+            };
+            all_fields || self.ctx.idx.settings.get("index.query_string.lenient") == Some("true")
         })
     }
 
@@ -528,11 +934,29 @@ impl Parser<'_, '_> {
             return self.ctx.exists_query(&unescape(raw)).map(Some);
         }
         if wild && (raw == "*") {
-            if field.is_none() || field == Some("*") {
-                return Ok(Some(arc(search_index::query::MatchAllQuery)));
-            }
-            let f = field.unwrap();
-            return self.ctx.exists_query(f).map(Some);
+            // `QueryStringQueryParser.getWildcardQuery`: `*` on a field (the clause's, or the
+            // parser's single default field) is that field's `exists` query, on the
+            // all-fields pattern every document; with several default fields each gets its
+            // own `exists`.
+            let actual = match field {
+                Some(f) => Some(f.to_string()),
+                None if !self.qs.fields.is_empty() => None,
+                None => match &self.qs.default_field {
+                    Some(df) => Some(df.clone()),
+                    None => {
+                        let defaults = text::default_fields(self.ctx);
+                        if defaults.iter().any(|(f, _)| f == "*") { Some("*".to_string()) } else { None }
+                    }
+                },
+            };
+            return match actual {
+                Some(f) if f.contains('*') && f.chars().all(|c| c == '*') => Ok(Some(arc(search_index::query::MatchAllQuery))),
+                Some(f) => self.star_exists(&f).map(Some),
+                None => self.each_field(None, &mut |ctx, f| {
+                    let _ = ctx;
+                    self.star_exists(f).map(Some)
+                }),
+            };
         }
         if wild {
             let allow_leading = self.qs.allow_leading_wildcard.unwrap_or(true);
@@ -589,6 +1013,16 @@ impl Parser<'_, '_> {
         self.field_text(field, &term, false, 0)
     }
 
+    /// `ExistsQueryBuilder.newFilter` as the query string parser calls it: an unmapped field
+    /// matches nothing (`unmapped field:<name>`), not a rewrite to `match_none`.
+    fn star_exists(&self, f: &str) -> EsResult<QueryRef> {
+        let q = self.ctx.exists_query(f)?;
+        if super::query::rewritten_to_none(&q) {
+            return Ok(super::query::match_none(&format!("unmapped field:{f}")));
+        }
+        Ok(q)
+    }
+
     fn phrase(&mut self, field: Option<&str>, text: &str, slop: i32) -> EsResult<Option<QueryRef>> {
         self.field_text(field, text, true, slop)
     }
@@ -627,7 +1061,7 @@ impl Parser<'_, '_> {
                 Err(e) => return Err(e),
             }
         }
-        let tie = self.qs.tie_breaker.unwrap_or(if self.qs.ty == MultiMatchType::MostFields { 1.0 } else { 0.0 });
+        let tie = self.qs.tie_breaker.unwrap_or(if matches!(self.qs.ty, MultiMatchType::MostFields | MultiMatchType::BoolPrefix) { 1.0 } else { 0.0 });
         Ok(match qs.len() {
             0 => None,
             1 => qs.pop(),
@@ -663,24 +1097,6 @@ fn normalize_pattern(p: &str, norm: &dyn Fn(&str) -> String) -> String {
     out
 }
 
-fn tk_text(t: &Tk) -> String {
-    match t {
-        Tk::RParen => ")".into(),
-        Tk::LParen => "(".into(),
-        Tk::And => "AND".into(),
-        Tk::Or => "OR".into(),
-        Tk::Caret(_) => "^".into(),
-        Tk::Tilde(_) => "~".into(),
-        Tk::Plus => "+".into(),
-        Tk::Minus => "-".into(),
-        Tk::Not => "NOT".into(),
-        Tk::Field(f) => format!("{f}:"),
-        Tk::Term(t, _) => t.clone(),
-        Tk::Phrase(p) => format!("\"{p}\""),
-        Tk::Regex(r) => format!("/{r}/"),
-        Tk::Range { .. } => "[".into(),
-    }
-}
 
 /// `query_string`.
 pub fn query_string(ctx: &QueryCtx, qs: &QueryString) -> EsResult<QueryRef> {
@@ -691,12 +1107,14 @@ pub fn query_string(ctx: &QueryCtx, qs: &QueryString) -> EsResult<QueryRef> {
             e
         }
     };
-    let toks = tokenize(&qs.query).map_err(wrap)?;
-    let mut p = Parser { ctx, qs, toks, pos: 0, src: qs.query.clone() };
+    let (toks, spans) = tokenize_spanned(&qs.query).map_err(wrap)?;
+    let mut p = Parser { ctx, qs, toks, pos: 0, src: qs.query.clone(), spans, depth: 0, at: ClausePos::First, tails: (true, true), bare_run: 0 };
     let q = p.top().map_err(wrap)?;
     let q = match q {
         Some(q) => q,
-        None => return Ok(match_none("Matching no documents because no terms present")),
+        // `QueryParserBase.parse`: a query without clauses is an empty `BooleanQuery`, which
+        // matches nothing (and prints as nothing).
+        None => return Ok(arc(BooleanQuery::new())),
     };
     text::apply_msm(q, qs.minimum_should_match.as_deref())
 }
@@ -706,6 +1124,8 @@ pub fn query_string(ctx: &QueryCtx, qs: &QueryString) -> EsResult<QueryRef> {
 pub fn simple_query_string(ctx: &QueryCtx, s: &SimpleQueryString) -> EsResult<QueryRef> {
     let explicit = !s.fields.is_empty();
     let fields = if explicit { text::resolve_fields(ctx, &s.fields) } else { text::resolve_fields(ctx, &text::default_fields(ctx)) };
+    // The resolved fields are a `HashMap`: its iteration order orders the per-field queries.
+    let fields = text::hash_ordered(fields);
     let lenient = s.lenient.unwrap_or(!explicit);
     let flags = if s.flags == sqs_flags::ALL { i32::MAX } else { s.flags };
     let mut sp = Simple { ctx, s, fields, lenient, flags, chars: s.query.chars().collect() };
@@ -832,7 +1252,7 @@ impl Simple<'_, '_> {
         let start = st.index;
         let mut text = String::new();
         let mut escaped = false;
-        let mut slop = None;
+        let mut has_slop = false;
         while st.index < st.end {
             let c = self.chars[st.index];
             if !escaped {
@@ -843,9 +1263,7 @@ impl Simple<'_, '_> {
                 } else if c == '"' {
                     if st.index + 1 < st.end && self.chars[st.index + 1] == '~' && self.on(F_NEAR) {
                         st.index += 1;
-                        if st.index + 1 < st.end {
-                            slop = Some(self.parse_fuzziness(st));
-                        }
+                        has_slop = st.index + 1 < st.end;
                     }
                     break;
                 }
@@ -854,6 +1272,7 @@ impl Simple<'_, '_> {
             text.push(c);
             st.index += 1;
         }
+        // The slop is read only once the phrase is known to be closed (`consumePhrase`).
         if st.index == st.end {
             // No closing quote: the opening one is ignored.
             st.index = start;
@@ -861,7 +1280,8 @@ impl Simple<'_, '_> {
             st.current = None;
             st.index += 1;
         } else {
-            let q = self.text_query(&text, true, slop.unwrap_or(0))?;
+            let slop = if has_slop { self.parse_fuzziness(st) } else { 0 };
+            let q = self.text_query(&text, true, slop)?;
             self.build_tree(st, q);
             st.index += 1;
         }
@@ -974,16 +1394,12 @@ impl Simple<'_, '_> {
                 Err(e) => return Err(e),
             }
         }
+        // `SimpleQueryStringQueryParser`: one field's query alone, several under a
+        // `DisjunctionMaxQuery` with tie breaker 1.0.
         Ok(match qs.len() {
             0 => None,
             1 => qs.pop(),
-            _ => {
-                let mut b = BooleanQuery::new();
-                for q in qs {
-                    b = b.add(Occur::Should, q);
-                }
-                Some(arc(b))
-            }
+            _ => Some(arc(DisMaxQuery::new(qs, 1.0))),
         })
     }
 
@@ -1044,6 +1460,28 @@ impl Simple<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn syntax_messages_like_javacc() {
+        // Captured from Elasticsearch 9.5.5 (`q=kw1:` and `q=a)`).
+        assert_eq!(
+            syntax_message(None, 4, CLAUSE_BODY),
+            "Encountered \"<EOF>\" at line 1, column 4.\nWas expecting one of:\n    <BAREOPER> ...\n    \"(\" ...\n    \"*\" ...\n    <QUOTED> ...\n    <TERM> ...\n    <PREFIXTERM> ...\n    <WILDTERM> ...\n    <REGEXPTERM> ...\n    \"[\" ...\n    \"{\" ...\n    <NUMBER> ...\n    "
+        );
+        assert_eq!(syntax_message(Some((K_RPAREN, ")")), 1, &[K_EOF, K_AND]), "Encountered \" \")\" \") \"\" at line 1, column 1.\nWas expecting one of:\n    <EOF> \n    <AND> ...\n    ");
+        assert_eq!(syntax_message(None, 2, &[K_NUMBER]), "Encountered \"<EOF>\" at line 1, column 2.\nWas expecting:\n    <NUMBER> ...\n    ");
+        assert_eq!(java_cc_escapes("é\"\\"), "\\u00e9\\\"\\\\");
+    }
+
+    #[test]
+    fn token_spans_count_utf16_units() {
+        let (toks, spans) = tokenize_spanned("é) f:x \"a b\"").unwrap();
+        assert_eq!(toks.len(), 5);
+        assert_eq!(spans, vec![(0, 1), (1, 2), (3, 5), (5, 6), (7, 12)]);
+        let err = parse_error("a)", "m");
+        assert!(!err.es && err.caused_by.as_ref().is_some_and(|c| !c.es && c.kind == "parse_exception"));
+        assert_eq!(parse_error("x", "Lexical error at line 1").caused_by.unwrap().kind, "token_mgr_error");
+    }
+
     use super::*;
 
     #[test]

@@ -145,11 +145,15 @@ pub struct BindCtx<'a> {
     pub time_series_request: bool,
     /// The query matches every live doc ([`ShardOptions::matches_all`]).
     pub matches_all: bool,
+    /// [`ShardOptions::filter_by_filter`].
+    pub filter_by_filter: bool,
     /// `search.max_buckets`.
     pub max_buckets: usize,
     /// `profile: true`: the profile tree and the node of the aggregation being bound.
     pub profiler: Option<Arc<crate::profile::Profiler>>,
     pub profile_parent: Option<usize>,
+    /// [`ShardOptions::query`].
+    pub query: Option<search_index::QueryRef>,
 }
 
 /// Elasticsearch's `CardinalityUpperBound`: an upper bound on the owning bucket ordinals an
@@ -721,6 +725,14 @@ pub struct ShardOptions {
     /// `profile: true`: aggregators record their phases here; render with
     /// [`Profiler::to_json`](crate::profile::Profiler::to_json) after `finish`.
     pub profiler: Option<Arc<crate::profile::Profiler>>,
+    /// `search.aggs.rewrite_to_filter_by_filter` (Elasticsearch's default: on): top-level
+    /// `filters` and low-cardinality keyword `terms` aggregations may run filter by filter
+    /// under a `match_all` query ([`crate::bucket::fbf`]). Off by default here, so a caller
+    /// opts in with the cluster setting.
+    pub filter_by_filter: bool,
+    /// The shard's query, for profiles that report what OpenSearch would have done with it
+    /// ([`crate::filter_rewrite`]); only read when profiling in the opensearch dialect.
+    pub query: Option<search_index::QueryRef>,
 }
 
 /// Collects one shard's aggregations; plug it into a search (alone or in a
@@ -762,9 +774,11 @@ impl AggCollector {
             nested_agg: None,
             time_series_request: has_type(&req.aggs, "time_series"),
             matches_all: opts.matches_all,
+            filter_by_filter: opts.filter_by_filter,
             max_buckets: opts.max_buckets.unwrap_or(crate::internal::DEFAULT_MAX_BUCKETS),
             profiler: opts.profiler.clone(),
             profile_parent: None,
+            query: opts.query.clone(),
         };
         let mut nodes = Vec::new();
         let mut globals = Vec::new();
@@ -805,7 +819,11 @@ impl AggCollector {
         let n = self.docs.len();
         let b = Batch { docs: &self.docs, ords: &self.zeros[..n], scores: &self.scores };
         for node in &mut self.nodes {
-            node.agg.collect(b)?;
+            // An aggregator that took the segment as a whole is never handed its docs
+            // (Elasticsearch's `CollectionTerminatedException` from `getLeafCollector`).
+            if !node.agg.segment_done() {
+                node.agg.collect(b)?;
+            }
         }
         self.docs.clear();
         self.scores.clear();
@@ -820,6 +838,14 @@ impl AggCollector {
         }
         if let Some(q) = self.global_query.take() {
             let mut g = GlobalCollector { nodes: std::mem::take(&mut self.globals), docs: Vec::with_capacity(BATCH), scores: Vec::new(), zeros: vec![0; BATCH] };
+            // OpenSearch searches through Lucene's `IndexSearcher.rewrite(query, needsScores)`,
+            // which wraps a query that needs no scores in a constant-score query; a profile
+            // shows that wrapper (only a profile can tell, so only profiled searches get it).
+            let q = if crate::dialect::opensearch() && self.searcher.profiler().is_some() && !g.score_mode().needs_scores() {
+                std::sync::Arc::new(search_index::query::ConstantScoreQuery::new(q))
+            } else {
+                q
+            };
             self.searcher.search(&q, &mut g)?;
             for n in &mut g.nodes {
                 n.agg.post_collection()?;
@@ -873,6 +899,23 @@ impl LeafCollector for TopLeaf<'_> {
         }
         if self.c.docs.len() >= BATCH {
             self.c.flush()?;
+        }
+        Ok(())
+    }
+
+    /// The block goes into the batch by slices; batches flush at the same `BATCH` boundaries
+    /// as per-doc collection.
+    fn collect_block(&mut self, mut docs: &[u32], score: f32) -> search_index::Result<()> {
+        while !docs.is_empty() {
+            let take = (BATCH - self.c.docs.len().min(BATCH)).clamp(1, docs.len());
+            self.c.docs.extend_from_slice(&docs[..take]);
+            if self.c.needs_scores {
+                self.c.scores.resize(self.c.scores.len() + take, score);
+            }
+            docs = &docs[take..];
+            if self.c.docs.len() >= BATCH {
+                self.c.flush()?;
+            }
         }
         Ok(())
     }

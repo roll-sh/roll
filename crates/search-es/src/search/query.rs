@@ -72,10 +72,50 @@ pub struct InnerHitsDef {
     pub query: QueryRef,
     /// Parent/child inner hits (`has_child`, `has_parent`).
     pub join: Option<super::join::JoinInner>,
+    /// Inner hits of `nested` queries inside this one's query: rendered under each of this
+    /// definition's hits (`InnerHitsContext` tree).
+    pub children: Vec<InnerHitsDef>,
 }
 
 pub fn arc<Q: search_index::Query + 'static>(q: Q) -> QueryRef {
     Arc::new(q)
+}
+
+/// What the shard-independent part of `QueryBuilder.rewrite` turns a query into, when that is
+/// `match_all` (`Some(true)`) or `match_none` (`Some(false)`).
+pub(crate) fn rewrites_to(q: &crate::query::Query) -> Option<bool> {
+    use crate::query::Query;
+    match q {
+        Query::MatchAll(_) => Some(true),
+        Query::MatchNone(_) => Some(false),
+        Query::Bool(b) => bool_rewrite(b),
+        // `ConstantScoreQueryBuilder.doRewrite`: a filter that matches nothing.
+        Query::ConstantScore(c) => (rewrites_to(&c.filter) == Some(false)).then_some(false),
+        // `IdsQueryBuilder.doRewrite`.
+        Query::Ids(i) if i.ids.is_empty() => Some(false),
+        // `BoostingQueryBuilder.doRewrite` / `FunctionScoreQueryBuilder.doRewrite`: a positive
+        // (inner) query that rewrites to any `MatchNoneQueryBuilder`, a user's one included.
+        Query::Boosting(b) => (rewrites_to(&b.positive) == Some(false)).then_some(false),
+        Query::FunctionScore(f) => (rewrites_to(&f.query) == Some(false)).then_some(false),
+        _ => None,
+    }
+}
+
+/// `BoolQueryBuilder.doRewrite`: no clause is `match_all`; a required clause that matches
+/// nothing, a prohibited one that matches everything, or only optional clauses that all match
+/// nothing make `match_none`.
+fn bool_rewrite(b: &crate::query::compound::Bool) -> Option<bool> {
+    if b.must.is_empty() && b.filter.is_empty() && b.must_not.is_empty() && b.should.is_empty() {
+        return Some(true);
+    }
+    if b.must.is_empty() && b.filter.is_empty() && b.must_not.is_empty() && b.should.iter().all(|q| rewrites_to(q) == Some(false)) {
+        return Some(false);
+    }
+    let none = |qs: &[crate::query::Query]| qs.iter().any(|q| rewrites_to(q) == Some(false));
+    if none(&b.must) || none(&b.filter) || b.must_not.iter().any(|q| rewrites_to(q) == Some(true)) {
+        return Some(false);
+    }
+    None
 }
 
 pub fn match_none(reason: &str) -> QueryRef {
@@ -122,62 +162,30 @@ impl<'a> QueryCtx<'a> {
         }
     }
 
-    /// The runtime field `name` (concrete fields win over mapping-level runtime fields; a
-    /// request's `runtime_mappings` shadow both).
+    /// The runtime field `name`: the mapping's `runtime` section shadows concrete fields of
+    /// the same name, a request's `runtime_mappings` shadow both.
     pub fn runtime_field(&self, name: &str) -> Option<Arc<super::runtime::RtField>> {
-        let requested = self.runtime_mappings.as_ref().is_some_and(|r| r.contains_key(name) || name.rsplit_once('.').is_some_and(|(p, _)| r.contains_key(p)));
-        if !requested && (self.idx.mapping.runtime.is_empty() || self.table.get(name).is_some()) {
+        if self.idx.mapping.runtime.is_empty() && self.runtime_mappings.as_ref().is_none_or(|r| r.is_empty()) {
             return None;
         }
-        super::runtime::RuntimeFields::of(&self.idx.mapping, self.runtime_mappings.as_ref()).ok()?.get(name).cloned()
+        // The shard's scope has them parsed already.
+        if let Some(scope) = super::runtime::RuntimeScope::ambient()
+            && scope.index_name() == self.idx.name
+        {
+            return scope.field(name).cloned();
+        }
+        super::runtime::RuntimeFields::of_index(&self.idx.mapping, self.runtime_mappings.as_ref()).ok()?.get(name).cloned()
     }
 
     /// A query over runtime field values (`AbstractScriptFieldQuery`, constant scoring).
-    fn runtime_query(&self, f: Arc<super::runtime::RtField>, pred: super::runtime::Predicate) -> EsResult<QueryRef> {
+    pub(crate) fn runtime_query(&self, f: Arc<super::runtime::RtField>, pred: super::runtime::Predicate) -> EsResult<QueryRef> {
         if !self.allow_expensive {
-            return Err(EsError::new(400, "elasticsearch_exception", "queries cannot be executed against runtime fields while [search.allow_expensive_queries] is set to [false]."));
+            return Err(EsError::new(400, "exception", "queries cannot be executed against runtime fields while [search.allow_expensive_queries] is set to [false]."));
         }
         let ev = super::runtime::Evaluator::new(&self.cluster.scripts, self.st, self.table, self.shard as i32, &self.idx.name, f)?;
+        // `AbstractScriptFieldQuery`: constant scoring, its own description and explanation.
         let q = search_index::query::ScriptQuery { script: Arc::new(super::runtime::RuntimeQuery { ev, pred: Arc::new(pred) }) };
-        Ok(arc(ConstantScoreQuery::new(arc(q))))
-    }
-
-    /// Term-level and simple full-text queries on runtime fields.
-    fn runtime_dispatch(&self, q: &Query) -> EsResult<Option<QueryRef>> {
-        use super::runtime::{Predicate, query_value};
-        use Query as Q;
-        let field = match q {
-            Q::Term(t) => &t.field,
-            Q::Terms(t) if t.values.is_some() => &t.field,
-            Q::Range(r) => &r.field,
-            Q::Exists(e) => &e.field,
-            Q::Prefix(p) => &p.field,
-            Q::Match(m) => &m.field,
-            _ => return Ok(None),
-        };
-        // `lookup` runtime fields only fetch (`LookupRuntimeFieldType` refuses queries).
-        if self.table.get(field).is_none()
-            && let Some(Value::Obj(def)) = self.runtime_mappings.as_ref().and_then(|r| r.get(field))
-            && def.get("type").and_then(Value::as_str) == Some("lookup")
-        {
-            return Err(EsError::illegal_argument(format!("Field [{field}] of type [lookup] does not support {} queries", q.name())));
-        }
-        let Some(f) = self.runtime_field(field) else { return Ok(None) };
-        let pred = match q {
-            Q::Term(t) => Predicate::Terms(vec![query_value(&f, &t.value)?]),
-            Q::Match(m) => Predicate::Terms(vec![query_value(&f, &m.query)?]),
-            Q::Terms(t) => Predicate::Terms(t.values.iter().flatten().map(|v| query_value(&f, v)).collect::<EsResult<_>>()?),
-            Q::Exists(_) => Predicate::Exists,
-            Q::Prefix(p) => Predicate::Prefix(p.value.clone()),
-            Q::Range(r) => Predicate::Range {
-                lo: r.from.as_ref().filter(|v| !v.is_null()).map(|v| query_value(&f, v)).transpose()?,
-                hi: r.to.as_ref().filter(|v| !v.is_null()).map(|v| query_value(&f, v)).transpose()?,
-                include_lower: r.include_lower,
-                include_upper: r.include_upper,
-            },
-            _ => return Ok(None),
-        };
-        self.runtime_query(f, pred).map(Some)
+        Ok(arc(q))
     }
 
     pub fn cluster_warn(&self, msg: &str) {
@@ -193,8 +201,9 @@ impl<'a> QueryCtx<'a> {
     }
 
     /// `KeyedFlattenedFieldType` refuses automaton queries.
+    /// OpenSearch's `flat_object` sub-fields take them (`opensearch::flat_object`).
     fn check_keyed(f: &FieldInfo, query: &str) -> EsResult<()> {
-        if f.flattened_key.is_some() {
+        if f.flattened_key.is_some() && !crate::opensearch::flat_object::is_keyed(f) {
             return Err(EsError::java(400, "unsupported_operation_exception", format!("[{query}] queries are not currently supported on keyed [flattened] fields.")));
         }
         Ok(())
@@ -210,13 +219,55 @@ impl<'a> QueryCtx<'a> {
 
     /// Converts a query (boost and `_name` applied).
     pub fn to_query(&self, q: &Query) -> EsResult<QueryRef> {
-        let inner = crate::stack::maybe_grow(|| self.do_to_query(q))?;
+        // OpenSearch's shard rewrite of a date range its shard's values all fall in: a new
+        // `RangeQueryBuilder` without bounds (keeping boost and name, as
+        // `AbstractQueryBuilder.rewrite` carries them over), which builds an `exists` query
+        // (`RangeQueryBuilder.doRewrite`, `WITHIN`).
+        let within = match q {
+            Query::Range(r) if crate::opensearch::active() => self.os_date_range_relation(r)?,
+            _ => None,
+        };
+        let inner = match within {
+            Some(exists) => exists,
+            None => crate::stack::maybe_grow(|| self.do_to_query(q))?,
+        };
         let c = q.common();
         let out = if c.boost != 1.0 && !inner.as_any().is::<MatchNoneQuery>() { arc(BoostQuery::new(inner, c.boost)) } else { inner };
         if let Some(n) = &c.name {
             self.named.borrow_mut().push((n.clone(), out.clone()));
         }
         Ok(out)
+    }
+
+    /// OpenSearch's `DateFieldType.isFieldWithinQuery` (the only field type whose ranges
+    /// know the shard's bounds): when every indexed value of the shard lies in the range — what
+    /// Lucene's point range rewrite also finds (it becomes `exists` or `match_all`) — the
+    /// range's `exists` query; when none can (no points, or all outside) `match_none`.
+    fn os_date_range_relation(&self, r: &crate::query::term_level::Range) -> EsResult<Option<QueryRef>> {
+        if self.runtime_mappings.as_ref().is_some_and(|m| m.contains_key(&r.field)) || self.idx.mapping.runtime.contains_key(&r.field) {
+            return Ok(None);
+        }
+        let Some(f) = self.field(&r.field) else { return Ok(None) };
+        if !f.kind.is_date() || !f.index {
+            return Ok(None);
+        }
+        let Ok(lq) = super::range::range_query(self, r) else { return Ok(None) };
+        let Ok(rw) = self.searcher.rewrite(&lq) else { return Ok(None) };
+        // The points side decides (a date range is a point range, alone or paired with its
+        // doc-values twin).
+        let points = match rw.as_any().downcast_ref::<search_index::query::range::IndexOrDocValuesQuery>() {
+            Some(iodv) => iodv.index.clone(),
+            None => rw,
+        };
+        let any = points.as_any();
+        if any.is::<FieldExistsQuery>() || any.is::<MatchAllQuery>() {
+            self.exists_query(&r.field).map(Some)
+        } else if any.is::<MatchNoneQuery>() {
+            // `DISJOINT`: a `MatchNoneQueryBuilder`.
+            Ok(Some(match_none("User requested \"match_none\" query.")))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Converts a query used as a filter (no scores needed; same structure).
@@ -243,11 +294,18 @@ impl<'a> QueryCtx<'a> {
             return Ok(rq);
         }
         match q {
+            // OpenSearch builds `match_all` and numeric / date ranges as approximations.
+            Q::MatchAll(_) if crate::opensearch::active() => Ok(crate::opensearch::approximate::ApproximateScoreQuery::match_all()),
             Q::MatchAll(_) => Ok(match_all(self)),
             Q::MatchNone(_) => Ok(match_none("User requested \"match_none\" query.")),
             Q::Bool(b) => self.bool_query(b),
             Q::Boosting(b) => {
                 let pos = self.to_query(&b.positive)?;
+                // `BoostingQueryBuilder.doRewrite`: a positive query that rewrites to
+                // `match_none` replaces the whole query; the negative one is never built.
+                if rewrites_to(&b.positive) == Some(false) || rewritten_to_none(&pos) {
+                    return Ok(pos);
+                }
                 let neg = self.to_query(&b.negative)?;
                 Ok(arc(search_index::query::BoostingQuery::new(pos, neg, b.negative_boost).map_err(index_err)?))
             }
@@ -266,10 +324,14 @@ impl<'a> QueryCtx<'a> {
                 Ok(arc(DisMaxQuery::new(subs, d.tie_breaker)))
             }
             Q::Term(t) => {
-                let Some(f) = self.field(&t.field) else { return self.unmapped_or_meta_term(&t.field, std::slice::from_ref(&t.value), t.case_insensitive) };
-                self.term_query(&f, &t.value, t.case_insensitive)
+                let Some(f) = self.field(&t.field) else { return self.unmapped_or_meta_term(&t.field, std::slice::from_ref(&t.value), t.case_insensitive, "term") };
+                let q = self.term_query(&f, &t.value, t.case_insensitive)?;
+                Ok(constant_rewritten(&f, q))
             }
             Q::Terms(t) => self.terms_query(t),
+            Q::Range(r) if crate::opensearch::active() && self.field(&r.field).is_some_and(|f| f.kind.is_numeric() || f.kind.is_date()) => {
+                super::range::range_query(self, r).map(crate::opensearch::approximate::ApproximateScoreQuery::range)
+            }
             Q::Range(r) => super::range::range_query(self, r),
             Q::Exists(e) => self.exists_query(&e.field),
             Q::Prefix(p) => {
@@ -309,14 +371,22 @@ impl<'a> QueryCtx<'a> {
         if b.must.is_empty() && b.filter.is_empty() && b.must_not.is_empty() && b.should.is_empty() {
             return Ok(match_all(self));
         }
+        // The rewrite runs before any clause becomes a Lucene query, so a clause that would
+        // fail to build (a bad analyzer, mixed analyzers…) never does.
+        if bool_rewrite(b) == Some(false) || crate::opensearch::can_match::bool_matches_none(self, b) {
+            return Ok(match_none("The \"bool\" query was rewritten to a \"match_none\" query."));
+        }
         let mut q = BooleanQuery::new();
         // Elasticsearch adds clauses in this order: must, must_not, should, filter.
         for x in &b.must {
             q = q.add(Occur::Must, self.to_query(x)?);
         }
+        // `BoolQueryBuilder.extractInnerHitBuilders` skips `must_not`: no hits come from it.
+        let mark = self.inner_hits.borrow().len();
         for x in &b.must_not {
             q = q.add(Occur::MustNot, self.to_filter(x)?);
         }
+        self.inner_hits.borrow_mut().truncate(mark);
         for x in &b.should {
             q = q.add(Occur::Should, self.to_query(x)?);
         }
@@ -347,9 +417,24 @@ impl<'a> QueryCtx<'a> {
 
     /// The term query of a field type (`MappedFieldType.termQuery`).
     pub fn term_query(&self, f: &FieldInfo, value: &Value, case_insensitive: bool) -> EsResult<QueryRef> {
+        if f.kind == Kind::AggregateMetric {
+            return super::aggregate_metric::terms(self, f, std::slice::from_ref(value), true);
+        }
         let n = f.number;
+        if f.kind == Kind::Version {
+            // `indexedValueForSearch`: the encoded value; case-insensitively, the value's
+            // letters in any case among the decoded terms.
+            let s = value_text(value);
+            if case_insensitive {
+                let aut = search_codec::automaton::Dfa::wildcard(&escape_wildcard(&s), true, search_codec::automaton::dfa::DEFAULT_WORK_LIMIT)
+                    .map_err(|e| EsError::new(400, "too_complex_to_determinize_exception", e.to_string()))?;
+                let aut = Arc::new(super::version_field::Decoded::new(Arc::new(aut)));
+                return Ok(arc(MultiTermQuery::automaton(n, aut, escape_wildcard(&s))));
+            }
+            return Ok(arc(TermQuery::new(n, super::version_field::encode(&s)?)));
+        }
         match f.kind {
-            Kind::Keyword | Kind::Version | Kind::CountedKeyword | Kind::Flattened => {
+            Kind::Keyword | Kind::CountedKeyword | Kind::Flattened => {
                 if !f.index && !f.doc_values {
                     return Err(not_searchable(f));
                 }
@@ -359,11 +444,11 @@ impl<'a> QueryCtx<'a> {
                         Some(k) => format!("{k}\0{s}"),
                         None => s,
                     };
-                    return Ok(self.multi_term(f, MultiTermQuery::wildcard(n, &escape_wildcard(&s), true).map_err(index_err)?));
+                    return Ok(self.multi_term(f, ci_term(n, &s)?));
                 }
                 let t = normalize(f, &s);
                 if f.index {
-                    Ok(arc(TermQuery::new(n, t.into_bytes())))
+                    Ok(crate::opensearch::keyword_term(f, arc(TermQuery::new(n, t.into_bytes()))))
                 } else {
                     Ok(arc(ConstantScoreQuery::new(arc(DocValuesTermsQuery::new(n, [t.into_bytes()])))))
                 }
@@ -376,18 +461,21 @@ impl<'a> QueryCtx<'a> {
                 if !f.index {
                     // Doc values hold the whole value: an exact (slow) match on it.
                     if case_insensitive {
-                        return Ok(self.multi_term(f, MultiTermQuery::wildcard(n, &escape_wildcard(&s), true).map_err(index_err)?));
+                        return Ok(self.multi_term(f, ci_term(n, &s)?));
                     }
                     return Ok(arc(ConstantScoreQuery::new(arc(DocValuesTermsQuery::new(n, [s.into_bytes()])))));
                 }
                 if case_insensitive {
-                    return Ok(arc(MultiTermQuery::wildcard(n, &escape_wildcard(&s), true).map_err(index_err)?));
+                    return Ok(arc(ci_term(n, &s)?));
                 }
                 let q = arc(TermQuery::new(n, s.into_bytes()));
                 Ok(if f.kind == Kind::MatchOnlyText { arc(ConstantScoreQuery::new(q)) } else { q })
             }
             Kind::Wildcard => {
-                let s = value_text(value);
+                let s = wildcard_normalized(f, &value_text(value));
+                if !case_insensitive && !crate::opensearch::active() {
+                    return Ok(super::extra::wildcard_terms(f, vec![s]));
+                }
                 super::extra::wildcard_field_query(self, f, &escape_wildcard(&s), case_insensitive)
             }
             Kind::ConstantKeyword => {
@@ -402,7 +490,9 @@ impl<'a> QueryCtx<'a> {
                     }
                     None => false,
                 };
-                Ok(if matches { arc(MatchAllQuery) } else { match_none("The \"term\" query doesn't match the constant value") })
+                // `Queries.NO_DOCS_INSTANCE`; the `term` builder's own rewrite names itself
+                // (see `constant_rewritten`).
+                Ok(if matches { arc(MatchAllQuery) } else { match_none("") })
             }
             Kind::Boolean => {
                 if !f.index && !f.doc_values {
@@ -439,8 +529,10 @@ impl<'a> QueryCtx<'a> {
             k if k.is_range() => super::range::range_field_term(self, f, value),
             Kind::Binary => Err(EsError::illegal_argument("Binary fields do not support searching".to_string())),
             Kind::DenseVector => Err(EsError::illegal_argument("[dense_vector] fields do not support term queries".to_string())),
+            // `FeatureField.newLinearQuery`: the score is the feature's stored value (the
+            // inverse for `positive_score_impact: false`), times the boost.
             Kind::SparseVector | Kind::RankFeatures => {
-                Err(EsError::illegal_argument(format!("[{}] fields do not support [term] queries", f.ty)))
+                search_index::query::FeatureQuery::linear(n, value_text(value).into_bytes(), 1.0).map_err(index_err)
             }
             Kind::RankFeature => Err(EsError::illegal_argument("[rank_feature] fields do not support [term] queries".to_string())),
             Kind::Completion => {
@@ -455,16 +547,18 @@ impl<'a> QueryCtx<'a> {
         }
     }
 
-    pub(crate) fn unmapped_or_meta_term(&self, field: &str, values: &[Value], case_insensitive: bool) -> EsResult<QueryRef> {
+    /// A `term`-like query (`query_name`) on a metadata or unmapped field.
+    pub(crate) fn unmapped_or_meta_term(&self, field: &str, values: &[Value], case_insensitive: bool, query_name: &str) -> EsResult<QueryRef> {
         match field {
             "_id" => {
                 let ids: Vec<String> = values.iter().map(value_text).collect();
                 Ok(ids_query(&ids))
             }
             "_index" => {
+                // Index names are lower case: a case-insensitive match lower-cases the pattern.
                 let any = values.iter().any(|v| {
                     let s = value_text(v);
-                    if case_insensitive { crate::xcontent::filter::glob_match(&s.to_lowercase(), &self.idx.name.to_lowercase()) } else { crate::xcontent::filter::glob_match(&s, &self.idx.name) }
+                    self.index_matches(&if case_insensitive { s.to_lowercase() } else { s })
                 });
                 Ok(if any { arc(MatchAllQuery) } else { match_none(&format!("The index [{}] doesn't match", self.idx.name)) })
             }
@@ -486,18 +580,27 @@ impl<'a> QueryCtx<'a> {
                 }
                 Ok(arc(ConstantScoreQuery::new(arc(PointInSetQuery::new(search_index::schema::SEQ_NO_FIELD, pts, PointType::Long)))))
             }
-            _ => Ok(match_none(&format!("unmapped field [{field}]"))),
+            // `TermQueryBuilder.doRewrite` and its kin.
+            _ => Ok(match_none(&format!("The \"{query_name}\" query is against a field that does not exist"))),
         }
     }
 
     fn terms_query(&self, t: &crate::query::term_level::Terms) -> EsResult<QueryRef> {
-        let values: Vec<Value> = match (&t.values, &t.lookup) {
-            (Some(v), _) => v.clone(),
-            (None, Some(l)) => super::extra::terms_lookup(self, l)?,
-            (None, None) => Vec::new(),
+        // Borrowed when the request lists the values (a 45,000-term list is not copied per
+        // shard).
+        let mut values: std::borrow::Cow<'_, [Value]> = match (&t.values, &t.lookup) {
+            (Some(v), _) => std::borrow::Cow::Borrowed(v.as_slice()),
+            (None, Some(l)) => std::borrow::Cow::Owned(super::extra::terms_lookup(self, l)?),
+            (None, None) => std::borrow::Cow::Owned(Vec::new()),
         };
         if values.is_empty() {
             return Ok(match_none("No terms supplied for \"terms\" query."));
+        }
+        if t.bitmap {
+            values = std::borrow::Cow::Owned(crate::opensearch::bitmap::terms(self, &t.field, &values)?);
+            if values.is_empty() {
+                return Ok(match_none("empty bitmap"));
+            }
         }
         let max = self.idx.settings.get("index.max_terms_count").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
         if values.len() > max {
@@ -506,7 +609,10 @@ impl<'a> QueryCtx<'a> {
                 values.len()
             )));
         }
-        let Some(f) = self.field(&t.field) else { return self.unmapped_or_meta_term(&t.field, &values, false) };
+        let Some(f) = self.field(&t.field) else { return self.unmapped_or_meta_term(&t.field, &values, false, "terms") };
+        if f.kind == Kind::AggregateMetric {
+            return super::aggregate_metric::terms(self, &f, &values, false);
+        }
         match f.kind {
             Kind::Keyword | Kind::Version | Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType | Kind::Flattened | Kind::CountedKeyword => {
                 if !f.index && !f.doc_values {
@@ -516,18 +622,38 @@ impl<'a> QueryCtx<'a> {
                     .iter()
                     .map(|v| {
                         let s = value_text(v);
-                        if f.kind.is_text() { s.into_bytes() } else { normalize(&f, &s).into_bytes() }
+                        Ok(if f.kind.is_text() {
+                            s.into_bytes()
+                        } else if f.kind == Kind::Version {
+                            super::version_field::encode(&s)?
+                        } else {
+                            normalize(&f, &s).into_bytes()
+                        })
                     })
-                    .collect();
+                    .collect::<EsResult<_>>()?;
                 if f.index {
-                    Ok(arc(ConstantScoreQuery::new(arc(MultiTermQuery::set(f.number, terms)))))
+                    // Lucene's `TermInSetQuery` scores constantly by itself (its explanation is
+                    // the query, not a `ConstantScore(…)` around it).
+                    Ok(arc(MultiTermQuery::set(f.number, terms)))
                 } else {
                     Ok(arc(ConstantScoreQuery::new(arc(DocValuesTermsQuery::new(f.number, terms)))))
                 }
             }
-            Kind::Boolean | Kind::Ip | Kind::ConstantKeyword | Kind::Wildcard => {
+            // `TermsQueryBuilder.doCoordinatorRewrite` on a constant field: `match_all` when
+            // any value is the constant, a `match_none` naming the query otherwise.
+            Kind::ConstantKeyword => {
+                for v in values.iter() {
+                    let q = self.term_query(&f, v, false)?;
+                    if q.as_any().is::<MatchAllQuery>() {
+                        return Ok(q);
+                    }
+                }
+                Ok(match_none("The \"terms\" query was rewritten to a \"match_none\" query."))
+            }
+            Kind::Wildcard if !crate::opensearch::active() => Ok(super::extra::wildcard_terms(&f, values.iter().map(|v| wildcard_normalized(&f, &value_text(v))).collect())),
+            Kind::Boolean | Kind::Ip | Kind::Wildcard => {
                 let mut b = BooleanQuery::new();
-                for v in &values {
+                for v in values.iter() {
                     b = b.add(Occur::Should, self.term_query(&f, v, false)?);
                 }
                 Ok(arc(ConstantScoreQuery::new(arc(b))))
@@ -535,12 +661,38 @@ impl<'a> QueryCtx<'a> {
             k if k.is_numeric() || k.is_date() => super::range::numeric_terms(self, &f, &values),
             _ => {
                 let mut b = BooleanQuery::new();
-                for v in &values {
+                for v in values.iter() {
                     b = b.add(Occur::Should, self.term_query(&f, v, false)?);
                 }
                 Ok(arc(ConstantScoreQuery::new(arc(b))))
             }
         }
+    }
+
+    /// `SearchIndexNameMatcher`: whether an `_index` pattern resolves (leniently, wildcards
+    /// expanded over indices, aliases and data streams) to the searched index — so the name of
+    /// an alias or data stream that holds the index matches it too.
+    pub fn index_matches(&self, pattern: &str) -> bool {
+        use crate::xcontent::filter::glob_match;
+        // `expand_wildcards=open`: a wildcard skips hidden names, except dot-prefixed ones
+        // when the pattern starts with a dot too.
+        let wild = pattern.contains('*');
+        let hit = |name: &str, hidden: bool| -> bool {
+            if !wild {
+                return pattern == name;
+            }
+            (!hidden || (pattern.starts_with('.') && name.starts_with('.'))) && glob_match(pattern, name)
+        };
+        let name = &self.idx.name;
+        if hit(name, self.idx.is_hidden()) {
+            return true;
+        }
+        if self.idx.aliases.iter().any(|(a, m)| hit(a, m.is_hidden == Some(true))) {
+            return true;
+        }
+        let md = &self.st.metadata;
+        let Some(ds) = md.data_stream_of(name) else { return false };
+        hit(&ds.name, ds.hidden) || md.data_stream_aliases.iter().any(|(a, da)| da.data_streams.iter().any(|d| d == &ds.name) && hit(a, false))
     }
 
     /// `exists` (`ExistsQueryBuilder.newFilter`): one field, or every field under an object path.
@@ -573,11 +725,16 @@ impl<'a> QueryCtx<'a> {
         } else {
             // An object path or pattern: every leaf below it.
             let pattern = if field.contains('*') { field.to_string() } else { format!("{field}.*") };
+            // `getMatchingFieldNames`: multi-fields and search_as_you_type's subfields are field
+            // types of their own; a text field's `_index_prefix` / `_index_phrase` aren't.
             for name in self.table.matching(&pattern) {
-                if let Some(f) = self.field(&name)
-                    && f.parent.is_none()
-                {
-                    fields.push(f);
+                if let Some(f) = self.field(&name) {
+                    let internal_of_text = f.parent.as_deref().and_then(|p| self.table.get(p)).is_some_and(|p| {
+                        matches!(p.kind, Kind::Text | Kind::MatchOnlyText) && (name.ends_with("._index_prefix") || name.ends_with("._index_phrase"))
+                    });
+                    if !internal_of_text {
+                        fields.push(f);
+                    }
                 }
             }
             if field.contains('*') {
@@ -591,7 +748,8 @@ impl<'a> QueryCtx<'a> {
             }
         }
         if fields.is_empty() {
-            return Ok(match_none(&format!("No mappings yet for field [{field}]")));
+            // `ExistsQueryBuilder.doRewrite`.
+            return Ok(match_none("The \"exists\" query was rewritten to a \"match_none\" query."));
         }
         let one = |f: &FieldInfo| -> QueryRef {
             match f.kind {
@@ -603,17 +761,53 @@ impl<'a> QueryCtx<'a> {
                     }
                 }
                 Kind::RankFeature => arc(TermQuery::new(crate::engine::fields::FEATURE_FIELD, f.name.as_bytes().to_vec())),
+                // `_field_names` (see `engine::fields::FEATURE_FIELD`).
+                Kind::Binary if !f.doc_values => super::ids::field_names_term(&f.name),
+                Kind::Completion => super::ids::field_names_term(&f.name),
+                // `MappedFieldType.existsQuery`: neither doc values nor norms (`engine::convert`
+                // indexes the `_field_names` entry).
+                Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType | Kind::Keyword if f.index && !f.doc_values && !f.norms => {
+                    super::ids::field_names_term(&f.name)
+                }
+                Kind::AggregateMetric => match super::aggregate_metric::exists_field(f) {
+                    Some(n) => arc(FieldExistsQuery { field: n }),
+                    None => match_none("aggregate_metric_double without metrics"),
+                },
+                // Weights, or the marker of an empty vector object (`engine::convert`).
+                Kind::SparseVector => arc(
+                    BooleanQuery::new()
+                        .add(Occur::Should, arc(FieldExistsQuery { field: f.number }))
+                        .add(Occur::Should, arc(TermQuery::new(crate::engine::fields::FEATURE_FIELD, f.name.as_bytes().to_vec()))),
+                ),
                 // A keyed flattened field exists where some term starts with its key.
                 Kind::Flattened if f.flattened_key.is_some() => arc(MultiTermQuery::prefix(f.number, normalize(f, "").into_bytes())),
+                // `RootFlattenedFieldType.existsQuery`: the doc values of the keyed subfield,
+                // which has no skipper, so the query never rewrites to `match_all`.
+                Kind::Flattened if f.ty == "flattened" => super::ids::described(arc(FieldExistsQuery { field: f.number }), "FieldExistsQuery", format!("FieldExistsQuery [field={}._keyed]", f.name)),
                 _ => arc(FieldExistsQuery { field: f.number }),
             }
         };
-        if fields.len() == 1 {
+        // An object's search_as_you_type fields bring their shingle and prefix subfields.
+        let mut extra: Vec<QueryRef> = Vec::new();
+        if self.field(field).is_none() {
+            for f in fields.iter().filter(|f| f.kind == Kind::SearchAsYouType) {
+                if f.prefix_field.is_some() {
+                    extra.push(super::ids::field_names_term(&format!("{}._index_prefix", f.name)));
+                }
+                for &(_, n) in &f.shingle_fields {
+                    extra.push(arc(FieldExistsQuery { field: n }));
+                }
+            }
+        }
+        if fields.len() == 1 && extra.is_empty() {
             return Ok(arc(ConstantScoreQuery::new(one(&fields[0]))));
         }
         let mut b = BooleanQuery::new();
         for f in &fields {
             b = b.add(Occur::Should, one(f));
+        }
+        for q in extra {
+            b = b.add(Occur::Should, q);
         }
         Ok(arc(ConstantScoreQuery::new(arc(b))))
     }
@@ -640,19 +834,28 @@ impl<'a> QueryCtx<'a> {
     }
 
     pub fn prefix_query(&self, field: &str, value: &str, case_insensitive: bool, rewrite: Option<&str>) -> EsResult<QueryRef> {
+        if let Some(rf) = self.runtime_target(field, "prefix")? {
+            return self.runtime_prefix(rf, value, case_insensitive);
+        }
         let Some(f) = self.field(field) else {
             if field == "_id" {
                 self.expensive("prefix")?;
                 return Ok(arc(MultiTermQuery::prefix(ID_FIELD, value.as_bytes().to_vec())));
             }
             if field == "_index" {
-                let ok = self.idx.name.starts_with(value);
+                let pattern = format!("{}*", if case_insensitive { value.to_lowercase() } else { value.to_string() });
+                let ok = self.index_matches(&pattern);
                 return Ok(if ok { arc(MatchAllQuery) } else { match_none("prefix doesn't match index") });
             }
-            return Ok(match_none(&format!("unmapped field [{field}]")));
+            return Ok(match_none("The \"prefix\" query is against a field that does not exist"));
         };
         let rw = self.rewrite_of(rewrite)?;
         let wrap = |q: MultiTermQuery| -> QueryRef { self.multi_term(&f, match rw { Some(r) => q.with_rewrite(r), None => q }) };
+        if f.kind == Kind::Version {
+            // `VersionStringFieldType.prefixQuery` is `wildcardQuery(value + "*")`.
+            self.expensive("wildcard")?;
+            return Ok(wrap(super::version_field::prefix(&f, value, case_insensitive)?));
+        }
         match f.kind {
             Kind::Keyword | Kind::Version | Kind::Text | Kind::SearchAsYouType | Kind::MatchOnlyText | Kind::Flattened | Kind::CountedKeyword => {
                 if !f.index && !f.doc_values {
@@ -685,7 +888,7 @@ impl<'a> QueryCtx<'a> {
                 let v = if f.kind.is_text() { value.to_string() } else { normalize(&f, value) };
                 Ok(wrap(MultiTermQuery::prefix(f.number, v.into_bytes())))
             }
-            Kind::Wildcard => super::extra::wildcard_field_query(self, &f, &format!("{}*", escape_wildcard(value)), case_insensitive),
+            Kind::Wildcard => super::extra::wildcard_field_query(self, &f, &format!("{}*", escape_wildcard(&wildcard_normalized(&f, value))), case_insensitive),
             Kind::ConstantKeyword => {
                 let ok = f.constant_value.as_deref().is_some_and(|c| if case_insensitive { c.to_lowercase().starts_with(&value.to_lowercase()) } else { c.starts_with(value) });
                 Ok(if ok { arc(MatchAllQuery) } else { match_none("constant value doesn't match") })
@@ -701,32 +904,45 @@ impl<'a> QueryCtx<'a> {
     }
 
     pub fn wildcard_query(&self, field: &str, value: &str, case_insensitive: bool, rewrite: Option<&str>) -> EsResult<QueryRef> {
+        if let Some(rf) = self.runtime_target(field, "wildcard")? {
+            return self.runtime_wildcard(rf, value, case_insensitive);
+        }
         let Some(f) = self.field(field) else {
             if field == "_id" {
                 return Ok(arc(MultiTermQuery::wildcard(ID_FIELD, value, case_insensitive).map_err(index_err)?));
             }
             if field == "_index" {
-                let ok = crate::xcontent::filter::glob_match(value, &self.idx.name);
+                let ok = self.index_matches(&if case_insensitive { value.to_lowercase() } else { value.to_string() });
                 return Ok(if ok { arc(MatchAllQuery) } else { match_none("wildcard doesn't match index") });
             }
-            return Ok(match_none(&format!("unmapped field [{field}]")));
+            return Ok(match_none("The \"wildcard\" query is against a field that does not exist"));
         };
         self.expensive("wildcard")?;
         Self::check_keyed(&f, "wildcard")?;
         let rw = self.rewrite_of(rewrite)?;
+        if f.kind == Kind::Version {
+            let q = super::version_field::wildcard(&f, value, case_insensitive)?;
+            return Ok(self.multi_term(&f, match rw {
+                Some(r) => q.with_rewrite(r),
+                None => q,
+            }));
+        }
         match f.kind {
             Kind::Keyword | Kind::Version | Kind::Text | Kind::SearchAsYouType | Kind::MatchOnlyText | Kind::Flattened | Kind::CountedKeyword => {
                 if !f.index && !f.doc_values {
                     return Err(not_searchable(&f));
                 }
                 let pattern = if f.kind.is_text() || f.normalizer.is_none() { value.to_string() } else { normalize_wildcard(&f, value) };
-                let q = MultiTermQuery::wildcard(f.number, &pattern, case_insensitive).map_err(index_err)?;
+                let mut q = MultiTermQuery::wildcard(f.number, &pattern, case_insensitive).map_err(index_err)?;
+                if crate::opensearch::flat_object::is_keyed(&f) {
+                    q = crate::opensearch::flat_object::keyed_query(&f, q);
+                }
                 Ok(self.multi_term(&f, match rw {
                     Some(r) => q.with_rewrite(r),
                     None => q,
                 }))
             }
-            Kind::Wildcard => super::extra::wildcard_field_query(self, &f, value, case_insensitive),
+            Kind::Wildcard => super::extra::wildcard_field_query(self, &f, &wildcard_normalized(&f, value), case_insensitive),
             Kind::ConstantKeyword => {
                 let ok = f.constant_value.as_deref().is_some_and(|c| {
                     if case_insensitive { crate::xcontent::filter::glob_match(&value.to_lowercase(), &c.to_lowercase()) } else { crate::xcontent::filter::glob_match(value, c) }
@@ -742,7 +958,7 @@ impl<'a> QueryCtx<'a> {
             if r.field == "_id" {
                 return Ok(arc(MultiTermQuery::regexp(ID_FIELD, &r.value, crate::query::term_level::regexp_flags::to_codec(r.flags), r.case_insensitive, r.max_determinized_states as u32).map_err(index_err)?));
             }
-            return Ok(match_none(&format!("unmapped field [{}]", r.field)));
+            return Ok(match_none("The \"regexp\" query is against a field that does not exist"));
         };
         self.expensive("regexp")?;
         Self::check_keyed(&f, "regexp")?;
@@ -753,27 +969,52 @@ impl<'a> QueryCtx<'a> {
                 if !f.index && !f.doc_values {
                     return Err(not_searchable(&f));
                 }
-                let q = MultiTermQuery::regexp(f.number, &r.value, crate::query::term_level::regexp_flags::to_codec(r.flags), r.case_insensitive, r.max_determinized_states as u32).map_err(index_err)?;
+                let mut q = MultiTermQuery::regexp(f.number, &r.value, crate::query::term_level::regexp_flags::to_codec(r.flags), r.case_insensitive, r.max_determinized_states as u32).map_err(index_err)?;
+                if crate::opensearch::flat_object::is_keyed(&f) {
+                    q = crate::opensearch::flat_object::keyed_query(&f, q);
+                }
+                if f.kind == Kind::Version {
+                    q = super::version_field::regexp(q);
+                }
                 Ok(self.multi_term(&f, match rw {
                     Some(x) => q.with_rewrite(x),
                     None => q,
                 }))
             }
             Kind::Wildcard => super::extra::wildcard_regexp(self, &f, r),
-            Kind::ConstantKeyword => Ok(arc(MatchAllQuery)),
+            // `ConstantFieldType.regexpQuery`: every document or none, as the value matches.
+            Kind::ConstantKeyword => {
+                let Some(c) = f.constant_value.as_deref() else { return Ok(match_none("constant_keyword without value")) };
+                let q = MultiTermQuery::regexp(f.number, &r.value, crate::query::term_level::regexp_flags::to_codec(r.flags), r.case_insensitive, r.max_determinized_states as u32).map_err(index_err)?;
+                Ok(if q.matches_term(c.as_bytes()) { arc(MatchAllQuery) } else { match_none("constant value doesn't match") })
+            }
             _ => Err(qse(self, format!("Can only use regexp queries on keyword and text fields - not on [{}] which is of type [{}]", f.name, f.ty))),
         }
     }
 
     fn fuzzy_query(&self, fz: &crate::query::term_level::Fuzzy) -> EsResult<QueryRef> {
-        let Some(f) = self.field(&fz.field) else { return Ok(match_none(&format!("unmapped field [{}]", fz.field))) };
+        let Some(f) = self.field(&fz.field) else { return Ok(match_none("The \"fuzzy\" query was rewritten to a \"match_none\" query.")) };
         self.expensive("fuzzy")?;
         Self::check_keyed(&f, "fuzzy")?;
         let value = value_text(&fz.value);
+        if f.kind == Kind::Version {
+            let edits = fuzzy_edits(&fz.fuzziness, &value);
+            let mut q = super::version_field::fuzzy(&f, &value, edits, fz.prefix_length.max(0) as usize, fz.max_expansions.max(1) as usize, fz.transpositions);
+            if let Some(r) = self.rewrite_of(fz.rewrite.as_deref())? {
+                q = q.with_rewrite(r);
+            }
+            return Ok(self.multi_term(&f, q));
+        }
         match f.kind {
-            Kind::Keyword | Kind::Version | Kind::Text | Kind::SearchAsYouType | Kind::MatchOnlyText | Kind::Flattened | Kind::CountedKeyword => {
-                let v = if f.kind.is_text() { value } else { normalize(&f, &value) };
-                let edits = fuzzy_edits(&fz.fuzziness, &v);
+            Kind::Keyword | Kind::Text | Kind::SearchAsYouType | Kind::MatchOnlyText | Kind::Flattened | Kind::CountedKeyword => {
+                let v = if f.kind.is_text() { value.clone() } else { normalize(&f, &value) };
+                // A `flat_object` sub-field fuzzes `<path>=<value>` (and so may edit the path,
+                // as `key\0value` here); AUTO measures that whole string.
+                let edits = if crate::opensearch::flat_object::is_keyed(&f) {
+                    fuzzy_edits(&fz.fuzziness, &crate::opensearch::flat_object::fuzzy_subject(&f, &value))
+                } else {
+                    fuzzy_edits(&fz.fuzziness, &v)
+                };
                 let mut q = MultiTermQuery::fuzzy(f.number, &v, edits, fz.prefix_length.max(0) as usize, fz.max_expansions.max(1) as usize, fz.transpositions);
                 if let Some(r) = self.rewrite_of(fz.rewrite.as_deref())? {
                     q = q.with_rewrite(r);
@@ -784,6 +1025,11 @@ impl<'a> QueryCtx<'a> {
                 Ok(self.multi_term(&f, q))
             }
             k if k.is_numeric() || k.is_date() => super::range::numeric_fuzzy(self, &f, &fz.value, &fz.fuzziness),
+            Kind::Wildcard if !crate::opensearch::active() => {
+                let v = wildcard_normalized(&f, &value);
+                let edits = fuzzy_edits(&fz.fuzziness, &v);
+                Ok(super::extra::wildcard_fuzzy(&f, &v, edits, fz.prefix_length.max(0) as usize, fz.max_expansions.max(1) as usize, fz.transpositions))
+            }
             _ => Err(qse(self, format!("Can only use fuzzy queries on keyword and text fields - not on [{}] which is of type [{}]", f.name, f.ty))),
         }
     }
@@ -807,11 +1053,16 @@ impl<'a> QueryCtx<'a> {
             Some(p) => arc(TermQuery::new(NESTED_PATH_FIELD, p.as_bytes().to_vec())),
         };
         let prev = self.nested.replace(Some(n.path.clone()));
+        let mark = self.inner_hits.borrow().len();
         let inner = self.to_query(&n.query);
         self.nested.replace(prev);
         let inner = inner?;
         let child_filter: QueryRef = arc(TermQuery::new(NESTED_PATH_FIELD, n.path.as_bytes().to_vec()));
-        let child = arc(BooleanQuery::new().add(Occur::Must, inner.clone()).add(Occur::Filter, child_filter));
+        let filtered = arc(BooleanQuery::new().add(Occur::Must, inner.clone()).add(Occur::Filter, child_filter));
+        // The block join filters its child query only when that may match other documents
+        // (`NestedHelper.mightMatchNonNestedDocs`), which shows in explanations and profiles.
+        // Inner hits always run the filtered form.
+        let child = if super::might_match_non_nested_docs(self.table, &inner, &n.path) { filtered.clone() } else { inner.clone() };
         let mode = match n.score_mode {
             crate::query::joining::JoinScoreMode::None => search_index::query::JoinScoreMode::None,
             crate::query::joining::JoinScoreMode::Avg => search_index::query::JoinScoreMode::Avg,
@@ -820,24 +1071,53 @@ impl<'a> QueryCtx<'a> {
             crate::query::joining::JoinScoreMode::Total => search_index::query::JoinScoreMode::Total,
         };
         if let Some(ih) = &n.inner_hits {
+            super::inner::check_sort(self, ih.sort.as_ref(), Some(&n.path))?;
             let name = ih.name.clone().unwrap_or_else(|| n.path.clone());
             // Inner hits rewrite `knn` queries to exact ones: every matching child counts.
             let ih_child = if crate::query::contains_query(&n.query, "knn") {
                 let prev = self.nested.replace(Some(n.path.clone()));
                 let was = self.exact_knn.replace(true);
                 let named = self.named.borrow().len();
+                let defs = self.inner_hits.borrow().len();
                 let inner = self.to_query(&n.query);
                 self.named.borrow_mut().truncate(named);
+                self.inner_hits.borrow_mut().truncate(defs);
                 self.exact_knn.set(was);
                 self.nested.replace(prev);
                 let filter: QueryRef = arc(TermQuery::new(NESTED_PATH_FIELD, n.path.as_bytes().to_vec()));
                 arc(BooleanQuery::new().add(Occur::Must, inner?).add(Occur::Filter, filter))
             } else {
-                child.clone()
+                filtered
             };
-            self.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: Some(n.path.clone()), query: ih_child, join: None });
+            // Nested inner hits defined inside this query belong to this one's hits.
+            let children: Vec<InnerHitsDef> = {
+                let mut all = self.inner_hits.borrow_mut();
+                let (keep, nested): (Vec<_>, Vec<_>) = all.drain(mark..).partition(|d| d.join.is_some());
+                all.extend(keep);
+                nested
+            };
+            self.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: Some(n.path.clone()), query: ih_child, join: None, children });
         }
         Ok(arc(ToParentQuery { child, parent_filter, score_mode: mode }))
+    }
+}
+
+/// Whether `q` is a `match_none` a query builder's rewrite produced (before the query is
+/// built: `doRewrite` / `doIndexMetadataRewrite` returning a `MatchNoneQueryBuilder`), which
+/// the enclosing builders' rewrites see.
+pub(crate) fn rewritten_to_none(q: &QueryRef) -> bool {
+    q.as_any()
+        .downcast_ref::<search_index::query::MatchNoneQuery>()
+        .is_some_and(|m| m.reason.ends_with("query was rewritten to a \"match_none\" query.") || m.reason.ends_with("query is against a field that does not exist"))
+}
+
+/// `TermQueryBuilder.maybeRewriteBasedOnConstantFields`: a `term` query on a constant field
+/// rewrites (before it is built) to `match_all` or to a `match_none` naming the query.
+pub(crate) fn constant_rewritten(f: &FieldInfo, q: QueryRef) -> QueryRef {
+    if f.kind == Kind::ConstantKeyword && q.as_any().is::<search_index::query::MatchNoneQuery>() {
+        match_none("The \"term\" query was rewritten to a \"match_none\" query.")
+    } else {
+        q
     }
 }
 
@@ -858,7 +1138,7 @@ pub fn ids_query(ids: &[String]) -> QueryRef {
     if ids.is_empty() {
         return match_none("Missing ids in \"ids\" query.");
     }
-    arc(ConstantScoreQuery::new(arc(MultiTermQuery::set(ID_FIELD, ids.iter().map(|s| s.as_bytes().to_vec())))))
+    super::ids::ids(ids)
 }
 
 pub fn not_searchable(f: &FieldInfo) -> EsError {
@@ -875,6 +1155,16 @@ pub fn value_text(v: &Value) -> String {
         Value::Str(s) => s.clone(),
         Value::Num(Number::Float(f)) => crate::json::write::java_double(*f),
         other => other.to_es_string(),
+    }
+}
+
+/// A query value or pattern of a `wildcard` field through its normalizer: OpenSearch's
+/// `wildcard` takes one (`WildcardFieldMapper` normalizes term, prefix, wildcard and regexp
+/// input whole); Elasticsearch's has none, so this is the identity there.
+fn wildcard_normalized(f: &FieldInfo, s: &str) -> String {
+    match &f.normalizer {
+        Some(n) => n.normalize(s),
+        None => s.to_string(),
     }
 }
 
@@ -918,6 +1208,14 @@ fn normalize_wildcard(f: &FieldInfo, pattern: &str) -> String {
     }
     flush(&mut lit, &mut out);
     out
+}
+
+/// A case-insensitive `term` query (`AutomatonQueries.caseInsensitiveTermQuery`): unlike a
+/// wildcard pattern, the empty term matches the empty value. Prints as the escaped term.
+fn ci_term(field: u32, s: &str) -> EsResult<MultiTermQuery> {
+    let aut = search_codec::automaton::Dfa::term_case_insensitive(s, search_codec::automaton::dfa::DEFAULT_WORK_LIMIT)
+        .map_err(|e| EsError::new(400, "too_complex_to_determinize_exception", e.to_string()))?;
+    Ok(MultiTermQuery::automaton(field, Arc::new(aut), escape_wildcard(s)))
 }
 
 pub fn escape_wildcard(s: &str) -> String {
@@ -978,7 +1276,9 @@ pub fn calculate_msm(optional: i32, spec: &str) -> EsResult<i32> {
         let n: i32 = s.parse().map_err(|_| bad())?;
         if n < 0 { optional + n } else { n }
     };
-    Ok(if result < 0 { 0 } else { result.min(optional) })
+    // No upper bound: more required clauses than there are matches nothing, as in
+    // Elasticsearch 9 (`Math.max(result, 0)`).
+    Ok(result.max(0))
 }
 
 #[cfg(test)]
@@ -994,7 +1294,9 @@ mod tests {
         assert_eq!(calculate_msm(3, "2<75%").unwrap(), 2);
         assert_eq!(calculate_msm(2, "2<75%").unwrap(), 2);
         assert_eq!(calculate_msm(10, "3<-25% 9<-3").unwrap(), 7);
-        assert_eq!(calculate_msm(2, "5").unwrap(), 2);
+        assert_eq!(calculate_msm(2, "5").unwrap(), 5);
+        assert_eq!(calculate_msm(2, "200%").unwrap(), 4);
+        assert_eq!(calculate_msm(2, "-5").unwrap(), 0);
         assert!(calculate_msm(2, "x").is_err());
     }
 

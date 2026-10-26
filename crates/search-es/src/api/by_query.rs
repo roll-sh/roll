@@ -59,10 +59,24 @@ impl Collector for DocIds {
 /// The matching documents of a by-query run, read lazily: each shard's matching doc ids are
 /// collected up front on a point-in-time searcher (four bytes a document), the documents
 /// themselves a batch at a time, so a run's memory is bounded by its batch size.
+///
+/// The shards interleave as Elasticsearch's `_doc`-sorted scroll merges them
+/// (`SearchPhaseController` sorts the shards' top docs by doc id, ties by shard index, and
+/// each shard resumes after its last emitted doc): a k-way merge on `(doc id, shard index)`.
+/// Reindex reads the shards one after the other instead (Elasticsearch 9.5.5 hands a reindex
+/// every match of the first shard, then of the next one, whatever the query; checked with
+/// `max_docs` on two and three shards). With `max_docs` this decides which documents a run
+/// touches.
 pub struct Scanner {
     shards: Vec<ShardScan>,
-    shard: usize,
-    pos: usize,
+    /// Each shard's next document: `(merge key, doc, shard index)`, smallest key first.
+    heads: std::collections::BinaryHeap<std::cmp::Reverse<(u64, u32, usize)>>,
+    /// Shard by shard (reindex) rather than interleaved by doc id.
+    by_shard: bool,
+    /// Each shard's read position.
+    pos: Vec<usize>,
+    /// Documents still to read.
+    left: u64,
     need_source: bool,
     /// Documents the run will read (`max_docs` applied).
     pub total: u64,
@@ -78,15 +92,14 @@ impl Scanner {
     /// The next `n` documents (empty when done).
     pub fn next_batch(&mut self, n: usize) -> EsResult<Vec<ScanDoc>> {
         let mut out = Vec::with_capacity(n.min(1024));
-        while out.len() < n && self.shard < self.shards.len() {
-            let sh = &self.shards[self.shard];
-            if self.pos >= sh.docs.len() {
-                self.shard += 1;
-                self.pos = 0;
-                continue;
+        while out.len() < n && self.left > 0 {
+            let Some(std::cmp::Reverse((_, doc, si))) = self.heads.pop() else { break };
+            self.left -= 1;
+            let sh = &self.shards[si];
+            self.pos[si] += 1;
+            if let Some(&next) = sh.docs.get(self.pos[si]) {
+                self.heads.push(std::cmp::Reverse((merge_key(self.by_shard, next, si), next, si)));
             }
-            let doc = sh.docs[self.pos];
-            self.pos += 1;
             let Some((seg, local)) = sh.searcher.segment_of(doc) else { continue };
             seg.ensure_stored().map_err(crate::engine::convert::index_error)?;
             let stored = sh.searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
@@ -109,12 +122,21 @@ impl Scanner {
     }
 }
 
+/// Where a shard's document `doc` falls in a run's order: by doc id then shard index, or by
+/// shard index then doc id.
+fn merge_key(by_shard: bool, doc: u32, shard: usize) -> u64 {
+    let shard = shard as u64 & 0xFFFF_FFFF;
+    if by_shard { shard << 32 | u64::from(doc) } else { u64::from(doc) << 32 | shard }
+}
+
 /// Finds the documents matching `query` (up to `max_docs`), shard by shard; `slice` keeps
 /// one `_id` slice of every shard, as a sliced scroll does.
 ///
 /// Shard failures fail the whole operation as Elasticsearch's scroll does
 /// (`search_phase_execution_exception`, "all shards failed" / "Partial shards failure");
-/// `need_source` (reindex, update by query) rejects documents without a stored `_source`.
+/// `need_source` (reindex, update by query) rejects documents without a stored `_source`;
+/// `by_shard` (reindex) reads the shards one after the other (see [`Scanner`]).
+#[allow(clippy::too_many_arguments)]
 pub fn scan(
     ctx: &Ctx,
     indices: &[String],
@@ -123,6 +145,7 @@ pub fn scan(
     max_docs: Option<u64>,
     slice: Option<(u32, u32)>,
     need_source: bool,
+    by_shard: bool,
 ) -> EsResult<Scanner> {
     let cluster = ctx.cluster;
     let st = cluster.state();
@@ -146,18 +169,16 @@ pub fn scan(
     };
     let targets = crate::search::shard_targets(cluster, &st, &req)?;
     let mut shards = Vec::new();
-    let mut total = 0u64;
+    let mut matched = 0u64;
     let mut failures: Vec<(usize, EsError)> = Vec::new();
     let mut succeeded = 0usize;
+    // Every shard is scanned: which of them the first `max_docs` documents come from is only
+    // known after the merge. No shard contributes more than `max_docs`.
     for (ti, t) in targets.iter().enumerate() {
-        let left = max_docs.map(|m| m.saturating_sub(total));
-        if left == Some(0) {
-            break;
-        }
-        match scan_shard(ctx, &st, t, query, slice, left) {
+        match scan_shard(ctx, &st, t, query, slice, max_docs) {
             Ok(sh) => {
                 succeeded += 1;
-                total += sh.docs.len() as u64;
+                matched += sh.docs.len() as u64;
                 shards.push(sh);
             }
             Err(e) => failures.push((ti, e)),
@@ -167,7 +188,10 @@ pub fn scan(
         let reason = if succeeded == 0 { "all shards failed" } else { "Partial shards failure" };
         return Err(crate::search::all_shards_failed(&cluster.node.id, &targets, &failures, reason));
     }
-    Ok(Scanner { shards, shard: 0, pos: 0, need_source, total })
+    let total = max_docs.map_or(matched, |m| m.min(matched));
+    let heads = shards.iter().enumerate().filter_map(|(si, sh)| sh.docs.first().map(|&d| std::cmp::Reverse((merge_key(by_shard, d, si), d, si)))).collect();
+    let pos = vec![0; shards.len()];
+    Ok(Scanner { shards, heads, by_shard, pos, left: total, need_source, total })
 }
 
 /// One shard of [`scan`]: its matching root documents in doc id order, at most `limit`.
@@ -760,7 +784,7 @@ fn run_doc_script(ctx: &Ctx, bound: &crate::scripting::Bound, kind: CtxKind, d: 
     let raw = d.source.map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_else(|| "{}".into());
     let src = search_painless::xcontent::parse_source_unordered(&raw).map_err(|e| EsError::parse(format!("{e:?}")))?;
     use search_painless::Value as PV;
-    let meta: Vec<(&str, PV)> = vec![
+    let mut meta: Vec<(&str, PV)> = vec![
         ("_index", PV::str(d.index)),
         ("_id", PV::str(d.id)),
         ("_version", PV::Long(d.version)),
@@ -768,6 +792,10 @@ fn run_doc_script(ctx: &Ctx, bound: &crate::scripting::Bound, kind: CtxKind, d: 
         ("op", PV::str("index")),
         ("_now", PV::Long(ctx.now_ms)),
     ];
+    // `ReindexMetadata.metadataMap`: `_slice` mirrors `_routing` (slice indexing).
+    if kind == CtxKind::Reindex {
+        meta.insert(4, ("_slice", d.routing.map(PV::str).unwrap_or(PV::Null)));
+    }
     let cv = ctx_value(kind, src, &meta, None).map_err(EsError::illegal_argument)?;
     let mut inst = sc.instance();
     inst.set_params(&bound.params);
@@ -879,7 +907,7 @@ pub async fn delete_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing) = (&indices, &query, &routing);
             async move {
-                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false)?;
+                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, false, false)?;
                 let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                 let mut touched = Vec::new();
                 let mut throttle = Throttle::new(live.clone());
@@ -955,7 +983,7 @@ pub async fn update_by_query(ctx: &Ctx<'_>) -> EsResult<Reply> {
         let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
             let (indices, query, routing, bound, pipeline) = (&indices, &query, &routing, &bound, &pipeline);
             async move {
-                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true)?;
+                let mut scanner = scan(ctx, indices, query.as_ref(), routing.as_deref(), max_docs, slice, true, false)?;
                 let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                 let mut touched = Vec::new();
                 let mut throttle = Throttle::new(live.clone());
@@ -1298,7 +1326,7 @@ pub async fn reindex(ctx: &Ctx<'_>) -> EsResult<Reply> {
                 let one = |slice: Option<(u32, u32)>, max_docs: Option<u64>, live: Arc<Live>| {
                     let (src_indices, query, plan) = (&src_indices, &query, &plan);
                     async move {
-                        let mut scanner = scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true)?;
+                        let mut scanner = scan(ctx, src_indices, query.as_ref(), None, max_docs, slice, true, true)?;
                         let mut s = Status { slice_id: live.slice_id, total: scanner.total, ..Default::default() };
                         let mut touched = Vec::new();
                         let mut throttle = Throttle::new(live.clone());
@@ -1369,4 +1397,21 @@ pub fn rethrottle(ctx: &Ctx) -> EsResult<Reply> {
     live.rethrottle(if rps > 0.0 { rps } else { f64::INFINITY });
     let t = ctx.cluster.tasks.get(n).unwrap_or(t);
     Reply::ok(super::tasks::by_node(ctx, &[t], true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_key;
+
+    /// The orders Elasticsearch 9.5.5 picked `max_docs` documents in (two shards holding
+    /// docs 0..3 each): by-query runs interleave by doc id, reindex drains shard 0 first.
+    #[test]
+    fn merge_keys_interleave_or_go_shard_by_shard() {
+        let mut docs: Vec<(u32, usize)> = (0..3).flat_map(|d| [(d, 0), (d, 1)]).collect();
+        docs.sort_by_key(|&(d, s)| merge_key(false, d, s));
+        assert_eq!(docs, [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]);
+        docs.sort_by_key(|&(d, s)| merge_key(true, d, s));
+        assert_eq!(docs, [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]);
+        assert!(merge_key(false, u32::MAX, 0) > merge_key(false, 0, usize::MAX));
+    }
 }

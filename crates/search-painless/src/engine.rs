@@ -442,7 +442,9 @@ fn compile_on_this_thread(src: &str, ctx: Context, settings: &Settings) -> Resul
         params: ctx.execute_params().iter().filter_map(|p| def.var_index(p)).map(|i| i as u32).collect(),
         reserved: ctx.reserved_slots(),
     };
-    let prog = compile::compile(analyzed, Arc::from(src), reg, &opts, def.vars.len(), doc_var, &layout).map_err(|e| error::compile_error(src, &e))?;
+    let mut prog = compile::compile(analyzed, Arc::from(src), reg, &opts, def.vars.len(), doc_var, &layout).map_err(|e| error::compile_error(src, &e))?;
+    prog.version_allowlist = crate::contexts::version_allowlist(ctx);
+    prog.unsigned_long_allowlist = crate::contexts::unsigned_long_allowlist(ctx);
     let statements16 = prog.statements.iter().map(|&b| error::utf16_offset(src, b as usize)).collect();
     Ok(Script { context: ctx, def, prog, statements16, deterministic: !nondeterministic, fast, max_object: settings.max_object_bytes, stack_bytes: settings.stack_bytes })
 }

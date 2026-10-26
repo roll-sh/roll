@@ -141,9 +141,45 @@ pub fn is_all(expressions: &[String]) -> bool {
     expressions.is_empty() || (expressions.len() == 1 && (expressions[0] == "_all" || expressions[0] == "*"))
 }
 
+/// An index component selector (`logs::data`, `logs::failures`): which part of a data stream
+/// an expression names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Selector {
+    Data,
+    Failures,
+}
+
+/// Splits `expr` into its base and selector (`::data` when there is none). An unknown selector
+/// is `invalid_index_name_exception`, as in `IndexNameExpressionResolver`.
+pub fn split_selector(expr: &str) -> Result<(&str, Selector), EsError> {
+    if expr.starts_with('<') {
+        return Ok((expr, Selector::Data));
+    }
+    match expr.rfind("::") {
+        None => Ok((expr, Selector::Data)),
+        Some(i) => match &expr[i + 2..] {
+            "data" => Ok((&expr[..i], Selector::Data)),
+            "failures" => Ok((&expr[..i], Selector::Failures)),
+            other => Err(EsError::invalid_index_name(expr, &format!("invalid usage of :: separator, [{other}] is not a recognized selector"))),
+        },
+    }
+}
+
+/// Whether an expression names a remote cluster (`cluster:index`; a `::` selector doesn't).
+fn is_remote(e: &str) -> bool {
+    if e.starts_with('<') {
+        return false;
+    }
+    let base = match e.rfind("::") {
+        Some(i) => &e[..i],
+        None => e,
+    };
+    base.contains(':')
+}
+
 /// Rejects `cluster:index` expressions.
 pub fn reject_remote(expressions: &[String]) -> Result<(), EsError> {
-    let remote: Vec<&String> = expressions.iter().filter(|e| !e.starts_with('<') && e.contains(':')).collect();
+    let remote: Vec<&String> = expressions.iter().filter(|e| is_remote(e)).collect();
     if !remote.is_empty() {
         let list: Vec<&str> = remote.iter().map(|s| s.as_str()).collect();
         return Err(EsError::illegal_argument(format!(
@@ -181,11 +217,23 @@ pub fn resolve(state: &ClusterState, expressions: &[String], opts: &IndicesOptio
     }
     let aliases = state.aliases();
     for raw in expressions {
-        let expr = resolve_date_math(raw, now_ms)?;
+        let (raw_base, selector) = split_selector(raw)?;
+        let expr = resolve_date_math(raw_base, now_ms)?;
         let (exclude, base) = match expr.strip_prefix('-') {
             Some(rest) if opts.allow_wildcards => (true, rest.to_string()),
             _ => (false, expr.clone()),
         };
+        if selector == Selector::Failures {
+            let matched = failure_indices(state, raw, &base, opts)?;
+            if exclude {
+                for m in &matched {
+                    out.remove(m);
+                }
+            } else {
+                out.extend(matched);
+            }
+            continue;
+        }
         if is_wildcard(&base) && opts.allow_wildcards {
             let mut matched: BTreeSet<String> = BTreeSet::new();
             let dot = base.starts_with('.');
@@ -289,6 +337,45 @@ pub fn resolve(state: &ClusterState, expressions: &[String], opts: &IndicesOptio
             .with_meta("resource.id", Value::from(expressions.to_vec())));
     }
     Ok(out.into_iter().collect())
+}
+
+/// The failure store indices an `expr::failures` expression selects: those of the data streams
+/// (or data stream aliases) it names or matches. A concrete index has no failure store.
+fn failure_indices(state: &ClusterState, raw: &str, base: &str, opts: &IndicesOptions) -> Result<Vec<String>, EsError> {
+    let md = &state.metadata;
+    let usable = |n: &&String| md.indices.get(*n).is_some_and(|i| opts.state_ok(i));
+    let mut out = Vec::new();
+    if is_wildcard(base) && opts.allow_wildcards {
+        let dot = base.starts_with('.');
+        for (name, ds) in &md.data_streams {
+            if glob_match(base, name) && (!ds.hidden || opts.expand_hidden || dot) {
+                out.extend(ds.failure_indices.iter().filter(usable).cloned());
+            }
+        }
+        if opts.allow_aliases {
+            for (alias, a) in &md.data_stream_aliases {
+                if glob_match(base, alias) {
+                    for ds in a.data_streams.iter().filter_map(|d| md.data_streams.get(d)) {
+                        out.extend(ds.failure_indices.iter().filter(usable).cloned());
+                    }
+                }
+            }
+        }
+        return Ok(out);
+    }
+    if let Some(ds) = md.data_streams.get(base) {
+        out.extend(ds.failure_indices.iter().filter(usable).cloned());
+    } else if let Some(a) = md.data_stream_aliases.get(base).filter(|_| opts.allow_aliases) {
+        for ds in a.data_streams.iter().filter_map(|d| md.data_streams.get(d)) {
+            out.extend(ds.failure_indices.iter().filter(usable).cloned());
+        }
+    } else if !opts.ignore_unavailable {
+        // An index or alias exists but has no failure store: Elasticsearch names the whole
+        // expression; a name that doesn't exist at all is reported without its selector.
+        let exists = md.indices.contains_key(base) || state.aliases().contains_key(base);
+        return Err(EsError::index_not_found(if exists { raw } else { base }));
+    }
+    Ok(out)
 }
 
 /// `action.destructive_requires_name`: wildcards and `_all` can't select indices to delete.
@@ -480,6 +567,15 @@ mod tests {
         assert_eq!(r(".h*", o).unwrap(), vec![".h"]);
         assert_eq!(r("a2", o).unwrap(), vec!["a2"]);
         assert_eq!(r("x:a1", o).unwrap_err(), "Cross-cluster calls are not supported in this context but remote indices were requested: [x:a1]");
+        assert_eq!(
+            r("a1::bogus", o).unwrap_err(),
+            "Invalid index name [a1::bogus], invalid usage of :: separator, [bogus] is not a recognized selector"
+        );
+        assert_eq!(r("a1::*", o).unwrap_err(), "Invalid index name [a1::*], invalid usage of :: separator, [*] is not a recognized selector");
+        assert_eq!(r("a1::data", o).unwrap(), ["a1"]);
+        assert_eq!(r("a1::failures", o).unwrap_err(), "no such index [a1::failures]");
+        assert_eq!(r("nope::failures", o).unwrap_err(), "no such index [nope]");
+        assert_eq!(r("x:a1::failures", o).unwrap_err(), "Cross-cluster calls are not supported in this context but remote indices were requested: [x:a1::failures]");
         assert_eq!(r("<a1>", o).unwrap(), vec!["a1"]);
         assert_eq!(r("<x-{now/d}>", o).unwrap_err(), "no such index [x-2026.10.20]");
         assert_eq!(r("*,c1", o).unwrap(), vec!["a1", "b1", "c1"]);

@@ -81,6 +81,8 @@ const REINDEX_PROPS: &[(&str, Prop)] = &[
     ("_id", p(PType::Any, true, true, Check::None)),
     ("_version", p(PType::Num, true, true, Check::Longable)),
     ("_routing", p(PType::Str, true, true, Check::None)),
+    // `ReindexMetadata`: `_slice` is `_routing` under another name (slice indexing).
+    ("_slice", p(PType::Str, true, true, Check::None)),
     ("op", p(PType::Str, false, true, Check::Ops)),
     ("_now", p(PType::Num, false, false, Check::Longable)),
 ];
@@ -313,7 +315,7 @@ impl Ctx {
         if let Value::Str(_) = &k
             && let Some(prop) = self.prop(&key) {
                 check(prop, Op::Update, &key, &v).map_err(|t| via(via(t, &self.put_frames()), &["script.CtxMap.put(CtxMap.java:96)", CTX_PUT]))?;
-                return Ok(self.meta.insert_raw(k, v).unwrap_or(Value::Null));
+                return Ok(self.meta_insert(k, v));
             }
         if self.direct() {
             return match self.source_map() {
@@ -338,6 +340,9 @@ impl Ctx {
         if let Value::Str(s) = k
             && let Some(prop) = self.prop(s.as_str()) {
                 check(prop, Op::Remove, s.as_str(), &Value::Null).map_err(|t| via(via(t, &self.remove_frames()), &["script.CtxMap.remove(CtxMap.java:137)"]))?;
+                if let Some(other) = self.routing_alias(s.as_str()) {
+                    self.meta.remove(&Value::str(other));
+                }
                 return Ok(self.meta.remove(k).unwrap_or(Value::Null));
             }
         if self.direct() {
@@ -346,6 +351,27 @@ impl Ctx {
         let mut t = crate::vm::Throw::new(cls::UNSUPPORTED_OPERATION_EXCEPTION, Some(format!("Cannot remove key {} from ctx", k.to_java_string())));
         t.frames = super::server_frames(&["script.CtxMap.remove(CtxMap.java:143)"]);
         Err(t)
+    }
+
+    /// The other name of a routing key in reindex scripts (`ReindexMetadata` keeps `_routing`
+    /// and `_slice` equal).
+    fn routing_alias(&self, key: &str) -> Option<&'static str> {
+        match key {
+            "_routing" if self.kind == CtxKind::Reindex => Some("_slice"),
+            "_slice" if self.kind == CtxKind::Reindex => Some("_routing"),
+            _ => None,
+        }
+    }
+
+    /// Stores a validated metadata value (under both routing names in reindex scripts).
+    fn meta_insert(&self, k: Value, v: Value) -> Value {
+        if let Some(other) = self.routing_alias(&k.to_java_string()) {
+            let previous = self.meta.get(&Value::str("_routing")).unwrap_or(Value::Null);
+            self.meta.insert_raw(Value::str(other), v.clone());
+            self.meta.insert_raw(k, v);
+            return previous;
+        }
+        self.meta.insert_raw(k, v).unwrap_or(Value::Null)
     }
 
     /// Frames of `Metadata.put`, through `ReindexMetadata`'s override in reindex scripts.
@@ -373,7 +399,7 @@ impl Ctx {
         let key = k.to_java_string();
         if let Some(prop) = self.prop(&key) {
             check(prop, Op::Update, &key, &v).map_err(|t| via(via(t, &self.put_frames()), &["script.CtxMap$Entry.setValue(CtxMap.java:347)"]))?;
-            return Ok(self.meta.insert_raw(k.clone(), v).unwrap_or(Value::Null));
+            return Ok(self.meta_insert(k.clone(), v));
         }
         if self.direct() {
             return Ok(self.source_map().and_then(|m| m.insert_raw(k.clone(), v)).unwrap_or(Value::Null));

@@ -47,6 +47,11 @@ impl Objects {
             }
             StorageConfig::S3 { bucket, region, endpoint, prefix } => {
                 let mut b = AmazonS3Builder::from_env().with_bucket_name(bucket);
+                // AWS reserves the `--x-s3` suffix for S3 Express One Zone directory buckets,
+                // which need session authentication and zonal endpoints.
+                if bucket.ends_with("--x-s3") {
+                    b = b.with_s3_express(true);
+                }
                 if let Some(r) = region {
                     b = b.with_region(r);
                 }

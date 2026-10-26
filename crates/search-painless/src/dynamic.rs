@@ -265,16 +265,41 @@ fn getter_of(reg: &Registry, class: ClassId, name: &str) -> Option<Getter> {
     None
 }
 
-enum Getter {
+#[derive(Clone, Copy)]
+pub(crate) enum Getter {
     Field(u32),
     Method(MethodId),
 }
+
+/// Entries of [`crate::vm::State::getter_cache`] (a script reads few distinct members).
+const GETTER_CACHE_MAX: usize = 16;
 
 /// `x.name` on a `def` receiver.
 pub fn get_dot(vm: &mut Vm, recv: &Value, name: u32) -> VR {
     let prog = vm.prog;
     let n: &str = &prog.names[name as usize];
-    get_dot_str(vm, recv, n)
+    if recv.is_null() || matches!(recv, Value::Obj(o) if matches!(&**o, Obj::Host(_))) {
+        return get_dot_str(vm, recv, n);
+    }
+    let class = lookup_class(recv);
+    let cached = vm.st.getter_cache.iter().find(|e| e.0 == class && e.1 == name).map(|e| e.2);
+    let getter = match cached {
+        Some(g) => g,
+        None => {
+            let Some(g) = getter_of(vm.reg, class, n) else {
+                return get_dot_str(vm, recv, n);
+            };
+            if vm.st.getter_cache.len() < GETTER_CACHE_MAX {
+                vm.st.getter_cache.push((class, name, g));
+            }
+            g
+        }
+    };
+    let reg = vm.reg;
+    match getter {
+        Getter::Field(f) => (reg.field(f).get)(vm, &mut [recv.clone()]),
+        Getter::Method(m) => (reg.method(m).imp)(vm, &mut [recv.clone()]),
+    }
 }
 
 pub fn get_dot_str(vm: &mut Vm, recv: &Value, n: &str) -> VR {

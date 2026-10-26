@@ -274,7 +274,7 @@ mod tests {
                 1 => ("c2", "u1", 0),
                 _ => ("c1", "u1", 1),
             };
-            record::encode(&mut f, 100 + i as u64, i, c, u, s, format!("op{i}").as_bytes());
+            record::encode(&mut f, 100 + i as u64, i, 0, c, u, s, format!("op{i}").as_bytes());
         }
         f
     }

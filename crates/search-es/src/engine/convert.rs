@@ -22,7 +22,6 @@ use bytes::Bytes;
 use search_codec::points::encode;
 use search_codec::stored::OwnedStoredValue;
 use search_index::doc::{DocValue, IndexableDoc, IndexableField, PreToken, StoredField};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// What a document carries besides its fields.
@@ -67,6 +66,8 @@ pub fn to_indexable(table: &FieldTable, parsed: &ParsedDocument, meta: &DocMeta<
         w.finish(&mut d);
         nested_docs.push(d);
     }
+    // Most fields write a term or point plus a doc value: room for that up front.
+    root.fields.reserve(parsed.fields.len() * 2 + 4);
     let mut w = Writer::new(table, &parsed.fields, meta.id);
     for f in parsed.fields.iter().chain(root_extra) {
         w.field(&mut root, f)?;
@@ -100,13 +101,20 @@ struct Writer<'t> {
     table: &'t FieldTable,
     /// The fields of the document being written (completion context paths read them).
     doc: &'t [DocField],
-    /// Text values per engine field (analyzed together).
-    texts: HashMap<u32, (Arc<FieldInfo>, Vec<String>)>,
-    text_order: Vec<u32>,
+    /// Text values per engine field (analyzed together), in the order fields first appear (a
+    /// document has few text fields: a list beats a map).
+    texts: Vec<(u32, Arc<FieldInfo>, Vec<String>)>,
     /// Range values per field: one binary doc value holds all of a doc's ranges.
     ranges: Vec<(u32, Kind, Vec<(super::ranges::Bound, super::ranges::Bound)>)>,
     /// `binary` doc values per field: one doc value holds all of a doc's values.
     binaries: Vec<(u32, Vec<Vec<u8>>)>,
+    /// Shape centroids per centroid sub-field (cartesian or not): one per doc, over all of its
+    /// shapes (the centroid `GeometryDocValueWriter` stores with the triangles).
+    centroids: Vec<(u32, bool, search_aggs::shape_field::CentroidCalculator)>,
+    /// `counted_keyword` occurrences per count sub-field, by value (term order).
+    counted: Vec<(u32, std::collections::BTreeMap<String, u32>)>,
+    /// Shape triangles per field: one doc value holds every shape of a multi-valued field.
+    shapes: Vec<(u32, Vec<search_index::query::shape::PackedTriangle>)>,
     /// The document's `_id` (a `join` parent's own join value).
     id: &'t str,
 }
@@ -117,16 +125,15 @@ fn long_point(v: i64) -> Vec<u8> {
 
 impl<'t> Writer<'t> {
     fn new(table: &'t FieldTable, doc: &'t [DocField], id: &'t str) -> Writer<'t> {
-        Writer { table, doc, texts: HashMap::new(), text_order: Vec::new(), ranges: Vec::new(), binaries: Vec::new(), id }
+        Writer { table, doc, texts: Vec::new(), ranges: Vec::new(), binaries: Vec::new(), centroids: Vec::new(), counted: Vec::new(), shapes: Vec::new(), id }
     }
 
     fn text(&mut self, f: &Arc<FieldInfo>, number: u32, v: &str) {
-        match self.texts.get_mut(&number) {
-            Some((_, vals)) => vals.push(v.to_string()),
+        match self.texts.iter_mut().find(|(n, _, _)| *n == number) {
+            Some((_, _, vals)) => vals.push(v.to_string()),
             None => {
                 let info = if number == f.number { f.clone() } else { self.table.by_number.get(&number).cloned().unwrap_or_else(|| f.clone()) };
-                self.texts.insert(number, (info, vec![v.to_string()]));
-                self.text_order.push(number);
+                self.texts.push((number, info, vec![v.to_string()]));
             }
         }
     }
@@ -135,11 +142,26 @@ impl<'t> Writer<'t> {
         for (n, k, all) in std::mem::take(&mut self.ranges) {
             d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(super::ranges::encode_dv(k, &all).into()) });
         }
+        for (n, values) in std::mem::take(&mut self.counted) {
+            let counts: Vec<u32> = values.into_values().collect();
+            let mut b = Vec::with_capacity(counts.len() + 1);
+            search_aggs::values::write_vint_array(&counts, &mut b);
+            d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(b.into()) });
+        }
+        for (n, tris) in std::mem::take(&mut self.shapes) {
+            d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(search_index::query::shape::doc_value(&tris)) });
+        }
+        for (n, cartesian, calc) in std::mem::take(&mut self.centroids) {
+            let coords = if cartesian { search_aggs::shape_field::Coords::Cartesian } else { search_aggs::shape_field::Coords::Geo };
+            // A degenerate shape (no weight: NaN centroid) keeps none; readers approximate it.
+            if let Ok(b) = search_aggs::shape_field::encode_centroid(&calc, coords) {
+                d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(b.to_vec().into()) });
+            }
+        }
         for (n, values) in std::mem::take(&mut self.binaries) {
             d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(encode_binary_dv(values).into()) });
         }
-        for n in std::mem::take(&mut self.text_order) {
-            let Some((f, values)) = self.texts.remove(&n) else { continue };
+        for (n, f, values) in std::mem::take(&mut self.texts) {
             let Some(a) = f.analyzer.clone() else { continue };
             if !f.index {
                 continue;
@@ -181,6 +203,11 @@ impl<'t> Writer<'t> {
         match (&df.value, f.kind) {
             (FieldValue::Text(s), Kind::Text | Kind::MatchOnlyText | Kind::SearchAsYouType) => {
                 self.text(&f, n, s);
+                // `context.addToFieldNames`: without norms or doc values only `_field_names`
+                // says the field has a value (`exists`, even for a value with no tokens).
+                if (f.kind == Kind::MatchOnlyText || !f.norms) && !f.doc_values && f.index {
+                    d.fields.push(IndexableField::Term { field: FEATURE_FIELD, term: Bytes::copy_from_slice(f.name.as_bytes()) });
+                }
                 if let Some((pf, _, _)) = f.prefix_field {
                     self.text(&f, pf, s);
                 }
@@ -208,8 +235,23 @@ impl<'t> Writer<'t> {
             }
             // `constant_keyword` indexes nothing: its value lives in the mapping.
             (FieldValue::Text(_) | FieldValue::Keyword(_), Kind::ConstantKeyword) => {}
-            (FieldValue::Text(s) | FieldValue::Keyword(s), Kind::Keyword | Kind::Version | Kind::Wildcard | Kind::CountedKeyword) => {
+            // `version`: terms and doc values hold the precedence-ordered encoding (validated
+            // when the document was parsed).
+            (FieldValue::Text(s) | FieldValue::Keyword(s), Kind::Version) => {
+                if let Ok(b) = search_aggs::version_string::encode(s) {
+                    let b = Bytes::from(b);
+                    d.fields.push(IndexableField::Term { field: n, term: b.clone() });
+                    d.fields.push(IndexableField::DocValue { field: n, value: DocValue::SortedSet(b) });
+                }
+            }
+            (FieldValue::Text(s) | FieldValue::Keyword(s), Kind::Keyword | Kind::Wildcard | Kind::CountedKeyword) => {
                 self.keyword(d, &f, s);
+                if let Some(cn) = f.subfield("count") {
+                    match self.counted.iter_mut().find(|(x, _)| *x == cn) {
+                        Some((_, m)) => *m.entry(s.clone()).or_insert(0) += 1,
+                        None => self.counted.push((cn, std::collections::BTreeMap::from([(s.clone(), 1)]))),
+                    }
+                }
             }
             (FieldValue::Long(v), k) if k.is_integral() || matches!(k, Kind::ScaledFloat(_) | Kind::Date | Kind::DateNanos) => {
                 let v = *v;
@@ -314,6 +356,10 @@ impl<'t> Writer<'t> {
                         Some((_, v)) => v.push(b.clone()),
                         None => self.binaries.push((n, vec![b.clone()])),
                     }
+                } else {
+                    // `context.addToFieldNames`: without doc values only `_field_names` says the
+                    // field has a value (for `exists`).
+                    d.fields.push(IndexableField::Term { field: FEATURE_FIELD, term: Bytes::copy_from_slice(f.name.as_bytes()) });
                 }
                 if f.store {
                     d.stored.push(StoredField { field: n, value: OwnedStoredValue::Bytes(b.clone()) });
@@ -351,7 +397,21 @@ impl<'t> Writer<'t> {
                     }
                 }
                 if f.doc_values {
-                    d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(search_index::query::shape::doc_value(&tris)) });
+                    match self.shapes.iter_mut().find(|(x, _)| *x == n) {
+                        Some((_, all)) => all.extend_from_slice(&tris),
+                        None => self.shapes.push((n, tris.clone())),
+                    }
+                    if let Some(cn) = f.subfield("centroid") {
+                        let cartesian = k == Kind::Shape;
+                        let i = match self.centroids.iter().position(|(x, _, _)| *x == cn) {
+                            Some(i) => i,
+                            None => {
+                                self.centroids.push((cn, cartesian, search_aggs::shape_field::CentroidCalculator::new()));
+                                self.centroids.len() - 1
+                            }
+                        };
+                        let _ = self.centroids[i].2.add(&super::shapes::centroid_geometry(g));
+                    }
                 }
             }
             (FieldValue::Range { from, to, include_from, include_to }, k) => {
@@ -397,13 +457,25 @@ impl<'t> Writer<'t> {
                         tokens.push(t);
                     }
                 }
+                // Lucene sums a field's term frequencies into an int (`IndexingChain.invert`):
+                // a feature's frequency is its float bits shifted, so tens of thousands of
+                // features overflow it.
+                let total: u64 = tokens.iter().map(|t| u64::from(t.freq)).sum();
+                if total > i32::MAX as u64 {
+                    return Err(EsError::illegal_argument(format!("too many tokens for field \"{}\"", f.name))
+                        .caused_by(EsError::java(400, "arithmetic_exception", "integer overflow")));
+                }
                 if !tokens.is_empty() {
                     d.fields.push(IndexableField::Tokens { field: n, tokens });
+                } else if f.kind == Kind::SparseVector {
+                    // An empty `sparse_vector` object still makes the field exist
+                    // (`SparseVectorFieldMapper` adds the field name; an empty array doesn't).
+                    d.fields.push(IndexableField::Term { field: FEATURE_FIELD, term: Bytes::copy_from_slice(f.name.as_bytes()) });
                 }
             }
             (FieldValue::Flattened(pairs), _) => {
                 for (k, v) in pairs {
-                    if f.ignore_above.is_some_and(|m| v.chars().count() > m) {
+                    if f.ignore_above.is_some_and(|m| crate::document::exceeds_ignore_above(v, m)) {
                         continue;
                     }
                     let vb = Bytes::copy_from_slice(v.as_bytes());
@@ -433,12 +505,20 @@ impl<'t> Writer<'t> {
                 let defs = super::completion::context_defs(&f);
                 // Context-enabled fields key every input under each of its typed contexts.
                 let typed = if defs.is_empty() { Vec::new() } else { super::completion::index_contexts(&f, &defs, contexts.as_ref(), self.doc)? };
+                // Completion fields have neither doc values nor norms: `exists` reads
+                // `_field_names` (`context.addToFieldNames`), like a binary field without doc values.
+                if !inputs.is_empty() {
+                    d.fields.push(IndexableField::Term { field: FEATURE_FIELD, term: Bytes::copy_from_slice(f.name.as_bytes()) });
+                }
                 for input in inputs {
                     let key = super::completion::index_key(&f, input);
                     if key.is_empty() {
                         continue;
                     }
+                    // The keys are the field's terms too (Lucene's completion postings format
+                    // keeps a terms dictionary): `term` / `match` queries find them.
                     if typed.is_empty() {
+                        d.fields.push(IndexableField::Term { field: n, term: Bytes::copy_from_slice(&key) });
                         d.fields.push(IndexableField::Suggest { field: n, key: key.into(), weight: w, payload: Bytes::copy_from_slice(input.as_bytes()) });
                         continue;
                     }
@@ -447,20 +527,13 @@ impl<'t> Writer<'t> {
                         k.extend_from_slice(ctx);
                         k.push(super::completion::CONTEXT_SEP);
                         k.extend_from_slice(&key);
+                        d.fields.push(IndexableField::Term { field: n, term: Bytes::copy_from_slice(&k) });
                         d.fields.push(IndexableField::Suggest { field: n, key: k.into(), weight: w, payload: Bytes::copy_from_slice(input.as_bytes()) });
                     }
                 }
             }
             (FieldValue::TokenCount(s), _) => {
-                let mut count = 0i64;
-                if let Some(a) = &f.analyzer {
-                    let skip_inc = f.mapper.raw("enable_position_increments").and_then(Value::as_bool) == Some(false);
-                    a.analyze(s, &mut |t| {
-                        if skip_inc || t.position_increment > 0 || count == 0 {
-                            count += 1;
-                        }
-                    });
-                }
+                let count = token_count(&f, s);
                 if f.index {
                     d.fields.push(IndexableField::Point { field: n, packed: encode::i32_bytes(count as i32).to_vec() });
                 }
@@ -470,6 +543,18 @@ impl<'t> Writer<'t> {
                 if f.store {
                     d.stored.push(StoredField { field: n, value: OwnedStoredValue::Int(count as i32) });
                 }
+            }
+            // One doc value per metric sub-field: doubles as sortable longs, `value_count` as is.
+            (FieldValue::AggregateMetric { min, max, sum, value_count }, Kind::AggregateMetric) => {
+                let metrics = [("min", min.map(encode::f64_sortable)), ("max", max.map(encode::f64_sortable)), ("sum", sum.map(encode::f64_sortable)), ("value_count", *value_count)];
+                for (name, v) in metrics {
+                    if let (Some(v), Some(sub)) = (v, f.subfield(name)) {
+                        d.fields.push(IndexableField::DocValue { field: sub, value: DocValue::SortedNumeric(v) });
+                    }
+                }
+            }
+            (FieldValue::Histogram(b), Kind::Histogram) => {
+                d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(Bytes::copy_from_slice(b)) });
             }
             (FieldValue::Percolator(q, _), Kind::Percolator) => {
                 d.fields.push(IndexableField::DocValue { field: n, value: DocValue::Binary(Bytes::copy_from_slice(q.as_bytes())) });
@@ -505,7 +590,7 @@ impl<'t> Writer<'t> {
 
     fn keyword(&mut self, d: &mut IndexableDoc, f: &Arc<FieldInfo>, s: &str) {
         let n = f.number;
-        if f.ignore_above.is_some_and(|m| s.chars().count() > m) {
+        if f.ignore_above.is_some_and(|m| crate::document::exceeds_ignore_above(s, m)) {
             return;
         }
         let normalized: std::borrow::Cow<str> = match &f.normalizer {
@@ -518,6 +603,9 @@ impl<'t> Writer<'t> {
         }
         if f.doc_values {
             d.fields.push(IndexableField::DocValue { field: n, value: DocValue::SortedSet(b) });
+        } else if f.index && !f.norms && f.kind == Kind::Keyword {
+            // `context.addToFieldNames` (see the text fields).
+            d.fields.push(IndexableField::Term { field: FEATURE_FIELD, term: Bytes::copy_from_slice(f.name.as_bytes()) });
         }
         if f.store {
             d.stored.push(StoredField { field: n, value: OwnedStoredValue::Str(s.to_string()) });
@@ -549,11 +637,35 @@ pub fn index_error(e: search_index::Error) -> EsError {
         }
         reason = text.to_string();
     }
+    // search-index's collapse collector reports a multi-valued key its own way; Elasticsearch
+    // (`GroupingDocValuesSelector`) answers 400 with this text.
+    // (OpenSearch keeps the collector's own 500.)
+    if kind == "illegal_state_exception"
+        && !crate::opensearch::active()
+        && let Some(doc) = reason.strip_prefix("failed to collapse ").and_then(|r| r.strip_suffix(", the collapse field must be single valued"))
+    {
+        return EsError::illegal_argument(format!("failed to extract doc:{doc}, the grouping field must be single valued"));
+    }
     if search_analysis::is_java_exception(&kind) || kind == "i_o_exception" {
         EsError::java(status, kind, reason)
     } else {
         EsError::new(status, kind, reason)
     }
+}
+
+/// `TokenCountFieldMapper.countPositions`: the tokens of `s` (positions, unless
+/// `enable_position_increments: false` counts every token).
+pub fn token_count(f: &FieldInfo, s: &str) -> i64 {
+    let mut count = 0i64;
+    if let Some(a) = &f.analyzer {
+        let skip_inc = f.mapper.raw("enable_position_increments").and_then(Value::as_bool) == Some(false);
+        a.analyze(s, &mut |t| {
+            if skip_inc || t.position_increment > 0 || count == 0 {
+                count += 1;
+            }
+        });
+    }
+    count
 }
 
 /// `BinaryFieldMapper.CustomBinaryDocValuesField`: a doc's values sorted and deduplicated,

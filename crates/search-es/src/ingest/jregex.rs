@@ -3,62 +3,21 @@
 //! Elasticsearch compiles these with `java.util.regex.Pattern`, whose semantics differ from the
 //! `regex` crate's in ways that change documents silently: `\d`, `\w`, `\s` and `\b` are ASCII,
 //! `.` stops at every Java line terminator, and Java has lookaround and backreferences. The Java
-//! engine roll has lives in `search-analysis` (its `pattern_replace` char filter runs
-//! `Matcher.replaceAll`), and its public surface is the analysis chain, so patterns run through a
-//! one-off normalizer made of that char filter:
+//! engine lives in `search-analysis` ([`search_analysis::jregex`]); this module adapts it to the
+//! ingest processors:
 //!
 //! - [`JavaReplace`] is `Matcher.replaceAll(replacement)` with Java's `$n`/`${name}`/`\`
-//!   replacement syntax and errors.
-//! - [`JavaPattern`] finds `Matcher.find()`'s matches by replacing each with itself wrapped in
-//!   two Unicode noncharacters that don't occur in the input (`\u{FDD0}$0\u{FDD1}`), then reading
-//!   the match bounds back out of the result. On top of that it implements `Pattern.split(input,
+//!   replacement syntax and errors (a bad replacement fails only once something matched).
+//! - [`JavaPattern`] iterates `Matcher.find()`'s matches and implements `Pattern.split(input,
 //!   limit)`: no leading empty string for a zero-width match at the start, trailing empty
 //!   strings removed when `limit == 0`, at most `limit` parts when it is positive.
 //!
-//! Noncharacters are reserved for internal use and never appear in interchange text; an input
-//! that does contain the default pair falls back to another pair, built on first use.
+//! Compiled patterns are shared by every document a pipeline processes, so the per-match scratch
+//! (`Captures`) is made per call: one small allocation per value, none per match.
 
-use std::sync::{Arc, Mutex};
+use search_analysis::jregex::{self as engine, Finder, JavaRegex, Replacement};
 
-use search_analysis::{Analysis, IndexOptions, Normalizer};
-
-use crate::error::{EsError, EsResult};
-
-/// The noncharacters U+FDD0..U+FDEF, paired up as match markers.
-const MARKERS: [(char, char); 16] = {
-    let mut out = [('\u{FDD0}', '\u{FDD1}'); 16];
-    let mut i = 0;
-    while i < 16 {
-        out[i] = (char::from_u32(0xFDD0 + 2 * i as u32).unwrap(), char::from_u32(0xFDD1 + 2 * i as u32).unwrap());
-        i += 1;
-    }
-    out
-};
-
-/// A normalizer whose only component is `pattern_replace(pattern, replacement)`.
-fn replacer(pattern: &str, replacement: &str) -> Result<Normalizer, search_analysis::AnalysisError> {
-    // The char filter requires a pattern; `(?:)` is the empty pattern's equivalent.
-    let pattern = if pattern.is_empty() { "(?:)" } else { pattern };
-    let settings = serde_json::json!({
-        "char_filter": { "p": { "type": "pattern_replace", "pattern": pattern, "replacement": replacement } },
-        "normalizer": { "n": { "type": "custom", "char_filter": ["p"] } },
-    });
-    let analysis = Analysis::from_settings(&settings, &IndexOptions::default())?;
-    analysis.normalizer("n").ok_or_else(|| search_analysis::AnalysisError::illegal("pattern normalizer missing"))
-}
-
-/// The normalizer's output, or its analysis-time error (a bad group reference).
-fn run(n: &Normalizer, text: &str) -> EsResult<String> {
-    let mut out: Option<String> = None;
-    n.analyzer()
-        .try_analyze(text, &mut |t| {
-            if out.is_none() {
-                out = Some(t.term.to_string());
-            }
-        })
-        .map_err(crate::analysis::es_error)?;
-    Ok(out.unwrap_or_default())
-}
+use crate::error::EsResult;
 
 /// Elasticsearch's text for a pattern that fails to compile: Java's `PatternSyntaxException`
 /// message (description, then the pattern and a caret on following lines).
@@ -68,83 +27,58 @@ pub fn syntax_message(e: &search_analysis::AnalysisError) -> String {
 
 /// `Matcher.replaceAll(replacement)` for one pattern and replacement.
 pub struct JavaReplace {
-    normalizer: Normalizer,
+    re: JavaRegex,
+    rep: Replacement,
 }
 
 impl std::fmt::Debug for JavaReplace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("JavaReplace")
+        write!(f, "JavaReplace({:?})", self.re.as_str())
     }
 }
 
 impl JavaReplace {
     pub fn new(pattern: &str, replacement: &str) -> Result<JavaReplace, search_analysis::AnalysisError> {
-        Ok(JavaReplace { normalizer: replacer(pattern, replacement)? })
+        let re = engine::compile(pattern, 0)?;
+        let rep = Replacement::parse(replacement, &re);
+        Ok(JavaReplace { re, rep })
     }
 
     pub fn replace_all(&self, text: &str) -> EsResult<String> {
-        run(&self.normalizer, text)
+        let mut caps = self.re.captures();
+        let mut out = String::with_capacity(text.len());
+        self.rep.replace(&self.re, text, true, &mut caps, &mut out).map_err(crate::analysis::es_error)?;
+        Ok(out)
     }
 }
 
 /// A compiled Java pattern that reports its matches (`Matcher.find()` iteration).
 pub struct JavaPattern {
-    source: String,
-    /// One normalizer per marker pair, built when an input needs it (index 0 at compile time).
-    marked: Mutex<Vec<Option<Arc<Normalizer>>>>,
+    re: JavaRegex,
 }
 
 impl std::fmt::Debug for JavaPattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "JavaPattern({:?})", self.source)
+        write!(f, "JavaPattern({:?})", self.re.as_str())
     }
 }
 
 impl JavaPattern {
     pub fn compile(pattern: &str) -> Result<JavaPattern, search_analysis::AnalysisError> {
-        let (a, b) = MARKERS[0];
-        let first = replacer(pattern, &format!("{a}$0{b}"))?;
-        let mut marked = vec![None; MARKERS.len()];
-        marked[0] = Some(Arc::new(first));
-        Ok(JavaPattern { source: pattern.to_string(), marked: Mutex::new(marked) })
+        Ok(JavaPattern { re: engine::compile(pattern, 0)? })
     }
 
     pub fn as_str(&self) -> &str {
-        &self.source
+        self.re.as_str()
     }
 
     /// The byte ranges of `Matcher.find()`'s successive matches in `text`.
     pub fn find_all(&self, text: &str, out: &mut Vec<(usize, usize)>) -> EsResult<()> {
         out.clear();
-        let Some(i) = MARKERS.iter().position(|(a, b)| !text.contains(*a) && !text.contains(*b)) else {
-            return Err(EsError::illegal_argument("input contains every regex match marker"));
-        };
-        let (open, close) = MARKERS[i];
-        let normalizer = {
-            let mut g = self.marked.lock().unwrap_or_else(|e| e.into_inner());
-            match &g[i] {
-                Some(n) => n.clone(),
-                None => {
-                    let n = Arc::new(replacer(&self.source, &format!("{open}$0{close}")).map_err(crate::analysis::es_error)?);
-                    g[i] = Some(n.clone());
-                    n
-                }
-            }
-        };
-        let marked = run(&normalizer, text)?;
-        // `marked` is `text` with every match wrapped in the markers; map back to `text` offsets.
-        let mut pos = 0usize; // byte offset in `text`
-        let mut start = None;
-        for c in marked.chars() {
-            if c == open {
-                start = Some(pos);
-            } else if c == close {
-                if let Some(s) = start.take() {
-                    out.push((s, pos));
-                }
-            } else {
-                pos += c.len_utf8();
-            }
+        let mut caps = self.re.captures();
+        let mut finder = Finder::new();
+        while let Some(m) = finder.next(&self.re, text, &mut caps, false) {
+            out.push(m);
         }
         Ok(())
     }
@@ -238,10 +172,24 @@ mod tests {
     }
 
     #[test]
-    fn inputs_containing_markers() {
+    fn noncharacters_are_ordinary_text() {
         let p = JavaPattern::compile(",").unwrap();
         let s = "a\u{FDD0},b\u{FDD1}";
         assert_eq!(p.split(s, 0).unwrap(), ["a\u{FDD0}", "b\u{FDD1}"]);
+        assert_eq!(gsub("\u{FDD0}", "x\u{FDD0}y", "-"), "x-y");
+    }
+
+    #[test]
+    fn empty_pattern_matches_everywhere() {
+        assert_eq!(gsub("", "ab", "-"), "-a-b-");
+        assert_eq!(split("", "", 0), [""]);
+    }
+
+    #[test]
+    fn unfinished_range_is_javas_error() {
+        // Java: `Pattern.compile("[a-")` (no caret line: the index is the pattern's length).
+        let e = JavaReplace::new("[a-", "").unwrap_err();
+        assert_eq!(syntax_message(&e), "Illegal character range near index 3\n[a-");
     }
 
     #[test]

@@ -14,9 +14,13 @@
  *   index's field names where a field goes (`match.<field>`, `"field": "<field>"`, `sort`).
  * - `_bulk` and `_msearch` bodies are one JSON document per line; each line is completed on its
  *   own, as an action/header or as a document/search body depending on its position.
+ * - After `?` in the path it completes the URL query parameters of the API the path names (and
+ *   the common ones: `pretty`, `filter_path`, …), then their allowed values after `=`. The table
+ *   comes from Elasticsearch's REST API spec (`search-params.generated.ts`) and is passed in
+ *   ([`CompletionSources.params`]), which keeps this module free of imports.
  */
 
-export type SuggestionKind = "method" | "api" | "index" | "key" | "query" | "agg" | "field" | "value";
+export type SuggestionKind = "method" | "api" | "index" | "key" | "query" | "agg" | "field" | "value" | "param";
 
 export interface Suggestion {
   /** What the list shows (and what the typed prefix is matched against). */
@@ -26,6 +30,8 @@ export interface Suggestion {
   detail?: string;
   /** For keys: the value inserted after the colon, the cursor going inside it. */
   value?: "{}" | "[]" | '""' | "";
+  /** Plain completions: the text inserted instead of the label (`size=` for a parameter). */
+  insert?: string;
 }
 
 export interface Completion {
@@ -47,6 +53,110 @@ export interface FieldInfo {
 export interface CompletionSources {
   indices: string[];
   fields: FieldInfo[];
+  /** URL query parameters per API (`search-params.generated.ts`); none: no parameter completion. */
+  params?: ParamTable;
+}
+
+/** A query parameter: name, type and, for enums, the allowed values. */
+export type ParamSpec = readonly [string, string] | readonly [string, string, readonly string[]];
+
+/** The parameters of the REST APIs: `apis` are `[methods bitmask over CONSOLE_METHODS, path pattern, parameter indexes]`. */
+export interface ParamTable {
+  params: readonly ParamSpec[];
+  common: readonly number[];
+  apis: readonly (readonly [number, string, readonly number[]])[];
+}
+
+/**
+ * The query parameters `method path` accepts: those of the API paths it matches best (most
+ * literal segments equal; `{placeholders}` match any segment), plus the common ones. A method
+ * no matching path allows still gets the path's parameters (the request will fail on its own).
+ */
+export function apiParams(method: string, path: string, table: ParamTable): ParamSpec[] {
+  const segs = path.split("?")[0].split("/").filter(Boolean);
+  const bit = 1 << Math.max(0, CONSOLE_METHODS.indexOf(method.toUpperCase() as ConsoleMethod));
+  let best = -1;
+  let bestWithMethod = false;
+  let ids = new Set<number>();
+  for (const [mask, pattern, pids] of table.apis) {
+    const ps = pattern.split("/").filter(Boolean);
+    if (ps.length !== segs.length) continue;
+    let literal = 0;
+    let ok = true;
+    for (let i = 0; i < ps.length && ok; i++) {
+      if (ps[i].startsWith("{")) continue;
+      if (ps[i] === segs[i]) literal++;
+      else ok = false;
+    }
+    if (!ok) continue;
+    const withMethod = (mask & bit) !== 0;
+    // Prefer paths that allow the method, then more literal segments.
+    if (withMethod !== bestWithMethod ? withMethod : literal > best) {
+      best = literal;
+      bestWithMethod = withMethod;
+      ids = new Set(pids);
+    } else if (withMethod === bestWithMethod && literal === best) {
+      for (const id of pids) ids.add(id);
+    }
+  }
+  for (const id of table.common) ids.add(id);
+  const seen = new Set<string>();
+  const out: ParamSpec[] = [];
+  for (const id of [...ids].sort((a, b) => a - b)) {
+    const p = table.params[id];
+    if (!p || seen.has(p[0])) continue;
+    seen.add(p[0]);
+    out.push(p);
+  }
+  return out;
+}
+
+const BOOLEAN_VALUES = ["true", "false"];
+
+/** Completion after the `?` of a request line: parameter names, or a parameter's values after `=`. */
+function completeQuery(method: string, line: string, pathStart: number, cursor: number, table: ParamTable): Completion | null {
+  const typed = line.slice(pathStart, cursor);
+  const q = typed.indexOf("?");
+  const path = typed.slice(0, q);
+  const query = typed.slice(q + 1);
+  const tokenStart = pathStart + q + 1 + query.lastIndexOf("&") + 1;
+  const token = line.slice(tokenStart, cursor);
+  const specs = apiParams(method, path, table);
+  const eq = token.indexOf("=");
+  if (eq < 0) {
+    const present = new Set(
+      line
+        .slice(pathStart + q + 1)
+        .split(/[&\s]/)
+        .map((kv) => kv.split("=")[0])
+        .filter((n) => n && n !== token),
+    );
+    const items = filterItems(
+      specs.filter((p) => !present.has(p[0])).map((p) => ({ label: p[0], kind: "param" as const, detail: p[1], insert: p[1] === "boolean" ? p[0] : `${p[0]}=` })),
+      token,
+    );
+    if (!items.length) return null;
+    let to = cursor;
+    while (to < line.length && !/[\s&=]/.test(line[to])) to++;
+    // Keep a value already typed after the name.
+    return { from: tokenStart, to, prefix: token, items, mode: "plain" };
+  }
+  const name = token.slice(0, eq);
+  const spec = specs.find((p) => p[0] === name);
+  if (!spec) return null;
+  const values = spec[1] === "boolean" ? BOOLEAN_VALUES : (spec[2] ?? []);
+  if (!values.length) return null;
+  // Enum lists (`expand_wildcards=open,hidden`): complete the value after the last comma.
+  const valueStart = tokenStart + eq + 1 + token.slice(eq + 1).lastIndexOf(",") + 1;
+  const prefix = line.slice(valueStart, cursor);
+  const items = filterItems(
+    values.map((v) => ({ label: v, kind: "value" as const })),
+    prefix,
+  );
+  if (!items.length) return null;
+  let to = cursor;
+  while (to < line.length && !/[\s&,]/.test(line[to])) to++;
+  return { from: valueStart, to, prefix, items, mode: "plain" };
 }
 
 export const CONSOLE_METHODS = ["GET", "POST", "PUT", "DELETE", "HEAD"] as const;
@@ -961,7 +1071,11 @@ function completeFirstLine(line: string, cursor: number, src: CompletionSources)
   while (pathStart < line.length && /\s/.test(line[pathStart])) pathStart++;
   if (cursor < pathStart) return null;
   const typed = line.slice(pathStart, cursor);
-  if (typed.includes("?")) return null;
+  if (typed.includes("?")) {
+    if (!src.params) return null;
+    const method = line.slice(lead, lead + sp);
+    return completeQuery(method, line, pathStart, cursor, src.params);
+  }
   const segStart = typed.lastIndexOf("/") + 1;
   const prefix = typed.slice(segStart);
   const before = typed.slice(0, segStart).split("/").filter(Boolean);
@@ -988,7 +1102,7 @@ function completeFirstLine(line: string, cursor: number, src: CompletionSources)
 export function applyCompletion(text: string, c: Completion, item: Suggestion): { text: string; cursor: number } {
   const after = text.slice(c.to);
   if (c.mode === "plain") {
-    const ins = item.label;
+    const ins = item.insert ?? item.label;
     return { text: text.slice(0, c.from) + ins + after, cursor: c.from + ins.length };
   }
   if (c.mode === "string") {

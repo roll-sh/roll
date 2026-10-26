@@ -139,29 +139,33 @@ async fn writes_are_logged_then_committed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn async_durability_syncs_in_the_background() {
+async fn async_durability_acknowledges_before_the_commit() {
     let store = open_store(search_store::test_objects("server-async"), "n1", &cache_dir("async"), false).await;
     let n = node_on(&store, NodeConfig::default());
     ok(&n, "c1", "PUT", "/a", r#"{"settings":{"index.translog.durability":"async","index.translog.sync_interval":"200ms"}}"#).await;
-    ok(&n, "c1", "PUT", "/a/_doc/1", r#"{"f":1}"#).await;
+    // The first write attaches the shard to the WAL; time the next ones.
+    ok(&n, "c1", "PUT", "/a/_doc/0", r#"{"f":0}"#).await;
     let l = n.get_loaded("c1").unwrap();
     let d = l.data.clone().unwrap();
-    assert_eq!(d.records.load(Ordering::Relaxed), 0, "acknowledged before logging");
-    assert!(n.background_tasks() >= 2, "reaper and syncer");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while d.records.load(Ordering::Relaxed) == 0 {
-        assert!(Instant::now() < deadline, "the syncer logs the write");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    for i in 1..=20 {
+        ok(&n, "c1", "PUT", &format!("/a/_doc/{i}"), r#"{"f":1}"#).await;
     }
-    // With nothing left to sync, the syncer stops.
+    // Logged at once (no syncer needed) and acknowledged without waiting for the WAL.
+    assert_eq!(d.records.load(Ordering::Relaxed), 21);
+    assert!(n.background_tasks() <= 1, "the reaper only: nothing to sync in the background");
+    // The WAL commits them within its window anyway.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while n.background_tasks() > 1 {
-        assert!(Instant::now() < deadline, "the syncer exits when idle");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    while store.stats().wal.durable_lsn < store.stats().wal.last_lsn {
+        assert!(Instant::now() < deadline, "the WAL commits async records");
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     drop(l);
+    drop(d);
+    // Dropped without a flush, the writes come back from the WAL.
+    assert!(n.force_unload("c1").await);
+    assert_eq!(count(&ok(&n, "c1", "GET", "/a/_count", "").await), 21);
     assert!(n.unload("c1").await);
-    assert_eq!(count(&ok(&n, "c1", "GET", "/a/_count", "").await), 1);
+    assert_eq!(count(&ok(&n, "c1", "GET", "/a/_count", "").await), 21);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -242,7 +246,8 @@ async fn wake_and_unload_cycles_under_load() {
     }
     let mut unloads = 0;
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(3) {
+    // At least 3 s and 50 acknowledged writes (a loaded machine or a slow store is slow).
+    while started.elapsed() < Duration::from_secs(3) || (acked.load(Ordering::Relaxed) <= 50 && started.elapsed() < Duration::from_secs(60)) {
         tokio::time::sleep(Duration::from_millis(150)).await;
         if n.unload("c1").await {
             unloads += 1;
@@ -288,8 +293,10 @@ async fn writes_running_when_a_cluster_is_dropped_are_never_acknowledged() {
     assert!(s >= 500 || b.contains("\"errors\":true"), "{s} {b}");
     let (s, b) = dropped("POST", "/i/_flush", "").await;
     assert!(s >= 500, "{s} {b}");
+    // A state change on the dropped instance: 503 like a cluster that is not ready, not 500.
     let (s, b) = dropped("PUT", "/j", "{}").await;
-    assert!(s >= 500, "{s} {b}");
+    assert_eq!(s, 503, "{b}");
+    assert!(b.contains("cluster_block_exception"), "{b}");
     // Nothing of it is there after the next wake; what was acknowledged is.
     assert_eq!(call(&n, "c1", "GET", "/i/_doc/0", "").await.0, 200);
     assert_eq!(call(&n, "c1", "GET", "/i/_doc/1", "").await.0, 404);
@@ -484,11 +491,11 @@ async fn clusters_over_their_memory_budget_are_committed() {
     let store = open_store(objects, "n1", &cache_dir("membudget"), false).await;
     let catalog = Arc::new(StaticCatalog::new());
     let mut spec = ClusterSpec::new("c1").with_password("pw");
-    spec.max_resident_bytes = Some(64 << 10);
+    // 3000 small documents take about 60 KiB in indexing buffers.
+    spec.max_resident_bytes = Some(16 << 10);
     catalog.insert(spec);
     let n = Node::new(catalog, Arc::new(ObjectStores::new(store.clone())), NodeConfig::default());
-    // Durability `request` turns buffers into segment files at every write; an `async` index
-    // keeps them in memory until its next sync.
+    // Writes stay in indexing buffers (only the WAL record is durable) until a commit.
     ok(&n, "c1", "PUT", "/m", r#"{"settings":{"number_of_shards":1,"index.translog.durability":"async","index.translog.sync_interval":"60s"}}"#).await;
     let mut body = String::new();
     for i in 0..3000 {
@@ -496,7 +503,7 @@ async fn clusters_over_their_memory_budget_are_committed() {
     }
     ok(&n, "c1", "POST", "/m/_bulk", &body).await;
     let before = n.usage("c1").await.unwrap();
-    assert!(before.resident_bytes > 64 << 10, "{before:?}");
+    assert!(before.resident_bytes > 16 << 10, "{before:?}");
     let commits = n.get_loaded("c1").unwrap().data.as_ref().unwrap().full_commits.load(Ordering::Relaxed);
     assert!(n.enforce_memory(0).await.is_empty(), "no node budget: nothing unloaded");
     let after = n.usage("c1").await.unwrap();
@@ -517,7 +524,7 @@ async fn a_budgeted_cluster_is_checked_soon_even_when_the_reaper_idles_slowly() 
     let catalog = Arc::new(StaticCatalog::new());
     catalog.insert(ClusterSpec::new("plain").with_password("pw"));
     let mut spec = ClusterSpec::new("c1").with_password("pw");
-    spec.max_resident_bytes = Some(64 << 10);
+    spec.max_resident_bytes = Some(16 << 10);
     catalog.insert(spec);
     // The default idle timeout (300 s) makes the reaper tick every 15 s.
     let n = Node::new(catalog, Arc::new(ObjectStores::new(store.clone())), NodeConfig::default());

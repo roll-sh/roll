@@ -59,7 +59,9 @@ const MOD_ROUTING_FUNCTION: i64 = 9_064_000;
 fn shard_of(idx: &IndexMeta, hash: i32) -> u32 {
     let shards = idx.number_of_shards().max(1) as i64;
     let created = idx.settings.get("index.version.created").and_then(|v| v.parse::<i64>().ok()).unwrap_or(i64::MAX);
-    if created >= MOD_ROUTING_FUNCTION {
+    // OpenSearch (forked from 7.10) always scales through `routing_num_shards`; its version
+    // ids are a different numbering, not comparable with Elasticsearch's.
+    if created >= MOD_ROUTING_FUNCTION && idx.dialect != crate::cluster::Dialect::OpenSearch {
         return (hash as i64).rem_euclid(shards) as u32;
     }
     let routing_num_shards = idx.routing_num_shards.max(1) as i64;

@@ -24,6 +24,8 @@ pub mod synthetic;
 pub mod source;
 pub mod tsdb;
 
+pub use fields::persist_hooks::WarmCacheEntry;
+
 use crate::error::{EsError, EsResult};
 use crate::meta::{ClusterState, IndexMeta};
 use fields::{FieldInfo, FieldTable, Kind, Numbers, Similarities};
@@ -36,6 +38,105 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 /// Opens the shards of an index (persistence hooks for search-server).
 pub trait ShardStorage: Send + Sync {
     fn open(&self, index_uuid: &str, shard: u32, schema: search_index::Schema) -> EsResult<Shard>;
+
+    /// The operation log of a shard [`ShardStorage::open`] just opened (`None`: nothing is
+    /// logged). Asked once per shard; the engine keeps it next to the shard.
+    fn log(&self, _index_uuid: &str, _shard: u32) -> Option<Arc<dyn ShardLog>> {
+        None
+    }
+
+    /// Where snapshots keep their shard contents durably (`None`: in memory, see
+    /// [`SnapshotStorage`]).
+    fn snapshots(&self) -> Option<Arc<dyn SnapshotStorage>> {
+        None
+    }
+}
+
+/// Durable snapshot contents: search-server keeps each snapshotted shard as a pinned commit
+/// point in object storage, sharing the index's segments. Without one, a snapshot keeps its
+/// shards' searchers in memory for as long as the process runs (`api::snapshots`).
+#[async_trait::async_trait]
+pub trait SnapshotStorage: Send + Sync {
+    /// Makes the current contents of the `shards` shards of index `index_uuid` (its engine when
+    /// loaded; a closed index's shards are committed already) durable as snapshot `snapshot`'s
+    /// copy: commits each shard, as Elasticsearch flushes a shard before snapshotting it, and
+    /// keeps that commit point.
+    async fn capture(&self, snapshot: &str, index_uuid: &str, shards: u32, engine: Option<Arc<IndexEngine>>) -> EsResult<()>;
+
+    /// Snapshot `snapshot`'s copy of index `index_uuid`, one entry per shard (no segments for
+    /// a shard that held nothing).
+    async fn load(&self, snapshot: &str, index_uuid: &str, shards: u32) -> EsResult<Vec<SnapshotShard>>;
+
+    /// `_clone`: snapshot `target` gets `source`'s copies of the indices `index_uuids`.
+    async fn clone_snapshot(&self, source: &str, target: &str, index_uuids: &[String]) -> EsResult<()>;
+
+    // A snapshot's copies exist before the snapshot is recorded (so a recorded snapshot is
+    // always complete), which means "not recorded" doesn't mean "garbage": `api::snapshots`
+    // drops a copy at once only when its snapshot can never be recorded (deleted, or failed
+    // before it was), and any other unrecorded one only after a grace period.
+
+    /// Every shard copy kept, of any snapshot (recorded, still being taken, or left behind by
+    /// one that failed or was cut short by a crash): `api::snapshots` decides which to drop.
+    async fn copies(&self) -> EsResult<Vec<SnapshotCopy>>;
+
+    /// Drops these shard copies (missing ones are fine); with `older_than`, only those written
+    /// at least that long ago. Refused once this instance of the cluster unloaded or lost
+    /// ownership.
+    async fn drop_copies(&self, copies: &[SnapshotCopy], older_than: Option<std::time::Duration>) -> EsResult<()>;
+}
+
+/// One shard's copy kept for a snapshot ([`SnapshotStorage::copies`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SnapshotCopy {
+    pub snapshot: String,
+    pub index_uuid: String,
+    pub shard: u32,
+}
+
+/// One shard of a durable snapshot: its segments (live docs applied) and the field numbering
+/// they were written with.
+pub struct SnapshotShard {
+    pub segments: Vec<search_index::SegmentHandle>,
+    pub numbers: Vec<(String, u32)>,
+}
+
+/// One operation as the shard applied it, for the shard's operation log (Elasticsearch's
+/// translog `Operation`): enough to apply it again on recovery with the same `_seq_no`,
+/// `_primary_term` and `_version` ([`ShardEngine::replay`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoggedOp<'a> {
+    /// An index operation. `source` is the document as indexed (after ingest), not the stored
+    /// form: replay parses it again against the index's mapping.
+    Index { id: &'a str, routing: Option<&'a str>, source: &'a [u8], seq_no: i64, primary_term: i64, version: i64 },
+    Delete { id: &'a str, seq_no: i64, primary_term: i64, version: i64 },
+    /// A sequence number used by an operation that failed after getting it.
+    NoOp { seq_no: i64, primary_term: i64 },
+}
+
+impl LoggedOp<'_> {
+    pub fn seq_no(&self) -> i64 {
+        match self {
+            LoggedOp::Index { seq_no, .. } | LoggedOp::Delete { seq_no, .. } | LoggedOp::NoOp { seq_no, .. } => *seq_no,
+        }
+    }
+}
+
+/// A shard's operation log (search-server's WAL). Writes call [`ShardLog::check`] before
+/// applying an operation and [`ShardLog::append`] once the shard applied it; an error from
+/// either fails the write with it.
+pub trait ShardLog: Send + Sync {
+    /// Whether an operation may be applied now (a full log answers 429 before the shard is
+    /// touched).
+    fn check(&self) -> EsResult<()> {
+        Ok(())
+    }
+
+    fn append(&self, op: &LoggedOp<'_>) -> EsResult<()>;
+
+    /// The shard was flushed (`_flush`, a force merge that flushes): the storage commits it
+    /// durably, and calls [`ShardEngine::committed`], before the request is answered. Only the
+    /// shards a request flushed are committed, as in Elasticsearch.
+    fn flush_requested(&self) {}
 }
 
 /// Shards in memory.
@@ -45,6 +146,21 @@ impl ShardStorage for MemoryShards {
     fn open(&self, _uuid: &str, _shard: u32, schema: search_index::Schema) -> EsResult<Shard> {
         let cfg = ShardConfig { merge_threads: 1, ..Default::default() };
         Shard::open(cfg, schema, Vec::new()).map_err(|e| EsError::internal(e.to_string()))
+    }
+}
+
+/// The field shards opening now with `table` order their segments by (see [`apply_leaf_sort`]).
+pub(crate) fn leaf_sort_field(table: &FieldTable) -> Option<u32> {
+    table.get("@timestamp").filter(|f| matches!(f.kind, fields::Kind::Date | fields::Kind::DateNanos) && f.index).map(|f| f.number)
+}
+
+/// `IndexShard.newEngineConfig`: an index whose mapping has a `@timestamp` date field when its
+/// shards open searches their newest segments first (`DataStream.TIMESERIES_LEAF_READERS_SORTER`);
+/// a field added later takes effect when the index opens again, as in Elasticsearch.
+fn apply_leaf_sort(table: &FieldTable, shards: &[Arc<ShardEngine>]) {
+    let leaf_sort = leaf_sort_field(table);
+    for s in shards {
+        s.shard.set_leaf_sort(leaf_sort);
     }
 }
 
@@ -76,6 +192,80 @@ pub struct ShardCounters {
     pub request_cache_bytes: AtomicU64,
     /// Query and fetch counts per search `stats` group.
     pub groups: Mutex<std::collections::BTreeMap<String, (u64, u64)>>,
+    /// What searches read, by field (`_field_usage_stats`).
+    pub field_usage: Mutex<crate::search::field_usage::ShardUsage>,
+    /// The translog since the last commit (`translog` stats): operations, their bytes as
+    /// Elasticsearch's translog serializes them ([`translog_op_bytes`]), and when it last
+    /// changed (engine epoch ms; 0: never).
+    pub translog_ops: AtomicU64,
+    pub translog_bytes: AtomicU64,
+    pub translog_modified_ms: AtomicI64,
+}
+
+/// An empty translog generation's size (its header): what Elasticsearch reports for a shard
+/// whose operations are all committed.
+pub const TRANSLOG_HEADER_BYTES: u64 = 55;
+
+/// Bytes Elasticsearch's translog takes for an operation (`Translog.writeOperationWithSize`:
+/// size, type and checksum around the operation; ids as `Uid.encodeId` packs them).
+pub fn translog_op_bytes(op: &LoggedOp<'_>) -> u64 {
+    fn vint(n: usize) -> usize {
+        let mut n = n as u64;
+        let mut len = 1;
+        while n >= 0x80 {
+            n >>= 7;
+            len += 1;
+        }
+        len
+    }
+    fn id(id: &str) -> usize {
+        let b = id.as_bytes();
+        let encoded = if !b.is_empty() && b.iter().all(u8::is_ascii_digit) {
+            1 + b.len().div_ceil(2)
+        } else if uid_base64(b) {
+            let bytes = b.len() * 3 / 4;
+            // An escape byte when the first decoded byte could be mistaken for a marker
+            // (>= 0xfd: the top 6 bits of the first char are all ones or nearly).
+            let first = base64_value(b[0]) << 2 | b.get(1).map_or(0, |c| base64_value(*c) >> 4);
+            bytes + usize::from(first >= 0xfd)
+        } else {
+            1 + b.len()
+        };
+        vint(encoded) + encoded
+    }
+    fn base64_value(c: u8) -> u8 {
+        match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            _ => 63,
+        }
+    }
+    /// `Uid.isURLBase64WithoutPadding`.
+    fn uid_base64(b: &[u8]) -> bool {
+        let ok_last = match b.len() & 3 {
+            0 => true,
+            1 => false,
+            2 => matches!(b[b.len() - 1], b'A' | b'Q' | b'g' | b'w'),
+            _ => matches!(b[b.len() - 1], b'A' | b'E' | b'I' | b'M' | b'Q' | b'U' | b'Y' | b'c' | b'g' | b'k' | b'o' | b's' | b'w' | b'0' | b'4' | b'8'),
+        };
+        ok_last && !b.is_empty() && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-' || *c == b'_')
+    }
+    fn string(s: &str) -> usize {
+        vint(s.chars().map(char::len_utf16).sum()) + s.len()
+    }
+    // size (int), operation type (byte) and the checksum (int).
+    let frame = 4 + 1 + 4;
+    let body = match *op {
+        // format vint, id, source, routing (optional string), version, auto id timestamp, seq_no, term
+        LoggedOp::Index { id: i, routing, source, .. } => 1 + id(i) + vint(source.len()) + source.len() + 1 + routing.map_or(0, string) + 32,
+        // format vint, id, version, seq_no, term
+        LoggedOp::Delete { id: i, .. } => 1 + id(i) + 24,
+        // seq_no, term, reason (empty)
+        LoggedOp::NoOp { .. } => 16 + 1,
+    };
+    (frame + body) as u64
 }
 
 static REFRESH_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -97,6 +287,8 @@ pub struct ShardEngine {
     last_search: AtomicI64,
     /// The shard request cache (size-0 search results), cleared when a refresh publishes changes.
     pub request_cache: parking_lot::Mutex<std::collections::HashMap<String, Arc<dyn std::any::Any + Send + Sync>>>,
+    /// Where applied operations are logged (search-server's WAL; `None` in memory).
+    pub log: Option<Arc<dyn ShardLog>>,
 }
 
 /// Off-heap sizes of one vector field (`DenseVectorStats` per field), by Lucene file
@@ -238,10 +430,47 @@ impl ShardEngine {
         epoch_ms()
     }
 
+    /// An operation went to the shard's translog (`translog` stats).
+    pub fn logged(&self, op: &LoggedOp<'_>) {
+        let c = &self.counters;
+        c.translog_ops.fetch_add(1, Ordering::Relaxed);
+        c.translog_bytes.fetch_add(translog_op_bytes(op), Ordering::Relaxed);
+        c.translog_modified_ms.store(self.now(), Ordering::Relaxed);
+    }
+
+    /// The translog figures now, to pass to [`ShardEngine::committed`] once a commit that
+    /// started after this call is durable.
+    pub fn translog_mark(&self) -> (u64, u64) {
+        (self.counters.translog_ops.load(Ordering::SeqCst), self.counters.translog_bytes.load(Ordering::SeqCst))
+    }
+
+    /// A commit holds every operation counted up to `mark` ([`ShardEngine::translog_mark`]):
+    /// the translog drops them, as Elasticsearch trims it after a flush. Commits of a shard are
+    /// serialized by their callers, and only they shrink the figures.
+    pub fn committed(&self, mark: (u64, u64)) {
+        let c = &self.counters;
+        let sub = |a: &AtomicU64, n: u64| {
+            let mut cur = a.load(Ordering::SeqCst);
+            while let Err(v) = a.compare_exchange_weak(cur, cur.saturating_sub(n), Ordering::SeqCst, Ordering::SeqCst) {
+                cur = v;
+            }
+        };
+        sub(&c.translog_ops, mark.0);
+        sub(&c.translog_bytes, mark.1);
+        c.translog_modified_ms.store(self.now(), Ordering::Relaxed);
+    }
+
     /// Called after every write.
     pub fn wrote(&self) {
         let now = self.now().max(1);
         let _ = self.dirty_since.compare_exchange(0, now, Ordering::AcqRel, Ordering::Relaxed);
+    }
+
+    /// The shard reopened on a commit with writes its searcher didn't show yet (search-server's
+    /// wake after a graceful unload): they count as written long ago, so the next search
+    /// refreshes as a scheduled refresh would have by now (never with refreshes disabled).
+    pub fn reopened_unrefreshed(&self) {
+        self.dirty_since.store(i64::MIN / 2, Ordering::Release);
     }
 
     /// Refreshes the shard (external refresh).
@@ -299,10 +528,11 @@ impl ShardEngine {
                 m.insert(key.into(), Value::from(cur + v));
             }
         };
-        // Root documents only (nested children are internal), as `docs.count` reports.
+        // Every live Lucene document of the searchable view, nested ones included
+        // (`IndexShard.docStats`; both Elasticsearch and OpenSearch count them).
         let searcher = self.shard.searcher();
-        let roots = searcher.count(&search_index::query::nested::root_filter()).unwrap_or(st.num_docs) as i64;
-        add("docs", "count", roots);
+        let docs: u64 = searcher.segments().iter().map(|s| s.num_docs as u64).sum();
+        add("docs", "count", docs as i64);
         add("docs", "deleted", st.deleted_docs as i64);
         add("docs", "total_size_in_bytes", st.segment_bytes as i64);
         add("store", "size_in_bytes", st.segment_bytes as i64);
@@ -338,7 +568,24 @@ impl ShardEngine {
         add("merges", "total_docs", st.merges_total_docs as i64);
         add("merges", "total_size_in_bytes", st.merges_total_bytes as i64);
         add("merges", "total_time_in_millis", st.merges_total_time.as_millis() as i64);
-        add("translog", "operations", (st.max_seq_no - st.local_checkpoint).max(0));
+        let ops = ld(&c.translog_ops);
+        let bytes = TRANSLOG_HEADER_BYTES as i64 + ld(&c.translog_bytes);
+        add("translog", "operations", ops);
+        add("translog", "uncommitted_operations", ops);
+        add("translog", "size_in_bytes", bytes);
+        add("translog", "uncommitted_size_in_bytes", bytes);
+        // Never written or committed: the translog's age starts when it is first looked at.
+        let now = self.now();
+        let modified = match c.translog_modified_ms.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => now,
+            Err(m) => m,
+        };
+        let age = now - modified;
+        if let Some(Value::Obj(m)) = block.get_mut("translog") {
+            // The oldest of the shards' translogs.
+            let cur = m.get("earliest_last_modified_age").and_then(Value::as_i64).unwrap_or(0);
+            m.insert("earliest_last_modified_age".into(), Value::from(cur.max(age.max(0))));
+        }
     }
 
     /// Adds the search `groups` matching `patterns` to an `_stats` block's `search` section.
@@ -404,7 +651,14 @@ impl IndexEngine {
     /// A loaded index engine. Construct through here (not a struct literal), so new engine
     /// state doesn't break other constructors.
     pub(crate) fn assemble(uuid: String, name: String, shards: Vec<Arc<ShardEngine>>, numbers: Numbers, table: FieldTable) -> IndexEngine {
+        apply_leaf_sort(&table, &shards);
         IndexEngine { uuid, name, shards, numbers, table: RwLock::new(Arc::new(table)), rebuild: Mutex::new(()), fielddata_loaded: Mutex::new(Default::default()) }
+    }
+
+    /// Re-applies the shards' segment order from the current mapping (the shards reopen with
+    /// the index: `_open`).
+    pub fn reopen_shards(&self) {
+        apply_leaf_sort(&self.table(), &self.shards);
     }
 
     /// Records that a request loads `field`'s field data: text fields with `fielddata: true`
@@ -413,7 +667,9 @@ impl IndexEngine {
         let t = self.table();
         let text = |f: &FieldInfo| f.kind.is_text() && f.subfield("fielddata").is_some();
         let ordinals = |f: &FieldInfo| aggregation && f.doc_values && matches!(f.kind, fields::Kind::Keyword | fields::Kind::Ip | fields::Kind::Version);
-        if t.get(field).is_some_and(|f| text(f) || ordinals(f)) {
+        // `_id` fielddata (sorts, aggregations and doc value fields where it's enabled) is the
+        // uninverted terms index (`search::id_fielddata`).
+        if field == "_id" || t.get(field).is_some_and(|f| text(f) || ordinals(f)) {
             let mut l = self.fielddata_loaded.lock();
             if !l.contains(field) {
                 l.insert(field.to_string());
@@ -446,8 +702,11 @@ impl IndexEngine {
                 _ => Map::new(),
             };
             for name in &loaded {
-                let Some(f) = t.get(name) else { continue };
-                let b = match f.subfield("fielddata") {
+                let b = if name == "_id" {
+                    searcher.segments().iter().map(|s| s.reader.uninverted_bytes(search_index::schema::ID_FIELD) as i64).sum()
+                } else {
+                    let Some(f) = t.get(name) else { continue };
+                    match f.subfield("fielddata") {
                     Some(n) => bytes_of(n, search_codec::container::SectionKind::DocValues),
                     None => {
                         // Keyword global ordinals exist once a shard has several segments: an
@@ -463,6 +722,7 @@ impl IndexEngine {
                             ords.insert(name.clone(), crate::obj! { "build_time_in_millis" => 0, "shard_max_value_count" => cur.max(max) });
                         }
                         16 * segs.len() as i64 + 8 * counts.iter().sum::<i64>()
+                    }
                     }
                 };
                 total += b;
@@ -593,6 +853,9 @@ pub fn index_sort(idx: &IndexMeta, table: &FieldTable) -> Option<search_codec::I
 
 /// Parses `index.similarity.*` (Elasticsearch's `SimilarityService`).
 pub fn similarities(idx: &IndexMeta) -> Similarities {
+    // OpenSearch 3's `BM25` is Lucene's `BM25Similarity` (no `k1 + 1` factor); its
+    // Elasticsearch-compatible scoring is the separate `LegacyBM25` type.
+    let plain_bm25 = idx.dialect == crate::cluster::Dialect::OpenSearch;
     let mut named = HashMap::new();
     let groups = idx.settings.by_prefix("index.similarity.");
     let mut names: Vec<String> = groups.keys().filter_map(|k| k.split('.').next().map(str::to_string)).collect();
@@ -604,7 +867,8 @@ pub fn similarities(idx: &IndexMeta) -> Similarities {
         let discount = get("discount_overlaps").map(|v| v != "false").unwrap_or(true);
         let sim = match get("type").as_deref() {
             // `legacy: false` (Lucene's plain BM25) is internal: percolator memory indices.
-            Some("BM25") | None => Similarity::Bm25 { k1: f("k1", 1.2), b: f("b", 0.75), discount_overlaps: discount, legacy: get("legacy").as_deref() != Some("false") },
+            Some("BM25") | None => Similarity::Bm25 { k1: f("k1", 1.2), b: f("b", 0.75), discount_overlaps: discount, legacy: !plain_bm25 && get("legacy").as_deref() != Some("false") },
+            Some("LegacyBM25") if plain_bm25 => Similarity::Bm25 { k1: f("k1", 1.2), b: f("b", 0.75), discount_overlaps: discount, legacy: true },
             Some("boolean") => Similarity::Boolean,
             Some("LMDirichlet") => Similarity::LmDirichlet { mu: f("mu", 2000.0), discount_overlaps: discount },
             Some("LMJelinekMercer") => Similarity::LmJelinekMercer { lambda: f("lambda", 0.1), discount_overlaps: discount },
@@ -643,12 +907,12 @@ pub fn similarities(idx: &IndexMeta) -> Similarities {
                 };
                 Similarity::Ib { distribution, lambda, normalization: normalization(&get), discount_overlaps: discount }
             }
-            _ => Similarity::bm25(),
+            _ => Similarities::builtin_bm25(plain_bm25),
         };
         named.insert(n, sim);
     }
-    let default = named.get("default").cloned().unwrap_or_default();
-    Similarities { default, named }
+    let default = named.get("default").cloned().unwrap_or_else(|| Similarities::builtin_bm25(plain_bm25));
+    Similarities { default, named, plain_bm25 }
 }
 
 fn normalization(get: &dyn Fn(&str) -> Option<String>) -> search_index::similarity::Normalization {
@@ -686,6 +950,20 @@ impl Engine {
         Engine { indices: RwLock::new(HashMap::new()), storage }
     }
 
+    /// Applies `idx`'s dynamic shard settings (`index.gc_deletes`) to its loaded shards now,
+    /// rather than when the index is next used: the storage calls it when the cluster state
+    /// changes, so a commit right after a settings update (an unload) already follows it.
+    pub fn apply_settings(&self, idx: &IndexMeta) {
+        if let Some(ie) = self.loaded(&idx.uuid) {
+            apply_shard_settings(idx, &ie.shards);
+        }
+    }
+
+    /// The storage's durable snapshot contents, if it keeps them.
+    pub fn snapshot_storage(&self) -> Option<Arc<dyn SnapshotStorage>> {
+        self.storage.snapshots()
+    }
+
     /// The engine of an existing (loaded) index, without creating one.
     pub fn loaded(&self, uuid: &str) -> Option<Arc<IndexEngine>> {
         self.indices.read().get(uuid).cloned()
@@ -719,8 +997,10 @@ impl Engine {
                             dirty_since: AtomicI64::new(0),
                             last_search: AtomicI64::new(epoch_ms()),
                             request_cache: Default::default(),
+                            log: self.storage.log(&idx.uuid, i),
                         }));
                     }
+                    apply_shard_settings(idx, &shards);
                     let ie = Arc::new(IndexEngine::assemble(idx.uuid.clone(), idx.name.clone(), shards, numbers, table));
                     g.insert(idx.uuid.clone(), ie.clone());
                     return Ok(ie);
@@ -753,6 +1033,7 @@ impl Engine {
         for s in &ie.shards {
             s.shard.update_schema(table.schema.clone()).map_err(convert::index_error)?;
         }
+        apply_shard_settings(idx, &ie.shards);
         *ie.table.write() = Arc::new(table);
         Ok(())
     }
@@ -767,6 +1048,18 @@ impl Engine {
     }
 }
 
+/// Dynamic index settings the shards apply themselves (`index.gc_deletes`).
+pub(crate) fn apply_shard_settings(idx: &IndexMeta, shards: &[Arc<ShardEngine>]) {
+    let gc = idx
+        .settings
+        .get("index.gc_deletes")
+        .and_then(|v| crate::units::TimeValue::parse(v, "index.gc_deletes").ok())
+        .map_or(std::time::Duration::from_secs(60), |t| std::time::Duration::from_millis(t.as_millis().max(0) as u64));
+    for s in shards {
+        s.shard.set_gc_deletes(gc);
+    }
+}
+
 /// The versions a field table is built from: (mapping, settings, synonyms). Each only grows.
 pub fn table_key(st: &ClusterState, idx: &IndexMeta) -> (u64, u64, u64) {
     (idx.mapping_version, idx.settings_version, st.metadata.synonyms_version)
@@ -778,3 +1071,27 @@ fn is_older(a: (u64, u64, u64), b: (u64, u64, u64)) -> bool {
     a.0 < b.0 || a.1 < b.1 || a.2 < b.2
 }
 
+
+#[cfg(test)]
+mod translog_tests {
+    use super::*;
+
+    /// Sizes Elasticsearch 9.5.5 reports (`_stats/translog` after each operation on an empty
+    /// shard: 55, 115, then 219 after an index and a delete).
+    #[test]
+    fn operation_sizes_match_elasticsearch() {
+        let index = |id, source: &'static [u8]| LoggedOp::Index { id, routing: None, source, seq_no: 0, primary_term: 1, version: 1 };
+        assert_eq!(translog_op_bytes(&index("1", br#"{"foo":"bar"}"#)), 60);
+        let two = translog_op_bytes(&index("2", br#"{"foo":"barbazquux"}"#));
+        let del = translog_op_bytes(&LoggedOp::Delete { id: "1", seq_no: 2, primary_term: 1, version: 2 });
+        assert_eq!((two, del), (67, 37));
+        assert_eq!(two + del, 219 - 115);
+        // Base64-looking ids are stored decoded (20 chars -> 15 bytes), others as UTF-8 with a marker.
+        let auto = translog_op_bytes(&index("Zm9vYmFyYmF6cXV1eDEy", b"{}"));
+        let text = translog_op_bytes(&index("a.b", b"{}"));
+        assert_eq!(auto - translog_op_bytes(&index("1", b"{}")), 15 - 2);
+        assert_eq!(text - translog_op_bytes(&index("1", b"{}")), 4 - 2);
+        let routed = LoggedOp::Index { id: "1", routing: Some("ab"), source: b"{}", seq_no: 0, primary_term: 1, version: 1 };
+        assert_eq!(translog_op_bytes(&routed) - translog_op_bytes(&index("1", b"{}")), 3);
+    }
+}

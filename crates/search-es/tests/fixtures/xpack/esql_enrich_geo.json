@@ -1,0 +1,567 @@
+{
+  "description" : "ES|QL ENRICH geo_match with shape inputs (containment, crossings, holes) and the match-field type check",
+  "steps" : [
+    {
+      "req" : "PUT /xpack-geosrc?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "g" : {
+              "type" : "geo_shape"
+            },
+            "name" : {
+              "type" : "keyword"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /xpack-geosrc/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{}}\n{\"g\":\"POLYGON ((-50 -50, 50 -50, 50 50, -50 50, -50 -50))\",\"name\":\"big\"}\n{\"index\":{}}\n{\"g\":\"LINESTRING (100 1, 100 -10)\",\"name\":\"cross\"}\n{\"index\":{}}\n{\"g\":\"POLYGON ((10 10, 20 10, 20 20, 10 20, 10 10), (12 12, 18 12, 18 18, 12 18, 12 12))\",\"name\":\"ring\"}\n{\"index\":{}}\n{\"g\":\"POINT (150 5)\",\"name\":\"pt\"}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/xpack-pol?filter_path=errors,acknowledged,error",
+      "body" : {
+        "geo_match" : {
+          "indices" : "xpack-geosrc",
+          "match_field" : "g",
+          "enrich_fields" : [
+            "name"
+          ]
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_enrich/policy/xpack-pol/_execute?filter_path=errors,acknowledged,error",
+      "status" : 200,
+      "response" : {}
+    },
+    {
+      "req" : "PUT /xpack-kw?filter_path=errors,acknowledged,error",
+      "body" : {
+        "mappings" : {
+          "properties" : {
+            "k" : {
+              "type" : "keyword"
+            },
+            "n" : {
+              "type" : "long"
+            },
+            "b" : {
+              "type" : "boolean"
+            }
+          }
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /xpack-kw/_bulk?refresh=true&filter_path=errors,error",
+      "raw" : "{\"index\":{}}\n{\"k\":\"a\",\"n\":1,\"b\":true}\n",
+      "status" : 200,
+      "response" : {
+        "errors" : false
+      }
+    },
+    {
+      "req" : "PUT /_enrich/policy/xpack-mpol?filter_path=errors,acknowledged,error",
+      "body" : {
+        "match" : {
+          "indices" : "xpack-kw",
+          "match_field" : "k",
+          "enrich_fields" : [
+            "n"
+          ]
+        }
+      },
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "POST /_enrich/policy/xpack-mpol/_execute?filter_path=errors,acknowledged,error",
+      "status" : 200,
+      "response" : {}
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOSHAPE(\"POLYGON ((1 1, 2 1, 2 2, 1 2, 1 1))\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((1.0 1.0, 2.0 1.0, 2.0 2.0, 1.0 2.0, 1.0 1.0))",
+            "big"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOSHAPE(\"POLYGON ((99 -1, 101 -1, 101 0, 99 0, 99 -1))\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((99.0 -1.0, 101.0 -1.0, 101.0 0.0, 99.0 0.0, 99.0 -1.0))",
+            "cross"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOSHAPE(\"POLYGON ((14 14, 16 14, 16 16, 14 16, 14 14))\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((14.0 14.0, 16.0 14.0, 16.0 16.0, 14.0 16.0, 14.0 14.0))",
+            "big"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOPOINT(\"POINT (15 15)\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (15.0 15.0)",
+            "big"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOPOINT(\"POINT (12 15)\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (12.0 15.0)",
+            [
+              "big",
+              "ring"
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOPOINT(\"POINT (100 -5)\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (100.0 -5.0)",
+            "cross"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOPOINT(\"POINT (100.5 -5)\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_point"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POINT (100.5 -5.0)",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOSHAPE(\"LINESTRING (60 0, 120 0)\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "LINESTRING (60.0 0.0, 120.0 0.0)",
+            "cross"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOSHAPE(\"POLYGON ((140 0, 160 0, 160 10, 140 10, 140 0))\") | ENRICH xpack-pol ON s WITH name"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "geo_shape"
+          },
+          {
+            "name" : "name",
+            "type" : "keyword"
+          }
+        ],
+        "values" : [
+          [
+            "POLYGON ((140.0 0.0, 160.0 0.0, 160.0 10.0, 140.0 10.0, 140.0 0.0))",
+            "pt"
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = \"POINT (1 1)\" | ENRICH xpack-pol ON s"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:45: Unsupported type [keyword] for enrich matching field [s]; only [geo_point, geo_shape] allowed for type [geo_match]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:45: Unsupported type [keyword] for enrich matching field [s]; only [geo_point, geo_shape] allowed for type [geo_match]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = 1 | ENRICH xpack-pol ON s"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:33: Unsupported type [integer] for enrich matching field [s]; only [geo_point, geo_shape] allowed for type [geo_match]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:33: Unsupported type [integer] for enrich matching field [s]; only [geo_point, geo_shape] allowed for type [geo_match]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_GEOPOINT(\"POINT (1 1)\") | ENRICH xpack-mpol ON s"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:59: Unsupported type [geo_point] for enrich matching field [s]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:59: Unsupported type [geo_point] for enrich matching field [s]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = true | ENRICH xpack-mpol ON s"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:37: Unsupported type [boolean] for enrich matching field [s]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:37: Unsupported type [boolean] for enrich matching field [s]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_VERSION(\"1.0\") | ENRICH xpack-mpol ON s"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:50: Unsupported type [version] for enrich matching field [s]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:50: Unsupported type [version] for enrich matching field [s]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = 1.5 | ENRICH xpack-mpol ON s"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "double"
+          },
+          {
+            "name" : "n",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            1.5,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = null | ENRICH xpack-mpol ON s"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "null"
+          },
+          {
+            "name" : "n",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            null,
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "ROW s = TO_DATETIME(\"2020-01-01\") | ENRICH xpack-mpol ON s"
+      },
+      "status" : 200,
+      "response" : {
+        "is_partial" : false,
+        "columns" : [
+          {
+            "name" : "s",
+            "type" : "date"
+          },
+          {
+            "name" : "n",
+            "type" : "long"
+          }
+        ],
+        "values" : [
+          [
+            "2020-01-01T00:00:00.000Z",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "req" : "POST /_query?filter_path=columns,values,error,is_partial,all_columns",
+      "body" : {
+        "query" : "FROM xpack-kw | ENRICH xpack-mpol ON b"
+      },
+      "status" : 400,
+      "response" : {
+        "error" : {
+          "root_cause" : [
+            {
+              "type" : "verification_exception",
+              "reason" : "Found 1 problem\nline 1:38: Unsupported type [boolean] for enrich matching field [b]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+            }
+          ],
+          "type" : "verification_exception",
+          "reason" : "Found 1 problem\nline 1:38: Unsupported type [boolean] for enrich matching field [b]; only [keyword, text, ip, long, integer, float, double, datetime] allowed for type [match]"
+        },
+        "status" : 400
+      }
+    },
+    {
+      "req" : "DELETE /_enrich/policy/xpack-pol?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /_enrich/policy/xpack-mpol?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /xpack-geosrc?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    },
+    {
+      "req" : "DELETE /xpack-kw?filter_path=acknowledged,error",
+      "status" : 200,
+      "response" : {
+        "acknowledged" : true
+      }
+    }
+  ]
+}

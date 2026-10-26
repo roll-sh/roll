@@ -80,7 +80,11 @@ fn main() -> anyhow::Result<()> {
     // Hand freed memory back at once, keep THP from inflating a sparse heap, and collect a
     // worker's heap when it parks, so an unloaded cluster's memory leaves the process.
     search_server::process::tune_memory();
-    tokio::runtime::Builder::new_multi_thread().enable_all().on_thread_park(search_server::process::on_thread_park).build()?.block_on(run())
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().on_thread_park(search_server::process::on_thread_park).build()?;
+    // Tokio's default worker count.
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+    search_server::process::start_purge_governor(rt.handle().clone(), workers);
+    rt.block_on(run())
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -106,6 +110,8 @@ async fn run() -> anyhow::Result<()> {
         // Like Elasticsearch's test clusters: reindex from remote may target this node, which
         // advertises its real port.
         node_settings.push(("reindex.remote.whitelist".to_string(), "127.0.0.1:*".to_string()));
+        // The file-realm superuser Elasticsearch's test clusters define (some tests log in as it).
+        node_settings.push(("roll.security.file_users".to_string(), "x_pack_rest_user:x-pack-test-password:superuser".to_string()));
         if let Some((_, port)) = args.listen.rsplit_once(':') {
             node_settings.push(("http.publish_port".to_string(), port.to_string()));
         }

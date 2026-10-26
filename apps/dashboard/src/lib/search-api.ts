@@ -4,7 +4,39 @@
  * reaches them only through the control plane's request console, so it never holds a password.
  */
 
-import { call } from "./roll-api";
+import { ROLL_API } from "./roll-api";
+
+/**
+ * The search control plane: rolld's API by default, or a fleet's (the `ApiUrl` output of
+ * deploy/search/aws/roll-search.yaml) with `NEXT_PUBLIC_ROLL_SEARCH_API`. A fleet's API wants
+ * its token (`ApiTokenSecret`) as `NEXT_PUBLIC_ROLL_SEARCH_TOKEN`; it ends up in the browser
+ * bundle, so only build a dashboard with it for people who may hold that token.
+ */
+export const SEARCH_API = (process.env.NEXT_PUBLIC_ROLL_SEARCH_API || ROLL_API).replace(/\/+$/, "");
+const SEARCH_TOKEN = process.env.NEXT_PUBLIC_ROLL_SEARCH_TOKEN || undefined;
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (SEARCH_TOKEN) headers.authorization = `Bearer ${SEARCH_TOKEN}`;
+  const res = await fetch(`${SEARCH_API}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: "no-store",
+  });
+  const text = await res.text();
+  let data: { error?: string } | null = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // A proxy or load balancer answering with text: report it as it is.
+    if (!res.ok) throw new Error(`${res.status} ${text.slice(0, 200)}`);
+    throw new Error(`unexpected response from ${SEARCH_API}: ${text.slice(0, 200)}`);
+  }
+  if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`);
+  return data as T;
+}
 
 export type Flavor = "elasticsearch" | "opensearch";
 

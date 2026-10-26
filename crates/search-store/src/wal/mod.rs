@@ -1,12 +1,18 @@
 //! The node WAL: one append stream shared by every shard of every cluster on the node.
 //!
 //! Appends copy the operation into an in-memory batch under one short lock and get an [`Lsn`]
-//! back. A dedicated flusher thread group-commits the batch at most once per `flush_delay`
-//! (5 ms) or as soon as `flush_bytes` (4 MiB) are buffered: one `write` and one `fdatasync`
-//! for every operation of every tenant in the window, which is what lets indexing outrun
-//! Elasticsearch's per-request translog fsync. Under light load (the previous commit held fewer
-//! than `eager_below` appends) it commits at once instead, so a lone client pays one fsync of
-//! latency, not the window. [`Wal::durable`] resolves once an LSN is on local disk.
+//! back. A dedicated flusher thread group-commits the batch: one `write` and one `fdatasync`
+//! for every operation of every tenant buffered since the previous commit, which is what lets
+//! indexing outrun Elasticsearch's per-request translog fsync. Commits are on demand: as soon
+//! as someone waits for a buffered record ([`Wal::durable`], [`Wal::wait_ack`]) the flusher
+//! commits, back to back with the previous commit, so the batch is whatever arrived during the
+//! last fsync. A lone client pays one fsync of latency, sixteen clients share each fsync, and a
+//! bulk request's thousand records go out in one commit when it waits for the last one. While
+//! fsyncs are fast (local NVMe, tmpfs) and no commit is running, a waiter commits the batch on
+//! its own thread instead (leader commit): handing the batch to the flusher thread and being
+//! woken by it again would cost more than the fsync itself. Records
+//! nobody waits for (`translog.durability: async`) are committed `flush_delay` (5 ms) after the
+//! first of them, or once `flush_bytes` (4 MiB) are buffered.
 //!
 //! The batches go into local files (`<seq:016>.wal`, see [`record`] for the format). A file is
 //! sealed once it holds `file_bytes` (64 MiB) or has been open for `ship_interval` (1 s), and a
@@ -71,15 +77,12 @@ pub type Lsn = u64;
 
 #[derive(Clone, Debug)]
 pub struct WalConfig {
-    /// Group-commit window: under load, at most one commit starts per window, so appends
-    /// arriving within it share one write and fsync. Zero commits back to back (appends arriving
-    /// during an fsync still share the next one).
+    /// The longest records nobody waits for stay buffered (they are committed this long after
+    /// the first of them). Records someone waits for are committed at once. Zero commits every
+    /// record at once (appends arriving during an fsync still share the next one).
     pub flush_delay: Duration,
     /// Commit early once this much is buffered.
     pub flush_bytes: usize,
-    /// When the previous commit held fewer appends than this, the next one doesn't wait for the
-    /// window (light load: waiting would only add latency).
-    pub eager_below: u64,
     /// Seal a local file once it reaches this size…
     pub file_bytes: u64,
     /// …or has been open this long: the most acknowledged data a lost local disk can take with it.
@@ -88,6 +91,8 @@ pub struct WalConfig {
     pub sync_objects: bool,
     /// fsync each group commit. Off only for tests and throwaway nodes.
     pub fsync: bool,
+    /// Let a waiter commit the batch itself while fsyncs are fast (see the module docs).
+    pub leader_commits: bool,
     /// Appends block while this much is buffered and not yet written (backpressure).
     pub max_pending_bytes: usize,
     /// Uploads of sealed files in flight at once.
@@ -105,11 +110,11 @@ impl Default for WalConfig {
         Self {
             flush_delay: Duration::from_millis(5),
             flush_bytes: 4 << 20,
-            eager_below: 8,
             file_bytes: 64 << 20,
             ship_interval: Duration::from_secs(1),
             sync_objects: false,
             fsync: true,
+            leader_commits: true,
             max_pending_bytes: 64 << 20,
             ship_concurrency: 4,
             zstd_level: 1,
@@ -136,6 +141,12 @@ pub struct WalSource {
     /// general so they never see their parent's later writes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until_ms: Option<u64>,
+    /// Ignore records appended before this Unix ms. A range opened by an attachment starts
+    /// there, not at the start of its first file: that file may hold older records of the
+    /// shard that its history doesn't include (a deposed owner's, appended before it noticed
+    /// another node took over, with seq_nos the other node reused).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<u64>,
     /// Highest seq_no of the shard found in the range, once it was replayed. A commit point at
     /// or past it makes the source unnecessary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,12 +162,17 @@ pub struct WalSource {
     /// the node that wrote them, or spanning a crash) may have legitimate gaps and aren't exact.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub exact: bool,
+    /// The cluster's ownership epoch the range was opened under: only records appended under
+    /// it are the shard's history (a deposed owner's records carry its older epoch, whenever
+    /// and wherever they land). `None`: no leases, every record counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
 }
 
 impl WalSource {
     /// A range of `node`'s files from `from` on, open-ended.
     pub(crate) fn open(node: &str, cluster: &str, from: u64) -> Self {
-        Self { node: node.into(), cluster: cluster.into(), from, to: None, until_ms: None, max_seq_no: None, skip: Vec::new(), exact: false }
+        Self { node: node.into(), cluster: cluster.into(), from, to: None, until_ms: None, since_ms: None, max_seq_no: None, skip: Vec::new(), exact: false, epoch: None }
     }
 
     pub(crate) fn skips(&self, seq: u64) -> bool {
@@ -299,6 +315,10 @@ struct State {
     spare: Vec<u8>,
     next_lsn: Lsn,
     batch_first_lsn: Lsn,
+    /// When the first record of the buffered batch was appended.
+    batch_started: Option<Instant>,
+    /// The newest LSN someone waits to be on local disk ([`Wal::durable`]).
+    wanted: Lsn,
     last_ms: u64,
     /// Something is buffered since the last commit (the flusher was woken for it).
     pending: bool,
@@ -344,6 +364,13 @@ pub(crate) struct WalShared {
     dir: PathBuf,
     cfg: WalConfig,
     st: Mutex<State>,
+    /// The local file being written. Whoever commits a batch holds it from taking the batch out
+    /// of [`State::buf`] until the batch is on disk, so batches reach disk in LSN order (lock
+    /// order: `io`, then `st`).
+    io: Mutex<Option<OpenFile>>,
+    /// Recent fsync latency (EWMA, ns; 0: none measured yet). Waiters commit inline only while
+    /// fsyncs are fast ([`INLINE_FSYNC_NANOS`]).
+    fsync_ewma: AtomicU64,
     wake: Condvar,
     room: Condvar,
     durable: watch::Sender<Mark>,
@@ -372,6 +399,8 @@ pub struct WalShard {
     slot: usize,
     cluster: Arc<str>,
     shard: ShardId,
+    /// Stamped into every record ([`record`]).
+    epoch: u64,
 }
 
 thread_local! {
@@ -440,6 +469,8 @@ impl Wal {
                 spare: Vec::new(),
                 next_lsn: 1,
                 batch_first_lsn: 1,
+                batch_started: None,
+                wanted: 0,
                 last_ms: 0,
                 pending: false,
                 cur_file: first_file,
@@ -460,6 +491,8 @@ impl Wal {
                 fenced: Default::default(),
             }),
             cfg,
+            io: Mutex::new(None),
+            fsync_ewma: AtomicU64::new(0),
             wake: Condvar::new(),
             room: Condvar::new(),
             durable: watch::Sender::new(Mark::default()),
@@ -492,6 +525,12 @@ impl Wal {
 
     /// Register a shard for appending (or get another handle to an existing registration).
     pub fn shard(&self, cluster: &str, shard: &ShardId) -> anyhow::Result<WalShard> {
+        self.shard_at(cluster, shard, 0)
+    }
+
+    /// [`Wal::shard`] for a cluster owned at `epoch`: every record the handle appends carries
+    /// it (see [`WalSource::epoch`]).
+    pub fn shard_at(&self, cluster: &str, shard: &ShardId, epoch: u64) -> anyhow::Result<WalShard> {
         keys::validate_cluster(cluster)?;
         keys::validate_shard(shard)?;
         let mut st = self.sh.st.lock();
@@ -516,7 +555,7 @@ impl Wal {
             }
         };
         st.slots[slot].as_mut().expect("indexed slot").handles += 1;
-        Ok(WalShard { sh: self.sh.clone(), slot, cluster: cluster.into(), shard: shard.clone() })
+        Ok(WalShard { sh: self.sh.clone(), slot, cluster: cluster.into(), shard: shard.clone(), epoch })
     }
 
     /// Whether a shard currently has a live handle.
@@ -529,6 +568,17 @@ impl Wal {
     /// Append one operation for a shard (looks the shard up; prefer [`WalShard::append`]).
     pub fn append(&self, cluster: &str, shard: &ShardId, seq_no: i64, op: &[u8]) -> anyhow::Result<Lsn> {
         self.shard(cluster, shard)?.append(seq_no, op)
+    }
+
+    /// Fails with [`WalFull`] when appends would be refused for lack of room (object storage
+    /// is behind): callers check before applying an operation they then must log.
+    pub fn check_room(&self) -> anyhow::Result<()> {
+        let cap = self.sh.cfg.max_local_bytes;
+        let unshipped = self.sh.unshipped.load(Relaxed);
+        if cap > 0 && unshipped >= cap {
+            return Err(WalFull { unshipped_bytes: unshipped, limit: cap }.into());
+        }
+        Ok(())
     }
 
     /// The last LSN handed out (0 before the first append).
@@ -546,8 +596,22 @@ impl Wal {
         self.sh.remote.borrow().lsn
     }
 
-    /// Resolves once `lsn` is on local disk (fsynced).
+    /// Resolves once `lsn` is on local disk (fsynced). A buffered record someone waits for is
+    /// committed at once (see the module docs).
     pub async fn durable(&self, lsn: Lsn) -> anyhow::Result<()> {
+        if self.sh.durable.borrow().lsn < lsn {
+            if self.sh.commit_inline(lsn) {
+                return wait_mark(&self.sh.durable, lsn, &self.sh).await;
+            }
+            let mut st = self.sh.st.lock();
+            if lsn > st.wanted {
+                st.wanted = lsn;
+                // Not buffered any more: the flusher is writing it.
+                if st.pending {
+                    self.sh.wake.notify_one();
+                }
+            }
+        }
         wait_mark(&self.sh.durable, lsn, &self.sh).await
     }
 
@@ -796,6 +860,16 @@ impl Wal {
         self.sh.local.lock().keys().copied().collect()
     }
 
+    /// A Unix ms that every record appended from now on is stamped at or after, and every
+    /// record appended before is stamped before (append times never decrease: a late clock is
+    /// restamped under the lock).
+    pub(crate) fn mark_ms(&self) -> u64 {
+        let mut st = self.sh.st.lock();
+        let mark = now_ms().max(st.last_ms + 1);
+        st.last_ms = mark;
+        mark
+    }
+
     /// The file seq new appends go to.
     pub(crate) fn current_file(&self) -> u64 {
         self.sh.st.lock().cur_file
@@ -876,22 +950,46 @@ impl WalShard {
         if ops.is_empty() {
             return Ok(0);
         }
-        let (cluster, uuid, shard) = (&*self.cluster, self.shard.index_uuid.as_str(), self.shard.shard);
+        let (cluster, uuid, shard, epoch) = (&*self.cluster, self.shard.index_uuid.as_str(), self.shard.shard, self.epoch);
         for (_, op) in ops {
             record::check_lengths(cluster, uuid, op.as_ref())?;
         }
         // Encode and checksum outside the lock, so the critical section is a copy: appenders on
         // every core share this lock, and a large operation's CRC would stall them all.
         let clock = now_ms();
+        let encode = |buf: &mut Vec<u8>, at: u64| {
+            for (seq_no, op) in ops {
+                record::encode(buf, at, *seq_no, epoch, cluster, uuid, shard, op.as_ref());
+            }
+        };
+        let max_seq_no = ops.iter().map(|(s, _)| *s).max().unwrap_or(i64::MIN);
+        self.encode_and_push(clock, ops.len() as u64, max_seq_no, &encode)
+    }
+
+    /// Append one operation whose payload is the concatenation of `parts` (framing plus a
+    /// document, say) without first copying them into one buffer.
+    pub fn append_parts(&self, seq_no: i64, parts: &[&[u8]]) -> anyhow::Result<Lsn> {
+        let sh = &*self.sh;
+        let cap = sh.cfg.max_local_bytes;
+        if cap > 0 {
+            let unshipped = sh.unshipped.load(Relaxed);
+            if unshipped >= cap {
+                sh.counters.full_rejections.fetch_add(1, Relaxed);
+                return Err(WalFull { unshipped_bytes: unshipped, limit: cap }.into());
+            }
+        }
+        let (cluster, uuid, shard, epoch) = (&*self.cluster, self.shard.index_uuid.as_str(), self.shard.shard, self.epoch);
+        record::check_payload_len(cluster, uuid, parts.iter().map(|p| p.len()).sum())?;
+        let encode = |buf: &mut Vec<u8>, at: u64| record::encode_parts(buf, at, seq_no, epoch, cluster, uuid, shard, parts);
+        self.encode_and_push(now_ms(), 1, seq_no, &encode)
+    }
+
+    fn encode_and_push(&self, clock: u64, count: u64, max_seq_no: i64, encode: &dyn Fn(&mut Vec<u8>, u64)) -> anyhow::Result<Lsn> {
         SCRATCH.with(|cell| {
             let mut scratch = cell.borrow_mut();
             scratch.clear();
-            let mut max_seq_no = i64::MIN;
-            for (seq_no, op) in ops {
-                record::encode(&mut scratch, clock, *seq_no, cluster, uuid, shard, op.as_ref());
-                max_seq_no = max_seq_no.max(*seq_no);
-            }
-            let r = self.push(&mut scratch, ops, clock, max_seq_no);
+            encode(&mut scratch, clock);
+            let r = self.push(&mut scratch, encode, count, clock, max_seq_no);
             if scratch.capacity() > SCRATCH_KEEP {
                 *scratch = Vec::new();
             }
@@ -899,8 +997,9 @@ impl WalShard {
         })
     }
 
-    /// Add encoded records (stamped `clock`) to the batch under the lock.
-    fn push<B: AsRef<[u8]>>(&self, encoded: &mut Vec<u8>, ops: &[(i64, B)], clock: u64, max_seq_no: i64) -> anyhow::Result<Lsn> {
+    /// Add encoded records (stamped `clock`) to the batch under the lock; `encode` stamps them
+    /// again if the clock must move forward.
+    fn push(&self, encoded: &mut Vec<u8>, encode: &dyn Fn(&mut Vec<u8>, u64), count: u64, clock: u64, max_seq_no: i64) -> anyhow::Result<Lsn> {
         let sh = &*self.sh;
         let mut guard = sh.st.lock();
         while guard.buf.len() >= sh.cfg.max_pending_bytes && guard.failed.is_none() && !guard.closing && !guard.abandon {
@@ -925,15 +1024,12 @@ impl WalShard {
         let now = clock.max(st.last_ms);
         if now != clock {
             encoded.clear();
-            for (seq_no, op) in ops {
-                record::encode(encoded, now, *seq_no, &slot.cluster, &slot.uuid, slot.shard, op.as_ref());
-            }
+            encode(encoded, now);
         }
         st.last_ms = now;
         let before = st.buf.len();
         st.buf.extend_from_slice(encoded);
         let n = encoded.len() as u64;
-        let count = ops.len() as u64;
         match slot.files.back_mut() {
             Some(f) if f.file == st.cur_file => {
                 f.max_seq_no = f.max_seq_no.max(max_seq_no);
@@ -951,6 +1047,7 @@ impl WalShard {
         if !st.pending {
             st.pending = true;
             st.batch_first_lsn = first;
+            st.batch_started = Some(Instant::now());
             sh.wake.notify_one();
         } else if before < sh.cfg.flush_bytes && st.buf.len() >= sh.cfg.flush_bytes {
             sh.wake.notify_one();
@@ -989,7 +1086,7 @@ impl WalShard {
 impl Clone for WalShard {
     fn clone(&self) -> Self {
         self.sh.st.lock().slots[self.slot].as_mut().expect("registered slot").handles += 1;
-        Self { sh: self.sh.clone(), slot: self.slot, cluster: self.cluster.clone(), shard: self.shard.clone() }
+        Self { sh: self.sh.clone(), slot: self.slot, cluster: self.cluster.clone(), shard: self.shard.clone(), epoch: self.epoch }
     }
 }
 
@@ -1099,9 +1196,6 @@ enum Step {
 }
 
 fn run_flusher(sh: Arc<WalShared>) {
-    let mut file: Option<(u64, File, u64)> = None;
-    let mut last_commit: Option<Instant> = None;
-    let mut last_batch = 0u64;
     loop {
         let mut st = sh.st.lock();
         let step = loop {
@@ -1111,10 +1205,10 @@ fn run_flusher(sh: Arc<WalShared>) {
             let now = Instant::now();
             let upload_slot = sh.cfg.sync_objects && st.ship_inflight < sh.cfg.ship_concurrency;
             if !st.buf.is_empty() {
-                // Under load at most one commit starts per window (back to back when an fsync
-                // takes longer). Light load (the last commit was small) commits at once, like
-                // Postgres below `commit_siblings`: waiting would only add latency.
-                let due = if last_batch < sh.cfg.eager_below { now } else { last_commit.map_or(now, |t| t + sh.cfg.flush_delay) };
+                // Someone waits for a buffered record: commit now (the previous commit is done,
+                // so this is back to back with it). Otherwise within `flush_delay`.
+                let waited = st.wanted >= st.batch_first_lsn;
+                let due = if waited { now } else { st.batch_started.map_or(now, |t| t + sh.cfg.flush_delay) };
                 if st.flush_now || st.closing || st.seal || st.buf.len() >= sh.cfg.flush_bytes || now >= due {
                     break Step::Flush;
                 }
@@ -1135,65 +1229,120 @@ fn run_flusher(sh: Arc<WalShared>) {
             }
             sh.wake.wait(&mut st);
         };
+        drop(st);
+        let mut io = sh.io.lock();
+        let mut st = sh.st.lock();
         match step {
             Step::Exit => {
                 let drain = !st.abandon && st.failed.is_none();
                 drop(st);
-                drop(file.take());
+                drop(io.take());
+                drop(io);
                 let _ = sh.ship_tx.send(ShipMsg::Stop { drain });
                 sh.flusher_done.send_replace(true);
                 return;
             }
+            // A waiter committed inline in between: decide again.
+            Step::Flush if st.buf.is_empty() => {}
+            Step::Seal if !st.buf.is_empty() || st.cur_opened.is_none() => {}
             Step::Seal => {
                 let last = st.next_lsn - 1;
                 seal_locked(&mut st, last);
                 drop(st);
-                if let Some((seq, f, _)) = file.take() {
-                    drop(f);
-                    sh.sealed(seq, last);
+                if let Some(f) = io.take() {
+                    drop(f.file);
+                    sh.sealed(f.seq, last);
                 }
             }
-            Step::Flush => {
-                let spare = std::mem::take(&mut st.spare);
-                let mut data = std::mem::replace(&mut st.buf, spare);
-                let (first_lsn, last_lsn, seq) = (st.batch_first_lsn, st.next_lsn - 1, st.cur_file);
-                st.pending = false;
-                st.flush_now = false;
-                let now = Instant::now();
-                last_commit = Some(now);
-                last_batch = last_lsn + 1 - first_lsn;
-                let roll = st.cur_bytes >= sh.cfg.file_bytes
-                    || st.seal
-                    || st.closing
-                    || (sh.cfg.sync_objects && st.ship_inflight < sh.cfg.ship_concurrency)
-                    || st.cur_opened.is_some_and(|t| now >= t + sh.cfg.ship_interval);
-                if roll {
-                    seal_locked(&mut st, last_lsn);
-                } else if st.cur_opened.is_none() {
-                    st.cur_opened = Some(now);
-                }
-                sh.room.notify_all();
-                drop(st);
-                if let Err(e) = write_batch(&sh, &mut file, seq, first_lsn, &data) {
-                    let mut st = sh.st.lock();
-                    sh.fail(&mut st, format!("writing WAL file {}: {e}", sh.path(seq).display()));
-                    continue;
-                }
-                sh.durable.send_modify(|m| m.lsn = m.lsn.max(last_lsn));
-                if roll && let Some((seq, f, _)) = file.take() {
-                    drop(f);
-                    sh.sealed(seq, last_lsn);
-                }
-                data.clear();
-                if data.capacity() > sh.cfg.flush_bytes * 2 {
-                    data.shrink_to(sh.cfg.flush_bytes);
-                }
-                let mut st = sh.st.lock();
-                if st.spare.capacity() < data.capacity() {
-                    st.spare = data;
-                }
+            Step::Flush => sh.commit_batch(&mut io, st),
+        }
+    }
+}
+
+/// Fsyncs at most this slow (on average) let a waiter commit its batch itself instead of waking
+/// the flusher thread and then being woken by it: two thread handoffs are most of a write's
+/// latency on fast disks, while a slow fsync must not block an async worker.
+const INLINE_FSYNC_NANOS: u64 = 250_000;
+
+/// The local file being written: its seq, handle and length.
+struct OpenFile {
+    seq: u64,
+    file: File,
+    len: u64,
+}
+
+impl WalShared {
+    /// Commits the buffered batch (non-empty) under `io`: takes it out of `st`, seals the file
+    /// when it's time, writes and fsyncs, and publishes the durable mark.
+    fn commit_batch(&self, io: &mut Option<OpenFile>, mut st: parking_lot::MutexGuard<'_, State>) {
+        let spare = std::mem::take(&mut st.spare);
+        let mut data = std::mem::replace(&mut st.buf, spare);
+        let (first_lsn, last_lsn, seq) = (st.batch_first_lsn, st.next_lsn - 1, st.cur_file);
+        st.pending = false;
+        st.flush_now = false;
+        st.batch_started = None;
+        let now = Instant::now();
+        let roll = st.cur_bytes >= self.cfg.file_bytes
+            || st.seal
+            || st.closing
+            || (self.cfg.sync_objects && st.ship_inflight < self.cfg.ship_concurrency)
+            || st.cur_opened.is_some_and(|t| now >= t + self.cfg.ship_interval);
+        if roll {
+            seal_locked(&mut st, last_lsn);
+        } else if st.cur_opened.is_none() {
+            st.cur_opened = Some(now);
+        }
+        self.room.notify_all();
+        drop(st);
+        if let Err(e) = write_batch(self, io, seq, first_lsn, &data) {
+            let mut st = self.st.lock();
+            self.fail(&mut st, format!("writing WAL file {}: {e}", self.path(seq).display()));
+            return;
+        }
+        self.durable.send_modify(|m| m.lsn = m.lsn.max(last_lsn));
+        if roll && let Some(f) = io.take() {
+            drop(f.file);
+            self.sealed(f.seq, last_lsn);
+        }
+        data.clear();
+        if data.capacity() > self.cfg.flush_bytes * 2 {
+            data.shrink_to(self.cfg.flush_bytes);
+        }
+        let mut st = self.st.lock();
+        if st.spare.capacity() < data.capacity() {
+            st.spare = data;
+        }
+    }
+
+    /// A waiter for `lsn` commits the buffered batch on its own thread when fsyncs are fast and
+    /// no other commit runs; whether `lsn` is durable afterwards.
+    fn commit_inline(&self, lsn: Lsn) -> bool {
+        if self.durable.borrow().lsn >= lsn {
+            return true;
+        }
+        if !self.cfg.leader_commits {
+            return false;
+        }
+        if self.cfg.fsync {
+            let ewma = self.fsync_ewma.load(Relaxed);
+            if ewma == 0 || ewma > INLINE_FSYNC_NANOS {
+                return false;
             }
         }
+        let Some(mut io) = self.io.try_lock() else { return false };
+        let st = self.st.lock();
+        if st.abandon || st.failed.is_some() || st.closing || lsn >= st.next_lsn {
+            return false;
+        }
+        if self.durable.borrow().lsn >= lsn {
+            return true;
+        }
+        // Batches leave the buffer only under `io`, which this thread holds: `lsn` is buffered.
+        if st.buf.is_empty() {
+            return false;
+        }
+        self.commit_batch(&mut io, st);
+        self.durable.borrow().lsn >= lsn
     }
 }
 
@@ -1206,30 +1355,34 @@ fn seal_locked(st: &mut State, last_lsn: Lsn) {
     st.sealed_lsn = st.sealed_lsn.max(last_lsn);
 }
 
-fn write_batch(sh: &WalShared, file: &mut Option<(u64, File, u64)>, seq: u64, first_lsn: Lsn, data: &[u8]) -> std::io::Result<()> {
-    if file.as_ref().is_none_or(|(s, _, _)| *s != seq) {
+fn write_batch(sh: &WalShared, file: &mut Option<OpenFile>, seq: u64, first_lsn: Lsn, data: &[u8]) -> std::io::Result<()> {
+    if file.as_ref().is_none_or(|f| f.seq != seq) {
         let path = sh.path(seq);
         let mut f = std::fs::OpenOptions::new().create_new(true).write(true).open(&path)?;
         let header = record::FileHeader { seq, first_lsn, created_ms: now_ms() }.encode();
         f.write_all(&header)?;
         sh.unshipped.fetch_add(header.len() as u64, Relaxed);
-        *file = Some((seq, f, header.len() as u64));
+        *file = Some(OpenFile { seq, file: f, len: header.len() as u64 });
         sh.local.lock().insert(seq, LocalFile { len: 0, sealed: false, shipped: false });
         if sh.cfg.fsync {
             sync_dir(&sh.dir);
         }
     }
-    let (_, f, len) = file.as_mut().expect("open file");
+    let f = file.as_mut().expect("open file");
     sh.unshipped.fetch_add(data.len() as u64, Relaxed);
-    f.write_all(data)?;
-    *len += data.len() as u64;
+    f.file.write_all(data)?;
+    f.len += data.len() as u64;
     if sh.cfg.fsync {
         let t = Instant::now();
-        f.sync_data()?;
-        sh.counters.fsync_nanos.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+        f.file.sync_data()?;
+        let nanos = t.elapsed().as_nanos() as u64;
+        sh.counters.fsync_nanos.fetch_add(nanos, Relaxed);
+        let old = sh.fsync_ewma.load(Relaxed);
+        let ewma = if old == 0 { nanos } else { (old * 7 + nanos) / 8 };
+        sh.fsync_ewma.store(ewma.max(1), Relaxed);
     }
     if let Some(l) = sh.local.lock().get_mut(&seq) {
-        l.len = *len;
+        l.len = f.len;
     }
     sh.counters.commits.fetch_add(1, Relaxed);
     sh.counters.commit_bytes.fetch_add(data.len() as u64, Relaxed);
@@ -1369,11 +1522,14 @@ mod tests {
         w.append(0, b"first").unwrap();
         // An appender that read its clock long ago and lost the race for the lock.
         let ops: [(i64, &[u8]); 2] = [(1, b"late"), (2, b"late too")];
+        let encode = |buf: &mut Vec<u8>, at: u64| {
+            for (seq, op) in ops {
+                record::encode(buf, at, seq, 0, "c1", "idx", 0, op);
+            }
+        };
         let mut encoded = Vec::new();
-        for (seq, op) in ops {
-            record::encode(&mut encoded, 5, seq, "c1", "idx", 0, op);
-        }
-        let lsn = w.push(&mut encoded, &ops, 5, 2).unwrap();
+        encode(&mut encoded, 5);
+        let lsn = w.push(&mut encoded, &encode, 2, 5, 2).unwrap();
         wal.durable(lsn).await.unwrap();
         let raw = std::fs::read(wal.local_path(wal.local_files()[0])).unwrap();
         let recs: Vec<_> = record::Records::new(&raw[record::FILE_HEADER..]).collect();
@@ -1382,6 +1538,130 @@ mod tests {
         assert!(recs[1].at_ms > 5);
         assert_eq!((recs[2].seq_no, recs[2].payload), (2, &b"late too"[..]));
         drop(w);
+        wal.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Commits are on demand: a thousand appends then one wait are one commit, at once, however
+    /// long the window for records nobody waits for; those still commit within the window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waiting_commits_at_once_and_unwaited_records_within_the_window() {
+        let objects = crate::test_objects("wal-unit-demand");
+        let dir = crate::test_dir().join(format!("wal-unit-{}", crate::random_u64()));
+        // A window much longer than one fsync, even on a loaded disk.
+        let cfg = WalConfig { flush_delay: Duration::from_secs(3), ship_interval: Duration::from_secs(3600), ..WalConfig::default() };
+        let wal = Wal::open("n1", objects, dir.clone(), cfg).await.unwrap();
+        let w = wal.shard("c1", &ShardId::new("idx", 0)).unwrap();
+        let t = Instant::now();
+        let mut lsn = 0;
+        for i in 0..1000 {
+            lsn = w.append_parts(i, &[b"op ", b"payload"]).unwrap();
+        }
+        wal.durable(lsn).await.unwrap();
+        assert!(t.elapsed() < Duration::from_millis(2000), "a waiter doesn't wait for the window: {:?}", t.elapsed());
+        assert_eq!(wal.stats().commits, 1, "{:?}", wal.stats());
+        // Nobody waits: committed within the window anyway.
+        let lsn = w.append(1000, b"async").unwrap();
+        let t = Instant::now();
+        while wal.durable_lsn() < lsn {
+            assert!(t.elapsed() < Duration::from_secs(15), "unwaited records commit within the window");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(t.elapsed() >= Duration::from_millis(2500), "{:?}", t.elapsed());
+        assert_eq!(wal.stats().commits, 2);
+        drop(w);
+        wal.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A waiter commits inline only while fsyncs are known to be fast; then its record is
+    /// durable before it ever awaits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waiters_commit_inline_only_while_fsyncs_are_fast() {
+        let objects = crate::test_objects("wal-unit-inline");
+        let dir = crate::test_dir().join(format!("wal-unit-{}", crate::random_u64()));
+        // A long window: only a waiter makes a record durable.
+        let cfg = WalConfig { flush_delay: Duration::from_secs(3600), ship_interval: Duration::from_secs(3600), ..WalConfig::default() };
+        let wal = Wal::open("n1", objects, dir.clone(), cfg).await.unwrap();
+        let w = wal.shard("c1", &ShardId::new("idx", 0)).unwrap();
+        // No fsync measured yet: hand off to the flusher (which measures one).
+        let lsn = w.append(0, b"a").unwrap();
+        assert!(!wal.sh.commit_inline(lsn));
+        wal.durable(lsn).await.unwrap();
+        assert!(wal.sh.fsync_ewma.load(Relaxed) > 0);
+        // Slow fsyncs: still the flusher's job.
+        wal.sh.fsync_ewma.store(INLINE_FSYNC_NANOS + 1, Relaxed);
+        let lsn = w.append(1, b"b").unwrap();
+        assert!(!wal.sh.commit_inline(lsn));
+        assert!(wal.durable_lsn() < lsn);
+        wal.durable(lsn).await.unwrap();
+        // Fast ones: the waiter commits (everything buffered) on its own thread.
+        wal.sh.fsync_ewma.store(1, Relaxed);
+        w.append(2, b"c").unwrap();
+        let lsn = w.append(3, b"d").unwrap();
+        let commits = wal.stats().commits;
+        // The flusher may still be finishing the previous commit (it holds the file until
+        // then); nobody else commits meanwhile (the window is an hour).
+        let t = Instant::now();
+        while !wal.sh.commit_inline(lsn) {
+            assert!(t.elapsed() < Duration::from_secs(10), "the waiter never committed inline");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(wal.durable_lsn(), lsn);
+        assert_eq!(wal.stats().commits, commits + 1);
+        // Already durable: nothing to do.
+        assert!(wal.sh.commit_inline(lsn));
+        assert_eq!(wal.stats().commits, commits + 1);
+        let raw = std::fs::read(wal.local_path(wal.local_files()[0])).unwrap();
+        let seqs: Vec<i64> = record::Records::new(&raw[record::FILE_HEADER..]).map(|r| r.seq_no).collect();
+        assert_eq!(seqs, [0, 1, 2, 3]);
+        drop(w);
+        wal.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Inline commits racing each other and the flusher (small files: seals in between) keep
+    /// every record exactly once and each shard's records in append order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_leader_commits_keep_log_order() {
+        let objects = crate::test_objects("wal-unit-leaders");
+        let dir = crate::test_dir().join(format!("wal-unit-{}", crate::random_u64()));
+        let cfg = WalConfig { fsync: false, file_bytes: 16 << 10, ship_interval: Duration::from_secs(3600), ..WalConfig::default() };
+        let wal = Wal::open("n1", objects, dir.clone(), cfg).await.unwrap();
+        let (writers, ops) = (8u32, 300i64);
+        let mut tasks = Vec::new();
+        for t in 0..writers {
+            let wal = wal.clone();
+            tasks.push(tokio::spawn(async move {
+                let w = wal.shard("c1", &ShardId::new("idx", t)).unwrap();
+                for i in 0..ops {
+                    let lsn = w.append_parts(i, &[b"payload of an operation ", &i.to_le_bytes()]).unwrap();
+                    if i % 3 != 2 {
+                        wal.durable(lsn).await.unwrap();
+                    }
+                }
+                let lsn = w.append(ops, b"last").unwrap();
+                wal.durable(lsn).await.unwrap();
+                w
+            }));
+        }
+        let mut handles = Vec::new();
+        for t in tasks {
+            handles.push(t.await.unwrap());
+        }
+        let mut next = vec![0i64; writers as usize];
+        let files = wal.local_files();
+        assert!(files.len() > 3, "small files were sealed: {files:?}");
+        for f in files {
+            let raw = std::fs::read(wal.local_path(f)).unwrap();
+            for r in record::Records::new(&raw[record::FILE_HEADER..]) {
+                let n = &mut next[r.shard as usize];
+                assert_eq!(r.seq_no, *n, "shard {} out of order in file {f}", r.shard);
+                *n += 1;
+            }
+        }
+        assert!(next.iter().all(|n| *n == ops + 1), "{next:?}");
+        drop(handles);
         wal.close().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }

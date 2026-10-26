@@ -234,7 +234,7 @@ pub fn inner_hits(qctx: &QueryCtx, sections: &[(Knn, Option<crate::query::joinin
         }
         let child: QueryRef = arc(b);
         let name = ih.name.clone().unwrap_or_else(|| path.clone());
-        qctx.inner_hits.borrow_mut().push(super::query::InnerHitsDef { name, spec: ih.clone(), nested_path: Some(path), query: child, join: None });
+        qctx.inner_hits.borrow_mut().push(super::query::InnerHitsDef { name, spec: ih.clone(), nested_path: Some(path), query: child, join: None, children: Vec::new() });
     }
     Ok(())
 }
@@ -451,14 +451,100 @@ fn source_at<'v>(m: &'v crate::json::Map, path: &str) -> Option<&'v crate::json:
     None
 }
 
+/// `TextEmbeddingQueryVectorBuilder.buildVector`: roll runs no inference, but a model that
+/// doesn't exist fails first, on the coordinator, as in Elasticsearch.
+fn check_text_embedding(ctx: &crate::rest::Ctx, builder: &crate::json::Value) -> EsResult<()> {
+    let Some(te) = builder.get("text_embedding") else { return Ok(()) };
+    let id = te.get("model_id").map(crate::json::Value::to_es_string).unwrap_or_default();
+    if !crate::xpack::ml::models::model_exists(ctx, &id) {
+        return Err(EsError::status(404, format!("[{id}] is not an inference service model or a deployed ml model")));
+    }
+    Ok(())
+}
+
+/// Resolves the `query_vector_builder.lookup` of `knn` queries anywhere in a query tree (the
+/// coordinator's rewrite, `KnnVectorQueryBuilder.doRewrite`), before any shard runs.
+pub fn resolve_query_lookups(ctx: &crate::rest::Ctx, q: &mut crate::query::Query) -> EsResult<()> {
+    use crate::query::Query as Q;
+    match q {
+        Q::Knn(k) => {
+            if let Some(b) = &k.query_vector_builder {
+                check_text_embedding(ctx, b)?;
+            }
+            if let Some(b) = &k.query_vector_builder
+                && b.get("lookup").is_some()
+                && let Some(v) = lookup_vector(ctx, b)?
+            {
+                let floats = match &v {
+                    crate::json::Value::Arr(a) => crate::query::specialized::VectorData::Floats(a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect()),
+                    crate::json::Value::Str(s) => crate::query::specialized::VectorData::Encoded(s.clone()),
+                    other => crate::query::specialized::VectorData::Floats(vec![other.as_f64().unwrap_or(0.0) as f32]),
+                };
+                k.query_vector = Some(floats);
+                k.query_vector_builder = None;
+            }
+            for f in k.filter.iter_mut() {
+                resolve_query_lookups(ctx, f)?;
+            }
+        }
+        Q::Bool(b) => {
+            for c in b.must.iter_mut().chain(b.filter.iter_mut()).chain(b.should.iter_mut()).chain(b.must_not.iter_mut()) {
+                resolve_query_lookups(ctx, c)?;
+            }
+        }
+        Q::DisMax(d) => {
+            for c in d.queries.iter_mut() {
+                resolve_query_lookups(ctx, c)?;
+            }
+        }
+        Q::Boosting(b) => {
+            resolve_query_lookups(ctx, &mut b.positive)?;
+            resolve_query_lookups(ctx, &mut b.negative)?;
+        }
+        Q::ConstantScore(c) => resolve_query_lookups(ctx, &mut c.filter)?,
+        Q::FunctionScore(f) => resolve_query_lookups(ctx, &mut f.query)?,
+        Q::ScriptScore(s) => resolve_query_lookups(ctx, &mut s.query)?,
+        Q::Nested(n) => resolve_query_lookups(ctx, &mut n.query)?,
+        Q::HasChild(h) => resolve_query_lookups(ctx, &mut h.query)?,
+        Q::HasParent(h) => resolve_query_lookups(ctx, &mut h.query)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Whether a query tree has a `knn` query with a lookup vector builder (the common case has
+/// none and skips the rewrite).
+pub fn has_query_lookups(q: &crate::query::Query) -> bool {
+    use crate::query::Query as Q;
+    match q {
+        Q::Knn(k) => k.query_vector_builder.is_some() || k.filter.iter().any(has_query_lookups),
+        Q::Bool(b) => b.must.iter().chain(&b.filter).chain(&b.should).chain(&b.must_not).any(has_query_lookups),
+        Q::DisMax(d) => d.queries.iter().any(has_query_lookups),
+        Q::Boosting(b) => has_query_lookups(&b.positive) || has_query_lookups(&b.negative),
+        Q::ConstantScore(c) => has_query_lookups(&c.filter),
+        Q::FunctionScore(f) => has_query_lookups(&f.query),
+        Q::ScriptScore(s) => has_query_lookups(&s.query),
+        Q::Nested(n) => has_query_lookups(&n.query),
+        Q::HasChild(h) => has_query_lookups(&h.query),
+        Q::HasParent(h) => has_query_lookups(&h.query),
+        _ => false,
+    }
+}
+
 /// Resolves the `query_vector_builder.lookup` of the top-level `knn` sections (on the
 /// coordinator, before any shard runs) into `query_vector`s.
 pub fn resolve_lookups(ctx: &crate::rest::Ctx, src: &mut crate::search_source::SearchSource) -> EsResult<()> {
+    if let Some(q) = src.query.as_mut()
+        && has_query_lookups(q)
+    {
+        resolve_query_lookups(ctx, q)?;
+    }
     for m in src.knn.iter_mut() {
         let Some(b) = m.get("query_vector_builder").cloned() else { continue };
         if m.contains_key("query_vector") {
             return Err(EsError::illegal_argument("cannot provide both [query_vector_builder] and [query_vector]"));
         }
+        check_text_embedding(ctx, &b)?;
         if let Some(v) = lookup_vector(ctx, &b)? {
             m.shift_remove("query_vector_builder");
             m.insert("query_vector".into(), v);

@@ -219,9 +219,24 @@ impl Internal for TopMetrics {
     }
 }
 
+impl TopMetrics {
+    /// `InternalTopMetrics.sortValue(key)`: the first top document's value of metric `key`
+    /// (empty without one); `None` when no metric has that name.
+    pub fn sort_value(&self, key: &str) -> Option<crate::bucket::terms::SortVal> {
+        use crate::bucket::terms::SortVal as S;
+        let i = self.names.iter().position(|n| n == key)?;
+        Some(match self.top.first().and_then(|t| t.metrics[i].as_ref()) {
+            None => S::Empty,
+            Some(MetricVal::Long(l)) => S::Long(*l),
+            Some(MetricVal::Double(d)) => S::Double(*d),
+            Some(MetricVal::Bytes(b)) => S::Bytes(b.clone()),
+        })
+    }
+}
+
 /// Binds `top_metrics`.
 pub fn create(def: &AggDef, spec: &TopMetricsSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
-    let max = 10;
+    let max = ctx.lookup.top_metrics_max_size() as usize;
     if spec.size > max {
         return Err(AggError::illegal_argument(format!(
             "[top_metrics.size] must not be more than [{max}] but was [{}]. This limit can be set by changing the [index.top_metrics_max_size] index level setting.",
@@ -247,7 +262,17 @@ pub fn create(def: &AggDef, spec: &TopMetricsSpec, ctx: &mut BindCtx<'_>) -> Res
             ctx.lookup.index_name()
         )));
     }
+    // `BucketedSort` exists for numeric scripts and distances only (`ScriptSortBuilder`).
+    if let Some(HitSort::Computed { sort, .. }) = keys.first()
+        && sort.kind() != "number"
+    {
+        return Err(AggError::illegal_argument(format!(
+            "error building sort for [_script]: script sorting only supported on [numeric] scripts but was [{}]",
+            sort.kind()
+        )));
+    }
     let (reverse, sort_format) = match keys.first() {
+        Some(HitSort::Computed { reverse, .. }) => (*reverse, DocValueFormat::Raw),
         Some(HitSort::Field { field, reverse, .. }) => (*reverse, field_format(field, None, None, ctx.lookup)?),
         Some(HitSort::Score { reverse }) => (!*reverse, DocValueFormat::Raw),
         Some(HitSort::Doc { reverse }) => (*reverse, DocValueFormat::Raw),
@@ -262,6 +287,7 @@ pub fn create(def: &AggDef, spec: &TopMetricsSpec, ctx: &mut BindCtx<'_>) -> Res
         metrics,
         buckets: Vec::new(),
         tracker: ctx.tracker(def),
+        filter_by_filter: ctx.filter_by_filter,
     }))
 }
 
@@ -290,6 +316,9 @@ struct TopMetricsAgg {
     /// Per bucket: Elasticsearch's `BucketedSort` slots.
     buckets: Vec<Option<BucketSlots>>,
     tracker: MemTracker,
+    /// `search.aggs.rewrite_to_filter_by_filter`: an enclosing `terms` then validates its order
+    /// path through `TopMetricsAggregator.validateSortPathKey` (its own message).
+    filter_by_filter: bool,
 }
 
 impl TopMetricsAgg {
@@ -453,6 +482,14 @@ impl Aggregator for TopMetricsAgg {
     }
 
     fn validate_sort(&self, name: &str, key: Option<&str>, rest: &[PathElement]) -> Result<()> {
+        // `TopMetricsAggregator.validateSortPathKey` names the missing metric its own way.
+        if let Some(k) = key
+            && self.filter_by_filter
+            && rest.is_empty()
+            && !self.metrics.iter().any(|m| m.name == k)
+        {
+            return Err(AggError::illegal_argument(format!("unknown metric [{k}]")));
+        }
         crate::collect::multi_value_validate_sort(name, key, rest, |k| self.metrics.iter().any(|m| m.name == k))
     }
 

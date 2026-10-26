@@ -1,0 +1,3662 @@
+{
+  "signature": "hand-written",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/hw-spanhl?ignore_unavailable=true",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/hw-spanhl",
+      "body": {
+        "settings": {
+          "number_of_shards": 1,
+          "refresh_interval": -1
+        },
+        "mappings": {
+          "properties": {
+            "text0": {
+              "type": "text"
+            },
+            "text1": {
+              "type": "text",
+              "term_vector": "with_positions_offsets"
+            }
+          }
+        }
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true,
+          "shards_acknowledged": true,
+          "index": "hw-spanhl"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/_bulk?refresh=true",
+      "lines": [
+        {
+          "index": {
+            "_index": "hw-spanhl",
+            "_id": "0"
+          }
+        },
+        {
+          "text0": [
+            "red quick apple fox banana query cats",
+            "of quick search brown runs brown cherry stream engine"
+          ],
+          "text1": [
+            "red quick apple fox banana query cats",
+            "of quick search brown runs brown cherry stream engine"
+          ]
+        },
+        {
+          "index": {
+            "_index": "hw-spanhl",
+            "_id": "1"
+          }
+        },
+        {
+          "text0": [
+            "the fox jumps over quick dogs",
+            "quick quick fox fox"
+          ],
+          "text1": [
+            "the fox jumps over quick dogs",
+            "quick quick fox fox"
+          ]
+        },
+        {
+          "index": {
+            "_index": "hw-spanhl",
+            "_id": "2"
+          }
+        },
+        {
+          "text0": [
+            "a b c quick d e f fox",
+            "fox quick"
+          ],
+          "text1": [
+            "a b c quick d e f fox",
+            "fox quick"
+          ]
+        }
+      ],
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "errors": false,
+          "took": 0,
+          "items": [
+            {
+              "index": {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 0,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 1,
+                "_primary_term": 1,
+                "status": 201
+              }
+            },
+            {
+              "index": {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_version": 1,
+                "result": "created",
+                "forced_refresh": true,
+                "_shards": {
+                  "total": 2,
+                  "successful": 1,
+                  "failed": 0
+                },
+                "_seq_no": 2,
+                "_primary_term": 1,
+                "status": 201
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text0": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text0": "fox"
+                }
+              }
+            ],
+            "slop": 2
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.34561062,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.34561062,
+                "highlight": {
+                  "text0": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.14688453,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text0": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text0": "fox"
+                }
+              }
+            ],
+            "slop": 2
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.34561062,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.34561062,
+                "highlight": {
+                  "text0": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.14688453,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              }
+            ],
+            "slop": 2
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.34561062,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.34561062,
+                "highlight": {
+                  "text1": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.14688453,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              }
+            ],
+            "slop": 2
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.34561062,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.34561062,
+                "highlight": {
+                  "text1": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.14688453,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              }
+            ],
+            "slop": 2
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.34561062,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.34561062
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.14688453
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text0": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text0": "fox"
+                }
+              }
+            ],
+            "slop": 1,
+            "in_order": false
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.20983505,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.20983505,
+                "highlight": {
+                  "text0": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14157546,
+                "highlight": {
+                  "text0": [
+                    "<em>fox</em> <em>quick</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.08393401,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text0": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text0": "fox"
+                }
+              }
+            ],
+            "slop": 1,
+            "in_order": false
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.20983505,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.20983505,
+                "highlight": {
+                  "text0": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14157546,
+                "highlight": {
+                  "text0": [
+                    "<em>fox</em> <em>quick</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.08393401,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              }
+            ],
+            "slop": 1,
+            "in_order": false
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.20983505,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.20983505,
+                "highlight": {
+                  "text1": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14157546,
+                "highlight": {
+                  "text1": [
+                    "<em>fox</em> <em>quick</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.08393401,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              }
+            ],
+            "slop": 1,
+            "in_order": false
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.20983505,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.20983505,
+                "highlight": {
+                  "text1": [
+                    "<em>quick</em> <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14157546,
+                "highlight": {
+                  "text1": [
+                    "<em>fox</em> <em>quick</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.08393401,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_near": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "quick"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              }
+            ],
+            "slop": 1,
+            "in_order": false
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.20983505,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.20983505
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14157546
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.08393401
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_not": {
+            "include": {
+              "span_term": {
+                "text0": "quick"
+              }
+            },
+            "exclude": {
+              "span_term": {
+                "text0": "fox"
+              }
+            },
+            "pre": 1,
+            "post": 1
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 12,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.19263545,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.19263545,
+                "highlight": {
+                  "text0": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> <em>quick</em> fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.16786805,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple fox banana query cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14330198,
+                "highlight": {
+                  "text0": [
+                    "a b c <em>quick</em> d e f fox",
+                    "fox <em>quick</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_not": {
+            "include": {
+              "span_term": {
+                "text0": "quick"
+              }
+            },
+            "exclude": {
+              "span_term": {
+                "text0": "fox"
+              }
+            },
+            "pre": 1,
+            "post": 1
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.19263545,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.19263545,
+                "highlight": {
+                  "text0": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> quick fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.16786805,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple fox banana query cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14330198,
+                "highlight": {
+                  "text0": [
+                    "a b c <em>quick</em> d e f fox"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_not": {
+            "include": {
+              "span_term": {
+                "text1": "quick"
+              }
+            },
+            "exclude": {
+              "span_term": {
+                "text1": "fox"
+              }
+            },
+            "pre": 1,
+            "post": 1
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.19263545,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.19263545,
+                "highlight": {
+                  "text1": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> quick fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.16786805,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple fox banana query cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14330198,
+                "highlight": {
+                  "text1": [
+                    "a b c <em>quick</em> d e f fox"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_not": {
+            "include": {
+              "span_term": {
+                "text1": "quick"
+              }
+            },
+            "exclude": {
+              "span_term": {
+                "text1": "fox"
+              }
+            },
+            "pre": 1,
+            "post": 1
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.19263545,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.19263545,
+                "highlight": {
+                  "text1": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> quick fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.16786805,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple fox banana query cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14330198,
+                "highlight": {
+                  "text1": [
+                    "a b c <em>quick</em> d e f fox"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_not": {
+            "include": {
+              "span_term": {
+                "text1": "quick"
+              }
+            },
+            "exclude": {
+              "span_term": {
+                "text1": "fox"
+              }
+            },
+            "pre": 1,
+            "post": 1
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 0.19263545,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.19263545
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.16786805
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 0.14330198
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_first": {
+            "match": {
+              "span_term": {
+                "text0": "quick"
+              }
+            },
+            "end": 2
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.11750764,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.11750764,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple fox banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_first": {
+            "match": {
+              "span_term": {
+                "text0": "quick"
+              }
+            },
+            "end": 2
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.11750764,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.11750764,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple fox banana query cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_first": {
+            "match": {
+              "span_term": {
+                "text1": "quick"
+              }
+            },
+            "end": 2
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.11750764,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.11750764,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple fox banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_first": {
+            "match": {
+              "span_term": {
+                "text1": "quick"
+              }
+            },
+            "end": 2
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.11750764,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.11750764,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple fox banana query cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_first": {
+            "match": {
+              "span_term": {
+                "text1": "quick"
+              }
+            },
+            "end": 2
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.11750764,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.11750764
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_or": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text0": "fox"
+                }
+              },
+              {
+                "span_term": {
+                  "text0": "cats"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 11,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text0": [
+                    "the <em>fox</em> jumps over quick dogs",
+                    "quick quick <em>fox</em> <em>fox</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text0": [
+                    "a b c quick d e f <em>fox</em>",
+                    "<em>fox</em> quick"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.4009106,
+                "highlight": {
+                  "text0": [
+                    "red quick apple <em>fox</em> banana query <em>cats</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_or": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text0": "fox"
+                }
+              },
+              {
+                "span_term": {
+                  "text0": "cats"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text0": [
+                    "the <em>fox</em> jumps over quick dogs",
+                    "quick quick <em>fox</em> <em>fox</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text0": [
+                    "a b c quick d e f <em>fox</em>",
+                    "<em>fox</em> quick"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.4009106,
+                "highlight": {
+                  "text0": [
+                    "red quick apple <em>fox</em> banana query <em>cats</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_or": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "cats"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text1": [
+                    "the <em>fox</em> jumps over quick dogs",
+                    "quick quick <em>fox</em> <em>fox</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text1": [
+                    "a b c quick d e f <em>fox</em>",
+                    "<em>fox</em> quick"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.4009106,
+                "highlight": {
+                  "text1": [
+                    "red quick apple <em>fox</em> banana query <em>cats</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_or": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "cats"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text1": [
+                    "the <em>fox</em> jumps over quick dogs",
+                    "quick quick <em>fox</em> <em>fox</em>"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text1": [
+                    "a b c quick d e f <em>fox</em>",
+                    "<em>fox</em> quick"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.4009106,
+                "highlight": {
+                  "text1": [
+                    "red quick apple <em>fox</em> banana query <em>cats</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_or": {
+            "clauses": [
+              {
+                "span_term": {
+                  "text1": "fox"
+                }
+              },
+              {
+                "span_term": {
+                  "text1": "cats"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.4009106
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_containing": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text0": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text0": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text0": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 8,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.6863408,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.6863408,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> <em>apple</em> <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_containing": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text0": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text0": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text0": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.6863408,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.6863408,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> <em>apple</em> <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_containing": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text1": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text1": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text1": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.6863408,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.6863408,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> <em>apple</em> <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_containing": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text1": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text1": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text1": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.6863408,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.6863408,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> <em>apple</em> <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_containing": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text1": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text1": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text1": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 0.6863408,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.6863408
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_within": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text0": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text0": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text0": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 3,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0981451,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.0981451,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> <em>apple</em> <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_within": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text0": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text0": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text0": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0981451,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.0981451,
+                "highlight": {
+                  "text0": [
+                    "red quick <em>apple</em> fox banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_within": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text1": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text1": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text1": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0981451,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.0981451,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> <em>apple</em> <em>fox</em> banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_within": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text1": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text1": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text1": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0981451,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.0981451,
+                "highlight": {
+                  "text1": [
+                    "red quick <em>apple</em> fox banana query cats"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_within": {
+            "big": {
+              "span_near": {
+                "clauses": [
+                  {
+                    "span_term": {
+                      "text1": "quick"
+                    }
+                  },
+                  {
+                    "span_term": {
+                      "text1": "fox"
+                    }
+                  }
+                ],
+                "slop": 5
+              }
+            },
+            "little": {
+              "span_term": {
+                "text1": "apple"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 0,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 1,
+              "relation": "eq"
+            },
+            "max_score": 1.0981451,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.0981451
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_multi": {
+            "match": {
+              "prefix": {
+                "text0": "qu"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 7,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text0": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> <em>quick</em> fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.6343956,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple fox banana <em>query</em> cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text0": [
+                    "a b c <em>quick</em> d e f fox",
+                    "fox <em>quick</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_multi": {
+            "match": {
+              "prefix": {
+                "text0": "qu"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text0": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> <em>quick</em> fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.6343956,
+                "highlight": {
+                  "text0": [
+                    "red <em>quick</em> apple fox banana <em>query</em> cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text0": [
+                    "a b c <em>quick</em> d e f fox",
+                    "fox <em>quick</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_multi": {
+            "match": {
+              "prefix": {
+                "text1": "qu"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text1": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> <em>quick</em> fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.6343956,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple fox banana <em>query</em> cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text1": [
+                    "a b c <em>quick</em> d e f fox",
+                    "fox <em>quick</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_multi": {
+            "match": {
+              "prefix": {
+                "text1": "qu"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951,
+                "highlight": {
+                  "text1": [
+                    "the fox jumps over <em>quick</em> dogs",
+                    "<em>quick</em> <em>quick</em> fox fox"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.6343956,
+                "highlight": {
+                  "text1": [
+                    "red <em>quick</em> apple fox banana <em>query</em> cats",
+                    "of <em>quick</em> search brown runs brown cherry stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021,
+                "highlight": {
+                  "text1": [
+                    "a b c <em>quick</em> d e f fox",
+                    "fox <em>quick</em>"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "span_multi": {
+            "match": {
+              "prefix": {
+                "text1": "qu"
+              }
+            }
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 3,
+              "relation": "eq"
+            },
+            "max_score": 1.8159951,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 1.8159951
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 1.6343956
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "2",
+                "_score": 1.6076021
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "span_near": {
+                  "clauses": [
+                    {
+                      "span_term": {
+                        "text0": "quick"
+                      }
+                    },
+                    {
+                      "span_term": {
+                        "text0": "fox"
+                      }
+                    }
+                  ],
+                  "slop": 0
+                }
+              },
+              {
+                "match": {
+                  "text0": "cherry"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 2,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.86312973,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.86312973,
+                "highlight": {
+                  "text0": [
+                    "of quick search brown runs brown <em>cherry</em> stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.28660396,
+                "highlight": {
+                  "text0": [
+                    "quick <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "span_near": {
+                  "clauses": [
+                    {
+                      "span_term": {
+                        "text0": "quick"
+                      }
+                    },
+                    {
+                      "span_term": {
+                        "text0": "fox"
+                      }
+                    }
+                  ],
+                  "slop": 0
+                }
+              },
+              {
+                "match": {
+                  "text0": "cherry"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text0": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.86312973,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.86312973,
+                "highlight": {
+                  "text0": [
+                    "of quick search brown runs brown <em>cherry</em> stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.28660396,
+                "highlight": {
+                  "text0": [
+                    "quick <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "span_near": {
+                  "clauses": [
+                    {
+                      "span_term": {
+                        "text1": "quick"
+                      }
+                    },
+                    {
+                      "span_term": {
+                        "text1": "fox"
+                      }
+                    }
+                  ],
+                  "slop": 0
+                }
+              },
+              {
+                "match": {
+                  "text1": "cherry"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "unified",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.86312973,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.86312973,
+                "highlight": {
+                  "text1": [
+                    "of quick search brown runs brown <em>cherry</em> stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.28660396,
+                "highlight": {
+                  "text1": [
+                    "quick <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "span_near": {
+                  "clauses": [
+                    {
+                      "span_term": {
+                        "text1": "quick"
+                      }
+                    },
+                    {
+                      "span_term": {
+                        "text1": "fox"
+                      }
+                    }
+                  ],
+                  "slop": 0
+                }
+              },
+              {
+                "match": {
+                  "text1": "cherry"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "plain",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.86312973,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.86312973,
+                "highlight": {
+                  "text1": [
+                    "of quick search brown runs brown <em>cherry</em> stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.28660396,
+                "highlight": {
+                  "text1": [
+                    "quick <em>quick</em> <em>fox</em> fox"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/hw-spanhl/_search",
+      "body": {
+        "query": {
+          "bool": {
+            "should": [
+              {
+                "span_near": {
+                  "clauses": [
+                    {
+                      "span_term": {
+                        "text1": "quick"
+                      }
+                    },
+                    {
+                      "span_term": {
+                        "text1": "fox"
+                      }
+                    }
+                  ],
+                  "slop": 0
+                }
+              },
+              {
+                "match": {
+                  "text1": "cherry"
+                }
+              }
+            ]
+          }
+        },
+        "highlight": {
+          "type": "fvh",
+          "fields": {
+            "text1": {}
+          }
+        },
+        "_source": false
+      },
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "took": 1,
+          "timed_out": false,
+          "_shards": {
+            "total": 1,
+            "successful": 1,
+            "skipped": 0,
+            "failed": 0
+          },
+          "hits": {
+            "total": {
+              "value": 2,
+              "relation": "eq"
+            },
+            "max_score": 0.86312973,
+            "hits": [
+              {
+                "_index": "hw-spanhl",
+                "_id": "0",
+                "_score": 0.86312973,
+                "highlight": {
+                  "text1": [
+                    "of quick search brown runs brown <em>cherry</em> stream engine"
+                  ]
+                }
+              },
+              {
+                "_index": "hw-spanhl",
+                "_id": "1",
+                "_score": 0.28660396
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "DELETE",
+      "path": "/hw-spanhl",
+      "compare": false,
+      "es": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/json",
+          "x-elastic-product": "Elasticsearch"
+        },
+        "body": {
+          "acknowledged": true
+        }
+      }
+    }
+  ]
+}

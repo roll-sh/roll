@@ -62,11 +62,13 @@ fn engine_mode(m: JoinScoreMode) -> search_index::query::JoinScoreMode {
     }
 }
 
-fn register_inner(ctx: &QueryCtx, ih: Option<&InnerHits>, default_name: &str, query: QueryRef, join: JoinInner) {
+fn register_inner(ctx: &QueryCtx, ih: Option<&InnerHits>, default_name: &str, query: QueryRef, join: JoinInner) -> EsResult<()> {
     if let Some(ih) = ih {
+        super::inner::check_sort(ctx, ih.sort.as_ref(), None)?;
         let name = ih.name.clone().unwrap_or_else(|| default_name.to_string());
-        ctx.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: None, query, join: Some(join) });
+        ctx.inner_hits.borrow_mut().push(InnerHitsDef { name, spec: ih.clone(), nested_path: None, query, join: Some(join), children: Vec::new() });
     }
+    Ok(())
 }
 
 /// Boolean rewrites identify clauses by their Lucene string, and a constant-scoring join's
@@ -108,7 +110,7 @@ pub fn has_child(ctx: &QueryCtx, q: &HasChild) -> EsResult<QueryRef> {
     };
     let inner = ctx.to_query(&q.query)?;
     let from = arc(BooleanQuery::new().add(Occur::Must, inner.clone()).add(Occur::Filter, type_filter(join, &q.ty)));
-    register_inner(ctx, q.inner_hits.as_ref(), &q.ty, inner, JoinInner { type_name: q.ty.clone(), children: true });
+    register_inner(ctx, q.inner_hits.as_ref(), &q.ty, inner, JoinInner { type_name: q.ty.clone(), children: true })?;
     let mut jq = JoinQuery::new(jf, from, type_filter(join, &parent), engine_mode(q.score_mode));
     jq.min = q.min_children.max(0) as u32;
     jq.max = q.max_children.max(0) as u32;
@@ -140,7 +142,7 @@ pub fn has_parent(ctx: &QueryCtx, q: &HasParent) -> EsResult<QueryRef> {
         children = children.add(Occur::Should, type_filter(join, c));
     }
     let to: QueryRef = arc(ConstantScoreQuery::new(arc(children)));
-    register_inner(ctx, q.inner_hits.as_ref(), &q.parent_type, inner, JoinInner { type_name: q.parent_type.clone(), children: false });
+    register_inner(ctx, q.inner_hits.as_ref(), &q.parent_type, inner, JoinInner { type_name: q.parent_type.clone(), children: false })?;
     let mode = if q.score { search_index::query::JoinScoreMode::Max } else { search_index::query::JoinScoreMode::None };
     Ok(arc(distinct(ctx, JoinQuery::new(jf, from, to, mode))))
 }
@@ -225,33 +227,18 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
         }
     }
     let total = matches.len();
-    if let Some(sort) = &spec.sort {
-        let keys = super::inner::sort_keys(sort);
-        let key = |d: u32, field: &str| -> Option<f64> {
-            let (seg, local) = searcher.segment_of(d)?;
-            super::inner::first_value(qctx.table, seg, local, field)
-        };
-        matches.sort_by(|a, b| {
-            for (field, desc) in &keys {
-                let o = if field == "_score" {
-                    a.1.total_cmp(&b.1)
-                } else {
-                    key(a.0, field).partial_cmp(&key(b.0, field)).unwrap_or(std::cmp::Ordering::Equal)
-                };
-                let o = if *desc { o.reverse() } else { o };
-                if o != std::cmp::Ordering::Equal {
-                    return o;
-                }
-            }
-            a.0.cmp(&b.0)
-        });
-    } else {
-        matches.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    }
     let from = spec.from.unwrap_or(0).max(0) as usize;
     let size = spec.size.unwrap_or(3).max(0) as usize;
     // No hits asked for: only the total is counted (`max_score` NaN).
     let max_score = if (sorted && !spec.track_scores) || size == 0 { None } else { matches.iter().map(|m| m.1).reduce(f32::max) };
+    let mut sort_values: Vec<Vec<Value>> = Vec::new();
+    if let Some(sort) = &spec.sort {
+        let top = super::inner::sorted_top(qctx, searcher, sort, None, &matches, from.saturating_add(size))?;
+        matches = top.iter().map(|(d, s, _)| (*d, *s)).collect();
+        sort_values = top.into_iter().map(|(_, _, v)| v).collect();
+    } else {
+        matches.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    }
     let opts = super::hits::FetchOpts {
         source: spec.source.as_ref().map(crate::fetch::FetchSource::from_value).transpose()?,
         stored_fields: spec.stored_fields.as_ref().map(|v| match v {
@@ -265,13 +252,17 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
         version: spec.version,
         seq_no_primary_term: spec.seq_no_primary_term,
         force_synthetic: false,
+        id_fielddata: super::id_fielddata::enabled(qctx.st),
+        script_fields_only: spec.script_fields.as_ref().and_then(Value::as_object).is_some_and(|m| !m.is_empty()),
+        raw_source: false,
+        keep_id: false,
     };
     let highlight = match &spec.highlight {
         Some(Value::Obj(hl)) => Some(super::highlight::Spec::parse(hl)?),
         _ => None,
     };
     let mut hits = Vec::new();
-    for (d, score) in matches.iter().skip(from).take(size) {
+    for (i, (d, score)) in matches.iter().enumerate().skip(from).take(size) {
         let stored = searcher.stored(*d).map_err(ie)?;
         let id = super::hits::stored_id(&stored).unwrap_or_default();
         let mut h = Map::new();
@@ -281,8 +272,9 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
         }
         h.insert("_index".into(), Value::Str(t.idx.name.clone()));
         h.insert("_id".into(), Value::Str(id.clone()));
-        let shown = if sorted && !spec.track_scores { None } else { Some(*score) };
-        super::hits::render_doc(qctx.table, Some(&t.idx), searcher, *d, &opts, &mut h, shown, qctx.now_ms)?;
+        // Sorted inner hits print no score (`TopFieldCollector` leaves it NaN).
+        let shown = if sorted { None } else { Some(*score) };
+        super::hits::render_doc_stored(qctx.table, Some(&t.idx), searcher, *d, &stored, &opts, &mut h, shown, qctx.now_ms)?;
         if let Some(hl) = &highlight {
             let source = crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()?;
             let out = super::highlight::highlight_hit(qctx, hl, &def.query, source.as_ref(), &id, searcher, Some(*d))?;
@@ -295,20 +287,8 @@ pub fn inner_hits(qctx: &QueryCtx, t: &Target, r: &ShardResult, doc: u32, def: &
             let e = searcher.explain(&def.query, *d).map_err(ie)?;
             h.insert("_explanation".into(), super::explanation_json(&e));
         }
-        if let Some(sort) = &spec.sort {
-            let vals: Vec<Value> = super::inner::sort_keys(sort)
-                .iter()
-                .map(|(f, _)| {
-                    if f == "_score" {
-                        return Value::Num(Number::Float(crate::fetch::java_float_as_double(*score)));
-                    }
-                    match searcher.segment_of(*d) {
-                        Some((seg, local)) => super::inner::first_json(qctx.table, seg, local, f),
-                        None => Value::Null,
-                    }
-                })
-                .collect();
-            h.insert("sort".into(), Value::Arr(vals));
+        if let Some(vals) = sort_values.get_mut(i) {
+            h.insert("sort".into(), Value::Arr(std::mem::take(vals)));
         }
         hits.push(Value::Obj(h));
     }

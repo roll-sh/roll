@@ -79,10 +79,11 @@ pub fn completion_score(weight: f32, boost: f32) -> f32 {
     }
 }
 
-/// Lucene's `FuzzyCompletionWeight.setNextMatch` boost: the most positions at which the
-/// accepted key prefix agrees with one of the query's analyzed forms.
+/// Lucene's `FuzzyCompletionWeight.setNextMatch` boost: the longest common prefix of the
+/// accepted key prefix and one of the query's analyzed forms (counting stops at the first
+/// position where they differ).
 pub fn fuzzy_prefix_boost(path: &[u8], analyzed: &[Vec<u8>]) -> f32 {
-    analyzed.iter().map(|a| path.iter().zip(a).filter(|(x, y)| x == y).count()).max().unwrap_or(0) as f32
+    analyzed.iter().map(|a| path.iter().zip(a).take_while(|(x, y)| x == y).count()).max().unwrap_or(0) as f32
 }
 
 /// Java's `CharSequence` order (UTF-16 code units) of two payloads (raw bytes when not UTF-8).

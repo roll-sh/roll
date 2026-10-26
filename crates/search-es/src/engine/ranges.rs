@@ -57,6 +57,10 @@ pub fn cidr(s: &str) -> EsResult<([u8; 16], [u8; 16])> {
     let b = crate::document::values::parse_ip(addr).ok_or_else(|| EsError::illegal_argument(format!("'{addr}' is not an IP string literal.")))?;
     let bits: u32 = bits.parse().map_err(|_| EsError::number_format(bits))?;
     let v4 = !addr.contains(':');
+    // `InetAddresses.parseCidr`.
+    if bits > if v4 { 32 } else { 128 } {
+        return Err(EsError::illegal_argument(format!("Illegal prefix length [{bits}] in [{s}]. Must be 0-32 for IPv4 ranges, 0-128 for IPv6 ranges")));
+    }
     let total = if v4 { bits + 96 } else { bits };
     let mut lo = b;
     let mut hi = b;

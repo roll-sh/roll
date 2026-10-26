@@ -22,7 +22,8 @@ use std::sync::Arc;
 pub trait MetaStore: Send + Sync {
     /// The last saved state, if any.
     async fn load(&self) -> anyhow::Result<Option<Bytes>>;
-    /// Saves a new state; `version` increases with every save.
+    /// Saves a new state; `version` increases with every save. An error that is (or wraps) an
+    /// [`EsError`] is what the client gets; any other is a 500 `failed to persist cluster state`.
     async fn save(&self, version: u64, state: Bytes) -> anyhow::Result<()>;
 }
 
@@ -153,6 +154,16 @@ pub struct Cluster {
     pub contexts: crate::search::contexts::Contexts,
     /// Compiled ingest pipelines.
     pub ingest: crate::ingest::pipeline::Cache,
+    /// In-memory state of the x-pack APIs (async results, verified credentials).
+    pub xpack: crate::xpack::Runtime,
+    /// The circuit breakers (`indices.breaker.*`).
+    pub breakers: crate::breaker::Breakers,
+    /// Shard contents of the snapshots this process took.
+    pub snapshot_data: crate::api::snapshots::SnapshotData,
+    /// Cross-cluster search usage (`_cluster/stats` `ccs`).
+    pub ccs: crate::remote::CcsStats,
+    /// The k-NN plugin's counters and graph-cache ledger (opensearch dialect).
+    pub knn: std::sync::Arc<crate::opensearch::knn_api::KnnRuntime>,
     /// The cluster's own handle, once its owner allowed background work
     /// ([`Cluster::enable_background_tasks`]).
     background: std::sync::OnceLock<std::sync::Weak<Cluster>>,
@@ -398,7 +409,19 @@ impl Cluster {
         };
         let mut state = ClusterState { dialect: config.dialect, ..state };
         state.metadata.dialect = config.dialect;
+        // x-pack's stack templates (`logs-*-*` and friends); OpenSearch has none.
+        if config.dialect == Dialect::Elasticsearch && config.node_setting("stack.templates.enabled") != Some("false") {
+            crate::meta::stack_templates::install_missing(&mut state.metadata, crate::time::now_millis());
+        }
         let (changes, _) = tokio::sync::watch::channel(state.version);
+        // Runtime-field grok runs inside Painless, which reads the static node setting from here.
+        if config.node_setting("runtime_fields.grok.watchdog.max_execution_time").is_some() {
+            let ms = config
+                .node_setting("runtime_fields.grok.watchdog.max_execution_time")
+                .and_then(|v| crate::units::TimeValue::parse(v, "runtime_fields.grok.watchdog.max_execution_time").ok())
+                .map_or(1000, |t| t.as_millis());
+            search_painless::es::extract::set_runtime_grok_watchdog((ms > 0).then(|| std::time::Duration::from_millis(ms as u64)));
+        }
         Ok(Cluster {
             changes,
             name: config.name.clone(),
@@ -425,6 +448,11 @@ impl Cluster {
             scripts: Default::default(),
             contexts: Default::default(),
             ingest: Default::default(),
+            xpack: Default::default(),
+            breakers: Default::default(),
+            snapshot_data: Default::default(),
+            ccs: Default::default(),
+            knn: Default::default(),
             background: Default::default(),
         })
     }
@@ -515,11 +543,26 @@ impl Cluster {
         let _guard = self.write.lock().await;
         let mut next = (*self.state()).clone();
         let r = f(&mut next)?;
+        // OpenSearch's ISM coordinator reacts to every cluster state change (indices created
+        // or deleted by any API).
+        if next.dialect == Dialect::OpenSearch {
+            crate::opensearch::ism::reconcile(&self.state(), &mut next, crate::time::now_millis());
+        }
+        // x-pack's template registry re-adds a deleted built-in on the next cluster state change
+        // (a `DELETE /_index_template/*` doesn't remove `logs` for good); roll re-adds it in the
+        // same update, which no client can tell apart.
+        if next.dialect == Dialect::Elasticsearch && self.config.node_setting("stack.templates.enabled") != Some("false") {
+            crate::meta::stack_templates::install_missing(&mut next.metadata, crate::time::now_millis());
+        }
         next.version += 1;
         next.metadata.version += 1;
         next.state_uuid = random_uuid();
         let bytes = Bytes::from(next.to_json().to_json());
-        self.store.save(next.version, bytes).await.map_err(|e| EsError::internal(format!("failed to persist cluster state: {e}")))?;
+        // A store may refuse with an Elasticsearch error of its own (a cluster unloading: 503).
+        self.store.save(next.version, bytes).await.map_err(|e| match e.downcast_ref::<EsError>() {
+            Some(es) => es.clone(),
+            None => EsError::internal(format!("failed to persist cluster state: {e}")),
+        })?;
         let version = next.version;
         *self.state.write() = Arc::new(next);
         self.changes.send_replace(version);

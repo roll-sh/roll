@@ -527,6 +527,7 @@ impl MultiMatch {
         let mut operator = Operator::Or;
         let (mut tie_breaker, mut lenient) = (None, None);
         let (mut zero, mut auto_syn) = (ZeroTerms::None, true);
+        let mut cutoff: Option<f32> = None;
         let mut current = String::new();
         let field_and_boost = |p: &XParser<'_>, fields: &mut FieldBoosts| -> EsResult<()> {
             let text = p.text()?;
@@ -542,7 +543,7 @@ impl MultiMatch {
                 Token::FieldName => current = p.current_name().unwrap_or("").to_string(),
                 _ if current == "fields" => {
                     if t == Token::StartArray {
-                        while let Some(t) = p.next_token() {
+        while let Some(t) = p.next_token() {
                             if t == Token::EndArray {
                                 break;
                             }
@@ -575,12 +576,18 @@ impl MultiMatch {
                     "_name" => name = Some(p.text()?),
                     "auto_generate_synonyms_phrase_query" => auto_syn = p.boolean_value()?,
                     "fuzzy_transpositions" => fz.fuzzy_transpositions = p.boolean_value()?,
+                    // OpenSearch still accepts the deprecated `cutoff_frequency`; roll runs the
+                    // query without the common-terms split.
+                    "cutoff_frequency" if crate::opensearch::active() => cutoff = Some(p.float_value()?),
                     _ => return Err(p.parsing_error(format!("[multi_match] query does not support [{current}]"))),
                 },
                 t => return Err(p.parsing_error(format!("[multi_match] unknown token [{t}] after [{current}]"))),
             }
         }
         let Some(query) = value else { return Err(p.parsing_error("No text specified for multi_match query")) };
+        if cutoff.is_some() && ty == MultiMatchType::BoolPrefix {
+            return Err(p.parsing_error(format!("[cutoff_frequency] not allowed for type [{}]", ty.name())));
+        }
         if fz.fuzziness.is_some() && matches!(ty, MultiMatchType::CrossFields | MultiMatchType::Phrase | MultiMatchType::PhrasePrefix) {
             return Err(p.parsing_error(format!("Fuzziness not allowed for type [{}]", ty.name())));
         }
@@ -846,6 +853,10 @@ impl QueryString {
                     if current == "fields" {
                         let mut names = Vec::new();
                         while p.next_token().is_some_and(|t| t != Token::EndArray) {
+                            // OpenSearch (3.1+) names the null field instead of failing on it.
+                            if p.token() == Token::Null && crate::opensearch::active() {
+                                return Err(p.parsing_error("[query_string] field name in [fields] cannot be null"));
+                            }
                             names.push(p.text()?);
                         }
                         fields = Some(parse_fields_and_weights(&names)?);
@@ -1180,14 +1191,27 @@ impl SimpleQueryString {
 /// An interval rule (`IntervalsSourceProvider`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum IntervalsSource {
-    Match { query: String, max_gaps: i32, ordered: bool, analyzer: Option<String>, filter: Option<Box<IntervalFilter>>, use_field: Option<String> },
+    /// `no_overlap`: OpenSearch's `mode: unordered_no_overlap` (then `ordered` is false).
+    Match { query: String, max_gaps: i32, ordered: bool, no_overlap: bool, analyzer: Option<String>, filter: Option<Box<IntervalFilter>>, use_field: Option<String> },
     AnyOf { intervals: Vec<IntervalsSource>, filter: Option<Box<IntervalFilter>> },
-    AllOf { intervals: Vec<IntervalsSource>, ordered: bool, max_gaps: i32, filter: Option<Box<IntervalFilter>> },
+    AllOf { intervals: Vec<IntervalsSource>, ordered: bool, no_overlap: bool, max_gaps: i32, filter: Option<Box<IntervalFilter>> },
     Prefix { prefix: String, analyzer: Option<String>, use_field: Option<String> },
-    Wildcard { pattern: String, analyzer: Option<String>, use_field: Option<String> },
-    Regexp { pattern: String, analyzer: Option<String>, use_field: Option<String> },
+    /// `max_expansions`: OpenSearch only.
+    Wildcard { pattern: String, analyzer: Option<String>, use_field: Option<String>, max_expansions: Option<i32> },
+    /// OpenSearch's form (`flags` set: its `RegexpFlag` mask) has `case_insensitive` and
+    /// `max_expansions` and no analyzer; Elasticsearch's normalizes the pattern with one.
+    Regexp { pattern: String, analyzer: Option<String>, use_field: Option<String>, flags: Option<i32>, case_insensitive: bool, max_expansions: Option<i32> },
     Fuzzy { term: String, prefix_length: i32, transpositions: bool, fuzziness: Fuzziness, analyzer: Option<String>, use_field: Option<String> },
     Range { lower: String, upper: String, include_lower: bool, include_upper: bool, analyzer: Option<String>, use_field: Option<String> },
+}
+
+/// OpenSearch's `IntervalMode` name.
+fn interval_mode(ordered: bool, no_overlap: bool) -> &'static str {
+    match (ordered, no_overlap) {
+        (true, _) => "ordered",
+        (false, true) => "unordered_no_overlap",
+        (false, false) => "unordered",
+    }
 }
 
 /// A filter on an interval rule: another rule with a relation, or a script.
@@ -1252,11 +1276,49 @@ impl IntervalsSource {
 
     fn parse_level(p: &mut XParser<'_>) -> EsResult<IntervalsSource> {
         let name = p.current_name().unwrap_or("").to_string();
-        let mut vals: Vec<Option<Value>> = vec![None; 6];
+        let mut vals: Vec<Option<Value>> = vec![None; 7];
         let mut filter: Option<Box<IntervalFilter>> = None;
         let mut intervals: Option<Vec<IntervalsSource>> = None;
         let mut fuzziness: Option<Fuzziness> = None;
+        let os = crate::opensearch::active();
         let fields: &[Field] = match name.as_str() {
+            // OpenSearch: `mode` (ordered, unordered, unordered_no_overlap) next to the
+            // deprecated `ordered`.
+            "match" if os => &[
+                Field::new("query", Tokens::STRING),
+                Field::new("max_gaps", Tokens::INT),
+                Field::new("ordered", Tokens::BOOLEAN),
+                Field::new("analyzer", Tokens::STRING),
+                Field::new("filter", Tokens::OBJECT),
+                Field::new("use_field", Tokens::STRING),
+                Field::new("mode", Tokens::STRING),
+            ],
+            "all_of" if os => &[
+                Field::new("ordered", Tokens::BOOLEAN),
+                Field::new("intervals", Tokens::OBJECT_ARRAY),
+                Field::new("max_gaps", Tokens::INT),
+                Field::new("filter", Tokens::OBJECT),
+                Field::new("mode", Tokens::STRING),
+            ],
+            "wildcard" if os => &[
+                Field::new("pattern", Tokens::STRING),
+                Field::new("analyzer", Tokens::STRING),
+                Field::new("use_field", Tokens::STRING),
+                Field::new("max_expansions", Tokens::INT),
+            ],
+            "regexp" if os => &[
+                Field::new("pattern", Tokens::STRING),
+                Field::new("flags", Tokens::STRING),
+                Field::new("use_field", Tokens::STRING),
+                Field::new("flags_value", Tokens::INT),
+                Field::new("max_expansions", Tokens::INT),
+                Field::new("case_insensitive", Tokens::BOOLEAN),
+            ],
+            "range" if os => {
+                return Err(p.parsing_error(format!(
+                    "Unknown interval type [{name}], expecting one of [match, any_of, all_of, prefix, wildcard, regexp]"
+                )));
+            }
             "match" => &[
                 Field::new("query", Tokens::STRING),
                 Field::new("max_gaps", Tokens::INT),
@@ -1290,6 +1352,11 @@ impl IntervalsSource {
                 Field::new("analyzer", Tokens::STRING),
                 Field::new("use_field", Tokens::STRING),
             ],
+            _ if os => {
+                return Err(p.parsing_error(format!(
+                    "Unknown interval type [{name}], expecting one of [match, any_of, all_of, prefix, wildcard, regexp]"
+                )));
+            }
             _ => {
                 return Err(p.parsing_error(format!(
                     "Unknown interval type [{name}], expecting one of [match, any_of, all_of, prefix, wildcard, regexp, range]"
@@ -1316,8 +1383,8 @@ impl IntervalsSource {
                     })?)
                 }
                 "fuzziness" => fuzziness = Some(Fuzziness::parse(p)?),
-                "max_gaps" | "prefix_length" => vals[i] = Some(Value::from(p.int_value()?)),
-                "ordered" | "transpositions" => vals[i] = Some(Value::Bool(p.boolean_value()?)),
+                "max_gaps" | "prefix_length" | "flags_value" | "max_expansions" => vals[i] = Some(Value::from(p.int_value()?)),
+                "ordered" | "transpositions" | "case_insensitive" => vals[i] = Some(Value::Bool(p.boolean_value()?)),
                 _ => vals[i] = Some(Value::Str(p.text()?)),
             }
             Ok(())
@@ -1326,11 +1393,58 @@ impl IntervalsSource {
         let int = |i: usize, d: i32| vals[i].as_ref().and_then(Value::as_i64).map(|v| v as i32).unwrap_or(d);
         let flag = |i: usize, d: bool| vals[i].as_ref().and_then(Value::as_bool).unwrap_or(d);
         let required = |v: Option<String>, n: &str| v.ok_or_else(|| EsError::illegal_argument(format!("Required [{n}]")));
+        let opt_int = |i: usize| vals[i].as_ref().and_then(Value::as_i64).map(|v| v as i32);
+        // OpenSearch's `IntervalMode`: the deprecated `ordered` wins over `mode`.
+        let mode = |ordered: usize, mode: usize| -> EsResult<(bool, bool)> {
+            if let Some(o) = vals[ordered].as_ref().and_then(Value::as_bool) {
+                return Ok((o, false));
+            }
+            match vals[mode].as_ref().and_then(Value::as_str) {
+                None => Ok((false, false)),
+                Some(m) if m.eq_ignore_ascii_case("ordered") => Ok((true, false)),
+                Some(m) if m.eq_ignore_ascii_case("unordered") => Ok((false, false)),
+                Some(m) if m.eq_ignore_ascii_case("unordered_no_overlap") => Ok((false, true)),
+                Some(m) => Err(EsError::x_content_parse_bare(format!("Failed to build [{name}] after last required field arrived"))
+                    .caused_by(EsError::illegal_argument(format!("no mode can be parsed from ordinal {m}")))),
+            }
+        };
         Ok(match name.as_str() {
+            "match" if os => {
+                let (ordered, no_overlap) = mode(2, 6)?;
+                IntervalsSource::Match { query: required(s(0), "query")?, max_gaps: int(1, -1), ordered, no_overlap, analyzer: s(3), filter, use_field: s(5) }
+            }
+            "all_of" if os => {
+                let (ordered, no_overlap) = mode(0, 4)?;
+                IntervalsSource::AllOf {
+                    ordered,
+                    no_overlap,
+                    intervals: intervals.ok_or_else(|| EsError::illegal_argument("Required [intervals]"))?,
+                    max_gaps: int(2, -1),
+                    filter,
+                }
+            }
+            "wildcard" if os => IntervalsSource::Wildcard { pattern: required(s(0), "pattern")?, analyzer: s(1), use_field: s(2), max_expansions: opt_int(3) },
+            "regexp" if os => {
+                // `flags_value` wins over `flags`; both default to every flag.
+                let flags = match (opt_int(3), s(1)) {
+                    (Some(v), _) => v,
+                    (None, Some(f)) => crate::query::term_level::regexp_flags::resolve(Some(&f)).map_err(EsError::illegal_argument)?,
+                    (None, None) => crate::query::term_level::regexp_flags::ALL,
+                };
+                IntervalsSource::Regexp {
+                    pattern: required(s(0), "pattern")?,
+                    analyzer: None,
+                    use_field: s(2),
+                    flags: Some(flags),
+                    case_insensitive: flag(5, false),
+                    max_expansions: opt_int(4).filter(|m| *m > 0),
+                }
+            }
             "match" => IntervalsSource::Match {
                 query: required(s(0), "query")?,
                 max_gaps: int(1, -1),
                 ordered: flag(2, false),
+                no_overlap: false,
                 analyzer: s(3),
                 filter,
                 use_field: s(5),
@@ -1338,13 +1452,21 @@ impl IntervalsSource {
             "any_of" => IntervalsSource::AnyOf { intervals: intervals.ok_or_else(|| EsError::illegal_argument("Required [intervals]"))?, filter },
             "all_of" => IntervalsSource::AllOf {
                 ordered: flag(0, false),
+                no_overlap: false,
                 intervals: intervals.ok_or_else(|| EsError::illegal_argument("Required [intervals]"))?,
                 max_gaps: int(2, -1),
                 filter,
             },
             "prefix" => IntervalsSource::Prefix { prefix: required(s(0), "prefix")?, analyzer: s(1), use_field: s(2) },
-            "wildcard" => IntervalsSource::Wildcard { pattern: required(s(0), "pattern")?, analyzer: s(1), use_field: s(2) },
-            "regexp" => IntervalsSource::Regexp { pattern: required(s(0), "pattern")?, analyzer: s(1), use_field: s(2) },
+            "wildcard" => IntervalsSource::Wildcard { pattern: required(s(0), "pattern")?, analyzer: s(1), use_field: s(2), max_expansions: None },
+            "regexp" => IntervalsSource::Regexp {
+                pattern: required(s(0), "pattern")?,
+                analyzer: s(1),
+                use_field: s(2),
+                flags: None,
+                case_insensitive: false,
+                max_expansions: None,
+            },
             "fuzzy" => IntervalsSource::Fuzzy {
                 term: required(s(0), "term")?,
                 prefix_length: int(1, 0),
@@ -1384,10 +1506,14 @@ impl IntervalsSource {
     fn write_level(&self, m: &mut Map) {
         let mut b = Map::new();
         let name = match self {
-            IntervalsSource::Match { query, max_gaps, ordered, analyzer, filter, use_field } => {
+            IntervalsSource::Match { query, max_gaps, ordered, no_overlap, analyzer, filter, use_field } => {
                 b.insert("query".into(), query.clone().into());
                 b.insert("max_gaps".into(), (*max_gaps).into());
-                b.insert("ordered".into(), (*ordered).into());
+                if super::opensearch_print() {
+                    b.insert("mode".into(), interval_mode(*ordered, *no_overlap).into());
+                } else {
+                    b.insert("ordered".into(), (*ordered).into());
+                }
                 super::opt_str(&mut b, "analyzer", analyzer);
                 if let Some(f) = filter {
                     b.insert("filter".into(), f.to_value());
@@ -1402,8 +1528,12 @@ impl IntervalsSource {
                 }
                 "any_of"
             }
-            IntervalsSource::AllOf { intervals, ordered, max_gaps, filter } => {
-                b.insert("ordered".into(), (*ordered).into());
+            IntervalsSource::AllOf { intervals, ordered, no_overlap, max_gaps, filter } => {
+                if super::opensearch_print() {
+                    b.insert("mode".into(), interval_mode(*ordered, *no_overlap).into());
+                } else {
+                    b.insert("ordered".into(), (*ordered).into());
+                }
                 b.insert("max_gaps".into(), (*max_gaps).into());
                 b.insert("intervals".into(), Value::Arr(intervals.iter().map(|s| { let mut x = Map::new(); s.write(&mut x); Value::Obj(x) }).collect()));
                 if let Some(f) = filter {
@@ -1417,11 +1547,29 @@ impl IntervalsSource {
                 super::opt_str(&mut b, "use_field", use_field);
                 "prefix"
             }
-            IntervalsSource::Wildcard { pattern, analyzer, use_field } | IntervalsSource::Regexp { pattern, analyzer, use_field } => {
+            IntervalsSource::Wildcard { pattern, analyzer, use_field, max_expansions } => {
                 b.insert("pattern".into(), pattern.clone().into());
                 super::opt_str(&mut b, "analyzer", analyzer);
                 super::opt_str(&mut b, "use_field", use_field);
-                if matches!(self, IntervalsSource::Wildcard { .. }) { "wildcard" } else { "regexp" }
+                if let Some(m) = max_expansions {
+                    b.insert("max_expansions".into(), (*m).into());
+                }
+                "wildcard"
+            }
+            IntervalsSource::Regexp { pattern, analyzer, use_field, flags, case_insensitive, max_expansions } => {
+                b.insert("pattern".into(), pattern.clone().into());
+                if let Some(f) = flags.filter(|f| *f != crate::query::term_level::regexp_flags::ALL) {
+                    b.insert("flags_value".into(), f.into());
+                }
+                super::opt_str(&mut b, "analyzer", analyzer);
+                super::opt_str(&mut b, "use_field", use_field);
+                if let Some(m) = max_expansions {
+                    b.insert("max_expansions".into(), (*m).into());
+                }
+                if *case_insensitive {
+                    b.insert("case_insensitive".into(), true.into());
+                }
+                "regexp"
             }
             IntervalsSource::Fuzzy { term, prefix_length, transpositions, fuzziness, analyzer, use_field } => {
                 b.insert("term".into(), term.clone().into());

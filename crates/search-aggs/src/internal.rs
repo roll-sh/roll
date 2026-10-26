@@ -444,6 +444,21 @@ pub fn java_hash_map_order(keys: &[&str], calls: &[usize], initial: usize) -> Ve
     m.order()
 }
 
+/// [`java_hash_map_order`] of a `new HashMap<>()` (default capacity).
+pub fn java_default_hash_map_order(keys: &[&str], calls: &[usize]) -> Vec<usize> {
+    let mut m = crate::util::JavaHashMapModel::new(None);
+    let mut present = vec![false; keys.len()];
+    for &k in calls {
+        if present[k] {
+            m.compute_if_absent_existing();
+        } else {
+            present[k] = true;
+            m.compute_if_absent_new(k, java_string_hash(keys[k]));
+        }
+    }
+    m.order()
+}
+
 /// `AggregationErrors.reduceTypeMismatch`.
 pub fn reduce_type_mismatch(name: &str) -> AggError {
     AggError::illegal_argument(format!(
@@ -459,6 +474,9 @@ impl Aggs {
     /// that must reduce alone are reduced); several results merge by name like
     /// [`Aggs::reduce_hashed`].
     pub fn reduce_lists(lists: Vec<Aggs>, ctx: &mut ReduceCtx<'_>) -> Result<Aggs> {
+        if crate::dialect::opensearch() {
+            return Self::reduce_opensearch(lists, ctx);
+        }
         if lists.len() != 1 {
             return Self::reduce_hashed(lists, ctx);
         }
@@ -475,6 +493,9 @@ impl Aggs {
     /// merges by name and reduces every aggregation; the output follows the iteration order of
     /// Elasticsearch's `HashMap<String, _>` keyed by name, which is what its responses show.
     pub fn reduce_hashed(lists: Vec<Aggs>, ctx: &mut ReduceCtx<'_>) -> Result<Aggs> {
+        if crate::dialect::opensearch() {
+            return Self::reduce_opensearch(lists, ctx);
+        }
         let Some(first) = lists.first() else { return Ok(Aggs::default()) };
         let initial = first.list.len();
         let mut groups: Vec<Group> = Vec::with_capacity(initial);
@@ -505,6 +526,74 @@ impl Aggs {
             out.push(Agg { name, meta, value });
         }
         Ok(Aggs { list: out })
+    }
+
+    /// OpenSearch's `InternalAggregations.reduce` (top level and every bucket's
+    /// sub-aggregations, even of a single result): grouped by name in a default
+    /// `new HashMap<>()`, whose iteration order the response shows. Every aggregation reduces:
+    /// the ones OpenSearch keeps unreduced when alone (`mustReduceOnSingleInternalAgg` false:
+    /// numeric metrics) reduce to themselves.
+    fn reduce_opensearch(lists: Vec<Aggs>, ctx: &mut ReduceCtx<'_>) -> Result<Aggs> {
+        let mut groups: Vec<Group> = Vec::new();
+        let mut index: hashbrown::HashMap<String, usize> = hashbrown::HashMap::new();
+        let mut calls = Vec::new();
+        for aggs in lists {
+            for a in aggs.list {
+                match index.get(&a.name) {
+                    Some(&g) => {
+                        calls.push(g);
+                        groups[g].2.push(a.value);
+                    }
+                    None => {
+                        calls.push(groups.len());
+                        index.insert(a.name.clone(), groups.len());
+                        groups.push((a.name, a.meta, vec![a.value]));
+                    }
+                }
+            }
+        }
+        let names: Vec<&str> = groups.iter().map(|g| g.0.as_str()).collect();
+        let order = java_default_hash_map_order(&names, &calls);
+        let mut slots: Vec<Option<Group>> = groups.into_iter().map(Some).collect();
+        let mut out = Vec::with_capacity(slots.len());
+        for i in order {
+            let (name, meta, values) = slots[i].take().expect("each group once");
+            let value = AggValue::reduce_list(&name, values, ctx)?;
+            out.push(Agg { name, meta, value });
+        }
+        Ok(Aggs { list: out })
+    }
+
+    /// The order OpenSearch's concurrent segment search leaves a shard's results in: each
+    /// shard reduces its slices' aggregations itself (`NonGlobalAggCollectorManager`, then
+    /// `GlobalAggCollectorManager` for the `global` ones, appended), so every level comes out of
+    /// a `new HashMap<>()` once before the coordinator's reduce takes it through another. Only
+    /// the order changes: one shard's partial reduce of its own results keeps their values.
+    pub fn opensearch_shard_order(&mut self, is_global: &dyn Fn(&str) -> bool) {
+        let (globals, others): (Vec<Agg>, Vec<Agg>) = std::mem::take(&mut self.list).into_iter().partition(|a| is_global(&a.name));
+        for group in [others, globals] {
+            let mut part = Aggs { list: group };
+            part.hash_order_levels();
+            self.list.extend(part.list);
+        }
+    }
+
+    /// [`opensearch_shard_order`](Self::opensearch_shard_order) of one level and the levels below.
+    fn hash_order_levels(&mut self) {
+        let names: Vec<&str> = self.list.iter().map(|a| a.name.as_str()).collect();
+        let calls: Vec<usize> = (0..names.len()).collect();
+        let order = java_default_hash_map_order(&names, &calls);
+        let mut slots: Vec<Option<Agg>> = std::mem::take(&mut self.list).into_iter().map(Some).collect();
+        self.list = order.into_iter().filter_map(|i| slots[i].take()).collect();
+        for a in &mut self.list {
+            if let Some(m) = a.value.multi_mut() {
+                for i in 0..m.len() {
+                    m.aggs_mut(i).hash_order_levels();
+                }
+            } else if let Some(sub) = a.value.single_aggs_mut() {
+                sub.hash_order_levels();
+            }
+        }
     }
 
     /// Renders `{name: {...}, ...}` into `out` (an object).
@@ -660,5 +749,25 @@ mod tests {
         assert_eq!(order(&["f", "fs", "fa", "fk"], 3), ["fa", "fk", "fs", "f"]);
         assert_eq!(order(&["r", "rk"], 3), ["rk", "r"]);
         assert_eq!(order(&["h", "h2"], 3), ["h", "h2"]);
+    }
+
+    /// Orders observed on OpenSearch 3.9.0 (a default `new HashMap<>()`; a concurrent search
+    /// reduces on the shard first, so colliding names flip twice).
+    #[test]
+    fn default_hash_map_order_matches_opensearch() {
+        use super::java_default_hash_map_order;
+        let once = |names: &[&str]| -> Vec<String> {
+            let calls: Vec<usize> = (0..names.len()).collect();
+            java_default_hash_map_order(names, &calls).into_iter().map(|i| names[i].to_string()).collect()
+        };
+        // Sequential search: one reduce.
+        assert_eq!(once(&["s", "b"]), ["b", "s"]);
+        assert_eq!(once(&["b", "a", "c"]), ["a", "b", "c"]);
+        assert_eq!(once(&["g", "t"]), ["t", "g"]);
+        // "zz" and "aa" share bucket 0: `computeIfAbsent` links the newer key first...
+        assert_eq!(once(&["zz", "aa"]), ["aa", "zz"]);
+        // ...and the coordinator's reduce of the shard's reduced list flips them back.
+        assert_eq!(once(&["aa", "zz"]), ["zz", "aa"]);
+        assert_eq!(once(&["y", "x"]), ["x", "y"]);
     }
 }

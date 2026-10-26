@@ -64,7 +64,14 @@ pub fn from_json(j: &Json) -> Value {
 
 /// An aggregation error as an [`EsError`].
 pub fn agg_error(e: search_aggs::AggError) -> EsError {
-    let search_aggs::AggError { kind, reason, status, meta, caused_by } = e;
+    let search_aggs::AggError { kind, mut reason, status, meta, caused_by } = e;
+    if kind == "script_exception" {
+        let (full, text) = super::scripts::take_script_error(&reason);
+        if let Some(full) = full {
+            return full;
+        }
+        reason = text.to_string();
+    }
     let mut out = if search_analysis::is_java_exception(&kind) || kind == "class_cast_exception" || kind == "arithmetic_exception" {
         EsError::java(status, kind, reason)
     } else {
@@ -98,6 +105,40 @@ pub fn check_lookup_fields(aggs: &Map, rm: &Map) -> EsResult<()> {
         }
     }
     aggs.values().try_for_each(|x| walk(x, rm))
+}
+
+/// `top_metrics` reads keyword metrics through segment ordinals, which runtime keyword fields
+/// don't have (`TopMetricsAggregator.MetricValues`).
+pub fn check_top_metrics_runtime(aggs: &Map, def: &dyn Fn(&str) -> Option<Value>) -> EsResult<()> {
+    for (_, body) in aggs {
+        let Value::Obj(b) = body else { continue };
+        for (k, v) in b {
+            let Value::Obj(m) = v else { continue };
+            if k == "aggs" || k == "aggregations" {
+                check_top_metrics_runtime(m, def)?;
+                continue;
+            }
+            if k != "top_metrics" {
+                continue;
+            }
+            let metrics: Vec<&Value> = match m.get("metrics") {
+                Some(Value::Arr(a)) => a.iter().collect(),
+                Some(o) => vec![o],
+                None => Vec::new(),
+            };
+            for metric in metrics {
+                if let Some(f) = metric.get("field").and_then(Value::as_str)
+                    && let Some(d) = def(f)
+                    && d.get("type").and_then(Value::as_str) == Some("keyword")
+                {
+                    return Err(EsError::illegal_argument(format!(
+                        "top_metrics can only collect bytes that have segment ordinals but Field [{f}] of type [keyword] does not"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn rewrite_runtime(aggs: &mut Map, def: &dyn Fn(&str) -> Option<Value>) {
@@ -146,19 +187,54 @@ pub fn rewrite_runtime(aggs: &mut Map, def: &dyn Fn(&str) -> Option<Value>) {
     }
 }
 
-/// Parses the `aggs` section.
-pub fn parse(aggs: &Map) -> EsResult<AggRequest> {
+/// Parses the `aggs` section. `raw` is the body the request's own section (`original`, before
+/// any rewrite) came from: a section that fails parses again over it, so the error locates
+/// itself in the body as Elasticsearch's does.
+pub fn parse(aggs: &Map, raw: Option<(&crate::search_source::AggsRaw, &Map)>) -> EsResult<AggRequest> {
     let mut aggs = std::borrow::Cow::Borrowed(aggs);
     if mentions_tsid(aggs.as_ref()) {
         tsid_after_keys(aggs.to_mut())?;
     }
     let j = to_json(&Value::Obj(aggs.into_owned()));
-    let req = search_aggs::parse(&j, &search_aggs::ParseOptions::default()).map_err(agg_error)?;
+    let req = match search_aggs::parse(&j, &search_aggs::ParseOptions::default()) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some((r, original)) = raw {
+                let opts = search_aggs::ParseOptions { src: Some(&r.body), base: vec![search_aggs::xparser::Seg::Key(r.key.clone())], ..Default::default() };
+                if let Err(located) = search_aggs::parse(&to_json(&Value::Obj(original.clone())), &opts) {
+                    return Err(agg_error(located));
+                }
+            }
+            return Err(agg_error(e));
+        }
+    };
     let errs = req.validate();
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
     Ok(req)
+}
+
+/// The syntax error of an `aggs` section, located in the body it came from when known: the
+/// REST layer parses aggregations with the rest of the body (`_msearch` parses every body
+/// before running any).
+pub fn parse_error(aggs: &Map, raw: Option<&crate::search_source::AggsRaw>) -> EsResult<()> {
+    let j = to_json(&Value::Obj(aggs.clone()));
+    let opts = match raw {
+        Some(r) => search_aggs::ParseOptions { src: Some(&r.body), base: vec![search_aggs::xparser::Seg::Key(r.key.clone())], ..Default::default() },
+        None => search_aggs::ParseOptions::default(),
+    };
+    search_aggs::parse(&j, &opts).map(|_| ()).map_err(agg_error)
+}
+
+/// `AggregatorFactories.Builder.validate` messages of an `aggs` section that parses (a
+/// section that doesn't parse fails on its own later): `_msearch` validates every request
+/// before running any.
+pub fn validation_errors(aggs: &Map) -> Vec<String> {
+    match search_aggs::parse(&to_json(&Value::Obj(aggs.clone())), &search_aggs::ParseOptions::default()) {
+        Ok(req) => req.validate(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Whether an aggregation tree names the `_tsid` field anywhere (the fast path skips the
@@ -235,6 +311,13 @@ pub fn render_tsid_keys(aggs: &Map, out: &mut Value, typed_keys: bool) {
         let Some(Value::Obj(res)) = key.and_then(|k| out.get_mut(&k)) else { continue };
         let tsid_terms = matches!(ty, "terms" | "rare_terms" | "significant_terms") && def.get("field").and_then(Value::as_str) == Some("_tsid");
         let composite = if ty == "composite" { composite_tsid_sources(def) } else { Vec::new() };
+        // `multi_terms`: the positions of `_tsid` terms in the key (and its `|`-joined string).
+        let multi: Vec<usize> = match (ty, def.get("terms")) {
+            ("multi_terms", Some(Value::Arr(terms))) => {
+                terms.iter().enumerate().filter(|(_, t)| t.get("field").and_then(Value::as_str) == Some("_tsid")).map(|(i, _)| i).collect()
+            }
+            _ => Vec::new(),
+        };
         let fix = |v: &mut Value| {
             if let Value::Str(s) = v {
                 *s = crate::engine::tsdb::tsid_display(s.as_bytes());
@@ -253,6 +336,22 @@ pub fn render_tsid_keys(aggs: &Map, out: &mut Value, typed_keys: bool) {
             if let Value::Obj(bm) = b {
                 if tsid_terms && let Some(k) = bm.get_mut("key") {
                     fix(k);
+                }
+                if !multi.is_empty()
+                    && let Some(Value::Arr(parts)) = bm.get_mut("key")
+                {
+                    let mut swaps = Vec::new();
+                    for &i in &multi {
+                        if let Some(Value::Str(hex)) = parts.get_mut(i) {
+                            let shown = crate::engine::tsdb::tsid_display(hex.as_bytes());
+                            swaps.push((std::mem::replace(hex, shown.clone()), shown));
+                        }
+                    }
+                    if let Some(Value::Str(ks)) = bm.get_mut("key_as_string") {
+                        for (hex, shown) in swaps {
+                            *ks = ks.replacen(&hex, &shown, 1);
+                        }
+                    }
                 }
                 if !composite.is_empty()
                     && let Some(Value::Obj(km)) = bm.get_mut("key")
@@ -343,9 +442,21 @@ pub fn check_metric_scripts(st: &ClusterState, aggs: &Map) -> EsResult<()> {
 pub fn reduce(cluster: &Cluster, st: &ClusterState, req: &AggRequest, parts: Vec<search_aggs::Aggs>, typed_keys: bool) -> EsResult<Value> {
     let max_buckets = st.metadata.cluster_setting("search.max_buckets").and_then(|v| v.parse::<usize>().ok()).unwrap_or(65536);
     let host: Arc<dyn search_aggs::ScriptHost> = Arc::new(super::agg_scripts::Host::new(cluster, None, 0, String::new()));
-    let opts = search_aggs::ReduceOptions { final_reduce: true, max_buckets, scripts: Some(host), ..Default::default() };
-    let out = search_aggs::reduce(parts, req, &opts).map_err(agg_error)?;
+    let opts = search_aggs::ReduceOptions { final_reduce: true, max_buckets, scripts: Some(host), budget: Some(cluster.breakers.request(cluster, st)), ..Default::default() };
+    let out = search_aggs::reduce(parts, req, &opts).map_err(|e| reduce_failure(agg_error(e)))?;
     Ok(from_json(&out.to_json(typed_keys)))
+}
+
+/// A failure of the final reduce. Elasticsearch reduces at the start of the fetch phase, on
+/// the coordinator, so no shard failed: `search_phase_execution_exception` for phase `fetch`
+/// with no shard failures (and so no root causes), the cause's status.
+pub fn reduce_failure(cause: EsError) -> EsError {
+    EsError::new(cause.status, "search_phase_execution_exception", "")
+        .with_meta("phase", "fetch")
+        .with_meta("grouped", true)
+        .with_meta("failed_shards", Value::Arr(Vec::new()))
+        .with_root_causes(Vec::new())
+        .caused_by(cause)
 }
 
 /// One shard's view of its index for aggregations.
@@ -361,9 +472,16 @@ pub struct Lookup<'a> {
     searcher: Searcher,
     alias_filter: Option<crate::query::Query>,
     parent_fields: Arc<Vec<crate::search_source::FieldAndFormat>>,
+    rescore: Option<Arc<Vec<super::PreparedRescore>>>,
 }
 
 impl<'a> Lookup<'a> {
+    /// The search's rescorers, which `top_hits` sorted by score applies to its buckets.
+    pub(crate) fn with_rescore(mut self, rescore: Vec<super::PreparedRescore>) -> Self {
+        self.rescore = (!rescore.is_empty()).then(|| Arc::new(rescore));
+        self
+    }
+
     /// The search's top-level `fields`: `top_hits` without its own `fields` fetches them.
     pub fn with_parent_fields(mut self, fields: &[crate::search_source::FieldAndFormat]) -> Self {
         self.parent_fields = Arc::new(fields.to_vec());
@@ -383,6 +501,7 @@ impl<'a> Lookup<'a> {
             searcher: searcher.clone(),
             alias_filter: t.alias_filter.clone(),
             parent_fields: Arc::new(Vec::new()),
+            rescore: None,
         }
     }
 }
@@ -402,11 +521,72 @@ fn numeric(k: Kind) -> Option<NumericType> {
     })
 }
 
+impl Lookup<'_> {
+    /// A sort's `nested` object (`NestedSortBuilder`): the innermost level's path docs
+    /// (with its `filter`) as children, its parent level's docs as parents.
+    /// A `_script` or `_geo_distance` key of a `top_hits` / `top_metrics` sort.
+    fn computed_sort(&self, item: &Json) -> search_aggs::Result<search_aggs::HitSort> {
+        let err = |e: EsError| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
+        let sorts = crate::search_source::parse_sorts_value(&from_json(item)).map_err(err)?;
+        let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
+        match sorts.into_iter().next() {
+            Some(crate::search_source::Sort::Script { script, ty, order, .. }) => {
+                let reverse = order == Some(crate::search_source::SortOrder::Desc);
+                let (kind, context) = match ty.as_str() {
+                    "string" => ("string", search_painless::Context::StringSort),
+                    "version" => ("version", search_painless::Context::BytesRefSort),
+                    _ => ("number", search_painless::Context::NumberSort),
+                };
+                let painless = super::extra::painless(&ctx, &script, context).map_err(err)?;
+                Ok(search_aggs::HitSort::Computed { sort: Arc::new(super::computed_sort::ScriptKey { painless, kind }), reverse })
+            }
+            Some(crate::search_source::Sort::GeoDistance(m)) => match super::sort::geo_distance(&ctx, &m).map_err(err)?.0 {
+                search_index::collector::top_field::SortKey::GeoDistance(g) => {
+                    let reverse = g.reverse;
+                    Ok(search_aggs::HitSort::Computed { sort: Arc::new(super::computed_sort::GeoKey(g)), reverse })
+                }
+                _ => Ok(search_aggs::HitSort::Doc { reverse: false }),
+            },
+            _ => Err(search_aggs::AggError::illegal_argument("malformed sort")),
+        }
+    }
+
+    fn nested_sort(&self, n: &Json) -> search_aggs::Result<search_index::collector::top_field::NestedSort> {
+        let mut cur = n;
+        while let Some(inner) = cur.get("nested") {
+            cur = inner;
+        }
+        let path = cur.get("path").and_then(Json::as_str).unwrap_or_default();
+        let Some(o) = self.table.objects.get(path).filter(|o| o.nested) else {
+            return Err(search_aggs::AggError::new(400, "query_shard_exception", format!("[nested] nested object under path [{path}] is not of nested type")));
+        };
+        let parent_filter: QueryRef = match &o.parent_nested {
+            None => search_index::query::nested::root_filter(),
+            Some(p) => Arc::new(TermQuery::new(NESTED_PATH_FIELD, p.as_bytes().to_vec())),
+        };
+        let mut child_filter: QueryRef = Arc::new(TermQuery::new(NESTED_PATH_FIELD, path.as_bytes().to_vec()));
+        if let Some(f) = cur.get("filter") {
+            let q = FieldLookup::query(self, f)?;
+            child_filter = Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Filter, child_filter).add(search_index::query::Occur::Filter, q));
+        }
+        let max_children = cur.get("max_children").and_then(Json::as_i64).map(|m| m.max(0) as usize);
+        Ok(search_index::collector::top_field::NestedSort { parent_filter, child_filter, max_children })
+    }
+}
+
 impl FieldLookup for Lookup<'_> {
     fn field(&self, name: &str) -> search_aggs::Result<Option<AggField>> {
         let Some(f) = self.table.get(name) else {
             if name == "_id" && crate::engine::tsdb::is_time_series(&self.idx) {
                 return Err(search_aggs::AggError::illegal_argument("Fielddata is not supported on [_id] field in [time_series] indices"));
+            }
+            // `IdFieldMapper`: `_id` fielddata is off unless `indices.id_field_data.enabled`
+            // (Elasticsearch's default is false; OpenSearch's true).
+            if name == "_id" {
+                if !super::id_fielddata::enabled(self.st) {
+                    return Err(search_aggs::AggError::illegal_argument(super::id_fielddata::DISABLED));
+                }
+                return Ok(Some(super::id_fielddata::agg_field()));
             }
             if name == "_tsid" && crate::engine::tsdb::is_time_series(&self.idx) {
                 // Hex doc values: keys come out hex and are printed base64url by
@@ -417,8 +597,43 @@ impl FieldLookup for Lookup<'_> {
                 // Sorted-set doc values of the ignored field names (8.15+).
                 return Ok(Some(AggField::new("_ignored", "_ignored", SourceType::Keyword, crate::engine::fields::IGNORED_FIELD)));
             }
+            // `root.key` of a `flattened` field: that key's values of the `._keyed` field.
+            if let Some(k) = self.table.keyed(name) {
+                if !k.doc_values {
+                    return Err(search_aggs::AggError::illegal_argument(format!(
+                        "Can't load fielddata on [{name}] because fielddata is unsupported on fields of type [{}]. Use doc values instead.",
+                        k.ty
+                    )));
+                }
+                // `flattened`, or OpenSearch's `flat_object` (named in unsupported-type errors).
+                let mut a = AggField::new(name, k.ty.as_str(), SourceType::Keyword, k.number);
+                a.flattened_key = k.flattened_key.clone();
+                a.nested_path = k.nested_path.clone();
+                return Ok(Some(a));
+            }
+            // `ConstantFieldType`s: one value for the whole shard.
+            let constant = match name {
+                "_index" => Some(self.idx.name.clone()),
+                "_index_mode" => Some(crate::meta::index_mode::IndexMode::of(&self.idx.settings).name().to_string()),
+                _ => None,
+            };
+            if let Some(c) = constant {
+                let mut a = AggField::new(name, name, SourceType::Keyword, u32::MAX);
+                a.constant = Some(c);
+                return Ok(Some(a));
+            }
             return Ok(None);
         };
+        // OpenSearch's `FlatObjectFieldType.docValueFormat` refuses the root field.
+        if f.ty == "flat_object" {
+            return Err(search_aggs::AggError::illegal_argument(format!("Field [{name}] of type [flat_object] does not support doc_value in root field")));
+        }
+        if f.kind == Kind::ConstantKeyword {
+            let mut a = AggField::new(f.name.clone(), f.ty.clone(), SourceType::Keyword, u32::MAX);
+            a.constant = f.constant_value.clone();
+            // Without a value no document has one: the field aggregates like an unmapped one.
+            return Ok(a.constant.is_some().then_some(a));
+        }
         let mut number = f.number;
         let source = match f.kind {
             k if numeric(k).is_some() => SourceType::Numeric(numeric(k).unwrap()),
@@ -429,8 +644,8 @@ impl FieldLookup for Lookup<'_> {
             Kind::Ip => SourceType::Ip,
             Kind::GeoPoint => SourceType::GeoPoint,
             Kind::Point => SourceType::CartesianPoint,
-            Kind::GeoShape => SourceType::GeoShape { centroid: None },
-            Kind::Shape => SourceType::CartesianShape { centroid: None },
+            Kind::GeoShape => SourceType::GeoShape { centroid: f.subfield("centroid") },
+            Kind::Shape => SourceType::CartesianShape { centroid: f.subfield("centroid") },
             Kind::Histogram => SourceType::Histogram,
             Kind::IntegerRange => SourceType::Range(search_aggs::RangeType::Integer),
             Kind::LongRange => SourceType::Range(search_aggs::RangeType::Long),
@@ -453,12 +668,9 @@ impl FieldLookup for Lookup<'_> {
                 None if f.doc_values => SourceType::Keyword,
                 // search-aggs reports the fielddata error when it binds a values source;
                 // `significant_text` needs none.
-                None if f.kind == Kind::Text => SourceType::None,
+                None if f.kind == Kind::Text || (f.kind == Kind::MatchOnlyText && crate::opensearch::active()) => SourceType::None,
                 None => {
-                    return Err(search_aggs::AggError::illegal_argument(format!(
-                        "Fielddata is disabled on [{}] in [{}]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{}] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
-                        f.name, self.index, f.name
-                    )));
+                    return Err(search_aggs::AggError::illegal_argument(fielddata_disabled(&f.name, &self.index)));
                 }
             },
             _ => SourceType::None,
@@ -473,7 +685,12 @@ impl FieldLookup for Lookup<'_> {
         a.date_format = f.mapper.raw("format").and_then(Value::as_str).map(str::to_string);
         a.nested_path = f.nested_path.clone();
         a.points = f.index && (f.kind.is_numeric() || f.kind.is_date());
+        a.indexed = f.index && f.kind == Kind::Keyword && number == f.number;
         a.counter = f.metric.as_deref() == Some("counter");
+        a.position = f.metric.as_deref() == Some("position") && crate::engine::tsdb::is_time_series(&self.idx);
+        if f.kind == Kind::CountedKeyword {
+            a.counts = f.subfield("count");
+        }
         Ok(Some(a))
     }
 
@@ -505,7 +722,22 @@ impl FieldLookup for Lookup<'_> {
 
     fn global_query(&self) -> QueryRef {
         // `buildFilteredQuery(match_all)`: non-nested docs plus the search's alias filter.
-        let root = self.root_filter();
+        // OpenSearch builds it from a `match_all`, filtered to the root docs only when the
+        // index has nested docs: the same docs, but its profile shows the query.
+        let root = if crate::opensearch::active() {
+            let all: QueryRef = Arc::new(search_index::query::MatchAllQuery);
+            if self.table.objects.values().any(|o| o.nested) {
+                Arc::new(search_index::query::BooleanQuery::new().add(search_index::query::Occur::Must, all).add(search_index::query::Occur::Filter, self.root_filter()))
+            } else {
+                all
+            }
+        } else if self.table.objects.values().any(|o| o.nested) {
+            self.root_filter()
+        } else {
+            // `SearchExecutionContext.filterQuery` adds the non-nested filter only to indices
+            // with nested fields.
+            Arc::new(search_index::query::MatchAllQuery)
+        };
         let Some(af) = &self.alias_filter else { return root };
         let ctx = QueryCtx::new(self.cluster, self.st, &self.idx, &self.table, &self.searcher, self.now);
         match ctx.to_filter(af) {
@@ -532,6 +764,19 @@ impl FieldLookup for Lookup<'_> {
         self.now
     }
 
+    fn field_date_formatter(&self, field: &str, pattern: &str) -> search_aggs::Result<Arc<dyn search_aggs::DateFormatter>> {
+        let locale = self.table.get(field).and_then(|f| f.date_format.as_ref().map(|d| d.locale));
+        match locale {
+            // search-aggs' printer knows English and `Locale.ROOT` texts; other locales print
+            // through the mapping's formatter.
+            Some(l @ crate::time::DateLocale::Cldr(_)) => match crate::time::DateFormatter::new(pattern) {
+                Ok(f) => Ok(Arc::new(LocaleDates { pattern: pattern.to_string(), fmt: f.with_locale(l) })),
+                Err(_) => self.date_formatter(pattern),
+            },
+            _ => self.date_formatter(pattern),
+        }
+    }
+
     fn date_formatter(&self, pattern: &str) -> search_aggs::Result<Arc<dyn search_aggs::DateFormatter>> {
         let printer = search_aggs::format::builtin_date_formatter(pattern)?;
         match crate::time::DateFormatter::new(pattern) {
@@ -541,7 +786,19 @@ impl FieldLookup for Lookup<'_> {
     }
 
     fn fetcher(&self) -> Option<Arc<dyn search_aggs::TopHitsFetcher>> {
-        Some(Arc::new(Fetcher { table: self.table.clone(), index: self.index.clone(), idx: self.idx.clone(), shard: self.shard.0, parent_fields: self.parent_fields.clone() }))
+        Some(Arc::new(Fetcher {
+            table: self.table.clone(),
+            index: self.index.clone(),
+            idx: self.idx.clone(),
+            shard: self.shard.0,
+            parent_fields: self.parent_fields.clone(),
+            rescore: self.rescore.clone(),
+            id_fielddata: super::id_fielddata::enabled(self.st),
+        }))
+    }
+
+    fn top_metrics_max_size(&self) -> u32 {
+        self.idx.settings.get("index.top_metrics_max_size").and_then(|v| v.parse().ok()).unwrap_or(10)
     }
 
     fn max_inner_result_window(&self) -> u32 {
@@ -575,6 +832,7 @@ impl FieldLookup for Lookup<'_> {
             match name.as_str() {
                 "_score" => out.push(HitSort::Score { reverse: !reverse }),
                 "_doc" => out.push(HitSort::Doc { reverse }),
+                "_script" | "_geo_distance" | "_geoDistance" => out.push(self.computed_sort(&it)?),
                 field => {
                     let Some(f) = self.field(field)? else {
                         return Err(search_aggs::AggError::new(400, "query_shard_exception", format!("No mapping found for [{field}] in order to sort on")));
@@ -596,7 +854,12 @@ impl FieldLookup for Lookup<'_> {
                         Some("median") => Some(SortMode::Median),
                         _ => None,
                     };
-                    out.push(HitSort::Field { field: f, reverse, missing, mode });
+                    // Inside a `nested` aggregation the hits are the nested docs themselves.
+                    let nested = match opts.as_ref().and_then(|o| o.get("nested")) {
+                        Some(n) => Some(self.nested_sort(n)?),
+                        None => None,
+                    };
+                    out.push(HitSort::Field { field: f, reverse, missing, mode, nested });
                 }
             }
         }
@@ -649,6 +912,35 @@ struct EsDates {
     parser: crate::time::DateFormatter,
 }
 
+fn es_zone(zone: &search_aggs::TimeZone) -> crate::time::Zone {
+    match zone {
+        search_aggs::TimeZone::Fixed { offset_secs, .. } => crate::time::Zone::Offset(*offset_secs),
+        search_aggs::TimeZone::Named(tz) => crate::time::Zone::Named(*tz),
+    }
+}
+
+/// A date format in a field's non-English `locale` (month and day names in its language).
+#[derive(Debug)]
+struct LocaleDates {
+    pattern: String,
+    fmt: crate::time::DateFormatter,
+}
+
+impl search_aggs::DateFormatter for LocaleDates {
+    fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    fn format(&self, millis: i64, nanos: u32, zone: &search_aggs::TimeZone) -> String {
+        let i = crate::time::Instant::from_millis(millis);
+        self.fmt.format(crate::time::Instant { secs: i.secs, nanos: i.nanos + nanos }, &es_zone(zone))
+    }
+
+    fn parse(&self, text: &str, now_millis: i64, round_up: bool, zone: &search_aggs::TimeZone) -> search_aggs::Result<i64> {
+        crate::time::parse_date_math(text, now_millis, round_up, Some(&es_zone(zone)), &self.fmt).map(|i| i.millis()).map_err(|e| to_agg_error(&e.to_es()))
+    }
+}
+
 /// An [`EsError`] for search-aggs (causes kept).
 fn to_agg_error(e: &EsError) -> search_aggs::AggError {
     let mut out = search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string());
@@ -680,11 +972,17 @@ impl search_aggs::DateFormatter for EsDates {
     }
 }
 
-/// `TextFieldMapper`'s fielddata error.
-fn fielddata_disabled(field: &str, index: &str) -> String {
-    format!(
-        "Fielddata is disabled on [{field}] in [{index}]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{field}] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
-    )
+/// `TextFieldMapper`'s fielddata error (OpenSearch's doesn't name the field and index first).
+pub(crate) fn fielddata_disabled(field: &str, index: &str) -> String {
+    fielddata_disabled_in(crate::opensearch::active(), field, index)
+}
+
+/// [`fielddata_disabled`] for a known dialect.
+pub(crate) fn fielddata_disabled_in(opensearch: bool, field: &str, index: &str) -> String {
+    let tail = format!(
+        "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{field}] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+    );
+    if opensearch { tail } else { format!("Fielddata is disabled on [{field}] in [{index}]. {tail}") }
 }
 
 /// `significant_text` and `categorize_text`: `_source` values re-analyzed with the field's
@@ -728,6 +1026,11 @@ impl search_aggs::TextTerms for TextSource {
     }
 
     fn tokens(&self, seg: &search_index::SegmentContext, doc: u32, field: &str, source_fields: &[String]) -> search_aggs::Result<Vec<Vec<Vec<u8>>>> {
+        let mut chars = 0;
+        self.tokens_counting(seg, doc, field, source_fields, &mut chars)
+    }
+
+    fn tokens_counting(&self, seg: &search_index::SegmentContext, doc: u32, field: &str, source_fields: &[String], chars: &mut u64) -> search_aggs::Result<Vec<Vec<Vec<u8>>>> {
         let Some(analyzer) = self.analyzer(field) else { return Ok(Vec::new()) };
         let Some(src) = Self::source(seg, doc)? else { return Ok(Vec::new()) };
         // Without explicit `source_fields`, `SearchExecutionContext.sourcePath`: a multi-field
@@ -756,6 +1059,7 @@ impl search_aggs::TextTerms for TextSource {
                     Value::Str(s) => std::borrow::Cow::Borrowed(s.as_str()),
                     other => std::borrow::Cow::Owned(other.to_es_string()),
                 };
+                *chars += text.encode_utf16().count() as u64;
                 let mut terms = Vec::new();
                 analyzer.analyze(&text, &mut |t| terms.push(t.term.as_bytes().to_vec()));
                 out.push(terms);
@@ -791,6 +1095,9 @@ struct Fetcher {
     idx: Arc<crate::meta::IndexMeta>,
     shard: u32,
     parent_fields: Arc<Vec<crate::search_source::FieldAndFormat>>,
+    rescore: Option<Arc<Vec<super::PreparedRescore>>>,
+    /// [`super::id_fielddata::enabled`] when the search started.
+    id_fielddata: bool,
 }
 
 /// The hidden key a rendered `top_hits` hit carries to the coordinator, which adds what needs
@@ -799,6 +1106,18 @@ struct Fetcher {
 pub const TOP_HIT_MARKER: &str = "__roll_top_hit";
 
 impl search_aggs::TopHitsFetcher for Fetcher {
+    fn rescores(&self) -> bool {
+        self.rescore.is_some()
+    }
+
+    fn rescore(&self, searcher: &Searcher, hits: &mut Vec<(u32, f32)>) -> search_aggs::Result<()> {
+        let Some(r) = &self.rescore else { return Ok(()) };
+        let shard_hits = hits.iter().map(|&(doc, score)| super::ShardHit { doc, score, sort: Vec::new(), group: None }).collect();
+        let (out, _, _) = super::apply_rescore(searcher, shard_hits, r).map_err(|e| search_aggs::AggError::new(e.status, e.kind.to_string(), e.reason().to_string()))?;
+        *hits = out.into_iter().map(|h| (h.doc, h.score)).collect();
+        Ok(())
+    }
+
     fn fetch(&self, searcher: &Searcher, hits: &[search_aggs::FetchHit], spec: &Json) -> search_aggs::Result<Vec<Json>> {
         let spec_v = from_json(spec);
         let get = |k: &str| spec_v.get(k);
@@ -839,6 +1158,10 @@ impl search_aggs::TopHitsFetcher for Fetcher {
             version: get("version").and_then(Value::as_bool).unwrap_or(false),
             seq_no_primary_term: get("seq_no_primary_term").and_then(Value::as_bool).unwrap_or(false),
             force_synthetic: false,
+            id_fielddata: self.id_fielddata,
+            script_fields_only: get("script_fields").and_then(Value::as_object).is_some_and(|m| !m.is_empty()),
+            raw_source: false,
+            keep_id: false,
         };
         let ie = |e| fetch_err(crate::engine::convert::index_error(e));
         let mut marker = Map::new();
@@ -849,6 +1172,9 @@ impl search_aggs::TopHitsFetcher for Fetcher {
         }
         if get("explain").and_then(Value::as_bool) == Some(true) {
             marker.insert("explain".into(), Value::Bool(true));
+        }
+        if let Some(sf @ Value::Obj(_)) = get("script_fields") {
+            marker.insert("script_fields".into(), sf.clone());
         }
         if !own_fields {
             marker.insert("parent_fields".into(), Value::Bool(true));
@@ -885,8 +1211,12 @@ impl search_aggs::TopHitsFetcher for Fetcher {
                 }
                 None => {
                     let stored = searcher.stored(h.doc).map_err(ie)?;
-                    m.insert("_id".into(), Value::Str(super::hits::stored_id(&stored).unwrap_or_default()));
-                    super::hits::render_doc(&self.table, Some(&self.idx), searcher, h.doc, &opts, &mut m, score, 0).map_err(fetch_err)?;
+                    // `stored_fields: _none_` loads no `_id`, unless Elasticsearch's script
+                    // fields phase asks for it.
+                    if opts.stored_fields != Some(None) || (opts.script_fields_only && !crate::opensearch::active()) {
+                        m.insert("_id".into(), Value::Str(super::hits::stored_id(&stored).unwrap_or_default()));
+                    }
+                    super::hits::render_doc_stored(&self.table, Some(&self.idx), searcher, h.doc, &stored, &opts, &mut m, score, 0).map_err(fetch_err)?;
                 }
             }
             if !h.sort.is_empty() {

@@ -118,11 +118,47 @@ pub struct AggField {
     /// `COUNTER` values source: `rate` computes a reset-aware counter rate per series, and
     /// several aggregations refuse the field).
     pub counter: bool,
+    /// A `time_series_metric: position` geo point of a `time_series` index
+    /// (`TimeSeriesValuesSourceType.POSITION`, named in unsupported-aggregation errors).
+    pub position: bool,
+    /// A field with one value for every document of the shard (`ConstantFieldType`: `_index`,
+    /// `_index_mode`, `constant_keyword`): aggregations read it as that value, with no doc
+    /// values.
+    pub constant: Option<String>,
+    /// A keyed `flattened` sub-field (`KeyedFlattenedFieldType`): its key. The doc values of
+    /// [`number`](Self::number) hold `key\0value` terms for every key; readers keep this key's
+    /// terms (a contiguous ordinal range) and strip the `key\0` prefix.
+    pub flattened_key: Option<String>,
+    /// The field's terms are in the inverted index exactly as in its doc values (an indexed
+    /// `keyword`: `ValuesSourceConfig.alignsWithSearchIndex`), so a term query can stand for a
+    /// doc-values term ([`crate::bucket::fbf`]).
+    pub indexed: bool,
+    /// A `counted_keyword` field: the binary doc values holding each doc's occurrence count
+    /// per distinct value (vInt array, in term order).
+    pub counts: Option<u32>,
+    /// Read every occurrence of a `counted_keyword` value (`counted_terms`), not each distinct
+    /// value once.
+    pub expand_counts: bool,
 }
 
 impl AggField {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>, source: SourceType, number: u32) -> AggField {
-        AggField { name: name.into(), type_name: type_name.into(), source, number, date_format: None, nested_path: None, points: false, counter: false }
+        AggField {
+            name: name.into(),
+            type_name: type_name.into(),
+            source,
+            number,
+            date_format: None,
+            nested_path: None,
+            points: false,
+            counter: false,
+            position: false,
+            constant: None,
+            flattened_key: None,
+            indexed: false,
+            counts: None,
+            expand_counts: false,
+        }
     }
 }
 
@@ -175,6 +211,19 @@ pub trait TopHitsFetcher: Send + Sync {
     /// `stored_fields`, `docvalue_fields`, `fields`, `script_fields`, `highlight`, `explain`,
     /// `version`, `seq_no_primary_term`).
     fn fetch(&self, searcher: &search_index::Searcher, hits: &[FetchHit], spec: &Json) -> Result<Vec<Json>>;
+
+    /// The search's rescorers applied to a bucket's best hits when `top_hits` sorts by score
+    /// (`TopHitsAggregator.buildAggregation` runs `context.rescore()` over its top docs):
+    /// `hits` are `(doc, score)`, best first, and come back rescored and re-sorted. The
+    /// default (no rescorers) leaves them alone.
+    fn rescore(&self, _searcher: &search_index::Searcher, _hits: &mut Vec<(u32, f32)>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether [`rescore`](Self::rescore) does anything (spares buckets the bookkeeping).
+    fn rescores(&self) -> bool {
+        false
+    }
 }
 
 /// Where documents without a value sort (`missing`).
@@ -199,6 +248,8 @@ pub enum SortMode {
 }
 
 /// A sort key of `top_hits` / `top_metrics` resolved against the index.
+// A few per request, never in bulk: the size difference between variants costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum HitSort {
     /// `_score` (`reverse: false` is descending, Lucene's natural score order).
@@ -211,7 +262,36 @@ pub enum HitSort {
         missing: SortMissing,
         /// `None`: `min` ascending, `max` descending.
         mode: Option<SortMode>,
+        /// A field inside `nested` objects sorts each hit by its nested children's values
+        /// (`NestedSortBuilder`: the parent level's docs, the path's docs with the sort's
+        /// `filter`, `max_children`).
+        nested: Option<search_index::collector::top_field::NestedSort>,
     },
+    /// A key the embedder computes per document: `_script` and `_geo_distance` sorts.
+    Computed { sort: std::sync::Arc<dyn ComputedSort>, reverse: bool },
+}
+
+/// A sort key computed per document (`_script` with its `type`, `_geo_distance`).
+pub trait ComputedSort: Send + Sync + std::fmt::Debug {
+    /// `number` (scripts and distances: doubles), `string` or `version` (bytes).
+    fn kind(&self) -> &str;
+    /// Binds the key to a segment.
+    fn segment(&self, seg: &search_index::SegmentContext) -> Result<Box<dyn SegmentComputedSort>>;
+    /// How a bytes value prints (a `version` script's values decode).
+    fn render_bytes(&self, b: &[u8]) -> crate::json::Json {
+        crate::json::Json::Str(String::from_utf8_lossy(b).into_owned())
+    }
+    /// Whether the values read `_score`.
+    fn needs_score(&self) -> bool {
+        false
+    }
+}
+
+/// A [`ComputedSort`] bound to a segment.
+pub trait SegmentComputedSort: Send {
+    /// The value of segment doc `doc` ([`crate::sort::SortVal::Null`] when it has none). A
+    /// failure is reported through `search_index::search::defer_error`.
+    fn value(&mut self, doc: u32, score: f32) -> crate::sort::SortVal;
 }
 
 /// Index-level hooks of one shard's aggregation run. Every method but [`field`](Self::field)
@@ -270,6 +350,13 @@ pub trait FieldLookup: Send + Sync {
         crate::format::builtin_date_formatter(pattern)
     }
 
+    /// A date formatter for a `format` pattern over the mapped date field `field`, in the
+    /// field's `locale` (`DateFieldType.docValueFormat`: `forPattern(format).withLocale(...)`).
+    fn field_date_formatter(&self, field: &str, pattern: &str) -> Result<Arc<dyn DateFormatter>> {
+        let _ = field;
+        self.date_formatter(pattern)
+    }
+
     /// A `java.text.DecimalFormat` for a numeric `format` pattern (`Locale.ROOT` symbols).
     fn decimal_format(&self, pattern: &str) -> Result<Arc<dyn NumberFormatter>> {
         crate::format::builtin_decimal_format(pattern)
@@ -293,6 +380,11 @@ pub trait FieldLookup: Send + Sync {
     /// `index.max_inner_result_window` (100): the bound of `top_hits` `from + size`.
     fn max_inner_result_window(&self) -> u32 {
         100
+    }
+
+    /// `index.top_metrics_max_size` (10): the bound of `top_metrics` `size`.
+    fn top_metrics_max_size(&self) -> u32 {
+        10
     }
 
     /// Resolves a `top_hits` / `top_metrics` `sort` (a string, an object or an array of them,
@@ -358,6 +450,12 @@ pub trait TextTerms: Send + Sync {
     /// The analyzed terms of the segment's doc `doc`: one list per value of each of
     /// `source_fields` (taken from `_source`, analyzed with `field`'s index analyzer), in order.
     fn tokens(&self, seg: &SegmentContext, doc: u32, field: &str, source_fields: &[String]) -> Result<Vec<Vec<Vec<u8>>>>;
+    /// [`tokens`](Self::tokens), adding the UTF-16 length of the values read to `chars`
+    /// (`profile`'s `chars_fetched`). The default counts nothing.
+    fn tokens_counting(&self, seg: &SegmentContext, doc: u32, field: &str, source_fields: &[String], chars: &mut u64) -> Result<Vec<Vec<Vec<u8>>>> {
+        let _ = chars;
+        self.tokens(seg, doc, field, source_fields)
+    }
     /// The number of documents of the searcher whose `field` holds `term` (Lucene's
     /// `docFreq`), the background frequency.
     fn doc_freq(&self, searcher: &search_index::Searcher, field: &str, term: &[u8]) -> Result<u64>;

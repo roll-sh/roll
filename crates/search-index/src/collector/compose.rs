@@ -129,6 +129,29 @@ impl LeafCollector for MultiLeaf<'_> {
         Ok(())
     }
 
+    // Constant scores: no minimum competitive score to merge, so each collector takes the
+    // whole block; one that terminates is finished and dropped, as in `collect`.
+    fn collect_block(&mut self, docs: &[u32], score: f32) -> Result<()> {
+        let mut live = 0;
+        for i in 0..self.leaves.len() {
+            let Some(l) = self.leaves[i].as_mut() else { continue };
+            match l.collect_block(docs, score) {
+                Ok(()) => live += 1,
+                Err(Error::CollectionTerminated) => {
+                    if let Some(mut l) = self.leaves[i].take() {
+                        l.finish()?;
+                    }
+                    self.scoring[i] = false;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if live == 0 {
+            return Err(Error::CollectionTerminated);
+        }
+        Ok(())
+    }
+
     fn finish(&mut self) -> Result<()> {
         for l in self.leaves.iter_mut().flatten() {
             l.finish()?;
@@ -180,17 +203,34 @@ impl Collector for MultiCollector<'_> {
 }
 
 /// Elasticsearch's `terminate_after`: stops after `max` collected docs (per shard).
+///
+/// Elasticsearch's `QueryPhaseCollector` counts only the docs its top hits take: those that
+/// pass `min_score` and the `post_filter` ([`TerminateAfter::counting`]). The others still
+/// reach the inner collector (aggregations see them) without counting.
 pub struct TerminateAfter<C> {
     pub inner: C,
     max: u64,
     count: u64,
     /// Whether collection stopped while docs may remain (`terminated_early`).
     pub terminated_early: bool,
+    min_score: Option<f32>,
+    filter: Option<Box<dyn crate::search::Weight>>,
 }
 
 impl<C: Collector> TerminateAfter<C> {
     pub fn new(inner: C, max: u64) -> TerminateAfter<C> {
-        TerminateAfter { inner, max, count: 0, terminated_early: false }
+        TerminateAfter { inner, max, count: 0, terminated_early: false, min_score: None, filter: None }
+    }
+
+    /// Counts only the docs scoring at least `min_score` and matching `filter` (a
+    /// `post_filter`). A doc's score is computed once and handed down.
+    pub fn counting(mut self, searcher: &crate::search::Searcher, min_score: Option<f32>, filter: Option<&crate::search::QueryRef>) -> Result<TerminateAfter<C>> {
+        self.min_score = min_score;
+        self.filter = match filter {
+            Some(f) => Some(searcher.create_weight(f, ScoreMode::CompleteNoScores)?),
+            None => None,
+        };
+        Ok(self)
     }
 
     pub fn count(&self) -> u64 {
@@ -203,16 +243,26 @@ struct TerminateLeaf<'a> {
     max: u64,
     count: &'a mut u64,
     terminated: &'a mut bool,
+    min_score: Option<f32>,
+    /// The post filter, when only its matches count (`None` inside: no match in the segment).
+    filter: Option<FilterBits>,
 }
 
 impl LeafCollector for TerminateLeaf<'_> {
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()> {
-        if *self.count >= self.max {
-            *self.terminated = true;
-            return Err(Error::CollectionTerminated);
+        let score = self.min_score.map(|_| scorer.score());
+        let counts = score.is_none_or(|s| s >= self.min_score.unwrap_or(f32::NEG_INFINITY)) && self.filter.as_mut().is_none_or(|f| f.accepts(doc));
+        if counts {
+            if *self.count >= self.max {
+                *self.terminated = true;
+                return Err(Error::CollectionTerminated);
+            }
+            *self.count += 1;
         }
-        *self.count += 1;
-        self.inner.collect(doc, scorer)
+        match score {
+            Some(score) => self.inner.collect(doc, &mut Fixed { score, inner: scorer }),
+            None => self.inner.collect(doc, scorer),
+        }
     }
     fn finish(&mut self) -> Result<()> {
         self.inner.finish()
@@ -237,7 +287,11 @@ impl<C: Collector> Collector for TerminateAfter<C> {
             return Err(Error::CollectionTerminated);
         }
         let inner = self.inner.leaf(seg)?;
-        Ok(Box::new(TerminateLeaf { inner, max: self.max, count: &mut self.count, terminated: &mut self.terminated_early }))
+        let filter = match &self.filter {
+            Some(w) => Some(FilterBits { scorer: w.scorer(seg)? }),
+            None => None,
+        };
+        Ok(Box::new(TerminateLeaf { inner, max: self.max, count: &mut self.count, terminated: &mut self.terminated_early, min_score: self.min_score, filter }))
     }
 }
 
@@ -321,13 +375,18 @@ impl<C: Collector> PostFilter<C> {
 
 struct PostFilterLeaf<'a> {
     inner: Box<dyn LeafCollector + 'a>,
-    filter: Option<Box<dyn crate::search::Scorer>>,
+    filter: FilterBits,
 }
 
-impl PostFilterLeaf<'_> {
+/// A filter's matches read as bits, for docs that arrive in increasing order.
+struct FilterBits {
+    scorer: Option<Box<dyn crate::search::Scorer>>,
+}
+
+impl FilterBits {
     /// Whether the filter matches `doc` (docs arrive in increasing order).
     fn accepts(&mut self, doc: u32) -> bool {
-        let Some(f) = self.filter.as_mut() else { return false };
+        let Some(f) = self.scorer.as_mut() else { return false };
         let cur = f.doc();
         if cur != u32::MAX && cur > doc {
             return false;
@@ -346,7 +405,7 @@ impl PostFilterLeaf<'_> {
 
 impl LeafCollector for PostFilterLeaf<'_> {
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()> {
-        if self.accepts(doc) { self.inner.collect(doc, scorer) } else { Ok(()) }
+        if self.filter.accepts(doc) { self.inner.collect(doc, scorer) } else { Ok(()) }
     }
     fn finish(&mut self) -> Result<()> {
         self.inner.finish()
@@ -364,7 +423,7 @@ impl<C: Collector> Collector for PostFilter<C> {
         self.inner.score_mode()
     }
     fn leaf<'a>(&'a mut self, seg: &SegmentContext) -> Result<Box<dyn LeafCollector + 'a>> {
-        let filter = self.filter.scorer(seg)?;
+        let filter = FilterBits { scorer: self.filter.scorer(seg)? };
         Ok(Box::new(PostFilterLeaf { inner: self.inner.leaf(seg)?, filter }))
     }
 }

@@ -73,7 +73,7 @@ fn windowed_scoring_equals_plain() {
     for seed in 0..3u64 {
         let corpus = build(seed + 50, 1500, ShardConfig { merge_threads: 0, ..Default::default() });
         let s = corpus.shard.searcher();
-        let ctl = SearchControl { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)), cancelled: None };
+        let ctl = SearchControl { deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)), cancelled: None, ext: None };
         for (qi, q) in queries().iter().enumerate() {
             for (n, threshold) in [(10usize, u64::MAX), (3, 5), (100, u64::MAX)] {
                 let mut a = TopScoreCollector::new(n, threshold);
@@ -213,6 +213,36 @@ fn terminate_after_stops_at_the_limit() {
         assert_eq!(c.inner.total, max.min(total));
         assert_eq!(c.terminated_early, max < total, "max {max} total {total}");
     }
+}
+
+/// Elasticsearch's `QueryPhaseCollector` counts only the hits that pass the post filter (and
+/// `min_score`); the other matches still reach the collector until the limit is passed.
+#[test]
+fn terminate_after_counts_filtered_hits_only() {
+    let corpus = build(7, 900, ShardConfig { merge_threads: 0, ..Default::default() });
+    let s = corpus.shard.searcher();
+    let q: QueryRef = Arc::new(MatchAllQuery);
+    let filter: QueryRef = Arc::new(TermQuery::new(TAG, b"t1".to_vec()));
+    let filtered = s.count(&filter).unwrap();
+    assert!(filtered > 3);
+    for max in [1u64, 3, filtered, filtered + 5] {
+        let mut c = TerminateAfter::new(TotalHitCountCollector::default(), max).counting(&s, None, Some(&filter)).unwrap();
+        s.search(&q, &mut c).unwrap();
+        assert_eq!(c.count(), max.min(filtered), "max {max}");
+        assert_eq!(c.terminated_early, max < filtered, "max {max} filtered {filtered}");
+        // Every match up to the one that passed the limit was collected, filtered or not.
+        assert!(c.inner.total >= c.count());
+    }
+    // A filter nothing matches never terminates.
+    let none: QueryRef = Arc::new(TermQuery::new(TAG, b"nope".to_vec()));
+    let mut c = TerminateAfter::new(TotalHitCountCollector::default(), 1).counting(&s, None, Some(&none)).unwrap();
+    s.search(&q, &mut c).unwrap();
+    assert!(!c.terminated_early);
+    assert_eq!(c.inner.total, s.count(&q).unwrap());
+    // `min_score` above every score: nothing counts either.
+    let mut c = TerminateAfter::new(TotalHitCountCollector::default(), 1).counting(&s, Some(f32::MAX), None).unwrap();
+    s.search(&q, &mut c).unwrap();
+    assert_eq!((c.count(), c.terminated_early), (0, false));
 }
 
 const GRP: u32 = 30;
@@ -511,4 +541,46 @@ fn profiled_searches_report_the_query_tree() {
     // An unprofiled view of the same searcher records nothing more.
     s.search(&q, &mut TopScoreCollector::new(10, u64::MAX)).unwrap();
     assert_eq!(p.tree().len(), 1);
+}
+
+/// A `_script` sort key whose script the deadline stopped on the third document.
+struct StoppedOnThird;
+struct StoppedOnThirdLeaf(u32);
+
+impl search_index::collector::SortScript for StoppedOnThird {
+    fn leaf(&self, _seg: &search_index::SegmentContext) -> search_index::Result<Box<dyn search_index::collector::LeafSortScript>> {
+        Ok(Box::new(StoppedOnThirdLeaf(0)))
+    }
+}
+
+impl search_index::collector::LeafSortScript for StoppedOnThirdLeaf {
+    fn number(&mut self, doc: u32) -> search_index::Result<f64> {
+        self.0 += 1;
+        if self.0 == 3 {
+            search_index::search::note_interrupted(search_index::Error::TimeExceeded);
+            return Err(search_index::Error::illegal("script stopped"));
+        }
+        Ok(f64::from(doc))
+    }
+}
+
+/// A doc whose sort script was interrupted isn't collected (Elasticsearch never reports a
+/// hit without its sort value); the docs before it are the partial result.
+#[test]
+fn interrupted_sort_scripts_keep_partial_results_only() {
+    let schema = Schema::new().with_field(FieldSchema::new(NUM, "num").with_doc_values(DocValuesType::SortedNumeric)).unwrap();
+    let shard = Shard::in_memory(schema);
+    for i in 0..5 {
+        shard.index(IndexOp::new(IndexableDoc::new(format!("d{i}").into_bytes()).doc_value(NUM, DocValue::SortedNumeric(i)))).unwrap();
+    }
+    shard.refresh().unwrap();
+    let s = shard.searcher();
+    let key = SortKey::Script(search_index::collector::ScriptSort { script: Arc::new(StoppedOnThird), reverse: true, mode: SortMode::Min, nested: None });
+    let mut col = TopFieldCollector::new(vec![key], 10, u64::MAX, false).with_searcher(&s);
+    let q: QueryRef = Arc::new(MatchAllQuery);
+    let r = s.search(&q, &mut col);
+    assert!(matches!(r, Err(search_index::Error::TimeExceeded)), "{r:?}");
+    let hits = col.top_docs().hits;
+    assert_eq!(hits.iter().map(|h| h.values.clone()).collect::<Vec<_>>(), vec![vec![SortValue::Double(1.0)], vec![SortValue::Double(0.0)]]);
+    assert!(search_index::search::take_deferred_error().is_none());
 }

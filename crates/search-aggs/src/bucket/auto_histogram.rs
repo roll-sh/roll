@@ -144,6 +144,19 @@ pub fn create(def: &AggDef, spec: &AutoDateHistogramSpec, ctx: &mut BindCtx<'_>)
     let n = roundings.len();
     let format = vs.format.clone();
     let has_values = !vs.unmapped || vs.missing.is_some();
+    // Profiled opensearch-dialect requests report OpenSearch's filter rewrite replay.
+    let os = (crate::dialect::opensearch() && ctx.profiler.is_some()).then(|| {
+        let nanos = vs.field.as_ref().is_some_and(|f| f.type_name == "date_nanos");
+        let buckets = crate::filter_rewrite::DateBuckets {
+            rounding: roundings[0].rounding.clone(),
+            hard: (None, None),
+            after: None,
+            nanos,
+            auto: roundings.iter().map(|r| (r.rounding.clone(), r.max_rough_millis())).collect(),
+            target: spec.buckets as i64,
+        };
+        Box::new(crate::filter_rewrite::FilterRewrite::date(ctx, &vs, buckets, !subs.is_empty(), usize::MAX))
+    });
     Ok(Box::new(AutoAgg {
         vs,
         has_values,
@@ -166,6 +179,7 @@ pub fn create(def: &AggDef, spec: &AutoDateHistogramSpec, ctx: &mut BindCtx<'_>)
         tracker: ctx.tracker(def),
         finished: false,
         rounding_count: n,
+        os,
     }))
 }
 
@@ -216,6 +230,9 @@ struct AutoAgg {
     tracker: MemTracker,
     finished: bool,
     rounding_count: usize,
+    /// Set for profiled opensearch-dialect requests (`skiplist_collectors_used` and the filter
+    /// rewrite replay join the debug map).
+    os: Option<Box<Option<crate::filter_rewrite::FilterRewrite>>>,
 }
 
 impl AutoAgg {
@@ -426,9 +443,25 @@ impl AutoAgg {
 
 impl Aggregator for AutoAgg {
     fn profile_type(&self) -> &'static str {
-        "AutoDateHistogramAggregator.FromSingle"
+        if self.many { "AutoDateHistogramAggregator.FromMany" } else { "AutoDateHistogramAggregator.FromSingle" }
+    }
+    fn profile_debug(&self) -> crate::json::Json {
+        let mut o = crate::json::Json::obj();
+        // OpenSearch adds the filter rewrite counts first (its debug map is a `HashMap`, so
+        // this only shows where two keys share a bucket).
+        if let Some(Some(r)) = self.os.as_deref() {
+            r.debug_into(&mut o);
+        }
+        o.push("surviving_buckets", crate::json::Json::from(self.ords.len() as u64));
+        if self.os.is_some() {
+            o.push("skiplist_collectors_used", crate::json::Json::from(0u64));
+        }
+        o
     }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        if let Some(Some(r)) = self.os.as_deref_mut() {
+            r.try_segment(seg);
+        }
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         self.reader = if self.has_values { Some(self.vs.numeric_reader(seg)?) } else { None };
         if self.record {

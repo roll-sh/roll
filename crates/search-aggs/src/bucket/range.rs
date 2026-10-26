@@ -343,7 +343,15 @@ pub fn create_range(def: &AggDef, spec: &RangeSpec, ctx: &mut BindCtx<'_>) -> Re
     } else {
         None
     };
+    // Profiled opensearch-dialect requests: OpenSearch's `RangeAggregatorBridge` replay.
+    let os_rewrite = if spec.kind == RangeKind::Range && !histogram {
+        let bounds: Vec<(f64, f64)> = ranges.iter().map(|r| (r.from, r.to)).collect();
+        crate::filter_rewrite::FilterRewrite::range(ctx, &vs, &bounds, !subs.is_empty()).map(Box::new)
+    } else {
+        None
+    };
     Ok(Box::new(RangeAgg {
+        os_rewrite,
         kind,
         counters,
         segment_done: false,
@@ -394,6 +402,8 @@ struct RangeAgg {
     tracker: MemTracker,
     dist: Vec<f64>,
     matched: Vec<u32>,
+    /// OpenSearch's filter rewrite replay (profiled opensearch-dialect requests).
+    os_rewrite: Option<Box<crate::filter_rewrite::FilterRewrite>>,
 }
 
 /// The range queries of [`RangeAgg::counters`], for fields whose range queries select exactly
@@ -521,7 +531,23 @@ impl Aggregator for RangeAgg {
         self.segment_done
     }
 
+    fn profile_type(&self) -> &'static str {
+        // OpenSearch's one range aggregator class (`range`, `date_range`, `geo_distance`).
+        if crate::dialect::opensearch() { "RangeAggregator" } else { "" }
+    }
+
+    fn profile_debug(&self) -> crate::json::Json {
+        let mut o = crate::json::Json::obj();
+        if let Some(r) = &self.os_rewrite {
+            r.debug_into(&mut o);
+        }
+        o
+    }
+
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        if let Some(r) = &mut self.os_rewrite {
+            r.try_segment(seg);
+        }
         self.segment_done = false;
         if let Some(ws) = &self.counters
             && !seg.has_deletions()

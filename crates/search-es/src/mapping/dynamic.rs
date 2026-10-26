@@ -139,10 +139,13 @@ fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &M
             crate::stack::maybe_grow(|| walk_object(c, existing, path, &flat, dynamic, trail))?;
             continue;
         }
+        if crate::opensearch::active() {
+            crate::opensearch::check_field_name(key).map_err(DynamicError::Other)?;
+        }
         if key.is_empty() {
             return Err(DynamicError::Other(EsError::document_parsing("failed to parse: field name cannot be an empty string").caused_by(EsError::illegal_argument("field name cannot be an empty string"))));
         }
-        if key.trim().is_empty() {
+        if key.trim().is_empty() && !crate::opensearch::active() {
             return Err(DynamicError::Other(EsError::document_parsing(format!("Field name cannot contain only whitespace: [{key}]"))));
         }
         if key.contains('.') {
@@ -158,7 +161,7 @@ fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &M
             if parts.iter().any(|p| p.is_empty()) {
                 return Err(failed(format!("field name cannot contain only whitespace: ['{key}']")));
             }
-            if parts.iter().any(|p| p.trim().is_empty()) {
+            if parts.iter().any(|p| p.trim().is_empty()) && !crate::opensearch::active() {
                 return Err(failed(format!("field name starting or ending with a [.] makes object resolution ambiguous: [{key}]")));
             }
             if subobjects || parts.len() == 1 {
@@ -220,6 +223,22 @@ fn walk_object(c: &mut Ctx, existing: Option<&ObjectMapper>, path: &str, doc: &M
                     let r = crate::stack::maybe_grow(|| walk_object(c, Some(&c.mapping.root), "", &single, root_dynamic, &mut Vec::new()));
                     c.copy_to_dest = was;
                     r?;
+                }
+            }
+            // `ConstantKeywordFieldMapper`: a field mapped without a value takes the first one
+            // a document gives it, through a mapping update.
+            Some(Mapper::Field(f)) if f.ty == "constant_keyword" && f.raw("value").is_none_or(Value::is_null) => {
+                let first = match value {
+                    Value::Str(s) => Some(s.clone()),
+                    Value::Num(_) | Value::Bool(_) => Some(value.to_es_string()),
+                    _ => None,
+                };
+                if let Some(v) = first
+                    && !matches!(c.update.lookup(&full), Some(super::MapperRef::Field(_)))
+                {
+                    let mut nf = f.clone();
+                    nf.set("value", Value::Str(v));
+                    insert(c, trail, Mapper::Field(nf));
                 }
             }
             Some(_) => {}

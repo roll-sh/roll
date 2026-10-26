@@ -316,3 +316,210 @@ fn constant_score_rewrites_its_boolean_without_scoring() {
     let q: search_index::QueryRef = Arc::new(ConstantScoreQuery::new(Arc::new(b)));
     assert_eq!(s.rewrite(&q).unwrap().lucene_string(s.schema()), "ConstantScore(a:x b:y -a:z)");
 }
+
+/// A 0-boosted match-none (a filter clause that matches nothing, nested a few levels deep)
+/// rewrites once to match-none: it used to ping-pong with its constant-score wrapper, and the
+/// nested rewrites multiplied that into a hang.
+#[test]
+fn zero_boosted_match_none_rewrites_once() {
+    use search_index::query::{BooleanQuery, BoostQuery, ConstantScoreQuery, MatchNoneQuery, Occur};
+    let shard = Shard::in_memory(schema());
+    let a = Analysis::global().analyzer("standard").unwrap();
+    shard.index(IndexOp::new(IndexableDoc::new(b"1".to_vec()).text(T, &a, "quick fox"))).unwrap();
+    assert!(shard.refresh().unwrap());
+    let s = shard.searcher();
+    let mut q: search_index::QueryRef = Arc::new(BoostQuery { query: Arc::new(MatchNoneQuery::new("empty BooleanQuery")), boost: 0.0 });
+    for _ in 0..8 {
+        q = Arc::new(ConstantScoreQuery::new(Arc::new(BooleanQuery::new().add(Occur::Filter, q).add(Occur::Should, Arc::new(TermQuery::new(T, "fox"))))));
+    }
+    let started = std::time::Instant::now();
+    let r = s.rewrite(&q).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "rewrite took {:?}", started.elapsed());
+    assert!(r.as_any().is::<MatchNoneQuery>(), "{}", r.lucene_string(s.schema()));
+    let mut c = TopScoreCollector::new(10, u64::MAX);
+    s.search(&q, &mut c).unwrap();
+    assert_eq!(c.top_docs().total_hits, 0);
+}
+
+/// Lucene 10.5's `DisjunctionMaxQuery.rewrite` drops disjuncts that rewrite to match-none, then
+/// collapses what is left: one disjunct is that disjunct, none is match-none.
+#[test]
+fn dismax_drops_match_none_disjuncts() {
+    use search_index::query::{DisMaxQuery, MatchNoneQuery};
+    let shard = Shard::in_memory(schema());
+    let a = Analysis::global().analyzer("standard").unwrap();
+    shard.index(IndexOp::new(IndexableDoc::new(b"1".to_vec()).text(T, &a, "quick fox"))).unwrap();
+    assert!(shard.refresh().unwrap());
+    let s = shard.searcher();
+    let none = || -> search_index::QueryRef { Arc::new(MatchNoneQuery::new("no")) };
+    let inner: search_index::QueryRef = Arc::new(DisMaxQuery::new(vec![none()], 0.0));
+    let q: search_index::QueryRef = Arc::new(DisMaxQuery::new(vec![Arc::new(TermQuery::new(T, "fox")), inner], 0.0));
+    let r = s.rewrite(&q).unwrap();
+    assert!(r.as_any().is::<TermQuery>(), "{}", r.lucene_string(s.schema()));
+    let q: search_index::QueryRef = Arc::new(DisMaxQuery::new(vec![none(), Arc::new(DisMaxQuery::new(vec![none()], 0.0))], 0.3));
+    let r = s.rewrite(&q).unwrap();
+    assert!(r.as_any().is::<MatchNoneQuery>(), "{}", r.lucene_string(s.schema()));
+    // Nothing to drop: the query stays a disjunction (of its rewritten clauses).
+    let q: search_index::QueryRef = Arc::new(DisMaxQuery::new(vec![Arc::new(TermQuery::new(T, "fox")), Arc::new(TermQuery::new(T, "quick"))], 0.3));
+    assert!(s.rewrite(&q).unwrap().as_any().is::<DisMaxQuery>());
+}
+
+/// Lucene's `WildcardQuery.toAutomaton("")` concatenates no automata: the empty language. The
+/// empty pattern matches no term, not even the empty one.
+#[test]
+fn empty_wildcard_pattern_matches_nothing() {
+    use search_index::query::MultiTermQuery;
+    const K: u32 = 11;
+    let schema = schema().with_field(FieldSchema::new(K, "k").indexed(IndexOptions::Docs, false)).unwrap();
+    let shard = Shard::in_memory(schema);
+    shard.index(IndexOp::new(IndexableDoc::new(b"1".to_vec()).term(K, ""))).unwrap();
+    shard.index(IndexOp::new(IndexableDoc::new(b"2".to_vec()).term(K, "a"))).unwrap();
+    assert!(shard.refresh().unwrap());
+    let s = shard.searcher();
+    let count = |pattern: &str, ci: bool| {
+        let q: search_index::QueryRef = Arc::new(MultiTermQuery::wildcard(K, pattern, ci).unwrap());
+        let mut c = TopScoreCollector::new(10, u64::MAX);
+        s.search(&q, &mut c).unwrap();
+        c.top_docs().total_hits
+    };
+    assert_eq!(count("", false), 0);
+    assert_eq!(count("", true), 0);
+    assert_eq!(count("*", false), 2);
+    assert_eq!(count("?", false), 1);
+}
+
+/// Point ranges over segments where every doc has one value take the inverse walk (clear the
+/// docs outside from a full set) when most docs match; constant-score top hits past the hit
+/// threshold end a segment once its score can't compete, and sorted collection keeps its
+/// competitive iterator under `constant_score`. Every result equals brute force.
+#[test]
+fn dense_point_ranges_and_constant_score_pruning_match_brute_force() {
+    use rand::{Rng, SeedableRng};
+    use search_codec::points::encode::{i32_bytes, i64_bytes};
+    use search_codec::{DocValuesType, PointsSpec};
+    use search_index::collector::{FieldSort, Missing, SortKey, SortMode, SortType, TopFieldCollector, TotalRelation};
+    use search_index::doc::DocValue;
+    use search_index::query::{BooleanQuery, ConstantScoreQuery, DocValuesRangeQuery, DvRange, PointRangeQuery};
+    use search_index::{DeleteOp, QueryRef, ShardConfig};
+    const N: u32 = 11;
+    const P: u32 = 12;
+    // The two dimensions of P as doc values: the brute-force side of every check.
+    const P0: u32 = 13;
+    const P1: u32 = 14;
+    let schema = Schema::new()
+        .with_field(FieldSchema::new(N, "n").with_points(PointsSpec::new(1, 8)).with_doc_values(DocValuesType::SortedNumeric))
+        .unwrap()
+        .with_field(FieldSchema::new(P, "p").with_points(PointsSpec::new(2, 4)))
+        .unwrap()
+        .with_field(FieldSchema::new(P0, "p0").with_doc_values(DocValuesType::SortedNumeric))
+        .unwrap()
+        .with_field(FieldSchema::new(P1, "p1").with_doc_values(DocValuesType::SortedNumeric))
+        .unwrap();
+    for seed in 0..4u64 {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let shard = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema.clone(), Vec::new()).unwrap();
+        let mut docs: Vec<Option<(i64, (i32, i32))>> = Vec::new();
+        for i in 0..rng.gen_range(3000..9000u32) {
+            // Mostly increasing values (time series: whole leaves inside or outside), some noise.
+            let n = i as i64 * 3 + rng.gen_range(-50..50);
+            let p = (rng.gen_range(-1000..1000), rng.gen_range(-1000..1000));
+            let mut d = IndexableDoc::new(format!("{i}").into_bytes()).point(N, i64_bytes(n).to_vec()).doc_value(N, DocValue::SortedNumeric(n));
+            d = d.point(P, [i32_bytes(p.0), i32_bytes(p.1)].concat());
+            d = d.doc_value(P0, DocValue::SortedNumeric(p.0 as i64)).doc_value(P1, DocValue::SortedNumeric(p.1 as i64));
+            shard.index(IndexOp::new(d)).unwrap();
+            docs.push(Some((n, p)));
+            if rng.gen_bool(0.0008) {
+                shard.refresh().unwrap();
+            }
+        }
+        // One segment with a doc missing the points (not every doc valued: the plain walk).
+        if seed % 2 == 1 {
+            shard.refresh().unwrap();
+            shard.index(IndexOp::new(IndexableDoc::new(b"bare".to_vec()))).unwrap();
+            docs.push(None);
+            for _ in 0..50 {
+                let i = docs.len() as u32;
+                let n = i as i64 * 3;
+                let d = IndexableDoc::new(format!("{i}").into_bytes()).point(N, i64_bytes(n).to_vec()).doc_value(N, DocValue::SortedNumeric(n)).point(P, [i32_bytes(0), i32_bytes(0)].concat()).doc_value(P0, DocValue::SortedNumeric(0)).doc_value(P1, DocValue::SortedNumeric(0));
+                shard.index(IndexOp::new(d)).unwrap();
+                docs.push(Some((n, (0, 0))));
+            }
+        }
+        shard.refresh().unwrap();
+        if seed >= 2 {
+            for _ in 0..40 {
+                let i = rng.gen_range(0..docs.len());
+                let id = if docs[i].is_none() { "bare".to_string() } else { format!("{i}") };
+                shard.delete(DeleteOp::new(id.into_bytes())).unwrap();
+                docs[i] = None;
+            }
+            shard.refresh().unwrap();
+        }
+        let s = shard.searcher();
+        let max = docs.len() as i64 * 3;
+        let ids = |q: &QueryRef| -> Vec<u32> {
+            let mut c = TopScoreCollector::new(docs.len() + 10, u64::MAX);
+            s.search(q, &mut c).unwrap();
+            let mut v: Vec<u32> = c.top_docs().hits.iter().map(|h| h.doc).collect();
+            v.sort();
+            v
+        };
+        let dv = |f: u32, lower: i64, upper: i64| -> QueryRef { Arc::new(DocValuesRangeQuery { field: f, range: DvRange::Long { lower, upper } }) };
+        for round in 0..30 {
+            let (lo, hi) = match round % 3 {
+                0 => (rng.gen_range(-100..max / 4), rng.gen_range(max / 2..max + 100)),
+                1 => (i64::MIN, rng.gen_range(0..max)),
+                _ => {
+                    let a = rng.gen_range(-100..max + 100);
+                    let b = rng.gen_range(-100..max + 100);
+                    (a.min(b), a.max(b))
+                }
+            };
+            let q: QueryRef = Arc::new(PointRangeQuery::long(N, lo, hi));
+            let want = ids(&dv(N, lo, hi));
+            assert_eq!(want.len(), docs.iter().filter(|d| d.is_some_and(|(n, _)| n >= lo && n <= hi)).count());
+            assert_eq!(ids(&q), want, "seed {seed} long [{lo}, {hi}]");
+            // Two dimensions: the inverse walk checks both on crossing cells.
+            let (a0, a1) = (rng.gen_range(-1100..0), rng.gen_range(0..1100));
+            let (b0, b1) = (rng.gen_range(-1100..-500), rng.gen_range(-200..1100));
+            let q2: QueryRef = Arc::new(PointRangeQuery::new(P, [i32_bytes(a0), i32_bytes(b0)].concat(), [i32_bytes(a1), i32_bytes(b1)].concat(), 4, search_index::query::PointType::Int).unwrap());
+            let want2 = ids(&(Arc::new(BooleanQuery::new().filter(dv(P0, a0 as i64, a1 as i64)).filter(dv(P1, b0 as i64, b1 as i64))) as QueryRef));
+            assert_eq!(want2.len(), docs.iter().filter(|d| d.is_some_and(|(_, p)| p.0 >= a0 && p.0 <= a1 && p.1 >= b0 && p.1 <= b1)).count());
+            assert_eq!(ids(&q2), want2, "seed {seed} 2-d [{a0}..{a1}] x [{b0}..{b1}]");
+            // Constant-score top hits past the threshold: the first `k` matching docs, a total
+            // that is a lower bound of the matches.
+            let cq: QueryRef = Arc::new(ConstantScoreQuery::new(q.clone()));
+            for (k, threshold) in [(10usize, 100u64), (1, 0), (500, 1000)] {
+                let full = {
+                    let mut c = TopScoreCollector::new(k, u64::MAX);
+                    s.search(&cq, &mut c).unwrap();
+                    c.top_docs()
+                };
+                for qq in [&q, &cq] {
+                    let mut c = TopScoreCollector::new(k, threshold);
+                    s.search(qq, &mut c).unwrap();
+                    let got = c.top_docs();
+                    let pairs = |t: &search_index::collector::TopDocs| t.hits.iter().map(|h| (h.doc, h.score.to_bits())).collect::<Vec<_>>();
+                    if Arc::ptr_eq(qq, &cq) {
+                        assert_eq!(pairs(&got), pairs(&full), "seed {seed} k={k} t={threshold} [{lo}, {hi}]");
+                    } else {
+                        assert_eq!(got.hits.iter().map(|h| h.doc).collect::<Vec<_>>(), full.hits.iter().map(|h| h.doc).collect::<Vec<_>>(), "seed {seed} [{lo}, {hi}]");
+                    }
+                    if got.relation == TotalRelation::EqualTo {
+                        assert_eq!(got.total_hits, full.total_hits, "seed {seed} k={k} t={threshold}");
+                    } else {
+                        assert!(got.total_hits > threshold.min(full.total_hits.saturating_sub(1)) && got.total_hits <= full.total_hits, "seed {seed} k={k} t={threshold}: {} of {}", got.total_hits, full.total_hits);
+                    }
+                }
+                // Sorted on the field under constant_score: pruned equals exhaustive.
+                let key = SortKey::Field(FieldSort { field: N, kind: SortType::Long, reverse: round % 2 == 0, missing: Missing::Last, mode: SortMode::Min, nested: None });
+                let sorted = |t: u64| {
+                    let mut c = TopFieldCollector::new(vec![key.clone()], k, t, false).with_searcher(&s);
+                    s.search(&cq, &mut c).unwrap();
+                    c.top_docs().hits.iter().map(|h| h.doc).collect::<Vec<_>>()
+                };
+                assert_eq!(sorted(threshold), sorted(u64::MAX), "seed {seed} sorted k={k} t={threshold}");
+            }
+        }
+    }
+}

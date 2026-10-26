@@ -159,6 +159,8 @@ pub fn compile(
         max_allocation_bytes: opts.max_allocation_bytes,
         concat_infos: pool.concat_infos,
         uses_score: a.uses_score,
+        version_allowlist: false,
+        unsigned_long_allowlist: false,
     })
 }
 
@@ -1205,6 +1207,13 @@ impl<'a> Fc<'a> {
                 self.release(m);
             }
             TK::Invoke { recv, m: method, args, null_safe } => {
+                // `((List) doc['f']).get(0)`: the fast path reads the field's buffer
+                if let Some(r) = recv
+                    && args.len() == 1
+                    && let Some((field, _)) = self.doc_literal(strip_list_cast(r))
+                {
+                    self.pool.doc_field(&field);
+                }
                 let m = self.mark();
                 match recv {
                     None => {
@@ -1270,8 +1279,9 @@ impl<'a> Fc<'a> {
                 self.doc_get(fi, i, d, result.as_ref(), |s| s.invoke_dyn(e.loc, sig, recv, name, args, false, result.as_ref(), d));
             }
             TK::InvokeDyn { recv, name, args, null_safe, result } => {
-                // `doc['field'].contains(x)`: the fast path reads the field's buffer
-                if &**name == "contains"
+                // `doc['field'].contains(x)`, `.getLat()`, `.getLon()`: the fast path reads the
+                // field's buffer
+                if matches!(&**name, "contains" | "getLat" | "getLon")
                     && let Some((field, _)) = self.doc_literal(recv)
                 {
                     self.pool.doc_field(&field);
@@ -1363,6 +1373,12 @@ impl<'a> Fc<'a> {
                     }
                     self.release(mk);
                     return;
+                }
+                // `doc['f'].lat` / `.lon`: the fast path reads the field's buffer
+                if matches!(&**name, "lat" | "lon")
+                    && let Some((field, _)) = self.doc_literal(recv)
+                {
+                    self.pool.doc_field(&field);
                 }
                 let r = self.expr(recv);
                 self.cur = loc;
@@ -1552,6 +1568,7 @@ impl<'a> Fc<'a> {
     }
 
     /// `doc['literal']` over the context's `doc` variable: the field and the key's location.
+    /// `doc['f']` (see [`Self::doc_literal`]).
     fn doc_literal(&self, recv: &TExpr) -> Option<(String, u32)> {
         if !self.is_exec {
             return None;
@@ -1999,3 +2016,14 @@ fn arith(op: Op, t: Ty, d: Reg, a: Reg, b: Reg) -> Insn {
     }
 }
 
+
+/// `e` without the casts a `(List) doc['f']` adds (they cannot fail on doc values).
+fn strip_list_cast(mut e: &TExpr) -> &TExpr {
+    loop {
+        match &e.k {
+            TK::Cast(x, crate::ir::Cast::Noop | crate::ir::Cast::Transparent) => e = x,
+            TK::Cast(x, crate::ir::Cast::Check(t)) if *t == Ty::of(crate::types::cls::LIST) => e = x,
+            _ => return e,
+        }
+    }
+}

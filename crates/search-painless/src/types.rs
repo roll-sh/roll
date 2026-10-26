@@ -495,6 +495,7 @@ pub mod cls {
         HOST_OBJECT = "org.elasticsearch.script.HostObject";
         SDV_UNSIGNED_LONG = "org.elasticsearch.xpack.unsignedlong.UnsignedLongScriptDocValues";
         SDV_VERSION = "org.elasticsearch.xpack.versionfield.VersionScriptDocValues";
+        VERSION_OBJ = "org.elasticsearch.xpack.versionfield.Version" as "Version";
         IP_ADDRESS = "org.elasticsearch.script.field.IPAddress" as "IPAddress";
         DELEGATE_DOC_VALUES_FIELD = "org.elasticsearch.script.field.DelegateDocValuesField";
         BINARY_DOC_VALUES_FIELD = "org.elasticsearch.script.field.BinaryDocValuesField";

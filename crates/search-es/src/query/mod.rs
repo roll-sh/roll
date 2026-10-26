@@ -171,6 +171,10 @@ queries! {
     Percolate(specialized::Percolate) = "percolate",
     Pinned(specialized::Pinned) = "pinned",
     Knn(specialized::Knn) = "knn",
+    // The opensearch dialect's `knn` (the k-NN plugin's builder).
+    OsKnn(crate::opensearch::knn::OsKnn) = "knn",
+    // The opensearch dialect's `hybrid` (the neural-search plugin's builder).
+    OsHybrid(crate::opensearch::hybrid::Hybrid) = "hybrid",
     SparseVector(specialized::SparseVector) = "sparse_vector",
     TextExpansion(specialized::TextExpansion) = "text_expansion",
     WeightedTokens(specialized::WeightedTokens) = "weighted_tokens",
@@ -361,6 +365,19 @@ fn parse_named(name: &str, p: &mut XParser<'_>) -> EsResult<Query> {
         "rank_feature" => specialized::RankFeature::parse(p)?.into(),
         "percolate" => specialized::Percolate::parse(p)?.into(),
         "pinned" => specialized::Pinned::parse(p)?.into(),
+        "knn" if crate::opensearch::active() => crate::opensearch::knn::OsKnn::parse(p)?.into(),
+        "hybrid" if crate::opensearch::active() => crate::opensearch::hybrid::Hybrid::parse(p)?.into(),
+        // OpenSearch's `template` query: its body is a query, rewritten (placeholders filled
+        // from the search pipeline's context; without them, as written) on the coordinator.
+        "template" if crate::opensearch::active() => {
+            // The content is re-read from its own JSON (error locations are within it).
+            let value = p.value().clone();
+            p.skip_children();
+            let content = value.to_json();
+            return parse_query(&value, Some(content.as_bytes()), &[])
+                .map(|(q, _)| q)
+                .map_err(|e| EsError::illegal_argument(format!("Failed to rewrite template query: {content}")).caused_by(e));
+        }
         "knn" => specialized::Knn::parse(p)?.into(),
         "sparse_vector" => specialized::SparseVector::parse(p)?.into(),
         "text_expansion" => specialized::TextExpansion::parse(p)?.into(),

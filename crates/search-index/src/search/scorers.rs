@@ -1293,6 +1293,42 @@ impl BlockMaxConjunctionBulk {
         total as f32
     }
 
+    /// Leapfrogs from `min`, scoring confirmed matches only, until the collector sets a
+    /// minimum competitive score; returns the lead's next doc.
+    fn score_doc_first(&mut self, c: &mut dyn LeafCollector, live: Option<&LiveDocs>, min: u32, max: u32) -> Result<u32> {
+        let n = self.scorers.len();
+        let mut doc = self.scorers[0].doc();
+        if !positioned(doc) || doc < min {
+            doc = self.scorers[0].advance(min);
+        }
+        'outer: while doc < max {
+            if live.is_none_or(|l| l.is_live(doc)) {
+                for i in 1..n {
+                    let s = &mut self.scorers[i];
+                    let mut other = s.doc();
+                    if !positioned(other) || other < doc {
+                        other = s.advance(doc);
+                    }
+                    if other != doc {
+                        doc = self.scorers[0].advance(other);
+                        continue 'outer;
+                    }
+                }
+                let mut score = 0f64;
+                for s in self.scorers.iter_mut() {
+                    score += s.score() as f64;
+                }
+                self.scorable.score = score as f32;
+                c.collect(doc, &mut self.scorable)?;
+                if self.scorable.min_competitive > 0.0 {
+                    return Ok(self.scorers[0].next());
+                }
+            }
+            doc = self.scorers[0].next();
+        }
+        Ok(doc)
+    }
+
     fn score_window(&mut self, c: &mut dyn LeafCollector, live: Option<&LiveDocs>, min: u32, max: u32, window_max: f32) -> Result<()> {
         if window_max < self.scorable.min_competitive {
             return Ok(());
@@ -1361,6 +1397,13 @@ impl BulkScorer for BlockMaxConjunctionBulk {
         // Windows past the last doc would step through the doc id space 64k at a time when
         // the lead's last block was skipped (it is not advanced then).
         let max = max.min(self.max_doc);
+        // Score-first windows score the lead's docs before the other clauses confirm them.
+        // A lead whose score isn't pure goes doc first until the collector sets a minimum
+        // score (`scoreDocFirstUntilDynamicPruning`), so docs no clause rejects are scored
+        // only as Lucene scores them.
+        if self.scorable.min_competitive == 0.0 && !self.scorers[0].pure_scores() {
+            wmin = self.score_doc_first(c, live, wmin, max)?;
+        }
         while wmin < max {
             let mut wmax = self.scorers[0].advance_shallow(wmin).min(max - 1);
             wmax = wmax.min(wmin.saturating_add(MAX_CONJ_WINDOW));
@@ -1512,7 +1555,10 @@ impl BulkScorer for ConjunctionBulk {
         if d == u32::MAX || d < min {
             lead.advance(min);
         }
-        if c.skips() {
+        // Batches score the lead's docs before the other clauses filter them: only for leads
+        // whose scores are pure. Others go doc first (Lucene's `ConjunctionBulkScorer`), scored
+        // only once every clause matched.
+        if c.skips() || !self.sc.subs[0].pure_scores() {
             self.score_docs(c, live, max)?;
         } else {
             self.score_batches(c, live, max)?;
@@ -1582,6 +1628,9 @@ pub struct MaxScoreBulk {
     num_windows: u64,
     num_candidates: u64,
     min_window: u32,
+    /// Scratch for [`partition`](Self::partition), reused across windows.
+    sort_buf: Vec<usize>,
+    ess_buf: Vec<usize>,
 }
 
 impl MaxScoreBulk {
@@ -1608,6 +1657,8 @@ impl MaxScoreBulk {
             num_windows: 0,
             num_candidates: 0,
             min_window: 1,
+            sort_buf: Vec::with_capacity(n),
+            ess_buf: Vec::with_capacity(n),
             clauses,
         }
     }
@@ -1653,35 +1704,49 @@ impl MaxScoreBulk {
     /// Splits clauses into non-essential/essential; false when none is essential (no doc in
     /// the window can compete).
     fn partition(&mut self) -> bool {
+        // Runs once per window: no allocation (scratch vectors are reused), and a stable
+        // insertion sort for the usual handful of clauses.
         let clauses = &self.clauses;
-        let mut sorted: Vec<usize> = (0..clauses.len()).collect();
-        sorted.sort_by(|&a, &b| {
-            let x = clauses[a].max_window as f64 / clauses[a].cost.max(1) as f64;
-            let y = clauses[b].max_window as f64 / clauses[b].cost.max(1) as f64;
-            x.total_cmp(&y)
-        });
+        let ratio = |i: usize| clauses[i].max_window as f64 / clauses[i].cost.max(1) as f64;
+        let mut sorted = std::mem::take(&mut self.sort_buf);
+        sorted.clear();
+        sorted.extend(0..clauses.len());
+        if sorted.len() <= 32 {
+            for k in 1..sorted.len() {
+                let (x, rx) = (sorted[k], ratio(sorted[k]));
+                let mut j = k;
+                while j > 0 && ratio(sorted[j - 1]).total_cmp(&rx).is_gt() {
+                    sorted[j] = sorted[j - 1];
+                    j -= 1;
+                }
+                sorted[j] = x;
+            }
+        } else {
+            sorted.sort_by(|&a, &b| ratio(a).total_cmp(&ratio(b)));
+        }
         let n = sorted.len();
         let mut sum = 0f64;
         self.first_essential = 0;
         self.next_min = f32::INFINITY;
-        let mut non = Vec::with_capacity(n);
-        let mut ess = Vec::with_capacity(n);
+        self.order.clear();
+        let mut ess = std::mem::take(&mut self.ess_buf);
+        ess.clear();
         for &i in &sorted {
             let ns = sum + self.clauses[i].max_window as f64;
-            let bound = sum_upper_bound(ns, non.len() + 1) as f32;
+            let bound = sum_upper_bound(ns, self.order.len() + 1) as f32;
             if bound < self.scorable.min_competitive {
                 sum = ns;
-                self.max_sums[non.len()] = sum;
-                non.push(i);
+                self.max_sums[self.order.len()] = sum;
+                self.order.push(i);
             } else {
                 ess.push(i);
                 self.next_min = self.next_min.min(bound);
             }
         }
-        self.first_essential = non.len();
-        self.order.clear();
-        self.order.extend(non);
-        self.order.extend(ess);
+        self.first_essential = self.order.len();
+        self.order.extend_from_slice(&ess);
+        self.sort_buf = sorted;
+        self.ess_buf = ess;
         self.first_required = n;
         if self.first_essential + 1 == n {
             // Lucene: with one essential clause, if it plus all non-essential clauses but the
@@ -1742,17 +1807,29 @@ impl MaxScoreBulk {
             c.doc = c.s.doc();
             return;
         }
-        // Several essential clauses (or a filter): accumulate into the window.
+        // Several essential clauses (or a filter): accumulate into the window, a decoded
+        // block of docs and scores per call (`nextDocsAndScores`) rather than a virtual
+        // `next` and `score` per doc. Deleted docs are dropped here instead of below.
         for k in fe..self.order.len() {
             let c = &mut self.clauses[self.order[k]];
-            let mut d = if c.doc == u32::MAX || c.doc < wmin { c.s.advance(wmin) } else { c.doc };
-            while d < wmax {
-                let o = d - wmin;
-                self.win_bits.set(o);
-                self.win_scores[o as usize] += c.s.score() as f64;
-                d = c.s.next();
+            if c.doc == u32::MAX || c.doc < wmin {
+                c.doc = c.s.advance(wmin);
             }
-            c.doc = d;
+            if c.doc < wmax {
+                loop {
+                    c.s.next_docs_and_scores(wmax, live, &mut self.batch);
+                    let b = &*self.batch;
+                    if b.len == 0 {
+                        break;
+                    }
+                    for (&d, &sc) in b.docs[..b.len].iter().zip(&b.scores[..b.len]) {
+                        let o = d - wmin;
+                        self.win_bits.set(o);
+                        self.win_scores[o as usize] += sc as f64;
+                    }
+                }
+                c.doc = c.s.doc();
+            }
         }
         let words = self.win_bits.words_mut();
         let nwords = ((wmax - wmin) as usize).div_ceil(64);
@@ -1949,6 +2026,14 @@ impl BulkScorer for WindowedDisjunctionBulk {
             for (i, s) in self.subs.iter_mut().enumerate() {
                 let mut d = self.docs[i];
                 while d < we {
+                    // Deleted docs are never scored (Lucene hands the sub-scorers the live
+                    // docs): a function can fail on a deleted doc's values.
+                    if let Some(l) = live
+                        && !l.is_live(d)
+                    {
+                        d = s.next();
+                        continue;
+                    }
                     let o = d - ws;
                     self.bits.set(o);
                     if !msm1 {
@@ -1975,7 +2060,7 @@ impl BulkScorer for WindowedDisjunctionBulk {
                     let d = ws + o as u32;
                     let cnt = if msm1 { 1 } else { std::mem::take(&mut self.counts[o]) };
                     let sc = if self.needs_scores { std::mem::take(&mut self.scores[o]) } else { 0.0 };
-                    if cnt < self.msm || live.is_some_and(|l| !l.is_live(d)) {
+                    if cnt < self.msm {
                         continue;
                     }
                     self.scorable.score = sc as f32;
@@ -2055,6 +2140,10 @@ mod tests {
     }
 
     impl Scorer for ListScorer {
+        // Constant scores: batches may score docs before the other clauses confirm them.
+        fn pure_scores(&self) -> bool {
+            true
+        }
         fn doc(&self) -> u32 {
             self.doc
         }
@@ -2102,6 +2191,79 @@ mod tests {
 
     fn list(docs: Vec<u32>, score: f32, calls: &Arc<AtomicUsize>) -> Box<dyn Scorer> {
         Box::new(ListScorer { docs, i: 0, doc: u32::MAX, score, block: 4, shallow_calls: calls.clone() })
+    }
+
+    /// A scorer whose scores aren't pure (`function_score`, scripts): records every doc it is
+    /// asked to score.
+    struct Recording {
+        inner: Box<dyn Scorer>,
+        scored: Arc<std::sync::Mutex<Vec<u32>>>,
+    }
+
+    impl Scorable for Recording {
+        fn score(&mut self) -> f32 {
+            self.scored.lock().unwrap().push(self.inner.doc());
+            self.inner.score()
+        }
+    }
+
+    impl Scorer for Recording {
+        fn doc(&self) -> u32 {
+            self.inner.doc()
+        }
+        fn next(&mut self) -> u32 {
+            self.inner.next()
+        }
+        fn advance(&mut self, t: u32) -> u32 {
+            self.inner.advance(t)
+        }
+        fn cost(&self) -> u64 {
+            self.inner.cost()
+        }
+        fn advance_shallow(&mut self, t: u32) -> u32 {
+            self.inner.advance_shallow(t)
+        }
+        fn max_score(&mut self, upto: u32) -> f32 {
+            self.inner.max_score(upto)
+        }
+    }
+
+    fn recording(docs: Vec<u32>, score: f32, calls: &Arc<AtomicUsize>) -> (Box<dyn Scorer>, Arc<std::sync::Mutex<Vec<u32>>>) {
+        let scored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (Box::new(Recording { inner: list(docs, score, calls), scored: scored.clone() }), scored)
+    }
+
+    #[test]
+    fn exhaustive_conjunction_scores_an_impure_lead_only_on_matches() {
+        // Elasticsearch: a `function_score` lead whose function fails (NaN) on a doc the
+        // other clause rejects must not fail the search.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (lead, scored) = recording(vec![1, 2, 5], 1.0, &calls);
+        let other = list(vec![0, 2, 3, 4, 6, 7, 8], 0.5, &calls);
+        let mut bulk = ConjunctionBulk::new(vec![(lead, true), (other, true)]);
+        let mut c = Windowed { seen: Vec::new(), min: 0, max: NO_MORE_DOCS, skip_mod: None };
+        assert_eq!(bulk.score(&mut c, None, 0, NO_MORE_DOCS).unwrap(), NO_MORE_DOCS);
+        assert_eq!(c.seen, [(2, 1.5)]);
+        assert_eq!(*scored.lock().unwrap(), [2]);
+    }
+
+    #[test]
+    fn top_scores_conjunction_scores_an_impure_lead_doc_first_until_pruning() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (lead, scored) = recording(vec![1, 2, 5, 9], 1.0, &calls);
+        let other = list(vec![0, 2, 3, 4, 6, 7, 8, 9], 0.5, &calls);
+        let mut bulk = BlockMaxConjunctionBulk::new(10, vec![lead, other]);
+        let mut c = Greedy { seen: Vec::new(), k: usize::MAX };
+        assert_eq!(bulk.score(&mut c, None, 0, NO_MORE_DOCS).unwrap(), NO_MORE_DOCS);
+        assert_eq!(c.seen, [(2, 1.5), (9, 1.5)]);
+        assert_eq!(*scored.lock().unwrap(), [2, 9]);
+        // Once the collector sets a minimum score, windows score first as Lucene's do.
+        let (lead, _) = recording((0..200).collect(), 1.0, &calls);
+        let other = list((0..200).filter(|d| d % 2 == 0).collect(), 0.5, &calls);
+        let mut bulk = BlockMaxConjunctionBulk::new(200, vec![lead, other]);
+        let mut c = Greedy { seen: Vec::new(), k: 2 };
+        bulk.score(&mut c, None, 0, NO_MORE_DOCS).unwrap();
+        assert_eq!(c.seen[..2], [(0, 1.5), (2, 1.5)]);
     }
 
     #[test]
@@ -2204,7 +2366,13 @@ mod tests {
                     (d, s as f32)
                 })
                 .collect();
-            let subs = (0..n).map(|i| (list(lists[i].clone(), weights[i], &calls), scoring[i])).collect();
+            // Every fourth round the clauses' scores aren't pure: doc at a time.
+            let subs = (0..n)
+                .map(|i| {
+                    let s = if round % 4 == 3 { recording(lists[i].clone(), weights[i], &calls).0 } else { list(lists[i].clone(), weights[i], &calls) };
+                    (s, scoring[i])
+                })
+                .collect();
             let mut bulk = ConjunctionBulk::new(subs);
             let mut got = Vec::new();
             let mut min = 0u32;

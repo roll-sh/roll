@@ -691,6 +691,53 @@ fn write_read_round_trip() {
     }
 }
 
+/// `UNINVERTED` field numbers rebuild sorted doc values from the terms (the `_id` fielddata):
+/// each doc's smallest term, cached, and nothing for fields without terms.
+#[test]
+fn uninverted_terms_read_as_sorted_doc_values() {
+    let mut rng = StdRng::seed_from_u64(7);
+    for n in [0usize, 1, 129, 2000] {
+        let docs: Vec<Doc> = (0..n).map(|i| random_doc(&mut rng, i)).collect();
+        let r = write(&MemSource::new(docs.clone(), 1, None));
+        assert_eq!(r.uninverted_bytes(ID), 0, "nothing built before first use");
+        assert!(r.doc_values(PRICE | UNINVERTED).is_none(), "no terms, no uninverted values");
+        assert!(r.doc_values(u32::MAX).is_none());
+        assert!(r.doc_values(ID).is_none(), "the real field keeps no doc values");
+        let Some(DocValuesReader::Sorted(ids)) = r.doc_values(ID | UNINVERTED) else {
+            assert_eq!(n, 0, "a segment with ids has uninverted ones");
+            continue;
+        };
+        let mut sorted: Vec<&str> = docs.iter().map(|d| d.id.as_str()).collect();
+        sorted.sort_unstable();
+        assert_eq!(ids.value_count(), n as u64);
+        let mut out = Vec::new();
+        for (doc, d) in docs.iter().enumerate() {
+            let ord = ids.ord(doc as u32).expect("every doc has an id");
+            assert_eq!(sorted[ord as usize], d.id);
+            ids.lookup_ord(ord, &mut out);
+            assert_eq!(out, d.id.as_bytes());
+        }
+        assert!(r.uninverted_bytes(ID) > 0, "built values are accounted for");
+        // Cached: the same reader comes back.
+        let again = r.doc_values(ID | UNINVERTED).unwrap() as *const DocValuesReader;
+        assert_eq!(again, r.doc_values(ID | UNINVERTED).unwrap() as *const DocValuesReader);
+        // A multi-valued field keeps each doc's smallest term.
+        if let Some(DocValuesReader::Sorted(body)) = r.doc_values(BODY | UNINVERTED) {
+            for (doc, d) in docs.iter().enumerate() {
+                let min = d.body.iter().map(|t| t.term.as_str()).min();
+                match (body.ord(doc as u32), min) {
+                    (Some(o), Some(m)) => {
+                        body.lookup_ord(o, &mut out);
+                        assert_eq!(out, m.as_bytes());
+                    }
+                    (None, None) => {}
+                    other => panic!("doc {doc}: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
 /// Spilling section buffers to temporary files changes where bytes wait, never the bytes.
 #[test]
 fn spilled_writes_are_identical() {
@@ -1431,4 +1478,62 @@ fn readers_are_shared_across_threads() {
             });
         }
     });
+}
+
+/// What BP reads from a merge: with a doc-frequency floor, the lazy term walk yields every term
+/// that reaches it, with the same live docs, as the full walk does.
+#[test]
+fn merged_terms_with_a_doc_freq_floor_keep_every_frequent_term() {
+    let mut rng = StdRng::seed_from_u64(31);
+    let mut segs = Vec::new();
+    for s in 0..4u8 {
+        let n = 300 + 150 * s as usize;
+        let docs: Vec<Doc> = (0..n).map(|i| random_doc(&mut rng, s as usize * 10_000 + i)).collect();
+        let reader = write(&MemSource::new(docs, s + 1, None));
+        let mut live = LiveDocs::all_live(n as u32);
+        for d in 0..n as u32 {
+            if rng.gen_bool(0.25) {
+                live.delete(d);
+            }
+        }
+        segs.push(MergeInput { reader, live: Some(Arc::new(live)) });
+    }
+    let m = MergeSource::new(segs, [17; 16]).unwrap();
+    let collect = |lazy: Option<u64>, field: u32| -> Vec<(Vec<u8>, Vec<u32>)> {
+        let mut out = Vec::new();
+        let mut terms = match lazy {
+            Some(_) => m.terms_docs_only(field).unwrap(),
+            None => m.terms(field).unwrap(),
+        }
+        .expect("terms");
+        let floor = lazy.unwrap_or(0);
+        loop {
+            let t = match lazy {
+                Some(min) => terms.next_term_min_doc_freq(min).unwrap(),
+                None => terms.next_term().unwrap(),
+            };
+            let Some(t) = t else { break };
+            let t = t.to_vec();
+            let p = terms.postings().unwrap();
+            let mut docs = Vec::new();
+            loop {
+                let d = p.next_doc();
+                if d == NO_MORE_DOCS {
+                    break;
+                }
+                docs.push(d);
+            }
+            if docs.len() as u64 >= floor.max(1) {
+                out.push((t, docs));
+            }
+        }
+        out
+    };
+    for field in [BODY, TAG, ID] {
+        for floor in [2u64, 5, 20, 100] {
+            let full: Vec<_> = collect(None, field).into_iter().filter(|(_, d)| d.len() as u64 >= floor).collect();
+            let lazy = collect(Some(floor), field);
+            assert_eq!(lazy, full, "field {field}, floor {floor}");
+        }
+    }
 }

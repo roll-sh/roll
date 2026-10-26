@@ -6,6 +6,11 @@
 //! Patterns run as a small NFA over the path's characters (`*` matches any run, dots
 //! included), stepped key by key, so filtering a document is one walk with no per-key path
 //! strings.
+//!
+//! Elasticsearch filters stored source bytes with Jackson's `FilterPath` instead
+//! (`SourceFilter.filterBytes`) unless an exclude has a wildcard: there includes match path
+//! segment by segment, a `*` stays within one segment (`*0` keeps `a0` but neither `o.kw0`
+//! nor a dotted key `x.y0`) and `**` spans any number. [`SourceFilter::new`] picks the mode.
 
 use crate::json::{Map, Value};
 
@@ -13,6 +18,8 @@ use crate::json::{Map, Value};
 #[derive(Clone, Debug)]
 pub struct Globs {
     pats: Vec<Vec<u8>>,
+    /// `FilterPath` semantics: a single `*` does not match `.`.
+    segments: bool,
 }
 
 /// An NFA state: positions reached in each pattern, or "everything below matched".
@@ -28,7 +35,13 @@ pub enum State {
 
 impl Globs {
     pub fn new(patterns: &[String]) -> Globs {
-        Globs { pats: patterns.iter().map(|p| p.as_bytes().to_vec()).collect() }
+        Globs { pats: patterns.iter().map(|p| p.as_bytes().to_vec()).collect(), segments: false }
+    }
+
+    /// Globs whose single `*` matches within one path segment (`FilterPath`); `**` matches
+    /// across segments.
+    pub fn segment_wise(patterns: &[String]) -> Globs {
+        Globs { segments: true, ..Globs::new(patterns) }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -80,6 +93,10 @@ impl Globs {
                     let pos = pos as usize;
                     if pos < p.len() {
                         if p[pos] == b'*' {
+                            let double = (pos + 1 < p.len() && p[pos + 1] == b'*') || (pos > 0 && p[pos - 1] == b'*');
+                            if c == b'.' && self.segments && !double {
+                                continue;
+                            }
                             self.closure(i as usize, pos, p, &mut out);
                         } else if p[pos] == c {
                             self.closure(i as usize, pos + 1, p, &mut out);
@@ -117,6 +134,15 @@ pub struct SourceFilter {
 
 impl SourceFilter {
     pub fn new(includes: &[String], excludes: &[String]) -> SourceFilter {
+        // `SourceFilter.canFilterBytes`: wildcard excludes filter the parsed map instead.
+        let bytes = !excludes.iter().any(|e| e.contains('*'));
+        let inc = |p: &[String]| if bytes { Globs::segment_wise(p) } else { Globs::new(p) };
+        SourceFilter { includes: (!includes.is_empty()).then(|| inc(includes)), excludes: Globs::new(excludes) }
+    }
+
+    /// The filter Elasticsearch applies to a parsed (or patched) source map
+    /// (`SourceFilter.filterMap`): `*` spans dots whatever the excludes.
+    pub fn over_map(includes: &[String], excludes: &[String]) -> SourceFilter {
         SourceFilter { includes: (!includes.is_empty()).then(|| Globs::new(includes)), excludes: Globs::new(excludes) }
     }
 
@@ -307,6 +333,16 @@ mod tests {
     }
 
     #[test]
+    fn map_filtering_spans_dots() {
+        // Elasticsearch 9.5.5: `_source: ["*0"]` over bytes keeps `a0` only; over a parsed
+        // source (patched vectors, `fields`) `*` crosses dots.
+        let doc = r#"{"o":{"kw0":1,"x":2},"a0":1,"n":[{"kw0":1,"z":2}]}"#;
+        assert_eq!(f(doc, &["*0"], &[]), r#"{"a0":1}"#);
+        let m = SourceFilter::over_map(&["*0".to_string()], &[]).apply(&src(doc));
+        assert_eq!(Value::Obj(m).to_json(), r#"{"o":{"kw0":1},"a0":1,"n":[{"kw0":1}]}"#);
+    }
+
+    #[test]
     fn includes_and_excludes_like_elasticsearch() {
         let d = r#"{"a":{"b":1,"c":2},"ab":3,"d":[{"e":1,"f":2},{"e":3}],"g":[1,2]}"#;
         assert_eq!(f(d, &["a"], &[]), r#"{"a":{"b":1,"c":2}}"#);
@@ -320,6 +356,27 @@ mod tests {
         assert_eq!(f(d, &["x"], &[]), "{}");
         // An include that names an object keeps it even when the exclude empties it.
         assert_eq!(f(r#"{"a":{"b":1}}"#, &["a"], &["a.b"]), r#"{"a":{}}"#);
+    }
+
+    /// Answers of Elasticsearch 9.5.5 for one document: includes match segment by segment
+    /// (`FilterPath`), unless an exclude has a wildcard, which filters the map with globs that
+    /// cross dots.
+    #[test]
+    fn wildcard_includes_stay_within_a_segment() {
+        let d = r#"{"a0":1,"o":{"kw0":"x","b":2},"n":[{"text0":"t","z":1}],"p":{"q":{"r0":3}},"x.y0":5}"#;
+        assert_eq!(f(d, &["*0"], &[]), r#"{"a0":1}"#);
+        assert_eq!(f(d, &["*kw0"], &[]), "{}");
+        assert_eq!(f(d, &["*.kw0"], &[]), r#"{"o":{"kw0":"x"}}"#);
+        assert_eq!(f(d, &["*y0"], &[]), "{}");
+        assert_eq!(f(d, &["x*"], &[]), r#"{"x.y0":5}"#);
+        assert_eq!(f(d, &["p.*0"], &[]), "{}");
+        assert_eq!(f(d, &["p.**"], &[]), r#"{"p":{"q":{"r0":3}}}"#);
+        assert_eq!(f(d, &["*.*0"], &[]), r#"{"o":{"kw0":"x"},"n":[{"text0":"t"}],"x.y0":5}"#);
+        assert_eq!(f(d, &["o"], &["b"]), r#"{"o":{"kw0":"x","b":2}}"#);
+        // Wildcard excludes: map filtering, `*` crosses dots for both.
+        assert_eq!(f(d, &["*"], &["*0"]), r#"{"o":{"b":2},"n":[{"z":1}],"p":{"q":{}}}"#);
+        assert_eq!(f(d, &[], &["*.r0"]), r#"{"a0":1,"o":{"kw0":"x","b":2},"n":[{"text0":"t","z":1}],"p":{"q":{}},"x.y0":5}"#);
+        assert_eq!(f(d, &["o"], &["*b"]), r#"{"o":{"kw0":"x"}}"#);
     }
 
     #[test]

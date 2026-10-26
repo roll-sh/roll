@@ -87,7 +87,20 @@ impl FetchSource {
         if fetch.is_none() && inc.is_none() && exc.is_none() {
             return Ok(None);
         }
+        check_ambiguous_source(inc.as_deref().unwrap_or_default(), exc.as_deref().unwrap_or_default())?;
         Ok(Some(FetchSource { fetch: fetch.unwrap_or(true), includes: inc.unwrap_or_default(), excludes: exc.unwrap_or_default(), exclude_vectors: None }))
+    }
+}
+
+/// OpenSearch's `FetchSourceContext` refuses a path both included and excluded (the first
+/// such include is named); Elasticsearch lets the exclude win.
+pub fn check_ambiguous_source(includes: &[String], excludes: &[String]) -> EsResult<()> {
+    if !crate::opensearch::active() {
+        return Ok(());
+    }
+    match includes.iter().find(|i| excludes.contains(i)) {
+        Some(i) => Err(crate::error::EsError::illegal_argument(format!("The same entry [{i}] cannot be both included and excluded in _source."))),
+        None => Ok(()),
     }
 }
 
@@ -135,21 +148,33 @@ pub struct SourceView<'a> {
     pub idx: &'a crate::meta::IndexMeta,
     pub table: &'a FieldTable,
     pub force_synthetic: bool,
+    /// The search fetch phase, whose forced synthetic `_source` keeps every vector
+    /// (`get` leaves them out of it as from any other source).
+    pub search: bool,
 }
 
 impl SourceView<'_> {
     /// The `_source` as fetched under `fs` (filtering included).
     pub fn apply(&self, v: Value, fs: &FetchSource) -> Value {
+        self.apply_parsed(v, fs, false)
+    }
+
+    /// [`apply`](Self::apply), where `parsed` says another fetch sub-phase already read the
+    /// source as a map (`fields`): Elasticsearch then filters the map (`Source.filter`), where
+    /// `*` spans dots, instead of the bytes.
+    pub fn apply_parsed(&self, v: Value, fs: &FetchSource, parsed: bool) -> Value {
         use crate::engine::synthetic;
         let mut v = v;
-        if self.force_synthetic
-            && synthetic::source_mode(self.idx) == synthetic::SourceMode::Stored
-            && let Value::Obj(m) = &v
-        {
+        // A forced synthetic `_source` of a stored-source index is built whole from the
+        // document. A search shows its vectors; `get` leaves them out as from a synthetic
+        // source (all of them unless the request filters it).
+        let forced = self.force_synthetic && synthetic::source_mode(self.idx) == synthetic::SourceMode::Stored;
+        if forced && let Value::Obj(m) = &v {
             let ctx = self.idx.mapping_ctx();
             v = Value::Obj(synthetic::synthesize(&self.idx.mapping, &ctx, self.table, synthetic::options(self.idx), m));
         }
         if self.table.has_vectors
+            && !(forced && self.search)
             && self.idx.settings.get("index.mapping.exclude_source_vectors") != Some("false")
             && let Value::Obj(m) = &mut v
         {
@@ -158,13 +183,19 @@ impl SourceView<'_> {
             // loader only leaves vectors out when it builds the whole document).
             let synthetic = self.force_synthetic || synthetic::source_mode(self.idx) == synthetic::SourceMode::Synthetic;
             let filtered = !fs.includes.is_empty() || !fs.excludes.is_empty();
-            if fs.exclude_vectors == Some(false) || (synthetic && filtered && fs.exclude_vectors.is_none()) {
-                synthetic::vectors_keeping(self.table, "", m, None);
+            let kept = if fs.exclude_vectors == Some(false) || (synthetic && filtered && fs.exclude_vectors.is_none()) {
+                synthetic::vectors_keeping(self.table, "", m, None)
             } else {
-                synthetic::vectors_keeping(self.table, "", m, Some(&crate::engine::source::Globs::new(&fs.includes)));
+                synthetic::vectors_keeping(self.table, "", m, Some(&crate::engine::source::Globs::new(&fs.includes)))
+            };
+            // Patching vectors back in turns the source into a map, which Elasticsearch
+            // filters with map semantics (`*` spans dots) rather than over the bytes.
+            if kept && filtered {
+                return Value::Obj(crate::engine::source::SourceFilter::over_map(&fs.includes, &fs.excludes).apply(m));
             }
         }
         match (fs.filter(), v) {
+            (Some(_), Value::Obj(m)) if parsed => Value::Obj(crate::engine::source::SourceFilter::over_map(&fs.includes, &fs.excludes).apply(&m)),
             (Some(f), Value::Obj(m)) => Value::Obj(f.apply(&m)),
             (_, v) => v,
         }
@@ -235,8 +266,7 @@ pub fn instant_of(nanos: bool, v: i64) -> crate::time::Instant {
 
 /// A Java `float` printed by Jackson as a float (shortest digits of the float, not the double).
 pub fn java_float_as_double(x: f32) -> f64 {
-    let s = crate::json::write::java_float(x);
-    s.parse::<f64>().unwrap_or(x as f64)
+    crate::json::write::java_float_value(x)
 }
 
 /// `stored_fields`: values of the requested stored fields (patterns allowed), by field name.

@@ -792,7 +792,16 @@ fn mapping_stats(st: &ClusterState) -> Value {
                 }
             }
         }
-        *modes.entry(idx.mapping.source.mode_name()).or_default() += 1;
+        // `SourceFieldMapper.indexMode`: the index setting, else the index mode's default
+        // (`_source.enabled: false` still counts as stored).
+        let mode = match idx.settings.get("index.mapping.source.mode") {
+            Some(m) => m.to_ascii_lowercase(),
+            None => match crate::meta::index_mode::IndexMode::of(&idx.settings) {
+                crate::meta::index_mode::IndexMode::Standard => idx.mapping.source.mode.as_deref().map_or_else(|| "stored".to_string(), str::to_ascii_lowercase),
+                m => m.default_source_mode().to_ascii_lowercase(),
+            },
+        };
+        *modes.entry(mode).or_default() += 1;
         let printed = idx.mapping_json(false);
         if uses.contains_key("dense_vector") {
             has_vectors = true;
@@ -1119,29 +1128,18 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
             "repositories" => super::snapshots::stats_repositories(&st, ctx.now_ms),
         },
         "repositories" => super::snapshots::repository_usage(&st),
-        "ccs" => obj! { "_search" => ccs_search_stats() },
+        "ccs" => obj! { "_search" => ctx.cluster.ccs.to_value() },
     };
+    let mut body = body;
+    if ctx.bool_param("include_remotes", false)? {
+        let clusters = crate::remote::remote_cluster_stats(ctx.cluster, &st, &body);
+        if let Some(Value::Obj(ccs)) = body.as_object_mut().and_then(|m| m.get_mut("ccs")) {
+            ccs.shift_insert(0, "clusters".into(), clusters);
+        }
+    }
     Reply::ok(body)
 }
 
-/// `ccs._search` of `_cluster/stats`: no remote clusters, no cross-cluster searches.
-fn ccs_search_stats() -> Value {
-    let took = || obj! { "max" => 0, "avg" => 0, "p90" => 0 };
-    obj! {
-        "total" => 0,
-        "success" => 0,
-        "skipped" => 0,
-        "took" => took(),
-        "took_mrt_true" => took(),
-        "took_mrt_false" => took(),
-        "remotes_per_search_max" => 0,
-        "remotes_per_search_avg" => 0.0,
-        "failure_reasons" => obj! {},
-        "features" => obj! {},
-        "clients" => obj! {},
-        "clusters" => obj! {},
-    }
-}
 
 pub fn get_settings(ctx: &Ctx) -> EsResult<Reply> {
     ctx.validate_timeouts()?;
@@ -1190,6 +1188,13 @@ pub async fn put_settings(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     cluster_settings::validate_update_in(ctx.cluster.dialect, "persistent", &persistent)?;
     cluster_settings::validate_update_in(ctx.cluster.dialect, "transient", &transient)?;
+    // `Setting.Property.Deprecated` (warned on every update, a reset included; `ctx.warn` is
+    // Elasticsearch-only).
+    for k in persistent.iter().chain(transient.iter()).map(|(k, _)| k.as_str()) {
+        if k == "indices.id_field_data.enabled" {
+            ctx.warn(format!("[{k}] setting was deprecated in Elasticsearch and will be removed in a future release. See the breaking changes documentation for the next major version."));
+        }
+    }
     let (p, t) = (persistent.clone(), transient.clone());
     ctx.cluster
         .update(move |st| {

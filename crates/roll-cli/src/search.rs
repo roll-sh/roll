@@ -184,6 +184,12 @@ pub async fn run(api: &Api, as_json: bool, cmd: Search) -> anyhow::Result<()> {
             // Sent as text, byte for byte (the control plane labels it JSON, or NDJSON for
             // `_bulk`/`_msearch`): re-encoding parsed JSON would reorder `_source` keys.
             let body = body.as_deref().map(read_body).transpose()?;
+            // Refused here rather than after uploading it all.
+            if let (Some(b), Some(mb)) = (&body, c["max_body_mb"].as_i64())
+                && b.len() > (mb.max(1) as usize) << 20
+            {
+                anyhow::bail!("the request body is {:.1} MiB, over cluster {}'s body limit of {mb} MiB (max_body_mb)", b.len() as f64 / (1 << 20) as f64, s(&c["name"]));
+            }
             let path = if path.starts_with('/') { path } else { format!("/{path}") };
             // Elasticsearch's own pretty printing keeps its key order (and does nothing to text).
             let path = if as_json { path } else { with_pretty(&path) };

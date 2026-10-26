@@ -536,14 +536,15 @@ async fn window_retention_keeps_the_commit_point_current_at_the_window_start() {
     let mut cfg = fast_config("n1");
     cfg.manifest_retain = 1;
     cfg.state_retain = 1;
-    cfg.manifest_retain_ms = 400;
+    // Wide enough that the branch below still falls inside it on a slow (loaded, S3) run.
+    cfg.manifest_retain_ms = 3000;
     let store = open(&objects, &temp_dir("window-edge"), cfg).await;
     let s = shard("idxE", 0);
     for g in 1..=3 {
         store.write_manifest("c1", &s, &ShardManifest { mapping_version: g, ..Default::default() }).await.unwrap();
         store.write_cluster("c1", &ClusterState::new(format!("{{\"g\":{g}}}"))).await.unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    tokio::time::sleep(Duration::from_millis(3500)).await;
     let m4 = store.write_manifest("c1", &s, &ShardManifest { mapping_version: 4, ..Default::default() }).await.unwrap();
     store.write_cluster("c1", &ClusterState::new("{\"g\":4}")).await.unwrap();
     // Generations 1 and 2 were superseded before the window started; 3 was current at its start.
@@ -817,11 +818,8 @@ async fn many_tenants_share_one_wal() {
     let s0 = shard("idx0", 0);
     let s1 = shard("idx1", 0);
     {
-        // A strict group-commit window (no eager commits) so grouping doesn't depend on how
-        // fast this machine's fsync is relative to the appends.
-        let mut cfg = fast_config("n1");
-        cfg.wal.eager_below = 0;
-        let store = open(&objects, &dir, cfg).await;
+        // Nobody waits until the end: records are committed in group-commit windows.
+        let store = open(&objects, &dir, fast_config("n1")).await;
         let mut handles = Vec::new();
         for c in 0..CLUSTERS {
             let cluster = format!("tenant-{c}");
@@ -1211,4 +1209,252 @@ async fn point_in_time_branches_span_a_restart_of_the_writing_node() {
     let got: Vec<i64> = replay_only(&n2, "then", &x).await.iter().map(|o| o.0).collect();
     assert_eq!(got, (0..30).collect::<Vec<_>>());
     drop(w);
+}
+
+/// A slow object store (a shared 2 MB/s link) and a small fetch part: a read in the middle of a
+/// cold segment returns long before the download completes, because the parts holding it jump
+/// the queue; the rest keeps arriving and the file completes intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reads_outrun_a_slow_progressive_download() {
+    let objects = test_objects("seg-slow");
+    let a = open(&objects, &temp_dir("seg-slow-a"), fast_config("n1")).await;
+    const PART: u64 = 64 << 10;
+    const LEN: usize = 48 * PART as usize + 777;
+    let (id, data) = make_segment(&a, LEN).await;
+    let cfg = search_store::StoreConfig { fetch_part_bytes: PART, ..fast_config("n2") };
+    let b = open(&objects, &temp_dir("seg-slow-b"), cfg).await;
+    assert_eq!(b.fetch_part(), PART);
+    // 3 MiB over a 2 MB/s link: about 1.6 s for the whole segment, 33 ms per part.
+    b.set_download_throttle(2_000_000);
+    let started = std::time::Instant::now();
+    let f = b.fetch_segment(&id).await.unwrap();
+    assert_eq!(f.len(), LEN as u64);
+    // The first response brought the last part only.
+    assert_eq!(f.downloaded(), PART, "one part per round trip");
+    let mid = LEN as u64 / 2;
+    let got = f.read(mid..mid + 100).await.unwrap();
+    let first_read = started.elapsed();
+    assert_eq!(&got[..], &data[mid as usize..mid as usize + 100]);
+    assert!(f.data().is_none() && f.downloaded() < LEN as u64 / 2, "the read came before most of the segment: {} of {LEN}", f.downloaded());
+    // A range across a part boundary near the start: both parts come next.
+    let r = PART * 3 - 10..PART * 3 + 10;
+    assert_eq!(&f.read(r.clone()).await.unwrap()[..], &data[r.start as usize..r.end as usize]);
+    assert!(f.data().is_none(), "still downloading");
+    let whole = f.complete().await.unwrap();
+    let total = started.elapsed();
+    assert_eq!(&whole[..], &data[..]);
+    assert!(total >= std::time::Duration::from_millis(1200), "the throttle holds: {total:?}");
+    assert!(first_read * 4 < total, "the first read took {first_read:?} of {total:?}");
+    // Cached now: no more waiting.
+    b.set_download_throttle(0);
+    assert_eq!(&b.open_segment(&id).await.unwrap()[..10], &data[..10]);
+}
+
+/// A deposed owner keeps appending for a moment (it hasn't noticed yet), so its WAL holds
+/// records of a history the new owner never saw, with seq_nos the new owner reuses. When it
+/// regains the cluster later in the same process, those records may share a WAL file with its
+/// new ones: replaying the shard must skip them (the new range starts at the attach, not at the
+/// file), or a recovery would resurrect unacknowledged writes over acknowledged ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deposed_owner_that_regains_a_cluster_never_replays_its_stale_records() {
+    let objects = test_objects("regain");
+    // Files ship only when asked, so the stale records stay in the file the owner reuses.
+    let slow = |node: &str| {
+        let mut c = fast_config(node);
+        c.wal.ship_interval = Duration::from_secs(3600);
+        c
+    };
+    let a = open(&objects, &temp_dir("regain-a"), slow("na")).await;
+    a.set_epoch("c1", 1);
+    a.claim_cluster("c1").await.unwrap();
+    let s = shard("idxREGAIN", 0);
+    let (wa, _, _) = recover(&a, "c1", &s).await;
+    let lsn = wa.append(0, b"a0").unwrap();
+    a.wal().durable_remote(lsn).await.unwrap();
+
+    // b takes over: it replays a's shipped history and writes its own.
+    let b = open(&objects, &temp_dir("regain-b"), slow("nb")).await;
+    b.set_epoch("c1", 2);
+    b.claim_cluster("c1").await.unwrap();
+    let (wb, mb, ops) = recover(&b, "c1", &s).await;
+    assert_eq!(ops, vec![(0, b"a0".to_vec())]);
+    let lsn = wb.append(1, b"b1").unwrap();
+    b.wal().durable(lsn).await.unwrap();
+
+    // a hasn't noticed: its divergent history reuses seq_nos 1 and 2 (never acknowledged).
+    wa.append(1, b"stale1").unwrap();
+    let lsn = wa.append(2, b"stale2").unwrap();
+    a.wal().durable(lsn).await.unwrap();
+
+    // b commits everything and leaves.
+    b.write_manifest("c1", &s, &ShardManifest { max_seq_no: 1, local_checkpoint: 1, ..mb }).await.unwrap();
+    b.detach_shard(wb).await.unwrap();
+
+    // a learns it was deposed and drops the cluster without writing.
+    assert!(a.check_owner("c1").await.is_err());
+    drop(wa);
+
+    // Later a owns the cluster again and writes seq_no 2 of the real history.
+    a.set_epoch("c1", 3);
+    a.claim_cluster("c1").await.unwrap();
+    let (wa, _, ops) = recover(&a, "c1", &s).await;
+    assert!(ops.is_empty(), "b committed everything: {ops:?}");
+    let lsn = wa.append(2, b"a2").unwrap();
+    a.wal().durable_remote(lsn).await.unwrap();
+
+    // Whoever recovers the shard next (a after a crash, or any node) sees only the real history.
+    let c = open(&objects, &temp_dir("regain-c"), fast_config("nc")).await;
+    c.set_epoch("c1", 4);
+    c.claim_cluster("c1").await.unwrap();
+    let ops = replay_only(&c, "c1", &s).await;
+    assert_eq!(ops, vec![(2, b"a2".to_vec())], "the deposed epoch's records stay out");
+    drop(wa);
+    for st in [a, b, c] {
+        st.close().await.unwrap();
+    }
+}
+
+/// A shard dropped without detaching (its cluster was force-unloaded) and attached again by the
+/// same process: the operations of the first attachment that no commit point covers stay in the
+/// shard's history next to the new ones, although the new range starts at its attachment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reattaching_in_the_same_process_keeps_the_earlier_operations() {
+    let objects = test_objects("reattach");
+    let mut cfg = fast_config("na");
+    cfg.wal.ship_interval = Duration::from_secs(3600);
+    let a = open(&objects, &temp_dir("reattach-a"), cfg).await;
+    let s = shard("idxREATTACH", 0);
+    let (w, _, _) = recover(&a, "c1", &s).await;
+    w.append(0, b"op0").unwrap();
+    let lsn = w.append(1, b"op1").unwrap();
+    a.wal().durable(lsn).await.unwrap();
+    drop(w);
+    let (w, _, ops) = recover(&a, "c1", &s).await;
+    assert_eq!(ops, vec![(0, b"op0".to_vec()), (1, b"op1".to_vec())]);
+    let lsn = w.append(2, b"op2").unwrap();
+    a.wal().durable_remote(lsn).await.unwrap();
+    let b = open(&objects, &temp_dir("reattach-b"), fast_config("nb")).await;
+    let ops = replay_only(&b, "c1", &s).await;
+    assert_eq!(ops.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![0, 1, 2]);
+    drop(w);
+    for st in [a, b] {
+        st.close().await.unwrap();
+    }
+}
+
+/// Every record carries the ownership epoch it was appended under, and a WAL range replays only
+/// its own epoch's records: an append through a handle of an older epoch that lands after the
+/// new range opened (same node, same file, a later time, a seq_no the real history uses) is
+/// not part of the shard's history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn records_of_an_older_epoch_never_replay_in_a_newer_range() {
+    let objects = test_objects("epochs");
+    let mut cfg = fast_config("na");
+    cfg.wal.ship_interval = Duration::from_secs(3600);
+    let a = open(&objects, &temp_dir("epochs-a"), cfg).await;
+    a.set_epoch("c1", 3);
+    a.claim_cluster("c1").await.unwrap();
+    let s = shard("idxEPOCHS", 0);
+    let (w, m, _) = recover(&a, "c1", &s).await;
+    assert_eq!(m.wal.last().and_then(|src| src.epoch), Some(3), "{:?}", m.wal);
+    // A handle of the deposed epoch 2 (a request that outlived its instance) appends late.
+    let stale = a.wal().shard_at("c1", &s, 2).unwrap();
+    w.append(0, b"real0").unwrap();
+    stale.append(1, b"stale1").unwrap();
+    let lsn = w.append(1, b"real1").unwrap();
+    a.wal().durable_remote(lsn).await.unwrap();
+    drop(stale);
+
+    let c = open(&objects, &temp_dir("epochs-c"), fast_config("nc")).await;
+    c.set_epoch("c1", 4);
+    c.claim_cluster("c1").await.unwrap();
+    let ops = replay_only(&c, "c1", &s).await;
+    assert_eq!(ops, vec![(0, b"real0".to_vec()), (1, b"real1".to_vec())]);
+    drop(w);
+    for st in [a, c] {
+        st.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pins_keep_snapshot_segments_through_merges_deletion_and_branches() {
+    use search_store::Fenced;
+    let objects = test_objects("pins");
+    let mut cfg = fast_config("n1");
+    cfg.manifest_retain = 1;
+    let store = open(&objects, &temp_dir("pins"), cfg).await;
+    let s = shard("idxPIN", 0);
+    let a = make_segment(&store, 4000).await;
+    let b = make_segment(&store, 6000).await;
+    let m = seed_cluster(&store, "prod", &s, &[a.clone(), b.clone()]).await;
+    let pin = shard("snap.S1.idxPIN", 0);
+    assert!(store.read_pin("prod", &pin).await.unwrap().is_none());
+    store.write_pin("prod", &pin, &m).await.unwrap();
+    let back = store.read_pin("prod", &pin).await.unwrap().unwrap();
+    assert_eq!(back.segments, m.segments);
+    assert_eq!((back.max_seq_no, back.local_checkpoint), (9, 9));
+    assert!(back.wal.is_empty() && back.wal_head.is_none() && back.base.is_none());
+    assert!(back.written_ms > 0);
+    // Written once: the same contents again is a no-op, other contents an error.
+    store.write_pin("prod", &pin, &m).await.unwrap();
+    let other = ShardManifest { segments: vec![m.segments[1].clone()], ..m.clone() };
+    assert!(store.write_pin("prod", &pin, &other).await.is_err());
+    assert_eq!(store.list_pins("prod").await.unwrap(), vec![pin.clone()]);
+    // Pins are no shard: waking never sees them.
+    assert_eq!(store.list_shards("prod").await.unwrap(), vec![s.clone()]);
+    assert_eq!(store.recover_shards("prod").await.unwrap().len(), 1);
+    let t_pinned = search_store_now();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // The index merges into a new segment (retention drops the old commit point), then is deleted.
+    let c = make_segment(&store, 3000).await;
+    let (wal, m2, _) = recover(&store, "prod", &s).await;
+    store.write_manifest("prod", &s, &ShardManifest { segments: vec![seg_ref(c.0, 3000)], ..m2 }).await.unwrap();
+    drop(wal);
+    store.delete_shard("prod", &s).await.unwrap();
+    let gc = store.collect_garbage(Duration::ZERO).await.unwrap();
+    assert_eq!(gc.pins, 1, "{gc:?}");
+    let live_a = a.0.live_key(m.segments[0].live.unwrap());
+    for key in [a.0.key(), b.0.key(), live_a.clone()] {
+        assert!(objects.exists(&key).await.unwrap(), "{key} is pinned");
+    }
+    assert!(!objects.exists(&c.0.key()).await.unwrap(), "only the deleted shard named c");
+
+    // Branches copy pins (a point-in-time branch those written by its time).
+    store.branch("prod", "preview", None).await.unwrap();
+    assert_eq!(store.list_pins("preview").await.unwrap(), vec![pin.clone()]);
+    assert_eq!(store.read_pin("preview", &pin).await.unwrap().unwrap().segments, m.segments);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store.write_pin("prod", &shard("snap.S2.idxPIN", 0), &m).await.unwrap();
+    store.branch("prod", "past", Some(t_pinned)).await.unwrap();
+    assert_eq!(store.list_pins("past").await.unwrap(), vec![pin.clone()], "S2 came later");
+
+    // Deleting the parent's pins keeps what the branches' pins name.
+    store.delete_pins("prod", &store.list_pins("prod").await.unwrap()).await.unwrap();
+    assert!(store.list_pins("prod").await.unwrap().is_empty());
+    store.delete_pins("prod", std::slice::from_ref(&pin)).await.unwrap();
+    store.collect_garbage(Duration::ZERO).await.unwrap();
+    assert!(objects.exists(&a.0.key()).await.unwrap());
+    store.delete_cluster("preview").await.unwrap();
+    store.delete_cluster("past").await.unwrap();
+    let gc = store.collect_garbage(Duration::ZERO).await.unwrap();
+    assert_eq!(gc.pins, 0);
+    for key in [a.0.key(), b.0.key(), live_a] {
+        assert!(!objects.exists(&key).await.unwrap(), "{key} must be collected");
+    }
+
+    // A deposed owner can't pin.
+    let p = open(&objects, &temp_dir("pins-a"), fast_config("na")).await;
+    p.set_epoch("own", 1);
+    p.claim_cluster("own").await.unwrap();
+    let q = open(&objects, &temp_dir("pins-b"), fast_config("nb")).await;
+    q.set_epoch("own", 2);
+    q.claim_cluster("own").await.unwrap();
+    let err = p.write_pin("own", &pin, &m).await.unwrap_err();
+    assert!(err.downcast_ref::<Fenced>().is_some(), "{err:#}");
+    assert!(p.delete_pins("own", std::slice::from_ref(&pin)).await.unwrap_err().downcast_ref::<Fenced>().is_some());
+    q.write_pin("own", &pin, &m).await.unwrap();
+    for st in [store, p, q] {
+        st.close().await.unwrap();
+    }
 }

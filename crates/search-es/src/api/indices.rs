@@ -288,6 +288,12 @@ pub fn create_backing_index(st: &mut ClusterState, name: &str, backing: BackingO
 }
 
 fn create_index_core(st: &mut ClusterState, provided_name: &str, name: &str, req: CreateRequest, now_ms: i64, backing: Option<BackingOf<'_>>) -> EsResult<Vec<String>> {
+    // OpenSearch's ISM templates pick new indices up from the cluster state change
+    // (`opensearch::ism::reconcile`, run by `Cluster::update`).
+    create_index_unhooked(st, provided_name, name, req, now_ms, backing)
+}
+
+fn create_index_unhooked(st: &mut ClusterState, provided_name: &str, name: &str, req: CreateRequest, now_ms: i64, backing: Option<BackingOf<'_>>) -> EsResult<Vec<String>> {
     names::validate_index_name(name)?;
     // The dot-prefix check is a filter on the create index action; data stream backing
     // indices are created by other actions and never warned about.
@@ -400,6 +406,9 @@ fn create_index_core(st: &mut ClusterState, provided_name: &str, name: &str, req
     settings.set("index.uuid", uuid.clone());
     settings.set("index.version.created", if opensearch { crate::version::OPENSEARCH_INDEX_VERSION_ID } else { crate::version::INDEX_VERSION_ID });
     crate::meta::auto_expand::apply(&mut settings);
+    if opensearch {
+        crate::opensearch::check_adaptive_shard_selection(name, &settings)?;
+    }
     if let Some(b) = &backing {
         data_stream_index_settings(&st.metadata, b.data_stream, &mut settings, &composed.mappings, now_ms)?;
         if let Some((start, end)) = b.past {
@@ -533,7 +542,17 @@ pub async fn create(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let hidden = req.settings.get("index.hidden") == Some("true");
     let now = ctx.now_ms;
     let n2 = name.clone();
-    let warnings = ctx.cluster.update(move |st| create_index(st, &provided, &n2, req, now)).await?;
+    let scripts = ctx.cluster.scripts.clone();
+    let warnings = ctx
+        .cluster
+        .update(move |st| {
+            let w = create_index(st, &provided, &n2, req, now)?;
+            if let Some(idx) = st.metadata.indices.get(&n2).cloned() {
+                crate::search::runtime::check_mapping_scripts(&scripts, st, &idx.mapping)?;
+            }
+            Ok(w)
+        })
+        .await?;
     ctx.warn_all(warnings);
     if name.starts_with('.') && !hidden && !names::is_system_index(&name) {
         ctx.warn_dialect(
@@ -611,6 +630,8 @@ pub fn delete_indices(st: &mut ClusterState, names: &[String]) -> EsResult<()> {
             st.metadata.synonyms = Default::default();
             st.metadata.synonyms_version += 1;
         }
+        // So are the x-pack objects (users, ML jobs, connectors, ...).
+        crate::xpack::store::on_index_deleted(st, n);
     }
     Ok(())
 }
@@ -730,6 +751,9 @@ pub async fn put_mapping(ctx: &Ctx<'_>) -> EsResult<Reply> {
             for idx in &indices {
                 let mctx = idx.mapping_ctx();
                 let merged = mapping::for_update(&idx.mapping, &body, &mctx)?;
+                if merged.runtime != idx.mapping.runtime {
+                    crate::search::runtime::check_mapping_scripts(&ctx.cluster.scripts, st, &merged)?;
+                }
                 let added: Vec<&str> = merged.runtime.keys().filter(|k| !idx.mapping.runtime.contains_key(*k)).map(String::as_str).collect();
                 crate::search::runtime::check_time_series(idx, &added, false)?;
                 let mode = IndexMode::of(&idx.settings);
@@ -1058,6 +1082,18 @@ pub async fn close(ctx: &Ctx<'_>) -> EsResult<Reply> {
         .await?;
     let mut indices = Map::new();
     for (n, uuid) in &closed {
+        // Elasticsearch flushes a closing index and reopens it on that commit, so everything
+        // indexed before the close is visible after `_open`, refreshed or not.
+        if let Some(ie) = ctx.cluster.engine.loaded(uuid) {
+            ie.refresh_all()?;
+            for s in &ie.shards {
+                // In memory that is the commit; the storage commits durable shards (and trims
+                // their translog) before the close is acknowledged.
+                if s.log.is_none() {
+                    s.committed(s.translog_mark());
+                }
+            }
+        }
         ctx.cluster.analysis.forget(uuid);
         ctx.cluster.ops.forget(uuid);
         indices.insert(n.clone(), obj! { "closed" => true });
@@ -1105,6 +1141,15 @@ async fn open_indices(ctx: &Ctx<'_>) -> EsResult<Value> {
         })
         .await?;
     let st = ctx.state();
+    for idx in names.iter().filter_map(|n| st.metadata.indices.get(n)) {
+        // An index whose analysis no longer builds (a synonyms set it loads at start) stays
+        // unassigned: `shards_acknowledged: false`, not an error.
+        if ctx.cluster.engine.loaded(&idx.uuid).is_some()
+            && let Ok(ie) = ctx.cluster.engine.index(ctx.cluster, &st, idx)
+        {
+            ie.reopen_shards();
+        }
+    }
     let started = names.iter().filter_map(|n| st.metadata.indices.get(n)).all(|idx| !ctx.cluster.shards_failed(&st, idx));
     Ok(obj! { "acknowledged" => true, "shards_acknowledged" => started })
 }
@@ -1245,6 +1290,19 @@ pub fn add_index_stats(cluster: &crate::Cluster, idx: &IndexMeta, block: &mut Va
     }
 }
 
+/// Drops the figures the engine reports that OpenSearch's stats sections don't have
+/// (`docs.total_size_in_bytes`, `store.total_data_set_size_in_bytes`, …): scalar keys absent
+/// from its template. Per-field breakdowns (objects) stay.
+fn os_prune(b: &mut Map, d: crate::cluster::Dialect) {
+    let t = stats_template(d);
+    let Some(tm) = t.as_object() else { return };
+    for (sec, v) in b.iter_mut() {
+        if let (Value::Obj(sm), Some(Value::Obj(tsec))) = (v, tm.get(sec)) {
+            sm.retain(|k, v| matches!(v, Value::Obj(_) | Value::Arr(_)) || tsec.contains_key(k));
+        }
+    }
+}
+
 /// One index's stats block with `shards` primaries (zeros until the engine reports numbers).
 pub fn stats_block(metrics: &[String], shards: u64) -> Value {
     stats_block_in(crate::cluster::Dialect::Elasticsearch, metrics, shards)
@@ -1283,13 +1341,12 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
     let metrics = ctx.list_param("metric").unwrap_or_default();
     let d = ctx.cluster.dialect;
     let os = d == crate::cluster::Dialect::OpenSearch;
-    for m in &metrics {
-        if !(if os { OS_STATS_METRICS } else { STATS_METRICS }).contains(&m.as_str()) {
-            return Err(EsError::illegal_argument(format!(
-                "request [{}] contains unrecognized metric: [{m}]",
-                ctx.path
-            )));
-        }
+    // `BaseRestHandler.unrecognized`: every unknown metric, each with its suggestions.
+    let known = if os { OS_STATS_METRICS } else { STATS_METRICS };
+    let invalid: std::collections::BTreeSet<String> = metrics.iter().filter(|m| !known.contains(&m.as_str())).cloned().collect();
+    if !invalid.is_empty() {
+        let candidates: std::collections::BTreeSet<String> = known.iter().filter(|k| **k != "_all").map(|k| k.to_string()).collect();
+        return Err(EsError::illegal_argument(crate::rest::params::unrecognized(&ctx.path, &invalid, &candidates, "metric")));
     }
     let level = ctx.query("level").unwrap_or("indices");
     if !matches!(level, "cluster" | "indices" | "shards") {
@@ -1310,6 +1367,8 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
     let both = ctx.list_param("fields").unwrap_or_default();
     let fd_fields: Vec<String> = ctx.list_param("fielddata_fields").unwrap_or_default().into_iter().chain(both.iter().cloned()).collect();
     let cp_fields: Vec<String> = ctx.list_param("completion_fields").unwrap_or_default().into_iter().chain(both.iter().cloned()).collect();
+    let file_sizes = !os && ctx.bool_param("include_segment_file_sizes", false)?;
+    let mut all_files = FileSizes::default();
     for idx in &indices {
         // Closed indices are only reported when asked for; indices without a started shard
         // have no stats.
@@ -1350,6 +1409,16 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
             {
                 let table = e.table();
                 let mut vs = crate::engine::VectorStats::default();
+                if file_sizes && let Some(Value::Obj(seg)) = bm.get_mut("segments") {
+                    let mut files = FileSizes::default();
+                    for s in &e.shards {
+                        files.add_shard(&s.shard);
+                    }
+                    seg.insert("file_sizes".into(), files.to_value());
+                    if k == "total" {
+                        all_files.merge(&files);
+                    }
+                }
                 for s in &e.shards {
                     s.stats_into(bm);
                     e.field_stats_into(s, bm, &fd_fields, &cp_fields);
@@ -1419,6 +1488,20 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
                         }
                     }
                 }
+            } else if !idx.is_closed()
+                && let Value::Obj(bm) = &mut b
+                && let Some(Value::Obj(tl)) = bm.get_mut("translog")
+            {
+                // No engine yet (nothing written): every shard still has its empty translog
+                // generation, as `ShardEngine::stats_into` reports it once there is one.
+                let bytes = (crate::engine::TRANSLOG_HEADER_BYTES * p) as i64;
+                for sk in ["size_in_bytes", "uncommitted_size_in_bytes"] {
+                    tl.insert(sk.into(), Value::from(bytes));
+                    *engine_all.entry((k.to_string(), "translog".into(), sk.into())).or_insert(0) += bytes;
+                }
+            }
+            if os && let Value::Obj(bm) = &mut b {
+                os_prune(bm, d);
             }
             m.insert(k.into(), b);
         }
@@ -1474,6 +1557,12 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
             }
         }
         add_ops(&mut b, all_ops);
+        if file_sizes
+            && let Value::Obj(bm) = &mut b
+            && let Some(Value::Obj(seg)) = bm.get_mut("segments")
+        {
+            seg.insert("file_sizes".into(), all_files.to_value());
+        }
         // Vector sizes add up across indices; the per-field breakdown is per index only.
         if let Value::Obj(bm) = &mut b
             && bm.contains_key("dense_vector")
@@ -1488,6 +1577,118 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
         body.insert("indices".into(), Value::Obj(crate::json::java_hash_map(per_index, 16)));
     }
     Reply::ok(Value::Obj(body))
+}
+
+/// `include_segment_file_sizes`: segment bytes per Lucene file kind (`SegmentsStats.files`).
+/// A roll segment is one container file; each section kind stands for the Lucene file holding
+/// the same data (term index `tip`, term blocks `tim`, postings `doc`/`pos`/`pay`, norms `nvd`,
+/// doc values `dvd`, points `kdd`, stored fields `fdt`/`fdm`, vectors `vec`/`vex`/`veq`, bloom
+/// filters `bfi`, completion `cmp`, and the segment and field infos `si`), counted once per
+/// segment that has it.
+#[derive(Default)]
+struct FileSizes {
+    /// Extension → (total, min, max, files).
+    by_ext: std::collections::BTreeMap<&'static str, (u64, u64, u64, u64)>,
+}
+
+impl FileSizes {
+    fn add_file(&mut self, ext: &'static str, size: u64) {
+        let e = self.by_ext.entry(ext).or_insert((0, u64::MAX, 0, 0));
+        e.0 += size;
+        e.1 = e.1.min(size);
+        e.2 = e.2.max(size);
+        e.3 += 1;
+    }
+
+    fn add_shard(&mut self, shard: &search_index::Shard) {
+        use search_codec::container::SectionKind as K;
+        for seg in shard.searcher().segments() {
+            let mut per: std::collections::BTreeMap<&'static str, u64> = std::collections::BTreeMap::new();
+            let sections = seg.reader.sections();
+            let in_sections: u64 = sections.iter().map(|s| s.2).sum();
+            for (kind, _, len) in sections {
+                let ext = match kind {
+                    K::Meta => "si",
+                    K::TermsIndex => "tip",
+                    K::TermsMeta => "tim",
+                    K::Docs => "doc",
+                    K::Positions => "pos",
+                    K::Payloads => "pay",
+                    K::Norms => "nvd",
+                    K::DocValues => "dvd",
+                    K::Points => "kdd",
+                    K::Stored => "fdt",
+                    K::StoredDict => "fdm",
+                    K::VectorData => "vec",
+                    K::VectorGraph => "vex",
+                    K::VectorQuantized => "veq",
+                    K::TermsBloom => "bfi",
+                    K::Suggest => "cmp",
+                };
+                *per.entry(ext).or_insert(0) += len;
+            }
+            // The container's header and section directory belong with the segment info.
+            *per.entry("si").or_insert(0) += seg.reader.size_in_bytes().saturating_sub(in_sections);
+            if seg.has_deletions() {
+                per.insert("liv", (seg.max_doc() as u64).div_ceil(64) * 8);
+            }
+            for (ext, size) in per {
+                self.add_file(ext, size);
+            }
+        }
+    }
+
+    fn merge(&mut self, o: &FileSizes) {
+        for (ext, &(sum, min, max, n)) in &o.by_ext {
+            let e = self.by_ext.entry(ext).or_insert((0, u64::MAX, 0, 0));
+            e.0 += sum;
+            e.1 = e.1.min(min);
+            e.2 = e.2.max(max);
+            e.3 += n;
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        let mut m = Map::new();
+        for (ext, &(sum, min, max, n)) in &self.by_ext {
+            m.insert(
+                (*ext).to_string(),
+                obj! {
+                    "description" => lucene_file_description(ext),
+                    "size_in_bytes" => sum as i64,
+                    "min_size_in_bytes" => min as i64,
+                    "max_size_in_bytes" => max as i64,
+                    "average_size_in_bytes" => (sum / n.max(1)) as i64,
+                    "count" => n as i64,
+                },
+            );
+        }
+        Value::Obj(crate::json::java_hash_map(m, 16))
+    }
+}
+
+/// `LuceneFilesExtensions.getDescription`.
+fn lucene_file_description(ext: &str) -> &'static str {
+    match ext {
+        "si" => "Segment Info",
+        "tip" => "Term Index",
+        "tim" => "Term Dictionary",
+        "doc" => "Frequencies",
+        "pos" => "Positions",
+        "pay" => "Payloads",
+        "nvd" => "Norms",
+        "dvd" => "DocValues",
+        "kdd" => "Points",
+        "fdt" => "Field Data",
+        "fdm" => "Field Metadata",
+        "vec" => "Vector Data",
+        "vex" => "Vector Index",
+        "veq" => "Scalar Quantized Vector Data",
+        "bfi" => "BloomFilter Index",
+        "cmp" => "Completion Index",
+        "liv" => "Live Documents",
+        _ => "Others",
+    }
 }
 
 /// A stable pseudo-random base64 id derived from an index, a shard and a purpose (commit ids,
@@ -1509,6 +1710,7 @@ fn derived_id(idx: &IndexMeta, shard: u32, purpose: &str, len: usize, url_safe: 
 /// `level=shards`: each started copy (the primaries; replicas stay unassigned on one node).
 fn shard_stats(ctx: &Ctx, idx: &IndexMeta, metrics: &[String]) -> Value {
     let node = &ctx.cluster.node;
+    let os = ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch;
     let mut shards = Map::new();
     for shard in 0..idx.number_of_shards() {
         let mut m = Map::new();
@@ -1520,6 +1722,9 @@ fn shard_stats(ctx: &Ctx, idx: &IndexMeta, metrics: &[String]) -> Value {
                 && let Value::Obj(b) = &mut block
             {
                 e.shard(shard).stats_into(b);
+                if os {
+                    os_prune(b, ctx.cluster.dialect);
+                }
             }
         } else if ctx.bool_param("include_unloaded_segments", false).unwrap_or(false)
             && let Some(e) = ctx.cluster.engine.loaded(&idx.uuid)
@@ -1536,23 +1741,35 @@ fn shard_stats(ctx: &Ctx, idx: &IndexMeta, metrics: &[String]) -> Value {
             }
             m.extend(block);
         }
-        m.insert(
-            "commit".into(),
+        // OpenSearch's commit user data has no `es_version` and comes in its `HashMap` order.
+        let user_data = if os {
             obj! {
-                "id" => derived_id(idx, shard, "commit", 16, false),
-                "generation" => 2,
-                "user_data" => obj! {
-                    "translog_uuid" => derived_id(idx, shard, "translog", 16, true),
-                    "es_version" => crate::version::INDEX_VERSION_ID,
-                    "local_checkpoint" => "-1",
-                    "max_seq_no" => "-1",
-                    "max_unsafe_auto_id_timestamp" => "-1",
-                    "history_uuid" => derived_id(idx, shard, "history", 16, true),
-                },
-                "num_docs" => 0,
-            },
-        );
-        m.insert("seq_no".into(), obj! { "max_seq_no" => -1, "local_checkpoint" => -1, "global_checkpoint" => -1 });
+                "translog_uuid" => derived_id(idx, shard, "translog", 16, true),
+                "history_uuid" => derived_id(idx, shard, "history", 16, true),
+                "local_checkpoint" => "-1",
+                "max_seq_no" => "-1",
+                "max_unsafe_auto_id_timestamp" => "-1",
+            }
+        } else {
+            obj! {
+                "translog_uuid" => derived_id(idx, shard, "translog", 16, true),
+                "es_version" => crate::version::INDEX_VERSION_ID,
+                "local_checkpoint" => "-1",
+                "max_seq_no" => "-1",
+                "max_unsafe_auto_id_timestamp" => "-1",
+                "history_uuid" => derived_id(idx, shard, "history", 16, true),
+            }
+        };
+        m.insert("commit".into(), obj! { "id" => derived_id(idx, shard, "commit", 16, false), "generation" => 2, "user_data" => user_data, "num_docs" => 0 });
+        // The shard's sequence numbers (a single node: the global checkpoint is the local one).
+        let (max_seq, checkpoint) = match ctx.cluster.engine.loaded(&idx.uuid) {
+            Some(e) if !idx.is_closed() => {
+                let sh = &e.shard(shard).shard;
+                (sh.max_seq_no(), sh.local_checkpoint())
+            }
+            _ => (-1, -1),
+        };
+        m.insert("seq_no".into(), obj! { "max_seq_no" => max_seq, "local_checkpoint" => checkpoint, "global_checkpoint" => checkpoint });
         m.insert(
             "retention_leases".into(),
             obj! {
@@ -1567,8 +1784,10 @@ fn shard_stats(ctx: &Ctx, idx: &IndexMeta, metrics: &[String]) -> Value {
             },
         );
         m.insert("shard_path".into(), obj! { "state_path" => "/data", "data_path" => "/data", "is_custom_data_path" => false });
-        m.insert("search_idle".into(), false.into());
-        m.insert("search_idle_time".into(), 0.into());
+        if !os {
+            m.insert("search_idle".into(), false.into());
+            m.insert("search_idle_time".into(), 0.into());
+        }
         shards.insert(shard.to_string(), Value::Arr(vec![Value::Obj(m)]));
     }
     Value::Obj(shards)
@@ -1691,7 +1910,14 @@ pub fn flush(ctx: &Ctx) -> EsResult<Reply> {
         if let Some(e) = ctx.cluster.engine.loaded(&idx.uuid) {
             for s in &e.shards {
                 s.refresh()?;
+                let mark = s.translog_mark();
                 s.shard.flush().map_err(crate::engine::convert::index_error)?;
+                // In memory the flush is the commit; the storage commits a durable shard (and
+                // trims its translog) before this request is answered.
+                match &s.log {
+                    None => s.committed(mark),
+                    Some(log) => log.flush_requested(),
+                }
                 s.counters.flush_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -1775,6 +2001,9 @@ fn force_merge(ctx: &Ctx, max_segments: i64, expunge: bool, flush: bool) -> EsRe
                 s.shard.refresh().map_err(crate::engine::convert::index_error)?;
                 if flush {
                     s.shard.flush().map_err(crate::engine::convert::index_error)?;
+                    if let Some(log) = &s.log {
+                        log.flush_requested();
+                    }
                 }
             }
         }

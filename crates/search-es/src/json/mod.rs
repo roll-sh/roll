@@ -13,6 +13,7 @@
 
 pub mod locate;
 pub mod parse;
+pub mod raw;
 pub mod write;
 
 use indexmap::IndexMap;

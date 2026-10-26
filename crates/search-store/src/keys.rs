@@ -23,6 +23,7 @@
 //! search/c/<cluster>/state/<epoch:020>-<gen:020>-<token:016x>.json.zst              cluster metadata
 //! search/c/<cluster>/i/<index uuid>/<shard>/<epoch:020>-<gen:020>-<token:016x>.json  shard manifest
 //! search/c/<cluster>/i/<index uuid>/<shard>/<epoch:020>-<gen:020>-<token:016x>.deleted.json  shard tombstone
+//! search/c/<cluster>/p/<pin>/<shard>.json                                 pinned commit point (snapshot contents, see `pins`)
 //! search/gc/pending.json                                                   garbage collector state
 //! search/gc/marks.bin                                                      what every manifest references (collector cache)
 //! ```
@@ -301,6 +302,16 @@ pub fn manifest_key(cluster: &str, shard: &ShardId, v: Version) -> String {
     format!("{CLUSTER_PREFIX}{cluster}/i/{}/{}/{v}.json", shard.index_uuid, shard.shard)
 }
 
+/// Pinned commit points of a cluster (`crate::Store::write_pin`).
+pub fn pins_prefix(cluster: &str) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/p/")
+}
+
+/// A pinned commit point: written once, never rewritten.
+pub fn pin_key(cluster: &str, pin: &ShardId) -> String {
+    format!("{CLUSTER_PREFIX}{cluster}/p/{}/{}.json", pin.index_uuid, pin.shard)
+}
+
 /// A shard's tombstone: the generation that records its deletion while the point-in-time window
 /// still needs its earlier commit points (see `Store::delete_shard`).
 pub fn tombstone_key(cluster: &str, shard: &ShardId, v: Version) -> String {
@@ -396,6 +407,8 @@ pub enum ClusterObject<'a> {
     State { cluster: &'a str, version: Version },
     /// A shard's commit point, or (`deleted`) its tombstone.
     Manifest { cluster: &'a str, index_uuid: &'a str, shard: u32, version: Version, deleted: bool },
+    /// A pinned commit point (`crate::Store::write_pin`).
+    Pin { cluster: &'a str, name: &'a str, shard: u32 },
 }
 
 pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
@@ -406,6 +419,14 @@ pub fn parse_cluster_key(key: &str) -> Option<ClusterObject<'_>> {
             return None;
         }
         return Some(ClusterObject::State { cluster, version: parse_version(file, ".json.zst")? });
+    }
+    if let Some(rest) = rest.strip_prefix("p/") {
+        let (name, file) = rest.split_once('/')?;
+        let shard = file.strip_suffix(".json")?;
+        if name.is_empty() || shard.is_empty() || !shard.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        return Some(ClusterObject::Pin { cluster, name, shard: shard.parse().ok()? });
     }
     let rest = rest.strip_prefix("i/")?;
     let mut parts = rest.split('/');
@@ -513,6 +534,12 @@ mod tests {
             assert_eq!(parse_cluster_key(bad), None, "{bad}");
         }
         assert_eq!(parse_cluster_key("search/c/c1/other"), None);
+        let pin = ShardId::new("snap.u1.i2", 4);
+        assert_eq!(pin_key("c1", &pin), "search/c/c1/p/snap.u1.i2/4.json");
+        assert_eq!(parse_cluster_key(&pin_key("c1", &pin)), Some(ClusterObject::Pin { cluster: "c1", name: "snap.u1.i2", shard: 4 }));
+        for bad in ["search/c/c1/p/x/y.json", "search/c/c1/p/x/1", "search/c/c1/p//1.json", "search/c/c1/p/x/1/2.json", "search/c/c1/p/x/.json"] {
+            assert_eq!(parse_cluster_key(bad), None, "{bad}");
+        }
         // Listing order (lexicographic) is history order: epoch first, then generation, at any
         // magnitude (a lease epoch may be a nanosecond timestamp).
         let mut names = [Version::new(2, 1, 0), Version::new(1, 30, 7), Version::new(1, 4, u64::MAX), Version::new(10_000_000_000_000_000, 1, 0), Version::new(u64::MAX, u64::MAX, 1)]

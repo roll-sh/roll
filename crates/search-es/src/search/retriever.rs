@@ -30,6 +30,10 @@ const MAX_NESTED_DEPTH: usize = 128;
 
 /// Replaces `source.retriever` by the sections it stands for.
 pub fn apply(source: &mut SearchSource, url_sort: bool) -> EsResult<()> {
+    rank_to_retriever(source)?;
+    if source.sub_searches.len() == 1 && source.query.is_none() {
+        source.query = source.sub_searches.pop();
+    }
     let Some(r) = source.retriever.take() else { return Ok(()) };
     // `SearchSourceBuilder.validate`: sections a retriever would set.
     let mut specified = Vec::new();
@@ -60,13 +64,13 @@ pub fn apply(source: &mut SearchSource, url_sort: bool) -> EsResult<()> {
     let mut fusion = None;
     match entry(&r)?.0 {
         "rrf" | "linear" => fusion = Some(compound(&r, 0, &[], &mut checks)?),
-        _ => extract(&r, false, 0, &[], &mut body, &mut checks, &mut diversify)?,
+        _ => extract(&r, false, 0, &[], &mut body, &mut checks, &mut diversify, &mut fusion)?,
     }
     let size = source.size.unwrap_or(10) as i64;
     let mut errors: Vec<String> = Vec::new();
     for (name, field, window) in &checks {
         // Compound retrievers only check a `size` the request sets.
-        if matches!(name.as_str(), "rrf" | "linear") && source.size.is_none() {
+        if matches!(name.as_str(), "rrf" | "linear" | "pinned") && source.size.is_none() {
             if *window < 0 {
                 errors.push(format!("[{field}] parameter cannot be negative, found [{window}]"));
             }
@@ -107,13 +111,90 @@ pub fn apply(source: &mut SearchSource, url_sort: bool) -> EsResult<()> {
     Ok(())
 }
 
+/// The deprecated `rank` section (`RRFRankBuilder.toRetriever`): the `query` (or each of
+/// `sub_searches`) becomes a `standard` retriever and each `knn` search a `knn` retriever,
+/// fused by an `rrf` retriever with the rank's window and constant.
+fn rank_to_retriever(source: &mut SearchSource) -> EsResult<()> {
+    let Some(rank) = source.rank.take() else { return Ok(()) };
+    if source.retriever.is_some() {
+        return Err(EsError::illegal_argument("Cannot specify both [rank] and [retriever]."));
+    }
+    let mut entries = rank.iter();
+    let Some((name, body)) = entries.next() else {
+        return Err(EsError::parse("expected a rank name, but found token [START_OBJECT] for [rank]"));
+    };
+    if name != "rrf" {
+        return Err(EsError::new(400, "named_object_not_found_exception", format!("[1:1] unknown field [{name}]")));
+    }
+    if entries.next().is_some() {
+        return Err(EsError::parse("expected token '}', but found token [START_OBJECT] for [rank]"));
+    }
+    let Value::Obj(body) = body else { return Err(EsError::x_content_parse(1, 1, "[rrf] expected object")) };
+    // `declareInt`: numbers coerce (truncate), strings parse.
+    let int = |k: &str| -> EsResult<Option<i64>> {
+        match body.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => match v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok())) {
+                Some(f) => Ok(Some(f.trunc() as i64)),
+                None => Err(EsError::x_content_parse(1, 1, format!("[rrf] failed to parse field [{k}]"))),
+            },
+        }
+    };
+    for k in body.keys() {
+        if !matches!(k.as_str(), "rank_window_size" | "rank_constant") {
+            return Err(EsError::x_content_parse(1, 1, format!("[rrf] unknown field [{k}]")));
+        }
+    }
+    let window = int("rank_window_size")?.unwrap_or(10);
+    let constant = int("rank_constant")?.unwrap_or(60);
+    if constant < 1 {
+        return Err(EsError::illegal_argument("[rank_constant] must be greater or equal to [1] for [rrf]"));
+    }
+    let mut queries = std::mem::take(&mut source.sub_searches);
+    queries.extend(source.query.take());
+    if queries.len() + source.knn.len() < 2 {
+        return Err(EsError::illegal_argument("[rrf] requires at least 2 sub-queries to be defined"));
+    }
+    let mut retrievers = Vec::new();
+    for q in &queries {
+        let mut standard = Map::new();
+        standard.insert("query".into(), q.to_value());
+        if let Some(n) = q.query_name() {
+            standard.insert("_name".into(), Value::Str(n.to_string()));
+        }
+        retrievers.push(crate::obj! { "standard" => Value::Obj(standard) });
+    }
+    // `KnnSearchBuilder.Builder.build(size)`: `k` defaults to the request's size and
+    // `num_candidates` to `1.5 k` (at most 10,000). The knn search's filters don't carry over.
+    let size = source.size.unwrap_or(10).max(0) as i64;
+    for knn in std::mem::take(&mut source.knn) {
+        let mut k = Map::new();
+        for key in ["field", "query_vector", "query_vector_builder", "k", "num_candidates", "similarity", "rescore_vector", "visit_percentage", "_name"] {
+            if let Some(v) = knn.get(key) {
+                k.insert(key.into(), v.clone());
+            }
+        }
+        let kk = k.get("k").and_then(Value::as_i64).unwrap_or(size);
+        k.entry("k".to_string()).or_insert(Value::from(kk));
+        k.entry("num_candidates".to_string()).or_insert(Value::from((1.5 * kk as f64).min(10_000.0).round() as i64));
+        retrievers.push(crate::obj! { "knn" => Value::Obj(k) });
+    }
+    let mut r = Map::new();
+    r.insert("rrf".into(), crate::obj! { "retrievers" => Value::Arr(retrievers), "rank_window_size" => Value::from(window), "rank_constant" => Value::from(constant) });
+    source.retriever = Some(r);
+    Ok(())
+}
+
 /// How a compound retriever fuses its children's rankings.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FusionKind {
-    /// `rrf`: `Σ 1 / (rank_constant + rank)`.
-    Rrf { rank_constant: i64 },
+    /// `rrf`: `Σ weight · 1 / (rank_constant + rank)`.
+    Rrf { rank_constant: i64, weights: Vec<f32> },
     /// `linear`: `Σ weight · normalize(score)`.
     Linear { weights: Vec<f32>, normalizers: Vec<Normalizer> },
+    /// `pinned` over a compound retriever: the pins (index, id) above its one child's
+    /// ranking; a pin naming another index still takes its pin position.
+    Pinned { pins: Vec<(Option<String>, String)>, organic: Option<Value> },
 }
 
 /// A `linear` child's score normalizer (`ScoreNormalizer`).
@@ -135,6 +216,15 @@ impl Normalizer {
     }
 
     /// `normalizeScores` over one child's ranked scores.
+    /// `ScoreNormalizer.getName`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Normalizer::None => "none",
+            Normalizer::MinMax => "minmax",
+            Normalizer::L2Norm => "l2_norm",
+        }
+    }
+
     pub fn apply(self, scores: &mut [f32]) {
         const EPSILON: f32 = 1e-6;
         match self {
@@ -173,36 +263,74 @@ pub struct Fusion {
     pub window: i64,
     pub min_score: Option<f32>,
     pub children: Vec<SearchSource>,
+    /// Per child: its retriever's `_name`.
+    pub names: Vec<Option<String>>,
+    /// Per child: a `standard` retriever's `topDocsQuery` (its query, with its filters as
+    /// filter clauses), which the final phase matches the totals and aggregations with.
+    pub tails: Vec<Option<Value>>,
+}
+
+/// A fused document: its key, fused score, and per child its position there (0-based) and
+/// normalized score (`linear`), if the child ranked it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FusedDoc<K> {
+    pub key: K,
+    pub score: f32,
+    pub per_child: Vec<Option<(u32, f32)>>,
 }
 
 impl Fusion {
     /// Combines the children's ranked hits (`combineInnerRetrieverResults`): keys with their
     /// fused scores, best first (ties keep the earlier key order), at most `window`.
     pub fn combine<K: Clone + Eq + std::hash::Hash + Ord>(&self, ranked: &[Vec<(K, f32)>]) -> Vec<(K, f32)> {
-        let mut fused: std::collections::HashMap<K, f32> = std::collections::HashMap::new();
+        self.combine_detailed(ranked).into_iter().map(|d| (d.key, d.score)).collect()
+    }
+
+    /// [`combine`](Self::combine), keeping what explanations report per child
+    /// (`RRFRankDoc.positions`, `LinearRankDoc.normalizedScores`).
+    pub fn combine_detailed<K: Clone + Eq + std::hash::Hash + Ord>(&self, ranked: &[Vec<(K, f32)>]) -> Vec<FusedDoc<K>> {
+        let n = ranked.len();
+        let mut fused: std::collections::HashMap<K, FusedDoc<K>> = std::collections::HashMap::new();
+        fn entry<'a, K: Clone + Eq + std::hash::Hash>(fused: &'a mut std::collections::HashMap<K, FusedDoc<K>>, k: &K, n: usize) -> &'a mut FusedDoc<K> {
+            fused.entry(k.clone()).or_insert_with(|| FusedDoc { key: k.clone(), score: 0.0, per_child: vec![None; n] })
+        }
         for (i, list) in ranked.iter().enumerate() {
             match &self.kind {
-                FusionKind::Rrf { rank_constant } => {
-                    for (rank, (k, _)) in list.iter().enumerate() {
-                        *fused.entry(k.clone()).or_insert(0.0) += 1.0 / (*rank_constant as f32 + (rank + 1) as f32);
+                FusionKind::Rrf { rank_constant, weights } => {
+                    let w = weights.get(i).copied().unwrap_or(1.0);
+                    for (rank, (k, s)) in list.iter().enumerate() {
+                        let d = entry(&mut fused, k, n);
+                        d.score += w * (1.0 / (*rank_constant as f32 + (rank + 1) as f32));
+                        d.per_child[i] = Some((rank as u32, *s));
+                    }
+                }
+                // Pins are resolved to documents by the caller (`fusion::rank`), which hands
+                // them in as a ranking of their own ahead of the child's.
+                FusionKind::Pinned { .. } => {
+                    for (rank, (k, s)) in list.iter().enumerate() {
+                        let d = entry(&mut fused, k, n);
+                        d.per_child[i] = Some((rank as u32, *s));
+                        d.score = d.score.max(*s);
                     }
                 }
                 FusionKind::Linear { weights, normalizers } => {
                     let mut scores: Vec<f32> = list.iter().map(|(_, s)| *s).collect();
                     normalizers.get(i).copied().unwrap_or(Normalizer::None).apply(&mut scores);
                     let w = weights.get(i).copied().unwrap_or(1.0);
-                    for ((k, _), s) in list.iter().zip(scores) {
+                    for (rank, ((k, _), s)) in list.iter().zip(scores).enumerate() {
+                        let d = entry(&mut fused, k, n);
+                        d.per_child[i] = Some((rank as u32, s));
                         let s = if s.is_nan() { 0.0 } else { s };
-                        *fused.entry(k.clone()).or_insert(0.0) += w * s;
+                        d.score += w * s;
                     }
                 }
             }
         }
-        let mut out: Vec<(K, f32)> = fused.into_iter().collect();
-        out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut out: Vec<FusedDoc<K>> = fused.into_values().collect();
+        out.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
         out.truncate(self.window.max(0) as usize);
         if let Some(m) = self.min_score {
-            out.retain(|(_, s)| *s >= m);
+            out.retain(|d| d.score >= m);
         }
         out
     }
@@ -216,9 +344,11 @@ fn child_source(r: &Map, depth: usize, inherited: &[Value], checks: &mut Vec<(St
     }
     let mut body = Map::new();
     let mut diversify = None;
-    extract(r, true, depth, inherited, &mut body, checks, &mut diversify)?;
+    let mut fusion = None;
+    extract(r, true, depth, inherited, &mut body, checks, &mut diversify, &mut fusion)?;
     let mut s = SearchSource::parse(&Value::Obj(body), None)?;
     s.diversify = diversify;
+    s.fusion = fusion.map(Box::new);
     Ok(s)
 }
 
@@ -257,10 +387,28 @@ fn compound(r: &Map, depth: usize, inherited: &[Value], checks: &mut Vec<(String
     };
     let mut children = Vec::new();
     let (mut weights, mut normalizers) = (Vec::new(), Vec::new());
+    let (mut names, mut tails) = (Vec::new(), Vec::new());
     for c in list {
         let Value::Obj(cm) = c else { return Err(EsError::parse(format!("[{name}] retrievers must be objects"))) };
         // `{"retriever": {...}, "weight": .., "normalizer": ..}` or a bare retriever.
         let (inner, weight, normalizer) = match cm.get("retriever") {
+            Some(Value::Obj(inner)) if !linear => {
+                // `RRFRetrieverComponent.fromXContent`.
+                let wrap = |e: EsError| EsError::x_content_parse(1, 1, format!("[{name}] failed to parse field [retrievers]")).caused_by(e);
+                for k in cm.keys() {
+                    if !matches!(k.as_str(), "retriever" | "weight") {
+                        return Err(wrap(EsError::parse(format!("unknown field [{k}], expected [retriever] or [weight]"))));
+                    }
+                }
+                let w = match cm.get("weight") {
+                    None | Some(Value::Null) => 1.0,
+                    Some(v) => v.as_f64().map(|w| w as f32).ok_or_else(|| wrap(EsError::x_content_parse(1, 1, "[weight] must be a number")))?,
+                };
+                if w < 0.0 {
+                    return Err(wrap(EsError::illegal_argument(format!("[weight] must be non-negative, found [{}]", search_index::util::java::float_to_string(w)))));
+                }
+                (inner, w, None)
+            }
             Some(Value::Obj(inner)) => {
                 for k in cm.keys() {
                     if !matches!(k.as_str(), "retriever" | "weight" | "normalizer") {
@@ -288,6 +436,19 @@ fn compound(r: &Map, depth: usize, inherited: &[Value], checks: &mut Vec<(String
             _ => (cm, 1.0, None),
         };
         children.push(crate::stack::maybe_grow(|| child_source(inner, depth + 1, &fs, checks))?);
+        let (kind, ibody) = entry(inner)?;
+        names.push(ibody.get("_name").map(Value::to_es_string));
+        tails.push((kind == "standard").then(|| {
+            let query = ibody.get("query").cloned().unwrap_or_else(|| crate::obj! { "match_all" => crate::obj! {} });
+            let mut fs2 = filters(ibody.get("filter"));
+            fs2.extend(fs.iter().cloned());
+            if fs2.is_empty() {
+                query
+            } else {
+                fs2.insert(0, query);
+                crate::obj! { "bool" => crate::obj! { "filter" => Value::Arr(fs2) } }
+            }
+        }));
         weights.push(weight);
         normalizers.push(normalizer.or(top_normalizer).unwrap_or(Normalizer::None));
     }
@@ -298,10 +459,10 @@ fn compound(r: &Map, depth: usize, inherited: &[Value], checks: &mut Vec<(String
     let kind = if linear {
         FusionKind::Linear { weights, normalizers }
     } else {
-        FusionKind::Rrf { rank_constant: int("rank_constant")?.unwrap_or(60) }
+        FusionKind::Rrf { rank_constant: int("rank_constant")?.unwrap_or(60), weights }
     };
     let min_score = body.get("min_score").and_then(Value::as_f64).map(|m| m as f32);
-    Ok(Fusion { kind, window, min_score, children })
+    Ok(Fusion { kind, window, min_score, children, names, tails })
 }
 
 /// A `diversify` retriever (`DiversifyRetrieverBuilder`, type `mmr`).
@@ -461,6 +622,8 @@ fn filters(v: Option<&Value>) -> Vec<Value> {
 /// Adds retriever `r` to the request body `out`; compound retrievers record their window-size
 /// checks (`name`, field, window).
 /// `inherited`: pre-filters of enclosing compound retrievers, which apply to their children.
+/// A retriever that runs as a compound one (`pinned`, a `rescorer` over `rrf`) sets `fusion`.
+#[allow(clippy::too_many_arguments)]
 fn extract(
     r: &Map,
     compound: bool,
@@ -469,6 +632,7 @@ fn extract(
     out: &mut Map,
     checks: &mut Vec<(String, &'static str, i64)>,
     diversify: &mut Option<Diversify>,
+    fusion: &mut Option<Fusion>,
 ) -> EsResult<()> {
     if depth >= MAX_NESTED_DEPTH {
         return Err(EsError::illegal_argument(format!(
@@ -575,7 +739,21 @@ fn extract(
             }
             let window = rescorers.iter().map(|r| r.get("window_size").and_then(Value::as_i64).unwrap_or(10)).min().unwrap_or(10);
             checks.push(("rescorer".into(), "window_size", window));
-            crate::stack::maybe_grow(|| extract(inner, true, depth + 1, &fs, out, checks, diversify))?;
+            // A compound retriever under the rescorer: its fused documents are rescored.
+            if let (sub @ ("rrf" | "linear"), ib) = entry(inner)? {
+                let sub_window = ib.get("rank_window_size").and_then(Value::as_i64).unwrap_or(10);
+                for r in &rescorers {
+                    let w = r.get("window_size").and_then(Value::as_i64).unwrap_or(10);
+                    if w > sub_window {
+                        return Err(EsError::illegal_argument(format!(
+                            "[rescorer] requires [window_size: {w}] to be smaller than or equal to its sub retriever's {sub} [rank_window_size: {sub_window}]"
+                        )));
+                    }
+                }
+                *fusion = Some(crate::stack::maybe_grow(|| self::compound(inner, depth + 1, &fs, checks))?);
+            } else {
+                crate::stack::maybe_grow(|| extract(inner, true, depth + 1, &fs, out, checks, diversify, fusion))?;
+            }
             match out.get_mut("rescore") {
                 Some(Value::Arr(a)) => a.extend(rescorers),
                 _ => {
@@ -584,12 +762,89 @@ fn extract(
             }
             Ok(())
         }
+        "pinned" => {
+            // `PinnedRetrieverBuilder`: the child's query becomes the organic query of a
+            // `pinned` query (a compound child: its ranking under the pins).
+            let wrap = |e: EsError| EsError::parse(e.reason().to_string()).caused_by(e);
+            for k in body.keys() {
+                if !matches!(k.as_str(), "ids" | "docs" | "retriever" | "rank_window_size" | "filter" | "min_score" | "_name") {
+                    return Err(unknown(name, k));
+                }
+            }
+            let (ids, docs) = (body.get("ids"), body.get("docs"));
+            if ids.is_some() && docs.is_some() {
+                return Err(wrap(EsError::illegal_argument("Both 'ids' and 'docs' cannot be specified at the same time")));
+            }
+            let non_empty = |v: Option<&Value>| matches!(v, Some(Value::Arr(a)) if !a.is_empty());
+            if !non_empty(ids) && !non_empty(docs) {
+                return Err(wrap(EsError::illegal_argument("Either 'ids' or 'docs' must be provided and non-empty for pinned retriever")));
+            }
+            let Some(Value::Obj(inner)) = body.get("retriever") else { return Err(EsError::parse("Required [retriever]")) };
+            let window = body.get("rank_window_size").and_then(Value::as_i64).unwrap_or(10);
+            checks.push((name.to_string(), "rank_window_size", window));
+            let mut fs = filters(body.get("filter"));
+            fs.extend(inherited.iter().cloned());
+            if matches!(entry(inner)?.0, "rrf" | "linear") {
+                let child = crate::stack::maybe_grow(|| self::compound(inner, depth + 1, &fs, checks))?;
+                let pins: Vec<(Option<String>, String)> = match (ids, docs) {
+                    (Some(Value::Arr(a)), _) => a.iter().map(|v| (None, v.to_es_string())).collect(),
+                    (_, Some(Value::Arr(a))) => a.iter().map(|d| (d.get("_index").map(Value::to_es_string), d.get("_id").map(Value::to_es_string).unwrap_or_default())).collect(),
+                    _ => Vec::new(),
+                };
+                let src = SearchSource { fusion: Some(Box::new(child)), ..Default::default() };
+                *fusion = Some(Fusion { kind: FusionKind::Pinned { pins, organic: None }, window, min_score: None, children: vec![src], names: vec![None], tails: vec![None] });
+                return Ok(());
+            }
+            let inner_name = entry(inner)?.1.get("_name").map(Value::to_es_string);
+            let mut sub = Map::new();
+            crate::stack::maybe_grow(|| extract(inner, true, depth + 1, &fs, &mut sub, checks, diversify, fusion))?;
+            if let Some(sort) = sub.get("sort") {
+                let first = match sort {
+                    Value::Arr(a) => a.first().cloned(),
+                    other => Some(other.clone()),
+                };
+                let by_score = match &first {
+                    None => true,
+                    Some(Value::Str(s)) => s == "_score",
+                    Some(Value::Obj(m)) => m.contains_key("_score"),
+                    _ => false,
+                };
+                if !by_score {
+                    return Err(wrap(EsError::illegal_argument(format!(
+                        "[pinned] retriever only supports sorting by score, invalid sort criterion: {}",
+                        first.map(|v| v.to_json()).unwrap_or_default()
+                    ))));
+                }
+            }
+            let Some(organic) = sub.shift_remove("query") else {
+                return Err(wrap(EsError::illegal_argument("pinned retriever requires retriever with associated query")));
+            };
+            let mut p = Map::new();
+            p.insert("organic".into(), organic);
+            if let Some(v) = ids {
+                p.insert("ids".into(), v.clone());
+            }
+            if let Some(v) = docs {
+                p.insert("docs".into(), v.clone());
+            }
+            let query = crate::obj! { "pinned" => Value::Obj(p) };
+            sub.insert("query".into(), query.clone());
+            let mut src = SearchSource::parse(&Value::Obj(sub), None)?;
+            src.diversify = diversify.take();
+            let organic = match &query {
+                Value::Obj(m) => m.get("pinned").and_then(|p| p.get("organic")).cloned(),
+                _ => None,
+            };
+            *fusion = Some(Fusion { kind: FusionKind::Pinned { pins: Vec::new(), organic }, window, min_score: None, children: vec![src], names: vec![inner_name], tails: vec![Some(query)] });
+            let _ = out;
+            Ok(())
+        }
         "diversify" => {
             let d = parse_diversify(body)?;
             let Some(Value::Obj(inner)) = body.get("retriever") else { return Err(EsError::illegal_argument("Required [retriever]")) };
             let mut fs = filters(body.get("filter"));
             fs.extend(inherited.iter().cloned());
-            crate::stack::maybe_grow(|| extract(inner, true, depth + 1, &fs, out, checks, diversify))?;
+            crate::stack::maybe_grow(|| extract(inner, true, depth + 1, &fs, out, checks, diversify, fusion))?;
             // The child searches the window: a kNN child's `k` is capped by it.
             if let Some(Value::Arr(knn)) = out.get_mut("knn") {
                 for k in knn.iter_mut() {

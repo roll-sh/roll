@@ -9,7 +9,9 @@
 //!   scalars reached by a partial match, and drops objects and arrays left empty. If nothing
 //!   matches, the response is `{}`.
 //! - Exclusive filtering removes the fields a filter ends on; containers emptied by it are
-//!   dropped, containers that were already empty are kept.
+//!   dropped, containers that were already empty are kept. OpenSearch's older filtering
+//!   generator starts a container lazily, so there any container a filter partially matched
+//!   is dropped when nothing of it is written, empty ones included.
 //! - Inclusions apply first, then exclusions.
 //!
 //! The filter is a compiled tree applied to the response value before it is serialized.
@@ -275,7 +277,7 @@ fn exclude_obj(m: Map, filters: &[&Node]) -> Option<Map> {
             },
         }
     }
-    if out.is_empty() && !was_empty && filtered {
+    if out.is_empty() && ((!was_empty && filtered) || crate::opensearch::active()) {
         return None;
     }
     Some(out)
@@ -291,7 +293,7 @@ fn exclude_arr(a: Vec<Value>, filters: &[&Node]) -> Option<Vec<Value>> {
             None => filtered = true,
         }
     }
-    if out.is_empty() && !was_empty && filtered {
+    if out.is_empty() && ((!was_empty && filtered) || crate::opensearch::active()) {
         return None;
     }
     Some(out)
@@ -341,6 +343,10 @@ mod tests {
         );
         assert!(!run("-hits.total.value", DOC).contains(r#""total""#));
         assert!(run("-empty.x", DOC).contains(r#""empty":{}"#));
+        // OpenSearch drops containers a filter reached when nothing of them is written.
+        let os = |f: &str| crate::opensearch::with(true, || run(f, DOC));
+        assert!(!os("-empty.x").contains("empty"));
+        assert_eq!(os("-hits.hits._id,-hits.hits._source,-hits.hits._score,-took"), r#"{"hits":{"total":{"value":2}},"empty":{},"list":[1,2]}"#);
     }
 
     #[test]

@@ -41,11 +41,26 @@ impl ValueType {
             "string" => ValueType::String,
             "double" | "float" => ValueType::Double,
             "number" | "numeric" | "long" | "integer" | "short" | "byte" => ValueType::Long,
+            // OpenSearch's `ValueType.UNSIGNED_LONG`; for unmapped fields (all `value_type`
+            // affects) its `missing` values aggregate as longs.
+            "unsigned_long" if crate::dialect::opensearch() => ValueType::Long,
             "date" => ValueType::Date,
             "ip" => ValueType::Ip,
             "boolean" => ValueType::Boolean,
             _ => return None,
         })
+    }
+
+    /// `toString()`: the description messages print (`byte|short|integer|long`).
+    pub fn description(self) -> &'static str {
+        match self {
+            ValueType::String => "string",
+            ValueType::Long => "byte|short|integer|long",
+            ValueType::Double => "float|double",
+            ValueType::Date => "date",
+            ValueType::Ip => "ip",
+            ValueType::Boolean => "boolean",
+        }
     }
 
     /// `getPreferredName()`.
@@ -280,6 +295,7 @@ impl BoundVs {
         }
         match &self.field {
             Some(f) if f.counter => format!("Field [{}] of type [{}][counter]", f.name, f.type_name),
+            Some(f) if f.position => format!("Field [{}] of type [{}][position]", f.name, f.type_name),
             Some(f) => format!("Field [{}] of type [{}]", f.name, f.type_name),
             None => format!("unmapped field with value source type [{}]", self.vs_type.type_name()),
         }
@@ -346,7 +362,10 @@ impl BoundVs {
     }
 
     pub fn has_ordinals(&self) -> bool {
-        self.script.is_none() && matches!(self.field.as_ref().map(|f| f.source), Some(SourceType::Keyword | SourceType::Ip))
+        // Keyed flattened fields share their dictionary with every other key: no global
+        // ordinals of their own, so they read through [`BytesReader`].
+        self.script.is_none()
+            && self.field.as_ref().is_some_and(|f| matches!(f.source, SourceType::Keyword | SourceType::Ip) && f.constant.is_none() && f.flattened_key.is_none())
     }
 
     pub fn numeric_reader(&self, seg: &SegmentContext) -> Result<NumReader> {
@@ -388,24 +407,26 @@ pub fn bind(spec: &VsSpec, lookup: &dyn FieldLookup, default_type: VsType, timez
                 match (vs_type, ft) {
                     (None, Some(t)) => vs_type = Some(t),
                     (Some(user), Some(t)) if user != t && spec.script.is_none() => {
-                        // Numeric-compatible hints are accepted (ValueType.isA compatibility).
-                        let compatible = (user.is_numeric() && t.is_numeric()) || (matches!(user, VsType::Keyword | VsType::Ip) && matches!(t, VsType::Keyword | VsType::Ip));
-                        if !compatible {
-                            return Err(AggError::illegal_argument(format!(
-                                "Field type [{}] is incompatible with specified value_type [{}]",
-                                f.type_name,
-                                spec.value_type.map(|v| v.preferred_name()).unwrap_or("")
-                            )));
-                        }
-                        vs_type = Some(t);
-                    }
-                    (_, None) if f.type_name == "text" => {
-                        // `TextFieldMapper.TextFieldType.fielddataBuilder` without fielddata.
+                        // `ValuesSourceConfig.internalResolve`: the hint's values source type
+                        // must be the field's (`long` and `double` both mean numeric).
                         return Err(AggError::illegal_argument(format!(
-                            "Fielddata is disabled on [{0}] in [{1}]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{0}] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
-                            f.name,
-                            lookup.index_name()
+                            "Field type [{}] is incompatible with specified value_type [{}]",
+                            f.type_name,
+                            spec.value_type.map(|v| v.description()).unwrap_or("")
                         )));
+                    }
+                    // OpenSearch's `match_only_text` is a `TextFieldMapper`.
+                    (_, None) if f.type_name == "text" || (f.type_name == "match_only_text" && crate::dialect::opensearch()) => {
+                        // `TextFieldMapper.TextFieldType.fielddataBuilder` without fielddata
+                        // (OpenSearch's message doesn't name the field and index first).
+                        let tail = format!(
+                            "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{}] in order to load field data by uninverting the inverted index. Note that this can use significant memory.",
+                            f.name
+                        );
+                        if crate::dialect::opensearch() {
+                            return Err(AggError::illegal_argument(tail));
+                        }
+                        return Err(AggError::illegal_argument(format!("Fielddata is disabled on [{}] in [{}]. {tail}", f.name, lookup.index_name())));
                     }
                     (_, None) => {
                         return Err(AggError::illegal_argument(format!("Field [{}] of type [{}] is not supported for aggregation", f.name, f.type_name)));
@@ -424,7 +445,11 @@ pub fn bind(spec: &VsSpec, lookup: &dyn FieldLookup, default_type: VsType, timez
     let tz = if timezone_aware { spec.time_zone.clone() } else { None };
     let format = resolve_format(spec.format.as_deref(), vs_type, tz.as_ref(), field.as_ref(), lookup)?;
     let mut b = BoundVs { vs_type, field, script, script_value_type: spec.value_type, unmapped, missing: None, format, time_zone: tz };
-    if let Some(m) = &spec.missing {
+    if let Some(c) = b.field.as_ref().and_then(|f| f.constant.clone()) {
+        // Every doc holds the constant (so `missing` never applies): it reads like a
+        // `missing` value for all of them.
+        b.missing = Some(MissingValue::Bytes(c.into_bytes()));
+    } else if let Some(m) = &spec.missing {
         b.missing = Some(parse_missing(&b, m, lookup.now_millis())?);
     }
     Ok(b)
@@ -459,7 +484,7 @@ pub fn field_format(f: &AggField, format: Option<&str>, tz: Option<&TimeZone>, l
         // Aggregations read `date_nanos` values as millis (Elasticsearch's `toMilliSeconds`).
         SourceType::Date { .. } | SourceType::Range(crate::range_field::RangeType::Date) => {
             let pattern = format.map(str::to_string).or_else(|| f.date_format.clone()).unwrap_or_else(|| crate::format::DEFAULT_DATE_FORMAT.to_string());
-            DocValueFormat::DateTime { formatter: lookup.date_formatter(&pattern)?, zone: tz.cloned().unwrap_or_default(), nanos: false }
+            DocValueFormat::DateTime { formatter: lookup.field_date_formatter(&f.name, &pattern)?, zone: tz.cloned().unwrap_or_default(), nanos: false }
         }
         SourceType::Numeric(t) => {
             if tz.is_some() {
@@ -482,6 +507,10 @@ pub fn field_format(f: &AggField, format: Option<&str>, tz: Option<&TimeZone>, l
         SourceType::GeoPoint => {
             check_no_format(f, format, tz)?;
             DocValueFormat::GeoHash
+        }
+        SourceType::Keyword if f.type_name == "version" => {
+            check_no_format(f, format, tz)?;
+            DocValueFormat::Version
         }
         _ => {
             check_no_format(f, format, tz)?;
@@ -518,6 +547,7 @@ pub fn parse_missing(vs: &BoundVs, m: &Json, now: i64) -> Result<MissingValue> {
             };
             MissingValue::Double(v)
         }
+        VsType::Keyword if vs.format == DocValueFormat::Version => MissingValue::Bytes(vs.format.parse_bytes(m)?),
         VsType::Keyword => MissingValue::Bytes(text.into_bytes()),
         VsType::Ip => MissingValue::Bytes(parse_ip(&text)?.to_vec()),
         VsType::GeoPoint => {
@@ -677,6 +707,17 @@ impl DvNum {
         }
     }
 
+    /// The smallest and largest raw value of the segment's field (from the doc values skip
+    /// index), if it has values.
+    pub fn raw_bounds(&self) -> Option<(i64, i64)> {
+        let s = match self {
+            DvNum::None => return None,
+            DvNum::Single(n) => n.skipper()?,
+            DvNum::Multi(m) => m.skipper()?,
+        };
+        (s.global_doc_count() > 0).then(|| (s.global_min_value(), s.global_max_value()))
+    }
+
     /// Decodes the values of every doc of `docs` (non-decreasing) at once into `b`: one
     /// dispatch on the encoding and no per-doc rank lookups on dense fields (see
     /// [`DvBatch::fill`]).
@@ -823,12 +864,14 @@ impl Decode {
         }
     }
 
-    /// The value as a long (integral sources).
+    /// The value as a long (integral sources). `unsigned_long` stays in its sign-flipped
+    /// form (`DocValueFormat::UnsignedLongShifted`): it orders like the unsigned value, keeps
+    /// all 64 bits (a double would merge values above 2^53) and is what the format prints.
     #[inline]
     pub fn to_i64(self, v: i64) -> i64 {
         match self {
             Decode::Nanos => v.div_euclid(1_000_000),
-            Decode::Long => v,
+            Decode::Long | Decode::UnsignedLong => v,
             other => other.to_f64(v) as i64,
         }
     }
@@ -842,7 +885,8 @@ impl Decode {
             Decode::Double => encode::sortable_f64(v),
             Decode::Float => encode::sortable_f32(v as i32) as f64,
             Decode::HalfFloat => encode::sortable_f16(v as i16) as f64,
-            Decode::Scaled(f) => v as f64 / f,
+            // `ScaledFloatLeafFieldData`: times the inverse, which rounds unlike a division.
+            Decode::Scaled(f) => v as f64 * (1.0 / f),
         }
     }
 }
@@ -954,14 +998,15 @@ impl NumReader {
     #[inline]
     pub fn longs(&mut self, doc: u32, score: f32) -> Result<&[i64]> {
         self.lbuf.clear();
-        if self.script.is_none() && matches!(self.decode, Decode::Long | Decode::Nanos) {
+        if self.script.is_none() && matches!(self.decode, Decode::Long | Decode::Nanos | Decode::UnsignedLong) {
             let buf = &mut self.lbuf;
             let decode = self.decode;
             self.dv.for_each(doc, |v| buf.push(decode.to_i64(v)));
             if self.lbuf.is_empty()
                 && let Some(m) = self.missing
             {
-                self.lbuf.push(m as i64);
+                // `unsigned_long` longs are sign-flipped (see `Decode::to_i64`).
+                self.lbuf.push(if decode == Decode::UnsignedLong { ((m as u64) ^ (1u64 << 63)) as i64 } else { m as i64 });
             }
             return Ok(&self.lbuf);
         }
@@ -980,6 +1025,18 @@ pub enum DvOrds {
     None,
     Single(SortedDocValues),
     Multi(SortedSetDocValues),
+    /// One key of a `flattened` field's `key\0value` dictionary (`KeyedFlattenedLeafFieldData`):
+    /// the key's terms are the contiguous ordinals `lo..hi`, renumbered from 0, and their
+    /// values come back without the `key\0` prefix.
+    Keyed(Box<KeyedOrds>),
+}
+
+#[derive(Clone)]
+pub struct KeyedOrds {
+    inner: SortedSetDocValues,
+    lo: u64,
+    hi: u64,
+    prefix_len: usize,
 }
 
 impl DvOrds {
@@ -989,6 +1046,25 @@ impl DvOrds {
             Some(DocValuesReader::SortedSet(s)) => DvOrds::Multi(s.clone()),
             _ => DvOrds::None,
         }
+    }
+
+    /// The ordinals of an aggregation field: [`DvOrds::open`], restricted to the key of a
+    /// keyed `flattened` sub-field.
+    pub fn for_field(seg: &SegmentContext, field: &AggField) -> DvOrds {
+        let dv = DvOrds::open(seg, field.number);
+        let Some(key) = &field.flattened_key else { return dv };
+        let DvOrds::Multi(inner) = dv else { return DvOrds::None };
+        let mut prefix = Vec::with_capacity(key.len() + 1);
+        prefix.extend_from_slice(key.as_bytes());
+        prefix.push(0);
+        let lo = inner.lookup_term(&prefix).unwrap_or_else(|ip| ip);
+        // Every `key\0…` term sorts before `key\1`.
+        *prefix.last_mut().unwrap() = 1;
+        let hi = inner.lookup_term(&prefix).unwrap_or_else(|ip| ip);
+        if lo >= hi {
+            return DvOrds::None;
+        }
+        DvOrds::Keyed(Box::new(KeyedOrds { inner, lo, hi, prefix_len: key.len() + 1 }))
     }
 
     #[inline]
@@ -1005,6 +1081,16 @@ impl DvOrds {
                     f(o)
                 }
             }
+            DvOrds::Keyed(k) => {
+                for o in k.inner.ords(doc) {
+                    if o >= k.hi {
+                        break;
+                    }
+                    if o >= k.lo {
+                        f(o - k.lo)
+                    }
+                }
+            }
         }
     }
 
@@ -1013,6 +1099,7 @@ impl DvOrds {
             DvOrds::None => 0,
             DvOrds::Single(s) => s.value_count(),
             DvOrds::Multi(s) => s.value_count(),
+            DvOrds::Keyed(k) => k.hi - k.lo,
         }
     }
 
@@ -1022,12 +1109,18 @@ impl DvOrds {
             DvOrds::None => {}
             DvOrds::Single(s) => s.lookup_ord(ord, out),
             DvOrds::Multi(s) => s.lookup_ord(ord, out),
+            DvOrds::Keyed(k) => {
+                k.inner.lookup_ord(ord + k.lo, out);
+                out.drain(..k.prefix_len.min(out.len()));
+            }
         }
     }
 
+    /// The segment's term dictionary; `None` for keyed `flattened` fields, whose ordinals
+    /// are a renumbered slice of it.
     pub fn dict(&self) -> Option<&search_codec::TermDict> {
         match self {
-            DvOrds::None => None,
+            DvOrds::None | DvOrds::Keyed(_) => None,
             DvOrds::Single(s) => Some(s.dict()),
             DvOrds::Multi(s) => Some(s.dict()),
         }
@@ -1038,6 +1131,7 @@ impl DvOrds {
             DvOrds::None => false,
             DvOrds::Single(s) => s.docs().contains(doc),
             DvOrds::Multi(s) => s.docs().contains(doc),
+            DvOrds::Keyed(k) => k.inner.ords(doc).any(|o| (k.lo..k.hi).contains(&o)),
         }
     }
 
@@ -1050,6 +1144,16 @@ impl DvOrds {
                 counts.resize(found.len(), 1);
             }),
             DvOrds::Multi(m) => b.fill(docs, |d, found, counts, vals| m.ords_batch(d, found, counts, vals)),
+            DvOrds::Keyed(_) => b.fill(docs, |d, found, counts, vals| {
+                for &doc in d {
+                    let before = vals.len();
+                    self.for_each(doc, |o| vals.push(o));
+                    if vals.len() > before {
+                        found.push(doc);
+                        counts.push((vals.len() - before) as u32);
+                    }
+                }
+            }),
         }
     }
 }
@@ -1058,6 +1162,8 @@ impl DvOrds {
 /// script's strings.
 pub struct BytesReader {
     pub ords: DvOrds,
+    /// `counted_keyword` occurrence counts, when every occurrence is read.
+    counts: Option<Box<search_codec::BinaryDocValues>>,
     /// Binary doc values (range fields: one encoded value per doc).
     binary: Option<Box<search_codec::BinaryDocValues>>,
     script: Option<Box<dyn LeafValuesScript>>,
@@ -1077,7 +1183,7 @@ pub struct BytesReader {
 impl BytesReader {
     pub fn open(vs: &BoundVs, seg: &SegmentContext) -> Result<BytesReader> {
         let ords = match &vs.field {
-            Some(f) => DvOrds::open(seg, f.number),
+            Some(f) => DvOrds::for_field(seg, f),
             None => DvOrds::None,
         };
         let binary = match &vs.field {
@@ -1094,8 +1200,13 @@ impl BytesReader {
             Some(MissingValue::Long(l)) => Some(l.to_string().into_bytes()),
             _ => None,
         };
+        let counts = match &vs.field {
+            Some(f) if f.expand_counts => f.counts.and_then(|n| seg.reader.binary(n).cloned()).map(Box::new),
+            _ => None,
+        };
         Ok(BytesReader {
             ords,
+            counts,
             binary,
             value_script: script.is_some() && vs.field.is_some(),
             script,
@@ -1131,10 +1242,16 @@ impl BytesReader {
                 self.ordbuf.clear();
                 let ob = &mut self.ordbuf;
                 self.ords.for_each(doc, |o| ob.push(o));
+                let counts = self.counts.as_ref().and_then(|c| c.get(doc));
+                let mut counts = counts.map(VIntIter::array);
                 for i in 0..self.ordbuf.len() {
                     self.ords.lookup(self.ordbuf[i], &mut self.term);
-                    self.data.extend_from_slice(&self.term);
-                    self.offsets.push(self.data.len());
+                    // A `counted_keyword` value is read as often as the doc holds it.
+                    let n = counts.as_mut().and_then(Iterator::next).unwrap_or(1).max(1);
+                    for _ in 0..n {
+                        self.data.extend_from_slice(&self.term);
+                        self.offsets.push(self.data.len());
+                    }
                 }
             }
             Some(script) => {
@@ -1278,5 +1395,70 @@ impl DocCounter {
     #[inline]
     pub fn is_constant(&self) -> bool {
         self.dv.is_none() && self.multi.is_none()
+    }
+}
+
+/// Lucene vInts of a `StreamOutput.writeVIntArray` (length, then the values).
+pub struct VIntIter<'a> {
+    b: &'a [u8],
+    left: usize,
+}
+
+impl<'a> VIntIter<'a> {
+    pub fn array(b: &'a [u8]) -> VIntIter<'a> {
+        let mut it = VIntIter { b, left: 1 };
+        let n = it.next().unwrap_or(0) as usize;
+        it.left = n;
+        it
+    }
+}
+
+impl Iterator for VIntIter<'_> {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> {
+        if self.left == 0 {
+            return None;
+        }
+        let (mut v, mut shift) = (0u32, 0u32);
+        loop {
+            let (&byte, rest) = self.b.split_first()?;
+            self.b = rest;
+            v |= u32::from(byte & 0x7f).checked_shl(shift).unwrap_or(0);
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        self.left -= 1;
+        Some(v)
+    }
+}
+
+/// `writeVIntArray`: the bytes [`VIntIter::array`] reads.
+pub fn write_vint_array(values: &[u32], out: &mut Vec<u8>) {
+    let mut put = |mut v: u32| {
+        while v >= 0x80 {
+            out.push((v as u8 & 0x7f) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    };
+    put(values.len() as u32);
+    for &v in values {
+        put(v);
+    }
+}
+
+#[cfg(test)]
+mod vint_tests {
+    use super::*;
+
+    #[test]
+    fn vint_arrays_round_trip() {
+        for vals in [vec![], vec![1], vec![3, 1, 200, 70000, u32::MAX]] {
+            let mut b = Vec::new();
+            write_vint_array(&vals, &mut b);
+            assert_eq!(VIntIter::array(&b).collect::<Vec<_>>(), vals);
+        }
     }
 }

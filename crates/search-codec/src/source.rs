@@ -52,6 +52,13 @@ pub trait PostingsSource {
 pub trait TermsSource {
     /// Advances to the next term.
     fn next_term(&mut self) -> Result<Option<&[u8]>>;
+    /// Advances to the next term, allowed to skip terms in fewer than `min_doc_freq` docs
+    /// without positioning their postings (BP keeps only frequent terms; a merge can tell most
+    /// rare terms from its inputs' doc counts alone). Terms returned may still be rarer.
+    fn next_term_min_doc_freq(&mut self, min_doc_freq: u64) -> Result<Option<&[u8]>> {
+        let _ = min_doc_freq;
+        self.next_term()
+    }
     /// Postings of the current term.
     fn postings(&mut self) -> Result<&mut dyn PostingsSource>;
 }
@@ -115,6 +122,11 @@ pub trait SegmentSource {
         BTreeMap::new()
     }
     fn terms(&self, field: u32) -> Result<Option<Box<dyn TermsSource + '_>>>;
+    /// [`terms`](Self::terms) for a reader that only needs doc ids from the postings
+    /// (frequencies and positions may be left undecoded).
+    fn terms_docs_only(&self, field: u32) -> Result<Option<Box<dyn TermsSource + '_>>> {
+        self.terms(field)
+    }
     /// Norm bytes (`SmallFloat` encoded lengths), any doc order.
     fn norms(&self, field: u32) -> Result<Option<NormsIter<'_>>>;
     fn doc_values(&self, field: u32) -> Result<Option<DocValuesSource<'_>>>;

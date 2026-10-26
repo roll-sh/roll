@@ -1,5 +1,6 @@
 //! Generates the route tables from the vendored REST API specs: Elasticsearch's
-//! (`spec/api/*.json`) and OpenSearch's (`spec/opensearch/api/*.json`).
+//! (`spec/api/*.json`) and OpenSearch's (`spec/opensearch/api/*.json`, plus the bundled
+//! plugins' APIs in `spec/opensearch/plugins/*.json`).
 //!
 //! The output (`$OUT_DIR/spec.rs`) is an `Api` enum with one variant per API of either spec and
 //! one static `ApiSpec` array per dialect indexed by it (an API a dialect lacks has an empty,
@@ -33,7 +34,29 @@ fn main() {
     println!("cargo:rerun-if-changed=spec/api");
     println!("cargo:rerun-if-changed=spec/opensearch/api");
     let (es, es_common) = load(&root.join("api"));
-    let (os, os_common) = load(&root.join("opensearch/api"));
+    let (mut os, os_common) = load(&root.join("opensearch/api"));
+    // The bundled plugins' APIs (roll's own files in the spec's format, see
+    // spec/opensearch/ROLL.md). `"params_from": "<api>"` copies another API's parameters.
+    println!("cargo:rerun-if-changed=spec/opensearch/plugins");
+    let (plugins, _) = load(&root.join("opensearch/plugins"));
+    for (name, mut api) in plugins {
+        // `"overlay": true`: parameters a core API takes that its spec file lacks.
+        if api.get("overlay").and_then(|v| v.as_bool()) == Some(true) {
+            let core = os.get_mut(&name).unwrap_or_else(|| panic!("overlay for unknown API {name}"));
+            if let (Some(extra), Some(params)) = (api["params"].as_object(), core["params"].as_object_mut()) {
+                params.extend(extra.clone());
+            }
+            continue;
+        }
+        if let Some(from) = api.get("params_from").and_then(|v| v.as_str()).map(str::to_owned) {
+            let mut params = os[&from]["params"].as_object().cloned().unwrap_or_default();
+            if let Some(own) = api["params"].as_object() {
+                params.extend(own.clone());
+            }
+            api["params"] = serde_json::Value::Object(params);
+        }
+        assert!(os.insert(name.clone(), api).is_none(), "plugin API {name} shadows a core API");
+    }
     let names: BTreeSet<&String> = es.keys().chain(os.keys()).collect();
 
     let mut out = String::new();

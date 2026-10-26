@@ -246,6 +246,9 @@ pub enum DateInterval {
     None,
     Calendar(String),
     Fixed(String),
+    /// OpenSearch's deprecated `interval`: a calendar unit (`1d`, `month`) rounds as a
+    /// calendar interval, anything else as a fixed one (`DateIntervalWrapper` legacy mode).
+    Legacy(String),
 }
 
 /// A parsed `date_histogram`.
@@ -285,6 +288,7 @@ pub fn set_interval(cur: &mut DateInterval, calendar: bool, v: &str) -> Result<(
     };
     match cur {
         DateInterval::None => {}
+        DateInterval::Legacy(_) => return Err(AggError::illegal_argument(format!("Cannot use [{name}] with [interval] configuration option."))),
         DateInterval::Calendar(_) if calendar => {}
         DateInterval::Fixed(_) if !calendar => {}
         DateInterval::Calendar(_) => {
@@ -301,6 +305,21 @@ pub fn set_interval(cur: &mut DateInterval, calendar: bool, v: &str) -> Result<(
     Ok(())
 }
 
+/// OpenSearch's deprecated `interval` (a string, or a number of milliseconds), refused next
+/// to `calendar_interval` / `fixed_interval`.
+pub fn set_legacy_interval(cur: &mut DateInterval, p: &mut XParser<'_>) -> Result<()> {
+    if matches!(cur, DateInterval::Calendar(_) | DateInterval::Fixed(_)) {
+        return Err(AggError::illegal_argument("Cannot use [interval] with [fixed_interval] or [calendar_interval] configuration options."));
+    }
+    let v = if p.token() == Token::Number { format!("{}ms", p.long_value()?) } else { p.text()? };
+    if v.is_empty() {
+        return Err(AggError::illegal_argument("[interval] must not be null: [date_histogram]"));
+    }
+    p.warnings.push("[interval] on [date_histogram] is deprecated, use [fixed_interval] or [calendar_interval] in the future.".to_string());
+    *cur = DateInterval::Legacy(v);
+    Ok(())
+}
+
 pub fn parse_date_histogram(p: &mut XParser<'_>, name: &str) -> Result<DateHistogramSpec> {
     let opts = VsOpts::new(true, true, true);
     let mut fields = VsSpec::fields(opts);
@@ -314,6 +333,9 @@ pub fn parse_date_histogram(p: &mut XParser<'_>, name: &str) -> Result<DateHisto
         Field::new("hard_bounds", Tokens::OBJECT),
         Field::new("order", Tokens::OBJECT_ARRAY),
     ]);
+    if crate::dialect::opensearch() {
+        fields.push(Field::new("interval", Tokens::LONG));
+    }
     let names: Vec<&'static str> = fields.iter().map(|f| f.name).collect();
     let mut s = DateHistogramSpec {
         vs: VsSpec::default(),
@@ -333,6 +355,7 @@ pub fn parse_date_histogram(p: &mut XParser<'_>, name: &str) -> Result<DateHisto
         match f {
             "calendar_interval" => set_interval(&mut s.interval, true, &p.text()?)?,
             "fixed_interval" => set_interval(&mut s.interval, false, &p.text()?)?,
+            "interval" => set_legacy_interval(&mut s.interval, p)?,
             "offset" => {
                 s.offset = if p.token() == Token::Number { p.long_value()? } else { parse_string_offset(&p.text()?)? };
             }
@@ -361,6 +384,13 @@ pub fn create_rounding(interval: &DateInterval, tz: Option<&crate::format::TimeZ
             let ms = parse_time_value_millis(f, "DateIntervalWrapper.interval")?;
             Rounding::new(RoundingKind::Interval(ms), zone, offset)
         }
+        DateInterval::Legacy(v) => match DateUnit::parse_calendar(v) {
+            Some(u) => Rounding::new(RoundingKind::Unit(u), zone, offset),
+            None => {
+                let ms = parse_time_value_millis(v, "DateIntervalWrapper.interval").map_err(|_| AggError::illegal_argument(format!("Unable to parse interval [{v}]")))?;
+                Rounding::new(RoundingKind::Interval(ms), zone, offset)
+            }
+        },
     }
 }
 
@@ -436,9 +466,12 @@ pub fn create_histogram(def: &AggDef, spec: &HistogramSpec, ctx: &mut BindCtx<'_
         doc_count_field: ctx.doc_count_field,
         tracker: ctx.tracker(def),
         batch: Default::default(),
+        prepared: None,
+        slot_ords: Vec::new(),
         name: def.name.clone(),
         out: Out::Numeric { cfg, empty },
         starts: None,
+        os: None,
     }))
 }
 
@@ -484,6 +517,7 @@ pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut B
     }
     let cfg = Arc::new(HistoConfig { order: spec.order.clone(), min_doc_count: spec.min_doc_count, keyed: spec.keyed, format: vs.format.clone() });
     let empty = if spec.min_doc_count == 0 { Some(Arc::new(DateEmptyInfo { rounding: rounding.without_offset(), bounds: ext })) } else { None };
+    let os = if range.is_none() { OsDateDebug::new(ctx, &vs, &rounding, hard.unwrap_or((None, None)), !subs.is_empty()) } else { None };
     Ok(Box::new(HistoAgg {
         key_fn: KeyFn::Date { rounding: rounding.clone(), hard: hard.unwrap_or((None, None)) },
         range: range.map(RangeSrc::new),
@@ -498,9 +532,12 @@ pub fn create_date_histogram(def: &AggDef, spec: &DateHistogramSpec, ctx: &mut B
         doc_count_field: ctx.doc_count_field,
         tracker: ctx.tracker(def),
         batch: Default::default(),
+        prepared: None,
+        slot_ords: Vec::new(),
         name: def.name.clone(),
         out: Out::Date { cfg, empty, offset: rounding.offset },
         starts,
+        os,
     }))
 }
 
@@ -568,6 +605,62 @@ struct HistoAgg {
     out: Out,
     /// Bucket starts published to direct `rate` sub-aggregations.
     starts: Option<crate::collect::BucketStarts>,
+    /// date_histogram: the rounding prepared for the segment's value range, and per prepared
+    /// bucket the `(owning << 32 | ord)` it was last added as (`u64::MAX`: not yet), so a
+    /// value costs a binary search and no hash lookup.
+    prepared: Option<crate::rounding::PreparedRounding>,
+    slot_ords: Vec<u64>,
+    /// Profiled opensearch-dialect date histograms: OpenSearch's leaf collector counts and
+    /// filter rewrite replay.
+    os: Option<Box<OsDateDebug>>,
+}
+
+/// OpenSearch's `DateHistogramAggregator.collectDebugInfo`: which leaf collector each segment
+/// would have used (single-valued, multi-valued, skip list, no-op) unless the filter rewrite
+/// optimization counted it from the points tree.
+struct OsDateDebug {
+    rewrite: Option<crate::filter_rewrite::FilterRewrite>,
+    single: u64,
+    multi: u64,
+    no_op: u64,
+}
+
+impl OsDateDebug {
+    fn new(ctx: &BindCtx<'_>, vs: &BoundVs, rounding: &crate::rounding::Rounding, hard: (Option<i64>, Option<i64>), has_sub: bool) -> Option<Box<OsDateDebug>> {
+        if !crate::dialect::opensearch() || ctx.profiler.is_none() {
+            return None;
+        }
+        let nanos = vs.field.as_ref().is_some_and(|f| f.type_name == "date_nanos");
+        let buckets = crate::filter_rewrite::DateBuckets { rounding: rounding.clone(), hard, after: None, nanos, auto: Vec::new(), target: 1 };
+        let rewrite = crate::filter_rewrite::FilterRewrite::date(ctx, vs, buckets, has_sub, usize::MAX);
+        Some(Box::new(OsDateDebug { rewrite, single: 0, multi: 0, no_op: 0 }))
+    }
+
+    fn segment(&mut self, vs: &BoundVs, seg: &SegmentContext) {
+        if self.rewrite.as_mut().is_some_and(|r| r.try_segment(seg)) {
+            return;
+        }
+        let Some(f) = vs.field.as_ref().filter(|_| !vs.unmapped || vs.missing.is_some()) else {
+            self.no_op += 1;
+            return;
+        };
+        if vs.script.is_none() && seg.reader.sorted_numeric(f.number).is_some_and(|d| !d.is_single_valued()) {
+            self.multi += 1;
+        } else {
+            self.single += 1;
+        }
+    }
+
+    fn debug_into(&self, o: &mut Json) {
+        // The filter rewrite counts go in first, as OpenSearch adds them.
+        if let Some(r) = &self.rewrite {
+            r.debug_into(o);
+        }
+        o.push("single_valued_collectors_used", Json::from(self.single));
+        o.push("multi_valued_collectors_used", Json::from(self.multi));
+        o.push("skip_list_collectors_used", Json::from(0u64));
+        o.push("no_op_collectors_used", Json::from(self.no_op));
+    }
 }
 
 impl HistoAgg {
@@ -605,6 +698,12 @@ impl HistoAgg {
 
     #[inline]
     fn add(&mut self, owning: u32, key: u64, doc: u32, score: f32) -> Result<()> {
+        self.add_ord(owning, key, doc, score).map(|_| ())
+    }
+
+    /// [`add`](Self::add), returning the bucket's ordinal.
+    #[inline]
+    fn add_ord(&mut self, owning: u32, key: u64, doc: u32, score: f32) -> Result<u32> {
         let (ord, new) = self.ords.add(owning, key);
         if new {
             grow(&mut self.counts, ord, 0);
@@ -612,6 +711,13 @@ impl HistoAgg {
                 self.tracker.ensure(self.counts.len() * 8 + self.ords.ram_bytes())?;
             }
         }
+        self.add_existing(ord, doc, score)?;
+        Ok(ord)
+    }
+
+    /// Counts `doc` into the existing bucket `ord`.
+    #[inline]
+    fn add_existing(&mut self, ord: u32, doc: u32, score: f32) -> Result<()> {
         self.counts[ord as usize] += self.doc_counter.count(doc);
         if !self.subs.is_empty() {
             self.subs.push(doc, ord, score)?;
@@ -646,32 +752,60 @@ impl HistoAgg {
             KeyFn::Date { rounding, hard } => {
                 let rounding = rounding.clone();
                 let hard = *hard;
-                for (p, raw) in batch.docs() {
-                    let doc = b.docs[p];
-                    if raw.len() == 1 {
-                        let k = rounding.round(decode.to_i64(raw[0]));
-                        if !(hard.1.is_some_and(|m| k >= m) || hard.0.is_some_and(|m| k < m)) {
-                            self.add(b.ords[p], k as u64, doc, b.score(p))?;
-                        }
-                        continue;
-                    }
-                    let mut prev: Option<i64> = None;
-                    let mut keys: smallvec::SmallVec<[i64; 4]> = smallvec::SmallVec::new();
-                    for &rv in raw {
-                        let k = rounding.round(decode.to_i64(rv));
-                        if prev == Some(k) {
-                            continue;
-                        }
-                        prev = Some(k);
-                        if hard.1.is_some_and(|m| k >= m) || hard.0.is_some_and(|m| k < m) {
-                            continue;
-                        }
-                        keys.push(k);
-                    }
-                    for k in keys {
-                        self.add(b.ords[p], k as u64, doc, b.score(p))?;
-                    }
+                // The prepared rounding is moved out while the loop borrows `self` mutably.
+                let prepared = self.prepared.take();
+                let res = self.collect_dates(b, batch, decode, &rounding, hard, prepared.as_ref());
+                self.prepared = prepared;
+                return res;
+            }
+        }
+        Ok(())
+    }
+
+    /// The date arm of [`collect_batch`](Self::collect_batch): single values inside the
+    /// segment's prepared range go through the array and the per-bucket ordinal cache.
+    fn collect_dates(&mut self, b: Batch<'_>, batch: &crate::values::NumBatch, decode: crate::values::Decode, rounding: &Rounding, hard: (Option<i64>, Option<i64>), prepared: Option<&crate::rounding::PreparedRounding>) -> Result<()> {
+        for (p, raw) in batch.docs() {
+            let doc = b.docs[p];
+            if let (Some(pr), [v]) = (prepared, raw)
+                && let Some(i) = pr.index(decode.to_i64(*v))
+            {
+                let k = pr.point(i);
+                if hard.1.is_some_and(|m| k >= m) || hard.0.is_some_and(|m| k < m) {
+                    continue;
                 }
+                let owning = b.ords[p];
+                let cached = self.slot_ords[i];
+                if cached != u64::MAX && cached >> 32 == u64::from(owning) {
+                    self.add_existing(cached as u32, doc, b.score(p))?;
+                } else {
+                    let ord = self.add_ord(owning, k as u64, doc, b.score(p))?;
+                    self.slot_ords[i] = u64::from(owning) << 32 | u64::from(ord);
+                }
+                continue;
+            }
+            if raw.len() == 1 {
+                let k = rounding.round(decode.to_i64(raw[0]));
+                if !(hard.1.is_some_and(|m| k >= m) || hard.0.is_some_and(|m| k < m)) {
+                    self.add(b.ords[p], k as u64, doc, b.score(p))?;
+                }
+                continue;
+            }
+            let mut prev: Option<i64> = None;
+            let mut keys: smallvec::SmallVec<[i64; 4]> = smallvec::SmallVec::new();
+            for &rv in raw {
+                let k = rounding.round(decode.to_i64(rv));
+                if prev == Some(k) {
+                    continue;
+                }
+                prev = Some(k);
+                if hard.1.is_some_and(|m| k >= m) || hard.0.is_some_and(|m| k < m) {
+                    continue;
+                }
+                keys.push(k);
+            }
+            for k in keys {
+                self.add(b.ords[p], k as u64, doc, b.score(p))?;
             }
         }
         Ok(())
@@ -767,7 +901,18 @@ impl Aggregator for HistoAgg {
             (Out::Date { .. }, _) => "DateHistogramAggregator",
         }
     }
+    fn profile_debug(&self) -> Json {
+        let mut o = Json::obj();
+        o.push("total_buckets", Json::from(self.ords.len() as u64));
+        if let Some(os) = &self.os {
+            os.debug_into(&mut o);
+        }
+        o
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        if let Some(os) = &mut self.os {
+            os.segment(&self.vs, seg);
+        }
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         if let Some(src) = &mut self.range {
             src.dv = self.vs.field.as_ref().and_then(|f| seg.reader.binary(f.number).cloned());
@@ -777,6 +922,15 @@ impl Aggregator for HistoAgg {
             self.reader = None;
         } else {
             self.reader = if self.vs.unmapped && self.vs.missing.is_none() { None } else { Some(self.vs.numeric_reader(seg)?) };
+        }
+        self.prepared = None;
+        if let (KeyFn::Date { rounding, .. }, Some(r)) = (&self.key_fn, &self.reader)
+            && let Some((dv, decode @ (crate::values::Decode::Long | crate::values::Decode::Nanos))) = r.raw()
+            && let Some((lo, hi)) = dv.raw_bounds()
+        {
+            self.prepared = rounding.prepare(decode.to_i64(lo), decode.to_i64(hi));
+            self.slot_ords.clear();
+            self.slot_ords.resize(self.prepared.as_ref().map_or(0, |p| p.len()), u64::MAX);
         }
         self.subs.set_segment(seg)
     }

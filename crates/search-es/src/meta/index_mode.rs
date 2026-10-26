@@ -400,7 +400,7 @@ fn validate_temporality_field(mapping: &Mapping, settings: &Settings) -> EsResul
 
 /// Routing path entries must not name objects, and in TSDB every field they match must be a
 /// dimension (or a flattened field listing its dimensions).
-fn validate_routing_path(mode: IndexMode, mapping: &Mapping, settings: &Settings) -> EsResult<()> {
+pub(crate) fn validate_routing_path(mode: IndexMode, mapping: &Mapping, settings: &Settings) -> EsResult<()> {
     let paths = settings.get_list("index.routing_path").unwrap_or_default();
     if paths.is_empty() {
         return Ok(());
@@ -419,6 +419,14 @@ fn validate_routing_path(mode: IndexMode, mapping: &Mapping, settings: &Settings
                 if !dimension || f.is_set("script") {
                     return Err(EsError::illegal_argument(format!(
                         "All fields that match routing_path must be configured with [time_series_dimension: true] or flattened fields with a list of dimensions in [time_series_dimensions] and without the [script] parameter. [{name}] was not a dimension."
+                    )));
+                }
+            }
+            for (name, rf) in &mapping.runtime {
+                if crate::xcontent::filter::glob_match(path, name) {
+                    return Err(EsError::illegal_argument(format!(
+                        "All fields that match routing_path must be configured with [time_series_dimension: true] or flattened fields with a list of dimensions in [time_series_dimensions] and without the [script] parameter. [{name}] was a runtime [{}].",
+                        rf.ty
                     )));
                 }
             }

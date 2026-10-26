@@ -37,6 +37,8 @@ struct Env {
     es: String,
     http: reqwest::Client,
     home: std::path::PathBuf,
+    objects: search_store::Objects,
+    cfg: SearchConfig,
 }
 
 impl Drop for Env {
@@ -58,13 +60,13 @@ async fn env_with(f: impl FnOnce(&mut SearchConfig)) -> Env {
     cfg.http_port = es_addr.port();
     cfg.gc_interval = None;
     f(&mut cfg);
-    let control = Control::new(cfg, objects).await.unwrap();
+    let control = Control::new(cfg.clone(), objects.clone()).await.unwrap();
     tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api = format!("http://{}", api_listener.local_addr().unwrap());
     let router = search_control::api::router(control.clone());
     tokio::spawn(async move { axum::serve(api_listener, router).await });
-    Env { control, api, es: format!("http://{es_addr}"), http: reqwest::Client::new(), home }
+    Env { control, api, es: format!("http://{es_addr}"), http: reqwest::Client::new(), home, objects, cfg }
 }
 
 async fn env() -> Env {
@@ -265,7 +267,10 @@ async fn lifecycle() {
     e.control.sample().await.unwrap();
     let u = e.get(&format!("/v1/search/clusters/{id}/usage?days=1")).await;
     assert_eq!(u["cluster_id"], id.as_str());
-    assert_eq!(u["requests"], 5, "console requests are counted (not invalid ones): {u}");
+    // Every request the node admitted: 6 from clients (also across the unload), the indices
+    // listing and 5 console requests. Not counted: wrong passwords, the 413, the console's own
+    // 400s.
+    assert_eq!(u["requests"], 12, "the node's request counts are metered: {u}");
     assert!(u["loaded_seconds"].as_i64().unwrap() >= 1, "{u}");
     assert!(u["loaded_gib_hours"].as_f64().unwrap() > 0.0);
     let cost = &u["cost"];
@@ -501,11 +506,9 @@ async fn documents() {
     assert!(u["peak_loaded_bytes"].as_i64().unwrap() > search_control::meter::LOADED_BASE_BYTES, "{u}");
 }
 
-/// Acceptance test for durable documents: needs search-server to persist shards through
-/// search-store (WAL acks, flush on unload, recovery on wake). Today shards live in memory and
-/// an unload drops them.
+/// Documents are durable: acknowledged writes survive an unload (flush, recovery on wake), a
+/// branch sees them, and so does a new node on the same object storage after a restart.
 #[tokio::test]
-#[ignore = "needs search-server shard persistence"]
 async fn documents_survive_unload_and_branch() {
     let e = env().await;
     let c = e.post("/v1/search/clusters", json!({"name": "durable"})).await;
@@ -513,17 +516,48 @@ async fn documents_survive_unload_and_branch() {
     let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/notes/_doc/1?refresh=true", Some(json!({"text": "kept"}))).await;
     assert_eq!(s, 201, "{v}");
     assert!(e.post("/v1/search/clusters/durable/unload", json!({})).await["unloaded"].as_bool().unwrap());
+    // An unload through the API records the asleep figures at once (no metering pass needed).
+    let shown = e.get("/v1/search/clusters/durable").await;
+    assert_eq!((shown["status"]["state"].as_str(), shown["indices"].as_i64(), shown["docs"].as_i64()), (Some("asleep"), Some(1), Some(1)), "{shown}");
+    assert!(shown["stored_bytes"].as_i64().unwrap() > 0, "{shown}");
     let (s, v) = e.es(&user, &pw, reqwest::Method::GET, "/notes/_doc/1", None).await;
     assert_eq!((s, v["_source"]["text"].as_str()), (200, Some("kept")), "{v}");
-    // Stored bytes and docs reach the figures once flushed.
     e.control.sample().await.unwrap();
     let shown = e.get("/v1/search/clusters/durable").await;
     assert!(shown["stored_bytes"].as_i64().unwrap() > 0, "{shown}");
-    // A branch sees the parent's documents.
+    // A branch sees the parent's documents, and shows its figures from the start.
     let b = e.post("/v1/search/clusters/durable/branches", json!({"name": "durable-b"})).await;
+    assert_eq!((b["indices"].as_i64(), b["docs"].as_i64()), (Some(1), Some(1)), "{b}");
+    assert!(b["stored_bytes"].as_i64().unwrap() > 0, "{b}");
     let (bu, bp) = creds(&b);
     let (s, v) = e.es(&bu, &bp, reqwest::Method::GET, "/notes/_doc/1", None).await;
     assert_eq!((s, v["_source"]["text"].as_str()), (200, Some("kept")), "{v}");
+    // Written, not refreshed, then the node stops: the WAL has it.
+    let (s, v) = e.es(&user, &pw, reqwest::Method::PUT, "/notes/_doc/2", Some(json!({"text": "late"}))).await;
+    assert_eq!(s, 201, "{v}");
+    e.control.shutdown().await.unwrap();
+    // A new node on another machine: the same catalog and object storage, an empty disk.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let es = format!("http://{}", listener.local_addr().unwrap());
+    let mut cfg = e.cfg.clone();
+    cfg.http_port = listener.local_addr().unwrap().port();
+    cfg.home = e.home.with_extension("restarted");
+    std::fs::create_dir_all(&cfg.home).unwrap();
+    for f in ["search.db", "search.db-wal", "search.db-shm"] {
+        let _ = std::fs::copy(e.home.join(f), cfg.home.join(f));
+    }
+    let restarted_home = cfg.home.clone();
+    let control = Control::new(cfg, e.objects.clone()).await.unwrap();
+    tokio::spawn(search_server::serve(listener, control.node.clone(), search_server::ListenOptions::default()));
+    let get = |id: &'static str| e.http.get(format!("{es}/notes/_doc/{id}")).basic_auth(&user, Some(&pw)).send();
+    for (id, text) in [("1", "kept"), ("2", "late")] {
+        let v: Value = get(id).await.unwrap().json().await.unwrap();
+        assert_eq!(v["_source"]["text"], text, "{v}");
+    }
+    let r = e.http.get(format!("{es}/notes/_count")).basic_auth(&user, Some(&pw)).send().await.unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap()["count"], 2);
+    control.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(restarted_home);
 }
 
 /// `GET /` with Basic auth, from a task of its own (the request that wakes a cluster).

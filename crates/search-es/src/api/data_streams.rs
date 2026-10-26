@@ -179,6 +179,10 @@ fn time_setting(st: &ClusterState, key: &str) -> Option<TimeValue> {
 /// `DataStreamLifecycle.getEffectiveDataRetentionWithSource`: the retention in effect and what
 /// determined it.
 pub(crate) fn effective_retention(st: &ClusterState, ds: &DataStream, lifecycle: &Value) -> Option<(TimeValue, &'static str)> {
+    // A disabled lifecycle keeps data forever: no effective retention.
+    if lifecycle.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
     let configured = lifecycle.get("data_retention").and_then(Value::as_str).and_then(|v| TimeValue::parse(v, "data_retention").ok());
     let internal = ds.system || ds.name.starts_with('.');
     if internal {
@@ -299,7 +303,9 @@ fn failures_lifecycle(st: &ClusterState, ds: &DataStream, include_defaults: bool
     let retention = l.get("data_retention").and_then(Value::as_str).and_then(|r| TimeValue::parse(r, "data_retention").ok());
     let internal = ds.system || ds.name.starts_with('.');
     let max = if internal { None } else { time_setting(st, "data_streams.lifecycle.retention.max") };
+    let disabled = l.get("enabled").and_then(Value::as_bool) == Some(false);
     let eff = match retention {
+        _ if disabled => None,
         Some(r) => match max {
             Some(m) if m.as_millis() < r.as_millis() => Some((m, "max_global_retention")),
             _ => Some((r, "data_stream_configuration")),

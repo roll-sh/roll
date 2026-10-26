@@ -10,6 +10,18 @@
 //! space once (Lucene's `TermOrdValComparator.setBottom`), so a non-competitive doc costs one
 //! ordinal lookup and no term bytes. When the sort is a prefix of the index sort, a segment
 //! stops after `n` hits (early termination), once the total-hits threshold is reached.
+//!
+//! Keyword values a segment lacks (a queued value from another segment, `search_after`, a
+//! custom `missing`) land between its ordinals ([`ORD_SCALE`]). A custom missing value the
+//! segment lacks gets a slot of its own in its gap, and other foreign values in that gap sort
+//! below or above it by their bytes — Elasticsearch's `ReplaceMissing` inserts the missing
+//! term into the segment's ordinals, so missing docs order exactly against every value.
+//!
+//! Queue entries keep their natives together with the segment generation they belong to; an
+//! entry from an earlier segment is translated (one terms-dictionary lookup per keyword key)
+//! the first time the current segment compares against it, into its own buffer. A competitive
+//! doc therefore costs no allocation once the queue is full: it reuses the evicted entry's
+//! buffers (Lucene's per-slot comparators).
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -27,6 +39,10 @@ use crate::util::bitset::FixedBitSet;
 pub enum SortType {
     /// Longs (long, date, date_nanos, scaled_float, boolean…).
     Long,
+    /// Unsigned longs stored sign-flipped (`u ^ 1 << 63`, so the longs order as the unsigned
+    /// values): like `Long`, except that `sum`, `avg` and `median` compute in unsigned 64-bit
+    /// arithmetic (OpenSearch's `unsigned_long` sort; Elasticsearch sorts them as `Long`).
+    UnsignedLong,
     /// 32-bit integers (integer, short, byte): like `Long`, with `Integer` missing bounds.
     Int,
     /// Doubles stored as sortable longs.
@@ -70,6 +86,12 @@ impl SortValue {
             (SortValue::Null, SortValue::Null) => Ordering::Equal,
             (SortValue::Long(a), SortValue::Double(b)) => (*a as f64).total_cmp(b),
             (SortValue::Double(a), SortValue::Long(b)) => a.total_cmp(&(*b as f64)),
+            // Shards of indices mapping the field differently (`long`, `double`, `half_float`
+            // across indices) merge on the widened double, as the coordinator does.
+            (SortValue::Float(a), SortValue::Double(b)) => f64::from(*a).total_cmp(b),
+            (SortValue::Double(a), SortValue::Float(b)) => a.total_cmp(&f64::from(*b)),
+            (SortValue::Float(a), SortValue::Long(b)) => f64::from(*a).total_cmp(&(*b as f64)),
+            (SortValue::Long(a), SortValue::Float(b)) => (*a as f64).total_cmp(&f64::from(*b)),
             _ => Ordering::Equal,
         }
     }
@@ -197,11 +219,19 @@ pub(crate) enum Native {
     None,
     I(i64),
     F(f64),
-    /// Keyword ordinal (doubled; odd values sit between ordinals: a translated bottom).
+    /// Keyword ordinal times [`ORD_SCALE`]; values between multiples are terms the segment
+    /// lacks (a translated bottom, `search_after` or missing value).
     Ord(i64),
     Score(f32),
-    Doc(u32),
+    Doc(i64),
 }
+
+/// Keyword ordinal `x` is `Native::Ord(x * ORD_SCALE)`. A term the segment lacks, whose
+/// insertion point is `i`, sits in the gap `(ORD_SCALE*(i-1), ORD_SCALE*i)`: at its middle, or
+/// one below / above it when it sorts before / after a custom missing value that shares the gap
+/// (the missing value takes the middle). Foreign values only ever meet the doc's own value (a
+/// real ordinal or the missing value), so the three slots order every comparison exactly.
+pub(crate) const ORD_SCALE: i64 = 4;
 
 /// Per-segment value source of one field key.
 enum Source {
@@ -229,6 +259,9 @@ pub(crate) struct LeafKey {
     scratch: Vec<i64>,
     /// Single-valued numeric doc values read a block at a time (the common sort).
     fast: Option<Box<FastValues>>,
+    /// A keyword `missing` value this segment lacks: its insertion point and bytes (see
+    /// [`ORD_SCALE`]).
+    missing_term: Option<(u64, Vec<u8>)>,
 }
 
 /// Sequential reads of a single-valued numeric field: values are decoded 64 at a time, so a
@@ -371,16 +404,17 @@ impl LeafKey {
         match self.sort.mode {
             SortMode::Min => {
                 let m = *s.iter().min().unwrap();
-                if keyword { Native::Ord(m * 2) } else { self.num(m) }
+                if keyword { Native::Ord(m * ORD_SCALE) } else { self.num(m) }
             }
             SortMode::Max => {
                 let m = *s.iter().max().unwrap();
-                if keyword { Native::Ord(m * 2) } else { self.num(m) }
+                if keyword { Native::Ord(m * ORD_SCALE) } else { self.num(m) }
             }
             SortMode::Sum | SortMode::Avg | SortMode::Median if keyword => {
                 let m = if self.sort.reverse { *s.iter().max().unwrap() } else { *s.iter().min().unwrap() };
-                Native::Ord(m * 2)
+                Native::Ord(m * ORD_SCALE)
             }
+            SortMode::Sum | SortMode::Avg | SortMode::Median if kind == SortType::UnsignedLong => Native::I(unsigned_mode(self.sort.mode, s)),
             SortMode::Sum => {
                 if self.sort.kind.is_integral() {
                     Native::I(s.iter().fold(0i64, |a, &b| a.wrapping_add(b)))
@@ -425,7 +459,7 @@ impl LeafKey {
 
     fn num(&self, v: i64) -> Native {
         match self.sort.kind {
-            SortType::Long | SortType::Int => Native::I(v),
+            SortType::Long | SortType::UnsignedLong | SortType::Int => Native::I(v),
             _ => Native::F(self.decode(v)),
         }
     }
@@ -444,16 +478,34 @@ impl LeafKey {
             },
             Native::Ord(o) => {
                 let mut b = Vec::new();
-                let ord = (o / 2) as u64;
-                match &self.src {
-                    Source::Sorted(v) => v.lookup_ord(ord, &mut b),
-                    Source::SortedSet(v) => v.lookup_ord(ord, &mut b),
-                    _ => {}
-                }
+                self.term_of(o, &mut b);
                 SortValue::Bytes(b)
             }
             Native::Score(s) => SortValue::Float(s),
-            Native::Doc(d) => SortValue::Long(d as i64),
+            Native::Doc(d) => SortValue::Long(d),
+        }
+    }
+
+    /// [`LeafKey::value`] into `slot`, reusing its buffers (a keyword's bytes).
+    fn value_into(&self, n: Native, slot: &mut SortValue) {
+        match (n, &mut *slot) {
+            (Native::Ord(o), SortValue::Bytes(b)) => self.term_of(o, b),
+            (Native::None, SortValue::Bytes(b)) if matches!(self.sort.missing, Missing::Value(SortValue::Bytes(_))) => {
+                if let Missing::Value(SortValue::Bytes(m)) = &self.sort.missing {
+                    b.clone_from(m);
+                }
+            }
+            _ => *slot = self.value(n),
+        }
+    }
+
+    /// The term of a (real) keyword native.
+    fn term_of(&self, o: i64, out: &mut Vec<u8>) {
+        let ord = (o / ORD_SCALE) as u64;
+        match &self.src {
+            Source::Sorted(v) => v.lookup_ord(ord, out),
+            Source::SortedSet(v) => v.lookup_ord(ord, out),
+            _ => out.clear(),
         }
     }
 
@@ -462,11 +514,11 @@ impl LeafKey {
         match v {
             SortValue::Null => Native::None,
             SortValue::Long(x) => match self.sort.kind {
-                SortType::Long | SortType::Int => Native::I(*x),
+                SortType::Long | SortType::UnsignedLong | SortType::Int => Native::I(*x),
                 _ => Native::F(*x as f64),
             },
             SortValue::Double(x) => match self.sort.kind {
-                SortType::Long | SortType::Int => Native::F(*x),
+                SortType::Long | SortType::UnsignedLong | SortType::Int => Native::F(*x),
                 _ => Native::F(*x),
             },
             SortValue::Float(x) => Native::F(*x as f64),
@@ -477,8 +529,18 @@ impl LeafKey {
                     _ => Err(0),
                 };
                 match r {
-                    Ok(o) => Native::Ord(o as i64 * 2),
-                    Err(ins) => Native::Ord(ins as i64 * 2 - 1),
+                    Ok(o) => Native::Ord(o as i64 * ORD_SCALE),
+                    Err(ins) => {
+                        let mid = ins as i64 * ORD_SCALE - ORD_SCALE / 2;
+                        match &self.missing_term {
+                            Some((mi, mb)) if *mi == ins => Native::Ord(match b.as_slice().cmp(mb.as_slice()) {
+                                Ordering::Less => mid - 1,
+                                Ordering::Equal => mid,
+                                Ordering::Greater => mid + 1,
+                            }),
+                            _ => Native::Ord(mid),
+                        }
+                    }
                 }
             }
         }
@@ -502,8 +564,30 @@ fn java_round(x: f64) -> i64 {
 
 impl SortType {
     fn is_integral(self) -> bool {
-        matches!(self, SortType::Long | SortType::Int)
+        matches!(self, SortType::Long | SortType::UnsignedLong | SortType::Int)
     }
+}
+
+/// `sum`, `avg` and `median` of sign-flipped unsigned longs in unsigned arithmetic: sums wrap
+/// at 2^64 and averages round half up, as OpenSearch's unsigned comparators compute them.
+/// The result is sign-flipped back. `vals` must not be empty.
+fn unsigned_mode(mode: SortMode, vals: &mut [i64]) -> i64 {
+    const FLIP: u64 = 1 << 63;
+    let u = |v: i64| (v as u64) ^ FLIP;
+    let half_up = |sum: u64, n: u64| sum / n + u64::from((sum % n) * 2 >= n);
+    let out = match mode {
+        SortMode::Sum => vals.iter().fold(0u64, |a, &b| a.wrapping_add(u(b))),
+        SortMode::Avg => half_up(vals.iter().fold(0u64, |a, &b| a.wrapping_add(u(b))), vals.len() as u64),
+        SortMode::Median => {
+            // The flipped longs order as the unsigned values.
+            vals.sort_unstable();
+            let n = vals.len();
+            if n % 2 == 1 { u(vals[n / 2]) } else { half_up(u(vals[n / 2 - 1]).wrapping_add(u(vals[n / 2])), 2) }
+        }
+        SortMode::Min => u(*vals.iter().min().unwrap_or(&0)),
+        SortMode::Max => u(*vals.iter().max().unwrap_or(&0)),
+    };
+    (out ^ FLIP) as i64
 }
 
 /// The value Elasticsearch substitutes for a missing numeric sort value with `_first` /
@@ -511,7 +595,7 @@ impl SortType {
 fn missing_bound(kind: SortType, first: bool, reverse: bool) -> Option<SortValue> {
     let min = first ^ reverse;
     Some(match kind {
-        SortType::Long => SortValue::Long(if min { i64::MIN } else { i64::MAX }),
+        SortType::Long | SortType::UnsignedLong => SortValue::Long(if min { i64::MIN } else { i64::MAX }),
         SortType::Int => SortValue::Long(if min { i32::MIN as i64 } else { i32::MAX as i64 }),
         SortType::Double => SortValue::Double(if min { f64::NEG_INFINITY } else { f64::INFINITY }),
         SortType::Float | SortType::HalfFloat => SortValue::Float(if min { f32::NEG_INFINITY } else { f32::INFINITY }),
@@ -541,12 +625,15 @@ fn cmp_native(a: Native, b: Native, sort: &FieldSort, missing_native: Option<Nat
     if sort.reverse { o.reverse() } else { o }
 }
 
-/// An entry of the queue (global doc, score, output values, natives of its segment).
+/// An entry of the queue (global doc, score, output values, and its natives in the space of
+/// segment generation `generation`).
 #[derive(Clone, Debug)]
 struct Entry {
     doc: u32,
     score: f32,
     values: Vec<SortValue>,
+    natives: Vec<Native>,
+    generation: u32,
 }
 
 /// Collects the top `n` hits by `keys`.
@@ -570,6 +657,9 @@ pub struct TopFieldCollector {
     shared: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// Part of `total` already added to `shared`.
     flushed: u64,
+    /// Counts segments: queue entries whose `generation` differs are translated into the
+    /// current segment's native space before comparing.
+    generation: u32,
 }
 
 impl TopFieldCollector {
@@ -591,6 +681,7 @@ impl TopFieldCollector {
             passed: false,
             shared: None,
             flushed: 0,
+            generation: 0,
         }
     }
 
@@ -644,8 +735,10 @@ impl TopFieldCollector {
         self
     }
 
+    /// `track_scores` (or a `min_score` the caller asks scores for), or a `_score` key — which
+    /// only collecting top docs reads: with `n == 0` nothing is scored.
     fn needs_scores(&self) -> bool {
-        self.track_scores || self.keys.iter().any(|k| matches!(k, SortKey::Score { .. }))
+        self.track_scores || (self.n > 0 && self.keys.iter().any(|k| matches!(k, SortKey::Score { .. })))
     }
 
     pub fn top_docs(mut self) -> TopFieldDocs {
@@ -706,9 +799,20 @@ struct TopFieldLeaf<'a> {
     scores: bool,
     /// The sort is one numeric field key: compare natives directly.
     single_numeric: Option<(bool, Option<Native>)>,
+    /// A key is a `_script`: a script the deadline stopped leaves its doc without a value.
+    scripted: bool,
+    /// The first key is `_doc` ascending (a scroll's `sort=_doc`): docs arrive in sort order,
+    /// so once the queue is full no later doc can enter it (Lucene's `DocComparator`).
+    doc_first: bool,
 }
 
 const MIN_SKIP_INTERVAL: u32 = 32;
+/// A bottom the sampling passed over is tried again after this many more docs: a queue that
+/// stops changing would otherwise never prune with its final (best) bottom.
+const RETRY_DOCS: u32 = 4096;
+/// The most competitive terms whose postings a keyword pruner unions (Lucene's
+/// `TermOrdValComparator.MAX_TERMS`).
+const MAX_COMPETITIVE_TERMS: u64 = 1024;
 const MAX_SKIP_INTERVAL: u32 = 8192;
 
 /// Lucene's numeric sort optimization (`NumericComparator` with points): once the hit count
@@ -717,29 +821,47 @@ const MAX_SKIP_INTERVAL: u32 = 8192;
 /// field's BKD tree, when that cuts the docs to visit at least eightfold; the bulk scorer then
 /// jumps over the others. Recomputed as the worst entry improves, sampled once updates get
 /// frequent.
+///
+/// Keyword keys do the same with the field's terms (`TermOrdValComparator`'s competitive
+/// iterator): the competitive ordinals of the segment's doc values, when at most
+/// [`MAX_COMPETITIVE_TERMS`] remain, name the terms whose postings hold every doc that can
+/// still compete (a doc's sort value is one of its values, and a keyword indexes exactly its
+/// doc values).
 struct Pruner {
     field: u32,
     reader: search_codec::SegmentReader,
-    /// Bytes per point value: 8 (long, double) or 4 (int, float).
+    /// Bytes per point value: 8 (long, double) or 4 (int, float); 0: a keyword key pruned
+    /// through its terms (bounds are then scaled ordinals, as [`Native::Ord`]).
     width: usize,
     reverse: bool,
     /// The bound `search_after` puts on the other side, in the doc values' integer space.
     after: Option<i64>,
     /// Whether docs without a value can compete (then nothing can be skipped).
     missing_competitive: bool,
+    /// Every doc of the segment has a value: with `search_after`, the bound alone prunes
+    /// before the queue is full (a doc without one would sort after the bound).
+    all_valued: bool,
     /// Competitive docs, when materialized.
     set: Option<crate::query::basic::SetScorer>,
     cost: u64,
-    last: Option<i64>,
+    /// The last `(bottom, strict)` the competitive docs were derived for.
+    last: Option<(i64, bool)>,
     calls: u32,
     interval: u32,
     fails: u32,
+    /// The sampling skipped the latest bottom (retried at doc `retry_at`, see [`RETRY_DOCS`]).
+    pending: bool,
+    retry_at: u32,
+    /// The next update runs whatever the sampling says (a retry).
+    force: bool,
+    /// The segment has no value of the field: every doc sorts as missing, last.
+    absent: bool,
 }
 
 /// A native value of a numeric key in its doc values' integer space.
 fn native_int(kind: SortType, n: Native) -> Option<i64> {
     match (kind, n) {
-        (SortType::Long | SortType::Int, Native::I(v)) => Some(v),
+        (SortType::Long | SortType::UnsignedLong | SortType::Int, Native::I(v)) => Some(v),
         (SortType::Double, Native::F(v)) => Some(encode::f64_sortable(v)),
         (SortType::Float, Native::F(v)) => Some(encode::f32_sortable(v as f32) as i64),
         _ => None,
@@ -756,9 +878,37 @@ impl Pruner {
         if fs.nested.is_some() || !matches!(fs.mode, SortMode::Min | SortMode::Max) {
             return None;
         }
+        // No value of the field in this segment (absent, or unmapped): every doc sorts as
+        // missing, after any value. Once the queue is full nothing here can enter: a missing
+        // doc loses to a valued bottom, and to a missing one when doc ids break the tie (Lucene's
+        // comparators give such a segment an empty competitive iterator).
+        if matches!(fs.missing, Missing::Last)
+            && matches!(keys.first(), Some(LeafKeyKind::Field(lk, _)) if matches!(lk.src, Source::None) && lk.nested.is_none())
+        {
+            return Some(Pruner {
+                field: fs.field,
+                reader: seg.reader.clone(),
+                width: 0,
+                reverse: fs.reverse,
+                after: None,
+                missing_competitive: false,
+                all_valued: false,
+                set: None,
+                cost: seg.reader.max_doc() as u64,
+                last: None,
+                calls: 0,
+                interval: MIN_SKIP_INTERVAL,
+                fails: 0,
+                pending: false,
+                retry_at: 0,
+                force: false,
+                absent: true,
+            });
+        }
         let width = match fs.kind {
-            SortType::Long | SortType::Double => 8,
+            SortType::Long | SortType::UnsignedLong | SortType::Double => 8,
             SortType::Int | SortType::Float => 4,
+            SortType::Keyword => return Pruner::keyword(fs, seg, keys, after),
             _ => return None,
         };
         let points = seg.reader.points(fs.field)?;
@@ -787,13 +937,129 @@ impl Pruner {
             reverse: fs.reverse,
             after,
             missing_competitive,
+            all_valued: points.doc_count() >= seg.reader.max_doc(),
             set: None,
             cost: seg.reader.max_doc() as u64,
             last: None,
             calls: 0,
             interval: MIN_SKIP_INTERVAL,
             fails: 0,
+            pending: false,
+            retry_at: 0,
+            force: false,
+            absent: false,
         })
+    }
+
+    /// A pruner for a keyword first key whose segment indexes the terms of its doc values.
+    fn keyword(fs: &FieldSort, seg: &SegmentContext, keys: &[LeafKeyKind], after: Option<&[Native]>) -> Option<Pruner> {
+        // Docs without a value could compete unless they sort last.
+        if !matches!(fs.missing, Missing::Last) {
+            return None;
+        }
+        let terms = seg.reader.terms(fs.field)?;
+        let values = match (seg.reader.sorted(fs.field), seg.reader.sorted_set(fs.field)) {
+            (Some(v), _) => v.value_count(),
+            (None, Some(v)) => v.value_count(),
+            _ => return None,
+        };
+        // The terms must be the doc values' terms (not, say, the n-grams of a wildcard field).
+        if terms.stats().num_terms != values || values == 0 {
+            return None;
+        }
+        let after = match (after, keys.first()) {
+            (Some(a), Some(LeafKeyKind::Field(..))) => match a[0] {
+                Native::Ord(o) => Some(o),
+                _ => return None,
+            },
+            _ => None,
+        };
+        Some(Pruner {
+            field: fs.field,
+            reader: seg.reader.clone(),
+            width: 0,
+            reverse: fs.reverse,
+            after,
+            missing_competitive: false,
+            all_valued: terms.stats().doc_count >= seg.reader.max_doc(),
+            set: None,
+            cost: seg.reader.max_doc() as u64,
+            last: None,
+            calls: 0,
+            interval: MIN_SKIP_INTERVAL,
+            fails: 0,
+            pending: false,
+            retry_at: 0,
+            force: false,
+            absent: false,
+        })
+    }
+
+    /// The competitive docs of a keyword key below (above) the scaled-ordinal `bottom`
+    /// (see [`Pruner::update`]).
+    fn update_terms(&mut self, bottom: i64, from: u32, strict: bool) {
+        // Ordinal `x` sits at `ORD_SCALE * x`; other bounds lie between two ordinals and
+        // round toward the competitive side's inner ordinal.
+        let floor = |v: i64| v.div_euclid(ORD_SCALE);
+        let ceil = |v: i64| v.saturating_add(ORD_SCALE - 1).div_euclid(ORD_SCALE);
+        let exact = bottom.rem_euclid(ORD_SCALE) == 0;
+        let (lo, hi) = if self.reverse {
+            let lo = if strict && exact { bottom / ORD_SCALE + 1 } else { ceil(bottom) };
+            let hi = self.after.map_or(i64::MAX, floor);
+            (lo, hi)
+        } else {
+            let hi = if strict && exact { bottom / ORD_SCALE - 1 } else { floor(bottom) };
+            let lo = self.after.map_or(0, ceil);
+            (lo, hi)
+        };
+        let max_doc = self.reader.max_doc();
+        let (sorted, sorted_set) = (self.reader.sorted(self.field), self.reader.sorted_set(self.field));
+        let count = sorted.map(|v| v.value_count()).or(sorted_set.map(|v| v.value_count())).unwrap_or(0) as i64;
+        let (lo, hi) = (lo.max(0), hi.min(count - 1));
+        if lo > hi {
+            self.cost = 0;
+            self.set = Some(crate::query::basic::SetScorer::new(Arc::new(crate::util::bitset::DocIdSetBuilder::new(max_doc).build()), 0.0));
+            return;
+        }
+        if (hi - lo + 1) as u64 > MAX_COMPETITIVE_TERMS {
+            self.update_interval(false);
+            return;
+        }
+        let Some(terms) = self.reader.terms(self.field) else { return };
+        let lookup = |ord: i64, out: &mut Vec<u8>| match (sorted, sorted_set) {
+            (Some(v), _) => v.lookup_ord(ord as u64, out),
+            (None, Some(v)) => v.lookup_ord(ord as u64, out),
+            _ => {}
+        };
+        let (mut lo_term, mut hi_term) = (Vec::new(), Vec::new());
+        lookup(lo, &mut lo_term);
+        lookup(hi, &mut hi_term);
+        // Estimate first: a union that keeps most docs is not worth building.
+        let mut freq = 0u64;
+        let mut it = terms.range(std::ops::Bound::Included(&lo_term), std::ops::Bound::Included(&hi_term));
+        while it.next().is_some() {
+            freq += u64::from(it.doc_freq());
+        }
+        if freq >= self.cost >> 3 {
+            self.update_interval(false);
+            return;
+        }
+        let mut b = crate::util::bitset::DocIdSetBuilder::new(max_doc);
+        b.grow(freq as usize);
+        let mut it = terms.range(std::ops::Bound::Included(&lo_term), std::ops::Bound::Included(&hi_term));
+        let mut cursor = search_codec::postings::PostingsCursor::empty();
+        while it.next().is_some() {
+            it.postings_reset(search_codec::postings::PostingsFlags::DOCS, &mut cursor);
+            let mut d = if from > 0 { cursor.advance(from) } else { cursor.next() };
+            while d < max_doc {
+                b.add(d);
+                d = cursor.next();
+            }
+        }
+        let set = b.build();
+        self.cost = set.cost();
+        self.set = Some(crate::query::basic::SetScorer::new(Arc::new(set), 0.0));
+        self.update_interval(true);
     }
 
     fn update_interval(&mut self, success: bool) {
@@ -811,18 +1077,39 @@ impl Pruner {
     }
 
     /// The worst queued value changed to `bottom`; docs from `from` on are still to come.
-    fn update(&mut self, bottom: i64, from: u32) {
-        if self.missing_competitive || self.last == Some(bottom) {
+    /// `strict`: a doc equal to the bottom can't compete (the bottom is the only key and every
+    /// doc still to come has a higher doc id, so ties lose), Lucene's
+    /// `Pruning.GREATER_THAN_OR_EQUAL_TO`; otherwise equal values stay competitive.
+    fn update(&mut self, bottom: i64, from: u32, strict: bool) {
+        if self.missing_competitive || self.last == Some((bottom, strict)) {
             return;
         }
         self.calls += 1;
-        if self.calls > 256 && (self.calls & (self.interval - 1)) != self.interval - 1 {
+        if !std::mem::take(&mut self.force) && self.calls > 256 && (self.calls & (self.interval - 1)) != self.interval - 1 {
+            self.pending = true;
             return;
         }
-        self.last = Some(bottom);
-        // Competitive values: at least the bottom (descending) or at most it (ascending);
-        // equal values stay, since ties may break on doc ids still to come in other segments.
-        let (lo, hi) = if self.reverse { (bottom, self.after.unwrap_or(i64::MAX)) } else { (self.after.unwrap_or(i64::MIN), bottom) };
+        self.pending = false;
+        self.last = Some((bottom, strict));
+        if self.width == 0 {
+            return self.update_terms(bottom, from, strict);
+        }
+        // Competitive values: at least the bottom (descending) or at most it (ascending),
+        // strictly beyond it when ties lose. An empty range (`lo > hi`) leaves no doc.
+        // (`None`: no value lies strictly beyond the bottom.)
+        let bounds = match (self.reverse, strict) {
+            (true, false) => Some((bottom, self.after.unwrap_or(i64::MAX))),
+            (true, true) => bottom.checked_add(1).map(|lo| (lo, self.after.unwrap_or(i64::MAX))),
+            (false, false) => Some((self.after.unwrap_or(i64::MIN), bottom)),
+            (false, true) => bottom.checked_sub(1).map(|hi| (self.after.unwrap_or(i64::MIN), hi)),
+        };
+        let (lo, hi) = bounds.unwrap_or((i64::MAX, i64::MIN));
+        if lo > hi {
+            // Nothing can compete any more.
+            self.cost = 0;
+            self.set = Some(crate::query::basic::SetScorer::new(Arc::new(crate::util::bitset::DocIdSetBuilder::new(self.reader.max_doc()).build()), 0.0));
+            return;
+        }
         let Some(points) = self.reader.points(self.field) else { return };
         let mut v = RangeDocs { lo, hi, width: self.width, from, b: crate::util::bitset::DocIdSetBuilder::new(self.reader.max_doc()) };
         if points.estimate_point_count(&mut v) >= self.cost >> 3 {
@@ -907,7 +1194,7 @@ pub(crate) fn compute_natives(keys: &mut [LeafKeyKind], base: u32, doc: u32, sco
     for k in keys.iter_mut() {
         let n = match k {
             LeafKeyKind::Score(_) => Native::Score(score),
-            LeafKeyKind::Doc(_) => Native::Doc(base + doc),
+            LeafKeyKind::Doc(_) => Native::Doc(i64::from(base + doc)),
             LeafKeyKind::Field(lk, _) => lk.native(doc),
         };
         out.push(n);
@@ -946,13 +1233,48 @@ pub(crate) fn natives_of(keys: &[LeafKeyKind], values: &[SortValue], doc: u32, s
                 SortValue::Double(d) => *d as f32,
                 _ => score,
             }),
+            // An i64, not a doc id: `_shard_doc`'s `search_after` bound is -1 on the shards after the
+            // one it names (every doc comes after it) and `i32::MAX` on those before.
             LeafKeyKind::Doc(_) => Native::Doc(match v {
-                SortValue::Long(d) => *d as u32,
-                _ => doc,
+                SortValue::Long(d) => *d,
+                _ => i64::from(doc),
             }),
             LeafKeyKind::Field(lk, _) => lk.to_native(v),
         })
         .collect()
+}
+
+/// Brings `e`'s natives into the space of segment generation `generation` (a no-op when they
+/// already are). One terms-dictionary lookup per keyword key; no allocation.
+fn translate(keys: &[LeafKeyKind], generation: u32, e: &mut Entry) {
+    if e.generation == generation {
+        return;
+    }
+    e.natives.clear();
+    for (k, v) in keys.iter().zip(&e.values) {
+        e.natives.push(match k {
+            LeafKeyKind::Score(_) => Native::Score(match v {
+                SortValue::Float(f) => *f,
+                SortValue::Double(d) => *d as f32,
+                _ => e.score,
+            }),
+            LeafKeyKind::Doc(_) => Native::Doc(i64::from(e.doc)),
+            LeafKeyKind::Field(lk, _) => lk.to_native(v),
+        });
+    }
+    e.generation = generation;
+}
+
+/// [`output_values`] into `out`, reusing its buffers.
+fn fill_values(keys: &[LeafKeyKind], natives: &[Native], score: f32, gdoc: u32, out: &mut Vec<SortValue>) {
+    out.resize(keys.len(), SortValue::Null);
+    for ((k, n), slot) in keys.iter().zip(natives).zip(out.iter_mut()) {
+        match k {
+            LeafKeyKind::Score(_) => *slot = SortValue::Float(score),
+            LeafKeyKind::Doc(_) => *slot = SortValue::Long(gdoc as i64),
+            LeafKeyKind::Field(lk, _) => lk.value_into(*n, slot),
+        }
+    }
 }
 
 /// The output values of natives.
@@ -986,29 +1308,108 @@ impl TopFieldLeaf<'_> {
         if !self.c.passed {
             return;
         }
-        let (Some(p), Some(b)) = (self.pruner.as_mut(), self.bottom.as_ref()) else { return };
+        let Some(p) = self.pruner.as_mut() else { return };
+        let Some(b) = self.bottom.as_ref() else {
+            // Queue not full yet: `search_after` alone bounds the competitive values
+            // (Lucene's `NumericComparator` with a top value).
+            if p.after.is_some() && p.all_valued {
+                p.update(if p.reverse { i64::MIN } else { i64::MAX }, from, false);
+            }
+            return;
+        };
         let SortKey::Field(fs) = &self.c.keys[0] else { return };
-        if let Some(v) = native_int(fs.kind, b[0]) {
-            p.update(v, from);
+        // Ties break on doc ids: with one key, a doc equal to a bottom from an earlier doc loses.
+        let strict = self.c.keys.len() == 1 && self.c.queue.last().is_some_and(|w| w.doc < self.base.saturating_add(from));
+        if p.absent {
+            // Every doc here sorts as the missing value: competitive only if that beats the
+            // bottom, or ties it while ties don't lose.
+            let o = match &self.keys[0] {
+                LeafKeyKind::Field(lk, m) => cmp_native(Native::None, b[0], &lk.sort, *m),
+                _ => return,
+            };
+            if p.set.is_none() && (o == Ordering::Greater || (o == Ordering::Equal && strict)) {
+                p.cost = 0;
+                p.set = Some(crate::query::basic::SetScorer::new(Arc::new(crate::util::bitset::DocIdSetBuilder::new(p.reader.max_doc()).build()), 0.0));
+            }
+            return;
         }
+        let v = match (fs.kind, b[0]) {
+            (SortType::Keyword, Native::Ord(o)) => Some(o),
+            (kind, n) => native_int(kind, n),
+        };
+        if let Some(v) = v {
+            p.update(v, from, strict);
+        }
+    }
+
+    /// With `_doc` ascending first, whether `gdoc` sorts after the full queue's worst entry
+    /// (then it, and every later doc, cannot enter whatever the other keys say).
+    #[inline]
+    fn after_bottom_doc(&self, gdoc: u32) -> bool {
+        self.doc_first && matches!(self.bottom.as_deref(), Some([Native::Doc(b), ..]) if *b < i64::from(gdoc))
     }
 
     fn refresh_bottom(&mut self) {
         if self.c.queue.len() >= self.c.n && self.c.n > 0 {
-            let w = self.c.queue.last().unwrap();
-            let (values, doc, score) = (w.values.clone(), w.doc, w.score);
-            self.bottom = Some(self.natives_of(&values, doc, score));
+            let generation = self.c.generation;
+            let w = self.c.queue.last_mut().unwrap();
+            translate(&self.keys, generation, w);
+            match &mut self.bottom {
+                Some(b) => b.clone_from(&w.natives),
+                None => self.bottom = Some(w.natives.clone()),
+            }
         }
     }
 }
 
 impl LeafCollector for TopFieldLeaf<'_> {
+    /// `_doc` ascending first with a full queue: the block can't change the hits; with an
+    /// exact total (a scroll's first page) it only counts, past the threshold it ends the
+    /// segment. Anything else collects per doc.
+    fn collect_block(&mut self, docs: &[u32], score: f32) -> Result<()> {
+        if let Some(&first) = docs.first()
+            && self.after_bottom_doc(self.base + first)
+        {
+            if self.c.passed {
+                return Err(Error::CollectionTerminated);
+            }
+            if self.c.threshold == u64::MAX {
+                self.c.total += docs.len() as u64;
+                self.collected += docs.len() as u64;
+                if self.scores && score > self.c.max_score {
+                    self.c.max_score = score;
+                }
+                return Ok(());
+            }
+        }
+        let mut sv = crate::search::ScoreValue(score);
+        for &d in docs {
+            self.collect(d, &mut sv)?;
+        }
+        Ok(())
+    }
+
     fn skips(&self) -> bool {
         self.pruner.is_some()
     }
 
     #[inline]
     fn competitive_from(&mut self, doc: u32) -> u32 {
+        let retry = match self.pruner.as_mut() {
+            Some(p) if p.pending && doc >= p.retry_at => {
+                p.retry_at = doc.saturating_add(RETRY_DOCS);
+                p.force = true;
+                true
+            }
+            Some(_) => false,
+            None => return doc,
+        };
+        if retry {
+            self.prune(doc);
+            if let Some(p) = self.pruner.as_mut() {
+                p.force = false;
+            }
+        }
         match self.pruner.as_mut() {
             Some(p) => p.next_from(doc),
             None => doc,
@@ -1028,34 +1429,72 @@ impl LeafCollector for TopFieldLeaf<'_> {
         if self.c.n == 0 {
             return Ok(());
         }
-        // One numeric key without search_after: a non-competitive doc costs one value read
-        // and one comparison.
-        if let (Some((reverse, missing)), Some(b), None) = (self.single_numeric, self.bottom.as_ref(), self.after.as_ref())
-            && !just_passed
+        if just_passed {
+            // The hit count just passed the threshold: pruning may start, whatever this doc
+            // turns out to be (one before `search_after` must not keep it from starting:
+            // Lucene's `setHitsThresholdReached` runs on the count alone).
+            self.prune(doc + 1);
+        }
+        if self.doc_first {
+            let gdoc = self.base + doc;
+            if self.after_bottom_doc(gdoc) {
+                self.collected += 1;
+                return if self.c.passed { Err(Error::CollectionTerminated) } else { Ok(()) };
+            }
+            // Before `search_after` on the first key (a tie goes to the general path, which
+            // compares the other keys).
+            if matches!(self.after.as_deref(), Some([Native::Doc(a), ..]) if i64::from(gdoc) < *a) {
+                return Ok(());
+            }
+        }
+        // One numeric key: a non-competitive doc costs one value read and one comparison.
+        // A doc sorting before `search_after` is out (a tie with it is left to the general
+        // path below, which breaks it on doc ids); one worse than the bottom cannot enter
+        // whatever the bound.
+        if let Some((reverse, missing)) = self.single_numeric
+            && (self.bottom.is_some() || self.after.is_some())
         {
             let LeafKeyKind::Field(lk, _) = &mut self.keys[0] else { unreachable!() };
             let n = lk.native(doc);
             let n = if n == Native::None { missing.unwrap_or(Native::None) } else { n };
-            let worse = match (n, b[0]) {
-                (Native::I(x), Native::I(y)) => if reverse { x <= y } else { x >= y },
-                (Native::F(x), Native::F(y)) => {
-                    let o = x.total_cmp(&y);
-                    if reverse { o != Ordering::Greater } else { o != Ordering::Less }
-                }
-                _ => false,
+            // `n` sorts strictly before (`Less`) or after (`Greater`) `y`; `None` when the
+            // natives don't compare here.
+            let order = |y: Native| match (n, y) {
+                (Native::I(x), Native::I(y)) => Some(if reverse { y.cmp(&x) } else { x.cmp(&y) }),
+                (Native::F(x), Native::F(y)) => Some(if reverse { y.total_cmp(&x) } else { x.total_cmp(&y) }),
+                _ => None,
             };
-            if worse {
-                self.collected += 1;
-                if self.c.early_terminate && self.c.passed {
-                    return Err(Error::CollectionTerminated);
-                }
+            if let Some(a) = &self.after
+                && order(a[0]) == Some(Ordering::Less)
+            {
                 return Ok(());
             }
-            self.natives.clear();
-            self.natives.push(n);
-            return self.insert(doc, score);
+            if let Some(b) = self.bottom.as_ref() {
+                if order(b[0]).is_some_and(|o| o != Ordering::Less) {
+                    self.collected += 1;
+                    if self.c.early_terminate && self.c.passed {
+                        return Err(Error::CollectionTerminated);
+                    }
+                    return Ok(());
+                }
+                if self.after.is_none() {
+                    self.natives.clear();
+                    self.natives.push(n);
+                    return self.insert(doc, score);
+                }
+            }
         }
         self.compute(doc, score);
+        // A sort script the search's deadline (or cancellation) stopped computed nothing for
+        // this doc: it must not be collected with a missing value. Collection stops here;
+        // what was collected before is the partial result.
+        if self.scripted
+            && let Some(e) = crate::search::take_interrupted()
+        {
+            // The script's own failure, deferred with it, is this interruption.
+            crate::search::take_deferred_error();
+            return Err(e);
+        }
         let gdoc = self.base + doc;
         if let Some(a) = &self.after {
             match self.cmp(&self.natives, a) {
@@ -1066,10 +1505,6 @@ impl LeafCollector for TopFieldLeaf<'_> {
                 },
                 Ordering::Greater => {}
             }
-        }
-        if just_passed {
-            // The hit count just passed the threshold: pruning may start.
-            self.prune(doc + 1);
         }
         if let Some(b) = &self.bottom {
             // Not better than the worst queued hit (ties lose: later doc ids).
@@ -1087,20 +1522,34 @@ impl LeafCollector for TopFieldLeaf<'_> {
 
 impl TopFieldLeaf<'_> {
     /// Queues `doc` (its natives are in `self.natives`), dropping the worst entry when full.
+    /// Callers only insert into a full queue a doc that beats its worst entry, so that entry
+    /// is evicted first and its buffers reused: no allocation once the queue is full.
     fn insert(&mut self, doc: u32, score: f32) -> Result<()> {
         let gdoc = self.base + doc;
-        let values = output_values(&self.keys, &self.natives, score, gdoc);
-        let e = Entry { doc: gdoc, score, values };
-        // Insert in order (the queue is small; binary search on the values).
-        let natives = self.natives.clone();
+        let generation = self.c.generation;
+        let mut e = if self.c.n > 0 && self.c.queue.len() >= self.c.n {
+            self.c.queue.pop().unwrap()
+        } else {
+            Entry { doc: 0, score: 0.0, values: Vec::with_capacity(self.keys.len()), natives: Vec::with_capacity(self.keys.len()), generation }
+        };
+        fill_values(&self.keys, &self.natives, score, gdoc, &mut e.values);
+        e.natives.clone_from(&self.natives);
+        (e.doc, e.score, e.generation) = (gdoc, score, generation);
+        // `_doc` first: a doc sorts after every queued one (docs arrive in increasing order).
+        if self.doc_first && self.c.queue.last().is_none_or(|l| l.doc < gdoc) {
+            self.c.queue.push(e);
+            return self.inserted(doc);
+        }
+        // Insert in order (binary search; entries of earlier segments are translated into
+        // this one's space once, when first probed).
         let pos = {
             let mut lo = 0;
             let mut hi = self.c.queue.len();
             while lo < hi {
                 let mid = (lo + hi) / 2;
-                let q = &self.c.queue[mid];
-                let qn = self.natives_of(&q.values, q.doc, q.score);
-                let o = self.cmp(&natives, &qn).then(gdoc.cmp(&q.doc));
+                let q = &mut self.c.queue[mid];
+                translate(&self.keys, generation, q);
+                let o = cmp_natives(&self.keys, &self.natives, &q.natives).then(gdoc.cmp(&q.doc));
                 if o == Ordering::Less {
                     hi = mid;
                 } else {
@@ -1110,6 +1559,11 @@ impl TopFieldLeaf<'_> {
             lo
         };
         self.c.queue.insert(pos, e);
+        self.inserted(doc)
+    }
+
+    /// Trims the queue to `n` after an insert of `doc` and updates the bottom and pruning.
+    fn inserted(&mut self, doc: u32) -> Result<()> {
         if self.c.queue.len() > self.c.n {
             self.c.queue.pop();
         }
@@ -1132,10 +1586,13 @@ impl Collector for TopFieldCollector {
         let keys = build_leaf_keys(&self.keys, seg, self.searcher.as_ref())?;
         let base = seg.base;
         let scores = self.needs_scores();
+        // Natives of queued entries belong to the previous segment.
+        self.generation = self.generation.wrapping_add(1);
         let single_numeric = match keys.as_slice() {
             [LeafKeyKind::Field(lk, missing)] if lk.fast.is_some() => Some((lk.sort.reverse, *missing)),
             _ => None,
         };
+        let scripted = keys.iter().any(|k| matches!(k, LeafKeyKind::Field(lk, _) if matches!(lk.src, Source::Script(_))));
         let mut leaf = TopFieldLeaf {
             c: self,
             base,
@@ -1147,6 +1604,8 @@ impl Collector for TopFieldCollector {
             pruner: None,
             scores,
             single_numeric,
+            scripted,
+            doc_first: false,
         };
         if let Some((vals, _)) = leaf.c.after.clone() {
             if vals.len() != leaf.keys.len() {
@@ -1158,6 +1617,7 @@ impl Collector for TopFieldCollector {
             }
             leaf.after = Some(leaf.natives_of(&vals, u32::MAX, f32::NAN));
         }
+        leaf.doc_first = matches!(leaf.keys.first(), Some(LeafKeyKind::Doc(false))) && leaf.c.n > 0;
         leaf.pruner = Pruner::new(leaf.c, seg, &leaf.keys, leaf.after.as_deref());
         leaf.refresh_bottom();
         leaf.prune(0);
@@ -1257,12 +1717,25 @@ pub(crate) fn build_leaf_keys(sort: &[SortKey], seg: &SegmentContext, searcher: 
                     }
                 };
                 let fast = if nested.is_none() { FastValues::of(&src) } else { None };
-                let mut lk = LeafKey { sort: fs.clone(), src, nested, scratch: Vec::new(), fast };
+                let mut lk = LeafKey { sort: fs.clone(), src, nested, scratch: Vec::new(), fast, missing_term: None };
+                // A keyword missing value the segment lacks takes the middle of its gap; other
+                // foreign values there order around it by their bytes (see `ORD_SCALE`).
+                if let Missing::Value(SortValue::Bytes(b)) = &fs.missing
+                    && fs.kind == SortType::Keyword
+                {
+                    let r = match &lk.src {
+                        Source::Sorted(v) => v.lookup_term(b),
+                        Source::SortedSet(v) => v.lookup_term(b),
+                        _ => Err(0),
+                    };
+                    if let Err(ins) = r {
+                        lk.missing_term = Some((ins, b.clone()));
+                    }
+                }
                 let missing = match &fs.missing {
                     Missing::Value(v) => Some(lk.to_native(v)),
                     m => missing_bound(fs.kind, matches!(m, Missing::First), fs.reverse).map(|v| lk.to_native(&v)),
                 };
-                // A keyword missing value between ordinals must stay comparable.
                 lk.scratch.reserve(4);
                 LeafKeyKind::Field(Box::new(lk), missing)
             }
@@ -1312,7 +1785,7 @@ fn derived_key(
         mode,
         nested: nested.cloned(),
     };
-    let lk = LeafKey { sort, src, nested: nested_leaf, scratch: Vec::new(), fast: None };
+    let lk = LeafKey { sort, src, nested: nested_leaf, scratch: Vec::new(), fast: None, missing_term: None };
     let missing = Some(lk.to_native(&SortValue::Double(f64::INFINITY)));
     Ok(LeafKeyKind::Field(Box::new(lk), missing))
 }
@@ -1320,5 +1793,39 @@ fn derived_key(
 impl PartialOrd for SortValue {
     fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
         Some(self.cmp_same(o))
+    }
+}
+
+#[cfg(test)]
+mod unsigned_tests {
+    use super::*;
+
+    fn enc(v: u64) -> i64 {
+        (v ^ (1 << 63)) as i64
+    }
+
+    fn run(mode: SortMode, vals: &[u64]) -> u64 {
+        let mut v: Vec<i64> = vals.iter().map(|&x| enc(x)).collect();
+        (unsigned_mode(mode, &mut v) as u64) ^ (1 << 63)
+    }
+
+    // Expected values from OpenSearch 3.9.0's 260_sort_unsigned_long YAML test.
+    #[test]
+    fn unsigned_modes_match_opensearch() {
+        const B: u64 = 13835058055282163712;
+        assert_eq!(run(SortMode::Median, &[B + 10, 5, 6, 7]), 7);
+        assert_eq!(run(SortMode::Median, &[B + 1, B + 2]), 4611686018427387906);
+        assert_eq!(run(SortMode::Median, &[B, 1]), 6917529027641081857);
+        assert_eq!(run(SortMode::Median, &[B + 8, B + 9, 3, 4]), 6917529027641081862);
+        assert_eq!(run(SortMode::Median, &[B + 3, B + 4, 2]), B + 3);
+        assert_eq!(run(SortMode::Sum, &[B + 10, 5, 6, 7]), 13835058055282163740);
+        assert_eq!(run(SortMode::Sum, &[B + 8, B + 9, 3, 4]), 9223372036854775832);
+        assert_eq!(run(SortMode::Sum, &[B + 5, B + 6, B + 7]), 4611686018427387922);
+        assert_eq!(run(SortMode::Avg, &[B, 1]), 6917529027641081857);
+        assert_eq!(run(SortMode::Avg, &[B + 3, B + 4, 2]), 3074457345618258606);
+        assert_eq!(run(SortMode::Avg, &[B + 5, B + 6, B + 7]), 1537228672809129307);
+        assert_eq!(run(SortMode::Min, &[B, 1]), 1);
+        assert_eq!(run(SortMode::Max, &[B, 1]), B);
+        assert_eq!(run(SortMode::Sum, &[u64::MAX]), u64::MAX);
     }
 }

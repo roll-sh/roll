@@ -977,6 +977,12 @@ impl NumericDocValues {
         self.values.get(index as u64)
     }
 
+    /// The values, one per doc of [`docs`](Self::docs) in doc order, for batch decoding with
+    /// [`NumericValues::get_range`](crate::packed::NumericValues::get_range).
+    pub fn values(&self) -> &NumericValues {
+        &self.values
+    }
+
     /// Docs with a value.
     pub fn docs(&self) -> &DocSet {
         &self.docs

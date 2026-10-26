@@ -120,6 +120,12 @@ pub(crate) trait FilterFactory: Send + Sync {
         SynonymRole::Same
     }
 
+    /// A `shingle` filter's sizes (`ShingleTokenFilterFactory.getInnerFactory`), for the
+    /// phrase suggester's gram size and unigram checks.
+    fn shingle(&self) -> Option<crate::analyzer::ShingleInfo> {
+        None
+    }
+
     /// `getChainAwareTokenFilterFactory`: a replacement built with knowledge of the preceding
     /// chain (synonym filters analyze their rules with it; `multiplexer` and `condition` resolve
     /// the filters they wrap). None keeps `self`.

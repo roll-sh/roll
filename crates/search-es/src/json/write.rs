@@ -41,6 +41,7 @@ fn write_compact(out: &mut Vec<u8>, v: &Value) {
             }
             out.push(b']');
         }
+        Value::Str(s) if let Some(raw) = super::raw::as_raw(s) => out.extend_from_slice(raw.as_bytes()),
         scalar => write_scalar(out, scalar),
     }
 }
@@ -50,6 +51,8 @@ fn write_compact(out: &mut Vec<u8>, v: &Value) {
 fn write_child(out: &mut Vec<u8>, v: &Value) {
     match v {
         Value::Obj(_) | Value::Arr(_) => crate::stack::maybe_grow(|| write_compact(out, v)),
+        // Pre-rendered JSON (a stored `_source`) goes out as it is.
+        Value::Str(s) if let Some(raw) = super::raw::as_raw(s) => out.extend_from_slice(raw.as_bytes()),
         scalar => write_scalar(out, scalar),
     }
 }
@@ -58,6 +61,11 @@ fn write_child(out: &mut Vec<u8>, v: &Value) {
 fn write_pretty_child(out: &mut Vec<u8>, v: &Value, level: usize) {
     match v {
         Value::Obj(_) | Value::Arr(_) => crate::stack::maybe_grow(|| write_pretty(out, v, level)),
+        // Pretty output re-reads pre-rendered JSON, as Jackson copies a raw field.
+        Value::Str(s) if let Some(raw) = super::raw::as_raw(s) => {
+            let tree = super::raw::parse(raw);
+            crate::stack::maybe_grow(|| write_pretty(out, &tree, level))
+        }
         scalar => write_scalar(out, scalar),
     }
 }
@@ -99,6 +107,7 @@ fn write_pretty(out: &mut Vec<u8>, v: &Value, level: usize) {
             indent(out, level);
             out.push(b']');
         }
+        Value::Str(s) if super::raw::as_raw(s).is_some() => write_pretty_child(out, v, level),
         scalar => write_scalar(out, scalar),
     }
 }
@@ -126,8 +135,38 @@ pub(crate) fn write_number(out: &mut Vec<u8>, n: &Number) {
             out.extend_from_slice(java_double(*f).as_bytes());
             out.push(b'"');
         }
-        Number::Float(f) => out.extend_from_slice(java_double(*f).as_bytes()),
+        Number::Float(f) => {
+            if !write_plain_double(out, *f) {
+                out.extend_from_slice(java_double(*f).as_bytes());
+            }
+        }
     }
+}
+
+/// [`java_double`] without allocating, for doubles Java prints in plain notation
+/// (`10^-3 <= |d| < 10^7`, the bulk of real values such as coordinates and prices): the
+/// shortest round-trip digits (Rust's `Display`, the digits `java_double` uses too) and a
+/// `.0` when there is no fraction. Returns false (nothing written) for other values. Java's
+/// two-digit minimum only matters for subnormals, far outside this range.
+#[inline]
+fn write_plain_double(out: &mut Vec<u8>, d: f64) -> bool {
+    let a = d.abs();
+    if !(1e-3..1e7).contains(&a) {
+        return false;
+    }
+    use std::io::Write;
+    let mut buf = [0u8; 48];
+    let mut cur = &mut buf[..];
+    if write!(cur, "{d}").is_err() {
+        return false;
+    }
+    let n = 48 - cur.len();
+    let s = &buf[..n];
+    out.extend_from_slice(s);
+    if !s.contains(&b'.') {
+        out.extend_from_slice(b".0");
+    }
+    true
 }
 
 /// Replaces non-finite doubles with the strings Jackson writes for them, so a value matches what
@@ -205,7 +244,83 @@ pub fn java_float(f: f32) -> String {
     }
     let sci = format!("{:e}", f.abs());
     let sci = if sci.split('e').next().is_some_and(|m| m.len() == 1) { two_digits(format!("{:.1e}", f.abs()), sci) } else { sci };
+    let sci = even_on_tie(sci, f.abs() as f64, |s| s.parse::<f32>().ok() == Some(f.abs()));
     java_format(&sci, f < 0.0)
+}
+
+/// The double that [`java_float`]'s text reads as, without allocating in the common cases
+/// (every hit's `_score`): integral floats are exact, and otherwise the shortest digits are
+/// formatted on the stack. The cases where `java_float` may adjust Rust's digits (a one-digit
+/// mantissa whose two-digit form differs, or an odd last digit whose neighbour also reads back
+/// as the float, a possible tie) go through `java_float` itself.
+pub fn java_float_value(f: f32) -> f64 {
+    if !f.is_finite() {
+        return java_float(f).parse::<f64>().unwrap_or(f64::from(f));
+    }
+    if f == f.trunc() && f.abs() < 16_777_216.0 {
+        return f64::from(f);
+    }
+    float_text_fast(f).unwrap_or_else(|| java_float(f).parse::<f64>().unwrap_or(f64::from(f)))
+}
+
+fn float_text_fast(f: f32) -> Option<f64> {
+    use std::io::Write;
+    let mut buf = [0u8; 32];
+    let n = {
+        let mut cur = &mut buf[..];
+        write!(cur, "{:e}", f.abs()).ok()?;
+        32 - cur.len()
+    };
+    let e = buf[..n].iter().position(|&b| b == b'e')?;
+    let digits = buf[..e].iter().filter(|b| b.is_ascii_digit()).count();
+    if digits == 1 {
+        let mut two = [0u8; 32];
+        let m = {
+            let mut cur = &mut two[..];
+            write!(cur, "{:.1e}", f.abs()).ok()?;
+            32 - cur.len()
+        };
+        if two[..m].iter().position(|&b| b == b'e').is_none_or(|i| two[i - 1] != b'0') {
+            return None;
+        }
+    }
+    let last = buf[e - 1];
+    if (last - b'0') % 2 == 1 {
+        let mut alt = buf;
+        alt[e - 1] -= 1;
+        if std::str::from_utf8(&alt[..n]).ok()?.parse::<f32>().ok() == Some(f.abs()) {
+            return None;
+        }
+    }
+    let v = std::str::from_utf8(&buf[..n]).ok()?.parse::<f64>().ok()?;
+    Some(if f < 0.0 { -v } else { v })
+}
+
+/// Java (19+) picks, of two shortest decimals exactly as close to the value, the one with an
+/// even last digit (`Float.toString(6.05078125f)` is `6.0507812`); Rust's shortest form may
+/// end in the odd one. `exact` is the value (exactly, as a double); `round_trips` tells whether
+/// a candidate reads back as it.
+fn even_on_tie(sci: String, exact: f64, round_trips: impl Fn(&str) -> bool) -> String {
+    let Some((mant, exp)) = sci.split_once('e') else { return sci };
+    let last = mant.as_bytes().last().copied().unwrap_or(b'0');
+    if (last - b'0').is_multiple_of(2) {
+        return sci;
+    }
+    let n = mant.bytes().filter(u8::is_ascii_digit).count();
+    // The exact expansion, well past the shortest digits: a tie reads `…d5000…` there.
+    let full = format!("{:.*e}", n + 40, exact);
+    let (fm, fe) = full.split_once('e').unwrap_or((&full, "0"));
+    if fe != exp {
+        return sci;
+    }
+    let fd: Vec<u8> = fm.bytes().filter(u8::is_ascii_digit).collect();
+    if fd.len() <= n || fd[n] != b'5' || fd[n + 1..].iter().any(|&d| d != b'0') {
+        return sci;
+    }
+    let mut alt = mant.as_bytes().to_vec();
+    *alt.last_mut().unwrap() -= 1;
+    let alt = format!("{}e{exp}", String::from_utf8(alt).unwrap_or_default());
+    if round_trips(&alt) { alt } else { sci }
 }
 
 /// Keeps the one-digit shortest form unless the closest two-digit decimal differs from it.
@@ -255,7 +370,80 @@ fn java_format(sci: &str, negative: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The allocation-free float path reads exactly as `java_float`'s text, across random bit
+    /// patterns, every integral float, scores and the tie/two-digit cases.
+    #[test]
+    fn java_float_value_matches_java_float() {
+        let slow = |f: f32| java_float(f).parse::<f64>().unwrap();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let check = |f: f32| {
+            let got = java_float_value(f);
+            let want = slow(f);
+            assert!(got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()), "{f:e}: {got} vs {want}");
+        };
+        for _ in 0..2_000_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            check(f32::from_bits(x as u32));
+        }
+        for i in -70_000..70_000 {
+            check(i as f32);
+            check(i as f32 / 1024.0);
+            check(i as f32 * 0.37);
+        }
+        for f in [0.0, -0.0, 0.5, 0.1, 1e10, 3.4028235e38, f32::MIN_POSITIVE, 1e-45, 16_777_216.0, 16_777_217.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            check(f);
+        }
+        check(f32::from_bits(0x40C1_A000));
+        check(-f32::from_bits(0x40D5_2000));
+    }
+
+    /// The plain-notation fast path writes exactly what `java_double` returns.
+    #[test]
+    fn plain_double_matches_java_double() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let check = |d: f64| {
+            let mut out = Vec::new();
+            if write_plain_double(&mut out, d) {
+                assert_eq!(String::from_utf8(out).unwrap(), java_double(d), "{d:e}");
+            } else {
+                assert!(!(1e-3..1e7).contains(&d.abs()), "{d:e}");
+            }
+        };
+        for d in [1e-3, 0.001, 0.0010000000000000002, 9_999_999.999999998, 1e7, 0.1, 0.3, 2.0, 100.0, 4.8951, 52.37, -13.4, 1234567.0, 0.000999] {
+            check(d);
+            check(-d);
+        }
+        for _ in 0..300_000 {
+            let r = next();
+            // uniform bits (mostly out of range), decimals with few digits, and values in range
+            check(f64::from_bits(r));
+            let digits = (r >> 60) as i32;
+            check((r % 100_000_000) as f64 / 10f64.powi(digits));
+            check(1e-3 + (r >> 11) as f64 / (1u64 << 53) as f64 * 1e7);
+            check(f32::from_bits(r as u32) as f64);
+        }
+    }
     use crate::{arr, obj};
+
+    /// Half floats Elasticsearch 9.5.5 rendered as sort values: of two equally close shortest
+    /// decimals, Java prints the one ending in an even digit.
+    #[test]
+    fn floats_break_ties_to_even_like_java() {
+        assert_eq!(java_float(f32::from_bits(0x40C1_A000)), "6.0507812");
+        assert_eq!(java_float(-f32::from_bits(0x40D5_2000)), "-6.6601562");
+        assert_eq!(java_float(121.1875), "121.1875");
+        assert_eq!(java_float(0.1), "0.1");
+        assert_eq!(java_float(1.0e10), "1.0E10");
+    }
 
     #[test]
     fn doubles_like_java() {

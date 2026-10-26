@@ -963,6 +963,63 @@ impl PointsReader {
         }
     }
 
+    /// Counts matching points without visiting cells inside the query (Lucene's
+    /// `PointRangeQuery#pointCount`): their point counts come from the split rule, so only
+    /// crossing leaves are read, and they are handed to `visitor` exactly as
+    /// [`intersect`](Self::intersect) would. Returns the points of the inside cells; the
+    /// caller adds what its visitor counted in the crossing leaves.
+    pub fn count_inside(&self, visitor: &mut dyn PointVisitor) -> u64 {
+        if self.num_points == 0 {
+            return 0;
+        }
+        let (mut min, mut max) = self.index_bounds();
+        let plen = self.spec.packed_len();
+        let mut leaf = Leaf {
+            docs: Vec::with_capacity(MAX_POINTS_IN_LEAF),
+            consecutive: false,
+            values: Vec::with_capacity(MAX_POINTS_IN_LEAF * plen),
+            min: vec![0; plen],
+            max: vec![0; plen],
+        };
+        self.count_rec(1, self.num_points as usize, &mut min, &mut max, visitor, &mut leaf)
+    }
+
+    fn count_rec(
+        &self,
+        node: usize,
+        count: usize,
+        min: &mut [u8],
+        max: &mut [u8],
+        v: &mut dyn PointVisitor,
+        leaf: &mut Leaf,
+    ) -> u64 {
+        match v.compare(min, max) {
+            Relation::CellOutsideQuery => 0,
+            Relation::CellInsideQuery => count as u64,
+            Relation::CellCrossesQuery => {
+                if node >= self.leaves {
+                    self.visit_leaf_crossing(node, leaf, v);
+                    return 0;
+                }
+                let bpd = self.spec.bytes_per_dim as usize;
+                let d = self.split_dims[node] as usize;
+                let split = &self.split_vals[node * bpd..(node + 1) * bpd];
+                let left = count * subtree_leaves(2 * node, self.leaves) / subtree_leaves(node, self.leaves);
+                let r = d * bpd..(d + 1) * bpd;
+                let mut saved = [0u8; 32];
+                saved[..bpd].copy_from_slice(&max[r.clone()]);
+                max[r.clone()].copy_from_slice(split);
+                let a = self.count_rec(2 * node, left, min, max, v, leaf);
+                max[r.clone()].copy_from_slice(&saved[..bpd]);
+                saved[..bpd].copy_from_slice(&min[r.clone()]);
+                min[r.clone()].copy_from_slice(split);
+                let b = self.count_rec(2 * node + 1, count - left, min, max, v, leaf);
+                min[r].copy_from_slice(&saved[..bpd]);
+                a + b
+            }
+        }
+    }
+
     /// Estimated number of points matching the visitor's query (no leaf is read): full counts
     /// of inside cells plus half of crossing leaves, like Lucene.
     pub fn estimate_point_count(&self, visitor: &mut dyn PointVisitor) -> u64 {
@@ -1452,6 +1509,16 @@ mod tests {
                 r.intersect(&mut q);
                 q.hits.sort();
                 assert_eq!(q.hits, want);
+                // Counting skips inside cells but must agree exactly.
+                let mut cq = Range {
+                    lo: lo.clone(),
+                    hi: hi.clone(),
+                    bpd: bpd as usize,
+                    dims: dims as usize,
+                    hits: Vec::new(),
+                };
+                let inside = r.count_inside(&mut cq);
+                assert_eq!(inside as usize + cq.hits.len(), want.len());
                 let est = r.estimate_point_count(&mut Range {
                     lo,
                     hi,

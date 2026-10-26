@@ -46,6 +46,9 @@ fn vector_functions_match_elasticsearch() {
             }
         }
     }
+    // `$(field, default)` is `field(field).get(default)`: the vector object itself.
+    let script = engine.compile("return $('v', null).getVector()[0] + $('missing', 7)", Context::Score).unwrap();
+    assert_eq!(script.instance().execute_f64(&mut VecHost(vec![2.5, 1.0])).unwrap(), 9.5);
     assert!(exact * 100 / total >= 85, "only {exact} of {total} vector results equal Elasticsearch's");
     eprintln!("{exact} of {total} vector results equal Elasticsearch's exactly");
 }
@@ -117,6 +120,9 @@ fn rank_vectors_max_sim() {
     assert_eq!(ok("double s = 0; Iterator it = doc['rv'].vectorValues; while (it.hasNext()) { float[] v = it.next(); s += v[0] * 10 + v[1] } return s", json!({})), json!(10.0 + 1.0 + 5.5));
     assert_eq!(ok("float[] m = doc['rb'].magnitudes; return m[0] + m[1]", json!({})), json!((5f32.sqrt() + 5.0) as f64));
     assert_eq!(ok("field('rv').get().isEmpty() ? 1 : 0", json!({})), json!(0.0));
+    // `$(field, default)` is `field(field).get(default)`: the vector object itself.
+    assert_eq!(ok("$('rv', null).getDims()", json!({})), json!(2.0));
+    assert_eq!(run("$('rv', null) == null ? 1 : 0", json!({}), true).unwrap(), json!(1.0));
     assert_eq!(err("doc['rv'].get(0) == null ? 1 : 0", json!({})), "accessing a rank-vectors field's value through 'get' or 'value' is not supported, use 'vectorValues' or 'magnitudes' instead.");
     // a document without vectors
     let missing = run("maxSimDotProduct(params.q, 'rv')", json!({"q": [[1, 0]]}), true).unwrap_err();

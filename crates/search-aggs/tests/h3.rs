@@ -197,3 +197,28 @@ fn geohex_grid_buckets_points_by_cell() {
     assert_eq!(e.reason, "[1:54] [geohex_grid] failed to parse field [precision]");
     assert_eq!(e.caused_by.as_ref().map(|c| c.reason.as_str()), Some("Invalid geohex aggregation precision of 16. Must be between 0 and 15"));
 }
+
+/// `H3.h3IsValid`: peer addresses that aren't cells never reach the cell functions (which
+/// index tables by the address's fields).
+#[test]
+fn invalid_addresses_are_rejected() {
+    for bad in ["ffffffffffffffff", "0", "", "+8a2a1072b59ffff", "zz", "8f2830828052d25f", "7f2830828052d25"] {
+        assert_eq!(h3::string_to_h3(bad), None, "{bad}");
+    }
+    // pentagon base cell 4 with a leading K-axis digit (a deleted subsequence)
+    let pentagon = h3::geo_to_h3(64.7, 10.536, 0);
+    assert!(h3::is_pentagon(pentagon), "{pentagon:x}");
+    let child = (pentagon & !(15u64 << 52)) | (1u64 << 52);
+    let deleted = child & !(7u64 << 42) | (1u64 << 42);
+    assert!(!h3::is_valid(deleted));
+    assert!(h3::is_valid(child & !(7u64 << 42)));
+    for res in 0..=h3::MAX_RES {
+        let c = h3::geo_to_h3(37.775, -122.419, res);
+        assert!(h3::is_valid(c), "{res}");
+        assert_eq!(h3::string_to_h3(&h3::h3_to_string(c)), Some(c));
+    }
+    // the processor reads `0` as base cell 0, as Elasticsearch does, but not out-of-range fields
+    assert_eq!(h3::string_to_h3_lenient("0"), Some(0));
+    assert_eq!(h3::string_to_h3_lenient("ffffffffffffffff"), None);
+    let _ = h3::h3_to_geo_boundary(0);
+}

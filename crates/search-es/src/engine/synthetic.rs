@@ -108,26 +108,31 @@ pub fn vectors(table: &FieldTable, path: &str, m: &mut Map, exclude: bool) {
     vectors_keeping(table, path, m, exclude.then_some(&none));
 }
 
-pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option<&super::source::Globs>) {
+/// Returns whether a vector stayed in.
+pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option<&super::source::Globs>) -> bool {
     let mut drop = Vec::new();
+    let mut kept = false;
     for (k, v) in m.iter_mut() {
         let full = join(path, k);
         if let Some(info) = table.get(&full)
             && info.is_source_vector()
         {
-            if keep.is_some_and(|g| !g.matches(&full)) {
+            // Elasticsearch takes vectors out of the stored `_source` at index time, a null one
+            // too, and patches back only the values the field holds: a null never shows.
+            if v.is_null() || keep.is_some_and(|g| !g.matches(&full)) {
                 drop.push(k.clone());
             } else {
                 normalize_vector(info, v);
+                kept = true;
             }
             continue;
         }
         match v {
-            Value::Obj(inner) => crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep)),
+            Value::Obj(inner) => kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep)),
             Value::Arr(a) => {
                 for e in a {
                     if let Value::Obj(inner) = e {
-                        crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep));
+                        kept |= crate::stack::maybe_grow(|| vectors_keeping(table, &full, inner, keep));
                     }
                 }
             }
@@ -137,6 +142,7 @@ pub fn vectors_keeping(table: &FieldTable, path: &str, m: &mut Map, keep: Option
     for k in drop {
         m.shift_remove(&k);
     }
+    kept
 }
 
 fn normalize_vector(info: &FieldInfo, v: &mut Value) {
@@ -454,6 +460,9 @@ impl<'a> Walk<'a> {
             && info.doc_values
             && !info.store
             && !fl.in_nested
+            // Inside an array of objects every value is kept verbatim instead, so values of
+            // all the objects merge in document order.
+            && !fl.in_array
             && f.copy_to.is_empty()
             && f.fields.is_empty()
     }
@@ -634,7 +643,7 @@ fn skip_store_original(f: &FieldMapper, ctx: &MappingCtx) -> bool {
 
 /// Whether the keyword multi-field a text field rebuilds its source from takes `s`.
 fn delegate_takes(table: &FieldTable, ctx: &MappingCtx, f: &FieldMapper, full: &str, s: &str) -> bool {
-    delegate(table, ctx, f, full).is_some_and(|info| !info.ignore_above.is_some_and(|m| s.chars().count() > m))
+    delegate(table, ctx, f, full).is_some_and(|info| !info.ignore_above.is_some_and(|m| crate::document::exceeds_ignore_above(s, m)))
 }
 
 /// The keyword multi-field text loads from (`TextFieldMapper.SyntheticSourceHelper`): the
@@ -699,7 +708,8 @@ fn render(info: &FieldInfo, f: &FieldMapper, fv: &FieldValue, ctx: &MappingCtx) 
                 _ => s.clone(),
             };
             let key = match info.kind {
-                Kind::Version => Key::Bytes(version_key(&s)),
+                // Doc values order: the encoded version (`VersionEncoder`).
+                Kind::Version => Key::Bytes(search_aggs::version_string::encode(&s).unwrap_or_else(|_| s.as_bytes().to_vec())),
                 _ => Key::Bytes(s.as_bytes().to_vec()),
             };
             Dv { key, v: Value::Str(s) }
@@ -776,33 +786,6 @@ fn range_bound(info: &FieldInfo, f: &FieldMapper, ctx: &MappingCtx, b: &ranges::
         (_, B::Ip(ip)) if (low && *ip == [0u8; 16]) || (!low && *ip == [0xffu8; 16]) => Value::Null,
         (_, B::Ip(ip)) => Value::Str(search_index::query::range::inet_to_string(ip)),
     }
-}
-
-/// `VersionEncoder` order, approximated: dotted numeric parts compare numerically, release
-/// versions after their pre-releases.
-fn version_key(s: &str) -> Vec<u8> {
-    let (main, pre) = match s.split_once('-') {
-        Some((m, p)) => (m, Some(p)),
-        None => (s.split_once('+').map_or(s, |(m, _)| m), None),
-    };
-    let mut out = Vec::new();
-    for part in main.split('.') {
-        if let Ok(n) = part.parse::<u64>() {
-            out.push(1);
-            out.extend_from_slice(&n.to_be_bytes());
-        } else {
-            out.push(2);
-            out.extend_from_slice(part.as_bytes());
-        }
-    }
-    match pre {
-        Some(p) => {
-            out.push(0);
-            out.extend_from_slice(p.as_bytes());
-        }
-        None => out.push(0xff),
-    }
-    out
 }
 
 /// Writes one object (`ObjectMapper.SyntheticSourceFieldLoader.write`).
@@ -891,7 +874,7 @@ fn write_leaf(w: &Walk<'_>, info: &FieldInfo, f: &FieldMapper, full: &str, scope
     }
     let leaf = scope.leaves.get(full)?;
     if info.kind == Kind::Flattened {
-        return flattened(leaf);
+        return flattened(w, f, full, leaf);
     }
     let mut dv: Vec<Value>;
     if leaf.offsets {
@@ -934,8 +917,10 @@ fn write_leaf(w: &Walk<'_>, info: &FieldInfo, f: &FieldMapper, full: &str, scope
 }
 
 /// `FlattenedFieldSyntheticWriterHelper`: keys sorted, values per key sorted and deduplicated,
-/// dotted keys as objects.
-fn flattened(leaf: &Leaf) -> Option<Value> {
+/// dotted keys as objects. Keys mapped under the field's `properties` come from their own
+/// mappers (typed values, the dotted key kept as one name), as `FlattenedDocValuesSyntheticFieldLoader`
+/// appends its sub-field loaders.
+fn flattened(w: &Walk<'_>, f: &FieldMapper, full: &str, leaf: &Leaf) -> Option<Value> {
     let mut by_key: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for d in &leaf.dv {
         if let Value::Arr(pairs) = &d.v {
@@ -952,13 +937,40 @@ fn flattened(leaf: &Leaf) -> Option<Value> {
         return None;
     }
     let mut root = Map::new();
+    let mut mapped: Vec<(String, Value)> = Vec::new();
     for (k, mut vals) in by_key {
+        if let Some(sub) = f.props.get(&k) {
+            let sub_full = format!("{full}.{k}");
+            if let Some(info) = w.table.get(&sub_full) {
+                let mut dvs: Vec<Dv> = Vec::new();
+                let mut ignored = std::collections::BTreeSet::new();
+                for v in &vals {
+                    for fv in crate::document::values::parse_standalone(sub, &sub_full, &Value::Str(v.clone()), w.ctx, &mut ignored).unwrap_or_default() {
+                        dvs.extend(render(info, sub, &fv, w.ctx));
+                    }
+                }
+                dvs.sort_by(|a, b| a.key.partial_cmp(&b.key).unwrap_or(std::cmp::Ordering::Equal));
+                if matches!(info.kind, Kind::Keyword | Kind::Ip | Kind::Wildcard | Kind::Version) {
+                    dvs.dedup_by(|a, b| a.key == b.key);
+                }
+                let mut out: Vec<Value> = dvs.into_iter().map(|d| d.v).collect();
+                match out.len() {
+                    0 => {}
+                    1 => mapped.push((k, out.pop().unwrap_or(Value::Null))),
+                    _ => mapped.push((k, Value::Arr(out))),
+                }
+                continue;
+            }
+        }
         vals.sort();
         vals.dedup();
         let v = if vals.len() == 1 { Value::Str(vals.pop().unwrap_or_default()) } else { Value::Arr(vals.into_iter().map(Value::Str).collect()) };
         insert_path(&mut root, &k, v);
     }
-    Some(Value::Obj(root))
+    for (k, v) in mapped {
+        root.insert(k, v);
+    }
+    (!root.is_empty()).then_some(Value::Obj(root))
 }
 
 fn insert_path(m: &mut Map, key: &str, v: Value) {
@@ -1018,8 +1030,9 @@ mod tests {
 
     #[test]
     fn version_keys_order_numerically() {
-        assert!(version_key("1.2.0") < version_key("1.10.0"));
-        assert!(version_key("1.0.0-alpha") < version_key("1.0.0"));
+        let key = |s: &str| search_aggs::version_string::encode(s).unwrap();
+        assert!(key("1.2.0") < key("1.10.0"));
+        assert!(key("1.0.0-alpha") < key("1.0.0"));
     }
 
     #[test]

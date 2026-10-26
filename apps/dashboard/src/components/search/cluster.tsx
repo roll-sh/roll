@@ -146,13 +146,15 @@ export function SearchClusterPage({ id }: { id: string }) {
         </p>
       </div>
 
-      <nav className="mt-6 flex gap-1 overflow-x-auto border-b border-line" aria-label="Cluster sections">
+      {/* overflow-x-auto turns overflow-y to auto too: a tab overlapping the hairline (-mb-px)
+          would make the bar scroll by a pixel and show a scrollbar on classic-scrollbar systems. */}
+      <nav className="mt-6 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-line" aria-label="Cluster sections">
         {TABS.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             aria-current={t === tab ? "page" : undefined}
-            className={`-mb-px border-b px-3 py-2 text-[13px] capitalize transition ${
+            className={`shrink-0 border-b px-3 py-2 text-[13px] capitalize transition ${
               t === tab ? "border-fg text-fg" : "border-transparent text-muted hover:text-fg"
             }`}
           >
@@ -662,7 +664,7 @@ function UsageTab({ cluster, info }: { cluster: SearchCluster; info: SearchInfo 
             hint: u && u.hours > 0 ? `${Math.min(100, (u.loaded_seconds / (u.hours * 3600)) * 100).toFixed(1)}% of the time` : undefined,
           },
           { label: "Memory", value: u ? `${u.loaded_gib_hours.toFixed(3)} GiB-h` : "—", hint: u ? `peak ${formatBytes(u.peak_loaded_bytes)}` : undefined },
-          { label: "Requests", value: u ? formatCount(u.requests) : "—", hint: "metered requests" },
+          { label: "Requests", value: u ? formatCount(u.requests) : "—", hint: "every request the cluster served" },
           { label: "Storage", value: u ? `${u.stored_gib_months.toFixed(4)} GiB-mo` : "—", hint: u ? `${formatBytes(u.stored_bytes)} now` : undefined },
         ]}
       />

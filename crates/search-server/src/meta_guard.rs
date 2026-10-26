@@ -112,7 +112,7 @@ impl MetaStore for CheckedMeta {
 
     async fn save(&self, version: u64, state: Bytes) -> anyhow::Result<()> {
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(crate::persist::Unloaded.into());
+            return Err(unloaded().context(crate::persist::Unloaded));
         }
         // Saves are serialized by the cluster's write lock; the mutex only guards the cache.
         let known = std::mem::take(&mut *self.known.lock());
@@ -126,17 +126,33 @@ impl MetaStore for CheckedMeta {
                 return Err(e.into());
             }
         };
-        match self.inner.save(version, state).await {
-            Ok(()) => {
+        let r = self.inner.save(version, state).await;
+        // An unload that raced the save (a forced unload: lease lost, persistence failed) may
+        // have released the cluster's epoch before the write landed, so it may not be the
+        // state the next owner reads: never acknowledge it.
+        let raced = self.closed.load(std::sync::atomic::Ordering::SeqCst);
+        match r {
+            Ok(()) if !raced => {
                 *self.known.lock() = hashes;
                 Ok(())
             }
+            Ok(()) => Err(unloaded().context(crate::persist::Unloaded)),
             Err(e) => {
                 *self.known.lock() = known;
-                Err(e)
+                if raced { Err(unloaded().context(format!("{e:#}"))) } else { Err(e) }
             }
         }
     }
+}
+
+/// What a client gets for a state change on a cluster that unloaded meanwhile (search-es maps
+/// an [`EsError`](search_es::EsError) a [`MetaStore`] returns to the response as is).
+fn unloaded() -> anyhow::Error {
+    anyhow::Error::new(search_es::EsError::new(
+        503,
+        "cluster_block_exception",
+        "blocked by: [SERVICE_UNAVAILABLE/1/state not recovered / initialized];",
+    ))
 }
 
 #[cfg(test)]
@@ -186,5 +202,50 @@ mod tests {
         assert_eq!(checked.known.lock().len(), 1);
         assert!(checked.save(4, Bytes::from_static(b"{not json")).await.is_err());
         assert!(checked.save(4, Bytes::from_static(b"")).await.is_err());
+    }
+
+    /// A store whose saves wait until released, so a test can unload the cluster mid-save.
+    struct Gated {
+        inner: MemoryStore,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl MetaStore for Gated {
+        async fn load(&self) -> anyhow::Result<Option<Bytes>> {
+            self.inner.load().await
+        }
+
+        async fn save(&self, version: u64, state: Bytes) -> anyhow::Result<()> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.save(version, state).await
+        }
+    }
+
+    /// A state change whose save was still running when the cluster was force-unloaded is
+    /// answered like a cluster that is not ready (503 cluster_block_exception), never a 500, and
+    /// nothing is published; later changes on the closed instance are refused the same way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_save_racing_an_unload_is_a_cluster_block() {
+        let gated = Arc::new(Gated { inner: MemoryStore::new(), entered: Default::default(), release: Default::default() });
+        let checked = Arc::new(CheckedMeta::new(gated.clone(), Dialect::Elasticsearch));
+        let c = Arc::new(Cluster::open(ClusterConfig::new("g"), checked.clone()).await.unwrap());
+        let req = tokio::spawn({
+            let c = c.clone();
+            async move { send(&c, "PUT", "/racing", "{}").await }
+        });
+        gated.entered.notified().await;
+        checked.close();
+        gated.release.notify_one();
+        let r = req.await.unwrap();
+        assert_eq!(r.status, 503, "{}", String::from_utf8_lossy(&r.body));
+        let v: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["error"]["type"], "cluster_block_exception", "{v}");
+        assert!(c.state().metadata.indices.is_empty(), "a refused change is not published");
+        // Closed before the next change starts: refused before reaching the store.
+        let r = send(&c, "PUT", "/later", "{}").await;
+        assert_eq!(r.status, 503);
     }
 }

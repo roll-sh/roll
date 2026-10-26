@@ -540,6 +540,38 @@ impl Grok {
         }
         Ok(Some(out))
     }
+
+    /// The text of each named capture of the first match with its UTF-8 byte offset and
+    /// length (Elasticsearch's `Grok.captureRanges`, used by `_text_structure/test_grok_pattern`);
+    /// `None` when nothing matches.
+    #[allow(clippy::type_complexity)]
+    pub fn capture_ranges(&self, text: &str) -> Result<Option<Vec<(String, Vec<(String, usize, usize)>)>>, MatchError> {
+        let Some(m) = self.search(text)? else { return Ok(None) };
+        // The matcher works in UTF-16 units; offsets are reported in UTF-8 bytes.
+        let mut byte_at = Vec::with_capacity(text.len() + 1);
+        for (b, c) in text.char_indices() {
+            for _ in 0..c.len_utf16() {
+                byte_at.push(b);
+            }
+        }
+        byte_at.push(text.len());
+        let mut out: Vec<(String, Vec<(String, usize, usize)>)> = Vec::new();
+        for c in &self.captures {
+            for &g in &c.groups {
+                let (Ok(s), Ok(e)) = (m.start(g as i32), m.end(g as i32)) else { continue };
+                if s < 0 || e < 0 {
+                    continue;
+                }
+                let (bs, be) = (byte_at[s as usize], byte_at[e as usize]);
+                let range = (text[bs..be].to_string(), bs, be - bs);
+                match out.iter_mut().find(|(k, _)| *k == c.name) {
+                    Some((_, l)) => l.push(range),
+                    None => out.push((c.name.clone(), vec![range])),
+                }
+            }
+        }
+        Ok(Some(out))
+    }
 }
 
 fn convert(ty: CaptureType, s: String) -> Result<GrokValue, ConvertError> {

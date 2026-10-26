@@ -133,6 +133,14 @@ pub struct PointInTime {
     pub keep_alive: Option<TimeValue>,
 }
 
+/// The raw body an `aggs` section came from, and its key: aggregations parse lazily, and
+/// their syntax errors locate themselves in it.
+#[derive(Debug, PartialEq)]
+pub struct AggsRaw {
+    pub body: Vec<u8>,
+    pub key: String,
+}
+
 /// A parsed search request body.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct SearchSource {
@@ -164,6 +172,8 @@ pub struct SearchSource {
     pub pit: Option<PointInTime>,
     pub runtime_mappings: Option<Map>,
     pub aggs: Option<Map>,
+    /// Where `aggs` came from, when the raw body is known.
+    pub aggs_raw: Option<std::sync::Arc<AggsRaw>>,
     pub highlight: Option<Map>,
     pub suggest: Option<Map>,
     pub knn: Vec<Map>,
@@ -176,9 +186,24 @@ pub struct SearchSource {
     /// plain search collapses first and rescores the collapsed hits).
     pub rescore_before_collapse: bool,
     pub rank: Option<Map>,
+    /// `sub_searches` (deprecated with `rank`): their queries.
+    pub sub_searches: Vec<Query>,
     pub ext: Option<Map>,
     /// Deprecation warnings raised while parsing.
     pub warnings: Vec<String>,
+    /// OpenSearch: the search counts as one with a k-NN query for concurrent segment search
+    /// although `query` doesn't show it (a hybrid search's final phase over rank docs).
+    pub os_knn: bool,
+}
+
+/// `SearchSourceBuilder.from`'s message for a negative value (OpenSearch words it like the
+/// `size` one).
+pub fn negative_from(v: i32) -> String {
+    if crate::opensearch::active() {
+        format!("[from] parameter cannot be negative, found [{v}]")
+    } else {
+        format!("[from] parameter cannot be negative but was [{v}]")
+    }
 }
 
 /// The checks `HighlightBuilder.fromXContent` makes while parsing (positioned on the
@@ -277,7 +302,7 @@ impl SearchSource {
             "from" => {
                 let v = p.int_value()?;
                 if v < 0 {
-                    return Err(EsError::illegal_argument(format!("[from] parameter cannot be negative but was [{v}]")));
+                    return Err(EsError::illegal_argument(negative_from(v)));
                 }
                 self.from = Some(v);
             }
@@ -337,7 +362,12 @@ impl SearchSource {
 
     fn object_key(&mut self, p: &mut XParser<'_>, key: &str) -> EsResult<()> {
         match key {
-            "query" => self.query = Some(parse_inner(p)?),
+            "query" => {
+                if !self.sub_searches.is_empty() {
+                    return Err(EsError::illegal_argument("cannot specify field [query] and field [sub_searches]"));
+                }
+                self.query = Some(parse_inner(p)?)
+            }
             "post_filter" => self.post_filter = Some(parse_inner(p)?),
             "_source" => self.source = Some(fetch_source(p)?),
             "script_fields" => {
@@ -348,7 +378,10 @@ impl SearchSource {
                     self.script_fields.push(script_field(p)?);
                 }
             }
-            "aggregations" | "aggs" => self.aggs = Some(p.map()?),
+            "aggregations" | "aggs" => {
+                self.aggs_raw = p.raw().map(|r| std::sync::Arc::new(AggsRaw { body: r.to_vec(), key: key.to_string() }));
+                self.aggs = Some(p.map()?);
+            }
             "highlight" => {
                 check_highlight(p)?;
                 self.highlight = Some(p.map()?);
@@ -359,14 +392,33 @@ impl SearchSource {
             }
             "sort" => self.sort = sorts(p)?,
             "rescore" => self.rescore.push(rescore(p)?),
+            "ext" if crate::opensearch::active() => self.ext = Some(crate::opensearch::parse_ext(p)?),
             "ext" => self.ext = Some(p.map()?),
             "slice" => self.slice = Some(slice(p)?),
             "collapse" => self.collapse = Some(collapse(p)?),
             "pit" => self.pit = Some(pit(p)?),
+            // OpenSearch has no runtime fields; its search-time `derived` fields run as them.
+            "runtime_mappings" if crate::opensearch::active() => return Err(p.parsing_error("Unknown key for a START_OBJECT in [runtime_mappings].")),
+            "derived" if crate::opensearch::active() => self.runtime_mappings = Some(crate::opensearch::derived_fields(p.map()?)?),
             "runtime_mappings" => self.runtime_mappings = Some(p.map()?),
             "knn" => self.knn = vec![p.map()?],
             "retriever" => self.retriever = Some(p.map()?),
-            "rank" => self.rank = Some(p.map()?),
+            "rank" => {
+                self.warnings.push("Deprecated field [rank] used, replaced by [retriever]".into());
+                self.rank = Some(p.map()?)
+            }
+            // OpenSearch still reads the (deprecated) object form `{"index": boost, ..}`.
+            "indices_boost" if crate::opensearch::active() => {
+                let mut name = String::new();
+                while let Some(t) = p.next_token() {
+                    match t {
+                        Token::EndObject => break,
+                        Token::FieldName => name = p.current_name().unwrap_or("").to_string(),
+                        t if t.is_value() => self.indices_boost.push((name.clone(), p.float_value()?)),
+                        t => return Err(p.parsing_error(format!("Unknown key for a {t} in [{name}]."))),
+                    }
+                }
+            }
             _ => return Err(unknown_key(p, Token::StartObject, key)),
         }
         Ok(())
@@ -386,6 +438,13 @@ impl SearchSource {
                 if key == "fields" {
                     self.fields = out;
                 } else {
+                    // OpenSearch's `DocValueFieldsFetchSubPhase`: `use_field_mapping` (a 6.x
+                    // transition value) means the field's own format.
+                    if crate::opensearch::active() {
+                        for f in out.iter_mut().filter(|f| f.format.as_deref() == Some("use_field_mapping")) {
+                            f.format = None;
+                        }
+                    }
                     self.docvalue_fields = out;
                 }
             }
@@ -417,6 +476,19 @@ impl SearchSource {
             }
             "_source" => self.source = Some(fetch_source(p)?),
             "search_after" => self.search_after = Some(p.list()?),
+            "sub_searches" => {
+                self.warnings.push("Deprecated field [sub_searches] used, replaced by [retriever]".into());
+                if self.query.is_some() {
+                    return Err(EsError::illegal_argument("cannot specify field [sub_searches] and field [query]"));
+                }
+                while let Some(t) = p.next_token() {
+                    match t {
+                        Token::EndArray => break,
+                        Token::StartObject => self.sub_searches.push(sub_search(p)?),
+                        t => return Err(p.xcontent_error(format!("malformed query within the [sub_searches] field; found {t}"))),
+                    }
+                }
+            }
             "knn" => {
                 while let Some(t) = p.next_token() {
                     match t {
@@ -434,6 +506,26 @@ impl SearchSource {
         }
         Ok(())
     }
+}
+
+/// `SubSearchSourceBuilder.fromXContent`: `{"query": {..}}`.
+fn sub_search(p: &mut XParser<'_>) -> EsResult<Query> {
+    let mut query = None;
+    while let Some(t) = p.next_token() {
+        match t {
+            Token::EndObject => break,
+            Token::FieldName => {
+                let name = p.current_name().unwrap_or("").to_string();
+                let t = p.next_token();
+                if name != "query" || t != Some(Token::StartObject) {
+                    return Err(p.xcontent_error(format!("[sub_search] unknown field [{name}]")));
+                }
+                query = Some(parse_inner(p)?);
+            }
+            t => return Err(p.parsing_error(format!("Unknown key for a {t} in [sub_search]."))),
+        }
+    }
+    query.ok_or_else(|| p.xcontent_error("Required [query]"))
 }
 
 /// `FetchSourceContext.fromXContent`.
@@ -491,6 +583,7 @@ fn fetch_source(p: &mut XParser<'_>) -> EsResult<FetchSource> {
             )));
         }
     }
+    crate::fetch::check_ambiguous_source(&fs.includes, &fs.excludes)?;
     Ok(fs)
 }
 
@@ -568,6 +661,20 @@ fn script_field(p: &mut XParser<'_>) -> EsResult<ScriptField> {
     Ok(ScriptField { name, script, ignore_failure })
 }
 
+/// `script_fields` given as a value (`top_hits`, already shape-checked by its parser).
+pub fn script_fields_from_value(spec: &Map) -> EsResult<Vec<ScriptField>> {
+    let mut out = Vec::with_capacity(spec.len());
+    for (name, def) in spec {
+        let Some(script) = def.get("script") else { continue };
+        let mut p = XParser::from_value(script);
+        p.next_token();
+        let script = Script::parse(&mut p)?;
+        let ignore_failure = def.get("ignore_failure").and_then(Value::as_bool).unwrap_or(false);
+        out.push(ScriptField { name: name.clone(), script, ignore_failure });
+    }
+    Ok(out)
+}
+
 /// An `indices_boost` entry: `{"index": boost}`.
 fn index_boost(p: &mut XParser<'_>) -> EsResult<(String, f32)> {
     if p.token() != Token::StartObject {
@@ -585,6 +692,13 @@ fn index_boost(p: &mut XParser<'_>) -> EsResult<(String, f32)> {
         return Err(p.parsing_error(format!("Expected [END_OBJECT] in [indices_boost] but found [{}]", t.map(Token::name).unwrap_or("null"))));
     }
     Ok((index, boost))
+}
+
+/// [`sorts`] over an already parsed value (aggregations' `sort`).
+pub fn parse_sorts_value(v: &Value) -> EsResult<Vec<Sort>> {
+    let mut p = XParser::from_value(v);
+    p.next_token();
+    sorts(&mut p)
 }
 
 /// `SortBuilder.fromXContent`: a name, an object of sorts, or an array of both.
@@ -685,7 +799,9 @@ fn field_sort(p: &mut XParser<'_>, field: String) -> EsResult<Sort> {
         Field::new("format", Tokens::STRING),
     ];
     let (mut order, mut missing, mut unmapped_type, mut mode, mut nested, mut numeric_type, mut format) = (None, None, None, None, None, None, None);
-    p.object("field_sort", F, |p, i| {
+    // A sort `format` is an Elasticsearch 8 addition: OpenSearch's parser doesn't know it.
+    let fields = if crate::opensearch::active() { &F[..F.len() - 1] } else { F };
+    p.object("field_sort", fields, |p, i| {
         match i {
             0 => missing = Some(p.value().clone()),
             1 => unmapped_type = Some(p.text()?),
@@ -722,10 +838,18 @@ fn script_sort(p: &mut XParser<'_>) -> EsResult<Sort> {
         Field::new("nested", Tokens::OBJECT),
     ];
     let (mut script, mut ty, mut order, mut mode, mut nested) = (None, None, None, None, None);
+    // Where `mode` and the last of the two constructor arguments (`script`, `type`) were, and
+    // whether `mode` came after both (`ConstructingObjectParser` queues it until then).
+    let (mut mode_at, mut last_required) = ((0, 0), ("", (0, 0)));
+    let mut mode_late = false;
     p.object("_script", F, |p, i| {
         match i {
-            0 => script = Some(Script::parse(p)?),
+            0 => {
+                last_required = ("script", p.token_location());
+                script = Some(Script::parse(p)?);
+            }
             1 => {
+                last_required = ("type", p.token_location());
                 let t = p.text()?;
                 if !matches!(t.to_lowercase().as_str(), "number" | "string" | "version") {
                     return Err(EsError::illegal_argument(format!("Unknown ScriptSortType [{t}]")));
@@ -733,7 +857,11 @@ fn script_sort(p: &mut XParser<'_>) -> EsResult<Sort> {
                 ty = Some(t.to_lowercase());
             }
             2 => order = Some(SortOrder::parse(&p.text()?)?),
-            3 => mode = Some(p.text()?.to_lowercase()),
+            3 => {
+                mode_at = p.token_location();
+                mode_late = script.is_some() && ty.is_some();
+                mode = Some(p.text()?.to_lowercase());
+            }
             _ => nested = Some(nested_sort(p)?),
         }
         Ok(())
@@ -741,6 +869,18 @@ fn script_sort(p: &mut XParser<'_>) -> EsResult<Sort> {
     let missing: Vec<&str> = [("script", script.is_none()), ("type", ty.is_none())].iter().filter(|x| x.1).map(|x| x.0).collect();
     if !missing.is_empty() {
         return Err(EsError::illegal_argument(format!("Required [{}]", missing.join(", "))));
+    }
+    // `ScriptSortBuilder.sortMode`: a string sort takes `min` or `max` only.
+    if let (Some("string"), Some(m @ ("sum" | "avg" | "median"))) = (ty.as_deref(), mode.as_deref()) {
+        let e = EsError::illegal_argument(format!("script sort of type [string] doesn't support mode [{m}]"));
+        let at_mode = EsError::x_content_parse(mode_at.0, mode_at.1, "[_script] failed to parse field [mode]").caused_by(e);
+        return Err(if mode_late {
+            at_mode
+        } else {
+            let built = EsError::x_content_parse(mode_at.0, mode_at.1, "failed to build [_script] after last required field arrived").caused_by(at_mode);
+            let (name, (l, c)) = last_required;
+            EsError::x_content_parse(l, c, format!("[_script] failed to parse field [{name}]")).caused_by(built)
+        });
     }
     Ok(Sort::Script { script: script.unwrap_or_else(|| Script::inline("")), ty: ty.unwrap_or_default(), order, mode, nested })
 }

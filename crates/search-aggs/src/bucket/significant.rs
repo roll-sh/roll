@@ -810,8 +810,20 @@ pub fn create(def: &AggDef, spec: &SignificantSpec, ctx: &mut BindCtx<'_>) -> Re
         Some(q) => Arc::new(BooleanQuery::new().add(Occur::Filter, ctx.lookup.query(q)?).add(Occur::Filter, ctx.lookup.global_query())),
         None => ctx.lookup.global_query(),
     };
+    // `SignificanceLookup` leaves the background filter null when nothing filters the shard:
+    // an indexed keyword's background frequencies are then the terms' `docFreq`.
+    let raw_df = spec.background_filter.is_none()
+        && ctx.sampling.is_none()
+        && (crate::dialect::opensearch() || superset_query.as_any().is::<search_index::query::MatchAllQuery>())
+        && vs.field.as_ref().is_some_and(|f| f.indexed && f.nested_path.is_none());
     let superset_size = match &ctx.sampling {
         Some(s) => s.count(ctx.searcher, &superset_query)?,
+        // `SignificanceLookup` takes the reader's `maxDoc` (deleted documents included) when
+        // there is no background filter and the search filters nothing (Elasticsearch: no
+        // nested fields, no alias filter; OpenSearch: always, nested documents included).
+        None if spec.background_filter.is_none() && (crate::dialect::opensearch() || superset_query.as_any().is::<search_index::query::MatchAllQuery>()) => {
+            ctx.searcher.max_doc() as u64
+        }
         None => ctx.searcher.count(&superset_query)?,
     };
     // Under a sampler the background is sampled too (term frequencies count the sampled
@@ -835,6 +847,7 @@ pub fn create(def: &AggDef, spec: &SignificantSpec, ctx: &mut BindCtx<'_>) -> Re
         scorer: Some(scorer),
         field,
         bg_filter,
+        raw_df,
         nested_docs,
         sampling: ctx.sampling,
         searcher: ctx.searcher.clone(),
@@ -859,6 +872,18 @@ struct TextSource {
     source_fields: Vec<String>,
     spotters: Option<Vec<Option<DupSpotter>>>,
     seg: Option<SegmentContext>,
+    /// `profile` debug counters (`SignificantTextAggregatorFactory`'s `collectDebugInfo`).
+    stats: TextStats,
+}
+
+#[derive(Default)]
+struct TextStats {
+    values_fetched: u64,
+    chars_fetched: u64,
+    extract_ns: u64,
+    extract_count: u64,
+    collect_analyzed_ns: u64,
+    collect_analyzed_count: u64,
 }
 
 struct SigAgg {
@@ -875,6 +900,8 @@ struct SigAgg {
     scorer: Option<Scorer>,
     field: Option<u32>,
     bg_filter: Option<QueryRef>,
+    /// Background frequencies are the terms' `docFreq` (deleted documents included).
+    raw_df: bool,
     /// The docs of the field's nested object path: background frequencies of a nested field
     /// count the root docs with a matching nested doc (`NestedQueryBuilder` over the term).
     nested_docs: Option<QueryRef>,
@@ -918,6 +945,23 @@ impl SigAgg {
             return Ok(n);
         }
         let Some(field) = self.field else { return Ok(0) };
+        // `SignificanceLookup.backgroundFrequency`: with no background filter, a field whose
+        // term query is a `TermQuery` (an indexed keyword) reads the term's `docFreq` from
+        // each segment, which counts deleted documents until a merge drops them (and ignores
+        // DFS statistics). Other fields count the matching live documents.
+        if self.raw_df
+            && let TermKey::Bytes(b) = key
+        {
+            let h = search_codec::bloom::hash64(b);
+            let n = self
+                .searcher
+                .segments()
+                .iter()
+                .filter_map(|s| s.reader.terms(field).and_then(|t| t.seek_exact_hashed(b, h)).map(|st| st.doc_freq as u64))
+                .sum();
+            self.bg_cache.insert(id, n);
+            return Ok(n);
+        }
         let term: QueryRef = match key {
             TermKey::Bytes(b) => Arc::new(DocValuesTermsQuery::new(field, [b.clone()])),
             TermKey::Long(l) => Arc::new(DocValuesRangeQuery { field, range: DvRange::Long { lower: *l, upper: *l } }),
@@ -963,6 +1007,34 @@ impl SigAgg {
 }
 
 impl Aggregator for SigAgg {
+    fn profile_type(&self) -> &'static str {
+        match (&self.text, self.proto.kind) {
+            (Some(_), _) => "MapStringTermsAggregator",
+            (None, SigKind::Long) => "NumericTermsAggregator",
+            (None, _) if self.vs.as_ref().is_some_and(|v| v.has_ordinals()) => "GlobalOrdinalsStringTermsAggregator",
+            (None, _) => "MapStringTermsAggregator",
+        }
+    }
+    fn profile_debug(&self) -> crate::json::Json {
+        use crate::json::Json;
+        let mut o = Json::obj();
+        if let Some(t) = &self.text {
+            let s = &t.stats;
+            o.push("collection_strategy", Json::Str("analyze text from _source".into()));
+            o.push("result_strategy", Json::Str("significant_terms".into()));
+            o.push("total_buckets", Json::from(self.keys.len() as u64));
+            o.push("values_fetched", Json::from(s.values_fetched));
+            o.push("chars_fetched", Json::from(s.chars_fetched));
+            o.push("extract_ns", Json::from(s.extract_ns.max(1)));
+            o.push("extract_count", Json::from(s.extract_count));
+            o.push("collect_analyzed_ns", Json::from(s.collect_analyzed_ns.max(1)));
+            o.push("collect_analyzed_count", Json::from(s.collect_analyzed_count));
+        } else {
+            o.push("total_buckets", Json::from(self.keys.len() as u64));
+            o.push("result_strategy", Json::Str("significant_terms".into()));
+        }
+        o
+    }
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
         if let Some(t) = &mut self.text {
             t.seg = Some(seg.clone());
@@ -988,7 +1060,13 @@ impl Aggregator for SigAgg {
             let mut keys: smallvec::SmallVec<[TermKey; 2]> = smallvec::SmallVec::new();
             if let Some(t) = self.text.as_mut() {
                 let seg = t.seg.as_ref().expect("segment");
-                let values = t.hook.tokens(seg, doc, &t.field, &t.source_fields)?;
+                let started = std::time::Instant::now();
+                let values = t.hook.tokens_counting(seg, doc, &t.field, &t.source_fields, &mut t.stats.chars_fetched)?;
+                let extracted = std::time::Instant::now();
+                t.stats.extract_ns += (extracted - started).as_nanos() as u64;
+                t.stats.extract_count += 1;
+                t.stats.values_fetched += values.len() as u64;
+                t.stats.collect_analyzed_count += values.iter().map(|v| v.len() as u64).sum::<u64>();
                 let mut in_doc: hashbrown::HashSet<Vec<u8>> = hashbrown::HashSet::new();
                 let mut spotter = match &mut t.spotters {
                     Some(sp) => {
@@ -1017,6 +1095,7 @@ impl Aggregator for SigAgg {
                 if let Some(sp) = spotter {
                     sp.start_new_sequence();
                 }
+                t.stats.collect_analyzed_ns += extracted.elapsed().as_nanos().max(1) as u64;
             } else if let Some(r) = self.bytes.as_mut() {
                 let n = r.load(doc, score)?;
                 for j in 0..n {
@@ -1186,6 +1265,12 @@ pub fn create_text(def: &AggDef, spec: &SigTextSpec, ctx: &mut BindCtx<'_>) -> R
     };
     let superset_size = match &ctx.sampling {
         Some(s) => s.count(ctx.searcher, &superset_query)?,
+        // `SignificanceLookup` takes the reader's `maxDoc` (deleted documents included) when
+        // there is no background filter and the search filters nothing (Elasticsearch: no
+        // nested fields, no alias filter; OpenSearch: always, nested documents included).
+        None if c.background_filter.is_none() && (crate::dialect::opensearch() || superset_query.as_any().is::<search_index::query::MatchAllQuery>()) => {
+            ctx.searcher.max_doc() as u64
+        }
         None => ctx.searcher.count(&superset_query)?,
     };
     let bg_filter = if c.background_filter.is_some() || ctx.sampling.is_some() { Some(superset_query.clone()) } else { None };
@@ -1193,7 +1278,7 @@ pub fn create_text(def: &AggDef, spec: &SigTextSpec, ctx: &mut BindCtx<'_>) -> R
     let source_fields = spec.source_fields.clone().unwrap_or_else(|| vec![field.clone()]);
     Ok(Box::new(SigAgg {
         proto: SignificantTerms { superset_size, ..base(SigKind::Str) },
-        text: Some(TextSource { hook, field, source_fields, spotters: spec.filter_duplicate_text.then(Vec::new), seg: None }),
+        text: Some(TextSource { hook, field, source_fields, spotters: spec.filter_duplicate_text.then(Vec::new), seg: None, stats: TextStats::default() }),
         vs: None,
         sfilter,
         lfilter: None,
@@ -1203,6 +1288,7 @@ pub fn create_text(def: &AggDef, spec: &SigTextSpec, ctx: &mut BindCtx<'_>) -> R
         scorer: Some(scorer),
         field: None,
         bg_filter,
+        raw_df: false,
         nested_docs: None,
         sampling: ctx.sampling,
         searcher: ctx.searcher.clone(),

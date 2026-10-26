@@ -68,14 +68,36 @@ impl PassageScorer {
 }
 
 pub fn highlight(values: &[&str], analyzer: Option<&Analyzer>, q: &HighlightTerms, opts: &HighlightOptions) -> Result<Vec<String>> {
+    highlight_sources(values, &[(analyzer, q)], opts)
+}
+
+/// [`highlight`] with matches from several analyses of the same values (`matched_fields`,
+/// Lucene's masked fields): each field's analyzer finds the query's matches on that field,
+/// and their offsets highlight the values together.
+pub fn highlight_sources(values: &[&str], sources: &[(Option<&Analyzer>, &HighlightTerms)], opts: &HighlightOptions) -> Result<Vec<String>> {
     let joined = values.join("\0");
     let content = Content::new(&joined);
     let len = content.len16() as i64;
     if len == 0 {
         return Ok(Vec::new());
     }
-    let tokens = analyze(values, analyzer, opts.max_analyzed_offset, opts.tokenized);
-    let matches: Vec<HlMatch> = find_matches(&tokens, q);
+    let mut matches: Vec<HlMatch> = Vec::new();
+    for (i, (analyzer, q)) in sources.iter().enumerate() {
+        let tokens = analyze(values, *analyzer, opts.max_analyzed_offset, opts.tokenized);
+        for mut m in find_matches(&tokens, q, opts.weight_matches, !opts.offsets_indexed) {
+            if i > 0 {
+                // Keys of different fields stay apart (a phrase key is per field).
+                let mut k = vec![0u8, 1, i as u8];
+                k.extend_from_slice(&m.key);
+                m.key = k;
+            }
+            matches.push(m);
+        }
+    }
+    if sources.len() > 1 {
+        matches.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+        matches.dedup_by(|a, b| a.start == b.start && a.end == b.end);
+    }
     // Keys and their frequencies in the doc.
     let mut key_of: HashMap<&[u8], usize> = HashMap::new();
     let mut ms: Vec<(u32, u32, usize)> = Vec::with_capacity(matches.len());

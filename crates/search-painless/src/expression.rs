@@ -1466,8 +1466,9 @@ impl Instance<'_> {
         if self.bufs.len() < bound.fields.len() {
             self.bufs.resize_with(bound.fields.len(), DocValues::default);
         }
+        // the bound fields are the host's literal-field slots (an instance has its own host)
         for (i, f) in bound.fields.iter().enumerate() {
-            match host.doc_values(f, &mut self.bufs[i]) {
+            match host.doc_values_at(i, f, &mut self.bufs[i]) {
                 Ok(true) => {}
                 // a field missing from this document's segment reads as no values
                 Ok(false) => self.bufs[i].clear(DocKind::Long),

@@ -18,7 +18,8 @@ use crate::error::{Error, Result};
 use crate::query::nested::segment_bits;
 use crate::schema::Schema;
 use crate::search::{
-    Explanation, Query, QueryRef, QueryVisitor, Scorable, ScoreMode, Scorer, Searcher, SegmentContext, Weight, defer_error,
+    BATCH, BulkScorer, DefaultBulkScorer, DocScoreBuf, Explanation, LeafCollector, Query, QueryRef, QueryVisitor, Scorable,
+    ScoreMode, Scorer, Searcher, SegmentContext, Weight, defer_error,
 };
 use crate::util::bitset::FixedBitSet;
 use crate::util::geo;
@@ -37,6 +38,16 @@ pub trait ScoreScript: Send + Sync {
 /// A score script bound to a segment.
 pub trait LeafScoreScript: Send {
     fn score(&mut self, doc: u32, sub_score: f32) -> Result<f64>;
+    /// Scores a batch: `out[i] = score(docs[i], subs[i])` (`docs` ascending). On a failure,
+    /// returns the index of the failing doc and its error; `out` before it is filled, after it
+    /// unspecified. Scripts that can evaluate a block at once (doc values decoded per block,
+    /// one dispatch per operation) override it; the default scores a doc at a time.
+    fn score_block(&mut self, docs: &[u32], subs: &[f32], out: &mut [f64]) -> std::result::Result<(), (usize, Error)> {
+        for (i, (&d, &sub)) in docs.iter().zip(subs).enumerate() {
+            out[i] = self.score(d, sub).map_err(|e| (i, e))?;
+        }
+        Ok(())
+    }
     /// A custom explanation description the script produced (`explanation.set(…)`).
     fn explanation(&mut self) -> Option<String> {
         None
@@ -64,7 +75,8 @@ impl NumDecode {
             NumDecode::Double => encode::sortable_f64(v),
             NumDecode::Float => encode::sortable_f32(v as i32) as f64,
             NumDecode::HalfFloat => encode::sortable_f16(v as i16) as f64,
-            NumDecode::Scaled(f) => v as f64 / f,
+            // `ScaledFloatLeafFieldData`: times the inverse, which rounds unlike a division.
+            NumDecode::Scaled(f) => v as f64 * (1.0 / f),
             NumDecode::UnsignedLong => ((v as u64) ^ (1u64 << 63)) as f64,
         }
     }
@@ -243,6 +255,34 @@ pub struct FunctionEntry {
     pub weight: Option<f32>,
 }
 
+impl FunctionEntry {
+    /// The `toString` of the `ScoreFunction` Elasticsearch builds for the entry: a filter wraps
+    /// it in a `FilterScoreFunction`, a weight in a `WeightFactorFunction`. Only script
+    /// functions override `Object.toString`; the others print their class and identity hash,
+    /// which differs by nature (a hash of the entry stands in for it).
+    pub fn java_string(&self) -> String {
+        const LUCENE: &str = "org.elasticsearch.common.lucene.search.function.";
+        const DECAY: &str = "org.elasticsearch.index.query.functionscore.DecayFunctionBuilder$";
+        let class = if self.filter.is_some() {
+            format!("{LUCENE}FunctionScoreQuery$FilterScoreFunction")
+        } else if self.weight.is_some() || matches!(self.function, ScoreFunction::Weight) {
+            format!("{LUCENE}WeightFactorFunction")
+        } else {
+            match &self.function {
+                ScoreFunction::Script(sc) => return format!("script{}", sc.describe()),
+                ScoreFunction::FieldValueFactor { .. } => format!("{LUCENE}FieldValueFactorFunction"),
+                ScoreFunction::Decay { origin: DecayOrigin::Geo { .. }, .. } => format!("{DECAY}GeoFieldDataScoreFunction"),
+                ScoreFunction::Decay { .. } => format!("{DECAY}NumericFieldDataScoreFunction"),
+                ScoreFunction::Random { .. } => format!("{LUCENE}RandomScoreFunction"),
+                ScoreFunction::Weight => unreachable!("weight functions print as WeightFactorFunction"),
+            }
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&format!("{:?}{:?}", self.function, self.weight), &mut h);
+        format!("{class}@{:x}", std::hash::Hasher::finish(&h) as u32)
+    }
+}
+
 /// `score_mode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionScoreMode {
@@ -265,15 +305,40 @@ pub enum CombineFunction {
     Max,
 }
 
+/// `Math.min(double, double)`: NaN if either is NaN, and -0.0 below 0.0.
+fn java_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == b {
+        if a.is_sign_negative() { a } else { b }
+    } else {
+        a.min(b)
+    }
+}
+
+/// `Math.max(double, double)`: NaN if either is NaN, and 0.0 above -0.0.
+fn java_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == b {
+        if a.is_sign_negative() { b } else { a }
+    } else {
+        a.max(b)
+    }
+}
+
 impl CombineFunction {
     fn combine(self, q: f64, f: f64, max: f64) -> f32 {
+        // Java's `Math.min`/`Math.max`: a NaN function value stays NaN (and fails the query
+        // as an invalid score) instead of becoming `max_boost`.
+        let f = java_min(f, max);
         match self {
-            CombineFunction::Multiply => (q * f.min(max)) as f32,
-            CombineFunction::Replace => f.min(max) as f32,
-            CombineFunction::Sum => (q + f.min(max)) as f32,
-            CombineFunction::Avg => ((f.min(max) + q) / 2.0) as f32,
-            CombineFunction::Min => q.min(f.min(max)) as f32,
-            CombineFunction::Max => q.max(f.min(max)) as f32,
+            CombineFunction::Multiply => (q * f) as f32,
+            CombineFunction::Replace => f as f32,
+            CombineFunction::Sum => (q + f) as f32,
+            CombineFunction::Avg => ((f + q) / 2.0) as f32,
+            CombineFunction::Min => java_min(q, f) as f32,
+            CombineFunction::Max => java_max(q, f) as f32,
         }
     }
 
@@ -330,7 +395,14 @@ impl FunctionScoreQuery {
 enum LeafFn {
     Weight,
     Fvf { vals: Option<search_codec::SortedNumericDocValues>, num: Option<search_codec::NumericDocValues>, f: ScoreFunction },
-    Decay { vals: Option<search_codec::SortedNumericDocValues>, num: Option<search_codec::NumericDocValues>, f: ScoreFunction, scale: f64 },
+    Decay {
+        vals: Option<search_codec::SortedNumericDocValues>,
+        num: Option<search_codec::NumericDocValues>,
+        f: ScoreFunction,
+        scale: f64,
+        /// The geo origin's precomputed half of the distance formula.
+        from: Option<geo::HaversinFrom>,
+    },
     Random { seed: i32, base: u32, field: Option<(RandomField, Option<DocValuesReader>)> },
     Script(Box<dyn LeafScoreScript>),
 }
@@ -374,6 +446,21 @@ pub fn murmur3_32(data: &[u8], seed: i32) -> i32 {
     h1 as i32
 }
 
+/// The value of `doc` when the field has at most one per doc: `Some(None)` for none, `None`
+/// when the field is multi-valued (then [`values_of`] reads them all). Saves the scratch
+/// vector and the value iterator on every document of a scoring loop.
+#[inline]
+fn single_value(sn: &Option<search_codec::SortedNumericDocValues>, num: &Option<search_codec::NumericDocValues>, doc: u32) -> Option<Option<i64>> {
+    match (sn, num) {
+        (Some(v), _) => {
+            let vals = v.singleton_values()?;
+            Some(v.docs().rank(doc).map(|i| vals.get(i as u64)))
+        }
+        (None, Some(v)) => Some(v.get(doc)),
+        (None, None) => Some(None),
+    }
+}
+
 fn values_of(sn: &Option<search_codec::SortedNumericDocValues>, num: &Option<search_codec::NumericDocValues>, doc: u32, out: &mut Vec<i64>) {
     out.clear();
     if let Some(v) = sn {
@@ -402,7 +489,11 @@ impl LeafFn {
             }
             ScoreFunction::Decay { field, func, scale, decay, .. } => {
                 let (vals, num) = dv(*field);
-                LeafFn::Decay { vals, num, f: f.clone(), scale: func.process_scale(*scale, *decay) }
+                let from = match f {
+                    ScoreFunction::Decay { origin: DecayOrigin::Geo { lat, lon }, .. } => Some(geo::HaversinFrom::new(*lat, *lon)),
+                    _ => None,
+                };
+                LeafFn::Decay { vals, num, f: f.clone(), scale: func.process_scale(*scale, *decay), from }
             }
             ScoreFunction::Random { seed, salt, field } => {
                 let salted = mix32(seed ^ salt);
@@ -423,8 +514,14 @@ impl LeafFn {
             LeafFn::Weight => Ok(1.0),
             LeafFn::Fvf { vals, num, f } => {
                 let ScoreFunction::FieldValueFactor { name, factor, modifier, missing, decode, .. } = f else { unreachable!() };
-                values_of(vals, num, doc, scratch);
-                let value = match scratch.iter().map(|&v| decode.decode(v)).reduce(f64::min) {
+                let found = match single_value(vals, num, doc) {
+                    Some(v) => v.map(|v| decode.decode(v)),
+                    None => {
+                        values_of(vals, num, doc, scratch);
+                        scratch.iter().map(|&v| decode.decode(v)).reduce(f64::min)
+                    }
+                };
+                let value = match found {
                     Some(v) => v,
                     None => match missing {
                         Some(m) => *m,
@@ -448,8 +545,8 @@ impl LeafFn {
                 }
                 Ok(r)
             }
-            LeafFn::Decay { vals, num, f, scale } => {
-                let d = decay_distance(f, vals, num, doc, scratch);
+            LeafFn::Decay { vals, num, f, scale, from } => {
+                let d = decay_distance(f, from.as_ref(), vals, num, doc, scratch);
                 let ScoreFunction::Decay { func, .. } = f else { unreachable!() };
                 Ok(func.evaluate(d, *scale))
             }
@@ -467,6 +564,143 @@ impl LeafFn {
         }
     }
 
+    /// [`score`](Self::score) for a block of docs: `out[i]` for every doc `need` selects (all
+    /// without a mask); a doc whose function fails gets `bad[i]` (its exact error comes from
+    /// [`score`](Self::score) if the doc's score is ever asked for). The same arithmetic as
+    /// `score`, with the doc values of the block decoded in one batch.
+    fn score_block(
+        &mut self,
+        docs: &[u32],
+        subs: &[f32],
+        need: Option<&[bool]>,
+        out: &mut [f64],
+        bad: &mut [bool],
+        b: &mut BlockScratch,
+    ) {
+        let needed = |i: usize| need.is_none_or(|m| m[i]);
+        match self {
+            LeafFn::Weight => out.fill(1.0),
+            LeafFn::Fvf { vals, num, f } => {
+                let ScoreFunction::FieldValueFactor { factor, modifier, missing, decode, .. } = f else { unreachable!() };
+                let (factor, modifier, missing, decode) = (*factor as f64, *modifier, *missing, *decode);
+                if b.fetch_single(vals, num, docs) {
+                    let n = docs.len();
+                    decode_block(decode, &b.single[..n], out);
+                    for i in 0..n {
+                        if !b.has[i] {
+                            match missing {
+                                Some(m) => out[i] = m,
+                                None => {
+                                    bad[i] |= needed(i);
+                                    out[i] = 0.0;
+                                }
+                            }
+                        }
+                    }
+                    modify_block(modifier, factor, out);
+                    for i in 0..n {
+                        if out[i] < 0.0 {
+                            bad[i] |= needed(i);
+                        }
+                    }
+                    return;
+                }
+                b.fetch(vals, num, docs);
+                let mut c = BlockCursor::default();
+                for (i, &d) in docs.iter().enumerate() {
+                    let found = c.values(b, d).iter().map(|&v| decode.decode(v)).reduce(f64::min);
+                    let value = match found.or(missing) {
+                        Some(v) => v,
+                        None => {
+                            bad[i] |= needed(i);
+                            continue;
+                        }
+                    };
+                    let r = modifier.apply(value * factor);
+                    if r < 0.0 {
+                        bad[i] |= needed(i);
+                    }
+                    out[i] = r;
+                }
+            }
+            LeafFn::Decay { vals, num, f, scale, from } => {
+                let ScoreFunction::Decay { func, origin, offset, mode, .. } = f else { unreachable!() };
+                let (func, offset, mode, scale, from) = (*func, *offset, *mode, *scale, from.as_ref());
+                if b.fetch_single(vals, num, docs) {
+                    let n = docs.len();
+                    let (raw, has) = (&b.single[..n], &b.has[..n]);
+                    match (&*origin, from) {
+                        (DecayOrigin::Geo { .. }, Some(h)) => {
+                            for i in 0..n {
+                                out[i] = if has[i] {
+                                    let (a, bb) = geo::decode_geo_dv(raw[i]);
+                                    0f64.max(h.meters(a, bb) - offset)
+                                } else {
+                                    0.0
+                                };
+                            }
+                        }
+                        _ => {
+                            for i in 0..n {
+                                out[i] = if has[i] { raw_distance(origin, from, offset, raw[i]) } else { 0.0 };
+                            }
+                        }
+                    }
+                    match func {
+                        DecayFn::Gauss => out.iter_mut().for_each(|v| *v = DecayFn::Gauss.evaluate(*v, scale)),
+                        DecayFn::Exp => out.iter_mut().for_each(|v| *v = DecayFn::Exp.evaluate(*v, scale)),
+                        DecayFn::Linear => out.iter_mut().for_each(|v| *v = DecayFn::Linear.evaluate(*v, scale)),
+                    }
+                    return;
+                }
+                b.fetch(vals, num, docs);
+                let mut c = BlockCursor::default();
+                for (i, &d) in docs.iter().enumerate() {
+                    let dist = match c.values(b, d) {
+                        [] => 0.0,
+                        [v] => raw_distance(origin, from, offset, *v),
+                        vs => select_distance(mode, vs.iter().map(|&v| raw_distance(origin, from, offset, v))),
+                    };
+                    out[i] = func.evaluate(dist, scale);
+                }
+            }
+            LeafFn::Random { .. } => {
+                for (i, (&d, &sub)) in docs.iter().zip(subs).enumerate() {
+                    if needed(i) {
+                        match self.score(d, sub, &mut b.one) {
+                            Ok(v) => out[i] = v,
+                            Err(_) => bad[i] = true,
+                        }
+                    }
+                }
+            }
+            LeafFn::Script(s) => match need {
+                None => {
+                    let mut start = 0;
+                    while start < docs.len() {
+                        match s.score_block(&docs[start..], &subs[start..], &mut out[start..]) {
+                            Ok(()) => break,
+                            Err((k, _)) => {
+                                bad[start + k] = true;
+                                start += k + 1;
+                            }
+                        }
+                    }
+                }
+                Some(m) => {
+                    for (i, (&d, &sub)) in docs.iter().zip(subs).enumerate() {
+                        if m[i] {
+                            match s.score(d, sub) {
+                                Ok(v) => out[i] = v,
+                                Err(_) => bad[i] = true,
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+
     fn explain(&mut self, doc: u32, sub: &Explanation, scratch: &mut Vec<i64>) -> Result<Explanation> {
         Ok(match self {
             LeafFn::Weight => Explanation::leaf(1.0f32, "constant score 1.0 - no function provided"),
@@ -479,8 +713,8 @@ impl LeafFn {
                     format!("field value function: {}(doc['{name}'].value{def} * factor={})", modifier.name(), float_to_string(factor)),
                 )
             }
-            LeafFn::Decay { vals, num, f, scale } => {
-                let d = decay_distance(f, vals, num, doc, scratch);
+            LeafFn::Decay { vals, num, f, scale, from } => {
+                let d = decay_distance(f, from.as_ref(), vals, num, doc, scratch);
                 let ScoreFunction::Decay { func, name, origin, offset, mode, .. } = f.clone() else { unreachable!() };
                 values_of(vals, num, doc, scratch);
                 let mut ds = String::from(mode.name());
@@ -547,6 +781,191 @@ impl LeafFn {
     }
 }
 
+/// Reused buffers of block scoring: the doc values of one block of docs, flattened.
+#[derive(Default)]
+struct BlockScratch {
+    found: Vec<u32>,
+    counts: Vec<u32>,
+    values: Vec<i64>,
+    /// Single-valued fields: the value of each doc of the block, if `has` it.
+    single: Vec<i64>,
+    has: Vec<bool>,
+    /// Scratch of the per-doc path ([`LeafFn::score`]).
+    one: Vec<i64>,
+}
+
+impl BlockScratch {
+    /// For a field with at most one value per doc, fills `single` / `has` for `docs`
+    /// (ascending) and returns true; false (nothing filled) for multi-valued fields. A dense
+    /// field read over a run of consecutive docs (`match_all`) decodes the run sequentially.
+    fn fetch_single(&mut self, sn: &Option<search_codec::SortedNumericDocValues>, num: &Option<search_codec::NumericDocValues>, docs: &[u32]) -> bool {
+        let n = docs.len();
+        let (set, vals) = match (sn, num) {
+            (Some(v), _) => match v.singleton_values() {
+                Some(vals) => (v.docs(), vals),
+                None => return false,
+            },
+            (None, Some(v)) => (v.docs(), v.values()),
+            (None, None) => {
+                self.has.clear();
+                self.has.resize(n, false);
+                self.single.clear();
+                self.single.resize(n, 0);
+                return true;
+            }
+        };
+        self.single.clear();
+        self.single.resize(n, 0);
+        self.has.clear();
+        if n > 0 && set.is_all() && docs[n - 1] < set.max_doc() && docs[n - 1] - docs[0] == (n - 1) as u32 {
+            vals.get_range(docs[0] as u64, &mut self.single);
+            self.has.resize(n, true);
+            return true;
+        }
+        self.has.resize(n, false);
+        self.found.clear();
+        self.counts.clear();
+        self.values.clear();
+        match (sn, num) {
+            (Some(v), _) => v.get_batch(docs, &mut self.found, &mut self.counts, &mut self.values),
+            (None, Some(v)) => v.get_batch(docs, &mut self.found, &mut self.values),
+            (None, None) => {}
+        }
+        let mut j = 0;
+        for (i, &d) in docs.iter().enumerate() {
+            if self.found.get(j) == Some(&d) {
+                self.has[i] = true;
+                self.single[i] = self.values[j];
+                j += 1;
+            }
+        }
+        true
+    }
+
+    /// Decodes the values of `docs` (ascending) in one batch; read them back in doc order
+    /// with a [`BlockCursor`].
+    fn fetch(&mut self, sn: &Option<search_codec::SortedNumericDocValues>, num: &Option<search_codec::NumericDocValues>, docs: &[u32]) {
+        self.found.clear();
+        self.counts.clear();
+        self.values.clear();
+        match (sn, num) {
+            (Some(v), _) => v.get_batch(docs, &mut self.found, &mut self.counts, &mut self.values),
+            (None, Some(v)) => {
+                v.get_batch(docs, &mut self.found, &mut self.values);
+                self.counts.resize(self.found.len(), 1);
+            }
+            (None, None) => {}
+        }
+    }
+}
+
+/// `out[i] = d.decode(raw[i])`, the decoding chosen once per block.
+fn decode_block(d: NumDecode, raw: &[i64], out: &mut [f64]) {
+    match d {
+        NumDecode::Long => out.iter_mut().zip(raw).for_each(|(o, &v)| *o = NumDecode::Long.decode(v)),
+        NumDecode::Double => out.iter_mut().zip(raw).for_each(|(o, &v)| *o = NumDecode::Double.decode(v)),
+        _ => out.iter_mut().zip(raw).for_each(|(o, &v)| *o = d.decode(v)),
+    }
+}
+
+/// `x[i] = m.apply(x[i] * factor)`, the modifier chosen once per block. Logarithms reuse the
+/// previous doc's result for an equal input (fields like `population` repeat values a lot).
+fn modify_block(m: Modifier, factor: f64, x: &mut [f64]) {
+    match m {
+        Modifier::None => x.iter_mut().for_each(|v| *v = Modifier::None.apply(*v * factor)),
+        Modifier::Square => x.iter_mut().for_each(|v| *v = Modifier::Square.apply(*v * factor)),
+        Modifier::Sqrt => x.iter_mut().for_each(|v| *v = Modifier::Sqrt.apply(*v * factor)),
+        Modifier::Reciprocal => x.iter_mut().for_each(|v| *v = Modifier::Reciprocal.apply(*v * factor)),
+        _ => {
+            let mut last: Option<(u64, f64)> = None;
+            for v in x.iter_mut() {
+                let a = *v * factor;
+                *v = match last {
+                    Some((bits, r)) if bits == a.to_bits() => r,
+                    _ => {
+                        let r = m.apply(a);
+                        last = Some((a.to_bits(), r));
+                        r
+                    }
+                };
+            }
+        }
+    }
+}
+
+/// Walks a [`BlockScratch::fetch`] result in doc order.
+#[derive(Default)]
+struct BlockCursor {
+    next: usize,
+    pos: usize,
+}
+
+impl BlockCursor {
+    /// The values (ascending) of `doc`, the next doc of the fetched block.
+    #[inline]
+    fn values<'a>(&mut self, b: &'a BlockScratch, doc: u32) -> &'a [i64] {
+        if b.found.get(self.next) != Some(&doc) {
+            return &[];
+        }
+        let n = b.counts[self.next] as usize;
+        self.next += 1;
+        let start = self.pos;
+        self.pos += n;
+        &b.values[start..start + n]
+    }
+}
+
+/// The per-block state of [`FsBulkScorer`].
+struct FsBlock {
+    subs: [f32; BATCH],
+    vals: [f64; BATCH],
+    factor: [f64; BATCH],
+    acc: [f64; BATCH],
+    wsum: [f64; BATCH],
+    scores: [f32; BATCH],
+    bad: [bool; BATCH],
+    need: [bool; BATCH],
+    done: [bool; BATCH],
+}
+
+/// A score handed to collectors by block scorers, recording the minimum competitive score
+/// they announce (docs below it are not collected at all).
+struct BlockScore {
+    score: f32,
+    min: f32,
+}
+
+impl Scorable for BlockScore {
+    #[inline]
+    fn score(&mut self) -> f32 {
+        self.score
+    }
+    fn set_min_competitive_score(&mut self, m: f32) {
+        if m > self.min {
+            self.min = m;
+        }
+    }
+}
+
+/// A score computed only when a collector asks for it (block scorers hand docs whose block
+/// computation failed to collectors this way, so the per-doc path raises the exact error at
+/// the same point it would without blocks).
+struct LazyScore<F: FnMut() -> f32> {
+    f: F,
+    cur: Option<f32>,
+}
+
+impl<F: FnMut() -> f32> Scorable for LazyScore<F> {
+    fn score(&mut self) -> f32 {
+        if let Some(c) = self.cur {
+            return c;
+        }
+        let v = (self.f)();
+        self.cur = Some(v);
+        v
+    }
+}
+
 fn random_bytes(rf: &RandomField, dv: Option<&DocValuesReader>, doc: u32) -> Option<Vec<u8>> {
     match (rf, dv?) {
         (RandomField::Bytes { .. }, DocValuesReader::Sorted(v)) => {
@@ -585,26 +1004,44 @@ fn num_text(d: NumDecode, v: i64) -> String {
 /// The selected distance of a doc (0 without values, as Elasticsearch's `replaceMissing`).
 fn decay_distance(
     f: &ScoreFunction,
+    from: Option<&geo::HaversinFrom>,
     vals: &Option<search_codec::SortedNumericDocValues>,
     num: &Option<search_codec::NumericDocValues>,
     doc: u32,
     scratch: &mut Vec<i64>,
 ) -> f64 {
     let ScoreFunction::Decay { origin, offset, mode, .. } = f else { return 0.0 };
+    let distance = |v: i64| raw_distance(origin, from, *offset, v);
+    // One value: every mode selects it.
+    if let Some(v) = single_value(vals, num, doc) {
+        return v.map_or(0.0, distance);
+    }
     values_of(vals, num, doc, scratch);
-    if scratch.is_empty() {
+    select_distance(*mode, scratch.iter().map(|&v| distance(v)))
+}
+
+/// The distance of one doc value from a decay origin, less the offset (at least 0).
+#[inline]
+fn raw_distance(origin: &DecayOrigin, from: Option<&geo::HaversinFrom>, offset: f64, v: i64) -> f64 {
+    match origin {
+        DecayOrigin::Number(o, dec) => 0f64.max((dec.decode(v) - o).abs() - offset),
+        DecayOrigin::Geo { lat, lon } => {
+            let (a, b) = geo::decode_geo_dv(v);
+            let m = match from {
+                Some(h) => h.meters(a, b),
+                None => geo::haversin_meters(*lat, *lon, a, b),
+            };
+            0f64.max(m - offset)
+        }
+    }
+}
+
+/// `mode` over the distances of a multi-valued doc (0 without any).
+fn select_distance(mode: MultiValueMode, ds: impl Iterator<Item = f64>) -> f64 {
+    let mut ds: smallvec::SmallVec<[f64; 4]> = ds.collect();
+    if ds.is_empty() {
         return 0.0;
     }
-    let mut ds: smallvec::SmallVec<[f64; 4]> = scratch
-        .iter()
-        .map(|&v| match origin {
-            DecayOrigin::Number(o, dec) => 0f64.max((dec.decode(v) - o).abs() - offset),
-            DecayOrigin::Geo { lat, lon } => {
-                let (a, b) = geo::decode_geo_dv(v);
-                0f64.max(geo::haversin_meters(*lat, *lon, a, b) - offset)
-            }
-        })
-        .collect();
     ds.sort_by(|a, b| a.total_cmp(b));
     mode.select(&ds)
 }
@@ -631,6 +1068,9 @@ struct FsScorer {
     cur: f32,
     scratch: Vec<i64>,
     failed: bool,
+    /// Whether matching needs a second phase (`min_score`, or the inner query's); without
+    /// one, iteration is the inner scorer's alone.
+    two_phase: bool,
 }
 
 impl FsScorer {
@@ -654,7 +1094,7 @@ impl FsScorer {
                 let mut m = f64::NEG_INFINITY;
                 for i in 0..n {
                     if applies(i, &self.sets) {
-                        m = m.max(self.fns[i].score(doc, sub, &mut self.scratch)? * self.weights[i] as f64);
+                        m = java_max(m, self.fns[i].score(doc, sub, &mut self.scratch)? * self.weights[i] as f64);
                     }
                 }
                 if m != f64::NEG_INFINITY {
@@ -665,7 +1105,7 @@ impl FsScorer {
                 let mut m = f64::INFINITY;
                 for i in 0..n {
                     if applies(i, &self.sets) {
-                        m = m.min(self.fns[i].score(doc, sub, &mut self.scratch)? * self.weights[i] as f64);
+                        m = java_min(m, self.fns[i].score(doc, sub, &mut self.scratch)? * self.weights[i] as f64);
                     }
                 }
                 if m != f64::INFINITY {
@@ -702,6 +1142,10 @@ impl FsScorer {
     fn compute(&mut self) -> Result<f32> {
         let doc = self.inner.doc();
         let sub = if self.needs_scores { self.inner.score() } else { 0.0 };
+        self.compute_at(doc, sub)
+    }
+
+    fn compute_at(&mut self, doc: u32, sub: f32) -> Result<f32> {
         if self.fns.is_empty() {
             return Ok(sub);
         }
@@ -714,6 +1158,111 @@ impl FsScorer {
             )));
         }
         Ok(s)
+    }
+
+    /// [`compute_at`](Self::compute_at) for the docs of a block, their query scores in
+    /// `blk.subs`: final scores in `blk.scores`, `blk.bad` for docs whose computation fails
+    /// (scored again a doc at a time if asked, for the exact error). Functions run a block at
+    /// a time and combine in the per-doc order of operations, so scores are bit-identical.
+    fn score_block(&mut self, docs: &[u32], blk: &mut FsBlock, scratch: &mut BlockScratch) {
+        let n = docs.len();
+        let nf = self.fns.len();
+        let mode = if nf == 1 && self.sets[0].is_none() { FunctionScoreMode::First } else { self.mode };
+        let FsBlock { subs, vals, factor, acc, wsum, scores, bad, need, done } = blk;
+        let (subs, vals, factor, acc, wsum, scores, bad, need, done) = (
+            &subs[..n],
+            &mut vals[..n],
+            &mut factor[..n],
+            &mut acc[..n],
+            &mut wsum[..n],
+            &mut scores[..n],
+            &mut bad[..n],
+            &mut need[..n],
+            &mut done[..n],
+        );
+        bad.fill(false);
+        factor.fill(1.0);
+        match mode {
+            FunctionScoreMode::First => done.fill(false),
+            FunctionScoreMode::Max => acc.fill(f64::NEG_INFINITY),
+            FunctionScoreMode::Min => acc.fill(f64::INFINITY),
+            FunctionScoreMode::Multiply => {}
+            FunctionScoreMode::Avg | FunctionScoreMode::Sum => {
+                acc.fill(0.0);
+                wsum.fill(0.0);
+            }
+        }
+        for i in 0..nf {
+            let set = self.sets[i].as_deref();
+            let all = set.is_none() && (mode != FunctionScoreMode::First || i == 0);
+            if !all {
+                for (k, &d) in docs.iter().enumerate() {
+                    need[k] = set.is_none_or(|s| s.get(d)) && !(mode == FunctionScoreMode::First && done[k]);
+                }
+            }
+            let mask = if all { None } else { Some(&need[..]) };
+            self.fns[i].score_block(docs, subs, mask, vals, bad, scratch);
+            let w = self.weights[i] as f64;
+            if all && mode == FunctionScoreMode::First {
+                // The lone (or first unfiltered) function: its value is the factor.
+                for k in 0..n {
+                    factor[k] = vals[k] * w;
+                    done[k] = true;
+                }
+                continue;
+            }
+            for k in 0..n {
+                if !all && !need[k] {
+                    continue;
+                }
+                let v = vals[k] * w;
+                match mode {
+                    FunctionScoreMode::First => {
+                        factor[k] = v;
+                        done[k] = true;
+                    }
+                    FunctionScoreMode::Max => acc[k] = java_max(acc[k], v),
+                    FunctionScoreMode::Min => acc[k] = java_min(acc[k], v),
+                    FunctionScoreMode::Multiply => factor[k] *= v,
+                    FunctionScoreMode::Avg | FunctionScoreMode::Sum => {
+                        acc[k] += v;
+                        wsum[k] += w;
+                    }
+                }
+            }
+        }
+        let max_boost = self.max_boost as f64;
+        if !matches!(mode, FunctionScoreMode::First | FunctionScoreMode::Multiply) {
+            for k in 0..n {
+                match mode {
+                    FunctionScoreMode::Max if acc[k] != f64::NEG_INFINITY => factor[k] = acc[k],
+                    FunctionScoreMode::Min if acc[k] != f64::INFINITY => factor[k] = acc[k],
+                    FunctionScoreMode::Avg | FunctionScoreMode::Sum if wsum[k] != 0.0 => {
+                        factor[k] = acc[k];
+                        if self.mode == FunctionScoreMode::Avg {
+                            factor[k] /= wsum[k];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // `combine` with the boost mode chosen once per block.
+        let finish = |scores: &mut [f32], bad: &mut [bool], c: CombineFunction| {
+            for k in 0..n {
+                let s = c.combine(subs[k] as f64, factor[k], max_boost);
+                if s < 0.0 || s.is_nan() {
+                    bad[k] = true;
+                }
+                scores[k] = s;
+            }
+        };
+        match self.combine {
+            CombineFunction::Multiply => finish(scores, bad, CombineFunction::Multiply),
+            CombineFunction::Replace => finish(scores, bad, CombineFunction::Replace),
+            CombineFunction::Sum => finish(scores, bad, CombineFunction::Sum),
+            c => finish(scores, bad, c),
+        }
     }
 
     fn check(&mut self) -> bool {
@@ -752,6 +1301,9 @@ impl Scorer for FsScorer {
         if self.failed { NO_MORE_DOCS } else { self.inner.doc() }
     }
     fn next(&mut self) -> u32 {
+        if !self.two_phase {
+            return if self.failed { NO_MORE_DOCS } else { self.inner.next() };
+        }
         loop {
             let d = self.approx_next();
             if d == NO_MORE_DOCS || self.matches() {
@@ -760,6 +1312,9 @@ impl Scorer for FsScorer {
         }
     }
     fn advance(&mut self, t: u32) -> u32 {
+        if !self.two_phase {
+            return if self.failed { NO_MORE_DOCS } else { self.inner.advance(t) };
+        }
         let d = self.approx_advance(t);
         if d == NO_MORE_DOCS || self.matches() {
             return if self.failed { NO_MORE_DOCS } else { d };
@@ -770,7 +1325,7 @@ impl Scorer for FsScorer {
         self.inner.cost()
     }
     fn has_two_phase(&self) -> bool {
-        self.min_score.is_some() || self.inner.has_two_phase()
+        self.two_phase
     }
     fn approx_next(&mut self) -> u32 {
         if self.failed {
@@ -798,6 +1353,84 @@ impl Scorer for FsScorer {
     }
 }
 
+/// Scores the inner query's matches a block at a time (Lucene scores function queries a doc
+/// at a time): the inner scorer fills a batch of docs and scores, each function decodes the
+/// doc values of the whole batch and evaluates them in a tight loop, and collectors get the
+/// docs with their final scores. Used when matching is the inner query's alone (no
+/// `min_score`, no two-phase inner query).
+struct FsBulkScorer {
+    sc: FsScorer,
+    buf: Box<DocScoreBuf>,
+    blk: Box<FsBlock>,
+    scratch: BlockScratch,
+    /// The minimum competitive score the collector announced.
+    min: f32,
+}
+
+impl BulkScorer for FsBulkScorer {
+    fn score(&mut self, collector: &mut dyn LeafCollector, live: Option<&search_codec::LiveDocs>, min: u32, max: u32) -> Result<u32> {
+        let s = &mut self.sc;
+        let mut d = s.inner.doc();
+        if d == u32::MAX || d < min {
+            d = s.inner.advance(min);
+        }
+        if collector.skips() {
+            return crate::search::score_skipping(s, collector, live, d, max);
+        }
+        let mut b = BlockScore { score: 0.0, min: self.min };
+        loop {
+            if s.failed {
+                return Ok(NO_MORE_DOCS);
+            }
+            s.inner.next_docs_and_scores(max, live, &mut self.buf);
+            let n = self.buf.len;
+            if n == 0 {
+                break;
+            }
+            let docs = &self.buf.docs[..n];
+            if s.needs_scores {
+                self.blk.subs[..n].copy_from_slice(&self.buf.scores[..n]);
+            } else {
+                self.blk.subs[..n].fill(0.0);
+            }
+            s.score_block(docs, &mut self.blk, &mut self.scratch);
+            for (i, &doc) in docs.iter().enumerate() {
+                if self.blk.bad[i] {
+                    let sub = self.blk.subs[i];
+                    let mut l = LazyScore {
+                        f: || match s.compute_at(doc, sub) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                defer_error(e);
+                                s.failed = true;
+                                0.0
+                            }
+                        },
+                        cur: None,
+                    };
+                    collector.collect(doc, &mut l)?;
+                    if s.failed {
+                        self.min = b.min;
+                        return Ok(NO_MORE_DOCS);
+                    }
+                } else {
+                    let score = self.blk.scores[i];
+                    if b.min <= 0.0 || score >= b.min {
+                        b.score = score;
+                        collector.collect(doc, &mut b)?;
+                    }
+                }
+            }
+        }
+        self.min = b.min;
+        Ok(s.inner.doc())
+    }
+
+    fn cost(&self) -> u64 {
+        self.sc.inner.cost()
+    }
+}
+
 impl FsWeight {
     fn fs_scorer(&self, seg: &SegmentContext) -> Result<Option<FsScorer>> {
         let Some(inner) = self.sub.scorer(seg)? else { return Ok(None) };
@@ -812,7 +1445,9 @@ impl FsWeight {
             });
             weights.push(f.weight.unwrap_or(1.0));
         }
+        let two_phase = self.q.min_score.is_some() || inner.has_two_phase();
         Ok(Some(FsScorer {
+            two_phase,
             inner,
             fns,
             sets,
@@ -832,6 +1467,30 @@ impl FsWeight {
 impl Weight for FsWeight {
     fn scorer(&self, seg: &SegmentContext) -> Result<Option<Box<dyn Scorer>>> {
         Ok(self.fs_scorer(seg)?.map(|s| Box::new(s) as Box<dyn Scorer>))
+    }
+
+    fn bulk_scorer(&self, seg: &SegmentContext, _mode: ScoreMode) -> Result<Option<Box<dyn BulkScorer>>> {
+        let Some(sc) = self.fs_scorer(seg)? else { return Ok(None) };
+        if sc.two_phase || sc.fns.is_empty() {
+            return Ok(Some(Box::new(DefaultBulkScorer::new(Box::new(sc)))));
+        }
+        Ok(Some(Box::new(FsBulkScorer {
+            sc,
+            buf: DocScoreBuf::new(),
+            blk: Box::new(FsBlock {
+                subs: [0.0; BATCH],
+                vals: [0.0; BATCH],
+                factor: [0.0; BATCH],
+                acc: [0.0; BATCH],
+                wsum: [0.0; BATCH],
+                scores: [0.0; BATCH],
+                bad: [false; BATCH],
+                need: [false; BATCH],
+                done: [false; BATCH],
+            }),
+            scratch: BlockScratch::default(),
+            min: 0.0,
+        })))
     }
 
     fn explain(&self, seg: &SegmentContext, doc: u32) -> Result<Explanation> {
@@ -947,7 +1606,9 @@ impl Query for FunctionScoreQuery {
     fn lucene_string(&self, schema: &Schema) -> String {
         let mut b = format!("function score ({}, functions: [", self.query.lucene_string(schema));
         for f in &self.functions {
-            b.push_str(&format!("{{filter({}), function [{:?}]}}", f.filter.as_ref().map_or("*:*".into(), |q| q.lucene_string(schema)), f.function));
+            b.push('{');
+            b.push_str(&f.java_string());
+            b.push('}');
         }
         b.push_str("])");
         b
@@ -998,6 +1659,10 @@ impl SsScorer {
     fn compute(&mut self) -> Result<f32> {
         let doc = self.inner.doc();
         let sub = if self.needs_score { self.inner.score() } else { 0.0 };
+        self.compute_at(doc, sub)
+    }
+
+    fn compute_at(&mut self, doc: u32, sub: f32) -> Result<f32> {
         let v = self.leaf.score(doc, sub)? as f32;
         if v < 0.0 || v.is_nan() {
             return Err(Error::illegal(format!(
@@ -1006,6 +1671,94 @@ impl SsScorer {
             )));
         }
         Ok(v * self.boost)
+    }
+}
+
+/// [`FsBulkScorer`] for `script_score`: the script scores a block of the inner query's
+/// matches at a time ([`LeafScoreScript::score_block`]).
+struct SsBulkScorer {
+    sc: SsScorer,
+    buf: Box<DocScoreBuf>,
+    subs: Box<[f32; BATCH]>,
+    out: Box<[f64; BATCH]>,
+    bad: Box<[bool; BATCH]>,
+    min: f32,
+}
+
+impl BulkScorer for SsBulkScorer {
+    fn score(&mut self, collector: &mut dyn LeafCollector, live: Option<&search_codec::LiveDocs>, min: u32, max: u32) -> Result<u32> {
+        let s = &mut self.sc;
+        let mut d = s.inner.doc();
+        if d == u32::MAX || d < min {
+            d = s.inner.advance(min);
+        }
+        if collector.skips() {
+            return crate::search::score_skipping(s, collector, live, d, max);
+        }
+        let mut b = BlockScore { score: 0.0, min: self.min };
+        loop {
+            if s.failed {
+                return Ok(NO_MORE_DOCS);
+            }
+            s.inner.next_docs_and_scores(max, live, &mut self.buf);
+            let n = self.buf.len;
+            if n == 0 {
+                break;
+            }
+            let docs = &self.buf.docs[..n];
+            let subs = &mut self.subs[..n];
+            if s.needs_score {
+                subs.copy_from_slice(&self.buf.scores[..n]);
+            } else {
+                subs.fill(0.0);
+            }
+            let (out, bad) = (&mut self.out[..n], &mut self.bad[..n]);
+            bad.fill(false);
+            let mut start = 0;
+            while start < n {
+                match s.leaf.score_block(&docs[start..], &subs[start..], &mut out[start..]) {
+                    Ok(()) => break,
+                    Err((k, _)) => {
+                        bad[start + k] = true;
+                        start += k + 1;
+                    }
+                }
+            }
+            for (i, &doc) in docs.iter().enumerate() {
+                let v = out[i] as f32;
+                if bad[i] || v < 0.0 || v.is_nan() {
+                    let sub = subs[i];
+                    let mut l = LazyScore {
+                        f: || match s.compute_at(doc, sub) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                defer_error(e);
+                                s.failed = true;
+                                0.0
+                            }
+                        },
+                        cur: None,
+                    };
+                    collector.collect(doc, &mut l)?;
+                    if s.failed {
+                        self.min = b.min;
+                        return Ok(NO_MORE_DOCS);
+                    }
+                } else {
+                    let score = v * s.boost;
+                    if b.min <= 0.0 || score >= b.min {
+                        b.score = score;
+                        collector.collect(doc, &mut b)?;
+                    }
+                }
+            }
+        }
+        self.min = b.min;
+        Ok(s.inner.doc())
+    }
+
+    fn cost(&self) -> u64 {
+        self.sc.inner.cost()
     }
 }
 
@@ -1086,10 +1839,10 @@ impl Scorer for SsScorer {
     }
 }
 
-impl Weight for SsWeight {
-    fn scorer(&self, seg: &SegmentContext) -> Result<Option<Box<dyn Scorer>>> {
+impl SsWeight {
+    fn ss_scorer(&self, seg: &SegmentContext) -> Result<Option<SsScorer>> {
         let Some(inner) = self.sub.scorer(seg)? else { return Ok(None) };
-        Ok(Some(Box::new(SsScorer {
+        Ok(Some(SsScorer {
             inner,
             leaf: self.script.leaf(seg)?,
             boost: self.boost,
@@ -1097,6 +1850,27 @@ impl Weight for SsWeight {
             needs_score: self.needs_score,
             cur: 0.0,
             failed: false,
+        }))
+    }
+}
+
+impl Weight for SsWeight {
+    fn scorer(&self, seg: &SegmentContext) -> Result<Option<Box<dyn Scorer>>> {
+        Ok(self.ss_scorer(seg)?.map(|s| Box::new(s) as Box<dyn Scorer>))
+    }
+
+    fn bulk_scorer(&self, seg: &SegmentContext, _mode: ScoreMode) -> Result<Option<Box<dyn BulkScorer>>> {
+        let Some(sc) = self.ss_scorer(seg)? else { return Ok(None) };
+        if sc.has_two_phase() {
+            return Ok(Some(Box::new(DefaultBulkScorer::new(Box::new(sc)))));
+        }
+        Ok(Some(Box::new(SsBulkScorer {
+            sc,
+            buf: DocScoreBuf::new(),
+            subs: Box::new([0.0; BATCH]),
+            out: Box::new([0.0; BATCH]),
+            bad: Box::new([false; BATCH]),
+            min: 0.0,
         })))
     }
 
@@ -1174,6 +1948,18 @@ impl Query for ScriptScoreQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combine_keeps_nan_like_java() {
+        // `ln1p` of a negative factor is NaN; Java's Math.min keeps it, so the query fails
+        // with an invalid score instead of scoring `max_boost`.
+        let s = CombineFunction::Multiply.combine(1.0, f64::NAN, f32::MAX as f64);
+        assert!(s.is_nan());
+        assert!(CombineFunction::Max.combine(f64::NAN, 1.0, 10.0).is_nan());
+        assert_eq!(CombineFunction::Replace.combine(1.0, 20.0, 10.0), 10.0);
+        assert!(java_min(-0.0, 0.0).is_sign_negative());
+        assert!(!java_max(-0.0, 0.0).is_sign_negative());
+    }
 
     #[test]
     fn murmur_and_mix_match_java() {

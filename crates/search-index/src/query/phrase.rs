@@ -979,10 +979,9 @@ impl PhraseWeight {
             }
             states.push(v);
         }
-        let sim = match scoring_stats(s, field, mode) {
-            Some(c) if !stats.is_empty() => Some(s.schema().similarity(field).scorer(boost, &c, &stats)),
-            _ => None,
-        };
+        // Lucene's `PhraseWeight` only asks for the field's statistics when one of its terms
+        // exists (a DFS phase records only those requests).
+        let sim = if stats.is_empty() { None } else { scoring_stats(s, field, mode) }.map(|c| s.schema().similarity(field).scorer(boost, &c, &stats));
         let scores = sim.is_some();
         let sim = Arc::new(sim.unwrap_or(SimScorer::Boolean(1.0)));
         PhraseWeight { field, slots, states, slop, sim, scores, mode, desc }

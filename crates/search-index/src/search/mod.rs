@@ -47,6 +47,46 @@ pub use explain::{ExplValue, Explanation};
 
 thread_local! {
     static DEFERRED: std::cell::RefCell<Option<Error>> = const { std::cell::RefCell::new(None) };
+    static AMBIENT: std::cell::RefCell<Option<SearchControl>> = const { std::cell::RefCell::new(None) };
+    static INTERRUPTED: std::cell::RefCell<Option<Error>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Records that code without a `Result` path to the searcher (a script polling for
+/// cancellation inside its loop) stopped because the search timed out or was cancelled. The
+/// script's own failure then surfaces as `e` ([`Error::TimeExceeded`] / [`Error::Cancelled`]),
+/// which keeps the partial results, as Lucene's `TimeExceededException` does.
+pub fn note_interrupted(e: Error) {
+    INTERRUPTED.with(|i| *i.borrow_mut() = Some(e));
+}
+
+/// Takes the interruption [`note_interrupted`] recorded on this thread, if any.
+pub fn take_interrupted() -> Option<Error> {
+    INTERRUPTED.with(|i| i.borrow_mut().take())
+}
+
+/// The deadline / cancellation of the search running on this thread, if it has one (see
+/// [`set_ambient_control`]). Code that runs per segment without a `SearchControl` argument
+/// (scripts polling for cancellation in their loops) reads it when it is created.
+pub fn ambient_control() -> Option<SearchControl> {
+    AMBIENT.with(|a| a.borrow().clone())
+}
+
+/// Restores the previous ambient control when dropped.
+pub struct AmbientGuard(Option<SearchControl>);
+
+impl Drop for AmbientGuard {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        AMBIENT.with(|a| *a.borrow_mut() = prev);
+    }
+}
+
+/// Makes `ctl` this thread's ambient control until the guard drops: [`Searcher::search`] and
+/// [`Searcher::count`] then honour it, and [`search_partitions`] hands it on to the threads
+/// that run slices of a concurrent search.
+pub fn set_ambient_control(ctl: Option<SearchControl>) -> AmbientGuard {
+    let ctl = ctl.filter(|c| !c.is_noop() || c.ext.is_some());
+    AmbientGuard(AMBIENT.with(|a| std::mem::replace(&mut *a.borrow_mut(), ctl)))
 }
 
 /// Records an error raised inside a scorer (a script failing, a function producing an
@@ -155,6 +195,15 @@ pub trait Scorer: Scorable + Send {
         1.0
     }
 
+    /// Whether scoring the current doc is cheap and cannot fail, so a bulk conjunction may
+    /// score the lead's docs a batch at a time before the other clauses confirm them. Lucene's
+    /// conjunctions score only confirmed matches (doc first) until dynamic pruning starts:
+    /// scorers whose score may fail (`function_score`'s invalid scores, scripts) or costs more
+    /// than a lookup keep the default, so they are scored only for docs every clause matches.
+    fn pure_scores(&self) -> bool {
+        false
+    }
+
     /// Fills `buf` with the current doc and the following matches below `upto` that are live,
     /// with their scores, and leaves the scorer on the doc after the batch (Lucene's
     /// `nextDocsAndScores`). The scorer must be positioned. An empty batch means no match is
@@ -237,6 +286,37 @@ pub struct DocScoreBuf {
 impl DocScoreBuf {
     pub fn new() -> Box<DocScoreBuf> {
         Box::new(DocScoreBuf { docs: [0; BATCH], scores: [0.0; BATCH], len: 0 })
+    }
+}
+
+/// A query's description (its Lucene string) built on first use: only explanations read it,
+/// and weights are created per search (a large `terms` set's string is costly to build).
+pub(crate) struct LazyDesc {
+    make: Box<dyn Fn() -> String + Send + Sync>,
+    text: std::sync::OnceLock<String>,
+}
+
+impl LazyDesc {
+    /// The Lucene string of `q` under the searcher's schema.
+    pub(crate) fn of<Q: Query + Clone>(q: &Q, s: &Searcher) -> LazyDesc {
+        let (q, s) = (q.clone(), s.clone());
+        LazyDesc { make: Box::new(move || q.lucene_string(s.schema())), text: std::sync::OnceLock::new() }
+    }
+
+    /// [`LazyDesc::of`] for a shared query.
+    pub(crate) fn of_ref(q: &QueryRef, s: &Searcher) -> LazyDesc {
+        let (q, s) = (q.clone(), s.clone());
+        LazyDesc { make: Box::new(move || q.lucene_string(s.schema())), text: std::sync::OnceLock::new() }
+    }
+
+    pub(crate) fn get(&self) -> &str {
+        self.text.get_or_init(|| (self.make)())
+    }
+}
+
+impl std::fmt::Display for LazyDesc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.get())
     }
 }
 
@@ -416,6 +496,13 @@ pub trait QueryVisitor {
             }
         }
     }
+    /// A span query: its tree (highlighters match it over the doc's tokens). The default
+    /// reports its terms through [`term`](Self::term).
+    fn span(&mut self, node: &crate::query::SpanNode) {
+        for (f, t) in node.leaf_terms() {
+            self.term(f, &t);
+        }
+    }
     /// Whether to descend into must-not clauses (default no).
     fn wants_negated(&self) -> bool {
         false
@@ -495,6 +582,18 @@ pub type QueryRef = Arc<dyn Query>;
 /// Collects the matches of one segment.
 pub trait LeafCollector {
     fn collect(&mut self, doc: u32, scorer: &mut dyn Scorable) -> Result<()>;
+    /// Collects `docs` (ascending, all live), every one scoring the constant `score`: Lucene's
+    /// `collect(DocIdStream)` for constant-score bulk scorers (`match_all`), so a collector
+    /// takes a block at once (a count, an append to an aggregation batch) instead of a virtual
+    /// call per doc. Callers use it only where no minimum competitive score could prune a doc.
+    /// Same results as [`collect`](Self::collect) per doc, which is the default.
+    fn collect_block(&mut self, docs: &[u32], score: f32) -> Result<()> {
+        let mut sv = ScoreValue(score);
+        for &d in docs {
+            self.collect(d, &mut sv)?;
+        }
+        Ok(())
+    }
     fn finish(&mut self) -> Result<()> {
         Ok(())
     }
@@ -517,6 +616,9 @@ pub trait Collector {
     fn leaf<'a>(&'a mut self, seg: &SegmentContext) -> Result<Box<dyn LeafCollector + 'a>>;
 }
 
+/// Stored-fields readers a segment keeps for reuse ([`SegmentCore::stored_document`]).
+const STORED_READERS: usize = 8;
+
 /// Per-segment caches shared by every snapshot holding the segment (keyed by the cache user).
 pub struct SegmentCore {
     pub uid: u64,
@@ -524,11 +626,36 @@ pub struct SegmentCore {
     cache: parking_lot::Mutex<Vec<CacheEntry>>,
     /// Set while the segment's file is still downloading (`shard::gate`).
     pub(crate) gate: Option<Arc<crate::shard::gate::Gate>>,
+    /// Stored-fields readers kept between fetches ([`SegmentCore::stored_document`]).
+    stored: parking_lot::Mutex<Vec<search_codec::StoredReader>>,
 }
 
 impl SegmentCore {
     pub fn new(uid: u64, reader: SegmentReader) -> SegmentCore {
-        SegmentCore { uid, reader, cache: parking_lot::Mutex::new(Vec::new()), gate: None }
+        SegmentCore { uid, reader, cache: parking_lot::Mutex::new(Vec::new()), gate: None, stored: parking_lot::Mutex::new(Vec::new()) }
+    }
+
+    /// The stored fields of `doc`. A fresh reader decompresses the doc's whole chunk (up to 128
+    /// docs); the hits of a fetch phase are mostly close in doc order (a scroll page of 1000
+    /// docs spans ~10 chunks), so the segment keeps a few readers with their last chunk:
+    /// a fetch takes one (or a fresh one), reads, and puts it back, so the threads of a
+    /// parallel fetch over one segment each keep reusing a reader instead of decompressing a
+    /// chunk per document.
+    pub fn stored_document(&self, doc: u32) -> Result<Vec<(u32, search_codec::stored::OwnedStoredValue)>> {
+        let taken = {
+            let mut pool = self.stored.lock();
+            match pool.iter().rposition(|r| r.holds(doc)) {
+                Some(i) => Some(pool.swap_remove(i)),
+                None => pool.pop(),
+            }
+        };
+        let mut r = taken.unwrap_or_else(|| self.reader.stored());
+        let out = r.document(doc);
+        let mut pool = self.stored.lock();
+        if pool.len() < STORED_READERS {
+            pool.push(r);
+        }
+        Ok(out?)
     }
 
     pub(crate) fn with_gate(uid: u64, reader: SegmentReader, gate: Option<Arc<crate::shard::gate::Gate>>) -> SegmentCore {
@@ -698,6 +825,10 @@ impl Default for SearchLimits {
 pub struct SearchControl {
     pub deadline: Option<Instant>,
     pub cancelled: Option<Arc<AtomicBool>>,
+    /// Request-scoped state of the embedding layer that code created per segment needs (a
+    /// search's runtime fields for the scripts it runs), carried to the threads of a
+    /// concurrent search with the control. Never consulted here.
+    pub ext: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl SearchControl {
@@ -716,7 +847,8 @@ impl SearchControl {
         Ok(())
     }
 
-    fn is_noop(&self) -> bool {
+    /// Neither a deadline nor a cancellation flag.
+    pub fn is_noop(&self) -> bool {
         self.deadline.is_none() && self.cancelled.is_none()
     }
 }
@@ -733,6 +865,17 @@ struct SearcherInner {
     ordinals: Arc<parking_lot::Mutex<HashMap<u32, Option<Arc<ordinals::GlobalOrdinals>>>>>,
     /// Set on profiled views: weights are timed per query.
     profiler: Option<Arc<profile::Profiler>>,
+    /// Statistics that replace the view's own ([`Searcher::with_global_stats`]).
+    global_stats: Option<Arc<dyn StatsSource>>,
+}
+
+/// Term and field statistics that replace a view's own when its queries build weights:
+/// `dfs_query_then_fetch` scores every shard with statistics summed over all of them
+/// (Elasticsearch's `AggregatedDfs` behind `CachedDfSource`). `None` keeps the view's own.
+pub trait StatsSource: Send + Sync {
+    fn term_stats(&self, field: u32, term: &[u8]) -> Option<TermStats>;
+    /// `Some(None)`: no doc anywhere has the field.
+    fn collection_stats(&self, field: u32) -> Option<Option<CollectionStats>>;
 }
 
 /// A point-in-time view of a shard: segments with their live docs, the schema they were
@@ -780,6 +923,7 @@ impl Searcher {
                 query_cache: None,
                 ordinals: Arc::default(),
                 profiler: None,
+                global_stats: None,
             }),
         }
     }
@@ -798,6 +942,7 @@ impl Searcher {
                 query_cache: i.query_cache.clone(),
                 ordinals: i.ordinals.clone(),
                 profiler: i.profiler.clone(),
+                global_stats: i.global_stats.clone(),
             }),
         }
     }
@@ -816,6 +961,7 @@ impl Searcher {
                 query_cache: i.query_cache.clone(),
                 ordinals: i.ordinals.clone(),
                 profiler: i.profiler.clone(),
+                global_stats: i.global_stats.clone(),
             }),
         }
     }
@@ -834,6 +980,7 @@ impl Searcher {
                 query_cache: policy,
                 ordinals: i.ordinals.clone(),
                 profiler: i.profiler.clone(),
+                global_stats: i.global_stats.clone(),
             }),
         }
     }
@@ -879,8 +1026,33 @@ impl Searcher {
                 query_cache: i.query_cache.clone(),
                 ordinals: i.ordinals.clone(),
                 profiler,
+                global_stats: i.global_stats.clone(),
             }),
         }
+    }
+
+    /// The same view, scoring with `stats` instead of its own statistics (see [`StatsSource`]).
+    pub fn with_global_stats(&self, stats: Option<Arc<dyn StatsSource>>) -> Searcher {
+        let i = &self.inner;
+        Searcher {
+            inner: Arc::new(SearcherInner {
+                segments: i.segments.clone(),
+                schema: i.schema.clone(),
+                max_doc: i.max_doc,
+                num_docs: i.num_docs,
+                limits: i.limits,
+                generation: i.generation,
+                query_cache: i.query_cache.clone(),
+                ordinals: i.ordinals.clone(),
+                profiler: i.profiler.clone(),
+                global_stats: stats,
+            }),
+        }
+    }
+
+    /// The statistics replacing this view's own, if any.
+    pub fn global_stats(&self) -> Option<&Arc<dyn StatsSource>> {
+        self.inner.global_stats.as_ref()
     }
 
     pub fn profiler(&self) -> Option<&Arc<profile::Profiler>> {
@@ -946,6 +1118,11 @@ impl Searcher {
     /// Statistics of `field` across segments; `None` when no doc has the field
     /// (Lucene returns null then and similarities are not used).
     pub fn collection_stats(&self, field: u32) -> Option<CollectionStats> {
+        if let Some(g) = &self.inner.global_stats
+            && let Some(st) = g.collection_stats(field)
+        {
+            return st;
+        }
         let mut st = CollectionStats { max_doc: self.inner.max_doc as u64, doc_count: 0, sum_total_term_freq: 0, sum_doc_freq: 0 };
         for s in &self.inner.segments {
             if let Some(t) = s.reader.terms(field) {
@@ -990,6 +1167,11 @@ impl Searcher {
 
     /// Statistics of one term across segments (deleted docs included, as in Lucene).
     pub fn term_stats(&self, field: u32, term: &[u8]) -> TermStats {
+        if let Some(g) = &self.inner.global_stats
+            && let Some(t) = g.term_stats(field, term)
+        {
+            return t;
+        }
         let mut t = TermStats { doc_freq: 0, total_term_freq: 0 };
         let h = search_codec::bloom::hash64(term);
         for s in &self.inner.segments {
@@ -1027,7 +1209,7 @@ impl Searcher {
 
     /// Runs `q` into `collector` over every segment.
     pub fn search(&self, q: &QueryRef, collector: &mut dyn Collector) -> Result<()> {
-        self.search_with(q, collector, &SearchControl::default())
+        self.search_with(q, collector, &ambient_control().unwrap_or_default())
     }
 
     /// [`search`](Self::search) with a deadline / cancellation. On timeout the collector keeps
@@ -1047,6 +1229,13 @@ impl Searcher {
     /// `CollectorManager`, intra-segment partitions included: see [`slices`](Self::slices)).
     /// A single slice runs on the calling thread.
     pub fn search_concurrent<M: CollectorManager>(&self, q: &QueryRef, m: &M, ctl: &SearchControl) -> Result<M::Out> {
+        let ambient;
+        let ctl = if ctl.is_noop() && ctl.ext.is_none() {
+            ambient = ambient_control().unwrap_or_default();
+            &ambient
+        } else {
+            ctl
+        };
         let w = self.create_weight(q, m.score_mode())?;
         let slices = self.slices();
         // Workers run nested concurrent searches inline: they never wait on each other.
@@ -1205,15 +1394,20 @@ impl std::fmt::Debug for Partition {
 pub fn search_partitions(parts: &[Partition], w: &dyn Weight, collector: &mut dyn Collector, ctl: &SearchControl) -> Result<()> {
     let mode = collector.score_mode();
     take_deferred_error();
+    take_interrupted();
+    // Slices of a concurrent search run on pool threads: scripts created there poll this.
+    let _ambient = (!ctl.is_noop() || ctl.ext.is_some()).then(|| set_ambient_control(Some(ctl.clone())));
+    // A script stopped by the deadline fails with its own error: report the interruption.
+    let interrupted = |e: Error| take_interrupted().unwrap_or(e);
     for part in parts {
         let seg = &part.seg;
         ctl.check()?;
         let mut leaf = match collector.leaf(seg) {
             Ok(l) => l,
             Err(Error::CollectionTerminated) => continue,
-            Err(e) => return Err(e),
+            Err(e) => return Err(interrupted(e)),
         };
-        let Some(mut bs) = w.bulk_scorer(seg, mode)? else {
+        let Some(mut bs) = w.bulk_scorer(seg, mode).map_err(interrupted)? else {
             leaf.finish()?;
             continue;
         };
@@ -1227,13 +1421,17 @@ pub fn search_partitions(parts: &[Partition], w: &dyn Weight, collector: &mut dy
             Ok(()) | Err(Error::CollectionTerminated) => {}
             Err(e) => {
                 let _ = leaf.finish();
-                return Err(e);
+                return Err(interrupted(e));
             }
         }
         if let Some(e) = take_deferred_error() {
+            return Err(interrupted(e));
+        }
+        if let Some(e) = take_interrupted() {
+            let _ = leaf.finish();
             return Err(e);
         }
-        leaf.finish()?;
+        leaf.finish().map_err(interrupted)?;
     }
     Ok(())
 }
@@ -1254,12 +1452,25 @@ impl Searcher {
         Ok(Some(total))
     }
 
+    /// [`count_if_cheap`](Self::count_if_cheap) per segment, in search order.
+    pub fn segment_counts_if_cheap(&self, q: &QueryRef) -> Result<Option<Vec<u64>>> {
+        let w = self.create_weight(q, ScoreMode::CompleteNoScores)?;
+        let mut out = Vec::with_capacity(self.inner.segments.len());
+        for seg in &self.inner.segments {
+            match w.count(seg)? {
+                Some(c) => out.push(c as u64),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(out))
+    }
+
     /// Number of live matches. Segments that know their count without iterating
     /// ([`Weight::count`]) answer directly; the others are iterated, split into slices run
     /// concurrently as [`search_concurrent`](Self::search_concurrent) does when
     /// [`SearchLimits::parallelism`] allows.
     pub fn count(&self, q: &QueryRef) -> Result<u64> {
-        self.count_with(q, &SearchControl::default())
+        self.count_with(q, &ambient_control().unwrap_or_default())
     }
 
     /// [`count`](Self::count) with a deadline and cancellation.
@@ -1314,7 +1525,7 @@ impl Searcher {
             .segment_of(doc)
             .ok_or_else(|| Error::illegal(format!("doc {doc} out of range")))?;
         seg.ensure_stored()?;
-        Ok(seg.reader.stored().document(local)?)
+        seg.core.stored_document(local)
     }
 }
 

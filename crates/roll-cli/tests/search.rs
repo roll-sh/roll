@@ -89,7 +89,7 @@ async fn clusters_and_requests() {
     assert_eq!(field(&out, "username"), "app");
     assert!(out.contains(&format!("curl -u app:{pw} http://127.0.0.1:")), "{out}");
     assert!(out.contains("(shown once)"));
-    let c = e.control.get("app").unwrap();
+    let c = e.control.get("app").await.unwrap();
     assert_eq!((c.password.as_str(), c.max_in_flight, c.destructive_requires_name), (pw.as_str(), 8, false));
 
     // A failing API call exits non-zero with the API's reason.
@@ -163,7 +163,7 @@ async fn clusters_and_requests() {
     // set
     let out = e.roll(&["search", "clusters", "set", "app", "--idle", "0", "--max-body-mb", "5"]).await;
     assert!(out.starts_with("app "), "{out}");
-    let c = e.control.get("app").unwrap();
+    let c = e.control.get("app").await.unwrap();
     assert_eq!((c.idle_timeout_s, c.max_body_mb), (0, 5));
     let out = e.roll(&["search", "clusters", "show", "app"]).await;
     assert!(out.contains("idle      always loaded"), "{out}");
@@ -180,7 +180,7 @@ async fn clusters_and_requests() {
     assert!(out.starts_with("branch app-dev (srch_"), "{out}");
     let bpw = field(&out, "password");
     assert_ne!(bpw, pw);
-    assert_eq!(e.control.get("app-dev").unwrap().password, bpw);
+    assert_eq!(e.control.get("app-dev").await.unwrap().password, bpw);
     let v = e.roll_json(&["search", "clusters", "branch", "app", "app-past", "--at", "0s"]).await;
     assert_eq!(v["parent_name"], "app");
     assert!(v["password"].is_string());
@@ -202,7 +202,7 @@ async fn clusters_and_requests() {
     let out = e.roll(&["search", "clusters", "password", "app"]).await;
     let pw2 = field(&out, "password");
     assert_ne!(pw2, pw);
-    assert_eq!(e.control.get("app").unwrap().password, pw2);
+    assert_eq!(e.control.get("app").await.unwrap().password, pw2);
 
     // unload
     let out = e.roll(&["search", "clusters", "unload", "app"]).await;
@@ -218,15 +218,15 @@ async fn clusters_and_requests() {
     }
     let u = e.roll_json(&["search", "clusters", "usage", "app"]).await;
     assert_eq!(u["days"], 30);
-    // Nine console requests (the indices listing is the control plane's own, not billed; the
-    // one over the body limit never reached the cluster).
-    assert_eq!(u["requests"], 9, "console requests are metered: {u}");
+    // Every request the node admitted (`Node::take_request_counts`): nine console requests and
+    // the indices listing. The one over the body limit never reached the cluster.
+    assert_eq!(u["requests"], 10, "the node's request counts are metered: {u}");
     assert!(u["loaded_seconds"].as_i64().unwrap() >= 1, "{u}");
 
     // delete
     let out = e.roll(&["search", "clusters", "delete", "app-past"]).await;
     assert_eq!(out.trim(), "deleted app-past");
-    assert!(e.control.get("app-past").is_err());
+    assert!(e.control.get("app-past").await.is_err());
     let names: Vec<String> = e.roll_json(&["search", "clusters", "list"]).await.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_string()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     e.control.shutdown().await.unwrap();

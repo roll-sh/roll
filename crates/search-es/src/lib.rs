@@ -15,6 +15,7 @@
 
 pub mod analysis;
 pub mod api;
+pub mod breaker;
 pub mod cluster;
 pub mod document;
 pub mod engine;
@@ -26,7 +27,9 @@ pub mod join;
 pub mod json;
 pub mod mapping;
 pub mod meta;
+pub mod opensearch;
 pub mod query;
+pub mod remote;
 pub mod rest;
 pub mod routes;
 pub mod scripting;
@@ -39,6 +42,7 @@ pub mod units;
 pub mod version;
 pub mod write;
 pub mod xcontent;
+pub mod xpack;
 
 pub use cluster::{Cluster, ClusterConfig, Dialect, MemoryStore, MetaStore};
 pub use error::{EsError, EsResult};

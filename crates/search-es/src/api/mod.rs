@@ -7,6 +7,7 @@
 pub mod aliases;
 pub mod analyze;
 pub mod bulk;
+mod bulk_ahead;
 pub mod by_query;
 pub mod by_query_request;
 pub mod remote;
@@ -19,6 +20,7 @@ pub mod desired_nodes;
 pub mod disk_usage;
 pub mod document;
 pub mod field_caps;
+pub mod geoip;
 pub mod health;
 pub mod indices;
 pub mod ingest;
@@ -53,6 +55,8 @@ pub fn extra_params(api: Api) -> &'static [&'static str] {
         Api::Reindex => &["pipeline"],
         // Read only to be rejected (`RestUpdateAction`: versioning is not for updates).
         Api::Update => &["version", "version_type"],
+        // Read only to be rejected (`RestSubmitAsyncSearchAction` parses it like `_search`).
+        Api::AsyncSearchSubmit => &["scroll"],
         Api::CatTasks => &["ts", "pri", "size", "detailed"],
         a if a.name().starts_with("cat.") => &["ts", "pri", "size"],
         _ => &[],
@@ -66,13 +70,17 @@ macro_rules! handlers {
         pub async fn dispatch($ctx: &Ctx<'_>) -> EsResult<Reply> {
             match $ctx.api {
                 $( $(Api::$api)|+ => $e, )*
+                // The x-pack APIs have their own table (`crate::xpack`).
+                other if crate::xpack::implemented(other) => crate::xpack::dispatch($ctx).await,
+                // The APIs only the opensearch dialect has (`crate::opensearch`).
+                other if crate::opensearch::implemented(other) => crate::opensearch::dispatch($ctx).await,
                 other => Err(EsError::not_implemented(other.name())),
             }
         }
 
         /// Whether roll implements an API (the others answer `unsupported_operation_exception`).
         pub fn implemented(api: Api) -> bool {
-            matches!(api, $( $(Api::$api)|+ )|*)
+            matches!(api, $( $(Api::$api)|+ )|*) || crate::xpack::implemented(api) || crate::opensearch::implemented(api)
         }
     };
 }
@@ -97,6 +105,7 @@ handlers! { ctx;
     DeleteByQueryRethrottle | UpdateByQueryRethrottle | ReindexRethrottle => by_query::rethrottle(ctx),
     Search => crate::search::search(ctx).await,
     IndicesDiskUsage => disk_usage::disk_usage(ctx),
+    IndicesFieldUsageStats => disk_usage::field_usage_stats(ctx),
     RankEval => rank_eval::rank_eval(ctx),
     KnnSearch => crate::search::knn::knn_search(ctx).await,
     Count => crate::search::count(ctx),
@@ -143,6 +152,9 @@ handlers! { ctx;
     IndicesShardStores => shards::shard_stores(ctx),
     IndicesSegments => shards::segments(ctx),
     NodesReloadSecureSettings => shards::reload_secure_settings(ctx),
+    DanglingIndicesListDanglingIndices => shards::list_dangling(ctx),
+    DanglingIndicesImportDanglingIndex | DanglingIndicesDeleteDanglingIndex => shards::import_or_delete_dangling(ctx),
+    NodesGetRepositoriesMeteringInfo | NodesClearRepositoriesMeteringArchive => shards::repositories_metering(ctx),
 
     TasksList => tasks::list(ctx).await,
     TasksGet => tasks::get(ctx).await,
@@ -216,8 +228,18 @@ handlers! { ctx;
     IngestGetPipeline => ingest::get(ctx),
     IngestDeletePipeline => ingest::delete(ctx).await,
     IngestProcessorGrok => ingest::grok(ctx),
-    IngestSimulate => crate::ingest::pipeline::simulate(ctx),
-    SimulateIngest => crate::ingest::simulate::simulate_ingest(ctx),
+    IngestGeoIpStats => geoip::stats(ctx),
+    IngestPutGeoipDatabase | IngestPutIpLocationDatabase => geoip::put(ctx).await,
+    IngestGetGeoipDatabase | IngestGetIpLocationDatabase => geoip::get(ctx),
+    IngestDeleteGeoipDatabase | IngestDeleteIpLocationDatabase => geoip::delete(ctx).await,
+    IngestSimulate => {
+        crate::xpack::enrich::warm(ctx.cluster).await;
+        crate::ingest::pipeline::simulate(ctx)
+    },
+    SimulateIngest => {
+        crate::xpack::enrich::warm(ctx.cluster).await;
+        crate::ingest::simulate::simulate_ingest(ctx)
+    },
 
     SynonymsPutSynonym => synonyms::put_set(ctx).await,
     SynonymsGetSynonym => synonyms::get_set(ctx),
@@ -226,6 +248,7 @@ handlers! { ctx;
     SynonymsPutSynonymRule => synonyms::put_rule(ctx).await,
     SynonymsGetSynonymRule => synonyms::get_rule(ctx),
     SynonymsDeleteSynonymRule => synonyms::delete_rule(ctx).await,
+    IndicesReloadSearchAnalyzers => synonyms::reload_search_analyzers(ctx).await,
 
     CatIndices => cat::indices(ctx),
     CatAliases => cat::aliases(ctx),
@@ -265,6 +288,7 @@ handlers! { ctx;
     SnapshotGetRepository => snapshots::get_repository(ctx),
     SnapshotDeleteRepository => snapshots::delete_repository(ctx).await,
     SnapshotVerifyRepository => snapshots::verify_repository(ctx),
+    SnapshotRepositoryAnalyze => snapshots::analyze_repository(ctx),
     SnapshotCleanupRepository => snapshots::cleanup_repository(ctx),
     SnapshotCreate => snapshots::create(ctx).await,
     SnapshotGet => snapshots::get(ctx),

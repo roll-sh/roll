@@ -7,7 +7,7 @@
 //! - **Epochs** only grow, per cluster, also across releases, and are what search-store writes
 //!   into manifests and cluster states: once a newer owner wrote anything, an older one's writes
 //!   fail (`Fenced`).
-//! - **Acknowledgements** need the lease: the node renews every `ttl / 3` and computes a local
+//! - **Acknowledgements** need the lease: the node renews every `ttl / 6` and computes a local
 //!   deadline from the instant it *sent* a successful acquire or renewal (`sent + ttl - margin`),
 //!   which is never later than the store's expiry. Writes are only acknowledged before it, so
 //!   a node that loses contact stops acknowledging before another node can take over.
@@ -38,7 +38,9 @@ pub trait Leases: Send + Sync + 'static {
     /// Takes `cluster`'s lease for `node` until `ttl` from now (or renews it). `Ok(Ok(epoch))`:
     /// held under `epoch`; `Ok(Err(owner))`: another node holds it.
     async fn acquire(&self, cluster: &str, node: &str, ttl: Duration) -> anyhow::Result<Result<u64, Owner>>;
-    /// Extends a lease held under `epoch`; `false` when it is not held any more.
+    /// Extends a lease held under `epoch`; `false` when it is not held any more. A lease that
+    /// expired or was released is never extended, even if nobody took it since: a renewal that
+    /// raced a release (an unload, a drain) must not keep the next owner out for a whole `ttl`.
     async fn renew(&self, cluster: &str, node: &str, epoch: u64, ttl: Duration) -> anyhow::Result<bool>;
     /// Extends every lease in `held` (`(cluster, epoch)`); answers per entry, in order. The
     /// default renews one by one; stores override it with one round trip.
@@ -94,9 +96,10 @@ impl Leases for MemoryLeases {
 
     async fn renew(&self, cluster: &str, node: &str, epoch: u64, ttl: Duration) -> anyhow::Result<bool> {
         let mut rows = self.rows.lock();
+        let now = now_ms();
         match rows.get_mut(cluster) {
-            Some((n, e, x)) if n == node && *e == epoch => {
-                *x = now_ms() + ttl.as_millis() as u64;
+            Some((n, e, x)) if n == node && *e == epoch && *x > now => {
+                *x = now + ttl.as_millis() as u64;
                 Ok(true)
             }
             _ => Ok(false),
@@ -175,9 +178,10 @@ impl Leases for SqliteLeases {
     async fn renew(&self, cluster: &str, node: &str, epoch: u64, ttl: Duration) -> anyhow::Result<bool> {
         let (cluster, node) = (cluster.to_string(), node.to_string());
         self.run(move |c| {
+            let now = now_ms();
             let n = c.execute(
-                "UPDATE search_leases SET expires_ms = ?4 WHERE cluster = ?1 AND node = ?2 AND epoch = ?3",
-                rusqlite::params![cluster, node, epoch as i64, (now_ms() + ttl.as_millis() as u64) as i64],
+                "UPDATE search_leases SET expires_ms = ?4 WHERE cluster = ?1 AND node = ?2 AND epoch = ?3 AND expires_ms > ?5",
+                rusqlite::params![cluster, node, epoch as i64, (now + ttl.as_millis() as u64) as i64, now as i64],
             )?;
             Ok(n == 1)
         })
@@ -188,12 +192,13 @@ impl Leases for SqliteLeases {
         let (held, node) = (held.to_vec(), node.to_string());
         self.run(move |c| {
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let expires = (now_ms() + ttl.as_millis() as u64) as i64;
+            let now = now_ms();
+            let expires = (now + ttl.as_millis() as u64) as i64;
             let mut out = Vec::with_capacity(held.len());
             {
-                let mut st = tx.prepare_cached("UPDATE search_leases SET expires_ms = ?4 WHERE cluster = ?1 AND node = ?2 AND epoch = ?3")?;
+                let mut st = tx.prepare_cached("UPDATE search_leases SET expires_ms = ?4 WHERE cluster = ?1 AND node = ?2 AND epoch = ?3 AND expires_ms > ?5")?;
                 for (cluster, epoch) in &held {
-                    out.push(st.execute(rusqlite::params![cluster, node, *epoch as i64, expires])? == 1);
+                    out.push(st.execute(rusqlite::params![cluster, node, *epoch as i64, expires, now as i64])? == 1);
                 }
             }
             tx.commit()?;
@@ -337,7 +342,7 @@ impl Leases for PgLeases {
             .client()
             .await?
             .execute(
-                "UPDATE roll_search_leases SET expires = now() + $4 * interval '1 millisecond' WHERE cluster = $1 AND node = $2 AND epoch = $3",
+                "UPDATE roll_search_leases SET expires = now() + $4 * interval '1 millisecond' WHERE cluster = $1 AND node = $2 AND epoch = $3 AND expires > now()",
                 &[&cluster, &node, &(epoch as i64), &ms],
             )
             .await?;
@@ -357,7 +362,7 @@ impl Leases for PgLeases {
             .query(
                 "UPDATE roll_search_leases AS l SET expires = now() + $4 * interval '1 millisecond'
                  FROM unnest($1::text[], $2::bigint[]) AS h(cluster, epoch)
-                 WHERE l.cluster = h.cluster AND l.epoch = h.epoch AND l.node = $3
+                 WHERE l.cluster = h.cluster AND l.epoch = h.epoch AND l.node = $3 AND l.expires > now()
                  RETURNING l.cluster",
                 &[&clusters, &epochs, &node, &ms],
             )
@@ -392,7 +397,8 @@ mod tests {
     use super::*;
 
     async fn exercise(l: &dyn Leases) {
-        let ttl = Duration::from_millis(150);
+        // Long enough that a loaded test machine doesn't expire leases between two steps.
+        let ttl = Duration::from_millis(1500);
         assert_eq!(l.acquire("c", "a", ttl).await.unwrap(), Ok(1));
         // Renewing through acquire keeps the epoch; another node is refused.
         assert_eq!(l.acquire("c", "a", ttl).await.unwrap(), Ok(1));
@@ -401,11 +407,14 @@ mod tests {
         assert!(l.renew("c", "a", 1, ttl).await.unwrap());
         assert!(!l.renew("c", "b", 1, ttl).await.unwrap());
         // Expiry lets another node in, with a higher epoch; the old holder can't renew.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(ttl + Duration::from_millis(100)).await;
         assert_eq!(l.acquire("c", "b", ttl).await.unwrap(), Ok(2));
         assert!(!l.renew("c", "a", 1, ttl).await.unwrap());
         // Release: the next holder (even the same node) gets a newer epoch at once.
         l.release("c", "b", 2).await.unwrap();
+        // A renewal that raced the release doesn't bring the lease back, alone or batched.
+        assert!(!l.renew("c", "b", 2, ttl).await.unwrap());
+        assert_eq!(l.renew_many(&[("c".to_string(), 2)], "b", ttl).await.unwrap(), vec![false]);
         assert_eq!(l.acquire("c", "b", ttl).await.unwrap(), Ok(3));
         assert_eq!(l.owner("c").await.unwrap().unwrap().epoch, 3);
         assert_eq!(l.owner("nope").await.unwrap(), None);
@@ -415,7 +424,7 @@ mod tests {
         assert_eq!(l.renew_many(&held, "b", Duration::from_secs(5)).await.unwrap(), vec![true, false, false]);
         assert_eq!(l.renew_many(&[], "b", ttl).await.unwrap(), Vec::<bool>::new());
         // The renewal took: past the old ttl, the lease is still b's.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(ttl + Duration::from_millis(100)).await;
         assert!(l.acquire("c", "a", ttl).await.unwrap().is_err());
     }
 

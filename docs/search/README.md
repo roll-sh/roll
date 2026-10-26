@@ -6,6 +6,7 @@ branch instantly and keep their data on object storage. Clients speak the Elasti
 changing the URL.
 
 Design: [architecture.md](architecture.md). Cross-crate interfaces: [contracts.md](contracts.md).
+On AWS (a fleet behind `search-proxy`): [deploy-aws.md](deploy-aws.md).
 
 ## Run it
 
@@ -30,6 +31,8 @@ pnpm dev                                # dashboard: /dashboard/search
 | `--search-test-features`                           | off               | publish Elasticsearch's test features (YAML suites through `--cluster-hook`; test deployments only) |
 | `--no-search`                                      |                   | don't run search |
 | `--search-only` (`ROLL_SEARCH_ONLY`)               |                   | only search and its API (search nodes on AWS) |
+| `--search-public-url` (`ROLL_SEARCH_PUBLIC_URL`)   |                   | the front clients use (load balancer, Lambda function URL): cluster URLs name it |
+| `--search-meta` (`ROLL_SEARCH_META`)               |                   | join a fleet: catalog, leases and node records in Postgres (or a shared SQLite file) |
 
 Storage is rolld's: `--s3-bucket` (with `--s3-prefix`, `--s3-endpoint`), or `<home>/objects`.
 Local disk under `<home>/search/` holds `search.db` (the control plane's SQLite) and the cache.
@@ -67,7 +70,7 @@ own host), `Authorization: ApiKey base64(<name>:<password>)` or
 | GET | `/v1/search/clusters` | list |
 | POST | `/v1/search/clusters` | create `{name, flavor?, parent?, at?, idle_timeout_s?, max_in_flight?, max_body_mb?, destructive_requires_name?}`; answers with `url`, `username`, `password` (once) and `id` — the shape `search-yaml run --cluster-hook` expects |
 | GET | `/v1/search/clusters/{id or name}` | settings, `status` (`loaded` with live index count and requests in flight, or `asleep`), last metered `indices`/`docs`/`stored_bytes`, `url`, `branches` |
-| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`; the idle timeout and body limit apply at once (also to a cluster that is waking up); a new flavor, `destructive_requires_name` or `max_in_flight` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
+| PATCH | `/v1/search/clusters/{id}` | `flavor`, `idle_timeout_s` (0: always loaded), `max_in_flight`, `max_body_mb`, `destructive_requires_name`; the idle timeout, body limit and `max_in_flight` apply at once (also to a cluster that is waking up); a new flavor or `destructive_requires_name` needs a reload: the cluster is put to sleep now, or as soon as no request runs (always-on clusters included), and keeps its current ones until then |
 | DELETE | `/v1/search/clusters/{id}` | waits for running requests and for a wake in progress (which is locked out and unloaded, never left serving); branches keep working |
 | GET, POST | `/v1/search/clusters/{id}/branches` | list; branch `{name, at?}` (`at`: Unix seconds within `--search-history`) |
 | POST | `/v1/search/clusters/{id}/password` | rotate; the new password is in the answer, once. From the answer on, the old one fails, also on a cluster that was waking up |
@@ -82,17 +85,22 @@ To run the YAML REST suites against clusters made through the API, start rolld w
 gets its own cluster, deleted afterwards).
 
 The dashboard (`/dashboard/search/<cluster>`) lists indices; selecting one opens its documents
-(paged `_search` with a query string, as rows or as a table of the most common fields), mapping
+(paged `_search` with a query string, as rows or as a table: the most common fields by default,
+a column picker over the page's paths and the mapping's leaf fields, kept per index in the
+browser, and click-to-sort on sortable columns, `.keyword` sub-fields for text), mapping
 and settings, with refresh and delete. Documents can be added, edited and deleted in place
 (`refresh=wait_for`, routing kept), and any view opens in the Dev Tools console. The console
-completes as you type (Ctrl+Space to ask): methods, paths and index names on the first line;
+completes as you type (Ctrl+Space to ask): methods, paths and index names on the first line,
+then the API's URL query parameters after `?` and their allowed values after `=` (from
+Elasticsearch's REST API spec, `scripts/gen-search-params.mjs`);
 body keys, query and aggregation types, mapping parameters, field types and the index's field
 names (from its mapping) in the body, line by line for `_bulk` and `_msearch`. It highlights JSON
 and copies a request as curl. The dashboard never re-encodes JSON it sends or shows: console and
 document bodies go out as typed (`1.0` stays a float to dynamic mapping, longs above 2^53 stay
 exact, key order is kept), `_source` is cut from the response text, and responses are re-indented
 token by token (`lib/search-docs.ts`: `formatJson`, `hitSources`, `sourceCells`). Index names and mappings are fetched only when a completion needs
-them, so opening the console never wakes a sleeping cluster.
+them, so opening the console never wakes a sleeping cluster. Against a fleet (AWS), build the
+dashboard with `NEXT_PUBLIC_ROLL_SEARCH_API` (its `ApiUrl`) and `NEXT_PUBLIC_ROLL_SEARCH_TOKEN`.
 
 ## Metering and pricing
 

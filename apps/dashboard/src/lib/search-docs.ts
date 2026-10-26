@@ -280,3 +280,85 @@ export function deleteRequest(index: string, id: string, routing?: string): { me
   if (routing) q.set("routing", routing);
   return { method: "DELETE", path: `/${encodeURIComponent(index)}/_doc/${encodeURIComponent(id)}?${q}` };
 }
+
+/** A mapped field: its full path (`user.name`, `title.keyword`) and type. */
+export interface MappedField {
+  name: string;
+  type: string;
+}
+
+/** Field types Elasticsearch sorts on by their doc values. */
+const SORTABLE = new Set([
+  "keyword",
+  "constant_keyword",
+  "wildcard",
+  "version",
+  "ip",
+  "boolean",
+  "date",
+  "date_nanos",
+  "long",
+  "integer",
+  "short",
+  "byte",
+  "double",
+  "float",
+  "half_float",
+  "scaled_float",
+  "unsigned_long",
+]);
+
+/**
+ * The field a table column sorts by, or `null` when Elasticsearch can't sort it: the column's own
+ * field when its type has doc values, else (text) a keyword multi-field under it
+ * (`title.keyword`, the dynamic mapping's). Unmapped columns and objects don't sort.
+ */
+export function sortField(column: string, fields: MappedField[]): string | null {
+  const own = fields.find((f) => f.name === column);
+  if (!own) return null;
+  if (SORTABLE.has(own.type)) return column;
+  if (own.type === "text" || own.type === "match_only_text") {
+    const sub = fields.find((f) => f.name.startsWith(`${column}.`) && !f.name.slice(column.length + 1).includes(".") && SORTABLE.has(f.type) && f.type !== "boolean");
+    return sub ? sub.name : null;
+  }
+  return null;
+}
+
+export type SortOrder = "asc" | "desc";
+
+/** A table sort: the column clicked and the field it sorts by. */
+export interface TableSort {
+  column: string;
+  field: string;
+  order: SortOrder;
+}
+
+/** Clicking a sortable column header: ascending, then descending, then back to relevance. */
+export function nextSort(current: TableSort | null, column: string, field: string): TableSort | null {
+  if (!current || current.column !== column) return { column, field, order: "asc" };
+  if (current.order === "asc") return { column, field, order: "desc" };
+  return null;
+}
+
+/**
+ * The `sort` clause of a table sort: missing values last both ways, as a table reads, and ties
+ * in index order so pages don't overlap.
+ */
+export function sortClause(sort: TableSort | null): unknown[] | undefined {
+  if (!sort) return undefined;
+  return [{ [sort.field]: { order: sort.order, missing: "_last" } }, "_doc"];
+}
+
+/**
+ * The columns a table shows: the ones picked (kept in the order picked, also when the page has no
+ * value for them), else the most common paths of the page.
+ */
+export function visibleColumns(picked: string[] | null, available: string[], max = 8): string[] {
+  if (picked && picked.length > 0) return picked;
+  return available.slice(0, max);
+}
+
+/** Toggles one column of a picker, starting from what is shown now. */
+export function toggleColumn(shown: string[], column: string): string[] {
+  return shown.includes(column) ? shown.filter((c) => c !== column) : [...shown, column];
+}

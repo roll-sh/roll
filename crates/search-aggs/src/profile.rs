@@ -30,6 +30,8 @@ struct Node {
     nanos: [u64; 6],
     counts: [u64; 6],
     debug: Option<Json>,
+    /// Owning buckets built (`built_buckets`, which every aggregator's debug map carries).
+    built: u64,
     children: Vec<usize>,
 }
 
@@ -80,11 +82,19 @@ impl Profiler {
         nodes[id].type_name = agg.profile_type().to_string();
     }
 
-    fn set_debug(&self, id: usize, debug: Json) {
+    fn set_debug(&self, id: usize, debug: Json, built: usize) {
         let mut nodes = self.nodes.lock().expect("profiler");
-        if debug.as_object().is_some_and(|o| !o.is_empty()) {
-            nodes[id].debug = Some(debug);
+        let n = &mut nodes[id];
+        n.built += built as u64;
+        let mut debug = if debug.as_object().is_some() { debug } else { Json::obj() };
+        // OpenSearch (forked before `built_buckets`) prints only the aggregator's own debug
+        // entries, and no `debug` at all when there are none.
+        if crate::dialect::opensearch() {
+            n.debug = debug.as_object().is_some_and(|o| !o.is_empty()).then_some(debug);
+            return;
         }
+        debug.push("built_buckets", Json::from(n.built));
+        n.debug = Some(debug);
     }
 
     /// The `aggregations` array of a shard's profile (`AggregationProfileShardResult`).
@@ -152,7 +162,7 @@ impl Aggregator for Profiled {
         let t = Instant::now();
         let r = self.inner.build(owning);
         self.profiler.add(self.id, BUILD, t, 1);
-        self.profiler.set_debug(self.id, self.inner.profile_debug());
+        self.profiler.set_debug(self.id, self.inner.profile_debug(), owning.len());
         r
     }
     fn build_empty(&self) -> AggValue {

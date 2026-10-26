@@ -2,11 +2,13 @@
 //!
 //! The node reads a cluster's description ([`ClusterSpec`]: password, limits, dialect) from the
 //! catalog when a request wakes it, and caches it in the loaded instance for the cluster's whole
-//! stay. [`search_server::Node::update_spec`] only reaches an instance that has finished loading,
-//! so a change made while a wake is under way (a password rotation, new limits, a delete) would
-//! be lost: the instance would come up with the description read before the change and keep it.
+//! stay. The node re-reads the catalog just before it publishes a waking instance, and
+//! [`search_server::Node::update_spec`] parks changes made after that until the instance is
+//! published, so the control plane hands every change of a cluster with a load under way to the
+//! node as well. What remains is a delete racing a wake (the instance must not come up at all)
+//! and changes the node can't apply in place (the dialect: a reload).
 //!
-//! The control plane closes that gap with the three seams the node gives it:
+//! The control plane handles those with the three seams the node gives it:
 //!
 //! - **The catalog** ([`SqlCatalog`]) records when a cluster was last looked up for a wake, and
 //!   hides clusters being deleted.
@@ -130,7 +132,7 @@ impl Catalog for SqlCatalog {
             // Stamped before reading: a change made after the read is after the stamp.
             st.looked_up.insert(cluster.to_string(), Instant::now());
         }
-        match self.store.by_name(cluster) {
+        match self.store.by_name(cluster).await {
             Ok(Some(c)) => Some(crate::control::spec_for(&c)),
             Ok(None) => {
                 // Not a cluster: don't keep a stamp for every probed name.
@@ -156,12 +158,16 @@ pub(crate) struct GuardedStores {
 impl StoreProvider for GuardedStores {
     async fn meta_store(&self, cluster: &str) -> anyhow::Result<Arc<dyn MetaStore>> {
         let inner = self.inner.meta_store(cluster).await?;
+        // Read before the critical section (it can't await). A delete hides the row only after
+        // marking the cluster deleting below, so a row seen here and no mark seen there means
+        // the delete hasn't started: it will see this load and wait for it.
+        let exists = self.store.by_name(cluster).await?.is_some();
         let token = {
             let mut st = self.wakes.inner.lock();
             // Checked and registered in one critical section with `set_deleting`: either the
             // delete sees this load and waits for it, or this load sees the delete.
             anyhow::ensure!(!st.deleting.contains(cluster), "cluster [{cluster}] is being deleted");
-            anyhow::ensure!(self.store.by_name(cluster)?.is_some(), "cluster [{cluster}] no longer exists");
+            anyhow::ensure!(exists, "cluster [{cluster}] no longer exists");
             st.next += 1;
             let token = st.next;
             st.loading.insert(cluster.to_string(), Load { token, claimed: false });
@@ -180,6 +186,15 @@ impl StoreProvider for GuardedStores {
 
     async fn release(&self, cluster: &str) {
         self.inner.release(cluster).await
+    }
+
+    async fn branch_at(&self, parent: &str, child: &str, at_ms: Option<u64>) -> anyhow::Result<()> {
+        self.inner.branch_at(parent, child, at_ms).await
+    }
+
+    /// Forwarded, or the node would keep every cluster's documents in memory only.
+    fn data(&self) -> Option<search_store::Store> {
+        self.inner.data()
     }
 }
 

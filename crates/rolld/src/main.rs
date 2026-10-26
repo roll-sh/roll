@@ -12,9 +12,6 @@ use tracing::info;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// `mi_option_purge_delay` (libmimalloc-sys doesn't export the constant).
-const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
-
 mod queues;
 mod search;
 
@@ -120,16 +117,19 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Return freed memory to the OS right away (mimalloc's default waits 1 s), and have each worker
+    // Return freed memory to the OS right away (mimalloc's default waits 1 s), keep transparent
+    // huge pages off (they inflate an idle node's RSS about threefold), and have each worker
     // collect its heap when it goes idle: otherwise memory freed after a burst stays with threads
     // that are parked. Measured: no throughput cost; idle footprint after 256 MB of writes 36–56 MB
     // → 24–31 MB (and ~90 MB → ~60 MB with 600 partitions).
-    unsafe { libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .on_thread_park(|| unsafe { libmimalloc_sys::mi_collect(false) })
-        .build()?
-        .block_on(run())
+    search_server::process::tune_memory();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().on_thread_park(search_server::process::on_thread_park).build()?;
+    // While the process is busy, freed pages stay committed for a moment (a zero purge delay
+    // makes bulk indexing refault every page it reuses: about 8% of its CPU); once idle the
+    // delay drops to 0 again and every worker collects, so the idle footprint above holds.
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+    search_server::process::start_purge_governor(rt.handle().clone(), workers);
+    rt.block_on(run())
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -151,15 +151,31 @@ async fn run() -> anyhow::Result<()> {
     if args.search_only {
         anyhow::ensure!(!args.queues_only, "--search-only and --queues-only exclude each other");
         anyhow::ensure!(!args.search.search_disabled, "--search-only with --no-search leaves nothing to run");
-        let s = search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node).await?;
+        let s = search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, args.api, true).await?;
         let listener = tokio::net::TcpListener::bind(args.api).await?;
-        info!(addr = %args.api, "search control API listening");
+        info!(addr = %args.api, tls = s.api_tls(), "search control API listening");
+        let api = s.serve_api(listener);
+        let serve = s.serve();
+        tokio::pin!(api, serve);
         tokio::select! {
-            r = axum::serve(listener, s.router()) => r?,
-            r = s.serve() => r?,
-            _ = shutdown_signal() => info!("shutting down"),
+            r = &mut api => r?,
+            r = &mut serve => r?,
+            _ = shutdown_signal() => {
+                info!("shutting down: handing clusters over");
+                // Both listeners keep answering while clusters flush and their leases go back:
+                // requests in flight finish, new ones are refused before running
+                // (`node_closed_exception`), which the proxy resends to the next owner. The
+                // whole stop, connections finishing included, fits --search-shutdown-timeout.
+                let drain = async {
+                    let deadline = s.shutdown().await;
+                    let _ = tokio::time::timeout_at(deadline, &mut serve).await;
+                };
+                tokio::select! {
+                    _ = drain => {}
+                    _ = &mut api => {}
+                }
+            }
         }
-        s.shutdown().await;
         return Ok(());
     }
 
@@ -250,7 +266,7 @@ async fn run() -> anyhow::Result<()> {
         router = router.merge(q.router());
     }
     // roll search: same object storage, its own node.
-    let search = if args.search.search_disabled { None } else { Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node).await?) };
+    let search = if args.search.search_disabled { None } else { Some(search::Search::start(&home, &args.search, &storage, &args.public_host, &args.node, args.api, false).await?) };
     if let Some(s) = &search {
         router = router.merge(s.router());
     }

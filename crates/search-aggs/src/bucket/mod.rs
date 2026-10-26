@@ -3,6 +3,7 @@
 pub mod auto_histogram;
 pub mod categorize_text;
 pub mod composite;
+pub mod fbf;
 pub mod filters;
 pub mod frequent_item_sets;
 pub mod geogrid;

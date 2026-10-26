@@ -73,11 +73,14 @@ pub struct KnnQuery {
     /// of the nested path's level. Hits are the best child of each of the top `k` parents
     /// (wrap the query in a `ToParentQuery` with `max` to score the parents).
     pub parent_filter: Option<QueryRef>,
+    /// Keep each segment's best `k` instead of the best `k` overall (OpenSearch's native
+    /// engines search segment by segment: a shard returns up to `k` hits per segment).
+    pub per_segment: bool,
 }
 
 impl KnnQuery {
     pub fn new(field: u32, vector: QueryVector, k: usize, num_candidates: usize) -> KnnQuery {
-        KnnQuery { field, vector, k, num_candidates: num_candidates.max(k), filter: None, min_score: None, exact: false, oversample: None, parent_filter: None }
+        KnnQuery { field, vector, k, num_candidates: num_candidates.max(k), filter: None, min_score: None, exact: false, oversample: None, parent_filter: None, per_segment: false }
     }
 
     /// Searches every segment and returns the global top `k` as `(global doc, score)`.
@@ -167,8 +170,10 @@ impl KnnQuery {
                 }
             }
         }
-        all.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        all.truncate(self.k);
+        if !self.per_segment {
+            all.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            all.truncate(self.k);
+        }
         all.sort_by_key(|x| x.0);
         Ok(all)
     }
@@ -383,6 +388,12 @@ impl Query for ScoreDocQuery {
             }
             _ => "ScoreAndDocQuery".into(),
         }
+    }
+
+    /// Lucene's `DocAndScoreQuery` (a rewritten `knn` query) or Elasticsearch's
+    /// `KnnScoreDocQuery` (the top-level `knn` section).
+    fn profile_name(&self) -> String {
+        if self.lucene { "DocAndScoreQuery".into() } else { "KnnScoreDocQuery".into() }
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -153,6 +153,12 @@ pub struct XParser<'a> {
     /// Jackson describes the input as `(String)` rather than `(byte[])` (stored alias filters
     /// are re-parsed from their string form).
     pub string_source: bool,
+    /// Spans of the body's numbers by value node ([`crate::json::locate::number_spans`]),
+    /// built on the first [`XParser::raw_text`] of a number.
+    num_spans: OnceCell<Option<std::collections::HashMap<usize, (usize, usize)>>>,
+    /// The original text of a scalar number root (a multi-field or `copy_to` target parsing
+    /// a copy of a document's number: Jackson re-reads the same token).
+    pub raw_number: Option<String>,
 }
 
 impl<'a> XParser<'a> {
@@ -172,6 +178,8 @@ impl<'a> XParser<'a> {
             depth: 0,
             max_depth: 30,
             string_source: false,
+            num_spans: OnceCell::new(),
+            raw_number: None,
         }
     }
 
@@ -308,6 +316,11 @@ impl<'a> XParser<'a> {
 
     // ---- locations ----
 
+    /// The raw body, when known.
+    pub fn raw(&self) -> Option<&'a [u8]> {
+        self.src
+    }
+
     /// The raw body (or the value's compact JSON when there is none).
     pub fn source(&self) -> &[u8] {
         match self.src {
@@ -344,14 +357,41 @@ impl<'a> XParser<'a> {
         locate(self.source(), &path, Target::Value).unwrap_or_else(|| self.token_location())
     }
 
+    /// Where the name of a field below the current token starts (`rel` ends with its key).
+    pub fn name_location_of(&self, rel: &[Seg<'_>]) -> (usize, usize) {
+        let mut path: Vec<Seg<'_>> = self.path();
+        path.extend_from_slice(rel);
+        locate(self.source(), &path, Target::Name).unwrap_or_else(|| self.token_location())
+    }
+
     /// The current scalar's text as it appears in the body (Jackson keeps a number's original
     /// digits: `1e19`, not `1.0E19`).
     pub fn raw_text(&self) -> String {
-        if let (Some(src), Some(Token::Number)) = (self.src, self.tok)
-            && let Some((a, b)) = crate::json::locate::value_span(src, &self.path())
-            && let Ok(t) = std::str::from_utf8(&src[a..b])
+        if self.tok != Some(Token::Number) {
+            return self.value().to_es_string();
+        }
+        if self.frames.is_empty()
+            && let Some(r) = &self.raw_number
         {
-            return t.to_string();
+            return r.clone();
+        }
+        if let Some(src) = self.src {
+            // A document's numbers: one pass over the body finds them all.
+            let span = if self.base.is_empty() {
+                let spans = self.num_spans.get_or_init(|| crate::json::locate::number_spans(src, self.root));
+                spans.as_ref().zip(self.val).and_then(|(m, v)| m.get(&(v as *const Value as usize)).copied())
+            } else {
+                None
+            };
+            let span = span.or_else(|| crate::json::locate::value_span(src, &self.path()));
+            // The text must still be this value (a pipeline may have replaced it).
+            if let Some((a, b)) = span
+                && let Ok(t) = std::str::from_utf8(&src[a..b])
+                && let Value::Num(n) = self.value()
+                && t.parse::<f64>().is_ok_and(|x| x == n.as_f64() || (x.is_nan() && n.as_f64().is_nan()))
+            {
+                return t.to_string();
+            }
         }
         self.value().to_es_string()
     }
@@ -366,6 +406,11 @@ impl<'a> XParser<'a> {
             _ => locate(src, &path, Target::Value),
         };
         loc.unwrap_or((1, 1))
+    }
+
+    /// Where the name of the current field starts (the field name before the current value).
+    pub fn name_location(&self) -> (usize, usize) {
+        locate(self.source(), &self.path(), Target::Name).unwrap_or_else(|| self.token_location())
     }
 
     /// Just past the current token (Jackson's `getCurrentLocation()`).
@@ -403,6 +448,9 @@ impl<'a> XParser<'a> {
 
     /// [`Self::jackson_error`] at a given location.
     pub fn jackson_error_at(&self, (l, c): (usize, usize), kind: &'static str, msg: &str) -> EsError {
+        if crate::opensearch::active() {
+            return opensearch_jackson_error(self.source(), (l, c), kind, msg);
+        }
         let mut loc = crate::json::parse::source_location(self.source(), l, c);
         if self.string_source {
             loc = loc.replacen("(byte[])", "(String)", 1);
@@ -898,6 +946,7 @@ pub fn is_illegal_argument(e: &EsError) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -996,4 +1045,29 @@ mod tests {
         assert_eq!(float_value(1.1).to_json(), "1.1");
         assert_eq!(float_value(2.0).to_json(), "2.0");
     }
+}
+
+/// A Jackson error as OpenSearch 3.9 reports it: its Jackson (2.18+) words — backticked type
+/// names, "cannot" — at a byte offset (sources are redacted from locations), thrown as is
+/// rather than wrapped in an `XContentParseException`.
+fn opensearch_jackson_error(src: &[u8], (l, c): (usize, usize), kind: &'static str, msg: &str) -> EsError {
+    let mut line_start = 0usize;
+    let mut line = 1usize;
+    for (i, b) in src.iter().enumerate() {
+        if line == l {
+            break;
+        }
+        if *b == b'\n' {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    let offset = line_start + c.saturating_sub(1);
+    let msg = msg.replace("out of range of int (", "out of range of `int` (").replace("out of range of long (", "out of range of `long` (");
+    let (kind, msg) = match msg.strip_suffix("not numeric, can not use numeric value accessors") {
+        Some(head) => ("input_coercion_exception", format!("{head}not numeric, cannot use numeric value accessors")),
+        None => (kind, msg),
+    };
+    let full = format!("{msg}\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #{offset}]");
+    EsError::new(400, kind, full.clone()).caused_by(EsError::new(400, kind, full))
 }

@@ -80,8 +80,23 @@ pub fn class_visible(ctx: Context, c: ClassId) -> bool {
         cls::INGEST_PROCESSORS => ctx == Ingest,
         cls::NAMED_GROUP_EXTRACTOR => matches!(ctx, BooleanField | DateField | DoubleField | GeoPointField | GeometryField | IpField | KeywordField | LongField | CompositeField),
         cls::SOURCE_MAP_FIELD | cls::INGEST_CONDITIONAL_SCRIPT => ctx == ProcessorConditional,
+        cls::VERSION_OBJ => version_allowlist(ctx),
         _ => true,
     }
+}
+
+/// Contexts that get x-pack's `version` field allowlist (`VersionFieldDocValuesExtension`).
+pub fn version_allowlist(ctx: Context) -> bool {
+    use Context::*;
+    matches!(ctx, Aggs | Score | Filter | Field | NumberSort | StringSort | BytesRefSort)
+}
+
+/// Contexts that get x-pack's `unsigned_long` doc values allowlist
+/// (`DocValuesWhitelistExtension`: field, score, filter, aggs, sort, bucket selector and
+/// scripted metric scripts).
+pub fn unsigned_long_allowlist(ctx: Context) -> bool {
+    use Context::*;
+    matches!(ctx, Field | Score | Filter | Aggs | NumberSort | StringSort | AggregationSelector | AggsInit | AggsMap | AggsCombine | AggsReduce)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

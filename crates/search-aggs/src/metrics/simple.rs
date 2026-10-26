@@ -1259,9 +1259,13 @@ pub fn create_weighted_avg(def: &AggDef, spec: &WeightedAvgSpec, ctx: &mut BindC
             "Cannot invoke \"org.elasticsearch.search.aggregations.support.ValuesSourceConfig.valueSourceType()\" because the return value of \"java.util.Map.get(Object)\" is null",
         ));
     };
-    let mut vspec = value.to_vs();
-    vspec.format = spec.format.clone();
-    let value = bind(&vspec, ctx.lookup, VsType::Numeric, false)?;
+    let value = bind(&value.to_vs(), ctx.lookup, VsType::Numeric, false)?;
+    // `MultiValuesSourceAggregationBuilder.resolveFormat`: not the value field's format but
+    // `format` as a decimal pattern, raw without one (a date value prints no string).
+    let format = match &spec.format {
+        Some(p) => DocValueFormat::Decimal(ctx.lookup.decimal_format(p)?),
+        None => DocValueFormat::Raw,
+    };
     let Some(weight) = &spec.weight else {
         return Err(AggError::illegal_argument("Could not find field name [weight] in multiValuesSource"));
     };
@@ -1275,7 +1279,7 @@ pub fn create_weighted_avg(def: &AggDef, spec: &WeightedAvgSpec, ctx: &mut BindC
         }
     }
     Ok(Box::new(WeightedAvgAgg {
-        format: value.format.clone(),
+        format,
         value,
         weight,
         readers: None,

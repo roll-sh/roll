@@ -378,7 +378,8 @@ fn info_inner(ctx: &Ctx) -> EsResult<Reply> {
             }
             s.set("node.name", node.name.clone());
             for (k, v) in &ctx.cluster.config.node_settings {
-                if !k.starts_with("node.attr.") {
+                // `roll.security.*` holds credentials (file-realm users): never printed.
+                if !k.starts_with("node.attr.") && !k.starts_with("roll.security.") {
                     s.set(k.clone(), v.clone());
                 }
             }
@@ -642,10 +643,10 @@ fn stats_inner(ctx: &Ctx) -> EsResult<Reply> {
         }
         if want("breaker") {
             let mut bs = Map::new();
-            for (name, limit, overhead) in breakers(&m) {
+            for (name, limit, overhead, estimated, tripped) in breaker_stats(ctx.cluster, &ctx.state(), &m) {
                 bs.insert(
                     name.to_string(),
-                    obj! { "limit_size_in_bytes" => limit, "limit_size" => crate::units::ByteSize(limit).human(), "estimated_size_in_bytes" => 0, "estimated_size" => "0b", "overhead" => overhead, "tripped" => 0 },
+                    obj! { "limit_size_in_bytes" => limit, "limit_size" => crate::units::ByteSize(limit).human(), "estimated_size_in_bytes" => estimated, "estimated_size" => crate::units::ByteSize(estimated).human(), "overhead" => overhead, "tripped" => tripped },
                 );
             }
             n.insert("breakers".into(), Value::Obj(bs));
@@ -720,6 +721,22 @@ pub fn breakers(m: &NodeMetrics) -> Vec<(&'static str, i64, f64)> {
         ("inflight_requests", heap, 2.0),
         ("parent", heap * 95 / 100, 1.0),
     ]
+}
+
+/// [`breakers`] with the `request` breaker's live numbers: its limit from
+/// `indices.breaker.request.limit`, what it holds and how often it tripped
+/// (name, limit, overhead, estimated, tripped).
+pub fn breaker_stats(cluster: &Cluster, st: &crate::meta::ClusterState, m: &NodeMetrics) -> Vec<(&'static str, i64, f64, i64, i64)> {
+    breakers(m)
+        .into_iter()
+        .map(|(name, limit, overhead)| {
+            if name != "request" {
+                return (name, limit, overhead, 0, 0);
+            }
+            let b = cluster.breakers.request(cluster, st);
+            (name, b.limit().min(i64::MAX as u64) as i64, overhead, b.used() as i64, b.tripped() as i64)
+        })
+        .collect()
 }
 
 /// `indexing_pressure` with every counter at zero.
@@ -896,4 +913,21 @@ const MODULES: &[Module] = &[
     Module { name: "runtime-fields-common", description: "Module for runtime fields features and extensions that have large dependencies", classname: "org.elasticsearch.runtimefields.RuntimeFieldsCommonPlugin", extended_plugins: &["lang-painless"] },
     Module { name: "unsigned-long", description: "Module for the unsigned long field type", classname: "org.elasticsearch.xpack.unsignedlong.UnsignedLongMapperPlugin", extended_plugins: &["x-pack-core", "lang-painless"] },
     Module { name: "wildcard", description: "A plugin for a keyword field type with efficient wildcard search", classname: "org.elasticsearch.xpack.wildcard.Wildcard", extended_plugins: &["x-pack-core", "lang-painless"] },
+    Module { name: "x-pack-async", description: "A module which handles common async operations", classname: "org.elasticsearch.xpack.async.AsyncResultsIndexPlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-async-search", description: "A module which allows to track the progress of a search asynchronously.", classname: "org.elasticsearch.xpack.search.AsyncSearch", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-core", description: "Elasticsearch Expanded Pack Plugin - Core", classname: "org.elasticsearch.xpack.core.XPackPlugin", extended_plugins: &[] },
+    Module { name: "x-pack-enrich", description: "Elasticsearch Expanded Pack Plugin - Enrich", classname: "org.elasticsearch.xpack.enrich.EnrichPlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-ent-search", description: "Elasticsearch Expanded Pack Plugin - Enterprise Search", classname: "org.elasticsearch.xpack.application.EnterpriseSearch", extended_plugins: &["x-pack-core", "search-business-rules"] },
+    Module { name: "x-pack-eql", description: "The Elasticsearch plugin that powers EQL for Elasticsearch", classname: "org.elasticsearch.xpack.eql.plugin.EqlPlugin", extended_plugins: &["x-pack-ql", "lang-painless"] },
+    Module { name: "x-pack-esql", description: "The plugin that powers ESQL for Elasticsearch", classname: "org.elasticsearch.xpack.esql.plugin.EsqlPlugin", extended_plugins: &["x-pack-esql-core", "lang-painless", "x-pack-ml", "x-pack-encryption"] },
+    Module { name: "x-pack-esql-core", description: "Elasticsearch infrastructure plugin for ESQL", classname: "org.elasticsearch.xpack.esql.core.plugin.EsqlCorePlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-graph", description: "Elasticsearch Expanded Pack Plugin - Graph", classname: "org.elasticsearch.xpack.graph.Graph", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-logstash", description: "Elasticsearch Expanded Pack Plugin - Logstash", classname: "org.elasticsearch.xpack.logstash.Logstash", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-migrate", description: "Elasticsearch Expanded Pack Plugin - Index and Data Stream Migration", classname: "org.elasticsearch.xpack.migrate.MigratePlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-ml", description: "Elasticsearch Expanded Pack Plugin - Machine Learning", classname: "org.elasticsearch.xpack.ml.MachineLearning", extended_plugins: &["x-pack-autoscaling", "lang-painless"] },
+    Module { name: "x-pack-ql", description: "Elasticsearch infrastructure plugin for EQL and SQL for Elasticsearch", classname: "org.elasticsearch.xpack.ql.plugin.QlPlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-security", description: "Elasticsearch Expanded Pack Plugin - Security", classname: "org.elasticsearch.xpack.security.Security", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-sql", description: "The Elasticsearch plugin that powers SQL for Elasticsearch", classname: "org.elasticsearch.xpack.sql.plugin.SqlPlugin", extended_plugins: &["x-pack-ql", "lang-painless"] },
+    Module { name: "x-pack-text-structure", description: "Elasticsearch Expanded Pack Plugin - Text Structure", classname: "org.elasticsearch.xpack.textstructure.TextStructurePlugin", extended_plugins: &["x-pack-core"] },
+    Module { name: "x-pack-watcher", description: "Elasticsearch Expanded Pack Plugin - Watcher", classname: "org.elasticsearch.xpack.watcher.Watcher", extended_plugins: &["x-pack-core", "lang-painless"] },
 ];

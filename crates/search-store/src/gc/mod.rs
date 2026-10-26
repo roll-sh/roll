@@ -8,11 +8,12 @@
 //! or that aren't written yet — a segment uploaded moments before the manifest naming it, a
 //! branch being made — as long as `grace` exceeds the longest such window (an hour is plenty).
 //!
-//! Every retained manifest keeps its segments and live docs (a reader may still hold it). WAL
-//! ranges are needed by the latest manifest of each shard (crash recovery) and by older ones only
-//! for point-in-time branches inside `manifest_retain_ms`: an older manifest's range counts while
-//! its successor is younger than the window, and only up to the WAL file the successor was
-//! written at (anything later is covered by the successor itself).
+//! Every retained manifest keeps its segments and live docs (a reader may still hold it), and so
+//! does every pin (`Store::write_pin`, snapshot contents). WAL ranges are needed by the latest
+//! manifest of each shard (crash recovery) and by older ones only for point-in-time branches
+//! inside `manifest_retain_ms`: an older manifest's range counts while its successor is younger
+//! than the window, and only up to the WAL file the successor was written at (anything later is
+//! covered by the successor itself).
 //!
 //! A latest commit point's range that is still open-ended reaches only to the end of the run (the
 //! process) that wrote it: when a node restarts it writes a run marker
@@ -69,6 +70,8 @@ pub struct GcStats {
     pub manifests_deleted: usize,
     /// WAL run markers no open range needed any more.
     pub run_markers_deleted: usize,
+    /// Pins (snapshot contents) whose objects were kept.
+    pub pins: usize,
 }
 
 /// The collector's memory between passes (one per [`Store`]).
@@ -165,7 +168,7 @@ impl Store {
             .await?
             .into_iter()
             .map(|(k, _)| k)
-            .filter(|k| matches!(keys::parse_cluster_key(k), Some(ClusterObject::Manifest { .. })))
+            .filter(|k| matches!(keys::parse_cluster_key(k), Some(ClusterObject::Manifest { .. } | ClusterObject::Pin { .. })))
             .collect();
         self.load_marks_snapshot().await;
         let missing: Vec<String> = {
@@ -212,8 +215,21 @@ impl Store {
             // capped by its successor, so retained history doesn't pin a node's WAL forever.
             let mut shards: HashMap<ShardOf<'_>, Vec<Gen<'_>>> = HashMap::new();
             for (key, m) in cache.iter() {
-                if let Some(ClusterObject::Manifest { cluster, index_uuid, shard, version, deleted }) = keys::parse_cluster_key(key) {
-                    shards.entry((cluster, index_uuid, shard)).or_default().push(Gen { version, deleted, key, marks: m });
+                match keys::parse_cluster_key(key) {
+                    Some(ClusterObject::Manifest { cluster, index_uuid, shard, version, deleted }) => {
+                        shards.entry((cluster, index_uuid, shard)).or_default().push(Gen { version, deleted, key, marks: m });
+                    }
+                    // A pin keeps its segments and live docs, never WAL.
+                    Some(ClusterObject::Pin { .. }) => {
+                        st.pins += 1;
+                        for &(id, live) in m.segments.iter() {
+                            keep_segments.insert(id);
+                            if let Some(g) = live {
+                                keep_live.insert((id, g));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             for gens in shards.values_mut() {

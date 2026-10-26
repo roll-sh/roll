@@ -68,6 +68,18 @@ pub enum IntervalsSource {
     NoMatch(String),
     /// A construction error reported when the query runs.
     Error(String),
+    /// Elasticsearch's `ScriptFilterSource` (`FILTER(<script>)`): the source's intervals a
+    /// script accepts.
+    Scripted(Box<IntervalsSource>, Arc<dyn IntervalScript>),
+}
+
+/// The script of a scripted interval filter (`IntervalFilterScript`): one instance per query,
+/// asked about each interval.
+pub trait IntervalScript: Send + Sync + std::fmt::Debug {
+    /// The script's id or source (the filter's description).
+    fn name(&self) -> &str;
+    /// Whether to keep the interval `[start, end]` with `gaps`.
+    fn accept(&self, start: i32, end: i32, gaps: i32) -> Result<bool>;
 }
 
 impl PartialEq for IntervalsSource {
@@ -241,6 +253,11 @@ impl IntervalsSource {
         Src::Source(spec, bx(s))
     }
 
+    /// The intervals of `s` that `script` accepts (`FilteredIntervalsSource`).
+    pub fn scripted(s: Src, script: Arc<dyn IntervalScript>) -> Src {
+        Src::Scripted(bx(s), script)
+    }
+
     pub fn no_intervals(reason: impl Into<String>) -> Src {
         Src::NoMatch(reason.into())
     }
@@ -310,7 +327,7 @@ impl IntervalsSource {
             Src::Term(_) | Src::MultiTerm { .. } | Src::Offset(..) => 1,
             Src::Block(v) | Src::Ordered(v) | Src::Unordered(v) => v.iter().map(|s| s.min_extent()).fold(0i32, |a, b| a.wrapping_add(b)),
             Src::Or(v, _) => v.iter().map(|s| s.min_extent()).min().unwrap_or(i32::MAX),
-            Src::Repeating(s, ..) | Src::MaxGaps(s, _) | Src::MaxWidth(s, _) | Src::Field(_, s) | Src::Source(_, s) => s.min_extent(),
+            Src::Repeating(s, ..) | Src::MaxGaps(s, _) | Src::MaxWidth(s, _) | Src::Field(_, s) | Src::Source(_, s) | Src::Scripted(s, _) => s.min_extent(),
             Src::Extend(s, b, a) => {
                 let m = b.wrapping_add(s.min_extent()).wrapping_add(*a);
                 if m < 0 { i32::MAX } else { m }
@@ -381,6 +398,7 @@ impl IntervalsSource {
             }
             Src::MaxGaps(s, n) => format!("MAXGAPS/{n}({})", s.to_lucene(schema)),
             Src::MaxWidth(s, n) => format!("MAXWIDTH/{n}({})", s.to_lucene(schema)),
+            Src::Scripted(_, script) => format!("FILTER({})", script.name()),
             Src::Extend(s, b, a) => format!("EXTEND({},{b},{a})", s.to_lucene(schema)),
             Src::Containing(a, b) => format!("CONTAINING({},{})", a.to_lucene(schema), b.to_lucene(schema)),
             Src::ContainedBy(a, b) => format!("CONTAINED_BY({},{})", a.to_lucene(schema), b.to_lucene(schema)),
@@ -418,6 +436,7 @@ impl IntervalsSource {
             Src::Repeating(s, n, _) => format!("R{n}({})", s.key()),
             Src::MaxGaps(s, n) => format!("G{n}({})", s.key()),
             Src::MaxWidth(s, n) => format!("W{n}({})", s.key()),
+            Src::Scripted(s, script) => format!("SF{:p}({})", Arc::as_ptr(script) as *const u8, s.key()),
             Src::Extend(s, b, a) => format!("E{b},{a}({})", s.key()),
             Src::Containing(a, b) => format!("C({},{})", a.key(), b.key()),
             Src::ContainedBy(a, b) => format!("CB({},{})", a.key(), b.key()),
@@ -438,7 +457,7 @@ impl IntervalsSource {
         match self {
             Src::Error(e) => Some(e),
             Src::Block(v) | Src::Ordered(v) | Src::Unordered(v) | Src::Or(v, _) | Src::AtLeast(v, _) => v.iter().find_map(|s| s.first_error()),
-            Src::Repeating(s, ..) | Src::MaxGaps(s, _) | Src::MaxWidth(s, _) | Src::Extend(s, ..) | Src::Offset(s, _) | Src::Field(_, s) | Src::Source(_, s) => s.first_error(),
+            Src::Repeating(s, ..) | Src::MaxGaps(s, _) | Src::MaxWidth(s, _) | Src::Extend(s, ..) | Src::Offset(s, _) | Src::Field(_, s) | Src::Source(_, s) | Src::Scripted(s, _) => s.first_error(),
             Src::Containing(a, b)
             | Src::ContainedBy(a, b)
             | Src::NotContaining(a, b)
@@ -457,7 +476,7 @@ impl IntervalsSource {
                 v.multi_term(field, Arc::new(move |t: &[u8]| q.matches_term(t)));
             }
             Src::Block(xs) | Src::Ordered(xs) | Src::Unordered(xs) | Src::Or(xs, _) | Src::AtLeast(xs, _) => xs.iter().for_each(|s| s.visit(field, v)),
-            Src::Repeating(s, ..) | Src::MaxGaps(s, _) | Src::MaxWidth(s, _) | Src::Extend(s, ..) | Src::Offset(s, _) => s.visit(field, v),
+            Src::Repeating(s, ..) | Src::MaxGaps(s, _) | Src::MaxWidth(s, _) | Src::Extend(s, ..) | Src::Offset(s, _) | Src::Scripted(s, _) => s.visit(field, v),
             Src::Field(f, s) => s.visit(*f, v),
             Src::Source(_, s) => s.visit(field, v),
             // Subtrahends are must-not.
@@ -510,6 +529,7 @@ impl IntervalsSource {
             Src::Repeating(x, n, _) => x.iter(field, seg, s)?.map(|it| Box::new(DupII::new(it, *n)) as BI),
             Src::MaxGaps(x, n) => x.iter(field, seg, s)?.map(|it| Box::new(FilterII { inp: it, gaps: Some(*n), width: None }) as BI),
             Src::MaxWidth(x, n) => x.iter(field, seg, s)?.map(|it| Box::new(FilterII { inp: it, gaps: None, width: Some(*n) }) as BI),
+            Src::Scripted(x, script) => x.iter(field, seg, s)?.map(|it| Box::new(ScriptII { inp: it, script: script.clone() }) as BI),
             Src::Extend(x, b, a) => x.iter(field, seg, s)?.map(|it| Box::new(ExtendII { inp: it, before: *b, after: *a, positioned: false }) as BI),
             Src::Offset(x, before) => x.iter(field, seg, s)?.map(|it| Box::new(OffsetII { inp: it, before: *before }) as BI),
             Src::Containing(a, b) => pair(a, b, field, seg, s)?.map(|(a, b)| Box::new(FilteringII::new(a, b, Rel::Containing)) as BI),
@@ -1831,6 +1851,56 @@ impl II for FilterII {
             };
             if ok {
                 return n;
+            }
+        }
+    }
+    fn match_cost(&self) -> f32 {
+        self.inp.match_cost()
+    }
+}
+
+/// [`IntervalsSource::Scripted`]: intervals the script accepts. A script failure stops
+/// matching and is reported after the segment ([`crate::search::defer_error`]).
+struct ScriptII {
+    inp: BI,
+    script: Arc<dyn IntervalScript>,
+}
+
+impl II for ScriptII {
+    fn doc(&self) -> i64 {
+        self.inp.doc()
+    }
+    fn next_doc(&mut self) -> i64 {
+        self.inp.next_doc()
+    }
+    fn advance(&mut self, t: i64) -> i64 {
+        self.inp.advance(t)
+    }
+    fn cost(&self) -> u64 {
+        self.inp.cost()
+    }
+    fn start(&self) -> i32 {
+        self.inp.start()
+    }
+    fn end(&self) -> i32 {
+        self.inp.end()
+    }
+    fn gaps(&self) -> i32 {
+        self.inp.gaps()
+    }
+    fn next_interval(&mut self) -> i32 {
+        loop {
+            let n = self.inp.next_interval();
+            if n == NO_MORE_INTERVALS {
+                return n;
+            }
+            match self.script.accept(self.inp.start(), self.inp.end(), self.inp.gaps()) {
+                Ok(true) => return n,
+                Ok(false) => {}
+                Err(e) => {
+                    crate::search::defer_error(e);
+                    return NO_MORE_INTERVALS;
+                }
             }
         }
     }

@@ -502,6 +502,23 @@ fn concurrent_matrix_keeps_one_live_doc_per_id() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+/// Reopens a commit with a published view.
+fn reopen_with(out: &search_index::shard::FlushOutcome, view: Option<search_index::PublishedView>) -> Shard {
+    let handles: Vec<SegmentHandle> = out
+        .segments
+        .iter()
+        .map(|f| {
+            let h = SegmentHandle::new(f.data.clone());
+            match &f.live_docs {
+                Some(b) => h.with_live_bytes(b).unwrap(),
+                None => h,
+            }
+        })
+        .collect();
+    let cfg = ShardConfig { merge_threads: 0, local_checkpoint: Some(out.local_checkpoint), ..Default::default() };
+    Shard::open_published(cfg, schema(), handles, view).unwrap()
+}
+
 /// Reopens a commit from its zero-copy bytes and live docs.
 fn reopen(out: &search_index::shard::FlushOutcome) -> Shard {
     let handles: Vec<SegmentHandle> = out
@@ -666,7 +683,8 @@ fn force_merge_returns_under_steady_indexing() {
 
 #[test]
 fn tombstones_are_accounted_and_pruned_by_deletes() {
-    let cfg = ShardConfig { merge_threads: 0, gc_deletes: Duration::from_millis(1), ..Default::default() };
+    // Long enough for the last tombstone to outlive the checks below on a loaded machine.
+    let cfg = ShardConfig { merge_threads: 0, gc_deletes: Duration::from_millis(500), ..Default::default() };
     let s = Shard::open(cfg, schema(), Vec::new()).unwrap();
     for i in 0..1000 {
         s.index(IndexOp::new(doc(&format!("{i}"), &["w"]))).unwrap();
@@ -687,7 +705,7 @@ fn tombstones_are_accounted_and_pruned_by_deletes() {
     assert!(st.version_map_bytes >= 5000 * 64, "{}", st.version_map_bytes);
     assert_eq!(st.buffer_bytes, 0, "tombstones are not indexing buffer");
     // No refresh: later deletes prune the expired ones (every max(gc_deletes / 4, 100ms)).
-    std::thread::sleep(Duration::from_millis(250));
+    std::thread::sleep(Duration::from_millis(800));
     s.delete(DeleteOp::new(b"last".to_vec())).unwrap();
     let st = s.stats();
     assert!(st.version_map_entries <= 1, "{}", st.version_map_entries);
@@ -695,7 +713,8 @@ fn tombstones_are_accounted_and_pruned_by_deletes() {
     // A recent tombstone still answers version checks.
     let mut op = IndexOp::new(doc("last", &["w"]));
     op.op_type = OpType::Create;
-    assert!(matches!(s.index(op).unwrap(), OpResult::Indexed { created: true, version: 2, .. }));
+    let r = s.index(op).unwrap();
+    assert!(matches!(r, OpResult::Indexed { created: true, version: 2, .. }), "{r:?}");
 }
 
 #[test]
@@ -769,3 +788,289 @@ fn the_shard_doc_limit_counts_buffered_nested_and_deleted_docs() {
     let small = ShardConfig { max_docs: 9, ..cfg };
     assert!(Shard::open(small, schema(), handles).is_err());
 }
+
+/// Tombstones of a commit point come back with what remained of `gc_deletes` (external
+/// versions after a reopen behave as before it), expired ones are ignored by primary version
+/// checks even before they are pruned, and replayed operations still see them.
+#[test]
+fn tombstones_round_trip_through_a_commit_and_expire_with_gc_deletes() {
+    let s = Shard::in_memory(schema());
+    let mut op = IndexOp::new(doc("1", &["a"]));
+    op.version = Some(10);
+    op.version_type = VersionType::External;
+    s.index(op).unwrap();
+    let mut del = DeleteOp::new(b"1".to_vec());
+    del.version = Some(11);
+    del.version_type = VersionType::External;
+    assert!(matches!(s.delete(del).unwrap(), OpResult::Deleted { found: true, version: 11, .. }));
+    s.delete(DeleteOp::new(b"never".to_vec())).unwrap();
+    let out = s.flush().unwrap();
+    let tombs = s.tombstones(out.local_checkpoint);
+    assert_eq!(tombs.len(), 2);
+    assert!(s.tombstones(0).is_empty(), "only tombstones the commit covers");
+    let t1 = tombs.iter().find(|t| &t.0[..] == b"1").unwrap();
+    assert_eq!((t1.1, t1.2), (1, 11));
+
+    let ext = |v: i64| {
+        let mut op = IndexOp::new(doc("1", &["b"]));
+        op.version = Some(v);
+        op.version_type = VersionType::External;
+        op
+    };
+    // Reopened without them: the delete is forgotten.
+    let bare = reopen(&out);
+    assert!(matches!(bare.index(ext(5)).unwrap(), OpResult::Indexed { version: 5, .. }));
+    // Seeded: the delete still decides.
+    let s2 = reopen(&out);
+    s2.seed_tombstones(tombs.clone());
+    match s2.index(ext(5)).unwrap() {
+        OpResult::Conflict(c) => assert_eq!(c.reason("1"), "[1]: version conflict, current version [11] is higher or equal to the one provided [5]"),
+        r => panic!("{r:?}"),
+    }
+    // A replayed older operation is stale against the tombstone.
+    let mut old = IndexOp::new(doc("1", &["old"]));
+    old.origin = Origin::Replay { seq_no: 0, primary_term: 1, version: 10 };
+    assert_eq!(s2.index(old).unwrap(), OpResult::Stale { seq_no: 0 });
+    // Past gc_deletes (shortened live) primaries no longer see it, replays still do.
+    s2.set_gc_deletes(Duration::from_millis(20));
+    std::thread::sleep(Duration::from_millis(40));
+    let mut old = IndexOp::new(doc("1", &["old"]));
+    old.origin = Origin::Replay { seq_no: 0, primary_term: 1, version: 10 };
+    assert_eq!(s2.index(old).unwrap(), OpResult::Stale { seq_no: 0 });
+    assert!(matches!(s2.index(ext(5)).unwrap(), OpResult::Indexed { version: 5, created: true, .. }));
+    assert!(s2.tombstones(i64::MAX).iter().all(|t| &t.0[..] != b"1"));
+    // Expired tombstones are not seeded, and seeding never overrides a newer state.
+    let s3 = reopen(&out);
+    s3.set_gc_deletes(Duration::from_millis(20));
+    s3.seed_tombstones(tombs.iter().map(|t| (t.0.clone(), t.1, t.2, Duration::from_secs(1))));
+    assert!(s3.tombstones(i64::MAX).is_empty());
+    s3.index(IndexOp::new(doc("1", &["live"]))).unwrap();
+    s3.seed_tombstones(tombs.clone());
+    assert!(s3.get(b"1", true).unwrap().is_some(), "a buffered doc wins over a seeded tombstone");
+}
+
+/// After a replay, seq nos handed out but never logged (a crash between the two) are filled
+/// with no-ops, so the local checkpoint reaches the max seq no.
+#[test]
+fn seq_no_gaps_are_filled() {
+    let s = Shard::in_memory(schema());
+    for seq in [0, 1, 3, 4, 7] {
+        let mut op = IndexOp::new(doc(&format!("{seq}"), &["w"]));
+        op.origin = Origin::Replay { seq_no: seq, primary_term: 1, version: 1 };
+        s.index(op).unwrap();
+    }
+    assert_eq!((s.local_checkpoint(), s.max_seq_no()), (1, 7));
+    assert_eq!(s.fill_seq_no_gaps(), 3, "seq nos 2, 5 and 6");
+    assert_eq!(s.local_checkpoint(), 7);
+    assert_eq!(s.fill_seq_no_gaps(), 0);
+    let r = s.index(IndexOp::new(doc("next", &["w"]))).unwrap();
+    assert!(matches!(r, OpResult::Indexed { seq_no: 8, .. }));
+}
+
+/// Elasticsearch's soft-deletes retention: deletes of recent operations don't make small
+/// segments merge (a fully deleted segment stays), until the retention lease moves past them.
+#[test]
+fn retained_deletes_do_not_trigger_merges() {
+    let cfg = ShardConfig { merge_threads: 0, ..Default::default() };
+    let s = Shard::open(cfg, schema(), Vec::new()).unwrap();
+    s.index(IndexOp::new(doc("1", &["a"]))).unwrap();
+    s.index(IndexOp::new(doc("2", &["a"]))).unwrap();
+    s.refresh().unwrap();
+    s.index(IndexOp::new(doc("3", &["a"]))).unwrap();
+    s.refresh().unwrap();
+    s.delete(DeleteOp::new(b"3".to_vec())).unwrap();
+    s.delete(DeleteOp::new(b"1".to_vec())).unwrap();
+    s.refresh().unwrap();
+    // As Elasticsearch 9.5.5 shows it: `_0 1 1`, `_1 0 1` (it adds a third segment of delete
+    // tombstones, which roll keeps in the version map instead).
+    let segs: Vec<(u32, u32)> = s.segments().iter().map(|g| (g.max_doc - g.del_count, g.del_count)).collect();
+    assert_eq!(segs, vec![(1, 1), (0, 1)]);
+    assert_eq!(s.retained_from(), 0, "a new shard retains everything until the lease syncs");
+    // Forced merges still expunge.
+    s.force_merge(None, true).unwrap();
+    s.refresh().unwrap();
+    let segs: Vec<(u32, u32)> = s.segments().iter().map(|g| (g.max_doc - g.del_count, g.del_count)).collect();
+    assert_eq!(segs, vec![(1, 0)]);
+}
+
+/// The soft-deletes retention lease travels with a commit: a shard reopened with it keeps the
+/// deletes it retained (no merge reclaims them right after the reopen), one reopened without
+/// it starts the lease at the commit's checkpoint.
+#[test]
+fn a_reopened_shard_keeps_its_retention_lease() {
+    let build = || {
+        let cfg = ShardConfig { merge_threads: 0, ..Default::default() };
+        let s = Shard::open(cfg, schema(), Vec::new()).unwrap();
+        s.index(IndexOp::new(doc("1", &["a"]))).unwrap();
+        s.index(IndexOp::new(doc("2", &["a"]))).unwrap();
+        s.refresh().unwrap();
+        s.index(IndexOp::new(doc("3", &["a"]))).unwrap();
+        s.refresh().unwrap();
+        s.delete(DeleteOp::new(b"3".to_vec())).unwrap();
+        s.delete(DeleteOp::new(b"1".to_vec())).unwrap();
+        s.refresh().unwrap();
+        s
+    };
+    let segs = |s: &Shard| s.segments().iter().map(|g| (g.max_doc - g.del_count, g.del_count)).collect::<Vec<_>>();
+    let s = build();
+    let lease = s.retention_lease();
+    assert_eq!((lease.0, lease.1), (0, -1), "a new shard retains everything");
+    let out = s.flush().unwrap();
+    let kept = reopen(&out);
+    kept.seed_retention_lease(lease.0, lease.1, lease.2);
+    assert_eq!(kept.retained_from(), 0);
+    kept.index(IndexOp::new(doc("4", &["a"]))).unwrap();
+    kept.refresh().unwrap();
+    assert_eq!(segs(&kept), vec![(1, 1), (0, 1), (1, 0)], "the retained deletes stay");
+    let fresh = reopen(&out);
+    assert_eq!(fresh.retained_from(), out.local_checkpoint + 1);
+    // A lease is never moved backwards past what the shard retains.
+    fresh.seed_retention_lease(fresh.retained_from() + 5, 0, std::time::Duration::ZERO);
+    assert_eq!(fresh.retained_from(), out.local_checkpoint + 1);
+    fresh.index(IndexOp::new(doc("4", &["a"]))).unwrap();
+    fresh.refresh().unwrap();
+    assert!(segs(&fresh).iter().all(|&(_, del)| del == 0), "the deletes are reclaimed: {:?}", segs(&fresh));
+}
+
+/// `Shard::set_leaf_sort`: searchers list segments by a point field's max value, descending,
+/// segments without the field last (Elasticsearch's `@timestamp` leaf sorter), and only once it
+/// is set.
+#[test]
+fn leaf_sort_orders_segments_by_max_point() {
+    const TS: u32 = 40;
+    let schema = schema().with_field(FieldSchema::new(TS, "@timestamp").with_points(search_codec::info::PointsSpec::new(1, 8))).unwrap();
+    let s = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema, Vec::new()).unwrap();
+    let ts_doc = |id: &str, ts: Option<i64>| {
+        let mut d = doc(id, &["w"]);
+        if let Some(t) = ts {
+            d.fields.push(IndexableField::Point { field: TS, packed: search_codec::points::encode::i64_bytes(t).to_vec() });
+        }
+        d
+    };
+    for (id, ts) in [("old", Some(10)), ("none", None), ("new", Some(30)), ("mid", Some(20))] {
+        s.index(IndexOp::new(ts_doc(id, ts))).unwrap();
+        s.refresh().unwrap();
+    }
+    // Each segment by the timestamp it holds.
+    let ids = |s: &Shard| -> Vec<Option<i64>> {
+        s.searcher().segments().iter().map(|seg| seg.reader.points(TS).map(|p| search_codec::points::encode::i64_from(p.max_packed_value()))).collect()
+    };
+    let (old, none, new, mid) = (Some(10), None, Some(30), Some(20));
+    assert_eq!(ids(&s), [old, none, new, mid]);
+    let generation = s.searcher().generation();
+    s.set_leaf_sort(Some(TS));
+    assert!(s.searcher().generation() > generation);
+    assert_eq!(ids(&s), [new, mid, old, none]);
+    s.set_leaf_sort(None);
+    assert_eq!(ids(&s), [old, none, new, mid]);
+}
+
+/// A commit taken with writes nobody refreshed yet says what the searcher showed
+/// (`FlushOutcome::published`): reopened with it, searches and non-realtime gets see exactly
+/// that (unrefreshed docs hidden, docs deleted since the refresh still found), realtime gets see
+/// everything, and the next refresh publishes the rest.
+#[test]
+fn a_commit_reopens_with_the_searcher_it_had() {
+    let s = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(), Vec::new()).unwrap();
+    for i in 0..10 {
+        s.index(IndexOp::new(doc(&format!("{i}"), &["w"]))).unwrap();
+    }
+    s.refresh().unwrap();
+    // Not refreshed: two new docs, one delete and one update of refreshed docs.
+    s.index(IndexOp::new(doc("new1", &["w", "fresh"]))).unwrap();
+    s.index(IndexOp::new(doc("new2", &["w", "fresh"]))).unwrap();
+    s.delete(DeleteOp::new(b"3".to_vec())).unwrap();
+    s.index(IndexOp::new(doc("4", &["w", "fresh"]))).unwrap();
+    // Memory pressure wrote some of it as a segment without publishing it.
+    s.write_buffers().unwrap();
+    s.index(IndexOp::new(doc("new3", &["w"]))).unwrap();
+    let all = || Arc::new(MatchAllQuery) as QueryRef;
+    let fresh = || Arc::new(TermQuery::new(BODY, "fresh")) as QueryRef;
+    assert_eq!((count(&s, all()), count(&s, fresh())), (10, 0));
+    let out = s.flush().unwrap();
+    let view = out.published.clone().expect("the commit holds unrefreshed writes");
+    // The segment memory pressure wrote, and the buffer the flush converted.
+    assert_eq!(view.hidden, vec![1, 2], "{view:?}");
+    assert_eq!(view.deleted.len(), 1, "doc 3 and the old doc 4: {view:?}");
+    assert_eq!(view.deleted[0].1.len(), 2, "{view:?}");
+    // Flushing published nothing.
+    assert_eq!((count(&s, all()), count(&s, fresh())), (10, 0));
+
+    let open = |view: Option<search_index::PublishedView>| {
+        let handles: Vec<SegmentHandle> = out
+            .segments
+            .iter()
+            .map(|f| {
+                let h = SegmentHandle::new(f.data.clone());
+                match &f.live_docs {
+                    Some(b) => h.with_live_bytes(b).unwrap(),
+                    None => h,
+                }
+            })
+            .collect();
+        let cfg = ShardConfig { merge_threads: 0, local_checkpoint: Some(out.local_checkpoint), ..Default::default() };
+        Shard::open_published(cfg, schema(), handles, view).unwrap()
+    };
+    let r = open(Some(view.clone()));
+    assert_eq!((count(&r, all()), count(&r, fresh())), (10, 0));
+    assert!(r.has_pending_changes());
+    assert!(r.get(b"3", false).unwrap().is_some(), "deleted after the refresh: still searchable");
+    assert!(r.get(b"3", true).unwrap().is_none(), "but gone for realtime reads");
+    assert!(r.get(b"new1", false).unwrap().is_none());
+    assert_eq!(r.get(b"new1", true).unwrap().unwrap().seq_no, 10);
+    assert_eq!(r.get(b"4", false).unwrap().unwrap().version, 1);
+    assert_eq!(r.get(b"4", true).unwrap().unwrap().version, 2);
+    // A leaf sort reorders what is shown without revealing the rest.
+    r.set_leaf_sort(Some(BODY));
+    assert_eq!(count(&r, all()), 10);
+    r.set_leaf_sort(None);
+    assert!(r.refresh().unwrap(), "the refresh publishes the hidden segment and deletes");
+    assert_eq!((count(&r, all()), count(&r, fresh())), (12, 3));
+    assert!(r.get(b"3", false).unwrap().is_none());
+    // Without the view everything is searchable, as after a restart; a commit of a shard
+    // whose searcher shows everything carries no view.
+    let r2 = open(None);
+    assert_eq!((count(&r2, all()), count(&r2, fresh())), (12, 3));
+    assert!(r.flush().unwrap().published.is_none());
+    // A view that doesn't fit the segments is refused.
+    let bad = search_index::PublishedView { hidden: vec![7], ..Default::default() };
+    let handles = vec![SegmentHandle::new(out.segments[0].data.clone())];
+    assert!(Shard::open_published(ShardConfig::default(), schema(), handles, Some(bad)).is_err());
+}
+
+/// A merge installed after the last refresh: the searcher still shows the merged-away
+/// segments, which a view over the commit can't express, so the commit counts as all
+/// published.
+#[test]
+fn a_commit_describes_a_searcher_over_segments_merged_since() {
+    let s = Shard::open(ShardConfig { merge_threads: 0, ..Default::default() }, schema(), Vec::new()).unwrap();
+    // Refresh until the merge that runs inline after a refresh merges something: the searcher
+    // still shows the merged segments.
+    let mut n = 0;
+    while s.segments().len() == s.searcher().segments().len() {
+        assert!(n < 100, "no merge");
+        s.index(IndexOp::new(doc(&format!("{n}"), &["w"]))).unwrap();
+        s.refresh().unwrap();
+        n += 1;
+    }
+    let all = || Arc::new(MatchAllQuery) as QueryRef;
+    let fresh = || Arc::new(TermQuery::new(BODY, "fresh")) as QueryRef;
+    // Not refreshed: a new doc, and a delete of a doc the merged segment holds.
+    s.index(IndexOp::new(doc("x", &["w", "fresh"]))).unwrap();
+    s.delete(DeleteOp::new(b"0".to_vec())).unwrap();
+    let out = s.flush().unwrap();
+    let view = out.published.clone().expect("the merge is traced back to what the searcher showed");
+    assert_eq!(view.merged.len(), 1, "{view:?}");
+    assert!(view.merged[0].1.is_empty(), "every doc of the merged segment was shown: {view:?}");
+    assert_eq!(count(&s, all()), n);
+    let r = reopen_with(&out, Some(view));
+    assert_eq!((count(&r, all()), count(&r, fresh())), (n, 0), "the reopened shard shows what the searcher showed");
+    assert!(r.get(b"0", false).unwrap().is_some(), "deleted after the refresh: still searchable");
+    assert!(r.get(b"0", true).unwrap().is_none());
+    assert!(r.refresh().unwrap());
+    assert_eq!((count(&r, all()), count(&r, fresh())), (n, 1));
+    // Once a refresh published the merged segment, commits need no trace of it.
+    assert!(s.refresh().unwrap());
+    assert!(s.flush().unwrap().published.is_none());
+}
+

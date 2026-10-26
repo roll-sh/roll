@@ -69,13 +69,15 @@ fn grow<R, F: FnOnce() -> R>(f: F) -> R {
     // thread-local references) across a level.
     unsafe impl<T> Send for AssertSend<T> {}
     let job = AssertSend(f);
+    // The request's dialect follows the work onto the continuation thread.
+    let opensearch = crate::opensearch::active();
     let out = std::thread::scope(|s| {
         let handle = std::thread::Builder::new()
             .name("search-deep".into())
             .stack_size(GROWN)
             .spawn_scoped(s, move || {
                 let job = job;
-                AssertSend((job.0)())
+                AssertSend(crate::opensearch::with(opensearch, job.0))
             })
             .expect("spawning a thread for deeply nested input");
         match handle.join() {

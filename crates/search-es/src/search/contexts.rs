@@ -2,6 +2,15 @@
 //! `keep_alive` so later pages (`_search/scroll`) and PIT searches see the same snapshot.
 //! Expiry is checked on access (no timer runs), bounded by `search.max_keep_alive` (24h) and
 //! `search.max_open_scroll_context` (500).
+//!
+//! A scroll page continues where the last one stopped, as Elasticsearch's
+//! `ScrollContext.lastEmittedDoc` does: when the scroll is sorted by score or by `_doc` (and
+//! has nothing that needs the whole window again: rescoring, collapsing, aggregations…), each
+//! shard keeps the last hit it contributed, and the next page collects only the `size` best
+//! hits after it ([`ScrollCursor`]) instead of the `offset + size` best and dropping the
+//! first `offset`. A page costs the same however deep the scroll is, and returns the very
+//! same hits (merging breaks ties on shard and doc, as the continuation does). Other scrolls
+//! page by offset.
 
 use super::{SearchOutcome, SearchRequest, Target};
 use crate::rest::Reply;
@@ -24,12 +33,114 @@ pub struct SearchContext {
     /// Scroll: hits returned so far.
     pub offset: usize,
     pub indices: Vec<String>,
+    /// When the context was opened (epoch ms; OpenSearch lists PITs with it).
+    pub created_ms: i64,
+    /// The keep alive it was opened with (ms).
+    pub keep_alive_ms: i64,
 }
 
 #[derive(Default)]
 pub struct Contexts {
     next: std::sync::atomic::AtomicU64,
     map: Mutex<HashMap<String, SearchContext>>,
+    /// Continuations of the scrolls that page by last hit, by context id (dropped with their
+    /// context: [`Contexts::purge`] keeps only live ids).
+    cursors: Mutex<HashMap<String, ScrollCursor>>,
+}
+
+/// How a scroll's next page continues ([`cursor_kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CursorKind {
+    /// Sorted by score: hits after `(score, doc)` in (score desc, doc asc).
+    Score,
+    /// Sorted by `_doc`: docs after `doc`.
+    Doc,
+}
+
+/// A scroll's continuation: per target, the last hit it contributed, as `(score, doc)`.
+#[derive(Clone, Debug)]
+struct ScrollCursor {
+    kind: CursorKind,
+    last: Vec<Option<(f32, u32)>>,
+    /// The first page's max score: every page reports the max over all matches.
+    max_score: Option<f32>,
+    /// The first page's exact total, which every page reports: later pages need not count
+    /// (Elasticsearch keeps `ScrollContext.totalHits` and disables total tracking after the
+    /// first page), so their collection stops once the page is full.
+    total: Option<u64>,
+}
+
+thread_local! {
+    /// The continuation of the scroll page this thread is running ([`page_after`]).
+    static PAGE: std::cell::RefCell<PageState> = const { std::cell::RefCell::new(None) };
+}
+
+/// The scroll page continuation this thread runs, to hand to the threads the page's shards
+/// run on ([`with_page`]).
+pub(crate) type PageState = Option<(CursorKind, Vec<Option<(f32, u32)>>)>;
+
+pub(crate) fn page_state() -> PageState {
+    PAGE.with(|p| p.borrow().clone())
+}
+
+/// Runs `f` with this thread's scroll continuation set to `state` (a [`page_state`] of the
+/// thread that runs the page), restoring the previous one after.
+pub(crate) fn with_page<R>(state: PageState, f: impl FnOnce() -> R) -> R {
+    struct Restore(PageState);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PAGE.with(|p| *p.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(PAGE.with(|p| std::mem::replace(&mut *p.borrow_mut(), state)));
+    f()
+}
+
+/// Inside a scroll page that continues by last hit: its kind and target `ti`'s last hit
+/// (`None` when the target contributed none yet). The query phase collects after it.
+pub(crate) fn page_after(ti: usize) -> Option<(CursorKind, Option<(f32, u32)>)> {
+    PAGE.with(|p| p.borrow().as_ref().map(|(k, last)| (*k, last.get(ti).copied().flatten())))
+}
+
+/// Whether a scroll of `req` can continue by last hit, and how: sorted by score (no sort,
+/// or `_score` descending) or by `_doc` ascending, with nothing that needs every page's full
+/// window (rescoring, collapsing, aggregations, suggestions, kNN, retrievers, profiling,
+/// `terminate_after`, `search_after`).
+pub(crate) fn cursor_kind(req: &SearchRequest) -> Option<CursorKind> {
+    use crate::search_source::{Sort, SortOrder};
+    let s = &req.source;
+    if !s.rescore.is_empty()
+        || s.collapse.is_some()
+        || s.aggs.is_some()
+        || s.suggest.is_some()
+        || !s.knn.is_empty()
+        || s.retriever.is_some()
+        || s.rank.is_some()
+        || s.diversify.is_some()
+        || s.fusion.is_some()
+        || s.profile
+        || s.track_scores
+        || s.terminate_after.is_some()
+        || s.search_after.is_some()
+        || req.fused.is_some()
+        || req.rank_only
+    {
+        return None;
+    }
+    match s.sort.as_slice() {
+        [] | [Sort::Score { order: SortOrder::Desc }] => Some(CursorKind::Score),
+        [Sort::Field { field, order: None | Some(SortOrder::Asc), missing: None, unmapped_type: None, mode: None, numeric_type: None, format: None, nested: None }] if field == "_doc" => Some(CursorKind::Doc),
+        _ => None,
+    }
+}
+
+/// The last hit each target contributed to a page (`ranked`: the page's hits, best first).
+fn advance(last: &mut [Option<(f32, u32)>], ranked: &[(usize, u32, f32)]) {
+    for &(t, doc, score) in ranked {
+        if let Some(l) = last.get_mut(t) {
+            *l = Some((score, doc));
+        }
+    }
 }
 
 impl std::fmt::Debug for Contexts {
@@ -70,7 +181,12 @@ pub fn check_keep_alive(ctx: &Ctx, ka: TimeValue) -> EsResult<Duration> {
 impl Contexts {
     fn purge(&self) {
         let now = Instant::now();
-        self.map.lock().retain(|_, c| c.expires > now);
+        let mut map = self.map.lock();
+        map.retain(|_, c| c.expires > now);
+        let mut cursors = self.cursors.lock();
+        if !cursors.is_empty() {
+            cursors.retain(|id, _| map.contains_key(id));
+        }
     }
 
     pub fn open(&self, c: SearchContext) -> String {
@@ -79,6 +195,15 @@ impl Contexts {
         let id = new_id(n, c.pit);
         self.map.lock().insert(id.clone(), c);
         id
+    }
+
+    /// When the last open scroll or point in time expires (`None`: none is open). A cluster
+    /// holding one must stay loaded until then: their searchers live only in memory.
+    pub fn latest_expiry(&self) -> Option<Instant> {
+        let now = Instant::now();
+        let mut g = self.map.lock();
+        g.retain(|_, c| c.expires > now);
+        g.values().map(|c| c.expires).max()
     }
 
     pub fn count_scrolls(&self) -> usize {
@@ -100,11 +225,37 @@ impl Contexts {
         self.map.lock().remove(id).is_some()
     }
 
+    /// Closes a context; how many shard contexts that frees (`num_freed` counts one per shard
+    /// the scroll or point in time holds open), 0 when it wasn't open.
+    pub fn close_shards(&self, id: &str) -> usize {
+        // A scroll whose shards the can-match phase all skipped holds none: it frees nothing.
+        self.map.lock().remove(id).map_or(0, |c| if c.pit { c.targets.len().max(1) } else { c.targets.len() })
+    }
+
+    /// The live points in time as `(id, created_ms, keep_alive_ms)`, oldest first.
+    pub fn pits(&self) -> Vec<(String, i64, i64)> {
+        self.purge();
+        let mut out: Vec<(String, i64, i64)> = self.map.lock().iter().filter(|(_, c)| c.pit).map(|(id, c)| (id.clone(), c.created_ms, c.keep_alive_ms)).collect();
+        out.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+        out
+    }
+
+    /// Closes every point in time, returning their ids (oldest first).
+    pub fn close_pits(&self) -> Vec<String> {
+        let ids: Vec<String> = self.pits().into_iter().map(|(id, _, _)| id).collect();
+        let mut g = self.map.lock();
+        for id in &ids {
+            g.remove(id);
+        }
+        ids
+    }
+
+    /// Closes every scroll (or every point in time); the shard contexts freed.
     pub fn close_all(&self, pit: bool) -> usize {
         let mut g = self.map.lock();
-        let before = g.len();
+        let freed = g.values().filter(|c| c.pit == pit).map(|c| c.targets.len().max(1)).sum();
         g.retain(|_, c| c.pit != pit);
-        before - g.len()
+        freed
     }
 }
 
@@ -129,10 +280,34 @@ pub fn start_scroll(ctx: &Ctx, req: &SearchRequest, targets: Vec<Target>, out: &
             format!("Trying to create too many scroll contexts. Must be less than or equal to: [{max_open}]. This limit can be set by changing the [search.max_open_scroll_context] setting."),
         ));
     }
+    // A shard that failed this first page keeps no context (its reader context is freed), so
+    // later pages and the clear-scroll count leave it out.
+    let failed: Vec<(&str, i64)> = out.failures.iter().filter_map(|f| Some((f.get("index")?.as_str()?, f.get("shard")?.as_i64()?))).collect();
+    let keep: Vec<bool> = targets.iter().map(|t| !failed.iter().any(|(i, s)| *i == t.idx.name && *s == t.shard.id as i64)).collect();
+    let mut renumber = vec![usize::MAX; targets.len()];
+    let mut kept = 0;
+    for (i, k) in keep.iter().enumerate() {
+        if *k {
+            renumber[i] = kept;
+            kept += 1;
+        }
+    }
+    let ranked: Vec<(usize, u32, f32)> = out.ranked.iter().filter(|r| keep[r.0]).map(|&(t, d, sc)| (renumber[t], d, sc)).collect();
+    let targets: Vec<Target> = targets.into_iter().zip(&keep).filter_map(|(t, k)| k.then_some(t)).collect();
     for t in &targets {
         t.shard.counters.scroll_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    let id = ctx.cluster.contexts.open(SearchContext { targets, request: Some(req.clone()), expires: Instant::now() + ka, pit: false, offset: returned, indices: req.indices.clone() });
+    let n = targets.len();
+    let id = ctx.cluster.contexts.open(SearchContext { targets, request: Some(req.clone()), expires: Instant::now() + ka, pit: false, offset: returned, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64 });
+    if let Some(kind) = cursor_kind(req) {
+        let mut last = vec![None; n];
+        advance(&mut last, &ranked);
+        let total = match out.total {
+            Some((n, search_index::collector::top_docs::TotalRelation::EqualTo)) => Some(n),
+            _ => None,
+        };
+        ctx.cluster.contexts.cursors.lock().insert(id.clone(), ScrollCursor { kind, last, max_score: out.max_score, total });
+    }
     out.scroll_id = Some(id);
     Ok(())
 }
@@ -163,16 +338,72 @@ pub fn scroll(ctx: &Ctx) -> EsResult<Reply> {
     let mut page = req.clone();
     page.source.from = Some(offset as i32);
     page.source.track_total_hits = Some(crate::search_source::TrackTotalHits::Accurate);
-    page.scroll = None;
+    // `page.scroll` stays set: a continuation is still a scroll (sliced the same way, its
+    // window is the batch size, not the offset reached plus the batch size).
     for t in &targets {
         t.shard.counters.scroll_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    let mut out = super::execute_on(ctx.cluster, &page, &targets)?;
+    let cursor = ctx.cluster.contexts.cursors.lock().get(&id).cloned();
+    // Hits carry their stored `_source` bytes as they are when the page goes straight out
+    // (`json::raw`).
+    let raw = ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch && ctx.query("filter_path").is_none();
+    let mut out = crate::json::raw::with_enabled(raw, || -> crate::error::EsResult<super::SearchOutcome> { Ok(match &cursor {
+        Some(c) => {
+            // Each shard collects its `size` best hits after the last one it contributed.
+            page.source.from = Some(0);
+            if c.total.is_some() {
+                page.source.track_total_hits = Some(crate::search_source::TrackTotalHits::Disabled);
+            }
+            struct Reset;
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    PAGE.with(|p| *p.borrow_mut() = None);
+                }
+            }
+            PAGE.with(|p| *p.borrow_mut() = Some((c.kind, c.last.clone())));
+            let _reset = Reset;
+            let mut out = super::execute_on(ctx.cluster, &page, &targets)?;
+            out.max_score = c.max_score;
+            if let Some(n) = c.total {
+                out.total = Some((n, search_index::collector::top_docs::TotalRelation::EqualTo));
+            }
+            out
+        }
+        None => super::execute_on(ctx.cluster, &page, &targets)?,
+    }) })?;
     let n = out.hits.len();
     let _ = size;
+    if let Some(mut c) = cursor {
+        advance(&mut c.last, &out.ranked);
+        let mut cursors = ctx.cluster.contexts.cursors.lock();
+        if let Some(slot) = cursors.get_mut(&id) {
+            *slot = c;
+        }
+    }
     ctx.cluster.contexts.with(&id, None, |c| c.offset += n);
-    out.scroll_id = Some(id);
-    Reply::ok(super::render(&out, &req))
+    // Elasticsearch: a continuation without a `scroll` keep-alive is the last one: its
+    // contexts are freed and the response carries no scroll id.
+    if ka.is_none() && ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch {
+        ctx.cluster.contexts.close(&id);
+        ctx.cluster.contexts.cursors.lock().remove(&id);
+    } else {
+        out.scroll_id = Some(id);
+    }
+    if targets.is_empty() && ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch {
+        // Nothing was searched: no score either (`SearchHits.empty`).
+        out.max_score = None;
+    }
+    let mut v = super::render_take(&mut out, &req);
+    // A scroll whose every shard the can-match phase skipped holds no context: Elasticsearch
+    // reduces nothing and says so (`num_reduce_phases: 0`, before `_shards`).
+    if targets.is_empty()
+        && ctx.cluster.dialect == crate::cluster::Dialect::Elasticsearch
+        && let Value::Obj(m) = &mut v
+    {
+        let at = m.get_index_of("_shards").unwrap_or(m.len());
+        m.shift_insert(at, "num_reduce_phases".into(), Value::from(0i64));
+    }
+    Reply::ok(v)
 }
 
 fn token(v: &Value) -> &'static str {
@@ -209,9 +440,7 @@ pub fn clear_scroll(ctx: &Ctx) -> EsResult<Reply> {
             check_scroll_id(id)?;
         }
         for id in &ids {
-            if ctx.cluster.contexts.close(id) {
-                freed += 1;
-            }
+            freed += ctx.cluster.contexts.close_shards(id);
         }
     }
     let status = if freed == 0 && !ids.iter().any(|i| i == "_all") { 404 } else { 200 };
@@ -257,7 +486,7 @@ pub fn open_pit(ctx: &Ctx) -> EsResult<Reply> {
         targets = kept;
     }
     let skipped = n - targets.len();
-    let id = ctx.cluster.contexts.open(SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone() });
+    let id = ctx.cluster.contexts.open(SearchContext { targets, request: None, expires: Instant::now() + ka, pit: true, offset: 0, indices: req.indices.clone(), created_ms: ctx.now_ms, keep_alive_ms: ka.as_millis() as i64 });
     Reply::ok(obj! { "id" => id, "_shards" => obj! { "total" => n as i64, "successful" => n as i64, "skipped" => skipped as i64, "failed" => 0 } })
 }
 
@@ -268,8 +497,8 @@ pub fn close_pit(ctx: &Ctx) -> EsResult<Reply> {
         return Err(EsError::action_request_validation(&["point in time id is missing".into()]));
     };
     check_pit_id(&id)?;
-    let ok = ctx.cluster.contexts.close(&id);
-    Ok(Reply::Body(if ok { 200 } else { 404 }, obj! { "succeeded" => true, "num_freed" => ok as i64 }))
+    let freed = ctx.cluster.contexts.close_shards(&id);
+    Ok(Reply::Body(if freed > 0 { 200 } else { 404 }, obj! { "succeeded" => true, "num_freed" => freed as i64 }))
 }
 
 /// `TransportSearchHelper.parseScrollId` on an id this node never minted: the decoded bytes are
@@ -412,7 +641,10 @@ fn check_pit_id(id: &str) -> EsResult<()> {
 
 /// The targets of a PIT search (extending its keep alive).
 pub fn pit_targets(ctx: &Ctx, pit: &crate::search_source::PointInTime) -> EsResult<Vec<Target>> {
-    check_pit_id(&pit.id)?;
+    match ctx.cluster.dialect {
+        crate::cluster::Dialect::OpenSearch => crate::opensearch::pit::check_id(&pit.id)?,
+        crate::cluster::Dialect::Elasticsearch => check_pit_id(&pit.id)?,
+    }
     let keep = match &pit.keep_alive {
         Some(k) => Some(check_keep_alive(ctx, *k)?),
         None => None,

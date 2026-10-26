@@ -148,11 +148,13 @@ fn fragments_of(text: &str, analyzer: Option<&Analyzer>, q: &HighlightTerms, opt
     let len = content.len16() as usize;
     let tokens = analyze(&[text], analyzer, opts.max_analyzed_offset, opts.tokenized);
     let phrases = phrase_spans(&tokens, q);
-    // Lucene's QueryScorer: phrase terms only score inside a match span.
+    let span_ranges: Vec<Vec<(i64, i64)>> = q.spans.iter().map(|n| super::spans::matches_ranges(n, &tokens)).collect();
+    // Lucene's QueryScorer: phrase (and span) terms only score inside a match.
     let token_score = |t: &HlToken| -> f32 {
         let in_phrase =
             || phrases.iter().any(|p| p.terms.contains(&t.term) && p.spans.iter().any(|&(s, e)| s <= t.position && t.position <= e));
-        if q.terms.contains(&t.term) || q.multi.iter().any(|m| m(&t.term)) || in_phrase() {
+        let in_span = || q.spans.iter().zip(&span_ranges).any(|(n, r)| super::spans::in_match_range(n, r, t));
+        if q.terms.contains(&t.term) || q.multi.iter().any(|m| m(&t.term)) || in_phrase() || in_span() {
             1.0
         } else {
             0.0

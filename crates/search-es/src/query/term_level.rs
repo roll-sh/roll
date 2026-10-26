@@ -97,14 +97,22 @@ impl Term {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TermsLookup {
     pub index: String,
+    /// Empty when OpenSearch's `query` names the documents instead.
     pub id: String,
     pub path: String,
     pub routing: Option<String>,
+    /// OpenSearch: the documents whose `path` values become the terms.
+    pub query: Option<Box<super::Query>>,
+    /// OpenSearch: read `path` from stored fields instead of `_source`.
+    pub store: bool,
 }
 
 impl TermsLookup {
     /// `TermsLookup.parseTermsLookup` (a `ConstructingObjectParser`).
     pub fn parse(p: &mut XParser<'_>) -> EsResult<TermsLookup> {
+        if crate::opensearch::active() {
+            return Self::parse_opensearch(p);
+        }
         const FIELDS: &[Field] = &[
             Field::new("index", Tokens::STRING),
             Field::new("id", Tokens::STRING),
@@ -121,15 +129,58 @@ impl TermsLookup {
             return Err(EsError::illegal_argument(format!("Required [{}]", missing.join(", "))));
         }
         let [index, id, path, routing] = vals;
-        Ok(TermsLookup { index: index.unwrap_or_default(), id: id.unwrap_or_default(), path: path.unwrap_or_default(), routing })
+        Ok(TermsLookup { index: index.unwrap_or_default(), id: id.unwrap_or_default(), path: path.unwrap_or_default(), routing, query: None, store: false })
+    }
+
+    /// OpenSearch's `TermsLookup` parser: `id` or a `query` (not both), `store`.
+    fn parse_opensearch(p: &mut XParser<'_>) -> EsResult<TermsLookup> {
+        const FIELDS: &[Field] = &[
+            Field::new("index", Tokens::STRING),
+            Field::new("id", Tokens::STRING),
+            Field::new("path", Tokens::STRING),
+            Field::new("query", Tokens::OBJECT),
+            Field::new("routing", Tokens::STRING),
+            Field::new("store", Tokens::BOOLEAN),
+        ];
+        let mut vals: [Option<String>; 5] = Default::default();
+        let mut query = None;
+        let mut store = false;
+        p.object("terms_lookup", FIELDS, |p, i| {
+            match i {
+                3 => query = Some(Box::new(super::parse_inner(p)?)),
+                5 => store = p.boolean_value()?,
+                _ => vals[i] = Some(p.text()?),
+            }
+            Ok(())
+        })?;
+        let missing: Vec<&str> = [(0, "index"), (2, "path")].iter().filter(|(i, _)| vals[*i].is_none()).map(|(_, n)| *n).collect();
+        if !missing.is_empty() {
+            return Err(EsError::illegal_argument(format!("Required [{}]", missing.join(", "))));
+        }
+        let built = |e: EsError| EsError::x_content_parse_bare("Failed to build [terms_lookup] after last required field arrived").caused_by(e);
+        match (&vals[1], &query) {
+            (None, None) => return Err(built(EsError::illegal_argument("[terms] query lookup element requires specifying either the id or the query."))),
+            (Some(_), Some(_)) => return Err(built(EsError::illegal_argument("[terms] query lookup element cannot specify both id and query."))),
+            _ => {}
+        }
+        let [index, id, path, _, routing] = vals;
+        Ok(TermsLookup { index: index.unwrap_or_default(), id: id.unwrap_or_default(), path: path.unwrap_or_default(), routing, query, store })
     }
 
     pub fn to_map(&self, m: &mut Map) {
         m.insert("index".into(), self.index.clone().into());
-        m.insert("id".into(), self.id.clone().into());
+        if self.query.is_none() {
+            m.insert("id".into(), self.id.clone().into());
+        }
         m.insert("path".into(), self.path.clone().into());
         if let Some(r) = &self.routing {
             m.insert("routing".into(), r.clone().into());
+        }
+        if let Some(q) = &self.query {
+            m.insert("query".into(), q.to_value());
+        }
+        if self.store {
+            m.insert("store".into(), true.into());
         }
     }
 }
@@ -140,6 +191,8 @@ pub struct Terms {
     pub field: String,
     pub values: Option<Vec<Value>>,
     pub lookup: Option<TermsLookup>,
+    /// OpenSearch's `value_type: bitmap`: the one value is a base64 roaring bitmap.
+    pub bitmap: bool,
     pub common: Common,
 }
 
@@ -163,6 +216,7 @@ impl Terms {
         let mut field: Option<String> = None;
         let mut values = None;
         let mut lookup = None;
+        let mut bitmap = false;
         let mut boost = 1.0f32;
         let mut name = None;
         let mut current: Option<String> = None;
@@ -190,6 +244,14 @@ impl Terms {
                 t if t.is_value() => match current.as_deref().unwrap_or("") {
                     "boost" => boost = p.float_value()?,
                     "_name" => name = Some(p.text()?),
+                    "value_type" if crate::opensearch::active() => {
+                        let v = p.text()?;
+                        bitmap = match v.to_ascii_lowercase().as_str() {
+                            "default" => false,
+                            "bitmap" => true,
+                            _ => return Err(EsError::illegal_argument(format!("{v} is not valid value_type"))),
+                        };
+                    }
                     other => return Err(p.parsing_error(format!("[terms] query does not support [{other}]"))),
                 },
                 t => {
@@ -211,7 +273,10 @@ impl Terms {
         if values.is_none() && lookup.is_none() {
             return Err(EsError::illegal_argument("No value or termsLookup specified for terms query"));
         }
-        let mut q = Terms { field, values, lookup, common: Common::default() };
+        if bitmap && lookup.is_none() && !matches!(values.as_deref(), Some([Value::Str(_)])) {
+            return Err(EsError::illegal_argument("Invalid value for bitmap type: Expected a single-element array with a base64 encoded serialized bitmap."));
+        }
+        let mut q = Terms { field, values, lookup, bitmap, common: Common::default() };
         q.common.boost = check_boost(boost, || q.clone().into())?;
         q.common.name = name;
         Ok(q)
@@ -228,6 +293,9 @@ impl Terms {
             None => {
                 m.insert(self.field.clone(), Value::Arr(self.values.clone().unwrap_or_default()));
             }
+        }
+        if self.bitmap {
+            m.insert("value_type".into(), "bitmap".into());
         }
         self.common.write_always(&mut m);
         Value::Obj(m)
@@ -505,6 +573,12 @@ impl Range {
         let mut boost = 1.0f32;
         let mut name = None;
         let mut current: Option<String> = None;
+        // OpenSearch keeps the `from`/`to`/`include_lower`/`include_upper` form and refuses a
+        // bound given twice; which inclusivity flags were set explicitly.
+        let os = crate::opensearch::active();
+        let (mut lower_set, mut upper_set) = (false, false);
+        let lower_twice = |p: &XParser<'_>| p.parsing_error("invalid lower bound for [range] query");
+        let upper_twice = |p: &XParser<'_>| p.parsing_error("invalid upper bound for [range] query");
         while let Some(t) = p.next_token() {
             match t {
                 Token::EndObject => break,
@@ -516,6 +590,52 @@ impl Range {
                         match t {
                             Token::EndObject => break,
                             Token::FieldName => current = p.current_name().map(str::to_string),
+                            _ if os && matches!(current.as_deref(), Some("from" | "to" | "include_lower" | "include_upper" | "gt" | "gte" | "lt" | "lte")) => {
+                                match current.as_deref().unwrap_or("") {
+                                    "from" => {
+                                        if from.is_some() {
+                                            return Err(lower_twice(p));
+                                        }
+                                        from = p.object_bytes();
+                                    }
+                                    "to" => {
+                                        if to.is_some() {
+                                            return Err(upper_twice(p));
+                                        }
+                                        to = p.object_bytes();
+                                    }
+                                    "include_lower" => {
+                                        if lower_set {
+                                            return Err(lower_twice(p));
+                                        }
+                                        include_lower = p.boolean_value()?;
+                                        lower_set = true;
+                                    }
+                                    "include_upper" => {
+                                        if upper_set {
+                                            return Err(upper_twice(p));
+                                        }
+                                        include_upper = p.boolean_value()?;
+                                        upper_set = true;
+                                    }
+                                    b @ ("gt" | "gte") => {
+                                        if from.is_some() || lower_set {
+                                            return Err(lower_twice(p));
+                                        }
+                                        include_lower = b == "gte";
+                                        from = p.object_bytes();
+                                        lower_set = true;
+                                    }
+                                    b => {
+                                        if to.is_some() || upper_set {
+                                            return Err(upper_twice(p));
+                                        }
+                                        include_upper = b == "lte";
+                                        to = p.object_bytes();
+                                        upper_set = true;
+                                    }
+                                }
+                            }
                             _ => match current.as_deref().unwrap_or("") {
                                 "boost" => boost = p.float_value()?,
                                 "gt" => {
@@ -582,6 +702,22 @@ impl Range {
 
     pub fn inner(&self) -> Value {
         let mut m = Map::new();
+        if super::opensearch_print() {
+            // OpenSearch's `doXContent`: both bounds (null when open) and both flags.
+            m.insert("from".into(), self.from.clone().unwrap_or(Value::Null));
+            m.insert("to".into(), self.to.clone().unwrap_or(Value::Null));
+            m.insert("include_lower".into(), self.include_lower.into());
+            m.insert("include_upper".into(), self.include_upper.into());
+            super::opt_str(&mut m, "time_zone", &self.time_zone);
+            if let Some(f) = self.format.as_ref().filter(|f| !f.trim().is_empty()) {
+                m.insert("format".into(), f.clone().into());
+            }
+            if let Some(r) = self.relation {
+                m.insert("relation".into(), r.name().into());
+            }
+            self.common.write_always(&mut m);
+            return obj! { self.field.clone() => Value::Obj(m) };
+        }
         if let Some(f) = &self.from {
             m.insert(if self.include_lower { "gte" } else { "gt" }.into(), f.clone());
         }

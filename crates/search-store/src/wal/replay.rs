@@ -96,6 +96,7 @@ struct Want {
     shard: ShardId,
     after_seq_no: i64,
     until_ms: Option<u64>,
+    since_ms: Option<u64>,
 }
 
 /// Runs of consecutive numbers in `from..=to` that aren't in `present` (sorted).
@@ -211,6 +212,7 @@ async fn load_object(view: Arc<ObjectView>, objects: &pg_storage::Objects, key: 
             && e.cluster == want.cluster
             && e.max_seq_no > want.after_seq_no
             && want.until_ms.is_none_or(|u| e.first_ms <= u)
+            && want.since_ms.is_none_or(|s| e.last_ms >= s)
     });
     let Some(e) = entry.cloned() else { return Ok(Loaded::Block { records: None, past_cut }) };
     let records = match &view.whole {
@@ -368,7 +370,7 @@ impl Wal {
     ) -> anyhow::Result<i64> {
         let sh = &self.sh;
         let node = src.node.as_str();
-        let want = Want { cluster: src.cluster.clone(), shard: shard.clone(), after_seq_no, until_ms: src.until_ms };
+        let want = Want { cluster: src.cluster.clone(), shard: shard.clone(), after_seq_no, until_ms: src.until_ms, since_ms: src.since_ms };
         let want = &want;
         let mut loads = futures::stream::iter(seqs.into_iter().map(|seq| {
             let local_len = local.get(&seq).copied();
@@ -397,6 +399,15 @@ impl Wal {
                 if src.until_ms.is_some_and(|u| r.at_ms > u) {
                     // Append times only grow on a node: everything after is later too.
                     return Ok(false);
+                }
+                if src.since_ms.is_some_and(|s| r.at_ms < s) {
+                    // From before the range was opened: not the shard's history.
+                    return Ok(true);
+                }
+                if src.epoch.is_some_and(|e| r.epoch != e) {
+                    // Appended under another ownership epoch (a deposed owner's): not part of
+                    // the history this range records.
+                    return Ok(true);
                 }
                 if wanted(r) && r.seq_no > after_seq_no {
                     f(r)?;

@@ -7,8 +7,10 @@
 //! (rounded up: a cluster woken for 200 ms is billed one second). Nothing runs per cluster while
 //! it sleeps: storage accrues from the change log in `search_storage` (see [`crate::store`]).
 //!
-//! Requests are counted with [`Meter::count_request`]; the control plane counts its console
-//! requests itself (the node does not count requests per cluster yet).
+//! Requests are the node's own count of requests admitted to each cluster
+//! (`search_server::Node::take_request_counts`, console requests included), handed to
+//! [`Meter::count_requests`] by every metering pass; each request is billed once, also when its
+//! cluster unloaded in between.
 //!
 //! The resident size of a loaded cluster is measured from its engine ([`resident_bytes`]): the
 //! heap its shards hold (segments still in memory, segment readers' heap and caches, indexing
@@ -161,7 +163,7 @@ impl Meter {
 
     /// Accounts the rest of a cluster's loaded time and marks it for a figures refresh.
     /// `resident` is its size measured now.
-    pub fn on_unloading(&self, cluster: &str, at_ms: i64, indices: Option<i64>, resident: Option<i64>) -> anyhow::Result<()> {
+    pub async fn on_unloading(&self, cluster: &str, at_ms: i64, indices: Option<i64>, resident: Option<i64>) -> anyhow::Result<()> {
         let (r, requests) = {
             let mut st = self.state.lock();
             let r = st.loaded.remove(cluster);
@@ -173,13 +175,13 @@ impl Meter {
         };
         let Some(r) = r else { return Ok(()) };
         let seconds = ((at_ms - r.since).max(0) + 999) / 1000;
-        self.record(cluster, at_ms, seconds, requests, larger(r.bytes, resident))
+        self.record(cluster, at_ms, seconds, requests, larger(r.bytes, resident)).await
     }
 
     /// One metering interval: accounts whole loaded seconds and the requests counted since the
     /// last one. Returns the clusters whose figures may need refreshing: every loaded one, and
     /// those that must be refreshed now (`true`: just loaded or unloaded).
-    pub fn sample(&self, at_ms: i64) -> anyhow::Result<Vec<(String, bool)>> {
+    pub async fn sample(&self, at_ms: i64) -> anyhow::Result<Vec<(String, bool)>> {
         // Measure outside the lock: it walks every shard of the cluster.
         let instances: Vec<(String, Arc<Cluster>)> = {
             let st = self.state.lock();
@@ -207,7 +209,7 @@ impl Meter {
             out
         };
         for (name, seconds, requests, bytes) in &work {
-            self.record(name, at_ms, *seconds, *requests, *bytes)?;
+            self.record(name, at_ms, *seconds, *requests, *bytes).await?;
         }
         let mut st = self.state.lock();
         let mut refresh: Vec<(String, bool)> = st.dirty.drain().map(|n| (n, true)).collect();
@@ -232,15 +234,15 @@ impl Meter {
 
     /// `resident`: the measured size over the interval; without a measurement (a cluster the
     /// meter can't see), its base plus stored bytes.
-    fn record(&self, name: &str, at_ms: i64, seconds: i64, requests: i64, resident: Option<i64>) -> anyhow::Result<()> {
+    async fn record(&self, name: &str, at_ms: i64, seconds: i64, requests: i64, resident: Option<i64>) -> anyhow::Result<()> {
         if seconds == 0 && requests == 0 {
             return Ok(());
         }
         // Deleted meanwhile: nothing to bill.
-        let Some(c) = self.store.by_name(name)? else { return Ok(()) };
+        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
         let loaded_bytes = if seconds == 0 { 0 } else { resident.unwrap_or_else(|| LOADED_BASE_BYTES.saturating_add(c.stored_bytes)) };
         let sample = UsageSample { at: at_ms / 1000, seconds, loaded_bytes, requests };
-        self.store.record_usage(&c.id, &sample)
+        self.store.record_usage(&c.id, &sample).await
     }
 }
 
@@ -262,7 +264,7 @@ impl LifecycleHooks for MeterHooks {
 
     async fn unloading(&self, cluster: &Arc<Cluster>) {
         let indices = cluster.state().metadata.indices.len() as i64;
-        if let Err(e) = self.0.on_unloading(&cluster.name, now_ms(), Some(indices), Some(resident_bytes(cluster))) {
+        if let Err(e) = self.0.on_unloading(&cluster.name, now_ms(), Some(indices), Some(resident_bytes(cluster))).await {
             tracing::warn!(cluster = cluster.name, error = %e, "search metering failed");
         }
     }
@@ -273,7 +275,7 @@ mod tests {
     use super::*;
     use crate::store::SearchCluster;
 
-    fn meter() -> (Arc<Meter>, Arc<Store>) {
+    async fn meter() -> (Arc<Meter>, Arc<Store>) {
         let store = Arc::new(Store::memory().unwrap());
         store
             .insert(&SearchCluster {
@@ -294,49 +296,50 @@ mod tests {
                 docs: 0,
                 stored_bytes: 1000,
             })
+            .await
             .unwrap();
         (Meter::new(store.clone()), store)
     }
 
-    #[test]
-    fn loaded_time_is_exact() {
-        let (m, s) = meter();
+    #[tokio::test]
+    async fn loaded_time_is_exact() {
+        let (m, s) = meter().await;
         m.on_loaded("app", 10_000, None);
         m.count_request("app");
         m.count_requests("app", 2);
-        assert_eq!(m.sample(70_500).unwrap(), vec![("app".to_string(), true)]);
+        assert_eq!(m.sample(70_500).await.unwrap(), vec![("app".to_string(), true)]);
         // Loaded and refreshed already: listed, not forced.
-        assert_eq!(m.sample(70_600).unwrap(), vec![("app".to_string(), false)]);
+        assert_eq!(m.sample(70_600).await.unwrap(), vec![("app".to_string(), false)]);
         // 60 whole seconds now; the 500 ms carry over.
-        let t = s.usage_since("srch_a", 0, 100).unwrap();
+        let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.loaded_seconds, t.requests), (60, 3));
         // Unloading rounds the remainder up: 70.0 s → 71.7 s is 1.7 s → 2 s.
-        m.on_unloading("app", 71_700, Some(4), None).unwrap();
-        let t = s.usage_since("srch_a", 0, 100).unwrap();
+        m.on_unloading("app", 71_700, Some(4), None).await.unwrap();
+        let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!(t.loaded_seconds, 62);
         assert!(!m.is_loaded("app"));
         assert_eq!(m.take_indices("app"), Some(4));
         // Asleep: no rows; the refresh still comes once.
-        assert_eq!(m.sample(200_000).unwrap(), vec![("app".to_string(), true)]);
-        assert!(m.sample(260_000).unwrap().is_empty());
-        assert_eq!(s.usage_since("srch_a", 0, 300).unwrap().loaded_seconds, 62);
+        assert_eq!(m.sample(200_000).await.unwrap(), vec![("app".to_string(), true)]);
+        assert!(m.sample(260_000).await.unwrap().is_empty());
+        assert_eq!(s.usage_since("srch_a", 0, 300).await.unwrap().loaded_seconds, 62);
         // Not measurable (no instance): base + stored bytes.
-        assert_eq!(s.usage_since("srch_a", 0, 300).unwrap().peak_loaded_bytes, LOADED_BASE_BYTES + 1000);
+        assert_eq!(s.usage_since("srch_a", 0, 300).await.unwrap().peak_loaded_bytes, LOADED_BASE_BYTES + 1000);
     }
 
-    #[test]
-    fn measured_sizes_bill_the_larger_end() {
-        let (m, s) = meter();
+    #[tokio::test]
+    async fn measured_sizes_bill_the_larger_end() {
+        let (m, s) = meter().await;
         m.on_loaded("app", 0, None);
         // Measured only at unload: the whole stay at that size.
-        m.on_unloading("app", 10_000, None, Some(5 << 20)).unwrap();
-        let t = s.usage_since("srch_a", 0, 100).unwrap();
+        m.on_unloading("app", 10_000, None, Some(5 << 20)).await.unwrap();
+        let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.loaded_seconds, t.peak_loaded_bytes), (10, 5 << 20));
         assert!((t.loaded_gib_hours - 10.0 * (5 << 20) as f64 / (1u64 << 30) as f64 / 3600.0).abs() < 1e-12);
         // Request-only rows carry no size, so they don't move the peak.
         m.count_requests("app", 3);
-        m.sample(20_000).unwrap();
-        let t = s.usage_since("srch_a", 0, 100).unwrap();
+        m.sample(20_000).await.unwrap();
+        let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.requests, t.peak_loaded_bytes, t.loaded_seconds), (3, 5 << 20, 10));
         assert_eq!(larger(Some(1), Some(3)), Some(3));
         assert_eq!(larger(None, Some(3)), Some(3));
@@ -385,10 +388,10 @@ mod tests {
         assert_eq!(index_figures(&c, &uuid).map(|f| f.docs), Some(2));
         assert_eq!(index_figures(&c, "nope"), None);
         // The meter measures a cluster it was given.
-        let (m, s) = meter();
+        let (m, s) = meter().await;
         m.on_loaded("app", 0, Some(&c));
-        m.sample(60_000).unwrap();
-        let t = s.usage_since("srch_a", 0, 100).unwrap();
+        m.sample(60_000).await.unwrap();
+        let t = s.usage_since("srch_a", 0, 100).await.unwrap();
         assert_eq!((t.loaded_seconds, t.peak_loaded_bytes), (60, resident_bytes(&c)));
     }
 
@@ -409,14 +412,14 @@ mod tests {
         assert_eq!(engine_figures(&c).docs, 3);
     }
 
-    #[test]
-    fn requests_after_unload_are_kept() {
-        let (m, s) = meter();
+    #[tokio::test]
+    async fn requests_after_unload_are_kept() {
+        let (m, s) = meter().await;
         m.count_request("app");
-        m.sample(1_000).unwrap();
-        assert_eq!(s.usage_since("srch_a", 0, 10).unwrap().requests, 1);
+        m.sample(1_000).await.unwrap();
+        assert_eq!(s.usage_since("srch_a", 0, 10).await.unwrap().requests, 1);
         // Unknown clusters (deleted) are ignored.
         m.count_request("gone");
-        m.sample(2_000).unwrap();
+        m.sample(2_000).await.unwrap();
     }
 }

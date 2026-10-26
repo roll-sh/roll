@@ -120,6 +120,15 @@ pub fn ise(msg: impl Into<String>) -> Thrown {
 pub fn uoe() -> Thrown {
     Throw::new(cls::UNSUPPORTED_OPERATION_EXCEPTION, None)
 }
+/// A failed [`crate::Host::check_cancelled`] poll (a search timeout or cancellation). Like
+/// Elasticsearch's `TimeExceededException` / `TaskCancelledException` raised outside the
+/// script's frames, a script's `catch` can't swallow it: it must stop the script.
+fn cancelled_error(e: crate::host::HostError) -> Thrown {
+    let mut t = crate::es::doc::host_error(e);
+    t.catchable = false;
+    t
+}
+
 pub fn painless_error(msg: impl Into<String>) -> Thrown {
     let mut t = Throw::new(cls::THROWABLE, Some(msg.into()));
     t.catchable = false;
@@ -421,6 +430,12 @@ pub struct Program {
     pub max_allocation_bytes: u64,
     /// See `Insn::AllocConcat`.
     pub concat_infos: Vec<(u64, Vec<bool>)>,
+    /// x-pack's `version` allowlist applies (`VersionFieldDocValuesExtension`: aggs, score,
+    /// filter, field and sort scripts): `doc['v'].value` works there only.
+    pub version_allowlist: bool,
+    /// x-pack's `unsigned_long` allowlist applies (`DocValuesWhitelistExtension`): elsewhere
+    /// (runtime fields) `doc['u'].value` is a list shortcut that fails.
+    pub unsigned_long_allowlist: bool,
 }
 
 /// Per-instance mutable state (one per thread/segment): constants as values, caches, state of
@@ -434,6 +449,10 @@ pub struct State {
     pub bindings: Vec<Option<Box<dyn Any>>>,
     /// Monomorphic cache of `def` call sites: receiver class and resolved method.
     pub dyn_cache: Vec<(ClassId, MethodId)>,
+    /// Resolved `def` field reads (`x.name`): receiver class, name id and getter. Scripts
+    /// read the same few members on every document; resolving one costs a formatted name and
+    /// two hashed lookups.
+    pub(crate) getter_cache: Vec<(ClassId, u32, crate::dynamic::Getter)>,
     /// Values emitted by runtime-field scripts during the current execution.
     pub emitted: Vec<Value>,
     /// Reused doc-values buffers, one per literal `doc['field']` of the program.
@@ -482,6 +501,10 @@ pub struct State {
     /// Loops poll [`crate::Host::check_cancelled`] instead of counting statements (see
     /// [`crate::Instance::set_cancellable`]).
     pub cancellable: bool,
+    /// Calls left until a library-driven lambda call polls for cancellation: the script's
+    /// persistent `$cancelPoll` counter, which the `@script_aware` augmentations (`each`,
+    /// `findAll`, `forEachRemaining`, stream reductions…) decrement once per element.
+    pub cancel_poll: u32,
 }
 
 impl State {
@@ -492,6 +515,7 @@ impl State {
             vars,
             bindings: (0..prog.bindings).map(|_| None).collect(),
             dyn_cache: vec![(ClassId(u16::MAX), u32::MAX); prog.dyn_sites as usize],
+            getter_cache: Vec::new(),
             emitted: Vec::new(),
             doc_bufs: (0..prog.doc_fields.len()).map(|_| crate::host::DocValues::default()).collect(),
             doc_dyn: Vec::new(),
@@ -515,6 +539,7 @@ impl State {
             fast_locals: Vec::new(),
             alloc_total: 0,
             cancellable: false,
+            cancel_poll: CANCELLATION_POLL_INTERVAL,
         }
     }
 
@@ -581,6 +606,13 @@ impl<'a> Vm<'a> {
         // through Rust frames
         if self.st.depth >= MAX_DEPTH || crate::guard::stack_exhausted() {
             return Err(stack_overflow());
+        }
+        if self.st.cancellable {
+            self.st.cancel_poll -= 1;
+            if self.st.cancel_poll == 0 {
+                self.st.cancel_poll = CANCELLATION_POLL_INTERVAL;
+                self.host.check_cancelled().map_err(cancelled_error)?;
+            }
         }
         let base = self.stack.len();
         push_frame(self.stack, func.nregs as usize);
@@ -769,7 +801,7 @@ impl<'a> Vm<'a> {
         if let Some(t) = crate::guard::take_pending() {
             return Err(t);
         }
-        self.host.check_cancelled().map_err(crate::es::doc::host_error)
+        self.host.check_cancelled().map_err(cancelled_error)
     }
 
     /// `$checkAllocBytes`: the running total (a Java `long`) over the limit fails the script.

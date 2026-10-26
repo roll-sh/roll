@@ -329,6 +329,9 @@ async fn update_attempt(ctx: &Ctx<'_>, expr: &str, id: &str, args: &WriteArgs, b
     } else {
         return Err(EsError::action_request_validation(&["script or doc is missing".into()]));
     };
+    // `UpdateHelper.calculateRouting`: the updated document keeps the routing it was indexed
+    // with (the request's routing only finds it).
+    let routing = crate::fetch::routing(&d.fields).or(routing);
     let mut a = args.clone();
     a.id = Some(id.to_string());
     a.routing = routing.clone();
@@ -393,6 +396,9 @@ pub async fn update(ctx: &Ctx<'_>) -> EsResult<Reply> {
     }
     let expr = ctx.path_param("index").unwrap_or_default().to_string();
     let id = args.id.take().unwrap_or_default();
+    if let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), &expr, "UPDATE", Some(&id)) {
+        return Err(e);
+    }
     let mut out = update_one(ctx, &expr, &id, &args, &body, retries).await?;
     match RefreshPolicy::parse(ctx.query("refresh"))? {
         RefreshPolicy::None => {}

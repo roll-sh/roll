@@ -115,15 +115,23 @@ pub fn parse_filters(p: &mut XParser<'_>, name: &str, check_query: &mut dyn FnMu
 pub struct AdjacencySpec {
     pub filters: Vec<(String, Json)>,
     pub separator: String,
+    /// OpenSearch's `show_only_intersecting` (2.19+): only the `a&b` buckets.
+    pub show_only_intersecting: bool,
 }
 
 pub fn parse_adjacency(p: &mut XParser<'_>, name: &str, check_query: &mut dyn FnMut(&XParser<'_>) -> Result<()>) -> Result<AdjacencySpec> {
-    let fields = [Field::new("separator", Tokens::STRING), Field::new("filters", Tokens::OBJECT_ARRAY)];
+    let all = [Field::new("separator", Tokens::STRING), Field::new("filters", Tokens::OBJECT_ARRAY), Field::new("show_only_intersecting", Tokens::BOOLEAN)];
+    let fields = if crate::dialect::opensearch() { &all[..] } else { &all[..2] };
     let mut filters: Vec<(String, Json)> = Vec::new();
     let mut separator = "&".to_string();
-    p.object("adjacency_matrix", &fields, |p, i| {
+    let mut show_only_intersecting = false;
+    p.object("adjacency_matrix", fields, |p, i| {
         if i == 0 {
             separator = p.text()?;
+            return Ok(());
+        }
+        if i == 2 {
+            show_only_intersecting = p.boolean_value()?;
             return Ok(());
         }
         if p.token() != Token::StartObject {
@@ -147,7 +155,7 @@ pub fn parse_adjacency(p: &mut XParser<'_>, name: &str, check_query: &mut dyn Fn
         return Err(AggError::illegal_state(format!("[{name}] is missing : filters parameter")));
     }
     filters.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
-    Ok(AdjacencySpec { filters, separator })
+    Ok(AdjacencySpec { filters, separator, show_only_intersecting })
 }
 
 struct Filter {
@@ -183,6 +191,8 @@ struct FiltersAgg {
     /// `filters`: Some(other key) with an other bucket; adjacency: None.
     spec: Option<Arc<FiltersSpec>>,
     separator: Option<String>,
+    /// `adjacency_matrix` `show_only_intersecting`.
+    only_intersecting: bool,
     slots: u32,
     counts: Vec<u64>,
     subs: Subs,
@@ -190,17 +200,28 @@ struct FiltersAgg {
     doc_count_field: Option<u32>,
     last_doc: u32,
     hits: Vec<bool>,
+    /// Filter-by-filter execution ([`super::fbf`]), when it applies.
+    fbf: Option<Box<super::fbf::Fbf>>,
 }
 
 pub fn create_filters(def: &AggDef, spec: &FiltersSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
-    let filters = bind_filters(&spec.filters, ctx)?;
+    // Sub-aggregations bind before the filters' queries are built, as Elasticsearch's
+    // factories do: a sub-aggregation's validation error wins over a filter's.
     let subs = Subs::bind(def, ctx)?;
+    let filters = bind_filters(&spec.filters, ctx)?;
     let n = spec.filters.len() as u32;
+    let fbf = if !spec.other_bucket && super::fbf::eligible(ctx, &subs, spec.filters.len()) {
+        let queries = spec.filters.iter().map(|(_, q)| ctx.lookup.query(q)).collect::<Result<Vec<_>>>()?;
+        Some(Box::new(super::fbf::Fbf::new(ctx, queries)?))
+    } else {
+        None
+    };
     Ok(Box::new(FiltersAgg {
         keys: spec.filters.iter().map(|f| f.0.clone()).collect(),
         filters,
         spec: Some(Arc::new(spec.clone())),
         separator: None,
+        only_intersecting: false,
         slots: n + u32::from(spec.other_bucket),
         counts: Vec::new(),
         subs,
@@ -208,6 +229,7 @@ pub fn create_filters(def: &AggDef, spec: &FiltersSpec, ctx: &mut BindCtx<'_>) -
         doc_count_field: ctx.doc_count_field,
         last_doc: u32::MAX,
         hits: vec![false; n as usize],
+        fbf,
     }))
 }
 
@@ -219,14 +241,17 @@ pub fn create_adjacency(def: &AggDef, spec: &AdjacencySpec, ctx: &mut BindCtx<'_
             spec.filters.len()
         )));
     }
-    let filters = bind_filters(&spec.filters, ctx)?;
+    // Sub-aggregations bind before the filters' queries are built, as Elasticsearch's
+    // factories do: a sub-aggregation's validation error wins over a filter's.
     let subs = Subs::bind(def, ctx)?;
+    let filters = bind_filters(&spec.filters, ctx)?;
     let n = spec.filters.len() as u32;
     Ok(Box::new(FiltersAgg {
         keys: spec.filters.iter().map(|f| f.0.clone()).collect(),
         filters,
         spec: None,
         separator: Some(spec.separator.clone()),
+        only_intersecting: spec.show_only_intersecting,
         slots: n + n * n.saturating_sub(1) / 2,
         counts: Vec::new(),
         subs,
@@ -234,6 +259,7 @@ pub fn create_adjacency(def: &AggDef, spec: &AdjacencySpec, ctx: &mut BindCtx<'_
         doc_count_field: ctx.doc_count_field,
         last_doc: u32::MAX,
         hits: vec![false; n as usize],
+        fbf: None,
     }))
 }
 
@@ -254,9 +280,46 @@ impl FiltersAgg {
 
 impl Aggregator for FiltersAgg {
     fn profile_type(&self) -> &'static str {
-        if self.separator.is_some() { "AdjacencyMatrixAggregator" } else { "FiltersAggregator.Compatible" }
+        if self.separator.is_some() {
+            "AdjacencyMatrixAggregator"
+        } else if self.fbf.is_some() {
+            "FilterByFilterAggregator"
+        } else {
+            "FiltersAggregator.Compatible"
+        }
     }
+
+    fn profile_debug(&self) -> Json {
+        let mut o = Json::obj();
+        if let Some(f) = &self.fbf {
+            f.debug(&mut o);
+        }
+        o
+    }
+
+    fn segment_done(&self) -> bool {
+        self.fbf.is_some()
+    }
+
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        if let Some(mut fbf) = self.fbf.take() {
+            let mut subs = std::mem::replace(&mut self.subs, Subs::empty());
+            let slots = self.slots as usize;
+            let counts = &mut self.counts;
+            if counts.len() < slots {
+                counts.resize(slots, 0);
+            }
+            let r = fbf.collect_segment(seg, self.doc_count_field, &mut subs, &mut |k, doc, c, subs| {
+                counts[k] += c;
+                match doc {
+                    Some(d) => subs.push(d, k as u32, f32::NAN),
+                    None => Ok(()),
+                }
+            });
+            self.subs = subs;
+            self.fbf = Some(fbf);
+            return r;
+        }
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         for f in &mut self.filters {
             f.scorer = f.weight.scorer(seg)?;
@@ -266,6 +329,9 @@ impl Aggregator for FiltersAgg {
     }
 
     fn collect(&mut self, b: Batch<'_>) -> Result<()> {
+        if self.fbf.is_some() {
+            return Ok(());
+        }
         let n = self.filters.len();
         for i in 0..b.len() {
             let doc = b.docs[i];
@@ -302,6 +368,10 @@ impl Aggregator for FiltersAgg {
     }
 
     fn finish_segment(&mut self) -> Result<()> {
+        if self.fbf.is_some() {
+            // Each filter's pass finished its own segment of the sub-aggregations.
+            return Ok(());
+        }
         self.subs.finish_segment()
     }
 
@@ -333,7 +403,7 @@ impl Aggregator for FiltersAgg {
                 let mut keys_per: Vec<Vec<(String, u32)>> = Vec::new();
                 for &o in owning {
                     let mut ks = Vec::new();
-                    for s in 0..n {
+                    for s in 0..if self.only_intersecting { 0 } else { n } {
                         let ord = o * self.slots + s;
                         if self.counts.get(ord as usize).copied().unwrap_or(0) > 0 {
                             ks.push((self.keys[s as usize].clone(), ord));

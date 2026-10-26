@@ -117,8 +117,8 @@ pub enum Kind {
     Sort { field: String, target: String, desc: bool },
     Json { field: String, target: Option<String>, add_to_root: bool, conflict_replace: bool },
     Kv { field: String, target: Option<String>, field_split: Arc<LazyPattern>, value_split: Arc<LazyPattern>, value_split_text: String, include: Option<Vec<String>>, exclude: Option<Vec<String>>, ignore_missing: bool, prefix: Option<String>, trim_key: Option<Arc<JavaReplace>>, trim_value: Option<Arc<JavaReplace>>, strip_brackets: bool },
-    Date { field: String, target: String, formats: Vec<String>, timezone: Option<Template>, output_format: String },
-    DateIndexName { field: String, prefix: Template, rounding: String, formats: Vec<String>, timezone: Option<String>, index_format: String },
+    Date { field: String, target: String, formats: Vec<String>, timezone: Option<Template>, locale: Option<Template>, output_format: String },
+    DateIndexName { field: String, prefix: Template, rounding: String, formats: Vec<String>, timezone: Option<String>, locale: crate::time::DateLocale, index_format: String },
     Dissect { field: String, dissect: Arc<search_painless::dissect::Dissect>, ignore_missing: bool },
     Grok { field: String, groks: Vec<Arc<search_painless::grok::Grok>>, ignore_missing: bool, trace: bool },
     Fail { message: Template },
@@ -135,8 +135,12 @@ pub enum Kind {
     Fingerprint { fields: Vec<String>, target: String, salt: String, method: String, ignore_missing: bool },
     Reroute { destination: Option<Template>, dataset: Vec<String>, namespace: Vec<String> },
     Terminate,
+    /// `enrich`: a lookup in a loaded enrich index (`crate::xpack::enrich`).
+    Enrich(Box<crate::xpack::enrich::Processor>),
     /// Accepted but needs data or licenses roll does not have (geoip, user_agent, …).
     Unsupported(String),
+    /// `geo_grid`: a grid cell id to its geometry (and hierarchy).
+    GeoGrid(Box<GeoGrid>),
 }
 
 fn target(cfg: &Map, field: &str) -> String {
@@ -346,6 +350,7 @@ impl Kind {
                     field: f,
                     formats,
                     timezone: s(cfg, "timezone").map(|t| Template::new(&t)).transpose()?,
+                    locale: s(cfg, "locale").map(|t| Template::new(&t)).transpose()?,
                     output_format: s(cfg, "output_format").unwrap_or_else(|| "yyyy-MM-dd'T'HH:mm:ss.SSSXXX".into()),
                 }
             }
@@ -364,6 +369,11 @@ impl Kind {
                         _ => vec!["yyyy-MM-dd'T'HH:mm:ss.SSSXX".into()],
                     },
                     timezone: s(cfg, "timezone"),
+                    locale: match s(cfg, "locale") {
+                        None => crate::time::DateLocale::English,
+                        Some(lt) if is_language_tag(&lt) => crate::time::DateLocale::parse(&lt),
+                        Some(lt) => return Err(creation_exception(ptype, tag, "java.lang.IllegalArgumentException", EsError::illegal_argument(format!("Invalid language tag specified: {lt}")))),
+                    },
                     index_format: s(cfg, "index_name_format").unwrap_or_else(|| "yyyy-MM-dd".into()),
                 }
             }
@@ -393,13 +403,15 @@ impl Kind {
                     }
                     _ => base.clone(),
                 };
+                let watchdog = grok_watchdog(cluster, "ingest.grok.watchdog.max_execution_time");
                 let mut groks = Vec::new();
                 for p in &patterns {
-                    groks.push(Arc::new(search_painless::grok::Grok::new(&bank, p).map_err(|e| {
+                    let g = search_painless::grok::Grok::new(&bank, p).map_err(|e| {
                         EsError::new(400, "parse_exception", format!("[patterns] Invalid regex pattern found in: {patterns:?}. {}", e.message))
                             .with_meta("property_name", "patterns")
                             .with_meta("processor_type", "grok")
-                    })?));
+                    })?;
+                    groks.push(Arc::new(g.with_max_execution_time(watchdog)));
                 }
                 Kind::Grok { field: f, groks, ignore_missing: im, trace: b(cfg, "trace_match", false) }
             }
@@ -499,6 +511,35 @@ impl Kind {
                     return Err(config_error(ptype, tag, "destination", "can only be set if dataset and namespace are not set"));
                 }
                 Kind::Reroute { destination: dest.map(|d| Template::new(&d)).transpose()?, dataset: list("dataset"), namespace: list("namespace") }
+            }
+            "enrich" => Kind::Enrich(Box::new(crate::xpack::enrich::compile(cluster, cfg, tag)?)),
+            "geo_grid" => {
+                let f = field()?;
+                let tile = req(cfg, ptype, tag, "tile_type")?;
+                let grid = match tile.to_lowercase().as_str() {
+                    "geohash" => GridType::Geohash,
+                    "geotile" => GridType::Geotile,
+                    "geohex" => GridType::Geohex,
+                    _ => return Err(config_error(ptype, tag, "tile_type", &format!("illegal value [{tile}], valid values are [GEOHASH, GEOTILE, GEOHEX]"))),
+                };
+                let format = s(cfg, "target_format").unwrap_or_else(|| "GEOJSON".into());
+                let wkt = match format.to_lowercase().trim() {
+                    "geojson" => false,
+                    "wkt" => true,
+                    _ => return Err(config_error(ptype, tag, "target_format", &format!("illegal value [{format}], valid values are [WKT, GEOJSON]"))),
+                };
+                let opt = |k: &str| s(cfg, k).filter(|v| !v.is_empty());
+                Kind::GeoGrid(Box::new(GeoGrid {
+                    target: s(cfg, "target_field").unwrap_or_else(|| f.clone()),
+                    field: f,
+                    parent: opt("parent_field"),
+                    children: opt("children_field"),
+                    non_children: opt("non_children_field"),
+                    precision: opt("precision_field"),
+                    ignore_missing: b(cfg, "ignore_missing", false),
+                    grid,
+                    wkt,
+                }))
             }
             other => Kind::Unsupported(other.to_string()),
         })
@@ -848,54 +889,63 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
                 }
             }
         }
-        Kind::Date { field, target, formats, timezone, output_format } => {
+        Kind::Date { field, target, formats, timezone, locale, output_format } => {
             let v = d.get(field)?.clone();
             let text = v.to_es_string();
+            let unable = |e: EsError| EsError::illegal_argument(format!("unable to parse date [{text}]")).caused_by(e);
+            // The zone and locale templates render once per document; their failures are
+            // the date's (`DateProcessor.execute`).
             let zone = match timezone {
-                Some(t) => Some(crate::time::Zone::parse(&t.render(d)?).map_err(EsError::illegal_argument)?),
+                Some(t) => Some(crate::time::Zone::parse(&t.render(d)?).map_err(|e| unable(zone_error(e)))?),
                 None => None,
             };
-            let mut last_err = None;
+            let loc = match locale {
+                Some(t) => crate::time::DateLocale::parse(&crate::mapping::params::parse_locale_checked(&t.render(d)?).map_err(unable)?),
+                None => crate::time::DateLocale::English,
+            };
+            // The first failure is the cause, later ones are suppressed by it
+            // (`ExceptionsHelper.useOrSuppress`).
+            let mut errors = Vec::new();
             let mut parsed = None;
             for f in formats {
-                let pattern = match f.as_str() {
-                    "ISO8601" => "iso8601",
-                    "UNIX" => "epoch_second",
-                    "UNIX_MS" => "epoch_millis",
-                    "TAI64N" => "epoch_millis",
-                    other => other,
-                };
-                match crate::time::DateFormatter::new(pattern).and_then(|fm| fm.parse(&text, zone.as_ref(), false)) {
+                match parse_ingest_date(f, &text, zone.as_ref(), loc) {
                     Ok(i) => {
                         parsed = Some(i);
                         break;
                     }
-                    Err(e) => last_err = Some(e),
+                    Err(e) => errors.push(e),
                 }
             }
             let Some(i) = parsed else {
-                return Err(EsError::illegal_argument(format!("unable to parse date [{text}]")).caused_by(EsError::illegal_argument(last_err.unwrap_or_default())));
+                return Err(unable(first_suppressing(errors)));
             };
+            // The output format prints in `Locale.ROOT` (`DateFormatter.forPattern`).
             let out = crate::time::DateFormatter::new(output_format).map_err(EsError::illegal_argument)?;
             d.set(target, Value::Str(out.format(i, zone.as_ref().unwrap_or(&crate::time::Zone::UTC))))?;
         }
-        Kind::DateIndexName { field, prefix, rounding, formats, timezone, index_format } => {
+        Kind::DateIndexName { field, prefix, rounding, formats, timezone, locale, index_format } => {
             let v = d.get(field)?.clone();
             let text = v.to_es_string();
             let zone = match timezone {
                 Some(t) => crate::time::Zone::parse(t).map_err(EsError::illegal_argument)?,
                 None => crate::time::Zone::UTC,
             };
+            // Every format is tried and the last that parses wins (no early exit in
+            // `DateIndexNameProcessor.execute`).
             let mut parsed = None;
+            let mut errors = Vec::new();
             for f in formats {
-                if let Ok(i) = crate::time::DateFormatter::new(f).and_then(|fm| fm.parse(&text, Some(&zone), false)) {
-                    parsed = Some(i);
-                    break;
+                match parse_ingest_date(f, &text, Some(&zone), *locale) {
+                    Ok(i) => parsed = Some(i),
+                    Err(e) => errors.push(e),
                 }
             }
-            let i = parsed.ok_or_else(|| EsError::illegal_argument(format!("unable to parse date [{text}]")))?;
+            let i = parsed.ok_or_else(|| EsError::illegal_argument(format!("unable to parse date [{text}]")).caused_by(first_suppressing(errors)))?;
             let p = prefix.render(d)?;
-            let name = format!("<{p}{{{}||/{rounding}{{{index_format}|{}}}}}>", crate::time::java_instant_string(i.millis()), zone_name(&zone));
+            // The date prints in the index name format (`Locale.ROOT`, the processor's zone);
+            // date math rounds it when the index name resolves.
+            let shown = crate::time::DateFormatter::new(index_format).map_err(EsError::illegal_argument)?.format(i, &zone);
+            let name = format!("<{p}{{{shown}||/{rounding}{{{index_format}|{}}}}}>", zone_name(&zone));
             d.meta.insert("_index".into(), Value::Str(name));
         }
         Kind::Dissect { field, dissect, ignore_missing } => {
@@ -918,7 +968,7 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
                 return Err(EsError::illegal_argument(format!("field [{field}] of type [{}] cannot be cast to [java.lang.String]", java_type(&v))));
             };
             for (i, g) in groks.iter().enumerate() {
-                let caps = g.captures(s).map_err(|e| EsError::illegal_argument(format!("{e:?}")))?;
+                let caps = g.captures(s).map_err(grok_match_error)?;
                 if let Some(caps) = caps {
                     for (k, val) in caps {
                         d.set(&k, grok_value(&val))?;
@@ -1117,11 +1167,291 @@ pub fn run(cluster: &crate::Cluster, k: &Kind, d: &mut IngestDoc, depth: usize) 
             }
             return Ok(Flow::Drop).map(|_| Flow::Continue);
         }
+        Kind::Enrich(p) => crate::xpack::enrich::run(cluster, p, d)?,
+        Kind::GeoGrid(g) => {
+            let v = match d.get_opt(&g.field) {
+                None | Some(Value::Null) if g.ignore_missing => return Ok(Flow::Continue),
+                None => return Err(EsError::illegal_argument(format!("field [{}] not present as part of path [{}]", g.field, g.field))),
+                Some(Value::Null) => return Err(EsError::illegal_argument(format!("field [{}] is null, cannot process it.", g.field))),
+                Some(v) => v.clone(),
+            };
+            let Value::Str(id) = v else {
+                return Err(EsError::illegal_argument(format!("field [{}] must be a String tile address", g.field)));
+            };
+            let cell = grid_cell(g.grid, &id).map_err(|e| EsError::illegal_argument("invalid tile definition").caused_by(e))?;
+            d.set(&g.target, cell.geometry.render(g.wkt))?;
+            if let Some(p) = &g.parent
+                && !cell.parent.is_empty()
+            {
+                d.set(p, Value::Str(cell.parent))?;
+            }
+            let invalid = |reason: String| EsError::illegal_argument("invalid tile definition").caused_by(EsError::illegal_argument(reason));
+            if let Some(c) = &g.children {
+                let children = cell.children.map_err(invalid)?;
+                if !children.is_empty() {
+                    d.set(c, Value::Arr(children.into_iter().map(Value::Str).collect()))?;
+                }
+            }
+            if let Some(c) = &g.non_children {
+                let non_children = cell.non_children.map_err(invalid)?;
+                if !non_children.is_empty() {
+                    d.set(c, Value::Arr(non_children.into_iter().map(Value::Str).collect()))?;
+                }
+            }
+            if let Some(p) = &g.precision {
+                d.set(p, Value::from(i64::from(cell.precision)))?;
+            }
+        }
         Kind::Unsupported(t) => {
             return Err(EsError::illegal_argument(format!("processor [{t}] is not available in roll search")));
         }
     }
     Ok(Flow::Continue)
+}
+
+/// The `geo_grid` processor's configuration.
+#[derive(Clone, Debug)]
+pub struct GeoGrid {
+    field: String,
+    target: String,
+    parent: Option<String>,
+    children: Option<String>,
+    non_children: Option<String>,
+    precision: Option<String>,
+    ignore_missing: bool,
+    grid: GridType,
+    wkt: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GridType {
+    Geohash,
+    Geotile,
+    Geohex,
+}
+
+/// A cell's shape: a `BBOX` (hash and tile cells) or a polygon ring of `(lon, lat)` (hex cells).
+enum CellGeometry {
+    Rect { min_lon: f64, max_lon: f64, max_lat: f64, min_lat: f64 },
+    Polygon(Vec<(f64, f64)>),
+}
+
+impl CellGeometry {
+    /// `GeometryParserFormat.WKT` / `GEOJSON` (`Envelope` for rectangles).
+    fn render(&self, wkt: bool) -> Value {
+        let j = crate::json::write::java_double;
+        match (self, wkt) {
+            (CellGeometry::Rect { min_lon, max_lon, max_lat, min_lat }, true) => Value::Str(format!("BBOX ({}, {}, {}, {})", j(*min_lon), j(*max_lon), j(*max_lat), j(*min_lat))),
+            (CellGeometry::Rect { min_lon, max_lon, max_lat, min_lat }, false) => crate::obj! {
+                "type" => "Envelope",
+                "coordinates" => Value::Arr(vec![Value::Arr(vec![Value::from(*min_lon), Value::from(*max_lat)]), Value::Arr(vec![Value::from(*max_lon), Value::from(*min_lat)])]),
+            },
+            (CellGeometry::Polygon(ring), true) => {
+                let pts: Vec<String> = ring.iter().map(|(lon, lat)| format!("{} {}", j(*lon), j(*lat))).collect();
+                Value::Str(format!("POLYGON (({}))", pts.join(", ")))
+            }
+            (CellGeometry::Polygon(ring), false) => crate::obj! {
+                "type" => "Polygon",
+                "coordinates" => Value::Arr(vec![Value::Arr(ring.iter().map(|(lon, lat)| Value::Arr(vec![Value::from(*lon), Value::from(*lat)])).collect())]),
+            },
+        }
+    }
+}
+
+/// What `GeoGridProcessor.TileHandler` computes for a cell id.
+struct GridCell {
+    geometry: CellGeometry,
+    parent: String,
+    /// `Err`: the reason computing them fails (the processor fails only when it asks).
+    children: Result<Vec<String>, String>,
+    non_children: Result<Vec<String>, String>,
+    precision: u32,
+}
+
+fn grid_cell(grid: GridType, id: &str) -> EsResult<GridCell> {
+    match grid {
+        GridType::Geohash => {
+            const BASE32: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+            if let Some(c) = id.chars().find(|c| !c.is_ascii() || !BASE32.contains(&(*c as u8))) {
+                return Err(EsError::illegal_argument(format!("unsupported symbol [{c}] in geohash [{id}]")));
+            }
+            if id.len() > 12 {
+                return Err(EsError::illegal_argument(format!("precision of geohash [{id}] must not be greater than 12")));
+            }
+            if id.is_empty() {
+                return Err(EsError::illegal_argument("empty geohash"));
+            }
+            let (min_lon, max_lon, max_lat, min_lat) = search_aggs::geo::geohash_cell_bounds(search_aggs::geo::geohash_long_of(id.as_bytes()));
+            Ok(GridCell {
+                geometry: CellGeometry::Rect { min_lon, max_lon, max_lat, min_lat },
+                parent: id[..id.len().saturating_sub(1)].to_string(),
+                children: Ok(BASE32.iter().map(|&c| format!("{id}{}", c as char)).collect()),
+                non_children: Ok(Vec::new()),
+                precision: id.len() as u32,
+            })
+        }
+        GridType::Geotile => {
+            // `GeoTileUtils.toBoundingBox`: `parseHash`, then `validateZXY`.
+            let (z, x, y) = crate::search::extra::geotile_zxy(id)?;
+            let tiles = 1i64 << z;
+            let (x, y) = (i64::from(x), i64::from(y));
+            let geometry = CellGeometry::Rect {
+                min_lon: search_aggs::geo::tile_to_lon(x, tiles),
+                max_lon: search_aggs::geo::tile_to_lon(x + 1, tiles),
+                max_lat: search_aggs::geo::tile_to_lat(y, tiles),
+                min_lat: search_aggs::geo::tile_to_lat(y + 1, tiles),
+            };
+            let children = if z + 1 > 29 {
+                Vec::new()
+            } else {
+                let (cz, cx, cy) = (z + 1, x * 2, y * 2);
+                vec![format!("{cz}/{cx}/{cy}"), format!("{cz}/{}/{cy}", cx + 1), format!("{cz}/{cx}/{}", cy + 1), format!("{cz}/{}/{}", cx + 1, cy + 1)]
+            };
+            Ok(GridCell { geometry, parent: if z == 0 { String::new() } else { format!("{}/{}/{}", z - 1, x / 2, y / 2) }, children: Ok(children), non_children: Ok(Vec::new()), precision: z })
+        }
+        GridType::Geohex => {
+            use search_aggs::h3;
+            // `H3.stringToH3` (`Long.parseUnsignedLong(address, 16)`) doesn't validate: the
+            // processor reads any index whose fields are in range (as `0`).
+            let Some(cell) = h3::string_to_h3_lenient(id) else {
+                if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) || id.trim_start_matches('0').len() > 16 {
+                    let msg = if id.trim_start_matches('0').len() > 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        format!("String value {id} exceeds range of unsigned long.")
+                    } else {
+                        format!("For input string: \"{id}\" under radix 16")
+                    };
+                    return Err(EsError::java(400, "number_format_exception", msg));
+                }
+                // Elasticsearch fails reading such an index (an exception without a message).
+                let mut e = EsError::illegal_argument("");
+                e.reason = None;
+                return Err(e);
+            };
+            let res = h3::resolution(cell);
+            let ring = h3_cartesian_ring(cell);
+            let list = |n: usize, f: &dyn Fn(usize) -> u64| (0..n).map(|i| h3::h3_to_string(f(i))).collect::<Vec<_>>();
+            // The finest cells have no children: `H3.h3ToChildren` / `h3ToNoChildrenIntersecting`
+            // fail, when the processor asks for them.
+            let finest = res >= h3::MAX_RES;
+            Ok(GridCell {
+                geometry: CellGeometry::Polygon(ring),
+                parent: if res == 0 { String::new() } else { h3::h3_to_string(h3::ring::parent(cell)) },
+                children: if finest { Err(format!("Invalid child resolution [{res}]")) } else { Ok(list(h3::ring::children_size(cell), &|i| h3::ring::child(cell, i))) },
+                non_children: if finest { Err("Resolution overflow".into()) } else { Ok(list(h3::ring::no_children_size(cell), &|i| h3::ring::no_child_intersecting(cell, i))) },
+                precision: res as u32,
+            })
+        }
+    }
+}
+
+/// `H3CartesianUtil.computePoints`: the cell boundary quantized to the index encoding and closed;
+/// the polar cells are closed along the dateline and the pole instead (vertices sorted by
+/// longitude, the south one reversed). Cells crossing the dateline stay one polygon (Elasticsearch
+/// splits those into a multipolygon).
+fn h3_cartesian_ring(cell: u64) -> Vec<(f64, f64)> {
+    use search_codec::points::encode;
+    let q = |lon: f64, lat: f64| (encode::decode_longitude(encode::encode_longitude(lon)), encode::decode_latitude(encode::encode_latitude(lat)));
+    let mut ring: Vec<(f64, f64)> = search_aggs::h3::h3_to_geo_boundary(cell).points.iter().map(|p| q(p.lon.to_degrees(), p.lat.to_degrees())).collect();
+    let res = search_aggs::h3::resolution(cell);
+    let north = search_aggs::h3::geo_to_h3(90.0, 0.0, res) == cell;
+    let south = search_aggs::h3::geo_to_h3(-90.0, 0.0, res) == cell;
+    if !(north || south) || ring.len() < 2 {
+        if let Some(&first) = ring.first() {
+            ring.push(first);
+        }
+        return ring;
+    }
+    ring.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let pos = |x: f64| if x < 0.0 { x + 360.0 } else { x };
+    let (first, last) = (ring[0], ring[ring.len() - 1]);
+    let t = (180.0 - pos(first.0)) / (pos(last.0) - pos(first.0));
+    let y = first.1 + t * (last.1 - first.1);
+    let pole = encode::decode_latitude(encode::encode_latitude(if north { 90.0 } else { -90.0 }));
+    let (max_lon, min_lon) = (encode::decode_longitude(i32::MAX), encode::decode_longitude(i32::MIN));
+    ring.extend([(max_lon, y), (max_lon, pole), (min_lon, pole), (min_lon, y), first]);
+    if south {
+        ring.reverse();
+    }
+    ring
+}
+
+/// `Locale.Builder.setLanguageTag`'s well-formedness: `-`-separated subtags, a 2–8 letter
+/// language first (empty resets to `Locale.ROOT`).
+fn is_language_tag(tag: &str) -> bool {
+    if tag.is_empty() {
+        return true;
+    }
+    let mut parts = tag.split('-');
+    let lang = parts.next().unwrap_or("");
+    (2..=8).contains(&lang.len()) && lang.bytes().all(|b| b.is_ascii_alphabetic()) && parts.all(|p| (1..=8).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// `ExceptionsHelper.useOrSuppress` over a list of failures: the first, suppressing the rest.
+fn first_suppressing(errors: Vec<EsError>) -> EsError {
+    let mut it = errors.into_iter();
+    match it.next() {
+        Some(first) => {
+            let rest: Vec<EsError> = it.collect();
+            if rest.is_empty() { first } else { first.with_suppressed(rest) }
+        }
+        None => EsError::illegal_argument("no date formats"),
+    }
+}
+
+/// `ZoneId.of`'s exception: `ZoneRulesException` for an unknown region, `DateTimeException`
+/// for a malformed id.
+fn zone_error(msg: String) -> EsError {
+    let kind = if msg.starts_with("Unknown time-zone ID") { "zone_rules_exception" } else { "date_time_exception" };
+    EsError::java(400, kind, msg)
+}
+
+/// The current year in UTC, which ingest date formats without a year take.
+fn current_year() -> i64 {
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    use chrono::Datelike;
+    chrono::DateTime::from_timestamp_millis(ms).map_or(1970, |d| i64::from(d.year()))
+}
+
+/// `DateFormat.getFunction(format, zone, locale).apply(text)`: the ingest date processors'
+/// formats, with the Java exceptions Elasticsearch reports as the cause.
+fn parse_ingest_date(format: &str, text: &str, zone: Option<&crate::time::Zone>, locale: crate::time::DateLocale) -> EsResult<crate::time::Instant> {
+    let nfe = |s: &str, radix: u32| {
+        let tail = if radix == 10 { String::new() } else { format!(" under radix {radix}") };
+        EsError::java(400, "number_format_exception", format!("For input string: \"{s}\"{tail}"))
+    };
+    let substring = |s: &str, from: usize, to: usize| -> EsResult<String> {
+        // `String.substring` over UTF-16 units.
+        let units: Vec<u16> = s.encode_utf16().collect();
+        if to > units.len() {
+            return Err(EsError::java(400, "string_index_out_of_bounds_exception", format!("Range [{from}, {to}) out of bounds for length {}", units.len())));
+        }
+        Ok(String::from_utf16_lossy(&units[from..to]))
+    };
+    match format {
+        "ISO8601" => {
+            let f = crate::time::DateFormatter::new("iso8601").map_err(EsError::illegal_argument)?;
+            f.parse_detailed(text, zone, false).map_err(|e| e.to_es())
+        }
+        "UNIX" => {
+            let secs = crate::query::xparser::java_parse_double(text)?;
+            // `(long) (seconds * 1000.0)`: saturating, NaN becomes 0.
+            Ok(crate::time::Instant::from_millis((secs * 1000.0) as i64))
+        }
+        "UNIX_MS" => crate::units::parse_java_long(text).map(crate::time::Instant::from_millis).ok_or_else(|| nfe(text, 10)),
+        "TAI64N" => {
+            let t = text.strip_prefix('@').unwrap_or(text);
+            let base_s = substring(t, 1, 16)?;
+            let base = i64::from_str_radix(&base_s, 16).map_err(|_| nfe(&base_s, 16))?;
+            let rest_s = substring(t, 16, 24)?;
+            let rest = i64::from_str_radix(&rest_s, 16).map_err(|_| nfe(&rest_s, 16))?;
+            Ok(crate::time::Instant::from_millis(base.wrapping_mul(1000).wrapping_sub(10000).wrapping_add(rest / 1_000_000)))
+        }
+        _ => {
+            let pattern = format.strip_prefix('8').unwrap_or(format);
+            let f = crate::time::DateFormatter::new(pattern).map_err(EsError::illegal_argument)?.with_locale(locale);
+            f.parse_with_year(text, zone, false, Some(current_year())).map_err(|e| e.to_es())
+        }
+    }
 }
 
 fn zone_name(z: &crate::time::Zone) -> String {
@@ -1134,6 +1464,23 @@ fn zone_name(z: &crate::time::Zone) -> String {
         }
         crate::time::Zone::Named(t) => t.name().to_string(),
     }
+}
+
+/// The grok watchdog limit from a static node setting (`ingest.grok.watchdog.max_execution_time`,
+/// default 1s); `0` or a negative value disables it, as Elasticsearch's `MatcherWatchdog.noop()`.
+pub(crate) fn grok_watchdog(cluster: &crate::Cluster, key: &str) -> Option<std::time::Duration> {
+    let millis = match cluster.config.node_setting(key) {
+        Some(v) => crate::units::TimeValue::parse(v, key).map(|t| t.as_millis()).unwrap_or(1000),
+        None => 1000,
+    };
+    (millis > 0).then(|| std::time::Duration::from_millis(millis as u64))
+}
+
+/// A grok match failure as Elasticsearch reports it: an interrupted match is a
+/// `RuntimeException`, a capture that doesn't convert a `NumberFormatException`.
+fn grok_match_error(e: search_painless::grok::MatchError) -> EsError {
+    let status = if matches!(e, search_painless::grok::MatchError::Interrupted { .. }) { 500 } else { 400 };
+    EsError::java(status, e.kind(), e.reason())
 }
 
 fn grok_value(v: &search_painless::grok::GrokValue) -> Value {
@@ -1228,4 +1575,69 @@ fn parse_csv(s: &str, sep: char, quote: char, trim: bool) -> EsResult<Vec<String
 #[allow(dead_code)]
 fn _str<'a>(d: &'a IngestDoc, f: &str) -> EsResult<Option<&'a str>> {
     str_field(d, f, "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn iso(i: crate::time::Instant) -> String {
+        crate::time::DateFormatter::new("strict_date_time").unwrap().format(i, &crate::time::Zone::UTC)
+    }
+
+    #[test]
+    fn ingest_date_formats_follow_date_format_java() {
+        let en = crate::time::DateLocale::English;
+        assert_eq!(iso(parse_ingest_date("TAI64N", "4000000050d506482dbdf024", None, en).unwrap()), "2012-12-22T01:00:46.767Z");
+        assert_eq!(iso(parse_ingest_date("TAI64N", "@4000000050d506482dbdf024", None, en).unwrap()), "2012-12-22T01:00:46.767Z");
+        let e = parse_ingest_date("TAI64N", "zz", None, en).unwrap_err();
+        assert_eq!((e.kind.as_ref(), e.reason()), ("string_index_out_of_bounds_exception", "Range [1, 16) out of bounds for length 2"));
+        let e = parse_ingest_date("TAI64N", "4000000050d50648", None, en).unwrap_err();
+        assert_eq!(e.reason(), "Range [16, 24) out of bounds for length 16");
+        let e = parse_ingest_date("TAI64N", "4000000050d5064zzdbdf024", None, en).unwrap_err();
+        assert_eq!((e.kind.as_ref(), e.reason()), ("number_format_exception", "For input string: \"000000050d5064z\" under radix 16"));
+        assert_eq!(iso(parse_ingest_date("UNIX", " 1.5e9 ", None, en).unwrap()), "2017-07-14T02:40:00.000Z");
+        assert_eq!(parse_ingest_date("UNIX", "abc", None, en).unwrap_err().reason(), "For input string: \"abc\"");
+        assert_eq!(parse_ingest_date("UNIX_MS", "1.5", None, en).unwrap_err().reason(), "For input string: \"1.5\"");
+        let es = crate::time::DateLocale::parse("es");
+        assert_eq!(iso(parse_ingest_date("dd MMMM yyyy", "03 marzo 2021", None, es).unwrap()), "2021-03-03T00:00:00.000Z");
+        assert!(parse_ingest_date("dd MMMM yyyy", "03 marzo 2021", None, en).is_err());
+        // No year: the current one.
+        let i = parse_ingest_date("MMM dd", "Mar 03", None, en).unwrap();
+        assert!(iso(i).starts_with(&format!("{}-03-03", current_year())));
+    }
+
+    #[test]
+    fn geo_grid_cells_match_elasticsearch() {
+        let tile = grid_cell(GridType::Geotile, "4/8/5").unwrap();
+        assert_eq!(tile.geometry.render(true).as_str(), Some("BBOX (0.0, 22.5, 55.77657301866769, 40.979898069620134)"));
+        assert_eq!((tile.parent.as_str(), tile.precision), ("3/4/2", 4));
+        assert_eq!(tile.children.unwrap(), ["5/16/10", "5/17/10", "5/16/11", "5/17/11"]);
+        let hash = grid_cell(GridType::Geohash, "u0").unwrap();
+        assert_eq!(hash.geometry.render(true).as_str(), Some("BBOX (0.0, 11.25, 50.625, 45.0)"));
+        let children = hash.children.unwrap();
+        assert_eq!((hash.parent.as_str(), children.len(), children[31].as_str()), ("u", 32, "u0z"));
+        let hex = grid_cell(GridType::Geohex, "811fbffffffffff").unwrap();
+        let wkt = hex.geometry.render(true);
+        assert!(wkt.as_str().unwrap().starts_with("POLYGON ((1.1885095294564962 49.470279179513454, "), "{wkt:?}");
+        assert_eq!((hex.parent.as_str(), hex.children.unwrap().len(), hex.non_children.unwrap().len()), ("801ffffffffffff", 7, 6));
+        // the finest cells fail only when the processor asks for their children
+        let finest = grid_cell(GridType::Geohex, "8f2830828052d25").unwrap();
+        assert_eq!(finest.children.unwrap_err(), "Invalid child resolution [15]");
+        assert_eq!(finest.non_children.unwrap_err(), "Resolution overflow");
+        assert!(grid_cell(GridType::Geohex, "ffffffffffffffff").err().unwrap().reason.is_none());
+        assert_eq!(grid_cell(GridType::Geotile, "30/1/1").err().unwrap().reason(), "Invalid geotile_grid precision of 30. Must be between 0 and 29.");
+        assert_eq!(grid_cell(GridType::Geohash, "").err().unwrap().reason(), "empty geohash");
+        assert!(grid_cell(GridType::Geotile, "3/9/1").is_err());
+        assert_eq!(grid_cell(GridType::Geohex, "zz").err().unwrap().kind.as_ref(), "number_format_exception");
+    }
+
+    #[test]
+    fn language_tags_and_suppressed_failures() {
+        assert!(is_language_tag("es") && is_language_tag("de-AT") && is_language_tag(""));
+        assert!(!is_language_tag("de_AT") && !is_language_tag("x") && !is_language_tag("de--AT"));
+        let e = first_suppressing(vec![EsError::illegal_argument("a"), EsError::illegal_argument("b")]);
+        assert_eq!((e.reason(), e.suppressed().len()), ("a", 1));
+        assert_eq!(zone_error("Unknown time-zone ID: X/Y".into()).kind.as_ref(), "zone_rules_exception");
+    }
 }

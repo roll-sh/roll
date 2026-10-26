@@ -54,12 +54,32 @@ pub fn doc_values(seg: &SegmentContext, local: u32, f: &FieldInfo, format: Optio
                 }
                 return Ok(out);
             }
-            if let Some(dv) = r.sorted_set(n) {
+            if let Some(key) = &f.flattened_key {
+                // A keyed sub-field's values are the `key\0value` doc values of its key.
+                if let Some(dv) = r.sorted_set(n) {
+                    let mut buf = Vec::new();
+                    for o in dv.ords(local) {
+                        buf.clear();
+                        dv.lookup_ord(o, &mut buf);
+                        if buf.len() > key.len() && buf.starts_with(key.as_bytes()) && buf[key.len()] == 0 {
+                            out.push(Value::Str(String::from_utf8_lossy(&buf[key.len() + 1..]).into_owned()));
+                        }
+                    }
+                }
+            } else if let Some(dv) = r.sorted_set(n) {
                 let mut buf = Vec::new();
+                // `counted_keyword`: each value as often as the doc holds it.
+                let counts = f.subfield("count").and_then(|c| r.binary(c)).and_then(|c| c.get(local));
+                let mut counts = counts.map(search_aggs::values::VIntIter::array);
                 for o in dv.ords(local) {
                     buf.clear();
                     dv.lookup_ord(o, &mut buf);
-                    out.push(Value::Str(String::from_utf8_lossy(&buf).into_owned()));
+                    let v = Value::Str(if f.kind == Kind::Version { super::version_field::decode(&buf) } else { String::from_utf8_lossy(&buf).into_owned() });
+                    let times = counts.as_mut().and_then(Iterator::next).unwrap_or(1).max(1);
+                    for _ in 1..times {
+                        out.push(v.clone());
+                    }
+                    out.push(v);
                 }
             } else if let Some(dv) = r.sorted(n)
                 && let Some(o) = dv.ord(local)
@@ -191,16 +211,23 @@ pub fn format_numeric(f: &FieldInfo, v: i64, format: Option<&str>) -> EsResult<V
     Ok(match f.kind {
         Kind::Date | Kind::DateNanos => {
             let fmt = match format {
-                Some(p) => std::sync::Arc::new(crate::time::DateFormatter::new(p).map_err(EsError::illegal_argument)?),
+                Some(p) => std::sync::Arc::new(match &f.date_format {
+                    Some(d) => d.derive(p),
+                    None => crate::time::DateFormatter::new(p),
+                }
+                .map_err(EsError::illegal_argument)?),
                 None => f.date_format.clone().ok_or_else(|| EsError::illegal_state("date field without format"))?,
             };
             Value::Str(fmt.format(crate::fetch::instant_of(f.kind == Kind::DateNanos, v), &crate::time::Zone::UTC))
         }
         Kind::Boolean => Value::Bool(v != 0),
         Kind::Double => num_formatted(encode::sortable_f64(v), format),
-        Kind::Float => num_formatted(crate::fetch::java_float_as_double(encode::sortable_f32(v as i32)), format),
-        Kind::HalfFloat => num_formatted(crate::fetch::java_float_as_double(encode::sortable_f16(v as i16)), format),
-        Kind::ScaledFloat(sf) => num_formatted(v as f64 / sf, format),
+        // Doc values print as the doubles the field data hands out: a float widened exactly
+        // (`-34.869998931884766`, not `-34.87`), a scaled value times the inverse factor
+        // (`ScaledFloatLeafFieldData`: `1037 * 0.01` is `10.370000000000001`).
+        Kind::Float => num_formatted(encode::sortable_f32(v as i32) as f64, format),
+        Kind::HalfFloat => num_formatted(encode::sortable_f16(v as i16) as f64, format),
+        Kind::ScaledFloat(sf) => num_formatted(scaled_double(v, sf), format),
         Kind::UnsignedLong => {
             let u = (v as u64) ^ (1 << 63);
             if u <= i64::MAX as u64 { Value::from(u as i64) } else { Value::Num(Number::UInt(u)) }
@@ -210,6 +237,12 @@ pub fn format_numeric(f: &FieldInfo, v: i64, format: Option<&str>) -> EsResult<V
             None => Value::from(v),
         },
     })
+}
+
+/// A scaled float's doc value as a double (`ScaledFloatLeafFieldData.getDoubleValues`: the
+/// long times `1 / scaling_factor`, which rounds differently from a division).
+pub fn scaled_double(v: i64, scaling_factor: f64) -> f64 {
+    v as f64 * (1.0 / scaling_factor)
 }
 
 fn num_formatted(d: f64, format: Option<&str>) -> Value {
@@ -228,8 +261,21 @@ pub fn decimal_format(d: f64, pattern: &str) -> String {
 }
 
 /// `docvalue_fields`: values of the requested fields (patterns allowed).
-pub fn docvalue_fields(table: &FieldTable, seg: &SegmentContext, local: u32, specs: &[FieldAndFormat], out: &mut Map) -> EsResult<()> {
+pub fn docvalue_fields(table: &FieldTable, seg: &SegmentContext, local: u32, specs: &[FieldAndFormat], id_fielddata: bool, out: &mut Map) -> EsResult<()> {
+    let mut deferred: Vec<FieldAndFormat> = Vec::new();
     for spec in specs {
+        if spec.field.contains('*') {
+            // Patterns reach metadata fields too (`getMatchingFieldNames`): the first one in the
+            // matched set's (hash) order without fielddata fails the request; the others answer
+            // after every spec.
+            let meta = metadata_matches(table, &spec.field, id_fielddata);
+            if let Some((name, _)) = meta.iter().find(|(_, ok)| !ok) {
+                return Err(if name == "_id" { super::id_fielddata::disabled() } else { no_fielddata(name) });
+            }
+            deferred.extend(meta.into_iter().map(|(n, _)| FieldAndFormat { field: n, ..spec.clone() }));
+        } else if metadata_field(&spec.field, id_fielddata) == Some(false) {
+            return Err(if spec.field == "_id" { super::id_fielddata::disabled() } else { no_fielddata(&spec.field) });
+        }
         // Time series metadata: `_ts_routing_hash` as stored, `_tsid` base64url-encoded.
         if spec.field == "_ts_routing_hash" || spec.field == "_tsid" {
             let n = if spec.field == "_tsid" { crate::engine::fields::TSID_FIELD } else { crate::engine::fields::TS_ROUTING_HASH_FIELD };
@@ -252,9 +298,14 @@ pub fn docvalue_fields(table: &FieldTable, seg: &SegmentContext, local: u32, spe
                 continue;
             }
             "_id" => {
-                return Err(EsError::illegal_argument(
-                    "Fielddata access on the _id field is disallowed, you can re-enable it by updating the dynamic cluster setting: indices.id_field_data.enabled",
-                ));
+                if !id_fielddata {
+                    return Err(super::id_fielddata::disabled());
+                }
+                let mut buf = Vec::new();
+                if super::id_fielddata::value(seg, local, &mut buf) {
+                    out.insert(spec.field.clone(), Value::Arr(vec![Value::Str(String::from_utf8_lossy(&buf).into_owned())]));
+                }
+                continue;
             }
             "_routing" | "_source" | "_doc_count" => {
                 return Err(EsError::illegal_argument(format!("Fielddata is not supported on field [{0}] of type [{0}]", spec.field)));
@@ -278,7 +329,21 @@ pub fn docvalue_fields(table: &FieldTable, seg: &SegmentContext, local: u32, spe
         }
         let names = if spec.field.contains('*') { table.matching(&spec.field) } else { vec![spec.field.clone()] };
         for name in names {
-            let Some(f) = table.get(&name) else { continue };
+            let keyed;
+            let f = match table.get(&name) {
+                Some(f) => f,
+                None => match table.keyed(&name) {
+                    Some(k) => {
+                        keyed = k;
+                        &keyed
+                    }
+                    None => continue,
+                },
+            };
+            // `FlatObjectFieldType.docValueFormat`: only a dotted sub-field has values.
+            if f.ty == "flat_object" && f.flattened_key.is_none() {
+                return Err(EsError::illegal_argument(format!("Field [{name}] of type [flat_object] does not support doc_value in root field")));
+            }
             if f.kind.is_text() && f.subfield("fielddata").is_none() && !f.doc_values {
                 if spec.field.contains('*') {
                     continue;
@@ -295,11 +360,87 @@ pub fn docvalue_fields(table: &FieldTable, seg: &SegmentContext, local: u32, spe
             }
             let vals = doc_values(seg, local, f, spec.format.as_deref())?;
             if !vals.is_empty() {
-                out.insert(name, Value::Arr(vals));
+                // OpenSearch's `FetchDocValuesPhase` appends each entry's values to the field's
+                // list (one field asked for in several formats lists them all); Elasticsearch
+                // keeps the last.
+                match out.get_mut(&name) {
+                    Some(Value::Arr(prev)) if crate::opensearch::active() => prev.extend(vals),
+                    _ => {
+                        out.insert(name, Value::Arr(vals));
+                    }
+                }
             }
         }
     }
+    if !deferred.is_empty() {
+        docvalue_fields(table, seg, local, &deferred, id_fielddata, out)?;
+    }
     Ok(())
+}
+
+fn no_fielddata(field: &str) -> EsError {
+    EsError::illegal_argument(format!("Fielddata is not supported on field [{field}] of type [{field}]"))
+}
+
+/// The dialect's metadata fields (`MapperService` metadata mappers) and whether each loads
+/// fielddata (`Some(true)`), refuses it (`Some(false)`), or isn't a field (`None`).
+fn metadata_field(name: &str, id_fielddata: bool) -> Option<bool> {
+    let os = crate::opensearch::active();
+    Some(match name {
+        "_id" => id_fielddata,
+        "_index" | "_seq_no" => true,
+        "_routing" | "_source" | "_doc_count" | "_field_names" | "_data_stream_timestamp" | "_nested_path" | "_feature" => false,
+        // Elasticsearch's `_ignored` has doc values; OpenSearch's only an index.
+        "_ignored" => !os,
+        "_version" => !os,
+        "_ignored_source" | "_tier" if !os => false,
+        "_index_mode" if !os => true,
+        _ => return None,
+    })
+}
+
+const METADATA_FIELDS: &[&str] = &[
+    "_data_stream_timestamp",
+    "_doc_count",
+    "_feature",
+    "_field_names",
+    "_id",
+    "_ignored",
+    "_ignored_source",
+    "_index",
+    "_index_mode",
+    "_nested_path",
+    "_routing",
+    "_seq_no",
+    "_source",
+    "_tier",
+    "_version",
+];
+
+/// The metadata fields a pattern matches, in the order a Java `HashSet` of every matched name
+/// (mapped ones included) iterates them, with [`metadata_field`]'s verdict. Names sharing a
+/// bucket keep the order of the (larger) map they were collected from.
+fn metadata_matches(table: &FieldTable, pattern: &str, id_fielddata: bool) -> Vec<(String, bool)> {
+    let glob = |n: &str| crate::xcontent::filter::glob_match(pattern, n);
+    let meta: Vec<(&str, bool)> = METADATA_FIELDS.iter().filter(|n| glob(n)).filter_map(|n| metadata_field(n, id_fielddata).map(|ok| (*n, ok))).collect();
+    if meta.is_empty() {
+        return Vec::new();
+    }
+    let size = meta.len() + table.matching(pattern).len();
+    let mut cap = 16usize;
+    while size > cap / 4 * 3 {
+        cap *= 2;
+    }
+    let spread = |n: &str| {
+        let h = n.encode_utf16().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(u32::from(c)));
+        h ^ (h >> 16)
+    };
+    let mut ordered = meta;
+    ordered.sort_by_key(|(n, _)| {
+        let h = spread(n) as usize;
+        (h & (cap - 1), h & (cap * 2 - 1), *n)
+    });
+    ordered.into_iter().map(|(n, ok)| (n.to_string(), ok)).collect()
 }
 
 /// The options of the fetch phase.
@@ -313,6 +454,18 @@ pub struct FetchOpts {
     pub seq_no_primary_term: bool,
     /// `force_synthetic_source`.
     pub force_synthetic: bool,
+    /// `_id` fielddata may load ([`super::id_fielddata::enabled`]): `docvalue_fields: [_id]`.
+    pub id_fielddata: bool,
+    /// Script fields leave `_source` out unless `_source` or `stored_fields: [_source]` asks
+    /// for it (`SearchService.parseSource`: script fields without a `FetchSourceContext`
+    /// fetch no source; Elasticsearch and OpenSearch alike).
+    pub script_fields_only: bool,
+    /// A stored `_source` may go into the hit as its bytes (`json::raw`) when nothing reads or
+    /// changes it: the REST `_search` and scroll pages.
+    pub raw_source: bool,
+    /// `_id` shows even under `stored_fields: _none_`: Elasticsearch's script fields and
+    /// highlight phases load it (OpenSearch's don't).
+    pub keep_id: bool,
 }
 
 /// Whether `_source` is returned under these options.
@@ -321,6 +474,7 @@ pub fn wants_source(o: &FetchOpts) -> FetchSource {
         (Some(fs), _) => fs.clone(),
         (None, Some(Some(sf))) => FetchSource { fetch: sf.iter().any(|f| f == "_source"), ..Default::default() },
         (None, Some(None)) => FetchSource { fetch: false, ..Default::default() },
+        (None, None) if o.script_fields_only => FetchSource { fetch: false, ..Default::default() },
         (None, None) => FetchSource::default(),
     }
 }
@@ -328,9 +482,29 @@ pub fn wants_source(o: &FetchOpts) -> FetchSource {
 /// Renders one hit's document part (from `_version` to `fields`) into `m`.
 #[allow(clippy::too_many_arguments)]
 pub fn render_doc(table: &FieldTable, idx: Option<&crate::meta::IndexMeta>, searcher: &Searcher, doc: u32, o: &FetchOpts, m: &mut Map, score: Option<f32>, ctx_now: i64) -> EsResult<Option<Map>> {
+    if searcher.segment_of(doc).is_none() {
+        return Ok(None);
+    }
+    let stored = searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
+    render_doc_stored(table, idx, searcher, doc, &stored, o, m, score, ctx_now)
+}
+
+/// [`render_doc`] with the hit's stored fields already loaded (`searcher.stored(doc)`): the
+/// fetch phase reads them once per hit, for `_id` and the rest alike.
+#[allow(clippy::too_many_arguments)]
+pub fn render_doc_stored(
+    table: &FieldTable,
+    idx: Option<&crate::meta::IndexMeta>,
+    searcher: &Searcher,
+    doc: u32,
+    stored: &[(u32, search_codec::stored::OwnedStoredValue)],
+    o: &FetchOpts,
+    m: &mut Map,
+    score: Option<f32>,
+    ctx_now: i64,
+) -> EsResult<Option<Map>> {
     let _ = ctx_now;
     let Some((seg, local)) = searcher.segment_of(doc) else { return Ok(None) };
-    let stored = searcher.stored(doc).map_err(crate::engine::convert::index_error)?;
     if o.version {
         m.insert("_version".into(), Value::from(meta_dv(seg, local, search_index::schema::VERSION_FIELD)));
     }
@@ -348,16 +522,33 @@ pub fn render_doc(table: &FieldTable, idx: Option<&crate::meta::IndexMeta>, sear
         _ => m.insert("_score".into(), Value::Null),
     };
     if o.stored_fields != Some(None) {
-        if let Some(r) = crate::fetch::routing(&stored) {
+        if let Some(r) = crate::fetch::routing(stored) {
             m.insert("_routing".into(), Value::Str(r));
         }
-        let ig = crate::fetch::ignored(&stored);
+        let ig = crate::fetch::ignored(stored);
         if !ig.is_empty() {
             m.insert("_ignored".into(), Value::Arr(ig.into_iter().map(Value::Str).collect()));
         }
     }
     let fs = wants_source(o);
-    let mut source = if fs.fetch || !o.fields.is_empty() { crate::fetch::source_bytes(&stored).map(crate::fetch::parse_source).transpose()? } else { None };
+    // The stored bytes as they are, when nothing reads or changes them (`SourceView` would
+    // return them unchanged): no filtering, `fields`, vectors or forced synthetic source.
+    let raw_source = if o.raw_source
+        && fs.fetch
+        && o.fields.is_empty()
+        && fs.filter().is_none()
+        && !table.has_vectors
+        && let Some(idx) = idx
+        && !(o.force_synthetic && crate::engine::synthetic::source_mode(idx) == crate::engine::synthetic::SourceMode::Stored)
+        && let Some(bytes) = crate::fetch::source_bytes(stored)
+        && let Some(end) = crate::json::raw::single_object_end(bytes)
+        && let Ok(text) = std::str::from_utf8(&bytes[..end])
+    {
+        Some(crate::json::raw::raw(text))
+    } else {
+        None
+    };
+    let mut source = if raw_source.is_none() && (fs.fetch || !o.fields.is_empty()) { crate::fetch::source_bytes(stored).map(crate::fetch::parse_source).transpose()? } else { None };
     // Vectors kept out of `_source` read back as the index holds them (floats).
     if let (Some(idx), Some(Value::Obj(sm))) = (idx, source.as_mut())
         && table.has_vectors
@@ -365,25 +556,43 @@ pub fn render_doc(table: &FieldTable, idx: Option<&crate::meta::IndexMeta>, sear
     {
         crate::engine::synthetic::vectors(table, "", sm, false);
     }
-    if fs.fetch
-        && let Some(src) = &source
-    {
-        let v = match idx {
-            Some(idx) => crate::fetch::SourceView { idx, table, force_synthetic: o.force_synthetic }.apply(src.clone(), &fs),
-            None => match (fs.filter(), src) {
-                (Some(f), Value::Obj(sm)) => Value::Obj(f.apply(sm)),
-                (_, v) => v.clone(),
-            },
+    if let Some(raw) = raw_source {
+        m.insert("_source".into(), raw);
+    }
+    if fs.fetch && source.is_some() {
+        // Only `fields` reads the source again; otherwise it moves into the hit uncopied.
+        let owned = |source: &mut Option<Value>| if o.fields.is_empty() { source.take().unwrap_or_default() } else { source.clone().unwrap_or_default() };
+        let v = match (idx, fs.filter(), &source) {
+            (Some(idx), _, _) => {
+                // `fields` naming a mapped field reads the source as a map first.
+                let parsed = (!fs.includes.is_empty() || !fs.excludes.is_empty()) && o.fields.iter().any(|f| !f.field.starts_with('_') && !table.matching(&f.field).is_empty());
+                crate::fetch::SourceView { idx, table, force_synthetic: o.force_synthetic, search: true }.apply_parsed(owned(&mut source), &fs, parsed)
+            }
+            (None, Some(f), Some(Value::Obj(sm))) => Value::Obj(f.apply(sm)),
+            (None, _, _) => owned(&mut source),
         };
         m.insert("_source".into(), v);
     }
     let mut fields = Map::new();
     if let Some(Some(sf)) = &o.stored_fields {
-        for (k, v) in crate::fetch::stored_fields(table, &stored, sf) {
+        for (k, v) in crate::fetch::stored_fields(table, stored, sf) {
             fields.insert(k, v);
         }
     }
-    docvalue_fields(table, seg, local, &o.docvalue_fields, &mut fields)?;
+    docvalue_fields(table, seg, local, &o.docvalue_fields, o.id_fielddata, &mut fields)?;
+    // `_index` (and Elasticsearch's `_index_mode`) answer the index's constant.
+    for spec in &o.docvalue_fields {
+        let hit = |n: &str| if spec.field.contains('*') { crate::xcontent::filter::glob_match(&spec.field, n) } else { spec.field == n };
+        if hit("_index")
+            && let Some(v) = m.get("_index")
+        {
+            fields.insert("_index".into(), Value::Arr(vec![v.clone()]));
+        }
+        if hit("_index_mode") && !crate::opensearch::active() {
+            let mode = idx.and_then(|i| i.settings.get("index.mode")).unwrap_or("standard");
+            fields.insert("_index_mode".into(), Value::Arr(vec![Value::Str(mode.to_string())]));
+        }
+    }
     if !o.fields.is_empty() {
         let mut ignored = Map::new();
         let mut fetched = Map::new();
@@ -391,12 +600,13 @@ pub fn render_doc(table: &FieldTable, idx: Option<&crate::meta::IndexMeta>, sear
             let v: Option<Value> = match meta.as_str() {
                 "_id" | "_index" => m.get(meta.as_str()).cloned(),
                 "_version" => Some(Value::from(meta_dv(seg, local, search_index::schema::VERSION_FIELD))),
-                "_ignored" => Some(Value::Arr(crate::fetch::ignored(&stored).into_iter().map(Value::Str).collect())),
+                "_ignored" => Some(Value::Arr(crate::fetch::ignored(stored).into_iter().map(Value::Str).collect())),
                 // Only documents that set `_doc_count` have one.
                 "_doc_count" => seg.reader.numeric(crate::engine::fields::DOC_COUNT_FIELD).and_then(|dv| dv.get(local)).map(|c| Value::Arr(vec![Value::from(c)])),
+                "_tier" => None,
                 _ => {
                     let mut tmp = Map::new();
-                    docvalue_fields(table, seg, local, &[FieldAndFormat { field: meta.clone(), format: None, include_unmapped: None }], &mut tmp)?;
+                    docvalue_fields(table, seg, local, &[FieldAndFormat { field: meta.clone(), format: None, include_unmapped: None }], o.id_fielddata, &mut tmp)?;
                     tmp.shift_remove(meta.as_str())
                 }
             };

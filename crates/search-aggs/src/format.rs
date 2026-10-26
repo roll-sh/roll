@@ -283,6 +283,8 @@ pub enum DocValueFormat {
     GeoTile,
     UnsignedLongShifted,
     Binary,
+    /// A `version` field's encoded terms ([`crate::version_string`]).
+    Version,
 }
 
 impl PartialEq for DocValueFormat {
@@ -294,7 +296,8 @@ impl PartialEq for DocValueFormat {
             | (DocValueFormat::GeoHash, DocValueFormat::GeoHash)
             | (DocValueFormat::GeoTile, DocValueFormat::GeoTile)
             | (DocValueFormat::UnsignedLongShifted, DocValueFormat::UnsignedLongShifted)
-            | (DocValueFormat::Binary, DocValueFormat::Binary) => true,
+            | (DocValueFormat::Binary, DocValueFormat::Binary)
+            | (DocValueFormat::Version, DocValueFormat::Version) => true,
             (DocValueFormat::Decimal(a), DocValueFormat::Decimal(b)) => a.pattern() == b.pattern(),
             (DocValueFormat::DateTime { formatter: a, zone: za, nanos: na }, DocValueFormat::DateTime { formatter: b, zone: zb, nanos: nb }) => {
                 a.pattern() == b.pattern() && za == zb && na == nb
@@ -341,6 +344,7 @@ impl DocValueFormat {
             DocValueFormat::GeoTile => "GEOTILE".into(),
             DocValueFormat::UnsignedLongShifted => "UNSIGNED_LONG_SHIFTED".into(),
             DocValueFormat::Binary => "BINARY".into(),
+            DocValueFormat::Version => "VERSION".into(),
         }
     }
 
@@ -368,7 +372,7 @@ impl DocValueFormat {
                 let u = (v as u64) ^ (1u64 << 63);
                 Json::from(u)
             }
-            DocValueFormat::Ip | DocValueFormat::Binary => Json::Int(v),
+            DocValueFormat::Ip | DocValueFormat::Binary | DocValueFormat::Version => Json::Int(v),
         }
     }
 
@@ -386,7 +390,7 @@ impl DocValueFormat {
             DocValueFormat::DateTime { .. } => self.format_long(v as i64),
             DocValueFormat::Boolean => Json::Bool(v != 0.0),
             DocValueFormat::GeoHash | DocValueFormat::GeoTile => self.format_long(v as i64),
-            DocValueFormat::Ip | DocValueFormat::Binary => Json::Float(v),
+            DocValueFormat::Ip | DocValueFormat::Binary | DocValueFormat::Version => Json::Float(v),
         }
     }
 
@@ -395,6 +399,7 @@ impl DocValueFormat {
         match self {
             DocValueFormat::Ip => Json::Str(ip_to_string(b)),
             DocValueFormat::Binary => Json::Str(base64(b)),
+            DocValueFormat::Version => Json::Str(crate::version_string::decode(b)),
             _ => Json::Str(String::from_utf8_lossy(b).into_owned()),
         }
     }
@@ -439,7 +444,7 @@ impl DocValueFormat {
     /// `parseLong(value, roundUp, now)`.
     pub fn parse_long(&self, s: &str, round_up: bool, now: i64) -> Result<i64> {
         match self {
-            DocValueFormat::Raw | DocValueFormat::Ip | DocValueFormat::Binary | DocValueFormat::GeoHash => {
+            DocValueFormat::Raw | DocValueFormat::Ip | DocValueFormat::Binary | DocValueFormat::GeoHash | DocValueFormat::Version => {
                 if let Some(v) = parse_java_long(s) {
                     return Ok(v);
                 }
@@ -483,7 +488,13 @@ impl DocValueFormat {
     /// `parseDouble(value, roundUp, now)`.
     pub fn parse_double(&self, s: &str, round_up: bool, now: i64) -> Result<f64> {
         match self {
-            DocValueFormat::Raw | DocValueFormat::UnsignedLongShifted | DocValueFormat::Ip | DocValueFormat::Binary | DocValueFormat::GeoHash | DocValueFormat::GeoTile => {
+            DocValueFormat::Raw
+            | DocValueFormat::UnsignedLongShifted
+            | DocValueFormat::Ip
+            | DocValueFormat::Binary
+            | DocValueFormat::GeoHash
+            | DocValueFormat::GeoTile
+            | DocValueFormat::Version => {
                 if s.trim().is_empty() {
                     return Err(AggError::new(400, "number_format_exception", "empty String"));
                 }
@@ -505,6 +516,7 @@ impl DocValueFormat {
         match self {
             DocValueFormat::Ip => parse_ip(&s).map(|b| b.to_vec()),
             DocValueFormat::Binary => unbase64(&s).ok_or_else(|| AggError::illegal_argument(format!("Illegal base64 character in [{s}]"))),
+            DocValueFormat::Version => crate::version_string::encode(&s).map_err(|e| AggError::new(400, e.kind, e.reason)),
             _ => Ok(s.into_bytes()),
         }
     }
@@ -725,14 +737,26 @@ impl BuiltinDateFormatter {
                 let local = millis + off as i64 * 1000;
                 let secs = local.div_euclid(1000);
                 let ms = local.rem_euclid(1000) as u32;
-                let Some(dt) = chrono::DateTime::from_timestamp(secs, ms * 1_000_000 + nanos).map(|d| d.naive_utc()) else {
-                    return millis.to_string();
+                // chrono stops at year 262143; Java prints up to year 999999999 (an
+                // `extended_stats` variance over dates gets there). The Gregorian calendar
+                // repeats every 400 years (146097 days, whole weeks too), so such an instant is
+                // printed as the same moment of a cycle near 1970 with the year shifted back.
+                const CYCLE_SECS: i64 = 146_097 * 86_400;
+                let (dt, year_shift) = match chrono::DateTime::from_timestamp(secs, ms * 1_000_000 + nanos) {
+                    Some(d) => (d.naive_utc(), 0),
+                    None => {
+                        let cycles = secs.div_euclid(CYCLE_SECS);
+                        match chrono::DateTime::from_timestamp(secs.rem_euclid(CYCLE_SECS), ms * 1_000_000 + nanos) {
+                            Some(d) => (d.naive_utc(), cycles * 400),
+                            None => return millis.to_string(),
+                        }
+                    }
                 };
                 let mut out = String::new();
                 for t in toks {
                     match t {
                         Tok::Lit(l) => out.push_str(l),
-                        Tok::F(c, n) => print_field(&mut out, *c, *n, &dt, off, zone),
+                        Tok::F(c, n) => print_field(&mut out, *c, *n, &dt, year_shift, off, zone),
                     }
                 }
                 out
@@ -784,11 +808,11 @@ fn pad(out: &mut String, v: i64, n: usize) {
     out.push_str(&s);
 }
 
-fn print_field(out: &mut String, c: char, n: usize, dt: &NaiveDateTime, off: i32, zone: &TimeZone) {
+fn print_field(out: &mut String, c: char, n: usize, dt: &NaiveDateTime, year_shift: i64, off: i32, zone: &TimeZone) {
     match c {
         'y' | 'u' | 'Y' => {
             // `Y`: the ISO week-based year (Elasticsearch's week formats).
-            let y = if c == 'Y' { dt.iso_week().year() as i64 } else { dt.year() as i64 };
+            let y = year_shift + if c == 'Y' { dt.iso_week().year() as i64 } else { dt.year() as i64 };
             if n == 2 {
                 pad(out, y.rem_euclid(100), 2)
             } else {
@@ -1205,7 +1229,10 @@ impl DecimalFmt {
         })
     }
 
-    fn format_digits(&self, digits: &[u8], mut point: i64, negative: bool) -> String {
+    /// `value`: the double `digits` are the shortest representation of, `None` when they are
+    /// exact (a long). It settles a rounding digit of exactly 5 (`DigitList.shouldRoundUp`).
+    fn format_digits(&self, digits: &[u8], mut point: i64, negative: bool, value: Option<f64>) -> String {
+        let value_point = point;
         // `digits` is the significant decimal digits, `point` the position of the decimal point.
         let mut out = String::new();
         if let Some(ed) = self.exp_digits {
@@ -1215,7 +1242,7 @@ impl DecimalFmt {
             point = int_digits;
             let total_max = int_digits as usize + self.max_frac;
             let mut d = digits.to_vec();
-            let (rd, carry) = round_half_even_digits(&d, total_max);
+            let (rd, carry) = round_half_even_digits(&d, total_max, value_point, value);
             d = rd;
             let mut exp = exp;
             if carry {
@@ -1247,7 +1274,7 @@ impl DecimalFmt {
         }
         // Round to max_frac fraction digits.
         let keep = (point + self.max_frac as i64).max(0) as usize;
-        let (d, carry) = if keep < digits.len() { round_half_even_digits(digits, keep) } else { (digits.to_vec(), false) };
+        let (d, carry) = if keep < digits.len() { round_half_even_digits(digits, keep, value_point, value) } else { (digits.to_vec(), false) };
         if carry {
             point += 1;
         }
@@ -1301,7 +1328,12 @@ impl DecimalFmt {
 
 /// Rounds a digit string half-even to `keep` digits; returns the digits (length `keep`, or
 /// `keep + 1` digits shifted when a carry adds one) and whether a carry added a digit.
-fn round_half_even_digits(digits: &[u8], keep: usize) -> (Vec<u8>, bool) {
+///
+/// Java's `DigitList` rounds the shortest digits of a double, but a final 5 is a tie only if
+/// those digits are the double's exact value: when they were rounded up (`alreadyRounded`)
+/// the double lies below the tie, when rounded down above it (`183.35` is
+/// `183.349999…`, so `#.0` prints `183.3`). `value` is that double (`None`: exact digits).
+fn round_half_even_digits(digits: &[u8], keep: usize, point: i64, value: Option<f64>) -> (Vec<u8>, bool) {
     if keep >= digits.len() {
         return (digits.to_vec(), false);
     }
@@ -1309,7 +1341,12 @@ fn round_half_even_digits(digits: &[u8], keep: usize) -> (Vec<u8>, bool) {
     let rest = &digits[keep..];
     let first = rest[0];
     let more = rest[1..].iter().any(|c| *c != b'0');
-    let up = first > b'5' || (first == b'5' && (more || d.last().is_some_and(|l| (l - b'0') % 2 == 1)));
+    let tie_up = || match value.map(|v| shortest_vs_exact(digits, point, v)) {
+        Some(std::cmp::Ordering::Less) => true,
+        Some(std::cmp::Ordering::Greater) => false,
+        _ => d.last().is_some_and(|l| (l - b'0') % 2 == 1),
+    };
+    let up = first > b'5' || (first == b'5' && (more || tie_up()));
     if !up {
         return (d, false);
     }
@@ -1327,6 +1364,29 @@ fn round_half_even_digits(digits: &[u8], keep: usize) -> (Vec<u8>, bool) {
             return (d, false);
         }
     }
+}
+
+/// How the decimal `0.digits × 10^point` compares with the exact value of `|v|`.
+fn shortest_vs_exact(digits: &[u8], point: i64, v: f64) -> std::cmp::Ordering {
+    // A double's exact expansion has at most 767 significant digits.
+    let s = format!("{:.800e}", v.abs());
+    let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let exact: Vec<u8> = mant.bytes().filter(|b| *b != b'.').collect();
+    let exact_point = exp.parse::<i64>().unwrap_or(0) + 1;
+    let lead = |d: &[u8]| d.iter().position(|c| *c != b'0');
+    let (Some(a), Some(b)) = (lead(digits), lead(&exact)) else { return std::cmp::Ordering::Equal };
+    let (pa, pb) = (point - a as i64, exact_point - b as i64);
+    if pa != pb {
+        return pa.cmp(&pb);
+    }
+    let (da, db) = (&digits[a..], &exact[b..]);
+    for i in 0..da.len().max(db.len()) {
+        let (x, y) = (*da.get(i).unwrap_or(&b'0'), *db.get(i).unwrap_or(&b'0'));
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 fn split_subpattern(p: &str) -> (String, Option<String>) {
@@ -1389,10 +1449,10 @@ impl NumberFormatter for DecimalFmt {
             return self.affix("\u{221e}".into(), negative);
         }
         if scaled == 0.0 {
-            return self.format_digits(b"0", 1, negative);
+            return self.format_digits(b"0", 1, negative, None);
         }
         let (d, p) = decimal_digits(scaled);
-        self.format_digits(&d, p, negative)
+        self.format_digits(&d, p, negative, Some(scaled))
     }
 
     fn format_long(&self, v: i64) -> String {
@@ -1400,7 +1460,7 @@ impl NumberFormatter for DecimalFmt {
         let m = (v as i128) * self.multiplier as i128;
         let s = m.unsigned_abs().to_string();
         let p = s.len() as i64;
-        self.format_digits(s.as_bytes(), p, negative)
+        self.format_digits(s.as_bytes(), p, negative, None)
     }
 
     fn parse(&self, text: &str) -> Option<f64> {
@@ -1581,6 +1641,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dates_beyond_chrono_years() {
+        // An `extended_stats` variance over a date field, as Elasticsearch 9.5.5 prints it.
+        let f = DocValueFormat::default_date();
+        assert_eq!(f.format_double(7.743975839926059e18), Json::Str("+245398795-05-25T03:27:39.008Z".into()));
+        assert_eq!(f.format_long(1_704_067_200_000), Json::Str("2024-01-01T00:00:00.000Z".into()));
+    }
+
+    #[test]
     fn zones() {
         assert_eq!(TimeZone::parse("+01:00").unwrap().id(), "+01:00");
         assert_eq!(TimeZone::parse("Z").unwrap().id(), "Z");
@@ -1616,6 +1684,20 @@ mod tests {
         assert_eq!(f.parse("now/d", 1_578_009_600_123, true, &TimeZone::utc()).unwrap(), 1_578_095_999_999);
         let p = builtin_date_formatter("yyyy-MM-dd").unwrap();
         assert_eq!(p.format(1_577_923_200_000, 0, &TimeZone::utc()), "2020-01-02");
+    }
+
+    /// Outputs of `java.text.DecimalFormat` (JDK 21, `Locale.ROOT`, `HALF_EVEN`): a final 5
+    /// of the shortest digits rounds by the double's exact value.
+    #[test]
+    fn half_even_ties_follow_the_exact_double() {
+        let f = DecimalFmt::new("#.0").unwrap();
+        for (v, want) in [(183.35, "183.3"), (0.25, ".2"), (0.35, ".3"), (1.45, "1.4"), (1.55, "1.6"), (100.05, "100.0"), (-183.35, "-183.3"), (0.05, ".1"), (1.005, "1.0"), (2.675, "2.7"), (2.5, "2.5")] {
+            assert_eq!(f.format_double(v), want, "{v}");
+        }
+        let g = DecimalFmt::new("#.00").unwrap();
+        for (v, want) in [(183.35, "183.35"), (1.005, "1.00"), (2.675, "2.67"), (0.05, ".05")] {
+            assert_eq!(g.format_double(v), want, "{v}");
+        }
     }
 
     #[test]

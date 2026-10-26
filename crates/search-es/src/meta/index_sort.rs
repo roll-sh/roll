@@ -260,9 +260,7 @@ pub fn validate_fields(settings: &Settings, mapping: &Mapping, index: &str) -> E
         match ty {
             "text" | "annotated_text" => {
                 if !field.bool_param("fielddata", &ctx) {
-                    return Err(no_dv(format!(
-                        "Fielddata is disabled on [{f}] in [{index}]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [{f}] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
-                    )));
+                    return Err(no_dv(crate::search::aggs::fielddata_disabled(f, index)));
                 }
             }
             "match_only_text" => return Err(no_dv("match_only_text fields do not support sorting and aggregations".into())),

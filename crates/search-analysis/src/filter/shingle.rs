@@ -452,6 +452,13 @@ impl FilterFactory for ShingleFactory {
     fn create(&self) -> Box<dyn Filter> {
         Box::new(Shingle::new(self.cfg.clone()))
     }
+    fn shingle(&self) -> Option<crate::analyzer::ShingleInfo> {
+        Some(crate::analyzer::ShingleInfo {
+            min_shingle_size: self.cfg.min,
+            max_shingle_size: self.cfg.max,
+            output_unigrams: self.cfg.output_unigrams,
+        })
+    }
     fn check(&self) -> Result<()> {
         if self.cfg.max < 2 {
             return Err(AnalysisError::illegal("Max shingle size must be >= 2"));

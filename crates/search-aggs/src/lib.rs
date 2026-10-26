@@ -30,9 +30,11 @@
 pub mod bucket;
 pub mod collect;
 pub mod commons_math;
+pub mod dialect;
 pub mod error;
 pub mod exp_histogram;
 pub mod field;
+pub mod filter_rewrite;
 pub mod fdlibm;
 pub mod format;
 pub mod h3;
@@ -55,6 +57,7 @@ pub mod shape_field;
 pub mod sort;
 pub mod util;
 pub mod values;
+pub mod version_string;
 pub mod xparser;
 
 pub use collect::{AggCollector, ShardOptions};

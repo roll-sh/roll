@@ -96,17 +96,56 @@ fn shape_geoms(g: &Geometry, out: &mut Vec<QueryGeometry>) -> EsResult<()> {
     Ok(())
 }
 
+/// `GeoUtils.quantizeLat`: the latitude a point indexed at `lat` reads back as.
+pub fn quantize_lat(lat: f64) -> f64 {
+    use search_codec::points::encode;
+    encode::decode_latitude(encode::encode_latitude(lat))
+}
+
+/// `GeoUtils.quantizeLon`.
+pub fn quantize_lon(lon: f64) -> f64 {
+    use search_codec::points::encode;
+    encode::decode_longitude(encode::encode_longitude(lon))
+}
+
+/// Elasticsearch quantizes a query geometry to the index encoding before building the Lucene
+/// query (`LuceneGeometriesUtils.toLatLonGeometry(geometry, true, …)`), so a point exactly on a
+/// box's lower edge matches (Lucene alone rounds the lower bound up and would miss it).
+fn quantize(shape: GeoShape) -> GeoShape {
+    let pts = |v: Vec<(f64, f64)>| v.into_iter().map(|(la, lo)| (quantize_lat(la), quantize_lon(lo))).collect::<Vec<_>>();
+    match shape {
+        GeoShape::Point(la, lo) => GeoShape::Point(quantize_lat(la), quantize_lon(lo)),
+        GeoShape::Rectangle(a, b, c, d) => GeoShape::Rectangle(quantize_lat(a), quantize_lat(b), quantize_lon(c), quantize_lon(d)),
+        GeoShape::Polygon(p) => GeoShape::Polygon(Polygon { outer: pts(p.outer), holes: p.holes.into_iter().map(pts).collect() }),
+        GeoShape::Circle { lat, lon, radius } => GeoShape::Circle { lat: quantize_lat(lat), lon: quantize_lon(lon), radius },
+        GeoShape::Line(l) => GeoShape::Line(pts(l)),
+    }
+}
+
 /// A point field query over shapes (index, doc values, or both).
 pub fn point_query(f: &FieldInfo, relation: ShapeRelation, shapes: Vec<GeoShape>, constant: bool) -> EsResult<QueryRef> {
-    let index = || -> QueryRef { arc(search_index::query::GeoPointShapeQuery { field: f.number, shapes: shapes.clone(), relation }) };
+    let shapes: Vec<GeoShape> = shapes.into_iter().map(quantize).collect();
+    // Lucene's `LatLonPoint.newGeometryQuery`: one intersecting circle is a distance query,
+    // one rectangle a box query (each prints, and a box rewrites, as its own kind).
+    let single = (relation == ShapeRelation::Intersects && shapes.len() == 1 && !crate::opensearch::active()).then(|| shapes[0].clone());
+    let index = || -> EsResult<QueryRef> {
+        Ok(match single {
+            Some(GeoShape::Circle { lat, lon, radius }) => arc(search_index::query::geo::GeoDistanceQuery::new(f.number, lat, lon, radius).map_err(index_err)?),
+            Some(GeoShape::Rectangle(min_lat, max_lat, min_lon, max_lon)) => search_index::query::geo::bounding_box(f.number, min_lat, max_lat, min_lon, max_lon).map_err(index_err)?,
+            _ => arc(search_index::query::GeoPointShapeQuery { field: f.number, shapes: shapes.clone(), relation }),
+        })
+    };
     let dv = || -> EsResult<QueryRef> { search_index::query::GeoPointDvQuery::geometry(f.number, relation, shapes.clone()).map_err(index_err) };
     let q = match (f.index, f.doc_values) {
-        (true, true) => arc(search_index::query::IndexOrDocValuesQuery { index: index(), dv: dv()? }),
-        (true, false) => index(),
+        (true, true) => arc(search_index::query::IndexOrDocValuesQuery { index: index()?, dv: dv()? }),
+        (true, false) => index()?,
         (false, true) => dv()?,
         _ => return Err(super::query::not_searchable(f)),
     };
-    Ok(if constant { arc(ConstantScoreQuery::new(q)) } else { q })
+    // Elasticsearch's `GeoPointFieldType.geoShapeQuery` returns the point queries bare (they
+    // score constantly themselves, and explain through the doc values side); OpenSearch wraps
+    // them in a constant score.
+    Ok(if constant && crate::opensearch::active() { arc(ConstantScoreQuery::new(q)) } else { q })
 }
 
 /// The geometry of an indexed shape (`indexed_shape`): the field at `path` of another document.
@@ -150,6 +189,10 @@ pub fn geo_shape_query(ctx: &QueryCtx, g: &crate::query::geo::GeoShape) -> EsRes
             point_query(&f, r, shapes, true)
         }
         Kind::GeoShape => {
+            // `MappedFieldType.failIfNotIndexedNorDocValuesFallback`.
+            if !f.index && !f.doc_values {
+                return Err(EsError::illegal_argument(format!("Cannot search on field [{}] since it is not indexed nor has doc values.", f.name)));
+            }
             let mut gs = Vec::new();
             shape_geoms(&geom, &mut gs)?;
             Ok(arc(ConstantScoreQuery::new(search_index::query::shape::geo_shape_query(f.number, r, gs, f.index, f.doc_values).map_err(index_err)?)))
@@ -248,12 +291,23 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
     };
     let fix = |uf: &Option<String>, fi: &FieldInfo, s: S| -> S { if uf.is_some() { S::fix_field(fi.number, s) } else { s } };
     Ok(match s {
-        D::Match { query, max_gaps, ordered, analyzer, filter, use_field } => {
+        D::Match { query, max_gaps, ordered, no_overlap, analyzer, filter, use_field } => {
             let fi = field_of(use_field)?;
             let a = analyzer_for(ctx, &fi, analyzer.as_deref())?;
             let mut toks: Vec<(Vec<u8>, u32, u32)> = Vec::new();
             a.analyze(query, &mut |t| toks.push((t.term.as_bytes().to_vec(), t.position_increment, t.position_length.max(1))));
-            let src = S::analyzed(&toks, *max_gaps, *ordered).map_err(index_err)?;
+            let simple = toks.len() > 1 && toks.iter().all(|t| t.1 > 0 && t.2 == 1);
+            let src = if *no_overlap && simple {
+                // OpenSearch's `IntervalBuilder` for a plain phrase in `unordered_no_overlap`
+                // mode (synonyms and graphs fall back to `unordered`).
+                let terms = toks.iter().map(|(t, inc, _)| {
+                    let term = S::term(t.clone());
+                    if *inc > 1 { S::extend(term, *inc as i32 - 1, 0) } else { term }
+                });
+                no_overlap_sources(terms.collect(), *max_gaps)
+            } else {
+                S::analyzed(&toks, *max_gaps, *ordered).map_err(index_err)?
+            };
             let src = fix(use_field, &fi, src);
             apply_filter(ctx, f, src, filter.as_deref())?
         }
@@ -261,8 +315,11 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
             let subs: EsResult<Vec<S>> = intervals.iter().map(|x| crate::stack::maybe_grow(|| interval_source(ctx, f, x))).collect();
             apply_filter(ctx, f, S::or(subs?), filter.as_deref())?
         }
-        D::AllOf { intervals, ordered, max_gaps, filter } => {
+        D::AllOf { intervals, ordered, no_overlap, max_gaps, filter } => {
             let subs: Vec<S> = intervals.iter().map(|x| crate::stack::maybe_grow(|| interval_source(ctx, f, x))).collect::<EsResult<_>>()?;
+            if *no_overlap && subs.len() > 1 {
+                return apply_filter(ctx, f, no_overlap_sources(subs, *max_gaps), filter.as_deref());
+            }
             let base = if *ordered { S::ordered(subs) } else { S::unordered(subs) };
             let base = if *max_gaps >= 0 { S::max_gaps(*max_gaps, base) } else { base };
             apply_filter(ctx, f, base, filter.as_deref())?
@@ -274,14 +331,22 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
             let mt = search_index::query::MultiTermQuery::prefix(fi.number, p.clone().into_bytes());
             fix(use_field, &fi, S::multi_term(mt, 128, format!("{p}*")))
         }
-        D::Wildcard { pattern, analyzer, use_field } => {
+        D::Wildcard { pattern, analyzer, use_field, max_expansions } => {
             let fi = field_of(use_field)?;
             let a = analyzer_for(ctx, &fi, analyzer.as_deref())?;
             let p = a.normalize(pattern);
             let mt = search_index::query::MultiTermQuery::wildcard(fi.number, &p, false).map_err(index_err)?;
-            fix(use_field, &fi, S::multi_term(mt, 128, p))
+            fix(use_field, &fi, S::multi_term(mt, max_expansions.map(|m| m.max(1) as usize).unwrap_or(128), p))
         }
-        D::Regexp { pattern, analyzer, use_field } => {
+        // OpenSearch's regexp rule: the pattern as written (no normalization), its flags and
+        // case sensitivity.
+        D::Regexp { pattern, use_field, flags: Some(flags), case_insensitive, max_expansions, .. } => {
+            let fi = field_of(use_field)?;
+            let mt = search_index::query::MultiTermQuery::regexp(fi.number, pattern, crate::query::term_level::regexp_flags::to_codec(*flags), *case_insensitive, 10000)
+                .map_err(index_err)?;
+            fix(use_field, &fi, S::multi_term(mt, max_expansions.map(|m| m as usize).unwrap_or(128), format!("/{pattern}/")))
+        }
+        D::Regexp { pattern, analyzer, use_field, .. } => {
             let fi = field_of(use_field)?;
             let a = analyzer_for(ctx, &fi, analyzer.as_deref())?;
             let p = a.normalize(pattern);
@@ -305,6 +370,20 @@ fn interval_source(ctx: &QueryCtx, f: &Arc<FieldInfo>, s: &crate::query::full_te
     })
 }
 
+/// OpenSearch's `IntervalBuilder.combineSources` in `unordered_no_overlap` mode: the sources
+/// folded pairwise with `unordered_no_overlaps`, each inner pair gap-limited.
+fn no_overlap_sources(subs: Vec<search_index::query::IntervalsSource>, max_gaps: i32) -> search_index::query::IntervalsSource {
+    use search_index::query::IntervalsSource as S;
+    let mut it = subs.into_iter();
+    let (Some(a), Some(b)) = (it.next(), it.next()) else { unreachable!("callers pass two sources or more") };
+    let mut inner = S::unordered_no_overlaps(a, b);
+    for next in it {
+        let left = if max_gaps == -1 { inner } else { S::max_gaps(max_gaps, inner) };
+        inner = S::unordered_no_overlaps(left, next);
+    }
+    if max_gaps == -1 { inner } else { S::max_gaps(max_gaps, inner) }
+}
+
 fn apply_filter(ctx: &QueryCtx, f: &Arc<FieldInfo>, src: search_index::query::IntervalsSource, filter: Option<&crate::query::full_text::IntervalFilter>) -> EsResult<search_index::query::IntervalsSource> {
     use crate::query::full_text::IntervalFilter;
     use search_index::query::IntervalsSource as S;
@@ -324,7 +403,73 @@ fn apply_filter(ctx: &QueryCtx, f: &Arc<FieldInfo>, src: search_index::query::In
                 t => return Err(EsError::illegal_argument(format!("Unknown filter type [{t}]"))),
             })
         }
-        IntervalFilter::Script(_) => Err(EsError::illegal_argument("interval script filters are not supported yet")),
+        IntervalFilter::Script(script) => {
+            let bound = ctx.cluster.scripts.compile(ctx.st, script, search_painless::Context::Interval)?;
+            let Some(compiled) = bound.painless().cloned() else {
+                return Err(EsError::illegal_argument(format!("script_lang not supported [{}]", script.lang.as_deref().unwrap_or("painless"))));
+            };
+            Ok(S::scripted(src, Arc::new(IntervalPainless::new(compiled, bound.params.clone(), script.id_or_code.clone()))))
+        }
+    }
+}
+
+/// An `IntervalFilterScript`: one Painless instance per query (Elasticsearch creates one with
+/// `newInstance()` and calls it for every interval of every segment), behind a lock because
+/// segments may be searched concurrently. Its loops poll the search's deadline.
+struct IntervalPainless {
+    // Field order matters: the instance borrows `script` and must drop first.
+    inst: parking_lot::Mutex<(search_painless::Instance<'static>, IntervalHost)>,
+    _script: Arc<search_painless::Script>,
+    name: String,
+}
+
+// SAFETY: the instance (with its reference-counted values) is only reached through the lock,
+// so no two threads touch it at once, and nothing it holds escapes a call.
+unsafe impl Send for IntervalPainless {}
+unsafe impl Sync for IntervalPainless {}
+
+impl std::fmt::Debug for IntervalPainless {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IntervalPainless({})", self.name)
+    }
+}
+
+/// The interval script's host: no documents, the search's cancellation.
+struct IntervalHost(Option<search_index::search::SearchControl>);
+
+impl search_painless::Host for IntervalHost {
+    fn check_cancelled(&mut self) -> Result<(), search_painless::HostError> {
+        let Some(ctl) = &self.0 else { return Ok(()) };
+        ctl.check().map_err(|e| {
+            let kind: &'static str = if e.kind() == "task_cancelled_exception" { "task_cancelled_exception" } else { "time_exceeded_exception" };
+            let reason = e.to_string();
+            search_index::search::note_interrupted(e);
+            search_painless::HostError { kind, reason, frames: Vec::new() }
+        })
+    }
+}
+
+impl IntervalPainless {
+    fn new(script: Arc<search_painless::Script>, params: serde_json::Value, name: String) -> IntervalPainless {
+        // SAFETY: `_script` keeps the script alive for as long as the instance exists.
+        let mut inst: search_painless::Instance<'static> = unsafe { std::mem::transmute(script.instance()) };
+        inst.set_params(&params);
+        inst.set_cancellable(super::scripts::search_scripts_poll());
+        let host = IntervalHost(search_index::search::ambient_control());
+        IntervalPainless { inst: parking_lot::Mutex::new((inst, host)), _script: script, name }
+    }
+}
+
+impl search_index::query::IntervalScript for IntervalPainless {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn accept(&self, start: i32, end: i32, gaps: i32) -> search_index::Result<bool> {
+        let mut g = self.inst.lock();
+        let (inst, host) = &mut *g;
+        inst.set_var("interval", search_painless::es::misc::interval(start, end, gaps));
+        inst.execute_bool(host).map_err(super::scripts::script_err)
     }
 }
 
@@ -391,13 +536,12 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
         let doc_fields: Option<Value> = match (&item.doc, &item.id) {
             (Some(d), _) => Some(d.clone()),
             (None, Some(id)) => {
-                let index = item.index.clone().unwrap_or_else(|| ctx.idx.name.clone());
-                if index == ctx.idx.name && !m.include {
+                // `handleExclude`: every like document's id is excluded, whatever its index.
+                if !m.include {
                     exclude_ids.push(id.clone());
                 }
                 let st = ctx.st;
-                let idx = st.metadata.indices.get(&index).cloned();
-                match idx {
+                match like_item_index(ctx, item.index.as_deref()) {
                     Some(idx) => {
                         let engine = ctx.cluster.engine.index(ctx.cluster, st, &idx)?;
                         let sh = crate::meta::routing::shard_for(&idx, id, item.routing.as_deref());
@@ -441,8 +585,7 @@ pub fn more_like_this(ctx: &QueryCtx, m: &crate::query::specialized::MoreLikeThi
         let doc_fields: Option<Value> = match (&item.doc, &item.id) {
             (Some(d), _) => Some(d.clone()),
             (None, Some(id)) => {
-                let index = item.index.clone().unwrap_or_else(|| ctx.idx.name.clone());
-                match ctx.st.metadata.indices.get(&index).cloned() {
+                match like_item_index(ctx, item.index.as_deref()) {
                     Some(idx) => {
                         let engine = ctx.cluster.engine.index(ctx.cluster, ctx.st, &idx)?;
                         let sh = crate::meta::routing::shard_for(&idx, id, item.routing.as_deref());
@@ -504,6 +647,16 @@ impl search_index::query::LeafSourceValues for SourceTextLeaf {
 }
 
 /// `match_only_text` phrase queries confirmed against `_source`.
+/// The index a like/unlike document is read from: its `_index` (an index or an alias of one
+/// index, as for a multi term vectors item) or the searched index. An item that can't be
+/// resolved is skipped, as Elasticsearch skips failed term vectors responses.
+fn like_item_index(ctx: &QueryCtx, index: Option<&str>) -> Option<std::sync::Arc<crate::meta::IndexMeta>> {
+    match index {
+        None => ctx.st.metadata.indices.get(&ctx.idx.name).cloned(),
+        Some(name) => crate::api::analyze::concrete_single_index(ctx.st, name, ctx.now_ms).ok().cloned(),
+    }
+}
+
 pub fn source_confirmed(ctx: &QueryCtx, f: &FieldInfo, q: QueryRef) -> QueryRef {
     let Some(a) = f.analyzer.clone() else { return q };
     let src = Arc::new(SourceText { table: ctx.table.clone(), path: f.name.clone() });

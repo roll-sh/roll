@@ -48,15 +48,32 @@ pub fn binding_ctor_args(name: &str, arity: usize) -> usize {
 
 // ------------------------------------------------------------------------------ sloppy math
 
+/// Interleaved so one lookup touches one cache line (or two) instead of one per table.
 struct Tables {
-    sin: Vec<f64>,
-    cos: Vec<f64>,
-    asin: Vec<f64>,
-    d1: Vec<f64>,
-    d2: Vec<f64>,
-    d3: Vec<f64>,
-    d4: Vec<f64>,
+    /// `[cos, sin]` per index.
+    cos_sin: Vec<[f64; 2]>,
+    /// `[asin, d1, d2, d3, d4]` per index.
+    asin: Vec<[f64; 5]>,
+    /// `asin_max()` and the step (computed once: `asin_max` calls `sin`).
+    asin_max: f64,
+    asin_delta: f64,
 }
+
+/// `SloppyMath.cosTab` / `sinTab` entries (index, bits) where the JVM Elasticsearch 9.5.5 ships
+/// disagrees with libm: a copy of `search_index::util::geo::{JAVA_COS, JAVA_SIN}`.
+pub const JAVA_COS: &[(u16, u64)] = &[
+    (237, 0x3fe7e83f87b03686), (242, 0x3fe79400574f55e4), (688, 0xbfe073879922ffec), (775, 0xbfe71bac960e41be), (797, 0xbfe88c66e7481ba0),
+    (934, 0xbfeec9b2d3c3bf84), (943, 0xbfef045a14cf738c), (954, 0xbfef43d085ff92dc), (964, 0xbfef7599a3a12078), (972, 0xbfef97f924c9099a),
+    (1149, 0xbfedacf42ce68aba), (1204, 0xbfeb3e4d3ef55710), (1228, 0xbfe9ef43ef29af94), (1824, 0x3fe8bc806b151742), (1826, 0x3fe8dc45331698cc),
+    (1910, 0x3fed2cb220e0ef9e), (1911, 0x3fed36fc7bcbfbdc), (1951, 0x3fee97ec36016b32),
+];
+/// See [`JAVA_COS`].
+pub const JAVA_SIN: &[(u16, u64)] = &[
+    (300, 0x3fe9777ef4c7d742), (305, 0x3fe9c2d110f075c2), (386, 0x3feda383a9668988), (560, 0x3fefa7557f08a516), (594, 0x3feefe220c0b95ec),
+    (699, 0x3feae068f345ecf0), (715, 0x3fe9fdf4f13149de), (743, 0x3fe84b7111af83fa), (765, 0x3fe6d5afef4aafce), (1405, 0xbfed733f508c0e00),
+    (1589, 0xbfef93f14f85ac08), (1602, 0xbfef58a2b1789e84), (1611, 0xbfef2817fc4609ce), (1636, 0xbfee817bab4cd10c), (1682, 0xbfecd7d9898b32f6),
+    (1767, 0xbfe84b7111af83fc), (1777, 0xbfe7a4f707bf97d0), (1778, 0xbfe79400574f55e6),
+];
 
 const TO_METERS: f64 = 6_371_008.771_4;
 const SIN_COS_TABS_SIZE: usize = (1 << 11) + 1;
@@ -93,10 +110,9 @@ fn asin_delta() -> f64 {
 fn tables() -> &'static Tables {
     static T: OnceLock<Tables> = OnceLock::new();
     T.get_or_init(|| {
-        let mut sin = vec![0.0; SIN_COS_TABS_SIZE];
-        let mut cos = vec![0.0; SIN_COS_TABS_SIZE];
+        let mut cos_sin = vec![[0.0; 2]; SIN_COS_TABS_SIZE];
         let pi_index = (SIN_COS_TABS_SIZE - 1) / 2;
-        for i in 0..SIN_COS_TABS_SIZE {
+        for (i, slot) in cos_sin.iter_mut().enumerate() {
             let angle = i as f64 * sin_cos_delta_hi() + i as f64 * sin_cos_delta_lo();
             let mut s = libm::sin(angle);
             let mut c = libm::cos(angle);
@@ -105,29 +121,40 @@ fn tables() -> &'static Tables {
             } else if i == pi_index / 2 || i == 3 * pi_index / 2 {
                 c = 0.0;
             }
-            sin[i] = s;
-            cos[i] = c;
+            *slot = [c, s];
         }
-        let (mut asin, mut d1, mut d2, mut d3, mut d4) =
-            (vec![0.0; ASIN_TABS_SIZE], vec![0.0; ASIN_TABS_SIZE], vec![0.0; ASIN_TABS_SIZE], vec![0.0; ASIN_TABS_SIZE], vec![0.0; ASIN_TABS_SIZE]);
-        for i in 0..ASIN_TABS_SIZE {
+        // Lucene fills these tables with `Math.sin` / `Math.cos`, which HotSpot computes with
+        // its own intrinsics: 36 entries differ from libm by one ulp. The patches are
+        // `search_index::util::geo::{JAVA_COS, JAVA_SIN}` (this crate does not depend on
+        // search-index); search-es tests that the copies agree.
+        for &(i, bits) in JAVA_COS {
+            cos_sin[i as usize][0] = f64::from_bits(bits);
+        }
+        for &(i, bits) in JAVA_SIN {
+            cos_sin[i as usize][1] = f64::from_bits(bits);
+        }
+        let mut asin = vec![[0.0; 5]; ASIN_TABS_SIZE];
+        for (i, slot) in asin.iter_mut().enumerate() {
             let x = i as f64 * asin_delta();
-            asin[i] = libm::asin(x);
             let one_minus = 1.0 / (1.0 - x * x);
             let p05 = libm::sqrt(one_minus);
             let p15 = p05 * one_minus;
             let p25 = p15 * one_minus;
             let p35 = p25 * one_minus;
-            d1[i] = p05;
-            d2[i] = (x * p15) * (1.0 / 2.0);
-            d3[i] = ((1.0 + 2.0 * x * x) * p25) * (1.0 / 6.0);
-            d4[i] = ((5.0 + 2.0 * x * (2.0 + x * (5.0 - 2.0 * x))) * p35) * (1.0 / 24.0);
+            *slot = [
+                libm::asin(x),
+                p05,
+                (x * p15) * (1.0 / 2.0),
+                ((1.0 + 2.0 * x * x) * p25) * (1.0 / 6.0),
+                ((5.0 + 2.0 * x * (2.0 + x * (5.0 - 2.0 * x))) * p35) * (1.0 / 24.0),
+            ];
         }
-        Tables { sin, cos, asin, d1, d2, d3, d4 }
+        Tables { cos_sin, asin, asin_max: asin_max(), asin_delta: asin_delta() }
     })
 }
 
 /// `SloppyMath.cos`.
+#[inline]
 fn sloppy_cos(a: f64) -> f64 {
     let a = a.abs();
     if a > sin_cos_max() {
@@ -137,8 +164,7 @@ fn sloppy_cos(a: f64) -> f64 {
     let mut index = (a * sin_cos_indexer() + 0.5) as i32;
     let delta = (a - index as f64 * sin_cos_delta_hi()) - index as f64 * sin_cos_delta_lo();
     index &= (SIN_COS_TABS_SIZE - 2) as i32;
-    let ic = t.cos[index as usize];
-    let is = t.sin[index as usize];
+    let [ic, is] = t.cos_sin[index as usize];
     ic + delta * (-is + delta * (-ic * (1.0 / 2.0) + delta * (is * (1.0 / 6.0) + delta * ic * (1.0 / 24.0))))
 }
 
@@ -211,13 +237,15 @@ pub fn lat_to_spherical_mercator(lat: f64) -> f64 {
 }
 
 /// `SloppyMath.asin`.
+#[inline]
 fn sloppy_asin(a: f64) -> f64 {
     let (a, neg) = if a < 0.0 { (-a, true) } else { (a, false) };
-    let r = if a <= asin_max() {
-        let t = tables();
-        let index = (a * (1.0 / asin_delta()) + 0.5) as usize;
-        let delta = a - index as f64 * asin_delta();
-        t.asin[index] + delta * (t.d1[index] + delta * (t.d2[index] + delta * (t.d3[index] + delta * t.d4[index])))
+    let t = tables();
+    let r = if a <= t.asin_max {
+        let index = (a * (1.0 / t.asin_delta) + 0.5) as usize;
+        let delta = a - index as f64 * t.asin_delta;
+        let [v, d1, d2, d3, d4] = t.asin[index];
+        v + delta * (d1 + delta * (d2 + delta * (d3 + delta * d4)))
     } else if a < 1.0 {
         let ps = [0x3fc5555555555555u64, 0xbfd4d61203eb6f7d, 0x3fc9c1550e884455, 0xbfa48228b5688f3b, 0x3f49efe07501b288, 0x3f023de10dfdf709].map(f64::from_bits);
         let qs = [0xc0033a271c8a2d4bu64, 0x40002ae59c598ac8, 0xbfe6066c1b8d0159, 0x3fb3b8c5b12e9282].map(f64::from_bits);
@@ -248,6 +276,36 @@ pub fn haversin_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let h = h1 + sloppy_cos(x1) * sloppy_cos(x2) * h2;
     let key = f64::from_bits(h.to_bits() & 0xFFFFFFFFFFFFFFF8);
     TO_METERS * 2.0 * sloppy_asin(1f64.min((key * 0.5).sqrt()))
+}
+
+/// [`haversin_meters`] from a first point given as its latitude in radians `x1`, the sloppy
+/// cosine of that and its longitude: bit-identical, without recomputing the first point's
+/// half per call.
+#[inline]
+fn haversin_from(x1: f64, cos_x1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let x2 = to_radians(lat2);
+    let h1 = 1.0 - sloppy_cos(x1 - x2);
+    let h2 = 1.0 - sloppy_cos(to_radians(lon1 - lon2));
+    let h = h1 + cos_x1 * sloppy_cos(x2) * h2;
+    let key = f64::from_bits(h.to_bits() & 0xFFFFFFFFFFFFFFF8);
+    TO_METERS * 2.0 * sloppy_asin(1f64.min((key * 0.5).sqrt()))
+}
+
+#[cfg(test)]
+#[test]
+fn haversin_from_matches_haversin_meters() {
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for _ in 0..50_000 {
+        let (a, b, c, d) = (next() * 180.0 - 90.0, next() * 360.0 - 180.0, next() * 180.0 - 90.0, next() * 360.0 - 180.0);
+        let x1 = to_radians(a);
+        assert_eq!(haversin_from(x1, sloppy_cos(x1), b, c, d).to_bits(), haversin_meters(a, b, c, d).to_bits());
+    }
 }
 
 /// `GeoUtils.planeDistance`.
@@ -740,7 +798,9 @@ fn decay_value(d: Decay, scaling: f64, distance: f64) -> f64 {
     match d {
         Decay::Linear => 0f64.max((scaling - distance) / scaling),
         Decay::Exp => (scaling * distance).exp(),
-        Decay::Gauss => (0.5 * distance.powf(2.0) / scaling).exp(),
+        // `Math.pow(distance, 2)`: HotSpot computes a square as `x * x`, the correctly
+        // rounded square (as libm's `pow` is), at a fraction of `pow`'s cost.
+        Decay::Gauss => (0.5 * (distance * distance) / scaling).exp(),
     }
 }
 
@@ -775,31 +835,82 @@ fn outer(mut t: Thrown, frames: &[String]) -> Thrown {
 }
 
 struct GeoDecay {
-    lat: f64,
     lon: f64,
+    /// The origin's latitude in radians and its sloppy cosine (fixed for the binding).
+    x1: f64,
+    cos_x1: f64,
     offset: f64,
     scaling: f64,
 }
 
 fn geo_decay(vm: &mut Vm, a: &[Value], d: Decay) -> VR {
+    let b = geo_binding(vm, a, d)?;
+    let (plat, plon) = match es(&a[4]) {
+        Some(EsObj::GeoPoint(x, y)) => (*x, *y),
+        _ => return Err(crate::vm::npe("Cannot invoke \"org.elasticsearch.common.geo.GeoPoint.lat()\" because \"docValue\" is null")),
+    };
+    geo_decay_at(b, plat, plon, d)
+}
+
+/// The class binding of a `decayGeo*` call (parsed once per instance).
+fn geo_binding(vm: &mut Vm, a: &[Value], d: Decay) -> Result<Rc<GeoDecay>, Thrown> {
     let (class, base) = match d {
         Decay::Linear => ("DecayGeoLinear", 98),
         Decay::Exp => ("DecayGeoExp", 120),
         Decay::Gauss => ("DecayGeoGauss", 142),
     };
-    let b = binding(vm, |_| {
+    binding(vm, |_| {
         let ctor = |line: u32| format!("script.ScoreScriptUtils${class}.<init>(ScoreScriptUtils.java:{line})");
         let unit = ["common.unit.DistanceUnit.parse(DistanceUnit.java:134)".to_string(), "common.unit.DistanceUnit.parse(DistanceUnit.java:146)".to_string()];
         let (lat, lon) = parse_geo_point(&a[0].to_java_string()).map_err(|t| outer(t, &[ctor(base)]))?;
         let scale = parse_distance(&a[1].to_java_string()).map_err(|t| outer(t, &[unit[0].clone(), unit[1].clone(), ctor(base + 1)]))?;
         let offset = parse_distance(&a[2].to_java_string()).map_err(|t| outer(t, &[unit[0].clone(), unit[1].clone(), ctor(base + 4)]))?;
-        Ok(GeoDecay { lat, lon, offset, scaling: scaling(d, scale, double(&a[3])) })
-    })?;
-    let (plat, plon) = match es(&a[4]) {
-        Some(EsObj::GeoPoint(x, y)) => (*x, *y),
-        _ => return Err(crate::vm::npe("Cannot invoke \"org.elasticsearch.common.geo.GeoPoint.lat()\" because \"docValue\" is null")),
+        let x1 = to_radians(lat);
+        Ok(GeoDecay { lon, x1, cos_x1: sloppy_cos(x1), offset, scaling: scaling(d, scale, double(&a[3])) })
+    })
+}
+
+/// `decayGeo*` of the method named `name` (`decayGeoGauss`, …) with the first four arguments
+/// in `a` and the document's point (the fast path's form).
+pub fn geo_decay_point(vm: &mut Vm, a: &[Value], lat: f64, lon: f64, name: &str) -> Result<f64, crate::vm::Thrown> {
+    let d = match name {
+        "decayGeoLinear" => Decay::Linear,
+        "decayGeoExp" => Decay::Exp,
+        _ => Decay::Gauss,
     };
-    let distance = haversin_meters(b.lat, b.lon, plat, plon);
+    let b = geo_binding(vm, a, d)?;
+    match geo_decay_at(b, lat, lon, d)? {
+        Value::Double(x) => Ok(x),
+        _ => unreachable!(),
+    }
+}
+
+/// The `decayGeo*` method `name` as a kind for [`geo_decay_cached`].
+pub fn geo_decay_kind(name: &str) -> u8 {
+    match name {
+        "decayGeoLinear" => 0,
+        "decayGeoExp" => 1,
+        _ => 2,
+    }
+}
+
+/// `decayGeo*` at a point once the class binding of the current slot (`vm.st.cur_binding`)
+/// exists: the binding is built once per instance from the first call's arguments, so later
+/// calls only need the point. `None` until the first call built it ([`geo_decay_point`]).
+#[inline]
+pub fn geo_decay_cached(vm: &Vm, kind: u8, lat: f64, lon: f64) -> Option<f64> {
+    let b = vm.st.bindings.get(vm.st.cur_binding as usize)?.as_ref()?.downcast_ref::<Rc<GeoDecay>>()?;
+    let d = match kind {
+        0 => Decay::Linear,
+        1 => Decay::Exp,
+        _ => Decay::Gauss,
+    };
+    let distance = haversin_from(b.x1, b.cos_x1, b.lon, lat, lon);
+    Some(decay_value(d, b.scaling, 0f64.max(distance - b.offset)))
+}
+
+fn geo_decay_at(b: Rc<GeoDecay>, plat: f64, plon: f64, d: Decay) -> VR {
+    let distance = haversin_from(b.x1, b.cos_x1, b.lon, plat, plon);
     let distance = 0f64.max(distance - b.offset);
     Ok(Value::Double(decay_value(d, b.scaling, distance)))
 }
@@ -1072,5 +1183,38 @@ mod tests {
         assert_eq!(parse_time_value_millis("36h", "x").unwrap(), 129_600_000);
         assert_eq!(parse_time_value_millis("0", "x").unwrap(), 0);
         assert!(parse_time_value_millis("1x", "x").is_err());
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore]
+fn bench_haversin_from() {
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let pts: Vec<(f64, f64)> = (0..1_100_000).map(|_| (next() * 180.0 - 90.0, next() * 360.0 - 180.0)).collect();
+    let x1 = to_radians(52.37);
+    let c1 = sloppy_cos(x1);
+    for _ in 0..3 {
+        let t = std::time::Instant::now();
+        let mut s = 0.0;
+        for &(a, b) in &pts {
+            s += haversin_from(x1, c1, 4.8951, a, b);
+        }
+        std::hint::black_box(s);
+        eprintln!("haversin_from {:.1} ns", t.elapsed().as_secs_f64() * 1e9 / pts.len() as f64);
+        let t = std::time::Instant::now();
+        let mut s = 0.0;
+        for &(a, b) in &pts {
+            let d = haversin_from(x1, c1, 4.8951, a, b);
+            s += decay_value(Decay::Gauss, -1.0e-12, d);
+        }
+        std::hint::black_box(s);
+        eprintln!("haversin_from + gauss {:.1} ns", t.elapsed().as_secs_f64() * 1e9 / pts.len() as f64);
     }
 }

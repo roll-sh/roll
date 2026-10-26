@@ -227,13 +227,66 @@ impl Width {
     }
 }
 
-/// The locales whose texts formatters print: `Locale.ROOT` (`DateFormatter.forPattern`, date
-/// math index names) and English (date fields' default `locale`). Other locales print English.
+/// The locale whose texts a formatter parses and prints: `Locale.ROOT` (`DateFormatter.forPattern`,
+/// date math index names), English (date fields' default `locale`), or another locale's
+/// `java.time` texts (CLDR, as Elasticsearch's JDK has them), by `Locale.toString()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DateLocale {
     #[default]
     Root,
     English,
+    Cldr(&'static str),
+}
+
+impl DateLocale {
+    /// `LocaleUtils.parse`: `root`/empty, a language, language and country, and a variant,
+    /// separated by `_` or `-`. English stays [`DateLocale::English`].
+    pub fn parse(s: &str) -> DateLocale {
+        if s.is_empty() || s.eq_ignore_ascii_case("root") {
+            return DateLocale::Root;
+        }
+        let mut parts = s.split(['_', '-']);
+        let lang = parts.next().unwrap_or("").to_ascii_lowercase();
+        if lang == "en" || lang.is_empty() {
+            return DateLocale::English;
+        }
+        let mut key = lang;
+        if let Some(c) = parts.next() {
+            key.push('_');
+            key.push_str(&c.to_ascii_uppercase());
+            for v in parts {
+                key.push('_');
+                key.push_str(v);
+            }
+        }
+        intern_locale(key).map_or(DateLocale::English, DateLocale::Cldr)
+    }
+
+    /// The `TextStyle` ordinal of a width (`FULL` 0, `SHORT` 2, `NARROW` 4; standalone + 1).
+    fn style(width: Width, standalone: bool) -> u8 {
+        let base = match width {
+            Width::Full => 0,
+            Width::Short => 2,
+            Width::Narrow => 4,
+        };
+        base + u8::from(standalone)
+    }
+}
+
+/// Locale keys live as long as the process; distinct ones are few (they come from mappings),
+/// but the table is capped so mappings can't grow it without bound.
+fn intern_locale(key: String) -> Option<&'static str> {
+    static SEEN: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<&'static str>>> = std::sync::OnceLock::new();
+    let mut seen = SEEN.get_or_init(Default::default).lock();
+    if let Some(k) = seen.get(key.as_str()) {
+        return Some(k);
+    }
+    if seen.len() >= 4096 {
+        return None;
+    }
+    let k: &'static str = Box::leak(key.into_boxed_str());
+    seen.insert(k);
+    Some(k)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -788,6 +841,12 @@ impl DateFormatter {
         Ok(DateFormatter { pattern: pattern.to_string(), alts, locale: DateLocale::Root })
     }
 
+    /// A request's `format` over a date field with this formatter: the pattern in the field's
+    /// locale (`DateFieldType.docValueFormat`).
+    pub fn derive(&self, pattern: &str) -> Result<DateFormatter, String> {
+        DateFormatter::new(pattern).map(|f| f.with_locale(self.locale))
+    }
+
     /// `DateFormatter.withLocale`.
     pub fn with_locale(mut self, locale: DateLocale) -> DateFormatter {
         self.locale = locale;
@@ -860,13 +919,20 @@ impl DateFormatter {
     /// [`DateFormatter::parse`] with the error Elasticsearch reports (`JavaDateFormatter.parse`
     /// then `DateFormatters.from`).
     pub fn parse_detailed(&self, text: &str, zone: Option<&Zone>, round_up: bool) -> Result<Instant, DateError> {
+        self.parse_with_year(text, zone, round_up, None)
+    }
+
+    /// [`DateFormatter::parse_detailed`], where a text without any year field takes
+    /// `default_year` instead of 1970 (the ingest `date` processors' `DateFormat.Java`: the
+    /// current year, keeping only the month, day and time of day parsed).
+    pub fn parse_with_year(&self, text: &str, zone: Option<&Zone>, round_up: bool, default_year: Option<i64>) -> Result<Instant, DateError> {
         let err = |kind| DateError { text: text.to_string(), format: self.pattern.clone(), kind };
         if text.is_empty() {
             return Err(err(DateErrorKind::Empty));
         }
         let multi = self.parsers() > 1;
         for alt in &self.alts {
-            let fail = match parse_alt(alt, text, zone, round_up, self.locale) {
+            let fail = match parse_alt(alt, text, zone, round_up, self.locale, default_year) {
                 Ok(i) => return Ok(i),
                 Err(f) => f,
             };
@@ -959,7 +1025,7 @@ struct Parsed {
     loc_weeks: bool,
 }
 
-fn parse_alt(alt: &Alt, text: &str, zone: Option<&Zone>, round_up: bool, locale: DateLocale) -> Result<Instant, AltFail> {
+fn parse_alt(alt: &Alt, text: &str, zone: Option<&Zone>, round_up: bool, locale: DateLocale, default_year: Option<i64>) -> Result<Instant, AltFail> {
     match alt {
         Alt::EpochMillis | Alt::EpochSecond => parse_epoch(alt, text).ok_or(AltFail::At(0)),
         Alt::Pattern { parse, week_based, mode, .. } => {
@@ -969,6 +1035,14 @@ fn parse_alt(alt: &Alt, text: &str, zone: Option<&Zone>, round_up: bool, locale:
             let end = match_toks(parse, bytes, 0, &mut p, locale).map_err(|at| if iso { AltFail::Iso } else { AltFail::At(at) })?;
             if end != bytes.len() {
                 return Err(if iso { AltFail::Iso } else { AltFail::Unparsed(end) });
+            }
+            // A parsed offset or zone is dropped too (`withZoneSameLocal(zone)`).
+            if let Some(y) = default_year
+                && p.year.is_none()
+                && p.year_of_era.is_none()
+                && p.week_year.is_none()
+            {
+                p = Parsed { year: Some(y), month: p.month, day: p.day, hour: p.hour, clock12: p.clock12, hour12: p.hour12, pm: p.pm, minute: p.minute, second: p.second, nano: p.nano, milli_of_day: p.milli_of_day, ..Parsed::default() };
             }
             let (resolver, defer_date) = match mode {
                 Mode::Java { resolver, defer_date } => (*resolver, *defer_date),
@@ -1102,7 +1176,7 @@ fn match_toks(toks: &[Tok], s: &[u8], mut pos: usize, p: &mut Parsed, locale: Da
                 pos += len;
             }
             Tok::AmPm => {
-                let (i, len) = match_text(&s[pos..], 2, |i| ["AM", "PM"][i].to_string()).ok_or(at)?;
+                let (i, len) = match_text(&s[pos..], 2, |i| ampm_text(locale, i)).ok_or(at)?;
                 p.pm = Some(i == 1);
                 pos += len;
             }
@@ -1497,8 +1571,9 @@ const MONTHS_SHORT: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul
 
 /// Month texts: English full and narrow forms; `Locale.ROOT` only has the short one (and
 /// numbers for narrow).
-fn month_text(locale: DateLocale, width: Width, _standalone: bool, i: usize) -> String {
+fn month_text(locale: DateLocale, width: Width, standalone: bool, i: usize) -> String {
     match (locale, width) {
+        (DateLocale::Cldr(l), _) => search_painless::time_locale::month(l, i as u8 + 1, DateLocale::style(width, standalone)).to_string(),
         (_, Width::Short) | (DateLocale::Root, Width::Full) => MONTHS_SHORT[i].to_string(),
         (DateLocale::English, Width::Full) => MONTHS[i].to_string(),
         (DateLocale::English, Width::Narrow) => MONTHS[i][..1].to_string(),
@@ -1506,8 +1581,9 @@ fn month_text(locale: DateLocale, width: Width, _standalone: bool, i: usize) -> 
     }
 }
 
-fn day_text(locale: DateLocale, width: Width, _standalone: bool, i: usize) -> String {
+fn day_text(locale: DateLocale, width: Width, standalone: bool, i: usize) -> String {
     match (locale, width) {
+        (DateLocale::Cldr(l), _) => search_painless::time_locale::day(l, i as u8 + 1, DateLocale::style(width, standalone)).to_string(),
         (DateLocale::English, Width::Full) => DAYS[i].to_string(),
         (_, Width::Narrow) => DAYS[i][..1].to_string(),
         _ => DAYS[i][..3].to_string(),
@@ -1517,6 +1593,7 @@ fn day_text(locale: DateLocale, width: Width, _standalone: bool, i: usize) -> St
 fn quarter_text(locale: DateLocale, width: Width, standalone: bool, q: u32) -> String {
     const ORDINAL: [&str; 4] = ["1st", "2nd", "3rd", "4th"];
     match (locale, width, standalone) {
+        (DateLocale::Cldr(l), _, _) => search_painless::time_locale::quarter(l, q as u8, DateLocale::style(width, standalone)).to_string(),
         (_, Width::Narrow, _) => q.to_string(),
         (DateLocale::English, Width::Full, _) => format!("{} quarter", ORDINAL[q as usize - 1]),
         // Root's stand-alone abbreviation is the number.
@@ -1525,9 +1602,18 @@ fn quarter_text(locale: DateLocale, width: Width, standalone: bool, q: u32) -> S
     }
 }
 
+/// AM (0) or PM (1).
+fn ampm_text(locale: DateLocale, i: usize) -> String {
+    match locale {
+        DateLocale::Cldr(l) => search_painless::time_locale::ampm(l, i as u8).to_string(),
+        _ => ["AM", "PM"][i].to_string(),
+    }
+}
+
 /// `bc`: before the common era.
 fn era_text(locale: DateLocale, width: Width, bc: bool) -> String {
     match (locale, width) {
+        (DateLocale::Cldr(l), _) => search_painless::time_locale::era(l, u8::from(!bc), DateLocale::style(width, false)).to_string(),
         (DateLocale::Root, _) => if bc { "BCE" } else { "CE" }.to_string(),
         (DateLocale::English, Width::Full) => if bc { "Before Christ" } else { "Anno Domini" }.to_string(),
         (DateLocale::English, Width::Narrow) => if bc { "B" } else { "A" }.to_string(),
@@ -1556,7 +1642,8 @@ fn day_period_text(locale: DateLocale, narrow: bool, i: usize) -> String {
         DateLocale::Root => ["AM", "PM", "AM", "PM", "PM", "PM"][i].to_string(),
         DateLocale::English if narrow && i == 0 => "mi".to_string(),
         DateLocale::English if narrow && i == 1 => "n".to_string(),
-        DateLocale::English => DAY_PERIODS[i].to_string(),
+        // Day periods of other locales aren't carried: English ones.
+        DateLocale::English | DateLocale::Cldr(_) => DAY_PERIODS[i].to_string(),
     }
 }
 
@@ -1635,7 +1722,7 @@ fn print_toks(toks: &[Tok], local: NaiveDateTime, off: i32, zone: &Zone, locale:
             Tok::MonthText { width, standalone } => out.push_str(&month_text(locale, *width, *standalone, local.month0() as usize)),
             Tok::DayText { width, standalone } => out.push_str(&day_text(locale, *width, *standalone, local.weekday().num_days_from_monday() as usize)),
             Tok::QuarterText { width, standalone } => out.push_str(&quarter_text(locale, *width, *standalone, (local.month() - 1) / 3 + 1)),
-            Tok::AmPm => out.push_str(if local.hour() < 12 { "AM" } else { "PM" }),
+            Tok::AmPm => out.push_str(&ampm_text(locale, usize::from(local.hour() >= 12))),
             Tok::DayPeriod { narrow } => {
                 let i = day_period_index(local.hour() * 60 + local.minute());
                 out.push_str(&day_period_text(locale, *narrow, i));
@@ -2173,5 +2260,28 @@ mod tests {
         assert_eq!(Zone::parse("-0530").unwrap(), Zone::Offset(-19800));
         assert!(matches!(Zone::parse("Europe/Paris").unwrap(), Zone::Named(_)));
         assert!(Zone::parse("Mars/Base").is_err());
+    }
+
+    #[test]
+    fn default_year_fills_texts_without_one() {
+        let f = DateFormatter::new("MMM dd HH:mm:ss").unwrap().with_locale(DateLocale::English);
+        let i = f.parse_with_year("Mar 03 10:11:12", None, false, Some(2026)).unwrap();
+        assert_eq!(DateFormatter::new("strict_date_time").unwrap().format(i, &Zone::UTC), "2026-03-03T10:11:12.000Z");
+        // Without a default the year stays 1970; a parsed year always wins.
+        assert_eq!(f.parse_millis("Jan 01 00:00:00").unwrap(), 0);
+        let y = DateFormatter::new("yyyy MMM dd").unwrap().with_locale(DateLocale::English);
+        assert_eq!(y.parse_with_year("2001 Jan 01", None, false, Some(2026)).unwrap().millis(), 978_307_200_000);
+        // The parsed offset is dropped with the year (the zone given applies instead).
+        let z = DateFormatter::new("MMM dd HH:mm Z").unwrap().with_locale(DateLocale::English);
+        let i = z.parse_with_year("Mar 03 10:11 +0500", Some(&Zone::Offset(3600)), false, Some(2026)).unwrap();
+        assert_eq!(DateFormatter::new("strict_date_time").unwrap().format(i, &Zone::UTC), "2026-03-03T09:11:00.000Z");
+    }
+
+    #[test]
+    fn derived_formats_keep_the_field_locale() {
+        let field = DateFormatter::new("dd MMMM yyyy").unwrap().with_locale(DateLocale::parse("de"));
+        let d = field.derive("MMMM yyyy").unwrap();
+        assert_eq!(d.locale, field.locale);
+        assert_eq!(d.format(Instant::from_millis(1_583_020_800_000), &Zone::UTC), "März 2020");
     }
 }

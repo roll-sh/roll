@@ -144,8 +144,10 @@ impl Weight for BoostingWeight {
         })
     }
 
-    fn count(&self, seg: &SegmentContext) -> Result<Option<u32>> {
-        self.positive.count(seg)
+    /// Lucene's `FunctionScoreQuery` weight (what Elasticsearch's `boosting` builds) offers no
+    /// count, scoring or not: a partial hit count collects its docs.
+    fn count(&self, _seg: &SegmentContext) -> Result<Option<u32>> {
+        Ok(None)
     }
 }
 

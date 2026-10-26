@@ -613,6 +613,45 @@ impl ShapeValue {
         (self.coords.decode_x(self.centroid.x), self.coords.decode_y(self.centroid.y))
     }
 
+    /// `GeometryDocValueReader.getLabelPosition()`: a polygon's centroid when it lies inside the
+    /// shape, otherwise the center of the triangle at the root of the doc value's triangle tree
+    /// (`TriangleTreeWriter` puts there the median triangle by minimum, then maximum, x).
+    pub fn label_position(&self) -> (f64, f64) {
+        let (cx, cy) = (self.centroid.x as f64, self.centroid.y as f64);
+        if self.centroid.shape_type == DimensionalShapeType::Polygon
+            && self.triangles.iter().any(|t| {
+                let (ax, ay, bx, by, tx, ty) = (t.a_x as f64, t.a_y as f64, t.b_x as f64, t.b_y as f64, t.c_x as f64, t.c_y as f64);
+                match t.kind {
+                    TriangleType::Point => ax == cx && ay == cy,
+                    TriangleType::Line => orient(ax, ay, bx, by, cx, cy) == 0 && cx >= ax.min(bx) && cx <= ax.max(bx) && cy >= ay.min(by) && cy <= ay.max(by),
+                    TriangleType::Triangle => {
+                        let (o1, o2, o3) = (orient(ax, ay, bx, by, cx, cy), orient(bx, by, tx, ty, cx, cy), orient(tx, ty, ax, ay, cx, cy));
+                        (o1 >= 0 && o2 >= 0 && o3 >= 0) || (o1 <= 0 && o2 <= 0 && o3 <= 0)
+                    }
+                }
+            })
+        {
+            return self.centroid_xy();
+        }
+        let key = |t: &DecodedTriangle| (t.a_x.min(t.b_x).min(t.c_x), t.a_x.max(t.b_x).max(t.c_x));
+        let mut order: Vec<&DecodedTriangle> = self.triangles.iter().collect();
+        if order.is_empty() {
+            return self.centroid_xy();
+        }
+        let mid = (order.len() - 1) / 2;
+        order.select_nth_unstable_by_key(mid, |t| key(t));
+        let t = order[mid];
+        let c = self.coords;
+        match t.kind {
+            TriangleType::Point => (c.decode_x(t.a_x), c.decode_y(t.a_y)),
+            TriangleType::Line => ((c.decode_x(t.a_x) + c.decode_x(t.b_x)) / 2.0, (c.decode_y(t.a_y) + c.decode_y(t.b_y)) / 2.0),
+            TriangleType::Triangle => (
+                (c.decode_x(t.a_x) + c.decode_x(t.b_x) + c.decode_x(t.c_x)) / 3.0,
+                (c.decode_y(t.a_y) + c.decode_y(t.b_y) + c.decode_y(t.c_y)) / 3.0,
+            ),
+        }
+    }
+
     /// `GeoShapeValue.relate(minX, maxX, minY, maxY)` (`Tile2DVisitor`) for an encoded cell.
     pub fn relate_tile(&self, min_x: i32, max_x: i32, min_y: i32, max_y: i32) -> GeoRelation {
         let q = Tile { min_x, max_x, min_y, max_y };

@@ -521,6 +521,8 @@ fn meta_of(target: &Target, args: &WriteArgs, id: &str) -> Map {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: &str, value: Value, first: Option<String>, fin: Option<String>, now_ms: i64) -> EsResult<Outcome> {
     let Value::Obj(src) = value else { return Ok(Outcome::Index(target, Value::Obj(Map::new()), Bytes::new())) };
+    // Enrich processors read in-memory tables of the enrich indices.
+    crate::xpack::enrich::warm(cluster).await;
     let mut d = IngestDoc::new(src, meta_of(&target, args, id), now_ms);
     let doc_id = args.id.clone().unwrap_or_else(|| "null".to_string());
     let index_of = |d: &IngestDoc| match d.meta.get("_index") {
@@ -568,6 +570,9 @@ pub async fn run_write(cluster: &Cluster, target: Target, args: &WriteArgs, id: 
         if is_final {
             let e = EsError::illegal_state(format!("final pipeline [{pid}] can't change the target index (from [{original}] to [{new_index}]) for document [{doc_id}]"));
             return Err(fail(e, vec![pid.clone()]));
+        }
+        if let Some(e) = crate::xpack::streams::check_reroute(&cluster.state(), &pid, &original, &new_index, &history) {
+            return Err(fail(e, vec![pid.clone()]).with_hidden("item_index", Value::Str(new_index)));
         }
         if history.contains(&new_index) {
             let mut cycle = history.clone();
@@ -651,6 +656,17 @@ pub fn simulate(ctx: &Ctx) -> EsResult<Reply> {
                         results.push(Value::Obj(r));
                         break;
                     }
+                    // A self-referencing document can't be rendered: every processor from
+                    // the one that made it reports the serialization failure instead.
+                    Ok(_) if d.self_reference.is_some() => {
+                        r.insert("status".into(), Value::Str("error".into()));
+                        if let Some(t) = &p.tag {
+                            r.insert("tag".into(), Value::Str(t.clone()));
+                        }
+                        let e = d.self_reference.clone().unwrap_or_else(|| EsError::illegal_argument("self-referencing document"));
+                        r.insert("error".into(), e.to_value_with_root(false));
+                        results.push(Value::Obj(r));
+                    }
                     Ok(_) => {
                         r.insert("status".into(), Value::Str("success".into()));
                         if let Some(t) = &p.tag {
@@ -674,6 +690,11 @@ pub fn simulate(ctx: &Ctx) -> EsResult<Reply> {
         } else {
             match run_pipeline(ctx.cluster, &pipeline, &mut d, 0) {
                 Ok(Flow::Drop) => out.push(Value::Null),
+                // The document can't be serialized (`IngestDocument` → `WriteableIngestDocument`).
+                Ok(_) if d.self_reference.is_some() => {
+                    let e = d.self_reference.take().unwrap_or_else(|| EsError::illegal_argument("self-referencing document"));
+                    out.push(obj! { "error" => e.to_value_with_root(false) })
+                }
                 Ok(_) => out.push(obj! { "doc" => d.to_simulate(false) }),
                 Err(e) => out.push(obj! { "error" => e.without_headers(&["processor_type", "processor_tag"]).to_value_with_root(false) }),
             }

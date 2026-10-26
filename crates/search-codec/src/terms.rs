@@ -434,6 +434,11 @@ impl TermsReader {
         Some(self.term_state(ord))
     }
 
+    /// A cursor for exact lookups of terms in increasing order (see [`SortedLookup`]).
+    pub fn sorted_lookup(&self) -> SortedLookup<'_> {
+        SortedLookup { r: self, block: u64::MAX, pos: 0, end: 0, idx: u64::MAX, cur: Vec::new(), meta: MetaDecoder::default() }
+    }
+
     /// The field's Bloom filter, if it has one.
     pub fn bloom(&self) -> Option<&BloomFilter> {
         self.bloom.as_ref()
@@ -689,6 +694,71 @@ struct MetaBlock {
     row_bits: u64,
     rows: usize,
     rows_len: usize,
+}
+
+/// Exact lookups of strictly increasing terms (a `terms` query's sorted set, often thousands
+/// of terms). Independent [`TermsReader::seek_exact`] calls each run the floor search, parse
+/// the block header and rescan the block from its start; consecutive sorted terms mostly fall
+/// into the same block or the next few, so this cursor keeps the current block and the scan
+/// position and only searches the index again once a term lies past the block. Results are
+/// those of `seek_exact` (tested against it).
+pub struct SortedLookup<'a> {
+    r: &'a TermsReader,
+    /// Current block (`u64::MAX`: none yet), the offset of its next entry and its end.
+    block: u64,
+    pos: usize,
+    end: usize,
+    /// Index in the block of the decoded entry `cur` (`u64::MAX`: none decoded yet).
+    idx: u64,
+    cur: Vec<u8>,
+    meta: MetaDecoder,
+}
+
+impl SortedLookup<'_> {
+    /// [`TermsReader::seek_exact_hashed`] for a term greater than every term this cursor was
+    /// asked for before.
+    pub fn seek_exact_hashed(&mut self, term: &[u8], hash: u64) -> Option<TermState> {
+        let r = self.r;
+        if let Some(b) = &r.bloom
+            && !b.may_contain_hash(hash)
+        {
+            return None;
+        }
+        if r.num_blocks == 0 || term < r.min_term.as_slice() || term > r.max_term.as_slice() {
+            return None;
+        }
+        // The current block stays the floor block while the next block's key is above `term`
+        // (earlier terms, all <= `term`, were at or past the current block's key).
+        let next = self.block.wrapping_add(1);
+        if self.block == u64::MAX || (next < r.num_blocks && r.key(next as usize) <= term) {
+            let b = r.floor_block(term);
+            let (s, e) = r.block_terms(b);
+            (self.block, self.pos, self.end, self.idx) = (b, s, e, u64::MAX);
+            self.cur.clear();
+        }
+        let data = &r.meta[..self.end.min(r.meta.len())];
+        loop {
+            if self.idx != u64::MAX {
+                match self.cur.as_slice().cmp(term) {
+                    Ordering::Equal => {
+                        self.meta.seek(r, self.block * TERMS_PER_BLOCK + self.idx);
+                        return Some(self.meta.state);
+                    }
+                    Ordering::Greater => return None,
+                    Ordering::Less => {}
+                }
+            }
+            if self.pos >= self.end {
+                return None;
+            }
+            let (shared, len) = read_entry(data, &mut self.pos);
+            let suffix = data.get(self.pos..self.pos.saturating_add(len))?;
+            self.pos += len;
+            self.cur.truncate(shared);
+            self.cur.extend_from_slice(suffix);
+            self.idx = self.idx.wrapping_add(1);
+        }
+    }
 }
 
 /// Term metadata lookups, caching the last block header.
@@ -1308,6 +1378,46 @@ mod tests {
         }
         assert!(it.next().is_none(), "iterators stay exhausted");
         v
+    }
+
+    /// `SortedLookup` answers exactly what independent `seek_exact` calls answer, for sorted
+    /// probe sets mixing present terms, absent ones between them, and terms past the ends.
+    #[test]
+    fn sorted_lookup_matches_seek_exact() {
+        use std::collections::BTreeSet;
+        let mut rng = StdRng::seed_from_u64(29);
+        for (size, long_prefix) in [(0usize, false), (1, false), (31, false), (33, false), (65, true), (700, false), (4000, true), (4000, false)] {
+            let mut set = BTreeSet::new();
+            while set.len() < size {
+                let mut t = random_term(&mut rng);
+                if long_prefix && rng.gen_bool(0.8) {
+                    let mut u = b"https://example.org/".to_vec();
+                    u.extend_from_slice(&t);
+                    t = u;
+                }
+                set.insert(t);
+            }
+            let r = build_set(&set);
+            let all: Vec<Vec<u8>> = set.iter().cloned().collect();
+            for density in [0.0, 0.05, 0.5, 1.0] {
+                let mut probes: BTreeSet<Vec<u8>> = all.iter().filter(|_| rng.gen_bool(density)).cloned().collect();
+                for _ in 0..200 {
+                    probes.insert(random_term(&mut rng));
+                }
+                for t in all.iter().take(40) {
+                    let mut t = t.clone();
+                    t.push(0);
+                    probes.insert(t);
+                }
+                probes.insert(Vec::new());
+                probes.insert(vec![0xff; 30]);
+                let mut lk = r.sorted_lookup();
+                for p in &probes {
+                    let got = lk.seek_exact_hashed(p, crate::bloom::hash64(p));
+                    assert_eq!(got, r.seek_exact(p), "{p:?} (size {size}, density {density})");
+                }
+            }
+        }
     }
 
     /// The block dictionary against a `BTreeSet` model: exact and ceiling seeks, ordered

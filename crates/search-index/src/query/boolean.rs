@@ -74,9 +74,40 @@ pub struct BooleanQuery {
     pub minimum_should_match: usize,
 }
 
-/// Identity of a query for rewrite rules (type + Lucene string).
-pub(crate) fn query_key(q: &QueryRef, schema: &Schema) -> (std::any::TypeId, String) {
-    (q.as_any().type_id(), q.lucene_string(schema))
+/// Identity of a query for rewrite rules: its type and Lucene string. The string is built
+/// only when two keys of the same type are compared (a 45,000-term `terms` clause's string is
+/// half a megabyte, and most rewrites compare clauses of different types); hashing uses the
+/// type alone, so equal keys still hash alike.
+#[derive(Clone)]
+pub(crate) struct QueryKey<'s> {
+    ty: std::any::TypeId,
+    q: QueryRef,
+    schema: &'s Schema,
+    text: std::cell::OnceCell<String>,
+}
+
+impl QueryKey<'_> {
+    fn text(&self) -> &str {
+        self.text.get_or_init(|| self.q.lucene_string(self.schema))
+    }
+}
+
+impl PartialEq for QueryKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty == other.ty && (Arc::ptr_eq(&self.q, &other.q) || self.text() == other.text())
+    }
+}
+
+impl Eq for QueryKey<'_> {}
+
+impl std::hash::Hash for QueryKey<'_> {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.ty.hash(h);
+    }
+}
+
+pub(crate) fn query_key<'s>(q: &QueryRef, schema: &'s Schema) -> QueryKey<'s> {
+    QueryKey { ty: q.as_any().type_id(), q: q.clone(), schema, text: std::cell::OnceCell::new() }
 }
 
 fn is<T: 'static>(q: &QueryRef) -> bool {
@@ -167,6 +198,8 @@ impl BooleanQuery {
     fn clause_sets(&self, schema: &Schema) -> Vec<BooleanClause> {
         let mut out = Vec::new();
         for o in [Occur::Must, Occur::Filter, Occur::Should, Occur::MustNot] {
+            // The key's cell caches its own text: hashing and equality never change.
+            #[allow(clippy::mutable_key_type)]
             let mut seen = std::collections::HashSet::new();
             for q in self.of(o) {
                 if matches!(o, Occur::Filter | Occur::MustNot) && !seen.insert(query_key(q, schema)) {
@@ -243,7 +276,7 @@ impl BooleanQuery {
         if sets.len() != self.clauses.len() {
             return Ok(Some(self.rebuilt(sets, msm)));
         }
-        let keys = |o: Occur| -> Vec<(std::any::TypeId, String)> { self.of(o).map(|q| query_key(q, schema)).collect() };
+        let keys = |o: Occur| -> Vec<QueryKey<'_>> { self.of(o).map(|q| query_key(q, schema)).collect() };
         if self.count(Occur::MustNot) > 0 {
             let mn = keys(Occur::MustNot);
             let mf: Vec<_> = keys(Occur::Must).into_iter().chain(keys(Occur::Filter)).collect();
@@ -292,8 +325,9 @@ impl BooleanQuery {
             if self.count(occ) == 0 || (occ == Occur::Should && msm > 1) {
                 continue;
             }
-            let mut order: Vec<(std::any::TypeId, String)> = Vec::new();
-            let mut merged: HashMap<(std::any::TypeId, String), (QueryRef, f64)> = HashMap::new();
+            let mut order: Vec<QueryKey<'_>> = Vec::new();
+            #[allow(clippy::mutable_key_type)]
+            let mut merged: HashMap<QueryKey<'_>, (QueryRef, f64)> = HashMap::new();
             for q in self.of(occ) {
                 let mut boost = 1f64;
                 let mut inner = q.clone();
@@ -438,7 +472,7 @@ impl Query for BooleanQuery {
         for c in &self.clauses {
             let m = if c.occur.is_scoring() { mode } else { ScoreMode::CompleteNoScores };
             let q = s.rewrite(&c.query)?;
-            clauses.push((c.occur, s.filter_weight(&q, m, boost)?, q.lucene_string(s.schema())));
+            clauses.push((c.occur, s.filter_weight(&q, m, boost)?, crate::search::LazyDesc::of_ref(&q, s)));
         }
         Ok(Box::new(BooleanWeight { clauses, msm: self.minimum_should_match, mode, pure_disjunction: self.is_pure_disjunction() }))
     }
@@ -502,7 +536,7 @@ impl Query for BooleanQuery {
 }
 
 struct BooleanWeight {
-    clauses: Vec<(Occur, Box<dyn Weight>, String)>,
+    clauses: Vec<(Occur, Box<dyn Weight>, crate::search::LazyDesc)>,
     msm: usize,
     mode: ScoreMode,
     pure_disjunction: bool,
@@ -802,7 +836,7 @@ impl Weight for BooleanWeight {
                 // Non-scoring clauses go through Lucene's query cache, whose wrapper weight
                 // explains as a constant score of 1 (Elasticsearch enables the cache).
                 e = if e.is_match() {
-                    Explanation::leaf(1f32, desc.clone())
+                    Explanation::leaf(1f32, desc.get().to_string())
                 } else {
                     Explanation::no_match(format!("{desc} doesn't match id {doc}"), Vec::new())
                 };

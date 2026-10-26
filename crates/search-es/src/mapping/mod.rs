@@ -84,9 +84,14 @@ pub struct MappingCtx {
     pub join_routing: Option<bool>,
     /// Deprecation warnings raised while parsing.
     pub warnings: RefCell<Vec<String>>,
+    /// `index.routing_path` of a `time_series` index (empty otherwise): unmapped fields that
+    /// match it fail the document.
+    pub routing_path: Vec<String>,
     /// Whose mapping rules apply: OpenSearch has its own field types (`flat_object`,
     /// `xy_point`, …), parameters (`boost`, `disable_objects`) and `dynamic` values.
     pub dialect: Dialect,
+    /// OpenSearch's `index.knn`: `knn_vector` fields get an ANN index (else they are flat).
+    pub knn: bool,
 }
 
 impl MappingCtx {
@@ -132,7 +137,13 @@ impl MappingCtx {
             requested_templates: None,
             join_routing: None,
             warnings: RefCell::new(Vec::new()),
+            routing_path: if crate::meta::index_mode::IndexMode::of(s) == crate::meta::index_mode::IndexMode::TimeSeries {
+                s.get_list("index.routing_path").unwrap_or_default()
+            } else {
+                Vec::new()
+            },
             dialect,
+            knn: s.get("index.knn").is_some_and(|v| v.eq_ignore_ascii_case("true")),
         }
     }
 
@@ -422,6 +433,18 @@ impl FieldMapper {
     /// Parses `{"type": …, params…}` for a field named `name` (its leaf name).
     pub fn parse(name: &str, def: &'static TypeDef, node: &Map, ctx: &MappingCtx, in_multi_field: bool) -> Result<FieldMapper, EsError> {
         let mut f = FieldMapper::new(name, def);
+        // OpenSearch's `flat_object` type parser consumes nothing, so every key but `type`
+        // (`fields` and `copy_to` included) is left for `checkNoRemainingFields`, which lists
+        // them in the order of the `HashMap` the node was parsed into.
+        if def.name == "flat_object" && node.len() > 1 {
+            let keys: Vec<&str> = node.keys().map(String::as_str).collect();
+            let rest: Vec<(&String, &Value)> = crate::opensearch::java_hashmap_order(&keys, node.len())
+                .into_iter()
+                .filter(|k| *k != "type")
+                .filter_map(|k| node.get_key_value(k))
+                .collect();
+            return Err(EsError::mapper_parsing(format!("Mapping definition for [{name}] has unsupported parameters: {}", remaining_text(&rest))));
+        }
         for (k, v) in node {
             match k.as_str() {
                 "type" => continue,
@@ -432,8 +455,8 @@ impl FieldMapper {
                         )));
                     }
                     parse_multi_fields(&mut f, name, v, ctx)?;
-                    if def.name == "join" && !f.fields.is_empty() {
-                        ctx.warn("Adding multifields to [join] mappers has no effect and will be forbidden in future");
+                    if matches!(def.name, "join" | "aggregate_metric_double" | "constant_keyword") && !f.fields.is_empty() {
+                        ctx.warn(format!("Adding multifields to [{}] mappers has no effect and will be forbidden in future", def.name));
                     }
                     continue;
                 }
@@ -500,6 +523,9 @@ impl FieldMapper {
 
     /// Type-specific normalization and validation after parsing.
     fn post_parse(&mut self, ctx: &MappingCtx) -> Result<(), EsError> {
+        if self.ty == "knn_vector" {
+            crate::opensearch::knn::normalize_mapping(self, ctx)?;
+        }
         if self.ty == "dense_vector"
             && let Some(Value::Obj(o)) = self.raw("index_options")
         {
@@ -1848,8 +1874,19 @@ impl RuntimeField {
                 return Err(EsError::mapper_parsing(format!("unknown parameter [{k}] on runtime field [{name}] of type [{ty}]")));
             }
         }
+        // `OnScriptError` is a restricted string parameter, checked as it is parsed; that it
+        // needs a script when the field is built.
+        if let Some(v) = params.get("on_script_error") {
+            let s = v.to_es_string();
+            if s != "fail" && s != "continue" {
+                return Err(EsError::mapper_parsing(format!("Unknown value [{s}] for field [on_script_error] - accepted values are [fail, continue]")));
+            }
+        }
         if ty == "composite" && params.get("script").is_none_or(Value::is_null) {
             return Err(EsError::illegal_argument(format!("composite runtime field [{name}] must declare a [script]")));
+        }
+        if params.contains_key("on_script_error") && params.get("script").is_none_or(Value::is_null) {
+            return Err(EsError::illegal_argument("Field [on_script_error] requires field [script] to be configured"));
         }
         if ty == "lookup" {
             for req in ["target_index", "input_field", "target_field", "fetch_fields"] {
@@ -3089,12 +3126,11 @@ pub fn java_hash_map_order<'a>(keys: impl Iterator<Item = &'a str>) -> Vec<usize
 }
 
 /// The texts a date field's `locale` parses and prints with: `Locale.ROOT` for an empty or
-/// `root` locale, English otherwise (the default, `en`, and every locale whose texts roll does
-/// not carry).
+/// `root` locale, English by default and for `en*`, the locale's `java.time` texts otherwise.
 pub fn date_locale(locale: Option<&Value>) -> crate::time::DateLocale {
     match locale.and_then(Value::as_str) {
-        Some(s) if s.is_empty() || s.eq_ignore_ascii_case("root") => crate::time::DateLocale::Root,
-        _ => crate::time::DateLocale::English,
+        Some(s) => crate::time::DateLocale::parse(s),
+        None => crate::time::DateLocale::English,
     }
 }
 

@@ -18,11 +18,45 @@ fn opt_long(ctx: &Ctx, name: &str) -> EsResult<Option<i64>> {
     if ctx.has_query(name) { ctx.long_param(name, 0).map(Some) } else { Ok(None) }
 }
 
+/// `SliceIndexing.parseRoutingOrSliceWithProvenance`: the `routing` parameter, or `_slice`
+/// (slice indexing's name for it, validated), never both.
+pub fn routing_or_slice(ctx: &Ctx) -> EsResult<Option<String>> {
+    let routing = ctx.query("routing");
+    let Some(slice) = ctx.query("_slice") else { return Ok(routing.filter(|r| !r.is_empty()).map(str::to_string)) };
+    validate_slice_value(slice)?;
+    if routing.is_some() {
+        return Err(EsError::illegal_argument("[routing] is not allowed together with [_slice]"));
+    }
+    Ok(Some(slice.to_string()))
+}
+
+/// `SliceIndexing.validateUserSliceValue`.
+pub fn validate_slice_value(slice: &str) -> EsResult<()> {
+    if slice.is_empty() {
+        return Err(EsError::illegal_argument("invalid [_slice] value: value must be non-empty"));
+    }
+    let len = slice.encode_utf16().count();
+    if len > 128 {
+        return Err(EsError::illegal_argument(format!("invalid [_slice] value [{slice}]: length [{len}] exceeds max [128]")));
+    }
+    if slice == "_all" {
+        return Err(EsError::illegal_argument(format!("invalid [_slice] value [{slice}]: value is reserved")));
+    }
+    // `[a-zA-Z0-9](?:[a-zA-Z0-9._:-]*[a-zA-Z0-9])?`
+    let b = slice.as_bytes();
+    let edge = |c: u8| c.is_ascii_alphanumeric();
+    let inner = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-');
+    if !(edge(b[0]) && edge(b[b.len() - 1]) && b.iter().all(|&c| inner(c))) {
+        return Err(EsError::illegal_argument(format!("invalid [_slice] value [{slice}]: only [a-zA-Z0-9._:-] are allowed and max length is [128]")));
+    }
+    Ok(())
+}
+
 /// Write parameters common to index, create, delete and update.
 pub fn write_args(ctx: &Ctx) -> EsResult<WriteArgs> {
     Ok(WriteArgs {
         id: ctx.path_param("id").map(str::to_string),
-        routing: ctx.query("routing").filter(|r| !r.is_empty()).map(str::to_string),
+        routing: routing_or_slice(ctx)?,
         create: false,
         version: opt_long(ctx, "version")?,
         version_type: ctx.query("version_type").map(write::parse_version_type).transpose()?,
@@ -86,6 +120,9 @@ fn finish_refresh(ctx: &Ctx, out: &mut WriteOutcome) -> EsResult<()> {
 
 /// `PUT/POST /{index}/_doc/{id}`, `POST /{index}/_doc`, `PUT/POST /{index}/_create/{id}`.
 pub async fn index(ctx: &Ctx<'_>, create_api: bool) -> EsResult<Reply> {
+    // Enabled streams restrict the parameters of writes to them (`RestIndexAction`); the
+    // auto-id and create handlers add `op_type` first.
+    crate::xpack::streams::check_index_request(ctx, ctx.path_param("index").unwrap_or_default(), create_api || ctx.path_param("id").is_none())?;
     let mut args = write_args(ctx)?;
     RefreshPolicy::parse(ctx.query("refresh"))?;
     match ctx.query("op_type") {
@@ -116,6 +153,14 @@ pub async fn index(ctx: &Ctx<'_>, create_api: bool) -> EsResult<Reply> {
     if !errs.is_empty() {
         return Err(EsError::action_request_validation(&errs));
     }
+    if !args.create
+        && let Some(e) = crate::opensearch::append_only_violation(&ctx.state(), &expr, "INDEX", args.id.as_deref())
+    {
+        return Err(e);
+    }
+    if let Some(e) = crate::xpack::streams::check_item(ctx, &expr, args.pipeline.as_deref()) {
+        return Err(e);
+    }
     let body = ctx.body.clone();
     let out = index_one(ctx, &expr, args, body, auto_id).await?;
     let mut out = out;
@@ -126,6 +171,15 @@ pub async fn index(ctx: &Ctx<'_>, create_api: bool) -> EsResult<Reply> {
 /// Indexes one document through the full write path (target, pipelines, routing, mapping);
 /// a document failure in a data stream with a failure store goes to its failure store.
 pub async fn index_one(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source: Bytes, auto_id: bool) -> EsResult<WriteOutcome> {
+    index_one_ahead(ctx, expr, args, source, auto_id, None).await
+}
+
+/// A document prepared ahead of its turn (`_bulk`'s parallel preparation): given the index the
+/// write resolved to, the prepared document if it is still valid for it.
+pub type PreparedAhead<'a> = &'a mut (dyn FnMut(&std::sync::Arc<crate::meta::IndexMeta>) -> Option<write::Prepared> + Send);
+
+/// [`index_one`], using a document prepared ahead when the write goes straight to an index.
+pub async fn index_one_ahead(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source: Bytes, auto_id: bool, ahead: Option<PreparedAhead<'_>>) -> EsResult<WriteOutcome> {
     let cluster = ctx.cluster;
     let existed = ctx.state().metadata.data_streams.contains_key(expr);
     let target = write::resolve_target(cluster, expr, &args, ctx.now_ms).await?;
@@ -150,7 +204,14 @@ pub async fn index_one(ctx: &Ctx<'_>, expr: &str, args: WriteArgs, source: Bytes
         }
     }
     let initial_ds = target.data_stream.clone().filter(|_| !direct);
-    let Some(initial_ds) = initial_ds else { return index_resolved(ctx, target, args, source, auto_id).await };
+    let Some(initial_ds) = initial_ds else {
+        if let Some(ahead) = ahead
+            && let Some(r) = index_prepared(ctx, &target, &args, auto_id, ahead).await
+        {
+            return r;
+        }
+        return index_resolved(ctx, target, args, source, auto_id).await;
+    };
     let original = parse_doc(&source).ok();
     let mut args = args;
     // The failure document names the id a write was given or generated (ingest runs before
@@ -244,6 +305,34 @@ async fn index_resolved(ctx: &Ctx<'_>, target: write::Target, args: WriteArgs, s
     write::apply_index(prepared, &args, auto_id, &id)
 }
 
+/// The tail of [`index_resolved`] for a document prepared ahead: `None` (nothing done) unless
+/// the write goes straight to a plain index, runs no pipeline and the prepared document is
+/// still valid for that index and routing; then routing checks and the apply, as there.
+async fn index_prepared(ctx: &Ctx<'_>, target: &write::Target, args: &WriteArgs, auto_id: bool, ahead: PreparedAhead<'_>) -> Option<EsResult<WriteOutcome>> {
+    let idx = &target.index;
+    if target.data_stream.is_some() || target.alias_routing.is_some() || crate::engine::tsdb::is_time_series(idx) {
+        return None;
+    }
+    let none = |k: &str| idx.settings.get(k).is_none_or(|p| p == "_none");
+    let default_skipped = args.pipeline.as_deref() == Some("_none");
+    if args.pipeline.as_deref().is_some_and(|p| p != "_none") || !none("index.final_pipeline") || !(default_skipped || none("index.default_pipeline")) {
+        return None;
+    }
+    let id = args.id.as_deref()?;
+    let p = ahead(idx)?;
+    if p.id != id || p.routing.as_deref() != args.routing.as_deref() {
+        return None;
+    }
+    let r = async {
+        let routing = write::effective_routing(target, args.routing.as_deref(), id)?;
+        write::check_routing(idx, id, routing.as_deref())?;
+        let shard = crate::meta::routing::shard_for(idx, id, routing.as_deref());
+        check_active_shards(ctx, idx, shard).await?;
+        write::apply_index(p, args, auto_id, id)
+    };
+    Some(r.await)
+}
+
 /// The document of an index request: an object (`Malformed content, must start with an
 /// object` otherwise).
 pub fn parse_doc(source: &[u8]) -> EsResult<Value> {
@@ -283,6 +372,9 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let expr = ctx.path_param("index").unwrap_or_default().to_string();
     let id = args.id.clone().unwrap_or_default();
     let st = ctx.state();
+    if let Some(e) = crate::opensearch::append_only_violation(&st, &expr, "DELETE", Some(&id)) {
+        return Err(e);
+    }
     let target = match write_target_existing(ctx, &st, &expr, &args).await? {
         Some(t) => t,
         None => return Err(EsError::index_not_found(&expr)),
@@ -299,13 +391,9 @@ pub async fn delete(ctx: &Ctx<'_>) -> EsResult<Reply> {
     Ok(Reply::Body(out.status(), out.to_value()))
 }
 
-/// The write index of `expr` for deletes and updates (which auto-create too).
+/// The write index of `expr` for deletes (which auto-create only with external versioning).
 async fn write_target_existing(ctx: &Ctx<'_>, _st: &crate::meta::ClusterState, expr: &str, args: &WriteArgs) -> EsResult<Option<write::Target>> {
-    let mut a = args.clone();
-    // Deletes may target data streams' backing indices directly; the data stream itself only
-    // takes creates, which `resolve_target` enforces for index requests.
-    a.create = true;
-    write::resolve_target(ctx.cluster, expr, &a, ctx.now_ms).await.map(Some)
+    write::resolve_delete_target(ctx.cluster, expr, args, ctx.now_ms).await.map(Some)
 }
 
 /// Options of a get.
@@ -321,8 +409,17 @@ pub struct GetArgs {
     pub force_synthetic: bool,
 }
 
-/// The concrete index of a single-index read (`concreteSingleIndex`).
+/// The concrete index of a single-index read (`concreteSingleIndex`). OpenSearch's resolver
+/// reports a missing name as an `index_expression` resource.
 pub fn single_index(ctx: &Ctx, expr: &str) -> EsResult<Arc<IndexMeta>> {
+    let r = single_index_in(ctx, expr);
+    if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
+        return r.map_err(|e| if e.kind == "index_not_found_exception" { e.set_meta("resource.type", "index_expression") } else { e });
+    }
+    r
+}
+
+fn single_index_in(ctx: &Ctx, expr: &str) -> EsResult<Arc<IndexMeta>> {
     let st = ctx.state();
     let opts = IndicesOptions { allow_no_indices: false, ..IndicesOptions::STRICT_EXPAND_OPEN };
     let names = resolve::resolve(&st, &[expr.to_string()], &opts, ctx.now_ms)?;
@@ -374,6 +471,9 @@ pub fn get_one(ctx: &Ctx, idx: &Arc<IndexMeta>, id: &str, args: &GetArgs) -> EsR
         shard.refresh()?;
     }
     let t = std::time::Instant::now();
+    if args.realtime {
+        shard.shard.note_realtime_get(id.as_bytes()).map_err(crate::engine::convert::index_error)?;
+    }
     let doc = shard.shard.get(id.as_bytes(), args.realtime).map_err(crate::engine::convert::index_error)?;
     let c = &shard.counters;
     c.get_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -428,7 +528,7 @@ pub fn render_get(ctx: &Ctx, index: &str, id: &str, got: Option<&GotDoc>, args: 
     let st = ctx.state();
     let engine = ctx.cluster.engine.index(ctx.cluster, &st, &g.index)?;
     let table = engine.table();
-    let view = crate::fetch::SourceView { idx: &g.index, table: &table, force_synthetic: args.force_synthetic };
+    let view = crate::fetch::SourceView { idx: &g.index, table: &table, force_synthetic: args.force_synthetic, search: false };
     if let Some(src) = crate::fetch::render_source_view(&d.fields, &fs, &view)? {
         m.insert("_source".into(), src);
     }
@@ -443,7 +543,7 @@ pub fn render_get(ctx: &Ctx, index: &str, id: &str, got: Option<&GotDoc>, args: 
 
 fn get_args(ctx: &Ctx) -> EsResult<GetArgs> {
     Ok(GetArgs {
-        routing: ctx.query("routing").filter(|r| !r.is_empty()).map(str::to_string),
+        routing: routing_or_slice(ctx)?,
         realtime: ctx.bool_param("realtime", true)?,
         refresh: ctx.bool_param("refresh", false)?,
         stored_fields: ctx.query("stored_fields").map(|s| s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()),
@@ -502,7 +602,7 @@ pub fn get_source(ctx: &Ctx, head: bool) -> EsResult<Reply> {
     let st = ctx.state();
     let engine = ctx.cluster.engine.index(ctx.cluster, &st, &g.index)?;
     let table = engine.table();
-    let view = crate::fetch::SourceView { idx: &g.index, table: &table, force_synthetic: args.force_synthetic };
+    let view = crate::fetch::SourceView { idx: &g.index, table: &table, force_synthetic: args.force_synthetic, search: false };
     match crate::fetch::render_source_view(&g.doc.fields, &FetchSource { fetch: true, ..fs }, &view)? {
         Some(v) => {
             if head {
@@ -593,7 +693,7 @@ pub fn mget(ctx: &Ctx) -> EsResult<Reply> {
         });
         match r {
             Ok(v) => docs.push(v),
-            Err(e) => docs.push(obj! { "_index" => shown, "_id" => id.as_str(), "error" => e.to_value_with_root(false) }),
+            Err(e) => docs.push(obj! { "_index" => shown, "_id" => id.as_str(), "error" => crate::opensearch::item_error(ctx, &e, true) }),
         }
     }
     Reply::ok(obj! { "docs" => Value::Arr(docs) })

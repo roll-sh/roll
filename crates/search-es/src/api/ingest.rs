@@ -197,6 +197,7 @@ pub async fn put(ctx: &Ctx<'_>) -> EsResult<Reply> {
         }
     }
     validate_pipeline(&id, &body)?;
+    crate::xpack::enrich::validate_pipeline_refs(ctx.cluster, &body)?;
     let now = ctx.now_ms;
     ctx.cluster
         .update(move |st| {

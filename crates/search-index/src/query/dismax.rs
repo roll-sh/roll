@@ -110,14 +110,26 @@ impl Query for DisMaxQuery {
             }
             return Ok(Some(Arc::new(b)));
         }
+        // Lucene 10.5: disjuncts that rewrite to match-none are dropped, and what remains
+        // collapses like the query itself would (none, a single disjunct).
         let mut changed = false;
         let mut out = Vec::with_capacity(self.disjuncts.len());
         for q in &self.disjuncts {
             let r = s.rewrite(q)?;
-            changed |= !Arc::ptr_eq(&r, q);
-            out.push(r);
+            let none = r.as_any().is::<MatchNoneQuery>();
+            changed |= none || !Arc::ptr_eq(&r, q);
+            if !none {
+                out.push(r);
+            }
         }
-        Ok(changed.then(|| Arc::new(DisMaxQuery { disjuncts: out, tie_breaker: self.tie_breaker }) as QueryRef))
+        if !changed {
+            return Ok(None);
+        }
+        Ok(Some(match out.len() {
+            0 => Arc::new(MatchNoneQuery::new("empty DisjunctionMaxQuery")),
+            1 => out.pop().unwrap(),
+            _ => Arc::new(DisMaxQuery { disjuncts: out, tie_breaker: self.tie_breaker }),
+        }))
     }
 
     fn lucene_string(&self, schema: &Schema) -> String {

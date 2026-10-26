@@ -246,6 +246,17 @@ fn api_capabilities(api: routes::Api) -> &'static [&'static str] {
             "exclude_source_vectors_setting",
             "dense_vector_docvalue_fields",
             "dense_vector_docvalue_fields_format",
+            "bit_dense_vector_synthetic_source",
+            "byte_float_bit_dot_product_with_bugfix",
+            "byte_float_dot_product_capability",
+            "transform_rank_rrf_to_retriever",
+            "nested_retriever_inner_hits_support",
+            "k_default_to_size",
+            "kql_query",
+            "kql_query_boolean_field_query",
+            "index_expression_selectors",
+            "extended-search-usage-stats",
+            "aggregate_metric_double_defaults_to_average",
         ],
         ClusterStats => &[
             "human-readable-total-docs-size",
@@ -270,6 +281,7 @@ fn api_capabilities(api: routes::Api) -> &'static [&'static str] {
         IndicesExplainDataLifecycle => &["data_stream_lifecycle_effective_retention"],
         IndicesPutDataLifecycle => &["dlm.downsampling_method", "dlm.frozen_after"],
         IndicesModifyDataStream => &["data_streams.modify.delete_index"],
+        EsqlQuery | EsqlAsyncQuery => crate::xpack::esql::CAPABILITIES,
         _ => &[],
     }
 }
@@ -286,7 +298,20 @@ pub fn capabilities(ctx: &Ctx) -> EsResult<Reply> {
     {
         api = Some(r.api);
         supported = implemented(r.api);
-        if let Some(params) = ctx.query("parameters") {
+        // Most Elasticsearch handlers don't declare `supportedQueryParameters()` (null), and
+        // then any parameter list counts as supported; only these declare theirs.
+        let declares_params = matches!(
+            r.api,
+            routes::Api::Capabilities
+                | routes::Api::ClusterStats
+                | routes::Api::IndicesGetDataStream
+                | routes::Api::SnapshotDelete
+                | routes::Api::SnapshotGet
+                | routes::Api::StreamsStatus
+                | routes::Api::StreamsLogsDisable
+                | routes::Api::StreamsLogsEnable
+        );
+        if let Some(params) = ctx.query("parameters").filter(|_| declares_params) {
             for p in params.split(',').filter(|p| !p.is_empty()) {
                 let known = r.api.param(p).is_some() || r.params.iter().any(|(n, _)| *n == p) || matches!(p, "pretty" | "human" | "error_trace" | "filter_path" | "format");
                 supported &= known;

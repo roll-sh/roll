@@ -2,7 +2,9 @@
 //!
 //! - [`PointRangeQuery`]: walks the BKD tree; cells inside the range add their docs without
 //!   checking values (whole doc ranges at once for leaves of consecutive docs), crossing cells
-//!   check values. A segment whose values all fall inside matches all its docs.
+//!   check values. A segment whose values all fall inside matches all its docs; one where
+//!   every doc has a single value and most match starts from all docs and clears the ones
+//!   outside (Lucene's inverse visitor: cells inside cost nothing).
 //! - [`PointInSetQuery`]: exact numeric values (`terms` on numbers).
 //! - [`DocValuesRangeQuery`] / [`DocValuesTermsQuery`]: two-phase scorers over doc values —
 //!   the approximation is the field's docs and the check reads the value — used when another
@@ -193,6 +195,13 @@ impl PointRangeQuery {
         if v.compare(p.min_packed_value(), p.max_packed_value()) == Relation::CellInsideQuery && p.doc_count() == max_doc {
             return Some(DocIdSet::All(max_doc));
         }
+        // Every doc has exactly one value and most match: start from every doc and clear the
+        // ones outside, so cells inside the range cost nothing (Lucene's inverse visitor).
+        if p.doc_count() == max_doc && p.size() == u64::from(max_doc) && self.estimate(seg) > u64::from(max_doc / 2) {
+            let mut inv = InverseVisitor { range: RangeVisitor { q: self, b: DocIdSetBuilder::new(1) }, bits: crate::util::bitset::FixedBitSet::full(max_doc) };
+            p.intersect(&mut inv);
+            return Some(DocIdSet::Dense(inv.bits));
+        }
         p.intersect(&mut v);
         Some(v.b.build())
     }
@@ -244,6 +253,84 @@ impl PointVisitor for RangeVisitor<'_> {
     }
     fn grow(&mut self, n: usize) {
         self.b.grow(n);
+    }
+}
+
+/// Clears the docs whose (single) point lies outside the range from a full bit set: cells
+/// inside the range are skipped, cells outside clear their docs without value checks.
+struct InverseVisitor<'a> {
+    range: RangeVisitor<'a>,
+    bits: crate::util::bitset::FixedBitSet,
+}
+
+impl PointVisitor for InverseVisitor<'_> {
+    fn compare(&mut self, min: &[u8], max: &[u8]) -> Relation {
+        match self.range.compare(min, max) {
+            Relation::CellInsideQuery => Relation::CellOutsideQuery,
+            Relation::CellOutsideQuery => Relation::CellInsideQuery,
+            Relation::CellCrossesQuery => Relation::CellCrossesQuery,
+        }
+    }
+    fn visit(&mut self, doc: u32) {
+        self.bits.clear(doc);
+    }
+    fn visit_doc_range(&mut self, start: u32, end: u32) {
+        self.bits.clear_range(start, end);
+    }
+    fn visit_value(&mut self, doc: u32, packed: &[u8]) {
+        let q = self.range.q;
+        let b = q.bytes_per_dim;
+        let inside = (0..q.dims()).all(|d| {
+            let r = d * b..(d + 1) * b;
+            packed[r.clone()] >= q.lower[r.clone()] && packed[r.clone()] <= q.upper[r]
+        });
+        if !inside {
+            self.bits.clear(doc);
+        }
+    }
+}
+
+/// Counts the matches of crossing leaves for [`PointsReader::count_inside`] (single-valued
+/// fields: a point is a doc).
+///
+/// [`PointsReader::count_inside`]: search_codec::PointsReader::count_inside
+struct CountVisitor<'a> {
+    inner: RangeVisitor<'a>,
+    n: u64,
+}
+
+impl CountVisitor<'_> {
+    #[inline]
+    fn matches(&self, packed: &[u8]) -> bool {
+        let q = self.inner.q;
+        let b = q.bytes_per_dim;
+        (0..q.dims()).all(|d| {
+            let r = d * b..(d + 1) * b;
+            packed[r.clone()] >= q.lower[r.clone()] && packed[r.clone()] <= q.upper[r]
+        })
+    }
+}
+
+impl PointVisitor for CountVisitor<'_> {
+    fn compare(&mut self, min: &[u8], max: &[u8]) -> Relation {
+        self.inner.compare(min, max)
+    }
+    fn visit(&mut self, _doc: u32) {
+        self.n += 1;
+    }
+    fn visit_docs(&mut self, docs: &[u32]) {
+        self.n += docs.len() as u64;
+    }
+    fn visit_doc_range(&mut self, start: u32, end: u32) {
+        self.n += u64::from(end.saturating_sub(start));
+    }
+    fn visit_value(&mut self, _doc: u32, packed: &[u8]) {
+        self.n += u64::from(self.matches(packed));
+    }
+    fn visit_value_docs(&mut self, docs: &[u32], packed: &[u8]) {
+        if self.matches(packed) {
+            self.n += docs.len() as u64;
+        }
     }
 }
 
@@ -302,6 +389,13 @@ impl Weight for PointRangeWeight {
         }
         if r == Relation::CellInsideQuery && p.size() == p.doc_count() as u64 {
             return Ok(Some(p.doc_count()));
+        }
+        // Single-valued: count points, skipping the cells inside the range (Lucene's
+        // `pointCount`), instead of collecting doc ids.
+        if p.size() == p.doc_count() as u64 {
+            let mut cv = CountVisitor { inner: RangeVisitor { q: &self.q, b: DocIdSetBuilder::new(1) }, n: 0 };
+            let inside = p.count_inside(&mut cv);
+            return Ok(Some((inside + cv.n) as u32));
         }
         Ok(None)
     }
@@ -575,6 +669,9 @@ impl Scorable for DvScorer {
 }
 
 impl Scorer for DvScorer {
+    fn pure_scores(&self) -> bool {
+        true
+    }
     fn doc(&self) -> u32 {
         self.doc
     }
@@ -1028,6 +1125,9 @@ impl Scorable for DocRangeScorer {
 }
 
 impl Scorer for DocRangeScorer {
+    fn pure_scores(&self) -> bool {
+        true
+    }
     fn doc(&self) -> u32 {
         self.doc
     }
@@ -1103,6 +1203,9 @@ impl Query for IndexSortRangeQuery {
     }
     fn lucene_string(&self, schema: &Schema) -> String {
         format!("{}:[{} TO {}]", schema.name(self.field), self.lower, self.upper)
+    }
+    fn profile_name(&self) -> String {
+        "IndexSortSortedNumericDocValuesRangeQuery".into()
     }
     fn visit(&self, v: &mut dyn crate::search::QueryVisitor) {
         self.fallback.visit(v);

@@ -58,6 +58,52 @@ pub struct MergeSource {
 }
 
 impl MergeSource {
+    /// The k-way merge of the inputs' terms of `field`; `docs_only`: postings decode doc ids only.
+    fn merged_terms(&self, field: u32, docs_only: bool) -> Result<Option<Box<dyn TermsSource + '_>>> {
+        let Some(info) = self.field(field) else {
+            return Ok(None);
+        };
+        let mut iters = Vec::new();
+        for (i, inp) in self.inputs.iter().enumerate() {
+            if let Some(t) = inp.reader.terms(field) {
+                iters.push((i, t.iter()));
+            }
+        }
+        if iters.is_empty() {
+            return Ok(None);
+        }
+        let mut flags = PostingsFlags::DOCS;
+        if !docs_only {
+            if info.index.has_freqs() {
+                flags = flags | PostingsFlags::FREQS;
+            }
+            if info.index.has_positions() {
+                flags = flags | PostingsFlags::POSITIONS;
+            }
+            if info.index.has_offsets() {
+                flags = flags | PostingsFlags::OFFSETS;
+            }
+            if info.payloads {
+                flags = flags | PostingsFlags::PAYLOADS;
+            }
+        }
+        let n = iters.len();
+        Ok(Some(Box::new(MergedTerms {
+            src: self,
+            iters,
+            heads: vec![None; n],
+            advance: (0..n).collect(),
+            term: Vec::new(),
+            flags,
+            postings: ConcatPostings {
+                parts: Vec::new(),
+                pool: Vec::new(),
+                part: 0,
+                peeked: None,
+            },
+        })))
+    }
+
     /// Prepares a merge of `inputs` into a segment with id `id`.
     pub fn new(inputs: Vec<MergeInput>, id: [u8; 16]) -> Result<MergeSource> {
         let mut maps = Vec::with_capacity(inputs.len());
@@ -365,6 +411,10 @@ struct MergedTerms<'s> {
 
 impl TermsSource for MergedTerms<'_> {
     fn next_term(&mut self) -> Result<Option<&[u8]>> {
+        self.next_term_min_doc_freq(0)
+    }
+
+    fn next_term_min_doc_freq(&mut self, min_doc_freq: u64) -> Result<Option<&[u8]>> {
         loop {
             for &k in &self.advance {
                 let (_, it) = &mut self.iters[k];
@@ -385,6 +435,26 @@ impl TermsSource for MergedTerms<'_> {
             else {
                 return Ok(None);
             };
+            if min_doc_freq > 1 {
+                // The inputs' doc counts (deleted docs included) bound the merged one: a term
+                // rarer than asked is passed over without touching its postings.
+                let (heads, iters) = (&self.heads, &mut self.iters);
+                let head = heads[min_k].as_deref();
+                let mut df = 0u64;
+                for (k, (_, it)) in iters.iter_mut().enumerate() {
+                    if heads[k].as_deref() == head {
+                        df += u64::from(it.doc_freq());
+                    }
+                }
+                if df < min_doc_freq {
+                    for (k, h) in heads.iter().enumerate() {
+                        if h.as_deref() == head {
+                            self.advance.push(k);
+                        }
+                    }
+                    continue;
+                }
+            }
             self.term.clear();
             self.term.extend_from_slice(self.heads[min_k].as_deref().unwrap_or_default());
             let ConcatPostings { parts, pool, .. } = &mut self.postings;
@@ -900,46 +970,11 @@ impl SegmentSource for MergeSource {
     }
 
     fn terms(&self, field: u32) -> Result<Option<Box<dyn TermsSource + '_>>> {
-        let Some(info) = self.field(field) else {
-            return Ok(None);
-        };
-        let mut iters = Vec::new();
-        for (i, inp) in self.inputs.iter().enumerate() {
-            if let Some(t) = inp.reader.terms(field) {
-                iters.push((i, t.iter()));
-            }
-        }
-        if iters.is_empty() {
-            return Ok(None);
-        }
-        let mut flags = PostingsFlags::DOCS;
-        if info.index.has_freqs() {
-            flags = flags | PostingsFlags::FREQS;
-        }
-        if info.index.has_positions() {
-            flags = flags | PostingsFlags::POSITIONS;
-        }
-        if info.index.has_offsets() {
-            flags = flags | PostingsFlags::OFFSETS;
-        }
-        if info.payloads {
-            flags = flags | PostingsFlags::PAYLOADS;
-        }
-        let n = iters.len();
-        Ok(Some(Box::new(MergedTerms {
-            src: self,
-            iters,
-            heads: vec![None; n],
-            advance: (0..n).collect(),
-            term: Vec::new(),
-            flags,
-            postings: ConcatPostings {
-                parts: Vec::new(),
-                pool: Vec::new(),
-                part: 0,
-                peeked: None,
-            },
-        })))
+        self.merged_terms(field, false)
+    }
+
+    fn terms_docs_only(&self, field: u32) -> Result<Option<Box<dyn TermsSource + '_>>> {
+        self.merged_terms(field, true)
     }
 
     fn norms(&self, field: u32) -> Result<Option<crate::source::NormsIter<'_>>> {

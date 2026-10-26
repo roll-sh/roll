@@ -6,7 +6,7 @@
 //! to shards as for documents, see [`crate::meta::routing`]), the stores holding each copy, and
 //! segments (none until the engine reports them).
 
-use crate::error::EsResult;
+use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::meta::resolve::{self, IndicesOptions};
 use crate::meta::{IndexMeta, routing};
@@ -351,6 +351,47 @@ pub fn reload_secure_settings(ctx: &Ctx) -> EsResult<Reply> {
         nodes.insert(node.id.clone(), Value::Obj(m));
     }
     let n = if selected { 1 } else { 0 };
+    Reply::ok(obj! {
+        "_nodes" => obj! { "total" => n, "successful" => n, "failed" => 0 },
+        "cluster_name" => ctx.cluster.name.clone(),
+        "nodes" => Value::Obj(nodes),
+    })
+}
+
+/// `GET /_dangling`: indices found on disk that the cluster metadata doesn't know. A roll
+/// cluster's shards exist only through its metadata, so there are never any.
+pub fn list_dangling(ctx: &Ctx) -> EsResult<Reply> {
+    Reply::ok(obj! {
+        "_nodes" => obj! { "total" => 1, "successful" => 1, "failed" => 0 },
+        "cluster_name" => ctx.cluster.name.clone(),
+        "dangling_indices" => Value::Arr(Vec::new()),
+    })
+}
+
+/// `POST /_dangling/{uuid}` and `DELETE /_dangling/{uuid}`: no dangling index can match.
+pub fn import_or_delete_dangling(ctx: &Ctx) -> EsResult<Reply> {
+    let uuid = ctx.param("index_uuid").unwrap_or_default();
+    Err(EsError::illegal_argument(format!("No dangling index found for UUID [{uuid}]")))
+}
+
+/// `GET /_nodes/{node_id}/_repositories_metering` and its archive clearing
+/// (`DELETE .../_repositories_metering/{max_archive_version}`): per node, the repositories'
+/// request counts. roll's snapshot repositories don't meter requests, so every selected node
+/// reports an empty list, as an Elasticsearch node with no metered repository does.
+pub fn repositories_metering(ctx: &Ctx) -> EsResult<Reply> {
+    if ctx.api == crate::routes::Api::NodesClearRepositoriesMeteringArchive {
+        let v = ctx.param("max_archive_version").unwrap_or_default();
+        if v.parse::<i64>().is_err() {
+            return Err(EsError::new(400, "number_format_exception", format!("For input string: \"{v}\"")));
+        }
+    }
+    let selectors: Vec<String> = ctx.path_param("node_id").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_else(|| vec!["_all".into()]);
+    let selected = super::nodes::selects_node(ctx, &selectors);
+    let mut nodes = Map::new();
+    if selected {
+        nodes.insert(ctx.cluster.node.id.clone(), Value::Arr(Vec::new()));
+    }
+    let n = i64::from(selected);
     Reply::ok(obj! {
         "_nodes" => obj! { "total" => n, "successful" => n, "failed" => 0 },
         "cluster_name" => ctx.cluster.name.clone(),

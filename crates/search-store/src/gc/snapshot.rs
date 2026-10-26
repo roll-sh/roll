@@ -206,8 +206,9 @@ fn parse_body(body: &[u8]) -> Option<Vec<(String, Arc<Marks>)>> {
             for _ in 0..nskip {
                 skip.push([r.varint()?, r.varint()?]);
             }
-            // `exact` only matters to replay, which reads manifests, not this snapshot.
-            wal.push(WalSource { node, cluster, from, to, until_ms, max_seq_no, skip, exact: false });
+            // `exact`, `since_ms` and `epoch` only matter to replay, which reads manifests, not
+            // this snapshot.
+            wal.push(WalSource { node, cluster, from, to, until_ms, since_ms: None, max_seq_no, skip, exact: false, epoch: None });
         }
         out.push((key, Arc::new(Marks { segments: segments.into_boxed_slice(), wal: wal.into_boxed_slice(), head, written_ms })));
     }

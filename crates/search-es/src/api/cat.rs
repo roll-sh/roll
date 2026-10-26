@@ -1073,8 +1073,43 @@ pub fn nodeattrs(ctx: &Ctx) -> EsResult<Reply> {
     finish(t)
 }
 
+/// `_cat/fielddata[/{fields}]`: the node's field data memory per field (`RestFielddataAction`
+/// reads it from node stats with `fielddata_fields` set to the requested fields, `*` by
+/// default), summed over every open index's shards.
 pub fn fielddata(ctx: &Ctx) -> EsResult<Reply> {
-    finish(table(ctx, columns!(ctx, FIELDDATA)))
+    let node = &ctx.cluster.node;
+    let patterns: Vec<String> = match ctx.param("fields") {
+        Some(f) if !f.is_empty() => f.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+        _ => vec!["*".to_string()],
+    };
+    let st = ctx.cluster.state();
+    let mut per: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for idx in st.metadata.indices.values().filter(|i| !i.is_closed()) {
+        let Some(e) = ctx.cluster.engine.loaded(&idx.uuid) else { continue };
+        for s in &e.shards {
+            let mut block = crate::obj! { "fielddata" => crate::obj! { "memory_size_in_bytes" => 0 } };
+            let Value::Obj(bm) = &mut block else { continue };
+            e.field_stats_into(s, bm, &patterns, &[]);
+            if let Some(Value::Obj(fields)) = bm.get("fielddata").and_then(|f| f.get("fields")) {
+                for (name, v) in fields {
+                    *per.entry(name.clone()).or_insert(0) += v.get("memory_size_in_bytes").and_then(Value::as_i64).unwrap_or(0);
+                }
+            }
+        }
+    }
+    let mut t = table(ctx, columns!(ctx, FIELDDATA));
+    for (field, bytes) in per {
+        t.push_row(|c| match c {
+            "id" => Cell::str(&node.id),
+            "host" => Cell::str(&node.host),
+            "ip" => Cell::str(&node.ip),
+            "node" => Cell::str(&node.name),
+            "field" => Cell::str(&field),
+            "size" => Cell::Bytes(bytes),
+            _ => Cell::Null,
+        });
+    }
+    finish(t)
 }
 
 /// `_cat/tasks`: the node runs no background tasks between requests, so the list holds the
@@ -1160,7 +1195,7 @@ pub fn circuit_breaker(ctx: &Ctx) -> EsResult<Reply> {
     let m = crate::api::nodes::NodeMetrics::sample(ctx.cluster);
     let patterns = ctx.list_param("circuit_breaker_patterns");
     let mut t = table(ctx, cols::CIRCUIT_BREAKER);
-    for (name, limit, overhead) in crate::api::nodes::breakers(&m) {
+    for (name, limit, overhead, estimated, tripped) in crate::api::nodes::breaker_stats(ctx.cluster, &ctx.state(), &m) {
         if let Some(p) = &patterns
             && !p.iter().any(|p| glob_match(p, name))
         {
@@ -1172,9 +1207,9 @@ pub fn circuit_breaker(ctx: &Ctx) -> EsResult<Reply> {
             "breaker" => Cell::str(name),
             "limit" => Cell::Bytes(limit),
             "limit_bytes" => Cell::Int(limit),
-            "estimated" => Cell::Bytes(0),
-            "estimated_bytes" => Cell::Int(0),
-            "tripped" => Cell::Int(0),
+            "estimated" => Cell::Bytes(estimated),
+            "estimated_bytes" => Cell::Int(estimated),
+            "tripped" => Cell::Int(tripped),
             "overhead" => Cell::Num(crate::json::write::java_double(overhead), overhead),
             _ => Cell::Null,
         });

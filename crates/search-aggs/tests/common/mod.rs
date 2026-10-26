@@ -551,6 +551,7 @@ impl Lookup<'_> {
         };
         let mut a = AggField::new(f.path.clone(), f.type_name.clone(), source, f.number);
         a.nested_path = f.nested.clone();
+        a.indexed = f.type_name == "keyword";
         // Counters are counters only in a time series index.
         a.counter = f.counter && self.index.fields.iter().any(|f| f.dimension);
         a
@@ -753,7 +754,7 @@ impl FieldLookup for Lookup<'_> {
                         "avg" => SortMode::Avg,
                         _ => SortMode::Median,
                     });
-                    out.push(HitSort::Field { field, reverse: order == Some("desc"), missing, mode });
+                    out.push(HitSort::Field { field, reverse: order == Some("desc"), missing, mode, nested: None });
                 }
             }
         }

@@ -24,9 +24,9 @@ CRATES=()
 for d in crates/search-*/; do
   CRATES+=(-p "$(basename "$d")")
 done
-PATHS=(crates/search-* crates/snowball crates/pg-storage crates/rolld crates/roll-cli
+PATHS=(crates/search-* crates/snowball crates/pg-storage crates/rolld crates/roll-cli deploy/search
        Cargo.toml Cargo.lock scripts/test-search.sh scripts/search-yaml-suites.sh
-       docs/search/compatibility.md .github/workflows/search.yml
+       docs/search/compatibility.md .github/workflows/search.yml tests/search
        apps/dashboard/src/lib/search-console.ts apps/dashboard/src/lib/search-docs.ts
        apps/dashboard/src/lib/search-console.test.mjs apps/dashboard/src/lib/search-docs.test.mjs)
 STAMP=target/.test-search.hash
@@ -96,6 +96,30 @@ yaml_suite() {
   fi
 }
 
+# The fleet tests (in-process nodes behind the proxy) once more with their catalog, leases and
+# node records in Postgres instead of SQLite. They wipe the tables, so they run one at a time.
+fleet_on_postgres() {
+  local name=roll-search-fleet-pg-$$ port
+  docker run --rm -d --name "$name" -m 1g -e POSTGRES_USER=roll -e POSTGRES_PASSWORD=roll -e POSTGRES_DB=search \
+    -p 127.0.0.1::5432 postgres:18-alpine >/dev/null
+  local status=0
+  port=$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')
+  for _ in $(seq 1 100); do
+    docker exec "$name" pg_isready -q -h 127.0.0.1 -U roll -d search 2>/dev/null && break
+    sleep 0.2
+  done
+  ROLL_SEARCH_TEST_PG="postgres://roll:roll@127.0.0.1:$port/search?sslmode=disable" \
+    cargo test -p search-control --test fleet -- --test-threads=1 || status=$?
+  docker stop "$name" >/dev/null 2>&1 || true
+  return $status
+}
+
+# The AWS stack must pass cfn-lint (no AWS credentials are needed for that).
+lint_template() {
+  docker run --rm -m 1g -v "$PWD/deploy/search/aws:/t:ro" python:3.13-slim \
+    sh -c 'pip install -q --root-user-action=ignore cfn-lint >/dev/null && cfn-lint /t/roll-search.yaml'
+}
+
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then
     echo "search: Docker is not running; start it or pass --unit" >&2
@@ -109,6 +133,8 @@ if [[ $unit_only == 0 ]]; then
   if [[ -x tests/search/clients/run.sh ]]; then
     tests/search/clients/run.sh
   fi
+  fleet_on_postgres
+  lint_template
 fi
 
 # Only a full run counts as green.

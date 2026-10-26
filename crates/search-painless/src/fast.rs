@@ -112,6 +112,12 @@ enum FExpr {
     DocDatePart(Box<str>, DatePart),
     /// `doc.containsKey('f')`.
     DocHas(Box<str>),
+    /// `doc['f'].lat` / `.lon` (`getLat()` / `getLon()`) of a `geo_point` field: the first
+    /// point's coordinate (`lat` true for the latitude).
+    DocGeo { field: Box<str>, lat: bool },
+    /// `decayGeo*(origin, scale, offset, decay, doc['f'].value)`: the class binding over the
+    /// first four arguments, fed the first point's coordinates.
+    GeoDecay { m: MethodId, binding: u32, args: Vec<FExpr>, field: Box<str> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +346,18 @@ fn doc_field<'e>(recv: &'e TExpr, v: &Vars) -> Option<&'e str> {
     const_str(key)
 }
 
+/// `doc['f']` / `doc.f` under casts that cannot fail on doc values (`(List) doc.f`).
+fn doc_field_cast<'e>(recv: &'e TExpr, v: &Vars) -> Option<&'e str> {
+    let mut e = recv;
+    loop {
+        match &e.k {
+            TK::Cast(x, Cast::Noop | Cast::Transparent) => e = x,
+            TK::Cast(x, Cast::Check(t)) if *t == Ty::of(cls::LIST) => e = x,
+            _ => return doc_field(e, v),
+        }
+    }
+}
+
 /// `doc['f'].value` (a `def`), the field side of a string comparison.
 fn str_eq_side<'e>(e: &'e TExpr, v: &Vars) -> Option<&'e str> {
     let e = strip_noop(e);
@@ -467,6 +485,14 @@ fn expr(e: &TExpr, v: &Vars) -> Option<FExpr> {
             Place::Local { slot } if Some(*slot) == v.score => FExpr::Score,
             Place::Local { slot } if *slot >= v.first_local => FExpr::Local(*slot),
             Place::MapKey { recv, key, .. } if local(recv).is_some() && local(recv) == v.params => FExpr::Param(const_str(key)?.into()),
+            Place::DefDot { recv, name, null_safe: false, result } if matches!(&**name, "lat" | "lon") => {
+                let d = FExpr::DocGeo { field: doc_field(recv, v)?.into(), lat: &**name == "lat" };
+                match result {
+                    Some(c) if numeric_cast(c) => FExpr::Cast(Box::new(d), c.clone()),
+                    Some(_) => return None,
+                    None => d,
+                }
+            }
             Place::DefDot { recv, name, null_safe: false, result } if matches!(&**name, "value" | "empty") => {
                 let f = doc_field(recv, v)?;
                 let d = if &**name == "value" { FExpr::Doc(f.into()) } else { FExpr::DocEmpty(f.into()) };
@@ -577,6 +603,39 @@ fn expr(e: &TExpr, v: &Vars) -> Option<FExpr> {
         TK::And(l, r) => FExpr::And(b(l)?, b(r)?),
         TK::Or(l, r) => FExpr::Or(b(l)?, b(r)?),
         TK::Cond { c, t, f } => FExpr::Cond(b(c)?, b(t)?, b(f)?),
+        TK::InvokeDyn { recv, name, args, null_safe: false, result } if matches!(&**name, "getLat" | "getLon") && args.is_empty() => {
+            let d = FExpr::DocGeo { field: doc_field(recv, v)?.into(), lat: &**name == "getLat" };
+            match result {
+                Some(c) if numeric_cast(c) => FExpr::Cast(Box::new(d), c.clone()),
+                Some(_) => return None,
+                None => d,
+            }
+        }
+        // `((List) doc.f).get(0)`: the first value, as `.value` reads it (an empty field
+        // throws in both, and the interpreter reports it)
+        TK::Invoke { recv: Some(r), m, args, null_safe: false }
+            if args.len() == 1
+                && matches!(args[0].k, TK::Const(Const::Int(0)))
+                && registry().method(*m).owner == cls::LIST
+                && &*registry().method(*m).name == "get" =>
+        {
+            FExpr::Doc(doc_field_cast(r, v)?.into())
+        }
+        TK::CallContext { m, args, binding: Some(binding) } if args.len() == 5 && registry().method(*m).name.starts_with("decayGeo") => {
+            let point = strip_noop(&args[4]);
+            let TK::Load(p) = &point.k else { return None };
+            let Place::DefDot { recv, name, null_safe: false, .. } = &**p else { return None };
+            if &**name != "value" {
+                return None;
+            }
+            let field = doc_field(recv, v)?.into();
+            let mut fargs = Vec::with_capacity(4);
+            for a in &args[..3] {
+                fargs.push(str_operand(a, v)?);
+            }
+            fargs.push(expr(&args[3], v)?);
+            FExpr::GeoDecay { m: *m, binding: *binding, args: fargs, field }
+        }
         TK::InvokeDyn { recv, name, args, null_safe: false, result } if matches!(&**name, "size" | "isEmpty") && args.is_empty() => {
             let f = doc_field(recv, v)?.into();
             let d = if &**name == "size" { FExpr::DocSize(f) } else { FExpr::DocEmpty(f) };
@@ -976,6 +1035,61 @@ impl Spec<'_> {
                     crate::es::score::date_decay_millis(vm, &a, ms, name).map_err(|_| ())
                 }))
             }
+            FExpr::DocGeo { field, lat } => {
+                let slot = self.geo_slot(field, vm)?;
+                let i = usize::from(!*lat);
+                D(fx(move |vm| {
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    match dv.geo.first() {
+                        Some(p) if dv.kind == crate::host::DocKind::GeoPoint => Ok(p[i]),
+                        _ => Err(()),
+                    }
+                }))
+            }
+            FExpr::GeoDecay { m, binding, args, field } => {
+                let slot = self.geo_slot(field, vm)?;
+                let mut fixed: Vec<Value> = Vec::with_capacity(3);
+                for a in &args[..3] {
+                    fixed.push(match a {
+                        FExpr::Str(s) => Value::str(s),
+                        FExpr::ParamObj(k) => {
+                            let Value::Map(pm) = self.params? else { return None };
+                            match pm.get_str(k)? {
+                                s @ Value::Str(_) => s,
+                                _ => return None,
+                            }
+                        }
+                        _ => return None,
+                    });
+                }
+                let D(decay) = convert(self.node(&args[3], vm)?, Prim::Double)? else { return None };
+                let name: &'static str = &registry().method(*m).name;
+                let kind = crate::es::score::geo_decay_kind(name);
+                let binding = *binding;
+                let [a0, a1, a2]: [Value; 3] = fixed.try_into().ok()?;
+                D(fx(move |vm| {
+                    // Arguments are evaluated on every call (an argument that fails, fails the
+                    // call), but only the first call's build the binding.
+                    let d = decay(vm)?;
+                    if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+                        crate::es::doc_fetch(vm, slot as u32).map_err(|_| ())?;
+                    }
+                    let dv = &vm.st.doc_bufs[slot];
+                    let [lat, lon] = match dv.geo.first() {
+                        Some(&p) if dv.kind == crate::host::DocKind::GeoPoint => p,
+                        _ => return Err(()),
+                    };
+                    vm.st.cur_binding = binding;
+                    if let Some(v) = crate::es::score::geo_decay_cached(vm, kind, lat, lon) {
+                        return Ok(v);
+                    }
+                    let a = [a0.clone(), a1.clone(), a2.clone(), Value::Double(d)];
+                    crate::es::score::geo_decay_point(vm, &a, lat, lon, name).map_err(|_| ())
+                }))
+            }
             FExpr::DocDatePart(field, part) => {
                 let slot = self.date_slot(field, vm)?;
                 let part = *part;
@@ -1129,6 +1243,14 @@ impl Spec<'_> {
 
     /// The doc-values slot of a `date` field (`None`: not a literal field of the program, or
     /// not a `date` on this document).
+    fn geo_slot(&self, field: &str, vm: &mut Vm) -> Option<usize> {
+        let slot = self.doc_fields.iter().position(|f| **f == *field)?;
+        if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
+            crate::es::doc_fetch(vm, slot as u32).ok()?;
+        }
+        (vm.st.doc_bufs[slot].kind == crate::host::DocKind::GeoPoint).then_some(slot)
+    }
+
     fn date_slot(&self, field: &str, vm: &mut Vm) -> Option<usize> {
         let slot = self.doc_fields.iter().position(|f| **f == *field)?;
         if vm.st.doc_buf_gen[slot] != vm.st.doc_gen {
@@ -1926,6 +2048,84 @@ mod tests {
         }
     }
 
+
+    struct GeoDoc {
+        points: Vec<[f64; 2]>,
+        pop: Vec<i64>,
+    }
+
+    impl Host for GeoDoc {
+        fn score(&mut self) -> f64 {
+            1.5
+        }
+        fn doc_values(&mut self, field: &str, out: &mut DocValues) -> Result<bool, HostError> {
+            match field {
+                "location" => {
+                    out.clear(DocKind::GeoPoint);
+                    out.geo.extend_from_slice(&self.points);
+                }
+                "population" => {
+                    out.clear(DocKind::Long);
+                    out.longs.extend_from_slice(&self.pop);
+                }
+                "d" => {
+                    out.clear(DocKind::Double);
+                    out.doubles.push(0.5);
+                }
+                _ => return Ok(false),
+            }
+            Ok(true)
+        }
+    }
+
+    /// Geo-point reads (`.lat`/`.lon`, `getLat()`, `doc.f.lon`), `((List) doc.f).get(0)` and
+    /// `decayGeo*` specialize (the Rally geonames scripts among them) and agree with the
+    /// interpreter, empty fields and bad decay arguments included (those bail out to it).
+    #[test]
+    fn geo_reads_and_geo_decay_agree_with_the_interpreter() {
+        let engine = Engine::new(Settings { max_compilations_rate: None, ..Settings::default() });
+        let params = serde_json::json!({ "origin": "52.37, 4.8951", "scale": "500km", "offset": "0km", "decay": 0.1, "bad": "nowhere", "n": 3 });
+        let cases = [
+            ("Math.abs(Math.log(Math.abs((int)((List)doc.population).get(0)) + 1) + (double)(doc.location.lon) * (double)(doc.location.lat))/_score", true),
+            ("Math.abs(Math.log(Math.abs(doc['population'].value) + 1) + doc['location'].lon * doc['location'].lat)/_score", true),
+            ("decayGeoGauss(params.origin, params.scale, params.offset, params.decay, doc['location'].value)", true),
+            ("decayGeoExp('40,-70', '100km', '10km', 0.5, doc['location'].value) * _score", true),
+            ("decayGeoLinear(params.origin, '2000km', '1km', params.decay, doc['location'].value)", true),
+            ("decayGeoGauss(params.bad, params.scale, params.offset, params.decay, doc['location'].value)", false),
+            ("decayGeoGauss(params.origin, '5parsecs', params.offset, params.decay, doc['location'].value)", false),
+            ("doc['location'].getLat() - doc['location'].getLon()", true),
+            ("double x = doc['location'].lat; if (x > 50) { return x } return -x", true),
+            ("(long)((List)doc.population).get(0) * params.n", true),
+            ("((List)doc['population']).get(0) + 0.5", true),
+            ("((List)doc['d']).get(0) * 2", true),
+            ("doc['population'].value + doc['location'].lat", true),
+        ];
+        let docs = [
+            GeoDoc { points: vec![[52.5, 13.4]], pop: vec![3_400_000] },
+            GeoDoc { points: vec![[-33.9, 151.2], [1.0, 2.0]], pop: vec![0, 5] },
+            GeoDoc { points: vec![], pop: vec![] },
+            GeoDoc { points: vec![[90.0, -180.0]], pop: vec![-7] },
+            GeoDoc { points: vec![[52.37, 4.8951]], pop: vec![i64::MAX] },
+        ];
+        for (src, specializes) in cases {
+            let script = engine.compile(src, Context::Score).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            let (mut fast, mut slow) = (script.instance(), script.instance());
+            fast.set_params(&params);
+            slow.set_params(&params);
+            slow.disable_fast_path();
+            let mut ran_fast = false;
+            for d in &docs {
+                let mut h1 = GeoDoc { points: d.points.clone(), pop: d.pop.clone() };
+                let mut h2 = GeoDoc { points: d.points.clone(), pop: d.pop.clone() };
+                let (a, b) = (fast.execute(&mut h1), slow.execute(&mut h2));
+                assert!(same(&a, &b), "{src} on {:?}: fast {a:?} vs interpreter {b:?}", d.points);
+                ran_fast |= fast.fast_path_active();
+            }
+            if specializes {
+                assert!(ran_fast, "{src} should take the fast path");
+            }
+        }
+    }
 
     struct DateDoc(i64);
 

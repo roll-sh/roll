@@ -179,3 +179,43 @@ async fn snapshot_lifecycle() {
     let (_, v) = call(&c, "GET", "/_snapshot/again/_all", None).await;
     assert_eq!(at(&v, "total").as_i64(), Some(1));
 }
+
+/// A snapshot keeps its shards' documents: restoring over a closed index (or under a new name,
+/// or from a clone) brings them back with their ids, routing and versions, and documents
+/// written after the snapshot are not in it.
+#[tokio::test]
+async fn restore_brings_documents_back() {
+    let c = cluster().await;
+    call(&c, "PUT", "/_snapshot/r", Some(r#"{"type":"fs","settings":{"location":"loc"}}"#)).await;
+    call(&c, "PUT", "/docs", Some(r#"{"settings":{"number_of_shards":2}}"#)).await;
+    for i in 0..10 {
+        call(&c, "PUT", &format!("/docs/_doc/{i}?routing=r{}", i % 3), Some(&format!(r#"{{"n":{i}}}"#))).await;
+    }
+    call(&c, "PUT", "/docs/_doc/3?routing=r0", Some(r#"{"n":33}"#)).await;
+    let (s, v) = call(&c, "PUT", "/_snapshot/r/s1?wait_for_completion=true", Some(r#"{"indices":"docs"}"#)).await;
+    assert_eq!((s, at(&v, "snapshot.state").as_str()), (200, Some("SUCCESS")));
+    call(&c, "PUT", "/docs/_doc/later?refresh=true", Some(r#"{"n":-1}"#)).await;
+    let (s, _) = call(&c, "PUT", "/_snapshot/r/s1/_clone/s2", Some(r#"{"indices":"docs"}"#)).await;
+    assert_eq!(s, 200);
+    call(&c, "POST", "/docs/_close", None).await;
+    let (s, v) = call(&c, "POST", "/_snapshot/r/s1/_restore?wait_for_completion=true", None).await;
+    assert_eq!((s, at(&v, "snapshot.shards.successful").as_i64()), (200, Some(2)), "{v:?}");
+    let (_, v) = call(&c, "GET", "/docs/_count", None).await;
+    assert_eq!(at(&v, "count").as_i64(), Some(10));
+    let (_, v) = call(&c, "GET", "/docs/_doc/3?routing=r0", None).await;
+    assert_eq!((at(&v, "_version").as_i64(), at(&v, "_routing").as_str(), at(&v, "_source.n").as_i64()), (Some(2), Some("r0"), Some(33)));
+    let (_, v) = call(&c, "GET", "/docs/_doc/later", None).await;
+    assert_eq!(at(&v, "found"), &Value::Bool(false));
+    // From the clone, under another name.
+    let (s, _) = call(&c, "POST", "/_snapshot/r/s2/_restore?wait_for_completion=true", Some(r#"{"rename_pattern":"docs","rename_replacement":"copy"}"#)).await;
+    assert_eq!(s, 200);
+    let (_, v) = call(&c, "GET", "/copy/_count", None).await;
+    assert_eq!(at(&v, "count").as_i64(), Some(10));
+    // A deleted snapshot can't be restored any more; the other one still can.
+    call(&c, "DELETE", "/_snapshot/r/s2", None).await;
+    call(&c, "DELETE", "/copy", None).await;
+    let (s, _) = call(&c, "POST", "/_snapshot/r/s1/_restore?wait_for_completion=true", Some(r#"{"rename_pattern":"docs","rename_replacement":"copy"}"#)).await;
+    assert_eq!(s, 200);
+    let (_, v) = call(&c, "GET", "/copy/_count", None).await;
+    assert_eq!(at(&v, "count").as_i64(), Some(10));
+}

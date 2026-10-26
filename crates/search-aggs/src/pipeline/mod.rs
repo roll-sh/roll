@@ -52,6 +52,8 @@ pub enum PipelineKind {
     Derivative { paths: Vec<String>, gap: GapPolicy, format: DocValueFormat, unit: Option<String> },
     SerialDiff { paths: Vec<String>, gap: GapPolicy, format: DocValueFormat, lag: i32 },
     MovFn { path: String, script: Script, native: Option<NativeMovFn>, window: i32, shift: i32, gap: GapPolicy, format: DocValueFormat },
+    /// `moving_percentiles`: the merged percentiles sketches of a window of histogram buckets.
+    MovingPercentiles { path: String, window: i32, shift: i32 },
     BucketScript { paths: Vec<(String, String)>, script: Script, gap: GapPolicy, format: DocValueFormat },
     BucketSelector { paths: Vec<(String, String)>, script: Script, gap: GapPolicy },
     BucketSort { sorts: Vec<(String, bool)>, from: i32, size: Option<i32>, gap: GapPolicy },
@@ -61,7 +63,10 @@ pub enum PipelineKind {
 impl PipelineKind {
     pub fn buckets_paths(&self) -> Vec<String> {
         match self {
-            PipelineKind::BucketMetric { path, .. } | PipelineKind::CumulativeCardinality { path, .. } | PipelineKind::MovFn { path, .. } => {
+            PipelineKind::BucketMetric { path, .. }
+            | PipelineKind::CumulativeCardinality { path, .. }
+            | PipelineKind::MovFn { path, .. }
+            | PipelineKind::MovingPercentiles { path, .. } => {
                 vec![path.clone()]
             }
             PipelineKind::CumulativeSum { paths, .. }
@@ -128,6 +133,7 @@ pub fn parse(p: &mut XParser<'_>, type_name: &str, name: &str, formats: DecimalF
         "derivative" | "serial_diff" => parse_derivative_like(p, type_name, name, formats),
         "cumulative_sum" | "cumulative_cardinality" | "normalize" => parse_constructing(p, type_name, formats),
         "moving_fn" => parse_movfn(p, formats),
+        "moving_percentiles" => parse_moving_percentiles(p),
         "bucket_script" => parse_bucket_script(p, formats),
         "bucket_selector" => parse_bucket_selector(p, name),
         "bucket_sort" => parse_bucket_sort(p),
@@ -331,6 +337,28 @@ fn parse_movfn(p: &mut XParser<'_>, formats: DecimalFactory<'_>) -> Result<Pipel
     let script = script.expect("script");
     let native = script.source.as_deref().and_then(NativeMovFn::parse);
     Ok(PipelineKind::MovFn { path: path.unwrap_or_default(), script, native, window: window.unwrap_or(0), shift, gap, format: format_of(format, formats)? })
+}
+
+/// `MovingPercentilesPipelineAggregationBuilder.PARSER`.
+fn parse_moving_percentiles(p: &mut XParser<'_>) -> Result<PipelineKind> {
+    let fields = [Field::new("buckets_path", Tokens::STRING), Field::new("window", Tokens::INT), Field::new("shift", Tokens::INT)];
+    let mut path = None;
+    let mut window = None;
+    let mut shift = 0;
+    p.constructing("moving_percentiles", &fields, &[0, 1], &[0, 1], |p, ev| {
+        match ev {
+            Ctor::Build => {
+                if window.unwrap_or(0) <= 0 {
+                    return Err(AggError::illegal_argument("[window] must be a positive, non-zero integer."));
+                }
+            }
+            Ctor::Field(0) => path = Some(p.text()?),
+            Ctor::Field(1) => window = Some(p.int_value()?),
+            Ctor::Field(_) => shift = p.int_value()?,
+        }
+        Ok(None)
+    })?;
+    Ok(PipelineKind::MovingPercentiles { path: path.unwrap_or_default(), window: window.unwrap_or(0), shift })
 }
 
 /// A `gap_policy` string (`GapPolicy.parse`).
@@ -701,6 +729,12 @@ fn validate_pipeline(p: &PipelineDef, siblings: &[Arc<AggDef>], parent: Option<&
         }
         PipelineKind::SerialDiff { .. } => sequential_ordered(t, name, parent, false, errors),
         PipelineKind::MovFn { .. } => sequential_ordered(t, name, parent, true, errors),
+        PipelineKind::MovingPercentiles { .. } => {
+            if paths.len() != 1 {
+                errors.push(format!("buckets_path must contain a single entry for aggregation [{name}]"));
+            }
+            sequential_ordered(t, name, parent, true, errors);
+        }
         PipelineKind::BucketScript { .. } | PipelineKind::BucketSelector { .. } => {
             if parent.is_none() {
                 errors.push(format!("{t} aggregation [{name}] must be declared inside of another aggregation"));
@@ -1144,7 +1178,12 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
     };
     let needs_histogram = matches!(
         p.kind,
-        PipelineKind::Derivative { .. } | PipelineKind::CumulativeSum { .. } | PipelineKind::SerialDiff { .. } | PipelineKind::MovFn { .. } | PipelineKind::CumulativeCardinality { .. }
+        PipelineKind::Derivative { .. }
+            | PipelineKind::CumulativeSum { .. }
+            | PipelineKind::SerialDiff { .. }
+            | PipelineKind::MovFn { .. }
+            | PipelineKind::MovingPercentiles { .. }
+            | PipelineKind::CumulativeCardinality { .. }
     );
     if needs_histogram && !histogram_like {
         return Err(AggError::class_cast(format!(
@@ -1242,6 +1281,28 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
                 index += 1;
             }
         }
+        PipelineKind::MovingPercentiles { path, window, shift } => {
+            // `MovingPercentilesPipelineAggregator.reduce`: the first bucket's percentiles fix the
+            // method; each bucket gets the merge of `[i - window + shift, i + shift)` (none when
+            // that window is empty).
+            if m.is_empty() {
+                return Ok(());
+            }
+            let path = list(path)?;
+            let kind = crate::metrics::percentiles::bucket_percentiles(m, &agg_name, 0, &path, None)?.kind;
+            let all: Vec<crate::metrics::percentiles::Percentiles> =
+                (0..m.len()).map(|i| crate::metrics::percentiles::bucket_percentiles(m, &agg_name, i, &path, Some(kind)).cloned()).collect::<Result<_>>()?;
+            let clamp = |x: i64| -> usize { x.clamp(0, all.len() as i64) as usize };
+            for i in 0..m.len() {
+                let from = clamp(i as i64 - *window as i64 + *shift as i64);
+                let to = clamp(i as i64 + *shift as i64);
+                if from >= to {
+                    continue;
+                }
+                let merged = <crate::metrics::percentiles::Percentiles as crate::internal::Internal>::reduce(all[from..to].to_vec(), ctx)?;
+                push_value(m, i, p, AggValue::Percentiles(Box::new(merged)));
+            }
+        }
         PipelineKind::CumulativeCardinality { path, format } => {
             let path = list(path)?;
             let mut hll: Option<crate::metrics::cardinality::Hll> = None;
@@ -1285,13 +1346,7 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
         PipelineKind::BucketSelector { paths, script, gap } => {
             let parsed: Vec<(String, Vec<String>)> = paths.iter().map(|(k, v)| Ok((k.clone(), list(v)?))).collect::<Result<_>>()?;
             let native = native_selector(script);
-            let compiled = match native {
-                Some(_) => None,
-                None => {
-                    let host = ctx.opts.scripts.clone().ok_or_else(|| AggError::illegal_argument("scripts are not supported"))?;
-                    Some(host.bucket_script(script, ScriptKind::BucketSelector)?)
-                }
-            };
+            let mut compiled = None;
             let mut keep = Vec::with_capacity(m.len());
             for i in 0..m.len() {
                 let mut vars: Vec<(String, Json)> = script.params.as_object().map(|o| o.to_vec()).unwrap_or_default();
@@ -1299,13 +1354,20 @@ fn parent_reduce(p: &PipelineDef, agg: &mut Agg, ctx: &mut ReduceCtx<'_>) -> Res
                     let v = resolve_bucket_value(m, &agg_name, i, path, Some(*gap))?;
                     vars.push((var.clone(), v.map(Json::Float).unwrap_or(Json::Null)));
                 }
-                let k = match (&native, &compiled) {
-                    (Some(n), _) => n.eval(&vars)?,
-                    (None, Some(c)) => match c.run(&vars)? {
-                        Json::Bool(b) => b,
-                        other => return Err(AggError::illegal_argument(format!("bucket_selector script must return a boolean, got [{other}]"))),
-                    },
-                    _ => true,
+                // The native comparison only covers numeric operands; anything else (a null or
+                // missing parameter) runs the real script so errors carry Painless's details.
+                if let Some(k) = native.as_ref().and_then(|n| n.eval(&vars)) {
+                    keep.push(k);
+                    continue;
+                }
+                if compiled.is_none() {
+                    let host = ctx.opts.scripts.clone().ok_or_else(|| AggError::illegal_argument("scripts are not supported"))?;
+                    compiled = Some(host.bucket_script(script, ScriptKind::BucketSelector)?);
+                }
+                let k = match compiled.as_ref().map(|c| c.run(&vars)).transpose()? {
+                    Some(Json::Bool(b)) => b,
+                    Some(other) => return Err(AggError::illegal_argument(format!("bucket_selector script must return a boolean, got [{other}]"))),
+                    None => true,
                 };
                 keep.push(k);
             }
@@ -1479,22 +1541,16 @@ fn native_selector(script: &Script) -> Option<NativeSelector> {
 }
 
 impl NativeSelector {
-    fn eval(&self, vars: &[(String, Json)]) -> Result<bool> {
-        let get = |o: &Operand| -> Result<f64> {
+    /// `None` when an operand isn't a number: the caller runs the script itself then.
+    fn eval(&self, vars: &[(String, Json)]) -> Option<bool> {
+        let get = |o: &Operand| -> Option<f64> {
             match o {
-                Operand::Num(n) => Ok(*n),
-                Operand::Var(v) => match vars.iter().rev().find(|(k, _)| k == v) {
-                    Some((_, Json::Null)) | None => Err(AggError::new(
-                        400,
-                        "script_exception",
-                        "runtime error".to_string(),
-                    )),
-                    Some((_, j)) => j.as_f64().ok_or_else(|| AggError::illegal_argument(format!("params.{v} is not a number"))),
-                },
+                Operand::Num(n) => Some(*n),
+                Operand::Var(v) => vars.iter().rev().find(|(k, _)| k == v).and_then(|(_, j)| j.as_f64()),
             }
         };
         let (a, b) = (get(&self.lhs)?, get(&self.rhs)?);
-        Ok(match self.op {
+        Some(match self.op {
             ">=" => a >= b,
             "<=" => a <= b,
             "==" => a == b,

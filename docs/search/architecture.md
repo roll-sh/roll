@@ -88,8 +88,10 @@ branch instantly and keep their data on object storage.
 1. `_bulk`/`_doc` requests are parsed, mapped (dynamic mapping updates the index mapping exactly
    as Elasticsearch does) and analyzed.
 2. The operation is appended to the cluster's WAL. The WAL is group-committed: every shard of
-   every cluster on the node shares one append stream, flushed every `wal_flush` (5 ms) or 4 MiB,
-   to local disk (fsync) and, in the background, shipped to object storage. A request returns once
+   every cluster on the node shares one append stream, committed to local disk (fsync) as soon as
+   a request waits for one of its records (back to back with the previous commit, so concurrent
+   writers share an fsync and a bulk request is one commit), records nobody waits for within
+   `wal_flush` (5 ms) or 4 MiB, and, in the background, shipped to object storage. A request returns once
    its records are durable on local disk (`index.translog.durability: request`, the default) or
    immediately (`async`). With `--search-sync-objects` the ack waits for object storage instead,
    for nodes with ephemeral disks.
@@ -157,7 +159,7 @@ request-rate and in-flight byte budgets so one tenant can't starve the node.
 
 Same shape as roll tasks and roll queues (`deploy/aws`, `deploy/queues/aws`): one image,
 a CloudFormation stack (`deploy/search/aws/roll-search.yaml`), arm64 Graviton, Spot where it is
-safe, no NAT (S3 gateway endpoint).
+safe, no NAT (S3 gateway endpoint). How to deploy it: [deploy-aws.md](deploy-aws.md).
 
 ```
  clients ──► NLB (TLS) or Lambda function URL
@@ -183,6 +185,9 @@ safe, no NAT (S3 gateway endpoint).
 - **Failover and deploys.** A node that stops heartbeating loses its leases; the next owner opens
   the cluster from its manifests and replays the WAL after them. SIGTERM (deploy, Spot reclaim)
   flushes and hands clusters over before exit, and the proxy retries in-flight requests.
+- **TLS on every hop** without a CA: nodes make a certificate at boot and publish its SHA-256 in
+  their fleet record, and proxies (and nodes calling each other's control API) accept only that
+  one; the function URL pins the proxies' certificate, which both derive from a stack secret.
 - **Zero idle.** Clusters unload after `IdleClusterSeconds`. The node fleet scales on CPU down to
   `MinNodes`, which may be 0: with no node running, the proxy holds the first request, starts a
   node (ECS `UpdateService`) and forwards once it heartbeats, as `mq-proxy` does.
@@ -198,10 +203,12 @@ safe, no NAT (S3 gateway endpoint).
   suite (Apache-2.0). The runner itself is validated against a real Elasticsearch in Docker.
   Every skipped test is listed with a reason in `crates/search-server/tests/yaml/skips.txt`;
   pass counts are tracked in [compatibility.md](compatibility.md).
-- **Differential suite**: the same requests against roll and `elasticsearch:9` in Docker,
-  comparing hits, scores, aggregations and errors.
-- **Client matrix**: unmodified official clients (Python, JavaScript, Java, Go, Ruby, PHP) and
-  searchkick, in Docker.
+- **Differential suite** (`crates/search-server/tests/differential.rs`): seeded random
+  workloads against roll and `elasticsearch:9` in Docker, comparing hits, scores (float-exact),
+  aggregations, errors and headers; differences are minimized into replayable fixtures.
+- **Client matrix** (`tests/search/clients/run.sh`): unmodified official clients (Python,
+  JavaScript, Java, Go, Ruby, PHP, the OpenSearch clients, django-elasticsearch-dsl) and
+  searchkick's own test suite, in Docker.
 - **Benchmarks**: Rally tracks against both, `scripts/bench-search.sh`.
 
 `scripts/test-search.sh` (`pnpm test:search`) runs all of it and skips itself when nothing

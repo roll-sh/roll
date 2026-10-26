@@ -629,6 +629,9 @@ pub struct PinnedDoc {
     pub id: String,
 }
 
+/// `PinnedQueryBuilder.MAX_NUM_PINNED_HITS`.
+const MAX_NUM_PINNED_HITS: usize = 100;
+
 /// `pinned`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pinned {
@@ -689,6 +692,28 @@ impl Pinned {
         }
         if ids.is_none() && docs.is_none() {
             return Err(wrap(p, failed_to_build("pinned", EsError::illegal_argument("[pinned] either ids or docs must be provided"))));
+        }
+        // `PinnedQueryBuilder`'s constructor: at most 100 pins, no duplicates.
+        let invalid = |msg: String| wrap(p, failed_to_build("pinned", EsError::illegal_argument(msg)));
+        if let Some(ids) = &ids {
+            if ids.len() > MAX_NUM_PINNED_HITS {
+                return Err(invalid(format!("[pinned] Max of {MAX_NUM_PINNED_HITS} ids exceeded: {} provided.", ids.len())));
+            }
+            let mut seen = std::collections::HashSet::new();
+            if let Some(dup) = ids.iter().find(|i| !seen.insert(i.as_str())) {
+                return Err(invalid(format!("[pinned] duplicate id found in list: {dup}")));
+            }
+        }
+        if let Some(docs) = &docs {
+            if docs.len() > MAX_NUM_PINNED_HITS {
+                return Err(invalid(format!("[pinned] Max of {MAX_NUM_PINNED_HITS} docs exceeded: {} provided.", docs.len())));
+            }
+            let mut seen = std::collections::HashSet::new();
+            if let Some(dup) = docs.iter().find(|d| !seen.insert((d.index.as_deref(), d.id.as_str()))) {
+                // `SpecifiedDocument.toString`: pretty-printed JSON.
+                let index = dup.index.as_ref().map(|i| format!("  \"_index\" : {},\n", Value::Str(i.clone()).to_json())).unwrap_or_default();
+                return Err(invalid(format!("[pinned] duplicate doc found in list: {{\n{index}  \"_id\" : {}\n}}", Value::Str(dup.id.clone()).to_json())));
+            }
         }
         let mut q = Pinned { organic, ids, docs, common: Common::default() };
         if let Some(b) = boost {
@@ -815,7 +840,7 @@ impl Knn {
                 3 => q.num_candidates = Some(p.int_value()?),
                 4 => q.visit_percentage = Some(p.float_value()?),
                 5 => q.similarity = Some(p.float_value()?),
-                6 => q.query_vector_builder = Some(p.take_value()),
+                6 => q.query_vector_builder = Some(parse_vector_builder(p)?),
                 7 => {
                     const R: &[Field] = &[Field::new("oversample", Tokens::FLOAT)];
                     let mut over = None;
@@ -1295,4 +1320,26 @@ impl Rule {
         self.common.write_if_set(&mut m);
         Value::Obj(m)
     }
+}
+
+/// `query_vector_builder`: one named builder (`text_embedding`, `lookup`), kept as given; any
+/// other name fails as the named-object parser does.
+pub fn parse_vector_builder(p: &mut XParser<'_>) -> EsResult<Value> {
+    let v = p.value();
+    if let Value::Obj(m) = &v
+        && let Some(name) = m.keys().find(|k| !matches!(k.as_str(), "text_embedding" | "lookup"))
+    {
+        let (l, c) = p.name_location_of(&[crate::json::locate::Seg::Key(name)]);
+        let unknown = EsError::new(400, "named_object_not_found_exception", format!("[{l}:{c}] unknown field [{name}]"));
+        let inner = EsError::x_content_parse(l, c, format!("[query_vector_builder] failed to parse field [{name}]")).caused_by(unknown);
+        // The enclosing object parser wraps this as `[knn] failed to parse field
+        // [query_vector_builder]` at the parser's position: the builder's name.
+        while p.token() != Token::FieldName {
+            if p.next_token().is_none() {
+                break;
+            }
+        }
+        return Err(inner);
+    }
+    Ok(p.take_value())
 }

@@ -110,3 +110,49 @@ test("source cells are lossless", () => {
   assert.deepEqual([...sourceCells(JSON.stringify(doc)).keys()], [...flatten(doc).keys()]);
   assert.deepEqual(columnsOf([sourceCells('{"a":1,"b":2}').keys(), sourceCells('{"b":3}').keys()]), ["b", "a"]);
 });
+
+test("sort fields", async () => {
+  const { sortField } = await import("./search-docs.ts");
+  const fields = [
+    { name: "title", type: "text" },
+    { name: "title.keyword", type: "keyword" },
+    { name: "body", type: "text" },
+    { name: "price", type: "scaled_float" },
+    { name: "at", type: "date" },
+    { name: "user", type: "object" },
+    { name: "user.name", type: "keyword" },
+    { name: "loc", type: "geo_point" },
+    { name: "tags", type: "flattened" },
+  ];
+  assert.equal(sortField("title", fields), "title.keyword");
+  assert.equal(sortField("body", fields), null);
+  assert.equal(sortField("price", fields), "price");
+  assert.equal(sortField("at", fields), "at");
+  assert.equal(sortField("user", fields), null);
+  assert.equal(sortField("user.name", fields), "user.name");
+  assert.equal(sortField("loc", fields), null);
+  assert.equal(sortField("tags", fields), null);
+  assert.equal(sortField("unmapped", fields), null);
+});
+
+test("table sorts cycle and build Elasticsearch's sort clause", async () => {
+  const { nextSort, sortClause } = await import("./search-docs.ts");
+  const a = nextSort(null, "title", "title.keyword");
+  assert.deepEqual(a, { column: "title", field: "title.keyword", order: "asc" });
+  const d = nextSort(a, "title", "title.keyword");
+  assert.equal(d.order, "desc");
+  assert.equal(nextSort(d, "title", "title.keyword"), null);
+  assert.deepEqual(nextSort(d, "price", "price"), { column: "price", field: "price", order: "asc" });
+  assert.equal(sortClause(null), undefined);
+  assert.deepEqual(sortClause(d), [{ "title.keyword": { order: "desc", missing: "_last" } }, "_doc"]);
+});
+
+test("column picker", async () => {
+  const { visibleColumns, toggleColumn } = await import("./search-docs.ts");
+  const avail = ["a", "b", "c", "d"];
+  assert.deepEqual(visibleColumns(null, avail, 2), ["a", "b"]);
+  assert.deepEqual(visibleColumns([], avail, 2), ["a", "b"]);
+  assert.deepEqual(visibleColumns(["d", "x"], avail), ["d", "x"]);
+  assert.deepEqual(toggleColumn(["a", "b"], "b"), ["a"]);
+  assert.deepEqual(toggleColumn(["a"], "c"), ["a", "c"]);
+});

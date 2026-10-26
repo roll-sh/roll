@@ -52,6 +52,10 @@ pub enum FieldValue {
     /// `percolator`: the stored query, as JSON, and where its value ends in the document
     /// (errors checking it against the mapping point there).
     Percolator(String, (usize, usize)),
+    /// `aggregate_metric_double`: one value's metrics (`value_count` is an integer).
+    AggregateMetric { min: Option<f64>, max: Option<f64>, sum: Option<f64>, value_count: Option<i64> },
+    /// `histogram`: its centroids as `EncodedTDigest.encodeCentroids` writes them.
+    Histogram(Vec<u8>),
 }
 
 /// What a value parser works with: the parser on the value, the index's mapping context, the
@@ -77,7 +81,9 @@ impl Cx<'_, '_> {
 /// Whether a field consumes a whole array as one value.
 pub(crate) fn takes_array(f: &FieldMapper, p: &XParser<'_>) -> bool {
     match f.ty {
-        "dense_vector" | "rank_vectors" => true,
+        "dense_vector" | "rank_vectors" | "knn_vector" => true,
+        // One value per document: a second array element fails (`AggregateMetricDoubleFieldMapper`).
+        "aggregate_metric_double" | "histogram" => matches!(p.token(), Token::StartArray),
         // `[lon, lat]` is one point; `[[lon, lat], …]` and strings are several.
         "geo_point" | "point" => matches!(p.value(), Value::Arr(a) if a.first().is_some_and(|x| matches!(x, Value::Num(_)))),
         _ => false,
@@ -146,6 +152,15 @@ fn is_numeric(ty: &str) -> bool {
 /// Parses a value that isn't under the walker's parser (multi-fields, `copy_to`, `null_value`).
 pub(crate) fn parse_detached(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, v: &Value, token: Token) -> EsResult<Option<Vec<FieldValue>>> {
     parse_detached_value(w, f, full, v, token).map_err(|e| e.cause)
+}
+
+/// [`parse_detached`] of a copy of the walker's current number, whose original text is `raw`
+/// ([`raw_number_of`]).
+pub(crate) fn parse_detached_raw(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, v: &Value, raw: Option<&str>) -> EsResult<Option<Vec<FieldValue>>> {
+    let mut tmp = XParser::started(v, None, Vec::new());
+    tmp.raw_number = raw.map(str::to_string);
+    let mut cx = Cx { p: &mut tmp, ctx: w.ctx, ignored: w.ignored, desc: w.desc };
+    parse_value(&mut cx, f, full).map(Some).map_err(|e| e.cause)
 }
 
 fn parse_detached_value(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, v: &Value, _token: Token) -> Result<Option<Vec<FieldValue>>, ValueError> {
@@ -329,14 +344,163 @@ pub(crate) fn parse_unsigned(v: &Value) -> Result<u64, EsError> {
             if !looks_numeric {
                 return Err(EsError::illegal_argument(format!("For input string: \"{s}\"")));
             }
-            match t.parse::<f64>() {
-                Ok(d) if d.fract() != 0.0 => Err(EsError::illegal_argument(format!("Value \"{s}\" has a decimal part"))),
-                Ok(d) if d < 0.0 => Err(EsError::illegal_argument(format!("Value [{}] is out of range for unsigned long", d as i64))),
-                Ok(d) if d > u64::MAX as f64 => Err(EsError::illegal_argument(format!("Value [{s}] is out of range for unsigned long"))),
-                Ok(d) => Ok(d as u64),
-                Err(_) => Err(EsError::illegal_argument(format!("For input string: \"{s}\""))),
+            // Exactly, as `BigDecimal` does: `10223372036854775807.23` has a decimal part even
+            // though no double can tell.
+            match Decimal::parse(t) {
+                Some(d) if d.fraction => Err(EsError::illegal_argument(format!("Value \"{s}\" has a decimal part"))),
+                Some(d) if d.negative && !d.is_zero() => {
+                    let shown = t.parse::<f64>().map(|v| v as i64).unwrap_or(i64::MIN);
+                    Err(EsError::illegal_argument(format!("Value [{shown}] is out of range for unsigned long")))
+                }
+                Some(d) => d.to_u64().ok_or_else(|| EsError::illegal_argument(format!("Value [{s}] is out of range for unsigned long"))),
+                None => Err(EsError::illegal_argument(format!("For input string: \"{s}\""))),
             }
         }
+    }
+}
+
+/// A decimal number's integer part, exactly (Java's `BigDecimal` of a JSON number or numeric
+/// string, then `toBigInteger`): the digits without leading zeros, and whether a non-zero
+/// fraction was cut off.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Decimal {
+    pub negative: bool,
+    /// Integer digits, no leading zeros (empty for zero); `None` when the exponent makes the
+    /// number too large to spell out.
+    pub digits: Option<String>,
+    pub fraction: bool,
+}
+
+impl Decimal {
+    /// `new BigDecimal(s)`: `[+-]digits[.digits][(e|E)[+-]digits]`, nothing else.
+    pub fn parse(s: &str) -> Option<Decimal> {
+        let b = s.as_bytes();
+        let mut i = 0;
+        let negative = match b.first() {
+            Some(b'-') => {
+                i = 1;
+                true
+            }
+            Some(b'+') => {
+                i = 1;
+                false
+            }
+            _ => false,
+        };
+        let (mut int, mut frac) = (String::new(), String::new());
+        while i < b.len() && b[i].is_ascii_digit() {
+            int.push(b[i] as char);
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'.' {
+            i += 1;
+            while i < b.len() && b[i].is_ascii_digit() {
+                frac.push(b[i] as char);
+                i += 1;
+            }
+        }
+        if int.is_empty() && frac.is_empty() {
+            return None;
+        }
+        let mut exp: i64 = 0;
+        if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+            i += 1;
+            let neg = match b.get(i) {
+                Some(b'-') => {
+                    i += 1;
+                    true
+                }
+                Some(b'+') => {
+                    i += 1;
+                    false
+                }
+                _ => false,
+            };
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                exp = exp.saturating_mul(10).saturating_add(i64::from(b[i] - b'0'));
+                i += 1;
+            }
+            if i == start {
+                return None;
+            }
+            if neg {
+                exp = -exp;
+            }
+        }
+        if i != b.len() {
+            return None;
+        }
+        // All digits, with the decimal point `point` digits from the left.
+        let all = format!("{int}{frac}");
+        let point = int.len() as i64 + exp;
+        let (digits, fraction) = if point <= 0 {
+            (Some(String::new()), all.bytes().any(|c| c != b'0'))
+        } else if point as usize >= all.len() {
+            // Integer digits followed by zeros: bounded, as a value past 10^400 only ever
+            // reaches an out-of-range message.
+            if point > 400 { (None, false) } else { (Some(format!("{all}{}", "0".repeat(point as usize - all.len()))), false) }
+        } else {
+            let (a, f) = all.split_at(point as usize);
+            (Some(a.to_string()), f.bytes().any(|c| c != b'0'))
+        };
+        let digits = digits.map(|d| d.trim_start_matches('0').to_string());
+        Some(Decimal { negative, digits, fraction })
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.digits.as_deref() == Some("")
+    }
+
+    /// The integer part as a `u64` (sign ignored), `None` past `u64::MAX`.
+    pub fn to_u64(&self) -> Option<u64> {
+        match self.digits.as_deref() {
+            Some("") => Some(0),
+            Some(d) => d.parse().ok(),
+            None => None,
+        }
+    }
+
+    /// `BigInteger.toString()` of the integer part.
+    pub fn integer_string(&self) -> String {
+        match self.digits.as_deref() {
+            Some("") => "0".into(),
+            Some(d) => format!("{}{d}", if self.negative { "-" } else { "" }),
+            None => "Infinity".into(),
+        }
+    }
+}
+
+/// OpenSearch's `unsigned_long` value (`AbstractXContentParser.bigIntegerValue` and
+/// `Numbers.toUnsignedLong`): numbers and numeric strings are exact decimals truncated
+/// toward zero (`coerce`, the default), or refused when they have a fraction (`coerce: false`).
+fn parse_unsigned_os(p: &XParser<'_>, coerce: bool) -> Result<u64, ValueError> {
+    let range = |shown: &str| EsError::illegal_argument(format!("Value [{shown}] is out of range for an unsigned long"));
+    match p.token() {
+        Token::String => {
+            let s = p.text()?;
+            if !coerce {
+                return Err(no_coerce_string("BigInteger"));
+            }
+            let d = Decimal::parse(&s).ok_or_else(|| EsError::illegal_argument(format!("For input string: \"{s}\"")))?;
+            if d.negative && !d.is_zero() || d.to_u64().is_none() {
+                return Err(range(&s).into());
+            }
+            Ok(d.to_u64().unwrap_or(0))
+        }
+        Token::Number => {
+            let raw = p.raw_text();
+            let d = Decimal::parse(&raw).ok_or_else(|| EsError::illegal_argument(format!("For input string: \"{raw}\"")))?;
+            if d.fraction && !coerce {
+                return Err(EsError::illegal_argument(format!("Value [{raw}] has a decimal part")).into());
+            }
+            if d.negative && !d.is_zero() || d.to_u64().is_none() {
+                return Err(range(&d.integer_string()).into());
+            }
+            Ok(d.to_u64().unwrap_or(0))
+        }
+        Token::StartObject => Err(EsError::illegal_argument("Cannot parse object as number").into()),
+        _ => Ok(parse_unsigned(p.value())?),
     }
 }
 
@@ -370,8 +534,24 @@ pub fn parse_ip(s: &str) -> Option<[u8; 16]> {
     addr.parse::<std::net::Ipv6Addr>().ok().map(|a| a.octets())
 }
 
+/// `text()`: a number reads as its text as written (`1.10`, `1E5`, `-0`), as Jackson's does.
 fn text_of(p: &XParser<'_>) -> Result<String, ValueError> {
+    if p.current_token() == Some(Token::Number) && raw_may_differ(p.value()) {
+        return Ok(p.raw_text());
+    }
     Ok(p.text()?)
+}
+
+/// Whether a number's text as written may differ from its rendering: JSON integers have no
+/// leading zeros or `+`, so only zero (`-0`) and non-integers can.
+fn raw_may_differ(v: &Value) -> bool {
+    matches!(v, Value::Num(Number::Float(_) | Number::Int(0) | Number::Big(_)))
+}
+
+/// The original text of the number the walker's parser is on, when it can differ from the
+/// value's rendering (for multi-fields and `copy_to` targets, which re-read the token).
+pub(crate) fn raw_number_of(p: &XParser<'_>) -> Option<String> {
+    (p.current_token() == Some(Token::Number) && raw_may_differ(p.value())).then(|| p.raw_text())
 }
 
 fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Result<Vec<FieldValue>, ValueError> {
@@ -416,6 +596,7 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
                 }
             }
         }
+        "unsigned_long" if crate::opensearch::active() => vec![FieldValue::UnsignedLong(parse_unsigned_os(w.p, coerce(f, ctx))?)],
         "unsigned_long" => vec![FieldValue::UnsignedLong(parse_unsigned(w.p.value())?)],
         "boolean" => {
             if token == Token::String && matches!(w.p.value(), Value::Str(s) if s.is_empty()) {
@@ -450,10 +631,17 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             let s = text_of(w.p)?;
             if f.ty == "keyword"
                 && let Some(limit) = param_i64(f, "ignore_above", ctx)
-                && s.chars().count() as i64 > limit
+                && (limit < 0 || super::exceeds_ignore_above(&s, limit as usize))
             {
                 w.ignore(full);
                 return Ok(Vec::new());
+            }
+            // `VersionEncoder.encodeVersion` fails on some legal versions (a digit group of 128+
+            // digits, a leading number beyond `int`); the value is encoded again when indexed.
+            if f.ty == "version"
+                && let Err(e) = search_aggs::version_string::encode(&s)
+            {
+                return Err(EsError::java(400, e.kind, e.reason).into());
             }
             vec![FieldValue::Keyword(s)]
         }
@@ -487,7 +675,13 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             vec![FieldValue::Binary(bytes)]
         }
         "geo_point" => {
-            let mut pts = if token == Token::StartArray { geo_point_array(w, f, full, ctx)? } else { vec![crate::query::geo::parse_point(w.p).map_err(ValueError::typed)?] };
+            let mut pts = if token == Token::StartArray {
+                geo_point_array(w, f, full, ctx, crate::query::geo::PointKind::Geo)?
+            } else if crate::opensearch::active() {
+                vec![crate::query::geo::parse_point(w.p).map_err(ValueError::typed)?]
+            } else {
+                vec![crate::query::geo::parse_field_point(w.p, crate::query::geo::PointKind::Geo, ignore_z(f, ctx)).map_err(ValueError::typed)?]
+            };
             let mut out = Vec::with_capacity(pts.len());
             for pt in &mut pts {
                 out.push(check_geo_point(w, f, full, ctx, token, pt)?);
@@ -495,12 +689,14 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             out
         }
         "point" => {
-            let pt = crate::query::geo::parse_point(w.p).map_err(ValueError::typed)?;
-            vec![FieldValue::Point { x: pt.lon, y: pt.lat }]
+            let kind = crate::query::geo::PointKind::Cartesian;
+            let pts = if token == Token::StartArray { geo_point_array(w, f, full, ctx, kind)? } else { vec![crate::query::geo::parse_field_point(w.p, kind, ignore_z(f, ctx)).map_err(ValueError::typed)?] };
+            pts.into_iter().map(|pt| FieldValue::Point { x: pt.lon, y: pt.lat }).collect()
         }
         "geo_shape" | "shape" => vec![FieldValue::Shape(crate::query::geo::parse_geometry(w.p).map_err(ValueError::typed)?)],
         "integer_range" | "long_range" | "float_range" | "double_range" | "date_range" | "ip_range" => vec![parse_range(w, f, full, ctx)?],
         "dense_vector" => parse_dense_vector(w, f, full, ctx)?,
+        "knn_vector" => parse_knn_vector(w, f, full, ctx)?,
         "rank_feature" => {
             let v = w.p.float_value()?;
             check_feature(v, full, "_feature").map_err(ValueError::from)?;
@@ -546,15 +742,38 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             flatten(&v, "", &mut out);
             vec![FieldValue::Flattened(out)]
         }
+        "flat_object" => {
+            // `FlatObjectFieldMapper.parseObjectPathParts`: an array reaches the mapper one
+            // element at a time, and every element must be an object.
+            if token != Token::StartObject {
+                return Err(w.p.parsing_error(format!("[{full}] unexpected token [{}] in flat_object field value", token.name())).into());
+            }
+            let mut out = Vec::new();
+            let mut path = String::new();
+            flat_object_entries(w, &mut path, &mut out)?;
+            vec![FieldValue::Flattened(out)]
+        }
         "completion" => vec![parse_completion(w)?],
-        "alias" => return Err(ValueError::none(w.doc_error(format!("Cannot write to a field alias [{full}].")))),
+        "alias" => {
+            let e = crate::opensearch::alias_write_error(full).unwrap_or_else(|| w.doc_error(format!("Cannot write to a field alias [{full}].")));
+            return Err(ValueError::none(e));
+        }
         "percolator" => {
             // `PercolatorFieldMapper`: the value is a query, parsed (and later checked against
             // the mapping) when the document is indexed.
             let q = crate::query::parse_inner(w.p).map_err(ValueError::plain)?;
             vec![FieldValue::Percolator(q.to_value().to_json(), w.p.token_location())]
         }
-        "semantic_text" | "aggregate_metric_double" | "histogram" | "counted_keyword" => {
+        "aggregate_metric_double" => parse_aggregate_metric(w, f, full)?,
+        "histogram" => parse_histogram(w, f, full)?,
+        // `CountedKeywordFieldMapper.parseCreateField`: strings only (nulls skipped).
+        "counted_keyword" => match token {
+            Token::String => vec![FieldValue::Keyword(w.p.text()?)],
+            t => {
+                return Err(EsError::java(400, "illegal_argument_exception", format!("Encountered unexpected token [{}].", t.name())).into());
+            }
+        },
+        "semantic_text" => {
             // Kept in _source; indexing these types comes with their engines.
             w.p.skip_children();
             Vec::new()
@@ -564,6 +783,268 @@ fn parse_non_null(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mapping
             Vec::new()
         }
     })
+}
+
+/// The metrics an `aggregate_metric_double` mapping declares, in `Metric` order.
+pub(crate) fn aggregate_metrics(f: &FieldMapper) -> Vec<&'static str> {
+    let declared: Vec<String> = match f.raw("metrics") {
+        Some(Value::Arr(a)) => a.iter().map(Value::to_es_string).collect(),
+        Some(v) => vec![v.to_es_string()],
+        None => Vec::new(),
+    };
+    ["min", "max", "sum", "value_count"].into_iter().filter(|m| declared.iter().any(|d| d == m)).collect()
+}
+
+/// `AggregateMetricDoubleFieldMapper.parseCreateField`: an object of exactly the declared
+/// metrics, numbers only (`value_count` a non-negative integer, `max` not below `min`), once
+/// per document. With `ignore_malformed` a bad value is skipped whole and the field recorded
+/// in `_ignored`.
+fn parse_aggregate_metric(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str) -> Result<Vec<FieldValue>, ValueError> {
+    let lenient = ignore_malformed(f, w.ctx);
+    // Containers entered so far, closed again when a malformed value is skipped.
+    let mut depth = 0usize;
+    match aggregate_metric_value(w, f, full, &mut depth) {
+        Ok(v) => Ok(v),
+        Err(e) if lenient && !matches!(e.wrap, super::Wrap::None) => {
+            if matches!(w.p.token(), Token::StartObject | Token::StartArray) {
+                w.p.skip_children();
+            }
+            while depth > 0 {
+                match w.p.next_token() {
+                    Some(Token::StartObject | Token::StartArray) => w.p.skip_children(),
+                    Some(Token::EndObject | Token::EndArray) => depth -= 1,
+                    None => break,
+                    _ => {}
+                }
+            }
+            w.ignore(full);
+            Ok(Vec::new())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn aggregate_metric_value(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, depth: &mut usize) -> Result<Vec<FieldValue>, ValueError> {
+    if w.p.token() != Token::StartArray {
+        return Ok(vec![aggregate_metric_object(w, f, full, depth)?]);
+    }
+    *depth += 1;
+    let mut out = Vec::new();
+    while let Some(t) = w.p.next_token() {
+        match t {
+            Token::EndArray => {
+                *depth -= 1;
+                break;
+            }
+            Token::Null => {}
+            _ => {
+                let v = aggregate_metric_object(w, f, full, depth)?;
+                if !out.is_empty() {
+                    return Err(EsError::illegal_argument(format!(
+                        "Field [{full}] of type [aggregate_metric_double] does not support indexing multiple values for the same field in the same document"
+                    ))
+                    .into());
+                }
+                out.push(v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn aggregate_metric_object(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, depth: &mut usize) -> Result<FieldValue, ValueError> {
+    let expecting = |w: &Cx<'_, '_>, want: &str, found: Token| {
+        let (l, c) = w.p.token_location();
+        ValueError::from(EsError::parsing(l, c, format!("Failed to parse object: expecting token of type [{want}] but found [{found}]")))
+    };
+    let token = w.p.token();
+    if token != Token::StartObject {
+        return Err(expecting(w, "START_OBJECT", token));
+    }
+    *depth += 1;
+    let declared = aggregate_metrics(f);
+    let (mut min, mut max, mut sum, mut value_count) = (None, None, None, None);
+    let mut parsed = 0usize;
+    loop {
+        let t = w.p.next_token().unwrap_or(Token::EndObject);
+        if t == Token::EndObject {
+            *depth -= 1;
+            break;
+        }
+        if t != Token::FieldName {
+            return Err(expecting(w, "FIELD_NAME", t));
+        }
+        let name = w.p.current_name().unwrap_or("").to_string();
+        let Some(metric) = ["min", "max", "sum", "value_count"].into_iter().find(|m| *m == name) else {
+            return Err(EsError::illegal_argument(format!("No enum constant org.elasticsearch.xpack.aggregatemetric.mapper.AggregateMetricDoubleFieldMapper.Metric.{name}")).into());
+        };
+        if !declared.contains(&metric) {
+            return Err(EsError::illegal_argument(format!("Aggregate metric [{metric}] does not exist in the mapping of field [{full}]")).into());
+        }
+        let vt = w.p.next_token().unwrap_or(Token::EndObject);
+        if vt != Token::Number {
+            return Err(expecting(w, "VALUE_NUMBER", vt));
+        }
+        let sub = |e: EsError| ValueError::from(EsError::illegal_argument(format!("failed to parse [{metric}] sub field: {}", e.reason())).caused_by(e));
+        let first = match metric {
+            "value_count" => {
+                // An integer without coercion: a decimal part is data loss.
+                let v = w.p.int_value().map_err(sub)?;
+                let d = w.p.double_value().map_err(sub)?;
+                if v as f64 != d {
+                    return Err(sub(EsError::illegal_argument(format!("{} cannot be converted to Integer without data loss", crate::json::write::java_double(d)))));
+                }
+                value_count.replace(i64::from(v)).is_none()
+            }
+            m => {
+                let v = w.p.double_value().map_err(sub)?;
+                let slot = match m {
+                    "min" => &mut min,
+                    "max" => &mut max,
+                    _ => &mut sum,
+                };
+                slot.replace(v).is_none()
+            }
+        };
+        if first {
+            parsed += 1;
+        }
+    }
+    if let (Some(lo), Some(hi)) = (min, max)
+        && hi < lo
+    {
+        return Err(EsError::illegal_argument(format!("Aggregate metric field [{full}] max value cannot be smaller than min value")).into());
+    }
+    if value_count.is_some_and(|c| c < 0) {
+        return Err(EsError::illegal_argument(format!("Aggregate metric [value_count] of field [{full}] cannot be a negative number")).into());
+    }
+    if parsed != declared.len() {
+        return Err(EsError::illegal_argument(format!("Aggregate metric field [{full}] must contain all metrics [{}]", declared.join(", "))).into());
+    }
+    Ok(FieldValue::AggregateMetric { min, max, sum, value_count })
+}
+
+/// `HistogramFieldMapper.parse` / `HistogramParser.parse`: `{"values": [...], "counts": [...]}`
+/// with values in increasing order and non-negative counts of the same length, once per
+/// document; `ignore_malformed` skips a bad value whole.
+fn parse_histogram(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str) -> Result<Vec<FieldValue>, ValueError> {
+    let lenient = ignore_malformed(f, w.ctx);
+    let mut depth = 0usize;
+    let r = (|| -> Result<Vec<FieldValue>, ValueError> {
+        if w.p.token() != Token::StartArray {
+            return Ok(vec![histogram_object(w, full, &mut depth)?]);
+        }
+        depth += 1;
+        let mut out = Vec::new();
+        while let Some(t) = w.p.next_token() {
+            match t {
+                Token::EndArray => {
+                    depth -= 1;
+                    break;
+                }
+                Token::Null => {}
+                _ => {
+                    let v = histogram_object(w, full, &mut depth)?;
+                    if !out.is_empty() {
+                        return Err(ValueError::typed(EsError::illegal_argument(format!(
+                            "Field [{full}] of type [histogram] doesn't support indexing multiple values for the same field in the same document"
+                        ))));
+                    }
+                    out.push(v);
+                }
+            }
+        }
+        Ok(out)
+    })();
+    match r {
+        Err(e) if lenient && !matches!(e.wrap, super::Wrap::None) => {
+            if matches!(w.p.token(), Token::StartObject | Token::StartArray) {
+                w.p.skip_children();
+            }
+            while depth > 0 {
+                match w.p.next_token() {
+                    Some(Token::StartObject | Token::StartArray) => w.p.skip_children(),
+                    Some(Token::EndObject | Token::EndArray) => depth -= 1,
+                    None => break,
+                    _ => {}
+                }
+            }
+            w.ignore(full);
+            Ok(Vec::new())
+        }
+        other => other,
+    }
+}
+
+fn histogram_object(w: &mut Cx<'_, '_>, full: &str, depth: &mut usize) -> Result<FieldValue, ValueError> {
+    let expecting = |w: &Cx<'_, '_>, want: &str, found: Token| {
+        let (l, c) = w.p.token_location();
+        ValueError::typed(EsError::parsing(l, c, format!("Failed to parse object: expecting token of type [{want}] but found [{found}]")))
+    };
+    let field_error = |w: &Cx<'_, '_>, msg: String| ValueError::typed(w.doc_error(format!("error parsing field [{full}], {msg}")));
+    let token = w.p.token();
+    if token != Token::StartObject {
+        return Err(expecting(w, "START_OBJECT", token));
+    }
+    *depth += 1;
+    let (mut values, mut counts): (Option<Vec<f64>>, Option<Vec<u64>>) = (None, None);
+    loop {
+        let t = w.p.next_token().unwrap_or(Token::EndObject);
+        if t == Token::EndObject {
+            *depth -= 1;
+            break;
+        }
+        if t != Token::FieldName {
+            return Err(expecting(w, "FIELD_NAME", t));
+        }
+        let name = w.p.current_name().unwrap_or("").to_string();
+        if name != "values" && name != "counts" {
+            return Err(field_error(w, format!("with unknown parameter [{name}]")));
+        }
+        let at = w.p.next_token().unwrap_or(Token::EndObject);
+        if at != Token::StartArray {
+            return Err(expecting(w, "START_ARRAY", at));
+        }
+        *depth += 1;
+        let (mut vs, mut cs) = (Vec::new(), Vec::new());
+        let mut previous = -f64::MAX;
+        loop {
+            let et = w.p.next_token().unwrap_or(Token::EndArray);
+            if et == Token::EndArray {
+                *depth -= 1;
+                break;
+            }
+            if et != Token::Number {
+                return Err(expecting(w, "VALUE_NUMBER", et));
+            }
+            if name == "values" {
+                let v = w.p.double_value().map_err(ValueError::typed)?;
+                if v < previous {
+                    let (jv, jp) = (crate::json::write::java_double(v), crate::json::write::java_double(previous));
+                    return Err(field_error(w, format!("[values] values must be in increasing order, got [{jv}] but previous value was [{jp}]")));
+                }
+                previous = v;
+                vs.push(v);
+            } else {
+                let c = w.p.long_value().map_err(ValueError::typed)?;
+                if c < 0 {
+                    return Err(field_error(w, format!("[counts] elements must be >= 0 but got {c}")));
+                }
+                cs.push(c as u64);
+            }
+        }
+        if name == "values" {
+            values = Some(vs);
+        } else {
+            counts = Some(cs);
+        }
+    }
+    let Some(values) = values else { return Err(field_error(w, "expected field called [values]".into())) };
+    let Some(counts) = counts else { return Err(field_error(w, "expected field called [counts]".into())) };
+    if values.len() != counts.len() {
+        return Err(field_error(w, format!("expected same length from [values] and [counts] but got [{} != {}]", values.len(), counts.len())));
+    }
+    Ok(FieldValue::Histogram(search_aggs::histogram_field::encode_histogram(&values, &counts)))
 }
 
 /// `ParentJoinFieldMapper.parse`: a relation name, or `{"name": …, "parent": …}`.
@@ -625,7 +1106,7 @@ fn check_feature(v: f32, feature: &str, field: &str) -> Result<(), EsError> {
     Ok(())
 }
 
-fn flatten(v: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
+pub(crate) fn flatten(v: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
     match v {
         Value::Obj(m) => {
             for (k, x) in m {
@@ -640,6 +1121,54 @@ fn flatten(v: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
         }
         Value::Null => {}
         other => out.push((prefix.to_string(), other.to_es_string())),
+    }
+}
+
+/// The leaves of the object the parser is on (OpenSearch's `flat_object`), as `(path, text)`
+/// pairs under `path`. Numbers keep their text as written (Jackson's `textOrNull`: `1.50` stays
+/// `1.50`), `null`s are skipped, arrays at any depth contribute each element.
+fn flat_object_entries(w: &mut Cx<'_, '_>, path: &mut String, out: &mut Vec<(String, String)>) -> Result<(), ValueError> {
+    while let Some(t) = w.p.next_token() {
+        match t {
+            Token::EndObject => return Ok(()),
+            Token::FieldName => {
+                let name = w.p.current_name().unwrap_or("");
+                let len = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(name);
+                let vt = w.p.next_token().unwrap_or(Token::Null);
+                crate::stack::maybe_grow(|| flat_object_value(w, vt, path, out))?;
+                path.truncate(len);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn flat_object_value(w: &mut Cx<'_, '_>, t: Token, path: &mut String, out: &mut Vec<(String, String)>) -> Result<(), ValueError> {
+    match t {
+        Token::StartObject => flat_object_entries(w, path, out),
+        Token::StartArray => {
+            while let Some(t) = w.p.next_token() {
+                if t == Token::EndArray {
+                    break;
+                }
+                crate::stack::maybe_grow(|| flat_object_value(w, t, path, out))?;
+            }
+            Ok(())
+        }
+        Token::Null => Ok(()),
+        Token::Number => {
+            out.push((path.clone(), w.p.raw_text()));
+            Ok(())
+        }
+        _ => {
+            out.push((path.clone(), w.p.text()?));
+            Ok(())
+        }
     }
 }
 
@@ -785,6 +1314,54 @@ fn range_bound(w: &mut Cx<'_, '_>, f: &FieldMapper, ctx: &MappingCtx, round_up: 
         }
         _ => p.value().clone(),
     })
+}
+
+/// OpenSearch's `knn_vector` (`KNNVectorFieldMapper.parseCreateField`): an array of numbers
+/// (numeric strings too), or one number. Element errors point at the element; dimension
+/// errors come after the array (Jackson's preview of its end is `null`).
+fn parse_knn_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Result<Vec<FieldValue>, ValueError> {
+    use crate::opensearch::knn;
+    let r = knn::resolve(f, ctx);
+    let mut values: Vec<f64> = Vec::new();
+    let element = |w: &mut Cx<'_, '_>, values: &mut Vec<f64>| -> Result<(), ValueError> {
+        let v = match w.p.token() {
+            Token::Number => w.p.double_value()?,
+            Token::String => {
+                let s = w.p.text()?;
+                crate::units::parse_java_double(&s).ok_or_else(|| ValueError::from(EsError::number_format(&s)))?
+            }
+            t => {
+                return Err(ValueError::from(EsError::new(
+                    400,
+                    "input_coercion_exception",
+                    format!("Current token ({}) not numeric, cannot use numeric value accessors", t.name()),
+                )));
+            }
+        };
+        knn::check_doc_vector(&r, std::slice::from_ref(&v)).or_else(|(at, e)| if at.is_some() { Err(e) } else { Ok(knn::DocVector::Floats(Vec::new())) }).map_err(ValueError::from)?;
+        values.push(v);
+        Ok(())
+    };
+    match w.p.token() {
+        Token::StartArray => {
+            while let Some(t) = w.p.next_token() {
+                if t == Token::EndArray {
+                    break;
+                }
+                element(w, &mut values)?;
+            }
+        }
+        Token::StartObject => w.p.skip_children(),
+        _ => element(w, &mut values)?,
+    }
+    match knn::check_doc_vector(&r, &values) {
+        Ok(knn::DocVector::Floats(v)) => Ok(vec![FieldValue::DenseVector(v)]),
+        Ok(knn::DocVector::Bytes(b)) => Ok(vec![FieldValue::ByteVector(b)]),
+        // Whole-vector errors: the plugin has read past the value, so the preview is `null`.
+        Err((_, e)) => Err(ValueError::none(
+            w.doc_error(format!("failed to parse field [{}] of type [knn_vector] in {}. Preview of field's value: 'null'", full, w.desc)).caused_by(e),
+        )),
+    }
 }
 
 fn parse_dense_vector(w: &mut Cx<'_, '_>, f: &FieldMapper, _full: &str, ctx: &MappingCtx) -> Result<Vec<FieldValue>, ValueError> {
@@ -938,7 +1515,12 @@ pub fn normalize_point(lat: f64, lon: f64) -> (f64, f64) {
 /// `[lon, lat]` or `[lon, lat, z]` read with Jackson's numeric accessors (strings coerce; other
 /// tokens fail as Jackson does), then any further elements as more points. Accessor and
 /// dimension failures happen outside the mapper's `ignore_malformed` guard.
-fn geo_point_array(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx) -> Result<Vec<crate::query::geo::GeoPoint>, ValueError> {
+/// A point mapping's `ignore_z_value` (true unless set to false).
+fn ignore_z(f: &FieldMapper, ctx: &MappingCtx) -> bool {
+    f.effective("ignore_z_value", ctx).as_bool() != Some(false)
+}
+
+fn geo_point_array(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &MappingCtx, kind: crate::query::geo::PointKind) -> Result<Vec<crate::query::geo::GeoPoint>, ValueError> {
     use crate::query::geo::GeoPoint;
     // Jackson's and XContent's exceptions aren't Elasticsearch exceptions: the document
     // parsing exception is the root cause.
@@ -969,11 +1551,9 @@ fn geo_point_array(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mappin
         Some(Token::EndArray) => return Ok(out),
         Some(Token::Number) => {
             let z = w.p.double_value().map_err(ValueError::typed)?;
-            if f.effective("ignore_z_value", ctx).as_bool() == Some(false) {
-                return Err(ValueError::typed(EsError::parse(format!(
-                    "Exception parsing coordinates: found Z value [{}] but [ignore_z_value] parameter is [false]",
-                    crate::json::write::java_double(z)
-                ))));
+            if !ignore_z(f, ctx) {
+                let e = EsError::parse(format!("Exception parsing coordinates: found Z value [{}] but [ignore_z_value] parameter is [false]", crate::json::write::java_double(z)));
+                return Err(fatal(w, e));
             }
         }
         _ => return Err(fatal(w, EsError::parse("field type does not accept > 3 dimensions"))),
@@ -982,7 +1562,11 @@ fn geo_point_array(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mappin
         if t == Token::EndArray {
             break;
         }
-        match crate::query::geo::parse_point(w.p) {
+        let next = match kind {
+            crate::query::geo::PointKind::Geo if crate::opensearch::active() => crate::query::geo::parse_point(w.p),
+            _ => crate::query::geo::parse_field_point(w.p, kind, ignore_z(f, ctx)),
+        };
+        match next {
             Ok(pt) => out.push(pt),
             // Points before the malformed one were already indexed.
             Err(_) if ignore_malformed(f, ctx) => {
@@ -1025,7 +1609,7 @@ fn check_geo_point(w: &mut Cx<'_, '_>, f: &FieldMapper, full: &str, ctx: &Mappin
 
 #[cfg(test)]
 mod geo_normalize_tests {
-    use super::normalize_point;
+    use super::*;
 
     #[test]
     fn wraps_like_geo_utils() {
@@ -1034,5 +1618,55 @@ mod geo_normalize_tests {
         assert_eq!(normalize_point(-95.0, 10.0), (-85.0, -170.0));
         assert_eq!(normalize_point(0.0, -190.0), (0.0, 170.0));
         assert_eq!(normalize_point(450.0, 0.0), (90.0, 0.0));
+    }
+
+    #[test]
+    fn decimal_integer_parts_are_exact() {
+        let d = |s: &str| Decimal::parse(s).unwrap();
+        assert_eq!(d("10223372036854775807.23").to_u64(), Some(10223372036854775807));
+        assert!(d("10223372036854775807.23").fraction);
+        assert!(!d("10223372036854775807.00").fraction);
+        assert_eq!(d("18446744073709551615.99").to_u64(), Some(u64::MAX));
+        assert_eq!(d("18446744073709551616").to_u64(), None);
+        assert_eq!(d("1e3").to_u64(), Some(1000));
+        assert_eq!(d("1.5e1").to_u64(), Some(15));
+        assert_eq!(d("1E+30").integer_string(), "1000000000000000000000000000000");
+        assert_eq!(d("-0.5").integer_string(), "0");
+        assert!(d("-0.5").is_zero() && d("-0.5").fraction);
+        assert_eq!(d("-5").integer_string(), "-5");
+        assert_eq!(d("5e-1").to_u64(), Some(0));
+        assert_eq!(d(".5").to_u64(), Some(0));
+        assert_eq!(d("1e100000").digits, None);
+        for bad in ["", " 5", "0x10", "1e", "-", "1.2.3", "abc", "1e+"] {
+            assert_eq!(Decimal::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn unsigned_long_strings_keep_their_fraction() {
+        // Elasticsearch: `BigDecimal.toBigIntegerExact` refuses a fraction no double can see.
+        let e = parse_unsigned(&Value::from("10223372036854775807.23")).unwrap_err();
+        assert_eq!(e.reason(), "Value \"10223372036854775807.23\" has a decimal part");
+        assert_eq!(parse_unsigned(&Value::from("1e19")).unwrap(), 10_000_000_000_000_000_000);
+        assert_eq!(parse_unsigned(&Value::from("-5")).unwrap_err().reason(), "Value [-5] is out of range for unsigned long");
+    }
+
+    #[test]
+    fn opensearch_unsigned_long_truncates() {
+        let run = |json: &str, coerce: bool| {
+            let v = crate::json::parse(json.as_bytes()).unwrap().unwrap();
+            let mut p = XParser::started(&v, Some(json.as_bytes()), Vec::new());
+            p.next_token();
+            p.next_token();
+            parse_unsigned_os(&p, coerce).map_err(|e| e.cause.reason().to_string())
+        };
+        assert_eq!(run(r#"{"c":"10223372036854775807.23"}"#, true), Ok(10223372036854775807));
+        assert_eq!(run(r#"{"c":18446744073709551615.9}"#, true), Ok(u64::MAX));
+        assert_eq!(run(r#"{"c":-0.5}"#, true), Ok(0));
+        assert_eq!(run(r#"{"c":1.5}"#, false), Err("Value [1.5] has a decimal part".into()));
+        assert_eq!(run(r#"{"c":-5}"#, true), Err("Value [-5] is out of range for an unsigned long".into()));
+        assert_eq!(run(r#"{"c":1e30}"#, true), Err("Value [1000000000000000000000000000000] is out of range for an unsigned long".into()));
+        assert_eq!(run(r#"{"c":"-1"}"#, true), Err("Value [-1] is out of range for an unsigned long".into()));
+        assert_eq!(run(r#"{"c":" 5"}"#, true), Err("For input string: \" 5\"".into()));
     }
 }

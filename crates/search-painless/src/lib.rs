@@ -58,3 +58,6 @@ pub use host::{DocKind, DocValues, Host, HostError, NoHost, TermStats, VectorEle
 pub use value::Value;
 #[doc(hidden)]
 pub use lookup::dump as registry_dump;
+/// `java.time` locale texts (months, days, quarters, eras, am/pm) for date formatters outside
+/// Painless (date fields' `locale`).
+pub use time::locale as time_locale;

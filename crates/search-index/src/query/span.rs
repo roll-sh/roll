@@ -107,6 +107,13 @@ impl SpanNode {
         }
     }
 
+    /// The terms the node scores with (what a visitor that doesn't look at spans sees).
+    pub fn leaf_terms(&self) -> Vec<(u32, Vec<u8>)> {
+        let mut out = Vec::new();
+        self.terms(&mut out);
+        out
+    }
+
     fn terms(&self, out: &mut Vec<(u32, Vec<u8>)>) {
         match self {
             SpanNode::Term { field, term } => out.push((*field, term.clone())),
@@ -175,7 +182,8 @@ impl SpanNode {
         })
     }
 
-    fn lucene(&self, schema: &Schema) -> String {
+    /// Lucene's `toString` of the span query.
+    pub fn lucene(&self, schema: &Schema) -> String {
         match self {
             SpanNode::Term { field, term } => format!("{}:{}", schema.name(*field), term_text(term)),
             SpanNode::Near { clauses, slop, in_order } => {
@@ -1170,17 +1178,16 @@ impl Query for SpanQuery {
         let mut terms = Vec::new();
         self.node.terms(&mut terms);
         let mut states = BTreeMap::new();
-        let mut stats: Vec<TermStats> = Vec::new();
         for (f, t) in terms {
             if states.contains_key(&(f, t.clone())) {
                 continue;
             }
             let ts = TermStates::build(s, f, &t);
-            if ts.doc_freq > 0 {
-                stats.push(ts.stats());
-            }
             states.insert((f, t), ts);
         }
+        // Lucene's `SpanWeight.getTermStates` collects into a `TreeMap`: statistics (and their
+        // explanation details) come in term order, not query order.
+        let stats: Vec<TermStats> = states.values().filter(|ts| ts.doc_freq > 0).map(|ts| ts.stats()).collect();
         // Terms that only filter (span_not excludes) need states but don't score.
         let mut all = Vec::new();
         self.node.all_terms(&mut all);
@@ -1217,11 +1224,7 @@ impl Query for SpanQuery {
     }
 
     fn visit(&self, v: &mut dyn QueryVisitor) {
-        let mut terms = Vec::new();
-        self.node.terms(&mut terms);
-        for (f, t) in terms {
-            v.term(f, &t);
-        }
+        v.span(&self.node);
     }
 
     fn as_any(&self) -> &dyn Any {

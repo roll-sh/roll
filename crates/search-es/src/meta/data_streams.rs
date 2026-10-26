@@ -175,8 +175,12 @@ pub fn validate_name(name: &str) -> Result<(), EsError> {
     Ok(())
 }
 
-/// `DataStream.getDefaultBackingIndexName`: `.ds-<name>-<uuuu.MM.dd>-<generation:06>`.
+/// `DataStream.getDefaultBackingIndexName`: `.ds-<name>-<uuuu.MM.dd>-<generation:06>`
+/// (OpenSearch's has no date: `.ds-<name>-<generation:06>`).
 pub fn backing_index_name(prefix: &str, data_stream: &str, generation: u64, now_ms: i64) -> String {
+    if crate::opensearch::active() {
+        return format!("{prefix}{data_stream}-{generation:06}");
+    }
     let date = crate::time::DateFormatter::new("uuuu.MM.dd").expect("valid pattern").format_millis(now_ms);
     format!("{prefix}{data_stream}-{date}-{generation:06}")
 }
@@ -444,6 +448,7 @@ mod tests {
     fn names_follow_elasticsearch() {
         assert_eq!(backing_index_name(BACKING_INDEX_PREFIX, "logs", 1, 1_792_525_469_350), ".ds-logs-2026.10.20-000001");
         assert_eq!(backing_index_name(FAILURE_STORE_PREFIX, "logs", 1_000_000, 0), ".fs-logs-1970.01.01-1000000");
+        assert_eq!(crate::opensearch::with(true, || backing_index_name(BACKING_INDEX_PREFIX, "logs", 2, 1_792_525_469_350)), ".ds-logs-000002");
         assert_eq!(validate_name("Logs").unwrap_err().reason(), "data_stream [Logs] must be lowercase");
         assert_eq!(validate_name(".ds-x").unwrap_err().reason(), "data_stream [.ds-x] must not start with '.ds-'");
         assert_eq!(validate_name("_x").unwrap_err().reason(), "data_stream [_x] must not start with '_', '-', or '+'");

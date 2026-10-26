@@ -12,10 +12,13 @@
 //!    one fails the document), then the document is parsed again against the new mapping.
 //! 5. **Engine.** The parsed document becomes an `IndexableDoc` and is applied to the shard
 //!    with its version checks; the outcome carries seq_no, primary term and version.
+//! 6. **Log.** The applied operation goes to the shard's operation log
+//!    ([`crate::engine::ShardLog`], search-server's WAL) with its seq_no, term and version, and
+//!    a seq_no a failed write used up as a no-op; search-server acknowledges once it is durable.
 
 use crate::cluster::Cluster;
 use crate::engine::convert::{self, DocMeta};
-use crate::engine::{IndexEngine, ShardEngine};
+use crate::engine::{IndexEngine, LoggedOp, ShardEngine};
 use crate::error::{EsError, EsResult};
 use crate::json::{Map, Value};
 use crate::mapping::{MappingCtx, MergeReason};
@@ -116,6 +119,46 @@ impl WriteOutcome {
         if let Some(f) = self.failure_store {
             m.insert("failure_store".into(), Value::from(f));
         }
+    }
+}
+
+impl WriteOutcome {
+    /// `{"<action>":{...,"status":N}}`: the bulk item [`write_into`](Self::write_into) and the
+    /// item status make, written straight as compact JSON (a 5,000-item bulk otherwise builds
+    /// 10 maps per item only to print them). `forced_refresh` adds the flag after `result`,
+    /// where the bulk handler inserts it.
+    pub fn write_bulk_item(&self, out: &mut Vec<u8>, action: &str, forced_refresh: bool) {
+        use crate::json::write::write_str;
+        let mut num = itoa::Buffer::new();
+        out.extend_from_slice(b"{");
+        write_str(out, action);
+        out.extend_from_slice(b":{\"_index\":");
+        write_str(out, &self.index);
+        out.extend_from_slice(b",\"_id\":");
+        write_str(out, &self.id);
+        out.extend_from_slice(b",\"_version\":");
+        out.extend_from_slice(num.format(self.version).as_bytes());
+        out.extend_from_slice(b",\"result\":");
+        write_str(out, self.result);
+        if self.forced_refresh || forced_refresh {
+            out.extend_from_slice(b",\"forced_refresh\":true");
+        }
+        out.extend_from_slice(b",\"_shards\":{\"total\":");
+        out.extend_from_slice(num.format(self.total).as_bytes());
+        out.extend_from_slice(if self.result == "noop" { b",\"successful\":0,\"failed\":0}" } else { b",\"successful\":1,\"failed\":0}" });
+        if self.seq_no >= 0 || self.result != "noop" {
+            out.extend_from_slice(b",\"_seq_no\":");
+            out.extend_from_slice(num.format(self.seq_no).as_bytes());
+            out.extend_from_slice(b",\"_primary_term\":");
+            out.extend_from_slice(num.format(self.primary_term).as_bytes());
+        }
+        if let Some(f) = self.failure_store {
+            out.extend_from_slice(b",\"failure_store\":");
+            write_str(out, f);
+        }
+        out.extend_from_slice(b",\"status\":");
+        out.extend_from_slice(num.format(self.status()).as_bytes());
+        out.extend_from_slice(b"}}");
     }
 }
 
@@ -289,6 +332,23 @@ fn write_index_of(st: &ClusterState, expr: &str) -> EsResult<Option<Target>> {
     Ok(None)
 }
 
+/// The write index of a delete. `TransportBulkAction` creates missing indices only for
+/// deletes with external versioning; any other delete of a missing index fails (OpenSearch's
+/// resolver reports the expression as an `index_expression` resource).
+pub async fn resolve_delete_target(cluster: &Cluster, expr: &str, args: &WriteArgs, now_ms: i64) -> EsResult<Target> {
+    let name = crate::meta::resolve::resolve_date_math(expr, now_ms)?;
+    let external = matches!(args.version_type, Some(VersionType::External | VersionType::ExternalGte));
+    if !external && write_index_of(&cluster.state(), &name)?.is_none() && !crate::meta::resolve::is_wildcard(&name) {
+        let e = EsError::index_not_found(&name);
+        return Err(if cluster.dialect == crate::cluster::Dialect::OpenSearch { e.set_meta("resource.type", "index_expression") } else { e });
+    }
+    let mut a = args.clone();
+    // Deletes may target data streams' backing indices directly; the data stream itself only
+    // takes creates, which `resolve_target` enforces for index requests.
+    a.create = true;
+    resolve_target(cluster, expr, &a, now_ms).await
+}
+
 /// Resolves (and if needed creates) the write index for `expr`.
 pub async fn resolve_target(cluster: &Cluster, expr: &str, args: &WriteArgs, now_ms: i64) -> EsResult<Target> {
     let name = crate::meta::resolve::resolve_date_math(expr, now_ms)?;
@@ -389,6 +449,10 @@ pub struct Prepared {
     pub id: String,
     /// Time series documents: `tsid@timestamp`, as version conflicts name them.
     pub tsdb: Option<String>,
+    /// The document as indexed and the routing it was prepared with: what the shard's
+    /// operation log keeps to apply it again on recovery.
+    pub source: Bytes,
+    pub routing: Option<String>,
 }
 
 /// Parses `source` for `idx` (merging a dynamic mapping update first when the document needs
@@ -468,7 +532,7 @@ pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: 
             let doc = convert::to_indexable(&table, &parsed, &meta)?;
             let shard_id = crate::meta::routing::shard_for(&idx, &gen_id, routing);
             let shard = engine.shard(shard_id).clone();
-            return Ok(Prepared { engine, shard, index: idx, doc, id: gen_id, tsdb: Some(desc) });
+            return Ok(Prepared { engine, shard, index: idx, doc, id: gen_id, tsdb: Some(desc), source: source.clone(), routing: routing.map(str::to_string) });
         }
         // Data stream documents need their timestamp (`DataStreamTimestampFieldMapper`).
         if idx.mapping.data_stream_timestamp == Some(true) {
@@ -488,7 +552,7 @@ pub async fn prepare(cluster: &Cluster, idx: Arc<IndexMeta>, id: &str, routing: 
         let doc = convert::to_indexable(&table, &parsed, &meta)?;
         let shard_id = crate::meta::routing::shard_for(&idx, id, routing);
         let shard = engine.shard(shard_id).clone();
-        return Ok(Prepared { engine, shard, index: idx, doc, id: id.to_string(), tsdb: None });
+        return Ok(Prepared { engine, shard, index: idx, doc, id: id.to_string(), tsdb: None, source: source.clone(), routing: routing.map(str::to_string) });
     }
     Err(EsError::illegal_state("mapping updates did not converge"))
 }
@@ -505,7 +569,7 @@ fn end_location(src: &[u8]) -> (usize, usize) {
 /// The `_id`, `_tsid` and `tsid@timestamp` of a time series document
 /// (`TsidExtractingIdFieldMapper`, `DataStreamTimestampFieldMapper`): the routing is the
 /// encoded routing hash; a requested `id` must be the one generated.
-fn time_series_id(idx: &IndexMeta, parsed: &crate::document::ParsedDocument, id: &str, routing: Option<&str>) -> EsResult<(String, Vec<u8>, String)> {
+pub(crate) fn time_series_id(idx: &IndexMeta, parsed: &crate::document::ParsedDocument, id: &str, routing: Option<&str>) -> EsResult<(String, Vec<u8>, String)> {
     use crate::engine::tsdb;
     let nanos = matches!(idx.mapping.lookup("@timestamp"), Some(crate::mapping::MapperRef::Field(f)) if f.ty == "date_nanos");
     let ts = parsed.fields.iter().find(|f| &*f.name == "@timestamp").and_then(|f| match f.value {
@@ -566,6 +630,20 @@ pub fn stored_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable,
     if sc.enabled == Some(false) {
         return None;
     }
+    // OpenSearch k-NN indices derive `knn_vector` values from the stored vectors.
+    let derived;
+    let (source, value) = match value {
+        Value::Obj(m) if crate::opensearch::knn::derives_source(idx) => {
+            let mut m = m.clone();
+            if crate::opensearch::knn::derive_source(idx, &mut m) {
+                derived = (Bytes::from(Value::Obj(m.clone()).to_json()), Value::Obj(m));
+                (&derived.0, &derived.1)
+            } else {
+                (source, value)
+            }
+        }
+        _ => (source, value),
+    };
     let inc = sc.includes.clone().unwrap_or_default();
     let exc = sc.excludes.clone().unwrap_or_default();
     if inc.is_empty() && exc.is_empty() {
@@ -578,6 +656,12 @@ pub fn stored_source(idx: &IndexMeta, table: &crate::engine::fields::FieldTable,
 
 /// Merges a document's dynamic mapping update into the index's mapping and publishes it.
 pub async fn apply_dynamic_update(cluster: &Cluster, idx: &IndexMeta, update: crate::mapping::Mapping) -> EsResult<Arc<IndexMeta>> {
+    // Elasticsearch's shards start with the index, so what they configure from the mapping
+    // when they open (the `@timestamp` segment order) predates the first document's update;
+    // roll opens them lazily, so open them now, before the mapping changes.
+    if cluster.engine.loaded(&idx.uuid).is_none() {
+        cluster.engine.index(cluster, &cluster.state(), idx)?;
+    }
     let name = idx.name.clone();
     let uuid = idx.uuid.clone();
     cluster
@@ -589,6 +673,12 @@ pub async fn apply_dynamic_update(cluster: &Cluster, idx: &IndexMeta, update: cr
             let ctx: MappingCtx = cur.mapping_ctx();
             let merged = cur.mapping.merge(&update, &ctx, MergeReason::MappingUpdate)?;
             merged.validate(&ctx)?;
+            // `IndexMode.validateMapping` on the dynamic update (routing fields must be
+            // dimensions, not runtime fields).
+            let mode = crate::meta::index_mode::IndexMode::of(&cur.settings);
+            if mode == crate::meta::index_mode::IndexMode::TimeSeries {
+                crate::meta::index_mode::validate_routing_path(mode, &merged, &cur.settings)?;
+            }
             if merged != *cur.mapping {
                 let mut ni = (*cur).clone();
                 ni.mapping = Arc::new(merged);
@@ -686,6 +776,9 @@ pub fn apply_index(p: Prepared, args: &WriteArgs, auto_id: bool, id: &str) -> Es
     op.if_seq_no = args.if_seq_no;
     op.if_primary_term = args.if_primary_term;
     op.auto_generated_id = auto_id;
+    if let Some(log) = &p.shard.log {
+        log.check()?;
+    }
     let t = std::time::Instant::now();
     let r = p.shard.shard.index(op);
     let c = &p.shard.counters;
@@ -694,8 +787,9 @@ pub fn apply_index(p: Prepared, args: &WriteArgs, auto_id: bool, id: &str) -> Es
         Ok(r) => r,
         Err(e) => {
             c.index_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if e.seq_no().is_some() {
+            if let Some((seq_no, primary_term)) = e.seq_no() {
                 p.shard.wrote();
+                log_op(&p.shard, &LoggedOp::NoOp { seq_no, primary_term })?;
             }
             return Err(convert::index_error(e));
         }
@@ -703,6 +797,7 @@ pub fn apply_index(p: Prepared, args: &WriteArgs, auto_id: bool, id: &str) -> Es
     p.shard.wrote();
     match r {
         OpResult::Indexed { seq_no, primary_term, version, created } => {
+            log_op(&p.shard, &LoggedOp::Index { id: &p.id, routing: p.routing.as_deref(), source: &p.source, seq_no, primary_term, version })?;
             c.index_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let (seq_no, primary_term) = visible_seq(&p.index, seq_no, primary_term);
             Ok(WriteOutcome {
@@ -752,12 +847,16 @@ pub fn apply_delete(cluster: &Cluster, idx: &Arc<IndexMeta>, id: &str, routing: 
     op.version_type = args.version_type.unwrap_or(VersionType::Internal);
     op.if_seq_no = args.if_seq_no;
     op.if_primary_term = args.if_primary_term;
+    if let Some(log) = &shard.log {
+        log.check()?;
+    }
     let t = std::time::Instant::now();
     let r = shard.shard.delete(op).map_err(convert::index_error)?;
     shard.counters.delete_time_nanos.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     shard.wrote();
     match r {
         OpResult::Deleted { seq_no, primary_term, version, found } => {
+            log_op(shard, &LoggedOp::Delete { id, seq_no, primary_term, version })?;
             if found {
                 shard.counters.delete_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -779,6 +878,16 @@ pub fn apply_delete(cluster: &Cluster, idx: &Arc<IndexMeta>, id: &str, routing: 
         OpResult::Conflict(vc) => Err(shard_error(EsError::new(409, "version_conflict_engine_exception", vc.reason(id)), idx, shard.id)),
         other => Err(EsError::internal(format!("unexpected delete outcome {other:?}"))),
     }
+}
+
+/// Appends an applied operation to the shard's log (search-server's WAL), if it has one, and
+/// counts it in the shard's translog stats.
+fn log_op(shard: &ShardEngine, op: &LoggedOp<'_>) -> EsResult<()> {
+    if let Some(log) = &shard.log {
+        log.append(op)?;
+    }
+    shard.logged(op);
+    Ok(())
 }
 
 /// The `refresh` parameter of write APIs.
@@ -818,15 +927,24 @@ pub fn refresh_shards(cluster: &Cluster, written: &[(String, u32)]) -> EsResult<
 /// Copies every document of `src` into `dst` keeping ids, routing, versions and sequence
 /// numbers (shrink, split, clone and restore start from the source's documents).
 pub fn copy_index(cluster: &Cluster, src: &Arc<IndexMeta>, dst: &Arc<IndexMeta>) -> EsResult<()> {
-    let st = cluster.state();
     let Some(se) = cluster.engine.loaded(&src.uuid) else { return Ok(()) };
+    let mut searchers = Vec::with_capacity(se.shards.len());
+    for shard in &se.shards {
+        shard.shard.refresh().map_err(convert::index_error)?;
+        searchers.push(shard.searcher());
+    }
+    copy_docs(cluster, &searchers, dst)
+}
+
+/// Indexes every document of `searchers` (an index's shards as of some point, e.g. a snapshot)
+/// into `dst` keeping ids, routing, versions and sequence numbers, logged like writes.
+pub fn copy_docs(cluster: &Cluster, searchers: &[search_index::Searcher], dst: &Arc<IndexMeta>) -> EsResult<()> {
+    let st = cluster.state();
     let de = cluster.engine.index(cluster, &st, dst)?;
     let table = de.table();
     let ctx = dst.mapping_ctx();
     let root = search_index::query::nested::root_filter();
-    for shard in &se.shards {
-        shard.shard.refresh().map_err(convert::index_error)?;
-        let searcher = shard.searcher();
+    for searcher in searchers {
         let mut docs = Vec::new();
         struct All<'a>(&'a mut Vec<u32>);
         struct Leaf<'a> {
@@ -856,7 +974,19 @@ pub fn copy_index(cluster: &Cluster, src: &Arc<IndexMeta>, dst: &Arc<IndexMeta>)
             let source = crate::fetch::source_bytes(&stored).map(Bytes::copy_from_slice).unwrap_or_else(|| Bytes::from_static(b"{}"));
             let value = crate::fetch::parse_source(&source)?;
             let parsed = crate::document::parse_document(&dst.mapping, &ctx, &value, Some(&source), Some(&id))?;
-            let meta = DocMeta { id: &id, routing: routing.as_deref(), source: stored_source(dst, &table, &source, &value), tsid: None };
+            // Time series documents keep their `_tsid` and the routing hash their `_id` starts
+            // with (`_ts_routing_hash`).
+            let ts = crate::engine::tsdb::is_time_series(dst).then(|| {
+                let tsid = crate::engine::tsdb::build_tsid(&crate::engine::tsdb::dimensions(dst, &parsed));
+                let hash = crate::engine::tsdb::id_routing_hash(dst, &id).map(crate::engine::tsdb::encode_hash).unwrap_or_default();
+                (tsid, hash)
+            });
+            let meta = DocMeta {
+                id: &id,
+                routing: if ts.is_some() { None } else { routing.as_deref() },
+                source: stored_source(dst, &table, &source, &value),
+                tsid: ts.as_ref().map(|(t, h)| (t.as_slice(), h.as_str())),
+            };
             let idoc = convert::to_indexable(&table, &parsed, &meta)?;
             let seq_no = crate::search::hits::meta_dv(seg, local, search_index::schema::SEQ_NO_FIELD);
             let primary_term = crate::search::hits::meta_dv(seg, local, search_index::schema::PRIMARY_TERM_FIELD);
@@ -865,7 +995,12 @@ pub fn copy_index(cluster: &Cluster, src: &Arc<IndexMeta>, dst: &Arc<IndexMeta>)
             op.origin = search_index::Origin::Replay { seq_no, primary_term, version };
             let target_shard = crate::meta::routing::shard_for(dst, &id, routing.as_deref());
             let ts = de.shard(target_shard);
-            ts.shard.index(op).map_err(convert::index_error)?;
+            if let Some(log) = &ts.log {
+                log.check()?;
+            }
+            if let search_index::OpResult::Indexed { .. } = ts.shard.index(op).map_err(convert::index_error)? {
+                log_op(ts, &LoggedOp::Index { id: &id, routing: routing.as_deref(), source: &source, seq_no, primary_term, version })?;
+            }
             ts.wrote();
         }
     }

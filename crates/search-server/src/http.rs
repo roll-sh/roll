@@ -196,6 +196,9 @@ where
         .keep_alive(true)
         .pipeline_flush(true)
         .max_buf_size(1 << 20)
+        // Neither Elasticsearch nor OpenSearch (Netty) sends a `Date` header; hyper would add one
+        // to every response, so clients and differential checks would see an extra header.
+        .auto_date_header(false)
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Duration::from_secs(30));
     let conn = builder.serve_connection(TokioIo::new(io), svc);
@@ -468,10 +471,73 @@ fn inflate(body: &[u8], gz: bool, max: usize, grow: &mut dyn FnMut(usize) -> Res
     Ok(Bytes::from(out))
 }
 
+/// Elasticsearch's default `http.compression_level` is 3, which in stock zlib (Netty's) is
+/// `deflate_fast`. zlib-rs follows zlib-ng, whose level 3 is the slower `deflate_medium`; its
+/// level 2 is `deflate_fast` and matches stock zlib's level 3 in ratio and speed (geonames pages:
+/// 4.96 vs 5.01, 3.2 vs 3.3 ms per 400 KB; zlib-rs level 3 is 5.25 at 4.3 ms).
+const GZIP_LEVEL: u32 = 2;
+/// Responses at least twice this size are deflated in chunks of it on the search pool.
+const GZIP_CHUNK: usize = 128 * 1024;
+/// Most threads one response's chunks spread over.
+const GZIP_MAX_THREADS: usize = 4;
+
 fn gzip(body: &[u8]) -> Option<Vec<u8>> {
-    let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(body.len() / 3 + 32), flate2::Compression::new(3));
+    if body.len() >= 2 * GZIP_CHUNK {
+        let threads = search_index::search::pool::cores().min(GZIP_MAX_THREADS);
+        if threads > 1 && !search_index::search::pool::in_worker() {
+            return gzip_chunked(body, GZIP_CHUNK, threads - 1);
+        }
+    }
+    let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(body.len() / 3 + 32), flate2::Compression::new(GZIP_LEVEL));
     enc.write_all(body).ok()?;
     enc.finish().ok()
+}
+
+/// One gzip member whose deflate stream is the concatenation of independently compressed
+/// chunks (pigz's independent mode): each chunk but the last ends on a sync flush, which closes
+/// its blocks on a byte boundary without `BFINAL`, so the next chunk's fresh compressor can
+/// start right after it. Back-references never cross a chunk, which costs about 1% of ratio at
+/// 128 KiB chunks and lets a large page compress on several threads.
+fn gzip_chunked(body: &[u8], chunk: usize, helpers: usize) -> Option<Vec<u8>> {
+    let parts: Vec<&[u8]> = body.chunks(chunk).collect();
+    type Part = parking_lot::Mutex<Option<(Vec<u8>, flate2::Crc)>>;
+    let outs: Vec<Part> = (0..parts.len()).map(|_| parking_lot::Mutex::new(None)).collect();
+    search_index::search::pool::for_each_index(parts.len(), helpers.min(parts.len() - 1), &|i| {
+        let deflated = deflate_part(parts[i], i + 1 == parts.len());
+        let mut crc = flate2::Crc::new();
+        crc.update(parts[i]);
+        *outs[i].lock() = deflated.map(|d| (d, crc));
+    });
+    let mut out = Vec::with_capacity(body.len() / 3 + 32);
+    // ID1 ID2 CM=deflate FLG=0 MTIME=0 XFL=0 OS=unknown, as `GzEncoder` writes it.
+    out.extend_from_slice(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 255]);
+    let mut crc = flate2::Crc::new();
+    for o in outs {
+        let (d, c) = o.into_inner()?;
+        out.extend_from_slice(&d);
+        crc.combine(&c);
+    }
+    out.extend_from_slice(&crc.sum().to_le_bytes());
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    Some(out)
+}
+
+/// Raw deflate of one chunk: ends with `BFINAL` when `last`, else on a sync flush.
+fn deflate_part(data: &[u8], last: bool) -> Option<Vec<u8>> {
+    use flate2::{Compress, Compression, FlushCompress, Status};
+    let mut c = Compress::new(Compression::new(GZIP_LEVEL), false);
+    let mut out = Vec::with_capacity(data.len() / 3 + 64);
+    let flush = if last { FlushCompress::Finish } else { FlushCompress::Sync };
+    loop {
+        let st = c.compress_vec(&data[c.total_in() as usize..], &mut out, flush).ok()?;
+        let consumed = c.total_in() as usize == data.len();
+        // A flush is complete once it returns with output space left (zlib's `avail_out != 0`).
+        match st {
+            Status::StreamEnd => return Some(out),
+            _ if !last && consumed && out.len() < out.capacity() => return Some(out),
+            _ => out.reserve(out.capacity().max(4096)),
+        }
+    }
 }
 
 /// The HTTP response; `accepts_gzip` (never for `HEAD`, whose length is the identity body's,
@@ -551,6 +617,41 @@ mod tests {
         let mut trailing = gzip(b"{}").unwrap();
         trailing.extend_from_slice(b"garbage");
         assert_eq!(&inflate(&trailing, true, 100, &mut unlimited).unwrap()[..], b"{}");
+    }
+
+    #[test]
+    fn chunked_gzip_is_one_valid_member() {
+        // JSON-ish text (compressible) and xorshift noise (incompressible: the output outgrows
+        // its first reservation), at sizes around chunk boundaries.
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut noise = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        };
+        let row = b"{\"name\":\"geo\",\"population\":12345,\"tz\":\"Europe/Berlin\"},";
+        let text: Vec<u8> = (0..700_000).map(|i| row[i % row.len()]).collect();
+        let rand: Vec<u8> = (0..700_000).map(|_| noise()).collect();
+        for data in [&text, &rand] {
+            for (len, chunk) in [(1, 1000), (999, 1000), (1000, 1000), (1001, 1000), (65_537, 4096), (262_144, GZIP_CHUNK), (262_145, GZIP_CHUNK), (700_000, GZIP_CHUNK)] {
+                for helpers in [0, 3] {
+                    let z = gzip_chunked(&data[..len], chunk, helpers).unwrap();
+                    let mut d = flate2::read::GzDecoder::new(&z[..]);
+                    let mut out = Vec::new();
+                    // GzDecoder checks the CRC and length trailer.
+                    d.read_to_end(&mut out).unwrap();
+                    assert!(out == data[..len], "len {len} chunk {chunk}");
+                    assert_eq!(&inflate(&z, true, len, &mut unlimited).unwrap()[..], &data[..len]);
+                }
+            }
+        }
+        // Large bodies take the chunked path through `gzip` and stay close to one stream's ratio.
+        let z = gzip(&text).unwrap();
+        let mut serial = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(GZIP_LEVEL));
+        serial.write_all(&text).unwrap();
+        assert!(z.len() <= serial.finish().unwrap().len() * 11 / 10 + 64);
+        assert_eq!(&inflate(&z, true, text.len(), &mut unlimited).unwrap()[..], &text[..]);
     }
 
     #[test]

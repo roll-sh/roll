@@ -275,6 +275,18 @@ fn bump(st: &mut ClusterState) -> &mut synonyms::Sets {
     Arc::make_mut(&mut st.metadata.synonyms)
 }
 
+/// The sets to change, reloading the analyzers that use them only with `refresh` (the
+/// default): with `refresh=false` Elasticsearch stores the change but analyzers keep the rules
+/// they loaded until something reloads them (`refresh=true`, `_reload_search_analyzers`, an
+/// index opening).
+fn sets_mut(st: &mut ClusterState, refresh: bool) -> &mut synonyms::Sets {
+    if refresh {
+        bump(st)
+    } else {
+        Arc::make_mut(&mut st.metadata.synonyms)
+    }
+}
+
 pub async fn put_set(ctx: &Ctx<'_>) -> EsResult<Reply> {
     let id = ctx.path_param("id").unwrap_or_default().to_string();
     let refresh = ctx.bool_param("refresh", true)?;
@@ -298,7 +310,7 @@ pub async fn put_set(ctx: &Ctx<'_>) -> EsResult<Reply> {
             for (rid, text) in rules {
                 set.rules.insert(rid.unwrap_or_else(time_based_id), text);
             }
-            bump(st).insert(set_id, Arc::new(set));
+            sets_mut(st, refresh).insert(set_id, Arc::new(set));
             Ok(created)
         })
         .await?;
@@ -397,7 +409,7 @@ pub async fn put_rule(ctx: &Ctx<'_>) -> EsResult<Reply> {
             check_count(st, others + 1)?;
             let mut set = (*set).clone();
             let created = set.rules.insert(rule_id, text).is_none();
-            bump(st).insert(sid, Arc::new(set));
+            sets_mut(st, refresh).insert(sid, Arc::new(set));
             Ok(created)
         })
         .await?;
@@ -426,9 +438,83 @@ pub async fn delete_rule(ctx: &Ctx<'_>) -> EsResult<Reply> {
             }
             let mut set = (*set).clone();
             set.rules.remove(&rule_id);
-            bump(st).insert(sid, Arc::new(set));
+            sets_mut(st, refresh).insert(sid, Arc::new(set));
             Ok(())
         })
         .await?;
     update_reply(ctx, "deleted", &set_id, refresh)
+}
+
+/// The search analyzers of `idx` a reload refreshes (`MapperService.reloadSearchAnalyzers`):
+/// those whose chain holds an updateable synonym filter — with `resource`, only one reading
+/// that synonyms set or file. In `HashSet` order, as Elasticsearch prints them.
+pub fn reloadable_analyzers(idx: &crate::meta::IndexMeta, resource: Option<&str>) -> Vec<String> {
+    let s = &idx.settings;
+    let filters = s.by_prefix("index.analysis.filter.");
+    let names: std::collections::BTreeSet<&str> = filters.keys().filter_map(|k| k.split('.').next()).collect();
+    let reloadable: Vec<&str> = names
+        .into_iter()
+        .filter(|f| {
+            let ty = filters.get(&format!("{f}.type")).unwrap_or("");
+            matches!(ty, "synonym" | "synonym_graph")
+                && filters.get(&format!("{f}.updateable")) == Some("true")
+                && resource.is_none_or(|r| {
+                    filters.get(&format!("{f}.synonyms_path")) == Some(r) || filters.get(&format!("{f}.synonyms_set")) == Some(r)
+                })
+        })
+        .collect();
+    if reloadable.is_empty() {
+        return Vec::new();
+    }
+    let analyzers = s.by_prefix("index.analysis.analyzer.");
+    let names: std::collections::BTreeSet<&str> = analyzers.keys().filter_map(|k| k.split('.').next()).collect();
+    let mut out: Vec<String> = Vec::new();
+    for a in names {
+        if analyzers.get_list(&format!("{a}.filter")).is_some_and(|l| l.iter().any(|f| reloadable.contains(&f.as_str()))) {
+            out.push(a.to_string());
+        }
+    }
+    crate::json::java_hash_order(&out, 16).into_iter().map(|i| out[i].clone()).collect()
+}
+
+/// `GET|POST /{index}/_reload_search_analyzers` (`TransportReloadAnalyzersAction`): a broadcast
+/// that runs once per index per node, so it counts every copy of one shard per index.
+/// Analysis chains rebuild from the cluster state when the synonyms version moves, so the reload
+/// bumps it (picking up changes stored with `refresh=false`) and reports the analyzers it covers.
+pub async fn reload_search_analyzers(ctx: &Ctx<'_>) -> EsResult<Reply> {
+    let resource = ctx.query("resource").map(str::to_string);
+    ctx.bool_param("preview", false)?;
+    let names = crate::api::resolve_indices(ctx, crate::meta::resolve::IndicesOptions::STRICT_EXPAND_OPEN_FORBID_CLOSED)?;
+    if names.iter().any(|n| ctx.state().metadata.indices.get(n).is_some_and(|i| !i.is_closed())) {
+        ctx.cluster
+            .update(|st| {
+                st.metadata.synonyms_version += 1;
+                Ok(())
+            })
+            .await?;
+    }
+    let st = ctx.state();
+    let (mut total, mut ok) = (0i64, 0i64);
+    let mut details = Vec::new();
+    for name in &names {
+        let Some(idx) = st.metadata.indices.get(name) else { continue };
+        if idx.is_closed() {
+            return Err(EsError::closed_index(&idx.name, &idx.uuid));
+        }
+        total += 1 + idx.number_of_replicas() as i64;
+        ok += 1;
+        let analyzers = reloadable_analyzers(idx, resource.as_deref());
+        if resource.is_some() && analyzers.is_empty() {
+            continue;
+        }
+        details.push(obj! {
+            "index" => idx.name.clone(),
+            "reloaded_analyzers" => analyzers.into_iter().map(Value::from).collect::<Vec<_>>(),
+            "reloaded_node_ids" => vec![Value::from(ctx.cluster.node.id.clone())],
+        });
+    }
+    Reply::ok(obj! {
+        "_shards" => obj! { "total" => total, "successful" => ok, "failed" => 0 },
+        "reload_details" => Value::Arr(details),
+    })
 }

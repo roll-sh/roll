@@ -59,6 +59,12 @@ impl TermStates {
             }
             ts.states.push(st);
         }
+        if let Some(g) = s.global_stats()
+            && let Some(t) = g.term_stats(field, term)
+        {
+            ts.doc_freq = t.doc_freq;
+            ts.total_term_freq = t.total_term_freq;
+        }
         ts
     }
 
@@ -376,6 +382,9 @@ impl Scorable for TermScorer {
 }
 
 impl Scorer for TermScorer {
+    fn pure_scores(&self) -> bool {
+        true
+    }
     #[inline]
     fn doc(&self) -> u32 {
         self.cursor.doc()
@@ -638,6 +647,14 @@ impl TermWeight {
         stats: Option<TermStats>,
     ) -> TermWeight {
         let states = TermStates::build(s, field, term);
+        // Lucene's `TermWeight` asks for the field's statistics whenever it scores, even for an
+        // absent term; that request is what a DFS phase records (`Searcher::with_global_stats`).
+        if states.doc_freq == 0
+            && mode.needs_scores()
+            && s.global_stats().is_some()
+        {
+            s.collection_stats(field);
+        }
         let sim = if states.doc_freq == 0 {
             None
         } else {

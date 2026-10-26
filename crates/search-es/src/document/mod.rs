@@ -20,6 +20,7 @@
 //! The output is engine-neutral ([`ParsedDocument`]): the search phase turns it into index
 //! writes, applying analyzers and normalizers.
 
+pub(crate) mod fast;
 pub mod values;
 
 use crate::error::{EsError, EsResult};
@@ -61,6 +62,14 @@ pub struct ParsedDocument {
     pub dynamic_update: Option<Mapping>,
 }
 
+/// Whether `s` is longer than a keyword's `ignore_above` limit, measured as Java's
+/// `String.length()` (UTF-16 code units: an emoji counts twice), as Elasticsearch does.
+#[inline]
+pub(crate) fn exceeds_ignore_above(s: &str, limit: usize) -> bool {
+    // UTF-16 never needs more units than UTF-8 needs bytes.
+    s.len() > limit && s.encode_utf16().count() > limit
+}
+
 /// Parses `source` (the raw request body, for error locations) whose parsed form is `doc`.
 /// `id` names the document in messages (`document with id 'x'`).
 pub fn parse_document(mapping: &Mapping, ctx: &MappingCtx, doc: &Value, source: Option<&[u8]>, id: Option<&str>) -> EsResult<ParsedDocument> {
@@ -77,13 +86,19 @@ pub fn parse_document(mapping: &Mapping, ctx: &MappingCtx, doc: &Value, source: 
     // Other failures of the dynamic pass (field name rules) are reported only when the walk
     // doesn't find them first, located.
     let mut deferred = None;
+    // The field the dynamic pass refused (`strict_allow_templates` admits the fields its
+    // templates map, so only that one fails).
+    let mut strict_field = None;
     let (effective, update, strict_pending) = match crate::mapping::dynamic::dynamic_update(mapping, doc_map, ctx) {
         Ok(Some(u)) => {
             let merged = mapping.merge(&u, ctx, MergeReason::MappingUpdate)?;
             (std::borrow::Cow::Owned(merged), Some(u), false)
         }
         Ok(None) => (std::borrow::Cow::Borrowed(mapping), None, false),
-        Err(crate::mapping::dynamic::DynamicError::Strict { .. }) => (std::borrow::Cow::Borrowed(mapping), None, true),
+        Err(crate::mapping::dynamic::DynamicError::Strict { field, path, .. }) => {
+            strict_field = Some((field, path));
+            (std::borrow::Cow::Borrowed(mapping), None, true)
+        }
         Err(crate::mapping::dynamic::DynamicError::Other(e)) => {
             deferred = Some(e);
             (std::borrow::Cow::Borrowed(mapping), None, false)
@@ -98,6 +113,7 @@ pub fn parse_document(mapping: &Mapping, ctx: &MappingCtx, doc: &Value, source: 
         ignored: BTreeSet::new(),
         nested: Vec::new(),
         strict_pending,
+        strict_field,
         array_objects: 0,
         nested_docs: 0,
         single_seen: HashSet::new(),
@@ -170,6 +186,8 @@ struct Walker<'m, 'p> {
     /// Indexes into `out.nested` of the nested documents being filled (innermost last).
     nested: Vec<NestedDoc>,
     strict_pending: bool,
+    /// `(field, path)` of the dynamic pass's strict failure.
+    strict_field: Option<(String, String)>,
     /// Objects met inside arrays so far (`index.mapping.array_objects.limit`).
     array_objects: i64,
     /// Nested documents created so far (`index.mapping.nested_objects.limit`).
@@ -254,6 +272,9 @@ impl<'m, 'p> Walker<'m, 'p> {
 
     /// Validates a field name as `DocumentParser` does.
     fn check_name(&self, name: &str) -> EsResult<()> {
+        if crate::opensearch::active() {
+            return crate::opensearch::check_field_name(name);
+        }
         if name.is_empty() {
             return Err(self.doc_error("failed to parse: field name cannot be an empty string").caused_by(EsError::illegal_argument("field name cannot be an empty string")));
         }
@@ -327,7 +348,11 @@ impl<'m, 'p> Walker<'m, 'p> {
     fn preview(&mut self) -> String {
         match self.p.current_token() {
             Some(Token::StartObject) => match self.p.map() {
-                Ok(m) => crate::json::java_map_string(&m),
+                // `XContentParser.map()` reads into `HashMap`s: Java's hash order, every level.
+                Ok(mut m) => {
+                    crate::ingest::doc::java_hash_order(&mut m, true);
+                    crate::json::java_map_string(&m)
+                }
                 Err(_) => "null".into(),
             },
             Some(Token::StartArray) => match self.p.list() {
@@ -349,8 +374,24 @@ impl<'m, 'p> Walker<'m, 'p> {
                 crate::stack::maybe_grow(|| self.object_value(child, &full, name, token, child.dynamic.unwrap_or(dynamic)))
             }
             Some(MapperRef::Field(f)) => self.field_values(f, &full, token),
-            Some(MapperRef::Alias(_)) => Err(self.doc_error(format!("Cannot write to a field alias [{full}]."))),
+            Some(MapperRef::Alias(_)) => Err(crate::opensearch::alias_write_error(&full).unwrap_or_else(|| self.doc_error(format!("Cannot write to a field alias [{full}].")))),
             None => {
+                // A dotted name under a `flattened` field (`flat.key: v`) expands up to it:
+                // the field parses `{"key": v}` (`DotExpandingXContentParser` stops at a field
+                // mapper that parses objects).
+                if name.contains('.')
+                    && let Some((i, f)) = name.match_indices('.').find_map(|(i, _)| match crate::mapping::lookup_in(om, &name[..i]) {
+                        Some(MapperRef::Field(f)) => Some((i, f)),
+                        _ => None,
+                    })
+                {
+                    if f.ty == "flattened" {
+                        return self.dotted_flattened(f, &join(path, &name[..i]), &name[i + 1..]);
+                    }
+                    if let Some(e) = self.dotted_into_leaf(f, &join(path, &name[..i]), &name[i + 1..]) {
+                        return Err(e);
+                    }
+                }
                 // Dotted names inside an object resolve against the intermediate objects.
                 // Strict columnar mappings hold every field by its dotted name at the root.
                 let subobjects = om.subobjects_enabled() && self.ctx.columnar.is_none();
@@ -405,10 +446,22 @@ impl<'m, 'p> Walker<'m, 'p> {
             let (l, c) = self.p.token_location();
             let within = if path.is_empty() { "_doc".to_string() } else { path.to_string() };
             let leaf = name.rsplit('.').next().unwrap_or(name);
+            // A field a template maps passes `strict_allow_templates`; only the refused one fails.
+            if dynamic == Dynamic::StrictAllowTemplates
+                && let Some((f, p)) = &self.strict_field
+                && (f.as_str(), p.as_str()) != (leaf, within.as_str())
+            {
+                // The value (an object a template maps, say) is not walked: the next field
+                // the walk meets must be this one's sibling.
+                self.p.skip_children();
+                return Ok(());
+            }
+            // OpenSearch's `StrictDynamicMappingException` carries no location.
+            let at = if crate::opensearch::active() { String::new() } else { format!("[{l}:{c}] ") };
             return Err(EsError::new(
                 400,
                 "strict_dynamic_mapping_exception",
-                format!("[{l}:{c}] mapping set to {}, dynamic introduction of [{leaf}] within [{within}] is not allowed", dynamic.as_str()),
+                format!("{at}mapping set to {}, dynamic introduction of [{leaf}] within [{within}] is not allowed", dynamic.as_str()),
             ));
         }
         // A dynamic field the mapping update left out was past a limit it may ignore
@@ -424,6 +477,13 @@ impl<'m, 'p> Walker<'m, 'p> {
             // outermost object that didn't fit is what's ignored.
             let head = if self.ctx.columnar.is_none() { name.split('.').next().unwrap_or(name) } else { name };
             self.ignored.insert(join(path, head));
+        }
+        // `DocumentParser`: a time series document can't carry unmapped routing fields.
+        if dynamic == Dynamic::False && !self.ctx.routing_path.is_empty() {
+            let full = join(path, name);
+            if self.ctx.routing_path.iter().any(|p| crate::xcontent::filter::glob_match(p, &full)) {
+                return Err(self.doc_error(format!("All fields matching [routing_path] must be mapped but [{full}] was declared as [dynamic: false]")));
+            }
         }
         // dynamic: false (or runtime): kept in _source only.
         self.p.skip_children();
@@ -578,6 +638,8 @@ impl<'m, 'p> Walker<'m, 'p> {
         let multi = token != Token::StartObject && !f.fields.is_empty();
         // The value is kept for the multi-fields and copy_to targets only when there are some.
         let snapshot = (multi || !f.copy_to.is_empty()).then(|| self.p.value().clone());
+        // They re-read the same token: a number as written (`1.10` stays `1.10`).
+        let raw = snapshot.as_ref().and_then(|_| values::raw_number_of(&self.p));
         // A data stream's `@timestamp` takes one value (`DataStreamTimestampFieldMapper`).
         if full == "@timestamp"
             && self.mapping.data_stream_timestamp == Some(true)
@@ -593,6 +655,15 @@ impl<'m, 'p> Walker<'m, 'p> {
             && let Err(e) = self.check_single(f, full)
         {
             return Err(self.wrap(e, f, full));
+        }
+        // `GeoPointFieldMapper`: a `position` metric takes one point per document.
+        if f.ty == "geo_point"
+            && token != Token::Null
+            && f.raw("time_series_metric").and_then(Value::as_str) == Some("position")
+            && self.out.fields.iter().any(|x| *x.name == *full)
+        {
+            let msg = format!("field type for [{full}] does not accept more than single value");
+            return Err(self.doc_error(format!("failed to parse: {msg}")).caused_by(EsError::parse(msg)));
         }
         let r = {
             let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
@@ -626,13 +697,32 @@ impl<'m, 'p> Walker<'m, 'p> {
                         }
                     }
                 }
-                for v in vals {
+                for mut v in vals {
+                    // `FlattenedFieldParser`: keys mapped under the flattened field's
+                    // `properties` are indexed only by their own mapper.
+                    if !f.props.is_empty()
+                        && let FieldValue::Flattened(pairs) = &mut v
+                    {
+                        self.flattened_props(f, full, pairs)?;
+                    }
+                    if let FieldValue::Features(new) = &mut v
+                        && self.merge_features(f, &name, new)?
+                    {
+                        continue;
+                    }
                     self.push(&name, v);
                 }
             }
             Err(e) => return Err(self.wrap(e, f, full)),
         }
         let Some(snapshot) = snapshot else { return Ok(()) };
+        // `DocumentParser.parseCopyFields`: only scalar values are copied.
+        if token == Token::StartObject && !f.copy_to.is_empty() {
+            return Err(self.doc_error(format!(
+                "Cannot copy field [{full}] to fields [{}]. Copy-to currently only works for value-type fields, not objects.",
+                f.copy_to.join(", ")
+            )));
+        }
         // Multi-fields and copy_to targets parse the same value.
         if multi {
             let mut path = String::new();
@@ -655,7 +745,7 @@ impl<'m, 'p> Walker<'m, 'p> {
                 }
                 let vals = {
                     let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
-                    values::parse_detached(&mut cx, sub, &name, &snapshot, token)?
+                    values::parse_detached_raw(&mut cx, sub, &name, &snapshot, raw.as_deref())?
                 };
                 for v in vals.unwrap_or_default() {
                     self.push(&name, v);
@@ -666,7 +756,7 @@ impl<'m, 'p> Walker<'m, 'p> {
             let Some(MapperRef::Field(tf)) = self.mapping.lookup(target) else { continue };
             let vals = {
                 let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
-                values::parse_detached(&mut cx, tf, target, &snapshot, token)?
+                values::parse_detached_raw(&mut cx, tf, target, &snapshot, raw.as_deref())?
             };
             let name = tf.full_name(target);
             for v in vals.unwrap_or_default() {
@@ -678,13 +768,112 @@ impl<'m, 'p> Walker<'m, 'p> {
                     let sub_full = format!("{target}.{sub_name}");
                     let vals = {
                         let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
-                        values::parse_detached(&mut cx, sub, &sub_full, &snapshot, token)?
+                        values::parse_detached_raw(&mut cx, sub, &sub_full, &snapshot, raw.as_deref())?
                     };
                     let sub_name = sub.full_name(&sub_full);
                     for v in vals.unwrap_or_default() {
                         self.push_copy(&sub_name, v);
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// A dotted name `<full>.<key>` whose prefix is a leaf field that only takes scalars: the
+    /// dot expansion hands that field the object `{key: value}`, which it refuses. `None` for
+    /// field types this doesn't cover (they keep the unmapped-field path).
+    fn dotted_into_leaf(&mut self, f: &FieldMapper, full: &str, key: &str) -> Option<EsError> {
+        let (nl, nc) = self.p.name_location();
+        let cause = match f.ty {
+            "keyword" | "text" | "match_only_text" | "wildcard" | "constant_keyword" | "version" | "ip" | "search_as_you_type" => {
+                EsError::illegal_state(format!("Can't get text on a START_OBJECT at {nl}:{nc}"))
+            }
+            "boolean" => EsError::illegal_state(format!("Can't get boolean value on a START_OBJECT at {nl}:{nc}")),
+            "long" | "integer" | "short" | "byte" | "double" | "float" | "half_float" | "scaled_float" | "unsigned_long" => {
+                EsError::illegal_argument("Cannot parse object as number")
+            }
+            "date" | "date_nanos" => EsError::illegal_argument("Cannot parse object or array as a date value"),
+            _ => return None,
+        };
+        let mut inner = self.p.value().clone();
+        for part in key.rsplit('.') {
+            let mut m = crate::json::Map::new();
+            m.insert(part.to_string(), inner);
+            inner = Value::Obj(m);
+        }
+        let preview = match &inner {
+            Value::Obj(m) => crate::json::java_map_string(m),
+            other => other.to_es_string(),
+        };
+        // The preview reads an object or array value whole: the error points at its end.
+        if matches!(self.p.token(), Token::StartObject | Token::StartArray) {
+            self.p.skip_children();
+        }
+        Some(
+            self.doc_error(format!("failed to parse field [{full}] of type [{}] in {}. Preview of field's value: '{preview}'", f.ty, self.desc))
+                .caused_by(cause),
+        )
+    }
+
+    /// A further object of a `rank_features` / `sparse_vector` field in the same document:
+    /// `rank_features` refuses a feature it already has; `sparse_vector` keeps each feature's
+    /// largest value (merged into the earlier value, so `true`: nothing more to push).
+    fn merge_features(&mut self, f: &FieldMapper, name: &Arc<str>, new: &mut Vec<(String, f32)>) -> EsResult<bool> {
+        let fields = match self.nested.last_mut() {
+            Some(n) => &mut n.fields,
+            None => &mut self.out.fields,
+        };
+        let Some(FieldValue::Features(old)) = fields.iter_mut().find(|x| x.name == *name).map(|x| &mut x.value) else { return Ok(false) };
+        if f.ty == "rank_features" {
+            let Some((k, _)) = new.iter().find(|(k, _)| old.iter().any(|(o, _)| o == k)) else { return Ok(false) };
+            let (l, c) = self.p.location_of(&[crate::json::locate::Seg::Key(k)]);
+            let msg = format!("[rank_features] fields do not support indexing multiple values for the same rank feature [{name}.{k}] in the same document");
+            return Err(EsError::document_parsing(format!("[{l}:{c}] failed to parse: {msg}")).caused_by(EsError::illegal_argument(msg)));
+        }
+        for (k, v) in new.drain(..) {
+            match old.iter_mut().find(|(o, _)| *o == k) {
+                Some((_, ov)) => *ov = ov.max(v),
+                None => old.push((k, v)),
+            }
+        }
+        Ok(true)
+    }
+
+    /// The value of a dotted name `<full>.<key>` where `<full>` is a `flattened` field.
+    fn dotted_flattened(&mut self, f: &'m FieldMapper, full: &str, key: &str) -> EsResult<()> {
+        let v = self.p.take_value();
+        if v.is_null() {
+            return Ok(());
+        }
+        let mut pairs = Vec::new();
+        values::flatten(&v, key, &mut pairs);
+        if !f.props.is_empty() {
+            self.flattened_props(f, full, &mut pairs)?;
+        }
+        let name = f.full_name(full);
+        self.push(&name, FieldValue::Flattened(pairs));
+        Ok(())
+    }
+
+    /// Moves the leaves of a `flattened` value whose key is mapped under its `properties` to
+    /// those sub-field mappers (`<full>.<key>`), leaving the rest to the flattened field.
+    fn flattened_props(&mut self, f: &'m FieldMapper, full: &str, pairs: &mut Vec<(String, String)>) -> EsResult<()> {
+        let mut i = 0;
+        while i < pairs.len() {
+            let Some((key, sub)) = f.props.get_key_value(pairs[i].0.as_str()) else {
+                i += 1;
+                continue;
+            };
+            let (_, text) = pairs.remove(i);
+            let sub_full = format!("{full}.{key}");
+            let vals = {
+                let mut cx = values::Cx { p: &mut self.p, ctx: self.ctx, ignored: &mut self.ignored, desc: &self.desc };
+                values::parse_detached(&mut cx, sub, &sub_full, &Value::Str(text), Token::String)?
+            };
+            let name = sub.full_name(&sub_full);
+            for v in vals.unwrap_or_default() {
+                self.push(&name, v);
             }
         }
         Ok(())
@@ -702,7 +891,7 @@ impl<'m, 'p> Walker<'m, 'p> {
             Wrap::Field => {
                 // Jackson hands back the number as the type last read: floats print as floats.
                 let preview = match (f.ty, self.p.current_token(), self.p.value()) {
-                    ("float" | "half_float", Some(Token::Number), Value::Num(crate::json::Number::Float(d))) => crate::json::write::java_float(*d as f32),
+                    ("float" | "half_float" | "knn_vector", Some(Token::Number), Value::Num(crate::json::Number::Float(d))) => crate::json::write::java_float(*d as f32),
                     _ => self.preview(),
                 };
                 let (l, c) = self.p.token_location();

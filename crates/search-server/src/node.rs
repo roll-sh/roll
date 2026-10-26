@@ -30,7 +30,7 @@
 //!   [`ClusterSpec::idle_unload`], else the node's) is unloaded: its shards are
 //!   committed to object storage and detached from the WAL, its lease released, its memory
 //!   dropped and returned to the OS. A cluster holding what lives only in memory (an open
-//!   scroll or point in time, until its last `keep_alive`; a running task) isn't idle. Woken
+//!   scroll or point in time, until the last is closed or expires; a running task) isn't idle. Woken
 //!   clusters keep their node id ([`stable_node_id`]) and `cluster_uuid`, so ids clients hold
 //!   stay valid. Every background task (idle reaper, lease renewal, async
 //!   WAL sync, flushes) exists only while a cluster that needs it is loaded, so a node with no
@@ -117,6 +117,10 @@ pub struct NodeConfig {
     /// only their metadata. For tests and throwaway nodes. Off: such a cluster stays loaded
     /// while it holds documents ([`Node::unload`] still unloads it when asked to).
     pub unload_memory_only: bool,
+    /// How old a durable snapshot copy no recorded snapshot uses (a crash between capturing
+    /// and recording a snapshot) must be before the sweep after a wake drops it
+    /// ([`search_es::api::snapshots::sweep_leftover_copies`]).
+    pub snapshot_leftover_grace: Duration,
 }
 
 impl Default for NodeConfig {
@@ -135,6 +139,7 @@ impl Default for NodeConfig {
             lease_ttl: DEFAULT_LEASE_TTL,
             memory_budget: None,
             unload_memory_only: false,
+            snapshot_leftover_grace: search_es::api::snapshots::LEFTOVER_GRACE,
         }
     }
 }
@@ -166,9 +171,6 @@ pub struct Loaded {
     spec: parking_lot::RwLock<Arc<ClusterSpec>>,
     /// Milliseconds since the node started, at the last request.
     last_used: AtomicU64,
-    /// Until when (ms since the node started) open scrolls or points in time may still be used:
-    /// the cluster isn't idle before (their searchers live only in memory).
-    pinned_until: AtomicU64,
     in_flight: AtomicUsize,
     waiting: AtomicUsize,
     permits: Arc<Semaphore>,
@@ -223,8 +225,10 @@ impl Loaded {
 
     /// Whether state that lives only in memory still needs the cluster loaded: an open scroll
     /// or point in time not yet expired, or a running task.
-    fn pinned(&self, now_ms: u64) -> bool {
-        self.pinned_until.load(Ordering::SeqCst) > now_ms || !self.cluster.tasks.list().is_empty()
+    fn pinned(&self) -> bool {
+        // Open contexts' searchers live only in memory: pinned exactly until the last one is
+        // closed or expires.
+        self.cluster.contexts.latest_expiry().is_some() || !self.cluster.tasks.list().is_empty()
     }
 }
 
@@ -306,6 +310,13 @@ pub struct Lease {
     fair: Mutex<Option<FairPermit>>,
     bytes: Reservation,
     dialect: Dialect,
+    /// Who the node authenticated with the cluster's own credentials (the owner, `elastic`, or
+    /// a credential's user); search-es trusts it ([`search_es::xpack::security::AUTHENTICATED_HEADER`]).
+    user: Option<Arc<str>>,
+    /// Credentials the cluster's own security verified instead (a native user, API key or
+    /// access token, [`auth::native_authorization`]): the `Authorization` header the request
+    /// runs with, so search-es authenticates and authorizes it as that principal.
+    native_auth: Option<String>,
 }
 
 /// Counts a request in the cluster's queue for as long as it waits, however the wait ends
@@ -376,43 +387,103 @@ impl Lease {
     }
 
     /// Runs the request on its cluster and makes its writes durable before answering.
-    pub async fn handle(&self, req: EsRequest) -> EsResponse {
-        let keep = search_keep_alive(&req);
-        let resp = self.run(req).await;
-        if let Some(k) = keep
-            && resp.status < 300
-        {
-            let until = self.node.now_ms().saturating_add(k.as_millis() as u64);
-            self.loaded.pinned_until.fetch_max(until, Ordering::SeqCst);
+    pub async fn handle(&self, mut req: EsRequest) -> EsResponse {
+        use search_es::xpack::security::AUTHENTICATED_HEADER;
+        // Only the node may say who authenticated.
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(AUTHENTICATED_HEADER));
+        if let Some(u) = &self.user {
+            req.headers.push((AUTHENTICATED_HEADER.to_string(), u.to_string()));
+        } else if let Some(h) = &self.native_auth {
+            req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+            req.headers.push(("authorization".to_string(), h.clone()));
         }
-        resp
+        self.run(req).await
+    }
+
+    /// Writes the async results a request changed to `.async-search` (a durable cluster): they
+    /// must outlive an unload, which an Elasticsearch node never does. One atomic load when
+    /// nothing changed. A failure is logged and retried with the next request or the unload.
+    async fn sync_async_results(&self) {
+        let cluster = &self.loaded.cluster;
+        if cluster.xpack.results.has_changes()
+            && let Err(e) = cluster.sync_async_results().await
+        {
+            tracing::warn!(cluster = &*self.loaded.name, error = %e.reason(), "storing async results failed");
+        }
     }
 
     async fn run(&self, req: EsRequest) -> EsResponse {
         let loaded = &self.loaded;
         loaded.requests.fetch_add(1, Ordering::Relaxed);
         let Some(data) = &loaded.data else {
-            return search_es::handle(&loaded.cluster, req).await;
+            return search_es::rest::handle_shared(&loaded.cluster, req).await;
         };
-        data.open_prepared(&loaded.cluster);
+        if let Err(e) = data.ready(&loaded.cluster).await {
+            // A shard whose WAL didn't replay must not be read or written yet.
+            tracing::warn!(cluster = &*loaded.name, error = ?e, "recovering shards failed");
+            return search_es::rest::error_response(&e.to_es(&loaded.name), &req, loaded.spec().dialect);
+        }
         let flush = is_flush(&req);
-        // Reads can't write (background tasks are the syncer's): nothing to make durable.
-        if !flush && matches!(req.method.as_str(), "GET" | "HEAD") {
-            return search_es::handle(&loaded.cluster, req).await;
+        // Reads can't write (background tasks are the syncer's): nothing to make durable, and
+        // a search never waits for the fsync of someone else's write.
+        if !flush && (matches!(req.method.as_str(), "GET" | "HEAD") || is_read_only_post(&req)) {
+            // Only reads of async results can change them; only those keep what an error
+            // response needs (no copy on the search path).
+            let err_req = reads_async_results(&req.uri)
+                .then(|| EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() });
+            let resp = search_es::rest::handle_shared(&loaded.cluster, req).await;
+            // A read that kept an async result longer (`keep_alive`) or opened a SQL cursor:
+            // Elasticsearch answers once the new expiration is stored, so the read is
+            // acknowledged like a write, and fails like one when that can't be made durable.
+            if loaded.cluster.xpack.results.has_changes() {
+                drop(self.fair.lock().take());
+                let result = match loaded.cluster.sync_async_results().await {
+                    Ok(()) => data.after_request(&loaded.cluster).await.map_err(|e| e.to_es(&loaded.name)),
+                    Err(e) => Err(e),
+                };
+                if data.failed().is_some() {
+                    self.node.spawn_force_unload(loaded);
+                }
+                if let Err(e) = result {
+                    tracing::warn!(cluster = &*loaded.name, error = %e.reason(), "storing async results not acknowledged");
+                    // A change of background work (an async search finishing) is retried by
+                    // the next request or the unload; it doesn't fail an unrelated read.
+                    if resp.status < 300
+                        && let Some(r) = &err_req
+                    {
+                        return search_es::rest::error_response(&e, r, loaded.spec().dialect);
+                    }
+                }
+            }
+            return resp;
         }
         let err_req = EsRequest { method: req.method.clone(), uri: req.uri.clone(), headers: req.headers.clone(), body: bytes::Bytes::new() };
-        let resp = search_es::handle(&loaded.cluster, req).await;
+        let resp = search_es::rest::handle_shared(&loaded.cluster, req).await;
         drop(self.fair.lock().take());
+        // Async results the request stored go to `.async-search`, acknowledged with it.
+        self.sync_async_results().await;
+        // Deployment assignments it started or stopped go to the cluster state (durable once
+        // saved), as on Elasticsearch.
+        let assignments = loaded.cluster.sync_ml_deployments(false).await;
         let mut result = data.after_request(&loaded.cluster).await;
         if result.is_ok() && flush && resp.status < 300 {
-            result = data.flush_all(&loaded.cluster, false).await.map_err(|e| data.classify(e));
+            // Only the shards this `_flush` targeted (search-es asked for them).
+            result = data.commit_flushed(&loaded.cluster).await.map_err(|e| data.classify(e));
         }
         if data.failed().is_some() {
             self.node.spawn_force_unload(loaded);
         }
-        match result {
-            Ok(()) => resp,
-            Err(e) => {
+        match (result, assignments) {
+            (Ok(()), Ok(())) => resp,
+            (Ok(()), Err(e)) => {
+                tracing::warn!(cluster = &*loaded.name, error = %e.reason(), "storing deployment assignments failed");
+                if resp.status < 300 {
+                    search_es::rest::error_response(&e, &err_req, loaded.spec().dialect)
+                } else {
+                    resp
+                }
+            }
+            (Err(e), _) => {
                 tracing::warn!(cluster = &*loaded.name, error = ?e, "write not acknowledged");
                 search_es::rest::error_response(&e.to_es(&loaded.name), &err_req, loaded.spec().dialect)
             }
@@ -463,35 +534,6 @@ impl Lease {
     }
 }
 
-/// How long a search context the request opens or extends is kept (`scroll`, a point in
-/// time's `keep_alive`), so the cluster stays loaded for it.
-fn search_keep_alive(req: &EsRequest) -> Option<Duration> {
-    let path = req.uri.split('?').next().unwrap_or("");
-    let search = path.ends_with("/_search") || path.contains("/_search/scroll") || path.ends_with("/_pit");
-    if !search {
-        return None;
-    }
-    let parse = |v: &str| search_es::units::TimeValue::parse(v, "keep_alive").ok().map(|t| t.as_millis()).filter(|ms| *ms > 0).map(|ms| Duration::from_millis(ms as u64));
-    let query = req.uri.split_once('?').map_or("", |(_, q)| q);
-    let mut keep = query
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .filter(|(k, _)| matches!(*k, "scroll" | "keep_alive"))
-        .filter_map(|(_, v)| parse(v))
-        .max();
-    // Bodies name them too (`{"scroll": ..}` of a scroll, `{"pit": {"keep_alive": ..}}`); only
-    // bodies mentioning one are parsed.
-    let body = &req.body[..];
-    let mentions = |k: &[u8]| body.windows(k.len()).any(|w| w == k);
-    if !body.is_empty() && (mentions(b"keep_alive") || mentions(b"\"scroll\""))
-        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(body)
-    {
-        let named = [v.get("scroll"), v.get("keep_alive"), v.get("pit").and_then(|p| p.get("keep_alive"))];
-        keep = keep.max(named.into_iter().flatten().filter_map(|v| v.as_str()).filter_map(parse).max());
-    }
-    keep
-}
-
 /// A cluster's node id: stable across wakes (Elasticsearch keeps it in the data path), so ids
 /// clients hold (task ids, `_nodes/<id>`) stay valid; derived from the cluster name, as tenants
 /// see one node whichever host serves them.
@@ -512,6 +554,34 @@ fn is_flush(req: &EsRequest) -> bool {
     matches!(req.method.as_str(), "POST" | "GET") && (path == "/_flush" || path.ends_with("/_flush"))
 }
 
+/// A `POST` that only reads (searches with a body): `_search`, `_msearch`, `_count`, `_mget`,
+/// `_field_caps`, `_termvectors`, `_mtermvectors`, `_explain/<id>`, `_validate/query`,
+/// `_search/scroll`, `_search/template`, `_msearch/template`, `_rank_eval`. None of them logs an
+/// operation or changes the cluster state, so none needs an acknowledgement from the WAL.
+fn is_read_only_post(req: &EsRequest) -> bool {
+    if req.method != "POST" {
+        return false;
+    }
+    let path = req.uri.split('?').next().unwrap_or("").trim_end_matches('/');
+    // `POST /i/_doc/_search` indexes a document with the id `_search`.
+    if path.split('/').any(|s| matches!(s, "_doc" | "_create" | "_update" | "_bulk")) {
+        return false;
+    }
+    let mut segs = path.rsplit('/');
+    let last = segs.next().unwrap_or("");
+    let prev = segs.next().unwrap_or("");
+    matches!(last, "_search" | "_msearch" | "_count" | "_mget" | "_field_caps" | "_termvectors" | "_mtermvectors" | "_rank_eval")
+        || matches!((prev, last), ("_search", "scroll" | "template") | ("_msearch", "template") | ("_validate", "query"))
+        || matches!(prev, "_explain" | "_termvectors")
+}
+
+/// Whether a read may change stored async results: async search, EQL, ES|QL and SQL reads
+/// (a `keep_alive` extension, a new SQL cursor).
+fn reads_async_results(uri: &str) -> bool {
+    let path = uri.split('?').next().unwrap_or("");
+    path.split('/').any(|s| matches!(s, "_async_search" | "_eql" | "_query" | "_sql"))
+}
+
 /// Why a request was turned away before reaching its cluster.
 #[derive(Debug)]
 pub struct Rejected {
@@ -520,6 +590,57 @@ pub struct Rejected {
 }
 
 const WWW_AUTHENTICATE: [&str; 3] = ["Basic realm=\"security\", charset=\"UTF-8\"", "Bearer realm=\"security\"", "ApiKey"];
+
+/// How often a held lease is renewed. Acknowledgements stop `0.8 × ttl` after a renewal was
+/// sent; a cluster that joins the renewer between two of its rounds waits up to one period
+/// for its first, so renewing every `ttl / 6` leaves a renewal `0.47 × ttl` to complete even
+/// then (a slow store, a loaded machine).
+pub fn lease_renew_period(ttl: Duration) -> Duration {
+    ttl / 6
+}
+
+/// The deadline a renewal sent at `sent` gives acknowledgements.
+fn lease_deadline(sent: Instant, ttl: Duration) -> Instant {
+    sent + ttl.mul_f64(0.8)
+}
+
+/// Renews `cluster`'s lease once, moving `deadline` on; an error once the lease is lost (a
+/// failing store is only logged: the deadline then runs out on its own).
+async fn renew_lease(leases: &dyn Leases, cluster: &str, node: &str, epoch: u64, ttl: Duration, deadline: &Mutex<Option<Instant>>) -> Result<(), anyhow::Error> {
+    let sent = Instant::now();
+    match leases.renew(cluster, node, epoch, ttl).await {
+        Ok(true) => {
+            *deadline.lock() = Some(lease_deadline(sent, ttl));
+            Ok(())
+        }
+        Ok(false) => {
+            let e = EsError::new(503, "cluster_block_exception", format!("cluster [{cluster}] lost its lease while waking up"));
+            Err(anyhow::Error::new(OpenError { error: e, source: anyhow::anyhow!("cluster [{cluster}]: lease (epoch {epoch}) lost while loading") }))
+        }
+        Err(e) => {
+            tracing::warn!(cluster, error = %e, "renewing the lease of a cluster waking up failed");
+            Ok(())
+        }
+    }
+}
+
+/// Keeps `cluster`'s lease renewed while a wake runs (every [`lease_renew_period`] after the
+/// last renewal sent), recording each new deadline in `deadline`. Returns only once the lease
+/// is lost.
+async fn keep_lease(leases: &dyn Leases, cluster: &str, node: &str, epoch: u64, ttl: Duration, deadline: &Mutex<Option<Instant>>) -> anyhow::Error {
+    loop {
+        let last_sent = deadline.lock().map_or_else(Instant::now, |d| d - ttl.mul_f64(0.8));
+        tokio::time::sleep_until((last_sent + lease_renew_period(ttl)).into()).await;
+        if let Err(e) = renew_lease(leases, cluster, node, epoch, ttl, deadline).await {
+            return e;
+        }
+    }
+}
+
+/// The user a verified claim authenticates: its credential's user, else the cluster's owner.
+fn authenticated_user(c: &auth::Claim) -> Arc<str> {
+    Arc::from(c.user.as_deref().unwrap_or("elastic"))
+}
 
 fn unauthorized(reason: String) -> EsError {
     EsError::security(401, reason).with_header_values("WWW-Authenticate", WWW_AUTHENTICATE.iter().map(|s| s.to_string()).collect())
@@ -730,7 +851,7 @@ impl Node {
             match leases.acquire(&name, self.node_id(), ttl).await? {
                 Ok(epoch) => {
                     held = Some(HeldLease { epoch });
-                    deadline = Some(sent + ttl.mul_f64(0.8));
+                    deadline = Some(lease_deadline(sent, ttl));
                 }
                 Err(owner) => {
                     let e = EsError::new(503, "cluster_block_exception", format!("cluster [{name}] is served by node [{}]", owner.node))
@@ -747,7 +868,41 @@ impl Node {
                 let _ = l.release(&name, node.node_id(), h.epoch).await;
             }
         };
-        let r = self.load_inner(&spec, data_store, deadline, held.map_or(0, |h| h.epoch)).await;
+        let r = match (self.leases.get(), held) {
+            (Some(leases), Some(h)) => {
+                // A wake can outlast the lease (a long WAL replay): keep it renewed meanwhile,
+                // so the cluster comes up with a fresh deadline instead of losing its lease on
+                // its first acknowledgement.
+                let renewed = Mutex::new(deadline);
+                let load = self.load_inner(&spec, data_store, deadline, h.epoch);
+                let ttl = self.cfg.lease_ttl;
+                let keep = keep_lease(leases.as_ref(), &name, self.node_id(), h.epoch, ttl, &renewed);
+                tokio::pin!(load, keep);
+                let lost = tokio::select! {
+                    r = &mut load => Ok(r),
+                    lost = &mut keep => Err(lost),
+                };
+                let mut r = match lost {
+                    Ok(r) => r,
+                    // Finish the load (it isn't cancellation safe) and drop what it built.
+                    Err(lost) => load.await.and_then(|_| Err(lost)),
+                };
+                // The renewer may run its next round only a period from now: a lease last
+                // renewed longer ago than that is renewed before the cluster serves anything.
+                let stale = renewed.lock().is_some_and(|d| d - ttl.mul_f64(0.8) + lease_renew_period(ttl) <= Instant::now());
+                if r.is_ok()
+                    && stale
+                    && let Err(lost) = renew_lease(leases.as_ref(), &name, self.node_id(), h.epoch, ttl, &renewed).await
+                {
+                    r = Err(lost);
+                }
+                if let Ok((_, _, Some(data), _)) = &r {
+                    data.set_lease_deadline(*renewed.lock());
+                }
+                r
+            }
+            _ => self.load_inner(&spec, data_store, deadline, 0).await,
+        };
         // The catalog may have changed since the request that started this wake read it (a
         // password rotated, limits changed): take the current description. Later changes find
         // the slot loading and wait in `pending_specs`.
@@ -781,7 +936,6 @@ impl Node {
             name: name.as_str().into(),
             spec: parking_lot::RwLock::new(Arc::new(spec)),
             last_used: AtomicU64::new(self.now_ms()),
-            pinned_until: AtomicU64::new(0),
             in_flight: AtomicUsize::new(0),
             waiting: AtomicUsize::new(0),
             permits: Arc::new(Semaphore::new(permits)),
@@ -840,6 +994,12 @@ impl Node {
                 data.set_verify_owner(verify_owner);
                 cluster.engine = search_es::engine::Engine::with_storage(data.clone());
                 stats = data.recover(&cluster).await?;
+                // Async results an earlier instance stored; their changes are stored from now on.
+                if let Err(e) = cluster.restore_async_results() {
+                    tracing::warn!(cluster = spec.name, error = %e.reason(), "reading stored async results failed");
+                }
+                // Deployments it had running start again, as after an Elasticsearch restart.
+                cluster.restore_ml_deployments();
                 Some(data)
             }
             None => None,
@@ -847,6 +1007,16 @@ impl Node {
         let cluster = Arc::new(cluster);
         // `wait_for_completion=false` by-query tasks run on after their response.
         cluster.enable_background_tasks();
+        if data.is_some() {
+            // Snapshot copies a crash left unrecorded; off the wake path (it lists the pins).
+            let (c, grace) = (Arc::downgrade(&cluster), self.cfg.snapshot_leftover_grace);
+            tokio::spawn(async move {
+                let Some(c) = c.upgrade() else { return };
+                if let Err(e) = search_es::api::snapshots::sweep_leftover_copies(&c, grace).await {
+                    tracing::debug!(cluster = c.name, error = %e.reason(), "sweeping leftover snapshot copies failed");
+                }
+            });
+        }
         Ok((cluster, meta, data, stats))
     }
 
@@ -870,7 +1040,7 @@ impl Node {
         map.iter()
             .filter_map(|(k, s)| s.get().map(|l| (k, l)))
             .filter(|(_, l)| {
-                if l.pinned(now) {
+                if l.pinned() {
                     l.last_used.fetch_max(now, Ordering::SeqCst);
                     return false;
                 }
@@ -920,8 +1090,28 @@ impl Node {
             l
         };
         self.hooks.unloading(&loaded.cluster).await;
+        if flush
+            && loaded.data.is_some()
+            && let Err(e) = loaded.cluster.sync_async_results().await
+        {
+            tracing::warn!(cluster = name, error = %e.reason(), "storing async results on unload failed");
+        }
+        if flush
+            && loaded.data.is_some()
+            && let Err(e) = loaded.cluster.sync_ml_deployments(true).await
+        {
+            tracing::warn!(cluster = name, error = %e.reason(), "storing deployment assignments on unload failed");
+        }
         // Requests still running on this instance (a forced unload) can't change it any more.
         loaded.meta.close();
+        if !flush
+            && loaded.lease.is_some()
+            && let Some(d) = &loaded.data
+        {
+            // Nor acknowledge anything: once the lease is released below, the next owner may
+            // replay the WAL before a write still in flight here is durable.
+            d.revoke_lease();
+        }
         if let Some(d) = &loaded.data {
             let flush = flush && d.failed().is_none();
             if let Err(e) = d.close(&loaded.cluster, flush).await {
@@ -1151,8 +1341,7 @@ impl Node {
             return evicted;
         }
         // Clusters holding scrolls or points in time go last.
-        let now = self.now_ms();
-        sizes.sort_by_key(|(l, _)| (l.pinned(now), l.last_used.load(Ordering::SeqCst)));
+        sizes.sort_by_key(|(l, _)| (l.pinned(), l.last_used.load(Ordering::SeqCst)));
         for (l, r) in sizes {
             if total.saturating_add(room) <= budget {
                 break;
@@ -1268,8 +1457,8 @@ impl Node {
         });
     }
 
-    /// Renews the leases of loaded clusters every `ttl / 3`; a cluster whose lease is lost is
-    /// dropped. Runs only while a leased cluster is loaded.
+    /// Renews the leases of loaded clusters every [`lease_renew_period`]; a cluster whose
+    /// lease is lost is dropped. Runs only while a leased cluster is loaded.
     fn ensure_renewer(self: &Arc<Self>) {
         // Called on every request of a leased cluster: a load, not a write, when running.
         if self.renewer.load(Ordering::SeqCst) || self.renewer.swap(true, Ordering::SeqCst) {
@@ -1287,7 +1476,7 @@ impl Node {
                     drop(n);
                     let unloaded = residency.notified();
                     tokio::select! {
-                        _ = tokio::time::sleep(ttl / 3) => {}
+                        _ = tokio::time::sleep(lease_renew_period(ttl)) => {}
                         _ = unloaded => {}
                     }
                     ttl
@@ -1313,7 +1502,7 @@ impl Node {
                         for (l, ok) in held.iter().zip(renewed) {
                             if ok {
                                 if let Some(d) = &l.data {
-                                    d.set_lease_deadline(Some(sent + ttl.mul_f64(0.8)));
+                                    d.set_lease_deadline(Some(lease_deadline(sent, ttl)));
                                 }
                             } else {
                                 tracing::warn!(cluster = &*l.name, epoch = l.epoch(), "lost the cluster's lease; dropping it");
@@ -1349,6 +1538,7 @@ impl Node {
     pub async fn enter(self: &Arc<Self>, req: &EsRequest, sni: Option<&str>) -> Result<Lease, Rejected> {
         let reject = |error: EsError| Rejected { error, dialect: Dialect::Elasticsearch };
         let presented;
+        let mut host_cluster = None;
         let claim = match &self.cfg.default_cluster {
             Some(_) => {
                 presented = Presented::None;
@@ -1356,7 +1546,7 @@ impl Node {
             }
             None => {
                 presented = auth::parse_authorization(req.header("authorization")).map_err(|m| reject(malformed(m)))?;
-                let host_cluster = sni
+                host_cluster = sni
                     .and_then(|s| auth::host_label(s, self.cfg.domain.as_deref()))
                     .or_else(|| req.header("host").and_then(|h| auth::host_label(h, self.cfg.domain.as_deref())));
                 Some(auth::claim(&presented, host_cluster))
@@ -1385,16 +1575,35 @@ impl Node {
             (None, Some(name)) => name.as_str(),
             (None, None) => return Err(failed()),
         };
+        // Credentials that aren't the cluster's own may be a principal of the cluster's
+        // security (native user, API key, access token): checked once the cluster is loaded.
+        let native = claim.as_ref().and_then(|c| auth::native_authorization(&presented, c, host_cluster));
+        let native_ok = |loaded: &Loaded| native.as_deref().is_some_and(|h| search_es::xpack::security::authenticate_native(&loaded.cluster, h).is_some());
         // Fast path: a loaded cluster checks against its shared description, no catalog read.
         if let Some(loaded) = self.get_loaded(name) {
             let spec = loaded.spec();
+            let mut via_native = false;
             if let Some(c) = &claim
                 && !auth::verify(&spec, c)
             {
-                return Err(failed());
+                if !native_ok(&loaded) {
+                    return Err(failed());
+                }
+                via_native = true;
+            }
+            // Draining (SIGTERM): nothing new starts, so the requests in flight finish and the
+            // cluster flushes and hands its lease over instead of being starved by a steady
+            // stream of requests. Refused before running: the proxy resends it to the next owner.
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return Err(Rejected { error: EsError::new(503, "node_closed_exception", "node is shutting down"), dialect: spec.dialect });
             }
             // Otherwise it is being unloaded: wake it again below.
-            if let Ok(lease) = self.pin(loaded, spec.dialect) {
+            if let Ok(mut lease) = self.pin(loaded, spec.dialect) {
+                if via_native {
+                    lease.native_auth = native.clone();
+                } else {
+                    lease.user = claim.as_ref().map(authenticated_user);
+                }
                 return self.admitted(lease, req);
             }
         }
@@ -1403,10 +1612,14 @@ impl Node {
             None if self.cfg.default_cluster.is_some() => ClusterSpec::new(name.to_string()),
             None => return Err(failed()),
         };
+        let mut via_native = false;
         if let Some(c) = &claim
             && !auth::verify(&spec, c)
         {
-            return Err(failed());
+            if native.is_none() {
+                return Err(failed());
+            }
+            via_native = true;
         }
         let dialect = spec.dialect;
         loop {
@@ -1420,8 +1633,18 @@ impl Node {
                 };
                 Rejected { error, dialect }
             })?;
+            if via_native && !native_ok(&loaded) {
+                return Err(failed());
+            }
             match self.pin(loaded, dialect) {
-                Ok(lease) => return self.admitted(lease, req),
+                Ok(mut lease) => {
+                    if via_native {
+                        lease.native_auth = native.clone();
+                    } else {
+                        lease.user = claim.as_ref().map(authenticated_user);
+                    }
+                    return self.admitted(lease, req);
+                }
                 Err(()) => tokio::task::yield_now().await,
             }
         }
@@ -1431,7 +1654,7 @@ impl Node {
     /// protocol in the module docs: count first, then check `closed`).
     fn pin(self: &Arc<Self>, loaded: Arc<Loaded>, dialect: Dialect) -> Result<Lease, ()> {
         loaded.in_flight.fetch_add(1, Ordering::SeqCst);
-        let lease = Lease { loaded, node: self.clone(), permit: None, fair: Mutex::new(None), bytes: Reservation::none(), dialect };
+        let lease = Lease { loaded, node: self.clone(), permit: None, fair: Mutex::new(None), bytes: Reservation::none(), dialect, user: None, native_auth: None };
         if lease.loaded.closed.load(Ordering::SeqCst) {
             // Unloaded (or being unloaded) under us: the lease's drop uncounts it.
             return Err(());
@@ -1796,24 +2019,6 @@ mod tests {
         assert!(n.take_request_counts().is_empty());
     }
 
-    #[test]
-    fn keep_alives_of_search_contexts() {
-        let k = |method: &str, uri: &str, body: &str| search_keep_alive(&EsRequest::json(method, uri, body.to_string())).map(|d| d.as_millis());
-        assert_eq!(k("GET", "/i/_search?scroll=1m", ""), Some(60_000));
-        assert_eq!(k("POST", "/i/_search?size=1&scroll=30s", "{}"), Some(30_000));
-        assert_eq!(k("POST", "/i/_pit?keep_alive=5m", ""), Some(300_000));
-        assert_eq!(k("POST", "/_search/scroll", r#"{"scroll":"2m","scroll_id":"x"}"#), Some(120_000));
-        assert_eq!(k("POST", "/_search/scroll/abc?scroll=10s", ""), Some(10_000));
-        assert_eq!(k("POST", "/_search", r#"{"pit":{"id":"x","keep_alive":"90s"}}"#), Some(90_000));
-        assert_eq!(k("POST", "/_search?scroll=1s", r#"{"pit":{"id":"x","keep_alive":"1h"}}"#), Some(3_600_000));
-        // Not searches, no keep-alive, or nonsense.
-        assert_eq!(k("POST", "/i/_doc?scroll=1m", "{}"), None);
-        assert_eq!(k("POST", "/i/_search", r#"{"query":{"match_all":{}}}"#), None);
-        assert_eq!(k("DELETE", "/_search/scroll", r#"{"scroll_id":["x"]}"#), None);
-        assert_eq!(k("GET", "/i/_search?scroll=-1", ""), None);
-        assert_eq!(k("GET", "/i/_search?scroll=soon", ""), None);
-    }
-
     #[tokio::test]
     async fn open_scrolls_keep_their_cluster_loaded() {
         let (n, _) = node(NodeConfig { idle_unload: Some(Duration::from_millis(40)), unload_memory_only: true, ..NodeConfig::default() });
@@ -1843,8 +2048,10 @@ mod tests {
         let r = send("POST", "/_search/scroll", &format!(r#"{{"scroll":"1m","scroll_id":"{id}"}}"#), c1).await;
         assert_eq!(r.status, 200, "{:?}", r.body_json());
         assert_eq!(r.body_json().pointer(&["hits", "hits"]).and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
-        // Once its scroll has expired, the cluster idles out as usual.
-        n.get_loaded("c1").unwrap().pinned_until.store(0, Ordering::SeqCst);
+        // Once its last scroll is closed, the cluster idles out as usual (no need to wait for
+        // the keep-alive).
+        let r = send("DELETE", "/_search/scroll", &format!(r#"{{"scroll_id":"{id}"}}"#), c1).await;
+        assert_eq!(r.status, 200, "{:?}", r.body_json());
         tokio::time::timeout(Duration::from_secs(5), async {
             while n.get_loaded("c1").is_some() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1852,6 +2059,42 @@ mod tests {
         })
         .await
         .expect("c1 unloads once its scroll expired");
+    }
+
+    /// A point in time pins its cluster until it is closed or its keep alive passes, whichever
+    /// comes first; nothing waits for the longest keep alive ever given.
+    #[tokio::test]
+    async fn points_in_time_pin_until_closed_or_expired() {
+        let (n, _) = node(NodeConfig { idle_unload: Some(Duration::from_millis(40)), unload_memory_only: true, ..NodeConfig::default() });
+        let send = |method: &str, uri: &str, body: &str| {
+            let mut r = EsRequest::json(method, uri, body.to_string());
+            r.headers.push(("Authorization".into(), basic("c1", "pw1")));
+            let n = n.clone();
+            async move { n.handle(r).await }
+        };
+        let gone = |n: Arc<Node>| async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while n.get_loaded("c1").is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok()
+        };
+        assert_eq!(send("PUT", "/i/_doc/1?refresh=true", r#"{"f":1}"#).await.status, 201);
+        // Closed explicitly: unloads right after, though the keep alive is an hour.
+        let r = send("POST", "/i/_pit?keep_alive=1h", "").await;
+        assert_eq!(r.status, 200);
+        let id = r.body_json().get("id").and_then(|v| v.as_str()).unwrap().to_string();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(n.get_loaded("c1").is_some(), "an open point in time keeps its cluster loaded");
+        assert_eq!(send("DELETE", "/_pit", &format!(r#"{{"id":"{id}"}}"#)).await.status, 200);
+        assert!(gone(n.clone()).await, "unloads once the point in time is closed");
+        // Expired: unloads once the (short) keep alive passed, without a close.
+        assert_eq!(send("POST", "/i/_pit?keep_alive=300ms", "").await.status, 200);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(n.get_loaded("c1").is_some());
+        assert!(gone(n.clone()).await, "unloads once the keep alive passed");
     }
 
     #[tokio::test]
@@ -2059,6 +2302,33 @@ mod tests {
         async fn delete(&self, _cluster: &str) -> anyhow::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn read_only_posts() {
+        let post = |uri: &str| is_read_only_post(&EsRequest::json("POST", uri, Vec::new()));
+        for uri in [
+            "/_search",
+            "/i/_search?q=x",
+            "/i,j/_msearch",
+            "/_count",
+            "/i/_mget",
+            "/i/_field_caps?fields=*",
+            "/i/_termvectors/1",
+            "/_mtermvectors",
+            "/i/_explain/1",
+            "/i/_validate/query",
+            "/_search/scroll",
+            "/i/_search/template",
+            "/_msearch/template",
+            "/i/_rank_eval",
+        ] {
+            assert!(post(uri), "{uri}");
+        }
+        for uri in ["/i/_doc", "/i/_bulk", "/i/_update/1", "/i/_delete_by_query", "/i/_update_by_query", "/_reindex", "/i/_refresh", "/i/_flush", "/i/_pit", "/_async_search", "/i/_doc/_search", "/i/_create/_count"] {
+            assert!(!post(uri), "{uri}");
+        }
+        assert!(!is_read_only_post(&EsRequest::json("PUT", "/i/_search", Vec::new())));
     }
 
     #[tokio::test]

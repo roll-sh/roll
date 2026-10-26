@@ -216,6 +216,7 @@ impl BinaryQuantizer {
 
 /// `Σₖ 2ᵏ·popcount(planeₖ ∧ code)`: the dot product of a 4-bit query and a one-bit code.
 #[inline]
+#[cfg_attr(target_arch = "aarch64", allow(unreachable_code))]
 fn plane_dots(planes: &[u64], code: &[u8], words: usize) -> u32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -224,7 +225,51 @@ fn plane_dots(planes: &[u64], code: &[u8], words: usize) -> u32 {
             return unsafe { plane_dots_popcnt(planes, code, words) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is part of the aarch64 baseline; loads stay inside both slices.
+        return unsafe { plane_dots_neon(planes, code, words) };
+    }
     plane_dots_portable(planes, code, words)
+}
+
+/// NEON [`plane_dots`]: two words per step, per-byte popcounts (`cnt`) of each plane ∧ code
+/// summed pairwise into 16-bit lanes (`uadalp`, at most 16 per lane per step, folded into 32
+/// bits long before they could wrap); scalar `count_ones` on aarch64 would move every word to
+/// a vector register and back.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn plane_dots_neon(planes: &[u64], code: &[u8], words: usize) -> u32 {
+    use std::arch::aarch64::*;
+    // Words both the code and every plane hold (plane k starts at k * words).
+    let n = if planes.len() >= 4 * words { words.min(code.len() / 8) } else { 0 };
+    let mut dots = [0u32; 4];
+    let mut w = 0;
+    while w + 2 <= n {
+        let mut acc = [vdupq_n_u16(0); 4];
+        let stop = n.min(w + 2 * 2048);
+        // SAFETY: 16-byte loads of words w and w + 1, both < n.
+        unsafe {
+            while w + 2 <= stop {
+                let c = vld1q_u8(code.as_ptr().add(w * 8));
+                for (k, a) in acc.iter_mut().enumerate() {
+                    let p = vld1q_u8(planes.as_ptr().add(k * words + w) as *const u8);
+                    *a = vpadalq_u8(*a, vcntq_u8(vandq_u8(p, c)));
+                }
+                w += 2;
+            }
+        }
+        for (d, a) in dots.iter_mut().zip(acc) {
+            *d += vaddlvq_u16(a);
+        }
+    }
+    for (wi, c) in code.as_chunks::<8>().0.iter().enumerate().take(words).skip(w) {
+        let b = u64::from_le_bytes(*c);
+        for (k, d) in dots.iter_mut().enumerate() {
+            *d += (planes[k * words + wi] & b).count_ones();
+        }
+    }
+    dots[0] + 2 * dots[1] + 4 * dots[2] + 8 * dots[3]
 }
 
 /// The same loop compiled with the `popcnt` instruction (baseline x86-64 lacks it, and
@@ -302,7 +347,7 @@ mod tests {
     #[test]
     fn popcnt_matches_portable() {
         let mut rng = StdRng::seed_from_u64(4);
-        for words in [1usize, 2, 6, 13] {
+        for words in [1usize, 2, 3, 6, 13, 64, 4099] {
             let planes: Vec<u64> = (0..4 * words).map(|_| rng.r#gen()).collect();
             let code: Vec<u8> = (0..8 * words).map(|_| rng.r#gen()).collect();
             assert_eq!(plane_dots(&planes, &code, words), plane_dots_portable(&planes, &code, words));

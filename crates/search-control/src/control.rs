@@ -2,11 +2,12 @@
 //! at a point in time), unloading, the request console, metering and the cost estimate.
 //!
 //! Serving is done by a [`search_server::Node`] built here: its [`Catalog`] is this control
-//! plane's SQLite store ([`SqlCatalog`]), its metadata and segments live in a
-//! [`search_store::Store`] on the node's object storage, and its lifecycle hooks feed the
-//! [`Meter`]. A cluster's name is its identity on the node (the Basic auth user, the host label
-//! under `--search-domain`, `cluster_name`, its key in object storage), so names are immutable
-//! and limited to DNS labels; the API also accepts the generated id.
+//! plane's store ([`SqlCatalog`]), its metadata and shards live in a [`search_store::Store`] on
+//! the node's object storage (documents are durable: WAL group commits, segments, manifests),
+//! and its lifecycle hooks feed the [`Meter`]. A cluster's name is its identity on the node (the
+//! Basic auth user, the host label under `--search-domain`, `cluster_name`, its key in object
+//! storage), so names are immutable and limited to DNS labels; the API also accepts the
+//! generated id.
 //!
 //! The password is returned when a cluster is created and when it is rotated, and never
 //! otherwise. The node compares presented secrets in constant time against the catalog's.
@@ -14,19 +15,32 @@
 //! Changing a cluster (password, settings, delete) takes effect on the node before the call
 //! returns, also when a request is waking the cluster at that moment ([`crate::wake`]): every
 //! change is serialized with applying it to the loaded instance (`specs`), and waits for wakes
-//! that may have read the old description. What is fixed when a cluster opens (its dialect, the
-//! `destructive_requires_name` default, its concurrency permits) changes by a reload, done as
-//! soon as no request runs.
+//! that may have read the old description. Limits and credentials apply live (the node resizes
+//! a cluster's permits in place); what the engine fixes when a cluster opens (its dialect and
+//! the `destructive_requires_name` default) changes by a reload, done as soon as no request
+//! runs.
+//!
+//! **A fleet** ([`FleetConfig`]): several nodes share one catalog (Postgres, or a SQLite file
+//! on one host), each cluster is served by the node holding its lease (`search_server::lease`,
+//! epochs fencing writes in search-store), nodes heartbeat their addresses for the front proxy
+//! (`search_proxy::fleet`), and writes are acknowledged once in object storage. Changes made
+//! through one node reach the others through the catalog's change counter
+//! ([`Store::changes_since`]), followed while a node holds clusters; a delete hides the cluster,
+//! waits for its owner to let go of it, then removes its data. API calls about a cluster another
+//! node holds (console, indices, unload, branch) are forwarded to that node's API
+//! ([`Control::owner_api`]). Garbage collection runs on one node at a time (a `_gc` lease).
 
 use crate::meter::{Meter, MeterHooks, engine_figures, index_figures, now_ms};
-pub use crate::wake::SqlCatalog;
-use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use crate::pricing::{Cost, Pricing};
 use crate::store::{SearchCluster, Store, UsageTotals};
+pub use crate::wake::SqlCatalog;
+use crate::wake::{ControlHooks, GuardedStores, LOAD_WAIT, Wakes};
 use base64::Engine;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use search_es::{Dialect, EsRequest, EsResponse};
+use search_proxy::fleet::{Beat, Heartbeat, Members};
+use search_server::lease::Leases;
 use search_server::node::Loaded;
 use search_server::{ClusterSpec, Credential, Node, NodeConfig, ObjectStores};
 use search_store::{Objects, StoreConfig, WalConfig};
@@ -34,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -66,17 +80,22 @@ pub struct SearchConfig {
     pub public_host: String,
     pub http_port: u16,
     pub tls: bool,
+    /// Where clients reach the clusters when that isn't this node's listener (a load balancer
+    /// or a Lambda function URL in front of a fleet): its scheme, host and port go into
+    /// cluster URLs instead of `public_host`, `http_port` and `tls`.
+    pub public_url: Option<String>,
     /// With a domain, clusters are reached at `<name>.<domain>` (TLS SNI or `Host` routing).
     pub domain: Option<String>,
     /// Default idle time before a cluster unloads (a cluster's own `idle_timeout_s` wins).
     pub idle_unload: Duration,
     /// Local disk cache budget for segments.
     pub cache_bytes: u64,
-    /// Acknowledge writes once the WAL is in object storage (ephemeral disks).
+    /// Acknowledge writes once the WAL is in object storage (ephemeral disks; always on in a
+    /// fleet).
     pub sync_objects: bool,
     /// Point-in-time branching window: commit points and cluster states stay this long.
     pub history_retention: Duration,
-    /// Garbage collection of unreferenced segments and WAL files (one node per bucket).
+    /// Garbage collection of unreferenced segments and WAL files.
     pub gc_interval: Option<Duration>,
     /// How often loaded clusters are metered.
     pub metering_interval: Duration,
@@ -85,8 +104,62 @@ pub struct SearchConfig {
     pub test_features: bool,
     /// How often a loaded cluster's figures (docs, stored bytes) are re-read from storage.
     pub stats_interval: Duration,
+    /// Memory all loaded clusters may hold together (`None`: no node budget).
+    pub memory_budget: Option<u64>,
+    /// Bearer token the `/v1/search` API requires (`None`: open, like rolld's local API).
+    pub api_token: Option<String>,
+    /// Join a fleet of nodes sharing a catalog (`None`: a single node with `search.db`).
+    pub fleet: Option<FleetConfig>,
     pub defaults: Defaults,
     pub pricing: Pricing,
+}
+
+/// A node of a fleet: where the shared metadata lives and how the proxy reaches this node.
+#[derive(Clone, Debug)]
+pub struct FleetConfig {
+    /// `postgres://…` (a fleet) or a SQLite file shared by the nodes of one host. Holds the
+    /// catalog, the ownership leases and the node records.
+    pub meta: String,
+    /// More CA certificates (PEM) for the metadata Postgres (the RDS bundle).
+    pub meta_ca: Option<PathBuf>,
+    /// The metadata password when the URL has none (an RDS-managed secret).
+    pub meta_password: Option<String>,
+    /// Unique per running node: the lease identity and the node record's key.
+    pub node_id: String,
+    pub az: Option<String>,
+    /// `host:port` proxies reach this node's Elasticsearch REST listener on.
+    pub advertise_http: String,
+    /// `host:port` of this node's control API, for proxies and for forwarding between nodes.
+    pub advertise_api: Option<String>,
+    /// SHA-256 (hex) of the certificate the REST listener serves, when it serves TLS: proxies
+    /// then connect with TLS and accept only this certificate (`search_proxy::upstream`).
+    pub tls_pin: Option<String>,
+    /// The control API listener serves TLS with the same certificate (`api::TlsListener`):
+    /// proxies and other nodes reach it over TLS pinned to `tls_pin`.
+    pub api_tls: bool,
+    pub heartbeat: Duration,
+    pub lease_ttl: Duration,
+    /// How often catalog changes are followed while clusters are loaded.
+    pub follow: Duration,
+}
+
+impl FleetConfig {
+    pub fn new(meta: impl Into<String>, node_id: impl Into<String>, advertise_http: impl Into<String>) -> FleetConfig {
+        FleetConfig {
+            meta: meta.into(),
+            meta_ca: None,
+            meta_password: None,
+            node_id: node_id.into(),
+            az: None,
+            advertise_http: advertise_http.into(),
+            advertise_api: None,
+            tls_pin: None,
+            api_tls: false,
+            heartbeat: Duration::from_secs(1),
+            lease_ttl: search_server::node::DEFAULT_LEASE_TTL,
+            follow: Duration::from_secs(1),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -107,6 +180,7 @@ impl SearchConfig {
             public_host: "127.0.0.1".into(),
             http_port: 59200,
             tls: false,
+            public_url: None,
             domain: None,
             idle_unload: Duration::from_secs(300),
             cache_bytes: 10 << 30,
@@ -116,6 +190,9 @@ impl SearchConfig {
             metering_interval: Duration::from_secs(60),
             test_features: false,
             stats_interval: Duration::from_secs(600),
+            memory_budget: None,
+            api_token: None,
+            fleet: None,
             defaults: Defaults {
                 flavor: "elasticsearch".into(),
                 idle_timeout_s: 300,
@@ -176,6 +253,12 @@ pub const CONSOLE_MAX_BODY: usize = 4 << 20;
 /// What an "always on" idle timeout becomes on the node (a century).
 const ALWAYS_ON: Duration = Duration::from_secs(100 * 365 * 86_400);
 
+/// The lease name garbage collection runs under (not a valid cluster name: no collision).
+pub const GC_LEASE: &str = "_gc";
+
+/// Header marking an API call one node forwarded to another (never forwarded again).
+pub const FORWARDED_HEADER: &str = "x-roll-search-forwarded";
+
 const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
 
 fn random_string(n: usize) -> String {
@@ -222,17 +305,39 @@ pub fn spec_for(c: &SearchCluster) -> ClusterSpec {
     spec
 }
 
-/// `target` as a loaded instance can take it now, and whether it needs a reload: the dialect,
-/// the `destructive_requires_name` default and the concurrency permits are fixed at load.
+/// `target` as a loaded instance can take it now, and whether it needs a reload: the dialect
+/// and the `destructive_requires_name` default are fixed when the engine opens the cluster.
+/// Everything else (credentials, limits, permits) the node applies in place.
 pub(crate) fn live_spec(mut target: ClusterSpec, l: &Loaded) -> (ClusterSpec, bool) {
-    let max_in_flight = l.spec().max_in_flight;
-    let reload = target.dialect != l.cluster.dialect
-        || target.destructive_requires_name != l.cluster.config.destructive_requires_name
-        || target.max_in_flight != max_in_flight;
+    let reload = target.dialect != l.cluster.dialect || target.destructive_requires_name != l.cluster.config.destructive_requires_name;
     target.dialect = l.cluster.dialect;
     target.destructive_requires_name = l.cluster.config.destructive_requires_name;
-    target.max_in_flight = max_in_flight;
     (target, reload)
+}
+
+/// Where clients reach cluster `name`: the front (`public_url`) when there is one, else this
+/// node's listener; with a domain, the cluster's own host name under it.
+fn connection_of(cfg: &SearchConfig, name: &str) -> Value {
+    let front = cfg.public_url.as_deref().and_then(|u| reqwest::Url::parse(u).ok()).filter(|u| u.host_str().is_some());
+    let (scheme, base_host, port) = match &front {
+        Some(u) => (u.scheme(), u.host_str().unwrap_or_default().to_string(), u.port_or_known_default().unwrap_or(443)),
+        None => (if cfg.tls { "https" } else { "http" }, cfg.public_host.clone(), cfg.http_port),
+    };
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let port_part = if port == default_port { String::new() } else { format!(":{port}") };
+    let host = match &cfg.domain {
+        Some(d) => format!("{name}.{d}"),
+        None => base_host,
+    };
+    json!({ "url": format!("{scheme}://{host}{port_part}"), "host": host, "port": port, "username": name })
+}
+
+/// `url` (a `postgres://` URL) with `password` set, percent-encoded, when given.
+fn with_password(url: &str, password: Option<&str>) -> anyhow::Result<String> {
+    let Some(p) = password.filter(|p| !p.is_empty()) else { return Ok(url.to_string()) };
+    let mut u = reqwest::Url::parse(url)?;
+    u.set_password(Some(p)).map_err(|_| anyhow::anyhow!("the metadata URL can't carry a password"))?;
+    Ok(u.to_string())
 }
 
 /// `spec` with a secret nobody knows.
@@ -254,6 +359,33 @@ pub struct Usage {
     pub cost: Cost,
 }
 
+/// This node's part in a fleet.
+pub struct Fleet {
+    pub node_id: String,
+    pub leases: Arc<dyn Leases>,
+    pub members: Arc<dyn Members>,
+    cfg: FleetConfig,
+    heartbeat: OnceLock<Arc<Heartbeat>>,
+    /// The catalog change counter applied so far.
+    seq: AtomicI64,
+    following: AtomicBool,
+    /// Changes of clusters that were waking when seen: applied once they are published.
+    deferred: Mutex<HashSet<String>>,
+    /// Forwards API calls to other nodes: TLS pinned by their records (`pins`) where they serve
+    /// it, as the proxies do.
+    http: Forwarder,
+    pins: Arc<search_proxy::upstream::Pins>,
+}
+
+/// The client API calls are forwarded to other nodes with.
+pub type Forwarder = hyper_util::client::legacy::Client<search_proxy::upstream::Connector, http_body_util::Full<bytes::Bytes>>;
+
+impl Fleet {
+    pub fn heartbeat(&self) -> Option<&Arc<Heartbeat>> {
+        self.heartbeat.get()
+    }
+}
+
 pub struct Control {
     pub cfg: SearchConfig,
     pub store: Arc<Store>,
@@ -261,13 +393,14 @@ pub struct Control {
     /// Segments, WAL and cluster metadata on object storage.
     pub data: search_store::Store,
     pub meter: Arc<Meter>,
+    pub fleet: Option<Arc<Fleet>>,
     /// Wakes in progress and clusters being deleted ([`crate::wake`]).
     wakes: Arc<Wakes>,
     /// Serializes changes of a cluster's description with applying it to the node, so the node
     /// never ends up with an older one than the catalog's.
-    specs: Mutex<()>,
+    specs: tokio::sync::Mutex<()>,
     /// Loaded clusters whose new settings need a reload (dialect, the
-    /// `destructive_requires_name` default, `max_in_flight`): unloaded once no request runs.
+    /// `destructive_requires_name` default): unloaded once no request runs.
     reloads: Mutex<HashSet<String>>,
     reloader: AtomicBool,
     me: OnceLock<Weak<Control>>,
@@ -277,16 +410,47 @@ pub struct Control {
 
 impl Control {
     pub async fn new(cfg: SearchConfig, objects: Objects) -> anyhow::Result<Arc<Self>> {
+        Self::open(cfg, objects, None).await
+    }
+
+    /// [`Control::new`] with the WAL in its own object store (S3 Express One Zone).
+    pub async fn open(mut cfg: SearchConfig, objects: Objects, wal_objects: Option<Objects>) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.home)?;
-        let store = Arc::new(Store::open(&cfg.home.join("search.db"))?);
+        let mut fleet_parts = None;
+        let store = match &cfg.fleet {
+            None => Arc::new(Store::open(&cfg.home.join("search.db"))?),
+            Some(f) => {
+                // Other nodes replay this node's WAL after a failover: it must be in object
+                // storage before a write is acknowledged.
+                cfg.sync_objects = true;
+                let (store, leases, members): (Store, Arc<dyn Leases>, Arc<dyn Members>) = match search_proxy::pg::MetaUrl::parse(&f.meta) {
+                    search_proxy::pg::MetaUrl::Postgres(url) => {
+                        let pg = search_proxy::pg::Pg::connect(&url, f.meta_ca.as_deref(), f.meta_password.as_deref()).await?;
+                        let leases = search_server::PgLeases::connect_with(&with_password(&search_proxy::pg::libpq_url(&url), f.meta_password.as_deref())?, f.meta_ca.as_deref()).await?;
+                        let members = search_proxy::PgMembers::new(pg.clone()).await?;
+                        (Store::postgres(pg).await?, leases, members)
+                    }
+                    search_proxy::pg::MetaUrl::Sqlite(path) => {
+                        (Store::open(&path)?, search_server::SqliteLeases::open(&path)?, search_proxy::SqliteMembers::open(&path)?)
+                    }
+                };
+                fleet_parts = Some((leases, members));
+                Arc::new(store)
+            }
+        };
         let scfg = StoreConfig {
             node: cfg.node_name.clone(),
             wal: WalConfig { sync_objects: cfg.sync_objects, ..WalConfig::default() },
             cache_bytes: cfg.cache_bytes,
             manifest_retain_ms: cfg.history_retention.as_millis() as u64,
+            // Segments fetched from object storage are checked whole before the cache keeps them.
+            verify: Some(search_server::persist::segment_verifier()),
             ..StoreConfig::default()
         };
-        let data = search_store::Store::open(objects, cfg.home.join("cache"), scfg).await?;
+        let data = match wal_objects {
+            Some(w) => search_store::Store::open_with_wal_objects(objects, w, cfg.home.join("cache"), scfg).await?,
+            None => search_store::Store::open(objects, cfg.home.join("cache"), scfg).await?,
+        };
         let meter = Meter::new(store.clone());
         let wakes = Arc::new(Wakes::default());
         let hooks = Arc::new(ControlHooks { meter: MeterHooks(meter.clone()), wakes: wakes.clone(), control: OnceLock::new() });
@@ -295,21 +459,49 @@ impl Control {
             Arc::new(GuardedStores { inner: ObjectStores::new(data.clone()), store: store.clone(), wakes: wakes.clone() }),
             NodeConfig {
                 node_name: cfg.node_name.clone(),
+                node_id: cfg.fleet.as_ref().map(|f| f.node_id.clone()),
                 domain: cfg.domain.clone(),
                 idle_unload: Some(cfg.idle_unload),
                 test_features: cfg.test_features,
+                lease_ttl: cfg.fleet.as_ref().map_or(search_server::node::DEFAULT_LEASE_TTL, |f| f.lease_ttl),
+                memory_budget: cfg.memory_budget,
                 ..NodeConfig::default()
             },
             hooks.clone(),
         );
+        let fleet = match (fleet_parts, &cfg.fleet) {
+            (Some((leases, members)), Some(f)) => {
+                node.set_leases(leases.clone());
+                let pins = Arc::new(search_proxy::upstream::Pins::default());
+                let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
+                connector.set_nodelay(true);
+                connector.set_connect_timeout(Some(Duration::from_secs(5)));
+                Some(Arc::new(Fleet {
+                    node_id: f.node_id.clone(),
+                    leases,
+                    members,
+                    cfg: f.clone(),
+                    heartbeat: OnceLock::new(),
+                    seq: AtomicI64::new(store.current_seq().await?),
+                    following: AtomicBool::new(false),
+                    deferred: Mutex::new(HashSet::new()),
+                    http: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                        .pool_idle_timeout(Duration::from_secs(60))
+                        .build(search_proxy::upstream::Connector::new(connector, pins.clone(), Duration::from_secs(5))),
+                    pins,
+                }))
+            }
+            _ => None,
+        };
         let control = Arc::new(Self {
             cfg,
             store,
             node,
             data,
             meter,
+            fleet,
             wakes,
-            specs: Mutex::new(()),
+            specs: tokio::sync::Mutex::new(()),
             reloads: Mutex::new(HashSet::new()),
             reloader: AtomicBool::new(false),
             me: OnceLock::new(),
@@ -327,29 +519,67 @@ impl Control {
         self.data.objects()
     }
 
-    /// Unloads every cluster (accounting their usage) and makes the WAL durable in object
-    /// storage. Call before exit.
-    pub async fn shutdown(&self) -> anyhow::Result<()> {
-        for name in self.node.loaded() {
-            self.unload_retrying(&name, Duration::from_secs(5)).await;
+    /// In a fleet: publishes this node (heartbeats start), once its listeners accept. No-op for
+    /// a single node.
+    pub async fn announce(&self) -> anyhow::Result<()> {
+        let Some(f) = &self.fleet else { return Ok(()) };
+        if f.heartbeat.get().is_some() {
+            return Ok(());
         }
+        let beat = Beat {
+            id: f.node_id.clone(),
+            http: f.cfg.advertise_http.clone(),
+            api: f.cfg.advertise_api.clone(),
+            az: f.cfg.az.clone(),
+            draining: false,
+            loaded: self.node.loaded().len() as u32,
+            tls: f.cfg.tls_pin.clone(),
+            api_tls: f.cfg.api_tls && f.cfg.tls_pin.is_some(),
+        };
+        let hb = Heartbeat::start(f.members.clone(), beat, f.cfg.heartbeat).await?;
+        let _ = f.heartbeat.set(hb);
+        Ok(())
+    }
+
+    /// Stops the node for good (SIGTERM): publishes `draining` (proxies send nothing new), then
+    /// unloads every cluster (flushing it and handing its lease back, so another node takes
+    /// over at once), accounts usage, makes the WAL durable and leaves the fleet. Requests for a
+    /// cluster this node no longer holds are answered `node_closed_exception`, which the proxy
+    /// resends elsewhere.
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        self.shutdown_within(Duration::from_secs(60)).await
+    }
+
+    pub async fn shutdown_within(&self, timeout: Duration) -> anyhow::Result<()> {
+        let hb = self.fleet.as_ref().and_then(|f| f.heartbeat.get().cloned());
+        if let Some(hb) = &hb
+            && let Err(e) = hb.drain().await
+        {
+            tracing::warn!(error = %e, "publishing draining failed");
+        }
+        let r = self.node.shutdown(timeout).await;
         if let Err(e) = self.sample().await {
             tracing::warn!(error = %e, "search metering failed");
         }
-        self.data.close().await
+        if let Some(hb) = &hb
+            && let Err(e) = hb.stop().await
+        {
+            tracing::warn!(error = %e, "leaving the fleet failed");
+        }
+        r
     }
 
     // --- clusters -------------------------------------------------------------------------
 
-    pub fn get(&self, id_or_name: &str) -> Result<SearchCluster> {
-        if let Some(c) = self.store.get(id_or_name)? {
+    pub async fn get(&self, id_or_name: &str) -> Result<SearchCluster> {
+        if let Some(c) = self.store.get(id_or_name).await? {
             return Ok(c);
         }
-        self.store.by_name(id_or_name)?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {id_or_name}")))
+        self.store.by_name(id_or_name).await?.ok_or_else(|| ControlError::NotFound(format!("no search cluster {id_or_name}")))
     }
 
-    pub fn list(&self) -> Result<Vec<SearchCluster>> {
-        Ok(self.store.list()?)
+    pub async fn list(&self) -> Result<Vec<SearchCluster>> {
+        Ok(self.store.list().await?)
     }
 
     fn check(&self, c: &SearchCluster) -> Result<()> {
@@ -393,7 +623,7 @@ impl Control {
 
     /// Fails when the name is taken, by a cluster or by data left in object storage.
     async fn check_free(&self, name: &str) -> Result<()> {
-        if self.store.by_name(name)?.is_some() || self.wakes.is_deleting(name) {
+        if self.store.by_name(name).await?.is_some() || self.wakes.is_deleting(name) {
             return Err(ControlError::Conflict(format!("a search cluster named {name} already exists")));
         }
         if self.data.cluster_exists(name).await? {
@@ -402,11 +632,11 @@ impl Control {
         Ok(())
     }
 
-    fn insert(&self, c: &SearchCluster) -> Result<()> {
-        match self.store.insert(c) {
-            Ok(()) => Ok(()),
-            Err(e) if e.to_string().contains("UNIQUE") => Err(ControlError::Conflict(format!("a search cluster named {} already exists", c.name))),
-            Err(e) => Err(e.into()),
+    async fn insert(&self, c: &SearchCluster) -> Result<()> {
+        if self.store.insert(c).await? {
+            Ok(())
+        } else {
+            Err(ControlError::Conflict(format!("a search cluster named {} already exists", c.name)))
         }
     }
 
@@ -437,16 +667,18 @@ impl Control {
         let c = Self::apply(self.fresh(name), o);
         self.check(&c)?;
         self.check_free(name).await?;
-        self.insert(&c)?;
-        self.store.set_stats(&c.id, c.created_at, 0, 0, 0)?;
+        self.insert(&c).await?;
+        self.store.set_stats(&c.id, c.created_at, 0, 0, 0).await?;
         Ok(c)
     }
 
     /// A new cluster with `parent`'s indices, as they are now or as they were at `at` (Unix
     /// seconds, within the history window). Instant: the branch's commit points name the
-    /// parent's segments, nothing is copied. Settings come from the parent unless given.
+    /// parent's segments, nothing is copied. Settings come from the parent unless given. In a
+    /// fleet, call it on the node holding the parent (the API forwards there): a loaded parent
+    /// is committed first, so the branch sees every acknowledged write.
     pub async fn branch(&self, parent: &str, name: &str, at: Option<i64>, o: ClusterOptions) -> Result<SearchCluster> {
-        let p = self.get(parent)?;
+        let p = self.get(parent).await?;
         let now = now();
         if let Some(t) = at {
             self.check_window(&p, t, now)?;
@@ -484,15 +716,28 @@ impl Control {
                 }
             }
         }
-        if let Err(e) = self.insert(&c) {
+        if let Err(e) = self.insert(&c).await {
             // Lost a race for the name: don't leave the branch's objects behind.
             if let Err(e2) = self.data.delete_cluster(&c.name).await {
                 tracing::warn!(cluster = c.name, error = %e2, "removing an orphaned branch failed");
             }
             return Err(e);
         }
-        self.store.set_stats(&c.id, now, c.indices, c.docs, c.stored_bytes)?;
-        self.meter.mark_dirty(&c.name);
+        self.store.set_stats(&c.id, now, c.indices, c.docs, c.stored_bytes).await?;
+        // The parent's recorded figures may be a metering interval old: read the branch's own
+        // from its commit points now, so it shows what it holds at once.
+        let mut c = c;
+        match self.refresh_stats(&c.name, now_ms()).await {
+            Ok(()) => {
+                if let Ok(Some(fresh)) = self.store.get(&c.id).await {
+                    (c.indices, c.docs, c.stored_bytes) = (fresh.indices, fresh.docs, fresh.stored_bytes);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(cluster = c.name, error = %e, "reading a new branch's figures failed");
+                self.meter.mark_dirty(&c.name);
+            }
+        }
         Ok(c)
     }
 
@@ -511,17 +756,17 @@ impl Control {
         Ok(())
     }
 
-    /// Changes settings. Credentials, the idle timeout and the body limit apply at once, also to
-    /// a cluster that is waking up. A new flavor (dialect), `destructive_requires_name` default or
-    /// `max_in_flight` needs a reload: the cluster is unloaded now if no request runs, or as soon
-    /// as none does; until then it keeps its current ones.
+    /// Changes settings. Credentials, limits (`max_in_flight` included) and the idle timeout
+    /// apply at once, also to a cluster that is waking up. A new flavor (dialect) or
+    /// `destructive_requires_name` default needs a reload: the cluster is unloaded now if no
+    /// request runs, or as soon as none does; until then it keeps its current ones.
     pub async fn update(&self, id: &str, o: ClusterOptions) -> Result<SearchCluster> {
         let c = {
-            let _g = self.specs.lock();
-            let c = Self::apply(self.get(id)?, o);
+            let _g = self.specs.lock().await;
+            let c = Self::apply(self.get(id).await?, o);
             self.check(&c)?;
-            self.store.update(&c)?;
-            self.apply_spec(&c.name);
+            self.store.update(&c).await?;
+            self.apply_spec(&c.name).await;
             c
         };
         self.settle(&c.name).await;
@@ -531,15 +776,16 @@ impl Control {
         Ok(c)
     }
 
-    /// A new password. Requests with the old one fail from now on, loaded, waking or not.
+    /// A new password. Requests with the old one fail from now on, loaded, waking or not (in a
+    /// fleet, on another node within one follow period).
     pub async fn rotate_password(&self, id: &str) -> Result<SearchCluster> {
         let c = {
-            let _g = self.specs.lock();
-            let mut c = self.get(id)?;
+            let _g = self.specs.lock().await;
+            let mut c = self.get(id).await?;
             c.password = random_string(32);
             c.password_rotated_at = Some(now());
-            self.store.update(&c)?;
-            self.apply_spec(&c.name);
+            self.store.update(&c).await?;
+            self.apply_spec(&c.name).await;
             c
         };
         self.settle(&c.name).await;
@@ -549,16 +795,26 @@ impl Control {
     /// Applies the catalog's description of `name` to its loaded instance, if any. Call with
     /// `specs` held (or through [`Self::apply_spec_now`]).
     ///
-    /// What a reload would change stays as loaded (the dialect, the `destructive_requires_name`
-    /// default and the concurrency permits are fixed when the cluster opens), so node-level
-    /// answers (401, 429) keep matching the cluster; a reload is scheduled instead. A cluster
-    /// that is being deleted, or is gone, gets an unguessable secret, and a gone one is evicted.
-    fn apply_spec(&self, name: &str) {
-        let Some(l) = self.node.get_loaded(name) else { return };
+    /// What a reload would change stays as loaded (the dialect and the
+    /// `destructive_requires_name` default are fixed when the cluster opens), so node-level
+    /// answers keep matching the cluster; a reload is scheduled instead. A cluster that is
+    /// being deleted, or is gone, gets an unguessable secret, and a gone one is evicted.
+    async fn apply_spec(&self, name: &str) {
+        let Some(l) = self.node.get_loaded(name) else {
+            // A load in progress past its own catalog re-read takes this as it publishes (the
+            // node parks it); with no load under way the node ignores it.
+            if self.wakes.is_loading(name)
+                && !self.wakes.is_deleting(name)
+                && let Ok(Some(row)) = self.store.by_name(name).await
+            {
+                self.node.update_spec(spec_for(&row));
+            }
+            return;
+        };
         let row = if self.wakes.is_deleting(name) {
             None
         } else {
-            match self.store.by_name(name) {
+            match self.store.by_name(name).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(cluster = name, error = %e, "reading a search cluster failed");
@@ -583,9 +839,9 @@ impl Control {
         }
     }
 
-    fn apply_spec_now(&self, name: &str) {
-        let _g = self.specs.lock();
-        self.apply_spec(name);
+    async fn apply_spec_now(&self, name: &str) {
+        let _g = self.specs.lock().await;
+        self.apply_spec(name).await;
     }
 
     /// Runs when a cluster has loaded (from the node's load hook): its instance was built from
@@ -602,9 +858,15 @@ impl Control {
             }
             spins += 1;
         }
-        self.apply_spec_now(&name);
+        self.apply_spec_now(&name).await;
         if let Some(t) = token {
             self.wakes.finish(&name, t);
+        }
+        if let Some(f) = &self.fleet {
+            if let Some(hb) = f.heartbeat.get() {
+                hb.set_loaded(self.node.loaded().len() as u32);
+            }
+            self.ensure_follower();
         }
     }
 
@@ -620,7 +882,7 @@ impl Control {
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
-        self.apply_spec_now(name);
+        self.apply_spec_now(name).await;
     }
 
     fn schedule_reload(&self, name: &str) {
@@ -657,7 +919,7 @@ impl Control {
             // Asleep: the next wake reads the catalog (a wake in progress is reconciled).
             return !self.wakes.is_loading(name);
         };
-        let needed = match self.store.by_name(name) {
+        let needed = match self.store.by_name(name).await {
             Ok(Some(row)) => live_spec(spec_for(&row), &l).1,
             Ok(None) => true,
             Err(_) => return false,
@@ -686,21 +948,36 @@ impl Control {
     /// Deletes a cluster and its data. Branches keep working: segments they share are deleted
     /// by garbage collection only once nothing references them.
     pub async fn delete(&self, id: &str) -> Result<()> {
-        let c = self.get(id)?;
+        let c = self.get(id).await?;
         {
             // From here the catalog hides the cluster, a wake can't open it, and a loaded (or
             // waking) instance checks against an unguessable secret.
-            let _g = self.specs.lock();
+            let _g = self.specs.lock().await;
             self.wakes.set_deleting(&c.name, true);
-            self.apply_spec(&c.name);
+            if self.fleet.is_some() {
+                // Other nodes see the flag through the catalog, lock the cluster out and let
+                // go of it.
+                if let Err(e) = self.store.set_deleting(&c.id, true).await {
+                    self.wakes.set_deleting(&c.name, false);
+                    return Err(e.into());
+                }
+            }
+            self.apply_spec(&c.name).await;
         }
         let r = self.delete_inner(&c).await;
-        let _g = self.specs.lock();
+        let _g = self.specs.lock().await;
         self.wakes.set_deleting(&c.name, false);
         match &r {
             Ok(()) => self.wakes.forget(&c.name),
             // Still there: give it its credentials back.
-            Err(_) => self.apply_spec(&c.name),
+            Err(_) => {
+                if self.fleet.is_some()
+                    && let Err(e) = self.store.set_deleting(&c.id, false).await
+                {
+                    tracing::warn!(cluster = c.name, error = %e, "un-hiding a search cluster after a failed delete failed");
+                }
+                self.apply_spec(&c.name).await;
+            }
         }
         r
     }
@@ -712,11 +989,31 @@ impl Control {
         if !self.unload_retrying(&c.name, Duration::from_secs(30)).await {
             return Err(ControlError::Conflict(format!("cluster {} has requests running; retry", c.name)));
         }
+        if let Some(f) = &self.fleet
+            && !self.wait_released(f, &c.name, Duration::from_secs(30)).await?
+        {
+            return Err(ControlError::Conflict(format!("cluster {} is still served by another node; retry", c.name)));
+        }
         self.data.delete_cluster(&c.name).await?;
-        self.store.delete(&c.id)?;
+        self.store.delete(&c.id).await?;
         self.refreshed.lock().remove(&c.name);
         self.reloads.lock().remove(&c.name);
         Ok(())
+    }
+
+    /// Waits until no other node holds `name`'s lease.
+    async fn wait_released(&self, f: &Fleet, name: &str, wait: Duration) -> anyhow::Result<bool> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match f.leases.owner(name).await? {
+                Some(o) if o.node != f.node_id && o.remaining_ms > 0 => {}
+                _ => return Ok(true),
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// Test seam: delays every cluster's metadata load, to widen the window of a wake.
@@ -727,43 +1024,93 @@ impl Control {
 
     /// Scale to zero now. `false` when requests are running.
     pub async fn unload(&self, id: &str) -> Result<bool> {
-        let c = self.get(id)?;
+        let c = self.get(id).await?;
         if self.node.get_loaded(&c.name).is_none() {
             return Ok(true);
         }
-        Ok(self.node.unload(&c.name).await)
+        let unloaded = self.node.unload(&c.name).await;
+        if unloaded {
+            // Asleep figures come from the commit points the unload just wrote: record them now
+            // rather than at the next metering pass, so the cluster's page is right at once.
+            if let Err(e) = self.refresh_stats(&c.name, now_ms()).await {
+                tracing::warn!(cluster = c.name, error = %e, "refreshing search cluster figures failed");
+                self.meter.mark_dirty(&c.name);
+            }
+        }
+        Ok(unloaded)
+    }
+
+    /// In a fleet: the control API of the node holding `name`, when that is another live node
+    /// (calls about the cluster go there). `None`: this node, or nobody holds it.
+    pub async fn owner_api(&self, name: &str) -> Option<String> {
+        let f = self.fleet.as_ref()?;
+        if self.node.get_loaded(name).is_some() {
+            return None;
+        }
+        let owner = match f.leases.owner(name).await {
+            Ok(Some(o)) if o.node != f.node_id && o.remaining_ms > 0 => o.node,
+            Ok(_) => return None,
+            Err(e) => {
+                tracing::warn!(cluster = name, error = %e, "reading a lease failed");
+                return None;
+            }
+        };
+        // The lease says who owns it; the record only gives the address. A record as old as a
+        // lease can last is from a node that is gone (slow heartbeats on a busy metadata store
+        // must not make a live owner look dead: running the call here would be refused).
+        let ttl = f.cfg.heartbeat.saturating_mul(5).max(f.cfg.lease_ttl).as_millis() as u64;
+        let members = f.members.list().await.ok()?;
+        let rec = members.iter().find(|r| r.beat.id == owner && r.age_ms < ttl)?;
+        let api = rec.beat.api.clone()?;
+        // A node asking for TLS is never called without it: a bad pin makes it unreachable.
+        let tls = match rec.beat.pins() {
+            Ok(p) => api.parse::<std::net::SocketAddr>().is_ok_and(|addr| p.iter().any(|(a, _)| *a == addr)),
+            Err(e) => {
+                tracing::warn!(node = owner, error = %e, "node record with a bad certificate pin");
+                return None;
+            }
+        };
+        f.pins.replace(members.iter().filter_map(|r| r.beat.pins().ok()).flatten().collect());
+        Some(format!("{}://{api}", if tls { "https" } else { "http" }))
+    }
+
+    /// The HTTP client API calls are forwarded with.
+    pub fn forwarder(&self) -> Option<&Forwarder> {
+        self.fleet.as_ref().map(|f| &f.http)
     }
 
     /// Where clients connect.
     pub fn connection(&self, c: &SearchCluster) -> Value {
-        let scheme = if self.cfg.tls { "https" } else { "http" };
-        let default_port = if self.cfg.tls { 443 } else { 80 };
-        let port = if self.cfg.http_port == default_port { String::new() } else { format!(":{}", self.cfg.http_port) };
-        let host = match &self.cfg.domain {
-            Some(d) => format!("{}.{d}", c.name),
-            None => self.cfg.public_host.clone(),
-        };
-        json!({
-            "url": format!("{scheme}://{host}{port}"),
-            "host": host,
-            "port": self.cfg.http_port,
-            "username": c.name,
-        })
+        connection_of(&self.cfg, &c.name)
     }
 
-    /// Loaded or asleep, with live figures when loaded.
-    pub fn status(&self, c: &SearchCluster) -> Value {
+    /// Loaded or asleep, with live figures when loaded here; in a fleet, a cluster another node
+    /// holds is `loaded` there (`node`).
+    pub async fn status(&self, c: &SearchCluster) -> Value {
         match self.node.get_loaded(&c.name) {
             Some(l) => {
                 let st = l.cluster.state();
-                json!({
+                let mut v = json!({
                     "state": "loaded",
                     "in_flight": l.in_flight(),
                     "indices": st.metadata.indices.len(),
                     "cluster_uuid": st.metadata.cluster_uuid,
-                })
+                });
+                if let Some(f) = &self.fleet {
+                    v["node"] = json!(f.node_id);
+                }
+                v
             }
-            None => json!({ "state": "asleep" }),
+            None => {
+                if let Some(f) = &self.fleet
+                    && let Ok(Some(o)) = f.leases.owner(&c.name).await
+                    && o.remaining_ms > 0
+                    && o.node != f.node_id
+                {
+                    return json!({ "state": "loaded", "node": o.node });
+                }
+                json!({ "state": "asleep" })
+            }
         }
     }
 
@@ -780,7 +1127,7 @@ impl Control {
 
     /// The cluster's indices (`_cat/indices`): health, status, docs, size. Wakes the cluster.
     pub async fn indices(&self, id: &str) -> Result<Vec<Value>> {
-        let c = self.get(id)?;
+        let c = self.get(id).await?;
         let resp = self.call(&c, EsRequest::new("GET", "/_cat/indices?format=json&bytes=b&s=index")).await;
         let body: Value = serde_json::from_slice(&resp.body).unwrap_or(Value::Null);
         if resp.status != 200 {
@@ -824,9 +1171,10 @@ impl Control {
             .collect())
     }
 
-    /// Runs one REST request (the dashboard console, `roll search request`).
+    /// Runs one REST request (the dashboard console, `roll search request`). The node counts it
+    /// for metering like any client's.
     pub async fn request(&self, id: &str, r: ConsoleRequest) -> Result<ConsoleResponse> {
-        let c = self.get(id)?;
+        let c = self.get(id).await?;
         let method = r.method.trim().to_ascii_uppercase();
         if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH") {
             return Err(ControlError::Invalid(format!("unsupported method {}", r.method)));
@@ -844,7 +1192,6 @@ impl Control {
         }
         req.body = body;
         let started = std::time::Instant::now();
-        self.meter.count_request(&c.name);
         let resp = self.call(&c, req).await;
         let took_ms = started.elapsed().as_millis() as u64;
         let is_json = resp.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.contains("json"));
@@ -863,13 +1210,66 @@ impl Control {
         Ok(ConsoleResponse { status: resp.status, headers: resp.headers, body, json: is_json && !truncated, took_ms, truncated })
     }
 
+    // --- fleet: following catalog changes ---------------------------------------------------
+
+    /// Starts following catalog changes, if this node is in a fleet and holds clusters. The
+    /// follower stops when the node holds none (no timer on an idle node) and resumes from
+    /// where it stopped.
+    fn ensure_follower(&self) {
+        let Some(f) = &self.fleet else { return };
+        if f.following.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(me) = self.me.get().cloned() else { return };
+        let every = f.cfg.follow;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let Some(c) = me.upgrade() else { return };
+                let Some(f) = c.fleet.clone() else { return };
+                if let Err(e) = c.follow_once(&f).await {
+                    tracing::warn!(error = %e, "following the search catalog failed");
+                }
+                if let Some(hb) = f.heartbeat.get() {
+                    hb.set_loaded(c.node.loaded().len() as u32);
+                }
+                if c.node.loaded().is_empty() && f.deferred.lock().is_empty() {
+                    f.following.store(false, Ordering::SeqCst);
+                    // A cluster that loaded after the check above either restarts the follower
+                    // from its hook (it saw the flag down) or saw it up and relies on this one.
+                    if c.node.loaded().is_empty() || f.following.swap(true, Ordering::SeqCst) {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Applies catalog changes since the last pass to the clusters this node holds.
+    pub async fn follow_once(&self, f: &Fleet) -> anyhow::Result<()> {
+        let since = f.seq.load(Ordering::SeqCst);
+        let (mut names, top) = self.store.changes_since(since).await?;
+        names.extend(f.deferred.lock().drain());
+        names.sort();
+        names.dedup();
+        for name in names {
+            if self.wakes.is_loading(&name) && self.node.get_loaded(&name).is_none() {
+                f.deferred.lock().insert(name);
+                continue;
+            }
+            self.apply_spec_now(&name).await;
+        }
+        f.seq.fetch_max(top, Ordering::SeqCst);
+        Ok(())
+    }
+
     // --- metering ---------------------------------------------------------------------------
 
-    pub fn usage(&self, id: &str, days: i64) -> Result<Usage> {
-        let c = self.get(id)?;
+    pub async fn usage(&self, id: &str, days: i64) -> Result<Usage> {
+        let c = self.get(id).await?;
         let now = now();
         let since = now - days * 86_400;
-        let totals = self.store.usage_since(&c.id, since, now)?;
+        let totals = self.store.usage_since(&c.id, since, now).await?;
         let hours = (now_ms() as f64 / 1000.0 - since.max(c.created_at) as f64).max(0.0) / 3600.0;
         let cost = self.cfg.pricing.cost(&totals, hours, c.stored_bytes);
         Ok(Usage { cluster_id: c.id, days, hours, totals, stored_bytes: c.stored_bytes, cost })
@@ -899,6 +1299,17 @@ impl Control {
             loop {
                 tokio::time::sleep(every).await;
                 let Some(c) = weak.upgrade() else { return };
+                // One node of a fleet at a time.
+                if let Some(f) = &c.fleet {
+                    match f.leases.acquire(GC_LEASE, &f.node_id, every.saturating_mul(2)).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(_)) => continue,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "taking the gc lease failed");
+                            continue;
+                        }
+                    }
+                }
                 let data = c.data.clone();
                 drop(c);
                 // `collect_garbage`'s future isn't provably `Send` (a higher-ranked lifetime in
@@ -914,12 +1325,15 @@ impl Control {
         });
     }
 
-    /// One metering pass (also called by tests): accounts loaded time and requests, and
-    /// refreshes the figures of clusters that just loaded or unloaded, and of loaded ones every
-    /// `stats_interval`.
+    /// One metering pass (also called by tests): takes the node's request counts, accounts
+    /// loaded time and requests, and refreshes the figures of clusters that just loaded or
+    /// unloaded, and of loaded ones every `stats_interval`.
     pub async fn sample(&self) -> anyhow::Result<()> {
+        for (name, n) in self.node.take_request_counts() {
+            self.meter.count_requests(&name, n.min(i64::MAX as u64) as i64);
+        }
         let at = now_ms();
-        for (name, forced) in self.meter.sample(at)? {
+        for (name, forced) in self.meter.sample(at).await? {
             let due = forced || self.refreshed.lock().get(&name).is_none_or(|t| at - t >= self.cfg.stats_interval.as_millis() as i64);
             if !due {
                 continue;
@@ -934,7 +1348,7 @@ impl Control {
 
     /// Re-reads a cluster's docs and stored bytes from its commit points.
     pub async fn refresh_stats(&self, name: &str, at_ms: i64) -> anyhow::Result<()> {
-        let Some(c) = self.store.by_name(name)? else { return Ok(()) };
+        let Some(c) = self.store.by_name(name).await? else { return Ok(()) };
         let u = self.data.cluster_usage(name).await?;
         let loaded = self.node.get_loaded(name);
         // Loaded with every index open, the engine counts the documents exactly (unflushed
@@ -956,7 +1370,7 @@ impl Control {
             },
         };
         drop(loaded);
-        self.store.set_stats(&c.id, at_ms / 1000, indices, docs, u.segment_bytes as i64)?;
+        self.store.set_stats(&c.id, at_ms / 1000, indices, docs, u.segment_bytes as i64).await?;
         let mut refreshed = self.refreshed.lock();
         if self.node.get_loaded(name).is_some() {
             refreshed.insert(name.to_string(), at_ms);
@@ -991,6 +1405,26 @@ fn stored_index_count(json: &[u8]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connections_name_the_front() {
+        let mut cfg = SearchConfig::local(std::env::temp_dir());
+        cfg.public_host = "10.0.0.5".into();
+        cfg.http_port = 9200;
+        assert_eq!(connection_of(&cfg, "app")["url"], "http://10.0.0.5:9200");
+        cfg.tls = true;
+        cfg.http_port = 443;
+        assert_eq!(connection_of(&cfg, "app")["url"], "https://10.0.0.5");
+        cfg.public_url = Some("https://abc.lambda-url.eu-west-1.on.aws/".into());
+        let c = connection_of(&cfg, "app");
+        assert_eq!((c["url"].as_str(), c["port"].as_u64(), c["username"].as_str()), (Some("https://abc.lambda-url.eu-west-1.on.aws"), Some(443), Some("app")));
+        cfg.public_url = Some("https://search.example.com:9243".into());
+        cfg.domain = Some("search.example.com".into());
+        assert_eq!(connection_of(&cfg, "app")["url"], "https://app.search.example.com:9243");
+        cfg.public_url = Some("not a url".into());
+        cfg.domain = None;
+        assert_eq!(connection_of(&cfg, "app")["url"], "https://10.0.0.5");
+    }
 
     #[test]
     fn console_bodies_keep_their_bytes() {
@@ -1057,6 +1491,14 @@ mod tests {
         let s = spec_for(&SearchCluster { idle_timeout_s: 60, flavor: "elasticsearch".into(), ..c });
         assert_eq!(s.idle_unload, Some(Duration::from_secs(60)));
         assert_eq!(s.dialect, Dialect::Elasticsearch);
+    }
+
+    #[test]
+    fn metadata_passwords_are_spliced_into_the_url() {
+        assert_eq!(with_password("postgres://roll@db:5432/s?sslmode=require", None).unwrap(), "postgres://roll@db:5432/s?sslmode=require");
+        assert_eq!(with_password("postgres://roll@db:5432/s", Some("")).unwrap(), "postgres://roll@db:5432/s");
+        assert_eq!(with_password("postgres://roll@db:5432/s?sslmode=require", Some("p@ss/w:rd")).unwrap(), "postgres://roll:p%40ss%2Fw%3Ard@db:5432/s?sslmode=require");
+        assert_eq!(with_password("postgres://roll:old@db/s", Some("new")).unwrap(), "postgres://roll:new@db/s");
     }
 
     #[test]

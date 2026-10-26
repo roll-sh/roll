@@ -120,8 +120,10 @@ pub fn parse(p: &mut XParser<'_>, name: &str) -> Result<MultiTermsSpec> {
             }
             3 => {
                 let v = p.long_value()?;
-                if v < 1 {
-                    return Err(AggError::illegal_argument(format!("[minDocCount] must be greater than or equal to 1. Found [{v}] in [{name}]")));
+                // OpenSearch accepts 0 (zero-count buckets for the shard's other key tuples).
+                let min = if crate::dialect::opensearch() { 0 } else { 1 };
+                if v < min {
+                    return Err(AggError::illegal_argument(format!("[minDocCount] must be greater than or equal to {min}. Found [{v}] in [{name}]")));
                 }
                 spec.min_doc_count = v as u64;
             }
@@ -247,6 +249,7 @@ pub fn create(def: &AggDef, spec: &MultiTermsSpec, ctx: &mut BindCtx<'_>) -> Res
         doc_counter: DocCounter::none(),
         doc_count_field: ctx.doc_count_field,
         tracker: ctx.tracker(def),
+        searcher: ctx.searcher.clone(),
     }))
 }
 
@@ -264,6 +267,7 @@ struct MultiTermsAgg {
     doc_counter: DocCounter,
     doc_count_field: Option<u32>,
     tracker: MemTracker,
+    searcher: search_index::Searcher,
 }
 
 fn key_cmp(a: &[TermKey], b: &[TermKey]) -> Ordering {
@@ -277,23 +281,80 @@ fn key_cmp(a: &[TermKey], b: &[TermKey]) -> Ordering {
 }
 
 impl MultiTermsAgg {
-    fn add(&mut self, owning: u32, key: &[TermKey], doc: u32, score: f32) -> Result<()> {
+    /// The bucket ordinal of `key` under `owning`, created with a zero count if new.
+    fn ord_of(&mut self, owning: u32, key: &[TermKey]) -> Result<u32> {
         self.idbuf.clear();
         self.idbuf.extend_from_slice(&owning.to_le_bytes());
         for part in key {
             part.identity(&mut self.idbuf);
         }
-        let ord = match self.index.get(self.idbuf.as_slice()) {
-            Some(&o) => o,
-            None => {
-                let o = self.keys.len() as u32;
-                self.index.insert(self.idbuf.clone(), o);
-                self.keys.push((owning, key.to_vec()));
-                grow(&mut self.counts, o, 0);
-                self.tracker.ensure(self.keys.len() * (64 + key.len() * 32))?;
-                o
+        if let Some(&o) = self.index.get(self.idbuf.as_slice()) {
+            return Ok(o);
+        }
+        let o = self.keys.len() as u32;
+        self.index.insert(self.idbuf.clone(), o);
+        self.keys.push((owning, key.to_vec()));
+        grow(&mut self.counts, o, 0);
+        self.tracker.ensure(self.keys.len() * (64 + key.len() * 32))?;
+        Ok(o)
+    }
+
+    /// `min_doc_count: 0` (OpenSearch's `MultiTermsAggregator.collectZeroDocEntriesIfNeeded`):
+    /// every key tuple of every document of the shard gets a bucket, matched or not.
+    fn collect_zero_doc_entries(&mut self, owning: u32) -> Result<()> {
+        if self.cfg.min_doc_count != 0 {
+            return Ok(());
+        }
+        let segs: Vec<SegmentContext> = self.searcher.segments().to_vec();
+        for seg in &segs {
+            for s in &mut self.sources {
+                s.reader = if s.vs.unmapped && s.vs.missing.is_none() {
+                    Reader::None
+                } else if s.bytes {
+                    Reader::Bytes(s.vs.bytes_reader(seg)?)
+                } else {
+                    Reader::Num(s.vs.numeric_reader(seg)?)
+                };
             }
-        };
+            for doc in 0..seg.max_doc() {
+                if !seg.is_live(doc) {
+                    continue;
+                }
+                let mut any_empty = false;
+                for s in &mut self.sources {
+                    s.load(doc, f32::NAN)?;
+                    any_empty |= s.vals.is_empty();
+                }
+                if any_empty {
+                    continue;
+                }
+                let n = self.sources.len();
+                let mut idx = vec![0usize; n];
+                loop {
+                    let key: Vec<TermKey> = (0..n).map(|j| self.sources[j].vals[idx[j]].clone()).collect();
+                    self.ord_of(owning, &key)?;
+                    let mut d = n;
+                    let mut done = true;
+                    while d > 0 {
+                        d -= 1;
+                        idx[d] += 1;
+                        if idx[d] < self.sources[d].vals.len() {
+                            done = false;
+                            break;
+                        }
+                        idx[d] = 0;
+                    }
+                    if done {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add(&mut self, owning: u32, key: &[TermKey], doc: u32, score: f32) -> Result<()> {
+        let ord = self.ord_of(owning, key)?;
         self.counts[ord as usize] += self.doc_counter.count(doc);
         self.subs.push(doc, ord, score)
     }
@@ -407,6 +468,9 @@ impl Aggregator for MultiTermsAgg {
     }
 
     fn build(&mut self, owning: &[u32]) -> Result<Vec<AggValue>> {
+        for &o in owning {
+            self.collect_zero_doc_entries(o)?;
+        }
         let pos: hashbrown::HashMap<u32, usize> = owning.iter().enumerate().map(|(i, &o)| (o, i)).collect();
         let mut per: Vec<Vec<u32>> = vec![Vec::new(); owning.len()];
         for (ord, (o, _)) in self.keys.iter().enumerate() {

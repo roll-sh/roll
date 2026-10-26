@@ -13,11 +13,15 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
+# Fixed-seed hashing of per-document lookups (field tables, the bulk fast path).
+foldhash.workspace = true
 indexmap.workspace = true
 itoa.workspace = true
 libc.workspace = true
 memchr.workspace = true
 parking_lot.workspace = true
+# Password hashes of the native realm (`xpack::security`, `{PBKDF2}` format).
+pbkdf2.workspace = true
 rand.workspace = true
 # Reindex from remote clusters (`api::remote`), behind `reindex.remote.whitelist`.
 reqwest.workspace = true

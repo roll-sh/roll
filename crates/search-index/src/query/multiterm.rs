@@ -119,8 +119,15 @@ impl MultiTermQuery {
 
     /// A wildcard pattern (`*`, `?`, `\` escapes), optionally ASCII case-insensitive.
     pub fn wildcard(field: u32, pattern: &str, case_insensitive: bool) -> Result<MultiTermQuery> {
-        let aut = Dfa::wildcard(pattern, case_insensitive, search_codec::automaton::dfa::DEFAULT_WORK_LIMIT)
-            .map_err(|e| Error::es("too_complex_to_determinize_exception", e.to_string(), 400))?;
+        // Lucene's `WildcardQuery.toAutomaton` concatenates one automaton per character, and
+        // `Operations.concatenate` of none is the empty language: `""` matches nothing, not
+        // the empty term.
+        let aut = if pattern.is_empty() {
+            Dfa::empty()
+        } else {
+            Dfa::wildcard(pattern, case_insensitive, search_codec::automaton::dfa::DEFAULT_WORK_LIMIT)
+                .map_err(|e| Error::es("too_complex_to_determinize_exception", e.to_string(), 400))?
+        };
         Ok(MultiTermQuery {
             field,
             matcher: TermsMatcher::Automaton { aut: Arc::new(aut), desc: pattern.to_string() },
@@ -230,8 +237,10 @@ impl MultiTermQuery {
                 run(t.range(lo, hi))
             }
             TermsMatcher::Set(terms) => {
+                // The set is sorted: one cursor walks the dictionary forward.
+                let mut lookup = t.sorted_lookup();
                 for term in terms.iter() {
-                    if let Some(st) = t.seek_exact_hashed(term, search_codec::bloom::hash64(term))
+                    if let Some(st) = lookup.seek_exact_hashed(term, search_codec::bloom::hash64(term))
                         && !f(term, st)
                     {
                         return;
@@ -327,7 +336,7 @@ impl Query for MultiTermQuery {
         Ok(Box::new(MtConstWeight {
             q: self.clone(),
             score: boost,
-            desc: self.lucene_string(s.schema()),
+            desc: crate::search::LazyDesc::of(self, s),
             blended: self.rewrite == RewriteMethod::ConstantScoreBlended,
         }))
     }
@@ -490,7 +499,7 @@ pub fn blended(field: u32, terms: &[(Vec<u8>, f32, TermStats)]) -> QueryRef {
 struct MtConstWeight {
     q: MultiTermQuery,
     score: f32,
-    desc: String,
+    desc: crate::search::LazyDesc,
     blended: bool,
 }
 
@@ -506,6 +515,9 @@ impl crate::search::Scorable for PostingsScorer {
 }
 
 impl Scorer for PostingsScorer {
+    fn pure_scores(&self) -> bool {
+        true
+    }
     fn doc(&self) -> u32 {
         self.c.doc()
     }
@@ -629,7 +641,7 @@ impl Weight for MtConstWeight {
         Ok(self.segment_scorer(seg))
     }
     fn explain(&self, seg: &SegmentContext, doc: u32) -> Result<Explanation> {
-        explain_const(self, seg, doc, &self.desc, self.score)
+        explain_const(self, seg, doc, self.desc.get(), self.score)
     }
 }
 

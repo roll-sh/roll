@@ -280,6 +280,67 @@ pub fn value_span(src: &[u8], path: &[Seg]) -> Option<(usize, usize)> {
     Some((start, sc.pos))
 }
 
+/// The byte span of every number in `root`, keyed by the address of its [`Value`] node,
+/// found by walking `src` (the body `root` was parsed from) alongside the tree in one pass:
+/// Jackson's `text()` of a number is its original text (`1.10`, `1E5`, `-0`), which the parsed
+/// value doesn't keep. `None` when the body and the tree don't line up.
+///
+/// [`Value`]: crate::json::Value
+pub fn number_spans(src: &[u8], root: &crate::json::Value) -> Option<std::collections::HashMap<usize, (usize, usize)>> {
+    let mut sc = Scanner { s: src, pos: 0, line: 1, row_start: 0 };
+    let mut out = std::collections::HashMap::new();
+    spans_of(&mut sc, root, &mut out)?;
+    Some(out)
+}
+
+fn spans_of(sc: &mut Scanner<'_>, v: &crate::json::Value, out: &mut std::collections::HashMap<usize, (usize, usize)>) -> Option<()> {
+    use crate::json::Value;
+    sc.ws();
+    let expect = |sc: &mut Scanner<'_>, b: u8| {
+        sc.ws();
+        if sc.s.get(sc.pos) == Some(&b) {
+            sc.pos += 1;
+            Some(())
+        } else {
+            None
+        }
+    };
+    match v {
+        Value::Obj(map) => {
+            expect(sc, b'{')?;
+            for (i, (k, child)) in map.iter().enumerate() {
+                if i > 0 {
+                    expect(sc, b',')?;
+                }
+                sc.ws();
+                if sc.string()? != *k {
+                    return None;
+                }
+                expect(sc, b':')?;
+                crate::stack::maybe_grow(|| spans_of(sc, child, out))?;
+            }
+            expect(sc, b'}')
+        }
+        Value::Arr(items) => {
+            expect(sc, b'[')?;
+            for (i, child) in items.iter().enumerate() {
+                if i > 0 {
+                    expect(sc, b',')?;
+                }
+                crate::stack::maybe_grow(|| spans_of(sc, child, out))?;
+            }
+            expect(sc, b']')
+        }
+        Value::Num(_) => {
+            let start = sc.pos;
+            sc.skip()?;
+            out.insert(v as *const Value as usize, (start, sc.pos));
+            Some(())
+        }
+        _ => sc.skip(),
+    }
+}
+
 /// Location of the field name `key` inside the object at `parent`.
 pub fn key_location(src: &[u8], parent: &[Seg], key: &str) -> Option<(usize, usize)> {
     let mut path = parent.to_vec();

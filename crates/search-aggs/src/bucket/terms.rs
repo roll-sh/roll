@@ -68,6 +68,44 @@ pub struct TermsSpec {
     pub execution_hint: Option<String>,
     pub collect_mode: Option<CollectMode>,
     pub show_term_doc_count_error: bool,
+    /// `counted_terms`: every occurrence of a `counted_keyword` value counts.
+    pub counted: bool,
+}
+
+/// `CountedTermsAggregationBuilder.PARSER`: a values source (`field`, `script`, `missing`,
+/// `value_type`, `format`) and `size`; buckets are ordered by count, then key.
+pub fn parse_counted(p: &mut XParser<'_>, name: &str) -> Result<TermsSpec> {
+    let opts = VsOpts::new(true, true, false);
+    let mut fields = VsSpec::fields(opts);
+    fields.push(Field::new("size", Tokens::INT));
+    let names: Vec<&'static str> = fields.iter().map(|f| f.name).collect();
+    let mut spec = TermsSpec {
+        vs: VsSpec::default(),
+        size: 10,
+        shard_size: None,
+        min_doc_count: 1,
+        shard_min_doc_count: 0,
+        order: BucketOrder::compound(vec![BucketOrder::COUNT_DESC]),
+        include_exclude: None,
+        execution_hint: None,
+        collect_mode: None,
+        show_term_doc_count_error: false,
+        counted: true,
+    };
+    p.object("counted_terms", &fields, |p, i| {
+        let f = names[i];
+        if spec.vs.parse_field(p, f)? {
+            return Ok(());
+        }
+        let v = p.int_value()?;
+        if v <= 0 {
+            return Err(AggError::illegal_argument(format!("[size] must be greater than 0. Found [{v}] in [{name}]")));
+        }
+        spec.size = v as usize;
+        Ok(())
+    })?;
+    spec.vs.check_required(opts)?;
+    Ok(spec)
 }
 
 /// `TermsAggregationBuilder.PARSER`.
@@ -98,6 +136,7 @@ pub fn parse(p: &mut XParser<'_>, name: &str) -> Result<TermsSpec> {
         execution_hint: None,
         collect_mode: None,
         show_term_doc_count_error: false,
+        counted: false,
     };
     p.object("terms", &fields, |p, i| {
         let f = names[i];
@@ -194,8 +233,24 @@ pub fn validate_order(order: &BucketOrder, subs: &Subs) -> Result<()> {
     Ok(())
 }
 
+/// A regex include/exclude on a field that isn't a string: `terms` reports it as an
+/// `AggregationExecutionException` (500) in OpenSearch, an `IllegalArgumentException` in
+/// Elasticsearch.
+fn regex_on_non_string(msg: String) -> AggError {
+    if crate::dialect::opensearch() { AggError::execution(msg) } else { AggError::illegal_argument(msg) }
+}
+
 pub fn create(def: &AggDef, spec: &TermsSpec, ctx: &mut BindCtx<'_>) -> Result<Box<dyn Aggregator>> {
-    let vs = bind(&spec.vs, ctx.lookup, VsType::Keyword, false)?;
+    let mut vs = bind(&spec.vs, ctx.lookup, VsType::Keyword, false)?;
+    if spec.counted {
+        // `CountedTermsAggregatorFactory`: keyword values only, read with their counts.
+        if !vs.unmapped && vs.vs_type != VsType::Keyword {
+            return Err(vs.unsupported("counted_terms"));
+        }
+        if let Some(f) = vs.field.as_mut() {
+            f.expand_counts = true;
+        }
+    }
     if vs.is_counter() {
         return Err(vs.unsupported("terms"));
     }
@@ -227,7 +282,7 @@ pub fn create(def: &AggDef, spec: &TermsSpec, ctx: &mut BindCtx<'_>) -> Result<B
                 && ie.is_regex_based()
                 && !vs.format.is_raw()
             {
-                return Err(AggError::illegal_argument(format!(
+                return Err(regex_on_non_string(format!(
                     "Aggregation [{}] cannot support regular expression style include/exclude settings as they can only be applied to string fields. Use an array of values for include/exclude clauses",
                     def.name
                 )));
@@ -236,19 +291,19 @@ pub fn create(def: &AggDef, spec: &TermsSpec, ctx: &mut BindCtx<'_>) -> Result<B
                 Some(ie) => Some(ie.string_filter(&vs.format)?),
                 None => None,
             };
-            let ords = vs.has_ordinals() && vs.missing.is_none() && spec.execution_hint.as_deref() != Some("map");
+            let ords = vs.has_ordinals() && vs.missing.is_none() && spec.execution_hint.as_deref() != Some("map") && !spec.counted;
             let gords = if ords { vs.field.as_ref().and_then(|f| ctx.searcher.global_ordinals(f.number)) } else { None };
             if ords {
-                Mode::Ords(OrdsState { gords, field: vs.field.as_ref().map(|f| f.number).unwrap_or(0), dv: DvOrds::None, seg: 0, accepted: None, filter, batch: Default::default(), assign: if many { Assign::Hash(OrdMap::new()) } else if subs.is_empty() && spec.min_doc_count > 0 { Assign::Direct } else { Assign::Dense(Vec::new(), Vec::new()) } })
+                Mode::Ords(OrdsState { gords, field: vs.field.as_ref().map(|f| f.number).unwrap_or(0), dv: DvOrds::None, seg: 0, accepted: None, filter, batch: Default::default(), single_segments: 0, multi_segments: 0, assign: if many { Assign::Hash(OrdMap::new()) } else if subs.is_empty() && spec.min_doc_count > 0 { Assign::Direct } else { Assign::Dense(Vec::new(), Vec::new()) } })
             } else {
-                Mode::Bytes(BytesState { reader: None, filter, ords: BytesOrdMap::new() })
+                Mode::Bytes(BytesState { reader: None, filter, ords: BytesOrdMap::new(), counted: spec.counted })
             }
         }
         VsType::Numeric | VsType::Date | VsType::Boolean => {
             if let Some(ie) = &spec.include_exclude
                 && ie.is_regex_based()
             {
-                return Err(AggError::illegal_argument(format!(
+                return Err(regex_on_non_string(format!(
                     "Aggregation [{}] cannot support regular expression style include/exclude settings as they can only be applied to string fields. Use an array of numeric values for include/exclude clauses used to filter numeric fields",
                     def.name
                 )));
@@ -262,8 +317,18 @@ pub fn create(def: &AggDef, spec: &TermsSpec, ctx: &mut BindCtx<'_>) -> Result<B
         }
         _ => return Err(vs.unsupported("terms")),
     };
+    let mut kind = kind;
+    let fbf = terms_fbf(&vs, &mut kind, &subs, ctx, spec)?;
     let mut subs = subs;
-    if collects_breadth_first(spec, &cfg, &kind, &subs, ctx) {
+    let breadth_first = fbf.is_none() && collects_breadth_first(spec, &cfg, &kind, &subs, ctx);
+    // OpenSearch's `TermsAggregatorFactory`: global ordinals need no remapping for a single
+    // owning bucket without include/exclude whose sub-aggregations (if any) are deferred and
+    // not sorted on (its profile's `collection_strategy`).
+    let os_dense = crate::dialect::opensearch()
+        && !many
+        && spec.include_exclude.is_none()
+        && (subs.is_empty() || (breadth_first && !cfg.order.elements().iter().any(|o| matches!(o, BucketOrder::Agg { .. }))));
+    if breadth_first {
         let sorting: Vec<&str> = cfg
             .order
             .elements()
@@ -285,7 +350,53 @@ pub fn create(def: &AggDef, spec: &TermsSpec, ctx: &mut BindCtx<'_>) -> Result<B
         doc_count_field: ctx.doc_count_field,
         searcher: ctx.searcher.clone(),
         tracker: ctx.tracker(def),
+        fbf,
+        os_dense,
     }))
+}
+
+/// `StringTermsAggregatorFromFilters.adaptIntoFiltersOrNull`: a top-level terms aggregation
+/// over an indexed keyword field with 1 to [`MAX_ORDS_TO_TRY_FILTERS`](super::fbf::MAX_ORDS_TO_TRY_FILTERS)
+/// global ordinals runs as one term filter per accepted ordinal.
+fn terms_fbf(vs: &BoundVs, mode: &mut Mode, subs: &Subs, ctx: &BindCtx<'_>, spec: &TermsSpec) -> Result<Option<Box<TermsFbf>>> {
+    let Mode::Ords(st) = mode else { return Ok(None) };
+    let (Some(field), Some(g)) = (&vs.field, &st.gords) else { return Ok(None) };
+    let max_ord = g.value_count();
+    if spec.counted || !field.indexed || vs.script.is_some() || vs.missing.is_some() || !vs.format.is_raw() || max_ord == 0 || max_ord > super::fbf::MAX_ORDS_TO_TRY_FILTERS || spec.execution_hint.as_deref() == Some("map") {
+        return Ok(None);
+    }
+    let mut gords = Vec::new();
+    let mut terms = Vec::new();
+    let mut buf = Vec::new();
+    for gord in 0..max_ord {
+        g.lookup(ctx.searcher, st.field, gord, &mut buf);
+        if st.filter.as_ref().is_some_and(|f| !f.accept(&buf)) {
+            continue;
+        }
+        gords.push(gord);
+        terms.push(String::from_utf8_lossy(&buf).into_owned());
+    }
+    if !super::fbf::eligible(ctx, subs, gords.len()) {
+        return Ok(None);
+    }
+    let mut queries = Vec::with_capacity(terms.len());
+    for t in terms {
+        let mut inner = Json::obj();
+        inner.push(field.name.as_str(), Json::Str(t));
+        let mut q = Json::obj();
+        q.push("term", inner);
+        queries.push(ctx.lookup.query(&q)?);
+    }
+    let fbf = super::fbf::Fbf::new(ctx, queries)?;
+    // Bucket ordinals are assigned as filters match (any filter may match nothing).
+    st.assign = Assign::Dense(Vec::new(), Vec::new());
+    Ok(Some(Box::new(TermsFbf { fbf, gords })))
+}
+
+/// A terms aggregation running filter by filter: the filters and the global ordinal of each.
+struct TermsFbf {
+    fbf: super::fbf::Fbf,
+    gords: Vec<u64>,
 }
 
 /// `SubAggCollectionMode` of a terms aggregation with sub-aggregations: as requested, else
@@ -345,12 +456,17 @@ struct OrdsState {
     assign: Assign,
     /// Batch-decoded ordinals.
     batch: crate::values::OrdBatch,
+    /// Segments whose ordinals were single-valued / multi-valued (`profile` debug).
+    single_segments: u32,
+    multi_segments: u32,
 }
 
 struct BytesState {
     reader: Option<BytesReader>,
     filter: Option<StringFilter>,
     ords: BytesOrdMap,
+    /// `counted_terms`: repeated values are occurrences, each counted.
+    counted: bool,
 }
 
 struct NumState {
@@ -381,6 +497,42 @@ struct TermsAgg {
     doc_count_field: Option<u32>,
     searcher: Searcher,
     tracker: MemTracker,
+    fbf: Option<Box<TermsFbf>>,
+    /// OpenSearch's collection strategy for these global ordinals would be `dense`.
+    os_dense: bool,
+}
+
+impl TermsAgg {
+    /// OpenSearch's `GlobalOrdinalsStringTermsAggregator.collectDebugInfo`: its collection
+    /// strategy (`dense`, or `remap` with its bucket count), and how it would select the top
+    /// buckets (`BucketSelectionStrategy.determine` with the default factor 5).
+    fn os_ords_debug(&self, st: &OrdsState, o: &mut Json) {
+        let value_count = st.gords.as_ref().map_or(0, |g| g.value_count());
+        let buckets = self.counts.iter().filter(|&&c| c > 0).count() as u64;
+        o.push("collection_strategy", Json::Str(if self.os_dense { "dense" } else { "remap" }.into()));
+        if !self.os_dense {
+            o.push("total_buckets", Json::from(buckets));
+        }
+        o.push("result_strategy", Json::Str("terms".into()));
+        o.push("segments_with_single_valued_ords", Json::from(st.single_segments as u64));
+        o.push("segments_with_multi_valued_ords", Json::from(st.multi_segments as u64));
+        o.push("has_filter", Json::Bool(st.filter.is_some()));
+        let min_doc_count = self.cfg.min_doc_count;
+        let required = self.cfg.shard_size as u64;
+        let max_bucket_ord = if self.os_dense { value_count } else { buckets };
+        let size = if min_doc_count == 0 { value_count.min(required) } else { max_bucket_ord.min(required) };
+        let selection = if size.saturating_mul(5) < value_count || self.cfg.order.is_key_order() {
+            "priority_queue"
+        } else {
+            let candidates = if min_doc_count == 0 && self.os_dense {
+                value_count
+            } else {
+                self.counts.iter().filter(|&&c| c > 0 && c >= min_doc_count).count() as u64
+            };
+            if candidates > size { "quick_select" } else { "select_all" }
+        };
+        o.push("result_selection_strategy", Json::Str(selection.into()));
+    }
 }
 
 /// A candidate bucket at build time.
@@ -651,6 +803,9 @@ pub fn compare_discard_nan(a: f64, b: f64, asc: bool) -> Ordering {
 
 impl Aggregator for TermsAgg {
     fn profile_type(&self) -> &'static str {
+        if self.fbf.is_some() {
+            return "StringTermsAggregatorFromFilters";
+        }
         match &self.mode {
             Mode::Ords(_) => "GlobalOrdinalsStringTermsAggregator",
             Mode::Bytes(_) => "MapStringTermsAggregator",
@@ -660,7 +815,15 @@ impl Aggregator for TermsAgg {
 
     fn profile_debug(&self) -> Json {
         let mut o = Json::obj();
+        if let Some(f) = &self.fbf {
+            o.push("delegate", Json::Str("FilterByFilterAggregator".into()));
+            let mut d = Json::obj();
+            f.fbf.debug(&mut d);
+            o.push("delegate_debug", d);
+            return o;
+        }
         match &self.mode {
+            Mode::Ords(st) if crate::dialect::opensearch() => self.os_ords_debug(st, &mut o),
             Mode::Ords(st) => {
                 let strategy = match st.assign {
                     Assign::Direct => "dense",
@@ -671,6 +834,8 @@ impl Aggregator for TermsAgg {
                 o.push("total_buckets", Json::from(self.counts.iter().filter(|&&c| c > 0).count() as u64));
                 o.push("result_strategy", Json::Str("terms".into()));
                 o.push("has_filter", Json::Bool(st.filter.is_some()));
+                o.push("segments_with_single_valued_ords", Json::from(st.single_segments as u64));
+                o.push("segments_with_multi_valued_ords", Json::from(st.multi_segments as u64));
             }
             Mode::Bytes(st) => {
                 o.push("total_buckets", Json::from(st.ords.len() as u64));
@@ -689,12 +854,27 @@ impl Aggregator for TermsAgg {
         }
         o
     }
+    fn segment_done(&self) -> bool {
+        self.fbf.is_some()
+    }
+
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
+        if let Some(mut f) = self.fbf.take() {
+            let r = self.collect_fbf(&mut f, seg);
+            self.fbf = Some(f);
+            return r;
+        }
         self.doc_counter = DocCounter::open(seg, self.doc_count_field);
         match &mut self.mode {
             Mode::Ords(st) => {
                 st.dv = DvOrds::open(seg, st.field);
                 st.seg = seg.ord;
+                match &st.dv {
+                    DvOrds::Single(_) => st.single_segments += 1,
+                    DvOrds::Multi(m) if m.is_single_valued() => st.single_segments += 1,
+                    DvOrds::Multi(_) => st.multi_segments += 1,
+                    DvOrds::None | DvOrds::Keyed(_) => {}
+                }
                 st.accepted = match (&st.filter, st.dv.dict()) {
                     (Some(f), Some(d)) => Some(f.accepted_ords(d)),
                     _ => None,
@@ -707,6 +887,9 @@ impl Aggregator for TermsAgg {
     }
 
     fn collect(&mut self, b: Batch<'_>) -> Result<()> {
+        if self.fbf.is_some() {
+            return Ok(());
+        }
         let mut mode = std::mem::replace(&mut self.mode, Mode::Num(NumState { reader: None, batch: Default::default(), filter: None, ords: OrdMap::new(), double: false }));
         let r = self.collect_mode(&mut mode, b);
         self.mode = mode;
@@ -714,6 +897,10 @@ impl Aggregator for TermsAgg {
     }
 
     fn finish_segment(&mut self) -> Result<()> {
+        if self.fbf.is_some() {
+            // Each filter's pass finished its own segment of the sub-aggregations.
+            return Ok(());
+        }
         self.subs.finish_segment()
     }
 
@@ -815,6 +1002,31 @@ impl Aggregator for TermsAgg {
 }
 
 impl TermsAgg {
+    /// One segment, filter by filter: each filter's count (or matches, with sub-aggregations)
+    /// goes to its global ordinal's bucket.
+    fn collect_fbf(&mut self, f: &mut TermsFbf, seg: &SegmentContext) -> Result<()> {
+        let Mode::Ords(st) = &mut self.mode else { return Ok(()) };
+        let Assign::Dense(map, inv) = &mut st.assign else { return Ok(()) };
+        let mut subs = std::mem::replace(&mut self.subs, Subs::empty());
+        let counts = &mut self.counts;
+        let tracker = &mut self.tracker;
+        let gords = &f.gords;
+        let r = f.fbf.collect_segment(seg, self.doc_count_field, &mut subs, &mut |k, doc, c, subs| {
+            let ord = dense_ord(map, inv, gords[k]);
+            if counts.len() <= ord as usize {
+                grow(counts, ord, 0);
+                tracker.ensure(counts.len() * 8)?;
+            }
+            counts[ord as usize] += c;
+            match doc {
+                Some(d) => subs.push(d, ord, f32::NAN),
+                None => Ok(()),
+            }
+        });
+        self.subs = subs;
+        r
+    }
+
     fn collect_mode(&mut self, mode: &mut Mode, b: Batch<'_>) -> Result<()> {
         let has_subs = !self.subs.is_empty();
         match mode {
@@ -854,7 +1066,7 @@ impl TermsAgg {
                     let doc = b.docs[i];
                     let n = r.load(doc, b.score(i))?;
                     for j in 0..n {
-                        if j > 0 && r.value(j) == r.value(j - 1) {
+                        if !st.counted && j > 0 && r.value(j) == r.value(j - 1) {
                             continue;
                         }
                         let v = r.value(j);
@@ -1178,6 +1390,11 @@ impl Terms {
         o
     }
 
+    /// `unsigned_long` terms in the opensearch dialect (`UnsignedLongTerms`).
+    fn is_unsigned_os(&self) -> bool {
+        matches!(self.cfg.format, DocValueFormat::UnsignedLongShifted) && crate::dialect::opensearch()
+    }
+
     fn promote_to_double(&mut self) {
         if self.kind != TermsKind::Long {
             return;
@@ -1195,11 +1412,77 @@ impl Terms {
     }
 }
 
+/// `InternalMultiTerms.needsPromotionToDouble` / `promoteToDouble`: a key position whose
+/// numeric converter differs between shard results (`long` in one index, `unsigned_long` or
+/// `double` in another) becomes a double everywhere, printed raw.
+fn promote_multi_keys(list: &mut [Terms]) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Conv {
+        Long,
+        Unsigned,
+        Double,
+        Other,
+    }
+    let conv = |k: &TermKey, f: &DocValueFormat| match k {
+        TermKey::Long(_) if matches!(f, DocValueFormat::UnsignedLongShifted) => Conv::Unsigned,
+        TermKey::Long(_) => Conv::Long,
+        TermKey::Double(_) => Conv::Double,
+        _ => Conv::Other,
+    };
+    let width = list.iter().map(|t| t.formats.len()).max().unwrap_or(0);
+    for i in 0..width {
+        let mut seen: Option<Conv> = None;
+        let mut mixed = false;
+        for t in list.iter() {
+            let Some(TermKey::Multi(parts)) = t.buckets.first().map(|b| &b.key) else { continue };
+            let (Some(k), Some(f)) = (parts.get(i), t.formats.get(i)) else { continue };
+            let c = conv(k, f);
+            match seen {
+                None => seen = Some(c),
+                Some(s) if s != c => mixed = true,
+                _ => {}
+            }
+            if c == Conv::Other {
+                seen = Some(Conv::Other);
+            }
+        }
+        if !mixed || seen == Some(Conv::Other) {
+            continue;
+        }
+        for t in list.iter_mut() {
+            let unsigned = matches!(t.formats.get(i), Some(DocValueFormat::UnsignedLongShifted));
+            for b in &mut t.buckets {
+                if let TermKey::Multi(parts) = &mut b.key
+                    && let Some(TermKey::Long(l)) = parts.get(i).cloned()
+                {
+                    parts[i] = TermKey::Double(if unsigned { ((l as u64) ^ (1 << 63)) as f64 } else { l as f64 });
+                }
+            }
+            if let Some(f) = t.formats.get_mut(i) {
+                *f = DocValueFormat::Raw;
+            }
+            // Distinct keys may now be equal or out of order: a key-sorted result is re-sorted
+            // so the merge sort meets equal keys together.
+            if t.reduce_order.is_key_order() {
+                let asc = t.reduce_order.is_key_asc();
+                t.buckets.sort_by(|a, b| {
+                    let c = a.key.cmp_key(&b.key);
+                    if asc { c } else { c.reverse() }
+                });
+            }
+        }
+    }
+}
+
 /// Reduce-side value of an order path for a bucket (`AggregationPath.resolveValue`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum SortVal {
     Long(i64),
     Double(f64),
+    /// A keyword or ip value (`top_metrics` on such a field).
+    Bytes(Vec<u8>),
+    /// No value (`SortValue.empty()`: a `top_metrics` without a top document or value).
+    Empty,
 }
 
 /// Resolves a sort path against a bucket's aggregations (`InternalAggregations.sortValue`).
@@ -1243,18 +1526,32 @@ pub fn agg_sort_value(name: &str, v: &AggValue, key: Option<&str>) -> Result<Sor
         let Some(k) = key else {
             return Err(AggError::illegal_argument("Missing value key in [null] which refers to a multi-value metric aggregation"));
         };
+        // `InternalTopMetrics.sortValue`: the metric's own value (bytes too), or empty.
+        if let AggValue::TopMetrics(t) = v
+            && let Some(sv) = t.sort_value(k)
+        {
+            return Ok(sv);
+        }
         return v.multi_value(name, k).map(SortVal::Double);
     }
     Err(AggError::illegal_argument(format!("Can't sort a [{}] aggregation [{name}]", v.type_name())))
 }
 
-/// Compares two reduce-side sort values (`SortValue.compareTo`, negated for `desc`).
-pub fn cmp_sort_vals(a: SortVal, b: SortVal, asc: bool) -> Ordering {
+/// Compares two reduce-side sort values (`SortValue.compareTo`, negated for `desc`). An empty
+/// value is the greatest (last ascending, first descending), as Elasticsearch orders them.
+pub fn cmp_sort_vals(a: &SortVal, b: &SortVal, asc: bool) -> Ordering {
     let c = match (a, b) {
-        (SortVal::Long(x), SortVal::Long(y)) => x.cmp(&y),
-        (SortVal::Double(x), SortVal::Double(y)) => java_double_compare(x, y),
-        (SortVal::Long(x), SortVal::Double(y)) => java_double_compare(x as f64, y),
-        (SortVal::Double(x), SortVal::Long(y)) => java_double_compare(x, y as f64),
+        (SortVal::Long(x), SortVal::Long(y)) => x.cmp(y),
+        (SortVal::Double(x), SortVal::Double(y)) => java_double_compare(*x, *y),
+        (SortVal::Long(x), SortVal::Double(y)) => java_double_compare(*x as f64, *y),
+        (SortVal::Double(x), SortVal::Long(y)) => java_double_compare(*x, *y as f64),
+        (SortVal::Bytes(x), SortVal::Bytes(y)) => x.cmp(y),
+        (SortVal::Empty, SortVal::Empty) => Ordering::Equal,
+        (SortVal::Empty, _) => Ordering::Greater,
+        (_, SortVal::Empty) => Ordering::Less,
+        // Values of different types order by type (bytes before numbers).
+        (SortVal::Bytes(_), _) => Ordering::Less,
+        (_, SortVal::Bytes(_)) => Ordering::Greater,
     };
     if asc { c } else { c.reverse() }
 }
@@ -1298,7 +1595,7 @@ impl<'a> ReduceSorter<'a> {
                     if *asc { c } else { c.reverse() }
                 }
                 BucketOrder::Agg { asc, .. } => {
-                    let c = cmp_sort_vals(self.agg_vals[i][ai], self.agg_vals[j][ai], *asc);
+                    let c = cmp_sort_vals(&self.agg_vals[i][ai], &self.agg_vals[j][ai], *asc);
                     ai += 1;
                     c
                 }
@@ -1332,6 +1629,8 @@ impl Internal for Terms {
     fn type_name(&self) -> &'static str {
         match self.kind {
             TermsKind::Str | TermsKind::Unmapped => "sterms",
+            // OpenSearch has its own result type for `unsigned_long` terms.
+            TermsKind::Long if self.is_unsigned_os() => "ulterms",
             TermsKind::Long => "lterms",
             TermsKind::Double => "dterms",
             TermsKind::Multi => "multi_terms",
@@ -1342,6 +1641,7 @@ impl Internal for Terms {
         match self.kind {
             TermsKind::Str => "StringTerms",
             TermsKind::Unmapped => "UnmappedTerms",
+            TermsKind::Long if self.is_unsigned_os() => "UnsignedLongTerms",
             TermsKind::Long => "LongTerms",
             TermsKind::Double => "DoubleTerms",
             TermsKind::Multi => "InternalMultiTerms",
@@ -1374,6 +1674,9 @@ impl Internal for Terms {
             for t in &mut list {
                 t.promote_to_double();
             }
+        }
+        if list[0].kind == TermsKind::Multi {
+            promote_multi_keys(&mut list);
         }
         let first = &list[0];
         let cfg = first.cfg.clone();

@@ -12,4 +12,5 @@ regex.workspace = true
 regex-syntax.workspace = true
 smallvec.workspace = true
 unicode-segmentation.workspace = true
+unicode-normalization.workspace = true
 serde_json.workspace = true

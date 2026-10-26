@@ -77,6 +77,7 @@ pub const ALL_TYPES: &[&str] = &[
     "t_test",
     "rate",
     "multi_terms",
+    "counted_terms",
     "categorize_text",
     "frequent_item_sets",
     "frequent_items",
@@ -369,6 +370,7 @@ fn parse_type(p: &mut XParser<'_>, ty: &'static str, name: &str, opts: &ParseOpt
         "cartesian_centroid" => AggKind::Cartesian(metrics::cartesian::parse(p, metrics::cartesian::CartesianKind::Centroid)?),
         "composite" => AggKind::Composite(bucket::composite::parse(p)?),
         "multi_terms" => AggKind::MultiTerms(bucket::multi_terms::parse(p, name)?),
+        "counted_terms" => AggKind::Terms(bucket::terms::parse_counted(p, name)?),
         "categorize_text" => {
             let check = |re: &str| match opts.java_regex_valid {
                 Some(f) => f(re),

@@ -306,8 +306,12 @@ impl SegmentSource for BufferSource<'_> {
             .map(|f| {
                 let mut fi = f.schema.field_info();
                 if f.terms.is_empty() {
-                    fi.index = search_codec::IndexOptions::None;
-                    fi.norms = false;
+                    // Values that analyzed to nothing leave only norms (0), which Lucene keeps:
+                    // the field stays indexed, without terms.
+                    if f.norm_docs.is_empty() {
+                        fi.index = search_codec::IndexOptions::None;
+                        fi.norms = false;
+                    }
                     fi.payloads = false;
                 }
                 if f.points.docs.is_empty() {
@@ -335,7 +339,9 @@ impl SegmentSource for BufferSource<'_> {
 
     fn norms(&self, field: u32) -> CResult<Option<NormsIter<'_>>> {
         let Some(fb) = self.fb(field) else { return Ok(None) };
-        if fb.norm_docs.is_empty() || fb.terms.is_empty() {
+        // A field whose values all analyzed to nothing still has norms (0), as in Lucene: they
+        // are what `exists` finds for it.
+        if fb.norm_docs.is_empty() {
             return Ok(None);
         }
         Ok(Some(Box::new(fb.norm_docs.iter().copied().zip(fb.norms.iter().copied()))))

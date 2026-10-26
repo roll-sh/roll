@@ -12,11 +12,16 @@ update this file in the same change when a signature other crates use moves.
 | roll API (`/v1/search/...`)  | rolld API `:7070`   | `--api` / `ROLL_API`                        |
 
 Other `rolld` flags (`crates/rolld/src/search.rs`, `#[derive(clap::Args)] SearchArgs`):
-`--search-tls-cert/-key`, `--search-domain`, `--search-idle-unload` (300 s),
+`--search-tls-cert/-key`, `--search-tls-self-signed` (a boot-time certificate; in a fleet the
+heartbeat publishes its pin), `--search-domain`, `--search-idle-unload` (300 s),
 `--search-cache-bytes`, `--search-sync-objects`, `--search-proxy-protocol`,
 `--search-history` (point-in-time window, 86400 s), `--search-gc-interval` (3600 s),
 `--search-test-features`, `--no-search`;
-`rolld --search-only` runs only search and its API. See [README.md](README.md).
+`rolld --search-only` runs only search and its API (over TLS with the REST certificate when the
+REST listener serves TLS; the record then sets `Beat.api_tls`). On SIGTERM its whole stop takes at
+most `--search-shutdown-timeout` (90 s; `Search::shutdown() -> Instant` returns the deadline for the
+last connections, `search::stop_phases(total) -> (drain, tail)`, tail = a quarter, at most 15 s).
+See [README.md](README.md).
 
 ## Version and dialect
 
@@ -66,7 +71,8 @@ people work in it at once.
   the current thread's stack bounds, so deeply nested requests move to a fresh stack before they
   could overflow a tokio worker's instead of aborting the node.
 - `search-server` uses `libc` (only `prctl(PR_SET_THP_DISABLE)`: transparent huge pages inflate an idle
-  node's RSS about threefold, see `search_server::process`) and `tokio-postgres-rustls` +
+  node's RSS about threefold; and `getrusage(RUSAGE_SELF)`: the purge governor's process CPU
+  reading; see `search_server::process`) and `tokio-postgres-rustls` +
   `rustls-native-certs` (TLS to the Postgres lease store, as `mq-cluster` does).
 - `search-index` uses `libm` for fdlibm-exact `sin`/`cos`/`asin`/`sqrt` (Lucene's `SloppyMath`
   tables behind geo distances and sorts must round like Java's `StrictMath`, which the platform
@@ -299,6 +305,10 @@ impl SegmentReader {
     pub fn postings(&self, field: u32, term: &TermState, flags: PostingsFlags) -> PostingsCursor;  // empty cursor if no terms
     pub fn norms(&self, field: u32) -> Option<&NormsReader>;
     pub fn doc_values(&self, field: u32) -> Option<&DocValuesReader>;  // enum of the five below
+    // `field | search_codec::UNINVERTED` (bit 31): Sorted doc values rebuilt from the field's
+    // terms on first use (each doc's smallest term), cached for the reader's life; `_id`
+    // fielddata (search-es `search::id_fielddata::FIELD`). None for fields without terms.
+    pub fn uninverted_bytes(&self, field: u32) -> usize;  // memory of the built UNINVERTED values (0 before first use)
     pub fn numeric(&self, f) -> Option<&NumericDocValues>; pub fn binary(&self, f) -> Option<&BinaryDocValues>;
     pub fn sorted(&self, f) -> Option<&SortedDocValues>; pub fn sorted_set(&self, f) -> Option<&SortedSetDocValues>;
     pub fn sorted_numeric(&self, f) -> Option<&SortedNumericDocValues>;
@@ -315,6 +325,8 @@ impl TermsReader { fn stats(&self) -> &TermsStats { num_terms, sum_doc_freq, sum
     fn min_term(&self) -> &[u8]; fn max_term(&self) -> &[u8]; fn has_freqs/has_positions/has_offsets/has_payloads(&self) -> bool;
     fn seek_exact(&self, term: &[u8]) -> Option<TermState>; fn term_state(&self, ord: u64) -> TermState;
     fn seek_exact_hashed(&self, term, bloom::hash64(term)) -> Option<TermState> /* hash once per lookup across segments */;
+    fn sorted_lookup(&self) -> SortedLookup { fn seek_exact_hashed(&mut self, term, hash) -> Option<TermState> }
+        /* strictly increasing terms (TermInSet): keeps the block and scan position; 45k-term set 3.5x faster */;
     fn bloom(&self) -> Option<&BloomFilter { may_contain(&[u8]), may_contain_hash(u64), len(), size_in_bytes() }>;
     fn postings(&self, &TermState, PostingsFlags) -> PostingsCursor;
     fn postings_reset(&self, &TermState, PostingsFlags, &mut PostingsCursor) /* reuses the cursor's buffers: no allocation per term */;
@@ -348,7 +360,8 @@ impl PostingsCursor { fn doc(&self) -> u32 /* u32::MAX before first */; fn next(
 // Doc values: values are addressed by the doc's rank in docs() (a DocSet); iterate with docs().cursor() / cursor.index().
 //   NumericDocValues::{get(doc)->Option<i64>, value_at(idx), docs(), cursor(), skipper(),
 //       get_batch(docs /* ascending */, found: &mut Vec<u32>, values: &mut Vec<i64>) /* appends; one dispatch per batch */,
-//       values_range(first_idx, out: &mut [i64]) /* sequential decode, ~1 ns/value: scans over every doc */}
+//       values_range(first_idx, out: &mut [i64]) /* sequential decode, ~1 ns/value: scans over every doc */,
+//       values() -> &NumericValues /* one per doc of docs(), for get_range / gather */}
 //   BinaryDocValues::{get(doc)->Option<&[u8]>, value_at(idx), docs()}
 //   SortedDocValues::{ord(doc)->Option<u64>, ord_at(idx), value_count(), lookup_ord(ord, &mut Vec<u8>), lookup_term(&[u8])->Result<u64,u64>, dict()->&TermDict, skipper(),
 //       ords_batch(docs, found, ords: &mut Vec<u64>), ords_range(first_idx, out: &mut [i64])}
@@ -377,7 +390,8 @@ impl PostingsCursor { fn doc(&self) -> u32 /* u32::MAX before first */; fn next(
 //       f64_sortable/sortable_f64, lat_lon_bytes, encode_latitude(_ceil), encode_longitude(_ceil), decode_latitude/longitude}
 //       (Lucene NumericUtils / GeoEncodingUtils, bit-exact: checked against ES docvalue_fields output)
 // Stored: StoredReader::{visit(doc, &mut dyn StoredVisitor) -> Result<()>, document(doc) -> Result<Vec<(u32, OwnedStoredValue)>>,
-//         raw(doc) -> Result<&[u8]>}  (doc >= max_doc: InvalidArgument; stored::decode_doc(bytes, visitor) decodes raw bytes)
+//         raw(doc) -> Result<&[u8]>, holds(doc) -> bool /* doc is in the decompressed chunk: reading it decompresses nothing */}
+//         (doc >= max_doc: InvalidArgument; stored::decode_doc(bytes, visitor) decodes raw bytes)
 //   trait StoredVisitor { fn needs_field(&mut self, field) -> VisitStatus /* Yes|No|Stop */; fn value(&mut self, field, StoredValue<'_>) }
 // Vectors: VectorsReader::{len(), docs(), ord(doc), doc(ord), vector(ord) -> &[u8], vector_f32(ord, &mut Vec<f32>),
 //     prepare(VectorQuery::{Float(&[f32]) | Byte(&[i8]) | Bits(&[u8])}) -> Result<PreparedQuery> /* InvalidArgument with ES's
@@ -469,12 +483,33 @@ pub enum IndexableField { Text { field, analyzer, values }, Tokens { field, toke
 pub struct Shard;
 impl Shard {
     pub fn open(cfg: ShardConfig, schema: Schema, segments: Vec<SegmentHandle>) -> Result<Shard>;  pub fn in_memory(schema) -> Shard;
+    // reopen on a commit whose searcher showed only part of it (`FlushOutcome::published`, `PublishedView { hidden:
+    // Vec<u32> /* segment positions written since the last refresh */, deleted: Vec<(u32, Vec<u32>)> /* docs deleted
+    // since */, merged: Vec<(u32, Vec<u32>)> /* segments merged since the refresh from shown ones: the docs not shown;
+    // every other doc is shown, deleted or not (traced through merges of merges, kept until the next publish, merges up
+    // to 2M docs) */ }`, at most `MAX_VIEW_DELETES` docs): searches see what they saw, realtime reads everything, the next
+    // refresh publishes the rest (`has_pending_changes()` meanwhile). `published: None`: the searcher showed the whole
+    // commit, or something a view can't express (a shown doc a merge since dropped).
+    pub fn open_published(cfg, schema, segments, published: Option<PublishedView>) -> Result<Shard>;
     pub fn index(&self, op: IndexOp) -> Result<OpResult>;   // IndexOp::new(doc) + version/version_type/if_seq_no/if_primary_term/op_type/origin
     pub fn delete(&self, op: DeleteOp) -> Result<OpResult>; // OpResult::{Indexed, Deleted, Conflict(VersionConflict), Stale}
     pub fn get(&self, id: &[u8], realtime: bool) -> Result<Option<StoredDoc>>;
+    pub fn realtime_searcher(&self, id: &[u8]) -> Result<Searcher>;  // ES's internal reader (unpublished segments too), refreshing the buffers first when `id` is buffered
+    pub fn note_realtime_get(&self, id: &[u8]) -> Result<()>;  // a realtime GET of a buffered `id`: ES's internal refresh, so later realtime_searcher statistics count it
     pub fn refresh(&self) -> Result<bool>;  pub fn flush(&self) -> Result<FlushOutcome>;  // segments (zero-copy bytes) + live docs + checkpoint
     pub fn maybe_merge(&self) -> Result<usize>;  pub fn force_merge(&self, max_num_segments: Option<usize>, only_expunge_deletes: bool) -> Result<()>;
     pub fn searcher(&self) -> Searcher;      // point in time; stats(), segments(), update_schema(), mark_seq_no_processed(), close()
+    pub fn leaf_sort(&self) -> Option<u32>;  pub fn retention_lease(&self) -> (i64, i64, Duration);  // to persist with a commit
+    pub fn seed_retention_lease(&self, from: i64, next: i64, age: Duration);  // reopen: keep retaining (never moves it back)
+    pub fn set_leaf_sort(&self, field: Option<u32>);  // searchers list segments by this 1-D point field's max, descending
+                                                      // (Elasticsearch's @timestamp leaf sorter); republishes the current
+                                                      // searcher's segments reordered (nothing unrefreshed becomes visible)
+    // durability hooks (search-server): delete tombstones of a commit (`up_to`: its checkpoint) and back at open,
+    // `index.gc_deletes` (dynamic; expired tombstones no longer count for primaries' version checks, replays still see
+    // them), seq_no gap filling after a replay, and the soft-deletes retention lease natural merges honour
+    pub fn tombstones(&self, up_to: i64) -> Vec<(Bytes, i64 /* seq_no */, i64 /* version */, Duration /* age */)>;
+    pub fn seed_tombstones(&self, impl IntoIterator<Item = (Bytes, i64, i64, Duration)>);  pub fn set_gc_deletes(&self, Duration);
+    pub fn fill_seq_no_gaps(&self) -> u64;  pub fn retained_from(&self) -> i64;
 }
 pub trait Query: Send + Sync + Debug + Any { fn weight(&self, s: &Searcher, mode: ScoreMode, boost: f32) -> Result<Box<dyn Weight>>;
     fn rewrite(&self, s: &Searcher) -> Result<Option<QueryRef>>; fn lucene_string(&self, &Schema) -> String; fn visit(..); fn as_any(&self) -> &dyn Any; }
@@ -491,9 +526,18 @@ pub trait Collector { fn score_mode(&self) -> ScoreMode; fn leaf<'a>(&'a mut sel
 impl Searcher { fn search(&self, &QueryRef, &mut dyn Collector) -> Result<()>; fn search_with(.., &SearchControl /* deadline, cancel */);
     fn search_concurrent<M: CollectorManager>(&self, &QueryRef, &M, &SearchControl) -> Result<M::Out>;
     fn count(&QueryRef) -> Result<u64> /* Weight::count per segment, the rest iterated in concurrent slices */; fn count_with(&QueryRef, &SearchControl);
-    fn count_if_cheap(&QueryRef) -> Result<Option<u64>>; fn explain(&QueryRef, global_doc) -> Result<Explanation>; fn rewrite(&QueryRef);
+// SearchControl { deadline, cancelled, ext: Option<Arc<dyn Any + Send + Sync>> /* request state of the embedder, carried to slice threads */ }
+// search::{set_ambient_control(Option<SearchControl>) -> AmbientGuard, ambient_control()}: the thread's control; search()/count()/search_concurrent()
+//   with a no-op control use it, search_partitions hands it to slice threads. search::{note_interrupted(Error), take_interrupted()}: a hook
+//   (script poll) that stopped because the deadline passed records it, and the searcher reports that error (TimeExceeded keeps partial results).
+// query::IntervalsSource::scripted(src, Arc<dyn IntervalScript>) /* FILTER(<script>) */; trait IntervalScript { name(), accept(start, end, gaps) -> Result<bool> }
+// query::FilterScript::runtime_field() -> bool (default false): AbstractScriptFieldQuery description/explanation
+    fn count_if_cheap(&QueryRef) -> Result<Option<u64>>; fn segment_counts_if_cheap(&QueryRef) -> Result<Option<Vec<u64>>> /* per segment,
+      search order */; fn explain(&QueryRef, global_doc) -> Result<Explanation>; fn rewrite(&QueryRef);
     fn stored(global_doc); fn term_vectors(global_doc, fields, term_stats, field_stats) -> Result<Vec<FieldTermVector>>;
     fn collection_stats(field); fn term_stats(field, term); fn with_limits(SearchLimits /* max_clause_count 4096, parallelism */);
+    fn with_global_stats(Option<Arc<dyn StatsSource>>) -> Searcher /* dfs_query_then_fetch: term / field statistics replacing
+      the view's own (TermStates::build, collection_stats, term_stats consult it first) */; fn global_stats(&self) -> Option<&Arc<dyn StatsSource>>;
     fn point_bounds(field) -> Option<PointBounds { min, max /* per-dim packed */, doc_count }> /* isFieldWithinQuery */; }
 ```
 
@@ -526,10 +570,18 @@ Option<(i64, i64)>`; type, status and reason are `source`'s): the caller appends
 conflicts, an immense `Term`, the doc limit) use none. `ShardConfig::max_docs` (default `shard::MAX_DOCS` =
 2147483519, Lucene's `IndexWriter.MAX_DOCS`) bounds docs held (`Shard::pending_docs()`: segments' `max_doc` + buffered,
 deleted docs until merged away); past it index and delete fail with Elasticsearch's "Number of documents in the shard
-cannot exceed [..]". A flush commit is a consistent cut (segments and live docs captured with no write in flight):
+cannot exceed [..]". Natural merges follow Elasticsearch's soft-deletes retention (Lucene's `SoftDeletesRetentionMergePolicy`): deleted
+docs of operations with seq no `>= retained_from()` don't count as deletes for the merge policy, so small segments with
+fresh deletes aren't rewritten after a refresh and a fully deleted segment stays; the lease starts at the opening
+checkpoint + 1 (0 for a new shard) and moves to the local checkpoint once per `shard::RETENTION_SYNC` (30 s,
+`index.soft_deletes.retention_lease.sync_interval`), checked lazily (no timer). Forced merges still expunge everything.
+Unlike Elasticsearch, a delete adds no tombstone document to a segment (`docs.deleted` counts only deleted documents).
+A flush commit is a consistent cut (segments and live docs captured with no write in flight):
 it never holds the delete of an update without its new doc. `force_merge(Some(n), _)` merges only the segments present
 at the call and their merge results (Lucene's `segmentsToMerge`), so it returns under steady indexing.
 `search::pool::execute_held(job, hold)`: `hold` drops once the worker that ran `job` is parked again.
+`search::pool::cores()`: the process's usable CPUs, looked up once. Use it instead of
+`std::thread::available_parallelism()` on any per-request path (the std call re-reads cgroup files each time).
 
 Queries (`query::*`): `TermQuery`, `MultiTermQuery` (prefix, wildcard, regexp, fuzzy, term range,
 term set; every Elasticsearch rewrite method via `RewriteMethod::parse`), `BooleanQuery`
@@ -546,7 +598,9 @@ sorted segments resolve to one doc id range), point/doc-values ranges rewrite as
 covering → `*:*` or `FieldExistsQuery`; `Searcher::point_bounds`),
 `FieldExistsQuery`, `MatchAllQuery`, `MatchNoneQuery`, `ConstantScoreQuery`, `BoostQuery`,
 `DisMaxQuery`, `SynonymQuery`, `FunctionScoreQuery` / `ScriptScoreQuery` (scripts through
-`ScoreScript`), `KnnQuery` (approximate / exact, filter, min score; the `knn` query, rewrites to
+`ScoreScript`; their bulk scorers score a block of the inner query's matches at a time, and
+`LeafScoreScript::score_block(docs, subs, out) -> Result<(), (usize, Error)>` lets a script
+evaluate a block — the default calls `score` per doc), `KnnQuery` (approximate / exact, filter, min score; the `knn` query, rewrites to
 `ScoreDocQuery::lucene` = Lucene's `DocAndScoreQuery`, "within top N docs"; the top-level `knn` section's merged
 hits are `ScoreDocQuery::new(hits)` = Elasticsearch's `KnnScoreDocQuery`, "within top k documents"), `ToParentQuery` / `ToChildQuery` (`nested::root_filter()` marks parents),
 `GeoDistanceQuery`, `GeoPointShapeQuery` (Lucene `LatLonPointQuery` rules: `GeoShape::{Point, Rectangle, Polygon,
@@ -584,7 +638,8 @@ from, to, score_mode: JoinScoreMode, min, max }` (`has_child`: from = child quer
 type filter; `has_parent`: from = parent query filtered to the parent type, to = child type filter, score mode Max when
 `score`; Lucene's global-ordinals join, resolved on rewrite). `KnnQuery.oversample: Option<f32>` is
 `rescore_vector.oversample` (hits are always rescored exactly); `KnnQuery.parent_filter: Option<QueryRef>` searches
-nested vectors (best child per parent, `k` parents; wrap in `ToParentQuery` with `Max`). `Searcher::global_ordinals(field) ->
+nested vectors (best child per parent, `k` parents; wrap in `ToParentQuery` with `Max`); `KnnQuery.per_segment: bool`
+keeps each segment's best `k` instead of the best `k` overall (OpenSearch's native k-NN engines). `Searcher::global_ordinals(field) ->
 Option<Arc<search::ordinals::GlobalOrdinals { value_count, global(seg_ord, ord), segment_map(seg), lookup(..) }>>`
 (sorted / sorted-set doc values, cached per searcher) is there for terms aggregations too.
 Non-scoring clauses go through a filter cache (`search::cache`, Lucene's usage-tracking policy: costly clauses after
@@ -646,7 +701,8 @@ search_after, early termination on the index sort; `compare_field_docs` merges s
 { field, points: [(lat, lon)], distance_type: Arc|Plane, unit_meters, reverse, mode: Option /* min asc, max desc */, nested })`
 = `_geo_distance` (Elasticsearch's values; no `sum` mode — reject it; missing = Infinity), `SortKey::Script(ScriptSort {
 script: Arc<dyn SortScript /* leaf(seg) -> LeafSortScript::number(doc) */>, reverse, mode, nested })` = `_script` numbers),
-`TotalHitCountCollector`, `MultiCollector`, `TerminateAfter`, `MinScore`, `PostFilter::new(&searcher, &filter, inner)`
+`TotalHitCountCollector`, `MultiCollector`, `TerminateAfter` (`.counting(&searcher, min_score, post_filter)`: only the
+hits that pass them count, as `QueryPhaseCollector` does), `MinScore`, `PostFilter::new(&searcher, &filter, inner)`
 (`post_filter`), `CollapseCollector`
 (groups by keyword / numeric doc values; hits carry the group value for inner hits),
 `QueryRescorer` (Elasticsearch's window rescoring and explanations), managers for concurrent
@@ -655,7 +711,10 @@ search (`TopScoreManager` — its slices share the hit count and best score bar,
 collectors). Highlighting:
 `highlight::highlight(query, values, analyzer, field, &HighlightOptions)` — unified (default),
 plain, fvh (Lucene's FastVectorHighlighter pipeline; `highlight_in(searcher, ..)` expands multi-term queries against
-the index as Elasticsearch's fvh does). Explanations match Elasticsearch's text, including the
+the index as Elasticsearch's fvh does). Span queries report their tree through `QueryVisitor::span(&SpanNode)` (the
+default forwards its terms to `term`); the highlighters match it over the doc's tokens (`highlight::spans`), and
+`HighlightOptions::offsets_indexed` (postings or term vectors with offsets) picks Lucene's offset source rules.
+Explanations match Elasticsearch's text, including the
 query-cache wrapper's (`1.0 = <query>` for filter clauses).
 
 Profiling (`search::profile`): `searcher.with_profiler(Some(Profiler::new()))` times every weight built through
@@ -687,7 +746,14 @@ impl AggRequest {
     //                None = 65536: composite's size is checked on the shard */,
     //                profiler: Option<Arc<search_aggs::profile::Profiler>> /* profile: true — after finish(),
     //                Profiler::to_json() is the shard's `profile.shards[].aggregations` array (type = Elasticsearch
-    //                aggregator class, description, time_in_nanos, breakdown with *_count, debug, children) */ }
+    //                aggregator class, description, time_in_nanos, breakdown with *_count, debug, children) */,
+    //                query: Option<QueryRef> /* the shard's query; read only by profiled opensearch-dialect requests
+    //                (search_aggs::filter_rewrite replays OpenSearch's filter rewrite optimization for the profile's
+    //                optimized_segments / leaf_visited / inner_visited; cardinality's dynamic pruning counts) */,
+    //                filter_by_filter: bool /* search.aggs.rewrite_to_filter_by_filter (search-es passes it, default
+    //                true for the elasticsearch dialect): top-level `filters` and keyword `terms` (≤ 1000 global
+    //                ordinals, AggField.indexed) run filter by filter under match_all (FilterByFilterAggregator,
+    //                StringTermsAggregatorFromFilters in profiles); default false */ }
     //                — construct with ..Default::default()
     fn collector(&self, &dyn FieldLookup, &search_index::Searcher, &ShardOptions { budget }) -> Result<AggCollector>;
     fn run(&self, &dyn FieldLookup, &Searcher, query: &QueryRef, &ShardOptions) -> Result<Aggs>;  // collector + search + finish
@@ -706,8 +772,11 @@ pub trait FieldLookup {   // per shard; every method but `field` has a default
     fn root_filter(&self) -> QueryRef; fn global_query(&self) -> QueryRef /* superset of significant_*, `global` */;
     fn join(&self, child_type: Option<&str>, parent_type: Option<&str>) -> Option<JoinRelation>;  // children / parent
     fn scripts(&self) -> Option<Arc<dyn ScriptHost>>; fn date_formatter(&self, pattern); fn decimal_format(&self, pattern);
+    fn field_date_formatter(&self, field, pattern) /* a mapped date field's format in its `locale`; default date_formatter */;
+    fn top_metrics_max_size(&self) -> u32 /* index.top_metrics_max_size, default 10 */;
     fn now_millis(&self) -> i64; fn doc_count_field(&self) -> Option<u32> /* _doc_count */;
-    fn fetcher(&self) -> Option<Arc<dyn TopHitsFetcher>> /* top_hits fetch phase */; fn max_inner_result_window(&self) -> u32;
+    fn fetcher(&self) -> Option<Arc<dyn TopHitsFetcher>> /* top_hits fetch phase; TopHitsFetcher::rescore / rescores
+      (default no-op): the search's rescorers over a score-sorted bucket's hits */; fn max_inner_result_window(&self) -> u32;
     fn hit_sort(&self, sort: &Json) -> Result<Vec<HitSort>>; fn text_terms(&self) -> Option<Arc<dyn TextTerms>> /* significant_text */;
     fn shard_id(&self) -> (u32, u32); fn index_uuid(&self) -> Option<&str> /* random_sampler's default shard seed = ShardId.hashCode() */;
     fn time_series(&self) -> Option<TimeSeriesInfo> /* time_series-mode index */;
@@ -715,6 +784,14 @@ pub trait FieldLookup {   // per shard; every method but `field` has a default
 pub struct TimeSeriesInfo { dimensions: Vec<AggField>, tsid_field: Option<u32> /* sorted `_tsid` dv */, timestamp_field: Option<u32> /* @timestamp */ }
 // AggField.counter: a `time_series_metric: counter` field of a time_series index (rate → reset-aware counter rate;
 // terms/date_histogram/missing/… refuse it, as in Elasticsearch).
+// AggField.indexed: the doc-values terms are the inverted index's (an indexed keyword; filter-by-filter `terms`).
+// Pipelines include `moving_percentiles` (PipelineKind::MovingPercentiles { path, window, shift }: reduces the
+// window's Percentiles states; metrics::percentiles::bucket_percentiles resolves its buckets_path).
+// `histogram` fields: one binary doc value per doc, histogram_field::encode_histogram(values, counts);
+// `aggregate_metric_double`: sorted-numeric sub-fields per metric (sortable doubles, value_count as a long).
+// MemoryBudget (search_aggs::memory): new(limit), limit(), set_limit(limit) /* dynamic breaker limits */, used(),
+// tripped() /* refused reservations */, reserve(bytes, label) -> circuit_breaking_exception, force(bytes), release(bytes).
+// search-es keeps one per cluster as the `request` breaker (Cluster.breakers) and passes it to collection and reduce.
 pub struct JoinRelation { join_field: u32 /* "<join>#<parent>" sorted dv */, parent_filter: QueryRef, child_filter: QueryRef }
 pub trait ScriptHost {   // aggs, aggs_init/map/combine/reduce, bucket_script/selector, moving_fn, script_heuristic
     fn values(&self, &Script) -> Result<Arc<dyn ValuesScript>>;
@@ -771,7 +848,26 @@ fields feed `sum`/`avg`/`min`/`max`/`value_count`/`percentiles`/`percentile_rank
 orders (Java `HashMap` iteration, Lucene priority queues), sketches (TDigest, HdrHistogram, HLL++),
 `random_sampler`'s sample for a given `seed` / `shard_seed`, `t_test` p-values (Commons Math's
 `FastMath`/t-distribution, `search_aggs::commons_math`) and `geohex_grid` cells (Elasticsearch's H3
-port with its jafama trigonometry, `search_aggs::h3`).
+port with its jafama trigonometry, `search_aggs::h3`). `h3::string_to_h3` returns only valid cells
+(`h3::is_valid`, `H3.h3IsValid`), so peer input never reaches the cell functions; `h3::string_to_h3_lenient`
+also accepts indices whose fields are in range (the `geo_grid` processor reads `"0"`, as Elasticsearch does).
+
+compat-es round 3 additions: `search_aggs::version_string::{encode, decode, decode_into, is_legal,
+EncodeError, NUMERIC_MARKER, PRERELEASE_SEPARATOR, NO_PRERELEASE_SEPARATOR}` (x-pack's `VersionEncoder`:
+byte order is semver precedence) and `DocValueFormat::Version` (picked for `version` keyword fields:
+keys decode, `missing`/`include`/`after` encode); `HitSort::Computed { sort: Arc<dyn ComputedSort>, reverse }`
+with the traits `field::ComputedSort` (`kind()` `number`|`string`|`version`, `segment(seg)`,
+`render_bytes`, `needs_score`) and `field::SegmentComputedSort::value(doc, score) -> sort::SortVal`
+(failures go through `search_index::search::defer_error`): `top_hits`/`top_metrics` keys for
+`_script` and `_geo_distance` (`top_metrics` rejects non-number kinds with Elasticsearch's message);
+`bucket::terms::SortVal` gained `Bytes(Vec<u8>)` and `Empty` (greatest) and is no longer `Copy`
+(`cmp_sort_vals` takes references) and `TopMetrics::sort_value(key)` feeds it, so `terms` orders by
+keyword/ip `top_metrics` values; `AggField { counts: Option<u32>, expand_counts: bool }` (a
+`counted_keyword`'s vInt-array count doc values; `BytesReader` repeats each value by its count when
+`expand_counts`), `TermsSpec.counted` and `bucket::terms::parse_counted` (`counted_terms`, parsed as
+its own type and run as a byte-keyed `terms` without per-doc dedup), `values::{VIntIter,
+write_vint_array}`; `multi_terms` reduce promotes a key position whose numeric type differs between
+shards (`long`/`unsigned_long`/`double`) to doubles; `shape_field::ShapeValue::label_position()`.
 
 ## `search-painless`
 
@@ -956,6 +1052,8 @@ impl Store {
     pub async fn open_segment(&self, key: &SegmentKey) -> Result<SegmentData>;  // cache hit, or one shared fetch
     pub async fn open_segments(&self, keys: &[SegmentKey]) -> Result<Vec<SegmentData>>;
     pub async fn fetch_segment(&self, key: &SegmentKey) -> Result<SegmentFetch>;  // use before the download completes (below)
+    pub fn fetch_part(&self) -> u64;   // ranged-read size of downloads (StoreConfig.fetch_part_bytes, default cache::FETCH_PART 8 MiB, >= 64 KiB)
+    #[doc(hidden)] pub fn set_download_throttle(&self, bytes_per_sec: u64);   // tests: downloads share a slow link
     pub async fn write_live_docs(&self, seg: &SegmentId, data: Bytes) -> Result<LiveGen>;
     pub async fn open_live_docs(&self, seg: &SegmentId, gen: LiveGen) -> Result<SegmentData>;
     // shard lifecycle: recover -> open segments -> replay -> attach -> append/flush -> detach
@@ -976,22 +1074,35 @@ impl Store {
     pub async fn branch(&self, parent: &str, child: &str, at_ms: Option<u64>) -> Result<()>;
     pub async fn delete_cluster(&self, cluster: &str) -> Result<()>;
     pub fn release_cluster(&self, cluster: &str);                             // forget in-memory tracking on unload
+    // Pins (snapshot contents): a commit point copied under search/c/<cluster>/p/<pin>/<shard>.json, outside any shard's
+    // history (waking never reads them); GC keeps what a pin names (GcStats.pins); branches copy them (PIT: written <= at).
+    // Written once (same segments again: no-op; other contents: error); fenced like manifests; WAL ranges and base dropped.
+    pub async fn write_pin(&self, cluster: &str, pin: &ShardId, m: &ShardManifest) -> Result<()>;
+    pub async fn read_pin(&self, cluster: &str, pin: &ShardId) -> Result<Option<ShardManifest>>;
+    pub async fn list_pins(&self, cluster: &str) -> Result<Vec<ShardId>>;
+    pub async fn delete_pins(&self, cluster: &str, pins: &[ShardId]) -> Result<()>;
     pub async fn collect_garbage(&self, grace: Duration) -> Result<GcStats>;  // one place per bucket
     pub async fn cluster_usage(&self, cluster: &str) -> Result<ClusterUsage>;   // incl. cached_bytes on this node
     pub fn stats(&self) -> StoreStats;  pub fn set_cache_budget(&self, bytes: u64);
 }
 impl WalShard { pub fn append(&self, seq_no: i64, op: &[u8]) -> Result<Lsn>;
                 pub fn append_many<B: AsRef<[u8]>>(&self, ops: &[(i64, B)]) -> Result<Lsn>;  // one lock, one commit, all or nothing
+                pub fn append_parts(&self, seq_no: i64, parts: &[&[u8]]) -> Result<Lsn>;   // one record, payload = parts concatenated (no copy)
                 pub fn stats(&self) -> ShardWalStats; }
 impl Wal {
     pub async fn wait_ack(&self, lsn: Lsn) -> Result<()>;      // translog.durability=request: local fsync, or S3 with sync_objects
     pub async fn durable(&self, lsn: Lsn) -> Result<()>;       // local fsync
     pub async fn durable_remote(&self, lsn: Lsn) -> Result<()>; // in object storage (seals the file now)
     pub async fn sync_remote(&self) -> Result<()>;  pub fn flush_now(&self);  pub fn stats(&self) -> WalStats;
+    pub fn check_room(&self) -> Result<()>;          // WalFull when appends would be refused (check before applying an op)
     pub fn cluster_stats(&self, cluster: &str) -> ClusterWalStats;   // per-tenant uncommitted ops/bytes
     pub fn pinning_shards(&self) -> Vec<PinningShard>;   // shards with uncommitted ops, oldest pinned WAL file first: flush candidates
 }
-pub struct WalRecord<'a> { pub at_ms: u64, pub seq_no: i64, pub cluster: &'a str, pub index_uuid: &'a str, pub shard: u32, pub payload: &'a [u8] }
+pub struct WalRecord<'a> { pub at_ms: u64, pub seq_no: i64, pub epoch: u64 /* ownership epoch it was appended under, 0: none */,
+                          pub cluster: &'a str, pub index_uuid: &'a str, pub shard: u32, pub payload: &'a [u8] }
+// Wal::shard(cluster, shard) = shard_at(cluster, shard, 0); Wal::shard_at(.., epoch): every record of the handle carries the epoch.
+// attach_shard registers with the store's epoch of the cluster and opens a WalSource { epoch: Some(e) } (e > 0): replay of that
+// range skips records of any other epoch (a deposed owner's), whatever their time or file.
 impl SegmentFetch {   // Clone; resolves once the size is known (the first request also brings the last 8 MiB: footer + TOC)
     pub fn len(&self) -> u64;  pub fn downloaded(&self) -> u64;  pub fn is_ready(&self, r: Range<u64>) -> bool;  // false outside the segment
     pub fn prioritize(&self, ranges: &[Range<u64>]);                 // e.g. term dictionaries and skip data from the TOC
@@ -1006,10 +1117,13 @@ impl SegmentFetch {   // Clone; resolves once the size is known (the first reque
 // before a query touches postings/doc values/stored fields of a field: f.wait_ready(those sections) (or use f.data() once Some).
 ```
 
-`StoreConfig { node, wal: WalConfig { flush_delay: 5ms, flush_bytes: 4 MiB, eager_below: 8, file_bytes: 64 MiB,
-ship_interval: 1s, sync_objects, fsync, max_pending_bytes, ship_concurrency, zstd_level, replay_cache_bytes,
+`StoreConfig { node, wal: WalConfig { flush_delay: 5ms /* longest an unwaited record stays buffered: commits are on demand,
+back to back, as soon as anyone waits (durable / wait_ack) for a buffered record */, flush_bytes: 4 MiB, file_bytes: 64 MiB,
+ship_interval: 1s, sync_objects, fsync, leader_commits: true /* a waiter commits the batch on its own thread while
+fsyncs average under 250 µs and no commit runs */, max_pending_bytes, ship_concurrency, zstd_level, replay_cache_bytes,
 max_local_bytes: 8 GiB /* unshipped bytes past which appends fail with WalFull */ }, cache_bytes, manifest_retain (4),
-manifest_retain_ms (point-in-time window, 0), state_retain (4), single_put_bytes, verify: Option<Verifier> }`.
+manifest_retain_ms (point-in-time window, 0), state_retain (4), single_put_bytes, verify: Option<Verifier>,
+fetch_part_bytes (8 MiB: parallel ranged reads of this size; a segment larger than one part can be read while it downloads) }`.
 `Verifier::new(|d: &SegmentData| -> Result<()>)` checks every *downloaded* segment (`d.name()` = `<id>.seg`) and
 live-docs file (`<id>.<gen>.liv`) before the cache keeps it; search-server should pass the codec's whole-file check
 for `.seg` (`ContainerReader::open(Slice::from_owner(d.clone()))?.verify()`, zero-copy) and `Ok(())` otherwise. A failure fails the download for every waiter
@@ -1058,7 +1172,8 @@ Object keys (never reused; a rewritten object gets a new key):
 - `search-es` exposes `Cluster` (one loaded tenant) and `pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse`.
   The route tables are generated from Elasticsearch's REST API spec JSON (Apache-2.0, vendored
   under `crates/search-es/spec/`) and, for the opensearch dialect, OpenSearch 3.9.0's
-  (`crates/search-es/spec/opensearch/`), so every path, method and parameter of each dialect is
+  (`crates/search-es/spec/opensearch/`, plus roll's own files for the bundled plugins' APIs in
+  `spec/opensearch/plugins/`), so every path, method and parameter of each dialect is
   known; unimplemented APIs answer the way Elasticsearch answers for an unknown or unsupported
   feature.
 - `search-server` owns `Node` (`open(spec)`, `idle()`, `unload(cluster)`, `branch(…)`), a
@@ -1070,7 +1185,9 @@ Object keys (never reused; a rewritten object gets a new key):
 // search-es
 pub struct EsRequest { pub method: String, pub uri: String /* raw path?query */, pub headers: Vec<(String, String)>, pub body: Bytes }
 pub struct EsResponse { pub status: u16, pub headers: Vec<(String, String)>, pub body: Bytes, pub head: bool /* send Content-Length, no body */ }
-pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse;            // Send future
+pub async fn handle(cluster: &Cluster, req: EsRequest) -> EsResponse;            // Send future; search APIs run in block_in_place
+pub async fn rest::handle_shared(cluster: &Arc<Cluster>, req: EsRequest) -> EsResponse; // search APIs on a blocking thread,
+                                                                                  // cancelled (ambient SearchControl.cancelled) when the future is dropped
 pub fn rest::error_response(e: &EsError, req: &EsRequest, d: Dialect) -> EsResponse; // errors before a cluster is known (auth, limits)
 #[async_trait] pub trait MetaStore: Send + Sync { async fn load(&self) -> Result<Option<Bytes>>; async fn save(&self, version: u64, state: Bytes) -> Result<()>; }
 pub struct MemoryStore;                                                           // MetaStore in memory
@@ -1142,8 +1259,45 @@ impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluste
 //   mapping::date_locale(Option<&Value>); stack::maybe_grow(f) — run recursion over untrusted nesting without overflowing
 // Document and search half (engine state lives behind an in-memory trait; persistence/idle unload plug in there):
 // Cluster { engine: engine::Engine, scripts: Arc<scripting::ScriptService>, contexts: search::contexts::Contexts /* scroll, PIT */,
-//           ingest: ingest::pipeline::Cache /* compiled pipelines per metadata version */, .. }
-// engine::ShardStorage: Send + Sync { fn open(&self, index_uuid, shard: u32, schema) -> EsResult<search_index::Shard> }
+//           ingest: ingest::pipeline::Cache /* compiled pipelines per metadata version */,
+//           knn: Arc<opensearch::knn_api::KnnRuntime> /* k-NN plugin counters, graph-cache ledger */, .. }
+// opensearch::ism: the ISM plugin API (policies and managed indices in xpack::store families
+// `ism.policy` / `ism.managed` / `ism.meta`, config index `.opendistro-ism-config`);
+// Cluster::update calls ism::reconcile(prev, &mut next, now) on every state change of the
+// OpenSearch dialect: indices gone (by uuid) stop being managed, new ones (any API: create,
+// resize, restore, rollover, data streams) are matched against ism_templates.
+// engine::ShardStorage: Send + Sync { fn open(&self, index_uuid, shard: u32, schema) -> EsResult<search_index::Shard>;
+//   fn log(&self, index_uuid, shard) -> Option<Arc<dyn ShardLog>> /* default None; asked once per opened shard */;
+//   fn snapshots(&self) -> Option<Arc<dyn SnapshotStorage>> /* default None: snapshot contents stay in memory */ }
+// #[async_trait] engine::SnapshotStorage { async fn capture(snapshot_uuid, index_uuid, shards, Option<Arc<IndexEngine>>);
+//   async fn load(snapshot_uuid, index_uuid, shards) -> Vec<SnapshotShard { segments: Vec<SegmentHandle>, numbers }>;
+//   async fn clone_snapshot(source, target, index_uuids); async fn copies() -> Vec<SnapshotCopy { snapshot, index_uuid, shard }>;
+//   async fn drop_copies(&[SnapshotCopy], older_than: Option<Duration>) /* refused once unloaded */ } — all EsResult;
+//   Engine::snapshot_storage(); Engine::snapshot_searchers(cluster, st, idx, Vec<SnapshotShard>) -> Vec<Searcher> (persist_hooks).
+//   api/snapshots.rs: with storage, create captures every index it includes before recording (an index that appears or is
+//   recreated meanwhile is captured and recording retried), so a recorded snapshot is complete. A copy no recorded snapshot uses
+//   (keyed by snapshot uuid + index uuid) is dropped at once only if its snapshot can't be recorded (deleted, or failed before
+//   saving the state); otherwise only once older than a grace and never while this process is taking it (SnapshotData taking
+//   set): api::snapshots::{LEFTOVER_GRACE (1 h), sweep_leftover_copies(&Cluster, grace)} (search-server runs it after a wake).
+//   Restores register in SnapshotData; deleting a snapshot being restored is a 503 concurrent_snapshot_execution_exception.
+//   restore loads pins when the process has no in-memory copy, clone copies pins first.
+// engine::ShardLog: Send + Sync { fn check(&self) -> EsResult<()> /* before applying (WAL full: 429) */; fn append(&self, &LoggedOp) -> EsResult<()>;
+//   fn flush_requested(&self) /* default no-op: `_flush` / a flushing force merge flushed this shard; the storage commits
+//   it (and calls ShardEngine::committed) before the request is answered */ }
+//   ShardEngine.log: Option<Arc<dyn ShardLog>>; write::apply_index/apply_delete (and copy_index) check before and append
+//   after the shard applied an operation: LoggedOp::{Index { id, routing, source /* as indexed, after ingest */, seq_no,
+//   primary_term, version }, Delete { id, seq_no, primary_term, version }, NoOp { seq_no, primary_term } /* Error::Rejected */};
+//   an append error fails the write with it. write::Prepared gained `source: Bytes, routing: Option<String>`.
+//   Engine::replay(&IndexMeta, shard, &LoggedOp) (persist_hooks.rs): applies a logged op again (Origin::Replay, parsed
+//   against the current mapping; stale/duplicate ops are no-ops). engine::apply_shard_settings: `index.gc_deletes` → shards;
+//   Engine::apply_settings(&IndexMeta) applies them to a loaded index at once (the storage calls it on every state change).
+// Contexts::latest_expiry() -> Option<Instant> (when the last open scroll/PIT expires; None: none open)
+// translog stats: ShardCounters.{translog_ops, translog_bytes, translog_modified_ms}; ShardEngine::logged(&LoggedOp) (write.rs, every
+//   logged op, in memory too), translog_mark() -> (ops, bytes) before a commit's Shard::flush and committed(mark) once it is durable
+//   (search-es `_flush`/close for in-memory shards, search-server's full commits for durable ones); engine::translog_op_bytes(&LoggedOp)
+//   (Elasticsearch's serialized size, Uid-encoded ids) and TRANSLOG_HEADER_BYTES (55, an empty generation)
+// MetaStore::save errors that are (or wrap) an EsError reach the client as that error (search-server: 503 for a save
+//   racing an unload); others stay 500 `failed to persist cluster state`
 //   engine::MemoryShards (default); Engine::with_storage(Arc<dyn ShardStorage>); Engine::index(cluster, st, idx) -> Arc<IndexEngine>
 //   (opens shards lazily, keeps the mapping→engine field table in sync, never moving it back: FieldTable.key is
 //   engine::table_key(st, idx) = (mapping_version, settings_version, synonyms_version) and metadata older in any
@@ -1171,6 +1325,10 @@ impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluste
 //   (Elasticsearch's HashMap key order for ingest output and hit `fields`); ingest::jregex::{JavaPattern::{compile, find_all,
 //   split(text, limit)}, JavaReplace::{new(pattern, replacement), replace_all}} — java.util.regex semantics for gsub/split/kv,
 //   run through search-analysis's engine (a one-off `pattern_replace` normalizer)
+// search::aggregate_metric::{delegate, Delegate, metric_field, terms, avg_range, sort_key, exists_field} — queries and sorts
+//   on `aggregate_metric_double` fields (single metric, or the sum/value_count average); document::values::aggregate_metrics(&FieldMapper);
+//   fetch::SourceView { idx, table, force_synthetic, search /* search fetch keeps vectors of a forced synthetic source */ };
+//   time::DateFormatter::{derive(pattern) /* the field's locale */, parse_with_year(text, zone, round_up, default_year)}
 // search::{search, msearch, count, explain, run (scroll/PIT), execute(cluster, &SearchRequest) -> SearchOutcome, render};
 //   search::query::QueryCtx::to_query(&query::Query) -> QueryRef (Query DSL → engine queries with Elasticsearch's rules);
 //   search::aggs::{Lookup /* search_aggs::FieldLookup incl. top_hits fetcher, hit sort, scripts */, reduce};
@@ -1237,8 +1395,12 @@ impl Cluster { async fn open(ClusterConfig, Arc<dyn MetaStore>) -> Result<Cluste
 //   InnerHitsDef.join; aggs::Lookup implements FieldLookup::join (children / parent aggregations)
 // search::percolate::{percolate, check_query, MemoryIndex::build(cluster, st, idx, docs), Percolated, check_indexed_documents};
 //   percolator fields keep their query in binary doc values; ShardResult.percolate
-// search::fusion::{execute, Fused}; retriever::{Fusion { kind, window, min_score, children }, FusionKind::{Rrf, Linear}, Normalizer};
-//   SearchSource.fusion; SearchRequest.{fused, rank_only}; SearchOutcome.ranked: Vec<(target, doc, score)>
+// search::percolate_candidates::{needs(&QueryRef) -> Needs, StoredQueries (per-segment cache "percolator"), adds_fields}
+// search::fusion::{execute, rank, Fused { node: Arc<Node>, cap }, Node, Child}; retriever::{Fusion { kind, window, min_score,
+//   children, names, tails }, FusedDoc, FusionKind::{Rrf { rank_constant, weights }, Linear, Pinned { pins, organic }}, Normalizer};
+//   SearchSource.{fusion, sub_searches}; SearchRequest.{fused, rank_only}; SearchOutcome.ranked: Vec<(target, doc, score)>;
+//   the final phase's query per shard is Fused::query(qctx, target, explain) = search::rank_docs::RankDocsQuery
+//   (TopQuery + tail; RankKind::{Plain, Rrf, Linear, Pinned} explanations); search::extra::MAX_ORGANIC_SCORE
 // search::knn::{knn_search (_knn_search, compatible-with=8 only), lookup_vector, resolve_lookups, decode_query_vector};
 //   knn::similarity_to_score(&VectorSpec, s); FieldInfo.vector_layouts (earlier engine fields of a dense_vector whose
 //   index_options changed; searched together); QueryCtx.{alias_filter, exact_knn, strict_unmapped, unmapped, percolate,
@@ -1275,6 +1437,7 @@ pub struct NodeConfig { pub node_name, pub node_id: Option<String> /* lease iden
                         pub host_metrics: bool /* copied into ClusterConfig; search-dev sets it */,
                         pub max_running: usize /* node-wide running requests, granted round-robin across clusters; 0 = 2 × cores, usize::MAX = off */,
                         pub lease_ttl: Duration /* 10 s */,
+                        pub snapshot_leftover_grace: Duration /* 1 h: age before the post-wake sweep drops unrecorded snapshot pins */,
                         pub memory_budget: Option<u64> /* resident bytes of all loaded clusters; LRU idle clusters are unloaded past it,
                                                           and a wake makes room first */,
                         pub unload_memory_only: bool /* false: with a StoreProvider whose data() is None, idle and budget unloads skip
@@ -1290,7 +1453,9 @@ impl Node { fn new(catalog, stores, cfg) -> Arc<Node>; fn with_hooks(..); fn set
                                                    for writes no WAL record covers yet, and its metadata store refuses saves */;
             async fn branch(parent, child); async fn branch_at(parent, child, at_ms: Option<u64>) /* commits a loaded parent first */;
             async fn delete_cluster(name); async fn flush(name); async fn usage(name) -> Usage { loaded, docs, deleted_docs, store_bytes, resident_bytes, requests };
-            async fn shutdown(timeout) /* refuse loads, unload all (flush, hand leases back), close the WAL: SIGTERM */;
+            async fn shutdown(timeout) /* refuse new requests (503 node_closed_exception, also for loaded clusters), let those in flight
+                                         finish, unload all (flush, hand leases back; past `timeout` drop without flushing, lease revoked
+                                         first so nothing more is acknowledged), close the WAL: SIGTERM */;
             async fn admit(&EsRequest, sni) -> Result<Lease, Rejected>; async fn enter(..) /* auth + rate */; async fn handle(EsRequest) -> EsResponse;
             fn loaded() -> Vec<String>; fn get_loaded(name) -> Option<Arc<Loaded>>;
             fn update_spec(ClusterSpec) /* live: credentials, rate, max_in_flight (permits added, or retired as they return), byte budget;
@@ -1312,7 +1477,8 @@ pub async fn serve_until(listener, node, opts, Shutdown) -> Result<()>;  // Shut
 // process::{tune_memory() -> Tuned { thp_disabled } /* mimalloc purge delay 0 + PR_SET_THP_DISABLE; call first in main (rolld too) */,
 //   on_thread_park /* tokio Builder::on_thread_park */}
 // limits::{RateLimiter, ByteBudget { reserve, grow(&mut Reservation, n), .. }, Reservation { bytes(), shrink(n) }, FairScheduler};
-// persist::{ClusterData { set_verify_owner, is_closed, .. }, Unloaded /* error: flush_all/state saves after unload */,
+// persist::{ClusterData { set_verify_owner, is_closed, commit_flushed /* full commits of the shards ShardLog::flush_requested
+//   named; returns once they are committed, whoever commits them */, .. }, Unloaded /* error: flush_all/state saves after unload */,
 //   segment_verifier() /* StoreConfig.verify */, resident_bytes(&Cluster), NUMBERS_KEY}; meta_guard::CheckedMeta::close()
 // http: Netty's limits — request line > 4096 B → 400 too_long_http_line_exception, header lines > 16384 B → 400
 //   too_long_http_header_exception (both close); body > max_content_length (declared, chunked or inflated) → empty
@@ -1326,14 +1492,24 @@ pub async fn serve_until(listener, node, opts, Shutdown) -> Result<()>;  // Shut
 //   node.processors=2, test cluster features)
 ```
 
-A cluster isn't idle while it holds state that lives only in memory: an open scroll or point in time (until the
-`scroll` / `keep_alive` of the last successful request naming one expires) or a running task, and its idle time starts
+A cluster isn't idle while it holds state that lives only in memory: an open scroll or point in time (exactly
+until the last one is closed or expires: `Contexts::latest_expiry`) or a running task, and its idle time starts
 when the pin ends (a long task's stored result gets a whole idle timeout to be fetched); memory-budget eviction
 takes such clusters last. Each cluster reports a node id that is stable across wakes and hosts
 (`node::stable_node_id(cluster)`, a base64url UUID derived from the name), and a cluster that never wrote its state
 saves it on its first wake so `cluster_uuid` stays the same too. Wakes keep everything durable but not what lives only
-in memory: `_stats`/`_nodes/stats` counters restart from zero, stored task results are gone, and documents indexed but not
-yet refreshed are searchable after the wake (as after an Elasticsearch restart).
+in memory: `_stats`/`_nodes/stats` counters restart from zero, and documents indexed but not yet refreshed are
+searchable after the wake (as after an Elasticsearch restart). Stored task results (`wait_for_completion=false`) live in
+the `.tasks` index and survive. A state change on an instance that unloaded meanwhile (forced unload) answers 503
+`cluster_block_exception`, never 2xx. Requests the node authenticated with the cluster's own credentials carry
+`x-roll-authenticated-user` (search-es `xpack::security::AUTHENTICATED_HEADER`: the credential's user or `elastic`);
+client-sent copies are stripped. Credentials that are not the cluster's own may belong to the cluster's security
+(native or file-realm users, API keys, access tokens): `auth::native_authorization` turns the claim into the header a
+client would send to Elasticsearch (`<user>@<cluster>` / `<key id>@<cluster>` lose the qualifier; Bearer only when
+routed by host), the loaded cluster checks it with `search_es::xpack::security::authenticate_native` (never the owner
+fallback: reserved users need a password of their own), and the request then runs with that `Authorization` header
+instead of the trusted header, so search-es authenticates and authorizes it as that principal. Failures answer exactly
+like wrong cluster credentials.
 
 Every cluster state reaches the `StoreProvider`'s `MetaStore` through `meta_guard::CheckedMeta`, which parses it
 exactly as a wake would (`ClusterState::from_json_in`, indices unchanged since the last save skipped by hash) and
@@ -1347,25 +1523,64 @@ them is loaded (`Node::background_tasks()` is 0 otherwise; the store's WAL threa
 cluster state JSON (`ClusterState::to_json`) is what `MetaStore::save` receives; `ObjectStores` stores it with
 `search-store`'s `write_cluster`/`read_cluster`.
 
+**Snapshot contents** are durable with shard durability: `ClusterData` implements `SnapshotStorage` by committing each
+shard of a snapshotted index and pinning that commit (`Store::write_pin`, pin `snap.<snapshot uuid>.<index uuid>`, one
+per non-empty shard, `user_data` reduced to the field numbering), so a restore after an unload, a crash, the index's
+deletion, merges, garbage collection or in a branch gets every document with its seq_no, version and term.
+
 **Shard durability** (`search_server::persist`, used when `StoreProvider::data()` is `Some`): the engine's
-`ShardStorage` is `ClusterData`. After every non-GET request the node makes the request's writes durable before
-answering: each dirty shard's consistent cut (`search_index::Shard::flush`, which publishes nothing) is appended to the
-WAL as a *cut record* (only segments the log doesn't hold yet as bytes, deletions as deltas) and the response waits for
-`Wal::wait_ack` when `index.translog.durability` is `request` (default); `async` indices are appended by a per-cluster
-syncer every `index.translog.sync_interval`. Concurrent writers of a shard share one cut. A *full commit* (segments to
-object storage, live docs, `write_manifest`, WAL trimmed) runs for records over 8 MiB (big bulks, merged segments), past
-`index.translog.flush_threshold_size` (10 GB) or `flush_threshold_age` (1 m), on `_flush`, before branching and on
-unload. Wake: `recover_shards`, segments from the cache (an uncached segment larger than one fetch part, 8 MiB, opens
-while still downloading: `Store::fetch_segment` + `SegmentHandle::fetching` behind `persist::FetchGate`, whose blocking
-waits use `block_in_place` on tokio workers; only on a multi-thread runtime), replay of the cut records, then
-`Engine::open_seeded(.., numbers)` with the index's field numbering (persisted in manifest `user_data["roll.field_numbers"]`
-and in records; field numbers are allocated in mapping-growth order and segments depend on them). Segment files live in
-`<staging>/c-<cluster>/<uuid>-<shard>/` (`Store::staging_dir`) and are uploaded from there. Errors: `WalFull` → 429
-`es_rejected_execution_exception`; `Fenced` or a lapsed lease → 503 `cluster_block_exception` and the cluster is dropped
-without writing; others → 500 `translog_exception` (the write stays in memory and is persisted by the next cut).
+`ShardStorage` is `ClusterData`, and every opened shard's `ShardLog` appends each applied operation to the node WAL as
+one record (`persist::record`: kind, seq_no, primary_term, version, id, routing, source; the source goes to the WAL as
+a separate part, never copied first). Writes never cut segments: refresh, flush and merges follow the engine
+(Elasticsearch's policy). After every request except GET/HEAD and read-only POSTs (`_search`, `_msearch`, `_count`,
+`_mget`, `_field_caps`, term vectors, `_explain`, `_validate/query`, scroll and template searches, `_rank_eval`; never a
+path with `_doc`/`_create`/`_update`/`_bulk`) the node waits for `Wal::wait_ack` of the cluster's newest record
+when the indices written use `index.translog.durability: request` (default); `async` indices don't wait (records are
+group-committed within `wal_flush` anyway). A shard attaches to the WAL on its first write after a wake (one manifest
+write); operations logged before that are appended by `after_request` (or, for background tasks, a syncer that runs
+only while tasks or pending operations exist). A *full commit* (`Shard::flush`, new segments to object storage, live
+docs, delete tombstones younger than `index.gc_deletes` in `user_data["roll.tombstones"]` (newest 100 000), what the
+searcher showed of the commit when it held unrefreshed writes in `user_data["roll.instance.published"]` (`persist::PUBLISHED_KEY`,
+`[[hidden positions], [[position, [docs deleted since]]], [[merged position, [docs not shown]]]]`; absent for closed indices, which reopen fully searchable),
+the shard's cumulative statistics in `user_data["roll.instance.stats"]` (`persist::STATS_KEY`; keys under
+`search_store::INSTANCE_DATA_PREFIX` are not inherited by branches; search-es
+`IndexEngine::{persisted_stats(n), restore_stats(n, json)}`: indexing/get/search counters, search groups,
+request-cache hits and misses, field usage with its tracking id, the index's loaded field data; restored at wake
+before replay; the unload's commit also writes when only these changed; also the request cache keys (rebuilt on use
+and counted as hits, `engine::WarmCacheEntry`), the segment order the shard opened with when `@timestamp` was mapped
+since (`Shard::leaf_sort`), and, at unload only and unless the shard was inactive for 5 minutes (Elasticsearch's
+flush on idle), the translog figures), the soft-deletes retention lease in `user_data["roll.retention"]`
+(`persist::RETENTION_KEY`, `[from, next, taken_unix_ms]`; `Shard::{retention_lease(), seed_retention_lease(..)}`, so a
+reopened shard doesn't merge away deletes a running one retains), on shard 0 at unload the synonym rules the index's
+analysis chain loaded when they differ from the sets (`persist::SYNONYMS_KEY` = `roll.instance.synonyms`;
+`Cluster::{loaded_synonyms_json(uuid), restore_loaded_synonyms(uuid, json)}` over
+`AnalysisCache::{loaded_synonyms, seed_loaded_synonyms}`: a set changed with `refresh=false` or replaced by rules the
+chain can't build keeps its loaded rules across a wake),
+`write_manifest` with `local_checkpoint` = the cut's, WAL trimmed) runs past `index.translog.flush_threshold_size`
+(10 GB), `index.translog.flush_threshold_age` (1 m, checked on writes at most once a second), past
+`persist::HEAP_COMMIT_BYTES` (64 MiB of buffers and in-memory segments, checked every 8 MiB logged), for the shards a
+`_flush` or flushing force merge targeted (only those), when
+an index closes (before the close is acknowledged: `_open` then sees every document, as Elasticsearch reopens on the
+flushed commit), before branching and on unload. Wake: `recover_shards`, segments from the cache (an uncached segment
+larger than one fetch part, `Store::fetch_part()`, opens while still downloading: `Store::fetch_segment` +
+`SegmentHandle::fetching` behind `persist::FetchGate`, whose blocking waits use `block_in_place` on tokio workers; only
+on a multi-thread runtime), `Engine::open_seeded(.., numbers)` with the index's field numbering (manifest
+`user_data["roll.field_numbers"]`), seeded tombstones, then `ClusterData::ready` replays the WAL past the checkpoint
+through `Engine::replay` (any order, duplicates and stale ops skipped: idempotent), fills seq_no gaps and refreshes, so
+every acknowledged operation is back with its `_seq_no`, `_version` and `_primary_term` and searchable (a crash or a
+handoff, as an Elasticsearch restart). When nothing was replayed (a graceful unload) a shard reopened with its
+`roll.instance.published` view (`Shard::open_published`) is not refreshed: the wake is invisible, and
+`ShardEngine::reopened_unrefreshed()` makes the next search refresh it unless refreshes are disabled. Requests wait
+for `ready` (a shard that failed to replay answers 500 until it does); only `ready` may open a recovered shard
+(`ShardStorage::open` answers 503 "is recovering" otherwise). `RecoveryStats { shards, segments, fetching, records,
+failed_records, orphans }`. Segment files live in `<staging>/c-<cluster>/<uuid>-<shard>/` (`Store::staging_dir`) and
+are uploaded from there. Errors: `WalFull` → 429 `es_rejected_execution_exception` (checked before an operation is
+applied; an append that still fails keeps the record pending for the next request); `Fenced` or a lapsed lease → 503
+`cluster_block_exception` and the cluster is dropped without writing; others → 500 `translog_exception`.
 With leases (`Node::set_leases`), a wake takes the cluster's lease (refused: 503 + `X-Roll-Search-Owner: <node>`),
 `set_epoch(cluster, epoch)` fences older writers in the store, `Store::claim_cluster` writes an ownership marker
-before anything of the cluster is read, renewals run every `ttl/3`, and writes are acknowledged only before
+before anything of the cluster is read, renewals run every `ttl/6` (`node::lease_renew_period`; a wake renews its
+lease while it runs and once more before serving if the last renewal is older than a period), and writes are acknowledged only before
 `sent + 0.8 × ttl` of the last successful renewal, so a partitioned owner stops acknowledging before another node can
 take over. Multi-node deployments must use `sync_objects` (acks once the WAL is in object storage); there each
 acknowledgement also waits for a `Store::check_owner` listing that started after its record was in object storage
@@ -1376,6 +1591,36 @@ search-es hook (`crates/search-es/src/persist_hooks.rs`, declared in `engine::fi
 open_seeded(cluster, st, idx, numbers)}`, `IndexEngine::{field_numbers(), field_numbers_allocated()}`,
 `Numbers::{snapshot(), allocated(), seeded(..)}`. search-es must not drop the `IndexEngine` of an index that still
 exists (`ShardStorage::open` refuses to reopen a shard that is still open: an empty shard would lose its data).
+Async results (async search, EQL, ES|QL, SQL async and cursors: `xpack::async_results::Results`) are durable as on
+Elasticsearch, in the `.async-search` system index (`persist_hooks::ASYNC_RESULTS_INDEX`, ES 9.5.5 mapping and
+settings, one document per result id): `Cluster::restore_async_results()` (search-server, at wake) reads them back
+and turns on `Results::track_changes()`; `Cluster::sync_async_results()` writes the ids changed since
+(`Results::{has_changes() /* one atomic load */, take_changes(now), note_changed(ids), note_all(), restore(id, entry, now)}`),
+called by search-server before acknowledging any request that changed them (writes, and reads that touched a
+`keep_alive` or opened a cursor; such a read fails with the persistence error when it can't be made durable) and
+before an unload. xpack code only uses `Results::{put, get, touch, remove}`; in memory nothing is tracked.
+Trained model deployment assignments are cluster state as on Elasticsearch: `xpack::ml::models::Deployments` notes
+start/update/stop (`take_changed()`, `assignments(with_process)`, `restore(iter)`, `note_changed()`, `has_any()`),
+search-server calls `Cluster::sync_ml_deployments(false)` before acknowledging a write (family `models::ASSIGNMENTS` =
+`trained_model_assignment` in `Metadata.xpack`, `{model_id, params, start_ms}` per deployment id; a failure answers the
+request with it), `sync_ml_deployments(true)` before an unload (adds the process's inference/cache-hit counts, last
+access and cached inputs, so the wake is invisible), and `Cluster::restore_ml_deployments()` at wake (after a crash the
+counters of the last unload, or none: a restarted process).
+
+compat-es round 3 additions: `search::version_field::{encode, decode, Decoded, wildcard, prefix,
+regexp, fuzzy}` (`version` fields index the `VersionEncoder` bytes; `Decoded` runs any automaton
+over decoded terms so prefix/wildcard/regexp/fuzzy match the text users see);
+`search::script_terms_sort::{ScriptTerms, TermsSortScript}` (`_script` sorts of type `string` and
+`version`: shard-global ordinals computed once per shard, swapped back to bytes by
+`sort::rescale`); `sort::ValueFormat::{Version, ScriptTerms(Arc<ScriptTerms>)}` (exhaustive matches
+need arms); `search::computed_sort::{ScriptKey, GeoKey}`; `search_source::parse_sorts_value(&Value)`;
+`engine::shapes::centroid_geometry` and a `<path>\0centroid` binary doc-values sub-field on
+`geo_shape`/`shape` fields (`FieldInfo::subfield("centroid")`, the exact centroid Elasticsearch keeps
+in its doc value header); `counted_keyword` fields get a `<path>\0count` binary sub-field
+(`subfield("count")`); `Cluster::update` re-adds missing stack templates after every change (as
+x-pack's registry does). search-painless: `cls::VERSION_OBJ` (`Version`, visible only in the
+contexts of x-pack's version allowlist), `EsObj::Version`, `contexts::version_allowlist(ctx)` and
+`Program.version_allowlist` (set by the engine after compiling).
 
 ## roll API (`/v1/search`, served by `search-control` on the rolld API port)
 
@@ -1410,11 +1655,20 @@ impl Control { async fn new(SearchConfig, pg_storage::Objects) -> Result<Arc<Con
                async fn shutdown(&self) -> Result<()>;  async fn sample(&self) /* one metering pass */; fn usage(id, days);
                async fn update(id, ClusterOptions); async fn rotate_password(id); async fn delete(id) }
 // Changes are applied to the node also while a cluster wakes (control.rs/wake.rs: the catalog
-// stamps lookups, the node's StoreProvider is wrapped to track loads and refuse deleted clusters,
-// the load hook reconciles the new instance). Dialect, destructive_requires_name and max_in_flight
-// are fixed at load: changing them schedules a reload, done once no request runs.
+// stamps lookups, a change of a cluster whose load is under way goes to Node::update_spec, which
+// parks it until the instance is published; the node's StoreProvider is wrapped (GuardedStores,
+// forwarding data()/branch_at()) to track loads and refuse deleted clusters, the load hook
+// reconciles the new instance). Credentials, limits and max_in_flight (permits resized) apply in
+// place; dialect and destructive_requires_name are fixed at load: changing them schedules a
+// reload, done once no request runs.
+// SearchConfig.public_url: the front (NLB / Lambda function URL) cluster URLs name; fleet: FleetConfig
+// { meta, meta_ca, meta_password, node_id, az, advertise_http, advertise_api, tls_pin /* published in Beat.tls */,
+//   api_tls /* the API listener serves TLS with the same certificate: Beat.api_tls */, heartbeat, lease_ttl, follow }.
+// API calls forwarded to the owner go through Control::forwarder() -> Option<&Forwarder> (hyper client over
+// search_proxy::upstream::Connector, pinned by the owner's record when it serves TLS).
 pub enum ControlError { NotFound, Invalid, Conflict, TooLarge /* 413 */, Internal }
 pub fn api::router(Arc<Control>) -> axum::Router;   // /v1/search
+pub struct api::TlsListener;   // TlsListener::new(TcpListener, TlsAcceptor) -> io::Result: an axum::serve::Listener, handshakes on their own tasks
 pub struct SqlCatalog;   // search_server::Catalog over SQLite: ClusterSpec { name, dialect from flavor, credentials: [password],
                          // idle_unload (0 = always loaded), max_in_flight, max_body_bytes, destructive_requires_name }
 pub struct meter::MeterHooks(Arc<Meter>);   // metering half of the node's LifecycleHooks: exact loaded time; Meter::count_request(cluster)
@@ -1424,11 +1678,64 @@ pub fn meter::index_figures(&Cluster, uuid) -> Option<EngineFigures>;   pub fn m
 ```
 
 A cluster's name is its key on the node and in object storage (Basic user, SNI label,
-`cluster_name`); names are DNS labels. The node does not count requests per cluster yet, so
-metered requests are only the console's until search-server exposes a counter (e.g.
-`Loaded::requests()` or a `LifecycleHooks::request` callback) for `Control::sample` to read.
-Wanted from search-server to simplify the wake coordination: `Node::update_spec` applying to a
-load in progress, and resizing `Loaded.permits` so `max_in_flight` changes need no reload.
+`cluster_name`); names are DNS labels. Metered requests are every request the node admitted
+(`Node::take_request_counts`, read by `Control::sample`), console requests included.
+
+## `search-proxy` (owned by the product crate)
+
+The AWS front proxy and the fleet protocol the nodes share with it. It depends on nothing else in
+roll search: ownership is the nodes' (`search_server::lease`); the proxy follows
+`X-Roll-Search-Owner` on a 503 refusal.
+
+```rust
+// fleet: one heartbeated record per node (ages by the store's clock), table search_nodes
+pub struct Beat { pub id, pub http /* host:port */, pub api: Option<String>, pub az: Option<String>, pub draining: bool, pub loaded: u32,
+                  pub tls: Option<String> /* SHA-256 hex of the REST certificate: proxies connect with TLS pinned to it; None: plain */,
+                  pub api_tls: bool /* the API address serves TLS with the same certificate */ }   // derives Default
+// Beat::pins() -> Result<Vec<(SocketAddr, CertPin)>, String>: the pin per address (REST, and API with api_tls); Err for a malformed pin
+pub struct NodeRecord { pub beat: Beat, pub age_ms: u64 }
+#[async_trait] pub trait Members { async fn beat(&Beat); async fn leave(id); async fn list() -> Vec<NodeRecord>; }
+// MemoryMembers::new(), SqliteMembers::open(path), PgMembers::new(Arc<pg::Pg>); fleet::open(url, ca, password) -> Arc<dyn Members>
+impl Heartbeat { async fn start(members, Beat, every) -> Arc<Heartbeat> /* first beat must succeed */; fn set_loaded(n);
+                 async fn drain() /* draining at once: SIGTERM */; async fn stop() /* leaves */ }
+// pg::{Pg::connect(url, ca, password) /* TLS per sslmode, system roots + ca */, MetaUrl::parse(s) -> Postgres(url) | Sqlite(path),
+//   libpq_url(url) /* sslmode=verify-ca|verify-full -> require (tokio-postgres can't parse them; we always verify) */}
+// route::{cluster_of(authorization, host_cluster) /* the node's rules: Basic user[@cluster], ApiKey id, Bearer <cluster>_ */,
+//   host_label(host, domain), weight(cluster, node), pick(cluster, &[Candidate { id, az }], az) /* rendezvous, own AZ first */}
+pub struct ProxyConfig { az, domain, node_ttl /* 5 s */, refresh /* 1 s */, hold_timeout /* 60 s */, wake_every /* 10 s */,
+                         connect_timeout /* 2 s */, retry_body_bytes /* 100 MiB per request */, retry_buffer_bytes /* 128 MiB per proxy */ }
+impl Directory { fn new(Arc<dyn Members>, ProxyConfig) -> Arc<Directory>; async fn refresh(); fn spawn_refresh(); fn live() -> Vec<String>; fn tls(&addr) -> bool;
+                 fn remember_owner(cluster, node); fn forget_owner(cluster); fn owner_of(cluster) -> Option<String> }
+impl Proxy { fn new(Arc<Directory>, Option<Arc<dyn Waker>>) -> Arc<Proxy>; async fn forward(Request<B: Body + Unpin>, &ClientInfo, Port) -> Response<Body>;
+             pub budget: Arc<replay::Budget> /* used(): request bytes kept for resends */;
+             async fn serve(self: Arc<Self>, TcpListener, ListenOptions { port: Port::{Rest, Api}, tls, proxy_protocol, drain }, watch::Receiver<bool>);
+             pub stats: Stats { requests, retries, redirects, held, wakes } }
+pub trait Waker { fn wake(&self) -> BoxFuture<Result<()>> }   // EcsWaker::new(cluster, service, desired, region).with_endpoint(..) (SigV4,
+                                                               // DescribeServices then UpdateService, never lowers desiredCount); CommandWaker(sh)
+// proxy::{serve_health(listener) /* never touches nodes */, tls_acceptor(cert, key), read_only(method, path) /* safe to resend */};
+// proxy_protocol::read_header (v1 + v2); lambda::{run(runtime_api, upstream, api_upstream, tls_seed: Option<&[u8]>), request_of, response_of}
+//   (function URL 2.0; https:// upstreams pinned to upstream::seeded(tls_seed));
+// aws::{ecs_availability_zone, ecs_task_id, advertise_for(bind)}
+// upstream::{fingerprint(der), pem_fingerprint(pem), parse_pin(hex) -> Option<CertPin = [u8; 32]>, self_signed(names) -> SelfSigned { cert_pem, key_pem, fingerprint },
+//   seeded(secret >= 16 bytes) -> SelfSigned /* deterministic Ed25519: the same certificate for the same secret */,
+//   Pins { get, contains, replace(map), Pins::any(pin) /* for every address and host names */ },
+//   Connector /* plain for http://, TLS for https:// accepting only the address's pinned certificate, never SNI */}
+```
+
+Retries: a request is resent only when the node provably didn't run it (connect failure, owner
+refusal, `node_closed_exception`), or, once, when it is read-only and the node broke the
+connection (to another node when there is one). Only a failed connect marks a node bad (3 s); a
+connection broken by the client's own upload failing (`Replay::client_failed`) is never resent; the owner cache learns only from REST answers past the
+node's credential check (not 401/403) and from refusals. A 503 over 64 KiB is passed on whole
+without parsing. Bodies stream through and are kept as
+they pass (`replay::Replay`, reference-counted chunks, no copy), so a refusal mid-upload resends
+the whole body; a body over `retry_body_bytes` or the shared budget streams on but can't be
+resent (the refusal reaches the client, and the owner it names is remembered for the retry). Binary: `search-proxy --meta <url>
+[--listen 0.0.0.0:9200] [--api-listen] [--health] [--tls-cert/--tls-key | *_PEM env | --tls-self-signed | --tls-seed <secret>] [--proxy-protocol]
+[--wake-ecs-service cluster/service --wake-count N | --wake-command sh] [--hold-timeout 120]`, or
+`[--lambda] --lambda-upstream http(s)://nlb:9200 [--lambda-api-upstream http(s)://nlb:7070] [--lambda-tls-seed <secret>]` inside Lambda (the function's image command is `--lambda`, so the image's
+`CMD ["rolld"]` never reaches this binary). Deployment:
+[deploy-aws.md](deploy-aws.md).
 
 ## `search-yaml`
 
@@ -1525,6 +1832,10 @@ runs the suites; every choice comes from `--seed` and the test id, printed in th
 - Unit tests next to the code. Integration tests in `crates/<crate>/tests/`, in-process on
   `127.0.0.1:0`. Copy the `Capped` 1 GiB allocator guard from `crates/stream-broker/tests/common`.
 - Tests needing Docker (real Elasticsearch, client libraries, MinIO) run only with `ROLL_E2E=1`.
+  The differential suite (`crates/search-server/tests/differential.rs`) also runs with
+  `ROLL_DIFF_ES=<url>`; its committed cases (`tests/differential/cases/*.json`, captured with
+  `tests/differential/capture.py`) replay without Docker. The client matrix is
+  `tests/search/clients/run.sh`.
 - Object storage in tests uses S3 when `ROLL_E2E_S3_BUCKET` is set, a temp dir otherwise.
 - Building on the shared dev machine: run cargo with
   `CARGO_TARGET_DIR=<repo>/target/agents/shared CARGO_BUILD_JOBS=6` and `-p <crate>`, so the

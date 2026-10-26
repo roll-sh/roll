@@ -220,6 +220,12 @@ async fn responses_match_elasticsearch() {
                 r.body = b.clone().into();
             }
             let resp = search_es::handle(&cluster, r).await;
+            // An ISM template applies only to indices created strictly after its
+            // `last_updated_time` (milliseconds); a real cluster never answers the policy PUT
+            // and the next index creation within the same millisecond, this in-process one can.
+            if method == "PUT" && uri.starts_with("/_plugins/_ism/policies/") {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
             if let Some(reason) = step.get("skip").and_then(Value::as_str) {
                 let _ = reason;
                 continue;
@@ -298,6 +304,11 @@ async fn capture() {
         cleanup(&client, &base).await;
         let mut steps_out = Vec::new();
         for step in scenario.get("steps").and_then(Value::as_array).unwrap() {
+            // A reference cluster that applies some changes asynchronously (OpenSearch's ISM
+            // registers managed indices in the background) gets a pause first; roll needs none.
+            if let Some(ms) = step.get("capture_sleep_ms").and_then(Value::as_i64) {
+                tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            }
             let req = step.get("req").and_then(Value::as_str).unwrap();
             let (method, uri) = split_req(req);
             let body = body_of(step);

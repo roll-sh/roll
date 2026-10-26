@@ -24,6 +24,11 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+
+/// Prefix of [`ShardManifest::user_data`] keys a branch starts without: the parent's running
+/// history (such as its statistics), not its contents.
+pub const INSTANCE_DATA_PREFIX: &str = "roll.instance.";
+
 /// Elasticsearch's `SequenceNumbers.NO_OPS_PERFORMED`.
 pub const NO_OPS_PERFORMED: i64 = -1;
 
@@ -77,7 +82,9 @@ pub struct ShardManifest {
     pub primary_term: u64,
     #[serde(default)]
     pub mapping_version: u64,
-    /// Free-form commit data (history uuid, sync ids, …).
+    /// Free-form commit data (history uuid, sync ids, …). Keys starting with
+    /// [`INSTANCE_DATA_PREFIX`] describe this cluster's own history (statistics) and are not
+    /// inherited by branches.
     #[serde(default)]
     pub user_data: BTreeMap<String, String>,
     /// WAL ranges that may hold operations past the checkpoint. Maintained by the store:

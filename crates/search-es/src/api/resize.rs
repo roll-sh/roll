@@ -75,7 +75,11 @@ fn parse(ctx: &Ctx) -> EsResult<ResizeRequest> {
                 r.settings.normalize_prefix("index.");
             }
             "aliases" => r.aliases = crate::meta::aliases::parse_aliases(v)?,
-            "max_primary_shard_size" => r.max_primary_shard_size = Some(ByteSize::parse(&v.to_es_string(), "max_primary_shard_size")?),
+            // OpenSearch names the shrink's per-shard bound `max_shard_size`.
+            "max_shard_size" if crate::opensearch::active() => r.max_primary_shard_size = Some(ByteSize::parse(&v.to_es_string(), "max_shard_size")?),
+            "max_primary_shard_size" if !crate::opensearch::active() => {
+                r.max_primary_shard_size = Some(ByteSize::parse(&v.to_es_string(), "max_primary_shard_size")?)
+            }
             other => {
                 let (l, c) = raw.and_then(|b| key_location(b, &[], other)).unwrap_or((1, 1));
                 return Err(EsError::x_content_parse(l, c, format!("[resize_request] unknown field [{other}]")));
@@ -107,6 +111,10 @@ fn routing_factor(source: u32, target: u32) -> EsResult<u32> {
 /// Creates the resized index in `st`.
 fn resize(st: &mut ClusterState, kind: ResizeType, source: &str, target: &str, req: ResizeRequest, now_ms: i64) -> EsResult<()> {
     let src = st.metadata.indices.get(source).cloned().ok_or_else(|| EsError::index_not_found_bare(source))?;
+    // `TransportResizeAction`: time series indices can't split (the message names the source).
+    if kind == ResizeType::Split && crate::engine::tsdb::is_time_series(&src) {
+        return Err(EsError::illegal_argument(format!("index-split is not supported because the destination index [{source}] is in time_series mode")));
+    }
     let source_shards = src.number_of_shards();
     let requested: Option<u32> = match req.settings.get("index.number_of_shards") {
         Some(v) => Some(v.parse().map_err(|_| EsError::illegal_argument(format!("Failed to parse value [{v}] for setting [index.number_of_shards]")))?),
@@ -122,6 +130,39 @@ fn resize(st: &mut ClusterState, kind: ResizeType, source: &str, target: &str, r
         ResizeType::Split => requested.unwrap_or(source_shards),
         ResizeType::Clone => requested.unwrap_or(source_shards),
     };
+    // `TransportResizeAction.prepareCreateIndexRequest` picks the source shards of every target
+    // shard (`IndexMetadata.select*Shard`) before any other check.
+    match kind {
+        ResizeType::Shrink => {
+            if source_shards < target_shards {
+                return Err(EsError::illegal_argument(format!(
+                    "the number of target shards [{target_shards}] must be less that the number of source shards [{source_shards}]"
+                )));
+            }
+            routing_factor(source_shards, target_shards)?;
+        }
+        ResizeType::Split => {
+            routing_factor(source_shards, target_shards)?;
+            if source_shards > target_shards {
+                return Err(EsError::illegal_argument(format!(
+                    "the number of source shards [{source_shards}] must be less that the number of target shards [{target_shards}]"
+                )));
+            }
+            let routing = if source_shards == 1 { target_shards } else { src.routing_num_shards };
+            if routing % target_shards != 0 {
+                return Err(EsError::illegal_state(format!(
+                    "the number of routing shards [{routing}] must be a multiple of the target shards [{target_shards}]"
+                )));
+            }
+        }
+        ResizeType::Clone => {
+            if source_shards != target_shards {
+                return Err(EsError::illegal_argument(format!(
+                    "the number of target shards ({target_shards}) must be the same as the number of  source shards ( {source_shards})"
+                )));
+            }
+        }
+    }
     if req.settings.contains("index.routing_partition_size") {
         return Err(EsError::illegal_argument("cannot provide a routing partition size value when resizing an index"));
     }
@@ -144,44 +185,13 @@ fn resize(st: &mut ClusterState, kind: ResizeType, source: &str, target: &str, r
     if blocks::check([src.as_ref()], Level::Write).is_ok() {
         return Err(EsError::illegal_state(format!("index {source} must be read-only to resize index. use \"index.blocks.write=true\"")));
     }
-    routing_factor(source_shards, target_shards)?;
+    // `validateShrinkIndex`, after `validateResize`.
+    if kind == ResizeType::Shrink && source_shards == 1 {
+        return Err(EsError::illegal_argument("can't shrink an index with only one shard"));
+    }
     for s in UNMODIFIABLE {
         if req.settings.get_value(s).is_some_and(|v| *v != crate::meta::settings::SettingValue::Null) {
             return Err(EsError::illegal_argument(format!("can't change setting [{s}] during resize")));
-        }
-    }
-    match kind {
-        ResizeType::Shrink => {
-            if source_shards < target_shards {
-                return Err(EsError::illegal_argument(format!(
-                    "the number of target shards [{target_shards}] must be less that the number of source shards [{source_shards}]"
-                )));
-            }
-            routing_factor(source_shards, target_shards)?;
-            if source_shards == 1 {
-                return Err(EsError::illegal_argument("can't shrink an index with only one shard"));
-            }
-        }
-        ResizeType::Split => {
-            routing_factor(source_shards, target_shards)?;
-            if source_shards > target_shards {
-                return Err(EsError::illegal_argument(format!(
-                    "the number of source shards [{source_shards}] must be less that the number of target shards [{target_shards}]"
-                )));
-            }
-            let routing = if source_shards == 1 { target_shards } else { src.routing_num_shards };
-            if routing % target_shards != 0 {
-                return Err(EsError::illegal_state(format!(
-                    "the number of routing shards [{routing}] must be a multiple of the target shards [{target_shards}]"
-                )));
-            }
-        }
-        ResizeType::Clone => {
-            if source_shards != target_shards {
-                return Err(EsError::illegal_argument(format!(
-                    "the number of target shards ({target_shards}) must be the same as the number of  source shards ( {source_shards})"
-                )));
-            }
         }
     }
     // Settings: the source's copyable ones, then the request's.
@@ -252,6 +262,9 @@ pub async fn handle(ctx: &Ctx<'_>, kind: ResizeType) -> EsResult<Reply> {
     }
     ctx.validate_timeouts()?;
     let req = parse(ctx)?;
+    if ctx.cluster.dialect == crate::cluster::Dialect::OpenSearch {
+        return handle_opensearch(ctx, kind, req).await;
+    }
     // `ResizeRequest.validate`.
     let mut errors = Vec::new();
     if req.settings.keys().any(|k| k.starts_with("index.sort.")) {
@@ -278,6 +291,82 @@ pub async fn handle(ctx: &Ctx<'_>, kind: ResizeType) -> EsResult<Reply> {
         crate::write::copy_index(ctx.cluster, &s, &d)?;
     }
     Reply::ok(obj! { "acknowledged" => true, "shards_acknowledged" => true, "index" => target })
+}
+
+/// OpenSearch's resize: its own validation (`max_shard_size`, target blocks that would leave
+/// the new shards unassigned) and `wait_for_completion=false`, which runs the resize as an
+/// `indices:admin/resize` task whose outcome `_tasks` keeps.
+async fn handle_opensearch(ctx: &Ctx<'_>, kind: ResizeType, req: ResizeRequest) -> EsResult<Reply> {
+    let now = ctx.now_ms;
+    let source = resolve_date_math(ctx.path_param("index").unwrap_or_default(), now)?;
+    let target = resolve_date_math(ctx.path_param("target").unwrap_or_default(), now)?;
+    let mut errors = Vec::new();
+    if req.settings.keys().any(|k| k.starts_with("index.sort.")) {
+        errors.push("can't override index sort when resizing an index".to_string());
+    }
+    if req.settings.contains("index.routing_partition_size") {
+        errors.push("cannot provide a routing partition size value when resizing an index".to_string());
+    }
+    if kind == ResizeType::Split && !req.settings.contains("index.number_of_shards") {
+        errors.push("index.number_of_shards is required for split operations".to_string());
+    }
+    if kind != ResizeType::Shrink && req.max_primary_shard_size.is_some() {
+        errors.push("Unsupported parameter [max_shard_size]".to_string());
+    }
+    if kind == ResizeType::Shrink && req.settings.contains("index.number_of_shards") && req.max_primary_shard_size.is_some() {
+        errors.push("Cannot set max_shard_size and index.number_of_shards at the same time!".to_string());
+    }
+    if req.max_primary_shard_size.is_some_and(|b| b.bytes() <= 0) {
+        errors.push("max_shard_size must be greater than 0".to_string());
+    }
+    for block in ["read_only", "metadata"] {
+        if req.settings.get(&format!("index.blocks.{block}")) == Some("true") {
+            errors.push(format!(
+                "target index [{target}] will be blocked by [index.blocks.{block}=true], this will disable metadata writes and cause the shards to be unassigned"
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(EsError::action_request_validation(&errors));
+    }
+    // `TransportResizeAction`: blocks the target would inherit from the source.
+    if let Some(src) = ctx.state().metadata.indices.get(&source) {
+        for block in ["read_only", "metadata"] {
+            let key = format!("index.blocks.{block}");
+            if !req.settings.contains(&key) && src.settings.get(&key) == Some("true") {
+                return Err(EsError::illegal_argument(format!(
+                    "target index [{target}] will be blocked by [{key}=true] which is copied from the source index [{source}], this will disable metadata writes and cause the shards to be unassigned"
+                )));
+            }
+        }
+    }
+    let wait = ctx.bool_param("wait_for_completion", true)?;
+    if ctx.has_query("task_execution_timeout") {
+        ctx.time_param("task_execution_timeout", crate::units::TimeValue::hours(1))?;
+    }
+    let run = async {
+        let (t, src_name) = (target.clone(), source.clone());
+        ctx.cluster.update(move |st| resize(st, kind, &source, &t, req, now)).await?;
+        let st = ctx.state();
+        if let (Some(s), Some(d)) = (st.metadata.indices.get(&src_name).cloned(), st.metadata.indices.get(&target).cloned()) {
+            crate::write::copy_index(ctx.cluster, &s, &d)?;
+        }
+        Ok(obj! { "acknowledged" => true, "shards_acknowledged" => true, "index" => target.clone() })
+    };
+    if wait {
+        return Reply::ok(run.await?);
+    }
+    let verb = match kind {
+        ResizeType::Shrink => "shrink",
+        ResizeType::Split => "split",
+        ResizeType::Clone => "clone",
+    };
+    let description = format!("{verb} from [{}] to [{}]", ctx.path_param("index").unwrap_or_default(), ctx.path_param("target").unwrap_or_default());
+    let headers = ctx.request.header("x-opaque-id").map(|v| vec![("X-Opaque-Id".to_string(), v.to_string())]).unwrap_or_default();
+    let guard = ctx.cluster.tasks.start_stored("indices:admin/resize", &description, headers);
+    let outcome = run.await;
+    let id = ctx.cluster.tasks.finish(guard, outcome);
+    Reply::ok(obj! { "task" => format!("{}:{id}", ctx.cluster.node.id) })
 }
 
 #[cfg(test)]

@@ -362,6 +362,19 @@ impl TopHitsAgg {
                 std::cmp::Ordering::Equal
             }
         });
+        if self.sort.is_none()
+            && let Some(f) = self.fetcher.as_ref().filter(|f| f.rescores())
+        {
+            let mut ranked: Vec<(u32, f32)> = b.heap.iter().map(|e| (e.doc, e.score)).collect();
+            f.rescore(&self.searcher, &mut ranked)?;
+            let order: std::collections::HashMap<u32, (usize, f32)> = ranked.iter().enumerate().map(|(i, &(d, s))| (d, (i, s))).collect();
+            for e in b.heap.iter_mut() {
+                if let Some(&(_, s)) = order.get(&e.doc) {
+                    e.score = s;
+                }
+            }
+            b.heap.sort_by_key(|e| order.get(&e.doc).map_or(usize::MAX, |p| p.0));
+        }
         let tracks = self.sort.is_none() || self.spec.track_scores;
         let max_score = match &self.sort {
             None => b.heap.first().map_or(f32::NAN, |e| e.score),
@@ -414,7 +427,7 @@ impl TopHitsAgg {
 
 impl Aggregator for TopHitsAgg {
     fn set_segment(&mut self, seg: &SegmentContext) -> Result<()> {
-        self.seg = self.sort.as_ref().map(|s| s.segment(seg));
+        self.seg = self.sort.as_ref().map(|s| s.segment_in(&self.searcher, seg)).transpose()?;
         self.base = seg.base;
         Ok(())
     }

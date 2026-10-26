@@ -14,6 +14,8 @@
 //! - **Branching** ([`Store::branch`]): a branch's manifests point at its parent's segments and
 //!   WAL; nothing is copied. Point-in-time branches start from the newest retained commit point
 //!   at or before the time and replay the parent's WAL up to it.
+//! - **Pins** ([`Store::write_pin`]): copies of commit points outside any shard's history that
+//!   keep their segments alive (snapshot contents); waking never reads them.
 //! - **Garbage collection** ([`Store::collect_garbage`]): deletes segments, live docs and WAL
 //!   objects that no retained manifest of any cluster references, after a grace period. What
 //!   each manifest references is remembered (and persisted), so a pass reads only new manifests.
@@ -47,12 +49,13 @@ pub mod wal;
 
 mod branch;
 mod gc;
+mod pins;
 
 pub use cache::{CacheStats, SegmentData, SegmentFetch, Verifier};
 pub use error::{Fenced, WalFull};
 pub use gc::GcStats;
 pub use keys::{LiveGen, SegmentId, SegmentKey, ShardId, ShardVersion, Version};
-pub use manifest::{BranchBase, ClusterState, NO_OPS_PERFORMED, SegmentRef, ShardManifest, WalHead};
+pub use manifest::{BranchBase, ClusterState, INSTANCE_DATA_PREFIX, NO_OPS_PERFORMED, SegmentRef, ShardManifest, WalHead};
 pub use pg_storage::{Objects, StorageConfig};
 pub use wal::{ClusterWalStats, Lsn, PinningShard, ReplayStats, ShardWalStats, Wal, WalConfig, WalRecord, WalShard, WalSource, WalStats};
 
@@ -196,6 +199,10 @@ pub struct StoreConfig {
     /// (search-server: the codec's `SegmentReader::verify`, a whole-file CRC). `None`: trust
     /// object storage.
     pub verify: Option<Verifier>,
+    /// Segments larger than this download as parallel ranged reads of this size, and a waking
+    /// shard opens such a segment while it is still downloading ([`cache::FETCH_PART`], 8 MiB;
+    /// at least 64 KiB). Smaller parts start queries on a cold segment sooner over slow links.
+    pub fetch_part_bytes: u64,
 }
 
 impl Default for StoreConfig {
@@ -209,6 +216,7 @@ impl Default for StoreConfig {
             state_retain: 4,
             single_put_bytes: 8 << 20,
             verify: None,
+            fetch_part_bytes: cache::FETCH_PART,
         }
     }
 }
@@ -372,6 +380,7 @@ impl Store {
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
         let cache = Cache::open(dir.join("seg"), dir.join("tmp"), cfg.cache_bytes, objects.clone(), cfg.verify.clone())?;
+        cache.set_fetch_part(cfg.fetch_part_bytes);
         let wal = Wal::open(&cfg.node, wal_objects, dir.join("wal"), cfg.wal.clone()).await?;
         Ok(Store {
             inner: Arc::new(Inner {
@@ -481,6 +490,19 @@ impl Store {
     /// Open many segments, fetching missing ones in parallel (waking a shard).
     pub async fn open_segments(&self, keys: &[SegmentKey]) -> anyhow::Result<Vec<SegmentData>> {
         futures::stream::iter(keys.iter().map(|k| self.open_segment(k))).buffered(8).collect::<Vec<_>>().await.into_iter().collect()
+    }
+
+    /// The ranged-read size of segment downloads (`StoreConfig::fetch_part_bytes`): segments
+    /// larger than this can be read while they download.
+    pub fn fetch_part(&self) -> u64 {
+        self.inner.cache.fetch_part()
+    }
+
+    /// Tests: segment downloads share a link of `bytes_per_sec` (0: unlimited), simulating a
+    /// slow object store.
+    #[doc(hidden)]
+    pub fn set_download_throttle(&self, bytes_per_sec: u64) {
+        self.inner.cache.set_throttle(bytes_per_sec);
     }
 
     pub fn is_cached(&self, key: &SegmentKey) -> bool {
@@ -933,16 +955,25 @@ impl Store {
         if wal.is_attached(&rec.cluster, &rec.shard) {
             bail!("shard {} of cluster [{}] is already open on this node", rec.shard, rec.cluster);
         }
-        let handle = wal.shard(&rec.cluster, &rec.shard)?;
-        let cur = wal.current_file();
+        let handle = wal.shard_at(&rec.cluster, &rec.shard, self.epoch(&rec.cluster))?;
         let checkpoint = rec.checkpoint();
         let mut sources = std::mem::take(&mut rec.sources);
+        if sources.iter().any(|s| wal.is_live(s)) {
+            // An earlier attachment in this process that never detached (the cluster was
+            // dropped): seal the file its records may share with the new range's, so its range
+            // can end before the new one starts.
+            wal.sync_remote().await?;
+        }
+        let cur = wal.current_file();
         for s in sources.iter_mut().filter(|s| wal.is_live(s)) {
-            // An earlier attachment in this process: its range ends where the new one starts.
             s.to = Some(cur - 1);
         }
         sources.retain(|s| s.to.is_none_or(|to| to >= s.from) && s.max_seq_no.is_none_or(|x| x > checkpoint));
-        sources.push(WalSource::open(&self.inner.cfg.node, &rec.cluster, wal.replay_from(&rec.cluster, &rec.shard, checkpoint).min(cur)));
+        // The new range starts now. Every operation of the shard this node appended earlier is
+        // in a range above, or in the commit point, or isn't part of the shard's history (a
+        // deposed attachment's): `since_ms` keeps the latter out of the current file.
+        let epoch = self.epoch(&rec.cluster);
+        sources.push(WalSource { since_ms: Some(wal.mark_ms()), epoch: (epoch > 0).then_some(epoch), ..WalSource::open(&self.inner.cfg.node, &rec.cluster, cur) });
         let mut m = rec.manifest.take().unwrap_or_default();
         m.wal = sources.clone();
         let written = self.put_manifest(&mut t, &rec.cluster, &rec.shard, m, false).await?;

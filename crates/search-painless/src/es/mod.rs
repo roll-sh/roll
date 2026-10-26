@@ -96,6 +96,8 @@ pub enum EsObj {
     RankVectors(Option<Rc<rank::RankVec>>),
     /// `IPAddress`.
     Ip(std::net::IpAddr),
+    /// x-pack's `Version` (a `version` field value; its text).
+    Version(Rc<str>),
     /// `CIDR`.
     Cidr(misc::Cidr),
     /// A `java.nio` buffer: `ByteBuffer` over bytes (`binary` field values) or a typed view.
@@ -146,6 +148,7 @@ impl EsObj {
             EsObj::RankVectors(Some(r)) => r.class(),
             EsObj::RankVectors(None) => cls::RANK_VECTORS_EMPTY,
             EsObj::Ip(_) => cls::IP_ADDRESS,
+            EsObj::Version(_) => cls::VERSION_OBJ,
             EsObj::Cidr(_) => cls::CIDR,
             EsObj::ByteBuffer(b) => b.class(),
             EsObj::ByteOrder(_) => cls::BYTE_ORDER,
@@ -285,6 +288,7 @@ impl EsObj {
                 out.push(']');
             }
             EsObj::Ip(a) => out.push_str(&misc::ip_to_string(a)),
+            EsObj::Version(v) => out.push_str(v),
             EsObj::Similarity(misc::SimObj::TermAttr(t)) => out.push_str(&t.term),
             EsObj::LongAccessor(v) => out.push_str(&v.get().to_string()),
             EsObj::ByteBuffer(b) => b.write_string(out),
@@ -303,7 +307,15 @@ impl EsObj {
         match self {
             EsObj::Values(s) => serde_json::Value::Array(s.vals.iter().map(|v| v.to_json()).collect()),
             EsObj::GeoPoint(lat, lon) => serde_json::json!({ "lat": lat, "lon": lon }),
+            // `GeoBoundingBox.toXContentFragment`.
+            EsObj::BoundingBox(tl, br) => serde_json::json!({
+                "top_left": { "lat": tl.0, "lon": tl.1 },
+                "bottom_right": { "lat": br.0, "lon": br.1 },
+            }),
+            // `GeoShapeValues.GeoShapeValue.toXContent` (since 8.9).
+            EsObj::GeoShape(_) => serde_json::Value::String("<unserializable>".into()),
             EsObj::Ip(a) => serde_json::Value::String(misc::ip_to_string(a)),
+            EsObj::Version(v) => serde_json::Value::String(v.to_string()),
             EsObj::Ctx(c) => c.to_json(),
             _ => {
                 let mut s = String::new();

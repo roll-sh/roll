@@ -93,7 +93,7 @@ impl DateUnit {
     }
 
     /// `DateTimeUnit.extraLocalOffsetLookup()`: how far before a value offsets are looked up.
-    fn extra_local_offset_lookup(self) -> i64 {
+    pub(crate) fn extra_local_offset_lookup(self) -> i64 {
         match self {
             DateUnit::Week => 7 * DAY,
             DateUnit::Year => 366 * DAY,
@@ -247,6 +247,52 @@ pub fn parse_time_value_millis(s: &str, setting: &str) -> Result<i64> {
     }
 }
 
+/// A [`Rounding`] prepared for the values of a known range ([`Rounding::prepare`]).
+#[derive(Clone, Debug)]
+pub struct PreparedRounding {
+    max: i64,
+    /// Rounding points, ascending; `points[0] <= min`.
+    points: Vec<i64>,
+}
+
+impl PreparedRounding {
+    /// Largest number of buckets an array covers (Elasticsearch prepares arrays of up to 128
+    /// points; a few more cost one extra step of the search).
+    pub const MAX_POINTS: usize = 256;
+
+    /// The bucket index of `v`, or `None` outside the prepared range.
+    #[inline]
+    pub fn index(&self, v: i64) -> Option<usize> {
+        let p = &self.points;
+        if v < p[0] || v > self.max {
+            return None;
+        }
+        // Branch-free lower search: the comparison becomes a conditional move.
+        let (mut lo, mut n) = (0usize, p.len());
+        while n > 1 {
+            let half = n / 2;
+            lo = if p[lo + half] <= v { lo + half } else { lo };
+            n -= half;
+        }
+        Some(lo)
+    }
+
+    /// The rounding point (bucket key) of bucket `i`.
+    #[inline]
+    pub fn point(&self, i: usize) -> i64 {
+        self.points[i]
+    }
+
+    /// Number of buckets.
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+}
+
 /// What a rounding rounds to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoundingKind {
@@ -363,6 +409,42 @@ impl Rounding {
             r = next;
         }
         false
+    }
+
+    /// The rounding of the values in `[min, max]` as a sorted array of its rounding points
+    /// (Elasticsearch's `ArrayRounding` from `prepare(min, max)`): a value rounds to the
+    /// largest point not after it, a branch-free binary search instead of calendar arithmetic
+    /// per value. `None` when the range spans more than [`PreparedRounding::MAX_POINTS`]
+    /// buckets, or when a point fails the self-check below.
+    ///
+    /// Each point is checked to round to itself and the instant before it to round to the
+    /// previous point; rounding is monotonic, so every value between two points then rounds
+    /// to the lower one, and the array answers exactly what [`round`](Self::round) would.
+    pub fn prepare(&self, min: i64, max: i64) -> Option<PreparedRounding> {
+        if min > max {
+            return None;
+        }
+        let first = self.round(min);
+        if first > min {
+            return None;
+        }
+        let mut points = Vec::with_capacity(16);
+        points.push(first);
+        loop {
+            let last = *points.last()?;
+            let next = self.next_rounding_value(last);
+            if next <= last || next == i64::MAX {
+                return None;
+            }
+            if next > max {
+                break;
+            }
+            if points.len() == PreparedRounding::MAX_POINTS || self.round(next) != next || self.round(next - 1) != last {
+                return None;
+            }
+            points.push(next);
+        }
+        Some(PreparedRounding { max, points })
     }
 
     /// The next rounded value after the bucket containing `utc` (`nextRoundingValue`).
@@ -734,6 +816,73 @@ mod tests {
         let sp = TimeZone::parse("America/Sao_Paulo").unwrap();
         let d = Rounding::new(RoundingKind::Unit(DateUnit::Day), sp, 0).unwrap();
         assert_eq!(d.round(ms("2018-11-04T12:00:00Z")), ms("2018-11-04T03:00:00Z"));
+    }
+
+    /// A prepared rounding answers exactly what `round` does, for every unit and fixed
+    /// interval, in fixed-offset zones and across DST transitions (including 30-minute and
+    /// skipped-midnight zones), at range edges and on bucket boundaries.
+    #[test]
+    fn prepared_matches_round() {
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(11);
+        let zones = ["UTC", "+05:30", "-08:00", "Europe/Paris", "America/Sao_Paulo", "Australia/Lord_Howe", "America/St_Johns", "Asia/Kathmandu"];
+        let kinds = [
+            RoundingKind::Unit(DateUnit::Second),
+            RoundingKind::Unit(DateUnit::Minute),
+            RoundingKind::Unit(DateUnit::Hour),
+            RoundingKind::Unit(DateUnit::Day),
+            RoundingKind::Unit(DateUnit::Week),
+            RoundingKind::Unit(DateUnit::Month),
+            RoundingKind::Unit(DateUnit::Quarter),
+            RoundingKind::Unit(DateUnit::Year),
+            RoundingKind::Interval(90 * 60_000),
+            RoundingKind::Interval(DAY),
+            RoundingKind::Interval(7 * DAY + 1),
+        ];
+        let mut prepared = 0;
+        for z in zones {
+            let tz = TimeZone::parse(z).unwrap();
+            for kind in kinds {
+                for offset in [0, 3_600_000, -DAY / 3] {
+                    let r = Rounding::new(kind, tz.clone(), offset).unwrap();
+                    for _ in 0..6 {
+                        // Ranges around DST-rich years, sized so most kinds fit an array.
+                        let span = match kind {
+                            RoundingKind::Unit(DateUnit::Second) => 100_000,
+                            RoundingKind::Unit(DateUnit::Minute) => 6_000_000,
+                            RoundingKind::Unit(DateUnit::Hour) | RoundingKind::Interval(_) => 8 * DAY,
+                            RoundingKind::Unit(DateUnit::Day) | RoundingKind::Unit(DateUnit::Week) => 200 * DAY,
+                            _ => 20 * 365 * DAY,
+                        };
+                        let min = ms("2018-01-01T00:00:00Z") + rng.gen_range(0..3 * 365 * DAY);
+                        let max = min + rng.gen_range(0..span);
+                        let Some(p) = r.prepare(min, max) else { continue };
+                        prepared += 1;
+                        let check = |v: i64| {
+                            let i = p.index(v).unwrap_or_else(|| panic!("{z} {kind:?} {v} outside [{min}, {max}]"));
+                            assert_eq!(p.point(i), r.round(v), "{z} {kind:?} offset {offset} value {v}");
+                        };
+                        check(min);
+                        check(max);
+                        for i in 1..p.len() {
+                            check(p.point(i));
+                            check(p.point(i) - 1);
+                        }
+                        for _ in 0..300 {
+                            check(rng.gen_range(min..=max));
+                        }
+                        assert_eq!(p.index(p.point(0) - 1), None);
+                        assert_eq!(p.index(max + 1), None);
+                    }
+                }
+            }
+        }
+        assert!(prepared > 1000, "{prepared}");
+        // Too many buckets, or an empty range: no array.
+        let s = Rounding::new(RoundingKind::Unit(DateUnit::Second), TimeZone::utc(), 0).unwrap();
+        assert!(s.prepare(0, 1_000_000).is_none());
+        assert!(s.prepare(10, 9).is_none());
+        assert!(s.prepare(i64::MIN, i64::MIN + 5).is_none() || s.prepare(i64::MIN, i64::MIN + 5).is_some_and(|p| p.point(0) == s.round(i64::MIN)));
     }
 
     #[test]

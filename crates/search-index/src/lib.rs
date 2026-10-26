@@ -50,10 +50,10 @@ pub use error::{Error, Result};
 pub use schema::{FieldSchema, Schema, TermVectorOptions};
 pub use search::{
     BulkScorer, Collector, CollectorManager, Explanation, LeafCollector, Query, QueryRef, Scorable, ScoreMode, Scorer,
-    SearchControl, Searcher, SegmentContext, Weight,
+    SearchControl, Searcher, SegmentContext, StatsSource, Weight,
 };
 pub use shard::{
-    DeleteOp, FlushOutcome, FlushedSegment, IndexOp, OpResult, OpType, Origin, SegmentGate, SegmentHandle, Shard, ShardConfig,
+    DeleteOp, FlushOutcome, FlushedSegment, IndexOp, OpResult, OpType, Origin, PublishedView, SegmentGate, SegmentHandle, Shard, ShardConfig,
     ShardStats, StoredDoc, VersionConflict, VersionType,
 };
 pub use similarity::Similarity;

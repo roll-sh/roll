@@ -22,8 +22,26 @@ fn agg_err(e: crate::error::EsError) -> AggError {
     a
 }
 
+/// A script failure as an aggregation error: the full error (`script_stack`, `position`,
+/// `caused_by`) is parked, since collection errors travel through the engine's error type,
+/// which carries only a type and a reason ([`super::scripts::take_script_error`] redeems it).
 fn script_err(e: search_painless::ScriptError) -> AggError {
-    agg_err(crate::scripting::script_error(e))
+    let ee = crate::scripting::script_error(e);
+    if ee.kind != "script_exception" {
+        return agg_err(ee);
+    }
+    let reason = format!("{}{}", ee.reason(), super::scripts::park_script_error(ee.clone()));
+    AggError::new(ee.status, "script_exception", reason)
+}
+
+/// A collection-time failure as an aggregation error: script errors are parked whole (see
+/// [`script_err`]).
+fn parked_agg_err(ee: crate::error::EsError) -> AggError {
+    if ee.kind != "script_exception" {
+        return agg_err(ee);
+    }
+    let reason = format!("{}{}", ee.reason(), super::scripts::park_script_error(ee.clone()));
+    AggError::new(ee.status, "script_exception", reason)
 }
 
 /// An aggs `Script` as the query DSL's.
@@ -112,9 +130,51 @@ struct Values {
     table: Arc<FieldTable>,
     shard: i32,
     index: String,
+    /// `super::id_fielddata::scripts`: whether `doc['_id']` reads.
+    id_fielddata: bool,
 }
 
 struct ValuesLeaf(Leaf);
+
+/// A concrete field standing in for a runtime field on an index that maps it (an aggregation
+/// over several indices, some with the runtime field): its doc values as script values.
+struct ConcreteValues {
+    table: Arc<FieldTable>,
+    name: String,
+    shard: i32,
+    index: String,
+}
+
+struct ConcreteValuesLeaf {
+    host: super::scripts::DocHost,
+    name: String,
+    buf: search_painless::DocValues,
+}
+
+impl ValuesScript for ConcreteValues {
+    fn leaf(&self, seg: &search_index::SegmentContext) -> search_aggs::Result<Box<dyn LeafValuesScript>> {
+        let host = super::scripts::DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone());
+        Ok(Box::new(ConcreteValuesLeaf { host, name: self.name.clone(), buf: search_painless::DocValues::default() }))
+    }
+}
+
+impl LeafValuesScript for ConcreteValuesLeaf {
+    fn run(&mut self, doc: u32, _score: f32, _value: Option<&ScriptValue>, out: &mut Vec<ScriptValue>) -> search_aggs::Result<()> {
+        use search_painless::{DocKind as K, Host as _};
+        self.host.doc = doc;
+        self.host.doc_values(&self.name, &mut self.buf).map_err(|e| AggError::illegal_argument(e.reason))?;
+        let b = &self.buf;
+        match b.kind {
+            K::String | K::Ip | K::Version => out.extend(b.strings().iter().take(b.len()).map(|s| ScriptValue::Str(s.clone()))),
+            K::Date | K::DateNanos => out.extend(b.longs.iter().map(|l| ScriptValue::Date(*l))),
+            K::Boolean => out.extend(b.longs.iter().map(|l| ScriptValue::Bool(*l != 0))),
+            K::GeoPoint => out.extend(b.geo.iter().map(|p| ScriptValue::GeoPoint(p[0], p[1]))),
+            K::Double | K::Float | K::HalfFloat | K::ScaledFloat => out.extend(b.doubles.iter().map(|d| ScriptValue::Double(*d))),
+            _ => out.extend(b.longs.iter().map(|l| ScriptValue::Long(*l))),
+        }
+        Ok(())
+    }
+}
 
 /// A runtime field's values as an aggregation values source.
 struct RuntimeValues(super::runtime::Evaluator);
@@ -129,7 +189,7 @@ impl ValuesScript for RuntimeValues {
 
 impl LeafValuesScript for RuntimeValuesLeaf {
     fn run(&mut self, doc: u32, _score: f32, _value: Option<&ScriptValue>, out: &mut Vec<ScriptValue>) -> search_aggs::Result<()> {
-        for v in self.0.values(doc).map_err(agg_err)? {
+        for v in self.0.values(doc).map_err(parked_agg_err)? {
             out.push(super::runtime::to_script_value(&v));
         }
         Ok(())
@@ -138,11 +198,16 @@ impl LeafValuesScript for RuntimeValuesLeaf {
 
 impl ValuesScript for Values {
     fn needs_score(&self) -> bool {
-        self.bound.painless().is_some_and(|s| s.needs_score())
+        match &self.bound.compiled {
+            search_painless::Compiled::Painless(s) => s.needs_score(),
+            search_painless::Compiled::Expression(e) => e.needs_score(),
+            search_painless::Compiled::Mustache(_) => false,
+        }
     }
     fn leaf(&self, seg: &search_index::SegmentContext) -> search_aggs::Result<Box<dyn LeafValuesScript>> {
-        let s = self.bound.painless().ok_or_else(|| AggError::illegal_argument("not a painless script"))?;
-        Ok(Box::new(ValuesLeaf(Leaf::new(s, &self.bound.params, DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone())))))
+        let leaf = Leaf::from_bound(&self.bound, DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()).with_id_fielddata(self.id_fielddata))
+            .ok_or_else(|| AggError::illegal_argument("not a painless script"))?;
+        Ok(Box::new(ValuesLeaf(leaf)))
     }
 }
 
@@ -173,7 +238,8 @@ impl BucketScript for Bucket {
         }
         let mut inst = s.instance();
         inst.set_params(&serde_json::Value::Object(params));
-        let v = inst.execute(&mut search_painless::NoHost).map_err(script_err)?;
+        let mut host = super::scripts::CancelHost::prepare(&mut inst);
+        let v = inst.execute(&mut host).map_err(script_err)?;
         Ok(Json::from_serde(&v.to_json()))
     }
 }
@@ -220,6 +286,7 @@ struct Scripted {
     table: Arc<FieldTable>,
     shard: i32,
     index: String,
+    id_fielddata: bool,
 }
 
 struct ScriptedState {
@@ -231,6 +298,7 @@ struct ScriptedState {
     table: Arc<FieldTable>,
     shard: i32,
     index: String,
+    id_fielddata: bool,
 }
 
 // SAFETY: a state lives on the thread collecting its shard; its Painless values are not shared.
@@ -245,9 +313,10 @@ impl ScriptedMetricScripts for Scripted {
             let mut inst = s.instance();
             inst.set_params(&params);
             inst.set_var("state", state.clone());
-            inst.execute(&mut search_painless::NoHost).map_err(script_err)?;
+            let mut host = super::scripts::CancelHost::prepare(&mut inst);
+            inst.execute(&mut host).map_err(script_err)?;
         }
-        Ok(Box::new(ScriptedState { state, params, map: self.map.clone(), combine: self.combine.clone(), leaf: None, table: self.table.clone(), shard: self.shard, index: self.index.clone() }))
+        Ok(Box::new(ScriptedState { state, params, map: self.map.clone(), combine: self.combine.clone(), leaf: None, table: self.table.clone(), shard: self.shard, index: self.index.clone(), id_fielddata: self.id_fielddata }))
     }
     fn needs_score(&self) -> bool {
         self.map.painless().is_some_and(|s| s.needs_score())
@@ -257,7 +326,7 @@ impl ScriptedMetricScripts for Scripted {
 impl ScriptedMetricState for ScriptedState {
     fn set_segment(&mut self, seg: &search_index::SegmentContext) -> search_aggs::Result<()> {
         let s = self.map.painless().ok_or_else(|| AggError::illegal_argument("not a painless script"))?;
-        let mut leaf = Leaf::new(s, &self.params, DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()));
+        let mut leaf = Leaf::new(s, &self.params, DocHost::new(self.table.clone(), seg.clone(), self.shard, self.index.clone()).with_id_fielddata(self.id_fielddata));
         leaf.set_var("state", self.state.clone());
         self.leaf = Some(leaf);
         Ok(())
@@ -273,7 +342,8 @@ impl ScriptedMetricState for ScriptedState {
         let mut inst = s.instance();
         inst.set_params(&self.params);
         inst.set_var("state", self.state.clone());
-        let v = inst.execute(&mut search_painless::NoHost).map_err(script_err)?;
+        let mut host = super::scripts::CancelHost::prepare(&mut inst);
+        let v = inst.execute(&mut host).map_err(script_err)?;
         Ok(Json::from_serde(&v.to_json()))
     }
 }
@@ -289,7 +359,8 @@ impl ScriptedMetricReduce for Reduce {
         inst.set_params(&params.to_serde());
         let list = serde_json::Value::Array(states.iter().map(|j| j.to_serde()).collect());
         inst.set_var("states", search_painless::Value::from_json_map(&list));
-        let v = inst.execute(&mut search_painless::NoHost).map_err(script_err)?;
+        let mut host = super::scripts::CancelHost::prepare(&mut inst);
+        let v = inst.execute(&mut host).map_err(script_err)?;
         Ok(Json::from_serde(&v.to_json()))
     }
 }
@@ -297,14 +368,20 @@ impl ScriptedMetricReduce for Reduce {
 impl ScriptHost for Host {
     fn values(&self, script: &search_aggs::Script) -> search_aggs::Result<Arc<dyn ValuesScript>> {
         // A runtime field aggregated by name.
-        if let Some(f) = super::runtime::from_agg_params(&super::aggs::from_json(&script.params)) {
+        let params = super::aggs::from_json(&script.params);
+        if let Some(f) = super::runtime::from_agg_params(&params) {
             let table = self.table.clone().ok_or_else(|| AggError::illegal_argument("runtime fields need an index"))?;
-            let ev = super::runtime::Evaluator::new(&self.scripts, &self.state, &table, self.shard, &self.index, f).map_err(agg_err)?;
+            if let Some(idx) = self.state.metadata.indices.get(&self.index)
+                && let Some(name) = super::runtime::agg_reads_concrete(&params, &idx.mapping, &table)
+            {
+                return Ok(Arc::new(ConcreteValues { table, name, shard: self.shard, index: self.index.clone() }));
+            }
+            let ev = super::runtime::Evaluator::new(&self.scripts, &self.state, &table, self.shard, &self.index, f).map_err(agg_err)?.counted();
             return Ok(Arc::new(RuntimeValues(ev)));
         }
         let bound = self.compile(script, Context::Aggs)?;
         let table = self.table.clone().ok_or_else(|| AggError::illegal_argument("value scripts need an index"))?;
-        Ok(Arc::new(Values { bound, table, shard: self.shard, index: self.index.clone() }))
+        Ok(Arc::new(Values { bound, table, shard: self.shard, index: self.index.clone(), id_fielddata: super::id_fielddata::scripts(&self.state) }))
     }
     fn bucket_script(&self, script: &search_aggs::Script, kind: ScriptKind) -> search_aggs::Result<Arc<dyn BucketScript>> {
         let ctx = if kind == ScriptKind::BucketSelector { Context::AggregationSelector } else { Context::BucketAggregation };
@@ -325,6 +402,7 @@ impl ScriptHost for Host {
             table,
             shard: self.shard,
             index: self.index.clone(),
+            id_fielddata: super::id_fielddata::scripts(&self.state),
         }))
     }
     fn scripted_metric_reduce(&self, reduce: &search_aggs::Script) -> search_aggs::Result<Arc<dyn ScriptedMetricReduce>> {

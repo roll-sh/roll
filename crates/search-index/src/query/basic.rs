@@ -40,6 +40,9 @@ impl Scorable for AllScorer {
 }
 
 impl Scorer for AllScorer {
+    fn pure_scores(&self) -> bool {
+        true
+    }
     fn doc(&self) -> u32 {
         self.doc
     }
@@ -57,6 +60,24 @@ impl Scorer for AllScorer {
     fn max_score(&mut self, _upto: u32) -> f32 {
         self.score
     }
+    fn next_docs_and_scores(&mut self, upto: u32, live: Option<&search_codec::LiveDocs>, buf: &mut crate::search::DocScoreBuf) {
+        // Consecutive docs: a full batch per call without a `next` per doc.
+        let mut n = 0;
+        let mut d = self.doc;
+        let end = upto.min(self.max_doc);
+        while d < end && n < crate::search::BATCH {
+            if live.is_none_or(|l| l.is_live(d)) {
+                buf.docs[n] = d;
+                buf.scores[n] = self.score;
+                n += 1;
+            }
+            d += 1;
+        }
+        buf.len = n;
+        if d != self.doc {
+            self.doc = if d < self.max_doc { d } else { NO_MORE_DOCS };
+        }
+    }
 }
 
 /// A materialized doc set with a constant score.
@@ -66,12 +87,14 @@ pub struct SetScorer {
     idx: usize,
     score: f32,
     cost: u64,
+    /// A collector asked for more than the constant score: no later doc can compete.
+    beaten: bool,
 }
 
 impl SetScorer {
     pub fn new(set: Arc<DocIdSet>, score: f32) -> SetScorer {
         let cost = set.cost();
-        SetScorer { set, doc: u32::MAX, idx: 0, score, cost }
+        SetScorer { set, doc: u32::MAX, idx: 0, score, cost, beaten: false }
     }
 }
 
@@ -79,9 +102,18 @@ impl Scorable for SetScorer {
     fn score(&mut self) -> f32 {
         self.score
     }
+    /// Lucene's `ConstantScoreScorer`: once the minimum competitive score exceeds the
+    /// constant, the iterator ends (the current doc stays). Collectors announce a minimum only
+    /// past the total-hits threshold, so the count is a lower bound by then.
+    fn set_min_competitive_score(&mut self, min: f32) {
+        self.beaten |= min > self.score;
+    }
 }
 
 impl Scorer for SetScorer {
+    fn pure_scores(&self) -> bool {
+        true
+    }
     fn doc(&self) -> u32 {
         self.doc
     }
@@ -90,6 +122,10 @@ impl Scorer for SetScorer {
         self.advance(t)
     }
     fn advance(&mut self, target: u32) -> u32 {
+        if self.beaten {
+            self.doc = NO_MORE_DOCS;
+            return self.doc;
+        }
         self.doc = match &*self.set {
             DocIdSet::Empty => NO_MORE_DOCS,
             DocIdSet::All(n) => {
@@ -134,6 +170,9 @@ impl Scorable for ConstScorer {
 }
 
 impl Scorer for ConstScorer {
+    fn pure_scores(&self) -> bool {
+        true
+    }
     fn doc(&self) -> u32 {
         self.inner.doc()
     }
@@ -236,6 +275,38 @@ impl BulkScorer for AllBulk {
         let mut sv = ScoreValue(self.score);
         let mut d = min;
         let skips = c.skips();
+        if !skips {
+            // Blocks of live docs: one collector call per block.
+            let mut block = [0u32; 256];
+            while d < end {
+                let mut n = 0;
+                match live {
+                    None => {
+                        let to = end.min(d + block.len() as u32);
+                        for (slot, doc) in block.iter_mut().zip(d..to) {
+                            *slot = doc;
+                        }
+                        n = (to - d) as usize;
+                        d = to;
+                    }
+                    Some(l) => {
+                        while n < block.len() {
+                            d = l.next_live(d);
+                            if d >= end {
+                                break;
+                            }
+                            block[n] = d;
+                            n += 1;
+                            d += 1;
+                        }
+                    }
+                }
+                if n > 0 {
+                    c.collect_block(&block[..n], self.score)?;
+                }
+            }
+            return Ok(if end >= self.max_doc { NO_MORE_DOCS } else { end });
+        }
         while d < end {
             if skips {
                 d = c.competitive_from(d);
@@ -336,7 +407,7 @@ impl ConstantScoreQuery {
 struct ConstWeight {
     inner: Box<dyn Weight>,
     score: f32,
-    desc: String,
+    desc: crate::search::LazyDesc,
 }
 
 struct ConstSupplier {
@@ -369,7 +440,7 @@ impl Weight for ConstWeight {
         Ok(Some(Box::new(ConstBulk { inner, score: self.score })))
     }
     fn explain(&self, seg: &SegmentContext, doc: u32) -> Result<Explanation> {
-        explain_const(self, seg, doc, &self.desc, self.score)
+        explain_const(self, seg, doc, self.desc.get(), self.score)
     }
     fn count(&self, seg: &SegmentContext) -> Result<Option<u32>> {
         self.inner.count(seg)
@@ -386,9 +457,39 @@ struct ConstLeaf<'a> {
     score: f32,
 }
 
+/// The constant score, noting whether the collector raised its minimum competitive score
+/// past it.
+struct ConstScore {
+    score: f32,
+    beaten: bool,
+}
+
+impl Scorable for ConstScore {
+    fn score(&mut self) -> f32 {
+        self.score
+    }
+    fn set_min_competitive_score(&mut self, min: f32) {
+        self.beaten |= min > self.score;
+    }
+}
+
 impl LeafCollector for ConstLeaf<'_> {
+    /// Once the collector needs more than the constant score, no later doc of the segment can
+    /// compete: the segment ends (Lucene's `ConstantScoreScorer` turns its iterator empty).
     fn collect(&mut self, doc: u32, _s: &mut dyn Scorable) -> Result<()> {
-        self.inner.collect(doc, &mut ScoreValue(self.score))
+        let mut s = ConstScore { score: self.score, beaten: false };
+        self.inner.collect(doc, &mut s)?;
+        if s.beaten {
+            return Err(crate::error::Error::CollectionTerminated);
+        }
+        Ok(())
+    }
+    // A sorted collector's competitive iterator still applies under a constant score.
+    fn skips(&self) -> bool {
+        self.inner.skips()
+    }
+    fn competitive_from(&mut self, doc: u32) -> u32 {
+        self.inner.competitive_from(doc)
     }
 }
 
@@ -406,7 +507,7 @@ impl Query for ConstantScoreQuery {
     fn weight(&self, s: &Searcher, mode: ScoreMode, boost: f32) -> Result<Box<dyn Weight>> {
         let inner_mode = if mode.is_exhaustive() || !mode.needs_scores() { ScoreMode::CompleteNoScores } else { ScoreMode::TopDocs };
         let inner = s.filter_weight(&s.rewrite(&self.query)?, inner_mode, 1.0)?;
-        Ok(Box::new(ConstWeight { inner, score: boost, desc: self.lucene_string(s.schema()) }))
+        Ok(Box::new(ConstWeight { inner, score: boost, desc: crate::search::LazyDesc::of(self, s) }))
     }
     /// Lucene's: the inner query loses what only matters for scores — a boost, a nested
     /// constant score, the scoring of boolean clauses (`rewriteNoScoring`: musts become
@@ -469,6 +570,11 @@ impl Query for BoostQuery {
         }
         if let Some(b) = self.query.as_any().downcast_ref::<BoostQuery>() {
             return Ok(Some(Arc::new(BoostQuery { query: b.query.clone(), boost: b.boost * self.boost })));
+        }
+        // A boosted match-none matches nothing: it bubbles up. (Kept, a 0 boost would wrap it
+        // in a constant score that rewrites straight back to it, forever.)
+        if self.query.as_any().is::<MatchNoneQuery>() {
+            return Ok(Some(self.query.clone()));
         }
         if self.boost == 0.0 && !self.query.as_any().is::<ConstantScoreQuery>() {
             // Lucene: a 0 boost needs no scores from the inner query.
@@ -594,13 +700,43 @@ impl Weight for ExistsWeight {
     fn explain(&self, seg: &SegmentContext, doc: u32) -> Result<Explanation> {
         explain_const(self, seg, doc, &self.desc, self.score)
     }
+    /// Lucene's `FieldExistsQuery` weight count: a field the segment lacks counts 0; a field
+    /// with norms counts only when every doc has it; vectors and skip-indexed doc values count
+    /// their docs, other doc values the docs of their points or terms when nothing is deleted
+    /// (doc values alone, like Elasticsearch's `_primary_term` nested root filter, give none).
+    /// A count of every doc is the live count even with deletions.
     fn count(&self, seg: &SegmentContext) -> Result<Option<u32>> {
-        if seg.has_deletions() {
-            return Ok(None);
+        let r = &seg.reader;
+        let Some(fi) = r.field_info(self.field) else { return Ok(Some(0)) };
+        let max = r.max_doc();
+        let deletions = seg.has_deletions();
+        if fi.norms {
+            let with_field = r.terms(self.field).map_or(0, |t| t.stats().doc_count);
+            return Ok((with_field == max).then_some(seg.num_docs));
         }
-        self.ensure(seg)?;
-        let set = seg.core.cached("exists", self.field as u64, || self.docs(seg));
-        Ok(Some(set.as_ref().as_ref().map_or(0, |s| s.cost() as u32)))
+        let count = if fi.vectors.is_some() || (fi.doc_values != search_codec::DocValuesType::None && fi.doc_values_skip_index) {
+            self.ensure(seg)?;
+            let set = seg.core.cached("exists", self.field as u64, || self.docs(seg));
+            Some(set.as_ref().as_ref().map_or(0, |s| s.cost() as u32))
+        } else if fi.doc_values != search_codec::DocValuesType::None {
+            if deletions {
+                None
+            } else if fi.points.is_some() {
+                Some(r.points(self.field).map_or(0, |p| p.doc_count()))
+            } else if fi.index != search_codec::IndexOptions::None {
+                Some(r.terms(self.field).map_or(0, |t| t.stats().doc_count))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(match count {
+            Some(0) => Some(0),
+            Some(c) if c == max => Some(seg.num_docs),
+            Some(c) if !deletions => Some(c),
+            _ => None,
+        })
     }
 }
 

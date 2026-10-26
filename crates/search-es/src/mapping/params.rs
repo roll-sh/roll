@@ -530,7 +530,8 @@ pub fn parse_locale_checked(s: &str) -> Result<String, EsError> {
     }
     if let Some(country) = parts.get(1) {
         let c = country.to_uppercase();
-        if !(c.is_empty() || c.chars().count() == 3 || in_pairs(ISO_COUNTRIES, &c)) {
+        // `getISO3Country` knows two-letter regions only (three-digit ones fail too).
+        if !(c.is_empty() || in_pairs(ISO_COUNTRIES, &c)) {
             return Err(EsError::illegal_argument(format!("Unknown country: {country}"))
                 .caused_by(EsError::java(400, "missing_resource_exception", format!("Couldn't find 3-letter country code for {c}"))));
         }

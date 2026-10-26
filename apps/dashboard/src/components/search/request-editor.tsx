@@ -3,6 +3,9 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { esJson, type SearchCluster } from "@/lib/search-api";
 import { applyCompletion, complete, mappingFields, type Completion, type FieldInfo } from "@/lib/search-console";
+import { API_PATHS, COMMON_PARAMS, PARAMS } from "@/lib/search-params.generated";
+
+const PARAM_TABLE = { params: PARAMS, common: COMMON_PARAMS, apis: API_PATHS };
 
 /**
  * The console's request editor: a plain textarea with completion (methods, paths, index names,
@@ -70,6 +73,7 @@ const KIND_MARK: Record<string, string> = {
   agg: "a",
   field: "f",
   value: "v",
+  param: "?",
 };
 
 export interface RequestEditorHandle {
@@ -143,7 +147,7 @@ export const RequestEditor = forwardRef<
     (text: string, cursor: number) => {
       waiting.current = ensureSources(text, cursor);
       const idx = rawIndex(text);
-      const c = complete(text, cursor, { indices: indices.current ?? [], fields: (idx && fields.current.get(idx)) || [] });
+      const c = complete(text, cursor, { indices: indices.current ?? [], fields: (idx && fields.current.get(idx)) || [], params: PARAM_TABLE });
       setComp(c);
       setSel(0);
       open.current = c !== null;
