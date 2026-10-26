@@ -53,7 +53,7 @@ impl Ddl<'_, '_> {
         t: &Table,
         only: &[String],
         inherit: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<usize>> {
         let default = self.default_target();
         let mut targets: Vec<Target> = Vec::new();
         for (i, c) in t.columns.iter().enumerate() {
@@ -152,6 +152,9 @@ impl Ddl<'_, '_> {
             total += 1;
         };
         let (mut all_rows, mut sampled) = (0usize, false);
+        // (The rows of the table's own storage, when that is what was read: how many there
+        // are is what the caller would count again.)
+        let mut local = None;
         if inherit {
             for row in self.inherited_rows(t)? {
                 let mut row = Some(row);
@@ -193,6 +196,7 @@ impl Ddl<'_, '_> {
                 offer(&mut || Err(bytes.to_vec()));
             }
             sampled = chosen.is_some();
+            local = Some(all_rows);
         }
         // (Sampled by pages: the table's rows all the same.)
         let total = if sampled { all_rows } else { total };
@@ -205,7 +209,7 @@ impl Ddl<'_, '_> {
             })
             .collect::<Result<_>>()?;
         if sample.is_empty() {
-            return Ok(());
+            return Ok(local);
         }
         let fmt = FormatCtx::default();
         let mut computed = Vec::new();
@@ -251,7 +255,7 @@ impl Ddl<'_, '_> {
             }
             store(&mut self.cat.colstats, bix.index.oid, false, computed);
         }
-        Ok(())
+        Ok(local)
     }
 
     /// BuildRelationExtStatistics: the statistics objects on `t`, from the same sample.

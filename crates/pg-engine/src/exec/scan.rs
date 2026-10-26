@@ -83,13 +83,14 @@ pub fn encode_table_row(row: &[Value], xid: u64) -> Vec<u8> {
 /// Encode a table row for storage, written by transaction `xid` as the heap tuple at
 /// `tid` (when the heap is modelled).
 pub fn encode_table_row_at(row: &[Value], xid: u64, tid: Option<(u32, u16)>) -> Vec<u8> {
-    let mut out = vec![if tid.is_some() { ROW_HEADER_TID } else { ROW_HEADER }];
+    let mut out = Vec::with_capacity(24 + row.len() * 10);
+    out.push(if tid.is_some() { ROW_HEADER_TID } else { ROW_HEADER });
     crate::storage::sst::put_varint(&mut out, xid);
     if let Some((block, off)) = tid {
         crate::storage::sst::put_varint(&mut out, block as u64);
         crate::storage::sst::put_varint(&mut out, off as u64);
     }
-    out.extend_from_slice(&crate::storage::row::encode_row(row));
+    crate::storage::row::encode_row_into(&mut out, row);
     out
 }
 
@@ -2557,11 +2558,10 @@ pub fn lock_row_mode(
     ctx: &ExecCtx,
 ) -> Result<Locked> {
     ctx.txn.borrow_mut().output_cid();
-    let name = t.name.clone();
     let got = ctx
         .txn
         .borrow_mut()
-        .lock_row(t.oid, key, mode, wait_policy(wait), &|| name.clone())?;
+        .lock_row(t.oid, key, mode, wait_policy(wait), &|| t.name.clone())?;
     if !got {
         return Ok(Locked::Skip);
     }

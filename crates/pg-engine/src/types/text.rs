@@ -145,11 +145,39 @@ impl std::fmt::Debug for FormatCtx {
 
 // ── floats ──
 
+/// Shortest round-trip digits and decimal exponent: 1.5e-5 → ("15", -5), as Postgres's
+/// float8out / float4out (Ryu's d2s / f2s) find them. The `ryu` crate runs the same
+/// algorithm, except that it takes a decimal exactly on a midpoint to a neighbouring float
+/// when the mantissa is even, which Postgres doesn't: such a result (rare) is found again
+/// by `shortest_digits_slow`.
+fn shortest_digits(v: f64, single: bool) -> (String, i32) {
+    let mut buf = ryu::Buffer::new();
+    let s = if single { buf.format_finite(v as f32) } else { buf.format_finite(v) };
+    let (mant, e) = match s.split_once('e') {
+        Some((m, e)) => (m, e.parse::<i32>().unwrap_or(0)),
+        None => (s, 0),
+    };
+    let point = mant.find('.').unwrap_or(mant.len());
+    let mut digits = String::with_capacity(mant.len());
+    digits.extend(mant.chars().filter(char::is_ascii_digit));
+    let Some(z) = digits.bytes().position(|b| b != b'0') else {
+        return ("0".into(), 0);
+    };
+    let exp = point as i32 - 1 - z as i32 + e;
+    let end = digits.trim_end_matches('0').len();
+    digits.truncate(end);
+    digits.drain(..z);
+    if is_midpoint(v, single, &digits, exp) {
+        return shortest_digits_slow(v, single);
+    }
+    (digits, exp)
+}
+
 /// Shortest round-trip digits and decimal exponent: 1.5e-5 → ("15", -5), as Ryu (which
 /// Postgres uses) finds them: the shortest decimals strictly between the midpoints to the
 /// neighbouring floats (one exactly on a midpoint isn't taken, though it reads back as this
-/// float), the closest of them, ties to even.
-fn shortest_digits(v: f64, single: bool) -> (String, i32) {
+/// float), the closest of them, ties to even. (A search by formatting and reading back.)
+fn shortest_digits_slow(v: f64, single: bool) -> (String, i32) {
     let split = |s: String| {
         let (mant, exp) = s.split_once('e').unwrap();
         let exp: i32 = exp.parse().unwrap();
@@ -379,6 +407,18 @@ pub fn parse_float4(s: &str) -> Result<f32> {
 }
 
 fn parse_float(s: &str, tname: &str) -> Result<f64> {
+    // (The common case: digits with a point, an optional minus, no exponent; finite and,
+    // with a nonzero digit, not rounded to zero.)
+    let b = s.as_bytes();
+    if b.len() <= 24
+        && b.first().is_some_and(|c| c.is_ascii_digit() || *c == b'-')
+        && b.iter().all(|c| c.is_ascii_digit() || *c == b'.' || *c == b'-')
+        && let Ok(v) = s.parse::<f64>()
+        && v.is_finite()
+        && (v != 0.0 || !b.iter().any(|c| (b'1'..=b'9').contains(c)))
+    {
+        return Ok(v);
+    }
     let t = s.trim();
     let lower = t.to_ascii_lowercase();
     let v = match lower.as_str() {
@@ -435,6 +475,22 @@ pub fn int_type_name(ty: &DataType) -> &'static str {
 
 /// Parse an integer literal with Postgres's rules (whitespace, sign, `_` separators, 0x/0o/0b).
 pub fn parse_int(s: &str, tname: &str, min: i64, max: i64) -> Result<i64> {
+    // (The common case: an optional minus and up to 18 decimal digits, nothing else.)
+    let b = s.as_bytes();
+    let (neg, digits) = match b.first() {
+        Some(b'-') => (true, &b[1..]),
+        _ => (false, b),
+    };
+    if !digits.is_empty() && digits.len() <= 18 && digits.iter().all(u8::is_ascii_digit) {
+        let mut v: i64 = 0;
+        for d in digits {
+            v = v * 10 + (d - b'0') as i64;
+        }
+        let v = if neg { -v } else { v };
+        if v >= min && v <= max {
+            return Ok(v);
+        }
+    }
     let bad = || {
         err!(
             INVALID_TEXT_REPRESENTATION,
@@ -2286,6 +2342,63 @@ pub fn format_interval(i: &Interval, ctx: &FormatCtx) -> String {
 mod tests {
     use super::*;
 
+    /// Ryu's digits (`shortest_digits`) against the search by formatting
+    /// (`shortest_digits_slow`) over random bit patterns, powers of two and short decimals.
+    /// They differ only at powers of two, where the interval of decimals reading back as the
+    /// float is lopsided and the search's "closest decimal of n digits" can fall outside it
+    /// (2^-1017: Postgres prints 7.120236347223045e-307, Ryu's digits, not the search's 17).
+    #[test]
+    fn shortest_digits_match_reference() {
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut differ = Vec::new();
+        let mut check = |v: f64, single: bool| {
+            if !v.is_finite() || v == 0.0 || (single && (!(v as f32).is_finite() || v as f32 == 0.0)) {
+                return;
+            }
+            let v = v.abs();
+            let pow2 = if single { (v as f32).to_bits() & 0x7f_ffff == 0 } else { v.to_bits() & 0xf_ffff_ffff_ffff == 0 };
+            let (a, b) = (shortest_digits(v, single), shortest_digits_slow(v, single));
+            if a != b {
+                assert!(pow2, "{v:e} single={single}: {a:?} against {b:?}");
+                differ.push(v.to_bits());
+            }
+        };
+        assert_eq!(shortest_digits(2f64.powi(-1017), false), ("7120236347223045".into(), -307));
+        for _ in 0..200_000 {
+            let b = next();
+            check(f64::from_bits(b), false);
+            check(f32::from_bits(b as u32) as f64, true);
+        }
+        for e in -1074..1024 {
+            let v = 2f64.powi(e);
+            check(v, false);
+            check(v, true);
+        }
+        for i in 1..20_000u32 {
+            check(i as f64 / 7.0, false);
+            check(i as f64 * 0.001, false);
+            check(i as f64 / 7.0, true);
+            check(i as f64 * 0.001, true);
+        }
+        drop(check);
+        assert!(!differ.is_empty() && differ.len() < 200, "{}", differ.len());
+        // Postgres's text for powers of two where the two differ.
+        for (e, pg) in [
+            (-24, "5.960464477539063e-08"),
+            (-44, "5.684341886080802e-14"),
+            (87, "1.5474250491067253e+26"),
+            (-1017, "7.120236347223045e-307"),
+        ] {
+            assert_eq!(format_float8(2f64.powi(e), 1), pg);
+        }
+    }
+
     #[test]
     fn floats() {
         assert_eq!(format_float8(1e20, 1), "1e+20");
@@ -2299,6 +2412,8 @@ mod tests {
         assert_eq!(format_float8(1e14, 1), "100000000000000");
         assert_eq!(format_float8(1e-4, 1), "0.0001");
         assert_eq!(format_float4(1e-5, 1), "1e-05");
+        // (On a midpoint with an even mantissa: Postgres takes the longer digits.)
+        assert_eq!(format_float4(372433216.0, 1), "3.7243322e+08");
         assert_eq!(format_float4(100000.0, 1), "100000");
         assert_eq!(format_float4(1000000.0, 1), "1e+06");
         assert_eq!(format_float4(0.1, 1), "0.1");

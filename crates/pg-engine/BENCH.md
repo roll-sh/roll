@@ -1818,6 +1818,85 @@ The server's connection threads (16 MB) never grow at ordinary depths. A stateme
 nests deep pays for its segments: a mapping per segment for each statement, and the page
 faults of the stack it touches. For example, 4,000 `+` terms touch about 30 MB in release.
 
+## Round 19 (agent 74): the write path and lock memory
+
+Agent 69 bounded a big transaction's write buffer; the per-row cost of the bulk steps was
+left. Profiled first (`tools/bench/perf.sh`, a frame-pointer release build:
+`RUSTFLAGS="-C force-frame-pointers=yes"`, `perf record --call-graph fp`, one statement at a
+time). Same harness: servers on cores 20–23, clients on 24–27, on a loaded machine (load
+15–20). Bulk times are medians of 3 interleaved runs, each engine from a fresh data
+directory: **before** is `0d8c976c` (this round's base), PostgreSQL in the same window.
+
+### Bulk, 1M rows (seconds; peak memory of the whole run)
+
+| step | pg | before | batch 1 | batch 1 / pg |
+|---|---|---|---|---|
+| COPY in | 0.81 | 4.80 | 2.45 | 0.33x |
+| CREATE INDEX | 0.32 | 2.41 | 2.49 | 0.13x |
+| CREATE UNIQUE INDEX | 0.27 | 2.09 | 2.07 | 0.13x |
+| COPY out | 0.40 | 1.47 | 0.59 | 0.67x |
+| INSERT … SELECT | 0.71 | 3.04 | 2.15 | 0.33x |
+| UPDATE half | 4.29 | 3.43 | 3.41 | 1.26x |
+| DELETE a quarter | 0.20 | 2.19 | 2.09 | 0.10x |
+| VACUUM | 0.24 | 0.82 | 0.75 | 0.32x |
+| ANALYZE | 0.11 | 1.19 | 1.04 | 0.11x |
+| count(*) after | 0.04 | 0.14 | 0.15 | 0.25x |
+| peak memory | 334 MB | 856 MB | 848 MB | |
+
+### What the profiles showed (batch 1)
+
+- COPY in, before: the heap model 26% (the first 400,000 rows modelled, multi-inserted and
+  their TIDs written into the stored rows again, then the whole model dropped when the load
+  passed its size), the write buffer 25%, parsing 18%, pg_stat_io 5% (three `String`s and two
+  SipHash lookups under a global mutex per row), the commit 9%.
+- COPY out: `float8out` 31% (two `format!` calls, a parse and a big-integer check per
+  value), escaping and a `String` per field.
+- INSERT … SELECT: the heap model 24% (its `HashMap` of keys alone 5%), pg_stat_io 8%, the
+  write buffer 17%.
+
+### What changed (batch 1)
+
+1. **The heap model of a big statement waits for its end** (`sizing::Defer`). COPY's multi-
+   insert batches and an INSERT … SELECT's rows past the statement's first 10,000 are put in
+   the model when it ends, in order and the way they went in, and their TIDs stamped then. A
+   statement taking the table past the model's size (400,000 row versions) stops modelling
+   it at that row, as before, but places only the waiting rows' heap pages (for the size
+   estimate) and drops them: none of their index entries, TOAST rows or TIDs are made. A
+   failed statement's waiting rows are modelled when it fails (dead tuples, as before).
+   INSERT … SELECT defers only when nothing it runs can read the model or the rows' TIDs
+   before it ends: no BEFORE ROW trigger, RETURNING, ON CONFLICT, RLS check, volatile default
+   or check, and a source that runs nothing volatile and doesn't scan the table
+   (`dml::model_deferrable`). `tests/big_tables.rs` `deferred_model_matches` runs the same
+   loads deferred from the first row, from the 50th and never: identical TIDs, relpages,
+   reltuples and relation sizes (past the model's size too, and a failed COPY).
+2. **TIDs are stamped in place** (`Txn::restamp`): a row the current command wrote and whose
+   version is still in the write buffer gets its TID without a second journal entry and
+   buffered copy.
+3. **Floats print by Ryu** (`ryu` crate; `text::shortest_digits`), the algorithm Postgres runs,
+   except that Postgres doesn't take a decimal exactly on a midpoint to a neighbour (the crate
+   does for even mantissas): such a result goes to the old search. A test compares the two
+   over 200,000 random bit patterns, every power of two and short decimals: they differ only
+   at powers of two, where the old search was wrong (2^-24: Postgres prints
+   `5.960464477539063e-08`, the search printed 17 digits).
+4. **COPY parsing borrows**: a text-format line without a backslash splits into slices of the
+   data (`InField` holds `Cow`s); integers and plain decimals parse without lowercasing a copy;
+   COPY TO writes integers (`itoa`) and text needing no escape straight into the line.
+5. **Per-row costs**: pg_stat_io's keys are `&'static str`s in a fast-hash map; the tuple
+   length is worked out once per inserted row (it was three times: compression bookkeeping,
+   layout, estimate) without collecting the column types or copying the row; a row with every
+   column given goes in as it is (`new_row`); no clone of each row for ON CONFLICT's retry when
+   there is no ON CONFLICT; stored rows are encoded into one buffer; DELETE's and UPDATE's
+   "seen" sets use the fast hasher; a row lock no longer copies the table's name.
+6. **ANALYZE** takes the row count from its own scan instead of counting the table again, and
+   sorts index keys unstably (the same order: equal (key, size) pairs are interchangeable).
+
+### Verification (batch 1)
+
+Every crate test binary at the default spill threshold and with `ROLL_TXN_SPILL_BYTES=4096`
+(25 of 25 each); clippy adds no warnings; `difftest smoke` passes; the regression suite in
+full on a private reference against the committed `results.tsv`: 51,148 / 51,150, no unit
+newly differing or newly matching.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

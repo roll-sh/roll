@@ -1434,6 +1434,22 @@ impl Txn {
         self.maybe_spill()
     }
 
+    /// Replace the bytes of a row this transaction wrote with the same row stored with its
+    /// heap TID (`sizing::stamp_tids`, once its batch is modelled): in place while the
+    /// current command's version is the newest, in the write buffer (no reader can tell the
+    /// two apart, so there is nothing to journal), else a `put`.
+    pub fn restamp(&mut self, key: &[u8], value: Vec<u8>) -> Result<()> {
+        if let Some(e) = self.writes.get_mut(key)
+            && e.cid == Some(self.write_cid)
+            && let Some(old) = &e.v
+        {
+            self.buf_bytes = (self.buf_bytes + value.len()).saturating_sub(old.len());
+            e.v = Some(Bytes::from(value));
+            return Ok(());
+        }
+        self.put(key.to_vec(), value)
+    }
+
     /// `put` of an entry of an index this statement is building, which nothing can need to
     /// see past: no snapshot taken before could read an index that didn't exist, and with no
     /// savepoint open nothing can roll back to before it (a rollback of the whole

@@ -37,6 +37,8 @@ fallible-iterator.workspace = true
 prost.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
+ryu.workspace = true
+itoa.workspace = true
 sha1.workspace = true
 aes.workspace = true
 des.workspace = true

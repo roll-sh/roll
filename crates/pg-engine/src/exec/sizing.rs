@@ -42,6 +42,23 @@ pub fn with_max_versions<R>(n: usize, f: impl FnOnce() -> R) -> R {
 fn max_versions() -> usize {
     MAX_VERSIONS_HERE.with(|m| m.get())
 }
+
+thread_local! {
+    /// `DEFER_AFTER` on this thread (`with_defer_after`).
+    static DEFER_AFTER_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(DEFER_AFTER) };
+}
+
+/// Run `f` with bulk statements modelling their first `n` rows as they go in and the rest
+/// when they end (`Defer`), on this thread (usize::MAX: every row as it goes in).
+#[doc(hidden)]
+pub fn with_defer_after<R>(n: usize, f: impl FnOnce() -> R) -> R {
+    let _g = crate::scoped::set(&DEFER_AFTER_HERE, n, "sizing::DEFER_AFTER_HERE");
+    f()
+}
+
+fn defer_after() -> usize {
+    DEFER_AFTER_HERE.with(|m| m.get())
+}
 /// COPY's multi-insert buffer limits (MAX_BUFFERED_TUPLES, MAX_BUFFERED_BYTES).
 pub const COPY_TUPLES: usize = 1000;
 pub const COPY_BYTES: usize = 65535;
@@ -139,14 +156,6 @@ fn estimate_rows<'a>(t: &Table, rows: impl Iterator<Item = &'a [Value]>, ctx: &E
     e
 }
 
-/// An untracked table's row version of `row` was written.
-fn estimate_grows(t: &Table, row: &[Value], ctx: &ExecCtx) {
-    let len = layout(t, row, ctx, &HashSet::new()).0;
-    if let Some(e) = ctx.sess.db.relfiles.lock().estimated.get_mut(&t.oid) {
-        e.add(len, heap_fillfactor(t));
-    }
-}
-
 /// Whether table `t` is too big to model (its sizes are estimates).
 pub fn is_estimated(t: u32, db: &Database) -> bool {
     db.relfiles.lock().untracked.contains(&t)
@@ -174,6 +183,38 @@ struct Bulk {
     mode: InsertMode,
     /// COPY's multi-insert buffer (None: rows go in one at a time).
     batch: Option<Batch>,
+    /// The statement's rows past its first `DEFER_AFTER`, modelled when it ends (None: as
+    /// they go in).
+    defer: Option<Defer>,
+}
+
+/// How many rows a bulk statement models as they go in before it defers the rest.
+const DEFER_AFTER: usize = 10_000;
+
+/// A big statement's rows past its first `DEFER_AFTER`, waiting to be modelled as they went
+/// in (COPY's multi-insert batches, or single inserts), when it ends. Nothing reads the
+/// model of the table meanwhile (the statement runs no BEFORE ROW trigger, nothing volatile
+/// and nothing reading the table: `Deferral`). A statement taking the table past the
+/// model's size stops modelling it once it does (as `check_size` would), without putting
+/// in, and stamping the TIDs of, the rows a model of that size drops anyway.
+#[derive(Default)]
+struct Defer {
+    /// COPY's multi-inserts (else single inserts).
+    multi: bool,
+    /// Rows modelled as they went in.
+    modelled: usize,
+    /// In order: a multi-insert batch each, or (single inserts) one of every row.
+    batches: Vec<Vec<Pending>>,
+    rows: usize,
+    xid: u64,
+    cid: u32,
+}
+
+impl Defer {
+    /// Whether the statement's next rows wait.
+    fn deferring(&self) -> bool {
+        self.modelled >= defer_after()
+    }
 }
 
 #[derive(Default)]
@@ -472,6 +513,11 @@ fn stored_with(t: u32, col: usize, v: &Value) -> Option<char> {
 
 /// A row about to be stored in `t`: the values it compresses get their method remembered.
 pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &ExecCtx) {
+    note_compression_len(t, row, key, ctx, None)
+}
+
+/// `note_compression`, given the row's tuple length (`row_len`) when known.
+fn note_compression_len(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &ExecCtx, len: Option<usize>) {
     let n = row.len().min(t.columns.len());
     // A compressed datum copied here stays compressed, as it was.
     let copied: Vec<(usize, u64, char)> = row[..n]
@@ -479,7 +525,8 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
         .enumerate()
         .filter_map(|(i, v)| compressed_with(v).map(|m| (i, value_sig(v), m)))
         .collect();
-    let at: RowId = (ctx.txn.borrow_mut().cur_xid(), key.map(Arc::from));
+    let xid = ctx.txn.borrow_mut().cur_xid();
+    let at = || -> RowId { (xid, key.map(Arc::from)) };
     let db = ctx.sess.db.instance;
     if !copied.is_empty() {
         mark_tracked(db, t.oid);
@@ -489,20 +536,20 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
     {
         // (The latest copy wins over a value of the same content stored before.)
         for (i, sig, method) in copied {
-            record_method(m.entry((db, t.oid, i, sig)).or_default(), at.clone(), method, true);
+            record_method(m.entry((db, t.oid, i, sig)).or_default(), at(), method, true);
         }
     }
-    let types: Vec<DataType> = t.columns[..n].iter().map(|c| c.ty.clone()).collect();
     let fmt = ctx.fmt();
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+    if len.unwrap_or_else(|| row_len(t, row, &text)) <= TOAST_THRESHOLD {
+        return;
+    }
+    let types: Vec<DataType> = t.columns[..n].iter().map(|c| c.ty.clone()).collect();
     let row: Vec<Value> = t.columns[..n]
         .iter()
         .zip(row)
         .map(|(c, v)| if c.virtual_gen || c.dropped { Value::Null } else { v.clone() })
         .collect();
-    if relsize::heap_tuple_len(&types, &row, &text) <= TOAST_THRESHOLD {
-        return;
-    }
     // (Compressed or moved out of line.)
     mark_tracked(db, t.oid);
     let lz4 = ctx
@@ -520,7 +567,7 @@ pub fn note_compression(t: &Table, row: &[Value], key: Option<&[u8]>, ctx: &Exec
                 None if lz4 => 'l',
                 None => 'p',
             };
-            record_method(m.entry((db, t.oid, i, value_sig(&row[i]))).or_default(), at.clone(), method, false);
+            record_method(m.entry((db, t.oid, i, value_sig(&row[i]))).or_default(), at(), method, false);
         }
     }
 }
@@ -617,6 +664,21 @@ fn array_bytes(a: &crate::types::array::ArrayValue, ty: &DataType) -> Option<Vec
     Some(out)
 }
 
+/// `relsize::heap_tuple_len` of `row` stored in `t` (virtual generated and dropped columns
+/// as nulls), without collecting the column types or a copy of the row.
+fn row_len(t: &Table, row: &[Value], text: &dyn Fn(&Value, &DataType) -> String) -> usize {
+    let n = row.len().min(t.columns.len());
+    let stored = |c: &crate::catalog::Column, v: &Value| !(c.virtual_gen || c.dropped || v.is_null());
+    let has_null = t.columns[..n].iter().zip(row).any(|(c, v)| !stored(c, v));
+    let mut off = relsize::tuple_header(n, has_null);
+    for (c, v) in t.columns[..n].iter().zip(row) {
+        if stored(c, v) {
+            off += relsize::datum_bytes(off, v, &c.ty, text);
+        }
+    }
+    off
+}
+
 /// A heap tuple's length (t_len) for `row`, with the values heap_toast_insert_or_update
 /// would store out of line (`pinned`: columns keeping an out-of-line value as they are).
 pub fn layout(
@@ -625,10 +687,25 @@ pub fn layout(
     ctx: &ExecCtx,
     pinned: &HashSet<usize>,
 ) -> (usize, Vec<NewExt>) {
+    layout_len(t, row, ctx, pinned, None)
+}
+
+/// `layout`, given the row's tuple length (`row_len`) when known.
+fn layout_len(
+    t: &Table,
+    row: &[Value],
+    ctx: &ExecCtx,
+    pinned: &HashSet<usize>,
+    len: Option<usize>,
+) -> (usize, Vec<NewExt>) {
     let n = row.len().min(t.columns.len());
-    let types: Vec<DataType> = t.columns[..n].iter().map(|c| c.ty.clone()).collect();
     let fmt = ctx.fmt();
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+    let len = len.unwrap_or_else(|| row_len(t, row, &text));
+    if len <= TOAST_THRESHOLD && pinned.is_empty() {
+        return (len, Vec::new());
+    }
+    let types: Vec<DataType> = t.columns[..n].iter().map(|c| c.ty.clone()).collect();
     // Virtual generated and dropped columns are stored as nulls.
     let nulled: Vec<Value>;
     let row: &[Value] = if t.columns[..n]
@@ -651,10 +728,6 @@ pub fn layout(
     } else {
         &row[..n]
     };
-    let len = relsize::heap_tuple_len(&types, row, &text);
-    if len <= TOAST_THRESHOLD && pinned.is_empty() {
-        return (len, Vec::new());
-    }
     let lz4 = ctx
         .sess
         .settings
@@ -1335,10 +1408,15 @@ fn lock_toast(t: &Table, ctx: &ExecCtx) -> Result<()> {
 
 /// `lock_toast` for a row written to a table too big to model: when the row's layout
 /// stores a value out of line.
-fn lock_toast_for(t: &Table, row: &[Value], ctx: &ExecCtx) -> Result<()> {
-    let big = |v: &Value| !matches!(v, Value::Null | Value::Bool(_) | Value::Int2(_) | Value::Int4(_) | Value::Int8(_) | Value::Float4(_) | Value::Float8(_) | Value::Oid(_));
-    if t.toast != 0 && row.iter().any(big) && !layout(t, row, ctx, &HashSet::new()).1.is_empty() {
+/// An untracked table's row version of `row` is being written: its TOAST table locked when
+/// a value goes out of line, and the estimate grown by its tuple (one layout for both).
+fn untracked_write(t: &Table, row: &[Value], ctx: &ExecCtx, len: Option<usize>) -> Result<()> {
+    let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), len);
+    if t.toast != 0 && !exts.is_empty() {
         lock_toast(t, ctx)?;
+    }
+    if let Some(e) = ctx.sess.db.relfiles.lock().estimated.get_mut(&t.oid) {
+        e.add(len, heap_fillfactor(t));
     }
     Ok(())
 }
@@ -1364,13 +1442,17 @@ pub fn inserted_with(
     vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
 ) -> Result<Option<Tid>> {
-    note_compression(t, row, Some(key), ctx);
+    // (The tuple's length, once for all three uses.)
+    let tuple = {
+        let fmt = ctx.fmt();
+        row_len(t, row, &|v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt))
+    };
+    note_compression_len(t, row, Some(key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        lock_toast_for(t, row, ctx)?;
-        estimate_grows(t, row, ctx);
+        untracked_write(t, row, ctx, Some(tuple))?;
         return Ok(None);
     }
-    let (len, exts) = layout(t, row, ctx, &HashSet::new());
+    let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), Some(tuple));
     if !exts.is_empty() {
         lock_toast(t, ctx)?;
     }
@@ -1405,9 +1487,40 @@ pub fn inserted_with(
             });
             return Ok(None);
         }
+        // A big INSERT … SELECT past its first rows: they wait for the statement's end.
+        if let Some(Bulk { defer: Some(d), mode, .. }) = b
+            && d.deferring()
+        {
+            if d.batches.is_empty() {
+                d.batches.push(Vec::new());
+            }
+            d.batches[0].push(Pending {
+                key: key.to_vec(),
+                len,
+                exts,
+                entries,
+            });
+            d.rows += 1;
+            (d.xid, d.cid) = (xid, cid);
+            let Some(heap) = heaps.get_mut(&t.oid) else {
+                return Ok(None);
+            };
+            if heap.versions() + d.rows <= max_versions() {
+                return Ok(None);
+            }
+            let est = past_model(heap, d, mode);
+            drop(rf);
+            untrack(db, t, Some(est));
+            return Ok(None);
+        }
         let mut single = InsertMode::single();
         let mode = match b {
-            Some(b) => &mut b.mode,
+            Some(b) => {
+                if let Some(d) = &mut b.defer {
+                    d.modelled += 1;
+                }
+                &mut b.mode
+            }
             None => &mut single,
         };
         if !exts.is_empty() {
@@ -1472,8 +1585,7 @@ pub fn updated(
 ) -> Result<Option<(Tid, bool)>> {
     note_compression(t, new, Some(new_key), ctx);
     if !ensure(t, indexes, ctx)? {
-        lock_toast_for(t, new, ctx)?;
-        estimate_grows(t, new, ctx);
+        untracked_write(t, new, ctx, None)?;
         return Ok(None);
     }
     let db = &ctx.sess.db;
@@ -2482,7 +2594,7 @@ pub fn stamp_tids(keys: &[Vec<u8>], tids: &[Tid], ctx: &ExecCtx) -> Result<()> {
             && super::scan::stored_tid(&bytes) != Some(*tid)
         {
             let b = super::scan::with_tid(&bytes, *tid)?;
-            ctx.txn.borrow_mut().put(k.clone(), b)?;
+            ctx.txn.borrow_mut().restamp(k, b)?;
         }
     }
     Ok(())
@@ -3054,9 +3166,11 @@ pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
 
 // ── COPY ──
 
-/// A COPY FROM into `t` in progress: rows go in through a bulk insert state, buffered
-/// into multi-inserts when `multi`. Dropping it before `finish` discards the buffer (the
-/// command failed).
+/// A COPY FROM into `t` in progress (or an INSERT … SELECT: `deferred_inserts`): rows go in
+/// through a bulk insert state, buffered into multi-inserts when `multi`, those past the
+/// statement's first `DEFER_AFTER` modelled when it ends (`Defer`). Dropping it before
+/// `finish` (the command failed) models the rows waiting, as they went in, and discards the
+/// multi-insert buffer.
 pub struct CopyLoad {
     db: Arc<Database>,
     key: (u32, u64),
@@ -3066,21 +3180,38 @@ pub struct CopyLoad {
 impl CopyLoad {
     pub fn start(t: &Table, multi: bool, freeze: bool, ctx: &ExecCtx) -> CopyLoad {
         let txn = ctx.txn.borrow();
-        let key = (t.oid, txn.id);
         // A table new in this transaction isn't worth looking up free space in.
         let use_fsm = !txn.storage_new_in_txn(t.oid);
+        let mode = InsertMode {
+            use_fsm,
+            frozen: freeze,
+            ..InsertMode::bulk()
+        };
+        let defer = multi.then(|| Defer {
+            multi: true,
+            ..Default::default()
+        });
+        Self::register(t, mode, multi.then(Batch::default), defer, txn.id, ctx)
+    }
+
+    /// An INSERT … SELECT nothing can read the table's model during (`InsertNode`): single
+    /// inserts, those past its first `DEFER_AFTER` rows modelled when it ends.
+    pub fn deferred_inserts(t: &Table, ctx: &ExecCtx) -> CopyLoad {
+        let id = ctx.txn.borrow().id;
+        Self::register(t, InsertMode::single(), None, Some(Defer::default()), id, ctx)
+    }
+
+    fn register(
+        t: &Table,
+        mode: InsertMode,
+        batch: Option<Batch>,
+        defer: Option<Defer>,
+        txn: u64,
+        ctx: &ExecCtx,
+    ) -> CopyLoad {
+        let key = (t.oid, txn);
         let db = ctx.sess.db.clone();
-        db.relfiles.lock().bulk.insert(
-            key,
-            Bulk {
-                mode: InsertMode {
-                    use_fsm,
-                    frozen: freeze,
-                    ..InsertMode::bulk()
-                },
-                batch: multi.then(Batch::default),
-            },
-        );
+        db.relfiles.lock().bulk.insert(key, Bulk { mode, batch, defer });
         CopyLoad {
             db,
             key,
@@ -3108,73 +3239,152 @@ impl CopyLoad {
     fn flush(&self, ctx: &ExecCtx) {
         let xid = ctx.txn.borrow_mut().cur_xid();
         let cid = ctx.txn.borrow_mut().output_cid();
-        let xids = self.db.xids();
         let mut rf = self.db.relfiles.lock();
-        let RelFiles {
-            heaps,
-            btrees,
-            bulk,
-            toast,
-            ..
-        } = &mut *rf;
+        let RelFiles { heaps, bulk, .. } = &mut *rf;
         let Some(b) = bulk.get_mut(&self.key) else {
             return;
         };
         let Some(batch) = b.batch.as_mut() else {
             return;
         };
-        let mut rows = std::mem::take(&mut batch.rows);
+        let rows = std::mem::take(&mut batch.rows);
         batch.bytes = 0;
-        if rows.is_empty() || !heaps.contains_key(&self.key.0) {
-            return;
-        }
-        // Each tuple is toasted first, then they all go in.
-        for p in &mut rows {
-            if !p.exts.is_empty() {
-                let tt = toast.entry(self.key.0).or_default();
-                let exts = std::mem::take(&mut p.exts);
-                let saved =
-                    save_toast(heaps, btrees, tt, &xids, self.toast, exts, xid, b.mode.use_fsm);
-                tt.rows.insert(p.key.clone(), saved);
-            }
-        }
         let Some(heap) = heaps.get_mut(&self.key.0) else {
             return;
         };
-        let tids = heap.multi_insert(
-            rows.iter().map(|p| (p.key.clone(), p.len)).collect(),
-            xid,
-            &mut b.mode,
-        );
-        for tid in &tids {
-            heap.set_raw_cid(*tid, cid);
+        if rows.is_empty() {
+            return;
         }
-        let mut keys = Vec::with_capacity(rows.len());
-        for (p, tid) in rows.into_iter().zip(&tids) {
-            let entries = p.entries.into_iter().map(|(o, k)| (o, k, false)).collect();
-            index_insert(btrees, heap, &xids, entries, *tid);
-            keys.push(p.key);
+        let Bulk { mode, defer, .. } = b;
+        if let Some(d) = defer.as_mut() {
+            if d.deferring() {
+                d.rows += rows.len();
+                (d.xid, d.cid) = (xid, cid);
+                d.batches.push(rows);
+                if heap.versions() + d.rows > max_versions() {
+                    let est = past_model(heap, d, mode);
+                    drop(rf);
+                    if let Some(t) = ctx.catalog().tables.get(&self.key.0) {
+                        untrack(&self.db, t, Some(est));
+                    }
+                }
+                return;
+            }
+            d.modelled += rows.len();
         }
-        let big = heap.versions() > max_versions();
         drop(rf);
-        // The rows (stored already, as each line was read) get the TIDs their tuples went to,
-        // as single inserts' rows do (their ctid; scans read them in that order).
-        let _ = stamp_tids(&keys, &tids, ctx);
-        // A load past the model's size stops being modelled here, as single inserts do
-        // (`check_size`), not at the next restart: its scans go parallel from now on.
-        if big && let Some(t) = ctx.catalog().tables.get(&self.key.0) {
-            untrack(&self.db, t, None);
+        self.model(vec![rows], true, xid, cid, Some(ctx));
+    }
+
+    /// Put rows in the model as they went in: each batch a multi-insert (`multi`; its tuples
+    /// toasted first, then they all go in), else each row a single insert. With `ctx` the
+    /// rows (stored already) get the TIDs their tuples went to, as single inserts' rows do
+    /// (their ctid; scans read them in that order), and a load past the model's size stops
+    /// being modelled (as single inserts do, `check_size`; not at the next restart: its
+    /// scans go parallel from now on).
+    fn model(&self, batches: Vec<Vec<Pending>>, multi: bool, xid: u64, cid: u32, ctx: Option<&ExecCtx>) {
+        let xids = self.db.xids();
+        let table = self.key.0;
+        for mut rows in batches {
+            let mut rf = self.db.relfiles.lock();
+            let RelFiles { heaps, btrees, bulk, toast, .. } = &mut *rf;
+            let mut single = InsertMode::single();
+            let mode = bulk.get_mut(&self.key).map_or(&mut single, |b| &mut b.mode);
+            let mut tids = Vec::with_capacity(rows.len());
+            if multi {
+                for p in &mut rows {
+                    if !p.exts.is_empty() {
+                        let tt = toast.entry(table).or_default();
+                        let exts = std::mem::take(&mut p.exts);
+                        let saved = save_toast(heaps, btrees, tt, &xids, self.toast, exts, xid, mode.use_fsm);
+                        tt.rows.insert(p.key.clone(), saved);
+                    }
+                }
+                let Some(heap) = heaps.get_mut(&table) else {
+                    return;
+                };
+                tids = heap.multi_insert(rows.iter().map(|p| (p.key.clone(), p.len)).collect(), xid, mode);
+                for tid in &tids {
+                    heap.set_raw_cid(*tid, cid);
+                }
+            }
+            let mut keys = Vec::with_capacity(rows.len());
+            for (i, p) in rows.into_iter().enumerate() {
+                if !multi {
+                    if !p.exts.is_empty() {
+                        let tt = toast.entry(table).or_default();
+                        let saved = save_toast(heaps, btrees, tt, &xids, self.toast, p.exts, xid, mode.use_fsm);
+                        tt.rows.insert(p.key.clone(), saved);
+                    }
+                    let Some(heap) = heaps.get_mut(&table) else {
+                        return;
+                    };
+                    let tid = heap.insert(p.key.clone(), p.len, xid, mode);
+                    heap.set_raw_cid(tid, cid);
+                    tids.push(tid);
+                }
+                let Some(heap) = heaps.get(&table) else {
+                    return;
+                };
+                let entries = p.entries.into_iter().map(|(o, k)| (o, k, false)).collect();
+                index_insert(btrees, heap, &xids, entries, tids[i]);
+                keys.push(p.key);
+            }
+            let big = heaps.get(&table).is_some_and(|h| h.versions() > max_versions());
+            drop(rf);
+            let Some(ctx) = ctx else { continue };
+            let _ = stamp_tids(&keys, &tids, ctx);
+            if big && let Some(t) = ctx.catalog().tables.get(&table) {
+                untrack(&self.db, t, None);
+                return;
+            }
         }
     }
 
-    /// The COPY is done: the buffer goes in.
+    /// The rows waiting, taken: (batches, multi, xid, cid).
+    fn take_deferred(&self) -> Option<(Vec<Vec<Pending>>, bool, u64, u32)> {
+        let mut rf = self.db.relfiles.lock();
+        let d = rf.bulk.get_mut(&self.key)?.defer.as_mut()?;
+        if d.batches.is_empty() {
+            return None;
+        }
+        d.rows = 0;
+        Some((std::mem::take(&mut d.batches), d.multi, d.xid, d.cid))
+    }
+
+    /// The statement is done: the buffer goes in, then the rows waiting.
     pub fn finish(&self, ctx: &ExecCtx) {
         self.flush(ctx);
+        if let Some((batches, multi, xid, cid)) = self.take_deferred() {
+            self.model(batches, multi, xid, cid, Some(ctx));
+        }
     }
+}
+
+/// A statement's rows waiting took the table past the model's size: the estimate of its
+/// heap (`untrack`) as they leave it, placed as they went in (a multi-insert's pages ahead
+/// of its rows, the free space single inserts fill first), then let go. Only the heap's
+/// pages are placed: the table's model (its TIDs, indexes, TOAST) is dropped next.
+fn past_model(heap: &mut Heap, d: &mut Defer, mode: &mut InsertMode) -> EstHeap {
+    for rows in std::mem::take(&mut d.batches) {
+        if d.multi {
+            heap.multi_insert(rows.into_iter().map(|p| (p.key, p.len)).collect(), d.xid, mode);
+        } else {
+            for p in rows {
+                heap.insert(p.key, p.len, d.xid, mode);
+            }
+        }
+    }
+    d.rows = 0;
+    EstHeap::from_heap(heap)
 }
 
 impl Drop for CopyLoad {
     fn drop(&mut self) {
+        // (A failed command's rows waiting go in as they went in: dead tuples.)
+        if let Some((batches, multi, xid, cid)) = self.take_deferred() {
+            self.model(batches, multi, xid, cid, None);
+        }
         self.db.relfiles.lock().bulk.remove(&self.key);
     }
 }

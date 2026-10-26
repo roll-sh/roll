@@ -461,6 +461,12 @@ pub fn heap_tuple(
     align(heap_tuple_len(types, row, text), MAXALIGN) + ITEM_ID
 }
 
+/// A heap tuple's header with its null bitmap (for `n` columns), aligned: where its data
+/// starts.
+pub fn tuple_header(n: usize, has_null: bool) -> usize {
+    align(23 + if has_null { n.div_ceil(8) } else { 0 }, MAXALIGN)
+}
+
 /// A heap tuple's t_len: its header (with the null bitmap) and data.
 pub fn heap_tuple_len(
     types: &[DataType],
@@ -468,10 +474,7 @@ pub fn heap_tuple_len(
     text: &dyn Fn(&Value, &DataType) -> String,
 ) -> usize {
     let has_null = row.iter().any(Value::is_null);
-    let mut off = align(
-        23 + if has_null { types.len().div_ceil(8) } else { 0 },
-        MAXALIGN,
-    );
+    let mut off = tuple_header(types.len(), has_null);
     for (v, ty) in row.iter().zip(types) {
         if !v.is_null() {
             off += datum_bytes(off, v, ty, text);

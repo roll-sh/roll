@@ -180,7 +180,7 @@ fn io(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
 
 /// pg_stat_io's rows over these counts (of one backend's, with its pid first).
 fn io_rows(
-    counts: &std::collections::HashMap<crate::exec::pgstat::IoKey, i64>,
+    counts: &crate::exec::fasthash::HashMap<crate::exec::pgstat::IoKey, i64>,
     reset: Option<i64>,
     pid: Option<i32>,
     c: &FnCtx,
@@ -216,7 +216,7 @@ fn io_rows(
             let count = |op: &str| {
                 counts
                     .iter()
-                    .filter(|((b, o, x, k), _)| b == f[0] && o == f[1] && x == f[2] && *k == op)
+                    .filter(|((b, o, x, k), _)| *b == f[0] && *o == f[1] && *x == f[2] && *k == op)
                     .map(|(_, n)| *n)
                     .sum::<i64>()
             };

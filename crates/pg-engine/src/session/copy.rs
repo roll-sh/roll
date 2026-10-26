@@ -1,6 +1,7 @@
 //! COPY ... FROM STDIN / TO STDOUT in text, CSV and binary formats, and FROM / TO a server
 //! file when the server allows them (`crate::server_files`).
 
+use std::borrow::Cow;
 use super::{Outcome, QueryResult, Session};
 use crate::catalog::{Relation, Table};
 use crate::error::{Error, Result, code};
@@ -9,7 +10,7 @@ use crate::sql::binder::ast::{const_str, inner, names, with_pos};
 use crate::sql::binder::{Binder, table_rules};
 use crate::sql::expr::Expr;
 use crate::sql::plan::{InsertPlan, Plan};
-use crate::types::Value;
+use crate::types::{DataType, Value};
 use crate::types::text::{format_value, parse_value};
 use pg_query::NodeEnum;
 use pg_query::protobuf as pb;
@@ -1592,7 +1593,7 @@ pub(crate) fn parse_copy_data(
             };
             if f.csv {
                 if value.is_none() && f.forces_not_null(colname) {
-                    value = Some(f.null.clone());
+                    value = Some(Cow::Owned(f.null.clone()));
                 } else if value.as_ref().is_some_and(|v| *v == f.null) && f.forces_null(colname)
                 {
                     value = None;
@@ -1741,13 +1742,13 @@ fn create_copy_file(ctx: &crate::exec::ExecCtx, name: &str) -> Result<(String, s
 }
 
 /// One input field: its value, plus the raw text when it can match the
-/// NULL or DEFAULT marker (unquoted).
-struct InField {
-    value: String,
-    raw: Option<String>,
+/// NULL or DEFAULT marker (unquoted). A field without escapes borrows the data.
+struct InField<'a> {
+    value: Cow<'a, str>,
+    raw: Option<Cow<'a, str>>,
 }
 
-impl InField {
+impl InField<'_> {
     fn is_null(&self, f: &CopyFormat) -> bool {
         self.raw.as_deref() == Some(f.null.as_str())
     }
@@ -1757,7 +1758,7 @@ impl InField {
     }
 }
 
-type Records = Vec<(String, Vec<InField>)>;
+type Records<'a> = Vec<(String, Vec<InField<'a>>)>;
 
 /// Columns a COPY reads or writes; generated columns can't be listed.
 fn target_columns(t: &Table, cols: &[String]) -> Result<Vec<usize>> {
@@ -1803,6 +1804,24 @@ fn column_for_copy(t: &Table, c: &str) -> Result<usize> {
 /// Text format escaping.
 fn text_escape(s: &str, delim: char) -> String {
     let mut out = String::with_capacity(s.len());
+    text_escape_into(&mut out, s, delim);
+    out
+}
+
+/// An integer's text appended to `out`.
+fn push_int(out: &mut String, n: i64) {
+    let mut b = itoa::Buffer::new();
+    out.push_str(b.format(n));
+}
+
+/// CopyAttributeOutText: `s` appended to `out`, escaped; text with nothing to escape (no
+/// control character, backslash or delimiter) as it is.
+fn text_escape_into(out: &mut String, s: &str, delim: char) {
+    let plain = |b: &u8| *b >= 0x20 && *b != b'\\' && *b != 0x7f && (!delim.is_ascii() || *b != delim as u8);
+    if delim.is_ascii() && s.as_bytes().iter().all(plain) {
+        out.push_str(s);
+        return;
+    }
     for ch in s.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
@@ -1819,7 +1838,6 @@ fn text_escape(s: &str, delim: char) -> String {
             c => out.push(c),
         }
     }
-    out
 }
 
 /// CopyAttributeOutCSV; `single`: the row's only column (where `\.` alone on its line
@@ -1850,7 +1868,7 @@ fn csv_field(s: &str, f: &CopyFormat, force: bool, single: bool) -> String {
 
 /// Split text-format COPY data into records: the raw line and its fields; and whether the
 /// end-of-copy marker came. `first`: the lines before it.
-fn split_text(data: &str, f: &CopyFormat, table: &str, first: usize) -> Result<(Records, bool)> {
+fn split_text<'a>(data: &'a str, f: &CopyFormat, table: &str, first: usize) -> Result<(Records<'a>, bool)> {
     let mut out = Vec::new();
     // (An empty line is a record of one empty field; no data at all is none.)
     if data.is_empty() {
@@ -1863,14 +1881,33 @@ fn split_text(data: &str, f: &CopyFormat, table: &str, first: usize) -> Result<(
         if line == "\\." {
             return Ok((out, true));
         }
+        // A line without escapes: each field is its own text, borrowed.
+        let fields = if !line.as_bytes().contains(&b'\\') {
+            line.split(f.delimiter)
+                .map(|s| InField {
+                    value: Cow::Borrowed(s),
+                    raw: Some(Cow::Borrowed(s)),
+                })
+                .collect()
+        } else {
+            split_text_escaped(line, f, table, lineno)?
+        };
+        out.push((line.to_string(), fields));
+    }
+    Ok((out, false))
+}
+
+/// A text-format line's fields, its escapes decoded.
+fn split_text_escaped(line: &str, f: &CopyFormat, table: &str, lineno: usize) -> Result<Vec<InField<'static>>> {
+    {
         let mut fields = Vec::new();
         let mut raw = String::new();
         let mut cur = String::new();
         let mut chars = line.chars().peekable();
         let push = |cur: &mut String, raw: &mut String, fields: &mut Vec<InField>| {
             fields.push(InField {
-                value: std::mem::take(cur),
-                raw: Some(std::mem::take(raw)),
+                value: Cow::Owned(std::mem::take(cur)),
+                raw: Some(Cow::Owned(std::mem::take(raw))),
             });
         };
         while let Some(ch) = chars.next() {
@@ -1927,13 +1964,12 @@ fn split_text(data: &str, f: &CopyFormat, table: &str, first: usize) -> Result<(
             cur.push(ch);
         }
         push(&mut cur, &mut raw, &mut fields);
-        out.push((line.to_string(), fields));
+        Ok(fields)
     }
-    Ok((out, false))
 }
 
 /// Split CSV data (quoted fields may span lines).
-fn split_csv(data: &str, f: &CopyFormat) -> Result<Records> {
+fn split_csv(data: &str, f: &CopyFormat) -> Result<Records<'static>> {
     let mut out = Vec::new();
     let mut fields: Vec<InField> = Vec::new();
     let mut cur = String::new();
@@ -1943,8 +1979,8 @@ fn split_csv(data: &str, f: &CopyFormat) -> Result<Records> {
     let mut chars = data.chars().peekable();
     let finish_field = |cur: &mut String, quoted: &mut bool, fields: &mut Vec<InField>| {
         let value = std::mem::take(cur);
-        let raw = if *quoted { None } else { Some(value.clone()) };
-        fields.push(InField { value, raw });
+        let raw = if *quoted { None } else { Some(Cow::Owned(value.clone())) };
+        fields.push(InField { value: Cow::Owned(value), raw });
         *quoted = false;
     };
     while let Some(ch) = chars.next() {
@@ -2088,20 +2124,28 @@ impl<'a> CopyLines<'a> {
             return Ok(b.to_vec());
         }
         let single = self.cols.len() == 1;
-        let mut line = String::new();
+        let mut line = String::with_capacity(64);
         for (i, (v, c)) in r.iter().zip(self.cols).enumerate() {
             if i > 0 {
                 line.push(f.delimiter);
             }
-            match v {
-                Value::Null => line.push_str(&f.null),
-                v => {
+            // (Integers and plain text written straight into the line: no escapes in an
+            // integer's text, none needed in most text.)
+            match (v, &c.ty) {
+                (Value::Null, _) => line.push_str(&f.null),
+                (Value::Int4(n), DataType::Int4) if !f.csv => push_int(&mut line, *n as i64),
+                (Value::Int8(n), DataType::Int8) if !f.csv => push_int(&mut line, *n),
+                (Value::Int2(n), DataType::Int2) if !f.csv => push_int(&mut line, *n as i64),
+                (Value::Text(s), DataType::Text | DataType::Varchar(_)) if !f.csv => {
+                    text_escape_into(&mut line, s, f.delimiter)
+                }
+                (v, _) => {
                     let s = format_value(v, &c.ty, &self.fmt);
                     if f.csv {
                         let force = f.force_quote_all || f.force_quote.contains(&c.name);
                         line.push_str(&csv_field(&s, f, force, single));
                     } else {
-                        line.push_str(&text_escape(&s, f.delimiter));
+                        text_escape_into(&mut line, &s, f.delimiter);
                     }
                 }
             }

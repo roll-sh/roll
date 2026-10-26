@@ -4210,7 +4210,7 @@ impl Ddl<'_, '_> {
             written.push((data_key(t, &r, Some(id)), r));
         }
         crate::exec::pgstat::count_insert(self.ctx, t.oid, written.len() as i64);
-        crate::exec::pgstat::io_insert(self.ctx, t.oid, written.len() as i64, "bulkwrite");
+        crate::exec::pgstat::io_insert(self.ctx, t, written.len() as i64, "bulkwrite");
         // A bulk insert into the new heap; a materialized view's rows are frozen. Each row
         // records the heap TID it got (its ctid).
         let frozen = self.cat.views.get(&t.oid).is_some_and(|v| v.materialized);

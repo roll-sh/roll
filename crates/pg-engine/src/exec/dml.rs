@@ -812,8 +812,7 @@ fn find_conflict(
     let nondet = unkeyed_nondet(t, bix, ctx);
     let lock_key = unique_lock_key(t, bix, vals, !nondet.is_empty());
     let exprs = form_existing && index_has_exprs(bix);
-    let name = t.name.clone();
-    let what = || format!("unique key in \"{name}\"");
+    let what = || format!("unique key in \"{}\"", t.name);
     loop {
         ctx.check()?;
         let mine = match entering {
@@ -2801,6 +2800,10 @@ pub enum Inserted {
 /// A new row from values for the `target` columns, the others defaulted.
 pub fn new_row(rules: &TableRules, target: &[usize], src: Row, ctx: &ExecCtx) -> Result<Row> {
     let t = &rules.table;
+    // (Every column given, in order: the row as it is.)
+    if src.len() == t.columns.len() && target.len() == src.len() && target.iter().enumerate().all(|(i, c)| i == *c) {
+        return Ok(src);
+    }
     let mut row: Row = vec![Value::Null; t.columns.len()];
     let mut provided = vec![false; t.columns.len()];
     for (v, c) in src.into_iter().zip(target) {
@@ -3131,7 +3134,7 @@ fn store_inserted(
     let Prepared { row, dkey } = p;
     let tid = super::sizing::inserted_with(t, &rules.indexes, &dkey, &row, Some(&vals.vals), ctx)?;
     super::pgstat::count_insert(ctx, t.oid, 1);
-    super::pgstat::io_insert(ctx, t.oid, 1, "normal");
+    super::pgstat::io_insert(ctx, t, 1, "normal");
     let xid = ctx.txn.borrow_mut().cur_xid();
     ctx.txn
         .borrow_mut()
@@ -3149,6 +3152,86 @@ fn store_inserted(
 }
 
 // ── INSERT ──
+
+/// Whether an INSERT's rows past its first few thousand can wait for its end to go in the
+/// heap model (`sizing::CopyLoad::deferred_inserts`): nothing the statement runs before it
+/// ends can read the table's model or the rows' TIDs. That is COPY's multi-insert rule (no
+/// BEFORE ROW trigger, no volatile default) plus no RETURNING or ON CONFLICT, no RLS or
+/// volatile check, and a source that runs nothing volatile and doesn't read the table
+/// (whose scan could prune the pages the rows go to).
+fn model_deferrable(plan: &InsertPlan, ctx: &ExecCtx) -> bool {
+    let rules = &plan.rules;
+    let t = &rules.table;
+    if rules.view
+        || t.partkey.is_some()
+        || t.foreign.is_some()
+        || plan.route.is_some()
+        || plan.on_conflict.is_some()
+        || !plan.returning.is_empty()
+        || !rules.rls_checks.is_empty()
+        || trigger::any(&rules.triggers, true, true, tt::INSERT, ctx)
+        || rules.checks.iter().any(|(_, e)| e.is_volatile())
+    {
+        return false;
+    }
+    let volatile_default = rules.defaults.iter().flatten().any(|d| {
+        let mut v = false;
+        d.walk(&mut |e| match e {
+            crate::sql::expr::Expr::Call(f, ..) if f.volatility == 'v' && f.name != "nextval" => v = true,
+            crate::sql::expr::Expr::Subquery(_) => v = true,
+            _ => {}
+        });
+        v
+    });
+    !volatile_default
+        && !crate::sql::paths::plan_volatile_deep(&plan.source)
+        && reads_only_others(&plan.source, t)
+}
+
+/// Whether a plan (its sub-selects and CTEs too) is made only of plain reading nodes, none
+/// scanning table `t` or one it inherits from.
+fn reads_only_others(p: &crate::sql::plan::Plan, t: &crate::catalog::Table) -> bool {
+    use crate::sql::plan::Plan as P;
+    let ok = match p {
+        P::Scan(s) => s.table.oid != t.oid && !t.inherits.contains(&s.table.oid),
+        P::With { ctes, .. } => ctes.iter().all(|(_, c)| reads_only_others(c, t)),
+        P::One
+        | P::Empty { .. }
+        | P::Values { .. }
+        | P::FunctionScan { .. }
+        | P::Barrier { .. }
+        | P::Context { .. }
+        | P::Filter { .. }
+        | P::Project { .. }
+        | P::ProjectSet { .. }
+        | P::Agg { .. }
+        | P::Window { .. }
+        | P::Sort { .. }
+        | P::Limit { .. }
+        | P::Distinct { .. }
+        | P::SetOp { .. }
+        | P::Append { .. }
+        | P::Join { .. }
+        | P::CteScan { .. }
+        | P::Recursive { .. }
+        | P::WorkScan { .. } => true,
+        _ => false,
+    };
+    if !ok {
+        return false;
+    }
+    let mut es = Vec::new();
+    crate::sql::explain::node_exprs(p, &mut es);
+    let mut fine = true;
+    for e in es {
+        e.walk(&mut |x| {
+            if let crate::sql::expr::Expr::Subquery(s) = x {
+                fine &= reads_only_others(&s.plan, t);
+            }
+        });
+    }
+    fine && crate::sql::explain::plan_inputs(p).iter().all(|c| reads_only_others(c, t))
+}
 
 pub struct InsertNode {
     plan: Box<InsertPlan>,
@@ -3207,6 +3290,9 @@ impl InsertNode {
             Some(c) if !rules.view && rules.table.partkey.is_none() => {
                 Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, ctx))
             }
+            None if model_deferrable(&plan, ctx) => {
+                Some(super::sizing::CopyLoad::deferred_inserts(&rules.table, ctx))
+            }
             _ => None,
         };
         Ok(InsertNode {
@@ -3247,6 +3333,10 @@ impl InsertNode {
     /// Insert one source row. Returns the final row (for RETURNING) with its key and the
     /// existing row ON CONFLICT updated, or None if skipped.
     fn insert(&mut self, src: Row, ctx: &ExecCtx) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        // (Only ON CONFLICT DO UPDATE retries, needing the row again.)
+        if self.plan.on_conflict.is_none() {
+            return self.insert_once(src, None, ctx);
+        }
         // ON CONFLICT DO UPDATE found its row changed while it waited for it: start over at
         // the unique checks (its BEFORE ROW triggers don't fire again).
         let mut resume = None;
@@ -3863,7 +3953,7 @@ pub(super) fn reads_transition(trigs: &[crate::sql::plan::BoundTrigger], event: 
 pub struct UpdateNode {
     plan: Box<UpdatePlan>,
     source: BoxNode,
-    seen: HashSet<Vec<u8>>,
+    seen: super::fasthash::HashSet<Vec<u8>>,
     set_cols: Vec<usize>,
     /// Each member's columns assigned (as `set_cols`).
     member_cols: Vec<Vec<usize>>,
@@ -3932,7 +4022,7 @@ impl UpdateNode {
         Ok(UpdateNode {
             plan,
             source,
-            seen: HashSet::new(),
+            seen: Default::default(),
             set_cols,
             member_cols,
             after: Vec::new(),
@@ -4511,7 +4601,7 @@ impl Node for UpdateNode {
 pub struct DeleteNode {
     plan: Box<DeletePlan>,
     source: BoxNode,
-    seen: HashSet<Vec<u8>>,
+    seen: super::fasthash::HashSet<Vec<u8>>,
     after: Vec<AfterRow>,
     /// An inheritance tree's AFTER ROW events, in the order its rows were deleted.
     ordered: Vec<(Owner, AfterRow)>,
@@ -4548,7 +4638,7 @@ impl DeleteNode {
         Ok(DeleteNode {
             plan,
             source,
-            seen: HashSet::new(),
+            seen: Default::default(),
             after: Vec::new(),
             ordered: Vec::new(),
             captured: Vec::new(),

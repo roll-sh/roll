@@ -490,8 +490,11 @@ impl Ddl<'_, '_> {
                     }
                     if analyze {
                         let started = std::time::Instant::now();
-                        self.analyze_columns(&r, &cols, false)?;
-                        let live = self.count_rows(&r)? as i64;
+                        let read = self.analyze_columns(&r, &cols, false)?;
+                        let live = match read {
+                            Some(n) => n,
+                            None => self.count_rows(&r)?,
+                        } as i64;
                         crate::exec::pgstat::report_analyze(
                             self.ctx,
                             r.oid,
@@ -1230,7 +1233,8 @@ impl Ddl<'_, '_> {
             let pages = match ix.modelled.or(built) {
                 Some(n) => n as i32,
                 None => {
-                    ix.keys.sort();
+                    // (Unstable: entries equal as (key, size) are interchangeable.)
+                    ix.keys.sort_unstable();
                     let dedup = !ix.bix.index.unique
                         && ix.bix.index.include.is_empty()
                         && ix.types.iter().all(relsize::equal_image)

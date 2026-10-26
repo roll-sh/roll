@@ -103,7 +103,7 @@ pub struct Shared {
     pub wal_records: i64,
     pub wal_bytes: i64,
     /// pg_stat_io counts by (backend type, object, context, operation).
-    pub io: HashMap<IoKey, i64>,
+    pub io: super::fasthash::HashMap<IoKey, i64>,
     /// pg_stat_slru's blks_zeroed, by SLRU name (the notify queue's pages as NOTIFYs
     /// commit).
     pub slru_zeroed: HashMap<String, i64>,
@@ -117,7 +117,7 @@ pub struct Shared {
 }
 
 /// A pg_stat_io cell: (backend type, object, context, operation).
-pub type IoKey = (String, String, String, &'static str);
+pub type IoKey = (&'static str, &'static str, &'static str, &'static str);
 
 impl Shared {
     fn table(&mut self, oid: u32) -> &mut TabEntry {
@@ -337,7 +337,7 @@ struct Fetched {
 #[derive(Debug, Default)]
 pub struct Pending {
     /// The backend's own I/O counts (pg_stat_get_backend_io), never flushed away.
-    pub io: HashMap<IoKey, i64>,
+    pub io: super::fasthash::HashMap<IoKey, i64>,
     /// The backend's own WAL (pg_stat_get_backend_wal): records and bytes.
     pub wal: (i64, i64),
     pub tabs: HashMap<u32, TabCounts>,
@@ -691,20 +691,20 @@ pub fn count_function(ctx: &ExecCtx, func: u32, language: &str, ms: f64) {
 
 /// I/O of the client backend (shared buffers are all hits; what the counts compare is
 /// that they grow).
-pub fn count_io(ctx: &ExecCtx, object: &str, context: &str, op: &'static str, n: i64) {
+pub fn count_io(ctx: &ExecCtx, object: &'static str, context: &'static str, op: &'static str, n: i64) {
     if n <= 0 {
         return;
     }
-    let key: IoKey = ("client backend".into(), object.into(), context.into(), op);
-    *ctx.sess.db.pgstat.lock().io.entry(key.clone()).or_default() += n;
+    let key: IoKey = ("client backend", object, context, op);
+    *ctx.sess.db.pgstat.lock().io.entry(key).or_default() += n;
     *ctx.sess.pgstat.borrow_mut().io.entry(key).or_default() += n;
 }
 
 /// The I/O a heap insert of `n` rows into `rel` does: it extends the relation (a
 /// temporary one's local buffers, past temp_buffers, evicted and written out).
-pub fn io_insert(ctx: &ExecCtx, rel: u32, n: i64, context: &str) {
-    let temp = ctx.catalog().tables.get(&rel).is_some_and(|t| t.temporary);
-    if !temp {
+pub fn io_insert(ctx: &ExecCtx, t: &crate::catalog::Table, n: i64, context: &'static str) {
+    let rel = t.oid;
+    if !t.temporary {
         count_io(ctx, "relation", context, "extends", n);
         return;
     }
@@ -827,11 +827,11 @@ pub fn report_checkpoint(db: &crate::txn::Database) {
     s.checkpoints_performed += 1;
     for op in ["writes", "fsyncs"] {
         *s.io
-            .entry(("checkpointer".into(), "relation".into(), "normal".into(), op))
+            .entry(("checkpointer", "relation", "normal", op))
             .or_default() += 1;
     }
     *s.io
-        .entry(("checkpointer".into(), "wal".into(), "normal".into(), "writes"))
+        .entry(("checkpointer", "wal", "normal", "writes"))
         .or_default() += 1;
 }
 
@@ -1030,7 +1030,7 @@ fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog) {
         s.wal_bytes += bytes;
         for op in ["writes", "fsyncs"] {
             *s.io
-                .entry(("client backend".into(), "wal".into(), "normal".into(), op))
+                .entry(("client backend", "wal", "normal", op))
                 .or_default() += xacts;
         }
     }

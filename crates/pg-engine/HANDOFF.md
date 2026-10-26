@@ -559,6 +559,21 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     locks or writes, and a unique-key lock and key holder per key inserted into a unique
     index. A 5M-row INSERT … SELECT into a table with a primary key peaks at 2.6 GB (6.0 GB
     before). BENCH.md "Where it is still slower" item 2 has the details.
+- **Write path, round 3** (round 19, agent 74; BENCH.md's agent 74 section): COPY in 2x, COPY
+  out 2.5x, INSERT … SELECT 1.4x faster.
+  - A big statement's heap model waits for its end (`sizing::Defer`): COPY's batches and an
+    INSERT … SELECT's rows past its first 10,000 (`DEFER_AFTER`, `with_defer_after` in
+    tests) are modelled when it ends, so a load past the model's size never builds the model
+    it would drop. INSERT … SELECT defers only when nothing it runs can see the model or the
+    rows' TIDs first (`dml::model_deferrable`); anything new that reads the model mid-statement
+    must keep to that rule or turn deferral off for it. `tests/big_tables.rs`
+    `deferred_model_matches` checks the TIDs and sizes are the same either way.
+  - TIDs are stamped into the current command's buffered rows in place (`Txn::restamp`).
+  - Floats print by the `ryu` crate (Postgres's own algorithm), but for a decimal exactly on a
+    midpoint, which Postgres refuses (`shortest_digits`). That fixed the output of powers of
+    two whose shortest decimal the old search missed.
+  - COPY FROM borrows fields from the data (`InField`'s `Cow`s); pg_stat_io's keys are
+    static strings in a fast-hash map; an inserted row's tuple length is computed once.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

@@ -476,11 +476,16 @@ pub fn decode_value(b: &[u8], pos: &mut usize) -> Result<Value> {
 
 pub fn encode_row(row: &[Value]) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 + row.len() * 8);
-    put_varint(&mut out, row.len() as u64);
-    for v in row {
-        encode_value(&mut out, v);
-    }
+    encode_row_into(&mut out, row);
     out
+}
+
+/// `encode_row` appended to `out`.
+pub fn encode_row_into(out: &mut Vec<u8>, row: &[Value]) {
+    put_varint(out, row.len() as u64);
+    for v in row {
+        encode_value(out, v);
+    }
 }
 
 /// Decode a stored row. Rows written before columns were added are shorter; the caller fills

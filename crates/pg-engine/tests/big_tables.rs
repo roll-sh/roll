@@ -127,3 +127,59 @@ fn copy_past_the_model() {
         );
     });
 }
+
+/// What bulk statements leave in the heap model when their rows past the first few are
+/// modelled at the end (`sizing::with_defer_after`): the same TIDs and sizes as modelled row
+/// by row, for COPY and INSERT … SELECT, a failed COPY, and loads past the model's size
+/// (whose sizes are estimates either way).
+#[test]
+fn deferred_model_matches() {
+    let script = |s: &mut Session| -> Vec<String> {
+        run(s, "CREATE TABLE src (id int, a int, b text);\nCREATE TABLE dc (id int NOT NULL, a int, b text);\nCREATE INDEX dc_a ON dc (a);\nCREATE TABLE di (id int, a int, b text);\nCREATE UNIQUE INDEX di_id ON di (id);\nCREATE TABLE dbig (id int, a int)");
+        run(s, "INSERT INTO src SELECT g, g % 37, repeat('x', g % 50) FROM generate_series(1, 3000) g");
+        let data: String = (1..=3000).map(|i| format!("{i}\t{}\tv{}\n", i % 37, "y".repeat(i % 40))).collect();
+        s.query_copy("COPY dc FROM STDIN", data.as_bytes()).unwrap();
+        run(s, "INSERT INTO di SELECT * FROM src;\nDELETE FROM di WHERE id % 3 = 0;\nVACUUM di;\nINSERT INTO di SELECT id + 5000, a, b FROM src");
+        // A COPY failing past its first rows, in a savepoint.
+        run(s, "BEGIN;\nSAVEPOINT a");
+        let dup: String = (1..=2500).map(|i| format!("{}\t1\tz\n", if i == 2400 { 7 } else { 10_000 + i })).collect();
+        assert!(s.query_copy("COPY di FROM STDIN", dup.as_bytes()).is_err());
+        run(s, "ROLLBACK TO a;\nCOMMIT");
+        with_max_versions(2000, || {
+            let big: String = (1..=5000).map(|i| format!("{i}\t{}\n", i % 11)).collect();
+            s.query_copy("COPY dbig FROM STDIN", big.as_bytes()).unwrap();
+            run(s, "INSERT INTO dbig SELECT g, g FROM generate_series(1, 3000) g");
+        });
+        run(s, "ANALYZE");
+        let mut out = Vec::new();
+        for q in [
+            "SELECT ctid, id FROM dc ORDER BY id",
+            "SELECT ctid, id FROM di ORDER BY id",
+            "SELECT relname, relpages, reltuples FROM pg_class WHERE relname IN ('dc', 'dc_a', 'di', 'di_id', 'dbig') ORDER BY 1",
+            "SELECT pg_relation_size('dc'), pg_relation_size('dc_a'), pg_relation_size('di'), pg_relation_size('di_id'), pg_relation_size('dbig')",
+            "SELECT count(*), sum(id) FROM dbig",
+        ] {
+            out.extend(rows(s, q));
+        }
+        out
+    };
+    let mut results = Vec::new();
+    for n in [usize::MAX, 0, 50] {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        results.push(pg_engine::exec::sizing::with_defer_after(n, || script(&mut s)));
+    }
+    for (i, what) in [(1, "deferred from the first row"), (2, "deferred past 50 rows")] {
+        let (a, b) = (&results[0], &results[i]);
+        let first = a.iter().zip(b).position(|(x, y)| x != y);
+        assert!(
+            first.is_none() && a.len() == b.len(),
+            "{what}: at {first:?} of {}/{}: {:?} against {:?}",
+            a.len(),
+            b.len(),
+            first.map(|k| &a[k]),
+            first.map(|k| &b[k])
+        );
+    }
+}
