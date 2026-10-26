@@ -21,6 +21,8 @@
 #                    -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" <PG_IMAGE below> \
 #                    (default settings, as roll-engine-ref)
 #   CLIENTS_CPUS   docker --cpus (default 4)
+#   CLIENTS_NAME   the suite container's name prefix (default clients; agents sharing a
+#                  machine use their own, so two runs of one suite don't collide)
 #
 # Results: $CLIENTS_CACHE/results/<suite>-<target>.txt (one `PASS|FAIL|SKIP <test id>` per
 # line, sorted) and the suite's output in <suite>-<target>.log.
@@ -64,7 +66,7 @@ rm -rf "$OUT.d" "$OUT.txt"
 mkdir -p "$OUT.d"
 echo "running $SUITE against $TARGET (127.0.0.1:$PORT), log: $OUT.log" >&2
 set +e
-docker run --rm --network host --cpus="${CLIENTS_CPUS:-4}" --name "clients-$SUITE-$TARGET" \
+docker run --rm --network host --cpus="${CLIENTS_CPUS:-4}" --name "${CLIENTS_NAME:-clients}-$SUITE-$TARGET" \
   --user "$(id -u):$(id -g)" -e HOME=/cache/home \
   -v "$CACHE:/cache" -v "$HERE:/harness:ro" \
   -e PGHOST=127.0.0.1 -e PGPORT="$PORT" -e PGUSER=postgres -e PGPASSWORD=pw -e PGDATABASE=postgres \
