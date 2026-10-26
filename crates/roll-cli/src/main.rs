@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 mod nosql;
 mod queues;
+mod storage;
 mod redis;
 
 /// roll — serverless infrastructure.
@@ -52,6 +53,9 @@ enum Cmd {
     /// RabbitMQ-compatible message queues.
     #[command(alias = "q")]
     Queues(queues::Queues),
+    /// S3-compatible object storage.
+    #[command(subcommand, alias = "s3")]
+    Storage(storage::Storage),
 }
 
 #[derive(Subcommand)]
@@ -158,6 +162,8 @@ struct Api {
     base: String,
     http: reqwest::Client,
     key: Option<String>,
+    /// Sent with every request (`roll storage` sends the account it acts in).
+    headers: Vec<(String, String)>,
 }
 
 impl Api {
@@ -166,19 +172,30 @@ impl Api {
         if let Some(k) = &self.key {
             req = req.bearer_auth(k);
         }
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
         if let Some(b) = body {
             req = req.json(&b);
         }
         let res = req.send().await.with_context(|| format!("can't reach {} (is it running?)", self.base))?;
         let status = res.status();
         let text = res.text().await?;
-        let value: Value = if text.is_empty() { Value::Null } else { serde_json::from_str(&text)? };
         if !status.is_success() {
+            // Errors are `{"error": ...}`, but whatever answered may not be the roll API at all.
+            let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             // Batch endpoints report per-record errors.
             let per_record = value["offsets"].as_array().and_then(|o| o.iter().find_map(|r| r["error"].as_str()));
-            bail!("{}", value["error"].as_str().or(per_record).unwrap_or(&text));
+            match value["error"].as_str().or(per_record) {
+                Some(e) => bail!("{e}"),
+                None if text.trim().is_empty() => bail!("{status}"),
+                None => bail!("{status}: {}", text.trim()),
+            }
         }
-        Ok(value)
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).with_context(|| format!("{} didn't answer with JSON: {}", self.base, text.chars().take(200).collect::<String>()))
     }
     /// The cell's root (for `/_roll/…`), from a tasks URL that may name a tenant
     /// (`…/t/<tenant>/v1/tasks`).
@@ -189,7 +206,7 @@ impl Api {
         {
             base = root;
         }
-        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone() }
+        Api { base: base.to_string(), http: self.http.clone(), key: self.key.clone(), headers: self.headers.clone() }
     }
     async fn get(&self, p: &str) -> anyhow::Result<Value> {
         self.call(reqwest::Method::GET, p, None).await
@@ -281,7 +298,7 @@ async fn project(api: &Api, key: &str) -> anyhow::Result<Value> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key };
+    let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key, headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
         Cmd::Redis(cmd) => return redis::run(&api, cli.json, cmd).await,
@@ -293,10 +310,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Tasks(cmd) => {
             let base = cli.tasks_url.map(|u| u.trim_end_matches('/').to_string()).unwrap_or(format!("{}/v1/tasks", api.base));
-            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()) };
+            let tasks_api = Api { base, http: api.http.clone(), key: cli.token.filter(|t| !t.is_empty()), headers: Vec::new() };
             return tasks::run(&tasks_api, *cmd, cli.json).await;
         }
         Cmd::Queues(q) => return queues::run(&api, cli.json, q).await,
+        Cmd::Storage(cmd) => return storage::run(&api, cli.json, cmd).await,
         Cmd::Nosql(cmd) => {
             let r = nosql::run(&api, cli.json, *cmd).await;
             if let Err(e) = &r

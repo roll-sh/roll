@@ -83,7 +83,7 @@ async fn mock() -> (Api, Log) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    (Api { base: format!("http://{addr}"), http: reqwest::Client::new(), key: Some("k:s".into()) }, log)
+    (Api { base: format!("http://{addr}"), http: reqwest::Client::new(), key: Some("k:s".into()), headers: Vec::new() }, log)
 }
 
 /// Runs a command and returns the requests after the database lookup.

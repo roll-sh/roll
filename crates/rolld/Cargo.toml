@@ -1,6 +1,6 @@
 [package]
 name = "rolld"
-description = "roll daemon: Postgres proxy, serverless Redis, Kafka-compatible streams, queues broker, ScyllaDB/Cassandra-compatible nosql, control plane API and reconcilers"
+description = "roll daemon: Postgres proxy, serverless Redis, S3-compatible storage, Kafka-compatible streams, queues broker, ScyllaDB/Cassandra-compatible nosql, control plane API and reconcilers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,9 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+bytes.workspace = true
 clap.workspace = true
+futures.workspace = true
 libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true
@@ -36,6 +38,10 @@ pg-storage.workspace = true
 redis-control.workspace = true
 redis-server.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
+s3-api.workspace = true
+s3-control.workspace = true
+s3-server.workspace = true
+s3-store.workspace = true
 serde_json.workspace = true
 stream-broker.workspace = true
 tasks.workspace = true

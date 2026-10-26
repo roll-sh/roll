@@ -10,7 +10,13 @@
     "test:nosql": "scripts/test-nosql.sh",
     "test:tasks": "scripts/test-tasks.sh",
     "test:stream": "scripts/test-stream.sh",
-    "test:queues": "scripts/test-queues.sh"
+    "test:queues": "scripts/test-queues.sh",
+    "test:storage": "scripts/test-storage.sh",
+    "test:storage-aws": "scripts/test-storage-aws.sh",
+    "test:storage-cdn": "scripts/test-storage-cdn.sh",
+    "test:storage-js": "pnpm --filter @roll/storage test",
+    "test:s3-conformance": "scripts/test-s3-conformance.sh",
+    "test:s3-conformance-localstack": "scripts/test-s3-conformance.sh --backend localstack"
   },
   "packageManager": "pnpm@12.10.1"
 }
