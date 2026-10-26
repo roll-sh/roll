@@ -314,47 +314,51 @@ impl Conn {
 thread_local! {
     /// Messages buffered for the client while a statement runs (`Conn::unflushed`).
     static UNFLUSHED: std::cell::RefCell<BytesMut> = std::cell::RefCell::new(BytesMut::new());
-    /// The session's client_encoding (sessions run on threads of their own): text goes out
-    /// in it and query text comes in in it.
-    static CLIENT_ENC: std::cell::Cell<i32> = const { std::cell::Cell::new(crate::types::mbconv::UTF8) };
+    /// The session's client_encoding and its database's encoding (sessions run on threads
+    /// of their own): text goes out in the first and query text comes in in it.
+    static CLIENT_ENC: std::cell::Cell<(i32, i32)> =
+        const { std::cell::Cell::new((crate::types::mbconv::UTF8, crate::types::mbconv::UTF8)) };
 }
 
 /// Take up the session's client_encoding for the messages that follow.
 fn sync_client_encoding(s: &Session) {
-    let e = s.state.settings.borrow().get_raw("client_encoding");
-    let id = e
-        .as_deref()
-        .and_then(crate::types::encnames::encoding_id)
-        .unwrap_or(crate::types::mbconv::UTF8);
-    CLIENT_ENC.with(|c| c.set(id));
+    let st = s.state.settings.borrow();
+    let id = |name| {
+        st.get_str(name)
+            .and_then(crate::types::encnames::encoding_id)
+            .unwrap_or(crate::types::mbconv::UTF8)
+    };
+    let e = (id("client_encoding"), id("server_encoding"));
+    CLIENT_ENC.with(|c| c.set(e));
 }
 
-fn client_enc() -> i32 {
+fn client_enc() -> (i32, i32) {
     CLIENT_ENC.with(|c| c.get())
+}
+
+fn plain_utf8() -> bool {
+    client_enc() == (crate::types::mbconv::UTF8, crate::types::mbconv::UTF8)
 }
 
 /// Server text in the client's encoding (pg_server_to_client).
 fn to_client(s: &str) -> Result<std::borrow::Cow<'_, [u8]>> {
-    let enc = client_enc();
-    if enc == crate::types::mbconv::UTF8 {
-        return Ok(std::borrow::Cow::Borrowed(s.as_bytes()));
-    }
-    crate::types::mbconv::convert(s.as_bytes(), crate::types::mbconv::UTF8, enc)
+    let (client, server) = client_enc();
+    crate::types::mbconv::server::to_client(s, client, server)
 }
 
 /// Client bytes as server text (pg_client_to_server).
 fn from_client(b: &[u8]) -> Result<Vec<u8>> {
-    let enc = client_enc();
-    if enc == crate::types::mbconv::UTF8 {
+    if plain_utf8() {
         return Ok(b.to_vec());
     }
-    Ok(crate::types::mbconv::to_utf8(b, enc)?.into_bytes())
+    let (client, server) = client_enc();
+    Ok(crate::types::mbconv::server::from_client(b, client, server)?.into_bytes())
 }
 
 /// A message body whose first `n` NUL-terminated strings are converted from the client's
 /// encoding (the rest, binary, kept).
 fn convert_cstrings(body: &[u8], n: usize) -> Result<Vec<u8>> {
-    if client_enc() == crate::types::mbconv::UTF8 {
+    if plain_utf8() {
         return Ok(body.to_vec());
     }
     let mut out = Vec::with_capacity(body.len());

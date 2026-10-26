@@ -93,17 +93,13 @@ pub fn supports_binary(ty: &DataType) -> bool {
 
 /// Text a send function writes (pq_sendtext): in the client's encoding.
 pub(crate) fn put_text(out: &mut BytesMut, s: &str, ctx: &FormatCtx) -> Result<()> {
-    out.put_slice(&super::mbconv::convert(
-        s.as_bytes(),
-        super::mbconv::UTF8,
-        ctx.client_encoding,
-    )?);
+    out.put_slice(&super::mbconv::server::to_client(s, ctx.client_encoding, ctx.server_encoding)?);
     Ok(())
 }
 
 /// Text a receive function reads (pq_getmsgtext): from the client's encoding, checked.
 pub(crate) fn get_text(b: &[u8], ctx: &FormatCtx) -> Result<String> {
-    super::mbconv::to_utf8(b, ctx.client_encoding)
+    super::mbconv::server::from_client(b, ctx.client_encoding, ctx.server_encoding)
 }
 
 pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> Result<()> {

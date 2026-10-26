@@ -582,7 +582,8 @@ fn memory_contexts(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
 }
 
 fn getdatabaseencoding(_: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::Text(Arc::from("UTF8")))
+    let enc = crate::types::collation::database_encoding();
+    Ok(Value::Text(Arc::from(crate::types::mbconv::server::name(enc))))
 }
 
 /// pg_client_encoding(): client_encoding's (canonical) name.

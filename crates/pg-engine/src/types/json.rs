@@ -688,7 +688,7 @@ impl<'a> Parser<'a> {
                                         ));
                                     }
                                     let c = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                                    out.push(char::from_u32(c).unwrap_or('\u{fffd}'));
+                                    self.push_unicode(&mut out, c)?;
                                 } else {
                                     // Reported at the end of the character after it.
                                     let next = self.s[self.pos..]
@@ -718,7 +718,7 @@ impl<'a> Parser<'a> {
                                 .detail("\\u0000 cannot be converted to text.")
                                 .context(json_context(self.s, self.pos, false)));
                             } else {
-                                out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+                                self.push_unicode(&mut out, cp)?;
                             }
                         }
                         _ => {
@@ -749,6 +749,28 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// A `\u` escape's character, in the database's encoding (pg_unicode_to_server_noerror).
+    fn push_unicode(&self, out: &mut String, cp: u32) -> Result<()> {
+        let c = char::from_u32(cp).unwrap_or('\u{fffd}');
+        let enc = super::collation::database_encoding();
+        if cp < 0x80 || enc == super::mbconv::UTF8 {
+            out.push(c);
+            return Ok(());
+        }
+        match super::mbconv::server::from_unicode_opt(enc, c.encode_utf8(&mut [0; 4])) {
+            Some(s) => out.push_str(&s),
+            None => {
+                return Err(Error::new(code::UNTRANSLATABLE_CHARACTER, "unsupported Unicode escape sequence")
+                    .detail(format!(
+                        "Unicode escape value could not be translated to the server's encoding {}.",
+                        super::mbconv::server::name(enc)
+                    ))
+                    .context(json_context(self.s, self.pos, false)));
+            }
+        }
+        Ok(())
     }
 
     fn hex4(&mut self) -> Result<u32> {

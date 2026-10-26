@@ -50,7 +50,7 @@ there, so fewer of its tests ran than in round 17).
 | node-postgres (pg integration) | 8.16.0 | 146 / 3 | 146 / 3 | 145 / 4 * | 1: gh-issues/1105 (5000 inserts in 5 s, a debug build) |
 | postgres.js | 3.4.7 | 194 / 62 | 194 / 62 | 194 / 62 | 0 |
 | pgjdbc (jdbc2/3/4/42, core) | 42.7.7 | 8221 / 0 | 8214 / 7 | 8218 / 3 * | 3: DML on pg_description / pg_class |
-| Npgsql (Npgsql.Tests) | 9.0.3 | 1919 / 2 | 1908 / 16 | 1903 / 11 | 9: hstore (4), ltree (4), SQL_ASCII database |
+| Npgsql (Npgsql.Tests) | 9.0.3 | 1914 / 2 | 1908 / 16 | 1909 / 11 (round 19, agent 66) | 9: hstore (4), ltree (4), Cancel_while_reading_from_long_running_query (rows of a running statement) |
 | SQLAlchemy (dialect/postgresql, sql) | 2.0.41 | 15801 / 2 | 15755 / 48 | 15801 / 2 * | 0 |
 | Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16 | 2: a file_fdw program table (see below), an ungrouped column (round 19) |
 | tokio-postgres (tests, postgres, derive) | 0.7.18 | 221 / 0 | | 212 / 9 * | 9: ltree / lquery / ltxtquery / hstore binary (7), startup NOTICE, pg_database order |
@@ -84,7 +84,6 @@ Engine, open:
   DatabaseMetaDataTest's setUp moves a function's comment onto a table, classoid kept: the
   engine's comments have no classoid of their own), `UPDATE pg_class SET relname` (pgjdbc
   testOidUpdatable). pg_class's statistics columns, reloptions and pg_depend are writable.
-- CREATE DATABASE ... ENCODING 'SQL_ASCII' (Npgsql Non_UTF8_Encoding): text is UTF-8 inside.
 - sqlx: a parameter declared as a domain-array oid is described by its base array type
   (domain_type_array_1..3), empty binary arrays aren't normalized (1-D with no elements:
   i32_array_empty, i32_vec; probably Hibernate's ArrayConstructorTest too).
@@ -127,6 +126,13 @@ Six suites ran again against the round 19 engine (debug build) and a private ref
 - pgx: the 4 hstore ones.
 - node-postgres: 1105, timing.
 - pgjdbc: the 3 above, plus TypeCacheDLLStressTest (see "Engine, open").
+
+Fixed in round 19, agent 66: databases in other encodings than UTF8 (Npgsql
+Non_UTF8_Encoding: a SQL_ASCII database written in WIN1252 and read back, then a UTF8 client's
+"invalid byte sequence"): CREATE DATABASE ... ENCODING, server_encoding, client_encoding
+conversions as PostgreSQL's (HANDOFF "Server encodings"); `tests/locale/encodings.sql`.
+Npgsql's other differences: hstore / ltree binary (agent 53) and
+Cancel_while_reading_from_long_running_query (a SELECT's rows sent as they are made, agent 65).
 
 Fixed in round 18, agent 51 (each with a golden, `a51_exists_param_join` / `a51_client_catalog`,
 or a wire test, `notices_copy_lines_and_portal_rows_as_they_come` /

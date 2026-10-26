@@ -50,6 +50,28 @@ pub fn parse_live(sql: &str) -> Result<(std::borrow::Cow<'_, str>, Vec<RawStmt>)
     use super::scs;
     use std::borrow::Cow;
     let o = scs::opts();
+    // (In a database whose encoding isn't UTF8, escapes in literals make its characters.)
+    if let Some((text, ws)) = super::srvlit::rewrite(sql, o.encoding, o.standard_strings)? {
+        let n = scs::pending();
+        let r = parse_scanned(&text, o);
+        if !ws.is_empty() {
+            // (The rewritten literals' warnings, in token order with the others.)
+            let mut all = scs::take_warnings();
+            let mut mine = all.split_off(n.min(all.len()));
+            mine.extend(ws);
+            mine.sort_by_key(|w| w.position.unwrap_or(0));
+            all.extend(mine);
+            scs::push_warnings(all);
+        }
+        let (t, stmts) = r?;
+        return Ok((Cow::Owned(t.into_owned()), stmts));
+    }
+    parse_scanned(sql, o)
+}
+
+fn parse_scanned(sql: &str, o: super::scs::LexOpts) -> Result<(std::borrow::Cow<'_, str>, Vec<RawStmt>)> {
+    use super::scs;
+    use std::borrow::Cow;
     // Where a syntax error stopped the scanner.
     let stop_at = |r: &Result<Vec<RawStmt>>| match r {
         Err(e) => Some(

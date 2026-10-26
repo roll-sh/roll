@@ -240,7 +240,7 @@ impl Collation {
     pub fn strcoll(&self, a: &str, b: &str) -> Ordering {
         match &self.icu {
             None => a.as_bytes().cmp(b.as_bytes()),
-            Some(i) => i.compare(a, b),
+            Some(i) => icu_compare(i, a, b),
         }
     }
 
@@ -251,7 +251,7 @@ impl Collation {
         }
         match &self.icu {
             None => a.as_bytes().cmp(b.as_bytes()),
-            Some(i) => match i.compare(a, b) {
+            Some(i) => match icu_compare(i, a, b) {
                 Ordering::Equal if self.deterministic => a.as_bytes().cmp(b.as_bytes()),
                 o => o,
             },
@@ -271,7 +271,10 @@ impl Collation {
     /// nondeterministic collation: its sort key, with the terminating NUL hashtext hashes).
     pub fn key(&self, s: &str) -> Vec<u8> {
         match (&self.icu, self.deterministic) {
-            (Some(i), false) => i.sort_key(s),
+            (Some(i), false) => match unicode(s) {
+                Some(u) => i.sort_key(&u),
+                None => i.sort_key(s),
+            },
             _ => s.as_bytes().to_vec(),
         }
     }
@@ -280,13 +283,28 @@ impl Collation {
     /// that sorts by them).
     pub fn sort_key(&self, s: &str) -> Vec<u8> {
         match &self.icu {
-            Some(i) => i.sort_key(s),
+            Some(i) => match unicode(s) {
+                Some(u) => i.sort_key(&u),
+                None => i.sort_key(s),
+            },
             None => s.as_bytes().to_vec(),
         }
     }
 
-    pub fn upper(&self, s: &str) -> String {
+    /// The ctype case mapping and regex classes go by: a libc locale in a database whose
+    /// encoding isn't UTF8 maps bytes with musl's `toupper`, which knows ASCII only.
+    fn eff_ctype(&self) -> &Ctype {
         match &self.ctype {
+            Ctype::Libc if database_encoding() != dblocale::UTF8 => &Ctype::Ascii,
+            c => c,
+        }
+    }
+
+    pub fn upper(&self, s: &str) -> String {
+        if let Some(r) = self.icu_mapped(s, |i, u| i.upper(u)) {
+            return r;
+        }
+        match self.eff_ctype() {
             Ctype::Ascii => s.to_ascii_uppercase(),
             Ctype::Builtin { full } => case::convert(s, case::CaseKind::Upper, *full),
             Ctype::Libc => libc::upper(s),
@@ -295,7 +313,10 @@ impl Collation {
     }
 
     pub fn lower(&self, s: &str) -> String {
-        match &self.ctype {
+        if let Some(r) = self.icu_mapped(s, |i, u| i.lower(u)) {
+            return r;
+        }
+        match self.eff_ctype() {
             Ctype::Ascii => s.to_ascii_lowercase(),
             Ctype::Builtin { full } => case::convert(s, case::CaseKind::Lower, *full),
             Ctype::Libc => libc::lower(s),
@@ -304,7 +325,7 @@ impl Collation {
     }
 
     pub fn casefold(&self, s: &str) -> String {
-        match &self.ctype {
+        match self.eff_ctype() {
             Ctype::Ascii => s.to_ascii_lowercase(),
             Ctype::Builtin { full } => case::convert(s, case::CaseKind::Fold, *full),
             Ctype::Libc => libc::lower(s),
@@ -313,7 +334,10 @@ impl Collation {
     }
 
     pub fn initcap(&self, s: &str) -> String {
-        match &self.ctype {
+        if let Some(r) = self.icu_mapped(s, |i, u| i.title(u)) {
+            return r;
+        }
+        match self.eff_ctype() {
             Ctype::Ascii => {
                 let mut out = String::with_capacity(s.len());
                 let mut prev_alnum = false;
@@ -339,6 +363,17 @@ impl Collation {
         }
     }
 
+    /// An ICU case mapping in a database whose encoding isn't UTF8: ICU maps the text as
+    /// Unicode, and the result comes back in the database's encoding.
+    fn icu_mapped(&self, s: &str, f: impl Fn(&icu::Icu, &str) -> String) -> Option<String> {
+        let Ctype::Icu(i) = &self.ctype else {
+            return None;
+        };
+        let u = unicode(s)?;
+        let enc = database_encoding();
+        Some(crate::types::mbconv::server::from_unicode(enc, &f(i, &u)).unwrap_or_else(|_| s.to_string()))
+    }
+
     /// The regex engine's strategy (`pg_set_regex_collation`).
     pub fn regex_strategy(&self) -> Result<Strategy> {
         if !self.deterministic {
@@ -347,7 +382,7 @@ impl Collation {
                 "nondeterministic collations are not supported for regular expressions",
             ));
         }
-        Ok(match &self.ctype {
+        Ok(match self.eff_ctype() {
             Ctype::Ascii => Strategy::C,
             Ctype::Builtin { full } => Strategy::Builtin { posix: !*full },
             Ctype::Libc => Strategy::Libc,
@@ -371,6 +406,24 @@ pub mod probes {
         ispunct as icu_ispunct, isspace as icu_isspace, isupper as icu_isupper,
         tolower as icu_tolower, toupper as icu_toupper,
     };
+}
+
+/// Text of a database whose encoding isn't UTF8 as Unicode (what Postgres gives ICU);
+/// `None` in a UTF8 database or for ASCII.
+fn unicode(s: &str) -> Option<String> {
+    let enc = database_encoding();
+    if enc == dblocale::UTF8 || s.is_ascii() {
+        return None;
+    }
+    crate::types::mbconv::server::to_unicode(enc, s).ok().map(|u| u.into_owned())
+}
+
+/// ICU's comparison of `a` and `b` (as Unicode).
+fn icu_compare(i: &icu::Icu, a: &str, b: &str) -> Ordering {
+    match (unicode(a), unicode(b)) {
+        (None, None) => i.compare(a, b),
+        (ua, ub) => i.compare(ua.as_deref().unwrap_or(a), ub.as_deref().unwrap_or(b)),
+    }
 }
 
 /// Opened collations, by definition.
@@ -453,6 +506,12 @@ pub fn default_unless_bytewise() -> Option<Arc<Collation>> {
             .filter(|d| !d.collation.bytewise())
             .map(|d| d.collation.clone())
     })
+}
+
+/// `GetDatabaseEncoding()` of the database whose statement runs on this thread (UTF8
+/// when none has run).
+pub fn database_encoding() -> i32 {
+    DEFAULT.with(|c| c.borrow().as_ref().map_or(dblocale::UTF8, |d| d.locale.encoding))
 }
 
 /// `database_ctype_is_c` of the database whose statement runs on this thread: text search
@@ -715,8 +774,9 @@ pub fn no_such_collation(names: &[String]) -> Error {
     Error::new(
         code::UNDEFINED_OBJECT,
         format!(
-            "collation \"{}\" for encoding \"UTF8\" does not exist",
-            names.join(".")
+            "collation \"{}\" for encoding \"{}\" does not exist",
+            names.join("."),
+            crate::types::mbconv::server::name(database_encoding())
         ),
     )
 }

@@ -1158,10 +1158,11 @@ pub(crate) fn parse_copy_data(
     st.bytes += take;
     // Data in another encoding is converted line by line, errors naming the line.
     let converted;
-    let data = if enc != crate::types::mbconv::UTF8 {
+    let server = fmt.server_encoding;
+    let data = if (enc, server) != (crate::types::mbconv::UTF8, crate::types::mbconv::UTF8) {
         let mut out = Vec::with_capacity(data.len());
         for (i, line) in data.split_inclusive(|b| *b == b'\n').enumerate() {
-            let u = crate::types::mbconv::to_utf8(line, enc).map_err(|e| {
+            let u = crate::types::mbconv::server::from_client(line, enc, server).map_err(|e| {
                 e.context(format!("COPY {}, line {}", c.table.name, st.phys_lines + i + 1))
             })?;
             out.extend_from_slice(u.as_bytes());
@@ -1911,10 +1912,10 @@ impl<'a> CopyLines<'a> {
     /// Text in the target encoding.
     fn encoded(&self, line: String) -> Result<Vec<u8>> {
         use crate::types::mbconv;
-        if self.enc == mbconv::UTF8 {
+        if (self.enc, self.fmt.server_encoding) == (mbconv::UTF8, mbconv::UTF8) {
             return Ok(line.into_bytes());
         }
-        Ok(mbconv::convert(line.as_bytes(), mbconv::UTF8, self.enc)?.into_owned())
+        Ok(mbconv::server::to_client(&line, self.enc, self.fmt.server_encoding)?.into_owned())
     }
 
     /// The HEADER line (text and CSV).

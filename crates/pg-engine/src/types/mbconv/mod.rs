@@ -5,6 +5,7 @@
 //! direct conversions between non-UTF-8 encodings (see `direct`).
 
 mod direct;
+pub mod server;
 
 use crate::error::{Error, Result, code};
 use crate::types::encnames::encoding_name;

@@ -966,15 +966,13 @@ fn normalize(def: &Def, raw: &str) -> Result<String> {
             }
             "DateStyle" => normalize_datestyle(raw, def.default)?,
             // check_client_encoding: any encoding (by any of its names) shown by its canonical
-            // name; the session converts to and from it (server.rs).
+            // name; the session converts to and from it (server.rs). Whether it converts to
+            // the database's: `Settings::client_encoding`.
             "client_encoding" => {
-                use crate::types::{encnames, mbconv};
+                use crate::types::encnames;
                 let Some(id) = encnames::encoding_id(raw.trim()) else {
                     return Err(invalid_value(name, raw));
                 };
-                if !mbconv::has_conversion(id, mbconv::UTF8) {
-                    return Err(invalid_value(name, raw));
-                }
                 encnames::encoding_name(id as i64)
                     .ok_or_else(|| invalid_value(name, raw))?
                     .to_string()
@@ -1205,12 +1203,18 @@ impl Settings {
                 generation,
                 values_key: Arc::new(ValuesKey(values)),
                 fmt,
-                lex: crate::sql::scs::LexOpts::from_settings(
-                    self.bool("standard_conforming_strings"),
-                    self.bool("escape_string_warning"),
-                    self.get_str("backslash_quote").unwrap_or_default(),
-                    self.get_str("client_encoding").unwrap_or_default(),
-                ),
+                lex: crate::sql::scs::LexOpts {
+                    encoding: self
+                        .get_str("server_encoding")
+                        .and_then(crate::types::encnames::encoding_id)
+                        .unwrap_or(crate::types::mbconv::UTF8),
+                    ..crate::sql::scs::LexOpts::from_settings(
+                        self.bool("standard_conforming_strings"),
+                        self.bool("escape_string_warning"),
+                        self.get_str("backslash_quote").unwrap_or_default(),
+                        self.get_str("client_encoding").unwrap_or_default(),
+                    )
+                },
                 statement_timeout: self.int("statement_timeout"),
                 max_stack_depth: self.int("max_stack_depth"),
                 search_path: search_path_items(self.get_str("search_path").unwrap_or_default()),
@@ -1279,6 +1283,25 @@ impl Settings {
                 self.values.remove(&canon);
             }
         }
+    }
+
+    /// check_client_encoding: an encoding with conversions to and from the database's
+    /// (PrepareClientEncoding); at startup, InitializeClientEncoding's FATAL.
+    fn client_encoding(&self, raw: &str, startup: bool) -> Result<String> {
+        use crate::types::{encnames, mbconv};
+        let v = normalize(self.def("client_encoding").expect("client_encoding"), raw)?;
+        let id = encnames::encoding_id(&v).unwrap_or(mbconv::UTF8);
+        let server = self.get_str("server_encoding").and_then(encnames::encoding_id).unwrap_or(mbconv::UTF8);
+        if mbconv::has_conversion(id, server) && mbconv::has_conversion(server, id) {
+            return Ok(v);
+        }
+        let (c, s) = (mbconv::server::name(id), mbconv::server::name(server));
+        if startup {
+            return Err(err!(FEATURE_NOT_SUPPORTED, "conversion between {c} and {s} is not supported").fatal());
+        }
+        let mut e = invalid_value("client_encoding", raw).detail(format!("Conversion between {c} and {s} is not supported."));
+        e.code = crate::error::code::FEATURE_NOT_SUPPORTED;
+        Err(e)
     }
 
     /// Set a value the server owns (session_authorization, is_superuser), bypassing checks.
@@ -1484,6 +1507,9 @@ impl Settings {
                         v,
                         self.get_str("DateStyle").unwrap_or(d.default),
                     )?),
+                    Some(v) if d.name == "client_encoding" => {
+                        Some(self.client_encoding(v, startup)?)
+                    }
                     Some(v) => Some(normalize(d, v)?),
                     None => None,
                 }
@@ -1947,6 +1973,10 @@ impl Settings {
             },
             client_encoding: self
                 .get_str("client_encoding")
+                .and_then(crate::types::encnames::encoding_id)
+                .unwrap_or(crate::types::mbconv::UTF8),
+            server_encoding: self
+                .get_str("server_encoding")
                 .and_then(crate::types::encnames::encoding_id)
                 .unwrap_or(crate::types::mbconv::UTF8),
             ..FormatCtx::default()

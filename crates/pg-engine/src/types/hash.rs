@@ -162,11 +162,19 @@ pub fn value_hash(v: &Value, ty: &DataType, seed: u64) -> Option<u64> {
         V::Float4(x) => hash_float8(*x as f64, seed),
         V::Float8(x) => hash_float8(*x, seed),
         V::Char(c) => hash_uint32_extended(*c as i8 as i32 as u32, seed),
-        V::Text(s) => match ty {
+        V::Text(s) => {
             // Trailing spaces don't count in char(n).
-            DataType::Bpchar(_) => hash_bytes_extended(s.trim_end_matches(' ').as_bytes(), seed),
-            _ => hash_bytes_extended(s.as_bytes(), seed),
-        },
+            let s = match ty {
+                DataType::Bpchar(_) => s.trim_end_matches(' '),
+                _ => s,
+            };
+            // (The text's bytes in the database's encoding.)
+            let enc = if s.is_ascii() { super::mbconv::UTF8 } else { super::collation::database_encoding() };
+            match super::mbconv::server::encode(enc, s) {
+                Ok(b) => hash_bytes_extended(&b, seed),
+                Err(_) => hash_bytes_extended(s.as_bytes(), seed),
+            }
+        }
         V::Bytea(b) => hash_bytes_extended(b, seed),
         V::Uuid(u) => hash_bytes_extended(&u.to_be_bytes(), seed),
         V::Numeric(n) => hash_numeric(n, seed),

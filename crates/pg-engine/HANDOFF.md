@@ -351,6 +351,26 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   was 20x a serial restore). At scale (3,000 tables, 20 M rows: STATUS.md) pg_dump takes
   1.5-2x PostgreSQL's time, restores 3-11x.
   (Databases' locales are kept since round 19: below.)
+- **Server encodings** (round 19, agent 66): CREATE DATABASE / initdb take SQL_ASCII and
+  every other server encoding (LATIN1-10, WIN125x, KOI8, ISO_8859_5-8, EUC_*, MULE_INTERNAL).
+  Text stays a Rust `String` inside; in a non-UTF8 database each server character is one
+  `char` whose code is an order-preserving number of its bytes (`types/mbconv/server.rs`):
+  byte `b` is U+00`b` in SQL_ASCII and the single-byte encodings (so length, ascii(), chr(),
+  C order, regex and LIKE work byte-as-character as PostgreSQL's do), a multibyte
+  character is 0x80 plus its rank in byte order (MULE_INTERNAL's LCPRV2 characters only
+  with the private charsets 0xf0-0xff). Bytes become text only at the boundaries:
+  pg_any_to_server / pg_server_to_any for the wire (queries, parameters, rows, binary text,
+  messages, COPY and its ENCODING) through mbconv's conversions, and functions that see the
+  server encoding's bytes (octet_length, convert_to / convert_from, text to bytea, md5,
+  hashtext for hash partitions, "char", ::name truncation, to_ascii, sizes). server_encoding
+  and client_encoding's default are the database's; SET client_encoding checks there is a
+  conversion both ways (FATAL at startup). Escapes in literals (E'\xe9', \u, U&'') are
+  rewritten into the database's characters before libpg_query reads them
+  (`sql/srvlit.rs`); json's \u, unistr() convert as pg_unicode_to_server; normalize,
+  casefold and unicode_assigned refuse non-UTF8 databases; a libc locale maps ASCII only
+  there (musl's toupper per byte) and ICU sees Unicode. Test: `tests/locale/encodings.sql`.
+  Left: identifiers' NAMEDATALEN truncation is in UTF-8 bytes (libpg_query's), XML and
+  IS JSON over bytea assume UTF-8 text.
 - **Database locales and collations** (round 19, agent 60): every database has its own
   locale, as pg_database has it (`types/collation/dblocale.rs` `DbLocale`: encoding,
   provider, datcollate, datctype, datlocale, daticurules, datcollversion), kept in the
@@ -369,13 +389,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   "default" behaves as the database's locale everywhere (`collation::by_name` /
   `default_for`; `collation::default()` for code without a catalog: text search's
   str_tolower and character classes by the database's LC_CTYPE, jsonpath's like_regex,
-  citext, jsonb's string order). Encodings other than UTF8 are refused
-  (FEATURE_NOT_SUPPORTED) after createdb's own checks. Tests: `tests/locale.rs` (a
+  citext, jsonb's string order). Every server encoding PostgreSQL allows is supported
+  (round 19, agent 66; below). Tests: `tests/locale.rs` (a
   multi-database harness: `tests/locale/*.sql` with `\c`, recorded from PostgreSQL),
   golden `a60_locale_libc_c` (goldens can choose their database's locale with a first line
   `-- createdb: <options>`; the default stays the builtin C.UTF-8 they were recorded in).
-  Left: non-UTF8 databases. (Indexes in byte order, citext's order and text range types
-  under an ICU default: round 19, agent 67, below.)
+  (Indexes in byte order, citext's order and text range types under an ICU default: round
+  19, agent 67, below; other encodings than UTF8: agent 66, above.)
 - **Collation-aware comparisons and indexes** (round 19, agent 67). Btree and hash index
   entries on a key under a collation that doesn't sort by bytes (ICU) or is nondeterministic
   are keyed by the collation's sort keys (`storage::keys::KeyColl`: the ICU sort key without

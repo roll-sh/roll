@@ -153,17 +153,8 @@ impl Session {
                 return Ok(QueryResult::command(tag));
             }
             "client_encoding" | "names" => {
-                // Any encoding with conversions to and from UTF8 (server.rs converts the
-                // session's traffic).
-                if let Some(v) = &value
-                    && let Some(id) = crate::types::encnames::encoding_id(v)
-                    && !crate::types::mbconv::has_conversion(id, crate::types::mbconv::UTF8)
-                {
-                    return Err(Error::new(
-                        code::FEATURE_NOT_SUPPORTED,
-                        format!("conversion between {v} and UTF8 is not supported"),
-                    ));
-                }
+                // (Settings::client_encoding checks it converts to and from the database's
+                // encoding; server.rs converts the session's traffic.)
                 self.state.settings.borrow_mut().set(
                     "client_encoding",
                     value.as_deref(),

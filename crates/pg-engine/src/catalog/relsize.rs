@@ -371,14 +371,22 @@ fn varlena_payload(v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) ->
             }
             _ => text(v, ty).len(),
         },
-        Value::Text(s) | Value::Json(s) => match ty {
-            DataType::Bpchar(m) if *m > 4 => {
-                let want = (*m - 4) as usize;
-                let chars = s.chars().count();
-                s.len() + want.saturating_sub(chars)
+        Value::Text(s) | Value::Json(s) => {
+            // (Its bytes in the database's encoding.)
+            let len = if s.is_ascii() {
+                s.len()
+            } else {
+                crate::types::mbconv::server::octet_len(crate::types::collation::database_encoding(), s)
+            };
+            match ty {
+                DataType::Bpchar(m) if *m > 4 => {
+                    let want = (*m - 4) as usize;
+                    let chars = s.chars().count();
+                    len + want.saturating_sub(chars)
+                }
+                _ => len,
             }
-            _ => s.len(),
-        },
+        }
         Value::Bytea(b) => b.len(),
         Value::TsVector(t) => t.varsize() - 4,
         Value::TsQuery(q) => q.varsize() - 4,

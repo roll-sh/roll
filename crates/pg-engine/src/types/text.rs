@@ -100,6 +100,8 @@ pub struct FormatCtx {
     pub settings: u64,
     /// client_encoding: what binary send / receive functions' text is in.
     pub client_encoding: i32,
+    /// server_encoding: the database's (what text inside is codes of, mbconv::server).
+    pub server_encoding: i32,
 }
 
 impl FormatCtx {
@@ -130,6 +132,7 @@ impl Default for FormatCtx {
             tz_abbrevs: "Default",
             settings: 0,
             client_encoding: super::mbconv::UTF8,
+            server_encoding: super::mbconv::UTF8,
         }
     }
 }
@@ -684,7 +687,9 @@ pub fn parse_bytea(s: &str) -> Result<Vec<u8>> {
         }
         return Ok(out);
     }
-    let b = s.as_bytes();
+    // (Other characters are their bytes in the database's encoding.)
+    let server = super::mbconv::server::encode(super::collation::database_encoding(), s)?;
+    let b: &[u8] = &server;
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
@@ -775,6 +780,12 @@ pub fn parse_char(s: &str) -> u8 {
         [b'\\', a @ b'0'..=b'7', b @ b'0'..=b'7', c @ b'0'..=b'7'] => {
             ((a - b'0') << 6).wrapping_add((b - b'0') << 3).wrapping_add(c - b'0')
         }
+        // (The first byte of the text in the database's encoding.)
+        b if b.first().is_some_and(|c| !c.is_ascii()) => {
+            let c = s.chars().next().unwrap_or_default().to_string();
+            let enc = super::collation::database_encoding();
+            super::mbconv::server::encode(enc, &c).ok().and_then(|e| e.first().copied()).unwrap_or(b[0])
+        }
         b => b.first().copied().unwrap_or(0),
     }
 }
@@ -824,13 +835,19 @@ pub fn apply_char_typmod(s: &str, ty: &DataType, explicit: bool) -> Result<Arc<s
             )
         }
         DataType::Name => {
-            // NAMEDATALEN - 1 bytes.
+            // NAMEDATALEN - 1 bytes (in the database's encoding).
             if s.len() <= 63 {
                 return Ok(s.into());
             }
-            let mut end = 63;
-            while !s.is_char_boundary(end) {
-                end -= 1;
+            let enc = super::collation::database_encoding();
+            let mut end = 0;
+            let mut bytes = 0;
+            for c in s.chars() {
+                bytes += super::mbconv::server::octet_len(enc, c.encode_utf8(&mut [0; 4]));
+                if bytes > 63 {
+                    break;
+                }
+                end += c.len_utf8();
             }
             Ok(s[..end].into())
         }
@@ -2048,8 +2065,9 @@ fn parse_regcollation(s: &str, ctx: &FormatCtx) -> Result<u32> {
         _ => Err(Error::new(
             code::UNDEFINED_OBJECT,
             format!(
-                "collation \"{}\" for encoding \"UTF8\" does not exist",
-                parts.join(".")
+                "collation \"{}\" for encoding \"{}\" does not exist",
+                parts.join("."),
+                super::mbconv::server::name(super::collation::database_encoding())
             ),
         )),
     }

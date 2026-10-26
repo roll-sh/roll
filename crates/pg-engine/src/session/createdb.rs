@@ -166,14 +166,6 @@ impl Session {
             n.hint = e.hint;
             self.raise_notice(n);
         }
-        let new = new?;
-        if new.encoding != dblocale::UTF8 {
-            return Err(Error::new(
-                code::FEATURE_NOT_SUPPORTED,
-                format!("encoding \"{}\" is not supported", dblocale::encoding_name(new.encoding)),
-            )
-            .detail("Databases here are UTF8."));
-        }
-        Ok(new)
+        new
     }
 }

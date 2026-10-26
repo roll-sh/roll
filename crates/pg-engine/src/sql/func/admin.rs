@@ -308,11 +308,9 @@ fn pg_read_file(a: &[Value], c: &FnCtx) -> Result<Value> {
         return Ok(Value::Null);
     };
     // read_text_file: the contents must be valid in the database encoding.
-    crate::types::mbconv::verify(crate::types::mbconv::UTF8, &b)?;
-    match String::from_utf8(b) {
-        Ok(s) => Ok(Value::text(s)),
-        Err(_) => Err(crate::error::internal("invalid UTF-8 after verification")),
-    }
+    let enc = crate::types::collation::database_encoding();
+    crate::types::mbconv::verify(enc, &b)?;
+    Ok(Value::text(crate::types::mbconv::server::decode(enc, &b)?))
 }
 
 fn pg_read_binary_file(a: &[Value], c: &FnCtx) -> Result<Value> {

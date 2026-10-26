@@ -985,6 +985,9 @@ struct TParser<'a> {
     ty: u8,
     /// The database's LC_CTYPE isn't C: characters classify by libc's (musl's) `isw*`.
     wide: bool,
+    /// A single-byte database encoding (`usewide` off): characters are bytes, classified
+    /// by the ctype's `isalpha` and so on, which know ASCII only (C, or musl's).
+    narrow: bool,
 }
 
 fn utf8_len(b: u8) -> usize {
@@ -1032,6 +1035,7 @@ impl<'a> TParser<'a> {
             lenchartoken: 0,
             ty: 0,
             wide: !crate::types::collation::database_ctype_is_c(),
+            narrow: crate::types::mbconv::max_length(crate::types::collation::database_encoding()) == 1,
         }
     }
 
@@ -1068,7 +1072,9 @@ impl<'a> TParser<'a> {
     /// classification; under another, libc's wide one (`w`).
     fn class(&self, nonascii: bool, f: fn(&u8) -> bool, w: fn(u32) -> bool) -> bool {
         let c = self.ch();
-        if self.wide {
+        if self.narrow {
+            c <= 0x7f && f(&(c as u8))
+        } else if self.wide {
             w(c)
         } else if c > 0x7f {
             nonascii

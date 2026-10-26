@@ -252,12 +252,6 @@ impl Engine {
                     std::env::var(v).ok()
                 })
                 .map_err(|e| internal(format!("initdb: {}", e.message)))?;
-                if init.db.encoding != crate::types::collation::dblocale::UTF8 {
-                    return Err(internal(format!(
-                        "initdb: encoding \"{}\" is not supported (databases are UTF8)",
-                        crate::types::collation::dblocale::encoding_name(init.db.encoding)
-                    )));
-                }
                 let owner = opts.superuser.clone();
                 let entry = |name: &str, oid, allow| DbEntry {
                     name: name.into(),

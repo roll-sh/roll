@@ -703,7 +703,7 @@ impl Ddl<'_, '_> {
                     let shown = if e.collation.is_empty() { c.clone() } else { names(&e.collation).join(".") };
                     return Err(Error::new(
                         code::UNDEFINED_OBJECT,
-                        format!("collation \"{shown}\" for encoding \"UTF8\" does not exist"),
+                        format!("collation \"{shown}\" for encoding \"{}\" does not exist", crate::types::mbconv::server::name(crate::types::collation::database_encoding())),
                     ));
                 }
                 if system::type_collation(&key_ty) == 0 {
@@ -2711,7 +2711,7 @@ impl Ddl<'_, '_> {
             Some(c) => crate::types::collation::def_by_name(&self.cat, &c).map(|d| d.oid).ok_or_else(|| {
                 Error::new(
                     code::UNDEFINED_OBJECT,
-                    format!("collation \"{c}\" for encoding \"UTF8\" does not exist"),
+                    format!("collation \"{c}\" for encoding \"{}\" does not exist", crate::types::mbconv::server::name(crate::types::collation::database_encoding())),
                 )
             })?,
             None => system::type_collation(&subtype),

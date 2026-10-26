@@ -5642,12 +5642,13 @@ fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Resu
             out = privilege_rows(table, ctx, cat);
         }
         IsCharacterSets => {
+            let enc = crate::types::mbconv::server::name(crate::types::collation::db_locale(cat).encoding);
             out.push(vec![
                 N,
                 N,
-                nm("UTF8"),
-                nm("UCS"),
-                nm("UTF8"),
+                nm(enc),
+                nm(if enc == "UTF8" { "UCS" } else { enc }),
+                nm(enc),
                 nm(&dbname),
                 nm("pg_catalog"),
                 nm("C"),

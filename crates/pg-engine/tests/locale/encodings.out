@@ -1,0 +1,406 @@
+> CREATE DATABASE locale_sa ENCODING 'sql_ascii' LOCALE_PROVIDER libc TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_sa2 ENCODING 'SQL_ASCII' LOCALE 'en_US.UTF-8' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_l1 ENCODING 'LATIN1' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_w1 ENCODING 'WIN1251' LOCALE 'C' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_ej ENCODING 'EUC_JP' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_tw ENCODING 'EUC_TW' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_mu ENCODING 'MULE_INTERNAL' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_l9 ENCODING 'LATIN9' LOCALE_PROVIDER icu ICU_LOCALE 'de' TEMPLATE template0
+-- CREATE DATABASE
+
+> CREATE DATABASE locale_x1 ENCODING 'SJIS' TEMPLATE template0
+ERROR 42704: SJIS is not a valid encoding name (at 27)
+
+> CREATE DATABASE locale_x2 ENCODING 'LATIN1' TEMPLATE template1
+ERROR 22023: new encoding (LATIN1) is incompatible with the encoding of the template database (UTF8)
+HINT: Use the same encoding as in the template database, or use template0 as template.
+
+> CREATE DATABASE locale_x3 ENCODING 'KOI8R' LOCALE 'ru_RU.UTF-8' TEMPLATE template0
+ERROR 22023: encoding "KOI8R" does not match locale "ru_RU.UTF-8"
+DETAIL: The chosen LC_CTYPE setting requires encoding "UTF8".
+
+> CREATE DATABASE locale_x4 TEMPLATE locale_l1
+-- CREATE DATABASE
+
+> SELECT datname, pg_encoding_to_char(encoding), datcollate, datctype, datlocprovider, datlocale
+> FROM pg_database WHERE datname LIKE 'locale\_%' ORDER BY 1
+datname:name | pg_encoding_to_char:name | datcollate:text | datctype:text | datlocprovider:char | datlocale:text
+locale_ej | EUC_JP | C | C | c | NULL
+locale_l1 | LATIN1 | C | C | c | NULL
+locale_l9 | LATIN9 | C | C | i | de
+locale_mu | MULE_INTERNAL | C | C | c | NULL
+locale_sa | SQL_ASCII | C | C | c | NULL
+locale_sa2 | SQL_ASCII | en_US.UTF-8 | en_US.UTF-8 | c | NULL
+locale_tw | EUC_TW | C | C | c | NULL
+locale_w1 | WIN1251 | C | C | c | NULL
+locale_x4 | LATIN1 | C | C | c | NULL
+-- SELECT 9
+
+> \c locale_l1
+
+> SHOW server_encoding
+server_encoding:text
+LATIN1
+-- SHOW
+
+> SHOW client_encoding
+client_encoding:text
+UTF8
+-- SHOW
+
+> SELECT getdatabaseencoding(), pg_client_encoding()
+getdatabaseencoding:name | pg_client_encoding:name
+LATIN1 | UTF8
+-- SELECT 1
+
+> SELECT character_set_name, character_repertoire, form_of_use FROM information_schema.character_sets
+character_set_name:name | character_repertoire:name | form_of_use:name
+LATIN1 | LATIN1 | LATIN1
+-- SELECT 1
+
+> CREATE TABLE t (a text)
+-- CREATE TABLE
+
+> INSERT INTO t VALUES ('é'), ('ÿ'), ('a'), ('Z'), ('ß'), ('Éa')
+-- INSERT 0 6
+
+> SELECT a, length(a), octet_length(a), bit_length(a), ascii(a), upper(a), lower(a), initcap(a), a::bytea AS b FROM t ORDER BY 1
+a:text | length:int4 | octet_length:int4 | bit_length:int4 | ascii:int4 | upper:text | lower:text | initcap:text | b:bytea
+Z | 1 | 1 | 8 | 90 | Z | z | Z | \x5a
+a | 1 | 1 | 8 | 97 | A | a | A | \x61
+Éa | 2 | 2 | 16 | 201 | ÉA | Éa | ÉA | \xc961
+ß | 1 | 1 | 8 | 223 | ß | ß | ß | \xdf
+é | 1 | 1 | 8 | 233 | é | é | é | \xe9
+ÿ | 1 | 1 | 8 | 255 | ÿ | ÿ | ÿ | \xff
+-- SELECT 6
+
+> SELECT string_agg(a, ',' ORDER BY a COLLATE "C") FROM t
+string_agg:text
+Z,a,Éa,ß,é,ÿ
+-- SELECT 1
+
+> SELECT a, a ~ '^[[:alpha:]]+$' AS alpha, a ILIKE 'é%' AS ilike, a::varchar(1) AS v FROM t ORDER BY 1
+a:text | alpha:bool | ilike:bool | v:varchar
+Z | t | f | Z
+a | t | f | a
+Éa | f | f | É
+ß | f | f | ß
+é | f | t | é
+ÿ | f | f | ÿ
+-- SELECT 6
+
+> INSERT INTO t VALUES ('€')
+ERROR 22P05: character with byte sequence 0xe2 0x82 0xac in encoding "UTF8" has no equivalent in encoding "LATIN1"
+
+> SELECT 'x€'
+ERROR 22P05: character with byte sequence 0xe2 0x82 0xac in encoding "UTF8" has no equivalent in encoding "LATIN1"
+
+> SELECT chr(233), chr(255), ascii(chr(200))
+chr:text | chr:text | ascii:int4
+é | ÿ | 200
+-- SELECT 1
+
+> SELECT chr(256)
+ERROR 54000: requested character too large for encoding: 256
+
+> SELECT convert_to('é', 'UTF8'), convert_to('é', 'LATIN1'), convert_from('\xe9', 'LATIN1'), convert_from('\xc3a9', 'UTF8')
+convert_to:bytea | convert_to:bytea | convert_from:text | convert_from:text
+\xc3a9 | \xe9 | é | é
+-- SELECT 1
+
+> SELECT convert_from('\xe282ac', 'UTF8')
+ERROR 22P05: character with byte sequence 0xe2 0x82 0xac in encoding "UTF8" has no equivalent in encoding "LATIN1"
+
+> SELECT md5('é'), 'é'::"char", 'é'::"char"::text, octet_length('é'::char(3)), 'é'::bytea
+md5:text | char:char | text:text | octet_length:int4 | bytea:bytea
+3406877694691ddd1dfb0aca54681407 | \351 | \351 | 3 | \xe9
+-- SELECT 1
+
+> SELECT U&'\00e9', U&'\0041'
+?column?:text | ?column?:text
+é | A
+-- SELECT 1
+
+> SELECT U&'\20ac'
+ERROR 22P05: character with byte sequence 0xe2 0x82 0xac in encoding "UTF8" has no equivalent in encoding "LATIN1" (at 11)
+
+> SELECT E'\xe9', E'\351\n', E'\u00e9', E'a\\\xff', E'\x41'
+?column?:text | ?column?:text | ?column?:text | ?column?:text | ?column?:text
+é | é
+ | é | a\ÿ | A
+-- SELECT 1
+
+> SELECT E'\u20ac'
+ERROR 22P05: character with byte sequence 0xe2 0x82 0xac in encoding "UTF8" has no equivalent in encoding "LATIN1" (at 10)
+
+> SELECT U&'d!00e9' UESCAPE '!'
+?column?:text
+dé
+-- SELECT 1
+
+> SET standard_conforming_strings = off
+-- SET
+
+> SELECT 'x\xe9', '\\\xe9'
+WARNING 22P06: nonstandard use of escape in a string literal (at 8)
+HINT: Use the escape string syntax for escapes, e.g., E'\r\n'.
+WARNING 22P06: nonstandard use of \\ in a string literal (at 17)
+HINT: Use the escape string syntax for backslashes, e.g., E'\\'.
+?column?:text | ?column?:text
+xé | \é
+-- SELECT 1
+
+> RESET standard_conforming_strings
+-- RESET
+
+> SELECT '"\u00e9"'::jsonb, '"\u00e9"'::json, '["\u00e9"]'::json ->> 0, '["\u0041"]'::jsonb ->> 0
+jsonb:jsonb | json:json | ?column?:text | ?column?:text
+"é" | "\u00e9" | é | A
+-- SELECT 1
+
+> SELECT '"\u20ac"'::jsonb
+ERROR 22P05: unsupported Unicode escape sequence (at 8)
+DETAIL: Unicode escape value could not be translated to the server's encoding LATIN1.
+CONTEXT: JSON data, line 1: "\u20ac...
+
+> SELECT unistr('\00e9x')
+unistr:text
+éx
+-- SELECT 1
+
+> SELECT unistr('\20ac')
+ERROR 22P05: character with byte sequence 0xe2 0x82 0xac in encoding "UTF8" has no equivalent in encoding "LATIN1"
+
+> SELECT normalize('a')
+ERROR 42601: Unicode normalization can only be performed if server encoding is UTF8
+
+> SELECT 'a' IS NFC NORMALIZED
+ERROR 42601: Unicode normalization can only be performed if server encoding is UTF8
+
+> SELECT casefold('A')
+ERROR 42601: Unicode case folding can only be performed if server encoding is UTF8
+
+> SELECT unicode_assigned('a')
+ERROR XX000: Unicode categorization can only be performed if server encoding is UTF8
+
+> SELECT to_ascii('éàç'), to_ascii('éàç', 'LATIN1')
+to_ascii:text | to_ascii:text
+eac | eac
+-- SELECT 1
+
+> SELECT length(repeat('é', 70)::name), octet_length(repeat('é', 70)::name)
+length:int4 | octet_length:int4
+63 | 63
+-- SELECT 1
+
+> SET client_encoding = 'LATIN2'
+ERROR 0A000: invalid value for parameter "client_encoding": "LATIN2"
+DETAIL: Conversion between LATIN2 and LATIN1 is not supported.
+
+> SET client_encoding = 'MULE_INTERNAL'
+-- SET
+
+> SELECT 'é' AS mule, pg_client_encoding()
+ERROR 22P05: character with byte sequence 0xc3 in encoding "MULE_INTERNAL" has no equivalent in encoding "LATIN1"
+
+> RESET client_encoding
+-- RESET
+
+> SHOW client_encoding
+client_encoding:text
+UTF8
+-- SHOW
+
+> SET client_encoding = 'WIN1252'
+ERROR 0A000: invalid value for parameter "client_encoding": "WIN1252"
+DETAIL: Conversion between WIN1252 and LATIN1 is not supported.
+
+> SELECT 'é' AS win1252
+win1252:text
+é
+-- SELECT 1
+
+> SET client_encoding = 'UTF8'
+-- SET
+
+> SELECT a, length(a) FROM t WHERE a = 'é'
+a:text | length:int4
+é | 1
+-- SELECT 1
+
+> \c locale_sa
+
+> SHOW server_encoding
+server_encoding:text
+SQL_ASCII
+-- SHOW
+
+> SELECT getdatabaseencoding(), 'é' AS e, length('é'), octet_length('é'), ascii('é'), upper('é'), 'é'::bytea
+getdatabaseencoding:name | e:text | length:int4 | octet_length:int4 | ascii:int4 | upper:text | bytea:bytea
+SQL_ASCII | é | 2 | 2 | 195 | é | \xc3a9
+-- SELECT 1
+
+> SELECT chr(233) AS bad
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0xe9
+
+> SELECT convert_to('é', 'LATIN1')
+convert_to:bytea
+\xc3a9
+-- SELECT 1
+
+> SELECT convert_from('\xe9', 'LATIN1')
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0xe9
+
+> SELECT U&'\00e9'
+ERROR 0A000: conversion between UTF8 and SQL_ASCII is not supported (at 11)
+
+> SELECT unistr('\00e9')
+ERROR 0A000: conversion between UTF8 and SQL_ASCII is not supported
+
+> SELECT '"\u00e9"'::jsonb
+ERROR 22P05: unsupported Unicode escape sequence (at 8)
+DETAIL: Unicode escape value could not be translated to the server's encoding SQL_ASCII.
+CONTEXT: JSON data, line 1: "\u00e9...
+
+> SELECT E'\xe9' AS bad
+ERROR 22021: invalid byte sequence for encoding "UTF8": 0xe9
+
+> SET client_encoding = 'LATIN1'
+-- SET
+
+> SELECT octet_length('é'), length('é')
+octet_length:int4 | length:int4
+2 | 2
+-- SELECT 1
+
+> SET client_encoding = 'SJIS'
+-- SET
+
+> SELECT 'x' AS sjis
+sjis:text
+x
+-- SELECT 1
+
+> SET client_encoding = 'UTF8'
+-- SET
+
+> \c locale_sa2
+
+> SELECT upper('é'), lower('É'), 'é' ~ '[[:alpha:]]'
+upper:text | lower:text | ?column?:bool
+é | É | f
+-- SELECT 1
+
+> \c locale_w1
+
+> SHOW server_encoding
+server_encoding:text
+WIN1251
+-- SHOW
+
+> SELECT x, length(x), octet_length(x), ascii(x), x::bytea AS b FROM (VALUES ('ж'), ('я'), ('Ё'), ('a'), ('€')) v(x) ORDER BY x
+x:text | length:int4 | octet_length:int4 | ascii:int4 | b:bytea
+a | 1 | 1 | 97 | \x61
+€ | 1 | 1 | 136 | \x88
+Ё | 1 | 1 | 168 | \xa8
+ж | 1 | 1 | 230 | \xe6
+я | 1 | 1 | 255 | \xff
+-- SELECT 5
+
+> SELECT 'ж' < 'я', '€' < 'ж'
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> \c locale_ej
+
+> SHOW server_encoding
+server_encoding:text
+EUC_JP
+-- SHOW
+
+> SELECT x, length(x), octet_length(x), x::bytea AS b FROM (VALUES ('日本'), ('ｱ'), ('a'), ('漢字'), ('丂')) v(x) ORDER BY x
+x:text | length:int4 | octet_length:int4 | b:bytea
+a | 1 | 1 | \x61
+ｱ | 1 | 2 | \x8eb1
+丂 | 1 | 3 | \x8fb0a1
+漢字 | 2 | 4 | \xb4c1bbfa
+日本 | 2 | 4 | \xc6fccbdc
+-- SELECT 5
+
+> SELECT ascii('日')
+ERROR 54000: requested character too large
+
+> SELECT chr(128)
+ERROR 54000: requested character too large for encoding: 128
+
+> SELECT substr('日本語', 2, 1), position('語' IN '日本語'), reverse('日本語'), left('日本語', 1)
+substr:text | position:int4 | reverse:text | left:text
+本 | 3 | 語本日 | 日
+-- SELECT 1
+
+> SELECT convert_to('日本', 'UTF8'), convert_to('日本', 'EUC_JP'), convert_from('\xc6fc', 'EUC_JP')
+convert_to:bytea | convert_to:bytea | convert_from:text
+\xe697a5e69cac | \xc6fccbdc | 日
+-- SELECT 1
+
+> SELECT '日本'::bytea, md5('日本')
+bytea:bytea | md5:text
+\xc6fccbdc | c6e7401e03571296bb3ac5f3904a81d5
+-- SELECT 1
+
+> SELECT '한'
+ERROR 22P05: character with byte sequence 0xed 0x95 0x9c in encoding "UTF8" has no equivalent in encoding "EUC_JP"
+
+> SELECT E'\xc6\xfc', E'\xc6', U&'\65e5'
+ERROR 22021: invalid byte sequence for encoding "EUC_JP": 0xc6
+
+> \c locale_tw
+
+> SELECT x, length(x), octet_length(x), x::bytea AS b FROM (VALUES ('中文'), ('a')) v(x) ORDER BY x
+x:text | length:int4 | octet_length:int4 | b:bytea
+a | 1 | 1 | \x61
+中文 | 2 | 4 | \xc4e3c5c6
+-- SELECT 2
+
+> \c locale_mu
+ERROR 0A000: conversion between UTF8 and MULE_INTERNAL is not supported
+
+(not connected)
+> \c locale_l9
+
+> SHOW server_encoding
+server_encoding:text
+LATIN9
+-- SHOW
+
+> SELECT x, upper(x), lower(x) FROM (VALUES ('é'), ('z'), ('a'), ('€'), ('Ä')) v(x) ORDER BY x
+x:text | upper:text | lower:text
+€ | € | €
+a | A | a
+Ä | Ä | ä
+é | É | é
+z | Z | z
+-- SELECT 5
+
+> SELECT 'ä' < 'b', 'ä' < 'b' COLLATE "C"
+?column?:bool | ?column?:bool
+t | f
+-- SELECT 1
+
+> \c postgres
+

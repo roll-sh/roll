@@ -315,6 +315,14 @@ impl SessionState {
             let _ = settings.load_module("pg_stat_statements");
             settings.set_internal("shared_preload_libraries", "pg_stat_statements");
         }
+        // The database's encoding is server_encoding, and client_encoding's default
+        // (PGC_S_DYNAMIC_DEFAULT) until the client names its own.
+        let enc = crate::types::collation::db_locale(&cat).encoding;
+        if enc != crate::types::mbconv::UTF8 {
+            let name = crate::types::mbconv::server::name(enc);
+            settings.set_config_file("server_encoding", name);
+            settings.set_config_file("client_encoding", name);
+        }
         settings.set_internal("session_authorization", user);
         settings.set_internal(
             "is_superuser",

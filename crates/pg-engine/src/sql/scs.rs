@@ -21,6 +21,8 @@ pub struct LexOpts {
     /// `\'` is rejected: `backslash_quote = off`, or `safe_encoding` with a client-only
     /// client encoding.
     pub no_backslash_quote: bool,
+    /// The database's encoding (escapes in literals make its characters: srvlit.rs).
+    pub encoding: i32,
 }
 
 impl Default for LexOpts {
@@ -29,6 +31,7 @@ impl Default for LexOpts {
             standard_strings: true,
             escape_warning: true,
             no_backslash_quote: false,
+            encoding: crate::types::mbconv::UTF8,
         }
     }
 }
@@ -48,6 +51,7 @@ impl LexOpts {
                 "on" | "true" | "yes" | "1" => false,
                 _ => client_only,
             },
+            encoding: crate::types::mbconv::UTF8,
         }
     }
 

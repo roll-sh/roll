@@ -1944,7 +1944,7 @@ impl Session {
                     .map_err(|e| param_err(e, None))?,
                 // Text arrives in the client's encoding (pg_client_to_server, which checks it).
                 Some(b) => {
-                    let s = crate::types::mbconv::to_utf8(&b, fmt.client_encoding)
+                    let s = crate::types::mbconv::server::from_client(&b, fmt.client_encoding, fmt.server_encoding)
                         .map_err(|e| param_err(e, None))?;
                     crate::types::text::parse_value(&s, ty, &fmt)
                         .map_err(|e| param_err(e, Some(&s)))?

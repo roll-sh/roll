@@ -23,10 +23,14 @@ fn length(a: &[Value], _: &FnCtx) -> Result<Value> {
 fn bp_length(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Int4(bpchar_trim(s(&a[0])).chars().count() as i32))
 }
+/// The database's encoding (GetDatabaseEncoding): what a text's bytes are in.
+fn db_enc() -> i32 {
+    crate::types::collation::database_encoding()
+}
 fn octet_length(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Int4(match &a[0] {
         Value::Bytea(b) => b.len() as i32,
-        v => s(v).len() as i32,
+        v => crate::types::mbconv::server::octet_len(db_enc(), s(v)) as i32,
     }))
 }
 fn bit_length(a: &[Value], c: &FnCtx) -> Result<Value> {
@@ -57,6 +61,7 @@ fn upper(a: &[Value], c: &FnCtx) -> Result<Value> {
     }))
 }
 fn casefold(a: &[Value], c: &FnCtx) -> Result<Value> {
+    require_utf8("case folding")?;
     Ok(text(match c.coll {
         Some(coll) => coll.casefold(s(&a[0])),
         None => crate::types::collation::default().casefold(s(&a[0])),
@@ -71,6 +76,10 @@ fn initcap(a: &[Value], c: &FnCtx) -> Result<Value> {
 
 // Under a collation whose ctype is C (C, POSIX, ucs_basic) case mapping, and so ILIKE, only
 // knows ASCII letters (asc_tolower / asc_toupper / asc_initcap).
+fn casefold_c(a: &[Value], c: &FnCtx) -> Result<Value> {
+    require_utf8("case folding")?;
+    lower_c(a, c)
+}
 fn lower_c(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(text(s(&a[0]).to_ascii_lowercase()))
 }
@@ -118,7 +127,7 @@ pub fn c_ctype_variant(def: &super::FuncDef) -> Option<super::FuncDef> {
         "lower" => d.imp = lower_c,
         "upper" => d.imp = upper_c,
         // casefold has nothing but the lowercase mapping in C.
-        "casefold" => d.imp = lower_c,
+        "casefold" => d.imp = casefold_c,
         "initcap" => d.imp = initcap_c,
         "~~*" | "ilike" => d.imp = ilike_c,
         "!~~*" | "not_ilike" => d.imp = not_ilike_c,
@@ -557,14 +566,27 @@ fn crc32c(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Int8(!crc as i64))
 }
 fn ascii(a: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::Int4(
-        s(&a[0]).chars().next().map(|c| c as i32).unwrap_or(0),
-    ))
+    let c = s(&a[0]).chars().next().map(|c| c as i32).unwrap_or(0);
+    // (In another encoding than UTF8 a single-byte character's code is its byte.)
+    let enc = db_enc();
+    if enc != crate::types::mbconv::UTF8 && c > 127 && crate::types::mbconv::max_length(enc) > 1 {
+        bail!(PROGRAM_LIMIT_EXCEEDED, "requested character too large");
+    }
+    Ok(Value::Int4(c))
 }
 fn chr(a: &[Value], _: &FnCtx) -> Result<Value> {
     let n = int_arg(&a[0]);
     if n == 0 {
         bail!(PROGRAM_LIMIT_EXCEEDED, "null character not permitted");
+    }
+    let enc = db_enc();
+    if enc != crate::types::mbconv::UTF8 && n > 127 {
+        if n < 0 {
+            bail!(INVALID_PARAMETER_VALUE, "character number must be positive");
+        }
+        if crate::types::mbconv::max_length(enc) > 1 || n > 255 {
+            bail!(PROGRAM_LIMIT_EXCEEDED, "requested character too large for encoding: {n}");
+        }
     }
     let c = u32::try_from(n)
         .ok()
@@ -579,9 +601,13 @@ fn chr(a: &[Value], _: &FnCtx) -> Result<Value> {
 }
 fn md5(a: &[Value], _: &FnCtx) -> Result<Value> {
     use md5::Digest;
+    let server;
     let bytes: &[u8] = match &a[0] {
         Value::Bytea(b) => b,
-        v => s(v).as_bytes(),
+        v => {
+            server = crate::types::mbconv::server::encode(db_enc(), s(v))?;
+            &server
+        }
     };
     let h = md5::Md5::digest(bytes);
     Ok(text(
@@ -2168,10 +2194,10 @@ fn unistr(a: &[Value], _: &FnCtx) -> Result<Value> {
         if (0xd800..0xdc00).contains(&cp) {
             pair_first = cp;
         } else {
-            out.push(
-                char::from_u32(cp)
-                    .ok_or_else(|| err!(INVALID_PARAMETER_VALUE, "invalid Unicode code point: {:04X}", cp))?,
-            );
+            let c = char::from_u32(cp)
+                .ok_or_else(|| err!(INVALID_PARAMETER_VALUE, "invalid Unicode code point: {:04X}", cp))?;
+            // (pg_unicode_to_server: in the database's encoding.)
+            out.push_str(&crate::types::mbconv::server::from_unicode(db_enc(), c.encode_utf8(&mut [0; 4]))?);
         }
         i += len;
     }
@@ -2322,26 +2348,21 @@ fn bytea_bytes(v: &Value) -> &[u8] {
         v => s(v).as_bytes(),
     }
 }
-/// convert_from(bytea, name): `pg_convert` into the database encoding (UTF8).
+/// convert_from(bytea, name): `pg_convert` into the database encoding.
 fn convert_from(a: &[Value], _: &FnCtx) -> Result<Value> {
     use crate::types::mbconv;
     let from = encoding_arg(&a[1], "source")?;
-    let out = mbconv::pg_convert(bytea_bytes(&a[0]), from, mbconv::UTF8)?;
-    let out = String::from_utf8(out).map_err(|e| {
-        let at = e.utf8_error().valid_up_to();
-        mbconv::invalid_encoding(mbconv::UTF8, &e.as_bytes()[at..])
-    })?;
-    Ok(text(out))
+    let enc = db_enc();
+    let out = mbconv::pg_convert(bytea_bytes(&a[0]), from, enc)?;
+    Ok(text(mbconv::server::decode(enc, &out)?))
 }
-/// convert_to(text, name): `pg_convert` from the database encoding (UTF8).
+/// convert_to(text, name): `pg_convert` from the database encoding.
 fn convert_to(a: &[Value], _: &FnCtx) -> Result<Value> {
     use crate::types::mbconv;
     let to = encoding_arg(&a[1], "destination")?;
-    Ok(Value::bytea(mbconv::pg_convert(
-        s(&a[0]).as_bytes(),
-        mbconv::UTF8,
-        to,
-    )?))
+    let enc = db_enc();
+    let src = mbconv::server::encode(enc, s(&a[0]))?;
+    Ok(Value::bytea(mbconv::pg_convert(&src, enc, to)?))
 }
 /// convert(bytea, name, name).
 fn convert(a: &[Value], _: &FnCtx) -> Result<Value> {
@@ -2392,20 +2413,29 @@ fn normalized(text: &str, form: &str) -> String {
         _ => text.nfc().collect(),
     }
 }
+/// Unicode functions work in a UTF8 database only (`unicode_normalize_func`).
+fn require_utf8(what: &str) -> Result<()> {
+    if db_enc() != crate::types::mbconv::UTF8 {
+        bail!(SYNTAX_ERROR, "Unicode {what} can only be performed if server encoding is UTF8");
+    }
+    Ok(())
+}
 fn normalize(a: &[Value], _: &FnCtx) -> Result<Value> {
+    require_utf8("normalization")?;
     let form = normal_form(a)?;
     Ok(text(normalized(s(&a[0]), form)))
 }
 fn is_normalized(a: &[Value], _: &FnCtx) -> Result<Value> {
+    require_utf8("normalization")?;
     let form = normal_form(a)?;
     Ok(Value::Bool(normalized(s(&a[0]), form) == s(&a[0])))
 }
 /// to_ascii: the text's bytes read in a single-byte encoding, accented letters as their
-/// ASCII base (ascii.c); the database's own encoding (UTF8) has no such mapping.
+/// ASCII base (ascii.c); by default in the database's encoding.
 fn to_ascii(a: &[Value], _: &FnCtx) -> Result<Value> {
     use crate::types::encnames::{encoding_id, encoding_name};
     let enc = match a.get(1) {
-        None => 6,
+        None => db_enc(),
         Some(Value::Int4(n)) => {
             if encoding_name(*n as i64).is_none() {
                 bail!(UNDEFINED_OBJECT, "{n} is not a valid encoding code");
@@ -2425,9 +2455,9 @@ fn to_ascii(a: &[Value], _: &FnCtx) -> Result<Value> {
         29 => (b"  ' \"    %S<STZZ `'\"\".--  s>stzz   L A  \"CS  -RZ  ,l'u .,as L\"lzRAAAALCCCEEEEIIDDNNOOOOxRUUUUYTBraaaalccceeeeiiddnnoooo/ruuuuyt ", 128),
         _ => bail!(FEATURE_NOT_SUPPORTED, "encoding conversion from {} to ASCII not supported", encoding_name(enc as i64).unwrap_or("")),
     };
-    let out: Vec<u8> = s(&a[0])
-        .bytes()
-        .map(|b| match b {
+    let out: Vec<u8> = crate::types::mbconv::server::encode(db_enc(), s(&a[0]))?
+        .iter()
+        .map(|&b| match b {
             b if b < 128 => b,
             b if b < range => b' ',
             b => table.get((b - range) as usize).copied().unwrap_or(b' '),
@@ -2466,6 +2496,9 @@ pub fn register(r: &mut Registry) {
     r.func("unicode_version", vec![], Text, |_, _| Ok(text("16.0")));
     r.func("icu_unicode_version", vec![], Text, |_, _| Ok(text("17.0")));
     r.func("unicode_assigned", vec![Text], Bool, |a, _| {
+        if db_enc() != crate::types::mbconv::UTF8 {
+            bail!(INTERNAL_ERROR, "Unicode categorization can only be performed if server encoding is UTF8");
+        }
         Ok(Value::Bool(s(&a[0]).chars().all(|c| case::category(c as u32) != 0)))
     });
     r.func("position", vec![Text, Text], Int4, position);
