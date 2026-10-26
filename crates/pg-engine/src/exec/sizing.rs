@@ -3103,10 +3103,16 @@ impl CopyLoad {
             index_insert(btrees, heap, &xids, entries, *tid);
             keys.push(p.key);
         }
+        let big = heap.versions() > max_versions();
         drop(rf);
         // The rows (stored already, as each line was read) get the TIDs their tuples went to,
         // as single inserts' rows do (their ctid; scans read them in that order).
         let _ = stamp_tids(&keys, &tids, ctx);
+        // A load past the model's size stops being modelled here, as single inserts do
+        // (`check_size`), not at the next restart: its scans go parallel from now on.
+        if big && let Some(t) = ctx.catalog().tables.get(&self.key.0) {
+            untrack(&self.db, t, None);
+        }
     }
 
     /// The COPY is done: the buffer goes in.

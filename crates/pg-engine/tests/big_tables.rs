@@ -106,3 +106,21 @@ fn index_only_scans_from_entries() {
         run(&mut s, "ROLLBACK");
     });
 }
+
+/// A table a COPY makes too big to model stops being modelled when the load goes in, not at
+/// the next restart: its index-only scans are answered from the entries straight away.
+#[test]
+fn copy_past_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE cp (id int NOT NULL, a int);\nCREATE INDEX cp_a ON cp (a)");
+        let data: String = (1..=3000).map(|i| format!("{i}\t{}\n", i % 37)).collect();
+        s.query_copy("COPY cp FROM STDIN", data.as_bytes()).unwrap();
+        same_both_ways(
+            &mut s,
+            &["SELECT count(*) FROM cp", "SELECT a, count(*) FROM cp WHERE a < 9 GROUP BY a ORDER BY a"],
+        );
+    });
+}
