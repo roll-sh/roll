@@ -9,6 +9,7 @@ mod build;
 mod convert;
 mod index;
 mod io;
+pub(crate) use io::{check_key_len, check_val_len};
 mod ops;
 #[cfg(test)]
 mod tests;

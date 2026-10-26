@@ -12,6 +12,7 @@
 mod files;
 pub mod native;
 mod amcheck;
+pub(crate) mod binary;
 mod btree;
 mod citext;
 mod cube;

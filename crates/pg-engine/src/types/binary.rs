@@ -84,13 +84,15 @@ pub fn supports_binary(ty: &DataType) -> bool {
         | T::PgNodeTree
         | T::Record => true,
         T::Row(fields) => fields.iter().all(|(_, t)| supports_binary(t)),
+        // An extension's native type: when it has send and receive functions.
+        T::Base(b) if b.ext != 0 => crate::ext::binary::has_binary(b.ext),
         T::Base(b) => b.repr.as_ref().is_some_and(supports_binary),
         _ => false,
     }
 }
 
 /// Text a send function writes (pq_sendtext): in the client's encoding.
-fn put_text(out: &mut BytesMut, s: &str, ctx: &FormatCtx) -> Result<()> {
+pub(crate) fn put_text(out: &mut BytesMut, s: &str, ctx: &FormatCtx) -> Result<()> {
     out.put_slice(&super::mbconv::convert(
         s.as_bytes(),
         super::mbconv::UTF8,
@@ -100,7 +102,7 @@ fn put_text(out: &mut BytesMut, s: &str, ctx: &FormatCtx) -> Result<()> {
 }
 
 /// Text a receive function reads (pq_getmsgtext): from the client's encoding, checked.
-fn get_text(b: &[u8], ctx: &FormatCtx) -> Result<String> {
+pub(crate) fn get_text(b: &[u8], ctx: &FormatCtx) -> Result<String> {
     super::mbconv::to_utf8(b, ctx.client_encoding)
 }
 
@@ -126,6 +128,8 @@ pub fn encode(v: &Value, ty: &DataType, ctx: &FormatCtx, out: &mut BytesMut) -> 
         (Value::Float8(f), _) => out.put_f64(*f),
         (Value::Numeric(n), _) => encode_numeric(n, out),
         // A made base type sends as its representation's type does.
+        // An extension's native type: its own send function.
+        (Value::Ext(kind, b), _) => crate::ext::binary::send(*kind, b, ctx, out)?,
         (_, T::Base(b)) if b.repr.is_some() => encode(v, b.repr.as_ref().unwrap(), ctx, out)?,
         // jsonpath_send: a version byte, then the text.
         (Value::Text(s), T::JsonPath) => {
@@ -780,6 +784,7 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
             need(4)?;
             Value::Oid(r.get_u32())
         }
+        T::Base(bt) if bt.ext != 0 => Value::Ext(bt.ext, crate::ext::binary::recv(bt.ext, b, ctx)?.into()),
         T::Base(bt) if bt.repr.is_some() => decode(b, bt.repr.as_ref().unwrap(), ctx)?,
         // timetz_recv: the time and zone in range, then the typmod's rounding.
         T::Timetz(m) => {

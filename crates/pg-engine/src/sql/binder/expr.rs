@@ -1765,11 +1765,11 @@ impl Binder<'_, '_> {
             pb::AExprKind::AexprNullif => {
                 let l = self.bind_expr(a.lexpr.as_deref().unwrap())?;
                 let r = self.bind_expr(a.rexpr.as_deref().unwrap())?;
-                let res = resolve_binop("=", &l.ty(), &r.ty()).map_err(|e| with_pos(e, loc))?;
-                let l = self.coerce_implicit(l, &res.arg_types[0])?;
-                let r = self.coerce_implicit(r, &res.arg_types[1])?;
+                let (def, types) = self.equality_op(&l, &r, loc)?;
+                let l = self.coerce_implicit(l, &types[0])?;
+                let r = self.coerce_implicit(r, &types[1])?;
                 let ty = l.ty();
-                let def = self.collated(res.def, &[&l, &r]);
+                let def = self.collated(def, &[&l, &r]);
                 let consts = l.is_const() && r.is_const() && def.volatility == 'i';
                 let e = Expr::NullIf(Box::new(l), Box::new(r), def, ty.clone());
                 // eval_const_expressions evaluates a NULLIF over constants.
@@ -2569,11 +2569,22 @@ impl Binder<'_, '_> {
                 Expr::Or(parts)
             });
         }
-        let res = resolve_binop("=", &l.ty(), &r.ty()).map_err(|e| with_pos(e, loc))?;
-        let l = self.coerce_implicit(l, &res.arg_types[0])?;
-        let r = self.coerce_implicit(r, &res.arg_types[1])?;
-        let def = self.collated(res.def, &[&l, &r]);
+        let (def, types) = self.equality_op(&l, &r, loc)?;
+        let l = self.coerce_implicit(l, &types[0])?;
+        let r = self.coerce_implicit(r, &types[1])?;
+        let def = self.collated(def, &[&l, &r]);
         Ok(Expr::IsDistinct(Box::new(l), Box::new(r), not, def))
+    }
+
+    /// The `=` IS DISTINCT FROM and NULLIF compare with (make_distinct_op's
+    /// make_op): an extension's or a user's operator as `oper` picks it, else the built-in;
+    /// with the argument types it takes.
+    fn equality_op(&mut self, l: &Expr, r: &Expr, loc: i32) -> Result<(Arc<FuncDef>, Vec<DataType>)> {
+        if let Some((def, types)) = self.user_op_def("=", &l.ty(), &r.ty(), loc)? {
+            return Ok((def, types));
+        }
+        let res = resolve_binop("=", &l.ty(), &r.ty()).map_err(|e| with_pos(e, loc))?;
+        Ok((res.def, res.arg_types.to_vec()))
     }
 
     fn in_list(&mut self, l: Expr, items: Vec<Expr>, not: bool, loc: i32) -> Result<Expr> {

@@ -1201,6 +1201,72 @@ fn hex(s: &str) -> Raw {
 }
 
 #[test]
+fn extension_types_binary_format() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        c.batch_execute(
+            "CREATE EXTENSION hstore; CREATE EXTENSION ltree; CREATE EXTENSION cube; \
+             CREATE EXTENSION citext; CREATE EXTENSION seg",
+        )
+        .await
+        .unwrap();
+        // hstore_send, ltree_send / lquery_send / ltxtq_send, cube_send and citext's, as
+        // PostgreSQL 18 produces them.
+        let r = c
+            .query_one(
+                "SELECT 'b=>2, a=>1, \"k k\"=>NULL'::hstore, 'a.b.c'::ltree, '*.b.*'::lquery, \
+                 'a & b'::ltxtquery, '(1,2),(3,4)'::cube, '(5,6)'::cube, 'MiXed'::citext",
+                &[],
+            )
+            .await
+            .unwrap();
+        let want = [
+            "000000030000000161000000013100000001620000000132000000036b206bffffffff",
+            "01612e622e63",
+            "012a2e622e2a",
+            "016120262062",
+            "000000023ff000000000000040000000000000004008000000000000\
+             4010000000000000",
+            "8000000240140000000000004018000000000000",
+            "4d69586564",
+        ];
+        for (i, w) in want.iter().enumerate() {
+            let w: String = w.split_whitespace().collect();
+            assert_eq!(r.get::<_, Raw>(i), hex(&w), "column {i}");
+        }
+        // The receive functions: parameters in binary.
+        let st = c
+            .prepare("SELECT $1::hstore::text, $2::ltree::text, $3::cube::text")
+            .await
+            .unwrap();
+        let r = c
+            .query_one(
+                &st,
+                &[
+                    &hex("000000020000000162000000013200000001610000000131"),
+                    &hex("01782e79"),
+                    &hex("800000013ff8000000000000"),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.get::<_, String>(0), "\"a\"=>\"1\", \"b\"=>\"2\"");
+        assert_eq!(r.get::<_, String>(1), "x.y");
+        assert_eq!(r.get::<_, String>(2), "(1.5)");
+        // seg has no send function.
+        let e = c
+            .query_one("SELECT '1 .. 2'::seg", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.as_db_error().map(|d| d.message()),
+            Some("no binary output function available for type seg")
+        );
+    });
+}
+
+#[test]
 fn range_binary_format() {
     let s = server(AuthMethod::Trust);
     runtime().block_on(async {
