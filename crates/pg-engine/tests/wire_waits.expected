@@ -86,3 +86,12 @@ statement_timeout < transaction_timeout: ok, ok, 57014 canceling statement due t
 transaction_timeout set in a block: ok, ok, ok; then connection closed; connection: FATAL 25P04 terminating connection due to transaction timeout
 idle_session outside a block: ok, ok; then connection closed; connection: FATAL 57P05 terminating connection due to idle-session timeout
 idle_session in a block: ok, ok, ok; then ok; connection: closed cleanly
+deadlock (rows): victim ERROR 40P01 deadlock detected (DETAIL: Process N waits for ShareLock on transaction N; blocked by process N. | Process N waits for ShareLock on transaction N; blocked by process N.) (HINT: See server log for query details.) (CONTEXT: while updating tuple (…) in relation "t"); the other ok
+deadlock (relations): victim ERROR 40P01 deadlock detected (DETAIL: Process N waits for ExclusiveLock on relation N of database N; blocked by process N. | Process N waits for ExclusiveLock on relation N of database N; blocked by process N.) (HINT: See server log for query details.); the other ok
+deadlock (advisory): victim ERROR 40P01 deadlock detected (DETAIL: Process N waits for ExclusiveLock on advisory lock [N,N,N,N]; blocked by process N. | Process N waits for ExclusiveLock on advisory lock [N,N,N,N]; blocked by process N.) (HINT: See server log for query details.); the other ok
+cancel a lock wait: pg_cancel_backend ok; the session: ERROR 57014 canceling statement due to user request (CONTEXT: while updating tuple (…) in relation "t"); then ok; connection: closed cleanly
+cancel a sleep: pg_cancel_backend ok; the session: ERROR 57014 canceling statement due to user request; then ok; connection: closed cleanly
+cancel an idle session: pg_cancel_backend ok; the session: idle; then ok; connection: closed cleanly
+terminate a lock wait: pg_terminate_backend ok; the session: FATAL 57P01 terminating connection due to administrator command (CONTEXT: while updating tuple (…) in relation "t"); then connection closed; connection: connection closed
+terminate a sleep: pg_terminate_backend ok; the session: FATAL 57P01 terminating connection due to administrator command; then connection closed; connection: connection closed
+terminate an idle session: pg_terminate_backend ok; the session: idle; then connection closed; connection: FATAL 57P01 terminating connection due to administrator command

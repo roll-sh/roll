@@ -399,6 +399,16 @@ impl Session {
         }
     }
 
+    /// The session has sent ReadyForQuery and waits for its client: a READ COMMITTED
+    /// transaction's statement snapshot goes, unless a cursor or a suspended portal still
+    /// reads with it (their snapshots stay registered, as Postgres's do).
+    pub fn note_idle(&self) {
+        let Some(t) = &self.txn else { return };
+        if self.state.cursors.borrow().is_empty() && self.portals.values().all(|p| p.lazy.is_none()) {
+            t.borrow_mut().release_statement_snapshot();
+        }
+    }
+
     /// When a session waiting for its client's next query (after ReadyForQuery) times out,
     /// and the FATAL it ends with (ProcessInterrupts' idle timeouts): in a transaction
     /// block, idle_in_transaction_session_timeout or the transaction's transaction_timeout,

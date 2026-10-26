@@ -1406,19 +1406,43 @@ fn lock_toast(t: &Table, ctx: &ExecCtx) -> Result<()> {
     Ok(())
 }
 
-/// `lock_toast` for a row written to a table too big to model: when the row's layout
-/// stores a value out of line.
+/// A value that may be stored out of line (a varlena: not a fixed-width scalar or NULL).
+fn may_toast(v: &Value) -> bool {
+    !matches!(v, Value::Null | Value::Bool(_) | Value::Int2(_) | Value::Int4(_) | Value::Int8(_) | Value::Float4(_) | Value::Float8(_) | Value::Oid(_))
+}
+
 /// An untracked table's row version of `row` is being written: its TOAST table locked when
-/// a value goes out of line, and the estimate grown by its tuple (one layout for both).
-fn untracked_write(t: &Table, row: &[Value], ctx: &ExecCtx, len: Option<usize>) -> Result<()> {
+/// a value goes out of line (toast_save_datum; a value an update keeps from `old`, the
+/// version it replaces, stays where it is) or one of `old`'s goes (toast_delete_datum), and
+/// the estimate grown by its tuple (one layout of the row for both).
+fn untracked_write(
+    t: &Table,
+    row: &[Value],
+    old: Option<&[Value]>,
+    ctx: &ExecCtx,
+    len: Option<usize>,
+) -> Result<()> {
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), len);
-    if t.toast != 0 && !exts.is_empty() {
+    let changed = |c: usize| old.is_none_or(|o| !same(o.get(c), row.get(c)));
+    if t.toast != 0
+        && (exts.iter().any(|e| changed(e.col)) || old.is_some_and(|o| toast_gone(t, o, Some(row), ctx)))
+    {
         lock_toast(t, ctx)?;
     }
     if let Some(e) = ctx.sess.db.relfiles.lock().estimated.get_mut(&t.oid) {
         e.add(len, heap_fillfactor(t));
     }
     Ok(())
+}
+
+/// Whether a version of a table too big to model has out-of-line values that go
+/// (toast_delete_datum): deleted (`new` None), or replaced by an update's new values.
+fn toast_gone(t: &Table, old: &[Value], new: Option<&[Value]>, ctx: &ExecCtx) -> bool {
+    old.iter().any(may_toast)
+        && layout(t, old, ctx, &HashSet::new())
+            .1
+            .iter()
+            .any(|e| new.is_none_or(|n| !same(n.get(e.col), old.get(e.col))))
 }
 
 /// A row is about to be inserted (heap_insert and its index entries).
@@ -1449,7 +1473,7 @@ pub fn inserted_with(
     };
     note_compression_len(t, row, Some(key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        untracked_write(t, row, ctx, Some(tuple))?;
+        untracked_write(t, row, None, ctx, Some(tuple))?;
         return Ok(None);
     }
     let (len, exts) = layout_len(t, row, ctx, &HashSet::new(), Some(tuple));
@@ -1585,7 +1609,7 @@ pub fn updated(
 ) -> Result<Option<(Tid, bool)>> {
     note_compression(t, new, Some(new_key), ctx);
     if !ensure(t, indexes, ctx)? {
-        untracked_write(t, new, ctx, None)?;
+        untracked_write(t, new, Some(old), ctx, None)?;
         return Ok(None);
     }
     let db = &ctx.sess.db;
@@ -1703,8 +1727,11 @@ pub fn raw_cid(table: u32, tid: Tid, db: &Database) -> Option<u32> {
 }
 
 /// A row is about to be deleted (heap_delete, and its out-of-line values).
-pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], ctx: &ExecCtx) -> Result<()> {
+pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx: &ExecCtx) -> Result<()> {
     if !ensure(t, indexes, ctx)? {
+        if t.toast != 0 && toast_gone(t, old, None, ctx) {
+            lock_toast(t, ctx)?;
+        }
         return Ok(());
     }
     let db = &ctx.sess.db;

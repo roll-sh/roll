@@ -872,6 +872,15 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (`scan::Xltw`); idle_in_transaction_session_timeout, transaction_timeout and
   idle_session_timeout were ignored (the FATALs, idle or running: `server.rs` `IdleRead`,
   `Session::idle_timeout`, `Txn::txn_deadline`). isolation STATUS.md has the details.
+  Then deadlock-parallel matches (121 of 122 specs, 1,647 of 1,648 permutations; only
+  intra-grant-inplace's accepted `DELETE FROM pg_class` is left): a PARALLEL SAFE
+  `LANGUAGE internal` alias of a restricted built-in was planned with the built-in's
+  proparallel, so it never ran in a debug_parallel_query worker and kept its advisory lock.
+  DETACH ... FINALIZE waits for older snapshots; tables too big for the size model take the
+  TOAST lock on the same deletes and updates as modelled ones; a terminated lock wait's FATAL
+  keeps its CONTEXT. The engine's own isolation specs (`tests/isolation/specs/roll-*.spec`,
+  `PGISOLATION_EXTRA=1`) cover what applications rely on beyond the suite: advisory locks,
+  NOWAIT / SKIP LOCKED, lock queue order, LISTEN / NOTIFY, sequences, serialization retries.
 
 ## Repository layout
 

@@ -2579,7 +2579,7 @@ pub fn delete_row(
     ssi_change(t, indexes, dkey, old, None, ctx)?;
     // heap_delete sets its xmax: writers of its unique keys wait for us now.
     ctx.txn.borrow_mut().row_modified(dkey);
-    super::sizing::deleted(t, indexes, dkey, ctx)?;
+    super::sizing::deleted(t, indexes, dkey, old, ctx)?;
     super::pgstat::count_delete(ctx, t.oid);
     ctx.txn.borrow_mut().delete(dkey.to_vec())?;
     delete_index_entries(t, indexes, old, dkey, ctx)

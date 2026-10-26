@@ -29,6 +29,11 @@
 //!
 //! Environment:
 //! - `PGISOLATION_ONLY=a,b,c`: run only these specs. `PGISOLATION_SKIP=a,b`: leave these out.
+//! - `PGISOLATION_EXTRA=1`: also run the engine's own specs, `tests/isolation/specs/*.spec`
+//!   (concurrency semantics beyond the suite's: advisory locks, NOWAIT / SKIP LOCKED, lock
+//!   queues, LISTEN / NOTIFY, sequences, serialization failures, DETACH ... FINALIZE), after
+//!   the schedule; the reference's output is their expected one. (Use another
+//!   `PGISOLATION_REPORT_DIR`: they aren't the suite's score.)
 //! - `PGISOLATION_REPORT_ONLY=1`: don't run anything, rebuild the report from saved outputs.
 //! - `PGISOLATION_REUSE_REFERENCE=1`: reuse a saved reference output when there is one (runs
 //!   the engine only).
@@ -125,11 +130,22 @@ fn pg_isolation() {
         // named.)
         let extra: Vec<_> = only
             .iter()
-            .filter(|t| !schedule.contains(t) && cfg.src.join("specs").join(format!("{t}.spec")).exists())
+            .filter(|t| !schedule.contains(t) && spec_path(&cfg, t).exists())
             .cloned()
             .collect();
         schedule.retain(|t| only.contains(t));
         schedule.extend(extra);
+    }
+    if std::env::var("PGISOLATION_EXTRA").is_ok_and(|v| v == "1") {
+        let mut own: Vec<String> = std::fs::read_dir(extra_specs_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".spec").map(str::to_string))
+            .filter(|t| !schedule.contains(t))
+            .collect();
+        own.sort();
+        schedule.extend(own);
     }
     schedule.retain(|t| !cfg.skip.contains(t));
     if !cfg.report_only {
@@ -1680,8 +1696,21 @@ impl Drop for EngineProc {
     }
 }
 
+/// The engine's own specs (`tests/isolation/specs`): concurrency semantics applications rely
+/// on beyond the suite's, run with `PGISOLATION_EXTRA=1` (after the schedule) or by name in
+/// `PGISOLATION_ONLY`, with the reference's output as their expected one.
+fn extra_specs_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/isolation/specs")
+}
+
+/// A spec's file: the suite's, else the engine's own.
+fn spec_path(cfg: &Config, test: &str) -> PathBuf {
+    let suite = cfg.src.join("specs").join(format!("{test}.spec"));
+    if suite.exists() { suite } else { extra_specs_dir().join(format!("{test}.spec")) }
+}
+
 fn load_spec(cfg: &Config, test: &str) -> Result<Spec, String> {
-    let path = cfg.src.join("specs").join(format!("{test}.spec"));
+    let path = spec_path(cfg, test);
     let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Specs naming pg_isolation_regress's database get the one this run uses.
     let src = if cfg.db != SPEC_DB { src.replace(SPEC_DB, &cfg.db) } else { src };
@@ -1692,7 +1721,7 @@ fn load_spec(cfg: &Config, test: &str) -> Result<Spec, String> {
 fn spec_roles(cfg: &Config, schedule: &[String]) -> BTreeSet<String> {
     let mut roles = BTreeSet::new();
     for t in schedule {
-        let Ok(src) = std::fs::read_to_string(cfg.src.join("specs").join(format!("{t}.spec"))) else {
+        let Ok(src) = std::fs::read_to_string(spec_path(cfg, t)) else {
             continue;
         };
         let words: Vec<&str> = src.split(|c: char| c.is_whitespace() || c == ';').filter(|w| !w.is_empty()).collect();

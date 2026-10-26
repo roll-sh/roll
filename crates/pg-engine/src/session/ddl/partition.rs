@@ -1158,6 +1158,10 @@ impl Ddl<'_, '_> {
         self.note_lock(t.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
         self.refresh_catalog();
         let t = self.cat.tables.get(&t.oid).cloned().unwrap_or(t);
+        // WaitForOlderSnapshots: a canceled concurrent detach finalized at once must still
+        // not finish under queries whose snapshots planned with the partition (they may
+        // hold no lock on it). (Before RemoveInheritance's checks, as Postgres.)
+        self.ctx.txn.borrow_mut().wait_for_older_snapshots()?;
         if t.inherits.first() != Some(&parent.oid) || t.partbound.is_none() {
             return Err(Error::new(
                 code::UNDEFINED_TABLE,

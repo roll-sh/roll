@@ -2761,6 +2761,16 @@ impl Txn {
         self.snapshot_fixed
     }
 
+    /// The session waits for its client between statements: a READ COMMITTED transaction
+    /// lets go of its last statement's snapshot (its xmin no longer holds back pruning or
+    /// WaitForOlderSnapshots: Postgres's backend then has xmin 0). The caller knows no cursor
+    /// or suspended portal still reads with it.
+    pub fn release_statement_snapshot(&mut self) {
+        if !self.isolation.txn_snapshot() {
+            self.xmin = None;
+        }
+    }
+
     /// CHECK_FOR_INTERRUPTS: a cancel, or the transaction's timeout (which ends the session).
     pub fn check_cancel(&self) -> Result<()> {
         if self.cancel.load(Ordering::Relaxed) {

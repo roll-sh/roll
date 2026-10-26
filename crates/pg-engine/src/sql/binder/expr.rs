@@ -7992,6 +7992,12 @@ impl Binder<'_, '_> {
         d.spread = false;
         d.strict = fdef.strict;
         d.volatility = fdef.volatility;
+        // Its parallel safety is the declared one (max_parallel_hazard reads the called
+        // function's proparallel): a PARALLEL SAFE alias of a restricted built-in runs in a
+        // worker, its locks a worker's (deadlock-parallel's lock_share / lock_excl).
+        if crate::sql::paths::parallel::func_parallel(&self.cat, d.oid) != fdef.parallel {
+            d.oid = fdef.oid;
+        }
         d.min_args = d.args.len();
         // A void built-in declared to return an integer gives its (Datum) 0 as that.
         let zero = match &fdef.ret {

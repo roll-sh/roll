@@ -16,11 +16,11 @@ run is a faithful isolationtester.
 
 ## Score
 
-| | before (round 17 start) | round 18 start | now |
-|---|---:|---:|---:|
-| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 120 of 122 (98.4%) |
-| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1646 of 1648 (99.9%) |
-| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 12232 of 12238 (100.0%) |
+| | before (round 17 start) | round 18 start | round 20 start | now |
+|---|---:|---:|---:|---:|
+| specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 120 of 122 (98.4%) | 121 of 122 (99.2%) |
+| permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1646 of 1648 (99.9%) | 1647 of 1648 (99.9%) |
+| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 12232 of 12238 (100.0%) | STEPS of 12238 (100.0%) |
 
 A *step* is one `step ...` line of isolationtester's output with what follows it (its rows,
 errors, notices, `<waiting ...>` and `<... completed>`); a permutation matches when all of its
@@ -35,7 +35,6 @@ it implemented over the old lock manager.
 | class | specs | permutations differing |
 |---|---|---:|
 | L2 | intra-grant-inplace | 1 |
-| L4 | deadlock-parallel | 1 |
 
 - **D1** (done, round 18, agent 56: all 56 permutations of detach-partition-concurrently-1..4
   match; see "DETACH PARTITION CONCURRENTLY" below).
@@ -50,15 +49,32 @@ it implemented over the old lock manager.
   (toast_save_datum / toast_delete_datum, as the size model lays the row out), takes
   RowExclusiveLock on the TOAST table until the transaction ends; DROP TABLE and TRUNCATE take
   AccessExclusiveLock on the TOAST table and index; REINDEX of a table locks its TOAST table
-  and index too. Not modelled: detoasting's AccessShareLock on the TOAST table when a read
-  fetches an out-of-line value, and deletes from tables too big for the size model.)
+  and index too. Since round 20 (agent 73) a table too big for the size model locks it for
+  the same statements as a modelled one (`sizing::lock_toast_changed`: a delete of a row
+  with an out-of-line value, an update saving or replacing one, not one keeping it; it used
+  to lock for any update of such a row and never for a delete; `big_tables.rs`
+  `toast_locks_past_the_model`, both paths against what PostgreSQL shows). Not modelled,
+  accepted: detoasting's AccessShareLock on the TOAST table and index. toast_fetch_datum
+  releases it as soon as the value is read (`table_close(toastrel, AccessShareLock)`), so
+  pg_locks never shows it after the statement; it only makes a read wait behind a REINDEX
+  of the TOAST index while that command runs, and the engine's TOAST index isn't a structure
+  a read could see half-built.)
 - (E1–E4, L1, L3, L5, L6, T1 and T2 match since round 18, agent 56: "What round 18 changed"
   below. I1, stats, and I2, horizons, too: see "Which differences are engine internals".)
 - **L2**: intra-grant-inplace's last permutation deletes the table's pg_class row with
   `DELETE FROM pg_class` (a catalog corruption Postgres permits a superuser); the engine
   refuses DML deleting catalog rows ("permission denied for table pg_class"), so the
   waits on that row and REVOKE's "cache lookup failed" don't happen. Not planned.
-- **L4**: A parallel worker's own advisory locks and the deadlock checker's queue reordering across a lock group: the engine runs the worker's part in the leader, so the order the waiters are woken in differs once.
+- (L4, deadlock-parallel, matches since round 20, agent 73. The engine does end a
+  debug_parallel_query worker's own locks with it; what differed was which queries ran as
+  that worker. A `LANGUAGE internal` alias of a built-in runs the built-in, and its call
+  carried the built-in's oid, so max_parallel_hazard read the built-in's proparallel ('r'
+  for pg_advisory_xact_lock) instead of the alias's PARALLEL SAFE. e1l's
+  `lock_excl(1,x) ... LIMIT 1` ran in the leader and kept its exclusive lock until e1c, where
+  Postgres's worker gives it back as it ends. The call now carries the alias's oid when the
+  two markings differ (`Binder::internal_call`). Locks a real parallel plan's lower part
+  takes, its functions' advisory locks, still stay with the leader: the engine's Gather is
+  an EXPLAIN node, its part below runs in the executor's thread; no spec or client sees it.)
 
 ## Per spec
 
@@ -222,13 +238,15 @@ it implemented over the old lock manager.
     Heap Fetches count every index entry it passes that isn't LP_DEAD on a page not
     all-visible, dead rows' included (`exec/scan.rs` `IosEntries`). VACUUM reports the dead
     tuples it had to keep (recently dead) as the table's n_dead_tup. Not modelled: horizons
-    per database (snapshots in other databases hold back this one's), and a READ COMMITTED
-    transaction idle between statements still holds its last statement's xmin.
+    per database (snapshots in other databases hold back this one's). (Since round 20,
+    agent 73, a READ COMMITTED transaction waiting for its client lets go of its last
+    statement's xmin unless a cursor or suspended portal reads with it, `Session::note_idle`;
+    it used to keep it until its next statement, holding back pruning and making a DETACH
+    ... FINALIZE wait for it, detach-partition-concurrently-3.)
 - (T2 was a fixed cap on PL/pgSQL nesting, not the stack: gone in round 18. D2's TOAST
   relations are modelled since round 18: the engine still stores out-of-line values in its
   rows' keyspace, and the TOAST table is a name, locks and its size model's chunks.)
-- What's left is two corner cases: L2's catalog-corrupting DELETE and L4's parallel lock
-  group.
+- What's left is one corner case: L2's catalog-corrupting DELETE (not planned).
 - **SSI** is implemented (`txn/ssi.rs`): no anomaly the suite checks commits, and the failures
   come where Postgres raises them. Not modelled: summarizing old serializable transactions into
   the SLRU when shared memory runs out (the engine keeps them until no snapshot needs them, the
@@ -273,6 +291,27 @@ failures predate round 17's lock manager); what differed:
   first statement after a SET turned it on) ends it idle or running, in lock and safe-snapshot
   waits, pg_sleep and scans (25P04; a statement_timeout not shorter than it doesn't arm, as
   enable_statement_timeout). `server.rs` `IdleRead::deadline`, `Session::idle_timeout`.
+- **pg_terminate_backend of a session in a lock wait**: its FATAL kept no CONTEXT; Postgres
+  raises it where the wait is, so it has the wait's `while updating tuple ...` line.
+  `wire_waits.rs` also checks deadlock reports in full (DETAIL with the processes and locks,
+  HINT, CONTEXT; rows, relations, advisory locks) and pg_cancel_backend / pg_terminate_backend
+  of a waiting, sleeping and idle session (the victim's error, then its connection).
+
+Beyond the suite (the engine's own specs, `tests/isolation/specs/roll-*.spec`, run with
+`PGISOLATION_EXTRA=1` or by name; the reference's output is their expected one, so they are
+checked the way the suite's are): advisory locks (session / transaction, shared /
+exclusive, try variants, stacking, unlock warnings, int4 pairs, pg_locks rows), NOWAIT and
+SKIP LOCKED for every strength held and asked for, and the job-queue patterns (`UPDATE ...
+WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED)`, a CTE deleting with RETURNING), lock queue
+order (a waiting AccessExclusive holds off a later AccessShare; NOWAIT behind it fails; a
+holder's upgrade goes first; a later FOR SHARE joins the share lockers past a waiting FOR
+UPDATE), LISTEN / NOTIFY (delivery at commit, order, duplicates folded, payloads,
+savepoints, listeners in a transaction, LISTEN / UNLISTEN at commit), sequences (gaps,
+setval outside the transaction, CACHE ranges, ALTER SEQUENCE waits), serialization failures
+and their retries (write skew, REPEATABLE READ's concurrent update / delete / lock / ON
+CONFLICT, read-only and deferrable), DETACH ... FINALIZE. All 65 permutations match; only
+the last needed a fix. (They were written against both servers and checked to wait and fail
+where the reference does: 20 waits, 27 errors, 19 notifications.)
 
 ## What round 18 changed (agent 56)
 
@@ -464,8 +503,10 @@ detach-partition-concurrently-1..4 went from 5 to 56 of 56 permutations. What ch
 - Also: PREPARE locks the relations its statement names (parse analysis), and DROP of a
   partition locks its parent AccessExclusive first (RangeVarCallbackForDropRelation), so
   queries planned with the partition wait for the drop.
-- Not modelled: FINALIZE's WaitForOlderSnapshots (transactions holding a snapshot but no lock
-  on the partition; no spec observes it, see L6).
+- FINALIZE waits for transactions holding snapshots older than its own (WaitForOlderSnapshots,
+  before RemoveInheritance's checks) since round 20, agent 73: a reader whose snapshot planned
+  with the partition but holds no lock on it delayed nothing before
+  (`roll-detach-finalize-snapshots`, below).
 
 Tests: `tests/wire.rs` `detach_partition_concurrently`, golden `detach_concurrently`.
 

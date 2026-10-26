@@ -212,3 +212,52 @@ fn measured_sizes_from_stored_rows() {
         assert_eq!(pages, ["[Bool(true), Float4(1500.0)]"]);
     });
 }
+
+/// The TOAST relation's RowExclusiveLock (toast_save_datum / toast_delete_datum) comes with
+/// the same statements whether the table is modelled or too big to be: a delete or update
+/// of a row with an out-of-line value takes it, one of a row without or keeping the value
+/// doesn't.
+#[test]
+fn toast_locks_past_the_model() {
+    let steps = [
+        ("delete a small row", "DELETE FROM tt WHERE id = 1"),
+        ("delete a row stored out of line", "DELETE FROM tt WHERE id = 1001"),
+        ("update keeping the value", "UPDATE tt SET n = n + 1 WHERE id = 1002"),
+        ("update replacing the value", "UPDATE tt SET v = 'short' WHERE id = 1003"),
+        ("insert a value out of line", "INSERT INTO tt SELECT 2000, 0, string_agg(md5(g::text), '') FROM generate_series(1, 400) g"),
+    ];
+    let toast_locked = "SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid() AND mode = 'RowExclusiveLock' \
+                        AND relation = (SELECT reltoastrelid FROM pg_class WHERE relname = 'tt')";
+    let run_all = |big: bool| -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = open(dir.path());
+        let go = || {
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            run(&mut s, "CREATE TABLE tt (id int PRIMARY KEY, n int, v text);\n\
+                INSERT INTO tt SELECT g, 0, 'small ' || g FROM generate_series(1, 1000) g;\n\
+                INSERT INTO tt SELECT 1000 + i, 0, string_agg(md5((i * 1000 + g)::text), '') FROM generate_series(1, 3) i, generate_series(1, 400) g GROUP BY i");
+            steps
+                .iter()
+                .map(|(name, sql)| {
+                    run(&mut s, &format!("BEGIN;\n{sql}"));
+                    let n = rows(&mut s, toast_locked).join("");
+                    run(&mut s, "ROLLBACK");
+                    format!("{name}: {n}")
+                })
+                .collect()
+        };
+        if big { with_max_versions(500, go) } else { go() }
+    };
+    let modelled = run_all(false);
+    assert_eq!(
+        modelled,
+        [
+            "delete a small row: [Int8(0)]",
+            "delete a row stored out of line: [Int8(1)]",
+            "update keeping the value: [Int8(0)]",
+            "update replacing the value: [Int8(1)]",
+            "insert a value out of line: [Int8(1)]",
+        ]
+    );
+    assert_eq!(run_all(true), modelled);
+}

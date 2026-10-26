@@ -43,6 +43,7 @@ impl Target {
             shared_preload_libraries: Vec::new(),
             locale: Default::default(),
             outbound: Vec::new(),
+            max_prepared_transactions: 0,
         };
         let engine = Engine::open(opts).unwrap();
         let opts = ServerOptions { auth: AuthMethod::ScramSha256 };
@@ -388,6 +389,111 @@ async fn connect_watched(
     (client, tokio::spawn(conn))
 }
 
+/// An error in full (DETAIL and HINT too), process and transaction numbers masked.
+fn full<T>(r: Result<T, tokio_postgres::Error>) -> String {
+    let Err(e) = &r else { return "ok".into() };
+    let Some(d) = e.as_db_error() else { return "connection closed".into() };
+    let mask = |s: &str| {
+        let mut out = String::new();
+        let mut digits = false;
+        for ch in s.chars() {
+            if ch.is_ascii_digit() {
+                if !digits {
+                    out.push('N');
+                }
+                digits = true;
+            } else {
+                digits = false;
+                out.push(ch);
+            }
+        }
+        out
+    };
+    let mut s = format!("{} {} {}", d.severity(), d.code().code(), d.message());
+    if let Some(x) = d.detail() {
+        s.push_str(&format!(" (DETAIL: {})", mask(x)));
+    }
+    if let Some(x) = d.hint() {
+        s.push_str(&format!(" (HINT: {x})"));
+    }
+    if let Some(x) = d.where_() {
+        s.push_str(&format!(" (CONTEXT: {})", mask_tuple(x)));
+    }
+    s
+}
+
+/// Deadlocks (rows, relations, advisory locks: the victim's error, DETAIL, HINT, CONTEXT),
+/// and what pg_cancel_backend / pg_terminate_backend do to a waiting, running or idle
+/// session.
+async fn deadlock_and_signal_cases(t: &Target) -> Vec<String> {
+    let mut out = Vec::new();
+    // (holder steps, victim steps; then the holder's last step waits and the victim's
+    // closes the cycle: the victim runs the deadlock check first, deadlock_timeout 100ms.)
+    let deadlocks: [(&str, &str, &str, &str, &str); 3] = [
+        ("rows", "UPDATE t SET v = v WHERE id = 1", "UPDATE t SET v = v WHERE id = 2",
+         "UPDATE t SET v = v WHERE id = 2", "UPDATE t SET v = v WHERE id = 1"),
+        ("relations", "LOCK TABLE t IN SHARE MODE", "LOCK TABLE u IN SHARE MODE",
+         "LOCK TABLE u IN EXCLUSIVE MODE", "LOCK TABLE t IN EXCLUSIVE MODE"),
+        ("advisory", "SELECT pg_advisory_xact_lock(11)", "SELECT pg_advisory_xact_lock(12)",
+         "SELECT pg_advisory_xact_lock(12)", "SELECT pg_advisory_xact_lock(11)"),
+    ];
+    for (name, h1, v1, h2, v2) in deadlocks {
+        let holder = t.connect(DB).await;
+        let victim = t.connect(DB).await;
+        holder.batch_execute(&format!("SET deadlock_timeout = '10s'; BEGIN; {h1}")).await.unwrap();
+        victim.batch_execute(&format!("SET deadlock_timeout = '100ms'; BEGIN; {v1}")).await.unwrap();
+        let waiting = tokio::spawn(async move {
+            let r = full(holder.simple_query(h2).await);
+            holder.batch_execute("ROLLBACK").await.unwrap();
+            r
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let v = full(victim.simple_query(v2).await);
+        victim.batch_execute("ROLLBACK").await.unwrap();
+        let h = waiting.await.unwrap();
+        out.push(format!("deadlock ({name}): victim {v}; the other {h}"));
+    }
+    // pg_cancel_backend / pg_terminate_backend of a session waiting, running, idle.
+    let admin = t.connect(DB).await;
+    let pid_of = async |c: &Client| -> i32 { c.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0) };
+    for (name, signal, busy) in [
+        ("cancel a lock wait", "pg_cancel_backend", Some("UPDATE t SET v = v WHERE id = 3")),
+        ("cancel a sleep", "pg_cancel_backend", Some("SELECT pg_sleep(30)")),
+        ("cancel an idle session", "pg_cancel_backend", None),
+        ("terminate a lock wait", "pg_terminate_backend", Some("UPDATE t SET v = v WHERE id = 3")),
+        ("terminate a sleep", "pg_terminate_backend", Some("SELECT pg_sleep(30)")),
+        ("terminate an idle session", "pg_terminate_backend", None),
+    ] {
+        let holder = t.connect(DB).await;
+        holder.batch_execute("BEGIN; SELECT v FROM t WHERE id = 3 FOR UPDATE").await.unwrap();
+        let (victim, ended) = connect_watched(t).await;
+        let victim = Arc::new(victim);
+        let pid = pid_of(&victim).await;
+        let run = busy.map(|q| {
+            let q = q.to_string();
+            let victim = victim.clone();
+            tokio::spawn(async move { full(victim.simple_query(&q).await) })
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let sent = full(admin.query(&format!("SELECT {signal}($1)"), &[&pid]).await);
+        let got = match run {
+            Some(r) => r.await.unwrap(),
+            None => "idle".into(),
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let next = full(victim.simple_query("SELECT 1").await);
+        drop(victim);
+        let end = match tokio::time::timeout(Duration::from_secs(5), ended).await {
+            Ok(Ok(Ok(()))) => "closed cleanly".to_string(),
+            Ok(Ok(Err(e))) => full::<()>(Err(e)),
+            _ => "still open".to_string(),
+        };
+        holder.batch_execute("ROLLBACK").await.unwrap();
+        out.push(format!("{name}: {signal} {sent}; the session: {got}; then {next}; connection: {end}"));
+    }
+    out
+}
+
 /// A cancel that arrives while the session is idle in a transaction block cancels nothing:
 /// the next statement runs.
 async fn idle_cancel_case(t: &Target) -> String {
@@ -425,6 +531,8 @@ async fn transcript(t: &Target) -> Vec<String> {
     drop(c);
     let mut lines = Vec::new();
     let mut note = |line: String| {
+        // (One line per case: a DETAIL's lines joined.)
+        let line = line.replace('\n', " | ");
         eprintln!("{line}");
         lines.push(line);
     };
@@ -441,6 +549,9 @@ async fn transcript(t: &Target) -> Vec<String> {
     }
     note(bounded("idle cancel".into(), idle_cancel_case(t)).await);
     for line in session_timeout_cases(t).await {
+        note(line);
+    }
+    for line in deadlock_and_signal_cases(t).await {
         note(line);
     }
     // Let the sessions end before dropping the database.

@@ -329,11 +329,14 @@ impl Conn {
         if (e.code == code::QUERY_CANCELED || e.code == code::CONNECTION_EXCEPTION)
             && self.terminated.as_ref().is_some_and(|t| t.load(Ordering::Relaxed))
         {
-            let fatal = Error::new(
+            let mut fatal = Error::new(
                 code::ADMIN_SHUTDOWN,
                 "terminating connection due to administrator command",
             )
             .fatal();
+            // (Raised where the statement was: its error context callbacks' lines, such as a
+            // lock wait's "while updating tuple ...", are the FATAL's.)
+            fatal.context = e.context.clone();
             return self.error(&fatal);
         }
         if e.severity == crate::error::Severity::Fatal {
@@ -1263,6 +1266,7 @@ fn ready_for_query(c: &mut Conn, s: &Session) -> std::io::Result<()> {
     }
     c.ready(s.status())?;
     s.notifications_idle();
+    s.note_idle();
     c.at_ready = true;
     Ok(())
 }
