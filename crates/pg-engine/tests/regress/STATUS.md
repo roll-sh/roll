@@ -293,8 +293,17 @@ What changed:
   before `b = (InitPlan 1).col1` in written order. The engine charged every sub-select as a
   SubPlan run per row. (Subset runs identical to the base, 36e828bd.)
 
+- **IN / EXISTS pulled up with sub-selects in the sub-select's own WHERE** (agent 51's
+  finding; `sublink.rs` `any_join`, `exists_join`): convert_ANY_sublink_to_join /
+  convert_EXISTS_sublink_to_join make the sub-select part of the join tree, its own
+  sub-selects (`y NOT IN (SELECT ...)`'s hashed SubPlan, a scalar one reading its row) quals
+  of the semi join's side. The engine kept the IN a hashed SubPlan and the EXISTS a SubPlan
+  per row. Left: such a sub-select reading the outer query (`... NOT IN (SELECT z ... WHERE
+  z < t.b)`), which Postgres makes the semi join's Join Filter; the engine keeps the IN a
+  SubPlan. (Subset runs identical to the base, 894057e4.)
+
 Goldens: `tests/sql/a55_lateral_bound.sql`, `a55_sublink_written.sql`, `a55_partial_agg.sql`,
-`a55_initplan_quals.sql`
+`a55_initplan_quals.sql`, `a55_sublink_quals.sql`
 (recorded from PostgreSQL 18.6; rows of the right join's null-extended row, NULL keys in semi /
 anti joins, under a left join's ON). No wrong results were found comparing rows.
 
