@@ -211,10 +211,16 @@ pub struct Probe {
     pub keys: Vec<(K, Norm)>,
     /// The join condition beyond the keys, over the joined row.
     pub cond: Option<K>,
+    /// The join has a condition no kernel does: an outer row with candidates goes to the
+    /// executor's thread (its join node checks them), one without is the workers'.
+    pub defer: bool,
     pub kind: JoinKind,
     pub nright: usize,
     /// The joined rows' columns anything reads (the condition's too; None: all).
     pub keep: Option<Box<[bool]>>,
+    /// A right or full join's inner rows some outer row matched (its node puts out the
+    /// others once the outer rows are done).
+    pub matched: Option<Arc<[std::sync::atomic::AtomicBool]>>,
 }
 
 /// A joined row as a stage gives it: made (a row of its own), or its outer and inner rows
@@ -265,6 +271,9 @@ impl Probe {
         }
         let t = &*self.built;
         let span = t.lookup(key);
+        if self.defer && span.1 > 0 {
+            return false;
+        }
         for i in 0..span.1 {
             let j = t.cand(span, i);
             if let Some(c) = &self.cond {
@@ -280,6 +289,11 @@ impl Probe {
                 break;
             }
         }
+        if let Some(m) = &self.matched {
+            for &j in matches.iter() {
+                m[j as usize].store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         true
     }
 
@@ -290,7 +304,7 @@ impl Probe {
             JoinKind::Semi if !matches.is_empty() => f(Joined::Row(l)),
             JoinKind::Anti if matches.is_empty() => f(Joined::Row(l)),
             JoinKind::Semi | JoinKind::Anti => {}
-            JoinKind::Left if matches.is_empty() => {
+            JoinKind::Left | JoinKind::Full if matches.is_empty() => {
                 let mut o = l;
                 o.extend(std::iter::repeat_n(Value::Null, self.nright));
                 f(Joined::Row(o));
@@ -304,6 +318,13 @@ impl Probe {
     }
 }
 
+/// A pipeline's stage, as the workers run it over the rows of the stage below: a hash
+/// join's probe, or a nested loop's inner index scans (`lookup`).
+pub enum Stage {
+    Hash(Probe),
+    Lookup(Box<super::lookup::Lookup>),
+}
+
 /// What a pipeline's node gives the node above: a row through `.1` stages (the scan's
 /// own rows are 0; `ALL`: a node outside a pipeline's), or an aggregated part.
 pub enum Item {
@@ -314,39 +335,67 @@ pub enum Item {
 /// The level of a row no stage is left to run on.
 pub const ALL: u8 = u8::MAX;
 
-/// Scratch for `run_stages`: per stage, its matches and the key vector.
+/// Scratch for `run_stages`: per stage, its matches (a lookup's: its rows) and the key
+/// vector.
 #[derive(Default)]
 pub struct Scratch {
     matches: Vec<Vec<u32>>,
+    rows: Vec<Vec<Row>>,
     key: Vec<Value>,
+    lookups: Vec<super::lookup::LookupScratch>,
+}
+
+impl Scratch {
+    /// The lookup stages' counts so far, into the stages (as a chunk ends).
+    pub fn flush(&mut self, stages: &[Arc<Stage>]) {
+        for (st, sc) in stages.iter().zip(self.lookups.iter_mut()) {
+            if let Stage::Lookup(l) = &**st {
+                l.take_counts(sc);
+            }
+        }
+    }
 }
 
 /// `row` (through stages `..from`) through `stages[from..]`; each row that comes out goes
 /// to `emit` with the stages it went through (all of them, or fewer where a kernel left
 /// one to the executor's thread). The last stage's rows come as they are (`Joined`).
-pub fn run_stages(stages: &[Arc<Probe>], from: usize, row: Row, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+pub fn run_stages(stages: &[Arc<Stage>], from: usize, row: Row, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
     if from == stages.len() {
         emit(Joined::Row(row), from as u8);
         return;
     }
     if s.matches.len() < stages.len() {
         s.matches.resize_with(stages.len(), Vec::new);
+        s.rows.resize_with(stages.len(), Vec::new);
+        s.lookups.resize_with(stages.len(), Default::default);
     }
-    let mut matches = std::mem::take(&mut s.matches[from]);
-    match stages[from].matches(&row, &mut s.key, &mut matches) {
-        false => emit(Joined::Row(row), from as u8),
-        true => {
-            let last = from + 1 == stages.len();
-            stages[from].emit(row, &matches, &mut |j| {
-                if last {
-                    emit(j, from as u8 + 1);
-                } else {
-                    run_stages(stages, from + 1, j.into_row(), s, emit);
-                }
-            });
+    match &*stages[from] {
+        Stage::Hash(p) => {
+            let mut matches = std::mem::take(&mut s.matches[from]);
+            match p.matches(&row, &mut s.key, &mut matches) {
+                false => emit(Joined::Row(row), from as u8),
+                true => p.emit(row, &matches, &mut |j| onward(stages, from, j, s, emit)),
+            }
+            s.matches[from] = matches;
+        }
+        Stage::Lookup(lk) => {
+            let mut rows = std::mem::take(&mut s.rows[from]);
+            match lk.rows(&row, &mut rows, &mut s.lookups[from]) {
+                false => emit(Joined::Row(row), from as u8),
+                true => lk.emit(row, &rows, &mut |j| onward(stages, from, j, s, emit)),
+            }
+            s.rows[from] = rows;
         }
     }
-    s.matches[from] = matches;
+}
+
+/// A row stage `from` made, to the stage after it (or out, after the last).
+fn onward(stages: &[Arc<Stage>], from: usize, j: Joined, s: &mut Scratch, emit: &mut dyn FnMut(Joined, u8)) {
+    if from + 1 == stages.len() {
+        emit(j, from as u8 + 1);
+    } else {
+        run_stages(stages, from + 1, j.into_row(), s, emit);
+    }
 }
 
 #[cfg(test)]

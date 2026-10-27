@@ -396,6 +396,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     *nright,
                 );
                 nl.key = Arc::as_ptr(plan) as usize;
+                nl.keep = join_keep(need, cond.as_ref(), *nleft + *nright);
                 if let Some(m) = meta.memoize.as_ref().filter(|_| !params.is_empty()) {
                     nl.memo = Some(Memoize {
                         keys: m.keys.clone(),
@@ -2792,6 +2793,13 @@ struct NestLoopNode {
     fixed: bool,
     /// Its plan's instrumentation key (EXPLAIN ANALYZE's rows the join filter removed).
     key: usize,
+    /// The joined rows' columns anything reads (None: all).
+    keep: Option<Box<[bool]>>,
+    /// Its inner scans run in a parallel scan's workers below (`lookup`): the level of its
+    /// rows (`pipe::ALL`: not), and the stage (its statistics are counted as it ends).
+    level: u8,
+    tried: bool,
+    stage: Option<Arc<super::pipe::Stage>>,
 }
 
 impl NestLoopNode {
@@ -2822,6 +2830,41 @@ impl NestLoopNode {
             memo: None,
             fixed,
             key: 0,
+            keep: None,
+            level: super::pipe::ALL,
+            tried: false,
+            stage: None,
+        }
+    }
+
+    /// Its inner scans as a stage a parallel scan's workers run (`lookup`), when they can
+    /// be one.
+    fn lookup_stage(&mut self, ctx: &ExecCtx) -> Result<Option<Arc<super::pipe::Stage>>> {
+        // (A memoized inner side scans once per distinct key: its scans' counts differ.)
+        if self.memo.is_some() || self.fixed || self.right.is_some() {
+            return Ok(None);
+        }
+        let lk = super::lookup::Lookup::new(
+            self.kind,
+            &self.right_plan,
+            &self.params,
+            self.cond.as_ref(),
+            self.nleft,
+            self.nright,
+            self.keep.clone(),
+            ctx,
+        )?;
+        let st = lk.map(|l| Arc::new(super::pipe::Stage::Lookup(Box::new(l))));
+        self.stage = st.clone();
+        Ok(st)
+    }
+
+    /// The stage's statistics so far (`Lookup::flush`).
+    fn flush(&self, ctx: &ExecCtx) {
+        if let Some(st) = &self.stage
+            && let super::pipe::Stage::Lookup(l) = &**st
+        {
+            l.flush(ctx);
         }
     }
 
@@ -2914,8 +2957,22 @@ impl NestLoopNode {
     }
 }
 
-impl Node for NestLoopNode {
-    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+impl NestLoopNode {
+    /// The next row (with its level) or part.
+    fn step(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        use super::pipe::Item;
+        if !self.tried {
+            self.tried = true;
+            if let Some(st) = self.lookup_stage(ctx)?
+                && let Some(l) = self.left.pipeline(vec![st], None, ctx)?
+            {
+                self.level = l + 1;
+                super::lookup::note_started();
+            } else {
+                self.stage = None;
+            }
+        }
+        let level = self.level;
         loop {
             if let Some(i) = self.unmatched_right.as_mut() {
                 // RIGHT/FULL: right rows that matched nothing.
@@ -2926,18 +2983,29 @@ impl Node for NestLoopNode {
                     if !self.right_matched[j] {
                         let mut out = vec![Value::Null; self.nleft];
                         out.extend(rows[j].iter().cloned());
-                        return Ok(Some(out));
+                        return Ok(Some(Item::Row(out, level)));
                     }
                 }
                 return Ok(None);
             }
             if self.cur.is_none() {
-                match self.left.next(ctx)? {
+                let next = match level {
+                    super::pipe::ALL => self.left.next(ctx)?,
+                    _ => match self.left.next_item(ctx)? {
+                        None => None,
+                        Some(Item::Part(p)) => return Ok(Some(Item::Part(p))),
+                        // (Joined in the workers already.)
+                        Some(Item::Row(r, l)) if l >= level => return Ok(Some(Item::Row(r, l))),
+                        Some(Item::Row(r, _)) => Some(r),
+                    },
+                };
+                match next {
                     Some(l) => {
                         let rows = self.right_rows(&l, ctx)?;
                         self.cur = Some((l, rows, 0, false));
                     }
                     None => {
+                        self.flush(ctx);
                         if matches!(self.kind, JoinKind::Right | JoinKind::Full) {
                             if self.right.is_none() {
                                 let _ = self.right_rows(&[], ctx)?;
@@ -2973,13 +3041,13 @@ impl Node for NestLoopNode {
                     JoinKind::Semi => {
                         let out = l.clone();
                         self.cur = None;
-                        return Ok(Some(out));
+                        return Ok(Some(Item::Row(out, level)));
                     }
                     JoinKind::Anti => {
                         self.cur = None;
                         break;
                     }
-                    _ => return Ok(Some(combined)),
+                    _ => return Ok(Some(Item::Row(combined, level))),
                 }
             }
             let Some((l, _, _, matched)) = self.cur.take() else {
@@ -2990,11 +3058,56 @@ impl Node for NestLoopNode {
                     JoinKind::Left | JoinKind::Full => {
                         let mut out = l;
                         out.extend(std::iter::repeat_n(Value::Null, self.nright));
-                        return Ok(Some(out));
+                        return Ok(Some(Item::Row(out, level)));
                     }
-                    JoinKind::Anti => return Ok(Some(l)),
+                    JoinKind::Anti => return Ok(Some(Item::Row(l, level))),
                     _ => {}
                 }
+            }
+        }
+    }
+}
+
+impl Node for NestLoopNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        match self.step(ctx)? {
+            None => Ok(None),
+            Some(super::pipe::Item::Row(r, _)) => Ok(Some(r)),
+            Some(super::pipe::Item::Part(_)) => Err(crate::error::internal("parts from a nested loop")),
+        }
+    }
+
+    fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        self.step(ctx)
+    }
+
+    fn pipeline(
+        &mut self,
+        above: Vec<Arc<super::pipe::Stage>>,
+        spec: Option<Arc<super::partial::Spec>>,
+        ctx: &ExecCtx,
+    ) -> Result<Option<u8>> {
+        if self.tried || self.cur.is_some() {
+            return Ok(None);
+        }
+        let with_spec = spec.is_some();
+        let Some(st) = self.lookup_stage(ctx)? else {
+            self.tried = !with_spec;
+            return Ok(None);
+        };
+        let mut stages = vec![st];
+        stages.extend(above);
+        match self.left.pipeline(stages, spec, ctx)? {
+            Some(l) => {
+                self.tried = true;
+                self.level = l + 1;
+                super::lookup::note_started();
+                Ok(Some(l + 1))
+            }
+            None => {
+                self.stage = None;
+                self.tried = !with_spec;
+                Ok(None)
             }
         }
     }
@@ -3119,6 +3232,8 @@ struct HashJoinNode {
     level: u8,
     /// Whether that was tried.
     tried: bool,
+    /// A right or full join's inner rows the workers matched (`pipe::Probe::matched`).
+    shared_matched: Option<Arc<[std::sync::atomic::AtomicBool]>>,
 }
 
 /// What a join's output needs copied: `need` and the columns its condition reads.
@@ -3154,6 +3269,7 @@ impl HashJoinNode {
             rnorm,
             level: super::pipe::ALL,
             tried: false,
+            shared_matched: None,
             kind,
             left,
             right_plan,
@@ -3349,10 +3465,13 @@ impl HashJoinNode {
     /// This join's probe as a stage a parallel scan's workers run (`pipe`), when it can
     /// be one: a hash join (not a merge join's, not one returning unmatched inner rows)
     /// whose outer keys and condition compile to kernels. Builds the table.
-    fn probe_stage(&mut self, ctx: &ExecCtx) -> Result<Option<Arc<super::pipe::Probe>>> {
+    fn probe_stage(&mut self, ctx: &ExecCtx) -> Result<Option<Arc<super::pipe::Stage>>> {
         use super::kernel::compile;
         if self.merge
-            || !matches!(self.kind, JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti)
+            || !matches!(
+                self.kind,
+                JoinKind::Inner | JoinKind::Left | JoinKind::Semi | JoinKind::Anti | JoinKind::Right | JoinKind::Full
+            )
             || ctx.instrumented()
         {
             return Ok(None);
@@ -3366,22 +3485,34 @@ impl HashJoinNode {
         else {
             return Ok(None);
         };
-        let cond = match &self.cond {
+        // (A condition without a kernel: the rows with candidates are checked here.)
+        let (cond, defer) = match &self.cond {
             Some(c) => match compile(c) {
-                Some(k) => Some(k),
-                None => return Ok(None),
+                Some(k) => (Some(k), false),
+                None => (None, true),
             },
-            None => None,
+            None => (None, false),
         };
+        // (Unmatched inner rows need every outer row's matches seen.)
+        if defer && matches!(self.kind, JoinKind::Right | JoinKind::Full) {
+            return Ok(None);
+        }
         self.build(ctx)?;
-        Ok(Some(Arc::new(super::pipe::Probe {
-            built: self.table.clone().unwrap(),
+        let built = self.table.clone().unwrap();
+        let matched = matches!(self.kind, JoinKind::Right | JoinKind::Full).then(|| {
+            (0..built.rows.len()).map(|_| std::sync::atomic::AtomicBool::new(false)).collect::<Arc<[_]>>()
+        });
+        self.shared_matched = matched.clone();
+        Ok(Some(Arc::new(super::pipe::Stage::Hash(super::pipe::Probe {
+            built,
             keys,
             cond,
+            defer,
             kind: self.kind,
             nright: self.nright,
             keep: self.keep.clone(),
-        })))
+            matched,
+        }))))
     }
 
     /// The next row (with its level) or part.
@@ -3453,6 +3584,12 @@ impl HashJoinNode {
                     }
                     None => {
                         if matches!(self.kind, JoinKind::Right | JoinKind::Full) {
+                            // (The rows the workers matched, with the ones matched here.)
+                            if let Some(m) = self.shared_matched.take() {
+                                for (a, b) in self.matched.iter_mut().zip(m.iter()) {
+                                    *a |= b.load(std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
                             // ExecScanHashTableForUnmatched: bucket by bucket (a merge
                             // join: in the inner side's order).
                             let t = self.table.as_ref().unwrap();
@@ -3526,7 +3663,7 @@ impl Node for HashJoinNode {
 
     fn pipeline(
         &mut self,
-        above: Vec<Arc<super::pipe::Probe>>,
+        above: Vec<Arc<super::pipe::Stage>>,
         spec: Option<Arc<super::partial::Spec>>,
         ctx: &ExecCtx,
     ) -> Result<Option<u8>> {

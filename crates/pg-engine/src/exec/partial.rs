@@ -119,6 +119,26 @@ impl SumNum {
         self.n += 1;
     }
 
+    /// A value given as its unscaled i128 `v` and scale `vs` added (`add`'s sum, exactly).
+    pub fn add_wide(&mut self, v: i128, vs: u32) {
+        match self.small {
+            None => self.small = Some((v, vs)),
+            Some((acc, s)) => {
+                let ns = s.max(vs);
+                let r = (|| {
+                    let a = acc.checked_mul(10i128.checked_pow(ns - s)?)?;
+                    let b = v.checked_mul(10i128.checked_pow(ns - vs)?)?;
+                    a.checked_add(b)
+                })();
+                match r {
+                    Some(r) => self.small = Some((r, ns)),
+                    None => self.add_big(Numeric::from_parts(num_bigint::BigInt::from(v), vs)),
+                }
+            }
+        }
+        self.n += 1;
+    }
+
     /// Another part's rows added (an exact sum: the same in any order).
     pub fn merge(&mut self, o: SumNum) {
         if let Some((v, s)) = o.small {
@@ -192,7 +212,20 @@ impl Partial {
 /// count(*)), whether it skips NULLs, and its empty partial state.
 pub struct Spec {
     pub keys: Vec<K>,
+    /// Per key, whether it is a bpchar: grouped without its trailing spaces (bpchareq), the
+    /// group keeping its first row's value.
+    pub trim: Vec<bool>,
     pub aggs: Vec<(Option<K>, bool, Partial)>,
+    /// Whether the executor's thread reads `Part::seq` (the hash table's order model).
+    pub seq: bool,
+}
+
+/// A bpchar key's value as its groups compare it.
+fn trimmed(v: Value) -> Value {
+    match v {
+        Value::Text(s) if s.ends_with(' ') => Value::text(s.trim_end_matches(' ')),
+        v => v,
+    }
 }
 
 /// A part of a chunk's rows aggregated: its groups (keys and states, numbered by first
@@ -202,6 +235,8 @@ pub struct Part {
     pub groups: Vec<(Vec<Value>, Vec<Partial>)>,
     pub seq: Vec<u32>,
     pub read: u64,
+    /// The rows aggregated.
+    pub rows: usize,
 }
 
 /// A chunk's rows as they come: aggregated parts, and rows left to the serial path (each
@@ -218,9 +253,12 @@ pub struct Partials<'a> {
     spec: &'a Spec,
     index: hashbrown::HashMap<Box<[Value]>, u32, super::fasthash::FastState>,
     part: Part,
-    /// The keys and arguments a row computes (those that aren't columns or constants).
+    /// The keys and arguments a row computes (those that aren't columns or constants), and
+    /// per argument its exact number when a numeric sum's was computed without a value
+    /// (`K::num`).
     key: Vec<Value>,
     args: Vec<Value>,
+    nums: Vec<Option<(i128, u32)>>,
 }
 
 /// A kernel's value over `row`: a column's or constant's in place, else the next of the
@@ -251,9 +289,11 @@ fn computed(k: &K) -> bool {
     !matches!(k, K::Col(_) | K::Const(_))
 }
 
-/// A row's group key as it is (its columns not copied), to look its group up by.
+/// A row's group key as its groups compare it (its columns not copied; bpchar keys
+/// trimmed, computed), to look its group up by.
 struct KeyRef<'x, R: ?Sized> {
     keys: &'x [K],
+    trim: &'x [bool],
     row: &'x R,
     computed: &'x [Value],
 }
@@ -261,7 +301,14 @@ struct KeyRef<'x, R: ?Sized> {
 impl<R: Cols + ?Sized> KeyRef<'_, R> {
     fn each(&self, mut f: impl FnMut(&Value) -> bool) -> bool {
         let mut at = 0;
-        self.keys.iter().all(|k| f(value(k, self.row, self.computed, &mut at)))
+        self.keys.iter().zip(self.trim).all(|(k, t)| {
+            if *t {
+                at += 1;
+                f(&self.computed[at - 1])
+            } else {
+                f(value(k, self.row, self.computed, &mut at))
+            }
+        })
     }
 }
 
@@ -292,9 +339,10 @@ impl<'a> Partials<'a> {
         Partials {
             spec,
             index: Default::default(),
-            part: Part { groups: Vec::new(), seq: Vec::new(), read: 0 },
+            part: Part { groups: Vec::new(), seq: Vec::new(), read: 0, rows: 0 },
             key: Vec::with_capacity(spec.keys.len()),
             args: Vec::with_capacity(spec.aggs.len()),
+            nums: Vec::with_capacity(spec.aggs.len()),
         }
     }
 
@@ -307,25 +355,41 @@ impl<'a> Partials<'a> {
     /// (false; the caller ends the part first: `take`). Its columns are read in place.
     pub fn row<R: Cols + ?Sized>(&mut self, row: &R) -> bool {
         self.key.clear();
-        for k in self.spec.keys.iter().filter(|k| computed(k)) {
+        for (k, t) in self.spec.keys.iter().zip(&self.spec.trim) {
+            if !computed(k) && !*t {
+                continue;
+            }
             match k.run(row) {
-                Some(v) => self.key.push(v),
+                Some(v) => self.key.push(if *t { trimmed(v) } else { v }),
                 None => return false,
             }
         }
         self.args.clear();
-        for a in self.spec.aggs.iter().filter_map(|(a, _, _)| a.as_ref()).filter(|a| computed(a)) {
+        self.nums.clear();
+        for (a, _, p) in self.spec.aggs.iter() {
+            let Some(a) = a.as_ref().filter(|a| computed(a)) else { continue };
+            // (A numeric sum's argument summed exactly as it is computed: no value made.)
+            if matches!(p, Partial::SumNum(_))
+                && matches!(a, K::Num { .. })
+                && let Some(r) = a.num(row)
+            {
+                // (A non-NULL stand-in: `add_wide` takes the number.)
+                self.args.push(if r.is_some() { Value::Bool(true) } else { Value::Null });
+                self.nums.push(r);
+                continue;
+            }
             match a.run(row) {
                 Some(v) => self.args.push(v),
                 None => return false,
             }
+            self.nums.push(None);
         }
         // (Columns past the row's end: left to the serial path, as `run` would.)
         let present = |k: &K| !matches!(k, K::Col(i) if row.col(*i).is_none());
         if !self.spec.keys.iter().all(present) || !self.spec.aggs.iter().filter_map(|a| a.0.as_ref()).all(present) {
             return false;
         }
-        let kr = KeyRef { keys: &self.spec.keys, row, computed: &self.key };
+        let kr = KeyRef { keys: &self.spec.keys, trim: &self.spec.trim, row, computed: &self.key };
         let g = self.index.get(&kr).map(|g| *g as usize);
         // (A state that can't take its value leaves the whole row to the serial path:
         // checked before anything changes.)
@@ -349,9 +413,16 @@ impl<'a> Partials<'a> {
                     key.push(v.clone());
                     true
                 });
+                // (The group's own key: its first row's values, bpchars untrimmed.)
+                let mut own = key.clone();
+                for ((k, t), v) in self.spec.keys.iter().zip(&self.spec.trim).zip(own.iter_mut()) {
+                    if *t {
+                        *v = k.run(row).unwrap_or(Value::Null);
+                    }
+                }
                 let key: Box<[Value]> = key.into_boxed_slice();
                 let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
-                self.part.groups.push((key.to_vec(), states));
+                self.part.groups.push((own, states));
                 let g = self.part.groups.len() - 1;
                 self.index.insert(key, g as u32);
                 g
@@ -359,26 +430,34 @@ impl<'a> Partials<'a> {
         };
         let mut at = 0;
         for (i, (a, skip, _)) in self.spec.aggs.iter().enumerate() {
+            let ci = at;
             let v = arg(a, row, &self.args, &mut at);
             if !skipped(a, *skip, v) {
-                self.part.groups[g].1[i].add(v);
+                let wide = if at > ci { self.nums[ci] } else { None };
+                match (&mut self.part.groups[g].1[i], wide) {
+                    (Partial::SumNum(sn), Some((n, sc))) => sn.add_wide(n, sc),
+                    (st, _) => st.add(v),
+                }
             }
         }
-        self.part.seq.push(g as u32);
+        if self.spec.seq {
+            self.part.seq.push(g as u32);
+        }
+        self.part.rows += 1;
         true
     }
 
     /// Rows aggregated in the part so far.
     pub fn rows(&self) -> usize {
-        self.part.seq.len()
+        self.part.rows
     }
 
     /// The part so far (the next one starts empty).
     pub fn take(&mut self) -> Option<Part> {
-        if self.part.read == 0 && self.part.seq.is_empty() {
+        if self.part.read == 0 && self.part.rows == 0 {
             return None;
         }
         self.index.clear();
-        Some(std::mem::replace(&mut self.part, Part { groups: Vec::new(), seq: Vec::new(), read: 0 }))
+        Some(std::mem::replace(&mut self.part, Part { groups: Vec::new(), seq: Vec::new(), read: 0, rows: 0 }))
     }
 }

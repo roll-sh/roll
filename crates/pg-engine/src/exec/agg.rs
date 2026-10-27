@@ -2566,6 +2566,18 @@ impl AggNode {
 
     /// The order groups come out in: a GroupAggregate's (the input sorted by the group
     /// keys, as for aggregates with DISTINCT / ORDER BY) or a HashAggregate's table's.
+    /// Whether `group_order` puts the groups in the hash table's order (`GroupOrder`):
+    /// not when they come sorted.
+    fn hash_ordered(&self, ctx: &ExecCtx) -> bool {
+        if self.aggs.iter().any(|a| a.distinct || !a.order_by.is_empty()) {
+            return false;
+        }
+        match &self.plan {
+            Some(plan) => super::pghash::agg_estimate(plan, ctx).sorted.is_none(),
+            None => false,
+        }
+    }
+
     fn group_order(
         &self,
         keys: &[Vec<Value>],
@@ -2663,7 +2675,7 @@ impl AggNode {
     /// through hash join probes in its workers, `pipe`): when the input is one that can and
     /// every key and aggregate can be: kernels for the keys and arguments, exact
     /// aggregates without DISTINCT, ORDER BY, FILTER or direct arguments.
-    fn partial_run(&self, input: &mut BoxNode, ctx: &ExecCtx) -> Result<bool> {
+    fn partial_run(&self, input: &mut BoxNode, colls: &[Option<KeyNorm>], seq: bool, ctx: &ExecCtx) -> Result<bool> {
         use super::kernel::compile;
         if ctx.instrumented() || self.split(ctx) {
             return Ok(false);
@@ -2671,6 +2683,11 @@ impl AggNode {
         let Some(keys) = self.groups.iter().map(compile).collect::<Option<Vec<_>>>() else {
             return Ok(false);
         };
+        // (Keys compared under a nondeterministic collation stay on the serial path; bpchar
+        // keys group trimmed.)
+        let trim: Vec<bool> = (0..keys.len())
+            .map(|i| matches!(colls.get(i), Some(Some(KeyNorm::Bpchar(None)))))
+            .collect();
         let mut aggs = Vec::with_capacity(self.aggs.len());
         for a in &self.aggs {
             if a.user.is_some()
@@ -2695,7 +2712,7 @@ impl AggNode {
             };
             aggs.push((arg, a.def.skip_nulls, empty));
         }
-        let spec = Arc::new(super::partial::Spec { keys, aggs });
+        let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq });
         Ok(input.pipeline(Vec::new(), Some(spec), ctx)?.is_some())
     }
 
@@ -2835,14 +2852,20 @@ impl AggNode {
             // keys hash alike.)
             let mut ghash: Vec<u32> = Vec::new();
             let nondet = colls.iter().any(Option::is_some);
+            // (Only bpchar keys, compared trimmed: the parts can group them.)
+            let trims_only = colls.iter().all(|c| matches!(c, None | Some(KeyNorm::Bpchar(None))));
+            // Whether the groups come out in the hash table's order, which the model of it
+            // (`hashed`) then follows row by row.
+            let hash_order = !self.groups.is_empty() && self.hash_ordered(ctx);
             // A parallel scan below aggregating its rows in parts (`partial`).
-            let parts = presorted_agg.is_none() && !nondet && self.partial_run(&mut input, ctx)?;
+            let parts =
+                presorted_agg.is_none() && trims_only && self.partial_run(&mut input, &colls, hash_order, ctx)?;
             // A group's first row (key `$key`, its hash key `$hkey`): its index.
             macro_rules! new_group {
                 ($key:expr, $hkey:expr) => {{
                     let key: Vec<Value> = $key;
                     let hkey: Vec<Value> = $hkey;
-                    if !self.groups.is_empty() {
+                    if hash_order {
                         ghash.push(if red.iter().any(|r| *r) {
                             let hk: Vec<Value> =
                                 hkey.iter().zip(&red).filter(|(_, r)| !**r).map(|(v, _)| v.clone()).collect();
@@ -2875,14 +2898,15 @@ impl AggNode {
                             let mut map = Vec::with_capacity(p.groups.len());
                             let mut parts = Vec::with_capacity(p.groups.len());
                             for (k, st) in p.groups {
-                                let gi = match index.get(&k) {
+                                let hk = if nondet { group_key(&k, &colls) } else { k.clone() };
+                                let gi = match index.get(&hk) {
                                     Some(i) => *i,
-                                    None => new_group!(k.clone(), k),
+                                    None => new_group!(k, hk),
                                 };
                                 map.push(gi);
                                 parts.push(st);
                             }
-                            if !self.groups.is_empty() {
+                            if hash_order {
                                 for &l in &p.seq {
                                     let g = map[l as usize];
                                     hashed.lookup(ghash[g], g);
@@ -2916,7 +2940,7 @@ impl AggNode {
                         new_group!(key, hkey)
                     }
                 };
-                if !self.groups.is_empty() {
+                if hash_order {
                     hashed.lookup(ghash[gi], gi);
                 }
                 let states = &mut groups[gi].1;

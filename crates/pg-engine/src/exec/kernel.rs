@@ -33,6 +33,60 @@ pub enum K {
     InList(Box<K>, Vec<(K, PureFn)>, bool),
     /// `x op ANY / ALL (array)` (`array_op`).
     ArrayOp(Box<[K; 2]>, PureFn, bool),
+    /// numeric + − × (`NumOp`): computed exactly in an i128 at the operands' scales where
+    /// they fit (`num`), its intermediate values never made; `f` otherwise.
+    Num {
+        op: NumOp,
+        f: PureFn,
+        args: Box<[K; 2]>,
+    },
+    /// A cast that reads no session setting (`cast_pure`): a length coercion, a string type
+    /// to another, a number to another, a date to a timestamp.
+    Cast(Box<K>, Box<(DataType, DataType)>, bool),
+}
+
+/// A numeric operator a kernel computes without allocating (`K::Num`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NumOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+/// A numeric (or integer) value as an exact unscaled i128 and its scale (None: another
+/// value, or one past an i128).
+fn small_num(v: &Value) -> Option<(i128, u32)> {
+    use num_traits::ToPrimitive;
+    match v {
+        Value::Numeric(n) => match &**n {
+            crate::types::numeric::Numeric::Finite { int, scale } => Some((int.to_i128()?, *scale)),
+            _ => None,
+        },
+        Value::Int2(x) => Some((*x as i128, 0)),
+        Value::Int4(x) => Some((*x as i128, 0)),
+        Value::Int8(x) => Some((*x as i128, 0)),
+        _ => None,
+    }
+}
+
+/// Whether casting `from` to `to` reads nothing but the value (no time zone, DateStyle or
+/// float output setting): `cast_value` then gives the same off the session.
+fn cast_pure(from: &DataType, to: &DataType) -> bool {
+    use DataType as T;
+    let string = |t: &DataType| matches!(t, T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name);
+    let number = |t: &DataType| matches!(t, T::Int2 | T::Int4 | T::Int8 | T::Float4 | T::Float8 | T::Numeric(_));
+    if matches!(from, T::Base(_) | T::Array(_)) || matches!(to, T::Base(_) | T::Array(_)) {
+        return false;
+    }
+    (from.same_base(to) && (string(to) || number(to) || matches!(to, T::Date | T::Timestamp(_))))
+        || (string(from) && string(to))
+        || (number(from) && number(to))
+        || (matches!(from, T::Date) && matches!(to, T::Timestamp(_)))
+}
+
+thread_local! {
+    /// The settings `cast_value` is called with by kernels (`cast_pure` casts read none).
+    static FMT: crate::types::text::FormatCtx = crate::types::text::FormatCtx::default();
 }
 
 /// A row's columns as kernels read them: a row, or a joined row's two sides unjoined
@@ -82,10 +136,25 @@ pub fn compile(e: &Expr) -> Option<K> {
         Expr::Col(i, _) => K::Col(*i),
         Expr::Const(v, _) => K::Const(v.clone()),
         Expr::Relabel(e, _) | Expr::SqlSyntax(e) | Expr::Collate(e, ..) => compile(e)?,
+        Expr::Cast(e, from, to, explicit) if cast_pure(from, to) => {
+            K::Cast(Box::new(compile(e)?), Box::new((from.clone(), to.clone())), *explicit)
+        }
         Expr::And(args) => K::And(args.iter().map(compile).collect::<Option<_>>()?),
         Expr::Or(args) => K::Or(args.iter().map(compile).collect::<Option<_>>()?),
         Expr::Not(a) => K::Not(Box::new(compile(a)?)),
         Expr::IsNull(a, neg) => K::IsNull(Box::new(compile(a)?), *neg),
+        Expr::Call(def, args, ty)
+            if args.len() == 2
+                && def.strict
+                && matches!(ty, DataType::Numeric(_))
+                && let Some(op) = crate::sql::func::ops::num_op(def.imp) =>
+        {
+            K::Num {
+                op,
+                f: pure_call(def, ty)?,
+                args: Box::new([compile(&args[0])?, compile(&args[1])?]),
+            }
+        }
         Expr::Call(def, args, ty) if args.len() == 2 => K::Call {
             f: pure_call(def, ty)?,
             args: Box::new([compile(&args[0])?, compile(&args[1])?]),
@@ -136,9 +205,65 @@ impl K {
         }
     }
 
+    /// A numeric expression's exact value (`K::Num` over columns, constants and other such
+    /// expressions) as an unscaled i128 and its scale, computed as `Numeric`'s add, sub
+    /// and mul compute it, without making a value; Some(None): NULL. None: not such an
+    /// expression, or a value past an i128 (`run` then computes it).
+    pub fn num<R: Cols + ?Sized>(&self, row: &R) -> Option<Option<(i128, u32)>> {
+        let leaf = |v: &Value| if v.is_null() { Some(None) } else { small_num(v).map(Some) };
+        match self {
+            K::Col(i) => leaf(row.col(*i)?),
+            K::Const(v) => leaf(v),
+            K::Num { op, args, .. } => {
+                // (Both operands before a NULL one: the call is strict.)
+                let (a, b) = (args[0].num(row)?, args[1].num(row)?);
+                let (Some((x, sx)), Some((y, sy))) = (a, b) else {
+                    return Some(None);
+                };
+                let pow = |n: u32| 10i128.checked_pow(n);
+                Some(Some(match op {
+                    NumOp::Add | NumOp::Sub => {
+                        let s = sx.max(sy);
+                        let (x, y) = (x.checked_mul(pow(s - sx)?)?, y.checked_mul(pow(s - sy)?)?);
+                        (if *op == NumOp::Add { x.checked_add(y)? } else { x.checked_sub(y)? }, s)
+                    }
+                    NumOp::Mul => {
+                        let s = sx + sy;
+                        if s as i64 > crate::types::numeric::DSCALE_MAX {
+                            return None;
+                        }
+                        (x.checked_mul(y)?, s)
+                    }
+                }))
+            }
+            _ => None,
+        }
+    }
+
     /// The value `eval` gives over `row` (None: leave it to `eval`).
     pub fn run<R: Cols + ?Sized>(&self, row: &R) -> Option<Value> {
         Some(match self {
+            K::Num { f, args, .. } => {
+                if let Some(r) = self.num(row) {
+                    return Some(match r {
+                        None => Value::Null,
+                        Some((v, s)) => Value::numeric(crate::types::numeric::Numeric::from_parts(
+                            num_bigint::BigInt::from(v),
+                            s,
+                        )),
+                    });
+                }
+                let (mut t0, mut t1) = (Value::Null, Value::Null);
+                let x = args[0].arg(row, &mut t0)?;
+                let y = args[1].arg(row, &mut t1)?;
+                if x.is_null() || y.is_null() {
+                    return Some(Value::Null);
+                }
+                if matches!(x, Value::Ext(..)) || matches!(y, Value::Ext(..)) {
+                    return None;
+                }
+                f(x, y, &DataType::NUMERIC).ok()?
+            }
             K::Col(i) => row.col(*i)?.clone(),
             K::Const(v) => v.clone(),
             K::Call { f, args, strict, ret } => {
@@ -248,6 +373,14 @@ impl K {
                     }
                 }
                 if saw_null { Value::Null } else { Value::Bool(*all) }
+            }
+            K::Cast(a, types, explicit) => {
+                let v = a.run(row)?;
+                if v.is_null() {
+                    return Some(Value::Null);
+                }
+                let (from, to) = &**types;
+                FMT.with(|f| crate::types::cast::cast_value(v, from, to, f, *explicit)).ok()?
             }
         })
     }

@@ -539,8 +539,16 @@ pub fn extract_value(unit_raw: &str, v: &Value, c: &FnCtx) -> Result<Value> {
 
 fn part_value(unit: &str, v: &Value, c: &FnCtx, numeric: bool) -> Result<Value> {
     match v {
-        Value::Timestamp(ts) => timestamp_part(unit, *ts, None, numeric),
         Value::Timestamptz(ts) => timestamp_part(unit, *ts, Some(&c.exec.fmt().tz), numeric),
+        v => part_value_local(unit, v, numeric),
+    }
+}
+
+/// `part_value` of a value whose fields don't depend on the session's time zone.
+fn part_value_local(unit: &str, v: &Value, numeric: bool) -> Result<Value> {
+    match v {
+        Value::Timestamp(ts) => timestamp_part(unit, *ts, None, numeric),
+        Value::Timestamptz(_) => Err(crate::error::internal("timestamptz's fields off the session")),
         Value::Date(d) => {
             if numeric {
                 date_part_extract(unit, *d)
@@ -562,6 +570,20 @@ fn extract(a: &[Value], c: &FnCtx) -> Result<Value> {
 
 fn date_part(a: &[Value], c: &FnCtx) -> Result<Value> {
     part_value(text_arg(&a[0]), &a[1], c, false)
+}
+
+fn p_extract(x: &Value, y: &Value, _: &crate::types::DataType) -> Result<Value> {
+    part_value_local(text_arg(x), y, true)
+}
+
+fn p_date_part(x: &Value, y: &Value, _: &crate::types::DataType) -> Result<Value> {
+    part_value_local(text_arg(x), y, false)
+}
+
+/// `ops::pure` for EXTRACT and date_part (a timestamptz's fields are left to the session).
+pub(super) fn pure(imp: super::FnImpl) -> Option<super::ops::PureFn> {
+    let table: [(super::FnImpl, super::ops::PureFn); 2] = [(extract, p_extract), (date_part, p_date_part)];
+    table.iter().find(|(f, _)| std::ptr::fn_addr_eq(*f, imp)).map(|(_, p)| *p)
 }
 
 // ── date_trunc ──

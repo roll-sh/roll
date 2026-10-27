@@ -1432,6 +1432,15 @@ fn p_dt_ge(x: &Value, y: &Value, _: &T) -> Result<Value> {
     Ok(Value::Bool(p_dtcmp(x, y)? != Ordering::Less))
 }
 
+/// numeric's +, − and × (the operators `exec::kernel` computes in an i128).
+pub fn num_op(imp: super::FnImpl) -> Option<crate::exec::kernel::NumOp> {
+    use crate::exec::kernel::NumOp;
+    [(num_add as super::FnImpl, NumOp::Add), (num_sub, NumOp::Sub), (num_mul, NumOp::Mul)]
+        .into_iter()
+        .find(|(f, _)| std::ptr::fn_addr_eq(*f, imp))
+        .map(|(_, o)| o)
+}
+
 /// The pure implementation of built-in `imp`, when it has one.
 pub fn pure(imp: super::FnImpl) -> Option<PureFn> {
     let table: [(super::FnImpl, PureFn); 27] = [
@@ -1468,4 +1477,5 @@ pub fn pure(imp: super::FnImpl) -> Option<PureFn> {
         .find(|(f, _)| std::ptr::fn_addr_eq(*f, imp))
         .map(|(_, p)| *p)
         .or_else(|| super::string::pure(imp))
+        .or_else(|| super::datetime::pure(imp))
 }

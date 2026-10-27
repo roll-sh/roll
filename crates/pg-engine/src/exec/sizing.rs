@@ -1788,6 +1788,14 @@ pub fn scanned_pages(table: u32, from: u32, to: Option<u32>, ctx: &ExecCtx) {
     }
 }
 
+/// Whether index scans fetching rows of `table` can't change the models
+/// (`fetched`'s pruning, `index_scanned`'s LP_DEAD marks): neither is modelled, or every
+/// page of the heap is all-visible (nothing to prune, no dead tuple an entry points at).
+pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
+    let rf = db.relfiles.lock();
+    rf.heaps.get(&table).is_none_or(|h| h.all_visible_pages() >= h.nblocks())
+}
+
 /// An index or bitmap heap scan fetches a row of `table` (by data key): the page it is on
 /// may be pruned when the scan moves to it (heapam_index_fetch_tuple). Returns the page,
 /// so the caller can tell when it moves (None: not modelled).

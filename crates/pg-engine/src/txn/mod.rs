@@ -1799,6 +1799,18 @@ impl Txn {
         ))
     }
 
+    /// The store and the time snapshot `s` reads it at, when this transaction has written
+    /// nothing (its snapshot reads are then the store's at that time): what readers on other
+    /// threads (a parallel scan's workers) read through, as `get_snap` and `scan_snap` would.
+    pub fn store_reader(&self, s: &Snap) -> Option<(Arc<Store>, u64)> {
+        if self.wrote || self.runs.is_some() || !self.writes.is_empty() {
+            return None;
+        }
+        self.catch_up(s);
+        let st = s.st.borrow();
+        (st.prev.is_empty() && st.mark >= self.journal_base).then(|| (self.db.store.clone(), st.ts))
+    }
+
     /// Read `key` as of the snapshot `s`.
     pub fn get_snap(&self, key: &[u8], s: &Snap) -> Result<Option<Bytes>> {
         self.catch_up(s);

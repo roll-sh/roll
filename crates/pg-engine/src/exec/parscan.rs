@@ -70,11 +70,116 @@ pub struct Decode {
     /// The rows aggregated as they're read (`partial`), rather than sent.
     pub spec: Option<Arc<super::partial::Spec>>,
     /// Hash join probes run over the filtered rows, bottom first (`pipe`).
-    pub stages: Vec<Arc<super::pipe::Probe>>,
+    pub stages: Vec<Arc<super::pipe::Stage>>,
+    /// An index-only scan's columns, read from the entries (`IndexChunk` gives the entry key
+    /// for the row): (column, type, DESC).
+    pub ios: Option<Vec<(usize, crate::types::DataType, bool)>>,
+}
+
+/// What a chunk reads: (data key, stored row) in the scan's order.
+pub type Chunk = Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send>;
+
+/// A chunk of a secondary index's entries as the rows they point at, in index order,
+/// fetched from the store a batch at a time at the statement's snapshot (`Txn::store_reader`;
+/// None: an index-only scan's, the entry key standing in for the row).
+pub struct IndexChunk {
+    pub entries: TxnScan,
+    pub fetch: Option<(Arc<crate::storage::Store>, u64)>,
+    buf: VecDeque<Result<(Vec<u8>, bytes::Bytes)>>,
+    done: bool,
+}
+
+/// Index entries a chunk's rows are fetched for at a time.
+const FETCH: usize = 256;
+
+impl IndexChunk {
+    pub fn new(entries: TxnScan, fetch: Option<(Arc<crate::storage::Store>, u64)>) -> IndexChunk {
+        IndexChunk { entries, fetch, buf: VecDeque::new(), done: false }
+    }
+}
+
+impl Iterator for IndexChunk {
+    type Item = Result<(Vec<u8>, bytes::Bytes)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(x) = self.buf.pop_front() {
+                return Some(x);
+            }
+            if self.done {
+                return None;
+            }
+            let mut ents: Vec<(Vec<u8>, bytes::Bytes)> = Vec::with_capacity(FETCH);
+            while ents.len() < FETCH {
+                match self.entries.next() {
+                    Some(Ok(e)) => ents.push(e),
+                    Some(Err(e)) => {
+                        self.done = true;
+                        self.buf.push_back(Err(e));
+                        break;
+                    }
+                    None => {
+                        self.done = true;
+                        break;
+                    }
+                }
+            }
+            let err = self.buf.pop_back();
+            match &self.fetch {
+                None => {
+                    // (Rows an index-only scan makes from its entries, as `index_row` counts.)
+                    super::scan::ROWS_FROM_INDEX_ENTRIES.fetch_add(ents.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    for (k, d) in ents {
+                        self.buf.push_back(Ok((d.to_vec(), bytes::Bytes::from(k))));
+                    }
+                }
+                Some((store, ts)) if !ents.is_empty() => {
+                    let mut keys: Vec<&[u8]> = ents.iter().map(|(_, d)| &d[..]).collect();
+                    keys.sort_unstable();
+                    keys.dedup();
+                    match store.get_versions(&keys, *ts) {
+                        Err(e) => {
+                            self.done = true;
+                            self.buf.push_back(Err(e));
+                        }
+                        Ok(got) => {
+                            let found: std::collections::HashMap<&[u8], bytes::Bytes> = keys
+                                .iter()
+                                .zip(got)
+                                .filter_map(|(k, v)| Some((*k, v?.1?)))
+                                .collect();
+                            for (_, d) in &ents {
+                                if let Some(b) = found.get(&d[..]) {
+                                    self.buf.push_back(Ok((d.to_vec(), b.clone())));
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+            self.buf.extend(err);
+        }
+    }
 }
 
 impl Decode {
-    fn row(&self, key: &[u8], bytes: &[u8]) -> Result<Row> {
+    pub(super) fn row(&self, key: &[u8], bytes: &[u8]) -> Result<Row> {
+        if let Some(cols) = &self.ios {
+            // (The index entry: past the table and index ids, its key columns.)
+            let mut row = vec![Value::Null; self.missing.len()];
+            let mut pos = 8;
+            for (col, ty, desc) in cols {
+                match crate::storage::keys::decode_index_value(bytes, &mut pos, ty, *desc) {
+                    Some(v) => row[*col] = v,
+                    None => return Err(internal("an index entry that doesn't decode")),
+                }
+            }
+            if self.with_key {
+                row.push(Value::Bytea(Arc::from(key)));
+            }
+            return Ok(row);
+        }
         let data = super::scan::row_data(bytes)?;
         let mut row = match &self.need {
             Some(n) => crate::storage::row::decode_row_need(data, n)?,
@@ -119,13 +224,13 @@ enum Msg {
 }
 
 struct Job {
-    scan: TxnScan,
+    scan: Chunk,
     out: Sender<Msg>,
 }
 
 pub struct ParScan {
     /// Chunks not handed out yet, in key order.
-    pending: VecDeque<TxnScan>,
+    pending: VecDeque<Chunk>,
     /// The handed-out chunks' results, in key order.
     results: VecDeque<Receiver<Msg>>,
     jobs: Option<Sender<Job>>,
@@ -141,6 +246,8 @@ pub struct ParScan {
 
 fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::atomic::AtomicBool>) {
     let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+    // (One for the worker's chunks: its lookups' cache lasts.)
+    let mut scratch = super::pipe::Scratch::default();
     loop {
         let job = match jobs.lock() {
             Ok(rx) => rx.recv(),
@@ -151,7 +258,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
             return;
         }
         if let Some(spec) = &d.spec {
-            if !work_partial(scan, &out, &d, spec, &stopped) {
+            if !work_partial(scan, &out, &d, spec, &stopped, &mut scratch) {
                 return;
             }
             continue;
@@ -161,7 +268,6 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
         let mut read = 0u32;
         let mut n = 0u32;
         let mut err = None;
-        let mut scratch = super::pipe::Scratch::default();
         for r in scan {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
@@ -200,6 +306,8 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
         if !batch.is_empty() && out.send(Msg::Rows(batch)).is_err() {
             return;
         }
+        // (The chunk's lookups counted before its end is.)
+        scratch.flush(&d.stages);
         let _ = out.send(match err {
             Some(e) => Msg::Err(e),
             None => Msg::Done(read),
@@ -219,11 +327,12 @@ const PART_ROWS: usize = 1 << 16;
 
 /// A chunk aggregated (`partial`): false when nothing receives any more.
 fn work_partial(
-    scan: TxnScan,
+    scan: Chunk,
     out: &Sender<Msg>,
     d: &Decode,
     spec: &super::partial::Spec,
     stopped: &dyn Fn() -> bool,
+    scratch: &mut super::pipe::Scratch,
 ) -> bool {
     use super::partial::{Partials, Seg};
     let mut pa = Partials::new(spec);
@@ -237,7 +346,6 @@ fn work_partial(
         }
     };
     let top = d.stages.len() as u8;
-    let mut scratch = super::pipe::Scratch::default();
     // (Rows a part can't take: sent in their place, the part so far first.)
     let mut serial: Vec<(Row, u8, bool)> = Vec::new();
     let mut n = 0usize;
@@ -269,7 +377,7 @@ fn work_partial(
             Some(true) => {
                 // (Each joined row in order: aggregated while nothing went to the serial
                 // path before it, else after it, in its place.)
-                super::pipe::run_stages(&d.stages, 0, row, &mut scratch, &mut |r, lvl| {
+                super::pipe::run_stages(&d.stages, 0, row, scratch, &mut |r, lvl| {
                     if !serial.is_empty() || lvl != top || !pa.row(&r) {
                         serial.push((r.into_row(), lvl, true));
                     }
@@ -284,6 +392,7 @@ fn work_partial(
             return false;
         }
     }
+    scratch.flush(&d.stages);
     send_part(&mut pa, &mut read) && out.send(Msg::Done(0)).is_ok()
 }
 
@@ -317,7 +426,7 @@ pub fn split_keys(lo: &[u8], hi: &[u8], n: usize) -> Vec<Vec<u8>> {
 impl ParScan {
     /// Read the chunks `scans` (consecutive key ranges, in order) with up to `workers`
     /// threads of a pool of `pool` (None: none could start).
-    pub fn start(scans: Vec<TxnScan>, workers: usize, pool: usize, d: Decode) -> Option<ParScan> {
+    pub fn start(scans: Vec<Chunk>, workers: usize, pool: usize, d: Decode) -> Option<ParScan> {
         let reserved = reserve(workers, pool);
         let workers = reserved;
         let (tx, rx) = channel::<Job>();

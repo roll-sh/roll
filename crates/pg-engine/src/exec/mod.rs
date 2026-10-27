@@ -6,6 +6,7 @@ pub mod fasthash;
 pub mod fastsort;
 pub mod merge;
 pub mod kernel;
+pub mod lookup;
 pub mod need;
 pub mod parscan;
 pub mod partial;
@@ -73,7 +74,7 @@ pub trait Node {
     /// (`partial`). Some(the level of this node's own rows): then `next_item` gives them.
     fn pipeline(
         &mut self,
-        _above: Vec<Arc<pipe::Probe>>,
+        _above: Vec<Arc<pipe::Stage>>,
         _spec: Option<Arc<partial::Spec>>,
         _ctx: &ExecCtx,
     ) -> Result<Option<u8>> {
@@ -256,6 +257,8 @@ pub struct ExecCtx<'a> {
     /// Correlated EXISTS subqueries run as hashed lookups (by subquery id; None: not
     /// convertible).
     exists_hash: RefCell<HashMap<usize, Option<Rc<ExistsHash>>>>,
+    /// Uncorrelated `= ANY (subquery)`s run as set lookups (by subquery id; None: not).
+    any_hash: RefCell<HashMap<usize, Option<Rc<AnyHash>>>>,
     /// Correlated scalar subqueries over a sequentially scanned table, run as hashed
     /// lookups of its rows by the correlated columns.
     scalar_hash: RefCell<HashMap<usize, Option<Rc<ScalarHash>>>>,
@@ -320,6 +323,15 @@ pub struct ScalarHash {
 pub struct ExistsHash {
     params: Vec<usize>,
     keys: std::collections::HashSet<Vec<Value>>,
+}
+
+/// An uncorrelated `x = ANY (subquery)` of a type whose `=` is equality of the values, as
+/// a hashed SubPlan runs it (ExecHashSubPlan): the subquery's values in a set, whether one
+/// of them is NULL, and whether there are none.
+pub struct AnyHash {
+    set: std::collections::HashSet<Value>,
+    null: bool,
+    empty: bool,
 }
 
 /// EXPLAIN ANALYZE's counters for one plan node.
@@ -584,6 +596,7 @@ impl<'a> ExecCtx<'a> {
             estimates: RefCell::default(),
             agg_estimates: RefCell::default(),
             exists_hash: RefCell::default(),
+            any_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
             gone_rels: RefCell::default(),
@@ -709,6 +722,7 @@ impl<'a> ExecCtx<'a> {
             estimates: RefCell::default(),
             agg_estimates: RefCell::default(),
             exists_hash: RefCell::default(),
+            any_hash: RefCell::default(),
             scalar_hash: RefCell::default(),
             sys_cols: RefCell::default(),
             gone_rels: RefCell::default(),
@@ -1051,6 +1065,44 @@ impl<'a> ExecCtx<'a> {
         Ok(Rc::new(rows))
     }
 
+    /// An uncorrelated `x = ANY (subquery)` whose `=` compares equal values of one type
+    /// exactly (`hashable_type`): its values in a set, read once (the subquery's cached rows).
+    fn any_hashed(&self, s: &Subquery, row: &[Value]) -> Result<Option<Rc<AnyHash>>> {
+        if let Some(h) = self.any_hash.borrow().get(&s.id) {
+            return Ok(h.clone());
+        }
+        let op = &s.ops[0];
+        let t = s.left[0].ty().without_typmod();
+        let ok = s.kind == SubqueryKind::Any
+            && s.left.len() == 1
+            && s.params.is_empty()
+            && self.outer.borrow().is_empty()
+            && op.name == "="
+            && op.args.len() == 2
+            && op.args.iter().all(|a| a.without_typmod() == t)
+            && crate::sql::binder::optimize::hashable_type(&t)
+            && op.coll.as_ref().is_none_or(|c| c.deterministic)
+            && !self.instrumented();
+        let made = if ok {
+            let rows = self.subquery_rows(s, row, None)?;
+            let mut set = std::collections::HashSet::with_capacity(rows.len());
+            let mut null = false;
+            for r in rows.iter() {
+                match r.first() {
+                    Some(Value::Null) | None => null = true,
+                    Some(v) => {
+                        set.insert(v.clone());
+                    }
+                }
+            }
+            Some(Rc::new(AnyHash { set, null, empty: rows.is_empty() }))
+        } else {
+            None
+        };
+        self.any_hash.borrow_mut().insert(s.id, made.clone());
+        Ok(made)
+    }
+
     /// A correlated EXISTS whose correlation is equalities of plain parameters with
     /// columns of types `=` compares exactly: its column values, read once.
     fn exists_hashed(&self, s: &Subquery) -> Result<Option<Rc<ExistsHash>>> {
@@ -1236,6 +1288,7 @@ impl<'a> ExecCtx<'a> {
                 // The subquery's rows first: over none the left side is never evaluated
                 // (ExecHashSubPlan's empty table, ExecScanSubPlan's no row to test), so what
                 // fails in it doesn't fail the comparison.
+                let listed = one.is_none();
                 let rows = match one {
                     Some(rows) => rows,
                     None => self.subquery_rows(s, row, None)?,
@@ -1246,6 +1299,24 @@ impl<'a> ExecCtx<'a> {
                 let mut left = Vec::with_capacity(s.left.len());
                 for l in &s.left {
                     left.push(eval(l, row, self)?);
+                }
+                if listed
+                    && !all
+                    && let Some(h) = self.any_hashed(s, row)?
+                {
+                    // (array_op's answers over rows: a NULL, NULL; a match, true.)
+                    let x = &left[0];
+                    return Ok(if h.empty {
+                        Value::Bool(false)
+                    } else if x.is_null() {
+                        Value::Null
+                    } else if h.set.contains(x) {
+                        Value::Bool(true)
+                    } else if h.null {
+                        Value::Null
+                    } else {
+                        Value::Bool(false)
+                    });
                 }
                 if s.left.len() == 1 {
                     let items: Vec<Value> = rows.iter().map(|r| r[0].clone()).collect();

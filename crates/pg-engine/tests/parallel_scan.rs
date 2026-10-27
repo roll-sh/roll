@@ -70,6 +70,11 @@ const QUERIES: &[&str] = &[
     // min / max over values that compare equal but differ (3 and 3.00): which one a tie
     // keeps shows.
     "SELECT g, max(n), min(n), count(n) FROM big GROUP BY g",
+    // bpchar filters and keys (casts kernels do: a length coercion, text to bpchar), keys
+    // equal but for trailing spaces grouped together under the first row's value.
+    "SELECT c, count(*), sum(x) FROM big WHERE c IN ('a', 'c') AND c <> 'b' GROUP BY c",
+    "SELECT k, count(*) FROM (SELECT (CASE WHEN g < 50 THEN 'x ' ELSE 'x' END)::bpchar k FROM big WHERE id > 1) t GROUP BY k",
+    "SELECT count(*), sum(x::int) FROM big WHERE x::int8 > 50 AND id::numeric < 400000.5",
 ];
 
 fn run_all(s: &mut Session) -> Vec<Vec<String>> {
@@ -107,9 +112,13 @@ fn seq_read(s: &mut Session) -> String {
     out(s, "SELECT seq_scan, seq_tup_read FROM pg_stat_user_tables WHERE relname = 'big'").join(",")
 }
 
+/// One test at a time: they check process-wide counters of parallel scans.
+static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Run a test's sessions on a big stack, as the server gives its session threads (an
 /// unoptimized build's frames don't fit the 2 MB of a test thread).
 fn on_session_thread(f: fn()) {
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(move || {
@@ -206,6 +215,10 @@ const JOIN_QUERIES: &[&str] = &[
     "SELECT d.name, count(*) FROM big b JOIN dim d ON b.g = d.k WHERE b.id % 3 = 0 GROUP BY d.name",
     // A LIMIT stopping early.
     "SELECT b.id, d.name FROM big b JOIN dim d ON b.g = d.k LIMIT 5",
+    // Right and full joins probed in the workers: the inner rows nothing matched last.
+    "SELECT d.k, b.id FROM big b RIGHT JOIN dim d ON b.g = d.k + 40 AND b.id < 2000",
+    "SELECT d.name, count(b.id), sum(b.x) FROM big b RIGHT JOIN dim d ON b.g = d.k + 30 GROUP BY d.name",
+    "SELECT b.id, d.k FROM big b FULL JOIN dim d ON b.g = d.k + 50 AND b.id > 419000 WHERE b.id IS NULL OR b.id > 419900",
 ];
 
 #[test]
@@ -279,4 +292,116 @@ fn split_keys_cover_in_order() {
         prev = c.clone();
     }
     assert!(split_keys(&lo, &lo, 4).is_empty());
+}
+
+/// Nested loops over inner index scans whose scans run in the outer parallel scan's
+/// workers (`exec::lookup`), and full index scans read by the workers for an aggregation
+/// above: rows in the serial order, errors at the same row, the same statistics.
+const LOOKUP_QUERIES: &[&str] = &[
+    // Several inner rows per key, in index order; an inner filter; a join condition.
+    "SELECT b.id, c.id, c.v FROM big b JOIN big2 c ON c.k = b.g WHERE b.id > 419500",
+    "SELECT b.id, c.id FROM big b JOIN big2 c ON c.k = b.id AND c.v LIKE 'a%' WHERE b.id < 3000",
+    "SELECT b.id, c.id FROM big b JOIN big2 c ON c.k = b.id AND c.id > b.g * 1000 WHERE b.id < 3000",
+    // Outer, semi and anti joins (keys that find nothing: big2's k stops at 149999).
+    "SELECT b.id, c.id, c.v FROM big b LEFT JOIN big2 c ON c.k = b.id WHERE b.id < 300 OR b.id > 419800",
+    "SELECT count(*), sum(b.id) FROM big b WHERE b.id > 410000 AND EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id - 300000 AND c.v LIKE '%a%')",
+    "SELECT count(*), sum(b.id) FROM big b WHERE (b.id < 2000 OR b.id > 418000) AND NOT EXISTS (SELECT 1 FROM big2 c WHERE c.k = b.id)",
+    // Aggregated above, in parts; a unique index of a modelled table; two loops stacked.
+    "SELECT b.g, count(*), sum(c.id) FROM big b JOIN big2 c ON c.k = b.id WHERE b.id < 8000 GROUP BY b.g ORDER BY 1",
+    "SELECT d.name, count(*) FROM big b JOIN dim d ON d.k = b.g WHERE b.x > 50 AND b.id > 400000 GROUP BY d.name ORDER BY 1",
+    "SELECT b.id, c.id, d.name FROM big b JOIN big2 c ON c.k = b.id JOIN dim d ON d.k = c.id % 60 WHERE b.id > 419000",
+    // An error in a key at a late row; a key of another type (int4 meeting an int8).
+    "SELECT count(*) FROM big b JOIN big2 c ON c.k = b.id * 10000 WHERE b.id > 214000",
+    "SELECT count(*), sum(c.id) FROM big b JOIN big2 c ON c.k = b.id::int8 + 7 WHERE b.id < 5000",
+    // Full index scans read by the workers (an index-only count, a grouping along an index).
+    "SELECT count(*) FROM big2",
+    "SELECT k, count(*), sum(id) FROM big2 WHERE id > 10 GROUP BY k HAVING sum(id) > 1000000",
+];
+
+#[test]
+fn parallel_lookups_match_serial() {
+    on_session_thread(parallel_lookups_match_serial_inner);
+}
+
+fn index_stats(s: &mut Session) -> String {
+    out(s, "SELECT pg_stat_force_next_flush()");
+    out(
+        s,
+        "SELECT indexrelname, idx_scan, idx_tup_read, idx_tup_fetch FROM pg_stat_user_indexes \
+         WHERE relname IN ('big2', 'dim') ORDER BY 1",
+    )
+    .join(",")
+}
+
+fn parallel_lookups_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big (id int NOT NULL, g int, x numeric(12,2), s text); \
+         INSERT INTO big SELECT i, i % 97, CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 1000) / 10.0 END, md5(i::text) \
+         FROM generate_series(1, 420000) i; \
+         CREATE TABLE big2 (id int NOT NULL, k int, v text); \
+         INSERT INTO big2 SELECT i, i % 150000, md5((i * 3)::text) FROM generate_series(1, 420000) i; \
+         CREATE INDEX big2_k ON big2 (k); \
+         CREATE TABLE dim (k int PRIMARY KEY, name text); \
+         INSERT INTO dim SELECT k, 'name ' || (k % 13) FROM generate_series(0, 59) k",
+    )
+    .unwrap();
+    for t in ["big", "big2", "dim"] {
+        s.query(&format!("VACUUM ANALYZE {t}")).unwrap();
+    }
+    // (Nested loops over index scans; plain index scans for the last two.)
+    s.query("SET enable_hashjoin = off; SET enable_mergejoin = off; SET enable_material = off").unwrap();
+    let run = |s: &mut Session, which: std::ops::Range<usize>| -> Vec<Vec<String>> {
+        LOOKUP_QUERIES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| which.contains(i))
+            .map(|(i, q)| {
+                let off = i + 2 >= LOOKUP_QUERIES.len();
+                if off {
+                    s.query("SET enable_seqscan = off; SET enable_hashagg = off; SET enable_bitmapscan = off").unwrap();
+                }
+                let r = out(s, q);
+                if off {
+                    s.query("RESET enable_seqscan; RESET enable_hashagg; RESET enable_bitmapscan").unwrap();
+                }
+                r
+            })
+            .collect()
+    };
+    // (The statistics compared are the queries' before the one failing: what a parallel
+    // scan's workers read past the failing row is counted as Postgres's workers count it.)
+    let (before, after) = (0..9, 9..LOOKUP_QUERIES.len());
+    let workers = |s: &mut Session, n: u32| s.query(&format!("SET max_parallel_workers_per_gather = {n}")).unwrap();
+    workers(&mut s, 0);
+    let mut serial = run(&mut s, before.clone());
+    let stat_serial = index_stats(&mut s);
+    workers(&mut s, 2);
+    let (looked, scans) = (pg_engine::exec::lookup::started(), pg_engine::exec::parscan::started());
+    let mut parallel = run(&mut s, before);
+    let stat_parallel = index_stats(&mut s);
+    workers(&mut s, 0);
+    serial.extend(run(&mut s, after.clone()));
+    workers(&mut s, 2);
+    parallel.extend(run(&mut s, after));
+    assert!(pg_engine::exec::lookup::started() > looked, "index lookups ran in the workers");
+    assert!(pg_engine::exec::parscan::started() > scans);
+    for ((q, a), b) in LOOKUP_QUERIES.iter().zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+    // Each run scanned the indexes as often and fetched as many rows: the counts doubled.
+    let n = |st: &str| -> Vec<i64> {
+        st.split("Int8(")
+            .skip(1)
+            .map(|x| x.split(')').next().unwrap().parse().unwrap())
+            .collect()
+    };
+    let (a, b) = (n(&stat_serial), n(&stat_parallel));
+    assert!(!a.is_empty(), "{stat_serial}");
+    assert_eq!(b, a.iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_serial} {stat_parallel}");
+    assert!(serial[9][0].starts_with("ERROR: integer out of range"), "{:?}", serial[9]);
+    assert!(serial[0].len() > 1000, "{}", serial[0].len());
+    assert!(serial[3].iter().any(|r| r.contains("Null")), "{:?}", &serial[3][..3]);
 }
