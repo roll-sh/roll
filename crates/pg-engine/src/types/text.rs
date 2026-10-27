@@ -691,25 +691,30 @@ pub fn parse_bool(s: &str) -> Result<bool> {
 
 // ── bytea ──
 
+/// byteaout: hex (`\x` and two digits a byte, hex_encode) or escape (printable ASCII but
+/// `\` as itself, the rest as `\ooo`), written a buffer at a time: a value may be 1 GB.
 pub fn format_bytea(b: &[u8], hex: bool) -> String {
-    if hex {
-        let mut s = String::with_capacity(2 + b.len() * 2);
-        s.push_str("\\x");
-        for byte in b {
-            s.push_str(&format!("{byte:02x}"));
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let out = if hex {
+        let mut out = vec![0u8; 2 + b.len() * 2];
+        out[..2].copy_from_slice(b"\\x");
+        for (pair, byte) in out[2..].as_chunks_mut::<2>().0.iter_mut().zip(b) {
+            pair[0] = HEX[(byte >> 4) as usize];
+            pair[1] = HEX[(byte & 15) as usize];
         }
-        s
+        out
     } else {
-        let mut s = String::new();
+        let mut out = Vec::with_capacity(b.len());
         for &byte in b {
             match byte {
-                b'\\' => s.push_str("\\\\"),
-                0x20..=0x7e => s.push(byte as char),
-                _ => s.push_str(&format!("\\{byte:03o}")),
+                b'\\' => out.extend_from_slice(b"\\\\"),
+                0x20..=0x7e => out.push(byte),
+                _ => out.extend_from_slice(&[b'\\', b'0' + (byte >> 6), b'0' + ((byte >> 3) & 7), b'0' + (byte & 7)]),
             }
         }
-        s
-    }
+        out
+    };
+    String::from_utf8(out).expect("ASCII")
 }
 
 pub fn parse_bytea(s: &str) -> Result<Vec<u8>> {

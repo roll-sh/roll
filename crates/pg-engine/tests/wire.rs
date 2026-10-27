@@ -3658,3 +3658,30 @@ fn startup_names_cut_to_namedatalen() {
     });
     s.engine.shutdown();
 }
+
+/// A big value goes out at the speed of a copy: a custom plan's cost doesn't print its
+/// constants (a parameter's value), and byteaout writes the whole value at once. 64 MB took
+/// 30 s (binary) and longer as text in a debug build; now well under one.
+#[test]
+fn big_bytea_values_go_out_in_linear_time() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        let big: Vec<u8> = (0..64usize << 20).map(|i| (i % 251) as u8).collect();
+        let started = Instant::now();
+        let st = c.prepare_typed("SELECT $1::bytea", &[tokio_postgres::types::Type::BYTEA]).await.unwrap();
+        let back: Vec<u8> = c.query_one(&st, &[&big]).await.unwrap().get(0);
+        assert!(back == big);
+        let text = c.simple_query("SELECT decode(repeat('ff01', 8 << 20), 'hex')").await.unwrap();
+        let hex = text
+            .iter()
+            .find_map(|m| match m {
+                SimpleQueryMessage::Row(r) => r.get(0),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((hex.len(), &hex[..8]), (2 + (32 << 20), "\\xff01ff"));
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    });
+    s.engine.shutdown();
+}
