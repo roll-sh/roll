@@ -10,7 +10,7 @@ contrib module in the image) is the environment's.
 
 ```sh
 # PostgreSQL 18.6 on 127.0.0.1:55838 (see run.sh's header), the engine on 127.0.0.1:55839:
-roll-engine --data /some/dir --listen 127.0.0.1:55839 --password pw --no-sync
+roll-engine --data /some/dir --listen 127.0.0.1:55839 --password pw --no-sync --allow-server-programs
 sg docker -c 'tests/clients/run.sh psycopg3 pg'
 sg docker -c 'tests/clients/run.sh psycopg3 engine'
 tests/clients/run.sh psycopg3 compare          # the tests whose outcome differs
@@ -54,7 +54,7 @@ hibernate-core (its failures on PostgreSQL there are the environment's).
 | pgjdbc (jdbc2/3/4/42, core) | 42.7.7 | 8221 / 0 | 8214 / 7 | 8218 / 3 *; round 19: 8221 / 0 | 0 (catalog DML, LIKE ending in its escape: round 19, agent 66) |
 | Npgsql (Npgsql.Tests) | 9.0.3 | 1914 / 2 | 1908 / 16 | 1917 / 2 (round 19, agents 53 and 66) | 0 |
 | SQLAlchemy (dialect/postgresql, sql) | 2.0.41 | 15801 / 2 | 15755 / 48 | 15801 / 2 * | 0 |
-| Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16; round 19: 3792 / 16 | 1: a file_fdw program table (see below) |
+| Django (26 apps) | 5.2.4 | 3793 / 15 | 3789 / 19 | 3792 / 16; round 19: 3792 / 16 | 0 (a file_fdw `program` table: round 19, agent 81) |
 | tokio-postgres (tests, postgres, derive) | 0.7.18 | 221 / 0 | | 212 / 9 *; round 19: 221 / 0 | 0 |
 | sqlx (9 postgres targets) | 0.9.0 | 333 / 0 | | 318 / 15 *; round 19: 333 / 0 | 0 |
 | Prisma (push, pull, migrate, client) | 7.10.1 | 47 / 0 | | 47 / 0 * | 0 (bit(n) lengths in `db pull`, fixed) |
@@ -85,10 +85,6 @@ Engine, open:
   rows plan otherwise and pass. A planner bug (join search), left to the planner work.
 - Hibernate PackagedEntityManagerTest.testOverriddenPar: `select nextval('Bug_SEQ')` finds no
   bug_seq (the persistence unit's schema export); not looked at.
-- Django inspectdb's test_foreign_data_wrapper reads `SELECT * ... LIMIT 1` from a file_fdw
-  `program 'echo 1,2,3,4'` table, which runs a server program: refused, as COPY ... PROGRAM is
-  (HANDOFF "Decisions"); it passes only if programs were allowed (an operator setting, as
-  `--allow-server-files` is, would do).
 - ActiveRecord ForeignTableTest (4): postgres_fdw's server has only `dbname` (a loopback
   through libpq's default socket) and its user mapping no password. The reference image trusts
   local socket connections; the engine, started with `--password`, asks for one ("fe_sendauth:
@@ -101,6 +97,13 @@ Engine, open:
   build (PostgreSQL: 0.1 ms; fixture loading); schema introspection is slower.
 - asyncpg's introspection tests: its type introspection query on a large catalog is slower
   than the test's 250 ms bound. node-postgres 1105 is timing (a debug build).
+
+Fixed in round 19, agent 81, client suites round 4: server programs. `roll-engine
+--allow-server-programs` (`EngineOptions::server_programs`, off by default; HANDOFF
+"Decisions") runs COPY ... FROM / TO PROGRAM and file_fdw's `program` as PostgreSQL does,
+through the shell, with its errors for a failing program (`src/server_programs.rs`). The
+harness's engine runs with it: Django's inspectdb test_foreign_data_wrapper (`SELECT * ...
+LIMIT 1` from a `program 'echo 1,2,3,4'` table) passes (inspectdb 27 / 0 on both).
 
 Fixed in round 19, agent 66, client suites round 3 (golden `a66_client_round3`, wire test
 `startup_notice_empty_arrays_and_catalog_dml`; file_fdw and server encodings are below and in

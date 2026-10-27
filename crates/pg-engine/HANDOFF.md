@@ -181,7 +181,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
   server file under the `--allow-server-files` policy (no file without it), and the
-  `program` option is accepted but never run (COPY ... PROGRAM stays refused, Decisions).
+  `program` option's program runs only under `--allow-server-programs` (Decisions).
   Wrappers that can't change rows get CheckValidResultRel's errors from
   `Catalog::fdw_modify_error` (the DML nodes, partition routing, COPY FROM, TRUNCATE);
   postgres_fdw is exempt there. Costs follow file_fdw's estimate_size / estimate_costs
@@ -1215,9 +1215,27 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   PostgreSQL's check for a role without `pg_read_server_files` (`convert_and_check_filename`:
   "absolute path not allowed" / "path must be in or below the data directory"), plus a
   real-path check refusing symbolic links that lead out (PostgreSQL would follow them).
-  `COPY ... PROGRAM` stays refused for everyone. Code: `src/server_files.rs`; tests:
-  `tests/server_files.rs`, `tests/sql/server_files_roles.sql`. The regress harness runs with it
-  (`PGREGRESS_DIR` as the directory), which is how misc_functions, largeobject and copy match.
+  Code: `src/server_files.rs`; tests: `tests/server_files.rs`,
+  `tests/sql/server_files_roles.sql`. The regress harness runs with it (`PGREGRESS_DIR` as the
+  directory), which is how misc_functions, largeobject and copy match.
+- **Server programs likewise** (round 19, agent 81): `COPY ... FROM / TO PROGRAM` and
+  file_fdw's `program` option are refused for every role by default (PostgreSQL's error for a
+  role without `pg_execute_server_program`; file_fdw's "could not execute command"). `roll-engine
+  --allow-server-programs` (embedded: `EngineOptions::server_programs`), a startup setting, not
+  a GUC, runs them as PostgreSQL does for the roles it allows (superusers, members of
+  pg_execute_server_program): `/bin/sh -c <command>` (popen), the working directory the
+  `--allow-server-files` directory if any (it stands for the data directory) else the engine's
+  data directory, the server's environment, stdin the null device for COPY FROM. Output streams
+  into COPY FROM / the foreign scan a chunk at a time; COPY TO writes into the program's stdin.
+  Failures are PostgreSQL's: "could not execute command", "program \"...\" failed" (38000) with
+  wait_result_to_str's detail (exit code, 126 / 127 "command not executable" / "not found",
+  "terminated by signal N: <strsignal>"), a SIGPIPE before EOF ignored (a LIMIT that stopped
+  reading), "could not write to COPY program: Broken pipe" when it stops reading and exits 0.
+  ANALYZE skips a program's foreign table ("cannot analyze this foreign table"), as
+  fileAnalyzeForeignTable does. A pipe dropped by an error or an early end kills and reaps the
+  program instead of waiting for it (PostgreSQL's pclose waits). Code:
+  `src/server_programs.rs`; tests: `tests/server_files.rs` `server_programs`. The client suites'
+  engine runs with it (Django's inspectdb reads a file_fdw `program 'echo 1,2,3,4'` table).
 - **Outbound connections are refused by default** (dblink, postgres_fdw): a tenant's database
   dialing arbitrary hosts would be a server-side request forgery and credential risk.
   `roll-engine --allow-outbound <list>` (embedded: `EngineOptions::outbound`), a startup

@@ -17,6 +17,7 @@ pub mod remote;
 pub mod server;
 pub mod scoped;
 pub mod server_files;
+pub mod server_programs;
 pub mod session;
 pub mod sort;
 pub mod sql;

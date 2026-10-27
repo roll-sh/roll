@@ -487,6 +487,7 @@ pub mod code {
     pub const ADMIN_SHUTDOWN: &str = "57P01";
     pub const CANNOT_CONNECT_NOW: &str = "57P03";
     pub const IO_ERROR: &str = "58030";
+    pub const EXTERNAL_ROUTINE_EXCEPTION: &str = "38000";
     pub const CONFIG_FILE_ERROR: &str = "F0000";
     pub const PROTOCOL_VIOLATION: &str = "08P01";
     pub const CONNECTION_EXCEPTION: &str = "08000";

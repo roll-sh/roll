@@ -15,7 +15,8 @@
 # Environment:
 #   CLIENTS_CACHE  sources, package caches and results (default ~/.cache/pg-clients)
 #   ENGINE_PORT    the engine on 127.0.0.1 (default 55839); start it yourself, e.g.
-#                  roll-engine --data <dir> --listen 127.0.0.1:55839 --password pw
+#                  roll-engine --data <dir> --listen 127.0.0.1:55839 --password pw \
+#                    --allow-server-programs   (Django's file_fdw `program` table)
 #   PG_PORT        a PostgreSQL 18.6 on 127.0.0.1 (default 55838), password pw:
 #                  docker run -d --name clients-pg -p 127.0.0.1:55838:5432 -e POSTGRES_PASSWORD=pw \
 #                    -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" <PG_IMAGE below> \

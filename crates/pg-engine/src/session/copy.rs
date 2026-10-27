@@ -440,6 +440,8 @@ pub struct CopyIn {
     pub filter: Option<Expr>,
     /// The size of the server file the data comes from (None: from the client).
     pub file_size: Option<i64>,
+    /// The data comes from a program (COPY FROM PROGRAM).
+    pub program: bool,
 }
 
 /// COPY FROM data read so far, a batch at a time (`Session::copy_in_run`).
@@ -523,19 +525,25 @@ impl Session {
                 "COPY (SELECT INTO) is not supported",
             ));
         }
-        // Server files are reachable only when the server allows them (and then by the roles
-        // Postgres lets in), programs never: the errors are the ones Postgres gives a role
+        // Server files and programs are reachable only when the server allows them (and then
+        // by the roles Postgres lets in): the errors are the ones Postgres gives a role
         // without pg_read_server_files / pg_write_server_files / pg_execute_server_program
         // (DoCopy).
         if s.is_program || !s.filename.is_empty() {
-            let allowed = !s.is_program
-                && self.state.cluster.server_files().is_some()
+            let enabled = if s.is_program {
+                self.state.cluster.server_programs().is_some()
+            } else {
+                self.state.cluster.server_files().is_some()
+            };
+            let allowed = enabled
                 && {
                     let cat = {
                         self.ensure_txn();
                         self.txn.as_ref().unwrap().borrow().catalog()
                     };
-                    let role = if s.is_from {
+                    let role = if s.is_program {
+                        crate::server_files::PG_EXECUTE_SERVER_PROGRAM
+                    } else if s.is_from {
                         crate::server_files::PG_READ_SERVER_FILES
                     } else {
                         crate::server_files::PG_WRITE_SERVER_FILES
@@ -684,9 +692,24 @@ impl Session {
                 ncols,
                 filter,
                 file_size: None,
+                program: false,
             };
             if s.filename.is_empty() {
                 return Ok(Outcome::CopyIn(cin));
+            }
+            // BeginCopyFrom's program: its output read as the insert takes it, its exit status
+            // checked at the end (EndCopyFrom).
+            if s.is_program {
+                cin.program = true;
+                let mut pipe = open_program(&*self.state.cluster, &s.filename, true)?;
+                let r = self.copy_in_run(&cin, &mut || {
+                    let mut chunk = vec![0u8; COPY_READ];
+                    let n = pipe.read(&mut chunk)?;
+                    chunk.truncate(n);
+                    Ok((n > 0).then_some(chunk))
+                })?;
+                pipe.close()?;
+                return Ok(Outcome::Done(r));
             }
             // BeginCopyFrom: the file is read where the client's data would come.
             let data = self.read_copy_file(&s.filename)?;
@@ -874,8 +897,15 @@ impl Session {
         let run = self.with_ctx(params, |ctx| {
             let bq = Binder::new(ctx, Vec::new()).bind_statement(&stmt)?;
             bq.check_perms(ctx)?;
-            // BeginCopyTo opens the file once the query is planned.
-            let file = if to_file { Some(create_copy_file(ctx, &s.filename)?) } else { None };
+            // BeginCopyTo opens the file (or starts the program) once the query is planned.
+            let file = match (to_file, s.is_program) {
+                (false, _) => None,
+                (true, true) => Some(CopyDest::Program(open_program(&*ctx.sess.cluster, &s.filename, false)?)),
+                (true, false) => {
+                    let (name, f) = create_copy_file(ctx, &s.filename)?;
+                    Some(CopyDest::File(name, std::io::BufWriter::new(f)))
+                }
+            };
             if s.query.is_some() {
                 for c in &format.force_quote {
                     if !bq.cols.iter().any(|o| o.name == *c) {
@@ -888,7 +918,7 @@ impl Session {
             }
             let mut lines = CopyLines::new(&format, &bq.cols, fmt, enc)?;
             let mut dest = match (file, sink.as_deref_mut()) {
-                (Some((name, f)), _) => CopyDest::File(name, std::io::BufWriter::new(f)),
+                (Some(d), _) => d,
                 (None, Some(k)) => {
                     k.copy_begin(format.binary, bq.cols.len())?;
                     CopyDest::Client(k)
@@ -1100,8 +1130,14 @@ impl Session {
             *ctx.sess.copy_progress.borrow_mut() = Some(super::state::CopyProgress {
                 relid: t.oid,
                 command: 1,
-                // PROGRESS_COPY_TYPE_FILE (with the file's size) or _PIPE.
-                kind: if c.file_size.is_some() { 1 } else { 3 },
+                // PROGRESS_COPY_TYPE_FILE (with the file's size), _PROGRAM or _PIPE.
+                kind: if c.program {
+                    2
+                } else if c.file_size.is_some() {
+                    1
+                } else {
+                    3
+                },
                 bytes_total: c.file_size.unwrap_or(0),
                 ..Default::default()
             });
@@ -1649,6 +1685,24 @@ impl CopyInParsed {
     }
 }
 
+/// OpenPipeStream for COPY ... PROGRAM (and file_fdw's `program`): `command` run in the
+/// server programs' directory, its output read (`read`) or its input written. Only reached
+/// when the server allows programs.
+pub(crate) fn open_program(
+    cluster: &dyn super::state::Cluster,
+    command: &str,
+    read: bool,
+) -> Result<crate::server_programs::Pipe> {
+    let Some(dir) = cluster.server_programs() else {
+        return Err(crate::error::internal("COPY ... PROGRAM without server programs"));
+    };
+    if read {
+        crate::server_programs::open_read(dir, command)
+    } else {
+        crate::server_programs::open_write(dir, command)
+    }
+}
+
 /// BeginCopyTo's file: an absolute path (in the server's files directory), created or
 /// truncated.
 fn create_copy_file(ctx: &crate::exec::ExecCtx, name: &str) -> Result<(String, std::fs::File)> {
@@ -2071,6 +2125,7 @@ impl<'a> CopyLines<'a> {
 enum CopyDest<'a> {
     Client(&'a mut dyn super::RowSink),
     File(String, std::io::BufWriter<std::fs::File>),
+    Program(crate::server_programs::Pipe),
     Collect(Vec<Vec<u8>>),
 }
 
@@ -2082,6 +2137,7 @@ impl CopyDest<'_> {
             CopyDest::File(name, w) => w.write_all(&d).map_err(|e| {
                 crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
             }),
+            CopyDest::Program(p) => p.write(&d),
             CopyDest::Collect(v) => {
                 v.push(d);
                 Ok(())
@@ -2097,6 +2153,8 @@ impl CopyDest<'_> {
             CopyDest::File(name, w) => w.flush().map_err(|e| {
                 crate::server_files::file_error(&e, &format!("could not write to COPY file \"{name}\""))
             }),
+            // EndCopyTo: ClosePipeToProgram.
+            CopyDest::Program(p) => p.close(),
             CopyDest::Collect(_) => Ok(()),
         }
     }

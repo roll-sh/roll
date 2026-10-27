@@ -1,15 +1,15 @@
 //! contrib/file_fdw (REL_18_6 `file_fdw.c`): foreign tables over a server file, read with
 //! COPY FROM's parser. The files are the server's files of `--allow-server-files`
 //! (`server_files.rs`): resolved and confined as COPY FROM's are, and unreadable (as a file
-//! the server process may not open) when the server has none. The `program` option is
-//! accepted where PostgreSQL accepts it, but running the program is refused, as COPY ...
-//! PROGRAM is.
+//! the server process may not open) when the server has none. The `program` option's
+//! program runs as COPY ... FROM PROGRAM's does when the server allows programs
+//! (`--allow-server-programs`, `server_programs.rs`); otherwise it can't be executed.
 
 use super::native::{FdwValidate, Native};
 use crate::catalog::{Catalog, Table};
 use crate::error::{Error, Result, code};
 use crate::exec::{BoxNode, ExecCtx, Node, Row};
-use crate::session::copy::{CopyFormat, CopyIn, CopyInParsed, open_copy_file, parse_copy_data};
+use crate::session::copy::{CopyFormat, CopyIn, CopyInParsed, open_copy_file, open_program, parse_copy_data};
 use crate::sql::binder::ast::mk;
 use crate::sql::expr::{Expr, eval, eval_bool};
 use crate::sql::plan::ScanPlan;
@@ -246,6 +246,12 @@ fn file_options(cat: &Catalog, t: &Table) -> Result<FileOptions> {
     Ok(FileOptions { filename, program, copy })
 }
 
+/// fileAnalyzeForeignTable's refusal: a program's output isn't analyzed (too volatile, says
+/// file_fdw.c).
+pub fn is_program_table(cat: &Catalog, t: &Table) -> bool {
+    is_file_table(cat, t) && file_options(cat, t).is_ok_and(|o| o.program)
+}
+
 /// The file's size, when it can be had (stat on the server's files; never a program's).
 fn file_size(o: &FileOptions, ctx: &crate::exec::ExecCtx) -> Option<u64> {
     if o.program {
@@ -293,8 +299,7 @@ pub fn explain_info(t: &Table, ctx: &crate::exec::ExecCtx) -> Option<(&'static s
 }
 
 /// BeginCopyFrom for foreign table `t`: its options checked by COPY's rules, its columns
-/// (all but generated ones) and the file opened. A program is refused, as COPY ... PROGRAM
-/// is.
+/// (all but generated ones) and the file opened (or the program started).
 fn begin(t: &Arc<Table>, ctx: &ExecCtx) -> Result<FileReader> {
     let cat = ctx.catalog();
     let o = file_options(&cat, t)?;
@@ -304,13 +309,16 @@ fn begin(t: &Arc<Table>, ctx: &ExecCtx) -> Result<FileReader> {
         .filter(|(_, c)| c.generated.is_none())
         .map(|(i, _)| i)
         .collect();
-    if o.program {
+    let src = if !o.program {
+        Source::File(open_copy_file(ctx.sess.cluster.server_files(), &o.filename)?)
+    } else if ctx.sess.cluster.server_programs().is_some() {
+        Source::Program(open_program(&*ctx.sess.cluster, &o.filename, true)?)
+    } else {
         return Err(crate::server_files::file_error(
             &std::io::ErrorKind::PermissionDenied.into(),
             &format!("could not execute command \"{}\"", o.filename),
         ));
-    }
-    let file = open_copy_file(ctx.sess.cluster.server_files(), &o.filename)?;
+    };
     let enc = format.encoding.unwrap_or_else(|| {
         let e = ctx.sess.settings.borrow().get_raw("client_encoding");
         e.as_deref()
@@ -325,9 +333,11 @@ fn begin(t: &Arc<Table>, ctx: &ExecCtx) -> Result<FileReader> {
             format: Box::new(format),
             filter: None,
             file_size: None,
+            program: o.program,
         },
         name: o.filename,
-        file: Some(file),
+        src,
+        at_end: false,
         buf: Vec::new(),
         st: CopyInParsed::default(),
         rows: Vec::new().into_iter(),
@@ -336,12 +346,19 @@ fn begin(t: &Arc<Table>, ctx: &ExecCtx) -> Result<FileReader> {
     })
 }
 
+/// Where a file_fdw table's data comes from.
+enum Source {
+    File(std::fs::File),
+    Program(crate::server_programs::Pipe),
+}
+
 /// A file read by COPY FROM's parser, a chunk at a time.
 struct FileReader {
     copy: CopyIn,
     name: String,
-    /// None at the end of the file.
-    file: Option<std::fs::File>,
+    src: Source,
+    /// The file (or the program's output) was read to its end.
+    at_end: bool,
     /// Data read and not yet parsed (an incomplete record).
     buf: Vec<u8>,
     st: CopyInParsed,
@@ -358,19 +375,20 @@ impl FileReader {
             if let Some(r) = self.rows.next() {
                 return Ok(Some(r));
             }
-            let Some(file) = &mut self.file else {
+            if self.at_end {
                 return Ok(None);
-            };
+            }
             ctx.check()?;
             let mut chunk = vec![0u8; 64 * 1024];
-            let n = std::io::Read::read(file, &mut chunk).map_err(|e| {
-                crate::server_files::file_error(&e, &format!("could not read from COPY file \"{}\"", self.name))
-            })?;
-            if n == 0 {
-                self.file = None;
-            }
+            let n = match &mut self.src {
+                Source::File(file) => std::io::Read::read(file, &mut chunk).map_err(|e| {
+                    crate::server_files::file_error(&e, &format!("could not read from COPY file \"{}\"", self.name))
+                })?,
+                Source::Program(p) => p.read(&mut chunk)?,
+            };
+            self.at_end = n == 0;
             self.buf.extend_from_slice(&chunk[..n]);
-            let took = parse_copy_data(&self.copy, &mut self.st, &self.buf, self.file.is_none(), ctx.fmt(), self.enc, &mut |e| ctx.notice(e))?;
+            let took = parse_copy_data(&self.copy, &mut self.st, &self.buf, self.at_end, ctx.fmt(), self.enc, &mut |e| ctx.notice(e))?;
             self.buf.drain(..took);
             let (rows, skipped) = self.st.take_rows();
             self.skipped = skipped;
@@ -396,8 +414,18 @@ impl FileReader {
         Ok(row)
     }
 
-    /// fileEndForeignScan's NOTICE of the rows ON_ERROR ignore skipped.
-    fn end(&self, ctx: &ExecCtx) {
+    /// EndCopyFrom: ClosePipeFromProgram's check of the program's exit status.
+    fn close(&mut self) -> Result<()> {
+        match &mut self.src {
+            Source::Program(p) => p.close(),
+            Source::File(_) => Ok(()),
+        }
+    }
+
+    /// fileEndForeignScan: EndCopyFrom's check of the program's exit status, and the NOTICE
+    /// of the rows ON_ERROR ignore skipped.
+    fn end(&mut self, ctx: &ExecCtx) -> Result<()> {
+        self.close()?;
         let n = self.skipped;
         if n > 0 && self.copy.format.log_verbosity >= 1 {
             let rows = if n == 1 { "row was" } else { "rows were" };
@@ -405,6 +433,7 @@ impl FileReader {
                 "{n} {rows} skipped due to data type incompatibility"
             )));
         }
+        Ok(())
     }
 }
 
@@ -417,6 +446,7 @@ pub fn read_all(t: &Table, ctx: &ExecCtx) -> Result<Vec<Row>> {
     while let Some(rec) = reader.next(ctx)? {
         out.push(reader.row(rec, &defaults, ctx)?);
     }
+    reader.close()?;
     Ok(out)
 }
 
@@ -468,7 +498,7 @@ impl Node for FileScan {
             let Some(rec) = self.reader.next(ctx)? else {
                 if !self.ended {
                     self.ended = true;
-                    self.reader.end(ctx);
+                    self.reader.end(ctx)?;
                 }
                 return Ok(None);
             };

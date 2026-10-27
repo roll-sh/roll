@@ -351,6 +351,16 @@ impl Ddl<'_, '_> {
                     if analyze && let Some(e) = self.cat.fdw_routine_error(&r) {
                         return Err(e);
                     }
+                    if analyze && !vacuum && crate::ext::file_fdw::is_program_table(&self.cat, &r) {
+                        // analyze_rel: the wrapper declined.
+                        if r.oid == t.oid {
+                            self.ctx.notice(crate::session::warning(
+                                code::WARNING,
+                                format!("skipping \"{}\" --- cannot analyze this foreign table", r.name),
+                            ));
+                        }
+                        continue;
+                    }
                     if analyze && !vacuum && crate::ext::file_fdw::is_file_table(&self.cat, &r) {
                         self.analyze_columns(&r, &cols, false)?;
                         // fileAnalyzeForeignTable: the file's pages, the rows it has.

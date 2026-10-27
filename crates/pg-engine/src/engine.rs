@@ -51,6 +51,10 @@ pub struct EngineOptions {
     /// `COPY ... FROM / TO '<file>'`) for the roles Postgres allows, confined to this
     /// directory (see `server_files`). None (the default): refused for every role.
     pub server_files: Option<PathBuf>,
+    /// Server programs (`COPY ... FROM / TO PROGRAM`, file_fdw's `program` option) for the
+    /// roles Postgres allows, run through the shell in the server files directory (else the
+    /// data directory; see `server_programs`). false (the default): refused for every role.
+    pub server_programs: bool,
     /// Libraries loaded at server start (`shared_preload_libraries`): `pg_stat_statements`
     /// collects statement statistics from then on.
     pub shared_preload_libraries: Vec<String>,
@@ -77,6 +81,7 @@ impl Default for EngineOptions {
             superuser: "postgres".into(),
             password: None,
             server_files: None,
+            server_programs: false,
             shared_preload_libraries: Vec::new(),
             locale: Default::default(),
             outbound: Vec::new(),
@@ -222,6 +227,8 @@ pub struct Engine {
     stopped: AtomicBool,
     me: Weak<Engine>,
     server_files: Option<crate::server_files::ServerFiles>,
+    /// The directory server programs run in, when they're allowed.
+    server_programs: Option<PathBuf>,
     statements: Option<crate::ext::pg_stat_statements::Store>,
     /// The outbound allow-list (None: refused).
     outbound: Option<crate::remote::outbound::Outbound>,
@@ -245,6 +252,14 @@ impl Engine {
                 internal(format!("server files directory \"{}\": {e}", d.display()))
             })?),
             None => None,
+        };
+        let server_programs = if opts.server_programs {
+            Some(match &server_files {
+                Some(sf) => PathBuf::from(sf.dir()),
+                None => std::path::absolute(&opts.data_dir)?,
+            })
+        } else {
+            None
         };
         let outbound = if opts.outbound.is_empty() {
             None
@@ -357,6 +372,7 @@ impl Engine {
                 stopped: AtomicBool::new(false),
                 me: me.clone(),
                 server_files,
+                server_programs,
                 statements,
                 outbound,
                 listen: std::sync::OnceLock::new(),
@@ -1516,6 +1532,10 @@ fn dir_size(p: &Path) -> u64 {
 impl Cluster for Engine {
     fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
         self.server_files.as_ref()
+    }
+
+    fn server_programs(&self) -> Option<&std::path::Path> {
+        self.server_programs.as_deref()
     }
 
     fn outbound(&self) -> Option<&crate::remote::outbound::Outbound> {

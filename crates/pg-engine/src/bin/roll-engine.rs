@@ -56,6 +56,12 @@ struct Args {
     /// for every role). For development and testing.
     #[arg(long, value_name = "DIR")]
     allow_server_files: Option<PathBuf>,
+    /// Let the roles PostgreSQL allows (superusers, pg_execute_server_program) run programs
+    /// on the server: COPY ... FROM / TO PROGRAM and file_fdw's `program` option, through
+    /// the shell, in the --allow-server-files directory (else the data directory). Off by
+    /// default (refused for every role). For development and testing.
+    #[arg(long)]
+    allow_server_programs: bool,
     /// Libraries to preload (comma-separated, as `shared_preload_libraries`):
     /// `pg_stat_statements` collects statement statistics from server start.
     #[arg(long, value_name = "LIBS", value_delimiter = ',')]
@@ -150,6 +156,7 @@ fn main() -> anyhow::Result<()> {
         superuser: a.user,
         password: a.password,
         server_files: a.allow_server_files,
+        server_programs: a.allow_server_programs,
         shared_preload_libraries: a.shared_preload_libraries,
         locale: a.initdb.options(),
         outbound: a.allow_outbound,

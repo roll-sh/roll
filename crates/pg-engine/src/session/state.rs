@@ -79,6 +79,10 @@ pub trait Cluster: Send + Sync {
     fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
         None
     }
+    /// The directory server programs run in, when they're allowed at all.
+    fn server_programs(&self) -> Option<&std::path::Path> {
+        None
+    }
     /// pg_stat_statements' statistics, when the library is preloaded.
     fn statements(&self) -> Option<&crate::ext::pg_stat_statements::Store> {
         None

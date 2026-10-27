@@ -1,7 +1,8 @@
 //! Server-side files (`--allow-server-files`, `EngineOptions::server_files`): refused for every
 //! role by default; when allowed, Postgres's functions and COPY work for the roles Postgres
 //! lets in, confined to the directory (relative paths resolve there, absolute ones and `..`
-//! must stay inside, and so must symbolic links).
+//! must stay inside, and so must symbolic links). Server programs (`--allow-server-programs`)
+//! likewise: refused by default, run through the shell as Postgres runs them when allowed.
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
@@ -10,6 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn open(data: &Path, files: Option<&Path>) -> Arc<Engine> {
+    open_with(data, files, false)
+}
+
+fn open_with(data: &Path, files: Option<&Path>, programs: bool) -> Arc<Engine> {
     Engine::open(EngineOptions {
         data_dir: data.to_path_buf(),
         cache_bytes: 4 << 20,
@@ -19,6 +24,7 @@ fn open(data: &Path, files: Option<&Path>) -> Arc<Engine> {
         superuser: "postgres".into(),
         password: None,
         server_files: files.map(Path::to_path_buf),
+        server_programs: programs,
         shared_preload_libraries: Vec::new(),
         locale: Default::default(),
         outbound: Vec::new(),
@@ -285,7 +291,7 @@ fn predefined_roles_and_privileges() {
     let r = s.query(&format!("COPY t TO {}", abs("out.txt"))).unwrap();
     assert_eq!(r.last().unwrap().tag, "COPY 1");
     assert_eq!(std::fs::read_to_string(root.join("out.txt")).unwrap(), "7\n");
-    // Still no programs.
+    // Still no programs (the server allows files only).
     assert_eq!(
         err(&mut s, "COPY t FROM PROGRAM 'cat'"),
         format!("42501 permission denied to COPY to or from an external program {hint}")
@@ -305,7 +311,7 @@ fn predefined_roles_and_privileges() {
 }
 
 /// file_fdw reads the server's files as COPY FROM does: none by default, and when allowed
-/// only inside the directory; programs never. A file bigger than one read chunk streams.
+/// only inside the directory; programs only when the server allows them (`server_programs`). A file bigger than one read chunk streams.
 #[test]
 fn file_fdw_tables() {
     let data = tempfile::tempdir().unwrap();
@@ -351,5 +357,97 @@ fn file_fdw_tables() {
         err(&mut s, "SELECT * FROM prog"),
         "42501 could not execute command \"echo 1\": Permission denied"
     );
+    engine.shutdown();
+}
+
+/// COPY ... PROGRAM and file_fdw's `program` with programs allowed: run through the shell in
+/// the server files directory, for the roles Postgres lets in, with Postgres's errors for a
+/// program that fails; refused when only files are allowed.
+#[test]
+fn server_programs() {
+    let data = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(files.path()).unwrap();
+    let hint = "HINT: Anyone can COPY to stdout or from stdin. psql's \\copy command also works for anyone.";
+    {
+        let engine = open(data.path(), Some(&root));
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE t (a int, b text)");
+        assert_eq!(
+            err(&mut s, "COPY t FROM PROGRAM 'echo 1'"),
+            format!("42501 permission denied to COPY to or from an external program {hint}")
+        );
+        engine.shutdown();
+    }
+    let data = tempfile::tempdir().unwrap();
+    let engine = open_with(data.path(), Some(&root), true);
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    run(&mut s, "CREATE TABLE t (a int, b text)");
+    // The directory standing for the data directory is the program's working directory.
+    std::fs::write(root.join("in.txt"), "1\tone\n2\ttwo\n").unwrap();
+    let r = s.query("COPY t FROM PROGRAM 'cat in.txt'").unwrap();
+    assert_eq!(r.last().unwrap().tag, "COPY 2");
+    // Output bigger than a read chunk streams in.
+    run(&mut s, "COPY t (a) FROM PROGRAM 'seq 3 100000'");
+    check(&mut s, "SELECT count(*) = 100000 AND sum(a) = 5000050000 FROM t");
+    let r = s.query("COPY t TO PROGRAM 'cat > out.txt'").unwrap();
+    assert_eq!(r.last().unwrap().tag, "COPY 100000");
+    assert_eq!(std::fs::read_to_string(root.join("out.txt")).unwrap().lines().count(), 100000);
+    // The exit status, as wait_result_to_str describes it, in the error's detail.
+    let failed = |s: &mut Session, sql: &str| match s.query(sql) {
+        Ok(_) => panic!("{sql}: no error"),
+        Err(e) => format!("{} {} DETAIL: {}", e.code, e.message, e.detail.unwrap_or_default()),
+    };
+    assert_eq!(
+        failed(&mut s, "COPY t FROM PROGRAM 'exit 3'"),
+        "38000 program \"exit 3\" failed DETAIL: child process exited with exit code 3"
+    );
+    assert_eq!(
+        failed(&mut s, "COPY t FROM PROGRAM 'no_such_command_a81 2>/dev/null'"),
+        "38000 program \"no_such_command_a81 2>/dev/null\" failed DETAIL: command not found"
+    );
+    assert_eq!(
+        failed(&mut s, "COPY t FROM PROGRAM 'kill -9 $$'"),
+        "38000 program \"kill -9 $$\" failed DETAIL: child process was terminated by signal 9: Killed"
+    );
+    assert_eq!(
+        failed(&mut s, "COPY t TO PROGRAM 'exit 2'"),
+        "38000 program \"exit 2\" failed DETAIL: child process exited with exit code 2"
+    );
+    // A bad row fails the COPY before the program's status is looked at.
+    assert_eq!(
+        err(&mut s, "COPY t FROM PROGRAM 'echo x; exit 1'"),
+        "22P02 invalid input syntax for type integer: \"x\""
+    );
+    // A program ended by SIGPIPE before its output was read is no error.
+    run(&mut s, "CREATE EXTENSION file_fdw");
+    run(&mut s, "CREATE SERVER srv FOREIGN DATA WRAPPER file_fdw");
+    run(&mut s, "CREATE FOREIGN TABLE p (a int, b int, c int, d int) SERVER srv OPTIONS (program 'echo 1,2,3,4', format 'csv')");
+    check(&mut s, "SELECT (a, b, c, d) = (1, 2, 3, 4) FROM p LIMIT 1");
+    run(&mut s, "CREATE FOREIGN TABLE y (a int) SERVER srv OPTIONS (program 'yes 1')");
+    check(&mut s, "SELECT count(*) = 3 FROM (SELECT * FROM y LIMIT 3) x");
+    run(&mut s, "CREATE FOREIGN TABLE f (a int) SERVER srv OPTIONS (program 'echo 1; exit 5')");
+    assert_eq!(
+        failed(&mut s, "SELECT * FROM f"),
+        "38000 program \"echo 1; exit 5\" failed DETAIL: child process exited with exit code 5"
+    );
+    // ANALYZE skips a program's table (fileAnalyzeForeignTable).
+    s.notices.clear();
+    run(&mut s, "ANALYZE p");
+    assert!(s.notices.iter().any(|n| n.message == "skipping \"p\" --- cannot analyze this foreign table"));
+    // Only roles with pg_execute_server_program's privileges.
+    run(&mut s, "CREATE ROLE regress_prog_user");
+    run(&mut s, "GRANT ALL ON t TO regress_prog_user");
+    run(&mut s, "SET ROLE regress_prog_user");
+    assert_eq!(
+        err(&mut s, "COPY t FROM PROGRAM 'echo 1'"),
+        format!("42501 permission denied to COPY to or from an external program {hint}")
+    );
+    run(&mut s, "RESET ROLE");
+    run(&mut s, "GRANT pg_execute_server_program TO regress_prog_user");
+    run(&mut s, "SET ROLE regress_prog_user");
+    let r = s.query("COPY t (a) FROM PROGRAM 'echo 7'").unwrap();
+    assert_eq!(r.last().unwrap().tag, "COPY 1");
+    run(&mut s, "RESET ROLE");
     engine.shutdown();
 }

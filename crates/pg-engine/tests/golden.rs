@@ -221,6 +221,7 @@ fn golden_wire() {
             superuser: "postgres".into(),
             password: Some("pw".into()),
             server_files: None,
+            server_programs: false,
             shared_preload_libraries: Vec::new(),
             locale: Default::default(),
             outbound: Vec::new(),

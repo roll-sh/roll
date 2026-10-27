@@ -53,6 +53,7 @@ fn engine(dir: &std::path::Path) -> std::sync::Arc<pg_engine::engine::Engine> {
         superuser: "postgres".into(),
         password: None,
         server_files: None,
+        server_programs: false,
         shared_preload_libraries: Vec::new(),
         locale: Default::default(),
         outbound: Vec::new(),
