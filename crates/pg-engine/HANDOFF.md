@@ -965,7 +965,10 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   files you didn't create. Never `pkill -f` by pattern: other agents run the same commands.
 - **Ports are shared.** Before starting a server or container on a port, check that nothing
   is listening there. Scripts must refuse to run setup (DROP/CREATE DATABASE, pgbench -i)
-  against a port they didn't just start. One bench run did, against another agent's server.
+  against a port they didn't just start. One bench run did, against another agent's server,
+  and two other pairs of agents later collided the same way. So each agent uses only its own
+  range: agent NN takes ports 50000 + 20×NN through 50000 + 20×NN + 19 (agent 73: 51460–51479),
+  for engines, references and harness ports alike. Still check that the port is free first.
 - **Pushing with several agents on one branch:** commit, then rebase onto the branch and push
   (`git push origin HEAD:<branch>`), never with force. Build commits from rebases of real
   commits; never copy files or a tree out of a snapshot worktree. ddffa59 did that, was based on
