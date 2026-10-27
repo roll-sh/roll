@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::error::Error;
 use crate::exec::ExecCtx;
-use crate::sql::expr::{Expr, SubqueryKind, eval};
+use crate::sql::expr::{Expr, Subquery, SubqueryKind, eval};
 use crate::sql::plan::Plan;
 use crate::types::Value;
 
@@ -40,6 +40,10 @@ fn foldable(e: &Expr) -> bool {
 struct Cx<'a, 'c> {
     ctx: &'a ExecCtx<'c>,
     pending: &'a [(Expr, Error)],
+    /// Planning a sub-select: the constants its parameters stand for (the enclosing level's
+    /// expressions it reads as `Outer(1, i)`, a pulled-up subquery's constant output), which
+    /// Postgres has put in place of the outer references before it plans it.
+    outer: Vec<Option<Expr>>,
 }
 
 impl Cx<'_, '_> {
@@ -51,7 +55,7 @@ impl Cx<'_, '_> {
     }
 
     /// eval_const_expressions over `e`; the sub-selects it reads go to `subs`.
-    fn expr<'e>(&self, e: &'e Expr, subs: &mut Vec<(&'e Arc<Plan>, bool)>) -> Option<Error> {
+    fn expr<'e>(&self, e: &'e Expr, subs: &mut Vec<(&'e Subquery, bool)>) -> Option<Error> {
         match e {
             Expr::Const(..) => None,
             Expr::And(args) | Expr::Or(args) => {
@@ -125,10 +129,17 @@ impl Cx<'_, '_> {
                     return None;
                 }
                 if let Expr::Subquery(s) = e {
-                    subs.push((&s.plan, s.kind == SubqueryKind::Exists));
+                    subs.push((s, s.kind == SubqueryKind::Exists));
                     return None;
                 }
-                if foldable(e) { self.fold(e) } else { None }
+                if foldable(e) {
+                    return self.fold(e);
+                }
+                // (A tree of constants the binder never saw whole: folded whole.)
+                if unfolded(e) {
+                    return eval(e, &[], self.ctx).err();
+                }
+                self.fold_outer(e)
             }
         }
     }
@@ -141,7 +152,7 @@ impl Cx<'_, '_> {
                 return Some(x);
             }
             for (s, exists) in subs {
-                let r = if exists { self.exists_plan(s) } else { self.plan(s) };
+                let r = self.sub(s, exists);
                 if r.is_some() {
                     return r;
                 }
@@ -199,6 +210,53 @@ impl Cx<'_, '_> {
 }
 
 impl Cx<'_, '_> {
+    /// Plan a sub-select, its parameters' constants in place of its outer references.
+    fn sub(&self, s: &Subquery, exists: bool) -> Option<Error> {
+        let outer = s
+            .params
+            .iter()
+            .map(|p| match p {
+                Expr::Const(..) => Some(p.clone()),
+                Expr::Outer(1, i, _) => self.outer.get(*i).cloned().flatten(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let cx = Cx { ctx: self.ctx, pending: self.pending, outer };
+        if exists { cx.exists_plan(&s.plan) } else { cx.plan(&s.plan) }
+    }
+
+    /// A call over constants and outer references that stand for constants: folded with
+    /// them in place (eval_const_expressions after the pull-up put them there).
+    fn fold_outer(&self, e: &Expr) -> Option<Error> {
+        if self.outer.iter().all(Option::is_none) || !matches!(e, Expr::Call(..) | Expr::Cast(..)) {
+            return None;
+        }
+        let mut pure = true;
+        let mut reads = false;
+        e.walk(&mut |x| match x {
+            Expr::Outer(1, i, _) if self.outer.get(*i).is_some_and(Option::is_some) => reads = true,
+            Expr::Const(..) | Expr::Cast(..) => {}
+            Expr::Call(d, ..) => pure &= d.volatility == 'i' && !d.is_srf(),
+            _ => pure = false,
+        });
+        if !pure || !reads || !e.is_immutable() {
+            return None;
+        }
+        let e = e
+            .clone()
+            .transform(&mut |x| {
+                Ok(match x {
+                    Expr::Outer(1, i, t) => match self.outer.get(i).cloned().flatten() {
+                        Some(c) => c,
+                        None => Expr::Outer(1, i, t),
+                    },
+                    x => x,
+                })
+            })
+            .ok()?;
+        eval(&e, &[], self.ctx).err()
+    }
+
     /// An EXISTS sub-select: simplify_EXISTS_query throws its target list (and ORDER BY,
     /// DISTINCT) away before planning it, unless it aggregates, has windows, a set
     /// operation, set-returning calls or an OFFSET.
@@ -362,16 +420,57 @@ fn exprs(p: &Plan) -> Vec<&Expr> {
     out
 }
 
+/// An immutable call or cast over constants and such calls only, not all of whose
+/// arguments are constants: an expression a pulled-up subquery's constant output was put
+/// into after binding, which eval_const_expressions folds whole.
+fn unfolded(e: &Expr) -> bool {
+    fn tree(e: &Expr) -> bool {
+        match e {
+            Expr::Const(..) => true,
+            Expr::Call(d, args, _) => d.volatility == 'i' && !d.is_srf() && args.iter().all(tree),
+            Expr::Cast(a, ..) => tree(a) && e.is_immutable(),
+            _ => false,
+        }
+    }
+    match e {
+        Expr::Call(_, args, _) => !args.iter().all(Expr::is_const) && tree(e),
+        Expr::Cast(a, ..) => !a.is_const() && tree(e),
+        _ => false,
+    }
+}
+
+/// Whether planning `p` may fold what binding couldn't: a sub-select reading a constant its
+/// level put in place of an outer reference (`Cx::fold_outer`), or a tree of constants put
+/// together after binding (`unfolded`).
+pub(crate) fn const_params(p: &Plan) -> bool {
+    let mut found = false;
+    for e in exprs(p) {
+        e.walk(&mut |x| {
+            if found {
+                return;
+            }
+            found = match x {
+                Expr::Subquery(s) => s.params.iter().any(Expr::is_const) || const_params(&s.plan),
+                x => unfolded(x),
+            };
+        });
+        if found {
+            return true;
+        }
+    }
+    crate::sql::explain::plan_inputs(p).into_iter().any(|c| const_params(c))
+}
+
 /// The error a planned statement fails with: the first constant expression still in its
 /// plan that fails to fold, its error as recorded in `pending` when it was bound.
 pub(crate) fn first_error(plan: &Plan, pending: &[(Expr, Error)], ctx: &ExecCtx) -> Option<Error> {
-    Cx { ctx, pending }.plan(plan)
+    Cx { ctx, pending, outer: Vec::new() }.plan(plan)
 }
 
 /// Whether simplifying `e` fails (an inlined function's body and a function call run while
 /// planning, `pending`, included).
 pub(crate) fn fails(e: &Expr, ctx: &ExecCtx, pending: &[(Expr, Error)]) -> bool {
-    let cx = Cx { ctx, pending };
+    let cx = Cx { ctx, pending, outer: Vec::new() };
     let mut subs = Vec::new();
     // (A sub-select is planned after the expression is simplified (SS_process_sublinks):
     // what fails in it doesn't stop the AND / OR around it; a SQL function's body inlined
@@ -387,6 +486,6 @@ pub(crate) fn fails(e: &Expr, ctx: &ExecCtx, pending: &[(Expr, Error)]) -> bool 
     cx.expr(e, &mut subs).is_some()
         || subs
             .into_iter()
-            .filter(|(p, _)| calls.contains(&Arc::as_ptr(p)))
-            .any(|(p, exists)| if exists { cx.exists_plan(p) } else { cx.plan(p) }.is_some())
+            .filter(|(s, _)| calls.contains(&Arc::as_ptr(&s.plan)))
+            .any(|(s, exists)| cx.sub(s, exists).is_some())
 }

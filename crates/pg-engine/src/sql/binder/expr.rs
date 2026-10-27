@@ -1587,6 +1587,7 @@ impl Binder<'_, '_> {
         if relabel {
             return Ok(Expr::Relabel(Box::new(e), ty));
         }
+        Self::record_to_composite(&e, &ty).map_err(|x| with_pos(x, if tc.location >= 0 { tc.location } else { ast::location(arg) }))?;
         let out = self.cast_explicit(e, &ty).map_err(|e| {
             if e.code == code::CANNOT_COERCE {
                 with_pos(

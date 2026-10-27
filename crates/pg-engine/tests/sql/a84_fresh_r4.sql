@@ -54,3 +54,17 @@ UPDATE a84tc SET (c) = (SELECT ROW(5, 6));
 UPDATE a84tc SET c = ROW(5, 6);
 SELECT * FROM a84tc;
 DROP TABLE a84tc;
+-- A pulled-up subquery's constant output put into an expression is folded with it, also
+-- inside a sub-select reading it (seed 1926 #43's ON EXISTS over a UNION).
+CREATE TABLE a84t2 (a int4, b text);
+SELECT 1 FROM a84t2 t6 JOIN (SELECT '{"a": {"b": 2}}'::jsonb AS c2 FROM a84t1 t8) s7 ON EXISTS (SELECT 1 UNION SELECT jsonb_array_length(s7.c2 -> 'a') FROM a84t1 t11 WHERE false);
+SELECT 1 FROM a84t2 t6 JOIN (SELECT '{"a": {"b": 2}}'::jsonb AS c2 FROM a84t1 t8) s7 ON (SELECT jsonb_array_length(s7.c2 -> 'a') FROM a84t1 t11) > 0;
+SELECT 1 FROM a84t2 t6 LEFT JOIN (SELECT '{"a": {"b": 2}}'::jsonb AS c2 FROM a84t1 t8) s7 ON true WHERE EXISTS (SELECT 1 UNION SELECT jsonb_array_length(s7.c2 -> 'a') FROM a84t1 t11);
+-- An empty join's outputs keep the failing constants of the columns read above it, also
+-- through a projection kept over it (seed 1926 #96).
+CREATE VIEW a84v3 AS SELECT (s2.c3) AS c1, 1 AS c2 FROM (a84t2 t1 RIGHT JOIN (SELECT 6 AS c0, ('"s"'::jsonb - 'a') AS c3 FROM a84t1 t3) s2 ON true) WHERE NULL;
+SELECT 1 FROM (a84t2 t1 JOIN a84v3 t2 ON false) GROUP BY t2.c1;
+SELECT 1 FROM (a84t2 t1 JOIN a84v3 t2 ON false);
+-- A sub-select in an empty relation's output read above it (smoke seed 10 #33).
+CREATE VIEW a84v4 AS SELECT 1 AS c0 FROM (a84t2 t1 LEFT JOIN a84t1 t2 ON t1.a = t2.id) WHERE t2.id <= jsonb_array_length('"s"');
+SELECT 1 FROM unnest('{3,1,2}'::int4[]) s1(u) JOIN (SELECT CASE WHEN 1::numeric(6, 1) >= (SELECT 1 FROM a84v4 t7 WHERE NULL ? 'a') THEN 1 END AS c2 FROM (SELECT 1 FROM a84t2 t4 WHERE NULL) s3 WHERE false) s2 ON s1.u = s2.c2;

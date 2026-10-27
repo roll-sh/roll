@@ -867,8 +867,27 @@ fn dummy(p: &Plan) -> Plan {
 fn dummy_with(p: &Plan, src: &Plan) -> Plan {
     let mut d = dummy_rel(p);
     let kept = crate::sql::binder::fold::candidates(src);
-    let cols = crate::sql::binder::fold::output_candidates(src, &kept);
-    let projected = matches!(d, Plan::Project { .. });
+    // (Over the projections dummy_rel keeps, their expressions read the columns of the
+    // input below them: that input's per-column constants go to the Empty standing for it.
+    // A join's dummy outputs read columns of their own.)
+    let (mut dn, mut sn) = (&d, src);
+    while let (Plan::Project { input: di, .. }, Plan::Project { input: si, .. }) = (dn, sn) {
+        (dn, sn) = (&**di, &**si);
+    }
+    let cols = match dn {
+        Plan::Empty { .. } => crate::sql::binder::fold::output_candidates(sn, &kept),
+        // (A join's dummy outputs: over one Empty of its leaves' columns, `dummy_outputs`.)
+        Plan::Project { input, .. } if matches!(&**input, Plan::Empty { .. }) => {
+            let mut out = Vec::new();
+            let mut off = 0;
+            for leaf in dummy_leaves(sn) {
+                out.extend(crate::sql::binder::fold::output_candidates(leaf, &kept).into_iter().map(|(k, e)| (k + off, e)));
+                off += plan_width(leaf);
+            }
+            out
+        }
+        _ => Vec::new(),
+    };
     if !kept.is_empty() || !cols.is_empty() {
         let mut cur = &mut d;
         while let Plan::Project { input, .. } = cur {
@@ -877,11 +896,7 @@ fn dummy_with(p: &Plan, src: &Plan) -> Plan {
         if let Plan::Empty { info, .. } = cur {
             let mut i = info.as_deref().cloned().unwrap_or_default();
             i.kept.extend(kept);
-            // (Over a projection dummy_rel keeps, its expressions read them: what they
-            // read stays with the Empty below as any.)
-            if !projected {
-                i.kept_cols.extend(cols);
-            }
+            i.kept_cols.extend(cols);
             *info = Some(Arc::new(i));
         }
     }
@@ -979,6 +994,14 @@ fn settle_tree(p: &mut Plan, needed: &[bool]) {
 }
 
 fn dummy_rel(p: &Plan) -> Plan {
+    // (A pseudoconstant false gating a join: the dummy join rel's Result shows the join's
+    // outputs.)
+    if let Plan::Filter { input, pred } = p
+        && matches!(&**input, Plan::Join { kind, .. } if !matches!(kind, JoinKind::Semi | JoinKind::Anti))
+        && pred.columns().is_empty()
+    {
+        return dummy_rel(input);
+    }
     // (A projection keeps its target list over the empty input: the dummy rel's Result
     // shows it.)
     if let Plan::Project { input, exprs } = p
@@ -1049,6 +1072,19 @@ fn unplanned_subqueries(p: &Plan, out: &mut Vec<(String, usize)>) {
             unplanned_subqueries(right, out);
         }
         _ => {}
+    }
+}
+
+/// The relations `dummy_outputs` reads its outputs over, in its column order.
+fn dummy_leaves(p: &Plan) -> Vec<&Plan> {
+    match p {
+        Plan::Project { input, .. } | Plan::Filter { input, .. } | Plan::Sort { input, .. } => dummy_leaves(input),
+        Plan::Join { kind, left, right, .. } if !matches!(kind, JoinKind::Semi | JoinKind::Anti) => {
+            let mut v = dummy_leaves(left);
+            v.extend(dummy_leaves(right));
+            v
+        }
+        p => vec![p],
     }
 }
 

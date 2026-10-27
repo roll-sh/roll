@@ -161,3 +161,32 @@ NULL | (5,6)
 > DROP TABLE a84tc
 -- DROP TABLE
 
+> CREATE TABLE a84t2 (a int4, b text)
+-- CREATE TABLE
+
+> SELECT 1 FROM a84t2 t6 JOIN (SELECT '{"a": {"b": 2}}'::jsonb AS c2 FROM a84t1 t8) s7 ON EXISTS (SELECT 1 UNION SELECT jsonb_array_length(s7.c2 -> 'a') FROM a84t1 t11 WHERE false)
+ERROR 22023: cannot get array length of a non-array
+
+> SELECT 1 FROM a84t2 t6 JOIN (SELECT '{"a": {"b": 2}}'::jsonb AS c2 FROM a84t1 t8) s7 ON (SELECT jsonb_array_length(s7.c2 -> 'a') FROM a84t1 t11) > 0
+ERROR 22023: cannot get array length of a non-array
+
+> SELECT 1 FROM a84t2 t6 LEFT JOIN (SELECT '{"a": {"b": 2}}'::jsonb AS c2 FROM a84t1 t8) s7 ON true WHERE EXISTS (SELECT 1 UNION SELECT jsonb_array_length(s7.c2 -> 'a') FROM a84t1 t11)
+?column?:int4
+-- SELECT 0
+
+> CREATE VIEW a84v3 AS SELECT (s2.c3) AS c1, 1 AS c2 FROM (a84t2 t1 RIGHT JOIN (SELECT 6 AS c0, ('"s"'::jsonb - 'a') AS c3 FROM a84t1 t3) s2 ON true) WHERE NULL
+-- CREATE VIEW
+
+> SELECT 1 FROM (a84t2 t1 JOIN a84v3 t2 ON false) GROUP BY t2.c1
+ERROR 22023: cannot delete from scalar
+
+> SELECT 1 FROM (a84t2 t1 JOIN a84v3 t2 ON false)
+?column?:int4
+-- SELECT 0
+
+> CREATE VIEW a84v4 AS SELECT 1 AS c0 FROM (a84t2 t1 LEFT JOIN a84t1 t2 ON t1.a = t2.id) WHERE t2.id <= jsonb_array_length('"s"')
+-- CREATE VIEW
+
+> SELECT 1 FROM unnest('{3,1,2}'::int4[]) s1(u) JOIN (SELECT CASE WHEN 1::numeric(6, 1) >= (SELECT 1 FROM a84v4 t7 WHERE NULL ? 'a') THEN 1 END AS c2 FROM (SELECT 1 FROM a84t2 t4 WHERE NULL) s3 WHERE false) s2 ON s1.u = s2.c2
+ERROR 22023: cannot get array length of a scalar
+

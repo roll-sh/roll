@@ -8,6 +8,9 @@
 
 use std::fmt::Write as _;
 
+#[path = "round4.rs"]
+mod round4;
+
 /// splitmix64: small, fast and good enough to drive a generator.
 pub struct Rng(u64);
 
@@ -139,6 +142,8 @@ pub struct Schema {
     /// Round 3: the composite type `ct3 (a text, b int)` and its table `tc3 (id, c, ca, n)`
     /// exist, ct3's field `a` under this collation; and the range type `ctr3` over it.
     pub composite: Option<(&'static str, bool)>,
+    /// Round 4: the tables `tj4` and `tp4` exist (`round4::schema`).
+    pub round4: bool,
 }
 
 /// A column visible to an expression: its qualified reference and type.
@@ -201,6 +206,10 @@ pub const WIDE_SEEDS: u64 = 1000;
 /// with collated fields, domains, generated columns, triggers, NULL-heavy data and a
 /// nondeterministic collation.
 pub const R3_SEEDS: u64 = 3000;
+/// The first seed generated with round 4's tables and statements (`round4.rs`): JSON and
+/// SQL/JSON, window frames, LATERAL set-returning functions, MERGE and RETURNING old / new over
+/// sub-partitioned tables with default partitions, numeric edges, time zones.
+pub const R4_SEEDS: u64 = 4000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
@@ -2240,6 +2249,11 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
             audited: false,
         });
     }
+    // (A generator of its own: the seeds before keep their schemas.)
+    if seed >= R4_SEEDS {
+        out.extend(round4::schema(&mut Rng::new(seed ^ 0x4444_4444)));
+        s.round4 = true;
+    }
     (s, out)
 }
 
@@ -2381,6 +2395,10 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     });
     while out.len() < n {
         g.alias = 0;
+        if s.round4 && g.rng.chance(0.25) {
+            out.extend(g.round4_stmt());
+            continue;
+        }
         if r3
             && let Some((_, range)) = s.composite
             && g.rng.chance(0.12)

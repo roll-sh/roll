@@ -1018,7 +1018,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         let r = crate::stack::guard(|| self.bind_statement_inner(n));
         let pending = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
         match r {
-            Ok(q) if !pending.is_empty() => match fold::first_error(&settled(&q.plan), &pending, self.ctx) {
+            Ok(q) if !pending.is_empty() || (!self.deparse && !self.unplanned && fold::const_params(&q.plan)) => match fold::first_error(&settled(&q.plan), &pending, self.ctx) {
                 Some(e) => Err(e),
                 None => Ok(q),
             },
@@ -1237,6 +1237,25 @@ impl<'b, 'a> Binder<'b, 'a> {
 
     // ── coercion ──
 
+    /// coerce_record_to_complex: in a cast or an INSERT / UPDATE target as written, only a
+    /// ROW() (or a whole-row reference) makes a record of another type a composite, whatever
+    /// the record turns out to hold. (Routine results and PL/pgSQL values convert as their
+    /// own code does.)
+    pub(crate) fn record_to_composite(e: &Expr, to: &DataType) -> Result<()> {
+        let from = e.ty();
+        if matches!(to, DataType::Row(t) if t.oid != 0)
+            && matches!(from, DataType::Record | DataType::Row(_))
+            && from.row_oid().is_none()
+            && !matches!(e, Expr::Row(..))
+        {
+            return Err(Error::new(
+                code::CANNOT_COERCE,
+                format!("cannot cast type record to {}", to.display()),
+            ));
+        }
+        Ok(())
+    }
+
     /// Convert `e` to `to` if a cast is allowed in `cc`; `err` builds the error otherwise.
     pub fn coerce_with(
         &mut self,
@@ -1430,17 +1449,6 @@ impl<'b, 'a> Binder<'b, 'a> {
         }
         if matches!(to, DataType::Record) && matches!(from, DataType::Row(_) | DataType::Record) {
             return Ok(e);
-        }
-        // coerce_record_to_complex: only a ROW() (or a whole-row reference) makes a record of
-        // another type a composite, whatever the record turns out to hold.
-        if matches!(to, DataType::Row(t) if t.oid != 0)
-            && matches!(&from, DataType::Record | DataType::Row(_) if from.row_oid().is_none())
-            && !matches!(e, Expr::Row(..))
-        {
-            return Err(Error::new(
-                code::CANNOT_COERCE,
-                format!("cannot cast type record to {}", to.display()),
-            ));
         }
         if let (DataType::Row(ff), DataType::Row(tf)) = (&from, to) {
             if ff == tf || tf.oid == 0 {

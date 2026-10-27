@@ -1275,6 +1275,7 @@ impl Binder<'_, '_> {
             ))
             .hint("Use OVERRIDING SYSTEM VALUE to override."));
         }
+        Self::record_to_composite(&e, &c.ty)?;
         let Some(domain) = c.domain else {
             return self.coerce_assign(e, &c.ty, &c.name);
         };
@@ -1918,6 +1919,7 @@ impl Binder<'_, '_> {
                     },
                     _ => ast::location(val),
                 };
+                Self::record_to_composite(&e, &c.ty).map_err(|x| with_pos(x, at))?;
                 let out = self.coerce_assign_to(e, &c.ty, c.domain, &c.name).map_err(|err| {
                     if err.position.is_none() && matches!(err.code, code::DATATYPE_MISMATCH | code::CANNOT_COERCE) {
                         with_pos(err, at)
