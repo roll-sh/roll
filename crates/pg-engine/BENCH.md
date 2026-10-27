@@ -1089,9 +1089,10 @@ ORM-style queries over its tables (point lookups with LIMIT, counts, IN lists, j
 ORDER BY / OFFSET, EXISTS and NOT IN, correlated scalar sub-selects, GROUP BY with MIN /
 MAX, row comparisons) have PostgreSQL's plans; their estimates differ only by ANALYZE's
 sample (a range over pgbench_accounts.aid from each side's own histogram). An INSERT that
-leaves columns to their defaults differs: PostgreSQL's source computes every column
-(`Result (width=60)` where the engine shows 4, and nextval's cost per row), and an INSERT
-... SELECT with ORDER BY keeps `Subquery Scan on "*SELECT*"` over the Sort.
+left columns to their defaults differed: PostgreSQL's source computes every column
+(`Result (width=60)` where the engine showed 4, and nextval's cost per row; second batch:
+the engine's source counts them now). Left: an INSERT ... SELECT with ORDER BY keeps
+`Subquery Scan on "*SELECT*"` over the Sort.
 
 ## Catalog, DDL and sessions (round 18, agent 44)
 

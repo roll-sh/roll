@@ -286,6 +286,14 @@ The causes, found on TPC-H at SF1 against PostgreSQL 18.6 with the same data, bo
 Golden: `tests/sql/a78_tpch_planner.sql`, `a78_semi_param.sql` (recorded from PostgreSQL
 18.6).
 
+Second batch: **an INSERT's new row has every column** (expand_insert_targetlist): the
+source (a Result, Values Scan, Function Scan, scan or join) counts the columns left to their
+defaults in its width (a NULL by its type's typmod: `char(22)` 92, `numeric(10,2)` 16, text
+32) and their default expressions' cost per row (a serial's nextval and cast: 0.005):
+`Insert ... -> Result (width=60)` where it showed 4. A full run against the committed baseline: 51,148 / 51,150, no unit changed; the difftest pair against the first batch identical, the smoke passing.
+Golden `a78_insert_defaults` (with a correlated NOT IN inside an IN, its rows: the pull-up
+was tried and left, HANDOFF).
+
 Looked at and left (why):
 
 - q05, q08 (parallel): the engine's partial plans are EXPLAIN's partial versions of the serial

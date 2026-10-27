@@ -1,0 +1,123 @@
+> create table a78_w (a int, b int default 5, c text, d serial, e numeric(10,2), f char(22))
+-- CREATE TABLE
+
+> create table a78_src as select g as k from generate_series(1, 100) g
+-- SELECT 100
+
+> analyze a78_src
+-- ANALYZE
+
+> explain insert into a78_w (a) values (1)
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..0.01 rows=0 width=0)
+  ->  Result  (cost=0.00..0.01 rows=1 width=152)
+-- EXPLAIN
+
+> explain insert into a78_w (a) values (1), (2)
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..0.04 rows=0 width=0)
+  ->  Values Scan on "*VALUES*"  (cost=0.00..0.04 rows=2 width=152)
+-- EXPLAIN
+
+> explain insert into a78_w (a) select 1
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..0.01 rows=0 width=0)
+  ->  Result  (cost=0.00..0.01 rows=1 width=152)
+-- EXPLAIN
+
+> explain insert into a78_w (c, a) select 'x', g from generate_series(1, 10) g
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..0.15 rows=0 width=0)
+  ->  Function Scan on generate_series g  (cost=0.00..0.15 rows=10 width=152)
+-- EXPLAIN
+
+> explain insert into a78_w default values
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..0.01 rows=0 width=0)
+  ->  Result  (cost=0.00..0.01 rows=1 width=152)
+-- EXPLAIN
+
+> explain insert into a78_w (a) values (1) returning *
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..0.01 rows=1 width=152)
+  ->  Result  (cost=0.00..0.01 rows=1 width=152)
+-- EXPLAIN
+
+> explain insert into a78_w (a) select k from a78_src
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..2.50 rows=0 width=0)
+  ->  Seq Scan on a78_src  (cost=0.00..2.50 rows=100 width=152)
+-- EXPLAIN
+
+> explain insert into a78_w values (1, 2, 'x', 3, 4.5, 'y')
+QUERY PLAN:text
+Insert on a78_w  (cost=0.00..0.01 rows=0 width=0)
+  ->  Result  (cost=0.00..0.01 rows=1 width=152)
+-- EXPLAIN
+
+> explain (verbose, costs off) insert into a78_w (a, c) values (1, 'z')
+QUERY PLAN:text
+Insert on public.a78_w
+  ->  Result
+        Output: 1, 5, 'z'::text, nextval('a78_w_d_seq'::regclass), NULL::numeric(10,2), NULL::character(22)
+-- EXPLAIN
+
+> insert into a78_w (a) select k from a78_src where k < 4
+-- INSERT 0 3
+
+> select a, b, c, d, e, f from a78_w order by a
+a:int4 | b:int4 | c:text | d:int4 | e:numeric | f:bpchar
+1 | 5 | NULL | 1 | NULL | NULL
+2 | 5 | NULL | 2 | NULL | NULL
+3 | 5 | NULL | 3 | NULL | NULL
+-- SELECT 3
+
+> create table a78_a (x int)
+-- CREATE TABLE
+
+> create table a78_b (y int)
+-- CREATE TABLE
+
+> create table a78_d (z int)
+-- CREATE TABLE
+
+> insert into a78_a select g from generate_series(1, 10) g
+-- INSERT 0 10
+
+> insert into a78_b select g from generate_series(1, 5) g
+-- INSERT 0 5
+
+> insert into a78_d select g from generate_series(1, 3) g
+-- INSERT 0 3
+
+> analyze a78_a, a78_b, a78_d
+-- ANALYZE
+
+> select * from a78_a a where a.x in (select b.y from a78_b b
+>   where b.y not in (select d.z from a78_d d where d.z < a.x)) order by 1
+x:int4
+1
+2
+3
+4
+5
+-- SELECT 5
+
+> select * from a78_a a where a.x in (select b.y from a78_b b
+>   where b.y not in (select d.z from a78_d d where d.z < a.x - 2)) order by 1
+x:int4
+1
+2
+3
+4
+5
+-- SELECT 5
+
+> select * from a78_a a where a.x in (select b.y from a78_b b
+>   where exists (select 1 from a78_d d where d.z = b.y and d.z < a.x)) order by 1
+x:int4
+-- SELECT 0
+
+> drop table a78_w, a78_src, a78_a, a78_b, a78_d
+-- DROP TABLE
+

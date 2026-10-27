@@ -1643,16 +1643,18 @@ them all with the "Fixed in round N" sections describing what was already tried.
    fits hash_mem; storage), q09 / q10 serial (ANALYZE's random sample). The planner
    leftovers passed on: join 355 at the default collapse limit (a LATERAL subquery with
    unread outputs kept as a parameterized item under a Memoize; changes every such LATERAL:
-   its own batch with a full run); a correlated NOT IN inside an IN (PostgreSQL: a semi join
-   with a Join Filter; the engine: a SubPlan); agent 52's Subquery Scan cost that setrefs
+   its own batch with a full run); agent 52's Subquery Scan cost that setrefs
    removes (2.19 for 2.20) and a bare PlaceHolderVar ranked last in a LATERAL join's output;
    `One-Time Filter: false` on the nullable side of `LEFT JOIN LATERAL (... WHERE a.x > 7)
    ON false` (a pulled-up LATERAL subquery over a join: Postgres makes that join relation
-   dummy). Also found (round 21): an INSERT leaving columns to their defaults shows the
-   source without them (Postgres's target list has every column: `Result (width=60)` for
-   the engine's 4, and their default expressions' cost per row), and an INSERT ... SELECT
-   that isn't pulled up (ORDER BY, GROUP BY, LIMIT) keeps `Subquery Scan on "*SELECT*"` to
-   compute the new row; EXPLAIN's `JIT:` lines past jit_above_cost are never shown.
+   dummy); a correlated NOT IN inside an IN's sub-select reading the outer query (tried in
+   round 21: the inner SubPlan reads the outer row as `Outer(2, ..)` inside its plan, so
+   moving the qual up a level needs those rewritten as the semi join's columns). Also found
+   (round 21): an INSERT ... SELECT that isn't pulled up (ORDER BY, GROUP BY, LIMIT) and
+   leaves columns to their defaults keeps `Subquery Scan on "*SELECT*"` to compute the new
+   row (the engine shows the Sort / Aggregate under the Insert); EXPLAIN's `JIT:` lines past
+   jit_above_cost are never shown. (An INSERT's source width and cost count the defaulted
+   columns since round 21.)
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

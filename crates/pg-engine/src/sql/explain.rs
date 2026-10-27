@@ -9270,6 +9270,33 @@ impl Builder<'_, '_> {
                     }
                     c.node.output = out;
                 }
+                // The columns the statement leaves to their defaults (NULL without one) are
+                // in the new row the source computes (expand_insert_targetlist): the source's
+                // width counts them, its cost their expressions per row (the target list's
+                // cost_qual_eval: a serial column's nextval).
+                if ip.route.is_none()
+                    && ip.copy.is_none()
+                    && c.internal.len() == ip.target.len()
+                    && (c.node.is_scan()
+                        || c.node.is_join()
+                        || matches!(c.node.node_type, "Result" | "Values Scan" | "Function Scan" | "Subquery Scan"))
+                {
+                    let (mut width, mut per) = (0u32, 0.0);
+                    for (i, col) in t.columns.iter().enumerate() {
+                        if col.dropped || ip.target.contains(&i) {
+                            continue;
+                        }
+                        match ip.rules.defaults.get(i).cloned().flatten() {
+                            Some(d) => {
+                                width += costs::type_width(&d.ty());
+                                per += costs::qual_cost(&d);
+                            }
+                            None => width += costs::type_width(&col.ty),
+                        }
+                    }
+                    c.node.width += width;
+                    c.node.total_cost += c.node.rows * per;
+                }
                 let mut n = self.modify("Insert", t, &refname, &c.node);
                 if t.foreign.is_some() {
                     self.foreign_insert_returning(&mut n, ip);
