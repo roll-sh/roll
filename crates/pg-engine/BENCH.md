@@ -1714,7 +1714,43 @@ CPUs that have it, as pgvector does. Release build, 1,536 dimensions, one pair: 
 ns, inner product 386 ns, cosine 629 ns, halfvec (F16C) about 250 ns: the latency of one
 4-lane dependency chain, which is also the reference's. Build, insert and query speed of the
 indexes against the reference: the `vector` workload of `tools/bench` (`bench.rs`
-`vector_bench`), measured with the index access methods (next sections).
+`vector_bench`).
+
+### Index build, insert and query (round 20, agent 70)
+
+100,000 rows of `vector(128)` (deterministic values in [-1, 1)), 200 nearest-neighbour queries
+`ORDER BY embedding <-> q LIMIT 10` over the simple protocol, one client; hnsw m 16,
+ef_construction 64, ef_search 40; ivfflat lists 100, probes 10. The reference is PostgreSQL
+18.6 with pgvector 0.8.7 built with `-DIVFFLAT_BENCH -DHNSW_MEMORY` and the engine (release)
+runs with `ROLL_VECTOR_BUILD_SEED=42`, so both build the same indexes: every query case's
+result hash and the full-scan sums are equal on both sides. Each server pinned to the same 4
+CPUs in turn (client on 4 others), default settings (maintenance_work_mem 64 MB), a shared
+machine at load about 10.
+
+| case | PostgreSQL + pgvector | engine | engine speed |
+|---|---|---|---|
+| COPY 100k rows | 3.90 s | 2.53 s | 1.5x |
+| CREATE INDEX hnsw | 185.9 s | 107.5 s | 1.7x |
+| hnsw queries (qps, p50) | 754 qps, 1.28 ms | 652 qps, 1.38 ms | 0.86x |
+| COPY 10k more rows into the hnsw index | 34.5 s | 17.6 s | 2.0x |
+| hnsw queries after the inserts | 591 qps, 1.61 ms | 845 qps, 1.15 ms | 1.4x |
+| CREATE INDEX ivfflat | 1.49 s | 1.43 s | 1.0x |
+| ivfflat queries (qps, p50) | 227 qps, 4.34 ms | 147 qps, 6.70 ms | 0.65x |
+| exact k-NN (seq scan + top-N sort) | 26 ms | 103 ms | 0.25x |
+| `sum(embedding <-> q)` over all rows | 30 ms | 75 ms | 0.40x |
+
+hnsw builds and inserts are faster: contiguous vector storage, a visited set without
+allocation per step, pages kept as records rather than buffers. Queries are about even (the
+graph walk does the same distance computations; the engine's statement overhead is a larger
+share at 1 ms). Still slower: ivfflat queries (every candidate of the probed lists is copied
+into the emulated tuplesort, which has to sort all of them to keep PostgreSQL's quicksort tie
+order; not profiled yet), and anything that reads every row (the row-at-a-time executor
+decoding 128-float values: "Where it is still slower").
+
+Recall@10 (the engine's, equal to the reference's since the results are): ivfflat over 20k
+rows of 32 dimensions, lists 100: probes 1 / 2 / 5 / 10 / 20: 0.528 / 0.794 / 0.944 / 0.966 /
+0.980; hnsw over 20k Gaussian rows of 32 dimensions: ef_search 10 / 20 / 40 / 100 / 200:
+0.762 / 0.900 / 0.974 / 0.998 / 1.000.
 
 ## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
 

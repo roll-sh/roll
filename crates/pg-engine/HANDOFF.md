@@ -284,8 +284,48 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     global_random_*`), which C code draws from.
   - Tests: pgvector's own suite in the contrib harness (`tests/contrib/STATUS.md` has the
     reference image to build), golden `a70_pgvector_types` (recorded from that image).
-  - State of round 20's first batch: the types; ivfflat and hnsw are stubs (CREATE INDEX
-    ... USING ivfflat / hnsw fails) until their ports land.
+  - Index access methods ivfflat and hnsw (`ext/vector/ivfflat/`, `ext/vector/hnsw/`), ports of
+    pgvector's C on the native index interface (below), reproducing its results row for row:
+    - ivfflat: PostgreSQL's block sampler and reservoir sampling (`sampling.rs`), k-means++
+      and Elkan iterations with the C code's float / double conversions in its order
+      (`kmeans.rs`), the assignment's tuplesort order, including its external sort past
+      maintenance_work_mem (`tuplesort.rs`: runs cut where tuplesort's memory accounting cuts
+      them, merged through its binary heap), list selection through a port of pairingheap.c,
+      the scan's sort by distance with work_mem, iterative scans, inserts and VACUUM placing
+      tuples on the pages pgvector would (`page.rs` models the pages byte for byte).
+    - hnsw: element levels from the session's pg_global_prng_state, the in-memory build with
+      pgvector's memory count against maintenance_work_mem and the switch to on-disk inserts
+      (with its NOTICE), neighbor selection and HnswUpdateConnection, duplicates, the page
+      layout of element and neighbor tuples, iterative scans (strict and relaxed, the
+      work_mem × hnsw.scan_mem_multiplier limit, hnsw.max_scan_tuples), VACUUM's repair.
+      Exact distance ties are broken by comparing C pointers in pgvector; the engine models the
+      usual layout (a new element below the loaded neighbors). With many exact ties (jaccard
+      over random bits) the reference's answer after inserts depends on its backend's
+      allocation history, so nothing can match it there; it agrees after the build.
+    - Randomness: pgvector draws from pg_global_prng_state, seeded at random per backend, so
+      the reference's own builds differ run to run. With `ROLL_VECTOR_BUILD_SEED=42` in the
+      engine's environment every build seeds it with 42 first, as pgvector built with
+      `-DIVFFLAT_BENCH -DHNSW_MEMORY` does: how the two are compared (`tests/pgvector_equality.rs`,
+      the bench). Builds are serial (max_parallel_maintenance_workers = 0's behaviour; parallel
+      builds aren't deterministic in the reference either).
+    - Checked: pgvector's whole suite 915 / 915 (contrib harness); `tests/pgvector_equality.rs`
+      (`#[ignore]`d, needs a seeded reference: PGVECTOR_REF; 10 cases over vector, halfvec,
+      sparsevec and bit, every opclass family, build, inserts, DELETE + VACUUM, reinserts,
+      iterative scans with filters, each query's ordered ids compared; PGVECTOR_SELF=1 runs the
+      reference against itself); the agents' larger runs (314 ivfflat queries over 20k–60k rows
+      including external sorts, hnsw over 20k rows with several layers, maintenance_work_mem
+      overflow, scan memory limits, page-for-page index dumps against pageinspect); the
+      `vector` bench at 100k × 128 (every result hash equal); recall in BENCH.md; goldens
+      `a70_pgvector_index`, `a70_bloom`; `tests/pgvector_ivfflat.rs`, `tests/pgvector_hnsw.rs`.
+    - Engine fixes found on the way: pgvector values sized as PostgreSQL stores them
+      (`ext::types::stored_payload`: heap pages, TOAST, costs, pg_column_size); index
+      statistics as index_update_stats / VACUUM / ANALYZE leave them; CREATE INDEX validates
+      the WITH options and amcanmulticol (hash, SP-GiST and native methods) before the columns,
+      and names a type without its typmod in "has no default operator class".
+    - Open: ivfflat queries are slower than pgvector's (BENCH.md); EXPLAIN widths of a Sort /
+      Limit above a resjunk ORDER BY expression leave the expression out (engine-wide, not
+      pgvector's: `SELECT id FROM t ORDER BY id * 2.5 LIMIT 5` shows width 4 where PostgreSQL
+      shows 36; planner).
 - **Index access methods of native code** (round 20, agent 70; `src/ext/index_am.rs`): what an
   extension's `CREATE ACCESS METHOD ... HANDLER` names when the handler is a C function the
   engine implements. Another index-type extension adds its routine to `index_am::routine`.
@@ -314,6 +354,16 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - VACUUM: an entry is dead when no version of its row since the oldest snapshot holds its
     value and no running transaction made it (`index_am::entry_dead`; uncommitted rows aren't
     in storage, so the entries' inserting transactions are remembered in memory).
+  - Bitmap-only methods (`AmProps::gettuple` false, `getbitmap` true) get bitmap paths; a
+    method can fix genericcostestimate's numIndexTuples (`IndexAm::cost_index_tuples`) and
+    store entries in another form than the key (`IndexAm::entry_value`: hnsw's normalized
+    cosine vectors).
+  - bloom (`contrib/bloom`, `ext/bloom.rs`), the interface's second user: its options
+    (length, col1..col32), bitmap scans only (`AmProps::getbitmap`: the heap read with the
+    index's conditions rechecked, the rows bloom's signatures would select), its pages modelled
+    as blbuild / blinsert / blbulkdelete lay them out (the metapage's not-full list, deleted
+    pages reused), blcostestimate's every-tuple genericcostestimate
+    (`IndexAm::cost_index_tuples`). contrib suite 1 / 1 file, golden `a70_bloom`.
 - **Performance** (round 17, agent 36): measured for the first time, `tools/bench/` against a
   pinned PostgreSQL 18.6 on the same 4 cores; numbers, method and the optimisations made are
   in `BENCH.md`. Over the wire the engine beats PostgreSQL on single-client OLTP (point
