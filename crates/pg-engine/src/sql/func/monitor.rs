@@ -117,18 +117,6 @@ fn wal(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
 fn recovery_prefetch(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     rows(vec![reset_row(6248, 0, "recovery_prefetch", c)])
 }
-/// pg_stat_get_replication_slot(name): no slot has statistics here, so the named slot's
-/// are all zeros (as for a slot whose stats were never reported).
-fn replication_slot(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
-    let sig = builtin_proc_sigs()
-        .iter()
-        .find(|s| s.oid == 6169)
-        .expect("built-in function");
-    let mut row: Vec<Value> = sig.out.iter().map(|(_, t)| zero(&ty(*t), c)).collect();
-    let name: String = text_arg(&a[0]).chars().take(63).collect();
-    row[0] = text(name);
-    Ok(Box::new(std::iter::once(Ok(row))))
-}
 /// pg_stat_get_backend_wal(pid): this backend's WAL (no row for any other).
 fn backend_wal(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     if a.first().and_then(|v| v.as_i64()) != Some(c.exec.sess.pid as i64) {
@@ -996,13 +984,11 @@ pub fn register(r: &mut Registry) {
     r.from_pg(3195, None, Some(archiver));
     r.from_pg(1136, None, Some(wal));
     r.from_pg(6248, None, Some(recovery_prefetch));
-    r.from_pg(6169, None, Some(replication_slot));
     r.from_pg(6313, None, Some(backend_wal));
     r.from_pg(3317, None, Some(wal_receiver));
     r.from_pg(2306, None, Some(slru));
     r.from_pg(6214, None, Some(io));
     r.from_pg(6386, None, Some(backend_io));
-    r.from_pg(3099, None, Some(no_rows));
     r.from_pg(3318, None, Some(super::system::pg_stat_get_progress_info));
     r.from_pg(6118, None, Some(no_rows));
     let backend: [(&str, FnImpl); 11] = [
@@ -1049,7 +1035,7 @@ pub fn register(r: &mut Registry) {
     }
     // Server files, shared memory and replication state: nothing to show.
     r.from_pg(3329, None, Some(file_settings));
-    for oid in [6399, 5052, 4100, 6014, 3781] {
+    for oid in [6399, 5052, 4100] {
         r.from_pg(oid, None, Some(no_rows));
     }
     r.from_pg(3400, None, Some(pg_config));

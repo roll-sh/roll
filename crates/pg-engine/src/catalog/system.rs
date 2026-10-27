@@ -4335,6 +4335,13 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                 }
             }
         }
+        PgReplicationOrigin => {
+            if let Some(r) = ctx.sess.db.repl() {
+                for x in r.origins.list() {
+                    out.push(vec![Value::Oid(x.id as u32), Value::Text(x.name.into())]);
+                }
+            }
+        }
         PgSubscription => {
             for x in cat.subscriptions.values() {
                 out.push(vec![

@@ -734,6 +734,13 @@ impl SessionState {
 impl Drop for SessionState {
     fn drop(&mut self) {
         self.release_advisory();
+        // ReplicationSlotCleanup: its temporary slots go, the slots it uses are released.
+        if let Some(r) = self.db.repl() {
+            for db in r.slots.backend_exit(self.pid) {
+                r.slots_changed(db);
+            }
+            r.origins.backend_exit(self.pid);
+        }
         crate::exec::pgstat::session_ends(self);
     }
 }

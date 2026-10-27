@@ -179,6 +179,9 @@ struct Registry {
     /// 0: none kept).
     #[serde(default)]
     wal_lsn: u64,
+    /// WAL positions below this may have been handed out (`repl::lsn`).
+    #[serde(default)]
+    next_lsn: u64,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -236,6 +239,8 @@ pub struct Engine {
     twophase: Arc<crate::txn::twophase::TwoPhase>,
     /// The cluster's fixed-numbered statistics and WAL position, shared by its databases.
     stats: crate::exec::pgstat::ClusterStats,
+    /// WAL positions and replication slots.
+    repl: Arc<crate::repl::Repl>,
     backends: Mutex<HashMap<i32, Backend>>,
     next_pid: AtomicI32,
     /// Held while a database's indexes are brought to the current key format.
@@ -386,6 +391,26 @@ impl Engine {
                 crate::session::settings::parse_list(v).into_iter().filter(|l| !l.is_empty()).collect();
         }
         let cache = BlockCache::new(opts.cache_bytes);
+        // (The server-start parameters of replication: the command line's, else the
+        // configuration files'.)
+        let setting = |n: &str| {
+            argv.iter().rev().find(|(k, _)| k == n).map(|(_, v)| v.clone()).or_else(|| conf.startup_value(n).map(|v| v.to_string()))
+        };
+        let wal_level = match setting("wal_level") {
+            Some(v) => crate::repl::WalLevel::parse(&v)
+                .ok_or_else(|| internal(format!("invalid value for parameter \"wal_level\": \"{v}\"")))?,
+            None => crate::repl::WalLevel::Replica,
+        };
+        let count = |n: &str, d: usize| -> Result<usize> {
+            match setting(n) {
+                Some(v) => v.parse().map_err(|_| internal(format!("invalid value for parameter \"{n}\": \"{v}\""))),
+                None => Ok(d),
+            }
+        };
+        let slots = crate::repl::slot::Slots::open(Some(opts.data_dir.clone()), count("max_replication_slots", 10)?)?;
+        let max_wal_senders = count("max_wal_senders", 10)?;
+        let next_lsn = registry.next_lsn;
+        let origins_dir = opts.data_dir.clone();
         let statements = opts
             .shared_preload_libraries
             .iter()
@@ -428,6 +453,19 @@ impl Engine {
                 },
             ));
             let stats = crate::exec::pgstat::Fixed::starting_at(registry.wal_lsn);
+            let weak = me.clone();
+            let wal = crate::repl::lsn::WalPos::new(next_lsn.max(registry.wal_lsn), move |n| {
+                if let Some(e) = weak.upgrade() {
+                    let mut r = e.registry.lock();
+                    r.next_lsn = r.next_lsn.max(n);
+                    if let Err(err) = e.save(&r) {
+                        warn!(error = %err, "saving the WAL position failed");
+                    }
+                }
+            });
+            let repl = Arc::new(crate::repl::Repl::new(wal, slots, crate::repl::origin::Origins::open(Some(origins_dir)), wal_level, max_wal_senders));
+            // One WAL position: the statistics' moves go to the change stream's counter.
+            stats.lock().wal = Some(repl.wal.clone());
             Engine {
                 opts,
                 cache,
@@ -440,6 +478,7 @@ impl Engine {
                 oids,
                 xids,
                 twophase,
+                repl,
                 index_upgrade: Mutex::new(()),
                 backends: Mutex::new(HashMap::new()),
                 next_pid: AtomicI32::new(1000 + (std::process::id() as i32 % 1000) * 10),
@@ -456,6 +495,11 @@ impl Engine {
             }
         });
         engine.init_shared()?;
+        engine.repl.wal.persist_reserved();
+        // (Never behind a position a slot has seen.)
+        for s in engine.repl.slots.list() {
+            engine.repl.wal.advance_to(s.data.confirmed_flush.max(s.data.restart_lsn));
+        }
         // Databases with prepared transactions open now, so those are there (in
         // pg_prepared_xacts, holding their locks) from the start.
         let prepared: Vec<DbEntry> = {
@@ -553,6 +597,8 @@ impl Engine {
             *db.pgstat.lock() = kept;
         }
         db.pgstat.lock().fixed = self.stats.clone();
+        db.set_repl(self.repl.clone());
+        self.repl.attach(&db);
         // Its prepared transactions, with their locks, before any session can see it.
         if db.recover_prepared()? == 0 {
             let mut r = self.registry.lock();
@@ -1485,6 +1531,7 @@ impl Engine {
     /// Flush and close everything (server shutdown).
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
+        self.repl.slots.flush();
         for b in self.backends.lock().values() {
             Self::terminate(b);
         }

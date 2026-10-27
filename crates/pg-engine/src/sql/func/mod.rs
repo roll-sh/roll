@@ -571,6 +571,7 @@ pub fn registry() -> &'static Registry {
         xmlmap::register(&mut r);
         monitor::register(&mut r);
         walfuncs::register(&mut r);
+        crate::repl::sqlfn::register(&mut r);
         pubsub::register(&mut r);
         xact::register(&mut r);
         register_type_io(&mut r);

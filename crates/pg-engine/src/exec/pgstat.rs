@@ -89,6 +89,9 @@ pub struct DbEntry {
 /// opens), so every database's sessions read and count the same ones, as in PostgreSQL.
 #[derive(Clone, Debug, Default)]
 pub struct Fixed {
+    /// The cluster's WAL positions (`repl::lsn`), when the engine has them: the position
+    /// is theirs, persisted ahead and shared with the change stream.
+    pub wal: Option<std::sync::Arc<crate::repl::lsn::WalPos>>,
     /// Reset times of the fixed-numbered statistics: archiver, bgwriter, checkpointer,
     /// io, recovery_prefetch, wal, and `slru:<name>`.
     pub resets: HashMap<String, i64>,
@@ -145,7 +148,10 @@ impl Fixed {
 
     /// pg_current_wal_lsn: where the next WAL record goes.
     pub fn wal_lsn(&self) -> u64 {
-        self.lsn_base.max(INITDB_LSN) + self.wal_written
+        match &self.wal {
+            Some(w) => w.current(),
+            None => self.lsn_base.max(INITDB_LSN) + self.wal_written,
+        }
     }
 
     /// pg_stat_wal counts `records` records of `bytes` bytes (the position moved as they
@@ -157,14 +163,21 @@ impl Fixed {
 
     /// A transaction's `bytes` of WAL are written: the position moves past them.
     pub fn advance(&mut self, bytes: i64) {
-        self.wal_written += bytes.max(0) as u64;
+        match &self.wal {
+            Some(w) => {
+                if bytes > 0 {
+                    w.alloc(bytes as u64);
+                }
+            }
+            None => self.wal_written += bytes.max(0) as u64,
+        }
     }
 
     /// One record of `bytes` bytes written now: where it starts (past a segment's header,
     /// at a segment's start) and ends.
     pub fn write_record(&mut self, bytes: u64) -> (u64, u64) {
         if self.wal_lsn().is_multiple_of(WAL_SEGMENT_SIZE) {
-            self.wal_written += SEGMENT_HEADER;
+            self.advance(SEGMENT_HEADER as i64);
         }
         let at = self.wal_lsn();
         self.add_wal(1, bytes as i64);
@@ -180,7 +193,7 @@ impl Fixed {
             return at;
         }
         let (_, end) = self.write_record(24);
-        self.wal_written += end.next_multiple_of(WAL_SEGMENT_SIZE) - end;
+        self.advance((end.next_multiple_of(WAL_SEGMENT_SIZE) - end) as i64);
         end
     }
 

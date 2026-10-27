@@ -458,6 +458,16 @@ impl Session {
         }
     }
 
+    /// The open transaction block's transaction (begun if it hasn't yet), None outside a
+    /// block: what a walsender's CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use') sets up.
+    pub fn block_txn(&mut self) -> Option<&RefCell<Txn>> {
+        if self.status == TxnStatus::Idle {
+            return None;
+        }
+        self.ensure_txn();
+        self.txn.as_ref()
+    }
+
     /// Whether a CALL or DO now must run atomically (no COMMIT / ROLLBACK inside): in a
     /// transaction block, explicit or of a multi-statement query.
     fn atomic(&self) -> bool {
@@ -609,7 +619,11 @@ impl Session {
                 let mut t = t.into_inner();
                 let notes = std::mem::take(&mut t.notifies);
                 stats = std::mem::take(&mut t.pgstat);
+                let origin = crate::repl::origin::before_commit(&self.state, &mut t);
                 let r = self.state.cluster.commit(t).map(|_| ());
+                if let (Ok(()), Some(o)) = (&r, origin) {
+                    crate::repl::origin::after_commit(&self.state, o);
+                }
                 committed_notify(&self.state, r.is_ok(), &notes);
                 r
             }
@@ -738,6 +752,12 @@ impl Session {
 
     /// After an error: an explicit block fails; an implicit transaction rolls back.
     pub(crate) fn on_error(&mut self) {
+        // (PostgresMain's error recovery: ReplicationSlotRelease, ReplicationSlotCleanup.)
+        if let Some(r) = self.state.db.repl() {
+            for db in r.slots.backend_exit(self.state.pid) {
+                r.slots_changed(db);
+            }
+        }
         let keep = self.state.commit_on_error.replace(false);
         if self.status == TxnStatus::InBlock || self.status == TxnStatus::Failed {
             self.status = TxnStatus::Failed;

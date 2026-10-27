@@ -2657,6 +2657,7 @@ pub fn delete_row(
     super::sizing::deleted(t, indexes, dkey, old, ctx)?;
     super::pgstat::count_delete(ctx, t.oid);
     ctx.txn.borrow_mut().delete(dkey.to_vec())?;
+    crate::repl::log::delete(t, old, ctx)?;
     delete_index_entries(t, indexes, old, dkey, ctx)
 }
 
@@ -2894,6 +2895,7 @@ pub fn update_row_rls(
     ctx.txn
         .borrow_mut()
         .put(new_key, encode_table_row_at(&new, xid, tid))?;
+    crate::repl::log::update(t, old, &new, ctx)?;
     Ok(new)
 }
 
@@ -3258,6 +3260,7 @@ fn store_inserted(
     ctx.txn
         .borrow_mut()
         .put(dkey.clone(), encode_table_row_at(&row, xid, tid))?;
+    crate::repl::log::insert(t, &row, ctx)?;
     put_index_entries_with(t, &rules.indexes, &vals.vals, &dkey, ctx)?;
     if trigger::wants_after(&rules.triggers, tt::INSERT, ctx) {
         after.push(AfterRow {

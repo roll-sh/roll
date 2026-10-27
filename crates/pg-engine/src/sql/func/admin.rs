@@ -183,16 +183,6 @@ fn no_slot(name: &str) -> Error {
     )
 }
 
-fn pg_stat_reset_replication_slot(a: &[Value], _: &FnCtx) -> Result<Value> {
-    match a.first().filter(|v| !v.is_null()) {
-        Some(v) => Err(Error::new(
-            code::INVALID_PARAMETER_VALUE,
-            format!("replication slot \"{}\" does not exist", text_arg(v)),
-        )),
-        None => Ok(Value::Null),
-    }
-}
-
 fn pg_stat_have_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
     let kind = text_arg(&a[0]);
     let (db, obj) = (
@@ -449,28 +439,6 @@ fn pg_walfile_name_offset(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
     ]))))
 }
 
-/// pg_replication_origin_create: the name's checks (reserved names, MAX_RONAME_LEN);
-/// replication origins themselves aren't kept.
-fn pg_replication_origin_create(a: &[Value], _: &FnCtx) -> Result<Value> {
-    let name = text_arg(&a[0]);
-    let reserved = ["any", "none"].iter().any(|r| name.eq_ignore_ascii_case(r));
-    if reserved || name.starts_with("pg_") {
-        return Err(Error::new(
-            code::RESERVED_NAME,
-            format!("replication origin name \"{name}\" is reserved"),
-        )
-        .detail("Origin names \"any\", \"none\", and names starting with \"pg_\" are reserved."));
-    }
-    if name.len() > 512 {
-        return Err(Error::new(code::PROGRAM_LIMIT_EXCEEDED, "replication origin name is too long")
-            .detail("Replication origin names must be no longer than 512 bytes."));
-    }
-    Err(Error::new(
-        code::FEATURE_NOT_SUPPORTED,
-        "replication origins are not supported",
-    ))
-}
-
 /// pg_split_walfile_name(name): its segment number and timeline.
 fn pg_split_walfile_name(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
     let name = text_arg(&a[0]);
@@ -655,8 +623,14 @@ fn pg_ls_tmpdir_in(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
     Ok(Box::new(std::iter::empty()))
 }
 
-fn pg_ls_replslotdir(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
-    Err(no_slot(text_arg(&a[0])))
+/// pg_ls_replslotdir: a slot's directory holds no files here (its state is in the slots
+/// file, and the change stream in the database's store).
+fn pg_ls_replslotdir(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let name = text_arg(&a[0]);
+    match c.exec.sess.db.repl().and_then(|r| r.slots.get(name)) {
+        Some(_) => Ok(Box::new(std::iter::empty())),
+        None => Err(no_slot(name)),
+    }
 }
 
 pub fn register(r: &mut Registry) {
@@ -762,14 +736,6 @@ pub fn register(r: &mut Registry) {
     )
     .volatile();
     r.func(
-        "pg_stat_reset_replication_slot",
-        vec![Text],
-        Void,
-        pg_stat_reset_replication_slot,
-    )
-    .volatile()
-    .non_strict();
-    r.func(
         "pg_stat_reset_subscription_stats",
         vec![Oid],
         Void,
@@ -870,7 +836,6 @@ pub fn register(r: &mut Registry) {
     r.from_pg(2851, Some(pg_walfile_name), None);
     r.from_pg(2850, None, Some(pg_walfile_name_offset));
     r.from_pg(6213, None, Some(pg_split_walfile_name));
-    r.from_pg(6003, Some(pg_replication_origin_create), None);
     r.from_pg(3441, None, Some(pg_control_system));
     r.from_pg(3442, None, Some(pg_control_checkpoint));
     r.from_pg(3443, None, Some(pg_control_recovery));

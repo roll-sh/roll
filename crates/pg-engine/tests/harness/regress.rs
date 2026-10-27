@@ -98,6 +98,29 @@ static CONTRIB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 fn contrib_mode() -> bool {
     CONTRIB.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// The settings of the contrib modules' `--temp-config` files (test_decoding's
+/// `logical.conf`: wal_level = logical, ...), which the engine starts with as `-c` options,
+/// as the reference must.
+static TEMP_CONFIG: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn temp_config(module_dir: &Path) -> Vec<(String, String)> {
+    let mk = std::fs::read_to_string(module_dir.join("Makefile")).unwrap_or_default();
+    let mut out = Vec::new();
+    for w in mk.split_whitespace() {
+        if let Some(rest) = w.strip_prefix("$(top_srcdir)/contrib/")
+            && w.ends_with(".conf")
+        {
+            let path = module_dir.parent().unwrap().join(rest);
+            for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+                if let Some((k, v)) = line.split('#').next().unwrap_or("").split_once('=') {
+                    out.push((k.trim().to_string(), v.trim().trim_matches('\'').to_string()));
+                }
+            }
+        }
+    }
+    out
+}
 const GIT_TAG: &str = "REL_18_6";
 const HUNKS_PER_FILE: usize = 12;
 
@@ -348,6 +371,9 @@ pub fn pg_contrib() {
         })
         .collect();
     if !base.report_only {
+        for (m, _, _) in &schedules {
+            TEMP_CONFIG.lock().unwrap().extend(temp_config(&module_cfg(m).src));
+        }
         // (Never the main suite's: a run of each may share `PGREGRESS_DIR`.)
         let data = base.root.join(format!("contrib-enginedata-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
@@ -1300,6 +1326,14 @@ impl EngineProc {
             // (dblink's and postgres_fdw's suites connect to a loopback server: the engine
             // itself, reached without a host as through PostgreSQL's Unix socket.)
             .args(if contrib_mode() { &["--allow-outbound", "local"][..] } else { &[][..] })
+            .args(
+                TEMP_CONFIG
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(k, _)| k != "shared_preload_libraries" && k != "max_prepared_transactions")
+                    .flat_map(|(k, v)| ["-c".to_string(), format!("{k}={v}")]),
+            )
             .env("RUST_LOG", "warn")
             .env("RUST_BACKTRACE", "0")
             .stdout(logf.try_clone().unwrap())

@@ -107,9 +107,11 @@ impl Session {
                 "cannot PREPARE while holding both session-level and transaction-level locks on the same object",
             ));
         }
-        // EndPrepare: the state record, durable before PREPARE returns.
+        // EndPrepare: the state record, durable before PREPARE returns. (With the change
+        // stream's records and its PREPARE record, when the transaction logs its changes.)
         let rec = txn.borrow().prepared_record(&info)?;
-        self.state.db.store.commit(vec![(twophase::record_key(gid), Some(rec.into()))], |_| Ok(()))?;
+        let writes = vec![(twophase::record_key(gid), Some(rec.into()))];
+        crate::repl::log::prepare(&self.state.db, &mut txn.borrow_mut(), &info, writes)?;
         Ok(info)
     }
 
@@ -130,7 +132,7 @@ impl Session {
             for (name, o) in std::mem::take(&mut t.db_options_undo).into_iter().rev() {
                 let _ = self.state.cluster.set_database_options(&name, o);
             }
-            let r = self.state.db.store.commit(vec![(twophase::record_key(gid), None)], |_| Ok(()));
+            let r = crate::repl::log::rollback_prepared(&self.state.db, &t, vec![(twophase::record_key(gid), None)]);
             t.rollback();
             r.map(|_| ())
         };

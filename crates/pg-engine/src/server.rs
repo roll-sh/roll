@@ -224,6 +224,41 @@ struct Conn {
     at_ready: bool,
     /// Errors and warnings sent, for the server log (kept only while it's written).
     sent: Vec<Error>,
+    /// A walsender connection (`replication=...` in the startup packet).
+    repl: Option<crate::repl::walsender::Mode>,
+    /// The snapshot its last CREATE_REPLICATION_SLOT exported.
+    exported: Option<crate::repl::walsender::Exported>,
+}
+
+impl crate::repl::walsender::Wire for Conn {
+    fn put(&mut self, t: u8, body: &[u8]) {
+        self.msg(t, |b| b.put_slice(body));
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Conn::flush(self)
+    }
+
+    fn poll(&mut self, wait: std::time::Duration) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+        let eof = || std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected EOF on standby connection");
+        if self.rd.buffer().is_empty() {
+            let sock = &self.rd.get_ref().s;
+            let prev = sock.read_timeout()?;
+            sock.set_read_timeout(Some(wait.max(std::time::Duration::from_millis(1))))?;
+            let mut b = [0u8; 1];
+            let r = sock.peek(&mut b);
+            sock.set_read_timeout(prev)?;
+            match r {
+                Ok(0) => return Err(eof()),
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        self.read_message()?.map(Some).ok_or_else(eof)
+    }
 }
 
 impl Conn {
@@ -609,6 +644,8 @@ fn handle(
         live: std::rc::Rc::new(stream.try_clone()?),
         at_ready: false,
         sent: Vec::new(),
+        repl: None,
+        exported: None,
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
@@ -726,19 +763,30 @@ fn handle(
         return c.flush();
     };
     let user = user.to_string();
-    let database = get("database")
+    let mut database = get("database")
         .filter(|d| !d.is_empty())
         .unwrap_or(&user)
         .to_string();
-    if get("replication").is_some_and(|r| r != "false" && r != "0" && r != "off") {
-        c.error(
-            &Error::new(
-                code::FEATURE_NOT_SUPPORTED,
-                "replication connections are not supported",
-            )
-            .fatal(),
-        );
-        return c.flush();
+    // A walsender (replication=true: physical, without a database; =database: logical).
+    if let Some(r) = get("replication") {
+        match crate::repl::walsender::mode_of(r) {
+            Some(m) => c.repl = Some(m),
+            None if crate::types::text::parse_bool(r) == Ok(false) => {}
+            None => {
+                c.error(
+                    &Error::new(
+                        code::INVALID_PARAMETER_VALUE,
+                        format!("invalid value for parameter \"replication\": \"{r}\""),
+                    )
+                    .hint("Valid values are: \"false\", 0, \"true\", 1, \"database\".")
+                    .fatal(),
+                );
+                return c.flush();
+            }
+        }
+        if c.repl == Some(crate::repl::walsender::Mode::Physical) {
+            database = "postgres".into();
+        }
     }
 
     let method = match hba_method(&engine, peer, &user, &database, opts.auth) {
@@ -763,6 +811,12 @@ fn handle(
     };
     if method != AuthMethod::Trust {
         s.state.system_user = Some(format!("{}:{user}", method.name()));
+    }
+    if c.repl.is_some()
+        && let Err(e) = crate::repl::walsender::check_role(&s.state.db.catalog(), &user)
+    {
+        c.error(&e);
+        return c.flush();
     }
 
     // Settings from the startup packet: plain parameters and `options=-c name=value`.
@@ -1291,9 +1345,32 @@ fn message_loop(
                     }
                 };
                 start_activity(engine, pid, s, "active", Some(sql.clone()));
-                match guard(c, s, |c, s| Ok(simple_query(c, s, &sql))) {
-                    Ok(r) => r?,
-                    Err(e) => c.error(&e),
+                if let Some(mode) = c.repl
+                    && (crate::repl::cmd::is_command(&sql) || mode == crate::repl::walsender::Mode::Physical)
+                {
+                    let r = guard(c, s, |c, s| {
+                        if !crate::repl::cmd::is_command(&sql) {
+                            return Err(Error::new(
+                                code::FEATURE_NOT_SUPPORTED,
+                                "cannot execute SQL commands in WAL sender for physical replication",
+                            ));
+                        }
+                        let cmd = crate::repl::cmd::parse(&sql)?;
+                        let mut exported = c.exported.take();
+                        let r = crate::repl::walsender::exec(c, s, mode, cmd, &mut exported);
+                        c.exported = exported;
+                        r
+                    });
+                    if let Err(e) = r {
+                        s.on_error();
+                        send_notices(c, s);
+                        c.error(&e);
+                    }
+                } else {
+                    match guard(c, s, |c, s| Ok(simple_query(c, s, &sql))) {
+                        Ok(r) => r?,
+                        Err(e) => c.error(&e),
+                    }
                 }
                 statement_done_activity(engine, pid, s);
                 c.log_sent(Some(s), pid, Some(&sql));

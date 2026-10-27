@@ -84,6 +84,39 @@ has no `regress.so`, whose functions dblink's test creates).
 | dblink | 218 | 218 | done |
 | pgvector (0.8.7) | 915 | 915 | done (see below) |
 | bloom | 58 | 58 | done (on the native index access method interface) |
+| test_decoding | 1047 | 1014 | logical decoding (round 20, agent 79; see below) |
+
+### test_decoding (round 20, agent 79)
+
+Logical decoding (HANDOFF "Logical replication"). Its tests need the module's temp-config
+(`logical.conf`: wal_level = logical, max_replication_slots = 4, logical_decoding_work_mem =
+64kB): the harness now starts the engine with the `--temp-config` settings of the modules it
+runs (`-c name=value`), and the reference must run with them too, so run the module on its
+own with a reference started so (plus `max_prepared_transactions=5` for twophase):
+
+```sh
+docker run -d --name me-cref -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" \
+  <pinned image> -c wal_level=logical -c max_replication_slots=4 -c logical_decoding_work_mem=64kB \
+  -c max_prepared_transactions=5 -c autovacuum_naptime=1d
+PGCONTRIB_ONLY=test_decoding PGREGRESS_CONTAINER=me-cref ... cargo test -p pg-engine --test pg_contrib -- --ignored --nocapture
+```
+
+1,014 / 1,047 (96.8%): xact, binary, prepared, time, messages, spill, truncate whole; ddl 246 /
+252, slot 89 / 91, replorigin 86 / 87, stats 34 / 38. What differs:
+- **Streaming of rolled-back subtransactions** (stream 4, twophase_stream 2, decoding_in_xact
+  1): PostgreSQL decodes a subtransaction's changes before it learns it rolled back, so a big
+  one streams and then reports "aborting streamed (sub)transaction"; the engine's change
+  records of a subtransaction go with its ROLLBACK TO, so a transaction is streamed only for
+  what it committed.
+- **include-rewrites** (ddl 1): table rewrites (ALTER TABLE ... ADD COLUMN with a volatile
+  default) aren't decoded as inserts.
+- **Catalog-table features** (rewrite 7, ddl 2, toast 1): CLUSTER pg_class, a user catalog
+  table refusing a rewrite, `pg_relation_size` of a shared catalog's TOAST table, UPDATE of
+  pg_attribute (permission), MERGE ... INSERT VALUES (s.*) (executor, not decoding).
+- **decoding_into_rel** (3): decoding into a table in the transaction that reads the slot.
+- stats (4): spill counters of the reference's reorder buffer (its memory accounting of a
+  serialized big transaction) and pg_stat_replication_slots' row order after a drop.
+- twophase (2): pg_locks rows of a prepared transaction (lock code).
 
 ### pgvector (round 20, agent 70)
 
@@ -157,8 +190,7 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   PostgreSQL heap tuples, and a row is removed with DELETE ... WHERE ctid); pg_walinspect,
   basic_archive (PostgreSQL WAL records and segments; the engine's WAL is its own store's);
   pg_logicalinspect (logical decoding's snapshot files); sepgsql (SELinux).
-- **Not done**: test_decoding (the engine has no logical decoding: no replication slots or
-  change stream, which CDC tools such as Debezium need; a project of its own); xml2 (its
+- **Not done**: xml2 (its
   xslt_process needs an XSLT processor; the xpath_* functions could use the engine's XPath);
   pg_overexplain, spi (refint, autoinc, insert_username, moddatetime).
 

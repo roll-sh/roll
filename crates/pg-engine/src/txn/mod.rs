@@ -137,6 +137,10 @@ pub struct Database {
     /// The commit timestamp of the catalog published last (an earlier commit's, published
     /// after it, doesn't replace it).
     published_ts: AtomicU64,
+    /// The change stream's state (`repl::log`).
+    pub log: crate::repl::log::DbLog,
+    /// The cluster's replication state (WAL positions, slots), when it has one.
+    repl: RwLock<Option<Arc<crate::repl::Repl>>>,
 }
 
 type DetachViewEntry = (u64, Vec<(u32, u32)>, bool, Arc<Catalog>);
@@ -208,7 +212,18 @@ impl Database {
             detach_views: Mutex::new(Vec::new()),
             pending: Mutex::new(None),
             published_ts: AtomicU64::new(0),
+            log: Default::default(),
+            repl: RwLock::new(None),
         }))
+    }
+
+    /// Take part in the cluster's WAL positions and slots (`repl`).
+    pub fn set_repl(&self, r: Arc<crate::repl::Repl>) {
+        *self.repl.write() = Some(r);
+    }
+
+    pub fn repl(&self) -> Option<Arc<crate::repl::Repl>> {
+        self.repl.read().clone()
     }
 
     /// `base` without the partitions pending detach whose marks a snapshot taken at
@@ -309,7 +324,8 @@ impl Database {
         let tp = self.twophase();
         let mut n = 0;
         for (_, v) in &records {
-            if let Some((info, txn)) = twophase::recover(self, v)? {
+            if let Some((info, mut txn)) = twophase::recover(self, v)? {
+                crate::repl::log::recovered(self, &mut txn, &info.gid)?;
                 tp.recovered(info, txn);
                 n += 1;
             }
@@ -401,6 +417,7 @@ impl Database {
             db_options_undo: Vec::new(),
             exported: false,
             prepared: false,
+            log: None,
         }
     }
 
@@ -851,6 +868,9 @@ pub struct Txn {
     exported: bool,
     /// A prepared transaction (PREPARE TRANSACTION): its commit checks ran when it prepared.
     prepared: bool,
+    /// Its change stream log, while it logs its changes (`repl::log`): decided when it gets
+    /// its transaction id.
+    pub(crate) log: Option<Box<crate::repl::log::TxnLog>>,
 }
 
 impl Txn {
@@ -1373,6 +1393,11 @@ impl Txn {
     pub fn xid(&mut self) -> u64 {
         if self.xid == 0 {
             self.xid = self.db.xids().assign();
+            // (After the id is running: a slot being made either sees this transaction
+            // running, and waits for it, or this transaction sees the slot.)
+            if self.db.log.capture.load(Ordering::SeqCst) {
+                self.log = Some(Box::default());
+            }
             // Its transaction lock, held until it ends (what waiting for it waits on).
             self.db.locks.hold_xact_lock(self.id, self.id, self.lock_proc(), self.xid);
             if self.sxact {
@@ -1479,6 +1504,13 @@ impl Txn {
         cat.tables
             .get(&oid)
             .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+    }
+
+    /// A change stream record (`repl::log`), in a read-only transaction too.
+    pub fn put_log(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        self.record(key, Some(Bytes::from(value)));
+        self.wrote = true;
+        self.maybe_spill()
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
@@ -2358,6 +2390,9 @@ impl Txn {
     /// ROLLBACK TO SAVEPOINT: undo writes after it; the savepoint stays.
     pub fn rollback_to(&mut self, name: &str) -> Result<()> {
         let i = self.find_savepoint(name)?;
+        if let Some(l) = &mut self.log {
+            l.rolled_back();
+        }
         let target = self.savepoints[i].journal_len;
         if target < self.journal_base {
             // Back past a spill: the runs lose what was written after the savepoint (first,
@@ -2594,6 +2629,18 @@ impl Txn {
             }
         }
         let db = self.db.clone();
+        // The change stream's commit record (`repl::log`): a placeholder until `check`
+        // seals it under the commit lock.
+        let xid = self.xid;
+        // (A transaction that logged no change and changed no catalog decodes to nothing,
+        // as one PostgreSQL's reorder buffer never heard of: no commit record.)
+        let log = if xid != 0 { self.log.take().filter(|l| l.seq > 0 || new_catalog) } else { None };
+        let repl = self.db.repl();
+        let sealed = std::cell::Cell::new(None);
+        let placeholder = crate::repl::log::placeholder_key();
+        if log.is_some() && repl.is_some() {
+            writes.push((placeholder.clone(), None));
+        }
         let check = |store: &Store, writes: &mut Vec<(Vec<u8>, Option<Bytes>)>| -> Result<()> {
             // Other DDL committed since this transaction's began: its catalog changes are
             // carried onto the current catalog (the commit lock is held, so it stays current).
@@ -2625,6 +2672,14 @@ impl Txn {
                             "could not serialize access due to concurrent update",
                         ));
                     }
+                }
+            }
+            if let (Some(l), Some(r)) = (&log, &repl) {
+                let (rec, lsn) = crate::repl::log::seal(&db.log, &r.wal, crate::repl::log::commit_marker(xid, l), l.bytes);
+                sealed.set(Some(lsn));
+                match writes.iter_mut().rev().find(|w| w.0 == placeholder) {
+                    Some(w) => *w = rec,
+                    None => writes.push(rec),
                 }
             }
             Ok(())
@@ -2676,8 +2731,13 @@ impl Txn {
             };
             self.db.store.commit_grouped(writes, check, appended, publish_catalog)
         } else {
-            self.db.store.commit(writes, |s| check(s, &mut Vec::new()))
+            self.db.store.commit_grouped(writes, check, |_| {}, |_| {})
         };
+        // (Other commits move the WAL position by what the statistics count them writing:
+        // `exec::pgstat`.)
+        if let Some(lsn) = sealed.get() {
+            crate::repl::log::committed(&self.db.log, lsn);
+        }
         self.finish_xid(result.is_ok());
         if let Ok(ts) = &result
             && !self.moved_out.is_empty()
@@ -2798,6 +2858,16 @@ impl Txn {
         );
         self.exported = true;
         Ok(id)
+    }
+
+    /// Take the store state `ts` as this fresh REPEATABLE READ transaction's snapshot (a
+    /// logical slot's consistent point: CREATE_REPLICATION_SLOT ... (SNAPSHOT 'use')).
+    pub fn use_snapshot(&mut self, ts: u64) {
+        self._pin = Some(self.db.store.pin(ts));
+        self.xmin = Some(self.db.xids().register_snapshot_of(Some(self.id)));
+        self.snapshot_ts = ts;
+        self.start_ts = ts;
+        self.snapshot_fixed = true;
     }
 
     /// SET TRANSACTION SNAPSHOT (ImportSnapshot): run on the exported snapshot `id`. The

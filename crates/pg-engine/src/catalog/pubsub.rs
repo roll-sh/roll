@@ -115,7 +115,7 @@ fn filter_columns(qual: &str) -> Vec<String> {
 impl Catalog {
     /// RelationGetIndexAttrBitmap(INDEX_ATTR_BITMAP_IDENTITY_KEY): the replica identity
     /// index's columns (positions), None without one.
-    fn identity_key(&self, t: &Table) -> Option<Vec<usize>> {
+    pub(crate) fn identity_key(&self, t: &Table) -> Option<Vec<usize>> {
         match t.replident {
             // rd_pkindex: an immediate primary key only.
             None => t.pkey.clone().filter(|_| {

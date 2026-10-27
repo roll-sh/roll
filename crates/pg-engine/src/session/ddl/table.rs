@@ -7617,6 +7617,11 @@ impl Ddl<'_, '_> {
                 }
             }
         }
+        // One change stream record for the tables logically logged (xl_heap_truncate).
+        {
+            let logged: Vec<&Table> = tables.iter().map(|t| &**t).collect();
+            crate::repl::log::truncate(&logged, cascade, s.restart_seqs, self.ctx)?;
+        }
         // Then the foreign tables, by server (ExecForeignTruncate).
         for (_, rels) in &foreign {
             crate::ext::postgres_fdw::modify::truncate(rels, cascade, s.restart_seqs, self.ctx)?;

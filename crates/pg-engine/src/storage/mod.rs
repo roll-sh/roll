@@ -397,6 +397,13 @@ impl Store {
         self.assigned.load(Ordering::Acquire)
     }
 
+    /// Run `f` with the commit lock held, so no commit takes a timestamp meanwhile, given
+    /// the last one assigned (a logical slot's consistent point: `repl::sqlfn`).
+    pub fn with_commit_lock<T>(&self, f: impl FnOnce(u64) -> T) -> T {
+        let _c = self.commit.lock();
+        f(self.assigned.load(Ordering::Acquire))
+    }
+
     pub fn pin(self: &Arc<Self>, ts: u64) -> SnapshotPin {
         *self.snapshots.lock().entry(ts).or_insert(0) += 1;
         SnapshotPin {
@@ -592,35 +599,7 @@ impl Store {
         writes: Vec<(Vec<u8>, Option<Bytes>)>,
         check: impl FnOnce(&Store) -> Result<()>,
     ) -> Result<u64> {
-        if !self.opts.sync || self.ingests(&writes) {
-            return self.commit_with(writes, |s, _| check(s), |_| {});
-        }
-        let rotate;
-        let ts;
-        {
-            let mut c = self.commit.lock();
-            if self.closed.load(Ordering::Acquire) {
-                return Err(internal("database is closed"));
-            }
-            check(self)?;
-            if writes.is_empty() {
-                return Ok(self.visible_ts());
-            }
-            ts = self.assigned.load(Ordering::Acquire) + 1;
-            c.wal.append(ts, &writes)?;
-            self.assigned.store(ts, Ordering::Release);
-            let mem = self.view.read().mem.clone();
-            for (k, v) in writes {
-                mem.insert(mvcc_key(&k, ts), v, ts);
-            }
-            rotate = mem.bytes() >= self.opts.memtable_bytes;
-        }
-        self.wait_durable(ts)?;
-        if rotate {
-            self.rotate()?;
-            self.schedule_background();
-        }
-        Ok(ts)
+        self.commit_grouped(writes, |s, _| check(s), |_| {}, |_| {})
     }
 
     /// Whether a commit of `writes` is big enough to go in as an SST of its own

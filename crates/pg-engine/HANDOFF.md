@@ -474,6 +474,68 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   orders PostgreSQL shows once work_mem is exceeded).
   Found and left open (not executor work): deep expressions overflowed a 2 MB thread that
   embeds the engine. Fixed in round 19 by agent 63 ("Deep input", below).
+- **Logical replication** (round 20, agent 79; `src/repl/`): replication slots, a logical
+  change stream from the engine's own commit path, the test_decoding and pgoutput plugins,
+  the SQL interface and the replication protocol (`replication=database`), so CDC clients
+  (pg_recvlogical, Debezium, ...) and PostgreSQL subscribers read the engine as a publisher.
+  - **Server settings**: `roll-engine -c wal_level=logical -c max_replication_slots=N -c
+    max_wal_senders=N` (embedded: `EngineOptions::settings`, postgresql.conf's role: every
+    `-c` setting is also a session default). wal_level is `replica` by default, as in
+    PostgreSQL, and logical decoding fails with its error until it is `logical`.
+  - **WAL positions** (`repl/lsn.rs`): one cluster-wide counter every commit takes a range of
+    (`WalPos::alloc`), persisted 64 MB ahead in the registry (`next_lsn`), so positions only
+    increase, across crashes too. pg_current_wal_lsn / _insert_lsn / _flush_lsn read it;
+    pg_wal_lsn_diff works on it.
+  - **Slots** (`repl/slot.rs`): the cluster's registry, persistent slots in
+    `<data>/replslots.json` (temp file + rename; fsynced on create / drop / advance; confirmed
+    positions written as they move), temporary slots dropped with their session or at its
+    next error (PostgresMain's ReplicationSlotCleanup). PostgreSQL's errors, limits and array
+    order (a new slot takes the first free place). Creation waits for the transactions running
+    when it starts (as SnapBuild's consistent point does), then takes the consistent point
+    under the database's commit lock (`Store::with_commit_lock`): every later commit of the
+    database has a later position, and a snapshot at that store state (SNAPSHOT 'use' /
+    'export') holds exactly the earlier ones.
+  - **Change stream** (`repl/log.rs`): while a database has a logical slot (`DbLog::capture`),
+    a transaction decides when it gets its xid to log its changes: INSERT / UPDATE / DELETE
+    hooks in `exec/dml.rs`, TRUNCATE in `ddl/table.rs`, transactional messages, and a relation
+    description record when a relation (or its definition) first appears in the transaction.
+    The records are ordinary writes of the transaction under a reserved key range, so they
+    spill, roll back to savepoints and commit atomically with the data; the commit adds one
+    commit record whose WAL positions are taken under the store's commit lock
+    (`Store::commit_grouped`'s check, `log::seal`), so a database's commit records are in
+    commit order. Without a slot nothing is logged; a commit only moves the WAL position (one
+    atomic add). Old tuples follow the replica identity (FULL, the identity key when it changed
+    or is stored out of line, NOTHING); values PostgreSQL keeps out of line that an UPDATE
+    didn't assign are logged as unchanged TOAST (the size model's layout, `sizing::
+    external_columns`, and datum identity). A transaction that logged no change and changed no
+    catalog writes no commit record (PostgreSQL's reorder buffer never sees one). PREPARE writes
+    the records and a PREPARE record (two-phase decoding), COMMIT / ROLLBACK PREPARED their own;
+    a recovered prepared transaction keeps logging (`log::recovered`). What every slot of a
+    database confirmed is removed (`Repl::gc`).
+  - **Decoding** (`repl/decode.rs`, `repl/plugin.rs`): commit records in position order, each
+    transaction's records with their positions, driving the plugin as logical.c does: BEGIN /
+    changes / COMMIT, streaming blocks once a transaction outgrows logical_decoding_work_mem
+    (ReorderBufferChangeSize's accounting) when streaming is on, spill statistics otherwise,
+    prepared transactions at PREPARE with two-phase slots (two_phase_at), origins filtered.
+    pg_logical_slot_{get,peek}[_binary]_changes, pg_replication_slot_advance,
+    pg_copy_*_replication_slot, pg_logical_emit_message, pg_replication_slots,
+    pg_stat_replication_slots, output_plugin_libraries, the plugin's startup CONTEXT.
+  - **Plugins**: test_decoding (`repl/test_decoding.rs`, test_decoding.c's text exactly) and
+    pgoutput (`repl/pgoutput.rs`: protocol versions 1-4, Begin / Commit / Origin / Relation /
+    Type / Insert / Update / Delete / Truncate / Message / Stream* / two-phase messages, binary
+    or text tuples, publications applied: published actions, ALL TABLES / TABLES IN SCHEMA,
+    publish_via_partition_root, column lists, generated columns, row filters (evaluated by the
+    walsender's session)).
+  - **Replication protocol** (`repl/cmd.rs`, `repl/walsender.rs`, wired in `server.rs`):
+    IDENTIFY_SYSTEM, SHOW, CREATE / ALTER / DROP / READ_REPLICATION_SLOT, START_REPLICATION ...
+    LOGICAL in CopyBoth (XLogData, keepalives, Standby Status Updates confirming positions),
+    TIMELINE_HISTORY's error, SQL in `replication=database` sessions; the REPLICATION attribute
+    is checked at connection ("permission denied to start WAL sender"). pg_stat_replication.
+  - **Replication origins** (`repl/origin.rs`): pg_replication_origin_* functions, the
+    pg_replication_origin catalog and status view; a session origin stamps the commits it makes
+    and stores the origin's progress in the same commit.
+  - Tests and scores: see "Logical replication" in `tests/contrib/STATUS.md` (test_decoding)
+    and the verification notes there.
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
@@ -1718,6 +1780,14 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   password the server then uses (password_required), and the server process's environment
   (PGPASSWORD, service files, .pgpass) is never read. Code: `src/remote/outbound.rs`; tests:
   `tests/outbound.rs`. The contrib harness runs with `--allow-outbound local`.
+- **Physical replication is an accepted difference** (round 20, agent 79): streaming WAL to a
+  standby, `pg_basebackup`, `pg_receivewal` and WAL shipping expose PostgreSQL's on-disk format
+  (WAL records, data files), which the engine doesn't have. A `replication=true` connection is
+  accepted (IDENTIFY_SYSTEM, SHOW, physical slots), but START_REPLICATION PHYSICAL,
+  BASE_BACKUP and UPLOAD_MANIFEST fail with FEATURE_NOT_SUPPORTED ("physical replication is
+  not supported by this server", with a hint to use logical replication). Physical slots exist
+  (pg_create_physical_replication_slot, pg_copy_physical_replication_slot) as registry entries.
+  Logical replication is the supported path (below, "Logical replication").
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for

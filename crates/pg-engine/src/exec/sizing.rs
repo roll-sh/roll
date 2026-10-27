@@ -912,6 +912,35 @@ fn toast_layout_full(
     (len, exts, st, zipped)
 }
 
+/// The columns of `row` PostgreSQL stores out of line in `t` (None: none, the tuple fits):
+/// what an UPDATE leaving them unchanged doesn't log again (logical decoding's unchanged
+/// TOAST datums).
+pub fn external_columns(t: &Table, row: &[Value], ctx: &ExecCtx) -> Option<Vec<bool>> {
+    let n = row.len().min(t.columns.len());
+    if t.toast == 0 {
+        return None;
+    }
+    let types: Vec<DataType> = t.columns[..n].iter().map(|c| c.ty.clone()).collect();
+    let fmt = ctx.fmt();
+    let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt);
+    let row: Vec<Value> = t.columns[..n]
+        .iter()
+        .zip(row)
+        .map(|(c, v)| if c.virtual_gen || c.dropped { Value::Null } else { v.clone() })
+        .collect();
+    if relsize::heap_tuple_len(&types, &row, &text) <= TOAST_THRESHOLD {
+        return None;
+    }
+    let lz4 = ctx
+        .sess
+        .settings
+        .borrow()
+        .get_raw("default_toast_compression")
+        .is_some_and(|v| v == "lz4");
+    let (_, _, st, _) = toast_layout_full(t, &types, &row, &HashSet::new(), &text, lz4);
+    Some(st.iter().map(|s| *s == St::External).collect())
+}
+
 /// How a column's value of `row` is stored in `t` (pg_column_size / pg_column_compression):
 /// None when it is stored as it is, else its stored size (a compressed varlena's, or an
 /// out-of-line value's extsize) and its compression method when compressed.
