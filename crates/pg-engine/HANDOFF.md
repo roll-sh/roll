@@ -699,7 +699,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   NULL-heavy data and a nondeterministic collation; its fixes: self-join elimination's null
   test of a composite, presorted aggregates under a nondeterministic collation, an aggregate's
   level from the columns its arguments name as written, a scalar sub-select's column name,
-  non-inlined SQL function bodies planned only when they run.
+  non-inlined SQL function bodies planned only when they run. Batch 2: `x IN (subquery)` over
+  no rows never evaluates x; a subquery planned apart under a constant-false qual of its own
+  level is never planned (relation_excluded_by_constraints: its failing constants don't
+  fail), while over an inner join such a qual gates the join; immutable comparisons over
+  COLLATE'd constants fold; an untyped literal coerced to a column-free grouping key's value
+  is an occurrence of that key.
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified

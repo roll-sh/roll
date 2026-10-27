@@ -1,0 +1,37 @@
+> CREATE TABLE a75gk (d date, n int)
+-- CREATE TABLE
+
+> SELECT count(*) FROM a75gk GROUP BY GROUPING SETS ((), ('2025-06-19'::date)) HAVING 1 > (10.00 - ('2025-06-19' - '1999-11-11'::date))
+count:int8
+-- SELECT 0
+
+> SELECT count(*), ('2025-06-19' - '1999-11-11'::date) AS x FROM a75gk GROUP BY GROUPING SETS ((), ('2025-06-19'::date))
+count:int8 | x:int4
+0 | NULL
+-- SELECT 1
+
+> SELECT count(*), '2025-06-19' - '1999-11-11'::date AS x FROM a75gk GROUP BY ROLLUP (('2025-06-19'::date))
+count:int8 | x:int4
+0 | NULL
+-- SELECT 1
+
+> INSERT INTO a75gk VALUES ('2024-01-01', 1)
+-- INSERT 0 1
+
+> SELECT count(*), ('2025-06-19' - '1999-11-11'::date) AS x, n FROM a75gk GROUP BY GROUPING SETS ((), ('2025-06-19'::date), (n)) ORDER BY 3, 2
+count:int8 | x:int4 | n:int4
+1 | 9352 | 1
+1 | 9352 | NULL
+1 | 9352 | NULL
+-- SELECT 3
+
+> SELECT count(*), (d - '2024-01-01') AS x FROM a75gk GROUP BY GROUPING SETS ((), ('2024-01-01'::date), (d)) ORDER BY 2
+count:int8 | x:int4
+1 | 0
+1 | NULL
+1 | NULL
+-- SELECT 3
+
+> DROP TABLE a75gk
+-- DROP TABLE
+

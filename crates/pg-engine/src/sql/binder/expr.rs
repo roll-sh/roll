@@ -2365,8 +2365,18 @@ impl Binder<'_, '_> {
             && !self.deparse
             && def.volatility == 'i'
             && !def.is_srf()
-            && args.iter().all(|a| matches!(a, Expr::Const(..)))
+            // (A constant under a COLLATE is one: eval_const_expressions makes the
+            // CollateExpr a Const of that collation. Only for a result without a collation,
+            // which a folded value couldn't carry on: `'a' = 'a' COLLATE "x"`.)
+            && args.iter().all(|a| match a {
+                Expr::Collate(x, ..) => matches!(**x, Expr::Const(..)) && !ty.collatable(),
+                a => matches!(a, Expr::Const(..)),
+            })
         {
+            // (Explicit collations that conflict fail first, as assign_collations does.)
+            if args.iter().any(|a| matches!(a, Expr::Collate(..))) {
+                self.collation_of(&e)?;
+            }
             let v = match eval(&e, &[], self.ctx) {
                 Ok(v) => v,
                 // Postgres folds when it plans: a failing call stays a call, whose error

@@ -1219,14 +1219,20 @@ impl<'a> ExecCtx<'a> {
                 } else {
                     None
                 };
-                let mut left = Vec::with_capacity(s.left.len());
-                for l in &s.left {
-                    left.push(eval(l, row, self)?);
-                }
+                // The subquery's rows first: over none the left side is never evaluated
+                // (ExecHashSubPlan's empty table, ExecScanSubPlan's no row to test), so what
+                // fails in it doesn't fail the comparison.
                 let rows = match one {
                     Some(rows) => rows,
                     None => self.subquery_rows(s, row, None)?,
                 };
+                if rows.is_empty() {
+                    return Ok(Value::Bool(all));
+                }
+                let mut left = Vec::with_capacity(s.left.len());
+                for l in &s.left {
+                    left.push(eval(l, row, self)?);
+                }
                 if s.left.len() == 1 {
                     let items: Vec<Value> = rows.iter().map(|r| r[0].clone()).collect();
                     return array_op(&left[0], &items, &s.ops[0], &s.left[0].ty(), all, self);

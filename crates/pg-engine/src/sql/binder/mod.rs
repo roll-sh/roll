@@ -2013,12 +2013,33 @@ impl<'b, 'a> Binder<'b, 'a> {
 
     /// Implicit coercion for a function / operator argument.
     pub fn coerce_implicit(&mut self, e: Expr, to: &DataType) -> Result<Expr> {
-        self.coerce_with(e, to, CastContext::Implicit, &|from| {
+        let literal = matches!(e, Expr::Const(_, DataType::Unknown));
+        let out = self.coerce_with(e, to, CastContext::Implicit, &|from| {
             Error::new(
                 code::DATATYPE_MISMATCH,
                 format!("cannot cast type {} to {}", from.display(), to.display()),
             )
-        })
+        })?;
+        Ok(if literal { self.pass_marked_literal(out) } else { out })
+    }
+
+    /// An untyped literal an operator or function argument made a constant equal to a
+    /// grouping key without columns: an occurrence of that key (parse analysis matches the
+    /// transformed expressions), kept apart from folding as a written one is
+    /// (`SelectState::pass_marks`): `HAVING 1 > ('2025-06-19' - d)` for a key
+    /// `('2025-06-19'::date)`.
+    fn pass_marked_literal(&self, e: Expr) -> Expr {
+        let Some(lv) = self.levels.last() else { return e };
+        if lv.st.pass_marks.is_empty()
+            || lv.st.pass_depth == 0
+            || lv.st.in_agg
+            || matches!(lv.clause, Clause::Window)
+            || !matches!(e, Expr::Const(..))
+            || !lv.st.group_exprs.iter().any(|g| g.columns().is_empty() && g.same_as(&e))
+        {
+            return e;
+        }
+        Expr::SqlSyntax(Box::new(Expr::SqlSyntax(Box::new(e))))
     }
 
     /// Assignment coercion (INSERT / UPDATE targets).

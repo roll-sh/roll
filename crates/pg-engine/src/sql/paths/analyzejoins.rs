@@ -859,9 +859,15 @@ fn plain_cols(p: &Plan) -> Option<Vec<(String, Option<String>)>> {
 /// standing for it. (The constant expressions that failed to fold in what it replaces stay
 /// with it: `DummyInfo::kept`.)
 fn dummy(p: &Plan) -> Plan {
+    dummy_with(p, p)
+}
+
+/// `dummy` of `p` keeping the constants of `src` (`p`, or `p` without the subqueries
+/// Postgres never plans: `without_subqueries`).
+fn dummy_with(p: &Plan, src: &Plan) -> Plan {
     let mut d = dummy_rel(p);
-    let kept = crate::sql::binder::fold::candidates(p);
-    let cols = crate::sql::binder::fold::output_candidates(p, &kept);
+    let kept = crate::sql::binder::fold::candidates(src);
+    let cols = crate::sql::binder::fold::output_candidates(src, &kept);
     let projected = matches!(d, Plan::Project { .. });
     if !kept.is_empty() || !cols.is_empty() {
         let mut cur = &mut d;
@@ -880,6 +886,21 @@ fn dummy(p: &Plan) -> Plan {
         }
     }
     d
+}
+
+/// `p` with the subqueries planned apart below it (Barrier) as plain empty relations: a
+/// relation excluded by a constant-false restriction of its own (relation_excluded_by_
+/// constraints, in set_rel_size) is never planned, nor its subquery, so nothing in that is
+/// simplified.
+fn without_subqueries(p: &Plan) -> Plan {
+    if let Plan::Barrier { .. } = p {
+        return Plan::Empty { ncols: plan_width(p), cols: None, info: None };
+    }
+    let mut q = p.clone();
+    for c in crate::sql::explain::plan_inputs_mut(&mut q) {
+        *c = Arc::new(without_subqueries(c));
+    }
+    q
 }
 
 /// Over a statement's whole plan (its levels' outputs read only as the levels above read
@@ -1225,7 +1246,11 @@ impl Planner<'_, '_> {
             _ => false,
         };
         if replace {
-            *p = dummy(p);
+            // (A constant-false qual restricting a subquery planned apart, the level's one
+            // relation: Postgres never plans that subquery. Over a join it gates the join,
+            // whose relations are planned.)
+            let excluded = matches!(&*p, Plan::Filter { input, .. } if !empty(input) && matches!(&**input, Plan::Barrier { .. }));
+            *p = if excluded { dummy_with(p, &without_subqueries(p)) } else { dummy(p) };
         }
     }
 }

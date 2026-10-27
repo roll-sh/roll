@@ -446,6 +446,44 @@ PostgreSQL's record_cmp has no collation for the field and fails ("could not det
 collation to use for string comparison") once it compares two values of it; `max(c)::ct`
 (a record cast to a composite) isn't refused.
 
+Batch 2 (`a75_fresh_r3b`), from the round 3 seeds 3030-3329:
+
+- **Wrong state (errors PostgreSQL never raises)**: `x [NOT] IN (subquery)` and `x op ANY /
+  ALL (subquery)` over a subquery returning no rows evaluated `x` first, so a call failing in
+  it failed a DELETE PostgreSQL completes (seed 3193 #75): ExecHashSubPlan returns before it
+  projects the left side over an empty table, ExecScanSubPlan has no row to test it against
+  (`exec/mod.rs`).
+- **Wrong state (errors PostgreSQL never raises)**: a subquery planned apart (grouped,
+  aggregated) restricted by a constant-false qual of its own level is excluded before it is
+  planned (relation_excluded_by_constraints, in set_rel_size), so nothing in it is simplified;
+  the engine pushed the qual into the subquery and kept its failing constants with the dummy
+  (seeds 3233 #5, 3204 #45: an INSERT ... ON CONFLICT and an UPDATE whose SET sub-selects read
+  such a view failed). The qual now stays over the subquery (`optimize::add_filter`) and the
+  dummy keeps only its level's constants (`analyzejoins::without_subqueries`). Over a join a
+  constant-false qual is the join's (distribute_qual_to_rels' pseudoconstant, gating the
+  join): its relations are planned, and their subqueries' failing constants do fail.
+- **Engine error**: an immutable call over constants under a COLLATE wasn't folded (`'a' = 'a'
+  COLLATE "und-x-icu"`; eval_const_expressions makes such a CollateExpr a Const), so a FULL JOIN
+  on it failed "FULL JOIN is only supported with merge-joinable or hash-joinable join
+  conditions" where PostgreSQL's ON is a constant true (seed 3142 #91). Only for a result
+  without a collation (a folded text value couldn't carry its explicit one on), and after the
+  call's collations are derived, so explicit ones that conflict still fail first.
+- **Wrong rows (grouping sets; agent 68's leftover)**: an untyped literal an operator makes a
+  constant equal to a grouping key without columns is an occurrence of that key, as parse
+  analysis matches the transformed expressions: `HAVING 1 > (10.00 - ('2025-06-19' -
+  '1999-11-11'::date))` for a key `('2025-06-19'::date)` is NULL in the empty set's row over no
+  input, where the engine folded the subtraction and kept the row
+  (`a75_groupingsets_literal`; `Binder::pass_marked_literal`).
+
+Left from the round 3 seeds: `int4range @> x` with `x` of a domain over int4 (seed 3045 #47:
+PostgreSQL finds no operator, the engine resolves one); `array_agg` of a domain column (seed
+3202 #58: PostgreSQL's column type is the domain's array type, the engine's int4[]); seed 3285
+#94 is the physical row order after an UPDATE ... FROM a DISTINCT ON sub-select (below).
+Seeds 2040-2189 against batch 1: 16 mismatches fewer (engine_error 39 -> 36, missing_error
+24 -> 22, eval_error 98 -> 92, wrong_error 40 -> 39, tag 9 -> 7), two new eval_errors where the
+engine now skips an evaluation PostgreSQL makes (seed 2133 #66 "cannot get array length of a
+scalar", seed 2184 #1 "operand, lower bound, and upper bound cannot be NaN"), not reduced yet.
+
 ## Open
 
 - **Wrong rows (JSON_VALUE / JSON_QUERY, a PostgreSQL 18.6 quirk)**: after a row whose call
@@ -463,8 +501,6 @@ collation to use for string comparison") once it compares two values of it; `max
   `jsonb_array_length('{}')` under `WHERE NULL`), doesn't fail the statement as in
   PostgreSQL; a dummy projection kept over an empty relation (`dummy_rel`'s target list)
   doesn't pass on its input's per-column constants (`kept_cols`).
-- A stable SQL function whose body fails only at run time on some rows (seed 1472 #24's `f0`):
-  the engine fails an INSERT ... SELECT PostgreSQL completes.
 
 - **Constant folding, left**: a UNION ALL arm found empty (`... WHERE false UNION ALL ...`)
   is dropped with its outputs, which PostgreSQL still simplifies; a strict call over a pulled-up subquery's output whose expression
@@ -473,11 +509,9 @@ collation to use for string comparison") once it compares two values of it; `max
   #33, s12 #52, s20 #42, s22 #62) are these.
 
 - Grouping keys' occurrences are matched by their text as written (`pass_marks`): one written
-  differently but equal (`abs(+9)` for a key `abs(9)`, an untyped `'2025-06-19'` an operator
-  makes a date for a key `('2025-06-19'::date)`: `HAVING 1 > (10.00 - ('2025-06-19' -
-  '1999-11-11'::date))`) is still folded with its surroundings; PostgreSQL compares the
-  transformed expressions. Bare literals aren't marked (their type comes from the context;
-  a key written as one matches the constant it becomes).
+  differently but equal (`abs(+9)` for a key `abs(9)`) is still folded with its surroundings;
+  PostgreSQL compares the transformed expressions. (An untyped literal an operator coerces
+  matches the constant it becomes since round 3, batch 2.)
 - EXPLAIN only: a single-table FROM subquery on the nullable side whose WHERE is a
   sub-select (`c LEFT JOIN (SELECT x FROM a WHERE (SELECT false)) s ON ...`): PostgreSQL
   checks it as the outer join's Join Filter, the engine gates the scan with a Result.

@@ -571,7 +571,12 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 }
                 // (So is one that reads none at all: distribute_qual_to_rels gives a
                 // pseudoconstant clause the whole join's scope, a gating qual of the join.)
-                if p.columns().is_empty() && !matches!(p, Expr::Const(..)) {
+                // (A constant false or NULL too, of an inner join: the join is dummy, its
+                // relations planned all the same, their subqueries' constants simplified.)
+                if p.columns().is_empty()
+                    && (!matches!(p, Expr::Const(..))
+                        || (kind == JoinKind::Inner && matches!(p, Expr::Const(Value::Bool(false) | Value::Null, _))))
+                {
                     if kind == JoinKind::Inner {
                         cond_parts.push(p);
                     } else {
@@ -1049,6 +1054,18 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                     pred: p,
                 },
                 None => proj,
+            }
+        }
+        // A constant-false (or NULL) qual restricting a subquery planned apart stays over it:
+        // Postgres excludes the relation before planning the subquery
+        // (relation_excluded_by_constraints), so nothing in it is simplified
+        // (`analyzejoins::reduce_dummies`).
+        Plan::Barrier { .. }
+            if parts.iter().any(|q| matches!(q, Expr::Const(Value::Bool(false) | Value::Null, _))) =>
+        {
+            Plan::Filter {
+                input: Arc::new(plan),
+                pred: and_all(parts).unwrap(),
             }
         }
         // A security barrier: only the clauses that can't leak its rows' values go into
