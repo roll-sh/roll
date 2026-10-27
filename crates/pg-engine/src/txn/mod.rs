@@ -2028,6 +2028,7 @@ impl Txn {
         row: Option<Arc<Vec<crate::types::Value>>>,
         policy: WaitPolicy,
         what: &dyn Fn() -> String,
+        row_key: Option<&[u8]>,
     ) -> Result<bool> {
         if token.is_none()
             && row.is_none()
@@ -2053,7 +2054,7 @@ impl Txn {
         let got = self.lock(key, LockMode::Exclusive, policy, what)?;
         if got {
             self.unique_keys_taken += 1;
-            self.hold_unique_key(key, token, row);
+            self.hold_unique_key(key, token, row, row_key);
         }
         Ok(got)
     }
@@ -2081,6 +2082,7 @@ impl Txn {
         key: &[u8],
         token: Option<u32>,
         row: Option<Arc<Vec<crate::types::Value>>>,
+        row_key: Option<&[u8]>,
     ) {
         let holder = self.holder();
         let xid = self.cur_xid();
@@ -2090,8 +2092,38 @@ impl Txn {
                 self.xact_locks.push(holder);
             }
         }
-        let kh = locks::KeyHolder { holder, xid, token, row };
+        let kh = locks::KeyHolder { holder, xid, token, row, row_key: row_key.map(<[u8]>::to_vec) };
         self.db.locks.set_key_holder(key, self.id, kh);
+    }
+
+    /// Row `row_key` (values `row`) enters exclusion constraint `con`: others' checks see
+    /// the entry and wait for the running (sub)transaction (a dirty snapshot's in-progress
+    /// index tuple), until it ends. (Its lock goes with the subtransaction if that aborts.)
+    pub fn hold_exclusion_entry(
+        &mut self,
+        con: u32,
+        row_key: &[u8],
+        row: Arc<Vec<crate::types::Value>>,
+    ) -> Result<()> {
+        let key = locks::excl_entry_key(con, row_key);
+        self.lock(&key, LockMode::Exclusive, WaitPolicy::Block, &String::new)?;
+        let holder = self.holder();
+        let xid = self.cur_xid();
+        if holder != self.id {
+            self.db.locks.hold_xact_lock(holder, self.id, self.lock_proc(), xid);
+            if !self.xact_locks.contains(&holder) {
+                self.xact_locks.push(holder);
+            }
+        }
+        let kh = locks::KeyHolder { holder, xid, token: None, row: Some(row), row_key: Some(row_key.to_vec()) };
+        self.db.locks.add_excl_entry(con, &key, row_key, self.id, kh);
+        Ok(())
+    }
+
+    /// The entries of exclusion constraint `con` other backends are writing: (row key,
+    /// writer).
+    pub fn exclusion_entries(&self, con: u32) -> Vec<(Vec<u8>, locks::KeyHolder)> {
+        self.db.locks.excl_entries(con, self.lock_proc())
     }
 
     /// Wait for the writer of an in-progress index entry: its speculative insertion to

@@ -1757,6 +1757,12 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     Ok(())
 }
 
+/// Where the heap model has row `key`'s latest version, one another transaction is writing
+/// included (a wait for that transaction names it). None when the table isn't modelled.
+pub fn modelled_tid(table: u32, key: &[u8], ctx: &ExecCtx) -> Option<Tid> {
+    ctx.sess.db.relfiles.lock().heaps.get(&table)?.tid_of(key)
+}
+
 /// A sequential scan of the table starts: every page it reads may be pruned.
 pub fn scanned(table: u32, ctx: &ExecCtx) {
     let db = &ctx.sess.db;

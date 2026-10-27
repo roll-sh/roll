@@ -20,7 +20,7 @@ run is a faithful isolationtester.
 |---|---:|---:|---:|---:|
 | specs matching | 30 of 122 (24.6%) | 94 of 122 (77.0%) | 120 of 122 (98.4%) | 121 of 122 (99.2%) |
 | permutations matching | 921 of 1648 (55.9%) | 1452 of 1648 (88.1%) | 1646 of 1648 (99.9%) | 1647 of 1648 (99.9%) |
-| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 12232 of 12238 (100.0%) | STEPS of 12238 (100.0%) |
+| steps matching | 10146 of 12238 (82.9%) | 11397 of 12238 (93.1%) | 12232 of 12238 (100.0%) | 12234 of 12238 (100.0%) |
 
 A *step* is one `step ...` line of isolationtester's output with what follows it (its rows,
 errors, notices, `<waiting ...>` and `<... completed>`); a permutation matches when all of its
@@ -50,7 +50,7 @@ it implemented over the old lock manager.
   RowExclusiveLock on the TOAST table until the transaction ends; DROP TABLE and TRUNCATE take
   AccessExclusiveLock on the TOAST table and index; REINDEX of a table locks its TOAST table
   and index too. Since round 20 (agent 73) a table too big for the size model locks it for
-  the same statements as a modelled one (`sizing::lock_toast_changed`: a delete of a row
+  the same statements as a modelled one (`sizing::untracked_write`, `toast_gone`: a delete of a row
   with an out-of-line value, an update saving or replacing one, not one keeping it; it used
   to lock for any update of such a row and never for a delete; `big_tables.rs`
   `toast_locks_past_the_model`, both paths against what PostgreSQL shows). Not modelled,
@@ -282,7 +282,25 @@ failures predate round 17's lock manager); what differed:
   (`scan::Xltw`, `xltw_context`: the version the waiter's snapshot sees), a unique check's
   `while inserting index tuple (b,o) in relation "t_pkey"` (its own new tuple; the stored TID
   when it has one, else the key's stand-in, as for ctid). The tuple lock's wait has none, as
-  in Postgres.
+  in Postgres. Then every other XactLockTableWait the engine has: ON CONFLICT's pre-check
+  (`... index tuple (b,o) in relation "t"`, the other writer's row: key holders record their
+  row's key, `KeyHolder::row_key`; another transaction's row in progress is named where the
+  heap model put it, `sizing::modelled_tid`), an exclusion constraint's (`while checking
+  exclusion constraint on tuple ...`), a foreign key check's, with the RI query as its next
+  line (`SQL statement "SELECT 1 FROM ONLY "public"."p" x WHERE "id" OPERATOR(pg_catalog.=)
+  $1 FOR KEY SHARE OF x"`, `ri_check_query`, made only for an error), deletes and referential
+  actions' updates and deletes.
+- **Exclusion constraints serialized every writer**: a writer took one lock per constraint
+  (per leading value when its first operator is `=`) until its transaction ended, so a row
+  that conflicted with nothing waited for every other inserter (booking-style `EXCLUDE USING
+  gist (during WITH &&)` tables ran one writer at a time). Now each entry in progress is
+  visible to the others as Postgres's index tuple under a dirty snapshot is
+  (`Txn::hold_exclusion_entry`, `locks::EXCL_ENTRY`, `LockManager::excl_entries`): the
+  writer puts its entry in first, then checks committed rows and others' entries in
+  progress; it waits only for a conflicting one's writer (or a conflicting row's deleter in
+  progress), then checks again (`roll-exclusion-constraints`). Not modelled: two ON CONFLICT
+  insertions whose speculative rows conflict under an exclusion arbiter wait for each other
+  (a deadlock error) where Postgres's livelock-preventing wait lets one start over.
 - **idle_in_transaction_session_timeout, transaction_timeout and idle_session_timeout** were
   accepted and ignored. Now: waiting for the next query after ReadyForQuery (not between an
   extended query's messages), a session past idle_in_transaction_session_timeout (in a block,
@@ -309,8 +327,8 @@ UPDATE), LISTEN / NOTIFY (delivery at commit, order, duplicates folded, payloads
 savepoints, listeners in a transaction, LISTEN / UNLISTEN at commit), sequences (gaps,
 setval outside the transaction, CACHE ranges, ALTER SEQUENCE waits), serialization failures
 and their retries (write skew, REPEATABLE READ's concurrent update / delete / lock / ON
-CONFLICT, read-only and deferrable), DETACH ... FINALIZE. All 65 permutations match; only
-the last needed a fix. (They were written against both servers and checked to wait and fail
+CONFLICT, read-only and deferrable), DETACH ... FINALIZE, exclusion constraints. All 68
+permutations match; the last two needed fixes. (They were written against both servers and checked to wait and fail
 where the reference does: 20 waits, 27 errors, 19 notifications.)
 
 ## What round 18 changed (agent 56)

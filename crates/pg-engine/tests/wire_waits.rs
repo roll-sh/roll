@@ -143,6 +143,51 @@ fn waits() -> Vec<Wait> {
             release: "ROLLBACK",
         },
         Wait {
+            name: "delete",
+            hold: "BEGIN; SELECT v FROM t WHERE id = 6 FOR UPDATE",
+            begin: "",
+            simple: "DELETE FROM t WHERE id = 6",
+            extended: "DELETE FROM t WHERE id = $1",
+            params: || vec![Box::new(6i32)],
+            release: "ROLLBACK",
+        },
+        Wait {
+            name: "exclusion constraint",
+            hold: "BEGIN; INSERT INTO ex VALUES ('[1,10)')",
+            begin: "",
+            simple: "INSERT INTO ex VALUES ('[5,15)')",
+            extended: "INSERT INTO ex SELECT int4range($1, $2)",
+            params: || vec![Box::new(5i32), Box::new(15i32)],
+            release: "ROLLBACK",
+        },
+        Wait {
+            name: "ON CONFLICT DO NOTHING",
+            hold: "BEGIN; INSERT INTO u VALUES (8)",
+            begin: "",
+            simple: "INSERT INTO u VALUES (8) ON CONFLICT DO NOTHING",
+            extended: "INSERT INTO u VALUES ($1) ON CONFLICT DO NOTHING",
+            params: || vec![Box::new(8i32)],
+            release: "ROLLBACK",
+        },
+        Wait {
+            name: "ON CONFLICT DO UPDATE",
+            hold: "BEGIN; INSERT INTO u VALUES (9)",
+            begin: "",
+            simple: "INSERT INTO u VALUES (9) ON CONFLICT (id) DO UPDATE SET id = excluded.id",
+            extended: "INSERT INTO u VALUES ($1) ON CONFLICT (id) DO UPDATE SET id = excluded.id",
+            params: || vec![Box::new(9i32)],
+            release: "ROLLBACK",
+        },
+        Wait {
+            name: "foreign key check",
+            hold: "BEGIN; DELETE FROM parent WHERE id = 1",
+            begin: "",
+            simple: "INSERT INTO child VALUES (1)",
+            extended: "INSERT INTO child VALUES ($1)",
+            params: || vec![Box::new(1i32)],
+            release: "ROLLBACK",
+        },
+        Wait {
             name: "relation lock",
             hold: "BEGIN; LOCK TABLE t IN ACCESS EXCLUSIVE MODE",
             begin: "",
@@ -294,7 +339,13 @@ async fn case(t: &Target, w: &Wait, end: End, proto: Proto) -> String {
         line.push_str(&format!("; after the hold: {again}"));
         waiter.batch_execute("ROLLBACK; RESET ALL").await.unwrap();
         // Leave the tables as they were.
-        waiter.batch_execute("DELETE FROM u; SELECT pg_advisory_unlock_all()").await.unwrap();
+        waiter
+            .batch_execute(
+                "DELETE FROM u; DELETE FROM ex; DELETE FROM child; SELECT pg_advisory_unlock_all();
+                 INSERT INTO t VALUES (6, 0) ON CONFLICT DO NOTHING",
+            )
+            .await
+            .unwrap();
     }
     line
 }
@@ -523,8 +574,12 @@ async fn transcript(t: &Target) -> Vec<String> {
     let c = t.connect(DB).await;
     c.batch_execute(
         "CREATE TABLE t (id int PRIMARY KEY, v int);
-         INSERT INTO t SELECT g, 0 FROM generate_series(1, 5) g;
-         CREATE TABLE u (id int PRIMARY KEY);",
+         INSERT INTO t SELECT g, 0 FROM generate_series(1, 6) g;
+         CREATE TABLE u (id int PRIMARY KEY);
+         CREATE TABLE ex (r int4range, EXCLUDE USING gist (r WITH &&));
+         CREATE TABLE parent (id int PRIMARY KEY);
+         INSERT INTO parent VALUES (1);
+         CREATE TABLE child (pid int REFERENCES parent);",
     )
     .await
     .unwrap();

@@ -188,6 +188,18 @@ pub const SPECTOKEN: u8 = 10;
 pub const CATALOG_ROW: u8 = 11;
 /// A unique index key's lock (the engine's in-progress index entry, `unique_key_lock`).
 pub const UNIQUE_KEY: u8 = 4;
+/// An exclusion constraint's entry in progress (`excl_entry_key`): what a dirty snapshot
+/// sees of another writer's index entry, held by the writer until its (sub)transaction ends.
+pub const EXCL_ENTRY: u8 = 12;
+
+/// The lock standing for row `row`'s entry in exclusion constraint `con` while its writer
+/// runs (`Txn::hold_exclusion_entry`).
+pub fn excl_entry_key(con: u32, row: &[u8]) -> Vec<u8> {
+    let mut k = prefixed(EXCL_ENTRY);
+    k.extend_from_slice(&con.to_be_bytes());
+    k.extend_from_slice(row);
+    k
+}
 
 fn prefixed(kind: u8) -> Vec<u8> {
     vec![0, 0, 0, 0, 0, 0, 0, kind]
@@ -222,6 +234,8 @@ pub struct KeyHolder {
     pub xid: u64,
     pub token: Option<u32>,
     pub row: Option<Arc<Vec<crate::types::Value>>>,
+    /// The row's storage key (its heap tuple, which a wait for it names in its CONTEXT).
+    pub row_key: Option<Vec<u8>>,
 }
 
 /// The lock on relation `rel` of database `db` (LOCKTAG_RELATION).
@@ -456,6 +470,9 @@ struct State {
     /// Transactions' compact row and unique-key locks (`bulklocks`), by transaction: what
     /// `rows` and the unique keys of `locks` would otherwise hold for them.
     bulk: crate::exec::fasthash::HashMap<u64, BulkLocks>,
+    /// Exclusion constraints' entries in progress, by constraint: their lock (`EXCL_ENTRY`),
+    /// row key and writer. An entry whose lock is no longer held is gone (dropped lazily).
+    excl: HashMap<u32, Vec<(Vec<u8>, Vec<u8>, KeyHolder)>>,
 }
 
 /// Whether `key` is a unique key's lock (`UNIQUE_KEY`).
@@ -500,7 +517,7 @@ impl State {
         if let Some((owner, proc, holder, xid)) = found {
             let e = self.locks.entry(key.to_vec()).or_default();
             e.holds.push(Hold { owner, proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
-            e.key_holder = Some((owner, KeyHolder { holder, xid, token: None, row: None }));
+            e.key_holder = Some((owner, KeyHolder { holder, xid, token: None, row: None, row_key: None }));
         }
     }
 
@@ -1043,6 +1060,33 @@ impl LockManager {
         }
     }
 
+    /// Exclusion constraint `con`'s entry for row `row` is in progress: lock `key`, just
+    /// taken by `owner`, stands for it until its writer `kh` ends.
+    pub fn add_excl_entry(&self, con: u32, key: &[u8], row: &[u8], owner: u64, kh: KeyHolder) {
+        let mut s = self.state.lock();
+        if s.locks.get(key).is_some_and(|e| e.holds.iter().any(|h| h.owner == owner)) {
+            s.excl.entry(con).or_default().push((key.to_vec(), row.to_vec(), kh));
+        }
+    }
+
+    /// The entries in progress of exclusion constraint `con` that backends other than `proc`
+    /// are writing: (row key, writer). (Ended writers' entries go.)
+    pub fn excl_entries(&self, con: u32, proc: u64) -> Vec<(Vec<u8>, KeyHolder)> {
+        let mut s = self.state.lock();
+        let State { locks, excl, .. } = &mut *s;
+        let Some(list) = excl.get_mut(&con) else { return Vec::new() };
+        list.retain(|(k, _, _)| locks.get(k).is_some_and(|e| !e.holds.is_empty()));
+        let out = list
+            .iter()
+            .filter(|(k, _, _)| locks.get(k).is_some_and(|e| e.holds.iter().any(|h| h.proc != proc)))
+            .map(|(_, row, kh)| (row.clone(), kh.clone()))
+            .collect();
+        if list.is_empty() {
+            excl.remove(&con);
+        }
+        out
+    }
+
     /// The in-progress entry another backend than `proc` holds unique key lock `key` for:
     /// what it recorded, or (when it recorded nothing) its top-level transaction.
     pub fn key_holder(&self, key: &[u8], proc: u64) -> Option<KeyHolder> {
@@ -1055,6 +1099,7 @@ impl LockManager {
                     xid: g.xid,
                     token: None,
                     row: None,
+                    row_key: None,
                 })
             });
         };
@@ -1063,7 +1108,7 @@ impl LockManager {
             Some((owner, kh)) if e.holds.iter().any(|h| h.owner == *owner && h.proc != proc) => {
                 Some(kh.clone())
             }
-            _ => Some(KeyHolder { holder: h.owner, xid: 0, token: None, row: None }),
+            _ => Some(KeyHolder { holder: h.owner, xid: 0, token: None, row: None, row_key: None }),
         }
     }
 
@@ -1394,7 +1439,7 @@ impl LockManager {
             for (k, _) in g.ukeys.iter() {
                 let e = s.locks.entry(k.to_vec()).or_default();
                 e.holds.push(Hold { owner, proc: b.proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
-                e.key_holder = Some((owner, KeyHolder { holder: g.holder, xid: g.xid, token: None, row: None }));
+                e.key_holder = Some((owner, KeyHolder { holder: g.holder, xid: g.xid, token: None, row: None, row_key: None }));
                 keys.push(k.to_vec());
             }
             keys.extend(g.moved);

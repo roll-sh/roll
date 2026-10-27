@@ -124,3 +124,40 @@ fn prepared_transactions_survive_a_restart() {
         e.shutdown();
     });
 }
+
+/// A prepared transaction that changed the cluster-wide catalog (roles) finishes after a
+/// restart, also when other transactions changed roles and databases meanwhile: committed,
+/// its roles are there with what it gave them; rolled back, they aren't.
+#[test]
+fn prepared_role_changes_finish_after_a_restart() {
+    on_thread(|| {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let e = engine(dir.path(), 5);
+            let mut a = e.connect(1, "postgres", "postgres", "t").unwrap();
+            let out = run(
+                &mut a,
+                "CREATE ROLE regress_tp_w;
+                 BEGIN; CREATE ROLE regress_tp_q LOGIN; ALTER ROLE regress_tp_w CONNECTION LIMIT 3;
+                 CREATE TABLE tp (i int); PREPARE TRANSACTION 'r1';
+                 BEGIN; CREATE ROLE regress_tp_gone; PREPARE TRANSACTION 'r2';
+                 CREATE ROLE regress_tp_z; CREATE DATABASE regress_tp_db; DROP DATABASE regress_tp_db;",
+            );
+            assert!(!out.contains("ERROR"), "{out}");
+            drop(a);
+            e.shutdown();
+        }
+        let e = engine(dir.path(), 5);
+        let mut a = e.connect(1, "postgres", "postgres", "t").unwrap();
+        let out = run(&mut a, "COMMIT PREPARED 'r1'; ROLLBACK PREPARED 'r2'");
+        assert!(!out.contains("ERROR"), "{out}");
+        assert_eq!(
+            rows(&mut a, "SELECT rolname, rolcanlogin, rolconnlimit FROM pg_roles WHERE rolname LIKE 'regress_tp%' ORDER BY 1"),
+            ["regress_tp_q | t | -1", "regress_tp_w | f | 3", "regress_tp_z | f | -1"]
+        );
+        assert_eq!(rows(&mut a, "SELECT count(*) FROM tp"), ["0"]);
+        run(&mut a, "DROP TABLE tp; DROP ROLE regress_tp_q; DROP ROLE regress_tp_w; DROP ROLE regress_tp_z");
+        drop(a);
+        e.shutdown();
+    });
+}

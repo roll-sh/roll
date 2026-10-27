@@ -470,7 +470,7 @@ pub fn recover(db: &Arc<Database>, b: &[u8]) -> Result<Option<(Info, Txn)>> {
     for _ in 0..d.u64()? {
         let k = d.bytes()?.to_vec();
         let xid = d.u64()?;
-        db.locks.set_key_holder(&k, id, super::locks::KeyHolder { holder: id, xid, token: None, row: None });
+        db.locks.set_key_holder(&k, id, super::locks::KeyHolder { holder: id, xid, token: None, row: None, row_key: None });
     }
     db.locks.transfer(id, id);
     if d.u8()? != 0 {

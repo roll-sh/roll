@@ -824,6 +824,7 @@ fn find_conflict(
                 e.row.cloned(),
                 WaitPolicy::SkipLocked,
                 &what,
+                e.key,
             )?,
             None => false,
         };
@@ -836,7 +837,7 @@ fn find_conflict(
                 if dirty == Dirty::Partial {
                     return Ok(Some(Vec::new()));
                 }
-                let line = unique_wait_context(t, bix, entering, None, ctx);
+                let line = unique_wait_context(t, bix, entering, kh.row_key.as_deref(), ctx);
                 ctx.txn.borrow_mut().wait_for_key_holder(&kh, line)?;
                 continue;
             }
@@ -848,6 +849,7 @@ fn find_conflict(
                     e.row.cloned(),
                     WaitPolicy::Block,
                     &what,
+                    e.key,
                 )?;
             }
         }
@@ -887,15 +889,19 @@ fn unique_wait_context(
         Some(e) => (bix.index.name.as_str(), e.key?),
         None => (t.name.as_str(), found?),
     };
-    let (b, o) = row_tid(key, ctx);
+    let (b, o) = row_tid(t, key, ctx);
     Some(format!("while inserting index tuple ({b},{o}) in relation \"{rel}\""))
 }
 
-/// A row version's heap TID as its ctid shows it: the one stored with it, else the key's
-/// stand-in (a row not written yet: the unique checks run before the heap write).
-fn row_tid(key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
+/// A row version's heap TID as its ctid shows it: the one stored with it, else where the heap
+/// model put it (another transaction's version in progress), else the key's stand-in (a row
+/// not written yet: the unique checks run before the heap write).
+fn row_tid(t: &Table, key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
     let stored = ctx.txn.try_borrow().ok().and_then(|x| x.get(key).ok().flatten());
     if let Some(tid) = stored.as_deref().and_then(super::scan::stored_tid) {
+        return tid;
+    }
+    if let Some(tid) = super::sizing::modelled_tid(t.oid, key, ctx) {
         return tid;
     }
     match super::scan::ctid_of(key) {
@@ -1032,13 +1038,19 @@ fn unique_violation(t: &Table, bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) 
 }
 
 /// Look for a row other than `own` whose key values conflict with `vals` under an exclusion
-/// constraint (every operator true). Returns the conflicting row's key values. Writers of the
-/// constraint serialise on a lock (per first value when that operator is `=`).
+/// constraint (every operator true). Returns the conflicting row's key values.
+/// check_exclusion_or_unique_constraint over a dirty snapshot: `entering` (the row's storage
+/// key) puts the row's entry in first (`Txn::hold_exclusion_entry`, as Postgres inserts its
+/// index tuple before checking), so concurrent conflicting writers always see each other;
+/// another writer's conflicting entry in progress, or a conflicting row a transaction in
+/// progress is deleting, is waited for (XactLockTableWait, XLTW_RecheckExclusionConstr) and
+/// the check starts over. Writers whose rows don't conflict don't wait for each other.
 pub fn exclusion_conflict(
     t: &Table,
     bix: &BoundIndex,
     vals: &[Value],
     own: Option<&[u8]>,
+    entering: Option<&[u8]>,
     ctx: &ExecCtx,
 ) -> Result<Option<Vec<Value>>> {
     let Some(con) = &bix.constraint else {
@@ -1050,6 +1062,20 @@ pub fn exclusion_conflict(
     if vals.iter().any(Value::is_null) {
         return Ok(None);
     }
+    // Whether another entry's key values conflict with ours (every operator true).
+    let conflicts = |other: &[Value]| -> Result<bool> {
+        if other.iter().any(Value::is_null) {
+            return Ok(false);
+        }
+        let mut pair = vals.to_vec();
+        pair.extend(other.iter().cloned());
+        for op in ops {
+            if eval(op, &pair, ctx)? != Value::Bool(true) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
     let check = |dkey: &[u8], row: &[Value]| -> Result<Option<Vec<Value>>> {
         if own == Some(dkey) {
             return Ok(None);
@@ -1057,62 +1083,62 @@ pub fn exclusion_conflict(
         let Some(other) = index_values(bix, row, ctx)? else {
             return Ok(None);
         };
-        if other.iter().any(Value::is_null) {
-            return Ok(None);
-        }
-        let mut pair = vals.to_vec();
-        pair.extend(other.iter().cloned());
-        for op in ops {
-            if eval(op, &pair, ctx)? != Value::Bool(true) {
-                return Ok(None);
-            }
-        }
-        Ok(Some(other))
+        Ok(conflicts(&other)?.then_some(other))
     };
-    let mut lock_key = vec![0, 0, 0, 0, 0, 0, 0, 5];
-    lock_key.extend(con.oid.to_be_bytes());
-    let by_value = con.leading_eq && bix.index.id != 0;
-    if by_value {
-        lock_key.extend(index_value_prefix(t, &bix.index, &vals[..1], &bix.colls));
+    if let Some(k) = entering {
+        ctx.txn.borrow_mut().hold_exclusion_entry(con.oid, k, Arc::new(vals.to_vec()))?;
     }
-    let name = t.name.clone();
-    ctx.txn
-        .borrow_mut()
-        .lock(&lock_key, LockMode::Exclusive, WaitPolicy::Block, &|| {
-            format!("exclusion constraint on \"{name}\"")
-        })?;
-    if by_value {
-        let prefix = index_value_prefix(t, &bix.index, &vals[..1], &bix.colls);
-        let dkeys: Vec<Vec<u8>> = ctx
-            .txn
-            .borrow()
-            .scan_latest(&prefix, &prefix_end(&prefix))
-            .map(|e| e.map(|(_, d)| d.to_vec()))
-            .collect::<Result<_>>()?;
-        for dkey in dkeys {
-            ctx.check()?;
-            let Some((_, Some(bytes))) = ctx.txn.borrow().get_latest(&dkey)? else {
-                continue;
-            };
-            if let Some(other) = check(&dkey, &decode_table_row(t, &bytes)?)? {
-                return Ok(Some(other));
+    let wait_context = |dkey: &[u8]| {
+        let (b, o) = row_tid(t, dkey, ctx);
+        Some(format!("while checking exclusion constraint on tuple ({b},{o}) in relation \"{}\"", t.name))
+    };
+    let by_value = con.leading_eq && bix.index.id != 0;
+    'retry: loop {
+        ctx.check()?;
+        // Others' entries in progress (their rows aren't readable yet).
+        let pending = ctx.txn.borrow().exclusion_entries(con.oid);
+        for (dkey, kh) in pending {
+            let Some(other) = kh.row.as_deref() else { continue };
+            if own != Some(dkey.as_slice()) && conflicts(other)? {
+                let line = wait_context(&dkey);
+                ctx.txn.borrow_mut().wait_for_xact(kh.holder).map_err(|e| e.inner_context(line))?;
+                continue 'retry;
             }
+        }
+        // Committed rows (and ours): only the leading `=` value's when it has one.
+        let rows: Vec<(Vec<u8>, bytes::Bytes)> = if by_value {
+            let prefix = index_value_prefix(t, &bix.index, &vals[..1], &bix.colls);
+            let dkeys: Vec<Vec<u8>> = ctx
+                .txn
+                .borrow()
+                .scan_latest(&prefix, &prefix_end(&prefix))
+                .map(|e| e.map(|(_, d)| d.to_vec()))
+                .collect::<Result<_>>()?;
+            let mut rows = Vec::with_capacity(dkeys.len());
+            for dkey in dkeys {
+                if let Some((_, Some(bytes))) = ctx.txn.borrow().get_latest(&dkey)? {
+                    rows.push((dkey, bytes));
+                }
+            }
+            rows
+        } else {
+            let start = index_prefix(t.oid, 0);
+            ctx.txn.borrow().scan_latest(&start, &prefix_end(&start)).collect::<Result<_>>()?
+        };
+        for (dkey, bytes) in rows {
+            ctx.check()?;
+            let Some(other) = check(&dkey, &decode_table_row(t, &bytes)?)? else { continue };
+            // Being deleted or updated by a transaction in progress: what it does decides.
+            let modifier = ctx.txn.borrow().row_modifier(&dkey);
+            if let Some(h) = modifier {
+                let line = wait_context(&dkey);
+                ctx.txn.borrow_mut().wait_for_xact(h).map_err(|e| e.inner_context(line))?;
+                continue 'retry;
+            }
+            return Ok(Some(other));
         }
         return Ok(None);
     }
-    let start = index_prefix(t.oid, 0);
-    let rows: Vec<(Vec<u8>, bytes::Bytes)> = ctx
-        .txn
-        .borrow()
-        .scan_latest(&start, &prefix_end(&start))
-        .collect::<Result<_>>()?;
-    for (dkey, bytes) in rows {
-        ctx.check()?;
-        if let Some(other) = check(&dkey, &decode_table_row(t, &bytes)?)? {
-            return Ok(Some(other));
-        }
-    }
-    Ok(None)
 }
 
 /// ExecWithoutOverlapsNotEmpty: the range part of a WITHOUT OVERLAPS key can't be empty
@@ -1188,7 +1214,7 @@ fn index_conflict(
         return Ok(find_conflict(t, bix, vals, own, entering, dirty, form_existing, ctx)?
             .map(|k| (k, None)));
     }
-    Ok(exclusion_conflict(t, bix, vals, own, ctx)?.map(|o| (Vec::new(), Some(o))))
+    Ok(exclusion_conflict(t, bix, vals, own, entering.and_then(|e| e.key), ctx)?.map(|o| (Vec::new(), Some(o))))
 }
 
 fn index_violation(
@@ -1536,7 +1562,16 @@ fn check_fk(
     // RI_FKey_check: over the transaction snapshot in REPEATABLE READ unless the referenced
     // table is partitioned (detectNewRows).
     let xact_snapshot = parent.partkey.is_none() && ctx.txn.borrow().isolation.txn_snapshot();
-    if !find_parent_tree(&parent, ref_columns, &vals, xact_snapshot, ctx)? {
+    // (Its query, made only for an error while it looks, such as its lock wait's: the error
+    // names it.)
+    let found = match find_parent_tree(&parent, ref_columns, &vals, xact_snapshot, ctx) {
+        Ok(found) => found,
+        Err(e) => {
+            let frame = ri_check_query(&cat, &parent, t, columns, ref_columns);
+            return ctx.sess.framed(frame, |_| Err(e));
+        }
+    };
+    if !found {
         return Err(child_violation(t, con, &parent, &vals, ctx));
     }
     Ok(())
@@ -2564,6 +2599,46 @@ fn ri_query(
     }
 }
 
+/// The query RI_FKey_check runs for a referencing row (`SELECT 1 FROM [ONLY] pk x WHERE
+/// pkcol OPERATOR(pg_catalog.=) $i ... FOR KEY SHARE OF x`), which errors raised while it
+/// looks for the referenced row (its lock wait's) name.
+fn ri_check_query(
+    cat: &crate::catalog::Catalog,
+    parent: &Table,
+    child: &Table,
+    columns: &[usize],
+    ref_columns: &[usize],
+) -> Frame {
+    let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let only = if parent.partkey.is_some() { "" } else { "ONLY " };
+    let rel = format!("{}.{}", quote(cat.schema_name(parent.schema)), quote(&parent.name));
+    let same_family = |t: &DataType| match t {
+        DataType::Int2 | DataType::Int4 | DataType::Int8 => 1,
+        DataType::Float4 | DataType::Float8 => 2,
+        t => t.oid(),
+    };
+    let quals: Vec<String> = ref_columns
+        .iter()
+        .zip(columns)
+        .enumerate()
+        .map(|(i, (r, c))| {
+            let (pk, fk) = (&parent.columns[*r].ty, &child.columns[*c].ty);
+            // ri_GenerateQual: the parameter cast to the operator's input type.
+            let cast = if same_family(pk) == same_family(fk) {
+                String::new()
+            } else {
+                format!("::pg_catalog.{}", pk.typname())
+            };
+            format!("{} OPERATOR(pg_catalog.=) ${}{cast}", quote(&parent.columns[*r].name), i + 1)
+        })
+        .collect();
+    Frame::Query {
+        kind: "SQL statement",
+        text: format!("SELECT 1 FROM {only}{rel} x WHERE {} FOR KEY SHARE OF x", quals.join(" AND ")),
+        shift: 0,
+    }
+}
+
 /// Delete one row (already locked): data and index entries. (Referential actions are AFTER
 /// triggers.)
 pub fn delete_row(
@@ -3042,7 +3117,7 @@ pub fn insert_prepared(
                     }
                     for k in &vals.entered {
                         if !vals.taken.contains(k) {
-                            ctx.txn.borrow_mut().hold_unique_key(k, None, shared.clone());
+                            ctx.txn.borrow_mut().hold_unique_key(k, None, shared.clone(), Some(&p.dkey));
                         }
                     }
                     None
@@ -3051,7 +3126,7 @@ pub fn insert_prepared(
                     // The speculative insertion is complete: its entries stand for the
                     // transaction from now on.
                     for k in &vals.entered {
-                        ctx.txn.borrow_mut().hold_unique_key(k, None, shared.clone());
+                        ctx.txn.borrow_mut().hold_unique_key(k, None, shared.clone(), Some(&p.dkey));
                     }
                     Some(store_inserted(rules, p.clone(), &vals, after, ctx))
                 }
@@ -3119,8 +3194,17 @@ fn index_entries_checked(
                             out.entered.push(lk);
                         }
                         out.conflict |= found.is_some();
-                    } else if exclusion_conflict(t, bix, v, None, ctx)?.is_some() {
-                        out.conflict = true;
+                    } else {
+                        // The speculative row's exclusion entry goes in first, as any
+                        // writer's; given up with the row when it conflicts (`taken`).
+                        let con = bix.constraint.as_ref().map_or(0, |c| c.oid);
+                        let lk = crate::txn::locks::excl_entry_key(con, &p.dkey);
+                        let had = ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive);
+                        let found = exclusion_conflict(t, bix, v, None, Some(&p.dkey), ctx)?;
+                        if !had && ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive) {
+                            out.taken.push(lk);
+                        }
+                        out.conflict |= found.is_some();
                     }
                 }
                 _ => {

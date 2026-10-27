@@ -175,12 +175,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     `PGISOLATION_MAX_PREPARED=5` against a reference started with the setting,
     prepared-transactions (1,432 SSI permutations), prepared-transactions-cic, stats and
     two-ids match: 1,579 / 1,579. `PGISOLATION_ONLY` now runs specs outside the schedule.
-  - Not done: XactLockTableWait's CONTEXT ("while updating tuple (0,1) in relation ...") is
-    missing on every lock wait that times out, not only a prepared transaction's (lock code);
-    transactional statistics of a prepared transaction are lost by a crash (PostgreSQL loses
-    all statistics then); a recovered transaction's TRUNCATE ... RESTART IDENTITY undo isn't
-    kept; a prepared transaction that changed cluster-wide catalogs (roles) can't commit
-    after a restart (the shared catalog's history isn't kept across one).
+  - Not done: transactional statistics of a prepared transaction are lost by a crash
+    (PostgreSQL loses all statistics then); a recovered transaction's TRUNCATE ... RESTART
+    IDENTITY undo isn't kept. (XactLockTableWait's CONTEXT on lock waits: round 20, agent 73,
+    every wait kind, `tests/wire_waits.rs`. A prepared transaction that changed roles commits
+    or rolls back after a restart or crash, also with other role and database DDL committed
+    meanwhile: `twophase.rs` `prepared_role_changes_finish_after_a_restart`, round 20, agent
+    73; it no longer fails since round 19's catalog work, 80fa7310.)
 - **dblink and postgres_fdw** (round 19, agent 59): native, over the engine's own client
   (`src/remote/`: libpq's connection strings, a blocking wire client on `postgres-protocol`
   with SCRAM / md5 / cleartext, asynchronous queries, notifications, cancel requests; no libpq,
@@ -880,7 +881,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   TOAST lock on the same deletes and updates as modelled ones; a terminated lock wait's FATAL
   keeps its CONTEXT. The engine's own isolation specs (`tests/isolation/specs/roll-*.spec`,
   `PGISOLATION_EXTRA=1`) cover what applications rely on beyond the suite: advisory locks,
-  NOWAIT / SKIP LOCKED, lock queue order, LISTEN / NOTIFY, sequences, serialization retries.
+  NOWAIT / SKIP LOCKED, lock queue order, LISTEN / NOTIFY, sequences, serialization retries,
+  exclusion constraints. Every XactLockTableWait has its CONTEXT line (ON CONFLICT pre-checks,
+  exclusion constraints, foreign key checks with the RI query's line), and an exclusion
+  constraint's writers no longer wait for each other unless their rows conflict (each one
+  took a lock for the whole constraint): entries in progress are visible to the other
+  writers, as a dirty snapshot's index tuples (`Txn::hold_exclusion_entry`).
 
 ## Repository layout
 

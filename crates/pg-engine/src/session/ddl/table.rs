@@ -2762,7 +2762,7 @@ impl Ddl<'_, '_> {
             };
             crate::exec::dml::check_without_overlaps(t, &bix, &vals)?;
             if let Some(other) =
-                crate::exec::dml::exclusion_conflict(t, &bix, &vals, Some(&dkey), self.ctx)?
+                crate::exec::dml::exclusion_conflict(t, &bix, &vals, Some(&dkey), None, self.ctx)?
             {
                 let detail = crate::exec::dml::key_detail(t, &bix, &vals, self.ctx, "");
                 let other = crate::exec::dml::key_detail(t, &bix, &other, self.ctx, "");
