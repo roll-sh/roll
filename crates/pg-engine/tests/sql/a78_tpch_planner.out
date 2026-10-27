@@ -1,0 +1,250 @@
+> create table a78_n as select g as k, 'N' || g as name, g % 5 as r from generate_series(0, 24) g
+-- SELECT 25
+
+> create table a78_s as select g as k, g % 25 as nk, 'S' || g as name from generate_series(1, 1000) g
+-- SELECT 1000
+
+> create table a78_c as select g as k, g % 25 as nk from generate_series(1, 5000) g
+-- SELECT 5000
+
+> create table a78_o as select g as k, g % 5000 + 1 as ck, (g % 50)::numeric as qty from generate_series(1, 20000) g
+-- SELECT 20000
+
+> create table a78_l as select g as k, g % 20000 + 1 as ok, g % 1000 + 1 as sk, (g % 47)::numeric as qty from generate_series(1, 60000) g
+-- SELECT 60000
+
+> alter table a78_n add primary key (k)
+-- ALTER TABLE
+
+> alter table a78_s add primary key (k)
+-- ALTER TABLE
+
+> alter table a78_c add primary key (k)
+-- ALTER TABLE
+
+> alter table a78_o add primary key (k)
+-- ALTER TABLE
+
+> create index on a78_l (ok)
+-- CREATE INDEX
+
+> create index on a78_l (sk, ok)
+-- CREATE INDEX
+
+> analyze a78_n, a78_s, a78_c, a78_o, a78_l
+-- ANALYZE
+
+> explain select * from (select n1.name as a, n2.name as b from a78_c c, a78_n n1, a78_n n2
+>   where c.nk = n2.k
+>     and ((n1.name = 'N1' and n2.name = 'N2') or (n1.name = 'N2' and n2.name = 'N1'))) x
+QUERY PLAN:text
+Hash Join  (cost=2.87..107.62 rows=416 width=6)
+  Hash Cond: (c.nk = n2.k)
+  ->  Seq Scan on a78_c c  (cost=0.00..82.00 rows=5000 width=4)
+  ->  Hash  (cost=2.84..2.84 rows=2 width=10)
+        ->  Nested Loop  (cost=0.00..2.84 rows=2 width=10)
+              Join Filter: (((n1.name = 'N1'::text) AND (n2.name = 'N2'::text)) OR ((n1.name = 'N2'::text) AND (n2.name = 'N1'::text)))
+              ->  Seq Scan on a78_n n1  (cost=0.00..1.38 rows=2 width=3)
+                    Filter: ((name = 'N1'::text) OR (name = 'N2'::text))
+              ->  Materialize  (cost=0.00..1.39 rows=2 width=7)
+                    ->  Seq Scan on a78_n n2  (cost=0.00..1.38 rows=2 width=7)
+                          Filter: ((name = 'N2'::text) OR (name = 'N1'::text))
+-- EXPLAIN
+
+> select count(*) from (select n1.name as a, n2.name as b from a78_c c, a78_n n1, a78_n n2
+>   where c.nk = n2.k
+>     and ((n1.name = 'N1' and n2.name = 'N2') or (n1.name = 'N2' and n2.name = 'N1'))) x
+count:int8
+400
+-- SELECT 1
+
+> explain (costs off) select c.k, o.k, sum(l.qty) from a78_c c, a78_o o, a78_l l
+>   where o.k in (select ok from a78_l group by ok having sum(qty) > 80)
+>     and c.k = o.ck and o.k = l.ok
+>   group by c.k, o.k order by 3 desc, 1, 2 limit 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: (sum(l.qty)) DESC, c.k, o.k
+        ->  HashAggregate
+              Group Key: c.k, o.k
+              ->  Hash Join
+                    Hash Cond: (o.ck = c.k)
+                    ->  Hash Join
+                          Hash Cond: (l.ok = o.k)
+                          ->  Hash Join
+                                Hash Cond: (l.ok = a78_l.ok)
+                                ->  Seq Scan on a78_l l
+                                ->  Hash
+                                      ->  HashAggregate
+                                            Group Key: a78_l.ok
+                                            Filter: (sum(a78_l.qty) > '80'::numeric)
+                                            ->  Seq Scan on a78_l
+                          ->  Hash
+                                ->  Seq Scan on a78_o o
+                    ->  Hash
+                          ->  Seq Scan on a78_c c
+-- EXPLAIN
+
+> select c.k, o.k, sum(l.qty) from a78_c c, a78_o o, a78_l l
+>   where o.k in (select ok from a78_l group by ok having sum(qty) > 80)
+>     and c.k = o.ck and o.k = l.ok
+>   group by c.k, o.k order by 3 desc, 1, 2 limit 5
+k:int4 | k:int4 | sum:numeric
+9 | 10008 | 110
+27 | 5026 | 110
+38 | 15037 | 110
+45 | 44 | 110
+56 | 10055 | 110
+-- SELECT 5
+
+> explain (costs off) select s.name from a78_s s, a78_n n
+>   where s.k in (select l.sk from a78_l l where l.ok in (select k from a78_o where qty < 10)
+>                 and l.qty > (select 0.5 * sum(l2.qty) from a78_l l2 where l2.sk = l.sk and l2.ok = l.ok))
+>     and s.nk = n.k and n.name = 'N3'
+>   order by s.name
+QUERY PLAN:text
+Sort
+  Sort Key: s.name
+  ->  Nested Loop Semi Join
+        ->  Nested Loop
+              Join Filter: (n.k = s.nk)
+              ->  Index Scan using a78_s_pkey on a78_s s
+              ->  Materialize
+                    ->  Seq Scan on a78_n n
+                          Filter: (name = 'N3'::text)
+        ->  Nested Loop
+              ->  Index Scan using a78_l_sk_ok_idx on a78_l l
+                    Index Cond: (sk = s.k)
+                    Filter: (qty > (SubPlan 1))
+                    SubPlan 1
+                      ->  Aggregate
+                            ->  Index Scan using a78_l_sk_ok_idx on a78_l l2
+                                  Index Cond: ((sk = l.sk) AND (ok = l.ok))
+              ->  Index Scan using a78_o_pkey on a78_o
+                    Index Cond: (k = l.ok)
+                    Filter: (qty < '10'::numeric)
+-- EXPLAIN
+
+> select s.name from a78_s s, a78_n n
+>   where s.k in (select l.sk from a78_l l where l.ok in (select k from a78_o where qty < 10)
+>                 and l.qty > (select 0.5 * sum(l2.qty) from a78_l l2 where l2.sk = l.sk and l2.ok = l.ok))
+>     and s.nk = n.k and n.name = 'N3'
+>   order by s.name
+name:text
+S103
+S153
+S203
+S253
+S3
+S303
+S353
+S403
+S453
+S503
+S53
+S553
+S603
+S653
+S703
+S753
+S803
+S853
+S903
+S953
+-- SELECT 20
+
+> explain select distinct ck, qty from a78_o order by 1 desc
+QUERY PLAN:text
+Sort  (cost=785.19..797.69 rows=5000 width=8)
+  Sort Key: ck DESC
+  ->  HashAggregate  (cost=428.00..478.00 rows=5000 width=8)
+        Group Key: ck, qty
+        ->  Seq Scan on a78_o  (cost=0.00..328.00 rows=20000 width=8)
+-- EXPLAIN
+
+> explain select distinct ck from a78_o order by 1 desc
+QUERY PLAN:text
+Sort  (cost=735.19..747.69 rows=5000 width=4)
+  Sort Key: ck DESC
+  ->  HashAggregate  (cost=378.00..428.00 rows=5000 width=4)
+        Group Key: ck
+        ->  Seq Scan on a78_o  (cost=0.00..328.00 rows=20000 width=4)
+-- EXPLAIN
+
+> explain select distinct ck, k from a78_o where k < 1000 order by 1 desc
+QUERY PLAN:text
+Unique  (cost=89.54..97.03 rows=999 width=8)
+  ->  Sort  (cost=89.54..92.04 rows=999 width=8)
+        Sort Key: ck DESC, k
+        ->  Index Scan using a78_o_pkey on a78_o  (cost=0.29..39.77 rows=999 width=8)
+              Index Cond: (k < 1000)
+-- EXPLAIN
+
+> select distinct ck, k from a78_o where k < 1000 and ck > 990 order by 1 desc, 2
+ck:int4 | k:int4
+1000 | 999
+999 | 998
+998 | 997
+997 | 996
+996 | 995
+995 | 994
+994 | 993
+993 | 992
+992 | 991
+991 | 990
+-- SELECT 10
+
+> select distinct ck, qty from a78_o where ck < 4 order by 1 desc, 2
+ck:int4 | qty:numeric
+3 | 2
+2 | 1
+1 | 0
+-- SELECT 3
+
+> set parallel_setup_cost = 0
+-- SET
+
+> set parallel_tuple_cost = 0
+-- SET
+
+> set min_parallel_table_scan_size = 0
+-- SET
+
+> explain (costs off) select o.ck, count(distinct l.sk) from a78_o o join a78_l l on l.ok = o.k
+>   where o.qty < 25 group by o.ck
+QUERY PLAN:text
+GroupAggregate
+  Group Key: o.ck
+  ->  Gather Merge
+        Workers Planned: 2
+        ->  Sort
+              Sort Key: o.ck, l.sk
+              ->  Parallel Hash Join
+                    Hash Cond: (l.ok = o.k)
+                    ->  Parallel Seq Scan on a78_l l
+                    ->  Parallel Hash
+                          ->  Parallel Seq Scan on a78_o o
+                                Filter: (qty < '25'::numeric)
+-- EXPLAIN
+
+> select o.ck, count(distinct l.sk) from a78_o o join a78_l l on l.ok = o.k
+>   where o.qty < 25 and o.ck < 4 group by o.ck order by 1
+ck:int4 | count:int8
+1 | 1
+2 | 1
+3 | 1
+-- SELECT 3
+
+> reset parallel_setup_cost
+-- RESET
+
+> reset parallel_tuple_cost
+-- RESET
+
+> reset min_parallel_table_scan_size
+-- RESET
+
+> drop table a78_n, a78_s, a78_c, a78_o, a78_l
+-- DROP TABLE
+

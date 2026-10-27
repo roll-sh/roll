@@ -480,7 +480,7 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
         conjuncts(e.clone(), &mut parts);
         let mut local = Vec::new();
         for q in parts {
-            if clean(&q) {
+            if clean(&q) || own_sublinks(&q) {
                 local.push(q);
             } else if reads_outer(&q) && !has_sublink(&q) && !deep_outer(&q) && !q.is_volatile() {
                 out.push(q.shift_cols(off as isize));
@@ -489,6 +489,15 @@ fn sub_join(p: &Plan) -> Option<(Vec<Expr>, Plan)> {
             }
         }
         Some(and_all(local))
+    }
+    // A qual whose sub-selects read only this level's rows (their parameters its columns,
+    // nothing of the query outside): it stays with the sub-select's relations, its SubPlan
+    // and all (TPC-H q20's `ps_availqty > (SELECT ... WHERE l_partkey = ps_partkey ...)`):
+    // convert_ANY_sublink_to_join only refuses Vars of the parent query.
+    fn own_sublinks(q: &Expr) -> bool {
+        let mut other = false;
+        q.walk(&mut |x| other |= matches!(x, Expr::Outer(..) | Expr::Agg(..) | Expr::Window(..) | Expr::Srf(..)));
+        !other && has_sublink(q) && shallow_sublinks(q) && !crate::sql::explain::expr_volatile_deep(q)
     }
     // `pull`: whether the clauses here can move up to the semi join (else nothing here
     // may read the outer query).
@@ -1598,7 +1607,12 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
         Some((None, corr, rhs))
     };
     // (Its WHERE's own sub-selects go along: convert_ANY_sublink_to_join makes the
-    // sub-select a subquery of the query, pulled up with its quals, SubPlans and all.)
+    // sub-select a subquery of the query, pulled up with its quals, SubPlans and all; so
+    // over a join tree's scans (TPC-H q20).)
+    let tree = || {
+        let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
+        tree()
+    };
     let rel = {
         let _g = crate::scoped::set(&EXISTS_SUBLINKS, true, "sublink::EXISTS_SUBLINKS");
         sub_rel(p)

@@ -532,6 +532,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - Test: `tests/deep_input.rs` runs every shape through the embedded API on a 2 MB thread
     and on the test thread, in both build profiles. Its goldens, `tests/deep_input.out`, are
     recorded from PostgreSQL (`DEEP_RECORD`).
+- **TPC-H plans, the tail** (round 21, agent 78; BENCH.md "Round 21", STATUS.md): 16 of the
+  22 SF1 plans have PostgreSQL's shape (19 of 22 serial). Fixed: a join OR's per-relation
+  restrictions in a pulled-up FROM subquery compensated in the clause (q07: 40 rows for
+  6,454); reduce_unique_semijoins among other joins, with a grouped sub-select as the item
+  (q18); an IN over a sub-select whose WHERE has its own correlated sub-select pulled up
+  (q20); a grouping without a partial form over the join's partial plans sorted
+  under a Gather Merge (q16); hash bucket sizes of a parameterized scan's key by its
+  relation's tuples (q02's join cost 107,845 for 56,375); `SELECT DISTINCT ... ORDER BY 1
+  DESC` as a Unique over one Sort. A wrong-results fix with them: an index scan above a semi
+  join made with part of its left side took its parameter from the semi join's right side,
+  which the engine's semi join doesn't return ("column #32 out of range", Hibernate's
+  BulkManipulationTest).
 - **Catalog, DDL and sessions** (round 18, agent 44; BENCH.md "Catalog, DDL and sessions"): the
   catalog is stored as a record per object (`catalog/persist.rs`, catalog format 1: older
   databases are rewritten when first opened), so a DDL commit writes only what changed; its
@@ -1619,21 +1631,28 @@ them all with the "Fixed in round N" sections describing what was already tried.
 6. **equivclass**, **inherit** and **collate.icu.utf8**: done (round 15, agent 10).
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
-9. **TPC-H plans and the planner tail** (round 20, agent 64; BENCH.md "Round 20" lists each
-   TPC-H query's remaining cause): 15 of the 22 SF1 plans have PostgreSQL's shape. Left:
-   q05 (Memoize's cost against an inner index scan), q16 (a sorted partial join under a
-   Gather Merge for a grouping without a partial form), q18 (a semi join made an inner join
-   over a sub-select already distinct), q20 (an IN pulled up over a sub-select with its own
-   correlated sub-select), q07 / q08 / q21 (not examined). The planner leftovers passed on:
-   join 355 at the default collapse limit (a LATERAL subquery with unread outputs kept as a
-   parameterized item under a Memoize; changes every such LATERAL: its own batch with a full
-   run); a correlated NOT IN inside an IN (PostgreSQL: a semi join with a Join Filter; the
-   engine: a SubPlan); agent 52's Subquery Scan cost that setrefs removes (2.19 for 2.20)
-   and a bare PlaceHolderVar ranked last in a LATERAL join's output; `SELECT DISTINCT ...
-   ORDER BY 1 DESC` (PostgreSQL's distinct pathkeys take the ORDER BY's directions,
-   transformDistinctClause listing the ORDER BY items first, so one Sort serves both; the
-   engine's parallel DISTINCT sorts ascending, then sorts again: difftest seed 1777 in
-   smoke_known); `One-Time Filter: false` on the nullable side of `LEFT JOIN ... ON false`.
+9. **TPC-H plans and the planner tail** (rounds 20-21, agents 64 and 78; BENCH.md "Round 21"
+   lists each TPC-H query's remaining cause): 16 of the 22 SF1 plans have PostgreSQL's shape
+   (19 of 22 serial). Left: q05 / q08 (the engine's partial plans are EXPLAIN's partial
+   versions of the serial join tree the search chose; Postgres keeps partial paths per join
+   relation, add_partial_path, and its best partial plan joins in another order: partial
+   paths in the join search), q18 (a sorted grouping over a merge join in c_custkey order
+   with an Incremental Sort: get_useful_group_keys_orderings and pathkeys_useful_for_grouping
+   at the join), q21 (two joins over rows=1 that tie within 0.5), q13 after a restart (a
+   cold heap model laid out densely: customer 3,588 pages for 3,640, so its HashAggregate
+   fits hash_mem; storage), q09 / q10 serial (ANALYZE's random sample). The planner
+   leftovers passed on: join 355 at the default collapse limit (a LATERAL subquery with
+   unread outputs kept as a parameterized item under a Memoize; changes every such LATERAL:
+   its own batch with a full run); a correlated NOT IN inside an IN (PostgreSQL: a semi join
+   with a Join Filter; the engine: a SubPlan); agent 52's Subquery Scan cost that setrefs
+   removes (2.19 for 2.20) and a bare PlaceHolderVar ranked last in a LATERAL join's output;
+   `One-Time Filter: false` on the nullable side of `LEFT JOIN LATERAL (... WHERE a.x > 7)
+   ON false` (a pulled-up LATERAL subquery over a join: Postgres makes that join relation
+   dummy). Also found (round 21): an INSERT leaving columns to their defaults shows the
+   source without them (Postgres's target list has every column: `Result (width=60)` for
+   the engine's 4, and their default expressions' cost per row), and an INSERT ... SELECT
+   that isn't pulled up (ORDER BY, GROUP BY, LIMIT) keeps `Subquery Scan on "*SELECT*"` to
+   compute the new row; EXPLAIN's `JIT:` lines past jit_above_cost are never shown.
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

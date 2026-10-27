@@ -3372,3 +3372,56 @@ fn monitoring_views() {
     drop(session);
     engine.shutdown();
 }
+
+#[test]
+fn semi_join_right_side_not_a_parameter() {
+    // Hibernate's BulkManipulationTest.testUpdateWithWhereExistsSubquery (pgjdbc: Parse /
+    // Bind / Execute, a named statement once executed often): an EXISTS pulled up as a semi
+    // join of one of three inner-joined tables. The join search took a column of the semi
+    // join's right side (Human_friends.human1, equated with Human.mammal) as the parameter of
+    // an index scan above it, which the engine's semi join doesn't return ("column #32 out of
+    // range").
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        c.batch_execute(
+            "CREATE TABLE Animal (id bigint PRIMARY KEY, description varchar(255), body_weight float4, \
+               mother_id bigint REFERENCES Animal, father_id bigint REFERENCES Animal, zoo_id bigint, \
+               serialNumber varchar(255)); \
+             CREATE TABLE Mammal (animal bigint PRIMARY KEY REFERENCES Animal, pregnant boolean, \
+               birthdate date, mammalZoo_id bigint, name varchar(255)); \
+             CREATE TABLE Human (mammal bigint PRIMARY KEY REFERENCES Mammal, name_first varchar(255), \
+               name_initial char(1), name_last varchar(255), nickName varchar(255), \
+               height_centimeters float(53) NOT NULL, intValue integer, floatValue float4, \
+               bigDecimalValue numeric(38,2), bigIntegerValue numeric(38,0)); \
+             CREATE TABLE Human_friends (human1 bigint REFERENCES Human, human2 bigint NOT NULL REFERENCES Human); \
+             INSERT INTO Animal (id, description) VALUES (1, 'a'), (2, 'b'), (3, 'c'); \
+             INSERT INTO Mammal (animal) VALUES (1), (2), (3); \
+             INSERT INTO Human (mammal, name_last, height_centimeters) \
+               VALUES (1, 'Public', 1), (2, 'Doe', 2), (3, 'Public', 3); \
+             INSERT INTO Human_friends VALUES (1, 3), (2, 1), (3, 1)",
+        )
+        .await
+        .unwrap();
+        let sql = "with id_cte (id) as materialized (select h1_0.mammal from Human h1_0 \
+            join Animal h1_1 on h1_0.mammal=h1_1.id join Mammal h1_2 on h1_0.mammal=h1_2.animal \
+            where exists(select f1_0.human2 from Human_friends f1_0 join Human f1_1 on f1_1.mammal=f1_0.human2 \
+            where f1_1.name_last=$1 and h1_0.mammal=f1_0.human1)), \
+            update_cte_Animal (id) as (update Animal h1_1 set description='updated' \
+            where h1_1.id in (select id.id from id_cte id) returning id) select count(*) from id_cte id";
+        let st = c.prepare(sql).await.unwrap();
+        for _ in 0..7 {
+            let n: i64 = c.query_one(&st, &[&"Public"]).await.unwrap().get(0);
+            assert_eq!(n, 3);
+        }
+        let n: i64 = c.query_one(sql.replace("$1", "'Public'").as_str(), &[]).await.unwrap().get(0);
+        assert_eq!(n, 3);
+        let updated: i64 = c
+            .query_one("SELECT count(*) FROM Animal WHERE description = 'updated'", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(updated, 3);
+    });
+    s.engine.shutdown();
+}

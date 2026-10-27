@@ -14,7 +14,6 @@ eval_error s20 #42
 eval_error s22 #62
 eval_error s25 #79
 eval_error s1604 #74
-wrong_rows s1777 #34
 eval_error s1827 #2
 eval_error s1827 #35
 eval_error s1829 #78

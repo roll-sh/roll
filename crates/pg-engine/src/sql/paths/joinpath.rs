@@ -520,6 +520,9 @@ struct Search<'s, 'c, 'a> {
     post: f64,
     /// The outer join the join being made implements.
     cur_sj: Option<usize>,
+    /// A semi join of a group of semi joins was made an inner one (reduce_unique_semijoins):
+    /// its classes stay as they were made, its clauses theirs.
+    reduced_semi_classes: bool,
     /// Building a parameterized join path's plan: per enclosing nested loop, the values
     /// (over the group row) it passes in, which a scan inside reads as `Outer(1, k)`.
     param_stack: std::cell::RefCell<Vec<Vec<Expr>>>,
@@ -1234,7 +1237,9 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// no nonnullable relations, so distribute_qual_to_rels leaves maybe_equivalence on for
     /// its quals; process_equivalence), and so the classes choose its joins' clauses.
     pub(super) fn semi_classes(&self) -> bool {
-        self.general && !self.sjs.is_empty() && self.sjs.iter().all(|j| j.kind == JoinKind::Semi) && self.phvs.is_empty()
+        self.general
+            && (self.reduced_semi_classes || !self.sjs.is_empty() && self.sjs.iter().all(|j| j.kind == JoinKind::Semi))
+            && self.phvs.is_empty()
     }
 
     /// Add the equalities between equivalence class members of different FROM items the
@@ -3408,6 +3413,24 @@ impl Search<'_, '_, '_> {
     }
 }
 
+/// The leaves whose columns path `p` doesn't return: the right sides of the semi and anti
+/// joins in it (the engine's semi join returns the rows of the side they come from only).
+fn semi_hidden(p: &JP) -> u32 {
+    match &p.node {
+        JNode::Join { jt, outer, inner, .. } => {
+            let below = semi_hidden(outer) | semi_hidden(inner);
+            match jt {
+                Jt::Semi | Jt::Anti => below | inner.set,
+                Jt::RightSemi | Jt::RightAnti => below | outer.set,
+                _ => below,
+            }
+        }
+        JNode::Material(x) => semi_hidden(x),
+        JNode::Memoize { input, .. } | JNode::Unique { input, .. } => semi_hidden(input),
+        _ => 0,
+    }
+}
+
 fn cheapest_param(list: &[JP]) -> Option<&JP> {
     let mut best: Option<&JP> = None;
     for p in list {
@@ -4180,6 +4203,40 @@ impl Search<'_, '_, '_> {
 
     /// innerrel_is_unique: the inner relation is one table with a unique index whose every
     /// column a clause equates to the outer side.
+    /// reduce_unique_semijoins over a group's semi joins: one whose right side is a single
+    /// item with at most one match per row by the join's clauses is an inner join, its
+    /// clauses ordinary join clauses.
+    fn reduce_unique_semijoins(&mut self) {
+        let mut t = 0;
+        while t < self.sjs.len() {
+            let sj = &self.sjs[t];
+            let own: Vec<usize> = (0..self.clauses.len()).filter(|&c| self.clauses[c].sj == Some(t)).collect();
+            let reducible = sj.kind == JoinKind::Semi
+                && sj.min_r.count_ones() == 1
+                && sj.syn_r == sj.min_r
+                && !own.is_empty()
+                && own.iter().all(|&c| self.clauses[c].nullable == 0)
+                && self.inner_unique(sj.min_r, &own);
+            if !reducible {
+                t += 1;
+                continue;
+            }
+            self.reduced_semi_classes |= self.semi_classes();
+            self.sjs.remove(t);
+            for c in &mut self.clauses {
+                match c.sj {
+                    Some(k) if k == t => {
+                        c.sj = None;
+                        c.req = c.leaves;
+                        c.on = false;
+                    }
+                    Some(k) if k > t => c.sj = Some(k - 1),
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn inner_unique(&self, inner: u32, restrict: &[usize]) -> bool {
         if inner.count_ones() != 1 {
             return false;
@@ -4188,8 +4245,25 @@ impl Search<'_, '_, '_> {
         let leaf = &self.leaves[l];
         // A subquery distinct on the columns the join equates (rel_is_distinct_for's
         // query_is_distinct_for: its GROUP BY keys, DISTINCT outputs, or a single row).
+        // (Its level's plan as the leaf, or a sub-select an IN made the right side of the
+        // semi join: a grouping under its HAVING's filter.)
+        let grouped = |p: &Plan| {
+            let mut q = p;
+            loop {
+                match q {
+                    Plan::Filter { input, .. } | Plan::Project { input, .. } | Plan::Sort { input, .. } => q = input,
+                    Plan::Agg { sets: None, .. } | Plan::Distinct { on: None, .. } => return true,
+                    _ => return false,
+                }
+            }
+        };
+        let sub = match &leaf.plan {
+            Plan::Barrier { input, .. } => Some(&**input),
+            p if grouped(p) => Some(p),
+            _ => None,
+        };
         if leaf.scan.is_none()
-            && let Plan::Barrier { input, .. } = &leaf.plan
+            && let Some(input) = sub
         {
             let mut cols = Vec::new();
             for &c in restrict {
@@ -5146,6 +5220,22 @@ impl Search<'_, '_, '_> {
             return;
         }
         // (Nor can an outer side give a column of a semi join's right side inside it.)
+        // (By the path: a semi join of part of its syntactic left side, its min_lefthand,
+        // leaves the rest to join above it, which an equivalence class may parameterize
+        // by the right side's member (Hibernate's EXISTS over a join of three tables); a
+        // unique-ified right side, joined as an inner join, returns its columns.)
+        if ip.req & op.set != 0 && {
+            let hid = semi_hidden(op);
+            hid != 0
+                && self
+                    .outer_params(ip)
+                    .iter()
+                    .flat_map(Expr::columns)
+                    .filter_map(|g| self.leaf_of.get(g).copied())
+                    .any(|l| l < self.leaves.len() && hid >> l & 1 == 1)
+        } {
+            return;
+        }
         if ip.req & op.set != 0
             && self
                 .outer_params(ip)
@@ -8571,6 +8661,7 @@ impl Planner<'_, '_> {
             extra: if general { extra } else { Vec::new() },
             post: self.post_cost.take(),
             cur_sj: None,
+            reduced_semi_classes: false,
             param_stack: Default::default(),
             lateral_supplied: Default::default(),
             loop_rows: self.pw_loop_rows.take(),
@@ -8997,27 +9088,6 @@ impl Planner<'_, '_> {
             for (k, x) in lneed.iter_mut().enumerate() {
                 *x = s.needed_above(off + k, set);
             }
-            // extract_restriction_or_clauses: a join OR clause whose every arm says
-            // something about this item alone restricts it too, when that rejects enough
-            // of its rows (consider_new_or_clause); the clause's selectivity makes up for
-            // it.
-            if (s.general || s.kind == JoinKind::Inner)
-                && matches!(&plan, Plan::Scan(sp) if plannable(sp))
-            {
-                for (ci, q) in s.or_restrictions(i) {
-                    let local = q.shift_cols(-(off as isize));
-                    let Plan::Scan(sp) = &plan else { break };
-                    let Some(r) = self.rel(sp, &lneed) else { break };
-                    let or_sel = self.sel(&r, std::slice::from_ref(&local));
-                    if or_sel > 0.9 {
-                        continue;
-                    }
-                    plan = crate::sql::binder::optimize::add_filter(&self.cat, plan, local);
-                    if or_sel > 0.0 {
-                        s.clauses[ci].sel_div.push(or_sel);
-                    }
-                }
-            }
             // A pulled-up subquery's scan, planned for itself before: the join's paths are
             // chosen again (parameterized ones too), as for any base relation.
             if let Plan::Scan(sp) = &mut plan
@@ -9029,6 +9099,31 @@ impl Planner<'_, '_> {
                 sp.access = Access::Unplanned;
                 sp.index = None;
                 sp.reverse = false;
+            }
+            // extract_restriction_or_clauses: a join OR clause whose every arm says
+            // something about this item alone restricts it too, when that rejects enough
+            // of its rows (consider_new_or_clause); the clause's selectivity makes up for
+            // it. (A pulled-up subquery's scan may have the restriction from its own
+            // level's planning already: the join clause is still compensated, once per
+            // query level as Postgres does it.)
+            if (s.general || s.kind == JoinKind::Inner)
+                && matches!(&plan, Plan::Scan(sp) if plannable(sp))
+            {
+                for (ci, q) in s.or_restrictions(i) {
+                    let local = q.shift_cols(-(off as isize));
+                    let Plan::Scan(sp) = &plan else { break };
+                    let Some(r) = self.rel(sp, &lneed) else { break };
+                    let or_sel = self.sel(&r, std::slice::from_ref(&local));
+                    if or_sel > 0.9 {
+                        continue;
+                    }
+                    if !has_qual(&plan, &local) {
+                        plan = crate::sql::binder::optimize::add_filter(&self.cat, plan, local);
+                    }
+                    if or_sel > 0.0 {
+                        s.clauses[ci].sel_div.push(or_sel);
+                    }
+                }
             }
             let mut proj = None;
             let mut sys = None;
@@ -9430,6 +9525,12 @@ impl Planner<'_, '_> {
             if s.inner_unique(2, &all) {
                 s.kind = JoinKind::Inner;
             }
+        }
+        // (In a group: each semi join to one item, by its own clauses (TPC-H q18's IN over
+        // a sub-select grouped by the compared column); its clauses join as an inner
+        // join's.)
+        if s.general {
+            s.reduce_unique_semijoins();
         }
         if s.order.is_some() {
             // The width the sort sees: its projection's, else the whole row's.

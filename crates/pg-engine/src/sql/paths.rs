@@ -5958,12 +5958,30 @@ impl Planner<'_, '_> {
         }
         let mut tmp = Plan::Sort {
             input: x.clone(),
-            keys: k2,
+            keys: k2.clone(),
         };
         let n = vec![true; w];
         let _ = needed;
-        if !(self.ordered_scan(&mut tmp, &n, lim) && !matches!(tmp, Plan::Sort { .. })) {
-            return false;
+        let indexed = self.ordered_scan(&mut tmp, &n, lim) && !matches!(tmp, Plan::Sort { .. });
+        // (Without such an index: the input sorted so, a Unique over it, when that costs
+        // less than distinct rows sorted again (create_distinct_paths against
+        // create_ordered_paths: `SELECT DISTINCT b, a ... ORDER BY 1 DESC`). Both over the
+        // input planned.)
+        let mut planned = None;
+        if !indexed {
+            let mut xp = (**x).clone();
+            self.walk(&mut xp, &n, None);
+            let xp = Arc::new(xp);
+            planned = Some(Plan::Sort {
+                input: Arc::new(Plan::Distinct {
+                    input: xp.clone(),
+                    on: None,
+                    order: 0,
+                    hashed: false,
+                }),
+                keys: keys.clone(),
+            });
+            tmp = Plan::Sort { input: xp, keys: k2 };
         }
         let d = Arc::new(Plan::Distinct {
             input: Arc::new(tmp),
@@ -5975,6 +5993,13 @@ impl Planner<'_, '_> {
         // over it rather than hashing.)
         if crate::sql::explain::distinct_order(&d, self.ctx).is_none_or(|k| !k.is_empty()) {
             return false;
+        }
+        if let Some(orig) = planned {
+            let mine = crate::sql::explain::estimate(&d, self.ctx);
+            let theirs = crate::sql::explain::estimate(&Arc::new(orig), self.ctx);
+            if mine.total >= theirs.total {
+                return false;
+            }
         }
         *p = Arc::try_unwrap(d).unwrap_or_else(|a| (*a).clone());
         true

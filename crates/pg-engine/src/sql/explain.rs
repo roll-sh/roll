@@ -13684,6 +13684,33 @@ impl Builder<'_, '_> {
                 sn.children.push(child.child("Outer"));
                 c.node = sn;
             }
+            // (Or the relation's partial plans sorted so in the workers under a Gather Merge:
+            // generate_useful_gather_paths at the scan/join relation, whose query_pathkeys
+            // are the group pathkeys with the aggregates' order (TPC-H q16's count(DISTINCT),
+            // which has no partial form), when that is cheaper.)
+            if let Some((pi, others, rel_rows)) = &gather_in
+                && !sort_keys.is_empty()
+                && common < sort_keys.len()
+            {
+                let mut cols: Vec<Option<usize>> = presort_idx
+                    .iter()
+                    .filter(|i| !redundant.get(**i).copied().unwrap_or(false))
+                    .map(|&i| match &groups[i] {
+                        Expr::Col(j, _) => Some(*j),
+                        _ => None,
+                    })
+                    .collect();
+                cols.resize(sort_keys.len(), None);
+                let gm = self
+                    .useful_gathers(pi, others, &sort_keys, &cols, *rel_rows, c.node.key, true)
+                    .into_iter()
+                    .reduce(|a, b| if parallel::cheaper(&b, &a) { b } else { a });
+                if let Some(gm) = gm
+                    && parallel::cheaper(&gm, &c.node)
+                {
+                    c.node = gm;
+                }
+            }
             if !groups.is_empty() {
                 n.strategy = Some("Sorted");
                 n.title = "GroupAggregate".into();
@@ -15418,8 +15445,15 @@ impl Builder<'_, '_> {
                 // add_path dropped the serial input. A merge join's ordered inputs stay.)
                 let (d1, d2) = (parallel::disabled_nodes(&b1.node), parallel::disabled_nodes(&b2.node));
                 let b1_clearly = d1 < d2 || (d1 == d2 && b2.node.total_cost > b1.node.total_cost * 1.01);
+                // (A serial join that isn't parallel safe itself (a correlated SubPlan in its
+                // inner scan, TPC-H q20) competes with the gathered one on even terms in
+                // add_path: fuzzily the same in total, the one cheaper to start stays.)
+                fn restricted(n: &ExNode) -> bool {
+                    !n.subplans.is_empty() || (n.is_scan() && !n.par_safe) || n.children.iter().any(restricted)
+                }
+                let b1_kept = if restricted(&b1.node) { !parallel::dominates(&b2.node, &b1.node) } else { b1_clearly };
                 if parallel::par_beats(&b2.node, &b1.node)
-                    || (b1.node.node_type != "Merge Join" && !ordered_input && !b1_clearly)
+                    || (b1.node.node_type != "Merge Join" && !ordered_input && !b1_kept)
                 {
                     b2.node.partial = b1.node.partial;
                     if b2.node.alt.is_none() {
@@ -15719,8 +15753,17 @@ impl Builder<'_, '_> {
                     let mut bucket = (1.0_f64, 1.0_f64);
                     for (a, b) in &pairs {
                         let iv = if sw { a } else { b };
+                        // (estimate_hash_bucketsize scales the column's distinct values by
+                        // its base relation's restrictions, vardata.rel->rows: a
+                        // parameterized scan's relation (rows per loop, not known here) has
+                        // only the join's clause, so its tuples; never the hashed side's
+                        // rows, a join's (TPC-H q02).)
+                        let bucket_rows = iv
+                            .var
+                            .as_ref()
+                            .map_or(iv.rel_rows, |v| if v.rows > 0.0 { v.rows } else { v.tuples });
                         let (mcv, bs) =
-                            joins::bucket_stats(&cat, iv.var.as_ref(), iv.rel_rows, vb);
+                            joins::bucket_stats(&cat, iv.var.as_ref(), bucket_rows, vb);
                         let bs = match (&iv.var, iv.distinct.filter(|d| *d >= 1.0)) {
                             // (A unique column (a single grouping key): as many values as
                             // rows.)

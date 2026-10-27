@@ -82,13 +82,13 @@ psycopg 3's, asyncpg's and pgx's cancel, timeout, interrupt, deadlock and notifi
 (`-k` / `-run` on those words: 42, 31 and 110 tests) pass on both servers, no difference.)
 
 Engine, open:
-- Hibernate BulkManipulationTest.testUpdateWithWhereExistsSubquery: "column #32 out of range"
-  in `WITH id_cte AS MATERIALIZED (SELECT ... JOIN ... JOIN ... WHERE EXISTS (SELECT ... JOIN
-  ...)), update_cte AS (UPDATE ... WHERE id IN (SELECT id FROM id_cte)) SELECT count(*) FROM
-  id_cte`: a parameterized nested loop's parameters index a wider row than its outer side
-  makes (10 columns, Human's). It fails only when the test runs (pgjdbc, after the class's
-  other tests); the same statements replayed through psql or the wire after the same DDL and
-  rows plan otherwise and pass. A planner bug (join search), left to the planner work.
+- (Fixed in round 21, agent 78: Hibernate BulkManipulationTest.testUpdateWithWhereExistsSubquery,
+  "column #32 out of range". The plan, not the protocol: with the class's rows (three
+  Humans, no ANALYZE) psql gets it too. The EXISTS is a semi join of `Human` alone with its
+  sub-select, the other two tables joined above it, and their index scans took the class
+  member `Human_friends.human1` from the semi join's right side, which the engine's semi join
+  doesn't return (`joinpath.rs` `semi_hidden`). The class's 54 tests pass; wire test
+  `semi_join_right_side_not_a_parameter`, golden `a78_semi_param`.)
 - Hibernate PackagedEntityManagerTest.testOverriddenPar: `select nextval('Bug_SEQ')` finds no
   bug_seq (the persistence unit's schema export); not looked at.
 - ActiveRecord ForeignTableTest (4): postgres_fdw's server has only `dbname` (a loopback

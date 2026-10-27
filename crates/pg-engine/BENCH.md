@@ -1041,6 +1041,58 @@ instead of 19.6 with the base executor); a worker decodes a lineitem row in abou
 - Every TPC-H result hash agrees with PostgreSQL's; pgbench select-only at scale 10 (8
   clients, 5 interleaved runs each) within noise of the base (medians 52.1k / 53.0k TPS).
 
+## Round 21 (agent 78): TPC-H plans, the tail
+
+The same comparison as round 20's: `EXPLAIN` (costs on) of the 22 queries at SF1 on
+PostgreSQL 18.6 (container `a78-pg`) and the engine, loaded with the same data by
+`tools/bench` and analyzed, compared node by node, with parallel query at its defaults and
+again with `max_parallel_workers_per_gather = 0`. Before (this round's base, `c7f59d74`):
+14 of 22 had PostgreSQL's shape (agent 64's 15 less q09, which flips with PostgreSQL's own
+ANALYZE: re-analyzing part flips its plan there too); after: **16 of 22**, and **19 of 22**
+serial. Every result hash agrees with PostgreSQL's. Timings weren't the point (one run on a
+shared machine, load 15, other rounds' executor changes in between): q20 took 0.9 s and q07
+4.1 s (2.8 s and 7.3 s in round 20), the rest within round 20's spread.
+
+What differed and why (STATUS.md, round 21):
+
+1. **q07**: the query's FROM subquery is pulled up with its scans planned on their own level
+   first, and those weren't plannable when the group took the OR clause's restrictions out
+   for each nation (extract_restriction_or_clauses), so the OR kept its whole selectivity
+   besides them: the two nations' join 1 row, the query 40 for PostgreSQL's 6,454, and a
+   nested-loop plan from the nations outwards.
+2. **q18**: reduce_unique_semijoins ran only for a semi join of two items; in a group (the IN
+   among customer, orders and lineitem) the sub-select, grouped by l_orderkey, makes it an
+   inner join (Hash Join over the GroupAggregate, no Unique).
+3. **q20**: the outer IN's sub-select has its own correlated sub-select (`ps_availqty >
+   (SELECT 0.5 * sum(l_quantity) ... WHERE l_partkey = ps_partkey ...)`), which the pull-up
+   refused; such a qual stays with its relations.
+4. **q16**: count(DISTINCT) has no partial form; the GroupAggregate's presorted input may be
+   the parallel join sorted in the workers under a Gather Merge, which PostgreSQL finds
+   cheaper than sorting the gathered rows.
+5. **q02** (its plan matched by luck): EXPLAIN's hash join scaled the inner key's distinct
+   values by the hashed side's rows (a join's 159,537) instead of its relation's, a bucket
+   of 4 rows for 1, so each probe ran the correlated SubPlan of the hash clause 4 times:
+   107,845 for PostgreSQL's 56,375. That also decided q20's Gather (a serial join that isn't
+   parallel safe and the join over a gathered input are kept as add_path keeps them).
+
+Left: q05 / q08 (partial paths only along the serial join tree: PostgreSQL's best partial
+plan for q05 joins customer ⋈ nation ⋈ region first and orders by orders_o_custkey_idx, a
+tree whose serial form costs 197,316 against the engine's serial best 97,786; it needs
+partial paths per join relation in the join search), q18 (a GroupAggregate over an
+Incremental Sort on c_custkey from a merge join: group keys reordered by the input's order
+and that order kept at the join), q21 (two joins over 1 row, 0.5 apart), q13 after an engine
+restart (customer's cold heap model has 3,588 pages for 3,640: 147,857 rows, and the
+HashAggregate then fits hash_mem by 1%), q09 / q10 serial (ANALYZE's sample).
+
+Other workloads, against the same reference: pgbench's statements (scale 10) and twenty
+ORM-style queries over its tables (point lookups with LIMIT, counts, IN lists, joins with
+ORDER BY / OFFSET, EXISTS and NOT IN, correlated scalar sub-selects, GROUP BY with MIN /
+MAX, row comparisons) have PostgreSQL's plans; their estimates differ only by ANALYZE's
+sample (a range over pgbench_accounts.aid from each side's own histogram). An INSERT that
+leaves columns to their defaults differs: PostgreSQL's source computes every column
+(`Result (width=60)` where the engine shows 4, and nextval's cost per row), and an INSERT
+... SELECT with ORDER BY keeps `Subquery Scan on "*SELECT*"` over the Sort.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

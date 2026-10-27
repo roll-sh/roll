@@ -225,6 +225,85 @@ run against the committed baseline (`9407d0ee`): 51,148 / 51,150, no unit change
 difftest pair against the first batch identical statement for statement, the smoke
 passing. Golden `tests/sql/a64_tpch_planner2.sql`.
 
+## Round 21, agent 78 (TPC-H plans, the tail: OR restrictions of pulled-up subqueries, unique semi joins in groups, IN over sub-selects with their own SubPlans; a semi join's hidden side as a parameter)
+
+Measured by a full run of the batch (debug build, private reference `a78-rref1`) against the
+committed baseline (`results.tsv`, `9407d0ee`): **51,148 / 51,150, no unit changed**. The
+difftest smoke passes (one known mismatch gone: seed 1777 #34, out of `smoke_known.txt`), and
+150 seeds x 120 statements with planner-setting variants (`DIFFTEST_PLAN=0.5`) give the same
+mismatch records as the batch's base (`c7f59d74`), statement for statement. Every TPC-H SF1
+result hash agrees with PostgreSQL's. (The generated blocks are left to the next committed
+full run.) TPC-H SF1 plans with PostgreSQL's shape: 16 of 22 (parallel, the defaults), 19 of
+22 with max_parallel_workers_per_gather = 0.
+
+The causes, found on TPC-H at SF1 against PostgreSQL 18.6 with the same data, both analyzed
+(BENCH.md "Round 21"):
+
+- **Wrong results (an error)**: a semi join made with only part of its syntactic left side
+  (an EXISTS over three inner-joined tables, joined to one of them first) left the others to
+  join above it, and an equivalence class could parameterize their index scans by the
+  semi join's right-side column (`Human_friends.human1` for `Human.mammal`), which the
+  engine's semi join doesn't return: "column #32 out of range" (Hibernate's
+  BulkManipulationTest.testUpdateWithWhereExistsSubquery; any protocol, the plan only). A
+  nested loop's inner path may no longer take parameters from the right side of a semi or
+  anti join inside its outer path (`joinpath.rs` `semi_hidden`, by the path: a unique-ified
+  right side joined as an inner join returns its columns). Postgres's semi join carries the
+  right side's Vars, so its plan reads `f1_0.human1` where the engine's reads
+  `h1_0.mammal`; the rows are the same. Wire test `semi_join_right_side_not_a_parameter`,
+  golden `a78_semi_param`.
+- **A join OR's restrictions in a pulled-up subquery** (TPC-H q07): a FROM subquery's scans,
+  planned on their level first, were still planned when the group extracted the OR's
+  per-relation restrictions (extract_restriction_or_clauses), so the OR clause wasn't
+  divided by them (consider_new_or_clause): 40 rows for 6,454. The scans are made plannable
+  first; a restriction the scan already has isn't added twice, and the clause is still
+  compensated.
+- **reduce_unique_semijoins in a group** (q18): a semi join to one item that is distinct on
+  the join's columns (a sub-select grouped by them under its HAVING) is an inner join, also
+  among other joins; its classes stay as made (`reduced_semi_classes`). `inner_unique` also
+  sees a grouped sub-select planned as the item itself (not only under a Barrier).
+- **IN over a sub-select with its own correlated sub-select** (q20): `sub_join` refused any
+  qual with a SubPlan; one whose sub-selects read only the sub-select's rows stays with its
+  relations (convert_ANY_sublink_to_join refuses only Vars of the parent query), and the
+  join tree's scans may carry them (`EXISTS_SUBLINKS` over the tree form too).
+- **A grouping without a partial form over a parallel join** (q16's count(DISTINCT)): its
+  presorted input (the group keys, then the aggregate's argument) may be the join's partial
+  plans sorted in the workers under a Gather Merge (generate_useful_gather_paths at the
+  scan/join relation), when cheaper than sorting the gathered rows.
+- **Hash bucket sizes of a parameterized scan's column** (q02, the q20 Gather): EXPLAIN's
+  hash join costing scaled the inner key's distinct values by the hashed side's rows (a join's)
+  when the key's relation was a parameterized scan; estimate_hash_bucketsize scales by the
+  base relation's rows (its tuples there). q02's join cost 107,845 for Postgres's 56,375.
+  With it, a serial join that isn't parallel safe (a correlated SubPlan inside) and the same
+  join over a Gathered input compete as add_path has them (fuzzily equal totals keep the one
+  cheaper to start: q20's Seq Scan on part).
+- **`SELECT DISTINCT ... ORDER BY 1 DESC`**: without an index in that order, the DISTINCT may
+  sort its input on the ORDER BY's keys and directions, then its other columns, a Unique over
+  it and no Sort above, when that costs less than hashing and sorting the distinct rows
+  (create_distinct_paths' distinct_pathkeys from transformDistinctClause). Difftest seed
+  1777's EXPLAIN now matches (its smoke entry is a wrong_rows record of values that compare
+  equal, fixed before).
+
+Golden: `tests/sql/a78_tpch_planner.sql`, `a78_semi_param.sql` (recorded from PostgreSQL
+18.6).
+
+Looked at and left (why):
+
+- q05, q08 (parallel): the engine's partial plans are EXPLAIN's partial versions of the serial
+  join tree the search chose (`explain.rs` join_built: methods and orientations per join);
+  Postgres keeps partial paths per join relation (add_partial_path), so its best partial
+  plan may join in another order (q05: customer ⋈ nation ⋈ region outermost, orders by
+  orders_o_custkey_idx; its serial version costs 197,316, the engine's serial best 97,786).
+  Serial plans match. This needs partial paths in the join search.
+- q18: the sorted grouping over a merge join in c_custkey order with an Incremental Sort
+  (get_useful_group_keys_orderings reordering the group keys by the input's order, and
+  pathkeys_useful_for_grouping keeping that order at the join); the engine hashes.
+- q21: rows=1 at the top joins: the semi join and the join to orders tie within 0.5 cost.
+- q13 after an engine restart: a cold heap model is laid out afresh, densely, so customer has
+  3,588 pages for the 3,640 its load and VACUUM made (pg_class, Postgres's), 147,857 rows for
+  150,000; the HashAggregate then fits hash_mem by 1% and doesn't spill. Storage.
+- q09, q10 (serial): ANALYZE's random sample (p_name's histogram; Postgres's own plan flips
+  between runs of ANALYZE).
+
 ## Round 19, agent 60 (database locales: libc C by default, CREATE DATABASE's providers)
 
 The engine's databases reported and behaved as the builtin C.UTF-8 locale; the reference is
