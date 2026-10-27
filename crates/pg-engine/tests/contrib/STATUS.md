@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Round 20 (agent 70): pgvector 915 / 915, bloom 58 / 58 (pg_trgm, btree_gist and cube unchanged at 261, 613 and 316). Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 20 (agent 83): postgres_fdw 1,846 / 2,053 (89.9%; dblink 218, file_fdw 187 unchanged). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Round 20 (agent 70): pgvector 915 / 915, bloom 58 / 58 (pg_trgm, btree_gist and cube unchanged at 261, 613 and 316). Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -69,7 +69,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | amcheck | 204 | 203 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
-| postgres_fdw | 2053 | 1802 | see below |
+| postgres_fdw | 2053 | 1846 | see below |
 | file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
 | tsm_system_rows | 16 | 16 | done (round 19, agent 71) |
 | tsm_system_time | 16 | 14 | see below |
@@ -230,13 +230,34 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   Append (`async_capable`; the executor still reads members in turn), Batch Size from
   `batch_size` (rows still go one statement each); a scan of a table with a dropped column
   returns no physical target list (build_physical_tlist punts); rows routed or inherited into
-  foreign tables under transition-table triggers fail as PostgreSQL fails them. Left (251
-  units): join,
-  aggregate and upper-relation pushdown (Foreign Scans of joins and upper relations: the
-  planner's foreign paths, postgres_fdw's costs and use_remote_estimate, about 110 EXPLAIN
-  units and the row orders their plans give), ORDER BY / LIMIT with FOR UPDATE, batched
-  remote INSERTs, COPY into foreign tables, parallel_commit / parallel_abort,
-  analyze_sampling, query_cancel's timeout unit.
+  foreign tables under transition-table triggers fail as PostgreSQL fails them.
+  Round 20 (agent 83, postgres_fdw 1,846 / 2,053): joins and aggregations run remotely.
+  The binder records PostgreSQL's range table indexes (`ScanPlan::rtindex`: FROM items, joins
+  and subqueries in parse order, RTE_GROUP, then pulled-up sublinks' and subqueries'
+  relations), which the remote SQL's `rN` aliases are. The join search offers each join
+  relation of one server's tables to the wrapper once, from its first pair of inputs
+  (`paths/joinpath/foreign.rs`, GetForeignJoinPaths); foreign_join_ok decides it
+  (`ext/postgres_fdw/join.rs`: inner, left, full and semi joins, same server and user, no
+  local conditions below, PlaceHolderVars and semi join targets checked; join clauses vs.
+  remote conditions as postgres_fdw pulls them up), its Foreign Scan path costed by
+  estimate_path_cost_size (base relations too: fdw_startup_cost, fdw_tuple_cost, remote
+  EXPLAINs under use_remote_estimate, whose parameterized paths' equivalence clauses fix the
+  clauses' order). `Plan::Foreign` (`ext/fdw.rs`, the wrapper's `ForeignRelOps`) is the Foreign
+  Scan of a join or upper relation: EXPLAIN's Relations line and Remote SQL, a cursor read
+  into the join row, local conditions as its Filter. Deparsing (`joinsql.rs`) follows
+  deparseFromExprForRel: `(r1 INNER JOIN r2 ON (...))`, FULL JOIN sides with conditions as
+  `sN(c1, ...)` subqueries, semi joins as EXISTS. An outer join's side planned as a group of its
+  own that is a foreign join is taken into the join above (`fdw_adopt`). After a level is
+  planned, `pushdown.rs` sends WHERE clauses over an outer join, the target list's order, the
+  ORDER BY / LIMIT over a foreign join, and aggregations (`upperpath.rs`,
+  foreign_grouping_ok: the grouped target list, GROUP BY by position, HAVING split into sent
+  and local, aggregates with DISTINCT, ORDER BY, FILTER, WITHIN GROUP, VARIADIC; also over a
+  join the search didn't choose remotely, `JoinMeta::fdw_alt`), with their ORDER BY / LIMIT.
+  Left: join paths with pathkeys (merge joins over sorted remote joins), FOR UPDATE over
+  joins (whole-row ROW() columns), parameterized foreign paths, the resjunk columns a grouped
+  scan's EXPLAIN shows, some join orders of three or more relations, batched remote INSERTs
+  and async execution (labels only), COPY into foreign tables, parallel_commit /
+  parallel_abort, analyze_sampling, query_cancel's timeout unit.
 - **file_fdw** (round 19, agent 66; `src/ext/file_fdw.rs`): done. The validator (options by
   catalog with getClosestMatch's hint, the filename / program privileges, COPY's own option
   checks through `CopyFormat::parse`), scans read by COPY FROM's parser

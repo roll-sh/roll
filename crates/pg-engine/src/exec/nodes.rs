@@ -512,6 +512,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         Plan::Update(p) => open_update(p, ctx)?,
         Plan::Delete(p) => open_delete(p, ctx)?,
         Plan::Merge(p) => Box::new(super::merge::MergeNode::new(p.clone(), ctx)?),
+        Plan::Foreign(f) => crate::ext::fdw::open(f, ctx)?,
     })
 }
 

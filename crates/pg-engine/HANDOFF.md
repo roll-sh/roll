@@ -217,6 +217,19 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   join or an aggregate, foreign paths in the join search with postgres_fdw's costs, and PG's
   range-table indexes for the `rN` aliases, which the binder doesn't record), batched
   INSERTs, COPY into foreign tables, parallel_commit / parallel_abort, analyze_sampling.
+  Round 20 (agent 83, postgres_fdw 1,846 / 2,053): join and aggregate pushdown. The hooks are
+  generic: `Plan::Foreign` (a Foreign Scan of a join or upper relation; its `scans` are
+  `plan_inputs`, so EXPLAIN names them; its private part a `ext::fdw::ForeignRelOps`), the
+  join search's foreign join paths (`paths/joinpath/foreign.rs`, called at the end of
+  `add_paths_u`, once per join relation, `JNode::Foreign`), and the binder's
+  `ScanPlan::rtindex` (PostgreSQL's range table index: `Level::rt_len`, `pullups`,
+  `sublinks`, applied in `Binder::apply_pullups` after WHERE). Upper relations, the ORDER BY /
+  LIMIT over foreign joins and WHERE clauses over outer joins are rewrites of the planned level
+  in `pushdown::push_level` (the cost model would almost always pick them; PG's choice is by
+  cost). Join rows live in the join search's group row; a joined relation's columns its own
+  join doesn't return get ids from `postgres_fdw::join::HIDDEN_COLS` up: never size a vector
+  by a column id there. Stack rule kept: the new EXPLAIN and executor arms are
+  `#[inline(never)]` helpers (`foreign_rel`, `fdw::open`).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

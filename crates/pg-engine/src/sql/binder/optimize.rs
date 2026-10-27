@@ -37,6 +37,7 @@ pub fn width(p: &Plan) -> usize {
         | Plan::Distinct { input, .. }
         | Plan::Barrier { input, .. } | Plan::Context { input, .. } => width(input),
         Plan::LockRows { width, .. } => *width,
+        Plan::Foreign(f) => f.out.len(),
         Plan::Project { exprs, .. } | Plan::ProjectSet { exprs, .. } => exprs.len(),
         Plan::Agg {
             groups, sets, aggs, ..

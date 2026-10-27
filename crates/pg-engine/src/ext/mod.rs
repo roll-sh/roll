@@ -18,6 +18,7 @@ mod btree;
 mod citext;
 mod cube;
 pub mod dblink;
+pub mod fdw;
 pub mod file_fdw;
 mod fuzzystrmatch;
 mod hstore;

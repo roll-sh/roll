@@ -1214,6 +1214,7 @@ pub(crate) fn plan_inputs_mut(p: &mut Plan) -> Vec<&mut Arc<Plan>> {
         Plan::Update(p) => vec![&mut p.source],
         Plan::Delete(p) => vec![&mut p.source],
         Plan::Merge(p) => vec![&mut p.source],
+        Plan::Foreign(f) => f.scans.iter_mut().collect(),
         _ => Vec::new(),
     }
 }
@@ -1240,6 +1241,7 @@ pub(crate) fn plan_inputs(p: &Plan) -> Vec<&Arc<Plan>> {
         Plan::Update(p) => vec![&p.source],
         Plan::Delete(p) => vec![&p.source],
         Plan::Merge(p) => vec![&p.source],
+        Plan::Foreign(f) => f.scans.iter().collect(),
         _ => Vec::new(),
     }
 }
@@ -5773,6 +5775,7 @@ impl Builder<'_, '_> {
         let key = addr(p);
         match &**p {
             Plan::Context { input, .. } => self.convert(input),
+            Plan::Foreign(f) => self.foreign_rel(p, f),
             // A subquery Postgres plans as a level of its own: its Subquery Scan shows
             // unless trivial (setrefs' trivial_subqueryscan): it returns columns its plan
             // computes but doesn't return (resjunk sort or group keys), or the node above
@@ -11912,6 +11915,67 @@ impl Builder<'_, '_> {
                 n.children.push(child)
             }
         }
+    }
+
+    /// A Foreign Scan of a join or upper relation: its relations' names, the wrapper's
+    /// lines. (Out of `convert`, whose frame is on every plan level's stack.)
+    #[inline(never)]
+    fn foreign_rel(&mut self, p: &Arc<Plan>, f: &super::plan::ForeignRel) -> Built {
+        // (Named by the relation's row: each scan's columns from its offset.)
+        let mut names: Vec<Name> = Vec::new();
+        let mut refs: Vec<String> = Vec::new();
+        for (k, sp) in f.scans.iter().enumerate() {
+            let map = f.cols.get(k).cloned().unwrap_or_default();
+            let refname = self.refname(sp);
+            if let Plan::Scan(s) = &**sp {
+                let mut ns = self.table_names(&s.table, &refname);
+                if let Some(al) = &s.col_aliases {
+                    for (c, n) in s.table.columns.iter().zip(ns.iter_mut()) {
+                        if let Some((_, a)) = al.iter().find(|(o, _)| *o == c.name) {
+                            *n = Name::col(&refname, a);
+                        }
+                    }
+                }
+                for (i, n) in ns.into_iter().enumerate() {
+                    // (Columns the relation's row has but doesn't return have ids past it.)
+                    if let Some(Some(g)) = map.get(i)
+                        && *g < crate::ext::postgres_fdw::join::HIDDEN_COLS
+                    {
+                        if names.len() <= *g {
+                            names.resize_with(*g + 1, || Name::same("?"));
+                        }
+                        names[*g] = n;
+                    }
+                }
+            }
+            refs.push(refname);
+        }
+        let mut n = ExNode::new("Foreign Scan");
+        n.operation = Some("Select");
+        (n.rows, n.startup_cost, n.total_cost, n.width) = f.est;
+        n.key = Some(addr(p));
+        n.fixed_tlist = true;
+        let out: Vec<Name> = match f.private.0.output(f) {
+            // (A plain column as it is, a value computed remotely parenthesized.)
+            Some((exprs, aggs)) => exprs
+                .iter()
+                .map(|e| match e {
+                    Expr::Col(c, _) => names.get(*c).cloned().unwrap_or_else(|| Name::same("?")),
+                    e => self.name(e, &names, &aggs).wrapped(),
+                })
+                .collect(),
+            None => f.out.iter().map(|&c| names.get(c).cloned().unwrap_or_else(|| Name::same("?"))).collect(),
+        };
+        let filter = f.private.0.filter();
+        if !filter.is_empty() {
+            let texts = filter.iter().map(|e| self.show(e, &names, Cx::Scan)).collect();
+            n.details.push(Detail::Text("Filter", and_text(texts).unwrap_or_default()));
+            n.details.push(Detail::Removed("Rows Removed by Filter", Vec::new()));
+        }
+        for (label, text) in f.private.0.explain(f, &|i| refs.get(i).cloned().unwrap_or_default(), self.ctx, self.o.verbose) {
+            n.details.push(Detail::Text(label, text));
+        }
+        Built::passthrough(n, out)
     }
 
     /// A postgres_fdw direct modification's node (Foreign Update / Foreign Delete).

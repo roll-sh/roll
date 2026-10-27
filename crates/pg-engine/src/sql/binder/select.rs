@@ -1751,6 +1751,7 @@ impl Binder<'_, '_> {
         let locking = self.locking_spec(&s.locking_clause)?;
         // FROM
         let mut plan = self.bind_from(&s.from_clause, locking.as_ref())?;
+
         // Grouping sets null the columns a set leaves out: virtual generated columns that
         // wouldn't go NULL with them are computed below (their PlaceHolderVars).
         if !self.deparse
@@ -1827,6 +1828,10 @@ impl Binder<'_, '_> {
                 plan = optimize::add_filter(&self.cat, plan, pred);
             }
         }
+        // (The GROUP BY's range table entry (RTE_GROUP) comes after the FROM items', the
+        // pulled-up sublinks' and subqueries' relations after both.)
+        let base = self.level().rt_len + u32::from(s.group_clause.iter().any(|g| !matches!(inner(g), Some(NodeEnum::GroupingSet(gs)) if gs.content.is_empty())));
+        self.apply_pullups(&mut plan, base);
         if !self.deparse {
             self.apply_rel_vars(&mut plan);
         }
@@ -3924,11 +3929,14 @@ impl Binder<'_, '_> {
                 Ok((p, scope, vec![]))
             }
             Some(NodeEnum::RangeVar(rv)) => {
+                self.cur_rtindex = self.add_rte();
                 let (p, rel) = self.bind_range_var(rv, locking)?;
                 Ok((p, Scope { rels: vec![rel] }, vec![]))
             }
             Some(NodeEnum::RangeSubselect(rs)) => {
                 self.hidden_rtes += 1;
+                self.add_rte();
+                let rt_lo = self.fresh_id();
                 // Not LATERAL: the FROM items to its left are out of its sight (in the
                 // range table still, for errors).
                 let hidden = (!rs.lateral).then(|| {
@@ -3981,6 +3989,7 @@ impl Binder<'_, '_> {
                 let pushed = push.is_some();
                 let saved_push = std::mem::replace(&mut self.pushed_lock, push);
                 let r = self.bind_subquery(rs.subquery.as_deref().unwrap());
+                let rt_up = (rt_lo, self.fresh_id(), self.last_rt_flat);
                 self.pushed_lock = saved_push;
                 let deferred = std::mem::take(&mut self.deferred);
                 (self.defer_level, self.deferred) = saved_defer;
@@ -4058,11 +4067,13 @@ impl Binder<'_, '_> {
                     let mut plan = plan;
                     union_alias(&mut plan, &name);
                     crate::sql::plan::mark_deferred_lateral(&mut plan);
+                    self.level().pullups.push(rt_up);
                     plan
                 } else if deferred {
                     // (Not one: its level planned now, as any.)
                     let mut plan = plan;
                     union_alias(&mut plan, &name);
+                    self.level().pullups.push(rt_up);
                     let lim = self.arm_limit.filter(|a| a.0 == sub_level).map(|a| (a.1, a.2));
                     let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL");
                     let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, false, "rowmarks::OWN_LOCK");
@@ -4075,15 +4086,32 @@ impl Binder<'_, '_> {
                 } else {
                     let mut plan = plan;
                     union_alias(&mut plan, &name);
+                    self.level().pullups.push(rt_up);
                     plan
                 };
                 Ok((plan, Scope { rels: vec![rel] }, params))
             }
-            Some(NodeEnum::RangeFunction(rf)) => self.bind_range_function(rf),
-            Some(NodeEnum::JoinExpr(j)) => self.bind_join(j, locking),
-            Some(NodeEnum::RangeTableSample(ts)) => self.bind_table_sample(ts, locking),
-            Some(NodeEnum::RangeTableFunc(rtf)) => self.bind_xml_table(rtf),
-            Some(NodeEnum::JsonTable(jt)) => self.bind_json_table(jt),
+            Some(NodeEnum::RangeFunction(rf)) => {
+                self.add_rte();
+                self.bind_range_function(rf)
+            }
+            Some(NodeEnum::JoinExpr(j)) => {
+                let r = self.bind_join(j, locking);
+                self.add_rte();
+                r
+            }
+            Some(NodeEnum::RangeTableSample(ts)) => {
+                self.cur_rtindex = self.add_rte();
+                self.bind_table_sample(ts, locking)
+            }
+            Some(NodeEnum::RangeTableFunc(rtf)) => {
+                self.add_rte();
+                self.bind_xml_table(rtf)
+            }
+            Some(NodeEnum::JsonTable(jt)) => {
+                self.add_rte();
+                self.bind_json_table(jt)
+            }
             _ => Err(crate::error::unsupported("this FROM item")),
         }
     }
@@ -4342,7 +4370,9 @@ impl Binder<'_, '_> {
         self.check_as = saved_as;
         self.fn_levels = saved_fns;
         self.ctes = saved_ctes;
-        self.levels.pop();
+        if let Some(l) = self.levels.pop() {
+            self.last_rt_flat = l.rt_flat.max(l.rt_len);
+        }
         r
     }
 
@@ -4667,6 +4697,7 @@ impl Binder<'_, '_> {
                     params: Default::default(),
                     reltarget: Default::default(),
                     fdw: None,
+                    rtindex: crate::sql::plan::RtIndex(self.cur_rtindex),
                 };
                 let mut scan = scan;
                 if !colnames.is_empty() {
@@ -4781,6 +4812,7 @@ impl Binder<'_, '_> {
                             params: Default::default(),
                             reltarget: Default::default(),
                             fdw: None,
+                            rtindex: Default::default(),
                         }))
                     }
                     None if self.view_stack.contains(&v.oid) => {
@@ -4809,7 +4841,11 @@ impl Binder<'_, '_> {
                         let saved_lock = std::mem::replace(&mut self.view_lock, locked);
                         let push = if self.deparse { None } else { self.push_lock(locking, &name) };
                         let saved_push = std::mem::replace(&mut self.pushed_lock, push);
+                        let rt_lo = self.fresh_id();
                         let r = self.bind_view_query(&v);
+                        // (The view's relations, once pulled up, after this level's.)
+                        let rt_up = (rt_lo, self.fresh_id(), self.last_rt_flat);
+                        self.level().pullups.push(rt_up);
                         self.pushed_lock = saved_push;
                         self.view_lock = saved_lock;
                         self.view_stack.pop();

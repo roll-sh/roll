@@ -196,6 +196,48 @@ pub struct ScanPlan {
     pub reltarget: RelVars,
     /// A postgres_fdw scan's ORDER BY and LIMIT sent with it (`ext::postgres_fdw::pushdown`).
     pub fdw: Option<Arc<FdwPushdown>>,
+    /// Its index in PostgreSQL's range table of the query level planning it (1-based; 0: not
+    /// known): the FROM items, join and subquery entries in parse order, then the relations of
+    /// subqueries pulled up (a foreign join's remote SQL names relations `r<index>`).
+    pub rtindex: RtIndex,
+}
+
+/// `ScanPlan::rtindex`. Not part of its Debug text.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct RtIndex(pub u32);
+
+impl std::fmt::Debug for RtIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
+/// A Foreign Scan of a join or upper relation (GetForeignJoinPaths / GetForeignUpperPaths):
+/// relations of one foreign server that its wrapper runs remotely as one query.
+#[derive(Clone, Debug)]
+pub struct ForeignRel {
+    /// The base relations' scans (`Plan::Scan`s of foreign tables, their filters the
+    /// relations' restriction clauses), in the order the relation's row has their columns.
+    pub scans: Vec<Arc<Plan>>,
+    /// Per scan, the relation row column each column of its row is.
+    pub cols: Vec<Vec<Option<usize>>>,
+    /// The columns of the relation's row (a join's) the node returns, in order; an upper
+    /// relation returns its own target list.
+    pub out: Vec<usize>,
+    /// The wrapper's description of what it sends (opaque to the planner).
+    pub private: FdwPrivate,
+    /// The planner's estimates of the path (rows, startup and total cost, width).
+    pub est: (f64, f64, f64, u32),
+}
+
+/// `ForeignRel::private`. Not part of its Debug text.
+#[derive(Clone)]
+pub struct FdwPrivate(pub Arc<dyn crate::ext::fdw::ForeignRelOps>);
+
+impl std::fmt::Debug for FdwPrivate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
 }
 
 /// What a foreign scan sends besides its conditions: the sort it stands for, and the LIMIT /
@@ -390,6 +432,20 @@ pub struct JoinMeta {
     /// parameters (the left side's Vars, lateral references and PlaceHolderVars'
     /// ph_lateral).
     pub lateral_flat: bool,
+    /// The query level's scan/join relation, when a foreign data wrapper can run it
+    /// remotely but its Foreign Scan wasn't the cheapest path: that path's plan, over the
+    /// join's row (an aggregation above may still run remotely over it).
+    pub fdw_alt: FdwAlt,
+}
+
+/// `JoinMeta::fdw_alt`. Not part of its Debug text.
+#[derive(Clone, Default)]
+pub struct FdwAlt(pub Option<Arc<Plan>>);
+
+impl std::fmt::Debug for FdwAlt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
 }
 
 /// The FROM join of a LATERAL subquery left for the query above to pull up
@@ -1416,6 +1472,8 @@ pub enum Plan {
     Update(Box<UpdatePlan>),
     Delete(Box<DeletePlan>),
     Merge(Box<MergePlan>),
+    /// A Foreign Scan of a join or upper relation.
+    Foreign(Box<ForeignRel>),
 }
 
 impl Plan {

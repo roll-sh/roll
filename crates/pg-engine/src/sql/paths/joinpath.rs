@@ -10,6 +10,7 @@ use crate::sql::joins::{self, In, InKind, JoinGucs, Jt, QualCost, Semi};
 use crate::sql::plan::{JoinMeta, JoinMethod};
 use std::rc::Rc;
 
+mod foreign;
 mod lift;
 
 /// A pulled-up subquery's expression over the row it reads (`lift::subst`).
@@ -247,6 +248,8 @@ enum JNode {
         /// key is one then, and `cols` all pass through (semi_rhs_exprs that aren't Vars).
         exprs: Vec<Expr>,
     },
+    /// A Foreign Scan of a join its wrapper runs remotely.
+    Foreign { info: std::sync::Arc<crate::ext::postgres_fdw::join::RelInfo> },
     Join {
         method: JoinMethod,
         jt: Jt,
@@ -303,7 +306,7 @@ impl JP {
                 JNode::Material(_) => InKind::Material,
                 JNode::Memoize { rescan, .. } => InKind::Memoize(rescan.0, rescan.1),
                 JNode::Opaque { kind, .. } => *kind,
-                JNode::Append { .. } | JNode::Unique { .. } | JNode::Pre { .. } => InKind::Plain,
+                JNode::Append { .. } | JNode::Unique { .. } | JNode::Pre { .. } | JNode::Foreign { .. } => InKind::Plain,
                 JNode::Join {
                     method: JoinMethod::Hash,
                     batches,
@@ -562,6 +565,12 @@ struct Search<'s, 'c, 'a> {
     /// The equalities as written (`JoinMeta::ec_written`) that equate two members of one
     /// class, in deconstruct_jointree's order: process_equivalence's (`ec_members`).
     ec_written: Vec<(usize, usize)>,
+    /// The relations a foreign data wrapper can run remotely, with its description of each
+    /// (`foreign`), and the join relations it was offered (once each).
+    fdw_rels: Vec<(u32, std::sync::Arc<crate::ext::postgres_fdw::join::RelInfo>)>,
+    fdw_tried: Vec<u32>,
+    /// The base relations the wrapper's descriptions number (bits of `RelInfo::relids`).
+    fdw_list: std::cell::RefCell<Vec<crate::ext::postgres_fdw::join::Base>>,
 }
 
 /// An equivalence class member that is an expression of one FROM item's columns, not a
@@ -1776,6 +1785,9 @@ impl Search<'_, '_, '_> {
                         add_jpath(&mut rel.paths, sp, self.startup);
                     }
                     rel.param = self.append_param_paths(l, width);
+                    if let Some(f) = self.fdw_adopt(l) {
+                        self.fdw_rels.push((set, std::sync::Arc::new(f)));
+                    }
                 }
             }
             // (A catalog: its scan as it is planned alone, and parameterized index scans
@@ -1817,7 +1829,14 @@ impl Search<'_, '_, '_> {
                     Some((pr, ps, en)) => (Rc::new(pr), ps, en),
                     None => (r.clone(), Vec::new(), Vec::new()),
                 };
-                for p in self.pl.paths(&pr, &want) {
+                let fdw = self.fdw_base(l);
+                for mut p in self.pl.paths(&pr, &want) {
+                    // (A wrapper's scan: its own estimate, estimate_path_cost_size's.)
+                    if let Some(f) = &fdw
+                        && p.keys.is_empty()
+                    {
+                        (p.startup, p.total, p.rows) = (f.startup, f.total, f.rows);
+                    }
                     let keys = self.gkeys(l, &p.keys);
                     rel.paths.push(JP {
                         rows: p.rows,
@@ -1838,6 +1857,12 @@ impl Search<'_, '_, '_> {
                     });
                 }
                 rel.param = self.param_paths(l, &r, width);
+                if let Some(f) = fdw {
+                    if f.opts.use_remote_estimate {
+                        self.fdw_param_clauses(l);
+                    }
+                    self.fdw_rels.push((set, std::sync::Arc::new(f)));
+                }
             }
         }
         // (A relation a PlaceHolderVar reading LATERAL values is evaluated at, or at a join
@@ -4410,6 +4435,9 @@ impl Search<'_, '_, '_> {
         if (self.g.hashjoin || jt == Jt::Full) && !hash.is_empty() {
             self.hash_inner_and_outer(ri, outer, inner, &hash, &ex);
         }
+        if !self.fdw_rels.is_empty() {
+            self.foreign_join_path(ri, outer, inner, jt, uniq, restrict);
+        }
     }
 }
 
@@ -6151,6 +6179,7 @@ impl Search<'_, '_, '_> {
     fn build_path_node(&self, p: &JP) -> (Plan, Vec<usize>) {
         match &p.node {
             JNode::Pre { plan, layout } => ((**plan).clone(), layout.clone()),
+            JNode::Foreign { info } => self.build_foreign(info, p),
             JNode::Opaque { leaf, merged, sub, .. } => {
                 let l = &self.leaves[*leaf];
                 let mut plan = match sub {
@@ -6925,6 +6954,7 @@ impl Search<'_, '_, '_> {
                         from_call: None,
                         hash_swapped: Vec::new(),
                         ec_written: Vec::new(),
+                        fdw_alt: Default::default(),
                         semi_carried: if kind == JoinKind::Semi {
                             let mut w = 0;
                             for (l, leaf) in self.leaves.iter().enumerate() {
@@ -8554,6 +8584,9 @@ impl Planner<'_, '_> {
             kept_at: group_kept,
             phv_lat: Vec::new(),
             ec_written: Vec::new(),
+            fdw_rels: Vec::new(),
+            fdw_tried: Vec::new(),
+            fdw_list: Default::default(),
         };
         s.phv_lat = vec![(0, 0); raw_leaves.len()];
         for p in &s.phvs {
@@ -9579,6 +9612,9 @@ impl Planner<'_, '_> {
             }
         }
         let (mut plan, layout) = s.build(&best);
+        if let Plan::Join { meta, .. } = &mut plan {
+            meta.fdw_alt = crate::sql::plan::FdwAlt(s.fdw_alt(&layout).map(Arc::new));
+        }
         // The columns of equalities turned into constants stay needed up to the join.
         let kept: Vec<usize> = match &*p {
             Plan::Join { meta, .. } => meta

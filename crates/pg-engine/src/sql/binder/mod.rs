@@ -391,6 +391,19 @@ pub(crate) struct Level {
     /// A SQL function body the planner inlines over constant arguments: references to the
     /// arguments are those constants, folded like any (`substitute_actual_parameters`).
     pub inline_args: bool,
+    /// The range table entries parse analysis has made for this level so far (FROM items,
+    /// joins, subqueries; `ScanPlan::rtindex`).
+    pub rt_len: u32,
+    /// FROM subqueries pulled up into this level: the fresh ids their scans were bound
+    /// with (a range) and the length of their range tables, appended after this level's in
+    /// order (pull_up_subqueries).
+    pub pullups: Vec<(usize, usize, u32)>,
+    /// Its sublinks (fresh id range, range table length, EXISTS): those pull_up_sublinks
+    /// makes joins of come before the FROM subqueries (an EXISTS's relations, an IN's
+    /// subquery entry, whose relations come last).
+    pub sublinks: Vec<(usize, usize, u32, bool)>,
+    /// The level's range table once its subqueries are pulled up.
+    pub rt_flat: u32,
 }
 
 /// `plpgsql.variable_conflict` / `#variable_conflict`.
@@ -427,6 +440,10 @@ impl Level {
             fn_aliases: Vec::new(),
             var_conflict: None,
             inline_args: false,
+            rt_len: 0,
+            pullups: Vec::new(),
+            sublinks: Vec::new(),
+            rt_flat: 0,
         }
     }
 
@@ -651,6 +668,10 @@ pub struct Binder<'b, 'a> {
     /// Recording what the names of a stored definition resolve to (`refs`).
     pub(crate) refs: Option<Box<refs::RefLog>>,
     next_id: usize,
+    /// The range table index of the relation being bound (`ScanPlan::rtindex`).
+    pub(crate) cur_rtindex: u32,
+    /// The flattened range table length of the last query level bound (`Level::rt_flat`).
+    pub(crate) last_rt_flat: u32,
 }
 
 /// Make what the binder reads of the catalog through thread-locals (made casts, built-in
@@ -751,6 +772,8 @@ impl<'b, 'a> Binder<'b, 'a> {
             view_events: 0,
             refs: None,
             next_id: 1,
+            cur_rtindex: 0,
+            last_rt_flat: 0,
         }
     }
 
@@ -759,6 +782,65 @@ impl<'b, 'a> Binder<'b, 'a> {
     pub(crate) fn next_rti(&mut self) -> crate::sql::plan::Rti {
         let depth = self.levels.len();
         crate::sql::plan::Rti((depth << 40) | (self.fresh_id() & ((1 << 40) - 1)))
+    }
+
+    /// A new range table entry of this level (`ScanPlan::rtindex`).
+    pub(crate) fn add_rte(&mut self) -> u32 {
+        let l = self.level();
+        l.rt_len += 1;
+        l.rt_len
+    }
+
+    /// The level's FROM subqueries pulled up: their relations' range table indexes after
+    /// the level's own entries (`base` of them), in order.
+    pub(crate) fn apply_pullups(&mut self, p: &mut crate::sql::plan::Plan, base: u32) {
+        let ups = std::mem::take(&mut self.level().pullups);
+        let subs = std::mem::take(&mut self.level().sublinks);
+        fn present(p: &crate::sql::plan::Plan, lo: usize, hi: usize) -> bool {
+            if let crate::sql::plan::Plan::Scan(s) = p {
+                let id = s.rti.0 & ((1 << 40) - 1);
+                return id > lo && id < hi;
+            }
+            crate::sql::explain::plan_inputs(p).into_iter().any(|c| present(c, lo, hi))
+        }
+        let mut off = base;
+        let mut shifts = Vec::new();
+        let mut late = Vec::new();
+        for (lo, hi, len, exists) in subs {
+            if !present(p, lo, hi) {
+                continue;
+            }
+            if exists {
+                shifts.push((lo, hi, off));
+                off += len;
+            } else {
+                off += 1;
+                late.push((lo, hi, len));
+            }
+        }
+        for (lo, hi, len) in ups.into_iter().chain(late) {
+            shifts.push((lo, hi, off));
+            off += len;
+        }
+        self.level().rt_flat = off;
+        if shifts.is_empty() {
+            return;
+        }
+        fn go(p: &mut crate::sql::plan::Plan, shifts: &[(usize, usize, u32)]) {
+            if let crate::sql::plan::Plan::Scan(s) = p {
+                let id = s.rti.0 & ((1 << 40) - 1);
+                if let Some((_, _, off)) = shifts.iter().find(|(lo, hi, _)| id > *lo && id < *hi)
+                    && s.rtindex.0 > 0
+                {
+                    s.rtindex.0 += off;
+                }
+                return;
+            }
+            for c in crate::sql::explain::plan_inputs_mut(p) {
+                go(std::sync::Arc::make_mut(c), shifts);
+            }
+        }
+        go(p, &shifts);
     }
 
     /// A query bound elsewhere (an inlined CTE's) read here as a subquery: its scans take
@@ -855,6 +937,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         let r = f(self);
         self.defer_fold = defer;
         let lvl = self.levels.pop().unwrap();
+        self.last_rt_flat = lvl.rt_flat.max(lvl.rt_len);
         if let Some(parent) = self.levels.last_mut()
             && matches!(parent.clause, Clause::Select | Clause::Having | Clause::OrderBy | Clause::DistinctOn)
             && !parent.st.in_agg

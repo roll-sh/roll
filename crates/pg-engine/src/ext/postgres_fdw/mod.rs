@@ -6,10 +6,15 @@ pub mod connection;
 pub mod deparse;
 pub mod direct;
 pub mod import;
+pub mod join;
+pub mod joinscan;
+pub mod joinsql;
 pub mod modify;
 pub mod option;
 pub mod pushdown;
 pub mod scan;
+pub mod upper;
+pub mod upperpath;
 
 use super::native::Native;
 use crate::error::{Error, Result, code};

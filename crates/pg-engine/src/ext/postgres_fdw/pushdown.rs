@@ -64,6 +64,9 @@ fn order_for(cat: &Catalog, fmt: &crate::types::text::FormatCtx, input: &Plan, k
 /// Rewrite the plan: sorts over foreign scans become remote ORDER BYs, a LIMIT over them a
 /// remote LIMIT when nothing is checked locally.
 pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
+    if push_foreign(cat, fmt, p) {
+        return;
+    }
     // (Children first: a sort under a merge join reads a presorted remote scan too.)
     if let Plan::LockRows { input, marks, width } = p
         && let Some(level) = remote_lock(cat, input, marks, *width)
@@ -176,7 +179,102 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
     if cat.servers.is_empty() || !has_foreign(p) {
         return;
     }
+    absorb_filters(&cat, ctx.fmt(), p);
+    top_tlist(p);
+    super::upperpath::push_grouped(&cat, ctx.fmt(), p);
     push(&cat, ctx.fmt(), p);
+}
+
+/// A filter over a foreign join (a WHERE clause over an outer join): its conditions the
+/// join's own, sent where they can be (remote_conds), else checked as its rows come.
+fn absorb_filters(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
+    if let Plan::Filter { input, pred } = p
+        && let Some((f, cols)) = foreign_below(input)
+        && let Some(js) = f.private.0.as_any().downcast_ref::<super::joinscan::JoinScan>()
+        && js.order.is_empty()
+        && js.limit.is_none()
+    {
+        let mut parts = Vec::new();
+        conjuncts_of(pred, &mut parts);
+        let map = |e: &Expr| {
+            e.clone()
+                .transform(&mut |x| match x {
+                    Expr::Col(k, t) => Ok(cols.get(k).cloned().unwrap_or(Expr::Col(usize::MAX, t))),
+                    x => Ok(x),
+                })
+                .unwrap_or_else(|_| e.clone())
+        };
+        let q = super::joinsql::Sql::new(cat, fmt, &js.bases);
+        let mut info = (*js.info).clone();
+        for c in &parts {
+            let c = map(c);
+            if info.local_conds.is_empty() && q.shippable(&info, &c) {
+                info.remote_conds.push(c);
+            } else {
+                info.local_conds.push(c);
+            }
+        }
+        let mut js = js.clone();
+        for c in &info.local_conds {
+            for g in c.columns() {
+                if !js.tlist.contains(&g) {
+                    js.tlist.push(g);
+                }
+            }
+        }
+        js.info = Arc::new(info);
+        let mut nf = f.clone();
+        nf.private = crate::sql::plan::FdwPrivate(Arc::new(js));
+        let mut inner = (**input).clone();
+        put_foreign(&mut inner, nf);
+        *p = inner;
+        return;
+    }
+    for c in crate::sql::explain::plan_inputs_mut(p) {
+        if has_foreign(c) {
+            absorb_filters(cat, fmt, Arc::make_mut(c));
+        }
+    }
+}
+
+fn conjuncts_of(e: &Expr, out: &mut Vec<Expr>) {
+    match e {
+        Expr::And(xs) => xs.iter().for_each(|x| conjuncts_of(x, out)),
+        e => out.push(e.clone()),
+    }
+}
+
+/// The level's scan/join relation, a foreign join, returns the level's target list
+/// (apply_scanjoin_target_to_paths): its remote SELECT list in the order the target list
+/// reads its columns.
+fn top_tlist(p: &mut Plan) {
+    let mut q = &mut *p;
+    while let Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::Distinct { input, .. } | Plan::LockRows { input, .. } = q {
+        q = Arc::make_mut(input);
+    }
+    if !matches!(q, Plan::Project { .. }) {
+        return;
+    }
+    let Some((f, cols)) = foreign_below(q) else { return };
+    let Some(js) = f.private.0.as_any().downcast_ref::<super::joinscan::JoinScan>() else { return };
+    let mut tl: Vec<usize> = Vec::new();
+    for e in &cols {
+        for g in e.columns() {
+            if js.tlist.contains(&g) && !tl.contains(&g) {
+                tl.push(g);
+            }
+        }
+    }
+    let rest: Vec<usize> = js.tlist.iter().copied().filter(|g| !tl.contains(g)).collect();
+    tl.extend(rest);
+    if tl == js.tlist {
+        return;
+    }
+    let mut js = js.clone();
+    js.tlist = tl;
+    let mut nf = f.clone();
+    nf.private = crate::sql::plan::FdwPrivate(Arc::new(js));
+    put_foreign(q, nf);
 }
 
 /// A level whose locking clause marks only postgres_fdw tables: their row marks are whole-row
@@ -220,4 +318,156 @@ fn set_remote_locks(p: &mut Plan, marks: &[crate::sql::plan::LockMark], ok: &mut
         }
         _ => *ok = false,
     }
+}
+
+/// The foreign join under `p`'s projections, and `p`'s columns as its join row's columns
+/// (expressions over the join row), when `p` is projections over one.
+fn foreign_below(p: &Plan) -> Option<(&crate::sql::plan::ForeignRel, Vec<Expr>)> {
+    match p {
+        Plan::Foreign(f) if f.private.0.as_any().is::<super::joinscan::JoinScan>() => {
+            let types = crate::sql::paths::analyzejoins::col_types(p);
+            Some((f, f.out.iter().enumerate().map(|(k, &g)| Expr::Col(g, types.get(k).cloned().unwrap_or(crate::types::DataType::Unknown))).collect()))
+        }
+        // (A grouped relation's columns: its target list's entries.)
+        Plan::Foreign(f) => {
+            let up = f.private.0.as_any().downcast_ref::<super::upper::UpperScan>()?;
+            Some((f, up.tlist.clone()))
+        }
+        Plan::Project { input, exprs } => {
+            let (f, cols) = foreign_below(input)?;
+            let mapped = exprs
+                .iter()
+                .map(|e| {
+                    e.clone().transform(&mut |x| match x {
+                        Expr::Col(i, _) => Ok(cols.get(i).cloned().unwrap_or(x)),
+                        x => Ok(x),
+                    })
+                })
+                .collect::<crate::error::Result<Vec<_>>>()
+                .ok()?;
+            Some((f, mapped))
+        }
+        _ => None,
+    }
+}
+
+/// Replace the foreign join under `p`'s projections with `f`.
+fn put_foreign(p: &mut Plan, f: crate::sql::plan::ForeignRel) {
+    match p {
+        Plan::Foreign(x) => **x = f,
+        Plan::Project { input, .. } => put_foreign(Arc::make_mut(input), f),
+        _ => {}
+    }
+}
+
+/// add_foreign_ordered_paths / add_foreign_final_paths over a foreign join: the ORDER BY
+/// of a sort over it and the LIMIT over that sent with its remote query; its SELECT list
+/// in the level's target list order when it is the level's scan/join relation.
+fn push_foreign(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) -> bool {
+    let (sort, limit, below): (Option<&Vec<SortKey>>, Option<(&Option<Expr>, &Option<Expr>)>, &Plan) = match &*p {
+        Plan::Limit { input, limit, offset, with_ties: None } => match &**input {
+            Plan::Sort { input: s, keys } => (Some(keys), Some((limit, offset)), &**s),
+            i => (None, Some((limit, offset)), i),
+        },
+        Plan::Sort { input, keys } => (Some(keys), None, &**input),
+        _ => return false,
+    };
+    let Some((f, cols)) = foreign_below(below) else { return false };
+    if let Some(up) = f.private.0.as_any().downcast_ref::<super::upper::UpperScan>() {
+        let r = push_grouped_tail(cat, fmt, up, f, &cols, sort, limit, below);
+        return match r {
+            Some(np) => {
+                *p = np;
+                true
+            }
+            None => false,
+        };
+    }
+    let Some(js) = f.private.0.as_any().downcast_ref::<super::joinscan::JoinScan>() else { return false };
+    if !js.order.is_empty() || js.limit.is_some() {
+        return false;
+    }
+    let q = super::joinsql::Sql::new(cat, fmt, &js.bases);
+    let map = |e: &Expr| {
+        e.clone().transform(&mut |x| match x {
+            Expr::Col(i, _) => Ok(cols.get(i).cloned().unwrap_or(x)),
+            x => Ok(x),
+        })
+    };
+    let mut js = js.clone();
+    if let Some(keys) = sort {
+        let mut order = Vec::new();
+        for k in keys {
+            let Ok(e) = map(&k.expr) else { return false };
+            if k.using.is_some() || !q.shippable(&js.info, &e) {
+                return false;
+            }
+            order.push((e, k.desc, k.nulls_first));
+        }
+        js.order = order;
+    }
+    let lim = limit.filter(|_| js.info.local_conds.is_empty()).and_then(|(l, o)| {
+        let ok = |e: &Option<Expr>| e.as_ref().is_none_or(|x| x.columns().is_empty() && q.shippable(&js.info, x));
+        (ok(l) && ok(o)).then(|| (l.clone(), o.clone()))
+    });
+    js.limit = lim.clone();
+    let mut nf = f.clone();
+    nf.private = crate::sql::plan::FdwPrivate(Arc::new(js));
+    let mut inner = below.clone();
+    put_foreign(&mut inner, nf);
+    *p = match (limit, lim) {
+        (Some(_), Some(_)) | (None, _) => inner,
+        (Some((l, o)), None) => Plan::Limit { input: Arc::new(inner), limit: l.clone(), offset: o.clone(), with_ties: None },
+    };
+    true
+}
+
+/// add_foreign_ordered_paths / add_foreign_final_paths over a grouped relation: the sort's
+/// keys (its target list's entries) and the LIMIT sent with it.
+#[allow(clippy::too_many_arguments)]
+fn push_grouped_tail(
+    cat: &Catalog,
+    fmt: &crate::types::text::FormatCtx,
+    up: &super::upper::UpperScan,
+    f: &crate::sql::plan::ForeignRel,
+    cols: &[Expr],
+    sort: Option<&Vec<SortKey>>,
+    limit: Option<(&Option<Expr>, &Option<Expr>)>,
+    below: &Plan,
+) -> Option<Plan> {
+    if !up.order.is_empty() || up.limit.is_some() {
+        return None;
+    }
+    let mut q = super::joinsql::Sql::new(cat, fmt, &up.input.bases);
+    q.aggs = &up.aggs;
+    let info = &up.input.info;
+    let mut up = up.clone();
+    if let Some(keys) = sort {
+        let mut order = Vec::new();
+        for k in keys {
+            let e = k.expr.clone().transform(&mut |x| match x {
+                Expr::Col(i, _) => Ok(cols.get(i).cloned().unwrap_or(x)),
+                x => Ok(x),
+            });
+            let e = e.ok()?;
+            if k.using.is_some() || !q.shippable(info, &e) {
+                return None;
+            }
+            order.push((e, k.desc, k.nulls_first));
+        }
+        up.order = order;
+    }
+    let lim = limit.filter(|_| up.local.is_empty()).and_then(|(l, o)| {
+        let ok = |e: &Option<Expr>| e.as_ref().is_none_or(|x| x.columns().is_empty() && q.shippable(info, x));
+        (ok(l) && ok(o)).then(|| (l.clone(), o.clone()))
+    });
+    up.limit = lim.clone();
+    let mut nf = f.clone();
+    nf.private = crate::sql::plan::FdwPrivate(Arc::new(up));
+    let mut inner = below.clone();
+    put_foreign(&mut inner, nf);
+    Some(match (limit, lim) {
+        (Some(_), Some(_)) | (None, _) => inner,
+        (Some((l, o)), None) => Plan::Limit { input: Arc::new(inner), limit: l.clone(), offset: o.clone(), with_ties: None },
+    })
 }

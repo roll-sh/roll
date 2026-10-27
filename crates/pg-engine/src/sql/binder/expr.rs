@@ -4346,7 +4346,10 @@ impl Binder<'_, '_> {
         if deferrable {
             self.defer_level = Some(self.levels.len() + 1);
         }
+        let rt_lo = self.fresh_id();
         let r = self.bind_subquery(s.subselect.as_deref().unwrap());
+        let rt_up = (rt_lo, self.fresh_id(), self.last_rt_flat, kind == T::ExistsSublink);
+        self.level().sublinks.push(rt_up);
         let deferred = std::mem::take(&mut self.deferred);
         (self.defer_level, self.deferred) = saved_defer;
         self.arm_limit = saved_limit;

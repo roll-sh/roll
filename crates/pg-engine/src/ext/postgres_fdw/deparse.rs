@@ -26,6 +26,26 @@ pub struct Deparser<'a> {
     /// The scan row's column holding the remote row's ctid (a scan returning system
     /// columns), which conditions may send.
     pub ctid_col: Option<usize>,
+    /// A join's relations (empty: one relation, `table`): columns are the join row's, each
+    /// relation's from its offset, qualified with its alias (`r1`).
+    pub rels: Vec<RelRef<'a>>,
+    /// Join row columns a subquery of the remote query returns: their text (`s6.c1`) and
+    /// the column they are (for its collation).
+    pub subq: std::collections::HashMap<usize, String>,
+    /// Parameters as placeholders (a remote EXPLAIN's query).
+    pub placeholders: bool,
+    /// An upper relation's aggregates, which `Expr::Agg(i)` names (their arguments over the
+    /// join row).
+    pub aggs: &'a [crate::sql::plan::AggCall],
+}
+
+/// One relation of a join being deparsed (`Deparser::rels`).
+#[derive(Clone)]
+pub struct RelRef<'a> {
+    /// Per column of the relation's row, the join row column it is.
+    pub cols: &'a [Option<usize>],
+    pub table: &'a Table,
+    pub alias: String,
 }
 
 /// Collation state of a shippable expression (FDWCollateState).
@@ -103,7 +123,16 @@ impl<'a> Deparser<'a> {
             alias: None,
             fmt: transmission_fmt(fmt),
             ctid_col: None,
+            rels: Vec::new(),
+            subq: Default::default(),
+            placeholders: false,
+            aggs: &[],
         }
+    }
+
+    /// The relation (and its column) a join row column belongs to.
+    pub fn rel_of(&self, g: usize) -> Option<(&RelRef<'a>, usize)> {
+        self.rels.iter().find_map(|r| r.cols.iter().position(|c| *c == Some(g)).map(|k| (r, k)))
     }
 
     /// is_shippable: built in, or a member of a listed extension.
@@ -135,9 +164,105 @@ impl<'a> Deparser<'a> {
         }
     }
 
+    /// foreign_expr_walker's Aggref: a simple aggregate whose function, arguments, FILTER
+    /// and ORDER BY (its sort operators) can run remotely.
+    fn agg_shippable(&self, a: &crate::sql::plan::AggCall) -> bool {
+        let oid = a.def.sig.oid;
+        let builtin = a.user.is_none() && oid < FIRST_GENBKI;
+        let listed = a.user.is_some() && oid >= FIRST_GENBKI && self.object_shippable(oid);
+        if a.json_ctor || !(builtin || listed) {
+            return false;
+        }
+        let ok = |e: &Expr| self.walk(e, &mut (Coll::None, None));
+        a.args.iter().all(ok)
+            && a.direct.iter().all(ok)
+            && a.filter.as_ref().is_none_or(ok)
+            && a.order_by.iter().all(|k| ok(&k.expr) && k.using.as_ref().is_none_or(|u| self.object_shippable(u.oid)))
+            && !a
+                .args
+                .iter()
+                .chain(&a.direct)
+                .chain(a.filter.iter())
+                .chain(a.order_by.iter().map(|k| &k.expr))
+                .any(|e| crate::sql::paths::expr_volatile_deep(e) || has_stable(e))
+    }
+
+    /// The name of an aggregate's function, schema-qualified outside pg_catalog
+    /// (appendFunctionName).
+    fn function_name(&self, oid: u32, name: &str) -> String {
+        match self.cat.functions.get(&oid) {
+            Some(f) if f.schema != crate::catalog::PG_CATALOG_OID => {
+                format!("{}.{}", quote_ident(self.cat.schema_name(f.schema)), quote_ident(name))
+            }
+            _ => quote_ident(name),
+        }
+    }
+
+    /// appendOrderBySuffix.
+    fn order_suffix(&self, k: &crate::sql::plan::SortKey) -> String {
+        let mut s = match &k.using {
+            Some(u) => format!(" USING OPERATOR({}.{})", quote_ident(self.cat.schema_name(self.cat.functions.get(&u.oid).map_or(crate::catalog::PG_CATALOG_OID, |f| f.schema))), u.name),
+            None if k.desc => " DESC".to_string(),
+            None => " ASC".to_string(),
+        };
+        s.push_str(if k.nulls_first { " NULLS FIRST" } else { " NULLS LAST" });
+        s
+    }
+
+    /// deparseAggref.
+    fn aggref(&self, a: &crate::sql::plan::AggCall) -> String {
+        let mut s = self.function_name(a.def.sig.oid, a.def.sig.name);
+        s.push('(');
+        if a.distinct {
+            s.push_str("DISTINCT ");
+        }
+        let sortkey = |k: &crate::sql::plan::SortKey| {
+            let e = match &k.expr {
+                Expr::Const(v, t) => self.constant(v, t, 1),
+                x if matches!(x, Expr::Col(..)) => self.expr(x),
+                x => format!("({})", self.expr(x)),
+            };
+            e + &self.order_suffix(k)
+        };
+        if a.def.kind.is_ordered() {
+            let direct: Vec<String> = a.direct.iter().map(|e| self.expr(e)).collect();
+            s.push_str(&direct.join(", "));
+            s.push_str(") WITHIN GROUP (ORDER BY ");
+            s.push_str(&a.order_by.iter().map(sortkey).collect::<Vec<_>>().join(", "));
+        } else {
+            if a.args.is_empty() {
+                s.push('*');
+            } else {
+                let mut args: Vec<String> = a.args.iter().map(|e| self.expr(e)).collect();
+                // (A variadic call's array as one: VARIADIC.)
+                if a.def.sig.spread
+                    && let Some(l) = args.last_mut()
+                {
+                    l.insert_str(0, "VARIADIC ");
+                }
+                s.push_str(&args.join(", "));
+            }
+            if !a.order_by.is_empty() {
+                s.push_str(" ORDER BY ");
+                s.push_str(&a.order_by.iter().map(sortkey).collect::<Vec<_>>().join(", "));
+            }
+        }
+        if let Some(f) = &a.filter {
+            s.push_str(") FILTER (WHERE ");
+            s.push_str(&self.expr(f));
+        }
+        s.push(')');
+        s
+    }
+
     /// The collation of column `i` (None: not collatable), and whether it is the default.
     fn column_collation(&self, i: usize) -> Option<String> {
-        let c = self.table.columns.get(i)?;
+        let c = if self.rels.is_empty() {
+            self.table.columns.get(i)?
+        } else {
+            let (r, k) = self.rel_of(i)?;
+            r.table.columns.get(k)?
+        };
         if !c.ty.collatable() {
             return None;
         }
@@ -178,6 +303,15 @@ impl<'a> Deparser<'a> {
         };
         let (state, coll): (Coll, Option<String>) = match e {
             Expr::Col(i, _) if Some(*i) == self.ctid_col => (Coll::None, None),
+            Expr::Col(i, _) if !self.rels.is_empty() => {
+                let ok = self.subq.contains_key(i)
+                    || self.rel_of(*i).is_some_and(|(r, k)| k < r.table.columns.len() && !r.table.columns[k].dropped);
+                if !ok {
+                    return false;
+                }
+                let c = self.column_collation(*i);
+                (if c.is_some() { Coll::Safe } else { Coll::None }, c)
+            }
             Expr::Col(i, _) => {
                 if *i >= self.table.columns.len() {
                     return false;
@@ -292,6 +426,13 @@ impl<'a> Deparser<'a> {
                 }
                 derived(&inner, ty, None)
             }
+            Expr::Agg(i, _) => {
+                let Some(a) = self.aggs.get(*i) else { return false };
+                if !self.agg_shippable(a) {
+                    return false;
+                }
+                (Coll::None, None)
+            }
             _ => return false,
         };
         if !self.type_shippable(&e.ty()) {
@@ -329,6 +470,16 @@ fn has_stable(e: &Expr) -> bool {
 impl Deparser<'_> {
     /// A column reference (deparseColumnRef), qualified in joins.
     pub fn column(&self, i: usize) -> String {
+        if !self.rels.is_empty() {
+            if let Some(t) = self.subq.get(&i) {
+                return t.clone();
+            }
+            return match self.rel_of(i) {
+                Some((r, k)) if k < r.table.columns.len() => format!("{}.{}", r.alias, quote_ident(&column_name(r.table, k))),
+                Some((r, _)) => format!("{}.ctid", r.alias),
+                None => format!("?{i}"),
+            };
+        }
         let name = if Some(i) == self.ctid_col { "ctid".to_string() } else { quote_ident(&column_name(self.table, i)) };
         match &self.alias {
             Some(a) => format!("{a}.{name}"),
@@ -338,6 +489,11 @@ impl Deparser<'_> {
 
     /// printRemoteParam: `$n::type`, `n` the place of `e` among the query's parameters.
     fn param(&self, e: &Expr) -> String {
+        if self.placeholders {
+            // (printRemotePlaceholder: a remote EXPLAIN has no parameter values.)
+            let t = type_name(self.cat, &e.ty());
+            return format!("((SELECT null::{t})::{t})");
+        }
         let mut ps = self.params.borrow_mut();
         let n = match ps.iter().position(|p| p.same_as(e)) {
             Some(i) => i + 1,
@@ -395,6 +551,9 @@ impl Deparser<'_> {
             Expr::Cast(x, from, to, false) if from.oid() == to.oid() => x,
             e => e,
         };
+        if !self.rels.is_empty() {
+            return matches!(e, Expr::Col(i, _) if self.subq.contains_key(i) || self.rel_of(*i).is_some());
+        }
         matches!(e, Expr::Col(i, _) if *i < self.table.columns.len() || Some(*i) == self.ctid_col)
     }
 
@@ -497,6 +656,10 @@ impl Deparser<'_> {
                 }
                 s
             }
+            Expr::Agg(i, _) => match self.aggs.get(*i) {
+                Some(a) => self.aggref(a),
+                None => format!("{e:?}"),
+            },
             e => format!("{e:?}"),
         }
     }

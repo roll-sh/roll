@@ -51,19 +51,29 @@ fn conjuncts(e: &Expr, out: &mut Vec<Expr>) {
 /// The scan's remote query: the columns `need` reads (None: all) and those of the local
 /// conditions, the shippable conditions in restriction order, and the locking clause.
 pub fn spec(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::types::text::FormatCtx) -> Spec {
+    spec_with(s, need, cat, fmt, false)
+}
+
+/// `spec`, its parameters as placeholders when `explain` (a remote EXPLAIN's query).
+pub fn spec_with(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate::types::text::FormatCtx, explain: bool) -> Spec {
     let t = &s.table;
     let mut d = Deparser::new(cat, t, fmt);
+    d.placeholders = explain;
     let ctid_col = s.sys.then(|| t.columns.len() + usize::from(s.with_key));
     d.ctid_col = ctid_col;
     let mut filter = Vec::new();
     if let Some(f) = &s.filter {
         conjuncts(f, &mut filter);
     }
+    // (The conditions in baserestrictinfo order, those the scan still checks: a clause a
+    // join took over is out of its filter.)
     let order: Vec<Expr> = if s.written.is_empty() {
         filter.clone()
     } else {
         let mut w = Vec::new();
         s.written.iter().for_each(|x| conjuncts(x, &mut w));
+        w.retain(|c| filter.iter().any(|f| f.same_as(c)));
+        w.extend(filter.iter().filter(|f| !w.iter().any(|c| c.same_as(f))).cloned().collect::<Vec<_>>());
         w
     };
     let remote: Vec<Expr> = order.into_iter().filter(|c| d.shippable(c)).collect();
@@ -167,22 +177,47 @@ fn fetch_size(cat: &Catalog, t: &Table) -> usize {
         .unwrap_or(100)
 }
 
-/// A running foreign scan: a remote cursor read in batches.
-struct ScanNode {
-    table: Arc<Table>,
-    key: u32,
-    cursor: String,
+/// A remote query read through a cursor, `fetch` rows at a time (create_cursor,
+/// fetch_more_data, close_cursor).
+pub struct Cursor {
+    pub key: u32,
+    name: String,
     fetch: usize,
     batch: VecDeque<Vec<Option<String>>>,
     eof: bool,
+    /// The remote query and its parameters (`$n`), declared as a cursor at the first row.
+    pub sql: String,
+    params: Vec<Expr>,
+}
+
+impl Cursor {
+    pub fn new(key: u32, fetch: usize, sql: String, params: Vec<Expr>) -> Cursor {
+        Cursor { key, name: String::new(), fetch, batch: VecDeque::new(), eof: false, sql, params }
+    }
+
+    /// The next remote row.
+    pub fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Vec<Option<String>>>> {
+        loop {
+            if let Some(r) = self.batch.pop_front() {
+                return Ok(Some(r));
+            }
+            if self.eof {
+                return Ok(None);
+            }
+            self.fetch_more(ctx)?;
+        }
+    }
+}
+
+/// A running foreign scan: a remote cursor read in batches.
+struct ScanNode {
+    table: Arc<Table>,
+    cur: Cursor,
     retrieved: Vec<usize>,
     ctid: bool,
     with_key: bool,
     sys: bool,
     local: Vec<Expr>,
-    /// The remote query and its parameters (`$n`), declared as a cursor at the first row.
-    sql: String,
-    params: Vec<Expr>,
     /// The FROM item's alias and column aliases (conversion errors name them).
     alias: Option<String>,
     col_aliases: Option<Arc<Vec<(String, String)>>>,
@@ -234,24 +269,18 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
     let key = connection::get_connection(ctx, &m, false)?;
     Ok(Box::new(ScanNode {
         table: s.table.clone(),
-        key,
-        cursor: String::new(),
-        fetch: fetch_size(&cat, &s.table),
-        batch: VecDeque::new(),
-        eof: false,
+        cur: Cursor::new(key, fetch_size(&cat, &s.table), spec.sql, spec.params),
         retrieved: spec.retrieved,
         ctid: spec.ctid,
         with_key: s.with_key,
         sys: s.sys,
         local: spec.local,
-        sql: spec.sql,
-        params: spec.params,
         alias: s.alias.clone(),
         col_aliases: s.col_aliases.clone(),
     }))
 }
 
-impl ScanNode {
+impl Cursor {
     /// create_cursor, at the first row asked for (when outer references have values).
     fn declare(&mut self, ctx: &ExecCtx) -> Result<()> {
         let fmt = super::deparse::transmission_fmt(ctx.fmt());
@@ -263,7 +292,7 @@ impl ScanNode {
                 Ok((!v.is_null()).then(|| crate::types::text::format_value(&v, &p.ty(), &fmt)))
             })
             .collect::<Result<_>>()?;
-        self.cursor = format!("c{}", connection::next_cursor(ctx));
+        self.name = format!("c{}", connection::next_cursor(ctx));
         // (The parameters' values go in as literals of the parameters' types: `$n::type`
         // becomes `'value'::type`, highest numbers first.)
         let mut text = self.sql.clone();
@@ -271,7 +300,7 @@ impl ScanNode {
             let lit = v.as_deref().map_or("NULL".to_string(), super::deparse::string_literal);
             text = text.replace(&format!("${}::", i + 1), &format!("{lit}::"));
         }
-        let declare = format!("DECLARE {} CURSOR FOR\n{text}", self.cursor);
+        let declare = format!("DECLARE {} CURSOR FOR\n{text}", self.name);
         let intr = crate::remote::interrupts(ctx);
         let query = &self.sql;
         let res = connection::with_conn(ctx, self.key, |c| {
@@ -288,13 +317,13 @@ impl ScanNode {
     }
 }
 
-impl ScanNode {
+impl Cursor {
     /// fetch_more_data.
-    fn fetch(&mut self, ctx: &ExecCtx) -> Result<()> {
-        if self.cursor.is_empty() {
+    fn fetch_more(&mut self, ctx: &ExecCtx) -> Result<()> {
+        if self.name.is_empty() {
             self.declare(ctx)?;
         }
-        let sql = format!("FETCH {} FROM {}", self.fetch, self.cursor);
+        let sql = format!("FETCH {} FROM {}", self.fetch, self.name);
         let query = &self.sql;
         let intr = crate::remote::interrupts(ctx);
         let r = connection::with_conn(ctx, self.key, |c| {
@@ -314,7 +343,7 @@ impl ScanNode {
         self.eof = r.rows.len() < self.fetch;
         self.batch.extend(r.rows);
         if self.eof {
-            let close = format!("CLOSE {}", self.cursor);
+            let close = format!("CLOSE {}", self.name);
             connection::with_conn(ctx, self.key, |c| {
                 let r = c.exec(&close, &intr)?;
                 if r.status != Status::CommandOk {
@@ -330,14 +359,7 @@ impl ScanNode {
 impl Node for ScanNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         loop {
-            if self.batch.is_empty() {
-                if self.eof {
-                    return Ok(None);
-                }
-                self.fetch(ctx)?;
-                continue;
-            }
-            let vals = self.batch.pop_front().unwrap();
+            let Some(vals) = self.cur.next(ctx)? else { return Ok(None) };
             let row = make_row(self, vals, ctx)?;
             let mut ok = true;
             for c in &self.local {
@@ -387,18 +409,12 @@ pub fn remote_rows(t: &Table, ctx: &ExecCtx) -> Result<(Vec<Row>, i32)> {
     })?;
     let node = ScanNode {
         table: Arc::new(t.clone()),
-        key,
-        cursor: String::new(),
-        fetch: 0,
-        batch: VecDeque::new(),
-        eof: true,
+        cur: Cursor::new(key, 0, String::new(), Vec::new()),
         retrieved: cols,
         ctid: false,
         with_key: false,
         sys: false,
         local: Vec::new(),
-        sql: String::new(),
-        params: Vec::new(),
         alias: None,
         col_aliases: None,
     };
