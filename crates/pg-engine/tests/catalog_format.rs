@@ -22,6 +22,8 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: 0,
+        auth_files: Default::default(),
+        settings: Vec::new(),
         server_programs: false,
     })
     .unwrap()

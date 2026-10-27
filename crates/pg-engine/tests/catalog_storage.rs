@@ -23,6 +23,8 @@ fn options(dir: &std::path::Path) -> EngineOptions {
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: 0,
+        auth_files: Default::default(),
+        settings: Vec::new(),
     }
 }
 

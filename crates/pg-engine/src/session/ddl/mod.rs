@@ -478,10 +478,11 @@ impl<'c, 'a> Ddl<'c, 'a> {
             N::CreateSubscriptionStmt(s) => self.create_subscription(s)?,
             N::AlterSubscriptionStmt(s) => self.alter_subscription(s)?,
             N::DropSubscriptionStmt(s) => self.drop_subscription(s)?,
+            // (A top-level ALTER SYSTEM is the session's: `Session::alter_system`.)
             N::AlterSystemStmt(_) => {
                 return Err(Error::new(
-                    code::INSUFFICIENT_PRIVILEGE,
-                    "permission denied to set parameter via ALTER SYSTEM",
+                    code::ACTIVE_SQL_TRANSACTION,
+                    "ALTER SYSTEM cannot be executed from a function",
                 ));
             }
             N::CreateTableSpaceStmt(s) => self.create_tablespace(s)?,

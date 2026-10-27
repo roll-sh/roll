@@ -226,6 +226,8 @@ fn golden_wire() {
             locale: Default::default(),
             outbound: Vec::new(),
             max_prepared_transactions: max,
+            auth_files: Default::default(),
+            settings: Vec::new(),
         };
         let engine = pg_engine::engine::Engine::open(opts).unwrap();
         let server = pg_engine::server::ServerOptions {

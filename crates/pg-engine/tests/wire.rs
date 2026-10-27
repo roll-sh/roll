@@ -34,6 +34,8 @@ fn server(auth: AuthMethod) -> Server {
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: 0,
+        auth_files: Default::default(),
+        settings: Vec::new(),
     };
     let engine = Engine::open(opts).unwrap();
     let addr = pg_engine::server::spawn(engine.clone(), "127.0.0.1:0", ServerOptions { auth })

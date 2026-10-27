@@ -1,0 +1,482 @@
+> ALTER SYSTEM RESET ALL
+-- ALTER SYSTEM
+
+> SELECT pg_reload_conf()
+pg_reload_conf:bool
+t
+-- SELECT 1
+
+> SELECT pg_sleep(0.3)
+pg_sleep:void
+
+-- SELECT 1
+
+> DROP ROLE IF EXISTS regress_a80_u
+NOTICE 00000: role "regress_a80_u" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS regress_a80_r
+NOTICE 00000: role "regress_a80_r" does not exist, skipping
+-- DROP ROLE
+
+> SELECT sourcefile, sourceline, seqno, name, setting, applied, error FROM pg_file_settings ORDER BY seqno
+sourcefile:text | sourceline:int4 | seqno:int4 | name:text | setting:text | applied:bool | error:text
+/var/lib/postgresql/18/docker/postgresql.conf | 60 | 1 | listen_addresses | * | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 65 | 2 | max_connections | 100 | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 132 | 3 | shared_buffers | 128MB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 155 | 4 | dynamic_shared_memory_type | posix | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 271 | 5 | max_wal_size | 1GB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 272 | 6 | min_wal_size | 80MB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 645 | 7 | log_timezone | UTC | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 687 | 8 | autovacuum_worker_slots | 16 | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 781 | 9 | datestyle | iso, mdy | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 783 | 10 | timezone | UTC | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 797 | 11 | lc_messages | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 799 | 12 | lc_monetary | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 800 | 13 | lc_numeric | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 801 | 14 | lc_time | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 807 | 15 | default_text_search_config | pg_catalog.english | t | NULL
+-- SELECT 15
+
+> ALTER SYSTEM SET bogus = 1
+ERROR 42704: unrecognized configuration parameter "bogus"
+
+> ALTER SYSTEM SET "bad name" = 1
+ERROR 42704: unrecognized configuration parameter "bad name"
+
+> ALTER SYSTEM SET "a.b c" = 1
+ERROR 42602: invalid configuration parameter name "a.b c"
+DETAIL: Custom parameter names must be two or more simple identifiers separated by dots.
+
+> ALTER SYSTEM RESET nonexist
+ERROR 42704: unrecognized configuration parameter "nonexist"
+
+> ALTER SYSTEM SET work_mem = 'abc'
+ERROR 22023: invalid value for parameter "work_mem": "abc"
+
+> ALTER SYSTEM SET log_min_duration_statement = 5000000000
+ERROR 22023: invalid value for parameter "log_min_duration_statement": "5000000000"
+HINT: Value exceeds integer range.
+
+> ALTER SYSTEM SET log_min_duration_statement = -5
+ERROR 22023: -5 ms is outside the valid range for parameter "log_min_duration_statement" (-1 ms .. 2147483647 ms)
+
+> ALTER SYSTEM SET datestyle = 'bogus'
+ERROR 22023: invalid value for parameter "DateStyle": "bogus"
+DETAIL: Unrecognized key word: "bogus".
+
+> ALTER SYSTEM SET work_mem = E'1\nMB'
+ERROR 22023: parameter value for ALTER SYSTEM must not contain a newline
+
+> ALTER SYSTEM SET transaction_isolation = 'serializable'
+ERROR 55P02: parameter "transaction_isolation" cannot be changed
+
+> ALTER SYSTEM SET transaction_read_only = on
+ERROR 55P02: parameter "transaction_read_only" cannot be changed
+
+> ALTER SYSTEM SET session_authorization = 'postgres'
+ERROR 55P02: parameter "session_authorization" cannot be changed
+
+> ALTER SYSTEM SET role = 'none'
+ERROR 55P02: parameter "role" cannot be changed
+
+> ALTER SYSTEM SET seed = 0.5
+ERROR 55P02: parameter "seed" cannot be changed
+
+> ALTER SYSTEM SET server_version = '1'
+ERROR 55P02: parameter "server_version" cannot be changed
+
+> ALTER SYSTEM SET data_directory = '/x'
+ERROR 55P02: parameter "data_directory" cannot be changed
+
+> ALTER SYSTEM SET config_file = '/x'
+ERROR 55P02: parameter "config_file" cannot be changed
+
+> ALTER SYSTEM SET allow_alter_system = on
+ERROR 55P02: parameter "allow_alter_system" cannot be changed
+
+> BEGIN
+-- BEGIN
+
+> ALTER SYSTEM SET work_mem = '1MB'
+ERROR 25001: ALTER SYSTEM cannot run inside a transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> DO $$ BEGIN EXECUTE 'ALTER SYSTEM SET work_mem = ''1MB'''; END $$
+ERROR 25001: ALTER SYSTEM cannot be executed from a function
+CONTEXT: SQL statement "ALTER SYSTEM SET work_mem = '1MB'"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+
+> CREATE ROLE regress_a80_u
+-- CREATE ROLE
+
+> CREATE ROLE regress_a80_r IN ROLE pg_read_all_settings
+-- CREATE ROLE
+
+> SET ROLE regress_a80_u
+-- SET
+
+> ALTER SYSTEM SET work_mem = '1MB'
+ERROR 42501: permission denied to set parameter "work_mem"
+
+> ALTER SYSTEM RESET ALL
+ERROR 42501: permission denied to perform ALTER SYSTEM RESET ALL
+
+> ALTER SYSTEM RESET work_mem
+ERROR 42501: permission denied to set parameter "work_mem"
+
+> SELECT pg_reload_conf()
+ERROR 42501: permission denied for function pg_reload_conf
+
+> SELECT count(*) FROM pg_file_settings
+ERROR 42501: permission denied for view pg_file_settings
+
+> RESET ROLE
+-- RESET
+
+> GRANT ALTER SYSTEM ON PARAMETER work_mem TO regress_a80_u
+-- GRANT
+
+> SET ROLE regress_a80_u
+-- SET
+
+> ALTER SYSTEM SET work_mem = '1MB'
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET maintenance_work_mem = '100MB'
+ERROR 42501: permission denied to set parameter "maintenance_work_mem"
+
+> RESET ROLE
+-- RESET
+
+> ALTER SYSTEM SET work_mem = '8MB'
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET search_path = a, "B c", 'd'
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET "foo.Bar" = 'it''s \ x'
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET plpgsql.bogus = 1
+ERROR 42602: invalid configuration parameter name "plpgsql.bogus"
+DETAIL: "plpgsql" is a reserved prefix.
+
+> ALTER SYSTEM RESET plpgsql.bogus
+-- ALTER SYSTEM
+
+> ALTER SYSTEM RESET "foo.nonexist"
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET shared_buffers = 128
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET max_connections = 101
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET statement_timeout TO 1000
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET log_checkpoints = off
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET "DateStyle" = 'sql, dmy'
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET work_mem = DEFAULT
+-- ALTER SYSTEM
+
+> ALTER SYSTEM SET work_mem = '6MB'
+-- ALTER SYSTEM
+
+> SELECT sourcefile, sourceline, seqno, name, setting, applied, error FROM pg_file_settings ORDER BY seqno
+sourcefile:text | sourceline:int4 | seqno:int4 | name:text | setting:text | applied:bool | error:text
+/var/lib/postgresql/18/docker/postgresql.conf | 60 | 1 | listen_addresses | * | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 65 | 2 | max_connections | 100 | f | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 132 | 3 | shared_buffers | 128MB | f | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 155 | 4 | dynamic_shared_memory_type | posix | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 271 | 5 | max_wal_size | 1GB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 272 | 6 | min_wal_size | 80MB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 645 | 7 | log_timezone | UTC | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 687 | 8 | autovacuum_worker_slots | 16 | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 781 | 9 | datestyle | iso, mdy | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 783 | 10 | timezone | UTC | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 797 | 11 | lc_messages | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 799 | 12 | lc_monetary | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 800 | 13 | lc_numeric | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 801 | 14 | lc_time | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 807 | 15 | default_text_search_config | pg_catalog.english | t | NULL
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 3 | 16 | search_path | a, "B c", d | t | NULL
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 4 | 17 | foo.Bar | it's \ x | t | NULL
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 5 | 18 | shared_buffers | 128 | f | setting could not be applied
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 6 | 19 | max_connections | 101 | f | setting could not be applied
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 7 | 20 | statement_timeout | 1000 | t | NULL
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 8 | 21 | log_checkpoints | off | t | NULL
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 9 | 22 | DateStyle | sql, dmy | t | NULL
+/var/lib/postgresql/18/docker/postgresql.auto.conf | 10 | 23 | work_mem | 6MB | t | NULL
+-- SELECT 23
+
+> SHOW statement_timeout
+statement_timeout:text
+0
+-- SHOW
+
+> SELECT name, setting, source, sourcefile, sourceline, pending_restart FROM pg_settings
+>   WHERE name IN ('work_mem', 'shared_buffers', 'statement_timeout', 'max_connections') ORDER BY name
+name:text | setting:text | source:text | sourcefile:text | sourceline:int4 | pending_restart:bool
+max_connections | 100 | configuration file | /var/lib/postgresql/18/docker/postgresql.conf | 65 | t
+shared_buffers | 16384 | configuration file | /var/lib/postgresql/18/docker/postgresql.conf | 132 | t
+statement_timeout | 0 | default | NULL | NULL | f
+work_mem | 4096 | default | NULL | NULL | f
+-- SELECT 4
+
+> SELECT pg_reload_conf()
+pg_reload_conf:bool
+t
+-- SELECT 1
+
+> SELECT pg_sleep(0.5)
+pg_sleep:void
+
+-- SELECT 1
+
+> SELECT pg_conf_load_time() > pg_postmaster_start_time()
+?column?:bool
+t
+-- SELECT 1
+
+> SHOW statement_timeout
+statement_timeout:text
+1s
+-- SHOW
+
+> SHOW work_mem
+work_mem:text
+6MB
+-- SHOW
+
+> SHOW search_path
+search_path:text
+a, "B c", d
+-- SHOW
+
+> SHOW "foo.bar"
+foo.bar:text
+it's \ x
+-- SHOW
+
+> SHOW DateStyle
+DateStyle:text
+SQL, DMY
+-- SHOW
+
+> SHOW log_checkpoints
+log_checkpoints:text
+off
+-- SHOW
+
+> SHOW shared_buffers
+shared_buffers:text
+128MB
+-- SHOW
+
+> SELECT name, setting, source, sourcefile, sourceline, pending_restart FROM pg_settings
+>   WHERE name IN ('work_mem', 'shared_buffers', 'statement_timeout', 'max_connections', 'DateStyle',
+>                  'log_checkpoints', 'search_path', 'TimeZone') ORDER BY name
+name:text | setting:text | source:text | sourcefile:text | sourceline:int4 | pending_restart:bool
+DateStyle | SQL, DMY | configuration file | /var/lib/postgresql/18/docker/postgresql.auto.conf | 9 | f
+TimeZone | UTC | configuration file | /var/lib/postgresql/18/docker/postgresql.conf | 783 | f
+log_checkpoints | off | configuration file | /var/lib/postgresql/18/docker/postgresql.auto.conf | 8 | f
+max_connections | 100 | configuration file | /var/lib/postgresql/18/docker/postgresql.conf | 65 | t
+search_path | a, "B c", d | configuration file | /var/lib/postgresql/18/docker/postgresql.auto.conf | 3 | f
+shared_buffers | 16384 | configuration file | /var/lib/postgresql/18/docker/postgresql.conf | 132 | t
+statement_timeout | 1000 | configuration file | /var/lib/postgresql/18/docker/postgresql.auto.conf | 7 | f
+work_mem | 6144 | configuration file | /var/lib/postgresql/18/docker/postgresql.auto.conf | 10 | f
+-- SELECT 8
+
+> SELECT name, reset_val FROM pg_settings WHERE name IN ('work_mem', 'statement_timeout') ORDER BY name
+name:text | reset_val:text
+statement_timeout | 1000
+work_mem | 6144
+-- SELECT 2
+
+> SET work_mem = '2MB'
+-- SET
+
+> SELECT source, sourcefile FROM pg_settings WHERE name = 'work_mem'
+source:text | sourcefile:text
+session | NULL
+-- SELECT 1
+
+> RESET work_mem
+-- RESET
+
+> SHOW work_mem
+work_mem:text
+6MB
+-- SHOW
+
+> SET statement_timeout = 0
+-- SET
+
+> SET ROLE regress_a80_u
+-- SET
+
+> SELECT name, source, sourcefile, sourceline FROM pg_settings WHERE name = 'work_mem'
+name:text | source:text | sourcefile:text | sourceline:int4
+work_mem | configuration file | NULL | NULL
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE regress_a80_r
+-- SET
+
+> SELECT name, source, sourcefile, sourceline FROM pg_settings WHERE name = 'work_mem'
+name:text | source:text | sourcefile:text | sourceline:int4
+work_mem | configuration file | /var/lib/postgresql/18/docker/postgresql.auto.conf | 10
+-- SELECT 1
+
+> SELECT count(*) > 0 FROM pg_file_settings
+ERROR 42501: permission denied for view pg_file_settings
+
+> RESET ROLE
+-- RESET
+
+> ALTER SYSTEM RESET ALL
+-- ALTER SYSTEM
+
+> SELECT sourcefile, sourceline, seqno, name, setting, applied, error FROM pg_file_settings ORDER BY seqno
+sourcefile:text | sourceline:int4 | seqno:int4 | name:text | setting:text | applied:bool | error:text
+/var/lib/postgresql/18/docker/postgresql.conf | 60 | 1 | listen_addresses | * | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 65 | 2 | max_connections | 100 | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 132 | 3 | shared_buffers | 128MB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 155 | 4 | dynamic_shared_memory_type | posix | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 271 | 5 | max_wal_size | 1GB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 272 | 6 | min_wal_size | 80MB | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 645 | 7 | log_timezone | UTC | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 687 | 8 | autovacuum_worker_slots | 16 | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 781 | 9 | datestyle | iso, mdy | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 783 | 10 | timezone | UTC | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 797 | 11 | lc_messages | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 799 | 12 | lc_monetary | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 800 | 13 | lc_numeric | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 801 | 14 | lc_time | C | t | NULL
+/var/lib/postgresql/18/docker/postgresql.conf | 807 | 15 | default_text_search_config | pg_catalog.english | t | NULL
+-- SELECT 15
+
+> SELECT pg_reload_conf()
+pg_reload_conf:bool
+t
+-- SELECT 1
+
+> SELECT pg_sleep(0.5)
+pg_sleep:void
+
+-- SELECT 1
+
+> RESET statement_timeout
+-- RESET
+
+> SHOW statement_timeout
+statement_timeout:text
+0
+-- SHOW
+
+> SHOW work_mem
+work_mem:text
+4MB
+-- SHOW
+
+> SHOW search_path
+search_path:text
+"$user", public
+-- SHOW
+
+> SHOW DateStyle
+DateStyle:text
+ISO, MDY
+-- SHOW
+
+> SELECT current_setting('foo.bar', true)
+current_setting:text
+
+-- SELECT 1
+
+> SELECT name, setting, source, sourcefile, sourceline FROM pg_settings
+>   WHERE name IN ('work_mem', 'DateStyle', 'shared_buffers') ORDER BY name
+name:text | setting:text | source:text | sourcefile:text | sourceline:int4
+DateStyle | ISO, MDY | configuration file | /var/lib/postgresql/18/docker/postgresql.conf | 781
+shared_buffers | 16384 | configuration file | /var/lib/postgresql/18/docker/postgresql.conf | 132
+work_mem | 4096 | default | NULL | NULL
+-- SELECT 3
+
+> SET log_checkpoints = on
+ERROR 55P02: parameter "log_checkpoints" cannot be changed now
+
+> SET shared_buffers = '1MB'
+ERROR 55P02: parameter "shared_buffers" cannot be changed without restarting the server
+
+> SET data_directory = '/x'
+ERROR 55P02: parameter "data_directory" cannot be changed without restarting the server
+
+> SET server_version = '1'
+ERROR 55P02: parameter "server_version" cannot be changed
+
+> SET log_connections = on
+ERROR 55P02: parameter "log_connections" cannot be set after connection start
+
+> SELECT set_config('log_checkpoints', 'on', false)
+ERROR 55P02: parameter "log_checkpoints" cannot be changed now
+
+> SELECT set_config('work_mem', '1MB', true), current_setting('work_mem')
+set_config:text | current_setting:text
+1MB | 1MB
+-- SELECT 1
+
+> SELECT current_setting('nonexist', true) IS NULL, current_setting('foo.nonexist', true) IS NULL
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT current_setting('foo.nonexist')
+ERROR 42704: unrecognized configuration parameter "foo.nonexist"
+
+> SELECT set_config('foo.x', 'y', false), current_setting('foo.x')
+set_config:text | current_setting:text
+y | y
+-- SELECT 1
+
+> SELECT set_config('work_mem', NULL, false)
+set_config:text
+4MB
+-- SELECT 1
+
+> SELECT set_config(NULL, 'x', false)
+ERROR 22004: SET requires parameter name
+
+> SELECT set_config('work_mem', '2MB', NULL)
+set_config:text
+2MB
+-- SELECT 1
+
+> SELECT current_setting(NULL), current_setting('work_mem', NULL)
+current_setting:text | current_setting:text
+NULL | NULL
+-- SELECT 1
+
+> RESET work_mem
+-- RESET
+
+> REVOKE ALTER SYSTEM ON PARAMETER work_mem FROM regress_a80_u
+-- REVOKE
+
+> DROP ROLE regress_a80_u
+-- DROP ROLE
+
+> DROP ROLE regress_a80_r
+-- DROP ROLE
+

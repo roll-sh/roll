@@ -33,7 +33,16 @@ fn clear_attribute_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Null)
 }
 
-fn pg_reload_conf(_: &[Value], _: &FnCtx) -> Result<Value> {
+/// pg_reload_conf: SIGHUP to the postmaster, which reads the configuration files again; every
+/// session takes the new values before its next message (`Session::poll_config`).
+fn pg_reload_conf(_: &[Value], c: &FnCtx) -> Result<Value> {
+    if let Some(conf) = c.exec.sess.cluster.server_config() {
+        let logs = conf.reload();
+        let files = conf.loaded();
+        for m in logs {
+            crate::log::postmaster(Some(&files), crate::error::Severity::Log, &m);
+        }
+    }
     Ok(Value::Bool(true))
 }
 
@@ -379,9 +388,18 @@ fn pg_ls_dir(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     Ok(Box::new(out.into_iter()))
 }
 
-/// pg_ls_logdir & co.: no files.
+/// pg_ls_tmpdir & co.: no files.
 fn ls_empty(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
     Ok(Box::new(std::iter::empty()))
+}
+
+/// pg_ls_logdir: the server log goes to stderr (logging_collector off), so there is no
+/// log directory, as in a fresh cluster.
+fn ls_logdir(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
+    Err(crate::error::Error::new(
+        crate::error::code::UNDEFINED_FILE,
+        "could not open directory \"log\": No such file or directory",
+    ))
 }
 
 /// WAL geometry: the segment size (wal_segment_size) and the one timeline there is.
@@ -862,8 +880,8 @@ pub fn register(r: &mut Registry) {
     r.from_pg(2856, None, Some(pg_timezone_names));
     r.from_pg(2084, None, Some(pg_show_all_settings));
     r.from_pg(2556, None, Some(pg_tablespace_databases));
+    r.srf_cols("pg_ls_logdir", vec![], ls_cols(), ls_logdir).volatile();
     for name in [
-        "pg_ls_logdir",
         "pg_ls_tmpdir",
         "pg_ls_archive_statusdir",
         "pg_ls_summariesdir",

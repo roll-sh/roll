@@ -29,6 +29,8 @@ fn open_with(data: &Path, files: Option<&Path>, programs: bool) -> Arc<Engine> {
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: 0,
+        auth_files: Default::default(),
+        settings: Vec::new(),
     })
     .unwrap()
 }

@@ -565,10 +565,72 @@ fn extension_versions(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
     )
 }
 
+/// pg_show_all_file_settings (pg_file_settings): the configuration files as they are now,
+/// evaluated as a reload would; the postmaster parameters they'd change become
+/// pending_restart for this session (ProcessConfigFile sets GUC_PENDING_RESTART).
+fn file_settings(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let Some(conf) = c.exec.sess.cluster.server_config() else {
+        return rows(Vec::new());
+    };
+    let (out, pending) = conf.file_settings();
+    c.exec.sess.settings.borrow_mut().mark_pending_restart(&pending);
+    let opt = |v: &Option<String>| v.as_deref().map_or(Value::Null, text);
+    rows(
+        out.into_iter()
+            .map(|r| {
+                vec![
+                    text(r.item.file),
+                    Value::Int4(r.item.line as i32),
+                    Value::Int4(r.seqno),
+                    opt(&r.item.name),
+                    opt(&r.item.value),
+                    Value::Bool(r.applied),
+                    r.item.error.map_or(Value::Null, text),
+                ]
+            })
+            .collect(),
+    )
+}
+
 /// pg_hba_file_rules: the one rule the server applies, to every connection: SCRAM when the
 /// session authenticated with a password, trust otherwise.
 fn hba_file_rules(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let file = c.exec.sess.settings.borrow().get_raw("hba_file").unwrap_or_default();
+    if let Some(hba) = c.exec.sess.cluster.server_config().and_then(|s| s.hba_file_now()) {
+        let list = |v: &[String]| {
+            Value::Array(Arc::new(crate::types::array::ArrayValue::from_vec(
+                DataType::Text,
+                v.iter().map(|s| text(s.as_str())).collect(),
+            )))
+        };
+        let opt = |v: &Option<String>| v.as_deref().map_or(Value::Null, text);
+        let mut n = 0;
+        return rows(
+            hba.lines
+                .iter()
+                .map(|l| {
+                    let ok = l.error.is_none();
+                    if ok {
+                        n += 1;
+                    }
+                    let when = |v: Value| if ok { v } else { Value::Null };
+                    vec![
+                        when(Value::Int4(n)),
+                        text(file.as_str()),
+                        Value::Int4(l.line as i32),
+                        when(text(l.conn_type.as_str())),
+                        when(list(&l.databases)),
+                        when(list(&l.users)),
+                        opt(&l.address),
+                        opt(&l.netmask),
+                        when(text(l.method.as_str())),
+                        if l.options.is_empty() { Value::Null } else { list(&l.options) },
+                        opt(&l.error),
+                    ]
+                })
+                .collect(),
+        );
+    }
     let scram = c
         .exec
         .sess
@@ -594,6 +656,34 @@ fn hba_file_rules(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
         Value::Null,
         Value::Null,
     ]])
+}
+
+/// pg_ident_file_mappings: the operator's pg_ident.conf (`--ident-file`), as it is now.
+fn ident_file_mappings(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let file = c.exec.sess.settings.borrow().get_raw("ident_file").unwrap_or_default();
+    let lines = c.exec.sess.cluster.server_config().map(|s| s.ident_file_now()).unwrap_or_default();
+    let mut n = 0;
+    rows(
+        lines
+            .iter()
+            .map(|l| {
+                let ok = l.error.is_none();
+                if ok {
+                    n += 1;
+                }
+                let when = |v: &str| if ok { text(v) } else { Value::Null };
+                vec![
+                    if ok { Value::Int4(n) } else { Value::Null },
+                    text(file.as_str()),
+                    Value::Int4(l.line as i32),
+                    when(&l.map),
+                    when(&l.sys),
+                    when(&l.pg),
+                    l.error.as_deref().map_or(Value::Null, text),
+                ]
+            })
+            .collect(),
+    )
 }
 
 /// pg_get_backend_memory_contexts: the backend's memory context tree as Postgres lays it out
@@ -958,12 +1048,14 @@ pub fn register(r: &mut Registry) {
         }
     }
     // Server files, shared memory and replication state: nothing to show.
-    for oid in [6399, 5052, 4100, 3329, 6250, 6014, 3781] {
+    r.from_pg(3329, None, Some(file_settings));
+    for oid in [6399, 5052, 4100, 6014, 3781] {
         r.from_pg(oid, None, Some(no_rows));
     }
     r.from_pg(3400, None, Some(pg_config));
     r.from_pg(2282, None, Some(memory_contexts));
     r.from_pg(3401, None, Some(hba_file_rules));
+    r.from_pg(6250, None, Some(ident_file_mappings));
     r.from_pg(6318, None, Some(wait_events));
     r.from_pg(6401, None, Some(tz_abbrevs_zone));
     r.from_pg(2599, None, Some(tz_abbrevs));

@@ -122,9 +122,12 @@ Engine, open:
 - ActiveRecord ForeignTableTest (4): postgres_fdw's server has only `dbname` (a loopback
   through libpq's default socket) and its user mapping no password. The reference image trusts
   local socket connections; the engine, started with `--password`, asks for one ("fe_sendauth:
-  no password supplied"), with `--allow-outbound local` too. An engine started with trust
-  authentication (or a mapping with a password) would pass; how the engine should treat its
-  own loopback connections is an authentication policy question (agent 59's postgres_fdw).
+  no password supplied"), with `--allow-outbound local` too. Since round 20 (agent 80) the
+  engine takes pg_hba.conf rules (`--hba-file`, `--hba`), and its connections to itself
+  through libpq's default socket are `local` ones: started with `--hba "local all all
+  trust" --hba "host all all all scram-sha-256"` (the reference image's policy) it trusts
+  them as the reference does; postgres_fdw's password_required rule for non-superusers
+  stays.
 - ActiveRecord PostgresqlTransactionTest#test_raises_QueryCanceled_when_canceling_statement_
   due_to_user_request: a cancel while the statement waits on a row lock (agent 56's item).
 - ActiveRecord: ALTER TABLE ... DISABLE / ENABLE TRIGGER ALL is about 1.4 ms a table in a debug

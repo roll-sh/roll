@@ -44,6 +44,8 @@ impl Target {
             locale: Default::default(),
             outbound: Vec::new(),
             max_prepared_transactions: 0,
+            auth_files: Default::default(),
+            settings: Vec::new(),
         };
         let engine = Engine::open(opts).unwrap();
         let opts = ServerOptions { auth: AuthMethod::ScramSha256 };

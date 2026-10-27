@@ -37,8 +37,12 @@ pub trait Cluster: Send + Sync {
     fn set_database_collversion(&self, _name: &str, _version: Option<String>) -> Result<()> {
         Err(crate::error::unsupported("ALTER DATABASE REFRESH COLLATION VERSION"))
     }
-    /// postgresql.conf's settings that initdb chose (lc_messages, lc_monetary, ...).
-    fn config_settings(&self) -> Vec<(String, String)> {
+    /// The configuration files (postgresql.conf, postgresql.auto.conf).
+    fn server_config(&self) -> Option<&crate::sysconf::ServerConfig> {
+        None
+    }
+    /// The server's command-line settings (`roll-engine --max-prepared-transactions`, ...).
+    fn command_line(&self) -> Vec<(String, String)> {
         Vec::new()
     }
     fn drop_database(
@@ -174,9 +178,14 @@ pub struct SingleCluster {
     pub started: i64,
     /// The database's locale (what its catalog carries, `Database::set_locale`).
     pub locale: DbLocale,
+    /// Its configuration files (postgresql.auto.conf in memory).
+    pub conf: crate::sysconf::ServerConfig,
 }
 
 impl Cluster for SingleCluster {
+    fn server_config(&self) -> Option<&crate::sysconf::ServerConfig> {
+        Some(&self.conf)
+    }
     fn databases(&self) -> Vec<(u32, String, u32)> {
         vec![(5, self.name.clone(), 10)]
     }
@@ -315,6 +324,10 @@ pub struct SessionState {
     pub notice_hold: Cell<u32>,
     /// Connections this session made to other servers (dblink's, postgres_fdw's cache).
     pub remote: RefCell<crate::remote::SessionConns>,
+    /// The client's address (None: an embedded session).
+    pub peer: Cell<Option<std::net::SocketAddr>>,
+    /// The server log lines this session wrote (log_line_prefix's %l).
+    pub log_line: Cell<u64>,
 }
 
 /// While alive, notices are collected instead of streamed (`SessionState::hold_notices`).
@@ -337,19 +350,25 @@ impl SessionState {
             .map(|r| r.oid)
             .unwrap_or(crate::catalog::BOOTSTRAP_SUPERUSER_OID);
         let mut settings = Settings::new();
-        for (name, value) in cluster.config_settings() {
-            settings.set_config_file(&name, &value);
+        if let Some(conf) = cluster.server_config() {
+            settings.adopt_file_layer(conf.loaded());
         }
-        // The server's max_prepared_transactions (a postmaster setting).
+        for (name, value) in cluster.command_line() {
+            settings.set_command_line(&name, &value);
+        }
+        // The server's max_prepared_transactions (a postmaster setting; an embedder's).
         let max_prepared = db.twophase().max();
-        if max_prepared > 0 {
-            settings.set_config_file("max_prepared_transactions", &max_prepared.to_string());
+        if max_prepared > 0 && settings.get_str("max_prepared_transactions") != Some(max_prepared.to_string().as_str()) {
+            settings.set_command_line("max_prepared_transactions", &max_prepared.to_string());
         }
         // A preloaded library's parameters are there from the start.
         if cluster.statements().is_some() {
             let _ = settings.load_module("pg_stat_statements");
-            settings.set_internal("shared_preload_libraries", "pg_stat_statements");
+            if settings.get_str("shared_preload_libraries").is_none_or(|v| !v.contains("pg_stat_statements")) {
+                settings.set_command_line("shared_preload_libraries", "pg_stat_statements");
+            }
         }
+        settings.changed.clear();
         // The database's encoding is server_encoding, and client_encoding's default
         // (PGC_S_DYNAMIC_DEFAULT) until the client names its own.
         let enc = crate::types::collation::db_locale(&cat).encoding;
@@ -410,6 +429,8 @@ impl SessionState {
             in_use: RefCell::new(Vec::new()),
             notice_hold: Cell::new(0),
             remote: RefCell::new(Default::default()),
+            peer: Cell::new(None),
+            log_line: Cell::new(0),
         }
     }
 

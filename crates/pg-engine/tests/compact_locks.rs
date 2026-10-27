@@ -23,6 +23,8 @@ fn open(dir: &std::path::Path) -> Arc<Engine> {
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: 2,
+        auth_files: Default::default(),
+        settings: Vec::new(),
         server_programs: false,
     })
     .unwrap()

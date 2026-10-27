@@ -49,6 +49,8 @@ pub const INFORMATION_SCHEMA_OID: u32 = 13327;
 pub const PG_TOAST_OID: u32 = 99;
 pub const FIRST_USER_OID: u32 = 16384;
 pub const BOOTSTRAP_SUPERUSER_OID: u32 = 10;
+/// pg_read_all_settings.
+pub const ROLE_PG_READ_ALL_SETTINGS: u32 = 3374;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Schema {

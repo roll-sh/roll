@@ -68,6 +68,12 @@ pub struct EngineOptions {
     /// max_prepared_transactions: how many transactions may be prepared at once (PREPARE
     /// TRANSACTION). 0 (the default, as PostgreSQL's): two-phase commit is disabled.
     pub max_prepared_transactions: usize,
+    /// Client authentication rules (pg_hba.conf / pg_ident.conf; none: the server's
+    /// `--auth` rule for every connection).
+    pub auth_files: crate::sysconf::AuthFiles,
+    /// Run-time parameters set on the command line (`postgres -c name=value`; PGC_S_ARGV):
+    /// above the configuration files, as pg_settings' "command line".
+    pub settings: Vec<(String, String)>,
 }
 
 impl Default for EngineOptions {
@@ -86,6 +92,8 @@ impl Default for EngineOptions {
             locale: Default::default(),
             outbound: Vec::new(),
             max_prepared_transactions: 0,
+            auth_files: Default::default(),
+            settings: Vec::new(),
         }
     }
 }
@@ -244,6 +252,10 @@ pub struct Engine {
     /// The address the server listens on (`server::serve`), which connections without a host
     /// reach.
     listen: std::sync::OnceLock<std::net::SocketAddr>,
+    /// postgresql.conf / postgresql.auto.conf.
+    conf: crate::sysconf::ServerConfig,
+    /// The parameters the command line set (source "command line").
+    argv: Vec<(String, String)>,
 }
 
 const REGISTRY_FILE: &str = "databases.json";
@@ -251,6 +263,16 @@ const REGISTRY_FILE: &str = "databases.json";
 impl Engine {
     /// The server's listening address (the first one noted), for connections the engine
     /// makes to itself (dblink, postgres_fdw without a host).
+    /// The configuration files and client authentication rules.
+    pub fn server_conf(&self) -> &crate::sysconf::ServerConfig {
+        &self.conf
+    }
+
+    /// A parameter the server's command line set.
+    pub fn command_line_value(&self, name: &str) -> Option<&str> {
+        self.argv.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    }
+
     pub fn note_listen_addr(&self, addr: std::net::SocketAddr) {
         let _ = self.listen.set(addr);
     }
@@ -321,6 +343,48 @@ impl Engine {
         for d in registry.databases.iter_mut().filter(|d| d.is_template.is_none()) {
             d.is_template = Some(d.name == "template0" || d.name == "template1");
         }
+        // The configuration files; the postmaster parameters the engine uses take their values
+        // from them unless the command line gave one.
+        let mut conf = crate::sysconf::ServerConfig::open(Some(opts.data_dir.clone()), &registry.config);
+        conf.set_auth_files(opts.auth_files.clone());
+        let mut opts = opts;
+        let mut argv = Vec::new();
+        for (k, v) in std::mem::take(&mut opts.settings) {
+            use crate::session::settings::{FileParam, file_param};
+            let canon = match file_param(&k, &v) {
+                FileParam::Unknown => {
+                    return Err(internal(format!("unrecognized configuration parameter \"{k}\"")));
+                }
+                FileParam::Known { value: None, module: false, .. } => {
+                    return Err(internal(format!("invalid value for parameter \"{k}\": \"{v}\"")));
+                }
+                FileParam::Known { canon, .. } => canon.to_string(),
+                FileParam::Custom(lower) => lower,
+            };
+            match canon.as_str() {
+                "max_prepared_transactions" => {
+                    opts.max_prepared_transactions = v.parse().unwrap_or(0);
+                    continue;
+                }
+                "shared_preload_libraries" => {
+                    opts.shared_preload_libraries =
+                        crate::session::settings::parse_list(&v).into_iter().filter(|l| !l.is_empty()).collect();
+                    continue;
+                }
+                _ => argv.push((canon, v)),
+            }
+        }
+        if opts.max_prepared_transactions > 0 {
+            argv.push(("max_prepared_transactions".to_string(), opts.max_prepared_transactions.to_string()));
+        } else if let Some(n) = conf.startup_value("max_prepared_transactions").and_then(|v| v.parse().ok()) {
+            opts.max_prepared_transactions = n;
+        }
+        if !opts.shared_preload_libraries.is_empty() {
+            argv.push(("shared_preload_libraries".to_string(), opts.shared_preload_libraries.join(",")));
+        } else if let Some(v) = conf.startup_value("shared_preload_libraries") {
+            opts.shared_preload_libraries =
+                crate::session::settings::parse_list(v).into_iter().filter(|l| !l.is_empty()).collect();
+        }
         let cache = BlockCache::new(opts.cache_bytes);
         let statements = opts
             .shared_preload_libraries
@@ -387,6 +451,8 @@ impl Engine {
                 statements,
                 outbound,
                 listen: std::sync::OnceLock::new(),
+                conf,
+                argv,
             }
         });
         engine.init_shared()?;
@@ -1765,8 +1831,12 @@ impl Cluster for Engine {
         self.save(&r)
     }
 
-    fn config_settings(&self) -> Vec<(String, String)> {
-        self.registry.lock().config.clone()
+    fn server_config(&self) -> Option<&crate::sysconf::ServerConfig> {
+        Some(&self.conf)
+    }
+
+    fn command_line(&self) -> Vec<(String, String)> {
+        self.argv.clone()
     }
 
     fn drop_database(

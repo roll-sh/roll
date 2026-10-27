@@ -80,6 +80,7 @@ pub fn engine_session_prepared(
         name: dbname.to_string(),
         started: 0,
         locale,
+        conf: Default::default(),
     });
     Session::new(SessionState::new(db, cluster, "postgres", 4242))
 }

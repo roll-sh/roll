@@ -222,6 +222,8 @@ struct Conn {
     /// ReadyForQuery went out and no message came since: the session is idle, and its idle
     /// timeouts run (only then: not between the messages of an extended query).
     at_ready: bool,
+    /// Errors and warnings sent, for the server log (kept only while it's written).
+    sent: Vec<Error>,
 }
 
 impl Conn {
@@ -342,11 +344,32 @@ impl Conn {
         if e.severity == crate::error::Severity::Fatal {
             self.fatal = true;
         }
+        if crate::log::active() {
+            self.sent.push(e.clone());
+        }
         self.msg(b'E', |b| error_fields(b, e, e.severity.as_str()));
     }
 
     fn notice(&mut self, e: &Error) {
+        if e.severity == crate::error::Severity::Warning && crate::log::active() {
+            self.sent.push(e.clone());
+        }
         self.msg(b'N', |b| error_fields(b, e, e.severity.as_str()));
+    }
+
+    /// The errors and warnings sent since the last call go to the server log (the session's,
+    /// or before there is one, the connection's backend), with `statement`.
+    fn log_sent(&mut self, s: Option<&Session>, pid: i32, statement: Option<&str>) {
+        for e in std::mem::take(&mut self.sent) {
+            match s {
+                Some(s) => s.log_error(&e, statement),
+                None => {
+                    let f = crate::log::Format::postmaster();
+                    let who = crate::log::Who { pid, session: None, backend_type: "client backend" };
+                    crate::log::write(&f, &who, &crate::log::Message::error(&e, None));
+                }
+            }
+        }
     }
 
     fn ready(&mut self, status: TxnStatus) -> std::io::Result<()> {
@@ -585,6 +608,7 @@ fn handle(
         terminated: None,
         live: std::rc::Rc::new(stream.try_clone()?),
         at_ready: false,
+        sent: Vec::new(),
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
@@ -666,6 +690,13 @@ fn handle(
         }
     };
 
+    // log_connections' receipt (the files' and the command line's value: the session's
+    // settings aren't there yet).
+    let lc = engine
+        .command_line_value("log_connections")
+        .map(str::to_string)
+        .or_else(|| engine.server_conf().loaded().values.get("log_connections").map(|v| v.value.clone()))
+        .unwrap_or_default();
     let (pid, secret, terminated) =
         engine.register_backend(stream.try_clone().ok(), peer);
     let _guard = BackendGuard {
@@ -673,6 +704,16 @@ fn handle(
         pid,
     };
     c.terminated = Some(terminated.clone());
+    if conn_logging(&lc, "receipt") && crate::log::active() {
+        let (host, port) = peer.map_or(("[local]".to_string(), String::new()), |p| (p.ip().to_canonical().to_string(), p.port().to_string()));
+        let who = crate::log::Who { pid, session: None, backend_type: "client backend" };
+        let files = engine.server_conf().loaded();
+        let mut f = crate::log::Format::postmaster();
+        if let Some(v) = files.values.get("log_line_prefix") {
+            f.prefix = v.value.clone();
+        }
+        crate::log::write(&f, &who, &crate::log::Message::log(&format!("connection received: host={host} port={port}")));
+    }
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     let Some(user) = get("user").filter(|u| !u.is_empty()) else {
         c.error(
@@ -700,7 +741,15 @@ fn handle(
         return c.flush();
     }
 
-    if let Err(e) = authenticate(&mut c, &engine, &user, &database, opts.auth) {
+    let method = match hba_method(&engine, peer, &user, &database, opts.auth) {
+        Ok(m) => m,
+        Err(e) => {
+            c.error(&e);
+            return c.flush();
+        }
+    };
+    if let Err(e) = authenticate(&mut c, &engine, &user, &database, method) {
+        auth_delay(&engine);
         c.error(&e);
         return c.flush();
     }
@@ -712,8 +761,8 @@ fn handle(
             return c.flush();
         }
     };
-    if opts.auth != AuthMethod::Trust {
-        s.state.system_user = Some(format!("{}:{user}", opts.auth.name()));
+    if method != AuthMethod::Trust {
+        s.state.system_user = Some(format!("{}:{user}", method.name()));
     }
 
     // Settings from the startup packet: plain parameters and `options=-c name=value`.
@@ -739,10 +788,18 @@ fn handle(
             continue;
         }
         // Startup-packet values (PGC_S_CLIENT) are what RESET returns to.
-        if let Err(e) = s.state.settings.borrow_mut().set_default(&k, &v) {
+        if let Err(e) = s.state.settings.borrow_mut().set_client_default(&k, &v) {
             c.error(&e.fatal());
             return c.flush();
         }
+    }
+    s.state.peer.set(peer);
+    s.preload_libraries();
+    if conn_logging(&s.state.settings.borrow().get_raw("log_connections").unwrap_or_default(), "authorization") {
+        let app = s.state.settings.borrow().show_value("application_name");
+        let line = format!("connection authorized: user={user} database={database} application_name={app}");
+        s.log_message(&line, None);
+        s.notices.clear();
     }
     s.take_changed_settings();
     // (process_startup_options' NOTICEs: an application_name truncated.)
@@ -784,7 +841,18 @@ fn handle(
     send_notices(&mut c, &mut s);
     ready_for_query(&mut c, &s)?;
 
+    let started = std::time::Instant::now();
     let r = message_loop(&mut c, &engine, &mut s, pid, &terminated);
+    c.log_sent(Some(&s), pid, None);
+    if s.state.settings.borrow().bool("log_disconnections") {
+        let t = started.elapsed();
+        let (h, m, sec, ms) = (t.as_secs() / 3600, t.as_secs() / 60 % 60, t.as_secs() % 60, t.subsec_millis());
+        let (host, port) = peer.map_or(("[local]".to_string(), String::new()), |p| (p.ip().to_canonical().to_string(), p.port().to_string()));
+        let line = format!(
+            "disconnection: session time: {h}:{m:02}:{sec:02}.{ms:03} user={user} database={database} host={host} port={port}"
+        );
+        s.log_message(&line, None);
+    }
     if terminated.load(Ordering::Relaxed) && !c.fatal {
         c.error(
             &Error::new(
@@ -841,6 +909,98 @@ fn parse_options(s: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// Whether log_connections (PostgreSQL 18's list: receipt, authentication, authorization,
+/// setup_durations; on / all) covers `aspect`.
+fn conn_logging(v: &str, aspect: &str) -> bool {
+    let v = v.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "on" | "true" | "yes" | "1" => aspect != "setup_durations",
+        "all" => true,
+        _ => v.split(',').any(|a| a.trim() == aspect),
+    }
+}
+
+/// check_hba: the method pg_hba.conf's first matching rule names (without rules, the
+/// server's `--auth` method for everyone); `reject` and no matching rule end the connection.
+fn hba_method(
+    engine: &Engine,
+    peer: Option<SocketAddr>,
+    user: &str,
+    database: &str,
+    default: AuthMethod,
+) -> Result<AuthMethod> {
+    let Some(hba) = engine.server_conf().hba() else {
+        if let Some(p) = peer {
+            crate::hba::take_local(p);
+        }
+        return Ok(default);
+    };
+    let local = peer.is_some_and(crate::hba::take_local);
+    let host = match peer {
+        Some(p) if !local => p.ip().to_canonical().to_string(),
+        _ => "[local]".to_string(),
+    };
+    let cat = engine.auth_catalog(database).ok();
+    let member = |role: &str| {
+        cat.as_ref().is_some_and(|c| match (c.role_by_name(user), c.role_by_name(role)) {
+            (Some(u), Some(r)) => c.is_member_of_role(u.oid, r.oid, 0),
+            _ => false,
+        })
+    };
+    let refused = |what: &str| {
+        Error::new(
+            code::INVALID_AUTHORIZATION_SPECIFICATION,
+            format!("{what} for host \"{host}\", user \"{user}\", database \"{database}\", no encryption"),
+        )
+        .fatal()
+    };
+    let Some(rule) = hba.choose(peer.map(|p| p.ip().to_canonical()), local, database, user, &member) else {
+        return Err(refused("no pg_hba.conf entry"));
+    };
+    Ok(match rule.method.as_str() {
+        "trust" => AuthMethod::Trust,
+        "scram-sha-256" => AuthMethod::ScramSha256,
+        "md5" => AuthMethod::Md5,
+        "password" => AuthMethod::Password,
+        "reject" => return Err(refused("pg_hba.conf rejects connection")),
+        m => {
+            let name = match m {
+                "ident" => "Ident",
+                "peer" => "Peer",
+                "gss" => "GSSAPI",
+                "sspi" => "SSPI",
+                "pam" => "PAM",
+                "ldap" => "LDAP",
+                "radius" => "RADIUS",
+                "cert" => "certificate",
+                _ => "OAuth bearer",
+            };
+            return Err(Error::new(
+                code::INVALID_AUTHORIZATION_SPECIFICATION,
+                format!("{name} authentication failed for user \"{user}\""),
+            )
+            .fatal());
+        }
+    })
+}
+
+/// auth_delay (preloaded): a failed authentication waits auth_delay.milliseconds before the
+/// error goes out.
+fn auth_delay(engine: &Engine) {
+    let conf = engine.server_conf();
+    let preloaded = engine.options().shared_preload_libraries.iter().any(|l| l == "auth_delay");
+    let ms = conf
+        .loaded()
+        .values
+        .get("auth_delay.milliseconds")
+        .and_then(|v| v.value.parse::<u64>().ok())
+        .or_else(|| engine.command_line_value("auth_delay.milliseconds").and_then(|v| v.parse().ok()))
+        .unwrap_or(0);
+    if preloaded && ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
 }
 
 fn authenticate(
@@ -1074,7 +1234,10 @@ fn message_loop(
 ) -> std::io::Result<()> {
     // After an error in extended protocol, messages are skipped until Sync.
     let mut skipping = false;
+    // The query of the last Parse, for what the server log says of errors after it.
+    let mut last_stmt: Option<String> = None;
     loop {
+        c.log_sent(Some(s), pid, last_stmt.as_deref());
         let idle = if std::mem::take(&mut c.at_ready) { s.idle_timeout() } else { None };
         let msg = match c.read_message_by(idle.as_ref().map(|i| i.0)) {
             Ok(m) => m,
@@ -1100,6 +1263,7 @@ fn message_loop(
             continue;
         }
         sync_client_encoding(s);
+        s.poll_config();
         // Query text arrives in the client's encoding.
         let body = match t {
             b'Q' | b'P' => match convert_cstrings(&body, 2) {
@@ -1132,6 +1296,7 @@ fn message_loop(
                     Err(e) => c.error(&e),
                 }
                 statement_done_activity(engine, pid, s);
+                c.log_sent(Some(s), pid, Some(&sql));
                 // A FATAL error (the session terminating itself) ends the session.
                 if c.fatal {
                     return c.flush();
@@ -1140,6 +1305,8 @@ fn message_loop(
                 continue;
             }
             b'P' => {
+                let mut b = Body::new(&body);
+                last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
                 extended_activity(engine, pid, s, t, &body);
                 guard(c, s, |c, s| parse_msg(c, s, &body))
             }
@@ -1473,6 +1640,7 @@ fn command_complete(c: &mut Conn, tag: &str) {
 }
 
 fn simple_query(c: &mut Conn, s: &mut Session, sql: &str) -> std::io::Result<()> {
+    let start = std::time::Instant::now();
     let stmts = match s.parse(sql) {
         Ok(v) => v,
         Err(e) => {
@@ -1487,9 +1655,28 @@ fn simple_query(c: &mut Conn, s: &mut Session, sql: &str) -> std::io::Result<()>
         c.msg(b'I', |_| {});
         return Ok(());
     }
+    // log_statement: the whole query string once (exec_simple_query).
+    let logged = s.statement_logged(&stmts);
+    if logged {
+        let detail = s.execute_detail(&stmts);
+        s.log_message(&format!("statement: {sql}"), detail.as_deref());
+        send_notices(c, s);
+    }
     s.set_batch_len(stmts.len());
+    let sent = c.sent.len();
     let r = simple_batch(c, s, sql, &stmts);
     s.set_batch_len(0);
+    // check_log_duration (not for a statement that failed).
+    let failed = c.sent[sent.min(c.sent.len())..].iter().any(|e| e.severity != crate::error::Severity::Warning);
+    if !failed && let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), logged) {
+        if with_stmt {
+            let detail = s.execute_detail(&stmts);
+            s.log_message(&format!("duration: {ms} ms  statement: {sql}"), detail.as_deref());
+        } else {
+            s.log_message(&format!("duration: {ms} ms"), None);
+        }
+        send_notices(c, s);
+    }
     r
 }
 
@@ -1748,9 +1935,30 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
         return Ok(());
     }
     send_notices(c, s);
+    // exec_execute_message's log_statement and duration lines.
+    let start = std::time::Instant::now();
+    let info = if crate::log::active() || s.state.settings.borrow().get_str("client_min_messages") == Some("log") {
+        s.portal_log(&portal)
+    } else {
+        None
+    };
+    let logged = info.as_ref().is_some_and(|(_, _, p)| s.statement_logged(std::slice::from_ref(p)));
+    if let Some((what, detail, _)) = info.as_ref().filter(|_| logged) {
+        s.log_message(&format!("execute {what}: {sql}"), detail.as_deref());
+        send_notices(c, s);
+    }
     let r = streamed(c, s, &formats, false, |s| s.execute_portal(&portal, max_rows));
     if r.is_ok() {
         s.note_executed();
+        if let Some((what, detail, _)) = &info
+            && let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), logged)
+        {
+            if with_stmt {
+                s.log_message(&format!("duration: {ms} ms  execute {what}: {sql}"), detail.as_deref());
+            } else {
+                s.log_message(&format!("duration: {ms} ms"), None);
+            }
+        }
     }
     send_notices(c, s);
     let (o, more) = r.map_err(|e| e.in_chars(&sql))?;

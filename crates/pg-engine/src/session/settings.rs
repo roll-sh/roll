@@ -425,6 +425,17 @@ pub struct Settings {
     /// level: the GUC stack entries its SET LOCALs make, until something needs them there
     /// (`stack_txn_start`).
     txn_start: Option<(usize, [Option<String>; 2])>,
+    /// The configuration files' values as of the last reload this session took
+    /// (`adopt_file_layer`): below role / database defaults and `config`, above the built-in
+    /// defaults (PGC_S_FILE).
+    file: Arc<crate::sysconf::Loaded>,
+    /// The parameters `config` holds from the server's command line (source "command line").
+    argv: Vec<&'static str>,
+    /// postmaster parameters this session found changed in the files (reading
+    /// pg_file_settings marks them, as ProcessConfigFile does): pending_restart.
+    pending: Vec<&'static str>,
+    /// The `defaults` the client's startup packet gave (source "client").
+    client: Vec<String>,
 }
 
 impl Default for Settings {
@@ -439,6 +450,10 @@ impl Default for Settings {
             changed: Vec::new(),
             derived: DerivedCache::default(),
             txn_start: None,
+            file: crate::sysconf::Loaded::empty(),
+            argv: Vec::new(),
+            pending: Vec::new(),
+            client: Vec::new(),
         }
     }
 }
@@ -1183,6 +1198,51 @@ pub fn flags(name: &str) -> Option<&'static [&'static str]> {
     find(name).map(|d| d.flags)
 }
 
+/// The parameters ALTER SYSTEM refuses besides internal ones (GUC_DISALLOW_IN_FILE /
+/// GUC_DISALLOW_IN_AUTO_FILE).
+const DISALLOW_IN_AUTO_FILE: &[&str] = &[
+    "allow_alter_system",
+    "config_file",
+    "data_directory",
+    "role",
+    "seed",
+    "session_authorization",
+    "transaction_deferrable",
+    "transaction_isolation",
+    "transaction_read_only",
+];
+
+/// What a configuration file's `name = raw` is (ProcessConfigFile's lookups).
+pub enum FileParam {
+    /// A built-in parameter or an extension library's: its canonical name, context (as
+    /// pg_settings names it), and the value normalized (None: invalid).
+    Known {
+        canon: &'static str,
+        context: &'static str,
+        module: bool,
+        value: Option<String>,
+        default: &'static str,
+    },
+    /// A custom name (a placeholder's), in lower case.
+    Custom(String),
+    /// Neither: "unrecognized configuration parameter".
+    Unknown,
+}
+
+pub fn file_param(name: &str, raw: &str) -> FileParam {
+    match find_any(name) {
+        Some(d) => FileParam::Known {
+            canon: d.name,
+            context: d.context.name(),
+            module: d.module.is_some(),
+            value: normalize(d, raw).ok(),
+            default: d.default,
+        },
+        None if valid_custom_name(name) => FileParam::Custom(name.to_ascii_lowercase()),
+        None => FileParam::Unknown,
+    }
+}
+
 /// One row of pg_settings.
 pub struct SettingRow {
     pub name: String,
@@ -1202,6 +1262,9 @@ pub struct SettingRow {
     pub enumvals: Option<&'static [&'static str]>,
     pub boot_val: String,
     pub reset_val: String,
+    /// Where the configuration files set the value in effect (source "configuration file").
+    pub sourcefile: Option<(&'static str, u32)>,
+    pub pending_restart: bool,
 }
 
 impl Settings {
@@ -1303,6 +1366,16 @@ impl Settings {
         Ok(())
     }
 
+    /// A startup-packet setting (PGC_S_CLIENT): what RESET returns to, source "client".
+    pub fn set_client_default(&mut self, name: &str, value: &str) -> Result<()> {
+        self.set_default(name, value)?;
+        let canon = canonical_name(name);
+        if !self.client.contains(&canon) {
+            self.client.push(canon);
+        }
+        Ok(())
+    }
+
     /// A setting from the connection's startup packet (`options`, or a plain parameter).
     pub fn set_startup(&mut self, name: &str, value: &str) -> Result<()> {
         self.set_full(name, Some(value), false, false, false, true)
@@ -1316,6 +1389,113 @@ impl Settings {
             self.touched(canon);
             self.config.insert(canon.to_string(), value.to_string());
         }
+    }
+
+    /// A value of the server's command line (`roll-engine --max-prepared-transactions`,
+    /// `--shared-preload-libraries`; PGC_S_ARGV): above the configuration files.
+    pub fn set_command_line(&mut self, name: &str, value: &str) {
+        // (An extension library's parameter too: it applies once the library is loaded.)
+        if let Some(d) = find_any(name) {
+            let Ok(v) = normalize(d, value) else { return };
+            self.touched(d.name);
+            self.config.insert(d.name.to_string(), v);
+            if !self.argv.contains(&d.name) {
+                self.argv.push(d.name);
+            }
+        }
+    }
+
+    /// The configuration files' values this session has (`sysconf::Loaded::generation`).
+    pub fn file_generation(&self) -> u64 {
+        self.file.generation
+    }
+
+    /// Take the configuration files' values of a reload (a backend's ProcessConfigFile at
+    /// SIGHUP). PGC_BACKEND / PGC_SU_BACKEND parameters keep the values the session started
+    /// with; reported parameters whose value changed go out as ParameterStatus.
+    pub fn adopt_file_layer(&mut self, new: Arc<crate::sysconf::Loaded>) {
+        if Arc::ptr_eq(&self.file, &new) {
+            return;
+        }
+        let before: Vec<String> = REPORTED.iter().map(|n| self.show_value(n)).collect();
+        let kept: Vec<&'static Def> = table()
+            .defs
+            .iter()
+            .filter(|d| matches!(d.context, Context::Backend | Context::SuBackend))
+            .filter(|d| {
+                self.file.values.get(d.name).map(|f| &f.value) != new.values.get(d.name).map(|f| &f.value)
+            })
+            .collect();
+        let new = if kept.is_empty() {
+            new
+        } else {
+            let mut l = (*new).clone();
+            for d in kept {
+                match self.file.values.get(d.name) {
+                    Some(f) => l.values.insert(d.name.to_string(), f.clone()),
+                    None => l.values.remove(d.name),
+                };
+            }
+            l.refresh_differing();
+            Arc::new(l)
+        };
+        // (A placeholder the files made stays when they no longer set it, empty.)
+        let gone: Vec<String> = self.file.custom_names().filter(|n| new.custom(n).is_none()).cloned().collect();
+        self.file = new;
+        for n in gone {
+            if self.def(&n).is_none() {
+                self.add_placeholder(&n);
+            }
+        }
+        self.derived = DerivedCache::default();
+        for (n, b) in REPORTED.iter().zip(before) {
+            if self.show_value(n) != b {
+                self.changed.push(n.to_string());
+            }
+        }
+    }
+
+    /// postmaster parameters found changed in the files (show_all_file_settings).
+    pub fn mark_pending_restart(&mut self, names: &[&'static str]) {
+        for n in names {
+            if !self.pending.contains(n) {
+                self.pending.push(n);
+            }
+        }
+    }
+
+    /// AlterSystemSetConfigFile's checks of `name` and `value` (None: RESET): a parameter
+    /// files may set, a value it takes, a custom name this session could create.
+    pub fn check_alter_system(&self, name: &str, value: Option<&str>) -> Result<()> {
+        let lower = name.to_ascii_lowercase();
+        match self.def(name) {
+            Some(d) => {
+                if d.context == Context::Internal || DISALLOW_IN_AUTO_FILE.contains(&d.name) {
+                    bail!(CANT_CHANGE_RUNTIME_PARAM, "parameter \"{name}\" cannot be changed");
+                }
+                if let Some(v) = value {
+                    normalize(d, v)?;
+                }
+            }
+            // (An existing placeholder.)
+            None if self.file.custom(&lower).is_some()
+                || self.values.contains_key(&lower)
+                || self.defaults.contains_key(&lower) => {}
+            None if value.is_some() || !valid_custom_name(name) => {
+                if !name.contains('.') {
+                    bail!(UNDEFINED_OBJECT, "unrecognized configuration parameter \"{name}\"");
+                }
+                check_custom_name(name, &self.reserved)?;
+            }
+            None => {}
+        }
+        if value.is_some_and(|v| v.contains('\n')) {
+            bail!(
+                INVALID_PARAMETER_VALUE,
+                "parameter value for ALTER SYSTEM must not contain a newline"
+            );
+        }
+        Ok(())
     }
 
     /// Validate `name = value` as SET would, without applying it.
@@ -1478,17 +1658,23 @@ impl Settings {
             Some(d) => Some(
                 get(d.name)
                     .or_else(|| self.config.get(d.name).map(String::as_str))
+                    .or_else(|| self.file.differing(d.name))
                     .unwrap_or(d.default),
             ),
             None if name.bytes().any(|c| c.is_ascii_uppercase()) => {
-                get(&name.to_ascii_lowercase())
+                let lower = name.to_ascii_lowercase();
+                get(&lower).or_else(|| self.file.custom(&lower))
             }
-            None => get(name),
+            None => get(name).or_else(|| self.file.custom(name)),
         }
     }
 
     /// SHOW's form of a known parameter's raw value.
     fn shown(d: &Def, raw: &str) -> String {
+        // (show_data_directory_mode, show_log_file_mode, show_unix_socket_permissions.)
+        if matches!(d.name, "data_directory_mode" | "log_file_mode" | "unix_socket_permissions") {
+            return format!("{:04o}", raw.parse::<i64>().unwrap_or(0));
+        }
         match d.kind {
             Kind::Int(u) => show_int(raw.parse().unwrap_or(0), u),
             Kind::Real(u) => show_real(raw.parse().unwrap_or(0.0), u),
@@ -1500,13 +1686,19 @@ impl Settings {
     pub fn show(&self, name: &str) -> Result<String> {
         match self.def(name) {
             Some(d) if d.name == "seed" => Ok("unavailable".into()),
+            // show_archive_command: only while archiving.
+            Some(d) if d.name == "archive_command" && self.get_str("archive_mode") == Some("off") => {
+                Ok("(disabled)".into())
+            }
             Some(d) => Ok(Self::shown(d, self.get_str(d.name).unwrap_or_default())),
             None => match self
                 .values
                 .get(&name.to_ascii_lowercase())
                 .or_else(|| self.defaults.get(&name.to_ascii_lowercase()))
+                .map(String::as_str)
+                .or_else(|| self.file.custom(&name.to_ascii_lowercase()))
             {
-                Some(v) => Ok(v.clone()),
+                Some(v) => Ok(v.to_string()),
                 None => Err(err!(
                     UNDEFINED_OBJECT,
                     "unrecognized configuration parameter \"{name}\""
@@ -1519,6 +1711,7 @@ impl Settings {
         self.def(name).is_some()
             || self.values.contains_key(&name.to_ascii_lowercase())
             || self.defaults.contains_key(&name.to_ascii_lowercase())
+            || self.file.custom(&name.to_ascii_lowercase()).is_some()
     }
 
     /// SET name = value. `local` reverts at transaction end; `in_txn` reverts on rollback.
@@ -1617,7 +1810,7 @@ impl Settings {
             }
             None => {
                 // RESET / SET TO DEFAULT
-                if def.is_some() || self.defaults.contains_key(&canon) {
+                if def.is_some() || self.defaults.contains_key(&canon) || self.file.custom(&canon).is_some() {
                     self.values.remove(&canon);
                 } else {
                     self.values.insert(canon.clone(), String::new());
@@ -2063,7 +2256,9 @@ impl Settings {
         table()
             .defs
             .iter()
+            // (PL/pgSQL's parameters are there once it is loaded, as an extension library's.)
             .filter(|d| !d.flag("NO_SHOW_ALL") && self.def(d.name).is_some())
+            .filter(|d| !d.name.starts_with("plpgsql.") || self.module_loaded("plpgsql"))
             .map(|d| {
                 let raw = self.get_raw(d.name).unwrap_or_default();
                 let (unit, vartype) = match d.kind {
@@ -2075,29 +2270,47 @@ impl Settings {
                 };
                 let setting = match d.kind {
                     Kind::Real(_) => format_g(raw.parse().unwrap_or(0.0)),
+                    _ if d.name == "archive_command" => self.show_value(d.name),
+                    Kind::Int(_) if d.name.ends_with("_mode") || d.name == "unix_socket_permissions" => {
+                        Self::shown(d, &raw)
+                    }
                     _ => raw.clone(),
                 };
                 let ranged = matches!(d.kind, Kind::Int(_) | Kind::Real(_));
+                let filed = self.file.values.get(d.name);
                 let reset = self
                     .defaults
                     .get(d.name)
                     .or_else(|| self.config.get(d.name))
+                    .or_else(|| filed.map(|f| &f.value))
                     .cloned()
                     .unwrap_or_else(|| d.default.to_string());
                 let reset = match d.kind {
                     Kind::Real(_) => format_g(reset.parse().unwrap_or(0.0)),
                     _ => reset,
                 };
-                let source = if self.values.contains_key(d.name) {
+                // (Each transaction sets these, PGC_S_OVERRIDE.)
+                let source = if TXN_START.contains(&d.name) {
+                    "override"
+                } else if self.values.contains_key(d.name) {
                     "session"
+                } else if self.defaults.contains_key(d.name) && self.client.iter().any(|c| c == d.name) {
+                    "client"
                 } else if self.defaults.contains_key(d.name) {
                     "user"
+                } else if self.argv.contains(&d.name) {
+                    "command line"
+                } else if filed.is_some() && !self.config.contains_key(d.name) {
+                    "configuration file"
                 } else {
                     d.source
                 };
+                let sourcefile = filed
+                    .filter(|_| source == "configuration file")
+                    .map(|f| (f.file, f.line));
                 SettingRow {
                     name: d.name.to_string(),
-                    shown: Self::shown(d, &raw),
+                    shown: if d.name == "archive_command" { self.show_value(d.name) } else { Self::shown(d, &raw) },
                     setting,
                     unit,
                     category: d.category,
@@ -2114,6 +2327,9 @@ impl Settings {
                     },
                     boot_val: d.boot.to_string(),
                     reset_val: reset,
+                    sourcefile,
+                    pending_restart: self.file.pending_restart.contains(&d.name)
+                        || self.pending.contains(&d.name),
                 }
             })
             .collect()
@@ -2151,6 +2367,12 @@ pub fn notice_wanted(st: &Settings, sev: crate::error::Severity) -> bool {
 }
 
 /// Split a search_path value into schema names, expanding `$user`.
+/// A list parameter's items (SplitIdentifierString, without its case folding): comma
+/// separated, double quotes removed.
+pub fn parse_list(v: &str) -> Vec<String> {
+    v.split(',').map(|s| s.trim().trim_matches('"').to_string()).collect()
+}
+
 pub fn parse_search_path(v: &str, user: &str) -> Vec<String> {
     search_path_items(v)
         .into_iter()

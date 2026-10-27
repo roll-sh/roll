@@ -4982,7 +4982,11 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
         }
         PgSettings => {
             let settings = ctx.sess.settings.borrow();
+            // (Where a value comes from: for superusers and pg_read_all_settings.)
+            let see_files = settings.get_str("is_superuser") == Some("on")
+                || cat.has_privs_of_role(ctx.current_user(), crate::catalog::ROLE_PG_READ_ALL_SETTINGS, ctx.db_owner());
             for r in settings.all() {
+                let file = r.sourcefile.filter(|_| see_files);
                 out.push(vec![
                     nm(&r.name),
                     nm(&r.setting),
@@ -5000,9 +5004,9 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     }),
                     nm(&r.boot_val),
                     nm(&r.reset_val),
-                    N,
-                    N,
-                    b(false),
+                    file.map_or(N, |f| nm(f.0)),
+                    file.map_or(N, |f| i4(f.1 as i64)),
+                    b(r.pending_restart),
                 ]);
             }
         }

@@ -86,6 +86,27 @@ struct Args {
     /// older build on the data directory.
     #[arg(long)]
     downgrade_catalog: bool,
+    /// A run-time parameter, as `postgres -c name=value` (repeatable): above
+    /// postgresql.conf and ALTER SYSTEM's postgresql.auto.conf, pg_settings' "command line".
+    #[arg(short = 'c', long = "set", value_name = "NAME=VALUE", value_parser = parse_setting)]
+    settings: Vec<(String, String)>,
+    /// Client authentication rules in pg_hba.conf's format, read again by pg_reload_conf
+    /// and SIGHUP (shown by pg_hba_file_rules). Without it (or --hba), every connection
+    /// authenticates with --auth.
+    #[arg(long, value_name = "FILE")]
+    hba_file: Option<PathBuf>,
+    /// A pg_hba.conf line (repeatable; when there's no --hba-file), e.g.
+    /// `--hba "host all all 127.0.0.1/32 trust" --hba "host all all all scram-sha-256"`.
+    #[arg(long = "hba", value_name = "RULE")]
+    hba_lines: Vec<String>,
+    /// User name maps in pg_ident.conf's format (pg_ident_file_mappings).
+    #[arg(long, value_name = "FILE")]
+    ident_file: Option<PathBuf>,
+}
+
+fn parse_setting(s: &str) -> Result<(String, String), String> {
+    let (k, v) = s.split_once('=').ok_or("NAME=VALUE")?;
+    Ok((k.trim().replace('-', "_"), v.to_string()))
 }
 
 /// initdb's locale and encoding options.
@@ -166,6 +187,12 @@ fn main() -> anyhow::Result<()> {
         locale: a.initdb.options(),
         outbound: a.allow_outbound,
         max_prepared_transactions: a.max_prepared_transactions,
+        settings: a.settings,
+        auth_files: pg_engine::sysconf::AuthFiles {
+            hba_file: a.hba_file,
+            hba_lines: a.hba_lines,
+            ident_file: a.ident_file,
+        },
         ..EngineOptions::default()
     })?;
     if a.downgrade_catalog {
@@ -184,14 +211,27 @@ fn main() -> anyhow::Result<()> {
             let Ok(rt) = rt else { return };
             rt.block_on(async {
                 use tokio::signal::unix::{SignalKind, signal};
-                let (Ok(mut term), Ok(mut int)) =
-                    (signal(SignalKind::terminate()), signal(SignalKind::interrupt()))
-                else {
+                let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::interrupt()),
+                    signal(SignalKind::hangup()),
+                ) else {
                     return;
                 };
-                tokio::select! {
-                    _ = term.recv() => {}
-                    _ = int.recv() => {}
+                loop {
+                    tokio::select! {
+                        _ = term.recv() => break,
+                        _ = int.recv() => break,
+                        // SIGHUP: the configuration files again, as pg_reload_conf().
+                        _ = hup.recv() => {
+                            let conf = engine.server_conf();
+                            let logs = conf.reload();
+                            let files = conf.loaded();
+                            for m in logs {
+                                pg_engine::log::postmaster(Some(&files), pg_engine::error::Severity::Log, &m);
+                            }
+                        }
+                    }
                 }
             });
             tracing::info!("shutting down");
@@ -201,6 +241,18 @@ fn main() -> anyhow::Result<()> {
     }
     let listener = std::net::TcpListener::bind(&a.listen)?;
     tracing::info!(addr = %a.listen, ?auth, "listening");
+    // The server log (PostgreSQL's, logging_collector off): stderr.
+    pg_engine::log::set_sink(Some(pg_engine::log::stderr_sink()));
+    let files = engine.server_conf().loaded();
+    pg_engine::log::postmaster(
+        Some(&files),
+        pg_engine::error::Severity::Log,
+        &format!("listening on {} address \"{}\", port {}",
+            if listener.local_addr()?.is_ipv4() { "IPv4" } else { "IPv6" },
+            listener.local_addr()?.ip(),
+            listener.local_addr()?.port()),
+    );
+    pg_engine::log::postmaster(Some(&files), pg_engine::error::Severity::Log, "database system is ready to accept connections");
     pg_engine::server::serve(engine, listener, ServerOptions { auth })?;
     Ok(())
 }

@@ -1,6 +1,7 @@
 # PostgreSQL 18.6 run-time parameters (pg_settings of an initdb'd server, plus the hidden
 # NO_SHOW_ALL ones): name, vartype, unit, context, category, short_desc, extra_desc, min, max,
 # enumvals, boot_val, reset_val (the engine's default), flags, source. Backslash escapes \t \n \\.
+allow_alter_system	bool		sighup	Version and Platform Compatibility / Other Platforms and Clients	Allows running the ALTER SYSTEM command.	Can be set to off for environments where global configuration changes should be made using a different method.				on	on		default
 allow_in_place_tablespaces	bool		superuser	Developer Options	Allows tablespaces directly inside pg_tblspc, for testing.					off	off	NOT_IN_SAMPLE	default
 allow_system_table_mods	bool		superuser	Developer Options	Allows modifications of the structure of system tables.					off	off	NOT_IN_SAMPLE	default
 application_name	string		user	Reporting and Logging / What to Log	Sets the application name to be reported in statistics and logs.							NOT_IN_SAMPLE	default

@@ -271,6 +271,12 @@ fn connect_one(info: &ConnInfo, env: &Env, host: &str, hostaddr: &str, port: u16
         format!("{prefix}{}\n\tIs the server running on that host and accepting TCP/IP connections?\n", io_text(&e))
     })?;
     let _ = stream.set_nodelay(true);
+    // (The engine's own "Unix socket": pg_hba.conf's local lines apply to it.)
+    if hostaddr.is_empty() && (host.is_empty() || host.starts_with('/'))
+        && let Ok(a) = stream.local_addr()
+    {
+        crate::hba::mark_local(a);
+    }
     let mut c = Conn {
         stream,
         addr,

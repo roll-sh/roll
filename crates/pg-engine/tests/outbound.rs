@@ -25,6 +25,8 @@ fn open(data: &Path, outbound: &[&str]) -> Arc<Engine> {
         locale: Default::default(),
         outbound: outbound.iter().map(|s| s.to_string()).collect(),
         max_prepared_transactions: 0,
+        auth_files: Default::default(),
+        settings: Vec::new(),
     })
     .unwrap()
 }

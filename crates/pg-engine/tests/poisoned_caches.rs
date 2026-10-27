@@ -58,6 +58,8 @@ fn engine(dir: &std::path::Path) -> std::sync::Arc<pg_engine::engine::Engine> {
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: 0,
+        auth_files: Default::default(),
+        settings: Vec::new(),
     })
     .unwrap()
 }

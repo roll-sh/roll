@@ -10,6 +10,8 @@ pub mod fastpath;
 pub(crate) use utility::{bind_call, bind_call_typed};
 pub mod ddl;
 pub mod settings;
+mod serverlog;
+pub use serverlog::truncate_param as serverlog_truncate;
 pub mod state;
 mod pgss;
 mod prepared;
@@ -197,6 +199,8 @@ pub struct Portal {
 
 pub struct Session {
     pub state: SessionState,
+    /// The command running, as the server log's %i shows it.
+    pub log_tag: String,
     txn: Option<RefCell<Txn>>,
     status: TxnStatus,
     /// The open transaction was started implicitly (no BEGIN) and ends with the batch.
@@ -333,6 +337,7 @@ impl Session {
         state.db.sessions.fetch_add(1, Ordering::SeqCst);
         Session {
             state,
+            log_tag: String::new(),
             txn: None,
             status: TxnStatus::Idle,
             implicit: false,
@@ -973,7 +978,18 @@ impl Session {
         crate::stack::grow(|| self.query_copy_here(sql, copy_data))
     }
 
+    /// A reload published new configuration values: take them before the next message, as a
+    /// backend's ProcessConfigFile does at SIGHUP.
+    pub fn poll_config(&self) {
+        if let Some(conf) = self.state.cluster.server_config()
+            && conf.generation() != self.state.settings.borrow().file_generation()
+        {
+            self.state.settings.borrow_mut().adopt_file_layer(conf.loaded());
+        }
+    }
+
     fn query_copy_here(&mut self, sql: &str, copy_data: &[u8]) -> Result<Vec<QueryResult>> {
+        self.poll_config();
         let stmts = match self.parse(sql) {
             Ok(s) => s,
             Err(e) => {
@@ -1359,6 +1375,15 @@ impl Session {
                 done(QueryResult::command("DO"))
             }
             NodeEnum::CallStmt(c) => done(self.call_stmt(c, params, &p.param_types)?),
+            NodeEnum::AlterSystemStmt(s) => {
+                if self.in_block() {
+                    return Err(Error::new(
+                        code::ACTIVE_SQL_TRANSACTION,
+                        "ALTER SYSTEM cannot run inside a transaction block",
+                    ));
+                }
+                done(self.alter_system(s)?)
+            }
             _ => {
                 let in_block = self.in_block();
                 let tag = ddl::run_top_level(in_block, || {
@@ -1617,8 +1642,18 @@ impl Session {
         // pg_stat_statements: the workers the plan's Gathers launch.
         let count_workers = self.pgss_counts_workers();
         let mut workers = 0;
+        // auto_explain (explain_ExecutorStart / End): the plan, with what ran, when it took
+        // long enough.
+        let ae = crate::ext::auto_explain::start(&self.state.settings.borrow(), false);
+        let mut ae_plan = None;
         let r = self.with_ctx(params, |ctx| {
             bq.check_perms(ctx)?;
+            let ae_instr = ae.as_ref().filter(|a| a.opts.analyze).map(|_| {
+                let i = std::rc::Rc::new(crate::exec::Instr::default());
+                *ctx.instr.borrow_mut() = Some(i.clone());
+                i
+            });
+            let ae_start = std::time::Instant::now();
             if count_workers {
                 workers = crate::sql::explain::gather_workers(&bq.plan, ctx) as i64;
             }
@@ -1655,8 +1690,46 @@ impl Session {
                 drop(put);
                 made = collect(&bq.plan, ctx, None)?;
             }
+            if let Some(a) = &ae {
+                let secs = ae_start.elapsed().as_secs_f64();
+                if ae_instr.is_some() {
+                    *ctx.instr.borrow_mut() = None;
+                }
+                let plan = ctx.explained.borrow_mut().take().unwrap_or((bq.plan.clone(), bq.hidden_rtes));
+                if let Some(text) = a.message(secs * 1000.0, "", "", &[]).map(|_| {
+                    crate::sql::explain::explain(&plan.0, plan.1, &a.opts, ctx, params, ae_instr.as_deref(), 0.0, secs)
+                }) {
+                    ae_plan = Some((secs * 1000.0, text));
+                }
+            }
             Ok(ctx.processed.get())
         });
+        if let (Some(a), Some((ms, plan))) = (&ae, ae_plan) {
+            // (A prepared statement's source text: its PREPARE's, or its Parse message's.)
+            let query = self
+                .prepared
+                .iter()
+                .find(|(_, v)| std::ptr::eq(&***v, p))
+                .and_then(|(k, _)| self.prepared_meta.get(k))
+                .map(|m| m.0.clone())
+                .unwrap_or_else(|| self.whole_query(p));
+            let fmt = self.format_ctx();
+            let shown: Vec<Option<String>> = params
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match v {
+                    Value::Null => None,
+                    v => Some(crate::types::text::format_value(
+                        v,
+                        p.param_types.get(i).unwrap_or(&crate::types::DataType::Text),
+                        &fmt,
+                    )),
+                })
+                .collect();
+            if let Some(m) = a.message(ms, &plan, &query, &shown) {
+                self.log_at(a.level, &m, None);
+            }
+        }
         if streams {
             self.row_sink = sink;
         }

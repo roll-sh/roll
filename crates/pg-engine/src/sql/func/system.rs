@@ -98,7 +98,7 @@ fn current_setting(a: &[Value], c: &FnCtx) -> Result<Value> {
 }
 fn set_config(a: &[Value], c: &FnCtx) -> Result<Value> {
     if a[0].is_null() {
-        bail!(INVALID_PARAMETER_VALUE, "SET requires parameter name");
+        bail!(NULL_VALUE_NOT_ALLOWED, "SET requires parameter name");
     }
     let name = text_arg(&a[0]);
     let local = a[2].as_bool().unwrap_or(false);
@@ -143,8 +143,12 @@ fn inet_server_port(_: &[Value], _: &FnCtx) -> Result<Value> {
 fn pg_postmaster_start_time(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Timestamptz(c.exec.sess.cluster.start_time()))
 }
+/// When the configuration files were last loaded (the server's start or a reload).
 fn pg_conf_load_time(a: &[Value], c: &FnCtx) -> Result<Value> {
-    pg_postmaster_start_time(a, c)
+    match c.exec.sess.cluster.server_config() {
+        Some(conf) => Ok(Value::Timestamptz(conf.loaded().load_time)),
+        None => pg_postmaster_start_time(a, c),
+    }
 }
 fn pg_is_in_recovery(_: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Bool(false))

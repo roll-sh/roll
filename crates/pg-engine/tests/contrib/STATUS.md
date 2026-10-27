@@ -80,7 +80,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | dict_int | 63 | 63 | done |
 | dict_xsyn | 29 | 29 | done |
 | passwordcheck | 12 | 12 | done |
-| auto_explain | 12 | 10 | see below |
+| auto_explain | 12 | 12 | done (round 20, agent 80) |
 | dblink | 218 | 218 | done |
 | pgvector (0.8.7) | 915 | 915 | done (see below) |
 | bloom | 58 | 58 | done (on the native index access method interface) |
@@ -140,9 +140,15 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
 - **tsm_system_time** (units 9, 11): PostgreSQL puts a Materialize over a sample scan whose
   method isn't repeatable across scans when the query level isn't one relation
   (set_tablesample_rel_pathlist); the engine's EXPLAIN doesn't (rows match).
-- **auto_explain** (units 5, 10): ALTER SYSTEM is refused (the engine has no
-  postgresql.auto.conf). Logging plans (the module's purpose) isn't done: the engine has no
-  server log a client sees, and the plans would go there at LOG level.
+- **auto_explain**: done (round 20, agent 80). ALTER SYSTEM writes postgresql.auto.conf
+  (`src/sysconf.rs`), so units 5 and 10 match. The plans go to the server log
+  (`src/log.rs`; `roll-engine` writes it to stderr) and to the client past
+  client_min_messages, as explain_ExecutorEnd lays them out (`ext/auto_explain.rs`): the
+  module's TAP test (t/001_auto_explain.pl) is `tests/server_log.rs`. Nested statements
+  (log_nested_statements) and log_triggers aren't explained yet.
+- **auth_delay**: done (round 20, agent 80): preloaded (shared_preload_libraries, `-c` or
+  postgresql.auto.conf), a failed authentication waits auth_delay.milliseconds before its
+  error (`server.rs` `auth_delay`). The module has no regression test.
 - **intagg**: int_array_aggregate's transition function is the internal
   `array_agg_transfn` over an `internal` state, which the engine's aggregates don't take
   (no contrib units; the module has no regression test).
@@ -154,8 +160,7 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
 - **Not done**: test_decoding (the engine has no logical decoding: no replication slots or
   change stream, which CDC tools such as Debezium need; a project of its own); xml2 (its
   xslt_process needs an XSLT processor; the xpath_* functions could use the engine's XPath);
-  pg_overexplain, spi (refint, autoinc, insert_username, moddatetime), auth_delay's delay
-  (its parameter only).
+  pg_overexplain, spi (refint, autoinc, insert_username, moddatetime).
 
 - **btree_gist** (3 units): rows of an unordered GiST index scan come back in PostgreSQL's
   GiST tree order (macaddr, macaddr8, bytea units without ORDER BY): the engine reads the

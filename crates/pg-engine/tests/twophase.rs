@@ -33,6 +33,8 @@ fn engine(dir: &std::path::Path, max_prepared: usize) -> std::sync::Arc<Engine> 
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: max_prepared,
+        auth_files: Default::default(),
+        settings: Vec::new(),
     })
     .unwrap()
 }

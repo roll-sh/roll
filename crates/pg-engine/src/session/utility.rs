@@ -23,6 +23,73 @@ const CURSOR_OPT_HOLD: i32 = 0x0020;
 impl Session {
     // ── SET / RESET ──
 
+    /// Whether the current role holds `privilege` (SET, ALTER SYSTEM) on parameter `name`
+    /// (pg_parameter_acl).
+    fn parameter_granted(&self, name: &str, privilege: u32) -> bool {
+        let cat = self
+            .txn
+            .as_ref()
+            .map(|t| t.borrow().catalog())
+            .unwrap_or_else(|| self.state.db.catalog());
+        let lname = name.to_ascii_lowercase();
+        cat.parameters.iter().find(|p| p.1 == lname).is_some_and(|p| {
+            let role = self.state.current_role(&cat);
+            let db_owner = self.state.db_owner(&cat);
+            cat.obj_mask(crate::catalog::acl::ObjKind::Parameter, p.0, role, db_owner).0 & privilege != 0
+        })
+    }
+
+    /// ALTER SYSTEM SET / RESET / RESET ALL (AlterSystemSetConfigFile): postgresql.auto.conf
+    /// rewritten; what it sets takes effect at the next reload (or restart).
+    pub(super) fn alter_system(&mut self, s: &pb::AlterSystemStmt) -> Result<QueryResult> {
+        use pb::VariableSetKind as K;
+        let set = s.setstmt.as_ref().ok_or_else(|| crate::error::internal("ALTER SYSTEM without SET"))?;
+        let st = self.state.settings.borrow();
+        if !st.bool("allow_alter_system") {
+            return Err(Error::new(
+                code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "ALTER SYSTEM is not allowed in this environment",
+            ));
+        }
+        let name = set.name.as_str();
+        let (value, reset_all) = match K::try_from(set.kind).unwrap_or(K::VarSetValue) {
+            K::VarSetValue => (Some(set_value(name, &set.args)?), false),
+            K::VarSetDefault | K::VarReset => (None, false),
+            K::VarResetAll => (None, true),
+            k => {
+                return Err(crate::error::internal(format!(
+                    "unrecognized alter system stmt type: {}",
+                    k as i32
+                )));
+            }
+        };
+        if st.get_str("is_superuser") != Some("on") {
+            if reset_all {
+                return Err(Error::new(
+                    code::INSUFFICIENT_PRIVILEGE,
+                    "permission denied to perform ALTER SYSTEM RESET ALL",
+                ));
+            }
+            if !self.parameter_granted(name, crate::catalog::acl::ALTER_SYSTEM) {
+                return Err(Error::new(
+                    code::INSUFFICIENT_PRIVILEGE,
+                    format!("permission denied to set parameter \"{name}\""),
+                ));
+            }
+        }
+        if !reset_all {
+            st.check_alter_system(name, value.as_deref())?;
+        }
+        drop(st);
+        let conf = self
+            .state
+            .cluster
+            .server_config()
+            .ok_or_else(|| crate::error::unsupported("ALTER SYSTEM"))?;
+        conf.alter_system((!reset_all).then_some(name), value.as_deref())?;
+        Ok(QueryResult::command("ALTER SYSTEM"))
+    }
+
     pub(super) fn set_stmt(&mut self, s: &pb::VariableSetStmt) -> Result<QueryResult> {
         use pb::VariableSetKind as K;
         let kind = K::try_from(s.kind).unwrap_or(K::VarSetValue);
@@ -251,25 +318,7 @@ impl Session {
             v => v,
         };
         // SET granted on the parameter (GRANT SET ON PARAMETER).
-        let granted = {
-            let cat = self
-                .txn
-                .as_ref()
-                .map(|t| t.borrow().catalog())
-                .unwrap_or_else(|| self.state.db.catalog());
-            let lname = name.to_ascii_lowercase();
-            cat.parameters
-                .iter()
-                .find(|p| p.1 == lname)
-                .is_some_and(|p| {
-                    let role = self.state.current_role(&cat);
-                    let db_owner = self.state.db_owner(&cat);
-                    cat.obj_mask(crate::catalog::acl::ObjKind::Parameter, p.0, role, db_owner)
-                        .0
-                        & crate::catalog::acl::SET
-                        != 0
-                })
-        };
+        let granted = self.parameter_granted(name, crate::catalog::acl::SET);
         self.state.settings.borrow_mut().set_granted(
             name,
             value.as_deref(),
@@ -1438,6 +1487,21 @@ pub(crate) fn routine_set(ctx: &crate::exec::ExecCtx, s: &pb::VariableSetStmt) -
 
 impl Session {
     /// LOAD 'library': the engine's modules are built in; loading PL/pgSQL reserves its prefix.
+    /// The libraries a session starts with (shared_preload_libraries, then
+    /// session_preload_libraries and local_preload_libraries, process_session_preload_libraries):
+    /// the ones the engine knows define their parameters; others are skipped with a WARNING.
+    pub fn preload_libraries(&mut self) {
+        let lists: Vec<String> = ["shared_preload_libraries", "session_preload_libraries", "local_preload_libraries"]
+            .iter()
+            .filter_map(|n| self.state.settings.borrow().get_raw(n))
+            .collect();
+        for lib in lists.iter().flat_map(|l| super::settings::parse_list(l)).filter(|l| !l.is_empty()) {
+            let name = lib.trim_start_matches("$libdir/").trim_start_matches("plugins/");
+            let w = self.state.settings.borrow_mut().load_module(name);
+            self.notices.extend(w);
+        }
+    }
+
     pub(super) fn load_stmt(&mut self, s: &pb::LoadStmt) -> Result<QueryResult> {
         let lib = s.filename.trim_start_matches("$libdir/");
         let lib = lib.strip_suffix(".so").unwrap_or(lib);

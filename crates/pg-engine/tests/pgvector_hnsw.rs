@@ -265,7 +265,7 @@ fn concurrent_inserts() {
 fn session_of(db: std::sync::Arc<pg_engine::txn::Database>, pid: i32) -> Session {
     use pg_engine::session::state::{SessionState, SingleCluster};
     let locale = common::createdb_locale(common::GOLDEN_CREATEDB);
-    let cluster = std::sync::Arc::new(SingleCluster { name: "b".into(), started: 0, locale });
+    let cluster = std::sync::Arc::new(SingleCluster { name: "b".into(), started: 0, locale, conf: Default::default() });
     Session::new(SessionState::new(db, cluster, "postgres", pid))
 }
 

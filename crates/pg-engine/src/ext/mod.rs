@@ -11,6 +11,7 @@
 
 mod files;
 pub mod native;
+pub mod auto_explain;
 mod amcheck;
 pub(crate) mod bloom;
 pub(crate) mod binary;

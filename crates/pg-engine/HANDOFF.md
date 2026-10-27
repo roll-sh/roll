@@ -136,6 +136,63 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     misc_functions, lock, advisory_lock, stats_import, prepared_xacts, tidscan, create_index,
     create_misc (no unit changed against the committed results.tsv), and the isolation suite
     (120 / 122 specs, 1,646 / 1,648 permutations, as before).
+- **Server configuration, authentication rules and the server log** (round 20, agent 80):
+  - `src/sysconf.rs`: postgresql.conf is the pinned image's (its 15 settings at their lines,
+    the locale lines what initdb chose); postgresql.auto.conf is ALTER SYSTEM's, kept in the
+    data directory in PostgreSQL's format and replaced atomically. Both are reported under
+    the reference's data directory, as data_directory is. A reload (pg_reload_conf, or
+    SIGHUP to `roll-engine`) evaluates them as ProcessConfigFileInternal does (earlier
+    duplicates ignored, "setting could not be applied" for internal parameters, invalid
+    values and changed postmaster ones, which keep their start value and become
+    pending_restart; unknown names apply nothing) and publishes a `Loaded` layer; each
+    session takes it before its next message (`Session::poll_config`), PGC_BACKEND ones
+    keeping their values, reported parameters sent as ParameterStatus. In `Settings` the
+    layer sits below role / database / client defaults and the command line, above the
+    built-in defaults; pg_settings shows source "configuration file" with sourcefile /
+    sourceline (superusers and pg_read_all_settings), "command line" for `roll-engine -c
+    name=value` (and --max-prepared-transactions, --shared-preload-libraries), "client" for
+    startup-packet values. pg_file_settings re-reads the files and marks the postmaster
+    parameters they'd change pending_restart for the session, as PostgreSQL does.
+    max_prepared_transactions and shared_preload_libraries take postgresql.auto.conf's value
+    at start when the command line gives none. ALTER SYSTEM (`Session::alter_system`):
+    allow_alter_system, PreventInTransactionBlock, superuser or GRANT ALTER SYSTEM ON
+    PARAMETER, the GUC_DISALLOW_IN_FILE / _AUTO_FILE parameters, placeholders, newlines.
+    pg_conf_load_time is the last load's time. Golden `a80_alter_system`.
+  - `src/hba.rs`: pg_hba.conf rules from `roll-engine --hba-file` or `--hba "<line>"`
+    (repeatable), pg_ident.conf from `--ident-file`; read again by every reload (a file with
+    errors keeps the old rules: "pg_hba.conf was not reloaded"); pg_hba_file_rules and
+    pg_ident_file_mappings show the files as they are. Without rules every connection uses
+    `--auth`, as before. Connections are TCP, so host / hostnossl / hostnogssenc lines
+    match; `local` lines match the engine's connections to itself through libpq's default
+    socket (dblink / postgres_fdw without a host, marked by `hba::mark_local`), as the
+    reference's Unix socket ones: `--hba "local all all trust" --hba "host all all all
+    scram-sha-256"` is the reference image's policy. trust, reject, scram-sha-256, md5,
+    password; other methods fail as their authentication would. auth_delay (preloaded)
+    waits auth_delay.milliseconds after a failed authentication.
+  - `src/log.rs`, `session/serverlog.rs`: the server log PostgreSQL writes to stderr
+    (nothing until an embedder sets a sink; `roll-engine` writes to its stderr):
+    log_line_prefix (every escape), log_timezone, log_error_verbosity (terse / default /
+    verbose with LOCATION), log_min_messages and log_min_error_statement (errors and
+    warnings with their STATEMENT), log_statement (GetCommandLogLevel's classes),
+    log_duration / log_min_duration_statement / log_min_duration_sample, extended-protocol
+    "execute <name>" lines with their parameters (log_parameter_max_length),
+    log_connections (PostgreSQL 18's receipt / authorization) and log_disconnections, and
+    the postmaster's reload and startup lines. LOG messages reach the client too past
+    client_min_messages, as in PostgreSQL. auto_explain (`ext/auto_explain.rs`, loaded by
+    LOAD, session_preload_libraries or shared_preload_libraries): top-level statements past
+    log_min_duration, with log_analyze / log_buffers / log_timing / log_verbose /
+    log_settings, log_format text or json (xml, yaml as EXPLAIN prints them),
+    log_parameter_max_length, sample_rate, log_level. `tests/server_log.rs` follows
+    contrib/auto_explain's TAP test. Not done: nested statements (log_nested_statements),
+    log_lock_waits / log_temp_files / log_checkpoints lines, logging_collector and
+    pg_current_logfile (always NULL), csvlog / jsonlog. pg_ls_logdir fails as a cluster without
+  a log directory does.
+  - Verified: crate tests, clippy, the difftest smoke, pg_contrib auto_explain 12 / 12,
+    passwordcheck 12 / 12, pg_stat_statements 1,013 / 1,013, a full regress run (debug,
+    private reference) 51,148 / 51,150 with no unit changed against the committed
+    results.tsv, and guc, sysviews, plpgsql, misc_functions, stats and rules after the last
+    changes (2,533 / 2,533). Not done: `port` / `listen_addresses` still report the image's
+    values, not `--listen`'s (goldens over the wire run on random ports).
 - **Two-phase commit** (round 19, agent 71): PREPARE TRANSACTION, COMMIT / ROLLBACK
   PREPARED, pg_prepared_xacts (`txn/twophase.rs`, `session/prepared.rs`).
   max_prepared_transactions is a server option (`roll-engine --max-prepared-transactions N`,
