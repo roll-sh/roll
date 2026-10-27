@@ -912,6 +912,135 @@ Left, with what was found:
   order, one thread), index-only scans of big tables that need the heap, window functions
   and sorts on one thread, numeric values allocating.
 
+## Round 20 (agent 77): analytic executor, first batch
+
+The same harness and settings: both servers on cores 28-31, the client on 16-19, the
+machine shared with other agents' builds and test runs (load 14-18). **pg** is PostgreSQL
+18.6 (container `a77-pg`); **before** the engine at `c7f59d74` (agent 64's second batch);
+**after** with this batch. Each engine run follows a restart and a first read of lineitem,
+orders and partsupp; medians of 3, the better of two interleaved runs per side; **spread**
+the larger of the two sides' run-to-run differences (high here: the runs shared the machine
+with other agents' builds). Every result hash agrees with PostgreSQL's.
+
+| query | pg | before | after | after / pg | after / before | spread |
+|---|---|---|---|---|---|---|
+| q01 | 1.969 | 8.180 | 2.179 | 0.90x | 3.75x | 47% |
+| q02 | 0.202 | 1.151 | 1.197 | 0.17x | 0.96x | 26% |
+| q03 | 0.389 | 2.355 | 1.141 | 0.34x | 2.06x | 53% |
+| q04 | 0.142 | 1.012 | 0.609 | 0.23x | 1.66x | 50% |
+| q05 | 0.291 | 1.263 | 1.069 | 0.27x | 1.18x | 61% |
+| q06 | 0.376 | 2.012 | 1.797 | 0.21x | 1.12x | 50% |
+| q07 | 0.471 | 7.915 | 7.783 | 0.06x | 1.02x | 18% |
+| q08 | 0.211 | 3.043 | 3.080 | 0.07x | 0.99x | 13% |
+| q09 | 1.300 | 18.39 | 5.370 | 0.24x | 3.42x | 25% |
+| q10 | 0.679 | 6.266 | 3.957 | 0.17x | 1.58x | 20% |
+| q11 | 0.088 | 1.071 | 1.068 | 0.08x | 1.00x | 14% |
+| q12 | 0.549 | 6.569 | 3.727 | 0.15x | 1.76x | 34% |
+| q13 | 0.844 | 5.382 | 4.109 | 0.21x | 1.31x | 32% |
+| q14 | 0.139 | 1.980 | 1.940 | 0.07x | 1.02x | 34% |
+| q15 | 0.338 | 1.518 | 1.448 | 0.23x | 1.05x | 42% |
+| q16 | 0.227 | 1.524 | 0.797 | 0.28x | 1.91x | 29% |
+| q17 | 0.842 | 3.561 | 1.754 | 0.48x | 2.03x | 20% |
+| q18 | 2.186 | 10.36 | 4.990 | 0.44x | 2.08x | 40% |
+| q19 | 0.053 | 0.458 | 0.497 | 0.11x | 0.92x | 90% |
+| q20 | 0.107 | 3.045 | 0.914 | 0.12x | 3.33x | 40% |
+| q21 | 0.480 | 2.982 | 2.732 | 0.18x | 1.09x | 46% |
+| q22 | 0.120 | 0.639 | 0.789 | 0.15x | 0.81x | 34% |
+| all 22 | 12.00 | 90.7 | 52.9 | 0.23x | 1.71x | |
+
+### What the profiles showed
+
+`perf` of every query (`tools/bench/perf.sh`'s helper, user-space cycles: the host's kernel
+symbols break `perf report`) and per-thread shares. In 15 of the 22 queries the executor's
+thread did most of the work while the three scan workers waited, for these reasons, by
+total time:
+
+1. **Nested loops over inner index scans on the executor's thread** (q09, q03, q04, q18's
+   outer loop, q21, q05, q19, q22): an index scan per outer row, each reading the index
+   entries and fetching rows through every LSM source; q09 alone 18 s. PostgreSQL runs these
+   loops in its parallel workers.
+2. **bpchar filters and keys without kernels** (q01, q10, q12, q19, ...): `l_shipmode =
+   'MAIL'` compares `l_shipmode::bpchar`, an implicit length coercion the kernels didn't do,
+   so every row went to the executor's thread unfiltered; GROUP BY a bpchar (q01's
+   l_returnflag, q12's l_shipmode) kept partial aggregation off.
+3. **Full index scans serial**: q18's grouping along lineitem_pkey (6M entries), count(*) by
+   index-only scan (3 s for lineitem).
+4. **Numeric intermediate values**: two allocations per value per operator in q01's
+   `l_extendedprice * (1 - l_discount) * (1 + l_tax)`.
+5. **Joins kept off the workers**: right joins (q13), joins with a sub-select in the join
+   condition (q17: 6M probes on the executor's thread to find 60k candidates).
+6. **`= ANY (subquery)` compared against every row** of the sub-select per outer row (q20's
+   hashed SubPlan, 10k x 5k comparisons).
+
+Storage, outside this round's scope (agent 74's): the block cache holds decompressed blocks
+and TPC-H SF1's don't fit in `--cache-mb 2048`, so random index lookups decompress most of the
+blocks they read (zstd was 10-15% of q07 / q09 / q18; q09 at `--cache-mb 8192` took 10.8 s
+instead of 19.6 with the base executor); a worker decodes a lineitem row in about 450 ns
+(count with a numeric filter: 0.93 s against PostgreSQL's 0.33).
+
+### What changed
+
+- **Index lookups in the workers** (`exec/lookup.rs`): a nested loop whose inner side is a
+  plain btree index scan by equality, over a parallel scan, becomes a pipeline stage next to
+  the hash probes (`pipe::Stage`): each worker encodes the index key from its outer row
+  (kernels over the loop's parameters), reads the entries and fetches their rows from the
+  store at the statement's snapshot (`Txn::store_reader`: only while the transaction has
+  written nothing, when its reads are the store's), decodes the columns read, and applies the
+  inner filter and join condition: inner, left, semi and anti loops. A worker keeps the rows
+  of a small (modelled) table's keys it looked up. Rows a kernel can't do go to the executor's
+  thread in their place, where the loop runs them serially. Not for modelled tables unless
+  the index is unique and fully matched and every page is all-visible (a fetch could prune a
+  page or kill entries otherwise: `sizing::fetches_change_nothing`), Memoize (its cache
+  changes the scan counts), EXPLAIN ANALYZE, predicate locks. The index statistics are
+  counted as the serial loop counts them.
+- **Full secondary-index scans in the workers** (`ScanNode::start_parallel_index`,
+  `parscan::IndexChunk`): for a pipeline above (partial aggregation, probes), the index's
+  entry range is cut into chunks the workers read in index order, fetching rows a batch at a
+  time (an index-only scan decodes its entries); a big table only (not modelled: equal keys'
+  rows in storage order).
+- **Right and full hash joins** probe in the workers, the matched inner rows in shared flags;
+  a join condition with no kernel defers only outer rows that have candidates.
+- **Kernels**: casts that read no setting (length coercions, string to string, number to
+  number, date to timestamp), EXTRACT / date_part of dates and timestamps, numeric + - x
+  computed exactly in an i128 at the operands' scales without making intermediate values
+  (`K::num`), which partial sums take directly (`SumNum::add_wide`).
+- **Partial aggregation** groups bpchar keys (trimmed; the group keeps its first row's
+  value) and no longer feeds the hash table order model row by row when groups come out
+  sorted (a GroupAggregate).
+- **Hashed ANY**: an uncorrelated `x = ANY (subquery)` whose type's `=` is equality of values
+  (`hashable_type`) looks x up in a set of the sub-select's values (ExecHashSubPlan's
+  answers for NULLs and no rows).
+
+### Where TPC-H is still slower
+
+- q07, q08 (serial nested-loop plans unlike PostgreSQL's), q13 (serial plan), q20, q21:
+  plans differ (agent 78's work); q07's fully serial plan is 7.8 s.
+- Storage reads: index lookups mostly decompress blocks (above); scans decode rows 3x slower
+  than PostgreSQL's workers read tuples (q06, q14, q15 are scan-bound in the workers).
+- Numeric columns still decode into an `Arc` and a `BigInt` per value; sorts and window
+  functions run on one thread; the hash join's build side is hashed on the executor's thread.
+- Small modelled tables (customer, part, supplier) aren't scanned in parallel (q02, q11,
+  q16, q22 run serial plans whose per-row costs are point reads).
+
+### Verification (round 20, agent 77)
+
+- `cargo test -p pg-engine` (all of it, `tests/parallel_scan.rs`'s new
+  `parallel_lookups_match_serial`: inner, left, semi and anti loops over index lookups,
+  several rows per key, inner filters, join conditions, a unique index of a modelled table,
+  loops stacked, an error at a late row, full index and index-only scans under an
+  aggregation, serial against parallel row for row with the same index statistics; right and
+  full joins, bpchar keys and filters, casts in the other two) and `cargo clippy -p pg-engine
+  --all-targets` with no new warnings.
+- The regression suite in full (debug build, private reference): 51,148 / 51,150, no unit
+  changed against the committed baseline.
+- `difftest smoke` passes; 150 seeds x 120 statements (`DIFFTEST_PLAN=0.5`) against the
+  base's run (`c7f59d74`): 22 of its 140 mismatch records gone (the upstream difftest round 3
+  fixes) and two new ones, neither through this batch's paths (tiny tables, no parallel scan:
+  a missing error POSITION in the binder's ungrouped-column check, and an array-length
+  error under GROUPING SETS).
+- Every TPC-H result hash agrees with PostgreSQL's; pgbench select-only at scale 10 (8
+  clients, 5 interleaved runs each) within noise of the base (medians 52.1k / 53.0k TPS).
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

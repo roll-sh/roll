@@ -425,6 +425,32 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   sorts by the session's work_mem, per-relation group estimates, a grouped CTE's order). Executor: a bitmap heap scan selecting
   many rows of a table too big to model runs as a filtered (parallel) scan of the table,
   outside EXPLAIN ANALYZE and predicate locking (q06 26 s -> about 2 s).
+- **Analytic executor, first batch** (round 20, agent 77; BENCH.md "Round 20 (agent 77)"):
+  profiles of all 22 TPC-H queries showed the executor's thread doing what PostgreSQL's
+  parallel workers do. Now in the workers: a nested loop's inner index scans by equality
+  (`exec/lookup.rs`, a pipeline stage beside the hash probes: each worker scans the index for
+  its own outer rows and fetches their rows from the store at the statement's snapshot,
+  `Txn::store_reader`, only while the transaction has written nothing), full scans of a big
+  table's secondary index under a pipeline (`ScanNode::start_parallel_index`, chunks in index
+  order; count(*) as an index-only scan, q18's grouping along lineitem_pkey), right and full
+  hash join probes (matched inner rows in shared flags), and joins whose condition has no
+  kernel (only outer rows with candidates go to the executor's thread). Kernels gained
+  session-free casts (the implicit `bpchar` length coercion kept every bpchar filter on the
+  executor's thread), EXTRACT / date_part, and numeric + - x in an i128 without intermediate
+  values; partial aggregation groups bpchar keys and skips the hash-order model when groups
+  come out sorted; an uncorrelated `= ANY (subquery)` of an exactly hashable type is a set
+  lookup (q20 compared each row with every subquery row). Conditions that keep the serial
+  path: modelled tables only for unique full-key lookups and only while every page is
+  all-visible (`sizing::fetches_change_nothing`: a fetch could prune or kill otherwise),
+  Memoize, EXPLAIN ANALYZE, predicate locks, row marks. Index scans' statistics are counted
+  as the serial loops count them; rows the workers read past a failing row are counted as
+  PostgreSQL's workers count them. Tests: `tests/parallel_scan.rs`
+  `parallel_lookups_match_serial` and new queries in the other two.
+  Found, not executor work: the block cache holds decompressed blocks and TPC-H SF1's no
+  longer fit in 2 GB, so index lookups of lineitem and orders decompress (zstd) most blocks
+  they read (q09 at `--cache-mb 8192`: 19.6 s -> 10.8 s with the base executor); scans decode
+  rows at about 450 ns each per worker (PostgreSQL ~150); q07, q08, q13 (serial plans), q20
+  and q21 have plans unlike PostgreSQL's.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
