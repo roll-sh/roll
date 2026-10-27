@@ -84,9 +84,9 @@ has no `regress.so`, whose functions dblink's test creates).
 | dblink | 218 | 218 | done |
 | pgvector (0.8.7) | 915 | 915 | done (see below) |
 | bloom | 58 | 58 | done (on the native index access method interface) |
-| test_decoding | 1047 | 1014 | logical decoding (round 20, agent 79; see below) |
+| test_decoding | 1047 | 1024 | logical decoding (round 20, agents 79 and 87; see below) |
 
-### test_decoding (round 20, agent 79)
+### test_decoding (round 20, agents 79 and 87)
 
 Logical decoding (HANDOFF "Logical replication"). Its tests need the module's temp-config
 (`logical.conf`: wal_level = logical, max_replication_slots = 4, logical_decoding_work_mem =
@@ -101,21 +101,37 @@ docker run -d --name me-cref -e POSTGRES_PASSWORD=pw -e POSTGRES_INITDB_ARGS="--
 PGCONTRIB_ONLY=test_decoding PGREGRESS_CONTAINER=me-cref ... cargo test -p pg-engine --test pg_contrib -- --ignored --nocapture
 ```
 
-1,014 / 1,047 (96.8%): xact, binary, prepared, time, messages, spill, truncate whole; ddl 246 /
-252, slot 89 / 91, replorigin 86 / 87, stats 34 / 38. What differs:
-- **Streaming of rolled-back subtransactions** (stream 4, twophase_stream 2, decoding_in_xact
+1,024 / 1,047 (97.8%; round 20, agent 87, at 61214bbc; agent 79's commit measured 1,014): xact,
+binary, prepared, time, messages, spill, truncate, permissions, slot, replorigin whole; ddl 251 /
+252, stats 35 / 38. Agent 87 fixed: copy_replication_slot's (swapped, as in PostgreSQL) error
+messages, a session origin's local position at every commit, include-rewrites (a table
+rewrite's rows logged as rewrite inserts, decoded only for plugins asking), a rolled-back
+prepared transaction over logical_decoding_work_mem decoded without its changes
+(ReorderBufferCheckAndTruncateAbortedTXN), a user catalog table refusing a rewrite, MERGE ...
+INSERT VALUES (s.*), and `-c` settings stored normalized (RESET logical_decoding_work_mem gave
+0, so stats' spill counters stayed 0). What differs:
+- **Streaming of rolled-back subtransactions** (stream 3, twophase_stream 2, decoding_in_xact
   1): PostgreSQL decodes a subtransaction's changes before it learns it rolled back, so a big
   one streams and then reports "aborting streamed (sub)transaction"; the engine's change
   records of a subtransaction go with its ROLLBACK TO, so a transaction is streamed only for
   what it committed.
-- **include-rewrites** (ddl 1): table rewrites (ALTER TABLE ... ADD COLUMN with a volatile
-  default) aren't decoded as inserts.
-- **Catalog-table features** (rewrite 7, ddl 2, toast 1): CLUSTER pg_class, a user catalog
-  table refusing a rewrite, `pg_relation_size` of a shared catalog's TOAST table, UPDATE of
-  pg_attribute (permission), MERGE ... INSERT VALUES (s.*) (executor, not decoding).
+- **Catalog-table features** (rewrite 7, toast 1): CLUSTER pg_class, `pg_relation_size` of a
+  shared catalog's TOAST table, UPDATE of pg_attribute (permission).
+- **Plan choices** (ddl 1, stats 3): the MERGE's join keeps the target table as the hashed
+  side, so its rows come out in another order (PostgreSQL hashes the target there); three
+  slot-creating function scans in one FROM are joined s3 first (PostgreSQL: s1, s2, s3), so
+  the slots take other places in pg_replication_slots.
 - **decoding_into_rel** (3): decoding into a table in the transaction that reads the slot.
-- stats (4): spill counters of the reference's reorder buffer (its memory accounting of a
-  serialized big transaction) and pg_stat_replication_slots' row order after a drop.
+- twophase (2): pg_locks rows of a prepared transaction (lock code).
+
+End to end (agent 87, debug build, PostgreSQL 18.6 in a host-network container): a
+PostgreSQL subscriber (`CREATE SUBSCRIPTION ... PUBLICATION p1` against the engine) copies the
+tables (tablesync workers, all `r`) and then streams: PK and REPLICA IDENTITY FULL tables,
+UPDATEs of the key, TRUNCATE, and about 6,000 small transactions from two concurrent sessions,
+both sides identical (row counts, sums, md5 of every row). pg_recvlogical: --create-slot with
+test_decoding, --start with plugin options writing a file (inserts, update, delete,
+transactional message), stopped with SIGINT, the slot's confirmed position at the WAL end,
+restarted from there with only the new transaction, --drop-slot.
 - twophase (2): pg_locks rows of a prepared transaction (lock code).
 
 ### pgvector (round 20, agent 70)

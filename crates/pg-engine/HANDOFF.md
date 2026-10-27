@@ -536,6 +536,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     and stores the origin's progress in the same commit.
   - Tests and scores: see "Logical replication" in `tests/contrib/STATUS.md` (test_decoding)
     and the verification notes there.
+  - Verified as a whole (round 20, agent 87, rebased onto 5f9f26f3, whose group-committed DDL
+    shares `Store::commit_grouped` with the change stream's sealing): the crate suite at the
+    default and with `ROLL_TXN_SPILL_BYTES=4096`, clippy without new warnings, isolation 121 /
+    122 (the branch's own), a full regress run on a private reference 51,148 / 51,150 with no
+    unit changed against `results.tsv`, test_decoding 1,024 / 1,047, a PostgreSQL 18.6 subscriber of the
+    engine (initial copy and streaming) and pg_recvlogical (STATUS.md has the details). A
+    commit without a slot does nothing more than before: the WAL position's atomic add (by
+    exactly what pg_stat_wal counts), no replication state read, no origin lock while no
+    session has an origin. An in-process bench (`bench oltp`, release, no fsync, one client
+    pinned to 4 CPUs, 6 rounds of base ea038e8e and head interleaved) on a machine at load 40-60:
+    insert medians 13.4k / 13.3k tps, update_indexed 7.3k / 6.9k, within the rounds' own spread
+    (11-15k, 5-9k); re-measure on a quiet machine for anything finer.
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
