@@ -2210,7 +2210,7 @@ pub fn shared_states(aggs: &[AggCall], presorted: Option<usize>) -> Vec<Option<u
     let mut share: Vec<Option<usize>> = vec![None; aggs.len()];
     for i in 0..aggs.len() {
         let a = &aggs[i];
-        let Some(ua) = &a.user else { continue };
+        let Some(ua) = a.user.as_ref().filter(|u| !u.internal) else { continue };
         if a.def.kind.is_ordered() {
             continue;
         }

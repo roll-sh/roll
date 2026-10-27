@@ -54,6 +54,9 @@ pub struct Options {
     /// SERIALIZE BINARY (else TEXT).
     pub serialize_binary: bool,
     pub format: Format,
+    /// pg_overexplain's DEBUG and RANGE_TABLE (options once the library is loaded).
+    pub debug: bool,
+    pub range_table: bool,
 }
 
 /// A restriction or inner join clause as it comes out of its equivalence class: an `=`
@@ -218,6 +221,12 @@ fn def_bool(d: &pb::DefElem) -> Result<bool> {
 
 /// `ParseExplainOptionList`.
 pub fn options(list: &[pb::Node]) -> Result<Options> {
+    options_with(list, false)
+}
+
+/// `ParseExplainOptionList`, with pg_overexplain's options when `overexplain` (the library is
+/// loaded: RegisterExtensionExplainOption).
+pub fn options_with(list: &[pb::Node], overexplain: bool) -> Result<Options> {
     let mut o = Options {
         analyze: false,
         verbose: false,
@@ -232,6 +241,8 @@ pub fn options(list: &[pb::Node]) -> Result<Options> {
         memory: false,
         serialize: false,
         serialize_binary: false,
+        debug: false,
+        range_table: false,
         format: Format::Text,
     };
     let (mut timing, mut summary, mut buffers) = (None, None, None);
@@ -283,6 +294,8 @@ pub fn options(list: &[pb::Node]) -> Result<Options> {
                     _ => return Err(bad_value(d, &v)),
                 };
             }
+            "debug" if overexplain => o.debug = def_bool(d)?,
+            "range_table" if overexplain => o.range_table = def_bool(d)?,
             other => {
                 return Err(with_pos(
                     Error::new(
@@ -830,6 +843,9 @@ struct Builder<'c, 'a> {
     /// The copies of group keys' sub-selects GROUPING() arguments are, by the GROUPING
     /// call (its definition's address, unique per call) and argument.
     phantoms: HashMap<(usize, usize), SubplanLabel>,
+    /// Sample scans whose method can't repeat its scans (`unrepeatable_samples`), by address:
+    /// they read under a Materialize.
+    samples: std::collections::HashSet<usize>,
 }
 
 /// A query level met while converting: its id, the level it is in, whether it is a FROM
@@ -11761,6 +11777,13 @@ impl Builder<'_, '_> {
         n.cols = cols;
         n.key = Some(addr(p));
         n.subplans.append(&mut self.pending);
+        // set_tablesample_rel_pathlist: a method that can't repeat its scans (tsm_system_time)
+        // reads under a Materialize when the scan may run more than once.
+        if (self.depth > 0 && s.sample.as_ref().is_some_and(|ts| !repeatable_across_scans(ts.method)))
+            || self.samples.contains(&addr(p))
+        {
+            n = self.materialize_top(n);
+        }
         if s.mark.is_some() && !s.fdw.as_ref().is_some_and(|f| f.copy_mark) {
             n = self.lock_scan(n, p, s, &names);
         }
@@ -18616,6 +18639,8 @@ fn estimate_options() -> Options {
         memory: false,
         serialize: false,
         serialize_binary: false,
+        debug: false,
+        range_table: false,
         format: Format::Text,
     }
 }
@@ -18663,6 +18688,7 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
+        samples: Default::default(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -19194,6 +19220,8 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         memory: false,
         serialize: false,
         serialize_binary: false,
+        debug: false,
+        range_table: false,
         format: Format::Text,
     };
     let groups = |p: &Arc<Plan>| {
@@ -19238,6 +19266,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
+        samples: Default::default(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -19292,6 +19321,8 @@ pub fn set_group_estimates(
         memory: false,
         serialize: false,
         serialize_binary: false,
+        debug: false,
+        range_table: false,
         format: Format::Text,
     };
     let (refnames, _) = assign_refnames(input);
@@ -19335,6 +19366,7 @@ pub fn set_group_estimates(
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
+        samples: Default::default(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -19399,6 +19431,8 @@ pub fn agg_redundant_keys(
         memory: false,
         serialize: false,
         serialize_binary: false,
+        debug: false,
+        range_table: false,
         format: Format::Text,
     };
     let (refnames, _) = assign_refnames(input);
@@ -19442,6 +19476,7 @@ pub fn agg_redundant_keys(
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
+        samples: Default::default(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -19485,6 +19520,8 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         memory: false,
         serialize: false,
         serialize_binary: false,
+        debug: false,
+        range_table: false,
         format: Format::Text,
     };
     let (refnames, _) = assign_refnames(plan);
@@ -19528,6 +19565,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
+        samples: Default::default(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -19599,6 +19637,8 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
         memory: false,
         serialize: false,
         serialize_binary: false,
+        debug: false,
+        range_table: false,
         format: Format::Text,
     };
     let (refnames, _) = assign_refnames(plan);
@@ -19642,6 +19682,7 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
+        samples: Default::default(),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,
@@ -20076,6 +20117,51 @@ thread_local! {
 /// search_indexed_tlist_for_non_var never replaces with references. (A subquery's planned
 /// apart are read through its scan's Vars, or its plan's target list once that scan is
 /// removed: referenced.)
+/// TsmRoutine.repeatable_across_scans of a TABLESAMPLE method: tsm_system_time's isn't.
+fn repeatable_across_scans(method: &str) -> bool {
+    method != "system_time"
+}
+
+/// The sample scans set_tablesample_rel_pathlist puts under a Materialize (their method
+/// can't repeat its scans and the scan may run more than once): in a subquery planned apart,
+/// or in a query level of more than one relation (an inheritance tree or an appendrel counts
+/// as one), by address.
+fn unrepeatable_samples(root: &Plan) -> std::collections::HashSet<usize> {
+    /// The relations of the query level `p` is in (not looking into subqueries planned apart).
+    fn rels(p: &Plan) -> usize {
+        match p {
+            Plan::Scan(_)
+            | Plan::SysScan { .. }
+            | Plan::FunctionScan { .. }
+            | Plan::Values { .. }
+            | Plan::CteScan { .. }
+            | Plan::WorkScan { .. }
+            | Plan::EnrScan { .. }
+            | Plan::Barrier { .. }
+            | Plan::Append { .. } => 1,
+            p => plan_inputs(p).iter().map(|c| rels(c)).sum(),
+        }
+    }
+    fn walk(p: &Plan, level_rels: usize, sub: bool, out: &mut std::collections::HashSet<usize>) {
+        match p {
+            Plan::Scan(s) => {
+                if s.sample.as_ref().is_some_and(|ts| !repeatable_across_scans(ts.method)) && (sub || level_rels != 1) {
+                    out.insert(addr(p));
+                }
+            }
+            Plan::Barrier { input, .. } => walk(input, rels(input), true, out),
+            p => {
+                for c in plan_inputs(p) {
+                    walk(c, level_rels, sub, out);
+                }
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    walk(root, rels(root), false, &mut out);
+    out
+}
+
 fn plain_const_lists(root: &Plan) -> std::collections::HashSet<usize> {
     fn top(p: &Plan, out: &mut std::collections::HashSet<usize>) {
         match p {
@@ -20362,6 +20448,7 @@ pub fn explain(
         key_sub_ids: Default::default(),
         key_subs: HashMap::new(),
         phantoms: HashMap::new(),
+        samples: unrepeatable_samples(plan),
         having: None,
         pw_aggs: Vec::new(),
         pw_partial: false,

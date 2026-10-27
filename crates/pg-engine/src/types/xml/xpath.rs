@@ -2226,7 +2226,7 @@ pub fn cast_to_string(x: &XDoc, v: &mut XValue) -> String {
 }
 
 /// `xmlXPathCastToNumber`.
-fn cast_to_number(x: &XDoc, v: &mut XValue) -> f64 {
+pub fn cast_to_number(x: &XDoc, v: &mut XValue) -> f64 {
     match v {
         XValue::NodeSet(s) => string_to_number(&cast_node_set_to_string(x, s)),
         XValue::String(s) => string_to_number(s),

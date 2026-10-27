@@ -369,6 +369,7 @@ impl From<std::io::Error> for Error {
 pub mod code {
     pub const SUCCESSFUL_COMPLETION: &str = "00000";
     pub const TRIGGER_PROTOCOL_VIOLATED: &str = "39P01";
+    pub const TRIGGERED_ACTION_EXCEPTION: &str = "09000";
     pub const GENERATED_ALWAYS: &str = "428C9";
     pub const BAD_COPY_FILE_FORMAT: &str = "22P04";
     pub const TOO_MANY_ARGUMENTS: &str = "54023";

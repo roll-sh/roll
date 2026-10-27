@@ -35,6 +35,8 @@ pub(crate) mod relinfo;
 mod pgrowlocks;
 mod dicts;
 mod sslinfo;
+mod spi;
+mod xml2;
 mod tcn;
 mod pgstattuple;
 mod pg_visibility;

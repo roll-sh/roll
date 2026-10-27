@@ -139,6 +139,8 @@ pub fn lookup(probin: &str, symbol: &str) -> Option<Native> {
         "uuid-ossp" => super::uuid_ossp::symbol(symbol),
         "tsm_system_rows" | "tsm_system_time" => super::tsm::symbol(symbol),
         "pgrowlocks" => super::pgrowlocks::symbol(symbol),
+        "autoinc" | "insert_username" | "moddatetime" | "refint" => super::spi::symbol(symbol),
+        "pgxml" => super::xml2::symbol(symbol),
         "sslinfo" => super::sslinfo::symbol(symbol),
         "tcn" => super::tcn::symbol(symbol),
         "dict_int" | "dict_xsyn" => super::dicts::symbol(symbol),
@@ -196,6 +198,7 @@ pub fn trigger(probin: &str, symbol: &str) -> Option<TriggerImpl> {
     match library(probin) {
         "lo" => super::lo::trigger(symbol),
         "tcn" => super::tcn::trigger(symbol),
+        "autoinc" | "insert_username" | "moddatetime" | "refint" => super::spi::trigger(symbol),
         _ => None,
     }
 }

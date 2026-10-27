@@ -752,6 +752,10 @@ pub struct UserAgg {
     /// The combine function (COMBINEFUNC), over `[state, state]`, and whether it is strict:
     /// what a Finalize Aggregate runs over the partial aggregations' states.
     pub combine: Option<(Expr, bool)>,
+    /// The transition and final functions are a built-in aggregate's internal ones over an
+    /// `internal` state (intagg's `int_agg_state AS 'array_agg_transfn'`): the call runs as
+    /// that aggregate (its `AggDef::make`), and `trans` / `final_` are never evaluated.
+    pub internal: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

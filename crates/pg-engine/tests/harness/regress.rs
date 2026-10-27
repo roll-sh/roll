@@ -283,6 +283,8 @@ const CONTRIB_MODULES: &[&str] = &[
     "auto_explain",
     "passwordcheck",
     "bloom",
+    "spi",
+    "xml2",
 ];
 
 /// Extensions outside contrib whose own regression tests run the same way: (module, git

@@ -5794,7 +5794,30 @@ impl Binder<'_, '_> {
         }
         if let Some(u) = user {
             self.require_function(u.oid);
-            let ua = self.user_agg(&u, &arg_types, &res.ret, loc)?;
+            // (Transition and final functions that are a built-in aggregate's internal
+            // ones run as that aggregate.)
+            let (def, ua) = match self.internal_agg_impl(&u, &arg_types) {
+                Some(b) => (
+                    Arc::new(crate::exec::agg::AggDef {
+                        sig: def.sig.clone(),
+                        make: b.make,
+                        kind: b.kind,
+                        skip_nulls: b.skip_nulls,
+                    }),
+                    crate::sql::plan::UserAgg {
+                        trans: Expr::Const(Value::Null, b.sig.args.first().cloned().unwrap_or(DataType::Text)),
+                        trans_strict: false,
+                        final_: None,
+                        final_strict: false,
+                        init: None,
+                        moving: None,
+                        inverse: None,
+                        combine: None,
+                        internal: true,
+                    },
+                ),
+                None => (def, self.user_agg(&u, &arg_types, &res.ret, loc)?),
+            };
             return Ok(AggCall {
                 def,
                 args: a2,
@@ -6064,6 +6087,7 @@ impl Binder<'_, '_> {
                 moving: None,
                 inverse: Some(inverse),
                 combine: None,
+                internal: false,
             }))
         } else {
             None
@@ -6085,7 +6109,50 @@ impl Binder<'_, '_> {
             moving,
             inverse: None,
             combine,
+            internal: false,
         })
+    }
+
+    /// The built-in aggregate whose internal transition and final functions (over an
+    /// `internal` state) aggregate `u`'s transition and final functions are: `LANGUAGE
+    /// internal` functions naming them (intagg's int_array_aggregate is array_agg's
+    /// `array_agg_transfn` / `array_agg_finalfn`). None: `u` runs its own functions.
+    fn internal_agg_impl(
+        &self,
+        u: &crate::catalog::Function,
+        arg_types: &[DataType],
+    ) -> Option<Arc<crate::exec::agg::AggDef>> {
+        let spec = u.agg.as_deref()?;
+        if spec.transtype.oid() != 2281 || spec.mtransfn != 0 {
+            return None;
+        }
+        // (A LANGUAGE internal function naming one, or the built-in itself.)
+        let src = |oid: u32| match self.cat.functions.get(&oid) {
+            Some(f) => (f.language == "internal").then(|| f.body.trim().to_string()),
+            None => crate::sql::func::pg_oids::PROCS
+                .iter()
+                .find(|p| p.0 == oid)
+                .map(|p| p.1.to_string()),
+        };
+        let trans = src(spec.transfn)?;
+        let final_ = if spec.finalfn == 0 { String::new() } else { src(spec.finalfn)? };
+        let name = match (trans.as_str(), final_.as_str()) {
+            ("array_agg_transfn", "array_agg_finalfn")
+            | ("array_agg_array_transfn", "array_agg_array_finalfn") => "array_agg",
+            ("string_agg_transfn", "string_agg_finalfn")
+            | ("bytea_string_agg_transfn", "bytea_string_agg_finalfn") => "string_agg",
+            _ => return None,
+        };
+        let defs = crate::exec::agg::agg_registry().by_name.get(name)?;
+        let first = arg_types.first()?;
+        defs.iter()
+            .find(|d| match d.sig.args.first() {
+                Some(DataType::Bytea) => matches!(first, DataType::Bytea),
+                Some(DataType::Text) => !matches!(first, DataType::Bytea),
+                Some(DataType::AnyArray) => first.elem().is_some(),
+                _ => first.elem().is_none(),
+            })
+            .cloned()
     }
 
     /// A call of an aggregate's support function (a user function or a built-in) on `args`;
