@@ -934,9 +934,17 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
             "no binary input function available for type gtsvector"
         ),
         T::PgBrinBloomSummary | T::PgBrinMinmaxMultiSummary => parse_value("", ty, ctx)?,
+        // date_recv: the range date_in accepts (IS_VALID_DATE), or infinity.
         T::Date => {
             need(4)?;
-            Value::Date(r.get_i32())
+            let d = r.get_i32();
+            if d != super::datetime::DATE_NEG_INF
+                && d != super::datetime::DATE_POS_INF
+                && !super::datetime::is_valid_date(d)
+            {
+                bail!(DATETIME_FIELD_OVERFLOW, "date out of range");
+            }
+            Value::Date(d)
         }
         // time_recv: in range, then the typmod's rounding.
         T::Time(m) => {
@@ -947,13 +955,25 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
             }
             Value::Time(super::datetime::round_micros(t, *m))
         }
-        T::Timestamp(_) => {
+        // timestamp_recv / timestamptz_recv: what timestamp_out can print (IS_VALID_TIMESTAMP),
+        // or infinity; then the typmod's rounding (AdjustTimestampForTypmod).
+        T::Timestamp(m) | T::Timestamptz(m) => {
             need(8)?;
-            Value::Timestamp(r.get_i64())
-        }
-        T::Timestamptz(_) => {
-            need(8)?;
-            Value::Timestamptz(r.get_i64())
+            let mut t = r.get_i64();
+            if super::datetime::ts_is_finite(t) {
+                if !super::datetime::ts_is_valid(t) {
+                    bail!(DATETIME_FIELD_OVERFLOW, "timestamp out of range");
+                }
+                t = super::datetime::round_micros(t, *m);
+                if !super::datetime::ts_is_valid(t) {
+                    bail!(DATETIME_FIELD_OVERFLOW, "timestamp out of range");
+                }
+            }
+            if matches!(ty, T::Timestamp(_)) {
+                Value::Timestamp(t)
+            } else {
+                Value::Timestamptz(t)
+            }
         }
         T::Interval(_) => {
             need(16)?;

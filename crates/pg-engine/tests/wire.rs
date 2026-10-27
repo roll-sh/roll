@@ -3576,3 +3576,30 @@ fn portals_hold_returning_rows_and_run_once() {
     assert_eq!(c.query("SELECT count(*) FROM hp"), ["T count:20/-1", "D 0", "C SELECT 1"]);
     s.engine.shutdown();
 }
+
+/// Binary date / timestamp / timestamptz input takes what the output function can print, or
+/// infinity (date_recv's IS_VALID_DATE, timestamp_recv's IS_VALID_TIMESTAMP).
+#[test]
+fn binary_datetime_input_in_range() {
+    use tokio_postgres::types::Type;
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        let code = |e: tokio_postgres::Error| e.code().unwrap().code().to_string();
+        for ty in [Type::TIMESTAMP, Type::TIMESTAMPTZ] {
+            let st = c.prepare_typed("SELECT $1 IS NOT NULL", &[ty]).await.unwrap();
+            let at = |us: i64| Raw(us.to_be_bytes().to_vec());
+            let min = -211_813_488_000_000_000i64;
+            assert!(c.query_one(&st, &[&at(min)]).await.unwrap().get::<_, bool>(0));
+            assert!(c.query_one(&st, &[&at(i64::MAX)]).await.unwrap().get::<_, bool>(0));
+            assert_eq!(code(c.query_one(&st, &[&at(min - 1)]).await.unwrap_err()), "22008");
+        }
+        let st = c.prepare_typed("SELECT $1::text", &[Type::DATE]).await.unwrap();
+        let day = |d: i32| Raw(d.to_be_bytes().to_vec());
+        let text = |r: tokio_postgres::Row| r.get::<_, String>(0);
+        assert_eq!(text(c.query_one(&st, &[&day(-2_451_545)]).await.unwrap()), "4714-11-24 BC");
+        assert_eq!(text(c.query_one(&st, &[&day(i32::MIN)]).await.unwrap()), "-infinity");
+        assert_eq!(code(c.query_one(&st, &[&day(-2_451_546)]).await.unwrap_err()), "22008");
+    });
+    s.engine.shutdown();
+}
