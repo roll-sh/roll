@@ -1000,6 +1000,36 @@ fn databases_open_and_close() {
     s.engine.shutdown();
 }
 
+/// DROP DATABASE without FORCE waits up to 5 s for the database's other sessions to go
+/// (CountOtherDBBackends), so one exiting meanwhile doesn't fail it; one staying does,
+/// after the wait.
+#[test]
+fn drop_database_waits_for_exiting_sessions() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let admin = s.connect("postgres").await;
+        admin.batch_execute("CREATE DATABASE dw").await.unwrap();
+        let a = s.connect("dw").await;
+        a.batch_execute("SELECT 1").await.unwrap();
+        let leave = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            drop(a);
+        });
+        let t = Instant::now();
+        admin.batch_execute("DROP DATABASE dw").await.unwrap();
+        assert!(t.elapsed() >= Duration::from_millis(900), "{:?}", t.elapsed());
+        leave.await.unwrap();
+
+        admin.batch_execute("CREATE DATABASE dw").await.unwrap();
+        let _a = s.connect("dw").await;
+        let t = Instant::now();
+        let err = admin.batch_execute("DROP DATABASE dw").await.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("55006"));
+        assert!(t.elapsed() >= Duration::from_millis(4500), "{:?}", t.elapsed());
+    });
+    s.engine.shutdown();
+}
+
 #[test]
 fn roles_are_cluster_wide() {
     let s = server(AuthMethod::ScramSha256);

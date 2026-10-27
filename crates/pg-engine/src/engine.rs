@@ -1593,6 +1593,25 @@ impl Engine {
         Ok(closing)
     }
 
+    /// CountOtherDBBackends: the other sessions and prepared transactions on database
+    /// `oid`, after waiting up to 5 s (50 x 100 ms) for them to go (a session exiting, or
+    /// one DROP DATABASE ... FORCE just terminated). (0, 0) once there are none.
+    fn count_other_backends(&self, oid: u32) -> (usize, usize) {
+        let mut tries = 0;
+        loop {
+            // (A session leaving may be out of the backends list but still counted on its
+            // open database, which `close_now` checks.)
+            let open = self.open.lock().dbs.get(&oid).map_or(0, |db| db.sessions.load(Ordering::SeqCst));
+            let n = self.sessions_on(oid, None).len().max(open);
+            let p = self.twophase.in_database(oid);
+            tries += 1;
+            if n + p == 0 || tries == 50 {
+                return (n, p);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn busy(name: &str, n: usize) -> Error {
         Error::new(
             code::OBJECT_IN_USE,
@@ -1821,15 +1840,12 @@ impl Cluster for Engine {
                         format!("template database \"{t}\" does not exist"),
                     )
                 })?;
-                let n = self.sessions_on(e.oid, None).len();
-                let p = self.twophase.in_database(e.oid);
-                if p > 0 {
+                if let (n, p) = self.count_other_backends(e.oid)
+                    && n + p > 0
+                {
                     let mut err = Self::busy_with(t, n, p);
                     err.message = format!("source database \"{t}\" is being accessed by other users");
                     return Err(err);
-                }
-                if n > 0 {
-                    return Err(Self::source_busy(t, n));
                 }
                 Some(e)
             }
@@ -1924,25 +1940,15 @@ impl Cluster for Engine {
             )
             .detail(Self::prepared_detail(prepared)));
         }
-        let users = self.sessions_on(entry.oid, None);
-        if !users.is_empty() || prepared > 0 {
-            if !force {
-                return Err(Self::busy_with(name, users.len(), prepared));
+        if force {
+            for pid in self.sessions_on(entry.oid, None) {
+                self.terminate_backend(pid);
             }
-            for pid in &users {
-                self.terminate_backend(*pid);
-            }
-            // Give the terminated sessions a moment to go away.
-            for _ in 0..100 {
-                if self.sessions_on(entry.oid, None).is_empty() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            let left = self.sessions_on(entry.oid, None).len();
-            if left > 0 {
-                return Err(Self::busy(name, left));
-            }
+        }
+        if let (n, p) = self.count_other_backends(entry.oid)
+            && n + p > 0
+        {
+            return Err(Self::busy_with(name, n, p));
         }
         let closed = self.close_now(entry.oid, |n| Self::busy(name, n))?;
         {
@@ -1978,9 +1984,10 @@ impl Cluster for Engine {
                 format!("database \"{to}\" already exists"),
             ));
         }
-        let users = self.sessions_on(entry.oid, None);
-        if !users.is_empty() {
-            return Err(Self::busy(from, users.len()));
+        if let (n, p) = self.count_other_backends(entry.oid)
+            && n + p > 0
+        {
+            return Err(Self::busy_with(from, n, p));
         }
         let closed = self.close_now(entry.oid, |n| Self::busy(from, n))?;
         let mut r = self.registry.lock();
