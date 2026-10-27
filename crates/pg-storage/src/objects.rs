@@ -33,17 +33,37 @@ pub enum StorageConfig {
 pub struct Objects {
     store: Arc<dyn ObjectStore>,
     pub description: String,
+    durable: bool,
 }
 
 const PART_SIZE: usize = 8 * 1024 * 1024;
 
 impl Objects {
+    /// A store over `config`. A local directory doesn't fsync: a blob can be lost on a crash or
+    /// power loss after its write returned. See [`Objects::new_durable`].
     pub fn new(config: &StorageConfig) -> anyhow::Result<Self> {
+        Self::open(config, false)
+    }
+
+    /// Like [`Objects::new`], but a local directory fsyncs every blob it writes, and the
+    /// directories it creates, before the write returns, so whatever references a blob after a
+    /// successful write can rely on it surviving power loss. S3 is unchanged: its writes are
+    /// durable when they return.
+    pub fn new_durable(config: &StorageConfig) -> anyhow::Result<Self> {
+        Self::open(config, true)
+    }
+
+    /// Whether a write is on stable storage when it returns.
+    pub fn durable(&self) -> bool {
+        self.durable
+    }
+
+    fn open(config: &StorageConfig, fsync: bool) -> anyhow::Result<Self> {
         Ok(match config {
             StorageConfig::Local(dir) => {
                 std::fs::create_dir_all(dir)?;
-                let store = LocalFileSystem::new_with_prefix(dir)?.with_automatic_cleanup(true);
-                Self { store: Arc::new(store), description: format!("file://{}", dir.display()) }
+                let store = LocalFileSystem::new_with_prefix(dir)?.with_automatic_cleanup(true).with_fsync(fsync);
+                Self { store: Arc::new(store), description: format!("file://{}", dir.display()), durable: fsync }
             }
             StorageConfig::S3 { bucket, region, endpoint, prefix } => {
                 let mut b = AmazonS3Builder::from_env().with_bucket_name(bucket);
@@ -62,7 +82,7 @@ impl Objects {
                     Some(p) => Arc::new(PrefixStore::new(s3, p.as_str())),
                     None => Arc::new(s3),
                 };
-                Self { store, description }
+                Self { store, description, durable: true }
             }
         })
     }
@@ -290,6 +310,48 @@ pub(crate) mod tests {
         assert!(stored < raw / 100, "repetitive data should compress well");
         let back = zstd::decode_all(&o.get("z.zst").await.unwrap().unwrap()[..]).unwrap();
         assert_eq!(back, data);
+    }
+
+    #[tokio::test]
+    async fn durable_local_store_fsyncs_and_works_the_same() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("roll-objects-durable-{n}"));
+        let o = Objects::new_durable(&StorageConfig::Local(dir.clone())).unwrap();
+        assert!(o.durable());
+        assert!(!Objects::new(&StorageConfig::Local(dir.clone())).unwrap().durable(), "plain local stores don't fsync");
+        // Puts into new directories, multipart uploads and zstd uploads all go through the
+        // fsyncing paths and read back the same.
+        o.put("code/blobs/ab/cdef", Bytes::from_static(b"blob")).await.unwrap();
+        assert_eq!(o.get("code/blobs/ab/cdef").await.unwrap().unwrap(), "blob");
+        let data: Vec<u8> = (0..(PART_SIZE as u32 * 2 + 12345)).map(|i| (i % 253) as u8).collect();
+        assert_eq!(o.upload("code/packs/big", &data[..]).await.unwrap(), data.len() as u64);
+        let mut out = Vec::new();
+        o.download("code/packs/big", &mut out).await.unwrap();
+        assert_eq!(out, data);
+        o.upload_zstd("z.zst", &data[..], |_| {}).await.unwrap();
+        assert_eq!(zstd::decode_all(&o.get("z.zst").await.unwrap().unwrap()[..]).unwrap(), data);
+        // Overwrites replace atomically; nothing staged is left behind.
+        o.put("code/blobs/ab/cdef", Bytes::from_static(b"again")).await.unwrap();
+        assert_eq!(o.get("code/blobs/ab/cdef").await.unwrap().unwrap(), "again");
+        let mut listed: Vec<String> = o.list("").await.unwrap().into_iter().map(|(k, _)| k).collect();
+        listed.sort();
+        assert_eq!(listed, ["code/blobs/ab/cdef", "code/packs/big", "z.zst"]);
+        o.delete_prefix("code/").await.unwrap();
+        assert!(o.get("code/packs/big").await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn s3_is_durable_either_way() {
+        let config = StorageConfig::S3 {
+            bucket: "b".into(),
+            region: Some("us-east-1".into()),
+            endpoint: Some("http://[IP]:9".into()),
+            prefix: Some("p".into()),
+        };
+        let (plain, durable) = (Objects::new(&config).unwrap(), Objects::new_durable(&config).unwrap());
+        assert!(plain.durable() && durable.durable());
+        assert_eq!(plain.description, durable.description);
     }
 
     #[test]

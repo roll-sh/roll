@@ -6,6 +6,7 @@ Monorepo for roll, serverless infrastructure. Use pnpm for the web side (`apps/*
 ## Brand
 
 - The name is **roll**, lowercase. Never write "roll.sh" in a logo, lockup or UI title.
+- roll code's tagline is **keep the code rolling**. It's lowercase in UI strips and footers, and starts with a capital at the start of prose.
 - **Horizon is THE logo.** It is a dome cut into three horizontal bands that sits on a base line.
   - It is `HorizonMark` / `RollLogo` in `@roll/brand`.
   - The same mark is used in the header, sidebar, favicon, avatar and every other place where the logo appears. Don't invent variants.
@@ -103,6 +104,148 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - compaction: `tests/compaction.rs`
   - Set `ROLL_E2E_S3_BUCKET` (plus `ROLL_E2E_S3_ENDPOINT` and AWS credentials) to run the broker tests against S3.
   - `roll stream …` in `crates/roll-cli` and `/dashboard/streams` both use the HTTP API.
+- **Code (source control, "keep the code rolling"):**
+  - `crates/code-store` is storage. It holds Bonsai-style changesets (the files changed relative to
+    the first parent), the per-ref lander with 3-way merges, git derivation, and blobs in
+    `pg_storage::Objects`. Its only network I/O is object storage.
+  - `crates/code-git` is the git wire protocol: pkt-line, packs, and a smart HTTP server and
+    client. It is generic over `GitBackend`.
+  - `crates/code-github` is the GitHub App: auth, webhooks, REST, event mapping and mirror
+    scheduling.
+  - `crates/code-control` is the control plane: owners, repos, changes, work items, the git
+    adapter and the `/v1/code` API.
+  - control.db goes through `crates/code-sql` (SQLite on one node, Postgres in a cluster; SQL in
+    SQLite's dialect). A read-then-write (numbering, claims, queue positions) is one `db.write`
+    closure; write closures may re-run, so they only touch the database: emit, cache and notify
+    after `write` returns. Never ignore a failed statement inside a write (it ends a Postgres
+    transaction): use `ON CONFLICT`, or check first.
+  - `crates/code-preview` runs `roll.toml` checks and previews in containers.
+  - `crates/code-cluster` is membership, repo leases and forwarding; `code-control/src/cluster.rs`
+    wires it in (docs/code/cluster.md). In a cluster every request naming a repo, change, thread
+    or work item runs on the repo's owner: put new such routes under a routed prefix
+    (`cluster::classify`). A repo's background work runs only on its owner: check
+    `Code::owns_repo` before side effects, run long work under `Code::while_owner`, and resume it
+    from `Code::resume_repo` (or `Code::subscribe_ownership`), never by scanning every repo at
+    startup. On a single node all of this is a no-op.
+  - Landing must stay O(change). Never read the full tree, scan history, or do repo-wide work
+    inside the lander. CI never sits in front of it.
+  - git is derived. Imports must round-trip byte-exactly, so commit ids match and the GitHub
+    mirror stays fast-forward. `tests/roundtrip.rs` guards this.
+  - Never size an allocation from a count or length in a pack or pkt-line. Bound it by the bytes
+    present and `Limits`.
+  - Pushed trees are hostile: they can repeat names, and they can hold symlinks. Anything that
+    writes a tree to disk goes through `Store::materialize`, which refuses an entry that already
+    exists. Read files from a materialized tree with `symlink_metadata` first, as `roll.toml` is.
+  - Code from outside the repo (a fork's PR, `trusted: false`) never runs on its own, because
+    checks and previews run with the repo's data. A writer approves one head at a time
+    (`approve-run`). GitHub installations span tenants, so listing or connecting them is
+    admin-only.
+  - On a `queue` repo, only tested trees land on the default branch. Batches are built on
+    `refs/roll/queue` and land with `Store::advance` (one compare-and-swap). Any other way onto
+    the default branch is an admin `bypass` and goes in the audit log. Refs under `refs/roll/`
+    are internal: never list, count or publish them.
+  - Landing rules are blockers: add a rule to `Code::blockers`, not a check in one endpoint.
+    Rules read `roll.toml` from the default branch's head, never from the change being landed.
+  - Reviews (`crates/code-control/src/review/`, docs/code/reviews.md) are one record for
+    people, agents, review apps, GitHub reviewers and roll. Their rules add blockers through
+    `Code::blockers`, and they read `.roll/review.yaml` and CODEOWNERS from the default branch's
+    head, never from the change. The file can only tighten the repo's settings. A change's paths
+    are everything since its merge base, never just its last commit.
+  - roll's own reviewer is `crates/code-review` (providers, prompts, modes, pricing; no routes),
+    `crates/code-index` (symbols, references and trigram search per repo, following the default
+    branch) and `crates/code-control/src/ai/` (jobs, metering, routes).
+    - Anthropic has no Rust SDK, so `provider/anthropic.rs` speaks raw HTTP. Always set
+      `output_config.effort`. Never send `thinking` (`disabled` and `budget_tokens` are 400s on
+      `claude-opus-5-5`), forced `tool_choice` or an assistant prefill. Answers are
+      `output_config.format` JSON schemas that pass `schema::check`. Check `stop_reason` before
+      reading `content`. Send `fallbacks: "default"` only to models that support it.
+    - Keep the system prompt's repo block byte-stable: it's the cache prefix. Anything that
+      varies per review goes in the user message.
+    - Never truncate a diff silently: whatever isn't reviewed goes in `skipped`.
+    - Owners' keys are sealed (`ROLL_SECRET_KEY`) and never returned or logged.
+    - No test calls a real model API: use the mock servers in `code-review/tests/engine.rs` and
+      `code-control/tests/reviewer.rs`.
+  - Review app tokens (`rla_…`) are always scoped to their repos, even on an open daemon.
+    Webhooks only go to public addresses unless the config allows private ones
+    (`ROLL_CODE_WEBHOOK_ALLOW_PRIVATE`, local development only).
+  - Any URL a tenant chooses is fetched through a client with `review::apps::PublicOnly` and no
+    redirects, plus a literal-host check, because IP literals skip the resolver. That covers
+    webhooks, review apps and owners' own provider `base_url`
+    (`ROLL_CODE_PROVIDER_ALLOW_PRIVATE` to allow). Bound what you read from it.
+  - Owner-management routes check `Code::manages`/`check_manage`, not `owns`/`check_write`:
+    agent tokens (`agent:<name>`) work code but never manage the owner, and review only as their
+    own agent.
+  - Verdicts from outside decide only when the author can: GitHub reviews only from
+    `OWNER`/`MEMBER`/`COLLABORATOR`, and roll's own approval only for a review that read every
+    file (`code_review::engine::guard_approval`). Model output is untrusted data.
+  - Globs from callers (search `path`, CODEOWNERS, review.yaml) are matched with the table in
+    `glob.rs`/`pattern.rs`. Never match `**` recursively.
+  - Repo webhooks (`src/webhooks.rs`) and review apps share one delivery queue (`review_deliveries`;
+    targets are `app_…` or `wh_…`): same signature, retries, SSRF guard and log. Don't add a second
+    one. `Code::emit` queues an event's deliveries before it returns; a state change that matters
+    promises its event in its own transaction (`webhooks::Promises`, `webhook_outbox`) and emits
+    it with `Code::emit_kept`. Landings come from
+    the store's durable land log (`Store::land_log`, written in each landing's transaction) after a
+    persisted cursor. Never drive anything that must not miss a landing from the broadcast
+    channel: it drops under lag. Never deliver inline from a request.
+  - A broken default branch opens `broken-main` items through `Code::report_broken_main` and
+    closes them through `Code::main_green` (`src/broken.rs`), whether roll's runner or an external
+    status noticed it. Runner items have no `status:` label; status items have `status:<context>`.
+    Don't open items any other way.
+  - A token is looked up on every request (API, git, MCP). Don't cache a token→caller mapping:
+    revocation must take effect at once.
+  - The MCP server (`src/mcp.rs`) calls the API router on the caller's behalf, so tools can't
+    drift from the routes. Add a tool by mapping it onto a route, never by calling services
+    directly. A land that conflicts or is blocked is a result (`status`), not an error.
+  - The runner, the queue and previews get trees from `Code::checkout`: leased work trees moved with
+    `Store::checkout_delta`. Never write into a leased tree, never `remove_dir_all` it, and
+    fall back to a fresh `materialize` on any error. `checkout_delta` follows the same
+    hostile-tree rules as `materialize`. Hold a lease only while reading or copying the tree
+    (previews copy it into their container and let go). `Code::open` clears what a previous
+    process left under `code/worktrees` and `code/previews`.
+  - `docs/code/http-api.md` is the contract between `code-control` and
+    `apps/dashboard/src/lib/code-api.ts`. Change both together.
+  - The reserved owner names in `crates/code-control/src/names.rs` and
+    `apps/dashboard/src/lib/reserved-names.ts` must stay identical. Every new top-level route in
+    the Next app is a reserved name. A test on each side enforces this.
+  - Public pages stream, so `apps/dashboard/src/proxy.ts` checks that the owner or repo exists
+    before rendering. That gives real 404s and 308s for renamed repos. Keep the check there,
+    not in the pages.
+  - After touching anything code-related, run `pnpm test:code`. It skips itself when nothing
+    relevant changed, and it runs:
+    - the dashboard's vitest suite
+    - the Docker preview tests
+    - 40,000 merges in release
+    - 2,000 changes through the merge queue
+  - Every feature gets a test. `docs/code/test-coverage.md` maps features to tests; update it
+    when you add either. `code-control/tests/coverage_map.rs` and `roll-cli`'s
+    `every_code_command_is_in_the_coverage_map` fail when a route, MCP tool, event or `roll code`
+    command has no row there, or a row names a test that doesn't exist. Put new tests in the
+    matching file:
+    - storage and landing: `code-store/tests/{lander,store,roundtrip,advance}.rs`
+    - the merge queue, reverts and bisecting: `code-control/tests/queue.rs` (fake runner)
+    - work trees: `code-store/tests/checkout.rs` and `code-control/tests/checkout.rs`
+    - blame: `code-store/tests/blame.rs` (against `git blame --first-parent`)
+    - webhooks, commit statuses, blame and search over HTTP: `code-control/tests/webhooks.rs`
+    - MCP: `code-control/tests/mcp.rs`
+    - git protocol: `code-git/tests` (`http.rs` for wire-level behaviour)
+    - HTTP contract: `code-control/tests/{api,contract}.rs`
+    - git end to end: `code-control/tests/{git,git_more}.rs`
+    - GitHub: `code-control/tests/github.rs` and `code-github/tests`
+    - checks and previews: `code-preview/tests/service.rs` (fake runner) and `docker.rs` (real
+      Docker)
+    - the CLI: `roll-cli/tests/code.rs`
+    - dashboard logic: `apps/dashboard/src/**/*.test.ts` (vitest, node)
+    - dashboard components: `apps/dashboard/src/**/*.test.tsx` (vitest, Testing Library, jsdom;
+      helpers in `src/test/`)
+    - HTTP statuses and the auth matrix for every route: `code-control/tests/routes.rs`
+    - the cluster in one process: `code-control/tests/cluster.rs`; as real `rolld` containers
+      in Docker (kills, rolling restarts, Postgres restarts under load):
+      `rolld/tests/code_cluster_e2e.rs` (`ROLL_E2E=1`; the image is `deploy/code/Dockerfile`)
+    - event stream limits: `code-control/tests/streams.rs`
+    - the cluster (several nodes in one process: routing, takeover, joining, draining):
+      `code-control/tests/cluster.rs`
+    - two nodes racing on one control database: `code-control/tests/concurrency.rs`
 - **Storage (S3-compatible):**
   - `crates/s3-proto` is the wire protocol with no I/O: SigV4, SigV4a and SigV2 (headers, presigned, aws-chunked with trailers, POST policies), SSE headers, XML, checksums, ranges and conditionals, S3 error codes.
   - `crates/s3-store` is the metadata (SQLite plus a durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (`aws-sdk-s3` or a local directory) and the GC/scrub jobs. It has no HTTP.

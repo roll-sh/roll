@@ -1,0 +1,30 @@
+[package]
+name = "code-cluster"
+description = "roll code on many nodes: membership, repo leases with self-fencing, placement, handoff and request forwarding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+code-sql.workspace = true
+hex.workspace = true
+hmac.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+libc.workspace = true
+parking_lot.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "net", "io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tracing-subscriber.workspace = true

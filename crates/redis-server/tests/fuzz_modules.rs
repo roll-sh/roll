@@ -13,7 +13,7 @@
 //!   cargo test -p redis-server --test fuzz_modules -- --ignored --nocapture
 //! ```
 //!
-//! - `ROLL_FUZZ_REDIS` the reference (required; `redis:8-alpine`, used by nothing else: every
+//! - `ROLL_FUZZ_REDIS` the reference (required; `redis:8.10.3-alpine`, used by nothing else: every
 //!   run starts with FLUSHALL and sets `notify-keyspace-events`)
 //! - `ROLL_FUZZ_CONTAINER` a Docker container name the fuzzer owns, published on
 //!   `ROLL_FUZZ_REDIS`: started afresh for the run (the modules keep state across FLUSHALL),
@@ -2238,7 +2238,7 @@ async fn reference_hazard(aux: &mut Conn, c: &Cmd) -> io::Result<bool> {
 /// Start the reference container afresh (`ROLL_FUZZ_CONTAINER`, published on `addr`).
 async fn restart_reference(container: &str, addr: &str) {
     let _ = std::process::Command::new("docker").args(["rm", "-f", container]).output();
-    let image = std::env::var("ROLL_COMPAT_IMAGE").unwrap_or_else(|_| "redis:8-alpine".into());
+    let image = std::env::var("ROLL_COMPAT_IMAGE").unwrap_or_else(|_| "redis:8.10.3-alpine".into());
     let out = std::process::Command::new("docker").args(["run", "-d", "--name", container, "-p", &format!("{addr}:6379"), &image]).output().expect("docker run");
     assert!(out.status.success(), "docker run: {}", String::from_utf8_lossy(&out.stderr));
     for _ in 0..100 {
@@ -2330,7 +2330,7 @@ fn signature(c: &Cmd, m: &Mismatch) -> String {
 #[ignore]
 async fn fuzz_modules() {
     let Ok(ref_addr) = std::env::var("ROLL_FUZZ_REDIS") else {
-        eprintln!("fuzz: set ROLL_FUZZ_REDIS=host:port (a throwaway redis:8-alpine)");
+        eprintln!("fuzz: set ROLL_FUZZ_REDIS=host:port (a throwaway redis:8.10.3-alpine)");
         return;
     };
     let env_u64 = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);

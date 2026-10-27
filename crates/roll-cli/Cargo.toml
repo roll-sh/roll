@@ -15,6 +15,7 @@ path = "src/main.rs"
 roll-server-tests = ["dep:nosql-engine", "dep:nosql-server", "dep:nosql-storage"]
 
 [dependencies]
+libc.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -38,8 +39,11 @@ unicode-width.workspace = true
 urlencoding.workspace = true
 
 [dev-dependencies]
-aws-sdk-s3.workspace = true
 axum.workspace = true
+code-control.workspace = true
+pg-storage.workspace = true
+tempfile.workspace = true
+aws-sdk-s3.workspace = true
 # `tests/nosql_api.rs`: the real control API in process.
 nosql-control.workspace = true
 nosql-server.workspace = true
@@ -48,7 +52,6 @@ regex.workspace = true
 s3-control.workspace = true
 s3-server.workspace = true
 s3-store.workspace = true
-tempfile.workspace = true
 
 [[test]]
 name = "cqlsh_roll"

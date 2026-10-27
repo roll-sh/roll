@@ -5,6 +5,7 @@ import {
   Activity,
   ChevronsUpDown,
   Database,
+  GitBranch,
   Globe,
   HardDrive,
   Inbox,
@@ -29,6 +30,7 @@ import { useMarkState } from "./mark-state";
 
 const nav = [
   { label: "Overview", icon: LayoutGrid, href: "/dashboard" },
+  { label: "Code", icon: GitBranch, href: "/dashboard/code" },
   { label: "Databases", icon: Database, href: "/dashboard/databases" },
   { label: "Redis", icon: MemoryStick, href: "/dashboard/redis" },
   { label: "Storage", icon: HardDrive, href: "/dashboard/storage" },

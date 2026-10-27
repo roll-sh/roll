@@ -8,7 +8,7 @@ use crate::util::now_us;
 use crate::{cmd, container};
 
 /// The Redis version we are compatible with (reported by INFO and HELLO).
-pub const REDIS_VERSION: &str = "8.10.2";
+pub const REDIS_VERSION: &str = "8.10.3";
 
 const CONN_FLAGS: u64 = NOSCRIPT | LOADING | STALE | FAST | NO_AUTH | ALLOW_BUSY;
 

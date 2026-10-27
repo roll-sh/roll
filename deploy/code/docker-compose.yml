@@ -1,0 +1,106 @@
+# A three-node roll code cluster on one machine, to try it out (deploy/code/README.md):
+# Postgres, SeaweedFS as S3, three `rolld --code-only` nodes and nginx as the load balancer.
+#   docker build -f deploy/code/Dockerfile -t roll-code .
+#   docker compose -f deploy/code/docker-compose.yml up -d
+#   curl localhost:7070/v1/code/health
+# The secrets below are placeholders for local use only.
+
+x-node: &node
+  image: ${ROLL_CODE_IMAGE:-roll-code}
+  restart: unless-stopped
+  # Above ROLL_CODE_DRAIN_TIMEOUT: a stopping node hands its repos over before it exits.
+  stop_grace_period: 60s
+  depends_on:
+    postgres: { condition: service_healthy }
+    bucket: { condition: service_completed_successfully }
+  environment: &env
+    ROLL_CODE_DATABASE: postgres://roll:roll@postgres:5432/roll?sslmode=disable
+    ROLL_CODE_DB_CONNECTIONS: "8"
+    ROLL_CODE_CLUSTER_SECRET: local-cluster-secret-change-me
+    ROLL_CODE_TOKEN: dev-admin-token-change-me
+    ROLL_SECRET_KEY: local-secret-key-change-me-0123456789abcdef
+    ROLL_CODE_PUBLIC_URL: http://localhost:${ROLL_CODE_PORT:-7070}
+    ROLL_CODE_DRAIN_TIMEOUT: "30"
+    ROLL_S3_BUCKET: roll-code
+    ROLL_S3_ENDPOINT: http://s3:8333
+    AWS_REGION: us-east-1
+    AWS_ACCESS_KEY_ID: local
+    AWS_SECRET_ACCESS_KEY: local
+    # Webhooks to receivers on this machine's networks (local development only).
+    ROLL_CODE_WEBHOOK_ALLOW_PRIVATE: "1"
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: roll
+      POSTGRES_PASSWORD: roll
+      POSTGRES_DB: roll
+    # 3 nodes × (2 × 8 + 4) connections, plus a rolling upgrade's extra node and psql.
+    command: ["postgres", "-c", "max_connections=200"]
+    volumes: [pg:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "roll", "-h", "127.0.0.1"]
+      interval: 2s
+      retries: 30
+
+  s3:
+    image: chrislusf/seaweedfs:latest
+    command: ["server", "-s3", "-dir=/data"]
+    volumes: [s3:/data]
+
+  # Creates the bucket once SeaweedFS is up.
+  bucket:
+    image: chrislusf/seaweedfs:latest
+    depends_on: [s3]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for i in $$(seq 60); do
+          echo 's3.bucket.create -name roll-code' | weed shell -master=s3:9333 2>&1 | tee /tmp/out
+          grep -qiE 'error|fail' /tmp/out || exit 0
+          grep -qi 'already exist' /tmp/out && exit 0
+          sleep 1
+        done
+        exit 1
+
+  node1:
+    <<: *node
+    hostname: node1
+    environment:
+      <<: *env
+      ROLL_CODE_NODE_ID: node1
+      ROLL_CODE_ADVERTISE_URL: http://node1:7070
+    volumes: [node1:/data]
+
+  node2:
+    <<: *node
+    hostname: node2
+    environment:
+      <<: *env
+      ROLL_CODE_NODE_ID: node2
+      ROLL_CODE_ADVERTISE_URL: http://node2:7070
+    volumes: [node2:/data]
+
+  node3:
+    <<: *node
+    hostname: node3
+    environment:
+      <<: *env
+      ROLL_CODE_NODE_ID: node3
+      ROLL_CODE_ADVERTISE_URL: http://node3:7070
+    volumes: [node3:/data]
+
+  # The load balancer: round robin over the nodes, no stickiness (nginx.conf).
+  lb:
+    image: nginx:alpine
+    depends_on: [node1, node2, node3]
+    ports: ["${ROLL_CODE_PORT:-7070}:7070"]
+    volumes: ["./nginx.conf:/etc/nginx/nginx.conf:ro"]
+
+volumes:
+  pg:
+  s3:
+  node1:
+  node2:
+  node3:
