@@ -189,12 +189,60 @@ pub struct Portal {
     pub stmt: Arc<Prepared>,
     pub params: Vec<Value>,
     pub result_formats: Vec<i16>,
-    pending: Option<VecDeque<Row>>,
-    tag_verb: String,
+    run: PortalRun,
     pub cols: Option<Vec<OutCol>>,
     /// A SELECT suspended after an Execute's row count: its executor, which the next
     /// Execute runs on (PORTAL_ONE_SELECT runs as its rows are asked for).
     lazy: Option<cursor::Lazy>,
+}
+
+/// How far a portal's statement has run (its PortalStatus, and the rows PortalRun holds).
+enum PortalRun {
+    /// Not run yet: the next Execute runs it.
+    Ready,
+    /// Run to its end, its rows handed out by the Executes (PortalRunSelect): a SELECT's
+    /// (PORTAL_ONE_SELECT) or the holdStore FillPortalStore filled with a RETURNING's or a
+    /// utility's rows (PORTAL_ONE_RETURNING, PORTAL_ONE_MOD_WITH, PORTAL_UTIL_SELECT), which
+    /// runs on the first Execute whatever its row count. `rows`: those not handed out yet;
+    /// `tag`: the CommandComplete tag without its row count ("INSERT 0", "SELECT", "SHOW"),
+    /// `counted` when it shows one; `at_end`: an Execute found no more rows (atEnd).
+    Held { rows: VecDeque<Row>, tag: String, counted: bool, at_end: bool },
+    /// A statement that returns no rows ran (PORTAL_MULTI_QUERY: MarkPortalDone), or its run
+    /// failed (PORTAL_FAILED): it can't run again (seen once a savepoint's rollback has
+    /// left the transaction usable).
+    Done,
+}
+
+impl PortalRun {
+    /// Run to its end with `rows` and the tag the statement returned.
+    fn held(rows: VecDeque<Row>, tag: &str, at_end: bool) -> PortalRun {
+        let (tag, counted) = match tag.rsplit_once(' ') {
+            Some((verb, n)) if n.parse::<u64>().is_ok() => (verb.to_string(), true),
+            _ => (tag.to_string(), false),
+        };
+        PortalRun::Held { rows, tag, counted, at_end }
+    }
+
+    /// An Execute on held rows (PortalRunSelect forward): the next `max_rows` (0: all of
+    /// them), the tag, and whether the portal is suspended. Suspended when the row count was
+    /// reached, even by the last row (PortalRun doesn't look ahead); at its end every Execute
+    /// completes with no rows.
+    fn fetch(&mut self, max_rows: usize) -> Option<(Vec<Row>, String, bool)> {
+        let PortalRun::Held { rows, tag, counted, at_end } = self else {
+            return None;
+        };
+        let out: Vec<Row> = if *at_end {
+            Vec::new()
+        } else {
+            let n = if max_rows == 0 { rows.len() } else { max_rows.min(rows.len()) };
+            rows.drain(..n).collect()
+        };
+        if max_rows == 0 || out.len() < max_rows {
+            *at_end = true;
+        }
+        let tag = if *counted { format!("{tag} {}", out.len()) } else { tag.clone() };
+        Some((out, tag, !*at_end))
+    }
 }
 
 pub struct Session {
@@ -2235,8 +2283,7 @@ impl Session {
                 stmt: p,
                 params: values,
                 result_formats,
-                pending: None,
-                tag_verb: String::new(),
+                run: PortalRun::Ready,
                 cols,
                 lazy: None,
             },
@@ -2266,32 +2313,48 @@ impl Session {
             self.on_error();
             return Err(e);
         };
+        // exec_execute_message refuses a failed transaction's commands (all but its end)
+        // before PortalRun, which leaves the portal as it was.
+        if self.status == TxnStatus::Failed
+            && (pt.lazy.is_some()
+                || matches!(pt.run, PortalRun::Held { .. })
+                || !ends_failed_txn(pt.stmt.stmt.as_ref().and_then(inner)))
+        {
+            self.portals.insert(portal.to_string(), pt);
+            self.on_error();
+            return Err(Error::new(
+                code::IN_FAILED_SQL_TRANSACTION,
+                "current transaction is aborted, commands ignored until end of transaction block",
+            ));
+        }
         if let Some(lazy) = pt.lazy.take() {
             let r = self.execute_suspended(&mut pt, lazy, max_rows);
+            if r.is_err() {
+                pt.run = PortalRun::Done;
+            }
             self.portals.insert(portal.to_string(), pt);
             if r.is_err() {
                 self.on_error();
             }
             return r;
         }
-        if let Some(mut rest) = pt.pending.take() {
-            let n = if max_rows == 0 {
-                rest.len()
-            } else {
-                max_rows.min(rest.len())
+        // Run already: PortalRun hands out the rows held, or refuses a portal that's done.
+        if !matches!(pt.run, PortalRun::Ready) {
+            let r = match pt.run.fetch(max_rows) {
+                Some((rows, tag, more)) => {
+                    Ok((Outcome::Done(QueryResult { cols: pt.cols.clone(), rows, tag }), more))
+                }
+                // (MarkPortalActive: a portal done or failed.)
+                None => Err(Error::new(
+                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    format!("portal \"{portal}\" cannot be run"),
+                )),
             };
-            let rows: Vec<Row> = rest.drain(..n).collect();
-            // Suspended when the row count was reached, even by the last row: PortalRun
-            // doesn't look ahead (the next Execute then completes with no rows).
-            let more = !rest.is_empty() || (max_rows > 0 && rows.len() == max_rows);
-            let tag = format!("{} {}", pt.tag_verb, rows.len());
-            let cols = pt.cols.clone();
-            // (A SELECT run to its end stays there: Execute again returns no rows.)
-            if more || pt.tag_verb == "SELECT" {
-                pt.pending = Some(rest);
-            }
             self.portals.insert(portal.to_string(), pt);
-            return Ok((Outcome::Done(QueryResult { cols, rows, tag }), more));
+            if r.is_err() {
+                self.on_error();
+            }
+            return r;
         }
         let stmt = pt.stmt.clone();
         let params = pt.params.clone();
@@ -2306,29 +2369,34 @@ impl Session {
         let out = match out {
             Ok(o) => o,
             Err(e) => {
+                pt.run = PortalRun::Done;
                 self.portals.insert(portal.to_string(), pt);
                 return Err(e);
             }
         };
         let r = match out {
-            Outcome::Done(mut r) => {
-                let mut more = false;
-                let n = self.sent.unwrap_or(r.rows.len());
-                if max_rows > 0
-                    && (n > max_rows
-                        || n == max_rows && r.cols.is_some() && r.tag.starts_with("SELECT "))
-                {
-                    let rest: VecDeque<Row> = r.rows.split_off(max_rows.min(r.rows.len())).into();
-                    pt.tag_verb = r.tag.split(' ').next().unwrap_or("SELECT").to_string();
-                    pt.pending = Some(rest);
-                    more = true;
-                } else if r.cols.is_some() && r.tag.starts_with("SELECT ") {
-                    pt.tag_verb = "SELECT".into();
-                    pt.pending = Some(VecDeque::new());
+            // A SELECT whose rows went to the client as it made them (`sent`): suspended
+            // when it made as many as were asked for (its executor in `lazy`, or at its end
+            // without knowing it), else at its end.
+            Outcome::Done(r) if r.cols.is_some() && self.sent.is_some() => {
+                let more = max_rows > 0 && self.sent == Some(max_rows);
+                if pt.lazy.is_none() {
+                    pt.run = PortalRun::held(VecDeque::new(), &r.tag, !more);
                 }
                 (Outcome::Done(r), more)
             }
-            o => (o, false),
+            // Rows made to the statement's end, held for this Execute and the next.
+            Outcome::Done(mut r) if r.cols.is_some() => {
+                pt.run = PortalRun::held(std::mem::take(&mut r.rows).into(), &r.tag, false);
+                let (rows, tag, more) = pt.run.fetch(max_rows).expect("held rows");
+                r.rows = rows;
+                r.tag = tag;
+                (Outcome::Done(r), more)
+            }
+            o => {
+                pt.run = PortalRun::Done;
+                (o, false)
+            }
         };
         self.portals.insert(portal.to_string(), pt);
         Ok(r)
@@ -2381,22 +2449,21 @@ impl Session {
                 QueryResult::rows(cols, rows, tag)
             }));
         }
-        let not_started = self.portals[&s.portalname].pending.is_none();
-        if not_started {
+        if matches!(self.portals[&s.portalname].run, PortalRun::Ready) {
             // Run it, keeping every row in the portal for this FETCH and what follows.
             let (o, _) = self.execute_portal(&s.portalname, 0)?;
-            let rows = match o {
-                Outcome::Done(r) => r.rows,
-                _ => Vec::new(),
-            };
             let pt = self.portals.get_mut(&s.portalname).unwrap();
-            pt.tag_verb = "SELECT".into();
-            pt.pending = Some(rows.into());
+            if let Outcome::Done(r) = o
+                && matches!(pt.run, PortalRun::Held { .. })
+            {
+                pt.run = PortalRun::held(r.rows.into(), &r.tag, false);
+            }
         }
         let pt = self.portals.get_mut(&s.portalname).unwrap();
-        let rest = pt.pending.get_or_insert_with(VecDeque::new);
-        let n = (count.max(0) as u64).min(rest.len() as u64) as usize;
-        let rows: Vec<Row> = rest.drain(..n).collect();
+        let rows = match count {
+            0 => Vec::new(),
+            n => pt.run.fetch(n as usize).map(|(rows, _, _)| rows).unwrap_or_default(),
+        };
         let cols = pt.cols.clone().unwrap_or_default();
         Ok(Some(if s.ismove {
             QueryResult::command(format!("MOVE {}", rows.len()))
@@ -2439,13 +2506,13 @@ impl Session {
         // (The rows made before an error went out before it.)
         let done = r?;
         let count = sent.unwrap_or(rows.len());
+        let more = max_rows > 0 && count == max_rows;
         if done {
             // (Run to its end, it stays there: Execute again returns no rows.)
-            pt.pending = Some(VecDeque::new());
+            pt.run = PortalRun::held(VecDeque::new(), "SELECT 0", !more);
         } else {
             pt.lazy = Some(lazy);
         }
-        let more = max_rows > 0 && count == max_rows;
         let tag = format!("SELECT {count}");
         Ok((Outcome::Done(QueryResult { cols: pt.cols.clone(), rows, tag }), more))
     }

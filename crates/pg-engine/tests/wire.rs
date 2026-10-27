@@ -3504,3 +3504,75 @@ fn semi_join_right_side_not_a_parameter() {
     });
     s.engine.shutdown();
 }
+
+/// PortalRun: a RETURNING statement (or one that writes in WITH) runs to its end on its
+/// portal's first Execute, whatever the row count (FillPortalStore); the Executes hand out
+/// the rows it holds, suspended when they reach the count (PortalRunSelect doesn't look
+/// ahead) and done with no rows once they're out. A statement without rows runs once
+/// (MarkPortalDone), and so does one that failed: Execute again is refused.
+#[test]
+fn portals_hold_returning_rows_and_run_once() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query("CREATE TABLE hp (id int, title text)");
+    c.query("BEGIN");
+    c.parse("ins", "INSERT INTO hp (title) VALUES ('x'), ('y') RETURNING title");
+    c.bind("", "ins");
+    c.execute("", 2);
+    c.execute("", 2);
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D x", "D y", "s", "C INSERT 0 0", "C INSERT 0 0"]);
+    c.bind("", "ins");
+    c.execute("", 1);
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D x", "s", "D y", "C INSERT 0 1"]);
+    c.bind("", "ins");
+    c.execute("", 3);
+    c.execute("", 1);
+    assert_eq!(c.sync(), ["D x", "D y", "C INSERT 0 2", "C INSERT 0 0"]);
+    assert_eq!(c.query("SELECT count(*) FROM hp"), ["T count:20/-1", "D 6", "C SELECT 1"]);
+    c.parse("", "UPDATE hp SET id = 1 WHERE title = 'x' RETURNING title");
+    c.bind("", "");
+    c.execute("", 1);
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D x", "s", "D x", "D x", "C UPDATE 2"]);
+    c.parse("", "DELETE FROM hp WHERE id = 1 RETURNING title");
+    c.bind("", "");
+    c.execute("", 0);
+    c.execute("", 0);
+    assert_eq!(c.sync(), ["D x", "D x", "D x", "C DELETE 3", "C DELETE 0"]);
+    c.parse("", "WITH w AS (INSERT INTO hp VALUES (5, 'a') RETURNING title) SELECT * FROM w");
+    c.bind("", "");
+    c.execute("", 1);
+    c.execute("", 1);
+    assert_eq!(c.sync(), ["D a", "s", "C SELECT 0"]);
+    c.parse("", "SHOW search_path");
+    c.bind("", "");
+    c.execute("", 1);
+    c.execute("", 1);
+    assert_eq!(c.sync(), ["D \"$user\", public", "s", "C SHOW"]);
+    c.parse("", "INSERT INTO hp VALUES (9, 'z')");
+    c.bind("pp", "");
+    c.execute("pp", 0);
+    assert_eq!(c.sync(), ["C INSERT 0 1"]);
+    c.execute("pp", 0);
+    assert_eq!(c.sync(), ["E 55000"]);
+    c.query("ROLLBACK");
+    // A portal whose run failed, after the rollback of the savepoint it failed in.
+    c.query("BEGIN");
+    c.query("INSERT INTO hp VALUES (5, 'f')");
+    c.parse("", "SELECT 1/(id - 5) FROM hp");
+    c.bind("pf", "");
+    assert_eq!(c.sync(), Vec::<String>::new());
+    c.query("SAVEPOINT s");
+    c.execute("pf", 0);
+    assert_eq!(c.sync(), ["E 22012"]);
+    c.execute("pf", 0);
+    assert_eq!(c.sync(), ["E 25P02"]);
+    c.query("ROLLBACK TO s");
+    c.execute("pf", 0);
+    assert_eq!(c.sync(), ["E 55000"]);
+    c.query("ROLLBACK");
+    assert_eq!(c.query("SELECT count(*) FROM hp"), ["T count:20/-1", "D 0", "C SELECT 1"]);
+    s.engine.shutdown();
+}
