@@ -594,12 +594,22 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     results), `tests/crash_bulk.rs` (kill -9 of a process loading spilled transactions; all
     or nothing per transaction, indexes agreeing with rows), and the whole crate suite with
     `ROLL_TXN_SPILL_BYTES=4096`, which passes.
-  - Still unbounded: locks held per row until commit. That is a row lock per row a statement
-    locks or writes, and a unique-key lock and key holder per key inserted into a unique
-    index. A 5M-row INSERT … SELECT into a table with a primary key peaks at 2.6 GB (6.0 GB
-    before). BENCH.md "Where it is still slower" item 2 has the details.
+  - Locks held per row until commit were unbounded (a 5M-row INSERT … SELECT into a table with
+    a primary key peaked at 2.6 GB); round 19's agent 74 made bulk locks compact (below).
 - **Write path, round 3** (round 19, agent 74; BENCH.md's agent 74 section): COPY in 2x, COPY
-  out 2.5x, INSERT … SELECT 1.4x faster.
+  out 2.5x, INSERT … SELECT 1.4x, UPDATE 1.5x faster; a 5M-row INSERT … SELECT 2.6 GB → 0.5 GB.
+  - Compact locks (`txn/bulklocks.rs`): past 2,048 row locks, and apart 2,048 plain unique-key
+    locks, a transaction's next ones go into per-(sub)transaction sets in the lock manager
+    (`State::bulk`; ~20 bytes plus the key) instead of an entry each. Every lookup of a row
+    lock or unique key consults them; a unique key someone else asks for is first moved into
+    the main table (`State::materialize`), so waits, deadlock detection and pg_locks use the
+    usual paths. `ROLL_COMPACT_LOCKS_AFTER=0` makes every lock that can be compact compact:
+    the isolation suite and the crate suite pass that way. Code that adds a way to look a
+    row lock or unique key up must consult the sets (`State::bulk_row_holds`, `materialize`);
+    PREPARE TRANSACTION expands them first (`Txn::expand_compact_locks`, called from
+    `prepare_checks`). Agent 73's wait logic is untouched.
+  - UPDATE and DELETE keep a set of the rows they changed only when their source can return
+    a row twice (`dml::rows_once`).
   - A big statement's heap model waits for its end (`sizing::Defer`): COPY's batches and an
     INSERT … SELECT's rows past its first 10,000 (`DEFER_AFTER`, `with_defer_after` in
     tests) are modelled when it ends, so a load past the model's size never builds the model

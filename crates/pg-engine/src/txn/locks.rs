@@ -16,6 +16,7 @@
 //! - Every (sub)transaction that locks rows holds its transaction lock (ExclusiveLock on
 //!   `xact_key`) until it ends; waiting for a transaction is a ShareLock request on it.
 
+use super::bulklocks::{BulkLocks, row_tag, untag};
 use crate::error::{Error, Result, code};
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
@@ -443,6 +444,73 @@ struct State {
     rows: crate::exec::fasthash::HashMap<Vec<u8>, Vec<RowHold>>,
     /// Prepared transactions' dummy backends (`transfer`).
     prepared: std::collections::HashSet<u64>,
+    /// Transactions' compact row and unique-key locks (`bulklocks`), by transaction: what
+    /// `rows` and the unique keys of `locks` would otherwise hold for them.
+    bulk: crate::exec::fasthash::HashMap<u64, BulkLocks>,
+}
+
+/// Whether `key` is a unique key's lock (`UNIQUE_KEY`).
+fn is_unique_key(key: &[u8]) -> bool {
+    key.len() >= 8 && key[..7] == [0; 7] && key[7] == UNIQUE_KEY
+}
+
+/// Locks taken into compact sets so far (row locks and unique keys; tests read it).
+pub static COMPACT_HOLDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl State {
+    /// The compact row locks on `row`, as holds (none when no transaction has any).
+    fn bulk_row_holds(&self, row: &[u8]) -> Vec<RowHold> {
+        let mut out = Vec::new();
+        for (&owner, b) in &self.bulk {
+            for g in &b.segs {
+                if let Some(t) = g.rows.get(row) {
+                    let (mode, modifies) = untag(t);
+                    out.push(RowHold { holder: g.holder, owner, proc: b.proc, mode, modifies });
+                }
+            }
+        }
+        out
+    }
+
+    /// Move a compact unique-key lock on `key` into the main table (someone else asks for
+    /// it): from there it is queued for, released and reported as any lock.
+    fn materialize(&mut self, key: &[u8]) {
+        if self.bulk.is_empty() || !is_unique_key(key) {
+            return;
+        }
+        let mut found = None;
+        'all: for (&owner, b) in self.bulk.iter_mut() {
+            for g in &mut b.segs {
+                if g.ukeys.remove(key) {
+                    g.moved.push(key.to_vec());
+                    found = Some((owner, b.proc, g.holder, g.xid));
+                    break 'all;
+                }
+            }
+        }
+        if let Some((owner, proc, holder, xid)) = found {
+            let e = self.locks.entry(key.to_vec()).or_default();
+            e.holds.push(Hold { owner, proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
+            e.key_holder = Some((owner, KeyHolder { holder, xid, token: None, row: None }));
+        }
+    }
+
+    /// Release `owner`'s holds of the unique keys a compact segment moved to the main table
+    /// (one count each: a later lock of the key by the transaction is its own).
+    fn release_moved(&mut self, owner: u64, moved: Vec<Vec<u8>>) {
+        for k in moved {
+            if let Some(e) = self.locks.get_mut(&k)
+                && let Some(i) = e.holds.iter().position(|h| h.owner == owner && h.mode == LockMode::Exclusive)
+            {
+                e.holds[i].count -= 1;
+                if e.holds[i].count == 0 {
+                    e.holds.remove(i);
+                }
+                LockManager::wakeup(self, &k);
+                LockManager::drop_empty(self, &k);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -494,6 +562,8 @@ impl LockManager {
         what: &dyn Fn() -> String,
     ) -> Result<bool> {
         let mut s = self.state.lock();
+        // (A compact unique-key lock someone else asks for goes to the main table first.)
+        s.materialize(key);
         if let Some(pid) = pid_of(proc) {
             s.pids.insert(proc, pid);
         }
@@ -712,6 +782,11 @@ impl LockManager {
         rows: impl IntoIterator<Item = Vec<u8>>,
     ) {
         let mut s = self.state.lock();
+        if let Some(b) = s.bulk.remove(&owner) {
+            for g in b.segs {
+                s.release_moved(owner, g.moved);
+            }
+        }
         for r in rows {
             if let Some(holds) = s.rows.get_mut(&r) {
                 holds.retain(|h| h.owner != owner);
@@ -734,6 +809,14 @@ impl LockManager {
     /// Subtransactions aborting: their row locks on `rows` go, then their transaction locks.
     pub fn release_subxact(&self, owner: u64, holders: &[u64], rows: &[Vec<u8>]) {
         let mut s = self.state.lock();
+        if let Some(b) = s.bulk.get_mut(&owner) {
+            let (gone, kept): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut b.segs).into_iter().partition(|g| holders.contains(&g.holder));
+            b.segs = kept;
+            for g in gone {
+                s.release_moved(owner, g.moved);
+            }
+        }
         for r in rows {
             if let Some(holds) = s.rows.get_mut(r) {
                 holds.retain(|h| !(h.owner == owner && holders.contains(&h.holder)));
@@ -778,7 +861,9 @@ impl LockManager {
     /// Lock row `row` (its data key) in `mode` for (sub)transaction `holder` of top-level
     /// transaction `owner`, as heap_lock_tuple does: Ok(false) only for SKIP LOCKED. `tuple`
     /// is the row's heavyweight tuple lock key; `xid` the holder's transaction id. The
-    /// holder's transaction lock (`xact_key(holder)`) is held from here on.
+    /// holder's transaction lock (`xact_key(holder)`) is held from here on. With `compact`,
+    /// a new hold may go into the transaction's compact set (`bulklocks`), which it is told:
+    /// such a hold is released with the transaction (or its subtransaction), not by row.
     #[allow(clippy::too_many_arguments)]
     pub fn lock_row(
         &self,
@@ -791,6 +876,7 @@ impl LockManager {
         mode: RowLockMode,
         w: &Waits<'_>,
         what: &dyn Fn() -> String,
+        mut compact: Option<&mut bool>,
     ) -> Result<bool> {
         let mut have_tuple_lock = false;
         let mut first = true;
@@ -807,10 +893,11 @@ impl LockManager {
             {
                 s.pids.insert(proc, pid);
             }
-            let holds: &[RowHold] = s.rows.get(row).map_or(&[], |h| h.as_slice());
+            let bulk = if s.bulk.is_empty() { Vec::new() } else { s.bulk_row_holds(row) };
+            let holds = || s.rows.get(row).map_or(&[][..], |h| h.as_slice()).iter().chain(&bulk);
             if first {
                 first = false;
-                let mine: Vec<&RowHold> = holds.iter().filter(|h| h.owner == owner).collect();
+                let mine: Vec<&RowHold> = holds().filter(|h| h.owner == owner).collect();
                 if mine.iter().any(|h| h.mode >= mode) {
                     // Held at least this strongly by this transaction already.
                     return Ok(true);
@@ -819,13 +906,29 @@ impl LockManager {
                 // holding it and waiting for us.
                 skip_tuple_lock = !mine.is_empty();
             }
-            let conflicting: Vec<u64> = holds
-                .iter()
+            let conflicting: Vec<u64> = holds()
                 .filter(|h| h.owner != owner && h.mode.conflicts_with(mode))
                 .map(|h| h.holder)
                 .collect();
             if conflicting.is_empty() {
                 Self::hold_xact(&mut s, holder, owner, proc, xid);
+                // (A holder's lock stays where it is; a new one goes compact when it may.)
+                let in_main = s.rows.get(row).is_some_and(|h| h.iter().any(|h| h.holder == holder));
+                if !in_main && let Some(flag) = compact.as_deref_mut() {
+                    let b = s.bulk.entry(owner).or_insert_with(|| BulkLocks { proc, segs: Vec::new() });
+                    let g = b.seg(holder, xid);
+                    let held = |t: Option<u8>| match t.map(untag) {
+                        Some((h, modifies)) => row_tag(h.max(mode), modifies),
+                        None => row_tag(mode, false),
+                    };
+                    if g.rows.upsert(row, held) {
+                        *flag = true;
+                        COMPACT_HOLDS.fetch_add(1, Ordering::Relaxed);
+                        drop(s);
+                        release_tuple(self, have_tuple_lock);
+                        return Ok(true);
+                    }
+                }
                 let holds = s.rows.entry(row.to_vec()).or_default();
                 match holds.iter_mut().find(|h| h.holder == holder) {
                     Some(h) => h.mode = h.mode.max(mode),
@@ -927,7 +1030,17 @@ impl LockManager {
     /// what it recorded, or (when it recorded nothing) its top-level transaction.
     pub fn key_holder(&self, key: &[u8], proc: u64) -> Option<KeyHolder> {
         let s = self.state.lock();
-        let e = s.locks.get(key)?;
+        let Some(e) = s.locks.get(key) else {
+            // A compact one: its (sub)transaction's in-progress entry.
+            return s.bulk.values().filter(|b| b.proc != proc).find_map(|b| {
+                b.segs.iter().find(|g| g.ukeys.get(key).is_some()).map(|g| KeyHolder {
+                    holder: g.holder,
+                    xid: g.xid,
+                    token: None,
+                    row: None,
+                })
+            });
+        };
         let h = e.holds.iter().find(|h| h.proc != proc)?;
         match &e.key_holder {
             Some((owner, kh)) if e.holds.iter().any(|h| h.owner == *owner && h.proc != proc) => {
@@ -939,39 +1052,69 @@ impl LockManager {
 
     /// Row `row`'s lock by transaction `owner` is now an update's or a delete's (the
     /// tuple's xmax is no longer lock-only): other writers' checks of its unique keys wait
-    /// for it to end.
+    /// for it to end. (Its hold of `holder`'s, else any of the transaction's.)
     pub fn mark_row_modified(&self, row: &[u8], owner: u64, holder: u64) {
         let mut s = self.state.lock();
-        if let Some(holds) = s.rows.get_mut(row) {
-            match holds.iter_mut().find(|h| h.owner == owner && h.holder == holder) {
-                Some(h) => h.modifies = true,
-                None => {
-                    if let Some(h) = holds.iter_mut().find(|h| h.owner == owner) {
-                        h.modifies = true;
-                    }
-                }
+        let State { rows, bulk, .. } = &mut *s;
+        let modified = |t: u8| row_tag(untag(t).0, true);
+        let mut main = rows.get_mut(row);
+        // The hold of `holder`'s: in the main table, else in its compact set.
+        if let Some(h) = main
+            .as_deref_mut()
+            .and_then(|holds| holds.iter_mut().find(|h| h.owner == owner && h.holder == holder))
+        {
+            h.modifies = true;
+            return;
+        }
+        let segs = match bulk.get_mut(&owner) {
+            Some(b) => &mut b.segs[..],
+            None => &mut [],
+        };
+        if let Some(g) = segs.iter_mut().find(|g| g.holder == holder)
+            && g.rows.update(row, modified)
+        {
+            return;
+        }
+        // Else any of the transaction's.
+        if let Some(h) = main.and_then(|holds| holds.iter_mut().find(|h| h.owner == owner)) {
+            h.modifies = true;
+            return;
+        }
+        for g in segs.iter_mut().filter(|g| g.holder != holder) {
+            if g.rows.update(row, modified) {
+                return;
             }
         }
+    }
+
+    /// Every hold of row `row`: the main table's, then the compact sets'.
+    fn all_row_holds(s: &State, row: &[u8]) -> Vec<RowHold> {
+        let mut out: Vec<RowHold> = s.rows.get(row).cloned().unwrap_or_default();
+        if !s.bulk.is_empty() {
+            out.extend(s.bulk_row_holds(row));
+        }
+        out
     }
 
     /// The (sub)transactions (lock ids) of other transactions than `owner` holding row
     /// `row` in a mode conflicting with `mode`.
     pub fn row_conflicts(&self, row: &[u8], owner: u64, mode: RowLockMode) -> Vec<u64> {
         let s = self.state.lock();
-        s.rows.get(row).map_or_else(Vec::new, |v| {
-            v.iter()
-                .filter(|h| h.owner != owner && h.mode.conflicts_with(mode))
-                .map(|h| h.holder)
-                .collect()
-        })
+        Self::all_row_holds(&s, row)
+            .iter()
+            .filter(|h| h.owner != owner && h.mode.conflicts_with(mode))
+            .map(|h| h.holder)
+            .collect()
     }
 
     /// The (sub)transaction of another backend than `proc` updating or deleting row `row`
     /// (HeapTupleSatisfiesDirty's in-progress xmax), if any.
     pub fn row_modifier(&self, row: &[u8], proc: u64) -> Option<u64> {
         let s = self.state.lock();
-        s.rows
-            .get(row)?
+        if s.bulk.is_empty() {
+            return s.rows.get(row)?.iter().find(|h| h.modifies && h.proc != proc).map(|h| h.holder);
+        }
+        Self::all_row_holds(&s, row)
             .iter()
             .find(|h| h.modifies && h.proc != proc)
             .map(|h| h.holder)
@@ -980,23 +1123,21 @@ impl LockManager {
     /// The row locks on `row` other transactions than `owner` hold: (mode, pid).
     pub fn row_holders(&self, row: &[u8], owner: u64) -> Vec<(RowLockMode, Option<i32>)> {
         let s = self.state.lock();
-        s.rows
-            .get(row)
-            .map(|v| {
-                v.iter()
-                    .filter(|h| h.owner != owner)
-                    .map(|h| (h.mode, pid_of(h.proc)))
-                    .collect()
-            })
-            .unwrap_or_default()
+        Self::all_row_holds(&s, row)
+            .iter()
+            .filter(|h| h.owner != owner)
+            .map(|h| (h.mode, pid_of(h.proc)))
+            .collect()
     }
 
     /// The strongest row lock `owner` holds on `row`.
     pub fn row_held(&self, row: &[u8], owner: u64) -> Option<RowLockMode> {
         let s = self.state.lock();
-        s.rows
-            .get(row)
-            .and_then(|v| v.iter().filter(|h| h.owner == owner).map(|h| h.mode).max())
+        Self::all_row_holds(&s, row)
+            .iter()
+            .filter(|h| h.owner == owner)
+            .map(|h| h.mode)
+            .max()
     }
 
     /// pg_blocking_pids: the backends whose holds of the lock backend `pid` waits for
@@ -1109,6 +1250,9 @@ impl LockManager {
                 h.proc = proc;
             }
         }
+        if let Some(b) = s.bulk.get_mut(&owner) {
+            b.proc = proc;
+        }
     }
 
     /// A prepared transaction's dummy backend is gone (COMMIT / ROLLBACK PREPARED).
@@ -1129,18 +1273,14 @@ impl LockManager {
     /// update's or delete's, the holder's transaction id, its backend's pid).
     pub fn row_lockers(&self, row: &[u8]) -> Vec<(RowLockMode, bool, u64, Option<i32>)> {
         let s = self.state.lock();
-        s.rows
-            .get(row)
-            .map(|v| {
-                v.iter()
-                    .map(|h| {
-                        let xid = s.locks.get(&xact_key(h.holder)).map_or(0, |e| e.xid);
-                        let pid = s.pids.get(&h.proc).copied().or_else(|| pid_of(h.proc));
-                        (h.mode, h.modifies, xid, pid)
-                    })
-                    .collect()
+        Self::all_row_holds(&s, row)
+            .iter()
+            .map(|h| {
+                let xid = s.locks.get(&xact_key(h.holder)).map_or(0, |e| e.xid);
+                let pid = s.pids.get(&h.proc).copied().or_else(|| pid_of(h.proc));
+                (h.mode, h.modifies, xid, pid)
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// The row locks `owner` holds: (row, strongest mode, whether an update's or delete's).
@@ -1191,7 +1331,58 @@ impl LockManager {
     /// Whether anyone holds a lock (for idle detection and tests).
     pub fn held_count(&self) -> usize {
         let s = self.state.lock();
-        s.locks.len() + s.rows.len()
+        s.locks.len() + s.rows.len() + s.bulk.values().map(BulkLocks::len).sum::<usize>()
+    }
+
+    /// Take unique key lock `key` (Exclusive) for (sub)transaction `holder` (transaction id
+    /// `xid`) of transaction `owner` into its compact set, standing for its in-progress index
+    /// entry. Only while nobody else holds or wants the key: false, take it the usual way
+    /// (`acquire`, which first moves another's compact hold into the main table).
+    pub fn hold_compact_unique_key(&self, key: &[u8], owner: u64, proc: u64, holder: u64, xid: u64) -> bool {
+        let mut s = self.state.lock();
+        if s.locks.contains_key(key) || s.bulk.values().any(|b| b.segs.iter().any(|g| g.ukeys.get(key).is_some())) {
+            return false;
+        }
+        Self::hold_xact(&mut s, holder, owner, proc, xid);
+        let b = s.bulk.entry(owner).or_insert_with(|| BulkLocks { proc, segs: Vec::new() });
+        let done = b.seg(holder, xid).ukeys.insert(key, 0);
+        if done {
+            COMPACT_HOLDS.fetch_add(1, Ordering::Relaxed);
+        }
+        done
+    }
+
+    /// Move all of `owner`'s compact locks into the main tables (PREPARE TRANSACTION: they
+    /// are recorded, moved to its dummy backend and restored as any): the unique keys it
+    /// holds there now, and the rows.
+    pub fn expand_compact(&self, owner: u64) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut s = self.state.lock();
+        let Some(b) = s.bulk.remove(&owner) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (mut keys, mut rows) = (Vec::new(), Vec::new());
+        for g in b.segs {
+            for (row, t) in g.rows.iter() {
+                let (mode, modifies) = untag(t);
+                let holds = s.rows.entry(row.to_vec()).or_default();
+                match holds.iter_mut().find(|h| h.holder == g.holder) {
+                    Some(h) => {
+                        h.mode = h.mode.max(mode);
+                        h.modifies |= modifies;
+                    }
+                    None => holds.push(RowHold { holder: g.holder, owner, proc: b.proc, mode, modifies }),
+                }
+                rows.push(row.to_vec());
+            }
+            for (k, _) in g.ukeys.iter() {
+                let e = s.locks.entry(k.to_vec()).or_default();
+                e.holds.push(Hold { owner, proc: b.proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
+                e.key_holder = Some((owner, KeyHolder { holder: g.holder, xid: g.xid, token: None, row: None }));
+                keys.push(k.to_vec());
+            }
+            keys.extend(g.moved);
+        }
+        (keys, rows)
     }
 
     /// The DETAIL of a deadlock error for this cycle (DeadLockReport).

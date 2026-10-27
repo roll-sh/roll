@@ -816,18 +816,13 @@ fn find_conflict(
     loop {
         ctx.check()?;
         let mine = match entering {
-            Some(e) => {
-                let got = ctx
-                    .txn
-                    .borrow_mut()
-                    .lock(&lock_key, LockMode::Exclusive, WaitPolicy::SkipLocked, &what)?;
-                if got {
-                    ctx.txn
-                        .borrow_mut()
-                        .hold_unique_key(&lock_key, e.token, e.row.cloned());
-                }
-                got
-            }
+            Some(e) => ctx.txn.borrow_mut().lock_unique_key(
+                &lock_key,
+                e.token,
+                e.row.cloned(),
+                WaitPolicy::SkipLocked,
+                &what,
+            )?,
             None => false,
         };
         if !mine {
@@ -844,12 +839,13 @@ fn find_conflict(
             }
             if let Some(e) = entering {
                 // Free, but others are queued for it: wait in line.
-                ctx.txn
-                    .borrow_mut()
-                    .lock(&lock_key, LockMode::Exclusive, WaitPolicy::Block, &what)?;
-                ctx.txn
-                    .borrow_mut()
-                    .hold_unique_key(&lock_key, e.token, e.row.cloned());
+                ctx.txn.borrow_mut().lock_unique_key(
+                    &lock_key,
+                    e.token,
+                    e.row.cloned(),
+                    WaitPolicy::Block,
+                    &what,
+                )?;
             }
         }
         let Some(dkey) = committed_conflict(t, bix, vals, own, &nondet, ctx)? else {
@@ -3151,6 +3147,32 @@ fn store_inserted(
     Ok((row, dkey))
 }
 
+/// Whether a plan returns each row of the tables it scans at most once: scans of distinct
+/// tables under filters, projections, sorts and appends (no join, set operation or
+/// function). An UPDATE or DELETE over one needn't remember the rows it has done.
+fn rows_once(p: &crate::sql::plan::Plan) -> bool {
+    fn scans(p: &crate::sql::plan::Plan, tables: &mut Vec<u32>) -> bool {
+        use crate::sql::plan::Plan as P;
+        match p {
+            P::Scan(s) => {
+                let fresh = !tables.contains(&s.table.oid);
+                tables.push(s.table.oid);
+                fresh
+            }
+            P::Filter { .. }
+            | P::Project { .. }
+            | P::Barrier { .. }
+            | P::Context { .. }
+            | P::LockRows { .. }
+            | P::Limit { .. }
+            | P::Sort { .. }
+            | P::Append { .. } => crate::sql::explain::plan_inputs(p).iter().all(|c| scans(c, tables)),
+            _ => false,
+        }
+    }
+    scans(p, &mut Vec::new())
+}
+
 // ── INSERT ──
 
 /// Whether an INSERT's rows past its first few thousand can wait for its end to go in the
@@ -3953,7 +3975,8 @@ pub(super) fn reads_transition(trigs: &[crate::sql::plan::BoundTrigger], event: 
 pub struct UpdateNode {
     plan: Box<UpdatePlan>,
     source: BoxNode,
-    seen: super::fasthash::HashSet<Vec<u8>>,
+    /// The rows updated so far, when the source can return a row more than once (a join).
+    seen: Option<super::fasthash::HashSet<Vec<u8>>>,
     set_cols: Vec<usize>,
     /// Each member's columns assigned (as `set_cols`).
     member_cols: Vec<Vec<usize>>,
@@ -4019,10 +4042,11 @@ impl UpdateNode {
         )?;
         let trans = plan.inh && reads_transition(&plan.rules.triggers, tt::UPDATE);
         let source = super::nodes::open(&plan.source, ctx)?;
+        let seen = (!rows_once(&plan.source)).then(Default::default);
         Ok(UpdateNode {
             plan,
             source,
-            seen: Default::default(),
+            seen,
             set_cols,
             member_cols,
             after: Vec::new(),
@@ -4365,7 +4389,7 @@ impl Node for UpdateNode {
                 None => (&self.plan.rules, &self.plan.sets, None, &self.set_cols, Owner::Root),
             };
             let t = rules.table.clone();
-            if !self.seen.insert(dkey.clone())
+            if self.seen.as_mut().is_some_and(|s| !s.insert(dkey.clone()))
                 || (self.plan.route.is_some() && ctx.moved.borrow().contains(&dkey))
             {
                 // A row joined more than once is updated once; one moved here by this
@@ -4601,7 +4625,8 @@ impl Node for UpdateNode {
 pub struct DeleteNode {
     plan: Box<DeletePlan>,
     source: BoxNode,
-    seen: super::fasthash::HashSet<Vec<u8>>,
+    /// The rows deleted so far, when the source can return a row more than once (a join).
+    seen: Option<super::fasthash::HashSet<Vec<u8>>>,
     after: Vec<AfterRow>,
     /// An inheritance tree's AFTER ROW events, in the order its rows were deleted.
     ordered: Vec<(Owner, AfterRow)>,
@@ -4635,10 +4660,11 @@ impl DeleteNode {
         trigger::statement(&plan.triggers, &plan.table, true, tt::DELETE, &[], ctx)?;
         let trans = plan.inh && reads_transition(&plan.triggers, tt::DELETE);
         let source = super::nodes::open(&plan.source, ctx)?;
+        let seen = (!rows_once(&plan.source)).then(Default::default);
         Ok(DeleteNode {
             plan,
             source,
-            seen: Default::default(),
+            seen,
             after: Vec::new(),
             ordered: Vec::new(),
             captured: Vec::new(),
@@ -4765,7 +4791,7 @@ impl Node for DeleteNode {
                 ),
             };
             let t = t.clone();
-            if !self.seen.insert(dkey.clone()) {
+            if self.seen.as_mut().is_some_and(|s| !s.insert(dkey.clone())) {
                 continue;
             }
             let before = trigger::any(triggers, true, true, tt::DELETE, ctx);

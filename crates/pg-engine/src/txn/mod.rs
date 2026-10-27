@@ -2,6 +2,7 @@
 //! savepoints, sequences, and transactional catalog changes.
 
 pub(crate) mod catmerge;
+mod bulklocks;
 pub mod locks;
 pub(crate) mod spill;
 pub mod ssi;
@@ -339,6 +340,7 @@ impl Database {
             locks_held: HashMap::new(),
             lock_journal: Vec::new(),
             row_locks: Vec::new(),
+            unique_keys_taken: 0,
             xact_locks: Vec::new(),
             spec_token: 0,
             savepoints: Vec::new(),
@@ -750,6 +752,9 @@ pub struct Txn {
     lock_journal: Vec<(Vec<u8>, LockMode)>,
     /// Rows locked (or written) here, with the depth that locked them.
     row_locks: Vec<(Vec<u8>, usize)>,
+    /// Unique key locks taken the usual way (past `bulklocks::compact_after()`, plain ones go
+    /// compact).
+    unique_keys_taken: usize,
     /// Lock ids of the (sub)transactions here holding their transaction lock.
     xact_locks: Vec<u64>,
     /// The last speculative insertion token handed out (`begin_speculative`).
@@ -1997,6 +2002,63 @@ impl Txn {
         self.db.locks.release(key, self.id, mode);
     }
 
+    /// Take unique key lock `key` (Exclusive, with `policy`) for this (sub)transaction's
+    /// index entry for `row` (`lock`, then `hold_unique_key`). Past a few thousand of them
+    /// the next plain ones (no speculative token, no row whose index expressions others
+    /// evaluate) go into the transaction's compact set while nobody else holds or wants them
+    /// (`bulklocks`): released with the (sub)transaction, not listed here.
+    pub fn lock_unique_key(
+        &mut self,
+        key: &[u8],
+        token: Option<u32>,
+        row: Option<Arc<Vec<crate::types::Value>>>,
+        policy: WaitPolicy,
+        what: &dyn Fn() -> String,
+    ) -> Result<bool> {
+        if token.is_none()
+            && row.is_none()
+            && self.unique_keys_taken >= bulklocks::compact_after()
+            && !self.locks_held.contains_key(&(key.to_vec(), LockMode::Exclusive))
+        {
+            let holder = self.holder();
+            let xid = self.cur_xid();
+            let proc = self.lock_proc();
+            if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid) {
+                // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
+                // waiting for it waits on, and its subtransaction's.)
+                if !self.xact_locks.contains(&self.id) {
+                    self.db.locks.hold_xact_lock(self.id, self.id, proc, self.xid);
+                    self.xact_locks.push(self.id);
+                }
+                if !self.xact_locks.contains(&holder) {
+                    self.xact_locks.push(holder);
+                }
+                return Ok(true);
+            }
+        }
+        let got = self.lock(key, LockMode::Exclusive, policy, what)?;
+        if got {
+            self.unique_keys_taken += 1;
+            self.hold_unique_key(key, token, row);
+        }
+        Ok(got)
+    }
+
+    /// PREPARE TRANSACTION: the compact locks move into the lock manager's main tables
+    /// (`LockManager::expand_compact`) and into this transaction's lists, so they are
+    /// recorded, moved and restored as any.
+    pub fn expand_compact_locks(&mut self) {
+        let (keys, rows) = self.db.locks.expand_compact(self.id);
+        for k in keys {
+            let k = (k, LockMode::Exclusive);
+            if !self.locks_held.contains_key(&k) {
+                self.lock_journal.push(k.clone());
+                self.locks_held.insert(k, 0);
+            }
+        }
+        self.row_locks.extend(rows.into_iter().map(|r| (r, 0)));
+    }
+
     /// Unique key lock `key` (just taken) now stands for this (sub)transaction's index
     /// entry for `row`: others' checks of the key wait for the running (sub)transaction,
     /// or for speculative insertion `token` while it is unfinished.
@@ -2109,6 +2171,10 @@ impl Txn {
         let holder = self.holder();
         let xid = self.cur_xid();
         let tuple = locks::tuple_key(self.db.oid, rel, key);
+        // Past a few thousand row locks the next ones may go compact (`bulklocks`): released
+        // with the (sub)transaction, not listed here.
+        let mut compacted = false;
+        let compact = (self.row_locks.len() >= bulklocks::compact_after()).then_some(&mut compacted);
         let got = self.db.locks.lock_row(
             key,
             &tuple,
@@ -2119,12 +2185,15 @@ impl Txn {
             mode,
             &self.waits(policy),
             what,
+            compact,
         )?;
         if got {
             if !self.xact_locks.contains(&holder) {
                 self.xact_locks.push(holder);
             }
-            self.row_locks.push((key.to_vec(), self.savepoints.len()));
+            if !compacted {
+                self.row_locks.push((key.to_vec(), self.savepoints.len()));
+            }
         }
         // (A row lock may have waited for a transaction that committed DDL: a catalog row's
         // updater.)

@@ -279,6 +279,8 @@ impl Txn {
     /// as PREPARE does: PreCommit_CheckForSerializationFailure, and REPEATABLE READ /
     /// SERIALIZABLE's check that no write of it was overtaken by a concurrent commit.
     pub fn prepare_checks(&mut self) -> Result<()> {
+        // (Compact locks are recorded and moved as the rest: `expand_compact_locks`.)
+        self.expand_compact_locks();
         if self.sxact
             && let Err(e) = self.db.ssi.pre_commit(self.id)
         {

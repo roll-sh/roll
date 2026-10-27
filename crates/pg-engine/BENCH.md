@@ -1897,6 +1897,66 @@ Every crate test binary at the default spill threshold and with `ROLL_TXN_SPILL_
 full on a private reference against the committed `results.tsv`: 51,148 / 51,150, no unit
 newly differing or newly matching.
 
+### Batch 2: compact locks
+
+A transaction held a lock-manager entry per row it locked or wrote (the key twice, a holder
+list, its own list of what to release: about 200 bytes) and, for a table with a unique index,
+a heavyweight lock with its key holder per inserted key (the key in the lock table, in the
+transaction's held-lock map and in its journal: a few hundred bytes). Past 2,048 row locks
+(and, apart, 2,048 unique keys) a transaction's next ones go into compact sets
+(`txn/bulklocks.rs`), per (sub)transaction: each key once in an arena with a byte of what is
+held (strength, whether an update's or delete's), under an open-addressing index whose slots
+carry 32 bits of the key's hash, about 20 bytes plus the key. Postgres keeps both kinds in the
+tuples (xmax) and the index entries; the engine's writes stay private until commit, so others
+must still find them through the lock manager, which consults the sets wherever it looks a row
+or a unique key up. A unique key another writer asks for moves into the main table first
+(`State::materialize`), so queueing, waits, deadlock detection and pg_locks go through the
+usual paths; the sets are released with their transaction or subtransaction, and PREPARE
+TRANSACTION expands them into the main tables (`Txn::expand_compact_locks`) to be recorded and
+moved as any. UPDATE and DELETE over a source that returns each row once (scans under filters,
+projections, sorts or appends of distinct tables) no longer remember every row they changed
+(`dml::rows_once`).
+
+One transaction of 5M rows (`INSERT INTO big SELECT g, g % 1000, md5(g::text) FROM
+generate_series(1, 5000000) g`, a primary key), then `UPDATE big SET b = b + 1` in another,
+the engine's peak RSS (fresh server each; seconds, MB):
+
+| | before | batch 2 |
+|---|---|---|
+| INSERT … SELECT | 76 s, 2,645 MB | 48 s, 501 MB |
+| UPDATE of all 5M (peak so far) | 41–45 s, 3,475 MB | 27 s, 1,029 MB |
+
+The 1M bulk run, the same method as above (3 interleaved runs; this window's medians):
+
+| step | pg | before | batch 1 | batch 2 |
+|---|---|---|---|---|
+| COPY in | 0.81 | 4.43 | 2.39 | 2.53 |
+| CREATE INDEX | 0.39 | 2.24 | 2.22 | 2.18 |
+| CREATE UNIQUE INDEX | 0.23 | 1.96 | 2.04 | 2.42 |
+| COPY out | 0.38 | 1.42 | 0.60 | 0.54 |
+| INSERT … SELECT | 0.68 | 2.73 | 2.50 | 2.01 |
+| UPDATE half | 4.15 | 3.14 | 3.13 | 2.12 |
+| DELETE a quarter | 0.21 | 2.06 | 1.93 | 1.70 |
+| VACUUM | 0.22 | 0.79 | 0.72 | 0.74 |
+| ANALYZE | 0.10 | 1.18 | 0.98 | 0.99 |
+| count(*) after | 0.04 | 0.13 | 0.16 | 0.10 |
+| peak memory | 349 MB | 855 MB | 839 MB | 799 MB |
+
+(The index builds take no row locks: their spread is the machine's load.)
+
+### Verification (batch 2)
+
+The isolation suite on a private reference, with every lock that can be compact made compact
+(`ROLL_COMPACT_LOCKS_AFTER=0`) and at the default: 120 / 122 specs, 1,646 / 1,648
+permutations, 12,232 / 12,238 steps both times, the same two specs differing as committed.
+`tests/compact_locks.rs`: NOWAIT, SKIP LOCKED, lock_timeout and lock strengths against compact
+row locks, waits for compact in-progress unique keys (a waiting writer getting the unique
+violation at commit), savepoints rolled back and released, a key inserted again by its own
+transaction, PREPARE TRANSACTION and COMMIT PREPARED; `bulklocks::tests::keyset_matches_a_map`.
+Every crate test binary at the default, with `ROLL_TXN_SPILL_BYTES=4096` and with
+`ROLL_COMPACT_LOCKS_AFTER=0`; clippy adds no warnings; the regression suite in full on a
+private reference against the committed `results.tsv`: 51,148 / 51,150, no unit changed.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
@@ -1915,24 +1975,25 @@ In rough order of what it costs users:
    streamed the index builds, VACUUM, ANALYZE and ALTER TABLE's checks, and ingests big
    commits as SSTs. Round 19 (agent 69) bounded the memory: a transaction's write buffer
    spills to sorted runs on disk, COPY FROM reads its data a batch at a time, and index builds
-   write sorted runs (the 1M bulk run's peak 1.75 GB → 0.85 GB). What is left:
-   - Per-row executor and heap-model work dominates the time. COPY spends ~5 µs a row against
-     PostgreSQL's ~0.8. A row goes through `Expr` constants, `InsertNode`'s general path,
-     the heap model's key map for the first 400k rows, a `BTreeMap` buffer insert and a row
-     lock.
-   - Locks held per row until commit: a row lock per row written or locked (a lock-manager
-     entry and a key copy in `Txn::row_locks`, about 160 bytes a row), and for a table with
-     a unique index a heavyweight lock and key holder per inserted key (the engine's stand-in
-     for PostgreSQL's dirty-snapshot check of uncommitted index entries; a few hundred bytes a
-     key, in `LockManager::locks`, `Txn::locks_held` and the lock journal). A 5M-row INSERT …
-     SELECT into a table with a primary key peaks at 2.6 GB (6.0 GB before), and an UPDATE of
-     all of it adds 0.8 GB. PostgreSQL keeps both kinds in the tuples and index entries.
-     Bounding them means a compact per-transaction form for bulk locks, such as sorted runs
-     probed through a bloom filter, that other transactions' conflict checks consult.
+   write sorted runs (the 1M bulk run's peak 1.75 GB → 0.85 GB). Round 19 (agent 74) defers
+   a big statement's heap model, parses and prints COPY data without a copy per field and
+   floats by Ryu, and keeps bulk locks compact (COPY in 2x, COPY out 2.5x; a 5M-row INSERT …
+   SELECT 2.6 GB → 0.5 GB). What is left:
+   - Per-row executor and storage work dominates the time. COPY spends ~2.4 µs a row against
+     PostgreSQL's ~0.8: a row goes through `Expr` constants and `InsertNode`'s general path
+     (a `Frame` per row, defaults, checks), a `BTreeMap` buffer insert with its journal entry
+     (the key copied twice), the sorted run it spills to and the commit's SST it is merged
+     into (each with a bloom filter bit set per key, cache misses on a big filter). DELETE
+     writes a tombstone per row and per index entry (Postgres sets xmax only) and checks the
+     transaction's own writes twice per row.
+   - Locks: compact past 2,048 per transaction (`txn/bulklocks.rs`, about 20 bytes plus the
+     key). What a big UPDATE or DELETE still holds per row is the write buffer's (spilled)
+     and, over a join, the set of rows done.
    - ANALYZE of a table too big to model measures every row for the planner's relpages and
      index pages: the text width of every value and an index sort key per row, then sorted.
-     The sample itself is cheap. Estimating those from the sample would change relpages
-     (TPC-H plans read them; agent 64).
+     The sample itself is cheap (agent 64 samples by pages). Estimating those from the sample
+     would change relpages (TPC-H plans read them; agent 64). CREATE INDEX measures the same
+     way (`measure_rows`), repeating its own build's key extraction and sort.
    - An index build writes its entries twice: as sorted runs, then into the commit's SST.
      Linking runs in as L0 files would need a per-file commit timestamp in the SST format.
 3. **Index scans over many rows (range scans, secondary lookups: 0.2–0.4x at 8 clients over
