@@ -153,6 +153,19 @@ fn pg_conf_load_time(a: &[Value], c: &FnCtx) -> Result<Value> {
 fn pg_is_in_recovery(_: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Bool(false))
 }
+/// pg_wal_replay_pause / _resume, pg_is_wal_replay_paused, pg_get_wal_replay_pause_state
+/// (xlogfuncs.c): the server is never in recovery.
+fn not_in_recovery(_: &[Value], _: &FnCtx) -> Result<Value> {
+    Err(Error::new(
+        code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+        "recovery is not in progress",
+    )
+    .hint("Recovery control functions can only be executed during recovery."))
+}
+/// pg_last_wal_replay_lsn: NULL, nothing was ever replayed.
+fn pg_last_wal_replay_lsn(_: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(Value::Null)
+}
 fn pg_sleep(a: &[Value], c: &FnCtx) -> Result<Value> {
     crate::exec::flush_live_notices();
     let secs = a[0].as_f64().unwrap_or(0.0);
@@ -1529,7 +1542,13 @@ fn pg_get_indexdef(a: &[Value], c: &FnCtx) -> Result<Value> {
     let cat = c.exec.catalog();
     let oid = oid_arg(&a[0]);
     let pretty = a.get(2).is_some_and(|v| matches!(v, Value::Bool(true)));
-    let col = if a.len() >= 2 { int_arg(&a[1]).max(0) as usize } else { 0 };
+    // (pg_get_indexdef_worker: a column number no column has, negative or past the last,
+    // prints nothing: '', not NULL.)
+    let col = if a.len() >= 2 { int_arg(&a[1]) } else { 0 };
+    let col = match usize::try_from(col) {
+        Ok(c) => c,
+        Err(_) => usize::MAX,
+    };
     if !cat.indexes.contains_key(&oid) {
         return Ok(system_index_def(&cat, oid, col, pretty, &c.exec.search_path)
             .map(text)
@@ -1552,7 +1571,7 @@ fn pg_get_indexdef(a: &[Value], c: &FnCtx) -> Result<Value> {
             }),
             None => match ix.include.get(col - 1 - ix.columns.len()) {
                 Some(i) => text(quote_ident(&t.columns[*i].name)),
-                None => Value::Null,
+                None => text(String::new()),
             },
         });
     }
@@ -1602,7 +1621,7 @@ fn system_index_def(
         )
     };
     if col > 0 {
-        return keys.get(col - 1).map(|k| quote_ident(k));
+        return Some(keys.get(col - 1).map(|k| quote_ident(k)).unwrap_or_default());
     }
     let table = if pretty {
         cat.qualified_name(ns, &table, search_path)
@@ -4454,6 +4473,11 @@ pub fn register(r: &mut Registry) {
     .stable();
     r.func("pg_is_in_recovery", vec![], Bool, pg_is_in_recovery)
         .volatile();
+    r.func("pg_is_wal_replay_paused", vec![], Bool, not_in_recovery).volatile();
+    r.func("pg_get_wal_replay_pause_state", vec![], Text, not_in_recovery).volatile();
+    r.func("pg_wal_replay_pause", vec![], Void, not_in_recovery).volatile();
+    r.func("pg_wal_replay_resume", vec![], Void, not_in_recovery).volatile();
+    r.func("pg_last_wal_replay_lsn", vec![], PgLsn, pg_last_wal_replay_lsn).volatile();
     r.func("pg_sleep", vec![Float8], Void, pg_sleep).volatile();
     r.func("pg_sleep_for", vec![Interval(-1)], Void, pg_sleep_for).volatile();
     r.func("pg_sleep_until", vec![Timestamptz(-1)], Void, pg_sleep_until).volatile();

@@ -1256,10 +1256,15 @@ fn rel_columns(
             .collect();
     }
     if cat.sequences.contains_key(&oid) {
+        // (DefineSequence's columns are all NOT NULL.)
+        let col = |num, name: &str, ty: DataType| {
+            let c = super::Column { not_null: true, ..super::Column::new(name, ty.clone()) };
+            (num, name.to_string(), ty, Some(c))
+        };
         return vec![
-            (1, "last_value".into(), DataType::Int8, None),
-            (2, "log_cnt".into(), DataType::Int8, None),
-            (3, "is_called".into(), DataType::Bool, None),
+            col(1, "last_value", DataType::Int8),
+            col(2, "log_cnt", DataType::Int8),
+            col(3, "is_called", DataType::Bool),
         ];
     }
     if let Some(ix) = cat.indexes.get(&oid) {
@@ -2140,7 +2145,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     c(r.kind),
                     i2(r.natts as i64),
                     i2(r.checks as i64),
-                    b(r.kind == 'v' || cat.class_has_rules.contains(&r.oid)),
+                    b(matches!(r.kind, 'v' | 'm') || cat.class_has_rules.contains(&r.oid)),
                     b(triggered(r.oid)),
                     // (Set by a first child; only ANALYZE clears it, once the children
                     // are gone.)
@@ -3735,6 +3740,12 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                         .unwrap_or_else(|| f.body.clone()));
                 }
                 row[29] = acl_value(cat, cat.acl(ObjKind::Function, f.oid, 0));
+                // proargdefaults: the defaults' expression list, kept as their SQL (as
+                // adbin is), which pg_get_expr prints as Postgres prints the node list.
+                if ndefaults > 0 {
+                    let d: Vec<&str> = f.defaults.iter().flatten().map(String::as_str).collect();
+                    row[23] = nm(d.join(", "));
+                }
                 row[4] = o(match lang {
                     "sql" => 14,
                     "plpgsql" => 13681,
@@ -6140,6 +6151,7 @@ fn constraint_row(ctx: &ExecCtx, cat: &Catalog, t: &Arc<Table>, con: &super::Con
     let action = |a: &FkAction| c(a.code());
     let (deferrable, deferred) = con.deferral();
     let mut exclop = N;
+    let mut eqops = (N, N, N);
     let (keys, fkeys, frel, upd, del, mtype, indid, bin) = match &con.kind {
         ConstraintKind::Exclusion { index, ops } => {
             let k = cat
@@ -6204,6 +6216,10 @@ fn constraint_row(ctx: &ExecCtx, cat: &Catalog, t: &Arc<Table>, con: &super::Con
             ..
         } => {
             let indid = super::depend::fk_index(cat, *ref_table, ref_columns).unwrap_or(0);
+            if let Some(ops) = fk_eq_ops(cat, t, columns, *ref_table, ref_columns, indid, con.is_period()) {
+                let a = |v: Vec<u32>| arr(DataType::Oid, v.into_iter().map(o).collect());
+                eqops = (a(ops.0), a(ops.1), a(ops.2));
+            }
             (
                 Some(columns.iter().map(|c| *c as i64 + 1).collect()),
                 Some(
@@ -6256,15 +6272,76 @@ fn constraint_row(ctx: &ExecCtx, cat: &Catalog, t: &Arc<Table>, con: &super::Con
         b(con.is_period()),
         i2arr(keys),
         i2arr(fkeys),
-        N,
-        N,
-        N,
+        eqops.0,
+        eqops.1,
+        eqops.2,
         // confdelsetcols
         i2arr((!con.del_set_cols.is_empty())
             .then(|| con.del_set_cols.iter().map(|c| *c as i64 + 1).collect())),
         exclop,
         bin,
     ]
+}
+
+/// A foreign key's equality operators, per column pair (ATAddForeignKeyConstraint):
+/// conpfeqop (PK = FK), conppeqop (PK = PK) and conffeqop (FK = FK), from the operator
+/// family of the referenced index's column; an FK type the family has no operators for
+/// is compared as the PK's type (it coerces to it), all three the PK's own. A PERIOD
+/// key's last pair is compared by overlaps, the rest by equality (GiST strategies).
+fn fk_eq_ops(
+    cat: &Catalog,
+    t: &Table,
+    columns: &[usize],
+    ref_table: u32,
+    ref_columns: &[usize],
+    index: u32,
+    period: bool,
+) -> Option<(Vec<u32>, Vec<u32>, Vec<u32>)> {
+    let ix = cat.indexes.get(&index)?;
+    let pk = cat.tables.get(&ref_table)?;
+    let method = access_method_oid(&ix.method);
+    let mut out = (Vec::new(), Vec::new(), Vec::new());
+    for (i, (fc, pc)) in columns.iter().zip(ref_columns).enumerate() {
+        let k = ix.columns.iter().position(|c| matches!(c.key, IndexKey::Column(x) if x == *pc))?;
+        let pty = &pk.columns.get(*pc)?.ty;
+        let opclass = match ix.columns[k].opclass {
+            0 => cat.default_opclass(method, pty),
+            c => c,
+        };
+        let class = cat.opclass_info(opclass)?;
+        let overlaps = period && i + 1 == columns.len();
+        // (GistTranslateCompareType: btree_gist's classes use the btree numbers, ranges'
+        // RTEqualStrategyNumber / RTOverlapStrategyNumber.)
+        let member = |l: u32, r: u32| -> u32 {
+            let strategies: &[i16] = match (method, overlaps) {
+                (403, _) => &[3],
+                (_, true) => &[3],
+                (_, false) => &[3, 18],
+            };
+            let want = if overlaps { "&&" } else { "=" };
+            strategies
+                .iter()
+                .map(|s| cat.opfamily_member(class.family, l, r, *s))
+                .find(|op| {
+                    let name = || match crate::sql::func::operator_by_oid(*op) {
+                        Some(o) => o.name == want,
+                        None => cat.operators.get(op).is_some_and(|o| o.name == want),
+                    };
+                    *op != 0 && (method == 403 || name())
+                })
+                .unwrap_or(0)
+        };
+        let fty = type_oid(cat, &t.columns.get(*fc)?.ty);
+        let pp = member(class.intype, class.intype);
+        let (mut pf, mut ff) = (member(class.intype, fty), member(fty, fty));
+        if pf == 0 || ff == 0 {
+            (pf, ff) = (pp, pp);
+        }
+        out.0.push(pf);
+        out.1.push(pp);
+        out.2.push(ff);
+    }
+    Some(out)
 }
 
 /// The operators of an exclusion constraint over index `ix` (pg_operator oids).

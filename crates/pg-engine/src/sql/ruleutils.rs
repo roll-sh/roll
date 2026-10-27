@@ -153,6 +153,8 @@ fn unquote_ident(s: &str) -> String {
 /// Whether an index expression prints as a function call (no extra parentheses needed).
 pub fn looks_like_function(e: &Expr) -> bool {
     match e {
+        // (A native SUBSCRIPT handler's fetch is a SubscriptingRef, not a call.)
+        Expr::Call(def, ..) if def.oid == 0 && def.name == "subscript" => false,
         Expr::Call(def, ..) => !is_operator(def.name),
         Expr::NullIf(..) | Expr::SqlSyntax(_) | Expr::Coalesce(..) | Expr::MinMax(..) => true,
         _ => false,
@@ -993,6 +995,11 @@ impl Deparser<'_, '_> {
                 }
                 self.buf.push_str(qual);
                 self.buf.push_str(&quote_ident(crate::sql::expr::DROPPED_COLUMN));
+            }
+            // A native SUBSCRIPT handler's fetch (hstore's `h['k']`): a SubscriptingRef.
+            Expr::Call(d, args, ty) if d.oid == 0 && d.name == "subscript" && d.strict && args.len() == 2 => {
+                let sub = Expr::Subscript(Box::new(args[0].clone()), vec![(Some(args[1].clone()), None, false)], ty.clone());
+                self.expr_here(&sub, showimplicit)?;
             }
             Expr::Agg(i, _) => self.aggregate(self.aggs.get(*i)?)?,
             Expr::Param(i, _) => self.buf.push_str(&param_name(*i)),

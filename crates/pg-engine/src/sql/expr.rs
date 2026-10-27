@@ -964,7 +964,18 @@ impl fmt::Debug for Expr {
             },
             Expr::Array(a, _) => write!(f, "ARRAY{a:?}"),
             Expr::Row(a, _) => write!(f, "ROW{a:?}"),
-            Expr::Subscript(e, i, _) => write!(f, "({e:?})[{}]", i.len()),
+            // (With the subscripts: this text is what matching takes for equality, and
+            // `a[1]` isn't `a[2]`.)
+            Expr::Subscript(e, i, _) => {
+                write!(f, "({e:?})")?;
+                for (lo, hi, slice) in i {
+                    match slice {
+                        true => write!(f, "[{lo:?}:{hi:?}]")?,
+                        false => write!(f, "[{lo:?}]")?,
+                    }
+                }
+                Ok(())
+            }
             Expr::Field(e, i, _) => write!(f, "({e:?}).{i}"),
             Expr::Assign {
                 base,
@@ -1365,22 +1376,21 @@ fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                 return Ok(match v {
                     Value::Null => Value::Null,
                     Value::Jsonb(j) => {
-                        // jsonb subscripting: j['key'] / j[0]
-                        let mut cur = Some((*j).clone());
+                        // jsonb subscripting (jsonb_subscript_fetch): the subscripts as a
+                        // text path, as #> takes it; a NULL one gives NULL.
+                        let mut path = Vec::with_capacity(idx.len());
                         for (lo, _, _) in idx {
                             let k = match lo {
                                 Some(e) => eval(e, row, ctx)?,
                                 None => Value::Null,
                             };
-                            cur = match (cur, k) {
-                                (Some(c), Value::Text(s)) => c.get(&s).cloned(),
-                                (Some(c), k) if k.as_i64().is_some() => {
-                                    c.index(k.as_i64().unwrap()).cloned()
-                                }
-                                _ => None,
-                            };
+                            path.push(match k {
+                                Value::Null => None,
+                                Value::Text(s) => Some(s.to_string()),
+                                k => k.as_i64().map(|i| i.to_string()),
+                            });
                         }
-                        match cur {
+                        match crate::sql::func::json::jsonb_path_get(&j, &path) {
                             Some(j) => Value::Jsonb(Arc::new(j)),
                             None => Value::Null,
                         }

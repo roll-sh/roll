@@ -269,7 +269,7 @@ fn path_of(v: &Value) -> Vec<Option<String>> {
     }
 }
 
-fn jsonb_path_get(j: &Jsonb, path: &[Option<String>]) -> Option<Jsonb> {
+pub(crate) fn jsonb_path_get(j: &Jsonb, path: &[Option<String>]) -> Option<Jsonb> {
     let mut cur = j;
     for p in path {
         let p = p.as_ref()?;

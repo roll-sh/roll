@@ -3961,7 +3961,11 @@ impl Tree<'_, '_, '_> {
             }
             Expr::Subscript(base, subs, ty) => {
                 let bty = base.ty();
-                let elem = bty.elem()?.clone();
+                // (jsonb_subscript_transform: a jsonb container's element type is jsonb.)
+                let elem = match &bty {
+                    DataType::Jsonb => DataType::Jsonb,
+                    _ => bty.elem()?.clone(),
+                };
                 let slice = subs.iter().any(|s| s.2);
                 let _ = write!(
                     out,

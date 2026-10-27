@@ -3952,7 +3952,8 @@ impl Binder<'_, '_> {
                         ));
                     }
                     // jsonb_subscript_transform: each subscript as integer or text (an
-                    // unknown literal as text); fetched as a #> path.
+                    // unknown literal as text); a SubscriptingRef of jsonb, which fetches
+                    // as a #> path does (jsonb_subscript_fetch) and prints as subscripts.
                     let mut keys = Vec::new();
                     for (l, _, _) in subs.drain(..) {
                         let n = flushed.get();
@@ -3962,8 +3963,7 @@ impl Binder<'_, '_> {
                         let key = if matches!(lt, DataType::Unknown) {
                             b.coerce_implicit(l, &DataType::Text)?
                         } else if func::can_coerce(&lt, &DataType::Int4) {
-                            let i = b.coerce_implicit(l, &DataType::Int4)?;
-                            b.cast_explicit(i, &DataType::Text)?
+                            b.coerce_implicit(l, &DataType::Int4)?
                         } else if func::can_coerce(&lt, &DataType::Text) {
                             b.coerce_implicit(l, &DataType::Text)?
                         } else {
@@ -3976,10 +3976,9 @@ impl Binder<'_, '_> {
                                 sub_locs.get(n).copied().unwrap_or(-1),
                             ));
                         };
-                        keys.push(key);
+                        keys.push((Some(key), None, false));
                     }
-                    let path = Expr::Array(keys, DataType::array_of(DataType::Text));
-                    return b.binop("#>", base, path, -1);
+                    return Ok(Expr::Subscript(Box::new(base), keys, DataType::Jsonb));
                 }
                 // A type whose SUBSCRIPT handler is native code (hstore): its transform
                 // (one subscript, of text) and fetch.

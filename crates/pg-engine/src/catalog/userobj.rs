@@ -559,6 +559,32 @@ impl Catalog {
         }
     }
 
+    /// get_opfamily_member: the operator of family `family` for (`left`, `right`) at
+    /// `strategy` (0 if none).
+    pub fn opfamily_member(&self, family: u32, left: u32, right: u32, strategy: i16) -> u32 {
+        if let Some(m) = self.opmembers.values().find(|m| {
+            !m.func && (m.family, m.left, m.right, m.number) == (family, left, right, strategy)
+        }) {
+            return m.object;
+        }
+        // (The built-in ones by key, hashed once.)
+        static BUILTIN: std::sync::OnceLock<std::collections::HashMap<(u32, u32, u32, i16), (u32, u32)>> =
+            std::sync::OnceLock::new();
+        let builtin = BUILTIN.get_or_init(|| {
+            rows(SysTable::PgAmop)
+                .iter()
+                .map(|r| {
+                    let key = (oid_at(r, 1), oid_at(r, 2), oid_at(r, 3), int_at(r, 4) as i16);
+                    (key, (oid_at(r, 0), oid_at(r, 6)))
+                })
+                .collect()
+        });
+        builtin
+            .get(&(family, left, right, strategy))
+            .filter(|(oid, _)| !self.opmembers_removed.contains(oid))
+            .map_or(0, |m| m.1)
+    }
+
     /// A member by its pg_amop (`func` false) or pg_amproc oid.
     pub fn opmember_info(&self, func: bool, oid: u32) -> Option<MemberInfo> {
         if let Some(m) = self.opmembers.get(&oid).filter(|m| m.func == func) {
