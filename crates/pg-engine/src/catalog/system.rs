@@ -334,6 +334,7 @@ impl SysTable {
             array_oid: r.4,
             name: Some(Arc::from(r.1)),
             fields: (*self.columns()).clone(),
+            colls: Vec::new(),
         })))
     }
 
@@ -402,6 +403,7 @@ fn parse_cols(spec: &str) -> Vec<(String, DataType)> {
                         array_oid: 10028,
                         name: Some(Arc::from("pg_statistic")),
                         fields: parse_cols(spec),
+                        colls: Vec::new(),
                     }))
                 }
                 _ => DataType::from_name(base).unwrap_or_else(|| panic!("type {base}")),
@@ -2723,6 +2725,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     array_oid: typarray,
                     name: Some(Arc::from(name)),
                     fields: Vec::new(),
+                    colls: Vec::new(),
                 }));
                 push(
                     reltype,

@@ -99,8 +99,8 @@ the most common such errors): array_length / jsonb functions over jsonb scalars,
 literals to polymorphic functions, aggregates in WHERE / JOIN ON, LATERAL-less references to
 FROM items.
 
-`smoke_known.txt` lists the smoke run's remaining mismatches above `error_message` (62): the
-smoke test fails only on one not in it.
+`smoke_known.txt` lists the smoke run's remaining mismatches above `error_message` (20 since
+round 3, batch 1): the smoke test fails only on one not in it.
 
 ## Fixed
 
@@ -293,6 +293,28 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 2 (agent 68), before and after batch 1 | 1740–1889 × 100 | 14,895 | wrong_rows 3, wrong_state 3, tag 6 (the same both) |
 | round 2, base (a4823f7c) | 1890–2039 × 100 | 14,991 | wrong_rows 1, wrong_state 1, engine_error 44, eval_error 96, tag 6 |
 | round 2, batch 2 | 1890–2039 × 100 | 14,991 | wrong_state 1, engine_error 30, eval_error 84, tag 5 |
+| round 3 (agent 75), base (f4406f71) | 2040–2189 × 100 | 15,051 | wrong_rows 1, wrong_columns 1, engine_error 40, missing_error 33, eval_error 101, tag 9 |
+| round 3, batch 1 | 2040–2189 × 100 | 15,051 | engine_error 39, missing_error 24, eval_error 98, tag 9 |
+| round 3 grammar, batch 1 engine before its last fixes | 3030–3329 × 100 | 29,911 | wrong_rows 2, wrong_state 6, wrong_columns 1, tag 7 |
+
+## Round 3 grammar (agent 75)
+
+Seeds from `R3_SEEDS` (3000) on add to the schema: a nondeterministic collation `ci3` among
+the text columns' collations; domains (`d3int` with a CHECK, `d3text` with a collation) as
+column types; a generated column (`g`, STORED or VIRTUAL) over an integer one, which DML
+doesn't write; NULL-heavy data (a NULL share of 15%, 40% or 70% per table); triggers on one
+keyed table (a BEFORE row trigger skipping some rows and filling NULLs, AFTER row triggers
+and an AFTER statement trigger over its transition table, all logging into `audit3`, whose
+contents are compared after each DML statement on that table); and a composite type `ct3 (a
+text COLLATE <C | en-x-icu | und-x-icu | ci3 | default>, b int)` with its table `tc3 (id, c
+ct3, ca ct3[], n)` (NULL values and NULL fields), btree indexes on `c`, `(c DESC NULLS LAST,
+n)`, `ca`, a unique one on `c`, and the range type `ctr3` over it. 12% of the statements are
+then `composite_stmt`'s: comparisons, ORDER BY in every direction, GROUP BY, DISTINCT, DISTINCT
+ON, min / max, count(DISTINCT), window ORDER BY and PARTITION BY, self-joins, UNION, IN / ANY,
+GREATEST, row comparisons of fields, anonymous ROW() sort keys, arrays and ranges of `ct3`, a
+correlated min, and UPDATE / INSERT ... ON CONFLICT / DELETE ... RETURNING over `tc3`. (DML
+with RETURNING, MERGE, ON CONFLICT, data-modifying and recursive CTEs, window frames,
+partitioned and inherited tables were there already.)
 
 ## Round 2 (agent 68)
 
@@ -350,20 +372,81 @@ Batch 2, from seeds 1740–1889 (`a68_groupingsets_folded`, `a68_fold_empty_subq
   query's body is kept with it (`Binder::defer_plan`, `CteDef::deferred`) and raised where
   the query is read (or kept with the WITH query around that reference).
 
-## Open
+## Round 3 (agent 75)
 
-- **Wrong rows (collations, composite types; agent 67's leftover)**: a composite type's text
-  field declared with a collation (`CREATE TYPE ct AS (a text COLLATE "en-x-icu", b int)`) is
-  compared by bytes everywhere a record is: `ROW('a', 1)::ct < ROW('B', 1)::ct` is false
-  (PostgreSQL's record_cmp compares each field under its attcollation: true), `WHERE c >=
-  ROW('Z', 0)::ct` counts 4 of 5 rows (PostgreSQL 1), min / max and ORDER BY differ; an index
-  on such a column keys the field by bytes too (`storage/keys.rs` encodes a Record's fields
-  with `encode_value`; `key_colls` gives a composite column no `KeyColl`). Both have to change
-  together (an index keyed under the field collation while comparisons stay bytewise would
-  disagree with its own scans): per-field collations into the record comparison
-  (`sql/func/ops.rs` record compare, `compare_values` for sorts, hashing / grouping), then
-  `KeyColl` per field for composite index columns behind an index key format 3 (rebuilt on
-  open, as `Engine::reencoded_indexes` does for format 2).
+Batch 1 (`a75_composite_collation`, `tests/locale/composite.sql`, `tests/index_key_format.rs`
+`composite_index_keys_are_upgraded`), agent 67's leftover:
+
+- **Wrong rows (composites with collated fields)**: records compared by their bytes
+  everywhere: `ROW('a', 1)::ct < ROW('B', 1)::ct` with `ct (a text COLLATE "en-x-icu", b
+  int)` was false (PostgreSQL's record_cmp compares each field under its attcollation:
+  true), `WHERE c >= ROW('Z', 0)::ct` counted 2 rows of 7 where PostgreSQL counts 1, and min /
+  max, ORDER BY, window ORDER BY, GREATEST / LEAST, IN / ANY, arrays of composites, nested
+  composites, domains and range types over them disagreed; in an ICU-default database every
+  record with a text field did (its fields are under the default). Under a nondeterministic
+  field collation, GROUP BY, DISTINCT, count(DISTINCT), UNION, window PARTITION BY, `IN
+  (SELECT ...)` and unique indexes kept values PostgreSQL finds equal apart. A record's
+  comparison is now a record collation (`Collation::record`: per field, the collation it
+  compares under, nested for composite fields), derived from the type
+  (`collation::for_type`: a CREATE TYPE's COLLATE, a table row type's column collations, an
+  anonymous ROW()'s field collations, which `RowType::colls` now carries as PostgreSQL's
+  blessed row type does; the database default otherwise) and carried as any collation is:
+  with the comparison call (`record_compare_def`, also for sub-select comparisons), a sort
+  key's `<`, min / max, window and grouping keys, set operations, range types over
+  composites (`types/range.rs` `vcmp`) and index keys.
+- **Wrong rows (field access)**: `(c).a` derived the default collation, not the field's
+  (FieldSelect's resultcollid), so `(c).a < 'b'` and `((c).a, (c).b) < ('b', 0)` compared
+  bytes (`binder::collation_at`, `collation::field_collation`).
+- **Index key format 3**: a btree or hash index on a composite column (or an array or range of
+  them) whose fields are under such collations keys each field by its collation's sort key
+  (`keys::encode_collated`), so index scans, ORDER BY and Merge Append use it in record_cmp's
+  order; indexes written before are rebuilt when a database is first opened
+  (`Engine::reencoded_indexes`).
+- **Wrong rows (min / max)**: `max(c)` of a composite was planned as an index scan under
+  `c IS NOT NULL`, which tests the fields, so a value with a NULL field (`(,1)`, the largest)
+  was skipped: PostgreSQL has no sort operator for record's min / max and aggregates them.
+  Their result type is `record`, as PostgreSQL's (`(min(c)).a` fails).
+- Build hazard: `crates/pg-icu`'s build fails when ICU4C can't be built (it used to warn and
+  build without ICU, leaving every ICU collation wrong or unavailable); `PG_ICU_DISABLE=1`
+  builds without it on purpose.
+
+Found by the round 3 grammar and seeds 2040-2189 (`a75_fresh_r3`):
+
+- **Wrong rows (self-join elimination over composites)**: a self-join on a unique composite
+  column became one scan filtered by `c IS NOT NULL`, which tests the fields, so rows with a
+  NULL field were lost (`x JOIN y ON x.c = y.c`); PostgreSQL's NullTest there is of the value
+  (argisrow false, shown as `c IS DISTINCT FROM NULL`) (`analyzejoins::replace_selfjoin_qual`).
+- **Wrong rows (presorted aggregate, nondeterministic collations)**: with a DISTINCT aggregate
+  over a nondeterministic key the Agg's input was presorted by bytes, so `max(s)` / `min(s)` of
+  `SELECT max(s), count(DISTINCT s)` kept another of two equal values than PostgreSQL, whose
+  Sort below orders under the key's collation (ties stay in input order): text and
+  composites alike.
+- **Wrong rows (aggregate level)**: an aggregate whose arguments name only an outer query's
+  columns belongs to that query, also when folding drops them (`count(1) FILTER (WHERE
+  starts_with(NULL, o.c))` in a sub-select): the binder now notes the levels of the columns the
+  arguments name as written (`Binder::agg_refs`), as parse analysis does (seed 2183 #73: an
+  outer query over one row returned 0 for the sub-select instead of NULL; smoke's
+  `missing_error s1 #34` went with it).
+- **Wrong columns**: a scalar sub-select's name is its first column's resname, `?column?` when
+  that figures none, so a CASE whose ELSE is one is named after it (seed 2187 #13).
+- Seed 1472 #24 (an INSERT failing in the engine only): a SQL function PostgreSQL neither
+  inlines nor runs while planning has its body planned only when it runs, so a failing
+  constant in it fails only then (`fold.rs`: such a call's sub-plan isn't walked).
+- Seed 1926 #33 (an error PostgreSQL raises): the constants an empty relation keeps for the
+  readers of its columns are settled in the plans of sub-selects too (an EXISTS turned into an
+  InitPlan read a pulled-up view's failing output in a join clause; `settle_kept_cols`).
+- Seed 1926 #43 stays open: an EXISTS over a UNION whose arm reads a column of a relation found
+  empty (`ON EXISTS (SELECT 1 UNION SELECT jsonb_array_length(s7.c2 -> 'a') FROM w WHERE
+  false)`, `s7 ... WHERE false`) fails in PostgreSQL only when that relation is empty; which
+  outputs PostgreSQL substitutes there before planning the sub-select needs its pull-up order.
+
+Left: two anonymous rows whose fields have different collations (`ROW('a'::text COLLATE "C",
+1)` against `ROW('B'::text, 1)` in an ICU database) compare under the first's, where
+PostgreSQL's record_cmp has no collation for the field and fails ("could not determine which
+collation to use for string comparison") once it compares two values of it; `max(c)::ct`
+(a record cast to a composite) isn't refused.
+
+## Open
 
 - **Wrong rows (JSON_VALUE / JSON_QUERY, a PostgreSQL 18.6 quirk)**: after a row whose call
   fell back to its ON ERROR (or, without an ON ERROR step, ON EMPTY) default, a row whose

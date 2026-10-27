@@ -2768,6 +2768,11 @@ impl Binder<'_, '_> {
             && nd_keys.iter().any(|k| {
                 matches!(k, Expr::Collate(..))
                     || matches!(k, Expr::Call(d, ..) if d.name == super::INDETERMINATE_HASH)
+                    // (Composites with fields under nondeterministic collations: grouping
+                    // normalizes them, `agg::nondeterministic_keys`.)
+                    || (!self.deparse
+                        && k.ty().holds_composite()
+                        && crate::types::collation::for_type(&self.cat, &k.ty()).is_some_and(|c| !c.deterministic))
             })
         {
             plan = Plan::Agg {
@@ -7750,7 +7755,10 @@ fn figure(n: &Node) -> (Option<String>, u8) {
                     if !rt.name.is_empty() {
                         return (Some(rt.name.clone()), 2);
                     }
-                    return figure(rt.val.as_deref().unwrap());
+                    // (Its resname, `?column?` when it figures none, is a name all the same:
+                    // a CASE whose ELSE is such a sub-select takes it.)
+                    let n = figure(rt.val.as_deref().unwrap()).0;
+                    return (Some(n.unwrap_or_else(|| "?column?".into())), 2);
                 }
                 (None, 0)
             }

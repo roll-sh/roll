@@ -141,7 +141,7 @@ pub mod oid {
 }
 
 /// A composite type's fields; named composites (CREATE TYPE ... AS) also carry their identity.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RowType {
     /// The composite type's oid, or 0 for an anonymous row (`record`).
     pub oid: u32,
@@ -149,6 +149,26 @@ pub struct RowType {
     /// Its name as `format_type` shows it.
     pub name: Option<Arc<str>>,
     pub fields: Vec<(String, DataType)>,
+    /// An anonymous row's field collations other than the default, as its expressions
+    /// derive them (the attcollations of the row type Postgres blesses for a ROW()); empty
+    /// when there are none. A named composite's are in the catalog. Not part of the type's
+    /// identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub colls: Vec<Option<Arc<str>>>,
+}
+
+impl PartialEq for RowType {
+    fn eq(&self, o: &Self) -> bool {
+        self.oid == o.oid && self.array_oid == o.array_oid && self.name == o.name && self.fields == o.fields
+    }
+}
+
+impl Eq for RowType {}
+
+impl std::hash::Hash for RowType {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.oid, self.array_oid, &self.name, &self.fields).hash(state)
+    }
 }
 
 impl DataType {
@@ -157,6 +177,16 @@ impl DataType {
         match self {
             DataType::Row(r) if r.oid != 0 => Some(r.oid),
             _ => None,
+        }
+    }
+
+    /// Whether values of this type hold composite values (directly, in arrays or ranges).
+    pub fn holds_composite(&self) -> bool {
+        match self {
+            DataType::Row(_) => true,
+            DataType::Array(e) => e.holds_composite(),
+            DataType::Range(r) | DataType::Multirange(r) => r.subtype.holds_composite(),
+            _ => false,
         }
     }
 
@@ -1265,6 +1295,7 @@ impl DataType {
             array_oid: 0,
             name: None,
             fields,
+            colls: Vec::new(),
         }))
     }
 

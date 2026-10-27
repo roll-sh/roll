@@ -1097,6 +1097,11 @@ fn partition_collations(
                 let cat = cat.get_or_insert_with(|| ctx.catalog());
                 crate::types::collation::by_name(cat, name).filter(|c| !c.bytewise())
             }
+            // Composites by their fields' collations.
+            k if k.ty().holds_composite() => {
+                let cat = cat.get_or_insert_with(|| ctx.catalog());
+                crate::types::collation::for_type(cat, &k.ty())
+            }
             _ => None,
         })
         .collect()

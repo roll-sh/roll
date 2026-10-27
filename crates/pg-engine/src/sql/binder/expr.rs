@@ -302,7 +302,8 @@ impl Binder<'_, '_> {
                     .enumerate()
                     .map(|(i, a)| (format!("f{}", i + 1), a.ty()))
                     .collect();
-                Ok(Expr::Row(args, DataType::row(fields)))
+                let ty = self.with_field_colls(DataType::row(fields), &args);
+                Ok(Expr::Row(args, ty))
             }
             NodeEnum::AIndirection(ind) => self.bind_indirection(ind),
             NodeEnum::CollateClause(c) => {
@@ -1266,7 +1267,10 @@ impl Binder<'_, '_> {
                         ..(*rt).clone()
                     }))
                 }
-                _ => DataType::row(fields),
+                _ => {
+                    let exprs: Vec<Expr> = cols.iter().map(|(_, e)| e.clone()).collect();
+                    self.with_field_colls(DataType::row(fields), &exprs)
+                }
             };
             let mut row = Expr::Row(cols.into_iter().map(|(_, e)| e).collect(), ty.clone());
             if let Some(test) = nulled.filter(|t| !matches!(t, Expr::And(v) if v.is_empty())) {
@@ -2395,7 +2399,10 @@ impl Binder<'_, '_> {
                 .map(Expr::ty)
                 .chain(std::iter::once(ty.clone()))
                 .find_map(|t| match t {
-                    DataType::Range(rt) | DataType::Multirange(rt) => rt.coll(),
+                    // (A composite subtype: its fields' collations.)
+                    DataType::Range(rt) | DataType::Multirange(rt) => rt
+                        .coll()
+                        .or_else(|| crate::types::collation::for_type(&self.cat, &rt.subtype)),
                     _ => None,
                 })
         {
@@ -2455,6 +2462,57 @@ impl Binder<'_, '_> {
         }
     }
 
+    /// How values of `e`'s type compare when it holds composites (`collation::for_type`).
+    pub(crate) fn record_coll(&self, e: &Expr) -> Option<Arc<crate::types::collation::Collation>> {
+        let ty = e.ty();
+        if self.deparse || !ty.holds_composite() {
+            return None;
+        }
+        crate::types::collation::for_type(&self.cat, &ty)
+    }
+
+    /// An anonymous row type over `args` with the field collations they derive other than
+    /// the default (`RowType::colls`).
+    fn with_field_colls(&self, ty: DataType, args: &[Expr]) -> DataType {
+        let DataType::Row(rt) = &ty else { return ty };
+        let colls: Vec<Option<Arc<str>>> = args
+            .iter()
+            .map(|a| match a.ty().collatable().then(|| self.collation_of(a)) {
+                Some(Ok(super::Coll::Implicit(c) | super::Coll::Explicit(c, _))) if c != "default" => {
+                    Some(Arc::from(c.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        if self.deparse || colls.iter().all(Option::is_none) {
+            return ty;
+        }
+        DataType::Row(Arc::new(crate::types::RowType {
+            colls,
+            ..(**rt).clone()
+        }))
+    }
+
+    /// A comparison over composite values (or arrays or ranges of them) under their fields'
+    /// collations: record_cmp's attcollation.
+    fn record_compare_def(&self, def: Arc<FuncDef>, args: &[Expr]) -> Arc<FuncDef> {
+        if def.coll.is_some()
+            || !matches!(
+                def.name,
+                "=" | "<>" | "<" | "<=" | ">" | ">=" | "btrecordcmp" | "btarraycmp" | "array_sort"
+            )
+        {
+            return def;
+        }
+        match args.iter().find_map(|a| self.record_coll(a)) {
+            Some(c) => Arc::new(FuncDef {
+                coll: Some(c),
+                ..(*def).clone()
+            }),
+            None => def,
+        }
+    }
+
     /// A comparison's `def` as it runs over `args` (see `input_collation_def`).
     fn collated(&self, def: Arc<FuncDef>, args: &[&Expr]) -> Arc<FuncDef> {
         let args: Vec<Expr> = args.iter().map(|a| (*a).clone()).collect();
@@ -2470,7 +2528,7 @@ impl Binder<'_, '_> {
         let c_def = func::string::c_ctype_variant(&def);
         let needs = needs_collation(&def, args);
         if c_def.is_none() && needs.is_none() && !crate::types::collation::sensitive(&def) {
-            return def;
+            return self.record_compare_def(def, args);
         }
         let mut coll = super::Coll::None;
         for a in args {
@@ -4109,6 +4167,8 @@ impl Binder<'_, '_> {
                 },
                 _ => res.def,
             };
+            // (Composites: their fields under theirs.)
+            let def = self.record_compare_def(def, &[lefts.last().cloned().unwrap(), Expr::Col(0, c.ty.clone())]);
             ops.push(def);
         }
         // Cast subquery columns to the operator's right-hand types.
@@ -5277,7 +5337,12 @@ impl Binder<'_, '_> {
             .map(|s| s.iter().map(|c| c.used.replace(false)).collect())
             .collect();
         let was_in_agg = std::mem::replace(&mut self.level().st.in_agg, true);
+        let refs_before = self.agg_refs.replace(Vec::new());
         let r = self.agg_call(schema, name, f);
+        let written = std::mem::replace(&mut self.agg_refs, refs_before).unwrap_or_default();
+        if let Some(r) = &mut self.agg_refs {
+            r.extend(written.iter().filter(|l| !r.contains(l)).copied().collect::<Vec<_>>());
+        }
         self.level().st.in_agg = was_in_agg;
         let mut args_ctes: Vec<(usize, String)> = Vec::new();
         // (`cte_levels` lines up with `ctes` from the top: the stack is set aside and put
@@ -5296,7 +5361,13 @@ impl Binder<'_, '_> {
         // The aggregate belongs to the lowest query level its arguments read columns of
         // (an outer one's, inside a sublink): that level's clause decides if it's allowed.
         let cur = self.levels.len() - 1;
-        let target = self.agg_level(&call);
+        // (Columns its arguments name that folding dropped count too: not an ordered-set
+        // aggregate's, whose direct arguments were bound alike.)
+        let named = written.iter().copied().filter(|&l| l <= cur && call.direct.is_empty()).max();
+        let target = match (self.agg_level_read(&call), named) {
+            (Some(a), Some(b)) => a.max(b),
+            (a, b) => a.or(b).unwrap_or(cur),
+        };
         let clause = if target == cur {
             clause
         } else {
@@ -5385,9 +5456,9 @@ impl Binder<'_, '_> {
     }
 
     /// The query level an aggregate's arguments make it belong to
-    /// (`check_agglevels_and_constraints`): the lowest one whose columns they read; the
-    /// current one when they read none.
-    fn agg_level(&self, call: &AggCall) -> usize {
+    /// (`check_agglevels_and_constraints`): the lowest one whose columns they read (None:
+    /// they read none, it is the current one).
+    fn agg_level_read(&self, call: &AggCall) -> Option<usize> {
         let cur = self.levels.len() - 1;
         let mut up: Option<usize> = None;
         // (check_agg_arguments: not the direct arguments of an ordered-set aggregate.)
@@ -5399,7 +5470,7 @@ impl Binder<'_, '_> {
                 up = Some(up.map_or(u, |x| x.min(u)));
             }
         }
-        cur - up.unwrap_or(0).min(cur)
+        up.map(|u| cur - u.min(cur))
     }
 
     /// How many levels up from `level` the nearest column `e` reads is.
@@ -5743,9 +5814,24 @@ impl Binder<'_, '_> {
                     _ => None,
                 }
             }
+            // Composites (and arrays of them) under their fields' collations.
+            Some(t) if matches!(name, "min" | "max") && t.holds_composite() => {
+                match a2.first().and_then(|a| self.record_coll(a)) {
+                    Some(coll) => {
+                        let lt = resolve_binop("<", t, t)?.def;
+                        Some(Arc::new(FuncDef {
+                            coll: Some(coll),
+                            ..(*lt).clone()
+                        }))
+                    }
+                    None => None,
+                }
+            }
             _ => None,
         };
         let ret = match (&res.ret, arg_types.first()) {
+            // (min(record) / max(record): a composite's are records.)
+            (_, Some(DataType::Row(_))) if matches!(name, "min" | "max") => DataType::Record,
             // min/max keep the input's typmod-less type.
             (_, Some(t)) if matches!(name, "min" | "max") => t.without_typmod(),
             (r, _) => r.clone(),
@@ -6187,11 +6273,14 @@ impl Binder<'_, '_> {
                 _ => {}
             }
         }
-        // Ranges order by their bounds under the subtype collation.
+        // Ranges order by their bounds under the subtype collation, composites (and arrays
+        // and ranges of them) by their fields under theirs.
         if using.is_none()
             && !self.deparse
-            && let DataType::Range(rt) | DataType::Multirange(rt) = &ty
-            && let Some(coll) = rt.coll()
+            && let Some(coll) = match &ty {
+                DataType::Range(rt) | DataType::Multirange(rt) if rt.coll().is_some() => rt.coll(),
+                _ => self.record_coll(&expr),
+            }
         {
             let lt = resolve_binop("<", &ty, &ty)?.def;
             using = Some(Arc::new(FuncDef {

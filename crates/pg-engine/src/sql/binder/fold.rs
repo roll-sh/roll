@@ -117,6 +117,13 @@ impl Cx<'_, '_> {
                 {
                     return Some(err.clone());
                 }
+                // (A SQL function's body Postgres neither inlines nor runs while planning is
+                // planned when the call runs: what fails in it fails only then.)
+                if let Expr::Subquery(s) = e
+                    && s.call.as_ref().is_some_and(|c| !c.inline)
+                {
+                    return None;
+                }
                 if let Expr::Subquery(s) = e {
                     subs.push((&s.plan, s.kind == SubqueryKind::Exists));
                     return None;

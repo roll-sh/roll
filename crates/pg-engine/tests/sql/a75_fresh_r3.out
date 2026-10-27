@@ -1,0 +1,127 @@
+> CREATE TYPE a75r3c AS (a text COLLATE "C", b int)
+-- CREATE TYPE
+
+> CREATE TABLE a75r3t (id int PRIMARY KEY, c a75r3c, n int)
+-- CREATE TABLE
+
+> INSERT INTO a75r3t VALUES (1, ROW('a%', -1), 3), (2, NULL, 3), (3, ROW(NULL, 1), 3), (4, ROW('foo', NULL), 1), (5, ROW('ß', 2), 4)
+-- INSERT 0 5
+
+> CREATE UNIQUE INDEX a75r3t_u ON a75r3t (c)
+-- CREATE INDEX
+
+> SELECT x.id, y.id FROM a75r3t x JOIN a75r3t y ON x.c = y.c ORDER BY 1, 2
+id:int4 | id:int4
+1 | 1
+3 | 3
+4 | 4
+5 | 5
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF) SELECT x.id, y.id FROM a75r3t x JOIN a75r3t y ON x.c = y.c ORDER BY 1, 2
+QUERY PLAN:text
+Sort
+  Sort Key: y.id, y.id
+  ->  Seq Scan on a75r3t y
+        Filter: (c IS DISTINCT FROM NULL)
+-- EXPLAIN
+
+> CREATE COLLATION a75r3ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TYPE a75r3n AS (a text COLLATE a75r3ci, b int)
+-- CREATE TYPE
+
+> CREATE TABLE a75r3d (id int PRIMARY KEY, c a75r3n, s text COLLATE a75r3ci)
+-- CREATE TABLE
+
+> INSERT INTO a75r3d VALUES (1, ROW('a', 1), 'a'), (2, ROW('A', 1), 'A')
+-- INSERT 0 2
+
+> SELECT max(c), count(DISTINCT (c).a) FROM a75r3d
+max:record | count:int8
+(A,1) | 1
+-- SELECT 1
+
+> SELECT max(s), count(DISTINCT s), min(s) FROM a75r3d
+max:text | count:int8 | min:text
+A | 1 | A
+-- SELECT 1
+
+> SELECT array_agg(DISTINCT c) FROM a75r3d
+array_agg:user
+{"(a,1)"}
+-- SELECT 1
+
+> CREATE TABLE a75r3e (id int)
+-- CREATE TABLE
+
+> CREATE VIEW a75r3v AS SELECT max(1::text) AS c0, 1 AS c1 FROM a75r3e
+-- CREATE VIEW
+
+> SELECT (SELECT count(1) FILTER (WHERE starts_with(NULL, t1.c0)) FROM a75r3e t3) AS c1 FROM a75r3v t1
+c1:int8
+NULL
+-- SELECT 1
+
+> SELECT (SELECT count(1) FILTER (WHERE starts_with(NULL, t1.c0)) FROM a75r3t t3 WHERE false) AS c1 FROM a75r3v t1
+c1:int8
+NULL
+-- SELECT 1
+
+> SELECT CASE WHEN false THEN 1 ELSE (SELECT 1) END
+?column?:int4
+1
+-- SELECT 1
+
+> SELECT CASE WHEN false THEN 1 ELSE (SELECT 1 AS x) END
+x:int4
+1
+-- SELECT 1
+
+> SELECT CASE WHEN true THEN (SELECT 1 AS y) END
+case:int4
+1
+-- SELECT 1
+
+> SELECT (SELECT 1)::int, -(SELECT 1 AS q), (SELECT 1 AS q)::text
+?column?:int4 | ?column?:int4 | q:text
+1 | -1 | 1
+-- SELECT 1
+
+> CREATE FUNCTION a75r3f(p int) RETURNS int LANGUAGE sql STABLE STRICT AS $$ SELECT CASE WHEN p > 100 THEN 9 ELSE ('{"a": 2.50}'::jsonb ->> 'a')::int END $$
+-- CREATE FUNCTION
+
+> SELECT (SELECT a75r3f(1) FROM a75r3e WHERE NULL) FROM a75r3t ORDER BY 1 LIMIT 1
+a75r3f:int4
+NULL
+-- SELECT 1
+
+> SELECT a75r3f(1)
+ERROR 22P02: invalid input syntax for type integer: "2.50"
+CONTEXT: SQL function "a75r3f" statement 1
+
+> CREATE TABLE a75r3x (a int, b text)
+-- CREATE TABLE
+
+> CREATE VIEW a75r3w AS SELECT s2.c3 AS c1 FROM (a75r3x t1 RIGHT JOIN (SELECT ('"s"'::jsonb - 'a') AS c3 FROM a75r3e) s2 ON true) WHERE NULL
+-- CREATE VIEW
+
+> SELECT 1 FROM a75r3t t3 WHERE EXISTS (SELECT t4.a FROM a75r3x t4 LEFT JOIN (SELECT t6.c1 ->> 'b' AS c0 FROM a75r3w t6) s5 ON t4.b = s5.c0)
+ERROR 22023: cannot delete from scalar
+
+> DROP VIEW a75r3w, a75r3v
+-- DROP VIEW
+
+> DROP FUNCTION a75r3f
+-- DROP FUNCTION
+
+> DROP TABLE a75r3t, a75r3d, a75r3e, a75r3x
+-- DROP TABLE
+
+> DROP TYPE a75r3c, a75r3n
+-- DROP TYPE
+
+> DROP COLLATION a75r3ci
+-- DROP COLLATION
+

@@ -2783,11 +2783,19 @@ impl AggNode {
                         })
                         .collect();
                     if a.distinct {
-                        keys.extend(a.args.iter().map(|e| SortKey {
+                        // (Under the arguments' collations, as the Sort the planner puts
+                        // below orders them: ties a nondeterministic one finds stay in
+                        // input order.)
+                        let colls = sort_collations(&a.args, ctx);
+                        keys.extend(a.args.iter().zip(colls).map(|(e, c)| SortKey {
                             expr: e.clone(),
                             desc: false,
                             nulls_first: false,
-                            using: None,
+                            using: c.and_then(|c| {
+                                let ty = e.ty();
+                                let lt = crate::sql::func::resolve_binop("<", &ty, &ty).ok()?.def;
+                                Some(Arc::new(crate::sql::func::FuncDef { coll: Some(c), ..(*lt).clone() }))
+                            }),
                         }));
                     } else {
                         keys.extend(a.order_by.iter().cloned());
@@ -3415,6 +3423,11 @@ pub(crate) fn nondeterministic_keys(
                     let cat = cat.get_or_insert_with(|| ctx.catalog());
                     crate::types::collation::by_name(cat, name).filter(|c| !c.deterministic)
                 }
+                // Composites with fields under nondeterministic collations.
+                k if k.ty().holds_composite() => {
+                    let cat = cat.get_or_insert_with(|| ctx.catalog());
+                    crate::types::collation::for_type(cat, &k.ty()).filter(|c| !c.deterministic)
+                }
                 _ => None,
             };
             if matches!(k.ty(), T::Bpchar(_)) {
@@ -3438,6 +3451,11 @@ pub(crate) fn sort_collations(
             crate::sql::expr::Expr::Collate(_, name, _) => {
                 let cat = cat.get_or_insert_with(|| ctx.catalog());
                 crate::types::collation::by_name(cat, name).filter(|c| !c.bytewise())
+            }
+            // (Composites: their fields under theirs.)
+            k if k.ty().holds_composite() => {
+                let cat = cat.get_or_insert_with(|| ctx.catalog());
+                crate::types::collation::for_type(cat, &k.ty())
             }
             _ => None,
         })

@@ -432,6 +432,14 @@ fn replace_selfjoin_qual(q: Expr) -> Expr {
         && a.same_as(b)
         && !a.is_volatile()
     {
+        // (Of a composite: a NullTest of the value, not of its fields (argisrow false),
+        // which ruleutils shows as IS DISTINCT FROM NULL.)
+        let ty = a.ty();
+        if matches!(ty, DataType::Row(_) | DataType::Record)
+            && let Ok(eq) = crate::sql::func::resolve_binop("=", &ty, &ty)
+        {
+            return Expr::IsDistinct(Box::new(a.clone()), Box::new(Expr::Const(Value::Null, ty)), false, eq.def);
+        }
         return Expr::IsNull(Box::new(a.clone()), true);
     }
     q
@@ -879,6 +887,48 @@ fn dummy(p: &Plan) -> Plan {
 /// of its columns (`DummyInfo::kept_cols`) are kept outright when the plan above reads the
 /// column (`binder::fold::first_error` then finds them).
 pub(crate) fn settle_kept_cols(p: &mut Plan, needed: &[bool]) {
+    if !has_kept_cols(p) {
+        return;
+    }
+    settle_tree(p, needed);
+    // (The sub-selects in its expressions, planned apart: all their outputs read, an EXISTS
+    // simplify_EXISTS_query throws the target list of away none.)
+    super::sublinkcopy::plan_exprs_mut(p, &mut |e| {
+        let x = std::mem::replace(e, Expr::Const(Value::Null, DataType::Bool));
+        *e = x
+            .transform(&mut |y| {
+                Ok(match y {
+                    Expr::Subquery(mut s) if has_kept_cols(&s.plan) => {
+                        let read = s.kind != crate::sql::expr::SubqueryKind::Exists
+                            || !crate::sql::binder::fold::exists_simplified(&s.plan);
+                        let n = vec![read; plan_width(&s.plan)];
+                        settle_kept_cols(Arc::make_mut(&mut s.plan), &n);
+                        Expr::Subquery(s)
+                    }
+                    y => y,
+                })
+            })
+            .unwrap();
+    });
+}
+
+/// Whether an Empty in `p` (or in the plan of a sub-select in its expressions) keeps
+/// constants for readers of its columns.
+pub(crate) fn has_kept_cols(p: &Plan) -> bool {
+    if let Plan::Empty { info: Some(i), .. } = p {
+        return !i.kept_cols.is_empty();
+    }
+    let mut es = Vec::new();
+    crate::sql::explain::node_exprs(p, &mut es);
+    let mut sub = false;
+    for e in es {
+        e.walk(&mut |x| sub |= matches!(x, Expr::Subquery(s) if has_kept_cols(&s.plan)));
+    }
+    sub || crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_kept_cols(c))
+}
+
+/// `settle_kept_cols` over the plan tree itself.
+fn settle_tree(p: &mut Plan, needed: &[bool]) {
     fn has(p: &Plan) -> bool {
         match p {
             Plan::Empty { info: Some(i), .. } => !i.kept_cols.is_empty(),
@@ -902,7 +952,7 @@ pub(crate) fn settle_kept_cols(p: &mut Plan, needed: &[bool]) {
     for (k, c) in crate::sql::explain::plan_inputs_mut(p).into_iter().enumerate() {
         let n = needs.get(k).cloned().unwrap_or_else(|| vec![true; plan_width(c)]);
         if has(c) {
-            settle_kept_cols(Arc::make_mut(c), &n);
+            settle_tree(Arc::make_mut(c), &n);
         }
     }
 }

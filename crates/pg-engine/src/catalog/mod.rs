@@ -1284,6 +1284,7 @@ impl CompositeType {
             array_oid: self.array_oid,
             name: Some(Arc::from(self.name.as_str())),
             fields: self.fields.clone(),
+            colls: Vec::new(),
         }))
     }
 }
@@ -3489,6 +3490,7 @@ impl Catalog {
             oid,
             array_oid,
             name: Some(Arc::from(name)),
+            colls: Vec::new(),
             fields,
         })))
     }

@@ -1,0 +1,375 @@
+> CREATE COLLATION a75ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TYPE a75ct AS (a text COLLATE "en-x-icu", b int)
+-- CREATE TYPE
+
+> CREATE TYPE a75cn AS (a text COLLATE a75ci, b int)
+-- CREATE TYPE
+
+> CREATE TYPE a75nest AS (x a75ct, y text COLLATE "en-x-icu")
+-- CREATE TYPE
+
+> CREATE TYPE a75r AS RANGE (subtype = a75ct)
+-- CREATE TYPE
+
+> CREATE DOMAIN a75dct AS a75ct CHECK ((VALUE).b >= 0)
+-- CREATE DOMAIN
+
+> SELECT ROW('a',1)::a75ct < ROW('B',1)::a75ct AS named, ROW('a',1) < ROW('B',1) AS rowcmp
+named:bool | rowcmp:bool
+t | f
+-- SELECT 1
+
+> SELECT r1 < r2 AS anon FROM (SELECT ROW('a'::text COLLATE "en-x-icu",1) r1, ROW('B'::text COLLATE "en-x-icu",1) r2) s
+anon:bool
+t
+-- SELECT 1
+
+> SELECT r1 < r2 AS anon_c FROM (SELECT ROW('a'::text,1) r1, ROW('B'::text,1) r2) s
+anon_c:bool
+f
+-- SELECT 1
+
+> SELECT s1 < s2 AS wholerow FROM (SELECT 'a'::text COLLATE "en-x-icu" AS x) s1, (SELECT 'B'::text COLLATE "en-x-icu" AS x) s2
+wholerow:bool
+t
+-- SELECT 1
+
+> SELECT ARRAY[ROW('a',1)::a75ct] < ARRAY[ROW('B',1)::a75ct] AS arr
+arr:bool
+t
+-- SELECT 1
+
+> SELECT ROW(ROW('a',1)::a75ct, 'x')::a75nest < ROW(ROW('B',1)::a75ct, 'x')::a75nest AS nest,
+>        ROW(ROW('a',1)::a75ct, 'b')::a75nest < ROW(ROW('a',1)::a75ct, 'B')::a75nest AS nest2
+nest:bool | nest2:bool
+t | t
+-- SELECT 1
+
+> SELECT a75r(ROW('a',1)::a75ct, ROW('B',1)::a75ct) AS rng
+rng:user
+["(a,1)","(B,1)")
+-- SELECT 1
+
+> SELECT a75r(ROW('a',1)::a75ct, ROW('c',1)::a75ct) @> ROW('B',1)::a75ct AS rng_contains
+rng_contains:bool
+t
+-- SELECT 1
+
+> SELECT a75r(ROW('b',1)::a75ct, ROW('B',1)::a75ct)
+a75r:user
+["(b,1)","(B,1)")
+-- SELECT 1
+
+> SELECT ROW('a',1)::a75dct < ROW('B',1)::a75dct AS dom
+dom:bool
+t
+-- SELECT 1
+
+> SELECT ROW('a',1)::a75cn = ROW('A',1)::a75cn AS cn_eq, ROW('a',1)::a75cn < ROW('B',1)::a75cn AS cn_lt
+cn_eq:bool | cn_lt:bool
+t | t
+-- SELECT 1
+
+> CREATE TABLE a75tc (id int, c a75ct, d a75dct, n a75cn, ca a75ct[])
+-- CREATE TABLE
+
+> INSERT INTO a75tc VALUES
+>   (1, ROW('a',1), ROW('a',1), ROW('a',1), ARRAY[ROW('a',1)::a75ct]),
+>   (2, ROW('B',1), ROW('B',1), ROW('A',1), ARRAY[ROW('B',1)::a75ct]),
+>   (3, ROW('b',1), ROW('b',1), ROW('b',1), ARRAY[ROW('b',1)::a75ct]),
+>   (4, ROW('A',2), ROW('A',2), ROW('B',2), ARRAY[ROW('A',2)::a75ct]),
+>   (5, ROW('Z',0), ROW('Z',0), NULL, NULL),
+>   (6, NULL, NULL, ROW(NULL,1), ARRAY[NULL::a75ct]),
+>   (7, ROW(NULL,1), ROW(NULL,1), ROW('a',NULL), ARRAY[ROW(NULL,1)::a75ct])
+-- INSERT 0 7
+
+> SELECT count(*) FROM a75tc WHERE c >= ROW('Z',0)::a75ct
+count:int8
+2
+-- SELECT 1
+
+> SELECT min(c), max(c), min(d), max(d), min(ca), max(ca) FROM a75tc
+min:record | max:record | min:record | max:record | min:user | max:user
+(a,1) | (,1) | (a,1) | (,1) | {"(a,1)"} | {NULL}
+-- SELECT 1
+
+> SELECT string_agg(id::text, ',' ORDER BY c), string_agg(id::text, ',' ORDER BY d DESC), string_agg(id::text, ',' ORDER BY ca) FROM a75tc
+string_agg:text | string_agg:text | string_agg:text
+1,4,3,2,5,7,6 | 6,7,5,2,3,4,1 | 1,4,3,2,7,6,5
+-- SELECT 1
+
+> SELECT id FROM a75tc ORDER BY ca NULLS FIRST, id
+id:int4
+5
+1
+4
+3
+2
+7
+6
+-- SELECT 7
+
+> SELECT count(DISTINCT n), count(DISTINCT c) FROM a75tc
+count:int8 | count:int8
+5 | 6
+-- SELECT 1
+
+> SELECT n, count(*) FROM a75tc GROUP BY n ORDER BY n
+n:user | count:int8
+(a,1) | 2
+(a,) | 1
+(b,1) | 1
+(B,2) | 1
+(,1) | 1
+NULL | 1
+-- SELECT 6
+
+> SELECT DISTINCT n FROM a75tc ORDER BY n
+n:user
+(a,1)
+(a,)
+(b,1)
+(B,2)
+(,1)
+NULL
+-- SELECT 6
+
+> SELECT id, rank() OVER (ORDER BY c) FROM a75tc ORDER BY 2, 1
+id:int4 | rank:int8
+1 | 1
+4 | 2
+3 | 3
+2 | 4
+5 | 5
+7 | 6
+6 | 7
+-- SELECT 7
+
+> SELECT id, first_value(id) OVER (PARTITION BY n ORDER BY id) FROM a75tc ORDER BY 1
+id:int4 | first_value:int4
+1 | 1
+2 | 1
+3 | 3
+4 | 4
+5 | 5
+6 | 6
+7 | 7
+-- SELECT 7
+
+> SELECT greatest(ROW('a',1)::a75ct, ROW('B',1)::a75ct), least(ROW('a',1)::a75ct, ROW('B',1)::a75ct)
+greatest:user | least:user
+(B,1) | (a,1)
+-- SELECT 1
+
+> SELECT id FROM a75tc WHERE c IN (ROW('B',1)::a75ct, ROW('z',0)::a75ct) ORDER BY 1
+id:int4
+2
+-- SELECT 1
+
+> SELECT id FROM a75tc WHERE c > ALL (ARRAY[ROW('a',1)::a75ct, ROW('A',2)::a75ct]) ORDER BY 1
+id:int4
+2
+3
+5
+7
+-- SELECT 4
+
+> SELECT a.id, b.id FROM a75tc a JOIN a75tc b ON a.c < b.c AND b.id = 2 ORDER BY 1
+id:int4 | id:int4
+1 | 2
+3 | 2
+4 | 2
+-- SELECT 3
+
+> SELECT ((c).a, (c).b) < ('b', 0) AS rc, (c).a < 'b' AS field, id FROM a75tc ORDER BY id
+rc:bool | field:bool | id:int4
+t | t | 1
+f | f | 2
+f | f | 3
+t | t | 4
+f | f | 5
+NULL | NULL | 6
+NULL | NULL | 7
+-- SELECT 7
+
+> SELECT array_agg(c ORDER BY c)::text FROM a75tc
+array_agg:text
+{"(a,1)","(A,2)","(b,1)","(B,1)","(Z,0)","(,1)",NULL}
+-- SELECT 1
+
+> SELECT id FROM a75tc ORDER BY ROW((c).a, id)
+id:int4
+1
+4
+3
+2
+5
+6
+7
+-- SELECT 7
+
+> SELECT id FROM a75tc t ORDER BY t
+id:int4
+1
+2
+3
+4
+5
+6
+7
+-- SELECT 7
+
+> CREATE INDEX a75tc_c ON a75tc (c)
+-- CREATE INDEX
+
+> CREATE INDEX a75tc_ca ON a75tc (ca)
+-- CREATE INDEX
+
+> CREATE INDEX a75tc_d ON a75tc (d DESC)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT id FROM a75tc WHERE c >= ROW('Z',0)::a75ct
+id:int4
+5
+7
+-- SELECT 2
+
+> SELECT id FROM a75tc WHERE c < ROW('b',0)::a75ct ORDER BY c
+id:int4
+1
+4
+-- SELECT 2
+
+> SELECT id FROM a75tc WHERE c > ROW('a',5)::a75ct AND c <= ROW('b',1)::a75ct ORDER BY c DESC
+id:int4
+3
+4
+-- SELECT 2
+
+> SELECT id FROM a75tc ORDER BY c DESC LIMIT 3
+id:int4
+6
+7
+5
+-- SELECT 3
+
+> SELECT id FROM a75tc ORDER BY c NULLS FIRST LIMIT 3
+id:int4
+6
+1
+4
+-- SELECT 3
+
+> SELECT id FROM a75tc WHERE ca > ARRAY[ROW('a',9)::a75ct] ORDER BY ca
+id:int4
+4
+3
+2
+7
+6
+-- SELECT 5
+
+> SELECT min(c), max(c) FROM a75tc
+min:record | max:record
+(a,1) | (,1)
+-- SELECT 1
+
+> SELECT id FROM a75tc WHERE d < ROW('b',0)::a75dct ORDER BY d
+id:int4
+1
+4
+-- SELECT 2
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE UNIQUE INDEX a75tc_n ON a75tc (n)
+ERROR 23505: could not create unique index "a75tc_n"
+DETAIL: Key (n)=((a,1)) is duplicated.
+OBJECTS: schema=public table=a75tc constraint=a75tc_n
+
+> CREATE TABLE a75tu (n a75cn UNIQUE)
+-- CREATE TABLE
+
+> INSERT INTO a75tu VALUES (ROW('x',1))
+-- INSERT 0 1
+
+> INSERT INTO a75tu VALUES (ROW('X',1))
+ERROR 23505: duplicate key value violates unique constraint "a75tu_n_key"
+DETAIL: Key (n)=((X,1)) already exists.
+OBJECTS: schema=public table=a75tu constraint=a75tu_n_key
+
+> INSERT INTO a75tu VALUES (ROW('X',1)) ON CONFLICT (n) DO NOTHING
+-- INSERT 0 0
+
+> SELECT * FROM a75tu
+n:user
+(x,1)
+-- SELECT 1
+
+> CREATE TABLE a75tr (r a75r)
+-- CREATE TABLE
+
+> INSERT INTO a75tr VALUES (a75r(ROW('a',1)::a75ct, ROW('c',1)::a75ct)), (a75r(ROW('B',1)::a75ct, ROW('z',1)::a75ct))
+-- INSERT 0 2
+
+> SELECT r FROM a75tr ORDER BY r
+r:user
+["(a,1)","(c,1)")
+["(B,1)","(z,1)")
+-- SELECT 2
+
+> SELECT r FROM a75tr WHERE r @> ROW('b',5)::a75ct ORDER BY r
+r:user
+["(a,1)","(c,1)")
+-- SELECT 1
+
+> CREATE TYPE a75p AS (a text, b int)
+-- CREATE TYPE
+
+> CREATE TABLE a75m (id int, c a75p)
+-- CREATE TABLE
+
+> INSERT INTO a75m VALUES (1, ROW('Z',0)), (2, ROW(NULL,1)), (3, NULL), (4, ROW('a',1))
+-- INSERT 0 4
+
+> CREATE INDEX a75m_c ON a75m (c)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT max(c), min(c) FROM a75m
+max:record | min:record
+(,1) | (Z,0)
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT max(c) FROM a75m
+QUERY PLAN:text
+Aggregate
+  ->  Index Only Scan using a75m_c on a75m
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE a75m, a75tc, a75tu, a75tr
+-- DROP TABLE
+
+> DROP TYPE a75p, a75nest, a75r
+-- DROP TYPE
+
+> DROP DOMAIN a75dct
+-- DROP DOMAIN
+
+> DROP TYPE a75ct, a75cn
+-- DROP TYPE
+
+> DROP COLLATION a75ci
+-- DROP COLLATION
+

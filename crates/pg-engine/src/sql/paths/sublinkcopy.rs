@@ -141,7 +141,7 @@ fn copy_ids(s: &mut crate::sql::expr::Subquery, fresh: &mut std::collections::Ha
 }
 
 /// Every expression of a plan tree (not of its sub-selects' plans), mutably.
-fn plan_exprs_mut(p: &mut Plan, f: &mut dyn FnMut(&mut Expr)) {
+pub(crate) fn plan_exprs_mut(p: &mut Plan, f: &mut dyn FnMut(&mut Expr)) {
     use crate::sql::plan::{Access, BitmapQual, ConflictAction, IndexBounds, OnConflict};
     fn bounds(b: &mut IndexBounds, f: &mut dyn FnMut(&mut Expr)) {
         b.eq.iter_mut().for_each(&mut *f);

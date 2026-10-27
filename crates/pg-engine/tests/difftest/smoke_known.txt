@@ -1,11 +1,7 @@
 # Mismatches the smoke run still finds (difftest.rs `smoke`).
-missing_error s1 #34
 missing_error s1 #53
-eval_error s2 #59
 eval_error s3 #24
-eval_error s3 #43
 eval_error s3 #54
-eval_error s3 #74
 eval_error s3 #78
 eval_error s5 #6
 eval_error s10 #33

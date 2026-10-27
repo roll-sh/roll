@@ -152,3 +152,53 @@ fn collated_index_keys_are_upgraded() {
     assert_eq!(rows(&mut s, q), expected);
     assert!(s.query(unique).is_err());
 }
+
+/// Format 3: an index on a composite column whose fields are under collations that don't
+/// sort by bytes keys each field by its collation's sort keys, in record_cmp's order; one
+/// written in byte order is rebuilt when the database is first opened.
+#[test]
+fn composite_index_keys_are_upgraded() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let ordered = "SELECT id FROM t ORDER BY c";
+    let range = "SELECT id FROM t WHERE c < ROW('b', 0)::ct ORDER BY id";
+    let unique = "INSERT INTO n VALUES (ROW('ABC', 1))";
+    let off = "SET enable_seqscan = off; SET enable_sort = off; SET enable_bitmapscan = off";
+    let ids = |s: &mut Session, q: &str| rows(s, q).join(" ");
+    let expected = {
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        s.query(
+            "CREATE TYPE ct AS (a text COLLATE \"en-x-icu\", b int); \
+             CREATE TABLE t (id int, c ct); \
+             INSERT INTO t VALUES (1, ROW('b', 1)), (2, ROW('A', 1)), (3, ROW('a', 2)), (4, ROW('B', 0)), (5, ROW(NULL, 1)); \
+             CREATE INDEX t_c ON t (c); \
+             CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false); \
+             CREATE TYPE cn AS (a text COLLATE ci, b int); \
+             CREATE TABLE n (c cn UNIQUE); \
+             INSERT INTO n VALUES (ROW('abc', 1))",
+        )
+        .unwrap();
+        s.query(off).unwrap();
+        let plan = rows(&mut s, &format!("EXPLAIN (COSTS OFF) {ordered}"));
+        assert!(plan.iter().any(|l| l.contains("Index Scan using t_c")), "{plan:?}");
+        let r = (ids(&mut s, ordered), ids(&mut s, range));
+        // (en-x-icu: a < A < b < B; a NULL field after a value.)
+        assert_eq!(r.0, "Int4(3) Int4(2) Int4(1) Int4(4) Int4(5)");
+        assert_eq!(r.1, "Int4(2) Int4(3)");
+        assert!(s.query(unique).is_err());
+        r
+    };
+    // Written by a build from before: byte-order keys, format 0.
+    engine.downgrade_index_keys_for_test("postgres").unwrap();
+    engine.shutdown();
+    drop(engine);
+    let engine = open(dir.path());
+    let mut s = engine.connect(2, "postgres", "postgres", "t").unwrap();
+    assert_eq!(
+        engine.index_key_format_for_test("postgres").unwrap(),
+        pg_engine::storage::keys::INDEX_KEY_FORMAT
+    );
+    s.query(off).unwrap();
+    assert_eq!((ids(&mut s, ordered), ids(&mut s, range)), expected);
+    assert!(s.query(unique).is_err());
+}

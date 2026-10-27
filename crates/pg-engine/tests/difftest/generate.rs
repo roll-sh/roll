@@ -102,6 +102,10 @@ pub struct Col {
     pub ty: Ty,
     /// An explicit collation of a text column.
     pub coll: Option<&'static str>,
+    /// A generated column (round 3): DML doesn't write it.
+    pub generated: bool,
+    /// The domain the column is declared as (round 3).
+    pub dom: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +119,8 @@ pub struct Table {
     /// Rows may be inserted, updated, deleted (not a view or an inheritance child's parent
     /// with differing columns).
     pub writable: bool,
+    /// Row and statement triggers on it write `audit3` (round 3).
+    pub audited: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +136,9 @@ pub struct Schema {
     pub funcs: Vec<Func>,
     /// Set-returning functions: name, argument types, output columns.
     pub srfs: Vec<(String, Vec<Ty>, Vec<(String, Ty)>)>,
+    /// Round 3: the composite type `ct3 (a text, b int)` and its table `tc3 (id, c, ca, n)`
+    /// exist, ct3's field `a` under this collation; and the range type `ctr3` over it.
+    pub composite: Option<(&'static str, bool)>,
 }
 
 /// A column visible to an expression: its qualified reference and type.
@@ -188,12 +197,18 @@ pub struct Gen<'a> {
 
 /// The first seed generated with the wider grammar.
 pub const WIDE_SEEDS: u64 = 1000;
+/// The first seed generated with round 3's schema objects and statements: composite types
+/// with collated fields, domains, generated columns, triggers, NULL-heavy data and a
+/// nondeterministic collation.
+pub const R3_SEEDS: u64 = 3000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
     "Ab", "ba", "aa", "z", "Ä", "foo", "bar", "a,b",
 ];
 const COLLS: &[&str] = &["C", "POSIX", "und-x-icu", "en-x-icu", "default"];
+/// Round 3's column collations: a nondeterministic one too (`ci3`).
+const COLLS3: &[&str] = &["C", "POSIX", "und-x-icu", "en-x-icu", "ci3", "ci3"];
 /// Time zones the wider grammar converts through (DST changes, offsets, POSIX-style names).
 const TZS: &[&str] = &["UTC", "America/New_York", "Europe/Berlin", "Asia/Kolkata", "Australia/Lord_Howe", "+03", "EST5EDT", "Pacific/Chatham"];
 
@@ -303,7 +318,12 @@ pub fn literal(rng: &mut Rng, ty: Ty) -> String {
 
 /// A stored value for a column, as a literal (NULL sometimes).
 fn value(rng: &mut Rng, c: &Col) -> String {
-    if c.name != "id" && rng.chance(0.15) {
+    value_r(rng, c, 0.15)
+}
+
+/// A value of `c`, NULL with probability `nulls`.
+fn value_r(rng: &mut Rng, c: &Col, nulls: f64) -> String {
+    if c.name != "id" && rng.chance(nulls) {
         return "NULL".into();
     }
     match c.ty {
@@ -355,6 +375,9 @@ fn value(rng: &mut Rng, c: &Col) -> String {
 }
 
 fn col_type_sql(c: &Col) -> String {
+    if let Some(d) = c.dom {
+        return d.to_string();
+    }
     let base = match c.ty {
         Num => "numeric(10,2)".to_string(),
         t => t.sql().to_string(),
@@ -1702,7 +1725,9 @@ impl<'a> Gen<'a> {
         if ts.is_empty() {
             return None;
         }
-        let t = ts[self.rng.below(ts.len())].clone();
+        let mut t = ts[self.rng.below(ts.len())].clone();
+        // (Generated columns aren't written.)
+        t.cols.retain(|c| !c.generated);
         let a = "x";
         let scope: Vec<SCol> = t
             .cols
@@ -1954,25 +1979,50 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
     let mut rng = Rng::new(seed);
     let mut s = Schema::default();
     let mut out = Vec::new();
-    let names = ["a", "b", "c", "d", "e", "f", "g"];
+    let names = ["a", "b", "c", "d", "e", "f"];
+    let r3 = seed >= R3_SEEDS;
+    if r3 {
+        out.push("CREATE COLLATION ci3 (provider = icu, locale = 'und-u-ks-level2', deterministic = false)".into());
+        out.push("CREATE DOMAIN d3int AS int CHECK (VALUE IS NULL OR VALUE > -3)".into());
+        out.push("CREATE DOMAIN d3text AS text COLLATE \"en-x-icu\" CHECK (VALUE <> 'zz')".into());
+    }
     let ntables = rng.range(2, 4);
     for ti in 0..ntables {
         let name = format!("t{ti}");
         let mut cols = Vec::new();
         let keyed = rng.chance(0.75);
         if keyed {
-            cols.push(Col { name: "id".into(), ty: Int, coll: None });
+            cols.push(Col { name: "id".into(), ty: Int, coll: None, generated: false, dom: None });
         }
         let ncols = rng.range(2, 5) as usize;
+        let mut gen_def = None;
         for c in names.iter().take(ncols) {
             let ty = *rng.pick(COLUMN_TYPES);
-            let coll = if ty == Text && rng.chance(0.3) { Some(*rng.pick(&COLLS[..4])) } else { None };
-            cols.push(Col { name: c.to_string(), ty, coll });
+            let coll = if ty == Text && rng.chance(0.3) { Some(*rng.pick(if r3 { COLLS3 } else { &COLLS[..4] })) } else { None };
+            let mut col = Col { name: c.to_string(), ty, coll, generated: false, dom: None };
+            if r3 && ty == Int && rng.chance(0.25) {
+                col.dom = Some("d3int");
+            } else if r3 && ty == Text && coll.is_none() && rng.chance(0.2) {
+                (col.dom, col.coll) = (Some("d3text"), Some("en-x-icu"));
+            }
+            cols.push(col);
         }
+        // Round 3: a generated column over an integer one.
+        if r3 && rng.chance(0.4)
+            && let Some(src) = cols.iter().find(|c| c.ty == Int).map(|c| c.name.clone())
+        {
+            let kind = if rng.chance(0.5) { "STORED" } else { "VIRTUAL" };
+            gen_def = Some(format!("g int GENERATED ALWAYS AS (coalesce({src}, 0) * 2 + 1) {kind}"));
+            cols.push(Col { name: "g".into(), ty: Int, coll: None, generated: true, dom: None });
+        }
+        let nulls = if r3 { *rng.pick(&[0.15, 0.4, 0.7]) } else { 0.15 };
         let kind = rng.below(10);
         let defs: Vec<String> = cols
             .iter()
             .map(|c| {
+                if c.generated {
+                    return gen_def.clone().unwrap();
+                }
                 let mut d = format!("{} {}", c.name, col_type_sql(c));
                 if c.name == "id" && kind < 7 {
                     d.push_str(" PRIMARY KEY");
@@ -2039,9 +2089,9 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
             if kind == 7 {
                 // Inheritance: a child with an extra column.
                 out.push(format!("CREATE TABLE {name}_c (extra int) INHERITS ({name})"));
-                let child_cols: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+                let child_cols: Vec<String> = cols.iter().filter(|c| !c.generated).map(|c| c.name.clone()).collect();
                 for _ in 0..rng.range(0, 4) {
-                    let vs: Vec<String> = cols.iter().map(|c| if c.name == "id" { (100 + rng.range(0, 1000)).to_string() } else { value(&mut rng, c) }).collect();
+                    let vs: Vec<String> = cols.iter().filter(|c| !c.generated).map(|c| if c.name == "id" { (100 + rng.range(0, 1000)).to_string() } else { value_r(&mut rng, c, nulls) }).collect();
                     out.push(format!("INSERT INTO {name}_c ({}, extra) VALUES ({}, {})", child_cols.join(", "), vs.join(", "), rng.range(0, 3)));
                 }
                 writable = true;
@@ -2054,6 +2104,7 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
         for _ in 0..nrows {
             let vs: Vec<String> = cols
                 .iter()
+                .filter(|c| !c.generated)
                 .map(|c| {
                     if c.name == "id" {
                         let mut v = rng.range(1, 40);
@@ -2062,14 +2113,14 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
                         }
                         v.to_string()
                     } else {
-                        value(&mut rng, c)
+                        value_r(&mut rng, c, nulls)
                     }
                 })
                 .collect();
             rows.push(format!("({})", vs.join(", ")));
         }
         if !rows.is_empty() {
-            let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+            let names: Vec<String> = cols.iter().filter(|c| !c.generated).map(|c| c.name.clone()).collect();
             out.push(format!("INSERT INTO {name} ({}) VALUES {}", names.join(", "), rows.join(", ")));
         }
         // Indexes.
@@ -2098,7 +2149,23 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
             };
             out.push(stmt);
         }
-        s.tables.push(Table { name: name.clone(), cols: cols.clone(), key, is_view: false, writable });
+        // Round 3: triggers on one keyed plain table, writing `audit3`.
+        let partitioned = out.iter().any(|o| o.starts_with(&format!("CREATE TABLE {name} (")) && o.contains(" PARTITION BY "));
+        let audited = r3
+            && key.is_some()
+            && !partitioned
+            && !s.tables.iter().any(|t| t.audited)
+            && rng.chance(0.5);
+        if audited {
+            out.extend(triggers(&mut rng, &name, &cols));
+        }
+        s.tables.push(Table { name: name.clone(), cols: cols.clone(), key, is_view: false, writable, audited });
+    }
+    if r3 && rng.chance(0.6) {
+        let coll = *rng.pick(&["en-x-icu", "C", "und-x-icu", "ci3", "default"]);
+        let range = rng.chance(0.5);
+        out.extend(composite(&mut rng, coll, range));
+        s.composite = Some((coll, range));
     }
     if rng.chance(0.7) {
         out.push("ANALYZE".into());
@@ -2166,13 +2233,139 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
         out.push(format!("CREATE VIEW {name} AS {}", q.sql));
         s.tables.push(Table {
             name,
-            cols: q.cols.iter().map(|(n, t)| Col { name: n.clone(), ty: *t, coll: None }).collect(),
+            cols: q.cols.iter().map(|(n, t)| Col { name: n.clone(), ty: *t, coll: None, generated: false, dom: None }).collect(),
             key: None,
             is_view: true,
             writable: false,
+            audited: false,
         });
     }
     (s, out)
+}
+
+
+/// Round 3's triggers on table `t`: a BEFORE row trigger that skips some rows and fills an
+/// integer column's NULLs, an AFTER row trigger and an AFTER statement trigger (over its
+/// transition table) logging into `audit3`.
+fn triggers(rng: &mut Rng, t: &str, cols: &[Col]) -> Vec<String> {
+    let fill = cols
+        .iter()
+        .find(|c| c.ty == Int && c.name != "id" && !c.generated)
+        .map(|c| format!("NEW.{0} := coalesce(NEW.{0}, -1); ", c.name))
+        .unwrap_or_default();
+    let skip = rng.range(0, 6);
+    let mut out = vec![
+        "CREATE TABLE audit3 (op text, k int, v text)".to_string(),
+        format!(
+            "CREATE FUNCTION trg3b() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id % 7 = {skip} THEN RETURN NULL; END IF; {fill}RETURN NEW; END $$"
+        ),
+        format!("CREATE TRIGGER t3b BEFORE INSERT OR UPDATE ON {t} FOR EACH ROW EXECUTE FUNCTION trg3b()"),
+        "CREATE FUNCTION trg3a() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF TG_OP = 'DELETE' THEN INSERT INTO audit3 VALUES (TG_OP, OLD.id, OLD::text); RETURN OLD; END IF; INSERT INTO audit3 VALUES (TG_OP, NEW.id, NEW::text); RETURN NEW; END $$".to_string(),
+    ];
+    let when = if rng.chance(0.5) { " WHEN (OLD.* IS DISTINCT FROM NEW.*)" } else { "" };
+    out.push(format!("CREATE TRIGGER t3a AFTER INSERT OR DELETE ON {t} FOR EACH ROW EXECUTE FUNCTION trg3a()"));
+    out.push(format!("CREATE TRIGGER t3u AFTER UPDATE ON {t} FOR EACH ROW{when} EXECUTE FUNCTION trg3a()"));
+    out.push("CREATE FUNCTION trg3s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO audit3 SELECT 'S' || TG_OP, count(*), string_agg(id::text, ',' ORDER BY id) FROM nt; RETURN NULL; END $$".to_string());
+    let ev = *rng.pick(&["INSERT", "UPDATE", "DELETE"]);
+    let rel = if ev == "DELETE" { "OLD" } else { "NEW" };
+    out.push(format!("CREATE TRIGGER t3s AFTER {ev} ON {t} REFERENCING {rel} TABLE AS nt FOR EACH STATEMENT EXECUTE FUNCTION trg3s()"));
+    out
+}
+
+/// A `ct3` literal: a text and an integer, either NULL now and then.
+fn ct3_lit(rng: &mut Rng) -> String {
+    let a = if rng.chance(0.15) { "NULL".to_string() } else { format!("'{}'", rng.pick(TEXTS)) };
+    let b = if rng.chance(0.15) { "NULL".to_string() } else { rng.range(-1, 3).to_string() };
+    format!("ROW({a}, {b})::ct3")
+}
+
+/// Round 3's composite type `ct3 (a text COLLATE coll, b int)`, the table `tc3` of them
+/// (NULL-heavy: NULL values and NULL fields), indexes, and a range type over it.
+fn composite(rng: &mut Rng, coll: &str, range: bool) -> Vec<String> {
+    let collate = if coll == "default" { String::new() } else { format!(" COLLATE \"{coll}\"") };
+    let mut out = vec![
+        format!("CREATE TYPE ct3 AS (a text{collate}, b int)"),
+        "CREATE TABLE tc3 (id int PRIMARY KEY, c ct3, ca ct3[], n int)".to_string(),
+    ];
+    let rows: Vec<String> = (0..rng.range(0, 14))
+        .map(|i| {
+            let c = if rng.chance(0.2) { "NULL".to_string() } else { ct3_lit(rng) };
+            let ca = match rng.below(4) {
+                0 => "NULL".to_string(),
+                1 => "'{}'".to_string(),
+                _ => format!("ARRAY[{}, {}]", ct3_lit(rng), ct3_lit(rng)),
+            };
+            let n = if rng.chance(0.3) { "NULL".to_string() } else { rng.range(0, 4).to_string() };
+            format!("({}, {c}, {ca}, {n})", i + 1)
+        })
+        .collect();
+    if !rows.is_empty() {
+        out.push(format!("INSERT INTO tc3 VALUES {}", rows.join(", ")));
+    }
+    if rng.chance(0.6) {
+        out.push("CREATE INDEX tc3_c ON tc3 (c)".into());
+    }
+    if rng.chance(0.3) {
+        out.push("CREATE INDEX tc3_cd ON tc3 (c DESC NULLS LAST, n)".into());
+    }
+    if rng.chance(0.4) {
+        out.push("CREATE INDEX tc3_ca ON tc3 (ca)".into());
+    }
+    if rng.chance(0.2) {
+        out.push("CREATE UNIQUE INDEX tc3_u ON tc3 (c)".into());
+    }
+    if range {
+        out.push("CREATE TYPE ctr3 AS RANGE (subtype = ct3)".into());
+    }
+    out
+}
+
+impl Gen<'_> {
+    /// One of round 3's statements over `tc3`: comparisons, sorts, grouping, DISTINCT,
+    /// aggregates, joins, set operations, window functions and DML over composite values
+    /// (their fields under ct3's collation), field accesses, row comparisons, arrays and
+    /// ranges of them.
+    fn composite_stmt(&mut self, range: bool) -> Stmt {
+        let op = *self.rng.pick(&["<", "<=", ">", ">=", "=", "<>"]);
+        let lit = ct3_lit(&mut self.rng);
+        let lit2 = ct3_lit(&mut self.rng);
+        let t = format!("'{}'", self.rng.pick(TEXTS));
+        let dir = *self.rng.pick(&["", " DESC", " NULLS FIRST", " DESC NULLS LAST"]);
+        let q = |sql: String, cols: &[(&str, Ty)]| Stmt::Query(Query { sql, ordered: true, cols: cols.iter().map(|(n, t)| (n.to_string(), *t)).collect() });
+        let id = [("id", Int)];
+        let txt = [("c", Text)];
+        match self.rng.below(if range { 22 } else { 20 }) {
+            0 => q(format!("SELECT c::text, count(*) FROM tc3 GROUP BY c ORDER BY c{dir}"), &[("c", Text), ("count", Big)]),
+            1 => q(format!("SELECT s.c::text FROM (SELECT DISTINCT c FROM tc3) s ORDER BY s.c{dir}"), &txt),
+            2 => q(format!("SELECT id FROM tc3 WHERE c {op} {lit} ORDER BY id"), &id),
+            3 => q("SELECT min(c)::text, max(c)::text, count(DISTINCT c), min(ca)::text, max(ca)::text FROM tc3".into(), &[("a", Text), ("b", Text), ("n", Big), ("c", Text), ("d", Text)]),
+            4 => q(format!("SELECT id FROM tc3 ORDER BY c{dir}, id"), &id),
+            5 => q(format!("SELECT (c).a, (c).b, id FROM tc3 WHERE (c).a {op} {t} ORDER BY 1{dir}, 3"), &[("a", Text), ("b", Int), ("id", Int)]),
+            6 => q(format!("SELECT id, rank() OVER (ORDER BY c{dir}), count(*) OVER (PARTITION BY c) FROM tc3 ORDER BY 1"), &[("id", Int), ("r", Big), ("n", Big)]),
+            7 => q(format!("SELECT id FROM tc3 WHERE ca @> ARRAY[{lit}] OR ca {op} ARRAY[{lit2}] ORDER BY id"), &id),
+            8 => q(format!("SELECT id FROM tc3 ORDER BY ca{dir}, id"), &id),
+            9 => q(format!("SELECT x.id, y.id FROM tc3 x JOIN tc3 y ON x.c {op} y.c ORDER BY 1, 2"), &[("x", Int), ("y", Int)]),
+            10 => q(format!("SELECT c::text FROM (SELECT c FROM tc3 UNION SELECT {lit}) s ORDER BY s.c{dir}"), &txt),
+            11 => q(format!("SELECT id, ROW((c).a, id) < ROW({t}::text, 3), ((c).a, (c).b) {op} ({t}, 1) FROM tc3 ORDER BY id"), &[("id", Int), ("x", Bool), ("y", Bool)]),
+            12 => q(format!("SELECT id FROM tc3 ORDER BY ROW((c).a, n){dir}, id"), &id),
+            13 => q(format!("SELECT string_agg(id::text, ',' ORDER BY c{dir}, id), array_agg((c).a ORDER BY (c).a{dir}, id)::text FROM tc3"), &[("s", Text), ("a", Text)]),
+            14 => q(format!("SELECT id, greatest(c, {lit})::text, c IN ({lit}, {lit2}) FROM tc3 ORDER BY id"), &[("id", Int), ("g", Text), ("i", Bool)]),
+            15 => q(format!("SELECT id FROM tc3 WHERE c {op} ANY (ARRAY[{lit}, {lit2}]) ORDER BY id"), &id),
+            16 => q("SELECT n, max(c)::text, count(DISTINCT (c).a) FROM tc3 GROUP BY n ORDER BY n".into(), &[("n", Int), ("m", Text), ("d", Big)]),
+            17 => {
+                let sql = match self.rng.below(3) {
+                    0 => format!("UPDATE tc3 SET c = {lit} WHERE c {op} {lit2} RETURNING id, c::text"),
+                    1 => format!("INSERT INTO tc3 VALUES ({}, {lit}, ARRAY[{lit2}], {}) ON CONFLICT (id) DO UPDATE SET c = EXCLUDED.c WHERE tc3.c {op} EXCLUDED.c RETURNING id, c::text", self.rng.range(1, 20), self.rng.range(0, 3)),
+                    _ => format!("DELETE FROM tc3 WHERE (c).a {op} {t} RETURNING id"),
+                };
+                Stmt::Dml { sql, table: "tc3".into(), ordered: false }
+            }
+            18 => q(format!("SELECT x.id FROM tc3 x WHERE x.c {op} (SELECT min(y.c) FROM tc3 y WHERE y.n = x.n) ORDER BY 1"), &id),
+            19 => q(format!("SELECT DISTINCT ON (c) c::text, id FROM tc3 ORDER BY c{dir}, id"), &[("c", Text), ("id", Int)]),
+            20 => q(format!("SELECT ctr3(least(c, {lit}), greatest(c, {lit}))::text, ctr3(least(c, {lit}), greatest(c, {lit})) @> {lit2} FROM tc3 WHERE c IS NOT NULL ORDER BY id"), &[("r", Text), ("b", Bool)]),
+            _ => q(format!("SELECT r::text FROM (SELECT ctr3(least(c, {lit}), greatest(c, {lit})) r, id FROM tc3 WHERE c IS NOT NULL) s ORDER BY r{dir}, id"), &txt),
+        }
+    }
 }
 
 /// The statements of one run after the schema: queries mostly, some DML and settings.
@@ -2180,8 +2373,21 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     let mut g = Gen::new(seed, s);
     let mut out = Vec::new();
     let mut serial = 0;
+    let r3 = seed >= R3_SEEDS;
+    let audit = || Stmt::Query(Query {
+        sql: "SELECT op, k, v FROM audit3 ORDER BY op, k, v COLLATE \"C\"".into(),
+        ordered: true,
+        cols: vec![("op".into(), Text), ("k".into(), Int), ("v".into(), Text)],
+    });
     while out.len() < n {
         g.alias = 0;
+        if r3
+            && let Some((_, range)) = s.composite
+            && g.rng.chance(0.12)
+        {
+            out.push(g.composite_stmt(range));
+            continue;
+        }
         // (The wider grammar's statement kinds: prepared statements, cursors, savepoints,
         // recursive CTEs with SEARCH / CYCLE.)
         if g.wide && g.rng.chance(0.08) {
@@ -2248,7 +2454,12 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
             out.push(Stmt::Query(q));
         } else if r < 96 {
             if let Some(d) = g.dml() {
+                // (Triggers on the table log into audit3: its contents too.)
+                let audited = matches!(&d, Stmt::Dml { table, .. } if s.tables.iter().any(|t| t.audited && &t.name == table));
                 out.push(d);
+                if r3 && audited {
+                    out.push(audit());
+                }
             }
         } else if r < 98 {
             // A DO block raising notices of computed values.

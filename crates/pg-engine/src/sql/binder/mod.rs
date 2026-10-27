@@ -577,6 +577,10 @@ pub struct Binder<'b, 'a> {
     /// the plan once the statement is planned (`fold::first_error`): Postgres folds in
     /// eval_const_expressions, after pulling subqueries up and dropping unused outputs.
     pub(crate) fold_err: Option<Vec<(Expr, crate::error::Error)>>,
+    /// While an aggregate's arguments are bound: the query levels of the columns they
+    /// reference as written (`lift`), also those folding then drops (`starts_with(NULL,
+    /// o.c)`), which decide the aggregate's level as Postgres's parse analysis does.
+    pub(crate) agg_refs: Option<Vec<usize>>,
     /// Binding a statement of a SQL function run statement by statement (`call_sql`): its
     /// body is the statement itself.
     pub sql_fn_statement: bool,
@@ -719,6 +723,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             unplanned_subs: Default::default(),
             defer_fold: false,
             fold_err: None,
+            agg_refs: None,
             sql_fn_statement: false,
             persistent: false,
             insert_locs: Vec::new(),
@@ -874,6 +879,11 @@ impl<'b, 'a> Binder<'b, 'a> {
     /// Make an expression from level `from` usable in the current level, adding params to
     /// every level in between.
     pub(crate) fn lift(&mut self, from: usize, mut e: Expr) -> Expr {
+        if let Some(r) = &mut self.agg_refs
+            && !r.contains(&from)
+        {
+            r.push(from);
+        }
         let cur = self.levels.len() - 1;
         for l in from + 1..=cur {
             let ty = e.ty();
@@ -1764,6 +1774,18 @@ impl<'b, 'a> Binder<'b, 'a> {
                 None
             }
             Expr::Col(i, _) => depth.checked_sub(1).map(|l| (l, *i)),
+            // A composite's field: the collation it is declared with (FieldSelect's
+            // resultcollid, the attcollation).
+            Expr::Field(inner, k, ty) if ty.collatable() => {
+                if let DataType::Row(rt) = inner.ty() {
+                    self.collation_at(inner, depth)?;
+                    let c = crate::types::collation::field_collation(&self.cat, &rt, *k);
+                    return Ok(Coll::Implicit(
+                        c.unwrap_or_else(|| ty.default_collation().unwrap_or_default().to_string()),
+                    ));
+                }
+                None
+            }
             // An aggregate's / window function's result: what its arguments derive.
             Expr::Agg(i, ty) | Expr::Window(i, ty) if ty.collatable() => {
                 let st = depth
@@ -2371,13 +2393,7 @@ impl Coll {
 /// A statement's plan with the constants its empty relations keep for their readers settled
 /// (`analyzejoins::settle_kept_cols`): every output of the statement is read.
 fn settled(plan: &Plan) -> std::borrow::Cow<'_, Plan> {
-    fn has(p: &Plan) -> bool {
-        match p {
-            Plan::Empty { info: Some(i), .. } => !i.kept_cols.is_empty(),
-            p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| has(c)),
-        }
-    }
-    if !has(plan) {
+    if !crate::sql::paths::analyzejoins::has_kept_cols(plan) {
         return std::borrow::Cow::Borrowed(plan);
     }
     let mut p = plan.clone();

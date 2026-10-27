@@ -112,6 +112,8 @@ fn scope(rt: &RangeType) -> Option<CollGuard> {
 fn vcmp(a: &Value, b: &Value) -> Ordering {
     COLL.with(|c| match (&*c.borrow(), a, b) {
         (Some(c), Value::Text(x), Value::Text(y)) => c.cmp(x, y),
+        // (A composite subtype's fields under theirs: `Collation::record`.)
+        (Some(c), Value::Record(_), Value::Record(_)) => crate::types::collation::cmp_values(c, a, b),
         _ => a.cmp_total(b),
     })
 }

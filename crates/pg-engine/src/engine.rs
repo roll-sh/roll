@@ -851,21 +851,29 @@ impl Engine {
     /// The indexes whose keys changed since index key format `from` (non-temporary,
     /// stored): format 1, those with a column whose NULLS FIRST / LAST isn't its direction's
     /// default; format 2, those keyed under a collation that doesn't sort by bytes (an
-    /// expression key's collation may be one when the database's or a column's is).
+    /// expression key's collation may be one when the database's or a column's is); format
+    /// 3, those with composite keys whose fields are under such collations (an expression
+    /// key may be one when the database's default is or a composite type has a COLLATE).
     fn reencoded_indexes(cat: &Catalog, from: u32) -> Vec<String> {
         let mut out = Vec::new();
         let icu_default = !crate::types::collation::default_for(cat).bytewise();
+        let collated_composites = cat.composites.values().any(|c| !c.collations.is_empty());
         for ix in cat.indexes.values() {
             let Some(t) = cat.table(ix.table) else { continue };
             let nulls = from < 1 && ix.columns.iter().any(|c| c.nulls_first != c.desc);
+            let btree_expr = matches!(ix.method.as_str(), "btree" | "hash")
+                && ix.columns.iter().any(|c| matches!(c.key, crate::catalog::IndexKey::Expr(_)));
+            let colls = crate::sql::binder::column_key_colls(cat, t, ix);
             let collated = from < 2
-                && (!crate::sql::binder::column_key_colls(cat, t, ix).is_empty()
-                    || (matches!(ix.method.as_str(), "btree" | "hash")
-                        && ix.columns.iter().any(|c| matches!(c.key, crate::catalog::IndexKey::Expr(_)))
+                && (!colls.is_empty()
+                    || (btree_expr
                         && (icu_default
                             || ix.columns.iter().any(|c| c.collation.is_some())
                             || t.columns.iter().any(|c| c.collation.is_some()))));
-            if ix.id == 0 || !(nulls || collated) {
+            let composite = from < 3
+                && (colls.iter().flatten().any(|k| k.coll.fields.is_some())
+                    || (btree_expr && (icu_default || collated_composites)));
+            if ix.id == 0 || !(nulls || collated || composite) {
                 continue;
             }
             let schema = cat.schema_name(t.schema);

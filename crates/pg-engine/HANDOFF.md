@@ -629,6 +629,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   argument's error still happens); an empty relation keeps its outputs' failed constants per
   column (`DummyInfo::kept_cols`) for the plan above; `IS DISTINCT FROM` over constants folds.
   The smoke also runs the fixed wide-grammar seeds (`SMOKE_EXTRA`).
+  Round 19, agent 75 (difftest round 3): composite values compare under their fields'
+  collations everywhere (below, "Collation-aware comparisons"); a grammar for seeds from 3000
+  on with composite types with collated fields, domains, generated columns, triggers,
+  NULL-heavy data and a nondeterministic collation; its fixes: self-join elimination's null
+  test of a composite, presorted aggregates under a nondeterministic collation, an aggregate's
+  level from the columns its arguments name as written, a scalar sub-select's column name,
+  non-inlined SQL function bodies planned only when they run.
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
@@ -731,8 +738,20 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (in-process release builds alternated on a loaded machine: OLTP point / secondary
   lookups, inserts and upserts within noise, TPC-H SF0.2 total within 1-3%).
   Left: a `roll_pk_clustered` table's rows under an ICU key are stored in the key's byte
-  order (its physical order only; no plan reads it as sorted); records of text in an index
-  are keyed by bytes (record_cmp's per-field collations).
+  order (its physical order only; no plan reads it as sorted).
+  Composite values (round 19, agent 75) compare field by field under each field's
+  collation, as record_cmp does with its attcollations: a record collation
+  (`Collation::record`, per field the collation it compares under, nested for composite
+  fields; a synthetic oid so pathkeys and index keys match it) derived from the type by
+  `collation::for_type` (a CREATE TYPE's COLLATE, a table row type's column collations, an
+  anonymous ROW()'s fields' collations in `RowType::colls`, the database default otherwise)
+  and attached where a text collation would be: record comparison calls and sub-select
+  comparisons (`binder::record_compare_def`), sort keys, min / max, window and grouping keys
+  (nondeterministic fields normalized by `key_value`), set operations, range types over
+  composites, unique checks and index keys (index key format 3: each field under its
+  collation's sort key; older indexes rebuilt on open). A field access `(c).a` derives the
+  field's collation. Test: `tests/locale/composite.sql`, golden `a75_composite_collation`,
+  `tests/index_key_format.rs` `composite_index_keys_are_upgraded`.
   **ICU4X verdict: keep ICU4C.** `icu4x.rs`'s `icu4x_parity` (an ignored test, `--features
   icu4x`) compares it with ICU4C 78.1 over 923 locales and a generated corpus: 27 locales
   order differently (en-US-u-va-posix, Sámi, Hawaiian, script variants such as az-Cyrl and
@@ -799,7 +818,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - `tools/bench/`: the benchmark harness against PostgreSQL (`run.sh`, `suite.sh`,
     `perf.sh` for profiles, `report.py`); method and results in `BENCH.md`.
 - `crates/pg-icu`: ICU4C 78.1 built from source (exact collation behaviour; needs curl or
-  wget, tar, make and a C++17 compiler, about 60 s, cached in `target/icu4c`).
+  wget, tar, make and a C++17 compiler, about 60 s, cached in `target/icu4c`). A build that
+  can't make or find ICU fails (round 19, agent 75: a build whose TMPDIR didn't exist yet once
+  went on without ICU, silently changing every ICU collation's results); `PG_ICU_DISABLE=1`
+  builds without ICU deliberately.
 - `crates/pg-snowball`: Snowball stemmers for full-text search.
 
 ## Setting up a new machine
@@ -1037,7 +1059,9 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   (for planner work that means `src/sql/paths*`, joins, costs, binder optimize/sublink/lift and
   explain), crate tests and clippy are enough; re-run the regress pair only when they do.
   Otherwise a busy branch keeps moving under a long verification and the batch never lands.
-- `/tmp` is tmpfs (RAM): keep large scratch data in `~/.cache/<agent>/`.
+- `/tmp` is tmpfs (RAM): keep large scratch data in `~/.cache/<agent>/`. Create your TMPDIR
+  before the first build: pg-icu's build fails (by design, since round 19) when it is missing
+  and ICU isn't cached yet.
 
 ## Conventions
 

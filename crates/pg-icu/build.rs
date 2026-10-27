@@ -11,9 +11,10 @@
 //!   (converters, display names, currencies, units, zones, RBNF, transliterators):
 //!   collation, break iteration, locale and property data stay, unchanged.
 //!
-//! Anything going wrong (no network, no C++ compiler, a cross build) is a warning: the
-//! crate then builds without ICU (`available()` is false) rather than failing the build.
-//! `PG_ICU_DISABLE=1` forces that; `PG_ICU_CACHE` moves the cache.
+//! Anything going wrong (no network, no C++ compiler, a missing TMPDIR, a cross build) fails
+//! the build: without ICU every ICU collation would fail or, under pg-engine's `icu4x`
+//! feature, only approximate the reference's, so results would silently differ. Building
+//! without ICU (`available()` false) takes `PG_ICU_DISABLE=1`. `PG_ICU_CACHE` moves the cache.
 
 use sha2::{Digest, Sha512};
 use std::fs;
@@ -33,6 +34,10 @@ fn main() {
         println!("cargo:rerun-if-env-changed={v}");
     }
     println!("cargo::rustc-check-cfg=cfg(pg_icu)");
+    if env("PG_ICU_DISABLE").is_some_and(|v| v != "0") {
+        println!("cargo:warning=pg-icu: PG_ICU_DISABLE is set, building without ICU4C {VERSION}");
+        return;
+    }
     match build() {
         Ok(dir) => {
             println!("cargo:rerun-if-changed={}", dir.join("ok").display());
@@ -51,9 +56,12 @@ fn main() {
             );
             println!("cargo:rustc-cfg=pg_icu");
         }
-        Err(e) => {
-            println!("cargo:warning=pg-icu: building without ICU4C {VERSION}: {e}");
-        }
+        // (A failed build script runs again on the next build, which retries.)
+        Err(e) => panic!(
+            "pg-icu: could not build ICU4C {VERSION}: {e}\n\
+             ICU collations would be wrong or unavailable without it. Fix the cause and \
+             rebuild, or set PG_ICU_DISABLE=1 to build without ICU on purpose."
+        ),
     }
 }
 
@@ -76,9 +84,6 @@ fn cache_dir() -> Result<PathBuf, String> {
 }
 
 fn build() -> Result<PathBuf, String> {
-    if env("PG_ICU_DISABLE").is_some_and(|v| v != "0") {
-        return Err("PG_ICU_DISABLE is set".into());
-    }
     let target = env("TARGET").unwrap_or_default();
     if env("HOST").as_deref() != Some(target.as_str()) {
         return Err(format!("cross build to {target}"));
@@ -193,6 +198,10 @@ fn download(to: &Path) -> Result<(), String> {
 
 /// configure and make the static libraries; their directory.
 fn compile(src: &Path, build: &Path) -> Result<PathBuf, String> {
+    // (configure's temporary files go there; a missing one fails it obscurely.)
+    if let Some(t) = env("TMPDIR").filter(|t| !Path::new(t).is_dir()) {
+        return Err(format!("TMPDIR {t} is not a directory"));
+    }
     fs::create_dir_all(build).map_err(|e| e.to_string())?;
     let log = build.join("build.log");
     if !build.join("config.status").is_file() {

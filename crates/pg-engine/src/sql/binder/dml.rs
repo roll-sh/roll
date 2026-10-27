@@ -3550,6 +3550,8 @@ pub(crate) fn key_colls(
                     let name = c.collation.clone().or_else(|| expr_collation(t, k)).unwrap_or_else(|| "default".into());
                     collation::by_name(cat, &name)
                 }
+                // Composites by their fields under theirs (index key format 3).
+                _ if ty.holds_composite() => collation::for_type(cat, &ty),
                 _ => None,
             };
             let coll = coll.filter(|c| !c.bytewise() || !c.deterministic)?;

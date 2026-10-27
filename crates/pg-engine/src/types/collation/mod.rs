@@ -156,6 +156,9 @@ pub struct Collation {
     /// other than C or POSIX isn't, though musl's strcoll compares bytes too).
     pub collate_is_c: bool,
     icu: Option<Arc<icu::Icu>>,
+    /// A composite type's comparison (`Collation::record`): per field, the collation its
+    /// values compare under.
+    pub fields: Option<Arc<[Option<Arc<Collation>>]>>,
 }
 
 /// `builtin_validate_locale`'s canonical names.
@@ -222,13 +225,43 @@ impl Collation {
             ctype,
             collate_is_c,
             icu,
+            fields: None,
         })
     }
 
+    /// record_cmp's comparison of a composite type's values: field `i` under `fields[i]`
+    /// (its attcollation, kept only when it doesn't compare as bytes, or a nested composite's
+    /// own), the others as their type compares them; None when no field needs one. Records
+    /// carry no type, so the binder derives this from theirs (`binder::record_coll`) and it
+    /// travels as any collation does: with a call, a sort key's `<`, an index key column.
+    pub fn record(fields: Vec<Option<Arc<Collation>>>) -> Option<Arc<Collation>> {
+        if fields.iter().all(Option::is_none) {
+            return None;
+        }
+        // An identity of its own, the same for the same fields' collations: pathkeys and
+        // index keys match collations by oid. (Real collation oids stay below 2^31.)
+        let mut h: u32 = 0x811c_9dc5;
+        for f in &fields {
+            for b in f.as_ref().map_or(0, |c| c.oid).to_le_bytes() {
+                h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+            }
+        }
+        Some(Arc::new(Collation {
+            oid: h | 0x8000_0000,
+            name: "record".into(),
+            provider: 'r',
+            deterministic: fields.iter().flatten().all(|c| c.deterministic),
+            ctype: Ctype::Ascii,
+            collate_is_c: false,
+            icu: None,
+            fields: Some(fields.into()),
+        }))
+    }
+
     /// Whether strings compare as bytes (`collate_is_c`, or a libc locale whose strcoll is
-    /// strcmp).
+    /// strcmp). A record collation never does.
     pub fn bytewise(&self) -> bool {
-        self.icu.is_none()
+        self.icu.is_none() && self.fields.is_none()
     }
 
     /// `ctype_is_c`.
@@ -567,6 +600,24 @@ pub fn cmp_values(c: &Collation, a: &Value, b: &Value) -> Ordering {
             let _g = crate::types::range::under(Some(Arc::new(c.clone())));
             a.cmp_total(b)
         }
+        // record_cmp: a NULL field after a value, two NULLs equal.
+        (Value::Record(x), Value::Record(y)) if let Some(f) = &c.fields => {
+            for (i, (p, q)) in x.iter().zip(y.iter()).enumerate() {
+                let o = match (p.is_null(), q.is_null()) {
+                    (true, true) => Ordering::Equal,
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    _ => match f.get(i).and_then(Option::as_ref) {
+                        Some(fc) => cmp_values(fc, p, q),
+                        None => p.cmp_total(q),
+                    },
+                };
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
         (Value::Array(x), Value::Array(y)) => {
             for (p, q) in x.items.iter().zip(y.items.iter()) {
                 let o = match (p.is_null(), q.is_null()) {
@@ -590,10 +641,77 @@ pub fn cmp_values(c: &Collation, a: &Value, b: &Value) -> Ordering {
     }
 }
 
+/// How values of `ty` compare when it holds composite values with fields under collations
+/// that don't compare as bytes (record_cmp, under each field's attcollation): a record
+/// collation (`Collation::record`); an array's its elements', a range's its subtype's. None
+/// when values compare as their bytes do (`cmp_total`). A field without a COLLATE (an
+/// anonymous record's without one in `RowType::colls`) is under the database default.
+pub fn for_type(cat: &crate::catalog::Catalog, ty: &crate::types::DataType) -> Option<Arc<Collation>> {
+    for_type_at(cat, ty, 0)
+}
+
+fn for_type_at(cat: &crate::catalog::Catalog, ty: &crate::types::DataType, depth: usize) -> Option<Arc<Collation>> {
+    use crate::types::DataType as T;
+    if depth > 32 {
+        return None;
+    }
+    match ty {
+        T::Row(rt) => {
+            let fields = rt
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, (_, fty))| {
+                    if fty.collatable() {
+                        let c = by_name(cat, field_collation(cat, rt, i).as_deref().unwrap_or("default"))?;
+                        (!c.bytewise() || !c.deterministic).then_some(c)
+                    } else {
+                        for_type_at(cat, fty, depth + 1)
+                    }
+                })
+                .collect();
+            Collation::record(fields)
+        }
+        T::Array(e) if !e.collatable() => for_type_at(cat, e, depth + 1),
+        T::Range(r) | T::Multirange(r) if !r.subtype.collatable() => for_type_at(cat, &r.subtype, depth + 1),
+        _ => None,
+    }
+}
+
+/// The collation field `i` of a composite type is declared with (its attcollation when not
+/// the default): a CREATE TYPE's COLLATE, a table's column's, an anonymous row's
+/// `RowType::colls`.
+pub fn field_collation(cat: &crate::catalog::Catalog, rt: &crate::types::RowType, i: usize) -> Option<String> {
+    if rt.oid == 0 {
+        return rt.colls.get(i).cloned().flatten().map(|c| c.to_string());
+    }
+    let field = &rt.fields.get(i)?.0;
+    if let Some(c) = cat.composites.get(&rt.oid) {
+        return c.collations.get(field).cloned();
+    }
+    let (rel, false) = *cat.tables.ix().rowtypes.get(&rt.oid)? else {
+        return None;
+    };
+    let t = cat.tables.get(&rel)?;
+    t.live_columns().find(|(_, c)| &c.name == field)?.1.collation.clone()
+}
+
 /// Equality of two values under a collation.
 pub fn eq_values(c: &Collation, a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Text(x), Value::Text(y)) => c.eq(x, y),
+        // (record_eq: NULL fields equal each other.)
+        (Value::Record(x), Value::Record(y)) if let Some(f) = &c.fields => {
+            x.len() == y.len()
+                && x.iter().zip(y.iter()).enumerate().all(|(i, (p, q))| match (p.is_null(), q.is_null()) {
+                    (true, true) => true,
+                    (false, false) => match f.get(i).and_then(Option::as_ref) {
+                        Some(fc) => eq_values(fc, p, q),
+                        None => p.cmp_total(q) == Ordering::Equal,
+                    },
+                    _ => false,
+                })
+        }
         (Value::Array(x), Value::Array(y)) => {
             x.items.len() == y.items.len()
                 && x.dims == y.dims
@@ -615,6 +733,18 @@ pub fn key_value(c: &Collation, v: &Value) -> Value {
     }
     match v {
         Value::Text(s) => Value::bytea(c.key(s)),
+        Value::Record(r) => match &c.fields {
+            Some(f) => Value::Record(Arc::new(
+                r.iter()
+                    .enumerate()
+                    .map(|(i, x)| match f.get(i).and_then(Option::as_ref) {
+                        Some(fc) => key_value(fc, x),
+                        None => x.clone(),
+                    })
+                    .collect(),
+            )),
+            None => v.clone(),
+        },
         Value::Array(a) => {
             let mut a = (**a).clone();
             for x in a.items.iter_mut() {
@@ -795,6 +925,13 @@ pub fn index_nondet(
         .columns
         .iter()
         .map(|c| {
+            // (A composite column: its fields' collations.)
+            if let crate::catalog::IndexKey::Column(i) = c.key
+                && let Some(col) = t.columns.get(i)
+                && col.ty.holds_composite()
+            {
+                return for_type(cat, &col.ty).filter(|k| !k.deterministic);
+            }
             let name = c.collation.clone().or_else(|| match c.key {
                 crate::catalog::IndexKey::Column(i) => {
                     t.columns.get(i).and_then(|col| col.collation.clone())

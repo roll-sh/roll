@@ -113,8 +113,9 @@ pub fn with_legacy_index_keys<R>(f: impl FnOnce() -> R) -> R {
 
 /// The index key format this build writes (`Catalog::index_key_format`): 1 places a NULL
 /// as its column's NULLS FIRST / LAST says; 2 keys strings under a collation that doesn't
-/// sort by bytes by its sort keys (`KeyColl`).
-pub const INDEX_KEY_FORMAT: u32 = 2;
+/// sort by bytes by its sort keys (`KeyColl`); 3 keys composite values' fields so too, each
+/// under its own collation (`Collation::record`).
+pub const INDEX_KEY_FORMAT: u32 = 3;
 
 thread_local! {
     /// Store tables with a primary key the way builds before storage format 1
@@ -206,6 +207,17 @@ fn encode_collated(out: &mut Vec<u8>, v: &Value, kc: &KeyColl) {
             out.push(ARRAY);
             for item in &a.items {
                 encode_collated(out, item, kc);
+            }
+            out.push(ARRAY_END);
+        }
+        // A composite's fields under their collations, as `encode_value` lays a record out.
+        Value::Record(items) if let Some(f) = &kc.coll.fields => {
+            out.push(ARRAY);
+            for (i, item) in items.iter().enumerate() {
+                match f.get(i).and_then(Option::as_ref) {
+                    Some(c) => encode_collated(out, item, &KeyColl { coll: c.clone(), bpchar: false }),
+                    None => encode_value(out, item, false),
+                }
             }
             out.push(ARRAY_END);
         }

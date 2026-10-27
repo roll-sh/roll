@@ -6599,7 +6599,12 @@ impl Planner<'_, '_> {
             let mut plain = !arg.is_volatile();
             arg.walk(&mut |x| plain &= !matches!(x, Expr::Subquery(_)));
             let ty = arg.ty();
-            if !plain || crate::sql::func::resolve_binop("<", &ty, &ty).is_err() {
+            // (A composite's min / max have no sort operator, aggsortop: Postgres
+            // aggregates them, and `IS NOT NULL` would test their fields besides.)
+            if !plain
+                || matches!(ty, DataType::Row(_) | DataType::Record)
+                || crate::sql::func::resolve_binop("<", &ty, &ty).is_err()
+            {
                 return;
             }
             let desc = name == "max";

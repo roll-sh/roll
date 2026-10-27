@@ -2387,11 +2387,15 @@ impl SetOpNode {
         // finds equal, bpchar without trailing spaces.
         let types = row_types(&self.left);
         let width = types.len().max(self.nondet.len());
-        let cat = (!self.nondet.is_empty()).then(|| ctx.catalog());
+        let cat = (!self.nondet.is_empty() || types.iter().any(|t| t.holds_composite())).then(|| ctx.catalog());
         let colls: Vec<Option<super::agg::KeyNorm>> = (0..width)
             .map(|i| {
-                let c = match (&cat, self.nondet.get(i)) {
-                    (Some(cat), Some(Some(n))) => crate::types::collation::by_name(cat, n),
+                let c = match (&cat, self.nondet.get(i), types.get(i)) {
+                    (Some(cat), Some(Some(n)), _) => crate::types::collation::by_name(cat, n),
+                    // (Composites with fields under nondeterministic collations.)
+                    (Some(cat), _, Some(t)) if t.holds_composite() => {
+                        crate::types::collation::for_type(cat, t).filter(|c| !c.deterministic)
+                    }
                     _ => None,
                 };
                 if matches!(types.get(i), Some(crate::types::DataType::Bpchar(_))) {
