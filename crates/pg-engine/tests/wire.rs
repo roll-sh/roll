@@ -3577,6 +3577,40 @@ fn portals_hold_returning_rows_and_run_once() {
     s.engine.shutdown();
 }
 
+/// A utility statement's ParameterDescription lists only the parameters of the query parse
+/// analysis looks into (EXPLAIN's, CREATE TABLE AS's, DECLARE's): PREPARE ... AS and COPY
+/// (query) have none (Ecto's explain with a fallback generic plan).
+#[test]
+fn utility_statements_describe_their_analyzed_parameters() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    let mut params = |sql: &str| -> Vec<u8> {
+        c.parse("", sql);
+        c.describe(b'S', "");
+        c.send(b'S', b"");
+        let mut t = Vec::new();
+        while let Some((k, b)) = c.next_within(Duration::from_millis(1500)) {
+            match k {
+                b't' => t = b,
+                b'Z' => break,
+                _ => {}
+            }
+        }
+        t
+    };
+    let none = vec![0u8, 0];
+    let int4 = vec![0u8, 1, 0, 0, 0, 23];
+    assert_eq!(params("PREPARE ecto_explain_statement(unknown, unknown) AS SELECT $1::int + $2::int"), none);
+    assert_eq!(params("COPY (SELECT $1::int) TO STDOUT"), none);
+    assert_eq!(params("CREATE VIEW v AS SELECT $1::int AS a"), none);
+    assert_eq!(params("EXPLAIN EXECUTE p($1)"), none);
+    assert_eq!(params("CREATE TABLE t AS SELECT $1::int AS a"), int4);
+    assert_eq!(params("SELECT $1::int AS a INTO t"), int4);
+    assert_eq!(params("DECLARE c CURSOR FOR SELECT $1::int"), int4);
+    assert_eq!(params("EXPLAIN SELECT $1::int"), int4);
+    s.engine.shutdown();
+}
+
 /// Binary date / timestamp / timestamptz input takes what the output function can print, or
 /// infinity (date_recv's IS_VALID_DATE, timestamp_recv's IS_VALID_TIMESTAMP).
 #[test]

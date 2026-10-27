@@ -1995,21 +1995,34 @@ impl Session {
                 })
                 .collect();
         } else if let Some(n) = p.stmt.as_ref() {
-            // EXPLAIN of a query: its parameters typed as the query types them
-            // (transformExplainStmt analyzes the query).
-            if let Some(NodeEnum::ExplainStmt(ex)) = inner(n)
-                && let Some(q) = ex.query.as_deref()
-                && matches!(
-                    inner(q),
-                    Some(
-                        NodeEnum::SelectStmt(_)
-                            | NodeEnum::InsertStmt(_)
-                            | NodeEnum::UpdateStmt(_)
-                            | NodeEnum::DeleteStmt(_)
-                            | NodeEnum::MergeStmt(_)
-                    )
-                )
-            {
+            // A utility statement's parameters are those of the query parse analysis looks
+            // into: EXPLAIN's, CREATE TABLE AS's, DECLARE CURSOR's (transformStmt; others,
+            // such as PREPARE ... AS or COPY (query), stay utility statements, whose $n
+            // nothing types: ParameterDescription lists only the Parse message's).
+            fn analyzed(n: &Node) -> Option<&Node> {
+                match inner(n)? {
+                    NodeEnum::ExplainStmt(ex) => analyzed(ex.query.as_deref()?),
+                    NodeEnum::CreateTableAsStmt(c) => analyzed(c.query.as_deref()?),
+                    NodeEnum::DeclareCursorStmt(d) => analyzed(d.query.as_deref()?),
+                    NodeEnum::SelectStmt(_)
+                    | NodeEnum::InsertStmt(_)
+                    | NodeEnum::UpdateStmt(_)
+                    | NodeEnum::DeleteStmt(_)
+                    | NodeEnum::MergeStmt(_) => Some(n),
+                    _ => None,
+                }
+            }
+            if let Some(q) = analyzed(n) {
+                // transformCreateTableAsStmt.
+                if let Some(NodeEnum::CreateTableAsStmt(c)) = inner(n)
+                    && c.objtype == pb::ObjectType::ObjectMatview as i32
+                    && max_param(q) > 0
+                {
+                    return Err(Error::new(
+                        code::FEATURE_NOT_SUPPORTED,
+                        "materialized views may not be defined using bound parameters",
+                    ));
+                }
                 let types = p.param_types.clone();
                 if let Ok(t) = self.with_ctx(&[], |ctx| {
                     let mut b = Binder::new(ctx, types);
@@ -2018,11 +2031,10 @@ impl Session {
                 }) {
                     p.param_types = t;
                 }
-            }
-            // Utility statements: count $n so ParameterDescription is right.
-            let max = max_param(n);
-            while p.param_types.len() < max {
-                p.param_types.push(DataType::Text);
+                let max = max_param(q);
+                while p.param_types.len() < max {
+                    p.param_types.push(DataType::Text);
+                }
             }
             for t in &mut p.param_types {
                 if matches!(t, DataType::Unknown) {
