@@ -2717,7 +2717,7 @@ impl Ddl<'_, '_> {
                 format!("range subtype cannot be {}", subtype.display()),
             ));
         }
-        if !opclass && system::default_opclass(403, &subtype) == 0 && !subtype.is_array() {
+        if !opclass && self.cat.default_opclass(403, &subtype) == 0 && !subtype.is_array() {
             return Err(Error::new(code::UNDEFINED_OBJECT, format!("data type {} has no default operator class for access method \"btree\"", subtype.display()))
                 .hint("You must specify an operator class for the range type or define a default operator class for the subtype."));
         }

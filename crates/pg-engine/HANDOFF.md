@@ -675,7 +675,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   which Parse / PREPARE bind to type its parameters (`UPDATE pg_class SET relname = $1`).
   GUC_IS_NAME parameters truncate with their NOTICE (`settings::take_name_notices`, sent
   after AuthenticationOk at startup). Left: a planner bug behind Hibernate's "column #32 out
-  of range", Django's file_fdw `program` table (needs server programs allowed), xml2.
+  of range", xml2. Round 19, agent 81 (round 4 of the suites, tests/clients/STATUS.md): 21 more
+  suites (Go, Rust, Elixir, Node, PHP, Java, .NET, Python, pgAdmin / DBeaver metadata), each
+  with its `suites/<name>.sh`; asyncpg, psycopg 3, pgx, ruby-pg and node-postgres re-run.
+  Fixes: server programs (Decisions); literal types without a length (`N'x'`, `char 'x'`,
+  `bit '101'` are unconstrained: ConstCharacter; a column's `char` gets length 1 from the
+  grammar, never from the binder); CREATE TABLE's table constraints resolved after all
+  columns, redundant keys dropped (transformIndexConstraints); the catalog's default opclass
+  (`Catalog::default_opclass`) for ranges and keys over extension types; information_schema
+  and sequence-function gaps; DISTINCT ON sub-selects; read-only row locks; ON CONFLICT's
+  arbiter left to planning (`Binder::unplanned`); SAOP join clauses parameterize index /
+  bitmap paths (`or_param_paths`), estimated as scalararraysel does for a runtime array.
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row

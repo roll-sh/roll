@@ -754,6 +754,29 @@ fn int(v: Option<i64>) -> Value {
     v.map_or(Value::Null, |n| Value::Int4(n as i32))
 }
 
+/// A column of a catalog row value (`t` is the catalog's row type oid).
+fn catalog_field(v: &Value, t: u32, col: &str) -> Value {
+    let Value::Record(fields) = v else { return Value::Null };
+    crate::catalog::system::SysTable::by_rowtype(t)
+        .and_then(|s| s.columns().iter().position(|(n, _)| n == col))
+        .and_then(|i| fields.get(i).cloned())
+        .unwrap_or(Value::Null)
+}
+
+/// _pg_truetypid: `CASE WHEN $2.typtype = 'd' THEN $2.typbasetype ELSE $1.atttypid END`.
+fn truetypid(a: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(if is_domain(&a[1]) { catalog_field(&a[1], 71, "typbasetype") } else { catalog_field(&a[0], 75, "atttypid") })
+}
+
+/// _pg_truetypmod: `CASE WHEN $2.typtype = 'd' THEN $2.typtypmod ELSE $1.atttypmod END`.
+fn truetypmod(a: &[Value], _: &FnCtx) -> Result<Value> {
+    Ok(if is_domain(&a[1]) { catalog_field(&a[1], 71, "typtypmod") } else { catalog_field(&a[0], 75, "atttypmod") })
+}
+
+fn is_domain(t: &Value) -> bool {
+    matches!(catalog_field(t, 71, "typtype"), Value::Char(c) if c == b'd')
+}
+
 fn char_max_length(a: &[Value], _: &FnCtx) -> Result<Value> {
     let (t, m) = (int_arg(&a[0]), int_arg(&a[1]));
     Ok(int(match t {
@@ -953,6 +976,15 @@ pub fn register(r: &mut Registry) {
     // information_schema.
     r.from_pg(13328, None, Some(expandarray));
     r.from_pg(13329, Some(index_position), None);
+    // _pg_truetypid / _pg_truetypmod (pg_attribute, pg_type): their arguments are the
+    // catalogs' row types.
+    for (oid, imp) in [(13330, truetypid as FnImpl), (13331, truetypmod)] {
+        let d = r.from_pg(oid, Some(imp), None);
+        d.args = [75, 71]
+            .iter()
+            .map(|&t| crate::catalog::system::SysTable::by_rowtype(t).and_then(|s| s.row_type()).unwrap_or(DataType::Record))
+            .collect();
+    }
     r.from_pg(13332, Some(char_max_length), None);
     r.from_pg(13333, Some(char_octet_length), None);
     r.from_pg(13335, Some(numeric_precision), None);

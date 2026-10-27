@@ -139,12 +139,9 @@ fn resolve_inner(
                 crate::types::tsearch::queue(super::ast::with_pos(w, tn.location));
             }
         }
-    } else if matches!(ty, DataType::Bpchar(_)) && parts.len() == 2 && parts[1] == "bpchar" {
-        // `char` / `character` without a length is char(1); a bare `bpchar` has no length.
-        ty = DataType::Bpchar(5);
-    } else if matches!(ty, DataType::Bit(_)) && parts.len() == 2 {
-        ty = DataType::Bit(1);
     }
+    // (`char` / `bit` without a length are char(1) / bit(1) by the grammar's typmod; as a
+    // literal's type, `char 'x'` / `N'x'` (ConstCharacter), they have no length.)
     // Multi-dimensional declarations are the same array type.
     if !tn.array_bounds.is_empty() {
         // Types without an array type (pseudo-types, pg_node_tree, the BRIN summaries...).

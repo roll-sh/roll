@@ -555,7 +555,13 @@ impl Session {
                     }
                     b.params.clone()
                 }
-                Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?,
+                Err(e) => {
+                    let (params, cols) = self.analyzed_params(&stmt, &p.param_types, e)?;
+                    if !is_select_into && !cols.is_empty() {
+                        p.plans.lock().cols = Some(cols.iter().map(|c| c.ty.clone()).collect());
+                    }
+                    params
+                }
             };
         }
         let p = Arc::new(p);

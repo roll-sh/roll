@@ -1,0 +1,146 @@
+> CREATE EXTENSION citext
+-- CREATE EXTENSION
+
+> CREATE DOMAIN a81_citext_dom AS citext
+-- CREATE DOMAIN
+
+> CREATE TYPE a81_citext_range AS RANGE (SUBTYPE = citext)
+-- CREATE TYPE
+
+> CREATE TYPE a81_citext_comp AS (t citext)
+-- CREATE TYPE
+
+> SELECT a81_citext_range('a', 'B'), a81_citext_range('a', 'B') @> 'A'::citext,
+>   a81_citext_range('b', 'C') @> 'a'::citext
+a81_citext_range:user | ?column?:bool | ?column?:bool
+[a,B) | t | f
+-- SELECT 1
+
+> SELECT a81_citext_range('B', 'a')
+ERROR 22000: range lower bound must be less than or equal to range upper bound
+
+> SELECT '[a,B]'::a81_citext_range, '{[a,B], [c,d)}'::a81_citext_multirange
+a81_citext_range:user | a81_citext_multirange:user
+[a,B] | {[a,B],[c,d)}
+-- SELECT 1
+
+> SELECT ('a'::citext)::a81_citext_dom, row('x')::a81_citext_comp
+a81_citext_dom:user | row:user
+a | (x)
+-- SELECT 1
+
+> SELECT (SELECT opcname FROM pg_opclass WHERE oid = rngsubopc)
+>   FROM pg_range WHERE rngtypid = 'a81_citext_range'::regtype
+opcname:name
+citext_ops
+-- SELECT 1
+
+> CREATE TABLE a81_cpk (x citext)
+-- CREATE TABLE
+
+> CREATE UNIQUE INDEX a81_cpk_i ON a81_cpk (x)
+-- CREATE INDEX
+
+> ALTER TABLE a81_cpk ADD PRIMARY KEY USING INDEX a81_cpk_i
+-- ALTER TABLE
+
+> SELECT conname, contype FROM pg_constraint WHERE conrelid = 'a81_cpk'::regclass
+conname:name | contype:char
+a81_cpk_i | p
+a81_cpk_x_not_null | n
+-- SELECT 2
+
+> DROP TABLE a81_cpk
+-- DROP TABLE
+
+> DROP TYPE a81_citext_range
+-- DROP TYPE
+
+> DROP TYPE a81_citext_comp
+-- DROP TYPE
+
+> DROP DOMAIN a81_citext_dom
+-- DROP DOMAIN
+
+> DROP EXTENSION citext
+-- DROP EXTENSION
+
+> CREATE TABLE a81_pt (id oid PRIMARY KEY, elem oid)
+-- CREATE TABLE
+
+> INSERT INTO a81_pt SELECT g, g + 1 FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> ANALYZE a81_pt
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> WITH RECURSIVE r(e, a) AS (SELECT 1007::oid, '{23}'::oid[]
+>   UNION ALL SELECT t.elem, NULL::oid[] FROM r JOIN a81_pt t ON t.id = any(r.a))
+> SELECT * FROM r
+QUERY PLAN:text
+CTE Scan on r
+  CTE r
+    ->  Recursive Union
+          ->  Result
+          ->  Nested Loop
+                ->  WorkTable Scan on r r_1
+                ->  Index Scan using a81_pt_pkey on a81_pt t
+                      Index Cond: (id = ANY (r_1.a))
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF)
+> WITH RECURSIVE r(e, a) AS (SELECT 1007::oid, '{23}'::oid[]
+>   UNION ALL SELECT t.elem, NULL::oid[] FROM r, a81_pt t
+>   WHERE (r.e IS NOT NULL AND t.id = r.e) OR (r.a IS NOT NULL AND t.id = any(r.a)))
+> SELECT * FROM r
+QUERY PLAN:text
+CTE Scan on r
+  CTE r
+    ->  Recursive Union
+          ->  Result
+          ->  Nested Loop
+                ->  WorkTable Scan on r r_1
+                ->  Bitmap Heap Scan on a81_pt t
+                      Recheck Cond: ((id = r_1.e) OR (id = ANY (r_1.a)))
+                      ->  BitmapOr
+                            ->  Bitmap Index Scan on a81_pt_pkey
+                                  Index Cond: (id = r_1.e)
+                            ->  Bitmap Index Scan on a81_pt_pkey
+                                  Index Cond: (id = ANY (r_1.a))
+-- EXPLAIN
+
+> WITH RECURSIVE r(e, a, d) AS (SELECT 10::oid, '{20,30}'::oid[], 0
+>   UNION ALL SELECT t.elem, CASE WHEN r.d = 0 THEN '{40}'::oid[] END, r.d + 1 FROM r, a81_pt t
+>   WHERE r.d < 3 AND ((r.e IS NOT NULL AND t.id = r.e) OR (r.a IS NOT NULL AND t.id = any(r.a))))
+> SELECT * FROM r ORDER BY d, e
+e:oid | a:oid[] | d:int4
+10 | {20,30} | 0
+11 | {40} | 1
+21 | {40} | 1
+31 | {40} | 1
+12 | NULL | 2
+22 | NULL | 2
+32 | NULL | 2
+41 | NULL | 2
+41 | NULL | 2
+41 | NULL | 2
+13 | NULL | 3
+23 | NULL | 3
+33 | NULL | 3
+42 | NULL | 3
+42 | NULL | 3
+42 | NULL | 3
+-- SELECT 16
+
+> SELECT a81_pt.id FROM (VALUES ('{5,6,7}'::oid[]), ('{}'), (NULL)) v(a)
+>   JOIN a81_pt ON a81_pt.id = any(v.a) ORDER BY 1
+id:oid
+5
+6
+7
+-- SELECT 3
+
+> DROP TABLE a81_pt
+-- DROP TABLE
+

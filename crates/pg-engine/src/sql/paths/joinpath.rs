@@ -2721,12 +2721,16 @@ impl Search<'_, '_, '_> {
 
     /// generate_bitmap_or_paths over the join OR clauses movable to leaf `l`: a bitmap
     /// heap scan parameterized by the other leaves the clause reads, its arms' index
-    /// conditions taking their values from them.
+    /// conditions taking their values from them. A join clause `col op ANY (<other
+    /// leaves' array>)` likewise (match_clause_to_indexcol's ScalarArrayOpExpr with an
+    /// outer array: an index or bitmap scan parameterized by them).
     fn or_param_paths(&self, l: usize, r: &Rc<Rel>, width: u32, set: u32) -> Vec<JP> {
         let leaf = &self.leaves[l];
         let mut out: Vec<JP> = Vec::new();
         for (ci, c) in self.clauses.iter().enumerate() {
-            if !matches!(c.expr, Expr::Or(_))
+            let saop = matches!(&c.expr, Expr::ArrayOp { left, right, all: false, .. }
+                if self.leaves_of(left) == set && self.leaves_of(right) & set == 0);
+            if !(matches!(c.expr, Expr::Or(_)) || saop)
                 || c.leaves & set == 0
                 || c.leaves == set
                 || c.expr.is_volatile()

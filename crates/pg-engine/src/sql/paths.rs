@@ -1553,6 +1553,14 @@ fn implies(q: &Expr, p: &Expr) -> bool {
         {
             return true;
         }
+        // (clause_is_strict_for: a strict operator's ScalarArrayOpExpr is NULL when its
+        // scalar or its array is.)
+        if let Expr::ArrayOp { left, right, op, .. } = q
+            && op.strict
+            && [&**left, &**right].iter().any(|a| key_operand(a).same_as(key_operand(x)))
+        {
+            return true;
+        }
         return false;
     }
     let (Some((px, pop, pv)), Some((qx, qop, qv))) = (cmp_parts(p), cmp_parts(q)) else {

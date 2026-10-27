@@ -585,6 +585,10 @@ impl Ddl<'_, '_> {
         }
         let outer_deferred = self.defer_generated.replace(Vec::new());
         let outer_defaults = self.defer_defaults.replace(Vec::new());
+        // Table constraints, with where they come among the columns' own: transformed once
+        // every column is known (transformCreateStmt only collects them), so a key may name
+        // a column defined after it.
+        let mut table_cons: Vec<(usize, &pb::Constraint)> = Vec::new();
         for e in &s.table_elts {
             match inner(e) {
                 Some(NodeEnum::ColumnDef(_)) if of_type.is_some() => {}
@@ -604,15 +608,18 @@ impl Ddl<'_, '_> {
                 {
                     late_not_nulls.push((**c).clone());
                 }
-                Some(NodeEnum::Constraint(c)) => {
-                    if let Some(p) = self.table_constraint(&t, c, None)? {
-                        pending.push(p);
-                    }
-                }
+                Some(NodeEnum::Constraint(c)) => table_cons.push((pending.len(), c)),
                 Some(NodeEnum::TableLikeClause(l)) => {
                     self.like_clause(&mut t, l, &mut pending, &mut seqs)?
                 }
                 _ => return Err(crate::error::unsupported("this table element")),
+            }
+        }
+        let mut added = 0;
+        for (at, c) in table_cons {
+            if let Some(p) = self.table_constraint(&t, c, None)? {
+                pending.insert(at + added, p);
+                added += 1;
             }
         }
         let deferred =
@@ -731,6 +738,25 @@ impl Ddl<'_, '_> {
             let p = rest.remove(pk);
             rest.insert(first, p);
         }
+        // transformIndexConstraints: a key with the columns and properties of an earlier one
+        // (the primary key first) is redundant and goes; its name, if the earlier has none,
+        // passes to it.
+        let mut kept: Vec<Pending> = Vec::with_capacity(rest.len());
+        for p in rest {
+            if let Pending::Index { primary: false, name, cols, include, nulls_not_distinct, deferrable, initially_deferred, .. } = &p
+                && let Some(Pending::Index { name: prior_name, .. }) = kept.iter_mut().find(|k| {
+                    matches!(k, Pending::Index { cols: c, include: i, nulls_not_distinct: n, deferrable: d, initially_deferred: id, .. }
+                        if c == cols && i == include && n == nulls_not_distinct && d == deferrable && id == initially_deferred)
+                })
+            {
+                if prior_name.is_none() {
+                    *prior_name = name.clone();
+                }
+                continue;
+            }
+            kept.push(p);
+        }
+        let mut rest = kept;
         let not_nulls = merge_not_nulls(not_nulls, &t)?;
         let mut not_nulls = not_nulls;
         for p in &rest {
@@ -3278,7 +3304,7 @@ impl Ddl<'_, '_> {
                 continue;
             };
             let col = &t.columns[i];
-            let default_op = crate::catalog::system::default_opclass(403, &col.ty);
+            let default_op = self.cat.default_opclass(403, &col.ty);
             let coll_ok = k.collation.as_deref().is_none_or(|x| {
                 x == col.collation.as_deref().unwrap_or("default")
             });

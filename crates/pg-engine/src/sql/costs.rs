@@ -830,7 +830,21 @@ impl Est<'_> {
                         let et = ty.elem().cloned().unwrap_or(DataType::Unknown);
                         a.items.iter().map(|v| Expr::Const(v.clone(), et.clone())).collect()
                     }
-                    _ => return if *all { DEFAULT_INEQ_SEL } else { 0.5 },
+                    r => {
+                        // (An array known only when run: the operator's estimate against a
+                        // value not a constant, for an assumed 10 elements, their
+                        // probabilities not taken as disjoint.)
+                        let Some(et) = r.ty().elem().cloned() else {
+                            return if *all { DEFAULT_INEQ_SEL } else { 0.5 };
+                        };
+                        let _g = op_coll(op);
+                        let s2 = self.binary_op(op.name, left, &Expr::CaseTest(et));
+                        let mut s = if *all { 1.0 } else { 0.0 };
+                        for _ in 0..10 {
+                            s = if *all { s * s2 } else { s + s2 - s * s2 };
+                        }
+                        return s;
+                    }
                 };
                 // (= ANY and <> ALL of distinct values: disjoint probabilities.)
                 let disjoint = if *all { op.name == "<>" } else { op.name == "=" };

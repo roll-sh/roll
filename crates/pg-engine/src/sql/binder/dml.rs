@@ -1629,6 +1629,11 @@ impl Binder<'_, '_> {
             out.push(bix.index.oid);
         }
         if out.is_empty() {
+            // (infer_arbiter_indexes is the planner's: parse analysis alone, as PREPARE and
+            // Parse do, doesn't look.)
+            if self.unplanned {
+                return Ok(out);
+            }
             return Err(Error::new(
                 code::INVALID_COLUMN_REFERENCE,
                 "there is no unique or exclusion constraint matching the ON CONFLICT specification",

@@ -2737,7 +2737,8 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                 )
                 .filter(|r| r.0 != 0)
             {
-                let t = cat.user_data_type(oid).unwrap_or(DataType::Record);
+                // (By the relation: finding it by its row type is a scan of them all.)
+                let t = cat.row_type_of(relid).unwrap_or(DataType::Record);
                 push(
                     oid,
                     name.clone(),
@@ -4124,7 +4125,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
             {
                 let subopc = match cat.ranges.values().find(|r| r.oid == rt.oid) {
                     Some(r) if r.subtype_opc != 0 => r.subtype_opc,
-                    _ => default_opclass(403, &rt.subtype),
+                    _ => cat.default_opclass(403, &rt.subtype),
                 };
                 out.push(vec![
                     o(rt.oid),
@@ -6848,7 +6849,8 @@ fn info_column(
         .and_then(|o| crate::types::collation::def_by_oid(cat, o));
     let identity = col.and_then(|c| c.identity.clone());
     let seq = col.and_then(|c| c.seq).and_then(|s| cat.sequences.get(&s));
-    let nullable = !col.is_some_and(|c| c.not_null);
+    // (attnotnull, or a domain type's typnotnull: the column's own domain, not one under it.)
+    let nullable = !col.is_some_and(|c| c.not_null) && !domain.is_some_and(|d| d.not_null);
     vec![
         nm(db),
         nm(cat.schema_name(schema)),

@@ -1157,6 +1157,27 @@ impl Session {
                 ));
             }
         }
+        // ExecCheckXactReadOnly: row locks are UPDATE permission, refused on a non-temporary
+        // relation (CreateCommandTag names the first row mark's strength).
+        if let NodeEnum::SelectStmt(s) = node
+            && let Some(NodeEnum::LockingClause(l)) = s.locking_clause.first().and_then(|n| n.node.as_ref())
+            && !s.from_clause.is_empty()
+        {
+            self.ensure_txn();
+            if self.txn.as_ref().is_some_and(|t| t.borrow().read_only) && !self.locks_temp_only(s) {
+                use pg_query::protobuf::LockClauseStrength as S;
+                let cmd = match S::try_from(l.strength).unwrap_or(S::LcsForupdate) {
+                    S::LcsForkeyshare => "SELECT FOR KEY SHARE",
+                    S::LcsForshare => "SELECT FOR SHARE",
+                    S::LcsFornokeyupdate => "SELECT FOR NO KEY UPDATE",
+                    _ => "SELECT FOR UPDATE",
+                };
+                return Err(Error::new(
+                    code::READ_ONLY_SQL_TRANSACTION,
+                    format!("cannot execute {cmd} in a read-only transaction"),
+                ));
+            }
+        }
         match node {
             // SELECT ... INTO t is CREATE TABLE t AS SELECT ...
             NodeEnum::SelectStmt(sel) if crate::sql::binder::ast::select_into(sel).is_some() => {
@@ -1405,13 +1426,14 @@ impl Session {
     /// A statement being prepared (PREPARE, a Parse message) whose planned binding failed
     /// with `planned`: Postgres only analyzes it then, so what fails only when it's planned
     /// or starts (folding a constant call, a merge join without a collation, inlining a SQL
-    /// function) waits for EXECUTE. The parameter types its analysis infers, or the error.
+    /// function) waits for EXECUTE. The parameter types its analysis infers and its result
+    /// columns (none known: empty), or the error.
     pub(super) fn analyzed_params(
         &mut self,
         stmt: &Node,
         types: &[DataType],
         planned: Error,
-    ) -> Result<Vec<DataType>> {
+    ) -> Result<(Vec<DataType>, Vec<OutCol>)> {
         let inlining = |e: &Error| {
             e.context
                 .as_deref()
@@ -1424,8 +1446,8 @@ impl Session {
             b.bind_statement(stmt)
         });
         match analyzed {
-            Ok(b) => Ok(b.params.clone()),
-            Err(e) if inlining(&e) && inlining(&planned) => Ok(types),
+            Ok(b) => Ok((b.params.clone(), b.cols.clone())),
+            Err(e) if inlining(&e) && inlining(&planned) => Ok((types, Vec::new())),
             Err(_) => Err(planned),
         }
     }
@@ -1794,7 +1816,13 @@ impl Session {
                     drop(plans);
                     b.params.clone()
                 }
-                Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?,
+                Err(e) => {
+                    let (params, cols) = self.analyzed_params(&stmt, &p.param_types, e)?;
+                    if !cols.is_empty() {
+                        p.plans.lock().fixed_result = Some(result_row(&cols));
+                    }
+                    params
+                }
             };
             // The query as written types its parameters, before rules rewrite it (an INSERT
             // a DO INSTEAD NOTHING rule drops still has its $n).
@@ -2729,6 +2757,26 @@ impl Session {
 
     /// INSERT / UPDATE / DELETE / MERGE of a temporary table: allowed in a read-only
     /// transaction (only writes to permanent relations are refused).
+    /// A SELECT ... FOR UPDATE whose FROM items are all temporary tables (or one that names
+    /// a relation that doesn't exist, whose own error comes first).
+    fn locks_temp_only(&self, s: &pg_query::protobuf::SelectStmt) -> bool {
+        let Some(t) = &self.txn else {
+            return false;
+        };
+        let cat = t.borrow().catalog();
+        s.from_clause.iter().all(|f| match f.node.as_ref() {
+            Some(NodeEnum::RangeVar(rv)) => {
+                let schema = (!rv.schemaname.is_empty()).then_some(rv.schemaname.as_str());
+                match cat.lookup(schema, &rv.relname, &self.state.search_path()) {
+                    Ok(Some(crate::catalog::Relation::Table(t))) => cat.schema_name(t.schema).starts_with("pg_temp"),
+                    Ok(Some(_)) => false,
+                    _ => true,
+                }
+            }
+            _ => false,
+        })
+    }
+
     fn writes_temp_only(&self, node: &NodeEnum) -> bool {
         let rv = match node {
             NodeEnum::InsertStmt(s) => s.relation.as_ref(),

@@ -196,6 +196,8 @@ pub fn cast_context(from: &DataType, to: &DataType) -> Option<CastContext> {
         // arrays: element-wise
         (T::Array(a), T::Array(b)) => return cast_context(a, b),
         (T::Int2Vector, T::Array(e)) if matches!(**e, T::Int2) => Implicit,
+        // Element-wise, as an array of int2 (jOOQ's `indoption::int[]`).
+        (T::Int2Vector, T::Array(e)) => return cast_context(&T::Int2, e),
         (T::OidVector, T::Array(e)) if matches!(**e, T::Oid) => Implicit,
         // Element-wise, as an array of oid.
         (T::OidVector, T::Array(e)) => return cast_context(&T::Oid, e),

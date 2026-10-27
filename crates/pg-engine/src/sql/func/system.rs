@@ -337,15 +337,31 @@ fn seq_by_oid(cat: &Catalog, oid: u32) -> Result<Arc<crate::catalog::Sequence>> 
     if let Some(s) = cat.sequences.get(&oid) {
         return Ok(s.clone());
     }
-    let what = cat
-        .tables
-        .get(&oid)
-        .map(|t| t.name.clone())
-        .unwrap_or_else(|| oid.to_string());
-    Err(Error::new(
-        code::WRONG_OBJECT_TYPE,
-        format!("\"{what}\" is not a sequence"),
-    ))
+    // sequence_open's validate_relation_kind (errdetail_relkind_not_supported).
+    let (name, kind) = if let Some(t) = cat.tables.get(&oid) {
+        let kind = if t.is_foreign() {
+            "foreign tables"
+        } else if t.partkey.is_some() {
+            "partitioned tables"
+        } else {
+            "tables"
+        };
+        (t.name.clone(), kind)
+    } else if let Some(v) = cat.views.get(&oid) {
+        (v.name.clone(), if v.materialized { "materialized views" } else { "views" })
+    } else if let Some(i) = cat.indexes.get(&oid) {
+        let partitioned = cat.tables.get(&i.table).is_some_and(|t| t.partkey.is_some());
+        (i.name.clone(), if partitioned { "partitioned indexes" } else { "indexes" })
+    } else if let Some(c) = cat.composites.get(&oid) {
+        (c.name.clone(), "composite types")
+    } else {
+        return Err(Error::new(
+            code::INTERNAL_ERROR,
+            format!("could not open relation with OID {oid}"),
+        ));
+    };
+    Err(Error::new(code::WRONG_OBJECT_TYPE, format!("cannot open relation \"{name}\""))
+        .detail(format!("This operation is not supported for {kind}.")))
 }
 
 fn seq_arg(v: &Value, c: &FnCtx) -> Result<Arc<crate::catalog::Sequence>> {
@@ -415,7 +431,14 @@ fn seq_priv(seq: &crate::catalog::Sequence, c: &FnCtx, privs: u32) -> Result<()>
 /// pg_sequence_parameters: a sequence's options (pg_sequence).
 fn pg_sequence_parameters(a: &[Value], c: &FnCtx) -> Result<super::SrfIter> {
     use crate::catalog::acl;
-    let seq = seq_arg(&a[0], c)?;
+    // (It reads pg_sequence's row: none for another relation.)
+    let seq = match seq_arg(&a[0], c) {
+        Err(e) if e.code == code::WRONG_OBJECT_TYPE => {
+            let oid = a[0].as_i64().unwrap_or(0);
+            return Err(Error::new(code::INTERNAL_ERROR, format!("cache lookup failed for sequence {oid}")));
+        }
+        r => r?,
+    };
     seq_priv(&seq, c, acl::SELECT | acl::UPDATE | acl::USAGE)?;
     let row = vec![
         Value::Int8(seq.start),
@@ -432,7 +455,13 @@ fn pg_sequence_parameters(a: &[Value], c: &FnCtx) -> Result<super::SrfIter> {
 /// pg_get_sequence_data: its last value and is_called (NULLs without SELECT on it).
 fn pg_get_sequence_data(a: &[Value], c: &FnCtx) -> Result<super::SrfIter> {
     use crate::catalog::acl;
-    let seq = seq_arg(&a[0], c)?;
+    // (try_relation_open: another relation, or none, gives NULLs.)
+    let seq = match seq_arg(&a[0], c) {
+        Err(e) if matches!(e.code, code::WRONG_OBJECT_TYPE | code::INTERNAL_ERROR) => {
+            return Ok(Box::new(std::iter::once(Ok(vec![Value::Null, Value::Null]))));
+        }
+        r => r?,
+    };
     let row = if seq_priv(&seq, c, acl::SELECT).is_ok() {
         let (last, called) = c.exec.sess.db.seq_state(&seq)?;
         vec![Value::Int8(last), Value::Bool(called)]
@@ -440,6 +469,33 @@ fn pg_get_sequence_data(a: &[Value], c: &FnCtx) -> Result<super::SrfIter> {
         vec![Value::Null, Value::Null]
     };
     Ok(Box::new(std::iter::once(Ok(row))))
+}
+
+/// pg_sequence_last_value: its last value once called, else NULL (NULL too without SELECT
+/// or USAGE on it).
+fn pg_sequence_last_value(a: &[Value], c: &FnCtx) -> Result<Value> {
+    use crate::catalog::acl;
+    let seq = seq_arg(&a[0], c)?;
+    if seq_priv(&seq, c, acl::SELECT | acl::USAGE).is_err() {
+        return Ok(Value::Null);
+    }
+    let (last, called) = c.exec.sess.db.seq_state(&seq)?;
+    Ok(if called { Value::Int8(last) } else { Value::Null })
+}
+
+/// oidvectortypes: each type as format_type shows it ("-" for 0), comma-separated.
+fn oidvectortypes(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let Value::Array(arr) = &a[0] else {
+        return Ok(Value::Null);
+    };
+    let mut out = Vec::with_capacity(arr.items.len());
+    for v in &arr.items {
+        match format_type(&[v.clone(), Value::Null], c)? {
+            Value::Text(t) => out.push(t.to_string()),
+            _ => out.push("???".into()),
+        }
+    }
+    Ok(text(out.join(", ")))
 }
 
 /// The sequence's next value for this session: from the values it cached (CACHE n),
@@ -4366,6 +4422,8 @@ pub fn register(r: &mut Registry) {
     r.from_pg(6315, Some(pg_basetype), None);
     r.from_pg(3078, None, Some(pg_sequence_parameters));
     r.from_pg(6427, None, Some(pg_get_sequence_data));
+    r.from_pg(4032, Some(pg_sequence_last_value), None);
+    r.from_pg(1349, Some(oidvectortypes), None);
     r.func("pg_backend_pid", vec![], Int4, pg_backend_pid)
         .stable();
     r.func("inet_server_addr", vec![], Inet, inet_server_addr)

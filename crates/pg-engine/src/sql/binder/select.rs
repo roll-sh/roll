@@ -1995,9 +1995,26 @@ impl Binder<'_, '_> {
                 .zip(&order)
                 .map(|(n, k)| entry(n, &k.expr))
                 .collect();
+            // (Sub-selects are bound apart, each a plan of its own; equal() compares their
+            // queries: the same text in one SELECT is the same query.)
+            let raw = |n: &Node| ast::deparse_expr(n).ok();
+            let on_raw: Vec<Option<String>> = s.distinct_clause.iter().map(raw).collect();
+            let order_raw: Vec<Option<String>> = s
+                .sort_clause
+                .iter()
+                .map(|sb| match inner(sb) {
+                    Some(NodeEnum::SortBy(sb)) => sb.node.as_deref().and_then(raw),
+                    _ => None,
+                })
+                .collect();
+            let equal = |j: usize, i: usize| {
+                distinct_on[j].same_as(&order[i].expr)
+                    || (has_subquery(&distinct_on[j])
+                        && on_raw.get(j).is_some_and(|a| a.is_some() && order_raw.get(i) == Some(a)))
+            };
             let same = |j: usize, i: usize| match (on_entries.get(j), order_entries.get(i)) {
                 (Some(Some(a)), Some(Some(b))) => a == b,
-                (Some(None), Some(None)) | (None, _) | (_, None) => distinct_on[j].same_as(&order[i].expr),
+                (Some(None), Some(None)) | (None, _) | (_, None) => equal(j, i),
                 _ => false,
             };
             let mut skipped = false;
@@ -8552,4 +8569,15 @@ fn materialize_virtuals(plan: Plan, mut scope: Scope) -> (Plan, Scope) {
         ),
         None => (plan, scope),
     }
+}
+
+/// Whether the expression has a sub-select in it.
+fn has_subquery(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::Subquery(_)) {
+            found = true;
+        }
+    });
+    found
 }
