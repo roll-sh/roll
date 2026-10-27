@@ -7,6 +7,7 @@ on:
     paths:
       - "apps/**"
       - "packages/**"
+      - "crates/s3-*/**"
       - "package.json"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
@@ -29,6 +30,12 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm --filter dashboard test
+      # @roll/storage's tests run storage-js against the real developer API.
+      - run: cargo build -p s3-api --example storage-api
+      - run: pnpm --filter @roll/storage test
       - run: pnpm build

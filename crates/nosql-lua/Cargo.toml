@@ -1,0 +1,16 @@
+[package]
+name = "nosql-lua"
+description = "Lua 5.4 for roll nosql's ScyllaDB-compatible Lua UDFs: vendored core, bounded states, raw bindings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+links = "lua54-nosql"
+build = "build.rs"
+
+[build-dependencies]
+cc.workspace = true
+
+[dev-dependencies]
+# tests/coexist.rs: rolld links both Lua builds into one binary.
+redis-lua.workspace = true

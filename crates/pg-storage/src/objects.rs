@@ -100,6 +100,24 @@ impl Objects {
         }
     }
 
+    /// Bytes `range` of an object (one ranged GET). `None` when the object doesn't exist.
+    pub async fn get_range(&self, key: &str, range: std::ops::Range<u64>) -> anyhow::Result<Option<Bytes>> {
+        match self.store.get_range(&ObjPath::from(key), range).await {
+            Ok(b) => Ok(Some(b)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The size of an object, `None` when it doesn't exist.
+    pub async fn size(&self, key: &str) -> anyhow::Result<Option<u64>> {
+        match self.store.head(&ObjPath::from(key)).await {
+            Ok(m) => Ok(Some(m.size)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn exists(&self, key: &str) -> anyhow::Result<bool> {
         match self.store.head(&ObjPath::from(key)).await {
             Ok(_) => Ok(true),
@@ -260,6 +278,16 @@ pub(crate) mod tests {
         assert!(o.get("a/b").await.unwrap().is_none());
         assert!(o.get("z").await.unwrap().is_some());
         o.delete("never-existed").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ranges_and_sizes() {
+        let (o, _) = temp_objects("range");
+        o.put("r", Bytes::from_static(b"0123456789")).await.unwrap();
+        assert_eq!(o.get_range("r", 2..5).await.unwrap().unwrap(), "234");
+        assert_eq!(o.size("r").await.unwrap(), Some(10));
+        assert_eq!(o.size("missing").await.unwrap(), None);
+        assert!(o.get_range("missing", 0..1).await.unwrap().is_none());
     }
 
     #[tokio::test]

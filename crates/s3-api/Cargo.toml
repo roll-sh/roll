@@ -1,0 +1,35 @@
+[package]
+name = "s3-api"
+description = "roll storage: the developer API (Supabase-Storage-compatible REST, resumable uploads, app-auth rules)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+md-5.workspace = true
+memchr.workspace = true
+s3-image.workspace = true
+s3-proto.workspace = true
+s3-server.workspace = true
+s3-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+aws-sdk-s3.workspace = true
+image.workspace = true
+reqwest = { workspace = true, features = ["stream", "multipart"] }
+ring.workspace = true
+tracing-subscriber.workspace = true

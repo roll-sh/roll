@@ -6,7 +6,7 @@ Serverless infrastructure for everything.
 
 ```
 apps/
-  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/code, /dashboard/databases, /dashboard/streams, /dashboard/tasks), public repo pages (/<owner>/<repo>)
+  dashboard/        Next.js 16 app — brand playground (/), dashboard (/dashboard, /dashboard/code, /dashboard/databases, /dashboard/streams, /dashboard/tasks, /dashboard/storage, /dashboard/nosql), public repo pages (/<owner>/<repo>)
 packages/
   brand/            @roll/brand — logo geometry, animation engine, React components, SVG assets
   tasks/            @roll/tasks — TypeScript SDK: client, pull consumer, signature verification, workflows
@@ -17,6 +17,15 @@ crates/
   redis-engine/     Redis data structures and commands (pure, synchronous, one engine per shard)
   redis-server/     Redis network layer: RESP + TLS, REST API, tenants, durability on S3, replicas
   redis-control/    Redis control plane: databases, branches, restore, replicas, metering, HTTP API
+  nosql-types/      CQL data types: values, ordering, serialisation, literals, JSON, Murmur3 tokens
+  nosql-proto/      CQL native protocol v3/v4/v5 (both directions) and an async client
+  nosql-cql/        CQL lexer and parser for Cassandra 5 and ScyllaDB, with the references' syntax errors
+  nosql-storage/    LSM storage on object storage: memtables, SSTables, compaction, commit log, branches, PITR
+  nosql-engine/     CQL engine: schema, queries, LWT, indexes, views, CDC, auth, UDFs (Lua 5.4), DESCRIBE, dialects
+  nosql-lua/        Vendored Lua 5.4 for ScyllaDB Lua UDFs (symbols prefixed so it links next to redis-lua)
+  nosql-alternator/ ScyllaDB Alternator: the DynamoDB API on top of the engine
+  nosql-server/     NoSQL data plane: CQL (+TLS, SNI, shard-aware), Alternator, ScyllaDB REST, tenants, scale to zero
+  nosql-control/    NoSQL control plane: databases, branches, restore, imports, masking, metering, HTTP API
   stream-log/       Kafka-format partition log: segments, group commit, idempotence, transactions
   stream-broker/    Kafka-compatible broker: wire protocol, coordinators, tiering, compaction, HTTP API
   tasks/            roll tasks: messages, queues, schedules, workflows (SQLite, its own S3 log store, or DynamoDB)
@@ -26,7 +35,11 @@ crates/
   code-control/     roll code control plane: owners, repos, changes, work items, git adapter, HTTP API
   code-preview/     roll code checks and previews: roll.toml, containers, branched Postgres/Redis, host routing
   code-cluster/     roll code on many nodes: membership, repo leases with self-fencing, placement, handoff, forwarding
-  rolld/            Daemon: proxy + API + reconciler + Redis + Kafka listener (+ roll tasks on /v1/tasks, roll code on /v1/code and /git)
+  s3-proto/         S3 wire protocol: SigV4 (headers, presigned, aws-chunked + trailers), XML, checksums, errors
+  s3-store/         roll storage metadata: SQLite + durable log on S3, branching, refcounts, trash, GC, blob backend
+  s3-server/        S3-compatible HTTP API: routing, auth, handlers, streaming to and from S3
+  s3-control/       roll storage control plane: buckets, branches, keys, browsing, usage and pricing (/v1/storage)
+  rolld/            Daemon: proxy + API + reconciler + Redis + NoSQL + Kafka listener + S3 API (+ roll tasks on /v1/tasks, roll code on /v1/code and /git)
   roll-cli/         `roll` CLI
 deploy/aws/         roll tasks on AWS: Dockerfile + CloudFormation
 ```
@@ -253,6 +266,64 @@ It also runs a differential compatibility suite. That suite sends the same scrip
 The script skips itself when nothing relevant changed. Pass `--force` to run anyway, or `--unit` to skip
 Docker. CI is in `.github/workflows/redis.yml`. To run the durability tests against S3, set
 `ROLL_E2E_S3_BUCKET` and `ROLL_E2E_S3_ENDPOINT` (plus AWS credentials).
+
+## NoSQL
+
+A ScyllaDB- and Cassandra-compatible wide-column database, written in Rust. Each database has a
+dialect, `scylla` (ScyllaDB 2026.3.3) or `cassandra` (Cassandra 5.0.9), and behaves like that server
+for every client: drivers, cqlsh, ScyllaDB's `nodetool` over its REST API, and the AWS SDKs through
+Alternator. Data lives in object storage, a database nobody uses costs only its S3 bytes, and a
+branch of any size is ready instantly. The main use is a copy of a production cluster per pull
+request, developer or CI run (`docs/nosql/preview-environments.md`).
+
+```sh
+cargo run -p rolld                                   # CQL on :59042, Alternator on :58000, REST on :59100
+cargo run -p roll-cli -- nosql create app --dialect scylla --datacenter us-east-1
+cargo run -p roll-cli -- nosql cqlsh app             # built-in cqlsh, same output as the real one
+cargo run -p roll-cli -- nosql import app --from cql://reader:pw@prod:9042 --keyspaces shop
+cargo run -p roll-cli -- nosql branch app --name pr-482 --expires 72h
+cargo run -p roll-cli -- nosql diff pr-482           # schema change against the parent, as CQL
+cargo run -p roll-cli -- nosql connect pr-482        # Java, Python, Go, Rust and Node snippets
+```
+
+How it works (details in `docs/nosql/`):
+
+- **The cluster a client sees.** A database presents one healthy node in a single datacenter, with
+  the datacenter, rack and cluster names you choose, so drivers configured for production work
+  unchanged. Every consistency level is satisfied, schema agreement is immediate, and ScyllaDB's
+  shard-aware, LWT and tablet extensions are advertised as ScyllaDB does.
+- **Many tenants per node.** Connections pick a database by TLS server name (`<db>.<domain>`) or by
+  the login `role@<db>`. A database loads on first use and unloads after its idle timeout.
+- **Storage.** An LSM tree per table, with our own SSTable format built for range reads from S3, a
+  memory and disk block cache, and every compaction strategy of both products (visible effects such
+  as tombstone purging match). Each node ships one commit-log segment for all its tenants every
+  ~100 ms; `durability: sync` acknowledges a write only once it is in S3.
+- **Branches and point in time.** Branches reference their parent's SSTables, so creating one
+  writes a single manifest. Reset keeps a branch's endpoint and credentials, restore runs in place,
+  and branches can expire, be read-only, hold only the schema, or carry a masking policy that
+  anonymises production data for every role.
+- **Getting data in.** A live import from any Cassandra or ScyllaDB cluster over CQL keeps write
+  times and TTLs, and can refresh on a schedule.
+- **Metering.** Storage, requests and connection time, with a cost estimate next to Amazon
+  Keyspaces, DynamoDB, Astra and ScyllaDB Cloud.
+
+### Tests
+
+`pnpm test:nosql` (or `scripts/test-nosql.sh`) runs clippy and every crate's tests. It then starts
+`scylladb/scylla:2026.3.3` and `cassandra:5.0.9` (or reuses running ones given in
+`ROLL_NOSQL_REF_*`) for the tests that compare roll with them:
+
+- the differential scripts, which send the same CQL to roll and the reference and compare raw
+  results;
+- the Rust driver;
+- cqlsh output;
+- imports.
+
+`--conformance` adds ScyllaDB's own `test/cqlpy` and `test/alternator` suites, run against roll.
+`scripts/nosql-conformance.sh` downloads them at test time; they are never committed. Every test
+the reference passes must pass on roll, apart from the lists in
+`crates/nosql-server/tests/conformance/roll-known-failures-*.txt`, which may only shrink. Current
+numbers are in `docs/nosql/plan.md`. CI is in `.github/workflows/nosql.yml`.
 
 ## Streams
 
@@ -625,3 +696,62 @@ More in [docs/code](docs/code/README.md): [architecture](docs/code/architecture.
 
 It skips itself when nothing code-related changed. `--force` runs anyway, and `--unit` skips
 Docker and the throughput run.
+
+## Storage
+
+roll storage is S3-compatible object storage: any S3 SDK or tool (`aws`, boto3, the JS v3 SDK,
+rclone, `mc`) works against `rolld` on `:59000`. It adds two things S3 doesn't have: **branching
+buckets** (an instant copy-on-write copy of a bucket) and a **recovery window** (deleted and
+overwritten objects stay restorable for 7 days by default). Prices are S3 Standard list prices.
+
+```sh
+cargo run -p rolld                                        # S3 API on :59000, roll API on :7070
+roll storage create assets
+roll storage keys create laptop --permission write        # AWS_ACCESS_KEY_ID / _SECRET / AWS_ENDPOINT_URL
+aws s3 cp ./logo.png s3://assets/img/logo.png
+roll storage branch assets assets-pr-42                   # instant, no data copied
+roll storage trash assets                                 # recently deleted, restorable
+roll storage usage assets
+```
+
+`/dashboard/storage` has buckets, an object browser with drag-and-drop upload, recently deleted
+objects, branches, CORS and lifecycle settings, access keys and usage. Docs:
+[docs/storage](docs/storage/README.md).
+
+How it works:
+
+- **One object, one blob.** Every customer object is exactly one object in S3, written once and
+  never modified. There's no packing and no compaction, so every byte has S3's own durability, and
+  roll's code never rewrites stored data.
+- **Durable metadata.** Metadata lives in SQLite. Every change goes to S3 as a create-only
+  group-commit log entry before the request is acknowledged: the tasks log-store pattern, with
+  fencing, snapshots and recovery from S3 alone.
+- **Branches.** A branch shares its parent's blobs. A write to a parent first pushes the old state
+  down to its branches, so each branch stays frozen at its creation. Creating one costs one row.
+- **Delayed deletes.**
+  - Deletes and overwrites go to a trash that customers can restore from for `recover_days`.
+  - Below that, an unreferenced blob waits 24 hours more before it's really deleted.
+  - A daily orphan scan removes blobs left by crashed uploads.
+  - A weekly scrub checks that every referenced blob is still in S3.
+- **Checksums end to end.** `Content-MD5` and `x-amz-checksum-*` (headers or trailers) are
+  verified on the way in, and every upload to S3 carries a CRC32C that S3 checks.
+- **Free copies.** `CopyObject` adds a reference instead of copying bytes.
+- **Margin without risk.** Blobs are stored in S3 Intelligent-Tiering, so cold data costs roll
+  less while customers pay the Standard price (see [pricing notes](docs/storage/pricing.md)).
+
+### Tests
+
+`pnpm test:storage` (or `scripts/test-storage.sh`) runs the following:
+
+1. Build and `clippy -D warnings`.
+2. The unit and integration tests of `s3-proto`, `s3-store`, `s3-server` and `s3-control`. These
+   cover:
+   - AWS's SigV4 test vectors
+   - metadata recovery from object storage, fencing, branching, trash, GC
+   - the S3 API through the AWS SDK
+3. A compatibility suite with real tools in Docker: `amazon/aws-cli`, `rclone/rclone` and
+   MinIO's `mc` (`bitnamilegacy/minio-client`).
+
+It skips itself when nothing storage-related changed. `--force` runs anyway, and `--unit` skips
+Docker. CI is `.github/workflows/storage.yml`, which also runs the store and server suites
+against S3 (SeaweedFS). To do that locally, set `ROLL_E2E_S3_BUCKET` and `ROLL_E2E_S3_ENDPOINT`.

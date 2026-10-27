@@ -1,0 +1,10 @@
+/tmp/roll-cqlsh-golden/shell.cql:25:Tracing is not enabled.
+/tmp/roll-cqlsh-golden/shell.cql:27:Tracing is already enabled. Use TRACING OFF to disable.
+/tmp/roll-cqlsh-golden/shell.cql:31:Expanded output is already enabled. Use EXPAND OFF to disable.
+/tmp/roll-cqlsh-golden/shell.cql:34:Expanded output is not enabled.
+/tmp/roll-cqlsh-golden/shell.cql:36:Query paging is already enabled. Use PAGING OFF to disable.
+/tmp/roll-cqlsh-golden/shell.cql:39:Query paging is not enabled.
+/tmp/roll-cqlsh-golden/shell.cql:49:*** No help on nope
+/tmp/roll-cqlsh-golden/shell.cql:55:Already capturing output to /tmp/roll-cqlsh-golden/capture.txt. Use CAPTURE OFF to disable.
+/tmp/roll-cqlsh-golden/shell.cql:58:Not currently capturing output.
+/tmp/roll-cqlsh-golden/sourced.cql:3:InvalidRequest: Error from server: code=2200 [Invalid query] message="Unrecognized name nope"

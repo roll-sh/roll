@@ -1,0 +1,2 @@
+<stdin>:1:InvalidRequest: Error from server: code=2200 [Invalid query] message="Materialized views are disabled. Enable in cassandra.yaml to use."
+<stdin>:1:Materialized view 'mv' not found in 'cli_g_exec'

@@ -1,0 +1,366 @@
+> CreateTable {"TableName":"alt_upd_paths","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_upd_paths","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# a dot inside an ExpressionAttributeNames value is a literal dot, not a path
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"d1"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#a":"a.b"},"ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"d1"}},"UpdateExpression":"SET #a.#b = :v","ExpressionAttributeNames":{"#a":"x","#b":"y"},"ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute x"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"d1"}},"UpdateExpression":"SET #a = :v","ExpressionAttributeNames":{"#a":"a[0]"},"ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"d1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"d1"},"a.b":{"N":"7"},"a[0]":{"N":"7"}}}
+# SET a nested map member: modify, then add a new member
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"m1"},"a":{"M":{"b":{"N":"3"},"c":{"N":"4"}}},"d":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m1"}},"UpdateExpression":"SET a.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m1"}},"UpdateExpression":"SET a.d = :v","ExpressionAttributeValues":{":v":{"N":"3"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"m1"},"a":{"M":{"b":{"N":"3"},"c":{"N":"7"},"d":{"N":"3"}}},"d":{"N":"5"}}}
+# SET a nested member replaces a whole sub-document with another type
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"m2"},"a":{"M":{"b":{"N":"3"},"c":{"M":{"one":{"N":"1"},"two":{"N":"2"}}}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m2"}},"UpdateExpression":"SET a.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"m2"},"a":{"M":{"b":{"N":"3"},"c":{"N":"7"}}}}}
+# SET a.b.c where a exists but a.b does not / is not a map
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"m3"},"a":{"M":{"x":{"N":"1"},"s":{"S":"str"},"l":{"L":[{"N":"1"}]}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m3"}},"UpdateExpression":"SET a.b.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a.b.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m3"}},"UpdateExpression":"SET a.s.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a.s.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m3"}},"UpdateExpression":"SET a.l.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a.l.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m3"}},"UpdateExpression":"SET a.x[0] = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a.x[0]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m3"}},"UpdateExpression":"SET a.l[0].z = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a.l[0].z"}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"m3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"m3"},"a":{"M":{"x":{"N":"1"},"s":{"S":"str"},"l":{"L":[{"N":"1"}]}}}}}
+# SET a list element in place
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"l1"},"a":{"L":[{"S":"one"},{"S":"two"},{"S":"three"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[1] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[0] = :v, a[2] = :w","ExpressionAttributeValues":{":v":{"S":"A"},":w":{"S":"C"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"S":"A"},{"S":"hello"},{"S":"C"}]}}}
+# index must be a literal integer: value or name references are syntax errors
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[:x] = :v","ExpressionAttributeValues":{":v":{"S":"hello"},":x":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[:x] = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[#x] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[#x] = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[-1] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[-1] = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[1.5] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[1.5] = :v': syntax error at char 7"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[] = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[x] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[x] = :v': syntax error at char 6"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET [1] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET [1] = :v': syntax error at char 4"}
+# index formatting: leading zeros, whitespace, huge values
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[01] = :v","ExpressionAttributeValues":{":v":{"S":"z1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[ 2 ] = :v","ExpressionAttributeValues":{":v":{"S":"z2"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a [0] = :v","ExpressionAttributeValues":{":v":{"S":"z0"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"S":"z0"},{"S":"z1"},{"S":"z2"}]}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[2147483647] = :v","ExpressionAttributeValues":{":v":{"S":"big1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[2147483648] = :v","ExpressionAttributeValues":{":v":{"S":"big2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[2147483648] = :v': list index out of integer range"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[4294967296] = :v","ExpressionAttributeValues":{":v":{"S":"big3"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[4294967296] = :v': list index out of integer range"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"UpdateExpression":"SET a[99999999999999999999] = :v","ExpressionAttributeValues":{":v":{"S":"big4"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[99999999999999999999] = :v': list index out of integer range"}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l1"},"a":{"L":[{"S":"z0"},{"S":"z1"},{"S":"z2"},{"S":"big1"}]}}}
+# SET a list element past the end appends; several are appended in index order
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"l2"},"a":{"L":[{"S":"one"},{"S":"two"},{"S":"three"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a[7] = :v","ExpressionAttributeValues":{":v":{"S":"hello"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l2"},"a":{"L":[{"S":"one"},{"S":"two"},{"S":"three"},{"S":"hello"}]}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a[84] = :a, a[37] = :b, a[17] = :c, a[50] = :d","ExpressionAttributeValues":{":a":{"S":"a1"},":b":{"S":"a2"},":c":{"S":"a3"},":d":{"S":"a4"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l2"},"a":{"L":[{"S":"one"},{"S":"two"},{"S":"three"},{"S":"hello"},{"S":"a3"},{"S":"a2"},{"S":"a4"},{"S":"a1"}]}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a[1] = :a, a[100] = :b","ExpressionAttributeValues":{":a":{"S":"X"},":b":{"S":"Y"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l2"},"a":{"L":[{"S":"one"},{"S":"X"},{"S":"three"},{"S":"hello"},{"S":"a3"},{"S":"a2"},{"S":"a4"},{"S":"a1"},{"S":"Y"}]}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"UpdateExpression":"SET a[8] = :a","ExpressionAttributeValues":{":a":{"S":"at-end"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l2"},"a":{"L":[{"S":"one"},{"S":"X"},{"S":"three"},{"S":"hello"},{"S":"a3"},{"S":"a2"},{"S":"a4"},{"S":"a1"},{"S":"at-end"}]}}}
+# SET into an empty list
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"l3"},"a":{"L":[]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l3"}},"UpdateExpression":"SET a[5] = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"l3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"l3"},"a":{"L":[{"N":"7"}]}}}
+# deep path with dots, indexes and name references on both sides
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"x1"},"a":{"M":{"b":{"N":"3"},"c":{"L":[{"S":"hi"},{"M":{"x":{"M":{"y":{"L":[{"N":"3"},{"N":"5"},{"N":"7"}]}}}}}]}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"x1"}},"UpdateExpression":"SET a.c[1].#n.y[1] = :v","ExpressionAttributeNames":{"#n":"x"},"ExpressionAttributeValues":{":v":{"N":"9"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"x1"}},"UpdateExpression":"SET a.z = a.c[1].#n.y[1]","ExpressionAttributeNames":{"#n":"x"}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"x1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x1"},"a":{"M":{"b":{"N":"3"},"c":{"L":[{"S":"hi"},{"M":{"x":{"M":{"y":{"L":[{"N":"3"},{"N":"9"},{"N":"7"}]}}}}}]},"z":{"N":"9"}}}}}
+# nested lists: a[1][0]
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"x2"},"a":{"L":[{"L":[{"N":"1"},{"N":"2"}]},{"L":[{"N":"3"},{"L":[{"N":"4"},{"N":"5"}]}]}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"x2"}},"UpdateExpression":"SET a[1][1][0] = :v, a[0][5] = :w","ExpressionAttributeValues":{":v":{"N":"40"},":w":{"N":"99"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"x2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"x2"},"a":{"L":[{"L":[{"N":"1"},{"N":"2"},{"N":"99"}]},{"L":[{"N":"3"},{"L":[{"N":"40"},{"N":"5"}]}]}]}}}
+# SET a nested path when the parent is missing or not a container
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"b1"},"a":{"S":"hello"},"b":{"L":[{"S":"hi"}]},"m":{"M":{"x":{"N":"1"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b1"}},"UpdateExpression":"SET a.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b1"}},"UpdateExpression":"SET b.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: b.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b1"}},"UpdateExpression":"SET c.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b1"}},"UpdateExpression":"SET a[0] = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a[0]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b1"}},"UpdateExpression":"SET m[0] = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: m[0]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b1"}},"UpdateExpression":"SET c[0] = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute c"}
+# same, when the item does not exist
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b-missing"}},"UpdateExpression":"SET c.c = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update nested document path on non-existent item"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b-missing"}},"UpdateExpression":"SET c[0] = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update nested document path on non-existent item"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b-missing"}},"UpdateExpression":"SET c.d.e = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update nested document path on non-existent item"}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"b-missing"}},"ConsistentRead":true}
+< 200 {}
+# REMOVE: top-level, nested, list items
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r1"},"a":{"M":{"b":{"N":"3"},"c":{"L":[{"S":"hi"},{"M":{"x":{"M":{"y":{"L":[{"N":"3"},{"N":"5"},{"N":"7"}]}}},"q":{"N":"2"}}}]}}},"t":{"S":"top"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r1"}},"UpdateExpression":"REMOVE a.c[1].x.y[1], a.c[1].q"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r1"},"a":{"M":{"b":{"N":"3"},"c":{"L":[{"S":"hi"},{"M":{"x":{"M":{"y":{"L":[{"N":"3"},{"N":"7"}]}}}}}]}}},"t":{"S":"top"}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r1"}},"UpdateExpression":"REMOVE t"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r1"},"a":{"M":{"b":{"N":"3"},"c":{"L":[{"S":"hi"},{"M":{"x":{"M":{"y":{"L":[{"N":"3"},{"N":"7"}]}}}}}]}}}}}
+# REMOVE a list item past the end is a no-op
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r2"},"a":{"L":[{"N":"4"},{"N":"5"},{"N":"6"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r2"}},"UpdateExpression":"REMOVE a[17]"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r2"},"a":{"L":[{"N":"4"},{"N":"5"},{"N":"6"}]}}}
+# REMOVE a[1] SET a[3]: indexes refer to the list before the update
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r3"},"a":{"L":[{"N":"2"},{"N":"3"},{"N":"4"},{"N":"5"},{"N":"6"},{"N":"7"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r3"}},"UpdateExpression":"REMOVE a[1] SET a[3] = :v","ExpressionAttributeValues":{":v":{"N":"17"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r3"},"a":{"L":[{"N":"2"},{"N":"4"},{"N":"17"},{"N":"6"},{"N":"7"}]}}}
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r3"},"a":{"L":[{"N":"2"},{"N":"3"},{"N":"4"},{"N":"5"},{"N":"6"},{"N":"7"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r3"}},"UpdateExpression":"SET a[3] = :v REMOVE a[1]","ExpressionAttributeValues":{":v":{"N":"17"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r3"},"a":{"L":[{"N":"2"},{"N":"4"},{"N":"17"},{"N":"6"},{"N":"7"}]}}}
+# REMOVE several indexes of the same list, in any order, some past the end
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r4"},"a":{"L":[{"N":"0"},{"N":"1"},{"N":"2"},{"N":"3"},{"N":"4"},{"N":"5"},{"N":"6"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r4"}},"UpdateExpression":"REMOVE a[5], a[0], a[2], a[9]"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r4"},"a":{"L":[{"N":"1"},{"N":"3"},{"N":"4"},{"N":"6"}]}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r4"}},"UpdateExpression":"REMOVE a[1], a[1]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a[1]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r4"}},"UpdateExpression":"REMOVE a[0], a[1], a[2], a[3]"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r4"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r4"},"a":{"L":[]}}}
+# REMOVE a[1] and SET a[2] = a[1]: RHS read from the old item
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r5"},"a":{"L":[{"S":"x"},{"S":"y"},{"S":"z"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r5"}},"UpdateExpression":"REMOVE a[0] SET a[2] = a[0]"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r5"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r5"},"a":{"L":[{"S":"y"},{"S":"x"}]}}}
+# REMOVE the only member of a map / list leaves an empty map / list
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r6"},"a":{"M":{"b":{"N":"1"}}},"l":{"L":[{"N":"1"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r6"}},"UpdateExpression":"REMOVE a.b, l[0]"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r6"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r6"},"a":{"M":{}},"l":{"L":[]}}}
+# REMOVE a nested path whose parent is missing or of the wrong type
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"r7"},"a":{"S":"hello"},"b":{"L":[{"S":"hi"}]},"m":{"M":{"x":{"N":"3"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE a.c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE b.c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: b.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE c.c"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE a[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: a[0]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE m[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: m[0]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE c[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE m.y.z"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: document paths not valid for this item: m.y.z"}
+# REMOVE a missing leaf whose parent exists is a no-op
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE m.y"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE b[7]"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"UpdateExpression":"REMOVE c"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r7"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"r7"},"a":{"S":"hello"},"b":{"L":[{"S":"hi"}]},"m":{"M":{"x":{"N":"3"}}}}}
+# REMOVE on a missing item: top-level, nested and index paths (item is not created)
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r-missing"}},"UpdateExpression":"REMOVE a"}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r-missing"}},"UpdateExpression":"REMOVE x.y"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update nested document path on non-existent item"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r-missing"}},"UpdateExpression":"REMOVE x[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update nested document path on non-existent item"}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"r-missing"}},"ConsistentRead":true}
+< 200 {}
+# overlapping paths in one update (checked before reading the item)
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b = :v, a = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a.b"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b = :v, a.b.c = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a.b.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b.c = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a.b"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b.c.d.e = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a.b"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :v, a[1] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a[1] = :v, a = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a[1] = :v, a[1] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a[1]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a[1][1] = :v, a[1] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a[1]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a[1] = :v, a[1][1] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a[1][1]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a[1][1][1][1] = :v, a[1][1] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a[1][1]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :v, a = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"REMOVE a SET a = :v","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :v REMOVE a","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"REMOVE a, a","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"REMOVE a.b, a","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b = :v REMOVE a.b.c","ExpressionAttributeValues":{":v":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a.b.c"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :v ADD a :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :v DELETE a :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"SS":["x"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+# overlap is detected after name references are resolved
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET #a1 = :v, #a2 = :w","ExpressionAttributeNames":{"#a1":"a","#a2":"a"},"ExpressionAttributeValues":{":v":{"N":"1"},":w":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET #a1.b = :v, a.#b = :w","ExpressionAttributeNames":{"#a1":"a","#b":"b"},"ExpressionAttributeValues":{":v":{"N":"1"},":w":{"N":"2"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a.b"}
+# conflicting paths (map member and list index on the same parent)
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b = :v, a[1] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths conflict at a[1]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a[1] = :v, a.b = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths conflict at a.b"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b.c = :v, a.b[2] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths conflict at a.b[2]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"REMOVE a.b, a[0]"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths conflict at a[0]"}
+# overlap and conflict together: which is reported
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a.b = :v, a[1] = :w, a = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths conflict at a[1]"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :w, a.b = :v, a[1] = :w","ExpressionAttributeValues":{":v":{"N":"2"},":w":{"S":"there"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Invalid UpdateExpression: two document paths overlap at a"}
+# overlap vs. undefined value reference: which wins
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o1"}},"UpdateExpression":"SET a = :v, a = :undefined","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"ExpressionAttributeValues missing entry ':undefined' required by expression"}
+# attribute names are case-sensitive, a and A do not overlap; siblings do not overlap
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"o2"},"a":{"M":{"x":{"N":"3"},"y":{"N":"4"},"c":{"M":{"y":{"N":"3"}}},"l":{"L":[{"N":"1"},{"N":"2"},{"N":"3"}]}}},"b":{"M":{"x":{"N":"1"},"y":{"N":"2"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o2"}},"UpdateExpression":"SET a.b = :v1, a.c.d = :v2, b.x = :v3, A = :v3, a.l[0] = :v1, a.l[2] = :v2 REMOVE a.x, b.y","ExpressionAttributeValues":{":v1":{"N":"10"},":v2":{"S":"dog"},":v3":{"N":"17"}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o2"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"o2"},"A":{"N":"17"},"a":{"M":{"l":{"L":[{"N":"10"},{"N":"2"},{"S":"dog"}]},"y":{"N":"4"},"c":{"M":{"y":{"N":"3"},"d":{"S":"dog"}}},"b":{"N":"10"}}},"b":{"M":{"x":{"N":"17"}}}}}
+# reading a path that is also modified is allowed
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"o3"},"a":{"S":"hello"},"m":{"M":{"x":{"N":"1"},"y":{"N":"2"}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o3"}},"UpdateExpression":"REMOVE a SET b = a"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"o3"},"b":{"S":"hello"},"m":{"M":{"x":{"N":"1"},"y":{"N":"2"}}}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o3"}},"UpdateExpression":"SET c = b REMOVE b"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"o3"},"c":{"S":"hello"},"m":{"M":{"x":{"N":"1"},"y":{"N":"2"}}}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o3"}},"UpdateExpression":"SET m.x = m.y, m.y = m.x"}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"o3"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"o3"},"c":{"S":"hello"},"m":{"M":{"x":{"N":"2"},"y":{"N":"1"}}}}}
+# ADD and DELETE on nested paths
+> PutItem {"TableName":"alt_upd_paths","Item":{"p":{"S":"n1"},"m":{"M":{"n":{"N":"1"},"s":{"SS":["a"]},"l":{"L":[{"N":"1"},{"NS":["1"]}]}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"ADD m.n :v","ExpressionAttributeValues":{":v":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"ADD m.s :v","ExpressionAttributeValues":{":v":{"SS":["b"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"ADD m.l[0] :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"ADD m.new :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"DELETE m.s :v","ExpressionAttributeValues":{":v":{"SS":["a"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"DELETE m.l[1] :v","ExpressionAttributeValues":{":v":{"NS":["1"]}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"n1"},"m":{"M":{"n":{"N":"6"},"s":{"SS":["b"]},"l":{"L":[{"N":"2"}]},"new":{"N":"1"}}}}}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"ADD zz.n :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute zz"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"n1"}},"UpdateExpression":"DELETE zz.n :v","ExpressionAttributeValues":{":v":{"SS":["a"]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update document path: missing attribute zz"}
+# deep nesting: 32 levels and 33 levels of document path
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"z1"}},"UpdateExpression":"SET a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateItem cannot update nested document path on non-existent item"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"z1"}},"UpdateExpression":"SET a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a = :v': Document path exceeded 32 nesting levels"}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"z1"}},"UpdateExpression":"SET a[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0] = :v","ExpressionAttributeValues":{":v":{"N":"7"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Failed parsing UpdateExpression 'SET a[0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0][0] = :v': Document path exceeded 32 nesting levels"}
+# nested values deeper than 32 levels
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"z2"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"N":"1"}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"z3"}},"UpdateExpression":"SET a = :v","ExpressionAttributeValues":{":v":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"M":{"a":{"N":"1"}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+< 200 {}
+> GetItem {"TableName":"alt_upd_paths","Key":{"p":{"S":"z3"}},"ConsistentRead":true,"ProjectionExpression":"p"}
+< 200 {"Item":{"p":{"S":"z3"}}}
+> DeleteTable {"TableName":"alt_upd_paths"}
+< 200 {"TableDescription":{"TableName":"alt_upd_paths","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_upd_paths:scylla:table/alt_upd_paths","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

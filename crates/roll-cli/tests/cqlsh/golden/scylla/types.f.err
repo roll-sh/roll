@@ -1,0 +1,3 @@
+/tmp/roll-cqlsh-golden/types.cql:27:InvalidRequest: Error from server: code=2200 [Invalid query] message="WRITETIME expects an atomic column, but li is a non-frozen collection"
+/tmp/roll-cqlsh-golden/types.cql:28:SyntaxException: line 1:71 : Syntax error
+/tmp/roll-cqlsh-golden/types.cql:45:InvalidRequest: Error from server: code=2200 [Invalid query] message="Unrecognized name Zip"

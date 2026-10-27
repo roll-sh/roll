@@ -1,0 +1,268 @@
+# Table S/N; partition 'f' with 10 items of mixed attribute types, partition 'g' with 3
+> CreateTable {"TableName":"alt_qs_lf","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_qs_lf","KeySchema":[{"AttributeName":"p","KeyType":"HASH"},{"AttributeName":"c","KeyType":"RANGE"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"},{"AttributeName":"c","AttributeType":"N"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+> BatchWriteItem {"RequestItems":{"alt_qs_lf":[{"PutRequest":{"Item":{"c":{"N":"1"},"a":{"N":"1"},"s":{"S":"hello"},"ss":{"SS":["a","b"]},"l":{"L":[{"N":"1"},{"S":"x"}]},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"2"},"a":{"N":"2"},"s":{"S":"help"},"ns":{"NS":["1","2"]},"n":{"NULL":true},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"3"},"a":{"N":"10"},"s":{"S":"world"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"4"},"a":{"S":"3"},"s":{"S":"hel"},"m":{"M":{"x":{"N":"1"}}},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"7"},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"},"p":{"S":"f"}}}},{"PutRequest":{"Item":{"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"},"p":{"S":"f"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+> BatchWriteItem {"RequestItems":{"alt_qs_lf":[{"PutRequest":{"Item":{"p":{"S":"g"},"c":{"N":"1"},"a":{"N":"1"}}}},{"PutRequest":{"Item":{"p":{"S":"g"},"c":{"N":"2"},"a":{"N":"2"}}}},{"PutRequest":{"Item":{"p":{"S":"g"},"c":{"N":"3"},"a":{"N":"3"}}}}]}}
+< 200 {"UnprocessedItems":{}}
+# Every ComparisonOperator with a correct argument
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"2"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NE","AttributeValueList":[{"N":"2"}]}}}
+< 200 {"Count":9,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"7"}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"LT","AttributeValueList":[{"N":"2"}]}}}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"LE","AttributeValueList":[{"N":"2"}]}}}
+< 200 {"Count":3,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"2"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GE","AttributeValueList":[{"N":"2"}]}}}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"LT","AttributeValueList":[{"S":"4"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GE","AttributeValueList":[{"B":"AA=="}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"},{"N":"10"}]}}}
+< 200 {"Count":3,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"S":"1"},{"S":"9"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"IN","AttributeValueList":[{"N":"1"},{"N":"10"},{"S":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IN operator requires all AttributeValueList elements to have the same type "}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"IN","AttributeValueList":[{"N":"99"}]}}}
+< 200 {"Count":0,"ScannedCount":10,"Items":[]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NULL","AttributeValueList":[]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"7"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NOT_NULL","AttributeValueList":[]}}}
+< 200 {"Count":9,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"s":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"hel"}]}}}
+< 200 {"Count":3,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"s":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"S":"el"}]}}}
+< 200 {"Count":3,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"s":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"S":"el"}]}}}
+< 200 {"Count":5,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+# EQ / NE on non-scalar values
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"ss":{"ComparisonOperator":"EQ","AttributeValueList":[{"SS":["b","a"]}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"l":{"ComparisonOperator":"EQ","AttributeValueList":[{"L":[{"N":"1"},{"S":"x"}]}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"m":{"ComparisonOperator":"EQ","AttributeValueList":[{"M":{"x":{"N":"1"}}}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"BOOL":false}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"NULL":true}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NE","AttributeValueList":[{"NULL":true}]}}}
+< 200 {"Count":9,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"7"}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"n":{"ComparisonOperator":"EQ","AttributeValueList":[{"NULL":true}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}}]}
+# NULL / NOT_NULL test existence, not the NULL type
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"n":{"ComparisonOperator":"NULL","AttributeValueList":[]}}}
+< 200 {"Count":9,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"7"}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"n":{"ComparisonOperator":"NOT_NULL","AttributeValueList":[]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NOT_NULL","AttributeValueList":[]}}}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"nothere":{"ComparisonOperator":"NULL","AttributeValueList":[]}}}
+< 200 {"Count":10,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"7"}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+# BEGINS_WITH on binary, CONTAINS on sets/lists/binary, NOT_CONTAINS
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"b":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"B":"AA=="}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"ss":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"S":"a"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"s":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"S":"x"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"ns":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"N":"2"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"bs":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"B":"YQ=="}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"l":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"S":"x"}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"b":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"B":"Yg=="}]}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"ss":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"S":"a"}]}}}
+< 200 {"Count":0,"ScannedCount":10,"Items":[]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"nothere":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"S":"a"}]}}}
+< 200 {"Count":0,"ScannedCount":10,"Items":[]}
+# Wrong argument counts per operator
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"EQ\" operator requires AttributeValueList of size 1, instead found list size 0"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"EQ\" operator requires AttributeValueList of size 1, instead found list size 2"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NE","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"NE\" operator requires AttributeValueList of size 1, instead found list size 0"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"LT","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"LT\" operator requires AttributeValueList of size 1, instead found list size 0"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"LT","AttributeValueList":[{"N":"1"},{"N":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"LT\" operator requires AttributeValueList of size 1, instead found list size 2"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GE","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"GE\" operator requires AttributeValueList of size 1, instead found list size 0"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"BETWEEN\" operator requires AttributeValueList of size 2, instead found list size 1"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"},{"N":"2"},{"N":"3"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"BETWEEN\" operator requires AttributeValueList of size 2, instead found list size 3"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"IN","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"IN\" operator requires AttributeValueList to be non-empty, instead found list size 0"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NULL","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"NULL\" operator requires AttributeValueList to be empty, instead found list size 1"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NOT_NULL","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"NOT_NULL\" operator requires AttributeValueList to be empty, instead found list size 1"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"BEGINS_WITH\" operator requires AttributeValueList of size 1, instead found list size 0"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"a"},{"S":"b"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"BEGINS_WITH\" operator requires AttributeValueList of size 1, instead found list size 2"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"CONTAINS","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"CONTAINS\" operator requires AttributeValueList of size 1, instead found list size 0"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"S":"a"},{"S":"b"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"NOT_CONTAINS\" operator requires AttributeValueList of size 1, instead found list size 2"}
+# Wrong argument types per operator
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"LT","AttributeValueList":[{"BOOL":true}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"LT operator allow only the types String, Number, or Binary"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"L":[]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"GT operator allow only the types String, Number, or Binary"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"LE","AttributeValueList":[{"SS":["a"]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"LE operator allow only the types String, Number, or Binary"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GE","AttributeValueList":[{"NULL":true}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"GE operator allow only the types String, Number, or Binary"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"1"},{"S":"2"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"BETWEEN operator requires the same type for lower and upper bound; instead got \"N\" and \"S\""}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"10"},{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"BETWEEN operator requires lower_bound <= upper_bound, but 10 > 1"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"BOOL":true},{"BOOL":true}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"between allow only the types String, Number, or Binary"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"IN","AttributeValueList":[{"N":"1"},{"S":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IN operator requires all AttributeValueList elements to have the same type "}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"IN","AttributeValueList":[{"L":[{"N":"1"}]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IN operator requires AttributeValueList elements to be of type String, Number, or Binary "}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"IN","AttributeValueList":[{"SS":["a"]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"IN operator requires AttributeValueList elements to be of type String, Number, or Binary "}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"begins_with() supports only string or binary type, got: {\"N\":\"1\"}"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"SS":["a"]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"begins_with() supports only string or binary type, got: {\"SS\":[\"a\"]}"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"L":[]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"CONTAINS operator requires a single AttributeValue of type String, Number, or Binary, got \"L\" instead"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"SS":["a"]}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"CONTAINS operator requires a single AttributeValue of type String, Number, or Binary, got \"SS\" instead"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NOT_CONTAINS","AttributeValueList":[{"M":{}}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"CONTAINS operator requires a single AttributeValue of type String, Number, or Binary, got \"M\" instead"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"X":"1"}]}}}
+< 200 {"Count":0,"ScannedCount":10,"Items":[]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":["raw"]}}}
+< 200 {"Count":0,"ScannedCount":10,"Items":[]}
+# Operator spelling, missing fields, extra fields
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"eq","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator eq"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NOPE","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator NOPE"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Missing ComparisonOperator, Value or Exists"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"With ComparisonOperator, AttributeValueList must be given and an array"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NULL"}}}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"7"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NOT_NULL"}}}
+< 200 {"Count":9,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}],"Exists":true}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Exists with ComparisonOperator"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}],"Value":{"N":"1"}}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot combine Value with ComparisonOperator"}
+# QueryFilter on key attributes
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"c":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"QueryFilter can only contain non-primary key attributes: Sort key attribute: c"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"QueryFilter can only contain non-primary key attributes: Partition key attribute: p"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]},"c":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"QueryFilter can only contain non-primary key attributes: Sort key attribute: c"}
+# Several conditions and ConditionalOperator AND / OR / invalid
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"0"}]},"s":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"hel"}]}}}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"0"}]},"s":{"ComparisonOperator":"BEGINS_WITH","AttributeValueList":[{"S":"hel"}]}},"ConditionalOperator":"AND"}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"5"}]},"s":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"hel"}]}},"ConditionalOperator":"OR"}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"5"}]}},"ConditionalOperator":"OR"}
+< 200 {"Count":1,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"5"}]}},"ConditionalOperator":"or"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter must be AND, OR or missing. Found or."}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"5"}]}},"ConditionalOperator":"XOR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter must be AND, OR or missing. Found XOR."}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"5"}]}},"ConditionalOperator":1}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter, if given, must be a string"}
+# ConditionalOperator without QueryFilter; empty QueryFilter
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"ConditionalOperator":"OR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty QueryFilter"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"ConditionalOperator":"AND"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty QueryFilter"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{}}
+< 200 {"Count":10,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"7"}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{},"ConditionalOperator":"OR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty QueryFilter"}
+# Count / ScannedCount, Limit with QueryFilter
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"99"}]}}}
+< 200 {"Count":0,"ScannedCount":10,"Items":[]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"NOT_NULL","AttributeValueList":[]}},"Limit":3}
+< 200 {"Count":3,"ScannedCount":3,"LastEvaluatedKey":{"p":{"S":"f"},"c":{"N":"3"}},"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"10"}]}},"Limit":2}
+< 200 {"Count":0,"ScannedCount":2,"LastEvaluatedKey":{"p":{"S":"f"},"c":{"N":"2"}},"Items":[]}
+# QueryFilter with AttributesToGet and Select
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1"}]}},"AttributesToGet":["s"]}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"s":{"S":"help"}},{"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1"}]}},"Select":"COUNT"}
+< 200 {"Count":2,"ScannedCount":10}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1"}]}},"Select":"SPECIFIC_ATTRIBUTES","AttributesToGet":["a"]}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"a":{"N":"2"}},{"a":{"N":"10"}}]}
+# Mixing legacy and expression parameters
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1"}]}},"FilterExpression":"a > :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"FilterExpression and QueryFilter are not allowed together"}
+> Query {"TableName":"alt_qs_lf","KeyConditions":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"f"}]}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1"}]}},"ProjectionExpression":"a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot use both old-style and new-style parameters in same request: QueryFilter and ProjectionExpression"}
+> Query {"TableName":"alt_qs_lf","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"f"}},"QueryFilter":{"a":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"1"}]}}}
+< 200 {"Count":2,"ScannedCount":10,"Items":[{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Query {"TableName":"alt_qs_lf","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"f"}},"FilterExpression":"a > :v","ConditionalOperator":"OR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty QueryFilter"}
+> Query {"TableName":"alt_qs_lf","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"f"},":v":{"N":"1"}},"FilterExpression":"a > :v","AttributesToGet":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot use both old-style and new-style parameters in same request: FilterExpression and AttributesToGet"}
+> Query {"TableName":"alt_qs_lf","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"f"},":v":{"N":"1"}},"FilterExpression":"a > :v","ConditionalOperator":"OR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty QueryFilter"}
+> Query {"TableName":"alt_qs_lf","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"f"}},"ProjectionExpression":"a","AttributesToGet":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"GetItem does not allow both ProjectionExpression and AttributesToGet to be given together"}
+> Query {"TableName":"alt_qs_lf","KeyConditionExpression":"p = :p","ExpressionAttributeValues":{":p":{"S":"f"}},"AttributesToGet":["a","s"]}
+< 200 {"Count":10,"ScannedCount":10,"Items":[{"a":{"N":"1"},"s":{"S":"hello"}},{"a":{"N":"2"},"s":{"S":"help"}},{"a":{"N":"10"},"s":{"S":"world"}},{"a":{"S":"3"},"s":{"S":"hel"}},{"a":{"N":"-1"}},{"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{},{"a":{"BOOL":false},"s":{"S":""}},{"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"a":{"NULL":true},"s":{"S":"zebra"}}]}
+# ScanFilter: key attributes allowed, operators, ConditionalOperator
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"g"}]}}}
+< 200 {"Count":3,"ScannedCount":13,"Items":[{"p":{"S":"g"},"c":{"N":"1"},"a":{"N":"1"}},{"p":{"S":"g"},"c":{"N":"2"},"a":{"N":"2"}},{"p":{"S":"g"},"c":{"N":"3"},"a":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"c":{"ComparisonOperator":"GT","AttributeValueList":[{"N":"8"}]}}}
+< 200 {"Count":2,"ScannedCount":13,"Items":[{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"c":{"ComparisonOperator":"LE","AttributeValueList":[{"N":"1"}]},"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"g"}]}},"ConditionalOperator":"OR"}
+< 200 {"Count":4,"ScannedCount":13,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"g"},"c":{"N":"1"},"a":{"N":"1"}},{"p":{"S":"g"},"c":{"N":"2"},"a":{"N":"2"}},{"p":{"S":"g"},"c":{"N":"3"},"a":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"c":{"ComparisonOperator":"LE","AttributeValueList":[{"N":"1"}]},"p":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"g"}]}},"ConditionalOperator":"AND"}
+< 200 {"Count":1,"ScannedCount":13,"Items":[{"p":{"S":"g"},"c":{"N":"1"},"a":{"N":"1"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"a":{"ComparisonOperator":"NULL","AttributeValueList":[]}}}
+< 200 {"Count":1,"ScannedCount":13,"Items":[{"p":{"S":"f"},"c":{"N":"7"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"s":{"ComparisonOperator":"CONTAINS","AttributeValueList":[{"S":"o"}]}}}
+< 200 {"Count":2,"ScannedCount":13,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"a":{"ComparisonOperator":"IN","AttributeValueList":[{"N":"1"},{"N":"2"}]}}}
+< 200 {"Count":4,"ScannedCount":13,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"g"},"c":{"N":"1"},"a":{"N":"1"}},{"p":{"S":"g"},"c":{"N":"2"},"a":{"N":"2"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"a":{"ComparisonOperator":"BETWEEN","AttributeValueList":[{"N":"2"},{"N":"3"}]}}}
+< 200 {"Count":3,"ScannedCount":13,"Items":[{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"g"},"c":{"N":"2"},"a":{"N":"2"}},{"p":{"S":"g"},"c":{"N":"3"},"a":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"a":{"ComparisonOperator":"XX","AttributeValueList":[{"N":"1"}]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Unsupported comparison operator XX"}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[]}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"\"EQ\" operator requires AttributeValueList of size 1, instead found list size 0"}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{}}
+< 200 {"Count":13,"ScannedCount":13,"Items":[{"p":{"S":"f"},"c":{"N":"1"},"a":{"N":"1"},"l":{"L":[{"N":"1"},{"S":"x"}]},"s":{"S":"hello"},"ss":{"SS":["a","b"]}},{"p":{"S":"f"},"c":{"N":"2"},"a":{"N":"2"},"n":{"NULL":true},"ns":{"NS":["1","2"]},"s":{"S":"help"}},{"p":{"S":"f"},"c":{"N":"3"},"a":{"N":"10"},"b":{"B":"YWJj"},"bs":{"BS":["YQ=="]},"s":{"S":"world"}},{"p":{"S":"f"},"c":{"N":"4"},"a":{"S":"3"},"m":{"M":{"x":{"N":"1"}}},"s":{"S":"hel"}},{"p":{"S":"f"},"c":{"N":"5"},"a":{"N":"-1"},"b":{"B":"AAE="},"t":{"BOOL":true}},{"p":{"S":"f"},"c":{"N":"6"},"a":{"B":"AQ=="},"s":{"SS":["hello","x"]}},{"p":{"S":"f"},"c":{"N":"7"}},{"p":{"S":"f"},"c":{"N":"8"},"a":{"BOOL":false},"s":{"S":""}},{"p":{"S":"f"},"c":{"N":"9"},"a":{"L":[{"N":"1"}]},"s":{"N":"5"}},{"p":{"S":"f"},"c":{"N":"10"},"a":{"NULL":true},"s":{"S":"zebra"}},{"p":{"S":"g"},"c":{"N":"1"},"a":{"N":"1"}},{"p":{"S":"g"},"c":{"N":"2"},"a":{"N":"2"}},{"p":{"S":"g"},"c":{"N":"3"},"a":{"N":"3"}}]}
+> Scan {"TableName":"alt_qs_lf","ConditionalOperator":"OR"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty ScanFilter"}
+# Scan mixing legacy and expression parameters
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}},"FilterExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"FilterExpression and ScanFilter are not allowed together"}
+> Scan {"TableName":"alt_qs_lf","ScanFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"1"}]}},"ProjectionExpression":"a"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot use both old-style and new-style parameters in same request: ScanFilter and ProjectionExpression"}
+> Scan {"TableName":"alt_qs_lf","FilterExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ConditionalOperator":"AND"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"'ConditionalOperator' parameter cannot be specified for missing or empty ScanFilter"}
+> Scan {"TableName":"alt_qs_lf","FilterExpression":"a = :v","ExpressionAttributeValues":{":v":{"N":"1"}},"AttributesToGet":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Cannot use both old-style and new-style parameters in same request: FilterExpression and AttributesToGet"}
+> Scan {"TableName":"alt_qs_lf","ProjectionExpression":"a","AttributesToGet":["a"]}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"GetItem does not allow both ProjectionExpression and AttributesToGet to be given together"}
+> DeleteTable {"TableName":"alt_qs_lf"}
+< 200 {"TableDescription":{"TableName":"alt_qs_lf","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_qs_lf:scylla:table/alt_qs_lf","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

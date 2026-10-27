@@ -1,0 +1,25 @@
+
+SHOW [cqlsh only]
+
+  Displays information about the current cqlsh session. Can be called in
+  the following ways:
+
+SHOW VERSION
+
+  Shows the version and build of the connected Cassandra instance, as
+  well as the version of the CQL spec that the connected Cassandra
+  instance understands.
+
+SHOW HOST
+
+  Shows where cqlsh is currently connected.
+
+SHOW SESSION <sessionid>
+
+  Pretty-prints the requested tracing session.
+
+SHOW REPLICAS <token> (<keyspace>)
+
+  Lists the replica nodes by IP address for the given token. The current
+  keyspace is used if one is not specified.
+

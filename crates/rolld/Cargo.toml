@@ -1,6 +1,6 @@
 [package]
 name = "rolld"
-description = "roll daemon: Postgres proxy, serverless Redis, Kafka-compatible streams, queues broker, control plane API and reconcilers"
+description = "roll daemon: Postgres proxy, serverless Redis, S3-compatible storage, Kafka-compatible streams, queues broker, ScyllaDB/Cassandra-compatible nosql, control plane API and reconcilers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,12 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+bytes.workspace = true
 clap.workspace = true
 code-cluster.workspace = true
 code-control.workspace = true
 code-preview.workspace = true
+futures.workspace = true
 libc.workspace = true
 libmimalloc-sys.workspace = true
 mimalloc.workspace = true
@@ -28,22 +30,38 @@ mq-shovel.workspace = true
 mq-stomp.workspace = true
 mq-storage.workspace = true
 mq-stream.workspace = true
+nosql-alternator.workspace = true
+nosql-control.workspace = true
+nosql-server.workspace = true
+nosql-storage.workspace = true
 object_store.workspace = true
 pg-control.workspace = true
 pg-proxy.workspace = true
 pg-storage.workspace = true
 redis-control.workspace = true
 redis-server.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
+s3-api.workspace = true
+s3-control.workspace = true
+s3-server.workspace = true
+s3-store.workspace = true
+serde_json.workspace = true
 stream-broker.workspace = true
 tasks.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+urlencoding.workspace = true
 
 [dev-dependencies]
+aws-sdk-dynamodb.workspace = true
+bytes.workspace = true
 futures-util.workspace = true
 lapin.workspace = true
+nosql-proto = { workspace = true, features = ["client"] }
 parking_lot.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

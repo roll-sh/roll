@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./test/register.mjs --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@roll/brand": "workspace:*",

@@ -1,0 +1,10 @@
+
+LOGIN [cqlsh only]
+
+   Changes login information without requiring restart.
+
+LOGIN <username> (<password>)
+
+   Login using the specified username. If password is specified, it will be used
+   otherwise, you will be prompted to enter.
+

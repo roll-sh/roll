@@ -1,6 +1,6 @@
 //! `roll queues` — the RabbitMQ-compatible broker, driven through the rolld roll API (`/v1/queues`).
 
-mod fmt;
+pub(crate) mod fmt;
 mod parse;
 mod top;
 

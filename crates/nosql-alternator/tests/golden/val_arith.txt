@@ -1,0 +1,326 @@
+# Number arithmetic in UpdateItem: SET a = a + :v, SET a = a - :v, SET a = :x + :y and ADD; result precision and range checks.
+> CreateTable {"TableName":"alt_val_arith","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}
+< 200 {"TableDescription":{"TableName":"alt_val_arith","KeySchema":[{"AttributeName":"p","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"p","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","CreationDateTime":"*","TableStatus":"ACTIVE","TableId":"*"}}
+# Exact decimal arithmetic; results are normalised (trailing zeros dropped) both in UPDATED_NEW and when stored
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k0"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k0"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"10000000000000000000000"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"10000000000000000000001"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k0"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"10000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k1"},"a":{"N":"10000000000000000000000"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k1"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"9999999999999999999999"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k1"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"9999999999999999999999"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k2"},"a":{"N":"1.50"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k2"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1.50"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"3"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k2"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"3"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k3"},"a":{"N":"0.1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k3"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"0.2"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0.3"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k3"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0.3"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k4"},"a":{"N":"1.10"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k4"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"2.20"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"3.3"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k4"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"3.3"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k5"},"a":{"N":"1e2"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k5"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"0"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"100"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k5"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k6"},"a":{"N":"0.000"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k6"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"0"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k6"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k7"},"a":{"N":"1.5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k7"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"-1.5"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k7"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k8"},"a":{"N":"-0"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k8"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"0"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k8"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k9"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k9"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"1.000"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k9"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k10"},"a":{"N":"12345678901234567890123456789012345678"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k10"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"12345678901234567890123456789012345679"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k10"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"12345678901234567890123456789012345679"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k11"},"a":{"N":"99999999999999999999999999999999999999"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k11"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"100000000000000000000000000000000000000"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k11"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k12"},"a":{"N":"1e-130"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k12"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k12"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k13"},"a":{"N":"1e-130"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k13"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"-1e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k13"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k14"},"a":{"N":"1e-130"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k14"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"2e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k14"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k15"},"a":{"N":"9e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k15"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"9e124"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k15"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k16"},"a":{"N":"-9e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k16"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"9e124"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"-990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k16"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"-990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k17"},"a":{"N":"1e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k17"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"-1e125"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k17"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k18"},"a":{"N":"123.456"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k18"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"-0.456"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"123"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k18"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"123"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k19"},"a":{"N":"5"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k19"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"7.25"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"-2.25"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k19"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"-2.25"}}}
+# Overflow of the result: the message shows the full result in plain notation
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k20"},"a":{"N":"9e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k20"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"9e125"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k20"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k21"},"a":{"N":"9e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k21"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"-9e125"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k21"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k22"},"a":{"N":"1e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k22"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"9e125"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k22"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k23"},"a":{"N":"-9e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k23"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"9e125"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: -1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k23"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"-900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+# Underflow of the result
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k24"},"a":{"N":"5e-130"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k24"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"-4.5e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k24"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k25"},"a":{"N":"1e-129"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k25"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"-9.9e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k25"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k26"},"a":{"N":"0.10e-129"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k26"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"0.15e-129"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: -0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k26"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+# Too many significant digits in the result
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k27"},"a":{"N":"1e50"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k27"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 100000000000000000000000000000000000000000000000001. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k27"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k28"},"a":{"N":"1e50"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k28"}},"UpdateExpression":"SET a = a - :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 99999999999999999999999999999999999999999999999999. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k28"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k29"},"a":{"N":"1e50"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k29"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1.0"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 100000000000000000000000000000000000000000000000001. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k29"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k30"},"a":{"N":"1e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k30"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k30"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k31"},"a":{"N":"99999999999999999999999999999999999999"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k31"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"2"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 100000000000000000000000000000000000001. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k31"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"99999999999999999999999999999999999999"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k32"},"a":{"N":"1.2345678901234567890123456789012345678"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k32"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"0.00000000000000000000000000000000000001"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 1.23456789012345678901234567890123456781. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k32"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"1.2345678901234567890123456789012345678"}}}
+# An operand that is itself invalid is reported before any arithmetic
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k33"},"a":{"N":"1e-130"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k33"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1e-131"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 1e-131. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k33"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k34"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k34"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"1e126"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1e126. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k34"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"1"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k35"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k35"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"dog"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"The parameter cannot be converted to a numeric value: dog"}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k35"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"1"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k36"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k36"}},"UpdateExpression":"SET a = a + :v","ExpressionAttributeValues":{":v":{"N":"123456789012345678901234567890123456789"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 123456789012345678901234567890123456789. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k36"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"1"}}}
+# ADD on numbers: same arithmetic and the same errors
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k37"},"a":{"N":"1"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k37"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"10000000000000000000000"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"10000000000000000000001"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k37"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"10000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k38"},"a":{"N":"1.50"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k38"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1.50"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"3"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k38"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"3"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k39"},"a":{"N":"1e-130"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k39"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"-1e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k39"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k40"},"a":{"N":"9e125"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k40"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"9e125"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k40"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k41"},"a":{"N":"1e50"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k41"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 100000000000000000000000000000000000000000000000001. Attempting to store a number with more significant digits than supported."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k41"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k42"},"a":{"N":"1e-129"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k42"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"-9.9e-130"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number underflow: 0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001. Attempting to store a number with magnitude lower than supported range."}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k42"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k43"},"a":{"N":"99999999999999999999999999999999999999"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k43"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"100000000000000000000000000000000000000"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k43"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"100000000000000000000000000000000000000"}}}
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"k44"},"a":{"N":"-0"}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k44"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"-0"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"k44"}},"ConsistentRead":true,"ProjectionExpression":"a"}
+< 200 {"Item":{"a":{"N":"0"}}}
+# ADD on a missing attribute stores the operand as sent; UPDATED_NEW shows it as sent too
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"new"}},"UpdateExpression":"ADD a :v","ExpressionAttributeValues":{":v":{"N":"1.50"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"1.50"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"new"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"new"},"a":{"N":"1.5"}}}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"new"}},"AttributeUpdates":{"b":{"Value":{"N":"2.50"},"Action":"ADD"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"b":{"N":"2.50"}}}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"new"}},"AttributeUpdates":{"b":{"Value":{"N":"2.50"},"Action":"ADD"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"b":{"N":"5"}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"new"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"new"},"a":{"N":"1.5"},"b":{"N":"5"}}}
+# Arithmetic between two values, no attribute involved
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"SET a = :x + :y","ExpressionAttributeValues":{":x":{"N":"1.50"},":y":{"N":"2.50"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"4"}}}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"SET a = :x + :y","ExpressionAttributeValues":{":x":{"N":"9e125"},":y":{"N":"9e125"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number overflow: 1800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000. Attempting to store a number with magnitude larger than supported range."}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"SET a = :x - :y","ExpressionAttributeValues":{":x":{"N":"1e50"},":y":{"N":"1"}},"ReturnValues":"UPDATED_NEW"}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Number too precise: 99999999999999999999999999999999999999999999999999. Attempting to store a number with more significant digits than supported."}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"SET a = :x + :y","ExpressionAttributeValues":{":x":{"N":"0.1"},":y":{"N":"0.2"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"a":{"N":"0.3"}}}
+# Arithmetic with a missing attribute or a non-number operand
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"SET a = nothere + :x","ExpressionAttributeValues":{":x":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: invalid number object"}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"SET a = :x + :y","ExpressionAttributeValues":{":x":{"N":"1"},":y":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"S\"'"}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"SET a = :x - :y","ExpressionAttributeValues":{":x":{"NS":["1"]},":y":{"N":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"UpdateExpression: expected number, found type '\"NS\"'"}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"vv"}},"UpdateExpression":"ADD a :y","ExpressionAttributeValues":{":y":{"S":"1"}}}
+< 400 {"__type":"com.amazonaws.dynamodb.v20120810#ValidationException","message":"Incorrect operand type for operator or function. Expected N: {\"S\":\"1\"}"}
+# Arithmetic on nested numbers (stored as sent inside M): the result is computed from the nested text
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"nest"},"m":{"M":{"x":{"N":"1.50"},"y":{"N":"1e2"}}},"l":{"L":[{"N":"0.10"}]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"nest"}},"UpdateExpression":"SET m.x = m.x + :v, m.y = m.y - :v, l[0] = l[0] + :v","ExpressionAttributeValues":{":v":{"N":"1.50"}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"l":{"L":[{"N":"1.6"}]},"m":{"M":{"x":{"N":"3"},"y":{"N":"98.5"}}}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"nest"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"nest"},"l":{"L":[{"N":"1.6"}]},"m":{"M":{"x":{"N":"3"},"y":{"N":"98.5"}}}}}
+# ADD to an NS set: elements are compared as text, not by value
+> PutItem {"TableName":"alt_val_arith","Item":{"p":{"S":"set"},"s":{"NS":["1.50","2"]}}}
+< 200 {}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"set"}},"UpdateExpression":"ADD s :v","ExpressionAttributeValues":{":v":{"NS":["1.5","2","3.0"]}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"s":{"NS":["1.50","2","1.5","3.0"]}}}
+> UpdateItem {"TableName":"alt_val_arith","Key":{"p":{"S":"set"}},"UpdateExpression":"DELETE s :v","ExpressionAttributeValues":{":v":{"NS":["1.5","3"]}},"ReturnValues":"UPDATED_NEW"}
+< 200 {"Attributes":{"s":{"NS":["1.50","2","3.0"]}}}
+> GetItem {"TableName":"alt_val_arith","Key":{"p":{"S":"set"}},"ConsistentRead":true}
+< 200 {"Item":{"p":{"S":"set"},"s":{"NS":["1.50","2","3.0"]}}}
+> DeleteTable {"TableName":"alt_val_arith"}
+< 200 {"TableDescription":{"TableName":"alt_val_arith","TableSizeBytes":"*","TableStatus":"DELETING","TableArn":"arn:scylla:alternator:alternator_alt_val_arith:scylla:table/alt_val_arith","TableId":"*","BillingModeSummary":{"LastUpdateToPayPerRequestDateTime":"*","BillingMode":"PAY_PER_REQUEST"},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0,"NumberOfDecreasesToday":0}}}

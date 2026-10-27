@@ -1,0 +1,8 @@
+<stdin>:1:Column family nope not found
+<stdin>:1:Index nope not found
+<stdin>:1:Materialized view 'nope' not found
+<stdin>:1:'nope' not found in keyspace 'cli_g_exec'
+<stdin>:1:Keyspace 'nope' not found.
+<stdin>:1:Not in any keyspace.
+<stdin>:1:'nope' not found in keyspaces
+<stdin>:1:No keyspace specified and no current keyspace

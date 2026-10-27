@@ -556,7 +556,7 @@ fn td_byrank(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
 }
 
 /// TDIGEST.QUANTILE key quantile [quantile ...]
-// NaN passes the bound check, as in RedisBloom.
+// `q < 0.0 || q > 1.0` lets NaN through on purpose; `RangeInclusive::contains` would not.
 #[allow(clippy::manual_range_contains)]
 fn td_quantile(cx: &mut Cx, args: &[Bytes]) -> CmdResult {
     let mut k = td_read(cx, &args[1])?;
