@@ -162,6 +162,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             let snap = volatile.then(|| ctx.fresh_snapshot());
             let run = || {
                 ctx.sess.framed(frame.clone(), |_| {
+                    let _frame = crate::stack::FnFrame::enter(crate::stack::PG_SQL_FN_FRAME)?;
                     if let Some(p) = perms {
                         crate::sql::binder::perms::check(p, ctx)?;
                         crate::sql::binder::perms::check_row_security(p, ctx)?;
@@ -177,6 +178,44 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 input,
                 frame: frame.clone(),
                 snap,
+            })
+        }
+        // create_gating_plan: the quals that read no column of the row (pseudoconstant) run
+        // once, before the input does; when one fails, the input is never run (a recursive
+        // function's `WHERE n > 0` ends its recursion).
+        Plan::Filter { input, pred } if gating(pred) && !ctx.instrumented() => Box::new(GateNode {
+            plan: input.clone(),
+            need: nd::add(need.map(<[bool]>::to_vec), [pred]),
+            gates: gates_of(pred),
+            filter: Some(pred.clone()),
+            input: None,
+        }),
+        // (An inner join's: the join runs with the others. Not under EXPLAIN ANALYZE, which
+        // counts the join's rows by its plan node.)
+        Plan::Join {
+            kind: JoinKind::Inner,
+            cond: Some(c),
+            ..
+        } if gating(c) && !ctx.instrumented() => {
+            let gates = gates_of(c);
+            let rest: Vec<Expr> = match c {
+                Expr::And(list) => list.iter().filter(|e| !gating(e)).cloned().collect(),
+                _ => Vec::new(),
+            };
+            let mut join = (**plan).clone();
+            if let Plan::Join { cond, .. } = &mut join {
+                *cond = match rest.len() {
+                    0 => None,
+                    1 => rest.into_iter().next(),
+                    _ => Some(Expr::And(rest)),
+                };
+            }
+            Box::new(GateNode {
+                plan: Arc::new(join),
+                need: need.map(<[bool]>::to_vec),
+                gates,
+                filter: None,
+                input: None,
             })
         }
         Plan::Filter { input, pred } => Box::new(FilterNode {
@@ -1497,6 +1536,61 @@ struct ProjectNode {
     input: BoxNode,
     exprs: Vec<Expr>,
 }
+/// Whether a filter or an inner join's condition has quals that gate it (`GateNode`).
+fn gating(pred: &Expr) -> bool {
+    let gate = crate::sql::binder::optimize::pseudo_constant;
+    match pred {
+        Expr::And(list) => list.iter().any(gate),
+        e => gate(e),
+    }
+}
+
+/// The gating quals of `pred` (`gating`).
+fn gates_of(pred: &Expr) -> Vec<Expr> {
+    match pred {
+        Expr::And(list) => list.iter().filter(|e| gating(e)).cloned().collect(),
+        e => vec![e.clone()],
+    }
+}
+
+/// A node gated by pseudoconstant quals (a Result's One-Time Filter): they are evaluated at
+/// the first row asked for, and the input is opened (and run) only when they all hold.
+/// A filter's quals (`filter`) then filter the input's rows.
+struct GateNode {
+    plan: Arc<Plan>,
+    need: Option<Vec<bool>>,
+    gates: Vec<Expr>,
+    filter: Option<Expr>,
+    input: Option<BoxNode>,
+}
+
+impl Node for GateNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if self.input.is_none() {
+            for g in &self.gates {
+                if !eval_bool(g, &[], ctx)? {
+                    self.input = Some(Box::new(VecNode::new(Vec::new())));
+                    return Ok(None);
+                }
+            }
+            self.input = Some(open_need(&self.plan, self.need.take(), ctx)?);
+        }
+        let input = self.input.as_mut().unwrap();
+        while let Some(r) = input.next(ctx)? {
+            match &self.filter {
+                Some(p) => {
+                    ctx.check()?;
+                    if eval_bool(p, &r, ctx)? {
+                        return Ok(Some(r));
+                    }
+                }
+                None => return Ok(Some(r)),
+            }
+        }
+        Ok(None)
+    }
+}
+
 
 impl Node for ProjectNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
@@ -1507,8 +1601,9 @@ impl Node for ProjectNode {
     }
 }
 
-/// Start a set-returning call (or a plain function, as one row).
-pub fn start_srf(call: &SrfCall, row: &[Value], ctx: &ExecCtx) -> Result<SrfIter> {
+/// Start a set-returning call (or a plain function, as one row): in FROM (`scan`, a function
+/// scan) or in a select list (ProjectSet).
+pub fn start_srf(call: &SrfCall, row: &[Value], scan: bool, ctx: &ExecCtx) -> Result<SrfIter> {
     // XMLTABLE evaluates its arguments itself, as its scan reaches them.
     let args = if crate::sql::func::xmltable::is_xmltable(&call.func) {
         Vec::new()
@@ -1533,6 +1628,13 @@ pub fn start_srf(call: &SrfCall, row: &[Value], ctx: &ExecCtx) -> Result<SrfIter
         return Ok(Box::new(std::iter::once(Ok(vec![Value::Null]))));
     }
     if let Some(body) = &call.body {
+        // (Postgres's frames between a function's call and its body's: a function scan's or
+        // ProjectSet's executor, ExecMakeTableFunctionResult / ExecMakeFunctionResultSet.)
+        let _frame = crate::stack::FnFrame::hold(if scan {
+            crate::stack::PG_FUNCSCAN_FRAME
+        } else {
+            crate::stack::PG_PROJECTSET_FRAME
+        });
         let rows = ctx.with_outer(Rc::new(args), || super::collect(body, ctx, None))?;
         return Ok(Box::new(rows.into_iter().map(Ok)));
     }
@@ -1573,7 +1675,7 @@ impl Node for ProjectSetNode {
                 let iters = self
                     .srfs
                     .iter()
-                    .map(|s| start_srf(s, &row, ctx).map(Some))
+                    .map(|s| start_srf(s, &row, false, ctx).map(Some))
                     .collect::<Result<Vec<_>>>()?;
                 self.cur = Some((row, iters));
             }
@@ -1636,7 +1738,7 @@ impl FunctionScanNode {
                         p
                     });
                 if !fixed {
-                    return start_srf(c, &[], ctx).map(Some);
+                    return start_srf(c, &[], true, ctx).map(Some);
                 }
                 let key = {
                     use std::hash::{Hash, Hasher};
@@ -1649,7 +1751,7 @@ impl FunctionScanNode {
                 let rows = match cached {
                     Some(r) => r,
                     None => {
-                        let rows: Vec<Row> = start_srf(c, &[], ctx)?.collect::<Result<_>>()?;
+                        let rows: Vec<Row> = start_srf(c, &[], true, ctx)?.collect::<Result<_>>()?;
                         let rows = Rc::new(rows);
                         ctx.subq_cache.borrow_mut().insert(key, rows.clone());
                         rows
@@ -4124,7 +4226,12 @@ impl Node for ContextNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         let input = &mut self.input;
         let frame = &self.frame;
-        let mut run = || ctx.sess.framed(frame.clone(), |_| input.next(ctx));
+        let mut run = || {
+            ctx.sess.framed(frame.clone(), |_| {
+                let _frame = crate::stack::FnFrame::enter(crate::stack::PG_SQL_FN_FRAME)?;
+                input.next(ctx)
+            })
+        };
         // The rows a SQL function's statement writes aren't the calling statement's.
         let processed = ctx.processed.get();
         let r = match &self.snap {

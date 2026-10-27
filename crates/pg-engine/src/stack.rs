@@ -85,21 +85,110 @@ pub fn set_max_depth_kb(kb: i64) {
     }
 }
 
-/// The statement's budget in bytes of this engine's stack.
+/// The statement's budget in bytes of this engine's stack: max_stack_depth × SCALE, and the
+/// allowance of the function calls running now (`FnFrame`).
 fn budget() -> usize {
-    (SHOWN_KB.with(Cell::get).max(100) as usize * 1024).saturating_mul(SCALE)
+    (SHOWN_KB.with(Cell::get).max(100) as usize * 1024)
+        .saturating_mul(SCALE)
+        .saturating_add(ALLOWED.with(Cell::get))
 }
 
 /// A recursion whose depth Postgres's own frames bound before this engine's stack does
 /// (JSON nesting, PL/pgSQL calls): `depth` levels of `pg_frame` bytes each (Postgres 18.6's,
 /// measured against its default 2MB) fail where max_stack_depth would stop Postgres.
+/// The frames of the function calls running now (`FnFrame`) count too.
 #[inline]
 pub fn check_emulated(depth: usize, pg_frame: usize) -> Result<()> {
     let max = SHOWN_KB.with(Cell::get).max(100) as usize * 1024;
-    if depth.saturating_mul(pg_frame) > max {
+    if depth.saturating_mul(pg_frame).saturating_add(EMULATED.with(Cell::get)) > max {
         return Err(depth_error());
     }
     check()
+}
+
+thread_local! {
+    /// Postgres's stack held by the function calls running now (`FnFrame`), in bytes.
+    static EMULATED: Cell<usize> = const { Cell::new(0) };
+    /// This engine's stack the function calls running now add to the budget.
+    static ALLOWED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The engine's stack a function call (`FnFrame::enter`) adds to the budget: a call level
+/// takes about 70 kB of it in a release build (the executor's and the call's frames), where
+/// Postgres's takes 0.5 to 2.2 kB, so recursive functions stop where Postgres's frames
+/// would, not where this engine's stack runs out (8,422 levels of a recursive SQL function
+/// take about 280 MB of stack, given back when the statement ends). Debug frames are about
+/// five times bigger: there the budget alone bounds them.
+const CALL_ALLOWANCE: usize = if cfg!(debug_assertions) { 0 } else { 128 << 10 };
+
+/// One running call of a function whose recursion Postgres's frames bound (PL/pgSQL, a SQL
+/// function's fmgr_sql): `pg_frame` bytes of Postgres's stack while it is alive. The calls
+/// running at once add up whatever their languages, as Postgres's frames do on its stack.
+pub struct FnFrame {
+    pg_frame: usize,
+    allowed: usize,
+}
+
+/// Postgres's stack per call of a SQL function that isn't inlined (fmgr_sql running its
+/// plan): `f(n)` = `CASE WHEN n = 0 THEN 0 ELSE f(n - 1) + 1 END` runs 8,422 levels at 2MB
+/// (4,211 calls; every other level is inlined), 8,423 don't.
+pub const PG_SQL_FN_FRAME: usize = 498;
+
+/// Postgres's stack per sub-select run (ExecSubPlan and the executor below it) between a
+/// SQL function's call and the calls inside it: a recursive function that calls itself in a
+/// scalar subquery runs 2,420 levels at 2MB (866 bytes each, its call's 498 included).
+pub const PG_SUBPLAN_FRAME: usize = 368;
+
+/// Likewise a set-returning function's call in FROM (a function scan): such a recursive
+/// function runs 3,039 calls at 2MB (690 bytes each).
+pub const PG_FUNCSCAN_FRAME: usize = 192;
+
+/// And in a select list (ProjectSet): 3,438 calls (610 bytes each).
+pub const PG_PROJECTSET_FRAME: usize = 112;
+
+impl FnFrame {
+    /// Enter a call: "stack depth limit exceeded" where Postgres's frames would pass
+    /// max_stack_depth.
+    pub fn enter(pg_frame: usize) -> Result<FnFrame> {
+        let used = EMULATED.with(Cell::get) + pg_frame;
+        if used > SHOWN_KB.with(Cell::get).max(100) as usize * 1024 {
+            return Err(depth_error());
+        }
+        check()?;
+        EMULATED.with(|e| e.set(used));
+        allow(CALL_ALLOWANCE as isize);
+        Ok(FnFrame {
+            pg_frame,
+            allowed: CALL_ALLOWANCE,
+        })
+    }
+
+    /// Postgres's frames between two calls that check nothing themselves (a SubPlan's
+    /// executor run): `pg_frame` bytes the calls running inside count.
+    pub fn hold(pg_frame: usize) -> FnFrame {
+        EMULATED.with(|e| e.set(e.get() + pg_frame));
+        FnFrame { pg_frame, allowed: 0 }
+    }
+}
+
+impl Drop for FnFrame {
+    fn drop(&mut self) {
+        EMULATED.with(|e| e.set(e.get().saturating_sub(self.pg_frame)));
+        allow(-(self.allowed as isize));
+    }
+}
+
+/// Change the budget by `bytes` (`ALLOWED`), moving the current segment's limit with it.
+fn allow(bytes: isize) {
+    if bytes == 0 {
+        return;
+    }
+    ALLOWED.with(|a| a.set(a.get().saturating_add_signed(bytes)));
+    ST.with(|s| {
+        let mut st = s.get();
+        st.fail_at = fail_at(st.base, st.carried);
+        s.set(st);
+    });
 }
 
 fn fail_at(base: usize, carried: usize) -> usize {

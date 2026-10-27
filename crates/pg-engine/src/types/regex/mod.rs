@@ -92,48 +92,63 @@ const REG_ECOLORS: i32 = 20;
 // Postgres's regex code checks `stack_is_too_deep()` (the C stack against max_stack_depth,
 // 2MB) at the entry of its recursive functions and fails with REG_ETOOBIG ("regular
 // expression is too complex"). The depth is emulated, so the same patterns fail: each
-// recursive function adds the frame Postgres 18.6's build (aarch64, gcc -O2) gives it, over
-// the stack a backend has in use when it compiles or runs a pattern. The real stack is
-// checked too, as a backstop.
+// recursive function adds the frame Postgres 18.6's build gives it, over the stack a backend
+// has in use when it compiles or runs a pattern. The real stack is checked too, as a
+// backstop.
+//
+// The frames are those of the reference image's build for the architecture this engine is
+// built for (the pinned image is multi-architecture, so a host runs the reference natively):
+// x86-64 from its binary's prologues (return address, pushes, `sub rsp`; objdump of
+// /usr/local/bin/postgres), aarch64 from its build (gcc -O2) likewise. The base is what
+// makes the deepest nesting of groups match: `(` × n `a` `)` × n compiles up to n = 8,710
+// on x86-64.
+
+/// The value for this build's architecture: (x86-64, aarch64).
+const fn arch(x86_64: usize, aarch64: usize) -> usize {
+    if cfg!(target_arch = "aarch64") { aarch64 } else { x86_64 }
+}
 
 /// `max_stack_depth` (2048kB).
 const MAX_STACK_DEPTH: usize = 2048 * 1024;
 /// The stack in use when `pg_regcomp` runs (its own frame included), below a plain query.
-const BASE_DEPTH: usize = 6744;
+const BASE_DEPTH: usize = arch(6248, 6744);
 /// `rstacktoodeep` and `stack_is_too_deep`'s frames at a check.
 const CHECK_FRAMES: usize = 32;
 
 /// Frame sizes of the recursive functions (and the callers between them and the entry
 /// points), as Postgres's build lays them out.
 pub(crate) mod frame {
-    pub const PARSE: usize = 96;
+    use super::arch;
+    pub const PARSE: usize = arch(80, 96);
     /// parsebranch, with parseqatom inlined into it.
-    pub const PARSEBRANCH: usize = 176;
+    pub const PARSEBRANCH: usize = arch(160, 176);
     pub const SUBRE: usize = 64;
     pub const NFATREE: usize = 112;
     pub const NFANODE: usize = 64;
     pub const OPTIMIZE: usize = 144;
     pub const CLEANUP: usize = 32;
-    pub const MARKREACHABLE: usize = 48;
+    pub const MARKREACHABLE: usize = arch(32, 48);
     pub const MARKCANREACH: usize = 48;
-    pub const DUPTRAVERSE: usize = 48;
+    pub const DUPTRAVERSE: usize = arch(32, 48);
     pub const DELTRAVERSE: usize = 48;
-    pub const REMOVETRAVERSE: usize = 64;
+    pub const REMOVETRAVERSE: usize = arch(48, 64);
     pub const CLEARTRAVERSE: usize = 32;
     pub const EMPTYREACHABLE: usize = 48;
     pub const FINDCONSTRAINTLOOP: usize = 64;
     pub const CLONESUCCESSORSTATES: usize = 112;
-    pub const CHECKMATCHALL_RECURSE: usize = 80;
+    pub const CHECKMATCHALL_RECURSE: usize = arch(64, 80);
     /// The stack in use when pg_regexec's searches run, less that of pg_regcomp's body:
     /// pg_regexec keeps its matching state (`struct vars`, with its small DFAs) on the
-    /// stack.
-    pub const REGEXEC_LESS_REGCOMP: isize = 34520;
+    /// stack. (x86-64: RE_wchar_execute's 160 and pg_regexec's 34,768, with find and
+    /// cfind inlined, against RE_compile_and_cache's 288 and pg_regcomp's 320.)
+    pub const REGEXEC_LESS_REGCOMP: isize = arch(34320, 34520) as isize;
     /// cdissect, with the c*dissect functions inlined into it.
     pub const CDISSECT: usize = 128;
-    /// miss, with lacon inlined into it; and the DFA searches lacon runs.
+    /// miss, with lacon inlined into it; and the DFA searches lacon runs. (x86-64: 208, and the
+    /// 16 it pushes for shortest's seventh argument.)
     pub const MISS: usize = 224;
-    pub const LONGEST: usize = 112;
-    pub const SHORTEST: usize = 128;
+    pub const LONGEST: usize = arch(96, 112);
+    pub const SHORTEST: usize = arch(112, 128);
 }
 
 thread_local! {

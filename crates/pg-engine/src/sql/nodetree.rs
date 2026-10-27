@@ -52,6 +52,7 @@ pub fn sql_body_tree(ctx: &ExecCtx, f: &Function) -> Option<String> {
         subst: None,
         recursive_flag: false,
         rename: None,
+        colls: Vec::new(),
     };
     let mut queries = Vec::new();
     for (i, stmt) in stmts.iter().enumerate() {
@@ -101,6 +102,7 @@ pub fn view_rule_tree(
         subst: None,
         recursive_flag: false,
         rename: Some(colnames.to_vec()),
+        colls: Vec::new(),
     };
     t.qs.insert(1, QState::default());
     let q = t.select(s, false, true)?;
@@ -124,6 +126,7 @@ pub fn policy_expr_tree(ctx: &ExecCtx, t: &Arc<Table>, sql: &str) -> Option<Stri
         subst: None,
         recursive_flag: false,
         rename: None,
+        colls: Vec::new(),
     };
     tr.qs.insert(1, QState::default());
     let names: Vec<String> = t
@@ -518,6 +521,9 @@ struct Tree<'q, 'b, 'a> {
     recursive_flag: bool,
     /// A view's column names, for its query's output (level 1).
     rename: Option<Vec<String>>,
+    /// The collations of the nodes of the expressions being written (`expr`), innermost
+    /// last: computed once per expression rather than once per node asked.
+    colls: Vec<HashMap<usize, Option<Coll>>>,
 }
 
 impl Tree<'_, '_, '_> {
@@ -3410,7 +3416,11 @@ impl Tree<'_, '_, '_> {
     // ── expressions ──
 
     fn coll(&self, e: &Expr) -> Coll {
-        self.b.collation_of(e).unwrap_or(Coll::None)
+        let known = self.colls.last().and_then(|m| m.get(&(e as *const Expr as usize)));
+        match known {
+            Some(c) => c.clone().unwrap_or(Coll::None),
+            None => self.b.collation_of(e).unwrap_or(Coll::None),
+        }
     }
 
     /// The collation the inputs derive (`inputcollid`) and the result's (for a collatable
@@ -3526,6 +3536,20 @@ impl Tree<'_, '_, '_> {
 
     /// `e`, bound at binder level `lvl`, as the query at the current level reads it.
     fn expr(&mut self, out: &mut String, e: &Expr, lvl: usize) -> Option<()> {
+        // An expression not inside the one being written: its nodes' collations, derived
+        // once (`coll`). (While `e` is borrowed its nodes' addresses are theirs alone.)
+        let known = self.colls.last().is_some_and(|m| m.contains_key(&(e as *const Expr as usize)));
+        if known {
+            return self.expr_node(out, e, lvl);
+        }
+        let colls = self.b.collations_below(e);
+        self.colls.push(colls);
+        let r = self.expr_node(out, e, lvl);
+        self.colls.pop();
+        r
+    }
+
+    fn expr_node(&mut self, out: &mut String, e: &Expr, lvl: usize) -> Option<()> {
         let cur = self.lvl();
         // After grouping, a GROUP BY expression is the RTE_GROUP's column.
         if self.subst == Some(lvl)

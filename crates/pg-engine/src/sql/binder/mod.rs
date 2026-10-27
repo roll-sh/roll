@@ -629,6 +629,19 @@ pub struct Binder<'b, 'a> {
     pub user_fn_loc: Option<i32>,
     /// The next SQL function body bound gets `Level::inline_args`.
     pub fold_args: bool,
+    /// The next SQL function body bound is inlined in place of its call (`in_sql_fn`).
+    pub(crate) inline_body: bool,
+    /// The level whose expression is being bound (`bind_expr_unmarked`): a
+    /// subexpression of it is checked with it.
+    pub(crate) expr_top: usize,
+    /// SQL functions whose bodies are being inlined into the query being planned now
+    /// (inline_function's `active_fns`): a call of one isn't inlined again. A body planned
+    /// as a statement of its own starts a list of its own, as fmgr_sql plans its body.
+    pub(crate) inlining: Vec<u32>,
+    /// SQL functions whose bodies are being bound, inlined or not: a call of one that isn't
+    /// inlined runs its body when called (plans it then), as Postgres runs every call that
+    /// isn't inlined, so recursion binds each body once.
+    pub(crate) bodies: Vec<u32>,
     /// The statement whose WITH clause is bound next: how often it names each of its
     /// items (cterefcount), for inlining them.
     pub(crate) cte_refs: Option<std::collections::HashMap<String, usize>>,
@@ -757,6 +770,10 @@ impl<'b, 'a> Binder<'b, 'a> {
             dml_inh: false,
             user_fn_loc: None,
             fold_args: false,
+            inline_body: false,
+            expr_top: usize::MAX,
+            inlining: Vec::new(),
+            bodies: Vec::new(),
             cte_refs: None,
             fn_perms: None,
             deps: None,
@@ -1831,10 +1848,39 @@ impl<'b, 'a> Binder<'b, 'a> {
     /// `collation_of` with only the first `depth` levels (an outer reference's value is the
     /// level's param, an expression one level out).
     fn collation_at(&self, e: &Expr, depth: usize) -> Result<Coll> {
-        crate::stack::guard(|| self.collation_at_here(e, depth))
+        crate::stack::guard(|| self.collation_node(e, depth, &mut |c| self.collation_at(c, depth)))
     }
 
-    fn collation_at_here(&self, e: &Expr, depth: usize) -> Result<Coll> {
+    /// The collation of every node of `root` (by address), `collation_of` each, in one pass
+    /// from the leaves up: for a walk over a whole tree that asks every node (a node tree's
+    /// collations), where asking each in turn would redo its subtree. None: deriving it
+    /// fails. The addresses are `root`'s nodes' only while `root` is borrowed.
+    pub(crate) fn collations_below(&self, root: &Expr) -> HashMap<usize, Option<Coll>> {
+        fn go(b: &Binder<'_, '_>, e: &Expr, depth: usize, map: &mut HashMap<usize, Option<Coll>>) {
+            crate::stack::grow(|| {
+                for c in e.children() {
+                    go(b, c, depth, map);
+                }
+                let r = b.collation_node(e, depth, &mut |c| match map.get(&(c as *const Expr as usize)) {
+                    Some(Some(k)) => Ok(k.clone()),
+                    Some(None) => Err(crate::error::internal("collation")),
+                    None => b.collation_at(c, depth),
+                });
+                map.insert(e as *const Expr as usize, r.ok());
+            })
+        }
+        let mut map = HashMap::new();
+        go(self, root, self.levels.len(), &mut map);
+        map
+    }
+
+    /// `e`'s collation, its children's from `kid` (at the same depth).
+    fn collation_node(
+        &self,
+        e: &Expr,
+        depth: usize,
+        kid: &mut dyn FnMut(&Expr) -> Result<Coll>,
+    ) -> Result<Coll> {
         let col = match e {
             Expr::Collate(_, c, IMPLICIT_COLLATE) => return Ok(Coll::Implicit(c.clone())),
             Expr::Collate(_, c, l) => return Ok(Coll::Explicit(c.clone(), *l)),
@@ -1861,7 +1907,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             // resultcollid, the attcollation).
             Expr::Field(inner, k, ty) if ty.collatable() => {
                 if let DataType::Row(rt) = inner.ty() {
-                    self.collation_at(inner, depth)?;
+                    kid(inner)?;
                     let c = crate::types::collation::field_collation(&self.cat, &rt, *k);
                     return Ok(Coll::Implicit(
                         c.unwrap_or_else(|| ty.default_collation().unwrap_or_default().to_string()),
@@ -1937,7 +1983,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         // composite has no collation (assign_collations_walker's RowExpr case).
         if let Expr::Row(items, _) = e {
             for x in items {
-                self.collation_at(x, depth)?;
+                kid(x)?;
             }
             return Ok(Coll::None);
         }
@@ -1953,26 +1999,25 @@ impl<'b, 'a> Binder<'b, 'a> {
             )
         {
             for x in &s.left {
-                self.collation_at(x, depth)?;
+                kid(x)?;
             }
             return Ok(Coll::None);
         }
         let mut merged = Coll::None;
-        let mut err = None;
-        let _ = e.clone().map_children(&mut |c| {
-            if err.is_none() {
-                match self.collation_at(&c, depth) {
-                    Ok(k) => match std::mem::replace(&mut merged, Coll::None).merge(k) {
-                        Ok(m) => merged = m,
-                        Err(e) => err = Some(e),
-                    },
-                    Err(e) => err = Some(e),
-                }
+        // (An assignment's subscripts come before its base and value.)
+        let kids = match e {
+            Expr::Assign {
+                base, subs, value, ..
+            } => {
+                let mut k: Vec<&Expr> = subs.iter().flat_map(|(a, b, _)| a.iter().chain(b.iter())).collect();
+                k.extend([&**base, &**value]);
+                k
             }
-            Ok(c)
-        });
-        if let Some(e) = err {
-            return Err(e);
+            _ => e.children(),
+        };
+        for c in kids {
+            let k = kid(c)?;
+            merged = merged.merge(k)?;
         }
         if !ty.collatable() {
             return Ok(Coll::None);

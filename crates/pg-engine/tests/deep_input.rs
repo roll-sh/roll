@@ -7,7 +7,8 @@
 //!     DEEP_RECORD=<host:port> cargo test -p pg-engine --test deep_input -- --nocapture
 //!
 //! (user `postgres`, password from GOLDEN_PASSWORD or `pw`). DEEP_FILTER=<shape> runs one
-//! shape. Sizes are below and well above Postgres's boundary with max_stack_depth = 2MB.
+//! shape. Sizes are below and well above Postgres's boundary with max_stack_depth = 2MB; a
+//! release build also runs `RELEASE_CASES`, recursive functions just below and above it.
 
 mod common;
 
@@ -62,23 +63,57 @@ const CASES: &[(&str, usize)] = &[
     ("jsonpath", 10_200),
     ("jsonpathplus", 13_000),
     ("jsonpathplus", 40_000),
-    // (The regex engine emulates Postgres's frames of an aarch64 build, whose boundary is
-    // lower than the x86-64 reference's 8,704; XML's is libxml2's 256.)
+    // (The regex engine emulates the frames of the reference's build for this architecture:
+    // 8,710 nested groups on x86-64. XML's limit is libxml2's 256.)
     ("regex", 5000),
+    ("regex", 8700),
+    ("regex", 8720),
     ("regex", 9000),
     ("xml", 256),
+    ("xml", 300),
     ("plpgsql", 900),
     ("plpgsql", 2000),
-    // (A recursive SQL function: the binder inlines its body at every call, so any depth
-    // fails; Postgres runs 8,320 levels. Open, see HANDOFF.)
+    // Recursive SQL functions (more near Postgres's boundaries in `RELEASE_CASES`).
+    ("sqlfn", 1000),
     ("sqlfn", 20_000),
+    ("sqlfnnoinline", 300),
+    ("sqlfnnoinline", 20_000),
+    ("sqlfnmutual", 1000),
+    ("sqlfnpoly", 1000),
+    ("sqlfnsubq", 300),
+    ("sqlfnsubq", 20_000),
+    ("sqlfnpl", 300),
+    ("sqlfnsrf", 300),
+    ("sqlfnsrf", 20_000),
+    ("sqlfnsrfinline", 100),
     ("colplus", 4000),
     ("colplus", 100_000),
-    // (300: CREATE VIEW takes time cubic in the nesting, in nodetree's collations; see HANDOFF.)
     ("viewdef", 300),
+    ("viewdef", 2000),
     ("explain", 2000),
     ("deepjsonb", 18_000),
     ("setting", 0),
+];
+
+/// Cases a release build runs too: recursive functions near Postgres's boundaries, where a
+/// call level is a call (a debug build's frames are five times bigger, and its stack budget
+/// stops them first). A SQL function's call that isn't inlined takes 498 bytes of
+/// Postgres's stack: 8,422 levels of `sqlfn`, every other one inlined.
+const RELEASE_CASES: &[(&str, usize)] = &[
+    ("sqlfn", 8000),
+    ("sqlfn", 9000),
+    ("sqlfnnoinline", 4000),
+    ("sqlfnnoinline", 4500),
+    ("sqlfnmutual", 12_000),
+    ("sqlfnmutual", 13_000),
+    ("sqlfnpoly", 8000),
+    ("sqlfnpoly", 9000),
+    ("sqlfnsubq", 2300),
+    ("sqlfnsubq", 2600),
+    ("sqlfnpl", 900),
+    ("sqlfnpl", 1000),
+    ("plpgsql", 925),
+    ("plpgsql", 940),
 ];
 
 fn statements_of(shape: &str, n: usize) -> Vec<String> {
@@ -160,6 +195,56 @@ fn statements_of(shape: &str, n: usize) -> Vec<String> {
                 format!("SELECT deep_s({n})"),
             ];
         }
+        // (Not inlinable: it has a FROM clause.)
+        "sqlfnnoinline" => {
+            return vec![
+                "CREATE OR REPLACE FUNCTION deep_sn(n int) RETURNS int LANGUAGE sql AS $$ SELECT CASE WHEN n = 0 THEN 0 ELSE deep_sn(n - 1) + 1 END FROM (VALUES (1)) v $$".into(),
+                format!("SELECT deep_sn({n})"),
+            ];
+        }
+        "sqlfnmutual" => {
+            return vec![
+                "CREATE OR REPLACE FUNCTION deep_ev(n int) RETURNS bool LANGUAGE sql AS $$ SELECT true $$".into(),
+                "CREATE OR REPLACE FUNCTION deep_od(n int) RETURNS bool LANGUAGE sql AS $$ SELECT CASE WHEN n = 0 THEN false ELSE deep_ev(n - 1) END $$".into(),
+                "CREATE OR REPLACE FUNCTION deep_ev(n int) RETURNS bool LANGUAGE sql AS $$ SELECT CASE WHEN n = 0 THEN true ELSE deep_od(n - 1) END $$".into(),
+                format!("SELECT deep_ev({n}), deep_od({n})"),
+            ];
+        }
+        "sqlfnpoly" => {
+            return vec![
+                "CREATE OR REPLACE FUNCTION deep_sp(n int, x anyelement) RETURNS anyelement LANGUAGE sql AS $$ SELECT CASE WHEN n = 0 THEN x ELSE deep_sp(n - 1, x) END $$".into(),
+                format!("SELECT deep_sp({n}, 'a'::text), deep_sp({n}, 2.5)"),
+            ];
+        }
+        "sqlfnsubq" => {
+            return vec![
+                "CREATE OR REPLACE FUNCTION deep_sq(n int) RETURNS int LANGUAGE sql AS $$ SELECT n + coalesce((SELECT deep_sq(n - 1) FROM (VALUES (1)) v WHERE n > 0), 0) $$".into(),
+                format!("SELECT deep_sq({n})"),
+            ];
+        }
+        // (SQL calling PL/pgSQL calling SQL: the SQL function is inlined into each PL/pgSQL
+        // statement.)
+        "sqlfnpl" => {
+            return vec![
+                "CREATE OR REPLACE FUNCTION deep_ss(n int) RETURNS int LANGUAGE sql AS $$ SELECT 0 $$".into(),
+                "CREATE OR REPLACE FUNCTION deep_pp(n int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN deep_ss(n); END $$".into(),
+                "CREATE OR REPLACE FUNCTION deep_ss(n int) RETURNS int LANGUAGE sql AS $$ SELECT CASE WHEN n = 0 THEN 0 ELSE deep_pp(n - 1) + 1 END $$".into(),
+                format!("SELECT deep_ss({n})"),
+            ];
+        }
+        "sqlfnsrf" => {
+            return vec![
+                "CREATE OR REPLACE FUNCTION deep_srf(n int) RETURNS SETOF int LANGUAGE sql AS $$ SELECT n UNION ALL SELECT * FROM deep_srf(n - 1) WHERE n > 0 $$".into(),
+                format!("SELECT count(*), sum(x) FROM deep_srf({n}) x"),
+            ];
+        }
+        // (Stable: Postgres inlines it in FROM level by level, until `n > 0` is false.)
+        "sqlfnsrfinline" => {
+            return vec![
+                "CREATE OR REPLACE FUNCTION deep_srfi(n int) RETURNS SETOF int STABLE LANGUAGE sql AS $$ SELECT n UNION ALL SELECT * FROM deep_srfi(n - 1) WHERE n > 0 $$".into(),
+                format!("SELECT count(*), sum(x) FROM deep_srfi({n}) x"),
+            ];
+        }
         "setting" => {
             return [
                 "SHOW max_stack_depth",
@@ -191,7 +276,9 @@ fn summary(events: &[Event]) -> String {
             Event::Error(f) => {
                 let _ = write!(out, "ERROR {} {}", f.code, f.message);
                 if let Some(d) = &f.detail {
-                    let _ = write!(out, " DETAIL: {d}");
+                    // (One line per case: a DETAIL of several lines, libxml2's context and
+                    // caret, is kept with its line breaks written as `\n`.)
+                    let _ = write!(out, " DETAIL: {}", d.replace('\n', "\\n"));
                 }
                 if let Some(h) = &f.hint {
                     let _ = write!(out, " HINT: {h}");
@@ -222,8 +309,10 @@ fn cases() -> Vec<(&'static str, usize)> {
             .collect();
     }
     let filter = std::env::var("DEEP_FILTER").ok();
+    let release: &[(&str, usize)] = if cfg!(debug_assertions) { &[] } else { RELEASE_CASES };
     CASES
         .iter()
+        .chain(release)
         .copied()
         .filter(move |(s, _)| filter.as_deref().is_none_or(|f| f == *s))
         .collect()
@@ -306,7 +395,7 @@ fn deep_input_record() {
     let mut out = String::new();
     {
         let mut c = PgClient::connect(&addr, "postgres", &password, "deep_input").unwrap();
-        for (shape, n) in CASES.iter().copied() {
+        for (shape, n) in CASES.iter().chain(RELEASE_CASES).copied() {
             for (i, sql) in statements_of(shape, n).iter().enumerate() {
                 eprintln!("record: {}", key(shape, n, i));
                 let got = summary(&c.simple_query(sql).unwrap());

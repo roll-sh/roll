@@ -30,8 +30,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Postgres's stack per nested PL/pgSQL call (a recursive function of one IF and a
-/// RETURN calling itself: 928 levels fit its default 2MB, 944 don't).
-const PG_CALL_FRAME: usize = 2240;
+/// RETURN calling itself: 933 calls fit its default 2MB, 934 don't).
+const PG_CALL_FRAME: usize = 2246;
 
 thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -532,15 +532,17 @@ fn internal_pos(mut e: Error) -> Error {
     e
 }
 
-struct DepthGuard;
+struct DepthGuard {
+    _frame: crate::stack::FnFrame,
+}
 
 impl DepthGuard {
-    /// (The stack bounds the nesting, as in Postgres: check_stack_depth, with its frames.)
+    /// (The stack bounds the nesting, as in Postgres: check_stack_depth, with its frames,
+    /// summed with the SQL functions' running between them.)
     fn enter() -> Result<DepthGuard> {
-        let d = DEPTH.with(|d| d.get());
-        crate::stack::check_emulated(d as usize + 1, PG_CALL_FRAME)?;
-        DEPTH.with(|x| x.set(d + 1));
-        Ok(DepthGuard)
+        let f = crate::stack::FnFrame::enter(PG_CALL_FRAME)?;
+        DEPTH.with(|x| x.set(x.get() + 1));
+        Ok(DepthGuard { _frame: f })
     }
 }
 
@@ -794,6 +796,7 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
         let final_stmt = i + 1 == stmts.len();
         let r = ctx.sess.framed(sql_fn_frame(f, at), |_| {
             let r = (|| -> Result<Option<Vec<Row>>> {
+                let _frame = crate::stack::FnFrame::enter(crate::stack::PG_SQL_FN_FRAME)?;
                 match node.node.as_ref() {
                     Some(
                         NodeEnum::SelectStmt(_)

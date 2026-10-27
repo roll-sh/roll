@@ -1,0 +1,422 @@
+> CREATE FUNCTION rec_f(n int) RETURNS int LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN 0 ELSE rec_f(n - 1) + 1 END'
+-- CREATE FUNCTION
+
+> SELECT rec_f(0), rec_f(1), rec_f(2), rec_f(10), rec_f(1000)
+rec_f:int4 | rec_f:int4 | rec_f:int4 | rec_f:int4 | rec_f:int4
+0 | 1 | 2 | 10 | 1000
+-- SELECT 1
+
+> SELECT g, rec_f(g) FROM generate_series(0, 5) g
+g:int4 | rec_f:int4
+0 | 0
+1 | 1
+2 | 2
+3 | 3
+4 | 4
+5 | 5
+-- SELECT 6
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_f(5)
+QUERY PLAN:text
+Result
+  Output: (rec_f(4) + 1)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_f(g) FROM generate_series(1, 3) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: CASE WHEN (g = 0) THEN 0 ELSE (rec_f((g - 1)) + 1) END
+  Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_f(g) + rec_f(g + 1) FROM generate_series(1, 3) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: (CASE WHEN (g = 0) THEN 0 ELSE (rec_f((g - 1)) + 1) END + CASE WHEN ((g + 1) = 0) THEN 0 ELSE (rec_f(((g + 1) - 1)) + 1) END)
+  Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> CREATE FUNCTION rec_fi(n int) RETURNS int IMMUTABLE LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN 0 ELSE rec_fi(n - 1) + 1 END'
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_fi(5)
+QUERY PLAN:text
+Result
+  Output: 5
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_fi(g) FROM generate_series(1, 3) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: CASE WHEN (g = 0) THEN 0 ELSE (rec_fi((g - 1)) + 1) END
+  Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> SELECT rec_fi(20), rec_fi(g) FROM generate_series(3, 4) g
+rec_fi:int4 | rec_fi:int4
+20 | 3
+20 | 4
+-- SELECT 2
+
+> CREATE FUNCTION rec_nf(n int) RETURNS int LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN 0 ELSE rec_nf(n - 1) + 1 END FROM (VALUES (1)) v'
+-- CREATE FUNCTION
+
+> SELECT rec_nf(0), rec_nf(7), rec_nf(500)
+rec_nf:int4 | rec_nf:int4 | rec_nf:int4
+0 | 7 | 500
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_nf(5)
+QUERY PLAN:text
+Result
+  Output: rec_nf(5)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_nf(5) FROM generate_series(1, 3) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: rec_nf(5)
+  Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> CREATE FUNCTION rec_sq(n int) RETURNS int LANGUAGE sql
+>   AS 'SELECT n + coalesce((SELECT rec_sq(n - 1) FROM (VALUES (1)) v WHERE n > 0), 0)'
+-- CREATE FUNCTION
+
+> SELECT rec_sq(10), rec_sq(300)
+rec_sq:int4 | rec_sq:int4
+55 | 45150
+-- SELECT 1
+
+> CREATE FUNCTION rec_st(n int) RETURNS int STRICT LANGUAGE sql
+>   AS 'SELECT coalesce(rec_st(nullif(n, 0) - 1), 0) + 1'
+-- CREATE FUNCTION
+
+> SELECT rec_st(0), rec_st(5), rec_st(NULL)
+rec_st:int4 | rec_st:int4 | rec_st:int4
+1 | 6 | NULL
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_st(g) FROM generate_series(1, 2) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: rec_st(g)
+  Function Call: generate_series(1, 2)
+-- EXPLAIN
+
+> CREATE FUNCTION rec_ev(n int) RETURNS bool LANGUAGE sql AS 'SELECT true'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION rec_od(n int) RETURNS bool LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN false ELSE rec_ev(n - 1) END'
+-- CREATE FUNCTION
+
+> CREATE OR REPLACE FUNCTION rec_ev(n int) RETURNS bool LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN true ELSE rec_od(n - 1) END'
+-- CREATE FUNCTION
+
+> SELECT g, rec_ev(g), rec_od(g) FROM generate_series(0, 6) g
+g:int4 | rec_ev:bool | rec_od:bool
+0 | t | f
+1 | f | t
+2 | t | f
+3 | f | t
+4 | t | f
+5 | f | t
+6 | t | f
+-- SELECT 7
+
+> SELECT rec_ev(1001), rec_od(1001)
+rec_ev:bool | rec_od:bool
+f | t
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_ev(g) FROM generate_series(1, 2) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: CASE WHEN (g = 0) THEN true ELSE CASE WHEN ((g - 1) = 0) THEN false ELSE rec_ev(((g - 1) - 1)) END END
+  Function Call: generate_series(1, 2)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_od(4)
+QUERY PLAN:text
+Result
+  Output: rec_od(2)
+-- EXPLAIN
+
+> CREATE FUNCTION rec_poly(n int, x anyelement) RETURNS anyelement LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN x ELSE rec_poly(n - 1, x) END'
+-- CREATE FUNCTION
+
+> SELECT rec_poly(5, 'a'::text), rec_poly(3, 2.5), rec_poly(4, ARRAY[1, 2]), rec_poly(0, NULL::date)
+rec_poly:text | rec_poly:numeric | rec_poly:int4[] | rec_poly:date
+a | 2.5 | {1,2} | NULL
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_poly(g, 'a'::text) FROM generate_series(1, 2) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: CASE WHEN (g = 0) THEN 'a'::text ELSE rec_poly((g - 1), 'a'::text) END
+  Function Call: generate_series(1, 2)
+-- EXPLAIN
+
+> CREATE FUNCTION rec_arr(n int, VARIADIC xs int[]) RETURNS int LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN array_length(xs, 1) ELSE rec_arr(n - 1, VARIADIC xs || n) END'
+-- CREATE FUNCTION
+
+> SELECT rec_arr(3, 10, 20)
+rec_arr:int4
+5
+-- SELECT 1
+
+> CREATE FUNCTION rec_sp(n int) RETURNS int LANGUAGE sql AS 'SELECT 0'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION rec_pp(n int) RETURNS int LANGUAGE plpgsql AS 'BEGIN RETURN rec_sp(n); END'
+-- CREATE FUNCTION
+
+> CREATE OR REPLACE FUNCTION rec_sp(n int) RETURNS int LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN 0 ELSE rec_pp(n - 1) + 1 END'
+-- CREATE FUNCTION
+
+> SELECT rec_sp(10), rec_pp(10)
+rec_sp:int4 | rec_pp:int4
+10 | 10
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_sp(g) FROM generate_series(1, 2) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: CASE WHEN (g = 0) THEN 0 ELSE (rec_pp((g - 1)) + 1) END
+  Function Call: generate_series(1, 2)
+-- EXPLAIN
+
+> CREATE FUNCTION rec_err(n int) RETURNS int LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN 1 / n ELSE rec_err(n - 1) END'
+-- CREATE FUNCTION
+
+> SELECT rec_err(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err" during inlining
+
+> SELECT rec_err(1)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err" statement 1
+
+> CREATE FUNCTION rec_err2(n int) RETURNS int LANGUAGE sql
+>   AS 'SELECT CASE WHEN n = 0 THEN 1 / n ELSE rec_err2(n - 1) END FROM (VALUES (1)) v'
+-- CREATE FUNCTION
+
+> SELECT rec_err2(3)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err2" statement 1
+CONTEXT: SQL function "rec_err2" statement 1
+CONTEXT: SQL function "rec_err2" statement 1
+CONTEXT: SQL function "rec_err2" statement 1
+
+> CREATE FUNCTION rec_perr(n int) RETURNS int LANGUAGE plpgsql
+>   AS 'BEGIN IF n = 0 THEN RETURN 100; END IF; RETURN rec_serr(n - 1) + 1; END'
+-- CREATE FUNCTION
+
+> CREATE FUNCTION rec_serr(n int) RETURNS int LANGUAGE sql AS 'SELECT rec_perr(n) FROM (VALUES (1)) v'
+-- CREATE FUNCTION
+
+> SELECT rec_perr(0), rec_perr(5), rec_serr(5)
+rec_perr:int4 | rec_perr:int4 | rec_serr:int4
+100 | 105 | 105
+-- SELECT 1
+
+> CREATE FUNCTION rec_srf(n int) RETURNS SETOF int LANGUAGE sql
+>   AS 'SELECT n UNION ALL SELECT * FROM rec_srf(n - 1) WHERE n > 0'
+-- CREATE FUNCTION
+
+> SELECT * FROM rec_srf(3)
+rec_srf:int4
+0
+1
+2
+3
+-- SELECT 4
+
+> SELECT rec_srf(2)
+rec_srf:int4
+0
+1
+2
+-- SELECT 3
+
+> SELECT count(*), sum(x) FROM rec_srf(400) x
+count:int8 | sum:int8
+401 | 80200
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM rec_srf(3)
+QUERY PLAN:text
+Function Scan on public.rec_srf
+  Output: rec_srf
+  Function Call: rec_srf(3)
+-- EXPLAIN
+
+> SELECT g, x FROM generate_series(1, 2) g, rec_srf(g) x
+g:int4 | x:int4
+1 | 0
+1 | 1
+2 | 0
+2 | 1
+2 | 2
+-- SELECT 5
+
+> CREATE FUNCTION rec_tab(n int) RETURNS TABLE (a int, b text) LANGUAGE sql
+>   AS 'SELECT n, n::text UNION ALL SELECT * FROM rec_tab(n - 1) WHERE n > 0'
+-- CREATE FUNCTION
+
+> SELECT * FROM rec_tab(2)
+a:int4 | b:text
+0 | 0
+1 | 1
+2 | 2
+-- SELECT 3
+
+> SELECT (rec_tab(1)).*
+a:int4 | b:text
+0 | 0
+1 | 1
+-- SELECT 2
+
+> CREATE FUNCTION rec_srf2(n int) RETURNS SETOF int LANGUAGE sql
+>   AS 'SELECT n UNION ALL SELECT rec_srf2(n - 1) WHERE n > 0'
+-- CREATE FUNCTION
+
+> SELECT * FROM rec_srf2(3)
+rec_srf2:int4
+0
+1
+2
+3
+-- SELECT 4
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT * FROM rec_srf2(3)
+QUERY PLAN:text
+Function Scan on public.rec_srf2
+  Output: rec_srf2
+  Function Call: rec_srf2(3)
+-- EXPLAIN
+
+> CREATE FUNCTION rec_srfi(n int) RETURNS SETOF int STABLE LANGUAGE sql
+>   AS 'SELECT n UNION ALL SELECT * FROM rec_srfi(n - 1) WHERE n > 0'
+-- CREATE FUNCTION
+
+> SELECT * FROM rec_srfi(3)
+rec_srfi:int4
+0
+1
+2
+3
+-- SELECT 4
+
+> SELECT count(*) FROM rec_srfi(50)
+count:int8
+51
+-- SELECT 1
+
+> CREATE FUNCTION rec_srfb(n int) RETURNS SETOF int STABLE LANGUAGE sql
+>   AS 'SELECT * FROM rec_srfb(n - 1) WHERE n > 0 UNION ALL SELECT n'
+-- CREATE FUNCTION
+
+> SELECT * FROM rec_srfb(3)
+rec_srfb:int4
+0
+1
+2
+3
+-- SELECT 4
+
+> CREATE TABLE rec_log (n int)
+-- CREATE TABLE
+
+> CREATE FUNCTION rec_void(n int) RETURNS void LANGUAGE sql
+>   AS 'INSERT INTO rec_log SELECT 0 WHERE n > 0 AND rec_void(n - 1) IS NULL; INSERT INTO rec_log VALUES (n)'
+-- CREATE FUNCTION
+
+> SELECT rec_void(3)
+rec_void:void
+NULL
+-- SELECT 1
+
+> SELECT * FROM rec_log ORDER BY n
+n:int4
+0
+0
+0
+0
+1
+2
+3
+-- SELECT 7
+
+> CREATE FUNCTION rec_std(n int) RETURNS int LANGUAGE sql RETURN 0
+-- CREATE FUNCTION
+
+> CREATE OR REPLACE FUNCTION rec_std(n int) RETURNS int LANGUAGE sql
+>   RETURN CASE WHEN n = 0 THEN 0 ELSE rec_std(n - 1) + 2 END
+-- CREATE FUNCTION
+
+> SELECT rec_std(6)
+rec_std:int4
+12
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_std(g) FROM generate_series(1, 2) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: CASE WHEN (g = 0) THEN 0 ELSE (rec_std((g - 1)) + 2) END
+  Function Call: generate_series(1, 2)
+-- EXPLAIN
+
+> CREATE VIEW rec_v AS SELECT g, rec_f(g) AS r FROM generate_series(1, 3) g
+-- CREATE VIEW
+
+> SELECT * FROM rec_v
+g:int4 | r:int4
+1 | 1
+2 | 2
+3 | 3
+-- SELECT 3
+
+> SELECT pg_get_viewdef('rec_v')
+pg_get_viewdef:text
+ SELECT g,
+    rec_f(g) AS r
+   FROM generate_series(1, 3) g(g);
+-- SELECT 1
+
+> CREATE TABLE rec_t (a int DEFAULT rec_f(4), b int CHECK (rec_f(b) < 100))
+-- CREATE TABLE
+
+> INSERT INTO rec_t (b) VALUES (5)
+-- INSERT 0 1
+
+> INSERT INTO rec_t (b) VALUES (500)
+ERROR 23514: new row for relation "rec_t" violates check constraint "rec_t_b_check"
+DETAIL: Failing row contains (4, 500).
+OBJECTS: schema=public table=rec_t constraint=rec_t_b_check
+
+> SELECT * FROM rec_t
+a:int4 | b:int4
+4 | 5
+-- SELECT 1
+
+> DROP VIEW rec_v
+-- DROP VIEW
+
+> DROP TABLE rec_t, rec_log
+-- DROP TABLE
+
+> DROP FUNCTION rec_f, rec_fi, rec_nf, rec_sq, rec_st, rec_ev, rec_od, rec_poly, rec_arr,
+>   rec_sp, rec_pp, rec_err, rec_err2, rec_perr, rec_serr, rec_srf, rec_tab, rec_srf2,
+>   rec_srfi, rec_srfb, rec_void, rec_std
+-- DROP FUNCTION
+

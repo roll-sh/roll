@@ -1201,6 +1201,9 @@ impl<'a> ExecCtx<'a> {
     }
 
     pub fn eval_subquery(&self, s: &Subquery, row: &[Value]) -> Result<Value> {
+        // (A sub-select's frames count towards the calls inside it; a SQL function's call,
+        // which is one here, frames itself.)
+        let _frame = s.func.is_none().then(|| crate::stack::FnFrame::hold(crate::stack::PG_SUBPLAN_FRAME));
         crate::stack::guard(|| self.eval_subquery_here(s, row))
     }
 

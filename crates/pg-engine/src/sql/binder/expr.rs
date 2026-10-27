@@ -92,7 +92,17 @@ impl Binder<'_, '_> {
     }
 
     fn bind_expr_unmarked(&mut self, n: &Node) -> Result<Expr> {
-        let e = self.bind_node(n)?;
+        // Collations are checked once per expression, when the whole of it is bound
+        // (assign_query_collations), not for each subexpression again: that was quadratic
+        // in the expression's depth.
+        let lvl = self.levels.len();
+        if self.expr_top == lvl {
+            return self.bind_node(n);
+        }
+        let outer = std::mem::replace(&mut self.expr_top, lvl);
+        let r = self.bind_node(n);
+        self.expr_top = outer;
+        let e = r?;
         // Different explicit collations meeting is an error (assign_collations).
         let mut explicit = 0;
         e.walk(&mut |x| explicit += matches!(x, Expr::Collate(..)) as usize);
@@ -1816,7 +1826,10 @@ impl Binder<'_, '_> {
                     let r = self.bind_expr(r)?;
                     let parts = names(&a.name);
                     let schema = (parts.len() > 1).then(|| parts[parts.len() - 2].clone());
-                    if let Some(e) =
+                    // (The operand is copied only when a user operator may take it: a copy at every
+                    // level of a deep expression was quadratic.)
+                    if !self.cat.operators.is_empty()
+                        && let Some(e) =
                         self.user_operator(schema.as_deref(), &opname, None, r.clone(), loc)?
                     {
                         return Ok(e);
@@ -2037,7 +2050,11 @@ impl Binder<'_, '_> {
             }
             return self.row_compare(op, ls.clone(), rs.clone(), loc);
         }
-        if let Some(e) = self.user_operator(schema, op, Some(l.clone()), r.clone(), loc)? {
+        // (The operands are copied only when a user operator may take them: a copy at every
+        // level of a deep expression was quadratic.)
+        if !self.cat.operators.is_empty()
+            && let Some(e) = self.user_operator(schema, op, Some(l.clone()), r.clone(), loc)?
+        {
             return Ok(e);
         }
         let res = match (resolve_binop(op, &l.ty(), &r.ty()), schema) {
@@ -7488,10 +7505,12 @@ impl Binder<'_, '_> {
         // PL/pgSQL, and SQL bodies of several statements, run when called.
         // So do functions with SET clauses, which hold while they run.
         let by_statement = std::mem::take(&mut self.sql_fn_statement);
+        let inline = std::mem::take(&mut self.inline_body);
         if fdef.language == "plpgsql"
             || !fdef.config.is_empty()
             || (fdef.language == "sql" && crate::sql::parse::body_runs_by_statement(fdef))
             || (!by_statement && fdef.language == "sql" && self.body_writes_ruled_table(fdef))
+            || (fdef.language == "sql" && !inline && self.bodies.contains(&fdef.oid))
         {
             // Interpreted at run time; the arguments arrive as the outer row.
             let cols: Vec<OutCol> = if !fdef.out_cols.is_empty() {
@@ -7568,12 +7587,28 @@ impl Binder<'_, '_> {
         // Positions are in the body: `in_sql_fn` makes them the internal query's. A statement
         // run on its own that writes a relation with rules is rewritten by them, as a
         // statement is.
+        // inline_function's active_fns: the bodies being inlined into this query; a body
+        // that isn't inlined is planned as a query of its own.
+        self.bodies.push(fdef.oid);
+        let outer_inlining = if inline {
+            self.inlining.push(fdef.oid);
+            None
+        } else {
+            Some(std::mem::take(&mut self.inlining))
+        };
         let r = if by_statement && self.body_writes_ruled_table(fdef) {
             self.bind_statement(&body)
                 .map(|bq| ((*bq.plan).clone(), bq.cols))
         } else {
             self.bind_select_node(&body)
         };
+        match outer_inlining {
+            Some(outer) => self.inlining = outer,
+            None => {
+                self.inlining.pop();
+            }
+        }
+        self.bodies.pop();
         (self.check_as, self.definer) = (saved_as, saved_definer);
         self.ctes = saved_ctes;
         self.fn_levels.pop();
@@ -8432,7 +8467,22 @@ impl Binder<'_, '_> {
             && f.volatility == 'i'
             && !f.returns_set
             && f.ret != DataType::Record;
-        Some(if !evaluated && inlines(f, body, args, place) {
+        // inline_function never inlines a function into its own inlined body: that call
+        // runs when executed, each level planning its body as fmgr_sql does.
+        // inline_set_returning_function has no such check: Postgres inlines a recursive one
+        // level by level until a constant-false qual leaves a level out (or the stack runs
+        // out); here a recursive one in FROM runs as a call.
+        let recursive = match place {
+            FnPlace::Scalar => self.inlining.contains(&f.oid),
+            _ => self.bodies.contains(&f.oid),
+        };
+        let inlined = !evaluated && !recursive && inlines(f, body, args, place);
+        // A call that isn't inlined of a function whose body is being bound runs its body
+        // when called (`bind_user_body`), framing itself.
+        if !inlined && self.bodies.contains(&f.oid) {
+            return None;
+        }
+        Some(if inlined {
             // Folded with the constants while inlining (in FROM, later: without the frame).
             SqlFnCall {
                 at: SqlFnAt::Inlining,
@@ -8446,6 +8496,7 @@ impl Binder<'_, '_> {
             // `inline_function` analyzes the body before it checks it is a simple SELECT.
             let tried = place == FnPlace::Scalar
                 && !evaluated
+                && !recursive
                 && !f.procedure
                 && !f.security_definer
                 && !f.returns_set
@@ -8471,6 +8522,8 @@ impl Binder<'_, '_> {
         run: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
         self.fold_args = at.is_some_and(|c| c.fold);
+        // (A set-returning body inlined in FROM is a subquery, planned on its own.)
+        self.inline_body = at.is_some_and(|c| matches!(c.at, SqlFnAt::Inlining)) && !f.returns_set;
         match at {
             // Run by the executor: its privileges are checked when it runs.
             Some(

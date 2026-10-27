@@ -8,6 +8,13 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Round 20, agent 82 (recursive functions, deep views, regex frames; HANDOFF "Deep input"):
+recursive SQL functions run, inlined as inline_function inlines them (never into their own
+inlined body) and otherwise called with their body planned per call, their depth limited by
+PostgreSQL's emulated frames; pseudoconstant quals gate filters and inner joins; CREATE VIEW
+is linear in expression depth; the regex engine's frames are the reference build's for the
+host architecture. Verification is in the round's commit message.
+
 Round 19, agent 63 (deep input, HANDOFF "Deep input"): the stack grows on demand at recursion
 points and the depth limit is `max_stack_depth` × a per-profile factor (with PostgreSQL's own
 per-level costs emulated for JSON input, PL/pgSQL calls and jsonpath), so deep input never

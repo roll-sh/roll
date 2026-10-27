@@ -2376,6 +2376,30 @@ Verified (batch 3): every crate test binary at the default and with `ROLL_TXN_SP
 (27 of 27 each), clippy adds no warnings, the regression suite in full on a private reference
 against the committed `results.tsv`: 51,148 / 51,150, no unit changed.
 
+## Recursive functions and deep views (round 20, agent 82)
+
+HANDOFF.md, "Deep input", has the design. These are release times on the shared machine (`q`,
+one statement each, the engine's start included):
+
+| `x + x + … + x`, terms | 1,000 | 2,000 | 4,000 |
+|---|---|---|---|
+| SELECT, before | 106 ms | 343 ms | 1,283 ms |
+| SELECT, now | 40 ms | 66 ms | 119 ms |
+| CREATE VIEW, before | 26 s | 4.5 min (agent 63) | — |
+| CREATE VIEW, now | 200 ms | 549 ms | 2,509 ms |
+
+- The binder was quadratic: a binary operator copied both operands for the user-operator
+  lookup, and every subexpression rechecked its collations over its subtree.
+- CREATE VIEW was cubic: nodetree asked every node for its collation, and `collation_at`
+  copied each subtree it visited.
+- What is left is quadratic in a dependency. The view's text is deparsed through
+  `pg_query::deparse`, which encodes the tree as protobuf with prost, and prost's
+  `encoded_len` measures each nested message's whole subtree again at every level. At 4,000
+  terms, 80% of the time is there. 4,875 terms is the most the depth limit allows.
+- A recursive SQL function's call level takes about 70 kB of stack in a release build. Each
+  call adds 128 kB to the stack budget, so PostgreSQL's 8,422 levels touch about 280 MB of
+  stack segments. They are unmapped when the statement ends.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

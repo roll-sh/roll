@@ -545,6 +545,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       error are now PostgreSQL's 54001 with the HINT. This limit is the one parse-side
       difference left: about 1,650 nested scalar subqueries, where PostgreSQL goes to
       2,176, and about 4,900 `NOT`s, where it goes to 8,064.
+    - It stays (agent 82 looked): `PG_QUERY_PROTOBUF_MAX_DEPTH` is a plain `#define` in
+      libpg_query's `src/pg_query_internal.h`, used by its encoder and its decoder alike.
+      pg_query's build.rs passes no flag for it, and a `-D` would lose to the header's
+      definition. Upstream (libpg_query `18-latest`, pg_query.rs `main`) still has 10,000.
+      Raising it means vendoring the 61 MB crate or forking it, and reading the C parse tree
+      without protobuf means bindings for every node type. Neither is clean.
   - **The depth limit.** The budget is `max_stack_depth` × `SCALE` bytes of the engine's
     own stack, summed over segments: SCALE is 32 in release and 160 in debug. These are the
     deepest inputs that still work, on a release build at the default 2 MB (bisected to
@@ -559,7 +565,16 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     | `NOT` chains | 8,064 | 4,875 | the protobuf limit |
     | `ROW()` nesting | 4,992 | 4,875 | the grammar |
     | `UNION ALL` arms | 7,168 | 8,500 | the depth limit |
-    | PL/pgSQL recursion | 928 | 906 | emulated: 2,240 bytes per call |
+    | PL/pgSQL recursion | 932 | 932 | emulated: 2,246 bytes per call |
+    | recursive SQL function (`CASE ... f(n - 1) + 1`) | 8,422 | 8,422 | emulated: 498 bytes per call |
+    | the same, not inlinable (a FROM clause) | 4,212 | 4,210 | emulated |
+    | mutually recursive SQL functions | 12,634 | 12,634 | emulated |
+    | polymorphic recursive SQL function | 8,426 | 8,422 | emulated |
+    | recursion through a scalar subquery | 2,419 | 2,421 | emulated: + 368 per sub-select |
+    | SQL → PL/pgSQL → SQL | 933 | 933 | emulated |
+    | set-returning, in a select list | 3,437 | 3,437 | emulated: + 112 per ProjectSet |
+    | set-returning, in FROM | 3,038 | 4,210 | emulated (its function scan's frames aren't) |
+    | regex `(` × n `a` `)` × n | 8,710 | 8,710 | emulated: the reference's frames |
     | jsonpath parentheses | 9,984 | 9,750 | bison's 10,000 states |
 
     - Where PostgreSQL's own frames bound a recursion, the limit is emulated per level with
@@ -567,7 +582,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       - JSON input: an array level is 96 bytes in json and 113 in jsonb; an object level
         is 129. json's 21,760 and jsonb's 18,432 arrays work, and the regress tests' 100 kB
         cases fail.
-      - PL/pgSQL calls: 2,240 bytes each, so 928 levels run and 944 fail. The fixed cap
+      - PL/pgSQL calls: 2,246 bytes each, so 932 levels run and 933 fail. The fixed cap
         of 64 is gone.
       - jsonpath trees: 159 bytes per level. Its nested parentheses also give bison's
         "memory exhausted" at 10,000.
@@ -575,17 +590,65 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       `ulimit -s`). ARRAY[] beyond 6 dimensions fails with 54000.
   - **Cost.** The guards sit on hot paths (`eval`, executor `open`), and cost nothing measurable:
     TPC-H 1.005×, OLTP 1.04× against the base, in-process (BENCH.md, "Deep input").
-  - **Found and left open:**
-    - A recursive SQL function fails at any depth, even `f(1)`: the binder inlines its body
-      at every call, recursing until the depth limit. PostgreSQL's inline_function skips
-      functions already being inlined and runs them through fmgr_sql. PostgreSQL runs
-      8,320 levels of `CASE WHEN n = 0 THEN 0 ELSE f(n - 1) + 1 END`.
-    - CREATE VIEW takes time cubic in expression depth (`nodetree::Tree::collations` runs
-      `collation_at` over every subtree): 300 levels take 1 s and 600 take 8 s (release).
-    - The regex engine's emulated frames are an aarch64 build's. On the x86-64 reference,
-      `((...a...))` works up to 8,704 levels, where the engine stops before 8,000.
-    - An XML document deeper than 256 levels: the engine's error DETAIL adds libxml2's
-      context lines, which the reference doesn't print.
+  - **Recursive functions** (round 20, agent 82; agent 63 had left these open):
+    - *Inlining follows inline_function.* A SQL function already being inlined into the
+      expression (`Binder::inlining`, PostgreSQL's `active_fns`) isn't inlined again. A call
+      that isn't inlined, of a function whose body is being bound (`Binder::bodies`), runs
+      its body when called: a `PlCall` whose `call_sql` binds the body then, as fmgr_sql
+      plans its body for each call. A body that isn't inlined starts an `inlining` list of
+      its own. So every other level of `CASE WHEN n = 0 THEN 0 ELSE f(n - 1) + 1 END` is
+      inlined, as in PostgreSQL, and EXPLAIN shows `(f(4) + 1)` for `f(5)`. Mutually
+      recursive functions inline each other once per call.
+    - *Set-returning functions in FROM.* inline_set_returning_function has no such check:
+      PostgreSQL inlines a recursive one level by level, until a constant-false qual leaves
+      a level out (`WHERE n > 0` under a UNION ALL arm), and fails with stack depth when
+      nothing does. Here one that recursed runs as a call instead. Its rows are
+      PostgreSQL's, and its EXPLAIN is a Function Scan where PostgreSQL's shows the inlined
+      levels. Shapes that PostgreSQL can never finish inlining (a plain `SELECT * FROM
+      f(n - 1) WHERE n > 0`) fail there and return rows here.
+    - *Gating quals* (`exec::nodes::GateNode`): the quals of a filter or an inner join that
+      read no column of the row (pseudoconstant) run once, before the input runs. When one
+      fails, the input never runs. This is create_gating_plan's One-Time Filter, and it ends
+      a recursive function's recursion at its `WHERE n > 0`. It is off under EXPLAIN
+      ANALYZE, which counts rows per plan node.
+    - *Depth* (`stack::FnFrame`): a call that isn't inlined holds PostgreSQL's frame: 498
+      bytes for a SQL function and 2,246 for PL/pgSQL. Between calls a sub-select adds 368
+      bytes and a ProjectSet 112. The calls running at once add up, whatever their
+      language. In a release build each call also adds 128 kB to the stack budget, because a
+      call level takes about 70 kB of the engine's own stack. So the emulated frames decide
+      where recursion stops (the table above), at the price of about 280 MB of stack for
+      PostgreSQL's 8,422 levels, unmapped when the statement ends. In a debug build the
+      budget alone stops recursion, at about 2,000 levels.
+    - Left open: a set-returning function's call in FROM doesn't hold the function scan's
+      frame (PostgreSQL's 3,038 levels, 4,210 here), because its body runs as a join's
+      inner side, which can't tell a FROM call from a scalar one. An error deep in a
+      recursion can show one CONTEXT line fewer, "during inlining": PostgreSQL plans each
+      call's body with its arguments as constants (a custom plan), so it folds an inlined
+      level's `1 / n` while inlining it, where the engine raises the error when it runs it.
+      And EXPLAIN VERBOSE of a non-inlinable SQL function's call over a column prints the
+      column qualified (`f(g.g)`, PostgreSQL `f(g)`), recursive or not: the scans of the
+      function's body count as the statement's relations.
+  - **CREATE VIEW in linear time** (round 20, agent 82): `collation_at` copied every subtree
+    it visited, and nodetree asked it for every node, so the cost was cubic. Now it visits
+    children in place. nodetree derives a whole expression's collations in one pass
+    (`Binder::collations_below`), the binder checks collations once per expression instead
+    of once per subexpression (`Binder::expr_top`), and a binary operator copies its operands
+    only when the catalog has user operators. 2,000 `+` terms took 4.5 minutes in release
+    and now take 0.55 s. What is left is quadratic in a dependency: prost's `encoded_len`
+    when the view's text is deparsed (BENCH.md, "Recursive functions and deep views").
+  - **Regex frames per architecture** (round 20, agent 82): the x86-64 frames come from the
+    reference binary's prologues (objdump: return address, pushes, `sub rsp`). The aarch64
+    frames are as before. Both are chosen by `cfg(target_arch)`, so each matches the
+    reference image's build on its own host. The base is calibrated against the x86-64
+    reference. These match PostgreSQL exactly: 8,710 nested groups, 8,709 nested `(a|`,
+    1,308 nested `(a)*`, 564 nested `(a*b)*`, 43,549 `a`s, 13,065 `(a)`s and 6,121 nested
+    `(?=`. (`miss` pushes 16 bytes for `shortest`'s seventh argument.) The boundaries in
+    `tests/sql/regex_depth.sql` and deep_input's regex cases are the x86-64 reference's
+    now; an aarch64 host re-records them at its own boundaries.
+  - **XML deeper than 256 levels**: the engine's DETAIL, with libxml2's context lines and
+    caret, was already PostgreSQL's text. The difference was the test's: `deep_input.out`
+    keeps one line per case, and recording cut PostgreSQL's DETAIL at its first line break.
+    Line breaks are written as `\n` now, and 300 levels are recorded (agent 82).
   - Test: `tests/deep_input.rs` runs every shape through the embedded API on a 2 MB thread
     and on the test thread, in both build profiles. Its goldens, `tests/deep_input.out`, are
     recorded from PostgreSQL (`DEEP_RECORD`).

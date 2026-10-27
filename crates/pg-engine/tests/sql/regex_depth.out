@@ -1,25 +1,25 @@
-> select 'a' ~ (repeat('(', 7683) || 'a' || repeat(')', 7683))
+> select 'a' ~ (repeat('(', 8710) || 'a' || repeat(')', 8710))
 ?column?:bool
 t
 -- SELECT 1
 
-> select 'a' ~ (repeat('(', 7684) || 'a' || repeat(')', 7684))
+> select 'a' ~ (repeat('(', 8711) || 'a' || repeat(')', 8711))
 ERROR 2201B: invalid regular expression: regular expression is too complex
 
-> select 'a' ~ repeat('a', 43539)
+> select 'a' ~ repeat('a', 43549)
 ?column?:bool
 f
 -- SELECT 1
 
-> select 'a' ~ repeat('a', 43540)
+> select 'a' ~ repeat('a', 43550)
 ERROR 2201B: invalid regular expression: regular expression is too complex
 
-> select 'a' ~ repeat('(a)', 11874)
+> select 'a' ~ repeat('(a)', 13065)
 ?column?:bool
 f
 -- SELECT 1
 
-> select 'a' ~ repeat('(a)', 11875)
+> select 'a' ~ repeat('(a)', 13066)
 ERROR 2201B: invalid regular expression: regular expression is too complex
 
 > select 'a' ~ (repeat('(', 1308) || 'a' || repeat(')*', 1308))
@@ -30,18 +30,18 @@ t
 > select 'a' ~ (repeat('(', 1309) || 'a' || repeat(')*', 1309))
 ERROR 2201B: invalid regular expression: regular expression is too complex
 
-> select 'a' ~ (repeat('(?=', 5841) || 'a' || repeat(')', 5841))
+> select 'a' ~ (repeat('(?=', 6121) || 'a' || repeat(')', 6121))
 ?column?:bool
 t
 -- SELECT 1
 
-> select 'a' ~ (repeat('(?=', 5842) || 'a' || repeat(')', 5842))
+> select 'a' ~ (repeat('(?=', 6122) || 'a' || repeat(')', 6122))
 ERROR 2201B: regular expression failed: regular expression is too complex
 
-> select regexp_match('a', repeat('(', 7684) || 'a' || repeat(')', 7684))
+> select regexp_match('a', repeat('(', 8711) || 'a' || repeat(')', 8711))
 ERROR 2201B: invalid regular expression: regular expression is too complex
 
-> select regexp_replace('a', repeat('a', 43540), 'x')
+> select regexp_replace('a', repeat('a', 43550), 'x')
 ERROR 2201B: invalid regular expression: regular expression is too complex
 
 > set statement_timeout = '50ms'
