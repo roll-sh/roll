@@ -3637,3 +3637,24 @@ fn binary_datetime_input_in_range() {
     });
     s.engine.shutdown();
 }
+
+/// ProcessStartupPacket: the database and user names are cut to NAMEDATALEN - 1 bytes, so
+/// an overlength name finds what CREATE truncated it to.
+#[test]
+fn startup_names_cut_to_namedatalen() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        let (db, user) = ("d".repeat(66), "u".repeat(70));
+        c.batch_execute(&format!("CREATE DATABASE \"{db}\"; CREATE ROLE \"{user}\" LOGIN"))
+            .await
+            .unwrap();
+        let mut cfg = s.config(&db, "");
+        cfg.user(&user);
+        let (c, conn) = cfg.connect(NoTls).await.unwrap();
+        tokio::spawn(conn);
+        let r = c.query_one("SELECT current_database()::text, current_user::text", &[]).await.unwrap();
+        assert_eq!((r.get::<_, String>(0), r.get::<_, String>(1)), ("d".repeat(63), "u".repeat(63)));
+    });
+    s.engine.shutdown();
+}

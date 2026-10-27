@@ -762,11 +762,15 @@ fn handle(
         );
         return c.flush();
     };
-    let user = user.to_string();
-    let mut database = get("database")
-        .filter(|d| !d.is_empty())
-        .unwrap_or(&user)
-        .to_string();
+    // ProcessStartupPacket: the database defaults to the user name; both are cut to
+    // NAMEDATALEN - 1 bytes, so an overlength name finds the object its CREATE truncated.
+    // (A byte cut, not pg_mbcliplen: a name cut inside a character matches nothing.)
+    let name = |s: &str| {
+        let b = s.as_bytes();
+        String::from_utf8_lossy(&b[..b.len().min(63)]).into_owned()
+    };
+    let mut database = name(get("database").filter(|d| !d.is_empty()).unwrap_or(user));
+    let user = name(user);
     // A walsender (replication=true: physical, without a database; =database: logical).
     if let Some(r) = get("replication") {
         match crate::repl::walsender::mode_of(r) {
