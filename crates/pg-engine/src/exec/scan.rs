@@ -75,6 +75,20 @@ pub fn decode_table_row_at(t: &Table, key: Option<&[u8]>, bytes: &[u8]) -> Resul
     Ok(row)
 }
 
+/// `decode_table_row` building only the columns `need` marks (the others NULL), for a reader
+/// that keeps none of the values (a measurement).
+pub fn decode_table_row_need(t: &Table, bytes: &[u8], need: &[bool]) -> Result<Row> {
+    let (_, data) = split_header(bytes)?;
+    let mut row = crate::storage::row::decode_row_need(data, need)?;
+    if row.len() < t.columns.len() {
+        for c in &t.columns[row.len()..] {
+            row.push(c.missing.clone().unwrap_or(Value::Null));
+        }
+    }
+    row.truncate(t.columns.len());
+    Ok(row)
+}
+
 /// Encode a table row for storage, written by transaction `xid`.
 pub fn encode_table_row(row: &[Value], xid: u64) -> Vec<u8> {
     encode_table_row_at(row, xid, None)

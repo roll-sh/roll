@@ -4833,7 +4833,8 @@ impl Node for DeleteNode {
             if before && !trigger::before_delete(triggers, &t, &old, ctx)? {
                 continue;
             }
-            match self_modified(&dkey, ctx) {
+            // (Only a BEFORE trigger, run since the check above, can have changed it.)
+            match if before { self_modified(&dkey, ctx) } else { SelfModified::No } {
                 SelfModified::No => {}
                 SelfModified::ByThis => continue,
                 SelfModified::ByLater => return Err(triggered_change("deleted")),

@@ -467,6 +467,22 @@ pub fn tuple_header(n: usize, has_null: bool) -> usize {
     align(23 + if has_null { n.div_ceil(8) } else { 0 }, MAXALIGN)
 }
 
+/// `datum_bytes` of a value known by its size alone: of a fixed-length type (`payload`
+/// None), or a varlena of `payload` bytes (`storage::row::stored_tuple_len`).
+pub fn datum_len_at(off: usize, ty: &DataType, payload: Option<usize>) -> usize {
+    let (len, al) = type_layout(ty);
+    match payload {
+        None => align(off, al) - off + len.max(0) as usize,
+        Some(p) if p < 127 => p + 1,
+        Some(p) => align(off, al) - off + p + 4,
+    }
+}
+
+/// `heap_tuple` of a tuple of length `len` (`heap_tuple_len`).
+pub fn heap_tuple_of_len(len: usize) -> usize {
+    align(len, MAXALIGN) + ITEM_ID
+}
+
 /// A heap tuple's t_len: its header (with the null bitmap) and data.
 pub fn heap_tuple_len(
     types: &[DataType],

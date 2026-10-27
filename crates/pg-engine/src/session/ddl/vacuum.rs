@@ -1150,7 +1150,7 @@ impl Ddl<'_, '_> {
             am: bool,
             tuples: usize,
             /// (sort key, index tuple size), when its pages aren't modelled.
-            keys: Vec<(Vec<u8>, usize)>,
+            keys: Vec<(u64, Vec<u8>, usize)>,
             /// A btree's keys as its model has them, when its pages aren't modelled: sized
             /// by the model's sorted build (`sizing::btree_build_blocks`).
             btree_keys: Option<Vec<Arc<crate::catalog::btsim::Key>>>,
@@ -1191,10 +1191,39 @@ impl Ddl<'_, '_> {
         }
         let mut rows = 0usize;
         let mut sizes: Vec<usize> = Vec::new();
-        for r in self.scan_rows(t) {
+        // (Indexes of plain columns read only theirs: the other values aren't decoded, and
+        // the heap's tuples are sized from the stored bytes where they can be.)
+        let need: Option<Vec<bool>> = ixs
+            .iter()
+            .all(|ix| {
+                ix.btree_keys.is_none()
+                    && ix.bix.predicate.is_none()
+                    && ix.bix.keys.iter().all(|k| matches!(k, crate::sql::expr::Expr::Col(..)))
+            })
+            .then(|| {
+                let mut cols = std::collections::HashSet::new();
+                for ix in &ixs {
+                    crate::exec::sizing::index_columns(&ix.bix, &mut cols);
+                }
+                (0..t.columns.len()).map(|i| cols.contains(&i)).collect()
+            });
+        let virt_mask: Vec<bool> = (0..t.columns.len()).map(|i| virt.contains(&i)).collect();
+        let start = crate::storage::keys::index_prefix(t.oid, 0);
+        let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
+        for r in scan {
             self.ctx.check()?;
-            let (_, mut row) = r?;
+            let (_, bytes) = r?;
             rows += 1;
+            let stored = match modelled {
+                None => crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask),
+                Some(_) => None,
+            };
+            let mut row = match &need {
+                Some(need) if modelled.is_some() || stored.is_some() => {
+                    crate::exec::scan::decode_table_row_need(t, &bytes, need)?
+                }
+                _ => crate::exec::scan::decode_table_row(t, &bytes)?,
+            };
             for ix in &mut ixs {
                 let Some(mut vals) = super::table::index_values(&ix.bix, &row, self)? else {
                     continue;
@@ -1208,10 +1237,25 @@ impl Ddl<'_, '_> {
                 } else if ix.modelled.is_none() {
                     let sort = super::table::key_bytes(&vals);
                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
-                    ix.keys.push((sort, relsize::index_tuple(&ix.types, &vals, &text)));
+                    ix.keys.push((key_prefix(&sort), sort, relsize::index_tuple(&ix.types, &vals, &text)));
                 }
             }
             if modelled.is_none() {
+                if let Some(len) = stored {
+                    // (Debug builds check it against the size of the row decoded.)
+                    #[cfg(debug_assertions)]
+                    {
+                        let mut full = crate::exec::scan::decode_table_row(t, &bytes)?;
+                        for &i in &virt {
+                            if i < full.len() {
+                                full[i] = Value::Null;
+                            }
+                        }
+                        debug_assert_eq!(relsize::heap_tuple_of_len(len), relsize::heap_tuple(&types, &full, &text));
+                    }
+                    sizes.push(relsize::heap_tuple_of_len(len));
+                    continue;
+                }
                 for &i in &virt {
                     if i < row.len() {
                         row[i] = Value::Null;
@@ -1233,15 +1277,17 @@ impl Ddl<'_, '_> {
             let pages = match ix.modelled.or(built) {
                 Some(n) => n as i32,
                 None => {
-                    // (Unstable: entries equal as (key, size) are interchangeable.)
+                    // (By the first 8 bytes, then the key, then the size: the keys' order, the
+                    // prefix compared without reading the key. Unstable: entries equal as
+                    // (key, size) are interchangeable.)
                     ix.keys.sort_unstable();
                     let dedup = !ix.bix.index.unique
                         && ix.bix.index.include.is_empty()
                         && ix.types.iter().all(relsize::equal_image)
                         && ix.bix.colls.iter().flatten().all(|k| k.coll.deterministic);
                     let mut sizes = Vec::with_capacity(ix.keys.len());
-                    for group in ix.keys.chunk_by(|a, b| dedup && a.0 == b.0) {
-                        relsize::posting_tuples(group[0].1, group.len(), &mut sizes);
+                    for group in ix.keys.chunk_by(|a, b| dedup && a.1 == b.1) {
+                        relsize::posting_tuples(group[0].2, group.len(), &mut sizes);
                     }
                     relsize::btree_pages(&sizes)
                 }
@@ -1293,6 +1339,15 @@ impl Ddl<'_, '_> {
                 .map_or(m.live, |p| p as i32),
         }
     }
+}
+
+/// A sort key's first 8 bytes, big-endian, zero-padded: ordering by it, then by the whole key,
+/// orders keys as the whole key does.
+fn key_prefix(k: &[u8]) -> u64 {
+    let mut b = [0u8; 8];
+    let n = k.len().min(8);
+    b[..n].copy_from_slice(&k[..n]);
+    u64::from_be_bytes(b)
 }
 
 /// A boolean VACUUM option's value (no argument: true).

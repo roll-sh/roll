@@ -183,3 +183,32 @@ fn deferred_model_matches() {
         );
     }
 }
+
+/// VACUUM, ANALYZE and CREATE INDEX measuring a table too big to model size most rows from
+/// their stored bytes (`storage::row::stored_tuple_len`); debug builds check every such size
+/// against the decoded row's. Here over each kind of value it reads or leaves to decoding:
+/// nulls, booleans, numbers, dates, timestamps, ASCII and other text, varchar, char(n),
+/// numeric, a virtual generated column and rows from before an added column.
+#[test]
+fn measured_sizes_from_stored_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(300, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE m (i int, b bool, s smallint, l bigint, f real, d float8, dt date, ts timestamp, tz timestamptz, t text, v varchar(20), c char(5), n numeric, g int GENERATED ALWAYS AS (i * 2) VIRTUAL)");
+        run(&mut s, "INSERT INTO m (i, b, s, l, f, d, dt, ts, tz, t, v, c, n) SELECT g, g % 2 = 0, g % 100, g * 1000, g / 3.0, g / 7.0, date '2000-01-01' + g, timestamp '2000-01-01' + g * interval '1 hour', timestamptz '2000-01-01 00:00+00' + g * interval '1 minute', CASE WHEN g % 5 = 0 THEN NULL WHEN g % 7 = 0 THEN 'é' || g ELSE repeat('x', g % 200) END, 'v' || g, 'c' || (g % 10), g / 3.0 FROM generate_series(1, 1500) g");
+        run(&mut s, "ALTER TABLE m ADD COLUMN extra int DEFAULT 7");
+        run(&mut s, "INSERT INTO m (i, t, extra) SELECT g, repeat('y', 300), g FROM generate_series(1501, 1700) g");
+        run(&mut s, "CREATE INDEX m_i ON m (i);\nCREATE INDEX m_t ON m (t) INCLUDE (l);\nANALYZE m;\nVACUUM m");
+        let pages = rows(&mut s, "SELECT relpages > 0, reltuples FROM pg_class WHERE relname = 'm'");
+        assert_eq!(pages, ["[Bool(true), Float4(1700.0)]"]);
+        // Only kinds sized from the stored bytes (and nulls), so every row goes that way.
+        run(&mut s, "CREATE TABLE m2 (i int, b bool, s smallint, l bigint, f real, d float8, dt date, ts timestamp, tz timestamptz, t text, v varchar(20), g int GENERATED ALWAYS AS (i * 2) VIRTUAL)");
+        run(&mut s, "INSERT INTO m2 SELECT g, g % 2 = 0, g % 100, g * 1000, g / 3.0, g / 7.0, date '2000-01-01' + g, timestamp '2000-01-01' + g * interval '1 hour', timestamptz '2000-01-01 00:00+00' + g * interval '1 minute', CASE WHEN g % 5 = 0 THEN NULL ELSE repeat('x', g % 300) END, CASE WHEN g % 3 = 0 THEN NULL ELSE 'v' || g END FROM generate_series(1, 1500) g");
+        let sized = pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed);
+        run(&mut s, "CREATE INDEX m2_i ON m2 (i);\nCREATE UNIQUE INDEX m2_l ON m2 (l) INCLUDE (t);\nANALYZE m2;\nVACUUM m2");
+        assert!(pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed) >= sized + 4 * 1500, "sized from the stored bytes");
+        let pages = rows(&mut s, "SELECT relpages > 0, reltuples FROM pg_class WHERE relname = 'm2'");
+        assert_eq!(pages, ["[Bool(true), Float4(1500.0)]"]);
+    });
+}

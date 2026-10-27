@@ -1956,6 +1956,40 @@ transaction, PREPARE TRANSACTION and COMMIT PREPARED; `bulklocks::tests::keyset_
 Every crate test binary at the default, with `ROLL_TXN_SPILL_BYTES=4096` and with
 `ROLL_COMPACT_LOCKS_AFTER=0`; clippy adds no warnings; the regression suite in full on a
 private reference against the committed `results.tsv`: 51,148 / 51,150, no unit changed.
+(pgrowlocks, added meanwhile, reads row locks too: it consults the compact sets.)
+
+### Batch 3: measuring without decoding
+
+VACUUM, ANALYZE and CREATE INDEX measure a table too big to model row by row
+(`Ddl::measure_rows`). Now a row's heap tuple is sized from its stored bytes when every value
+is a null, a boolean, a fixed-size number, a date, a timestamp or ASCII text of its column's
+type (`storage::row::stored_tuple_len`; debug builds check each such size against the decoded
+row's, and `tests/big_tables.rs` `measured_sizes_from_stored_rows` runs it over each kind), and
+plain-column indexes decode only their columns. Index keys sort by an 8-byte prefix first. A
+DELETE without BEFORE triggers checks the transaction's own writes once per row, not twice.
+The same numbers as before (relpages, reltuples, index pages). On a quiet machine, 3
+interleaved runs:
+
+| step | pg | before | batch 2 | batch 3 |
+|---|---|---|---|---|
+| COPY in | 0.75 | 4.52 | 2.42 | 2.51 |
+| CREATE INDEX | 0.29 | 2.23 | 2.09 | 2.13 |
+| CREATE UNIQUE INDEX | 0.19 | 1.86 | 1.82 | 1.88 |
+| COPY out | 0.40 | 1.48 | 0.54 | 0.54 |
+| INSERT … SELECT | 0.60 | 2.88 | 2.02 | 2.04 |
+| UPDATE half | 4.05 | 3.15 | 2.15 | 2.11 |
+| DELETE a quarter | 0.19 | 2.05 | 1.88 | 1.64 |
+| VACUUM | 0.22 | 0.77 | 0.61 | 0.66 |
+| ANALYZE | 0.10 | 1.13 | 0.94 | 0.90 |
+| count(*) after | 0.04 | 0.10 | 0.13 | 0.10 |
+| peak memory | 351 MB | 847 MB | 729 MB | 788 MB |
+
+What the measurement still costs is the scan itself and, per index, a key per row encoded and
+sorted (the build already did both: sharing them is the next step).
+
+Verified (batch 3): every crate test binary at the default and with `ROLL_TXN_SPILL_BYTES=4096`
+(27 of 27 each), clippy adds no warnings, the regression suite in full on a private reference
+against the committed `results.tsv`: 51,148 / 51,150, no unit changed.
 
 ## Where it is still slower, and why
 

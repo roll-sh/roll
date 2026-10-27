@@ -610,6 +610,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     `prepare_checks`). Agent 73's wait logic is untouched.
   - UPDATE and DELETE keep a set of the rows they changed only when their source can return
     a row twice (`dml::rows_once`).
+  - `measure_rows` sizes most stored rows without decoding them
+    (`storage::row::stored_tuple_len`, cross-checked in debug builds) and decodes only the
+    columns of plain-column indexes; a new value kind it sizes raw needs a case there that
+    gives exactly `relsize::datum_bytes`.
   - A big statement's heap model waits for its end (`sizing::Defer`): COPY's batches and an
     INSERT … SELECT's rows past its first 10,000 (`DEFER_AFTER`, `with_defer_after` in
     tests) are modelled when it ends, so a load past the model's size never builds the model

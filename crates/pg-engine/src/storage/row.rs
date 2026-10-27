@@ -536,6 +536,63 @@ pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
     Ok(())
 }
 
+/// What `relsize::heap_tuple_len` gives the stored row `b` (its encoded values) taken as
+/// `types`, the columns `null` stored as nulls (virtual generated ones), without decoding it.
+/// None when a value's size needs it decoded: anything but nulls, booleans, fixed-size numbers,
+/// dates and timestamps of the column's own type and ASCII text in a text or varchar column;
+/// and rows shorter than `types` (they get columns added since).
+pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<usize> {
+    use crate::catalog::relsize::{datum_len_at, tuple_header};
+    let mut pos = 0;
+    let n = get_varint(b, &mut pos).ok()? as usize;
+    if n < types.len() {
+        return None;
+    }
+    // Each value: None a null, Some(None) fixed-length, Some(Some(payload)) text.
+    let mut vals: Vec<Option<Option<usize>>> = Vec::with_capacity(types.len());
+    for (i, ty) in types.iter().enumerate() {
+        let t = *b.get(pos)?;
+        pos += 1;
+        // (The encoded payload's size, for a value of the column's own type.)
+        let fixed = |ok: bool, size: usize| ok.then_some(size);
+        let skip = match ty {
+            _ if t == tag::NULL => 0,
+            DataType::Bool => fixed(t == tag::TRUE || t == tag::FALSE, 0)?,
+            DataType::Int2 => fixed(t == tag::INT2, 2)?,
+            DataType::Int4 | DataType::Date => fixed(t == tag::INT4 && matches!(ty, DataType::Int4) || t == tag::DATE && matches!(ty, DataType::Date), 4)?,
+            DataType::Int8 => fixed(t == tag::INT8, 8)?,
+            DataType::Float4 => fixed(t == tag::FLOAT4, 4)?,
+            DataType::Float8 => fixed(t == tag::FLOAT8, 8)?,
+            DataType::Timestamp(_) => fixed(t == tag::TIMESTAMP, 8)?,
+            DataType::Timestamptz(_) => fixed(t == tag::TIMESTAMPTZ, 8)?,
+            DataType::Text | DataType::Varchar(_) if t == tag::TEXT => {
+                let len = get_varint(b, &mut pos).ok()? as usize;
+                if !b.get(pos..pos + len)?.is_ascii() {
+                    return None;
+                }
+                pos += len;
+                vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(len)));
+                continue;
+            }
+            _ => return None,
+        };
+        pos += skip;
+        let stored = t != tag::NULL && !null.get(i).copied().unwrap_or(false);
+        vals.push(stored.then_some(None));
+    }
+    let mut off = tuple_header(types.len(), vals.iter().any(Option::is_none));
+    for (v, ty) in vals.iter().zip(types) {
+        if let Some(payload) = v {
+            off += datum_len_at(off, ty, *payload);
+        }
+    }
+    STORED_SIZES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(off)
+}
+
+/// Rows `stored_tuple_len` sized (tests read it).
+pub static STORED_SIZES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// `decode_row` building only the values `need` marks (the others NULL; a value past the
 /// mask's end isn't needed).
 pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
