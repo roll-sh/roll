@@ -2005,6 +2005,53 @@ fn concurrent_ddl_on_unrelated_objects() {
     s.engine.shutdown();
 }
 
+/// Two sessions creating tables with foreign keys at once (Kysely's with-schema setup) never
+/// give one oid to two catalog rows: a key's internal triggers take the oids right after the
+/// constraint's, allocated as one block from the cluster's counter (another session's DDL
+/// used to take one in between), and both tables then drop, at once too.
+#[test]
+fn concurrent_foreign_keys_take_distinct_oids() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        let c = s.connect("postgres").await;
+        let mk = |t: &str| {
+            format!(
+                "CREATE TABLE mammals.{t} (id serial PRIMARY KEY, name varchar(50) UNIQUE,
+                 owner_id integer REFERENCES public.person(id) ON DELETE CASCADE)"
+            )
+        };
+        let dup = "SELECT count(*) FROM (SELECT oid FROM (
+            SELECT oid FROM pg_class UNION ALL SELECT oid FROM pg_constraint
+            UNION ALL SELECT oid FROM pg_trigger UNION ALL SELECT oid FROM pg_type
+            UNION ALL SELECT oid FROM pg_attrdef) o WHERE oid >= 16384 GROUP BY oid HAVING count(*) > 1) d";
+        let (pet, staging) = (mk("pet"), mk("pet_staging"));
+        for round in 0..20 {
+            c.batch_execute(
+                "DROP TABLE IF EXISTS mammals.pet, mammals.pet_staging, public.person;
+                 DROP SCHEMA IF EXISTS mammals; CREATE TABLE public.person (id serial PRIMARY KEY);
+                 CREATE SCHEMA mammals",
+            )
+            .await
+            .unwrap();
+            let (x, y) = tokio::join!(a.batch_execute(&pet), b.batch_execute(&staging));
+            x.unwrap();
+            y.unwrap();
+            let n: i64 = c.query_one(dup, &[]).await.unwrap().get(0);
+            assert_eq!(n, 0, "round {round}: oids shared by two catalog rows");
+            let (x, y) = tokio::join!(
+                a.batch_execute("DROP TABLE mammals.pet"),
+                b.batch_execute("DROP TABLE mammals.pet_staging")
+            );
+            x.unwrap();
+            y.unwrap();
+            c.batch_execute("DROP TABLE public.person").await.unwrap();
+        }
+    });
+    s.engine.shutdown();
+}
+
 /// pg_hba's md5 and password methods: an MD5 challenge for a role with an MD5 password (SCRAM
 /// for one with a SCRAM secret), the password in clear checked against either kind.
 #[test]

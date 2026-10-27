@@ -3436,13 +3436,11 @@ impl Ddl<'_, '_> {
         }
     }
 
-    /// A foreign key's oid, then `n` more for its internal triggers (`trigger::ri_triggers`).
+    /// A foreign key's oid, then `n` more for its internal triggers (`trigger::ri_triggers`
+    /// derives them from the constraint's: one block, so that no other session's DDL takes
+    /// one in between from the cluster's counter).
     pub(super) fn alloc_fk_oid(&mut self, n: u32) -> u32 {
-        let oid = self.cat.alloc_oid();
-        for _ in 0..n {
-            self.cat.alloc_oid();
-        }
-        oid
+        self.cat.alloc_oids(n + 1)
     }
 
     /// Check a foreign key's existing rows, as adding it does (the referenced table locked

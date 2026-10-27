@@ -2484,13 +2484,10 @@ impl Catalog {
     }
 
     /// An index-backed constraint's oid, then for a deferrable one its unique_key_recheck
-    /// trigger's (index_constraint_create), which is the next.
+    /// trigger's (index_constraint_create), which is the next (one block: `recheck_triggers`
+    /// derives it).
     pub fn alloc_con_oid(&mut self, deferrable: bool) -> u32 {
-        let o = self.alloc_oid();
-        if deferrable {
-            self.alloc_oid();
-        }
-        o
+        self.alloc_oids(1 + deferrable as u32)
     }
 
     /// `n` consecutive oids.
