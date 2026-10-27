@@ -1577,38 +1577,10 @@ impl Session {
         Ok((bq, false))
     }
 
-    /// cached_plan_cost: the plan's total cost, as EXPLAIN shows it; a custom plan's with a
-    /// charge for planning it (1000 * cpu_operator_cost per range table entry, plus one).
+    /// cached_plan_cost (`plan_total_cost`).
     fn plan_cost(&mut self, bq: &BoundQuery, params: &[Value], planning: bool) -> f64 {
-        let Ok(mut o) = crate::sql::explain::options(&[]) else {
-            return 0.0;
-        };
-        o.format = crate::sql::explain::Format::Json;
-        o.costs = true;
-        o.summary = false;
-        let text = self
-            .with_ctx(params, |ctx| {
-                Ok(crate::sql::explain::explain(
-                    &bq.plan,
-                    bq.hidden_rtes,
-                    &o,
-                    ctx,
-                    params,
-                    None,
-                    0.0,
-                    0.0,
-                ))
-            })
-            .unwrap_or_default();
-        let total = (text.split("\"Total Cost\": ").nth(1))
-            .and_then(|r| r.split([',', '\n', ' ']).next())
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.0);
-        if planning {
-            total + 2.5 * (range_entries(&bq.plan) + bq.hidden_rtes + 1) as f64
-        } else {
-            total
-        }
+        self.with_ctx(params, |ctx| Ok(plan_total_cost(ctx, &bq.plan, bq.hidden_rtes, params, planning)))
+            .unwrap_or_default()
     }
 
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
@@ -3428,4 +3400,31 @@ fn in_parallel_worker(ctx: &crate::exec::ExecCtx, plan: &crate::sql::plan::Plan)
     crate::sql::paths::parallel::ParCfg::read(ctx).max_workers > 0
         && !plan.writes()
         && crate::sql::paths::parallel::plan_hazard(plan, &ctx.catalog()) == 's'
+}
+
+/// cached_plan_cost: `plan`'s total cost, as EXPLAIN shows it; a custom plan's with a charge
+/// for planning it (1000 * cpu_operator_cost per range table entry, plus one).
+pub(crate) fn plan_total_cost(
+    ctx: &crate::exec::ExecCtx,
+    plan: &Arc<Plan>,
+    hidden_rtes: usize,
+    params: &[Value],
+    planning: bool,
+) -> f64 {
+    let Ok(mut o) = crate::sql::explain::options(&[]) else {
+        return 0.0;
+    };
+    o.format = crate::sql::explain::Format::Json;
+    o.costs = true;
+    o.summary = false;
+    let text = crate::sql::explain::explain(plan, hidden_rtes, &o, ctx, params, None, 0.0, 0.0);
+    let total = (text.split("\"Total Cost\": ").nth(1))
+        .and_then(|r| r.split([',', '\n', ' ']).next())
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    if planning {
+        total + 2.5 * (range_entries(plan) + hidden_rtes + 1) as f64
+    } else {
+        total
+    }
 }

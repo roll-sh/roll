@@ -112,6 +112,8 @@ const RELEASE_CASES: &[(&str, usize)] = &[
     ("sqlfnsubq", 2600),
     ("sqlfnpl", 900),
     ("sqlfnpl", 1000),
+    ("sqlfnsrf", 3000),
+    ("sqlfnsrf", 3100),
     ("plpgsql", 925),
     ("plpgsql", 940),
 ];

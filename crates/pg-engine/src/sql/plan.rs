@@ -1287,6 +1287,8 @@ pub enum Plan {
         /// The call's input collation (None: the default, or none determined), which the
         /// function's collatable variables take.
         coll: Option<String>,
+        /// A FROM item's call (a function scan), like `Context::scan`.
+        scan: bool,
     },
     /// A security_barrier view's query (or a subquery planned apart): the statement's
     /// quals that may leak its rows' values stay above it; EXPLAIN shows a Subquery Scan
@@ -1325,6 +1327,9 @@ pub enum Plan {
         /// A VOLATILE function's statement: each run is a command of its own, with its own
         /// snapshot (a non-volatile one reads the calling query's).
         volatile: bool,
+        /// A FROM item's call (a function scan), whose executor frames count towards the
+        /// depth of the calls inside it (`stack::PG_FUNCSCAN_FRAME`).
+        scan: bool,
     },
     Filter {
         input: Arc<Plan>,

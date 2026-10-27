@@ -127,8 +127,10 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             args,
             ncols,
             coll,
+            scan,
         } => {
             let vals = eval_all(args, &[], ctx)?;
+            let _frame = scan.then(|| crate::stack::FnFrame::hold(crate::stack::PG_FUNCSCAN_FRAME));
             let rows = if func.strict && vals.iter().any(Value::is_null) {
                 // STRICT: NULL in → NULL out, without running the body.
                 if func.returns_set {
@@ -157,12 +159,14 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             frame,
             perms,
             volatile,
+            scan,
         } => {
             // A volatile SQL function's statement runs as a command of its own.
             let snap = volatile.then(|| ctx.fresh_snapshot());
+            let pg_frame = sql_fn_frame(*scan);
             let run = || {
                 ctx.sess.framed(frame.clone(), |_| {
-                    let _frame = crate::stack::FnFrame::enter(crate::stack::PG_SQL_FN_FRAME)?;
+                    let _frame = crate::stack::FnFrame::enter(pg_frame)?;
                     if let Some(p) = perms {
                         crate::sql::binder::perms::check(p, ctx)?;
                         crate::sql::binder::perms::check_row_security(p, ctx)?;
@@ -178,6 +182,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 input,
                 frame: frame.clone(),
                 snap,
+                pg_frame,
             })
         }
         // create_gating_plan: the quals that read no column of the row (pseudoconstant) run
@@ -187,7 +192,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             plan: input.clone(),
             need: nd::add(need.map(<[bool]>::to_vec), [pred]),
             gates: gates_of(pred),
-            filter: Some(pred.clone()),
+            filter: rest_of(pred),
             input: None,
         }),
         // (An inner join's: the join runs with the others. Not under EXPLAIN ANALYZE, which
@@ -198,17 +203,9 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             ..
         } if gating(c) && !ctx.instrumented() => {
             let gates = gates_of(c);
-            let rest: Vec<Expr> = match c {
-                Expr::And(list) => list.iter().filter(|e| !gating(e)).cloned().collect(),
-                _ => Vec::new(),
-            };
             let mut join = (**plan).clone();
             if let Plan::Join { cond, .. } = &mut join {
-                *cond = match rest.len() {
-                    0 => None,
-                    1 => rest.into_iter().next(),
-                    _ => Some(Expr::And(rest)),
-                };
+                *cond = rest_of(c);
             }
             Box::new(GateNode {
                 plan: Arc::new(join),
@@ -1553,9 +1550,22 @@ fn gates_of(pred: &Expr) -> Vec<Expr> {
     }
 }
 
+/// The quals of `pred` that don't gate it (`gating`), which still run per row.
+fn rest_of(pred: &Expr) -> Option<Expr> {
+    let mut rest: Vec<Expr> = match pred {
+        Expr::And(list) => list.iter().filter(|e| !gating(e)).cloned().collect(),
+        _ => Vec::new(),
+    };
+    match rest.len() {
+        0 => None,
+        1 => rest.pop(),
+        _ => Some(Expr::And(rest)),
+    }
+}
+
 /// A node gated by pseudoconstant quals (a Result's One-Time Filter): they are evaluated at
 /// the first row asked for, and the input is opened (and run) only when they all hold.
-/// A filter's quals (`filter`) then filter the input's rows.
+/// A filter's other quals (`filter`) then filter the input's rows.
 struct GateNode {
     plan: Arc<Plan>,
     need: Option<Vec<bool>>,
@@ -4220,15 +4230,24 @@ struct ContextNode {
     frame: crate::error::Frame,
     /// The snapshot of a volatile function's statement.
     snap: Option<Rc<crate::txn::Snap>>,
+    /// Postgres's stack its call holds while it runs (`sql_fn_frame`).
+    pg_frame: usize,
+}
+
+/// Postgres's stack a SQL function's call holds while its statement runs: fmgr_sql's, and
+/// in FROM also the function scan's above it.
+fn sql_fn_frame(scan: bool) -> usize {
+    crate::stack::PG_SQL_FN_FRAME + if scan { crate::stack::PG_FUNCSCAN_FRAME } else { 0 }
 }
 
 impl Node for ContextNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         let input = &mut self.input;
         let frame = &self.frame;
+        let pg_frame = self.pg_frame;
         let mut run = || {
             ctx.sess.framed(frame.clone(), |_| {
-                let _frame = crate::stack::FnFrame::enter(crate::stack::PG_SQL_FN_FRAME)?;
+                let _frame = crate::stack::FnFrame::enter(pg_frame)?;
                 input.next(ctx)
             })
         };

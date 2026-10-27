@@ -7540,6 +7540,7 @@ impl Binder<'_, '_> {
                 args: outer,
                 ncols: cols.len(),
                 coll,
+                scan: false,
             };
             return Ok((plan, cols));
         }
@@ -8106,6 +8107,7 @@ impl Binder<'_, '_> {
             self.call_collation(&coerced)?;
         }
         let at = self.sql_fn_at(&fdef, &coerced, FnPlace::Scalar);
+        let hidden_rtes = self.hidden_rtes;
         let bound = self.in_sql_fn(&fdef, at, |b| {
             let (plan, cols) = b.bind_user_body(&fdef, &coerced)?;
             if fdef.language == "sql" {
@@ -8234,6 +8236,9 @@ impl Binder<'_, '_> {
         {
             return Ok(e);
         }
+        // A call that isn't inlined plans its body on its own: the body's relations aren't
+        // the statement's (EXPLAIN qualifies columns by the statement's alone).
+        self.hidden_rtes = hidden_rtes;
         let plan = Arc::new(self.sql_fn_plan(&fdef, at, plan));
         let nargs = coerced.len();
         let mut params = coerced;
@@ -8565,6 +8570,7 @@ impl Binder<'_, '_> {
                 frame: sql_fn_frame(f, at),
                 perms: perms.filter(|p| !p.is_empty()).map(Arc::new),
                 volatile: f.volatility == 'v',
+                scan: false,
             },
             _ => plan,
         }

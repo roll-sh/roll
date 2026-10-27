@@ -71,6 +71,16 @@ SELECT rec_err(1);
 CREATE FUNCTION rec_err2(n int) RETURNS int LANGUAGE sql
   AS 'SELECT CASE WHEN n = 0 THEN 1 / n ELSE rec_err2(n - 1) END FROM (VALUES (1)) v';
 SELECT rec_err2(3);
+-- Each call plans its body with its arguments as constants (a custom plan) the first five
+-- times in a session, folding the level it inlines: "during inlining". Then the generic
+-- plan, which is cheaper, runs it.
+SELECT rec_err(2);
+SELECT rec_err(4);
+SELECT rec_err(10);
+SELECT rec_err(4);
+SET plan_cache_mode = force_custom_plan;
+SELECT rec_err(4);
+RESET plan_cache_mode;
 CREATE FUNCTION rec_perr(n int) RETURNS int LANGUAGE plpgsql
   AS 'BEGIN IF n = 0 THEN RETURN 100; END IF; RETURN rec_serr(n - 1) + 1; END';
 CREATE FUNCTION rec_serr(n int) RETURNS int LANGUAGE sql AS 'SELECT rec_perr(n) FROM (VALUES (1)) v';
@@ -123,6 +133,23 @@ CREATE TABLE rec_t (a int DEFAULT rec_f(4), b int CHECK (rec_f(b) < 100));
 INSERT INTO rec_t (b) VALUES (5);
 INSERT INTO rec_t (b) VALUES (500);
 SELECT * FROM rec_t;
+
+-- A non-inlined call over a column: the body's relations aren't the statement's.
+CREATE FUNCTION rec_nfc(n int) RETURNS int LANGUAGE sql AS 'SELECT n FROM (SELECT 1) s';
+EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_nfc(g) FROM generate_series(1, 3) g;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_nfc(g) + rec_nfc(1) FROM generate_series(1, 3) g;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT g FROM generate_series(1, 3) g WHERE rec_nfc(g) > 1;
+DROP FUNCTION rec_nfc;
+
+-- A gating qual (One-Time Filter) runs once, and only it does; the other quals run per row.
+CREATE FUNCTION rec_tattle(x int, y int) RETURNS bool STABLE LANGUAGE plpgsql
+  AS $$ BEGIN RAISE NOTICE 'x = %, y = %', x, y; RETURN x > y; END $$;
+SELECT * FROM (SELECT 9 AS x, unnest(ARRAY[1, 2, 3]) AS u) ss WHERE rec_tattle(x, 8);
+SELECT * FROM (SELECT 9 AS x, unnest(ARRAY[1, 2, 3]) AS u) ss WHERE rec_tattle(x, 8) AND u > 1;
+SELECT * FROM generate_series(1, 3) a JOIN generate_series(2, 4) b
+  ON a = b AND rec_tattle(1, 0);
+SELECT * FROM generate_series(1, 3) a WHERE rec_tattle(1, 2);
+DROP FUNCTION rec_tattle;
 
 DROP VIEW rec_v;
 DROP TABLE rec_t, rec_log;

@@ -573,7 +573,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     | recursion through a scalar subquery | 2,419 | 2,421 | emulated: + 368 per sub-select |
     | SQL → PL/pgSQL → SQL | 933 | 933 | emulated |
     | set-returning, in a select list | 3,437 | 3,437 | emulated: + 112 per ProjectSet |
-    | set-returning, in FROM | 3,038 | 4,210 | emulated (its function scan's frames aren't) |
+    | set-returning, in FROM | 3,038 | 3,038 | emulated: + 192 per function scan |
     | regex `(` × n `a` `)` × n | 8,710 | 8,710 | emulated: the reference's frames |
     | jsonpath parentheses | 9,984 | 9,750 | bison's 10,000 states |
 
@@ -611,6 +611,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       fails, the input never runs. This is create_gating_plan's One-Time Filter, and it ends
       a recursive function's recursion at its `WHERE n > 0`. It is off under EXPLAIN
       ANALYZE, which counts rows per plan node.
+      Only the pseudoconstant quals gate; the others still run per row (agent 86: a full run
+      caught subselect's `tattle(x, 8)` running for every row once more).
     - *Depth* (`stack::FnFrame`): a call that isn't inlined holds PostgreSQL's frame: 498
       bytes for a SQL function and 2,246 for PL/pgSQL. Between calls a sub-select adds 368
       bytes and a ProjectSet 112. The calls running at once add up, whatever their
@@ -619,15 +621,22 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       where recursion stops (the table above), at the price of about 280 MB of stack for
       PostgreSQL's 8,422 levels, unmapped when the statement ends. In a debug build the
       budget alone stops recursion, at about 2,000 levels.
-    - Left open: a set-returning function's call in FROM doesn't hold the function scan's
-      frame (PostgreSQL's 3,038 levels, 4,210 here), because its body runs as a join's
-      inner side, which can't tell a FROM call from a scalar one. An error deep in a
-      recursion can show one CONTEXT line fewer, "during inlining": PostgreSQL plans each
-      call's body with its arguments as constants (a custom plan), so it folds an inlined
-      level's `1 / n` while inlining it, where the engine raises the error when it runs it.
-      And EXPLAIN VERBOSE of a non-inlinable SQL function's call over a column prints the
-      column qualified (`f(g.g)`, PostgreSQL `f(g)`), recursive or not: the scans of the
-      function's body count as the statement's relations.
+    - *Set-returning calls in FROM* (agent 86): a FROM call's body (`Plan::Context`, or
+      `Plan::PlCall` for one run when called, with `scan`) holds the function scan's frame
+      too, 690 bytes a call, so 3,038 levels run and 3,039 fail, as in PostgreSQL.
+    - *Custom plans* (agent 86): a call that runs its body when called (`call_sql`) plans
+      it as functions.c's plan cache does, per function and statement for the session
+      (`SessionState::sql_fn_plans`): the first five times with the arguments as constants
+      (`Binder::fold_args`), folding the level it inlines, so an error there shows "during
+      inlining"; then the generic plan when it costs less than their average
+      (choose_custom_plan, `sql_fn_planned`); plan_cache_mode decides first.
+    - *EXPLAIN* (agent 86): a non-inlined call's body doesn't count towards the statement's
+      relations, so `f(g)` isn't qualified.
+    - Left open: a call bound with its statement (`Plan::Context`, every non-recursive call
+      that isn't inlined) always runs the generic plan. PostgreSQL's first five calls in a
+      session plan custom, so a body whose constant folding fails errors there even when
+      no row reaches the expression (`SELECT 1 / n FROM empty_table` with `n = 0`: PostgreSQL
+      "division by zero", the engine NULL). PL/pgSQL statements likewise.
   - **CREATE VIEW in linear time** (round 20, agent 82): `collation_at` copied every subtree
     it visited, and nodetree asked it for every node, so the cost was cubic. Now it visits
     children in place. nodetree derives a whole expression's collations in one pass

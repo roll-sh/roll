@@ -5551,6 +5551,7 @@ impl Binder<'_, '_> {
                 ))
             })?;
             let mut body = b.sql_fn_plan(&fdef, at, body);
+            mark_scan(&mut body);
             if let Some(outs) = expand {
                 let mut e = Expr::Col(0, cols[0].ty.clone());
                 if let (Some(d), true) = (fdef.ret_domain, fdef.out_cols.is_empty()) {
@@ -8580,4 +8581,14 @@ fn has_subquery(e: &Expr) -> bool {
         }
     });
     found
+}
+
+/// A FROM call's body: its executor's frames are a function scan's too
+/// (`stack::PG_FUNCSCAN_FRAME`), whether the body runs with the statement or when called.
+fn mark_scan(p: &mut Plan) {
+    match p {
+        Plan::Context { scan, .. } | Plan::PlCall { scan, .. } => *scan = true,
+        Plan::Project { input, .. } | Plan::Limit { input, .. } => mark_scan(Arc::make_mut(input)),
+        _ => {}
+    }
 }

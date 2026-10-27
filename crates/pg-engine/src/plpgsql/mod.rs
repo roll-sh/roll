@@ -761,6 +761,77 @@ impl Drop for ConfigGuard<'_> {
     }
 }
 
+/// GetCachedPlan for statement `stmt` of SQL function `f` called with `args` (functions.c's
+/// plans are cached per function for the session): a custom plan (`bind(true)`) the first
+/// five times, then the generic one (`bind(false)`) when it costs less than their average
+/// (choose_custom_plan); plan_cache_mode decides first.
+fn sql_fn_planned<B, C>(
+    ctx: &ExecCtx,
+    f: &Function,
+    stmt: usize,
+    args: &[Value],
+    bind: impl Fn(bool) -> Result<(B, Plan, C, usize)>,
+) -> Result<(B, Arc<Plan>, C)> {
+    use crate::session::state::SqlFnPlans;
+    let cost = |plan: &Arc<Plan>, rtes: usize, custom: bool| {
+        ctx.with_outer(Rc::new(args.to_vec()), || {
+            Ok(crate::session::plan_total_cost(ctx, plan, rtes, &[], custom))
+        })
+    };
+    let key = (f.oid, stmt);
+    let mode = ctx.sess.settings.borrow().get_str("plan_cache_mode").map(str::to_string);
+    let custom = match mode.as_deref() {
+        _ if args.is_empty() => Some(false),
+        Some("force_generic_plan") => Some(false),
+        Some("force_custom_plan") => Some(true),
+        _ => {
+            let mut plans = ctx.sess.sql_fn_plans.borrow_mut();
+            let p = plans.entry(key).or_default();
+            if *p.body != *f.body {
+                *p = SqlFnPlans {
+                    body: Arc::from(f.body.as_str()),
+                    ..SqlFnPlans::default()
+                };
+            }
+            (p.custom < 5).then_some(true)
+        }
+    };
+    if custom.is_none() {
+        let (b, plan, cols, rtes) = bind(false)?;
+        let plan = Arc::new(plan);
+        let known = ctx.sess.sql_fn_plans.borrow()[&key].generic_cost;
+        let generic = match known {
+            Some(c) => c,
+            None => {
+                let c = cost(&plan, rtes, false)?;
+                ctx.sess.sql_fn_plans.borrow_mut().get_mut(&key).unwrap().generic_cost = Some(c);
+                c
+            }
+        };
+        let avg = {
+            let plans = ctx.sess.sql_fn_plans.borrow();
+            plans[&key].custom_cost / plans[&key].custom as f64
+        };
+        if generic < avg {
+            return Ok((b, plan, cols));
+        }
+    }
+    if custom != Some(false) {
+        let (b, plan, cols, rtes) = bind(true)?;
+        let plan = Arc::new(plan);
+        if mode.as_deref() != Some("force_custom_plan") {
+            let c = cost(&plan, rtes, true)?;
+            if let Some(p) = ctx.sess.sql_fn_plans.borrow_mut().get_mut(&key) {
+                p.custom += 1;
+                p.custom_cost += c;
+            }
+        }
+        return Ok((b, plan, cols));
+    }
+    let (b, plan, cols, _) = bind(false)?;
+    Ok((b, Arc::new(plan), cols))
+}
+
 /// Run a SQL function's statements in order over `args`; the last one's rows are the result,
 /// shaped like `call_function`'s.
 fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
@@ -809,10 +880,18 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                             body: text.clone(),
                             ..f.clone()
                         };
-                        let mut b = Binder::new(ctx, Vec::new());
-                        b.sql_fn_statement = true;
-                        let (plan, cols) =
-                            crate::sql::scs::quietly(|| b.bind_user_body(&one, &consts))?;
+                        let bind = |custom: bool| {
+                            let mut b = Binder::new(ctx, Vec::new());
+                            b.sql_fn_statement = true;
+                            // A custom plan: the arguments are constants, folded while
+                            // planning (and while inlining the calls over them).
+                            b.fold_args = custom;
+                            let (plan, cols) =
+                                crate::sql::scs::quietly(|| b.bind_sql_fn_statement(&one, &consts))?;
+                            let rtes = b.hidden_rtes;
+                            Ok((b, plan, cols, rtes))
+                        };
+                        let (b, plan, cols) = sql_fn_planned(ctx, f, i, &args, bind)?;
                         crate::sql::binder::perms::check(&b.perms, ctx)?;
                         // check_sql_fn_retval, as the function's statements are planned.
                         if final_stmt {
@@ -823,7 +902,6 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                                 Some(&cols),
                             )?;
                         }
-                        let plan = Arc::new(plan);
                         let run = || {
                             ctx.with_outer(Rc::new(args.clone()), || collect(&plan, ctx, None))
                         };

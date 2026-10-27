@@ -378,6 +378,7 @@ fn key(p: &Plan) -> Option<Keyed> {
             frame,
             perms,
             volatile,
+            scan,
         } => {
             let (i, map, keys) = key(input)?;
             (
@@ -386,6 +387,7 @@ fn key(p: &Plan) -> Option<Keyed> {
                     frame: frame.clone(),
                     perms: perms.clone(),
                     volatile: *volatile,
+                    scan: *scan,
                 },
                 map,
                 keys,

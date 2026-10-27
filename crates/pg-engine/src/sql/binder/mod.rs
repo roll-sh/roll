@@ -1018,6 +1018,25 @@ impl<'b, 'a> Binder<'b, 'a> {
         }
     }
 
+    /// A SQL function's statement planned when its call runs (`call_sql`), with the errors
+    /// of constant folding Postgres raises while it plans it, as `bind_statement`'s.
+    pub(crate) fn bind_sql_fn_statement(
+        &mut self,
+        f: &crate::catalog::Function,
+        args: &[Expr],
+    ) -> Result<(Plan, Vec<OutCol>)> {
+        let prev = self.fold_err.replace(Vec::new());
+        let r = self.bind_user_body(f, args);
+        let pending = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
+        let (plan, cols) = r?;
+        if !pending.is_empty()
+            && let Some(e) = fold::first_error(&settled(&plan), &pending, self.ctx)
+        {
+            return Err(e);
+        }
+        Ok((plan, cols))
+    }
+
     /// A constant expression `e` failed to fold with `err`: it stays unfolded. Inside a
     /// statement the error waits for the plan (`fold_err`); binding a lone expression it is
     /// raised now, unless folding is deferred (a CASE arm, a default) or nothing is planned.

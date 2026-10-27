@@ -13,7 +13,12 @@ recursive SQL functions run, inlined as inline_function inlines them (never into
 inlined body) and otherwise called with their body planned per call, their depth limited by
 PostgreSQL's emulated frames; pseudoconstant quals gate filters and inner joins; CREATE VIEW
 is linear in expression depth; the regex engine's frames are the reference build's for the
-host architecture. Verification is in the round's commit message.
+host architecture. Agent 86 rebased it, fixed its gating (only the pseudoconstant quals gate;
+subselect 231 ran `tattle` once more per row), and added the function scan's frames of FROM
+calls, functions.c's custom / generic plans for bodies planned per call, and unqualified
+EXPLAIN columns of non-inlined calls. Verified at `3f15c96`: a full run (debug, private
+reference) 51,148 / 51,150, no unit changed against results.tsv; isolation 120 / 122 specs,
+1,646 / 1,648 permutations; difftest smoke; crate tests in debug and release; clippy.
 
 Round 19, agent 63 (deep input, HANDOFF "Deep input"): the stack grows on demand at recursion
 points and the depth limit is `max_stack_depth` × a per-profile factor (with PostgreSQL's own

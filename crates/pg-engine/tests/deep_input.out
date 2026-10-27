@@ -136,6 +136,10 @@ sqlfnpl 1000 #0	CREATE FUNCTION
 sqlfnpl 1000 #1	CREATE FUNCTION
 sqlfnpl 1000 #2	CREATE FUNCTION
 sqlfnpl 1000 #3	ERROR 54001 stack depth limit exceeded HINT: Increase the configuration parameter "max_stack_depth" (currently 2048kB), after ensuring the platform's stack depth limit is adequate.
+sqlfnsrf 3000 #0	CREATE FUNCTION
+sqlfnsrf 3000 #1	3001|4501500
+sqlfnsrf 3100 #0	CREATE FUNCTION
+sqlfnsrf 3100 #1	ERROR 54001 stack depth limit exceeded HINT: Increase the configuration parameter "max_stack_depth" (currently 2048kB), after ensuring the platform's stack depth limit is adequate.
 plpgsql 925 #0	CREATE FUNCTION
 plpgsql 925 #1	925
 plpgsql 940 #0	CREATE FUNCTION

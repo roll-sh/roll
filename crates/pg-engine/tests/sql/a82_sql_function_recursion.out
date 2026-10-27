@@ -217,6 +217,42 @@ CONTEXT: SQL function "rec_err2" statement 1
 CONTEXT: SQL function "rec_err2" statement 1
 CONTEXT: SQL function "rec_err2" statement 1
 
+> SELECT rec_err(2)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err" during inlining
+CONTEXT: SQL function "rec_err" statement 1
+
+> SELECT rec_err(4)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err" during inlining
+CONTEXT: SQL function "rec_err" statement 1
+CONTEXT: SQL function "rec_err" statement 1
+
+> SELECT rec_err(10)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err" statement 1
+CONTEXT: SQL function "rec_err" statement 1
+CONTEXT: SQL function "rec_err" statement 1
+CONTEXT: SQL function "rec_err" statement 1
+CONTEXT: SQL function "rec_err" statement 1
+
+> SELECT rec_err(4)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err" statement 1
+CONTEXT: SQL function "rec_err" statement 1
+
+> SET plan_cache_mode = force_custom_plan
+-- SET
+
+> SELECT rec_err(4)
+ERROR 22012: division by zero
+CONTEXT: SQL function "rec_err" during inlining
+CONTEXT: SQL function "rec_err" statement 1
+CONTEXT: SQL function "rec_err" statement 1
+
+> RESET plan_cache_mode
+-- RESET
+
 > CREATE FUNCTION rec_perr(n int) RETURNS int LANGUAGE plpgsql
 >   AS 'BEGIN IF n = 0 THEN RETURN 100; END IF; RETURN rec_serr(n - 1) + 1; END'
 -- CREATE FUNCTION
@@ -408,6 +444,73 @@ OBJECTS: schema=public table=rec_t constraint=rec_t_b_check
 a:int4 | b:int4
 4 | 5
 -- SELECT 1
+
+> CREATE FUNCTION rec_nfc(n int) RETURNS int LANGUAGE sql AS 'SELECT n FROM (SELECT 1) s'
+-- CREATE FUNCTION
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_nfc(g) FROM generate_series(1, 3) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: rec_nfc(g)
+  Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT rec_nfc(g) + rec_nfc(1) FROM generate_series(1, 3) g
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: (rec_nfc(g) + rec_nfc(1))
+  Function Call: generate_series(1, 3)
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT g FROM generate_series(1, 3) g WHERE rec_nfc(g) > 1
+QUERY PLAN:text
+Function Scan on pg_catalog.generate_series g
+  Output: g
+  Function Call: generate_series(1, 3)
+  Filter: (rec_nfc(g.g) > 1)
+-- EXPLAIN
+
+> DROP FUNCTION rec_nfc
+-- DROP FUNCTION
+
+> CREATE FUNCTION rec_tattle(x int, y int) RETURNS bool STABLE LANGUAGE plpgsql
+>   AS $$ BEGIN RAISE NOTICE 'x = %, y = %', x, y; RETURN x > y; END $$
+-- CREATE FUNCTION
+
+> SELECT * FROM (SELECT 9 AS x, unnest(ARRAY[1, 2, 3]) AS u) ss WHERE rec_tattle(x, 8)
+NOTICE 00000: x = 9, y = 8
+CONTEXT: PL/pgSQL function rec_tattle(integer,integer) line 1 at RAISE
+x:int4 | u:int4
+9 | 1
+9 | 2
+9 | 3
+-- SELECT 3
+
+> SELECT * FROM (SELECT 9 AS x, unnest(ARRAY[1, 2, 3]) AS u) ss WHERE rec_tattle(x, 8) AND u > 1
+NOTICE 00000: x = 9, y = 8
+CONTEXT: PL/pgSQL function rec_tattle(integer,integer) line 1 at RAISE
+x:int4 | u:int4
+9 | 2
+9 | 3
+-- SELECT 2
+
+> SELECT * FROM generate_series(1, 3) a JOIN generate_series(2, 4) b
+>   ON a = b AND rec_tattle(1, 0)
+NOTICE 00000: x = 1, y = 0
+CONTEXT: PL/pgSQL function rec_tattle(integer,integer) line 1 at RAISE
+a:int4 | b:int4
+2 | 2
+3 | 3
+-- SELECT 2
+
+> SELECT * FROM generate_series(1, 3) a WHERE rec_tattle(1, 2)
+NOTICE 00000: x = 1, y = 2
+CONTEXT: PL/pgSQL function rec_tattle(integer,integer) line 1 at RAISE
+a:int4
+-- SELECT 0
+
+> DROP FUNCTION rec_tattle
+-- DROP FUNCTION
 
 > DROP VIEW rec_v
 -- DROP VIEW
