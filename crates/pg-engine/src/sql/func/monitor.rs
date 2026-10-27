@@ -290,6 +290,7 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
     let dbo = c.exec.db_owner();
     let dbs = c.exec.sess.cluster.databases();
     let all_stats = cat.has_privs_of_role(me, READ_ALL_STATS, dbo);
+    let waits = lock_waits(c);
     let mut out = Vec::new();
     for b in c.exec.sess.cluster.activity() {
         if want.is_some_and(|p| p != b.pid as i64) {
@@ -307,17 +308,38 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
         if all_stats || role.is_some_and(|r| cat.has_privs_of_role(me, r, dbo)) {
             row[4] = text(b.state.as_str());
             row[5] = text(b.query.as_str());
-            row[8] = b.xact_start.map_or(Value::Null, Value::Timestamptz);
+            let me_now = b.pid == c.exec.sess.pid;
+            // An idle backend waits for its client; an active one, maybe for a lock.
+            let wait = if b.state.starts_with("idle") {
+                Some(("Client", "ClientRead"))
+            } else {
+                waits.get(&b.pid).map(|t| ("Lock", *t)).or(b.wait)
+            };
+            if let Some((t, e)) = wait.filter(|_| !me_now) {
+                row[6] = text(t);
+                row[7] = text(e);
+            }
+            // (The backend's own row is as it is now, mid-statement.)
+            let xact_start = if me_now { Some(c.exec.txn_time()) } else { b.xact_start };
+            row[8] = xact_start.map_or(Value::Null, Value::Timestamptz);
             row[9] = b.query_start.map_or(Value::Null, Value::Timestamptz);
             row[10] = Value::Timestamptz(b.backend_start);
-            row[11] = b.query_start.map_or(Value::Null, Value::Timestamptz);
+            row[11] = b.state_change.or(b.query_start).map_or(Value::Null, Value::Timestamptz);
             match &b.client_addr {
                 Some(s) => {
                     row[12] = crate::types::text::parse_inet(s, false).unwrap_or(Value::Null);
-                    row[14] = Value::Int4(0);
+                    row[14] = Value::Int4(b.client_port.map_or(0, i32::from));
                 }
                 None => row[14] = Value::Int4(-1),
             }
+            let (xid, xmin) = if me_now {
+                let t = c.exec.txn.borrow();
+                (t.xid_if_assigned(), t.snapshot_xmin())
+            } else {
+                (b.backend_xid, b.backend_xmin)
+            };
+            row[15] = xid.map_or(Value::Null, |x| Value::Oid(x as u32));
+            row[16] = xmin.map_or(Value::Null, |x| Value::Oid(x as u32));
             row[17] = text("client backend");
             // query_id: this session's, when compute_query_id computes it and the query is
             // reported (a hash of the query text stands in for Postgres's jumble).
@@ -370,6 +392,33 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
             row[5] = text("<insufficient privilege>");
         }
         out.push(row);
+    }
+    out
+}
+
+/// The backends waiting for a heavyweight lock (in any open database), with the waited
+/// lock's type (pg_stat_activity's wait_event for wait_event_type Lock).
+fn lock_waits(c: &FnCtx) -> std::collections::HashMap<i32, &'static str> {
+    use crate::txn::locks::Tag;
+    let sess = &c.exec.sess;
+    let dbs = std::iter::once(sess.db.clone())
+        .chain(sess.cluster.opened_databases().into_iter().filter(|d| !Arc::ptr_eq(d, &sess.db)));
+    let mut out = std::collections::HashMap::new();
+    for db in dbs {
+        for l in db.locks.snapshot().into_iter().filter(|l| !l.granted) {
+            let Some(pid) = l.pid else { continue };
+            let kind = match l.tag {
+                Tag::Relation { .. } => "relation",
+                Tag::Tuple { .. } => "tuple",
+                Tag::Transaction { xid, .. } if xid != 0 => "transactionid",
+                Tag::Transaction { .. } => "virtualxid",
+                Tag::SpecToken { .. } => "spectoken",
+                Tag::Object { .. } => "object",
+                Tag::Advisory(_) => "advisory",
+                Tag::Other(_) => "transactionid",
+            };
+            out.insert(pid, kind);
+        }
     }
     out
 }
@@ -878,7 +927,7 @@ pub fn register(r: &mut Registry) {
             let untracked = [
                 "pg_stat_get_function_",
                 "pg_stat_get_xact_function_",
-                "pg_stat_get_db_checksum_",
+                "pg_stat_get_db_checksum_last_failure",
             ]
             .iter()
             .any(|p| s.name.starts_with(p));

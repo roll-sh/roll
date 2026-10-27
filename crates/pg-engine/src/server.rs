@@ -608,7 +608,7 @@ fn handle(
     };
 
     let (pid, secret, terminated) =
-        engine.register_backend(stream.try_clone().ok(), peer.map(|p| p.ip().to_string()));
+        engine.register_backend(stream.try_clone().ok(), peer);
     let _guard = BackendGuard {
         engine: &engine,
         pid,
@@ -967,11 +967,42 @@ fn activity_state(s: &Session) -> &'static str {
 /// the statement left it (SET application_name reports itself: pgstat_report_appname).
 fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
     let app = s.state.settings.borrow().show("application_name").ok();
+    let idle = s.status() == TxnStatus::Idle;
+    let (xid, xmin) = s.activity_xids();
+    let now = crate::types::datetime::Clock::system().now;
     engine.set_activity(pid, |a| {
-        a.state = activity_state(s).into();
+        let state = activity_state(s);
+        if a.state != state {
+            a.state = state.into();
+            a.state_change = Some(now);
+        }
+        if idle {
+            a.xact_start = None;
+        }
+        a.backend_xid = xid;
+        a.backend_xmin = xmin;
         if let Some(app) = app {
             a.application_name = app;
         }
+    });
+}
+
+/// pg_stat_activity as a statement (or a fastpath call) starts: `state`, its transaction's
+/// start (now, outside a transaction block), and the xmin a snapshot taken now has.
+fn start_activity(engine: &Engine, pid: i32, s: &Session, state: &str, sql: Option<String>) {
+    let now = crate::types::datetime::Clock::system().now;
+    let xmin = s.state.db.xids().current_xmin();
+    engine.set_activity(pid, |a| {
+        if a.state != state {
+            a.state = state.into();
+            a.state_change = Some(now);
+        }
+        if let Some(q) = sql {
+            a.query = q;
+        }
+        a.query_start = Some(now);
+        a.xact_start.get_or_insert(now);
+        a.backend_xmin.get_or_insert(xmin);
     });
 }
 
@@ -1022,12 +1053,7 @@ fn message_loop(
                         continue;
                     }
                 };
-                let now = crate::types::datetime::Clock::system().now;
-                engine.set_activity(pid, |a| {
-                    a.state = "active".into();
-                    a.query = sql.clone();
-                    a.query_start = Some(now);
-                });
+                start_activity(engine, pid, s, "active", Some(sql.clone()));
                 match guard(c, s, |c, s| Ok(simple_query(c, s, &sql))) {
                     Ok(r) => r?,
                     Err(e) => c.error(&e),
@@ -1074,11 +1100,7 @@ fn message_loop(
             // Copy messages outside COPY are ignored, as Postgres does.
             b'd' | b'c' | b'f' => continue,
             b'F' => {
-                let now = crate::types::datetime::Clock::system().now;
-                engine.set_activity(pid, |a| {
-                    a.state = "fastpath function call".into();
-                    a.query_start = Some(now);
-                });
+                start_activity(engine, pid, s, "fastpath function call", None);
                 let r = guard(c, s, |c, s| fastpath_msg(c, s, &body));
                 send_notices(c, s);
                 if let Err(e) = r {
@@ -1133,14 +1155,7 @@ fn extended_activity(engine: &Engine, pid: i32, s: &Session, t: u8, body: &[u8])
             .ok()
             .and_then(|portal| s.portals.get(portal).map(|p| p.stmt.sql.clone())),
     };
-    let now = crate::types::datetime::Clock::system().now;
-    engine.set_activity(pid, |a| {
-        a.state = "active".into();
-        if let Some(q) = sql {
-            a.query = q;
-        }
-        a.query_start = Some(now);
-    });
+    start_activity(engine, pid, s, "active", sql);
 }
 
 /// Run one message's work so that an engine panic becomes an ERROR (XX000) for this

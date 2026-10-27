@@ -3278,3 +3278,97 @@ fn startup_notice_empty_arrays_and_catalog_dml() {
     });
     s.engine.shutdown();
 }
+
+/// What monitoring tools read (postgres_exporter, pgAdmin, pg_activity, pgwatch): a lock wait
+/// in another database as pg_stat_activity (wait events, transaction start), pg_locks and
+/// pg_blocking_pids show it; pg_stat_database of a database that closed while idle; and the
+/// cluster's WAL position, one for every database, growing as pg_stat_wal's bytes do and
+/// going on after a restart.
+#[test]
+fn monitoring_views() {
+    let s = server(AuthMethod::ScramSha256);
+    let lsn_before_restart = runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        a.batch_execute("CREATE DATABASE other").await.unwrap();
+        let b = s.connect("other").await;
+        b.batch_execute("CREATE TABLE t (a int); INSERT INTO t VALUES (1)").await.unwrap();
+        // One WAL position for the cluster, moving by the WAL bytes written (as pg_stat_wal
+        // counts them once the writers report).
+        let flush = "SELECT pg_stat_force_next_flush(); SELECT 1";
+        a.batch_execute(flush).await.unwrap();
+        b.batch_execute(flush).await.unwrap();
+        let q = "SELECT pg_current_wal_lsn(), (SELECT wal_bytes FROM pg_stat_wal)";
+        let before = lines(&a, q).await.unwrap().remove(0);
+        let (lsn, bytes) = before.split_once('|').unwrap();
+        assert_eq!(lines(&b, "SELECT pg_current_wal_lsn()").await.unwrap(), [lsn]);
+        b.batch_execute("INSERT INTO t SELECT generate_series(1, 100)").await.unwrap();
+        let lsn_moved = format!("SELECT pg_current_wal_lsn() > '{lsn}'");
+        assert_eq!(lines(&a, &lsn_moved).await.unwrap(), ["t"]);
+        b.batch_execute(flush).await.unwrap();
+        let moved = format!(
+            "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '{lsn}') = (SELECT wal_bytes FROM pg_stat_wal) - {bytes}"
+        );
+        assert_eq!(lines(&a, &moved).await.unwrap(), ["t"]);
+        // A lock wait in database "other", seen from "postgres".
+        b.batch_execute("SET application_name = 'holder'; BEGIN; LOCK TABLE t").await.unwrap();
+        let w = s.connect("other").await;
+        let pw = lines(&w, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        let pb = lines(&b, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        let waiter = tokio::spawn(async move {
+            let r = lines(&w, "SELECT count(*) FROM t").await;
+            (w, r)
+        });
+        until_blocked(&a, &pw).await;
+        let activity = format!(
+            "SELECT pid, state, wait_event_type, wait_event, xact_start IS NOT NULL, \
+             backend_xmin IS NOT NULL FROM pg_stat_activity WHERE pid IN ({pw}, {pb}) \
+             ORDER BY application_name"
+        );
+        assert_eq!(
+            lines(&a, &activity).await.unwrap(),
+            [
+                format!("{pw}|active|Lock|relation|t|t"),
+                format!("{pb}|idle in transaction|Client|ClientRead|t|f")
+            ]
+        );
+        let blocking = format!("SELECT pg_blocking_pids({pw})");
+        assert_eq!(lines(&a, &blocking).await.unwrap(), [format!("{{{pb}}}")]);
+        let locks = format!("SELECT mode, granted FROM pg_locks WHERE pid = {pw} AND locktype = 'relation'");
+        assert_eq!(lines(&a, &locks).await.unwrap(), ["AccessShareLock|f"]);
+        b.batch_execute("COMMIT").await.unwrap();
+        let (w, r) = waiter.await.unwrap();
+        assert_eq!(r.unwrap(), ["101"]);
+        // pg_stat_database's counts go on across the database closing while idle.
+        let other = "SELECT xact_commit > 0, numbackends FROM pg_stat_database WHERE datname = 'other'";
+        assert_eq!(lines(&a, other).await.unwrap(), ["t|2"]);
+        let xacts = "SELECT xact_commit FROM pg_stat_database WHERE datname = 'other'";
+        let seen = lines(&a, xacts).await.unwrap();
+        drop((b, w));
+        let start = Instant::now();
+        while s.engine.open_databases() > 1 {
+            assert!(start.elapsed() < Duration::from_secs(20), "database never closed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // (The sessions' last counts were flushed as they ended.)
+        let after: i64 = lines(&a, xacts).await.unwrap()[0].parse().unwrap();
+        assert!(after >= seen[0].parse::<i64>().unwrap(), "{after} after {seen:?}");
+        lines(&a, "SELECT pg_current_wal_lsn()").await.unwrap().remove(0)
+    });
+    s.engine.shutdown();
+    // After a restart, the position is past where it was.
+    let opts = EngineOptions {
+        data_dir: s._dir.path().to_path_buf(),
+        cache_bytes: 4 << 20,
+        memtable_bytes: 1 << 20,
+        sync: false,
+        password: Some("secret".into()),
+        ..EngineOptions::default()
+    };
+    let engine = Engine::open(opts).unwrap();
+    let mut session = engine.connect(1, "postgres", "postgres", "").unwrap();
+    let q = format!("SELECT pg_current_wal_lsn() > '{lsn_before_restart}'");
+    let r = session.query(&q).unwrap();
+    assert_eq!(format!("{:?}", r[0].rows[0]), "[Bool(true)]");
+    drop(session);
+    engine.shutdown();
+}

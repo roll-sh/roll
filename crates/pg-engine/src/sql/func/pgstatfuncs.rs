@@ -208,6 +208,23 @@ db_counters! {
     db_parallel_workers_launched = 6356 => |d| d.parallel_workers_launched;
 }
 
+/// pg_stat_get_db_numbackends: the backends connected to the database now.
+fn db_numbackends(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let oid = oid_arg(&a[0]);
+    // (Database 0's: the auxiliary processes, which have none.)
+    if oid == 0 {
+        return Ok(Value::Int4(super::monitor::AUX_PROCESSES.len() as i32));
+    }
+    let cluster = &c.exec.sess.cluster;
+    let Some((_, name, _)) = cluster.databases().into_iter().find(|d| d.0 == oid) else {
+        return Ok(Value::Int4(0));
+    };
+    let n = cluster.activity().iter().filter(|b| b.database == name).count();
+    // (A cluster that lists no backends still has this one.)
+    let n = if n == 0 && name == c.exec.sess.database { 1 } else { n };
+    Ok(Value::Int4(n as i32))
+}
+
 fn db_stat_reset_time(a: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(pgstat::fetch_db(c.exec, oid_arg(&a[0])).map_or(Value::Null, |d| ts(d.stat_reset)))
 }
@@ -253,6 +270,7 @@ pub fn register(r: &mut Registry) {
     for (oid, f) in TAB_COUNTERS.iter().chain(TAB_TIMES).chain(TAB_FLOATS).chain(XACT_COUNTERS) {
         r.from_pg(*oid, Some(*f), None);
     }
+    r.from_pg(1941, Some(db_numbackends), None);
     r.from_pg(2978, Some(function_calls), None);
     r.from_pg(2979, Some(function_total_time), None);
     r.from_pg(2980, Some(function_self_time), None);

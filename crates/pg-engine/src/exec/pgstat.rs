@@ -84,17 +84,11 @@ pub struct DbEntry {
     pub stat_reset: Option<i64>,
 }
 
-/// The shared statistics of a database (and, kept with it, the cluster's fixed ones).
+/// The cluster's fixed-numbered statistics (WAL, checkpointer, I/O, SLRU and their reset
+/// times) and its WAL position: one per cluster (`Cluster`'s, set on every database it
+/// opens), so every database's sessions read and count the same ones, as in PostgreSQL.
 #[derive(Clone, Debug, Default)]
-pub struct Shared {
-    pub tables: HashMap<u32, TabEntry>,
-    /// The catalog version whose dropped relations' and functions' entries were last
-    /// removed (`end_xact`).
-    pub pruned_at: u64,
-    pub funcs: HashMap<u32, FuncCounts>,
-    pub db: DbEntry,
-    /// Database 0: shared relations' counts.
-    pub shared_db: DbEntry,
+pub struct Fixed {
     /// Reset times of the fixed-numbered statistics: archiver, bgwriter, checkpointer,
     /// io, recovery_prefetch, wal, and `slru:<name>`.
     pub resets: HashMap<String, i64>,
@@ -107,6 +101,112 @@ pub struct Shared {
     /// pg_stat_slru's blks_zeroed, by SLRU name (the notify queue's pages as NOTIFYs
     /// commit).
     pub slru_zeroed: HashMap<String, i64>,
+    /// The WAL position the cluster started at (`wal_lsn`).
+    pub lsn_base: u64,
+    /// WAL bytes written since then (as pg_stat_wal's wal_bytes, but never reset).
+    pub wal_written: u64,
+    /// The last checkpoint: its record's and its redo's WAL positions and its time (None:
+    /// the one the cluster started from).
+    pub checkpoint: Option<(u64, u64, i64)>,
+    /// Backups in progress (pg_backup_start), by the backend running each.
+    pub backups: HashMap<i32, Backup>,
+}
+
+/// A base backup a backend started (pg_backup_start), until it stops it.
+#[derive(Clone, Debug)]
+pub struct Backup {
+    pub label: String,
+    /// Its start (the checkpoint's redo) and checkpoint record's positions, and its time.
+    pub start: u64,
+    pub checkpoint: u64,
+    pub time: i64,
+}
+
+/// wal_segment_size.
+pub const WAL_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+/// A segment's long page header: its first record follows it.
+const SEGMENT_HEADER: u64 = 0x28;
+
+/// A cluster's `Fixed` statistics, shared by its databases.
+pub type ClusterStats = std::sync::Arc<parking_lot::Mutex<Fixed>>;
+
+/// The WAL position a new cluster's first record follows (initdb's checkpoint: the start of
+/// the second segment, as pg_control_checkpoint reports it before any checkpoint here).
+pub const INITDB_LSN: u64 = 16 * 1024 * 1024 + 0x28;
+
+impl Fixed {
+    /// A cluster's statistics, its WAL resuming after `lsn` (where it was at shutdown; 0:
+    /// a new cluster): at the next segment, as after a restart's checkpoint.
+    pub fn starting_at(lsn: u64) -> ClusterStats {
+        const SEG: u64 = 16 * 1024 * 1024;
+        let base = if lsn <= INITDB_LSN { INITDB_LSN } else { (lsn / SEG + 1) * SEG + 0x28 };
+        std::sync::Arc::new(parking_lot::Mutex::new(Fixed { lsn_base: base, ..Fixed::default() }))
+    }
+
+    /// pg_current_wal_lsn: where the next WAL record goes.
+    pub fn wal_lsn(&self) -> u64 {
+        self.lsn_base.max(INITDB_LSN) + self.wal_written
+    }
+
+    /// pg_stat_wal counts `records` records of `bytes` bytes (the position moved as they
+    /// were written: `advance`).
+    pub fn add_wal(&mut self, records: i64, bytes: i64) {
+        self.wal_records += records;
+        self.wal_bytes += bytes;
+    }
+
+    /// A transaction's `bytes` of WAL are written: the position moves past them.
+    pub fn advance(&mut self, bytes: i64) {
+        self.wal_written += bytes.max(0) as u64;
+    }
+
+    /// One record of `bytes` bytes written now: where it starts (past a segment's header,
+    /// at a segment's start) and ends.
+    pub fn write_record(&mut self, bytes: u64) -> (u64, u64) {
+        if self.wal_lsn().is_multiple_of(WAL_SEGMENT_SIZE) {
+            self.wal_written += SEGMENT_HEADER;
+        }
+        let at = self.wal_lsn();
+        self.add_wal(1, bytes as i64);
+        self.advance(bytes as i64);
+        (at, at + bytes)
+    }
+
+    /// pg_switch_wal (RequestXLogSwitch): a switch record ends the segment, and the WAL
+    /// goes on at the next one; its end (or, at a segment's start already, that position).
+    pub fn switch(&mut self) -> u64 {
+        let at = self.wal_lsn();
+        if at.is_multiple_of(WAL_SEGMENT_SIZE) {
+            return at;
+        }
+        let (_, end) = self.write_record(24);
+        self.wal_written += end.next_multiple_of(WAL_SEGMENT_SIZE) - end;
+        end
+    }
+
+    /// A checkpoint at `time`: its redo point, a running-transactions record, then its own
+    /// record. Returns the redo and the checkpoint record's positions.
+    pub fn checkpoint_at(&mut self, time: i64) -> (u64, u64) {
+        let (redo, _) = self.write_record(0x58);
+        let (ckpt, _) = self.write_record(122);
+        self.checkpoint = Some((ckpt, redo, time));
+        (redo, ckpt)
+    }
+}
+
+/// The shared statistics of a database (and, through `fixed`, the cluster's fixed ones).
+#[derive(Clone, Debug, Default)]
+pub struct Shared {
+    pub tables: HashMap<u32, TabEntry>,
+    /// The catalog version whose dropped relations' and functions' entries were last
+    /// removed (`end_xact`).
+    pub pruned_at: u64,
+    pub funcs: HashMap<u32, FuncCounts>,
+    pub db: DbEntry,
+    /// Database 0: shared relations' counts.
+    pub shared_db: DbEntry,
+    /// The cluster's fixed-numbered statistics (locked after this database's).
+    pub fixed: ClusterStats,
     /// Backends' counts kept unflushed when they went idle, by process id.
     pub unflushed: HashMap<i32, Unflushed>,
     /// When a reader flushed an idle backend's counts (its idle timeout), until the
@@ -449,7 +549,10 @@ fn read<T>(ctx: &ExecCtx, f: impl Fn(&Shared) -> T, cache: impl FnOnce(&mut Fetc
         Consistency::None => f(&shared(&ctx.sess.db)),
         Consistency::Snapshot => {
             if p.snapshot.is_none() {
-                let s = shared(&ctx.sess.db).clone();
+                let mut s = shared(&ctx.sess.db).clone();
+                // (The cluster's fixed statistics too, as they are now.)
+                let copy = s.fixed.lock().clone();
+                s.fixed = std::sync::Arc::new(parking_lot::Mutex::new(copy));
                 p.snapshot = Some((now(), Box::new(s)));
                 p.mode = Some(mode);
             }
@@ -507,7 +610,8 @@ pub fn fetch_function(ctx: &ExecCtx, func: u32) -> Option<FuncCounts> {
 pub fn fetch_db(ctx: &ExecCtx, db: u32) -> Option<DbEntry> {
     let mine = ctx.sess.db.oid;
     if db != mine && db != 0 {
-        return None;
+        // Another database's: as its entry is now (one without an entry counts nothing).
+        return Some(ctx.sess.cluster.db_stats(db).unwrap_or_default());
     }
     if db == 0 {
         return Some(shared(&ctx.sess.db).shared_db.clone());
@@ -535,16 +639,32 @@ pub fn fetch_slru(ctx: &ExecCtx) -> HashMap<String, i64> {
         }
         p.mode = Some(mode);
         if p.cache.slru.is_none() {
-            p.cache.slru = Some(shared(&ctx.sess.db).slru_zeroed.clone());
+            p.cache.slru = Some(shared(&ctx.sess.db).fixed.lock().slru_zeroed.clone());
         }
         return p.cache.slru.clone().unwrap_or_default();
     }
-    read(ctx, |s| s.slru_zeroed.clone(), |_, _| {})
+    read(ctx, |s| s.fixed.lock().slru_zeroed.clone(), |_, _| {})
 }
 
 /// The fixed-numbered statistics and other cluster-wide values (no snapshot).
-pub fn with_shared<T>(ctx: &ExecCtx, f: impl FnOnce(&mut Shared) -> T) -> T {
-    f(&mut shared(&ctx.sess.db))
+pub fn with_shared<T>(ctx: &ExecCtx, f: impl FnOnce(&mut Fixed) -> T) -> T {
+    let fixed = shared(&ctx.sess.db).fixed.clone();
+    f(&mut fixed.lock())
+}
+
+/// Database `db`'s own entry, with its idle backends' counts flushed.
+pub fn db_entry(db: &crate::txn::Database) -> DbEntry {
+    shared(db).db.clone()
+}
+
+/// The cluster's fixed statistics database `db` counts into.
+pub fn fixed(db: &crate::txn::Database) -> ClusterStats {
+    db.pgstat.lock().fixed.clone()
+}
+
+/// The cluster's WAL position now (pg_current_wal_lsn).
+pub fn wal_lsn(db: &crate::txn::Database) -> u64 {
+    fixed(db).lock().wal_lsn()
 }
 
 // ── counting ──
@@ -696,7 +816,7 @@ pub fn count_io(ctx: &ExecCtx, object: &'static str, context: &'static str, op: 
         return;
     }
     let key: IoKey = ("client backend", object, context, op);
-    *ctx.sess.db.pgstat.lock().io.entry(key).or_default() += n;
+    *ctx.sess.db.pgstat.lock().fixed.lock().io.entry(key).or_default() += n;
     *ctx.sess.pgstat.borrow_mut().io.entry(key).or_default() += n;
 }
 
@@ -820,10 +940,10 @@ pub fn report_analyze(
 /// A checkpoint was requested and done (CHECKPOINT): it writes and syncs buffers and logs
 /// a checkpoint record.
 pub fn report_checkpoint(db: &crate::txn::Database) {
-    let mut s = db.pgstat.lock();
+    let fixed = db.pgstat.lock().fixed.clone();
+    let mut s = fixed.lock();
     s.checkpoints_requested += 1;
-    s.wal_records += 1;
-    s.wal_bytes += 122;
+    s.checkpoint_at(now());
     s.checkpoints_performed += 1;
     for op in ["writes", "fsyncs"] {
         *s.io
@@ -881,7 +1001,8 @@ pub fn reset_function(ctx: &ExecCtx, func: u32) {
 
 /// pg_stat_reset_shared / pg_stat_reset_slru: `target`'s reset time is now.
 pub fn reset_shared(ctx: &ExecCtx, target: &str) {
-    let mut s = ctx.sess.db.pgstat.lock();
+    let fixed = fixed(&ctx.sess.db);
+    let mut s = fixed.lock();
     let t = now();
     if target == "io" {
         s.io.clear();
@@ -903,17 +1024,8 @@ pub fn reset_shared(ctx: &ExecCtx, target: &str) {
 /// When the fixed-numbered statistics were last reset: at first, when the statistics
 /// started (the server's start).
 pub fn reset_time(ctx: &ExecCtx, target: &str) -> Option<i64> {
-    static START: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    let start = *START.get_or_init(now);
-    Some(
-        *ctx.sess
-            .db
-            .pgstat
-            .lock()
-            .resets
-            .entry(target.to_string())
-            .or_insert(start),
-    )
+    let start = ctx.sess.cluster.start_time();
+    Some(*fixed(&ctx.sess.db).lock().resets.entry(target.to_string()).or_insert(start))
 }
 
 // ── the end of a transaction ──
@@ -1025,18 +1137,19 @@ fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog) {
     s.db.xact_commit += u.xact_commit;
     s.db.xact_rollback += u.xact_rollback;
     let (records, bytes, xacts) = u.wal;
+    let mut f = s.fixed.lock();
     if xacts > 0 {
-        s.wal_records += records;
-        s.wal_bytes += bytes;
+        f.add_wal(records, bytes);
         for op in ["writes", "fsyncs"] {
-            *s.io
+            *f.io
                 .entry(("client backend", "wal", "normal", op))
                 .or_default() += xacts;
         }
     }
     for (name, n) in u.slru_zeroed {
-        *s.slru_zeroed.entry(name).or_default() += n;
+        *f.slru_zeroed.entry(name).or_default() += n;
     }
+    drop(f);
     s.db.sessions += u.sessions;
     s.db.parallel_workers_to_launch += u.parallel_workers.0;
     s.db.parallel_workers_launched += u.parallel_workers.1;
@@ -1179,6 +1292,8 @@ fn end_xact_counts(
             p.wal_pending.0 += wal + 1;
             p.wal_pending.1 += wal * 59 + 34;
             p.wal_pending.2 += 1;
+            // (Its records are in the WAL now; the statistics count them when flushed.)
+            fixed(&sess.db).lock().advance(wal * 59 + 34);
         }
         let mut s = sess.db.pgstat.lock();
         // Dropped objects' entries go, once per catalog version, by a transaction that sees

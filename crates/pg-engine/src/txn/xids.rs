@@ -66,6 +66,12 @@ pub struct SnapshotXmin {
     owner: Option<u64>,
 }
 
+impl SnapshotXmin {
+    pub fn xmin(&self) -> u64 {
+        self.xmin
+    }
+}
+
 impl Drop for SnapshotXmin {
     fn drop(&mut self) {
         let mut s = self.xids.state.lock();

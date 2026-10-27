@@ -404,11 +404,13 @@ fn lsn_arg(v: &Value) -> u64 {
     }
 }
 
-/// pg_ls_waldir: the segment the server writes now.
+/// pg_ls_waldir: the segment the server writes now (pg_walfile_name of
+/// pg_current_wal_lsn).
 fn pg_ls_waldir(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let now = Value::Timestamptz(c.exec.stmt_time());
+    let lsn = crate::exec::pgstat::wal_lsn(&c.exec.sess.db);
     Ok(Box::new(std::iter::once(Ok(vec![
-        Value::text(wal_file_name(1, 1)),
+        Value::text(wal_file_name(1, lsn.saturating_sub(1) / WAL_SEGMENT_SIZE)),
         Value::Int8(WAL_SEGMENT_SIZE as i64),
         now,
     ]))))
@@ -480,36 +482,51 @@ fn one_row(row: Vec<Value>) -> Result<SrfIter> {
     Ok(Box::new(std::iter::once(Ok(row))))
 }
 
-/// pg_control_*: the control file's fields, for this server.
+/// The last checkpoint: its record's and redo's positions and its time (the one the
+/// cluster started from until there is another: at its WAL's start, the server's start).
+fn last_checkpoint(c: &FnCtx) -> (u64, u64, i64) {
+    let f = crate::exec::pgstat::fixed(&c.exec.sess.db);
+    let f = f.lock();
+    f.checkpoint.unwrap_or_else(|| {
+        let at = f.lsn_base.max(crate::exec::pgstat::INITDB_LSN);
+        (at, at, c.exec.sess.cluster.start_time())
+    })
+}
+
+/// pg_control_*: the control file's fields, for this server. (It is written at each
+/// checkpoint.)
 fn pg_control_system(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     one_row(vec![
         Value::Int4(1800),
         Value::Int4(202506291),
         Value::Int8(7_000_000_000_000_000_001),
-        Value::Timestamptz(c.exec.stmt_time()),
+        Value::Timestamptz(last_checkpoint(c).2),
     ])
 }
 
 fn pg_control_checkpoint(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let (ckpt, redo, time) = last_checkpoint(c);
+    let xids = c.exec.sess.db.xids();
+    let next_oid = c.exec.catalog().oids.as_ref().map_or(16384, |g| g.peek());
     one_row(vec![
-        Value::PgLsn(WAL_SEGMENT_SIZE + 0x28),
-        Value::PgLsn(WAL_SEGMENT_SIZE + 0x28),
-        Value::text(wal_file_name(1, 1)),
+        Value::PgLsn(ckpt),
+        Value::PgLsn(redo),
+        Value::text(wal_file_name(1, redo / WAL_SEGMENT_SIZE)),
         Value::Int4(1),
         Value::Int4(1),
         Value::Bool(true),
-        Value::text("0:1000"),
-        Value::Oid(16384),
+        Value::text(format!("0:{}", xids.next())),
+        Value::Oid(next_oid),
         Value::Oid(1),
         Value::Oid(0),
-        Value::Oid(3),
+        Value::Oid(xids.oldest() as u32),
+        Value::Oid(1),
+        Value::Oid(xids.horizon() as u32),
+        Value::Oid(1),
         Value::Oid(1),
         Value::Oid(0),
-        Value::Oid(1),
-        Value::Oid(1),
         Value::Oid(0),
-        Value::Oid(0),
-        Value::Timestamptz(c.exec.stmt_time()),
+        Value::Timestamptz(time),
     ])
 }
 

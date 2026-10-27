@@ -1,0 +1,319 @@
+> DROP ROLE IF EXISTS regress_a80b_mon
+NOTICE 00000: role "regress_a80b_mon" does not exist, skipping
+-- DROP ROLE
+
+> DROP ROLE IF EXISTS regress_a80b_plain
+NOTICE 00000: role "regress_a80b_plain" does not exist, skipping
+-- DROP ROLE
+
+> SELECT pg_typeof(pg_current_wal_lsn()), pg_typeof(pg_current_wal_insert_lsn()), pg_typeof(pg_current_wal_flush_lsn())
+pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+pg_lsn | pg_lsn | pg_lsn
+-- SELECT 1
+
+> SELECT pg_current_wal_flush_lsn() <= pg_current_wal_insert_lsn(), pg_current_wal_lsn() >= '0/1000000'
+?column?:bool | ?column?:bool
+t | t
+-- SELECT 1
+
+> SELECT pg_wal_lsn_diff('0/10', '0/0'), pg_wal_lsn_diff('1/0', '0/FF'), pg_wal_lsn_diff('0/0', '0/10'), pg_typeof(pg_wal_lsn_diff('0/1', '0/0'))
+pg_wal_lsn_diff:numeric | pg_wal_lsn_diff:numeric | pg_wal_lsn_diff:numeric | pg_typeof:regtype
+16 | 4294967041 | -16 | numeric
+-- SELECT 1
+
+> SELECT pg_wal_lsn_diff(NULL, '0/0') IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_walfile_name(pg_current_wal_lsn()) ~ '^0000000100000000000000[0-9A-F]{2}$'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_is_in_recovery(), pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(), pg_last_xact_replay_timestamp()
+pg_is_in_recovery:bool | pg_last_wal_receive_lsn:pg_lsn | pg_last_wal_replay_lsn:pg_lsn | pg_last_xact_replay_timestamp:timestamptz
+f | NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT pg_is_wal_replay_paused()
+ERROR 55000: recovery is not in progress
+HINT: Recovery control functions can only be executed during recovery.
+
+> SELECT pg_get_wal_replay_pause_state()
+ERROR 55000: recovery is not in progress
+HINT: Recovery control functions can only be executed during recovery.
+
+> SELECT pg_wal_replay_pause()
+ERROR 55000: recovery is not in progress
+HINT: Recovery control functions can only be executed during recovery.
+
+> SELECT pg_wal_replay_resume()
+ERROR 55000: recovery is not in progress
+HINT: Recovery control functions can only be executed during recovery.
+
+> SELECT pg_promote()
+ERROR 55000: recovery is not in progress
+HINT: Recovery control functions can only be executed during recovery.
+
+> SELECT pg_promote(false, 5)
+ERROR 55000: recovery is not in progress
+HINT: Recovery control functions can only be executed during recovery.
+
+> SELECT pg_switch_wal() <= pg_current_wal_lsn() AS switched
+switched:bool
+t
+-- SELECT 1
+
+> SELECT pg_current_wal_lsn() = pg_switch_wal() AS at_segment_start
+at_segment_start:bool
+t
+-- SELECT 1
+
+> SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn) % (16 * 1024 * 1024) = 0 AS segment_boundary
+segment_boundary:bool
+t
+-- SELECT 1
+
+> SELECT pg_create_restore_point('a80b') > '0/0'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_create_restore_point(repeat('y', 64))
+ERROR 22023: value too long for restore point (maximum 63 characters)
+
+> SELECT pg_log_standby_snapshot() > '0/0'
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_backup_stop()
+ERROR 55000: backup is not in progress
+HINT: Did you call pg_backup_start()?
+
+> SELECT pg_backup_start(repeat('x', 1100))
+ERROR 22023: backup label too long (max 1024 bytes)
+
+> SELECT pg_backup_start('a80b', true) = (SELECT redo_lsn FROM pg_control_checkpoint())
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_backup_start('again')
+ERROR 55000: a backup is already in progress in this session
+
+> SELECT lsn > (SELECT checkpoint_lsn FROM pg_control_checkpoint()), regexp_replace(labelfile, '[0-9A-F]+/[0-9A-F]+|[0-9A-F]{24}|[0-9-]+ [0-9:]+ UTC', 'X', 'g'), spcmapfile FROM pg_backup_stop(false)
+?column?:bool | regexp_replace:text | spcmapfile:text
+t | START WAL LOCATION: X (file X)
+CHECKPOINT LOCATION: X
+BACKUP METHOD: streamed
+BACKUP FROM: primary
+START TIME: X
+LABEL: a80b
+START TIMELINE: 1
+ | 
+-- SELECT 1
+
+> SELECT pg_backup_stop(false)
+ERROR 55000: backup is not in progress
+HINT: Did you call pg_backup_start()?
+
+> SELECT pg_backup_start('a80b2', false) IS NOT NULL
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT labelfile ~ 'LABEL: a80b2' FROM pg_backup_stop()
+NOTICE 00000: WAL archiving is not enabled; you must ensure that all required WAL segments are copied through other means to complete the backup
+?column?:bool
+t
+-- SELECT 1
+
+> CHECKPOINT
+-- CHECKPOINT
+
+> SELECT redo_lsn <= checkpoint_lsn AS redo_first, checkpoint_lsn <= pg_current_wal_lsn() AS written, redo_wal_file = pg_walfile_name(redo_lsn + 1) AS redo_file, timeline_id, prev_timeline_id, full_page_writes, next_xid ~ '^0:[0-9]+$' AS next_xid, oldest_xid_dbid, oldest_multi_dbid, oldest_commit_ts_xid, newest_commit_ts_xid, checkpoint_time <= now() AS past FROM pg_control_checkpoint()
+redo_first:bool | written:bool | redo_file:bool | timeline_id:int4 | prev_timeline_id:int4 | full_page_writes:bool | next_xid:bool | oldest_xid_dbid:oid | oldest_multi_dbid:oid | oldest_commit_ts_xid:28 | newest_commit_ts_xid:28 | past:bool
+t | t | t | 1 | 1 | t | t | 1 | 1 | 0 | 0 | t
+-- SELECT 1
+
+> SELECT pg_control_version, catalog_version_no, pg_control_last_modified = (SELECT checkpoint_time FROM pg_control_checkpoint()) AS at_checkpoint FROM pg_control_system()
+pg_control_version:int4 | catalog_version_no:int4 | at_checkpoint:bool
+1800 | 202506291 | t
+-- SELECT 1
+
+> SELECT * FROM pg_control_init()
+max_data_alignment:int4 | database_block_size:int4 | blocks_per_segment:int4 | wal_block_size:int4 | bytes_per_wal_segment:int4 | max_identifier_length:int4 | max_index_columns:int4 | max_toast_chunk_size:int4 | large_object_chunk_size:int4 | float8_pass_by_value:bool | data_page_checksum_version:int4 | default_char_signedness:bool
+8 | 8192 | 131072 | 8192 | 16777216 | 64 | 32 | 1996 | 2048 | t | 1 | t
+-- SELECT 1
+
+> SELECT * FROM pg_control_recovery()
+min_recovery_end_lsn:pg_lsn | min_recovery_end_timeline:int4 | backup_start_lsn:pg_lsn | backup_end_lsn:pg_lsn | end_of_backup_record_required:bool
+0/0 | 0 | 0/0 | 0/0 | f
+-- SELECT 1
+
+> SELECT pg_postmaster_start_time() <= now(), pg_backend_pid() > 0, pg_jit_available() IN (true, false)
+?column?:bool | ?column?:bool | ?column?:bool
+t | t | t
+-- SELECT 1
+
+> SELECT * FROM pg_get_wal_summarizer_state()
+summarized_tli:int8 | summarized_lsn:pg_lsn | pending_lsn:pg_lsn | summarizer_pid:int4
+0 | 0/0 | 0/0 | NULL
+-- SELECT 1
+
+> SELECT count(*) FROM pg_available_wal_summaries()
+count:int8
+0
+-- SELECT 1
+
+> SELECT * FROM pg_wal_summary_contents(1, '0/0', '0/1')
+ERROR 58P01: could not open file "pg_wal/summaries/0000000100000000000000000000000000000001.summary": No such file or directory
+
+> SELECT * FROM pg_get_wal_resource_managers()
+rm_id:int4 | rm_name:text | rm_builtin:bool
+0 | XLOG | t
+1 | Transaction | t
+10 | Heap | t
+11 | Btree | t
+12 | Hash | t
+13 | Gin | t
+14 | Gist | t
+15 | Sequence | t
+16 | SPGist | t
+17 | BRIN | t
+18 | CommitTs | t
+19 | ReplicationOrigin | t
+2 | Storage | t
+20 | Generic | t
+21 | LogicalMessage | t
+3 | CLOG | t
+4 | Database | t
+5 | Tablespace | t
+6 | MultiXact | t
+7 | RelMap | t
+8 | Standby | t
+9 | Heap2 | t
+-- SELECT 22
+
+> SELECT num_timed >= 0, num_requested > 0, num_done > 0, restartpoints_timed, restartpoints_req, restartpoints_done, write_time >= 0, sync_time >= 0, buffers_written >= 0, slru_written >= 0, stats_reset <= now() FROM pg_stat_checkpointer
+?column?:bool | ?column?:bool | ?column?:bool | restartpoints_timed:int8 | restartpoints_req:int8 | restartpoints_done:int8 | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | 0 | 0 | 0 | t | t | t | t | t
+-- SELECT 1
+
+> SELECT wal_records >= 0, wal_fpi >= 0, wal_bytes >= 0, wal_buffers_full >= 0, stats_reset <= now() FROM pg_stat_wal
+?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool | ?column?:bool
+t | t | t | t | t
+-- SELECT 1
+
+> SELECT buffers_clean, maxwritten_clean, buffers_alloc >= 0, stats_reset <= now() FROM pg_stat_bgwriter
+buffers_clean:int8 | maxwritten_clean:int8 | ?column?:bool | ?column?:bool
+0 | 0 | t | t
+-- SELECT 1
+
+> SELECT archived_count, last_archived_wal, last_archived_time, failed_count, last_failed_wal, last_failed_time, stats_reset <= now() FROM pg_stat_archiver
+archived_count:int8 | last_archived_wal:text | last_archived_time:timestamptz | failed_count:int8 | last_failed_wal:text | last_failed_time:timestamptz | ?column?:bool
+0 | NULL | NULL | 0 | NULL | NULL | t
+-- SELECT 1
+
+> SELECT count(*), count(DISTINCT (backend_type, object, context)) FROM pg_stat_io
+count:int8 | count:int8
+79 | 79
+-- SELECT 1
+
+> SELECT datname, numbackends > 0 AS connected, xact_commit >= 0, checksum_failures, checksum_last_failure, stats_reset IS NOT NULL AS reset_set FROM pg_stat_database WHERE datname = current_database()
+datname:name | connected:bool | ?column?:bool | checksum_failures:int8 | checksum_last_failure:timestamptz | reset_set:bool
+golden_a80b_monitoring | t | t | 0 | NULL | f
+-- SELECT 1
+
+> SELECT datname IS NULL AS shared, numbackends, checksum_failures FROM pg_stat_database WHERE datid = 0
+shared:bool | numbackends:int4 | checksum_failures:int8
+t | 0 | 0
+-- SELECT 1
+
+> SELECT confl_tablespace, confl_lock, confl_snapshot, confl_bufferpin, confl_deadlock, confl_active_logicalslot FROM pg_stat_database_conflicts WHERE datname = current_database()
+confl_tablespace:int8 | confl_lock:int8 | confl_snapshot:int8 | confl_bufferpin:int8 | confl_deadlock:int8 | confl_active_logicalslot:int8
+0 | 0 | 0 | 0 | 0 | 0
+-- SELECT 1
+
+> SELECT pg_stat_get_db_numbackends(0), pg_stat_get_db_numbackends(1) >= 0, pg_stat_get_db_checksum_failures(0), pg_stat_get_db_checksum_last_failure(0)
+pg_stat_get_db_numbackends:int4 | ?column?:bool | pg_stat_get_db_checksum_failures:int8 | pg_stat_get_db_checksum_last_failure:timestamptz
+8 | t | 0 | NULL
+-- SELECT 1
+
+> CREATE ROLE regress_a80b_mon
+-- CREATE ROLE
+
+> CREATE ROLE regress_a80b_plain
+-- CREATE ROLE
+
+> GRANT pg_monitor TO regress_a80b_mon
+-- GRANT ROLE
+
+> SELECT pg_has_role('regress_a80b_mon', 'pg_read_all_stats', 'USAGE'), pg_has_role('regress_a80b_mon', 'pg_read_all_settings', 'MEMBER'), pg_has_role('regress_a80b_mon', 'pg_stat_scan_tables', 'SET')
+pg_has_role:bool | pg_has_role:bool | pg_has_role:bool
+t | t | t
+-- SELECT 1
+
+> SET ROLE regress_a80b_mon
+-- SET
+
+> SELECT count(*) > 0 FROM pg_stat_activity WHERE backend_type = 'checkpointer' AND query IS NOT NULL
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT count(*) >= 0 FROM pg_ls_waldir()
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT count(*) >= 0 FROM pg_ls_archive_statusdir()
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT pg_switch_wal()
+ERROR 42501: permission denied for function pg_switch_wal
+
+> RESET ROLE
+-- RESET
+
+> SET ROLE regress_a80b_plain
+-- SET
+
+> SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'checkpointer' AND query = '<insufficient privilege>'
+count:int8
+0
+-- SELECT 1
+
+> SELECT pg_switch_wal()
+ERROR 42501: permission denied for function pg_switch_wal
+
+> SELECT pg_backup_start('x')
+ERROR 42501: permission denied for function pg_backup_start
+
+> SELECT pg_create_restore_point('x')
+ERROR 42501: permission denied for function pg_create_restore_point
+
+> SELECT pg_wal_replay_pause()
+ERROR 42501: permission denied for function pg_wal_replay_pause
+
+> SELECT pg_ls_waldir()
+ERROR 42501: permission denied for function pg_ls_waldir
+
+> SELECT pg_current_wal_lsn() > '0/0', pg_is_in_recovery()
+?column?:bool | pg_is_in_recovery:bool
+t | f
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> DROP ROLE regress_a80b_mon
+-- DROP ROLE
+
+> DROP ROLE regress_a80b_plain
+-- DROP ROLE
+

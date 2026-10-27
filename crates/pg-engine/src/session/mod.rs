@@ -381,6 +381,19 @@ impl Session {
         self.status
     }
 
+    /// The open transaction's id and the xmin of the snapshot it holds between statements
+    /// (a REPEATABLE READ / SERIALIZABLE transaction's), for pg_stat_activity.
+    pub fn activity_xids(&self) -> (Option<u64>, Option<u64>) {
+        match &self.txn {
+            Some(t) => {
+                let t = t.borrow();
+                let xmin = if t.isolation.txn_snapshot() { t.snapshot_xmin() } else { None };
+                (t.xid_if_assigned(), xmin)
+            }
+            None => (None, None),
+        }
+    }
+
     /// Whether a CALL or DO now must run atomically (no COMMIT / ROLLBACK inside): in a
     /// transaction block, explicit or of a multi-statement query.
     fn atomic(&self) -> bool {

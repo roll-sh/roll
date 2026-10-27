@@ -972,10 +972,16 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
         }
     };
     let now = crate::types::datetime::Clock::system().now;
-    for l in ctx.sess.db.locks.snapshot() {
+    // The cluster's locks: this database's, then the other open ones' (a closed database
+    // has no sessions).
+    let others = ctx.sess.cluster.opened_databases();
+    let locks = ctx.sess.db.locks.snapshot().into_iter().chain(
+        others.iter().filter(|d| !Arc::ptr_eq(d, &ctx.sess.db)).flat_map(|d| d.locks.snapshot()),
+    );
+    for l in locks {
         // A wait for a transaction that has no id (WaitForOlderSnapshots,
         // WaitForLockers): on its virtual transaction id. (Every transaction holds its own;
-        // this one's is the row added below.)
+        // this one's is the row added below, another backend's is its granted one.)
         let mut vxid_waited = None;
         let (locktype, database, relation, xid, classid, objid, objsubid) = match &l.tag {
             Tag::Relation { db, rel } => ("relation", Value::Oid(*db), Value::Oid(*rel), n(), n(), n(), n()),
@@ -983,7 +989,7 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
             Tag::Transaction { xid, .. } if *xid != 0 => {
                 ("transactionid", n(), n(), Value::Oid(*xid as u32), n(), n(), n())
             }
-            Tag::Transaction { id, .. } if !l.granted => {
+            Tag::Transaction { id, .. } if !l.granted || l.pid.is_some_and(|p| p != me) => {
                 vxid_waited = Some(format!("3/{}", *id as u32));
                 ("virtualxid", n(), n(), n(), n(), n(), n())
             }

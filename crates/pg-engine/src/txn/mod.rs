@@ -1375,6 +1375,16 @@ impl Txn {
         (self.xid != 0).then_some(self.xid)
     }
 
+    /// The xmin of the snapshot it holds (pg_stat_activity's backend_xmin): a READ
+    /// COMMITTED statement's while it runs, a transaction snapshot's from its first
+    /// statement on.
+    pub fn snapshot_xmin(&self) -> Option<u64> {
+        if !self.isolation.txn_snapshot() && !self.stmt_snapshot {
+            return None;
+        }
+        self.xmin.as_ref().map(|x| x.xmin())
+    }
+
     /// Record how the transaction ended (its subtransactions' ids end with it).
     fn finish_xid(&mut self, committed: bool) {
         let undo = std::mem::take(&mut self.seq_undo);

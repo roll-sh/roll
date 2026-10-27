@@ -5,6 +5,10 @@ use super::{BOOTSTRAP_SUPERUSER_OID, Catalog, PG_DATABASE_OWNER_OID};
 use crate::error::{Error, Result, code};
 use serde::{Deserialize, Serialize};
 
+/// initdb's memberships among the predefined roles (system_constraints / pg_auth_members
+/// rows): (role, member), pg_monitor's, inherited and settable.
+pub const PREDEFINED_MEMBERS: [(u32, u32); 3] = [(3374, 3373), (3375, 3373), (3377, 3373)];
+
 pub const INSERT: u32 = 1 << 0;
 pub const SELECT: u32 = 1 << 1;
 pub const UPDATE: u32 = 1 << 2;
@@ -596,6 +600,7 @@ impl Catalog {
 
     /// Roles `role` is a member of, directly or not (itself included). With `inherit_only`,
     /// only through memberships that pass privileges on (role INHERIT and grant INHERIT).
+    /// (`PREDEFINED_MEMBERS` count too: they are initdb's pg_auth_members rows.)
     pub fn roles_of(&self, role: u32, inherit_only: bool, db_owner: u32) -> Vec<u32> {
         let mut out = vec![role];
         let mut i = 0;
@@ -608,6 +613,7 @@ impl Catalog {
                 .iter()
                 .filter(|m| m.member == r && (!inherit_only || m.inherit))
                 .map(|m| m.role)
+                .chain(PREDEFINED_MEMBERS.iter().filter(|p| p.1 == r).map(|p| p.0))
                 .collect();
             direct.sort_unstable();
             for role in direct {
@@ -647,9 +653,10 @@ impl Catalog {
         while i < out.len() {
             let r = out[i];
             i += 1;
-            for m in self.members.iter().filter(|m| m.member == r && m.set) {
-                if !out.contains(&m.role) {
-                    out.push(m.role);
+            let set = self.members.iter().filter(|m| m.member == r && m.set).map(|m| m.role);
+            for role in set.chain(PREDEFINED_MEMBERS.iter().filter(|p| p.1 == r).map(|p| p.0)) {
+                if !out.contains(&role) {
+                    out.push(role);
                 }
             }
         }

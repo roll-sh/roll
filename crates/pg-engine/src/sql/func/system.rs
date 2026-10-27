@@ -152,6 +152,15 @@ fn pg_is_in_recovery(_: &[Value], _: &FnCtx) -> Result<Value> {
 fn pg_sleep(a: &[Value], c: &FnCtx) -> Result<Value> {
     crate::exec::flush_live_notices();
     let secs = a[0].as_f64().unwrap_or(0.0);
+    // pg_stat_activity shows the wait (WAIT_EVENT_PG_SLEEP) while it lasts.
+    struct Waiting<'a>(&'a dyn crate::session::state::Cluster, i32);
+    impl Drop for Waiting<'_> {
+        fn drop(&mut self) {
+            self.0.set_wait(self.1, None);
+        }
+    }
+    let _waiting = Waiting(&*c.exec.sess.cluster, c.exec.sess.pid);
+    _waiting.0.set_wait(_waiting.1, Some(("Timeout", "PgSleep")));
     let end = std::time::Instant::now()
         + std::time::Duration::from_secs_f64(if secs.is_nan() {
             0.0
@@ -248,7 +257,17 @@ fn may_signal(pid: i32, c: &FnCtx, terminate: bool) -> Result<bool> {
 /// pg_blocking_pids(pid): the backends holding the heavyweight locks `pid` waits for.
 fn pg_blocking_pids(a: &[Value], c: &FnCtx) -> Result<Value> {
     let pid = int_arg(&a[0]) as i32;
-    let pids = c.exec.sess.db.locks.blocking_pids(pid);
+    // (The backend's locks are in its own database's lock manager: any open one's.)
+    let sess = &c.exec.sess;
+    let mut pids = sess.db.locks.blocking_pids(pid);
+    if pids.is_empty() {
+        for db in sess.cluster.opened_databases().iter().filter(|d| !Arc::ptr_eq(d, &sess.db)) {
+            pids = db.locks.blocking_pids(pid);
+            if !pids.is_empty() {
+                break;
+            }
+        }
+    }
     Ok(Value::Array(Arc::new(ArrayValue::from_vec(
         T::Int4,
         pids.into_iter().map(Value::Int4).collect(),
@@ -3137,9 +3156,6 @@ fn num_nulls(a: &[Value], _: &FnCtx) -> Result<Value> {
 fn num_nonnulls(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Int4(a.iter().filter(|v| !v.is_null()).count() as i32))
 }
-fn pg_current_wal_lsn(_: &[Value], c: &FnCtx) -> Result<Value> {
-    Ok(Value::PgLsn(c.exec.sess.db.store.visible_ts()))
-}
 fn pg_notify(a: &[Value], c: &FnCtx) -> Result<Value> {
     let s = |v: &Value| match v {
         Value::Null => String::new(),
@@ -4774,8 +4790,6 @@ pub fn register(r: &mut Registry) {
     r.func("num_nonnulls", vec![T::array_of(Any)], Int4, num_nonnulls)
         .variadic()
         .non_strict();
-    r.func("pg_current_wal_lsn", vec![], PgLsn, pg_current_wal_lsn)
-        .volatile();
     r.func("pg_notify", vec![Text, Text], Void, pg_notify)
         .volatile()
         .non_strict();

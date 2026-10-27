@@ -30,6 +30,7 @@ pub mod xact;
 pub mod xml;
 pub mod xmlmap;
 pub mod xmltable;
+pub mod walfuncs;
 
 use crate::error::{Error, Result, code};
 use crate::exec::ExecCtx;
@@ -569,6 +570,7 @@ pub fn registry() -> &'static Registry {
         xml::register(&mut r);
         xmlmap::register(&mut r);
         monitor::register(&mut r);
+        walfuncs::register(&mut r);
         pubsub::register(&mut r);
         xact::register(&mut r);
         register_type_io(&mut r);

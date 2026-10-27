@@ -167,6 +167,10 @@ struct Registry {
     /// transaction there prepares): opened at startup to recover them.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     prepared_dbs: BTreeSet<u32>,
+    /// The WAL position at the last clean shutdown (pg_current_wal_lsn resumes after it;
+    /// 0: none kept).
+    #[serde(default)]
+    wal_lsn: u64,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -186,6 +190,9 @@ struct Backend {
 struct OpenDbs {
     dbs: HashMap<u32, Arc<Database>>,
     closing: HashSet<u32>,
+    /// The cumulative statistics of databases closed while idle, until they open again (a
+    /// database's counters go on across its closes, as a server's do).
+    kept: HashMap<u32, crate::exec::pgstat::Shared>,
 }
 
 /// A database being closed (or kept closed while its files are copied, renamed or removed):
@@ -219,6 +226,8 @@ pub struct Engine {
     xids: Arc<crate::txn::xids::Xids>,
     /// The cluster's prepared transactions.
     twophase: Arc<crate::txn::twophase::TwoPhase>,
+    /// The cluster's fixed-numbered statistics and WAL position, shared by its databases.
+    stats: crate::exec::pgstat::ClusterStats,
     backends: Mutex<HashMap<i32, Backend>>,
     next_pid: AtomicI32,
     /// Held while a database's indexes are brought to the current key format.
@@ -354,9 +363,11 @@ impl Engine {
                     }
                 },
             ));
+            let stats = crate::exec::pgstat::Fixed::starting_at(registry.wal_lsn);
             Engine {
                 opts,
                 cache,
+                stats,
                 registry: Mutex::new(registry),
                 open: Mutex::new(OpenDbs::default()),
                 reopenable: Condvar::new(),
@@ -472,6 +483,10 @@ impl Engine {
         db.set_oids(self.oids.clone());
         db.set_xids(self.xids.clone());
         db.set_twophase(self.twophase.clone());
+        if let Some(kept) = open.kept.remove(&entry.oid) {
+            *db.pgstat.lock() = kept;
+        }
+        db.pgstat.lock().fixed = self.stats.clone();
         // Its prepared transactions, with their locks, before any session can see it.
         if db.recover_prepared()? == 0 {
             let mut r = self.registry.lock();
@@ -663,7 +678,7 @@ impl Engine {
     pub fn register_backend(
         &self,
         socket: Option<TcpStream>,
-        client_addr: Option<String>,
+        client: Option<std::net::SocketAddr>,
     ) -> (i32, i32, Arc<AtomicBool>) {
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
         let mut b = [0u8; 4];
@@ -672,7 +687,8 @@ impl Engine {
         let terminated = Arc::new(AtomicBool::new(false));
         let activity = Activity {
             pid,
-            client_addr,
+            client_addr: client.map(|p| p.ip().to_string()),
+            client_port: client.map(|p| p.port()),
             backend_start: crate::types::datetime::Clock::system().now,
             state: "starting".into(),
             ..Activity::default()
@@ -769,6 +785,7 @@ impl Engine {
             b.activity.user = user.to_string();
             b.activity.application_name = application_name.to_string();
             b.activity.state = "idle".into();
+            b.activity.state_change = Some(crate::types::datetime::Clock::system().now);
         }
         Ok(session)
     }
@@ -833,6 +850,7 @@ impl Engine {
                 .filter_map(|id| {
                     let db = open.dbs.remove(&id)?;
                     open.closing.insert(id);
+                    open.kept.insert(id, std::mem::take(&mut *db.pgstat.lock()));
                     Some((db, Closing { engine: self, oid: id }))
                 })
                 .collect()
@@ -1408,6 +1426,12 @@ impl Engine {
         // Prepared transactions go from memory (their state records stay stored, for the
         // next start); they hold their databases.
         self.twophase.clear();
+        // Where the WAL position resumes at the next start.
+        let mut r = self.registry.lock();
+        r.wal_lsn = self.stats.lock().wal_lsn();
+        if let Err(e) = self.save(&r) {
+            warn!(error = %e, "saving the registry failed");
+        }
     }
 
     /// Close a database that must have no sessions (DROP / RENAME / template copy), and keep
@@ -1792,6 +1816,7 @@ impl Cluster for Engine {
             r.databases.retain(|d| d.oid != entry.oid);
             self.save(&r)?;
         }
+        self.open.lock().kept.remove(&entry.oid);
         let _ = std::fs::remove_dir_all(self.db_dir(entry.oid));
         drop(closed);
         // dropDatabaseDependencies, DeleteSharedComments: what refers to it goes too.
@@ -1932,6 +1957,24 @@ impl Cluster for Engine {
         }
         self.sync_open(Some(db));
         Ok(ts)
+    }
+
+    fn opened_databases(&self) -> Vec<Arc<Database>> {
+        self.open.lock().dbs.values().cloned().collect()
+    }
+
+    fn set_wait(&self, pid: i32, event: Option<(&'static str, &'static str)>) {
+        self.set_activity(pid, |a| a.wait = event);
+    }
+
+    fn db_stats(&self, oid: u32) -> Option<crate::exec::pgstat::DbEntry> {
+        let open = self.open.lock();
+        if let Some(k) = open.kept.get(&oid) {
+            return Some(k.db.clone());
+        }
+        let db = open.dbs.get(&oid).cloned();
+        drop(open);
+        db.map(|db| crate::exec::pgstat::db_entry(&db))
     }
 
     fn other_databases(&self, current: u32) -> Vec<(u32, String, Arc<Database>)> {

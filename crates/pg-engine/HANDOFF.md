@@ -97,6 +97,45 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   decoding files). Not done: test_decoding (no logical decoding), bloom (pluggable index AMs),
   xml2 (XSLT), pg_overexplain, spi. Scores and the per-module notes: contrib STATUS.md.
   amcheck's verify_heapam counts its pages in pg_stat_io's bulkread context.
+- **Monitoring views and functions** (round 20, agent 80b): what postgres_exporter,
+  pgAdmin's dashboard, pg_activity and pgwatch read. Their queries (extracted from each tool's
+  source: the exporter's collectors, pgAdmin's dashboard templates, pg_activity's
+  `queries/*.sql`, pgwatch's `metrics.yaml`) now raise only the errors the reference raises
+  (pgwatch's `table_hashes` excepted: `information_schema._pg_truetypid(pg_attribute,
+  pg_type)`, a function over whole catalog rows, isn't implemented).
+  - The fixed-numbered statistics (pg_stat_wal, _checkpointer, _bgwriter, _io, _slru, their
+    reset times) are the cluster's (`pgstat::Fixed`, one `ClusterStats` the engine sets on
+    every database it opens), not each database's. A database's own statistics outlive its
+    idle close (`OpenDbs::kept`), so pg_stat_database counters never go back;
+    pg_stat_database shows another database's counts (`Cluster::db_stats`), zeros for one
+    without an entry, numbackends (database 0: the auxiliary processes), checksum_failures 0.
+  - The WAL position is the cluster's too: `Fixed::wal_lsn`, the start (`INITDB_LSN`, or the
+    segment after where the last clean shutdown left it, `Registry::wal_lsn`) plus the WAL
+    bytes written (a transaction's records move it at its end; pg_stat_wal counts them when
+    the backend reports). pg_current_wal_lsn / _insert_lsn / _flush_lsn are one position;
+    pg_switch_wal, pg_create_restore_point, pg_log_standby_snapshot, CHECKPOINT and
+    pg_backup_start / pg_backup_stop (backup_label and tablespace_map contents, the archiving
+    NOTICE) write records and switch segments as PostgreSQL does; pg_control_checkpoint /
+    _system report the last checkpoint, the xid and oid counters; pg_ls_waldir lists the
+    current segment. The recovery functions are a primary's (`sql/func/walfuncs.rs`):
+    NULL positions, "recovery is not in progress". Accepted: a crash loses the position's
+    progress since the last clean shutdown (it resumes at the next segment after the saved
+    one), and the size of a WAL record is the engine's estimate.
+  - pg_stat_activity: state_change, xact_start (live for the backend's own row),
+    backend_xid / backend_xmin (a transaction snapshot's between statements, the
+    statement's while it runs), client_port, wait events (Client / ClientRead when idle,
+    Lock / <locktype> while waiting for a heavyweight lock in any open database, Timeout /
+    PgSleep in pg_sleep). pg_locks and pg_blocking_pids cover every open database, with other
+    backends' virtualxid locks. pg_monitor's initdb memberships count for privileges
+    (`acl::PREDEFINED_MEMBERS`: it reads every backend's activity).
+  - Tests: golden `a80b_monitoring`, `tests/wire.rs` `monitoring_views` (a lock wait across
+    databases, an idle close, the position across a restart). Left: wait events of row-lock
+    waits outside the lock manager, pg_ls_logdir (the server log is agent 80's), catalog
+    scans in pg_stat_sys_tables' last_seq_scan / last_idx_scan, pg_get_shmem_allocations.
+  - Verified: crate tests, clippy, the difftest smoke, regress files sysviews, stats,
+    misc_functions, lock, advisory_lock, stats_import, prepared_xacts, tidscan, create_index,
+    create_misc (no unit changed against the committed results.tsv), and the isolation suite
+    (120 / 122 specs, 1,646 / 1,648 permutations, as before).
 - **Two-phase commit** (round 19, agent 71): PREPARE TRANSACTION, COMMIT / ROLLBACK
   PREPARED, pg_prepared_xacts (`txn/twophase.rs`, `session/prepared.rs`).
   max_prepared_transactions is a server option (`roll-engine --max-prepared-transactions N`,

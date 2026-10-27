@@ -75,6 +75,17 @@ pub trait Cluster: Send + Sync {
     fn other_databases(&self, _current: u32) -> Vec<(u32, String, Arc<Database>)> {
         Vec::new()
     }
+    /// The databases open now (sessions' locks and statistics are in them; a closed one
+    /// has no sessions).
+    fn opened_databases(&self) -> Vec<Arc<Database>> {
+        Vec::new()
+    }
+    /// Backend `pid` waits for `event` (wait_event_type, wait_event) now, or no longer.
+    fn set_wait(&self, _pid: i32, _event: Option<(&'static str, &'static str)>) {}
+    /// Database `oid`'s cumulative statistics entry (pg_stat_database), if it has one.
+    fn db_stats(&self, _oid: u32) -> Option<crate::exec::pgstat::DbEntry> {
+        None
+    }
     /// The directory server-side files are confined to, when they're allowed at all.
     fn server_files(&self) -> Option<&crate::server_files::ServerFiles> {
         None
@@ -140,11 +151,21 @@ pub struct Activity {
     pub user: String,
     pub application_name: String,
     pub client_addr: Option<String>,
+    /// The client's TCP port (None: not over TCP).
+    pub client_port: Option<u16>,
     pub backend_start: i64,
     pub xact_start: Option<i64>,
     pub query_start: Option<i64>,
+    /// When `state` last changed.
+    pub state_change: Option<i64>,
     pub state: String,
     pub query: String,
+    /// The transaction's id and its snapshot's xmin, as of the backend's last report (its
+    /// own row reads them live).
+    pub backend_xid: Option<u64>,
+    pub backend_xmin: Option<u64>,
+    /// What it waits for besides locks and its client (`Cluster::set_wait`).
+    pub wait: Option<(&'static str, &'static str)>,
 }
 
 /// A cluster with one database and nothing else (tests, embedded use).
