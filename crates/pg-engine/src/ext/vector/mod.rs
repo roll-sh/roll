@@ -57,7 +57,6 @@ pub(crate) fn am_routine(sym: &str) -> Option<&'static crate::ext::index_am::AmR
 /// same data differ; built with IVFFLAT_BENCH / HNSW_MEMORY it seeds it with 42 first. With
 /// the environment variable ROLL_VECTOR_BUILD_SEED set (to the seed) the engine does the same,
 /// so its builds can be compared with such a reference (the equality tests).
-#[allow(dead_code)] // (the index access methods' builds)
 pub(crate) fn seed_build(ctx: &crate::exec::ExecCtx) {
     static SEED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     let seed = SEED.get_or_init(|| std::env::var("ROLL_VECTOR_BUILD_SEED").ok().and_then(|s| s.trim().parse().ok()));

@@ -23,6 +23,8 @@ pub struct ScanState {
     seen: std::collections::HashSet<Vec<u8>>,
     /// The index's first key over the table's row.
     key: crate::sql::expr::Expr,
+    /// The value an entry holds for a key value (`IndexAm::entry_value`).
+    form: Box<dyn Fn(&Value) -> Value>,
     /// Fetched and not yet returned: (value to check, data key, the row's bytes).
     pub pending: std::collections::VecDeque<(Option<Value>, Vec<u8>, Option<bytes::Bytes>)>,
 }
@@ -30,7 +32,7 @@ pub struct ScanState {
 impl ScanState {
     /// A scan of index `ix` of table `t` (keys bound as `keys`) ordered by the distances to
     /// `orderbys`.
-    pub fn open(r: &AmRoutine, t: &crate::catalog::Table, ix: &crate::catalog::Index, keys: &[crate::sql::expr::Expr], orderbys: &[Value], ctx: &crate::exec::ExecCtx) -> Result<ScanState> {
+    pub fn open(r: &'static AmRoutine, t: &crate::catalog::Table, ix: &crate::catalog::Index, keys: &[crate::sql::expr::Expr], orderbys: &[Value], ctx: &crate::exec::ExecCtx) -> Result<ScanState> {
         r.load(ctx);
         let am = AmIndex::of(&ctx.catalog(), t, ix, keys, ctx);
         let updated = am.store.updated()?;
@@ -39,6 +41,7 @@ impl ScanState {
             updated,
             seen: Default::default(),
             key: keys.first().cloned().unwrap_or(crate::sql::expr::Expr::Const(Value::Null, crate::types::DataType::Text)),
+            form: Box::new(move |v| r.am.entry_value(&am, v)),
             pending: Default::default(),
         })
     }
@@ -59,7 +62,7 @@ impl ScanState {
         let Some(v) = check else {
             return Ok(true);
         };
-        let cur = crate::sql::expr::eval(&self.key, row, ctx)?;
+        let cur = (self.form)(&crate::sql::expr::eval(&self.key, row, ctx)?);
         let image = |v: &Value| {
             let mut out = Vec::new();
             crate::storage::row::encode_value(&mut out, v);
@@ -91,6 +94,11 @@ pub struct AmProps {
     pub storage: bool,
     pub clusterable: bool,
     pub can_include: bool,
+    /// amgettuple / amgetbitmap: plain and ordered scans, bitmap scans. (A bitmap scan of a
+    /// native method's index reads the heap with the index's conditions checked on each row,
+    /// as GIN's and BRIN's do here: the rows are the ones the bitmap would select, rechecked.)
+    pub gettuple: bool,
+    pub getbitmap: bool,
 }
 
 /// An index access method of native code: its handler's routine.
@@ -119,6 +127,7 @@ impl AmRoutine {
 pub fn routine(lib: &str, symbol: &str) -> Option<&'static AmRoutine> {
     match lib {
         "vector" => crate::ext::vector::am_routine(symbol),
+        "bloom" => (symbol == "blhandler").then_some(&crate::ext::bloom::ROUTINE),
         _ => None,
     }
 }
@@ -178,11 +187,24 @@ pub trait IndexAm {
     /// ORDER BY operator, NULL for a null argument).
     fn scan(&self, ix: &AmIndex, orderbys: &[Value], ctx: &crate::exec::ExecCtx) -> Result<Box<dyn AmScan>>;
 
+    /// genericcostestimate's numIndexTuples, when amcostestimate sets it before calling it
+    /// (bloom visits every tuple: the index's tuples); None: estimated from the selectivity.
+    fn cost_index_tuples(&self, _ix: &AmIndex, _index_tuples: f64) -> Option<f64> {
+        None
+    }
+
     /// amcostestimate.
     fn cost(&self, ix: &AmIndex, input: &CostInput, ctx: &crate::exec::ExecCtx) -> CostOutput;
 
     /// The index's size in blocks (RelationGetNumberOfBlocks).
     fn blocks(&self, ix: &AmIndex, ctx: &crate::exec::ExecCtx) -> Result<u64>;
+
+    /// The value an entry for key value `v` holds, as `scan` returns it and `vacuum` passes
+    /// it to `dead` (what a row's current value is compared with): `v` itself, unless the
+    /// operator class stores it changed (hnsw's normalizing classes).
+    fn entry_value(&self, _ix: &AmIndex, v: &Value) -> Value {
+        v.clone()
+    }
 }
 
 /// A row as an index build reads it.
@@ -204,11 +226,13 @@ pub trait BuildHeap {
     fn scan(&mut self) -> Box<dyn Iterator<Item = Result<AmRow>> + '_>;
 }
 
-/// ambuild's result: heap tuples seen and index tuples made.
+/// ambuild's result (heap tuples seen and index tuples made), or VACUUM's (the index tuples
+/// left, and how many it removed).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BuildStats {
     pub heap_tuples: f64,
     pub index_tuples: f64,
+    pub removed: f64,
 }
 
 /// What amcostestimate gets: genericcostestimate's results, computed by the planner.
@@ -349,8 +373,8 @@ pub fn note_insert(store: &AmStore, dkey: &[u8], xid: u64, oldest: u64) {
 /// VACUUM's test of an entry (ambulkdelete's callback): its row (`dkey` of table `t`, its
 /// index key `key`) is dead to everyone when no version of it since the oldest snapshot
 /// holds `value` (any version will do for a row never updated) and no running transaction
-/// made the entry.
-pub fn entry_dead(store: &AmStore, t: &crate::catalog::Table, key: &crate::sql::expr::Expr, dkey: &[u8], value: &Value, ctx: &crate::exec::ExecCtx) -> Result<bool> {
+/// made the entry. (`form`: the value an entry holds for a key value, `IndexAm::entry_value`.)
+pub fn entry_dead(store: &AmStore, t: &crate::catalog::Table, key: &crate::sql::expr::Expr, form: &dyn Fn(&Value) -> Value, dkey: &[u8], value: &Value, ctx: &crate::exec::ExecCtx) -> Result<bool> {
     let xids = ctx.sess.db.xids();
     if let Some(&x) = inflight().lock().get(&store.id()).and_then(|m| m.get(dkey))
         && x >= xids.horizon()
@@ -373,7 +397,7 @@ pub fn entry_dead(store: &AmStore, t: &crate::catalog::Table, key: &crate::sql::
                 return Ok(false);
             }
             let row = crate::exec::scan::decode_table_row(t, &b)?;
-            if image(&crate::sql::expr::eval(key, &row, ctx)?) == want {
+            if image(&form(&crate::sql::expr::eval(key, &row, ctx)?)) == want {
                 return Ok(false);
             }
         }

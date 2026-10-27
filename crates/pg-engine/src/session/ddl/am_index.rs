@@ -56,8 +56,15 @@ impl Ddl<'_, '_> {
             let am = AmIndex::of(&self.cat, t, &bix.index, &bix.keys, self.ctx);
             let key = bix.keys[0].clone();
             let ctx = self.ctx;
-            let mut dead = |dkey: &[u8], v: &Value| crate::ext::index_am::entry_dead(&am.store, t, &key, dkey, v, ctx);
-            r.am.vacuum(&am, &mut dead, ctx)?;
+            let form = |v: &Value| r.am.entry_value(&am, v);
+            let mut dead = |dkey: &[u8], v: &Value| crate::ext::index_am::entry_dead(&am.store, t, &key, &form, dkey, v, ctx);
+            let stats = r.am.vacuum(&am, &mut dead, ctx)?;
+            // (ambulkdelete runs only over dead tuples: an index with none removed keeps its
+            // statistics, as amvacuumcleanup without a bulk delete returns none.)
+            if stats.removed > 0.0 {
+                let pages = r.am.blocks(&am, ctx)? as i32;
+                self.cat.relstats.insert(bix.index.oid, crate::catalog::RelStats { pages, tuples: stats.index_tuples, allvisible: 0, allfrozen: 0 });
+            }
         }
         Ok(())
     }
@@ -125,8 +132,12 @@ impl Ddl<'_, '_> {
         let keys = self.heap_ordered_keys(t)?;
         let blocks = crate::exec::sizing::fork_blocks(t.oid, crate::exec::sizing::Fork::Main, self.ctx)?.unwrap_or(0) as u32;
         let mut heap = DdlHeap { d: self, t, bix, keys, blocks };
-        r.am.build(&am, &mut heap, self.ctx)?;
-        self.index_built(t, ix)
+        let stats = r.am.build(&am, &mut heap, self.ctx)?;
+        self.index_built(t, ix)?;
+        // index_update_stats: the index's pages and the tuples ambuild made.
+        let pages = r.am.blocks(&am, self.ctx)? as i32;
+        self.cat.relstats.insert(ix.oid, crate::catalog::RelStats { pages, tuples: stats.index_tuples, allvisible: 0, allfrozen: 0 });
+        Ok(())
     }
 
     /// The table's rows' data keys in heap (ctid) order with their blocks where the heap is

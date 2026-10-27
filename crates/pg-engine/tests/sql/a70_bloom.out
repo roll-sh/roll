@@ -1,0 +1,100 @@
+> CREATE EXTENSION bloom
+-- CREATE EXTENSION
+
+> CREATE TABLE a70_tb (i int4, t text) WITH (autovacuum_enabled = off)
+-- CREATE TABLE
+
+> INSERT INTO a70_tb SELECT i % 13, i::text FROM generate_series(1, 5000) i
+-- INSERT 0 5000
+
+> CREATE INDEX a70_tb_b ON a70_tb USING bloom (i, t) WITH (length = 64, col1 = 3)
+-- CREATE INDEX
+
+> SELECT pg_relation_size('a70_tb_b') / 8192, relpages, reltuples FROM pg_class WHERE relname = 'a70_tb_b'
+?column?:int8 | relpages:int4 | reltuples:float4
+10 | 10 | 5000
+-- SELECT 1
+
+> INSERT INTO a70_tb SELECT i % 13, i::text FROM generate_series(1, 700) i
+-- INSERT 0 700
+
+> SELECT pg_relation_size('a70_tb_b') / 8192
+?column?:int8
+12
+-- SELECT 1
+
+> EXPLAIN SELECT * FROM a70_tb WHERE i = 3 AND t = '42'
+QUERY PLAN:text
+Seq Scan on a70_tb  (cost=0.00..87.15 rows=1 width=36)
+  Filter: ((i = 3) AND (t = '42'::text))
+-- EXPLAIN
+
+> DELETE FROM a70_tb WHERE i < 6
+-- DELETE 2632
+
+> VACUUM a70_tb
+-- VACUUM
+
+> SELECT pg_relation_size('a70_tb_b') / 8192, relpages, reltuples FROM pg_class WHERE relname = 'a70_tb_b'
+?column?:int8 | relpages:int4 | reltuples:float4
+12 | 12 | 3068
+-- SELECT 1
+
+> INSERT INTO a70_tb SELECT i % 13, i::text FROM generate_series(1, 3000) i
+-- INSERT 0 3000
+
+> SELECT pg_relation_size('a70_tb_b') / 8192
+?column?:int8
+12
+-- SELECT 1
+
+> DELETE FROM a70_tb
+-- DELETE 6068
+
+> VACUUM a70_tb
+-- VACUUM
+
+> INSERT INTO a70_tb SELECT i % 13, i::text FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> SELECT pg_relation_size('a70_tb_b') / 8192, relpages FROM pg_class WHERE relname = 'a70_tb_b'
+?column?:int8 | relpages:int4
+12 | 12
+-- SELECT 1
+
+> ANALYZE a70_tb
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN SELECT * FROM a70_tb WHERE i = 3
+QUERY PLAN:text
+Bitmap Heap Scan on a70_tb  (cost=63.04..74.96 rows=154 width=8)
+  Recheck Cond: (i = 3)
+  ->  Bitmap Index Scan on a70_tb_b  (cost=0.00..63.00 rows=154 width=0)
+        Index Cond: (i = 3)
+-- EXPLAIN
+
+> SELECT count(*) FROM a70_tb WHERE i = 3 AND t = '42'
+count:int8
+1
+-- SELECT 1
+
+> ALTER INDEX a70_tb_b SET (length = 4097)
+ERROR 22023: value 4097 out of bounds for option "length"
+DETAIL: Valid values are between "1" and "4096".
+
+> ALTER INDEX a70_tb_b SET (col33 = 2)
+ERROR 22023: unrecognized parameter "col33"
+
+> CREATE INDEX ON a70_tb USING bloom (i) WITH (length = 0)
+ERROR 22023: value 0 out of bounds for option "length"
+DETAIL: Valid values are between "1" and "4096".
+
+> DROP TABLE a70_tb
+-- DROP TABLE
+
+> DROP EXTENSION bloom
+-- DROP EXTENSION
+

@@ -1146,8 +1146,6 @@ impl Ddl<'_, '_> {
             types: Vec<DataType>,
             /// Its pages when they are modelled (only its tuples are counted then).
             modelled: Option<u32>,
-            /// Of a native access method.
-            am: bool,
             tuples: usize,
             /// (sort key, index tuple size), when its pages aren't modelled.
             keys: Vec<(u64, Vec<u8>, usize)>,
@@ -1163,7 +1161,7 @@ impl Ddl<'_, '_> {
                 }
                 let mut types: Vec<DataType> = bix.keys.iter().map(|k| k.ty()).collect();
                 types.extend(bix.index.include.iter().map(|&i| t.columns[i].ty.clone()));
-                // (An index of a native access method has its own size; NULLs aren't in it.)
+                // (An index of a native access method has its own size.)
                 let am = crate::ext::index_am::routine_by_name(&self.cat, &bix.index.method).is_some();
                 let modelled = if am {
                     let a = crate::ext::index_am::AmIndex::of(&self.cat, t, &bix.index, &bix.keys, self.ctx);
@@ -1182,7 +1180,6 @@ impl Ddl<'_, '_> {
                     bix,
                     types,
                     modelled,
-                    am,
                     tuples: 0,
                     keys: Vec::new(),
                     btree_keys,
@@ -1228,9 +1225,6 @@ impl Ddl<'_, '_> {
                 let Some(mut vals) = super::table::index_values(&ix.bix, &row, self)? else {
                     continue;
                 };
-                if ix.am && vals.first().is_some_and(Value::is_null) {
-                    continue;
-                }
                 ix.tuples += 1;
                 if let Some(keys) = &mut ix.btree_keys {
                     keys.push(crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx));

@@ -213,7 +213,10 @@ impl std::fmt::Debug for NativeAm {
 impl Am {
     /// amgettuple: plain and index-only scans (else bitmap scans only).
     fn gettuple(self) -> bool {
-        !matches!(self, Am::Gin | Am::Brin)
+        match self {
+            Am::Native(n) => n.0.props.gettuple,
+            _ => !matches!(self, Am::Gin | Am::Brin),
+        }
     }
 
     /// amoptionalkey: a scan without a condition on the first column.
@@ -2476,7 +2479,14 @@ impl Planner<'_, '_> {
         loop_count: f64,
         orderbys: usize,
     ) -> AmCost {
-        let (c, _) = self.generic(rel, ii, quals, 0.0, 0.0, loop_count, orderbys);
+        let Some(t) = self.ctx.catalog().index_table(ii.ix.table) else {
+            return self.generic(rel, ii, quals, 0.0, 0.0, loop_count, orderbys).0;
+        };
+        let keys: Vec<Expr> = ii.keys.clone();
+        let am = crate::ext::index_am::AmIndex::of(&self.ctx.catalog(), &t, &ii.ix, &keys, self.ctx);
+        r.load(self.ctx);
+        let tuples = r.am.cost_index_tuples(&am, ii.tuples).unwrap_or(0.0);
+        let (c, _) = self.generic(rel, ii, quals, tuples, 0.0, loop_count, orderbys);
         let input = crate::ext::index_am::CostInput {
             has_orderbys: orderbys > 0,
             startup: c.startup,
@@ -2484,18 +2494,12 @@ impl Planner<'_, '_> {
             selectivity: c.sel,
             correlation: c.correlation,
             num_index_pages: c.pages,
-            num_index_tuples: 0.0,
+            num_index_tuples: tuples,
             spc_random_page_cost: self.g.random_page_cost,
             spc_seq_page_cost: self.g.seq_page_cost,
             index_tuples: ii.tuples,
             rel_pages: rel.size.pages,
         };
-        let Some(t) = self.ctx.catalog().index_table(ii.ix.table) else {
-            return c;
-        };
-        let keys: Vec<Expr> = ii.keys.clone();
-        let am = crate::ext::index_am::AmIndex::of(&self.ctx.catalog(), &t, &ii.ix, &keys, self.ctx);
-        r.load(self.ctx);
         let o = r.am.cost(&am, &input, self.ctx);
         AmCost {
             startup: o.startup,
@@ -3117,7 +3121,12 @@ fn order_by_ops(ii: &IndexInfo, w: &Want) -> (Vec<PathKey>, Vec<Expr>) {
         if args.len() != 2 {
             break;
         }
-        let fixed = |e: &Expr| e.columns().is_empty() && !e.is_volatile();
+        // (An uncorrelated scalar sub-select is an InitPlan's Param to Postgres: a value fixed
+        // for the scan, whatever the sub-select calls.)
+        let initplan = |e: &Expr| {
+            matches!(e, Expr::Subquery(s) if s.params.is_empty() && matches!(s.kind, crate::sql::expr::SubqueryKind::Scalar) && s.func.is_none())
+        };
+        let fixed = |e: &Expr| e.columns().is_empty() && (!e.is_volatile() || initplan(e));
         for (col, key) in ii.keys.iter().enumerate() {
             let ops = &ii.fam_ops[col];
             let ordering = |oid: u32| {
@@ -4379,7 +4388,10 @@ fn describe_need(ctx: &ExecCtx, s: &ScanPlan, par: Option<(usize, f64)>, needed:
             let n = rel.indexes.iter().position(|i| i.ix.oid == ix.oid)?;
             let cs = iclauses(&rel.indexes[n], quals, &rel);
             let order_by: Vec<Expr> = match &s.index {
-                Some((ix, b)) if matches!(ix.method.as_str(), "gist" | "spgist") => {
+                Some((ix, b))
+                    if matches!(ix.method.as_str(), "gist" | "spgist")
+                        || crate::ext::index_am::is_native(&ctx.catalog(), &ix.method) =>
+                {
                     b.order.iter().map(|k| k.expr.clone()).collect()
                 }
                 _ => Vec::new(),

@@ -1,0 +1,277 @@
+> CREATE EXTENSION vector
+-- CREATE EXTENSION
+
+> SET max_parallel_maintenance_workers = 0
+-- SET
+
+> CREATE TABLE a70_items (id int, v vector(3), h halfvec(3), b bit(8))
+-- CREATE TABLE
+
+> INSERT INTO a70_items SELECT i, ARRAY[i % 7, i % 11, i % 13]::vector,
+>   ARRAY[i % 5, i % 3, 1]::halfvec, (i % 256)::bit(8) FROM generate_series(1, 300) i
+-- INSERT 0 300
+
+> INSERT INTO a70_items (id) VALUES (301)
+-- INSERT 0 1
+
+> ANALYZE a70_items
+-- ANALYZE
+
+> CREATE TABLE a70_nodim (v vector)
+-- CREATE TABLE
+
+> CREATE INDEX ON a70_nodim USING ivfflat (v)
+ERROR 22023: column does not have dimensions
+
+> CREATE INDEX ON a70_nodim USING hnsw (v)
+ERROR 42704: data type vector has no default operator class for access method "hnsw"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> CREATE INDEX ON a70_items USING ivfflat (v) WITH (lists = 0)
+ERROR 22023: value 0 out of bounds for option "lists"
+DETAIL: Valid values are between "1" and "32768".
+
+> CREATE INDEX ON a70_items USING hnsw (v) WITH (m = 1)
+ERROR 22023: value 1 out of bounds for option "m"
+DETAIL: Valid values are between "2" and "100".
+
+> CREATE INDEX ON a70_items USING hnsw (v) WITH (m = 40, ef_construction = 50)
+ERROR 42704: data type vector has no default operator class for access method "hnsw"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> CREATE INDEX ON a70_items USING ivfflat (v) WITH (foo = 1)
+ERROR 22023: unrecognized parameter "foo"
+
+> CREATE UNIQUE INDEX ON a70_items USING hnsw (v)
+ERROR 0A000: access method "hnsw" does not support unique indexes
+
+> CREATE INDEX ON a70_items USING hnsw (v, h)
+ERROR 0A000: access method "hnsw" does not support multicolumn indexes
+
+> CREATE INDEX a70_ivf ON a70_items USING ivfflat (v vector_l2_ops) WITH (lists = 4)
+-- CREATE INDEX
+
+> SELECT indexdef FROM pg_indexes WHERE indexname = 'a70_ivf'
+indexdef:text
+CREATE INDEX a70_ivf ON public.a70_items USING ivfflat (v) WITH (lists='4')
+-- SELECT 1
+
+> SELECT relpages, reltuples FROM pg_class WHERE relname = 'a70_ivf'
+relpages:int4 | reltuples:float4
+6 | 300
+-- SELECT 1
+
+> SELECT pg_relation_size('a70_ivf') / 8192 AS pages
+pages:int8
+6
+-- SELECT 1
+
+> SET ivfflat.probes = 4
+-- SET
+
+> EXPLAIN SELECT id, v <-> '[3,1,2]' AS d FROM a70_items ORDER BY 2 LIMIT 5
+QUERY PLAN:text
+Limit  (cost=11.76..11.77 rows=5 width=12)
+  ->  Sort  (cost=11.76..12.51 rows=301 width=12)
+        Sort Key: ((v <-> '[3,1,2]'::vector))
+        ->  Seq Scan on a70_items  (cost=0.00..6.76 rows=301 width=12)
+-- EXPLAIN
+
+> SELECT id, v <-> '[3,1,2]' AS d FROM a70_items ORDER BY v <-> '[3,1,2]', id LIMIT 5
+id:int4 | d:float8
+67 | 1
+276 | 1
+2 | 1.4142135623730951
+66 | 1.4142135623730951
+144 | 1.4142135623730951
+-- SELECT 5
+
+> SELECT count(*) FROM (SELECT id FROM a70_items ORDER BY v <-> '[3,1,2]') s
+count:int8
+301
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a70_items WHERE id > 100 ORDER BY v <-> '[3,1,2]' LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: ((v <-> '[3,1,2]'::vector))
+        ->  Seq Scan on a70_items
+              Filter: (id > 100)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a70_items ORDER BY v <-> (SELECT v FROM a70_items WHERE id = 7) LIMIT 3
+QUERY PLAN:text
+Limit
+  InitPlan 1
+    ->  Seq Scan on a70_items a70_items_1
+          Filter: (id = 7)
+  ->  Sort
+        Sort Key: ((a70_items.v <-> (InitPlan 1).col1))
+        ->  Seq Scan on a70_items
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a70_items ORDER BY v <=> '[3,1,2]' LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: ((v <=> '[3,1,2]'::vector))
+        ->  Seq Scan on a70_items
+-- EXPLAIN
+
+> SET ivfflat.iterative_scan = relaxed_order
+-- SET
+
+> SELECT id FROM a70_items WHERE id % 50 = 0 ORDER BY v <-> '[3,1,2]', id LIMIT 3
+id:int4
+200
+300
+100
+-- SELECT 3
+
+> RESET ivfflat.iterative_scan
+-- RESET
+
+> UPDATE a70_items SET v = '[100,100,100]' WHERE id = 1
+-- UPDATE 1
+
+> SELECT id FROM a70_items ORDER BY v <-> '[100,100,100]' LIMIT 2
+id:int4
+1
+76
+-- SELECT 2
+
+> DELETE FROM a70_items WHERE id <= 100
+-- DELETE 100
+
+> VACUUM a70_items
+-- VACUUM
+
+> SELECT reltuples FROM pg_class WHERE relname = 'a70_ivf'
+reltuples:float4
+200
+-- SELECT 1
+
+> SELECT count(*) FROM (SELECT id FROM a70_items ORDER BY v <-> '[3,1,2]') s
+count:int8
+201
+-- SELECT 1
+
+> REINDEX INDEX a70_ivf
+-- REINDEX
+
+> SELECT count(*) FROM (SELECT id FROM a70_items ORDER BY v <-> '[3,1,2]') s
+count:int8
+201
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> TRUNCATE a70_items
+NOTICE 00000: ivfflat index created with little data
+DETAIL: This will cause low recall.
+HINT: Drop the index until the table has more data.
+-- TRUNCATE TABLE
+
+> SELECT count(*) FROM (SELECT id FROM a70_items ORDER BY v <-> '[3,1,2]') s
+count:int8
+0
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*) FROM (SELECT id FROM a70_items ORDER BY v <-> '[3,1,2]') s
+count:int8
+201
+-- SELECT 1
+
+> ALTER INDEX a70_ivf SET (lists = 2)
+-- ALTER INDEX
+
+> SELECT reloptions FROM pg_class WHERE relname = 'a70_ivf'
+reloptions:text[]
+{lists=2}
+-- SELECT 1
+
+> DROP INDEX a70_ivf
+-- DROP INDEX
+
+> CREATE INDEX a70_hnsw ON a70_items USING hnsw (v vector_cosine_ops) WITH (m = 8, ef_construction = 32)
+-- CREATE INDEX
+
+> CREATE INDEX a70_hnsw_h ON a70_items USING hnsw (h halfvec_l2_ops)
+-- CREATE INDEX
+
+> CREATE INDEX a70_hnsw_b ON a70_items USING hnsw (b bit_hamming_ops)
+-- CREATE INDEX
+
+> SET hnsw.ef_search = 400
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a70_items ORDER BY v <=> '[3,1,2]' LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: ((v <=> '[3,1,2]'::vector))
+        ->  Seq Scan on a70_items
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a70_items ORDER BY h <-> '[1,1,1]' LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: ((h <-> '[1,1,1]'::halfvec))
+        ->  Seq Scan on a70_items
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a70_items ORDER BY b <~> '10101010' LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: ((b <~> '10101010'::"bit"))
+        ->  Seq Scan on a70_items
+-- EXPLAIN
+
+> SELECT count(*) FROM (SELECT id FROM a70_items ORDER BY v <=> '[3,1,2]') s
+count:int8
+201
+-- SELECT 1
+
+> SELECT count(*) FROM (SELECT id FROM a70_items ORDER BY v <=> '[0,0,0]') s
+count:int8
+201
+-- SELECT 1
+
+> SET hnsw.iterative_scan = strict_order
+-- SET
+
+> SELECT count(*) FROM (SELECT id FROM a70_items WHERE id % 3 = 0 ORDER BY h <-> '[1,1,1]' LIMIT 20) s
+count:int8
+20
+-- SELECT 1
+
+> RESET hnsw.iterative_scan
+-- RESET
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a70_items ORDER BY v <-> '[3,1,2]' LIMIT 5
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: ((v <-> '[3,1,2]'::vector))
+        ->  Seq Scan on a70_items
+-- EXPLAIN
+
+> \d a70_items
+> DROP TABLE a70_items, a70_nodim
+ERROR 42601: syntax error at or near "\" (at 1)
+
+> DROP EXTENSION vector
+ERROR 2BP01: cannot drop extension vector because other objects depend on it
+DETAIL: column v of table a70_items depends on type vector
+DETAIL: column v of table a70_nodim depends on type vector
+DETAIL: column h of table a70_items depends on type halfvec
+DETAIL: index a70_hnsw_b depends on operator class bit_hamming_ops for access method hnsw
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+

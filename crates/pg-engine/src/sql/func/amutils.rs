@@ -71,8 +71,8 @@ fn made_am_caps(c: &FnCtx, am: u32) -> Option<AmCaps> {
             searchnulls: p.search_nulls,
             clusterable: p.clusterable,
             caninclude: p.can_include,
-            gettuple: true,
-            getbitmap: false,
+            gettuple: p.gettuple,
+            getbitmap: p.getbitmap,
             canreturn: false,
         });
     }

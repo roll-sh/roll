@@ -379,10 +379,14 @@ impl Ddl<'_, '_> {
             Some(_) => self.cat.am_builtin_name(&am_name),
             None => am_name.clone(),
         };
-        if !matches!(
-            method.as_str(),
-            "btree" | "hash" | "gin" | "gist" | "brin" | "spgist"
-        ) {
+        // (A native method's handler is the extension's C function: no built-in one.)
+        let native = crate::ext::index_am::routine_by_name(&self.cat, &am_name).is_some();
+        if !native
+            && !matches!(
+                method.as_str(),
+                "btree" | "hash" | "gin" | "gist" | "brin" | "spgist"
+            )
+        {
             return Err(Error::new(
                 code::UNDEFINED_OBJECT,
                 format!("access method \"{method}\" does not exist"),
@@ -402,6 +406,19 @@ impl Ddl<'_, '_> {
                 format!("access method \"{am_name}\" does not support included columns"),
             ));
         }
+        // (amcanmulticol: not hash's or SP-GiST's; a native method's routine says.)
+        let multicol = match crate::ext::index_am::routine_by_name(&self.cat, &am_name) {
+            Some(r) => r.props.can_multicol,
+            None => !matches!(method.as_str(), "hash" | "spgist"),
+        };
+        if s.index_params.len() > 1 && !multicol {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                format!("access method \"{am_name}\" does not support multicolumn indexes"),
+            ));
+        }
+        // (DefineIndex validates the options before it looks at the columns.)
+        let options = index_options(&self.cat, &method, &s.options)?;
         let parts = self.index_parts(
             &t,
             &am_name,
@@ -424,7 +441,6 @@ impl Ddl<'_, '_> {
                 .collect();
             self.check_unique_partkey(&t, &cols, "UNIQUE")?;
         }
-        let options = index_options(&self.cat, &method, &s.options)?;
         let name_parts = parts.name_parts;
         let name = if s.idxname.is_empty() {
             let refs: Vec<&str> = name_parts.iter().map(String::as_str).collect();
@@ -755,7 +771,7 @@ impl Ddl<'_, '_> {
                     c.oid
                 }
                 None if self.cat.default_opclass(am, &key_ty) == 0 => {
-                    return Err(Error::new(code::UNDEFINED_OBJECT, format!("data type {} has no default operator class for access method \"{method}\"", key_ty.display()))
+                    return Err(Error::new(code::UNDEFINED_OBJECT, format!("data type {} has no default operator class for access method \"{method}\"", key_ty.without_typmod().display()))
                         .hint("You must specify an operator class for the index or define a default operator class for the data type."));
                 }
                 // A made default class is recorded; Postgres's are implied.

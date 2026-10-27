@@ -397,6 +397,7 @@ fn varlena_payload(v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) ->
         Value::Numeric(_) => 2 + 2 * numeric_digits(&text(v, ty)),
         Value::Bits(n, _) => 4 + (*n as usize).div_ceil(8),
         Value::Inet(a, _) => 3 + a.len(),
+        Value::Ext(k, b) if let Some(n) = crate::ext::types::stored_payload(*k, b) => n,
         Value::Array(a) => {
             let elem = ty.elem().cloned().unwrap_or_else(|| a.elem.clone());
             let items = &a.items;

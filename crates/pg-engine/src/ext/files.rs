@@ -9,6 +9,8 @@ pub(super) const FILES: &[(&str, &str)] = &[
     ("amcheck--1.3--1.4.sql", include_str!("files/amcheck--1.3--1.4.sql")),
     ("amcheck--1.4--1.5.sql", include_str!("files/amcheck--1.4--1.5.sql")),
     ("amcheck.control", include_str!("files/amcheck.control")),
+    ("bloom--1.0.sql", include_str!("files/bloom--1.0.sql")),
+    ("bloom.control", include_str!("files/bloom.control")),
     ("btree_gin--1.0--1.1.sql", include_str!("files/btree_gin--1.0--1.1.sql")),
     ("btree_gin--1.0.sql", include_str!("files/btree_gin--1.0.sql")),
     ("btree_gin--1.1--1.2.sql", include_str!("files/btree_gin--1.1--1.2.sql")),

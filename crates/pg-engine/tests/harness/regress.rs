@@ -259,6 +259,7 @@ const CONTRIB_MODULES: &[&str] = &[
     "dict_xsyn",
     "auto_explain",
     "passwordcheck",
+    "bloom",
 ];
 
 /// Extensions outside contrib whose own regression tests run the same way: (module, git

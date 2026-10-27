@@ -39,7 +39,7 @@ pub fn library(probin: &str) -> &str {
 /// as `dlsym` failing is).
 pub fn has_library(lib: &str) -> bool {
     matches!(lib, "_int" | "amcheck" | "btree_gin" | "btree_gist" | "citext" | "cube" | "dblink" | "earthdistance" | "file_fdw" | "fuzzystrmatch" | "hstore" | "isn" | "lo" | "ltree" | "pgcrypto"
-            | "pg_buffercache" | "pg_stat_statements" | "pg_trgm" | "postgres_fdw" | "seg" | "tablefunc" | "pg_prewarm" | "pg_freespacemap" | "pg_visibility" | "pgstattuple" | "tcn" | "sslinfo" | "dict_int" | "dict_xsyn" | "pgrowlocks" | "tsm_system_rows" | "tsm_system_time" | "unaccent" | "uuid-ossp" | "vector")
+            | "pg_buffercache" | "pg_stat_statements" | "pg_trgm" | "postgres_fdw" | "seg" | "tablefunc" | "pg_prewarm" | "pg_freespacemap" | "pg_visibility" | "pgstattuple" | "tcn" | "sslinfo" | "dict_int" | "dict_xsyn" | "pgrowlocks" | "tsm_system_rows" | "tsm_system_time" | "unaccent" | "uuid-ossp" | "vector" | "bloom")
 }
 
 /// A made operator class's support function `number` (for its input type), when it is a C
@@ -147,6 +147,7 @@ pub fn lookup(probin: &str, symbol: &str) -> Option<Native> {
         "pg_freespacemap" => super::pg_freespacemap::symbol(symbol),
         "pg_prewarm" => super::pg_prewarm::symbol(symbol),
         "vector" => super::vector::symbol(symbol),
+        "bloom" => super::bloom::symbol(symbol),
         _ => None,
     }
 }

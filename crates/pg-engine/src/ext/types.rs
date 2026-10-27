@@ -178,6 +178,19 @@ pub fn check_typmod(kind: u16, b: &[u8], typmod: i32) -> Result<()> {
     }
 }
 
+/// The size of a value's PostgreSQL form after its varlena header, when the engine models it
+/// (pgvector's types: the header fields before the elements, then the elements); None: a type
+/// sized by its text.
+pub fn stored_payload(kind: u16, b: &[u8]) -> Option<usize> {
+    match kind {
+        // vector and halfvec: int16 dim, int16 unused, the elements; sparsevec: int32 dim,
+        // nnz and unused, the indices and values (here dim and nnz only).
+        VECTOR | HALFVEC => Some(4 + b.len()),
+        SPARSEVEC => Some(4 + b.len()),
+        _ => None,
+    }
+}
+
 /// Put an order-preserving byte string in a key (0 escaped, terminated).
 pub fn key_bytes(b: &[u8], out: &mut Vec<u8>) {
     for &c in b {

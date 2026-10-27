@@ -757,6 +757,9 @@ pub fn opclass_accepts(intype: u32, ty: &DataType) -> bool {
         || matches!(ty, DataType::Varchar(_) | DataType::Text) && intype == 1042
         // (cidr is binary-coercible to inet.)
         || matches!(ty, DataType::Cidr) && intype == 869
+        // (bit and varbit are binary-coercible to each other.)
+        || matches!(ty, DataType::Varbit(_)) && intype == 1560
+        || matches!(ty, DataType::Bit(_)) && intype == 1562
 }
 
 /// Whether `opclass` is the default for its input type.
