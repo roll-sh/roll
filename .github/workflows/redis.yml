@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: docker pull -q redis:8-alpine
+      - run: docker pull -q redis:8.10.3-alpine
       - name: Differential compatibility with Redis 8
         run: ROLL_COMPAT_REQUIRED=1 cargo test -p redis-server --test compat
 

@@ -133,6 +133,8 @@ cluster-port
 cluster-announce-bus-port
 cluster-announce-port
 cluster-announce-tls-port
+repl-compression
+repl-compression-max-latency
 repl-timeout
 repl-ping-replica-period
 repl-ping-slave-period

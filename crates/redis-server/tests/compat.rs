@@ -1,5 +1,5 @@
 //! Differential compatibility tests: every script in `tests/compat/*.txt` runs against real Redis
-//! (Docker, `redis:8-alpine`) and against roll, and every reply must be identical.
+//! (Docker, `redis:8.10.3-alpine`) and against roll, and every reply must be identical.
 //!
 //! Script syntax (one command per line, `redis-cli` quoting):
 //!
@@ -79,7 +79,7 @@ fn reference(env: &str, args: &[&str]) -> Option<(String, Option<Container>)> {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("roll-compat-{}-{}-{seq}", std::process::id(), redis_engine::util::now_us() % 1_000_000);
-    let image = std::env::var("ROLL_COMPAT_IMAGE").unwrap_or_else(|_| "redis:8-alpine".into());
+    let image = std::env::var("ROLL_COMPAT_IMAGE").unwrap_or_else(|_| "redis:8.10.3-alpine".into());
     let out = Command::new("docker")
         .args(["run", "-d", "--rm", "--name", &name, "-p", "127.0.0.1::6379", &image])
         .args(if args.is_empty() { vec![] } else { [&["redis-server"][..], args].concat() })

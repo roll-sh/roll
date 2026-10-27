@@ -261,7 +261,7 @@ Storage stays bounded:
 - the control plane.
 
 It also runs a differential compatibility suite. That suite sends the same scripts to roll and to
-`redis:8-alpine` in Docker and compares the replies byte for byte.
+`redis:8.10.3-alpine` in Docker and compares the replies byte for byte.
 
 The script skips itself when nothing relevant changed. Pass `--force` to run anyway, or `--unit` to skip
 Docker. CI is in `.github/workflows/redis.yml`. To run the durability tests against S3, set
