@@ -572,11 +572,12 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
                 }
                 // (So is one that reads none at all: distribute_qual_to_rels gives a
                 // pseudoconstant clause the whole join's scope, a gating qual of the join.)
-                // (A constant false or NULL too, of an inner join: the join is dummy, its
-                // relations planned all the same, their subqueries' constants simplified.)
+                // (A constant false or NULL too: the join is dummy, its relations planned
+                // all the same, their subqueries' constants simplified. Of an outer join
+                // too: the top join domain's pseudoconstant gates the whole join, not its
+                // outer side.)
                 if p.columns().is_empty()
-                    && (!matches!(p, Expr::Const(..))
-                        || (kind == JoinKind::Inner && matches!(p, Expr::Const(Value::Bool(false) | Value::Null, _))))
+                    && (!matches!(p, Expr::Const(..)) || matches!(p, Expr::Const(Value::Bool(false) | Value::Null, _)))
                 {
                     if kind == JoinKind::Inner {
                         cond_parts.push(p);

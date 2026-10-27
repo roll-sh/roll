@@ -1992,6 +1992,11 @@ impl Binder<'_, '_> {
         if !elem.ty().same_base(&rt.subtype) {
             return Ok(None);
         }
+        // (An element of a domain the range's subtype isn't finds no operator: resolved as
+        // written.)
+        if self.declared_domain(elem).is_some_and(|d| Some(d) != rt.subtype_domain) {
+            return Ok(None);
+        }
         // (The comparisons would run under the element's collation, not the range's: only
         // a range under the default collation is rewritten.)
         if rt.subtype.collatable() && rt.collation != 100 && rt.collation != 0 {
@@ -2087,6 +2092,13 @@ impl Binder<'_, '_> {
                 ));
             }
         };
+        if let Some(names) = self.poly_domain_conflict(&res.def.args, &[l.clone(), r.clone()]) {
+            return Err(with_pos(
+                Error::new(code::UNDEFINED_FUNCTION, format!("operator does not exist: {} {op} {}", names[0], names[1]))
+                    .hint("No operator matches the given name and argument types. You might need to add explicit type casts."),
+                loc,
+            ));
+        }
         self.call_resolved(res, vec![l, r])
     }
 
@@ -4467,6 +4479,9 @@ impl Binder<'_, '_> {
                         self.sub_colls.insert(id, c.implicit());
                     }
                 }
+                if let Some(d) = cols[0].domain {
+                    self.sub_domains.insert(id, d);
+                }
                 Ok(Expr::Subquery(Box::new(Subquery {
                     id,
                     kind: SubqueryKind::Scalar,
@@ -4501,6 +4516,14 @@ impl Binder<'_, '_> {
                 } else {
                     DataType::array_of(ct)
                 };
+                // (ARRAY() of a domain: its array type; of an array of one: that, as it is.)
+                if let Some(d) = cols[0].domain.and_then(|d| match self.cat.domain_type(d)? {
+                    (x, false) if !x.base.is_array() => Some(x.array_oid).filter(|&a| a != 0),
+                    (_, true) => Some(d),
+                    _ => None,
+                }) {
+                    self.sub_domains.insert(id, d);
+                }
                 Ok(Expr::Subquery(Box::new(Subquery {
                     id,
                     kind: SubqueryKind::Array,
@@ -5207,6 +5230,15 @@ impl Binder<'_, '_> {
             }
         }
         .map_err(|e| with_pos(e, loc))?;
+        if !res.def.variadic
+            && let Some(names) = self.poly_domain_conflict(&res.def.args, &args)
+        {
+            return Err(with_pos(
+                Error::new(code::UNDEFINED_FUNCTION, format!("function {name}({}) does not exist", names.join(", ")))
+                    .hint("No function matches the given name and argument types. You might need to add explicit type casts."),
+                loc,
+            ));
+        }
         // enforce_generic_type_consistency: anyelement-family parameters whose inputs are
         // all untyped literals have nothing to resolve from.
         let family1 = |t: &DataType| {

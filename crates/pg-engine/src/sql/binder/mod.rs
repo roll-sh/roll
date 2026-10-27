@@ -516,6 +516,9 @@ pub struct Binder<'b, 'a> {
     /// Scalar subqueries (by id) whose column is a table column with a collation other
     /// than its type's default: the collation the subquery derives.
     pub(crate) sub_colls: HashMap<usize, Coll>,
+    /// Scalar and ARRAY() subqueries (by id) whose column is of a domain: the domain (or
+    /// array-of-domain) type the sub-select has.
+    pub(crate) sub_domains: HashMap<usize, u32>,
     /// Deparse mode: the query each sublink (subquery id) runs, as written.
     pub(crate) sublink_nodes: HashMap<usize, pb::Node>,
     /// Deparse mode: the columns each NATURAL join (by its node's address) joins on.
@@ -732,6 +735,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             lit_locs: HashMap::new(),
             const_colls: HashMap::new(),
             sub_colls: HashMap::new(),
+            sub_domains: HashMap::new(),
             sublink_nodes: HashMap::new(),
             natural_using: HashMap::new(),
             join_inner: HashMap::new(),
@@ -1427,6 +1431,17 @@ impl<'b, 'a> Binder<'b, 'a> {
         if matches!(to, DataType::Record) && matches!(from, DataType::Row(_) | DataType::Record) {
             return Ok(e);
         }
+        // coerce_record_to_complex: only a ROW() (or a whole-row reference) makes a record of
+        // another type a composite, whatever the record turns out to hold.
+        if matches!(to, DataType::Row(t) if t.oid != 0)
+            && matches!(&from, DataType::Record | DataType::Row(_) if from.row_oid().is_none())
+            && !matches!(e, Expr::Row(..))
+        {
+            return Err(Error::new(
+                code::CANNOT_COERCE,
+                format!("cannot cast type record to {}", to.display()),
+            ));
+        }
         if let (DataType::Row(ff), DataType::Row(tf)) = (&from, to) {
             if ff == tf || tf.oid == 0 {
                 return Ok(e);
@@ -1705,6 +1720,7 @@ impl<'b, 'a> Binder<'b, 'a> {
                 let f = sq.call.as_ref()?.def.oid;
                 return self.cat.functions.get(&f)?.ret_domain;
             }
+            Expr::Subquery(sq) => return self.sub_domains.get(&sq.id).copied(),
             // A STRICT one: NULL for NULL arguments.
             Expr::Case { whens, else_: Some(e), .. }
                 if whens.len() == 1
@@ -1801,6 +1817,57 @@ impl<'b, 'a> Binder<'b, 'a> {
                 (_, true) => None,
             },
         }
+    }
+
+    /// check_generic_type_consistency over the inputs' declared domains: an `anyelement`
+    /// argument stands for its type as it is (a domain stays one), while `anyarray` and
+    /// `anyrange` arguments are flattened to their base types first, so a domain over int4
+    /// against an int4range's element type is no match (`int4range @> d` finds no operator).
+    /// The inputs' types as `oper` / `func_get_detail` name them when it isn't consistent.
+    pub(crate) fn poly_domain_conflict(&self, params: &[DataType], args: &[Expr]) -> Option<Vec<String>> {
+        let doms: Vec<Option<u32>> = args.iter().map(|a| self.declared_domain(a)).collect();
+        if doms.iter().all(Option::is_none) {
+            return None;
+        }
+        let base = |t: &DataType| crate::catalog::system::type_oid(&self.cat, &t.without_typmod());
+        // The element type each polymorphic input fixes (a domain's oid when it is one).
+        let mut elems: Vec<u32> = Vec::new();
+        for ((p, a), d) in params.iter().zip(args).zip(&doms) {
+            let t = a.ty();
+            if matches!(t, DataType::Unknown) {
+                continue;
+            }
+            let e = match p {
+                DataType::AnyElement | DataType::AnyNonArray | DataType::AnyEnum => d.unwrap_or_else(|| base(&t)),
+                DataType::AnyArray => {
+                    // (Flattened: a domain over an array is its base array type, whose
+                    // elements are a domain only when that is an array of one.)
+                    let arr = d.and_then(|d| match self.cat.domain_type(d)? {
+                        (_, true) => Some(d),
+                        (x, false) => self.cat.domain_array_base(x),
+                    });
+                    match arr.and_then(|a| self.cat.domain_type(a)) {
+                        Some((x, true)) => x.oid,
+                        _ => base(t.elem()?),
+                    }
+                }
+                DataType::AnyRange | DataType::AnyMultirange => match &t {
+                    DataType::Range(rt) | DataType::Multirange(rt) => rt.subtype_domain.unwrap_or_else(|| base(&rt.subtype)),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            elems.push(e);
+        }
+        if elems.windows(2).all(|w| w[0] == w[1]) {
+            return None;
+        }
+        Some(
+            args.iter()
+                .zip(&doms)
+                .map(|(a, d)| self.cat.format_type(&a.ty().without_typmod(), *d, &self.ctx.search_path))
+                .collect(),
+        )
     }
 
     /// The domain (or array-of-domain) type all of `items` are declared as.

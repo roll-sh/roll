@@ -1254,7 +1254,7 @@ fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
             let distinct = match (x.is_null(), y.is_null()) {
                 (true, true) => false,
                 (true, false) | (false, true) => true,
-                _ => call2(eq, x, y, &a.ty(), ctx)? != Value::Bool(true),
+                _ => crate::sql::func::call2_typed(eq, x, y, &a.ty(), &b.ty(), ctx)? != Value::Bool(true),
             };
             Ok(Value::Bool(distinct != *negated))
         }
@@ -1337,7 +1337,7 @@ fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                     saw_null = true;
                     continue;
                 }
-                if call2(eq, x.clone(), y, &e.ty(), ctx)? == Value::Bool(true) {
+                if crate::sql::func::call2_typed(eq, x.clone(), y, &e.ty(), &item.ty(), ctx)? == Value::Bool(true) {
                     return Ok(Value::Bool(!*negated));
                 }
             }

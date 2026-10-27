@@ -87,10 +87,60 @@ fn check_record_types(c: &FnCtx, ordering: bool) -> Result<()> {
     Ok(())
 }
 
+/// record_cmp / record_eq take a field's collation from both row types; when they declare
+/// different ones (`ROW(x COLLATE "C", 1)` against `ROW(x, 1)`) the field has none, and
+/// comparing two values of it fails as a string comparison without a collation does. The
+/// fields are compared in order, so the comparison fails only on reaching such a field with
+/// two values.
+fn check_record_collations(a: &Value, b: &Value, c: &FnCtx) -> Result<()> {
+    let (T::Row(l), T::Row(r), Value::Record(x), Value::Record(y)) = (c.arg_type(0), c.arg_type(1), a, b) else {
+        return Ok(());
+    };
+    // (`colls` isn't part of a row type's equality.)
+    if l.oid == r.oid && (l.oid != 0 || l.colls == r.colls) {
+        return Ok(());
+    }
+    let cat = c.exec.catalog();
+    let field = |rt: &crate::types::RowType, i: usize| {
+        crate::types::collation::field_collation(&cat, rt, i).unwrap_or_else(|| "default".into())
+    };
+    let conflict = |i: usize| {
+        matches!((l.fields.get(i), r.fields.get(i)), (Some((_, t)), Some(_)) if t.collatable())
+            && field(&l, i) != field(&r, i)
+    };
+    if !(0..l.fields.len()).any(conflict) {
+        return Ok(());
+    }
+    let fields = c.coll.and_then(|k| k.fields.as_ref());
+    for (i, (p, q)) in x.iter().zip(y.iter()).enumerate() {
+        match (p.is_null(), q.is_null()) {
+            (true, true) => continue,
+            (false, false) => {}
+            _ => return Ok(()),
+        }
+        if conflict(i) {
+            return Err(err!(
+                INDETERMINATE_COLLATION,
+                "could not determine which collation to use for string comparison"
+            )
+            .hint("Use the COLLATE clause to set the collation explicitly."));
+        }
+        let o = match fields.and_then(|f| f.get(i)).and_then(Option::as_ref) {
+            Some(fc) => crate::types::collation::cmp_values(fc, p, q),
+            None => p.cmp_total(q),
+        };
+        if o != Ordering::Equal {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 macro_rules! record_cmp_fns {
     ($($name:ident => ($ordering:expr, $test:expr)),* $(,)?) => {
         $(fn $name(a: &[Value], c: &FnCtx) -> Result<Value> {
             check_record_types(c, $ordering)?;
+            check_record_collations(&a[0], &a[1], c)?;
             let o = cmp_in(&a[0], &a[1], c);
             Ok(Value::Bool($test(o)))
         })*

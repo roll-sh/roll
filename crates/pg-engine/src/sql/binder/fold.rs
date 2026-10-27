@@ -272,13 +272,7 @@ pub(crate) fn output_candidates(p: &Plan, base: &[Expr]) -> Vec<(usize, Expr)> {
 // (Only what Postgres would have simplified: quals, and the outputs something in the
 // dropped plan reads; an output nothing reads was a subquery's unused one.)
 fn candidates_go(p: &Plan, needed: &[bool], out: &mut Vec<Expr>) {
-    let push = |e: &Expr, out: &mut Vec<Expr>| {
-        e.walk(&mut |x| {
-            if foldable(x) && !out.iter().any(|o| o.same_as(x)) {
-                out.push(x.clone());
-            }
-        });
-    };
+    let push = |e: &Expr, out: &mut Vec<Expr>| push_candidates(e, out);
     match p {
         Plan::Empty { info: Some(i), .. } => {
             out.extend(i.kept.iter().cloned());
@@ -306,6 +300,25 @@ fn candidates_go(p: &Plan, needed: &[bool], out: &mut Vec<Expr>) {
         let n = needs.get(k).cloned().unwrap_or_else(|| vec![true; crate::sql::binder::plan_width(c)]);
         candidates_go(c, &n, out);
     }
+}
+
+/// The constants in `e` that failed to fold, and those of the sub-selects it reads:
+/// preprocess_expression plans a sub-select (make_subplan) as it simplifies the expression,
+/// whatever later becomes of the relation reading it (an outer join's side found empty).
+fn push_candidates(e: &Expr, out: &mut Vec<Expr>) {
+    e.walk(&mut |x| {
+        if foldable(x) && !out.iter().any(|o| o.same_as(x)) {
+            out.push(x.clone());
+        }
+        // (A SQL function's body Postgres neither inlines nor runs while planning is planned
+        // when it runs.)
+        if let Expr::Subquery(s) = x
+            && !s.call.as_ref().is_some_and(|c| !c.inline)
+        {
+            let read = s.kind != SubqueryKind::Exists || !exists_simplified(&s.plan);
+            candidates_go(&s.plan, &vec![read; crate::sql::binder::plan_width(&s.plan)], out);
+        }
+    });
 }
 
 /// `candidates` of some expressions.

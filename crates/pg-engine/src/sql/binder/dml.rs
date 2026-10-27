@@ -1899,10 +1899,28 @@ impl Binder<'_, '_> {
                 } else {
                     Expr::bool(false)
                 };
-                // (transformAssignedExpr: a type mismatch points at the expression.)
+                // (transformAssignedExpr: a type mismatch points at the expression; of a
+                // `(a, b) = (SELECT ...)`, at that column's expression in the sub-select.)
+                let at = match inner(val) {
+                    Some(NodeEnum::MultiAssignRef(m)) => match m.source.as_deref().and_then(inner) {
+                        Some(NodeEnum::SubLink(sl)) => match sl.subselect.as_deref().and_then(inner) {
+                            Some(NodeEnum::SelectStmt(sel)) => sel
+                                .target_list
+                                .get(m.colno as usize - 1)
+                                .and_then(|t| match inner(t) {
+                                    Some(NodeEnum::ResTarget(r)) => r.val.as_deref().map(ast::location),
+                                    _ => None,
+                                })
+                                .unwrap_or(-1),
+                            _ => -1,
+                        },
+                        _ => ast::location(val),
+                    },
+                    _ => ast::location(val),
+                };
                 let out = self.coerce_assign_to(e, &c.ty, c.domain, &c.name).map_err(|err| {
-                    if err.position.is_none() && err.code == code::DATATYPE_MISMATCH {
-                        with_pos(err, ast::location(val))
+                    if err.position.is_none() && matches!(err.code, code::DATATYPE_MISMATCH | code::CANNOT_COERCE) {
+                        with_pos(err, at)
                     } else {
                         err
                     }
@@ -1954,7 +1972,7 @@ impl Binder<'_, '_> {
                 let v = self
                     .insert_value(e, t, rules, col, over_system, over_user)
                     .map_err(|err| {
-                        if err.position.is_none() && err.code == code::DATATYPE_MISMATCH && at >= 0
+                        if err.position.is_none() && matches!(err.code, code::DATATYPE_MISMATCH | code::CANNOT_COERCE) && at >= 0
                         {
                             with_pos(err, at)
                         } else {

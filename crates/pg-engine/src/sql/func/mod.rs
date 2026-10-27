@@ -1379,13 +1379,18 @@ pub fn resolve_prefix(op: &str, t: &DataType) -> Result<Resolved> {
 /// Call a resolved operator on two values (used by IN lists, CASE, sorting helpers).
 /// Call a binary operator's implementation; `ty` is the operands' type (enum operators need it).
 pub fn call2(def: &FuncDef, a: Value, b: Value, ty: &DataType, ctx: &ExecCtx) -> Result<Value> {
+    call2_typed(def, a, b, ty, ty, ctx)
+}
+
+/// `call2` with each argument's own type (two row types whose fields' collations differ).
+pub fn call2_typed(def: &FuncDef, a: Value, b: Value, ty: &DataType, rty: &DataType, ctx: &ExecCtx) -> Result<Value> {
     if def.strict && (a.is_null() || b.is_null()) {
         return Ok(Value::Null);
     }
     let ret = DataType::Bool;
     let args = [
         Expr::Const(Value::Null, ty.clone()),
-        Expr::Const(Value::Null, ty.clone()),
+        Expr::Const(Value::Null, rty.clone()),
     ];
     let fc = FnCtx {
         exec: ctx,
