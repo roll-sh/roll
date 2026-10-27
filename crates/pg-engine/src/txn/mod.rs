@@ -2635,10 +2635,10 @@ impl Txn {
         // (A transaction that logged no change and changed no catalog decodes to nothing,
         // as one PostgreSQL's reorder buffer never heard of: no commit record.)
         let log = if xid != 0 { self.log.take().filter(|l| l.seq > 0 || new_catalog) } else { None };
-        let repl = self.db.repl();
+        let repl = if log.is_some() { self.db.repl() } else { None };
         let sealed = std::cell::Cell::new(None);
-        let placeholder = crate::repl::log::placeholder_key();
-        if log.is_some() && repl.is_some() {
+        let placeholder = if repl.is_some() { crate::repl::log::placeholder_key() } else { Vec::new() };
+        if repl.is_some() {
             writes.push((placeholder.clone(), None));
         }
         let check = |store: &Store, writes: &mut Vec<(Vec<u8>, Option<Bytes>)>| -> Result<()> {

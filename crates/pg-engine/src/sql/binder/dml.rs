@@ -2857,29 +2857,49 @@ impl Binder<'_, '_> {
                         .unwrap_or(pb::OverridingKind::OverridingNotSet);
                     let over_system = overriding == pb::OverridingKind::OverridingSystemValue;
                     let over_user = overriding == pb::OverridingKind::OverridingUserValue;
+                    // `s.*` items stand for their fields (transformExpressionList): bound first
+                    // when there are any, so the target columns count the expanded values.
+                    let star = |v: &&Node| {
+                        matches!(inner(v), Some(NodeEnum::ColumnRef(c))
+                            if c.fields.last().is_some_and(|f| matches!(inner(f), Some(NodeEnum::AStar(_)))))
+                    };
+                    let expanded = match w.values.iter().any(|v| star(&v)) {
+                        true => {
+                            let (mut vals, mut locs) = (Vec::new(), Vec::new());
+                            for v in &w.values {
+                                let es = self.in_clause(Clause::ValuesSingle, |b| b.bind_values_item(v))?;
+                                locs.extend(std::iter::repeat_n(ast::location(v), es.len()));
+                                vals.extend(es);
+                            }
+                            Some((vals, locs))
+                        }
+                        false => None,
+                    };
+                    let n = expanded.as_ref().map_or(w.values.len(), |e| e.0.len());
+                    let loc = |i: usize| expanded.as_ref().map_or_else(|| ast::location(&w.values[i]), |e| e.1[i]);
                     let (mut target, paths, view_cols) =
-                        self.insert_targets(&w.target_list, t, view, w.values.len())?;
-                    if w.values.len() > target.len() {
+                        self.insert_targets(&w.target_list, t, view, n)?;
+                    if n > target.len() {
                         return Err(with_pos(
                             Error::new(
                                 code::SYNTAX_ERROR,
                                 "INSERT has more expressions than target columns",
                             ),
-                            ast::location(&w.values[target.len()]),
+                            loc(target.len()),
                         ));
                     }
-                    if !w.target_list.is_empty() && w.values.len() < target.len() {
+                    if !w.target_list.is_empty() && n < target.len() {
                         return Err(with_pos(
                             Error::new(
                                 code::SYNTAX_ERROR,
                                 "INSERT has more target columns than expressions",
                             ),
-                            ast::location(&w.target_list[w.values.len()]),
+                            ast::location(&w.target_list[n]),
                         ));
                     }
-                    target.truncate(w.values.len());
+                    target.truncate(n);
                     let mut vals = Vec::new();
-                    for v in &w.values {
+                    for v in w.values.iter().filter(|_| expanded.is_none()) {
                         vals.push(self.in_clause(Clause::ValuesSingle, |b| b.bind_expr(v))?);
                         if !self.level().st.srfs.is_empty() {
                             // Allowed by the parser, refused when it runs.
@@ -2891,6 +2911,9 @@ impl Binder<'_, '_> {
                                 ast::location(v),
                             ));
                         }
+                    }
+                    if let Some((e, _)) = expanded {
+                        vals = e;
                     }
                     let (values, target) =
                         self.insert_row(vals, &target, &paths, t, &rules, over_system, over_user)?;

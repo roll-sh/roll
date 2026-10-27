@@ -166,7 +166,7 @@ impl Fixed {
         match &self.wal {
             Some(w) => {
                 if bytes > 0 {
-                    w.alloc(bytes as u64);
+                    w.skip(bytes as u64);
                 }
             }
             None => self.wal_written += bytes.max(0) as u64,

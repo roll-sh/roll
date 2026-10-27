@@ -543,8 +543,7 @@ fn stream_acquired(
         // The client's messages.
         let wait = if db.log.commit_count() != seen { Duration::ZERO } else { Duration::from_millis(20) };
         let mut wait = wait;
-        loop {
-            let Some((t, body)) = w.poll(wait)? else { break };
+        while let Some((t, body)) = w.poll(wait)? {
             wait = Duration::ZERO;
             last_recv = Instant::now();
             ping_sent = false;

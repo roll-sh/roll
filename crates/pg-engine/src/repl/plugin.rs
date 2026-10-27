@@ -84,6 +84,9 @@ pub struct Startup {
     pub streaming: bool,
     /// The client asked for two-phase decoding (pgoutput's two_phase option).
     pub twophase_opt: bool,
+    /// Table rewrites' rows are decoded too (ctx->output_rewrites: test_decoding's
+    /// include-rewrites).
+    pub output_rewrites: bool,
 }
 
 /// An output plugin's callbacks (OutputPluginCallbacks).
@@ -167,6 +170,9 @@ pub struct Decoder<'a> {
     pub stats: SlotStats,
     /// Rows output so far.
     pub rows: usize,
+    /// Replay a transaction without its changes (`outgrows_work_mem` and `rolled_back`).
+    skip_changes: bool,
+    output_rewrites: bool,
 }
 
 /// How a decoding context is set up.
@@ -207,6 +213,8 @@ impl<'a> Decoder<'a> {
             two_phase_at: s.two_phase_at,
             stats: SlotStats::default(),
             rows: 0,
+            skip_changes: false,
+            output_rewrites: st.output_rewrites,
         })
     }
 
@@ -248,7 +256,13 @@ impl<'a> Decoder<'a> {
                 if !self.ctx.twophase || m.end_lsn <= self.two_phase_at || self.plugin.filter_prepare(m.xid, &m.gid) {
                     return Ok(());
                 }
-                self.replay(m, &t, Ending::Prepare, sink)
+                // ReorderBufferCheckAndTruncateAbortedTXN: a transaction that outgrows
+                // logical_decoding_work_mem and has rolled back by then loses its changes
+                // (only the PREPARE and, later, ROLLBACK PREPARED are decoded).
+                self.skip_changes = self.outgrows_work_mem(m)? && self.rolled_back(m)?;
+                let r = self.replay(m, &t, Ending::Prepare, sink);
+                self.skip_changes = false;
+                r
             }
             Kind::CommitPrepared => {
                 if !self.ctx.twophase || self.plugin.filter_prepare(m.xid, &m.gid) {
@@ -287,6 +301,35 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// Whether transaction `m`'s changes reach logical_decoding_work_mem.
+    fn outgrows_work_mem(&mut self, m: &Marker) -> Result<bool> {
+        let store = self.ctx.db.store.clone();
+        let mut size = 0usize;
+        for c in decode::changes(&store, m) {
+            let c = c?;
+            if let Rec::Rel(d) = &c.rec {
+                self.ctx.rels.insert(d.oid, d.clone());
+                continue;
+            }
+            size += change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt);
+            if size >= self.work_mem {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether prepared transaction `m` was rolled back (TransactionIdDidAbort, as of now).
+    fn rolled_back(&self, m: &Marker) -> Result<bool> {
+        for r in decode::markers(&self.ctx.db.store, m.end_lsn, u64::MAX) {
+            let r = r?;
+            if r.kind == Kind::RollbackPrepared && r.xid == m.xid {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// ReorderBufferReplay / ReorderBufferStreamTXN: the transaction's changes, streamed in
     /// blocks if it outgrows logical_decoding_work_mem while streaming is on.
     fn replay(&mut self, m: &Marker, t: &TxnInfo, end: Ending, sink: &mut dyn FnMut(Output) -> Result<()>) -> Result<()> {
@@ -300,7 +343,8 @@ impl<'a> Decoder<'a> {
         let mut streamed = false;
         let mut began = false;
         let mut spilled = false;
-        for c in decode::changes(&store, m) {
+        let keep = if self.skip_changes { 0 } else { usize::MAX };
+        for c in decode::changes(&store, m).take(keep) {
             let c = c?;
             if let Rec::Rel(d) = &c.rec {
                 self.ctx.rels.insert(d.oid, d.clone());
@@ -320,6 +364,11 @@ impl<'a> Decoder<'a> {
                     self.stats.spill_bytes += size as i64;
                     size = 0;
                 }
+                // (ReorderBufferProcessTXN: a rewrite's rows, queued like any, are output
+                // only to plugins asking for them.)
+                if c.rewrite && !self.output_rewrites {
+                    continue;
+                }
                 if !began {
                     self.begin(t, end)?;
                     began = true;
@@ -328,7 +377,9 @@ impl<'a> Decoder<'a> {
                 self.emit(sink)?;
                 continue;
             }
-            pending.push(c);
+            if !c.rewrite || self.output_rewrites {
+                pending.push(c);
+            }
             if size >= self.work_mem {
                 self.stream_block(t, &mut pending, &mut streamed, size, sink)?;
                 size = 0;

@@ -150,7 +150,7 @@ impl Plugin for TestDecoding {
                         match name.as_str() {
                             "force-binary" => s.binary |= b,
                             "stream-changes" => streaming = b,
-                            _ => {}
+                            _ => s.output_rewrites = b,
                         }
                     }
                 }

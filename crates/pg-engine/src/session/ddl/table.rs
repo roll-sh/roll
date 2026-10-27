@@ -849,8 +849,21 @@ impl Ddl<'_, '_> {
         }
     }
 
-    /// table_rewrite event triggers, before table `oid` is rewritten.
+    /// table_rewrite event triggers, before table `oid` is rewritten (after ATRewriteTables'
+    /// check of a user catalog table).
     pub(super) fn fire_table_rewrite(&mut self, oid: u32) -> Result<()> {
+        if let Some(t) = self.cat.tables.get(&oid)
+            && t.options.iter().any(|o| {
+                o.split_once('=').is_some_and(|(k, v)| {
+                    k == "user_catalog_table" && crate::types::text::parse_bool(v.trim_matches('\'')).unwrap_or(false)
+                })
+            })
+        {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                format!("cannot rewrite table \"{}\" used as a catalog table", t.name),
+            ));
+        }
         let reason = self
             .rewrite_why
             .iter()
@@ -3821,6 +3834,7 @@ impl Ddl<'_, '_> {
                 .txn
                 .borrow_mut()
                 .put(dkey.clone(), encode_table_row(&nr, xid))?;
+            crate::repl::log::rewrite_insert(new, &nr, self.ctx)?;
             written.push((okey, dkey));
         }
         crate::exec::sizing::reattach(new, saved, &written, &self.ctx.sess.db);

@@ -1386,8 +1386,10 @@ impl Settings {
     pub fn set_config_file(&mut self, name: &str, value: &str) {
         if let Some(d) = self.def(name) {
             let canon = d.name;
+            // (Stored as SET stores it: `64kB` of a kB parameter is `64`.)
+            let value = normalize(d, value).unwrap_or_else(|_| value.to_string());
             self.touched(canon);
-            self.config.insert(canon.to_string(), value.to_string());
+            self.config.insert(canon.to_string(), value);
         }
     }
 

@@ -9,6 +9,7 @@ use crate::error::{Error, Result, code};
 use crate::sql::func::{FnCtx, Registry, SrfIter, text_arg};
 use crate::types::Value;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +39,8 @@ struct State {
 
 pub struct Origins {
     st: Mutex<State>,
+    /// How many sessions have an origin set up (a commit of a database with none skips the lock).
+    sessions_n: AtomicUsize,
     path: Option<PathBuf>,
 }
 
@@ -54,6 +57,25 @@ pub fn progress_key(id: u16) -> Vec<u8> {
     k
 }
 
+/// pg_replication_origin_create's check of the name (IsReservedOriginName); internal callers
+/// such as subscriptions use reserved `pg_<oid>` names.
+fn check_reserved(name: &str) -> Result<()> {
+    if name.eq_ignore_ascii_case("any") || name.eq_ignore_ascii_case("none") || name.starts_with("pg_") {
+        return Err(Error::new(code::RESERVED_NAME, format!("replication origin name \"{name}\" is reserved"))
+            .detail("Origin names \"any\", \"none\", and names starting with \"pg_\" are reserved."));
+    }
+    Ok(())
+}
+
+/// replorigin_create's own check: MAX_RONAME_LEN.
+fn check_len(name: &str) -> Result<()> {
+    if name.len() > 512 {
+        return Err(Error::new(code::PROGRAM_LIMIT_EXCEEDED, "replication origin name is too long")
+            .detail("Replication origin names must be no longer than 512 bytes."));
+    }
+    Ok(())
+}
+
 fn no_origin(name: &str) -> Error {
     Error::new(code::UNDEFINED_OBJECT, format!("replication origin \"{name}\" does not exist"))
 }
@@ -67,7 +89,7 @@ impl Origins {
             .and_then(|b| serde_json::from_slice::<Stored>(&b).ok())
             .map(|s| s.origins)
             .unwrap_or_default();
-        Origins { st: Mutex::new(State { origins, sessions: HashMap::new() }), path }
+        Origins { st: Mutex::new(State { origins, sessions: HashMap::new() }), sessions_n: AtomicUsize::new(0), path }
     }
 
     fn save(&self, st: &State) {
@@ -94,14 +116,7 @@ impl Origins {
 
     /// replorigin_create.
     pub fn create(&self, name: &str) -> Result<u16> {
-        if name.eq_ignore_ascii_case("any") || name.eq_ignore_ascii_case("none") || name.starts_with("pg_") {
-            return Err(Error::new(code::RESERVED_NAME, format!("replication origin name \"{name}\" is reserved"))
-                .detail("Origin names \"any\", \"none\", and names starting with \"pg_\" are reserved."));
-        }
-        if name.len() > 512 {
-            return Err(Error::new(code::PROGRAM_LIMIT_EXCEEDED, "replication origin name is too long")
-                .detail("Replication origin names must be no longer than 512 bytes."));
-        }
+        check_len(name)?;
         let mut st = self.st.lock();
         if st.origins.iter().any(|o| o.name == name) {
             return Err(Error::new(
@@ -150,6 +165,9 @@ impl Origins {
     }
 
     pub fn session(&self, pid: i32) -> Option<SessionOrigin> {
+        if self.sessions_n.load(Ordering::Acquire) == 0 {
+            return None;
+        }
         self.st.lock().sessions.get(&pid).copied()
     }
 
@@ -167,11 +185,15 @@ impl Origins {
             ));
         }
         st.sessions.insert(pid, SessionOrigin { id: o.id, ..Default::default() });
+        self.sessions_n.store(st.sessions.len(), Ordering::Release);
         Ok(())
     }
 
     pub fn session_reset(&self, pid: i32) -> Result<()> {
-        if self.st.lock().sessions.remove(&pid).is_none() {
+        let mut st = self.st.lock();
+        let removed = st.sessions.remove(&pid);
+        self.sessions_n.store(st.sessions.len(), Ordering::Release);
+        if removed.is_none() {
             return Err(Error::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, "no replication origin is configured"));
         }
         Ok(())
@@ -196,7 +218,12 @@ impl Origins {
 
     /// A backend ended: its session origin is released.
     pub fn backend_exit(&self, pid: i32) {
-        self.st.lock().sessions.remove(&pid);
+        if self.sessions_n.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let mut st = self.st.lock();
+        st.sessions.remove(&pid);
+        self.sessions_n.store(st.sessions.len(), Ordering::Release);
     }
 }
 
@@ -205,9 +232,7 @@ impl Origins {
 pub fn before_commit(sess: &crate::session::state::SessionState, txn: &mut crate::txn::Txn) -> Option<(u16, u64)> {
     let r = sess.db.repl()?;
     let so = r.origins.session(sess.pid)?;
-    if txn.xid_if_assigned().is_none() {
-        return None;
-    }
+    txn.xid_if_assigned()?;
     if let Some(l) = txn.log.as_mut() {
         l.origin = so.id;
         l.origin_lsn = so.xact_lsn;
@@ -218,11 +243,10 @@ pub fn before_commit(sess: &crate::session::state::SessionState, txn: &mut crate
     Some((so.id, so.xact_lsn))
 }
 
-/// After it committed: the origin's progress in memory.
+/// After it committed: the origin's progress in memory (replorigin_session_advance: the local
+/// position moves with every commit, the remote one only with a session origin position).
 pub fn after_commit(sess: &crate::session::state::SessionState, (id, lsn): (u16, u64)) {
-    if let Some(r) = sess.db.repl()
-        && lsn != 0
-    {
+    if let Some(r) = sess.db.repl() {
         r.origins.advance(id, lsn, r.wal.current(), false);
     }
 }
@@ -241,6 +265,9 @@ fn lsn(v: &Value) -> u64 {
 }
 
 fn create(a: &[Value], c: &FnCtx) -> Result<Value> {
+    check_reserved(text_arg(&a[0]))?;
+    // (replorigin_create's own check, before anything else can fail.)
+    check_len(text_arg(&a[0]))?;
     Ok(Value::Oid(origins(c)?.origins.create(text_arg(&a[0]))? as u32))
 }
 fn drop_fn(a: &[Value], c: &FnCtx) -> Result<Value> {

@@ -558,6 +558,17 @@ pub fn insert(t: &Table, row: &[Value], ctx: &ExecCtx) -> Result<()> {
     put(ctx, Some(t), b)
 }
 
+/// A row a table rewrite wrote into the table's new storage (heap_insert into the transient
+/// relation: decoded as an INSERT only for plugins asking for rewrites).
+pub fn rewrite_insert(t: &Table, row: &[Value], ctx: &ExecCtx) -> Result<()> {
+    if !capturing(ctx) || !logged(t) {
+        return Ok(());
+    }
+    let mut b = head(b'W', t);
+    b.extend_from_slice(&encode_row(&stored(t, row)));
+    put(ctx, Some(t), b)
+}
+
 pub fn update(t: &Table, old: &[Value], new: &[Value], ctx: &ExecCtx) -> Result<()> {
     if !capturing(ctx) || !logged(t) {
         return Ok(());
@@ -652,7 +663,7 @@ pub fn decode_rec(b: &[u8]) -> Result<Rec> {
             let d: RelDesc = serde_json::from_slice(b.get(5..).ok_or_else(bad)?).map_err(|_| bad())?;
             Rec::Rel(Arc::new(d))
         }
-        Some(b'I') => Rec::Insert { rel: rel()?, new: decode_row(&b[5..])? },
+        Some(b'I' | b'W') => Rec::Insert { rel: rel()?, new: decode_row(&b[5..])? },
         Some(b'U') => {
             let mut p = 5;
             let old = old_at(&mut p)?;

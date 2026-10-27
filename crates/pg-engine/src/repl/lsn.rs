@@ -57,14 +57,28 @@ impl WalPos {
         self.cur.load(Ordering::Acquire)
     }
 
-    /// Take `n` bytes of positions (aligned); the first one.
+    /// Take `n` bytes of positions (aligned, starting at an aligned position); the first one.
     pub fn alloc(&self, n: u64) -> u64 {
         let n = align(n.max(8));
-        let at = self.cur.fetch_add(n, Ordering::AcqRel);
+        let mut at = 0;
+        let _ = self.cur.try_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+            at = align(c);
+            Some(at + n)
+        });
         if at + n > self.reserved.load(Ordering::Acquire) {
             self.reserve(at + n);
         }
         at
+    }
+
+    /// Move the insert position past `n` bytes exactly (pg_stat_wal's estimate of a
+    /// transaction's records, `pgstat::Fixed::advance`, so the position moves by what
+    /// wal_bytes counts).
+    pub fn skip(&self, n: u64) {
+        let at = self.cur.fetch_add(n, Ordering::AcqRel);
+        if at + n > self.reserved.load(Ordering::Acquire) {
+            self.reserve(at + n);
+        }
     }
 
     /// Move the insert position to at least `lsn` (pg_switch_wal's next segment).

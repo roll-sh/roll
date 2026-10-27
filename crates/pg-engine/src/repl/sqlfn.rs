@@ -270,24 +270,28 @@ fn pg_stat_get_replication_slot(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
 }
 
 fn pg_stat_reset_replication_slot(a: &[Value], c: &FnCtx) -> Result<Value> {
-    let r = repl(c)?;
+    // No CheckSlotRequirements: a database without the engine's registry (embedded) has no slots.
+    let r = c.exec.sess.db.repl();
     let now = log::now();
     match a.first().filter(|v| !v.is_null()) {
         Some(v) => {
             let nm = name(v);
-            match r.slots.get(&nm) {
+            match r.as_ref().and_then(|r| r.slots.get(&nm)) {
                 Some(s) if s.logical() => {}
                 Some(_) => return Ok(Value::Null),
                 None => {
                     return Err(Error::new(
-                        code::UNDEFINED_OBJECT,
+                        code::INVALID_PARAMETER_VALUE,
                         format!("replication slot \"{nm}\" does not exist"),
                     ));
                 }
             }
-            r.slots.update(&nm, false, |d| d.stats = super::slot::SlotStats { reset: Some(now), ..Default::default() })?;
+            if let Some(r) = &r {
+                r.slots.update(&nm, false, |d| d.stats = super::slot::SlotStats { reset: Some(now), ..Default::default() })?;
+            }
         }
         None => {
+            let Some(r) = r else { return Ok(Value::Null) };
             for s in r.slots.list().into_iter().filter(|s| s.logical()) {
                 let _ = r.slots.update(&s.data.name, false, |d| {
                     d.stats = super::slot::SlotStats { reset: Some(now), ..Default::default() }
@@ -535,17 +539,15 @@ fn copy_slot(a: &[Value], c: &FnCtx, logical: bool) -> Result<SrfIter> {
     let src = name(&a[0]);
     let dst = name(&a[1]);
     let Some(s) = r.slots.get(&src).filter(|s| !s.creating) else { return Err(no_slot(&src)) };
-    if logical && !s.logical() {
-        return Err(Error::new(
-            code::FEATURE_NOT_SUPPORTED,
-            format!("cannot copy physical replication slot \"{src}\" as a logical replication slot"),
-        ));
-    }
-    if !logical && s.logical() {
-        return Err(Error::new(
-            code::FEATURE_NOT_SUPPORTED,
-            format!("cannot copy logical replication slot \"{src}\" as a physical replication slot"),
-        ));
+    // (copy_replication_slot's two messages are the other way round: a logical source asked
+    // for as physical is "cannot copy physical replication slot ... as a logical".)
+    if logical != s.logical() {
+        let msg = if s.logical() {
+            format!("cannot copy physical replication slot \"{src}\" as a logical replication slot")
+        } else {
+            format!("cannot copy logical replication slot \"{src}\" as a physical replication slot")
+        };
+        return Err(Error::new(code::FEATURE_NOT_SUPPORTED, msg));
     }
     if s.data.restart_lsn == 0 {
         return Err(Error::new(code::FEATURE_NOT_SUPPORTED, "cannot copy a replication slot that doesn't reserve WAL"));

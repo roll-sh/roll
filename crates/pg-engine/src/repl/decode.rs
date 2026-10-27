@@ -18,6 +18,8 @@ pub fn markers(store: &Arc<Store>, from: u64, to: u64) -> impl Iterator<Item = R
 pub struct Change {
     pub lsn: u64,
     pub rec: Rec,
+    /// A row a table rewrite wrote (`log::rewrite_insert`).
+    pub rewrite: bool,
 }
 
 /// Transaction `m`'s change records, in order, with the positions they took after its
@@ -30,7 +32,7 @@ pub fn changes(store: &Arc<Store>, m: &Marker) -> impl Iterator<Item = Result<Ch
         let (_, v) = r?;
         let lsn = at;
         at += log::record_size(v.len());
-        Ok(Change { lsn, rec: log::decode_rec(&v)? })
+        Ok(Change { lsn, rewrite: v.first() == Some(&b'W'), rec: log::decode_rec(&v)? })
     })
 }
 
