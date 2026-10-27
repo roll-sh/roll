@@ -263,3 +263,96 @@ fn toast_locks_past_the_model() {
     );
     assert_eq!(run_all(true), modelled);
 }
+
+/// CREATE INDEX of a table too big to model measures the table and the index in its own
+/// pass over the rows (`Ddl::measures_in_build`): the same pages and tuples as measuring
+/// them apart (ANALYZE's pass, with nothing written between), for plain, expression,
+/// partial, INCLUDE and unique indexes.
+#[test]
+fn index_build_measures_as_analyze() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(400, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE ib (id int NOT NULL, a int, t text, pad text);
+             INSERT INTO ib SELECT g, g % 61, CASE WHEN g % 9 = 0 THEN NULL ELSE repeat('k', g % 40) END, repeat('p', g % 90) FROM generate_series(1, 4000) g");
+        let indexes = [
+            "CREATE INDEX ib_a ON ib (a)",
+            "CREATE INDEX ib_t ON ib (t) INCLUDE (a)",
+            "CREATE INDEX ib_e ON ib ((a * 2 + 1), lower(t))",
+            "CREATE INDEX ib_p ON ib (id) WHERE a < 20",
+            "CREATE UNIQUE INDEX ib_id ON ib (id DESC)",
+        ];
+        let stats = "SELECT relname, relpages, reltuples FROM pg_class WHERE relname LIKE 'ib%' ORDER BY relname";
+        for ix in indexes {
+            run(&mut s, ix);
+            let built = rows(&mut s, stats);
+            run(&mut s, "ANALYZE ib");
+            assert_eq!(rows(&mut s, stats), built, "{ix}");
+        }
+        // A duplicate found by the build's pass still fails it.
+        let e = s.query("CREATE UNIQUE INDEX ib_dup ON ib (a)").unwrap_err();
+        assert!(format!("{e:?}").contains("is duplicated"), "{e:?}");
+    });
+}
+
+/// A DELETE's index entries go in together at its end (`Txn::defer_entry_delete`): within
+/// its transaction, index scans, index-only scans from the entries, unique keys inserted
+/// again and savepoints see what deleting them one at a time gives; so do DELETEs of rows
+/// their transaction wrote itself.
+#[test]
+fn deferred_entry_deletes() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        // (Parallel workers don't run under `with_max_versions`: a seq scan of this "big"
+        // table in them counted 42 deleted rows, deferred or not.)
+        run(&mut s, "SET max_parallel_workers_per_gather = 0");
+        run(&mut s, "CREATE TABLE dd (id int PRIMARY KEY, a int, t text);
+             CREATE INDEX dd_a ON dd (a);
+             INSERT INTO dd SELECT g, g % 50, 'v' || g FROM generate_series(1, 3000) g;
+             VACUUM ANALYZE dd");
+        let queries = ["SELECT count(*) FROM dd", "SELECT a, count(*) FROM dd WHERE a < 10 GROUP BY a ORDER BY a"];
+        run(&mut s, "BEGIN;\nDELETE FROM dd WHERE a % 3 = 0;\nINSERT INTO dd VALUES (3, 3, 'again'), (6, 6, 'again')");
+        same_both_ways(&mut s, &queries);
+        run(&mut s, "SET enable_seqscan = off;\nSET enable_bitmapscan = off");
+        assert_eq!(rows(&mut s, "SELECT id, t FROM dd WHERE a = 6 ORDER BY id"), ["[Int4(6), Text(\"again\")]"]);
+        run(&mut s, "SAVEPOINT p;\nDELETE FROM dd WHERE a = 1;\nROLLBACK TO p;\nDELETE FROM dd WHERE a = 2");
+        assert_eq!(rows(&mut s, "SELECT count(*) FROM dd WHERE a IN (1, 2)"), ["[Int8(60)]"]);
+        run(&mut s, "RESET enable_seqscan;\nRESET enable_bitmapscan;\nCOMMIT");
+        same_both_ways(&mut s, &queries);
+        run(&mut s, "BEGIN;\nINSERT INTO dd SELECT g, g % 50, 'n' FROM generate_series(10001, 12000) g;\nDELETE FROM dd WHERE id > 10000 AND a < 25;\nCOMMIT");
+        same_both_ways(&mut s, &queries);
+        let e = s.query("INSERT INTO dd VALUES (10030, 0, 'dup')").unwrap_err();
+        assert!(format!("{e:?}").contains("duplicate key"), "{e:?}");
+        run(&mut s, "INSERT INTO dd VALUES (10001, 0, 'ok')");
+    });
+}
+
+/// A table too big to model that was never measured keeps its estimated size across a
+/// restart (`sizing::persist_estimates`): its first plan after one needn't read it whole.
+#[test]
+fn estimate_kept_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let explain = "EXPLAIN SELECT * FROM est WHERE a = 1";
+    let (before, size) = {
+        let eng = open(dir.path());
+        let r = with_max_versions(500, || {
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            run(&mut s, "CREATE TABLE est (id int, a int, t text)");
+            let data: String = (1..=3000).map(|i| format!("{i}\t{}\tsome text {i}\n", i % 37)).collect();
+            s.query_copy("COPY est FROM STDIN", data.as_bytes()).unwrap();
+            run(&mut s, "INSERT INTO est SELECT g, 1, 'more' FROM generate_series(1, 200) g");
+            (rows(&mut s, explain), rows(&mut s, "SELECT pg_relation_size('est')"))
+        });
+        eng.shutdown();
+        r
+    };
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        assert_eq!(rows(&mut s, explain), before);
+        assert_eq!(rows(&mut s, "SELECT pg_relation_size('est')"), size);
+    });
+}

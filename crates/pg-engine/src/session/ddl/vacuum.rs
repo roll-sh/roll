@@ -1140,6 +1140,16 @@ impl Ddl<'_, '_> {
     /// CREATE INDEX measures the new index and its table (an empty table that was never
     /// measured keeps its unknown tuple count).
     pub(super) fn index_built(&mut self, t: &Table, index: &crate::catalog::Index) -> Result<()> {
+        self.index_built_from(t, index, None)
+    }
+
+    /// `index_built`, with the measure the build's own pass took (`measures_in_build`).
+    pub(super) fn index_built_from(
+        &mut self,
+        t: &Table,
+        index: &crate::catalog::Index,
+        measured: Option<RowMeasure>,
+    ) -> Result<()> {
         // (Modelling the index's pages evaluates its expressions again: what they say then
         // isn't Postgres's.)
         // index_update_stats updates the table's pg_class row in place (relhasindex and its
@@ -1147,13 +1157,18 @@ impl Ddl<'_, '_> {
         self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1259, t.oid)?;
         let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
-        let r = self.index_built_measured(t, index);
+        let r = self.index_built_measured(t, index, measured);
         self.ctx.notices.borrow_mut().truncate(quiet);
         drop(hold);
         r
     }
 
-    fn index_built_measured(&mut self, t: &Table, index: &crate::catalog::Index) -> Result<()> {
+    fn index_built_measured(
+        &mut self,
+        t: &Table,
+        index: &crate::catalog::Index,
+        measured: Option<RowMeasure>,
+    ) -> Result<()> {
         crate::exec::sizing::index_built(t, index.oid, crate::exec::sizing::models_build(&index.method), self.ctx)?;
         // index_update_stats leaves the table's statistics alone when autovacuum is off
         // for it (a dump restoring statistics before its indexes keeps them).
@@ -1163,7 +1178,10 @@ impl Ddl<'_, '_> {
                     && crate::types::text::parse_bool(v.trim_matches('\'')).is_ok_and(|b| !b)
             })
         });
-        let m = self.measure_rows(t, Some(Some(index.oid)))?;
+        let m = match measured {
+            Some(m) => m,
+            None => self.measure_rows(t, Some(Some(index.oid)))?,
+        };
         let before = self.cat.relstats.get(&t.oid).copied();
         if !autovacuum_off && (m.rows > 0 || before.is_some_and(|s| s.tuples >= 0.0)) {
             let pages = self.heap_pages(t, &m);
@@ -1186,6 +1204,30 @@ impl Ddl<'_, '_> {
     /// rows' tuples when the table is too big to model), and for its indexes (`indexes`:
     /// None, none; Some(None), all of them; else that one) their pages and tuples.
     fn measure_rows(&self, t: &Table, indexes: Option<Option<u32>>) -> Result<RowMeasure> {
+        Ok(self.measure_rows_with(t, indexes, None)?.expect("a measure"))
+    }
+
+    /// Whether building index `ix` of `t` measures them in the build's own pass over the
+    /// rows (`measure_rows_with`): a btree of a table too big to model, whose measure is the
+    /// rows' stored sizes and the index's keys sorted, none of which the build changes.
+    pub(super) fn measures_in_build(&self, t: &Table, ix: &crate::catalog::Index) -> bool {
+        let db = &self.ctx.sess.db;
+        ix.id != 0
+            && ix.method == "btree"
+            && crate::exec::sizing::is_estimated(t.oid, db)
+            && crate::exec::sizing::btree_blocks(ix.oid, db).is_none()
+    }
+
+    /// `measure_rows`, handing `each` (when given) each row's data key and key values of
+    /// the one index measured, as its measure computes them: an index build's own pass
+    /// (`measures_in_build`), so the rows are read and the keys computed once. None (nothing
+    /// read): the index isn't measured by its keys alone after all.
+    pub(super) fn measure_rows_with(
+        &self,
+        t: &Table,
+        indexes: Option<Option<u32>>,
+        mut each: Option<&mut dyn FnMut(&[u8], &[Value]) -> Result<()>>,
+    ) -> Result<Option<RowMeasure>> {
         let db = &self.ctx.sess.db;
         let blocks = crate::exec::sizing::heap_blocks(t, self.ctx);
         let modelled = match blocks {
@@ -1248,6 +1290,9 @@ impl Ddl<'_, '_> {
                 });
             }
         }
+        if each.is_some() && (ixs.len() != 1 || ixs[0].modelled.is_some() || ixs[0].btree_keys.is_some()) {
+            return Ok(None);
+        }
         let mut rows = 0usize;
         let mut sizes: Vec<usize> = Vec::new();
         // (Indexes of plain columns read only theirs: the other values aren't decoded, and
@@ -1274,7 +1319,7 @@ impl Ddl<'_, '_> {
         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
         for r in scan {
             self.ctx.check()?;
-            let (_, bytes) = r?;
+            let (dkey, bytes) = r?;
             rows += 1;
             if let Some(p) = &progress
                 && rows.is_multiple_of(per_page)
@@ -1298,6 +1343,9 @@ impl Ddl<'_, '_> {
                 let Some(mut vals) = super::table::index_values(&ix.bix, &row, self)? else {
                     continue;
                 };
+                if let Some(f) = each.as_mut() {
+                    f(&dkey, &vals)?;
+                }
                 ix.tuples += 1;
                 if let Some(keys) = &mut ix.btree_keys {
                     keys.push(crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx));
@@ -1361,12 +1409,12 @@ impl Ddl<'_, '_> {
             };
             measured.push((ix.bix.index.oid, pages, ix.tuples as f64));
         }
-        Ok(RowMeasure {
+        Ok(Some(RowMeasure {
             rows,
             modelled,
             live,
             indexes: measured,
-        })
+        }))
     }
 
     /// pg_class stats of indexes measured (`measure_rows`).
@@ -1386,7 +1434,7 @@ impl Ddl<'_, '_> {
 }
 
 /// What `measure_rows` found.
-struct RowMeasure {
+pub(super) struct RowMeasure {
     rows: usize,
     /// The heap's modelled pages (None: too big to model), else the live rows' tuples
     /// packed afresh (`Ddl::heap_pages`).

@@ -271,6 +271,7 @@ fn backend_io(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     if pid != Some(c.exec.sess.pid as i64) {
         return rows(Vec::new());
     }
+    crate::exec::pgstat::flush_io(c.exec.sess);
     let counts = c.exec.sess.pgstat.borrow().io.clone();
     rows(io_rows(&counts, None, Some(c.exec.sess.pid), c))
 }

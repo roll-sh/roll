@@ -1402,6 +1402,7 @@ fn delete_index_entries(
     indexes: &[BoundIndex],
     row: &[Value],
     dkey: &[u8],
+    defer: bool,
     ctx: &ExecCtx,
 ) -> Result<()> {
     for bix in indexes {
@@ -1415,7 +1416,11 @@ fn delete_index_entries(
         }
         if let Some(vals) = index_values(bix, row, ctx)? {
             let k = index_entry_key(t, &bix.index, &vals, dkey, &bix.colls);
-            ctx.txn.borrow_mut().delete(k)?;
+            if defer {
+                ctx.txn.borrow_mut().defer_entry_delete(k)?;
+            } else {
+                ctx.txn.borrow_mut().delete(k)?;
+            }
         }
     }
     Ok(())
@@ -2691,6 +2696,19 @@ pub fn delete_row(
     old: &[Value],
     ctx: &ExecCtx,
 ) -> Result<()> {
+    delete_row_with(t, indexes, dkey, old, false, ctx)
+}
+
+/// `delete_row`; its index entries deferred to the statement's end when `defer`
+/// (`Txn::defer_entry_delete`, `DeleteNode::defers_entries`).
+fn delete_row_with(
+    t: &Table,
+    indexes: &[BoundIndex],
+    dkey: &[u8],
+    old: &[Value],
+    defer: bool,
+    ctx: &ExecCtx,
+) -> Result<()> {
     if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
         return crate::ext::postgres_fdw::modify::delete(t, dkey, ctx).map(|_| ());
     }
@@ -2701,7 +2719,7 @@ pub fn delete_row(
     super::pgstat::count_delete(ctx, t.oid);
     ctx.txn.borrow_mut().delete(dkey.to_vec())?;
     crate::repl::log::delete(t, old, ctx)?;
-    delete_index_entries(t, indexes, old, dkey, ctx)
+    delete_index_entries(t, indexes, old, dkey, defer, ctx)
 }
 
 /// A partition with the root's column layout: a routed row needs no conversion.
@@ -4863,9 +4881,23 @@ pub struct DeleteNode {
     done: bool,
     deferred: bool,
     capture: bool,
+    /// Its rows' index entries are deleted together at its end (`defers_entries`).
+    defer_entries: bool,
 }
 
 impl DeleteNode {
+    /// Whether nothing the statement runs before it ends can read the deleted rows' index
+    /// entries through the transaction's writes (its own snapshot doesn't see them): no
+    /// BEFORE ROW trigger, RETURNING or anything volatile, so they can wait for its end
+    /// (`Txn::defer_entry_delete`).
+    fn defers_entries(plan: &DeletePlan, ctx: &ExecCtx) -> bool {
+        !plan.view
+            && plan.returning.is_empty()
+            && !trigger::any(&plan.triggers, true, true, tt::DELETE, ctx)
+            && plan.members.iter().all(|m| !trigger::any(&m.triggers, true, true, tt::DELETE, ctx))
+            && !crate::sql::paths::plan_volatile_deep(&plan.source)
+    }
+
     pub fn new(plan: Box<DeletePlan>, ctx: &ExecCtx) -> Result<Self> {
         if plan.inh && reads_transition(&plan.triggers, tt::DELETE) && plan.members.iter().any(|m| m.table.foreign.is_some()) {
             return Err(crate::ext::postgres_fdw::modify::transition_error());
@@ -4888,7 +4920,9 @@ impl DeleteNode {
         let trans = plan.inh && reads_transition(&plan.triggers, tt::DELETE);
         let source = super::nodes::open(&plan.source, ctx)?;
         let seen = (!rows_once(&plan.source)).then(Default::default);
+        let defer_entries = Self::defers_entries(&plan, ctx);
         Ok(DeleteNode {
+            defer_entries,
             plan,
             source,
             seen,
@@ -4977,6 +5011,9 @@ impl Node for DeleteNode {
             let Some(mut src) = self.source.next(ctx)? else {
                 self.done = true;
                 crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
+                if self.defer_entries {
+                    ctx.txn.borrow_mut().flush_entry_deletes()?;
+                }
                 if self.plan.inh {
                     trigger::batch(ctx, || self.finish_tree(ctx))?;
                 } else if !self.deferred {
@@ -5076,7 +5113,7 @@ impl Node for DeleteNode {
                     let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1));
                     crate::ext::postgres_fdw::modify::with_back(back)
                 });
-                delete_row(&t, indexes, &dkey, &old, ctx)?;
+                delete_row_with(&t, indexes, &dkey, &old, self.defer_entries, ctx)?;
             }
             if self.plan.inh {
                 if trigger::any(triggers, true, false, tt::DELETE, ctx) {

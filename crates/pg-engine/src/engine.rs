@@ -1028,6 +1028,7 @@ impl Engine {
                 .collect()
         };
         for (db, _closing) in closing {
+            crate::exec::sizing::persist_estimates(&db);
             if let Err(e) = db.persist_sequences() {
                 warn!(database = %db.name, error = %e, "saving sequence positions failed");
             }
@@ -1609,6 +1610,7 @@ impl Engine {
                 .collect()
         };
         for (db, _closing) in dbs {
+            crate::exec::sizing::persist_estimates(&db);
             if let Err(e) = db.persist_sequences() {
                 warn!(database = %db.name, error = %e, "saving sequence positions failed");
             }

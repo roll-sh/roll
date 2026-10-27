@@ -467,6 +467,9 @@ struct Fetched {
 pub struct Pending {
     /// The backend's own I/O counts (pg_stat_get_backend_io), never flushed away.
     pub io: super::fasthash::HashMap<IoKey, i64>,
+    /// The latest I/O counted, still adding up (`count_io`): not yet in `io` or the
+    /// shared counts.
+    pub io_run: Option<(IoKey, i64)>,
     /// The backend's own WAL (pg_stat_get_backend_wal): records and bytes.
     pub wal: (i64, i64),
     pub tabs: HashMap<u32, TabCounts>,
@@ -677,6 +680,7 @@ pub fn fetch_slru(ctx: &ExecCtx) -> HashMap<String, i64> {
 
 /// The fixed-numbered statistics and other cluster-wide values (no snapshot).
 pub fn with_shared<T>(ctx: &ExecCtx, f: impl FnOnce(&mut Fixed) -> T) -> T {
+    flush_io(ctx.sess);
     let fixed = shared(&ctx.sess.db).fixed.clone();
     f(&mut fixed.lock())
 }
@@ -839,14 +843,41 @@ pub fn count_function(ctx: &ExecCtx, func: u32, language: &str, ms: f64) {
 }
 
 /// I/O of the client backend (shared buffers are all hits; what the counts compare is
-/// that they grow).
+/// that they grow). Counts of one key in a row (a row-at-a-time insert's extends) add up
+/// in the backend (`Pending::io_run`) and go into the shared and backend counts together:
+/// when another key is counted, before anything reads or resets them (`flush_io`), and at
+/// the transaction's end.
 pub fn count_io(ctx: &ExecCtx, object: &'static str, context: &'static str, op: &'static str, n: i64) {
     if n <= 0 {
         return;
     }
     let key: IoKey = ("client backend", object, context, op);
-    *ctx.sess.db.pgstat.lock().fixed.lock().io.entry(key).or_default() += n;
-    *ctx.sess.pgstat.borrow_mut().io.entry(key).or_default() += n;
+    let prev = {
+        let mut p = ctx.sess.pgstat.borrow_mut();
+        match &mut p.io_run {
+            Some((k, c)) if *k == key => {
+                *c += n;
+                return;
+            }
+            run => run.replace((key, n)),
+        }
+    };
+    if let Some((k, c)) = prev {
+        add_io(ctx.sess, k, c);
+    }
+}
+
+fn add_io(sess: &crate::session::state::SessionState, key: IoKey, n: i64) {
+    *sess.db.pgstat.lock().fixed.lock().io.entry(key).or_default() += n;
+    *sess.pgstat.borrow_mut().io.entry(key).or_default() += n;
+}
+
+/// The backend's I/O counts still adding up (`count_io`), counted now.
+pub fn flush_io(sess: &crate::session::state::SessionState) {
+    let run = sess.pgstat.borrow_mut().io_run.take();
+    if let Some((k, c)) = run {
+        add_io(sess, k, c);
+    }
 }
 
 /// The I/O a heap insert of `n` rows into `rel` does: it extends the relation (a
@@ -909,6 +940,7 @@ pub fn io_rewrite(ctx: &ExecCtx, rel: u32) {
 
 /// pg_stat_reset_backend_stats of this backend.
 pub fn reset_backend(ctx: &ExecCtx) {
+    flush_io(ctx.sess);
     let mut p = ctx.sess.pgstat.borrow_mut();
     p.io.clear();
     p.wal = (0, 0);
@@ -1042,6 +1074,7 @@ pub fn reset_function(ctx: &ExecCtx, func: u32) {
 
 /// pg_stat_reset_shared / pg_stat_reset_slru: `target`'s reset time is now.
 pub fn reset_shared(ctx: &ExecCtx, target: &str) {
+    flush_io(ctx.sess);
     let fixed = fixed(&ctx.sess.db);
     let mut s = fixed.lock();
     let t = now();
@@ -1354,6 +1387,7 @@ pub fn busy(sess: &crate::session::state::SessionState) {
 
 /// The backend ends: what it kept goes now (pgstat_report_stat(true) at exit).
 pub fn session_ends(sess: &crate::session::state::SessionState) {
+    flush_io(sess);
     report(sess, true, &sess.db.catalog());
 }
 
@@ -1390,6 +1424,7 @@ fn end_xact_counts(
     cat: &crate::catalog::Catalog,
     count_xact: bool,
 ) {
+    flush_io(sess);
     let wal = xact.wal_records;
     let counts = xact.end_xact(commit);
     {

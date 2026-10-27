@@ -1234,7 +1234,16 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         None
     };
     if let Some(pages) = known_big {
-        untrack(db, t, Some(EstHeap { pages, room: 0, reusable: 0 }));
+        set_estimated(db, t, Some(EstHeap { pages, room: 0, reusable: 0 }));
+        return Ok(false);
+    }
+    // One never measured that was too big to model when its database last had it open: the
+    // estimate kept then (`store_estimate`).
+    if cold
+        && ctx.catalog().relstats.get(&t.oid).is_none_or(|s| s.tuples < 0.0)
+        && let Some(pages) = stored_estimate(t, ctx)
+    {
+        set_estimated(db, t, Some(EstHeap { pages, room: 0, reusable: 0 }));
         return Ok(false);
     }
     let start = index_prefix(t.oid, 0);
@@ -1374,8 +1383,14 @@ fn forget(rf: &mut RelFiles, t: &Table) {
 }
 
 /// Stop modelling a table that grew too big; its size is estimated from here on (from its
-/// heap model's, or `est`).
+/// heap model's, or `est`). The estimate is kept for the database's next open
+/// (`stored_estimate`).
 fn untrack(db: &Database, t: &Table, est: Option<EstHeap>) {
+    let pages = set_estimated(db, t, est).pages;
+    store_estimate(db, t.oid, pages);
+}
+
+fn set_estimated(db: &Database, t: &Table, est: Option<EstHeap>) -> EstHeap {
     let mut rf = db.relfiles.write();
     let est = est
         .or_else(|| rf.heaps.get(&t.oid).map(EstHeap::from_heap))
@@ -1383,6 +1398,51 @@ fn untrack(db: &Database, t: &Table, est: Option<EstHeap>) {
     rf.untracked.insert(t.oid);
     forget(&mut rf, t);
     rf.estimated.insert(t.oid, est);
+    est
+}
+
+/// Where a table too big to model has its estimated heap pages kept for the next open of
+/// its database, with the relfilenode they are of: its first use then needn't read it
+/// whole to know it is big (`ensure`). Written as it becomes big and when the database
+/// closes (`persist_estimates`), outside transactions: the estimate isn't transactional
+/// (a rolled-back load leaves its pages, as Postgres's file keeps them).
+const EST_PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0x22];
+
+fn est_key(oid: u32) -> Vec<u8> {
+    let mut k = EST_PREFIX.to_vec();
+    k.extend_from_slice(&oid.to_be_bytes());
+    k
+}
+
+fn store_estimate(db: &Database, oid: u32, pages: u32) {
+    // (A table not committed yet has no relfilenode to tie it to: its next open reads it.)
+    let Some(node) = db.catalog().relfilenode(oid).filter(|n| *n != 0) else {
+        return;
+    };
+    let mut v = pages.to_le_bytes().to_vec();
+    v.extend_from_slice(&node.to_le_bytes());
+    if let Err(e) = db.store.commit(vec![(est_key(oid), Some(bytes::Bytes::from(v)))], |_| Ok(())) {
+        tracing::warn!(error = %e, "keeping a table's size estimate failed");
+    }
+}
+
+/// The estimated heap pages kept for table `t` (`store_estimate`), when they are of its
+/// current relfilenode.
+fn stored_estimate(t: &Table, ctx: &ExecCtx) -> Option<u32> {
+    let store = &ctx.sess.db.store;
+    let v = store.get(&est_key(t.oid), store.visible_ts()).ok()??;
+    let node = ctx.catalog().relfilenode(t.oid)?;
+    (v.len() == 8 && u32::from_le_bytes(v[4..8].try_into().ok()?) == node)
+        .then(|| u32::from_le_bytes(v[..4].try_into().expect("4 bytes")))
+}
+
+/// Keep the estimates of the database's tables too big to model for its next open (it is
+/// closing).
+pub fn persist_estimates(db: &Database) {
+    let est: Vec<(u32, u32)> = db.relfiles.read().estimated.iter().map(|(o, e)| (*o, e.pages)).collect();
+    for (oid, pages) in est {
+        store_estimate(db, oid, pages);
+    }
 }
 
 fn check_size(db: &Database, t: &Table) {

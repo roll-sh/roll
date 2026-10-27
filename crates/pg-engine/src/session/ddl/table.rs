@@ -3672,25 +3672,20 @@ impl Ddl<'_, '_> {
         let mut direct: Option<bool> = None;
         // (Half the spill threshold, at most 32 MB: a build too big to buffer.)
         let run_bytes = (self.ctx.txn.borrow().db.store.txn_spill_bytes() / 2).min(32 << 20);
-        for r in self.scan_rows(t) {
-            self.ctx.check()?;
-            let (dkey, row) = r?;
-            let Some(vals) = index_values(&bix, &row, self)? else {
-                continue;
-            };
+        let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
             if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
-                let first = seen.insert(unique_key(&vals), &dkey, |d| {
+                let first = seen.insert(unique_key(vals), dkey, |d| {
                     Ok(stored_values(d)?.map(|v| unique_key(&v)))
                 })?;
                 if let Some(first) = first {
                     let first = stored_values(&first)?;
-                    return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(&vals), &ix.name));
+                    return Err(self.duplicate_key(t, &bix, first.as_deref().unwrap_or(vals), &ix.name));
                 }
             }
             if ix.id != 0 {
-                let k = index_entry_key(t, ix, &vals, &dkey, &bix.colls);
+                let k = index_entry_key(t, ix, vals, dkey, &bix.colls);
                 batch_bytes += k.len() + dkey.len() + 64;
-                batch.push((k, dkey));
+                batch.push((k, dkey.to_vec()));
                 if batch_bytes >= run_bytes {
                     let b = std::mem::take(&mut batch);
                     let d = self
@@ -3700,6 +3695,23 @@ impl Ddl<'_, '_> {
                         .put_new_index_entries(b, &range_start, &range_end, direct)?;
                     direct = Some(d);
                     batch_bytes = 0;
+                }
+            }
+            Ok(())
+        };
+        // (A table too big to model is measured in the same pass: its rows read and its keys
+        // computed once.)
+        let measured = if self.measures_in_build(t, ix) {
+            self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?
+        } else {
+            None
+        };
+        if measured.is_none() {
+            for r in self.scan_rows(t) {
+                self.ctx.check()?;
+                let (dkey, row) = r?;
+                if let Some(vals) = index_values(&bix, &row, self)? {
+                    step(&dkey, &vals)?;
                 }
             }
         }
@@ -3715,7 +3727,7 @@ impl Ddl<'_, '_> {
             }
         }
         drop(seen);
-        self.index_built(t, ix)
+        self.index_built_from(t, ix, measured)
     }
 
     fn duplicate_key(&self, t: &Table, bix: &BoundIndex, vals: &[Value], name: &str) -> Error {

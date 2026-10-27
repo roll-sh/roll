@@ -418,6 +418,9 @@ impl Database {
             exported: false,
             prepared: false,
             log: None,
+            entry_deletes: Vec::new(),
+            entry_deletes_bytes: 0,
+            entry_deletes_direct: None,
         }
     }
 
@@ -871,6 +874,12 @@ pub struct Txn {
     /// Its change stream log, while it logs its changes (`repl::log`): decided when it gets
     /// its transaction id.
     pub(crate) log: Option<Box<crate::repl::log::TxnLog>>,
+    /// Index entries the running statement deleted, going in together at its end
+    /// (`defer_entry_delete`), with about how many bytes they hold.
+    entry_deletes: Vec<Vec<u8>>,
+    entry_deletes_bytes: usize,
+    /// How the statement's earlier batch of them went in (true: as a run).
+    entry_deletes_direct: Option<bool>,
 }
 
 impl Txn {
@@ -1010,6 +1019,8 @@ impl Txn {
 
     /// Start a statement: READ COMMITTED takes a fresh snapshot.
     pub fn begin_statement(&mut self, needs_snapshot: bool) -> Result<()> {
+        // (What an earlier statement deferred is the next one's to see.)
+        self.flush_entry_deletes()?;
         if self.catalog.is_none() {
             let c = self.db.catalog();
             self.read_catalog = Some(c.clone());
@@ -1313,7 +1324,8 @@ impl Txn {
         });
         runs.write(&mut versions)?;
         self.journal_base = self.position();
-        self.journal = Vec::new();
+        // (Its room kept: the buffer fills again as it did.)
+        self.journal.clear();
         self.writes = BTreeMap::new();
         self.buf_bytes = 0;
         Ok(())
@@ -1600,7 +1612,7 @@ impl Txn {
             }
             return Ok(false);
         }
-        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        sort_by_key_after(&mut entries, start.len(), |e| e.0.as_slice());
         let (cid, ts) = (Some(self.write_cid), self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
         let runs = self.runs.get_or_insert_with(|| Box::new(Runs::new(dir)));
@@ -1611,6 +1623,73 @@ impl Txn {
         self.wrote = true;
         self.cur_xid();
         Ok(true)
+    }
+
+    /// `delete` of an index entry by a statement nothing in which can read the index
+    /// through this transaction's writes before it ends (`exec::dml` decides: a DELETE
+    /// without BEFORE ROW triggers or anything volatile, whose own snapshot doesn't see its
+    /// writes): it waits in a list and goes in with the statement's others
+    /// (`flush_entry_deletes`), sorted, as a run of the spilled writes when the transaction
+    /// has written nothing else in those indexes, instead of a buffer write and its undo
+    /// record each. (Postgres's DELETE leaves index entries alone; the engine's go with
+    /// their rows.)
+    pub fn defer_entry_delete(&mut self, key: Vec<u8>) -> Result<()> {
+        if self.read_only || !self.savepoints.is_empty() {
+            return self.delete(key);
+        }
+        self.entry_deletes_bytes += key.len() + 32;
+        self.entry_deletes.push(key);
+        let run_bytes = (self.db.store.txn_spill_bytes() / 2).min(32 << 20);
+        if self.entry_deletes_bytes >= run_bytes {
+            self.put_entry_deletes()?;
+        }
+        Ok(())
+    }
+
+    /// The statement's deferred index entry deletes go in (`defer_entry_delete`): it ends,
+    /// or something is about to read what it wrote (its AFTER triggers).
+    pub fn flush_entry_deletes(&mut self) -> Result<()> {
+        let r = self.put_entry_deletes();
+        self.entry_deletes_direct = None;
+        r
+    }
+
+    fn put_entry_deletes(&mut self) -> Result<()> {
+        let mut keys = std::mem::take(&mut self.entry_deletes);
+        self.entry_deletes_bytes = 0;
+        if keys.is_empty() {
+            return Ok(());
+        }
+        sort_by_key_after(&mut keys, 0, |k| k.as_slice());
+        let direct = match self.entry_deletes_direct {
+            Some(d) => d,
+            // (Each index's entries start with its table's and its own id: 8 bytes.)
+            None => {
+                self.savepoints.is_empty() && !keys.chunk_by(|a, b| a.get(..8) == b.get(..8)).any(|g| {
+                    let start = &g[0][..g[0].len().min(8)];
+                    let end = crate::storage::keys::prefix_end(start);
+                    self.writes
+                        .range::<[u8], _>((Bound::Included(start), Bound::Excluded(end.as_slice())))
+                        .next()
+                        .is_some()
+                        || self.runs.as_ref().is_some_and(|r| r.scan(start, &end, LATEST).next().is_some())
+                })
+            }
+        };
+        self.entry_deletes_direct = Some(direct);
+        if !direct {
+            for k in keys {
+                self.delete(k)?;
+            }
+            return Ok(());
+        }
+        let (cid, ts) = (Some(self.write_cid), self.position() as u64);
+        let dir = self.db.store.spill_dir().join(self.id.to_string());
+        let runs = self.runs.get_or_insert_with(|| Box::new(Runs::new(dir)));
+        runs.write(&mut keys.into_iter().map(|k| (k, Ent { v: None, cid, ts })))?;
+        self.wrote = true;
+        self.cur_xid();
+        Ok(())
     }
 
     pub fn delete(&mut self, key: Vec<u8>) -> Result<()> {
@@ -1802,9 +1881,13 @@ impl Txn {
         }
         match st.prev.get(key) {
             Some(Some(v)) => Ok(Some(v.clone())),
-            // (Nothing in the buffer then: a spilled write, or none.)
-            Some(None) => Ok(self.runs_get(key, LATEST)?.map(|e| e.0)),
-            None => Ok(self.buf_get(key)?.map(|e| e.0)),
+            // (Nothing in the buffer then: a spilled write, or none. The runs as of the mark:
+            // a run written since, a statement's deferred entry deletes, isn't seen.)
+            Some(None) => Ok(self.runs_get(key, st.mark as u64)?.map(|e| e.0)),
+            None => match self.writes.get(key) {
+                Some(e) => Ok(Some(e.v.clone())),
+                None => Ok(self.runs_get(key, st.mark as u64)?.map(|e| e.0)),
+            },
         }
     }
 
@@ -1832,11 +1915,13 @@ impl Txn {
             // Taken before the last spill: none of the buffer, the runs as they were.
             return TxnScan::new(Vec::new(), self.lower(start, end, st.ts, st.mark as u64));
         }
+        // (The runs as of the mark, as `snap_get` reads them.)
+        let mark = st.mark as u64;
         if st.prev.is_empty() {
-            return self.scan_at(start, end, st.ts);
+            return TxnScan::new(self.mem_in(start, end).collect(), self.lower(start, end, st.ts, mark));
         }
         let own = self.snap_own(start, end, &st);
-        TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, LATEST))
+        TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark))
     }
 
     /// Scan [start, end) in descending key order, as of the snapshot `s` (None: the
@@ -1849,7 +1934,7 @@ impl Txn {
                 if st.mark < self.journal_base {
                     (st.ts, BTreeMap::new(), st.mark as u64)
                 } else {
-                    (st.ts, self.snap_own(start, end, &st), LATEST)
+                    (st.ts, self.snap_own(start, end, &st), st.mark as u64)
                 }
             }
             None => (self.snapshot_ts, self.mem_in(start, end).collect(), LATEST),
@@ -2571,6 +2656,8 @@ impl Txn {
     }
 
     pub fn commit(mut self) -> Result<u64> {
+        // (A statement's deferred index entry deletes go in at its end at the latest.)
+        self.flush_entry_deletes()?;
         if self.sxact
             && !self.prepared
             && let Err(e) = self.db.ssi.pre_commit(self.id)
@@ -2998,6 +3085,28 @@ type Buffered<I> = std::iter::Map<I, BufFn>;
 
 type SpilledWrites = Box<dyn Iterator<Item = Result<(Vec<u8>, Option<Bytes>)>>>;
 
+/// Sort items by their keys (`key`), every key sharing its first `skip` bytes (one index's):
+/// by the 16 bytes after them first, with the items' places, then runs of equal ones by the
+/// whole key. (The keys aren't read while they differ there: a sort of plain numbers.)
+fn sort_by_key_after<T>(items: &mut Vec<T>, skip: usize, key: impl Fn(&T) -> &[u8]) {
+    let word = |k: &[u8]| {
+        let mut b = [0u8; 16];
+        let rest = k.get(skip..).unwrap_or(&[]);
+        let n = rest.len().min(16);
+        b[..n].copy_from_slice(&rest[..n]);
+        u128::from_be_bytes(b)
+    };
+    let mut order: Vec<(u128, usize)> = items.iter().enumerate().map(|(i, e)| (word(key(e)), i)).collect();
+    order.sort_unstable_by_key(|o| o.0);
+    for run in order.chunk_by_mut(|a, b| a.0 == b.0) {
+        if run.len() > 1 {
+            run.sort_unstable_by(|a, b| key(&items[a.1]).cmp(key(&items[b.1])));
+        }
+    }
+    let mut taken: Vec<Option<T>> = std::mem::take(items).into_iter().map(Some).collect();
+    items.extend(order.into_iter().map(|(_, i)| taken[i].take().expect("each item once")));
+}
+
 /// A spilled transaction's writes for its commit, in key order: each key's last, the
 /// buffer's over the runs' (the catalog's stand-in left out).
 fn spilled_writes(mem: BTreeMap<Vec<u8>, Ent>, runs: Box<Runs>) -> SpilledWrites {
@@ -3169,5 +3278,35 @@ impl Iterator for TxnScan {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sort_by_key_after_sorts_as_the_keys() {
+        // Keys sharing a 3-byte prefix, then tails short, long, equal for 8 bytes, padded.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = (0..5000u32)
+            .map(|i| {
+                let mut k = b"pfx".to_vec();
+                let len = (next() % 14) as usize;
+                k.extend((0..len).map(|_| (next() % 3) as u8));
+                (k, i.to_be_bytes().to_vec())
+            })
+            .collect();
+        let mut want = entries.clone();
+        want.sort();
+        super::sort_by_key_after(&mut entries, 3, |e| e.0.as_slice());
+        let keys = |v: &[(Vec<u8>, Vec<u8>)]| v.iter().map(|e| e.0.clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&entries), keys(&want));
+        entries.sort();
+        assert_eq!(entries, want);
     }
 }
