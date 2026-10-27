@@ -2473,7 +2473,20 @@ impl Ddl<'_, '_> {
                     }
                     if comments {
                         let mut copied = Vec::new();
-                        for (o, sub, text) in self.cat.comments.iter() {
+                        // (The source's comments in pg_description's order: its columns',
+                        // its constraints'.)
+                        let mut theirs: Vec<(u64, u32, i32, String)> = (self.cat.comments_of(src.oid).iter())
+                            .map(|(sub, tick, text)| (*tick, src.oid, *sub, text.clone()))
+                            .collect();
+                        for c in &src.constraints {
+                            theirs.extend(
+                                (self.cat.comments_of(c.oid).iter())
+                                    .map(|(sub, tick, text)| (*tick, c.oid, *sub, text.clone())),
+                            );
+                        }
+                        theirs.sort_by_key(|c| (c.0, c.1, c.2));
+                        for (_, o, sub, text) in &theirs {
+                            let (o, sub) = (o, sub);
                             if *o == src.oid && *sub > 0 {
                                 let Some(c) = src.columns.get(*sub as usize - 1) else {
                                     continue;
@@ -2507,7 +2520,9 @@ impl Ddl<'_, '_> {
                                 copied.push((tc.oid, 0, text.clone()));
                             }
                         }
-                        self.cat.comments_mut().extend(copied);
+                        for (tc, sub, text) in copied {
+                            self.cat.set_comment(tc, sub, text);
+                        }
                     }
                 }
                 Pending::Fk(f) => {
@@ -8347,7 +8362,8 @@ impl Ddl<'_, '_> {
                         continue;
                     };
                     // (Made anew by DefineIndex's recursion: no comment comes along.)
-                    self.cat.comments_mut().retain(|c| c.0 != cnew && c.0 != old.oid);
+                    self.cat.drop_comments(cnew);
+                    self.cat.drop_comments(old.oid);
                     let con_kind = (ct.constraints.iter())
                         .find(|c| c.kind.index() == Some(cnew))
                         .map(|c| c.kind.clone());
@@ -8373,7 +8389,7 @@ impl Ddl<'_, '_> {
                     let mut ccon = 0;
                     if let Some(c) = ct.constraints.iter_mut().find(|c| c.kind.index() == Some(cnew)) {
                         let o = c.oid;
-                        self.cat.comments_mut().retain(|x| x.0 != o);
+                        self.cat.drop_comments(o);
                         ccon = self.cat.alloc_con_oid(c.deferrable);
                         c.oid = ccon;
                         c.name = name;
@@ -8487,9 +8503,7 @@ impl Ddl<'_, '_> {
             }
         }
         for (old, new) in remap {
-            for c in self.cat.comments_mut().iter_mut().filter(|c| c.0 == old) {
-                c.0 = new;
-            }
+            self.cat.move_comments(old, new);
         }
         for tb in tables {
             match &mut t {
@@ -8639,9 +8653,7 @@ impl Ddl<'_, '_> {
             oid: new,
             ..(*old).clone()
         });
-        for c in self.cat.comments_mut().iter_mut().filter(|c| c.0 == ix) {
-            c.0 = new;
-        }
+        self.cat.move_comments(ix, new);
         if let Some(s) = self.cat.relstats.remove(&ix) {
             self.cat.relstats.insert(new, s);
         }

@@ -1333,6 +1333,23 @@ impl Engine {
         Self::set_storage_format(&db, 0)
     }
 
+    /// Downgrading to a build of catalog format 1 (round 19 and before; `roll-engine
+    /// --downgrade-catalog`): every database's catalog stored as such a build reads it
+    /// (comments in the header again). Run it on a data directory the server last stopped
+    /// cleanly, before any other session; the older build then opens it. (Opening it with
+    /// this build again upgrades it again.) The databases' names.
+    pub fn downgrade_catalogs(&self) -> Result<Vec<String>> {
+        let entries: Vec<DbEntry> = self.registry.lock().databases.clone();
+        let mut out = Vec::new();
+        for entry in entries {
+            let db = self.open_db(&entry)?;
+            let writes = crate::catalog::persist::downgrade_writes(&db.catalog())?;
+            db.store.commit(writes, |_| Ok(()))?;
+            out.push(entry.name.clone());
+        }
+        Ok(out)
+    }
+
     /// Testing the catalog format upgrade: store `dbname`'s catalog as one value, as before
     /// catalog format 1 (`catalog::persist`), and the number of records that took.
     #[doc(hidden)]
@@ -1884,6 +1901,22 @@ impl Cluster for Engine {
         let Some(cat) = txn.changed_catalog().filter(|_| !txn.publish) else {
             return txn.commit();
         };
+        // A transaction whose copy of the shared catalogs is current and unchanged commits
+        // without the shared lock: racing DDL commits of databases' own objects
+        // (`pg_restore -j`) took turns under it for the whole commit, WAL write and catalog
+        // merge included. (A shared change committed meanwhile is published onto the
+        // database's current catalog, which this commit's catalog is merged onto.)
+        {
+            let (version, has_shared, dbs) = {
+                let r = self.registry.lock();
+                (r.shared_version, r.shared.is_some(), r.databases.iter().map(|d| d.oid).collect::<BTreeSet<u32>>())
+            };
+            if !has_shared
+                || (cat.shared_stamp.0 == version && SharedCatalog::extract(&cat, &dbs).hash() == cat.shared_stamp.1)
+            {
+                return txn.commit();
+            }
+        }
         let _g = self.shared_lock.lock();
         let (version, shared, dbs) = {
             let r = self.registry.lock();

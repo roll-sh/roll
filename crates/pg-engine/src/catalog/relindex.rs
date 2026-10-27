@@ -104,6 +104,9 @@ pub struct TableIx {
     /// `ddl::mentions` would find a name in, without reading every text.
     pub words: PHash<String, Counts>,
     pub rows: RelRows,
+    /// Partitions pending detach (DETACH PARTITION ... CONCURRENTLY) → their parent
+    /// (`Catalog::has_detach_pending`, which every statement after DDL asked of every table).
+    pub detach_pending: PMap<u32>,
 }
 
 /// The words `ddl::mentions` matches a name against: each maximal run of identifier
@@ -294,6 +297,7 @@ struct TableParts {
     rls: Option<String>,
     words: Vec<String>,
     rows: RelRows,
+    detach: Option<u32>,
 }
 
 impl TableParts {
@@ -326,6 +330,7 @@ impl TableParts {
             rls: t.rls.then(|| t.name.clone()),
             words,
             rows: table_rows(t),
+            detach: t.detach_pending.then(|| t.inherits.first().copied()).flatten(),
         }
     }
 }
@@ -397,6 +402,15 @@ impl TableIx {
         {
             set_member(&mut self.rls, n.clone(), oid, up);
         }
+        if let Some(parent) = p.detach
+            && !(same && p.detach == skip.detach)
+        {
+            if up {
+                self.detach_pending.insert(oid, parent);
+            } else {
+                self.detach_pending.remove(&oid);
+            }
+        }
     }
 }
 
@@ -413,6 +427,7 @@ fn no_parts() -> TableParts {
         rls: None,
         words: Vec::new(),
         rows: RelRows::default(),
+        detach: None,
     }
 }
 

@@ -17,7 +17,7 @@ use crate::catalog::{Catalog, persist};
 use crate::error::{Error, Result, code};
 use bytes::Bytes;
 use serde_json::{Map, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 fn conflict() -> Error {
     Error::new(
@@ -33,7 +33,6 @@ fn conflict() -> Error {
 /// values. (It serialized all three catalogs whole, which `pg_restore -j` over thousands of
 /// tables paid for every index and constraint: 20x a serial restore.)
 pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
-    let internal = |e: serde_json::Error| crate::error::internal(e.to_string());
     let mut out = cur.clone();
     // The header: scalars and lists (comments, ACLs, memberships, ...). Only the fields this
     // transaction changed are merged (`cur`'s are the rest): serializing all three headers,
@@ -48,12 +47,8 @@ pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
             "class_tick" => continue,
             // Counters: the larger.
             "next_oid" => Some(Value::from(mine.next_oid.max(cur.next_oid))),
-            // Comments by object: the current ones, those this transaction set or removed
-            // changed (pg_restore -j comments every object as it goes).
-            "comments" => {
-                out.comments = merge_comments(base, mine, cur);
-                continue;
-            }
+            // (Comments' ticks: those this transaction set are set again below.)
+            "comment_tick" => continue,
             _ => {
                 let field = |c: &Catalog| persist::header_field(c, k);
                 merge_opt(field(base)?.as_ref(), field(mine)?.as_ref(), field(cur)?.as_ref())?
@@ -64,51 +59,43 @@ pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
         }
     }
     persist::set_header(&mut out, &head)?;
-    // The records: this transaction's changes, merged with the current catalog's where they
-    // changed the same ones.
-    type Records = HashMap<(u8, u32), Option<Bytes>>;
-    let theirs: Records = persist::record_changes(base, cur)?
-        .into_iter()
-        .map(|(t, o, v)| ((t, o), v))
-        .collect();
-    let changes = persist::record_changes(base, mine)?;
-    let before: Records = if changes.iter().any(|(t, o, _)| theirs.contains_key(&(*t, *o))) {
-        persist::record_changes(mine, base)?
-            .into_iter()
-            .map(|(t, o, v)| ((t, o), v))
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    // The records: this transaction's changes. Those the current catalog has as the base
+    // did are copied (the entries themselves, shared by pointer); only those both changed
+    // are merged, as JSON. (Every racing commit serialized and parsed again every record it
+    // changed, and every record the commits since its base did: 0.5 ms a commit under the
+    // commit lock, which `pg_restore -j`'s workers took turns at.)
+    let internal = |e: serde_json::Error| crate::error::internal(e.to_string());
     let mut moved = Vec::new();
+    let mut commented = Vec::new();
     // The relations whose name index entries may change (tables, indexes, views, sequences).
     let mut rels = BTreeSet::new();
-    for (tag, oid, v) in changes {
+    for (tag, oid) in persist::changed_record_keys(base, mine) {
         if tag == persist::CLASS_ORDER_TAG {
-            moved.push((oid, v));
+            moved.push((oid, mine.class_order.contains_key(&oid)));
+            continue;
+        }
+        if tag == persist::COMMENTS_TAG {
+            commented.push(oid);
             continue;
         }
         if matches!(tag, 2..=5) {
             rels.insert(oid);
         }
-        let v = match theirs.get(&(tag, oid)) {
-            None => v,
-            Some(c) if *c == v => continue,
-            Some(c) => {
-                let parse = |b: &Option<Bytes>| -> Result<Option<Value>> {
-                    b.as_ref()
-                        .map(|b| serde_json::from_slice(b).map_err(internal))
-                        .transpose()
-                };
-                let b = parse(before.get(&(tag, oid)).unwrap_or(&None))?;
-                merge_opt(b.as_ref(), parse(&v)?.as_ref(), parse(c)?.as_ref())?
-                    .map(|m| serde_json::to_vec(&m).map(Bytes::from).map_err(internal))
-                    .transpose()?
-            }
-        };
+        if persist::same_record(base, cur, tag, oid) {
+            persist::copy_record(mine, &mut out, tag, oid);
+            continue;
+        }
+        if persist::same_record(mine, cur, tag, oid) {
+            continue;
+        }
+        let j = |c: &Catalog| persist::record_json(c, tag, oid);
+        let v = merge_opt(j(base)?.as_ref(), j(mine)?.as_ref(), j(cur)?.as_ref())?
+            .map(|m| serde_json::to_vec(&m).map(Bytes::from).map_err(internal))
+            .transpose()?;
         persist::apply_record(&mut out, tag, oid, v.as_deref()).map_err(|_| conflict())?;
     }
     class_order(mine, moved, &mut out);
+    merge_comments(base, mine, &commented, &mut out);
     out.oids = mine.oids.clone();
     out.catalog_format = cur.catalog_format;
     // (The name index and children of the relations this transaction changed, and the
@@ -129,22 +116,29 @@ pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
     Ok(out)
 }
 
-/// `cur`'s comments with this transaction's changes since `base`: those it removed or set
-/// (keyed by object and sub-id) go, then those it set follow in its order (a comment set
-/// again is a new row at pg_description's end, as the transaction had it).
-fn merge_comments(base: &Catalog, mine: &Catalog, cur: &Catalog) -> std::sync::Arc<Vec<(u32, i32, String)>> {
-    let key = |c: &(u32, i32, String)| (c.0, c.1);
-    let before: HashMap<(u32, i32), &String> = base.comments.iter().map(|c| (key(c), &c.2)).collect();
-    let after: HashMap<(u32, i32), &String> = mine.comments.iter().map(|c| (key(c), &c.2)).collect();
-    let mut touched: std::collections::HashSet<(u32, i32)> =
-        before.keys().filter(|k| after.get(*k) != before.get(*k)).copied().collect();
-    let set: Vec<&(u32, i32, String)> =
-        mine.comments.iter().filter(|c| before.get(&key(c)) != Some(&&c.2)).collect();
-    touched.extend(set.iter().map(|c| key(c)));
-    let mut out: Vec<(u32, i32, String)> =
-        cur.comments.iter().filter(|c| !touched.contains(&key(c))).cloned().collect();
-    out.extend(set.into_iter().cloned());
-    std::sync::Arc::new(out)
+/// The comments of the objects in `oids` (whose comment records this transaction changed
+/// since `base`) carried onto `out` (the current catalog's): those it removed go, those it
+/// set are set again, in its order, after the current ones (a comment set again is a new row
+/// at pg_description's end, as the transaction had it).
+fn merge_comments(base: &Catalog, mine: &Catalog, oids: &[u32], out: &mut Catalog) {
+    let mut set: Vec<(u64, u32, i32, String)> = Vec::new();
+    for &oid in oids {
+        let (b, m) = (base.comments_of(oid), mine.comments_of(oid));
+        for (sub, _, _) in b {
+            if !m.iter().any(|x| x.0 == *sub) {
+                out.drop_comment(oid, *sub);
+            }
+        }
+        for x in m {
+            if !b.contains(x) {
+                set.push((x.1, oid, x.0, x.2.clone()));
+            }
+        }
+    }
+    set.sort_by_key(|x| (x.0, x.1, x.2));
+    for (_, oid, sub, text) in set {
+        out.set_comment(oid, sub, text);
+    }
 }
 
 fn max_num(a: Option<&Value>, b: Option<&Value>) -> Value {
@@ -171,7 +165,7 @@ pub fn reapply(
         let (bv, mv, cv) = (hb.get(k), hm.get(k), hc.get(k));
         let v = match k.as_str() {
             "version" | "catalog_format" | "class_tick" => continue,
-            "next_oid" => Some(max_num(mv, cv)),
+            "next_oid" | "comment_tick" => Some(max_num(mv, cv)),
             _ => merge_opt(bv, mv, cv)?,
         };
         if let Some(v) = v {
@@ -281,15 +275,15 @@ fn merge_value(b: &Value, m: &Value, c: &Value) -> Result<Value> {
 /// this transaction set (new rows, rows updated other than in place), after them in the
 /// order it set them; those it removed (dropped relations) gone. `moved`: its class_order
 /// records that differ from the base's.
-fn class_order(mine: &Catalog, moved: Vec<(u32, Option<Bytes>)>, out: &mut Catalog) {
+fn class_order(mine: &Catalog, moved: Vec<(u32, bool)>, out: &mut Catalog) {
     let mut tick = out.class_tick;
     let mut set = Vec::new();
     for (oid, v) in moved {
         match v {
-            None => {
+            false => {
                 out.class_order.remove(&oid);
             }
-            Some(_) => set.push((mine.class_order.get(&oid).copied().unwrap_or(0), oid)),
+            true => set.push((mine.class_order.get(&oid).copied().unwrap_or(0), oid)),
         }
     }
     set.sort();

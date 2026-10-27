@@ -1208,17 +1208,14 @@ fn obj_description(a: &[Value], c: &FnCtx) -> Result<Value> {
         .map(|d| d.0)
         .collect();
     if cat.shared_class_of(oid, &dbs).is_none()
-        && let Some((_, _, t)) = cat
-            .comments
-            .iter()
-            .find(|(o, s, t)| *o == oid && *s == 0 && !t.is_empty())
+        && let Some(t) = cat.comment(oid, 0).filter(|t| !t.is_empty())
         && class.is_none_or(|k| {
             cat.class_of(oid)
                 .unwrap_or(crate::catalog::depend::CONSTRAINT)
                 == k
         })
     {
-        return Ok(text(t.as_str()));
+        return Ok(text(t));
     }
     if let Some(t) = cat
         .class_comments
@@ -1236,9 +1233,9 @@ fn col_description(a: &[Value], c: &FnCtx) -> Result<Value> {
     let oid = oid_arg(&a[0]);
     let sub = int_arg(&a[1]) as i32;
     let cat = c.exec.catalog();
-    match cat.comments.iter().find(|(o, s, _)| *o == oid && *s == sub) {
-        Some((_, _, t)) if t.is_empty() => Ok(Value::Null),
-        Some((_, _, t)) => Ok(text(t.as_str())),
+    match cat.comment(oid, sub) {
+        Some("") => Ok(Value::Null),
+        Some(t) => Ok(text(t)),
         None => match cat.class_comments.iter().find(|x| (x.0, x.1, x.2) == (oid, 1259, sub)) {
             Some(x) => Ok(text(x.3.as_str())),
             None => Ok(crate::catalog::system::builtin_description(&cat, oid, None, sub)
@@ -1261,9 +1258,9 @@ fn shobj_description(a: &[Value], c: &FnCtx) -> Result<Value> {
     if cat.shared_class_of(oid, &dbs) != Some(class) {
         return Ok(Value::Null);
     }
-    match cat.comments.iter().find(|(o, s, _)| *o == oid && *s == 0) {
-        Some((_, _, t)) if t.is_empty() => Ok(Value::Null),
-        Some((_, _, t)) => Ok(text(t.as_str())),
+    match cat.comment(oid, 0) {
+        Some("") => Ok(Value::Null),
+        Some(t) => Ok(text(t)),
         None => Ok(crate::catalog::system::builtin_shdescription(
             &cat,
             &c.exec.sess.cluster.databases(),
@@ -1745,11 +1742,18 @@ pub fn constraint_def(
 fn pg_get_constraintdef(a: &[Value], c: &FnCtx) -> Result<Value> {
     let cat = c.exec.catalog();
     let oid = oid_arg(&a[0]);
-    for t in cat.tables.values() {
-        if let Some(con) = t.constraints.iter().find(|c| c.oid == oid) {
-            let pretty = a.get(1).is_some_and(|v| matches!(v, Value::Bool(true)));
-            return Ok(text(constraint_def(c.exec, &cat, t, con, pretty)));
-        }
+    // (The table through the constraint owners' index, `relindex`: the first by oid, as a
+    // scan of every table per call found it.)
+    let owner = cat.tables.ix().con_owner.get(&oid).and_then(|o| o.keys().next());
+    debug_assert_eq!(
+        owner,
+        cat.tables.values().find(|t| t.constraints.iter().any(|c| c.oid == oid)).map(|t| t.oid)
+    );
+    if let Some(t) = owner.and_then(|o| cat.tables.get(&o))
+        && let Some(con) = t.constraints.iter().find(|c| c.oid == oid)
+    {
+        let pretty = a.get(1).is_some_and(|v| matches!(v, Value::Bool(true)));
+        return Ok(text(constraint_def(c.exec, &cat, t, con, pretty)));
     }
     for d in cat.domains.values() {
         if d.not_null && oid == crate::catalog::system::domain_constraint_oid(d, 63) {

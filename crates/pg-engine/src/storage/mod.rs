@@ -666,6 +666,53 @@ impl Store {
         self.visible.fetch_max(upto, Ordering::AcqRel);
     }
 
+    /// `commit_with` for a commit that publishes a new catalog, group-committed as `commit`
+    /// is (round 19, agent 76): `appended(ts)` runs under the commit lock once the writes are
+    /// in the WAL and memtable (the commit's catalog becomes the one the next commit checks
+    /// against), then the fsync is waited for without the lock (one waiting commit does it
+    /// for all appended so far), and `after(ts)` runs once they are durable and visible (it
+    /// publishes the catalog). Concurrent DDL commits (`pg_restore -j`) each held the
+    /// commit lock through their own fsync, so they took turns at the disk's latency.
+    pub fn commit_grouped(
+        self: &Arc<Self>,
+        mut writes: Vec<(Vec<u8>, Option<Bytes>)>,
+        check: impl FnOnce(&Store, &mut Vec<(Vec<u8>, Option<Bytes>)>) -> Result<()>,
+        appended: impl FnOnce(u64),
+        after: impl FnOnce(u64),
+    ) -> Result<u64> {
+        if !self.opts.sync || self.ingests(&writes) {
+            return self.commit_with(writes, check, after);
+        }
+        let rotate;
+        let ts;
+        {
+            let mut c = self.commit.lock();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(internal("database is closed"));
+            }
+            check(self, &mut writes)?;
+            if writes.is_empty() {
+                return Ok(self.visible_ts());
+            }
+            ts = self.assigned.load(Ordering::Acquire) + 1;
+            c.wal.append(ts, &writes)?;
+            self.assigned.store(ts, Ordering::Release);
+            let mem = self.view.read().mem.clone();
+            for (k, v) in writes {
+                mem.insert(mvcc_key(&k, ts), v, ts);
+            }
+            appended(ts);
+            rotate = mem.bytes() >= self.opts.memtable_bytes;
+        }
+        self.wait_durable(ts)?;
+        after(ts);
+        if rotate {
+            self.rotate()?;
+            self.schedule_background();
+        }
+        Ok(ts)
+    }
+
     /// Like `commit`, and `after(ts)` runs under the commit lock once the writes are visible
     /// (used to publish a new catalog atomically with the data).
     /// (`check` may also change the writes: a catalog carried onto the current one.)

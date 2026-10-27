@@ -511,7 +511,7 @@ impl Ddl<'_, '_> {
             self.drop_trigger_tree(k);
         }
         self.cat.triggers.remove(&oid);
-        self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
+        self.cat.drop_comments(oid);
     }
 
     /// The trigger a DROP TRIGGER [IF EXISTS] name ON table names, checked droppable by the
@@ -670,14 +670,12 @@ impl Ddl<'_, '_> {
     /// ENABLE / DISABLE foreign keys' internal triggers on `t` (one by name, or all). False:
     /// there is no such trigger.
     fn set_ri_enabled(&mut self, t: &mut Table, name: Option<&str>, enabled: char) -> Result<bool> {
+        // (The table's own deferrable keys' triggers: those of every table, filtered,
+        // made ALTER TABLE ... DISABLE TRIGGER ALL O(catalog).)
         let hits: Vec<crate::exec::trigger::RiTrigger> =
             crate::exec::trigger::ri_triggers(&self.cat, Some(t.oid))
                 .into_iter()
-                .chain(
-                    crate::exec::trigger::recheck_triggers(&self.cat)
-                        .into_iter()
-                        .filter(|r| r.trig.table == t.oid),
-                )
+                .chain(crate::exec::trigger::recheck_triggers_from(self.cat.tables.get(&t.oid).into_iter()))
                 .filter(|r| name.is_none_or(|n| r.trig.name == n))
                 .collect();
         let Some(first) = hits.first() else {

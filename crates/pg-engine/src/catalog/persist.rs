@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The catalog format this build writes (`Catalog::catalog_format`).
-pub const CATALOG_FORMAT: u32 = 1;
+pub const CATALOG_FORMAT: u32 = 2;
 
 /// Where the per-object records lie: after `CATALOG_KEY` and the sequences' keys, in the
 /// reserved keyspace of table oid 0.
@@ -151,6 +151,9 @@ trait StoredMap<V> {
     fn put_all(&self, tag: u8, out: &mut Writes) -> Result<()>;
     fn load_one(&mut self, oid: u32, v: V);
     fn remove_one(&mut self, oid: u32);
+    fn get_one(&self, oid: u32) -> Option<&V>;
+    /// The keys whose entries differ in `new` (no record made).
+    fn changed_keys(&self, new: &Self, same: fn(&V, &V) -> bool, out: &mut Vec<u32>);
 }
 
 impl<V: Serialize> StoredMap<V> for BTreeMap<u32, V> {
@@ -168,6 +171,17 @@ impl<V: Serialize> StoredMap<V> for BTreeMap<u32, V> {
     }
     fn remove_one(&mut self, oid: u32) {
         self.remove(&oid);
+    }
+    fn get_one(&self, oid: u32) -> Option<&V> {
+        self.get(&oid)
+    }
+    fn changed_keys(&self, new: &Self, same: fn(&V, &V) -> bool, out: &mut Vec<u32>) {
+        for (k, v) in self {
+            if new.get(k).is_none_or(|n| !same(v, n)) {
+                out.push(*k);
+            }
+        }
+        out.extend(new.keys().filter(|k| !self.contains_key(k)));
     }
 }
 
@@ -193,6 +207,12 @@ impl<V: Serialize + Clone> StoredMap<V> for PMap<V> {
     fn remove_one(&mut self, oid: u32) {
         self.remove(&oid);
     }
+    fn get_one(&self, oid: u32) -> Option<&V> {
+        self.get(&oid)
+    }
+    fn changed_keys(&self, new: &Self, same: fn(&V, &V) -> bool, out: &mut Vec<u32>) {
+        self.diff(new, same, |k, _, _| out.push(k));
+    }
 }
 
 impl<V: Serialize + Clone, I: super::pmap::MapIndex<V>> StoredMap<V> for super::pmap::IndexedMap<V, I> {
@@ -210,6 +230,28 @@ impl<V: Serialize + Clone, I: super::pmap::MapIndex<V>> StoredMap<V> for super::
     fn remove_one(&mut self, oid: u32) {
         self.remove(&oid);
     }
+    fn get_one(&self, oid: u32) -> Option<&V> {
+        self.get(&oid)
+    }
+    fn changed_keys(&self, new: &Self, same: fn(&V, &V) -> bool, out: &mut Vec<u32>) {
+        let (a, b): (&PMap<V>, &PMap<V>) = (self, new);
+        a.changed_keys(b, same, out)
+    }
+}
+
+/// One tag's parsed records (a `Vec<(u32, V)>` of its map's values, or a set's oids).
+type Parsed = Box<dyn std::any::Any + Send>;
+
+fn parse_for<V: DeserializeOwned + Send + 'static, M: StoredMap<V>>(_: &M, items: &[(u32, &[u8])]) -> Result<Parsed> {
+    Ok(Box::new(parse_all::<V>(items)?))
+}
+
+fn insert_from<V: 'static, M: StoredMap<V>>(m: &mut M, p: Parsed) -> Result<()> {
+    let v = p.downcast::<Vec<(u32, V)>>().map_err(|_| internal("catalog map records"))?;
+    for (oid, x) in *v {
+        m.load_one(oid, x);
+    }
+    Ok(())
 }
 
 fn by_ptr<T>(a: &Arc<T>, b: &Arc<T>) -> bool {
@@ -251,26 +293,94 @@ macro_rules! stored_fields {
             Ok(())
         }
 
-        /// One map's (or set's) records, in oid order: the values parsed on several threads
-        /// (`parse_all`), inserted in order.
-        fn load_records(c: &mut Catalog, tag: u8, items: &[(u32, &[u8])]) -> Result<()> {
+        fn header(c: &Catalog) -> Result<Bytes> {
+            json(&header_map(c)?)
+        }
+
+        /// The (tag, oid) of the records that differ between `a` and `b`, without making
+        /// them (a merge of concurrent DDL copies entries, `copy_one`).
+        fn changed_records(a: &Catalog, b: &Catalog, out: &mut Vec<(u8, u32)>) {
+            let mut keys = Vec::new();
+            $(
+                keys.clear();
+                a.$m.changed_keys(&b.$m, $cmp, &mut keys);
+                out.extend(keys.iter().map(|k| ($mtag, *k)));
+            )*
+            $(
+                out.extend(a.$s.symmetric_difference(&b.$s).map(|k| ($stag, *k)));
+            )*
+        }
+
+        /// Whether record (`tag`, `oid`) is alike in `a` and `b`.
+        fn same_one(a: &Catalog, b: &Catalog, tag: u8, oid: u32) -> bool {
             match tag {
-                $($mtag => {
-                    for (oid, v) in parse_all(items)? {
-                        c.$m.load_one(oid, v);
-                    }
-                    Ok(())
-                })*
+                $($mtag => match (a.$m.get_one(oid), b.$m.get_one(oid)) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => $cmp(x, y),
+                    _ => false,
+                },)*
+                $($stag => a.$s.contains(&oid) == b.$s.contains(&oid),)*
+                _ => false,
+            }
+        }
+
+        /// Record (`tag`, `oid`) of `from` put in `to` (its entry, or none).
+        fn copy_one(from: &Catalog, to: &mut Catalog, tag: u8, oid: u32) {
+            match tag {
+                $($mtag => match from.$m.get_one(oid) {
+                    Some(v) => to.$m.load_one(oid, v.clone()),
+                    None => to.$m.remove_one(oid),
+                },)*
                 $($stag => {
-                    c.$s.extend(items.iter().map(|(oid, _)| *oid));
-                    Ok(())
+                    if from.$s.contains(&oid) {
+                        to.$s.insert(oid);
+                    } else {
+                        to.$s.remove(&oid);
+                    }
                 })*
+                _ => {}
+            }
+        }
+
+        /// Record (`tag`, `oid`) of `c` as JSON (None: no entry; a set's member is null).
+        fn one_json(c: &Catalog, tag: u8, oid: u32) -> Result<Option<serde_json::Value>> {
+            match tag {
+                $($mtag => c.$m.get_one(oid)
+                    .map(|x| serde_json::to_value(x).map_err(|e| internal(e.to_string())))
+                    .transpose(),)*
+                $($stag => Ok(c.$s.contains(&oid).then_some(serde_json::Value::Null)),)*
+                _ => Ok(None),
+            }
+        }
+
+        /// Every record tag, ascending.
+        fn all_tags() -> Vec<u8> {
+            let mut t = vec![$($mtag,)* $($stag,)*];
+            t.sort_unstable();
+            t
+        }
+
+        /// One map's (or set's) records, in oid order, parsed (`parse_all`; on whichever
+        /// thread loads that tag, `load`).
+        fn parse_tag(c: &Catalog, tag: u8, items: &[(u32, &[u8])]) -> Result<Parsed> {
+            match tag {
+                $($mtag => parse_for(&c.$m, items),)*
+                $($stag => Ok(Box::new(items.iter().map(|(oid, _)| *oid).collect::<Vec<u32>>())),)*
                 _ => Err(internal(format!("corrupt catalog: unknown record tag {tag}"))),
             }
         }
 
-        fn header(c: &Catalog) -> Result<Bytes> {
-            json(&header_map(c)?)
+        /// `parse_tag`'s values inserted in order.
+        fn insert_tag(c: &mut Catalog, tag: u8, p: Parsed) -> Result<()> {
+            match tag {
+                $($mtag => insert_from(&mut c.$m, p),)*
+                $($stag => {
+                    let v = p.downcast::<Vec<u32>>().map_err(|_| internal("catalog set records"))?;
+                    c.$s.extend(v.into_iter());
+                    Ok(())
+                })*
+                _ => Err(internal(format!("corrupt catalog: unknown record tag {tag}"))),
+            }
         }
 
         /// The header's fields as JSON (with `catalog_format`).
@@ -388,6 +498,7 @@ stored_fields! {
         rules = 47 by_ptr,
         event_triggers = 48 by_ptr,
         builtin_proc_owners = 49 by_value,
+        comments = 50 by_ptr,
     ],
     sets: [
         opmembers_removed = 100,
@@ -402,7 +513,7 @@ stored_fields! {
         storage_format,
         version,
         next_oid,
-        comments,
+        comment_tick,
         class_comments,
         extensions,
         acls,
@@ -480,6 +591,30 @@ pub fn apply_record(c: &mut Catalog, tag: u8, oid: u32, v: Option<&[u8]>) -> Res
     apply_one(c, tag, oid, v)
 }
 
+/// For a merge of concurrent DDL (`txn::catmerge`): the (tag, oid) of the records that
+/// differ between `a` and `b`, found as a commit's diff finds them, none made.
+pub fn changed_record_keys(a: &Catalog, b: &Catalog) -> Vec<(u8, u32)> {
+    let mut out = Vec::new();
+    changed_records(a, b, &mut out);
+    out
+}
+
+/// Whether record (`tag`, `oid`) is alike in `a` and `b` (by pointer where entries are
+/// shared).
+pub fn same_record(a: &Catalog, b: &Catalog, tag: u8, oid: u32) -> bool {
+    same_one(a, b, tag, oid)
+}
+
+/// Record (`tag`, `oid`) of `from` put in `to`, the entry itself (no JSON).
+pub fn copy_record(from: &Catalog, to: &mut Catalog, tag: u8, oid: u32) {
+    copy_one(from, to, tag, oid)
+}
+
+/// Record (`tag`, `oid`) of `c` as JSON (None: none).
+pub fn record_json(c: &Catalog, tag: u8, oid: u32) -> Result<Option<serde_json::Value>> {
+    one_json(c, tag, oid)
+}
+
 /// The header record's fields as JSON.
 pub fn header_fields(c: &Catalog) -> Result<serde_json::Map<String, serde_json::Value>> {
     header_map(c)
@@ -503,6 +638,9 @@ pub fn set_header(c: &mut Catalog, m: &serde_json::Map<String, serde_json::Value
 /// The record tag of `class_order` (pg_class's heap order, merged apart).
 pub const CLASS_ORDER_TAG: u8 = 46;
 
+/// The record tag of `comments` (merged apart, `txn::catmerge`).
+pub const COMMENTS_TAG: u8 = 50;
+
 /// The writes that store `c` in a store holding no records yet.
 pub fn writes_new(c: &Catalog) -> Result<Writes> {
     let mut out = vec![(crate::txn::CATALOG_KEY.to_vec(), Some(header(c)?))];
@@ -510,37 +648,89 @@ pub fn writes_new(c: &Catalog) -> Result<Writes> {
     Ok(out)
 }
 
-/// The catalog whose header is `head`, its records read from `records` (in key order).
-/// A header of format 0 is a whole catalog, and `records` isn't read.
+/// The catalog whose header is `head`, its records read through `scan` (a key range's, in
+/// key order). A header of format 0 is a whole catalog, and no record is read.
+///
+/// (A database's first open reads every record. Each map's records are scanned and parsed
+/// on threads of their own, the tags spread over up to 8, and inserted in tag order: the
+/// tables', indexes', pg_class order's ... scans and parses ran one after the other.)
 pub fn load(
     head: &[u8],
-    records: impl FnOnce() -> Result<Vec<(Vec<u8>, Bytes)>>,
+    scan: impl Fn(&[u8], &[u8]) -> Result<Vec<(Vec<u8>, Bytes)>> + Sync,
 ) -> Result<Catalog> {
     let mut c: Catalog =
         serde_json::from_slice(head).map_err(|e| internal(format!("corrupt catalog: {e}")))?;
-    if c.catalog_format == 0 {
-        return Ok(c);
+    if c.catalog_format > CATALOG_FORMAT {
+        return Err(internal(format!(
+            "the catalog is stored in format {}, which this build (format {CATALOG_FORMAT}) can't read",
+            c.catalog_format
+        )));
     }
-    let records = records()?;
-    // (In key order: each map's records together, in oid order.)
-    let mut items: Vec<(u32, &[u8])> = Vec::new();
-    let mut tag = None;
-    for (k, v) in &records {
-        let rest = &k[RECORD_PREFIX.len()..];
-        if rest.len() != 5 {
-            return Err(internal("corrupt catalog: bad record key"));
+    if c.catalog_format != 0 {
+        let tags = all_tags();
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8);
+        let cat = &c;
+        let scan = &scan;
+        let one = |tag: u8| -> Result<Option<Parsed>> {
+            let mut from = RECORD_PREFIX.to_vec();
+            from.push(tag);
+            let mut to = RECORD_PREFIX.to_vec();
+            to.push(tag + 1);
+            let records = scan(&from, &to)?;
+            if records.is_empty() {
+                return Ok(None);
+            }
+            let mut items: Vec<(u32, &[u8])> = Vec::with_capacity(records.len());
+            for (k, v) in &records {
+                let rest = &k[RECORD_PREFIX.len()..];
+                if rest.len() != 5 {
+                    return Err(internal("corrupt catalog: bad record key"));
+                }
+                items.push((u32::from_be_bytes([rest[1], rest[2], rest[3], rest[4]]), &v[..]));
+            }
+            parse_tag(cat, tag, &items).map(Some)
+        };
+        let parsed: Vec<(u8, Option<Parsed>)> = std::thread::scope(|s| -> Result<Vec<_>> {
+            let parts: Vec<_> = (0..workers)
+                .map(|w| {
+                    let mine: Vec<u8> = tags.iter().copied().skip(w).step_by(workers).collect();
+                    s.spawn(move || mine.into_iter().map(|t| Ok((t, one(t)?))).collect::<Result<Vec<_>>>())
+                })
+                .collect();
+            let mut out = Vec::new();
+            for p in parts {
+                out.extend(p.join().map_err(|_| internal("catalog load panicked"))??);
+            }
+            Ok(out)
+        })?;
+        let mut parsed = parsed;
+        parsed.sort_unstable_by_key(|p| p.0);
+        for (tag, p) in parsed {
+            if let Some(p) = p {
+                insert_tag(&mut c, tag, p)?;
+            }
         }
-        if tag.is_some_and(|t| t != rest[0]) {
-            load_records(&mut c, tag.unwrap(), &items)?;
-            items.clear();
-        }
-        tag = Some(rest[0]);
-        items.push((u32::from_be_bytes([rest[1], rest[2], rest[3], rest[4]]), &v[..]));
     }
-    if let Some(t) = tag {
-        load_records(&mut c, t, &items)?;
-    }
+    // (Comments read from a header of before format 2 are ticked from 1.)
+    let top = (c.comments.values()).flat_map(|x| x.0.iter().map(|e| e.1)).max().unwrap_or(0);
+    c.comment_tick = c.comment_tick.max(top);
     Ok(c)
+}
+
+/// Downgrading to a build of catalog format 1 (`roll-engine --downgrade-catalog`, after a
+/// clean shutdown): the writes that store `c` as format 1 had it, comments in the header
+/// (as a list in pg_description's order) and no comment records.
+pub fn downgrade_writes(c: &Catalog) -> Result<Writes> {
+    let mut m = header_map(c)?;
+    m.insert("catalog_format".into(), 1.into());
+    m.remove("comment_tick");
+    let list: Vec<(u32, i32, &str)> = c.comments_in_order();
+    m.insert("comments".into(), serde_json::to_value(&list).map_err(|e| internal(e.to_string()))?);
+    let mut out = vec![(crate::txn::CATALOG_KEY.to_vec(), Some(json(&m)?))];
+    for oid in c.comments.keys() {
+        out.push((record_key(COMMENTS_TAG, *oid), None));
+    }
+    Ok(out)
 }
 
 /// Testing the upgrade: `c` stored as one value, as before catalog format 1 (with

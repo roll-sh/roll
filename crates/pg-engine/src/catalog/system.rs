@@ -7,7 +7,6 @@ use super::{
     quote_ident,
 };
 use crate::error::Result;
-use crate::exec::fasthash::HashMap as FastMap;
 use crate::exec::{ExecCtx, Row};
 use crate::sql::func::system::index_def;
 use crate::sql::ruleutils::{Stored, stored_expr};
@@ -1546,73 +1545,7 @@ struct SysRowsKey {
     settings: Arc<crate::session::settings::ValuesKey>,
 }
 
-/// A system catalog's generated rows, shared by the statements (and sessions) that read it
-/// under the same `SysRowsKey`, with hashes on the columns equalities looked up.
-pub struct SysRows {
-    pub rows: Vec<Row>,
-    /// Per column: the rows holding each value.
-    by_col: parking_lot::Mutex<FastMap<usize, Arc<FastMap<Value, Vec<u32>>>>>,
-    /// Per column and kind of value: whether every row's value is of that kind (or NULL),
-    /// so the hash serves an equality with it.
-    hashable: parking_lot::Mutex<FastMap<(usize, std::mem::Discriminant<Value>), bool>>,
-    /// Per column: the rows where it is NULL.
-    nulls: parking_lot::Mutex<FastMap<usize, Arc<Vec<u32>>>>,
-}
-
-impl SysRows {
-    pub fn new(rows: Vec<Row>) -> SysRows {
-        SysRows {
-            rows,
-            by_col: Default::default(),
-            hashable: Default::default(),
-            nulls: Default::default(),
-        }
-    }
-
-    /// The rows whose column `k` is NULL, in row order.
-    pub fn nulls(&self, k: usize) -> Arc<Vec<u32>> {
-        self.nulls
-            .lock()
-            .entry(k)
-            .or_insert_with(|| {
-                Arc::new(
-                    (0..self.rows.len() as u32)
-                        .filter(|&i| self.rows[i as usize].get(k).is_none_or(Value::is_null))
-                        .collect(),
-                )
-            })
-            .clone()
-    }
-
-    /// The rows whose column `k` equals `v` (in row order), when a hash on the column can
-    /// tell (every value of the column is of `v`'s kind or NULL); None otherwise.
-    pub fn lookup(&self, k: usize, v: &Value, same: &dyn Fn(&Value) -> bool) -> Option<Vec<u32>> {
-        let kind = (k, std::mem::discriminant(v));
-        let ok = *self.hashable.lock().entry(kind).or_insert_with(|| {
-            self.rows
-                .iter()
-                .all(|r| r.get(k).is_some_and(|x| x.is_null() || same(x)))
-        });
-        if !ok {
-            return None;
-        }
-        let map = self
-            .by_col
-            .lock()
-            .entry(k)
-            .or_insert_with(|| {
-                let mut m: FastMap<Value, Vec<u32>> = FastMap::default();
-                for (i, r) in self.rows.iter().enumerate() {
-                    if !r[k].is_null() {
-                        m.entry(r[k].clone()).or_default().push(i as u32);
-                    }
-                }
-                Arc::new(m)
-            })
-            .clone();
-        Some(map.get(v).cloned().unwrap_or_default())
-    }
-}
+pub use super::sysrows::{SysRows, project};
 
 /// `Database::sys_rows`: the catalogs generated last, for every session of the database.
 /// (The catalogs whose rows the next version reuses, `sysdelta::spliced`, hold the catalog
@@ -1633,7 +1566,20 @@ pub fn rows_cacheable(table: SysTable) -> bool {
     use SysTable::*;
     matches!(
         table,
-        PgClass | PgAttribute | PgAttrdef | PgType | PgNamespace | PgIndex | PgConstraint | PgProc
+        PgClass
+            | PgAttribute
+            | PgAttrdef
+            | PgType
+            | PgNamespace
+            | PgIndex
+            | PgConstraint
+            | PgProc
+            | PgDepend
+            | IsTableConstraints
+            | IsKeyColumnUsage
+            | IsReferentialConstraints
+            | IsCheckConstraints
+            | IsConstraintColumnUsage
     )
 }
 
@@ -1645,7 +1591,11 @@ fn rows_key(table: SysTable, ctx: &ExecCtx) -> SysRowsKey {
         current_user: ctx.current_user(),
         session_user: ctx.session_user(),
         login: ctx.sess.user.clone(),
-        search_path: ctx.search_path.clone(),
+        // (pg_depend reads stored texts under the session's path, whatever the statement's.)
+        search_path: match table {
+            SysTable::PgDepend => ctx.sess.search_path(),
+            _ => ctx.search_path.clone(),
+        },
         // (Only when it exists: a session that made no temporary object has none, and what
         // `pg_temp` names is then nothing, whatever its name would be.)
         temp_schema: super::session_temp_schema().filter(|t| cat.schema_named(t).is_some()),
@@ -1675,7 +1625,7 @@ pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
     if !rows_cacheable(table) {
         return rows_generated(table, ctx);
     }
-    Ok(rows_shared(table, ctx)?.rows.clone())
+    Ok(rows_shared(table, ctx)?.iter().cloned().collect())
 }
 
 /// How many rows `rows` gives of pg_class, pg_attribute or pg_attrdef, counted without
@@ -1755,7 +1705,7 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
         let c = cache.lock();
         let hit = c.entries.iter().find(|(k, ..)| k.same(&key)).map(|(_, r, _)| r.clone());
         // (Rows of an earlier version, and that version, to splice this one's from.)
-        let base = (hit.is_none() && super::sysdelta::spliced(table))
+        let base = (hit.is_none() && super::sysdelta::kept(table))
             .then(|| {
                 (c.entries.iter().rev())
                     .find(|(k, _, held)| held.is_some() && k.same_but_catalog(&key))
@@ -1770,9 +1720,15 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
     // (Generated outside the lock: another session may generate the same rows meanwhile,
     // and either copy serves.)
     let cat = ctx.catalog();
+    let owner = super::sysdelta::run_owner(table);
     let spliced = match &base {
-        Some((rows, held)) => match super::sysdelta::changed_rels(held, &cat) {
-            Some(changed) => super::sysdelta::splice(table, ctx, &rows.rows, &changed)?,
+        Some((rows, held)) if !super::sysdelta::spliced(table) => {
+            super::sysdelta::unchanged(held, &cat).then(|| Err(rows.clone()))
+        }
+        Some((rows, held)) => match super::sysdelta::changed_rels(table, held, &cat) {
+            // (Nothing its rows read changed: the earlier version's rows, hashes and all.)
+            Some(changed) if changed.is_empty() => Some(Err(rows.clone())),
+            Some(changed) => super::sysdelta::splice(table, ctx, held, rows, &changed)?.map(Ok),
             None => None,
         },
         None => None,
@@ -1780,17 +1736,32 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
     let rows = match spliced {
         Some(r) => {
             SPLICED.with(|c| c.set(c.get() + 1));
+            let r = match r {
+                Ok(r) => Arc::new(SysRows::from_chunks(r, owner)),
+                Err(same) => same,
+            };
             #[cfg(debug_assertions)]
             {
                 let full = rows_generated_for(table, ctx, None)?;
-                debug_assert!(full == r, "{}'s rows spliced from an earlier version", table.name());
+                let got = r.iter().eq(full.iter());
+                debug_assert!(got, "{}'s rows spliced from an earlier version", table.name());
+                debug_assert!(
+                    !super::sysdelta::spliced(table) || super::sysdelta::parts_hold(table, &cat, r.chunks()),
+                    "{}'s spliced rows' parts",
+                    table.name()
+                );
             }
             r
         }
-        None => rows_generated(table, ctx)?,
+        None => {
+            let rows = rows_generated(table, ctx)?;
+            Arc::new(match super::sysdelta::spliced(table) {
+                true => SysRows::from_chunks(super::sysdelta::chunked(table, &cat, rows), owner),
+                false => SysRows::new(rows),
+            })
+        }
     };
-    let rows = Arc::new(SysRows::new(rows));
-    let held = super::sysdelta::spliced(table).then(|| cat.clone());
+    let held = super::sysdelta::kept(table).then(|| cat.clone());
     let mut c = cache.lock();
     // (The rows of earlier versions under the same key are superseded: these are what the
     // next version's are spliced from.)
@@ -2656,7 +2627,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     0,
                 );
             }
-            for e in cat.enums.values() {
+            for e in cat.enums.values().filter(|_| only.is_none()) {
                 let t = e.data_type();
                 push(
                     e.oid,
@@ -2686,7 +2657,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     0,
                 );
             }
-            for d in cat.domains.values() {
+            for d in cat.domains.values().filter(|_| only.is_none()) {
                 let base = cat.domain_base_oid(d);
                 push(
                     d.oid,
@@ -2757,14 +2728,11 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     0,
                 );
             }
-            // Row types of tables and views.
-            for (oid, array_oid, schema, name, relid) in cat
-                .tables
-                .values()
+            // Row types of tables and views (`only`: of that relation alone, `sysdelta`).
+            for (oid, array_oid, schema, name, relid) in pick(&cat.tables, only)
                 .map(|t| (t.rowtype, t.array_type(), t.schema, &t.name, t.oid))
                 .chain(
-                    cat.views
-                        .values()
+                    pick(&cat.views, only)
                         .map(|v| (v.rowtype, v.array_type(), v.schema, &v.name, v.oid)),
                 )
                 .filter(|r| r.0 != 0)
@@ -2798,7 +2766,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     0,
                 );
             }
-            for ct in cat.composites.values() {
+            for ct in cat.composites.values().filter(|_| only.is_none()) {
                 let t = ct.data_type();
                 push(
                     ct.oid,
@@ -2828,7 +2796,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     0,
                 );
             }
-            for r in cat.ranges.values() {
+            for r in cat.ranges.values().filter(|_| only.is_none()) {
                 let rt = r.range_type();
                 for (oid, array_oid, name, t) in [
                     (r.oid, r.array_oid, &r.name, DataType::Range(rt.clone())),
@@ -2869,7 +2837,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     );
                 }
             }
-            for d in cat.base_types.values() {
+            for d in cat.base_types.values().filter(|_| only.is_none()) {
                 let t = d.data_type();
                 if d.is_shell() {
                     push(d.oid(), d.ty.name.to_string(), d.ty.schema, &t, 'p', 0, 0, 0, -1, false, 0);
@@ -2940,6 +2908,11 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                 }
             }
             // Owners and privileges of user types (arrays follow their element type).
+            let mut base_arrays: std::collections::HashMap<u32, &Arc<super::userobj::BaseTypeDef>> =
+                std::collections::HashMap::new();
+            for d in cat.base_types.values() {
+                base_arrays.entry(d.ty.array_oid).or_insert(d);
+            }
             for row in out.iter_mut() {
                 let Value::Oid(oid) = row[0] else { continue };
                 if let Some(&(_, _, len, align)) =
@@ -2973,7 +2946,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     if let Some(def) = &d.default {
                         row[30] = nm(def);
                     }
-                } else if let Some(d) = cat.base_types.values().find(|d| d.ty.array_oid == oid) {
+                } else if let Some(d) = base_arrays.get(&oid) {
                     row[10] = c(d.delimiter);
                     row[22] = c(if d.ty.align == 'd' { 'd' } else { 'i' });
                     if d.ty.collatable {
@@ -3000,17 +2973,13 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                             .find(|r| r.oid == elem || r.multi_oid == elem)
                             .map(|r| r.owner)
                     })
-                    .or_else(|| {
-                        cat.tables
-                            .values()
-                            .find(|t| t.rowtype == elem)
-                            .map(|t| t.owner)
+                    .or_else(|| match cat.tables.ix().rowtypes.get(&elem) {
+                        Some(&(t, false)) => cat.tables.get(&t).map(|t| t.owner),
+                        _ => None,
                     })
-                    .or_else(|| {
-                        cat.views
-                            .values()
-                            .find(|v| v.rowtype == elem)
-                            .map(|v| v.owner)
+                    .or_else(|| match cat.views.ix().rowtypes.get(&elem) {
+                        Some(&(v, false)) => cat.views.get(&v).map(|v| v.owner),
+                        _ => None,
                     });
                 if let Some(owner) = owner {
                     row[3] = o(owner);
@@ -3027,6 +2996,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                 .collect();
             for r in super::static_rows::rows(table)
                 .iter()
+                .filter(|_| only.is_none())
                 .filter(|r| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2)))
             {
                 let mut r = r.clone();
@@ -3537,14 +3507,15 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
             }
         }
         PgConstraint => {
-            out.extend(super::static_rows::rows(table).iter().cloned());
-            for t in cat.tables.values() {
+            // (`only`: one table's constraints alone, `sysdelta`.)
+            out.extend(super::static_rows::rows(table).iter().filter(|_| only.is_none()).cloned());
+            for t in pick(&cat.tables, only) {
                 for con in &t.constraints {
                     out.push(constraint_row(ctx, cat, t, con));
                 }
             }
             // Constraint triggers' own constraints (contype t).
-            for x in cat.triggers.values().filter(|x| x.con_oid != 0) {
+            for x in cat.triggers.values().filter(|x| x.con_oid != 0 && only.is_none()) {
                 let schema = cat.tables.get(&x.table).map_or(0, |t| t.schema);
                 out.push(vec![
                     o(x.con_oid),
@@ -3581,7 +3552,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
             for d in cat
                 .domains
                 .values()
-                .filter(|d| d.oid >= super::FIRST_USER_OID)
+                .filter(|d| d.oid >= super::FIRST_USER_OID && only.is_none())
             {
                 let not_null = d.not_null.then(|| {
                     (
@@ -4285,14 +4256,21 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                 if all
                     .iter()
                     .any(|d| d.0 == oid && builtin_database(oid) == Some(d.1.as_str()))
-                    && !cat.comments.iter().any(|(o, _, _)| *o == oid)
+                    && cat.comments_of(oid).is_empty()
                 {
                     out.push(r.clone());
                 }
             }
-            for (oid, _, text) in cat.comments.iter().filter(|c| !c.2.is_empty()) {
-                if let Some(class) = cat.shared_class_of(*oid, &dbs) {
-                    out.push(vec![o(*oid), o(class), nm(text)]);
+            // (The shared objects' comments, by object and sub-id.)
+            let ids: std::collections::BTreeSet<u32> = (cat.roles.keys().chain(&dbs))
+                .chain(&[1663, 1664])
+                .chain(cat.tablespaces.keys())
+                .copied()
+                .collect();
+            for oid in ids {
+                let Some(class) = cat.shared_class_of(oid, &dbs) else { continue };
+                for (_, _, text) in cat.comments_of(oid).iter().filter(|c| !c.2.is_empty()) {
+                    out.push(vec![o(oid), o(class), nm(text)]);
                 }
             }
         }
@@ -4610,22 +4588,19 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     super::static_rows::oid_at(r, 1),
                 );
                 if builtin_object_exists(cat, oid, class)
-                    && !cat
-                        .comments
-                        .iter()
-                        .any(|(o, s, _)| *o == oid && Value::Int4(*s) == r[2])
+                    && !matches!(r[2], Value::Int4(s) if cat.comment(oid, s).is_some())
                 {
                     out.push(r.clone());
                 }
             }
-            for (oid, sub, text) in cat.comments.iter().filter(|c| !c.2.is_empty()) {
-                if cat.shared_class_of(*oid, &dbs).is_some() {
+            for (oid, sub, text) in cat.comments_in_order().into_iter().filter(|c| !c.2.is_empty()) {
+                if cat.shared_class_of(oid, &dbs).is_some() {
                     continue;
                 }
                 let class = cat
-                    .class_of(*oid)
+                    .class_of(oid)
                     .unwrap_or(crate::catalog::depend::CONSTRAINT);
-                out.push(vec![o(*oid), o(class), i4(*sub as i64), nm(text)]);
+                out.push(vec![o(oid), o(class), i4(sub as i64), nm(text)]);
             }
             for (oid, class, sub, text) in &cat.class_comments {
                 out.push(vec![o(*oid), o(*class), i4(*sub as i64), nm(text)]);
@@ -4636,7 +4611,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                 }
             }
             for (oid, class, text) in extension_descriptions(cat) {
-                if !cat.comments.iter().any(|(o, s, _)| *o == oid && *s == 0) {
+                if cat.comment(oid, 0).is_none() {
                     out.push(vec![o(oid), o(class), i4(0), nm(text)]);
                 }
             }
@@ -6634,7 +6609,7 @@ pub fn builtin_description(
     class: Option<u32>,
     sub: i32,
 ) -> Option<String> {
-    if cat.comments.iter().any(|(o, s, _)| *o == oid && *s == sub) {
+    if cat.comment(oid, sub).is_some() {
         return None;
     }
     let found = super::static_rows::rows(SysTable::PgDescription)
@@ -6750,7 +6725,7 @@ pub fn builtin_shdescription(
     oid: u32,
     class: u32,
 ) -> Option<String> {
-    if cat.comments.iter().any(|(o, _, _)| *o == oid)
+    if !cat.comments_of(oid).is_empty()
         || !dbs
             .iter()
             .any(|d| d.0 == oid && builtin_database(oid) == Some(d.1.as_str()))

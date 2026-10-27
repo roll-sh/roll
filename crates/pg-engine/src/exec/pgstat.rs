@@ -201,6 +201,8 @@ pub struct Shared {
     /// The catalog version whose dropped relations' and functions' entries were last
     /// removed (`end_xact`).
     pub pruned_at: u64,
+    /// That catalog (the next prune looks at what changed since).
+    pub pruned: Option<std::sync::Arc<crate::catalog::Catalog>>,
     pub funcs: HashMap<u32, FuncCounts>,
     pub db: DbEntry,
     /// Database 0: shared relations' counts.
@@ -1163,6 +1165,35 @@ fn in_catalog(cat: &crate::catalog::Catalog, rel: u32) -> bool {
         || cat.toast_owner(rel).is_some()
 }
 
+/// The entries of the relations and functions `cur` dropped since `old` (the catalog the
+/// entries were last pruned for) gone: those its maps' changes name.
+fn prune_since(s: &mut Shared, old: &crate::catalog::Catalog, cur: &crate::catalog::Catalog) {
+    let mut gone: Vec<u32> = Vec::new();
+    for (oid, x, _) in old.tables.changes(&cur.tables) {
+        gone.push(oid);
+        if let Some(t) = x.filter(|t| t.toast != 0) {
+            gone.extend([t.toast, t.toast + 1]);
+        }
+    }
+    for (oid, x, _) in old.views.changes(&cur.views) {
+        gone.push(oid);
+        if let Some(t) = x.and_then(|v| v.storage.as_ref()).filter(|t| t.toast != 0) {
+            gone.extend([t.toast, t.toast + 1]);
+        }
+    }
+    gone.extend(old.indexes.changes(&cur.indexes).into_iter().map(|c| c.0));
+    for rel in gone {
+        if !in_catalog(cur, rel) {
+            s.tables.remove(&rel);
+        }
+    }
+    for (f, _, now) in old.functions.changes(&cur.functions) {
+        if now.is_none() {
+            s.funcs.remove(&f);
+        }
+    }
+}
+
 /// Flush the counts of backends idle for PGSTAT_IDLE_INTERVAL (their idle timeouts have
 /// fired): what readers of the shared statistics do first.
 fn flush_idle(s: &mut Shared, db: &crate::txn::Database) {
@@ -1299,12 +1330,21 @@ fn end_xact_counts(
         // Dropped objects' entries go, once per catalog version, by a transaction that sees
         // the database's current catalog. (Every transaction's end visited every table's
         // entry under the lock all sessions share; and one over an older catalog removed
-        // the entries of tables made since.)
-        if s.pruned_at != cat.version && sess.db.catalog().version == cat.version {
-            s.tables.retain(|rel, _| *rel < crate::catalog::FIRST_USER_OID || in_catalog(cat, *rel));
-            s.funcs
-                .retain(|f, _| *f < crate::catalog::FIRST_USER_OID || cat.functions.contains_key(f));
+        // the entries of tables made since.) Since the version pruned last, only what the
+        // catalog's maps changed is looked at: each DDL commit of `pg_restore -j` visited
+        // every table's entry.
+        let cur = sess.db.catalog();
+        if s.pruned_at != cat.version && cur.version == cat.version {
+            match s.pruned.take() {
+                Some(old) => prune_since(&mut s, &old, &cur),
+                None => {
+                    s.tables.retain(|rel, _| *rel < crate::catalog::FIRST_USER_OID || in_catalog(cat, *rel));
+                    s.funcs
+                        .retain(|f, _| *f < crate::catalog::FIRST_USER_OID || cat.functions.contains_key(f));
+                }
+            }
             s.pruned_at = cat.version;
+            s.pruned = Some(cur);
         }
         drop(s);
         p.clear_snapshot();

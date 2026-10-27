@@ -2009,6 +2009,173 @@ and the debug cross-checks (spliced rows against the full generation, a merged c
 index against `reindex`, dropped relations' access methods and file numbers against a scan,
 `referencing_fks` against a scan).
 
+## Catalog round 5: catalog rows shared across versions, comments as records, group-committed DDL (round 20, agent 76)
+
+Same harness and catalogs as agents 58 and 62 (`scale --keep 1`: 10,000 tables in 20 schemas
+and a table of 1,000 partitions; `scale-ops`, queries 5 times each). PostgreSQL in `a76-pg`
+(pinned image and settings), both servers on cores 8-11, the client on 12-15, other agents'
+builds loading the machine. **before** the engine at `80fa7310` (agent 62's), **after** this
+round's, release builds, each run from a copy of the same data directory.
+
+### 10,000 tables (ms per statement; `scale-ops`)
+
+Medians of 3 interleaved runs (pg, before, after), queries 5 times each: the machine was
+loaded (load 12-20; PostgreSQL's own times are 1.5-4x agent 62's), so compare within a row.
+In-process, without the protocol, `count(*)` of pg_class is 0.05 ms once its rows are shared
+and 0.9-1.2 ms after COMMENT or CREATE TABLE (a splice), the pg_class x pg_attribute join 8.6
+ms (17 ms right after ALTER TABLE), the ORM query 10.5 ms (11 ms after COMMENT, 24 after ADD
+COLUMN); pg_type's first generation 1,344 ms before, 44-54 ms after.
+
+| case | pg | before | after |
+|---|---|---|---|
+| `count(*)` of pg_class, after DDL (COMMENT, then the count) | 11.75 | 88.63 | 0.48 |
+| pg_class x pg_attribute of a schema, after ALTER TABLE | 14.43 | 315.03 | 30.35 |
+| ORM constraints query, after DDL | 47.01 | 526.54 | 21.38 |
+| `count(*)` of pg_class (the first after the setup's DDL included) | 12.24 | 48.59 | 22.41 |
+| pg_class x pg_attribute of a schema (the first included) | 15.01 | 75.83 | 69.04 |
+| ORM constraints query (the first included) | 58.91 | 366.45 | 31.72 |
+| psql `\d t` lookup, after DDL | 0.67 | 4.01 | 2.36 |
+| psql `\d t` indexes, after DDL | 1.64 | 4.88 | 2.90 |
+| information_schema.columns of a table, after DDL | 5.79 | 2.99 | 2.06 |
+| COMMENT ON TABLE | 0.57 | 1.53 | 0.32 |
+| ALTER TABLE ADD COLUMN | 0.69 | 4.03 | 1.36 |
+| CREATE INDEX | 1.38 | 3.46 | 1.97 |
+| CREATE TABLE | 4.74 | 4.61 | 4.11 |
+| DROP TABLE | 7.47 | 6.38 | 3.25 |
+
+ALTER TABLE ... DISABLE / ENABLE TRIGGER ALL of a table without triggers (in-process, 50
+tables): 1.71 / 1.40 ms before (agent 66 measured 1.4 ms over the wire against PostgreSQL's
+0.1), 0.60 / 0.60 ms after; ALTER TABLE ADD COLUMN in-process 0.69 ms before, 0.79-0.85 after
+on the more loaded machine (no change: what is left is the statement's own work, below).
+
+### pg_restore of 3,000 tables (`tests/pg_dump/scale_setup.sql`, `-v big=10`, `pg_dump -Fc` from PostgreSQL; seconds, 0 errors, 3,069 tables each time)
+
+Two rounds, each interleaved (the second on a less loaded machine):
+
+| | pg | before | after |
+|---|---|---|---|
+| `pg_restore`, round 1 | 35.4 | 126.4 | 30.0 |
+| `pg_restore -j 4`, round 1 | 30.8 | 122.5 | 24.1 |
+| `pg_restore`, round 2 | 26.5 | 51.9 | 22.3 |
+| `pg_restore -j 4`, round 2 | 24.2 | 85.1 | 18.6 |
+
+`pg_restore -j 4` now beats a serial restore by about 20%, as on PostgreSQL, and both are
+faster than PostgreSQL's. What the parallel restore's commits spent before (commit timers,
+an earlier build of this round, -j 4: 32,000 commits, 8,500 of them merged onto a racing
+one): merging 7.5 s under the commit lock, 4.7 s of it comparing and copying `filenodes`,
+which held a file number for each of the 3,000 tables pg_restore -j truncates before their
+COPY; waiting for that lock 5 s; the shared catalogs' lock, held through every DDL commit,
+serialized the rest.
+
+### What changed
+
+1. **Catalog rows in shared chunks** (`catalog/sysrows.rs`, `catalog/sysdelta.rs`). A system
+   catalog's shared rows (`Database::sys_rows`) are kept in chunks of about 64 rows that end
+   at an object's last row, each chunk an `Arc` with the runs of rows of one object it holds.
+   A new catalog version's rows are the last generated version's chunks by pointer, the
+   chunks holding the objects its DDL changed made again (the objects found by binary
+   searches over the runs' positions, so the splice asks the catalog about the changed
+   objects only, and touches no row of any other). A version in which nothing a catalog's
+   rows read changed (COMMENT, statistics) reuses the earlier rows whole, their hashes too.
+   Agent 62's splice (pg_class, pg_attribute, pg_attrdef) copied every row of the catalog per
+   version (a `Vec` of deep copies: 221,000 rows of pg_attribute); per-row `Arc`s, tried
+   first, cost a cache miss per row to count and to splice, about as much. Spliced now too:
+   pg_index (TOAST tables' indexes included), pg_constraint (the tables' constraints; those
+   of constraint triggers and domains are kept in place when nothing they read changed),
+   pg_type (the relations' row types and their arrays). Kept whole when unchanged: pg_depend
+   and information_schema's constraint views (table_constraints, key_column_usage,
+   referential_constraints, check_constraints, constraint_column_usage), cacheable now
+   (`system::rows_cacheable`; pg_depend keyed by the session's search path, which its
+   stored texts are read under). Debug builds compare every splice and every reuse with the
+   full generation, and every chunk's runs with its rows.
+2. **Scans copy only what is read** (`system::project`, the plan's `exec::need` mask: the
+   other columns NULL), and `count(*)` over a catalog scan counts the shared rows without
+   making any (`Node::count_rest`, `AggNode`). An equality on the column naming a row's
+   object (`attrelid`, `adrelid`, `indexrelid`, pg_class's `oid`) is served from where the
+   object's rows lie, without a hash of every row (`SysRows::run_of`).
+3. **Hash joins restrict a catalog scan to the inner side's keys** (`Node::restrict_keys`):
+   an inner or semi hash join on one oid column, its inner side built with at most 1,024
+   rows, has its outer catalog scan read only the rows of those keys through the scan's hash
+   (`pg_class JOIN pg_namespace ... WHERE nspname = ...`: 1,000 of 41,000 rows), when the
+   scan's filter can't raise or call anything (columns and constants under built-in
+   comparisons), so nothing left out would have shown.
+4. **Quadratic catalog generation**: pg_type asked every table whose row type each row is
+   (`Catalog::user_data_type`, the owner pass: 1.3 s at 10,000 tables, now through the row
+   type indexes, `relindex`), pg_description looked every built-in description up in the
+   comment list; `pg_get_constraintdef` scanned every table per call (the ORM query's 1,500
+   calls: 225 ms; now `con_owner`).
+5. **Comments are records of their own** (catalog format 2, `catalog/comments.rs`): per
+   object, by sub-id, each with the tick of when it was set (`Catalog::comment_tick`, in
+   the header: pg_description's order, a comment set again a new row at the end). A DDL
+   commit writes the records of the objects whose comments it changed (the header held every
+   comment and was written whole by every commit); obj_description / col_description and the
+   shared catalogs' sync look comments up by object (`SharedCatalog::extract`, every DDL
+   commit, scanned them all); a racing commit's comments merge by object
+   (`catmerge::merge_comments`), the ones it set ticked again after the current ones.
+6. **Racing DDL commits** (`pg_restore -j`): a commit of a database's own objects whose copy
+   of the shared catalogs is current no longer takes the shared catalogs' lock, which every
+   DDL commit held through its whole commit, merge and WAL write included
+   (`Engine::commit`); catalog commits are group-committed (`Store::commit_grouped`: appended
+   under the commit lock, the next commit checking against and merging onto the appended
+   catalog, `Database::latest_catalog`; the fsync waited for without the lock; published once
+   durable, never over a later commit's, `Database::publish_catalog`); the merge copies the
+   entries only this transaction changed by pointer and merges as JSON only what both changed
+   (`persist::changed_record_keys` / `same_record` / `copy_record`); the shared statistics'
+   prune of dropped objects looks at what changed since the version pruned last
+   (`pgstat::prune_since`; every DDL commit visited every table's entry under the lock all
+   sessions share). And `filenodes`, `rel_am` and `rel_tablespace` are persistent maps
+   (`PMap`): pg_restore -j truncates every table before its COPY, which gives each a new file
+   number, and every racing merge compared and copied the whole map (4.7 s of a 3,000-table
+   restore's 7.5 s of merging).
+7. **Per-statement DDL overhead**: `has_detach_pending`, which every statement after DDL
+   asked of every table (a scan per catalog version), is an index of the tables map
+   (`TableIx::detach_pending`); ALTER TABLE ... ENABLE / DISABLE TRIGGER ALL built every
+   table's deferrable keys' triggers to keep one table's (`recheck_triggers_from`).
+
+### Catalog format 2: upgrade and downgrade
+
+Comments moved from the catalog header into records under tag 50 (`persist::COMMENTS_TAG`).
+A database stored in format 1 (or 0) is rewritten when it is first opened, in one commit
+(its comments ticked in their header order, so pg_description's order is unchanged).
+Downgrading: stop the server cleanly, run `roll-engine --data <dir> --downgrade-catalog`
+(`Engine::downgrade_catalogs`: every database's catalog stored as format 1 has it, comments
+in the header again, their records deleted), then start the older build. It refuses nothing
+itself: run it on a cleanly stopped data directory (an older build replaying this one's WAL
+after a crash isn't supported, round 18's rule), and don't open the directory with this build
+in between (that upgrades it again). Test `tests/catalog_format.rs`.
+
+### First connection
+
+In-process, 10,000 tables, 3 interleaved runs (`bench --target inproc startup-catalog`, the
+connect and its first `count(*)` of pg_class): before 126-184 ms, after 130-161 ms (a
+database already in format 2); the first open of a format-1 database pays its rewrite once
+(290-350 ms). Not near-constant: a database's records are now scanned and parsed per map on
+up to 8 threads (`persist::load`), which only overlaps what was serial, and inserting the
+11,000 tables' entries with their indexes, `reindex` and the first catalog generation are
+still O(catalog). A near-constant open needs the catalog's secondary indexes (names,
+`relindex`) stored and its entries parsed on first use (a lazy `PMap` chunk holding its
+records' bytes), or a binary snapshot of the built catalog: neither is done.
+
+### Verification (round 20, agent 76)
+
+`cargo test -p pg-engine` (every test binary), clippy (no new warnings), `difftest smoke`
+(passes, against `a76-pg`); the isolation suite on a private reference: 120 / 122 specs,
+1,646 / 1,648 permutations, as committed; the regression suite in full (debug build, private
+reference `a76-ref1`) against the committed `results.tsv`: **51,148 / 51,150, no unit
+changed**; over that run's database, `pg_dump_roundtrip` (dumps in every format alike to the
+last round's but one entry each, restores of the reference's dump into the engine 0 errors
+every way; the engine's dump restored into the reference fails 4 statements, the domain over
+a domain with a type modifier, `mynums2`, whose `typtypmod` the engine shows as its base's:
+the same with the engine before this round, `80fa7310`) and `pg_dump_tap` (14,817 / 14,817,
+002_pg_dump.pl 14,609 / 14,609). New tests: `tests/catalog_format.rs` (format 1 upgraded with
+its comments and their order, downgraded with `downgrade_catalogs`, a COMMENT's bytes written
+not growing with the comments), `tests/catalog_storage.rs`
+`group_committed_ddl_keeps_every_change` (four sessions' racing DDL with the WAL fsynced, read
+back after a restart and after a crash), `tests/ddl_scaling.rs`
+`more_catalogs_after_ddl_are_spliced_or_kept`, and the debug cross-checks (every splice and
+reuse against the full generation, every chunk's runs against its rows, tables pending detach
+and `pg_get_constraintdef`'s owner and `user_data_type`'s relation against scans).
+
 ## Deep input (round 19, agent 63)
 
 The stack grows on demand at recursion points (HANDOFF.md, "Deep input"). This section

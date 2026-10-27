@@ -42,6 +42,21 @@ pub type Row = Vec<Value>;
 pub trait Node {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>>;
 
+    /// How many rows `next` would still return, counted without making them, by a node that
+    /// can (its filter evaluated on each as `next` would; None: it can't, and nothing was
+    /// read). What `count(*)` over a catalog scan reads.
+    fn count_rest(&mut self, _ctx: &ExecCtx) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Before its first row: a node that can may leave out the rows whose column `col` (an
+    /// oid) is none of `keys`, which nothing above can match (an inner or semi hash join's
+    /// outer side, its inner side built: a catalog scan then reads the matching rows through
+    /// its hash instead of every row). Nothing it leaves out would have shown in any way.
+    fn restrict_keys(&mut self, _col: usize, _keys: &[u32], _ctx: &ExecCtx) -> Result<()> {
+        Ok(())
+    }
+
     /// A deferred DML node's AFTER triggers, once the whole statement's rows are done: the
     /// row events, then (`stmt`) the statement's.
     fn end(&mut self, _ctx: &ExecCtx, _stmt: bool) -> Result<()> {

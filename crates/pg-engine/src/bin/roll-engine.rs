@@ -81,6 +81,11 @@ struct Args {
     /// two-phase commit (PREPARE TRANSACTION). 0, the default as in PostgreSQL, disables it.
     #[arg(long, value_name = "N", default_value_t = 0)]
     max_prepared_transactions: usize,
+    /// Store every database's catalog as builds of catalog format 1 (before round 19's
+    /// comment records) read it, then exit: run it after a clean shutdown, before starting an
+    /// older build on the data directory.
+    #[arg(long)]
+    downgrade_catalog: bool,
 }
 
 /// initdb's locale and encoding options.
@@ -163,6 +168,13 @@ fn main() -> anyhow::Result<()> {
         max_prepared_transactions: a.max_prepared_transactions,
         ..EngineOptions::default()
     })?;
+    if a.downgrade_catalog {
+        for name in engine.downgrade_catalogs()? {
+            println!("{name}: catalog stored in format 1");
+        }
+        engine.shutdown();
+        return Ok(());
+    }
     // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the
     // same way here), so sequences keep their positions.
     {

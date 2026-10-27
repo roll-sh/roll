@@ -151,7 +151,47 @@ fn whole_catalogs_after_ddl_are_spliced() {
     engine.shutdown();
 }
 
-/// Racing DDL commits (pg_restore -j's indexes, constraints and comments; round 19, agent
+/// pg_constraint, pg_type and pg_index after DDL are spliced too (round 20, agent 76), and
+/// pg_depend and information_schema's constraint views are kept whole across a version in
+/// which nothing they read changed (COMMENT).
+#[test]
+fn more_catalogs_after_ddl_are_spliced_or_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    add_objects(&mut s, 0, 5);
+    let spliced_q = [
+        "SELECT count(*) FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid",
+        "SELECT count(*) FROM pg_type t JOIN pg_class r ON r.oid = t.typrelid",
+        "SELECT count(*) FROM pg_index i JOIN pg_class r ON r.oid = i.indexrelid",
+    ];
+    let kept_q = [
+        "SELECT count(*) FROM pg_depend",
+        "SELECT count(*) FROM information_schema.table_constraints",
+    ];
+    for q in spliced_q.iter().chain(&kept_q) {
+        run(&mut s, q);
+    }
+    for ddl in [
+        "COMMENT ON TABLE other1 IS 'x'",
+        "CREATE TABLE fresh (a int PRIMARY KEY, b text CHECK (b <> ''))",
+        "ALTER TABLE fresh ADD COLUMN c int UNIQUE",
+        "CREATE INDEX fresh_c ON fresh (c)",
+        "DROP TABLE other2 CASCADE",
+    ] {
+        run(&mut s, ddl);
+        for q in spliced_q {
+            assert_eq!(generated(&mut s, q), 0, "{ddl}: {q}: generated whole after it");
+        }
+    }
+    run(&mut s, "COMMENT ON TABLE other1 IS 'y'");
+    for q in kept_q {
+        run(&mut s, q);
+        run(&mut s, "COMMENT ON TABLE other1 IS 'z'");
+        assert_eq!(generated(&mut s, q), 0, "{q}: generated again after a COMMENT");
+    }
+    engine.shutdown();
+}
 /// 62): a commit whose catalog's base is no longer current is merged onto the current one
 /// under the commit lock, and that must cost what the transactions changed, not the catalog
 /// (it reindexed and checked every relation's name, and merged the header's comment list

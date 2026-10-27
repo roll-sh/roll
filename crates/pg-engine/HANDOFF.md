@@ -623,6 +623,33 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   per version and per scan (shared `Arc` rows are the next step); pg_constraint, pg_type and
   pg_index aren't spliced; the first connection (135-160 ms at 10,000 tables) and ALTER TABLE
   ADD COLUMN's overhead weren't worked on.
+- **Catalog round 5** (round 20, agent 76; BENCH.md "Catalog round 5"): system catalogs'
+  shared rows are chunks shared by pointer between catalog versions (`catalog/sysrows.rs`);
+  a new version remakes only the chunks of the objects its DDL changed (`sysdelta::splice`,
+  now pg_class, pg_attribute, pg_attrdef, pg_index, pg_constraint, pg_type) or reuses the
+  rows whole when nothing they read changed (also pg_depend and information_schema's
+  constraint views, cacheable now); scans copy only the columns a plan reads, `count(*)` of a
+  catalog counts without making rows, and a hash join restricts its outer catalog scan to the
+  inner side's keys (`Node::restrict_keys`). pg_type's generation, pg_get_constraintdef and
+  obj_description were O(catalog) per row or call. Comments are records of their own
+  (catalog format 2: older databases are rewritten when first opened; `roll-engine
+  --downgrade-catalog` stores format 1 again after a clean shutdown). Racing DDL commits:
+  no shared-catalog lock for commits that don't change shared catalogs, group commit for
+  catalog commits (`Store::commit_grouped`, the next commit merging onto the appended
+  catalog), merges copying entries by pointer, `filenodes` / `rel_am` / `rel_tablespace` as
+  `PMap`s (pg_restore -j truncates every table, giving each a file number), the statistics'
+  prune by catalog changes. Per-statement DDL: tables pending detach indexed, ENABLE /
+  DISABLE TRIGGER ALL of one table's triggers only. A database's records are scanned and
+  parsed per map on several threads at open. At 10,000 tables
+  (PostgreSQL / before / after, ms, a loaded machine): `count(*)` of pg_class after DDL 11.8 /
+  88.6 / 0.48, pg_class x pg_attribute after ALTER 14.4 / 315 / 30.4, the ORM constraints
+  query after DDL 47.0 / 527 / 21.4; `pg_restore -j 4` of 3,000 tables 24.2 / 85.1 / 18.6 s,
+  serially 26.5 / 51.9 / 22.3 s. DISABLE / ENABLE TRIGGER ALL 1.7 / 1.4 ms → 0.6 ms
+  in-process. Left: the first connection (about 130-160 ms at 10,000 tables, unchanged: lazy
+  entries or a binary snapshot), ALTER TABLE ADD COLUMN (1.4 ms over the wire against 0.7),
+  the first whole-catalog generation of a session's key (70-100 ms for pg_attribute), the
+  per-version hashes of spliced catalogs, pg_depend and information_schema not spliced
+  (generated whole after DDL that changes what they show).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -1271,7 +1298,9 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   `Catalog::index_key_format` and `Catalog::storage_format` with `Engine::upgrade_storage` in
   `src/engine.rs` (batched, resumable, tested by `tests/storage_upgrade_batches.rs`), and
   `Catalog::catalog_format` (`catalog/persist.rs`: a database's catalog is a header and a
-  record per object; `Database::open` rewrites a catalog stored as one value). A field added to
+  record per object; `Database::open` rewrites a catalog stored in an older format; format 2,
+  round 20 agent 76, moved comments into records of their own, and `roll-engine
+  --downgrade-catalog` stores format 1 again for an older build). A field added to
   `Catalog` must be listed in `persist.rs`'s `stored_fields!` (as a map, a set or in the header;
   the macro's exhaustive destructuring doesn't compile otherwise), with a record tag never used
   before.
@@ -1374,6 +1403,17 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     key targets, owned sequences); any change to what every row reads (schemas, roles, ACLs,
     types, collations, triggers, rules, ...) generates whole. Debug builds compare every
     splice with the full generation. Test `ddl_scaling.rs whole_catalogs_after_ddl_are_spliced`.
+  - Round 20 agent 76's shared row chunks (`catalog/sysrows.rs`): those rows are chunks of
+    about 64 rows ending at an object's last row, each an `Arc` with its runs of one object
+    (`RowChunk::parts`); a splice (`sysdelta::splice`, now also pg_index, pg_constraint and
+    pg_type) makes again only the chunks holding the changed objects and shares the others
+    by pointer; a version `changed_rels` finds nothing changed in reuses the entry whole.
+    `sysdelta::kept` catalogs (pg_depend, information_schema's constraint views, cacheable
+    since this round) are reused whole when `sysdelta::unchanged` (only comments, pg_class's
+    order, statistics, frozen xids, counters differ) and generated whole otherwise. A scan
+    copies only the columns its plan's `need` mask marks (`system::project`). Debug builds
+    compare every splice and reuse with the full generation, and every chunk's runs with its
+    rows (`sysdelta::parts_hold`). Test `ddl_scaling.rs more_catalogs_after_ddl_are_spliced_or_kept`.
   - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
     pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by

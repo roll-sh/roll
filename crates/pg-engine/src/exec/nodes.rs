@@ -62,10 +62,10 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         Plan::Scan(s) => super::scan::open_scan(s, need, ctx)?,
         Plan::SysScan { mark: Some(_), .. } => open_locked_sys_scan(plan, need, ctx)?,
         Plan::SysScan { table, filter, path, .. } => {
-            if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), ctx)? {
+            if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), need, ctx)? {
                 return Ok(Box::new(VecNode::new(rows)));
             }
-            if let Some(node) = sys_shared_scan(*table, filter.as_ref(), path.as_deref(), ctx)? {
+            if let Some(node) = sys_shared_scan(*table, filter.as_ref(), path.as_deref(), need, ctx)? {
                 return Ok(node);
             }
             let mut rows = match is_named_rows(*table, filter.as_ref(), ctx)? {
@@ -637,8 +637,20 @@ fn open_locked_sys_scan(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) 
         alias: alias.clone(),
         mark: None,
     });
-    let input = open_node(&unmarked, need, ctx)?;
-    Ok(match table.columns().iter().position(|(n, _)| n == "oid") {
+    let col = table.columns().iter().position(|(n, _)| n == "oid");
+    // (The lock reads each row's oid, whatever is read above.)
+    let need: Option<Vec<bool>> = need.map(|n| {
+        let mut n = n.to_vec();
+        if let Some(c) = col {
+            if n.len() <= c {
+                n.resize(c + 1, false);
+            }
+            n[c] = true;
+        }
+        n
+    });
+    let input = open_node(&unmarked, need.as_deref(), ctx)?;
+    Ok(match col {
         Some(col) => Box::new(CatalogLockNode {
             input,
             class: table.oid(),
@@ -706,6 +718,12 @@ impl VecNode {
 impl Node for VecNode {
     fn next(&mut self, _: &ExecCtx) -> Result<Option<Row>> {
         Ok(self.rows.next())
+    }
+
+    fn count_rest(&mut self, _: &ExecCtx) -> Result<Option<u64>> {
+        let n = self.rows.len() as u64;
+        self.rows = Vec::new().into_iter();
+        Ok(Some(n))
     }
 }
 
@@ -812,6 +830,10 @@ fn sys_equality(
 /// How many rescans of a catalog per statement read one relation's rows alone
 /// (`sys_rel_rows`) before the whole catalog is generated.
 const REL_RESCANS: u32 = 16;
+
+/// How many inner rows a hash join asks its outer side to restrict itself to at most
+/// (`Node::restrict_keys`; past it, reading every outer row costs about as much).
+const RESTRICT_KEYS: usize = 1024;
 
 /// The value conjunct `c` sets `table`'s relation column to (`system::rel_column`), as
 /// `sys_equality` reads such a conjunct: a built-in `=` between the column and a value (a
@@ -981,6 +1003,7 @@ fn sys_rescan(
     table: crate::catalog::system::SysTable,
     filter: Option<&Expr>,
     path: Option<&crate::sql::plan::SysPath>,
+    need: Option<&[bool]>,
     ctx: &ExecCtx,
 ) -> Result<Option<Vec<Row>>> {
     // (A view's rows may change within a statement, as pg_settings after set_config:
@@ -1044,20 +1067,24 @@ fn sys_rescan(
         Some((_, Some(ix))) => Some(ix),
         None => class_name_bounds(table, path, ctx)?.map(|b| sys_named(all, &b)),
     };
+    // (Only the columns read above are copied, `system::project`; an index order a sort
+    // relies on is found on whole rows first.)
+    let ordered = path.filter(|sp| sp.ordered);
+    let copy = if ordered.is_some() { None } else { need };
     let mut out = Vec::new();
     let mut check = |r: &Row| -> Result<()> {
         ctx.check()?;
         if eval_bool(f, r, ctx)? {
-            out.push(r.clone());
+            out.push(crate::catalog::system::project(r, copy));
         }
         Ok(())
     };
     match &picked {
-        Some(ix) => ix.iter().try_for_each(|&i| check(&all.rows[i as usize]))?,
-        None => all.rows.iter().try_for_each(&mut check)?,
+        Some(ix) => ix.iter().try_for_each(|&i| check(all.row(i as usize)))?,
+        None => all.iter().try_for_each(&mut check)?,
     }
     // An index path a sort relies on: the rows in that index's order.
-    if let Some(sp) = path.filter(|sp| sp.ordered) {
+    if let Some(sp) = ordered {
         out = crate::sql::paths::sys_index_order(out, &sp.scan, ctx)?.0;
     }
     Ok(Some(out))
@@ -1093,6 +1120,7 @@ fn sys_shared_scan(
     table: crate::catalog::system::SysTable,
     filter: Option<&Expr>,
     path: Option<&crate::sql::plan::SysPath>,
+    need: Option<&[bool]>,
     ctx: &ExecCtx,
 ) -> Result<Option<BoxNode>> {
     if !crate::catalog::system::rows_cacheable(table) {
@@ -1144,8 +1172,8 @@ fn sys_shared_scan(
     // An index path a sort relies on: the candidates in that index's order.
     if let Some(sp) = path.filter(|sp| sp.ordered) {
         let cand: Vec<Row> = match &picked {
-            Some(ix) => ix.iter().map(|&i| rows.rows[i as usize].clone()).collect(),
-            None => rows.rows.clone(),
+            Some(ix) => ix.iter().map(|&i| rows.row(i as usize).clone()).collect(),
+            None => rows.iter().cloned().collect(),
         };
         let sorted = crate::sql::paths::sys_index_order(cand, &sp.scan, ctx)?.0;
         let node: BoxNode = Box::new(VecNode::new(sorted));
@@ -1161,7 +1189,9 @@ fn sys_shared_scan(
         rows,
         picked,
         i: 0,
+        chunk: (0, 0),
         filter: filter.cloned(),
+        need: need.map(Rc::from),
     })))
 }
 
@@ -1217,8 +1247,9 @@ fn like_prefix_quals(f: &Expr) -> Vec<Expr> {
 
 /// The rows of pg_class's `rows` whose `relname` `bounds` admits, in row order.
 fn sys_named(rows: &crate::catalog::system::SysRows, bounds: &crate::catalog::system::NameBounds) -> Vec<u32> {
-    (0..rows.rows.len() as u32)
-        .filter(|&i| rows.rows[i as usize][1].as_str().is_some_and(|n| bounds.admits(n)))
+    (rows.iter().enumerate())
+        .filter(|(_, r)| r[1].as_str().is_some_and(|n| bounds.admits(n)))
+        .map(|(i, _)| i as u32)
         .collect()
 }
 
@@ -1283,32 +1314,126 @@ struct SharedRowsNode {
     /// The rows to check, in order (None: all).
     picked: Option<Vec<u32>>,
     i: usize,
+    /// Reading all of them: the chunk and the row in it next.
+    chunk: (usize, usize),
     filter: Option<Expr>,
+    /// The columns read above (`exec::need`): only those are copied out of the shared rows.
+    need: Option<Rc<[bool]>>,
+}
+
+impl SharedRowsNode {
+    /// The next row to check, if any.
+    fn advance(&mut self) -> Option<(usize, usize)> {
+        match &self.picked {
+            Some(ix) => {
+                let r = *ix.get(self.i)? as usize;
+                self.i += 1;
+                Some((usize::MAX, r))
+            }
+            None => {
+                let chunks = self.rows.chunks();
+                while self.chunk.0 < chunks.len() && self.chunk.1 >= chunks[self.chunk.0].rows.len() {
+                    self.chunk = (self.chunk.0 + 1, 0);
+                }
+                let (c, k) = self.chunk;
+                if c >= chunks.len() {
+                    return None;
+                }
+                self.chunk.1 += 1;
+                Some((c, k))
+            }
+        }
+    }
+}
+
+/// Row `k` of chunk `c` of `rows` (`c` usize::MAX: row `k` of all).
+fn shared_row(rows: &crate::catalog::system::SysRows, c: usize, k: usize) -> &Row {
+    if c == usize::MAX { rows.row(k) } else { &rows.chunks()[c].rows[k] }
 }
 
 impl Node for SharedRowsNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        loop {
-            let at = match &self.picked {
-                Some(ix) => match ix.get(self.i) {
-                    Some(&r) => r as usize,
-                    None => return Ok(None),
-                },
-                None if self.i < self.rows.rows.len() => self.i,
-                None => return Ok(None),
-            };
-            self.i += 1;
-            let r = &self.rows.rows[at];
+        while let Some((c, k)) = self.advance() {
+            let r = shared_row(&self.rows, c, k);
             match &self.filter {
                 Some(f) => {
                     ctx.check()?;
                     if eval_bool(f, r, ctx)? {
-                        return Ok(Some(r.clone()));
+                        return Ok(Some(crate::catalog::system::project(r, self.need.as_deref())));
                     }
                 }
-                None => return Ok(Some(r.clone())),
+                None => return Ok(Some(crate::catalog::system::project(r, self.need.as_deref()))),
             }
         }
+        Ok(None)
+    }
+
+    fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
+        let mut n = 0;
+        if self.filter.is_none() {
+            // (Nothing to evaluate: what is left.)
+            n = match &self.picked {
+                Some(ix) => ix.len().saturating_sub(self.i),
+                None => {
+                    let chunks = self.rows.chunks();
+                    (chunks.iter().skip(self.chunk.0).map(|c| c.rows.len()).sum::<usize>())
+                        .saturating_sub(self.chunk.1)
+                }
+            } as u64;
+            self.picked = Some(Vec::new());
+            self.i = 0;
+            return Ok(Some(n));
+        }
+        while let Some((c, k)) = self.advance() {
+            ctx.check()?;
+            if let Some(f) = &self.filter
+                && eval_bool(f, shared_row(&self.rows, c, k), ctx)?
+            {
+                n += 1;
+            }
+        }
+        Ok(Some(n))
+    }
+
+    fn restrict_keys(&mut self, col: usize, keys: &[u32], _ctx: &ExecCtx) -> Result<()> {
+        // (Only before the first row, and when the filter can't raise anything or call
+        // anything for the rows left out: a Seq Scan's filter runs on every row.)
+        if self.i != 0 || self.chunk != (0, 0) || !self.filter.as_ref().is_none_or(quiet_filter) {
+            return Ok(());
+        }
+        let same = |x: &Value| matches!(x, Value::Oid(_));
+        let mut all: Vec<u32> = Vec::new();
+        for k in keys {
+            match self.rows.lookup(col, &Value::Oid(*k), &same) {
+                Some(ix) => all.extend(ix),
+                None => return Ok(()),
+            }
+        }
+        all.sort_unstable();
+        all.dedup();
+        if let Some(p) = &self.picked {
+            let had: std::collections::HashSet<u32> = p.iter().copied().collect();
+            all.retain(|i| had.contains(i));
+        }
+        self.picked = Some(all);
+        Ok(())
+    }
+}
+
+/// Whether evaluating `e` on a row can't raise an error, a notice or any other effect:
+/// columns and constants compared by built-in operators, with AND / OR / NOT and IS [NOT]
+/// NULL.
+fn quiet_filter(e: &Expr) -> bool {
+    match e {
+        Expr::Col(..) | Expr::Const(..) => true,
+        Expr::And(v) | Expr::Or(v) => v.iter().all(quiet_filter),
+        Expr::Not(x) | Expr::IsNull(x, _) => quiet_filter(x),
+        Expr::Call(d, args, _) => {
+            d.oid < crate::catalog::FIRST_USER_OID
+                && matches!(d.name, "=" | "<>" | "<" | "<=" | ">" | ">=")
+                && args.iter().all(|a| matches!(a, Expr::Col(..) | Expr::Const(..)))
+        }
+        _ => false,
     }
 }
 
@@ -3234,6 +3359,9 @@ struct HashJoinNode {
     tried: bool,
     /// A right or full join's inner rows the workers matched (`pipe::Probe::matched`).
     shared_matched: Option<Arc<[std::sync::atomic::AtomicBool]>>,
+    /// Whether its outer side was asked to leave out rows of keys the inner side lacks
+    /// (`Node::restrict_keys`).
+    restricted: bool,
 }
 
 /// What a join's output needs copied: `need` and the columns its condition reads.
@@ -3270,6 +3398,7 @@ impl HashJoinNode {
             level: super::pipe::ALL,
             tried: false,
             shared_matched: None,
+            restricted: false,
             kind,
             left,
             right_plan,
@@ -3544,6 +3673,33 @@ impl HashJoinNode {
             }
         }
         self.build(ctx)?;
+        // An inner or semi join on one oid column: the outer side may leave out the rows of
+        // keys the inner side lacks (a catalog scan reads the others through its hash).
+        if !self.restricted {
+            self.restricted = true;
+            if !self.merge
+                && matches!(self.kind, JoinKind::Inner | JoinKind::Semi)
+                && self.level == super::pipe::ALL
+                && let [Expr::Col(k, _)] = &self.lkeys[..]
+                && let [rkey] = &self.rkeys[..]
+                && let Some(t) = &self.table
+                && t.rows.len() <= RESTRICT_KEYS
+            {
+                let mut keys = Vec::with_capacity(t.rows.len());
+                let mut oids = true;
+                for r in &t.rows {
+                    match eval(rkey, r, ctx)? {
+                        Value::Oid(o) => keys.push(o),
+                        Value::Null => {}
+                        _ => oids = false,
+                    }
+                }
+                if oids {
+                    let k = *k;
+                    self.left.restrict_keys(k, &keys, ctx)?;
+                }
+            }
+        }
         let level = self.level;
         loop {
             if let Some(it) = self.unmatched_right.as_mut() {

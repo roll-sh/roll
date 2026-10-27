@@ -74,15 +74,15 @@ pub struct SharedCatalog {
 impl SharedCatalog {
     /// The shared part of `c`; `databases` are the cluster's database oids.
     pub fn extract(c: &Catalog, databases: &BTreeSet<u32>) -> SharedCatalog {
-        let shared = |o: u32| {
-            c.roles.contains_key(&o)
-                || databases.contains(&o)
-                || TABLESPACES.contains(&o)
-                || c.tablespaces.contains_key(&o)
-        };
-        let mut comments: Vec<(u32, i32, String)> =
-            c.comments.iter().filter(|x| shared(x.0)).cloned().collect();
-        comments.sort_by_key(|x| (x.0, x.1));
+        // (The shared objects' comments, looked up by object: every commit of DDL reads
+        // them, and a scan of every comment made that O(catalog).)
+        let ids: BTreeSet<u32> = (c.roles.keys().chain(databases).chain(&TABLESPACES))
+            .chain(c.tablespaces.keys())
+            .copied()
+            .collect();
+        let comments: Vec<(u32, i32, String)> = (ids.iter())
+            .flat_map(|o| c.comments_of(*o).iter().map(move |(s, _, t)| (*o, *s, t.clone())))
+            .collect();
         SharedCatalog {
             roles: c.roles.clone(),
             members: c.members.clone(),
@@ -102,16 +102,28 @@ impl SharedCatalog {
 
     /// Replace the shared part of `c` with this one, stamped as `version`.
     pub fn apply(&self, c: &mut Catalog, databases: &BTreeSet<u32>, version: u64) {
-        let old: BTreeSet<u32> = c.roles.keys().chain(c.tablespaces.keys()).copied().collect();
-        let shared = |o: u32| {
-            old.contains(&o)
-                || self.roles.contains_key(&o)
-                || databases.contains(&o)
-                || TABLESPACES.contains(&o)
-                || self.tablespaces.contains_key(&o)
-        };
-        c.comments_mut().retain(|x| !shared(x.0));
-        c.comments_mut().extend(self.comments.iter().cloned());
+        let ids: BTreeSet<u32> = (c.roles.keys().chain(c.tablespaces.keys()))
+            .chain(self.roles.keys())
+            .chain(databases)
+            .chain(&TABLESPACES)
+            .chain(self.tablespaces.keys())
+            .copied()
+            .collect();
+        // The shared objects' comments as this copy has them (those that differ set again).
+        for o in ids {
+            let want: Vec<(i32, String)> =
+                (self.comments.iter()).filter(|x| x.0 == o).map(|x| (x.1, x.2.clone())).collect();
+            let same = {
+                let have = c.comments_of(o);
+                have.len() == want.len() && have.iter().zip(&want).all(|(h, w)| h.0 == w.0 && h.2 == w.1)
+            };
+            if !same {
+                c.drop_comments(o);
+                for (s, t) in want {
+                    c.set_comment(o, s, t);
+                }
+            }
+        }
         c.acls.retain(|a| !SHARED_CLASSES.contains(&a.class));
         c.acls.extend(self.acls.iter().cloned());
         c.roles = self.roles.clone();

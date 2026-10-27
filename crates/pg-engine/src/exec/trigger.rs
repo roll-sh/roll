@@ -1281,7 +1281,7 @@ pub fn recheck_triggers(cat: &crate::catalog::Catalog) -> Vec<RiTrigger> {
     recheck_triggers_from(cat.tables.values())
 }
 
-fn recheck_triggers_from<'a>(tables: impl Iterator<Item = &'a Arc<crate::catalog::Table>>) -> Vec<RiTrigger> {
+pub fn recheck_triggers_from<'a>(tables: impl Iterator<Item = &'a Arc<crate::catalog::Table>>) -> Vec<RiTrigger> {
     use crate::catalog::{ConstraintKind, trigger_type as tt};
     let mut out = Vec::new();
     for t in tables {

@@ -163,6 +163,17 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 20, agent 76 (catalog round 5: shared catalog row chunks, comments as records, group-committed DDL)
+
+Catalog speed only (BENCH.md "Catalog round 5"): system catalogs' shared rows in chunks reused
+by pointer across catalog versions (pg_index, pg_constraint and pg_type spliced too, pg_depend
+and information_schema's constraint views kept when unchanged), scans copying only what plans
+read, `count(*)` of a catalog without rows, hash joins restricting catalog scans to their
+inner keys, comments as records of their own (catalog format 2), group-committed DDL and
+cheaper racing merges. Nothing a statement shows was meant to change: a full debug run of the
+change on a private reference (`a76-ref1`) against the committed `results.tsv` measured
+**51148**, no unit changed; the generated blocks are left to the next full run.
+
 ## Round 19, agent 62 (dependencies DDL records, one catalog per statement, racing DDL commits)
 
 pg_depend gained what find_expr_references records and the engine missed (HANDOFF, "Where it

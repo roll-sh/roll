@@ -2733,6 +2733,23 @@ impl AggNode {
 
     fn run(&mut self, ctx: &ExecCtx) -> Result<Vec<Row>> {
         let mut input = self.input.take().unwrap();
+        // count(*) alone, of no groups: the rows counted by the input itself when it can
+        // (a catalog scan's shared rows, `Node::count_rest`), none of them made.
+        if self.groups.is_empty()
+            && self.sets.is_none()
+            && !self.aggs.is_empty()
+            && self.aggs.iter().all(|a| {
+                a.def.sig.name == "count"
+                    && a.args.is_empty()
+                    && a.user.is_none()
+                    && a.filter.is_none()
+                    && !a.distinct
+                    && a.order_by.is_empty()
+            })
+            && let Some(n) = input.count_rest(ctx)?
+        {
+            return Ok(vec![vec![Value::Int8(n as i64); self.aggs.len()]]);
+        }
         let colls = nondeterministic_keys(&self.groups, ctx);
         let Some(sets) = self.sets.clone() else {
             // Plain GROUP BY (or none).

@@ -274,7 +274,7 @@ impl Ddl<'_, '_> {
         };
         self.cat.statistics.insert(oid, Arc::new(st));
         if !s.stxcomment.is_empty() {
-            self.cat.comments_mut().push((oid, 0, s.stxcomment.clone()));
+            self.cat.set_comment(oid, 0, s.stxcomment.clone());
         }
         self.save()?;
         Ok(TAG.into())
@@ -355,7 +355,7 @@ impl Ddl<'_, '_> {
             .collect();
         for oid in gone {
             self.cat.statistics.remove(&oid);
-            self.cat.comments_mut().retain(|(o, _, _)| *o != oid);
+            self.cat.drop_comments(oid);
         }
     }
 
@@ -396,9 +396,7 @@ impl Ddl<'_, '_> {
                     ..(*x).clone()
                 }),
             );
-            for c in self.cat.comments_mut().iter_mut().filter(|c| c.0 == x.oid) {
-                c.0 = oid;
-            }
+            self.cat.move_comments(x.oid, oid);
         }
     }
 
@@ -471,14 +469,9 @@ impl Ddl<'_, '_> {
             };
             self.cat.statistics.insert(oid, Arc::new(st));
             if comments
-                && let Some((_, _, text)) = self
-                    .cat
-                    .comments
-                    .iter()
-                    .find(|(o, s, _)| *o == x.oid && *s == 0)
-                    .cloned()
+                && let Some(text) = self.cat.comment(x.oid, 0).map(str::to_string)
             {
-                self.cat.comments_mut().push((oid, 0, text));
+                self.cat.set_comment(oid, 0, text);
             }
         }
     }

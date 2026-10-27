@@ -5,6 +5,7 @@
 
 pub mod acl;
 pub mod btsim;
+pub mod comments;
 pub mod depend;
 pub mod ginsim;
 pub mod gistsim;
@@ -27,6 +28,7 @@ pub mod static_rows;
 pub mod sys_rels;
 pub mod sys_sizes;
 pub mod sysdelta;
+pub mod sysrows;
 pub mod system;
 pub mod tsearch;
 pub mod type_procs;
@@ -1806,11 +1808,12 @@ pub struct Catalog {
     pub functions: pmap::PMap<Arc<Function>>,
     #[serde(default)]
     pub roles: BTreeMap<u32, Role>,
-    /// (object oid, sub-id, text): `COMMENT ON`. Their pg_description classoid is their
-    /// object's catalog (`class_of`).
-    /// (Shared by the catalog's copies until one changes it: `comments_mut`.)
+    /// `COMMENT ON`, by object (`comments`: a record per object since catalog format 2).
+    #[serde(default, deserialize_with = "comments::serde_any::deserialize")]
+    pub comments: comments::Comments,
+    /// The last comment's tick (`comments`: pg_description's order).
     #[serde(default)]
-    pub comments: Arc<Vec<(u32, i32, String)>>,
+    pub comment_tick: u64,
     /// pg_description rows (objoid, classoid, objsubid, text) whose classoid isn't their
     /// object's own catalog: a superuser's UPDATE / INSERT on pg_description put them there
     /// (pgjdbc moves a function's comment onto a table). Kept as written, as Postgres keeps
@@ -1874,8 +1877,8 @@ pub struct Catalog {
     pub casts: BTreeMap<u32, Arc<userobj::Cast>>,
     /// Relations whose access method isn't the default (heap for tables and materialized
     /// views, none for partitioned tables), and indexes of a made access method.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub rel_am: BTreeMap<u32, u32>,
+    #[serde(default, skip_serializing_if = "pmap::PMap::is_empty")]
+    pub rel_am: pmap::PMap<u32>,
     /// CREATE TYPE base types and shell types.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub base_types: BTreeMap<u32, Arc<userobj::BaseTypeDef>>,
@@ -1899,8 +1902,8 @@ pub struct Catalog {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tablespaces: BTreeMap<u32, shared::Tablespace>,
     /// pg_class.reltablespace of the relations not in the database's default tablespace.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub rel_tablespace: BTreeMap<u32, u32>,
+    #[serde(default, skip_serializing_if = "pmap::PMap::is_empty")]
+    pub rel_tablespace: pmap::PMap<u32>,
     /// Every database's subscriptions (cluster-wide: see `shared`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub subscriptions: BTreeMap<u32, shared::Subscription>,
@@ -1939,8 +1942,8 @@ pub struct Catalog {
     pub frozen_xids: pmap::PMap<u64>,
     /// pg_class.relfilenode of relations whose storage was replaced (TRUNCATE, a rewrite,
     /// REINDEX, ...), where it no longer equals the oid.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub filenodes: BTreeMap<u32, u32>,
+    #[serde(default, skip_serializing_if = "pmap::PMap::is_empty")]
+    pub filenodes: pmap::PMap<u32>,
     /// pg_proc.proowner of built-in routines given another owner (ALTER FUNCTION ... OWNER
     /// TO); the others are the bootstrap superuser's.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2383,11 +2386,6 @@ impl Catalog {
             && kids(self) == kids(o)
     }
 
-    /// The comments, to change (copied first when other catalogs share them).
-    pub fn comments_mut(&mut self) -> &mut Vec<(u32, i32, String)> {
-        Arc::make_mut(&mut self.comments)
-    }
-
     /// The relation name index's entry of relation `oid` (an index is in its table's schema).
     fn name_entry(&self, oid: u32) -> Option<((u32, String), (RelKind, u32))> {
         if let Some(t) = self.tables.get(&oid) {
@@ -2508,7 +2506,7 @@ impl Catalog {
         if self.class_of(oid) != Some(class) {
             return self.class_comments.iter().any(|c| (c.0, c.1, c.2) == (oid, class, sub));
         }
-        self.comments.iter().any(|c| c.0 == oid && c.1 == sub && !c.2.is_empty())
+        self.comment(oid, sub).is_some_and(|t| !t.is_empty())
             || system::builtin_description(self, oid, Some(class), sub).is_some()
     }
 
@@ -2518,10 +2516,10 @@ impl Catalog {
             self.class_comments.retain(|c| (c.0, c.1, c.2) != (oid, class, sub));
             return;
         }
-        self.comments_mut().retain(|c| !(c.0 == oid && c.1 == sub));
+        self.drop_comment(oid, sub);
         if system::builtin_description(self, oid, Some(class), sub).is_some() {
             // (An empty comment hides the one Postgres ships.)
-            self.comments_mut().push((oid, sub, String::new()));
+            self.set_comment(oid, sub, String::new());
         }
     }
 
@@ -2532,8 +2530,7 @@ impl Catalog {
             self.class_comments.push((oid, class, sub, text));
             return;
         }
-        self.comments_mut().retain(|c| !(c.0 == oid && c.1 == sub));
-        self.comments_mut().push((oid, sub, text));
+        self.set_comment(oid, sub, text);
     }
 
     /// The system catalog (pg_class, pg_proc, …) object `oid` of this database is in, for
@@ -3512,17 +3509,21 @@ impl Catalog {
         if let Some(r) = self.ranges.values().find(|r| r.multi_oid == oid) {
             return Some(DataType::Multirange(r.range_type()));
         }
-        let rel = self
-            .tables
-            .values()
-            .find(|t| t.rowtype == oid)
-            .map(|t| t.oid)
-            .or_else(|| {
-                self.views
-                    .values()
-                    .find(|v| v.rowtype == oid)
-                    .map(|v| v.oid)
-            });
+        // (The relation maps' row type indexes, `relindex`: pg_type's rows asked this of
+        // every relation, by a scan of every table each.)
+        let rel = match self.tables.ix().rowtypes.get(&oid) {
+            Some(&(t, false)) => Some(t),
+            _ => match self.views.ix().rowtypes.get(&oid) {
+                Some(&(v, false)) => Some(v),
+                _ => None,
+            },
+        };
+        debug_assert_eq!(
+            rel,
+            (self.tables.values().find(|t| t.rowtype == oid).map(|t| t.oid))
+                .or_else(|| self.views.values().find(|v| v.rowtype == oid).map(|v| v.oid)),
+            "the relation of row type {oid}"
+        );
         match rel {
             Some(rel) => self.row_type_of(rel),
             None => system::SysTable::by_rowtype(oid).and_then(|t| t.row_type()),
@@ -3855,24 +3856,22 @@ impl Catalog {
     }
 
     fn scan_detach_pending(&self) -> Vec<(u32, u32)> {
-        self.tables
-            .values()
-            .filter(|t| t.detach_pending)
-            .filter_map(|t| t.inherits.first().map(|p| (*p, t.oid)))
-            .collect()
+        // (The tables map's index of them, `relindex`: every statement after DDL scanned
+        // every table for the flag.)
+        let out: Vec<(u32, u32)> = self.tables.ix().detach_pending.iter().map(|(t, p)| (*p, *t)).collect();
+        debug_assert_eq!(
+            out,
+            (self.tables.values())
+                .filter(|t| t.detach_pending)
+                .filter_map(|t| t.inherits.first().map(|p| (*p, t.oid)))
+                .collect::<Vec<_>>()
+        );
+        out
     }
 
     /// Whether a partition is pending detach (a cheap check for a frozen catalog).
     pub fn has_detach_pending(&self) -> bool {
-        if self.lookups.frozen {
-            !self
-                .lookups
-                .detach_pending
-                .get_or_init(|| self.scan_detach_pending())
-                .is_empty()
-        } else {
-            self.tables.values().any(|t| t.detach_pending)
-        }
+        !self.tables.ix().detach_pending.is_empty()
     }
 
     /// This catalog without the partitions `omitted` ((parent, partition) pairs) in their
@@ -4299,7 +4298,7 @@ impl Catalog {
         {
             self.remove_name(seq.schema, &seq.name);
         }
-        self.comments_mut().retain(|(o, _, _)| *o != oid);
+        self.drop_comments(oid);
         Some(t)
     }
 

@@ -262,8 +262,7 @@ impl Ddl<'_, '_> {
             },
         );
         if let Some(c) = &control.comment {
-            self.cat.comments_mut().retain(|(o, s, _)| !(*o == oid && *s == 0));
-            self.cat.comments_mut().push((oid, 0, c.clone()));
+            self.cat.set_comment(oid, 0, c.clone());
         }
         self.save()?;
         self.execute_extension_script(oid, control, None, &version, &required_schemas, &schema)?;

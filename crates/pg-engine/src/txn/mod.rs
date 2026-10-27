@@ -130,6 +130,13 @@ pub struct Database {
     /// Catalog views leaving out partitions pending detach (`Catalog::detach_view`) made for
     /// the current catalog: (its version, what they leave out, routing_full, the view).
     detach_views: Mutex<Vec<DetachViewEntry>>,
+    /// The catalog of the last commit appended to the WAL and not published yet, with its
+    /// commit timestamp (`Store::commit_grouped`): what the next DDL commit checks against
+    /// and merges onto (`latest_catalog`), published once that commit is durable.
+    pending: Mutex<Option<(u64, Arc<Catalog>)>>,
+    /// The commit timestamp of the catalog published last (an earlier commit's, published
+    /// after it, doesn't replace it).
+    published_ts: AtomicU64,
 }
 
 type DetachViewEntry = (u64, Vec<(u32, u32)>, bool, Arc<Catalog>);
@@ -139,8 +146,7 @@ impl Database {
         let ts = store.visible_ts();
         let catalog = match store.get(CATALOG_KEY, ts)? {
             Some(b) => {
-                let (from, to) = persist::record_range();
-                let stored = persist::load(&b, || {
+                let stored = persist::load(&b, |from, to| {
                     store.scan(from, to, ts).collect::<Result<Vec<_>>>()
                 })?;
                 let mut c = stored.clone();
@@ -200,6 +206,8 @@ impl Database {
             sys_rows: Mutex::new(Default::default()),
             detach_marks: Mutex::new(HashMap::new()),
             detach_views: Mutex::new(Vec::new()),
+            pending: Mutex::new(None),
+            published_ts: AtomicU64::new(0),
         }))
     }
 
@@ -249,6 +257,28 @@ impl Database {
 
     pub fn catalog(&self) -> Arc<Catalog> {
         self.catalog.read().clone()
+    }
+
+    /// The catalog a commit's DDL is checked against and merged onto (under the store's
+    /// commit lock): the last one appended to the WAL, published or not.
+    fn latest_catalog(&self) -> Arc<Catalog> {
+        let pending = self.pending.lock().as_ref().map(|(_, c)| c.clone());
+        pending.unwrap_or_else(|| self.catalog())
+    }
+
+    /// Catalog `c` of the commit at `ts` published, unless a later commit's is already.
+    fn publish_catalog(&self, ts: u64, c: Arc<Catalog>) {
+        {
+            let mut w = self.catalog.write();
+            if self.published_ts.load(Ordering::Acquire) <= ts {
+                self.published_ts.store(ts, Ordering::Release);
+                *w = c;
+            }
+        }
+        let mut p = self.pending.lock();
+        if p.as_ref().is_some_and(|(t, _)| *t <= ts) {
+            *p = None;
+        }
     }
 
     /// Hand out transaction ids from the cluster's counter.
@@ -2568,9 +2598,9 @@ impl Txn {
             // Other DDL committed since this transaction's began: its catalog changes are
             // carried onto the current catalog (the commit lock is held, so it stays current).
             if let Some(base) = base
-                && db.catalog().version != base
+                && db.latest_catalog().version != base
             {
-                let cur = db.catalog();
+                let cur = db.latest_catalog();
                 let (Some(b), Some(mine)) = (base_cat.as_deref(), catalog.borrow().clone()) else {
                     return Err(Error::new(
                         code::SERIALIZATION_FAILURE,
@@ -2603,12 +2633,12 @@ impl Txn {
         let publish = self.publish;
         // A new catalog is published under the commit lock, with the data (`check` may have
         // merged it onto the current one).
-        let publish_catalog = |_| {
+        let publish_catalog = |ts| {
             if let Some(c) = catalog.borrow_mut().take() {
                 if !publish {
-                    db2.last_local.store(c.version, Ordering::Release);
+                    db2.last_local.fetch_max(c.version, Ordering::AcqRel);
                 }
-                *db2.catalog.write() = c;
+                db2.publish_catalog(ts, c);
             }
         };
         let result = if let Some((keys, mut stream)) = spilled {
@@ -2636,7 +2666,15 @@ impl Txn {
         } else if writes.is_empty() {
             Ok(self.db.store.visible_ts())
         } else if catalog.borrow().is_some() {
-            self.db.store.commit_with(writes, check, publish_catalog)
+            // (Group-committed: the next DDL commit merges onto this one's catalog, which is
+            // published once its fsync is done.)
+            let db3 = self.db.clone();
+            let appended = |ts| {
+                if let Some(c) = catalog.borrow().clone() {
+                    *db3.pending.lock() = Some((ts, c));
+                }
+            };
+            self.db.store.commit_grouped(writes, check, appended, publish_catalog)
         } else {
             self.db.store.commit(writes, |s| check(s, &mut Vec::new()))
         };

@@ -8,8 +8,8 @@ use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
 use std::time::Duration;
 
-fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
-    Engine::open(EngineOptions {
+fn options(dir: &std::path::Path) -> EngineOptions {
+    EngineOptions {
         data_dir: dir.to_path_buf(),
         cache_bytes: 4 << 20,
         memtable_bytes: 1 << 20,
@@ -23,8 +23,11 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         locale: Default::default(),
         outbound: Vec::new(),
         max_prepared_transactions: 0,
-    })
-    .unwrap()
+    }
+}
+
+fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
+    Engine::open(options(dir)).unwrap()
 }
 
 fn rows(s: &mut Session, sql: &str) -> Vec<String> {
@@ -228,6 +231,58 @@ fn merged_concurrent_ddl_is_stored() {
     engine.shutdown();
 }
 
+/// DDL commits racing with the WAL fsynced (`Store::commit_grouped`: each appends under the
+/// commit lock, the next one merges onto its catalog before it is published, and one fsync
+/// covers several): every session's tables, indexes and comments are in the catalog every
+/// session reads afterwards and in the one stored, after a restart and after a crash.
+#[test]
+fn group_committed_ddl_keeps_every_change() {
+    for crash in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = |dir: &std::path::Path| EngineOptions {
+            sync: true,
+            ..options(dir)
+        };
+        let engine = Engine::open(opts(dir.path())).unwrap();
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        for w in 0..4 {
+            run(&mut s, &format!("CREATE TABLE g{w}_base (id int PRIMARY KEY, v text)"));
+        }
+        let threads: Vec<_> = (0..4)
+            .map(|w| {
+                let engine = engine.clone();
+                std::thread::spawn(move || {
+                    let mut s = engine.connect(10 + w, "postgres", "postgres", "t").unwrap();
+                    for i in 0..25 {
+                        run(&mut s, &format!("CREATE TABLE g{w}_{i} (id int PRIMARY KEY, v text)"));
+                        run(&mut s, &format!("CREATE INDEX g{w}_{i}_v ON g{w}_{i} (v)"));
+                        run(&mut s, &format!("COMMENT ON TABLE g{w}_{i} IS 'w{w} i{i}'"));
+                        run(&mut s, &format!("ALTER TABLE g{w}_base ADD COLUMN c{i} int"));
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let q = "SELECT (SELECT count(*) FROM pg_class WHERE relname ~ '^g[0-3]_[0-9]+(_v)?$'), \
+                 (SELECT count(*) FROM pg_description d JOIN pg_class c ON c.oid = d.objoid WHERE c.relname ~ '^g'), \
+                 (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname ~ '^g[0-3]_base$' AND a.attnum > 0)";
+        let want = vec!["[Int8(200), Int8(100), Int8(108)]".to_string()];
+        assert_eq!(rows(&mut s, q), want);
+        let before = catalog_of(&mut s);
+        drop(s);
+        if !crash {
+            engine.shutdown();
+        }
+        drop(engine);
+        let engine = Engine::open(opts(dir.path())).unwrap();
+        let mut s = engine.connect(2, "postgres", "postgres", "t").unwrap();
+        assert_eq!(rows(&mut s, q), want, "crash: {crash}");
+        assert_eq!(catalog_of(&mut s), before, "crash: {crash}");
+        engine.shutdown();
+    }
+}
 fn catalog_of(s: &mut Session) -> Vec<Vec<String>> {
     [
         "SELECT oid, relname, relkind, relnatts, relhasindex FROM pg_class WHERE oid >= 16384 ORDER BY oid",

@@ -1702,14 +1702,9 @@ impl Ddl<'_, '_> {
                 t.constraints.push(c);
             }
             if comments
-                && let Some((_, _, text)) = self
-                    .cat
-                    .comments
-                    .iter()
-                    .find(|(o, sub, _)| *o == six.oid && *sub == 0)
-                    .cloned()
+                && let Some(text) = self.cat.comment(six.oid, 0).map(str::to_string)
             {
-                self.cat.comments_mut().push((oid, 0, text));
+                self.cat.set_comment(oid, 0, text);
             }
             self.cat.put_index(ix);
         }
