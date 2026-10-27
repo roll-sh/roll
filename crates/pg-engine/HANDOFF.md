@@ -1654,7 +1654,11 @@ them all with the "Fixed in round N" sections describing what was already tried.
    leaves columns to their defaults keeps `Subquery Scan on "*SELECT*"` to compute the new
    row (the engine shows the Sort / Aggregate under the Insert); EXPLAIN's `JIT:` lines past
    jit_above_cost are never shown. (An INSERT's source width and cost count the defaulted
-   columns since round 21.)
+   columns since round 21, and a Sort / Limit under a projection dropping the ORDER BY's
+   resjunk columns counts them in its width.) TPC-H q07 is parallel as PostgreSQL's since
+   round 21 (agent 77 measured it serial before); q08 is parallel but joins customer by
+   hashing in the workers where PostgreSQL uses customer_pkey (the partial-paths cause, as
+   q05).
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

@@ -6821,17 +6821,24 @@ impl Builder<'_, '_> {
                     },
                     _ => 0,
                 };
-                c.node.width = cols
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| mask.is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
-                    .map(|(_, c)| c.width)
-                    .sum::<u32>()
-                    + junk_keys;
-                let w = c.node.width;
-                for pt in c.node.partials_mut() {
-                    pt.width = w;
-                    pt.cols = cols.clone();
+                // (A node that can't project under a projection only dropping the level's
+                // resjunk columns returns them: its width counts the ORDER BY's expressions
+                // the select list doesn't have, `SELECT id ... ORDER BY id * 2.5`.)
+                let keeps_junk =
+                    junk_only && matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit" | "Unique" | "Gather Merge");
+                if !keeps_junk {
+                    c.node.width = cols
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| mask.is_none_or(|m| m.get(*i).copied().unwrap_or(true)))
+                        .map(|(_, c)| c.width)
+                        .sum::<u32>()
+                        + junk_keys;
+                    let w = c.node.width;
+                    for pt in c.node.partials_mut() {
+                        pt.width = w;
+                        pt.cols = cols.clone();
+                    }
                 }
                 c.node.cols = cols;
                 // (cost_qual_eval: a called function's procost too.)

@@ -294,6 +294,11 @@ defaults in its width (a NULL by its type's typmod: `char(22)` 92, `numeric(10,2
 Golden `a78_insert_defaults` (with a correlated NOT IN inside an IN, its rows: the pull-up
 was tried and left, HANDOFF).
 
+Third batch (agent 70's finding): **a Sort or Limit under a projection that only drops the
+ORDER BY's resjunk columns returns them**, so its width counts them (a Sort, Incremental
+Sort, Limit, Unique or Gather Merge can't project): `SELECT id ... ORDER BY id * 2.5 LIMIT 5`
+shows `Limit (width=36)` for the engine's 4. Golden `a78_resjunk_width`. A full run against the committed baseline: 51,148 / 51,150, no unit changed; the difftest smoke passing.
+
 Looked at and left (why):
 
 - q05, q08 (parallel): the engine's partial plans are EXPLAIN's partial versions of the serial
