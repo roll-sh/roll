@@ -27,7 +27,12 @@ ANALYZE counts of dead versions visited. Match them only when it costs nothing. 
 them as accepted internal differences, rather than copying PostgreSQL's storage to reproduce
 them. Application-visible behaviour always matches.
 Performance is a goal of its own: measure it (`tools/bench`, BENCH.md) against the reference
-and make the engine faster than PostgreSQL wherever possible.
+and make the engine faster than PostgreSQL wherever possible. Resource use is a goal as well.
+Measure peak memory, CPU, on-disk size and write amplification along with time, and use less
+of each than PostgreSQL where you can. Keep the engine's structure lightweight: an
+in-process engine with no copy of PostgreSQL's heavy machinery. A speedup in one area must not
+slow down or bloat another. Check pgbench and the other workloads in BENCH.md for regressions,
+and report the before/after memory figures next to the timings.
 
 The regression suite is one measure, not the whole one. Round 16 found locking and
 wrong-result bugs that no statement in it catches. Further measures, each with its own
