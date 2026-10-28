@@ -2663,6 +2663,89 @@ transactions (5,000; `/proc/<pid>/stat` utime + stime, in ticks), median of thre
   text as prepared statements still are: that took the `-C` PL/pgSQL loop from about 405
   ticks to 343.
 
+## Round 20 (agent 85): write path round 4
+
+Profiled first (frame-pointer release build, `perf record --call-graph fp` of the engine during
+one statement at a time, stacks folded and grouped by caller). Shares of the engine's samples
+at `ea038e8e`, the round's base:
+
+- COPY in: the insert path 58% (`Txn::put` 20%: the write buffer's map insert, its journal
+  entry and spills; the heap model 15%: per-row sizing and, as the load passes the model's size,
+  the waiting rows placed to estimate the heap; pg_stat_io 4.3%, a global mutex and two hash
+  lookups per row), parsing 16%, the commit 12%, L0 → L1 compaction in the background 11%.
+- CREATE INDEX: writing the entries as runs 34% (their sort 11.5%), measuring the table again
+  26%, the scan 15%, the commit 12%.
+- DELETE a quarter: the three tombstones per row (row, two index entries) 27%, the scan 18%
+  plus its workers, row locks 13%.
+- ANALYZE: measuring every row and index key 71% (the keys' sort 14%), sampling 27%.
+
+What changed:
+
+1. **CREATE INDEX measures in its own pass** (`Ddl::measures_in_build`, `measure_rows_with`):
+   for a btree of a table too big to model, the build's scan is the measuring scan; each row's
+   key values are computed once and handed to the build (unique check, entry). The table and
+   the index get the same numbers as a separate measure (`tests/big_tables.rs`
+   `index_build_measures_as_analyze`: plain, INCLUDE, expression, partial, unique).
+2. **Index entries sort by 16-byte words** (`txn::sort_by_key_after`): the bytes after the
+   index's prefix as a `u128`, with the entries' places, ties by the whole key; then the entries
+   move into that order. The build's sort went from 11.5% to 5% of its samples.
+3. **DELETE's index entries go in at the statement's end** (`Txn::defer_entry_delete`,
+   `DeleteNode::defers_entries`): a DELETE without BEFORE ROW triggers, RETURNING or anything
+   volatile collects its index entry keys and writes them sorted as one run of the
+   transaction's spilled writes (when the transaction has written nothing else in those
+   indexes; else, and under a savepoint, as before). Nothing the statement runs can read them
+   before it ends (its snapshot doesn't see its writes); the next statement, AFTER triggers and
+   the commit see them. Snapshot reads of the runs now go by the snapshot's journal mark
+   instead of the newest version (`snap_get`, `scan_snap`, `scan_rev`), so a cursor opened
+   before the DELETE doesn't see a run written after it. Tested by `deferred_entry_deletes`
+   and `index_only_scans_from_entries` (the cursor case). Postgres sets xmax and leaves the
+   entries; leaving them in the engine would need every reader of index entries (unique
+   checks, index-only scans from the entries) to check the row: not done.
+4. **pg_stat_io counts combine** (`pgstat::count_io`): consecutive counts of one key add up
+   in the backend and go into the backend's and the shared counts together, when another key
+   is counted, before pg_stat_io / pg_stat_get_backend_io / a reset reads them, and at the
+   transaction's end (pgstat_report_stat's point). COPY's per-row 4.3% went to 0.6%.
+5. **Estimates kept across restarts** (`sizing::store_estimate`, `persist_estimates`): a table
+   becoming too big to model, and every such table when its database closes, has its
+   estimated heap pages stored (outside transactions, with its relfilenode). Its first use
+   after a restart, never measured by VACUUM / ANALYZE / CREATE INDEX, takes that instead of
+   reading the table: the first EXPLAIN of an unanalyzed 1M-row table after a restart 0.73 s
+   → 0.12 s (the same as a warm one), with the plan the engine showed before the restart
+   (`estimate_kept_across_restart`). (The read estimated the rows past the first 400,000 by
+   their stored lengths, so its pages differed slightly from the warm engine's.)
+6. The spill keeps its journal's room (`journal.clear()`).
+
+Tried and dropped: sorting ANALYZE's measured keys by their prefixes apart from the keys
+(their grouping then reads the keys out of order; slower than the in-place sort).
+
+### Bulk, 1M rows
+
+The machine was loaded through the round (load 30–65 on 36 cores, from other agents' builds
+and test runs), so wall times are about twice agent 74's; the CPU column is the server's CPU
+time over the statement (the engine process's, the PostgreSQL container's cgroup), which the
+load moves less. Medians of 3 interleaved runs (PostgreSQL, base, this round; each engine
+from a fresh data directory), the bulk benchmark's steps run through psql (`\copy` of the same
+1M-row file), servers on cores 16–19, seconds:
+
+| step | pg wall | pg cpu | base wall | base cpu | round 4 wall | round 4 cpu |
+|---|---|---|---|---|---|---|
+| COPY in | 1.56 | 1.48 | 4.50 | 4.29 | 4.73 | 4.47 |
+| CREATE INDEX | 0.81 | 1.18 | 3.79 | 3.72 | 3.21 | 3.13 |
+| CREATE UNIQUE INDEX | 0.56 | 0.67 | 3.53 | 4.32 | 3.14 | 3.99 |
+| COPY out | 0.92 | 0.71 | 1.10 | 1.40 | 1.30 | 1.73 |
+| INSERT … SELECT | 1.37 | 1.23 | 4.05 | 4.44 | 4.40 | 4.19 |
+| UPDATE half | 6.92 | 6.85 | 3.61 | 4.14 | 3.64 | 4.19 |
+| DELETE a quarter | 0.50 | 0.40 | 3.43 | 5.34 | 2.38 | 5.10 |
+| VACUUM | 0.52 | 0.56 | 1.27 | 1.14 | 1.26 | 1.77 |
+| ANALYZE | 0.30 | 0.20 | 1.86 | 1.77 | 1.49 | 1.35 |
+| count(*) after | 0.19 | 0.16 | 0.31 | 0.53 | 0.42 | 0.49 |
+| DROP TABLE (both) | 0.19 | 0.09 | 7.20 | 6.76 | 6.23 | 6.10 |
+
+CREATE INDEX 15%, DELETE 30% (wall; its CPU is mostly the parallel scan's workers), ANALYZE
+20% faster; COPY, INSERT … SELECT, COPY out, UPDATE and VACUUM within the load's noise. Found:
+`DROP TABLE` of the two 1M-row tables takes 6–7 s (PostgreSQL 0.2 s): it isn't in the bulk
+benchmark's timed steps, and is the biggest single gap the run showed.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

@@ -1172,6 +1172,41 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     two whose shortest decimal the old search missed.
   - COPY FROM borrows fields from the data (`InField`'s `Cow`s); pg_stat_io's keys are
     static strings in a fast-hash map; an inserted row's tuple length is computed once.
+- **Write path, round 4** (round 20, agent 85; BENCH.md's agent 85 section): CREATE INDEX 15%,
+  DELETE 30%, ANALYZE 20% faster; the first plan of a big unanalyzed table after a restart no
+  longer reads it (0.73 s → 0.12 s at 1M rows).
+  - CREATE INDEX of a table too big to model measures the table and the index in the build's
+    own pass (`Ddl::measures_in_build`, `measure_rows_with`: each row's key values computed
+    once, the same numbers as a separate measure); index entries sort by 16-byte words
+    (`txn::sort_by_key_after`).
+  - A DELETE without BEFORE ROW triggers, RETURNING or anything volatile defers its index
+    entry deletes to its end and writes them as one sorted run (`Txn::defer_entry_delete`,
+    `flush_entry_deletes`, called at the DeleteNode's end, at every `begin_statement` and at
+    commit; under a savepoint, or where the transaction has written into the index, they go
+    through the buffer as before). Snapshot reads of the spilled runs go by the snapshot's
+    journal mark (`snap_get`, `scan_snap`, `scan_rev`): a run written after a snapshot (these,
+    an index build's) isn't seen by it. Anything new that reads index entries mid-DELETE must
+    keep to `defers_entries`' rule.
+  - pg_stat_io: consecutive counts of one key combine in the backend (`Pending::io_run`), and
+    go in before anything reads or resets the counts (`pgstat::flush_io`) and at transaction
+    end.
+  - A big table's estimated heap pages are kept in the store (`sizing::store_estimate`, key
+    prefix `[0; 7] ++ [0x22]`, with the relfilenode) as it becomes big and when its database
+    closes; `ensure` uses them for a table never measured. Not a format change: older versions
+    ignore the keys.
+  - Verification gap closed: the full crate suite with `ROLL_COMPACT_LOCKS_AFTER=0` at
+    `ea038e8e` (round 3's end, with the pgrowlocks fix) passes.
+  - Found, not fixed: DROP TABLE of a 1M-row table takes 3 s (PostgreSQL 0.1 s); in-process
+    under `sizing::with_max_versions`, a parallel seq scan of a small "big" table counted 42
+    rows its transaction had deleted (the test sets max_parallel_workers_per_gather = 0;
+    parallel workers don't run under the thread-local limit; the same statements at 600k rows
+    over the wire count right).
+  - Left from the list: the per-row write buffer (the map insert and journal entry with the key
+    twice; COPY's per-row path otherwise as before), each row written as spill run, merge and
+    commit file (the per-file commit timestamp an SST would need to link runs in), DELETE
+    leaving index entries for VACUUM as Postgres does (every reader of entries would check the
+    row), ANALYZE's full measure (its sample depends on the measured pages, so it can't share
+    the pass).
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
