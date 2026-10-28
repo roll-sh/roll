@@ -63,7 +63,7 @@ impl BulkLocks {
                     holder,
                     xid,
                     rows: KeySet::default(),
-                    ukeys: KeySet::default(),
+                    ukeys: KeySet::with_payloads(),
                     moved: Vec::new(),
                 });
                 self.segs.len() - 1
@@ -115,6 +115,8 @@ pub(crate) struct KeySet {
     len: usize,
     /// Entries removed (tag `DEAD`), still in the arena and the slots.
     dead: usize,
+    /// Entries carry a payload after the tag (its length byte, then its bytes).
+    payloads: bool,
 }
 
 /// The tag of a removed entry.
@@ -136,6 +138,30 @@ impl KeySet {
     fn key_at(&self, off: usize) -> (&[u8], u8) {
         let n = u16::from_le_bytes([self.arena[off], self.arena[off + 1]]) as usize;
         (&self.arena[off + 2..off + 2 + n], self.arena[off + 2 + n])
+    }
+
+    /// The payload of the entry at `off` (empty when it has none).
+    fn payload_at(&self, off: usize) -> &[u8] {
+        if !self.payloads {
+            return &[];
+        }
+        let n = u16::from_le_bytes([self.arena[off], self.arena[off + 1]]) as usize;
+        let p = off + 3 + n;
+        &self.arena[p + 1..p + 1 + self.arena[p] as usize]
+    }
+
+    /// The length of the entry at `off`.
+    fn entry_len(&self, off: usize) -> usize {
+        let n = u16::from_le_bytes([self.arena[off], self.arena[off + 1]]) as usize;
+        if !self.payloads {
+            return 3 + n;
+        }
+        4 + n + self.arena[off + 3 + n] as usize
+    }
+
+    /// A set whose entries carry payloads (`insert_with`): a length byte more each.
+    pub fn with_payloads() -> KeySet {
+        KeySet { payloads: true, ..Default::default() }
     }
 
     /// The slot holding `key` (and its entry's offset), or the empty slot it would go in.
@@ -167,15 +193,36 @@ impl KeySet {
         off.map(|o| self.arena[o + 2 + key.len()])
     }
 
+    /// The payload `key` was put in with (`insert_with`), if it is in the set.
+    pub fn payload(&self, key: &[u8]) -> Option<&[u8]> {
+        if self.len == 0 {
+            return None;
+        }
+        let (_, off) = self.find(key, hash(key));
+        off.map(|o| self.payload_at(o))
+    }
+
     /// Put `key` in with `tag`, or give it `tag` when it is in already. Keys longer than
     /// 64 kB, or an arena past 4 GB, don't fit: false (the caller locks it the usual way).
+    #[cfg(test)]
     pub fn insert(&mut self, key: &[u8], tag: u8) -> bool {
         self.upsert(key, |_| tag)
     }
 
+    /// `insert`, the entry carrying `payload` (up to 255 bytes; a longer one is left out)
+    /// when it is new.
+    pub fn insert_with(&mut self, key: &[u8], tag: u8, payload: &[u8]) -> bool {
+        self.upsert_with(key, payload, |_| tag)
+    }
+
     /// Put `key` in, its tag `f(the tag it had)` (None: not in). False as `insert`.
     pub fn upsert(&mut self, key: &[u8], f: impl FnOnce(Option<u8>) -> u8) -> bool {
-        if key.len() > u16::MAX as usize || self.arena.len() + key.len() + 3 >= u32::MAX as usize {
+        self.upsert_with(key, &[], f)
+    }
+
+    fn upsert_with(&mut self, key: &[u8], payload: &[u8], f: impl FnOnce(Option<u8>) -> u8) -> bool {
+        let payload = if payload.len() > u8::MAX as usize { &[][..] } else { payload };
+        if key.len() > u16::MAX as usize || self.arena.len() + key.len() + payload.len() + 4 >= u32::MAX as usize {
             return false;
         }
         if (self.len + self.dead + 1) * 4 > self.slots.len() * 3 {
@@ -195,6 +242,10 @@ impl KeySet {
         self.arena.extend_from_slice(&(key.len() as u16).to_le_bytes());
         self.arena.extend_from_slice(key);
         self.arena.push(tag);
+        if self.payloads {
+            self.arena.push(payload.len() as u8);
+            self.arena.extend_from_slice(payload);
+        }
         self.slots[i] = slot_of(h, off);
         self.len += 1;
         true
@@ -227,13 +278,19 @@ impl KeySet {
 
     /// The live keys with their tags, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = (&[u8], u8)> {
+        self.entries().map(|(k, t, _)| (k, t))
+    }
+
+    /// The live keys with their tags and payloads, in no particular order.
+    pub fn entries(&self) -> impl Iterator<Item = (&[u8], u8, &[u8])> {
         let mut off = 0;
         std::iter::from_fn(move || {
             while off < self.arena.len() {
-                let (k, tag) = self.key_at(off);
-                off += 3 + k.len();
+                let at = off;
+                let (k, tag) = self.key_at(at);
+                off += self.entry_len(at);
                 if tag != DEAD {
-                    return Some((k, tag));
+                    return Some((k, tag, self.payload_at(at)));
                 }
             }
             None
@@ -244,13 +301,14 @@ impl KeySet {
     /// the entries again.
     fn grow(&mut self) {
         if self.dead > self.len {
-            let live: Vec<(Vec<u8>, u8)> = self.iter().map(|(k, t)| (k.to_vec(), t)).collect();
+            let live: Vec<(Vec<u8>, u8, Vec<u8>)> =
+                self.entries().map(|(k, t, p)| (k.to_vec(), t, p.to_vec())).collect();
             self.arena.clear();
             self.dead = 0;
             self.len = 0;
             self.slots = vec![0; self.slots.len().max(16)];
-            for (k, t) in live {
-                self.insert(&k, t);
+            for (k, t, p) in live {
+                self.insert_with(&k, t, &p);
             }
             return;
         }
@@ -260,14 +318,13 @@ impl KeySet {
         let mut off = 0;
         while off < self.arena.len() {
             let (k, _) = self.key_at(off);
-            let len = k.len();
             let h = hash(k);
             let mut i = h as usize & mask;
             while slots[i] != 0 {
                 i = (i + 1) & mask;
             }
             slots[i] = slot_of(h, off);
-            off += 3 + len;
+            off += self.entry_len(off);
         }
         self.slots = slots;
     }
@@ -313,5 +370,29 @@ mod tests {
         assert_eq!(seen, want);
         assert_eq!(s.get(b"absent"), None);
         assert!(!s.insert(&vec![0; 70_000], 1));
+    }
+
+    /// Payloads stay with their keys past growths, compactions and re-tags.
+    #[test]
+    fn keyset_payloads() {
+        let mut s = KeySet::with_payloads();
+        for i in 0..50_000u32 {
+            let key = format!("k{i}").into_bytes();
+            assert!(s.insert_with(&key, (i % 100) as u8, &i.to_le_bytes()[..(i % 5) as usize]));
+            if i % 3 == 0 {
+                s.remove(&key);
+            } else if i % 3 == 1 {
+                s.insert(&key, 7);
+            }
+        }
+        for i in 0..50_000u32 {
+            let key = format!("k{i}").into_bytes();
+            let bytes = i.to_le_bytes();
+            let want = (i % 3 != 0).then(|| &bytes[..(i % 5) as usize]);
+            assert_eq!(s.payload(&key), want, "{i}");
+        }
+        assert_eq!(s.entries().count(), s.len());
+        assert!(s.insert_with(b"long", 1, &[1; 300]));
+        assert_eq!(s.payload(b"long"), Some(&[][..]));
     }
 }

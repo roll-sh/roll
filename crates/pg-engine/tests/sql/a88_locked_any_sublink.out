@@ -1,0 +1,111 @@
+> CREATE TABLE a88_jobs (id int PRIMARY KEY, queue text NOT NULL, state text NOT NULL DEFAULT 'available',
+>   priority int NOT NULL DEFAULT 0, attempt int NOT NULL DEFAULT 0)
+-- CREATE TABLE
+
+> CREATE INDEX a88_jobs_fetch ON a88_jobs (queue, state, priority, id)
+-- CREATE INDEX
+
+> INSERT INTO a88_jobs (id, queue, priority) SELECT g, 'q' || (g % 3), g % 5 FROM generate_series(1, 3000) g
+-- INSERT 0 3000
+
+> ANALYZE a88_jobs
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF)
+> UPDATE a88_jobs SET state = 'executing', attempt = attempt + 1
+> WHERE id IN (SELECT id FROM a88_jobs WHERE state = 'available' AND queue = 'q1'
+>              ORDER BY priority, id LIMIT 5 FOR UPDATE SKIP LOCKED)
+> RETURNING id
+QUERY PLAN:text
+Update on a88_jobs
+  ->  Nested Loop
+        ->  HashAggregate
+              Group Key: "ANY_subquery".id
+              ->  Subquery Scan on "ANY_subquery"
+                    ->  Limit
+                          ->  LockRows
+                                ->  Index Scan using a88_jobs_fetch on a88_jobs a88_jobs_1
+                                      Index Cond: ((queue = 'q1'::text) AND (state = 'available'::text))
+        ->  Index Scan using a88_jobs_pkey on a88_jobs
+              Index Cond: (id = "ANY_subquery".id)
+-- EXPLAIN
+
+> UPDATE a88_jobs SET state = 'executing', attempt = attempt + 1
+> WHERE id IN (SELECT id FROM a88_jobs WHERE state = 'available' AND queue = 'q1'
+>              ORDER BY priority, id LIMIT 5 FOR UPDATE SKIP LOCKED)
+> RETURNING id, state, attempt
+id:int4 | state:text | attempt:int4
+10 | executing | 1
+40 | executing | 1
+55 | executing | 1
+25 | executing | 1
+70 | executing | 1
+-- UPDATE 5
+
+> EXPLAIN (COSTS OFF)
+> SELECT id, priority FROM a88_jobs
+> WHERE id IN (SELECT id FROM a88_jobs WHERE queue = 'q2' ORDER BY priority, id LIMIT 3 FOR UPDATE)
+> ORDER BY id
+QUERY PLAN:text
+Sort
+  Sort Key: a88_jobs.id
+  ->  Nested Loop
+        ->  HashAggregate
+              Group Key: "ANY_subquery".id
+              ->  Subquery Scan on "ANY_subquery"
+                    ->  Limit
+                          ->  LockRows
+                                ->  Sort
+                                      Sort Key: a88_jobs_1.priority, a88_jobs_1.id
+                                      ->  Seq Scan on a88_jobs a88_jobs_1
+                                            Filter: (queue = 'q2'::text)
+        ->  Index Scan using a88_jobs_pkey on a88_jobs
+              Index Cond: (id = "ANY_subquery".id)
+-- EXPLAIN
+
+> SELECT id, priority FROM a88_jobs
+> WHERE id IN (SELECT id FROM a88_jobs WHERE queue = 'q2' ORDER BY priority, id LIMIT 3 FOR UPDATE)
+> ORDER BY id
+id:int4 | priority:int4
+5 | 0
+20 | 0
+35 | 0
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF)
+> DELETE FROM a88_jobs
+> WHERE id IN (SELECT id FROM a88_jobs WHERE state = 'executing' ORDER BY id LIMIT 2 FOR NO KEY UPDATE SKIP LOCKED)
+QUERY PLAN:text
+Delete on a88_jobs
+  ->  Nested Loop
+        ->  HashAggregate
+              Group Key: "ANY_subquery".id
+              ->  Subquery Scan on "ANY_subquery"
+                    ->  Limit
+                          ->  LockRows
+                                ->  Sort
+                                      Sort Key: a88_jobs_1.id
+                                      ->  Index Scan using a88_jobs_fetch on a88_jobs a88_jobs_1
+                                            Index Cond: (state = 'executing'::text)
+        ->  Index Scan using a88_jobs_pkey on a88_jobs
+              Index Cond: (id = "ANY_subquery".id)
+-- EXPLAIN
+
+> WITH d AS (DELETE FROM a88_jobs
+>   WHERE id IN (SELECT id FROM a88_jobs WHERE state = 'executing' ORDER BY id LIMIT 2 FOR NO KEY UPDATE SKIP LOCKED)
+>   RETURNING id)
+> SELECT id FROM d ORDER BY id
+id:int4
+10
+25
+-- SELECT 2
+
+> SELECT state, count(*) FROM a88_jobs GROUP BY state ORDER BY state
+state:text | count:int8
+available | 2995
+executing | 3
+-- SELECT 2
+
+> DROP TABLE a88_jobs
+-- DROP TABLE
+

@@ -1383,6 +1383,14 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   constraint's writers no longer wait for each other unless their rows conflict (each one
   took a lock for the whole constraint): entries in progress are visible to the other
   writers, as a dirty snapshot's index tuples (`Txn::hold_exclusion_entry`).
+  Concurrency round 4 (round 20, agent 88; isolation STATUS.md has the details): ON
+  CONFLICT under an exclusion arbiter is the livelock-preventing wait (one of two conflicting
+  speculative insertions starts over instead of a deadlock; `dml::ExclWait`), a deferrable
+  exclusion constraint's insert-time check doesn't wait, compact unique keys name their
+  row in CONTEXT lines, a job queue's `IN (SELECT ... FOR UPDATE SKIP LOCKED)` joins as
+  "ANY_subquery" instead of a SubPlan over the whole table, and `tests/app_concurrency.rs`
+  runs application patterns (queues, upserts, SERIALIZABLE retries, leader election,
+  NOTIFY order) against the engine and, `against_reference`, PostgreSQL.
 
 ## Repository layout
 

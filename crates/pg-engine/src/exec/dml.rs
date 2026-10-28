@@ -1037,6 +1037,20 @@ fn unique_violation(t: &Table, bix: &BoundIndex, vals: &[Value], ctx: &ExecCtx) 
         .constraint(name)
 }
 
+/// How an exclusion check treats a conflicting entry, or a conflicting row's delete, that a
+/// transaction in progress is writing (CEOUC_WAIT_MODE).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExclWait {
+    /// Wait for the writer, then look again (CEOUC_WAIT).
+    Wait,
+    /// A potential conflict, without waiting (CEOUC_NOWAIT: a deferrable constraint's
+    /// check as the row goes in).
+    NoWait,
+    /// A speculative insertion's arbiter (CEOUC_LIVELOCK_PREVENTING_WAIT): wait only for
+    /// another speculative insertion of a newer transaction; anything else is a conflict.
+    Livelock,
+}
+
 /// Look for a row other than `own` whose key values conflict with `vals` under an exclusion
 /// constraint (every operator true). Returns the conflicting row's key values.
 /// check_exclusion_or_unique_constraint over a dirty snapshot: `entering` (the row's storage
@@ -1050,7 +1064,8 @@ pub fn exclusion_conflict(
     bix: &BoundIndex,
     vals: &[Value],
     own: Option<&[u8]>,
-    entering: Option<&[u8]>,
+    entering: Option<(&[u8], Option<u32>)>,
+    mode: ExclWait,
     ctx: &ExecCtx,
 ) -> Result<Option<Vec<Value>>> {
     let Some(con) = &bix.constraint else {
@@ -1085,8 +1100,8 @@ pub fn exclusion_conflict(
         };
         Ok(conflicts(&other)?.then_some(other))
     };
-    if let Some(k) = entering {
-        ctx.txn.borrow_mut().hold_exclusion_entry(con.oid, k, Arc::new(vals.to_vec()))?;
+    if let Some((k, token)) = entering {
+        ctx.txn.borrow_mut().hold_exclusion_entry(con.oid, k, Arc::new(vals.to_vec()), token)?;
     }
     let wait_context = |dkey: &[u8]| {
         let (b, o) = row_tid(t, dkey, ctx);
@@ -1095,17 +1110,14 @@ pub fn exclusion_conflict(
     let by_value = con.leading_eq && bix.index.id != 0;
     'retry: loop {
         ctx.check()?;
-        // Others' entries in progress (their rows aren't readable yet).
+        // Others' entries in progress (their rows aren't readable yet), taken before the
+        // committed rows are read: a writer committing meanwhile is in one or the other.
         let pending = ctx.txn.borrow().exclusion_entries(con.oid);
-        for (dkey, kh) in pending {
-            let Some(other) = kh.row.as_deref() else { continue };
-            if own != Some(dkey.as_slice()) && conflicts(other)? {
-                let line = wait_context(&dkey);
-                ctx.txn.borrow_mut().wait_for_xact(kh.holder).map_err(|e| e.inner_context(line))?;
-                continue 'retry;
-            }
-        }
-        // Committed rows (and ours): only the leading `=` value's when it has one.
+        // Committed rows (and ours): only the leading `=` value's when it has one. A
+        // conflicting one is a conflict whatever else is in progress (the scan's order
+        // decides which Postgres meets first; it reports the same conflict, after waiting
+        // for the others when they come first), unless a transaction in progress is
+        // deleting or updating it: then what that one does decides.
         let rows: Vec<(Vec<u8>, bytes::Bytes)> = if by_value {
             let prefix = index_value_prefix(t, &bix.index, &vals[..1], &bix.colls);
             let dkeys: Vec<Vec<u8>> = ctx
@@ -1125,17 +1137,38 @@ pub fn exclusion_conflict(
             let start = index_prefix(t.oid, 0);
             ctx.txn.borrow().scan_latest(&start, &prefix_end(&start)).collect::<Result<_>>()?
         };
+        let mut modified = None;
         for (dkey, bytes) in rows {
             ctx.check()?;
             let Some(other) = check(&dkey, &decode_table_row(t, &bytes)?)? else { continue };
-            // Being deleted or updated by a transaction in progress: what it does decides.
             let modifier = ctx.txn.borrow().row_modifier(&dkey);
-            if let Some(h) = modifier {
+            match modifier.filter(|_| mode == ExclWait::Wait) {
+                Some(h) => modified = modified.or(Some((dkey, h))),
+                None => return Ok(Some(other)),
+            }
+        }
+        if let Some((dkey, h)) = modified {
+            let line = wait_context(&dkey);
+            ctx.txn.borrow_mut().wait_for_xact(h).map_err(|e| e.inner_context(line))?;
+            continue 'retry;
+        }
+        for (dkey, kh) in pending {
+            let Some(other) = kh.row.as_deref() else { continue };
+            if own != Some(dkey.as_slice()) && conflicts(other)? {
+                let wait = match mode {
+                    ExclWait::Wait => true,
+                    ExclWait::NoWait => false,
+                    // Only an older speculative insertion waits for a newer one; the newer
+                    // gives up its row and starts over, so the two never wait for each other.
+                    ExclWait::Livelock => kh.token.is_some() && ctx.txn.borrow_mut().cur_xid() < kh.xid,
+                };
+                if !wait {
+                    return Ok(Some(other.to_vec()));
+                }
                 let line = wait_context(&dkey);
-                ctx.txn.borrow_mut().wait_for_xact(h).map_err(|e| e.inner_context(line))?;
+                ctx.txn.borrow_mut().wait_for_key_holder(&kh, line)?;
                 continue 'retry;
             }
-            return Ok(Some(other));
         }
         return Ok(None);
     }
@@ -1214,7 +1247,12 @@ fn index_conflict(
         return Ok(find_conflict(t, bix, vals, own, entering, dirty, form_existing, ctx)?
             .map(|k| (k, None)));
     }
-    Ok(exclusion_conflict(t, bix, vals, own, entering.and_then(|e| e.key), ctx)?.map(|o| (Vec::new(), Some(o))))
+    let mode = match dirty {
+        Dirty::Wait => ExclWait::Wait,
+        Dirty::Partial => ExclWait::NoWait,
+    };
+    let entering = entering.and_then(|e| e.key).map(|k| (k, None));
+    Ok(exclusion_conflict(t, bix, vals, own, entering, mode, ctx)?.map(|o| (Vec::new(), Some(o))))
 }
 
 fn index_violation(
@@ -3134,6 +3172,9 @@ pub fn insert_prepared(
                     for k in &vals.entered {
                         ctx.txn.borrow_mut().hold_unique_key(k, None, shared.clone(), Some(&p.dkey));
                     }
+                    for &con in &vals.excl {
+                        ctx.txn.borrow().settle_exclusion_entry(con, &p.dkey);
+                    }
                     Some(store_inserted(rules, p.clone(), &vals, after, ctx))
                 }
             },
@@ -3158,6 +3199,8 @@ struct CheckedEntries {
     /// Unique key locks this attempt took, and every one its arbiter entries hold.
     taken: Vec<Vec<u8>>,
     entered: Vec<Vec<u8>>,
+    /// The exclusion constraints a speculative insertion's arbiter entries went into.
+    excl: Vec<u32>,
 }
 
 /// ExecInsertIndexTuples' part before the writes: each index's values (FormIndexDatum, in
@@ -3179,6 +3222,7 @@ fn index_entries_checked(
         conflict: false,
         taken: Vec::new(),
         entered: Vec::new(),
+        excl: Vec::new(),
     };
     for bix in &rules.indexes {
         let vals = index_values(bix, &p.row, ctx)?;
@@ -3206,10 +3250,12 @@ fn index_entries_checked(
                         let con = bix.constraint.as_ref().map_or(0, |c| c.oid);
                         let lk = crate::txn::locks::excl_entry_key(con, &p.dkey);
                         let had = ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive);
-                        let found = exclusion_conflict(t, bix, v, None, Some(&p.dkey), ctx)?;
+                        let entering = Some((p.dkey.as_slice(), Some(token)));
+                        let found = exclusion_conflict(t, bix, v, None, entering, ExclWait::Livelock, ctx)?;
                         if !had && ctx.txn.borrow().holds_lock_mode(&lk, LockMode::Exclusive) {
                             out.taken.push(lk);
                         }
+                        out.excl.push(con);
                         out.conflict |= found.is_some();
                     }
                 }

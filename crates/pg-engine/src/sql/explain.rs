@@ -17693,13 +17693,16 @@ fn target_scans(p: &Plan) -> Vec<&Plan> {
 }
 
 fn target_scan(p: &Plan, oid: u32) -> Option<&Plan> {
-    if let Plan::Scan(s) = p
-        && s.with_key
-        && s.table.oid == oid
-    {
-        return Some(p);
+    // (Outside subqueries first: a sub-select's locked scan of the same table returns its
+    // row's key too, `IN (SELECT id FROM t ... FOR UPDATE)` pulled up as "ANY_subquery".)
+    fn go(p: &Plan, oid: u32, into_subqueries: bool) -> Option<&Plan> {
+        match p {
+            Plan::Scan(s) if s.with_key && s.table.oid == oid => Some(p),
+            Plan::Barrier { .. } if !into_subqueries => None,
+            _ => plan_inputs(p).into_iter().find_map(|c| go(c, oid, into_subqueries)),
+        }
     }
-    plan_inputs(p).into_iter().find_map(|c| target_scan(c, oid))
+    go(p, oid, false).or_else(|| go(p, oid, true))
 }
 
 // ── output ──

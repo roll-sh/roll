@@ -298,9 +298,9 @@ failures predate round 17's lock manager); what differed:
   (`Txn::hold_exclusion_entry`, `locks::EXCL_ENTRY`, `LockManager::excl_entries`): the
   writer puts its entry in first, then checks committed rows and others' entries in
   progress; it waits only for a conflicting one's writer (or a conflicting row's deleter in
-  progress), then checks again (`roll-exclusion-constraints`). Not modelled: two ON CONFLICT
-  insertions whose speculative rows conflict under an exclusion arbiter wait for each other
-  (a deadlock error) where Postgres's livelock-preventing wait lets one start over.
+  progress), then checks again (`roll-exclusion-constraints`). (Two ON CONFLICT
+  insertions whose speculative rows conflict under an exclusion arbiter: round 4 of the
+  concurrency work, agent 88, below.)
 - **idle_in_transaction_session_timeout, transaction_timeout and idle_session_timeout** were
   accepted and ignored. Now: waiting for the next query after ReadyForQuery (not between an
   extended query's messages), a session past idle_in_transaction_session_timeout (in a block,
@@ -327,9 +327,50 @@ UPDATE), LISTEN / NOTIFY (delivery at commit, order, duplicates folded, payloads
 savepoints, listeners in a transaction, LISTEN / UNLISTEN at commit), sequences (gaps,
 setval outside the transaction, CACHE ranges, ALTER SEQUENCE waits), serialization failures
 and their retries (write skew, REPEATABLE READ's concurrent update / delete / lock / ON
-CONFLICT, read-only and deferrable), DETACH ... FINALIZE, exclusion constraints. All 68
-permutations match; the last two needed fixes. (They were written against both servers and checked to wait and fail
+CONFLICT, read-only and deferrable), DETACH ... FINALIZE, exclusion constraints (and ON
+CONFLICT under them, a deferred one's recheck: round 20, agent 88). All 75 permutations of
+the 9 specs match; the last two of round 20's first 68 needed fixes. (They were written against both servers and checked to wait and fail
 where the reference does: 20 waits, 27 errors, 19 notifications.)
+
+## Concurrency round 4 (round 20, agent 88)
+
+- **ON CONFLICT with an exclusion constraint as its arbiter** (`roll-exclusion-on-conflict`,
+  7 permutations; the engine before this failed 4). An arbiter's check after the
+  speculative row went in is check_exclusion_or_unique_constraint's
+  CEOUC_LIVELOCK_PREVENTING_WAIT (`dml::ExclWait::Livelock`): it waits only for another
+  speculative insertion of a newer transaction (on its token, SpeculativeInsertionWait);
+  anything else in progress, or committed, is a conflict, and the insertion kills its row
+  and starts over at the pre-check. Two conflicting insertions used to wait for each other
+  (a deadlock error, or a stall behind a third one); now one of them starts over. Entries
+  carry their speculative token until the insertion completes
+  (`Txn::settle_exclusion_entry`), the pre-check waits on that token rather than the
+  transaction, and spectokens are taken under the (sub)transaction's xid, as the entries
+  record it. A deferrable exclusion constraint's check as the row goes in no longer waits
+  (CEOUC_NOWAIT): the insert goes in at once and the recheck (statement end, or COMMIT
+  when deferred) waits. A committed conflicting row is a conflict before any entry in
+  progress is waited for (the spec's old session found the committed row first, as
+  Postgres's index scan did, instead of waiting behind a later writer).
+- **A unique key held compact** (agent 74's `bulklocks`, past 2,048 keys in a transaction)
+  now records its row: the ON CONFLICT pre-check's XactLockTableWait CONTEXT names the
+  other writer's tuple, `while inserting index tuple (54,10) in relation "t"`, as for any
+  other key (`KeySet::insert_with`, a payload per entry; `compact_locks.rs`).
+- **Application-style concurrency** (`tests/app_concurrency.rs`, every check also passes
+  against PostgreSQL 18.6 with `against_reference`): SKIP LOCKED job queues (Oban's
+  `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)`, graphile-worker's CTE),
+  upsert storms, ON CONFLICT DO NOTHING under an exclusion constraint, SERIALIZABLE
+  transfers with retries, advisory-lock leader election, LISTEN / NOTIFY delivery (a
+  transaction's notifications together and in order, transactions in commit order). With
+  pgbench against both servers (debug build): TPC-B in READ COMMITTED, REPEATABLE READ and
+  SERIALIZABLE with `--max-tries` (balances agree, no failures), FOR NO KEY UPDATE / FOR
+  UPDATE of a parent next to child inserts (no deadlock / the same deadlocks), sequences,
+  identity and serial columns with rollbacks (no value twice). No wrong result, lost
+  update, extra deadlock or wrong SQLSTATE turned up.
+- **Throughput**: a job queue's fetch, `IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`,
+  stayed a hashed SubPlan over a sequential scan of the whole table (every fetch read
+  every job): the sub-select now joins as a subquery of its own ("ANY_subquery", its
+  LockRows inside), as convert_ANY_sublink_to_join does, and EXPLAIN matches (golden
+  `a88_locked_any_sublink`). Oban's pattern went from 30 to 111 transactions/s on 32
+  sessions (debug build).
 
 ## What round 18 changed (agent 56)
 

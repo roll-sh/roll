@@ -138,6 +138,13 @@ fn compact_unique_keys_wait_for_their_writer() {
             assert_eq!(q(&mut b, &format!("INSERT INTO t VALUES ({id}, -{id}, 1) ON CONFLICT DO NOTHING")), Err("55P03".into()), "{id}");
         }
         ok(&mut b, "INSERT INTO t VALUES (20000, 20000, 1)");
+        // An ON CONFLICT pre-check's wait names the other writer's row, compact or not
+        // (XactLockTableWait's CONTEXT): where the heap puts it.
+        let mut waits = Vec::new();
+        for id in [10002, 14000] {
+            let e = b.query(&format!("INSERT INTO t VALUES ({id}, -{id}, 1) ON CONFLICT (id) DO NOTHING")).unwrap_err();
+            waits.push((id, e.context.unwrap_or_default().to_string()));
+        }
         // A waiting writer gets the unique violation once A commits.
         let e2 = e.clone();
         let waiter = std::thread::Builder::new()
@@ -150,6 +157,10 @@ fn compact_unique_keys_wait_for_their_writer() {
         std::thread::sleep(Duration::from_millis(300));
         ok(&mut a, "COMMIT");
         assert_eq!(waiter.join().unwrap(), Err("23505".into()));
+        // (Where PostgreSQL 18.6 puts the two rows: their ctids after the same inserts.)
+        for ((id, context), tid) in waits.into_iter().zip(["(32,82)", "(54,10)"]) {
+            assert_eq!(context, format!("while inserting index tuple {tid} in relation \"t\""), "{id}");
+        }
         assert_eq!(q(&mut b, "INSERT INTO t VALUES (14000, -1, 1)"), Err("23505".into()));
         // Rolled back: the keys are free.
         ok(&mut a, "BEGIN");

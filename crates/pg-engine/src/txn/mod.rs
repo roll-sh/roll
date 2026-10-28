@@ -2112,7 +2112,7 @@ impl Txn {
             let holder = self.holder();
             let xid = self.cur_xid();
             let proc = self.lock_proc();
-            if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid) {
+            if self.db.locks.hold_compact_unique_key(key, self.id, proc, holder, xid, row_key) {
                 // (As `lock` and `hold_unique_key` do: the transaction's own lock, which
                 // waiting for it waits on, and its subtransaction's.)
                 if !self.xact_locks.contains(&self.id) {
@@ -2173,11 +2173,13 @@ impl Txn {
     /// Row `row_key` (values `row`) enters exclusion constraint `con`: others' checks see
     /// the entry and wait for the running (sub)transaction (a dirty snapshot's in-progress
     /// index tuple), until it ends. (Its lock goes with the subtransaction if that aborts.)
+    /// `token`: a speculative insertion's, until `settle_exclusion_entry`.
     pub fn hold_exclusion_entry(
         &mut self,
         con: u32,
         row_key: &[u8],
         row: Arc<Vec<crate::types::Value>>,
+        token: Option<u32>,
     ) -> Result<()> {
         let key = locks::excl_entry_key(con, row_key);
         self.lock(&key, LockMode::Exclusive, WaitPolicy::Block, &String::new)?;
@@ -2189,9 +2191,15 @@ impl Txn {
                 self.xact_locks.push(holder);
             }
         }
-        let kh = locks::KeyHolder { holder, xid, token: None, row: Some(row), row_key: Some(row_key.to_vec()) };
+        let kh = locks::KeyHolder { holder, xid, token, row: Some(row), row_key: Some(row_key.to_vec()) };
         self.db.locks.add_excl_entry(con, &key, row_key, self.id, kh);
         Ok(())
+    }
+
+    /// The speculative insertion that put row `row_key`'s entry into exclusion constraint
+    /// `con` is complete.
+    pub fn settle_exclusion_entry(&self, con: u32, row_key: &[u8]) {
+        self.db.locks.settle_excl_entry(con, &locks::excl_entry_key(con, row_key));
     }
 
     /// The entries of exclusion constraint `con` other backends are writing: (row key,
@@ -2239,14 +2247,14 @@ impl Txn {
     pub fn begin_speculative(&mut self) -> Result<u32> {
         self.spec_token = self.spec_token.wrapping_add(1).max(1);
         let token = self.spec_token;
-        let xid = self.xid();
+        let xid = self.cur_xid(); // (the (sub)transaction's, as entries record it)
         self.lock(&locks::spectoken_key(xid, token), LockMode::Exclusive, WaitPolicy::Block, &String::new)?;
         Ok(token)
     }
 
     /// SpeculativeInsertionLockRelease.
     pub fn end_speculative(&mut self, token: u32) {
-        let xid = self.xid();
+        let xid = self.cur_xid();
         self.unlock(&locks::spectoken_key(xid, token), LockMode::Exclusive);
     }
 

@@ -507,17 +507,19 @@ impl State {
         let mut found = None;
         'all: for (&owner, b) in self.bulk.iter_mut() {
             for g in &mut b.segs {
+                let row_key = g.ukeys.payload(key).map(<[u8]>::to_vec);
                 if g.ukeys.remove(key) {
                     g.moved.push(key.to_vec());
-                    found = Some((owner, b.proc, g.holder, g.xid));
+                    found = Some((owner, b.proc, g.holder, g.xid, row_key));
                     break 'all;
                 }
             }
         }
-        if let Some((owner, proc, holder, xid)) = found {
+        if let Some((owner, proc, holder, xid, row_key)) = found {
             let e = self.locks.entry(key.to_vec()).or_default();
             e.holds.push(Hold { owner, proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
-            e.key_holder = Some((owner, KeyHolder { holder, xid, token: None, row: None, row_key: None }));
+            let row_key = row_key.filter(|k| !k.is_empty());
+            e.key_holder = Some((owner, KeyHolder { holder, xid, token: None, row: None, row_key }));
         }
     }
 
@@ -1069,6 +1071,17 @@ impl LockManager {
         }
     }
 
+    /// A speculative insertion's entry `key` of exclusion constraint `con` is complete: it
+    /// stands for its (sub)transaction from now on.
+    pub fn settle_excl_entry(&self, con: u32, key: &[u8]) {
+        let mut s = self.state.lock();
+        if let Some(list) = s.excl.get_mut(&con) {
+            for (_, _, kh) in list.iter_mut().filter(|(k, _, _)| k == key) {
+                kh.token = None;
+            }
+        }
+    }
+
     /// The entries in progress of exclusion constraint `con` that backends other than `proc`
     /// are writing: (row key, writer). (Ended writers' entries go.)
     pub fn excl_entries(&self, con: u32, proc: u64) -> Vec<(Vec<u8>, KeyHolder)> {
@@ -1094,12 +1107,15 @@ impl LockManager {
         let Some(e) = s.locks.get(key) else {
             // A compact one: its (sub)transaction's in-progress entry.
             return s.bulk.values().filter(|b| b.proc != proc).find_map(|b| {
-                b.segs.iter().find(|g| g.ukeys.get(key).is_some()).map(|g| KeyHolder {
-                    holder: g.holder,
-                    xid: g.xid,
-                    token: None,
-                    row: None,
-                    row_key: None,
+                b.segs.iter().find_map(|g| {
+                    let row_key = g.ukeys.payload(key)?;
+                    Some(KeyHolder {
+                        holder: g.holder,
+                        xid: g.xid,
+                        token: None,
+                        row: None,
+                        row_key: (!row_key.is_empty()).then(|| row_key.to_vec()),
+                    })
                 })
             });
         };
@@ -1399,15 +1415,24 @@ impl LockManager {
     /// Take unique key lock `key` (Exclusive) for (sub)transaction `holder` (transaction id
     /// `xid`) of transaction `owner` into its compact set, standing for its in-progress index
     /// entry. Only while nobody else holds or wants the key: false, take it the usual way
-    /// (`acquire`, which first moves another's compact hold into the main table).
-    pub fn hold_compact_unique_key(&self, key: &[u8], owner: u64, proc: u64, holder: u64, xid: u64) -> bool {
+    /// (`acquire`, which first moves another's compact hold into the main table). `row_key`:
+    /// the entry's heap tuple (named by the CONTEXT of a wait for it).
+    pub fn hold_compact_unique_key(
+        &self,
+        key: &[u8],
+        owner: u64,
+        proc: u64,
+        holder: u64,
+        xid: u64,
+        row_key: Option<&[u8]>,
+    ) -> bool {
         let mut s = self.state.lock();
         if s.locks.contains_key(key) || s.bulk.values().any(|b| b.segs.iter().any(|g| g.ukeys.get(key).is_some())) {
             return false;
         }
         Self::hold_xact(&mut s, holder, owner, proc, xid);
         let b = s.bulk.entry(owner).or_insert_with(|| BulkLocks { proc, segs: Vec::new() });
-        let done = b.seg(holder, xid).ukeys.insert(key, 0);
+        let done = b.seg(holder, xid).ukeys.insert_with(key, 0, row_key.unwrap_or_default());
         if done {
             COMPACT_HOLDS.fetch_add(1, Ordering::Relaxed);
         }
@@ -1436,10 +1461,11 @@ impl LockManager {
                 }
                 rows.push(row.to_vec());
             }
-            for (k, _) in g.ukeys.iter() {
+            for (k, _, row_key) in g.ukeys.entries() {
                 let e = s.locks.entry(k.to_vec()).or_default();
                 e.holds.push(Hold { owner, proc: b.proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
-                e.key_holder = Some((owner, KeyHolder { holder: g.holder, xid: g.xid, token: None, row: None, row_key: None }));
+                let row_key = (!row_key.is_empty()).then(|| row_key.to_vec());
+                e.key_holder = Some((owner, KeyHolder { holder: g.holder, xid: g.xid, token: None, row: None, row_key }));
                 keys.push(k.to_vec());
             }
             keys.extend(g.moved);

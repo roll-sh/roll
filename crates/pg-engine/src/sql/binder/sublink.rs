@@ -849,6 +849,27 @@ fn lateral_clean(p: &Plan, n: usize) -> bool {
     ok && crate::sql::explain::plan_inputs(p).iter().all(|c| lateral_clean(c, n))
 }
 
+/// `plan_clean` for a sub-select with a locking clause, its LockRows under the level's
+/// LIMIT, ORDER BY or select list (`IN (SELECT id ... LIMIT n FOR UPDATE SKIP LOCKED)`, a
+/// job queue's fetch): convert_ANY_sublink_to_join keeps it a subquery of its own, which
+/// locks the rows it returns as the SubPlan would.
+fn locked_clean(p: &Plan) -> bool {
+    match p {
+        Plan::LockRows { input, .. } => plan_clean(input),
+        Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::Project { input, .. } => {
+            let mut exprs = Vec::new();
+            crate::sql::explain::node_exprs(p, &mut exprs);
+            let clean = exprs.iter().all(|e| {
+                let mut ok = true;
+                e.walk(&mut |x| ok &= !matches!(x, Expr::Outer(..) | Expr::Subquery(_) | Expr::Srf(..)));
+                ok
+            });
+            clean && locked_clean(input)
+        }
+        _ => false,
+    }
+}
+
 /// A plan of plain relational nodes reading nothing of an outer query.
 fn plan_clean(p: &Plan) -> bool {
     if !matches!(
@@ -1629,7 +1650,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
         // Any other uncorrelated subquery joins as it is: a VALUES list pulled up
         // (pull_up_simple_values), else a subquery of its own ("ANY_subquery").
         None if sub.params.is_empty()
-            && (plan_clean(p) || values_clean(p))
+            && (plan_clean(p) || locked_clean(p) || values_clean(p))
             && !matches!(p, Plan::Empty { .. } | Plan::One) =>
         {
             let n = width(p);
@@ -1648,7 +1669,7 @@ fn any_join(cat: &Catalog, plan: &Plan, sub: &Subquery, unplanned: &Unplanned) -
                 _ => Plan::Barrier {
                     input: Arc::new(p.clone()),
                     alias: "ANY_subquery".into(),
-                    cols: (1..=n).map(|i| format!("column{i}")).collect(),
+                    cols: (1..=n).map(|i| sub.names.get(i - 1).cloned().unwrap_or_else(|| format!("column{i}"))).collect(),
                     secure: false,
                     path: None,
                     // (Its ORDER BY's order is of no use to the semi join above:
