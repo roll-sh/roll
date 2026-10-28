@@ -1109,9 +1109,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - **Accepted internal differences** (the engine's storage needn't imitate PostgreSQL's;
     only what clients see must match): tables over 400,000 row versions have estimated heap
     and index sizes (relpages, pg_relation_size) rather than PostgreSQL's page for page;
-    heaps and indexes are laid out afresh when the database reopens, so their pages can be
-    fewer than PostgreSQL's files (a heap of 2,250 pages against 2,521; an index of 543
-    against 604): putting rows back at their stored TIDs would change where new rows go; WAL files are
+    indexes are laid out afresh when the database reopens, so their pages can be
+    fewer than PostgreSQL's files (an index of 543 against 604; heaps keep their pages since
+    round 20, agent 85: rows go back on their stored blocks); WAL files are
     zero-filled ahead and big commits are SST files of their own, so a crashed database must
     be reopened by this version before an older one.
 - **Bounded memory for big transactions and COPY** (round 19, agent 69; BENCH.md's agent 69
@@ -1196,6 +1196,14 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     ignore the keys.
   - Verification gap closed: the full crate suite with `ROLL_COMPACT_LOCKS_AFTER=0` at
     `ea038e8e` (round 3's end, with the pgrowlocks fix) passes.
+  - A modelled table keeps its pages across a restart (agent 78's finding: TPC-H customer came
+    back with 3,588 pages for 3,640, and q13's aggregate stopped spilling): the first model
+    after the database opens puts each row back on the block it was stored with
+    (`heapsim::restored`, from `ensure`'s cold path), so page counts, pg_relation_size and the
+    planner's estimates are the same before and after (`tests/big_tables.rs`
+    `heap_pages_kept_across_restart`). Line pointer offsets aren't restored (a row after
+    removed ones on its page gets a lower one), nor are pages that held only dead tuples at
+    the end of the heap; a model dropped mid-session (TRUNCATE, a rewrite) is laid out afresh.
   - Found, not fixed: DROP TABLE of a 1M-row table takes 3 s (PostgreSQL 0.1 s); in-process
     under `sizing::with_max_versions`, a parallel seq scan of a small "big" table counted 42
     rows its transaction had deleted (the test sets max_parallel_workers_per_gather = 0;

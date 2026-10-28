@@ -2714,6 +2714,11 @@ What changed:
    (`estimate_kept_across_restart`). (The read estimated the rows past the first 400,000 by
    their stored lengths, so its pages differed slightly from the warm engine's.)
 6. The spill keeps its journal's room (`journal.clear()`).
+7. **A modelled heap keeps its pages across a restart** (`heapsim::restored`): its first model
+   after the database opens puts each row back on its stored block instead of packing the rows
+   afresh, so the planner's page counts don't change with a restart (agent 78 found TPC-H
+   customer coming back with 3,588 pages for 3,640, which changed q13's plan; not re-measured
+   at SF1 here: `heap_pages_kept_across_restart` checks a table with rows deleted mid-heap).
 
 Tried and dropped: sorting ANALYZE's measured keys by their prefixes apart from the keys
 (their grouping then reads the keys out of order; slower than the in-place sort).
