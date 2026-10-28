@@ -1015,8 +1015,15 @@ impl<'b, 'a> Binder<'b, 'a> {
         // Postgres folds constant calls when it plans, after parse analysis: a call that
         // fails to fold fails only once the whole statement has been analysed.
         let prev = self.fold_err.replace(Vec::new());
+        // (So do the errors of planning its levels, which the binder plans as it goes: parse
+        // analysis's errors, a later level's ungrouped column say, come first.)
+        self.defer_plan.borrow_mut().push(None);
         let r = crate::stack::guard(|| self.bind_statement_inner(n));
+        let planned = self.defer_plan.borrow_mut().pop().flatten();
         let pending = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
+        if let (Ok(_), Some(e)) = (&r, planned) {
+            return Err(e);
+        }
         match r {
             Ok(q) if !pending.is_empty() || (!self.deparse && !self.unplanned && fold::const_params(&q.plan)) => match fold::first_error(&settled(&q.plan), &pending, self.ctx) {
                 Some(e) => Err(e),
@@ -1720,6 +1727,8 @@ impl<'b, 'a> Binder<'b, 'a> {
                     _ => None,
                 };
             }
+            // (NULLIF has its first argument's type.)
+            Expr::NullIf(a, ..) => return self.declared_domain_at(a, depth),
             Expr::Coalesce(args, _) | Expr::MinMax(args, ..) => {
                 return common(&mut args.iter());
             }

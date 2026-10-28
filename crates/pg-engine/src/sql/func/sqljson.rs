@@ -756,6 +756,18 @@ pub fn run_query(
     c: &FnCtx,
 ) -> Result<Value> {
     let throw = o.on_error == Behavior::Error;
+    // JSON_EXISTS in lax mode stops at the first item found (JsonPathExists: no result list),
+    // so an error past it never happens.
+    if o.op == Op::Exists && !path.strict && vars.dt.is_empty() {
+        let found = jsonpath::exists_with(target, path, vars.json.as_ref(), !throw, true, &c.exec.fmt().tz, &|_| {})?;
+        let Some(b) = found else {
+            return behavior(o, false, error_default, ret, c);
+        };
+        return match o.coerce {
+            Coerce::None => Ok(Value::Bool(b)),
+            _ => coercion(o, Some(&Jsonb::Bool(b)), ret, c).or_else(|e| result_error(o, e, ret, error_default, c)),
+        };
+    }
     // Errors of the path are SQL/JSON errors (others, as a missing variable, always raise).
     let found = jsonpath::query_items(
         target,
@@ -763,7 +775,8 @@ pub fn run_query(
         vars.json.as_ref(),
         &vars.dt,
         !throw,
-        false,
+        // (JsonPathQuery and its kin run the path with useTz.)
+        true,
         &c.exec.fmt().tz,
     )?;
     let on_error = |e: Error| result_error(o, e, ret, error_default, c);
@@ -1014,7 +1027,7 @@ impl TableRun<'_, '_> {
             self.vars.json.as_ref(),
             &self.vars.dt,
             !self.spec.error_on_error,
-            false,
+            true,
             &self.c.exec.fmt().tz,
         )?
         .unwrap_or_default()

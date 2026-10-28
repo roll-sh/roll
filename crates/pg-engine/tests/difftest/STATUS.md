@@ -99,7 +99,7 @@ the most common such errors): array_length / jsonb functions over jsonb scalars,
 literals to polymorphic functions, aggregates in WHERE / JOIN ON, LATERAL-less references to
 FROM items.
 
-`smoke_known.txt` lists the smoke run's remaining mismatches above `error_message` (15 since
+`smoke_known.txt` lists the smoke run's remaining mismatches above `error_message` (14 since
 round 4, batch 1): the smoke test fails only on one not in it.
 
 ## Fixed
@@ -362,8 +362,35 @@ Batch 1 (`a84_fresh_r4`), round 3's leftovers:
 
 Pair run, fresh seeds 3330–3479 against the base: 47 mismatches fewer (table above), none new;
 smoke: 4 known eval_errors gone (s10 #33, s20 #42, s22 #62, s25 #79; `smoke_known.txt` re-recorded,
-15 entries). Regression suite: full run of 79067aa2 (debug, private reference), 51,148 / 51,150,
-no unit changed against results.tsv.
+14 entries after the rebase). Regression suite: full runs of 79067aa2 and, rebased, 45b30b44
+(debug, private references), 51,148 / 51,150, no unit changed against results.tsv.
+
+Batch 2 (`a84_fresh_r4b`), from the round 4 grammar's seeds 4000–4099 (the first run: wrong_rows
+24 in 30 seeds, nearly all jsonpath):
+
+- **Wrong rows (jsonpath, depth first)**: a path is evaluated item by item to its end, as
+  executeItemUnwrapTargetArray does, so what an unwrapped array gave before an error goes
+  through the rest of the path, and a silenced error keeps it (`$.a.boolean()` over `["1",
+  "a"]`: `[true]`); lax `jsonb_path_exists` / `@?` / JSON_EXISTS stop at the first item found
+  (an error past it never happens: `t`, where the engine said NULL / false); silent
+  `jsonb_path_match` / `@@` judge the items found before an error.
+- **Wrong rows (`.double()`)**: of a numeric it keeps the numeric (only checked to be a
+  double): `-0.0` stays `0.0`, 30 digits stay 30 digits.
+- **Engine error (SQL/JSON and time zones)**: JSON_VALUE / JSON_QUERY / JSON_EXISTS /
+  JSON_TABLE run their paths with time zones (JsonPathQuery's `useTz`), so `.timestamp()` of a
+  string with an offset converts instead of failing "cannot convert value from timestamptz to
+  timestamp without time zone usage".
+- **Wrong rows (sum of -0)**: sum(float8) / sum(float4) start from the first value (float8pl),
+  so only -0s sum to -0; Youngs-Cramer's Sx starts from 0.
+- **Wrong rows (outer join reduction)**: `NOT (x < ANY ('{}'))` is true for a NULL x, so it
+  doesn't make x's relation non-nullable: ANY counts only at the top level, where false is as
+  good as NULL, else an array known to have elements (is_strict_saop's falseOK); the engine
+  turned the LEFT JOIN under it into an inner join and lost its rows.
+- **Missing errors / wrong columns**: NULLIF's `=` over an array of a domain against the base
+  type's array finds no operator (seed 4012 #0), and NULLIF has its first argument's domain.
+- **Wrong error (error order)**: the errors of planning a level (a FULL JOIN no merge or hash
+  join can run) wait for the whole statement's parse analysis, whose errors (an ungrouped
+  column) come first (seeds 4000 #33, 4009 #37, 4040 #39 and kin: 0A000 for 42803).
 
 
 ## Round 3 grammar (agent 75)
@@ -557,6 +584,25 @@ scalar", seed 2184 #1 "operand, lower bound, and upper bound cannot be NaN"), re
 in round 4, as were the other two leftovers here (int4range @> d, array_agg of a domain).
 
 ## Open
+
+- **Round 4 seeds, reduced, not fixed** (cases in the round's notes above):
+  - FULL JOIN error where PostgreSQL first reduces it: `t1 FULL JOIN t3 t5 ON (SELECT true)
+    WHERE extract(dow FROM t5.b) = 0` errors in the engine (0A000), while `WHERE t5.c = 0`
+    reduces as PostgreSQL does; extract over a date isn't seen as strict by the reduction
+    (seeds 4005 #1, 4014, 4045, 4047, and the 0A000 wrong_errors after them).
+  - Errors PostgreSQL raises while planning that the engine never raises: a regular
+    expression under a nondeterministic collation in a qual over an empty table (seed 4066
+    #49: patternsel compiles it for its estimate); an implicit-collation conflict in a CASE's
+    branches that only an ORDER BY over it needs (seed 4069 #40); a failing constant in a
+    DML's sub-select under `HAVING NULL` (seed 4071 #80, under planner settings).
+  - Executor laziness: a PL/pgSQL `RETURN QUERY` whose column types don't match fails in the
+    engine where PostgreSQL never calls the function (the join's other side is empty, seed
+    4059 #2); "could not determine which collation to use for string hashing" from a FULL
+    JOIN on a domain column against a nondeterministic one, in a cursor (seed 4033 #102).
+  - FOR NO KEY UPDATE over a join with a FULL JOIN subquery under `WHERE false` isn't refused
+    (seed 4082 #55; the locked-nullable-side item below).
+  - A one-item IN over an array of a domain against the base type's array
+    (`ARRAY[d] IN ('{1}'::int4[])`) isn't refused, where `=` and NULLIF are.
 
 - **Wrong rows (JSON_VALUE / JSON_QUERY, a PostgreSQL 18.6 quirk)**: after a row whose call
   fell back to its ON ERROR (or, without an ON ERROR step, ON EMPTY) default, a row whose

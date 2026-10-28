@@ -51,10 +51,11 @@ fn nonnull_cols(e: &Expr, top: bool) -> Cols {
         {
             nonnull_cols(x, false)
         }
-        // (is_strict_saop: ALL over an empty array is true whatever the left side; so only
-        // ANY, or ALL over an array known to have elements.)
+        // (is_strict_saop: ALL over an empty array is true whatever the left side, ANY false;
+        // so ANY at the top level, where false is as good as NULL, else an array known to have
+        // elements: `NOT (x < ANY ('{}'))` is true for a NULL x.)
         Expr::ArrayOp { left, right, op, all }
-            if op.strict && matches!(&**right, Expr::Const(..) | Expr::Array(..)) && (!*all || saop_nonempty(right)) =>
+            if op.strict && matches!(&**right, Expr::Const(..) | Expr::Array(..)) && ((!*all && top) || saop_nonempty(right)) =>
         {
             nonnull_cols(left, false)
         }

@@ -1263,7 +1263,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (`int4range @> d` finds no operator), sub-selects of domain columns have the domain's type,
   record comparisons of fields declared under different collations fail (42P22), only ROW()
   or a whole-row reference casts a record to a composite, expressions a pulled-up constant
-  is put into after binding fold whole.
+  is put into after binding fold whole. Batch 2, from the new grammar: jsonpath evaluated
+  depth first (a silenced error keeps the items found before it; lax exists stops at the first
+  item), `.double()` keeps a numeric, SQL/JSON paths run with time zones, sum of -0 floats is
+  -0, `NOT (x < ANY ('{}'))` doesn't reduce an outer join, planning errors wait for parse
+  analysis's.
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified

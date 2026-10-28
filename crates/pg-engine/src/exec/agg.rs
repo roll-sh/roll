@@ -313,7 +313,8 @@ struct SumF4(Option<f32>);
 impl Accum for SumF4 {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
         let v = a[0].as_f64().unwrap_or(0.0) as f32;
-        let r = self.0.unwrap_or(0.0) + v;
+        // (float4pl from the first value: -0 stays -0.)
+        let r = self.0.map_or(v, |s| s + v);
         if r.is_infinite() && !v.is_infinite() && !self.0.unwrap_or(0.0).is_infinite() {
             bail!(NUMERIC_VALUE_OUT_OF_RANGE, "value out of range: overflow");
         }
@@ -331,6 +332,9 @@ struct FloatStats {
     n: f64,
     sx: f64,
     sxx: f64,
+    /// A value other than -0 was pushed: sum's float8pl starts from the first value, so
+    /// only -0s sum to -0 (Sx starts from 0).
+    not_neg_zero: bool,
 }
 
 impl FloatStats {
@@ -353,6 +357,7 @@ impl FloatStats {
         self.n = n;
         self.sx = sx;
         self.sxx = sxx;
+        self.not_neg_zero |= !(x == 0.0 && x.is_sign_negative());
         Ok(())
     }
 }
@@ -388,12 +393,12 @@ impl Accum for FloatAgg {
         Ok(())
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
-        let FloatStats { n, sx, sxx } = self.st;
+        let FloatStats { n, sx, sxx, not_neg_zero } = self.st;
         if n == 0.0 {
             return Ok(Value::Null);
         }
         Ok(match self.kind {
-            StatKind::Sum => Value::Float8(sx),
+            StatKind::Sum => Value::Float8(if not_neg_zero { sx } else { -0.0 }),
             StatKind::Avg => Value::Float8(sx / n),
             StatKind::VarPop => Value::Float8(sxx / n),
             StatKind::StddevPop => Value::Float8((sxx / n).sqrt()),

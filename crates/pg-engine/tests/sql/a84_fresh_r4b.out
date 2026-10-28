@@ -1,0 +1,139 @@
+> CREATE TABLE a84j (id int, j jsonb)
+-- CREATE TABLE
+
+> INSERT INTO a84j VALUES (1, '{"n": 1e3}'), (2, '{"n": "10"}'), (3, '{"n": 2.5}'), (4, '{"n": -0.0}'),
+>   (5, '{"n": 123456789012345678901234567890}'), (6, '{"a": [1, 2, 3]}'), (7, '{"a": ["1", "a", null, true]}'),
+>   (8, '{"a": 5, "s": "abc"}'), (9, '{"b": {"c": "x"}, "a": [1]}'), (10, '{"b": {"c": "x"}}'), (11, '[1, "x", 3]')
+-- INSERT 0 11
+
+> SELECT id, jsonb_path_query_array(j, '$.n.double()', '{}', true) FROM a84j ORDER BY id
+id:int4 | jsonb_path_query_array:jsonb
+1 | [1000]
+2 | [10]
+3 | [2.5]
+4 | [0.0]
+5 | [123456789012345678901234567890]
+6 | []
+7 | []
+8 | []
+9 | []
+10 | []
+11 | []
+-- SELECT 11
+
+> SELECT id, jsonb_path_query_array(j, '$.a.boolean()', '{}', true) FROM a84j ORDER BY id
+id:int4 | jsonb_path_query_array:jsonb
+1 | []
+2 | []
+3 | []
+4 | []
+5 | []
+6 | [true, true, true]
+7 | [true]
+8 | [true]
+9 | [true]
+10 | []
+11 | []
+-- SELECT 11
+
+> SELECT id, jsonb_path_query_array(j, '$[*].double()', '{}', true) FROM a84j WHERE id = 11
+id:int4 | jsonb_path_query_array:jsonb
+11 | [1]
+-- SELECT 1
+
+> SELECT t.id, r.v FROM a84j t, LATERAL jsonb_path_query(t.j, '$.a.boolean()', '{}', true) WITH ORDINALITY r(v, o) ORDER BY t.id, r.o
+id:int4 | v:jsonb
+6 | true
+6 | true
+6 | true
+7 | true
+8 | true
+9 | true
+-- SELECT 6
+
+> SELECT id, jsonb_path_exists(j, '$.*.keyvalue()', '{}', silent => true), j @? '$.*.keyvalue()', jsonb_path_exists(j, 'strict $.*.keyvalue()', '{}', true) FROM a84j ORDER BY id
+id:int4 | jsonb_path_exists:bool | ?column?:bool | jsonb_path_exists:bool
+1 | NULL | NULL | NULL
+2 | NULL | NULL | NULL
+3 | NULL | NULL | NULL
+4 | NULL | NULL | NULL
+5 | NULL | NULL | NULL
+6 | NULL | NULL | NULL
+7 | NULL | NULL | NULL
+8 | NULL | NULL | NULL
+9 | NULL | NULL | NULL
+10 | t | t | t
+11 | f | f | NULL
+-- SELECT 11
+
+> SELECT id, JSON_EXISTS(j, '$.a.boolean()' TRUE ON ERROR), JSON_EXISTS(j, '$.a.boolean()') FROM a84j ORDER BY id
+id:int4 | json_exists:bool | json_exists:bool
+1 | f | f
+2 | f | f
+3 | f | f
+4 | f | f
+5 | f | f
+6 | t | t
+7 | t | t
+8 | t | t
+9 | t | t
+10 | f | f
+11 | f | f
+-- SELECT 11
+
+> SELECT JSON_QUERY('{"ts": "2025-11-02 01:30:00+00"}', '$.ts.timestamp()' RETURNING json)
+json_query:json
+"2025-11-02T01:30:00"
+-- SELECT 1
+
+> SELECT JSON_VALUE('{"ts": "2025-11-02 01:30:00+00"}', '$.ts.timestamp()' RETURNING text)
+json_value:text
+2025-11-02 01:30:00
+-- SELECT 1
+
+> SELECT * FROM JSON_TABLE('{"ts": "2025-11-02 01:30:00+00"}', '$' COLUMNS (t timestamp PATH '$.ts.timestamp()'))
+t:timestamp
+2025-11-02 01:30:00
+-- SELECT 1
+
+> SELECT sum(x), avg(x) FROM (VALUES ('-0'::float8)) v(x)
+sum:float8 | avg:float8
+-0 | 0
+-- SELECT 1
+
+> SELECT sum(x) FROM (VALUES ('-0'::float8), ('-0')) v(x)
+sum:float8
+-0
+-- SELECT 1
+
+> SELECT sum(x) FROM (VALUES ('-0'::float8), ('0')) v(x)
+sum:float8
+0
+-- SELECT 1
+
+> SELECT sum(x) FROM (VALUES ('-0'::float4)) v(x)
+sum:float4
+-0
+-- SELECT 1
+
+> SELECT id, sum(x) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM (VALUES (1, '-0'::float8), (2, '1')) v(id, x) ORDER BY id
+id:int4 | sum:float8
+1 | -0
+2 | 1
+-- SELECT 2
+
+> CREATE DOMAIN a84jd AS int CHECK (value > -3)
+-- CREATE DOMAIN
+
+> CREATE TABLE a84jt (id int, c a84jd)
+-- CREATE TABLE
+
+> SELECT NULLIF('{1,2}'::int4[], array_agg(c)) FROM a84jt
+ERROR 42883: operator does not exist: integer[] = a84jd[] (at 8)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT NULLIF(array_agg(c), array_agg(c)) FROM a84jt
+nullif:user
+NULL
+-- SELECT 1
+

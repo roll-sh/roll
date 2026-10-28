@@ -140,10 +140,11 @@ impl super::Gen<'_> {
                 q(format!("SELECT id, j {op} '{p}', jsonb_path_query_array{w}(j, '{p}', {x}, true) FROM tj4 WHERE j IS NOT NULL ORDER BY id"), true, &[Int, Bool, Jsonb])
             }
             2 => q(format!("SELECT t.id, r.v FROM tj4 t, LATERAL jsonb_path_query(t.j, '{p}', {x}, true) WITH ORDINALITY r(v, o) ORDER BY t.id, r.o"), false, &[Int, Jsonb]),
-            // SQL/JSON query functions (non-NULL inputs: PostgreSQL 18.6 carries a row's ON
-            // ERROR default into a later NULL input's result).
+            // SQL/JSON query functions (non-NULL inputs, and JSON_VALUE not RETURNING json /
+            // jsonb: PostgreSQL 18.6 carries a row's ON ERROR / ON EMPTY default into later
+            // rows' results there).
             3 => {
-                let ret = *rng.pick(&["", " RETURNING int", " RETURNING text", " RETURNING numeric", " RETURNING date", " RETURNING jsonb", " RETURNING bool"]);
+                let ret = *rng.pick(&["", " RETURNING int", " RETURNING text", " RETURNING numeric", " RETURNING date", " RETURNING bool"]);
                 let on = *rng.pick(&["", " NULL ON ERROR", " ERROR ON ERROR", " DEFAULT -1 ON ERROR", " DEFAULT 0 ON EMPTY", " NULL ON EMPTY ERROR ON ERROR"]);
                 let on = if ret.contains("date") || ret.contains("bool") || ret.contains("jsonb") { on.replace("-1", "NULL").replace("DEFAULT 0", "NULL") } else { on.to_string() };
                 q(format!("SELECT id, JSON_VALUE(j, '{p}' PASSING 1 AS x{ret}{on}) FROM tj4 WHERE j IS NOT NULL ORDER BY id"), true, &[Int, Text])
@@ -157,7 +158,7 @@ impl super::Gen<'_> {
             }
             5 => {
                 let on = *rng.pick(&["", " TRUE ON ERROR", " ERROR ON ERROR", " UNKNOWN ON ERROR"]);
-                q(format!("SELECT id, JSON_EXISTS(j, '{p}' PASSING 1 AS x{on}), j IS JSON OBJECT, js IS JSON WITH UNIQUE KEYS, js::text IS JSON ARRAY FROM tj4 ORDER BY id"), true, &[Int, Bool, Bool, Bool, Bool])
+                q(format!("SELECT id, JSON_EXISTS(j, '{p}' PASSING 1 AS x{on}), j IS JSON OBJECT, js IS JSON WITH UNIQUE KEYS, js::text IS JSON ARRAY FROM tj4 WHERE j IS NOT NULL ORDER BY id"), true, &[Int, Bool, Bool, Bool, Bool])
             }
             6 => {
                 let cols = *rng.pick(&[

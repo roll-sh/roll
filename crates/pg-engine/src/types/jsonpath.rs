@@ -1893,6 +1893,26 @@ pub fn exists_with(
             Err(Fail::Soft(e)) | Err(Fail::Hard(e)) => Err(e),
         };
     }
+    // Lax: executeItem without a result list stops at the first item it finds, depth first
+    // (an error past it never happens). Strict mode evaluates everything, to find any error.
+    if !path.strict && vars.is_none_or(|v| matches!(v, Jsonb::Object(_))) {
+        let cx = Exec {
+            root: target,
+            vars,
+            dt_vars: &[],
+            strict: false,
+            use_tz,
+            tz: tz.clone(),
+            notice,
+        };
+        let mut out = Vec::new();
+        return match cx.eval_top(&path.expr, &mut out) {
+            Ok(()) => Ok(Some(!out.is_empty())),
+            Err(_) if !out.is_empty() => Ok(Some(true)),
+            Err(Fail::Soft(_)) if silent => Ok(None),
+            Err(Fail::Soft(e)) | Err(Fail::Hard(e)) => Err(e),
+        };
+    }
     Ok(query_with(target, path, vars, silent, use_tz, tz, notice)?.map(|r| !r.is_empty()))
 }
 
@@ -1917,8 +1937,14 @@ pub fn matches_with(
     tz: &super::datetime::TimeZone,
     notice: &dyn Fn(Error),
 ) -> Result<Option<bool>> {
-    let Some(r) = query_with(target, path, vars, silent, use_tz, tz, notice)? else {
-        return Ok(None);
+    // (Silent: jsonb_path_match judges the items found before an error, as found.)
+    let r = if silent {
+        query_partial_with(target, path, vars, silent, use_tz, tz, notice)?
+    } else {
+        let Some(r) = query_with(target, path, vars, silent, use_tz, tz, notice)? else {
+            return Ok(None);
+        };
+        r
     };
     match r.as_slice() {
         [Jsonb::Bool(b)] => Ok(Some(*b)),
@@ -2007,11 +2033,13 @@ impl<'a> Exec<'a> {
             return Ok(());
         };
         let mut next = Vec::new();
-        self.access(a, it, &mut next, None)?;
+        // (Depth first, as executeItemUnwrapTargetArray: the items an unwrapped array gave
+        // before an error go through the rest of the path first.)
+        let r = self.access(a, it, &mut next, None);
         for x in next {
             self.chain_dfs(x, rest, out)?;
         }
-        Ok(())
+        r
     }
 
     fn eval(&self, n: &Node, cur: Option<&It<'a>>, last: Option<i64>) -> R<Vec<It<'a>>> {
@@ -2372,6 +2400,7 @@ impl<'a> Exec<'a> {
                 _ => return Err(num_only("a numeric value")),
             },
             Method::Double => {
+                let numeric = matches!(it.json(), Some(Jsonb::Number(_)));
                 let f = match it.json() {
                     // numeric_out, then float8in.
                     Some(Jsonb::Number(v)) => {
@@ -2390,6 +2419,11 @@ impl<'a> Exec<'a> {
                         code::NON_NUMERIC_SQL_JSON_ITEM,
                         "NaN or Infinity is not allowed for jsonpath item method .double()",
                     ));
+                }
+                // (A numeric stays as it is: only checked to be a double.)
+                if numeric {
+                    out.push(it);
+                    return Ok(());
                 }
                 let v = Numeric::parse_pg(&super::text::format_float8(f, 1)).map_err(Fail::Soft)?;
                 out.push(It::owned(Jsonb::Number(v)));

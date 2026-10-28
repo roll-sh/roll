@@ -1254,7 +1254,15 @@ fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
             let distinct = match (x.is_null(), y.is_null()) {
                 (true, true) => false,
                 (true, false) | (false, true) => true,
-                _ => crate::sql::func::call2_typed(eq, x, y, &a.ty(), &b.ty(), ctx)? != Value::Bool(true),
+                _ => {
+                    let aty = a.ty();
+                    let r = if matches!(aty, DataType::Row(_)) {
+                        crate::sql::func::call2_typed(eq, x, y, &aty, &b.ty(), ctx)?
+                    } else {
+                        crate::sql::func::call2(eq, x, y, &aty, ctx)?
+                    };
+                    r != Value::Bool(true)
+                }
             };
             Ok(Value::Bool(distinct != *negated))
         }
@@ -1331,13 +1339,22 @@ fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                 return Ok(Value::Null);
             }
             let mut saw_null = false;
+            // (The left side's type once; an item's own only for records, whose fields'
+            // collations the comparison checks.)
+            let ety = e.ty();
+            let rows = matches!(ety, DataType::Row(_));
             for (item, eq) in list {
                 let y = eval(item, row, ctx)?;
                 if y.is_null() {
                     saw_null = true;
                     continue;
                 }
-                if crate::sql::func::call2_typed(eq, x.clone(), y, &e.ty(), &item.ty(), ctx)? == Value::Bool(true) {
+                let r = if rows {
+                    crate::sql::func::call2_typed(eq, x.clone(), y, &ety, &item.ty(), ctx)?
+                } else {
+                    crate::sql::func::call2(eq, x.clone(), y, &ety, ctx)?
+                };
+                if r == Value::Bool(true) {
                     return Ok(Value::Bool(!*negated));
                 }
             }
