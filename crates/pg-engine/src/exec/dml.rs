@@ -2097,7 +2097,9 @@ fn find_parent(
         }
         return lookup(&k);
     }
-    for ix in cat.table_indexes(parent) {
+    // (The primary key's index too: `pkey_index` isn't among `indexes`.)
+    let pkey = parent.pkey_index.and_then(|p| cat.indexes.get(&p).cloned()).filter(|ix| ix.id != 0);
+    for ix in pkey.into_iter().chain(cat.table_indexes(parent)) {
         let ixcols: Vec<Option<usize>> = ix
             .columns
             .iter()
@@ -2209,7 +2211,9 @@ fn scan_matching(
     let nondet = ri_colls(t, cols, ctx);
     // An index whose leading columns are exactly `cols` (not for keys equal beyond their
     // bytes).
-    for ix in cat.table_indexes(t).into_iter().filter(|_| nondet.is_none()) {
+    // (The primary key's index is `pkey_index`, not among `indexes`.)
+    let pkey = t.pkey_index.and_then(|p| cat.indexes.get(&p).cloned()).filter(|ix| ix.id != 0);
+    for ix in pkey.into_iter().chain(cat.table_indexes(t)).filter(|_| nondet.is_none()) {
         if ix.predicate.is_some() || ix.columns.len() < cols.len() {
             continue;
         }
