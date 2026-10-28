@@ -2061,19 +2061,23 @@ impl Session {
             match inner(&stmt) {
                 // (DML on a derived system catalog: no RETURNING, no rows.)
                 Some(n) if ddl::catalog_dml_query(n).is_some() => Ok(None),
-                Some(NodeEnum::SelectStmt(_)) => Ok(Some(self.bound(p, &stmt, &[])?.cols.clone())),
+                // (Describe doesn't plan: what fails only when planned, ON CONFLICT's arbiter
+                // inference say, is described by the statement's analysis.)
+                Some(NodeEnum::SelectStmt(_)) => Ok(Some(match self.bound(p, &stmt, &[]) {
+                    Ok(b) => b.cols.clone(),
+                    Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
+                })),
                 Some(
                     NodeEnum::InsertStmt(_)
                     | NodeEnum::UpdateStmt(_)
                     | NodeEnum::DeleteStmt(_)
                     | NodeEnum::MergeStmt(_),
                 ) => {
-                    let b = self.bound(p, &stmt, &[])?;
-                    Ok(if b.cols.is_empty() {
-                        None
-                    } else {
-                        Some(b.cols.clone())
-                    })
+                    let cols = match self.bound(p, &stmt, &[]) {
+                        Ok(b) => b.cols.clone(),
+                        Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
+                    };
+                    Ok((!cols.is_empty()).then_some(cols))
                 }
                 Some(NodeEnum::VariableShowStmt(s)) => Ok(Some(self.show_cols(&s.name))),
                 Some(NodeEnum::ExplainStmt(e)) => {

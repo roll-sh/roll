@@ -6,7 +6,36 @@ use crate::error::{Error, Result, code};
 use crate::sql::func::registry;
 use crate::types::DataType;
 use crate::types::text::NameResolver;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+/// The built-in functions' names by oid (the registry's, then pg_proc's): regprocout looks
+/// one up per value, so not by scanning thousands of entries.
+fn builtin_names() -> &'static HashMap<u32, &'static str> {
+    static M: OnceLock<HashMap<u32, &'static str>> = OnceLock::new();
+    M.get_or_init(|| {
+        let mut m = HashMap::new();
+        for f in registry().funcs.values().flatten() {
+            m.entry(f.oid).or_insert(f.name);
+        }
+        for p in super::system::builtin_proc_sigs() {
+            m.entry(p.oid).or_insert(p.name);
+        }
+        m
+    })
+}
+
+/// pg_oids::PROCS by name.
+fn procs_by_name() -> &'static HashMap<&'static str, Vec<(u32, &'static [u32])>> {
+    static M: OnceLock<HashMap<&'static str, Vec<(u32, &'static [u32])>>> = OnceLock::new();
+    M.get_or_init(|| {
+        let mut m: HashMap<&'static str, Vec<(u32, &'static [u32])>> = HashMap::new();
+        for &(oid, n, args) in crate::sql::func::pg_oids::PROCS {
+            m.entry(n).or_default().push((oid, args));
+        }
+        m
+    })
+}
 
 pub struct CatalogNames {
     pub catalog: Arc<Catalog>,
@@ -22,13 +51,9 @@ impl CatalogNames {
         if let Some((_, n)) = super::ESTIMATORS.iter().find(|(o, _)| *o == oid) {
             return Some(n.to_string());
         }
-        let r = registry();
-        if let Some(f) = r.funcs.values().flatten().find(|f| f.oid == oid) {
-            return Some(f.name.to_string());
-        }
-        // pg_proc's own name (procedure_description quotes it).
-        if let Some(p) = super::system::builtin_proc_sigs().iter().find(|p| p.oid == oid) {
-            return Some(p.name.to_string());
+        // (The registry's, else pg_proc's own name: procedure_description quotes it.)
+        if let Some(n) = builtin_names().get(&oid) {
+            return Some(n.to_string());
         }
         // The languages' handlers: their signature without the argument list.
         if let Some(n) = super::depend::procedure_description(&self.catalog, oid, &self.search_path)
@@ -117,10 +142,7 @@ impl CatalogNames {
             }
             // Internal-only built-ins (estimators, trigger functions, handlers), by Postgres's
             // own signatures.
-            for (oid, _, args) in crate::sql::func::pg_oids::PROCS
-                .iter()
-                .filter(|(_, n, _)| n == fname)
-            {
+            for (oid, args) in procs_by_name().get(fname.as_str()).into_iter().flatten() {
                 if !procs.iter().any(|p| p.1 == *oid) {
                     procs.push(builtin(*oid, args.to_vec()));
                 }

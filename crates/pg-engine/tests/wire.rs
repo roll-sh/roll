@@ -3611,6 +3611,36 @@ fn utility_statements_describe_their_analyzed_parameters() {
     s.engine.shutdown();
 }
 
+/// What sqlc's managed-db replay reads from Parse / Describe: a sequence's columns come from
+/// the sequence (RowDescription's table oid and attnum, so their attnotnull is found), and an
+/// ON CONFLICT whose arbiter no constraint matches describes as analysis types it: the error
+/// is the planner's, at execution (infer_arbiter_indexes).
+#[test]
+fn sequence_columns_and_unplanned_on_conflict_describe() {
+    use tokio_postgres::types::Type;
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        c.batch_execute("CREATE SEQUENCE my_sequence; CREATE TABLE authors (id bigserial PRIMARY KEY, name text NOT NULL, bio text)")
+            .await
+            .unwrap();
+        let oid: u32 = c.query_one("SELECT 'my_sequence'::regclass::oid", &[]).await.unwrap().get(0);
+        let st = c.prepare("SELECT last_value, is_called FROM my_sequence").await.unwrap();
+        let cols: Vec<(u32, i16)> = st.columns().iter().map(|c| (c.table_oid().unwrap_or(0), c.column_id().unwrap_or(0))).collect();
+        assert_eq!(cols, [(oid, 1), (oid, 3)]);
+        let st = c
+            .prepare("INSERT INTO authors (name, bio) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET bio = $2 RETURNING id, bio")
+            .await
+            .unwrap();
+        assert_eq!(st.params(), [Type::TEXT, Type::TEXT]);
+        let types: Vec<Type> = st.columns().iter().map(|c| c.type_().clone()).collect();
+        assert_eq!(types, [Type::INT8, Type::TEXT]);
+        let e = c.query(&st, &[&"a", &"b"]).await.unwrap_err();
+        assert_eq!(e.code().unwrap().code(), "42P10");
+    });
+    s.engine.shutdown();
+}
+
 /// Binary date / timestamp / timestamptz input takes what the output function can print, or
 /// infinity (date_recv's IS_VALID_DATE, timestamp_recv's IS_VALID_TIMESTAMP).
 #[test]

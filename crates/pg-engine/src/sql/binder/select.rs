@@ -4973,11 +4973,18 @@ impl Binder<'_, '_> {
                     Expr::Const(Value::Int8(self.ctx.sess.db.seq_log_cnt(&s)), DataType::Int8),
                     Expr::Const(Value::Bool(called), DataType::Bool),
                 ];
-                let cols = vec![
-                    OutCol::new("last_value", DataType::Int8),
-                    OutCol::new("log_cnt", DataType::Int8),
-                    OutCol::new("is_called", DataType::Bool),
-                ];
+                // (The sequence's own columns: RowDescription names them, sqlc reads their
+                // attnotnull.)
+                let cols: Vec<OutCol> = [("last_value", DataType::Int8), ("log_cnt", DataType::Int8), ("is_called", DataType::Bool)]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (n, t))| {
+                        let mut c = OutCol::new(n, t);
+                        c.table = s.oid;
+                        c.attnum = i as i16 + 1;
+                        c
+                    })
+                    .collect();
                 let rel = derived_rel(alias.as_deref().unwrap_or(&s.name), &cols, 0);
                 Ok((
                     Plan::Values {
