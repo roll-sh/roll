@@ -108,7 +108,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   (aggregates over a built-in aggregate's internal transition functions run as that
   aggregate), xml2 23 / 29 (the XPath functions and xpath_table; xslt_process fails as in a
   build without libxslt: an XSLT 1.0 processor matching libxslt is a module of its own, contrib
-  STATUS.md has why). Golden `a80a_contrib_tail`.
+  STATUS.md has why). Golden `a80a_contrib_tail`. pg_overexplain 36 / 37: LOAD gives EXPLAIN
+  its DEBUG and RANGE_TABLE options (`sql/explain/overexplain.rs`), plan node ids and range
+  table indexes modelled from the engine's plan as PostgreSQL numbers one of that shape;
+  golden `a80a_overexplain`.
 - **Monitoring views and functions** (round 20, agent 80b): what postgres_exporter,
   pgAdmin's dashboard, pg_activity and pgwatch read. Their queries (extracted from each tool's
   source: the exporter's collectors, pgAdmin's dashboard templates, pg_activity's

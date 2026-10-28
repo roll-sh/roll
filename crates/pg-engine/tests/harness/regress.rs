@@ -285,6 +285,7 @@ const CONTRIB_MODULES: &[&str] = &[
     "bloom",
     "spi",
     "xml2",
+    "pg_overexplain",
 ];
 
 /// Extensions outside contrib whose own regression tests run the same way: (module, git

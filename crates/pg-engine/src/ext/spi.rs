@@ -67,7 +67,7 @@ fn before_row(t: &TriggerData, who: &str) -> Result<Row> {
 fn autoinc(t: TriggerData, ctx: &ExecCtx) -> Result<Option<Row>> {
     let mut row = before_row(&t, "")?;
     let relname = &t.table.name;
-    if t.args.is_empty() || t.args.len() % 2 != 0 {
+    if t.args.is_empty() || !t.args.len().is_multiple_of(2) {
         return Err(elog(format!("autoinc ({relname}): even number gt 0 of arguments was expected")));
     }
     for pair in t.args.chunks(2) {

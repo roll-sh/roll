@@ -276,6 +276,8 @@ pub struct SessionState {
     pub commit_on_error: std::cell::Cell<bool>,
     /// The session has used temporary tables (temp_buffers can't change any more).
     pub temp_ever: std::cell::Cell<bool>,
+    /// pg_overexplain is loaded (LOAD): EXPLAIN takes its DEBUG and RANGE_TABLE options.
+    pub overexplain: std::cell::Cell<bool>,
     pub backend_start: i64,
     /// pg_prepared_statements rows: (name, statement, prepare time, parameter types, result
     /// types, from SQL, generic plans, custom plans).
@@ -428,6 +430,7 @@ impl SessionState {
             temp_used: std::cell::Cell::new(false),
             commit_on_error: std::cell::Cell::new(false),
             temp_ever: std::cell::Cell::new(false),
+            overexplain: std::cell::Cell::new(false),
             backend_start: crate::types::datetime::Clock::system().now,
             prepared_sql: RefCell::new(HashMap::new()),
             pgss: RefCell::default(),

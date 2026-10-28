@@ -724,8 +724,8 @@ impl Session {
         s: &pb::ExplainStmt,
         params: &[Value],
     ) -> Result<QueryResult> {
-        use crate::sql::explain::{Format, explain, options};
-        let mut o = options(&s.options)?;
+        use crate::sql::explain::{Format, explain};
+        let mut o = crate::sql::explain::options_with(&s.options, self.state.overexplain.get())?;
         let mut q = s.query.as_deref().unwrap().clone();
         let mut prepared = None;
         let mut values = params.to_vec();
@@ -1510,6 +1510,8 @@ impl Session {
                 let w = self.state.settings.borrow_mut().reserve_prefix("plpgsql");
                 self.notices.extend(w);
             }
+            // EXPLAIN's DEBUG and RANGE_TABLE options (RegisterExtensionExplainOption).
+            "pg_overexplain" => self.state.overexplain.set(true),
             // Libraries whose effect is their parameters (and, passwordcheck, its hook).
             "auto_explain" | "plugins/auto_explain" | "passwordcheck" | "auth_delay" => {
                 let l = lib.trim_start_matches("plugins/");

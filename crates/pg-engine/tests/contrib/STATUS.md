@@ -86,6 +86,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | bloom | 58 | 58 | done (on the native index access method interface) |
 | spi | 52 | 52 | done (round 20, agent 80a) |
 | xml2 | 29 | 23 | XPath functions done; xslt_process as without libxslt (see below) |
+| pg_overexplain | 37 | 36 | DEBUG / RANGE_TABLE done; internals' numbers (see below) |
 | test_decoding | 1047 | 1024 | logical decoding (round 20, agents 79 and 87; see below) |
 
 ### test_decoding (round 20, agents 79 and 87)
@@ -204,6 +205,20 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   and xpath_table over the engine's libxml model (documents read with XML_PARSE_NOENT under
   legacy strictness, so a malformed one gives NULL; nodes dumped as xmlNodeDump does;
   "unsupported XQuery result" NOTICEs). Golden `a80a_contrib_tail`.
+- **pg_overexplain** (round 20, agent 80a; `sql/explain/overexplain.rs`): LOAD
+  'pg_overexplain' gives EXPLAIN its DEBUG and RANGE_TABLE options (before it, both are
+  unrecognized). DEBUG: per node Disabled Nodes, Parallel Safe, Plan Node ID (set_plan_refs'
+  preorder, subplans after the main tree; extParam / allParam "none"), and the PlannedStmt
+  section. RANGE_TABLE: Scan / Append / Nominal RTIs and the range table, numbered as
+  PostgreSQL numbers a plan of that shape (the level's relations in FROM order, its GROUP
+  entry, the partitions its scans read). An Append shows "Subplans Removed" in structured
+  formats as ExplainMissingMembers does. These are planner internals the engine models from
+  its plan, not a copy of PostgreSQL's range table: a query with sub-selects, joins written
+  with JOIN, CTEs or set operations may number differently. Executor Parameter Types lists the
+  EvalPlanQual parameters of ModifyTable and LockRows (type 0); nested loop parameters aren't
+  modelled. Left: unit 30 (the nested loop over partition index scans the engine doesn't plan
+  with enable_seqscan off; extParam / allParam and the parameter types of a parameterized
+  scan). Nothing runs unless the library is loaded. Golden `a80a_overexplain`.
 - **xml2's xslt_process** (6 units): fails as in a PostgreSQL built without libxslt
   (`xslt_process() is not available without libxslt`, the module's own `xml2_1.out`). Not
   written: matching libxslt means an XSLT 1.0 processor with its exact behaviour, not a

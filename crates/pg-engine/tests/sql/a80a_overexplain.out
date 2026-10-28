@@ -1,0 +1,318 @@
+> EXPLAIN (DEBUG) SELECT 1
+ERROR 42601: unrecognized EXPLAIN option "debug" (at 10)
+
+> EXPLAIN (RANGE_TABLE) SELECT 1
+ERROR 42601: unrecognized EXPLAIN option "range_table" (at 10)
+
+> LOAD 'pg_overexplain'
+-- LOAD
+
+> EXPLAIN (DEBUFF) SELECT 1
+ERROR 42601: unrecognized EXPLAIN option "debuff" (at 10)
+
+> EXPLAIN (DEBUG) SELECT 1
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=4)
+  Disabled Nodes: 0
+  Parallel Safe: false
+  Plan Node ID: 0
+PlannedStmt:
+  Command Type: select
+  Flags: canSetTag
+  Subplans Needing Rewind: none
+  Relation OIDs: none
+  Executor Parameter Types: none
+  Parse Location: 0 to end
+-- EXPLAIN
+
+> EXPLAIN (RANGE_TABLE) SELECT 1
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=4)
+RTI 1 (result):
+  Eref: "*RESULT*" ()
+-- EXPLAIN
+
+> EXPLAIN (DEBUG, RANGE_TABLE, FORMAT JSON) SELECT 1
+QUERY PLAN:json
+[
+  {
+    "Plan": {
+      "Node Type": "Result",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 0.00,
+      "Total Cost": 0.01,
+      "Plan Rows": 1,
+      "Plan Width": 4,
+      "Disabled": false,
+      "Disabled Nodes": 0,
+      "Parallel Safe": false,
+      "Plan Node ID": 0,
+      "extParam": "none",
+      "allParam": "none"
+    },
+    "PlannedStmt": {
+      "Command Type": "select",
+      "Flags": "canSetTag",
+      "Subplans Needing Rewind": "none",
+      "Relation OIDs": "none",
+      "Executor Parameter Types": "none",
+      "Parse Location": "0 to end"
+    },
+    "Range Table": [
+      {
+        "RTI": 1,
+        "Kind": "result",
+        "Inherited": false,
+        "In From Clause": false,
+        "Eref": "\"*RESULT*\" ()",
+        "Security Barrier": false,
+        "Lateral": false
+      }
+    ],
+    "Unprunable RTIs": "none",
+    "Result RTIs": "none"
+  }
+]
+-- EXPLAIN
+
+> EXPLAIN (DEBUG, RANGE_TABLE, FORMAT XML) SELECT 1
+QUERY PLAN:xml
+<explain xmlns="http://www.postgresql.org/2009/explain">
+  <Query>
+    <Plan>
+      <Node-Type>Result</Node-Type>
+      <Parallel-Aware>false</Parallel-Aware>
+      <Async-Capable>false</Async-Capable>
+      <Startup-Cost>0.00</Startup-Cost>
+      <Total-Cost>0.01</Total-Cost>
+      <Plan-Rows>1</Plan-Rows>
+      <Plan-Width>4</Plan-Width>
+      <Disabled>false</Disabled>
+      <Disabled-Nodes>0</Disabled-Nodes>
+      <Parallel-Safe>false</Parallel-Safe>
+      <Plan-Node-ID>0</Plan-Node-ID>
+      <extParam>none</extParam>
+      <allParam>none</allParam>
+    </Plan>
+    <PlannedStmt>
+      <Command-Type>select</Command-Type>
+      <Flags>canSetTag</Flags>
+      <Subplans-Needing-Rewind>none</Subplans-Needing-Rewind>
+      <Relation-OIDs>none</Relation-OIDs>
+      <Executor-Parameter-Types>none</Executor-Parameter-Types>
+      <Parse-Location>0 to end</Parse-Location>
+    </PlannedStmt>
+    <Range-Table>
+      <Range-Table-Entry>
+        <RTI>1</RTI>
+        <Kind>result</Kind>
+        <Inherited>false</Inherited>
+        <In-From-Clause>false</In-From-Clause>
+        <Eref>"*RESULT*" ()</Eref>
+        <Security-Barrier>false</Security-Barrier>
+        <Lateral>false</Lateral>
+      </Range-Table-Entry>
+    </Range-Table>
+    <Unprunable-RTIs>none</Unprunable-RTIs>
+    <Result-RTIs>none</Result-RTIs>
+  </Query>
+</explain>
+-- EXPLAIN
+
+> EXPLAIN (DEBUG false, RANGE_TABLE off) SELECT 1
+QUERY PLAN:text
+Result  (cost=0.00..0.01 rows=1 width=4)
+-- EXPLAIN
+
+> EXPLAIN (DEBUG 'x') SELECT 1
+ERROR 42601: debug requires a Boolean value
+
+> CREATE FUNCTION oe_filter(text) RETURNS SETOF text LANGUAGE plpgsql AS $$
+> DECLARE ln text;
+> BEGIN
+>   FOR ln IN EXECUTE $1 LOOP
+>     RETURN NEXT regexp_replace(ln, 'Relation OIDs:( \m\d+\M)+', 'Relation OIDs: NNN...', 'g');
+>   END LOOP;
+> END;
+> $$
+-- CREATE FUNCTION
+
+> CREATE TABLE oe (id int, name text)
+-- CREATE TABLE
+
+> CREATE TABLE oep (id int, genus text) PARTITION BY LIST (genus)
+-- CREATE TABLE
+
+> CREATE TABLE oep_a PARTITION OF oep FOR VALUES IN ('a')
+-- CREATE TABLE
+
+> CREATE TABLE oep_b PARTITION OF oep FOR VALUES IN ('b')
+-- CREATE TABLE
+
+> SELECT oe_filter($q$EXPLAIN (DEBUG, RANGE_TABLE, COSTS OFF) SELECT * FROM oe WHERE id > 1$q$)
+oe_filter:text
+  Command Type: select
+  Disabled Nodes: 0
+  Eref: oe (id, name)
+  Executor Parameter Types: none
+  Filter: (id > 1)
+  Flags: canSetTag
+  Parallel Safe: true
+  Parse Location: 0 to end
+  Permission Info Index: 1
+  Plan Node ID: 0
+  Relation Kind: relation
+  Relation Lock Mode: AccessShareLock
+  Relation OIDs: NNN...
+  Relation: oe
+  Scan RTI: 1
+  Subplans Needing Rewind: none
+PlannedStmt:
+RTI 1 (relation, in-from-clause):
+Seq Scan on oe
+Unprunable RTIs: 1
+-- SELECT 20
+
+> EXPLAIN (RANGE_TABLE, COSTS OFF) SELECT * FROM oe x WHERE id > 1
+QUERY PLAN:text
+Seq Scan on oe x
+  Filter: (id > 1)
+  Scan RTI: 1
+RTI 1 (relation, in-from-clause):
+  Alias: x ()
+  Eref: x (id, name)
+  Relation: oe
+  Relation Kind: relation
+  Relation Lock Mode: AccessShareLock
+  Permission Info Index: 1
+Unprunable RTIs: 1
+-- EXPLAIN
+
+> EXPLAIN (RANGE_TABLE, COSTS OFF) SELECT * FROM oep WHERE genus = 'b'
+QUERY PLAN:text
+Seq Scan on oep_b oep
+  Filter: (genus = 'b'::text)
+  Scan RTI: 2
+RTI 1 (relation, inherited, in-from-clause):
+  Eref: oep (id, genus)
+  Relation: oep
+  Relation Kind: partitioned_table
+  Relation Lock Mode: AccessShareLock
+  Permission Info Index: 1
+RTI 2 (relation, in-from-clause):
+  Alias: oep (id, genus)
+  Eref: oep (id, genus)
+  Relation: oep_b
+  Relation Kind: relation
+  Relation Lock Mode: AccessShareLock
+Unprunable RTIs: 1 2
+-- EXPLAIN
+
+> SELECT oe_filter($q$EXPLAIN (DEBUG, RANGE_TABLE, COSTS OFF) SELECT genus, count(*) FROM oep GROUP BY genus$q$)
+oe_filter:text
+              Disabled Nodes: 0
+              Disabled Nodes: 0
+              Parallel Safe: true
+              Parallel Safe: true
+              Plan Node ID: 2
+              Plan Node ID: 3
+              Scan RTI: 3
+              Scan RTI: 4
+        ->  Seq Scan on oep_a oep_1
+        ->  Seq Scan on oep_b oep_2
+        Append RTIs: 1
+        Disabled Nodes: 0
+        Parallel Safe: true
+        Plan Node ID: 1
+  ->  Append
+  Alias: oep (id, genus)
+  Alias: oep (id, genus)
+  Command Type: select
+  Disabled Nodes: 0
+  Eref: "*GROUP*" (genus)
+  Eref: oep (id, genus)
+  Eref: oep (id, genus)
+  Eref: oep (id, genus)
+  Executor Parameter Types: none
+  Flags: canSetTag
+  Group Key: oep.genus
+  Parallel Safe: true
+  Parse Location: 0 to end
+  Permission Info Index: 1
+  Plan Node ID: 0
+  Relation Kind: partitioned_table
+  Relation Kind: relation
+  Relation Kind: relation
+  Relation Lock Mode: AccessShareLock
+  Relation Lock Mode: AccessShareLock
+  Relation Lock Mode: AccessShareLock
+  Relation OIDs: NNN...
+  Relation: oep
+  Relation: oep_a
+  Relation: oep_b
+  Subplans Needing Rewind: none
+HashAggregate
+PlannedStmt:
+RTI 1 (relation, inherited, in-from-clause):
+RTI 2 (group):
+RTI 3 (relation, in-from-clause):
+RTI 4 (relation, in-from-clause):
+Unprunable RTIs: 1 3 4
+-- SELECT 48
+
+> SELECT oe_filter($q$EXPLAIN (DEBUG, RANGE_TABLE, COSTS OFF) INSERT INTO oe VALUES (1, 'x')$q$)
+oe_filter:text
+        Disabled Nodes: 0
+        Parallel Safe: false
+        Plan Node ID: 1
+  ->  Result
+  Command Type: insert
+  Disabled Nodes: 0
+  Eref: "*RESULT*" ()
+  Eref: oe (id, name)
+  Exclude Relation RTI: 0
+  Executor Parameter Types: 0
+  Flags: canSetTag
+  Nominal RTI: 1
+  Parallel Safe: false
+  Parse Location: 0 to end
+  Permission Info Index: 1
+  Plan Node ID: 0
+  Relation Kind: relation
+  Relation Lock Mode: RowExclusiveLock
+  Relation OIDs: NNN...
+  Relation: oe
+  Subplans Needing Rewind: none
+Insert on oe
+PlannedStmt:
+RTI 1 (relation):
+RTI 2 (result):
+Result RTIs: 1
+Unprunable RTIs: 1
+-- SELECT 27
+
+> EXPLAIN (RANGE_TABLE, COSTS OFF) INSERT INTO oep VALUES (1, 'a')
+QUERY PLAN:text
+Insert on oep
+  Nominal RTI: 1
+  Exclude Relation RTI: 0
+  ->  Result
+RTI 1 (relation):
+  Eref: oep (id, genus)
+  Relation: oep
+  Relation Kind: partitioned_table
+  Relation Lock Mode: RowExclusiveLock
+  Permission Info Index: 1
+RTI 2 (result):
+  Eref: "*RESULT*" ()
+Unprunable RTIs: 1
+Result RTIs: 1
+-- EXPLAIN
+
+> DROP TABLE oe, oep
+-- DROP TABLE
+
+> DROP FUNCTION oe_filter(text)
+-- DROP FUNCTION
+

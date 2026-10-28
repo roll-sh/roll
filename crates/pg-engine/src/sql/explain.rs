@@ -6,6 +6,7 @@
 //! counters the executor keeps in `ExecCtx::instr`.
 
 mod parallel;
+mod overexplain;
 mod pwagg;
 
 use super::binder::ast::{const_str, inner, with_pos};
@@ -424,6 +425,9 @@ enum Detail {
     /// A file_fdw scan's "Foreign File Size" (ExplainPropertyInteger in bytes): shown with
     /// costs only.
     FileSize(u64),
+    /// A property an EXPLAIN extension adds after the node's own (pg_overexplain), and
+    /// whether it is a number or boolean (unquoted in JSON).
+    Hook(&'static str, String, bool),
 }
 
 /// Set a node's `Detail::GroupSort` (none: empty).
@@ -18176,6 +18180,8 @@ impl Render<'_> {
         }
         for d in &n.details {
             match d {
+                // (ExplainMissingMembers: after the extensions' properties, below.)
+                Detail::Text("Subplans Removed", _) => {}
                 Detail::Text(k, v) => self.w.prop(k, v, false),
                 Detail::Workers(w) => {
                     self.w.prop("Workers Planned", &w.to_string(), true);
@@ -18509,6 +18515,7 @@ impl Render<'_> {
                 | Detail::MergeTuples(_)
                 | Detail::GroupSort(_)
                 | Detail::FileSize(_)
+                | Detail::Hook(..)
                 | Detail::MemoizeInfo => {}
             }
         }
@@ -18533,6 +18540,22 @@ impl Render<'_> {
         }
         if self.o.buffers && !text {
             self.w.buffer_props(self.io_timing);
+        }
+        for d in &n.details {
+            if let Detail::Hook(k, v, numeric) = d {
+                self.w.prop(k, v, *numeric);
+            }
+        }
+        // ExplainMissingMembers: an Append's members pruned at planning or startup (in a
+        // structured format always).
+        let removed = n.details.iter().find_map(|d| match d {
+            Detail::Text("Subplans Removed", v) => Some(v.as_str()),
+            _ => None,
+        });
+        if let Some(v) = removed {
+            self.w.prop("Subplans Removed", v, true);
+        } else if !text && matches!(n.node_type, "Append" | "Merge Append") {
+            self.w.prop("Subplans Removed", "0", true);
         }
     }
 
@@ -20523,6 +20546,12 @@ pub fn explain(
     let root = b.single_copy(plan, root);
     break if o.scroll && !backward_ok(&root) { b.materialize_top(root) } else { root };
     };
+    let mut root = root;
+    let overex = (o.debug || o.range_table).then(|| {
+        let rt = overexplain::RangeTable::build(plan, &root, false);
+        overexplain::per_node(&mut root, o, &rt, ctx);
+        rt
+    });
     let mut r = Render {
         o,
         instr,
@@ -20642,6 +20671,10 @@ pub fn explain(
             }
             r.w.close("Serialization", true);
         }
+    }
+    // (explain_per_plan_hook.)
+    if let Some(rt) = &overex {
+        overexplain::per_plan(&mut r.w, o, rt, &root);
     }
     if o.summary && o.analyze {
         let v = format!("{:.3}", execution * 1000.0);

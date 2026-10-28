@@ -16,8 +16,8 @@ pub(crate) fn explain(
     s: &pb::ExplainStmt,
     types: Vec<DataType>,
 ) -> Result<(Vec<Row>, Vec<OutCol>)> {
-    use crate::sql::explain::{Format, options};
-    let mut o = options(&s.options)?;
+    use crate::sql::explain::Format;
+    let mut o = crate::sql::explain::options_with(&s.options, ctx.sess.overexplain.get())?;
     let Some(q) = s.query.as_deref() else {
         return Ok((Vec::new(), Vec::new()));
     };
