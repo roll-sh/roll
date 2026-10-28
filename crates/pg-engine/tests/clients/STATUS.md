@@ -142,6 +142,33 @@ through the shell, with its errors for a failing program (`src/server_programs.r
 harness's engine runs with it: Django's inspectdb test_foreign_data_wrapper (`SELECT * ...
 LIMIT 1` from a `program 'echo 1,2,3,4'` table) passes (inspectdb 27 / 0 on both).
 
+Fixed in round 19, agent 81, third batch (wire tests `portals_hold_returning_rows_and_run_once`,
+`binary_datetime_input_in_range`, `utility_statements_describe_their_analyzed_parameters`,
+`startup_names_cut_to_namedatalen`, `big_bytea_values_go_out_in_linear_time`, and the helpers'
+goldens):
+- Portals follow PortalRun (Postgrex): a RETURNING statement (or a WITH that writes) runs to
+  its end on the first Execute and hands out its held rows, PortalSuspended at the row count,
+  `INSERT 0 0` once done; it never runs again (it ran twice, inserting the rows twice). Left:
+  three edge cases (a Bind that fails in planning, a failed portal made in a savepoint, a
+  portal re-executed after its COMMIT in one pipeline) give 55000 where PG gives 34000 /
+  EmptyQueryResponse.
+- Binary date / timestamp / timestamptz input out of range is 22008 (IS_VALID_TIMESTAMP).
+- A utility statement describes only the parameters its analysis types (PREPARE ... AS: 0;
+  Ecto); startup database and user names are cut to 63 bytes (Diesel).
+- Big bytea values: a custom plan's cost no longer renders constants (`plan_cost`), bytea's
+  text output is one buffer: 128 MB echoed in binary 58.8 s -> 0.49 s (PG 0.47 s).
+- Concurrent CREATE TABLEs with foreign keys made duplicate trigger oids, then DROP panicked
+  (Kysely): an FK's oids are one `alloc_oids` block. DROP / RENAME DATABASE and CREATE
+  DATABASE ... TEMPLATE wait up to 5 s for exiting sessions (CountOtherDBBackends; Diesel).
+- Catalog values (pgAdmin, DBeaver, Alembic, sqlc): sequences' attnotnull, jsonb / hstore
+  subscripts deparsed as subscripts, proargdefaults, a materialized view's relhasrules, FK
+  conpfeqop / conppeqop / conffeqop, pg_get_indexdef past the last column, the WAL replay
+  functions; and a wrong result: `a[1]` and `a[2]` were one expression to ORDER BY / GROUP BY
+  (their debug text left out the subscript).
+- A foreign key's check looked for its parent with a scan: the primary key's index
+  (`pkey_index`) wasn't among the indexes it tried. MikroORM's 2,000 checked rows took 46 s
+  (debug build), now 0.29 s; ON DELETE's scans of the referencing side use it too.
+
 Fixed in round 19, agent 81, second batch (golden `a81_client_round4`):
 - Literal types: `N'VINET'`, `char 'x'`, `bit '101'`, `'x'::pg_catalog.bpchar` have no length
   (ConstCharacter / ConstBit); they were char(1) / bit(1), cutting values to one character

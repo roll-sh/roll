@@ -1529,6 +1529,14 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   through `PMap::changes` / `diff`, not by visiting every object.
 - Every fix gets a golden recorded against PostgreSQL. Correctness (results, errors, data)
   before EXPLAIN text.
+- Oids an object derives from another (a foreign key's RI triggers after its constraint, a
+  deferrable key's recheck trigger) come from one `Catalog::alloc_oids(n)` call, never as
+  `oid + k` of separate allocations: concurrent DDL merges catalogs, and another session's
+  allocation can fall in between (round 19, agent 81: Kysely's two concurrent CREATE TABLEs
+  made duplicate pg_trigger oids, then a DROP panicked).
+- An expression's debug text (`Expr`'s Debug, which `same_as` and plan comparisons use) must
+  show everything its equality depends on: it once left out subscript values, so `a[1]` and
+  `a[2]` were one expression in ORDER BY / GROUP BY.
 - Commit only verified states: the whole `cargo test -p pg-engine` passes first.
 
 ## Session and thread state
