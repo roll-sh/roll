@@ -1692,3 +1692,38 @@ pub fn rewritten(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>) -> (Heap, Vec<T
     }
     (h, tids)
 }
+
+/// A heap laid out again from its rows when its database opens: each row on the block it was
+/// stored with (`blocks`, ascending; the rows given in that order), so the table keeps the
+/// pages it had (Postgres's file keeps them: the planner's page counts and the ctids don't
+/// change with a restart), a block no row is on left empty. Rows without a stored block, or
+/// that no longer fit on theirs, go after them as `rewritten` places rows.
+pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>, blocks: &[Option<u32>]) -> (Heap, Vec<Tid>) {
+    let mut h = Heap::new(fillfactor);
+    let save = h.save_free();
+    let mut tids = Vec::with_capacity(rows.len());
+    for (i, (k, len)) in rows.into_iter().enumerate() {
+        let at = blocks.get(i).copied().flatten().filter(|&b| b as usize + 1 >= h.pages.len());
+        let b = match at {
+            Some(b) if h.pages.get(b as usize).is_none_or(|p| maxalign(len) <= p.heap_free()) => {
+                while h.pages.len() <= b as usize {
+                    h.pages.push(Page::fresh());
+                }
+                b
+            }
+            _ => {
+                let fits = h.pages.last().is_some_and(|p| maxalign(len) + save <= p.heap_free());
+                if !fits {
+                    h.pages.push(Page::fresh());
+                }
+                h.pages.len() as u32 - 1
+            }
+        };
+        let tid = h.put(b, Heap::new_tup(len, 0), false);
+        // (Rows come in their stored TIDs' order, not necessarily their keys'.)
+        h.placed(&k, tid);
+        h.keys.insert(k, tid);
+        tids.push(tid);
+    }
+    (h, tids)
+}

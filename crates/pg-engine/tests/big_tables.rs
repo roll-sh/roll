@@ -330,6 +330,38 @@ fn deferred_entry_deletes() {
     });
 }
 
+/// A modelled table keeps its pages across a restart (`heapsim::restored`: each row back on
+/// the block it was stored with): the planner's page counts and pg_relation_size are what they
+/// were, with rows deleted from the middle of it. (Line pointer offsets aren't kept: a row
+/// after removed ones on its page gets a lower one.)
+#[test]
+fn heap_pages_kept_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let queries = [
+        "SELECT pg_relation_size('hp')",
+        "EXPLAIN SELECT * FROM hp WHERE a > 3",
+        "SELECT relpages FROM pg_class WHERE relname = 'hp'",
+    ];
+    let before: Vec<Vec<String>> = {
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE hp (id int, a int, t text);
+             INSERT INTO hp SELECT g, g % 7, repeat('x', 40 + g % 60) FROM generate_series(1, 3000) g;
+             DELETE FROM hp WHERE id BETWEEN 500 AND 1500 AND id % 3 <> 0;
+             UPDATE hp SET t = t || 'y' WHERE id % 11 = 0;
+             VACUUM hp");
+        let r = queries.iter().map(|q| rows(&mut s, q)).collect();
+        drop(s);
+        eng.shutdown();
+        r
+    };
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    for (q, b) in queries.iter().zip(&before) {
+        assert_eq!(&rows(&mut s, q), b, "{q}");
+    }
+}
+
 /// A table too big to model that was never measured keeps its estimated size across a
 /// restart (`sizing::persist_estimates`): its first plan after one needn't read it whole.
 #[test]

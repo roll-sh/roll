@@ -1333,7 +1333,14 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         mark_tracked(db.instance, t.oid);
     }
     if heap_missing && !rf.heaps.contains_key(&t.oid) {
-        let (mut h, tids) = heapsim::rewritten(heap_fillfactor(t), lens);
+        // (The first model since the database opened: each row back on its stored block, the
+        // pages the table had before. A model dropped since is laid out afresh, as before.)
+        let (mut h, tids) = if cold {
+            let blocks: Vec<Option<u32>> = stored.iter().map(|s| s.map(|t| t.0)).collect();
+            heapsim::restored(heap_fillfactor(t), lens, &blocks)
+        } else {
+            heapsim::rewritten(heap_fillfactor(t), lens)
+        };
         h.unstamped = stored.iter().zip(&tids).any(|(s, t)| s.is_some_and(|s| s != *t));
         // (The first model of the table since the database was opened: the pages its
         // last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
