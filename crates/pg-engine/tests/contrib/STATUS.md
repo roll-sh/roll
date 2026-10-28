@@ -72,7 +72,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | postgres_fdw | 2053 | 1856 | see below |
 | file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
 | tsm_system_rows | 16 | 16 | done (round 19, agent 71) |
-| tsm_system_time | 16 | 14 | see below |
+| tsm_system_time | 16 | 16 | done (round 20, agent 80a: the Materialize) |
 | pg_prewarm | 5 | 5 | done (no buffer pool: nothing is read; the range's blocks are reported) |
 | pg_freespacemap | 15 | 15 | done (the heap model's FSM) |
 | pg_visibility | 99 | 99 | done (the heap model's visibility map) |
@@ -84,6 +84,8 @@ has no `regress.so`, whose functions dblink's test creates).
 | dblink | 218 | 218 | done |
 | pgvector (0.8.7) | 915 | 915 | done (see below) |
 | bloom | 58 | 58 | done (on the native index access method interface) |
+| spi | 52 | 52 | done (round 20, agent 80a) |
+| xml2 | 29 | 23 | XPath functions done; xslt_process as without libxslt (see below) |
 | test_decoding | 1047 | 1024 | logical decoding (round 20, agents 79 and 87; see below) |
 
 ### test_decoding (round 20, agents 79 and 87)
@@ -186,9 +188,31 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   without SSL (the server declines SSLRequest). tcn is a native trigger (its spec matches);
   intagg installs, int_array_enum runs (an internal-language set-returning function runs its
   built-in), int_array_aggregate doesn't (below). Golden `a71_contrib_round3`.
-- **tsm_system_time** (units 9, 11): PostgreSQL puts a Materialize over a sample scan whose
-  method isn't repeatable across scans when the query level isn't one relation
-  (set_tablesample_rel_pathlist); the engine's EXPLAIN doesn't (rows match).
+- **Round 20 (agent 80a), the contrib tail.** tsm_system_time: a sample scan whose method
+  can't repeat its scans reads under a Materialize when it may run more than once, in a
+  subquery planned apart or a query level of more than one relation, as
+  set_tablesample_rel_pathlist has it (`explain.rs` `unrepeatable_samples`; EXPLAIN only, its
+  costs not fed back to the planner). intagg: an aggregate whose transition and final functions
+  are a built-in aggregate's internal ones over an `internal` state (`array_agg_transfn` /
+  `array_agg_finalfn`, the array and string_agg variants), declared LANGUAGE internal by an
+  extension script or named directly by CREATE AGGREGATE, runs as that aggregate
+  (`binder::expr` `internal_agg_impl`, `UserAgg::internal`). spi (`ext/spi.rs`): autoinc,
+  insert_username, moddatetime and refint's check_primary_key / check_foreign_key as native
+  trigger functions; refint's queries run as SPI runs them (prepared with the key columns'
+  types as `$n`, their errors with the query as CONTEXT, REFINT_VERBOSE's NOTICEs). xml2
+  (`ext/xml2.rs`): xpath_string / number / bool / nodeset / list, xml_encode_special_chars
+  and xpath_table over the engine's libxml model (documents read with XML_PARSE_NOENT under
+  legacy strictness, so a malformed one gives NULL; nodes dumped as xmlNodeDump does;
+  "unsupported XQuery result" NOTICEs). Golden `a80a_contrib_tail`.
+- **xml2's xslt_process** (6 units): fails as in a PostgreSQL built without libxslt
+  (`xslt_process() is not available without libxslt`, the module's own `xml2_1.out`). Not
+  written: matching libxslt means an XSLT 1.0 processor with its exact behaviour, not a
+  subset: template conflict resolution and built-in rules, xsl:number / sort / key /
+  format-number, the extension elements and EXSLT functions libxslt registers (saxon:output
+  is the module test's security case), xsltSaveResultTo's serialization (declaration, indent,
+  method html / text), and its error reporting. A subset that passes the module's four
+  stylesheets would misbehave on the next stylesheet an application sends; this is a module
+  in its own right.
 - **auto_explain**: done (round 20, agent 80). ALTER SYSTEM writes postgresql.auto.conf
   (`src/sysconf.rs`), so units 5 and 10 match. The plans go to the server log
   (`src/log.rs`; `roll-engine` writes it to stderr) and to the client past
@@ -198,17 +222,13 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
 - **auth_delay**: done (round 20, agent 80): preloaded (shared_preload_libraries, `-c` or
   postgresql.auto.conf), a failed authentication waits auth_delay.milliseconds before its
   error (`server.rs` `auth_delay`). The module has no regression test.
-- **intagg**: int_array_aggregate's transition function is the internal
-  `array_agg_transfn` over an `internal` state, which the engine's aggregates don't take
-  (no contrib units; the module has no regression test).
+- **intagg**: done (round 20, agent 80a; no contrib units, the module has no regression
+  test; golden `a80a_contrib_tail`).
 - **Not applicable**: pageinspect (above); pg_surgery (heap_force_kill / heap_force_freeze
   repair corrupted heap tuples by TID outside transactions: the engine's rows aren't
   PostgreSQL heap tuples, and a row is removed with DELETE ... WHERE ctid); pg_walinspect,
   basic_archive (PostgreSQL WAL records and segments; the engine's WAL is its own store's);
   pg_logicalinspect (logical decoding's snapshot files); sepgsql (SELinux).
-- **Not done**: xml2 (its
-  xslt_process needs an XSLT processor; the xpath_* functions could use the engine's XPath);
-  pg_overexplain, spi (refint, autoinc, insert_username, moddatetime).
 
 - **btree_gist** (3 units): rows of an unordered GiST index scan come back in PostgreSQL's
   GiST tree order (macaddr, macaddr8, bytea units without ORDER BY): the engine reads the

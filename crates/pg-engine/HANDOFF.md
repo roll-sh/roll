@@ -102,6 +102,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   decoding files). Not done: test_decoding (no logical decoding), bloom (pluggable index AMs),
   xml2 (XSLT), pg_overexplain, spi. Scores and the per-module notes: contrib STATUS.md.
   amcheck's verify_heapam counts its pages in pg_stat_io's bulkread context.
+- **Contrib tail** (round 20, agent 80a): spi 52 / 52 (autoinc, insert_username, moddatetime,
+  refint as native triggers, refint's queries run as SPI runs them), tsm_system_time 16 / 16
+  (the Materialize over a sample scan that may run twice), intagg's int_array_aggregate
+  (aggregates over a built-in aggregate's internal transition functions run as that
+  aggregate), xml2 23 / 29 (the XPath functions and xpath_table; xslt_process fails as in a
+  build without libxslt: an XSLT 1.0 processor matching libxslt is a module of its own, contrib
+  STATUS.md has why). Golden `a80a_contrib_tail`.
 - **Monitoring views and functions** (round 20, agent 80b): what postgres_exporter,
   pgAdmin's dashboard, pg_activity and pgwatch read. Their queries (extracted from each tool's
   source: the exporter's collectors, pgAdmin's dashboard templates, pg_activity's
