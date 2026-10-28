@@ -99,8 +99,8 @@ the most common such errors): array_length / jsonb functions over jsonb scalars,
 literals to polymorphic functions, aggregates in WHERE / JOIN ON, LATERAL-less references to
 FROM items.
 
-`smoke_known.txt` lists the smoke run's remaining mismatches above `error_message` (20 since
-round 3, batch 1): the smoke test fails only on one not in it.
+`smoke_known.txt` lists the smoke run's remaining mismatches above `error_message` (15 since
+round 4, batch 1): the smoke test fails only on one not in it.
 
 ## Fixed
 
@@ -296,6 +296,75 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 3 (agent 75), base (f4406f71) | 2040–2189 × 100 | 15,051 | wrong_rows 1, wrong_columns 1, engine_error 40, missing_error 33, eval_error 101, tag 9 |
 | round 3, batch 1 | 2040–2189 × 100 | 15,051 | engine_error 39, missing_error 24, eval_error 98, tag 9 |
 | round 3 grammar, batch 1 engine before its last fixes | 3030–3329 × 100 | 29,911 | wrong_rows 2, wrong_state 6, wrong_columns 1, tag 7 |
+| round 4 (agent 84), base (2b703e96) | 3330–3479 × 100 | 14,991 | wrong_rows 4, wrong_state 2, engine_error 30, missing_error 64, wrong_error 46, eval_error 77, tag 11 |
+| round 4, batch 1 | 3330–3479 × 100 | 14,991 | wrong_rows 4, wrong_state 2, engine_error 30, missing_error 53, wrong_error 45, eval_error 63, tag 9 |
+
+## Round 4 grammar (agent 84)
+
+Seeds from `R4_SEEDS` (4000) on add two tables (`round4.rs`, its own generator, so earlier
+seeds keep their schemas): `tj4 (id, j jsonb, js json, ts timestamptz, t timestamp, d date, iv
+interval, n numeric, f float8, k int)` with JSON documents of every shape (arrays, nested
+objects, scalars, JSON null, numeric strings, date strings, duplicate keys in `js`), DST
+boundaries, infinities and BC values, infinite and mixed-sign intervals, numeric NaN /
+Infinity / huge and tiny values, float -0 / NaN / Infinity; and `tp4 (k, d, v, n)` range-
+partitioned on k with a sub-partition list-partitioned on v, a default partition at both
+levels and a unique index on (k, v). A quarter of the statements are then `round4_stmt`'s:
+jsonpath functions and operators (`@?`, `@@`, `_tz` forms, silent, vars, filters, item
+methods `.double()` / `.boolean()` / `.keyvalue()` / `.datetime()` / `.decimal()` ...,
+`jsonb_path_query` in LATERAL WITH ORDINALITY); JSON_VALUE / JSON_QUERY / JSON_EXISTS with
+RETURNING, wrappers, QUOTES and ON EMPTY / ON ERROR; JSON_TABLE with NESTED PATH and
+ordinality; JSON_ARRAYAGG / JSON_OBJECTAGG / JSON_OBJECT / JSON_ARRAY / JSON_SERIALIZE /
+JSON_SCALAR / JSON(), IS JSON, jsonb_set / insert / strip_nulls / `#-`; window frames (ROWS,
+GROUPS, RANGE with numeric / interval / float offsets, every EXCLUDE); LATERAL set-returning
+functions (jsonb_array_elements / each / to_recordset, generate_series over timestamps and
+dates, multi-argument unnest, ROWS FROM, regexp_matches, string_to_table) and SRFs in the
+select list; MERGE (NOT MATCHED BY SOURCE, DO NOTHING) and UPDATE / INSERT ... ON CONFLICT /
+DELETE with RETURNING old / new and tableoid across partitions (row movement into default
+partitions); partition-pruned queries; numeric edge functions (round / trunc with negative
+scales, scale / min_scale / trim_scale, power, ln, to_char, width_bucket, factorial, gcd);
+and timestamp / interval arithmetic under a `SET TIME ZONE` (DST, AT TIME ZONE, date_trunc
+with a zone, date_bin, age, justify_*, make_timestamptz). JSON_VALUE never runs RETURNING json
+/ jsonb or over NULL inputs (PostgreSQL 18.6's carried-over defaults, Open below).
+
+## Round 4 (agent 84)
+
+Batch 1 (`a84_fresh_r4`), round 3's leftovers:
+
+- **Eval errors (seeds 2133 #66, 2184 #1)**: a sub-select is planned while its expression is
+  preprocessed (make_subplan), whatever becomes of the relation reading it later, so its
+  failing constants fail the statement even on the nullable side of `LEFT JOIN ... ON false`
+  (`fold::push_candidates`: an empty relation keeps its sub-selects' failing constants); a
+  constant-false WHERE over an outer join gates the whole join (the top join domain's
+  pseudoconstant), where the engine pushed it into the outer side and so never planned a
+  subquery there (`optimize::add_filter`).
+- **Missing errors (seed 3045 #47 and kin)**: check_generic_type_consistency over domains:
+  an `anyelement` argument of a domain stays the domain while `anyarray` / `anyrange` ones
+  are flattened, so `int4range @> d`, `d <@ int4range`, `int[] @> ARRAY[d]`, `int[] = d[]`
+  (NULLIF, IN) and `text[] <@ d3text[]` find no operator (`Binder::poly_domain_conflict`).
+- **Wrong columns (seed 3202 #58)**: a scalar sub-select of a domain column, or of
+  `array_agg` of one, and ARRAY() of one, have the domain's (array) type
+  (`Binder::sub_domains`).
+- **Missing errors (record_cmp)**: two row types whose field declares different collations
+  (`ROW(x COLLATE "C", 1)` against `ROW(x, 1)`, through subqueries, IN, IS DISTINCT FROM)
+  have no collation for it, and comparing two values of it fails with 42P22; NULLs and
+  fields after a difference never compare it (`ops::check_record_collations`).
+- **Missing errors (coerce_record_to_complex)**: `max(c)::ct`, `r::ct` of a subquery's
+  record column, `(SELECT ROW(...))::ct`, `INSERT ... SELECT ROW(...)` and `UPDATE ... SET c =
+  (SELECT ROW(...))` fail "cannot cast type record to ct" at PostgreSQL's positions; only a
+  ROW() or a whole-row reference converts (routine results and PL/pgSQL values convert as
+  before).
+- **Eval errors (folding after pull-up)**: an immutable expression a pulled-up subquery's
+  constant output was put into after binding is folded whole (`fold::unfolded`), also inside
+  a sub-select reading it (`Cx::fold_outer`: seed 1926 #43's ON EXISTS over a UNION); an
+  empty join's dummy outputs keep the failing constants of the columns read above it,
+  through the projections kept over it (`analyzejoins::dummy_with`, seed 1926 #96); a
+  sub-select in an empty relation's output read above it (smoke s10 #33).
+
+Pair run, fresh seeds 3330–3479 against the base: 47 mismatches fewer (table above), none new;
+smoke: 4 known eval_errors gone (s10 #33, s20 #42, s22 #62, s25 #79; `smoke_known.txt` re-recorded,
+15 entries). Regression suite: full run of 79067aa2 (debug, private reference), 51,148 / 51,150,
+no unit changed against results.tsv.
+
 
 ## Round 3 grammar (agent 75)
 
@@ -439,12 +508,14 @@ Found by the round 3 grammar and seeds 2040-2189 (`a75_fresh_r3`):
   empty (`ON EXISTS (SELECT 1 UNION SELECT jsonb_array_length(s7.c2 -> 'a') FROM w WHERE
   false)`, `s7 ... WHERE false`) fails in PostgreSQL only when that relation is empty; which
   outputs PostgreSQL substitutes there before planning the sub-select needs its pull-up order.
+  (Round 4: the variants over a relation that isn't empty are fixed; this one stays open.)
 
 Left: two anonymous rows whose fields have different collations (`ROW('a'::text COLLATE "C",
 1)` against `ROW('B'::text, 1)` in an ICU database) compare under the first's, where
 PostgreSQL's record_cmp has no collation for the field and fails ("could not determine which
 collation to use for string comparison") once it compares two values of it; `max(c)::ct`
-(a record cast to a composite) isn't refused.
+(a record cast to a composite) isn't refused. (Both fixed in
+round 4.)
 
 Batch 2 (`a75_fresh_r3b`), from the round 3 seeds 3030-3329:
 
@@ -482,7 +553,8 @@ PostgreSQL finds no operator, the engine resolves one); `array_agg` of a domain 
 Seeds 2040-2189 against batch 1: 16 mismatches fewer (engine_error 39 -> 36, missing_error
 24 -> 22, eval_error 98 -> 92, wrong_error 40 -> 39, tag 9 -> 7), two new eval_errors where the
 engine now skips an evaluation PostgreSQL makes (seed 2133 #66 "cannot get array length of a
-scalar", seed 2184 #1 "operand, lower bound, and upper bound cannot be NaN"), not reduced yet.
+scalar", seed 2184 #1 "operand, lower bound, and upper bound cannot be NaN"), reduced and fixed
+in round 4, as were the other two leftovers here (int4range @> d, array_agg of a domain).
 
 ## Open
 
@@ -492,21 +564,29 @@ scalar", seed 2184 #1 "operand, lower bound, and upper bound cannot be NaN"), no
   to the ON ERROR check and `jsestate->error` still holds the previous row's (only the path
   step resets it). Seed 1801 #53 (`JSON_VALUE(t2.c, '$.a' RETURNING int DEFAULT -1 ON ERROR)`
   over a LEFT JOIN's null-extended row). Not emulated: it needs per-call-site state across
-  rows, and the result depends on the row order, which differs between plans.
+  rows, and the result depends on the row order, which differs between plans. A second one
+  (round 4): JSON_VALUE ... RETURNING json / jsonb returns NULL for every row after one that
+  fell back to its ON EMPTY default (`JSON_VALUE(j, '$.s' RETURNING jsonb)` over `{"n": 1}`,
+  then `{"s": "abc"}`: NULL, where alone it is `"abc"`); not emulated either, and the round 4
+  grammar avoids both.
 - **Plan choice**: `SELECT DISTINCT a FROM t ORDER BY 1 DESC` is a HashAggregate under a Sort in
   the engine where PostgreSQL has a Unique over a Sort (ASC agrees), so which of two equal
   values (`'1 mon'` / `'30 days'`) is kept differs (planner costs).
 - Constant folding: a qual over a pulled-up subquery's output whose constant fails, ANDed
   with NULL above a subquery found empty (`... t WHERE t.c3 > 0 AND NULL` with `c3`
   `jsonb_array_length('{}')` under `WHERE NULL`), doesn't fail the statement as in
-  PostgreSQL; a dummy projection kept over an empty relation (`dummy_rel`'s target list)
-  doesn't pass on its input's per-column constants (`kept_cols`).
+  PostgreSQL. (A dummy projection kept over an empty relation passes on its input's
+  per-column constants since round 4.)
 
 - **Constant folding, left**: a UNION ALL arm found empty (`... WHERE false UNION ALL ...`)
   is dropped with its outputs, which PostgreSQL still simplifies; a strict call over a pulled-up subquery's output whose expression
-  fails (`NULL + s.c` with `c` = `width_bucket('NaN', ...)`: PostgreSQL substitutes first);
-  a CASE arm a pulled-up constant makes unreachable. The five new smoke entries (s5 #6, s10
-  #33, s12 #52, s20 #42, s22 #62) are these.
+  fails (`NULL + s.c` with `c` = `width_bucket('NaN', ...)`: PostgreSQL substitutes first,
+  the binder folds `NULL + s.c` before any pull-up; smoke s12 #52); a CASE arm a pulled-up
+  constant makes unreachable; a pulled-up constant output read by a scalar sub-select in the
+  select list (substituted after binding, at planning, so `fold::unfolded` doesn't see it);
+  seed 1926 #43 itself, whose relation is also found empty (its sub-select's failing
+  constants come from the substitution, which the empty relation's kept constants don't
+  model).
 
 - Grouping keys' occurrences are matched by their text as written (`pass_marks`): one written
   differently but equal (`abs(+9)` for a key `abs(9)`) is still folded with its surroundings;

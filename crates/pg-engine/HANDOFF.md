@@ -1254,6 +1254,16 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   fail), while over an inner join such a qual gates the join; immutable comparisons over
   COLLATE'd constants fold; an untyped literal coerced to a column-free grouping key's value
   is an occurrence of that key.
+  Round 20, agent 84 (difftest round 4): a grammar for seeds from 4000 on (`difftest/round4.rs`:
+  jsonpath and SQL/JSON, JSON_TABLE, window frames, LATERAL set-returning functions, MERGE and
+  RETURNING old / new over sub-partitioned tables with default partitions, numeric edges,
+  time zones); fixes: sub-selects under relations found empty are still planned (their
+  failing constants fail), a constant-false WHERE over an outer join gates the whole join,
+  polymorphic operators and functions over domains follow check_generic_type_consistency
+  (`int4range @> d` finds no operator), sub-selects of domain columns have the domain's type,
+  record comparisons of fields declared under different collations fail (42P22), only ROW()
+  or a whole-row reference casts a record to a composite, expressions a pulled-up constant
+  is put into after binding fold whole.
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
