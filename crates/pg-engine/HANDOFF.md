@@ -1172,9 +1172,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     two whose shortest decimal the old search missed.
   - COPY FROM borrows fields from the data (`InField`'s `Cow`s); pg_stat_io's keys are
     static strings in a fast-hash map; an inserted row's tuple length is computed once.
-- **Write path, round 4** (round 20, agent 85; BENCH.md's agent 85 section): CREATE INDEX 15%,
-  DELETE 30%, ANALYZE 20% faster; the first plan of a big unanalyzed table after a restart no
-  longer reads it (0.73 s → 0.12 s at 1M rows).
+- **Write path, round 4** (round 20, agent 85; BENCH.md's agent 85 section): CREATE INDEX
+  1.2–1.6x faster, DELETE up to 30%, the other bulk steps within a loaded machine's noise;
+  memory, disk and bytes written unchanged; no read workload slower. The first plan of a big
+  unanalyzed table after a restart no longer reads it (0.73 s → 0.12 s at 1M rows).
   - CREATE INDEX of a table too big to model measures the table and the index in the build's
     own pass (`Ddl::measures_in_build`, `measure_rows_with`: each row's key values computed
     once, the same numbers as a separate measure); index entries sort by 16-byte words

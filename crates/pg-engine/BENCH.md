@@ -2751,6 +2751,49 @@ CREATE INDEX 15%, DELETE 30% (wall; its CPU is mostly the parallel scan's worker
 `DROP TABLE` of the two 1M-row tables takes 6–7 s (PostgreSQL 0.2 s): it isn't in the bulk
 benchmark's timed steps, and is the biggest single gap the run showed.
 
+Again after the rebase onto `d8facea5`, on a quieter machine (load about 20), the same method
+with resources added: **up** is `d8facea5` alone, **round 4** is it with this round's commits.
+Peak memory is the engine's VmHWM (PostgreSQL: its container's memory.peak, shared_buffers
+2 GB included); on disk is the data directory after the load (and a CHECKPOINT) and at the
+end (PostgreSQL's includes its WAL); written is what the server wrote to storage over the load
+and over the whole run (`/proc/<pid>/io` write_bytes; the container's io.stat), for 49 MB of
+COPY data:
+
+| step | pg wall | pg cpu | up wall | up cpu | round 4 wall | round 4 cpu |
+|---|---|---|---|---|---|---|
+| COPY in | 1.55 | 1.48 | 3.92 | 3.78 | 3.45 | 3.27 |
+| CREATE INDEX | 0.66 | 1.11 | 3.63 | 3.46 | 2.25 | 2.18 |
+| CREATE UNIQUE INDEX | 0.45 | 0.60 | 2.65 | 3.12 | 2.31 | 2.75 |
+| COPY out | 1.02 | 0.81 | 0.74 | 1.26 | 0.95 | 1.49 |
+| INSERT … SELECT | 1.14 | 1.03 | 2.93 | 3.24 | 2.81 | 3.07 |
+| UPDATE half | 6.38 | 6.40 | 3.34 | 3.91 | 2.95 | 3.53 |
+| DELETE a quarter | 0.42 | 0.33 | 2.25 | 4.85 | 2.06 | 4.79 |
+| VACUUM | 0.42 | 0.47 | 0.98 | 0.89 | 1.18 | 1.15 |
+| ANALYZE | 0.25 | 0.17 | 1.14 | 1.04 | 1.30 | 1.19 |
+| count(*) after | 0.14 | 0.13 | 0.29 | 0.42 | 0.32 | 0.44 |
+| DROP TABLE (both) | 0.17 | 0.07 | 4.93 | 4.85 | 5.28 | 5.17 |
+
+| resources | pg | up | round 4 |
+|---|---|---|---|
+| peak memory | 952 MB | 420 MB | 425 MB |
+| on disk after the load | 1,099 MB | 58 MB | 58 MB |
+| written by the load | 165 MB | 100 MB | 100 MB |
+| on disk at the end | 1,097 MB | 64 MB | 64 MB |
+| written over the run | 884 MB | 567 MB | 570 MB |
+
+CREATE INDEX 1.6x, COPY in 12%, UPDATE 12% faster here; ANALYZE, VACUUM and COPY out moved
+the other way by about as much as the first run moved them this way (none of their code paths
+changed but the snapshot reads, which take the same path when there are no runs): the load's
+noise. Memory, disk and writes are unchanged: the load writes 2.0x the COPY data (the commit's
+SST, then L0 → L1 compaction compressing it to 58 MB), PostgreSQL 3.4x (WAL and heap, 1.1 GB
+on disk with its WAL), and the whole run writes 1.5x less than PostgreSQL's.
+
+Reads (no regression): the OLTP and 200k analytic suites (`bench oltp`, `bench analytic`),
+4 interleaved runs each, both orders: every OLTP read within ±10% (point selects 0.99–1.08x,
+range scans 0.99–1.09x, secondary lookups 1.01–1.11x); the analytic queries' wall medians
+moved ±12% with spreads of 2x between runs, so their engine CPU was measured over the whole
+suite (5 reps, 3 interleaved runs): 9.75 s up, 9.66 s round 4.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
