@@ -391,6 +391,19 @@ Batch 2 (`a84_fresh_r4b`), from the round 4 grammar's seeds 4000–4099 (the fir
 - **Wrong error (error order)**: the errors of planning a level (a FULL JOIN no merge or hash
   join can run) wait for the whole statement's parse analysis, whose errors (an ungrouped
   column) come first (seeds 4000 #33, 4009 #37, 4040 #39 and kin: 0A000 for 42803).
+- **Crash (found by the crate's deep_input test after the rebase)**: `optimize::
+  strip_free_domains` unwrapped a transform that fails past the statement's stack budget; it
+  now leaves a qual without domain coercions alone (no rebuilt tree at all) and stops at the
+  budget, so the next guard raises "stack depth limit exceeded".
+
+Cost: none of this runs per row except the record comparisons' collation check (only for two
+anonymous row types whose field collations differ) and IN lists / IS DISTINCT FROM over
+anonymous records; the binder's new checks run only for calls with two polymorphic
+parameters, and the constant-tree scan is one linear pass per statement. Measured side by
+side against the base (release builds, load 20–45, medians of 10 alternated runs over 2M
+rows): sum / avg of float8 454 / 463 ms, IS DISTINCT FROM 830 / 827, IN over named records
+3,570 / 3,681, `=` over named records 2,014 / 2,045; point selects with IN and IS DISTINCT
+FROM over the simple protocol within the run-to-run noise.
 
 
 ## Round 3 grammar (agent 75)

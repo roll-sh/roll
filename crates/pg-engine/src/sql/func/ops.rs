@@ -106,7 +106,7 @@ fn check_record_collations(lt: &T, rt: &T, a: &Value, b: &Value, c: &FnCtx) -> R
     };
     let conflict = |i: usize| {
         matches!((l.fields.get(i), r.fields.get(i)), (Some((_, t)), Some(_)) if t.collatable())
-            && field(&l, i) != field(&r, i)
+            && field(l, i) != field(r, i)
     };
     if !(0..l.fields.len()).any(conflict) {
         return Ok(());
