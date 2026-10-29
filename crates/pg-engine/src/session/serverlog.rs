@@ -83,6 +83,9 @@ impl Session {
 
     /// check_log_statement: whether log_statement covers one of `stmts`.
     pub fn statement_logged(&self, stmts: &[Arc<Prepared>]) -> bool {
+        if !self.state.settings.borrow().logs_statements() {
+            return false;
+        }
         let want = match self.state.settings.borrow().get_str("log_statement") {
             Some("all") => LogStmt::All,
             Some("mod") => LogStmt::Mod,
@@ -158,6 +161,9 @@ impl Session {
     /// log_statement didn't already log it).
     pub fn duration_logged(&self, elapsed: std::time::Duration, was_logged: bool) -> Option<(String, bool)> {
         let st = self.state.settings.borrow();
+        if !st.logs_statements() {
+            return None;
+        }
         let duration = st.bool("log_duration");
         let min = st.int("log_min_duration_statement");
         let sample = st.int("log_min_duration_sample");

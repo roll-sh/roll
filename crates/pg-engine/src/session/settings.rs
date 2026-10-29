@@ -488,6 +488,9 @@ struct Derived {
     /// written).
     track_counts: bool,
     replica_role: bool,
+    /// log_statement, log_duration, log_min_duration_statement / _sample ask for statement
+    /// or duration lines (else the server skips that work per statement).
+    logs_statements: bool,
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1341,6 +1344,10 @@ impl Settings {
                 lock_timeout: self.int("lock_timeout"),
                 track_counts: self.get_str("track_counts").is_none_or(|v| v != "off"),
                 replica_role: self.get_str("session_replication_role") == Some("replica"),
+                logs_statements: self.get_str("log_statement").is_some_and(|v| v != "none")
+                    || self.bool("log_duration")
+                    || self.int("log_min_duration_statement") >= 0
+                    || self.int("log_min_duration_sample") >= 0,
             })
         })
     }
@@ -1348,6 +1355,11 @@ impl Settings {
     /// Whether `track_counts` is on.
     pub fn track_counts(&self) -> bool {
         self.derived().track_counts
+    }
+
+    /// Whether statements get log_statement / duration lines (`Derived::logs_statements`).
+    pub fn logs_statements(&self) -> bool {
+        self.derived().logs_statements
     }
 
     /// Whether `session_replication_role` is `replica`.

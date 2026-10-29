@@ -228,6 +228,8 @@ struct Conn {
     repl: Option<crate::repl::walsender::Mode>,
     /// The snapshot its last CREATE_REPLICATION_SLOT exported.
     exported: Option<crate::repl::walsender::Exported>,
+    /// ErrorResponses sent so far.
+    errors: u64,
 }
 
 impl crate::repl::walsender::Wire for Conn {
@@ -382,6 +384,7 @@ impl Conn {
         if crate::log::active() {
             self.sent.push(e.clone());
         }
+        self.errors += 1;
         self.msg(b'E', |b| error_fields(b, e, e.severity.as_str()));
     }
 
@@ -646,6 +649,7 @@ fn handle(
         sent: Vec::new(),
         repl: None,
         exported: None,
+        errors: 0,
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
@@ -1744,12 +1748,13 @@ fn simple_query(c: &mut Conn, s: &mut Session, sql: &str) -> std::io::Result<()>
         send_notices(c, s);
     }
     s.set_batch_len(stmts.len());
-    let sent = c.sent.len();
+    let errors = c.errors;
     let r = simple_batch(c, s, sql, &stmts);
     s.set_batch_len(0);
     // check_log_duration (not for a statement that failed).
-    let failed = c.sent[sent.min(c.sent.len())..].iter().any(|e| e.severity != crate::error::Severity::Warning);
-    if !failed && let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), logged) {
+    if c.errors == errors
+        && let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), logged)
+    {
         if with_stmt {
             let detail = s.execute_detail(&stmts);
             s.log_message(&format!("duration: {ms} ms  statement: {sql}"), detail.as_deref());
@@ -2018,11 +2023,7 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     send_notices(c, s);
     // exec_execute_message's log_statement and duration lines.
     let start = std::time::Instant::now();
-    let info = if crate::log::active() || s.state.settings.borrow().get_str("client_min_messages") == Some("log") {
-        s.portal_log(&portal)
-    } else {
-        None
-    };
+    let info = if s.state.settings.borrow().logs_statements() { s.portal_log(&portal) } else { None };
     let logged = info.as_ref().is_some_and(|(_, _, p)| s.statement_logged(std::slice::from_ref(p)));
     if let Some((what, detail, _)) = info.as_ref().filter(|_| logged) {
         s.log_message(&format!("execute {what}: {sql}"), detail.as_deref());

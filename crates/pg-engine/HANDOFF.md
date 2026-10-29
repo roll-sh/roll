@@ -183,7 +183,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     "execute <name>" lines with their parameters (log_parameter_max_length),
     log_connections (PostgreSQL 18's receipt / authorization) and log_disconnections, and
     the postmaster's reload and startup lines. LOG messages reach the client too past
-    client_min_messages, as in PostgreSQL. auto_explain (`ext/auto_explain.rs`, loaded by
+    client_min_messages, as in PostgreSQL. Unused, all this costs a flag per statement:
+    statement and duration logging are gated on `Settings::logs_statements` (cached with the
+    derived settings), errors are kept for the log only while a sink is set, a reload check is
+    one atomic load per message, and the files' layer is consulted only for values that
+    differ from the built-in defaults. auto_explain (`ext/auto_explain.rs`, loaded by
     LOAD, session_preload_libraries or shared_preload_libraries): top-level statements past
     log_min_duration, with log_analyze / log_buffers / log_timing / log_verbose /
     log_settings, log_format text or json (xml, yaml as EXPLAIN prints them),
