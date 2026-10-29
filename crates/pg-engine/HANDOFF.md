@@ -1089,7 +1089,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   catalog values (pgAdmin, DBeaver, Alembic), the FK check through the primary key's index
   (it scanned the parent), Describe of what fails only when planned, sequences' columns in
   RowDescription, reg* names of built-ins by index. Left (STATUS.md): LIMIT without ORDER
-  BY over GROUP BY depends on autovacuum's statistics (the engine never auto-analyzes);
+  BY over GROUP BY depends on autovacuum's statistics (autovacuum since round 22, agent 99);
   concurrent CREATE SCHEMA / TABLE of one name don't wait for each other (Flyway's
   concurrent migrates); a LATERAL "outer reference" error (EF Core); slow paths listed.
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
@@ -1444,6 +1444,42 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   uncontended path unchanged), cancels wake a waiting backend at once (`locks::interrupt`),
   and the size models are behind a read-write lock so concurrent index scans no longer
   serialize on them per row.
+- **Autovacuum** (round 22, agent 99; `src/autovacuum.rs`): the engine analyzes (and
+  vacuums) on its own, as PostgreSQL 18.6's autovacuum does, so plans after an ORM's load
+  come from real statistics.
+  - Driven by the modification counters, never by polling: a statistics flush that moves a
+    user table's n_mod_since_analyze / n_ins_since_vacuum / n_dead_tup records it
+    (`pgstat::Shared::av_changed`) and tells the launcher once (`Hook::note`); counts kept
+    unflushed note their idle-timeout time. The launcher thread sleeps on a condition variable
+    with no timeout while nothing is due, and visits a database at the next
+    autovacuum_naptime tick (ticks from engine start: a change waits 0 to naptime, as under
+    PostgreSQL's launcher). A visit looks only at the tables recorded since the last one
+    (relation_needs_vacanalyze: thresholds, scale factors, autovacuum_vacuum_max_threshold,
+    the insert threshold with relallfrozen, every per-table reloption, autovacuum_enabled);
+    with nothing past a threshold it costs no session.
+  - Work runs in an "autovacuum worker" backend (pg_stat_activity: backend_type, query
+    `autovacuum: ANALYZE s.t`, no user / client) as `VACUUM (SKIP_LOCKED, PROCESS_TOAST
+    FALSE[, ANALYZE])` / `ANALYZE (SKIP_LOCKED)`, one table per transaction, so statistics
+    are a manual ANALYZE's and the locks PostgreSQL's (ShareUpdateExclusive, conditional).
+    The session is marked (`SessionState::autovacuum`): pgstat reports go to the auto
+    columns (last_autovacuum / _autoanalyze, the counts and total times), pg_stat_statements
+    and statement logging don't see it, it isn't in pg_stat_database.sessions or connection
+    limits. At most autovacuum_max_workers databases at once, one worker per database.
+  - A lock request that conflicts with a worker's lock cancels the worker at once
+    (`LockManager::acquire`, `set_autovacuum`; PostgreSQL's deadlock checker does it after
+    deadlock_timeout), and the table is retried on the next visit, as is one skipped
+    because its lock was taken. DROP / RENAME DATABASE and template copies stop the
+    database's worker (`count_other_backends`). Worker threads run at nice 10.
+  - Cost-based delay (`Ddl::vacuum_delay_point`): vacuum_cost_delay / _limit for VACUUM and
+    ANALYZE, autovacuum_vacuum_cost_delay / _limit in workers, one page hit per page read,
+    delay_time with track_cost_delay_timing. pg_stat_progress_analyze / _vacuum report every
+    backend's running command (`state::Progress`, atomics shared with pg_stat_activity's
+    entry): phases, sample / heap blocks, indexes.
+  - Not modelled: anti-wraparound vacuums (the engine's ids don't wrap), autovacuum of
+    system catalogs and TOAST tables (their counters aren't kept), the per-table cost
+    reloptions, the server log's "canceling autovacuum task" line (tracing only). The golden
+    harness's wire engine runs with autovacuum off (its files share one engine for minutes);
+    the regress harness keeps it on, as the reference has it. Test `tests/autovacuum.rs`.
 
 ## Repository layout
 

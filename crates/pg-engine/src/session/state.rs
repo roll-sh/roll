@@ -174,6 +174,57 @@ pub struct Activity {
     pub backend_xmin: Option<u64>,
     /// What it waits for besides locks and its client (`Cluster::set_wait`).
     pub wait: Option<(&'static str, &'static str)>,
+    /// A background worker's backend_type ("autovacuum worker"; None: a client backend).
+    pub backend_type: Option<&'static str>,
+    /// The backend's running VACUUM / ANALYZE progress (its session's `progress`).
+    pub progress: Option<Arc<Progress>>,
+}
+
+/// A backend's command progress other backends read (st_progress_command / _param):
+/// written with atomics, so reporting takes no lock.
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// PROGRESS_COMMAND_*: 0 none, 1 VACUUM, 2 ANALYZE.
+    pub command: std::sync::atomic::AtomicU8,
+    pub relid: std::sync::atomic::AtomicU32,
+    pub params: [std::sync::atomic::AtomicI64; 20],
+}
+
+impl Progress {
+    pub const VACUUM: u8 = 1;
+    pub const ANALYZE: u8 = 2;
+
+    /// pgstat_progress_start_command.
+    pub fn start(&self, command: u8, relid: u32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.command.store(0, Relaxed);
+        for p in &self.params {
+            p.store(0, Relaxed);
+        }
+        self.relid.store(relid, Relaxed);
+        self.command.store(command, std::sync::atomic::Ordering::Release);
+    }
+
+    /// pgstat_progress_update_param (`i` from 0).
+    pub fn set(&self, i: usize, v: i64) {
+        self.params[i].store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// pgstat_progress_end_command.
+    pub fn end(&self) {
+        self.command.store(0, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The command running (as pg_stat_get_progress_info names it) and its parameters.
+    pub fn read(&self) -> Option<(&'static str, u32, [i64; 20])> {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        let kind = match self.command.load(Acquire) {
+            Self::VACUUM => "VACUUM",
+            Self::ANALYZE => "ANALYZE",
+            _ => return None,
+        };
+        Some((kind, self.relid.load(Relaxed), std::array::from_fn(|i| self.params[i].load(Relaxed))))
+    }
 }
 
 /// A cluster with one database and nothing else (tests, embedded use).
@@ -265,6 +316,14 @@ pub struct SessionState {
     pub on_commit_truncating: std::cell::Cell<bool>,
     /// A VACUUM or ANALYZE is running (no other may start inside it).
     pub in_vacuum: std::cell::Cell<bool>,
+    /// The session is an autovacuum worker's (`autovacuum.rs`): its VACUUM / ANALYZE
+    /// report as autovacuum's, and pg_stat_statements doesn't see its commands.
+    pub autovacuum: std::cell::Cell<bool>,
+    /// The running VACUUM's / ANALYZE's progress (shared with pg_stat_activity's entry).
+    pub progress: Arc<Progress>,
+    /// Cost-based vacuum delay of the running VACUUM / ANALYZE: (cost balance, delay in
+    /// ms, cost limit, page-hit cost, whether delays are timed). Delay 0: off.
+    pub vacuum_cost: std::cell::Cell<(i64, f64, i64, i64, bool)>,
     /// The running statement doesn't take a snapshot (transaction control, LOCK, SET,
     /// SHOW: PlannedStmtRequiresSnapshot), so a REPEATABLE READ / SERIALIZABLE
     /// transaction's snapshot waits for a later one.
@@ -438,6 +497,9 @@ impl SessionState {
             on_commit: RefCell::new(Vec::new()),
             on_commit_truncating: std::cell::Cell::new(false),
             in_vacuum: std::cell::Cell::new(false),
+            autovacuum: std::cell::Cell::new(false),
+            progress: Arc::default(),
+            vacuum_cost: std::cell::Cell::new((0, 0.0, 200, 1, false)),
             no_snapshot: Default::default(),
             pgstat: RefCell::new(crate::exec::pgstat::Pending::new_session()),
             temp_used: std::cell::Cell::new(false),

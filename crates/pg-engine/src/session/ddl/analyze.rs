@@ -24,6 +24,15 @@ const WIDTH_THRESHOLD: usize = 1024;
 const ARRAY_WIDTH_THRESHOLD: usize = 0x10000;
 const FLOAT8_LT: u32 = 672;
 
+/// Ends the backend's progress report (pgstat_progress_end_command), on errors too.
+pub(super) struct ProgressEnd<'a>(pub(super) &'a crate::session::state::Progress);
+
+impl Drop for ProgressEnd<'_> {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
 /// One column (or index expression) to analyze.
 struct Target {
     attnum: i16,
@@ -54,6 +63,11 @@ impl Ddl<'_, '_> {
         only: &[String],
         inherit: bool,
     ) -> Result<Option<usize>> {
+        // pg_stat_progress_analyze: acquiring (inherited) sample rows.
+        let progress = self.ctx.sess.progress.clone();
+        progress.start(crate::session::state::Progress::ANALYZE, t.oid);
+        progress.set(0, if inherit { 2 } else { 1 });
+        let _ended = ProgressEnd(&progress);
         let default = self.default_target();
         let mut targets: Vec<Target> = Vec::new();
         for (i, c) in t.columns.iter().enumerate() {
@@ -181,17 +195,25 @@ impl Ddl<'_, '_> {
                 .get(&t.oid)
                 .map_or((0, 0.0), |s| (s.pages.max(0) as usize, s.tuples));
             let chosen = sampled_blocks(pages, want);
+            progress.set(1, chosen.as_ref().map_or(pages, |c| c.iter().filter(|b| **b).count()) as i64);
+            let (mut block, mut blocks_done) = (usize::MAX, 0i64);
             let scan = self.ctx.txn.borrow().scan(&start, &end);
             for (i, r) in scan.enumerate() {
                 self.ctx.check()?;
                 let (_, bytes) = r?;
                 all_rows += 1;
                 // (The page row i is on, the rows filling the pages evenly in table order.)
-                if let Some(c) = &chosen {
-                    let b = ((i as f64 * pages as f64 / tuples.max(1.0)) as usize).min(pages - 1);
-                    if !c[b] {
-                        continue;
-                    }
+                let b = ((i as f64 * pages as f64 / tuples.max(1.0)) as usize).min(pages.max(1) - 1);
+                if let Some(c) = &chosen
+                    && !c[b]
+                {
+                    continue;
+                }
+                if b != block {
+                    block = b;
+                    blocks_done += 1;
+                    progress.set(2, blocks_done);
+                    self.vacuum_delay_point(1)?;
                 }
                 offer(&mut || Err(bytes.to_vec()));
             }
@@ -211,6 +233,7 @@ impl Ddl<'_, '_> {
         if sample.is_empty() {
             return Ok(local);
         }
+        progress.set(0, 3);
         let fmt = FormatCtx::default();
         let mut computed = Vec::new();
         for tg in &targets {

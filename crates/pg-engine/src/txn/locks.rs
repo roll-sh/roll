@@ -476,6 +476,8 @@ struct State {
     /// Exclusion constraints' entries in progress, by constraint: their lock (`EXCL_ENTRY`),
     /// row key and writer. An entry whose lock is no longer held is gone (dropped lazily).
     excl: HashMap<u32, Vec<(Vec<u8>, Vec<u8>, KeyHolder)>>,
+    /// Autovacuum workers' backends, with what cancels each one's work.
+    autovacuum: HashMap<u64, std::sync::Arc<AtomicBool>>,
 }
 
 /// The lock waits in progress, by their cancel flag's address: what a cancel or terminate
@@ -699,6 +701,20 @@ impl LockManager {
             }
             WaitPolicy::Block => {}
         }
+        // An autovacuum worker holding a conflicting lock is canceled
+        // (GetBlockingAutoVacuumPgproc: PostgreSQL's deadlock checker does it after
+        // deadlock_timeout; it is done at once here, so the wait is shorter).
+        if !s.autovacuum.is_empty() {
+            for h in &s.locks[key].holds {
+                if h.proc != proc
+                    && h.mode.conflicts_with(mode)
+                    && let Some(c) = s.autovacuum.get(&h.proc)
+                {
+                    c.store(true, Ordering::Relaxed);
+                    interrupt(c);
+                }
+            }
+        }
         let e = s.locks.get_mut(key).unwrap();
         match insert_at {
             Some(i) => e.queue.insert(i, proc),
@@ -837,6 +853,15 @@ impl LockManager {
     }
 
     /// Release one count of `owner`'s hold of `mode`.
+    /// Backend `proc` is an autovacuum worker whose work `cancel` cancels (None: no more).
+    pub fn set_autovacuum(&self, proc: u64, cancel: Option<std::sync::Arc<AtomicBool>>) {
+        let mut s = self.state.lock();
+        match cancel {
+            Some(c) => s.autovacuum.insert(proc, c),
+            None => s.autovacuum.remove(&proc),
+        };
+    }
+
     pub fn release(&self, key: &[u8], owner: u64, mode: LockMode) {
         let mut s = self.state.lock();
         if let Some(e) = s.locks.get_mut(key)

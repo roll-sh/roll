@@ -33,6 +33,7 @@ impl Ddl<'_, '_> {
             ));
         }
         let _in = InVacuum(&self.ctx.sess.in_vacuum, self.ctx.sess.in_vacuum.replace(true));
+        self.start_vacuum_cost();
         let mut vacuum = s.is_vacuumcmd;
         let mut analyze = !s.is_vacuumcmd;
         let (mut full, mut skip_pages, mut only_db, mut verbose) = (false, false, false, false);
@@ -465,11 +466,25 @@ impl Ddl<'_, '_> {
                     } else {
                         // PROCESS_MAIN false: only the TOAST table is vacuumed.
                         let mut live = None;
+                        // pg_stat_progress_vacuum: scanning the heap, then final cleanup.
+                        let progress = self.ctx.sess.progress.clone();
+                        let _ended = vacuum.then(|| {
+                            progress.start(crate::session::state::Progress::VACUUM, r.oid);
+                            progress.set(0, 1);
+                            let pages = self.cat.relstats.get(&r.oid).map_or(0, |s| s.pages.max(0));
+                            progress.set(1, pages as i64);
+                            let indexes = r.indexes.len() + usize::from(r.pkey_index.is_some());
+                            progress.set(8, indexes as i64);
+                            super::analyze::ProgressEnd(&progress)
+                        });
                         if vacuum && process_main {
                             self.vacuum_am_indexes(&r)?;
                         }
                         if process_main || !vacuum {
                             live = Some(self.measure(&r, vacuum)?);
+                        }
+                        if vacuum {
+                            progress.set(0, 6);
                         }
                         if vacuum {
                             // vac_update_relstats: the table's pg_class row, in place.
@@ -553,6 +568,53 @@ impl Ddl<'_, '_> {
             self.save()?;
         }
         Ok(what.into())
+    }
+
+    /// VacuumCostActive's setup at the start of vacuum(): autovacuum's delay and limit in
+    /// a worker (autovacuum_vacuum_cost_delay / _limit, -1 for vacuum_cost_*), else
+    /// vacuum_cost_delay / _limit.
+    fn start_vacuum_cost(&self) {
+        let st = self.ctx.sess.settings.borrow();
+        let real = |n: &str| st.get_str(n).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let (mut delay, mut limit) = (real("vacuum_cost_delay"), st.int("vacuum_cost_limit"));
+        if self.ctx.sess.autovacuum.get() {
+            let d = real("autovacuum_vacuum_cost_delay");
+            if d >= 0.0 {
+                delay = d;
+            }
+            let l = st.int("autovacuum_vacuum_cost_limit");
+            if l > 0 {
+                limit = l;
+            }
+        }
+        let timed = st.bool("track_cost_delay_timing");
+        self.ctx.sess.vacuum_cost.set((0, delay, limit.max(1), st.int("vacuum_cost_page_hit"), timed));
+    }
+
+    /// vacuum_delay_point after `pages` pages read (each a buffer hit: the engine's pages
+    /// are in memory): past the cost limit, sleep delay × balance / limit (at most 4 ×
+    /// delay) and start over. A cancel ends the wait.
+    pub(super) fn vacuum_delay_point(&self, pages: i64) -> Result<()> {
+        let sess = self.ctx.sess;
+        let (balance, delay, limit, hit, timed) = sess.vacuum_cost.get();
+        if delay <= 0.0 || !sess.in_vacuum.get() {
+            return Ok(());
+        }
+        let balance = balance + pages * hit;
+        if balance < limit {
+            sess.vacuum_cost.set((balance, delay, limit, hit, timed));
+            return Ok(());
+        }
+        sess.vacuum_cost.set((0, delay, limit, hit, timed));
+        let ms = (delay * balance as f64 / limit as f64).min(delay * 4.0);
+        let started = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_secs_f64(ms / 1000.0));
+        if timed {
+            // (delay_time: the VACUUM's parameter 10, the ANALYZE's 8, in nanoseconds.)
+            let i = if sess.progress.command.load(std::sync::atomic::Ordering::Relaxed) == crate::session::state::Progress::VACUUM { 10 } else { 8 };
+            sess.progress.params[i].fetch_add(started.elapsed().as_nanos() as i64, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.ctx.check()
     }
 
     /// VACUUM's new relfrozenxid: OldestXmin, held back by the oldest xmin of a row not yet
@@ -1206,11 +1268,22 @@ impl Ddl<'_, '_> {
             });
         let virt_mask: Vec<bool> = (0..t.columns.len()).map(|i| virt.contains(&i)).collect();
         let start = crate::storage::keys::index_prefix(t.oid, 0);
+        // (A VACUUM's pages, for its delay points and pg_stat_progress_vacuum.)
+        let per_page = self.cat.relstats.get(&t.oid).filter(|s| s.pages > 0).map_or(64, |s| ((s.tuples / s.pages as f64) as usize).max(1));
+        let progress = self.ctx.sess.in_vacuum.get().then(|| self.ctx.sess.progress.clone());
         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
         for r in scan {
             self.ctx.check()?;
             let (_, bytes) = r?;
             rows += 1;
+            if let Some(p) = &progress
+                && rows.is_multiple_of(per_page)
+            {
+                if p.command.load(std::sync::atomic::Ordering::Relaxed) == crate::session::state::Progress::VACUUM {
+                    p.set(2, (rows / per_page) as i64);
+                }
+                self.vacuum_delay_point(1)?;
+            }
             let stored = match modelled {
                 None => crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask),
                 Some(_) => None,

@@ -3631,6 +3631,9 @@ pub(super) fn pg_stat_get_progress_info(a: &[Value], c: &FnCtx) -> Result<super:
         _ => return Ok(Box::new(std::iter::empty())),
     };
     let sess = c.exec.sess;
+    if kind.eq_ignore_ascii_case("VACUUM") || kind.eq_ignore_ascii_case("ANALYZE") {
+        return Ok(Box::new(command_progress(&kind, c).into_iter().map(Ok)));
+    }
     let Some(p) = sess.copy_progress.borrow().clone().filter(|_| kind.eq_ignore_ascii_case("COPY"))
     else {
         return Ok(Box::new(std::iter::empty()));
@@ -3650,6 +3653,43 @@ pub(super) fn pg_stat_get_progress_info(a: &[Value], c: &FnCtx) -> Result<super:
     ];
     row.extend(params.iter().map(|v| Value::Int8(*v)));
     Ok(Box::new(std::iter::once(Ok(row))))
+}
+
+/// pg_stat_get_progress_info('VACUUM' / 'ANALYZE'): every backend running that command
+/// (an autovacuum worker's too); relid and the parameters only where the caller may read
+/// the backend's statistics (HAS_PGSTAT_PERMISSIONS), null otherwise.
+fn command_progress(kind: &str, c: &FnCtx) -> Vec<Vec<Value>> {
+    let sess = c.exec.sess;
+    let cat = c.exec.catalog();
+    let (me, dbo) = (c.exec.current_user(), c.exec.db_owner());
+    let all_stats = cat.has_privs_of_role(me, 3375, dbo);
+    let dbs = sess.cluster.databases();
+    let mut seen_me = false;
+    let mut entries: Vec<(i32, Option<u32>, Option<u32>, std::sync::Arc<crate::session::state::Progress>)> = Vec::new();
+    for b in sess.cluster.activity() {
+        let Some(p) = b.progress.clone() else { continue };
+        seen_me |= b.pid == sess.pid;
+        let role = cat.role_by_name(&b.user).map(|r| r.oid);
+        let db = dbs.iter().find(|d| d.1 == b.database).map(|d| d.0);
+        entries.push((b.pid, db, role, p));
+    }
+    // (A cluster without a backend list: this session's own.)
+    if !seen_me {
+        entries.push((sess.pid, Some(sess.database_oid()), Some(me), sess.progress.clone()));
+    }
+    let mut out = Vec::new();
+    for (pid, db, role, p) in entries {
+        let Some((_, relid, params)) = p.read().filter(|r| r.0.eq_ignore_ascii_case(kind)) else { continue };
+        let mut row = vec![Value::Int4(pid), db.map_or(Value::Null, Value::Oid)];
+        if all_stats || role.is_some_and(|r| cat.has_privs_of_role(me, r, dbo)) {
+            row.push(Value::Oid(relid));
+            row.extend(params.iter().map(|v| Value::Int8(*v)));
+        } else {
+            row.extend(std::iter::repeat_n(Value::Null, 21));
+        }
+        out.push(row);
+    }
+    out
 }
 
 fn pg_get_keywords(_: &[Value], _: &FnCtx) -> Result<super::SrfIter> {

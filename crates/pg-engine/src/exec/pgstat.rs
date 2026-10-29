@@ -56,6 +56,13 @@ pub struct TabEntry {
     pub analyze_count: i64,
     pub total_vacuum_time: f64,
     pub total_analyze_time: f64,
+    /// What autovacuum's workers did (the auto columns of pg_stat_all_tables).
+    pub last_autovacuum_time: Option<i64>,
+    pub autovacuum_count: i64,
+    pub total_autovacuum_time: f64,
+    pub last_autoanalyze_time: Option<i64>,
+    pub autoanalyze_count: i64,
+    pub total_autoanalyze_time: f64,
 }
 
 /// A function's counts (PgStat_FunctionCounts): calls, and times in milliseconds.
@@ -229,6 +236,13 @@ pub struct Shared {
     idle_flushed: HashMap<i32, Instant>,
     /// Relations rewritten (new files) since they were last read: a scan reads them in.
     pub cold: std::collections::HashSet<u32>,
+    /// User tables whose modification counters (n_mod_since_analyze, n_ins_since_vacuum,
+    /// n_dead_tup) moved since autovacuum last looked at the database.
+    pub av_changed: std::collections::HashSet<u32>,
+    /// The autovacuum launcher (when the database has one) and whether it has been told
+    /// about this database's changes (a visit is due).
+    pub av: Option<crate::autovacuum::Hook>,
+    pub av_noted: bool,
 }
 
 /// A pg_stat_io cell: (backend type, object, context, operation).
@@ -912,9 +926,15 @@ pub fn report_vacuum(ctx: &ExecCtx, rel: u32, live: i64, dead: i64, ms: f64) {
     t.live_tuples = live;
     t.dead_tuples = dead;
     t.ins_since_vacuum = 0;
-    t.last_vacuum_time = Some(now());
-    t.vacuum_count += 1;
-    t.total_vacuum_time += ms;
+    if ctx.sess.autovacuum.get() {
+        t.last_autovacuum_time = Some(now());
+        t.autovacuum_count += 1;
+        t.total_autovacuum_time += ms;
+    } else {
+        t.last_vacuum_time = Some(now());
+        t.vacuum_count += 1;
+        t.total_vacuum_time += ms;
+    }
 }
 
 /// pgstat_report_analyze: the counts this transaction will report at its end are taken
@@ -947,9 +967,15 @@ pub fn report_analyze(
     if reset_counter {
         t.mod_since_analyze = 0;
     }
-    t.last_analyze_time = Some(now());
-    t.analyze_count += 1;
-    t.total_analyze_time += ms;
+    if ctx.sess.autovacuum.get() {
+        t.last_autoanalyze_time = Some(now());
+        t.autoanalyze_count += 1;
+        t.total_autoanalyze_time += ms;
+    } else {
+        t.last_analyze_time = Some(now());
+        t.analyze_count += 1;
+        t.total_analyze_time += ms;
+    }
 }
 
 /// A checkpoint was requested and done (CHECKPOINT): it writes and syncs buffers and logs
@@ -1131,6 +1157,9 @@ fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog) {
         e.blocks_hit += c.blocks_hit;
         e.live_tuples = e.live_tuples.max(0);
         e.dead_tuples = e.dead_tuples.max(0);
+        if rel >= crate::catalog::FIRST_USER_OID && modifies(&c) {
+            s.av_changed.insert(rel);
+        }
         let db = if shared { &mut s.shared_db } else { &mut s.db };
         db.tuples_returned += c.tuples_returned;
         db.tuples_fetched += c.tuples_fetched;
@@ -1168,6 +1197,50 @@ fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog) {
     s.db.sessions += u.sessions;
     s.db.parallel_workers_to_launch += u.parallel_workers.0;
     s.db.parallel_workers_launched += u.parallel_workers.1;
+    if !s.av_changed.is_empty() {
+        note_autovacuum(s, Instant::now());
+    }
+}
+
+/// Whether counts `c` move what autovacuum's thresholds read.
+fn modifies(c: &TabCounts) -> bool {
+    c.changed_tuples != 0 || c.tuples_inserted != 0 || c.delta_dead_tuples != 0 || c.truncdropped
+}
+
+/// Tell the database's autovacuum launcher (once until it visits) that tables changed, or
+/// will have once counts kept unflushed until `at` are flushed.
+fn note_autovacuum(s: &mut Shared, at: Instant) {
+    if !s.av_noted && let Some(h) = &s.av {
+        s.av_noted = h.note(at);
+    }
+}
+
+/// An autovacuum worker's look at the database (do_autovacuum's pgstat fetch): idle
+/// backends' due counts flushed, the tables changed since the last look taken, and the
+/// launcher told again about counts still kept unflushed (their idle timeout comes later).
+pub fn take_autovacuum_changes(db: &crate::txn::Database) -> (Vec<u32>, HashMap<u32, TabEntry>) {
+    let mut s = shared(db);
+    s.av_noted = false;
+    let changed: Vec<u32> = std::mem::take(&mut s.av_changed).into_iter().collect();
+    let entries = changed.iter().filter_map(|r| s.tables.get(r).map(|e| (*r, e.clone()))).collect();
+    let later = s
+        .unflushed
+        .values()
+        .filter(|u| u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)))
+        .filter_map(|u| u.due)
+        .min();
+    if let Some(at) = later {
+        note_autovacuum(&mut s, at);
+    }
+    (changed, entries)
+}
+
+/// A table autovacuum wanted to process but didn't (its lock was taken, its work was
+/// canceled): looked at again on the next visit.
+pub fn autovacuum_retry(db: &crate::txn::Database, rel: u32) {
+    let mut s = db.pgstat.lock();
+    s.av_changed.insert(rel);
+    note_autovacuum(&mut s, Instant::now());
 }
 
 /// Whether relation `rel` (a table, index, view or TOAST table) is in the catalog.
@@ -1420,6 +1493,9 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
     if !force && !overdue && p.last_flush.is_some_and(|t| now.duration_since(t) < MIN_INTERVAL) {
         p.pending_since.get_or_insert(now);
         u.due = Some(now + IDLE_INTERVAL);
+        if u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)) {
+            note_autovacuum(&mut s, now + IDLE_INTERVAL);
+        }
         s.unflushed.insert(sess.pid, u);
         p.parked = true;
         return;

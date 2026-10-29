@@ -23,7 +23,9 @@ fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
         outbound: Vec::new(),
         max_prepared_transactions: 0,
         auth_files: Default::default(),
-        settings: Vec::new(),
+        // (The plans compared follow the statistics the test's ANALYZEs set: autovacuum
+        // re-analyzing mid-test would change them, and float sums with them.)
+        settings: vec![("autovacuum".into(), "off".into())],
     })
     .unwrap()
 }

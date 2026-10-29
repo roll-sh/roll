@@ -227,7 +227,9 @@ fn golden_wire() {
             outbound: Vec::new(),
             max_prepared_transactions: max,
             auth_files: Default::default(),
-            settings: Vec::new(),
+            // (The files run for minutes in one engine: autovacuum's naptime ticks would
+            // analyze some files' tables mid-file, at times that vary run to run.)
+            settings: vec![("autovacuum".into(), "off".into())],
         };
         let engine = pg_engine::engine::Engine::open(opts).unwrap();
         let server = pg_engine::server::ServerOptions {

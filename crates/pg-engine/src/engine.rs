@@ -263,6 +263,15 @@ pub struct Engine {
     argv: Vec<(String, String)>,
     /// Logical replication apply workers and their launcher.
     workers: Arc<crate::repl::apply::Workers>,
+    /// The autovacuum launcher and its workers.
+    autovacuum: Arc<crate::autovacuum::Launcher>,
+}
+
+impl Drop for Engine {
+    /// (An engine dropped without `shutdown`: the autovacuum launcher's thread ends too.)
+    fn drop(&mut self) {
+        self.autovacuum.dropped();
+    }
 }
 
 const REGISTRY_FILE: &str = "databases.json";
@@ -495,6 +504,7 @@ impl Engine {
                 conf,
                 argv,
                 workers: Arc::default(),
+                autovacuum: Arc::new(crate::autovacuum::Launcher::new(me.clone())),
             }
         });
         engine.init_shared()?;
@@ -532,6 +542,10 @@ impl Engine {
             .workers
             .start_launcher(&engine)
             .map_err(|e| internal(format!("spawn logical replication launcher: {e}")))?;
+        engine
+            .autovacuum
+            .start()
+            .map_err(|e| internal(format!("spawn autovacuum launcher: {e}")))?;
         Ok(engine)
     }
 
@@ -619,7 +633,11 @@ impl Engine {
         if let Some(kept) = open.kept.remove(&entry.oid) {
             *db.pgstat.lock() = kept;
         }
-        db.pgstat.lock().fixed = self.stats.clone();
+        {
+            let mut s = db.pgstat.lock();
+            s.fixed = self.stats.clone();
+            s.av = Some(crate::autovacuum::Hook::new(&self.autovacuum, entry.oid));
+        }
         db.set_repl(self.repl.clone());
         self.repl.attach(&db);
         // Its prepared transactions, with their locks, before any session can see it.
@@ -632,6 +650,22 @@ impl Engine {
         info!(database = %entry.name, "opened database");
         open.dbs.insert(entry.oid, db.clone());
         Ok(db)
+    }
+
+    /// Database `oid` for an autovacuum worker: its name and the open database (opened if
+    /// it was closed for being idle). None when it's gone or can't be connected to.
+    pub(crate) fn autovacuum_database(&self, oid: u32) -> Option<(String, Arc<Database>)> {
+        let entry = self.registry.lock().databases.iter().find(|d| d.oid == oid).cloned()?;
+        if !entry.allow_connections || entry.options().is_invalid() {
+            return None;
+        }
+        let db = self.open_db(&entry).ok()?;
+        Some((entry.name, db))
+    }
+
+    /// The autovacuum launcher (tests read its counters).
+    pub fn autovacuum(&self) -> &crate::autovacuum::Launcher {
+        &self.autovacuum
     }
 
     /// Whether `db` is (still) the open instance of its database.
@@ -903,7 +937,7 @@ impl Engine {
                 .count();
             let db_others = b
                 .iter()
-                .filter(|(p, b)| **p != pid && b.database == entry.oid)
+                .filter(|(p, b)| **p != pid && b.database == entry.oid && b.activity.backend_type.is_none())
                 .count();
             (others, db_others)
         };
@@ -916,6 +950,7 @@ impl Engine {
         if let Some(b) = self.backends.lock().get_mut(&pid) {
             b.database = entry.oid;
             b.cancel = Some(session.cancel.clone());
+            b.activity.progress = Some(session.state.progress.clone());
             b.activity.database = dbname.to_string();
             b.activity.user = user.to_string();
             b.activity.application_name = application_name.to_string();
@@ -1558,6 +1593,7 @@ impl Engine {
         self.stopped.store(true, Ordering::Release);
         // (Apply workers hold sessions: they end before the databases close.)
         self.workers.shutdown();
+        self.autovacuum.shutdown();
         self.repl.slots.flush();
         for b in self.backends.lock().values() {
             Self::terminate(b);
@@ -1626,6 +1662,8 @@ impl Engine {
     fn count_other_backends(&self, oid: u32) -> (usize, usize) {
         let mut tries = 0;
         loop {
+            // (An autovacuum worker there is told to go: TerminateOtherDBBackends.)
+            self.autovacuum.stop_database(oid);
             // (A session leaving may be out of the backends list but still counted on its
             // open database, which `close_now` checks.)
             let open = self.open.lock().dbs.get(&oid).map_or(0, |db| db.sessions.load(Ordering::SeqCst));

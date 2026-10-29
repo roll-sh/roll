@@ -42,6 +42,9 @@ fn setting(s: &SessionState, name: &str) -> Option<String> {
 
 /// `pgss_enabled(level)`: track = all, or top and at the top level.
 pub fn enabled(s: &SessionState, level: u32) -> bool {
+    if s.autovacuum.get() {
+        return false;
+    }
     match setting(s, "pg_stat_statements.track").as_deref() {
         Some("all") => true,
         Some("none") => false,

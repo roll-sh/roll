@@ -44,9 +44,9 @@ tab_counters! {
     mod_since_analyze = 3177 => |e| e.mod_since_analyze;
     ins_since_vacuum = 5053 => |e| e.ins_since_vacuum;
     vacuum_count = 3054 => |e| e.vacuum_count;
-    autovacuum_count = 3055 => |_e| 0;
+    autovacuum_count = 3055 => |e| e.autovacuum_count;
     analyze_count = 3056 => |e| e.analyze_count;
-    autoanalyze_count = 3057 => |_e| 0;
+    autoanalyze_count = 3057 => |e| e.autoanalyze_count;
 }
 
 macro_rules! tab_times {
@@ -61,9 +61,9 @@ macro_rules! tab_times {
 tab_times! {
     lastscan = 6310 => |e| e.lastscan;
     last_vacuum_time = 2781 => |e| e.last_vacuum_time;
-    last_autovacuum_time = 2782 => |_e| None;
+    last_autovacuum_time = 2782 => |e| e.last_autovacuum_time;
     last_analyze_time = 2783 => |e| e.last_analyze_time;
-    last_autoanalyze_time = 2784 => |_e| None;
+    last_autoanalyze_time = 2784 => |e| e.last_autoanalyze_time;
 }
 
 macro_rules! tab_floats {
@@ -77,9 +77,9 @@ macro_rules! tab_floats {
 
 tab_floats! {
     total_vacuum_time = 6358 => |e| e.total_vacuum_time;
-    total_autovacuum_time = 6359 => |_e| 0.0;
+    total_autovacuum_time = 6359 => |e| e.total_autovacuum_time;
     total_analyze_time = 6360 => |e| e.total_analyze_time;
-    total_autoanalyze_time = 6361 => |_e| 0.0;
+    total_autoanalyze_time = 6361 => |e| e.total_autoanalyze_time;
 }
 
 fn tab_entry(a: &[Value], c: &FnCtx) -> Option<TabEntry> {

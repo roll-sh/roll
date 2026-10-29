@@ -361,7 +361,11 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
             };
             row[15] = xid.map_or(Value::Null, |x| Value::Oid(x as u32));
             row[16] = xmin.map_or(Value::Null, |x| Value::Oid(x as u32));
-            row[17] = text("client backend");
+            row[17] = text(b.backend_type.unwrap_or("client backend"));
+            if b.backend_type.is_some() {
+                // (No client: address, host name and port are null.)
+                row[14] = Value::Null;
+            }
             // query_id: this session's, when compute_query_id computes it and the query is
             // reported (a hash of the query text stands in for Postgres's jumble).
             if b.pid == c.exec.sess.pid {

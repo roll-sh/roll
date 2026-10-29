@@ -4,6 +4,7 @@
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
 pub mod auth;
+pub mod autovacuum;
 pub mod catalog;
 pub mod engine;
 pub mod ext;
