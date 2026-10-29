@@ -239,11 +239,17 @@ impl Exec<'_, '_> {
                 vec![xpath::cast_to_string(&self.x, &mut v)]
             }
         };
+        // One value's nodes are in document order already.
+        if let [v] = values.as_slice() {
+            return Ok(XValue::NodeSet(self.key_lookup(&name, root, v).map_err(|_| err::STACK)?));
+        }
         let mut out: Vec<XNode> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for v in values {
-            let found = self.key_lookup(&name, root, &v).map_err(|_| err::STACK)?;
-            for n in found {
-                if !out.iter().any(|o| same(o, &n)) {
+            for n in self.key_lookup(&name, root, &v).map_err(|_| err::STACK)? {
+                if let XNode::Node(id) = n
+                    && seen.insert(id)
+                {
                     out.push(n);
                 }
             }
@@ -296,7 +302,8 @@ impl Exec<'_, '_> {
                 };
                 for s in strings {
                     let e = table.entry(s).or_default();
-                    if !e.iter().any(|o| same(o, &node)) {
+                    // (Nodes come in document order: a repeat can only be the last.)
+                    if !e.last().is_some_and(|o| same(o, &node)) {
                         e.push(node.clone());
                     }
                 }

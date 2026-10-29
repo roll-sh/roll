@@ -206,7 +206,9 @@ fn transform(sheet: &Sheet, mut src: Doc, params: &[(String, String)], diag: &mu
         strip_spaces(sheet, &mut src);
     }
     let html = output::html_result(sheet);
-    let mut e = Exec::new(sheet, XDoc::new(src), diag);
+    let mut x = XDoc::new(src);
+    x.order_nodes();
+    let mut e = Exec::new(sheet, x, diag);
     e.html = html;
     e.out = output::new_result(sheet, html);
     let root = Ctx { node: XNode::Node(DOC), pos: 1, size: 1 };

@@ -120,7 +120,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   3 / XSLT 3; sup-xml-xslt has no licence), and none would share the engine's libxml-faithful
   tree and errors. A differential corpus of 602 cases matches 596 (contrib STATUS.md has the
   six: non-UTF-8 output encodings, an accepted difference, and two error details). xpath_table in a select list raises "materialize mode required". Goldens
-  `a98_xslt`, deep_input `xslt` / `xsltrec`. pg_overexplain 36 / 37: LOAD gives EXPLAIN
+  `a98_xslt`, deep_input `xslt` / `xsltrec`.
+  - Measured (release build vs the reference, a 20,000-row document built with string_agg):
+    identity 269 / 202 ms, a two-key sort 167 / 134 ms, Muenchian grouping 367 / 333 ms.
+    Without building (string_agg 48 / 19 ms) and parsing the document (108 / 76 ms), the
+    transformations take 113 / 107, 11 / 39 and 211 / 238 ms. libxslt numbers the source
+    document (xmlXPathOrderDocElems) so document-order comparisons are lookups; the engine
+    does the same for xslt_process's source (`XDoc::order_nodes`; grouping took 9.2 s before).
+    Peak memory is the open item: parsing that 1 MB document takes about 200 MB in the engine
+    (xpath_string alone peaks at 210 MB; the reference's backend grows 57 MB for all three
+    transformations). That is the libxml tree model's node size (`tree::Node` carries a
+    `Decl` and its own name string; boxing the declaration and interning names would cut it),
+    shared by every XML function, not XSLT's. pg_overexplain 36 / 37: LOAD gives EXPLAIN
   its DEBUG and RANGE_TABLE options (`sql/explain/overexplain.rs`), plan node ids and range
   table indexes modelled from the engine's plan as PostgreSQL numbers one of that shape;
   golden `a80a_overexplain`.

@@ -141,6 +141,9 @@ pub struct XDoc {
     /// Entity index → its declaration node in the DTD.
     decl_of: Vec<Option<NodeId>>,
     ids: OnceCell<HashMap<String, NodeId>>,
+    /// Document order of the source tree's nodes (1-based; 0: not ordered), as libxslt's
+    /// `xmlXPathOrderDocElems` makes comparisons constant-time. Empty unless ordered.
+    order: Vec<u32>,
 }
 
 impl XDoc {
@@ -181,6 +184,7 @@ impl XDoc {
             pos,
             decl_of,
             ids: OnceCell::new(),
+            order: Vec::new(),
         }
     }
 
@@ -199,6 +203,29 @@ impl XDoc {
             id = p;
         }
         id
+    }
+
+    /// Numbers the document's nodes in document order (an element, its attributes, then its
+    /// children), so comparing two of them is a lookup. The order is the one the
+    /// comparison computes; nodes grafted later stay unnumbered.
+    pub fn order_nodes(&mut self) {
+        let mut order = vec![0u32; self.doc.nodes.len()];
+        let mut k = 0u32;
+        let mut stack = vec![DOC];
+        while let Some(id) = stack.pop() {
+            k += 1;
+            order[id] = k;
+            let n = &self.doc.nodes[id];
+            if n.kind == Kind::EntityRef || n.kind == Kind::Dtd {
+                continue;
+            }
+            for &a in &n.attrs {
+                k += 1;
+                order[a] = k;
+            }
+            stack.extend(n.children.iter().rev().copied());
+        }
+        self.order = order;
     }
 
     /// Sorts nodes into document order (`xmlXPathNodeSetSort`).
@@ -462,6 +489,13 @@ impl XDoc {
     fn cmp_nodes(&self, n1: &XNode, n2: &XNode) -> i32 {
         if n1.same(n2) {
             return 0;
+        }
+        if let (XNode::Node(a), XNode::Node(b)) = (n1, n2)
+            && let (Some(&x), Some(&y)) = (self.order.get(*a), self.order.get(*b))
+            && x != 0
+            && y != 0
+        {
+            return if x < y { 1 } else { -1 };
         }
         let XNode::Node(mut node1) = *n1 else {
             return 1;
