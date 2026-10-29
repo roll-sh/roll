@@ -423,7 +423,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       statistics as index_update_stats / VACUUM / ANALYZE leave them; CREATE INDEX validates
       the WITH options and amcanmulticol (hash, SP-GiST and native methods) before the columns,
       and names a type without its typmod in "has no default operator class".
-    - Open: ivfflat queries are slower than pgvector's (BENCH.md); EXPLAIN widths of a Sort /
+    - Open: EXPLAIN widths of a Sort /
       Limit above a resjunk ORDER BY expression leave the expression out (engine-wide, not
       pgvector's: `SELECT id FROM t ORDER BY id * 2.5 LIMIT 5` shows width 4 where PostgreSQL
       shows 36; planner).
@@ -454,8 +454,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       records a batch at a time, the build graph freed first.
     - Stored extension values decode with one copy and are skipped without decoding;
       `Expr::same_as` compares the second Debug text as it is written.
-    - Open (BENCH.md): index builds' peak memory above pgvector's, the per-row cost of the
-      engine's scans (storage iteration, row decoding) behind the full-scan numbers.
+    - Index scans of native methods make an entry's value only for a row an update marked
+      (`AmScan::next`'s `wants`) and decode only the columns read above; a filter over rows
+      whose other columns read include an extension type's is evaluated over its own columns
+      first (`ScanNode::prefilter_mask`); tables that may hold out-of-line datums keep column
+      masks and parallel scans when none of their columns is of a type `note_read` remembers
+      (`sizing::reads_tracked`).
+    - Open (BENCH.md "pgvector round 2"): filtered queries over 768- and 1,536-dimension
+      vectors (PostgreSQL's heap holds only TOAST pointers there; the engine stores vectors
+      inline and reads every row's bytes: out-of-line storage of big values is the fix, a
+      row format change); index builds' peak memory (hnsw: the graph and its records both in
+      memory; ivfflat at 128 dimensions); the per-row cost of the storage iteration and row
+      decoding behind full scans of small rows.
 - **Index access methods of native code** (round 20, agent 70; `src/ext/index_am.rs`): what an
   extension's `CREATE ACCESS METHOD ... HANDLER` names when the handler is a C function the
   engine implements. Another index-type extension adds its routine to `index_am::routine`.

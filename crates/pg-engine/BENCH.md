@@ -2042,6 +2042,100 @@ rows of 32 dimensions, lists 100: probes 1 / 2 / 5 / 10 / 20: 0.528 / 0.794 / 0.
 0.980; hnsw over 20k Gaussian rows of 32 dimensions: ef_search 10 / 20 / 40 / 100 / 200:
 0.762 / 0.900 / 0.974 / 0.998 / 1.000.
 
+## pgvector round 2 (round 21, agent 89)
+
+What changed (HANDOFF "pgvector", speed): sequential scans of in-order heaps streamed and, at
+8 MB or more, read by the parallel scan's workers, which compute pgvector's distances
+(filters, float sums, a projection's distances over the stored bytes, a bounded sort's
+per-chunk top-k); a streaming bounded sort; four-row distance kernels (independent sums,
+each in the reference's order) in ivfflat scans and builds and in hnsw searches; ivfflat
+scans over shared pages; index scans that copy no vector they don't check; filters decoded
+before the vectors they don't read. Every result is still pgvector's bit for bit: each
+query case's result hash below is equal on both sides.
+
+Method: `tools/bench` `vector` workload (`--type`, `--dim`, `--rows`, `--parts`), the
+reference PostgreSQL 18.6 + pgvector 0.8.7 built with `-DIVFFLAT_BENCH -DHNSW_MEMORY` (seeded
+builds, as `ROLL_VECTOR_BUILD_SEED=42` makes the engine's), each server on the same 4 CPUs
+(client on 4 others), `shared_buffers=2GB` and the engine's `--cache-mb 2048`, default
+maintenance_work_mem (64 MB) and work_mem. Engine and reference runs interleaved, the
+engine restarted for each and every row read once before the cases (both caches warm).
+Medians of 3 rounds for the 128-dimension table, 1 round for the others; a shared machine
+(load 15-40), so single-round numbers move by about 15%. Queries: 200 per case, ivfflat
+lists 100 (50 at 1,536 dimensions: 100 needs more than maintenance_work_mem on both sides),
+probes 10; hnsw m 16, ef_construction 64, ef_search 40; filtered queries `WHERE cat = i %
+50` (2%) with iterative scans; scans 5 queries each. "x": the engine's speed against the
+reference (above 1: faster). MB: peak memory above the warm server's while the case runs
+(the engine's RSS; the reference container's anon + shmem). Index sizes are
+`pg_relation_size`, equal on both sides (the engine models pgvector's pages byte for byte).
+
+### vector(128), 100,000 rows
+
+| case | PostgreSQL + pgvector | engine | engine speed | peak MB (pg / engine) |
+|---|---|---|---|---|
+| CREATE INDEX hnsw | 222.2 s | 134.2 s | 1.66x | 64 / 130 |
+| hnsw size | 79.3 MB | 79.3 MB | | |
+| hnsw queries (qps, p50) | 378 qps, 2.38 ms | 538 qps, 1.69 ms | 1.42x | 0.2 / 5.5 |
+| hnsw, filtered, strict order | 35.8 qps, 28.2 ms | 65.9 qps, 15.1 ms | 1.84x | 4.1 / 39.9 |
+| hnsw, filtered, relaxed order | 53.0 qps, 18.6 ms | 84.7 qps, 11.4 ms | 1.60x | 3.1 / 0.0 |
+| COPY 10k more rows into hnsw | 51.1 s | 24.3 s | 2.10x | |
+| hnsw queries after the inserts | 433 qps, 2.25 ms | 627 qps, 1.36 ms | 1.45x | 0.0 / 0.0 |
+| CREATE INDEX ivfflat | 1.52 s | 1.95 s | 0.78x | 57 / 31 |
+| ivfflat size | 52.5 MB | 52.5 MB | | |
+| ivfflat queries (qps, p50) | 160 qps, 5.81 ms | 150 qps, 6.67 ms | 0.94x | 0.8 / 1.8 |
+| ivfflat, filtered (plans as a scan + top-N sort) | 150 qps, 6.22 ms | 116 qps, 8.50 ms | 0.77x | 0.6 / 39.3 |
+| exact k-NN (seq scan + top-N sort) | 34.2 ms | 43.3 ms | 0.79x | 0.3 / 0.5 |
+| exact k-NN, filtered | 19.4 ms | 36.7 ms | 0.53x | 0.0 / 0.1 |
+| `sum(embedding <-> q)` | 30.3 ms | 53.7 ms | 0.56x | 0.0 / 0.2 |
+| `sum(embedding <=> q)` | 36.5 ms | 36.3 ms | 1.01x | 0.0 / 0.1 |
+| `sum(embedding <#> q)` | 31.1 ms | 29.6 ms | 1.05x | 0.0 / 0.1 |
+
+Medians of 3 rounds (hnsw: 1). The full-scan rows moved most between rounds on this machine
+(the round before this batch: exact k-NN 0.81x, filtered 0.89x, l2 sum 0.94x, the other sums
+0.93-0.96x; with the engine's scans run in parallel on 4 CPUs, its numbers follow the
+machine's load more than PostgreSQL's serial sums do). Against round 20's engine on the same
+data (interleaved, round 21's first batch): ivfflat queries 92 -> 144 qps, exact k-NN 127 ->
+61 ms, the sums 116-123 -> 29-31 ms, hnsw queries 1.86 -> 1.39 ms p50.
+
+### Other types and sizes (1 round each)
+
+| case | halfvec(768) 30k | vector(768) 30k | vector(1536) 20k | bit(1024) 50k | sparsevec(30000), 64 nnz, 50k |
+|---|---|---|---|---|---|
+| CREATE INDEX hnsw | 1.09x (39 s; 112 / 64 MB) | 1.25x (112 s; 105 / 64 MB) | 1.41x (135 s; 83 / 64 MB) | 3.35x (18 s; 62 / 41 MB) | 1.00x (49 s; 131 / 58 MB) |
+| hnsw queries | 0.95x (2.36 / 2.71 ms p50) | 1.24x | 1.06x | 1.04x | 0.99x |
+| hnsw, filtered, strict / relaxed | 1.60x / 1.46x | 0.57x / 0.70x | 0.58x / 0.70x | 1.63x / 1.66x | 0.91x / 0.89x |
+| COPY 10% more into hnsw | 1.39x | 1.40x | 1.35x | 3.76x | 0.92x |
+| hnsw queries after the inserts | 1.06x | 1.46x | 1.15x | 1.24x | 1.27x |
+| CREATE INDEX ivfflat | 1.09x (14 / 46 MB) | 1.73x (31 / 77 MB) | 1.55x (25 / 66 MB) | 1.37x (20 / 9 MB) | (no ivfflat) |
+| ivfflat queries | 1.22x | 1.20x | 1.15x | 1.33x | |
+| exact k-NN (seq scan + top-N) | 1.88x | 9.6x | 7.0x | 1.22x | 0.75x |
+| exact k-NN, filtered | 0.71x | 0.58x | 0.63x | | 0.53x |
+| `sum(distance)` over every row | 1.28x / 1.13x / 1.42x | 8.5x / 7.1x / 7.0x | 8.4x / 8.0x / 9.5x | 0.95x / 1.50x (hamming / jaccard) | 1.54x / 1.35x / 1.12x |
+
+(Sums: l2 / cosine / inner product. Memory: engine / reference, peak above the warm
+server's. "Filtered" ivfflat queries plan as a sequential scan and a top-N sort on both
+sides, the filtered exact k-NN row.)
+
+Where the engine is faster: index builds and inserts (contiguous vectors, the four-row
+kernels in the build's assignment and k-means, no buffer manager), unfiltered index queries,
+and every full scan of vectors over PostgreSQL's TOAST threshold (768 and 1,536
+dimensions: PostgreSQL detoasts each row, the engine reads them in place, 7-10x).
+
+Where it is slower, and why:
+- Filtered queries over big vectors (768 / 1,536 dimensions): PostgreSQL's heap holds only
+  the TOAST pointers, so its scan reads 148 pages for 20,000 rows and detoasts the 2% the
+  filter keeps; the engine stores the vectors inline, so its scan reads every row's bytes
+  (decoding only the filter's columns now). The fix is out-of-line storage for big values in
+  the engine's row format, a storage format change, not done.
+- Index builds' peak memory is above pgvector's for hnsw (the engine's graph and its
+  records both in memory while the build writes them; maintenance_work_mem bounds
+  pgvector's) and for ivfflat at 128 dimensions. Open.
+- ivfflat at 128 dimensions: its build (sampling and the build's heap pass, per row) and its
+  queries are about even with pgvector's; above 128 dimensions the kernels dominate and the
+  engine is ahead.
+- Scans of small tables (under 8 MB: no parallel scan) and the remaining per-row cost of the
+  engine's storage iteration (merge of the LSM's sources, block lookups) and row decoding;
+  sparsevec's filtered scans and bit's sums are where that shows most.
+
 ## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
 
 Same harness and catalogs as agent 58's: PostgreSQL in `a62-pg` (pinned image and settings),
