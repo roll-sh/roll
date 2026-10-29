@@ -4,6 +4,8 @@
 //! below, and PostgreSQL's regression SQL when it is there (`DEPARSE_REGRESS_SQL`, or
 //! `$PGREGRESS_DIR/src-repo/src/test/regress/sql`).
 
+mod common;
+
 use pg_engine::sql::binder::ast;
 use pg_engine::sql::deparse;
 use pg_query::NodeEnum as E;
@@ -442,4 +444,34 @@ fn deep_chain_deparses_on_a_small_thread() {
         })
         .unwrap();
     h.join().unwrap();
+}
+
+/// A view over the deepest `+` chain the engine takes (4,875 terms in a release build; a
+/// debug build's depth budget is smaller) is created, read and printed on a 2 MB thread.
+/// Before the native deparser, libpg_query's deparser failed on it ("could not parse
+/// protobuf") from about 4,000 terms; once it was created, reading its stored text back
+/// overflowed the stack (`ast::stored_parse`).
+#[test]
+fn deep_view_on_2mb_thread() {
+    use common::{Event, engine_query, engine_session, open_store};
+    let n = if cfg!(debug_assertions) { 2000 } else { 4875 };
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let dir = tempfile::tempdir().unwrap();
+            let mut s = engine_session(open_store(dir.path()), "deep");
+            let mut rows = |q: &str| match engine_query(&mut s, q).as_slice() {
+                [Event::Result { rows, .. }] => rows.clone(),
+                e => panic!("{}: {e:?}", &q[..q.len().min(40)]),
+            };
+            let sum = vec!["x"; n].join(" + ");
+            rows(&format!("CREATE VIEW deep_v AS SELECT {sum} AS s FROM (VALUES (1)) t(x)"));
+            let got = rows("SELECT s, length(pg_get_viewdef('deep_v')) FROM deep_v");
+            // PostgreSQL prints ` SELECT x + ... + x AS s\n   FROM ( VALUES (1)) t(x);`.
+            let want = vec![Some(n.to_string()), Some((6 * n + 36).to_string())];
+            assert_eq!(got, vec![want]);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

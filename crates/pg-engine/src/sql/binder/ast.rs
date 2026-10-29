@@ -421,7 +421,7 @@ pub fn parse_exprs(sql: &str) -> Result<Vec<Node>> {
         STORED_EXPR,
         &text,
         || {
-            pg_query::parse(&text, 0)
+            stored_parse(&text)
                 .map(|r| r.protobuf.stmts)
                 .map_err(|e| crate::error::internal(format!("stored expression: {e}")))
         },
@@ -447,12 +447,19 @@ pub fn parse_exprs(sql: &str) -> Result<Vec<Node>> {
 }
 
 /// Parse a statement (view bodies).
+/// `pg_query::parse` of a stored text, with stack for the parser and for decoding the tree:
+/// stored texts can nest as deep as the statements that made them.
+fn stored_parse(sql: &str) -> pg_query::Result<pg_query::ParseResult> {
+    let room = crate::stack::tree_headroom(sql.len()).max(3 << 20);
+    crate::stack::with_headroom(room, || pg_query::parse(sql, 0))
+}
+
 pub fn parse_stmt(sql: &str) -> Result<Node> {
     let stmts = crate::sql::parse::cached_parse(
         STORED_STMT,
         sql,
         || {
-            pg_query::parse(sql, 0)
+            stored_parse(sql)
                 .map(|r| r.protobuf.stmts)
                 .map_err(|e| crate::error::internal(format!("stored query: {e}")))
         },

@@ -2623,7 +2623,8 @@ one statement each, the engine's start included):
   lookup, and every subexpression rechecked its collations over its subtree.
 - CREATE VIEW was cubic: nodetree asked every node for its collation, and `collation_at`
   copied each subtree it visited.
-- What is left is quadratic in a dependency. The view's text is deparsed through
+- What was left was quadratic in a dependency (fixed in round 21, "Native deparser" below).
+  The view's text is deparsed through
   `pg_query::deparse`, which encodes the tree as protobuf with prost, and prost's
   `encoded_len` measures each nested message's whole subtree again at every level. At 4,000
   terms, 80% of the time is there. 4,875 terms is the most the depth limit allows.
@@ -2831,6 +2832,32 @@ record --call-graph fp`, shares of the engine's samples):
 - RLS checks on update (`update_row_rls`) 2.7%, row locks 1.8%, permission checks 1.3%.
 
 Not optimized in this round: the numbers are the next round's baseline.
+
+## Native deparser (round 21, agent 93)
+
+`ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,
+function bodies, ...) now write their text with `sql/deparse`, a port of libpg_query's
+deparser, instead of `pg_query::deparse` and its protobuf encoding. CREATE VIEW over
+`x + x + … + x`, release, in-process (`tests/deep_input.rs`'s `viewdef` shape, the
+statement alone), base 31bb2756 against this:
+
+| terms | 1,000 | 2,000 | 4,000 | 4,875 |
+|---|---|---|---|---|
+| before | 198 ms | 598 ms | 2.7 s, then fails | 5.1 s, then fails |
+| now | 85 ms | 146 ms | 295 ms | 373 ms |
+
+- "Fails": libpg_query's protobuf decoder stops at 10,000 nested messages, so somewhere
+  between 2,000 and 4,000 terms CREATE VIEW ended in `XX000 deparse: Invalid statement:
+  could not parse protobuf`. Those views are created now (PostgreSQL takes 4,032 terms).
+- What is left is linear: about 75 µs a term, mostly binding and the stored text's parse.
+- Reading such a view's text back (`ast::parse_stmt` / `parse_exprs`: `pg_query::parse`
+  outside `sql::parse`) had no stack for decoding the tree and overflowed a 2 MB thread at
+  4,875 terms: it runs with `tree_headroom` now (`ast::stored_parse`; test
+  `deparse_identity.rs deep_view_on_2mb_thread`).
+- Identity with libpg_query's text: `tests/deparse_identity.rs` (the goldens, a fixed corpus,
+  and PostgreSQL's regress SQL with `DEPARSE_REGRESS_SQL`): 43,000 statements and 225,000
+  expressions, no difference, nothing left to libpg_query. `ROLL_DEPARSE_CHECK=<file>` makes
+  every call compare the two and log differences and fallbacks there.
 
 ## Where it is still slower, and why
 
