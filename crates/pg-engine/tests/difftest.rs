@@ -550,6 +550,11 @@ impl Runner {
             {
                 let mut w = WATCH.lock().unwrap();
                 w.case = Case { class: Class::Hang, ordered, setup: history.clone(), stmt: sql.clone(), other: None, note: format!("seed {seed} #{idx}") }.text(None, None);
+                // (DIFFTEST_ECHO: the statement about to run, as a case file, for one that
+                // takes the process down, a stack overflow, which no hook sees.)
+                if std::env::var("DIFFTEST_ECHO").is_ok() {
+                    let _ = std::fs::write(out_dir().join(format!("current-s{seed}.sql")), &w.case);
+                }
             }
             let (e, r) = pair.run(&sql);
             if matches!(st, Stmt::Query(_)) {
