@@ -941,6 +941,27 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   the first whole-catalog generation of a session's key (70-100 ms for pg_attribute), the
   per-version hashes of spliced catalogs, pg_depend and information_schema not spliced
   (generated whole after DDL that changes what they show).
+- **Catalog round 6, first batch** (round 21, agent 92; BENCH.md "Catalog round 6"):
+  - Domains over domains: typtypmod is -1 (DefineDomain takes the type modifier written
+    after the base type's name, and a domain's name takes none), typndims 0; a column, view
+    column or composite field declared as a domain (or an array of one) has atttypmod -1, as
+    PostgreSQL's typenameTypeIdAndMod gives; information_schema.columns reads a domain over a
+    domain through its base domain (USER-DEFINED, no lengths, that domain as the udt) and
+    an array of a domain as that array type. RowDescription keeps the base type's typmod
+    (printtup's getBaseTypeAndTypmod). The engine's dump restored into PostgreSQL failed 4
+    statements over `mynums2` since 590cb171 (round 17), whose `catalog_typmod` gave a domain
+    over an array the element's typmod (right for `mynums`, wrong for the domain over it);
+    ddffa598 reverted that by accident and b99558db restored it, so a round in between
+    measured 0. Golden `a92_domain_typmods`.
+  - Shared catalog rows were generated once per session: the sessions' search paths begin
+    with their own `pg_temp_<pid>`, which keyed `Database::sys_rows` (`system::rows_key` now
+    drops a temporary schema that doesn't exist and names one that does `pg_temp`, its name
+    in `temp_schema`). A whole catalog read without a filter in no order (`count(*)` of
+    pg_class) counts the relation maps' rows (`system::row_count`) and generates rows only
+    when one is read (`exec/nodes.rs` `CountedRowsNode`). Shared catalog scans evaluate
+    their filter as a compiled kernel (`exec::kernel`) when it compiles. A hash join asks
+    its outer catalog scan to restrict itself to up to 65,536 inner keys, and the scan does
+    when they are under a quarter of its rows (a schema's relations against pg_attribute).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference

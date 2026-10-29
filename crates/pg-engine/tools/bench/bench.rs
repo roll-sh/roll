@@ -1202,6 +1202,97 @@ fn scale_ops(cx: &Ctx) {
     }
 }
 
+/// More kinds of objects over a catalog `scale --keep 1` left: `functions` SQL functions,
+/// `views` views and `indexes` more indexes (on `t0`.. in turn), made in steps of `step` with
+/// each step's time per statement (round 21, agent 92: catalogs of 50,000-100,000 objects).
+fn scale_more(cx: &Ctx) {
+    let tables: usize = cx.opt("tables", 10_000);
+    let schemas: usize = cx.opt("schemas", 20).max(1);
+    let functions: usize = cx.opt("functions", 10_000);
+    let views: usize = cx.opt("views", 10_000);
+    let indexes: usize = cx.opt("indexes", 10_000);
+    let step: usize = cx.opt("step", 2_000).max(1);
+    let mut c = cx.conn();
+    let steps = |c: &mut dyn Conn, what: &str, n: usize, f: &dyn Fn(usize) -> String| {
+        let mut done = 0;
+        while done < n {
+            let m = step.min(n - done);
+            let t = Instant::now();
+            for i in done..done + m {
+                must(c.simple(&f(i)), what);
+            }
+            let s = t.elapsed().as_secs_f64();
+            done += m;
+            cx.report("scale_more", what, &[("objects", done.to_string()), ("per_op_ms", format!("{:.3}", s * 1000.0 / m as f64))]);
+        }
+    };
+    let t = |i: usize| (i % schemas, i % tables.max(1));
+    steps(c.as_mut(), "create_function", functions, &|i| {
+        let (s, _) = t(i);
+        format!("CREATE FUNCTION sc{s}.f{i}(x int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT x + {i}'")
+    });
+    steps(c.as_mut(), "create_view", views, &|i| {
+        let (s, k) = t(i);
+        format!("CREATE VIEW sc{s}.v{i} AS SELECT id, a, b + {i} AS c FROM sc{}.t{k} WHERE id > 0", k % schemas)
+    });
+    steps(c.as_mut(), "create_index", indexes, &|i| {
+        let (_, k) = t(i);
+        format!("CREATE INDEX ix_more_{i} ON sc{}.t{k} (a, b)", k % schemas)
+    });
+}
+
+/// What client tools and ORMs read of the catalog (psql's `\dt` / `\df` / `\dv` / `\d t`,
+/// pgAdmin's and DBeaver's table lists, Django's, Rails' and Prisma's introspection, the
+/// ORM constraints query), over a catalog `scale` (and `scale-more`) made: each `reps`
+/// times, the first run apart.
+fn catalog_tools(cx: &Ctx) {
+    let tables: usize = cx.opt("tables", 10_000);
+    let schemas: usize = cx.opt("schemas", 20).max(1);
+    let reps: usize = cx.opt("reps", 5);
+    let only: String = cx.opt("only", String::new());
+    let mid = tables / 2;
+    let ms = mid % schemas;
+    let t = format!("sc{ms}.t{mid}");
+    let queries: Vec<(&str, String)> = vec![
+        ("psql_dt", format!("SELECT n.nspname as \"Schema\", c.relname as \"Name\", CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 't' THEN 'TOAST table' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' END as \"Type\", pg_catalog.pg_get_userbyid(c.relowner) as \"Owner\" FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','') AND n.nspname OPERATOR(pg_catalog.~) '^(sc{ms})$' COLLATE pg_catalog.default ORDER BY 1,2")),
+        ("psql_dv", format!("SELECT n.nspname, c.relname, pg_catalog.pg_get_userbyid(c.relowner) FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('v','') AND n.nspname OPERATOR(pg_catalog.~) '^(sc{ms})$' COLLATE pg_catalog.default ORDER BY 1,2")),
+        ("psql_df", format!("SELECT n.nspname as \"Schema\", p.proname as \"Name\", pg_catalog.pg_get_function_result(p.oid) as \"Result data type\", pg_catalog.pg_get_function_arguments(p.oid) as \"Argument data types\", CASE p.prokind WHEN 'a' THEN 'agg' WHEN 'w' THEN 'window' WHEN 'p' THEN 'proc' ELSE 'func' END as \"Type\" FROM pg_catalog.pg_proc p LEFT JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname OPERATOR(pg_catalog.~) '^(sc{ms})$' COLLATE pg_catalog.default ORDER BY 1, 2, 4")),
+        ("psql_d_lookup", format!("SELECT c.oid, n.nspname, c.relname FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relname OPERATOR(pg_catalog.~) '^(t{mid})$' COLLATE pg_catalog.default AND n.nspname OPERATOR(pg_catalog.~) '^(sc{ms})$' COLLATE pg_catalog.default ORDER BY 2, 3")),
+        ("psql_d_indexes", format!("SELECT c2.relname, i.indisprimary, i.indisunique, i.indisclustered, i.indisvalid, pg_catalog.pg_get_indexdef(i.indexrelid, 0, true), pg_catalog.pg_get_constraintdef(con.oid, true), contype, condeferrable, condeferred, i.indisreplident, c2.reltablespace FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i LEFT JOIN pg_catalog.pg_constraint con ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p','u','x')) WHERE c.oid = '{t}'::regclass AND c.oid = i.indrelid AND i.indexrelid = c2.oid ORDER BY i.indisprimary DESC, c2.relname")),
+        ("pgadmin_tables", format!("SELECT rel.oid, rel.relname AS name, (SELECT count(*) FROM pg_catalog.pg_trigger WHERE tgrelid=rel.oid AND tgisinternal = FALSE) AS triggercount, (SELECT count(*) FROM pg_catalog.pg_trigger WHERE tgrelid=rel.oid AND tgisinternal = FALSE AND tgenabled = 'O') AS has_enable_triggers, (CASE WHEN rel.relkind = 'p' THEN true ELSE false END) AS is_partitioned, (SELECT count(1) FROM pg_catalog.pg_inherits WHERE inhrelid=rel.oid LIMIT 1) as is_inherits, (SELECT count(1) FROM pg_catalog.pg_inherits WHERE inhparent=rel.oid LIMIT 1) as is_inherited, des.description FROM pg_catalog.pg_class rel LEFT OUTER JOIN pg_catalog.pg_description des ON (des.objoid=rel.oid AND des.objsubid=0 AND des.classoid='pg_class'::regclass) WHERE rel.relkind IN ('r','s','t','p') AND rel.relnamespace = 'sc{ms}'::regnamespace AND NOT rel.relispartition ORDER BY rel.relname")),
+        ("dbeaver_tables", format!("SELECT c.oid,c.*,d.description FROM pg_catalog.pg_class c LEFT OUTER JOIN pg_catalog.pg_description d ON d.objoid=c.oid AND d.objsubid=0 AND d.classoid='pg_class'::regclass WHERE c.relnamespace='sc{ms}'::regnamespace AND c.relkind not in ('i','I','c')")),
+        ("django_tables", "SELECT c.relname, CASE WHEN c.relispartition THEN 'p' WHEN c.relkind IN ('m', 'v') THEN 'v' ELSE 't' END, obj_description(c.oid, 'pg_class') FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('f', 'm', 'p', 'r', 'v') AND n.nspname NOT IN ('pg_catalog', 'pg_toast') AND pg_catalog.pg_table_is_visible(c.oid)".into()),
+        ("django_constraints", format!("SELECT c.conname, array(SELECT attname FROM unnest(c.conkey) WITH ORDINALITY cols(colid, arridx) JOIN pg_attribute AS ca ON cols.colid = ca.attnum WHERE ca.attrelid = c.conrelid ORDER BY cols.arridx), c.contype, (SELECT fkc.relname || '.' || fka.attname FROM pg_attribute AS fka JOIN pg_class AS fkc ON fka.attrelid = fkc.oid WHERE fka.attrelid = c.confrelid AND fka.attnum = c.confkey[1]), cl.reloptions FROM pg_constraint AS c JOIN pg_class AS cl ON c.conrelid = cl.oid WHERE cl.relname = 't{mid}' AND pg_catalog.pg_table_is_visible(cl.oid)")),
+        ("rails_columns", format!("SELECT a.attname, format_type(a.atttypid, a.atttypmod), pg_get_expr(d.adbin, d.adrelid), a.attnotnull, a.atttypid, a.atttypmod, c.collname, col_description(a.attrelid, a.attnum) AS comment, attidentity AS identity, attgenerated as attgenerated FROM pg_attribute a LEFT JOIN pg_attrdef d ON a.attrelid = d.adrelid AND a.attnum = d.adnum LEFT JOIN pg_type t ON a.atttypid = t.oid LEFT JOIN pg_collation c ON a.attcollation = c.oid AND a.attcollation <> t.typcollation WHERE a.attrelid = '{t}'::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum")),
+        ("prisma_columns", format!("SELECT oid.namespace, info.table_name, info.column_name, format_type(att.atttypid, att.atttypmod) as formatted_type, info.numeric_precision, info.numeric_scale, info.numeric_precision_radix, info.datetime_precision, info.data_type, info.udt_schema as type_schema_name, info.udt_name as full_data_type, pg_get_expr(attdef.adbin, attdef.adrelid) AS column_default, info.is_nullable, info.is_identity, info.character_maximum_length, description.description FROM information_schema.columns info JOIN pg_attribute att ON att.attname = info.column_name JOIN (SELECT pg_class.oid, relname, pg_namespace.nspname as namespace FROM pg_class JOIN pg_namespace on pg_namespace.oid = pg_class.relnamespace AND pg_namespace.nspname = ANY ('{{sc{ms}}}')) as oid ON oid.oid = att.attrelid AND relname = info.table_name AND namespace = info.table_schema LEFT OUTER JOIN pg_attrdef attdef ON attdef.adrelid = att.attrelid AND attdef.adnum = att.attnum AND table_schema = namespace LEFT OUTER JOIN pg_description description ON description.objoid = att.attrelid AND description.objsubid = att.attnum WHERE table_schema = ANY ('{{sc{ms}}}') ORDER BY namespace, table_name, ordinal_position")),
+        ("orm_constraints", format!("SELECT con.conname, con.contype, cl.relname, pg_get_constraintdef(con.oid) FROM pg_constraint con JOIN pg_class cl ON cl.oid = con.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace WHERE n.nspname = 'sc{ms}' ORDER BY cl.relname, con.conname")),
+        ("is_tables", format!("SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'sc{ms}' ORDER BY table_name")),
+        ("is_columns", format!("SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'sc{ms}' AND table_name = 't{mid}' ORDER BY ordinal_position")),
+        ("pg_class_count", "SELECT count(*) FROM pg_class".into()),
+    ];
+    let mut c = cx.conn();
+    for (name, sql) in &queries {
+        if !only.is_empty() && !only.split(',').any(|o| o == *name) {
+            continue;
+        }
+        let (rows, first) = timed(|| must(c.simple(sql), name).0);
+        let (_, total) = timed(|| {
+            for _ in 0..reps {
+                must(c.simple(sql), name);
+            }
+        });
+        cx.report(
+            "catalog_tools",
+            name,
+            &[
+                ("rows", rows.to_string()),
+                ("first_ms", format!("{:.3}", first * 1000.0)),
+                ("per_query_ms", format!("{:.3}", total * 1000.0 / reps.max(1) as f64)),
+            ],
+        );
+    }
+}
+
 /// In-process, after `Engine::open` (reported at startup): the first connection to the
 /// database and its first catalog query, then a second connection's.
 fn startup_catalog(cx: &Ctx) {
@@ -1359,6 +1450,8 @@ fn main() {
             "ddl" => ddl(&cx),
             "scale" => scale(&cx),
             "scale-ops" => scale_ops(&cx),
+            "scale-more" => scale_more(&cx),
+            "catalog-tools" => catalog_tools(&cx),
             "startup-catalog" => startup_catalog(&cx),
             "idle" => idle(&cx),
             "startup" => {

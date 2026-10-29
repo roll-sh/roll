@@ -876,8 +876,9 @@ fn sys_equality(
 const REL_RESCANS: u32 = 16;
 
 /// How many inner rows a hash join asks its outer side to restrict itself to at most
-/// (`Node::restrict_keys`; past it, reading every outer row costs about as much).
-const RESTRICT_KEYS: usize = 1024;
+/// (`Node::restrict_keys`; the outer side restricts itself only when the keys are few
+/// against its rows: a schema's 1,500 relations against pg_attribute's 150,000 rows).
+const RESTRICT_KEYS: usize = 1 << 16;
 
 /// The value conjunct `c` sets `table`'s relation column to (`system::rel_column`), as
 /// `sys_equality` reads such a conjunct: a built-in `=` between the column and a value (a
@@ -1189,6 +1190,26 @@ fn sys_shared_scan(
         (false, None) => None,
     };
     let filter = checked.as_ref();
+    // A whole catalog read in no order the scan gives: `count(*)` of it counts what the
+    // relation maps keep (`system::row_count`) without generating any row, and the rows are
+    // made only if something reads them (a session's first `count(*)` of pg_class after
+    // connecting generated the whole catalog).
+    if filter.is_none()
+        && path.is_none_or(|p| {
+            matches!(p.scan.access, crate::sql::plan::Access::Seq | crate::sql::plan::Access::Unplanned)
+                && !p.ordered
+        })
+        && {
+            use crate::catalog::system::SysTable::*;
+            matches!(table, PgClass | PgAttribute | PgAttrdef | PgIndex)
+        }
+    {
+        return Ok(Some(Box::new(CountedRowsNode {
+            table,
+            need: need.map(Rc::from),
+            rows: None,
+        })));
+    }
     let rows = match sys_rel_rows(table, filter, path, ctx)? {
         Some(r) => r,
         None => crate::catalog::system::rows_shared(table, ctx)?,
@@ -1234,6 +1255,7 @@ fn sys_shared_scan(
         picked,
         i: 0,
         chunk: (0, 0),
+        kernel: filter.and_then(super::kernel::compile),
         filter: filter.cloned(),
         need: need.map(Rc::from),
     })))
@@ -1361,11 +1383,22 @@ struct SharedRowsNode {
     /// Reading all of them: the chunk and the row in it next.
     chunk: (usize, usize),
     filter: Option<Expr>,
+    /// The filter compiled (`exec::kernel`): what most catalog filters are, evaluated without
+    /// `eval`'s calls (`relkind IN (...)` over every pg_class row was most of psql's `\dt`).
+    kernel: Option<super::kernel::K>,
     /// The columns read above (`exec::need`): only those are copied out of the shared rows.
     need: Option<Rc<[bool]>>,
 }
 
 impl SharedRowsNode {
+    /// Whether row `r` passes `f`, the filter.
+    fn passes(&self, f: &Expr, r: &Row, ctx: &ExecCtx) -> Result<bool> {
+        if let Some(b) = self.kernel.as_ref().and_then(|k| k.passes(r)) {
+            return Ok(b);
+        }
+        eval_bool(f, r, ctx)
+    }
+
     /// The next row to check, if any.
     fn advance(&mut self) -> Option<(usize, usize)> {
         match &self.picked {
@@ -1402,7 +1435,7 @@ impl Node for SharedRowsNode {
             match &self.filter {
                 Some(f) => {
                     ctx.check()?;
-                    if eval_bool(f, r, ctx)? {
+                    if self.passes(f, r, ctx)? {
                         return Ok(Some(crate::catalog::system::project(r, self.need.as_deref())));
                     }
                 }
@@ -1431,7 +1464,7 @@ impl Node for SharedRowsNode {
         while let Some((c, k)) = self.advance() {
             ctx.check()?;
             if let Some(f) = &self.filter
-                && eval_bool(f, shared_row(&self.rows, c, k), ctx)?
+                && self.passes(f, shared_row(&self.rows, c, k), ctx)?
             {
                 n += 1;
             }
@@ -1443,6 +1476,11 @@ impl Node for SharedRowsNode {
         // (Only before the first row, and when the filter can't raise anything or call
         // anything for the rows left out: a Seq Scan's filter runs on every row.)
         if self.i != 0 || self.chunk != (0, 0) || !self.filter.as_ref().is_none_or(quiet_filter) {
+            return Ok(());
+        }
+        // (Past a quarter of the rows, reading them all costs about as much.)
+        let total = self.picked.as_ref().map_or_else(|| self.rows.len(), |p| p.len());
+        if keys.len().saturating_mul(4) > total {
             return Ok(());
         }
         let same = |x: &Value| matches!(x, Value::Oid(_));
@@ -1461,6 +1499,61 @@ impl Node for SharedRowsNode {
         }
         self.picked = Some(all);
         Ok(())
+    }
+}
+
+/// `sys_shared_scan`'s node for a whole catalog without a filter: its shared rows are taken
+/// (generated if no statement has yet) only when a row is asked for.
+struct CountedRowsNode {
+    table: crate::catalog::system::SysTable,
+    need: Option<Rc<[bool]>>,
+    rows: Option<SharedRowsNode>,
+}
+
+impl CountedRowsNode {
+    fn rows(&mut self, ctx: &ExecCtx) -> Result<&mut SharedRowsNode> {
+        if self.rows.is_none() {
+            self.rows = Some(SharedRowsNode {
+                rows: crate::catalog::system::rows_shared(self.table, ctx)?,
+                picked: None,
+                i: 0,
+                chunk: (0, 0),
+                filter: None,
+                kernel: None,
+                need: self.need.clone(),
+            });
+        }
+        Ok(self.rows.as_mut().unwrap())
+    }
+}
+
+impl Node for CountedRowsNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        self.rows(ctx)?.next(ctx)
+    }
+
+    fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
+        match &mut self.rows {
+            Some(r) => r.count_rest(ctx),
+            None => {
+                let n = crate::catalog::system::row_count(self.table, ctx);
+                // (Nothing is left once counted.)
+                self.rows = Some(SharedRowsNode {
+                    rows: Arc::new(crate::catalog::system::SysRows::new(Vec::new())),
+                    picked: None,
+                    i: 0,
+                    chunk: (0, 0),
+                    filter: None,
+                    kernel: None,
+                    need: None,
+                });
+                Ok(n.map(|n| n as u64))
+            }
+        }
+    }
+
+    fn restrict_keys(&mut self, col: usize, keys: &[u32], ctx: &ExecCtx) -> Result<()> {
+        self.rows(ctx)?.restrict_keys(col, keys, ctx)
     }
 }
 

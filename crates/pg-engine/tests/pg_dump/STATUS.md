@@ -70,6 +70,13 @@ Over the regression database (entries are the dump's `-- Name:` sections; round 
 | `pg_dumpall --globals-only / --roles-only / --tablespaces-only` | | 7 / 7, 7 / 7, 5 / 5 |
 | psql backslash commands (`psql_meta.sql`) | 122 / 146 | 140 / 146 (the 6 left: sizes, `\dnS`) |
 
+Rounds 20-21: the engine's dump restored into the reference failed 4 statements again from
+round 20 on (`mynums2`, a domain over a domain whose `typtypmod` showed its base's; the
+regression is 590cb171's, hidden for a round by ddffa598's accidental revert); 0 again since
+round 21 (agent 92, golden `a92_domain_typmods`), every way, with restores of the reference's
+dump into the engine 0 errors too. Restoring the reference's dump into the engine took 35-62 s
+against PostgreSQL's 3-4 s for the engine's dump.
+
 What still differs in the data entries (14 of plain's 14) is the databases' state, not pg_dump:
 values computed from `random()` / `now()` / `version()`, the oids in `dropped_objects`, and rows
 in another physical order (`gtest29`, `rtest_emplog`: an UPDATE's new row versions placed

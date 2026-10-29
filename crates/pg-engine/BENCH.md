@@ -2176,6 +2176,35 @@ back after a restart and after a crash), `tests/ddl_scaling.rs`
 reuse against the full generation, every chunk's runs against its rows, tables pending detach
 and `pg_get_constraintdef`'s owner and `user_data_type`'s relation against scans).
 
+## Catalog round 6: first batch (round 21, agent 92)
+
+Same catalog as rounds 4-5 (`scale --keep 1`: 10,000 tables in 20 schemas, a table of 1,000
+partitions), release builds in-process (`bench --target inproc startup-catalog`, a fresh copy
+of the data directory per run), the machine quiet (load 2). **before** `b6659eb9`, **after**
+this batch.
+
+| case | before | after |
+|---|---|---|
+| first connection: connect (opens the database) | 100-250 ms | 95-180 ms (unchanged: the next batch) |
+| first connection: its first `count(*)` of pg_class | 74-131 ms | 2.9-7.4 ms |
+| second connection: its first `count(*)` of pg_class | 70-145 ms | 0.1 ms |
+
+The second session's count was a bug: every session generated its own copy of the shared
+catalog rows, because each session's search path starts with its own `pg_temp_<pid>` and the
+path keyed the cache. A whole catalog read without a filter now counts what the relation maps
+keep (`system::row_count`) and makes rows only if one is read. Catalog scans' filters run as
+compiled kernels where they compile (`relkind = ANY (...)` went through `eval` per row).
+
+### Verification (round 21, agent 92, first batch)
+
+`cargo test -p pg-engine` (every test binary), clippy (no new warnings), `difftest smoke`; the
+isolation suite on a private reference: 121 / 122 specs, 1,647 / 1,648 permutations; the
+regression suite in full (debug build, private reference `a92-ref1`) against the committed
+`results.tsv`: 51,148 / 51,150, no unit changed; `pg_dump_tap` 14,817 / 14,817;
+`pg_dump_roundtrip` over that run's database: 0 errors restoring either side's dump into the
+other, every way (the engine's dump into PostgreSQL failed 4 statements before), dumps
+2,720 / 2,733 entries alike. Golden `a92_domain_typmods`.
+
 ## Deep input (round 19, agent 63)
 
 The stack grows on demand at recursion points (HANDOFF.md, "Deep input"). This section

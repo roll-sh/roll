@@ -1,0 +1,169 @@
+> create domain mynums as numeric(4,2)[1]
+-- CREATE DOMAIN
+
+> create domain mynums2 as mynums
+-- CREATE DOMAIN
+
+> create domain vc5 as varchar(5)
+-- CREATE DOMAIN
+
+> create domain vc5b as vc5
+-- CREATE DOMAIN
+
+> create domain vc5c as vc5b not null
+-- CREATE DOMAIN
+
+> create domain ts3 as timestamp(3)
+-- CREATE DOMAIN
+
+> create domain ts3b as ts3 check (value > '2000-01-01')
+-- CREATE DOMAIN
+
+> create domain posint as int check (value > 0)
+-- CREATE DOMAIN
+
+> create domain posints as posint[]
+-- CREATE DOMAIN
+
+> create table dd (a mynums, b mynums2, c vc5, d vc5b, e vc5c, f vc5b[], g ts3b, h posints, i varchar(7), j numeric(6,1)[])
+-- CREATE TABLE
+
+> select typname, typtypmod, format_type(typbasetype, typtypmod), format_type(oid, typtypmod), typndims
+> from pg_type where typname in ('mynums', 'mynums2', 'vc5', 'vc5b', 'vc5c', 'ts3', 'ts3b', 'posint', 'posints')
+> order by 1
+typname:name | typtypmod:int4 | format_type:text | format_type:text | typndims:int4
+mynums | 262150 | numeric(4,2)[] | mynums(262150) | 1
+mynums2 | -1 | mynums | mynums2 | 0
+posint | -1 | integer | posint | 0
+posints | -1 | posint[] | posints | 1
+ts3 | 3 | timestamp(3) without time zone | ts3(3) | 0
+ts3b | -1 | ts3 | ts3b | 0
+vc5 | 9 | character varying(5) | vc5(9) | 0
+vc5b | -1 | vc5 | vc5b | 0
+vc5c | -1 | vc5b | vc5c | 0
+-- SELECT 9
+
+> select attname, atttypmod, format_type(atttypid, atttypmod), attndims
+> from pg_attribute where attrelid = 'dd'::regclass and attnum > 0 order by attnum
+attname:name | atttypmod:int4 | format_type:text | attndims:int2
+a | -1 | mynums | 0
+b | -1 | mynums2 | 0
+c | -1 | vc5 | 0
+d | -1 | vc5b | 0
+e | -1 | vc5c | 0
+f | -1 | vc5b[] | 1
+g | -1 | ts3b | 0
+h | -1 | posints | 0
+i | 11 | character varying(7) | 0
+j | 393221 | numeric(6,1)[] | 1
+-- SELECT 10
+
+> select t.typname, t.typnotnull, format_type(t.typbasetype, t.typtypmod) as typdefn
+> from pg_type t where t.typtype = 'd' and t.typnamespace = 'public'::regnamespace order by 1
+typname:name | typnotnull:bool | typdefn:text
+mynums | f | numeric(4,2)[]
+mynums2 | f | mynums
+posint | f | integer
+posints | f | posint[]
+ts3 | f | timestamp(3) without time zone
+ts3b | f | ts3
+vc5 | f | character varying(5)
+vc5b | f | vc5
+vc5c | t | vc5b
+-- SELECT 9
+
+> select domain_name, data_type, character_maximum_length, numeric_precision, numeric_scale,
+>   datetime_precision, udt_name
+> from information_schema.domains where domain_schema = 'public' order by 1
+domain_name:name | data_type:varchar | character_maximum_length:int4 | numeric_precision:int4 | numeric_scale:int4 | datetime_precision:int4 | udt_name:name
+mynums | numeric[] | NULL | NULL | NULL | NULL | _numeric
+mynums2 | USER-DEFINED | NULL | NULL | NULL | NULL | mynums
+posint | integer | NULL | 32 | 0 | NULL | int4
+posints | USER-DEFINED | NULL | NULL | NULL | NULL | _posint
+ts3 | timestamp without time zone | NULL | NULL | NULL | 3 | timestamp
+ts3b | USER-DEFINED | NULL | NULL | NULL | NULL | ts3
+vc5 | character varying | 5 | NULL | NULL | NULL | varchar
+vc5b | USER-DEFINED | NULL | NULL | NULL | NULL | vc5
+vc5c | USER-DEFINED | NULL | NULL | NULL | NULL | vc5b
+-- SELECT 9
+
+> select column_name, data_type, character_maximum_length, character_octet_length,
+>   numeric_precision, numeric_precision_radix, numeric_scale, datetime_precision,
+>   domain_name, udt_schema, udt_name
+> from information_schema.columns where table_name = 'dd' order by ordinal_position
+column_name:name | data_type:varchar | character_maximum_length:int4 | character_octet_length:int4 | numeric_precision:int4 | numeric_precision_radix:int4 | numeric_scale:int4 | datetime_precision:int4 | domain_name:name | udt_schema:name | udt_name:name
+a | ARRAY | NULL | NULL | NULL | NULL | NULL | NULL | mynums | pg_catalog | _numeric
+b | USER-DEFINED | NULL | NULL | NULL | NULL | NULL | NULL | mynums2 | public | mynums
+c | character varying | 5 | 20 | NULL | NULL | NULL | NULL | vc5 | pg_catalog | varchar
+d | USER-DEFINED | NULL | NULL | NULL | NULL | NULL | NULL | vc5b | public | vc5
+e | USER-DEFINED | NULL | NULL | NULL | NULL | NULL | NULL | vc5c | public | vc5b
+f | ARRAY | NULL | NULL | NULL | NULL | NULL | NULL | NULL | public | _vc5b
+g | USER-DEFINED | NULL | NULL | NULL | NULL | NULL | NULL | ts3b | public | ts3
+h | ARRAY | NULL | NULL | NULL | NULL | NULL | NULL | posints | public | _posint
+i | character varying | 7 | 28 | NULL | NULL | NULL | NULL | NULL | pg_catalog | varchar
+j | ARRAY | NULL | NULL | NULL | NULL | NULL | NULL | NULL | pg_catalog | _numeric
+-- SELECT 10
+
+> create view ddv as select b, d, e::vc5b as e2, d::vc5 as d2, c::varchar(3) as c3, i from dd
+-- CREATE VIEW
+
+> select attname, atttypmod, format_type(atttypid, atttypmod)
+> from pg_attribute where attrelid = 'ddv'::regclass order by attnum
+attname:name | atttypmod:int4 | format_type:text
+b | -1 | mynums2
+d | -1 | vc5b
+e2 | -1 | vc5b
+d2 | -1 | vc5
+c3 | 7 | character varying(3)
+i | 11 | character varying(7)
+-- SELECT 6
+
+> create type ddt as (x mynums2, y vc5, z vc5b, w varchar(4))
+-- CREATE TYPE
+
+> select attname, atttypmod, format_type(atttypid, atttypmod)
+> from pg_attribute where attrelid = 'ddt'::regclass order by attnum
+attname:name | atttypmod:int4 | format_type:text
+x | -1 | mynums2
+y | -1 | vc5
+z | -1 | vc5b
+w | 8 | character varying(4)
+-- SELECT 4
+
+> insert into dd values ('{1.5}', '{2.25}', 'ab', 'cd', 'ef', '{gh}', '2020-01-01 10:00:00.12345', '{3}', 'ij', '{1.25}')
+-- INSERT 0 1
+
+> select a, b, c, d, e, f, g, h, i, j, pg_typeof(b), pg_typeof(d), pg_typeof(d::vc5) from dd
+a:numeric[] | b:numeric[] | c:varchar | d:varchar | e:varchar | f:user | g:timestamp | h:user | i:varchar | j:numeric[] | pg_typeof:regtype | pg_typeof:regtype | pg_typeof:regtype
+{1.50} | {2.25} | ab | cd | ef | {gh} | 2020-01-01 10:00:00.123 | {3} | ij | {1.3} | mynums2 | vc5b | vc5
+-- SELECT 1
+
+> select * from ddv
+b:numeric[] | d:varchar | e2:varchar | d2:varchar | c3:varchar | i:varchar
+{2.25} | cd | ef | cd | ab | ij
+-- SELECT 1
+
+> insert into dd (b) values ('{123.456}')
+ERROR 22003: numeric field overflow
+DETAIL: A field with precision 4, scale 2 must round to an absolute value less than 10^2.
+
+> insert into dd (d) values ('abcdefg')
+ERROR 22001: value too long for type character varying(5)
+
+> select ('2021-02-03 04:05:06.789123'::ts3b)::text
+text:text
+2021-02-03 04:05:06.789
+-- SELECT 1
+
+> drop view ddv
+-- DROP VIEW
+
+> drop table dd
+-- DROP TABLE
+
+> drop type ddt
+-- DROP TYPE
+
+> drop domain posints, posint, ts3b, ts3, vc5c, vc5b, vc5, mynums2, mynums
+-- DROP DOMAIN
+

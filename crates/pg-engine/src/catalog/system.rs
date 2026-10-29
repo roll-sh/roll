@@ -888,11 +888,6 @@ fn acl_value(cat: &Catalog, acl: Option<&acl::Acl>) -> Value {
 
 const OWNER: u32 = super::BOOTSTRAP_SUPERUSER_OID;
 
-/// Oid of the type a column reports (its domain if declared with one).
-fn col_type_oid(cat: &Catalog, col: &super::Column) -> u32 {
-    col.domain.unwrap_or_else(|| type_oid(cat, &col.ty))
-}
-
 /// pg_type's typsubscript, typinput, typoutput, typreceive, typsend, typmodin, typmodout
 /// and typanalyze of type `oid`.
 fn type_procs(cat: &Catalog, oid: u32) -> [u32; 8] {
@@ -1590,20 +1585,31 @@ pub fn rows_cacheable(table: SysTable) -> bool {
 
 fn rows_key(table: SysTable, ctx: &ExecCtx) -> SysRowsKey {
     let cat = ctx.catalog();
+    // (Only when it exists: a session that made no temporary object has none, and what
+    // `pg_temp` names is then nothing, whatever its name would be.)
+    let temp_schema = super::session_temp_schema().filter(|t| cat.schema_named(t).is_some());
+    // (pg_depend reads stored texts under the session's path, whatever the statement's.)
+    let path = match table {
+        SysTable::PgDepend => ctx.sess.search_path(),
+        _ => ctx.search_path.clone(),
+    };
+    // The session's own temporary schema leads every session's path under a name of its
+    // own (`pg_temp_<pid>`): one that doesn't exist names nothing, and one that does is
+    // `temp_schema`. Without that, every session generated its own copy of the rows.
+    let own = ctx.sess.temp_schema();
+    let search_path = path
+        .into_iter()
+        .filter(|s| *s != own || temp_schema.is_some())
+        .map(|s| if s == own { "pg_temp".to_string() } else { s })
+        .collect();
     SysRowsKey {
         table: table.oid(),
         cat: Arc::downgrade(&cat),
         current_user: ctx.current_user(),
         session_user: ctx.session_user(),
         login: ctx.sess.user.clone(),
-        // (pg_depend reads stored texts under the session's path, whatever the statement's.)
-        search_path: match table {
-            SysTable::PgDepend => ctx.sess.search_path(),
-            _ => ctx.search_path.clone(),
-        },
-        // (Only when it exists: a session that made no temporary object has none, and what
-        // `pg_temp` names is then nothing, whatever its name would be.)
-        temp_schema: super::session_temp_schema().filter(|t| cat.schema_named(t).is_some()),
+        search_path,
+        temp_schema,
         settings: ctx.sess.settings.borrow().values_key(),
     }
 }
@@ -2295,9 +2301,10 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     } else {
                         None
                     };
-                    let tyoid = match &col {
-                        Some(c) if c.dropped => 0,
-                        Some(c) => col_type_oid(cat, c),
+                    // The domain (or array of one) the column is declared as.
+                    let domain = match &col {
+                        Some(c) if c.dropped => None,
+                        Some(c) => c.domain,
                         None => sys_domain
                             .or_else(|| {
                                 cat.views
@@ -2307,10 +2314,13 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                             // A composite type's field declared as a domain (or an array of
                             // one): that type.
                             .or_else(|| {
-                                let ct = cat.composites.values().find(|ct| ct.relid == r.oid)?;
+                                let ct = cat.composite_of_rel(r.oid)?;
                                 cat.composite_domains.get(&ct.oid)?.get(&name).copied()
-                            })
-                            .unwrap_or_else(|| type_oid(cat, &ty)),
+                            }),
+                    };
+                    let tyoid = match &col {
+                        Some(c) if c.dropped => 0,
+                        _ => domain.unwrap_or_else(|| type_oid(cat, &ty)),
                     };
                     // Everyone may read pg_subscription, all but the connection string.
                     let public_read = r.oid == 6100 && name != "subconninfo";
@@ -2347,8 +2357,10 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                         o(tyoid),
                         i2(ty.typlen() as i64),
                         i2(num as i64),
-                        // (An array column's is its element type's.)
-                        i4(if sys_domain.is_some() {
+                        // (An array column's is its element type's. A domain carries its
+                        // base type's in typtypmod: a column declared as one has none,
+                        // as typenameTypeIdAndMod gives a domain's name.)
+                        i4(if domain.is_some() {
                             -1
                         } else {
                             ty.catalog_typmod() as i64
@@ -2673,7 +2685,9 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     0,
                     d.array_oid,
                     base,
-                    d.base.catalog_typmod(),
+                    // (A domain over a domain has none: DefineDomain takes the typmod
+                    // written after the base type's name, and a domain's name takes none.)
+                    if d.parent.is_some() { -1 } else { d.base.catalog_typmod() },
                     d.not_null,
                     0,
                 );
@@ -2902,7 +2916,8 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     row[if i == 0 { 12 } else { 14 + i }] = o(p);
                 }
                 if let Some(d) = cat.domains.get(&oid) {
-                    if matches!(d.base, DataType::Array(_)) {
+                    // (The array bounds written after the base type's name.)
+                    if d.parent.is_none() && matches!(d.base, DataType::Array(_)) {
                         row[27] = i4(1);
                     }
                 } else if let Value::Oid(elem) = row[13]
@@ -6942,6 +6957,35 @@ fn info_column(
         t => info_data_type(t),
     };
     let domain = col.and_then(|c| c.domain).and_then(|d| cat.domains.get(&d));
+    // An array of a domain: the array type is the udt (and a domain over one: that type).
+    let array_of_domain = |a: u32| match cat.domain_type(a) {
+        Some((d, true)) => Some((cat.schema_name(d.schema).to_string(), cat.array_typname(a, &d.name))),
+        _ => None,
+    };
+    let own_array = col.and_then(|c| c.domain).filter(|_| domain.is_none());
+    let (udt_schema, udt_name) =
+        match own_array.or(domain.and_then(|d| d.base_domain)).and_then(array_of_domain) {
+            Some(u) => u,
+            None => (udt_schema, udt_name),
+        };
+    // A domain over a domain: the view reads the type through the domain's own base type
+    // (`_pg_truetypid` / `_pg_truetypmod`: the base domain, no typmod), which is
+    // USER-DEFINED and has no lengths; the udt is that base domain.
+    let (data_type, len, octet, prec, radix, scale, dt_prec, udt_schema, udt_name) =
+        match domain.and_then(|d| d.parent).and_then(|p| cat.domains.get(&p)) {
+            Some(p) => (
+                "USER-DEFINED".to_string(),
+                N,
+                N,
+                N,
+                N,
+                N,
+                N,
+                cat.schema_name(p.schema).to_string(),
+                p.name.clone(),
+            ),
+            None => (data_type, len, octet, prec, radix, scale, dt_prec, udt_schema, udt_name),
+        };
     // (A collation other than the database default's: collation_catalog / schema / name.)
     let coll = col
         .map(|c| column_collation_in(cat, c))
