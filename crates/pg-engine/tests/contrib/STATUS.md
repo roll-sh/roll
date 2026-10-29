@@ -85,7 +85,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | pgvector (0.8.7) | 915 | 915 | done (see below) |
 | bloom | 58 | 58 | done (on the native index access method interface) |
 | spi | 52 | 52 | done (round 20, agent 80a) |
-| xml2 | 29 | 23 | XPath functions done; xslt_process as without libxslt (see below) |
+| xml2 | 29 | 29 | done: xslt_process is a native XSLT 1.0 processor (see below) |
 | pg_overexplain | 37 | 36 | DEBUG / RANGE_TABLE done; internals' numbers (see below) |
 | test_decoding | 1047 | 1024 | logical decoding (round 20, agents 79 and 87; see below) |
 
@@ -219,15 +219,56 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   modelled. Left: unit 30 (the nested loop over partition index scans the engine doesn't plan
   with enable_seqscan off; extParam / allParam and the parameter types of a parameterized
   scan). Nothing runs unless the library is loaded. Golden `a80a_overexplain`.
-- **xml2's xslt_process** (6 units): fails as in a PostgreSQL built without libxslt
-  (`xslt_process() is not available without libxslt`, the module's own `xml2_1.out`). Not
-  written: matching libxslt means an XSLT 1.0 processor with its exact behaviour, not a
-  subset: template conflict resolution and built-in rules, xsl:number / sort / key /
-  format-number, the extension elements and EXSLT functions libxslt registers (saxon:output
-  is the module test's security case), xsltSaveResultTo's serialization (declaration, indent,
-  method html / text), and its error reporting. A subset that passes the module's four
-  stylesheets would misbehave on the next stylesheet an application sends; this is a module
-  in its own right.
+- **xml2's xslt_process** (round 21, agent 98): done, 29 / 29. A native XSLT 1.0 processor
+  matching libxslt 1.1.43 with libxml2 2.13.9, as the reference image has them
+  (`src/ext/xslt/`); nothing of it runs or stays allocated unless xslt_process is called.
+  - xslt_proc.c's steps and errors: both documents read as `xmlReadMemory(..., XML_PARSE_NOENT)`
+    (a declared single-byte encoding honoured), every libxml message of the call collected
+    into the DETAIL as PG_XML_STRICTNESS_LEGACY does (parse warnings, XPath errors);
+    "error parsing XML document", "error parsing stylesheet as XML document", "failed to parse
+    stylesheet" (any of libxslt's `style->errors`), "failed to apply stylesheet" (an XPath
+    error stops it; xsltTransformError's errors let it run on and fail at the end), NULL
+    where xsltSaveResultToString fails. parse_params as xml2 parses the string; the values are
+    XPath expressions (xsltEvalUserParams), user parameters replace xsl:param but not
+    xsl:variable, undeclared ones are globals, a duplicate name fails.
+  - Stylesheets: xsltPreprocessStylesheet (blank text, comments, PIs, exclude-result-prefixes
+    moving declarations to the root), the top-level elements, simplified stylesheets,
+    forwards-compatible mode and xsl:fallback, xsl:import / xsl:include failing as
+    PostgreSQL's entity loader makes them fail ("Document is empty"), patterns and key `use`
+    compiled with XML_XPATH_NOVAR ("Forbidden variable"), attribute sets resolved and merged
+    as xsltResolveStylesheetAttributeSet does (cycles refused).
+  - The transformation: template conflict resolution (priority, then the last template;
+    libxslt's default priorities), modes, the built-in rules (parameters passed through,
+    apply-imports running them as there are no imports), call-template, params and
+    variables (globals computed up front in dependency order; redefinition fails),
+    result tree fragments (`XPATH_XSLT_TREE`: a node set to functions, an "Invalid type" to
+    location steps; libxslt:, saxon: and xt:node-set), keys, sorting (xsltDefaultSortFunction:
+    bytewise text, NaN first, document order on ties), xsl:number, format-number and
+    xsl:decimal-format (numbers.c), current, generate-id (libxslt's counter ids),
+    system-property, element- / function-available, unparsed-entity-uri, document() and the
+    file-writing extension elements failing as xml2's security preferences make them fail,
+    libxslt's namespace fixup (xsltGetSpecialNamespace, inherited namespaces of a template's
+    top-level literal elements, xsltCopyTree), text merging and disable-output-escaping.
+  - xsltSaveResultTo: the XML declaration, indent (unset counts as on for the newlines it
+    adds), doctype, cdata-section-elements, method text (text nodes only), method html
+    (HTMLtree.c's serializer, meta insertion, doctypes by version) and the html-root default,
+    output encodings through libxml's encoders. Accepted difference: PostgreSQL returns a
+    result that isn't UTF-8 (ISO-8859-1 output with non-ASCII text, UTF-16) as text without
+    checking it; the engine's text is UTF-8, so those bytes come back as U+FFFD.
+  - XPath: the engine's libxml evaluator with a host for variables and the XSLT functions,
+    one arena for the source document and the fragments (`XDoc::graft`), `/` per document.
+  - Differential corpus (602 stylesheets and documents: W3C XSLT 1.0 conformance-style cases
+    per section, output methods and encodings, real-world transforms, errors and parameter
+    strings), run through the reference and the engine: 596 / 602 identical, errors and
+    DETAIL included. Four are the non-UTF-8 outputs above (the runner re-encodes results, so
+    the reference fails there with 22021). Left: a document claiming UTF-16 in its declaration while given as
+    UTF-8 text (libxml re-reads it as UTF-16 and reports the garbage), and the DETAIL of
+    globals defined in a cycle (libxslt evaluates them lazily and repeats "Undefined
+    variable" four times; the engine reports it once). Golden `a98_xslt`; deep_input's
+    `xslt` (a stylesheet at and past libxml2's depth) and `xsltrec` (template recursion
+    within and past libxslt's 3,000 levels).
+  - xpath_table outside FROM (a select list) raises InitMaterializedSRF's "materialize mode
+    required, but it is not allowed in this context".
 - **auto_explain**: done (round 20, agent 80). ALTER SYSTEM writes postgresql.auto.conf
   (`src/sysconf.rs`), so units 5 and 10 match. The plans go to the server log
   (`src/log.rs`; `roll-engine` writes it to stderr) and to the client past

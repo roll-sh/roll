@@ -188,6 +188,8 @@ fn rows(c: &FnCtx) -> Result<SrfIter> {
                     (if b { "true" } else { "false" }).to_string()
                 }),
                 xpath::XValue::Number(f) => Some(xpath::cast_number_to_string(f)),
+                // (Only libxslt's variables make result tree fragments.)
+                xpath::XValue::Tree(_) => None,
             };
             let mut v = match cstr {
                 Some(s) => {

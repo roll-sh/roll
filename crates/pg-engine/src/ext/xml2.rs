@@ -1,6 +1,5 @@
 //! xml2 (`contrib/xml2`): the XPath functions over libxml's model (`types::xml`), and
-//! xpath_table. xslt_process fails as it does in a PostgreSQL built without libxslt: the
-//! engine has no XSLT processor (tests/contrib/STATUS.md has why).
+//! xpath_table; xslt_process runs the native XSLT processor (`ext/xslt`).
 
 use super::native::Native;
 use crate::Result;
@@ -23,12 +22,9 @@ pub(super) fn symbol(sym: &str) -> Option<Native> {
         "xpath_number" => Native::scalar(xpath_number),
         "xpath_bool" => Native::scalar(xpath_bool),
         "xpath_table" => Native::set(xpath_table),
-        "xslt_process" => Native::scalar(|_, _| {
-            Err(Error::new(
-                code::FEATURE_NOT_SUPPORTED,
-                "xslt_process() is not available without libxslt",
-            ))
-        }),
+        "xslt_process" => {
+            Native::scalar(|a, _| super::xslt::xslt_process(text(&a[0]), text(&a[1]), a.get(2).map(text)))
+        }
         _ => return None,
     })
 }
@@ -134,6 +130,7 @@ fn unsupported(c: &FnCtx, v: &XValue) -> String {
         XValue::Bool(_) => 2,
         XValue::Number(_) => 3,
         XValue::String(_) => 4,
+        XValue::Tree(_) => 9,
     };
     let mut e = Error::new(code::SUCCESSFUL_COMPLETION, format!("unsupported XQuery result: {t}"));
     e.severity = crate::error::Severity::Notice;
@@ -169,7 +166,7 @@ fn xpath_bool(a: &[Value], _: &FnCtx) -> Result<Value> {
         return Ok(Value::Bool(false));
     };
     Ok(Value::Bool(match &v {
-        XValue::NodeSet(s) => !s.is_empty(),
+        XValue::NodeSet(s) | XValue::Tree(s) => !s.is_empty(),
         XValue::Bool(b) => *b,
         XValue::Number(n) => *n != 0.0 && !n.is_nan(),
         XValue::String(_) => !xpath::cast_to_string(&x, &mut v).is_empty(),
@@ -180,8 +177,16 @@ fn xpath_bool(a: &[Value], _: &FnCtx) -> Result<Value> {
 /// document FROM relation WHERE condition`, a row per position in the paths' node sets (the
 /// key first, one column per path; NULLs for a document that isn't well-formed).
 fn xpath_table(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    // InitMaterializedSRF with MAT_SRF_USE_EXPECTED_DESC: only a call in FROM with a column
+    // definition list has the row type it builds (a select list's call has none).
     let types: Vec<DataType> = match c.ret {
         DataType::Row(r) => r.fields.iter().map(|f| f.1.clone()).collect(),
+        DataType::Record => {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                "materialize mode required, but it is not allowed in this context",
+            ));
+        }
         t => vec![t.clone()],
     };
     if types.is_empty() {

@@ -71,6 +71,12 @@ const CASES: &[(&str, usize)] = &[
     ("regex", 9000),
     ("xml", 256),
     ("xml", 300),
+    // xml2's xslt_process: a stylesheet nested to libxml2's limit and past it, and template
+    // recursion within and past libxslt's depth limit (3000 sequence constructors).
+    ("xslt", 250),
+    ("xslt", 300),
+    ("xsltrec", 1000),
+    ("xsltrec", 5000),
     ("plpgsql", 900),
     ("plpgsql", 2000),
     // Recursive SQL functions (more near Postgres's boundaries in `RELEASE_CASES`).
@@ -164,6 +170,21 @@ fn statements_of(shape: &str, n: usize) -> Vec<String> {
         "jsonpathplus" => format!("SELECT length(('$' || repeat(' + 1', {n}))::jsonpath::text)"),
         "regex" => format!("SELECT 'a' ~ ('{}a{}')", rep("("), rep(")")),
         "xml" => format!("SELECT length((repeat('<a>', {n}) || repeat('</a>', {n}))::xml::text)"),
+        "xslt" | "xsltrec" => {
+            let ss = r#"<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/>"#;
+            let body = if shape == "xslt" {
+                // Literal elements nested n deep (with the stylesheet and template: n + 2).
+                format!(r#"<xsl:template match="/">{}<xsl:value-of select="count(//*)"/>{}</xsl:template>"#, rep("<e>"), rep("</e>"))
+            } else {
+                format!(
+                    r#"<xsl:template match="/"><xsl:call-template name="r"><xsl:with-param name="n" select="{n}"/></xsl:call-template></xsl:template><xsl:template name="r"><xsl:param name="n"/><xsl:choose><xsl:when test="$n &gt; 0"><xsl:call-template name="r"><xsl:with-param name="n" select="$n - 1"/></xsl:call-template></xsl:when><xsl:otherwise>done</xsl:otherwise></xsl:choose></xsl:template>"#
+                )
+            };
+            return vec![
+                "CREATE EXTENSION IF NOT EXISTS xml2".into(),
+                format!("SELECT length(xslt_process('<a/>', $x${ss}{body}</xsl:stylesheet>$x$))"),
+            ];
+        }
         "plpgsql" => {
             return vec![
                 "CREATE OR REPLACE FUNCTION deep_r(n int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN IF n = 0 THEN RETURN 0; END IF; RETURN deep_r(n - 1) + 1; END $$".into(),

@@ -49,6 +49,14 @@ regex 8720 #0	ERROR 2201B invalid regular expression: regular expression is too 
 regex 9000 #0	ERROR 2201B invalid regular expression: regular expression is too complex
 xml 256 #0	1792
 xml 300 #0	ERROR 2200N invalid XML content DETAIL: line 1: Excessive depth in document: 257 use XML_PARSE_HUGE option\na><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a><a>\n                                                                               ^
+xslt 250 #0	CREATE EXTENSION
+xslt 250 #1	1
+xslt 300 #0	CREATE EXTENSION
+xslt 300 #1	ERROR 2200M error parsing stylesheet as XML document DETAIL: line 1: Excessive depth in document: 257 use XML_PARSE_HUGE option\ne><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e><e>\n                                                                               ^
+xsltrec 1000 #0	CREATE EXTENSION
+xsltrec 1000 #1	4
+xsltrec 5000 #0	CREATE EXTENSION
+xsltrec 5000 #1	ERROR 10608 failed to apply stylesheet
 plpgsql 900 #0	CREATE FUNCTION
 plpgsql 900 #1	900
 plpgsql 2000 #0	CREATE FUNCTION

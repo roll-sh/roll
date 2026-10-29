@@ -100,15 +100,27 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   btree page counts), consistent with pg_relation_size. Not applicable: pg_surgery,
   pg_walinspect, basic_archive, pg_logicalinspect (PostgreSQL heap tuples, WAL and logical
   decoding files). Not done: test_decoding (no logical decoding), bloom (pluggable index AMs),
-  xml2 (XSLT), pg_overexplain, spi. Scores and the per-module notes: contrib STATUS.md.
+  xml2 (XSLT; done in round 21, below), pg_overexplain, spi. Scores and the per-module notes: contrib STATUS.md.
   amcheck's verify_heapam counts its pages in pg_stat_io's bulkread context.
 - **Contrib tail** (round 20, agent 80a): spi 52 / 52 (autoinc, insert_username, moddatetime,
   refint as native triggers, refint's queries run as SPI runs them), tsm_system_time 16 / 16
   (the Materialize over a sample scan that may run twice), intagg's int_array_aggregate
   (aggregates over a built-in aggregate's internal transition functions run as that
-  aggregate), xml2 23 / 29 (the XPath functions and xpath_table; xslt_process fails as in a
-  build without libxslt: an XSLT 1.0 processor matching libxslt is a module of its own, contrib
-  STATUS.md has why). Golden `a80a_contrib_tail`. pg_overexplain 36 / 37: LOAD gives EXPLAIN
+  aggregate), xml2 23 / 29 (the XPath functions and xpath_table; xslt_process since round 21,
+  below). Golden `a80a_contrib_tail`.
+- **xml2's xslt_process** (round 21, agent 98): xml2 29 / 29. A native XSLT 1.0 processor
+  matching libxslt 1.1.43 / libxml2 2.13.9 (`src/ext/xslt/`: `top.rs` / `body.rs` /
+  `instr.rs` compile the stylesheet, `pattern.rs` match patterns, `apply.rs` / `run.rs` /
+  `build.rs` the transformation and libxslt's namespace fixup, `funcs.rs` the XSLT functions,
+  `number.rs` numbers.c, `output.rs` / `html.rs` xsltSaveResultTo and HTMLtree.c). It runs on
+  the engine's libxml model and XPath evaluator: `xpath::Host` adds variables and functions,
+  `XValue::Tree` is libxslt's result tree fragment, `XDoc::graft` puts fragments in the source
+  document's arena, `xpath::compile_flags` has XML_XPATH_NOVAR. No pure-Rust XSLT crate was
+  close (libxml-rs is an alpha reimplementation with its own tree; xrust / xee aim at XPath
+  3 / XSLT 3; sup-xml-xslt has no licence), and none would share the engine's libxml-faithful
+  tree and errors. A differential corpus of 602 cases matches 596 (contrib STATUS.md has the
+  six: non-UTF-8 output encodings, an accepted difference, and two error details). xpath_table in a select list raises "materialize mode required". Goldens
+  `a98_xslt`, deep_input `xslt` / `xsltrec`. pg_overexplain 36 / 37: LOAD gives EXPLAIN
   its DEBUG and RANGE_TABLE options (`sql/explain/overexplain.rs`), plan node ids and range
   table indexes modelled from the engine's plan as PostgreSQL numbers one of that shape;
   golden `a80a_overexplain`.

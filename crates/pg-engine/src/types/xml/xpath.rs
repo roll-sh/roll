@@ -39,6 +39,7 @@ const UNDEF_PREFIX_ERROR: i32 = 19;
 const ENCODING_ERROR: i32 = 20;
 const INVALID_CHAR_ERROR: i32 = 21;
 const STACK_ERROR: i32 = 23;
+const FORBID_VARIABLE_ERROR: i32 = 24;
 const RECURSION_LIMIT_EXCEEDED: i32 = 26;
 
 /// `xmlXPathErrorMessages`, without their trailing newlines (Postgres chops them).
@@ -187,8 +188,50 @@ impl XDoc {
         self.doc.nodes[id].kind
     }
 
-    fn parent(&self, id: NodeId) -> Option<NodeId> {
+    /// The parent XPath sees: an attribute's element, an entity's declaration.
+    pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.parent[id]
+    }
+
+    /// The document node `id` belongs to.
+    pub fn doc_of(&self, mut id: NodeId) -> NodeId {
+        while let Some(p) = self.parent[id] {
+            id = p;
+        }
+        id
+    }
+
+    /// Sorts nodes into document order (`xmlXPathNodeSetSort`).
+    pub fn sort_nodes(&self, set: &mut [XNode]) {
+        if set.len() > 1 {
+            self.sort(set);
+        }
+    }
+
+    /// Adds another document's tree (a result tree fragment, say) to the arena, so one XPath
+    /// evaluation reaches nodes of both; returns its document node, which has no parent.
+    /// Entities aren't carried over: the trees grafted have no entity references.
+    pub fn graft(&mut self, other: Doc) -> NodeId {
+        let base = self.doc.nodes.len();
+        for mut n in other.nodes {
+            n.parent = n.parent.map(|p| p + base);
+            for c in n.children.iter_mut().chain(n.attrs.iter_mut()) {
+                *c += base;
+            }
+            self.parent.push(n.parent);
+            self.pos.push(0);
+            self.doc.nodes.push(n);
+        }
+        for id in base..self.doc.nodes.len() {
+            let n = &self.doc.nodes[id];
+            for (i, &c) in n.children.iter().enumerate() {
+                self.pos[c] = i as u32;
+            }
+            for (i, &a) in n.attrs.iter().enumerate() {
+                self.pos[a] = i as u32;
+            }
+        }
+        base
     }
 
     fn siblings(&self, id: NodeId) -> &[NodeId] {
@@ -248,11 +291,6 @@ impl XDoc {
             Kind::EntityDecl => self.entity_children(id).last().copied(),
             _ => self.doc.nodes[id].children.last().copied(),
         }
-    }
-
-    /// `xmlDocGetRootElement`.
-    fn root_element(&self) -> Option<NodeId> {
-        self.doc.root_element()
     }
 
     // --- string values
@@ -354,7 +392,8 @@ impl XDoc {
         };
         let mut node = id;
         if self.kind(node) == Kind::Document {
-            match self.root_element().or_else(|| self.first_child(node)) {
+            let root = self.doc.nodes[node].children.iter().copied().find(|&c| self.kind(c) == Kind::Element);
+            match root.or_else(|| self.first_child(node)) {
                 Some(n) => node = n,
                 None => return 0,
             }
@@ -971,6 +1010,8 @@ struct Compiler<'a> {
     steps: Vec<Step>,
     last: i32,
     depth: i32,
+    /// `XML_XPATH_NOVAR`: variable references are an error.
+    novar: bool,
 }
 
 impl<'a> Compiler<'a> {
@@ -1308,6 +1349,9 @@ impl<'a> Compiler<'a> {
         self.last = -1;
         self.push_long(Op::Variable, 0, 0, 0, None, Some(name), prefix);
         self.skip_blanks();
+        if self.novar {
+            self.err(FORBID_VARIABLE_ERROR);
+        }
     }
 
     /// `xmlXPathCompFunctionCall`.
@@ -2009,6 +2053,11 @@ fn xpath_error(msg: &str, code: i32) -> Error {
 
 /// `xmlXPathCtxtCompile`, failing with Postgres's "invalid XPath expression".
 pub fn compile(expr: &str) -> Result<Compiled> {
+    compile_flags(expr, false)
+}
+
+/// `xmlXPathCtxtCompile` with the context's `XML_XPATH_NOVAR` flag as given.
+pub fn compile_flags(expr: &str, novar: bool) -> Result<Compiled> {
     let mut c = Compiler {
         s: expr.as_bytes(),
         cur: 0,
@@ -2016,6 +2065,7 @@ pub fn compile(expr: &str) -> Result<Compiled> {
         steps: Vec::new(),
         last: -1,
         depth: 0,
+        novar,
     };
     c.compile_expr(true);
     if c.error != 0 {
@@ -2043,12 +2093,23 @@ pub fn compile(expr: &str) -> Result<Compiled> {
 pub enum XValue {
     /// Nodes; in document order when the expression sorted them.
     NodeSet(Vec<XNode>),
+    /// A result tree fragment (`XPATH_XSLT_TREE`): libxslt's variables with content. A node
+    /// set to every function and operator, but no location step, filter or union takes it.
+    Tree(Vec<XNode>),
     Bool(bool),
     Number(f64),
     String(String),
 }
 
 impl XValue {
+    /// The nodes of a node set or a result tree fragment.
+    pub fn nodes(&self) -> Option<&Vec<XNode>> {
+        match self {
+            XValue::NodeSet(s) | XValue::Tree(s) => Some(s),
+            _ => None,
+        }
+    }
+
     fn from_lit(l: &Lit) -> XValue {
         match l {
             Lit::Number(n) => XValue::Number(*n),
@@ -2191,7 +2252,7 @@ fn bool_to_number(b: bool) -> f64 {
 /// `xmlXPathCastToBoolean`.
 fn cast_to_bool(v: &XValue) -> bool {
     match v {
-        XValue::NodeSet(s) => !s.is_empty(),
+        XValue::NodeSet(s) | XValue::Tree(s) => !s.is_empty(),
         XValue::String(s) => !s.is_empty(),
         XValue::Number(n) => number_to_bool(*n),
         XValue::Bool(b) => *b,
@@ -2218,7 +2279,7 @@ pub fn cast_node_to_string(x: &XDoc, node: &XNode) -> String {
 /// `xmlXPathCastToString`.
 pub fn cast_to_string(x: &XDoc, v: &mut XValue) -> String {
     match v {
-        XValue::NodeSet(s) => cast_node_set_to_string(x, s),
+        XValue::NodeSet(s) | XValue::Tree(s) => cast_node_set_to_string(x, s),
         XValue::String(s) => s.clone(),
         XValue::Bool(b) => (if *b { "true" } else { "false" }).into(),
         XValue::Number(n) => cast_number_to_string(*n),
@@ -2228,7 +2289,7 @@ pub fn cast_to_string(x: &XDoc, v: &mut XValue) -> String {
 /// `xmlXPathCastToNumber`.
 pub fn cast_to_number(x: &XDoc, v: &mut XValue) -> f64 {
     match v {
-        XValue::NodeSet(s) => string_to_number(&cast_node_set_to_string(x, s)),
+        XValue::NodeSet(s) | XValue::Tree(s) => string_to_number(&cast_node_set_to_string(x, s)),
         XValue::String(s) => string_to_number(s),
         XValue::Number(n) => *n,
         XValue::Bool(b) => bool_to_number(*b),
@@ -2315,7 +2376,7 @@ impl NsMap {
     }
 
     /// `xmlXPathNsLookup`.
-    fn lookup(&self, prefix: &str) -> Option<&str> {
+    pub fn lookup(&self, prefix: &str) -> Option<&str> {
         if prefix == "xml" {
             return Some(XML_NS);
         }
@@ -2324,6 +2385,7 @@ impl NsMap {
 }
 
 /// The namespace escape-uri() is registered under.
+pub const XQUERY_NS: &str = XQUERY_FUNCTIONS_NS;
 const XQUERY_FUNCTIONS_NS: &str = "http://www.w3.org/2002/08/xquery-functions";
 
 // ---------------------------------------------------------------------------------------------
@@ -2443,6 +2505,10 @@ struct Ctx<'a> {
     tmp_ns: Vec<Arc<NsNode>>,
     /// `ctxt->ancestor` of the preceding axis.
     ancestor: Option<NodeId>,
+    /// `ctxt->context->doc`: the document node `/` selects.
+    root: NodeId,
+    /// Variables and the functions beyond XPath's own (libxslt's).
+    host: Option<&'a dyn Host>,
     /// Steps taken on the following axis, which cycles through entity content in libxml.
     following_steps: usize,
 }
@@ -2461,6 +2527,8 @@ impl<'a> Ctx<'a> {
             depth: 0,
             tmp_ns: Vec::new(),
             ancestor: None,
+            root: DOC,
+            host: None,
             following_steps: 0,
         }
     }
@@ -2483,8 +2551,22 @@ impl<'a> Ctx<'a> {
         self.stack.push(v);
     }
 
+    /// A node set or a result tree fragment on top (the functions' type check).
     fn top_is_nodeset(&self) -> bool {
+        matches!(self.stack.last(), Some(XValue::NodeSet(_) | XValue::Tree(_)))
+    }
+
+    /// `CHECK_TYPE0(XPATH_NODESET)`: a node set proper (location steps, filters, unions).
+    fn top_is_strict_nodeset(&self) -> bool {
         matches!(self.stack.last(), Some(XValue::NodeSet(_)))
+    }
+
+    /// Pops a node set or a result tree fragment's nodes.
+    fn pop_nodes(&mut self) -> Option<Vec<XNode>> {
+        match self.pop() {
+            Some(XValue::NodeSet(s) | XValue::Tree(s)) => Some(s),
+            _ => None,
+        }
     }
 
     /// `CHECK_ARITY`.
@@ -2592,7 +2674,7 @@ impl<'a> Ctx<'a> {
                         }
                         Some(XNode::Node(c))
                     }
-                    Kind::Document => x.root_element().map(XNode::Node),
+                    Kind::Document => x.doc.nodes[id].children.iter().copied().find(|&c| is_elem(c)).map(XNode::Node),
                     _ => None,
                 }
             }
@@ -2678,7 +2760,7 @@ impl<'a> Ctx<'a> {
             XNode::Node(id) => match x.kind(*id) {
                 Kind::Document => None,
                 Kind::Attribute => x.parent(*id).map(XNode::Node),
-                _ => Some(XNode::Node(x.parent(*id).unwrap_or(DOC))),
+                _ => Some(XNode::Node(x.parent(*id).unwrap_or(self.root))),
             },
         }
     }
@@ -2696,10 +2778,10 @@ impl<'a> Ctx<'a> {
             return self.parent_of(&self.node);
         };
         if let XNode::Node(id) = c {
-            if Some(*id) == x.first_child(DOC) {
-                return Some(XNode::Node(DOC));
+            if Some(*id) == x.first_child(self.root) {
+                return Some(XNode::Node(self.root));
             }
-            if *id == DOC {
+            if *id == self.root {
                 return None;
             }
             return match x.kind(*id) {
@@ -2723,7 +2805,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         match cur {
-            Some(XNode::Node(DOC)) => None,
+            Some(XNode::Node(r)) if *r == self.root => None,
             None => self.x.next(id).map(XNode::Node),
             Some(c) => self.x.next(c.id()?).map(XNode::Node),
         }
@@ -2736,7 +2818,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         match cur {
-            Some(XNode::Node(DOC)) => None,
+            Some(XNode::Node(r)) if *r == self.root => None,
             None => x.prev(id).map(XNode::Node),
             Some(c) => {
                 let mut c = c.id()?;
@@ -2776,7 +2858,7 @@ impl<'a> Ctx<'a> {
         }
         loop {
             c = x.parent(c)?;
-            if c == DOC {
+            if c == self.root {
                 return None;
             }
             if let Some(n) = x.next(c) {
@@ -2807,7 +2889,7 @@ impl<'a> Ctx<'a> {
         }
         while x.prev(c).is_none() {
             c = x.parent(c)?;
-            if Some(c) == x.first_child(DOC) {
+            if Some(c) == x.first_child(self.root) {
                 return None;
             }
             if Some(c) != self.ancestor {
@@ -3055,7 +3137,7 @@ impl<'a> Ctx<'a> {
         let (test, ty) = (s.value2, s.value3);
         let prefix = s.s4.as_deref();
         let name = s.s5.as_deref();
-        if !self.top_is_nodeset() {
+        if !self.top_is_strict_nodeset() {
             self.err(INVALID_TYPE);
             return 0;
         }
@@ -3316,7 +3398,7 @@ impl<'a> Ctx<'a> {
         match v {
             XValue::Bool(b) => *b,
             XValue::Number(n) => *n == self.pos as f64,
-            XValue::NodeSet(s) => !s.is_empty(),
+            XValue::NodeSet(s) | XValue::Tree(s) => !s.is_empty(),
             XValue::String(s) => !s.is_empty(),
         }
     }
@@ -3455,7 +3537,7 @@ impl<'a> Ctx<'a> {
                 }
                 total += cur;
             }
-            Op::Root => self.push(XValue::NodeSet(vec![XNode::Node(DOC)])),
+            Op::Root => self.push(XValue::NodeSet(vec![XNode::Node(self.root)])),
             Op::Node => {
                 if s.ch1.get() != -1 {
                     total += self.eval_op(s.ch1.get());
@@ -3538,7 +3620,7 @@ impl<'a> Ctx<'a> {
                 }
                 total += cur;
             }
-            Op::Root => self.push(XValue::NodeSet(vec![XNode::Node(DOC)])),
+            Op::Root => self.push(XValue::NodeSet(vec![XNode::Node(self.root)])),
             Op::Node => {
                 if s.ch1.get() != -1 {
                     total += self.eval_op(s.ch1.get());
@@ -3649,7 +3731,7 @@ impl<'a> Ctx<'a> {
         if s.ch2.get() == -1 || self.stack.is_empty() {
             return total;
         }
-        if !self.top_is_nodeset() {
+        if !self.top_is_strict_nodeset() {
             self.err(INVALID_TYPE);
             return 0;
         }
@@ -3783,7 +3865,7 @@ impl<'a> Ctx<'a> {
                     return 0;
                 }
             }
-            Op::Root => self.push(XValue::NodeSet(vec![XNode::Node(DOC)])),
+            Op::Root => self.push(XValue::NodeSet(vec![XNode::Node(self.root)])),
             Op::Node => {
                 if s.ch1.get() != -1 {
                     total += self.eval_op(s.ch1.get());
@@ -3821,17 +3903,24 @@ impl<'a> Ctx<'a> {
                 if s.ch1.get() != -1 {
                     self.eval_op(s.ch1.get());
                 }
-                match s.s5.as_deref() {
-                    None => self.err(UNDEF_VARIABLE_ERROR),
-                    Some(p) => {
-                        if self.ns.lookup(p).is_none() {
+                let uri = match s.s5.as_deref() {
+                    None => None,
+                    Some(p) => match self.ns.lookup(p) {
+                        None => {
                             self.err(UNDEF_PREFIX_ERROR);
-                        } else {
-                            self.err(UNDEF_VARIABLE_ERROR);
+                            return 0;
                         }
+                        Some(u) => Some(u),
+                    },
+                };
+                let name = s.s4.as_deref().unwrap_or("");
+                match self.host.and_then(|h| h.variable(name, uri)) {
+                    Some(v) => self.push(v),
+                    None => {
+                        self.err(UNDEF_VARIABLE_ERROR);
+                        return 0;
                     }
                 }
-                return 0;
             }
             Op::Function => {
                 let frame = self.stack.len();
@@ -3848,24 +3937,40 @@ impl<'a> Ctx<'a> {
                     return 0;
                 }
                 let name = s.s4.as_deref().unwrap_or("");
-                let f = match s.s5.as_deref() {
-                    None => builtin(name),
+                let (f, uri) = match s.s5.as_deref() {
+                    None => (builtin(name), None),
                     Some(p) => match self.ns.lookup(p) {
                         None => {
                             self.err(UNDEF_PREFIX_ERROR);
                             return 0;
                         }
                         Some(uri) if uri == XQUERY_FUNCTIONS_NS && name == "escape-uri" => {
-                            Some(Func::EscapeUri)
+                            (Some(Func::EscapeUri), None)
                         }
-                        Some(_) => None,
+                        Some(uri) => (None, Some(uri)),
                     },
                 };
-                let Some(f) = f else {
-                    self.err(UNKNOWN_FUNC_ERROR);
-                    return 0;
-                };
-                self.call(f, nargs);
+                match f {
+                    Some(f) => self.call(f, nargs),
+                    None => match self.host.filter(|h| h.has_function(name, uri)) {
+                        Some(h) => {
+                            let at = self.stack.len().saturating_sub(nargs.max(0) as usize);
+                            let args = self.stack.split_off(at);
+                            let call = HostCall { x: self.x, ns: self.ns, node: &self.node, pos: self.pos, size: self.size };
+                            match h.call(&call, name, uri, args) {
+                                Ok(v) => self.push(v),
+                                Err(code) => {
+                                    self.err(code);
+                                    return 0;
+                                }
+                            }
+                        }
+                        None => {
+                            self.err(UNKNOWN_FUNC_ERROR);
+                            return 0;
+                        }
+                    },
+                }
                 if self.error == 0 && self.stack.len() != frame + 1 {
                     self.err(STACK_ERROR);
                     return 0;
@@ -3918,7 +4023,7 @@ impl<'a> Ctx<'a> {
                         return 0;
                     }
                     if c2 != -1 && !self.stack.is_empty() {
-                        if !self.top_is_nodeset() {
+                        if !self.top_is_strict_nodeset() {
                             self.err(INVALID_TYPE);
                             return 0;
                         }
@@ -3970,16 +4075,16 @@ impl<'a> Ctx<'a> {
             self.err(INVALID_OPERAND);
             return false;
         };
-        let is_set = |v: &XValue| matches!(v, XValue::NodeSet(_));
+        let is_set = |v: &XValue| v.nodes().is_some();
         if is_set(&a1) || is_set(&a2) {
             if !is_set(&a1) {
                 std::mem::swap(&mut a1, &mut a2);
             }
-            let XValue::NodeSet(ns1) = &a1 else {
+            let Some(ns1) = a1.nodes() else {
                 return false;
             };
             return match &a2 {
-                XValue::NodeSet(ns2) => self.equal_node_sets(ns1, ns2, neq),
+                XValue::NodeSet(ns2) | XValue::Tree(ns2) => self.equal_node_sets(ns1, ns2, neq),
                 XValue::Bool(b) => (!ns1.is_empty() == *b) != neq,
                 XValue::Number(f) => self.equal_node_set_float(ns1, *f, neq),
                 XValue::String(s) => self.equal_node_set_string(ns1, s, neq),
@@ -4082,7 +4187,7 @@ impl<'a> Ctx<'a> {
             return false;
         };
         let x = self.x;
-        let is_set = |v: &XValue| matches!(v, XValue::NodeSet(_));
+        let is_set = |v: &XValue| v.nodes().is_some();
         if is_set(&a1) || is_set(&a2) {
             if is_set(&a1) && is_set(&a2) {
                 return self.compare_node_sets(inf, strict, &a1, &a2);
@@ -4100,7 +4205,7 @@ impl<'a> Ctx<'a> {
 
     /// `xmlXPathCompareNodeSetValue`.
     fn compare_node_set_value(&self, inf: bool, strict: bool, arg: &XValue, val: &XValue) -> bool {
-        let XValue::NodeSet(ns) = arg else {
+        let Some(ns) = arg.nodes() else {
             return false;
         };
         let x = self.x;
@@ -4113,7 +4218,7 @@ impl<'a> Ctx<'a> {
                 ns.iter()
                     .any(|n| compare_numbers(inf, strict, string_to_number(&x.node_string(n)), f))
             }
-            XValue::NodeSet(_) => self.compare_node_sets(inf, strict, arg, val),
+            XValue::NodeSet(_) | XValue::Tree(_) => self.compare_node_sets(inf, strict, arg, val),
             XValue::Bool(b) => compare_numbers(
                 inf,
                 strict,
@@ -4125,7 +4230,7 @@ impl<'a> Ctx<'a> {
 
     /// `xmlXPathCompareNodeSets`.
     fn compare_node_sets(&self, inf: bool, strict: bool, a1: &XValue, a2: &XValue) -> bool {
-        let (XValue::NodeSet(ns1), XValue::NodeSet(ns2)) = (a1, a2) else {
+        let (Some(ns1), Some(ns2)) = (a1.nodes(), a2.nodes()) else {
             return false;
         };
         if ns1.is_empty() || ns2.is_empty() {
@@ -4394,7 +4499,7 @@ impl Ctx<'_> {
             self.err(INVALID_TYPE);
             return;
         }
-        if let Some(XValue::NodeSet(s)) = self.pop() {
+        if let Some(s) = self.pop_nodes() {
             self.push(XValue::Number(s.len() as f64));
         }
     }
@@ -4407,7 +4512,7 @@ impl Ctx<'_> {
             self.err(INVALID_TYPE);
             return;
         }
-        if let Some(XValue::NodeSet(s)) = self.pop() {
+        if let Some(s) = self.pop_nodes() {
             let mut res = 0.0;
             for n in &s {
                 res += string_to_number(&self.x.node_string(n));
@@ -4432,10 +4537,7 @@ impl Ctx<'_> {
             self.err(INVALID_TYPE);
             return None;
         }
-        match self.pop() {
-            Some(XValue::NodeSet(s)) => Some(s),
-            _ => None,
-        }
+        self.pop_nodes()
     }
 
     fn local_name_of(&self, n: &XNode) -> String {
@@ -4818,7 +4920,7 @@ impl Ctx<'_> {
             self.err(INVALID_OPERAND);
             return;
         };
-        if let XValue::NodeSet(s) = &obj {
+        if let Some(s) = obj.nodes() {
             let mut ret = Vec::new();
             for n in s {
                 let tokens = self.x.node_string(n);
@@ -4894,6 +4996,64 @@ impl Ctx<'_> {
         }
         self.stack.pop()
     }
+}
+
+/// What an embedding XPath context adds (libxslt's): variable values and functions beyond
+/// XPath's core library. Looked up after the core functions, as libxml's function hash has
+/// the core ones registered first.
+pub trait Host {
+    /// `varLookupFunc`: None for an undefined variable.
+    fn variable(&self, name: &str, uri: Option<&str>) -> Option<XValue>;
+    fn has_function(&self, name: &str, uri: Option<&str>) -> bool;
+    /// Calls a function `has_function` knows with its arguments in order; an error is an
+    /// XPath error code (`XP_ERROR`).
+    fn call(&self, c: &HostCall, name: &str, uri: Option<&str>, args: Vec<XValue>) -> std::result::Result<XValue, i32>;
+}
+
+/// The evaluation state a host function sees.
+pub struct HostCall<'a> {
+    pub x: &'a XDoc,
+    pub ns: &'a NsMap,
+    pub node: &'a XNode,
+    pub pos: i32,
+    pub size: i32,
+}
+
+/// The error codes a host function can raise.
+pub mod err {
+    pub const INVALID_TYPE: i32 = super::INVALID_TYPE;
+    pub const INVALID_ARITY: i32 = super::INVALID_ARITY;
+    pub const INVALID_OPERAND: i32 = super::INVALID_OPERAND;
+    pub const UNKNOWN_FUNC: i32 = super::UNKNOWN_FUNC_ERROR;
+    pub const STACK: i32 = super::STACK_ERROR;
+}
+
+/// An evaluation with an embedding context: the context position and size, the document `/`
+/// selects, and the host's variables and functions. Errors are XPath error codes.
+pub struct Env<'a> {
+    pub ns: &'a NsMap,
+    pub pos: i32,
+    pub size: i32,
+    pub root: NodeId,
+    pub host: &'a dyn Host,
+}
+
+/// `xmlXPathCompiledEval` in an embedding context; the error is the XPath error code.
+pub fn eval_env(comp: &Compiled, x: &XDoc, node: &XNode, env: &Env) -> std::result::Result<XValue, i32> {
+    let mut c = Ctx::new(x, comp, env.ns, node.clone());
+    c.pos = env.pos;
+    c.size = env.size;
+    c.root = env.root;
+    c.host = Some(env.host);
+    match c.run() {
+        Some(v) if c.error == 0 => Ok(v),
+        _ => Err(if c.error == 0 { STACK_ERROR } else { c.error }),
+    }
+}
+
+/// libxml's message for an XPath error code (`xmlXPathErrorMessages`).
+pub fn error_message(code: i32) -> &'static str {
+    message(code)
 }
 
 /// Evaluates `comp` with `node` as the context node and the registered namespaces
@@ -5127,7 +5287,7 @@ pub fn xpath(
 ) -> Result<Vec<String>> {
     let (x, v) = xpath_internal(expr, data, ns)?;
     Ok(match v {
-        XValue::NodeSet(set) => set.iter().map(|n| xml_xmlnodetoxmltype(&x, n)).collect(),
+        XValue::NodeSet(set) | XValue::Tree(set) => set.iter().map(|n| xml_xmlnodetoxmltype(&x, n)).collect(),
         XValue::Bool(b) => vec![(if b { "true" } else { "false" }).to_string()],
         XValue::Number(n) => vec![escape_xml(&crate::types::text::format_value(
             &Value::Float8(n),

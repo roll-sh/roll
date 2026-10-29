@@ -54,6 +54,13 @@ impl<'d> Saver<'d> {
         self.ascii_attrs = true;
     }
 
+    /// `xmlNodeDumpOutput` with an encoding: content escaped with `xmlEscapeContent`;
+    /// attributes with non-ASCII as character references when the document has no encoding.
+    pub fn node_dump_output(&mut self, ascii_attrs: bool) {
+        self.escape_entities = false;
+        self.ascii_attrs = ascii_attrs;
+    }
+
     /// Dumping a document copy (`xmlCopyDoc`) with `xmlNodeDump`.
     pub fn copy_dump(&mut self) {
         self.copy = true;
@@ -272,6 +279,8 @@ impl<'d> Saver<'d> {
                     self.format = saved;
                 }
             }
+            // libxslt's disable-output-escaping text (xmlStringTextNoenc).
+            Kind::Text if n.name == "textnoenc" => self.out.push_str(&n.content),
             Kind::Text => self.escape_text(&n.content),
             Kind::Pi => {
                 if !is_root && self.format == 1 {

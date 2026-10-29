@@ -37,6 +37,7 @@ mod dicts;
 mod sslinfo;
 mod spi;
 mod xml2;
+mod xslt;
 mod tcn;
 mod pgstattuple;
 mod pg_visibility;
