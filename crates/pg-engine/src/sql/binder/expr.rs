@@ -495,32 +495,8 @@ impl Binder<'_, '_> {
                 // As in Postgres, `a.b` is never `column.field` (that's `(a).b` or `t.a.b`).
                 if self.rel_exists(&[rel]) {
                     // ... but it may be a function of the row: `p.f` is `f(p)`.
-                    if self.cat.functions_named(col).any(|f| f.args.len() == 1) {
-                        let s = |v: &str| pb::Node {
-                            node: Some(NodeEnum::String(pb::String { sval: v.to_string() })),
-                        };
-                        let call = pb::FuncCall {
-                            funcname: vec![s(col)],
-                            args: vec![pb::Node {
-                                node: Some(NodeEnum::ColumnRef(pb::ColumnRef {
-                                    fields: vec![
-                                        s(rel),
-                                        pb::Node {
-                                            node: Some(NodeEnum::AStar(pb::AStar {})),
-                                        },
-                                    ],
-                                    location: loc,
-                                })),
-                            }],
-                            funcformat: pb::CoercionForm::CoerceExplicitCall as i32,
-                            location: loc,
-                            ..Default::default()
-                        };
-                        match self.bind_func_call(&call) {
-                            Ok(e) => return Ok(self.stored_column_call(e)),
-                            Err(e) if e.code != code::UNDEFINED_FUNCTION => return Err(e),
-                            Err(_) => {}
-                        }
+                    if let Some(e) = self.row_function(&[rel], col, loc)? {
+                        return Ok(e);
                     }
                     return Err(self.missing_column(Some(rel), col, loc));
                 }
@@ -534,13 +510,12 @@ impl Binder<'_, '_> {
                     return self.field_select(base, col, loc);
                 }
                 if self.rel_exists(&[schema, rel]) {
-                    return Err(with_pos(
-                        Error::new(
-                            code::UNDEFINED_COLUMN,
-                            format!("column {schema}.{rel}.{col} does not exist"),
-                        ),
-                        loc,
-                    ));
+                    // `s.p.f` is `f(s.p)` too (PostgREST's computed columns); else
+                    // errorMissingColumn names the relation alone.
+                    if let Some(e) = self.row_function(&[schema, rel], col, loc)? {
+                        return Ok(e);
+                    }
+                    return Err(self.missing_column(Some(rel), col, loc));
                 }
                 Err(self.missing_rel(rel, loc))
             }
@@ -577,6 +552,34 @@ impl Binder<'_, '_> {
     /// errorMissingColumn: no column `col` (of relation `rel`) here; what the range tables
     /// have instead (searchRangeTableForCol): an exact match that can't be referenced from
     /// here, or the column names closest to it.
+    /// `rel.f` (or `schema.rel.f`) with no column f is `f(rel.*)`, functional notation
+    /// (ParseFuncOrColumn), when a one-argument function f takes the row. None: no such
+    /// function.
+    fn row_function(&mut self, rel: &[&str], col: &str, loc: i32) -> Result<Option<Expr>> {
+        if !self.cat.functions_named(col).any(|f| f.args.len() == 1) {
+            return Ok(None);
+        }
+        let s = |v: &str| pb::Node {
+            node: Some(NodeEnum::String(pb::String { sval: v.to_string() })),
+        };
+        let mut fields: Vec<pb::Node> = rel.iter().map(|r| s(r)).collect();
+        fields.push(pb::Node { node: Some(NodeEnum::AStar(pb::AStar {})) });
+        let call = pb::FuncCall {
+            funcname: vec![s(col)],
+            args: vec![pb::Node {
+                node: Some(NodeEnum::ColumnRef(pb::ColumnRef { fields, location: loc })),
+            }],
+            funcformat: pb::CoercionForm::CoerceExplicitCall as i32,
+            location: loc,
+            ..Default::default()
+        };
+        match self.bind_func_call(&call) {
+            Ok(e) => Ok(Some(self.stored_column_call(e))),
+            Err(e) if e.code != code::UNDEFINED_FUNCTION => Err(e),
+            Err(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn missing_column(&self, rel: Option<&str>, col: &str, loc: i32) -> Error {
         const MAX_FUZZY: usize = 3;
         let mut distance = MAX_FUZZY + 1;
@@ -2359,6 +2362,7 @@ impl Binder<'_, '_> {
                 ty: ret.clone(),
                 ncols: 1,
                 body: None,
+                domains: Vec::new(),
             });
             return Ok(Some(Expr::Srf(i, ret)));
         }
@@ -5040,6 +5044,7 @@ impl Binder<'_, '_> {
                 ty: ret.clone(),
                 ncols,
                 body: None,
+                domains: Vec::new(),
             });
             return Ok(Expr::Srf(i, ret));
         }
@@ -7767,6 +7772,10 @@ impl Binder<'_, '_> {
             self.bind_statement(&body)
                 .map(|bq| ((*bq.plan).clone(), bq.cols))
         } else {
+            // (A statement planned on its own, a SQL function's: its command.)
+            if !inline {
+                self.note_command(&body);
+            }
             self.bind_select_node(&body)
         };
         match outer_inlining {
@@ -7910,6 +7919,7 @@ impl Binder<'_, '_> {
             ty: ty.clone(),
             ncols,
             body: Some(Arc::new(body)),
+            domains: Vec::new(),
         });
         Ok(Expr::Srf(i, ty))
     }
@@ -8059,6 +8069,7 @@ impl Binder<'_, '_> {
                 ty: ty.clone(),
                 ncols,
                 body: None,
+                domains: Vec::new(),
             });
             return Ok(Expr::Srf(i, ty));
         }
@@ -8089,6 +8100,7 @@ impl Binder<'_, '_> {
                 ty: ty.clone(),
                 ncols: fdef.out_cols.len().max(1),
                 body: None,
+                domains: Vec::new(),
             });
             return Ok(Expr::Srf(i, ty));
         }

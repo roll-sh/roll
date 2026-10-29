@@ -39,6 +39,9 @@ pub struct Perms {
     /// How many of `locks` the statement names (taken before it is analyzed; a wait for
     /// them can change what it means); the rest the planner and executor take.
     pub named_locks: usize,
+    /// The statement's command (CreateCommandName: a SELECT with a data-modifying WITH is a
+    /// SELECT), for ExecCheckXactReadOnly; None for what isn't a planned query.
+    pub command: Option<&'static str>,
 }
 
 impl Perms {
@@ -488,6 +491,28 @@ pub fn check(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
                 format!("permission denied for {word} {name}"),
             ));
         }
+    }
+    check_xact_read_only(perms, ctx)
+}
+
+/// ExecCheckXactReadOnly: in a read-only transaction, a statement needing more than SELECT
+/// on a relation outside the temporary schema fails before it runs, whether or not it would
+/// change a row, in a function's statement too.
+fn check_xact_read_only(perms: &Perms, ctx: &ExecCtx) -> Result<()> {
+    let Some(cmd) = perms.command else { return Ok(()) };
+    if !ctx.txn.borrow().read_only {
+        return Ok(());
+    }
+    let cat = ctx.catalog();
+    let writes = perms.rels.iter().any(|p| {
+        p.privs & !acl::SELECT != 0
+            && !cat.table(p.oid).is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+    });
+    if writes {
+        return Err(Error::new(
+            code::READ_ONLY_SQL_TRANSACTION,
+            format!("cannot execute {cmd} in a read-only transaction"),
+        ));
     }
     Ok(())
 }

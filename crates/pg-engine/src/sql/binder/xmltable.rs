@@ -207,6 +207,7 @@ impl Binder<'_, '_> {
                     ty,
                     ncols: cols.len(),
                     body: None,
+                    domains: Vec::new(),
                 })
             })
         })?;

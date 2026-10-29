@@ -5050,6 +5050,7 @@ impl Binder<'_, '_> {
             ty,
             ncols: 3,
             body: None,
+            domains: Vec::new(),
         };
         let mut cols: Vec<OutCol> = out
             .iter()
@@ -5643,6 +5644,7 @@ impl Binder<'_, '_> {
             return Err(with_pos(Error::new(code::SYNTAX_ERROR, msg), at));
         }
         let mut cols: Vec<OutCol> = Vec::new();
+        let mut coldef_domains: Vec<Option<u32>> = Vec::new();
         if def.out_cols.len() > 1 {
             for (n, t) in &def.out_cols {
                 let t = match t {
@@ -5669,12 +5671,13 @@ impl Binder<'_, '_> {
                 let Some(NodeEnum::ColumnDef(c)) = inner(cd) else {
                     continue;
                 };
-                let (t, _) = super::resolve_type_name(
+                let (t, d) = super::resolve_type_name(
                     &self.cat,
                     &self.ctx.search_path,
                     c.type_name.as_ref().unwrap(),
                 )?;
                 cols.push(OutCol::new(c.colname.clone(), t));
+                coldef_domains.push(d);
             }
         } else if let DataType::Row(fields) = &ret {
             for (n, t) in fields.iter() {
@@ -5723,6 +5726,7 @@ impl Binder<'_, '_> {
                 ty: ret,
                 ncols,
                 body: None,
+                domains: if coldef_domains.iter().any(Option::is_some) { coldef_domains } else { Vec::new() },
             },
             cols,
         ))
@@ -5840,6 +5844,7 @@ impl Binder<'_, '_> {
                 ty: row_ty,
                 ncols: cols.len(),
                 body: None,
+                domains: Vec::new(),
             },
             cols,
         ))
@@ -5930,6 +5935,7 @@ impl Binder<'_, '_> {
                     ty,
                     ncols: cols.len(),
                     body: None,
+                    domains: Vec::new(),
                 },
                 cols,
             ));
@@ -6008,6 +6014,7 @@ impl Binder<'_, '_> {
                 ty,
                 ncols: n,
                 body: Some(Arc::new(body)),
+                domains: Vec::new(),
             },
             cols,
         ))
@@ -6956,6 +6963,7 @@ fn const_srf(e: Expr) -> SrfCall {
         ty,
         ncols: 1,
         body: None,
+        domains: Vec::new(),
     }
 }
 

@@ -352,7 +352,7 @@ impl DecInt {
         };
         let mut l = self.mag[i];
         let mut k = 0;
-        while l % 10 == 0 {
+        while l.is_multiple_of(10) {
             l /= 10;
             k += 1;
         }

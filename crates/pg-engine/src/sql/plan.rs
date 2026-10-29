@@ -877,6 +877,10 @@ pub struct SrfCall {
     pub ncols: usize,
     /// A CREATE FUNCTION function's body: it runs with the arguments as the outer row.
     pub body: Option<Arc<Plan>>,
+    /// The domains of the columns a column definition list declares (`AS r(a d)`), by
+    /// column: each row's values are checked against them as the function returns it, read
+    /// or not (the record's tuple descriptor has the domain types).
+    pub domains: Vec<Option<u32>>,
 }
 
 #[derive(Clone, Debug)]

@@ -1127,6 +1127,34 @@ impl<'b, 'a> Binder<'b, 'a> {
         }
     }
 
+    /// The statement's command for ExecCheckXactReadOnly (`Perms::command`), from the first
+    /// statement bound (an outer one's, for what it contains).
+    pub(crate) fn note_command(&mut self, n: &pb::Node) {
+        if self.perms.command.is_some() {
+            return;
+        }
+        self.perms.command = match ast::inner(n) {
+            // (CreateCommandName names a statement's first row mark's strength.)
+            Some(pg_query::NodeEnum::SelectStmt(s)) => Some(match s.locking_clause.first().and_then(ast::inner) {
+                Some(pg_query::NodeEnum::LockingClause(l)) => {
+                    use pg_query::protobuf::LockClauseStrength as S;
+                    match S::try_from(l.strength).unwrap_or(S::LcsForupdate) {
+                        S::LcsForkeyshare => "SELECT FOR KEY SHARE",
+                        S::LcsForshare => "SELECT FOR SHARE",
+                        S::LcsFornokeyupdate => "SELECT FOR NO KEY UPDATE",
+                        _ => "SELECT FOR UPDATE",
+                    }
+                }
+                _ => "SELECT",
+            }),
+            Some(pg_query::NodeEnum::InsertStmt(_)) => Some("INSERT"),
+            Some(pg_query::NodeEnum::UpdateStmt(_)) => Some("UPDATE"),
+            Some(pg_query::NodeEnum::DeleteStmt(_)) => Some("DELETE"),
+            Some(pg_query::NodeEnum::MergeStmt(_)) => Some("MERGE"),
+            _ => None,
+        };
+    }
+
     fn bind_statement_body(&mut self, n: &pb::Node) -> Result<BoundQuery> {
         self.want_sys |= mentions_sys_column(n);
         // A relation with rules: the statements they make of it (planned already).
@@ -1154,6 +1182,7 @@ impl<'b, 'a> Binder<'b, 'a> {
                 param_domains: self.param_domains.clone(),
             });
         }
+        self.note_command(n);
         let (plan, cols) = match ast::inner(n) {
             Some(pg_query::NodeEnum::SelectStmt(s)) => self.bind_select_stmt(s)?,
             Some(pg_query::NodeEnum::InsertStmt(s)) => self.bind_insert(s)?,

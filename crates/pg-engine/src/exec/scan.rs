@@ -2038,12 +2038,20 @@ fn mix(mut x: u64) -> u64 {
 /// Put rows (by data key) in the order of their heap TIDs, rows the heap model doesn't
 /// place last (in key order); returns each row's block then. None when the table's heap
 /// isn't modelled.
+/// `roots`: by their HOT chains' roots, the TIDs index entries hold (a btree's equal keys
+/// are in that order: a row updated in place, HOT, keeps its place among them).
 fn heap_order(
     t: &Table,
     rows: &mut Vec<(Vec<u8>, bytes::Bytes)>,
+    roots: bool,
     ctx: &ExecCtx,
 ) -> Option<Vec<Option<u32>>> {
-    let tids = super::sizing::row_tids(t, rows, ctx)?;
+    let tids = if roots {
+        let keys: Vec<Vec<u8>> = rows.iter().map(|(k, _)| k.clone()).collect();
+        super::sizing::row_roots(t, &keys, ctx)?
+    } else {
+        super::sizing::row_tids(t, rows, ctx)?
+    };
     // (Rows the model doesn't place go last, in storage order: `None` sorts after every
     // TID, the index breaks ties.)
     let rank = |i: usize| (tids[i].is_none(), tids[i], i);
@@ -2086,7 +2094,7 @@ fn backward_order(s: &ScanPlan, key: &[u8], run: &mut Vec<(Vec<u8>, bytes::Bytes
             run.extend(order.into_iter().filter_map(|i| slots[i].take()));
         }
         None => {
-            let _ = heap_order(&s.table, run, ctx);
+            let _ = heap_order(&s.table, run, true, ctx);
             run.reverse();
         }
     }
@@ -2186,7 +2194,7 @@ impl ScanNode {
                     ctx.check()?;
                     rows.push(r);
                 }
-                if let Some(b) = heap_order(&self.plan.table, &mut rows, ctx) {
+                if let Some(b) = heap_order(&self.plan.table, &mut rows, false, ctx) {
                     self.blocks = b.into();
                 }
                 self.sorted = Some(rows.into_iter());
@@ -2232,7 +2240,7 @@ impl ScanNode {
             if self.rev {
                 backward_order(&self.plan, &prefix, &mut run, ctx);
             } else {
-                let _ = heap_order(&self.plan.table, &mut run, ctx);
+                let _ = heap_order(&self.plan.table, &mut run, true, ctx);
             }
         }
         if let Some(k) = &mut self.kills {
@@ -2749,7 +2757,7 @@ impl ScanNode {
                 rows.push(r?);
             }
             drop(txn);
-            heap_order(&p.table, &mut rows, ctx);
+            heap_order(&p.table, &mut rows, false, ctx);
             let per = rows.len().div_ceil(ParScan::chunks(workers)).max(1);
             let mut it = rows.into_iter().map(Ok);
             let mut out = Vec::new();
@@ -3531,7 +3539,7 @@ fn searched_rows(
             out.push((k, bytes));
         }
     }
-    let _ = heap_order(t, &mut out, ctx);
+    let _ = heap_order(t, &mut out, false, ctx);
     Ok(Some(out))
 }
 

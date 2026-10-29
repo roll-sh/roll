@@ -2044,6 +2044,14 @@ struct FunctionScanNode {
     one_field: Vec<bool>,
     ordinality: bool,
     n: i64,
+    /// Per call, its column definition list's domains (`SrfCall::domains`), checked on
+    /// every row it returns.
+    domains: Vec<Vec<Option<Arc<crate::sql::expr::DomainCoerce>>>>,
+    /// Per call, whether its rows are all made at the first fetch, as ExecMakeTableFunctionResult
+    /// fills its tuplestore: a function failing on a later row fails before any row goes
+    /// up (no row inserted, no row sent). Series and unnest, which can't fail midway, stream.
+    materialize: Vec<bool>,
+    started: bool,
 }
 
 impl FunctionScanNode {
@@ -2095,6 +2103,18 @@ impl FunctionScanNode {
                 .collect(),
             ordinality,
             n: 0,
+            materialize: calls
+                .iter()
+                .map(|c| c.body.is_some() || !matches!(&*c.func.name, "generate_series" | "unnest" | "generate_subscripts"))
+                .collect(),
+            started: false,
+            domains: calls
+                .iter()
+                .map(|c| {
+                    let mut b = crate::sql::binder::Binder::new(ctx, Vec::new());
+                    c.domains.iter().map(|d| d.map_or(Ok(None), |d| b.domain_coerce(d))).collect()
+                })
+                .collect::<Result<_>>()?,
         })
     }
 }
@@ -2102,22 +2122,33 @@ impl FunctionScanNode {
 impl Node for FunctionScanNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         ctx.check()?;
+        if !self.started {
+            self.started = true;
+            for ((((it, m), n), one), doms) in
+                self.iters.iter_mut().zip(&self.materialize).zip(&self.ncols).zip(&self.one_field).zip(&self.domains)
+            {
+                if *m && let Some(i) = it.take() {
+                    // (Shaped and checked against the domains here: a later row's failure
+                    // comes before the first row goes up.)
+                    let rows = i
+                        .map(|r| {
+                            let r = srf_columns(r?, *n, *one);
+                            check_domains(&r, doms, ctx)?;
+                            Ok(r)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    *it = Some(Box::new(rows.into_iter().map(Ok)));
+                }
+            }
+        }
         let mut any = false;
         let mut row = Vec::new();
-        for ((it, n), one) in self.iters.iter_mut().zip(&self.ncols).zip(&self.one_field) {
+        for (((it, n), one), doms) in self.iters.iter_mut().zip(&self.ncols).zip(&self.one_field).zip(&self.domains) {
             match it.as_mut().and_then(|i| i.next()) {
                 Some(r) => {
                     any = true;
-                    let mut r = r?;
-                    // A function returning a composite value (unnest of a row array): its
-                    // fields are the columns.
-                    if (*n > 1 || *one)
-                        && r.len() == 1
-                        && let Value::Record(f) = &r[0]
-                    {
-                        r = f.to_vec();
-                    }
-                    r.resize(*n, Value::Null);
+                    let r = srf_columns(r?, *n, *one);
+                    check_domains(&r, doms, ctx)?;
                     row.extend(r);
                 }
                 None => {
@@ -2135,6 +2166,29 @@ impl Node for FunctionScanNode {
         }
         Ok(Some(row))
     }
+}
+
+/// A function scan call's row as its `n` columns: a function returning a composite value
+/// (unnest of a row array) has its fields as the columns.
+fn srf_columns(mut r: Row, n: usize, one: bool) -> Row {
+    if (n > 1 || one)
+        && r.len() == 1
+        && let Value::Record(f) = &r[0]
+    {
+        r = f.to_vec();
+    }
+    r.resize(n, Value::Null);
+    r
+}
+
+/// A column definition list's domains checked over a call's row (`SrfCall::domains`).
+fn check_domains(r: &[Value], doms: &[Option<Arc<crate::sql::expr::DomainCoerce>>], ctx: &ExecCtx) -> Result<()> {
+    for (v, d) in r.iter().zip(doms) {
+        if let Some(d) = d {
+            d.check(v, ctx)?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether two grouping key values fall in one group (NULLs together).
