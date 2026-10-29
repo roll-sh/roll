@@ -330,6 +330,10 @@ impl Conn {
         if let Some(e) = info.nonempty("client_encoding") {
             params.push(("client_encoding", e.to_string()));
         }
+        // A walsender connection (`replication=database`, or `true` for physical).
+        if let Some(r) = info.nonempty("replication") {
+            params.push(("replication", r.to_string()));
+        }
         let mut buf = BytesMut::new();
         frontend::startup_message(params.iter().map(|(k, v)| (*k, v.as_str())), &mut buf).map_err(|e| e.to_string())?;
         self.send(&buf).map_err(|e| format!("{e}\n"))?;
@@ -791,7 +795,124 @@ impl Conn {
     pub fn parameter(&self, name: &str) -> Option<&str> {
         self.params.get(name).map(String::as_str)
     }
+
+    // ── COPY and the replication protocol (libpqwalreceiver) ──
+
+    /// The error text of the last failure, chomped (what libpqwalreceiver reports).
+    pub fn error_text(&self) -> String {
+        self.error_message.trim_end_matches('\n').to_string()
+    }
+
+    /// Send a command answered with CopyBothResponse (START_REPLICATION): Ok once the
+    /// stream is open; Err the server's error (or the connection's failure).
+    pub fn start_copy_both(&mut self, cmd: &str, intr: Interrupt) -> crate::Result<Result<(), String>> {
+        if let Err(e) = self.send_query(cmd) {
+            return Ok(Err(e.trim_end_matches('\n').to_string()));
+        }
+        loop {
+            // (postgres-protocol doesn't parse CopyBothResponse: taken off here.)
+            if self.rbuf.len() >= 5 && self.rbuf[0] == b'W' {
+                let len = u32::from_be_bytes([self.rbuf[1], self.rbuf[2], self.rbuf[3], self.rbuf[4]]) as usize;
+                if self.rbuf.len() > len {
+                    let _ = self.rbuf.split_to(1 + len);
+                    return Ok(Ok(()));
+                }
+            } else {
+                match backend::Message::parse(&mut self.rbuf) {
+                    Ok(Some(m)) => {
+                        self.process(m);
+                        if let Some(r) = self.results.pop_front() {
+                            // An error (or an unexpected result): read up to ReadyForQuery.
+                            while self.get_result(intr)?.is_some() {}
+                            let msg = r.error.map_or_else(|| "unexpected result from server".to_string(), |e| e.text());
+                            self.error_message = msg;
+                            return Ok(Err(self.error_text()));
+                        }
+                        if self.ready {
+                            self.busy = false;
+                            self.ready = false;
+                            return Ok(Err("unexpected end of the server's response".into()));
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.lost(e);
+                        return Ok(Err(self.error_text()));
+                    }
+                }
+            }
+            intr()?;
+            if let Err(e) = self.fill(Some(Duration::from_millis(100))) {
+                self.lost(e);
+                return Ok(Err(self.error_text()));
+            }
+        }
+    }
+
+    /// The next message of a COPY OUT / COPY BOTH stream, waiting up to `wait`: Some(Some
+    /// data), Some(None) at the server's CopyDone, None when nothing came. Err: the server's
+    /// error or the connection's failure.
+    pub fn copy_read(&mut self, wait: Duration) -> Result<Option<Option<bytes::Bytes>>, String> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match backend::Message::parse(&mut self.rbuf) {
+                Ok(Some(backend::Message::CopyData(d))) => return Ok(Some(Some(d.into_bytes()))),
+                Ok(Some(backend::Message::CopyDone)) => return Ok(Some(None)),
+                Ok(Some(backend::Message::ErrorResponse(e))) => {
+                    self.error_message = error_fields(e.fields()).text();
+                    return Err(self.error_text());
+                }
+                Ok(Some(m)) => {
+                    self.process(m);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.lost(e);
+                    return Err(self.error_text());
+                }
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            if let Err(e) = self.fill(Some(left.min(Duration::from_millis(100)))) {
+                self.lost(e);
+                return Err(self.error_text());
+            }
+        }
+    }
+
+    /// PQputCopyData on a COPY BOTH stream.
+    pub fn copy_send(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut buf = BytesMut::with_capacity(data.len() + 5);
+        buf.extend_from_slice(b"d");
+        buf.extend_from_slice(&((data.len() + 4) as u32).to_be_bytes());
+        buf.extend_from_slice(data);
+        self.send(&buf).map_err(|e| format!("could not send data to server: {e}"))
+    }
+
+    /// PQputCopyEnd: CopyDone.
+    pub fn copy_done(&mut self) -> Result<(), String> {
+        let mut buf = BytesMut::new();
+        frontend::copy_done(&mut buf);
+        self.send(&buf).map_err(|e| format!("could not send data to server: {e}"))
+    }
+
+    /// The results after a COPY OUT ended (its CommandComplete, up to ReadyForQuery): Err the
+    /// server's error.
+    pub fn copy_finish(&mut self, intr: Interrupt) -> crate::Result<Result<(), String>> {
+        let mut err = None;
+        while let Some(r) = self.get_result(intr)? {
+            if r.status == Status::FatalError {
+                err = Some(r.error.map_or_else(|| self.error_text(), |e| e.text().trim_end_matches('\n').to_string()));
+            }
+        }
+        Ok(err.map_or(Ok(()), Err))
+    }
 }
+
 
 impl Drop for Conn {
     /// PQfinish: a Terminate message, then the socket closes.

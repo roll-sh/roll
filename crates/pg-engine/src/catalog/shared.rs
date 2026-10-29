@@ -26,6 +26,16 @@ pub struct Tablespace {
     pub location: String,
 }
 
+/// A pg_subscription_rel row (a database's own catalog: the relation is that database's).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SubRel {
+    pub relid: u32,
+    /// srsubstate: 'i' init, 'd' data copy, 'f' finished copy, 's' synchronized, 'r' ready.
+    pub state: char,
+    /// srsublsn (0: NULL).
+    pub lsn: u64,
+}
+
 /// CREATE SUBSCRIPTION: a pg_subscription row (its database's, in the shared catalog).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Subscription {

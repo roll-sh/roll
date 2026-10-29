@@ -499,6 +499,7 @@ stored_fields! {
         event_triggers = 48 by_ptr,
         builtin_proc_owners = 49 by_value,
         comments = 50 by_ptr,
+        sub_rels = 51 by_value,
     ],
     sets: [
         opmembers_removed = 100,

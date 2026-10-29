@@ -4353,6 +4353,18 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                 }
             }
         }
+        PgSubscriptionRel => {
+            for (sub, rels) in &cat.sub_rels {
+                for r in rels.iter().filter(|r| cat.tables.contains_key(&r.relid)) {
+                    out.push(vec![
+                        o(*sub),
+                        o(r.relid),
+                        c(r.state),
+                        if r.lsn == 0 { N } else { Value::PgLsn(r.lsn) },
+                    ]);
+                }
+            }
+        }
         PgSubscription => {
             for x in cat.subscriptions.values() {
                 out.push(vec![

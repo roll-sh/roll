@@ -115,6 +115,10 @@ pub trait Cluster: Send + Sync {
     fn bootstrap_superuser(&self) -> String {
         "postgres".into()
     }
+    /// The logical replication apply workers (None: subscriptions never run).
+    fn logical_workers(&self) -> Option<Arc<crate::repl::apply::Workers>> {
+        None
+    }
 }
 
 /// A database's own options (pg_database's datistemplate, datallowconn, datconnlimit).

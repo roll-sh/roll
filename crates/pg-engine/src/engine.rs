@@ -261,6 +261,8 @@ pub struct Engine {
     conf: crate::sysconf::ServerConfig,
     /// The parameters the command line set (source "command line").
     argv: Vec<(String, String)>,
+    /// Logical replication apply workers and their launcher.
+    workers: Arc<crate::repl::apply::Workers>,
 }
 
 const REGISTRY_FILE: &str = "databases.json";
@@ -492,6 +494,7 @@ impl Engine {
                 listen: std::sync::OnceLock::new(),
                 conf,
                 argv,
+                workers: Arc::default(),
             }
         });
         engine.init_shared()?;
@@ -525,7 +528,27 @@ impl Engine {
                 }
             })
             .map_err(|e| internal(format!("spawn idle thread: {e}")))?;
+        engine
+            .workers
+            .start_launcher(&engine)
+            .map_err(|e| internal(format!("spawn logical replication launcher: {e}")))?;
         Ok(engine)
+    }
+
+    /// Every database's subscriptions, as committed.
+    pub fn subscriptions(&self) -> Vec<crate::catalog::Subscription> {
+        let shared = self.registry.lock().shared.clone();
+        shared.map(|s| s.subscriptions.values().cloned().collect()).unwrap_or_default()
+    }
+
+    /// The server is shutting down.
+    pub fn is_stopping(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    /// WAL positions, slots and origins.
+    pub fn repl_state(&self) -> Option<Arc<crate::repl::Repl>> {
+        Some(self.repl.clone())
     }
 
     pub fn options(&self) -> &EngineOptions {
@@ -1531,6 +1554,8 @@ impl Engine {
     /// Flush and close everything (server shutdown).
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
+        // (Apply workers hold sessions: they end before the databases close.)
+        self.workers.shutdown();
         self.repl.slots.flush();
         for b in self.backends.lock().values() {
             Self::terminate(b);
@@ -1729,6 +1754,10 @@ impl Cluster for Engine {
 
     fn bootstrap_superuser(&self) -> String {
         self.opts.superuser.clone()
+    }
+
+    fn logical_workers(&self) -> Option<Arc<crate::repl::apply::Workers>> {
+        Some(self.workers.clone())
     }
 
     fn statements(&self) -> Option<&crate::ext::pg_stat_statements::Store> {

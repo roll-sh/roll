@@ -1,11 +1,13 @@
-//! Subscriptions (subscriptioncmds.c): CREATE / ALTER / DROP SUBSCRIPTION. No connection to
-//! a publisher is ever made: a subscription can be created and altered with `connect =
-//! false` (or without a slot), and what would need the publisher fails as it does when the
-//! publisher can't be reached.
+//! Subscriptions (subscriptioncmds.c): CREATE / ALTER / DROP SUBSCRIPTION. What needs the
+//! publisher (checking publications, listing its tables, creating, altering and dropping
+//! the slot) connects to it with `replication=database` (`repl::walrcv`), through the
+//! outbound allow-list; the apply workers (`repl::apply`) do the replicating.
 
 use super::Ddl;
-use crate::catalog::Subscription;
 use crate::catalog::acl;
+use crate::catalog::{SubRel, Subscription};
+use crate::remote::conn::Conn;
+use crate::repl::walrcv::{self, Fail};
 use crate::error::{Error, Result, code};
 use crate::sql::binder::ast::{def_arg_str, inner, with_pos};
 use pg_query::NodeEnum;
@@ -158,15 +160,23 @@ fn check_conninfo(s: &str, must_use_password: bool) -> Result<Vec<(String, Strin
     Ok(opts)
 }
 
-/// walrcv_connect's failure: libpq's error for the options (the publisher is never
-/// reached).
-fn connect_error(opts: &[(String, String)]) -> String {
-    if let Some((_, p)) = opts.iter().rev().find(|(k, _)| k == "port")
-        && !p.parse::<u16>().is_ok_and(|n| n > 0)
-    {
-        return format!("invalid port number: \"{p}\"");
+/// A failure at the publisher as an error with `code` (an interrupt as itself).
+fn failed(e: Fail, code: &'static str) -> Error {
+    match e {
+        Fail::Interrupt(e) => e,
+        Fail::Remote { msg, .. } => Error::new(code, msg),
     }
-    "connecting to a publisher is not supported".into()
+}
+
+/// check_publications' warning: the publications the publisher doesn't have.
+fn missing_publications_warning(missing: &[String]) -> Error {
+    let list = walrcv::publications_str(missing, false);
+    let msg = if missing.len() == 1 {
+        format!("publication {list} does not exist on the publisher")
+    } else {
+        format!("publications {list} do not exist on the publisher")
+    };
+    crate::session::warning(code::UNDEFINED_OBJECT, msg)
 }
 
 /// The options a statement gives (parse_subscription_options).
@@ -423,6 +433,94 @@ fn superuser_only() -> Error {
 }
 
 impl Ddl<'_, '_> {
+    /// walrcv_connect to subscription `name`'s publisher; the error is libpq's message.
+    fn publisher(&self, conninfo: &str, name: &str) -> std::result::Result<Conn, String> {
+        walrcv::connect(conninfo, name, &crate::remote::env(self.ctx.sess))
+    }
+
+    /// The local table a published `nsp.rel` replicates into (RangeVarGetRelid and
+    /// CheckSubscriptionRelkind).
+    fn subscription_target(&self, nsp: &str, rel: &str) -> Result<u32> {
+        match self.cat.lookup(Some(nsp), rel, &[])? {
+            Some(crate::catalog::Relation::Table(t)) => Ok(t.oid),
+            Some(r) => {
+                let what = match r {
+                    crate::catalog::Relation::Sequence(_) => "sequences",
+                    crate::catalog::Relation::Index(_) => "indexes",
+                    _ => "views",
+                };
+                Err(Error::new(
+                    code::WRONG_OBJECT_TYPE,
+                    format!("cannot use relation \"{nsp}.{rel}\" as logical replication target"),
+                )
+                .detail(format!("This operation is not supported for {what}.")))
+            }
+            None => Err(Error::new(code::UNDEFINED_TABLE, format!("relation \"{nsp}.{rel}\" does not exist"))),
+        }
+    }
+
+    /// The published tables as pg_subscription_rel rows in `state`, checking `validate`'s
+    /// publications exist there first.
+    fn published_rels(&self, c: &mut Conn, x_pubs: &[String], validate: &[String], state: char) -> Result<Vec<SubRel>> {
+        let intr = crate::remote::interrupts(self.ctx);
+        if !validate.is_empty() {
+            let missing = walrcv::missing_publications(c, validate, &intr).map_err(|e| failed(e, CONNECTION_FAILURE))?;
+            if !missing.is_empty() {
+                self.ctx.notice(missing_publications_warning(&missing));
+            }
+        }
+        let mut out: Vec<SubRel> = Vec::new();
+        for (nsp, rel) in walrcv::fetch_table_list(c, x_pubs, &intr).map_err(|e| failed(e, CONNECTION_FAILURE))? {
+            let relid = self.subscription_target(&nsp, &rel)?;
+            if !out.iter().any(|r| r.relid == relid) {
+                out.push(SubRel { relid, state, lsn: 0 });
+            }
+        }
+        Ok(out)
+    }
+
+    /// AlterSubscription_refresh: tables the publications have now are added (to be copied
+    /// unless `copy_data` is off), those they don't any more removed.
+    fn refresh_subscription(&mut self, x: &Subscription, copy_data: bool, validate: &[String]) -> Result<()> {
+        let mut c = self.publisher(&x.conninfo, &x.name).map_err(|m| {
+            Error::new(CONNECTION_FAILURE, format!("subscription \"{}\" could not connect to the publisher: {m}", x.name))
+        })?;
+        let now = self.published_rels(&mut c, &x.publications, validate, if copy_data { 'i' } else { 'r' })?;
+        let mut rels = self.cat.sub_rels.get(&x.oid).cloned().unwrap_or_default();
+        rels.retain(|r| now.iter().any(|n| n.relid == r.relid));
+        for n in now {
+            if !rels.iter().any(|r| r.relid == n.relid) {
+                rels.push(n);
+            }
+        }
+        self.cat.sub_rels.insert(x.oid, rels);
+        Ok(())
+    }
+
+    /// walrcv_alter_slot (ALTER SUBSCRIPTION ... SET (failover / two_phase)).
+    fn alter_subscription_slot(&self, x: &Subscription, failover: Option<bool>, two_phase: Option<bool>) -> Result<()> {
+        let slot = x.slot_name.clone().unwrap_or_default();
+        let mut c = self.publisher(&x.conninfo, &x.name).map_err(|m| {
+            Error::new(CONNECTION_FAILURE, format!("subscription \"{}\" could not connect to the publisher: {m}", x.name))
+        })?;
+        let mut opts = Vec::new();
+        if let Some(f) = failover {
+            opts.push(format!("FAILOVER {f}"));
+        }
+        if let Some(t) = two_phase {
+            opts.push(format!("TWO_PHASE {t}"));
+        }
+        let cmd = format!("ALTER_REPLICATION_SLOT {} ( {} );", crate::catalog::quote_ident(&slot), opts.join(", "));
+        let intr = crate::remote::interrupts(self.ctx);
+        walrcv::exec(&mut c, &cmd, &intr).map_err(|e| match e {
+            Fail::Remote { msg, .. } => {
+                Error::new(code::PROTOCOL_VIOLATION, format!("could not alter replication slot \"{slot}\": {msg}"))
+            }
+            Fail::Interrupt(e) => e,
+        })?;
+        Ok(())
+    }
+
     fn database_oid(&self) -> u32 {
         let db = &self.ctx.sess.database;
         self.ctx
@@ -506,19 +604,35 @@ impl Ddl<'_, '_> {
             None => Some(s.subname.clone()),
         };
         let synccommit = o.synchronous_commit.clone().unwrap_or_else(|| "off".into());
-        let conn = check_conninfo(&s.conninfo, o.password_required && !superuser)?;
+        check_conninfo(&s.conninfo, o.password_required && !superuser)?;
         let publications = publication_names(&s.publication)?;
+        let mut rels = Vec::new();
+        let mut twophase = if o.two_phase { 'p' } else { 'd' };
         if o.connect {
-            return Err(Error::new(
-                CONNECTION_FAILURE,
-                format!(
-                    "subscription \"{}\" could not connect to the publisher: {}",
-                    s.subname,
-                    connect_error(&conn)
-                ),
-            ));
+            let mut c = self.publisher(&s.conninfo, &s.subname).map_err(|m| {
+                Error::new(
+                    CONNECTION_FAILURE,
+                    format!("subscription \"{}\" could not connect to the publisher: {m}", s.subname),
+                )
+            })?;
+            rels = self.published_rels(&mut c, &publications, &publications, if o.copy_data { 'i' } else { 'r' })?;
+            if o.create_slot {
+                let slot = slot_name.clone().unwrap_or_default();
+                // (two_phase is enabled once every table is ready: now, when none is copied.)
+                let two = o.two_phase && !o.copy_data && !rels.is_empty();
+                let intr = crate::remote::interrupts(self.ctx);
+                walrcv::create_slot(&mut c, &slot, false, two, o.failover, "nothing", &intr)
+                    .map_err(|e| failed(e, code::PROTOCOL_VIOLATION))?;
+                if two {
+                    twophase = 'e';
+                }
+                self.notice(format!("created replication slot \"{slot}\" on publisher"));
+            }
         }
         let oid = self.cat.alloc_oid();
+        if !rels.is_empty() {
+            self.cat.sub_rels.insert(oid, rels);
+        }
         self.cat.subscriptions.insert(
             oid,
             Subscription {
@@ -530,7 +644,7 @@ impl Ddl<'_, '_> {
                 enabled: o.enabled,
                 binary: o.binary,
                 stream: o.streaming,
-                twophase: if o.two_phase { 'p' } else { 'd' },
+                twophase,
                 disable_on_err: o.disable_on_error,
                 password_required: o.password_required,
                 run_as_owner: o.run_as_owner,
@@ -543,10 +657,21 @@ impl Ddl<'_, '_> {
             },
         );
         self.save()?;
-        self.ctx.notice(
-            crate::session::warning(code::WARNING, "subscription was created, but is not connected")
-                .hint("To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription."),
-        );
+        // The subscription's replication origin, its progress starting over.
+        if let Some(r) = self.ctx.sess.db.repl() {
+            let name = format!("pg_{oid}");
+            let _ = r.origins.drop_origin(&name, true);
+            r.origins.create(&name)?;
+        }
+        if let Some(w) = self.ctx.sess.cluster.logical_workers() {
+            w.wake();
+        }
+        if !o.connect {
+            self.ctx.notice(
+                crate::session::warning(code::WARNING, "subscription was created, but is not connected")
+                    .hint("To initiate replication, you must manually create the replication slot, enable the subscription, and refresh the subscription."),
+            );
+        }
         Ok("CREATE SUBSCRIPTION".into())
     }
 
@@ -573,7 +698,8 @@ impl Ddl<'_, '_> {
             )
             .hint(format!("Use {what} instead."))
         };
-        let mut connect = false;
+        let mut refresh: Option<(bool, Vec<String>)> = None;
+        let mut alter_slot: (Option<bool>, Option<bool>) = (None, None);
         match K::try_from(s.kind).unwrap_or(K::Undefined) {
             K::AlterSubscriptionOptions => {
                 let o = parse_options(
@@ -631,12 +757,14 @@ impl Ddl<'_, '_> {
                         ));
                     }
                     x.twophase = if o.two_phase { 'p' } else { 'd' };
-                    connect |= update;
+                    if update {
+                        alter_slot.1 = Some(false);
+                    }
                 }
                 if o.given("failover") {
                     self.check_alter_sub_option(&x, "failover", true)?;
                     x.failover = o.failover;
-                    connect = true;
+                    alter_slot.0 = Some(o.failover);
                 }
                 if o.given("origin") {
                     x.origin = o.origin.clone();
@@ -668,7 +796,7 @@ impl Ddl<'_, '_> {
                     }
                     self.two_phase_copy(&x, o.copy_data, "ALTER SUBSCRIPTION ... SET PUBLICATION with refresh = false, or with copy_data = false, or use DROP/CREATE SUBSCRIPTION.")?;
                     super::prevent_in_block("ALTER SUBSCRIPTION with refresh")?;
-                    connect = true;
+                    refresh = Some((o.copy_data, x.publications.clone()));
                 }
             }
             k @ (K::AlterSubscriptionAddPublication | K::AlterSubscriptionDropPublication) => {
@@ -685,7 +813,7 @@ impl Ddl<'_, '_> {
                     }
                     self.two_phase_copy(&x, o.copy_data, "ALTER SUBSCRIPTION ... SET PUBLICATION with refresh = false, or with copy_data = false, or use DROP/CREATE SUBSCRIPTION.")?;
                     super::prevent_in_block("ALTER SUBSCRIPTION with refresh")?;
-                    connect = true;
+                    refresh = Some((o.copy_data, if add { publication_names(&s.publication)? } else { Vec::new() }));
                 }
             }
             K::AlterSubscriptionRefresh => {
@@ -698,7 +826,7 @@ impl Ddl<'_, '_> {
                 let o = parse_options(&s.options, &["copy_data"])?;
                 self.two_phase_copy(&x, o.copy_data, "Use ALTER SUBSCRIPTION ... REFRESH with copy_data = false, or use DROP/CREATE SUBSCRIPTION.")?;
                 super::prevent_in_block("ALTER SUBSCRIPTION ... REFRESH")?;
-                connect = true;
+                refresh = Some((o.copy_data, Vec::new()));
             }
             K::AlterSubscriptionSkip => {
                 let o = parse_options(&s.options, &["lsn"])?;
@@ -706,19 +834,17 @@ impl Ddl<'_, '_> {
             }
             K::Undefined => {}
         }
-        if connect {
-            let opts = parse_conninfo(&x.conninfo).unwrap_or_default();
-            return Err(Error::new(
-                CONNECTION_FAILURE,
-                format!(
-                    "subscription \"{}\" could not connect to the publisher: {}",
-                    x.name,
-                    connect_error(&opts)
-                ),
-            ));
+        if alter_slot != (None, None) {
+            self.alter_subscription_slot(&x, alter_slot.0, alter_slot.1)?;
+        }
+        if let Some((copy_data, validate)) = &refresh {
+            self.refresh_subscription(&x, *copy_data, validate)?;
         }
         self.cat.subscriptions.insert(x.oid, x);
         self.save()?;
+        if let Some(w) = self.ctx.sess.cluster.logical_workers() {
+            w.wake();
+        }
         Ok(TAG.into())
     }
 
@@ -817,22 +943,54 @@ impl Ddl<'_, '_> {
             Err(e) => return Err(e),
         };
         self.require_owner(x.owner, "subscription", &x.name)?;
-        if let Some(slot) = &x.slot_name {
+        if x.slot_name.is_some() {
             super::prevent_in_block("DROP SUBSCRIPTION")?;
-            let opts = parse_conninfo(&x.conninfo).unwrap_or_default();
-            return Err(Error::new(
-                CONNECTION_FAILURE,
-                format!(
-                    "could not connect to publisher when attempting to drop replication slot \"{slot}\": {}",
-                    connect_error(&opts)
-                ),
-            )
-            .hint("Use ALTER SUBSCRIPTION ... DISABLE to disable the subscription, and then use ALTER SUBSCRIPTION ... SET (slot_name = NONE) to disassociate it from the slot."));
+        }
+        // logicalrep_worker_stop: the worker ends first (it holds the slot and the origin).
+        let workers = self.ctx.sess.cluster.logical_workers();
+        if let Some(w) = &workers {
+            w.stop(x.oid, true);
+        }
+        if let Some(slot) = &x.slot_name {
+            let r = self.drop_remote_slot(&x, slot);
+            if r.is_err()
+                && let Some(w) = &workers
+            {
+                w.release(x.oid);
+            }
+            r?;
+        }
+        if let Some(r) = self.ctx.sess.db.repl() {
+            let _ = r.origins.drop_origin(&format!("pg_{}", x.oid), true);
         }
         self.cat.subscriptions.remove(&x.oid);
+        self.cat.sub_rels.remove(&x.oid);
         self.cat.drop_comments(x.oid);
         self.save()?;
         Ok(TAG.into())
+    }
+
+    /// ReplicationSlotDropAtPubNode for DROP SUBSCRIPTION.
+    fn drop_remote_slot(&self, x: &Subscription, slot: &str) -> Result<()> {
+        let mut c = self.publisher(&x.conninfo, &x.name).map_err(|m| {
+            Error::new(
+                CONNECTION_FAILURE,
+                format!("could not connect to publisher when attempting to drop replication slot \"{slot}\": {m}"),
+            )
+            .hint("Use ALTER SUBSCRIPTION ... DISABLE to disable the subscription, and then use ALTER SUBSCRIPTION ... SET (slot_name = NONE) to disassociate it from the slot.")
+        })?;
+        let intr = crate::remote::interrupts(self.ctx);
+        match walrcv::drop_slot(&mut c, slot, &intr) {
+            Ok(()) => {
+                self.notice(format!("dropped replication slot \"{slot}\" on publisher"));
+                Ok(())
+            }
+            Err(Fail::Interrupt(e)) => Err(e),
+            Err(Fail::Remote { msg, .. }) => Err(Error::new(
+                CONNECTION_FAILURE,
+                format!("could not drop replication slot \"{slot}\" on publisher: {msg}"),
+            )),
+        }
     }
 
     /// ALTER SUBSCRIPTION ... RENAME TO (AlterObjectRename_internal).

@@ -593,6 +593,34 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     pinned to 4 CPUs, 6 rounds of base ea038e8e and head interleaved) on a machine at load 40-60:
     insert medians 13.4k / 13.3k tps, update_indexed 7.3k / 6.9k, within the rounds' own spread
     (11-15k, 5-9k); re-measure on a quiet machine for anything finer.
+  - **Subscriber** (round 20, agent 79's helper, landed by agent 87; `repl/walrcv.rs`,
+    `repl/apply.rs`, `session/ddl/subscription.rs`): CREATE / ALTER / DROP SUBSCRIPTION
+    against a PostgreSQL publisher (slot created and dropped there, `--allow-outbound` must
+    allow it), pg_subscription_rel states, a launcher and an apply worker thread per enabled
+    subscription. Table sync copies each table under a temporary slot's snapshot, then the
+    pgoutput stream is applied one local transaction per remote one, the subscription's
+    origin (`pg_<subid>`) committed with it, so a restart resumes after the last local commit.
+    Apply runs SQL statements as the subscription owner (REPLICA IDENTITY FULL / NOTHING rows
+    by `ctid = (first match) AND <all columns>`); conflicts are logged as PostgreSQL 18 logs
+    them. The launcher looks every 0.5 s while the cluster has subscriptions (or for 10 s after
+    subscription DDL woke it) and sleeps otherwise: no periodic work without subscriptions.
+    Verified (agent 87, debug build, PostgreSQL 18.6 publisher): initial copy of three tables
+    (PK, REPLICA IDENTITY FULL, unique), then 10,000 small transactions plus PK updates,
+    TRUNCATE and FULL-identity updates, both sides identical (row counts, sums, md5 of every
+    row), no conflicts; a restart resumes; regress subset (subscription, publication, ...)
+    unchanged. Open:
+    - **Duplicate ctids after a crash** (engine bug, not replication: reproduced at ea038e8e
+      with plain SQL): kill -9 during a stream of `BEGIN; INSERT ...; UPDATE t SET id = k, v
+      = ..., n = ... WHERE id = k; COMMIT` transactions, restart, run 1,000 more: `SELECT
+      count(*), count(DISTINCT ctid)` gives 5,000 / 4,759. The heap model rebuilt at the
+      restart (`sizing`, `heapsim::rewritten`, `row_tids` / `locate`) hands out positions
+      other rows hold. A subscriber's FULL-identity UPDATEs by ctid then changed the wrong rows
+      after a crash (the `AND <all columns>` recheck doesn't stop it: the row a ctid reads and
+      the row it writes differ).
+    - Apply speed: statements as SQL text, about 13 remote transactions a second in a loaded
+      debug build; apply rows natively (as the executor's DML does) to beat PostgreSQL here.
+    - Streaming of in-progress transactions (streaming = on / parallel), two_phase,
+      disable_on_error, run_as_owner details, the copy's parallel table sync workers.
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages

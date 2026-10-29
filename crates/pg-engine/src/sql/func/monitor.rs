@@ -86,6 +86,39 @@ fn no_rows(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
     Ok(Box::new(std::iter::empty()))
 }
 
+/// pg_stat_get_subscription(subid): the running apply and table synchronization workers
+/// (of every subscription when NULL).
+fn subscription(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let Some(w) = c.exec.sess.cluster.logical_workers() else {
+        return no_rows(a, c);
+    };
+    let want = match a.first() {
+        Some(Value::Oid(o)) => Some(*o),
+        _ => None,
+    };
+    let lsn = |l: u64| if l == 0 { Value::Null } else { Value::PgLsn(l) };
+    let ts = |t: Option<i64>| t.map_or(Value::Null, Value::Timestamptz);
+    let mut v: Vec<_> = w.stats().into_iter().filter(|s| want.is_none_or(|o| o == s.subid)).collect();
+    v.sort_by_key(|s| (s.subid, s.relid));
+    rows(v
+        .into_iter()
+        .map(|s| {
+            vec![
+                Value::Oid(s.subid),
+                s.relid.map_or(Value::Null, Value::Oid),
+                Value::Int4(s.pid),
+                Value::Null,
+                lsn(s.received_lsn),
+                ts(s.last_send),
+                ts(s.last_receipt),
+                lsn(s.latest_end_lsn),
+                ts(s.latest_end_time),
+                Value::Text(s.worker_type.into()),
+            ]
+        })
+        .collect())
+}
+
 fn rows(v: Vec<Vec<Value>>) -> Result<SrfIter> {
     Ok(Box::new(v.into_iter().map(Ok)))
 }
@@ -990,7 +1023,7 @@ pub fn register(r: &mut Registry) {
     r.from_pg(6214, None, Some(io));
     r.from_pg(6386, None, Some(backend_io));
     r.from_pg(3318, None, Some(super::system::pg_stat_get_progress_info));
-    r.from_pg(6118, None, Some(no_rows));
+    r.from_pg(6118, None, Some(subscription));
     let backend: [(&str, FnImpl); 11] = [
         ("dbid", backend_dbid),
         ("pid", backend_pid),

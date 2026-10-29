@@ -38,7 +38,7 @@ use crate::error::{Error, Result, code};
 use crate::types::{DataType, Value};
 use crate::{bail, err};
 pub use partition::{PartBound, PartKey, PartKeyCol, PartStrategy, RangeDatum};
-pub use shared::{Subscription, Tablespace};
+pub use shared::{SubRel, Subscription, Tablespace};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -1950,6 +1950,10 @@ pub struct Catalog {
     /// TO); the others are the bootstrap superuser's.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub builtin_proc_owners: BTreeMap<u32, u32>,
+    /// pg_subscription_rel: the relations of each subscription (by oid) of this database,
+    /// and their synchronization states.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sub_rels: BTreeMap<u32, Vec<shared::SubRel>>,
     /// Tables whose triggers were all dropped: pg_class.relhastriggers stays set until
     /// VACUUM clears it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]

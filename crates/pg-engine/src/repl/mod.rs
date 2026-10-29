@@ -12,6 +12,7 @@
 //! - `sqlfn`: the SQL interface (slot functions, pg_logical_slot_get_changes, ...).
 //! - `walsender`: the replication protocol (`replication=database` connections).
 
+pub mod apply;
 pub mod cmd;
 pub mod decode;
 pub mod log;
@@ -22,6 +23,7 @@ pub mod plugin;
 pub mod slot;
 pub mod sqlfn;
 pub mod test_decoding;
+pub mod walrcv;
 pub mod walsender;
 
 use crate::error::{Error, Result, code};
