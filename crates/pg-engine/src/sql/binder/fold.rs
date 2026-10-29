@@ -222,7 +222,7 @@ impl Cx<'_, '_> {
             })
             .collect::<Vec<_>>();
         let cx = Cx { ctx: self.ctx, pending: self.pending, outer };
-        if exists { cx.exists_plan(&s.plan) } else { cx.plan(&s.plan) }
+        crate::stack::grow(|| if exists { cx.exists_plan(&s.plan) } else { cx.plan(&s.plan) })
     }
 
     /// A call over constants and outer references that stand for constants: folded with
@@ -374,7 +374,7 @@ fn push_candidates(e: &Expr, out: &mut Vec<Expr>) {
             && !s.call.as_ref().is_some_and(|c| !c.inline)
         {
             let read = s.kind != SubqueryKind::Exists || !exists_simplified(&s.plan);
-            candidates_go(&s.plan, &vec![read; crate::sql::binder::plan_width(&s.plan)], out);
+            crate::stack::grow(|| candidates_go(&s.plan, &vec![read; crate::sql::binder::plan_width(&s.plan)], out));
         }
     });
 }
@@ -424,41 +424,86 @@ fn exprs(p: &Plan) -> Vec<&Expr> {
 /// arguments are constants: an expression a pulled-up subquery's constant output was put
 /// into after binding, which eval_const_expressions folds whole.
 fn unfolded(e: &Expr) -> bool {
-    fn tree(e: &Expr) -> bool {
-        match e {
-            Expr::Const(..) => true,
-            Expr::Call(d, args, _) => d.volatility == 'i' && !d.is_srf() && args.iter().all(tree),
-            Expr::Cast(a, ..) => tree(a) && e.is_immutable(),
-            _ => false,
-        }
+    // (Bounded: it runs at every node of an expression; constant trees are small.)
+    fn tree(e: &Expr, depth: usize) -> bool {
+        depth < 64
+            && match e {
+                Expr::Const(..) => true,
+                Expr::Call(d, args, _) => d.volatility == 'i' && !d.is_srf() && args.iter().all(|a| tree(a, depth + 1)),
+                Expr::Cast(a, ..) => tree(a, depth + 1) && e.is_immutable(),
+                _ => false,
+            }
     }
     match e {
-        Expr::Call(_, args, _) => !args.iter().all(Expr::is_const) && tree(e),
-        Expr::Cast(a, ..) => !a.is_const() && tree(e),
+        Expr::Call(_, args, _) => !args.iter().all(Expr::is_const) && tree(e, 0),
+        Expr::Cast(a, ..) => !a.is_const() && tree(e, 0),
         _ => false,
     }
+}
+
+/// Whether `e` is a tree of immutable calls and casts over constants, in one pass from the
+/// leaves; `found` set at an `unfolded` one (or, `subs`, at a sub-select reading a constant
+/// for an outer reference), where the scan stops.
+fn const_tree(e: &Expr, found: &mut bool, subs: bool) -> bool {
+    crate::stack::grow(|| {
+        if *found {
+            return false;
+        }
+        match e {
+            Expr::Const(..) => true,
+            Expr::Call(d, args, _) => {
+                let (mut tree, mut consts) = (true, true);
+                for a in args {
+                    tree &= const_tree(a, found, subs);
+                    consts &= a.is_const();
+                    if *found && subs {
+                        return false;
+                    }
+                }
+                let tree = tree && d.volatility == 'i' && !d.is_srf();
+                *found |= tree && !consts;
+                tree
+            }
+            Expr::Cast(a, ..) => {
+                // (Only a constant tree below is checked whole: those are small.)
+                let tree = const_tree(a, found, subs) && e.is_immutable();
+                *found |= tree && !a.is_const();
+                tree
+            }
+            _ => {
+                if subs
+                    && let Expr::Subquery(s) = e
+                    && (s.params.iter().any(Expr::is_const) || const_params(&s.plan))
+                {
+                    *found = true;
+                    return false;
+                }
+                for c in e.children() {
+                    const_tree(c, found, subs);
+                    if *found && subs {
+                        return false;
+                    }
+                }
+                false
+            }
+        }
+    })
 }
 
 /// Whether planning `p` may fold what binding couldn't: a sub-select reading a constant its
 /// level put in place of an outer reference (`Cx::fold_outer`), or a tree of constants put
 /// together after binding (`unfolded`).
 pub(crate) fn const_params(p: &Plan) -> bool {
-    let mut found = false;
-    for e in exprs(p) {
-        e.walk(&mut |x| {
+    crate::stack::grow(|| {
+        let mut found = false;
+        for e in exprs(p) {
+            const_tree(e, &mut found, true);
             if found {
-                return;
+                return true;
             }
-            found = match x {
-                Expr::Subquery(s) => s.params.iter().any(Expr::is_const) || const_params(&s.plan),
-                x => unfolded(x),
-            };
-        });
-        if found {
-            return true;
         }
-    }
-    crate::sql::explain::plan_inputs(p).into_iter().any(|c| const_params(c))
+        crate::sql::explain::plan_inputs(p).into_iter().any(|c| const_params(c))
+    })
 }
 
 /// The error a planned statement fails with: the first constant expression still in its

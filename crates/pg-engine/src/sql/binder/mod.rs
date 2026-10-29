@@ -1727,8 +1727,11 @@ impl<'b, 'a> Binder<'b, 'a> {
                     _ => None,
                 };
             }
-            // (NULLIF has its first argument's type.)
-            Expr::NullIf(a, ..) => return self.declared_domain_at(a, depth),
+            // (NULLIF has its first argument's type as the `=` takes it: a domain over a
+            // scalar becomes its base type, an array of a domain passed for anyarray stays.)
+            Expr::NullIf(a, _, d, _) if d.args.first().is_some_and(DataType::is_polymorphic) => {
+                return self.declared_domain_at(a, depth);
+            }
             Expr::Coalesce(args, _) | Expr::MinMax(args, ..) => {
                 return common(&mut args.iter());
             }

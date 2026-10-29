@@ -1256,7 +1256,7 @@ fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                 (true, false) | (false, true) => true,
                 _ => {
                     let aty = a.ty();
-                    let r = if matches!(aty, DataType::Row(_)) {
+                    let r = if matches!(&aty, DataType::Row(rt) if rt.oid == 0) {
                         crate::sql::func::call2_typed(eq, x, y, &aty, &b.ty(), ctx)?
                     } else {
                         crate::sql::func::call2(eq, x, y, &aty, ctx)?
@@ -1339,10 +1339,10 @@ fn eval_here(e: &Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
                 return Ok(Value::Null);
             }
             let mut saw_null = false;
-            // (The left side's type once; an item's own only for records, whose fields'
+            // (The left side's type once; an item's own only for anonymous records, whose fields'
             // collations the comparison checks.)
             let ety = e.ty();
-            let rows = matches!(ety, DataType::Row(_));
+            let rows = matches!(&ety, DataType::Row(rt) if rt.oid == 0);
             for (item, eq) in list {
                 let y = eval(item, row, ctx)?;
                 if y.is_null() {

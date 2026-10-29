@@ -43,8 +43,8 @@ cmp_fns! {
 
 /// record_cmp / record_eq's checks of the two row types, column by column: the same
 /// types, the same number of columns, and a comparison (`ordering`) or equality for each.
-fn check_record_types(c: &FnCtx, ordering: bool) -> Result<()> {
-    let (T::Row(l), T::Row(r)) = (c.arg_type(0), c.arg_type(1)) else {
+fn check_record_types(lt: &T, rt: &T, c: &FnCtx, ordering: bool) -> Result<()> {
+    let (T::Row(l), T::Row(r)) = (lt, rt) else {
         return Ok(());
     };
     if l.fields.is_empty() || r.fields.is_empty() {
@@ -92,8 +92,8 @@ fn check_record_types(c: &FnCtx, ordering: bool) -> Result<()> {
 /// comparing two values of it fails as a string comparison without a collation does. The
 /// fields are compared in order, so the comparison fails only on reaching such a field with
 /// two values.
-fn check_record_collations(a: &Value, b: &Value, c: &FnCtx) -> Result<()> {
-    let (T::Row(l), T::Row(r), Value::Record(x), Value::Record(y)) = (c.arg_type(0), c.arg_type(1), a, b) else {
+fn check_record_collations(lt: &T, rt: &T, a: &Value, b: &Value, c: &FnCtx) -> Result<()> {
+    let (T::Row(l), T::Row(r), Value::Record(x), Value::Record(y)) = (lt, rt, a, b) else {
         return Ok(());
     };
     // (`colls` isn't part of a row type's equality.)
@@ -139,8 +139,9 @@ fn check_record_collations(a: &Value, b: &Value, c: &FnCtx) -> Result<()> {
 macro_rules! record_cmp_fns {
     ($($name:ident => ($ordering:expr, $test:expr)),* $(,)?) => {
         $(fn $name(a: &[Value], c: &FnCtx) -> Result<Value> {
-            check_record_types(c, $ordering)?;
-            check_record_collations(&a[0], &a[1], c)?;
+            let (lt, rt) = (c.arg_type(0), c.arg_type(1));
+            check_record_types(&lt, &rt, c, $ordering)?;
+            check_record_collations(&lt, &rt, &a[0], &a[1], c)?;
             let o = cmp_in(&a[0], &a[1], c);
             Ok(Value::Bool($test(o)))
         })*

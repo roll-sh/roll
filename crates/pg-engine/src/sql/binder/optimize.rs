@@ -321,6 +321,14 @@ fn order_security_quals(cat: &Catalog, first: Vec<Expr>, rest: Vec<Expr>) -> Vec
 /// which collapses into the implicit one an operator applies to its base type (the
 /// operand is the value itself, `relname = 'x'::name`).
 fn strip_free_domains(e: Expr) -> Expr {
+    // (Nothing to do without a domain coercion: no rebuilt tree. Past the statement's stack
+    // budget the next guard raises the depth error; this walk, which can't fail, leaves the
+    // qual as it is.)
+    let mut domains = false;
+    e.walk(&mut |x| domains |= matches!(x, Expr::CoerceToDomain(..)));
+    if !domains || crate::stack::check().is_err() {
+        return e;
+    }
     let free = |d: &crate::sql::expr::DomainCoerce| {
         !d.tag && !d.array && !d.not_null && d.checks.is_empty() && d.base.is_none()
     };
