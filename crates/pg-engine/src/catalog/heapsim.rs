@@ -85,6 +85,20 @@ impl<'a> Vis<'a> {
         {
             return s;
         }
+        // Ended transactions stay ended: a thread's last answers are kept (direct mapped by
+        // xid), so concurrent scans don't all take the xid table's mutex for every row.
+        thread_local! {
+            static ENDED: std::cell::Cell<[(u64, u64, bool); 64]> = const { std::cell::Cell::new([(0, 0, false); 64]) };
+        }
+        let table = self.xids.uid();
+        let slot = (x % 64) as usize;
+        if let Some(s) = ENDED.with(|c| {
+            let (t, y, aborted) = c.get()[slot];
+            (t == table && y == x).then_some(if aborted { Xs::Aborted } else { Xs::Committed })
+        }) {
+            self.settled.set(Some((x, s)));
+            return s;
+        }
         let st = self.xids.status(x);
         let s = match st {
             Ok("in progress") => Xs::Running,
@@ -93,6 +107,11 @@ impl<'a> Vis<'a> {
         };
         if st.is_ok() && s != Xs::Running {
             self.settled.set(Some((x, s)));
+            ENDED.with(|c| {
+                let mut a = c.get();
+                a[slot] = (table, x, s == Xs::Aborted);
+                c.set(a);
+            });
         }
         s
     }

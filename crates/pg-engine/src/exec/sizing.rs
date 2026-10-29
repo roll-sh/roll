@@ -158,7 +158,7 @@ fn estimate_rows<'a>(t: &Table, rows: impl Iterator<Item = &'a [Value]>, ctx: &E
 
 /// Whether table `t` is too big to model (its sizes are estimates).
 pub fn is_estimated(t: u32, db: &Database) -> bool {
-    db.relfiles.write().untracked.contains(&t)
+    db.relfiles.read().untracked.contains(&t)
 }
 
 /// Whether table `t` is modelled and within the model's size (a bulk load can leave a
@@ -1223,7 +1223,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     // A table first touched since its database opened that its last VACUUM or ANALYZE found
     // too big to model: its size is the pages they counted, without reading it again (the
     // planner reads only pg_class and pg_statistic, as Postgres's does).
-    let cold = heap_missing && !db.relfiles.write().dropped.contains(&t.oid);
+    let cold = heap_missing && !db.relfiles.read().dropped.contains(&t.oid);
     let known_big = if cold {
         ctx.catalog()
             .relstats
@@ -1659,7 +1659,7 @@ pub fn updated(
     }
     let db = &ctx.sess.db;
     // Out-of-line values the new version keeps as they are.
-    let old_exts: Vec<Ext> = (db.relfiles.write().toast.get(&t.oid))
+    let old_exts: Vec<Ext> = (db.relfiles.read().toast.get(&t.oid))
         .and_then(|tt| tt.rows.get(old_key).cloned())
         .unwrap_or_default();
     let pinned: HashSet<usize> = old_exts
@@ -1781,7 +1781,7 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     }
     let db = &ctx.sess.db;
     // toast_delete: a row with out-of-line values opens the TOAST relation.
-    let external = (db.relfiles.write().toast.get(&t.oid))
+    let external = (db.relfiles.read().toast.get(&t.oid))
         .and_then(|tt| tt.rows.get(key))
         .is_some_and(|e| !e.is_empty());
     if external {

@@ -400,7 +400,12 @@ where the reference does: 20 waits, 27 errors, 19 notifications.)
   it covered (`index_scanned`, kill_prior_tuple's LP_DEAD marks). The models are behind a
   read-write lock now; a fetch locates its row and checks whether the page would be pruned
   under the read lock, a scan checks under it whether any entry would be marked
-  (`Btree::kill_needed`), and only an actual prune or mark takes the write lock.
+  (`Btree::kill_needed`), and only an actual prune or mark takes the write lock. The heap
+  model's visibility checks asked the cluster's xid table (one mutex) for every row's
+  inserter; a thread keeps its last answers for ended transactions (`Vis::state`, keyed by
+  the table's `Xids::uid`: an ended transaction's outcome never changes). 16 clients each
+  running a 3,000-entry index-only scan: 216-230 tps before, 470-502 after (one client:
+  about 100 either way).
   Still open (the size models' owners): `index_scanned` walks the whole range the scan
   could cover, not just the entries a LIMIT 1 scan reads, so a que-style fetch over a 3,000
   row queue costs about 10 ms (PostgreSQL: 0.3 ms); and a GiST exclusion constraint's

@@ -57,6 +57,8 @@ pub struct Xids {
     /// Ids before this (and after the special ones) have no status any more.
     oldest: u64,
     persist: Box<dyn Fn(u64) + Send + Sync>,
+    /// This table's own number in the process (`uid`).
+    uid: u64,
 }
 
 /// A snapshot's xmin, registered (`Xids::register_snapshot`) until this is dropped.
@@ -127,7 +129,17 @@ impl Xids {
             exported: Mutex::new(std::collections::HashMap::new()),
             oldest: FIRST_NORMAL_XID,
             persist: Box::new(persist),
+            uid: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
         }
+    }
+
+    /// A number no other transaction id table of the process has (caches of ended
+    /// transactions' outcomes are keyed by it).
+    pub fn uid(&self) -> u64 {
+        self.uid
     }
 
     /// With ids before `oldest` too old to have a status (0: none).
