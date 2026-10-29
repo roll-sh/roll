@@ -443,6 +443,13 @@ pub struct JoinMeta {
     /// remotely but its Foreign Scan wasn't the cheapest path: that path's plan, over the
     /// join's row (an aggregation above may still run remotely over it).
     pub fdw_alt: FdwAlt,
+    /// A join group's top join, when the group's cheapest partial path (rows spread over
+    /// parallel workers) joins in another order than this tree: that path's tree, over this
+    /// join's row (`paths::joinpath::partial`). EXPLAIN builds the parallel plans along it
+    /// too and keeps the cheaper; the executor runs this tree.
+    pub par_alt: FdwAlt,
+    /// That partial path's total cost as the search estimated it.
+    pub par_alt_cost: AltCost,
 }
 
 /// `JoinMeta::fdw_alt`. Not part of its Debug text.
@@ -450,6 +457,16 @@ pub struct JoinMeta {
 pub struct FdwAlt(pub Option<Arc<Plan>>);
 
 impl std::fmt::Debug for FdwAlt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("_")
+    }
+}
+
+/// `JoinMeta::par_alt_cost`. Not part of its Debug text.
+#[derive(Clone, Copy, Default)]
+pub struct AltCost(pub f64);
+
+impl std::fmt::Debug for AltCost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("_")
     }

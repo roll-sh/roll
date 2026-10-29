@@ -1179,3 +1179,142 @@ fn append_nonpartial_cost(subs: &[ExNode], numpaths: usize, workers: usize) -> f
     }
     costs.into_iter().fold(0.0, f64::max)
 }
+
+/// The relation a scan reads, as one join group's trees both have it (`JoinMeta::par_alt`).
+fn scan_ident(s: &ScanPlan) -> (usize, u32, u32, Option<String>) {
+    (s.rti.0, s.rtindex.0, s.table.oid, s.alias.clone())
+}
+
+impl Builder<'_, '_> {
+    /// The scans of a join group's other tree (`JoinMeta::par_alt`) named as
+    /// the same relations' scans in the group's plan `main`.
+    fn alt_refnames(&mut self, main: &Plan, alt: &Plan) {
+        fn scans<'p>(p: &'p Plan, out: &mut Vec<&'p Plan>) {
+            if let Plan::Scan(_) = p {
+                out.push(p);
+            }
+            for c in plan_inputs(p) {
+                scans(c, out);
+            }
+        }
+        let (mut ms, mut alts) = (Vec::new(), Vec::new());
+        scans(main, &mut ms);
+        scans(alt, &mut alts);
+        for a in alts {
+            let Plan::Scan(sa) = a else { continue };
+            let id = scan_ident(sa);
+            let name = ms.iter().find_map(|m| match m {
+                Plan::Scan(sm) if scan_ident(sm) == id => self.refnames.get(&addr(m)).cloned(),
+                _ => None,
+            });
+            if let Some(n) = name {
+                self.refnames.insert(addr(a), n);
+            }
+        }
+    }
+}
+
+impl Builder<'_, '_> {
+    /// A join group's partial plans along its cheapest partial path's tree
+    /// (`JoinMeta::par_alt`) beside those along its plan's (add_partial_path over both).
+    /// Not under ANALYZE: the executor runs the plan's tree, whose counts the nodes show.
+    #[inline(never)]
+    /// (`cost`: the search's estimate of the tree's partial path. Clearly dearer than the
+    /// plan's own partial plan, the tree isn't built: add_partial_path would drop it.)
+    pub(super) fn par_alt_partials(&mut self, b: &mut Built, main: &Plan, alt: &Arc<Plan>, cost: f64) {
+        if self.o.analyze || self.par.is_none() {
+            return;
+        }
+        if b.node.partial.as_ref().is_some_and(|own| cost > own.total_cost * 1.05) {
+            return;
+        }
+        self.alt_refnames(main, alt);
+        let saved = std::mem::take(&mut self.pending);
+        let a = self.node(alt);
+        self.pending = saved;
+        let same_names = a.exported.len() == b.exported.len()
+            && a.exported.iter().zip(&b.exported).all(|(x, y)| x.full == y.full);
+        let Some(ap) = a.node.partial.filter(|_| same_names) else { return };
+        let mut list: Vec<ExNode> = b.node.partial.take().map(|p| *p).into_iter().collect();
+        list.append(&mut b.node.partials);
+        for p in std::iter::once(*ap).chain(a.node.partials) {
+            add_partial_path(&mut list, p);
+        }
+        if !list.is_empty() {
+            b.node.partial = Some(Box::new(list.remove(0)));
+        }
+        b.node.partials = list;
+    }
+}
+
+thread_local! {
+    /// While `analyzed_plan` asks: the plan nodes the explained plan shows.
+    pub(super) static SHOWN_KEYS: std::cell::RefCell<Option<std::collections::HashSet<usize>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Notes the plan nodes `n` shows, when `analyzed_plan` asks.
+pub(super) fn note_shown(n: &ExNode) {
+    fn walk(n: &ExNode, set: &mut std::collections::HashSet<usize>) {
+        set.extend(n.key);
+        for c in n.children.iter().chain(&n.subplans) {
+            walk(c, set);
+        }
+    }
+    SHOWN_KEYS.with(|s| {
+        if let Some(set) = s.borrow_mut().as_mut() {
+            walk(n, set);
+        }
+    });
+}
+
+/// The plan EXPLAIN ANALYZE runs: the statement's plan with each join group whose
+/// parallel plan EXPLAIN shows along its partial path's tree (`JoinMeta::par_alt`) running
+/// that tree, so the nodes shown are the nodes run. None: the plan as it is.
+pub fn analyzed_plan(
+    plan: &Arc<Plan>,
+    hidden_rtes: usize,
+    o: &Options,
+    ctx: &ExecCtx,
+    params: &[crate::types::Value],
+) -> Option<Arc<Plan>> {
+    fn has_alt(p: &Plan) -> bool {
+        matches!(p, Plan::Join { meta, .. } if meta.par_alt.0.is_some()) || plan_inputs(p).into_iter().any(|c| has_alt(c))
+    }
+    fn keys(p: &Plan, out: &mut Vec<usize>) {
+        out.push(addr(p));
+        for c in plan_inputs(p) {
+            keys(c, out);
+        }
+    }
+    fn swap(p: &mut Plan, shown: &std::collections::HashSet<usize>) -> bool {
+        if let Plan::Join { meta, .. } = p
+            && let Some(alt) = meta.par_alt.0.clone()
+        {
+            let mut ks = Vec::new();
+            keys(&alt, &mut ks);
+            if ks.iter().any(|k| shown.contains(k)) {
+                *p = (*alt).clone();
+                return true;
+            }
+        }
+        let mut any = false;
+        for c in plan_inputs_mut(p) {
+            if has_alt(c) {
+                any |= swap(Arc::make_mut(c), shown);
+            }
+        }
+        any
+    }
+    if !has_alt(plan) {
+        return None;
+    }
+    let mut o = o.clone();
+    o.analyze = false;
+    o.format = Format::Text;
+    SHOWN_KEYS.with(|s| *s.borrow_mut() = Some(Default::default()));
+    let _ = explain(plan, hidden_rtes, &o, ctx, params, None, 0.0, 0.0);
+    let shown = SHOWN_KEYS.with(|s| s.borrow_mut().take())?;
+    let mut p = (**plan).clone();
+    swap(&mut p, &shown).then(|| Arc::new(p))
+}

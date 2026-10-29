@@ -863,6 +863,12 @@ impl Session {
             let mut run = None;
             let mut plan = (bq.plan.clone(), bq.hidden_rtes);
             if o.analyze {
+                // (The join trees whose parallel plans EXPLAIN shows are the ones run.)
+                if ctas.is_none()
+                    && let Some(p) = crate::sql::explain::analyzed_plan(&bq.plan, bq.hidden_rtes, &o, ctx, &shown)
+                {
+                    plan.0 = p;
+                }
                 let instr = std::rc::Rc::new(crate::exec::Instr::default());
                 *ctx.instr.borrow_mut() = Some(instr.clone());
                 let t = std::time::Instant::now();
@@ -873,7 +879,7 @@ impl Session {
                         crate::session::ddl::execute_with_params(ctx, node, &ctas_types).map(|_| ())
                     }
                     Some(node) => crate::session::ddl::execute(ctx, node, "").map(|_| ()),
-                    None => collect(&bq.plan, ctx, None).map(|_| ()),
+                    None => collect(&plan.0, ctx, None).map(|_| ()),
                 };
                 *ctx.instr.borrow_mut() = None;
                 r?;

@@ -7,6 +7,7 @@
 
 mod parallel;
 mod overexplain;
+pub use parallel::analyzed_plan;
 mod pwagg;
 
 use super::binder::ast::{const_str, inner, with_pos};
@@ -1910,6 +1911,12 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
                     *n = true;
                 }
             }
+        }
+        // (A join group's partial tree returns the join's row: the same columns are needed.)
+        if let Plan::Join { meta, .. } = p
+            && let Some(alt) = &meta.par_alt.0
+        {
+            go(alt, needed.clone(), whole, out);
         }
         out.insert(addr(p), needed);
         let mut es = Vec::new();
@@ -8963,7 +8970,7 @@ impl Builder<'_, '_> {
                 ..
             } => {
                 let saved = OUTER_JOIN_SIDE.with(|o| o.get());
-                let b = self.join(
+                let mut b = self.join(
                     key,
                     *kind,
                     left,
@@ -8974,6 +8981,9 @@ impl Builder<'_, '_> {
                     meta,
                 );
                 OUTER_JOIN_SIDE.with(|o| o.set(saved));
+                if let Some(alt) = &meta.par_alt.0 {
+                    self.par_alt_partials(&mut b, p, alt, meta.par_alt_cost.0);
+                }
                 b
             }
             // A statement a rule made of another command (a DELETE done as an UPDATE) that
@@ -20592,6 +20602,7 @@ pub fn explain(
     let root = b.single_copy(plan, root);
     break if o.scroll && !backward_ok(&root) { b.materialize_top(root) } else { root };
     };
+    parallel::note_shown(&root);
     let mut root = root;
     let overex = (o.debug || o.range_table).then(|| {
         let rt = overexplain::RangeTable::build(plan, &root, false);

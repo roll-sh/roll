@@ -351,6 +351,81 @@ Looked at and left (why):
 - q09, q10 (serial): ANALYZE's random sample (p_name's histogram; Postgres's own plan flips
   between runs of ANALYZE).
 
+## Round 22, agent 91 (planner round 6: partial paths in the join search)
+
+Measured by a full run of the batch (debug build, private reference `a91-rref`) against the
+committed baseline (`results.tsv`, `9407d0ee`): **51,148 / 51,150, no unit changed**. The
+difftest smoke passes, and 150 seeds x 120 statements with planner-setting variants
+(`DIFFTEST_PLAN=0.5`) give the same mismatch records as the batch's base (`7bb31b96`), record
+for record. Every TPC-H SF1 result hash agrees with PostgreSQL's. (The generated blocks are left
+to the next committed full run.) One full run on an earlier base (`30111bb9`, the first with
+autovacuum on in the regress harness's engine) had partition_join 134 differing (a three-way
+partitionwise join's hashed side the other way round); a second full run of the same binaries
+and subset runs of partition_join (debug and release, and the base's) all match it; most likely the plan
+turns on whether autovacuum has analyzed the tables by then (not traced).
+
+**Partial paths per join relation** (`paths/joinpath/partial.rs`). The engine's parallel
+plans were EXPLAIN's partial versions of the serial join tree the search chose; PostgreSQL
+keeps a partial_pathlist per relation (add_partial_path) and its best partial plan may join in
+another order (TPC-H q05, q08). The search now makes them as allpaths.c / joinpath.c do: a scan
+leaf's parallel sequential, index and bitmap scans (from the serial paths it already made),
+then per join pair partial nested loops over every partial path of the outer side
+(consider_parallel_nestloop: the inner side's cheapest and parameterized paths, its Memoize,
+the cheapest materialized) and partial hash joins over the cheapest one (the inner side whole
+in each worker, or its own partial path under a Parallel Hash), with PostgreSQL's costing (the
+inputs' per-worker rows, the join's rows over the parallel divisor) and add_partial_path's
+rules; consider_parallel by the leaves (a parallel-safe table scan) and the clauses
+(is_parallel_safe). The top relation's cheapest partial path, when its tree differs from the
+serial best's, is built as a plan over the same row (`JoinMeta::par_alt`); EXPLAIN builds the
+parallel plans along it too (`explain/parallel.rs` `par_alt_partials`, its scans named as the
+plan's) and keeps the cheaper by add_partial_path. EXPLAIN ANALYZE runs the tree whose plan it
+shows (`analyzed_plan`: a pass without ANALYZE finds which trees the shown plan reads, they
+replace their serial trees, the counts are theirs); the executor otherwise runs the serial tree.
+
+Planning time: the partial pass runs after the serial search, replaying the join pairs it made,
+only when a parallel plan could win: its cost is at least the cheapest partial scan of a leaf
+plus parallel_setup_cost (under a LIMIT, at least the setup cost against the serial plan's
+cost for the rows read), the serial plan's at most its cheapest path plus a generous upper
+work allowance per row (`UPPER_ROW_ALLOWANCE`). OLTP lookups joined to a big table skip it.
+(BENCH.md "Round 22" has the planning times.)
+
+TPC-H SF1 plans with PostgreSQL's shape: q05 and q08 now match (19 of 22 parallel after an
+engine restart, q13 being agent 85's restart case; 19 of 22 serial). Golden
+`a91_parallel_join_order` (recorded from PostgreSQL 18.6): q05's shape at a small scale, the
+parallel plan joining nation x region in the workers where the serial one hashes orders.
+
+Left: partial merge joins (sort_inner_and_outer's and consider_parallel_mergejoin's: q18's
+parallel plan), Gather paths at intermediate join relations in the search (EXPLAIN's derivation
+gathers inputs along the tree it is given), partial paths of non-scan leaves (FROM subqueries,
+VALUES, functions), groups with PlaceHolderVars or LATERAL items, partitionwise child joins.
+
+Also in this batch (golden `a91_planner_fixes`, recorded from PostgreSQL 18.6):
+
+- **A LATERAL subquery pulled up over a FROM subquery that reorders its columns** (EF Core's
+  `SelectMany_with_predicate_and_DefaultIfEmpty_*`, 4 tests failing with "outer reference
+  without an outer row"): the WHERE clause over the lateral reference the binder had pushed
+  into the inner FROM subquery's scan stayed there when the projection over the scan wasn't a
+  plain prefix of its columns (`hoist_frame_quals` didn't look through it), while the pull-up
+  dropped the join's parameters. The clause is taken out through the projection (a join
+  clause of the query, PostgreSQL's Join Filter); a tree that would still read the
+  references after hoisting isn't pulled up (`frame_quals_left`).
+- **Disabled nodes of a FROM item planned on its own** (pg_overexplain unit 30, agent 80): the
+  join search took an item's plan (an inheritance or partitioned Append) as having none, so
+  with enable_seqscan off its disabled sequential scans beat the members' parameterized index
+  scans. The item counts its plan's (`Leaf::disabled`), and an Append item also has the Append
+  of each member's cheapest path, disabled nodes first, among paths made for the orderings a
+  merge join could use (`append_plain_path`: a member's full index scan where its sequential
+  scan is disabled), as set_append_rel_pathlist has it.
+- **EXPLAIN's cost of the partial trees**: a tree's scans are named when it is converted, not
+  by a walk of every plan, and a tree whose partial path the search priced clearly above the
+  plan's own partial plan isn't converted (`JoinMeta::par_alt_cost`).
+
+q18's sorted grouping over a merge join (pathkeys_useful_for_grouping keeping c_custkey order
+at the join, the grouping offered that path besides the cheapest) matched PostgreSQL's serial
+q18 when tried, but on a smaller schema it chose a nested loop with a Memoize over the grouped
+IN sub-select's output that PostgreSQL costs higher (the Memoize's distinct keys of a grouped
+sub-select's output): left for the next round, with that costing.
+
 ## Round 19, agent 60 (database locales: libc C by default, CREATE DATABASE's providers)
 
 The engine's databases reported and behaved as the builtin C.UTF-8 locale; the reference is

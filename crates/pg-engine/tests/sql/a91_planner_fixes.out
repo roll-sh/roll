@@ -1,0 +1,140 @@
+> CREATE TABLE a91_l (id int PRIMARY KEY, name text, dt timestamp NOT NULL, l2name text, req int)
+-- CREATE TABLE
+
+> INSERT INTO a91_l SELECT i, 'L1 ' || i, '2001-01-01', 'L2 ' || lpad(i::text, 2, '0'), i FROM generate_series(1, 10) i
+-- INSERT 0 10
+
+> SELECT l.id, s.id0
+> FROM a91_l AS l
+> LEFT JOIN LATERAL (
+>     SELECT l2.id, l0.id AS id0
+>     FROM a91_l AS l0
+>     LEFT JOIN (
+>         SELECT l1.id, l1.req, l1.l2name FROM a91_l AS l1 WHERE l1.req IS NOT NULL
+>     ) AS l2 ON l0.id = CASE WHEN l2.req IS NOT NULL THEN l2.id END
+>     WHERE l2.req IS NOT NULL AND (l2.req = l.id * 2 OR length(l2.l2name)::int = l2.id)
+> ) AS s ON TRUE
+> ORDER BY 1, 2
+id:int4 | id0:int4
+1 | 2
+1 | 5
+2 | 4
+2 | 5
+3 | 5
+3 | 6
+4 | 5
+4 | 8
+5 | 5
+5 | 10
+6 | 5
+7 | 5
+8 | 5
+9 | 5
+10 | 5
+-- SELECT 15
+
+> EXPLAIN (COSTS OFF)
+> SELECT l.id, s.id0
+> FROM a91_l AS l
+> LEFT JOIN LATERAL (
+>     SELECT l2.id, l0.id AS id0
+>     FROM a91_l AS l0
+>     LEFT JOIN (
+>         SELECT l1.id, l1.req, l1.l2name FROM a91_l AS l1 WHERE l1.req IS NOT NULL
+>     ) AS l2 ON l0.id = CASE WHEN l2.req IS NOT NULL THEN l2.id END
+>     WHERE l2.req IS NOT NULL AND (l2.req = l.id * 2 OR length(l2.l2name)::int = l2.id)
+> ) AS s ON TRUE
+> ORDER BY 1, 2
+QUERY PLAN:text
+Incremental Sort
+  Sort Key: l.id, l0.id
+  Presorted Key: l.id
+  ->  Nested Loop Left Join
+        Join Filter: ((l1.req = (l.id * 2)) OR (length(l1.l2name) = l1.id))
+        ->  Index Only Scan using a91_l_pkey on a91_l l
+        ->  Materialize
+              ->  Hash Join
+                    Hash Cond: (CASE WHEN (l1.req IS NOT NULL) THEN l1.id ELSE NULL::integer END = l0.id)
+                    ->  Seq Scan on a91_l l1
+                          Filter: ((req IS NOT NULL) AND (req IS NOT NULL))
+                    ->  Hash
+                          ->  Seq Scan on a91_l l0
+-- EXPLAIN
+
+> DROP TABLE a91_l
+-- DROP TABLE
+
+> CREATE TABLE a91_veg (id serial, name text, genus text) PARTITION BY LIST (genus)
+-- CREATE TABLE
+
+> CREATE TABLE a91_daucus PARTITION OF a91_veg FOR VALUES IN ('daucus')
+-- CREATE TABLE
+
+> CREATE TABLE a91_brassica PARTITION OF a91_veg FOR VALUES IN ('brassica')
+-- CREATE TABLE
+
+> INSERT INTO a91_veg (name, genus)
+> 	VALUES ('carrot', 'daucus'), ('bok choy', 'brassica'),
+> 		   ('brocooli', 'brassica'), ('cauliflower', 'brassica'),
+> 		   ('cabbage', 'brassica'), ('kohlrabi', 'brassica'),
+> 		   ('rutabaga', 'brassica'), ('turnip', 'brassica')
+-- INSERT 0 8
+
+> CREATE INDEX ON a91_veg (id)
+-- CREATE INDEX
+
+> ANALYZE a91_veg
+-- ANALYZE
+
+> SET enable_hashjoin = false
+-- SET
+
+> SET enable_material = false
+-- SET
+
+> SET enable_mergejoin = false
+-- SET
+
+> SET enable_seqscan = false
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a91_veg v1, a91_veg v2 WHERE v1.id = v2.id
+QUERY PLAN:text
+Nested Loop
+  ->  Append
+        ->  Index Scan using a91_brassica_id_idx on a91_brassica v1_1
+        ->  Index Scan using a91_daucus_id_idx on a91_daucus v1_2
+  ->  Append
+        ->  Index Scan using a91_brassica_id_idx on a91_brassica v2_1
+              Index Cond: (id = v1.id)
+        ->  Index Scan using a91_daucus_id_idx on a91_daucus v2_2
+              Index Cond: (id = v1.id)
+-- EXPLAIN
+
+> SELECT v1.name, v2.genus FROM a91_veg v1, a91_veg v2 WHERE v1.id = v2.id ORDER BY 1
+name:text | genus:text
+bok choy | brassica
+brocooli | brassica
+cabbage | brassica
+carrot | daucus
+cauliflower | brassica
+kohlrabi | brassica
+rutabaga | brassica
+turnip | brassica
+-- SELECT 8
+
+> EXPLAIN (COSTS OFF) SELECT * FROM a91_veg v1
+QUERY PLAN:text
+Append
+  ->  Seq Scan on a91_brassica v1_1
+        Disabled: true
+  ->  Seq Scan on a91_daucus v1_2
+        Disabled: true
+-- EXPLAIN
+
+> RESET ALL
+-- RESET
+
+> DROP TABLE a91_veg
+-- DROP TABLE
+

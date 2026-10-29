@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 mod foreign;
 mod lift;
+mod partial;
 
 /// A pulled-up subquery's expression over the row it reads (`lift::subst`).
 pub(super) fn lift_subst(e: &Expr, map: &[Expr]) -> Expr {
@@ -55,6 +56,8 @@ struct Leaf {
     /// A system catalog's scan planned as its stand-in table's (`syscat`): the catalog and
     /// its FROM alias, the scan put back as one of it.
     sys: Option<(crate::catalog::system::SysTable, Option<String>)>,
+    /// The disabled nodes of the item's own plan (add_path compares them first).
+    disabled: u32,
     /// A whole-row mark's width (ROW_MARK_COPY, `Planner::copy_marks`): set_rel_width's
     /// whole-row Var, part of the relation's reltarget and every join's above it.
     whole: u32,
@@ -338,6 +341,8 @@ struct JRel {
     /// Its leaves in the order its target list has their columns (build_joinrel_tlist over
     /// the first pair make_join_rel built it from: the first input's, then the second's).
     tl: Vec<usize>,
+    /// Its partial paths (partial_pathlist: rows per worker), with their workers.
+    partial: Vec<(JP, usize)>,
 }
 
 /// add_path for group paths (parameterized ones keep to their own required set).
@@ -574,6 +579,11 @@ struct Search<'s, 'c, 'a> {
     fdw_tried: Vec<u32>,
     /// The base relations the wrapper's descriptions number (bits of `RelInfo::relids`).
     fdw_list: std::cell::RefCell<Vec<crate::ext::postgres_fdw::join::Base>>,
+    /// The parallel query settings when the group's relations may have partial paths
+    /// (`partial`).
+    par: Option<partial::Par>,
+    /// The join pairs whose partial paths `partial_pass` makes, in the order made.
+    partial_jobs: Vec<partial::Job>,
 }
 
 /// An equivalence class member that is an expression of one FROM item's columns, not a
@@ -1752,6 +1762,7 @@ impl Search<'_, '_, '_> {
             paths: Vec::new(),
             param: Vec::new(),
             tl: vec![l],
+            partial: Vec::new(),
         };
         match &leaf.scan {
             None => {
@@ -1773,7 +1784,7 @@ impl Search<'_, '_, '_> {
                     startup: leaf.startup,
                     total: leaf.total,
                     width,
-                    disabled: 0,
+                    disabled: leaf.disabled,
                     keys,
                     req,
                     set,
@@ -1783,6 +1794,9 @@ impl Search<'_, '_, '_> {
                     rel.param.push(jp);
                 } else {
                     rel.paths.push(jp);
+                    if let Some(ap) = self.append_plain_path(l, width) {
+                        add_jpath(&mut rel.paths, ap, self.startup);
+                    }
                     for mp in self.merged_paths(l, width) {
                         add_jpath(&mut rel.paths, mp, self.startup);
                     }
@@ -1836,7 +1850,12 @@ impl Search<'_, '_, '_> {
                 };
                 let fdw = self.fdw_base(l);
                 let mut fdw_plain = None;
-                for mut p in self.pl.paths(&pr, &want) {
+                let paths = self.pl.paths(&pr, &want);
+                // (Its partial index and bitmap paths are made along with these.)
+                if self.par.is_some() && !self.has_lat(l) && fdw.is_none() {
+                    rel.partial = self.base_partial(l, width, &pr, &paths);
+                }
+                for mut p in paths {
                     // (A wrapper's scan: its own estimate, estimate_path_cost_size's; its
                     // orderings are the remote server's, `fdw_sorted_paths`.)
                     if let Some(f) = &fdw {
@@ -3125,6 +3144,59 @@ impl Search<'_, '_, '_> {
     /// each set of outer leaves some member has a parameterized index scan for, an Append
     /// of every member's cheapest path with that parameterization (an index scan, or its
     /// sequential scan filtering on the join clauses).
+    /// An inheritance Append leaf as the Append of each member's cheapest path
+    /// (set_append_rel_pathlist's cheapest_total_path per child, disabled nodes first),
+    /// the members' index paths made for the orderings a merge join or the ORDER BY could
+    /// use (build_index_paths' useful pathkeys): with a scan kind disabled, a member's full
+    /// index scan can be its cheapest path where the item's own plan has its disabled
+    /// sequential scan. None when that is the item's plan anyway.
+    fn append_plain_path(&self, l: usize, width: u32) -> Option<JP> {
+        let leaf = &self.leaves[l];
+        let members = leaf.members.as_ref()?;
+        if leaf.lateral.is_some() || !leaf.fromless.is_empty() || members.is_empty() || leaf.disabled == 0 {
+            return None;
+        }
+        let set = 1u32 << l;
+        let mut scans: Vec<(Path, Rc<Rel>)> = Vec::new();
+        for m in members {
+            let rel = Rc::new(m.rel.shallow_with_quals());
+            let col = |k: usize| m.map.get(k).copied().flatten().filter(|&c| c < rel.table.columns.len());
+            let merge: Vec<Expr> = (0..leaf.ncols)
+                .filter(|&k| self.ec_has_other(leaf.off + k, set))
+                .filter_map(col)
+                .map(|c| Expr::Col(c, rel.table.columns[c].ty.clone()))
+                .collect();
+            let want = Want { keys: Vec::new(), limit: None, merge };
+            let best = self.pl.paths(&rel, &want).into_iter().min_by(|a, b| {
+                (a.disabled, a.total, a.startup).partial_cmp(&(b.disabled, b.total, b.startup)).unwrap_or(std::cmp::Ordering::Equal)
+            })?;
+            let mut best = best;
+            best.keys.clear();
+            scans.push((best, rel));
+        }
+        let disabled: u32 = scans.iter().map(|(p, _)| p.disabled).sum();
+        if disabled >= leaf.disabled {
+            return None;
+        }
+        // cost_append: the first member's startup, a half cpu_tuple_cost per row over several.
+        let rows: f64 = scans.iter().map(|(p, _)| p.rows).sum();
+        let mut total: f64 = scans.iter().map(|(p, _)| p.total).sum();
+        if scans.len() > 1 {
+            total += CPU_TUPLE_COST * 0.5 * rows;
+        }
+        Some(JP {
+            rows: leaf.rows,
+            startup: scans[0].0.startup,
+            total,
+            width,
+            disabled,
+            keys: Vec::new(),
+            req: 0,
+            set,
+            node: JNode::Append { leaf: l, scans, params: Vec::new(), enforced: Vec::new(), fromless: Vec::new() },
+        })
+    }
+
     fn append_param_paths(&self, l: usize, width: u32) -> Vec<JP> {
         let leaf = &self.leaves[l];
         let Some(members) = &leaf.members else {
@@ -3789,6 +3861,7 @@ impl Search<'_, '_, '_> {
                     paths: Vec::new(),
                     param: Vec::new(),
                     tl,
+                    partial: Vec::new(),
                 });
                 self.rels.len() - 1
             }
@@ -3824,6 +3897,9 @@ impl Search<'_, '_, '_> {
                     self.rels.push(u);
                     let ui = self.rels.len() - 1;
                     self.add_paths_u(ri, r1, ui, Jt::Inner, Uniq::Inner, &restrict);
+                    if let Some(j) = self.partial_jobs.last_mut().filter(|j| j.uniq == Uniq::Inner && j.inner == ui) {
+                        j.unique_of = Some((r2, uclauses.clone()));
+                    }
                     self.add_paths_u(ri, ui, r1, Jt::Inner, Uniq::Outer, &restrict);
                     self.rels.pop();
                 }
@@ -3989,6 +4065,7 @@ impl Search<'_, '_, '_> {
             rows: rel.rows,
             width: rel.width,
             tl: rel.tl.clone(),
+            partial: Vec::new(),
             paths: vec![JP {
                 rows: groups,
                 startup,
@@ -4453,6 +4530,57 @@ impl Search<'_, '_, '_> {
         uniq: Uniq,
         restrict: &[usize],
     ) {
+        let (ex, merge, hash) = self.pair_setup(ri, outer, inner, jt, uniq, restrict);
+        // (Right semi joins hash only; right and full joins merge on every clause.)
+        // (select_mergejoin_clauses: constant clauses the executor checks itself, as for
+        // FULL JOIN ON false.)
+        let merge_ok = jt != Jt::RightSemi
+            && !(matches!(jt, Jt::Full | Jt::Right | Jt::RightAnti)
+                && merge.len()
+                    != restrict
+                        .iter()
+                        .filter(|&&c| self.clauses[c].on && !matches!(self.clauses[c].expr, Expr::Const(..)))
+                        .count());
+        if merge_ok && (self.g.mergejoin || jt == Jt::Full) && !merge.is_empty() {
+            self.sort_inner_and_outer(ri, outer, inner, &merge, &ex);
+        }
+        if merge_ok {
+            self.match_unsorted_outer(ri, outer, inner, &merge, &ex);
+        }
+        if (self.g.hashjoin || jt == Jt::Full) && !hash.is_empty() {
+            self.hash_inner_and_outer(ri, outer, inner, &hash, &ex);
+        }
+        // (Its partial paths come after the search, when a parallel plan could win: the
+        // pair is noted for that pass, `partial_pass`.)
+        if self.par.is_some() && uniq != Uniq::Outer && jt != Jt::RightSemi {
+            self.partial_jobs.push(partial::Job {
+                ri,
+                outer,
+                inner,
+                jt,
+                uniq,
+                restrict: restrict.to_vec(),
+                cur_sj: self.cur_sj,
+                unique_of: None,
+            });
+        }
+        if !self.fdw_rels.is_empty() {
+            self.foreign_join_path(ri, outer, inner, jt, uniq, restrict);
+        }
+    }
+
+    /// add_paths_to_joinrel's JoinPathExtraData for the pair, and its merge and hash
+    /// clauses.
+    #[allow(clippy::type_complexity)]
+    fn pair_setup(
+        &self,
+        ri: usize,
+        outer: usize,
+        inner: usize,
+        jt: Jt,
+        uniq: Uniq,
+        restrict: &[usize],
+    ) -> (Extra, Vec<(usize, bool)>, Vec<(usize, bool)>) {
         let (oset, iset) = (self.rels[outer].set, self.rels[inner].set);
         let inner_unique = match (jt, uniq) {
             (Jt::Semi | Jt::Anti, _) => false,
@@ -4509,28 +4637,7 @@ impl Search<'_, '_, '_> {
             .copied()
             .filter(|&(c, oa)| self.clauses[c].hashable && (oa || self.clauses[c].commutes))
             .collect();
-        // (Right semi joins hash only; right and full joins merge on every clause.)
-        // (select_mergejoin_clauses: constant clauses the executor checks itself, as for
-        // FULL JOIN ON false.)
-        let merge_ok = jt != Jt::RightSemi
-            && !(matches!(jt, Jt::Full | Jt::Right | Jt::RightAnti)
-                && merge.len()
-                    != restrict
-                        .iter()
-                        .filter(|&&c| self.clauses[c].on && !matches!(self.clauses[c].expr, Expr::Const(..)))
-                        .count());
-        if merge_ok && (self.g.mergejoin || jt == Jt::Full) && !merge.is_empty() {
-            self.sort_inner_and_outer(ri, outer, inner, &merge, &ex);
-        }
-        if merge_ok {
-            self.match_unsorted_outer(ri, outer, inner, &merge, &ex);
-        }
-        if (self.g.hashjoin || jt == Jt::Full) && !hash.is_empty() {
-            self.hash_inner_and_outer(ri, outer, inner, &hash, &ex);
-        }
-        if !self.fdw_rels.is_empty() {
-            self.foreign_join_path(ri, outer, inner, jt, uniq, restrict);
-        }
+        (ex, merge, hash)
     }
 }
 
@@ -5215,6 +5322,12 @@ impl Search<'_, '_, '_> {
     }
 
     fn try_nestloop(&mut self, ri: usize, op: &JP, ip: &JP, keys: Vec<GKey>, ex: &Extra) {
+        self.try_nestloop_w(ri, op, ip, keys, ex, None)
+    }
+
+    /// try_nestloop_path, or with `part` (the outer side's workers: `op` is a partial path)
+    /// try_partial_nestloop_path.
+    fn try_nestloop_w(&mut self, ri: usize, op: &JP, ip: &JP, keys: Vec<GKey>, ex: &Extra, part: Option<usize>) {
         // An inner (or outer) path parameterized by more than the join: a join path itself
         // parameterized by the rest. Either an inner join's nested loop with the outer side
         // plain (allow_star_schema_join), or, in a group with outer joins, one parameterized
@@ -5236,6 +5349,11 @@ impl Search<'_, '_, '_> {
             return;
         }
         if !param_join && op.req != 0 {
+            return;
+        }
+        // (A partial path is never parameterized: the inner side's parameters all come from
+        // the outer side.)
+        if part.is_some() && param_join {
             return;
         }
         // (Nor can an outer side give a column of a semi join's right side inside it.)
@@ -5414,11 +5532,29 @@ impl Search<'_, '_, '_> {
             req: 0,
             set: ex.set,
         };
+        if let Some(w) = part {
+            self.add_partial(ri, jp, w);
+            return;
+        }
         let startup = self.startup;
         add_jpath(&mut self.rels[ri].paths, jp, startup);
     }
 
     fn try_hash(&mut self, ri: usize, op: &JP, ip: &JP, hash: &[(usize, bool)], ex: &Extra) {
+        self.try_hash_w(ri, op, ip, hash, ex, None)
+    }
+
+    /// try_hashjoin_path, or with `part` (the outer side's workers, and the inner side's
+    /// for a Parallel Hash over its partial path) try_partial_hashjoin_path.
+    fn try_hash_w(
+        &mut self,
+        ri: usize,
+        op: &JP,
+        ip: &JP,
+        hash: &[(usize, bool)],
+        ex: &Extra,
+        part: Option<(usize, Option<usize>)>,
+    ) {
         let keys: Vec<usize> = hash.iter().map(|h| h.0).collect();
         let mut quals: Vec<usize> = ex
             .restrict
@@ -5429,7 +5565,18 @@ impl Search<'_, '_, '_> {
         let Some((req, prows)) = self.nonnest_param(op, ip, ex, &mut quals, &keys) else {
             return;
         };
-        let (nb, nbatch) = joins::hash_table_size(ip.rows, ip.width, &self.g);
+        if part.is_some() && req != 0 {
+            return;
+        }
+        // (A Parallel Hash's shared table: the inner side's rows over all its processes.)
+        let shared = match (part, &self.par) {
+            (Some((ow, Some(iw))), Some(par)) => Some((ip.rows * par.cfg.divisor(iw), ow)),
+            _ => None,
+        };
+        let (nb, nbatch) = match shared {
+            Some((total, ow)) => joins::parallel_hash_table_size(total, ip.width, &self.g, ow),
+            None => joins::hash_table_size(ip.rows, ip.width, &self.g),
+        };
         let vb = nb as f64 * nbatch as f64;
         let mut bucket = (1.0_f64, 1.0_f64);
         let mut inner_sel = 1.0;
@@ -5505,7 +5652,7 @@ impl Search<'_, '_, '_> {
             // (A unique-ified inner side: one row per bucket.)
             bucket: (!matches!(ip.node, JNode::Unique { .. })).then_some(bucket),
             hash_tuples: costs::clamp_rows(inner_sel * op.rows * ip.rows),
-            parallel: None,
+            parallel: shared,
         };
         let (c, batches) = joins::hashjoin(
             ex.jt,
@@ -5543,6 +5690,10 @@ impl Search<'_, '_, '_> {
             req,
             set: ex.set,
         };
+        if let Some((w, _)) = part {
+            self.add_partial(ri, jp, w);
+            return;
+        }
         self.add_join_path(ri, jp);
     }
 
@@ -5791,6 +5942,10 @@ impl Search<'_, '_, '_> {
         for l in 0..n {
             self.base_rel(l);
         }
+        // (No leaf scanned in parallel: no join relation has partial paths.)
+        if self.rels.iter().all(|r| r.partial.is_empty()) {
+            self.par = None;
+        }
         self.const_ecs = self.find_const_ecs();
         // Rels of each level, in creation order.
         let mut levels: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
@@ -5892,6 +6047,7 @@ impl Search<'_, '_, '_> {
         }
         let full = (1u32 << n) - 1;
         let top = self.rel_index(full)?;
+        self.partial_pass(top);
         self.final_path(top)
     }
 
@@ -6403,20 +6559,22 @@ impl Search<'_, '_, '_> {
                 let mut inputs = inputs.clone();
                 for (m, (path, rel)) in members.iter().zip(scans) {
                     let mut s = m.scan.clone();
-                    let extra: Vec<Expr> = rel.quals[rel.quals.len() - params.len()..].to_vec();
-                    let mut all = Vec::new();
-                    if let Some(f) = s.filter.take() {
-                        conjuncts(f, &mut all);
+                    if !params.is_empty() {
+                        let extra: Vec<Expr> = rel.quals[rel.quals.len() - params.len()..].to_vec();
+                        let mut all = Vec::new();
+                        if let Some(f) = s.filter.take() {
+                            conjuncts(f, &mut all);
+                        }
+                        for q in &mut all {
+                            *q = deepen_outer(q).expect("checked by shallow_param");
+                        }
+                        all.extend(extra);
+                        s.filter = Some(if all.len() == 1 {
+                            all.pop().unwrap()
+                        } else {
+                            Expr::And(all)
+                        });
                     }
-                    for q in &mut all {
-                        *q = deepen_outer(q).expect("checked by shallow_param");
-                    }
-                    all.extend(extra);
-                    s.filter = Some(if all.len() == 1 {
-                        all.pop().unwrap()
-                    } else {
-                        Expr::And(all)
-                    });
                     s.access = Access::Unplanned;
                     apply(rel, &mut s, path);
                     let scan = Plan::Scan(Box::new(s));
@@ -7069,6 +7227,8 @@ impl Search<'_, '_, '_> {
                         hash_swapped: Vec::new(),
                         ec_written: Vec::new(),
                         fdw_alt: Default::default(),
+                        par_alt: Default::default(),
+                        par_alt_cost: Default::default(),
                         semi_carried: if kind == JoinKind::Semi {
                             let mut w = 0;
                             for (l, leaf) in self.leaves.iter().enumerate() {
@@ -8702,6 +8862,8 @@ impl Planner<'_, '_> {
             fdw_rels: Vec::new(),
             fdw_tried: Vec::new(),
             fdw_list: Default::default(),
+            par: None,
+            partial_jobs: Vec::new(),
         };
         s.phv_lat = vec![(0, 0); raw_leaves.len()];
         for p in &s.phvs {
@@ -9479,6 +9641,7 @@ impl Planner<'_, '_> {
                 rows,
                 startup: est.startup,
                 total: est.total,
+                disabled: est.disabled as u32,
                 kind,
                 cols,
                 fromless,
@@ -9575,6 +9738,7 @@ impl Planner<'_, '_> {
                 o.width = w;
             }
         }
+        s.par = s.parallel_settings();
         let (best, sorted) = s.run()?;
         s.orient_derived();
         // Partitionwise join, when it is cheaper. (Under a LIMIT without an order: its
@@ -9745,6 +9909,10 @@ impl Planner<'_, '_> {
         let (mut plan, layout) = s.build(&best);
         if let Plan::Join { meta, .. } = &mut plan {
             meta.fdw_alt = crate::sql::plan::FdwAlt(s.fdw_alt(&layout).map(Arc::new));
+            if let Some((alt, cost)) = s.par_alt(&best, &layout) {
+                meta.par_alt = crate::sql::plan::FdwAlt(Some(Arc::new(alt)));
+                meta.par_alt_cost = crate::sql::plan::AltCost(cost);
+            }
         }
         // The columns of equalities turned into constants stay needed up to the join.
         let kept: Vec<usize> = match &*p {

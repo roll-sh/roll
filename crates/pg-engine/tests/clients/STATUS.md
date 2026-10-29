@@ -85,7 +85,7 @@ marked open.
 | Spring JDBC / Flyway / Liquibase (driver program) | Boot 4.1.2, Flyway 13.11.1, Liquibase 5.0.4 | 271 / 0 | 226 / 2 | 2 (+43 ids): pg_sequence_last_value, oidvectortypes |
 | jOOQ (codegen + DSL program) | 3.21.9 | 141 / 0 | 140 / 0 (11 ids) | domain is_nullable, _pg_truetypid, int2vector::int[] |
 | r2dbc-postgresql | 1.1.3 | 1251 / 21 | 1251 / 21 | 0 |
-| EF Core (EFCore.PG.FunctionalTests) | efcore.pg 10.0.3 | 27410 / 0 | 23851 / 3559 | N'...' literals (2490), oidvectortypes (1066), a LATERAL "outer reference" (4, open) |
+| EF Core (EFCore.PG.FunctionalTests) | efcore.pg 10.0.3 | 27410 / 0 | 23851 / 3559 | N'...' literals (2490), oidvectortypes (1066), a LATERAL "outer reference" (4, fixed in round 22, agent 91) |
 | Dapper | 2.1.89 | 153 / 170 | 153 / 170 | 0 |
 | Alembic | 1.20.1 | 2152 / 1 | 2144 / 9 | 8: jsonb subscripts deparsed as #> |
 | SQLModel + Alembic autogenerate (driver program) | 0.0.48, asyncpg 0.32.0 | 74 / 0 | 74 / 0 | 0 |
@@ -117,8 +117,11 @@ Left, and why:
   the suites themselves weren't re-run (EF Core and MikroORM need their full runs, whose
   timing decides when the reference's autovacuum ran).
 - EF Core (4): "outer reference without an outer row" in a LEFT JOIN LATERAL over a derived
-  table with an OR qual (`SelectMany_with_predicate_and_DefaultIfEmpty_...`); not reduced to
-  a self-contained repro yet (~/.cache/a81/a81d/repro/q7.sql against Level1).
+  table with an OR qual (`SelectMany_with_predicate_and_DefaultIfEmpty_...`): fixed in round
+  22 (agent 91, regress STATUS.md round 22; golden `a91_planner_fixes`): the pulled-up LATERAL
+  subquery's clause over the lateral reference stayed in a scan under a FROM subquery's
+  projection that reorders columns. The 292 DefaultIfEmpty tests: 290 pass, the 2 left are
+  SelectMany4's LIMIT without ORDER BY (above).
 - Spring (2): Flyway's three concurrent migrates. Concurrent `CREATE SCHEMA IF NOT EXISTS` /
   `CREATE TABLE IF NOT EXISTS` of one name don't wait for the other transaction: PostgreSQL's
   second blocks on the first's uncommitted catalog row, then fails with a unique violation

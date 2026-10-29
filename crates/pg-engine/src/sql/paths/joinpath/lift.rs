@@ -471,6 +471,9 @@ fn flatten_tree(p: &Plan, nulled: u32, anulled: u32, cx: &mut Cx, semi: bool) ->
     };
     // (A LATERAL subquery's scans' clauses over its lateral references: its WHERE's.)
     let (hoisted_join, hoisted) = if frame.is_some() { hoist_frame_quals(join) } else { (join.clone(), Vec::new()) };
+    if frame.is_some() && frame_quals_left(&hoisted_join) {
+        return None;
+    }
     let join = &hoisted_join;
     // (Its own subqueries are pulled up into it first, as pull_up_simple_subquery does:
     // PlaceHolderVars for its own outer joins; its outputs are wrapped above for the
@@ -824,7 +827,50 @@ fn hoist_frame_quals(p: &Plan) -> (Plan, Vec<Expr>) {
             sp.reverse = false;
             (Plan::Scan(sp), out)
         }
+        // (A FROM subquery of its own, pulled up into it: its scans' clauses over the
+        // projection's row, which must return the columns they read.)
+        Plan::Project { input, exprs } => {
+            let (i, q) = hoist_frame_quals(input);
+            if q.is_empty() {
+                return (p.clone(), Vec::new());
+            }
+            let pos = |c: usize| exprs.iter().position(|e| matches!(e, Expr::Col(j, _) if *j == c));
+            if !q.iter().all(|e| e.columns().iter().all(|&c| pos(c).is_some())) {
+                return (p.clone(), Vec::new());
+            }
+            let out = q
+                .into_iter()
+                .map(|e| {
+                    e.transform(&mut |x| {
+                        Ok(match x {
+                            Expr::Col(c, t) => Expr::Col(pos(c).unwrap_or(c), t),
+                            x => x,
+                        })
+                    })
+                    .expect("a column map")
+                })
+                .collect();
+            (Plan::Project { input: Arc::new(i), exprs: exprs.clone() }, out)
+        }
         p => (p.clone(), Vec::new()),
+    }
+}
+
+/// A scan of the tree still checking a clause over the LATERAL references (one
+/// `hoist_frame_quals` couldn't take out): the tree can't be pulled up without them.
+fn frame_quals_left(p: &Plan) -> bool {
+    match p {
+        Plan::Scan(sp) => sp.filter.as_ref().is_some_and(|f| {
+            let mut parts = Vec::new();
+            conjuncts(f.clone(), &mut parts);
+            parts.iter().any(|e| {
+                let mut r = (false, false);
+                expr_frame_refs(e, 1, &mut r);
+                r.0
+            })
+        }),
+        Plan::Join { params, left, .. } if !params.is_empty() => frame_quals_left(left),
+        p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| frame_quals_left(c)),
     }
 }
 

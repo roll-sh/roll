@@ -112,9 +112,15 @@ pub(crate) fn explain(
         let instr = std::rc::Rc::new(crate::exec::Instr::default());
         let saved = ctx.instr.borrow_mut().replace(instr.clone());
         let t = std::time::Instant::now();
+        // (The join trees whose parallel plans EXPLAIN shows are the ones run.)
+        if ctas.is_none()
+            && let Some(p) = crate::sql::explain::analyzed_plan(&bq.plan, bq.hidden_rtes, &o, ctx, if generic { &[] } else { &values })
+        {
+            plan.0 = p;
+        }
         let r = match &ctas {
             Some(node) => crate::session::ddl::execute(ctx, node, "").map(|_| ()),
-            None => collect(&bq.plan, ctx, None).map(|_| ()),
+            None => collect(&plan.0, ctx, None).map(|_| ()),
         };
         *ctx.instr.borrow_mut() = saved;
         r?;

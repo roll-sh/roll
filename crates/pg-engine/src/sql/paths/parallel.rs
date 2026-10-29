@@ -413,10 +413,25 @@ impl Planner<'_, '_> {
         member: bool,
         useful: &crate::sql::plan::ScanUseful,
     ) -> Vec<(Path, usize)> {
+        let out = self.partial_seq(rel, cfg, member);
+        // Partial index scans (btree), and the bitmap heap scan: build_index_paths makes
+        // them along with the plain ones, for the orderings found useful.
+        let want = match &useful.0 {
+            Some(u) => Want {
+                keys: u.0.clone(),
+                limit: None,
+                merge: u.1.clone(),
+            },
+            None => Want::default(),
+        };
+        let serial = self.paths(rel, &want);
+        self.partial_paths_of(rel, cfg, member, &serial, out)
+    }
+
+    /// create_plain_partial_paths: the parallel sequential scan, when it gets workers.
+    pub(super) fn partial_seq(&self, rel: &Rel, cfg: &ParCfg, member: bool) -> Vec<(Path, usize)> {
         let mut out = Vec::new();
-        let t = &rel.table;
-        // create_plain_partial_paths.
-        let w = compute_workers(t, rel.size.pages, -1.0, cfg, member);
+        let w = compute_workers(&rel.table, rel.size.pages, -1.0, cfg, member);
         if w > 0 {
             let div = cfg.divisor(w);
             let cpu = (CPU_TUPLE_COST + rel.qual_cost) * rel.size.tuples;
@@ -432,17 +447,22 @@ impl Planner<'_, '_> {
                 w,
             ));
         }
-        // Partial index scans (btree), and the bitmap heap scan: build_index_paths makes
-        // them along with the plain ones, for the orderings found useful.
-        let want = match &useful.0 {
-            Some(u) => Want {
-                keys: u.0.clone(),
-                limit: None,
-                merge: u.1.clone(),
-            },
-            None => Want::default(),
-        };
-        for (path, _) in self.paths(rel, &want).into_iter().map(|p| (p, 0)) {
+        out
+    }
+
+    /// `partial_paths` from the relation's serial paths already made (the join search's,
+    /// for its orderings): the partial index and bitmap paths made along with them, after
+    /// the parallel sequential scan in `out`.
+    pub(super) fn partial_paths_of(
+        &self,
+        rel: &Rel,
+        cfg: &ParCfg,
+        member: bool,
+        serial: &[Path],
+        mut out: Vec<(Path, usize)>,
+    ) -> Vec<(Path, usize)> {
+        let t = &rel.table;
+        for path in serial {
             match &path.kind {
                 PathKind::Index(ip) if rel.indexes[ip.ix].am == Am::Btree => {
                     let w = compute_workers(t, ip.rand_pages, ip.index_pages, cfg, member);

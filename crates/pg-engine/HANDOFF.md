@@ -2635,6 +2635,19 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   not supported by this server", with a hint to use logical replication). Physical slots exist
   (pg_create_physical_replication_slot, pg_copy_physical_replication_slot) as registry entries.
   Logical replication is the supported path (below, "Logical replication").
+- **JIT: the engine is a PostgreSQL 18.6 whose JIT provider isn't installed** (round 22,
+  agent 91). It compiles no expressions to machine code, so it reports none: `jit` and the
+  other jit settings exist with PostgreSQL's defaults and checks (`jit = on`,
+  `jit_above_cost = 100000`, `jit_provider = 'llvmjit'`, ...; `session/gucs.tsv`),
+  `pg_jit_available()` is false, and EXPLAIN never prints a `JIT:` section. That is exactly
+  what PostgreSQL 18.6 does when llvmjit can't be loaded (checked against the pinned image
+  started with `-c jit_provider=<missing>`: `pg_jit_available()` false, no `JIT:` lines with
+  `jit_above_cost = 0`, plain or ANALYZE, text or JSON). The pinned image has llvmjit, so the
+  reference prints `JIT: Functions: N, Options: ...` (and timings under ANALYZE) for plans
+  costing more than jit_above_cost: an accepted configuration difference, not behaviour.
+  Printing function counts or timings for compilation that never ran would mislead the tools
+  that read them (auto_explain logs, pgAdmin / explain.dalibo.com, people tuning
+  jit_above_cost); pg_jit_available() is how clients are meant to tell.
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for
@@ -2732,14 +2745,21 @@ them all with the "Fixed in round N" sections describing what was already tried.
 6. **equivclass**, **inherit** and **collate.icu.utf8**: done (round 15, agent 10).
 7. **partition_aggregate**: done (137/137).
 8. The 18 plan-choice units listed in STATUS.md ("Plan choice visible in results").
-9. **TPC-H plans and the planner tail** (rounds 20-21, agents 64 and 78; BENCH.md "Round 21"
-   lists each TPC-H query's remaining cause): 16 of the 22 SF1 plans have PostgreSQL's shape
-   (19 of 22 serial). Left: q05 / q08 (the engine's partial plans are EXPLAIN's partial
-   versions of the serial join tree the search chose; Postgres keeps partial paths per join
-   relation, add_partial_path, and its best partial plan joins in another order: partial
-   paths in the join search), q18 (a sorted grouping over a merge join in c_custkey order
+9. **TPC-H plans and the planner tail** (rounds 20-22, agents 64, 78 and 91; BENCH.md "Round 21"
+   lists each TPC-H query's remaining cause, "Round 22" the partial paths): 19 of the 22 SF1
+   plans have PostgreSQL's shape (19 of 22 serial). q05 / q08 match since round 22: the join
+   search keeps partial paths per join relation (`paths/joinpath/partial.rs`, STATUS.md round
+   22: its partial tree is `JoinMeta::par_alt`, which EXPLAIN builds parallel plans along and
+   EXPLAIN ANALYZE runs when shown; the pass runs only when a parallel plan could win, so OLTP
+   planning doesn't pay for it). Left: q18 (a sorted grouping over a merge join in c_custkey order
    with an Incremental Sort: get_useful_group_keys_orderings and pathkeys_useful_for_grouping
-   at the join), q21 (two joins over rows=1 that tie within 0.5), q13 after a restart (a
+   at the join; round 22 tried it (STATUS.md round 22's last paragraph): keeping group-useful
+   pathkeys at joins and offering the grouping that path matched q18 serially, but a smaller
+   schema then chose a nested loop with a Memoize over the grouped IN sub-select's output that
+   PostgreSQL never builds that cheaply: the index scans of a 600k-entry two-column btree start
+   at 0.17 where PostgreSQL's start at 0.42 (a btree height), and the Memoize's distinct keys
+   of a grouped sub-select's output; fix those first; the parallel q18 also needs partial merge
+   joins in the search), q21 (two joins over rows=1 that tie within 0.5), q13 after a restart (a
    cold heap model laid out densely: customer 3,588 pages for 3,640, so its HashAggregate
    fits hash_mem; storage), q09 / q10 serial (ANALYZE's random sample). The planner
    leftovers passed on: join 355 at the default collapse limit (a LATERAL subquery with
@@ -2753,13 +2773,46 @@ them all with the "Fixed in round N" sections describing what was already tried.
    moving the qual up a level needs those rewritten as the semi join's columns). Also found
    (round 21): an INSERT ... SELECT that isn't pulled up (ORDER BY, GROUP BY, LIMIT) and
    leaves columns to their defaults keeps `Subquery Scan on "*SELECT*"` to compute the new
-   row (the engine shows the Sort / Aggregate under the Insert); EXPLAIN's `JIT:` lines past
-   jit_above_cost are never shown. (An INSERT's source width and cost count the defaulted
+   row (the engine shows the Sort / Aggregate under the Insert). (EXPLAIN's `JIT:` lines: a
+   decision since round 22, Decisions: the engine is a PostgreSQL without a JIT provider.)
+   (An INSERT's source width and cost count the defaulted
    columns since round 21, and a Sort / Limit under a projection dropping the ORDER BY's
    resjunk columns counts them in its width.) TPC-H q07 is parallel as PostgreSQL's since
-   round 21 (agent 77 measured it serial before); q08 is parallel but joins customer by
-   hashing in the workers where PostgreSQL uses customer_pkey (the partial-paths cause, as
-   q05).
+   round 21 (agent 77 measured it serial before).
+10. **Planner queue after round 22** (agent 91's list, found on ORM and TPC-DS-style queries
+   over the TPC-H SF1 data against PostgreSQL 18.6, and passed on by other agents; each
+   differs on the base too):
+   - A FROM subquery with a written LIMIT / OFFSET (`OFFSET 0` included: Prisma's and
+     SQLAlchemy's count wrappers) is no parallel relation to the query above
+     (set_rel_consider_parallel sees the unfolded `int8(0)`, limit_needed): the engine elides
+     the Limit and aggregates over its partial plan in workers (`Finalize Aggregate` over a
+     Gather where PostgreSQL has a plain Aggregate over the scan).
+   - A CTE inlined as a FROM subquery that groups (a window function over it) keeps its
+     `Subquery Scan on t` and the window's `ORDER BY t.v`; the engine removes the scan and
+     shows the aggregate's expression. A UNION ALL's arms under a Sort: PostgreSQL removes
+     their Subquery Scans and names the sort key `"*SELECT* 1".k`; the engine keeps them
+     and shows `"*SELECT* 1_1".k`.
+   - Parallel choices near ties on single-table and two-table ORM queries
+     (`EXISTS (... LIMIT 1) ORDER BY ... LIMIT 21`, a keyset page, a join ordered by a date
+     with OFFSET): the engine picks a Gather (Merge) where PostgreSQL stays serial, and a
+     grouping over a three-way hash join where PostgreSQL aggregates partially in workers;
+     look at the Gather Merge and fractional costs first.
+   - pg_overexplain DEBUG: a nested loop's extParam / allParam ids aren't modelled (low).
+   - Agent 88 (tests/isolation/STATUS.md): an UPDATE inside a WITH with
+     `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` doesn't get PostgreSQL's
+     unique-ified HashAggregate + Nested Loop (the plain statement does, golden
+     a88_locked_any_sublink); and that HashAggregate returns its groups in another order than
+     PostgreSQL's when there are more of them than estimated (the hash table's growth).
+   - Agent 99: an aggregate's final function cost per group isn't added (sum(numeric):
+     0.0025 x groups below PostgreSQL's total); `LIMIT (SELECT 5)` doesn't show its InitPlan.
+   - Agent 103 (index access, 75465ad5): on a GiST box index the engine picks an Index Only
+     Scan where PostgreSQL picks a Bitmap Heap / Index Scan (`tools/bench/access.rs`, "GiST box
+     &&"); PostgreSQL 18's skip scan costing and plan choice to compare (the executor side is
+     agent 114's). GIN / GiST page counts are cached per snapshot now: rebase before touching
+     the size model.
+   - Started, not pushed: a FROM subquery with a written LIMIT / OFFSET settles its own plan
+     (a Gather inside it if cheaper) and offers no partial plan above (`node`, after
+     `convert` of a Barrier over a Limit), for the first item of this list; unverified.
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

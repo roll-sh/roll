@@ -1383,6 +1383,44 @@ after `select 1` (catalogs, sessions); the size models of part (+~70 MB) and cus
 and a TID vector each); per-query working memory 100-250 MB above that (q10's and q13's
 hash builds and sorts of wide rows).
 
+## Round 22 (agent 91): partial paths in the join search
+
+The same plan comparison as round 21's (`EXPLAIN` of the 22 TPC-H queries at SF1, PostgreSQL
+18.6 in `a91-pg` and the engine loaded with the same data by `tools/bench` and analyzed).
+q05 and q08 now have PostgreSQL's parallel plans: the join search keeps partial paths per
+join relation, and the cheapest partial path's tree (customer x nation x region in the
+workers, orders by orders_o_custkey_idx, for q05; customer by customer_pkey for q08) is the
+one EXPLAIN's parallel plans follow (STATUS.md round 22). With the engine restarted before
+the run: **19 of 22** parallel (q13 differs after a restart, agent 85's; q18, q21 as before),
+**19 of 22** serial (q18, q21; q10 by ANALYZE's sample). Every result hash agrees with
+PostgreSQL's. `EXPLAIN ANALYZE` shows (and runs) the same plan: q05's partial tree with
+its own row counts.
+
+**Planning time.** CPU time of the engine process per statement, 2,000 statements per query
+in one session, the base (`69743b6c`) and this batch interleaved three times, the lower of
+each (read from `/proc/<pid>/stat`, which the machine's load of 20-30 moves less than wall
+time, whose run-to-run spread was 30% per query):
+
+| workload | base | batch | batch / base |
+|---|---|---|---|
+| pgbench's statements and ten ORM-style queries over pgbench_accounts (scale 10), EXPLAINed | 8,665 us | 8,545 us | 0.99 |
+| the same, executed (the eight that run in under a millisecond) | 15,415 us | 15,245 us | 0.99 |
+| TPC-H's 22 queries, EXPLAINed (200 each) | 140.3 ms | 141.9 ms | 1.01 |
+
+OLTP planning is unchanged: a join of a lookup to a big table makes its leaves' partial scans
+(from the serial paths already made) and stops there, since no parallel plan could beat the
+serial one by the bound in `partial_pass`. The first version, which made the partial join
+paths inline and named the partial trees' scans by a walk of every plan in EXPLAIN, cost
+12% more CPU per OLTP join statement (38% for a three-way join); both are gone. The TPC-H
+queries that run the pass pay for PostgreSQL's search, less the join pairs whose outer side's
+cheapest partial path already costs more than the bound (any partial join over it costs at
+least that: without that, the TPC-H total was 1.14x, q05 1.50x): q05 13.9 ms -> 15.2 ms
+(1.09x), q08 23.3 -> 24.7 (1.06x), q07 and q09 the same. Per-query noise is about 20% at this
+load; the TPC-H row is a later run than the OLTP rows, at another load.
+
+Memory: the pass's partial paths live with the search (as the serial ones); a skipped pass
+keeps one record per join pair (its relations and clause list), dropped with the search.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image
