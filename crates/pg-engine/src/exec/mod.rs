@@ -169,6 +169,27 @@ pub trait Node {
     fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<pipe::Item>> {
         Ok(self.next(ctx)?.map(|r| pipe::Item::Row(r, pipe::ALL)))
     }
+
+    /// The columns this node's rows come ordered by, each with its direction and NULLs
+    /// placement (an index scan's key columns, in the index's order), before its first row:
+    /// rows with equal values of the first k of them come one after another, for every k.
+    fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
+        None
+    }
+
+    /// A projection's expressions, before its first row: an aggregation above may read its
+    /// rows through them (`pipeline_projected`).
+    fn projection(&self) -> Option<&[Expr]> {
+        None
+    }
+
+    /// `pipeline` with no stages above, for an aggregation whose `spec` reads this
+    /// projection's input rows (its keys and arguments with the projection's expressions
+    /// put in for its columns): the rows the workers leave to the serial path come out
+    /// projected, the parts as they are.
+    fn pipeline_projected(&mut self, _spec: Arc<partial::Spec>, _ctx: &ExecCtx) -> Result<Option<u8>> {
+        Ok(None)
+    }
 }
 
 pub type BoxNode = Box<dyn Node>;
@@ -511,6 +532,10 @@ impl Node for InstrNode {
 
     fn add_captured(&mut self, rows: Vec<trigger::AfterRow>) {
         self.inner.add_captured(rows)
+    }
+
+    fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
+        self.inner.key_order()
     }
 
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {

@@ -1202,6 +1202,140 @@ smaller).
 - The regression suite in full (debug build, private reference): 51,148 / 51,150, no unit
   changed against the committed baseline (the first batch, and again with the second).
 
+## Round 21 (agent 101): executor memory and parallel work above the scan, first batch
+
+Same harness and settings as agent 90's round; both servers on cores 4-7, the client on
+2-3, the machine shared (load 18-25 throughout). **pg** is PostgreSQL 18.6 (`a101-pg`);
+**before** is the branch at `a04b5d87`, **after** this batch. Two interleaved full rounds
+each (before, after, after, before); each cell is the mean of the two rounds' medians of
+3. **CPU** is the engine's user + system seconds per run (its 3 reps / 3, the first
+rep's planning included). Every result hash agrees with PostgreSQL's.
+
+| query | pg | before | after | after / pg | after / before | CPU s before | CPU s after |
+|---|---|---|---|---|---|---|---|
+| q01 | 2.250 | 3.244 | 3.208 | 0.70x | 1.01x | 10.1 | 10.5 |
+| q02 | 0.265 | 1.587 | 1.847 | 0.14x | 0.86x | 1.9 | 2.4 |
+| q03 | 0.619 | 1.876 | 1.995 | 0.31x | 0.94x | 5.6 | 5.5 |
+| q04 | 0.212 | 0.955 | 1.130 | 0.19x | 0.85x | 2.2 | 2.4 |
+| q05 | 0.492 | 1.441 | 1.714 | 0.29x | 0.84x | 3.0 | 3.5 |
+| q06 | 0.702 | 2.206 | 2.418 | 0.29x | 0.91x | 4.5 | 4.9 |
+| q07 | 0.512 | 4.776 | 1.570 | 0.33x | 3.04x | 4.8 | 4.3 |
+| q08 | 0.242 | 2.030 | 0.837 | 0.29x | 2.43x | 2.0 | 1.6 |
+| q09 | 1.706 | 4.040 | 4.169 | 0.41x | 0.97x | 13.7 | 12.4 |
+| q10 | 0.755 | 4.495 | 3.875 | 0.19x | 1.16x | 9.3 | 9.2 |
+| q11 | 0.146 | 0.501 | 0.431 | 0.34x | 1.16x | 0.5 | 0.4 |
+| q12 | 0.828 | 2.871 | 2.820 | 0.29x | 1.02x | 8.7 | 8.5 |
+| q13 | 1.053 | 5.877 | 2.646 | 0.40x | 2.22x | 11.0 | 6.6 |
+| q14 | 0.263 | 2.598 | 2.400 | 0.11x | 1.08x | 5.1 | 4.7 |
+| q15 | 0.487 | 2.105 | 1.689 | 0.29x | 1.25x | 4.6 | 4.4 |
+| q16 | 0.350 | 1.400 | 1.267 | 0.28x | 1.11x | 1.8 | 1.7 |
+| q17 | 1.106 | 2.985 | 2.589 | 0.43x | 1.15x | 8.7 | 7.6 |
+| q18 | 3.513 | 6.798 | 4.574 | 0.77x | 1.49x | 16.8 | 13.2 |
+| q19 | 0.094 | 0.573 | 0.261 | 0.36x | 2.20x | 0.6 | 0.5 |
+| q20 | 0.136 | 1.096 | 1.263 | 0.11x | 0.87x | 1.1 | 1.3 |
+| q21 | 0.799 | 4.796 | 3.345 | 0.24x | 1.43x | 12.0 | 9.7 |
+| q22 | 0.124 | 1.401 | 0.916 | 0.14x | 1.53x | 1.4 | 1.0 |
+| all 22 | 16.65 | 59.65 | 46.96 | 0.35x | 1.27x | 129.8 | 116.3 |
+| peak memory (MB) | 1,711 | 4,131 | 2,975 | | | | |
+
+q02, q04, q05 and q20 vary by more than their differences: alternating fresh engines
+(base, new, base, new; 3 reps each) gave q02 8.0 / 8.9 / 8.8 / 8.9 CPU s, q04 12.6 / 12.1 /
+12.5 / 12.7, q05 16.5 / 17.0 / 14.9 / 14.5, q01 35.8 / 35.5 / 33.8 / 34.6.
+
+**pgbench** (scale 10, `-M prepared`, 8 clients, 10 s, fresh engine each, before / after /
+after / before): select-only 28.1k / 37.1k / 46.2k / 47.8k TPS, tpcb-like 3.42k / 3.73k /
+3.73k / 3.54k; peak RSS 397 / 414 / 399 / 415 MB. No difference beyond the spread.
+
+### What held the 4.1 GB
+
+Measured per query on a fresh engine with `--cache-mb 64` (so the cache isn't the peak),
+then over the whole round:
+- **q18's grouping**: 1.5M groups of a GroupAggregate over `lineitem_pkey`, all held
+  (the engine hashed every grouping, then sorted the groups), 1.4 GB. Now streamed.
+- **The block cache**: `--cache-mb 2048`, filled to its limit. A full scan's blocks could
+  push out everything else (and did, for the warm-up and q01); index lookups of q03, q07,
+  q09, q21 touch most of lineitem anyway, so the cache ends full either way (PostgreSQL's
+  shared buffers end at about 1.6 GB of its 2 GB). TPC-H SF1's entries decompressed are
+  2.2 GB, more than PostgreSQL's 1.6 GB of pages: the cache holding the same working set
+  takes more bytes than shared buffers do.
+- **Size models** of the modelled tables (part, customer, supplier): about 120 MB kept for
+  part, and the model's build held every row decoded at once (+150 MB transient).
+- Per-query working memory otherwise 100-450 MB (hash tables of wide rows: q02's partsupp
+  ⋈ supplier side, q10, q13).
+
+### What changed
+
+- **Streaming GroupAggregate** (`exec/agg.rs` `Stream`): a grouping PostgreSQL runs as a
+  GroupAggregate directly over an ordered path (no Sort under it), whose keys are its
+  input's ordered columns (`Node::key_order`: a forward btree scan's key columns in the
+  index's directions), finishes each group when the next one starts, as
+  agg_retrieve_direct does, the last group finalized before the next group's first row is
+  fed. One group is held instead of all (q18: 1.4 GB less), and a LIMIT above stops the
+  input: `SELECT k, sum(10 / (k - 700)) ... GROUP BY k LIMIT 3` now returns its 3 rows as
+  PostgreSQL does instead of the error of a later group (golden `a101_stream_group`).
+  Parts from a parallel scan's workers merge into the open group in order.
+- **Scan-resistant block cache** (`storage::bulk_read`, `Store::bulk_range`,
+  `BlockCache::insert_if_room`): a parallel scan of a range whose blocks exceed a quarter
+  of the cache (PostgreSQL's ring rule, NBuffers / 4) is a bulk read; its blocks go into the
+  cache only where it has room and evict nothing. The probes and lookups the workers run
+  over those rows fill the cache as before.
+- **Projection moves** (`ProjectNode::moves`): a projected plain column nothing else reads
+  is moved out of the input row instead of copied (agent 90's left-out change). q13 spent
+  28% of its CPU in `Value::clone` there.
+- **Partial aggregation through a projection** (`Node::projection`,
+  `pipeline_projected`): an aggregation over a FROM subquery's computed outputs (q07, q08)
+  now runs in the workers with the projection's expressions put in for its columns; only
+  when every computed expression is read by a key or argument whatever the row (not only
+  in a CASE branch), so the workers compute it for every row the projection would. Rows a
+  kernel leaves to the serial path come out projected.
+- **Modelled tables in parallel** (`start_parallel`): a modelled heap whose rows aren't all
+  stored in key order (customer: 42 rows went into earlier pages' free space at load) is
+  read on the executor's thread, put in heap order as the serial scan does, and its runs
+  handed to the workers when joins or an aggregation above run there (q07's lookups of
+  orders and lineitem per customer, q08, q19's part). A heap laid out afresh
+  (`unstamped`) whose keys are in heap order splits by keys when the scan reads no TIDs.
+- **Lighter structures**: hash join chains flat (`pghash::JoinTable`: a start per bucket and
+  a row index per tuple, instead of a vector per bucket and the tuple list kept); a heap
+  model's build decodes one row at a time; a hashed grouping's output order no longer
+  copies every group key.
+
+### Tried and left out
+
+A two-tier cache (decompressed blocks in a quarter of the budget, the files' compressed
+bytes of blocks read before in the rest), with zstd and with LZ4 blocks (`lz4_flex`; disk
+686 MB zstd, 885 MB LZ4, PostgreSQL 1,602 MB). Whole rounds on one engine, CPU seconds over
+the round (3 reps each) and peak:
+
+| cache | CPU s | peak MB |
+|---|---|---|
+| zstd, one tier | 393 | 2,906 |
+| LZ4, one tier | 378 | 2,903 |
+| LZ4, decompressed tier 25% | 418 | 2,214 |
+| zstd, decompressed tier 25% | 669 | 2,018 |
+
+The compressed tier holds the working set in a third of the bytes, but a 16 kB block
+decompressed for each lookup that misses the smaller first tier costs q07, q09, q11 and
+q20 30-100% more CPU (zstd) or 30-60% (LZ4). Cheaper misses (smaller blocks for point
+lookups, or a row cache) would make it worth it; LZ4 alone saves 4% CPU (q01 -14%) for
+29% more disk and a format addition older binaries can't read.
+
+### Where memory and time still go
+
+- Peak 2.98 GB against PostgreSQL's 1.71 GB: the cache (2 GB of decompressed blocks, full by
+  q09) plus 0.8-1.0 GB of models, allocator pages and per-query working memory.
+  Below PostgreSQL needs the working set cached in fewer bytes (above) and hash tables of
+  only the columns read.
+- The serial plan's hash builds, sorts and right-join groupings still run on the
+  executor's thread (q10, q13's c_custkey grouping, q21); numeric values still allocate twice.
+
+### Verification (round 21, agent 101)
+
+- `cargo test -p pg-engine` in debug and release (deep_input and the parallel tests
+  included), `cargo clippy -p pg-engine --all-targets` with no warning in the files changed,
+  the difftest smoke, the isolation suite 121 / 122 specs (1,647 / 1,648 permutations), the
+  regression suite in full (debug, private reference) 51,148 / 51,150 with no unit changed
+  against `results.tsv`; every TPC-H result hash equal to PostgreSQL's in all four rounds.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

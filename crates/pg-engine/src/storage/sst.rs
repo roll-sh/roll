@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAGIC: u64 = 0x726f_6c6c_7373_7431; // "rollsst1"
-const BLOCK_TARGET: usize = 16 * 1024;
+pub(crate) const BLOCK_TARGET: usize = 16 * 1024;
 const FOOTER_LEN: usize = 48;
 const BLOOM_BITS_PER_KEY: usize = 10;
 const BLOOM_K: u32 = 7;
@@ -803,7 +803,12 @@ impl SstReader {
         let block = Arc::new(Block::decode(raw)?);
         if fill {
             let size = block.mem_bytes();
-            self.cache.insert(self.cache_id, i as u32, block.clone(), size);
+            // (A bulk read's block takes only room the cache has free: it evicts nothing.)
+            if super::in_bulk_read() {
+                self.cache.insert_if_room(self.cache_id, i as u32, block.clone(), size);
+            } else {
+                self.cache.insert(self.cache_id, i as u32, block.clone(), size);
+            }
         }
         Ok(block)
     }

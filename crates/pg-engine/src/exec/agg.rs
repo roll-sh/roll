@@ -2519,6 +2519,8 @@ pub struct AggNode {
     plan: Option<Arc<crate::sql::plan::Plan>>,
     /// Planned as a Finalize Aggregate over partial ones (decided at the first group).
     split: std::cell::OnceCell<bool>,
+    /// Running as a GroupAggregate over its input's order (`Stream`).
+    stream: Option<Box<Stream>>,
 }
 
 impl AggNode {
@@ -2536,6 +2538,7 @@ impl AggNode {
             out: Vec::new().into_iter(),
             plan: None,
             split: std::cell::OnceCell::new(),
+            stream: None,
         }
     }
 
@@ -2585,7 +2588,7 @@ impl AggNode {
 
     fn group_order(
         &self,
-        keys: &[Vec<Value>],
+        keys: &[(Vec<Value>, Vec<AggState>)],
         hashed: &super::pghash::GroupOrder,
         ctx: &ExecCtx,
     ) -> Result<Vec<usize>> {
@@ -2612,7 +2615,7 @@ impl AggNode {
             let mut idx: Vec<usize> = (0..n).collect();
             let mut f = |a: &usize, b: &usize| -> Result<Ordering> {
                 for (i, k) in sk.iter().enumerate() {
-                    match super::nodes::compare_values(&keys[*a][i], &keys[*b][i], k, ctx)? {
+                    match super::nodes::compare_values(&keys[*a].0[i], &keys[*b].0[i], k, ctx)? {
                         Ordering::Equal => {}
                         o => return Ok(o),
                     }
@@ -2650,7 +2653,7 @@ impl AggNode {
             let mut idx: Vec<usize> = (0..n).collect();
             let mut f = |a: &usize, b: &usize| -> Result<Ordering> {
                 for (i, k) in &sk {
-                    match super::nodes::compare_values(&keys[*a][*i], &keys[*b][*i], k, ctx)? {
+                    match super::nodes::compare_values(&keys[*a].0[*i], &keys[*b].0[*i], k, ctx)? {
                         Ordering::Equal => {}
                         o => return Ok(o),
                     }
@@ -2685,6 +2688,18 @@ impl AggNode {
         if ctx.instrumented() || self.split(ctx) {
             return Ok(false);
         }
+        // (Through a projection right below: its expressions put in for its columns, the
+        // workers run the pipeline below it.)
+        let proj: Option<Vec<crate::sql::expr::Expr>> = input.projection().map(<[_]>::to_vec);
+        if let Some(p) = &proj
+            && !projection_read_always(p, self.groups.iter().chain(self.aggs.iter().flat_map(|a| a.args.iter())))
+        {
+            return Ok(false);
+        }
+        let compile = |e: &crate::sql::expr::Expr| match &proj {
+            None => compile(e),
+            Some(p) => compile(&through_projection(e, p)?),
+        };
         let Some(keys) = self.groups.iter().map(compile).collect::<Option<Vec<_>>>() else {
             return Ok(false);
         };
@@ -2718,7 +2733,11 @@ impl AggNode {
             aggs.push((arg, a.def.skip_nulls, empty));
         }
         let spec = Arc::new(super::partial::Spec { keys, trim, aggs, seq });
-        Ok(input.pipeline(Vec::new(), Some(spec), ctx)?.is_some())
+        Ok(match proj {
+            Some(_) => input.pipeline_projected(spec, ctx)?,
+            None => input.pipeline(Vec::new(), Some(spec), ctx)?,
+        }
+        .is_some())
     }
 
     /// A new group's aggregate states; direct arguments see the group's key.
@@ -2977,8 +2996,7 @@ impl AggNode {
                 let states = self.states(&[], ctx)?;
                 groups.push((Vec::new(), states));
             }
-            let keys: Vec<Vec<Value>> = groups.iter().map(|g| g.0.clone()).collect();
-            let order = self.group_order(&keys, &hashed, ctx)?;
+            let order = self.group_order(&groups, &hashed, ctx)?;
             let mut slots: Vec<Option<(Vec<Value>, Vec<AggState>)>> =
                 groups.into_iter().map(Some).collect();
             let mut out = Vec::with_capacity(slots.len());
@@ -3238,11 +3256,227 @@ impl AggNode {
 impl Node for AggNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         if self.input.is_some() {
-            let rows = self.run(ctx)?;
-            self.out = rows.into_iter();
+            match self.start_stream(ctx)? {
+                Some(s) => self.stream = Some(Box::new(s)),
+                None => {
+                    let rows = self.run(ctx)?;
+                    self.out = rows.into_iter();
+                }
+            }
+        }
+        if let Some(mut s) = self.stream.take() {
+            let r = self.stream_step(&mut s, ctx);
+            self.stream = Some(s);
+            return r;
         }
         Ok(self.out.next())
     }
+}
+
+/// A GroupAggregate whose input comes in its groups' order (`Node::key_order`): each group
+/// is finished when the next one starts, as Postgres's agg_retrieve_direct does, so one
+/// group is held at a time, not every group (TPC-H q18's 1.5M groups over lineitem_pkey).
+struct Stream {
+    input: BoxNode,
+    /// The input comes aggregated in parts by a parallel scan (`partial_run`), in order.
+    parts: bool,
+    share: Vec<Option<usize>>,
+    open: Option<(Vec<Value>, Vec<AggState>)>,
+    /// The row that ended the last group, fed to the group it starts on the next call.
+    pending: Option<Row>,
+    /// Groups a part finished, in order.
+    ready: std::collections::VecDeque<(Vec<Value>, Vec<AggState>)>,
+    done: bool,
+}
+
+impl AggNode {
+    /// Whether this grouping can run as a `Stream`: a plain GroupAggregate (no Sort below
+    /// it in the plan) whose grouping keys are its input's ordered columns, in the order and
+    /// directions the GroupAggregate's output takes, and aggregates fed in any order.
+    fn streams(&self, input: &BoxNode, colls: &[Option<KeyNorm>], ctx: &ExecCtx) -> bool {
+        if self.sets.is_some()
+            || self.groups.is_empty()
+            || colls.iter().any(Option::is_some)
+            || self.aggs.iter().any(|a| a.distinct || !a.order_by.is_empty() || a.def.kind.is_ordered())
+            || self.split(ctx)
+        {
+            return false;
+        }
+        let (Some(plan), Some(order)) = (&self.plan, input.key_order()) else {
+            return false;
+        };
+        let e = super::pghash::agg_estimate(plan, ctx);
+        let (Some(sorted), None) = (&e.sorted, &e.presort) else {
+            return false;
+        };
+        if sorted.is_empty() || sorted.len() > order.len() {
+            return false;
+        }
+        let in_order = sorted.iter().zip(&order).all(|(&(g, desc, nf), &(col, idesc, inf))| {
+            matches!(self.groups.get(g), Some(crate::sql::expr::Expr::Col(c, _)) if *c == col)
+                && desc == idesc
+                && nf == inf
+        });
+        // (A key the sorted ones determine groups nothing more: EXPLAIN's redundant keys.)
+        let red = self.redundant_keys(ctx);
+        in_order && (0..self.groups.len()).all(|g| red.get(g).copied().unwrap_or(false) || sorted.iter().any(|s| s.0 == g))
+    }
+
+    #[inline(never)]
+    fn start_stream(&mut self, ctx: &ExecCtx) -> Result<Option<Stream>> {
+        let colls = nondeterministic_keys(&self.groups, ctx);
+        match &self.input {
+            Some(input) if self.streams(input, &colls, ctx) => {}
+            _ => return Ok(None),
+        }
+        let mut input = self.input.take().unwrap();
+        let parts = self.partial_run(&mut input, &colls, false, ctx)?;
+        Ok(Some(Stream {
+            input,
+            parts,
+            share: shared_states(&self.aggs, None),
+            open: None,
+            pending: None,
+            ready: Default::default(),
+            done: false,
+        }))
+    }
+
+    fn finish_streamed(&self, (key, mut states): (Vec<Value>, Vec<AggState>), share: &[Option<usize>], ctx: &ExecCtx) -> Result<Row> {
+        copy_shared(share, &mut states);
+        let mut row = key;
+        for (a, st) in self.aggs.iter().zip(states) {
+            row.push(finish(a, st, ctx)?);
+        }
+        Ok(row)
+    }
+
+    fn stream_feed(&self, s: &mut Stream, row: &[Value], ctx: &ExecCtx) -> Result<()> {
+        let Some((_, states)) = s.open.as_mut() else { return Ok(()) };
+        for ((a, st), sh) in self.aggs.iter().zip(states.iter_mut()).zip(&s.share) {
+            if sh.is_none() {
+                feed(a, st, row, ctx)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn stream_step(&self, s: &mut Stream, ctx: &ExecCtx) -> Result<Option<Row>> {
+        loop {
+            if let Some(g) = s.ready.pop_front() {
+                return self.finish_streamed(g, &s.share, ctx).map(Some);
+            }
+            if let Some(row) = s.pending.take() {
+                self.stream_feed(s, &row, ctx)?;
+                continue;
+            }
+            if s.done {
+                return Ok(None);
+            }
+            let row = match s.parts {
+                true => match s.input.next_item(ctx)? {
+                    None => None,
+                    Some(super::pipe::Item::Row(row, _)) => Some(row),
+                    Some(super::pipe::Item::Part(p)) => {
+                        // (Its groups in order; the first may go on with the open one.)
+                        for (k, st) in p.groups {
+                            if s.open.as_ref().is_none_or(|(open, _)| *open != k) {
+                                let states = self.states(&k, ctx)?;
+                                if let Some(g) = s.open.replace((k, states)) {
+                                    s.ready.push_back(g);
+                                }
+                            }
+                            if let Some((_, states)) = s.open.as_mut() {
+                                for (a, x) in states.iter_mut().zip(st) {
+                                    a.acc.merge(x)?;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                },
+                false => s.input.next(ctx)?,
+            };
+            let Some(row) = row else {
+                s.done = true;
+                s.ready.extend(s.open.take());
+                continue;
+            };
+            ctx.check()?;
+            let key = self.groups.iter().map(|g| eval(g, &row, ctx)).collect::<Result<Vec<_>>>()?;
+            if s.open.as_ref().is_some_and(|(open, _)| *open == key) {
+                self.stream_feed(s, &row, ctx)?;
+                continue;
+            }
+            // (The last group is finished before the new one's first row is fed, as
+            // Postgres finalizes it first.)
+            let states = self.states(&key, ctx)?;
+            s.pending = Some(row);
+            if let Some(g) = s.open.replace((key, states)) {
+                return self.finish_streamed(g, &s.share, ctx).map(Some);
+            }
+        }
+    }
+}
+
+/// Whether every expression of projection `proj` that computes something (not a column or a
+/// constant) is read by one of `exprs` whatever the row: so the workers computing those
+/// (`through_projection`) compute it for every row, as the projection would, and an error
+/// it raises isn't skipped (one read only in a CASE branch or an AND's operand might be).
+fn projection_read_always<'a>(proj: &[crate::sql::expr::Expr], exprs: impl Iterator<Item = &'a crate::sql::expr::Expr>) -> bool {
+    use crate::sql::expr::Expr;
+    let mut read = vec![false; proj.len()];
+    for e in exprs {
+        let mut cond = false;
+        e.walk(&mut |x| {
+            if matches!(
+                x,
+                Expr::And(..) | Expr::Or(..) | Expr::Case { .. } | Expr::Coalesce(..) | Expr::InList(..) | Expr::ArrayOp { .. } | Expr::Subquery(..)
+            ) {
+                cond = true;
+            }
+        });
+        match e {
+            Expr::Col(i, _) => {
+                if let Some(r) = read.get_mut(*i) {
+                    *r = true;
+                }
+            }
+            _ if !cond => {
+                for i in e.columns() {
+                    if let Some(r) = read.get_mut(i) {
+                        *r = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    proj.iter().zip(&read).all(|(p, r)| *r || matches!(p, Expr::Col(..) | Expr::Const(..)))
+}
+
+/// `e` over a projection's input row: its columns replaced by the projection's expressions
+/// (None: a column it doesn't have).
+fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr]) -> Option<crate::sql::expr::Expr> {
+    use crate::sql::expr::Expr;
+    let mut ok = true;
+    let out = e
+        .clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Col(i, t) => match proj.get(i) {
+                    Some(p) => p.clone(),
+                    None => {
+                        ok = false;
+                        Expr::Col(i, t)
+                    }
+                },
+                x => x,
+            })
+        })
+        .ok()?;
+    ok.then_some(out)
 }
 
 /// Whether an aggregate's result is the same whatever order its rows come in (counts,

@@ -259,6 +259,8 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             computed: None,
             tried: false,
             topk: None,
+            moves: None,
+            piped: false,
         }),
         Plan::ProjectSet { input, exprs, srfs } => Box::new(ProjectSetNode {
             input: open(input, ctx)?,
@@ -1646,6 +1648,72 @@ struct ProjectNode {
     tried: bool,
     /// A bounded sort above's wish (`topk_below`), for the scan when the key is computed there.
     topk: Option<super::TopK>,
+    /// Per expression, the input column it is when no other expression reads that column:
+    /// moved out of the input row rather than copied (`NOT_MOVED`: evaluated). None: every
+    /// expression is evaluated (decided at the first row, `project_moves`).
+    moves: Option<Box<[u32]>>,
+    /// The input runs a pipeline for an aggregation above (`pipeline_projected`): its
+    /// parts pass through, its rows are projected.
+    piped: bool,
+}
+
+const NOT_MOVED: u32 = u32::MAX;
+
+/// A piped projection's next item: a part as it comes, a row projected.
+#[inline(never)]
+fn projected_item(p: &mut ProjectNode, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+    use super::pipe::Item;
+    Ok(match p.input.next_item(ctx)? {
+        None => None,
+        Some(Item::Part(x)) => Some(Item::Part(x)),
+        Some(Item::Row(r, l)) => Some(Item::Row(
+            match &p.moves {
+                Some(m) => project_moving(&p.exprs, m, r, ctx)?,
+                None => eval_all(&p.exprs, &r, ctx)?,
+            },
+            l,
+        )),
+    })
+}
+
+/// `ProjectNode::moves` of `exprs`: None when no column can move.
+#[inline(never)]
+fn project_moves(exprs: &[Expr]) -> Option<Box<[u32]>> {
+    let mut reads: Vec<u32> = Vec::new();
+    for e in exprs {
+        for (i, r) in super::need::of([e])?.into_iter().enumerate() {
+            if r {
+                if reads.len() <= i {
+                    reads.resize(i + 1, 0);
+                }
+                reads[i] += 1;
+            }
+        }
+    }
+    let moves: Box<[u32]> = exprs
+        .iter()
+        .map(|e| match e {
+            Expr::Col(i, _) if reads.get(*i) == Some(&1) => *i as u32,
+            _ => NOT_MOVED,
+        })
+        .collect();
+    moves.iter().any(|&m| m != NOT_MOVED).then_some(moves)
+}
+
+/// The projection of `r` with `moves`: the evaluated expressions first, in order (they read
+/// the row whole), then the moved columns taken out of it.
+#[inline(never)]
+fn project_moving(exprs: &[Expr], moves: &[u32], mut r: Row, ctx: &ExecCtx) -> Result<Row> {
+    let mut out = Vec::with_capacity(exprs.len());
+    for (e, &m) in exprs.iter().zip(moves) {
+        out.push(if m == NOT_MOVED || m as usize >= r.len() { eval(e, &r, ctx)? } else { Value::Null });
+    }
+    for (o, &m) in out.iter_mut().zip(moves) {
+        if m != NOT_MOVED && (m as usize) < r.len() {
+            *o = std::mem::replace(&mut r[m as usize], Value::Null);
+        }
+    }
+    Ok(out)
 }
 
 impl ProjectNode {
@@ -1653,6 +1721,7 @@ impl ProjectNode {
     /// their kernels are most of a row's work) to a parallel scan below, when there is one.
     fn compute_below(&mut self, ctx: &ExecCtx) -> Result<()> {
         self.tried = true;
+        self.moves = project_moves(&self.exprs);
         let mut kernels = Vec::new();
         let places: Vec<Option<usize>> = self
             .exprs
@@ -1786,7 +1855,34 @@ impl Node for ProjectNode {
             }
             return Ok(Some(out));
         }
+        if let Some(m) = &self.moves {
+            return project_moving(&self.exprs, m, r, ctx).map(Some);
+        }
         Ok(Some(eval_all(&self.exprs, &r, ctx)?))
+    }
+
+    fn projection(&self) -> Option<&[Expr]> {
+        (!self.tried).then_some(&self.exprs[..])
+    }
+
+    fn pipeline_projected(&mut self, spec: Arc<super::partial::Spec>, ctx: &ExecCtx) -> Result<Option<u8>> {
+        if self.tried {
+            return Ok(None);
+        }
+        let r = self.input.pipeline(Vec::new(), Some(spec), ctx)?;
+        if r.is_some() {
+            self.tried = true;
+            self.piped = true;
+            self.moves = project_moves(&self.exprs);
+        }
+        Ok(r)
+    }
+
+    fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        if !self.piped {
+            return Ok(self.next(ctx)?.map(|r| super::pipe::Item::Row(r, super::pipe::ALL)));
+        }
+        projected_item(self, ctx)
     }
 
     fn topk_below(&mut self, t: super::TopK) -> bool {

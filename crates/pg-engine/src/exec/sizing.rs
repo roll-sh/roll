@@ -1304,28 +1304,26 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         stored = tagged.iter().map(|x| x.0).collect();
         raw = tagged.into_iter().map(|x| x.2).collect();
     }
-    let mut rows = Vec::with_capacity(raw.len());
-    for (k, v) in raw {
-        rows.push((k, decode_table_row(t, &v)?));
-    }
+    // (Each row decoded in turn, its layout and index keys taken, then dropped: the model of
+    // a table at the limit's size doesn't hold every row decoded at once.)
     let mut lens = Vec::new();
     let mut exts = Vec::new();
-    if heap_missing {
-        for (k, r) in &rows {
-            let (len, e) = layout(t, r, ctx, &HashSet::new());
+    let mut built: Vec<(u32, BtreeOpts, Vec<(Arc<Key>, Vec<u8>)>)> = missing
+        .iter()
+        .map(|bix| (bix.index.oid, btree_opts(bix).unwrap_or_else(default_opts), Vec::new()))
+        .collect();
+    for (k, v) in raw {
+        let r = decode_table_row(t, &v)?;
+        if heap_missing {
+            let (len, e) = layout(t, &r, ctx, &HashSet::new());
             lens.push((k.clone(), len));
             exts.push((k.clone(), e));
         }
-    }
-    let mut built = Vec::new();
-    for bix in missing {
-        let mut ents = Vec::new();
-        for (k, r) in &rows {
-            if let Some(vals) = index_values(bix, r, ctx)? {
-                ents.push((index_key(t, bix, vals, r, ctx), k));
+        for (bix, (_, _, ents)) in missing.iter().zip(&mut built) {
+            if let Some(vals) = index_values(bix, &r, ctx)? {
+                ents.push((index_key(t, bix, vals, &r, ctx), k.clone()));
             }
         }
-        built.push((bix.index.oid, btree_opts(bix).unwrap_or_else(default_opts), ents));
     }
     let mut rf = db.relfiles.write();
     let rf = &mut *rf;
@@ -1359,7 +1357,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         }
         let ents: Vec<(Arc<Key>, Tid)> = ents
             .into_iter()
-            .filter_map(|(key, k)| heap.tid_of(k).map(|tid| (key, tid)))
+            .filter_map(|(key, k)| heap.tid_of(&k).map(|tid| (key, tid)))
             .collect();
         rf.btrees.insert(oid, Btree::build(opts, ents));
     }
@@ -3336,9 +3334,20 @@ pub fn heap_in_key_order(t: &Table, ctx: &ExecCtx) -> bool {
 /// its rows are stored in heap order (`Heap::in_key_order`) and no page has a prunable xid,
 /// so pruning each page as the scan reaches it would prune nothing (a page this statement
 /// makes prunable isn't prunable before it ends, nor one a transaction that ends meanwhile
-/// does, which this scan's snapshot may still see).
-pub fn heap_scan_splits(t: &Table, ctx: &ExecCtx) -> bool {
-    ctx.sess.db.relfiles.read().heaps.get(&t.oid).is_some_and(|h| h.in_key_order() && !h.any_prunable())
+/// does, which this scan's snapshot may still see). A scan that doesn't read its rows'
+/// TIDs (`tids_read` false: no system columns) needs only the keys in heap order: a heap
+/// laid out afresh at a restart (`unstamped`, its TIDs the model's, not the stored ones)
+/// still reads in storage order.
+pub fn heap_scan_splits(t: &Table, tids_read: bool, ctx: &ExecCtx) -> bool {
+    ctx.sess.db.relfiles.read().heaps.get(&t.oid).is_some_and(|h| {
+        (if tids_read { h.in_key_order() } else { h.keys_in_heap_order() }) && !h.any_prunable()
+    })
+}
+
+/// Whether no page of the table's modelled heap has a prunable xid: a scan reaching its
+/// pages prunes nothing (`heap_scan_splits`).
+pub fn heap_unprunable(t: &Table, ctx: &ExecCtx) -> bool {
+    ctx.sess.db.relfiles.read().heaps.get(&t.oid).is_some_and(|h| !h.any_prunable())
 }
 
 /// The table's current size in pages (None: not modelled).

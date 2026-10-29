@@ -580,13 +580,15 @@ const HASH_CHUNK_THRESHOLD: usize = HASH_CHUNK_SIZE / 4;
 const HJTUPLE_OVERHEAD: usize = 16;
 
 /// A hash join's in-memory table (single batch): bucket chains of inner row indexes, the
-/// most recently inserted first.
+/// most recently inserted first. The chains are kept flat, bucket by bucket (a start per
+/// bucket, a row index per tuple), not as a list per bucket: 8 bytes a tuple instead of a
+/// vector header per bucket and an allocation per chain.
 pub struct JoinTable {
     pub nbuckets: u32,
-    /// Per bucket, its chain with the head last.
-    chains: Vec<Vec<usize>>,
-    /// Inner rows with their hash values and stored sizes, in insertion order.
-    tuples: Vec<(usize, u32, usize)>,
+    /// Where each bucket's chain starts in `items`, and the end.
+    starts: Vec<u32>,
+    /// The chains' row indexes, bucket by bucket, each in insertion order (its head last).
+    items: Vec<u32>,
 }
 
 impl JoinTable {
@@ -597,31 +599,43 @@ impl JoinTable {
     pub fn build(nbuckets: u32, tuples: Vec<(usize, u32, usize)>) -> JoinTable {
         let mut nb = nbuckets.max(1).next_power_of_two();
         let initial = nb;
-        let mut chains: Vec<Vec<usize>> = vec![Vec::new(); nb as usize];
-        for (i, (row, h, _)) in tuples.iter().enumerate() {
-            chains[(h & (initial - 1)) as usize].push(*row);
+        for i in 0..tuples.len() {
             // ntuples (before this one counted) over the optimal bucket count.
             if i as u64 > nb as u64 && nb <= (i32::MAX / 2) as u32 {
                 nb *= 2;
             }
         }
-        let mut t = JoinTable {
-            nbuckets: initial,
-            chains,
-            tuples,
-        };
-        if nb != initial {
-            t.rebucket(nb);
+        if nb == initial {
+            return Self::flat(initial, tuples.iter().map(|&(row, h, _)| (row, h)));
         }
-        t
+        Self::rebucket(nb, &tuples)
     }
 
-    /// ExecHashIncreaseNumBuckets.
-    fn rebucket(&mut self, nb: u32) {
+    /// The table of `nb` buckets with `seq`'s rows pushed onto their chains in order.
+    fn flat(nb: u32, seq: impl Iterator<Item = (usize, u32)>) -> JoinTable {
+        let seq: Vec<(u32, u32)> = seq.map(|(row, h)| (row as u32, h & (nb - 1))).collect();
+        let mut starts = vec![0u32; nb as usize + 1];
+        for &(_, b) in &seq {
+            starts[b as usize + 1] += 1;
+        }
+        for b in 0..nb as usize {
+            starts[b + 1] += starts[b];
+        }
+        let mut fill = starts.clone();
+        let mut items = vec![0u32; seq.len()];
+        for (row, b) in seq {
+            items[fill[b as usize] as usize] = row;
+            fill[b as usize] += 1;
+        }
+        JoinTable { nbuckets: nb, starts, items }
+    }
+
+    /// ExecHashIncreaseNumBuckets: the table again with `nb` buckets.
+    fn rebucket(nb: u32, tuples: &[(usize, u32, usize)]) -> JoinTable {
         // dense_alloc's chunks (the list's head first): (tuples, maxlen, used). A tuple
         // over HASH_CHUNK_THRESHOLD gets a chunk of its own, second in the list.
         let mut list: Vec<(Vec<usize>, usize, usize)> = Vec::new();
-        for (i, (_, _, len)) in self.tuples.iter().enumerate() {
+        for (i, (_, _, len)) in tuples.iter().enumerate() {
             let size = (HJTUPLE_OVERHEAD + len).div_ceil(8) * 8;
             if size > HASH_CHUNK_THRESHOLD {
                 let at = if list.is_empty() { 0 } else { 1 };
@@ -636,28 +650,21 @@ impl JoinTable {
                 _ => list.insert(0, (vec![i], HASH_CHUNK_SIZE, size)),
             }
         }
-        let mut chains: Vec<Vec<usize>> = vec![Vec::new(); nb as usize];
-        for (ts, _, _) in &list {
-            for &i in ts {
-                let (row, h, _) = self.tuples[i];
-                chains[(h & (nb - 1)) as usize].push(row);
-            }
-        }
-        self.nbuckets = nb;
-        self.chains = chains;
+        Self::flat(nb, list.iter().flat_map(|(ts, _, _)| ts.iter().map(|&i| (tuples[i].0, tuples[i].1))))
+    }
+
+    fn bucket(&self, b: usize) -> &[u32] {
+        &self.items[self.starts[b] as usize..self.starts[b + 1] as usize]
     }
 
     /// The bucket chain (head first) a probe with hash value `h` walks.
     pub fn chain(&self, h: u32) -> impl Iterator<Item = usize> + '_ {
-        self.chains[(h & (self.nbuckets - 1)) as usize]
-            .iter()
-            .rev()
-            .copied()
+        self.bucket((h & (self.nbuckets - 1)) as usize).iter().rev().map(|&i| i as usize)
     }
 
     /// Every tuple, bucket by bucket (ExecScanHashTableForUnmatched's order).
     pub fn scan(&self) -> impl Iterator<Item = usize> + '_ {
-        self.chains.iter().flat_map(|c| c.iter().rev().copied())
+        (0..self.nbuckets as usize).flat_map(|b| self.bucket(b).iter().rev().map(|&i| i as usize))
     }
 }
 

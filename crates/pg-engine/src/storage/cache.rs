@@ -93,6 +93,26 @@ impl BlockCache {
         s.bytes += size;
     }
 
+    /// `insert`, when the block fits without evicting anything (a bulk read's block,
+    /// `storage::bulk_read`: a big scan fills a cache with room, never pushes out what is in
+    /// it).
+    pub fn insert_if_room(&self, file: u64, block: u32, b: CachedBlock, size: usize) {
+        let mut s = self.shard(file, block).lock();
+        if s.bytes + size > self.capacity_per_shard || s.map.contains_key(&(file, block)) {
+            return;
+        }
+        s.map.insert(
+            (file, block),
+            Entry {
+                block: b,
+                size,
+                referenced: false,
+            },
+        );
+        s.clock.push((file, block));
+        s.bytes += size;
+    }
+
     /// Drop every block of a closed file.
     pub fn forget_file(&self, file: u64) {
         for shard in &self.shards {
@@ -112,6 +132,11 @@ impl BlockCache {
             s.bytes -= freed;
             s.clock.retain(|(f, _)| *f != file);
         }
+    }
+
+    /// The bytes the cache may hold.
+    pub fn capacity_bytes(&self) -> usize {
+        self.capacity_per_shard * SHARDS
     }
 
     pub fn used_bytes(&self) -> usize {

@@ -1,0 +1,125 @@
+> CREATE TABLE a101_g (k int, j int, v numeric, t text, PRIMARY KEY (k, j))
+-- CREATE TABLE
+
+> INSERT INTO a101_g SELECT i / 3, i % 3, i * 1.5, 't' || (i % 7) FROM generate_series(1, 3000) i
+-- INSERT 0 3000
+
+> ANALYZE a101_g
+-- ANALYZE
+
+> SET enable_hashagg = off
+-- SET
+
+> SET enable_sort = off
+-- SET
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT k, sum(v), count(*) FROM a101_g GROUP BY k
+QUERY PLAN:text
+GroupAggregate
+  Group Key: k
+  ->  Index Scan using a101_g_pkey on a101_g
+-- EXPLAIN
+
+> SELECT k, sum(v), count(*), min(t), max(v) FROM a101_g GROUP BY k LIMIT 6
+k:int4 | sum:numeric | count:int8 | min:text | max:numeric
+0 | 4.5 | 2 | t1 | 3.0
+1 | 18.0 | 3 | t3 | 7.5
+2 | 31.5 | 3 | t0 | 12.0
+3 | 45.0 | 3 | t2 | 16.5
+4 | 58.5 | 3 | t0 | 21.0
+5 | 72.0 | 3 | t1 | 25.5
+-- SELECT 6
+
+> SELECT k, sum(v) FROM a101_g WHERE k BETWEEN 400 AND 405 GROUP BY k
+k:int4 | sum:numeric
+400 | 5404.5
+401 | 5418.0
+402 | 5431.5
+403 | 5445.0
+404 | 5458.5
+405 | 5472.0
+-- SELECT 6
+
+> SELECT k, count(*) FROM a101_g GROUP BY k HAVING sum(v) > 4490 LIMIT 4
+k:int4 | count:int8
+333 | 3
+334 | 3
+335 | 3
+336 | 3
+-- SELECT 4
+
+> EXPLAIN (COSTS OFF) SELECT j, k, sum(v) FROM a101_g GROUP BY j, k
+QUERY PLAN:text
+GroupAggregate
+  Group Key: k, j
+  ->  Index Scan using a101_g_pkey on a101_g
+-- EXPLAIN
+
+> SELECT j, k, sum(v) FROM a101_g GROUP BY j, k LIMIT 5
+j:int4 | k:int4 | sum:numeric
+0 | 1 | 4.5
+1 | 0 | 1.5
+1 | 1 | 6.0
+2 | 0 | 3.0
+2 | 1 | 7.5
+-- SELECT 5
+
+> SELECT count(*), sum(s) FROM (SELECT k, sum(v) s FROM a101_g GROUP BY k) x
+count:int8 | sum:numeric
+1001 | 6752250.0
+-- SELECT 1
+
+> SELECT k, sum(10 / (k - 700)) FROM a101_g GROUP BY k
+ERROR 22012: division by zero
+
+> SELECT k, sum(10 / (k - 700)) FROM a101_g GROUP BY k LIMIT 3
+k:int4 | sum:int8
+0 | 0
+1 | 0
+2 | 0
+-- SELECT 3
+
+> CREATE TABLE a101_n (a int, b int)
+-- CREATE TABLE
+
+> CREATE INDEX a101_n_a ON a101_n (a)
+-- CREATE INDEX
+
+> INSERT INTO a101_n SELECT CASE WHEN i % 4 = 0 THEN NULL ELSE i % 5 END, i FROM generate_series(1, 200) i
+-- INSERT 0 200
+
+> ANALYZE a101_n
+-- ANALYZE
+
+> EXPLAIN (COSTS OFF) SELECT a, count(*), sum(b) FROM a101_n GROUP BY a
+QUERY PLAN:text
+GroupAggregate
+  Group Key: a
+  ->  Index Scan using a101_n_a on a101_n
+-- EXPLAIN
+
+> SELECT a, count(*), sum(b) FROM a101_n GROUP BY a
+a:int4 | count:int8 | sum:int8
+0 | 30 | 3000
+1 | 30 | 2880
+2 | 30 | 2960
+3 | 30 | 3040
+4 | 30 | 3120
+NULL | 50 | 5100
+-- SELECT 6
+
+> RESET enable_hashagg
+-- RESET
+
+> RESET enable_sort
+-- RESET
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE a101_g, a101_n
+-- DROP TABLE
+

@@ -150,6 +150,24 @@ impl Top {
 /// What a chunk reads: (data key, stored row) in the scan's order.
 pub type Chunk = Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send>;
 
+/// A chunk of a bulk read (`Store::bulk_range`): the blocks it reads evict nothing from the
+/// block cache (`storage::bulk_read`), as PostgreSQL's ring keeps a big table's scan out of
+/// shared buffers; the probes and lookups the worker runs over its rows still fill it.
+pub struct Bulk<I>(pub I);
+
+impl<I: Iterator> Iterator for Bulk<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<I::Item> {
+        crate::storage::bulk_read(|| self.0.next())
+    }
+}
+
+/// `chunk` as a bulk read when `bulk`.
+pub fn chunk<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send + 'static>(it: I, bulk: bool) -> Chunk {
+    if bulk { Box::new(Bulk(it)) } else { Box::new(it) }
+}
+
 /// A chunk of a secondary index's entries (or a bitmap heap scan's row keys: entries with
 /// the data key as their value) as the rows they point at, in their order, fetched from the
 /// store a batch at a time at the statement's snapshot (`Txn::store_reader`; None: an

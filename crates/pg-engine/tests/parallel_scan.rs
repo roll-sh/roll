@@ -223,6 +223,13 @@ const JOIN_QUERIES: &[&str] = &[
     "SELECT d.k, b.id FROM big b RIGHT JOIN dim d ON b.g = d.k + 40 AND b.id < 2000",
     "SELECT d.name, count(b.id), sum(b.x) FROM big b RIGHT JOIN dim d ON b.g = d.k + 30 GROUP BY d.name",
     "SELECT b.id, d.k FROM big b FULL JOIN dim d ON b.g = d.k + 50 AND b.id > 419000 WHERE b.id IS NULL OR b.id > 419900",
+    // Aggregations over a projection of the join (a FROM subquery's computed outputs): its
+    // keys and arguments through the projection, aggregated in the workers; one read only
+    // in a CASE keeps the serial path unless another aggregate reads it whatever the row.
+    "SELECT g2, w, sum(v), count(*) FROM (SELECT b.g % 5 AS g2, d.w, b.x * 2 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY g2, w",
+    "SELECT g2, sum(CASE WHEN g2 = 1 THEN v ELSE 0 END), sum(v) FROM (SELECT b.g % 5 AS g2, b.x * 2 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY g2",
+    "SELECT n, sum(CASE WHEN n = 'name 1' THEN v END) FROM (SELECT d.name AS n, b.x + 1 AS v FROM big b JOIN dim d ON b.g = d.k) t GROUP BY n",
+    "SELECT count(*), sum(e) FROM (SELECT 100000 / (b.id - 419950) AS e FROM big b JOIN dim d ON b.g = d.k) t",
 ];
 
 #[test]

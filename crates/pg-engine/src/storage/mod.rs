@@ -165,6 +165,31 @@ enum Frozen {
     Sst(Arc<SstReader>),
 }
 
+thread_local! {
+    /// This thread is reading in bulk (`bulk_read`).
+    static BULK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` as a bulk read: a block it reads from a file goes into the block cache only
+/// where the cache has room (`BlockCache::insert_if_room`), evicting nothing; once the
+/// cache is full, a bulk read's blocks are used and dropped. PostgreSQL reads a big
+/// table's sequential scan through a small ring of buffers for the same reason: one pass
+/// over it would otherwise evict every other relation's pages.
+pub fn bulk_read<R>(f: impl FnOnce() -> R) -> R {
+    struct Back(bool);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            BULK.with(|b| b.set(self.0));
+        }
+    }
+    let _back = Back(BULK.with(|b| b.replace(true)));
+    f()
+}
+
+pub(crate) fn in_bulk_read() -> bool {
+    BULK.with(|b| b.get())
+}
+
 /// An immutable picture of the store's sources. Readers hold one for their whole scan.
 pub struct View {
     mem: Arc<Memtable>,
@@ -436,6 +461,28 @@ impl Store {
 
     pub fn view(&self) -> Arc<View> {
         self.view.read().clone()
+    }
+
+    /// Whether reading all of [start, end) is a bulk read: its files' blocks over that
+    /// range (decompressed, about `BLOCK_TARGET` each) are more than a quarter of the block
+    /// cache, PostgreSQL's rule for a sequential scan's ring (GetAccessStrategy's
+    /// BAS_BULKREAD for relations over NBuffers / 4). Such a read goes through
+    /// `bulk_read`, so a full scan of a big table doesn't push out everything else.
+    pub fn bulk_range(&self, start: &[u8], end: &[u8]) -> bool {
+        let v = self.view();
+        let ssts = v.l0.iter().chain(&v.l1).chain(v.imm.iter().filter_map(|f| match f {
+            Frozen::Sst(s) => Some(s),
+            Frozen::Mem(_) => None,
+        }));
+        let mut blocks = 0usize;
+        for s in ssts {
+            if s.meta.last_key.as_slice() < start || s.meta.first_key.as_slice() >= end {
+                continue;
+            }
+            let (a, b) = (s.find_block(start), s.find_block(end).min(s.block_count().saturating_sub(1)));
+            blocks += b.saturating_sub(a) + 1;
+        }
+        blocks.saturating_mul(sst::BLOCK_TARGET) > self.opts.cache.capacity_bytes() / 4
     }
 
     /// The value of the newest version of `key` visible at `ts` (None if absent or deleted).

@@ -2322,37 +2322,73 @@ impl ScanNode {
         }
         // (Decided as `next_raw` decides it.)
         self.nblocks = super::sizing::modelled_blocks(p.table.oid, ctx);
+        // A modelled heap whose rows aren't all stored in heap order (some went into an
+        // earlier page's free space, as PostgreSQL's free space map puts them): its rows are
+        // read here and put in heap order, as the serial scan puts them (`heap_order`), and
+        // the workers take runs of them (filters, probes and lookups above in parallel).
+        let mut reordered = false;
         if super::sizing::heap_modelled(&p.table, ctx) {
-            // A modelled heap's rows are read in parallel only when they are stored in heap
-            // order and no page would be pruned as the scan reaches it; and (as for
-            // PostgreSQL's parallel scans, min_parallel_table_scan_size's default) when it
-            // has 8 MB of pages: smaller ones aren't worth the threads.
-            if self.nblocks.is_none_or(|n| n < 1024) || !super::sizing::heap_scan_splits(&p.table, ctx) {
+            // A modelled heap's rows are read in parallel only when no page would be pruned
+            // as the scan reaches it; and (as for PostgreSQL's parallel scans,
+            // min_parallel_table_scan_size's default) when it has 8 MB of pages: smaller
+            // ones aren't worth the threads. Rows stored in heap order are read in chunks of
+            // keys by the workers themselves.
+            if self.nblocks.is_none_or(|n| n < 1024) || !super::sizing::heap_unprunable(&p.table, ctx) {
                 return Ok(None);
             }
-            self.in_order = Some(true);
+            reordered = !super::sizing::heap_scan_splits(&p.table, p.sys, ctx);
+            // (Reordered only for the work above it: joins' probes and lookups, aggregation.)
+            if reordered && stages.is_empty() && spec.is_none() {
+                return Ok(None);
+            }
+            self.in_order = Some(!reordered);
         } else {
             self.streamed = true;
         }
         let (start, end) = self.ranges[0].clone();
         let txn = ctx.txn.borrow();
-        let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
-        let hi = txn.scan_rev(&start, &end, Some(&*snap)).next().transpose()?.map(|(k, _)| k);
-        let (Some(lo), Some(hi)) = (lo, hi) else {
-            return Ok(None);
+        let scans: Vec<super::parscan::Chunk> = if reordered {
+            let mut rows = Vec::new();
+            for r in txn.scan_snap(&start, &end, &snap) {
+                rows.push(r?);
+            }
+            drop(txn);
+            heap_order(&p.table, &mut rows, ctx);
+            let per = rows.len().div_ceil(ParScan::chunks(workers)).max(1);
+            let mut it = rows.into_iter().map(Ok);
+            let mut out = Vec::new();
+            loop {
+                let c: Vec<_> = it.by_ref().take(per).collect();
+                if c.is_empty() {
+                    break;
+                }
+                out.push(Box::new(c.into_iter()) as super::parscan::Chunk);
+            }
+            out
+        } else {
+            let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
+            let hi = txn.scan_rev(&start, &end, Some(&*snap)).next().transpose()?.map(|(k, _)| k);
+            let (Some(lo), Some(hi)) = (lo, hi) else {
+                return Ok(None);
+            };
+            let cuts = split_keys(&lo, &hi, ParScan::chunks(workers));
+            if cuts.is_empty() {
+                return Ok(None);
+            }
+            let mut bounds = vec![start];
+            bounds.extend(cuts);
+            bounds.push(end);
+            let bulk = ctx.sess.db.store.bulk_range(&bounds[0], &bounds[bounds.len() - 1]);
+            let scans = bounds
+                .windows(2)
+                .map(|w| super::parscan::chunk(txn.scan_snap(&w[0], &w[1], &snap), bulk))
+                .collect();
+            drop(txn);
+            scans
         };
-        let cuts = split_keys(&lo, &hi, ParScan::chunks(workers));
-        if cuts.is_empty() {
+        if scans.is_empty() {
             return Ok(None);
         }
-        let mut bounds = vec![start];
-        bounds.extend(cuts);
-        bounds.push(end);
-        let scans = bounds
-            .windows(2)
-            .map(|w| Box::new(txn.scan_snap(&w[0], &w[1], &snap)) as super::parscan::Chunk)
-            .collect();
-        drop(txn);
         // (The columns decoded for a row whose values come from its stored bytes.)
         let need_raw = (!computed.raw.is_empty()).then(|| {
             let mut n: Vec<bool> = self.need.as_deref().map_or_else(|| vec![true; p.table.columns.len()], <[bool]>::to_vec);
@@ -2452,9 +2488,15 @@ impl ScanNode {
         let mut bounds = vec![start];
         bounds.extend(cuts);
         bounds.push(end);
+        // (A full index scan fetching its rows reads the whole table: a bulk read when the
+        // table's rows are.)
+        let bulk = {
+            let t = index_prefix(p.table.oid, 0);
+            ctx.sess.db.store.bulk_range(&t, &prefix_end(&t))
+        };
         let scans = bounds
             .windows(2)
-            .map(|w| Box::new(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone())) as super::parscan::Chunk)
+            .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk))
             .collect();
         drop(txn);
         let d = Decode {
@@ -2600,6 +2642,39 @@ impl ScanNode {
 }
 
 impl Node for ScanNode {
+    fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
+        use crate::catalog::IndexKey;
+        let p = &self.plan;
+        let (ix, b) = p.index.as_ref()?;
+        // (A forward btree scan of one key range: its rows in the index's order. Keys under
+        // a collation's sort keys or a made operator class are left out.)
+        if !matches!(p.access, Access::Index { .. } | Access::Unplanned)
+            || p.reverse
+            || p.current_of.is_some()
+            || ix.method != "btree"
+            || !b.order.is_empty()
+            || b.colls.iter().any(Option::is_some)
+            || self.ranges.len() != 1
+            || self.keys.is_some()
+            || self.am.is_some()
+            || self.sample.is_some()
+            || self.only.is_some()
+            || self.one_run
+            || self.emitted > 0
+        {
+            return None;
+        }
+        let cols: Vec<(usize, bool, bool)> = ix
+            .columns
+            .iter()
+            .map_while(|c| match c.key {
+                IndexKey::Column(i) if c.opclass == 0 && c.collation.is_none() => Some((i, c.desc, c.nulls_first)),
+                _ => None,
+            })
+            .collect();
+        (!cols.is_empty()).then_some(cols)
+    }
+
     fn pipeline(
         &mut self,
         above: Vec<Arc<super::pipe::Stage>>,

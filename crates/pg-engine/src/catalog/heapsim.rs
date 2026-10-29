@@ -720,6 +720,13 @@ impl Heap {
         !self.disordered && !self.unstamped
     }
 
+    /// Whether its rows are in key order, whatever TIDs they were stored with: a scan that
+    /// doesn't read their TIDs may read them in storage order (`in_key_order` without
+    /// `unstamped`).
+    pub fn keys_in_heap_order(&self) -> bool {
+        !self.disordered
+    }
+
     /// Whether some page has a prunable xid (a delete or an update set pd_prune_xid).
     pub fn any_prunable(&self) -> bool {
         self.pages.iter().any(|p| p.prune_xid != 0)

@@ -937,6 +937,49 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     helper) made the stack depth limit hit inside planner code that unwraps the stack guard
     (`joinpath/lift.rs` 125, `binder/optimize.rs` 352: a panic, not the 54001 error), so that
     change was left out. Those unwraps should return the error.
+- **Executor memory and parallel work above the scan, first batch** (round 21, agent 101;
+  BENCH.md "Round 21 (agent 101)"): TPC-H SF1 59.7 s -> 47.0 s, peak 4.13 GB -> 2.98 GB
+  (PostgreSQL 16.7 s, 1.71 GB), pgbench unchanged.
+  - **Streaming GroupAggregate** (`exec/agg.rs` `Stream`, `Node::key_order`): a grouping
+    PostgreSQL runs as a GroupAggregate directly over an ordered path, whose keys are its
+    input's ordered columns (a forward btree scan's key columns, in the index's directions),
+    finishes each group as the next starts (agg_retrieve_direct), holding one group. Every
+    other grouping still hashes all groups and orders them (`run`); extending `key_order` to
+    more nodes (a real Sort, merge joins) is how more groupings stream. Golden
+    `a101_stream_group` (a LIMIT above stops the input before a later group's error, as in
+    PostgreSQL).
+  - **Bulk reads** (`storage::bulk_read`, `Store::bulk_range`, `BlockCache::insert_if_room`):
+    a parallel scan over more than a quarter of the cache's bytes fills only free room and
+    evicts nothing. It is a thread-local flag set around the chunk iterator's `next` only
+    (`parscan::Bulk`), so the workers' probes and lookups fill the cache as before.
+  - **Projections**: plain columns nothing else reads are moved, not copied
+    (`ProjectNode::moves`); an aggregation over a projection runs its partial aggregation in
+    the workers through it (`Node::projection`, `pipeline_projected`, `agg::through_projection`)
+    only when every computed projected expression is read unconditionally by a key or an
+    argument (`projection_read_always`): otherwise an error the projection would raise could
+    be skipped. Agent 90's stack-depth finding: `deep_input` passes with these (helpers are
+    `#[inline(never)]`; the planner unwraps at `joinpath/lift.rs` and `binder/optimize.rs` are
+    agent 91's).
+  - **Modelled heaps in parallel** (`scan.rs` `start_parallel`, `sizing::heap_unprunable`):
+    when a pipeline or aggregation sits above, a modelled heap not stored in key order is
+    read on the executor's thread, put in heap order (`heap_order`) and handed to the workers
+    in runs; `heap_scan_splits(t, tids_read, ..)` lets a scan reading no TIDs split by keys
+    when only `unstamped` is set. Plain scans of such heaps stay serial (agent 102 owns the
+    threshold for modelled scans going parallel).
+  - `pghash::JoinTable` keeps flat chains; the size model's build decodes a row at a time.
+  - Tried, left out (BENCH has the numbers): a compressed second cache tier (saves 0.7 GB,
+    costs 11-90% CPU on lookup-heavy queries with 16 kB blocks) and LZ4 blocks (-4% CPU, +29%
+    disk, a format older binaries can't read).
+  - Tests: golden `a101_stream_group`, `parallel_scan.rs` join queries through projections
+    (an error in a projected expression, a column read only in a CASE). Verified: crate
+    tests debug and release, clippy, difftest smoke, isolation 121 / 122, a full regress run
+    (debug, private reference) 51,148 / 51,150 with no unit changed.
+  - Left: the cache is full by q09 and the engine's decompressed entries are bigger than
+    PostgreSQL's pages, so the peak stays above PostgreSQL's until the cache holds the
+    working set in fewer bytes (smaller blocks or a row cache for lookups, then a compressed
+    tier); hash tables keep whole rows (the columns not read are NULLs of 32 bytes); hash
+    builds, sorts and groupings over right joins run on the executor's thread (q10, q13,
+    q21); numeric values allocate twice; q02 / q20 small-table plans are 7-9x PostgreSQL's.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
