@@ -224,7 +224,7 @@ struct RawIter {
     file: Arc<SstReader>,
     block: usize,
     pos: usize,
-    cur: Option<Arc<crate::storage::sst::Block>>,
+    cur: Option<crate::storage::sst::Expanded>,
     keep: Box<dyn Fn(u64) -> bool>,
 }
 
@@ -245,7 +245,7 @@ impl RawIter {
                 if self.block >= self.file.block_count() {
                     return Ok(None);
                 }
-                self.cur = Some(self.file.block_with(self.block, false)?);
+                self.cur = Some(self.file.block_with(self.block, false)?.expand());
                 self.pos = 0;
             }
             let b = self.cur.as_ref().unwrap();

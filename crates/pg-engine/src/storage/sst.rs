@@ -32,7 +32,19 @@ pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     out.push(v as u8);
 }
 
+#[inline]
 pub fn get_varint(b: &[u8], pos: &mut usize) -> Result<u64> {
+    // (One byte, the common case: lengths, scales, entry headers.)
+    if let Some(&byte) = b.get(*pos)
+        && byte < 0x80
+    {
+        *pos += 1;
+        return Ok(byte as u64);
+    }
+    get_varint_long(b, pos)
+}
+
+fn get_varint_long(b: &[u8], pos: &mut usize) -> Result<u64> {
     let mut v = 0u64;
     let mut shift = 0;
     loop {
@@ -229,7 +241,8 @@ impl SstWriter {
         if self.first_key.is_none() {
             self.first_key = Some(key.to_vec());
         }
-        let shared = if self.block_entries == 0 {
+        // (A whole key at every restart: a cached block keeps the file's entries as they are.)
+        let shared = if self.block_entries.is_multiple_of(RESTART) {
             0
         } else {
             self.prev_key
@@ -386,19 +399,29 @@ pub struct SstReader {
     obsolete: AtomicBool,
 }
 
-/// A decoded block: its decompressed bytes (values are slices of them), every entry's full
-/// key laid end to end, and per entry where its key ends and where its value lies. Three
-/// allocations a block, where a `Vec` of owned keys and values took two an entry (and held
-/// about three times the bytes the cache counted).
+/// Entries between restarts in a cached block: every `RESTART`th entry stores its whole key
+/// (shared = 0), so a seek searches the restarts and decodes at most `RESTART - 1` entries.
+const RESTART: usize = 16;
+
+/// A block as the cache holds it: its decompressed entries in the file's format (values are
+/// slices of them) with a whole key every `RESTART` entries, and where those entries start.
+/// Keys are rebuilt as a cursor (`BlockPos`) moves, never stored whole: a copy of every key
+/// and an offset table per entry made the cache hold about 60% more than the entries' bytes
+/// (TPC-H SF1: 3.2 GB for 2.0 GB of entries), so a 2 GB cache held two thirds of it.
 pub struct Block {
     data: Bytes,
-    keys: Vec<u8>,
-    ents: Vec<BlockEnt>,
+    /// The offset of every `RESTART`th entry.
+    restarts: Vec<u32>,
+    len: usize,
+    last_key: Box<[u8]>,
 }
 
-#[derive(Clone, Copy)]
-struct BlockEnt {
-    key_end: u32,
+/// A position in a block: entry `i`, its whole key and value, and where the next one starts.
+#[derive(Default, Clone)]
+pub struct BlockPos {
+    i: usize,
+    next: u32,
+    key: Vec<u8>,
     val_off: u32,
     /// `TOMBSTONE`: a deletion.
     val_len: u32,
@@ -406,7 +429,233 @@ struct BlockEnt {
 
 const TOMBSTONE: u32 = u32::MAX;
 
+impl BlockPos {
+    pub fn index(&self) -> usize {
+        self.i
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
+
+/// The header of the entry at `pos`: (shared, unshared, value length + 1), `pos` past it.
+fn entry_head(b: &[u8], pos: &mut usize) -> Result<(usize, usize, usize)> {
+    let shared = get_varint(b, pos)? as usize;
+    let unshared = get_varint(b, pos)? as usize;
+    let vl = get_varint(b, pos)? as usize;
+    Ok((shared, unshared, vl))
+}
+
 impl Block {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn last_key(&self) -> Option<&[u8]> {
+        (self.len > 0).then_some(&*self.last_key)
+    }
+
+    /// Decode the entry at `pos.next` into `pos` (entry `pos.i`).
+    fn read(&self, pos: &mut BlockPos) {
+        let b = &self.data[..];
+        let mut p = pos.next as usize;
+        // (`decode` checked every entry of the block.)
+        let (shared, unshared, vl) = entry_head(b, &mut p).expect("a checked block");
+        pos.key.truncate(shared);
+        pos.key.extend_from_slice(&b[p..p + unshared]);
+        p += unshared;
+        pos.val_off = p as u32;
+        if vl == 0 {
+            pos.val_len = TOMBSTONE;
+        } else {
+            pos.val_len = (vl - 1) as u32;
+            p += vl - 1;
+        }
+        pos.next = p as u32;
+    }
+
+    /// `pos` at entry `i` (`len`: past the end).
+    pub fn at(&self, i: usize, pos: &mut BlockPos) {
+        if i >= self.len {
+            pos.i = self.len;
+            return;
+        }
+        let r = i / RESTART;
+        pos.next = self.restarts[r];
+        pos.key.clear();
+        pos.i = r * RESTART;
+        self.read(pos);
+        while pos.i < i {
+            pos.i += 1;
+            self.read(pos);
+        }
+    }
+
+    /// `pos` on to the next entry.
+    pub fn step(&self, pos: &mut BlockPos) {
+        pos.i += 1;
+        if pos.i < self.len {
+            self.read(pos);
+        }
+    }
+
+    /// The whole key of restart `r`, borrowed.
+    fn restart_key(&self, r: usize) -> &[u8] {
+        let mut p = self.restarts[r] as usize;
+        let (_, unshared, _) = entry_head(&self.data, &mut p).expect("a checked block");
+        &self.data[p..p + unshared]
+    }
+
+    /// `pos` at the first entry whose key is >= `key` (`len`: none).
+    pub fn seek(&self, key: &[u8], pos: &mut BlockPos) {
+        // The first restart whose key is >= `key`; the entries from the one before it.
+        let (mut lo, mut hi) = (0, self.restarts.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.restart_key(mid) < key {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        self.at(lo.saturating_sub(1) * RESTART, pos);
+        while pos.i < self.len && pos.key.as_slice() < key {
+            self.step(pos);
+        }
+    }
+
+    /// The value at `pos` (None: a tombstone).
+    pub fn value(&self, pos: &BlockPos) -> Option<Bytes> {
+        (pos.val_len != TOMBSTONE)
+            .then(|| self.data.slice(pos.val_off as usize..(pos.val_off + pos.val_len) as usize))
+    }
+
+    /// The value at `pos`, borrowed.
+    pub fn value_ref(&self, pos: &BlockPos) -> Option<&[u8]> {
+        (pos.val_len != TOMBSTONE)
+            .then(|| &self.data[pos.val_off as usize..(pos.val_off + pos.val_len) as usize])
+    }
+
+    /// The bytes it holds (what the block cache counts).
+    pub fn mem_bytes(&self) -> usize {
+        self.data.len() + self.restarts.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
+    }
+
+    /// Every entry with its key whole, for readers that go backwards or read a block once.
+    pub fn expand(&self) -> Expanded {
+        let mut keys = Vec::with_capacity(self.data.len());
+        let mut ents = Vec::with_capacity(self.len);
+        let mut pos = BlockPos::default();
+        self.at(0, &mut pos);
+        while pos.i < self.len {
+            keys.extend_from_slice(&pos.key);
+            ents.push(ExpandedEnt {
+                key_end: keys.len() as u32,
+                val_off: pos.val_off,
+                val_len: pos.val_len,
+            });
+            self.step(&mut pos);
+        }
+        Expanded {
+            data: self.data.clone(),
+            keys,
+            ents,
+        }
+    }
+
+    /// Check a decompressed block and find its restarts. One whose entries share a prefix at
+    /// a restart (files written before restarts were) is rewritten with whole keys there.
+    fn decode(raw: Bytes) -> Result<Block> {
+        let bad = || internal("bad sst block");
+        let mut restarts = Vec::with_capacity(raw.len() / 512 + 1);
+        let mut key: Vec<u8> = Vec::new();
+        let mut pos = 0;
+        let mut n = 0usize;
+        let mut rewrite = false;
+        while pos < raw.len() {
+            let start = pos;
+            let (shared, unshared, vl) = entry_head(&raw, &mut pos)?;
+            let end = pos + unshared + vl.saturating_sub(1);
+            if shared > key.len() || end > raw.len() {
+                return Err(bad());
+            }
+            if n.is_multiple_of(RESTART) {
+                restarts.push(start as u32);
+                rewrite |= shared != 0;
+            }
+            key.truncate(shared);
+            key.extend_from_slice(&raw[pos..pos + unshared]);
+            pos = end;
+            n += 1;
+        }
+        let block = Block {
+            data: raw,
+            restarts,
+            len: n,
+            last_key: key.as_slice().into(),
+        };
+        if !rewrite {
+            return Ok(block);
+        }
+        // (One pass: an entry at a restart gets its whole key, the others stay as they are,
+        // sharing with the same key before them.)
+        let raw = &block.data;
+        let mut out = Vec::with_capacity(raw.len() + n / RESTART * 24);
+        let mut restarts = Vec::with_capacity(n / RESTART + 1);
+        let (mut pos, mut i) = (0, 0usize);
+        key.clear();
+        while pos < raw.len() {
+            let start = pos;
+            let (shared, unshared, vl) = entry_head(raw, &mut pos)?;
+            key.truncate(shared);
+            key.extend_from_slice(&raw[pos..pos + unshared]);
+            let end = pos + unshared + vl.saturating_sub(1);
+            if i.is_multiple_of(RESTART) && shared != 0 {
+                restarts.push(out.len() as u32);
+                put_varint(&mut out, 0);
+                put_varint(&mut out, key.len() as u64);
+                put_varint(&mut out, vl as u64);
+                out.extend_from_slice(&key);
+                out.extend_from_slice(&raw[pos + unshared..end]);
+            } else {
+                if i.is_multiple_of(RESTART) {
+                    restarts.push(out.len() as u32);
+                }
+                out.extend_from_slice(&raw[start..end]);
+            }
+            pos = end;
+            i += 1;
+        }
+        Ok(Block {
+            data: Bytes::from(out),
+            restarts,
+            len: n,
+            last_key: block.last_key,
+        })
+    }
+}
+
+/// A block with every entry's key whole (`Block::expand`), indexed by entry: what reverse
+/// scans and one-pass readers use.
+pub struct Expanded {
+    data: Bytes,
+    keys: Vec<u8>,
+    ents: Vec<ExpandedEnt>,
+}
+
+#[derive(Clone, Copy)]
+struct ExpandedEnt {
+    key_end: u32,
+    val_off: u32,
+    val_len: u32,
+}
+
+impl Expanded {
     pub fn len(&self) -> usize {
         self.ents.len()
     }
@@ -434,10 +683,6 @@ impl Block {
             .then(|| &self.data[e.val_off as usize..(e.val_off + e.val_len) as usize])
     }
 
-    pub fn last_key(&self) -> Option<&[u8]> {
-        (!self.ents.is_empty()).then(|| self.key(self.ents.len() - 1))
-    }
-
     /// The first entry whose key is >= `key`.
     pub fn seek(&self, key: &[u8]) -> usize {
         let (mut lo, mut hi) = (0, self.ents.len());
@@ -450,58 +695,6 @@ impl Block {
             }
         }
         lo
-    }
-
-    /// The bytes it holds (what the block cache counts).
-    pub fn mem_bytes(&self) -> usize {
-        self.data.len()
-            + self.keys.capacity()
-            + self.ents.capacity() * std::mem::size_of::<BlockEnt>()
-            + std::mem::size_of::<Block>()
-    }
-
-    fn decode(raw: Bytes) -> Result<Block> {
-        let mut keys: Vec<u8> = Vec::with_capacity(raw.len());
-        let mut ents = Vec::with_capacity(raw.len() / 32);
-        let mut pos = 0;
-        let mut prev = 0usize;
-        let bad = || internal("bad sst block");
-        while pos < raw.len() {
-            let shared = get_varint(&raw, &mut pos)? as usize;
-            let unshared = get_varint(&raw, &mut pos)? as usize;
-            let vl = get_varint(&raw, &mut pos)? as usize;
-            if shared > keys.len() - prev || pos + unshared > raw.len() {
-                return Err(bad());
-            }
-            // The previous key's first `shared` bytes, then this one's own.
-            let start = keys.len();
-            keys.extend_from_within(prev..prev + shared);
-            keys.extend_from_slice(&raw[pos..pos + unshared]);
-            prev = start;
-            pos += unshared;
-            let (val_off, val_len) = if vl == 0 {
-                (pos as u32, TOMBSTONE)
-            } else {
-                if pos + vl - 1 > raw.len() {
-                    return Err(bad());
-                }
-                let v = (pos as u32, (vl - 1) as u32);
-                pos += vl - 1;
-                v
-            };
-            ents.push(BlockEnt {
-                key_end: keys.len() as u32,
-                val_off,
-                val_len,
-            });
-        }
-        keys.shrink_to_fit();
-        ents.shrink_to_fit();
-        Ok(Block {
-            data: raw,
-            keys,
-            ents,
-        })
     }
 }
 
@@ -654,6 +847,79 @@ mod tests {
                 let a = next();
                 assert_eq!(m.rem(a), a % d, "{a} % {d}");
             }
+        }
+    }
+
+    /// A block's entries (keys sharing prefixes, tombstones) as the file's format has them,
+    /// `restart` 0: every entry sharing with the one before (files written before restarts).
+    fn block_bytes(ents: &[(Vec<u8>, Option<Vec<u8>>)], restart: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut prev: &[u8] = &[];
+        for (i, (k, v)) in ents.iter().enumerate() {
+            let shared = if i == 0 || restart > 0 && i % restart == 0 {
+                0
+            } else {
+                prev.iter().zip(k).take_while(|(a, b)| a == b).count()
+            };
+            put_varint(&mut out, shared as u64);
+            put_varint(&mut out, (k.len() - shared) as u64);
+            put_varint(&mut out, v.as_ref().map_or(0, |v| v.len() as u64 + 1));
+            out.extend_from_slice(&k[shared..]);
+            out.extend_from_slice(v.as_deref().unwrap_or_default());
+            prev = k;
+        }
+        out
+    }
+
+    /// Seeks, steps and positions of a block agree with its entries, whichever way it was
+    /// written, and its expanded form too.
+    #[test]
+    fn block_positions() {
+        let ents: Vec<(Vec<u8>, Option<Vec<u8>>)> = (0..300u32)
+            .map(|i| {
+                let k = format!("tbl/{:05}/{}", i * 3, "x".repeat((i % 7) as usize)).into_bytes();
+                let v = (i % 11 != 0).then(|| format!("v{i}").into_bytes());
+                (k, v)
+            })
+            .collect();
+        for restart in [0, RESTART, 5] {
+            let b = Block::decode(Bytes::from(block_bytes(&ents, restart))).unwrap();
+            assert_eq!(b.len(), ents.len());
+            assert_eq!(b.last_key(), Some(ents.last().unwrap().0.as_slice()));
+            let mut pos = BlockPos::default();
+            b.at(0, &mut pos);
+            for (i, (k, v)) in ents.iter().enumerate() {
+                assert_eq!((pos.index(), pos.key()), (i, k.as_slice()));
+                assert_eq!(b.value_ref(&pos), v.as_deref());
+                let mut at = BlockPos::default();
+                b.at(i, &mut at);
+                assert_eq!(at.key(), k.as_slice());
+                assert_eq!(b.value(&at).as_deref(), v.as_deref());
+                b.step(&mut pos);
+            }
+            assert_eq!(pos.index(), b.len());
+            let e = b.expand();
+            for (i, (k, v)) in ents.iter().enumerate() {
+                assert_eq!((e.key(i), e.value_ref(i)), (k.as_slice(), v.as_deref()));
+                // Keys just below, at and just above each one.
+                let mut below = k.clone();
+                below.pop();
+                let mut above = k.clone();
+                above.push(0);
+                for probe in [below, k.clone(), above] {
+                    let want = ents.iter().position(|(k, _)| *k >= probe).unwrap_or(ents.len());
+                    b.seek(&probe, &mut pos);
+                    assert_eq!(pos.index(), want, "{restart} {probe:?}");
+                    assert_eq!(e.seek(&probe), want);
+                    if want < ents.len() {
+                        assert_eq!(pos.key(), ents[want].0.as_slice());
+                    }
+                }
+            }
+            b.seek(b"a", &mut pos);
+            assert_eq!(pos.index(), 0);
+            b.seek(b"z", &mut pos);
+            assert_eq!(pos.index(), b.len());
         }
     }
 }

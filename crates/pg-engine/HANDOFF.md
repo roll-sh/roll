@@ -670,6 +670,43 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   they read (q09 at `--cache-mb 8192`: 19.6 s -> 10.8 s with the base executor); scans decode
   rows at about 450 ns each per worker (PostgreSQL ~150); q07, q08, q13 (serial plans), q20
   and q21 have plans unlike PostgreSQL's.
+- **Analytic executor, second batch: the read path** (round 21, agent 90; BENCH.md "Round 21
+  (agent 90)"):
+  - **Cached blocks hold the file's entries, not a copy of every key** (`storage/sst.rs`
+    `Block`, `BlockPos`): every 16th entry stores its whole key (the writer emits restarts;
+    a block of an older file is rewritten with them as it is read, one pass), a seek searches
+    the restarts and steps at most 15 entries, a cursor rebuilds keys as it moves. Before, a
+    block kept a decoded copy of every key and an offset per entry: TPC-H SF1's 2.0 GB of
+    entries took 3.2 GB of cache, so the 2 GB cache held two thirds of it and index lookups
+    decompressed most blocks they read. Reverse scans and spill files read a block's
+    `expand`ed form (the old layout, per read, not cached). The file format is unchanged
+    (restarts are entries with `shared = 0`, which every reader already reads).
+  - **Rows read in place in the scan workers** (`exec/parscan.rs` `Lazy`, `LazyBuf`): a
+    worker walks a stored row's column offsets once, decodes a column only when the filter,
+    a join key or an aggregate first reads it, and reads numbers without making values
+    (`Cols::num`, `row::peek_num`, cached per row); a row the filter rejects or the partial
+    aggregate takes is never made a `Row`. Kernels compare numerics as exact i128s
+    (`K::NumCmp`), and partial sums of a numeric column add the column's number
+    (`Partials::cols`). Errors still come from the row that has them (a column that doesn't
+    decode makes the kernel give up, and the row's decode then fails as before).
+  - **Parallel fetches**: a full scan of a big table's btree index now runs in the workers
+    for the executor's thread too (a merge join's ordered input: q12's orders_pkey), and a
+    bitmap heap scan of a big table that isn't dense (`dense_bitmap_scan`) fetches its sorted
+    row keys in the workers (`start_parallel_keys`, `IndexChunk::keyed`), both in the serial
+    scan's order, with its statistics.
+  - Tests: `parallel_scan.rs` `parallel_fetches_match_serial` (bitmap rows plain, filtered,
+    aggregated, joined and failing; full pkey scans for ORDER BY and a merge join; statistics
+    doubled), `sst.rs` `block_positions` (blocks with and without restarts).
+  - Left: numeric values still allocate twice when made (`Arc<Numeric>` and the `BigInt`'s
+    digits; only rows that reach the executor's thread make them now); sorts, window
+    functions and hash builds run on the executor's thread; modelled tables (customer, part,
+    supplier) are read serially; the executor runs the serial plan, so a parallel plan whose
+    join order differs (q13's grouping over a right join) keeps its serial shape.
+  - Found: `deep_input`'s `sqlfnsrf 20000` passes only while executor frames stay as they
+    are. A projection that moved its input's values (`ProjectNode`, one more field and a
+    helper) made the stack depth limit hit inside planner code that unwraps the stack guard
+    (`joinpath/lift.rs` 125, `binder/optimize.rs` 352: a panic, not the 54001 error), so that
+    change was left out. Those unwraps should return the error.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

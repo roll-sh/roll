@@ -466,3 +466,94 @@ fn parallel_scans_of_modelled_heaps_inner() {
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     assert_eq!(after, out(&mut s, "SELECT id FROM vt WHERE g = 1 AND id % 1000 = 0 LIMIT 3"));
 }
+
+/// Scans whose rows the workers fetch by key: a bitmap heap scan of a few percent of a big
+/// table (plain, filtered, aggregated, under a hash join, failing at a late row), and full
+/// primary-key index scans read in index order by the executor's thread (a merge join's
+/// input).
+const FETCHED_QUERIES: &[&str] = &[
+    "SELECT id, v, x FROM big3 WHERE v BETWEEN 10 AND 20",
+    "SELECT id FROM big3 WHERE v BETWEEN 10 AND 20 AND s LIKE '%a%'",
+    "SELECT count(*), sum(x), min(s) FROM big3 WHERE v BETWEEN 10 AND 20",
+    "SELECT b.id, d.name FROM big3 b JOIN dim3 d ON d.k = b.v WHERE b.v BETWEEN 10 AND 20",
+    "SELECT count(*) FROM big3 WHERE v BETWEEN 10 AND 20 AND 1 / (id - 410010) > 0",
+];
+
+/// Run with sequential and bitmap scans off.
+const ORDERED_QUERIES: &[&str] = &[
+    "SELECT id, v FROM big3 ORDER BY id",
+    "SELECT b.id, c.x FROM big3 b JOIN big3 c ON c.id = b.id WHERE b.v = 3",
+];
+
+fn fetch_stats(s: &mut Session) -> String {
+    out(s, "SELECT pg_stat_force_next_flush()");
+    let t = out(s, "SELECT seq_scan, idx_scan, idx_tup_fetch FROM pg_stat_user_tables WHERE relname = 'big3'");
+    let i = out(
+        s,
+        "SELECT idx_scan, idx_tup_read, idx_tup_fetch FROM pg_stat_user_indexes WHERE relname = 'big3' ORDER BY indexrelname",
+    );
+    format!("{t:?} {i:?}")
+}
+
+#[test]
+fn parallel_fetches_match_serial() {
+    on_session_thread(parallel_fetches_match_serial_inner);
+}
+
+fn parallel_fetches_match_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big3 (id int PRIMARY KEY, v int, x numeric(12,2), s text); \
+         INSERT INTO big3 SELECT i, i % 1000, (i % 777) / 10.0, md5(i::text) FROM generate_series(1, 420000) i; \
+         CREATE INDEX big3_v ON big3 (v); \
+         CREATE TABLE dim3 (k int PRIMARY KEY, name text); \
+         INSERT INTO dim3 SELECT k, 'name ' || k FROM generate_series(0, 30) k",
+    )
+    .unwrap();
+    for t in ["big3", "dim3"] {
+        s.query(&format!("VACUUM ANALYZE {t}")).unwrap();
+    }
+    let run = |s: &mut Session| -> (Vec<Vec<String>>, Vec<String>) {
+        let mut rows = Vec::new();
+        let mut plans = Vec::new();
+        s.query("SET enable_indexscan = off; SET enable_seqscan = off").unwrap();
+        for q in FETCHED_QUERIES {
+            plans.extend(out(s, &format!("EXPLAIN (COSTS OFF) {q}")));
+            rows.push(out(s, q));
+        }
+        s.query("RESET enable_indexscan; SET enable_bitmapscan = off; SET enable_hashjoin = off").unwrap();
+        for q in ORDERED_QUERIES {
+            plans.extend(out(s, &format!("EXPLAIN (COSTS OFF) {q}")));
+            rows.push(out(s, q));
+        }
+        s.query("RESET enable_seqscan; RESET enable_bitmapscan; RESET enable_hashjoin").unwrap();
+        (rows, plans)
+    };
+    let workers = |s: &mut Session, n: u32| s.query(&format!("SET max_parallel_workers_per_gather = {n}")).unwrap();
+    workers(&mut s, 0);
+    let (serial, _) = run(&mut s);
+    let stat_serial = fetch_stats(&mut s);
+    workers(&mut s, 2);
+    let scans = pg_engine::exec::parscan::started();
+    let (parallel, plans) = run(&mut s);
+    let stat_parallel = fetch_stats(&mut s);
+    assert!(pg_engine::exec::parscan::started() >= scans + 6, "the scans ran in the workers");
+    assert!(plans.iter().any(|l| l.contains("Bitmap Heap Scan on big3")), "{plans:?}");
+    assert!(plans.iter().any(|l| l.contains("Index Scan using big3_pkey")), "{plans:?}");
+    let all = FETCHED_QUERIES.iter().chain(ORDERED_QUERIES);
+    for ((q, a), b) in all.zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+    assert!(serial[0].len() > 4000, "{}", serial[0].len());
+    assert!(serial[4][0].starts_with("ERROR: division by zero"), "{:?}", serial[4]);
+    assert_eq!(serial[5].len(), 420000);
+    // Each run fetched as many rows and scanned the indexes as often: the counts doubled.
+    let n = |st: &str| -> Vec<i64> {
+        st.split("Int8(").skip(1).map(|x| x.split(')').next().unwrap().parse().unwrap()).collect()
+    };
+    let (a, b) = (n(&stat_serial), n(&stat_parallel));
+    assert!(!a.is_empty(), "{stat_serial}");
+    assert_eq!(b, a.iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_serial} {stat_parallel}");
+}

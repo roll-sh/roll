@@ -62,7 +62,7 @@ engine-start)
   if ss -ltn | grep -q ":$ENGINE_PORT "; then echo "port $ENGINE_PORT busy" >&2; exit 1; fi
   mkdir -p "$DATA/engine"
   taskset -c "$SERVER_CPUS" "$BIN/roll-engine" --data "$DATA/engine" --listen 127.0.0.1:$ENGINE_PORT \
-    --password pw --cache-mb 2048 "$@" >>"$DATA/logs/engine.log" 2>&1 &
+    --password pw --cache-mb "${CACHE_MB:-2048}" "$@" >>"$DATA/logs/engine.log" 2>&1 &
   echo $! >"$DATA/engine.pid"
   i=0; until ss -ltn | grep -q ":$ENGINE_PORT "; do sleep 0.2; i=$((i+1)); [ $i -lt 300 ]; done
   echo "engine pid $(cat "$DATA/engine.pid")"
@@ -88,7 +88,7 @@ bench)
 inproc)
   # The client and the engine share a process: give it both CPU sets, as the wire runs have.
   taskset -c "$SERVER_CPUS,$CLIENT_CPUS" "$BENCH" --target inproc --label inproc \
-    --data "$DATA/engine" --cache-mb 2048 "$@"
+    --data "$DATA/engine" --cache-mb "${CACHE_MB:-2048}" "$@"
   ;;
 psql)
   t=$1; shift

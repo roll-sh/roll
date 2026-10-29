@@ -150,11 +150,12 @@ impl Top {
 /// What a chunk reads: (data key, stored row) in the scan's order.
 pub type Chunk = Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send>;
 
-/// A chunk of a secondary index's entries as the rows they point at, in index order,
-/// fetched from the store a batch at a time at the statement's snapshot (`Txn::store_reader`;
-/// None: an index-only scan's, the entry key standing in for the row).
+/// A chunk of a secondary index's entries (or a bitmap heap scan's row keys: entries with
+/// the data key as their value) as the rows they point at, in their order, fetched from the
+/// store a batch at a time at the statement's snapshot (`Txn::store_reader`; None: an
+/// index-only scan's, the entry key standing in for the row).
 pub struct IndexChunk {
-    pub entries: TxnScan,
+    pub entries: Box<dyn Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send>,
     pub fetch: Option<(Arc<crate::storage::Store>, u64)>,
     buf: VecDeque<Result<(Vec<u8>, bytes::Bytes)>>,
     done: bool,
@@ -165,7 +166,13 @@ const FETCH: usize = 256;
 
 impl IndexChunk {
     pub fn new(entries: TxnScan, fetch: Option<(Arc<crate::storage::Store>, u64)>) -> IndexChunk {
-        IndexChunk { entries, fetch, buf: VecDeque::new(), done: false }
+        IndexChunk { entries: Box::new(entries), fetch, buf: VecDeque::new(), done: false }
+    }
+
+    /// The rows stored under `keys[run]` (in that order; the invisible ones left out).
+    pub fn keyed(keys: Arc<[Vec<u8>]>, run: std::ops::Range<usize>, fetch: (Arc<crate::storage::Store>, u64)) -> IndexChunk {
+        let entries = run.map(move |i| Ok((Vec::new(), bytes::Bytes::copy_from_slice(&keys[i]))));
+        IndexChunk { entries: Box::new(entries), fetch: Some(fetch), buf: VecDeque::new(), done: false }
     }
 }
 
@@ -312,6 +319,125 @@ impl Decode {
     }
 }
 
+/// A worker's buffers for reading stored rows in place (`Lazy`), kept from row to row.
+pub(super) struct LazyBuf {
+    /// Per column walked, where its value starts (`u32::MAX`: not stored, added since).
+    offs: Vec<u32>,
+    /// Per column of the scan's row (and its key), the value once something read it (None
+    /// inside: it doesn't decode; making the row reports why).
+    cells: Vec<std::cell::OnceCell<Option<Value>>>,
+    /// Per column walked, its exact number once read in place (`row::peek_num`; None
+    /// inside: not one), so the aggregates and expressions reading it parse it once.
+    nums: Vec<std::cell::OnceCell<Option<Option<(i128, u32)>>>>,
+    /// The columns walked: up to the last one the scan reads.
+    upto: usize,
+}
+
+impl LazyBuf {
+    pub(super) fn new(d: &Decode) -> LazyBuf {
+        let ncols = d.missing.len();
+        let upto = match &d.need {
+            Some(n) => n.iter().take(ncols).rposition(|b| *b).map_or(0, |i| i + 1),
+            None => ncols,
+        };
+        LazyBuf {
+            offs: vec![u32::MAX; upto],
+            cells: (0..ncols + d.with_key as usize).map(|_| Default::default()).collect(),
+            nums: (0..upto).map(|_| Default::default()).collect(),
+            upto,
+        }
+    }
+
+    /// The stored row `bytes` (under `key`) to be read in place: where its columns start,
+    /// nothing decoded yet.
+    pub(super) fn read<'a>(&'a mut self, d: &'a Decode, key: &'a [u8], bytes: &'a [u8]) -> Result<Lazy<'a>> {
+        use crate::storage::{row::skip_value, sst::get_varint};
+        let data = super::scan::row_data(bytes)?;
+        let mut pos = 0;
+        let n = get_varint(data, &mut pos)? as usize;
+        for (i, off) in self.offs.iter_mut().enumerate() {
+            if i < n {
+                *off = pos as u32;
+                skip_value(data, &mut pos)?;
+            } else {
+                *off = u32::MAX;
+            }
+        }
+        for c in &mut self.cells {
+            c.take();
+        }
+        for c in &mut self.nums {
+            c.take();
+        }
+        Ok(Lazy { d, key, data, buf: self })
+    }
+}
+
+/// A stored row read in place: a column is decoded when something first reads it, and
+/// numbers are read without making values (`Cols::num`). What a filter rejects or a
+/// partial aggregate takes is never made a row.
+pub(super) struct Lazy<'a> {
+    d: &'a Decode,
+    key: &'a [u8],
+    data: &'a [u8],
+    buf: &'a mut LazyBuf,
+}
+
+impl Lazy<'_> {
+    fn needed(&self, i: usize) -> bool {
+        self.d.need.as_ref().is_none_or(|n| n.get(i).copied().unwrap_or(false))
+    }
+
+    /// Column `i` of the scan's row, as `Decode::row` makes it.
+    fn decode(&self, i: usize) -> Result<Value> {
+        let ncols = self.d.missing.len();
+        if i == ncols {
+            return Ok(Value::Bytea(Arc::from(self.key)));
+        }
+        if i >= self.buf.upto || !self.needed(i) {
+            return Ok(Value::Null);
+        }
+        match self.buf.offs[i] {
+            u32::MAX => Ok(self.d.missing[i].clone().unwrap_or(Value::Null)),
+            off => crate::storage::row::decode_value(self.data, &mut (off as usize)),
+        }
+    }
+
+    /// The scan's row (`Decode::row`'s), with the values already read.
+    pub(super) fn into_row(self) -> Result<Row> {
+        let mut row = Vec::with_capacity(self.buf.cells.len());
+        for i in 0..self.buf.cells.len() {
+            let v = match self.buf.cells[i].take() {
+                Some(Some(v)) => v,
+                _ => self.decode(i)?,
+            };
+            row.push(v);
+        }
+        Ok(row)
+    }
+}
+
+impl super::kernel::Cols for Lazy<'_> {
+    fn col(&self, i: usize) -> Option<&Value> {
+        self.buf.cells.get(i)?.get_or_init(|| self.decode(i).ok()).as_ref()
+    }
+
+    fn num(&self, i: usize) -> Option<Option<(i128, u32)>> {
+        let cell = self.buf.cells.get(i)?;
+        if cell.get().is_none()
+            && i < self.buf.upto
+            && self.needed(i)
+            && self.buf.offs[i] != u32::MAX
+            && let Some(r) = self.buf.nums[i]
+                .get_or_init(|| crate::storage::row::peek_num(self.data, self.buf.offs[i] as usize))
+        {
+            return Some(*r);
+        }
+        let v = self.col(i)?;
+        if v.is_null() { Some(None) } else { super::kernel::small_num(v).map(Some) }
+    }
+}
+
 /// A row, the pipeline stages it went through (`pipe`; 0: the scan's row), whether the
 /// filter is done with it, and how many of the table's rows were read since the item
 /// before (the filter's and the joins' dropped ones too: the table's statistics count
@@ -359,6 +485,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
     let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
     // (One for the worker's chunks: its lookups' cache lasts.)
     let mut scratch = super::pipe::Scratch::default();
+    let mut lazy = LazyBuf::new(&d);
     loop {
         let job = match jobs.lock() {
             Ok(rx) => rx.recv(),
@@ -369,7 +496,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
             return;
         }
         if let Some(spec) = &d.spec {
-            if !work_partial(scan, &out, &d, spec, &stopped, &mut scratch) {
+            if !work_partial(scan, &out, &d, spec, &stopped, &mut scratch, &mut lazy) {
                 return;
             }
             continue;
@@ -396,21 +523,43 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
                     break;
                 }
             };
-            let row = match d.row_with(&key, &bytes, d.need_raw.as_ref().or(d.need.as_ref())) {
-                Ok(row) => row,
-                Err(e) => {
-                    err = Some(e);
-                    break;
+            // (Filtered in place when nothing is computed over the row: a row the filter
+            // rejects is never made.)
+            let in_place = d.ios.is_none() && d.extra.is_empty() && d.topk.is_none() && d.need_raw.is_none();
+            let (row, done) = match (&d.filter, in_place) {
+                (Some(f), true) => {
+                    let made = lazy.read(&d, &key, &bytes).and_then(|lz| match f.passes(&lz) {
+                        Some(false) => Ok(None),
+                        pass => Ok(Some((lz.into_row()?, pass.is_some()))),
+                    });
+                    match made {
+                        Ok(Some(r)) => r,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
                 }
-            };
-            let done = match (&d.filter, d.filtered) {
-                (_, false) => true,
-                (Some(f), true) => match f.passes(&row) {
-                    Some(true) => true,
-                    Some(false) => continue,
-                    None => false,
-                },
-                (None, true) => false,
+                _ => {
+                    let row = match d.row_with(&key, &bytes, d.need_raw.as_ref().or(d.need.as_ref())) {
+                        Ok(row) => row,
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    };
+                    let done = match (&d.filter, d.filtered) {
+                        (_, false) => true,
+                        (Some(f), true) => match f.passes(&row) {
+                            Some(true) => true,
+                            Some(false) => continue,
+                            None => false,
+                        },
+                        (None, true) => false,
+                    };
+                    (row, done)
+                }
             };
             let row = if d.extra.is_empty() {
                 row
@@ -466,6 +615,15 @@ impl ParScan {
     }
 }
 
+/// Whether a row passes the scan's filter in a worker (None: the executor's thread decides).
+fn filter_pass<R: super::kernel::Cols + ?Sized>(d: &Decode, row: &R) -> Option<bool> {
+    match &d.filter {
+        Some(f) => f.passes(row),
+        None if d.filtered => None,
+        None => Some(true),
+    }
+}
+
 /// Parts sent at a time, at most (rows aggregated).
 const PART_ROWS: usize = 1 << 16;
 
@@ -477,6 +635,7 @@ fn work_partial(
     spec: &super::partial::Spec,
     stopped: &dyn Fn() -> bool,
     scratch: &mut super::pipe::Scratch,
+    lazy: &mut LazyBuf,
 ) -> bool {
     use super::partial::{Partials, Seg};
     let mut pa = Partials::new(spec);
@@ -499,22 +658,36 @@ fn work_partial(
             return false;
         }
         read += 1;
-        let row = match r.and_then(|(k, v)| d.row(&k, &v)) {
-            Ok(row) => row,
-            Err(e) => {
-                return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
-            }
+        let (k, v) = match r {
+            Ok(e) => e,
+            Err(e) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
         };
-        let pass = match &d.filter {
-            Some(f) => f.passes(&row),
-            None if d.filtered => None,
-            None => Some(true),
+        // (Read in place: a row the filter rejects or the part takes is never made.)
+        let row = match &d.ios {
+            None => lazy.read(d, &k, &v).and_then(|lazy| {
+                let pass = filter_pass(d, &lazy);
+                match pass {
+                    Some(false) => Ok(None),
+                    Some(true) if d.stages.is_empty() && pa.row(&lazy) => Ok(None),
+                    _ => lazy.into_row().map(|row| Some((row, pass))),
+                }
+            }),
+            Some(_) => d.row(&k, &v).map(|row| {
+                let pass = filter_pass(d, &row);
+                Some((row, pass))
+            }),
+        };
+        let (row, pass) = match row {
+            Ok(Some(r)) => r,
+            Ok(None) => continue,
+            Err(e) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
         };
         match pass {
             Some(false) => continue,
             None => serial.push((row, 0, false)),
             Some(true) if d.stages.is_empty() => {
-                if !pa.row(&row) {
+                // (One read in place was offered to the part already.)
+                if d.ios.is_none() || !pa.row(&row) {
                     serial.push((row, 0, true));
                 }
             }

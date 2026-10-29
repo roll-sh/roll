@@ -2251,6 +2251,9 @@ impl ScanNode {
         if self.secondary {
             return self.start_parallel_index(spec, stages, ctx);
         }
+        if self.keys.is_some() {
+            return self.start_parallel_keys(spec, stages, ctx);
+        }
         let p = &self.plan;
         if !self.tid_order
             || self.secondary
@@ -2343,11 +2346,12 @@ impl ScanNode {
     }
 
     /// A full scan of a big table's secondary btree index read by worker threads (for a
-    /// pipeline above, which reads all of its rows): its entry range cut into chunks the
-    /// workers read in index order, fetching their rows at the statement's snapshot (an
-    /// index-only scan: decoding the entries). The executor's thread takes the chunks in
-    /// order: the serial scan's rows in its order (a table not modelled has no heap order
-    /// for equal keys' rows).
+    /// pipeline above, or rows for this thread: a merge join's ordered input fetches its
+    /// rows in the workers, as a sequential scan's are read there): its entry range cut
+    /// into chunks the workers read in index order, fetching their rows at the statement's
+    /// snapshot (an index-only scan: decoding the entries). The executor's thread takes the
+    /// chunks in order: the serial scan's rows in its order (a table not modelled has no
+    /// heap order for equal keys' rows).
     fn start_parallel_index(
         &mut self,
         spec: Option<Arc<super::partial::Spec>>,
@@ -2357,8 +2361,7 @@ impl ScanNode {
         use super::parscan::{Decode, IndexChunk, ParScan, split_keys};
         let p = &self.plan;
         let Some((ix, b)) = &p.index else { return Ok(None) };
-        if (spec.is_none() && stages.is_empty())
-            || self.keys.is_some()
+        if self.keys.is_some()
             || self.only.is_some()
             || self.sample.is_some()
             || self.ios
@@ -2437,6 +2440,73 @@ impl ScanNode {
 }
 
 impl ScanNode {
+    /// A bitmap heap scan of a big table (its row keys collected, `bitmap_rows`) whose rows
+    /// worker threads fetch, decode and filter: the keys cut into runs taken in order, so the
+    /// rows come as the serial scan's (a table not modelled: no page a fetch could prune).
+    fn start_parallel_keys(
+        &mut self,
+        spec: Option<Arc<super::partial::Spec>>,
+        stages: Vec<Arc<super::pipe::Stage>>,
+        ctx: &ExecCtx,
+    ) -> Result<Option<super::parscan::ParScan>> {
+        use super::parscan::{Decode, IndexChunk, ParScan};
+        /// Fewer rows than this are fetched on this thread.
+        const MIN_KEYS: usize = 4096;
+        let p = &self.plan;
+        if self.keys.as_ref().is_none_or(|k| k.len() < MIN_KEYS)
+            || self.only.is_some()
+            || self.sample.is_some()
+            || self.ios
+            || p.index.is_some()
+            || p.mark.is_some()
+            || p.sys
+            || p.limit.is_some()
+            || ctx.instrumented()
+            || super::sizing::tracked(p.table.oid)
+            || predicate_locked(&p.table, ctx)
+        {
+            return Ok(None);
+        }
+        if spec.is_some() && p.filter.as_ref().is_some_and(|f| super::kernel::compile(f).is_none()) {
+            return Ok(None);
+        }
+        let (workers, pool) = parallel_workers(ctx);
+        let Some(snap) = ctx.snapshot() else {
+            return Ok(None);
+        };
+        if workers == 0 || super::sizing::heap_modelled(&p.table, ctx) {
+            return Ok(None);
+        }
+        let Some(fetch) = ctx.txn.borrow().store_reader(&snap) else {
+            return Ok(None);
+        };
+        let keys: Arc<[Vec<u8>]> = self.keys.take().into_iter().flatten().collect();
+        let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
+        let scans = (0..keys.len())
+            .step_by(per)
+            .map(|i| Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone())) as super::parscan::Chunk)
+            .collect();
+        let d = Decode {
+            need: self.need.as_deref().map(Arc::from),
+            missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
+            with_key: p.with_key,
+            filter: p.filter.as_ref().and_then(super::kernel::compile),
+            filtered: p.filter.is_some(),
+            spec,
+            stages,
+            ios: None,
+            extra: Vec::new(),
+            drop: Vec::new(),
+            raw: Vec::new(),
+            need_raw: None,
+            topk: None,
+        };
+        let par = ParScan::start(scans, workers, pool, d);
+        // (No worker started: the keys are read here after all.)
+        self.keys = Some(if par.is_some() { Vec::new() } else { keys.to_vec() }.into_iter());
+        Ok(par)
+    }
+
     /// `n` rows a parallel scan read, in its statistics as the serial scan counts them.
     fn count_read(&self, n: i64, ctx: &ExecCtx) {
         if n == 0 {
@@ -2449,7 +2519,8 @@ impl ScanNode {
                 super::pgstat::count_fetched(ctx, ix, n);
                 super::pgstat::count_blocks(ctx, ix, n);
             }
-            _ => {}
+            StatTarget::Fetched(t) => super::pgstat::count_fetched(ctx, t, n),
+            StatTarget::Off => {}
         }
     }
 

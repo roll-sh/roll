@@ -1226,13 +1226,14 @@ fn sst_get(sst: &SstReader, key: &[u8], seek: &[u8]) -> Result<Option<(u64, Opti
         return Ok(None);
     }
     let mut b = sst.find_block(seek);
+    let mut pos = sst::BlockPos::default();
     while b < sst.block_count() {
         let block = sst.block(b)?;
-        let i = block.seek(seek);
-        if i < block.len() {
-            let k = block.key(i);
+        block.seek(seek, &mut pos);
+        if pos.index() < block.len() {
+            let k = pos.key();
             if user_key(k) == key {
-                return Ok(Some((key_ts(k), block.value(i))));
+                return Ok(Some((key_ts(k), block.value(&pos))));
             }
             return Ok(None);
         }
@@ -1253,6 +1254,7 @@ fn ssts_get(
 ) -> Result<()> {
     let mut file = 0;
     let mut cur: Option<(usize, usize, Arc<sst::Block>)> = None;
+    let mut pos = sst::BlockPos::default();
     for &i in left {
         let (key, seek) = (keys[i], seeks[i].as_slice());
         while file < ssts.len() && user_key(&ssts[file].meta.last_key) < key {
@@ -1272,11 +1274,11 @@ fn ssts_get(
                     blk
                 }
             };
-            let j = block.seek(seek);
-            if j < block.len() {
-                let k = block.key(j);
+            block.seek(seek, &mut pos);
+            if pos.index() < block.len() {
+                let k = pos.key();
                 if user_key(k) == key {
-                    found.push((i, (key_ts(k), block.value(j))));
+                    found.push((i, (key_ts(k), block.value(&pos))));
                 }
                 break;
             }
@@ -1310,7 +1312,7 @@ enum Cursor {
         file: usize,
         block: Option<Arc<sst::Block>>,
         block_idx: usize,
-        pos: usize,
+        pos: sst::BlockPos,
         end: Vec<u8>,
         start: Vec<u8>,
         started: bool,
@@ -1338,7 +1340,7 @@ impl Cursor {
             file: 0,
             block: None,
             block_idx: 0,
-            pos: 0,
+            pos: sst::BlockPos::default(),
             end: end.to_vec(),
             start: start.to_vec(),
             started: false,
@@ -1418,7 +1420,7 @@ impl Cursor {
                         *block_idx = sst.find_block(start);
                         if *block_idx < sst.block_count() {
                             let b = sst.block_with(*block_idx, *fill)?;
-                            *pos = b.seek(start);
+                            b.seek(start, pos);
                             *block = Some(b);
                         }
                     }
@@ -1428,13 +1430,13 @@ impl Cursor {
                     if *block_idx >= sst.block_count() {
                         *file += 1;
                         *block_idx = 0;
-                        *pos = 0;
                         continue;
                     }
-                    *block = Some(sst.block_with(*block_idx, *fill)?);
-                    *pos = 0;
+                    let b = sst.block_with(*block_idx, *fill)?;
+                    b.at(0, pos);
+                    *block = Some(b);
                 }
-                if *pos >= block.as_ref().unwrap().len() {
+                if pos.index() >= block.as_ref().unwrap().len() {
                     *block = None;
                     *block_idx += 1;
                     continue;
@@ -1460,11 +1462,11 @@ impl Cursor {
                     return None;
                 }
                 let b = block.as_ref()?;
-                if *pos >= b.len() {
+                if pos.index() >= b.len() {
                     return None;
                 }
-                let k = b.key(*pos);
-                (end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref(*pos)))
+                let k = pos.key();
+                (end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref(pos)))
             }
         }
     }
@@ -1475,8 +1477,8 @@ impl Cursor {
             Cursor::Mem { buf, .. } => buf.pop_front().expect("a head entry"),
             Cursor::Level { block, pos, .. } => {
                 let b = block.as_ref().expect("a head entry");
-                let e = (b.key(*pos).to_vec(), b.value(*pos));
-                *pos += 1;
+                let e = (pos.key().to_vec(), b.value(pos));
+                b.step(pos);
                 e
             }
         }
@@ -1487,7 +1489,11 @@ impl Cursor {
             Cursor::Mem { buf, .. } => {
                 buf.pop_front();
             }
-            Cursor::Level { pos, .. } => *pos += 1,
+            Cursor::Level { block, pos, .. } => {
+                if let Some(b) = block {
+                    b.step(pos);
+                }
+            }
         }
     }
 
@@ -1528,11 +1534,11 @@ impl Cursor {
                     return;
                 }
                 if let Some(b) = block.as_ref() {
-                    if *pos < b.len() && b.key(*pos) >= target {
+                    if pos.index() < b.len() && pos.key() >= target {
                         return;
                     }
                     if b.last_key().is_some_and(|k| k >= target) {
-                        *pos = b.seek(target);
+                        b.seek(target, pos);
                         return;
                     }
                 }
@@ -1733,7 +1739,7 @@ enum RevCursor {
         /// The next file to read is `file - 1` (0: none left); within the current block,
         /// entries before `pos`.
         file: usize,
-        block: Option<Arc<sst::Block>>,
+        block: Option<sst::Expanded>,
         block_idx: usize,
         pos: usize,
         started: bool,
@@ -1802,7 +1808,7 @@ impl RevCursor {
                         *started = false;
                         continue;
                     }
-                    let b = sst.block(*block_idx)?;
+                    let b = sst.block(*block_idx)?.expand();
                     *pos = if end.is_empty() { b.len() } else { b.seek(end) };
                     *block = Some(b);
                 }
@@ -1824,7 +1830,7 @@ impl RevCursor {
                     } else {
                         *block_idx -= 1;
                     }
-                    let b = ssts[*file - 1].block(*block_idx)?;
+                    let b = ssts[*file - 1].block(*block_idx)?.expand();
                     *pos = b.len();
                     *block = Some(b);
                 }

@@ -500,6 +500,34 @@ pub fn decode_row(b: &[u8]) -> Result<Vec<Value>> {
     Ok(row)
 }
 
+/// The encoded value at `pos` as an exact number, read in place (what `kernel::small_num`
+/// gives its value): Some(None) a NULL, None anything but an integer or a finite numeric
+/// that fits an i128.
+pub fn peek_num(b: &[u8], pos: usize) -> Option<Option<(i128, u32)>> {
+    let mut p = pos + 1;
+    let le = |n: usize| b.get(pos + 1..pos + 1 + n);
+    Some(Some(match *b.get(pos)? {
+        tag::NULL => return Some(None),
+        tag::INT2 => (i16::from_le_bytes(le(2)?.try_into().ok()?) as i128, 0),
+        tag::INT4 => (i32::from_le_bytes(le(4)?.try_into().ok()?) as i128, 0),
+        tag::INT8 => (i64::from_le_bytes(le(8)?.try_into().ok()?) as i128, 0),
+        tag::NUMERIC => {
+            let scale = get_varint(b, &mut p).ok()? as u32;
+            let bytes = take_bytes(b, &mut p).ok()?;
+            // (Two's complement, little-endian, as `to_signed_bytes_le` wrote it: none
+            // longer than an i128's.)
+            if bytes.is_empty() || bytes.len() > 16 {
+                return if bytes.is_empty() { Some(Some((0, scale))) } else { None };
+            }
+            let fill = if bytes[bytes.len() - 1] & 0x80 != 0 { 0xFF } else { 0 };
+            let mut w = [fill; 16];
+            w[..bytes.len()].copy_from_slice(bytes);
+            (i128::from_le_bytes(w), scale)
+        }
+        _ => return None,
+    }))
+}
+
 /// Step over one encoded value without building it.
 pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
     let t = *b.get(*pos).ok_or_else(|| internal("truncated row"))?;

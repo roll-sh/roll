@@ -1441,6 +1441,20 @@ pub fn num_op(imp: super::FnImpl) -> Option<crate::exec::kernel::NumOp> {
         .map(|(_, o)| o)
 }
 
+/// The comparison `imp` is (=, <>, <, <=, >, >=), as the test of an ordering it makes
+/// (`exec::kernel` compares numerics as exact numbers).
+pub fn cmp_op(imp: super::FnImpl) -> Option<fn(Ordering) -> bool> {
+    let table: [(super::FnImpl, fn(Ordering) -> bool); 6] = [
+        (op_eq, |o| o == Ordering::Equal),
+        (op_ne, |o| o != Ordering::Equal),
+        (op_lt, |o| o == Ordering::Less),
+        (op_le, |o| o != Ordering::Greater),
+        (op_gt, |o| o == Ordering::Greater),
+        (op_ge, |o| o != Ordering::Less),
+    ];
+    table.iter().find(|(f, _)| std::ptr::fn_addr_eq(*f, imp)).map(|(_, t)| *t)
+}
+
 /// The pure implementation of built-in `imp`, when it has one.
 pub fn pure(imp: super::FnImpl) -> Option<PureFn> {
     let table: [(super::FnImpl, PureFn); 27] = [

@@ -259,6 +259,9 @@ pub struct Partials<'a> {
     key: Vec<Value>,
     args: Vec<Value>,
     nums: Vec<Option<(i128, u32)>>,
+    /// Per aggregate, a numeric sum's column read as its exact number (`Cols::num`: a
+    /// stored row read in place makes no value; Some(None): NULL).
+    cols: Vec<Option<Option<(i128, u32)>>>,
 }
 
 /// A kernel's value over `row`: a column's or constant's in place, else the next of the
@@ -343,6 +346,7 @@ impl<'a> Partials<'a> {
             key: Vec::with_capacity(spec.keys.len()),
             args: Vec::with_capacity(spec.aggs.len()),
             nums: Vec::with_capacity(spec.aggs.len()),
+            cols: Vec::with_capacity(spec.aggs.len()),
         }
     }
 
@@ -366,6 +370,13 @@ impl<'a> Partials<'a> {
         }
         self.args.clear();
         self.nums.clear();
+        self.cols.clear();
+        for (a, _, p) in self.spec.aggs.iter() {
+            self.cols.push(match (a, p) {
+                (Some(a @ K::Col(_)), Partial::SumNum(_)) => a.num(row),
+                _ => None,
+            });
+        }
         for (a, _, p) in self.spec.aggs.iter() {
             let Some(a) = a.as_ref().filter(|a| computed(a)) else { continue };
             // (A numeric sum's argument summed exactly as it is computed: no value made.)
@@ -386,9 +397,12 @@ impl<'a> Partials<'a> {
         }
         // (Columns past the row's end: left to the serial path, as `run` would.)
         let present = |k: &K| !matches!(k, K::Col(i) if row.col(*i).is_none());
-        if !self.spec.keys.iter().all(present) || !self.spec.aggs.iter().filter_map(|a| a.0.as_ref()).all(present) {
+        let args = self.spec.aggs.iter().zip(&self.cols).filter(|(_, c)| c.is_none());
+        if !self.spec.keys.iter().all(present) || !args.filter_map(|(a, _)| a.0.as_ref()).all(present) {
             return false;
         }
+        // (A column's number stands in for its value: NULL or not is what's read of it.)
+        let stand_in = |c: &Option<(i128, u32)>| if c.is_some() { &Value::Bool(true) } else { &Value::Null };
         let kr = KeyRef { keys: &self.spec.keys, trim: &self.spec.trim, row, computed: &self.key };
         let g = self.index.get(&kr).map(|g| *g as usize);
         // (A state that can't take its value leaves the whole row to the serial path:
@@ -396,7 +410,10 @@ impl<'a> Partials<'a> {
         let skipped = |a: &Option<K>, skip: bool, v: &Value| a.is_some() && skip && v.is_null();
         let mut at = 0;
         for (i, (a, skip, empty)) in self.spec.aggs.iter().enumerate() {
-            let v = arg(a, row, &self.args, &mut at);
+            let v = match &self.cols[i] {
+                Some(c) => stand_in(c),
+                None => arg(a, row, &self.args, &mut at),
+            };
             let st = match g {
                 Some(g) => &self.part.groups[g].1[i],
                 None => empty,
@@ -430,6 +447,15 @@ impl<'a> Partials<'a> {
         };
         let mut at = 0;
         for (i, (a, skip, _)) in self.spec.aggs.iter().enumerate() {
+            if let Some(c) = self.cols[i] {
+                if !skipped(a, *skip, stand_in(&c)) {
+                    match (&mut self.part.groups[g].1[i], c) {
+                        (Partial::SumNum(sn), Some((n, sc))) => sn.add_wide(n, sc),
+                        (st, _) => st.add(stand_in(&c)),
+                    }
+                }
+                continue;
+            }
             let ci = at;
             let v = arg(a, row, &self.args, &mut at);
             if !skipped(a, *skip, v) {

@@ -46,6 +46,13 @@ pub enum K {
     /// A pgvector distance function's call (strict, float8): its kernel, when the values'
     /// dimensions agree (`ext::vector::distance_kernel`).
     Dist(crate::ext::vector::DistKernel, Box<[K; 2]>),
+    /// A comparison of two numerics: as exact numbers (`num`) where both fit an i128, so a
+    /// column read in place (`Cols::num`) is never made a value; `f` otherwise.
+    NumCmp {
+        test: fn(std::cmp::Ordering) -> bool,
+        f: PureFn,
+        args: Box<[K; 2]>,
+    },
 }
 
 /// A numeric operator a kernel computes without allocating (`K::Num`).
@@ -58,7 +65,7 @@ pub enum NumOp {
 
 /// A numeric (or integer) value as an exact unscaled i128 and its scale (None: another
 /// value, or one past an i128).
-fn small_num(v: &Value) -> Option<(i128, u32)> {
+pub(super) fn small_num(v: &Value) -> Option<(i128, u32)> {
     use num_traits::ToPrimitive;
     match v {
         Value::Numeric(n) => match &**n {
@@ -96,6 +103,13 @@ thread_local! {
 /// (`pipe::Joined`).
 pub trait Cols {
     fn col(&self, i: usize) -> Option<&Value>;
+
+    /// Column `i` as an exact number (`small_num`; Some(None): NULL; None: absent, or not
+    /// such a number). A stored row read in place gives it without making a value.
+    fn num(&self, i: usize) -> Option<Option<(i128, u32)>> {
+        let v = self.col(i)?;
+        if v.is_null() { Some(None) } else { small_num(v).map(Some) }
+    }
 }
 
 impl Cols for [Value] {
@@ -157,6 +171,18 @@ pub fn compile(e: &Expr) -> Option<K> {
         {
             K::Num {
                 op,
+                f: pure_call(def, ty)?,
+                args: Box::new([compile(&args[0])?, compile(&args[1])?]),
+            }
+        }
+        Expr::Call(def, args, ty)
+            if args.len() == 2
+                && def.strict
+                && args.iter().all(|a| matches!(a.ty(), DataType::Numeric(_)))
+                && let Some(test) = crate::sql::func::ops::cmp_op(def.imp) =>
+        {
+            K::NumCmp {
+                test,
                 f: pure_call(def, ty)?,
                 args: Box::new([compile(&args[0])?, compile(&args[1])?]),
             }
@@ -243,7 +269,7 @@ impl K {
     pub fn num<R: Cols + ?Sized>(&self, row: &R) -> Option<Option<(i128, u32)>> {
         let leaf = |v: &Value| if v.is_null() { Some(None) } else { small_num(v).map(Some) };
         match self {
-            K::Col(i) => leaf(row.col(*i)?),
+            K::Col(i) => row.num(*i),
             K::Const(v) => leaf(v),
             K::Num { op, args, .. } => {
                 // (Both operands before a NULL one: the call is strict.)
@@ -297,6 +323,29 @@ impl K {
             }
             K::Col(i) => row.col(*i)?.clone(),
             K::Const(v) => v.clone(),
+            K::NumCmp { test, f, args } => {
+                if let (Some(a), Some(b)) = (args[0].num(row), args[1].num(row)) {
+                    let (Some((x, sx)), Some((y, sy))) = (a, b) else {
+                        return Some(Value::Null);
+                    };
+                    let s = sx.max(sy);
+                    let pow = |n: u32| 10i128.checked_pow(n);
+                    let scaled = (|| Some((x.checked_mul(pow(s - sx)?)?, y.checked_mul(pow(s - sy)?)?)))();
+                    if let Some((x, y)) = scaled {
+                        return Some(Value::Bool(test(x.cmp(&y))));
+                    }
+                }
+                let (mut t0, mut t1) = (Value::Null, Value::Null);
+                let x = args[0].arg(row, &mut t0)?;
+                let y = args[1].arg(row, &mut t1)?;
+                if x.is_null() || y.is_null() {
+                    return Some(Value::Null);
+                }
+                if matches!(x, Value::Ext(..)) || matches!(y, Value::Ext(..)) {
+                    return None;
+                }
+                f(x, y, &DataType::Bool).ok()?
+            }
             K::Call { f, args, strict, ret } => {
                 let (mut t0, mut t1) = (Value::Null, Value::Null);
                 // (Both arguments before a strict call's NULL: the second's failure, a
