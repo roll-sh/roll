@@ -115,14 +115,7 @@ pub fn spec_with(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate
             let keys: Vec<String> = f
                 .order
                 .iter()
-                .map(|k| {
-                    format!(
-                        "{} {} NULLS {}",
-                        d.expr(&k.expr),
-                        if k.desc { "DESC" } else { "ASC" },
-                        if k.nulls_first { "FIRST" } else { "LAST" }
-                    )
-                })
+                .map(|k| format!("{}{}", d.expr(&k.expr), d.order_suffix(k)))
                 .collect();
             sql.push_str(&format!(" ORDER BY {}", keys.join(", ")));
         }
@@ -412,13 +405,12 @@ impl Cursor {
         };
         self.eof = r.rows.len() < self.fetch;
         self.batch.extend(r.rows);
+        // (close_cursor, sent with the connection's next command; the transaction's end
+        // closes it when that is the next.)
         if self.eof {
             let close = format!("CLOSE {}", self.name);
             connection::with_conn(ctx, self.key, |c| {
-                let r = c.exec(&close, &intr)?;
-                if r.status != Status::CommandOk {
-                    return Err(connection::report(&r, c, Some(&close)));
-                }
+                c.defer(close);
                 Ok(())
             })?;
         }

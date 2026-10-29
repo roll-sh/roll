@@ -56,6 +56,13 @@ pub struct SortKey {
     pub using: Option<Arc<FuncDef>>,
 }
 
+impl SortKey {
+    /// A user operator class's ordering operator the key sorts by (`USING op`), by oid.
+    pub fn ordering_op(&self) -> Option<u32> {
+        self.using.as_ref()?.coll.as_ref().and_then(|c| crate::catalog::partition::comparator_op_oid(c))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinKind {
     Inner,

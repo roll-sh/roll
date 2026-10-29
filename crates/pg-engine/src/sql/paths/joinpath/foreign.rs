@@ -8,6 +8,9 @@ use super::*;
 use crate::ext::postgres_fdw::join as pj;
 use std::sync::Arc as SArc;
 
+/// postgres_fdw's DEFAULT_FDW_SORT_MULTIPLIER: a sort sent without remote estimates.
+const DEFAULT_FDW_SORT_MULTIPLIER: f64 = 1.2;
+
 impl Search<'_, '_, '_> {
     /// A base relation's description by its wrapper (GetForeignRelSize's fpinfo): a scan
     /// of a foreign table whose wrapper pushes joins down, read plainly.
@@ -244,6 +247,196 @@ impl Search<'_, '_, '_> {
                 self.note_derived(y, x, true);
             }
         }
+    }
+
+    /// postgresGetForeignPaths' parameterized paths (use_remote_estimate only): one for each
+    /// set of other relations a movable, shippable join clause reads, over the join clauses
+    /// movable into the relation given them (get_baserel_parampathinfo), costed by the
+    /// remote EXPLAIN of the scan with them (estimate_path_cost_size).
+    pub(super) fn fdw_param_paths(&self, l: usize, r: &Rc<Rel>, width: u32) -> Vec<JP> {
+        let leaf = &self.leaves[l];
+        let Some((s, _)) = leaf.scan.as_ref() else { return Vec::new() };
+        let (set, off) = (1u32 << l, leaf.off);
+        let lat = if self.has_lat(l) { self.lateral_closure(l) } else { 0 };
+        let cat = self.pl.cat.clone();
+        let fmt = self.pl.ctx.fmt().clone();
+        let d = crate::ext::postgres_fdw::deparse::Deparser::new(&cat, &s.table, &fmt);
+        // (A clause over this relation's columns, the others' values parameters.)
+        let as_param = |e: &Expr| {
+            e.clone().transform(&mut |x| {
+                Ok(match x {
+                    Expr::Col(g, t) if self.leaf_of.get(g) == Some(&l) => Expr::Col(g - off, t),
+                    Expr::Col(_, t) => Expr::Outer(1, 0, t),
+                    x => x,
+                })
+            })
+        };
+        let mut reqs: Vec<u32> = Vec::new();
+        for (ci, c) in self.clauses.iter().enumerate() {
+            if c.leaves & set == 0 || c.leaves == set || c.expr.is_volatile() || !self.movable_to(ci, l) {
+                continue;
+            }
+            if !as_param(&c.expr).is_ok_and(|e| d.shippable(&e)) {
+                continue;
+            }
+            let req = (c.leaves & !set) | lat;
+            if !reqs.contains(&req) {
+                reqs.push(req);
+            }
+        }
+        let opts = pj::opts(&cat, &s.table);
+        let need: Vec<bool> = (0..leaf.ncols).map(|k| self.needed_above(off + k, set)).collect();
+        let mut out = Vec::new();
+        for req in reqs {
+            let Some((mut prel, params, enforced)) = self.lateral_param_rel(l, r, req) else { continue };
+            self.orient_param_quals(&mut prel.quals[r.quals.len()..], &enforced, set);
+            let mut scan = s.clone();
+            scan.filter = match prel.quals.len() {
+                0 => None,
+                1 => Some(prel.quals[0].clone()),
+                _ => Some(Expr::And(prel.quals.clone())),
+            };
+            scan.written = prel.quals.clone();
+            let q = crate::ext::postgres_fdw::scan::spec_with(&scan, Some(&need), &cat, &fmt, true);
+            let Some((retrieved, _, st, tot)) = pj::explain_estimate(self.pl.ctx, &scan, &format!("EXPLAIN {}", q.sql)) else {
+                continue;
+            };
+            let local_sel = if q.local.is_empty() { 1.0 } else { self.pl.sel(&prel, &q.local) };
+            let (lst, lpt) = self.pl.rel_quals_cost(&prel, &q.local);
+            let rows = costs::clamp_rows(retrieved * local_sel);
+            let startup = st + lst + opts.startup_cost;
+            let total = tot + lpt * retrieved + opts.startup_cost + (opts.tuple_cost + costs::CPU_TUPLE_COST) * retrieved;
+            prel.rows = rows;
+            out.push(JP {
+                rows,
+                startup,
+                total,
+                width,
+                disabled: 0,
+                keys: Vec::new(),
+                req,
+                set,
+                node: JNode::Scan {
+                    leaf: l,
+                    path: Path { kind: PathKind::Seq, startup, total, rows, keys: Vec::new(), disabled: 0 },
+                    params,
+                    enforced,
+                    rel: Rc::new(prel),
+                },
+            });
+        }
+        out
+    }
+
+    /// Equivalence classes' equalities among a parameterized path's clauses in the order
+    /// their first making gave them (`note_derived` by a remote estimate's
+    /// generate_implied_equalities_for_column), else as the clause has its members:
+    /// `quals[i]` enforces `enforced[i]`, its outer side the parameters, of leaf set `set`.
+    fn orient_param_quals(&self, quals: &mut [Expr], enforced: &[usize], set: u32) {
+        let derives = self.derives.borrow();
+        for (q, &ci) in quals.iter_mut().zip(enforced) {
+            let Some((a, b, al, _)) = &self.clauses[ci].eq else { continue };
+            // (Between plain columns only: an expression member's clause stays as it is.)
+            let plain = |e: &Expr| key_col(e).is_some();
+            if !plain(a) || !plain(b) {
+                continue;
+            }
+            let (Some(x), Some(y)) = (self.mem_id(a), self.mem_id(b)) else { continue };
+            let a_first = !derives.iter().any(|&(p, r, apply)| apply && p == y && r == x);
+            let mine_first = a_first == (*al == set);
+            if let Expr::Call(def, args, _) = q
+                && def.name == "="
+                && args.len() == 2
+                && args[0].ty().without_typmod() == args[1].ty().without_typmod()
+                && args[0].has_outer_refs() == mine_first
+            {
+                args.swap(0, 1);
+            }
+        }
+    }
+
+    /// add_paths_with_pathkeys_for_rel: the relation's scan with the remote server sorting,
+    /// for each useful ordering (get_useful_pathkeys_for_relation: the query's ORDER BY when
+    /// it is all this relation's; with use_remote_estimate also each column whose
+    /// equivalence class joins another relation, ascending), costed by estimate_path_cost_size
+    /// (the unsorted estimate times DEFAULT_FDW_SORT_MULTIPLIER, or the remote EXPLAIN).
+    pub(super) fn fdw_sorted_paths(&self, l: usize, r: &Rc<Rel>, width: u32, f: &pj::RelInfo, want: &Want, base: &Path) -> Vec<JP> {
+        let leaf = &self.leaves[l];
+        let Some((s, _)) = leaf.scan.as_ref() else { return Vec::new() };
+        let (set, off) = (1u32 << l, leaf.off);
+        let cat = self.pl.cat.clone();
+        let fmt = self.pl.ctx.fmt().clone();
+        let d = crate::ext::postgres_fdw::deparse::Deparser::new(&cat, &s.table, &fmt);
+        let shippable = |keys: &[PathKey]| keys.iter().all(|k| d.shippable(&k.expr));
+        let mut useful: Vec<Vec<PathKey>> = Vec::new();
+        let nq = self.query_keys().len();
+        if nq > 0 && want.keys.len() == nq && shippable(&want.keys) {
+            useful.push(want.keys.clone());
+        }
+        if f.opts.use_remote_estimate {
+            for e in &want.merge {
+                let key = PathKey { expr: e.clone(), desc: false, nulls_first: false, cmp: 0, coll: 0 };
+                let Expr::Col(k, _) = e else { continue };
+                // (The query's own single key is taken already.)
+                if nq == 1 && useful.first().is_some_and(|u| u[0].expr.same_as(e)) || !shippable(std::slice::from_ref(&key)) {
+                    continue;
+                }
+                let ec = self.ec[off + k];
+                if useful.iter().any(|u| u.len() == 1 && matches!(u[0].expr, Expr::Col(j, _) if self.ec[off + j] == ec)) {
+                    continue;
+                }
+                useful.push(vec![key]);
+            }
+        }
+        let need: Vec<bool> = (0..leaf.ncols).map(|k| self.needed_above(off + k, set)).collect();
+        let mut out = Vec::new();
+        for keys in useful {
+            let (startup, total, rows) = if f.opts.use_remote_estimate {
+                let mut scan = s.clone();
+                let order = keys.iter().map(|k| crate::sql::plan::SortKey { expr: k.expr.clone(), desc: k.desc, nulls_first: k.nulls_first, using: None }).collect();
+                scan.fdw = Some(SArc::new(crate::sql::plan::FdwPushdown { order, ..scan.fdw.as_deref().cloned().unwrap_or_default() }));
+                let q = crate::ext::postgres_fdw::scan::spec_with(&scan, Some(&need), &cat, &fmt, true);
+                let Some((retrieved, _, st, tot)) = pj::explain_estimate(self.pl.ctx, s, &format!("EXPLAIN {}", q.sql)) else { continue };
+                let (lst, lpt) = self.pl.rel_quals_cost(r, &q.local);
+                let st = st + lst + f.opts.startup_cost;
+                let tot = tot + lpt * retrieved + f.opts.startup_cost + (f.opts.tuple_cost + costs::CPU_TUPLE_COST) * retrieved;
+                (st, tot, f.rows)
+            } else {
+                let st = f.rel_startup * DEFAULT_FDW_SORT_MULTIPLIER;
+                let tot = f.rel_total * DEFAULT_FDW_SORT_MULTIPLIER;
+                let fdw = f.opts.startup_cost;
+                (st + fdw, tot + fdw + (f.opts.tuple_cost + costs::CPU_TUPLE_COST) * f.retrieved_rows, f.rows)
+            };
+            let gk = self.gkeys(l, &keys);
+            let path = Path { kind: PathKind::Sort(Box::new(base.clone())), startup, total, rows, keys, disabled: 0 };
+            out.push(JP {
+                rows,
+                startup,
+                total,
+                width,
+                disabled: 0,
+                keys: gk,
+                req: 0,
+                set,
+                node: JNode::Scan { leaf: l, path, params: Vec::new(), enforced: Vec::new(), rel: r.clone() },
+            });
+        }
+        out
+    }
+
+    /// A foreign scan sorted by its server (`fdw_sorted_paths`): the ORDER BY goes with its
+    /// remote query.
+    #[inline(never)]
+    pub(super) fn fdw_presorted(&self, s: &mut crate::sql::plan::ScanPlan, path: &Path) {
+        if s.fdw.is_some() || !crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.pl.cat, &s.table) {
+            return;
+        }
+        let order = path
+            .keys
+            .iter()
+            .map(|k| crate::sql::plan::SortKey { expr: k.expr.clone(), desc: k.desc, nulls_first: k.nulls_first, using: None })
+            .collect();
+        s.fdw = Some(SArc::new(crate::sql::plan::FdwPushdown { order, ..Default::default() }));
     }
 
     /// `e` as the search shows its clause now (an equivalence class's equality in the

@@ -6309,7 +6309,7 @@ impl Binder<'_, '_> {
         });
         let using = cmp
             .filter(|f| self.cat.functions.contains_key(&f.object))
-            .and_then(|f| crate::catalog::partition::comparator_for_op(f.object, op))
+            .and_then(|f| crate::catalog::partition::comparator_for_op(f.object, op, o.oid))
             .and_then(|coll| {
                 let lt = resolve_binop("<", ty, ty)
                     .or_else(|_| resolve_binop("<", &DataType::Int4, &DataType::Int4))

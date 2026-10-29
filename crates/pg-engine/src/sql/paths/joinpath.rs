@@ -1835,12 +1835,16 @@ impl Search<'_, '_, '_> {
                     None => (r.clone(), Vec::new(), Vec::new()),
                 };
                 let fdw = self.fdw_base(l);
+                let mut fdw_plain = None;
                 for mut p in self.pl.paths(&pr, &want) {
-                    // (A wrapper's scan: its own estimate, estimate_path_cost_size's.)
-                    if let Some(f) = &fdw
-                        && p.keys.is_empty()
-                    {
+                    // (A wrapper's scan: its own estimate, estimate_path_cost_size's; its
+                    // orderings are the remote server's, `fdw_sorted_paths`.)
+                    if let Some(f) = &fdw {
+                        if !p.keys.is_empty() {
+                            continue;
+                        }
                         (p.startup, p.total, p.rows) = (f.startup, f.total, f.rows);
+                        fdw_plain = Some(p.clone());
                     }
                     let keys = self.gkeys(l, &p.keys);
                     rel.paths.push(JP {
@@ -1861,10 +1865,21 @@ impl Search<'_, '_, '_> {
                         },
                     });
                 }
+                let remote_estimate = fdw.as_ref().is_some_and(|f| f.opts.use_remote_estimate);
+                if remote_estimate {
+                    self.fdw_param_clauses(l);
+                }
+                if let (Some(f), Some(p)) = (&fdw, &fdw_plain)
+                    && params.is_empty()
+                {
+                    for jp in self.fdw_sorted_paths(l, &pr, width, f, &want, p) {
+                        add_jpath(&mut rel.paths, jp, self.startup);
+                    }
+                }
                 rel.param = self.param_paths(l, &r, width);
                 if let Some(f) = fdw {
-                    if f.opts.use_remote_estimate {
-                        self.fdw_param_clauses(l);
+                    if remote_estimate {
+                        rel.param.extend(self.fdw_param_paths(l, &r, width));
                     }
                     self.fdw_rels.push((set, std::sync::Arc::new(f)));
                 }
@@ -6334,6 +6349,11 @@ impl Search<'_, '_, '_> {
                     });
                 }
                 apply(rel, &mut s, path);
+                if let PathKind::Sort(_) = &path.kind
+                    && s.table.foreign.is_some()
+                {
+                    self.fdw_presorted(&mut s, path);
+                }
                 // (Its partial paths are built for the same orderings.)
                 if s.useful.0.is_none() {
                     let want = self.leaf_want(*leaf, rel);

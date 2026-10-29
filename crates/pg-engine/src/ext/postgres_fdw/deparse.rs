@@ -177,8 +177,7 @@ impl<'a> Deparser<'a> {
         a.args.iter().all(ok)
             && a.direct.iter().all(ok)
             && a.filter.as_ref().is_none_or(ok)
-            // (A USING operator's own oid isn't known here, only its function's: not sent.)
-            && a.order_by.iter().all(|k| ok(&k.expr) && k.using.is_none())
+            && a.order_by.iter().all(|k| ok(&k.expr) && self.sort_op_shippable(k))
             && !a
                 .args
                 .iter()
@@ -199,12 +198,25 @@ impl<'a> Deparser<'a> {
         }
     }
 
+    /// A sort key's ordering operator is shippable (is_shippable of a sortop other than the
+    /// type's default `<` / `>`): a user operator class's, when an extension the server
+    /// lists has it.
+    pub fn sort_op_shippable(&self, k: &crate::sql::plan::SortKey) -> bool {
+        match (&k.using, k.ordering_op()) {
+            (None, _) => true,
+            (Some(_), Some(op)) => self.object_shippable(op),
+            (Some(_), None) => false,
+        }
+    }
+
     /// appendOrderBySuffix.
-    fn order_suffix(&self, k: &crate::sql::plan::SortKey) -> String {
-        let mut s = match &k.using {
-            Some(u) => format!(" USING OPERATOR({}.{})", quote_ident(self.cat.schema_name(self.cat.functions.get(&u.oid).map_or(crate::catalog::PG_CATALOG_OID, |f| f.schema))), u.name),
-            None if k.desc => " DESC".to_string(),
-            None => " ASC".to_string(),
+    pub fn order_suffix(&self, k: &crate::sql::plan::SortKey) -> String {
+        let user_op = k.ordering_op().and_then(|oid| self.cat.operators.get(&oid));
+        let mut s = match (&k.using, user_op) {
+            (_, Some(o)) => format!(" USING OPERATOR({}.{})", quote_ident(self.cat.schema_name(o.schema)), o.name),
+            (Some(u), None) => format!(" USING OPERATOR({}.{})", quote_ident(self.cat.schema_name(self.cat.functions.get(&u.oid).map_or(crate::catalog::PG_CATALOG_OID, |f| f.schema))), u.name),
+            (None, _) if k.desc => " DESC".to_string(),
+            (None, _) => " ASC".to_string(),
         };
         s.push_str(if k.nulls_first { " NULLS FIRST" } else { " NULLS LAST" });
         s

@@ -10426,7 +10426,7 @@ impl Builder<'_, '_> {
         n.details.push(Detail::Targets(targets));
         let mut child = child;
         if self.o.verbose {
-            self.member_wholerows(&mut child, op, &rels);
+            self.member_wholerows(&mut child, op, &rels, &refname);
         }
         n.children.push(child.child("Outer"));
         Built::passthrough(n, Vec::new())
@@ -10435,15 +10435,26 @@ impl Builder<'_, '_> {
     /// A postgres_fdw member's whole row goes up after its ctid: an UPDATE's, a DELETE's
     /// under row triggers (add_row_identity_columns).
     #[inline(never)]
-    fn member_wholerows(&self, child: &mut ExNode, op: &str, rels: &[(Arc<crate::catalog::Table>, String)]) {
+    fn member_wholerows(&self, child: &mut ExNode, op: &str, rels: &[(Arc<crate::catalog::Table>, String)], parent: &str) {
         use crate::catalog::trigger_type as tt;
         let cat = self.ctx.catalog();
+        let mut plain = Vec::new();
         for (t, r) in rels {
             let whole = op == "Update"
                 || crate::ext::postgres_fdw::modify::catalog_tgtypes(&cat, t.oid).iter().any(|ty| ty & tt::ROW != 0 && ty & tt::DELETE != 0);
             if t.foreign.is_some() && whole && crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, t) {
                 wholerow_after_ctid(child, r);
+            } else {
+                plain.push(r);
             }
+        }
+        // (A row identity variable: the other members return NULL for it, and the
+        // inheritance parent's shows as a parenthesized NULL.)
+        if plain.len() < rels.len() {
+            for r in plain {
+                junk_after_ctid(child, r, "NULL::record");
+            }
+            junk_after_ctid(child, parent, "(NULL::record)");
         }
     }
 
@@ -13468,6 +13479,13 @@ impl Builder<'_, '_> {
         // columns all grouped; with grouping sets, the columns grouped along for being
         // selected). Then a key equal to an earlier one (processed_groupClause).
         let redundant = self.redundant_keys(input, groups, sets, &c.node.cols);
+        // (Every key fixed to a constant under ordered aggregates: the group pathkeys all
+        // redundant, the input sorted for the aggregates only, one group.)
+        let all_fixed = sets.is_none()
+            && !groups.is_empty()
+            && aggs.iter().any(|a| a.distinct || !a.order_by.is_empty())
+            && fixed_group_keys(input, groups).iter().all(|f| *f);
+        let redundant = if all_fixed { vec![true; groups.len()] } else { redundant };
         // (A key its input computes shows as that input's expression: show_agg_keys
         // deparses the input's target list entry.)
         let graw: Vec<Name> = groups
@@ -13805,10 +13823,13 @@ impl Builder<'_, '_> {
                     })
                     .collect();
                 put_group_sort(&mut n.details, keys);
-                n.details.push(Detail::List("Group Key", keys_ref(self, &presort_idx)));
+                let shown = keys_ref(self, &presort_idx);
+                if !shown.is_empty() {
+                    n.details.push(Detail::List("Group Key", shown));
+                }
                 // (Its groups come out in the keys' order.)
                 n.order = keys_sfx(self, &presort_idx);
-                n.rows = (c.node.rows * 0.2).clamp(1.0, 200.0);
+                n.rows = if all_fixed { 1.0 } else { (c.node.rows * 0.2).clamp(1.0, 200.0) };
             }
         }
         // Grouping sets with ordered aggregates can't hash: a GroupAggregate whose
@@ -17005,6 +17026,20 @@ fn wholerow_after_ctid(n: &mut ExNode, refname: &str) {
     }
     for c in &mut n.children {
         wholerow_after_ctid(c, refname);
+    }
+}
+
+/// `junk` after relation `refname`'s ctid wherever the nodes return it (a row identity
+/// variable's value for a relation without it).
+fn junk_after_ctid(n: &mut ExNode, refname: &str, junk: &str) {
+    let qualified = format!("{}.ctid", quote_ident(refname));
+    if let Some(i) = n.output.iter().position(|o| *o == qualified)
+        && n.output.get(i + 1).is_none_or(|o| o != junk)
+    {
+        n.output.insert(i + 1, junk.to_string());
+    }
+    for c in &mut n.children {
+        junk_after_ctid(c, refname, junk);
     }
 }
 

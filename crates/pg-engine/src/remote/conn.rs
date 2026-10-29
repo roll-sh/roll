@@ -141,6 +141,19 @@ pub enum TxStatus {
 /// query in progress is cancelled first).
 pub type Interrupt<'a> = &'a dyn Fn() -> crate::Result<()>;
 
+/// Traffic of every outbound connection in the process (writes, bytes written, reads, bytes
+/// read): what `stats` reports, for measuring round trips per query.
+static TRAFFIC: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// (writes, bytes written, reads, bytes read) by outbound connections so far.
+pub fn stats() -> [u64; 4] {
+    TRAFFIC.each_ref().map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn count(i: usize, n: usize) {
+    TRAFFIC[i].fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub struct Conn {
     stream: TcpStream,
     addr: SocketAddr,
@@ -166,6 +179,13 @@ pub struct Conn {
     pub bad: bool,
     /// The options it was made with (user, dbname, host, port as used).
     pub info: ConnInfo,
+    /// Commands whose results nothing waits for (a finished cursor's CLOSE, the remote
+    /// transaction's START), sent ahead of the next query in its message: a round trip
+    /// fewer each (`defer`).
+    deferred: Vec<String>,
+    /// The blocking read timeout the socket has now (None: not known), so that a read
+    /// sets it only when it changes.
+    read_timeout: Option<Duration>,
 }
 
 /// Connect as `info` says (PQconnectdb). The error is libpq's PQerrorMessage, chomped.
@@ -299,6 +319,8 @@ fn connect_one(info: &ConnInfo, env: &Env, host: &str, hostaddr: &str, port: u16
         error_message: String::new(),
         bad: false,
         info: info.clone(),
+        deferred: Vec::new(),
+        read_timeout: None,
     };
     let user = conninfo::effective(info, "user").unwrap_or_else(|| env.default_user.clone());
     let dbname = conninfo::effective(info, "dbname").unwrap_or_else(|| user.clone());
@@ -425,6 +447,8 @@ impl Conn {
     }
 
     fn send(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        count(0, 1);
+        count(1, buf.len());
         let r = self.stream.write_all(buf).and_then(|_| self.stream.flush());
         if r.is_err() {
             self.bad = true;
@@ -438,8 +462,11 @@ impl Conn {
         let mut tmp = [0u8; 16384];
         match wait {
             Some(d) => {
-                self.stream.set_nonblocking(false)?;
-                self.stream.set_read_timeout(Some(d.max(Duration::from_millis(1))))?;
+                let d = d.max(Duration::from_millis(1));
+                if self.read_timeout != Some(d) {
+                    self.stream.set_read_timeout(Some(d))?;
+                    self.read_timeout = Some(d);
+                }
             }
             None => self.stream.set_nonblocking(true)?,
         }
@@ -456,6 +483,8 @@ impl Conn {
                 ))
             }
             Ok(n) => {
+                count(2, 1);
+                count(3, n);
                 self.rbuf.extend_from_slice(&tmp[..n]);
                 Ok(true)
             }
@@ -579,12 +608,55 @@ impl Conn {
         Ok(())
     }
 
-    /// PQsendQuery: a simple-protocol query, results read with `get_result`.
+    /// Send `sql` (a command that can't fail but by the connection breaking, whose result
+    /// nobody reads) ahead of the next query, in its message. A transaction's end drops the
+    /// cursor CLOSEs waiting (it closes them; one failing would skip the ROLLBACK after it).
+    pub fn defer(&mut self, sql: String) {
+        self.deferred.push(sql);
+    }
+
+    /// The deferred commands to send ahead of `sql`, if any.
+    fn take_deferred(&mut self, sql: &str) -> Option<String> {
+        if self.deferred.is_empty() {
+            return None;
+        }
+        let head = sql.trim_start().get(..8).unwrap_or("").to_ascii_uppercase();
+        if head.starts_with("COMMIT") || head.starts_with("ROLLBACK") || head.starts_with("ABORT") {
+            self.deferred.retain(|d| !d.starts_with("CLOSE "));
+        }
+        if self.deferred.is_empty() {
+            return None;
+        }
+        let mut text = std::mem::take(&mut self.deferred).join("; ");
+        text.push_str("; ");
+        Some(text)
+    }
+
+    /// PQsendQuery: a simple-protocol query, results read with `get_result` (the deferred
+    /// commands first, in the same message: `exec` returns the last result).
     pub fn send_query(&mut self, sql: &str) -> Result<(), String> {
         self.begin_send()?;
         let mut buf = BytesMut::new();
-        frontend::query(sql, &mut buf).map_err(|e| e.to_string())?;
+        let text = match self.take_deferred(sql) {
+            Some(mut pre) => {
+                pre.push_str(sql);
+                std::borrow::Cow::Owned(pre)
+            }
+            None => std::borrow::Cow::Borrowed(sql),
+        };
+        frontend::query(&text, &mut buf).map_err(|e| e.to_string())?;
         self.sent(&buf)
+    }
+
+    /// The deferred commands sent and their results read before an extended-protocol
+    /// query: an error result (the connection's), or None.
+    fn flush_deferred(&mut self, intr: Interrupt) -> crate::Result<Option<PgResult>> {
+        if self.deferred.is_empty() {
+            return Ok(None);
+        }
+        let text = std::mem::take(&mut self.deferred).join("; ");
+        let r = self.exec(&text, intr)?;
+        Ok((!matches!(r.status, Status::CommandOk | Status::TuplesOk)).then_some(r))
     }
 
     /// PQsendQueryParams / PQsendQueryPrepared (`name` Some): parameters and results in text.
@@ -624,6 +696,9 @@ impl Conn {
     /// PQprepare: parse `sql` as statement `name` with `nparams` parameters of unspecified
     /// types. The result is CommandOk or the error.
     pub fn prepare(&mut self, name: &str, sql: &str, intr: Interrupt) -> crate::Result<PgResult> {
+        if let Some(r) = self.flush_deferred(intr)? {
+            return Ok(r);
+        }
         if let Err(e) = self.begin_send() {
             return Ok(self.failed(e));
         }
@@ -721,6 +796,9 @@ impl Conn {
 
     /// PQexecParams / PQexecPrepared.
     pub fn exec_params(&mut self, sql: &str, name: Option<&str>, params: &[Option<String>], intr: Interrupt) -> crate::Result<PgResult> {
+        if let Some(r) = self.flush_deferred(intr)? {
+            return Ok(r);
+        }
         if let Err(e) = self.send_query_params(sql, name, params) {
             return Ok(self.failed(e));
         }

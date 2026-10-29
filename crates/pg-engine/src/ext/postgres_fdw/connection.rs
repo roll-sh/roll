@@ -230,6 +230,12 @@ pub fn nest_level(ctx: &ExecCtx) -> usize {
     ctx.txn.try_borrow().map_or(1, |t| t.savepoint_depth() + 1)
 }
 
+/// Whether the connection has neither closed nor sent anything unasked (a terminated
+/// backend's FATAL): what is there to read is read without waiting.
+fn alive(conn: &mut Conn) -> bool {
+    !conn.bad && (conn.is_busy() || conn.consume_input()) && !conn.bad
+}
+
 /// begin_remote_xact: a remote transaction (REPEATABLE READ, or SERIALIZABLE when the local
 /// one is), and savepoints up to the local nesting level.
 fn begin_remote_xact(e: &mut Entry, ctx: &ExecCtx) -> Result<()> {
@@ -245,16 +251,28 @@ fn begin_remote_xact(e: &mut Entry, ctx: &ExecCtx) -> Result<()> {
         } else {
             "START TRANSACTION ISOLATION LEVEL REPEATABLE READ"
         };
-        e.changing_xact_state = true;
-        command(conn, sql, ctx)?;
+        // (Sent with the first command that needs it, a round trip fewer, when the
+        // connection still looks alive: a broken one fails here, so that GetConnection
+        // connects again.)
+        if alive(conn) {
+            conn.defer(sql.to_string());
+        } else {
+            e.changing_xact_state = true;
+            command(conn, sql, ctx)?;
+            e.changing_xact_state = false;
+        }
         e.xact_depth = 1;
-        e.changing_xact_state = false;
     }
     while e.xact_depth < cur {
-        e.changing_xact_state = true;
-        command(conn, &format!("SAVEPOINT s{}", e.xact_depth + 1), ctx)?;
+        let sql = format!("SAVEPOINT s{}", e.xact_depth + 1);
+        if alive(conn) {
+            conn.defer(sql);
+        } else {
+            e.changing_xact_state = true;
+            command(conn, &sql, ctx)?;
+            e.changing_xact_state = false;
+        }
         e.xact_depth += 1;
-        e.changing_xact_state = false;
     }
     Ok(())
 }

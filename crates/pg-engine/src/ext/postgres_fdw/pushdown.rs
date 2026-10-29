@@ -57,7 +57,7 @@ fn order_for(cat: &Catalog, fmt: &crate::types::text::FormatCtx, input: &Plan, k
         return None;
     }
     let d = Deparser::new(cat, &s.table, fmt);
-    let ok = mapped.iter().all(|k| k.using.is_none() && d.shippable(&k.expr) && k.expr.columns().iter().all(|c| *c < s.table.columns.len()));
+    let ok = mapped.iter().all(|k| d.sort_op_shippable(k) && d.shippable(&k.expr) && k.expr.columns().iter().all(|c| *c < s.table.columns.len()));
     ok.then_some((mapped, path))
 }
 
@@ -250,18 +250,44 @@ fn conjuncts_of(e: &Expr, out: &mut Vec<Expr>) {
 /// (apply_scanjoin_target_to_paths): its remote SELECT list in the order the target list
 /// reads its columns.
 fn top_tlist(p: &mut Plan) {
-    let mut q = &mut *p;
-    while let Plan::Limit { input, .. } | Plan::Sort { input, .. } | Plan::Distinct { input, .. } | Plan::LockRows { input, .. } = q {
-        q = Arc::make_mut(input);
+    // (A projection over the LIMIT / sort chain: the target list, the sort's keys after
+    // it, make_sort_input_target's resjunk columns.)
+    let mut above: Option<Vec<Expr>> = None;
+    let mut q: &mut Plan = match p {
+        Plan::Project { input, exprs } if matches!(&**input, Plan::Limit { .. } | Plan::Sort { .. }) => {
+            above = Some(exprs.clone());
+            Arc::make_mut(input)
+        }
+        other => other,
+    };
+    let mut keys: Vec<Expr> = Vec::new();
+    loop {
+        match q {
+            Plan::Sort { input, keys: k } => {
+                keys.extend(k.iter().map(|k| k.expr.clone()));
+                q = Arc::make_mut(input);
+            }
+            Plan::Limit { input, .. } | Plan::Distinct { input, .. } | Plan::LockRows { input, .. } => q = Arc::make_mut(input),
+            _ => break,
+        }
     }
-    if !matches!(q, Plan::Project { .. }) {
+    if !matches!(q, Plan::Project { .. }) && above.is_none() {
         return;
     }
     let Some((f, cols)) = foreign_below(q) else { return };
     let Some(js) = f.private.0.as_any().downcast_ref::<super::joinscan::JoinScan>() else { return };
+    let order: Vec<Expr> = match &above {
+        Some(exprs) if !matches!(q, Plan::Project { .. }) => exprs.iter().chain(&keys).cloned().collect(),
+        _ => cols.clone(),
+    };
     let mut tl: Vec<usize> = Vec::new();
-    for e in &cols {
-        for g in e.columns() {
+    for e in &order {
+        let cols_read: Vec<usize> = if above.is_some() && !matches!(q, Plan::Project { .. }) {
+            e.columns().into_iter().filter_map(|i| cols.get(i)).flat_map(|c| c.columns()).collect()
+        } else {
+            e.columns()
+        };
+        for g in cols_read {
             if js.tlist.contains(&g) && !tl.contains(&g) {
                 tl.push(g);
             }

@@ -1947,6 +1947,19 @@ impl Deparser<'_, '_> {
     }
 
     fn sort_suffix(&mut self, k: &SortKey) {
+        // A user operator class's ordering operator (generate_operator_name: qualified
+        // when its schema isn't searched).
+        if let Some(o) = k.ordering_op().and_then(|oid| self.cat.operators.get(&oid).cloned()) {
+            let name = self.cat.operator_name(&o, &self.ctx.search_path);
+            self.buf.push_str(" USING ");
+            if name.contains('.') {
+                self.buf.push_str(&format!("OPERATOR({name})"));
+            } else {
+                self.buf.push_str(&name);
+            }
+            self.buf.push_str(if k.nulls_first { " NULLS FIRST" } else { " NULLS LAST" });
+            return;
+        }
         // A non-default family's ordering operator (text_pattern_ops, record_image_ops).
         if let Some(op) = &k.using
             && op.coll.is_none()

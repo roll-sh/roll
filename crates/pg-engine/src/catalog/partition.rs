@@ -115,11 +115,18 @@ pub fn comparator_fn(c: &Collation) -> Option<u32> {
     c.name.strip_prefix(COMPARATOR)?.split(':').next()?.parse().ok()
 }
 
-/// A `comparator` stand-in for `ORDER BY ... USING op`, naming the operator too.
-pub fn comparator_for_op(f: u32, op: &str) -> Option<Arc<Collation>> {
+/// A `comparator` stand-in for `ORDER BY ... USING op`, naming the operator too and
+/// carrying its oid (`op_oid`: what EXPLAIN and postgres_fdw's deparse name it by).
+pub fn comparator_for_op(f: u32, op: &str, op_oid: u32) -> Option<Arc<Collation>> {
     let mut c = (*comparator(f)?).clone();
     c.name = format!("{COMPARATOR}{f}:{op}");
+    c.oid = op_oid;
     Some(Arc::new(c))
+}
+
+/// The ordering operator's oid a `comparator_for_op` stand-in carries.
+pub fn comparator_op_oid(c: &Collation) -> Option<u32> {
+    comparator_op(c).and(Some(c.oid)).filter(|o| *o != 0)
 }
 
 /// The ordering operator a `comparator_for_op` stand-in names.

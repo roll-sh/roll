@@ -399,6 +399,41 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   MERGE refuses foreign result relations (not when ON false leaves only the root); REINDEX
   TABLE refuses foreign tables; index key details quote column names (pg_get_indexdef_columns);
   a batched COPY's flush error names only the relation (relname_only).
+  Second batch (1,890): the join search offers postgres_fdw's own paths of a base relation.
+  Parameterized ones (`paths/joinpath/foreign.rs` `fdw_param_paths`, use_remote_estimate
+  only, one per set of outer relations a movable shippable join clause reads, costed by the
+  remote EXPLAIN with `((SELECT null::type)::type)` placeholders; an equivalence class's
+  clause oriented as its first making had it, `orient_param_quals`, from the members'
+  order in the clause's `eq` and the derivations a remote estimate noted), and sorted ones
+  (`fdw_sorted_paths`: the query's ORDER BY when it is all the relation's, and with
+  use_remote_estimate each join column's class ascending; DEFAULT_FDW_SORT_MULTIPLIER or
+  the remote EXPLAIN of the sorted query) whose plan sends the ORDER BY (`fdw_presorted`);
+  pl.paths' local Sort paths of such a scan are dropped (PostgreSQL's base relation has
+  none). The ORDER BY / LIMIT pushed over a foreign join under a projection lists the target
+  list first, then the sort keys (`pushdown::top_tlist`). `ORDER BY x USING op` of a user
+  operator class keeps the operator: the comparator stand-in collation carries its oid
+  (`partition::comparator_for_op`, `SortKey::ordering_op`), so deparse writes `USING
+  OPERATOR(schema.op)` and ships it when an extension the server lists has it, and
+  ruleutils shows `USING op NULLS LAST` inside aggregates. Ordered aggregates whose GROUP BY
+  keys are all fixed by constants show no Group Key (explain's `all_fixed`); an inherited
+  UPDATE's non-foreign members return `NULL::record` for the foreign members' whole-row
+  junk. Remote round trips: a remote transaction's START and SAVEPOINTs and a finished
+  cursor's CLOSE wait in the connection (`Conn::defer`) and go in the next query's message
+  (CLOSEs dropped before COMMIT / ROLLBACK, which close them; a connection that reads as
+  closed still starts synchronously, so GetConnection's retry sees it), and the socket's
+  read timeout is set only when it changes. `tests/fdw_traffic.rs` (ignored) measures a
+  loopback workload: remote writes per statement went 4.0 -> 2.0 (point lookups, range
+  scans, remote aggregates), 4.1 -> 2.1 (foreign joins), 2.0 -> 1.0 (lookups inside one
+  transaction), 3.0 -> 2.0 (direct UPDATEs), full scans 204 -> 202 per 20,000 rows; bytes
+  out -9% for lookups; wall time on loopback within the noise of a loaded machine
+  (interleaved runs: -3% to -13% on short queries in one series, +-6% in another); peak RSS
+  ~139 -> ~141 MB (debug, the measured binary also carried other branch commits).
+  Verified with full regress runs (51,148 / 51,150, no unit changed) against a private
+  reference, next to a run of the base it was rebased on. On the base of 59504ede (with
+  d3a1d2a8's autovacuum) two full runs showed partition_join plan units of plain tables
+  varying from run to run (15 units, then 3 others); a run of that base alone was clean;
+  runs on the next base were clean on both sides. Suspect autovacuum's ANALYZE timing if
+  partition_join units come and go.
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
