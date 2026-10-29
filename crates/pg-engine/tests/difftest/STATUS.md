@@ -28,7 +28,9 @@ and `DIFFTEST_DB` to your own prefix: the runner drops and creates `<prefix>_<se
 reference. Other knobs: `DIFFTEST_REF` (127.0.0.1:55499), `DIFFTEST_PASSWORD` (pw),
 `DIFFTEST_PLAN` (share of queries re-run under random planner settings, 0.25),
 `DIFFTEST_ORACLES` (share of statements followed by a TLP / NoREC check, 0.2),
-`DIFFTEST_HANG_SECS` (60), `DIFFTEST_SMOKE_SEEDS` (25), `DIFFTEST_PANIC_TRACE` (print panics).
+`DIFFTEST_HANG_SECS` (60), `DIFFTEST_SMOKE_SEEDS` (25), `DIFFTEST_PANIC_TRACE` (print panics),
+`DIFFTEST_ECHO` (write the statement about to run, with its setup, to
+`DIFFTEST_OUT/current-s<seed>.sql`: the case of a crash that aborts the process).
 
 ## What it generates
 
@@ -395,6 +397,13 @@ Batch 2 (`a84_fresh_r4b`), from the round 4 grammar's seeds 4000–4099 (the fir
   strip_free_domains` unwrapped a transform that fails past the statement's stack budget; it
   now leaves a qual without domain coercions alone (no rebuilt tree at all) and stops at the
   budget, so the next guard raises "stack depth limit exceeded".
+- **Crash (stack overflow, the pair run's seed 3534 #11, in the base too)**: a join group over
+  an inheritance parent (a view joining it to `unnest ... WITH ORDINALITY`, FULL JOIN, a
+  grouped CTE over the same view) was retried partitionwise (`joinpath.rs`, the forcing
+  `pw_agg_join`), gave the same plain plan, and was retried again on a clone the `lifting`
+  guard didn't recognise, until the stack overflowed and aborted the process. The retry now
+  happens once. `DIFFTEST_ECHO=1` writes each statement about to run as a case file
+  (`current-s<seed>.sql`), which is how a crash that takes the process down is caught.
 
 Cost: none of this runs per row except the record comparisons' collation check (only for two
 anonymous row types whose field collations differ) and IN lists / IS DISTINCT FROM over

@@ -28,3 +28,11 @@ CREATE DOMAIN a84jd AS int CHECK (value > -3);
 CREATE TABLE a84jt (id int, c a84jd);
 SELECT NULLIF('{1,2}'::int4[], array_agg(c)) FROM a84jt;
 SELECT NULLIF(array_agg(c), array_agg(c)) FROM a84jt;
+-- A join group over an inheritance parent whose plain plan the partitionwise retry gives
+-- again was planned again and again until the stack overflowed (seed 3534 #11).
+CREATE TABLE a84h (id int4);
+CREATE TABLE a84h_c (extra int) INHERITS (a84h);
+INSERT INTO a84h VALUES (4), (33);
+INSERT INTO a84h_c VALUES (316, 2);
+CREATE VIEW a84hv AS SELECT NULL::int AS c0, t1.id AS c1 FROM (a84h t1 LEFT JOIN unnest('{5}'::int4[]) WITH ORDINALITY s2(u, o) ON t1.id = s2.u);
+WITH w2 AS (SELECT array_agg(t3.c1) AS c0 FROM a84hv t3 GROUP BY t3.c1) SELECT count(*) FROM ((SELECT 5 AS c2) s7 LEFT JOIN w2 t9 ON true) FULL JOIN a84hv t10 ON s7.c2 = t10.c0;

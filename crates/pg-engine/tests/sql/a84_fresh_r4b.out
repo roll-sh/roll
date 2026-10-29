@@ -137,3 +137,23 @@ nullif:user
 NULL
 -- SELECT 1
 
+> CREATE TABLE a84h (id int4)
+-- CREATE TABLE
+
+> CREATE TABLE a84h_c (extra int) INHERITS (a84h)
+-- CREATE TABLE
+
+> INSERT INTO a84h VALUES (4), (33)
+-- INSERT 0 2
+
+> INSERT INTO a84h_c VALUES (316, 2)
+-- INSERT 0 1
+
+> CREATE VIEW a84hv AS SELECT NULL::int AS c0, t1.id AS c1 FROM (a84h t1 LEFT JOIN unnest('{5}'::int4[]) WITH ORDINALITY s2(u, o) ON t1.id = s2.u)
+-- CREATE VIEW
+
+> WITH w2 AS (SELECT array_agg(t3.c1) AS c0 FROM a84hv t3 GROUP BY t3.c1) SELECT count(*) FROM ((SELECT 5 AS c2) s7 LEFT JOIN w2 t9 ON true) FULL JOIN a84hv t10 ON s7.c2 = t10.c0
+count:int8
+6
+-- SELECT 1
+
