@@ -11,6 +11,11 @@ set -eu
 export GOPATH=/cache/go GOCACHE=/cache/go-build GOFLAGS=-mod=mod GOTOOLCHAIN=go1.26.10 CGO_ENABLED=0
 export POSTGRESQL_SERVER_URI="postgres://postgres:pw@$PGHOST:$PGPORT/postgres?sslmode=disable"
 export MYSQL_SERVER_URI=invalid
+# sqlc caches a managed database's analysis of each query under SQLCCACHE, keyed by its
+# version, config, schema and query text but not the server: without a fresh cache per run,
+# one server's answers (or an older engine's) are replayed against the other.
+export SQLCCACHE=/tmp/sqlc-cache-$TARGET
+rm -rf "$SQLCCACHE"
 cd "$SRC"
 T="go test -tags=examples -count=1 -timeout 40m -json"
 $T ./examples/authors/postgresql ./examples/batch/postgresql ./examples/booktest/postgresql \

@@ -66,7 +66,6 @@ pub enum NumOp {
 /// A numeric (or integer) value as an exact unscaled i128 and its scale (None: another
 /// value, or one past an i128).
 pub(super) fn small_num(v: &Value) -> Option<(i128, u32)> {
-    use num_traits::ToPrimitive;
     match v {
         Value::Numeric(n) => match &**n {
             crate::types::numeric::Numeric::Finite { int, scale } => Some((int.to_i128()?, *scale)),
@@ -312,7 +311,7 @@ impl K {
                     return Some(match r {
                         None => Value::Null,
                         Some((v, s)) => Value::numeric(crate::types::numeric::Numeric::from_parts(
-                            num_bigint::BigInt::from(v),
+                            crate::types::decint::DecInt::from(v),
                             s,
                         )),
                     });

@@ -5,8 +5,7 @@ use crate::err;
 use crate::error::Result;
 use crate::types::numeric::Numeric;
 use crate::types::{DataType as T, Value};
-use num_bigint::BigInt;
-use num_traits::One;
+use crate::types::decint::DecInt;
 
 fn num(v: &Value) -> Numeric {
     match v {
@@ -381,9 +380,9 @@ fn random_range_num(a: &[Value], c: &FnCtx) -> Result<Value> {
             digits[i] = c.exec.random_u64_range(0, NBASE / pow10 - 1) * pow10;
         }
         // The value: digits at weight rweight, as int * 10^-(4 * fractional digits).
-        let mut int = BigInt::from(0u32);
+        let mut int = DecInt::from(0u32);
         for d in &digits {
-            int = int * NBASE + BigInt::from(*d);
+            int = int * NBASE + DecInt::from(*d);
         }
         let frac = 4 * (res_ndigits as i32 - 1 - rweight);
         let v = Numeric::from_parts(int, frac.max(0) as u32);
@@ -400,7 +399,7 @@ fn nbase_digits(v: &Numeric) -> (Vec<u64>, i32) {
         return (Vec::new(), 0);
     };
     let s4 = scale.div_ceil(4) * 4;
-    let scaled = int * BigInt::from(10u32).pow(s4 - scale);
+    let scaled = int * DecInt::from(10u32).pow(s4 - scale);
     let text = scaled.to_string();
     let text = text.trim_start_matches('-');
     if text.chars().all(|ch| ch == '0') {
@@ -806,11 +805,15 @@ fn factorial(a: &[Value], _: &FnCtx) -> Result<Value> {
             "value overflows numeric format"
         ));
     }
-    let mut r = BigInt::one();
-    for i in 2..=n {
-        r *= i;
+    // (A product tree: halves of similar length multiply in Karatsuba's time.)
+    fn product(lo: i64, hi: i64) -> DecInt {
+        if hi - lo < 32 {
+            return (lo.max(1)..=hi).fold(DecInt::one(), |r, i| r * i);
+        }
+        let mid = lo + (hi - lo) / 2;
+        product(lo, mid) * product(mid + 1, hi)
     }
-    Ok(Value::numeric(Numeric::from_parts(r, 0)))
+    Ok(Value::numeric(Numeric::from_parts(product(2, n), 0)))
 }
 fn scale_fn(a: &[Value], _: &FnCtx) -> Result<Value> {
     let x = num(&a[0]);

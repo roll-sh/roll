@@ -51,6 +51,7 @@ chrono-tz = "0.10"
 bigdecimal = "0.4"
 num-bigint = "0.4"
 num-traits = "0.2"
+smallvec = { version = "1.16", features = ["union", "const_generics"] }
 uuid = "1"
 sha1 = "0.10"
 # pgcrypto (crates/pg-engine/src/ext/pgcrypto)

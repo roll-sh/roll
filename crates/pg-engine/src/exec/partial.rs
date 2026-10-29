@@ -93,7 +93,6 @@ impl SumNum {
     }
 
     pub fn add(&mut self, v: &Value) {
-        use num_traits::ToPrimitive;
         let small = match v {
             Value::Numeric(x) => match &**x {
                 Numeric::Finite { int, scale } => int.to_i64().map(|i| (i, *scale)),
@@ -110,7 +109,7 @@ impl SumNum {
                     None => {
                         // (Past the i128: what it holds goes to the exact sum.)
                         self.small = Some((i as i128, vs));
-                        self.add_big(Numeric::from_parts(num_bigint::BigInt::from(acc), s));
+                        self.add_big(Numeric::from_parts(crate::types::decint::DecInt::from(acc), s));
                     }
                 },
             },
@@ -132,7 +131,7 @@ impl SumNum {
                 })();
                 match r {
                     Some(r) => self.small = Some((r, ns)),
-                    None => self.add_big(Numeric::from_parts(num_bigint::BigInt::from(v), vs)),
+                    None => self.add_big(Numeric::from_parts(crate::types::decint::DecInt::from(v), vs)),
                 }
             }
         }
@@ -153,7 +152,7 @@ impl SumNum {
                     })();
                     match r {
                         Some(r) => self.small = Some((r, ns)),
-                        None => self.add_big(Numeric::from_parts(num_bigint::BigInt::from(v), s)),
+                        None => self.add_big(Numeric::from_parts(crate::types::decint::DecInt::from(v), s)),
                     }
                 }
             }
@@ -168,7 +167,7 @@ impl SumNum {
     pub fn total(&self) -> Option<Numeric> {
         let small = self
             .small
-            .map(|(v, s)| Numeric::from_parts(num_bigint::BigInt::from(v), s));
+            .map(|(v, s)| Numeric::from_parts(crate::types::decint::DecInt::from(v), s));
         match (&self.big, small) {
             (None, None) => None,
             (Some(a), None) => Some(a.clone()),

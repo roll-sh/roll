@@ -6,7 +6,7 @@ use crate::types::array::ArrayValue;
 use crate::types::json::parse_jsonb;
 use crate::types::numeric::Numeric;
 use crate::types::{DataType, Interval, Value};
-use num_bigint::BigInt;
+use crate::types::decint::DecInt;
 use std::sync::Arc;
 
 mod tag {
@@ -56,6 +56,9 @@ mod tag {
     /// A value stored out of line (`storage::toast`): the writing transaction, its sequence
     /// number there and the value's encoded length, as varints.
     pub const EXTERNAL: u8 = 42;
+    /// A numeric past i128: scale (varint), then bytes: a sign byte and its base-10^9 limbs
+    /// (u32 LE, least significant first). (Up to i128, `NUMERIC`'s two's complement bytes.)
+    pub const NUMERIC_DEC: u8 = 43;
 }
 
 /// The tag of a value stored out of line (`storage::toast`).
@@ -106,10 +109,20 @@ pub fn encode_value(out: &mut Vec<u8>, v: &Value) {
             Numeric::NaN => out.push(tag::NUM_NAN),
             Numeric::PosInf => out.push(tag::NUM_PINF),
             Numeric::NegInf => out.push(tag::NUM_NINF),
-            Numeric::Finite { int, scale } => {
+            Numeric::Finite { int, scale } if int.to_i128().is_some() => {
                 out.push(tag::NUMERIC);
                 put_varint(out, *scale as u64);
                 put_bytes(out, &int.to_signed_bytes_le());
+            }
+            Numeric::Finite { int, scale } => {
+                out.push(tag::NUMERIC_DEC);
+                put_varint(out, *scale as u64);
+                let mut b = Vec::with_capacity(1 + 4 * int.limbs().len());
+                b.push(int.is_negative() as u8);
+                for l in int.limbs() {
+                    b.extend_from_slice(&l.to_le_bytes());
+                }
+                put_bytes(out, &b);
             }
         },
         Value::Text(s) => {
@@ -381,9 +394,24 @@ pub fn decode_value(b: &[u8], pos: &mut usize) -> Result<Value> {
                 let fill = if bytes[bytes.len() - 1] & 0x80 != 0 { 0xFF } else { 0 };
                 let mut w = [fill; 8];
                 w[..bytes.len()].copy_from_slice(bytes);
-                BigInt::from(i64::from_le_bytes(w))
+                DecInt::from(i64::from_le_bytes(w))
             } else {
-                BigInt::from_signed_bytes_le(bytes)
+                DecInt::from_signed_bytes_le(bytes)
+            };
+            Value::numeric(Numeric::from_parts(int, scale))
+        }
+        tag::NUMERIC_DEC => {
+            let scale = get_varint(b, pos)? as u32;
+            let bytes = take_bytes(b, pos)?;
+            let int = match bytes.split_first() {
+                Some((&neg, limbs)) if neg <= 1 && limbs.len() % 4 == 0 => DecInt::from_limbs(
+                    neg == 1,
+                    limbs.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect(),
+                ),
+                _ => None,
+            };
+            let Some(int) = int else {
+                return Err(internal("invalid numeric in stored row"));
             };
             Value::numeric(Numeric::from_parts(int, scale))
         }
@@ -569,7 +597,7 @@ pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
             take_bytes(b, pos)?;
             return Ok(());
         }
-        tag::NUMERIC => {
+        tag::NUMERIC | tag::NUMERIC_DEC => {
             *pos += 1;
             get_varint(b, pos)?;
             take_bytes(b, pos)?;

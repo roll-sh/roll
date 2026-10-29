@@ -4154,12 +4154,13 @@ impl Ddl<'_, '_> {
                     );
                 }
                 func.owner = f.owner;
+                // (format_procedure: schema-qualified when the function isn't visible.)
                 let drop_hint = || {
                     format!(
-                        "Use {} {}({}) first.",
+                        "Use {} {} first.",
                         if f.procedure { "DROP PROCEDURE" } else { "DROP FUNCTION" },
-                        func.name,
-                        self.cat.param_type_names(&f, self.search_path()).join(",")
+                        crate::catalog::depend::procedure_description(&self.cat, f.oid, self.search_path())
+                            .unwrap_or_default()
                     )
                 };
                 if f.ret != func.ret

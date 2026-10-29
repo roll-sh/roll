@@ -4,7 +4,6 @@
 
 use crate::types::Value;
 use crate::types::numeric::Numeric;
-use num_traits::Signed;
 
 const NULL: u8 = 0xFF;
 const BOOL: u8 = 0x10;
@@ -73,7 +72,7 @@ fn put_numeric(out: &mut Vec<u8>, n: &Numeric) {
         Numeric::PosInf => out.push(NUM_POS_INF),
         Numeric::NegInf => out.push(NUM_NEG_INF),
         Numeric::Finite { int, scale } => {
-            if int.sign() == num_bigint::Sign::NoSign {
+            if int.is_zero() {
                 out.push(NUM_ZERO);
                 return;
             }

@@ -18,7 +18,7 @@ use crate::types::value::{
 };
 use crate::types::{DataType as T, Value};
 use crate::{bail, err};
-use num_bigint::BigInt;
+use crate::types::decint::DecInt;
 
 /// A zone name as AT TIME ZONE / date_trunc / generate_series take it (DecodeTimezoneNameToTz).
 pub fn zone(name: &str, c: &FnCtx) -> Result<TimeZone> {
@@ -146,7 +146,7 @@ fn current_timestamp_p(a: &[Value], c: &FnCtx) -> Result<Value> {
 
 /// int64_div_fast_to_numeric: `v / 10^scale` with that display scale.
 fn num_scaled(v: i128, scale: u32) -> Value {
-    Value::numeric(Numeric::from_parts(BigInt::from(v), scale))
+    Value::numeric(Numeric::from_parts(DecInt::from(v), scale))
 }
 
 fn num_int(v: i64) -> Value {

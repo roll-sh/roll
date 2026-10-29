@@ -9,8 +9,7 @@ use super::{DataType, Value};
 use crate::error::{Error, Result, code};
 use crate::{bail, err};
 use bytes::{Buf, BufMut, BytesMut};
-use num_bigint::BigInt;
-use num_traits::{Signed, ToPrimitive, Zero};
+use crate::types::decint::DecInt;
 use std::sync::Arc;
 
 /// Whether `ty` has a binary representation we implement.
@@ -643,22 +642,14 @@ fn encode_numeric(n: &Numeric, out: &mut BytesMut) {
 
 /// A finite numeric's base-10000 digits (without leading or trailing zero groups) and the
 /// weight of the first; no digits for zero.
-pub fn numeric_digits(int: &BigInt, scale: u32) -> (Vec<i16>, i16) {
+pub fn numeric_digits(int: &DecInt, scale: u32) -> (Vec<i16>, i16) {
     let abs = int.abs();
     if abs.is_zero() {
         return (Vec::new(), 0);
     }
     // Pad the fraction to a multiple of 4 digits so groups align at the decimal point.
     let pad = (4 - (scale % 4)) % 4;
-    let scaled = &abs * BigInt::from(10u32).pow(pad);
-    let mut groups: Vec<i16> = Vec::new();
-    let mut x = scaled;
-    let base = BigInt::from(10000u32);
-    while !x.is_zero() {
-        groups.push((&x % &base).to_i16().unwrap());
-        x /= &base;
-    }
-    groups.reverse();
+    let mut groups: Vec<i16> = abs.mul_pow10(pad as usize).base10000().into_iter().map(|g| g as i16).collect();
     // (In i64: the largest numerics have more groups than an i16 counts, 131072 digits
     // before the point and 16383 after.)
     let frac_groups = ((scale + pad) / 4) as i64;
@@ -707,7 +698,7 @@ fn decode_numeric(mut b: &[u8]) -> Result<Numeric> {
             "insufficient data left in message"
         );
     }
-    let mut int = BigInt::zero();
+    let mut digits = Vec::with_capacity(ndigits);
     for _ in 0..ndigits {
         let d = b.get_i16();
         if !(0..10000).contains(&d) {
@@ -716,12 +707,13 @@ fn decode_numeric(mut b: &[u8]) -> Result<Numeric> {
                 "invalid digit in external \"numeric\" value"
             );
         }
-        int = int * 10000 + BigInt::from(d);
+        digits.push(d as u32);
     }
+    let int = DecInt::from_base10000(digits.into_iter());
     // Value = int * 10000^(weight - ndigits + 1)
     let exp4 = weight - ndigits as i64 + 1;
     let n = if exp4 >= 0 {
-        Numeric::from_parts(int * BigInt::from(10u32).pow((exp4 * 4) as u32), 0)
+        Numeric::from_parts(int.mul_pow10((exp4 * 4) as usize), 0)
     } else {
         Numeric::from_parts(int, (-exp4 * 4) as u32)
     };

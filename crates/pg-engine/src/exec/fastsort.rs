@@ -86,7 +86,6 @@ fn encode(v: &Value, desc: bool, nulls_first: bool, out: &mut Vec<u8>) {
 /// significant digits (trailing zeros dropped), inverted for negatives.
 fn numeric_key(n: &crate::types::numeric::Numeric, out: &mut Vec<u8>) {
     use crate::types::numeric::Numeric as N;
-    use num_traits::{Signed, Zero};
     let (int, scale) = match n {
         N::NegInf => return out.push(0),
         N::PosInf => return out.push(4),

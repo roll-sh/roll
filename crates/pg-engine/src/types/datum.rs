@@ -5,8 +5,7 @@
 use super::numeric::Numeric;
 use super::value::Interval;
 use super::{DataType, Value};
-use num_bigint::{BigInt, Sign};
-use num_traits::Zero;
+use super::decint::{DecInt, Sign};
 use std::sync::Arc;
 
 /// How a type's values are laid out: its `typlen` and `typbyval`.
@@ -234,7 +233,7 @@ pub fn numeric_bytes(n: &Numeric) -> Vec<u8> {
         Numeric::Finite { int, scale } => (int, *scale),
     };
     let neg = int.sign() == Sign::Minus;
-    let digits_str = int.magnitude().to_string();
+    let digits_str = int.magnitude_string();
     // Split at the decimal point, padded out to whole base-10000 digits on both sides.
     let (ip, fp) = if digits_str.len() as u32 > scale {
         let at = digits_str.len() - scale as usize;
@@ -320,17 +319,19 @@ pub fn numeric_from_bytes(b: &[u8]) -> Option<Numeric> {
         .map(|c| i16::from_le_bytes([c[0], c[1]]) as i64)
         .collect();
     // value = sum(d[i] * 10000^(weight - i)), as an integer scaled by 10^scale.
-    let mut int = BigInt::zero();
-    for d in &digits {
-        int = int * 10000 + d;
-    }
+    let int = if digits.iter().all(|d| (0..10000).contains(d)) {
+        DecInt::from_base10000(digits.iter().map(|&d| d as u32))
+    } else {
+        // (Corrupt digits: summed as they are.)
+        digits.iter().fold(DecInt::zero(), |int, &d| int * 10000 + d)
+    };
     // `int` is scaled by 10000^(ndigits - 1 - weight); rescale to 10^scale.
     let exp10 = 4 * (digits.len() as i64 - 1 - weight as i64);
     let shift = scale as i64 - exp10;
     let int = if shift >= 0 {
-        int * BigInt::from(10).pow(shift as u32)
+        int.mul_pow10(shift as usize)
     } else {
-        int / BigInt::from(10).pow((-shift) as u32)
+        int.div_pow10((-shift) as usize)
     };
     Some(Numeric::from_parts(if neg { -int } else { int }, scale))
 }

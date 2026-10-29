@@ -6,6 +6,7 @@ pub mod cast;
 pub mod collation;
 pub mod datetime;
 pub mod datum;
+pub mod decint;
 pub mod encnames;
 pub mod mbconv;
 pub mod extstats;

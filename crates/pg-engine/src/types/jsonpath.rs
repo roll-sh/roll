@@ -3218,7 +3218,7 @@ fn numeric_size(v: &Numeric) -> usize {
     let Numeric::Finite { int, scale } = v else {
         return 6;
     };
-    let digits = int.magnitude().to_string();
+    let digits = int.magnitude_string();
     let scale = *scale as usize;
     let (ip, fp) = if digits.len() > scale {
         digits.split_at(digits.len() - scale)

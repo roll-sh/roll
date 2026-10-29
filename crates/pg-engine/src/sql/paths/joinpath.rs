@@ -597,6 +597,12 @@ struct XMember {
     ec: usize,
 }
 
+/// The columns each of the group's clauses and PlaceHolderVars reads (`width_of`).
+struct Reads {
+    clauses: Vec<Vec<usize>>,
+    phvs: Vec<Vec<usize>>,
+}
+
 /// A PlaceHolderVar of the group (`plan::phv_projection`): its column of the group's
 /// row, its expression over that row (reading lower ones' columns), and the leaves it is
 /// evaluated at (ph_eval_at): computed by the lowest join of them all, read as a column
@@ -1575,6 +1581,12 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
 
     /// The width of a relation's columns needed above it (build_joinrel_tlist).
     fn width_of(&self, set: u32) -> u32 {
+        // (The columns each clause and PlaceHolderVar reads, once: every column of the set
+        // asks about all of them.)
+        let reads = Reads {
+            clauses: self.clauses.iter().map(|c| c.expr.columns()).collect(),
+            phvs: self.phvs.iter().map(|p| p.expr.columns()).collect(),
+        };
         let mut w = 0;
         for (l, leaf) in self.leaves.iter().enumerate() {
             if set & (1 << l) == 0 {
@@ -1582,7 +1594,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
             }
             for k in 0..leaf.ncols {
                 let g = leaf.off + k;
-                if self.needed_above(g, set) {
+                if self.needed_above_in(g, set, Some(&reads)) {
                     w += leaf.cols[k].0;
                 }
             }
@@ -1590,7 +1602,7 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         }
         // (The PlaceHolderVars it computes that are needed above it: build_joinrel_tlist.)
         for p in &self.phvs {
-            if p.eval_at & !set == 0 && self.needed_above(p.col, set) {
+            if p.eval_at & !set == 0 && self.needed_above_in(p.col, set, Some(&reads)) {
                 w += costs::type_width(&p.expr.ty());
             }
         }
@@ -1600,15 +1612,28 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
     /// Column `g` is needed above relation `set`: by the group's consumers or a clause
     /// reaching outside the set (or a PlaceHolderVar evaluated above it).
     fn needed_above(&self, g: usize, set: u32) -> bool {
+        self.needed_above_in(g, set, None)
+    }
+
+    /// `needed_above`, with the columns the clauses and PlaceHolderVars read when known.
+    fn needed_above_in(&self, g: usize, set: u32, reads: Option<&Reads>) -> bool {
         if self.needed.get(g).copied().unwrap_or(false) {
             return true;
         }
+        let clause_reads = |i: usize| match reads {
+            Some(r) => r.clauses[i].contains(&g),
+            None => self.clauses[i].expr.columns().contains(&g),
+        };
+        let phv_reads = |i: usize| match reads {
+            Some(r) => r.phvs[i].contains(&g),
+            None => self.phvs[i].expr.columns().contains(&g),
+        };
         // (An outer join's own clause over one side only, its preserved side's, is checked
         // at the join, not below it: what it reads goes up to there.)
         let full = (1u32 << self.leaves.len()) - 1;
-        if self.clauses.iter().any(|c| {
+        if self.clauses.iter().enumerate().any(|(i, c)| {
             (c.leaves & !set != 0 || (c.on && (c.req & !set != 0 || (!self.general && set != full))))
-                && c.expr.columns().contains(&g)
+                && clause_reads(i)
         }) {
             return true;
         }
@@ -1626,13 +1651,14 @@ impl<'s, 'c, 'a> Search<'s, 'c, 'a> {
         // (A PlaceHolderVar a clause checked above the relation reads (an outer join
         // delays it there): computed here, read there.)
         if self.phv(g).is_some()
-            && self.clauses.iter().any(|c| c.req & !set != 0 && c.expr.columns().contains(&g))
+            && self.clauses.iter().enumerate().any(|(i, c)| c.req & !set != 0 && clause_reads(i))
         {
             return true;
         }
         self.phvs
             .iter()
-            .any(|p| p.eval_at & !set != 0 && p.col != g && p.expr.columns().contains(&g))
+            .enumerate()
+            .any(|(i, p)| p.eval_at & !set != 0 && p.col != g && phv_reads(i))
     }
 
     fn rel_index(&self, set: u32) -> Option<usize> {

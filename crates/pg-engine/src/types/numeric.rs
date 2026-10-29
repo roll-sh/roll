@@ -3,8 +3,7 @@
 
 use crate::error::{Error, Result, code};
 use crate::{bail, err};
-use num_bigint::{BigInt, Sign};
-use num_traits::{Signed, ToPrimitive, Zero};
+use super::decint::{DecInt, Sign};
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -31,16 +30,12 @@ const PG_LOG10_2: f64 = 0.301029995663981;
 pub enum Numeric {
     /// `int * 10^-scale`, scale >= 0 (the display scale).
     Finite {
-        int: BigInt,
+        int: DecInt,
         scale: u32,
     },
     NaN,
     PosInf,
     NegInf,
-}
-
-fn pow10(n: u32) -> BigInt {
-    BigInt::from(10u32).pow(n)
 }
 
 /// 10^n as an i128 (n <= 38).
@@ -50,15 +45,18 @@ fn pow10_i128(n: u32) -> Option<i128> {
 
 /// Two small values (each fitting an i64) at their common scale, as i128s: the fast path
 /// of add / sub / cmp, exactly what `aligned` computes, without allocating.
-fn aligned_small(a: &BigInt, sa: u32, b: &BigInt, sb: u32) -> Option<(i128, i128, u32)> {
+fn aligned_small(a: &DecInt, sa: u32, b: &DecInt, sb: u32) -> Option<(i128, i128, u32)> {
     let (x, y) = (a.to_i64()? as i128, b.to_i64()? as i128);
     let s = sa.max(sb);
     Some((x.checked_mul(pow10_i128(s - sa)?)?, y.checked_mul(pow10_i128(s - sb)?)?, s))
 }
 
 /// Divide rounding half away from zero.
-fn div_round(n: &BigInt, d: &BigInt) -> BigInt {
-    let (q, r) = (n / d, n % d);
+fn div_round(n: &DecInt, d: &DecInt) -> DecInt {
+    if let (Some(x), Some(y)) = (n.to_i128(), d.to_i128()) {
+        return DecInt::from(div_round_i128(x, y));
+    }
+    let (q, r) = n.div_rem(d);
     if r.is_zero() {
         return q;
     }
@@ -74,29 +72,39 @@ fn div_round(n: &BigInt, d: &BigInt) -> BigInt {
     }
 }
 
+/// `div_round` of i128s (d != 0; |n| < 2^127).
+fn div_round_i128(n: i128, d: i128) -> i128 {
+    let (q, r) = (n / d, n % d);
+    if r != 0 && r.unsigned_abs() >= d.unsigned_abs() - r.unsigned_abs() {
+        if (n < 0) != (d < 0) { q - 1 } else { q + 1 }
+    } else {
+        q
+    }
+}
+
 impl Numeric {
     pub fn zero() -> Self {
         Numeric::Finite {
-            int: BigInt::zero(),
+            int: DecInt::zero(),
             scale: 0,
         }
     }
 
     pub fn from_i64(v: i64) -> Self {
         Numeric::Finite {
-            int: BigInt::from(v),
+            int: DecInt::from(v),
             scale: 0,
         }
     }
 
     pub fn from_i128(v: i128) -> Self {
         Numeric::Finite {
-            int: BigInt::from(v),
+            int: DecInt::from(v),
             scale: 0,
         }
     }
 
-    pub fn from_parts(int: BigInt, scale: u32) -> Self {
+    pub fn from_parts(int: DecInt, scale: u32) -> Self {
         Numeric::Finite { int, scale }
     }
 
@@ -132,9 +140,9 @@ impl Numeric {
         match self {
             Numeric::Finite { int, scale } => {
                 let int = if new_scale >= *scale {
-                    int * pow10(new_scale - scale)
+                    int.mul_pow10((new_scale - scale) as usize)
                 } else {
-                    div_round(int, &pow10(scale - new_scale))
+                    int.round_pow10((scale - new_scale) as usize)
                 };
                 Numeric::Finite {
                     int,
@@ -155,11 +163,11 @@ impl Numeric {
                     return self.with_scale(digits as u32);
                 }
                 let drop = (*scale as i64 - digits) as u32;
-                let r = if drop as usize > int.bits() as usize / 3 + 2 {
+                let r = if drop as usize > int.num_digits() {
                     // Fewer digits than the drop: rounds to zero.
-                    BigInt::zero()
+                    DecInt::zero()
                 } else {
-                    div_round(int, &pow10(drop))
+                    int.round_pow10(drop as usize)
                 };
                 if digits >= 0 {
                     Numeric::Finite {
@@ -170,7 +178,7 @@ impl Numeric {
                     Numeric::zero()
                 } else {
                     Numeric::Finite {
-                        int: r * pow10((-digits) as u32),
+                        int: r.mul_pow10((-digits) as usize),
                         scale: 0,
                     }
                 }
@@ -187,10 +195,10 @@ impl Numeric {
                     return self.with_scale(digits as u32);
                 }
                 let drop = (*scale as i64 - digits) as u32;
-                let r = if drop as usize > int.bits() as usize / 3 + 2 {
-                    BigInt::zero()
+                let r = if drop as usize > int.num_digits() {
+                    DecInt::zero()
                 } else {
-                    int / pow10(drop)
+                    int.div_pow10(drop as usize)
                 };
                 if digits >= 0 {
                     Numeric::Finite {
@@ -201,7 +209,7 @@ impl Numeric {
                     Numeric::zero()
                 } else {
                     Numeric::Finite {
-                        int: r * pow10((-digits) as u32),
+                        int: r.mul_pow10((-digits) as usize),
                         scale: 0,
                     }
                 }
@@ -213,9 +221,8 @@ impl Numeric {
     pub fn floor(&self) -> Numeric {
         match self {
             Numeric::Finite { int, scale } => {
-                let d = pow10(*scale);
-                let mut q = int / &d;
-                if int.is_negative() && !(int % &d).is_zero() {
+                let mut q = int.div_pow10(*scale as usize);
+                if int.is_negative() && !int.divisible_pow10(*scale as usize) {
                     q -= 1;
                 }
                 Numeric::Finite { int: q, scale: 0 }
@@ -227,9 +234,8 @@ impl Numeric {
     pub fn ceil(&self) -> Numeric {
         match self {
             Numeric::Finite { int, scale } => {
-                let d = pow10(*scale);
-                let mut q = int / &d;
-                if int.is_positive() && !(int % &d).is_zero() {
+                let mut q = int.div_pow10(*scale as usize);
+                if int.is_positive() && !int.divisible_pow10(*scale as usize) {
                     q += 1;
                 }
                 Numeric::Finite { int: q, scale: 0 }
@@ -278,17 +284,11 @@ impl Numeric {
     pub fn normalize(&self) -> Numeric {
         match self {
             Numeric::Finite { int, scale } => {
-                let mut int = int.clone();
-                let mut scale = *scale;
-                let ten = BigInt::from(10);
-                while scale > 0 && !int.is_zero() && (&int % &ten).is_zero() {
-                    int /= &ten;
-                    scale -= 1;
-                }
                 if int.is_zero() {
-                    scale = 0;
+                    return Numeric::zero();
                 }
-                Numeric::Finite { int, scale }
+                let drop = int.trailing_zero_digits().min(*scale as usize);
+                Numeric::Finite { int: int.div_pow10(drop), scale: scale - drop as u32 }
             }
             n => n.clone(),
         }
@@ -299,11 +299,11 @@ impl Numeric {
         self.normalize().scale()
     }
 
-    fn aligned(a: &BigInt, sa: u32, b: &BigInt, sb: u32) -> (BigInt, BigInt, u32) {
+    fn aligned(a: &DecInt, sa: u32, b: &DecInt, sb: u32) -> (DecInt, DecInt, u32) {
         match sa.cmp(&sb) {
             Ordering::Equal => (a.clone(), b.clone(), sa),
-            Ordering::Less => (a * pow10(sb - sa), b.clone(), sb),
-            Ordering::Greater => (a.clone(), b * pow10(sa - sb), sa),
+            Ordering::Less => (a.mul_pow10((sb - sa) as usize), b.clone(), sb),
+            Ordering::Greater => (a.clone(), b.mul_pow10((sa - sb) as usize), sa),
         }
     }
 
@@ -318,7 +318,7 @@ impl Numeric {
                 if let Some((x, y, s)) = aligned_small(a, *sa, b, *sb)
                     && let Some(r) = x.checked_add(y)
                 {
-                    return Finite { int: BigInt::from(r), scale: s };
+                    return Finite { int: DecInt::from(r), scale: s };
                 }
                 let (a, b, s) = Self::aligned(a, *sa, b, *sb);
                 Finite {
@@ -334,7 +334,7 @@ impl Numeric {
             && let Some((x, y, s)) = aligned_small(a, *sa, b, *sb)
             && let Some(r) = x.checked_sub(y)
         {
-            return Numeric::Finite { int: BigInt::from(r), scale: s };
+            return Numeric::Finite { int: DecInt::from(r), scale: s };
         }
         self.add(&other.neg())
     }
@@ -348,7 +348,7 @@ impl Numeric {
                 if scale as i64 <= DSCALE_MAX
                     && let (Some(x), Some(y)) = (a.to_i64(), b.to_i64())
                 {
-                    return Finite { int: BigInt::from(x as i128 * y as i128), scale };
+                    return Finite { int: DecInt::from(x as i128 * y as i128), scale };
                 }
                 let n = Finite { int: a * b, scale };
                 if scale as i64 > DSCALE_MAX {
@@ -386,23 +386,23 @@ impl Numeric {
     }
 
     /// (weight, first base-10000 digit) of a finite non-zero value, as in numeric.c.
-    fn weight_and_first(int: &BigInt, scale: u32) -> (i64, i64) {
+    fn weight_and_first(int: &DecInt, scale: u32) -> (i64, i64) {
         if int.is_zero() {
             return (0, 0);
         }
-        let digits = int.abs().to_string().len() as i64;
+        let digits = int.num_digits().max(1) as i64;
         let exp10 = digits - 1 - scale as i64;
         let weight = exp10.div_euclid(4);
         let shift = 4 * weight + scale as i64;
-        let first = if shift >= 0 {
-            int.abs() / pow10(shift as u32)
-        } else {
-            int.abs() * pow10((-shift) as u32)
-        };
-        (weight, first.to_i64().unwrap_or(0))
+        // The digits of the magnitude at positions shift..shift+4 (below 0: zeros).
+        let first = (0..4).rev().fold(0i64, |acc, k| {
+            let pos = shift + k;
+            acc * 10 + if pos >= 0 { int.digit(pos as usize) as i64 } else { 0 }
+        });
+        (weight, first)
     }
 
-    fn select_div_scale(a: &BigInt, sa: u32, b: &BigInt, sb: u32) -> u32 {
+    fn select_div_scale(a: &DecInt, sa: u32, b: &DecInt, sb: u32) -> u32 {
         let (w1, f1) = Self::weight_and_first(a, sa);
         let (w2, f2) = Self::weight_and_first(b, sb);
         let mut qweight = w1 - w2;
@@ -423,10 +423,23 @@ impl Numeric {
                 }
                 // a/10^sa ÷ b/10^sb = (a * 10^(sb + rscale - sa)) / b, in units of 10^-rscale.
                 let shift = *sb as i64 + rscale as i64 - *sa as i64;
+                // (Both small: in i128, without allocating.)
+                if let (Some(x), Some(y)) = (a.to_i64(), b.to_i64())
+                    && let Some(p) = pow10_i128(shift.unsigned_abs().min(39) as u32)
+                {
+                    let (n, d) = if shift >= 0 {
+                        ((x as i128).checked_mul(p), Some(y as i128))
+                    } else {
+                        (Some(x as i128), (y as i128).checked_mul(p))
+                    };
+                    if let (Some(n), Some(d)) = (n, d) {
+                        return Ok(Numeric::Finite { int: DecInt::from(div_round_i128(n, d)), scale: rscale });
+                    }
+                }
                 let (n, d) = if shift >= 0 {
-                    (a * pow10(shift as u32), b.clone())
+                    (a.mul_pow10(shift as usize), b.clone())
                 } else {
-                    (a.clone(), b * pow10((-shift) as u32))
+                    (a.clone(), b.mul_pow10((-shift) as usize))
                 };
                 Ok(Numeric::Finite {
                     int: div_round(&n, &d),
@@ -526,9 +539,9 @@ impl Numeric {
                 let target = rscale + 1;
                 let exp = 2 * target as i64 - *scale as i64;
                 let n = if exp >= 0 {
-                    int * pow10(exp as u32)
+                    int.mul_pow10(exp as usize)
                 } else {
-                    int / pow10((-exp) as u32)
+                    int.div_pow10((-exp) as usize)
                 };
                 let r = n.sqrt();
                 Ok(Numeric::Finite {
@@ -553,9 +566,9 @@ impl Numeric {
                 let target = rscale + 1;
                 let exp = 2 * target as i64 - *scale as i64;
                 let n = if exp >= 0 {
-                    int * pow10(exp as u32)
+                    int.mul_pow10(exp as usize)
                 } else {
-                    int / pow10((-exp) as u32)
+                    int.div_pow10((-exp) as usize)
                 };
                 Ok(Numeric::Finite {
                     int: n.sqrt(),
@@ -650,7 +663,7 @@ impl Numeric {
                 if let Numeric::Finite { int, scale } = &r
                     && !int.is_zero()
                 {
-                    let digits = int.abs().to_string().len() as i64 - *scale as i64;
+                    let digits = int.num_digits().max(1) as i64 - *scale as i64;
                     if digits > maxdigits as i64 {
                         let limit = if maxdigits != 0 {
                             format!("10^{maxdigits}")
@@ -919,7 +932,7 @@ impl Numeric {
     }
 }
 
-fn big_gcd(mut a: BigInt, mut b: BigInt) -> BigInt {
+fn big_gcd(mut a: DecInt, mut b: DecInt) -> DecInt {
     while !b.is_zero() {
         let t = &a % &b;
         a = b;
@@ -970,7 +983,7 @@ fn is_integral(n: &Numeric) -> bool {
 
 fn is_odd_integer(n: &Numeric) -> bool {
     let v = n.var();
-    v.is_integral() && v.integer_part().bit(0)
+    v.is_integral() && v.integer_part().is_odd()
 }
 
 /// numeric.c's NumericVar for the transcendental functions: `int * 10^-scale`. The scale is
@@ -978,26 +991,26 @@ fn is_odd_integer(n: &Numeric) -> bool {
 /// round to an explicit result scale like mul_var/div_var/round_var.
 #[derive(Clone, Debug)]
 struct Var {
-    int: BigInt,
+    int: DecInt,
     scale: i64,
 }
 
-fn rescale(int: &BigInt, from: i64, to: i64) -> BigInt {
+fn rescale(int: &DecInt, from: i64, to: i64) -> DecInt {
     match to.cmp(&from) {
         Ordering::Equal => int.clone(),
-        Ordering::Greater => int * pow10((to - from) as u32),
-        Ordering::Less => div_round(int, &pow10((from - to) as u32)),
+        Ordering::Greater => int.mul_pow10((to - from) as usize),
+        Ordering::Less => int.round_pow10((from - to) as usize),
     }
 }
 
 impl Var {
-    fn from_parts(int: BigInt, scale: i64) -> Var {
+    fn from_parts(int: DecInt, scale: i64) -> Var {
         Var { int, scale }
     }
 
     fn from_i64(v: i64) -> Var {
         Var {
-            int: BigInt::from(v),
+            int: DecInt::from(v),
             scale: 0,
         }
     }
@@ -1018,7 +1031,7 @@ impl Var {
             }
         } else {
             Numeric::Finite {
-                int: self.int * pow10((-self.scale) as u32),
+                int: self.int.mul_pow10((-self.scale) as usize),
                 scale: 0,
             }
         }
@@ -1029,21 +1042,21 @@ impl Var {
     }
 
     fn is_integral(&self) -> bool {
-        self.scale <= 0 || (&self.int % pow10(self.scale as u32)).is_zero()
+        self.scale <= 0 || self.int.divisible_pow10(self.scale as usize)
     }
 
     /// The value truncated to an integer.
-    fn integer_part(&self) -> BigInt {
+    fn integer_part(&self) -> DecInt {
         if self.scale <= 0 {
-            &self.int * pow10((-self.scale) as u32)
+            self.int.mul_pow10((-self.scale) as usize)
         } else {
-            &self.int / pow10(self.scale as u32)
+            self.int.div_pow10(self.scale as usize)
         }
     }
 
     /// Decimal exponent of the leading digit.
     fn dexp(&self) -> i64 {
-        self.int.abs().to_string().len() as i64 - 1 - self.scale
+        self.int.num_digits().max(1) as i64 - 1 - self.scale
     }
 
     /// The base-NBASE weight (zero has weight 0).
@@ -1123,9 +1136,9 @@ impl Var {
         // (a/10^sa) / (b/10^sb) in units of 10^-rscale = a * 10^(sb + rscale - sa) / b.
         let shift = o.scale + rscale - self.scale;
         let (n, d) = if shift >= 0 {
-            (&self.int * pow10(shift as u32), o.int.clone())
+            (self.int.mul_pow10(shift as usize), o.int.clone())
         } else {
-            (self.int.clone(), &o.int * pow10((-shift) as u32))
+            (self.int.clone(), o.int.mul_pow10((-shift) as usize))
         };
         Ok(Var {
             int: div_round(&n, &d),
@@ -1146,9 +1159,9 @@ impl Var {
         let s = rscale + 1;
         let e = 2 * s - self.scale;
         let n = if e >= 0 {
-            &self.int * pow10(e as u32)
+            self.int.mul_pow10(e as usize)
         } else {
-            &self.int / pow10((-e) as u32)
+            self.int.div_pow10((-e) as usize)
         };
         Var {
             int: n.sqrt(),
@@ -1172,8 +1185,8 @@ fn estimate_ln_dweight(var: &Var) -> i64 {
     if var.int.sign() != Sign::Plus {
         return 0;
     }
-    let p9 = Var::from_parts(BigInt::from(9), 1);
-    let p11 = Var::from_parts(BigInt::from(11), 1);
+    let p9 = Var::from_parts(DecInt::from(9), 1);
+    let p11 = Var::from_parts(DecInt::from(11), 1);
     if var.cmp(&p9) != Ordering::Less && var.cmp(&p11) != Ordering::Greater {
         // ln(1 + x) ~= x.
         let x = var.sub(&Var::one());
@@ -1248,8 +1261,8 @@ fn ln_var(arg: &Var, rscale: i64) -> Result<Var> {
         Sign::Plus => {}
     }
     let two = Var::from_i64(2);
-    let p9 = Var::from_parts(BigInt::from(9), 1);
-    let p11 = Var::from_parts(BigInt::from(11), 1);
+    let p9 = Var::from_parts(DecInt::from(9), 1);
+    let p11 = Var::from_parts(DecInt::from(11), 1);
     let mut x = arg.clone();
     let mut fact = two.clone();
     // Reduce into 0.9 < x < 1.1 with repeated square roots.
@@ -1325,7 +1338,7 @@ fn power_var(base: &Var, exp: &Var) -> Result<Var> {
                 "a negative number raised to a non-integer power yields a complex result"
             );
         }
-        res_neg = exp.integer_part().bit(0);
+        res_neg = exp.integer_part().is_odd();
         base.int = -base.int;
     }
     // A low-precision exp * ln(base) for the result weight and a crude overflow test.
@@ -1521,7 +1534,7 @@ fn parse_numeric(s: &str) -> std::result::Result<Numeric, bool> {
             if j == first || digits.is_empty() || !trailing_ok(j) {
                 return Err(false);
             }
-            let v = BigInt::parse_bytes(digits.as_bytes(), radix).ok_or(false)?;
+            let v = DecInt::parse_radix(digits.as_bytes(), radix).ok_or(false)?;
             return Ok(Numeric::Finite {
                 int: if neg { -v } else { v },
                 scale: 0,
@@ -1605,7 +1618,7 @@ fn parse_numeric(s: &str) -> std::result::Result<Numeric, bool> {
     // value = digits * 10^(exponent - fraction digits); dscale = max(fraction - exponent, 0).
     let shift = exponent - dscale;
     let out_scale = (dscale - exponent).max(0);
-    let mut int: BigInt = digits.parse().map_err(|_| false)?;
+    let mut int: DecInt = digits.parse().map_err(|_| false)?;
     // Leading significant digit's decimal exponent, to refuse absurd sizes before allocating.
     let lead = digits.trim_start_matches('0').len() as i64 - 1 + shift;
     if !int.is_zero() && lead > (WEIGHT_MAX + 2) * 4 {
@@ -1617,9 +1630,9 @@ fn parse_numeric(s: &str) -> std::result::Result<Numeric, bool> {
     // Express at out_scale.
     let e = shift + out_scale;
     if e >= 0 {
-        int *= pow10(e as u32);
+        int = int.mul_pow10(e as usize);
     } else {
-        int /= pow10((-e) as u32);
+        int = int.div_pow10((-e) as usize);
     }
     Ok(Numeric::Finite {
         int: if neg { -int } else { int },
@@ -1635,7 +1648,7 @@ impl fmt::Display for Numeric {
             Numeric::NegInf => f.write_str("-Infinity"),
             Numeric::Finite { int, scale } => {
                 let neg = int.is_negative();
-                let digits = int.abs().to_string();
+                let digits = int.magnitude_string();
                 let scale = *scale as usize;
                 let mut out = String::with_capacity(digits.len() + 3);
                 if neg {
@@ -1820,7 +1833,7 @@ mod tests {
         assert_eq!(Numeric::from_f64(1e20).to_string(), "100000000000000000000");
     }
 
-    /// The i64 fast paths of add / sub / mul / cmp / checked give what the BigInt
+    /// The i64 fast paths of add / sub / mul / cmp / checked give what the DecInt
     /// arithmetic gives (computed here as the general path does), and equal values hash
     /// alike however they're written.
     #[test]
@@ -1830,9 +1843,9 @@ mod tests {
             .iter()
             .flat_map(|&v| [0u32, 1, 2, 5, 18].map(|s| (v, s)))
             .collect();
-        let big = |v: i64, s: u32| Numeric::Finite { int: BigInt::from(v), scale: s };
+        let big = |v: i64, s: u32| Numeric::Finite { int: DecInt::from(v), scale: s };
         let slow = |a: (i64, u32), b: (i64, u32), op: char| -> Numeric {
-            let (x, y) = (BigInt::from(a.0), BigInt::from(b.0));
+            let (x, y) = (DecInt::from(a.0), DecInt::from(b.0));
             let (x, y, s) = Numeric::aligned(&x, a.1, &y, b.1);
             match op {
                 '+' => Numeric::Finite { int: x + y, scale: s },
@@ -1851,9 +1864,9 @@ mod tests {
                     assert_eq!(format!("{got:?}"), format!("{want:?}"), "{a:?} {op} {b:?}");
                 }
                 let got = na.mul(&nb);
-                let want = Numeric::Finite { int: BigInt::from(a.0) * BigInt::from(b.0), scale: a.1 + b.1 };
+                let want = Numeric::Finite { int: DecInt::from(a.0) * DecInt::from(b.0), scale: a.1 + b.1 };
                 assert_eq!(format!("{got:?}"), format!("{want:?}"), "{a:?} * {b:?}");
-                let (x, y, _) = Numeric::aligned(&BigInt::from(a.0), a.1, &BigInt::from(b.0), b.1);
+                let (x, y, _) = Numeric::aligned(&DecInt::from(a.0), a.1, &DecInt::from(b.0), b.1);
                 assert_eq!(na.cmp(&nb), x.cmp(&y), "{a:?} cmp {b:?}");
                 if na == nb {
                     assert_eq!(h(&na), h(&nb), "{a:?} hash {b:?}");
@@ -1862,10 +1875,10 @@ mod tests {
         }
         // A value past the i64 equal to a small one (trailing zeros) hashes as it does.
         let a = big(15, 1);
-        let b = Numeric::Finite { int: BigInt::from(15) * BigInt::from(10).pow(30), scale: 31 };
+        let b = Numeric::Finite { int: DecInt::from(15) * DecInt::from(10).pow(30), scale: 31 };
         assert_eq!(a, b);
         assert_eq!(h(&a), h(&b));
         assert!(big(i64::MAX, 0).checked().is_ok());
-        assert!(Numeric::Finite { int: BigInt::from(10).pow(200000), scale: 0 }.checked().is_err());
+        assert!(Numeric::Finite { int: DecInt::from(10).pow(200000), scale: 0 }.checked().is_err());
     }
 }

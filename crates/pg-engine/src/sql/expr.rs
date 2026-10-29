@@ -861,6 +861,14 @@ impl Expr {
     /// second is compared as it is written, stopping where it differs: expressions holding
     /// big constants, a pgvector query's, are compared often.)
     pub fn same_as(&self, other: &Expr) -> bool {
+        if let Some(same) = same_shape(self, other) {
+            debug_assert_eq!(same, self.same_text(other), "same_shape({self:?}, {other:?})");
+            return same;
+        }
+        self.same_text(other)
+    }
+
+    fn same_text(&self, other: &Expr) -> bool {
         // (Once it differs it stays so, should a Debug impl write on past an error.)
         struct Rest<'a>(Option<&'a str>);
         impl std::fmt::Write for Rest<'_> {
@@ -914,6 +922,54 @@ impl Expr {
             })
         })
         .unwrap()
+    }
+}
+
+/// What `same_as` (equal Debug texts) answers, told from the expressions' shapes when they
+/// settle it: two columns, outer references or parameters by their numbers, calls by their
+/// callees and arguments, and texts that start with different characters. None: only the
+/// texts tell. (The planner compares clause sides with expressions per join relation, and
+/// formatting them was a tenth of planning a catalog join.)
+fn same_shape(a: &Expr, b: &Expr) -> Option<bool> {
+    use Expr::*;
+    /// The first byte of the expression's Debug text, where it is fixed.
+    fn lead(e: &Expr) -> Option<u8> {
+        match e {
+            Col(..) => Some(b'#'),
+            Outer(..) => Some(b'^'),
+            Param(..) => Some(b'$'),
+            Cast(..) | Relabel(..) | Collate(..) | IsNull(..) | BoolTest(..) | IsDistinct(..) | InList(..)
+            | ArrayOp { .. } | Subscript(..) | Field(..) => Some(b'('),
+            Call(d, ..) => d.name.as_bytes().first().copied(),
+            _ => None,
+        }
+    }
+    match (a, b) {
+        (SqlSyntax(_), _) | (_, SqlSyntax(_)) => None,
+        (Col(x, _), Col(y, _)) => Some(x == y),
+        (Outer(l, i, _), Outer(m, j, _)) => Some(l == m && i == j),
+        (Param(x, _), Param(y, _)) => Some(x == y),
+        (Call(d, xs, _), Call(e, ys, _)) => {
+            if d.name != e.name {
+                return Some(false);
+            }
+            if xs.len() != ys.len() {
+                return None;
+            }
+            let mut all = true;
+            for (x, y) in xs.iter().zip(ys) {
+                match same_shape(x, y) {
+                    Some(false) => return Some(false),
+                    Some(true) => {}
+                    None => all = false,
+                }
+            }
+            all.then_some(true)
+        }
+        _ => match (lead(a), lead(b)) {
+            (Some(x), Some(y)) if x != y => Some(false),
+            _ => None,
+        },
     }
 }
 

@@ -1,0 +1,252 @@
+> SELECT length(repeat('9', 100000)::numeric::text), md5(repeat('12345', 20000)::numeric::text)
+length:int4 | md5:text
+100000 | 97befb436b7830dea954481cd831751f
+-- SELECT 1
+
+> SELECT md5((repeat('7', 100000)::numeric * 3)::text), md5((repeat('7', 20000)::numeric * repeat('3', 15000)::numeric)::text)
+md5:text | md5:text
+1b678d15bcc68c93d10db74462e821ef | b39b468e22723979740a8fa9203ec4c1
+-- SELECT 1
+
+> SELECT md5((repeat('3', 20000)::numeric / repeat('7', 10000)::numeric)::text)
+md5:text
+0606cd3b45e2cb3936ef8763c452aa68
+-- SELECT 1
+
+> SELECT md5(factorial(3000)::text), factorial(0), factorial(1), factorial(33)
+md5:text | factorial:numeric | factorial:numeric | factorial:numeric
+dff139fd256b93fa8f78ef7b75943e04 | 1 | 1 | 8683317618811886495518194401280000000
+-- SELECT 1
+
+> SELECT 999999999::numeric + 1, 999999999999999999::numeric + 1, 999999999999999999999999999::numeric + 1
+?column?:numeric | ?column?:numeric | ?column?:numeric
+1000000000 | 1000000000000000000 | 1000000000000000000000000000
+-- SELECT 1
+
+> SELECT -1000000000::numeric - 1, 1e18::numeric - 1, 1e27 / 1e9, 1e36 % 999999999
+?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:numeric
+-1000000001 | 999999999999999999 | 1000000000000000000 | 1
+-- SELECT 1
+
+> SELECT 170141183460469231731687303715884105727::numeric + 1, -170141183460469231731687303715884105728::numeric - 1
+?column?:numeric | ?column?:numeric
+170141183460469231731687303715884105728 | -170141183460469231731687303715884105729
+-- SELECT 1
+
+> SELECT 9223372036854775807::numeric * 9223372036854775807, (-9223372036854775808)::numeric * 2
+?column?:numeric | ?column?:numeric
+85070591730234615847396907784232501249 | -18446744073709551616
+-- SELECT 1
+
+> SELECT round(123456789012345678901234567890.123456789, 5), round(-0.5), round(2.5), round(-123456789.987654321, -4)
+round:numeric | round:numeric | round:numeric | round:numeric
+123456789012345678901234567890.12346 | -1 | 3 | -123460000
+-- SELECT 1
+
+> SELECT trunc(-123456789012345678901.999, 2), floor(-1e30 - 0.5), ceil(1e30 + 0.5), floor(-0.000000001), ceil(0.000000001)
+trunc:numeric | floor:numeric | ceil:numeric | floor:numeric | ceil:numeric
+-123456789012345678901.99 | -1000000000000000000000000000001 | 1000000000000000000000000000001 | -1 | 1
+-- SELECT 1
+
+> SELECT trim_scale(1000000000.000000000000), trim_scale(0.000000000), min_scale(1e-20), scale(12.300000000000)
+trim_scale:numeric | trim_scale:numeric | min_scale:int4 | scale:int4
+1000000000 | 0 | 20 | 12
+-- SELECT 1
+
+> SELECT 1::numeric / 3, 2::numeric / 3, 1e30::numeric / 7, -1e-30 / 3, 10::numeric / 4, 1.5 * 7 / 7
+?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:numeric | ?column?:numeric
+0.33333333333333333333 | 0.66666666666666666667 | 142857142857142857142857142857 | -0.000000000000000000000000000000333333333333333333 | 2.5000000000000000 | 1.5000000000000000
+-- SELECT 1
+
+> SELECT div(1e40, 7), mod(-1e40, 7), div(-17, 5), mod(17.5, -5), 1e40::numeric % 1e20
+div:numeric | mod:numeric | div:numeric | mod:numeric | ?column?:numeric
+1428571428571428571428571428571428571428 | -4 | -3 | 2.5 | 0
+-- SELECT 1
+
+> SELECT sqrt(2::numeric), sqrt(1e100), sqrt(123456789012345678901234567890.5), sqrt(0.0000000002)
+sqrt:numeric | sqrt:numeric | sqrt:numeric | sqrt:numeric
+1.414213562373095 | 100000000000000000000000000000000000000000000000000 | 351364182882014.4 | 0.000014142135623730950
+-- SELECT 1
+
+> SELECT exp(1::numeric), ln(1e100), log(2, 1e50), power(2::numeric, 200), power(1.0001, 10000.5)
+exp:numeric | ln:numeric | log:numeric | power:numeric | power:numeric
+2.7182818284590452 | 230.25850929940457 | 166.09640474436812 | 1606938044258990275541962092341162602522202993782792835301376 | 2.7182818307240536
+-- SELECT 1
+
+> SELECT gcd(1e40::numeric, 1e30 + 10), lcm(123456789012345678901234567890, 987654321)
+gcd:numeric | lcm:numeric
+10 | 13548070124980948012498094801236261410
+-- SELECT 1
+
+> SELECT x::numeric(40, 10) FROM (VALUES ('12345678901234567890.0123456789012'), ('-0.00000000005')) v(x)
+x:numeric
+-0.0000000001
+12345678901234567890.0123456789
+-- SELECT 2
+
+> SELECT '1e131071'::numeric > 0, length('-1e-16383'::numeric::text), '0.0000000001e10'::numeric
+?column?:bool | length:int4 | numeric:numeric
+t | 16386 | 1
+-- SELECT 1
+
+> SELECT (repeat('1', 50) || '.' || repeat('2', 50))::numeric::float8, 1e300::numeric::float8, 123456789012345678901234567890::numeric::float4
+float8:float8 | float8:float8 | float4:float4
+1.1111111111111111e+49 | 1e+300 | 1.2345679e+29
+-- SELECT 1
+
+> SELECT sum(x), avg(x), stddev(x)::numeric(30, 20) FROM (SELECT (g::numeric * 1e25 + 0.5) AS x FROM generate_series(1, 1000) g) s
+ERROR 22003: numeric field overflow
+DETAIL: A field with precision 30, scale 20 must round to an absolute value less than 10^10.
+
+> SELECT sum(x::numeric * 1.5 / 7) FROM generate_series(1, 2000) x
+sum:numeric
+428785.71428571428571428571
+-- SELECT 1
+
+> SELECT to_char(123456789012345678901234567890.12345::numeric, 'FM999,999,999,999,999,999,999,999,999,999.99999')
+to_char:text
+123,456,789,012,345,678,901,234,567,890.12345
+-- SELECT 1
+
+> SELECT hash_numeric(1e40) = hash_numeric(10000000000000000000000000000000000000000.000), hash_numeric(-1e-40), hash_numeric_extended(123456789012345678901234567890, 7)
+?column?:bool | hash_numeric:int4 | hash_numeric_extended:int8
+t | -1324868418 | 3736871212075188455
+-- SELECT 1
+
+> CREATE TABLE a100_big (k numeric PRIMARY KEY, v numeric)
+-- CREATE TABLE
+
+> INSERT INTO a100_big SELECT g * 1e40 + g, -(g * 1e45) FROM generate_series(1, 50) g
+-- INSERT 0 50
+
+> INSERT INTO a100_big VALUES (repeat('9', 1000)::numeric, 1), (-1e100, 0.000000000000000000000000000000000000000001)
+-- INSERT 0 2
+
+> SELECT count(*), sum(k), min(v), max(k) - min(k) FROM a100_big
+count:int8 | sum:numeric | min:numeric | ?column?:numeric
+52 | 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999990000000000000000000000000000000000000000000000000000000012750000000000000000000000000000000000001274 | -50000000000000000000000000000000000000000000000 | 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+-- SELECT 1
+
+> SELECT k, v FROM a100_big WHERE k = 7e40 + 7
+k:numeric | v:numeric
+70000000000000000000000000000000000000007 | -7000000000000000000000000000000000000000000000
+-- SELECT 1
+
+> SELECT count(DISTINCT v), count(*) FILTER (WHERE k > 1e41) FROM a100_big
+count:int8 | count:int8
+52 | 42
+-- SELECT 1
+
+> SELECT v FROM a100_big ORDER BY v LIMIT 3
+v:numeric
+-50000000000000000000000000000000000000000000000
+-49000000000000000000000000000000000000000000000
+-48000000000000000000000000000000000000000000000
+-- SELECT 3
+
+> DROP TABLE a100_big
+-- DROP TABLE
+
+> CREATE SCHEMA a100_s
+-- CREATE SCHEMA
+
+> CREATE FUNCTION a100_s.f(a int, OUT b text) LANGUAGE sql AS 'SELECT a::text'
+-- CREATE FUNCTION
+
+> SELECT routine_name, data_type FROM information_schema.routines WHERE routine_schema = 'a100_s'
+routine_name:name | data_type:varchar
+f | text
+-- SELECT 1
+
+> SELECT parameter_name, data_type, parameter_mode, ordinal_position FROM information_schema.parameters
+>   WHERE specific_schema = 'a100_s' ORDER BY ordinal_position
+parameter_name:name | data_type:varchar | parameter_mode:varchar | ordinal_position:int4
+a | integer | IN | 1
+b | text | OUT | 2
+-- SELECT 2
+
+> CREATE OR REPLACE FUNCTION a100_s.f(a int, OUT b text, OUT c date) LANGUAGE sql AS 'SELECT a::text, current_date'
+ERROR 42P13: cannot change return type of existing function
+HINT: Use DROP FUNCTION a100_s.f(integer) first.
+
+> SELECT parameter_name, data_type, parameter_mode FROM information_schema.parameters
+>   WHERE specific_schema = 'a100_s' ORDER BY ordinal_position
+parameter_name:name | data_type:varchar | parameter_mode:varchar
+a | integer | IN
+b | text | OUT
+-- SELECT 2
+
+> CREATE ROLE a100_r
+-- CREATE ROLE
+
+> REVOKE EXECUTE ON FUNCTION a100_s.f(int) FROM PUBLIC
+-- REVOKE
+
+> GRANT USAGE ON SCHEMA a100_s TO a100_r
+-- GRANT
+
+> SET ROLE a100_r
+-- SET
+
+> SELECT count(*) FROM information_schema.routines WHERE routine_schema = 'a100_s'
+count:int8
+0
+-- SELECT 1
+
+> RESET ROLE
+-- RESET
+
+> SELECT count(*) FROM information_schema.routines WHERE routine_schema = 'a100_s'
+count:int8
+1
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> DROP FUNCTION a100_s.f(int)
+-- DROP FUNCTION
+
+> SELECT count(*) FROM information_schema.parameters WHERE specific_schema = 'a100_s'
+count:int8
+0
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*) FROM information_schema.parameters WHERE specific_schema = 'a100_s'
+count:int8
+2
+-- SELECT 1
+
+> DROP SCHEMA a100_s CASCADE
+NOTICE 00000: drop cascades to function a100_s.f(integer)
+-- DROP SCHEMA
+
+> DROP ROLE a100_r
+-- DROP ROLE
+
+> CREATE TABLE a100_p (a int, b int, PRIMARY KEY (a, b))
+-- CREATE TABLE
+
+> CREATE TABLE a100_c (x int, y int, z int, FOREIGN KEY (y, z) REFERENCES a100_p)
+-- CREATE TABLE
+
+> SELECT pkc.relname, pka.attname, fkc.relname, fka.attname, pos.n
+>   FROM pg_namespace pkn, pg_class pkc, pg_attribute pka, pg_namespace fkn, pg_class fkc,
+>     pg_attribute fka, pg_constraint con, generate_series(1, 32) pos(n), pg_class pkic
+>   WHERE pkn.oid = pkc.relnamespace AND pkc.oid = pka.attrelid AND pka.attnum = con.confkey[pos.n]
+>     AND con.confrelid = pkc.oid AND fkn.oid = fkc.relnamespace AND fkc.oid = fka.attrelid
+>     AND fka.attnum = con.conkey[pos.n] AND con.conrelid = fkc.oid AND con.contype = 'f'
+>     AND (pkic.relkind = 'i' OR pkic.relkind = 'I') AND pkic.oid = con.conindid
+>     AND fkc.relname LIKE 'a100%'
+>   ORDER BY pkn.nspname, pkc.relname, con.conname, pos.n
+relname:name | attname:name | relname:name | attname:name | n:int4
+a100_p | a | a100_c | y | 1
+a100_p | b | a100_c | z | 2
+-- SELECT 2
+
+> DROP TABLE a100_c, a100_p
+-- DROP TABLE
+

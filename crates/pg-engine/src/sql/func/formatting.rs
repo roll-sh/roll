@@ -2837,7 +2837,6 @@ pub fn numeric_out_sci(n: &Numeric, scale: i32) -> String {
         Numeric::PosInf => "Infinity".into(),
         Numeric::NegInf => "-Infinity".into(),
         Numeric::Finite { int, scale: s } => {
-            use num_traits::{Signed, Zero};
             let exponent: i64 = if int.is_zero() {
                 0
             } else {
@@ -2850,7 +2849,7 @@ pub fn numeric_out_sci(n: &Numeric, scale: i32) -> String {
                     scale: s + exponent as u32,
                 }
             } else {
-                let mul = num_bigint::BigInt::from(10).pow((-exponent) as u32);
+                let mul = crate::types::decint::DecInt::from(10).pow((-exponent) as u32);
                 Numeric::Finite {
                     int: int * mul,
                     scale: *s,
