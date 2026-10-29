@@ -18,7 +18,7 @@ impl D {
         Ok(())
     }
 
-    pub(super) fn into_clause(&mut self, into: &pb::IntoClause) -> R {
+    pub(super) fn select_into(&mut self, into: &pb::IntoClause) -> R {
         use pb::OnCommitAction as O;
         self.range_var(into.rel.as_ref().ok_or(Unhandled)?, Ctx::None)?;
         if !into.col_names.is_empty() {
@@ -144,16 +144,16 @@ impl D {
         Ok(())
     }
 
-    pub(super) fn from_clause(&mut self, l: &[Node]) -> R {
+    pub(super) fn opt_from(&mut self, l: &[Node]) -> R {
         if !l.is_empty() {
             self.group(Some("FROM"), Mode::Indent);
-            self.from_list(l)?;
+            self.table_refs(l)?;
             self.c(' ');
         }
         Ok(())
     }
 
-    pub(super) fn from_list(&mut self, l: &[Node]) -> R {
+    pub(super) fn table_refs(&mut self, l: &[Node]) -> R {
         for (i, n) in l.iter().enumerate() {
             self.table_ref(n)?;
             if i + 1 < l.len() {

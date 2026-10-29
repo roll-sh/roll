@@ -220,10 +220,10 @@ impl D {
             let rel = into.rel.as_ref().ok_or(Unhandled)?;
             self.group(Some("INTO"), Mode::Indent);
             self.opt_temp(&rel.relpersistence)?;
-            self.into_clause(into)?;
+            self.select_into(into)?;
             self.c(' ');
         }
-        self.from_clause(&s.from_clause)?;
+        self.opt_from(&s.from_clause)?;
         self.where_clause(s.where_clause.as_deref())?;
         if !s.group_clause.is_empty() {
             self.group(Some("GROUP BY"), Mode::Merge);
@@ -682,7 +682,7 @@ impl D {
             self.set_clauses(&s.target_list)?;
             self.c(' ');
         }
-        self.from_clause(&s.from_clause)?;
+        self.opt_from(&s.from_clause)?;
         self.where_or_current(s.where_clause.as_deref())?;
         if let Some(r) = &s.returning_clause {
             self.returning(r)?;
@@ -704,7 +704,7 @@ impl D {
         self.c(' ');
         if !s.using_clause.is_empty() {
             self.group(Some("USING"), Mode::Indent);
-            self.from_list(&s.using_clause)?;
+            self.table_refs(&s.using_clause)?;
             self.c(' ');
         }
         self.where_or_current(s.where_clause.as_deref())?;
@@ -805,7 +805,7 @@ impl D {
         if s.if_not_exists {
             self.s("IF NOT EXISTS ");
         }
-        self.into_clause(into)?;
+        self.select_into(into)?;
         self.c(' ');
         self.s("AS ");
         match query {
