@@ -977,6 +977,15 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   and sequence-function gaps; DISTINCT ON sub-selects; read-only row locks; ON CONFLICT's
   arbiter left to planning (`Binder::unplanned`); SAOP join clauses parameterize index /
   bitmap paths (`or_param_paths`), estimated as scalararraysel does for a runtime array.
+  Then: RETURNING portals follow PortalRun (run once, rows held), binary datetime ranges,
+  utility statements' ParameterDescription, startup names cut to 63 bytes, linear bytea
+  output, FK / RI trigger oids in one block, DROP DATABASE waiting for exiting sessions,
+  catalog values (pgAdmin, DBeaver, Alembic), the FK check through the primary key's index
+  (it scanned the parent), Describe of what fails only when planned, sequences' columns in
+  RowDescription, reg* names of built-ins by index. Left (STATUS.md): LIMIT without ORDER
+  BY over GROUP BY depends on autovacuum's statistics (the engine never auto-analyzes);
+  concurrent CREATE SCHEMA / TABLE of one name don't wait for each other (Flyway's
+  concurrent migrates); a LATERAL "outer reference" error (EF Core); slow paths listed.
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row
