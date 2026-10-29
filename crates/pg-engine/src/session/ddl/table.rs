@@ -8981,7 +8981,8 @@ impl Ddl<'_, '_> {
             K::ReindexObjectTable => {
                 let rv = s.relation.as_ref().unwrap();
                 let t = match self.lookup(rv)? {
-                    Some(Relation::Table(t)) => (*t).clone(),
+                    // (A foreign table has no storage to reindex.)
+                    Some(Relation::Table(t)) if t.foreign.is_none() => (*t).clone(),
                     Some(Relation::View(v)) if v.storage.is_some() => {
                         (**v.storage.as_ref().unwrap()).clone()
                     }

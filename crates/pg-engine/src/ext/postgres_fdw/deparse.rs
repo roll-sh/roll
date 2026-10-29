@@ -635,10 +635,12 @@ impl Deparser<'_> {
                 }
                 s
             }
+            // (deparseSubscriptingRef: always in parentheses, the container too unless it
+            // is a column.)
             Expr::Subscript(base, subs, _) => {
                 let mut s = match &**base {
-                    Expr::Col(..) => self.expr(base),
-                    b => format!("({})", self.expr(b)),
+                    Expr::Col(..) => format!("({}", self.expr(base)),
+                    b => format!("(({})", self.expr(b)),
                 };
                 for (lo, hi, slice) in subs {
                     s.push('[');
@@ -655,6 +657,7 @@ impl Deparser<'_> {
                     }
                     s.push(']');
                 }
+                s.push(')');
                 s
             }
             Expr::Agg(i, _) => match self.aggs.get(*i) {

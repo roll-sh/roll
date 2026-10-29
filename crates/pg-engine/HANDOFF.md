@@ -318,6 +318,16 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   same (~104 MB, debug). An Append's node is built in `nodes::open_append`, out of
   `open_node` (deep_input's 20,000-deep SQL function SRFs overflowed when the async
   reordering sat in `open_node`'s frame).
+  Round 21 (agent 94, postgres_fdw 1,878): foreign tables in partition trees and DML corners.
+  A routed INSERT into a foreign partition returns what the root's RETURNING and check
+  options read (`modify::routed_back` / `with_routed`, by column name); ON CONFLICT DO NOTHING
+  goes to the server (`modify::DO_NOTHING`, no batching under it: the count is the server's);
+  an UPDATE moving a row into a foreign partition it also changes fails as
+  postgresBeginForeignInsert does (`modify::update_targets`); a foreign partition's row is
+  never checked against its partition constraint or moved out locally (ExecForeignUpdate);
+  MERGE refuses foreign result relations (not when ON false leaves only the root); REINDEX
+  TABLE refuses foreign tables; index key details quote column names (pg_get_indexdef_columns);
+  a batched COPY's flush error names only the relation (relname_only).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

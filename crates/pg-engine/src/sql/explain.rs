@@ -11873,6 +11873,14 @@ impl Builder<'_, '_> {
         let t = &ip.rules.table;
         let exprs: Vec<&Expr> = ip.returning.iter().chain(ip.rules.view_checks.iter().map(|(_, e)| e)).collect();
         let back = modify::Back::of(t, &modify::tgtypes(&ip.rules.triggers), crate::catalog::trigger_type::INSERT, &exprs, ip.sys.then_some(t.columns.len()));
+        // (deparseInsertSql's doNothing.)
+        if ip.on_conflict.as_ref().is_some_and(|c| matches!(c.action, super::plan::ConflictAction::Nothing)) {
+            for d in &mut n.details {
+                if let Detail::Text("Remote SQL", s) = d {
+                    s.push_str(modify::DO_NOTHING);
+                }
+            }
+        }
         self.foreign_returning(n, t, back);
         let batch = modify::batch_size(&self.ctx.catalog(), t, !ip.returning.is_empty(), !ip.rules.view_checks.is_empty(), &modify::tgtypes(&ip.rules.triggers));
         for d in &mut n.details {

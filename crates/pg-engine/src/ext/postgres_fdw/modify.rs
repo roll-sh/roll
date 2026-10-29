@@ -24,6 +24,53 @@ thread_local! {
     static PENDING: std::cell::RefCell<Vec<Pending>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The running INSERT routes rows into partitions while capturing transition tables.
     static ROUTED_CAPTURE: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+    /// The root's columns (by name) a routing INSERT's RETURNING list and check options
+    /// read: a foreign partition's statement returns them too (ri_returningList mapped to
+    /// the partition).
+    static ROUTED_BACK: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    /// The foreign partitions the running UPDATE changes, while it moves a row.
+    static UPDATE_TARGETS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// While the guard lives, rows moved by an UPDATE can't go to the foreign tables `oids`.
+pub(crate) fn update_targets(oids: Vec<u32>) -> Option<crate::scoped::RefGuard<Vec<u32>>> {
+    (!oids.is_empty()).then(|| crate::scoped::set_ref(&UPDATE_TARGETS, oids, "postgres_fdw::UPDATE_TARGETS"))
+}
+
+/// postgresBeginForeignInsert: a row moved into a foreign partition the UPDATE changes
+/// would be changed again by it.
+pub(crate) fn check_update_target(t: &Table) -> Result<()> {
+    if UPDATE_TARGETS.with_borrow(|o| o.contains(&t.oid)) {
+        return Err(crate::error::Error::new(
+            crate::error::code::FEATURE_NOT_SUPPORTED,
+            format!("cannot route tuples into foreign table to be updated \"{}\"", t.name),
+        ));
+    }
+    Ok(())
+}
+
+/// While the guard lives, rows routed to foreign partitions bring back the columns of the
+/// root table `t` that `b` names.
+pub(crate) fn routed_back(t: &Table, b: Back) -> Option<crate::scoped::RefGuard<Option<Vec<String>>>> {
+    (!b.cols.is_empty()).then(|| {
+        let names = b.cols.iter().map(|&i| t.columns[i].name.clone()).collect();
+        crate::scoped::set_ref(&ROUTED_BACK, Some(names), "postgres_fdw::ROUTED_BACK")
+    })
+}
+
+/// A routed row's `b` with the partition `t`'s columns the routing statement reads
+/// (`routed_back`).
+pub(crate) fn with_routed(t: &Table, mut b: Back) -> Back {
+    ROUTED_BACK.with_borrow(|names| {
+        let Some(names) = names else { return };
+        for (i, c) in t.columns.iter().enumerate() {
+            if !c.dropped && names.contains(&c.name) && !b.cols.contains(&i) {
+                b.cols.push(i);
+            }
+        }
+        b.cols.sort_unstable();
+    });
+    b
 }
 
 /// While the guard lives, rows routed to partitions are captured for transition tables.
@@ -170,6 +217,12 @@ pub(crate) fn unsettled(out: &mut Vec<&'static str>) {
     if ROUTED_CAPTURE.with_borrow(|c| *c) {
         out.push("postgres_fdw::ROUTED_CAPTURE");
     }
+    if ROUTED_BACK.with_borrow(|c| c.is_some()) {
+        out.push("postgres_fdw::ROUTED_BACK");
+    }
+    if UPDATE_TARGETS.with_borrow(|c| !c.is_empty()) {
+        out.push("postgres_fdw::UPDATE_TARGETS");
+    }
 }
 
 fn text_params(t: &Table, row: &[Value], cols: &[usize], ctx: &ExecCtx) -> Vec<Option<String>> {
@@ -184,6 +237,11 @@ fn text_params(t: &Table, row: &[Value], cols: &[usize], ctx: &ExecCtx) -> Vec<O
 
 /// Run a remote modification with parameters; its RETURNING row, if it has one.
 fn run(t: &Table, sql: &str, params: &[Option<String>], ctx: &ExecCtx) -> Result<Option<Vec<Option<String>>>> {
+    Ok(run_result(t, sql, params, ctx)?.rows.into_iter().next())
+}
+
+/// Run a remote modification with parameters: its result.
+fn run_result(t: &Table, sql: &str, params: &[Option<String>], ctx: &ExecCtx) -> Result<crate::remote::conn::PgResult> {
     let m = super::scan::mapping_for(t, None, ctx)?;
     let key = connection::get_connection(ctx, &m, true)?;
     let intr = crate::remote::interrupts(ctx);
@@ -194,14 +252,12 @@ fn run(t: &Table, sql: &str, params: &[Option<String>], ctx: &ExecCtx) -> Result
         }
         Ok(r)
     });
-    match r {
-        Ok(r) => Ok(r.rows.into_iter().next()),
-        Err(e) => {
-            connection::note_error(ctx, key);
-            Err(e)
-        }
-    }
+    r.inspect_err(|_| connection::note_error(ctx, key))
 }
+
+/// deparseInsertSql's ON CONFLICT DO NOTHING (the only ON CONFLICT a foreign table takes:
+/// it has no arbiter indexes).
+pub const DO_NOTHING: &str = " ON CONFLICT DO NOTHING";
 
 /// deparseInsertSql: every (non-generated) column.
 pub fn insert_sql(cat: &crate::catalog::Catalog, t: &Table) -> (String, Vec<usize>) {
@@ -230,15 +286,17 @@ pub fn insert_sql(cat: &crate::catalog::Catalog, t: &Table) -> (String, Vec<usiz
 }
 
 /// INSERT of `row` into foreign table `t`: the stored row, as the remote server returned it
-/// when the statement takes it back.
-pub fn insert(t: &Table, row: Row, ctx: &ExecCtx) -> Result<Row> {
+/// when the statement takes it back; None when ON CONFLICT DO NOTHING (`do_nothing`) kept
+/// it out.
+pub fn insert(t: &Table, row: Row, do_nothing: bool, ctx: &ExecCtx) -> Result<Option<Row>> {
     let cat = ctx.catalog();
     let (mut sql, cols) = insert_sql(&cat, t);
     let back = back();
     // (Batched: nothing comes back, no row trigger of the table, batch_size over 1.)
     // (The running statement's batch: at most as many rows as 65535 parameters take.)
+    // (Not under ON CONFLICT DO NOTHING: the statement counts the rows the server took.)
     let batch = batch_size(&cat, t, false, false, &[]).min(65535 / cols.len().max(1)).max(1);
-    if batch > 1 && back.as_ref().is_none_or(|b| b.cols.is_empty() && !b.ctid) && !row_insert_triggers(&cat, t) {
+    if batch > 1 && !do_nothing && back.as_ref().is_none_or(|b| b.cols.is_empty() && !b.ctid) && !row_insert_triggers(&cat, t) {
         let params = text_params(t, &row, &cols, ctx);
         let full = PENDING.with_borrow_mut(|ps| {
             let i = match ps.iter().position(|p| p.table.oid == t.oid) {
@@ -255,16 +313,23 @@ pub fn insert(t: &Table, row: Row, ctx: &ExecCtx) -> Result<Row> {
             send_batch(p, ctx)?;
         }
         LAST_CTID.set(None);
-        return Ok(row);
+        return Ok(Some(row));
+    }
+    if do_nothing {
+        sql.push_str(DO_NOTHING);
     }
     if let Some(b) = &back {
         sql.push_str(&b.sql(t));
     }
     LAST_CTID.set(None);
-    let vals = run(t, &sql, &text_params(t, &row, &cols, ctx), ctx)?;
-    match (back, vals) {
-        (Some(b), Some(vals)) => b.row(t, &vals, ctx),
-        _ => Ok(row),
+    let r = run_result(t, &sql, &text_params(t, &row, &cols, ctx), ctx)?;
+    // (store_returning_result; "INSERT 0 0": the row conflicted.)
+    if do_nothing && r.rows.is_empty() && r.cmd_status.ends_with(" 0") {
+        return Ok(None);
+    }
+    match (back, r.rows.into_iter().next()) {
+        (Some(b), Some(vals)) => b.row(t, &vals, ctx).map(Some),
+        _ => Ok(Some(row)),
     }
 }
 

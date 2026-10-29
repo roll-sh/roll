@@ -184,7 +184,8 @@ pub fn key_detail(
         .columns
         .iter()
         .map(|c| match &c.key {
-            IndexKey::Column(i) => t.columns[*i].name.clone(),
+            // (pg_get_indexdef_columns: quote_identifier's names.)
+            IndexKey::Column(i) => crate::catalog::quote_ident(&t.columns[*i].name),
             IndexKey::Expr(e) => crate::sql::func::system::index_key_text(ctx, t, e),
         })
         .collect();
@@ -2830,7 +2831,10 @@ pub fn update_row_rls(
             new[i] = generated_value(rules, i, e, &new, ctx)?;
         }
     }
-    check_partition(rules, &new, ctx)?;
+    // (Not a foreign partition's row: the remote server has the say, ExecForeignUpdate.)
+    if t.foreign.is_none() {
+        check_partition(rules, &new, ctx)?;
+    }
     check_row_rls(rules, rls, &new, ctx)?;
     if t.foreign.is_some() && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t) {
         return crate::ext::postgres_fdw::modify::update(t, dkey, old, new, ctx);
@@ -3024,7 +3028,10 @@ fn prepare_insert(
         }
     }
     check_row_rls(rules, rls, &row, ctx)?;
-    check_partition(rules, &row, ctx)?;
+    // (ExecInsert checks a foreign partition's row by its server only.)
+    if t.foreign.is_none() {
+        check_partition(rules, &row, ctx)?;
+    }
     let rowid = if t.has_rowid() {
         Some(
             ctx.sess
@@ -3074,12 +3081,19 @@ pub fn insert_prepared(
         crate::ext::postgres_fdw::modify::check_routed_capture()?;
         // (A row routed here from a partitioned table: what this leaf's AFTER ROW triggers
         // and the views' check options read comes back.)
-        let _back = (!crate::ext::postgres_fdw::modify::has_back()).then(|| {
+        use crate::ext::postgres_fdw::modify;
+        modify::check_update_target(t)?;
+        let _back = (!modify::has_back()).then(|| {
             let exprs: Vec<&Expr> = rules.view_checks.iter().map(|(_, e)| e).collect();
-            let tg = crate::ext::postgres_fdw::modify::tgtypes(&rules.triggers);
-            crate::ext::postgres_fdw::modify::with_back(crate::ext::postgres_fdw::modify::Back::of(t, &tg, tt::INSERT, &exprs, None))
+            let tg = modify::tgtypes(&rules.triggers);
+            modify::with_back(modify::with_routed(t, modify::Back::of(t, &tg, tt::INSERT, &exprs, None)))
         });
-        let row = crate::ext::postgres_fdw::modify::insert(t, p.row, ctx)?;
+        // (ON CONFLICT DO NOTHING goes to the server; other ON CONFLICT specifications
+        // found no arbiter index while planning.)
+        let do_nothing = on_conflict.is_some_and(|c| matches!(c.action, crate::sql::plan::ConflictAction::Nothing));
+        let Some(row) = modify::insert(t, p.row, do_nothing, ctx)? else {
+            return Ok(Inserted::Skipped);
+        };
         if trigger::wants_after(&rules.triggers, tt::INSERT, ctx) {
             after.push(AfterRow {
                 event: tt::INSERT,
@@ -3556,6 +3570,14 @@ impl InsertNode {
         if let Some(routing) = self.plan.route.clone() {
             // (A foreign partition can't give its rows to the transition tables.)
             let _capture = crate::ext::postgres_fdw::modify::routed_capture(trigger::has_transition(&self.plan.rules.triggers, tt::INSERT));
+            // (What foreign partitions return for the RETURNING list and the check options.)
+            let _routed_back = if self.plan.returning.is_empty() && rules.view_checks.is_empty() {
+                None
+            } else {
+                let exprs: Vec<&Expr> = self.plan.returning.iter().chain(rules.view_checks.iter().map(|(_, e)| e)).collect();
+                let b = crate::ext::postgres_fdw::modify::Back::of(&rules.table, &[], tt::INSERT, &exprs, None);
+                crate::ext::postgres_fdw::modify::routed_back(&rules.table, b)
+            };
             let r = match resume {
                 Some((Some(leaf), p)) => resume_routed(
                     &routing,
@@ -3928,8 +3950,16 @@ impl Node for InsertNode {
             };
             let Some(src) = next else {
                 self.done = true;
-                // (ExecPendingInserts: a batch of remote INSERTs not full yet.)
-                crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
+                // (ExecPendingInserts: a batch of remote INSERTs not full yet. COPY's
+                // CopyMultiInsertBufferFlush names only the relation: relname_only.)
+                crate::ext::postgres_fdw::modify::flush_pending(ctx).map_err(|e| match &self.plan.copy {
+                    Some(c) => {
+                        let line = format!("COPY {}", c.table);
+                        let ctx_lines = e.context.as_deref().map_or(line.clone(), |x| format!("{x}\n{line}"));
+                        e.context(ctx_lines)
+                    }
+                    None => e,
+                })?;
                 if let Some(l) = self.copy_load.take() {
                     l.finish(ctx);
                 }
@@ -4642,8 +4672,11 @@ impl Node for UpdateNode {
             if keys.iter().any(|&i| old.get(i) != new.get(i)) {
                 lock_row_mode(&t, &dkey, RowLockMode::Update, Wait::Block, Xltw::Update, ctx)?;
             }
-            // A row leaving its partition moves through the partitioned table updated.
-            if let Some(routing) = &self.plan.route {
+            // A row leaving its partition moves through the partitioned table updated. (Not
+            // a foreign partition's: the remote server updates it in place, ExecForeignUpdate.)
+            if let Some(routing) = &self.plan.route
+                && t.foreign.is_none()
+            {
                 for (i, g) in rules.generated.iter().enumerate() {
                     if let Some(e) = g {
                         new[i] = eval(e, &new, ctx)?;
@@ -4651,6 +4684,19 @@ impl Node for UpdateNode {
                 }
                 if !partition_ok(rules, &new, ctx)? {
                     let mut routed = Vec::new();
+                    // (postgresBeginForeignInsert: not into a foreign partition this UPDATE
+                    // changes too.)
+                    let targets = self.plan.members.iter().filter(|m| m.rules.table.foreign.is_some()).map(|m| m.rules.table.oid).collect();
+                    let _targets = crate::ext::postgres_fdw::modify::update_targets(targets);
+                    // (A foreign partition's statement returns what RETURNING reads.)
+                    let _routed_back = if self.plan.returning.is_empty() {
+                        None
+                    } else {
+                        let named = &self.plan.rules.table;
+                        let exprs: Vec<&Expr> = self.plan.returning.iter().collect();
+                        let b = crate::ext::postgres_fdw::modify::Back::of(named, &[], tt::UPDATE, &exprs, None);
+                        crate::ext::postgres_fdw::modify::routed_back(named, b)
+                    };
                     let moved = move_row(rules, routing, &dkey, &old, new, &mut routed, ctx);
                     if self.plan.inh {
                         self.ordered

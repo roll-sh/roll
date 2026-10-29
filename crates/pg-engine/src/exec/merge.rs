@@ -48,6 +48,19 @@ impl MergeNode {
             let tables = std::iter::once(&plan.rules.table)
                 .chain(plan.members.iter().map(|m| &m.rules.table));
             for t in tables {
+                // (A foreign table among them: no MERGE, whatever the wrapper. Not when a
+                // constant false join condition leaves only the dummy root result relation.)
+                let excluded = matches!(
+                    &plan.join_cond,
+                    Some(crate::sql::expr::Expr::Const(crate::types::Value::Bool(false) | crate::types::Value::Null, _))
+                );
+                if t.foreign.is_some() && !excluded {
+                    return Err(crate::error::Error::new(
+                        crate::error::code::FEATURE_NOT_SUPPORTED,
+                        format!("cannot execute MERGE on relation \"{}\"", t.name),
+                    )
+                    .detail("This operation is not supported for foreign tables."));
+                }
                 for a in &plan.actions {
                     let cmd = match a.cmd {
                         crate::sql::plan::MergeCmd::Update { .. } => RiCmd::Update,
