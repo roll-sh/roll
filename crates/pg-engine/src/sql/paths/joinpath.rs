@@ -9654,22 +9654,25 @@ impl Planner<'_, '_> {
         // plainly, as cheaper on its own, is planned again partitionwise (the forcing
         // `pw_agg_join` gives), and the group with it, which may then be joined partition by
         // partition (partition_join 553).
-        // (Once only: under the forcing already, the same group planned again gives the same
-        // plain plan, over and over, a clone escaping the `lifting` guard each time.)
+        // (Bounded: inside a retry a nested level's grouping resets the forcing, and the same
+        // group was retried on a clone the `lifting` guard misses, until the stack ran out.)
         if pw_none
-            && !self.pw_agg_join.get()
+            && self.pw_retry.get() < 4
             && let Some((need_in, extra_in)) = as_given
             && s.leaves.iter().any(|l| join_item(&l.plan))
             && s.leaves.iter().enumerate().all(|(i, l)| join_item(&l.plan) || s.parted(i).is_some())
         {
             let mut q = p.clone();
             let saved_agg = self.pw_agg_join.replace(true);
+            let saved_retry = self.pw_retry.get();
+            self.pw_retry.set(saved_retry + 1);
             let saved_nested = self.join_nested.replace(false);
             self.absorbed.replace(extra_in);
             let r = self.plan_joins_with(&mut q, &need_in, order, sort_exprs);
             self.absorbed.take();
             self.join_nested.set(saved_nested);
             self.pw_agg_join.set(saved_agg);
+            self.pw_retry.set(saved_retry);
             let mut top = &q;
             while let Plan::Project { input, .. } | Plan::Sort { input, .. } | Plan::Filter { input, .. } = top {
                 top = input;

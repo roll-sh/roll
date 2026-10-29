@@ -401,8 +401,9 @@ Batch 2 (`a84_fresh_r4b`), from the round 4 grammar's seeds 4000–4099 (the fir
   an inheritance parent (a view joining it to `unnest ... WITH ORDINALITY`, FULL JOIN, a
   grouped CTE over the same view) was retried partitionwise (`joinpath.rs`, the forcing
   `pw_agg_join`), gave the same plain plan, and was retried again on a clone the `lifting`
-  guard didn't recognise, until the stack overflowed and aborted the process. The retry now
-  happens once. `DIFFTEST_ECHO=1` writes each statement about to run as a case file
+  guard didn't recognise (a nested level's grouping had reset the forcing), until the stack
+  overflowed and aborted the process. Retries now nest at most four deep
+  (`Planner::pw_retry`). `DIFFTEST_ECHO=1` writes each statement about to run as a case file
   (`current-s<seed>.sql`), which is how a crash that takes the process down is caught.
 
 Cost: none of this runs per row except the record comparisons' collation check (only for two

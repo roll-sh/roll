@@ -1960,6 +1960,8 @@ struct Planner<'c, 'a> {
     group_dirs: std::cell::RefCell<Option<GroupDirs>>,
     /// Planning a join group under a grouping that may go partitionwise.
     pw_agg_join: std::cell::Cell<bool>,
+    /// How many join groups' partitionwise retries (`joinpath.rs`) enclose the planning: bounded.
+    pw_retry: std::cell::Cell<u8>,
     /// Planning a join group's alternative with some of its items joined partitionwise
     /// first (`joinpath::partitionwise`'s `pw_subset`): no nested alternatives.
     pw_alt: std::cell::Cell<bool>,
@@ -2017,6 +2019,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             post_cost: Default::default(),
             group_dirs: Default::default(),
             pw_agg_join: Default::default(),
+            pw_retry: Default::default(),
             pw_alt: Default::default(),
             join_nested: Default::default(),
             merge_target: Default::default(),
