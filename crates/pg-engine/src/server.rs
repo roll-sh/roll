@@ -224,6 +224,9 @@ struct Conn {
     at_ready: bool,
     /// Errors and warnings sent, for the server log (kept only while it's written).
     sent: Vec<Error>,
+    /// What the server log reads of the connection, and when it started (MyStartTime).
+    log: crate::log::Conn,
+    started: i64,
     /// A walsender connection (`replication=...` in the startup packet).
     repl: Option<crate::repl::walsender::Mode>,
     /// The snapshot its last CREATE_REPLICATION_SLOT exported.
@@ -398,12 +401,14 @@ impl Conn {
     /// The errors and warnings sent since the last call go to the server log (the session's,
     /// or before there is one, the connection's backend), with `statement`.
     fn log_sent(&mut self, s: Option<&Session>, pid: i32, statement: Option<&str>) {
-        for e in std::mem::take(&mut self.sent) {
+        let mut sent = LIVE_SENT.with(|l| std::mem::take(&mut *l.borrow_mut()));
+        sent.append(&mut self.sent);
+        for e in sent {
             match s {
                 Some(s) => s.log_error(&e, statement),
                 None => {
                     let f = crate::log::Format::postmaster();
-                    let who = crate::log::Who { pid, session: None, backend_type: "client backend" };
+                    let who = crate::log::Who::backend(pid, self.started, &self.log);
                     crate::log::write(&f, &who, &crate::log::Message::error(&e, None));
                 }
             }
@@ -433,6 +438,8 @@ impl Conn {
 thread_local! {
     /// Messages buffered for the client while a statement runs (`Conn::unflushed`).
     static UNFLUSHED: std::cell::RefCell<BytesMut> = std::cell::RefCell::new(BytesMut::new());
+    /// Warnings sent as a statement ran (the live notice sink), for the server log.
+    static LIVE_SENT: std::cell::RefCell<Vec<Error>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The session's client_encoding and its database's encoding (sessions run on threads
     /// of their own): text goes out in the first and query text comes in in it.
     static CLIENT_ENC: std::cell::Cell<(i32, i32)> =
@@ -650,12 +657,19 @@ fn handle(
         repl: None,
         exported: None,
         errors: 0,
+        log: crate::log::Conn::new(peer, stream.local_addr().ok()),
+        started: crate::types::datetime::Clock::system().now,
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
     let mut live = stream.try_clone()?;
     crate::exec::set_notice_sink(Some(Box::new(move |ns: &[Error]| {
         let mut b = UNFLUSHED.with(|u| std::mem::take(&mut *u.borrow_mut()));
+        if crate::log::active() {
+            LIVE_SENT.with(|l| {
+                l.borrow_mut().extend(ns.iter().filter(|e| e.severity == crate::error::Severity::Warning).cloned())
+            });
+        }
         for e in ns {
             b.put_u8(b'N');
             let at = b.len();
@@ -747,12 +761,9 @@ fn handle(
     c.terminated = Some(terminated.clone());
     if conn_logging(&lc, "receipt") && crate::log::active() {
         let (host, port) = peer.map_or(("[local]".to_string(), String::new()), |p| (p.ip().to_canonical().to_string(), p.port().to_string()));
-        let who = crate::log::Who { pid, session: None, backend_type: "client backend" };
+        let who = crate::log::Who::backend(pid, c.started, &c.log);
         let files = engine.server_conf().loaded();
-        let mut f = crate::log::Format::postmaster();
-        if let Some(v) = files.values.get("log_line_prefix") {
-            f.prefix = v.value.clone();
-        }
+        let f = crate::log::Format::from_files(Some(&files));
         crate::log::write(&f, &who, &crate::log::Message::log(&format!("connection received: host={host} port={port}")));
     }
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
@@ -857,10 +868,14 @@ fn handle(
         }
     }
     s.state.peer.set(peer);
+    s.state.local_addr.set(c.wr.local_addr().ok());
+    *s.state.log_conn.borrow_mut() = c.log.clone();
     s.preload_libraries();
     if conn_logging(&s.state.settings.borrow().get_raw("log_connections").unwrap_or_default(), "authorization") {
         let app = s.state.settings.borrow().show_value("application_name");
         let line = format!("connection authorized: user={user} database={database} application_name={app}");
+        // (PerformAuthentication logs it before the startup packet's settings apply.)
+        *s.log_tag.borrow_mut() = "authentication".into();
         s.log_message(&line, None);
         s.notices.clear();
     }
@@ -908,6 +923,8 @@ fn handle(
     let r = message_loop(&mut c, &engine, &mut s, pid, &terminated);
     c.log_sent(Some(&s), pid, None);
     if s.state.settings.borrow().bool("log_disconnections") {
+        // (The backend has left the proc array: no virtual transaction id.)
+        s.log_exiting.set(true);
         let t = started.elapsed();
         let (h, m, sec, ms) = (t.as_secs() / 3600, t.as_secs() / 60 % 60, t.as_secs() % 60, t.subsec_millis());
         let (host, port) = peer.map_or(("[local]".to_string(), String::new()), |p| (p.ip().to_canonical().to_string(), p.port().to_string()));
@@ -1514,6 +1531,7 @@ fn guard<T>(
 /// ReadyForQuery, preceded by notifications received meanwhile (outside a transaction block);
 /// then the session waits, and notifications go straight to the client.
 fn ready_for_query(c: &mut Conn, s: &Session) -> std::io::Result<()> {
+    s.set_ps_idle();
     if s.status() == TxnStatus::Idle {
         for n in s.take_notifications() {
             notification(&mut c.out, &n);
@@ -1779,6 +1797,7 @@ fn simple_batch(
         // (What came before, the scanner's warnings say, goes before what the statement
         // raises as it runs.)
         send_notices(c, s);
+        s.set_ps(p);
         let mut out = streamed(c, s, &[], true, |s| s.execute(p));
         // Like Postgres, an implicit transaction commits before the last command tag goes out,
         // so deferred constraint failures replace it.
@@ -2026,6 +2045,7 @@ fn execute_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     send_notices(c, s);
     // exec_execute_message's log_statement and duration lines.
     let start = std::time::Instant::now();
+    s.set_ps_portal(&portal);
     let info = if s.state.settings.borrow().logs_statements() { s.portal_log(&portal) } else { None };
     let logged = info.as_ref().is_some_and(|(_, _, p)| s.statement_logged(std::slice::from_ref(p)));
     if let Some((what, detail, _)) = info.as_ref().filter(|_| logged) {

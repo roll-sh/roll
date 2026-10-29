@@ -3715,3 +3715,25 @@ fn big_bytea_values_go_out_in_linear_time() {
     });
     s.engine.shutdown();
 }
+
+/// port and listen_addresses are where the server listens (as `postgres -h -p` sets them), and
+/// inet_server_* / inet_client_* are the connection's two ends (round 21, agent 97).
+#[test]
+fn listen_settings_and_connection_addresses() {
+    let s = server(AuthMethod::ScramSha256);
+    let port = s.addr.rsplit_once(':').unwrap().1.to_string();
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        let q = "SELECT name, setting, source FROM pg_settings WHERE name IN ('port', 'listen_addresses') ORDER BY 1";
+        assert_eq!(
+            lines(&c, q).await.unwrap(),
+            ["listen_addresses|127.0.0.1|command line".to_string(), format!("port|{port}|command line")]
+        );
+        assert_eq!(lines(&c, "SHOW port").await.unwrap(), std::slice::from_ref(&port));
+        let q = "SELECT inet_server_addr(), inet_server_port(), inet_client_addr(), inet_client_port() > 0";
+        assert_eq!(lines(&c, q).await.unwrap(), [format!("127.0.0.1|{port}|127.0.0.1|t")]);
+        let q = "SELECT inet_client_port() = client_port FROM pg_stat_activity WHERE pid = pg_backend_pid()";
+        assert_eq!(lines(&c, q).await.unwrap(), ["t"]);
+    });
+    s.engine.shutdown();
+}

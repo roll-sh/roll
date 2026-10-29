@@ -26,6 +26,10 @@ pub struct Perms {
     pub rels: Vec<RelPerm>,
     /// User functions called (EXECUTE).
     pub funcs: Vec<u32>,
+    /// Where each call being bound began noting `funcs`: EXECUTE is checked in the plan's
+    /// expression order, a call before its arguments (ExecInitFunc), so a call's own
+    /// function goes in ahead of what its arguments noted.
+    pub call_marks: Vec<usize>,
     /// While binding a table's rules: the functions its generated columns call.
     pub gen_funcs: Vec<u32>,
     /// The relations the statement locks before it runs, in order, with their modes
@@ -231,9 +235,25 @@ impl Binder<'_, '_> {
         }
     }
 
+    /// `note_builtin_call` for the call being bound (ahead of its arguments' functions).
+    pub(crate) fn note_builtin_call_first(&mut self, oid: u32) {
+        if acl::builtin_proc_acl(oid).is_some() || self.cat.acl(ObjKind::Function, oid, 0).is_some()
+        {
+            self.require_call(oid);
+        }
+    }
+
     pub(crate) fn require_function(&mut self, oid: u32) {
         if !self.perms.funcs.contains(&oid) {
             self.perms.funcs.push(oid);
+        }
+    }
+
+    /// `require_function` for the call being bound.
+    pub(crate) fn require_call(&mut self, oid: u32) {
+        if !self.perms.funcs.contains(&oid) {
+            let at = self.perms.call_marks.last().copied().unwrap_or(usize::MAX).min(self.perms.funcs.len());
+            self.perms.funcs.insert(at, oid);
         }
     }
 

@@ -479,7 +479,14 @@ impl ServerConfig {
     /// Client authentication from the operator's files (before the server takes
     /// connections). Errors in pg_hba.conf at the start leave every connection refused, as
     /// PostgreSQL refuses to start.
-    pub fn set_auth_files(&mut self, auth: AuthFiles) {
+    pub fn set_auth_files(&mut self, mut auth: AuthFiles) {
+        // Absolute, as SelectConfigFiles makes hba_file and ident_file (and so a reload reads
+        // the same files whatever the working directory).
+        for p in [&mut auth.hba_file, &mut auth.ident_file].into_iter().flatten() {
+            if let Ok(a) = std::path::absolute(&*p) {
+                *p = a;
+            }
+        }
         let hba = auth.hba_text().map(|t| crate::hba::Hba::parse(&t));
         if let Some(h) = hba.as_ref().filter(|h| h.has_errors()) {
             for l in h.lines.iter().filter(|l| l.error.is_some()) {
@@ -490,6 +497,11 @@ impl ServerConfig {
             if h.has_errors() { Arc::new(crate::hba::Hba::default()) } else { Arc::new(h) }
         });
         self.auth = auth;
+    }
+
+    /// The operator's authentication files, as hba_file / ident_file report them.
+    pub fn auth_files(&self) -> &AuthFiles {
+        &self.auth
     }
 
     /// pg_hba.conf's rules in effect (None: none configured, the server's one rule applies).

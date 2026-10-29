@@ -397,8 +397,10 @@ pub struct SessionState {
     pub remote: RefCell<crate::remote::SessionConns>,
     /// The client's address (None: an embedded session).
     pub peer: Cell<Option<std::net::SocketAddr>>,
-    /// The server log lines this session wrote (log_line_prefix's %l).
-    pub log_line: Cell<u64>,
+    /// The server's end of the connection (inet_server_addr / _port).
+    pub local_addr: Cell<Option<std::net::SocketAddr>>,
+    /// What the server log reads of the connection (addresses, line counters).
+    pub log_conn: RefCell<crate::log::Conn>,
 }
 
 /// While alive, notices are collected instead of streamed (`SessionState::hold_notices`).
@@ -442,9 +444,25 @@ impl SessionState {
         let mut settings = Settings::new();
         if let Some(conf) = cluster.server_config() {
             settings.adopt_file_layer(conf.loaded());
+            // The operator's files, absolute, as SelectConfigFiles sets them (PGC_S_OVERRIDE).
+            let files = conf.auth_files();
+            for (name, path) in [("hba_file", &files.hba_file), ("ident_file", &files.ident_file)] {
+                if let Some(p) = path {
+                    settings.set_server_start(name, &p.to_string_lossy());
+                }
+            }
         }
-        for (name, value) in cluster.command_line() {
-            settings.set_command_line(&name, &value);
+        let argv = cluster.command_line();
+        for (name, value) in &argv {
+            settings.set_command_line(name, value);
+        }
+        // Where the server listens (`roll-engine --listen`, as `postgres -h -p`): port, and
+        // listen_addresses unless the command line names the host as given.
+        if let Some(a) = cluster.listen_addr() {
+            settings.set_command_line("port", &a.port().to_string());
+            if !argv.iter().any(|(n, _)| n == "listen_addresses") {
+                settings.set_command_line("listen_addresses", &a.ip().to_string());
+            }
         }
         // The server's max_prepared_transactions (a postmaster setting; an embedder's).
         let max_prepared = db.twophase().max();
@@ -526,7 +544,8 @@ impl SessionState {
             notice_hold: Cell::new(0),
             remote: RefCell::new(Default::default()),
             peer: Cell::new(None),
-            log_line: Cell::new(0),
+            local_addr: Cell::new(None),
+            log_conn: RefCell::default(),
         }
     }
 
@@ -679,6 +698,29 @@ impl SessionState {
             .database_owner(&self.database)
             .and_then(|n| cat.role_by_name(&n).map(|r| r.oid))
             .unwrap_or(crate::catalog::BOOTSTRAP_SUPERUSER_OID)
+    }
+
+    /// Whether the current user has the privileges of pg_read_all_settings (superusers do):
+    /// what GUC_SUPERUSER_ONLY parameters and pg_settings' sourcefile need.
+    pub fn reads_all_settings(&self) -> bool {
+        if self.settings.borrow().get_str("is_superuser") == Some("on") {
+            return true;
+        }
+        let cat = self.db.catalog();
+        cat.has_privs_of_role(self.current_role(&cat), crate::catalog::ROLE_PG_READ_ALL_SETTINGS, self.db_owner(&cat))
+    }
+
+    /// GetConfigOptionByName's check: a GUC_SUPERUSER_ONLY parameter (file locations,
+    /// libraries, SSL settings) is examined only with pg_read_all_settings' privileges.
+    pub fn check_examine(&self, name: &str) -> crate::error::Result<()> {
+        match super::settings::superuser_only(name) {
+            Some(canon) if !self.reads_all_settings() => Err(crate::error::Error::new(
+                crate::error::code::INSUFFICIENT_PRIVILEGE,
+                format!("permission denied to examine \"{canon}\""),
+            )
+            .detail("Only roles with privileges of the \"pg_read_all_settings\" role may examine this parameter.")),
+            _ => Ok(()),
+        }
     }
 
     /// The current database's pg_database oid.

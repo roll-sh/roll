@@ -5031,6 +5031,10 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
             let see_files = settings.get_str("is_superuser") == Some("on")
                 || cat.has_privs_of_role(ctx.current_user(), crate::catalog::ROLE_PG_READ_ALL_SETTINGS, ctx.db_owner());
             for r in settings.all() {
+                // (GUC_SUPERUSER_ONLY parameters are left out without those privileges.)
+                if !see_files && crate::session::settings::superuser_only(&r.name).is_some() {
+                    continue;
+                }
                 let file = r.sourcefile.filter(|_| see_files);
                 out.push(vec![
                     nm(&r.name),

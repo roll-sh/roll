@@ -19,24 +19,27 @@ enum LogStmt {
 }
 
 impl Session {
-    /// log_line_prefix's view of this session.
+    /// log_line_prefix's (and csvlog's / jsonlog's) view of this session.
     pub fn log_who(&self) -> Who {
         let st = self.state.settings.borrow();
-        let line = self.state.log_line.get() + 1;
-        self.state.log_line.set(line);
+        let conn = self.state.log_conn.borrow();
         let xid = self.txn.as_ref().and_then(|t| t.borrow().xid_if_assigned()).unwrap_or(0);
+        // (pg_locks' virtual transaction ids; a local id of 0 between transactions.)
+        let lxid = self.txn.as_ref().map_or(0, |t| t.borrow().id as u32);
         Who {
             pid: self.state.pid,
             backend_type: "client backend",
+            start: self.state.backend_start,
+            remote: conn.remote.clone(),
+            local: conn.local.clone(),
+            lines: conn.lines.clone(),
             session: Some(SessionWho {
                 user: st.session_authorization().to_string(),
                 database: self.state.database.clone(),
-                application_name: st.show_value("application_name"),
-                remote: self.state.peer.get().map(|p| (p.ip().to_canonical().to_string(), p.port())),
-                start: self.state.backend_start,
-                line,
-                command_tag: self.log_tag.clone(),
-                vxid: String::new(),
+                // (Not applied yet while authenticating.)
+                application_name: if *self.log_tag.borrow() == "authentication" { String::new() } else { st.show_value("application_name") },
+                command_tag: self.log_tag.borrow().clone(),
+                vxid: if self.log_exiting.get() { String::new() } else { format!("3/{lxid}") },
                 xid,
                 query_id: 0,
             }),
@@ -45,6 +48,35 @@ impl Session {
 
     pub fn log_format(&self) -> Format {
         Format::from_settings(&self.state.settings.borrow())
+    }
+
+    /// The process title's activity (%i, csvlog's / jsonlog's "ps"): the statement's
+    /// command tag while it runs (only kept while the log is written).
+    pub fn set_ps(&self, p: &Prepared) {
+        if crate::log::active() {
+            *self.log_tag.borrow_mut() = p.stmt.as_ref().and_then(|n| inner(n)).map_or_else(|| "???".into(), ps_tag);
+        }
+    }
+
+    /// `set_ps` for the statement of portal `name` (an Execute message).
+    pub fn set_ps_portal(&self, name: &str) {
+        if crate::log::active()
+            && let Some(p) = self.portals.get(name)
+        {
+            self.set_ps(&p.stmt);
+        }
+    }
+
+    /// The title between statements (ReadyForQuery's).
+    pub fn set_ps_idle(&self) {
+        if crate::log::active() {
+            *self.log_tag.borrow_mut() = match self.status() {
+                super::TxnStatus::Idle => "idle",
+                super::TxnStatus::InBlock => "idle in transaction",
+                super::TxnStatus::Failed => "idle in transaction (aborted)",
+            }
+            .into();
+        }
     }
 
     /// A LOG-level message (statement / duration lines, auto_explain's plans): to the server
@@ -237,4 +269,54 @@ fn random_unit() -> f64 {
     let mut b = [0u8; 8];
     let _ = getrandom::fill(&mut b);
     (u64::from_le_bytes(b) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// CreateCommandTag's tag of `n`, as the process title shows it while the statement runs.
+fn ps_tag(n: &NodeEnum) -> String {
+    use NodeEnum as N;
+    use pg_query::protobuf::TransactionStmtKind as K;
+    let t = match n {
+        N::SelectStmt(_) => "SELECT",
+        N::InsertStmt(_) => "INSERT",
+        N::UpdateStmt(_) => "UPDATE",
+        N::DeleteStmt(_) => "DELETE",
+        N::MergeStmt(_) => "MERGE",
+        N::DoStmt(_) => "DO",
+        N::CallStmt(_) => "CALL",
+        N::ExplainStmt(_) => "EXPLAIN",
+        N::CopyStmt(_) => "COPY",
+        N::VariableSetStmt(s) if s.kind == pg_query::protobuf::VariableSetKind::VarReset as i32 => "RESET",
+        N::VariableSetStmt(_) => "SET",
+        N::VariableShowStmt(_) => "SHOW",
+        N::PrepareStmt(_) => "PREPARE",
+        N::ExecuteStmt(_) => "EXECUTE",
+        N::DeallocateStmt(_) => "DEALLOCATE",
+        N::DeclareCursorStmt(_) => "DECLARE CURSOR",
+        N::FetchStmt(f) if f.ismove => "MOVE",
+        N::FetchStmt(_) => "FETCH",
+        N::ClosePortalStmt(_) => "CLOSE CURSOR",
+        N::LockStmt(_) => "LOCK TABLE",
+        N::TruncateStmt(_) => "TRUNCATE TABLE",
+        N::VacuumStmt(v) if !v.is_vacuumcmd => "ANALYZE",
+        N::VacuumStmt(_) => "VACUUM",
+        N::CheckPointStmt(_) => "CHECKPOINT",
+        N::ListenStmt(_) => "LISTEN",
+        N::UnlistenStmt(_) => "UNLISTEN",
+        N::NotifyStmt(_) => "NOTIFY",
+        N::LoadStmt(_) => "LOAD",
+        N::DiscardStmt(_) => "DISCARD ALL",
+        N::TransactionStmt(s) => match K::try_from(s.kind).unwrap_or(K::TransStmtBegin) {
+            K::TransStmtBegin | K::TransStmtStart => "BEGIN",
+            K::TransStmtCommit => "COMMIT",
+            K::TransStmtRollback | K::TransStmtRollbackTo => "ROLLBACK",
+            K::TransStmtSavepoint => "SAVEPOINT",
+            K::TransStmtRelease => "RELEASE",
+            K::TransStmtPrepare => "PREPARE TRANSACTION",
+            K::TransStmtCommitPrepared => "COMMIT PREPARED",
+            K::TransStmtRollbackPrepared => "ROLLBACK PREPARED",
+            _ => "???",
+        },
+        n => return crate::session::ddl::event_trigger::event_tag(n).unwrap_or_else(|| "???".into()),
+    };
+    t.into()
 }

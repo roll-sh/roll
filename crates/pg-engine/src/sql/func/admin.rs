@@ -42,11 +42,16 @@ fn pg_reload_conf(_: &[Value], c: &FnCtx) -> Result<Value> {
         for m in logs {
             crate::log::postmaster(Some(&files), crate::error::Severity::Log, &m);
         }
+        crate::log::collector::reload(&c.exec.sess.cluster.command_line(), &files);
     }
     Ok(Value::Bool(true))
 }
 
+/// pg_rotate_logfile: the collector opens new files (a warning without one).
 fn pg_rotate_logfile(_: &[Value], c: &FnCtx) -> Result<Value> {
+    if crate::log::collector::rotate() {
+        return Ok(Value::Bool(true));
+    }
     c.exec.notice(warning(
         code::WARNING,
         "rotation not possible because log collection not active",
@@ -54,17 +59,22 @@ fn pg_rotate_logfile(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Bool(false))
 }
 
+/// pg_current_logfile([format]): current_logfiles' entry (NULL without the collector).
 fn pg_current_logfile(a: &[Value], _: &FnCtx) -> Result<Value> {
-    if let Some(v) = a.first().filter(|v| !v.is_null())
-        && !matches!(text_arg(v), "stderr" | "csvlog" | "jsonlog")
-    {
-        return Err(Error::new(
-            code::INVALID_PARAMETER_VALUE,
-            format!("log format \"{}\" is not supported", text_arg(v)),
-        )
-        .hint("The supported log formats are \"stderr\", \"csvlog\", and \"jsonlog\"."));
-    }
-    Ok(Value::Null)
+    let kind = match a.first().filter(|v| !v.is_null()).map(text_arg) {
+        None => None,
+        Some("stderr") => Some(crate::log::Kind::Stderr),
+        Some("csvlog") => Some(crate::log::Kind::Csv),
+        Some("jsonlog") => Some(crate::log::Kind::Json),
+        Some(other) => {
+            return Err(Error::new(
+                code::INVALID_PARAMETER_VALUE,
+                format!("log format \"{other}\" is not supported"),
+            )
+            .hint("The supported log formats are \"stderr\", \"csvlog\", and \"jsonlog\"."));
+        }
+    };
+    Ok(crate::log::collector::current_file(kind).map_or(Value::Null, Value::text))
 }
 
 fn pg_log_backend_memory_contexts(a: &[Value], c: &FnCtx) -> Result<Value> {
@@ -383,13 +393,34 @@ fn ls_empty(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
     Ok(Box::new(std::iter::empty()))
 }
 
-/// pg_ls_logdir: the server log goes to stderr (logging_collector off), so there is no
-/// log directory, as in a fresh cluster.
-fn ls_logdir(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
-    Err(crate::error::Error::new(
-        crate::error::code::UNDEFINED_FILE,
-        "could not open directory \"log\": No such file or directory",
-    ))
+/// pg_ls_logdir: the logging collector's directory (pg_ls_dir_files: regular files, hidden
+/// ones left out); without the collector the server log goes to stderr and there is no log
+/// directory, as in a fresh cluster.
+fn ls_logdir(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let name = c.exec.sess.settings.borrow().get_str("log_directory").unwrap_or("log").to_string();
+    let open_error = || format!("could not open directory \"{name}\"");
+    let Some(dir) = crate::log::collector::log_dir() else {
+        return Err(crate::error::Error::new(
+            crate::error::code::UNDEFINED_FILE,
+            format!("{}: No such file or directory", open_error()),
+        ));
+    };
+    let entries = std::fs::read_dir(&dir).map_err(|e| crate::server_files::file_error(&e, &open_error()))?;
+    let mut rows = Vec::new();
+    for e in entries.flatten() {
+        let fname = e.file_name().to_string_lossy().into_owned();
+        let Ok(m) = e.metadata() else { continue };
+        if fname.starts_with('.') || !m.is_file() {
+            continue;
+        }
+        let modified = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_micros() as i64 - 946_684_800_000_000);
+        rows.push(Ok(vec![Value::text(fname), Value::Int8(m.len() as i64), Value::Timestamptz(modified)]));
+    }
+    Ok(Box::new(rows.into_iter()))
 }
 
 /// WAL geometry: the segment size (wal_segment_size) and the one timeline there is.

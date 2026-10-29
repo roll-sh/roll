@@ -174,6 +174,56 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     misc_functions, lock, advisory_lock, stats_import, prepared_xacts, tidscan, create_index,
     create_misc (no unit changed against the committed results.tsv), and the isolation suite
     (120 / 122 specs, 1,646 / 1,648 permutations, as before).
+- **Server administration and monitoring, round 2** (round 21, agent 97):
+  - Start-up settings: `port` and `listen_addresses` are the listener's (`roll-engine --listen`
+    as `postgres -h -p`: source "command line"; listen_addresses the host as written, port the
+    one bound; `server::serve` notes it, so embedders get it too; `-c port` / `-c
+    listen_addresses` are refused, --listen sets them). `--hba-file` / `--ident-file` are
+    hba_file / ident_file (absolute, source "override", pg_hba_file_rules' file_name).
+    data_directory and config_file stay the reference's paths (the engine's data directory
+    has its own layout; `--allow-server-files` stands for it). inet_client_addr / _port and
+    inet_server_addr / _port are the connection's ends (NULL embedded). A dblink / postgres_fdw
+    connection without host and port goes to the server's own port (libpq with PGPORT the
+    server's, as under pg_regress); an explicit other port finds no socket.
+  - GUC_SUPERUSER_ONLY (`settings::SUPERUSER_ONLY`, the 23 of guc_tables.c: file locations,
+    libraries, SSL, log_directory / log_filename): SHOW and current_setting (missing_ok too)
+    raise "permission denied to examine" without pg_read_all_settings' privileges, and
+    pg_settings / pg_show_all_settings / SHOW ALL leave them out. Function EXECUTE privileges
+    are checked in the plan's expression order, a call before its arguments (ExecInitFunc;
+    `Perms::call_marks`): `pg_stat_file(pg_current_logfile())` names pg_stat_file.
+  - Server log (`src/log.rs`, `src/log/formats.rs`, `src/log/collector.rs`): log_destination's
+    csvlog and jsonlog in write_csvlog's / write_jsonlog's field order and escaping (each with
+    its own per-process line counter, as stderr's %l, which now counts every line of a
+    message: DETAIL, HINT, STATEMENT); " at character N" and QUERY lines; %L (server address,
+    "[none]" outside backends), %a / %u / %d "[unknown]" before they are known, %q for
+    pre-session backend lines, %s / %c the process's start, %v / %x, %i and csv/json "ps"
+    (the process title: "idle", "idle in transaction", the running command's tag,
+    "authentication"); PL/pgSQL warnings sent while a statement runs are logged too. Without
+    the collector csvlog / jsonlog fall back to stderr's format, as PostgreSQL's do.
+    logging_collector (`collector::start`, started by `roll-engine` when the command line or
+    postgresql.auto.conf turns it on, after PostgreSQL's "redirecting log output" line): files
+    in log_directory (relative to the data directory) named by log_filename (pg_strftime in
+    log_timezone, .csv / .json), log_file_mode, log_rotation_age (aligned as
+    set_next_rotation_time), log_rotation_size, log_truncate_on_rotation, pg_rotate_logfile,
+    a reload's new directory / name / destinations (pg_reload_conf and SIGHUP:
+    `collector::reload`), current_logfiles in the data directory (removed at a start without
+    the collector), pg_current_logfile, pg_ls_logdir. Lines are formatted on the session's
+    thread and written by a background thread through a 64 kB buffer, flushed whenever its
+    queue (16k lines; a full queue blocks the writer, as a full syslogger pipe does) is
+    empty; `roll-engine`'s stderr goes the same way (`log::flush` at shutdown). Checked line by
+    line against a reference running with logging_collector and stderr,csvlog,jsonlog
+    (differences: only xids and PostgreSQL 18's "connection authenticated" / "connection
+    ready" lines, which the engine doesn't write). Tests: `tests/log_collector.rs`,
+    `tests/wire.rs` `listen_settings_and_connection_addresses`, golden `a97_settings_privs`.
+  - Monitoring tools: 166 queries of pgwatch (59, `_pg_truetypid`'s table_hashes included),
+    postgres_exporter (33), pgAdmin's dashboard (23), pg_activity (18) and pganalyze-collector
+    (33), run against the engine and a reference with pg_stat_statements on a populated
+    database, compared by errors, column names and types (`\gdesc`): no difference as a
+    superuser or as a pg_monitor member; as a plain role the 8 differences were the two
+    fixed above.
+  - Memory (release, 200 idle sessions, RSS): 37.4 MB at start and 117 kB per session for
+    both the base and this batch; with three hba rules, logging_collector and every
+    statement / connection logged in three formats, 129 kB per session.
 - **Server configuration, authentication rules and the server log** (round 20, agent 80):
   - `src/sysconf.rs`: postgresql.conf is the pinned image's (its 15 settings at their lines,
     the locale lines what initdb chose); postgresql.auto.conf is ALTER SYSTEM's, kept in the
@@ -228,15 +278,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     log_settings, log_format text or json (xml, yaml as EXPLAIN prints them),
     log_parameter_max_length, sample_rate, log_level. `tests/server_log.rs` follows
     contrib/auto_explain's TAP test. Not done: nested statements (log_nested_statements),
-    log_lock_waits / log_temp_files / log_checkpoints lines, logging_collector and
-    pg_current_logfile (always NULL), csvlog / jsonlog. pg_ls_logdir fails as a cluster without
-  a log directory does.
+    log_lock_waits / log_temp_files / log_checkpoints lines. (logging_collector,
+    pg_current_logfile, csvlog / jsonlog and pg_ls_logdir: round 21, agent 97, above.)
   - Verified: crate tests, clippy, the difftest smoke, pg_contrib auto_explain 12 / 12,
     passwordcheck 12 / 12, pg_stat_statements 1,013 / 1,013, a full regress run (debug,
     private reference) 51,148 / 51,150 with no unit changed against the committed
     results.tsv, and guc, sysviews, plpgsql, misc_functions, stats and rules after the last
-    changes (2,533 / 2,533). Not done: `port` / `listen_addresses` still report the image's
-    values, not `--listen`'s (goldens over the wire run on random ports).
+    changes (2,533 / 2,533). (`port` / `listen_addresses` report `--listen` since round 21.)
 - **Two-phase commit** (round 19, agent 71): PREPARE TRANSACTION, COMMIT / ROLLBACK
   PREPARED, pg_prepared_xacts (`txn/twophase.rs`, `session/prepared.rs`).
   max_prepared_transactions is a server option (`roll-engine --max-prepared-transactions N`,

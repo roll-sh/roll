@@ -175,6 +175,15 @@ tables keyed. Tests: `tests/pk_clustered.rs`, `tests/sql/pk_layout_default.sql`.
 Re-examined and emulated now (see below): `CONTEXT: parallel worker` and the worker counters
 under `debug_parallel_query`, a TOAST table read directly, MERGE into pg_class.
 
+## Round 21, agent 97 (server administration round 2: --listen's port, csvlog / jsonlog and the logging collector, GUC_SUPERUSER_ONLY)
+
+Server administration (HANDOFF "Server administration and monitoring, round 2"): port and
+listen_addresses from `--listen`, the connection's addresses, csvlog / jsonlog and the logging
+collector, examining GUC_SUPERUSER_ONLY parameters, EXECUTE checked a call before its
+arguments. No regression statement reads any of it: a full debug run of the change on a private
+reference (`a97-ref`) against the committed `results.tsv` measured **51148**, no unit changed;
+the generated blocks are left to the next full run.
+
 ## Round 20, agent 76 (catalog round 5: shared catalog row chunks, comments as records, group-committed DDL)
 
 Catalog speed only (BENCH.md "Catalog round 5"): system catalogs' shared rows in chunks reused

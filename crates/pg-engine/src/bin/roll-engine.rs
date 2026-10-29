@@ -169,11 +169,22 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let a = Args::parse();
+    // --listen is `postgres -h host -p port`: listen_addresses is the host as given (the port
+    // is the one bound, which sessions read from the listener).
+    if a.settings.iter().any(|(k, _)| k == "port" || k == "listen_addresses") {
+        anyhow::bail!("port and listen_addresses are set by --listen");
+    }
+    let mut settings = a.settings;
+    if let Some((host, _)) = a.listen.rsplit_once(':') {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        settings.push(("listen_addresses".into(), host.to_string()));
+    }
     let auth = a.auth.unwrap_or(if a.password.is_some() {
         AuthMethod::ScramSha256
     } else {
         AuthMethod::Trust
     });
+    let data_dir = a.data.clone();
     let engine = Engine::open(EngineOptions {
         data_dir: a.data,
         cache_bytes: a.cache_mb << 20,
@@ -187,7 +198,7 @@ fn main() -> anyhow::Result<()> {
         locale: a.initdb.options(),
         outbound: a.allow_outbound,
         max_prepared_transactions: a.max_prepared_transactions,
-        settings: a.settings,
+        settings,
         auth_files: pg_engine::sysconf::AuthFiles {
             hba_file: a.hba_file,
             hba_lines: a.hba_lines,
@@ -230,20 +241,38 @@ fn main() -> anyhow::Result<()> {
                             for m in logs {
                                 pg_engine::log::postmaster(Some(&files), pg_engine::error::Severity::Log, &m);
                             }
+                            pg_engine::log::collector::reload(engine.command_line_values(), &files);
                         }
                     }
                 }
             });
             tracing::info!("shutting down");
             engine.shutdown();
+            pg_engine::log::flush();
             std::process::exit(0);
         });
     }
     let listener = std::net::TcpListener::bind(&a.listen)?;
     tracing::info!(addr = %a.listen, ?auth, "listening");
-    // The server log (PostgreSQL's, logging_collector off): stderr.
+    // The server log (PostgreSQL's): stderr, or the logging collector's files.
     pg_engine::log::set_sink(Some(pg_engine::log::stderr_sink()));
     let files = engine.server_conf().loaded();
+    let argv = engine.command_line_values().to_vec();
+    pg_engine::log::set_command_line(&argv);
+    if pg_engine::log::collector::wanted_at_start(&argv, &files) {
+        let cfg = pg_engine::log::collector::Config::of_server(data_dir.clone(), &argv, &files);
+        let f = pg_engine::log::Format::from_files(Some(&files));
+        let hint = format!("Future log output will appear in directory \"{}\".", cfg.directory);
+        pg_engine::log::write(&f, &pg_engine::log::Who::postmaster(), &pg_engine::log::Message {
+            hint: Some(&hint),
+            ..pg_engine::log::Message::log("redirecting log output to logging collector process")
+        });
+        pg_engine::log::flush();
+        pg_engine::log::collector::start(cfg)?;
+    } else {
+        // (A previous run's collector's list of files is stale.)
+        let _ = std::fs::remove_file(data_dir.join("current_logfiles"));
+    }
     pg_engine::log::postmaster(
         Some(&files),
         pg_engine::error::Severity::Log,

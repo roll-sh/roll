@@ -90,6 +90,7 @@ fn current_schemas(a: &[Value], c: &FnCtx) -> Result<Value> {
 }
 fn current_setting(a: &[Value], c: &FnCtx) -> Result<Value> {
     let missing_ok = a.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+    c.exec.sess.check_examine(text_arg(&a[0]))?;
     match c.exec.sess.settings.borrow().show(text_arg(&a[0])) {
         Ok(v) => Ok(text(v)),
         Err(_) if missing_ok => Ok(Value::Null),
@@ -134,11 +135,26 @@ fn pg_settings_get_flags(a: &[Value], _: &FnCtx) -> Result<Value> {
 fn pg_backend_pid(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Int4(c.exec.sess.pid))
 }
-fn inet_server_addr(_: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::Null)
+/// inet_client_addr / _port, inet_server_addr / _port: the connection's ends (NULL for an
+/// embedded session, as for a Unix socket's).
+fn inet_of(a: Option<std::net::SocketAddr>) -> Value {
+    a.and_then(|a| crate::types::text::parse_inet(&a.ip().to_string(), false).ok())
+        .unwrap_or(Value::Null)
 }
-fn inet_server_port(_: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::Null)
+fn port_of(a: Option<std::net::SocketAddr>) -> Value {
+    a.map_or(Value::Null, |a| Value::Int4(i32::from(a.port())))
+}
+fn inet_client_addr(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(inet_of(c.exec.sess.peer.get()))
+}
+fn inet_client_port(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(port_of(c.exec.sess.peer.get()))
+}
+fn inet_server_addr(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(inet_of(c.exec.sess.local_addr.get()))
+}
+fn inet_server_port(_: &[Value], c: &FnCtx) -> Result<Value> {
+    Ok(port_of(c.exec.sess.local_addr.get()))
 }
 fn pg_postmaster_start_time(_: &[Value], c: &FnCtx) -> Result<Value> {
     Ok(Value::Timestamptz(c.exec.sess.cluster.start_time()))
@@ -4478,11 +4494,11 @@ pub fn register(r: &mut Registry) {
         .stable();
     r.func("inet_server_addr", vec![], Inet, inet_server_addr)
         .stable();
-    r.func("inet_client_addr", vec![], Inet, inet_server_addr)
+    r.func("inet_client_addr", vec![], Inet, inet_client_addr)
         .stable();
     r.func("inet_server_port", vec![], Int4, inet_server_port)
         .stable();
-    r.func("inet_client_port", vec![], Int4, inet_server_port)
+    r.func("inet_client_port", vec![], Int4, inet_client_port)
         .stable();
     r.func(
         "pg_postmaster_start_time",

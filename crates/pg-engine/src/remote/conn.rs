@@ -170,7 +170,12 @@ pub struct Conn {
 
 /// Connect as `info` says (PQconnectdb). The error is libpq's PQerrorMessage, chomped.
 pub fn connect(info: &ConnInfo, env: &Env) -> Result<Conn, String> {
-    let port_s = conninfo::effective(info, "port").unwrap_or_else(|| "5432".into());
+    // Without a host or port, libpq's default socket is the server's own one (as for a
+    // PostgreSQL server whose environment's PGPORT is the port it listens on).
+    let port_s = match info.nonempty("port") {
+        None if info.nonempty("host").is_none() && info.nonempty("hostaddr").is_none() => env.local_port.to_string(),
+        _ => conninfo::effective(info, "port").unwrap_or_else(|| "5432".into()),
+    };
     let hosts: Vec<String> = info
         .nonempty("host")
         .map_or_else(|| vec![String::new()], |h| h.split(',').map(str::to_string).collect());

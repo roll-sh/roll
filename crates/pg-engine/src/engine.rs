@@ -289,6 +289,11 @@ impl Engine {
         self.argv.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
 
+    /// Every parameter the server's command line set, in order.
+    pub fn command_line_values(&self) -> &[(String, String)] {
+        &self.argv
+    }
+
     pub fn note_listen_addr(&self, addr: std::net::SocketAddr) {
         let _ = self.listen.set(addr);
     }

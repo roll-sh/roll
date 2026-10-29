@@ -76,15 +76,17 @@ fn refused_by_default() {
 fn local_reaches_the_engine() {
     let data = tempfile::tempdir().unwrap();
     let engine = open(data.path(), &["local"]);
-    serve(&engine);
+    let port = serve(&engine);
     let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
     run(&mut s, "CREATE EXTENSION dblink");
     run(&mut s, "CREATE TABLE t (a int)");
     run(&mut s, "INSERT INTO t VALUES (1), (2)");
-    let rows = run(&mut s, "SELECT sum(a)::int FROM dblink('dbname=postgres port=5432', 'SELECT a FROM t') AS x(a int)");
+    // (The socket of the port the server listens on, which `port` reports.)
+    assert_eq!(run(&mut s, "SHOW port"), vec![format!("[Text({:?})]", port.to_string())]);
+    let rows = run(&mut s, &format!("SELECT sum(a)::int FROM dblink('dbname=postgres port={port}', 'SELECT a FROM t') AS x(a int)"));
     assert_eq!(rows, vec!["[Int4(3)]"]);
     // Another port is another socket: nothing there.
-    let e = err(&mut s, "SELECT dblink_connect('dbname=postgres port=5433')");
+    let e = err(&mut s, &format!("SELECT dblink_connect('dbname=postgres port={}')", port ^ 1));
     assert!(e.contains("No such file or directory"), "{e}");
     // A host stays refused.
     let e = err(&mut s, "SELECT dblink_connect('host=127.0.0.1 dbname=postgres')");

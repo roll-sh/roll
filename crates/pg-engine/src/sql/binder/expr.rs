@@ -4706,7 +4706,9 @@ impl Binder<'_, '_> {
 
     fn bind_func_call(&mut self, f: &pb::FuncCall) -> Result<Expr> {
         // (A function whose body calls it again recurses here, inlined.)
+        self.perms.call_marks.push(self.perms.funcs.len());
         let r = crate::stack::guard(|| self.bind_func_call_inner(f));
+        self.perms.call_marks.pop();
         // pg_typeof reports the type its argument is declared as, a domain too.
         let r = match r {
             Ok(Expr::Call(def, mut args, ty)) if def.oid == 1619 && args.len() == 1 => {
@@ -4957,7 +4959,7 @@ impl Binder<'_, '_> {
                     })?
             }
         };
-        self.note_builtin_call(def.oid);
+        self.note_builtin_call_first(def.oid);
         if def.is_srf() {
             self.check_srf_placement(f.location)?;
             let ncols = if def.out_cols.len() > 1 {
@@ -7521,7 +7523,7 @@ impl Binder<'_, '_> {
                 loc,
             ));
         }
-        self.require_function(fdef.oid);
+        self.require_call(fdef.oid);
         if fdef.language != "sql"
             && fdef.language != "plpgsql"
             && fdef.language != "internal"

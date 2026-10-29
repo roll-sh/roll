@@ -473,11 +473,16 @@ impl Session {
 
     pub(super) fn show_stmt(&mut self, name: &str) -> Result<QueryResult> {
         let cols = self.show_cols(name);
+        if name != "all" {
+            self.state.check_examine(name)?;
+        }
+        let all_visible = name == "all" && self.state.reads_all_settings();
         let st = self.state.settings.borrow();
         let rows = match name {
             "all" => st
                 .all()
                 .into_iter()
+                .filter(|r| all_visible || super::settings::superuser_only(&r.name).is_none())
                 .map(|r| {
                     let shown = if r.name == "session_authorization" {
                         self.state.user.clone()

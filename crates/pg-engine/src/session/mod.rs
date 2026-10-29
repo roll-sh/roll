@@ -248,7 +248,9 @@ impl PortalRun {
 pub struct Session {
     pub state: SessionState,
     /// The command running, as the server log's %i shows it.
-    pub log_tag: String,
+    pub log_tag: std::cell::RefCell<String>,
+    /// The backend is exiting (its log lines have no virtual transaction id).
+    pub log_exiting: std::cell::Cell<bool>,
     txn: Option<RefCell<Txn>>,
     status: TxnStatus,
     /// The open transaction was started implicitly (no BEGIN) and ends with the batch.
@@ -385,7 +387,8 @@ impl Session {
         state.db.sessions.fetch_add(1, Ordering::SeqCst);
         Session {
             state,
-            log_tag: String::new(),
+            log_tag: Default::default(),
+            log_exiting: std::cell::Cell::new(false),
             txn: None,
             status: TxnStatus::Idle,
             implicit: false,

@@ -1201,6 +1201,40 @@ pub fn flags(name: &str) -> Option<&'static [&'static str]> {
     find(name).map(|d| d.flags)
 }
 
+/// The GUC_SUPERUSER_ONLY parameters (guc_tables.c; pg_settings_get_flags doesn't show the
+/// flag): SHOW and current_setting need pg_read_all_settings' privileges, and pg_settings
+/// and SHOW ALL leave them out without.
+const SUPERUSER_ONLY: &[&str] = &[
+    "config_file",
+    "data_directory",
+    "dynamic_library_path",
+    "extension_control_path",
+    "external_pid_file",
+    "hba_file",
+    "ident_file",
+    "jit_provider",
+    "krb_server_keyfile",
+    "log_directory",
+    "log_filename",
+    "oauth_validator_libraries",
+    "primary_conninfo",
+    "session_preload_libraries",
+    "shared_preload_libraries",
+    "ssl_ciphers",
+    "ssl_dh_params_file",
+    "ssl_groups",
+    "ssl_max_protocol_version",
+    "ssl_min_protocol_version",
+    "ssl_passphrase_command",
+    "ssl_tls13_ciphers",
+    "unix_socket_directories",
+];
+
+/// The canonical name of `name` when it is a GUC_SUPERUSER_ONLY parameter.
+pub fn superuser_only(name: &str) -> Option<&'static str> {
+    find(name).map(|d| d.name).filter(|n| SUPERUSER_ONLY.contains(n))
+}
+
 /// The parameters ALTER SYSTEM refuses besides internal ones (GUC_DISALLOW_IN_FILE /
 /// GUC_DISALLOW_IN_AUTO_FILE).
 const DISALLOW_IN_AUTO_FILE: &[&str] = &[
@@ -1416,6 +1450,15 @@ impl Settings {
             if !self.argv.contains(&d.name) {
                 self.argv.push(d.name);
             }
+        }
+    }
+
+    /// A value the server sets as it starts, keeping the parameter's own source (hba_file's
+    /// "override": SelectConfigFiles' PGC_S_OVERRIDE).
+    pub fn set_server_start(&mut self, name: &str, value: &str) {
+        if let Some(d) = find(name) {
+            self.touched(d.name);
+            self.config.insert(d.name.to_string(), value.to_string());
         }
     }
 

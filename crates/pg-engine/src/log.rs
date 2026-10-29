@@ -5,39 +5,121 @@
 //! send_message_to_server_log lays it out, so log analysers (pgBadger and the like) read it.
 //!
 //! The engine is a library: nothing is written until the embedder sets a sink (`set_sink`;
-//! `roll-engine` writes to its stderr, as PostgreSQL's logging_collector = off does).
+//! `roll-engine` writes to its stderr, as PostgreSQL's logging_collector = off does) or starts
+//! the logging collector (`collector::start`: log_directory's files, csvlog and jsonlog,
+//! rotation). Lines are formatted on the writing thread and written by a background one, so
+//! a slow disk or terminal never holds up a query.
+
+pub mod collector;
+mod formats;
 
 use crate::error::{Error, Severity};
 use crate::types::datetime::{TimeZone, timestamp2tm};
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 
 static SINK: RwLock<Option<Sink>> = RwLock::new(None);
+/// A sink is set or the collector runs (one load per message to skip all of it).
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Where log lines go (None: nowhere). Each call gets one message's lines.
 pub fn set_sink(sink: Option<Sink>) {
     *SINK.write() = sink;
+    refresh_active();
 }
 
-/// The process's stderr.
+fn refresh_active() {
+    ACTIVE.store(SINK.read().is_some() || collector::running(), Ordering::Relaxed);
+}
+
+/// The process's stderr, written by a background thread (buffered, flushed whenever it has
+/// nothing more to write).
 pub fn stderr_sink() -> Sink {
-    Arc::new(|s: &str| {
-        use std::io::Write;
-        let _ = std::io::stderr().lock().write_all(s.as_bytes());
-    })
+    let w = collector::stderr_writer();
+    Arc::new(move |s: &str| w.send(s))
 }
 
 /// Whether anything is written at all (callers skip building messages otherwise).
 pub fn active() -> bool {
-    SINK.read().is_some()
+    ACTIVE.load(Ordering::Relaxed)
 }
 
-fn emit(s: &str) {
-    let sink = SINK.read().clone();
-    if let Some(f) = sink {
-        f(s);
+/// What a message is written as (log_destination's formats).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Stderr,
+    Csv,
+    Json,
+}
+
+fn emit(kind: Kind, s: String) {
+    if collector::running() {
+        collector::send(kind, s);
+        return;
+    }
+    if kind == Kind::Stderr {
+        let sink = SINK.read().clone();
+        if let Some(f) = sink {
+            f(&s);
+        }
+    }
+}
+
+/// Everything written so far is on its way out (tests, shutdown).
+pub fn flush() {
+    collector::flush();
+}
+
+/// log_destination: which formats each message is written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dest {
+    pub stderr: bool,
+    pub csv: bool,
+    pub json: bool,
+}
+
+impl Dest {
+    pub const STDERR: Dest = Dest { stderr: true, csv: false, json: false };
+
+    /// check_log_destination's list (syslog and eventlog write nothing here).
+    pub fn parse(v: &str) -> Dest {
+        let mut d = Dest { stderr: false, csv: false, json: false };
+        for w in v.split(',').map(|w| w.trim().to_ascii_lowercase()) {
+            match w.as_str() {
+                "stderr" => d.stderr = true,
+                "csvlog" => d.csv = true,
+                "jsonlog" => d.json = true,
+                _ => {}
+            }
+        }
+        d
+    }
+}
+
+/// A process's log line counters, one per format (log_status_format's %l, csvlog's and
+/// jsonlog's own).
+#[derive(Debug, Default)]
+pub struct Lines {
+    stderr: AtomicU64,
+    csv: AtomicU64,
+    json: AtomicU64,
+}
+
+impl Lines {
+    pub const fn new() -> Lines {
+        Lines { stderr: AtomicU64::new(0), csv: AtomicU64::new(0), json: AtomicU64::new(0) }
+    }
+
+    fn next(&self, kind: Kind) -> u64 {
+        let c = match kind {
+            Kind::Stderr => &self.stderr,
+            Kind::Csv => &self.csv,
+            Kind::Json => &self.json,
+        };
+        c.fetch_add(1, Ordering::Relaxed) + 1
     }
 }
 
@@ -84,13 +166,90 @@ pub fn level_output(sev: Severity, min: &str) -> bool {
     }
 }
 
-/// What log_line_prefix's escapes read of the process writing.
+/// What log_line_prefix's escapes (and csvlog's / jsonlog's fields) read of the process
+/// writing.
 #[derive(Clone, Debug, Default)]
 pub struct Who {
     pub pid: i32,
     /// A session's (None: the postmaster or another process without one).
     pub session: Option<SessionWho>,
     pub backend_type: &'static str,
+    /// When the process started (MyStartTime; microseconds since 2000-01-01).
+    pub start: i64,
+    /// A client backend's client address and port (None: no network client).
+    pub remote: Option<(String, u16)>,
+    /// A client backend's server address (%L; None: "[local]").
+    pub local: Option<String>,
+    pub lines: Arc<Lines>,
+}
+
+impl Who {
+    /// A client backend before its session exists (connection received, authentication).
+    pub fn backend(pid: i32, start: i64, conn: &Conn) -> Who {
+        Who {
+            pid,
+            session: None,
+            backend_type: "client backend",
+            start,
+            remote: conn.remote.clone(),
+            local: conn.local.clone(),
+            lines: conn.lines.clone(),
+        }
+    }
+
+    /// The postmaster's.
+    pub fn postmaster() -> Who {
+        static LINES: std::sync::OnceLock<Arc<Lines>> = std::sync::OnceLock::new();
+        Who { backend_type: "postmaster", ..Who::aux(std::process::id() as i32, "postmaster", &LINES) }
+    }
+
+    /// An auxiliary process of the server's (checkpointer, autovacuum worker, ...): the
+    /// engine's own threads, under the pid pg_stat_activity shows for them, with that
+    /// process's line counters.
+    pub fn aux(pid: i32, backend_type: &'static str, lines: &std::sync::OnceLock<Arc<Lines>>) -> Who {
+        Who {
+            pid,
+            session: None,
+            backend_type,
+            start: process_start(),
+            remote: None,
+            local: None,
+            lines: lines.get_or_init(Default::default).clone(),
+        }
+    }
+
+    fn is_client(&self) -> bool {
+        self.backend_type == "client backend"
+    }
+}
+
+/// What the log reads of a client connection (MyProcPort), kept for its whole life.
+#[derive(Clone, Debug, Default)]
+pub struct Conn {
+    pub remote: Option<(String, u16)>,
+    pub local: Option<String>,
+    pub lines: Arc<Lines>,
+}
+
+impl Conn {
+    pub fn new(peer: Option<std::net::SocketAddr>, local: Option<std::net::SocketAddr>) -> Conn {
+        Conn {
+            remote: peer.map(|p| (p.ip().to_canonical().to_string(), p.port())),
+            local: local.map(|l| l.ip().to_canonical().to_string()),
+            lines: Arc::default(),
+        }
+    }
+}
+
+/// %c, csvlog's session_id: the process's start time and pid, in hex.
+fn session_id(who: &Who) -> String {
+    format!("{:x}.{:x}", who.start.div_euclid(1_000_000) + 946_684_800, who.pid)
+}
+
+/// When this process (the "postmaster") started.
+fn process_start() -> i64 {
+    static START: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *START.get_or_init(|| crate::types::datetime::Clock::system().now)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -98,12 +257,6 @@ pub struct SessionWho {
     pub user: String,
     pub database: String,
     pub application_name: String,
-    /// The client's address and port (None: no network client).
-    pub remote: Option<(String, u16)>,
-    /// When the session started (microseconds since 2000-01-01).
-    pub start: i64,
-    /// The session's log line number (%l), counted by the caller.
-    pub line: u64,
     pub command_tag: String,
     pub vxid: String,
     pub xid: u64,
@@ -133,6 +286,7 @@ pub struct Format {
     pub verbosity: Verbosity,
     pub min_messages: String,
     pub min_error_statement: String,
+    pub dest: Dest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
@@ -151,7 +305,40 @@ impl Format {
             verbosity: Verbosity::Default,
             min_messages: "warning".into(),
             min_error_statement: "error".into(),
+            dest: Dest::STDERR,
         }
+    }
+
+    /// A process without a session's, under the configuration files' settings `files` and
+    /// the server's command line (`set_command_line`).
+    pub fn from_files(files: Option<&crate::sysconf::Loaded>) -> Format {
+        let mut f = Format::postmaster();
+        let argv = ARGV.read();
+        let get = |n: &str| {
+            argv.iter()
+                .rev()
+                .find(|(k, _)| k == n)
+                .map(|(_, v)| v.clone())
+                .or_else(|| files.and_then(|l| l.values.get(n)).map(|v| v.value.clone()))
+        };
+        {
+            if let Some(v) = get("log_line_prefix") {
+                f.prefix = v;
+            }
+            if let Some(tz) = get("log_timezone").and_then(|v| TimeZone::parse(&v)) {
+                f.tz = tz;
+            }
+            if let Some(v) = get("log_min_messages") {
+                f.min_messages = v;
+            }
+            if let Some(v) = get("log_error_verbosity") {
+                f.verbosity = verbosity(&v);
+            }
+            if let Some(v) = get("log_destination") {
+                f.dest = Dest::parse(&v);
+            }
+        }
+        f
     }
 
     pub fn from_settings(st: &crate::session::settings::Settings) -> Format {
@@ -159,21 +346,36 @@ impl Format {
         Format {
             prefix: get("log_line_prefix"),
             tz: TimeZone::parse(st.get_str("log_timezone").unwrap_or("UTC")).unwrap_or_else(TimeZone::gmt),
-            verbosity: match st.get_str("log_error_verbosity") {
-                Some("terse") => Verbosity::Terse,
-                Some("verbose") => Verbosity::Verbose,
-                _ => Verbosity::Default,
-            },
+            verbosity: verbosity(st.get_str("log_error_verbosity").unwrap_or_default()),
             min_messages: get("log_min_messages"),
             min_error_statement: get("log_min_error_statement"),
+            dest: Dest::parse(st.get_str("log_destination").unwrap_or("stderr")),
         }
     }
 }
 
-/// log_line_prefix expanded for one message (log_status_format). `sqlstate`: %e.
-fn prefix(f: &Format, who: &Who, now: i64, sqlstate: &str) -> String {
+/// The server's command line (`roll-engine -c`), above the files for the postmaster's and
+/// connections' lines before a session exists.
+static ARGV: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
+
+pub fn set_command_line(argv: &[(String, String)]) {
+    *ARGV.write() = argv.to_vec();
+}
+
+fn verbosity(v: &str) -> Verbosity {
+    match v {
+        "terse" => Verbosity::Terse,
+        "verbose" => Verbosity::Verbose,
+        _ => Verbosity::Default,
+    }
+}
+
+/// log_line_prefix expanded for one line (log_status_format): `sqlstate` is %e, `line` %l.
+fn prefix(f: &Format, who: &Who, now: i64, sqlstate: &str, line: u64) -> String {
     let mut out = String::new();
     let mut it = f.prefix.chars().peekable();
+    let client = who.is_client();
+    let unknown = |v: &str| if v.is_empty() { "[unknown]".to_string() } else { v.to_string() };
     while let Some(c) = it.next() {
         if c != '%' {
             out.push(c);
@@ -190,29 +392,31 @@ fn prefix(f: &Format, who: &Who, now: i64, sqlstate: &str) -> String {
             }
         }
         let Some(e) = it.next() else { break };
-        let s = who.session.as_ref();
+        let s = who.session.as_ref().filter(|_| client);
         let v: Option<String> = match e {
-            'a' => s.map(|s| s.application_name.clone()),
-            'u' => s.map(|s| s.user.clone()),
-            'd' => s.map(|s| s.database.clone()),
+            'a' if client => Some(unknown(s.map_or("", |s| &s.application_name))),
+            'u' if client => Some(unknown(s.map_or("", |s| &s.user))),
+            'd' if client => Some(unknown(s.map_or("", |s| &s.database))),
+            'a' | 'u' | 'd' => None,
             'b' => Some(who.backend_type.to_string()),
-            'c' => Some(format!("{:x}.{:x}", s.map_or(0, |s| (s.start / 1_000_000) + 946_684_800), who.pid)),
+            'c' => Some(session_id(who)),
             'p' => Some(who.pid.to_string()),
             'P' => None,
-            'l' => Some(s.map_or(0, |s| s.line).to_string()),
+            'l' => Some(line.to_string()),
             'm' => Some(stamp(now, &f.tz, true)),
             't' => Some(stamp(now, &f.tz, false)),
             'n' => Some(format!("{}.{:03}", now.div_euclid(1_000_000) + 946_684_800, now.rem_euclid(1_000_000) / 1000)),
-            's' => s.map(|s| stamp(s.start, &f.tz, false)),
-            'i' => s.map(|s| s.command_tag.clone()),
+            's' => Some(stamp(who.start, &f.tz, false)),
+            'i' if client => Some(s.map_or(String::new(), |s| s.command_tag.clone())),
             'e' => Some(sqlstate.to_string()),
-            'r' => s.and_then(|s| s.remote.as_ref()).map(|(h, p)| format!("{h}({p})")),
-            'h' => s.and_then(|s| s.remote.as_ref()).map(|(h, _)| h.clone()),
-            'L' => s.map(|_| "[local]".to_string()),
+            'r' => who.remote.as_ref().map(|(h, p)| format!("{h}({p})")),
+            'h' => who.remote.as_ref().map(|(h, _)| h.clone()),
+            'L' if client => Some(who.local.clone().unwrap_or_else(|| "[local]".into())),
+            'L' => Some("[none]".into()),
             'v' => s.map(|s| s.vxid.clone()),
             'x' => Some(s.map_or(0, |s| s.xid).to_string()),
             'Q' => Some(s.map_or(0, |s| s.query_id).to_string()),
-            'q' if s.is_none() => break,
+            'q' if !client => break,
             'q' => continue,
             '%' => Some("%".into()),
             _ => continue,
@@ -238,6 +442,10 @@ pub struct Message<'a> {
     pub context: Option<&'a str>,
     /// The query running (debug_query_string), unless the message hides it.
     pub statement: Option<&'a str>,
+    /// Where in `statement` the error is (a 1-based character position).
+    pub cursorpos: Option<u32>,
+    /// The query run internally that the error is in (QUERY), and the position in it.
+    pub internal: Option<(u32, &'a str)>,
     /// (routine, file, line) for log_error_verbosity = verbose.
     pub location: Option<(&'a str, &'a str, String)>,
 }
@@ -257,8 +465,19 @@ impl<'a> Message<'a> {
             hint: e.hint.as_deref(),
             context: e.context.as_deref(),
             statement,
+            cursorpos: e.position.filter(|p| *p > 0),
+            internal: e.objects.as_ref().and_then(|o| o.internal.as_ref()).map(|(p, q)| (*p, q.as_str())),
             location: Some((routine, file, line)),
         }
+    }
+
+    fn severity(&self) -> Severity {
+        self.severity.unwrap_or(Severity::Log)
+    }
+
+    /// check_log_of_query: the statement goes with the message past log_min_error_statement.
+    fn statement_shown(&self, f: &Format) -> Option<&'a str> {
+        self.statement.filter(|_| level_output(self.severity(), &f.min_error_statement))
     }
 }
 
@@ -267,39 +486,56 @@ pub fn wanted(f: &Format, sev: Severity) -> bool {
     active() && level_output(sev, &f.min_messages)
 }
 
-/// Write `m` (send_message_to_server_log), if log_min_messages wants it.
+/// Write `m` (send_message_to_server_log) in each of log_destination's formats, if
+/// log_min_messages wants it. Without the logging collector, csvlog and jsonlog fall back to
+/// stderr's format, as PostgreSQL's do.
 pub fn write(f: &Format, who: &Who, m: &Message) {
-    let sev = m.severity.unwrap_or(Severity::Log);
-    if !wanted(f, sev) {
+    if !wanted(f, m.severity()) {
         return;
     }
     let now = crate::types::datetime::Clock::system().now;
-    let p = prefix(f, who, now, m.code);
+    let collecting = collector::running();
+    if f.dest.stderr || (!collecting && (f.dest.csv || f.dest.json)) {
+        emit(Kind::Stderr, text(f, who, now, m));
+    }
+    if collecting && f.dest.csv {
+        emit(Kind::Csv, formats::csv(f, who, now, who.lines.next(Kind::Csv), m));
+    }
+    if collecting && f.dest.json {
+        emit(Kind::Json, formats::json(f, who, now, who.lines.next(Kind::Json), m));
+    }
+}
+
+/// The stderr format: every line under its own log_line_prefix.
+fn text(f: &Format, who: &Who, now: i64, m: &Message) -> String {
+    let line = || prefix(f, who, now, m.code, who.lines.next(Kind::Stderr));
     let tabs = |s: &str| s.replace('\n', "\n\t");
-    let mut out = format!("{p}{}:  ", sev.as_str());
+    let mut out = format!("{}{}:  ", line(), m.severity().as_str());
     if f.verbosity == Verbosity::Verbose {
         out.push_str(&format!("{}: ", m.code));
     }
     out.push_str(&tabs(m.text));
+    if let Some(p) = m.cursorpos.or(m.internal.map(|(p, _)| p).filter(|p| *p > 0)) {
+        out.push_str(&format!(" at character {p}"));
+    }
     out.push('\n');
     if f.verbosity >= Verbosity::Default {
-        for (label, v) in [("DETAIL", m.detail), ("HINT", m.hint), ("CONTEXT", m.context)] {
+        let query = m.internal.map(|(_, q)| q);
+        for (label, v) in [("DETAIL", m.detail), ("HINT", m.hint), ("QUERY", query), ("CONTEXT", m.context)] {
             if let Some(v) = v {
-                out.push_str(&format!("{p}{label}:  {}\n", tabs(v)));
+                out.push_str(&format!("{}{label}:  {}\n", line(), tabs(v)));
             }
         }
+        if f.verbosity == Verbosity::Verbose
+            && let Some((routine, file, l)) = &m.location
+        {
+            out.push_str(&format!("{}LOCATION:  {routine}, {file}:{l}\n", line()));
+        }
     }
-    if f.verbosity == Verbosity::Verbose
-        && let Some((routine, file, line)) = &m.location
-    {
-        out.push_str(&format!("{p}LOCATION:  {routine}, {file}:{line}\n"));
+    if let Some(q) = m.statement_shown(f) {
+        out.push_str(&format!("{}STATEMENT:  {}\n", line(), tabs(q)));
     }
-    if let Some(q) = m.statement
-        && level_output(sev, &f.min_error_statement)
-    {
-        out.push_str(&format!("{p}STATEMENT:  {}\n", tabs(q)));
-    }
-    emit(&out);
+    out
 }
 
 /// A message of the postmaster (reloads, startup): its own process, under the configuration
@@ -308,19 +544,6 @@ pub fn postmaster(files: Option<&crate::sysconf::Loaded>, sev: Severity, text: &
     if !active() {
         return;
     }
-    let mut f = Format::postmaster();
-    if let Some(l) = files {
-        let get = |n: &str| l.values.get(n).map(|v| v.value.clone());
-        if let Some(v) = get("log_line_prefix") {
-            f.prefix = v;
-        }
-        if let Some(tz) = get("log_timezone").and_then(|v| TimeZone::parse(&v)) {
-            f.tz = tz;
-        }
-        if let Some(v) = get("log_min_messages") {
-            f.min_messages = v;
-        }
-    }
-    let who = Who { pid: std::process::id() as i32, session: None, backend_type: "postmaster" };
-    write(&f, &who, &Message { severity: Some(sev), ..Message::log(text) });
+    let f = Format::from_files(files);
+    write(&f, &Who::postmaster(), &Message { severity: Some(sev), ..Message::log(text) });
 }

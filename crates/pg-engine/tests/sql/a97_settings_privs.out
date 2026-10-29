@@ -1,0 +1,107 @@
+> DROP ROLE IF EXISTS regress_a97_plain
+NOTICE 00000: role "regress_a97_plain" does not exist, skipping
+-- DROP ROLE
+
+> CREATE ROLE regress_a97_plain
+-- CREATE ROLE
+
+> SET ROLE regress_a97_plain
+-- SET
+
+> SHOW hba_file
+ERROR 42501: permission denied to examine "hba_file"
+DETAIL: Only roles with privileges of the "pg_read_all_settings" role may examine this parameter.
+
+> SHOW data_directory
+ERROR 42501: permission denied to examine "data_directory"
+DETAIL: Only roles with privileges of the "pg_read_all_settings" role may examine this parameter.
+
+> SHOW Log_Directory
+ERROR 42501: permission denied to examine "log_directory"
+DETAIL: Only roles with privileges of the "pg_read_all_settings" role may examine this parameter.
+
+> SELECT current_setting('config_file')
+ERROR 42501: permission denied to examine "config_file"
+DETAIL: Only roles with privileges of the "pg_read_all_settings" role may examine this parameter.
+
+> SELECT current_setting('ssl_ciphers', true)
+ERROR 42501: permission denied to examine "ssl_ciphers"
+DETAIL: Only roles with privileges of the "pg_read_all_settings" role may examine this parameter.
+
+> SELECT current_setting('no_such_setting', true) IS NULL
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT name FROM pg_settings WHERE name IN ('hba_file', 'log_directory', 'ssl_ciphers', 'port') ORDER BY 1
+name:text
+port
+-- SELECT 1
+
+> SELECT count(*) FROM pg_show_all_settings() WHERE name = 'unix_socket_directories'
+count:int8
+0
+-- SELECT 1
+
+> SHOW log_destination
+log_destination:text
+stderr
+-- SHOW
+
+> SELECT pg_stat_file(pg_current_logfile())
+ERROR 42501: permission denied for function pg_stat_file
+
+> SELECT pg_read_file(pg_current_logfile('csvlog'))
+ERROR 42501: permission denied for function pg_read_file
+
+> SELECT length(pg_current_logfile())
+ERROR 42501: permission denied for function pg_current_logfile
+
+> RESET ROLE
+-- RESET
+
+> GRANT pg_read_all_settings TO regress_a97_plain
+-- GRANT ROLE
+
+> SET ROLE regress_a97_plain
+-- SET
+
+> SELECT name FROM pg_settings WHERE name IN ('hba_file', 'log_directory', 'ssl_ciphers', 'port') ORDER BY 1
+name:text
+hba_file
+log_directory
+port
+ssl_ciphers
+-- SELECT 4
+
+> SHOW unix_socket_directories
+unix_socket_directories:text
+/var/run/postgresql
+-- SHOW
+
+> SHOW log_filename
+log_filename:text
+postgresql-%Y-%m-%d_%H%M%S.log
+-- SHOW
+
+> RESET ROLE
+-- RESET
+
+> SELECT pg_current_logfile(), pg_current_logfile('csvlog'), pg_current_logfile(NULL)
+pg_current_logfile:text | pg_current_logfile:text | pg_current_logfile:text
+NULL | NULL | NULL
+-- SELECT 1
+
+> SELECT pg_current_logfile('foo')
+ERROR 22023: log format "foo" is not supported
+HINT: The supported log formats are "stderr", "csvlog", and "jsonlog".
+
+> SELECT pg_rotate_logfile()
+WARNING 01000: rotation not possible because log collection not active
+pg_rotate_logfile:bool
+f
+-- SELECT 1
+
+> DROP ROLE regress_a97_plain
+-- DROP ROLE
+
