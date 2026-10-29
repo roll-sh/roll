@@ -1317,6 +1317,42 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     their filter as a compiled kernel (`exec::kernel`) when it compiles. A hash join asks
     its outer catalog scan to restrict itself to up to 65,536 inner keys, and the scan does
     when they are under a quarter of its rows (a schema's relations against pg_attribute).
+- **Catalog round 6, second batch** (round 21, agent 92; BENCH.md "Catalog round 6, second
+  batch"):
+  - `PMap` indexes its chunks by groups of 64 chunks behind `Arc`s of their own, every level
+    a sorted vector (`catalog/pmap.rs`): a change copies one group and one chunk, a diff
+    compares groups by pointer first, and an iterator is a few slice iterators (frames on
+    deep recursions hold them; mind their size, below). The flat chunk index (1,100 entries at 10,000 tables) was copied, dropped
+    and walked by every DDL statement's diffs: CREATE TABLE at 10,000 tables 1.3-1.7 → 0.5-0.7
+    ms over the wire (PostgreSQL 2.5-3.4), DROP TABLE 1.1-1.3 → 0.5-0.6 (4.0-4.5).
+  - Catalog format 3 (`catalog::compact`): records leave out fields at their default values
+    (a table's record was 1.9 kB of JSON, mostly defaults); older databases are rewritten
+    when first opened; `--downgrade-catalog` stores every field again (format 2 and 1 builds
+    require them). Test `catalog_format.rs` `records_leave_defaults_out_and_downgrade_whole`.
+  - Functions by name (`relindex::FuncIx`, `Catalog::functions_named`, checked against a scan
+    in debug builds): function and aggregate calls, CREATE FUNCTION, the object lookups and
+    `function_name` scanned every function.
+  - Concurrent CREATE of one name (`Ddl::reserve_names`, `locks::catalog_name_key`): schemas
+    and relations made or renamed hold the catalog unique index's key as an uncommitted
+    PostgreSQL row does; the second creator waits, then fails with the unique violation
+    PostgreSQL's index raises (pg_namespace_nspname_index, pg_type_typname_nsp_index,
+    pg_class_relname_nsp_index) once the first commits. Both used to commit, merged (Flyway's
+    concurrent migrates). Spec `roll-concurrent-create`.
+  - Nested loops check a compiled join condition on the outer and inner row in place and
+    copy a pair into one row only when it passes; per-relation catalog rescans go on to an
+    eighth of the relations before the whole catalog is generated; pg_class's name bounds are
+    checked only when no index equality picks the rows.
+  - Stack: `nodes::open_node` is on the stack of every plan level, and of every call level of
+    a recursive SQL function (`deep_input`'s `sqlfnsrf 20000`): a field added to a node it
+    builds counts there (the join kernel is boxed and compiled in an `#[inline(never)]`
+    helper). `Expr::rewrite` is `transform` for rewrites that can't fail (lift.rs's
+    substitutions), which unwrapped a depth error into a panic.
+  - Left (BENCH.md has the numbers): the first catalog query of a kind after start generates
+    that catalog whole (100-300 ms at 90,000 objects), and the generated rows are heavy
+    (pg_attribute, pg_type and pg_class of 90,000 objects took 1.1 GB of RSS); Prisma's
+    columns query (4x PostgreSQL), psql `\d`'s indexes query, `\dt` (1.5x); the first
+    connection (connect 95-180 ms at 10,000 tables); restoring PostgreSQL's dump of the
+    regression database into the engine (35-62 s against 3-4 s the other way).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -2112,8 +2148,10 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   `src/engine.rs` (batched, resumable, tested by `tests/storage_upgrade_batches.rs`), and
   `Catalog::catalog_format` (`catalog/persist.rs`: a database's catalog is a header and a
   record per object; `Database::open` rewrites a catalog stored in an older format; format 2,
-  round 20 agent 76, moved comments into records of their own, and `roll-engine
-  --downgrade-catalog` stores format 1 again for an older build). A field added to
+  round 20 agent 76, moved comments into records of their own; format 3, round 21 agent 92,
+  leaves fields at their defaults out, `catalog::compact`; `roll-engine --downgrade-catalog`
+  stores format 1 again for an older build). A field given `skip_serializing_if` must have
+  `#[serde(default)]` and use a `compact::` predicate (a downgrade writes it again). A field added to
   `Catalog` must be listed in `persist.rs`'s `stored_fields!` (as a map, a set or in the header;
   the macro's exhaustive destructuring doesn't compile otherwise), with a record tag never used
   before.

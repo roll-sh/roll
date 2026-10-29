@@ -22,17 +22,36 @@ use std::sync::Arc;
 /// well filled, and a chunk to copy stays small.
 const SHIFT: u32 = 6;
 
-type Chunk<V> = Arc<BTreeMap<u32, V>>;
+/// log2 of the chunks per group. The chunks are indexed by groups of `1 << GROUP_SHIFT`
+/// chunks, each behind an `Arc` too: a change copies the group index (one `Arc` per 4,096
+/// oids), one group (at most 64 `Arc`s) and one chunk, and a diff compares groups by pointer
+/// before chunks. (With one flat index, 10,000 tables' oids made a 1,100-entry index that
+/// every change copied and dropped and every diff walked: most of an ALTER TABLE's own time.)
+/// The levels are sorted vectors: small to copy and to keep (no tree nodes per entry), found
+/// by binary search, and iterated by slice iterators (an iterator on every frame of deep
+/// recursion that reads a catalog map stays small).
+const GROUP_SHIFT: u32 = 6;
+
+type Chunk<V> = Arc<Vec<(u32, V)>>;
+type Group<V> = Arc<Vec<(u32, Chunk<V>)>>;
+
+fn group_of(k: u32) -> u32 {
+    k >> (SHIFT + GROUP_SHIFT)
+}
+
+fn find<T>(v: &[(u32, T)], k: u32) -> std::result::Result<usize, usize> {
+    v.binary_search_by_key(&k, |e| e.0)
+}
 
 pub struct PMap<V> {
-    chunks: Arc<BTreeMap<u32, Chunk<V>>>,
+    groups: Arc<Vec<(u32, Group<V>)>>,
     len: usize,
 }
 
 impl<V> Clone for PMap<V> {
     fn clone(&self) -> Self {
         PMap {
-            chunks: self.chunks.clone(),
+            groups: self.groups.clone(),
             len: self.len,
         }
     }
@@ -41,23 +60,61 @@ impl<V> Clone for PMap<V> {
 impl<V> Default for PMap<V> {
     fn default() -> Self {
         PMap {
-            chunks: Arc::new(BTreeMap::new()),
+            groups: Arc::new(Vec::new()),
             len: 0,
         }
     }
 }
 
-type ChunkIter<'a, V> = std::collections::btree_map::Iter<'a, u32, V>;
+type ChunkIter<'a, V> = std::iter::Map<std::slice::Iter<'a, (u32, V)>, fn(&'a (u32, V)) -> (&'a u32, &'a V)>;
+
+type GroupIter<'a, V> = std::iter::FlatMap<
+    std::slice::Iter<'a, (u32, Chunk<V>)>,
+    ChunkIter<'a, V>,
+    fn(&'a (u32, Chunk<V>)) -> ChunkIter<'a, V>,
+>;
 
 /// `PMap::iter`'s iterator (also `&PMap`'s `IntoIterator`).
 pub type Iter<'a, V> = std::iter::FlatMap<
-    std::collections::btree_map::Values<'a, u32, Chunk<V>>,
-    ChunkIter<'a, V>,
-    fn(&'a Chunk<V>) -> ChunkIter<'a, V>,
+    std::slice::Iter<'a, (u32, Group<V>)>,
+    GroupIter<'a, V>,
+    fn(&'a (u32, Group<V>)) -> GroupIter<'a, V>,
 >;
 
-fn chunk_iter<V>(c: &Chunk<V>) -> ChunkIter<'_, V> {
-    c.iter()
+fn pair<V>(e: &(u32, V)) -> (&u32, &V) {
+    (&e.0, &e.1)
+}
+
+fn chunk_iter<V>(c: &(u32, Chunk<V>)) -> ChunkIter<'_, V> {
+    c.1.iter().map(pair as fn(&(u32, V)) -> (&u32, &V))
+}
+
+fn group_iter<V>(g: &(u32, Group<V>)) -> GroupIter<'_, V> {
+    g.1.iter().flat_map(chunk_iter as fn(&(u32, Chunk<V>)) -> ChunkIter<'_, V>)
+}
+
+/// The keys of sorted `a` and `b` in order, each with its values in both: `g(in a, in b)`.
+fn merge_keys<'a, T>(a: &'a [(u32, T)], b: &'a [(u32, T)], mut g: impl FnMut(u32, Option<&'a T>, Option<&'a T>)) {
+    let (mut i, mut j) = (0, 0);
+    loop {
+        match (a.get(i), b.get(j)) {
+            (None, None) => return,
+            (Some(x), Some(y)) if x.0 == y.0 => {
+                g(x.0, Some(&x.1), Some(&y.1));
+                i += 1;
+                j += 1;
+            }
+            (Some(x), y) if y.is_none_or(|y| x.0 < y.0) => {
+                g(x.0, Some(&x.1), None);
+                i += 1;
+            }
+            (_, Some(y)) => {
+                g(y.0, None, Some(&y.1));
+                j += 1;
+            }
+            (Some(_), None) => unreachable!(),
+        }
+    }
 }
 
 impl<V> PMap<V> {
@@ -74,7 +131,9 @@ impl<V> PMap<V> {
     }
 
     pub fn get(&self, k: &u32) -> Option<&V> {
-        self.chunks.get(&(k >> SHIFT))?.get(k)
+        let g = &self.groups[find(&self.groups, group_of(*k)).ok()?].1;
+        let c = &g[find(g, k >> SHIFT).ok()?].1;
+        Some(&c[find(c, *k).ok()?].1)
     }
 
     pub fn contains_key(&self, k: &u32) -> bool {
@@ -82,7 +141,7 @@ impl<V> PMap<V> {
     }
 
     pub fn iter(&self) -> Iter<'_, V> {
-        self.chunks.values().flat_map(chunk_iter as fn(&Chunk<V>) -> ChunkIter<'_, V>)
+        self.groups.iter().flat_map(group_iter as fn(&(u32, Group<V>)) -> GroupIter<'_, V>)
     }
 
     pub fn keys(&self) -> impl DoubleEndedIterator<Item = &u32> + Clone {
@@ -103,12 +162,12 @@ impl<V> PMap<V> {
 
     /// The same map (a copy nothing changed since): nothing in it differs.
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.chunks, &other.chunks)
+        Arc::ptr_eq(&self.groups, &other.groups)
     }
 
     /// The entries in which `self` and `new` differ, in key order: `f(key, in self, in new)`
     /// for each key only one has, and for each both have where `same` says the values
-    /// differ. Chunks the two share aren't visited.
+    /// differ. Groups and chunks the two share aren't visited.
     pub fn diff<'a>(
         &'a self,
         new: &'a Self,
@@ -118,33 +177,28 @@ impl<V> PMap<V> {
         if self.ptr_eq(new) {
             return;
         }
-        let mut a = self.chunks.iter().peekable();
-        let mut b = new.chunks.iter().peekable();
-        loop {
-            match (a.peek(), b.peek()) {
-                (None, None) => return,
-                (Some((ka, ca)), Some((kb, cb))) if ka == kb => {
-                    if !Arc::ptr_eq(ca, cb) {
-                        diff_chunk(ca, cb, &same, &mut f);
-                    }
-                    a.next();
-                    b.next();
+        merge_keys(&self.groups, &new.groups, |_, ga, gb| match (ga, gb) {
+            (Some(ga), Some(gb)) if Arc::ptr_eq(ga, gb) => {}
+            (Some(ga), Some(gb)) => merge_keys(ga, gb, |_, ca, cb| match (ca, cb) {
+                (Some(ca), Some(cb)) if Arc::ptr_eq(ca, cb) => {}
+                (ca, cb) => merge_keys(
+                    ca.map_or(&[][..], |c| &c[..]),
+                    cb.map_or(&[][..], |c| &c[..]),
+                    |k, a, b| match (a, b) {
+                        (Some(a), Some(b)) if same(a, b) => {}
+                        (a, b) => f(k, a, b),
+                    },
+                ),
+            }),
+            (ga, gb) => {
+                for (k, v) in ga.into_iter().flat_map(|g| g.iter()).flat_map(|c| c.1.iter()).map(|e| (e.0, &e.1)) {
+                    f(k, Some(v), None);
                 }
-                (Some((ka, ca)), kb) if kb.is_none_or(|(kb, _)| ka < kb) => {
-                    for (k, v) in ca.iter() {
-                        f(*k, Some(v), None);
-                    }
-                    a.next();
+                for (k, v) in gb.into_iter().flat_map(|g| g.iter()).flat_map(|c| c.1.iter()).map(|e| (e.0, &e.1)) {
+                    f(k, None, Some(v));
                 }
-                (_, Some((_, cb))) => {
-                    for (k, v) in cb.iter() {
-                        f(*k, None, Some(v));
-                    }
-                    b.next();
-                }
-                (Some(_), None) => unreachable!(),
             }
-        }
+        });
     }
 }
 
@@ -158,78 +212,74 @@ impl<T> PMap<Arc<T>> {
     }
 }
 
-fn diff_chunk<'a, V>(
-    a: &'a BTreeMap<u32, V>,
-    b: &'a BTreeMap<u32, V>,
-    same: &impl Fn(&V, &V) -> bool,
-    f: &mut impl FnMut(u32, Option<&'a V>, Option<&'a V>),
-) {
-    let mut ia = a.iter().peekable();
-    let mut ib = b.iter().peekable();
-    loop {
-        match (ia.peek(), ib.peek()) {
-            (None, None) => return,
-            (Some((ka, va)), Some((kb, vb))) if ka == kb => {
-                if !same(va, vb) {
-                    f(**ka, Some(va), Some(vb));
-                }
-                ia.next();
-                ib.next();
-            }
-            (Some((ka, va)), kb) if kb.is_none_or(|(kb, _)| ka < kb) => {
-                f(**ka, Some(va), None);
-                ia.next();
-            }
-            (_, Some((kb, vb))) => {
-                f(**kb, None, Some(vb));
-                ib.next();
-            }
-            (Some(_), None) => unreachable!(),
-        }
-    }
-}
-
 impl<V: Clone> PMap<V> {
     pub fn insert(&mut self, k: u32, v: V) -> Option<V> {
-        let chunk = Arc::make_mut(&mut self.chunks).entry(k >> SHIFT).or_default();
-        let old = Arc::make_mut(chunk).insert(k, v);
-        if old.is_none() {
-            self.len += 1;
+        let groups = Arc::make_mut(&mut self.groups);
+        let gi = match find(groups, group_of(k)) {
+            Ok(i) => i,
+            Err(i) => {
+                groups.insert(i, (group_of(k), Arc::new(Vec::new())));
+                i
+            }
+        };
+        let group = Arc::make_mut(&mut groups[gi].1);
+        let ci = match find(group, k >> SHIFT) {
+            Ok(i) => i,
+            Err(i) => {
+                group.insert(i, (k >> SHIFT, Arc::new(Vec::new())));
+                i
+            }
+        };
+        let chunk = Arc::make_mut(&mut group[ci].1);
+        match find(chunk, k) {
+            Ok(i) => Some(std::mem::replace(&mut chunk[i].1, v)),
+            Err(i) => {
+                chunk.insert(i, (k, v));
+                self.len += 1;
+                None
+            }
         }
-        old
     }
 
     pub fn remove(&mut self, k: &u32) -> Option<V> {
-        let c = k >> SHIFT;
-        if !self.chunks.get(&c).is_some_and(|ch| ch.contains_key(k)) {
+        if !self.contains_key(k) {
             return None;
         }
-        let chunks = Arc::make_mut(&mut self.chunks);
-        let chunk = chunks.get_mut(&c)?;
-        let old = Arc::make_mut(chunk).remove(k);
+        let groups = Arc::make_mut(&mut self.groups);
+        let gi = find(groups, group_of(*k)).ok()?;
+        let group = Arc::make_mut(&mut groups[gi].1);
+        let ci = find(group, k >> SHIFT).ok()?;
+        let chunk = Arc::make_mut(&mut group[ci].1);
+        let old = chunk.remove(find(chunk, *k).ok()?).1;
         if chunk.is_empty() {
-            chunks.remove(&c);
+            group.remove(ci);
         }
-        if old.is_some() {
-            self.len -= 1;
+        if group.is_empty() {
+            groups.remove(gi);
         }
-        old
+        self.len -= 1;
+        Some(old)
     }
 
     pub fn get_mut(&mut self, k: &u32) -> Option<&mut V> {
-        let c = k >> SHIFT;
-        if !self.chunks.get(&c).is_some_and(|ch| ch.contains_key(k)) {
+        if !self.contains_key(k) {
             return None;
         }
-        let chunk = Arc::make_mut(&mut self.chunks).get_mut(&c)?;
-        Arc::make_mut(chunk).get_mut(k)
+        let groups = Arc::make_mut(&mut self.groups);
+        let gi = find(groups, group_of(*k)).ok()?;
+        let group = Arc::make_mut(&mut groups[gi].1);
+        let ci = find(group, k >> SHIFT).ok()?;
+        let chunk = Arc::make_mut(&mut group[ci].1);
+        let i = find(chunk, *k).ok()?;
+        Some(&mut chunk[i].1)
     }
 
-    /// Every value, for changing in place: every chunk is made the map's own.
+    /// Every value, for changing in place: every group and chunk is made the map's own.
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
-        Arc::make_mut(&mut self.chunks)
-            .values_mut()
-            .flat_map(|c| Arc::make_mut(c).values_mut())
+        Arc::make_mut(&mut self.groups)
+            .iter_mut()
+            .flat_map(|g| Arc::make_mut(&mut g.1).iter_mut())
+            .flat_map(|c| Arc::make_mut(&mut c.1).iter_mut().map(|e| &mut e.1))
     }
 
     /// Keep the entries `f` keeps; only chunks that lose one are copied.
@@ -278,13 +328,29 @@ impl<V: Clone> Extend<(u32, V)> for PMap<V> {
 
 impl<V: Clone> From<BTreeMap<u32, V>> for PMap<V> {
     fn from(m: BTreeMap<u32, V>) -> Self {
-        let mut chunks: BTreeMap<u32, BTreeMap<u32, V>> = BTreeMap::new();
         let len = m.len();
+        let mut groups: Vec<(u32, Group<V>)> = Vec::new();
+        let mut group: Vec<(u32, Chunk<V>)> = Vec::new();
+        let mut chunk: Vec<(u32, V)> = Vec::new();
+        let (mut g, mut c) = (u32::MAX, u32::MAX);
         for (k, v) in m {
-            chunks.entry(k >> SHIFT).or_default().insert(k, v);
+            if k >> SHIFT != c && !chunk.is_empty() {
+                group.push((c, Arc::new(std::mem::take(&mut chunk))));
+            }
+            if group_of(k) != g && !group.is_empty() {
+                groups.push((g, Arc::new(std::mem::take(&mut group))));
+            }
+            (g, c) = (group_of(k), k >> SHIFT);
+            chunk.push((k, v));
+        }
+        if !chunk.is_empty() {
+            group.push((c, Arc::new(chunk)));
+        }
+        if !group.is_empty() {
+            groups.push((g, Arc::new(group)));
         }
         PMap {
-            chunks: Arc::new(chunks.into_iter().map(|(c, m)| (c, Arc::new(m))).collect()),
+            groups: Arc::new(groups),
             len,
         }
     }

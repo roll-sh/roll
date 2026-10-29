@@ -880,8 +880,15 @@ fn sys_equality(
 }
 
 /// How many rescans of a catalog per statement read one relation's rows alone
-/// (`sys_rel_rows`) before the whole catalog is generated.
+/// (`sys_rel_rows`) before the whole catalog is generated, at least: an eighth of the
+/// relations otherwise (`rel_rescans`; a nested loop over a schema's 1,000 relations into
+/// pg_attribute generated its 150,000 rows of 11,000 tables, 140 ms against 5).
 const REL_RESCANS: u32 = 16;
+
+fn rel_rescans(cat: &crate::catalog::Catalog) -> u32 {
+    let rels = cat.tables.len() + cat.views.len() + cat.indexes.len() + cat.sequences.len();
+    REL_RESCANS.max((rels / 8) as u32)
+}
 
 /// How many inner rows a hash join asks its outer side to restrict itself to at most
 /// (`Node::restrict_keys`; the outer side restricts itself only when the keys are few
@@ -1077,7 +1084,7 @@ fn sys_rescan(
     // past them, the whole catalog is generated, once.)
     let rel_rows = match &cached {
         None if crate::catalog::system::rows_cacheable(table)
-            && ctx.sys_rel_scans.borrow().get(&table.oid()).copied().unwrap_or(0) < REL_RESCANS =>
+            && ctx.sys_rel_scans.borrow().get(&table.oid()).copied().unwrap_or(0) < rel_rescans(&cat) =>
         {
             sys_rel_rows(table, Some(f), path, ctx)?
         }
@@ -1222,8 +1229,14 @@ fn sys_shared_scan(
         Some(r) => r,
         None => crate::catalog::system::rows_shared(table, ctx)?,
     };
-    let named = class_name_bounds(table, path, ctx)?.map(|b| sys_named(&rows, &b));
-    let picked = match sys_index_equality(path, &rows, ctx)? {
+    // (The names' bounds only when no index equality picks the rows: they are checked
+    // against every row.)
+    let equal = sys_index_equality(path, &rows, ctx)?;
+    let named = match equal {
+        None => class_name_bounds(table, path, ctx)?.map(|b| sys_named(&rows, &b)),
+        Some(_) => None,
+    };
+    let picked = match equal {
         Some((_, ix)) => Some(ix.unwrap_or_default()),
         None if named.is_some() => named,
         None => match filter {
@@ -3342,6 +3355,23 @@ fn capture_into_parent(done: &mut [BoxNode]) {
     done[0].add_captured(rows);
 }
 
+/// A join condition's kernel, boxed and compiled apart: `open_node`, on the stack of every
+/// plan level (and of every level of a recursive SQL function), stays its size.
+#[inline(never)]
+fn compile_boxed(cond: Option<&Expr>) -> Option<Box<super::kernel::K>> {
+    cond.and_then(super::kernel::compile).map(Box::new)
+}
+
+/// An outer and an inner row read as their concatenation (`NestLoopNode::cond_kernel`).
+struct Pair<'a>(&'a [Value], &'a [Value]);
+
+impl super::kernel::Cols for Pair<'_> {
+    #[inline]
+    fn col(&self, i: usize) -> Option<&Value> {
+        if i < self.0.len() { self.0.get(i) } else { self.1.get(i - self.0.len()) }
+    }
+}
+
 fn concat_rows(l: &[Value], r: &[Value]) -> Row {
     let mut out = Vec::with_capacity(l.len() + r.len());
     out.extend_from_slice(l);
@@ -3372,6 +3402,10 @@ struct NestLoopNode {
     left: BoxNode,
     right_plan: Arc<Plan>,
     cond: Option<Expr>,
+    /// The condition compiled (`exec::kernel`), checked on the outer and inner row in place:
+    /// a pair is copied into one row only once it passes (a catalog join's filter rejecting
+    /// thousands of pairs of wide rows copied each).
+    cond_kernel: Option<Box<super::kernel::K>>,
     params: Vec<Expr>,
     nleft: usize,
     nright: usize,
@@ -3411,6 +3445,7 @@ impl NestLoopNode {
             kind,
             left,
             right_plan,
+            cond_kernel: compile_boxed(cond.as_ref()),
             cond,
             params,
             nleft,
@@ -3614,17 +3649,23 @@ impl NestLoopNode {
                 ctx.check()?;
                 let j = *i;
                 *i += 1;
-                let combined = concat_rows(l, &rows[j]);
-                let ok = match &self.cond {
-                    Some(c) => eval_bool(c, &combined, ctx)?,
-                    None => true,
+                let pair = Pair(l, &rows[j]);
+                let early = self.cond_kernel.as_ref().and_then(|k| k.passes(&pair));
+                let combined = match early {
+                    Some(false) => None,
+                    _ => Some(concat_rows(l, &rows[j])),
                 };
-                if !ok {
+                let ok = match (&self.cond, early, &combined) {
+                    (_, Some(b), _) => b,
+                    (Some(c), None, Some(combined)) => eval_bool(c, combined, ctx)?,
+                    _ => true,
+                };
+                let Some(combined) = combined.filter(|_| ok) else {
                     if self.key != 0 {
                         ctx.filtered(self.key);
                     }
                     continue;
-                }
+                };
                 *matched = true;
                 if (self.params.is_empty() || self.fixed) && j < self.right_matched.len() {
                     self.right_matched[j] = true;

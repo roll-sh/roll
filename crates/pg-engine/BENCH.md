@@ -2541,6 +2541,107 @@ regression suite in full (debug build, private reference `a92-ref1`) against the
 other, every way (the engine's dump into PostgreSQL failed 4 statements before), dumps
 2,720 / 2,733 entries alike. Golden `a92_domain_typmods`.
 
+## Catalog round 6, second batch: DDL at scale, catalog format 3, 90,000 objects (round 21, agent 92)
+
+PostgreSQL in `a92-bpg` (`run.sh pg-start`: pinned image and settings), both servers on cores
+24-27, the client on 28-31, release builds, a fresh copy of each data directory per run.
+**A** is the first batch (`7afe80e8`), **B** this one.
+
+### DDL over the wire, 10,000 tables (`scale-ops --only ddl --n 200`, ms per statement)
+
+Medians of 3 interleaved runs (load 18-20 from other agents' builds):
+
+| case | PostgreSQL | A | B |
+|---|---|---|---|
+| CREATE TABLE | 3.10 | 1.29 | 0.60 |
+| ALTER TABLE ADD COLUMN | 0.45 | 0.57 | 0.34 |
+| CREATE INDEX | 0.91 | 0.60 | 0.41 |
+| COMMENT ON TABLE | 0.24 | 0.17 | 0.20 |
+| DROP TABLE | 5.58 | 1.28 | 0.76 |
+
+(A's figures from an earlier interleaved round on a quieter machine, PostgreSQL then 0.33-0.47
+for ALTER TABLE.) What ALTER TABLE spent was the catalog maps' chunk index: 11,000 tables'
+oids made a flat index of about 1,100 chunks, which every change copied and dropped and every
+one of a statement's diffs walked (`PMap::changes`, `persist::diff_records`: about 40% of the
+server's time). `PMap` now indexes its chunks by groups of 64, each behind an `Arc`, every
+level a sorted vector (cheaper to copy than tree nodes, and small slice iterators).
+
+### 90,000 objects (`scale --tables 25000 --parts 10000`, then `scale-more`: 10,000 functions, 10,000 views, 10,000 more indexes)
+
+Per statement, in steps of 5,000 (2,500 for `scale-more`); the engine in-process, PostgreSQL over
+the wire (its in-process figure would be lower by about 0.1 ms):
+
+| case | PostgreSQL | B |
+|---|---|---|
+| CREATE TABLE, at 5,000 / 25,000 tables | 2.41 / 2.71 | 0.31 / 0.46 |
+| CREATE TABLE ... PARTITION OF, partitions 0-5,000 / 5,000-10,000 | 15.3 / 33.7 | 2.4 / 8.8 |
+| ALTER TABLE ADD COLUMN, 25,000 tables | 0.56 | 0.30 |
+| CREATE INDEX, 25,000 tables | 1.13 | 0.37 |
+| CREATE FUNCTION (0-10,000 functions) | 0.28-0.30 | 0.35 (0.45-0.63 before `FuncIx`) |
+| CREATE VIEW | 1.10-1.14 | 1.07-1.67 |
+
+Both grow with a parent's partitions (each new partition's bound is checked against its
+siblings'); the engine 4-6x less.
+
+Client tools' and ORMs' catalog queries over that catalog (`catalog-tools`, over the wire, ms;
+first run, then the mean of 5):
+
+| query | PostgreSQL first / then | B first / then |
+|---|---|---|
+| psql `\dt` (a schema's 1,250 tables) | 48.6 / 27.8 | 271 / 41.6 |
+| psql `\dv` | 21.5 / 21.2 | 23.8 / 23.8 |
+| psql `\df` | 9.7 / 2.7 | 17.6 / 2.9 |
+| psql `\d t` lookup | 0.45 / 0.31 | 19.7 / 6.8 |
+| psql `\d t` indexes | 2.5 / 0.67 | 103 / 14.3 |
+| pgAdmin's table list | 463 / 435 | 61 / 47 |
+| DBeaver's table list | 57 / 45 | 12.2 / 11.8 |
+| Django's table list | 285 / 83 | 83 / 85 |
+| Django's constraints of a table | 2.1 / 0.63 | 64 / 2.4 |
+| Rails' columns of a table | 1.8 / 0.86 | 174 / 2.1 |
+| Prisma's columns of a schema | 324 / 252 | 1,135 / 1,111 |
+| the ORM constraints query | 97 / 65 | 45 / 27 |
+| information_schema.tables of a schema | 35 / 35 | 39 / 30 |
+| information_schema.columns of a table | 4.1 / 3.4 | 2.7 / 1.8 |
+| `count(*)` of pg_class | 8.6 / 8.5 | 0.28 / 0.12 |
+
+Before this batch (same catalog, B without the last fixes): Rails' columns 12.3 ms
+(a nested loop's join condition copied 2,742 pairs of wide catalog rows into one row each to
+reject them; now checked in place by its compiled kernel), `\d t` lookup 13.9 (pg_class's name
+bounds checked against all 140,000 rows although an index equality had picked one), `\d t`
+indexes 30, `\df` 11.1, Prisma 2,326. The engine's first runs generate the catalogs they read
+whole (pg_type, pg_attribute, pg_constraint: 100-300 ms here); PostgreSQL reads them from its
+heap.
+
+### Resources
+
+| | PostgreSQL | A | B |
+|---|---|---|---|
+| on disk, 10,000 tables (database / its catalogs) | 265 MB / 145 MB | 1.7 MB | 1.1 MB |
+| on disk, 90,000 objects | 785 MB / 422 MB | | 3.6 MB |
+| memory per idle connection (`idle --sessions 100`) | 1,546 kB | | 279 kB |
+| connection setup | 14.2 ms | | 8.7 ms |
+| engine RSS, 10,000 tables: started / database open / pg_attribute, pg_type, pg_class generated | | | 25 / 129 / 500 MB |
+| engine RSS, 90,000 objects: the same | | | 25 / 359 / 1,484 MB |
+
+Catalog format 3 leaves fields at their default values out of each record (a table's record
+1.9 kB → about 0.7 kB of JSON): smaller writes per DDL commit, a third less on disk. The
+generated catalog rows are what is heavy: shared rows of every catalog a query has read, a
+`Value` per column of every row. Making them compact
+(columns stored as the catalog entries they come from, rows made per scan) is the next
+resource item.
+
+### Verification (round 21, agent 92, second batch)
+
+`cargo test -p pg-engine` (every test binary; `tests/wire.rs`' racing CREATEs of one name now
+wait and fail as PostgreSQL's do), clippy (no new warnings), `difftest smoke`; the isolation
+suite on a private reference: 121 / 122 specs, 1,647 / 1,648 permutations, and the engine's own
+specs 88 / 88 (`roll-concurrent-create` new); the regression suite in full (debug build,
+private reference `a92-ref1`) against the committed `results.tsv`: 51,148 / 51,150, no unit
+changed; `pg_dump_tap` 14,817 / 14,817; `pg_dump_roundtrip` over that run's database: 0 errors
+restoring either side's dump into the other, every way; dumps 2,720 / 2,733 entries alike.
+New tests: `catalog_format.rs` `records_leave_defaults_out_and_downgrade_whole`, spec
+`roll-concurrent-create`, the debug cross-check of `functions_named` against a scan.
+
 ## Deep input (round 19, agent 63)
 
 The stack grows on demand at recursion points (HANDOFF.md, "Deep input"). This section

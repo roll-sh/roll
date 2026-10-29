@@ -192,6 +192,19 @@ pub const UNIQUE_KEY: u8 = 4;
 /// sees of another writer's index entry, held by the writer until its (sub)transaction ends.
 pub const EXCL_ENTRY: u8 = 12;
 
+/// A system catalog's unique index entry of name `name` in namespace `ns` (`index`: the
+/// catalog index's oid, which no user table's index prefix starts with): the lock a
+/// transaction creating or renaming an object to that name holds until it ends, as
+/// PostgreSQL's in-progress entry of the uncommitted catalog row makes another transaction
+/// inserting the same key wait for it (`Ddl::reserve_names`).
+pub fn catalog_name_key(index: u32, ns: u32, name: &str) -> Vec<u8> {
+    let mut k = prefixed(UNIQUE_KEY);
+    k.extend_from_slice(&index.to_be_bytes());
+    k.extend_from_slice(&ns.to_be_bytes());
+    k.extend_from_slice(name.as_bytes());
+    k
+}
+
 /// The lock standing for row `row`'s entry in exclusion constraint `con` while its writer
 /// runs (`Txn::hold_exclusion_entry`).
 pub fn excl_entry_key(con: u32, row: &[u8]) -> Vec<u8> {

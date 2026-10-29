@@ -71,41 +71,47 @@ pub struct Column {
     pub ty: DataType,
     pub not_null: bool,
     /// Default expression as SQL text (re-parsed when used).
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub default: Option<String>,
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub identity: Option<Identity>,
     /// Sequence backing a serial/identity column.
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub seq: Option<u32>,
     /// `GENERATED ALWAYS AS (expr) [STORED | VIRTUAL]`
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub generated: Option<String>,
     /// The generated column is VIRTUAL (computed when read). Its value is still kept in the
     /// row, but nothing outside reads it from there.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub virtual_gen: bool,
     /// Value for rows stored before this column was added.
-    #[serde(default, with = "value_serde")]
+    #[serde(default, with = "value_serde", skip_serializing_if = "compact::none")]
     pub missing: Option<Value>,
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub dropped: bool,
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub collation: Option<String>,
     /// The domain this column was declared with (its `ty` is the domain's base type).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub domain: Option<u32>,
     /// Number of parents this column is inherited from (attinhcount).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::zero16")]
     pub inhcount: u16,
     /// Defined locally, not only inherited (attislocal).
-    #[serde(default = "yes")]
+    #[serde(default = "yes", skip_serializing_if = "compact::truthy")]
     pub islocal: bool,
     /// ALTER COLUMN SET STATISTICS (attstattarget; None: the default).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub stattarget: Option<i16>,
     /// ALTER COLUMN SET STORAGE (attstorage; None: the type's).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub storage: Option<char>,
     /// COMPRESSION pglz / lz4 (attcompression 'p' / 'l'; None: the default).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub compression: Option<char>,
     /// ALTER COLUMN SET (n_distinct = …) as `name=value` (attoptions).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::empty")]
     pub options: Vec<String>,
     /// attndims: the array dimensions the column was declared with (`int[][]`: 2); 0 when it
     /// was not declared with a type (CREATE TABLE AS, LIKE, inherited). None: from before
@@ -114,7 +120,7 @@ pub struct Column {
     pub ndims: Option<i16>,
     /// The pg_attrdef oid of the default or generation expression (0: none, or not yet
     /// given one; `Catalog::put_table` gives it).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::zero")]
     pub def_oid: u32,
 }
 
@@ -261,28 +267,28 @@ pub struct Constraint {
     pub validated: bool,
     /// DEFERRABLE / INITIALLY DEFERRED of index-backed constraints (foreign keys keep theirs
     /// in the kind).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub deferrable: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub initially_deferred: bool,
     /// Number of parents this constraint is inherited from (coninhcount).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::zero16")]
     pub inhcount: u16,
     /// Defined locally, not only inherited (conislocal).
-    #[serde(default = "yes")]
+    #[serde(default = "yes", skip_serializing_if = "compact::truthy")]
     pub islocal: bool,
     /// The partitioned table's constraint this partition's one comes from (conparentid).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::zero")]
     pub parent: u32,
     /// Checked (conenforced); NOT ENFORCED check and foreign key constraints aren't.
-    #[serde(default = "yes")]
+    #[serde(default = "yes", skip_serializing_if = "compact::truthy")]
     pub enforced: bool,
     /// NOT NULL ... NO INHERIT (check constraints keep theirs in the kind).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub no_inherit: bool,
     /// tgenabled of a foreign key's internal triggers, by trigger oid, where not 'O'
     /// (ALTER TABLE ... DISABLE TRIGGER ALL).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::empty")]
     pub ri_enabled: Vec<(u32, char)>,
     /// A foreign key referencing a partitioned table: the oid before its check triggers',
     /// which follow the constraints derived for the referenced partitions (0: the check
@@ -385,16 +391,18 @@ pub enum IndexKey {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexColumn {
     pub key: IndexKey,
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub desc: bool,
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub nulls_first: bool,
     /// Explicit operator class oid (0: the type's default).
     #[serde(default)]
     pub opclass: u32,
     /// Explicit `COLLATE` name.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub collation: Option<String>,
     /// ALTER INDEX ... ALTER COLUMN n SET STATISTICS (expression columns).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub stattarget: Option<i16>,
     /// Operator class options (`tsvector_ops (siglen = 100)`), as `name=value`
     /// (pg_attribute.attoptions of the index column).
@@ -410,25 +418,28 @@ pub struct Index {
     /// Prefix of this index's keys within the table's keyspace (0 is the primary data).
     pub id: u32,
     pub columns: Vec<IndexColumn>,
+    #[serde(default, skip_serializing_if = "compact::empty")]
     pub include: Vec<usize>,
     pub unique: bool,
     pub primary: bool,
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub nulls_not_distinct: bool,
     /// Partial index predicate (SQL).
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub predicate: Option<String>,
     pub method: String,
     pub valid: bool,
     /// WITH (storage parameters), as `name=value`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::empty")]
     pub options: Vec<String>,
     /// The partitioned index this partition's index is attached to (0: none).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::zero")]
     pub parent: u32,
     /// CLUSTER ... USING / ALTER TABLE ... CLUSTER ON marked it (pg_index.indisclustered).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub clustered: bool,
     /// REPLICA IDENTITY USING INDEX chose it (pg_index.indisreplident).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub replident: bool,
 }
 
@@ -461,19 +472,26 @@ pub struct Table {
     pub owner: u32,
     pub columns: Vec<Column>,
     /// Primary key columns; without one rows are keyed by a hidden rowid.
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub pkey: Option<Vec<usize>>,
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub pkey_index: Option<u32>,
     /// The primary key is deferrable: its values may clash until it is checked, so rows are
     /// stored under the hidden rowid and the key's index has entries of its own (id != 0).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub pkey_unkeyed: bool,
+    #[serde(default, skip_serializing_if = "compact::empty")]
     pub indexes: Vec<u32>,
     pub constraints: Vec<Constraint>,
     pub next_index_id: u32,
     /// Sequence used for hidden rowids.
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub rowid_seq: Option<u32>,
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub temporary: bool,
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub unlogged: bool,
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub comment: Option<String>,
     /// The row type's oid; 0 until the table is stored.
     #[serde(default)]
@@ -492,27 +510,27 @@ pub struct Table {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toast_indname: Option<String>,
     /// ENABLE ROW LEVEL SECURITY / FORCE ROW LEVEL SECURITY.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub rls: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::falsy")]
     pub rls_force: bool,
     /// CREATE TABLE ... OF type: the composite type's oid (0: not a typed table).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::zero")]
     pub of_type: u32,
     /// INHERITS: the parent tables, in order (pg_inherits.inhseqno is the position + 1).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::empty")]
     pub inherits: Vec<u32>,
     /// PARTITION BY: a partitioned table, which stores no rows itself.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub partkey: Option<PartKey>,
     /// PARTITION OF / ATTACH PARTITION: the bound of a partition (its parent is `inherits[0]`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub partbound: Option<PartBound>,
     /// WITH (storage parameters), as `name=value` (pg_class.reloptions).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::empty")]
     pub options: Vec<String>,
     /// REPLICA IDENTITY FULL / NOTHING / USING INDEX ('f', 'n', 'i'; None: DEFAULT).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "compact::none")]
     pub replident: Option<char>,
     /// CREATE FOREIGN TABLE: a foreign table (relkind 'f'), which has no storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -940,11 +958,8 @@ impl Catalog {
         } else {
             &[2281, 26, 2281, 23]
         };
-        self.functions.values().find(|f| {
-            f.name == name
-                && f.args.len() == want.len()
-                && f.args.iter().zip(want).all(|(a, w)| a.1.oid() == *w)
-        })
+        self.functions_named(name)
+            .find(|f| f.args.len() == want.len() && f.args.iter().zip(want).all(|(a, w)| a.1.oid() == *w))
     }
 }
 
@@ -1598,6 +1613,60 @@ pub struct Role {
     pub valid_until: Option<i64>,
 }
 
+/// What catalog format 3 leaves out of a stored object (`persist`): a field at its default
+/// value, which reading gives it back (`#[serde(default)]`). `full` stores every field, as
+/// format 2 and older builds read them (`roll-engine --downgrade-catalog`).
+pub mod compact {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FULL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct Restore(bool);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FULL.with(|f| f.set(self.0));
+        }
+    }
+
+    /// `f` with every field stored.
+    pub fn full<T>(f: impl FnOnce() -> T) -> T {
+        let _r = Restore(FULL.with(|x| x.replace(true)));
+        f()
+    }
+
+    fn on() -> bool {
+        !FULL.with(|f| f.get())
+    }
+
+    pub fn none<T>(v: &Option<T>) -> bool {
+        v.is_none() && on()
+    }
+
+    #[allow(clippy::ptr_arg)] // (serde hands `skip_serializing_if` the field: a `&Vec`.)
+    pub fn empty<T>(v: &Vec<T>) -> bool {
+        v.is_empty() && on()
+    }
+
+    pub fn falsy(v: &bool) -> bool {
+        !*v && on()
+    }
+
+    pub fn truthy(v: &bool) -> bool {
+        *v && on()
+    }
+
+    pub fn zero(v: &u32) -> bool {
+        *v == 0 && on()
+    }
+
+    pub fn zero16(v: &u16) -> bool {
+        *v == 0 && on()
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -1807,7 +1876,7 @@ pub struct Catalog {
     #[serde(default)]
     pub domains: BTreeMap<u32, Arc<Domain>>,
     #[serde(default)]
-    pub functions: pmap::PMap<Arc<Function>>,
+    pub functions: pmap::IndexedMap<Arc<Function>, relindex::FuncIx>,
     #[serde(default)]
     pub roles: BTreeMap<u32, Role>,
     /// `COMMENT ON`, by object (`comments`: a record per object since catalog format 2).
@@ -2907,6 +2976,21 @@ impl Catalog {
             .unwrap_or_else(|| RelStats::initial(kind))
     }
 
+    /// The user functions named `name` (any schema), in oid order (`relindex::FuncIx`).
+    /// (Collected apart: the binder's call resolution, on the stack of every nested call
+    /// level, then holds a vector's iterator rather than the index's nested ones.)
+    #[inline(never)]
+    pub fn functions_named<'a>(&'a self, name: &str) -> std::vec::IntoIter<&'a Arc<Function>> {
+        let ix = self.functions.ix();
+        #[cfg(debug_assertions)]
+        {
+            let scan: Vec<u32> = self.functions.values().filter(|f| f.name == name).map(|f| f.oid).collect();
+            debug_assert_eq!(ix.named(name).collect::<Vec<_>>(), scan, "functions named {name}");
+        }
+        let found: Vec<&'a Arc<Function>> = ix.named(name).filter_map(|o| self.functions.get(&o)).collect();
+        found.into_iter()
+    }
+
     /// The table an index is on: a table, or a materialized view's storage.
     pub fn index_table(&self, oid: u32) -> Option<Arc<Table>> {
         self.tables
@@ -2934,6 +3018,11 @@ impl Catalog {
             .iter()
             .filter_map(|i| self.indexes.get(i).cloned())
             .collect()
+    }
+
+    /// The relation named `name` in `schema` (its kind and oid), from the name index.
+    pub fn relation_entry(&self, schema: u32, name: &str) -> Option<(RelKind, u32)> {
+        self.names.get(&(schema, name.to_string())).cloned()
     }
 
     pub fn name_taken(&self, schema: u32, name: &str) -> bool {
@@ -3615,10 +3704,10 @@ impl Catalog {
             .map(|f| f.oid)
             .collect();
         for oid in uses {
-            let Some(f) = self.functions.get_mut(&oid) else {
+            let Some(f) = self.functions.get(&oid) else {
                 continue;
             };
-            let f = Arc::make_mut(f);
+            let mut f = (**f).clone();
             if let Some(t) = subst(&f.ret, rowtype, new) {
                 f.ret = t;
             }
@@ -3628,6 +3717,7 @@ impl Catalog {
                     *t = nt;
                 }
             }
+            self.functions.insert(oid, Arc::new(f));
         }
     }
 
@@ -4405,7 +4495,7 @@ impl Catalog {
             .effective_path(search_path)
             .into_iter()
             .filter(|s| !self.schema_name(*s).starts_with("pg_temp"))
-            .find(|s| self.functions.values().any(|g| g.schema == *s && same(g)));
+            .find(|s| self.functions_named(&f.name).any(|g| g.schema == *s && same(g)));
         if first == Some(f.schema) {
             quote_ident(&f.name)
         } else {

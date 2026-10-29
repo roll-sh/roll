@@ -91,7 +91,7 @@ impl CatalogNames {
             _ => Vec::new(),
         };
         let mut procs: Vec<(u32, u32, Vec<u32>)> = Vec::new();
-        for f in cat.functions.values().filter(|f| &f.name == fname) {
+        for f in cat.functions_named(fname) {
             let args = f
                 .args
                 .iter()

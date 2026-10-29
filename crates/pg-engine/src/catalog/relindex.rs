@@ -680,3 +680,32 @@ mod tests {
         assert!(!indexable_word(""));
     }
 }
+
+/// The functions map's index: functions by name (what calls, CREATE FUNCTION and the
+/// object lookups ask for; each scanned every function, 10,000 user functions included).
+#[derive(Clone, Default)]
+pub struct FuncIx {
+    named: PHash<String, Counts>,
+}
+
+impl FuncIx {
+    /// The oids of the functions named `name`, ascending.
+    pub fn named<'a>(&'a self, name: &str) -> impl Iterator<Item = u32> + 'a {
+        self.named.get(&name.to_string()).into_iter().flat_map(|c| c.keys())
+    }
+}
+
+impl MapIndex<Arc<super::Function>> for FuncIx {
+    fn add(&mut self, oid: u32, f: &Arc<super::Function>) {
+        set_member(&mut self.named, f.name.clone(), oid, true);
+    }
+    fn remove(&mut self, oid: u32, f: &Arc<super::Function>) {
+        set_member(&mut self.named, f.name.clone(), oid, false);
+    }
+    fn replace(&mut self, oid: u32, old: &Arc<super::Function>, new: &Arc<super::Function>) {
+        if old.name != new.name {
+            self.remove(oid, old);
+            self.add(oid, new);
+        }
+    }
+}

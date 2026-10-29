@@ -1226,18 +1226,30 @@ fn scale_more(cx: &Ctx) {
             cx.report("scale_more", what, &[("objects", done.to_string()), ("per_op_ms", format!("{:.3}", s * 1000.0 / m as f64))]);
         }
     };
+    // (Names from `from` on: a second run over the same catalog.)
+    let from: usize = cx.opt("from", 0);
     let t = |i: usize| (i % schemas, i % tables.max(1));
     steps(c.as_mut(), "create_function", functions, &|i| {
+        let i = i + from;
         let (s, _) = t(i);
         format!("CREATE FUNCTION sc{s}.f{i}(x int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT x + {i}'")
     });
     steps(c.as_mut(), "create_view", views, &|i| {
+        let i = i + from;
         let (s, k) = t(i);
         format!("CREATE VIEW sc{s}.v{i} AS SELECT id, a, b + {i} AS c FROM sc{}.t{k} WHERE id > 0", k % schemas)
     });
     steps(c.as_mut(), "create_index", indexes, &|i| {
+        let i = i + from;
         let (_, k) = t(i);
         format!("CREATE INDEX ix_more_{i} ON sc{}.t{k} (a, b)", k % schemas)
+    });
+    // More partitions of `scp.p` (`scale` made `parts` of them).
+    let parts: usize = cx.opt("parts", 1_000);
+    let more_parts: usize = cx.opt("more-parts", 0);
+    steps(c.as_mut(), "create_partition", more_parts, &|j| {
+        let k = parts + j;
+        format!("CREATE TABLE scp.p{k} PARTITION OF scp.p FOR VALUES FROM ({}) TO ({})", k * 10, k * 10 + 10)
     });
 }
 

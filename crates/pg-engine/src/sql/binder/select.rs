@@ -4250,9 +4250,8 @@ impl Binder<'_, '_> {
         }
         let path = self.cat.routine_path(&self.ctx.search_path);
         let f = path.iter().find_map(|sc| {
-            self.cat.functions.values().find(|f| {
+            self.cat.functions_named(name).find(|f| {
                 f.schema == *sc
-                    && f.name == name
                     && f.args.len() == 1
                     && f.args[0].1.typname() == "internal"
                     && f.ret.typname() == "tsm_handler"
@@ -5308,7 +5307,7 @@ impl Binder<'_, '_> {
         } else {
             None
         };
-        let has_user = self.cat.functions.values().any(|x| x.name == name);
+        let has_user = self.cat.functions_named(&name).next().is_some();
         if !has_user {
             return Ok(None);
         }

@@ -111,28 +111,21 @@ fn outer_refs(e: &Expr) -> Vec<usize> {
 
 /// `e` (over the old row) over the new row; a column that stays a column keeps its type.
 pub(super) fn subst(e: &Expr, map: &[Expr]) -> Expr {
-    e.clone()
-        .transform(&mut |x| {
-            Ok(match x {
-                Expr::Col(i, t) => match map.get(i) {
-                    Some(Expr::Col(j, _)) => Expr::Col(*j, t),
-                    Some(m) => m.clone(),
-                    None => Expr::Col(i, t),
-                },
-                x => x,
-            })
-        })
-        .unwrap()
+    e.clone().rewrite(&mut |x| match x {
+        Expr::Col(i, t) => match map.get(i) {
+            Some(Expr::Col(j, _)) => Expr::Col(*j, t),
+            Some(m) => m.clone(),
+            None => Expr::Col(i, t),
+        },
+        x => x,
+    })
 }
 
 fn subst_outer(e: Expr, params: &[Expr]) -> Expr {
-    e.transform(&mut |x| {
-        Ok(match x {
-            Expr::Outer(1, i, t) => params.get(i).cloned().unwrap_or(Expr::Outer(1, i, t)),
-            x => x,
-        })
+    e.rewrite(&mut |x| match x {
+        Expr::Outer(1, i, t) => params.get(i).cloned().unwrap_or(Expr::Outer(1, i, t)),
+        x => x,
     })
-    .unwrap()
 }
 
 /// Whether the plan reads any value of an enclosing level (a LATERAL join's parameters

@@ -495,7 +495,7 @@ impl Binder<'_, '_> {
                 // As in Postgres, `a.b` is never `column.field` (that's `(a).b` or `t.a.b`).
                 if self.rel_exists(&[rel]) {
                     // ... but it may be a function of the row: `p.f` is `f(p)`.
-                    if self.cat.functions.values().any(|f| f.name == *col && f.args.len() == 1) {
+                    if self.cat.functions_named(col).any(|f| f.args.len() == 1) {
                         let s = |v: &str| pb::Node {
                             node: Some(NodeEnum::String(pb::String { sval: v.to_string() })),
                         };
@@ -5393,9 +5393,8 @@ impl Binder<'_, '_> {
             None => self.cat.routine_path(&self.ctx.search_path),
         };
         self.cat
-            .functions
-            .values()
-            .filter(|f| f.agg.is_some() && f.name == name && schemas.contains(&f.schema))
+            .functions_named(name)
+            .filter(|f| f.agg.is_some() && schemas.contains(&f.schema))
             .cloned()
             .collect()
     }
@@ -6649,8 +6648,8 @@ impl Binder<'_, '_> {
             }
             // A user function (LANGUAGE internal WINDOW) over a built-in window function's
             // code: its parameters (names, defaults, polymorphism) apply.
-            None if self.cat.functions.values().any(|u| {
-                u.name == name && u.language == "internal" && u.body.starts_with("window_")
+            None if self.cat.functions_named(name).any(|u| {
+                u.language == "internal" && u.body.starts_with("window_")
             }) =>
             {
                 let Some((fdef, args)) = self.resolve_user_function(None, name, f)? else {

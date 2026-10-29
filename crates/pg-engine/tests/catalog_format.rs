@@ -3,6 +3,9 @@
 //! its comments unchanged and in pg_description's order; `Engine::downgrade_catalogs`
 //! (`roll-engine --downgrade-catalog`) stores it as format 1 again; and a DDL commit writes
 //! the comments of the objects it changed, not every comment.
+//!
+//! Catalog format 3 (round 21, agent 92): a record leaves out the fields at their default
+//! values; a downgrade stores every field again, and the next open rewrites the records.
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
@@ -132,5 +135,52 @@ fn comment_writes_dont_grow_with_the_comments() {
     add(&mut s, 5, 300);
     let large = written(&mut s, "COMMENT ON TABLE c2 IS 'changed'");
     assert!(large <= small + 64, "{small} catalog bytes written with 5 comments, {large} with 300");
+    engine.shutdown();
+}
+
+/// The stored record of table `name` (its JSON), and the bytes of all records.
+fn table_record(engine: &Engine, name: &str) -> (String, usize) {
+    let all = engine.catalog_record_bytes_for_test("postgres").unwrap();
+    let bytes = all.iter().map(|(k, v)| k.len() + v.len()).sum();
+    let needle = format!("\"name\":\"{name}\"");
+    let rec = all
+        .iter()
+        .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+        .find(|v| v.contains(&needle) && v.contains("\"columns\""))
+        .unwrap();
+    (rec, bytes)
+}
+
+/// Format 3 records leave default values out; `downgrade_catalogs` stores every field (what
+/// a format 2 or older build requires), and opening the database again stores it compactly
+/// once more, the catalog alike throughout.
+#[test]
+fn records_leave_defaults_out_and_downgrade_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let what = "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attislocal, a.attinhcount, pg_get_expr(d.adbin, d.adrelid) FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid IN ('wide'::regclass, 'kid'::regclass) AND a.attnum > 0 ORDER BY a.attrelid, a.attnum";
+    let cons = "SELECT conname, contype, convalidated, conislocal, coninhcount, condeferrable FROM pg_constraint WHERE conrelid IN ('wide'::regclass, 'kid'::regclass) ORDER BY conname";
+    let expected = {
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, SETUP);
+        run(&mut s, "CREATE TABLE wide (a int PRIMARY KEY, b text DEFAULT 'x' COLLATE \"C\", c numeric(5,2) NOT NULL, d int[], e int UNIQUE DEFERRABLE);\nCREATE TABLE kid (f int) INHERITS (wide);\nCREATE INDEX wide_bc ON wide (b DESC NULLS LAST, c) WHERE c > 0");
+        (rows(&mut s, what), rows(&mut s, cons), comments(&mut s))
+    };
+    let (rec, compact) = table_record(&engine, "wide");
+    assert!(!rec.contains("\"dropped\"") && !rec.contains("\"identity\""), "{rec}");
+    assert!(rec.contains("\"collation\":\"C\""), "{rec}");
+    assert!(engine.downgrade_catalogs().unwrap().iter().any(|d| d == "postgres"));
+    let (rec, whole) = table_record(&engine, "wide");
+    assert!(rec.contains("\"dropped\":false") && rec.contains("\"islocal\":true"), "{rec}");
+    assert!(whole > compact * 3 / 2, "{whole} bytes whole, {compact} compact");
+    engine.shutdown();
+    drop(engine);
+
+    let engine = open(dir.path());
+    let mut s = engine.connect(2, "postgres", "postgres", "t").unwrap();
+    assert_eq!((rows(&mut s, what), rows(&mut s, cons), comments(&mut s)), expected);
+    let (rec, again) = table_record(&engine, "wide");
+    assert!(!rec.contains("\"dropped\""), "{rec}");
+    assert_eq!(again, compact);
     engine.shutdown();
 }

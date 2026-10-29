@@ -84,9 +84,8 @@ impl Ddl<'_, '_> {
             a.len() == args.len() && a.iter().zip(args).all(|(a, b)| a.same_base(b))
         };
         if let Some(f) = schemas.iter().find_map(|sc| {
-            self.cat.functions.values().find(|f| {
+            self.cat.functions_named(&name).find(|f| {
                 f.schema == *sc
-                    && f.name == name
                     && !f.procedure
                     && same(&f.args.iter().map(|a| a.1.clone()).collect::<Vec<_>>())
             })

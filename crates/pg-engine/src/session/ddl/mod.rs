@@ -546,6 +546,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
 
     /// Store the edited catalog in the transaction.
     fn save(&mut self) -> Result<()> {
+        self.reserve_names()?;
         self.lock_references()?;
         self.prepare_save();
         let before = self.ctx.catalog();
@@ -563,6 +564,97 @@ impl<'c, 'a> Ddl<'c, 'a> {
             .txn
             .borrow_mut()
             .lock(&key, mode, crate::txn::locks::WaitPolicy::Block, &|| format!("object {oid}"))?;
+        Ok(())
+    }
+
+    /// The names this command gave schemas and relations (made or renamed), each reserved as
+    /// PostgreSQL's catalog unique index entry of the uncommitted row is: another transaction
+    /// that made the name first and hasn't ended yet is waited for, and once it has committed
+    /// the name is taken (the unique violation PostgreSQL's index raises; CREATE ... IF NOT
+    /// EXISTS checked before the wait, as there). Concurrent commits of one name used to
+    /// both succeed, merged (Flyway's concurrent migrates ran their first version twice).
+    fn reserve_names(&mut self) -> Result<()> {
+        use crate::catalog::RelKind;
+        const NSPNAME: u32 = 2684;
+        const TYPNAME: u32 = 2704;
+        const RELNAME: u32 = 2663;
+        let before = self.ctx.txn.borrow().catalog();
+        // (index, namespace, name, whether a row type comes with it)
+        let mut names: Vec<(u32, u32, String)> = Vec::new();
+        for (oid, s) in &self.cat.schemas {
+            if before.schemas.get(oid).is_none_or(|b| b.name != s.name) {
+                names.push((NSPNAME, 0, s.name.clone()));
+            }
+        }
+        let rel = |names: &mut Vec<(u32, u32, String)>, schema: u32, name: &str, rowtype: bool| {
+            if rowtype {
+                names.push((TYPNAME, schema, name.to_string()));
+            }
+            names.push((RELNAME, schema, name.to_string()));
+        };
+        for (_, was, now) in before.tables.changes(&self.cat.tables) {
+            if let Some(t) = now.filter(|t| !t.temporary && was.is_none_or(|w| w.name != t.name || w.schema != t.schema)) {
+                rel(&mut names, t.schema, &t.name, t.rowtype != 0);
+            }
+        }
+        for (_, was, now) in before.views.changes(&self.cat.views) {
+            if let Some(v) = now.filter(|v| was.is_none_or(|w| w.name != v.name || w.schema != v.schema)) {
+                rel(&mut names, v.schema, &v.name, true);
+            }
+        }
+        for (_, was, now) in before.sequences.changes(&self.cat.sequences) {
+            if let Some(s) = now.filter(|s| was.is_none_or(|w| w.name != s.name || w.schema != s.schema)) {
+                rel(&mut names, s.schema, &s.name, false);
+            }
+        }
+        if names.is_empty() {
+            return Ok(());
+        }
+        let temp = |s: u32| self.cat.schemas.get(&s).is_some_and(|x| x.name.starts_with("pg_temp"));
+        names.retain(|(_, s, _)| !temp(*s));
+        for (index, ns, name) in &names {
+            let key = crate::txn::locks::catalog_name_key(*index, *ns, name);
+            let what = || format!("the name \"{name}\"");
+            self.ctx
+                .txn
+                .borrow_mut()
+                .lock_unique_key(&key, None, None, crate::txn::locks::WaitPolicy::Block, &what, None)?;
+        }
+        // What committed meanwhile (the transaction waited for, or one that committed after
+        // this statement's catalog was taken): an object this transaction's DDL didn't start
+        // from (one it dropped and made again had been there).
+        let now = self.ctx.sess.db.latest_catalog();
+        let base = self.ctx.txn.borrow().catalog_base().unwrap_or_else(|| before.clone());
+        let known = |oid: u32| {
+            [&base, &before].iter().any(|c| {
+                c.schemas.contains_key(&oid)
+                    || c.tables.contains_key(&oid)
+                    || c.views.contains_key(&oid)
+                    || c.sequences.contains_key(&oid)
+                    || c.indexes.contains_key(&oid)
+            })
+        };
+        for (index, ns, name) in &names {
+            let taken = match *index {
+                NSPNAME => now.schema_by_name(name).is_some_and(|s| !known(s.oid)),
+                _ => now.relation_entry(*ns, name).is_some_and(|(kind, oid)| {
+                    let rowtype = !matches!(kind, RelKind::Sequence | RelKind::Index);
+                    !known(oid) && (*index == RELNAME || rowtype)
+                }),
+            };
+            if taken {
+                let (index_name, detail) = match *index {
+                    NSPNAME => ("pg_namespace_nspname_index", format!("Key (nspname)=({name}) already exists.")),
+                    TYPNAME => ("pg_type_typname_nsp_index", format!("Key (typname, typnamespace)=({name}, {ns}) already exists.")),
+                    _ => ("pg_class_relname_nsp_index", format!("Key (relname, relnamespace)=({name}, {ns}) already exists.")),
+                };
+                return Err(Error::new(
+                    code::UNIQUE_VIOLATION,
+                    format!("duplicate key value violates unique constraint \"{index_name}\""),
+                )
+                .detail(detail));
+            }
+        }
         Ok(())
     }
 

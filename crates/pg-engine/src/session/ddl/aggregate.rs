@@ -103,8 +103,8 @@ impl Ddl<'_, '_> {
         };
         let mut out = Vec::new();
         for s in schemas {
-            for f in self.cat.functions.values().filter(|f| {
-                f.schema == s && f.name == name && !f.procedure && f.agg.is_none() && f.args.len() == nargs
+            for f in self.cat.functions_named(&name).filter(|f| {
+                f.schema == s && !f.procedure && f.agg.is_none() && f.args.len() == nargs
             }) {
                 out.push(Cand {
                     oid: f.oid,

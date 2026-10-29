@@ -1058,7 +1058,7 @@ fn visible(a: &[Value], c: &FnCtx) -> Result<Value> {
         };
         let first = path
             .into_iter()
-            .find(|p| cat.functions.values().any(|g| g.schema == *p && same(g)));
+            .find(|p| cat.functions_named(&f.name).any(|g| g.schema == *p && same(g)));
         return Ok(Value::Bool(first == Some(f.schema)));
     }
     // A range type's constructors (and its multirange's): visible if no schema earlier in

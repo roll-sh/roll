@@ -21,8 +21,11 @@ use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// The catalog format this build writes (`Catalog::catalog_format`).
-pub const CATALOG_FORMAT: u32 = 2;
+/// The catalog format this build writes (`Catalog::catalog_format`). Format 3 leaves a
+/// stored object's fields at their default values out of its record (`catalog::compact`:
+/// a table's record was 1.9 kB of JSON, most of it defaults, read and parsed at every open);
+/// a database stored in an older format is rewritten when first opened.
+pub const CATALOG_FORMAT: u32 = 3;
 
 /// Where the per-object records lie: after `CATALOG_KEY` and the sequences' keys, in the
 /// reserved keyspace of table oid 0.
@@ -720,7 +723,8 @@ pub fn load(
 
 /// Downgrading to a build of catalog format 1 (`roll-engine --downgrade-catalog`, after a
 /// clean shutdown): the writes that store `c` as format 1 had it, comments in the header
-/// (as a list in pg_description's order) and no comment records.
+/// (as a list in pg_description's order), no comment records, every record whole (format 3
+/// leaves default values out). A format 2 build reads that too.
 pub fn downgrade_writes(c: &Catalog) -> Result<Writes> {
     let mut m = header_map(c)?;
     m.insert("catalog_format".into(), 1.into());
@@ -728,6 +732,9 @@ pub fn downgrade_writes(c: &Catalog) -> Result<Writes> {
     let list: Vec<(u32, i32, &str)> = c.comments_in_order();
     m.insert("comments".into(), serde_json::to_value(&list).map_err(|e| internal(e.to_string()))?);
     let mut out = vec![(crate::txn::CATALOG_KEY.to_vec(), Some(json(&m)?))];
+    // (Every record with every field, as format 2 had them: such a build requires them.)
+    super::compact::full(|| all_records(c, &mut out))?;
+    out.retain(|(k, _)| k.get(RECORD_PREFIX.len()) != Some(&COMMENTS_TAG));
     for oid in c.comments.keys() {
         out.push((record_key(COMMENTS_TAG, *oid), None));
     }
@@ -740,7 +747,7 @@ pub fn downgrade_writes(c: &Catalog) -> Result<Writes> {
 pub fn legacy_writes(c: &Catalog, records: Vec<Vec<u8>>) -> Result<Writes> {
     let mut c = c.clone();
     c.catalog_format = 0;
-    let mut out = vec![(crate::txn::CATALOG_KEY.to_vec(), Some(json(&c)?))];
+    let mut out = vec![(crate::txn::CATALOG_KEY.to_vec(), Some(super::compact::full(|| json(&c))?))];
     out.extend(records.into_iter().map(|k| (k, None)));
     Ok(out)
 }

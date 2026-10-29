@@ -229,9 +229,8 @@ impl Ddl<'_, '_> {
             }
         }
         for s in self.lookup_schemas(&parts)? {
-            let mine = self.cat.functions.values().find(|f| {
+            let mine = self.cat.functions_named(&name).find(|f| {
                 f.schema == s
-                    && f.name == name
                     && proc_info(&self.cat, f.oid).is_some_and(|p| p.args == types)
             });
             if let Some(f) = mine {

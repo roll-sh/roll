@@ -2823,9 +2823,8 @@ impl Ddl<'_, '_> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let found = match self.cat.functions.values().find(|f| {
-            f.name == name
-                && schemas.contains(&f.schema)
+        let found = match self.cat.functions_named(&name).find(|f| {
+            schemas.contains(&f.schema)
                 && !f.procedure
                 && f.args.iter().map(|a| &a.1).eq(args.iter())
         }) {
@@ -4005,9 +4004,8 @@ impl Ddl<'_, '_> {
                     let parts = names(&fc.funcname);
                     let pname = parts.last().cloned().unwrap_or_default();
                     let path = self.cat.routine_path(self.search_path());
-                    let outs = self.cat.functions.values().any(|p| {
+                    let outs = self.cat.functions_named(&pname).any(|p| {
                         p.procedure
-                            && p.name == pname
                             && (parts.len() > 1 || path.contains(&p.schema))
                             && p.all_params().len() == fc.args.len()
                             && !p.out_cols.is_empty()
@@ -4126,9 +4124,8 @@ impl Ddl<'_, '_> {
     ) -> Result<String> {
         let existing = self
             .cat
-            .functions
-            .values()
-            .find(|f| f.schema == func.schema && f.name == func.name && f.same_params(&func))
+            .functions_named(&func.name)
+            .find(|f| f.schema == func.schema && f.same_params(&func))
             .cloned();
         func.oid = match existing {
             Some(f) if s.replace && f.agg.is_some() => {
@@ -4245,9 +4242,8 @@ impl Ddl<'_, '_> {
         };
         let cands: Vec<Arc<Function>> = self
             .cat
-            .functions
-            .values()
-            .filter(|f| f.name == name && schemas.contains(&f.schema))
+            .functions_named(&name)
+            .filter(|f| schemas.contains(&f.schema))
             .cloned()
             .collect();
         if owa.args_unspecified {
@@ -4585,9 +4581,8 @@ impl Ddl<'_, '_> {
             return Ok(0);
         };
         const INTERNAL: u32 = 2281;
-        let user = self.cat.functions.values().find(|f| {
-            f.name == *name
-                && f.args.len() == 1
+        let user = self.cat.functions_named(name).find(|f| {
+            f.args.len() == 1
                 && f.args[0].1.oid() == INTERNAL
                 && (parts.len() < 2 || self.cat.schema_name(f.schema) == parts[parts.len() - 2])
         });

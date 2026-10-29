@@ -276,7 +276,7 @@ impl Database {
 
     /// The catalog a commit's DDL is checked against and merged onto (under the store's
     /// commit lock): the last one appended to the WAL, published or not.
-    fn latest_catalog(&self) -> Arc<Catalog> {
+    pub(crate) fn latest_catalog(&self) -> Arc<Catalog> {
         let pending = self.pending.lock().as_ref().map(|(_, c)| c.clone());
         pending.unwrap_or_else(|| self.catalog())
     }

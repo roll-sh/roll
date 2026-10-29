@@ -328,8 +328,12 @@ savepoints, listeners in a transaction, LISTEN / UNLISTEN at commit), sequences 
 setval outside the transaction, CACHE ranges, ALTER SEQUENCE waits), serialization failures
 and their retries (write skew, REPEATABLE READ's concurrent update / delete / lock / ON
 CONFLICT, read-only and deferrable), DETACH ... FINALIZE, exclusion constraints (and ON
-CONFLICT under them, a deferred one's recheck: round 20, agent 88). All 75 permutations of
-the 9 specs match; the last two of round 20's first 68 needed fixes. (They were written against both servers and checked to wait and fail
+CONFLICT under them, a deferred one's recheck: round 20, agent 88), and (round 21, agent 92,
+`roll-concurrent-create`) CREATE SCHEMA / TABLE / SEQUENCE / VIEW of one name in two
+transactions: the second waits for the first, then fails with PostgreSQL's unique violation
+once it commits, goes ahead once it rolls back, and IF NOT EXISTS skips with a NOTICE only when
+the first committed before the check. All 88 permutations of the 11 specs match; the last two
+of round 20's first 68 needed fixes. (They were written against both servers and checked to wait and fail
 where the reference does: 20 waits, 27 errors, 19 notifications.)
 
 ## Concurrency round 4 (round 20, agent 88)

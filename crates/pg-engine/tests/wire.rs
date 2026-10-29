@@ -577,9 +577,16 @@ fn concurrent_ddl() {
         assert_eq!(names, ["p1_key", "p_key", "t1_x", "t1_xy", "t1_y", "t2_x"]);
         let c: String = a.query_one("SELECT obj_description('t2'::regclass)", &[]).await.unwrap().get(0);
         assert_eq!(c, "c");
-        // The same name taken by both.
-        let e = both("CREATE TABLE n (a int)", "CREATE TABLE n (b text)").await.unwrap_err();
-        assert_eq!(code(e).as_deref(), Some("23505"));
+        // The same name taken by both: the second waits for the first's uncommitted catalog
+        // row, then fails with its unique index's violation once the first commits.
+        a.batch_execute("BEGIN; CREATE TABLE n (a int)").await.unwrap();
+        b.batch_execute("BEGIN").await.unwrap();
+        let (r, ()) = tokio::join!(b.batch_execute("CREATE TABLE n (b text)"), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            a.batch_execute("COMMIT").await.unwrap();
+        });
+        assert_eq!(code(r.unwrap_err()).as_deref(), Some("23505"));
+        b.batch_execute("ROLLBACK").await.ok();
         // The same object changed by both: the second waits for the first's lock, then finds
         // no t2 by that name any more (Postgres's RangeVarGetRelidExtended).
         a.batch_execute("BEGIN; ALTER TABLE t2 RENAME TO t3").await.unwrap();
@@ -2020,11 +2027,15 @@ fn concurrent_ddl_on_unrelated_objects() {
         }
         b.batch_execute("INSERT INTO b_only DEFAULT VALUES").await.unwrap();
 
-        // Two tables of one name: likewise.
+        // Two tables of one name: the second waits for the first and fails once it commits.
         a.batch_execute("BEGIN; CREATE TABLE twice (x int)").await.unwrap();
-        b.batch_execute("BEGIN; CREATE TABLE twice (y text)").await.unwrap();
-        a.batch_execute("COMMIT").await.unwrap();
-        assert!(b.batch_execute("COMMIT").await.is_err());
+        b.batch_execute("BEGIN").await.unwrap();
+        let (r, ()) = tokio::join!(b.batch_execute("CREATE TABLE twice (y text)"), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            a.batch_execute("COMMIT").await.unwrap();
+        });
+        assert!(r.is_err());
+        b.batch_execute("ROLLBACK").await.ok();
         let cols: i64 = a
             .query_one("SELECT count(*) FROM pg_attribute WHERE attrelid = 'twice'::regclass AND attnum > 0", &[])
             .await

@@ -696,7 +696,8 @@ impl Ddl<'_, '_> {
                 *d = Arc::new(nd);
             }
         }
-        for f in self.cat.functions.values_mut() {
+        let mut changed = Vec::new();
+        for f in self.cat.functions.values() {
             let touches = subst(&f.ret, &types).is_some()
                 || f.args.iter().any(|(_, t)| subst(t, &types).is_some())
                 || f.out_cols.iter().any(|(_, t)| subst(t, &types).is_some());
@@ -715,8 +716,11 @@ impl Ddl<'_, '_> {
                         *t = ty;
                     }
                 }
-                *f = Arc::new(nf);
+                changed.push(Arc::new(nf));
             }
+        }
+        for f in changed {
+            self.cat.functions.insert(f.oid, f);
         }
         Ok(())
     }

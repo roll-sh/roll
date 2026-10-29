@@ -1549,6 +1549,18 @@ impl Engine {
         Ok(n)
     }
 
+    /// Testing the catalog format: `dbname`'s stored catalog records (keys and values).
+    #[doc(hidden)]
+    pub fn catalog_record_bytes_for_test(&self, dbname: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let entry = self
+            .entry(dbname)
+            .ok_or_else(|| internal(format!("no database {dbname}")))?;
+        let db = self.open_db(&entry)?;
+        let (from, to) = crate::catalog::persist::record_range();
+        let ts = db.store.visible_ts();
+        db.store.scan(from, to, ts).map(|r| r.map(|(k, v)| (k, v.to_vec()))).collect()
+    }
+
     /// Testing the catalog format upgrade: the number of catalog records `dbname` has
     /// stored.
     #[doc(hidden)]

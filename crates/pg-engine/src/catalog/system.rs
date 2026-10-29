@@ -4141,7 +4141,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
                     .get(n)
                     .and_then(|v| v.first())
                     .map(|d| d.oid)
-                    .or_else(|| cat.functions.values().find(|f| f.name == n).map(|f| f.oid))
+                    .or_else(|| cat.functions_named(n).next().map(|f| f.oid))
                     .unwrap_or(0)
             };
             for rt in crate::types::range::builtins()

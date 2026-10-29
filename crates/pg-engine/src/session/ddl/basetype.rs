@@ -113,7 +113,7 @@ impl Ddl<'_, '_> {
             _ => self.cat.effective_path(self.search_path()),
         };
         for s in schemas {
-            for f in self.cat.functions.values().filter(|f| f.schema == s && &f.name == name) {
+            for f in self.cat.functions_named(name).filter(|f| f.schema == s) {
                 let p = super::opclass::proc_info(&self.cat, f.oid)?;
                 if p.args == args {
                     return Some((f.oid, p.ret, f.volatility));

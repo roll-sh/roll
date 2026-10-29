@@ -1058,9 +1058,8 @@ pub fn object_address(
                 None => cat.effective_path(sp),
             };
             let found = schemas.iter().find_map(|sc| {
-                cat.functions.values().find(|f| {
+                cat.functions_named(fname).find(|f| {
                     f.schema == *sc
-                        && f.name == fname
                         && f.args.len() == types.len()
                         && (0..f.args.len()).all(|i| {
                             f.arg_domain(i)

@@ -7031,8 +7031,8 @@ impl Ddl<'_, '_> {
                     if f.procedure { "procedure" } else { "function" },
                     &f.name,
                 )?;
-                if self.cat.functions.values().any(|o| {
-                    o.oid != f.oid && o.name == newname && o.schema == f.schema && o.same_params(&f)
+                if self.cat.functions_named(&newname).any(|o| {
+                    o.oid != f.oid && o.schema == f.schema && o.same_params(&f)
                 }) {
                     let sig = self.cat.param_type_names(&f, self.search_path()).join(", ");
                     let schema = self.cat.schema_name(f.schema).to_string();

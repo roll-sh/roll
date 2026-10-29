@@ -478,9 +478,8 @@ impl Ddl<'_, '_> {
                 None => self.cat.routine_path(self.search_path()),
             };
             let user = path.iter().find_map(|sc| {
-                self.cat.functions.values().find(|f| {
+                self.cat.functions_named(fname).find(|f| {
                     f.schema == *sc
-                        && f.name == fname
                         && f.args.len() == args.len()
                         && f.args.iter().zip(args).all(|(a, t)| a.1.display() == *t)
                 })

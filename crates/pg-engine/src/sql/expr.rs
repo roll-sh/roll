@@ -752,6 +752,14 @@ impl Expr {
         })
     }
 
+    /// `transform` for a rewrite that can't fail (a substitution over an expression made
+    /// already): the stack grows for it, as for copies and drops, instead of meeting the
+    /// depth limit (whose error a caller with nowhere to return it would turn into a panic).
+    pub fn rewrite(self, f: &mut dyn FnMut(Expr) -> Expr) -> Expr {
+        let e = crate::stack::grow(|| self.map_children(&mut |c| Ok(c.rewrite(f))));
+        f(e.expect("an infallible rewrite"))
+    }
+
     /// Rewrite bottom-up.
     pub fn transform(self, f: &mut dyn FnMut(Expr) -> Result<Expr>) -> Result<Expr> {
         let e = crate::stack::guard(|| self.map_children(&mut |c| c.transform(f)))?;

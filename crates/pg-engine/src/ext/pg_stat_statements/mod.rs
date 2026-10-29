@@ -144,8 +144,8 @@ pub fn jumble_vars(s: &SessionState, node: &pg_query::NodeEnum, vars: &[(String,
             Some(sc) => Some(cat.schema_by_name(sc)?.oid),
             None => None,
         };
-        let mut found = cat.functions.values().filter(|f| {
-            f.procedure && f.name == name && ns.is_none_or(|o| o == f.schema) && f.args.len() + f.modes.iter().filter(|m| **m == 'o').count() == n
+        let mut found = cat.functions_named(name).filter(|f| {
+            f.procedure && ns.is_none_or(|o| o == f.schema) && f.args.len() + f.modes.iter().filter(|m| **m == 'o').count() == n
         });
         let f = found.next()?;
         if found.next().is_some() {
