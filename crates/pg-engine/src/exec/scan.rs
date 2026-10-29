@@ -341,7 +341,11 @@ fn scan_need(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Option<Rc<[b
     let need = need?;
     let plain_access = match (&s.access, &s.index) {
         (Access::Seq | Access::Unplanned, None) => true,
-        (Access::Index { .. } | Access::Bitmap(..), Some((ix, b))) => ix.method == "btree" && b.order.is_empty(),
+        // (And a native access method's ordered scan, pgvector's: its rows are fetched whole.)
+        (Access::Index { .. } | Access::Bitmap(..), Some((ix, b))) => {
+            (ix.method == "btree" && b.order.is_empty())
+                || (matches!(s.access, Access::Index { .. }) && crate::ext::index_am::routine_by_name(&ctx.catalog(), &ix.method).is_some())
+        }
         (Access::Bitmap(..), None) => true,
         _ => false,
     };
@@ -350,7 +354,7 @@ fn scan_need(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Option<Rc<[b
         || s.current_of.is_some()
         || s.sample.is_some()
         || ctx.instrumented()
-        || super::sizing::tracked(s.table.oid)
+        || super::sizing::reads_tracked(&s.table)
     {
         return None;
     }
@@ -475,6 +479,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             par: None,
             par_tried: false,
             in_order: None,
+            prefilter: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -527,6 +532,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             par: None,
             par_tried: false,
             in_order: None,
+            prefilter: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -572,7 +578,9 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             sample: None,
             only: None,
             key: s as *const ScanPlan as usize,
-            need: None,
+            // (Only the columns read above: a candidate the filter drops needn't have its
+            // vector decoded.)
+            need: need.clone(),
             plan,
             ranges: Vec::new(),
             cur_range: 0,
@@ -588,6 +596,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             par: None,
             par_tried: false,
             in_order: None,
+            prefilter: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -773,6 +782,7 @@ fn open_scan_as(
         par: None,
         par_tried: false,
         in_order: None,
+        prefilter: None,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1399,6 +1409,7 @@ fn dense_bitmap_scan(
         par: None,
         par_tried: false,
         in_order: None,
+        prefilter: None,
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -1528,6 +1539,8 @@ struct ScanNode {
     /// A sequential scan of a modelled heap: whether its rows are stored in heap order
     /// (`Heap::in_key_order`), so they're read as they're asked for (None: not decided).
     in_order: Option<bool>,
+    /// `prefilter_mask`, once decided.
+    prefilter: Option<Option<Rc<[bool]>>>,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -2062,6 +2075,30 @@ impl ScanNode {
 
 impl ScanNode {
     /// A stored row as this scan emits it: columns, then the key and system columns if asked.
+    /// The columns a row's filter reads, when the row's other columns read include an
+    /// extension type's (decided once; None: the filter goes over the whole row).
+    fn prefilter_mask(&mut self) -> Option<Rc<[bool]>> {
+        if self.prefilter.is_none() {
+            let p = &self.plan;
+            // (No mask: every column read.)
+            let need = |i: usize| self.need.as_ref().is_none_or(|n| n.get(i).copied().unwrap_or(false));
+            let mask = match &p.filter {
+                Some(f) if p.mark.is_none() && !matches!(p.access, Access::Tid { .. } | Access::TidRange(_)) => {
+                    super::need::of([f]).filter(|fm| {
+                        p.table.columns.iter().enumerate().any(|(i, c)| {
+                            need(i)
+                                && !fm.get(i).copied().unwrap_or(false)
+                                && matches!(&c.ty, crate::types::DataType::Base(b) if b.ext != 0)
+                        })
+                    })
+                }
+                _ => None,
+            };
+            self.prefilter = Some(mask.map(Rc::from));
+        }
+        self.prefilter.clone().flatten()
+    }
+
     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
         match &self.need {
             Some(need) => scan_row_need(&self.plan, key, bytes, need, ctx),
@@ -2267,7 +2304,7 @@ impl ScanNode {
             || p.limit.is_some()
             || self.ranges.len() != 1
             || ctx.instrumented()
-            || super::sizing::tracked(p.table.oid)
+            || super::sizing::reads_tracked(&p.table)
         {
             return Ok(None);
         }
@@ -2681,6 +2718,22 @@ impl Node for ScanNode {
             }
             // (An index-only scan from the entries never takes predicate locks:
             // `index_only_columns`.)
+            // A filter over a few columns of rows whose other columns read include big values
+            // (pgvector's): the filter first, over its own columns, and the rest decoded only
+            // for the rows it keeps. (Not where a fetched row takes a predicate lock first.)
+            let mut prefiltered = false;
+            if self.ios_cols.is_none()
+                && let Some(fm) = self.prefilter_mask()
+                && !predicate_locked(&self.plan.table, ctx)
+                && let Some(f) = &self.plan.filter
+            {
+                let probe = scan_row_need(&self.plan, &key, &bytes, &fm, ctx)?;
+                if !eval_bool(f, &probe, ctx)? {
+                    ctx.filtered(self.key);
+                    continue;
+                }
+                prefiltered = true;
+            }
             let mut row = match &self.ios_cols {
                 Some(cols) => self.index_row(cols, &key, &bytes, ctx)?,
                 None => self.full_row(&key, &bytes, ctx)?,
@@ -2720,7 +2773,8 @@ impl Node for ScanNode {
                 let me = ctx.txn.borrow().id;
                 ctx.sess.db.ssi.read_row(me, self.plan.table.oid, &key)?;
             }
-            if let Some(f) = &self.plan.filter
+            if !prefiltered
+                && let Some(f) = &self.plan.filter
                 && !eval_bool(f, &row, ctx)?
             {
                 ctx.filtered(self.key);

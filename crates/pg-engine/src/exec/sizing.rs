@@ -445,6 +445,22 @@ pub(crate) fn tracked(t: u32) -> bool {
     })
 }
 
+/// Whether reads of table `t` must decode every column for `note_read`: it may hold
+/// compressed or out-of-line datums (`tracked`) and has a column whose values `note_read`
+/// remembers (text, json, bytea and their kin). A table of numbers, dates and extension
+/// types (pgvector's) has none, so a scan of it may decode only the columns it needs.
+pub fn reads_tracked(t: &crate::catalog::Table) -> bool {
+    use crate::types::DataType as T;
+    tracked(t.oid)
+        && t.columns.iter().any(|c| {
+            !matches!(
+                c.ty,
+                T::Bool | T::Int2 | T::Int4 | T::Int8 | T::Float4 | T::Float8 | T::Numeric(_) | T::Date
+                    | T::Time(_) | T::Timetz(_) | T::Timestamp(_) | T::Timestamptz(_) | T::Interval(_) | T::Uuid | T::Oid
+            ) && !matches!(&c.ty, T::Base(b) if b.ext != 0)
+        })
+}
+
 /// A stored row of table `t`, the version `xmin` wrote (under `key`, when known), was read.
 pub fn note_read(t: u32, xmin: u64, key: Option<&[u8]>, row: &[Value]) {
     // (Nothing in a table that never stored a datum compressed or out of line is.)

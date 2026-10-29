@@ -168,7 +168,7 @@ impl Scan {
 
 impl AmScan for Scan {
     /// hnswgettuple.
-    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, Value)>> {
+    fn next(&mut self, ctx: &ExecCtx, wants: &dyn Fn(&[u8]) -> bool) -> Result<Option<(Vec<u8>, Option<Value>)>> {
         if self.first {
             ctx.check()?;
             self.scan_value();
@@ -226,7 +226,9 @@ impl AmScan for Scan {
             }
             let g = self.shared.graph.lock();
             let g = g.as_ref().ok_or_else(|| crate::error::internal("hnsw index is not valid"))?;
-            return Ok(Some((g.heap(h).to_vec(), self.sup.value(g.value(slot), g.dims))));
+            let dkey = g.heap(h).to_vec();
+            let v = wants(&dkey).then(|| self.sup.value(g.value(slot), g.dims));
+            return Ok(Some((dkey, v)));
         }
     }
 }

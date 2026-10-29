@@ -265,7 +265,7 @@ impl Decode {
         }
         let data = super::scan::row_data(bytes)?;
         let mut row = match need {
-            Some(n) => crate::storage::row::decode_row_need(data, n)?,
+            Some(n) => crate::storage::row::decode_row_need_spare(data, n, self.extra.len())?,
             None => crate::storage::row::decode_row(data)?,
         };
         let ncols = self.missing.len();
@@ -295,16 +295,21 @@ impl Decode {
             Some(_) => Some(super::scan::row_data(bytes)?),
             None => None,
         };
-        let mut vals = Vec::with_capacity(self.extra.len());
+        // (The values go after the columns as they come; a row a kernel leaves to `eval`
+        // goes back as it was.)
+        let n = row.len();
         for k in &self.extra {
             let v = match (data, k.dist_col()) {
                 (Some(data), Some((c, ..))) if self.raw.contains(&c) => k.dist_raw(data),
-                _ => k.run(&row),
+                _ => k.run(&row[..n]),
             };
             match v {
-                Some(v) => vals.push(v),
+                Some(v) => row.push(v),
                 None if data.is_some() => return self.row(key, bytes),
-                None => return Ok(row),
+                None => {
+                    row.truncate(n);
+                    return Ok(row);
+                }
             }
         }
         if done {
@@ -314,7 +319,6 @@ impl Decode {
                 }
             }
         }
-        row.extend(vals);
         Ok(row)
     }
 }

@@ -49,11 +49,8 @@ impl ScanState {
     /// The next entry: its data key, and the value to check the row against when the row
     /// was updated.
     pub fn next(&mut self, ctx: &crate::exec::ExecCtx) -> Result<Option<(Vec<u8>, Option<Value>)>> {
-        let Some((k, v)) = self.scan.next(ctx)? else {
-            return Ok(None);
-        };
-        let check = self.updated.read().contains(&k);
-        Ok(Some((k, check.then_some(v))))
+        let updated = self.updated.clone();
+        self.scan.next(ctx, &|k| updated.read().contains(k))
     }
 
     /// Whether a fetched row (its columns) goes out: an updated row's only for the entry with
@@ -163,9 +160,10 @@ pub fn routine_by_name(cat: &crate::catalog::Catalog, method: &str) -> Option<&'
 }
 
 /// What a scan of an index returns next, in the scan's order: an entry's row (its data key)
-/// and the entry's value of the first key column.
+/// and, where `wants` says so for the data key, the entry's value of the first key column
+/// (made only then: a vector's value is big, and only an updated row's is checked).
 pub trait AmScan {
-    fn next(&mut self, ctx: &crate::exec::ExecCtx) -> Result<Option<(Vec<u8>, Value)>>;
+    fn next(&mut self, ctx: &crate::exec::ExecCtx, wants: &dyn Fn(&[u8]) -> bool) -> Result<Option<(Vec<u8>, Option<Value>)>>;
 }
 
 /// The engine's side of an index access method (IndexAmRoutine's functions).

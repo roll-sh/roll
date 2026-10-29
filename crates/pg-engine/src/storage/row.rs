@@ -649,9 +649,14 @@ pub static STORED_SIZES: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 /// `decode_row` building only the values `need` marks (the others NULL; a value past the
 /// mask's end isn't needed).
 pub fn decode_row_need(b: &[u8], need: &[bool]) -> Result<Vec<Value>> {
+    decode_row_need_spare(b, need, 0)
+}
+
+/// `decode_row_need` with room for `spare` more values after the row's.
+pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Vec<Value>> {
     let mut pos = 0;
     let n = get_varint(b, &mut pos)? as usize;
-    let mut row = Vec::with_capacity(n);
+    let mut row = Vec::with_capacity(n + spare);
     for i in 0..n {
         if need.get(i).copied().unwrap_or(false) {
             row.push(decode_value(b, &mut pos)?);

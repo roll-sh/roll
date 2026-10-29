@@ -241,7 +241,7 @@ fn distances(tuples: &[Tuple], q: &Value, dist: Dist, dist4: Option<Dist4>, mut 
 
 impl AmScan for Scan {
     /// `ivfflatgettuple`.
-    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, Value)>> {
+    fn next(&mut self, ctx: &ExecCtx, wants: &dyn Fn(&[u8]) -> bool) -> Result<Option<(Vec<u8>, Option<Value>)>> {
         if self.first {
             self.scan_value()?;
             self.scan_lists()?;
@@ -251,7 +251,7 @@ impl AmScan for Scan {
         loop {
             if let Some(it) = self.out.next() {
                 let t = &self.pages[it.page as usize][it.at as usize];
-                return Ok(Some((t.dkey.to_vec(), t.row_value().clone())));
+                return Ok(Some((t.dkey.to_vec(), wants(&t.dkey).then(|| t.row_value().clone()))));
             }
             if self.list_index == self.max_probes {
                 return Ok(None);
