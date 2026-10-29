@@ -1389,8 +1389,9 @@ impl Session {
             NodeEnum::LoadStmt(s) => done(self.load_stmt(s)?),
             NodeEnum::CopyStmt(s) => self.copy_stmt(s, params),
             NodeEnum::CheckPointStmt(_) => {
-                self.state.db.store.flush_all()?;
-                crate::exec::pgstat::report_checkpoint(&self.state.db);
+                let log = self.state.settings.borrow().bool("log_checkpoints");
+                let db = self.state.db.clone();
+                crate::exec::pgstat::report_checkpoint(&db, log, || db.store.flush_all())?;
                 done(QueryResult::command("CHECKPOINT"))
             }
             NodeEnum::LockStmt(_) if self.status == TxnStatus::Idle && !self.implicit => {

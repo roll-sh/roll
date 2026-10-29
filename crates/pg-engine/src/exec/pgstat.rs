@@ -118,6 +118,8 @@ pub struct Fixed {
     /// The last checkpoint: its record's and its redo's WAL positions and its time (None:
     /// the one the cluster started from).
     pub checkpoint: Option<(u64, u64, i64)>,
+    /// CheckPointDistanceEstimate (bytes), for log_checkpoints' estimate.
+    pub distance_estimate: f64,
     /// Backups in progress (pg_backup_start), by the backend running each.
     pub backups: HashMap<i32, Backup>,
 }
@@ -1011,12 +1013,24 @@ pub fn report_analyze(
 }
 
 /// A checkpoint was requested and done (CHECKPOINT): it writes and syncs buffers and logs
-/// a checkpoint record.
-pub fn report_checkpoint(db: &crate::txn::Database) {
+/// a checkpoint record. `log_checkpoints` (the session's value): LogCheckpointStart /
+/// LogCheckpointEnd's lines, from the checkpointer.
+pub fn report_checkpoint(
+    db: &crate::txn::Database,
+    log_checkpoints: bool,
+    flush: impl FnOnce() -> crate::error::Result<()>,
+) -> crate::error::Result<()> {
+    let started = Instant::now();
+    let logging = log_checkpoints && crate::log::active();
+    if logging {
+        checkpointer_log("checkpoint starting: immediate force wait".into());
+    }
+    flush()?;
     let fixed = db.pgstat.lock().fixed.clone();
     let mut s = fixed.lock();
     s.checkpoints_requested += 1;
-    s.checkpoint_at(now());
+    let prev_redo = s.checkpoint.map(|(_, redo, _)| redo);
+    let (redo, ckpt) = s.checkpoint_at(now());
     s.checkpoints_performed += 1;
     for op in ["writes", "fsyncs"] {
         *s.io
@@ -1026,6 +1040,44 @@ pub fn report_checkpoint(db: &crate::txn::Database) {
     *s.io
         .entry(("checkpointer", "wal", "normal", "writes"))
         .or_default() += 1;
+    // UpdateCheckPointDistanceEstimate.
+    let distance = prev_redo.map_or(0, |p| redo.saturating_sub(p));
+    s.distance_estimate = if s.distance_estimate < distance as f64 {
+        distance as f64
+    } else {
+        0.9 * s.distance_estimate + 0.1 * distance as f64
+    };
+    let estimate = s.distance_estimate;
+    drop(s);
+    if logging {
+        // (Buffers: the pages the WAL since the last checkpoint stands for, out of
+        // shared_buffers' 16384; the engine has no shared buffers of its own to write.)
+        let bufs = (distance / 8192).min(16384);
+        let ms = started.elapsed().as_millis() as u64;
+        let secs = |ms: u64| format!("{}.{:03}", ms / 1000, ms % 1000);
+        let lsn = |p: u64| format!("{:X}/{:X}", p >> 32, p & 0xffff_ffff);
+        let files = u64::from(bufs > 0);
+        checkpointer_log(format!(
+            "checkpoint complete: wrote {bufs} buffers ({:.1}%), wrote 0 SLRU buffers; 0 WAL file(s) added, \
+             0 removed, 0 recycled; write={} s, sync=0.000 s, total={} s; sync files={files}, \
+             longest=0.000 s, average=0.000 s; distance={} kB, estimate={} kB; lsn={}, redo lsn={}",
+            bufs as f64 * 100.0 / 16384.0,
+            secs(ms),
+            secs(ms),
+            distance / 1024,
+            (estimate / 1024.0) as u64,
+            lsn(ckpt),
+            lsn(redo),
+        ));
+    }
+    Ok(())
+}
+
+/// A LOG line of the checkpointer (its pid in pg_stat_activity).
+fn checkpointer_log(text: String) {
+    static LINES: std::sync::OnceLock<std::sync::Arc<crate::log::Lines>> = std::sync::OnceLock::new();
+    let f = crate::log::Format::from_files(None);
+    crate::log::write(&f, &crate::log::Who::aux(30, "checkpointer", &LINES), &crate::log::Message::log(&text));
 }
 
 

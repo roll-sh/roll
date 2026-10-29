@@ -2386,6 +2386,19 @@ impl<'c, 'a> Interp<'c, 'a> {
         let values: Vec<Value> = self.vars.iter().map(|v| v.value.clone()).collect();
         let cx = self.cx();
         let child = cx.child(&[]);
+        // auto_explain.log_nested_statements: the plan of a query run through SPI (not a
+        // simple expression's, which skips the executor).
+        let ae = if simple.is_none() && crate::log::logs_nested() {
+            crate::ext::auto_explain::start(&cx.sess.settings.borrow(), true)
+        } else {
+            None
+        };
+        let ae_instr = ae.as_ref().filter(|a| a.opts.analyze).map(|_| {
+            let i = Rc::new(crate::exec::Instr::default());
+            *child.instr.borrow_mut() = Some(i.clone());
+            i
+        });
+        let ae_start = std::time::Instant::now();
         let r = child.with_outer(Rc::new(values), || {
             let rows = match simple {
                 Some(exprs) => vec![
@@ -2408,6 +2421,23 @@ impl<'c, 'a> Interp<'c, 'a> {
                 None => Ok(rows),
             }
         });
+        if let Some(a) = ae.as_ref().filter(|_| r.is_ok()) {
+            let secs = ae_start.elapsed().as_secs_f64();
+            if ae_instr.is_some() {
+                *child.instr.borrow_mut() = None;
+            }
+            if a.message(secs * 1000.0, "", "", &[]).is_some() {
+                let text = crate::sql::explain::explain(plan, 0, &a.opts, &child, &[], ae_instr.as_deref(), 0.0, secs);
+                // (The query's text: the innermost SPI frame's.)
+                let query = cx.sess.frames.borrow().iter().rev().find_map(|f| match f {
+                    crate::error::Frame::Query { text, .. } => Some(text.clone()),
+                    _ => None,
+                });
+                if let Some(m) = a.message(secs * 1000.0, &text, query.as_deref().unwrap_or(""), &[]) {
+                    crate::log::backend(&crate::log::Message { severity: Some(a.level), ..crate::log::Message::log(&m) });
+                }
+            }
+        }
         self.cx()
             .notices
             .borrow_mut()

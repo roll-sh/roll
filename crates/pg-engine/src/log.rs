@@ -547,3 +547,49 @@ pub fn postmaster(files: Option<&crate::sysconf::Loaded>, sev: Severity, text: &
     let f = Format::from_files(files);
     write(&f, &Who::postmaster(), &Message { severity: Some(sev), ..Message::log(text) });
 }
+
+/// A statement's log context for lines written from inside it.
+pub struct Backend {
+    pub format: Format,
+    pub who: Who,
+    /// log_lock_waits: the lock manager's lines.
+    pub lock_waits: bool,
+    /// auto_explain.log_nested_statements: nested statements' plans.
+    pub nested: bool,
+}
+
+thread_local! {
+    /// The statement running on this thread, for lines written from deep inside it (the lock
+    /// manager's log_lock_waits lines, auto_explain's nested statements). Set only for
+    /// sessions that asked for such lines (`Session::set_ps`).
+    static BACKEND: std::cell::RefCell<Option<Backend>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The running statement's log context (None: no lines from inside it).
+pub fn set_backend(ctx: Option<Backend>) {
+    BACKEND.with(|b| *b.borrow_mut() = ctx);
+}
+
+/// Whether the running statement has a log context.
+pub fn has_backend() -> bool {
+    BACKEND.with(|b| b.borrow().is_some())
+}
+
+/// Whether the running statement logs its lock waits.
+pub fn logs_lock_waits() -> bool {
+    BACKEND.with(|b| b.borrow().as_ref().is_some_and(|b| b.lock_waits))
+}
+
+/// Whether the running statement explains its nested statements.
+pub fn logs_nested() -> bool {
+    BACKEND.with(|b| b.borrow().as_ref().is_some_and(|b| b.nested))
+}
+
+/// A line of the running statement's backend (nothing when it has no log context).
+pub fn backend(m: &Message) {
+    BACKEND.with(|b| {
+        if let Some(b) = b.borrow().as_ref() {
+            write(&b.format, &b.who, m);
+        }
+    });
+}

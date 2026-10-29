@@ -55,6 +55,20 @@ impl Session {
     pub fn set_ps(&self, p: &Prepared) {
         if crate::log::active() {
             *self.log_tag.borrow_mut() = p.stmt.as_ref().and_then(|n| inner(n)).map_or_else(|| "???".into(), ps_tag);
+            // (log_lock_waits, nested auto_explain: lines from inside the statement.)
+            if self.state.settings.borrow().logs_inside() {
+                let st = self.state.settings.borrow();
+                let ctx = crate::log::Backend {
+                    format: self.log_format(),
+                    who: self.log_who(),
+                    lock_waits: st.bool("log_lock_waits"),
+                    nested: st.get_str("auto_explain.log_nested_statements") == Some("on"),
+                };
+                drop(st);
+                crate::log::set_backend(Some(ctx));
+            } else if crate::log::has_backend() {
+                crate::log::set_backend(None);
+            }
         }
     }
 

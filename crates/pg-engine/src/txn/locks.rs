@@ -606,6 +606,45 @@ fn pid_of(proc: u64) -> Option<i32> {
     (proc >> 63 == 1).then_some(proc as u32 as i32)
 }
 
+/// ProcSleep's log_lock_waits lines for the lock at `key` that `proc` waits for in `mode`:
+/// `what` is "still waiting for", "acquired", "detected deadlock while waiting for" or
+/// "avoided deadlock for" (whose message ends "by rearranging queue order"); `holders`: the
+/// DETAIL listing the lock's holders and wait queue.
+fn log_wait(s: &State, key: &[u8], proc: u64, mode: LockMode, start: Instant, what: &str, holders: bool) {
+    let pid = |p: u64| s.pids.get(&p).copied().or_else(|| pid_of(p)).unwrap_or(0);
+    let e = s.locks.get(key);
+    // DescribeLockTag.
+    let tag = match tag_of(key, e.map_or(0, |e| e.xid)) {
+        Tag::Relation { db, rel } => format!("relation {rel} of database {db}"),
+        Tag::Tuple { db, rel, .. } => format!("tuple of relation {rel} of database {db}"),
+        Tag::Transaction { xid, .. } if xid != 0 => format!("transaction {xid}"),
+        Tag::Transaction { id, .. } => format!("virtual transaction 3/{}", id as u32),
+        Tag::Object { db, class, obj, .. } => format!("object {obj} of class {class} of database {db}"),
+        Tag::SpecToken { xid, token } => format!("speculative token {token} of transaction {xid}"),
+        Tag::Advisory(_) | Tag::Other(_) => "advisory lock".to_string(),
+    };
+    let us = start.elapsed().as_micros();
+    let after = format!("after {}.{:03} ms", us / 1000, us % 1000);
+    let me = pid(proc);
+    let text = match what {
+        "avoided deadlock for" => format!("process {me} avoided deadlock for {} on {tag} by rearranging queue order {after}", mode.name()),
+        _ => format!("process {me} {what} {} on {tag} {after}", mode.name()),
+    };
+    let detail = holders.then(|| {
+        let mut held: Vec<i32> = Vec::new();
+        for h in e.map_or(&[][..], |e| &e.holds[..]) {
+            if !held.contains(&pid(h.proc)) {
+                held.push(pid(h.proc));
+            }
+        }
+        let list = |v: &[i32]| v.iter().map(i32::to_string).collect::<Vec<_>>().join(", ");
+        let queue: Vec<i32> = e.map_or(&[][..], |e| &e.queue[..]).iter().map(|p| pid(*p)).collect();
+        let (one, many) = ("Process holding the lock", "Processes holding the lock");
+        format!("{}: {}. Wait queue: {}.", if held.len() == 1 { one } else { many }, list(&held), list(&queue))
+    });
+    crate::log::backend(&crate::log::Message { detail: detail.as_deref(), ..crate::log::Message::log(&text) });
+}
+
 enum Deadlock {
     None,
     Soft,
@@ -749,8 +788,14 @@ impl LockManager {
         crate::exec::flush_live_notices();
         let mut s = self.state.lock();
         let mut checked = false;
+        // log_lock_waits (the statement carries a log context only when it is on).
+        let log_waits = crate::log::logs_lock_waits();
+        let mut logged = false;
         loop {
             if s.waiters.get(&proc).is_some_and(|w| w.status == Status::Granted) {
+                if logged {
+                    log_wait(&s, key, proc, mode, start, "acquired", false);
+                }
                 s.waiters.remove(&proc);
                 // A cancel that came while it slept was Postgres's interrupt of the wait, before
                 // the grant: the lock goes back.
@@ -782,10 +827,28 @@ impl LockManager {
             } else if !checked && now >= start + w.deadlock_timeout {
                 checked = true;
                 match self.deadlock_check(&mut s, proc) {
-                    Deadlock::Hard(cycle) => Some(self.report(&s, &cycle)),
-                    // (Queues reordered: whoever that lets in was woken.)
-                    Deadlock::Soft => continue,
-                    Deadlock::None => None,
+                    Deadlock::Hard(cycle) => {
+                        if log_waits {
+                            log_wait(&s, key, proc, mode, start, "detected deadlock while waiting for", true);
+                        }
+                        Some(self.report(&s, &cycle))
+                    }
+                    Deadlock::Soft => {
+                        if log_waits {
+                            log_wait(&s, key, proc, mode, start, "avoided deadlock for", true);
+                            logged = true;
+                            log_wait(&s, key, proc, mode, start, "still waiting for", true);
+                        }
+                        // (Queues reordered: whoever that lets in was woken.)
+                        continue;
+                    }
+                    Deadlock::None => {
+                        if log_waits {
+                            logged = true;
+                            log_wait(&s, key, proc, mode, start, "still waiting for", true);
+                        }
+                        None
+                    }
                 }
             } else {
                 None

@@ -215,6 +215,32 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     (differences: only xids and PostgreSQL 18's "connection authenticated" / "connection
     ready" lines, which the engine doesn't write). Tests: `tests/log_collector.rs`,
     `tests/wire.rs` `listen_settings_and_connection_addresses`, golden `a97_settings_privs`.
+  - Lines from inside a statement: a session with log_lock_waits or
+    auto_explain.log_nested_statements on (`Settings::logs_inside`, derived once per change)
+    hands each statement its log context (`log::set_backend`, a thread-local; nothing is
+    built otherwise). log_lock_waits: ProcSleep's "still waiting for <mode> on <tag> after
+    N ms" (DETAIL "Process(es) holding the lock: ... Wait queue: ..."), "acquired",
+    "detected deadlock while waiting for", "avoided deadlock ... by rearranging queue order",
+    DescribeLockTag's names (relation / transaction / virtual transaction / object / tuple).
+    Nested auto_explain: queries PL/pgSQL runs through SPI (not simple expressions), with the
+    SPI frame's text. log_checkpoints (on by default): CHECKPOINT's "checkpoint starting:
+    immediate force wait" and "checkpoint complete: ..." from the checkpointer (pid 30),
+    distance / estimate from the WAL position (UpdateCheckPointDistanceEstimate), buffers
+    as the WAL distance in pages (the engine has no shared buffers; an accepted internal
+    number). Autovacuum workers (`autovacuum.rs` `log_failure` / `log_report`, as an
+    "autovacuum worker" process): a canceled worker's "ERROR:  canceling autovacuum task"
+    with CONTEXT "automatic analyze / vacuum of table "db.schema.table"" (do_autovacuum's
+    PG_CATCH; other errors keep their own text), and past log_autovacuum_min_duration (the
+    table's storage parameter, else the setting; 10 min by default) heap_vacuum_rel's
+    "automatic vacuum of table ...: index scans: ..." and do_analyze_rel's "automatic
+    analyze of table ..." reports in PostgreSQL's layout, with the engine's pages, tuples,
+    visibility map, removal horizon and the worker thread's CPU (getrusage); buffer, WAL and
+    I/O figures of a buffer manager it doesn't have read 0, and no per-index lines (test
+    `tests/autovacuum_log.rs`). Not done: log_temp_files (the engine has no temporary
+    files to report), PostgreSQL 18's log_connections aspects
+    "authentication" and "setup_durations", nested statements of SQL-language functions,
+    the shutdown checkpoint's lines, `%L`/inet_* for the engine's own "local" connections
+    (reported as TCP).
   - Monitoring tools: 166 queries of pgwatch (59, `_pg_truetypid`'s table_hashes included),
     postgres_exporter (33), pgAdmin's dashboard (23), pg_activity (18) and pganalyze-collector
     (33), run against the engine and a reference with pg_stat_statements on a populated
@@ -223,7 +249,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     fixed above.
   - Memory (release, 200 idle sessions, RSS): 37.4 MB at start and 117 kB per session for
     both the base and this batch; with three hba rules, logging_collector and every
-    statement / connection logged in three formats, 129 kB per session.
+    statement / connection logged in three formats, 129 kB per session. Agent 80's settings,
+    hba and log machinery against the build before it (5f9f26f3): 115 → 117 kB per session,
+    about +1 MB at start (36.4 → 37.6 MB, within noise of two runs).
+  - pgbench (release, scale 10, 8 clients, 20 s, logging off, a loaded shared machine; engine
+    CPU per transaction, which load moves less than tps): select-only 291–304 µs base, 272–284
+    µs with round 21's logging; tpcb-like 1,657–1,712 µs base, 1,595–1,727 µs; peak RSS
+    363–375 MB base, 359–385 MB. No regression beyond the noise.
 - **Server configuration, authentication rules and the server log** (round 20, agent 80):
   - `src/sysconf.rs`: postgresql.conf is the pinned image's (its 15 settings at their lines,
     the locale lines what initdb chose); postgresql.auto.conf is ALTER SYSTEM's, kept in the
@@ -277,8 +309,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     log_min_duration, with log_analyze / log_buffers / log_timing / log_verbose /
     log_settings, log_format text or json (xml, yaml as EXPLAIN prints them),
     log_parameter_max_length, sample_rate, log_level. `tests/server_log.rs` follows
-    contrib/auto_explain's TAP test. Not done: nested statements (log_nested_statements),
-    log_lock_waits / log_temp_files / log_checkpoints lines. (logging_collector,
+    contrib/auto_explain's TAP test. (Nested statements, log_lock_waits and log_checkpoints:
+    round 21, agent 97, above; log_temp_files has no events. logging_collector,
     pg_current_logfile, csvlog / jsonlog and pg_ls_logdir: round 21, agent 97, above.)
   - Verified: crate tests, clippy, the difftest smoke, pg_contrib auto_explain 12 / 12,
     passwordcheck 12 / 12, pg_stat_statements 1,013 / 1,013, a full regress run (debug,

@@ -182,7 +182,9 @@ listen_addresses from `--listen`, the connection's addresses, csvlog / jsonlog a
 collector, examining GUC_SUPERUSER_ONLY parameters, EXECUTE checked a call before its
 arguments. No regression statement reads any of it: a full debug run of the change on a private
 reference (`a97-ref`) against the committed `results.tsv` measured **51148**, no unit changed;
-the generated blocks are left to the next full run.
+the generated blocks are left to the next full run. Its second batch (log_lock_waits,
+log_checkpoints, nested auto_explain, autovacuum's log lines) was measured the same way: 51148,
+no unit changed.
 
 ## Round 20, agent 76 (catalog round 5: shared catalog row chunks, comments as records, group-committed DDL)
 

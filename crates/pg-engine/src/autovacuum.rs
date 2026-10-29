@@ -355,11 +355,15 @@ impl Launcher {
                 a.xact_start = Some(now);
                 a.state_change = Some(now);
             });
+            let before_log = crate::log::active().then(|| Before::take(&database, w.rel));
             let r = sess.query(&sql);
             sess.notices.clear();
             match r {
                 Ok(_) if count(&database) > before => {
                     self.processed.fetch_add(1, Ordering::Relaxed);
+                    if let Some(b) = &before_log {
+                        log_report(&sess.state.settings.borrow(), pid, &database, w, &dbname, b);
+                    }
                 }
                 // (Skipped: its lock was taken. Looked at again on the next visit.)
                 Ok(_) => crate::exec::pgstat::autovacuum_retry(&database, w.rel),
@@ -367,6 +371,7 @@ impl Launcher {
                     let what = if w.vacuum { "vacuum" } else { "analyze" };
                     let msg = if err.code == crate::error::code::QUERY_CANCELED { "canceling autovacuum task" } else { err.message.as_str() };
                     tracing::info!(database = %dbname, "{msg} (automatic {what} of table \"{dbname}.{}.{}\")", w.schema, w.name);
+                    log_failure(&sess.state.settings.borrow(), pid, &err, w, &dbname);
                     crate::exec::pgstat::autovacuum_retry(&database, w.rel);
                 }
             }
@@ -497,4 +502,132 @@ fn lower_priority() {
             let _ = setpriority(0, tid as u32, 10);
         }
     }
+}
+
+/// The worker's server log lines: an autovacuum worker's (no client), under its session's
+/// settings.
+fn worker_log(st: &crate::session::settings::Settings, pid: i32, m: &crate::log::Message) {
+    static LINES: std::sync::OnceLock<Arc<crate::log::Lines>> = std::sync::OnceLock::new();
+    let f = crate::log::Format::from_settings(st);
+    crate::log::write(&f, &crate::log::Who::aux(pid, "autovacuum worker", &LINES), m);
+}
+
+/// do_autovacuum's PG_CATCH: the error (a lock conflict's cancel: "canceling autovacuum
+/// task") with "automatic vacuum / analyze of table" as its CONTEXT.
+fn log_failure(st: &crate::session::settings::Settings, pid: i32, err: &crate::error::Error, w: &Work, dbname: &str) {
+    if !crate::log::active() {
+        return;
+    }
+    let what = if w.vacuum { "vacuum" } else { "analyze" };
+    let mut e = if err.code == crate::error::code::QUERY_CANCELED {
+        crate::error::Error::new(crate::error::code::QUERY_CANCELED, "canceling autovacuum task")
+    } else {
+        err.clone()
+    };
+    let ctx = format!("automatic {what} of table \"{dbname}.{}.{}\"", w.schema, w.name);
+    e.context = Some(match &e.context {
+        Some(c) => format!("{c}\n{ctx}"),
+        None => ctx,
+    }
+    .into_boxed_str());
+    worker_log(st, pid, &crate::log::Message::error(&e, None));
+}
+
+/// What a table looked like before the worker's command, for log_autovacuum_min_duration's
+/// report.
+pub(crate) struct Before {
+    started: Instant,
+    cpu: (i64, i64),
+    dead: i64,
+}
+
+impl Before {
+    fn take(database: &crate::txn::Database, rel: u32) -> Before {
+        let dead = database.pgstat.lock().tables.get(&rel).map_or(0, |t| t.dead_tuples);
+        Before { started: Instant::now(), cpu: thread_cpu(), dead }
+    }
+}
+
+/// heap_vacuum_rel's and do_analyze_rel's LOG reports past log_autovacuum_min_duration (the
+/// table's storage parameter, else the setting). The engine's own numbers where it has them
+/// (pages, tuples, the visibility map, the removal horizon); buffer, WAL and I/O figures of
+/// PostgreSQL's buffer manager it doesn't have are 0.
+fn log_report(st: &crate::session::settings::Settings, pid: i32, database: &crate::txn::Database, w: &Work, dbname: &str, b: &Before) {
+    if !crate::log::active() {
+        return;
+    }
+    let cat = database.catalog();
+    let min = cat
+        .tables
+        .get(&w.rel)
+        .and_then(|t| reloption(&t.options, "log_autovacuum_min_duration").and_then(|v| v.parse::<i64>().ok()))
+        .unwrap_or_else(|| st.int("log_autovacuum_min_duration"));
+    let elapsed = b.started.elapsed();
+    if min < 0 || (min > 0 && (elapsed.as_millis() as i64) < min) {
+        return;
+    }
+    let (u1, s1) = thread_cpu();
+    let cs = |us: i64| format!("{}.{:02}", us / 1_000_000, us % 1_000_000 / 10_000);
+    let usage = format!(
+        "system usage: CPU: user: {} s, system: {} s, elapsed: {} s",
+        cs(u1 - b.cpu.0),
+        cs(s1 - b.cpu.1),
+        cs(elapsed.as_micros() as i64)
+    );
+    let io = "avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s\nbuffer usage: 0 hits, 0 reads, 0 dirtied\n\
+              WAL usage: 0 records, 0 full page images, 0 bytes, 0 buffers full\n";
+    let table = format!("\"{dbname}.{}.{}\"", w.schema, w.name);
+    if w.vacuum {
+        let rs = cat.rel_stats(w.rel, 'r');
+        let live = database.pgstat.lock().tables.get(&w.rel).map_or(0, |t| t.live_tuples);
+        let xids = database.xids();
+        let (cutoff, now) = (xids.horizon(), xids.current_xmin());
+        let pct = |n: i32| if rs.pages == 0 { 100.0 } else { 100.0 * n as f64 / rs.pages as f64 };
+        let text = format!(
+            "automatic vacuum of table {table}: index scans: 0\n\
+             pages: 0 removed, {p} remain, {p} scanned ({:.2}% of total), 0 eagerly scanned\n\
+             tuples: {} removed, {live} remain, 0 are dead but not yet removable\n\
+             removable cutoff: {}, which was {} XIDs old when operation ended\n\
+             frozen: 0 pages from table ({:.2}% of total) had 0 tuples frozen\n\
+             visibility map: {} pages set all-visible, {} pages set all-frozen (0 were all-visible)\n\
+             index scan not needed: 0 pages from table ({:.2}% of total) had 0 dead item identifiers removed\n\
+             {io}{usage}",
+            pct(rs.pages),
+            b.dead,
+            cutoff as u32,
+            now.saturating_sub(cutoff),
+            0.0,
+            rs.allvisible,
+            rs.allfrozen,
+            0.0,
+            p = rs.pages,
+        );
+        worker_log(st, pid, &crate::log::Message::log(&text));
+    }
+    if w.analyze {
+        let text = format!("automatic analyze of table {table}\n{io}{usage}");
+        worker_log(st, pid, &crate::log::Message::log(&text));
+    }
+}
+
+/// This thread's user and system CPU time (microseconds; getrusage RUSAGE_THREAD).
+fn thread_cpu() -> (i64, i64) {
+    #[cfg(target_os = "linux")]
+    {
+        #[repr(C)]
+        struct Rusage {
+            utime: [i64; 2],
+            stime: [i64; 2],
+            rest: [i64; 14],
+        }
+        unsafe extern "C" {
+            fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+        }
+        let mut r = Rusage { utime: [0; 2], stime: [0; 2], rest: [0; 14] };
+        // SAFETY: getrusage fills the struct, which has struct rusage's layout on Linux.
+        if unsafe { getrusage(1, &mut r) } == 0 {
+            return (r.utime[0] * 1_000_000 + r.utime[1], r.stime[0] * 1_000_000 + r.stime[1]);
+        }
+    }
+    (0, 0)
 }

@@ -87,6 +87,46 @@ fn server_log() {
     assert!(log.contains("STATEMENT:  select * from nope\n"), "{log}");
     let log = run("-c auto_explain.log_min_duration=-1 -c log_error_verbosity=verbose", "select 1/0");
     assert!(log.contains("ERROR:  22012: division by zero\n") && log.contains("LOCATION:  "), "{log}");
+
+    // auto_explain.log_nested_statements: a PL/pgSQL query's plan (DO itself has none).
+    let q = "DO $$ BEGIN PERFORM count(*) FROM pg_class; END $$";
+    let log = run("", q);
+    assert!(!log.contains("Seq Scan on pg_class"), "{log}");
+    let log = run("-c auto_explain.log_nested_statements=on", q);
+    assert!(log.contains("Query Text: ") && log.contains("Seq Scan on pg_class"), "{log}");
+
+    // log_lock_waits: a wait past deadlock_timeout, then the lock acquired (ProcSleep).
+    let log = rt.block_on(async {
+        let connect = |opts: &'static str| {
+            let mut c = tokio_postgres::Config::new();
+            c.host(host).port(port.parse().unwrap()).user("postgres").password("secret").dbname("postgres");
+            c.options(opts);
+            async move {
+                let (client, conn) = c.connect(tokio_postgres::NoTls).await.expect("connect");
+                tokio::spawn(conn);
+                client
+            }
+        };
+        let a = connect("-c auto_explain.log_min_duration=-1").await;
+        let b = connect("-c auto_explain.log_min_duration=-1 -c log_lock_waits=on -c deadlock_timeout=100").await;
+        a.batch_execute("CREATE TABLE lw (x int)").await.unwrap();
+        a.batch_execute("BEGIN; LOCK TABLE lw").await.unwrap();
+        taken();
+        let waiter = tokio::spawn(async move { b.batch_execute("BEGIN; LOCK TABLE lw; COMMIT").await.map(|_| b) });
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        a.batch_execute("COMMIT; DROP TABLE IF EXISTS nothing").await.unwrap();
+        let b = waiter.await.unwrap().unwrap();
+        // log_checkpoints: the checkpointer's two lines.
+        b.batch_execute("CHECKPOINT").await.unwrap();
+        a.batch_execute("DROP TABLE lw").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        taken()
+    });
+    assert!(log.contains("still waiting for AccessExclusiveLock on relation "), "{log}");
+    assert!(log.contains("DETAIL:  Process holding the lock: "), "{log}");
+    assert!(log.contains(" acquired AccessExclusiveLock on relation "), "{log}");
+    assert!(log.contains("LOG:  checkpoint starting: immediate force wait\n"), "{log}");
+    assert!(log.contains("LOG:  checkpoint complete: wrote "), "{log}");
     pg_engine::log::set_sink(None);
 }
 

@@ -491,6 +491,9 @@ struct Derived {
     /// log_statement, log_duration, log_min_duration_statement / _sample ask for statement
     /// or duration lines (else the server skips that work per statement).
     logs_statements: bool,
+    /// log_lock_waits or auto_explain.log_nested_statements: a statement then carries its log
+    /// context (`log::set_backend`), for the lock manager and nested statements.
+    logs_inside: bool,
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1382,6 +1385,8 @@ impl Settings {
                     || self.bool("log_duration")
                     || self.int("log_min_duration_statement") >= 0
                     || self.int("log_min_duration_sample") >= 0,
+                logs_inside: self.bool("log_lock_waits")
+                    || self.get_str("auto_explain.log_nested_statements") == Some("on"),
             })
         })
     }
@@ -1394,6 +1399,11 @@ impl Settings {
     /// Whether statements get log_statement / duration lines (`Derived::logs_statements`).
     pub fn logs_statements(&self) -> bool {
         self.derived().logs_statements
+    }
+
+    /// Whether a statement writes log lines from inside it (`Derived::logs_inside`).
+    pub fn logs_inside(&self) -> bool {
+        self.derived().logs_inside
     }
 
     /// Whether `session_replication_role` is `replica`.
