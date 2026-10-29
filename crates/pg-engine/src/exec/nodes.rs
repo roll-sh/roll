@@ -50,6 +50,34 @@ fn open_delete(p: &crate::sql::plan::DeletePlan, ctx: &ExecCtx) -> Result<BoxNod
     }
 }
 
+/// An Append's node. (Out of `open_node`, whose frame is on every plan level's stack.)
+#[inline(never)]
+fn open_append(inputs: &[Arc<Plan>], inh: bool, ctx: &ExecCtx) -> BoxNode {
+    let dml = inh && inputs.first().is_some_and(|p| matches!(&**p, Plan::Update(_) | Plan::Delete(_)));
+    // (A UNION ALL's members that are partitions are pruned too: make_partition_pruneinfo
+    // for an appendrel of several partitioned tables.)
+    let inputs = if (inh && !dml) || (!inh && !inputs.iter().any(|p| p.writes())) {
+        runtime_pruned(inputs, crate::sql::binder::partition::Known::Exec, ctx)
+    } else {
+        inputs.to_vec()
+    };
+    // The statements a rule made of one: separate commands.
+    let commands = !inh && inputs.iter().any(|p| p.writes());
+    // (Async Foreign Scans: the synchronous members' rows come first.)
+    let (inputs, first_async) = if dml || commands { (inputs, None) } else { crate::ext::postgres_fdw::scan::async_order(inputs, ctx) };
+    Box::new(AppendNode {
+        inputs,
+        i: 0,
+        cur: None,
+        first_async,
+        pre: None,
+        dml,
+        done: Vec::new(),
+        capture: false,
+        commands,
+    })
+}
+
 fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
     use super::need as nd;
     Ok(match &**plan {
@@ -339,30 +367,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 .nondet(nondet)
                 .planned(plan.clone()),
         ),
-        Plan::Append { inputs, inh, .. } => {
-            let dml = inh.is_some()
-                && inputs
-                    .first()
-                    .is_some_and(|p| matches!(&**p, Plan::Update(_) | Plan::Delete(_)));
-            // (A UNION ALL's members that are partitions are pruned too: make_partition_pruneinfo
-            // for an appendrel of several partitioned tables.)
-            let inputs = if (inh.is_some() && !dml) || (inh.is_none() && !inputs.iter().any(|p| p.writes())) {
-                runtime_pruned(inputs, crate::sql::binder::partition::Known::Exec, ctx)
-            } else {
-                inputs.clone()
-            };
-            // The statements a rule made of one: separate commands.
-            let commands = inh.is_none() && inputs.iter().any(|p| p.writes());
-            Box::new(AppendNode {
-                inputs,
-                i: 0,
-                cur: None,
-                dml,
-                done: Vec::new(),
-                capture: false,
-                commands,
-            })
-        }
+        Plan::Append { inputs, inh, .. } => open_append(inputs, inh.is_some(), ctx),
         Plan::Join {
             kind,
             left,
@@ -2954,6 +2959,10 @@ struct AppendNode {
     /// Each input is a command of its own (a rule's actions and the statement): it sees
     /// what the ones before it wrote.
     commands: bool,
+    /// The first Async Foreign Scan member (its request sent when the Append starts) and
+    /// its node once opened.
+    first_async: Option<usize>,
+    pre: Option<BoxNode>,
 }
 
 impl Node for AppendNode {
@@ -2981,9 +2990,21 @@ impl Node for AppendNode {
                 if self.commands && self.i > 0 {
                     ctx.next_command();
                 }
+                // (ExecAppendAsyncBegin: the first async member's request goes out now.)
+                if self.i == 0
+                    && let Some(k) = self.first_async
+                    && let Some(q) = self.inputs.get(k)
+                {
+                    let mut n = open(q, ctx)?;
+                    n.prefetch(ctx)?;
+                    self.pre = Some(n);
+                }
                 ctx.defer_after.set(self.dml);
                 ctx.capture.set(self.capture && self.i > 0);
-                let opened = open(p, ctx);
+                let opened = match self.pre.take_if(|_| self.first_async == Some(self.i)) {
+                    Some(n) => Ok(n),
+                    None => open(p, ctx),
+                };
                 ctx.defer_after.set(false);
                 ctx.capture.set(false);
                 let opened = opened?;

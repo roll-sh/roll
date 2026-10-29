@@ -167,6 +167,53 @@ pub fn async_capable(cat: &Catalog, t: &Table) -> bool {
     bool_option(cat, t, "async_capable", false)
 }
 
+/// ExecAppendAsyncBegin's order: an Append of several members, some of them async-capable
+/// foreign scans (`async_capable`, enable_async_append on), returns its synchronous members'
+/// rows while the async requests are in flight, then the async members' as they complete
+/// (in order: one request at a time per connection).
+/// The second value: the first async member's place, whose request goes out first.
+pub fn async_order(inputs: Vec<Arc<crate::sql::plan::Plan>>, ctx: &ExecCtx) -> (Vec<Arc<crate::sql::plan::Plan>>, Option<usize>) {
+    if inputs.len() < 2 || ctx.catalog().servers.is_empty() {
+        return (inputs, None);
+    }
+    let on = ctx.sess.settings.borrow().get_str("enable_async_append").is_none_or(|v| v != "off" && v != "false");
+    if !on {
+        return (inputs, None);
+    }
+    let cat = ctx.catalog();
+    let is_async = |p: &crate::sql::plan::Plan| {
+        let mut q = p;
+        while let crate::sql::plan::Plan::Project { input, .. } = q {
+            q = input;
+        }
+        matches!(q, crate::sql::plan::Plan::Scan(s) if s.table.foreign.is_some() && !s.with_key && s.mark.is_none() && is_postgres_fdw(&cat, &s.table) && async_capable(&cat, &s.table))
+    };
+    let flags: Vec<bool> = inputs.iter().map(|p| is_async(p)).collect();
+    if !flags.iter().any(|f| *f) {
+        return (inputs, None);
+    }
+    // (A synchronous member that is a foreign scan too may share the connection: no request
+    // goes out ahead of it.)
+    let foreign_sync = inputs.iter().zip(&flags).any(|(p, f)| !*f && has_foreign_scan(p));
+    if foreign_sync {
+        let (asy, sync): (Vec<_>, Vec<_>) = inputs.into_iter().zip(flags).partition(|(_, f)| *f);
+        return (sync.into_iter().chain(asy).map(|(p, _)| p).collect(), None);
+    }
+    if flags.iter().all(|f| *f) {
+        return (inputs, Some(0));
+    }
+    let (asy, sync): (Vec<_>, Vec<_>) = inputs.into_iter().zip(flags).partition(|(_, f)| *f);
+    let first = sync.len();
+    (sync.into_iter().chain(asy).map(|(p, _)| p).collect(), Some(first))
+}
+
+fn has_foreign_scan(p: &crate::sql::plan::Plan) -> bool {
+    match p {
+        crate::sql::plan::Plan::Scan(s) => s.table.foreign.is_some(),
+        p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_foreign_scan(c)),
+    }
+}
+
 /// fetch_size: the table's option, else the server's, else 100.
 fn fetch_size(cat: &Catalog, t: &Table) -> usize {
     let f = t.foreign.as_ref();
@@ -188,11 +235,27 @@ pub struct Cursor {
     /// The remote query and its parameters (`$n`), declared as a cursor at the first row.
     pub sql: String,
     params: Vec<Expr>,
+    /// A FETCH sent and not read yet (fetch_more_data_begin).
+    inflight: bool,
 }
 
 impl Cursor {
     pub fn new(key: u32, fetch: usize, sql: String, params: Vec<Expr>) -> Cursor {
-        Cursor { key, name: String::new(), fetch, batch: VecDeque::new(), eof: false, sql, params }
+        Cursor { key, name: String::new(), fetch, batch: VecDeque::new(), eof: false, sql, params, inflight: false }
+    }
+
+    /// fetch_more_data_begin: declare the cursor and send its first FETCH without waiting.
+    pub fn prefetch(&mut self, ctx: &ExecCtx) -> Result<()> {
+        if self.inflight || self.eof || !self.batch.is_empty() {
+            return Ok(());
+        }
+        let sql = self.fetch_sql(ctx)?;
+        let _ = connection::take_pending_result(self.key);
+        connection::with_conn_raw(ctx, self.key, |c| {
+            c.send_query(&sql).map_err(|m| Error::new(code::CONNECTION_FAILURE, m))
+        })?;
+        self.inflight = true;
+        Ok(())
     }
 
     /// The next remote row.
@@ -282,7 +345,8 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
 
 impl Cursor {
     /// create_cursor, at the first row asked for (when outer references have values).
-    fn declare(&mut self, ctx: &ExecCtx) -> Result<()> {
+    /// The DECLARE, sent with the first FETCH in one message (a round trip saved).
+    fn declare_sql(&mut self, ctx: &ExecCtx) -> Result<String> {
         let fmt = super::deparse::transmission_fmt(ctx.fmt());
         let values: Vec<Option<String>> = self
             .params
@@ -300,39 +364,45 @@ impl Cursor {
             let lit = v.as_deref().map_or("NULL".to_string(), super::deparse::string_literal);
             text = text.replace(&format!("${}::", i + 1), &format!("{lit}::"));
         }
-        let declare = format!("DECLARE {} CURSOR FOR\n{text}", self.name);
-        let intr = crate::remote::interrupts(ctx);
-        let query = &self.sql;
-        let res = connection::with_conn(ctx, self.key, |c| {
-            let r = c.exec(&declare, &intr)?;
-            if r.status != Status::CommandOk {
-                return Err(connection::report(&r, c, Some(query)));
-            }
-            Ok(())
-        });
-        if res.is_err() {
-            connection::note_error(ctx, self.key);
-        }
-        res
+        Ok(format!("DECLARE {} CURSOR FOR\n{text}", self.name))
+    }
+
+    /// The next FETCH, after the DECLARE when the cursor isn't declared yet.
+    fn fetch_sql(&mut self, ctx: &ExecCtx) -> Result<String> {
+        let declare = if self.name.is_empty() { Some(self.declare_sql(ctx)?) } else { None };
+        let fetch = format!("FETCH {} FROM {}", self.fetch, self.name);
+        Ok(match declare {
+            Some(d) => format!("{d};\n{fetch}"),
+            None => fetch,
+        })
     }
 }
 
 impl Cursor {
     /// fetch_more_data.
     fn fetch_more(&mut self, ctx: &ExecCtx) -> Result<()> {
-        if self.name.is_empty() {
-            self.declare(ctx)?;
-        }
-        let sql = format!("FETCH {} FROM {}", self.fetch, self.name);
+        let sql = self.fetch_sql(ctx)?;
         let query = &self.sql;
         let intr = crate::remote::interrupts(ctx);
-        let r = connection::with_conn(ctx, self.key, |c| {
-            let r = c.exec(&sql, &intr)?;
+        let inflight = std::mem::take(&mut self.inflight);
+        let stashed = if inflight { connection::take_pending_result(self.key) } else { None };
+        let run = |c: &mut crate::remote::conn::Conn| {
+            // (A command sent in between read this one's results first.)
+            if let Some(r) = stashed {
+                return Ok(r);
+            }
+            if inflight && !c.is_busy() {
+                return c.exec(&sql, &intr);
+            }
+            let r = if inflight { collect(c, &intr)? } else { c.exec(&sql, &intr)? };
             if r.status != Status::TuplesOk {
                 return Err(connection::report(&r, c, Some(query)));
             }
             Ok(r)
-        });
+        };
+        // (Its own FETCH in flight: the connection as it is; else another scan's prefetch is
+        // read first.)
+        let r = if inflight { connection::with_conn_raw(ctx, self.key, run) } else { connection::with_conn(ctx, self.key, run) };
         let r = match r {
             Ok(r) => r,
             Err(e) => {
@@ -356,7 +426,20 @@ impl Cursor {
     }
 }
 
+/// The results of the query sent (`prefetch`): its last one, as `exec` gives.
+fn collect(c: &mut crate::remote::conn::Conn, intr: crate::remote::conn::Interrupt) -> Result<crate::remote::conn::PgResult> {
+    let mut last = None;
+    while let Some(r) = c.get_result(intr)? {
+        last = Some(r);
+    }
+    last.ok_or_else(|| crate::error::internal("no result of the prefetched FETCH"))
+}
+
 impl Node for ScanNode {
+    fn prefetch(&mut self, ctx: &ExecCtx) -> Result<()> {
+        self.cur.prefetch(ctx)
+    }
+
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
         loop {
             let Some(vals) = self.cur.next(ctx)? else { return Ok(None) };

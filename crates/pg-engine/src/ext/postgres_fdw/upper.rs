@@ -75,6 +75,10 @@ impl crate::ext::fdw::ForeignRelOps for UpperScan {
         Some((self.tlist.clone(), self.aggs.clone()))
     }
 
+    fn group_cols(&self) -> Vec<usize> {
+        self.group_by.iter().map(|p| p - 1).collect()
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

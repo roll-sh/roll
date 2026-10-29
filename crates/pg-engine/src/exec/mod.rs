@@ -104,6 +104,12 @@ pub trait Node {
         Ok(())
     }
 
+    /// An Async Foreign Scan's first request (ExecAsyncRequest): sent now, its rows read
+    /// later, while the Append runs its other members.
+    fn prefetch(&mut self, _ctx: &ExecCtx) -> Result<()> {
+        Ok(())
+    }
+
     /// A DML node's target table.
     fn dml_table(&self) -> Option<Arc<crate::catalog::Table>> {
         None

@@ -20,6 +20,8 @@ thread_local! {
     static BACK: std::cell::RefCell<Option<Back>> = const { std::cell::RefCell::new(None) };
     /// The remote ctid of the row the last INSERT / UPDATE stored, when it came back.
     static LAST_CTID: std::cell::Cell<Option<(u32, u16)>> = const { std::cell::Cell::new(None) };
+    /// Rows of batched INSERTs not sent yet (postgresExecForeignBatchInsert).
+    static PENDING: std::cell::RefCell<Vec<Pending>> = const { std::cell::RefCell::new(Vec::new()) };
     /// The running INSERT routes rows into partitions while capturing transition tables.
     static ROUTED_CAPTURE: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
 }
@@ -233,6 +235,28 @@ pub fn insert(t: &Table, row: Row, ctx: &ExecCtx) -> Result<Row> {
     let cat = ctx.catalog();
     let (mut sql, cols) = insert_sql(&cat, t);
     let back = back();
+    // (Batched: nothing comes back, no row trigger of the table, batch_size over 1.)
+    // (The running statement's batch: at most as many rows as 65535 parameters take.)
+    let batch = batch_size(&cat, t, false, false, &[]).min(65535 / cols.len().max(1)).max(1);
+    if batch > 1 && back.as_ref().is_none_or(|b| b.cols.is_empty() && !b.ctid) && !row_insert_triggers(&cat, t) {
+        let params = text_params(t, &row, &cols, ctx);
+        let full = PENDING.with_borrow_mut(|ps| {
+            let i = match ps.iter().position(|p| p.table.oid == t.oid) {
+                Some(i) => i,
+                None => {
+                    ps.push(Pending { table: t.clone(), rows: Vec::new() });
+                    ps.len() - 1
+                }
+            };
+            ps[i].rows.push(params);
+            (ps[i].rows.len() >= batch).then(|| ps.remove(i))
+        });
+        if let Some(p) = full {
+            send_batch(p, ctx)?;
+        }
+        LAST_CTID.set(None);
+        return Ok(row);
+    }
     if let Some(b) = &back {
         sql.push_str(&b.sql(t));
     }
@@ -242,6 +266,68 @@ pub fn insert(t: &Table, row: Row, ctx: &ExecCtx) -> Result<Row> {
         (Some(b), Some(vals)) => b.row(t, &vals, ctx),
         _ => Ok(row),
     }
+}
+
+/// Rows waiting to go to one table in one INSERT.
+struct Pending {
+    table: Table,
+    rows: Vec<Vec<Option<String>>>,
+}
+
+/// BEFORE / AFTER ROW INSERT triggers on the foreign table turn batching off.
+fn row_insert_triggers(cat: &crate::catalog::Catalog, t: &Table) -> bool {
+    cat.triggers.values().any(|tg| tg.table == t.oid && tg.tgtype & tt::ROW != 0 && tg.tgtype & tt::INSERT != 0)
+}
+
+/// rebuildInsertSql: one INSERT of the batch's rows, `VALUES ($1, $2), ($3, $4)`.
+fn send_batch(p: Pending, ctx: &ExecCtx) -> Result<()> {
+    let cat = ctx.catalog();
+    let t = &p.table;
+    let (sql, _) = insert_sql(&cat, t);
+    let Some(at) = sql.find(" VALUES (") else {
+        for r in &p.rows {
+            run(t, &sql, r, ctx)?;
+        }
+        return Ok(());
+    };
+    let (head, first) = sql.split_at(at + " VALUES ".len());
+    let mut n = 0;
+    let mut groups = Vec::new();
+    for _ in &p.rows {
+        let g = first
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(", ")
+            .map(|v| {
+                if v.starts_with('$') {
+                    n += 1;
+                    format!("${n}")
+                } else {
+                    v.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        groups.push(format!("({g})"));
+    }
+    let sql = format!("{head}{}", groups.join(", "));
+    let params: Vec<Option<String>> = p.rows.into_iter().flatten().collect();
+    run(t, &sql, &params, ctx).map(|_| ())
+}
+
+/// ExecPendingInserts: send the batched rows not sent yet (the end of a data-modifying
+/// node).
+pub fn flush_pending(ctx: &ExecCtx) -> Result<()> {
+    let ps = PENDING.with_borrow_mut(std::mem::take);
+    for p in ps {
+        send_batch(p, ctx)?;
+    }
+    Ok(())
+}
+
+/// Rows of a statement that failed: never sent.
+pub fn discard_pending() {
+    PENDING.with_borrow_mut(|p| p.clear());
 }
 
 /// The columns a remote UPDATE sets (postgresPlanForeignModify): every column under a BEFORE

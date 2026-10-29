@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 20 (agent 83): postgres_fdw 1,846 / 2,053 (89.9%; dblink 218, file_fdw 187 unchanged). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Round 20 (agent 70): pgvector 915 / 915, bloom 58 / 58 (pg_trgm, btree_gist and cube unchanged at 261, 613 and 316). Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 20 (agent 83): postgres_fdw 1,856 / 2,053 (90.4%; dblink 218, file_fdw 187 unchanged). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Round 20 (agent 70): pgvector 915 / 915, bloom 58 / 58 (pg_trgm, btree_gist and cube unchanged at 261, 613 and 316). Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -69,7 +69,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | amcheck | 204 | 203 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
-| postgres_fdw | 2053 | 1846 | see below |
+| postgres_fdw | 2053 | 1856 | see below |
 | file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
 | tsm_system_rows | 16 | 16 | done (round 19, agent 71) |
 | tsm_system_time | 16 | 14 | see below |
@@ -306,10 +306,19 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   foreign_grouping_ok: the grouped target list, GROUP BY by position, HAVING split into sent
   and local, aggregates with DISTINCT, ORDER BY, FILTER, WITHIN GROUP, VARIADIC; also over a
   join the search didn't choose remotely, `JoinMeta::fdw_alt`), with their ORDER BY / LIMIT.
+  Second batch (1,856 / 2,053): a grouped scan's resjunk GROUP BY columns in EXPLAIN, the
+  LIMIT over an ORDER BY sent, aggregates' VARIADIC; batched remote INSERTs are real
+  (`modify::insert` keeps a batch_size's rows and sends one `INSERT ... VALUES (...), (...)`,
+  flushed when full, at the end of the data-modifying node and before any BEFORE ROW trigger,
+  as ExecPendingInserts; dropped on abort); Async Foreign Scans are real: an Append returns its
+  synchronous members' rows first while the first async member's FETCH is in flight
+  (`scan::async_order`, `Node::prefetch`, `Cursor::prefetch`; a command that needs the
+  connection first reads the pending result and keeps it for its scan, process_pending_request);
+  a cursor's DECLARE goes with its first FETCH in one message (a round trip fewer per scan).
   Left: join paths with pathkeys (merge joins over sorted remote joins), FOR UPDATE over
-  joins (whole-row ROW() columns), parameterized foreign paths, the resjunk columns a grouped
-  scan's EXPLAIN shows, some join orders of three or more relations, batched remote INSERTs
-  and async execution (labels only), COPY into foreign tables, parallel_commit /
+  joins (whole-row ROW() columns), parameterized foreign paths, some join orders of three or
+  more relations, async members after the first fetched one at a time (PostgreSQL's
+  round-robin of requests per connection), COPY into foreign tables, parallel_commit /
   parallel_abort, analyze_sampling, query_cancel's timeout unit.
 - **file_fdw** (round 19, agent 66; `src/ext/file_fdw.rs`): done. The validator (options by
   catalog with getClosestMatch's hint, the filename / program privileges, COPY's own option

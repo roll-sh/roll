@@ -3882,6 +3882,8 @@ impl Node for InsertNode {
             };
             let Some(src) = next else {
                 self.done = true;
+                // (ExecPendingInserts: a batch of remote INSERTs not full yet.)
+                crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
                 if let Some(l) = self.copy_load.take() {
                     l.finish(ctx);
                 }
@@ -4477,6 +4479,7 @@ impl Node for UpdateNode {
             ctx.check()?;
             let Some(mut src) = self.source.next(ctx)? else {
                 self.done = true;
+                crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
                 check_statement_rechecks(ctx)?;
                 if self.plan.inh {
                     trigger::batch(ctx, || self.finish_tree(ctx))?;
@@ -4881,6 +4884,7 @@ impl Node for DeleteNode {
             ctx.check()?;
             let Some(mut src) = self.source.next(ctx)? else {
                 self.done = true;
+                crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
                 if self.plan.inh {
                     trigger::batch(ctx, || self.finish_tree(ctx))?;
                 } else if !self.deferred {

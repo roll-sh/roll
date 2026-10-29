@@ -297,7 +297,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   cost). Join rows live in the join search's group row; a joined relation's columns its own
   join doesn't return get ids from `postgres_fdw::join::HIDDEN_COLS` up: never size a vector
   by a column id there. Stack rule kept: the new EXPLAIN and executor arms are
-  `#[inline(never)]` helpers (`foreign_rel`, `fdw::open`).
+  `#[inline(never)]` helpers (`foreign_rel`, `fdw::open`). Second batch (1,856): batched
+  INSERTs (`modify::PENDING`, flushed by `flush_pending` at the DML nodes' ends and in
+  `trigger::before_row_in`, dropped in `connection::abort`) and async Appends
+  (`scan::async_order` reorders an Append's members, synchronous first, and the first async
+  one's FETCH is sent ahead, `Node::prefetch`; `connection::with_conn` reads a pending
+  prefetch before any other command and keeps it, `take_pending_result`). Fewer round trips:
+  a scan's DECLARE goes in one message with its first FETCH (`Cursor::fetch_sql`); 440
+  loopback queries (single-row scans and foreign joins) took ~8% less time, engine RSS the
+  same (~104 MB, debug). An Append's node is built in `nodes::open_append`, out of
+  `open_node` (deep_input's 20,000-deep SQL function SRFs overflowed when the async
+  reordering sat in `open_node`'s frame).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

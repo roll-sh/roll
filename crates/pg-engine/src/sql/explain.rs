@@ -2049,6 +2049,8 @@ fn group_tlists(root: &Plan) -> GroupTlists {
     fn agg_below(p: &Plan) -> Option<(&Plan, usize, Option<&Expr>)> {
         match p {
             Plan::Agg { groups, .. } => Some((p, groups.len(), None)),
+            // (A grouped relation's Foreign Scan: its GROUP BY entries.)
+            Plan::Foreign(f) if !f.private.0.group_cols().is_empty() => Some((p, 0, None)),
             // (A HAVING.)
             Plan::Filter { input, pred, .. } => match &**input {
                 Plan::Agg { groups, .. } => Some((&**input, groups.len(), Some(pred))),
@@ -2059,6 +2061,17 @@ fn group_tlists(root: &Plan) -> GroupTlists {
     }
     fn found(fin: usize, exprs: &[Expr], below: (&Plan, usize, Option<&Expr>), above: &[usize], out: &mut GroupTlists) {
         let (agg, ng, having) = below;
+        if let Plan::Foreign(f) = agg {
+            let junk: Vec<usize> =
+                f.private.0.group_cols().into_iter().filter(|j| !exprs.iter().any(|e| matches!(e, Expr::Col(k, _) if k == j))).collect();
+            if !junk.is_empty() {
+                out.finals.insert(fin, junk);
+                for a in above {
+                    out.chain.insert(*a, fin);
+                }
+            }
+            return;
+        }
         let mut gk = Vec::new();
         exprs.iter().chain(having).for_each(|e| grouping_call_keys(e, &mut gk));
         out.grouping_keys.insert(addr(agg), gk);

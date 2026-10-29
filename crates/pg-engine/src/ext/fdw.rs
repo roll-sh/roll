@@ -26,6 +26,11 @@ pub trait ForeignRelOps: Send + Sync + 'static {
     fn filter(&self) -> Vec<crate::sql::expr::Expr> {
         Vec::new()
     }
+    /// A grouped relation's GROUP BY entries among its columns (EXPLAIN shows those its
+    /// query's target list doesn't name as resjunk columns).
+    fn group_cols(&self) -> Vec<usize> {
+        Vec::new()
+    }
     fn as_any(&self) -> &dyn std::any::Any;
 }
 

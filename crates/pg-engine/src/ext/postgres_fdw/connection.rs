@@ -314,6 +314,35 @@ pub fn get_connection(ctx: &ExecCtx, m: &Mapping, will_prep_stmt: bool) -> Resul
 
 /// Run `f` on the cached connection `key`.
 pub fn with_conn<T>(ctx: &ExecCtx, key: u32, f: impl FnOnce(&mut Conn) -> Result<T>) -> Result<T> {
+    with_conn_raw(ctx, key, |c| {
+        // (process_pending_request: a prefetched FETCH not read yet is read now, its rows
+        // kept for its scan, before the next command.)
+        let mut last = None;
+        while c.is_busy() {
+            match c.get_result(&|| Ok(()))? {
+                Some(r) => last = Some(r),
+                None => break,
+            }
+        }
+        if let Some(r) = last {
+            PENDING_RESULT.with_borrow_mut(|m| m.insert(key, r));
+        }
+        f(c)
+    })
+}
+
+thread_local! {
+    /// Results of prefetched FETCHes read for another command (`with_conn`), by connection.
+    static PENDING_RESULT: std::cell::RefCell<std::collections::HashMap<u32, crate::remote::conn::PgResult>> = Default::default();
+}
+
+/// The prefetched FETCH's result another command read first, if one did.
+pub fn take_pending_result(key: u32) -> Option<crate::remote::conn::PgResult> {
+    PENDING_RESULT.with_borrow_mut(|m| m.remove(&key))
+}
+
+/// `with_conn`, the connection as it is (a query sent and not read yet: `Cursor::prefetch`).
+pub fn with_conn_raw<T>(ctx: &ExecCtx, key: u32, f: impl FnOnce(&mut Conn) -> Result<T>) -> Result<T> {
     let mut r = ctx.sess.remote.borrow_mut();
     match r.fdw.entries.get_mut(&key).and_then(|e| e.conn.as_mut()) {
         Some(c) => f(c),
@@ -447,6 +476,7 @@ pub fn pre_prepare(sess: &crate::session::state::SessionState) -> Result<()> {
 
 /// XACT_EVENT_ABORT: every remote transaction rolls back.
 pub fn abort(sess: &crate::session::state::SessionState) {
+    super::modify::discard_pending();
     let mut r = sess.remote.borrow_mut();
     let st = &mut r.fdw;
     if !st.xact_got_connection {

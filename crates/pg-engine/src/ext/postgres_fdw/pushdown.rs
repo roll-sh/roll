@@ -183,6 +183,8 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
     top_tlist(p);
     super::upperpath::push_grouped(&cat, ctx.fmt(), p);
     push(&cat, ctx.fmt(), p);
+    // (Again: a LIMIT over a sort the first pass sent.)
+    push(&cat, ctx.fmt(), p);
 }
 
 /// A filter over a foreign join (a WHERE clause over an outer join): its conditions the
@@ -384,7 +386,8 @@ fn push_foreign(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan
         };
     }
     let Some(js) = f.private.0.as_any().downcast_ref::<super::joinscan::JoinScan>() else { return false };
-    if !js.order.is_empty() || js.limit.is_some() {
+    // (A LIMIT over a sort sent already: the final path's.)
+    if sort.is_some() && !js.order.is_empty() || js.limit.is_some() {
         return false;
     }
     let q = super::joinsql::Sql::new(cat, fmt, &js.bases);
@@ -435,7 +438,7 @@ fn push_grouped_tail(
     limit: Option<(&Option<Expr>, &Option<Expr>)>,
     below: &Plan,
 ) -> Option<Plan> {
-    if !up.order.is_empty() || up.limit.is_some() {
+    if sort.is_some() && !up.order.is_empty() || up.limit.is_some() {
         return None;
     }
     let mut q = super::joinsql::Sql::new(cat, fmt, &up.input.bases);

@@ -381,6 +381,10 @@ pub fn before_row_in(
     fits: Option<&dyn Fn(&Row) -> Result<bool>>,
     ctx: &ExecCtx,
 ) -> Result<Option<Row>> {
+    // (Pending batched inserts go first, so the triggers see their rows.)
+    if trigs.iter().any(|b| applies(b, true, true, event, ctx)) {
+        crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
+    }
     let mut new = new;
     // The stored generated columns aren't computed yet: NULL to the first trigger; what one
     // trigger puts there the next sees (and the computed value replaces). (A row moving to

@@ -177,7 +177,8 @@ impl<'a> Deparser<'a> {
         a.args.iter().all(ok)
             && a.direct.iter().all(ok)
             && a.filter.as_ref().is_none_or(ok)
-            && a.order_by.iter().all(|k| ok(&k.expr) && k.using.as_ref().is_none_or(|u| self.object_shippable(u.oid)))
+            // (A USING operator's own oid isn't known here, only its function's: not sent.)
+            && a.order_by.iter().all(|k| ok(&k.expr) && k.using.is_none())
             && !a
                 .args
                 .iter()
