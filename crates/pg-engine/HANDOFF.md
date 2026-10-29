@@ -848,12 +848,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     workload to PostgreSQL 18.6, identical. Crate tests, clippy (no new warnings), difftest
     smoke, test_decoding 1,024 / 1,047 (unchanged), a full regress run on a private reference
     51,148 / 51,150 with no unit changed against `results.tsv`. Open:
-    - **Duplicate ctids after a crash** (engine bug, not replication: reproduced at ea038e8e
-      with plain SQL): kill -9 during a stream of `BEGIN; INSERT ...; UPDATE t SET id = k, v
-      = ..., n = ... WHERE id = k; COMMIT` transactions, restart, run 1,000 more: `SELECT
-      count(*), count(DISTINCT ctid)` gives 5,000 / 4,759. The heap model rebuilt at the
-      restart (`sizing`, `heapsim::rewritten`, `row_tids` / `locate`) hands out positions
-      other rows hold. (Apply no longer reads ctids.)
+    - (Fixed, round 21, agent 95: duplicate ctids after a crash or restart. See "Crash
+      recovery" below.)
     - Binary transfer (`binary = true` is accepted but values still come as text), parallel
       apply workers, the copy's parallel table sync workers, run_as_owner's per-table role
       switch and the RLS / privilege checks of the target (TargetPrivilegesCheck),
@@ -980,6 +976,59 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     tier); hash tables keep whole rows (the columns not read are NULLs of 32 bytes); hash
     builds, sorts and groupings over right joins run on the executor's thread (q10, q13,
     q21); numeric values allocate twice; q02 / q20 small-table plans are 7-9x PostgreSQL's.
+- **Crash recovery** (round 21, agent 95; `tests/crash_ctids.rs`, `tests/crash_random.rs`).
+  - **Duplicate ctids after a restart** (agent 87 found them after a crash; a clean restart
+    did it too). Every stored row carries the heap TID the model gave it, and that is what
+    `ctid` shows. When a database reopens, its heap models are gone and `sizing::ensure`
+    builds each one again on first use. It used `heapsim::rewritten`, which packs the live
+    rows densely the way VACUUM FULL does. Rows kept their stored TIDs, so the model and the
+    rows disagreed. The model saw free space wherever a dead version or a gap had been, and
+    gave new versions TIDs that live rows still held: 5,000 rows, 4,759 distinct ctids after
+    1,000 updates. Anything addressing rows by ctid then read or wrote the wrong row.
+    - Fix: `heapsim::restored` puts every row at its stored TID. This is the state
+      PostgreSQL's recovery leaves: committed rows never move. The gaps become dead line
+      pointers, which is what PostgreSQL has there (versions pruned or still dead). Only
+      VACUUM frees them for reuse, so new rows still go after the old ones
+      (`storage_format.rs`).
+    - A row without a stored TID (a database older than stored TIDs) goes where a rewrite
+      would put it. So does a second row claiming a TID that another row already holds (a
+      database written by an affected build). `unstamped` is then set, as before. VACUUM FULL
+      restamps such rows.
+    - Re-measured tuple lengths can overfill a restored page (`Page::free_space` saturates).
+  - **Prepared transactions across a restart**: their writes are invisible to the scan that
+    builds the model. Without help, COMMIT PREPARED made rows appear at TIDs the model had
+    already handed out. `ensure` now adds their writes (`TwoPhase::writes_in`,
+    `Heap::restore_pending`): the replaced version gets the xid as xmax, the new version sits
+    at its stored TID, and a `pending` entry lets ROLLBACK PREPARED settle it as `update` would.
+  - **VACUUM FULL after a rolled-back update** (an in-process bug the harness found): a key
+    still points at the aborted version until `settle` runs. `live_rows` skipped those rows,
+    or, for a rolled-back key change, lost them under the old key. The rewrite then left
+    their stored TIDs stale, and the next inserts reused them. `live_rows` now settles first
+    and follows `locate`.
+  - **The harness** (`crash_random.rs`). A child process (the test binary run again) runs
+    seeded random steps:
+    - DML with TOASTed values, key changes, FK cascades and rolled-back savepoints;
+    - DDL (indexes, ADD COLUMN, CREATE TABLE AS / DROP, TRUNCATE);
+    - two-phase commits, VACUUM, VACUUM FULL, CHECKPOINT.
+
+    A thread kills the child with SIGKILL at a seeded step and microsecond. The step log (one
+    fsynced line per step) and the generator rebuild a model of what committed. After
+    reopening, the harness finishes a prepared transaction left by the cut step, then checks:
+    - the rows are exactly the model's, read by seq scan, index scan and bitmap scan;
+    - each index's counts agree with the heap;
+    - every ctid is unique and fetches its own row;
+    - the FK, CHECK and UNIQUE constraints hold, and added columns keep their defaults;
+    - CREATE TABLE AS tables exist exactly as the model says;
+    - `nextval` is past every value a committed step drew;
+    - no prepared transaction is lost.
+
+    Then 100 more steps run and the checks repeat.
+    - Default: seed 1, 3 rounds. `CRASH_SEEDS`, `CRASH_ROUNDS`, `CRASH_CHECK_STEPS=1` (check
+      ctids after every step) and `CRASH_TRACE=<file>` (log each step's SQL) are for sweeps
+      and bisecting.
+    - Sweep: seeds 1-13 × 4 rounds (release), clean after the fixes.
+    - amcheck's functions check arguments only (`ext/amcheck.rs`), so the harness's own scan
+      comparisons stand in for `bt_index_check(heapallindexed)`.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the
@@ -1508,9 +1557,11 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     after the database opens puts each row back on the block it was stored with
     (`heapsim::restored`, from `ensure`'s cold path), so page counts, pg_relation_size and the
     planner's estimates are the same before and after (`tests/big_tables.rs`
-    `heap_pages_kept_across_restart`). Line pointer offsets aren't restored (a row after
-    removed ones on its page gets a lower one), nor are pages that held only dead tuples at
-    the end of the heap; a model dropped mid-session (TRUNCATE, a rewrite) is laid out afresh.
+    `heap_pages_kept_across_restart`). Since agent 95 (see "Crash recovery"), each row
+    also gets its line pointer back: its whole stored TID. The model is built that way
+    whenever it is rebuilt from stored rows, including a model dropped mid-session (a
+    rolled-back TRUNCATE or rewrite gives the table its old storage back). Pages that held
+    only dead tuples at the end of the heap still aren't restored.
   - Found, not fixed: DROP TABLE of a 1M-row table takes 3 s (PostgreSQL 0.1 s); in-process
     under `sizing::with_max_versions`, a parallel seq scan of a small "big" table counted 42
     rows its transaction had deleted (the test sets max_parallel_workers_per_gather = 0;

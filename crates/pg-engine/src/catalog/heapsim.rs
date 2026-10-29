@@ -216,7 +216,8 @@ impl Page {
             return 0;
         }
         let lower = PAGE_HEADER + ITEM_ID * self.lps.len();
-        let upper = BLCKSZ - self.used;
+        // (A page restored at its rows' stored TIDs can hold more than their re-measured sizes allow.)
+        let upper = BLCKSZ.saturating_sub(self.used);
         upper.saturating_sub(lower).saturating_sub(ITEM_ID)
     }
 
@@ -1629,10 +1630,15 @@ impl Heap {
     }
 
     /// The rows whose current version is live, in physical order: (key, t_len).
-    pub fn live_rows(&self, v: &Vis) -> Vec<(Vec<u8>, usize)> {
+    /// Rows whose last update aborted go back to the versions it replaced first (`settle`):
+    /// until then their keys point at the aborted versions, and a moved row isn't under its
+    /// old key.
+    pub fn live_rows(&mut self, v: &Vis) -> Vec<(Vec<u8>, usize)> {
+        self.settle(v);
         let mut out: Vec<(Tid, &Vec<u8>, usize)> = Vec::new();
-        for (k, &tid) in &self.keys {
-            if let Some(t) = self.pages.get(tid.0 as usize).and_then(|p| p.tup(tid.1))
+        for k in self.keys.keys() {
+            if let Some(tid) = self.locate(k, v)
+                && let Some(t) = self.tuple(tid)
                 && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress | Htsv::InsertInProgress)
             {
                 out.push((tid, k, t.len as usize));
@@ -1677,6 +1683,105 @@ impl Heap {
     }
 }
 
+/// The heap a reopened database (after a clean shutdown or a crash) finds: every row at the
+/// TID it was written with, since PostgreSQL never moves a committed row on restart or
+/// recovery. The line pointers between them are dead (see `place_at`). Rows come in TID
+/// order, and rows without a TID come last. A row
+/// without a TID, or whose TID an earlier row already holds (a database written before
+/// restored models existed), goes where a rewrite would put it. Returns whether any row's
+/// place differs from its stored TID.
+pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> (Heap, bool) {
+    let mut h = Heap::new(fillfactor);
+    let mut moved = false;
+    let mut rest = Vec::new();
+    for (k, len, stored) in rows {
+        match stored.filter(|&tid| h.place_at(tid, Heap::new_tup(len, 0))) {
+            Some(tid) => {
+                h.placed(&k, tid);
+                h.keys.insert(k, tid);
+            }
+            None => {
+                moved |= stored.is_some();
+                rest.push((k, len));
+            }
+        }
+    }
+    for (k, len) in rest {
+        let tid = h.append(Heap::new_tup(len, 0));
+        h.placed(&k, tid);
+        h.keys.insert(k, tid);
+    }
+    (h, moved)
+}
+
+impl Heap {
+    /// Put `t` at `tid` unless a tuple (or a redirect) holds that line pointer already. Pages
+    /// and the line pointers before it are made as needed. Line pointers made as gaps are
+    /// dead: in PostgreSQL they hold versions pruned away or still dead, which only VACUUM
+    /// frees for reuse. Returns false when the slot is held, or the TID can't be one a
+    /// modelled heap gave out.
+    fn place_at(&mut self, (b, off): Tid, t: Tup) -> bool {
+        if off == 0 || off as usize > MAX_HEAP_TUPLES || b >= 1 << 20 {
+            return false;
+        }
+        if self.pages.len() <= b as usize {
+            self.pages.resize_with(b as usize + 1, Page::fresh);
+        }
+        let p = &mut self.pages[b as usize];
+        if matches!(p.lps.get(off as usize - 1), Some(Lp::Normal(_) | Lp::Redirect(_))) {
+            return false;
+        }
+        if p.lps.len() < off as usize {
+            p.lps.resize(off as usize, Lp::Dead);
+        }
+        p.used += maxalign(t.len as usize);
+        p.lps[off as usize - 1] = Lp::Normal(t);
+        p.new = false;
+        self.versions += 1;
+        true
+    }
+
+    /// Put `t` where a rewrite would: on the last page if it fits there, else a new one.
+    fn append(&mut self, t: Tup) -> Tid {
+        let need = maxalign(t.len as usize) + self.save_free();
+        if !self.pages.last().is_some_and(|p| need <= p.heap_free()) {
+            self.pages.push(Page::fresh());
+        }
+        let b = self.pages.len() as u32 - 1;
+        self.put(b, t, false)
+    }
+
+    /// A prepared transaction's write to the row stored under `key`, found when the heap is
+    /// laid out afresh (`restored`): the version it replaced or deleted gets its xid as
+    /// xmax, and the version it made (`new`: its length and stored TID) goes at that TID.
+    /// This is what `update` / `delete` would have left, so COMMIT PREPARED and ROLLBACK
+    /// PREPARED settle it the same way. Returns whether the new version had to go elsewhere.
+    pub fn restore_pending(&mut self, xid: u64, key: Vec<u8>, new: Option<(usize, Option<Tid>)>) -> bool {
+        let old = self.keys.get(&key).copied();
+        if let Some((b, off)) = old {
+            let p = &mut self.pages[b as usize];
+            if let Some(t) = p.tup_mut(off) {
+                t.xmax = xid;
+            }
+            p.set_prunable(xid);
+            p.all_visible = false;
+        }
+        let Some((len, stored)) = new else {
+            return false;
+        };
+        let mut t = Self::new_tup(len, xid);
+        t.prev = old;
+        let tid = match stored.filter(|&tid| self.place_at(tid, t.clone())) {
+            Some(tid) => tid,
+            None => self.append(t),
+        };
+        self.pending.entry(xid).or_default().push((key.clone(), tid, None));
+        self.disordered = true;
+        self.keys.insert(key, tid);
+        stored.is_some_and(|s| s != tid)
+    }
+}
+
 /// A heap built the way a rewrite (VACUUM FULL, CLUSTER) writes it: pages filled in turn
 /// up to the fillfactor, no free space map or visibility map yet.
 pub fn rewritten(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>) -> (Heap, Vec<Tid>) {
@@ -1693,41 +1798,6 @@ pub fn rewritten(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>) -> (Heap, Vec<T
         }
         let b = h.pages.len() as u32 - 1;
         let tid = h.put(b, Heap::new_tup(len, 0), false);
-        h.placed(&k, tid);
-        h.keys.insert(k, tid);
-        tids.push(tid);
-    }
-    (h, tids)
-}
-
-/// A heap laid out again from its rows when its database opens: each row on the block it was
-/// stored with (`blocks`, ascending; the rows given in that order), so the table keeps the
-/// pages it had (Postgres's file keeps them: the planner's page counts and the ctids don't
-/// change with a restart), a block no row is on left empty. Rows without a stored block, or
-/// that no longer fit on theirs, go after them as `rewritten` places rows.
-pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>, blocks: &[Option<u32>]) -> (Heap, Vec<Tid>) {
-    let mut h = Heap::new(fillfactor);
-    let save = h.save_free();
-    let mut tids = Vec::with_capacity(rows.len());
-    for (i, (k, len)) in rows.into_iter().enumerate() {
-        let at = blocks.get(i).copied().flatten().filter(|&b| b as usize + 1 >= h.pages.len());
-        let b = match at {
-            Some(b) if h.pages.get(b as usize).is_none_or(|p| maxalign(len) <= p.heap_free()) => {
-                while h.pages.len() <= b as usize {
-                    h.pages.push(Page::fresh());
-                }
-                b
-            }
-            _ => {
-                let fits = h.pages.last().is_some_and(|p| maxalign(len) + save <= p.heap_free());
-                if !fits {
-                    h.pages.push(Page::fresh());
-                }
-                h.pages.len() as u32 - 1
-            }
-        };
-        let tid = h.put(b, Heap::new_tup(len, 0), false);
-        // (Rows come in their stored TIDs' order, not necessarily their keys'.)
         h.placed(&k, tid);
         h.keys.insert(k, tid);
         tids.push(tid);

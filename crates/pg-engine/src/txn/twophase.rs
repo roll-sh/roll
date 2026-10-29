@@ -16,6 +16,7 @@ use crate::catalog::persist;
 use crate::error::{Error, Result, code, internal};
 use bytes::Bytes;
 use parking_lot::Mutex;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -174,6 +175,21 @@ impl TwoPhase {
     /// nprepared).
     pub fn in_database(&self, db: u32) -> usize {
         self.list.lock().iter().filter(|g| g.info.db == db).count()
+    }
+
+    /// The writes in [start, end) of database `db`'s prepared transactions, by xid.
+    pub fn writes_in(&self, db: u32, start: &[u8], end: &[u8]) -> Result<Vec<(u64, BTreeMap<Vec<u8>, Option<Bytes>>)>> {
+        let l = self.list.lock();
+        let mut out = Vec::new();
+        for g in l.iter().filter(|g| g.info.db == db) {
+            if let Some(t) = &g.txn {
+                let w = t.writes_in(start, end)?;
+                if !w.is_empty() {
+                    out.push((g.info.xid, w));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The server stops: the prepared transactions go from memory (their state records stay).

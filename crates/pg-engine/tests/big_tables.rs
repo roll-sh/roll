@@ -330,10 +330,9 @@ fn deferred_entry_deletes() {
     });
 }
 
-/// A modelled table keeps its pages across a restart (`heapsim::restored`: each row back on
-/// the block it was stored with): the planner's page counts and pg_relation_size are what they
-/// were, with rows deleted from the middle of it. (Line pointer offsets aren't kept: a row
-/// after removed ones on its page gets a lower one.)
+/// A modelled table keeps its pages across a restart (`heapsim::restored`: each row back at
+/// the TID it was stored with): the planner's page counts and pg_relation_size are what they
+/// were, with rows deleted from the middle of it.
 #[test]
 fn heap_pages_kept_across_restart() {
     let dir = tempfile::tempdir().unwrap();

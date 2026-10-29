@@ -1325,21 +1325,37 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             }
         }
     }
+    // Prepared transactions' writes (a restart recovers them before any model exists): each
+    // write's xid, key, and the version it made (its length and stored TID; None: a delete).
+    let mut pending = Vec::new();
+    if heap_missing {
+        for (xid, writes) in db.twophase().writes_in(db.oid, &start, &end)? {
+            for (k, v) in writes {
+                let new = match v {
+                    Some(b) => {
+                        let len = layout(t, &decode_table_row(t, &b)?, ctx, &HashSet::new()).0;
+                        Some((len, super::scan::stored_tid(&b)))
+                    }
+                    None => None,
+                };
+                pending.push((xid, k, new));
+            }
+        }
+    }
     let mut rf = db.relfiles.write();
     let rf = &mut *rf;
     if heap_missing && exts.iter().any(|(_, e)| !e.is_empty()) {
         mark_tracked(db.instance, t.oid);
     }
     if heap_missing && !rf.heaps.contains_key(&t.oid) {
-        // (The first model since the database opened: each row back on its stored block, the
-        // pages the table had before. A model dropped since is laid out afresh, as before.)
-        let (mut h, tids) = if cold {
-            let blocks: Vec<Option<u32>> = stored.iter().map(|s| s.map(|t| t.0)).collect();
-            heapsim::restored(heap_fillfactor(t), lens, &blocks)
-        } else {
-            heapsim::rewritten(heap_fillfactor(t), lens)
-        };
-        h.unstamped = stored.iter().zip(&tids).any(|(s, t)| s.is_some_and(|s| s != *t));
+        // (Every row where its stored TID says: rows never move when a database reopens, nor
+        // when a rolled-back TRUNCATE or rewrite gives the table its old storage back.)
+        let rows = lens.into_iter().zip(stored).map(|((k, len), tid)| (k, len, tid)).collect();
+        let (mut h, mut moved) = heapsim::restored(heap_fillfactor(t), rows);
+        for (xid, k, new) in pending {
+            moved |= h.restore_pending(xid, k, new);
+        }
+        h.unstamped = moved;
         // (The first model of the table since the database was opened: the pages its
         // last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
         if !rf.dropped.contains(&t.oid)
@@ -2797,7 +2813,7 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
     let db = &ctx.sess.db;
     let xids = db.xids();
     let mut rf = db.relfiles.write();
-    let Some(heap) = rf.heaps.get(&t.oid) else {
+    let Some(heap) = rf.heaps.get_mut(&t.oid) else {
         return Ok(());
     };
     let v = Vis::new(&xids);
