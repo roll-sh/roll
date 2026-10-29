@@ -1026,9 +1026,59 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     - Default: seed 1, 3 rounds. `CRASH_SEEDS`, `CRASH_ROUNDS`, `CRASH_CHECK_STEPS=1` (check
       ctids after every step) and `CRASH_TRACE=<file>` (log each step's SQL) are for sweeps
       and bisecting.
-    - Sweep: seeds 1-13 × 4 rounds (release), clean after the fixes.
+    - Sweep: seeds 1-30 × 4 rounds (release), clean after the fixes.
     - amcheck's functions check arguments only (`ext/amcheck.rs`), so the harness's own scan
       comparisons stand in for `bt_index_check(heapallindexed)`.
+  - **UNLOGGED relations after a crash** (`tests/crash_unlogged.rs`). PostgreSQL empties them
+    at the end of crash recovery: it copies each init fork over the relation's data, so
+    unlogged sequences start over too. A clean shutdown keeps them. The engine used to keep
+    them either way. Now the registry's `running` flag is set (and fsynced) at start and
+    cleared by `Engine::shutdown`. If it is still set at the next start, every database is
+    reset the first time it opens (`Database::reset_unlogged`), once per process and before
+    prepared transactions are recovered. The reset deletes each unlogged table's key range
+    (rows and index entries) and drops unlogged sequences' state, the way
+    ResetUnloggedRelations does: no triggers, no relfilenode change. Checked against
+    PostgreSQL 18.6 killed with SIGKILL: same counts and nextval values.
+    - An engine that is dropped without `shutdown()` counts as crashed, as it would for
+      PostgreSQL.
+    - Left open: a prepared transaction's writes to an unlogged table still apply at
+      COMMIT PREPARED after the reset. PostgreSQL loses them with the rest of the relation.
+  - Verified (4b1ee945, rebased onto 30111bb9):
+    - the crate suite in debug and in release, deep_input included;
+    - clippy, with no new warnings;
+    - the difftest smoke;
+    - isolation 121 / 122;
+    - a full regress run on a private reference (debug): 51,148 / 51,150, with no unit
+      changed against `results.tsv`.
+  - **Recovery cost** (release, a machine at load ~30). The test was pgbench `-i -s 200`, then
+    8 clients of tpcb-like killed with SIGKILL after 40 s, then a restart. The time is to the
+    first answered query. psql runs through `docker exec`, which adds about 0.12 s. The
+    engine's memory is its VmHWM; PostgreSQL's is the container's anon + shmem peak (the
+    cgroup peak, with page cache, in brackets).
+
+    | | first query | peak memory | on disk at the crash |
+    |---|---|---|---|
+    | engine (`--cache-mb 2048`) | 0.89 s (listening at 0.09 s) | 157 MB | 340 MB |
+    | PostgreSQL, shared_buffers=2GB, otherwise defaults | 3.43 s (redo 1.59 s) | 959 MB (976 MB) | 4,039 MB |
+    | PostgreSQL, BENCH.md's settings (max_wal_size=8GB, checkpoint_timeout=30min) | 10.05 s (redo 7.08 s) | 2,185 MB (4,482 MB) | 5,478 MB |
+
+    Every transaction pgbench counted was in pgbench_history after the restart, on both
+    servers.
+    - The engine's recovery is the first open of each database: WAL replay into memtables,
+      bounded by `memtable_bytes` (8 MB), then one flush. The debug log of a 20 s run shows
+      57,262 commits replayed in about 0.5 s and the flush in 0.13 s. Ideas if it ever
+      matters: insert the replay as one sorted run instead of record by record, and leave
+      the post-replay flush to the background (keep the old WAL until it is done).
+    - The larger lazy cost comes after recovery: the first statement on each modelled table
+      reads the whole table to lay out its heap model. For 300,000 rows that is 1.8-2.1 s, and
+      0.4 s less than the old dense layout (3 interleaved rounds each). Peak RSS is up about
+      7% (322-346 MB against 304-320 MB), because the restored model keeps the dead line
+      pointers and gaps that PostgreSQL's heap also has. Persisting the models, or building
+      them in the background, would remove that cost.
+    - pgbench tpcb-like (scale 10, 4 clients, 30 s, sync on, 3 interleaved rounds, load ~30):
+      base 852 / 1,653 / 1,494 tps, head 1,523 / 1,327 / 1,602 tps. VmHWM was 435-461 MB on
+      both, with CPU seconds alike. The fix is not on the commit path: it runs only when a
+      model is built, and in VACUUM FULL.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

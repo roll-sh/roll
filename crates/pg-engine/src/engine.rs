@@ -182,6 +182,11 @@ struct Registry {
     /// WAL positions below this may have been handed out (`repl::lsn`).
     #[serde(default)]
     next_lsn: u64,
+    /// Set while a server has the data directory open and cleared by a clean shutdown. If it
+    /// is still set at the next start, that server crashed, and unlogged relations are reset
+    /// (`Engine::unlogged_reset`).
+    #[serde(default)]
+    running: bool,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -225,6 +230,9 @@ pub struct Engine {
     cache: Arc<BlockCache>,
     registry: Mutex<Registry>,
     open: Mutex<OpenDbs>,
+    /// The databases whose unlogged relations still have to be reset when they first open,
+    /// because the last server crashed. Each is reset once per process.
+    unlogged_reset: Mutex<std::collections::HashSet<u32>>,
     /// Signalled when a database stops closing (`OpenDbs::closing`).
     reopenable: Condvar,
     /// Held while committing catalog changes, so the cluster-wide catalogs change one
@@ -364,6 +372,18 @@ impl Engine {
         for d in registry.databases.iter_mut().filter(|d| d.is_template.is_none()) {
             d.is_template = Some(d.name == "template0" || d.name == "template1");
         }
+        // Still running at the last start, so no clean shutdown since: a crash.
+        let crashed = registry.running;
+        if crashed {
+            info!("database system was not properly shut down; resetting unlogged relations");
+        }
+        registry.running = true;
+        write_registry(&opts.data_dir, &registry)?;
+        // (Durable before anything is written: a crash from here on must be seen as one.)
+        if opts.sync {
+            std::fs::File::open(opts.data_dir.join(REGISTRY_FILE))?.sync_all()?;
+        }
+        let unlogged_reset = if crashed { registry.databases.iter().map(|d| d.oid).collect() } else { Default::default() };
         // The configuration files; the postmaster parameters the engine uses take their values
         // from them unless the command line gave one.
         let mut conf = crate::sysconf::ServerConfig::open(Some(opts.data_dir.clone()), &registry.config);
@@ -488,6 +508,7 @@ impl Engine {
                 stats,
                 registry: Mutex::new(registry),
                 open: Mutex::new(OpenDbs::default()),
+                unlogged_reset: Mutex::new(unlogged_reset),
                 reopenable: Condvar::new(),
                 shared_lock: Mutex::new(()),
                 shared_history: Mutex::new(Default::default()),
@@ -645,6 +666,14 @@ impl Engine {
         }
         db.set_repl(self.repl.clone());
         self.repl.attach(&db);
+        // After a crash, unlogged relations come back empty (before prepared transactions
+        // take their locks again).
+        if self.unlogged_reset.lock().remove(&entry.oid) {
+            let n = db.reset_unlogged()?;
+            if n > 0 {
+                info!(database = %entry.name, relations = n, "reset unlogged relations");
+            }
+        }
         // Its prepared transactions, with their locks, before any session can see it.
         if db.recover_prepared()? == 0 {
             let mut r = self.registry.lock();
@@ -1641,6 +1670,7 @@ impl Engine {
         // Where the WAL position resumes at the next start.
         let mut r = self.registry.lock();
         r.wal_lsn = self.stats.lock().wal_lsn();
+        r.running = false;
         if let Err(e) = self.save(&r) {
             warn!(error = %e, "saving the registry failed");
         }

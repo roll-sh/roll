@@ -679,6 +679,41 @@ impl Database {
         }
         Ok(())
     }
+
+    /// ResetUnloggedRelations, when the database first opens after a crash. Every unlogged
+    /// table loses its rows and index entries, and unlogged sequences start over, which is
+    /// what copying their init forks does. Runs before any session can see the database.
+    /// Returns how many relations were reset.
+    pub fn reset_unlogged(&self) -> Result<usize> {
+        let cat = self.catalog();
+        let tables: Vec<u32> = cat.tables.values().filter(|t| t.unlogged && !t.temporary).map(|t| t.oid).collect();
+        let seqs: Vec<u32> = (cat.sequences.values())
+            .filter(|s| {
+                let owner = || s.owned_by.and_then(|(t, _)| cat.tables.get(&t)).is_some_and(|t| t.unlogged);
+                s.unlogged.unwrap_or_else(owner)
+            })
+            .map(|s| s.oid)
+            .collect();
+        for &oid in &tables {
+            let start = crate::storage::keys::index_prefix(oid, 0);
+            let end = crate::storage::keys::index_prefix(oid, u32::MAX);
+            loop {
+                let ts = self.store.visible_ts();
+                let batch: Vec<(Vec<u8>, Option<Bytes>)> = (self.store.scan(&start, &end, ts))
+                    .take(10_000)
+                    .map(|e| e.map(|(k, _)| (k, None)))
+                    .collect::<Result<_>>()?;
+                if batch.is_empty() {
+                    break;
+                }
+                self.store.commit(batch, |_| Ok(()))?;
+            }
+        }
+        for &oid in &seqs {
+            self.reset_seq(oid, None)?;
+        }
+        Ok(tables.len() + seqs.len())
+    }
 }
 
 struct Savepoint {
