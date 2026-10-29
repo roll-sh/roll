@@ -24,6 +24,7 @@ mod vector;
 use super::native::Native;
 use super::types::{HALFVEC, SPARSEVEC, VECTOR};
 use crate::Result;
+use crate::types::Value;
 use bytes::BytesMut;
 
 pub(crate) use halfvec::TYPE as HALFVEC_TYPE;
@@ -41,6 +42,73 @@ pub(super) fn symbol(sym: &str) -> Option<Native> {
         .or_else(|| halfvec::symbol(sym))
         .or_else(|| sparsevec::symbol(sym))
         .or_else(|| bitvec::symbol(sym))
+}
+
+/// A distance function's float8 over two non-NULL values of its type, as the executor's
+/// kernels run it (`exec::kernel`, off the executor's thread): over the values, and for
+/// vector, halfvec and sparsevec over their bytes (their kind), so that a stored value needn't
+/// be decoded for it.
+#[derive(Clone, Copy)]
+pub struct DistKernel {
+    pub of: fn(&Value, &Value) -> f64,
+    pub bytes: Option<(u16, fn(&[u8], &[u8]) -> f64)>,
+}
+
+/// The distance function whose native code is `imp` (an SQL function of library `vector`),
+/// as a kernel: what it returns for values whose dimensions agree (`kernel_dims_agree`).
+pub(crate) fn distance_kernel(imp: crate::sql::func::FnImpl) -> Option<DistKernel> {
+    static TABLE: std::sync::OnceLock<Vec<(crate::sql::func::FnImpl, DistKernel)>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        const SYMBOLS: [&str; 22] = [
+            "l2_distance",
+            "vector_l2_squared_distance",
+            "inner_product",
+            "vector_negative_inner_product",
+            "cosine_distance",
+            "vector_spherical_distance",
+            "l1_distance",
+            "halfvec_l2_distance",
+            "halfvec_l2_squared_distance",
+            "halfvec_inner_product",
+            "halfvec_negative_inner_product",
+            "halfvec_cosine_distance",
+            "halfvec_spherical_distance",
+            "halfvec_l1_distance",
+            "sparsevec_l2_distance",
+            "sparsevec_l2_squared_distance",
+            "sparsevec_inner_product",
+            "sparsevec_negative_inner_product",
+            "sparsevec_cosine_distance",
+            "sparsevec_l1_distance",
+            "hamming_distance",
+            "jaccard_distance",
+        ];
+        let kind = |s: &str| if s.starts_with("halfvec") { HALFVEC } else if s.starts_with("sparsevec") { SPARSEVEC } else { VECTOR };
+        SYMBOLS
+            .iter()
+            .filter_map(|s| Some((symbol(s)?.imp, DistKernel { of: dist::distance(s)?, bytes: dist::distance_bytes(s).map(|f| (kind(s), f)) })))
+            .collect()
+    });
+    table.iter().find(|(f, _)| std::ptr::fn_addr_eq(*f, imp)).map(|(_, k)| *k)
+}
+
+/// Whether two values of kind `kind` (their bytes) have the same dimensions.
+pub(crate) fn kernel_bytes_agree(kind: u16, x: &[u8], y: &[u8]) -> bool {
+    match kind {
+        VECTOR | HALFVEC => x.len() == y.len(),
+        SPARSEVEC => x.len() >= 4 && y.len() >= 4 && x[..4] == y[..4],
+        _ => false,
+    }
+}
+
+/// Whether two values of a distance function's type have the same dimensions (the
+/// function's CheckDims passes, so its kernel's value is what it returns).
+pub(crate) fn kernel_dims_agree(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Ext(k, x), Value::Ext(l, y)) if k == l => kernel_bytes_agree(*k, x, y),
+        (Value::Bits(n, _), Value::Bits(m, _)) => n == m,
+        _ => false,
+    }
 }
 
 /// The index access method routine handler `sym` returns.

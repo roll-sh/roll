@@ -155,8 +155,11 @@ impl IndexAm for Hnsw {
         if !b.flushed {
             b.flush()?;
         }
-        let indtuples = b.indtuples;
-        let mut g = b.graph;
+        // (The in-memory graph goes before the records are written.)
+        let (mut g, indtuples) = {
+            let b = b;
+            (b.graph, b.indtuples)
+        };
         g.flush(&ix.store, true)?;
         // The index's state from now on; other storage of the same index (before a
         // TRUNCATE or REINDEX) is let go, to be loaded again if it comes back.

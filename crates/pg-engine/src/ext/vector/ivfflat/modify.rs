@@ -7,6 +7,7 @@ use crate::Result;
 use crate::exec::ExecCtx;
 use crate::ext::index_am::{AmIndex, BuildStats};
 use crate::types::Value;
+use std::sync::Arc;
 
 fn invalid() -> crate::Error {
     crate::error::internal("ivfflat index is not valid")
@@ -125,7 +126,7 @@ pub(super) fn vacuum(ix: &AmIndex, dead: &mut dyn FnMut(&[u8], &Value) -> Result
                     if let Page::Entries { tuples, used, .. } = &mut idx.pages[search as usize] {
                         let mut d = deletable.iter().peekable();
                         let mut i = 0;
-                        tuples.retain(|_| {
+                        Arc::make_mut(tuples).retain(|_| {
                             let del = d.next_if_eq(&&i).is_some();
                             i += 1;
                             !del

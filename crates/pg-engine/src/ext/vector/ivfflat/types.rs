@@ -8,7 +8,6 @@ use crate::ext::types::{HALFVEC, VECTOR};
 use crate::ext::vector::common::{f32_to_half, half_to_f32};
 use crate::ext::vector::dist;
 use crate::types::Value;
-use std::sync::Arc;
 
 /// A support function computing a distance (FUNCTION 1 and 3).
 pub(super) type Dist = fn(&Value, &Value) -> f64;
@@ -146,10 +145,14 @@ pub(super) struct Procs {
     pub kind: Kind,
     /// FUNCTION 1 (IVFFLAT_DISTANCE_PROC): lists and entries against values and queries.
     pub distance: Dist,
+    /// FUNCTION 1 four values at a time, for the vector kernels that have that form.
+    pub distance4: Option<dist::Dist4>,
     /// FUNCTION 2 (IVFFLAT_NORM_PROC): values and queries are normalized when present.
     pub norm: Option<Norm>,
     /// FUNCTION 3 (IVFFLAT_KMEANS_DISTANCE_PROC).
     pub kmeans_distance: Dist,
+    /// FUNCTION 3 four values at a time, where the kernel has that form.
+    pub kmeans_distance4: Option<dist::Dist4>,
     /// FUNCTION 4 (IVFFLAT_KMEANS_NORM_PROC): spherical k-means when present.
     pub kmeans_norm: Option<Norm>,
 }
@@ -182,52 +185,16 @@ impl Procs {
         Ok(Procs {
             kind: Kind::of(col),
             distance: required(1)?,
+            distance4: symbol(1)?.and_then(dist::distance4),
             norm: optional(2)?,
             kmeans_distance: required(3)?,
+            kmeans_distance4: symbol(3)?.and_then(dist::distance4),
             kmeans_norm: optional(4)?,
         })
     }
 }
 
-/// The distance function of C name `symbol`: `dist`'s, but for `hamming_distance`, computed
-/// here without copying the strings (the same count).
+/// The distance function of C name `symbol`.
 fn distance(symbol: &str) -> Option<Dist> {
-    if symbol == "hamming_distance" {
-        return Some(hamming);
-    }
     dist::distance(symbol)
-}
-
-/// `BitHammingDistance` (as `dist::hamming`: each string's bytes, its pad bits cleared, over
-/// the shorter).
-fn hamming(a: &Value, b: &Value) -> f64 {
-    let (Value::Bits(na, a), Value::Bits(nb, b)) = (a, b) else {
-        return 0.0;
-    };
-    let bytes = |n: u32, b: &Arc<[u8]>| (n as usize).div_ceil(8).min(b.len());
-    let (la, lb) = (bytes(*na, a), bytes(*nb, b));
-    let n = la.min(lb);
-    if n == 0 {
-        return 0.0;
-    }
-    let mut d = 0u64;
-    // The bytes before the last are whole in both.
-    let full = n - 1;
-    let (ca, ra) = a[..full].as_chunks::<8>();
-    let (cb, rb) = b[..full].as_chunks::<8>();
-    for (x, y) in ca.iter().zip(cb) {
-        d += (u64::from_ne_bytes(*x) ^ u64::from_ne_bytes(*y)).count_ones() as u64;
-    }
-    for (x, y) in ra.iter().zip(rb) {
-        d += (x ^ y).count_ones() as u64;
-    }
-    let last = |n: u32, l: usize, b: &[u8]| {
-        let mut v = b[full];
-        if full == l - 1 && !n.is_multiple_of(8) {
-            v &= 0xffu8 << (8 - n % 8);
-        }
-        v
-    };
-    d += (last(*na, la, a) ^ last(*nb, lb, b)).count_ones() as u64;
-    d as f64
 }

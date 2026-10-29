@@ -35,11 +35,36 @@ fn lanes(a: &[u8], b: &[u8], n: usize, term: impl Fn(f32, f32) -> f32) -> [f32; 
     acc
 }
 
+/// `lanes` of four rows `a` against one `b` (each `n` floats), their sums interleaved:
+/// independent chains, so one row's additions overlap another's, each lane computed as
+/// `lanes` computes it.
+#[inline(always)]
+fn lanes4(a: &[&[u8]; 4], b: &[u8], n: usize, term: impl Fn(f32, f32) -> f32) -> [[f32; 4]; 4] {
+    let main = 4 * (n & !3);
+    let mut acc = [[0.0f32; 4]; 4];
+    let cb = b[..main].as_chunks::<16>().0;
+    let ca = a.map(|a| a[..main].as_chunks::<16>().0);
+    for (i, cb) in cb.iter().enumerate() {
+        let y = quad(cb);
+        for r in 0..4 {
+            let x = quad(&ca[r][i]);
+            for j in 0..4 {
+                acc[r][j] += term(x[j], y[j]);
+            }
+        }
+    }
+    acc
+}
+
+/// Whether four rows can go through a kernel's four-row form against `b`: each as long.
+fn same_len(a: &[&[u8]; 4], b: &[u8]) -> bool {
+    a.iter().all(|a| a.len() == b.len())
+}
+
 /// The reduction GCC gives most float sums (`inner_product`, `l1_distance`, the sparse
 /// norms): (l0 + l2) + (l1 + l3), then the remaining terms one at a time.
 #[inline(always)]
-fn sum_seq(a: &[u8], b: &[u8], n: usize, term: impl Fn(f32, f32) -> f32) -> f32 {
-    let l = lanes(a, b, n, &term);
+fn seq_reduce(l: [f32; 4], a: &[u8], b: &[u8], n: usize, term: impl Fn(f32, f32) -> f32) -> f32 {
     let mut s = (l[0] + l[2]) + (l[1] + l[3]);
     for i in n & !3..n {
         s += term(f32_at(a, i), f32_at(b, i));
@@ -47,15 +72,19 @@ fn sum_seq(a: &[u8], b: &[u8], n: usize, term: impl Fn(f32, f32) -> f32) -> f32 
     s
 }
 
-/// `VectorL2SquaredDistance`. Its remainder keeps two lanes: one term is added to the full
-/// sum, two or three go to the half sums (l0 + l2) and (l1 + l3) before they are added.
-pub(super) fn l2_squared(a: &[u8], b: &[u8]) -> f32 {
-    let n = a.len().min(b.len()) / 4;
-    let term = |x: f32, y: f32| (x - y) * (x - y);
-    let l = lanes(a, b, n, term);
+#[inline(always)]
+fn sum_seq(a: &[u8], b: &[u8], n: usize, term: impl Fn(f32, f32) -> f32) -> f32 {
+    seq_reduce(lanes(a, b, n, &term), a, b, n, term)
+}
+
+/// `VectorL2SquaredDistance`'s reduction of its lanes. Its remainder keeps two lanes: one
+/// term is added to the full sum, two or three go to the half sums (l0 + l2) and (l1 + l3)
+/// before they are added.
+#[inline(always)]
+fn l2_reduce(l: [f32; 4], a: &[u8], b: &[u8], n: usize) -> f32 {
     let (s0, s1) = (l[0] + l[2], l[1] + l[3]);
     let main = n & !3;
-    let t = |i: usize| term(f32_at(a, i), f32_at(b, i));
+    let t = |i: usize| l2_term(f32_at(a, i), f32_at(b, i));
     match n - main {
         0 => s0 + s1,
         1 => (s0 + s1) + t(main),
@@ -66,9 +95,40 @@ pub(super) fn l2_squared(a: &[u8], b: &[u8]) -> f32 {
     }
 }
 
+#[inline(always)]
+fn l2_term(x: f32, y: f32) -> f32 {
+    (x - y) * (x - y)
+}
+
+/// `VectorL2SquaredDistance`.
+pub(super) fn l2_squared(a: &[u8], b: &[u8]) -> f32 {
+    let n = a.len().min(b.len()) / 4;
+    l2_reduce(lanes(a, b, n, l2_term), a, b, n)
+}
+
+/// `l2_squared` of four rows against `b`.
+fn l2_squared4(a: &[&[u8]; 4], b: &[u8]) -> [f32; 4] {
+    if !same_len(a, b) {
+        return a.map(|a| l2_squared(a, b));
+    }
+    let n = b.len() / 4;
+    let l = lanes4(a, b, n, l2_term);
+    [0, 1, 2, 3].map(|r| l2_reduce(l[r], a[r], b, n))
+}
+
 /// `VectorInnerProduct`.
 pub(super) fn inner_product(a: &[u8], b: &[u8]) -> f32 {
     sum_seq(a, b, a.len().min(b.len()) / 4, |x, y| x * y)
+}
+
+/// `inner_product` of four rows against `b`.
+fn inner_product4(a: &[&[u8]; 4], b: &[u8]) -> [f32; 4] {
+    if !same_len(a, b) {
+        return a.map(|a| inner_product(a, b));
+    }
+    let n = b.len() / 4;
+    let l = lanes4(a, b, n, |x, y| x * y);
+    [0, 1, 2, 3].map(|r| seq_reduce(l[r], a[r], b, n, |x, y| x * y))
 }
 
 /// `VectorL1Distance`.
@@ -76,20 +136,22 @@ pub(super) fn l1(a: &[u8], b: &[u8]) -> f32 {
     sum_seq(a, b, a.len().min(b.len()) / 4, |x, y| (x - y).abs())
 }
 
-/// `VectorCosineSimilarity`: its three sums reduce as `l2_squared`'s does, except that one
-/// or two remaining terms go to the full sums.
-pub(super) fn cosine_similarity(a: &[u8], b: &[u8]) -> f64 {
-    let n = a.len().min(b.len()) / 4;
-    let main = n & !3;
-    let (mut ab, mut aa, mut bb) = ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
-    for (ca, cb) in a[..4 * main].as_chunks::<16>().0.iter().zip(b[..4 * main].as_chunks::<16>().0) {
-        let (x, y) = (quad(ca), quad(cb));
-        for j in 0..4 {
-            ab[j] += x[j] * y[j];
-            aa[j] += x[j] * x[j];
-            bb[j] += y[j] * y[j];
-        }
+/// `VectorCosineSimilarity`'s three sums (a·b, a·a, b·b) in their lanes.
+#[inline(always)]
+fn cos_lanes(x: [f32; 4], y: [f32; 4], acc: &mut [[f32; 4]; 3]) {
+    for j in 0..4 {
+        acc[0][j] += x[j] * y[j];
+        acc[1][j] += x[j] * x[j];
+        acc[2][j] += y[j] * y[j];
     }
+}
+
+/// `VectorCosineSimilarity`'s reduction of its lanes: as `l2_squared`'s, except that one or
+/// two remaining terms go to the full sums.
+#[inline(always)]
+fn cos_reduce(acc: [[f32; 4]; 3], a: &[u8], b: &[u8], n: usize) -> f64 {
+    let main = n & !3;
+    let [ab, aa, bb] = acc;
     let half = |l: [f32; 4]| [l[0] + l[2], l[1] + l[3]];
     let (hab, haa, hbb) = (half(ab), half(aa), half(bb));
     let (mut sab, mut saa, mut sbb) = (hab[0] + hab[1], haa[0] + haa[1], hbb[0] + hbb[1]);
@@ -109,6 +171,36 @@ pub(super) fn cosine_similarity(a: &[u8], b: &[u8]) -> f64 {
     }
     // Use sqrt(a * b) over sqrt(a) * sqrt(b)
     sab as f64 / (saa as f64 * sbb as f64).sqrt()
+}
+
+/// `VectorCosineSimilarity`.
+pub(super) fn cosine_similarity(a: &[u8], b: &[u8]) -> f64 {
+    let n = a.len().min(b.len()) / 4;
+    let main = 4 * (n & !3);
+    let mut acc = [[0.0f32; 4]; 3];
+    for (ca, cb) in a[..main].as_chunks::<16>().0.iter().zip(b[..main].as_chunks::<16>().0) {
+        cos_lanes(quad(ca), quad(cb), &mut acc);
+    }
+    cos_reduce(acc, a, b, n)
+}
+
+/// `cosine_similarity` of four rows against `b`.
+fn cosine_similarity4(a: &[&[u8]; 4], b: &[u8]) -> [f64; 4] {
+    if !same_len(a, b) {
+        return a.map(|a| cosine_similarity(a, b));
+    }
+    let n = b.len() / 4;
+    let main = 4 * (n & !3);
+    let mut acc = [[[0.0f32; 4]; 3]; 4];
+    let cb = b[..main].as_chunks::<16>().0;
+    let ca = a.map(|a| a[..main].as_chunks::<16>().0);
+    for (i, cb) in cb.iter().enumerate() {
+        let y = quad(cb);
+        for r in 0..4 {
+            cos_lanes(quad(&ca[r][i]), y, &mut acc[r]);
+        }
+    }
+    [0, 1, 2, 3].map(|r| cos_reduce(acc[r], a[r], b, n))
 }
 
 /// The sum of the squares of floats in double, as `vector_norm` and `l2_normalize` (and
@@ -307,6 +399,72 @@ mod x86 {
         }
         (ab, aa, bb)
     }
+
+    /// `l2_squared` of four rows against `b`, their sums interleaved.
+    #[target_feature(enable = "avx,f16c,fma")]
+    pub(super) fn l2_squared4(a: &[&[u8]; 4], b: &[u8], n: usize) -> [f32; 4] {
+        let count = n & !7;
+        let mut l = [_mm256_setzero_ps(); 4];
+        for i in (0..count).step_by(8) {
+            let y = load(b, i);
+            for r in 0..4 {
+                let d = _mm256_sub_ps(load(a[r], i), y);
+                l[r] = _mm256_fmadd_ps(d, d, l[r]);
+            }
+        }
+        let mut out = [0.0f32; 4];
+        for r in 0..4 {
+            let mut s = reduce(l[r]);
+            for i in count..n {
+                let d = h(a[r], i) - h(b, i);
+                s += d * d;
+            }
+            out[r] = s;
+        }
+        out
+    }
+
+    /// `inner_product` of four rows against `b`, their sums interleaved.
+    #[target_feature(enable = "avx,f16c,fma")]
+    pub(super) fn inner_product4(a: &[&[u8]; 4], b: &[u8], n: usize) -> [f32; 4] {
+        let count = n & !7;
+        let mut l = [_mm256_setzero_ps(); 4];
+        for i in (0..count).step_by(8) {
+            let y = load(b, i);
+            for r in 0..4 {
+                l[r] = _mm256_fmadd_ps(load(a[r], i), y, l[r]);
+            }
+        }
+        let mut out = [0.0f32; 4];
+        for r in 0..4 {
+            let mut s = reduce(l[r]);
+            for i in count..n {
+                s += h(a[r], i) * h(b, i);
+            }
+            out[r] = s;
+        }
+        out
+    }
+}
+
+/// `half_l2_squared` of four rows against `b` (each as long as `b`).
+fn half_l2_squared4(a: &[&[u8]; 4], b: &[u8]) -> [f32; 4] {
+    #[cfg(target_arch = "x86_64")]
+    if f16c() && same_len(a, b) {
+        // SAFETY: the CPU has the features.
+        return unsafe { x86::l2_squared4(a, b, b.len() / 2) };
+    }
+    a.map(|a| half_l2_squared(a, b))
+}
+
+/// `half_inner_product` of four rows against `b`.
+fn half_inner_product4(a: &[&[u8]; 4], b: &[u8]) -> [f32; 4] {
+    #[cfg(target_arch = "x86_64")]
+    if f16c() && same_len(a, b) {
+        // SAFETY: the CPU has the features.
+        return unsafe { x86::inner_product4(a, b, b.len() / 2) };
+    }
+    a.map(|a| half_inner_product(a, b))
 }
 
 // ── sparsevec (sparsevec.c) ──
@@ -402,33 +560,108 @@ fn sparse_norm_f32(a: &Sparse) -> f32 {
 
 // ── bit (bitutils.c) ──
 
-/// The bytes of a bit string, its pad bits cleared.
-fn bit_bytes(v: &Value) -> (u32, Vec<u8>) {
-    let Value::Bits(n, b) = v else { return (0, Vec::new()) };
-    let mut b = b[..(*n as usize).div_ceil(8).min(b.len())].to_vec();
-    if n % 8 != 0
-        && let Some(last) = b.last_mut()
-    {
-        *last &= 0xffu8 << (8 - n % 8);
+/// A bit string's bytes (as many as its length takes) and the mask of its last byte's bits.
+fn bit_view(v: &Value) -> (&[u8], u8) {
+    let Value::Bits(n, b) = v else { return (&[], 0xff) };
+    let mask = if n % 8 != 0 { 0xffu8 << (8 - n % 8) } else { 0xff };
+    (&b[..(*n as usize).div_ceil(8).min(b.len())], mask)
+}
+
+/// Two bit strings' bytes, their pad bits cleared and zipped to the shorter, without
+/// copying: the bytes before the last pair, and the last pair.
+fn bit_pair<'a>(a: &'a Value, b: &'a Value) -> (&'a [u8], &'a [u8], (u8, u8)) {
+    let ((a, ma), (b, mb)) = (bit_view(a), bit_view(b));
+    let m = a.len().min(b.len());
+    if m == 0 {
+        return (&[], &[], (0, 0));
     }
-    (*n, b)
+    let last = |v: &[u8], mask: u8| v[m - 1] & if v.len() == m { mask } else { 0xff };
+    (&a[..m - 1], &b[..m - 1], (last(a, ma), last(b, mb)))
+}
+
+/// Σ popcount(f(x, y)) over the 8-byte words of two byte strings (zipped to the shorter),
+/// then their remaining bytes.
+#[inline(always)]
+fn popcount2(a: &[u8], b: &[u8], f: impl Fn(u64, u64) -> u64) -> u64 {
+    let m = a.len().min(b.len());
+    let ((ca, ra), (cb, rb)) = (a[..m].as_chunks::<8>(), b[..m].as_chunks::<8>());
+    let mut n = 0u64;
+    for (x, y) in ca.iter().zip(cb) {
+        n += f(u64::from_ne_bytes(*x), u64::from_ne_bytes(*y)).count_ones() as u64;
+    }
+    for (x, y) in ra.iter().zip(rb) {
+        n += f(*x as u64, *y as u64).count_ones() as u64;
+    }
+    n
+}
+
+#[inline(always)]
+fn xor_count(a: &[u8], b: &[u8]) -> u64 {
+    popcount2(a, b, |x, y| x ^ y)
+}
+
+#[inline(always)]
+fn jaccard_counts(a: &[u8], b: &[u8]) -> [u64; 3] {
+    let m = a.len().min(b.len());
+    let (a, b) = (&a[..m], &b[..m]);
+    [popcount2(a, b, |x, y| x & y), popcount2(a, a, |x, _| x), popcount2(b, b, |y, _| y)]
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "popcnt")]
+fn xor_count_popcnt(a: &[u8], b: &[u8]) -> u64 {
+    xor_count(a, b)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "popcnt")]
+fn jaccard_counts_popcnt(a: &[u8], b: &[u8]) -> [u64; 3] {
+    jaccard_counts(a, b)
+}
+
+/// Whether the CPU counts bits in one instruction (pgvector's bit kernels take it when it
+/// does, as these do; the counts are the same either way).
+fn popcnt() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("popcnt")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
+/// The bits that differ between two byte strings (zipped to the shorter).
+pub(crate) fn bits_differing(a: &[u8], b: &[u8]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if popcnt() {
+        // SAFETY: the CPU has POPCNT.
+        return unsafe { xor_count_popcnt(a, b) };
+    }
+    xor_count(a, b)
+}
+
+/// The bits set in both of two byte strings (zipped to the shorter), in the first, in the
+/// second.
+pub(crate) fn bits_shared(a: &[u8], b: &[u8]) -> [u64; 3] {
+    #[cfg(target_arch = "x86_64")]
+    if popcnt() {
+        // SAFETY: the CPU has POPCNT.
+        return unsafe { jaccard_counts_popcnt(a, b) };
+    }
+    jaccard_counts(a, b)
 }
 
 /// `BitHammingDistance`.
 pub(super) fn hamming(a: &Value, b: &Value) -> f64 {
-    let ((_, a), (_, b)) = (bit_bytes(a), bit_bytes(b));
-    a.iter().zip(&b).map(|(x, y)| (x ^ y).count_ones() as u64).sum::<u64>() as f64
+    let (a, b, (x, y)) = bit_pair(a, b);
+    (bits_differing(a, b) + (x ^ y).count_ones() as u64) as f64
 }
 
 /// `BitJaccardDistance`.
 pub(super) fn jaccard(a: &Value, b: &Value) -> f64 {
-    let ((_, a), (_, b)) = (bit_bytes(a), bit_bytes(b));
-    let (mut ab, mut aa, mut bb) = (0u64, 0u64, 0u64);
-    for (x, y) in a.iter().zip(&b) {
-        ab += (x & y).count_ones() as u64;
-        aa += x.count_ones() as u64;
-        bb += y.count_ones() as u64;
-    }
+    let (a, b, (x, y)) = bit_pair(a, b);
+    let [ab, aa, bb] = bits_shared(a, b);
+    let (ab, aa, bb) = (ab + (x & y).count_ones() as u64, aa + x.count_ones() as u64, bb + y.count_ones() as u64);
     if ab == 0 { 1.0 } else { 1.0 - (ab as f64 / (aa + bb - ab) as f64) }
 }
 
@@ -522,6 +755,35 @@ pub(super) fn sparsevec_norm(a: &[u8]) -> f64 {
 
 // ── for the index access methods ──
 
+/// The byte-level kernels of the SQL distance functions over vector, halfvec and sparsevec,
+/// by C name, handed to macro `$m`.
+macro_rules! byte_kernels {
+    ($m:ident) => {
+        $m! {
+            "vector_l2_squared_distance" => vector_l2_squared,
+            "l2_distance" => vector_l2,
+            "vector_negative_inner_product" => vector_negative_ip,
+            "inner_product" => vector_ip,
+            "cosine_distance" => vector_cosine,
+            "vector_spherical_distance" => vector_spherical,
+            "l1_distance" => vector_l1,
+            "halfvec_l2_squared_distance" => halfvec_l2_squared,
+            "halfvec_l2_distance" => halfvec_l2,
+            "halfvec_negative_inner_product" => halfvec_negative_ip,
+            "halfvec_inner_product" => halfvec_ip,
+            "halfvec_cosine_distance" => halfvec_cosine,
+            "halfvec_spherical_distance" => halfvec_spherical,
+            "halfvec_l1_distance" => halfvec_l1,
+            "sparsevec_l2_squared_distance" => sparsevec_l2_squared,
+            "sparsevec_l2_distance" => sparsevec_l2,
+            "sparsevec_negative_inner_product" => sparsevec_negative_ip,
+            "sparsevec_inner_product" => sparsevec_ip,
+            "sparsevec_cosine_distance" => sparsevec_cosine,
+            "sparsevec_l1_distance" => sparsevec_l1,
+        }
+    };
+}
+
 /// The float8 the SQL function `symbol` (its C name) returns for two values of its type,
 /// bit for bit (the dimensions are the caller's to check).
 pub(crate) fn distance(symbol: &str) -> Option<fn(&Value, &Value) -> f64> {
@@ -540,28 +802,55 @@ pub(crate) fn distance(symbol: &str) -> Option<fn(&Value, &Value) -> f64> {
             }
         };
     }
-    Some(by_symbol! {
-        "vector_l2_squared_distance" => vector_l2_squared,
-        "l2_distance" => vector_l2,
-        "vector_negative_inner_product" => vector_negative_ip,
-        "inner_product" => vector_ip,
-        "cosine_distance" => vector_cosine,
-        "vector_spherical_distance" => vector_spherical,
-        "l1_distance" => vector_l1,
-        "halfvec_l2_squared_distance" => halfvec_l2_squared,
-        "halfvec_l2_distance" => halfvec_l2,
-        "halfvec_negative_inner_product" => halfvec_negative_ip,
-        "halfvec_inner_product" => halfvec_ip,
-        "halfvec_cosine_distance" => halfvec_cosine,
-        "halfvec_spherical_distance" => halfvec_spherical,
-        "halfvec_l1_distance" => halfvec_l1,
-        "sparsevec_l2_squared_distance" => sparsevec_l2_squared,
-        "sparsevec_l2_distance" => sparsevec_l2,
-        "sparsevec_negative_inner_product" => sparsevec_negative_ip,
-        "sparsevec_inner_product" => sparsevec_ip,
-        "sparsevec_cosine_distance" => sparsevec_cosine,
-        "sparsevec_l1_distance" => sparsevec_l1,
+    Some(byte_kernels!(by_symbol))
+}
+
+/// `distance` of a vector, halfvec or sparsevec function over the values' bytes (the
+/// dimensions are the caller's to check).
+pub(crate) fn distance_bytes(symbol: &str) -> Option<fn(&[u8], &[u8]) -> f64> {
+    macro_rules! by_symbol {
+        ($($name:literal => $f:path),* $(,)?) => {
+            match symbol {
+                $($name => $f as fn(&[u8], &[u8]) -> f64,)*
+                _ => return None,
+            }
+        };
+    }
+    Some(byte_kernels!(by_symbol))
+}
+
+/// A distance of four rows to one value at once: `[d(rows[0], v), ...]` bit for bit
+/// (`distance4`).
+pub(crate) type Dist4 = fn(&[&[u8]; 4], &[u8]) -> [f64; 4];
+
+/// The four-row form of the vector distance function `symbol` (its C name), for the
+/// kernels whose sums are most of the work: four rows' sums interleaved, each row's
+/// computed as the one-row kernel computes it. (The distances are symmetric bit for bit,
+/// so the value may be either argument of the SQL function.)
+pub(crate) fn distance4(symbol: &str) -> Option<Dist4> {
+    Some(match symbol {
+        "vector_l2_squared_distance" => |a, b| l2_squared4(a, b).map(|d| d as f64),
+        "l2_distance" => |a, b| l2_squared4(a, b).map(|d| (d as f64).sqrt()),
+        "inner_product" => |a, b| inner_product4(a, b).map(|d| d as f64),
+        "vector_negative_inner_product" => |a, b| inner_product4(a, b).map(|d| -d as f64),
+        "cosine_distance" => |a, b| cosine_similarity4(a, b).map(|s| 1.0 - clamp(s)),
+        "halfvec_l2_squared_distance" => |a, b| half_l2_squared4(a, b).map(|d| d as f64),
+        "halfvec_l2_distance" => |a, b| half_l2_squared4(a, b).map(|d| (d as f64).sqrt()),
+        "halfvec_inner_product" => |a, b| half_inner_product4(a, b).map(|d| d as f64),
+        "halfvec_negative_inner_product" => |a, b| half_inner_product4(a, b).map(|d| -d as f64),
+        _ => return None,
     })
+}
+
+/// Ask for the first cache lines of `b` ahead of their use: a hint, which the hardware's
+/// own prefetching follows through the rest (nothing on other targets).
+#[inline(always)]
+pub(crate) fn prefetch(b: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    for off in (0..b.len().min(256)).step_by(64) {
+        // SAFETY: the address is inside `b`; a prefetch reads nothing the program sees.
+        unsafe { std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(b.as_ptr().add(off).cast()) }
+    }
 }
 
 /// The float8 the norm function `symbol` returns (`vector_norm`, `halfvec_l2_norm`,

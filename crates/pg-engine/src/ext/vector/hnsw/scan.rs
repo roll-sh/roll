@@ -99,11 +99,11 @@ impl Scan {
         let mut ep = vec![ep0];
         let level = self.st.loaded[self.st.sc[ep0 as usize].e as usize].level as usize;
         for lc in (1..=level).rev() {
-            ep = self.st.search_layer(g, self.sup.dist, q, &ep, 1, lc, Opts::default(), None)?.0;
+            ep = self.st.search_layer(g, self.sup.dists(), q, &ep, 1, lc, Opts::default(), None)?.0;
         }
         let o = Opts { keep_visited: true, init_visited: true, count: true, ..Default::default() };
         let mut discarded = (self.set.iterative != Iterative::Off).then(DHeap::new);
-        let (w, wmem) = self.st.search_layer(g, self.sup.dist, q, &ep, self.set.ef_search, 0, o, discarded.as_mut())?;
+        let (w, wmem) = self.st.search_layer(g, self.sup.dists(), q, &ep, self.set.ef_search, 0, o, discarded.as_mut())?;
         self.discarded = discarded;
         self.w = w;
         self.wmem = wmem;
@@ -132,7 +132,7 @@ impl Scan {
             let g = shared.graph.lock();
             let g = g.as_ref().ok_or_else(|| crate::error::internal("hnsw index is not valid"))?;
             let o = Opts { keep_visited: true, init_visited: false, count: true, ..Default::default() };
-            self.st.search_layer(g, self.sup.dist, self.q.as_deref(), &ep, batch, 0, o, Some(&mut discarded)).map(|(w, wmem)| {
+            self.st.search_layer(g, self.sup.dists(), self.q.as_deref(), &ep, batch, 0, o, Some(&mut discarded)).map(|(w, wmem)| {
                 self.w = w;
                 self.wmem = wmem;
             })

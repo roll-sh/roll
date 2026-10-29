@@ -29,28 +29,32 @@ pub(super) enum Kind {
 /// A byte-level distance: the float8 the SQL function returns.
 pub(super) type DistFn = fn(&[u8], &[u8]) -> f64;
 
+/// The distance of a search: one value at a time, and four at a time where the kernel has
+/// that form (`dist::distance4`: the same bits).
+#[derive(Clone, Copy)]
+pub(super) struct Dists {
+    pub one: DistFn,
+    pub four: Option<dist::Dist4>,
+}
+
 /// HnswTypeInfo + HnswSupport of an index's (only) column.
 #[derive(Clone, Copy)]
 pub(super) struct Support {
     pub kind: Kind,
     pub dist: DistFn,
+    pub dist4: Option<dist::Dist4>,
     /// The norm function (FUNCTION 2), when the class normalizes (cosine).
     pub norm: Option<fn(&Value) -> f64>,
 }
 
 /// `BitHammingDistance` over two equally long bit strings' bytes (pad bits clear).
 fn hamming(a: &[u8], b: &[u8]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones() as u64).sum::<u64>() as f64
+    dist::bits_differing(a, b) as f64
 }
 
 /// `BitJaccardDistance`.
 fn jaccard(a: &[u8], b: &[u8]) -> f64 {
-    let (mut ab, mut aa, mut bb) = (0u64, 0u64, 0u64);
-    for (x, y) in a.iter().zip(b) {
-        ab += (x & y).count_ones() as u64;
-        aa += x.count_ones() as u64;
-        bb += y.count_ones() as u64;
-    }
+    let [ab, aa, bb] = dist::bits_shared(a, b);
     if ab == 0 { 1.0 } else { 1.0 - (ab as f64 / (aa + bb - ab) as f64) }
 }
 
@@ -100,7 +104,15 @@ impl Support {
             Some(s) => Some(dist::norm(s).ok_or_else(|| crate::error::internal(format!("hnsw: unsupported norm function {s}")))?),
             None => None,
         };
-        Ok(Support { kind, dist, norm })
+        // (Vector and halfvec values are the floats and halves the kernels read; the other
+        // kinds keep one at a time.)
+        let dist4 = if matches!(kind, Kind::Vector | Kind::Halfvec) { dist::distance4(sym) } else { None };
+        Ok(Support { kind, dist, dist4, norm })
+    }
+
+    /// The search's distance functions.
+    pub fn dists(&self) -> Dists {
+        Dists { one: self.dist, four: self.dist4 }
     }
 
     /// maxDimensions.

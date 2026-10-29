@@ -665,6 +665,13 @@ pub struct Heap {
     /// Laid out afresh from rows whose stored TIDs it doesn't keep: where it has a row, not
     /// the TID stored in the row, is its place (a scan's order).
     pub unstamped: bool,
+    /// Some row's place doesn't follow its key's order: an update, an insert into free
+    /// space before the last row's, rows rekeyed or laid out out of key order. Until then
+    /// keys and TIDs increase together, so a sequential scan reading rows in storage order
+    /// reads them in heap order (`in_key_order`).
+    pub disordered: bool,
+    /// The last row placed in key order: its key and TID.
+    last_placed: Option<(Vec<u8>, Tid)>,
 }
 
 impl Heap {
@@ -685,6 +692,36 @@ impl Heap {
         Heap {
             fillfactor,
             ..Default::default()
+        }
+    }
+
+    /// Whether rows in storage (key) order are in heap order: every row was placed after
+    /// the rows of smaller keys, and the TIDs rows carry are the model's.
+    pub fn in_key_order(&self) -> bool {
+        !self.disordered && !self.unstamped
+    }
+
+    /// Whether some page has a prunable xid (a delete or an update set pd_prune_xid).
+    pub fn any_prunable(&self) -> bool {
+        self.pages.iter().any(|p| p.prune_xid != 0)
+    }
+
+    /// A row stored under `key` was placed at `tid`.
+    fn placed(&mut self, key: &[u8], tid: Tid) {
+        if self.disordered {
+            return;
+        }
+        match &mut self.last_placed {
+            Some((k, t)) if key > k.as_slice() && tid > *t => {
+                k.clear();
+                k.extend_from_slice(key);
+                *t = tid;
+            }
+            Some(_) => {
+                self.disordered = true;
+                self.last_placed = None;
+            }
+            None => self.last_placed = Some((key.to_vec(), tid)),
         }
     }
 
@@ -1044,6 +1081,7 @@ impl Heap {
         let blk = self.get_buffer(len, None, mode.use_fsm, mode.bistate.as_mut(), 1);
         let xmin = if mode.frozen { 0 } else { xmin };
         let tid = self.put(blk, Self::new_tup(len, xmin), mode.frozen);
+        self.placed(&key, tid);
         self.keys.insert(key, tid);
         tid
     }
@@ -1101,6 +1139,7 @@ impl Heap {
             done += n;
         }
         for ((k, _), tid) in rows.into_iter().zip(&out) {
+            self.placed(&k, *tid);
             self.keys.insert(k, *tid);
         }
         out
@@ -1170,6 +1209,7 @@ impl Heap {
                 .or_default()
                 .push((new_key.clone(), (nb, noff), moved));
         }
+        self.disordered = true;
         self.keys.insert(new_key, (nb, noff));
         ((nb, noff), hot)
     }
@@ -1541,6 +1581,7 @@ impl Heap {
             }
         }
         self.keys = keys;
+        self.disordered = true;
         // (A row that moved back from an aborted update is under its old key: forgotten.)
         let renamed: HashMap<&[u8], &Vec<u8>> =
             pairs.iter().map(|(o, n)| (o.as_slice(), n)).collect();
@@ -1621,6 +1662,7 @@ pub fn rewritten(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>) -> (Heap, Vec<T
         }
         let b = h.pages.len() as u32 - 1;
         let tid = h.put(b, Heap::new_tup(len, 0), false);
+        h.placed(&k, tid);
         h.keys.insert(k, tid);
         tids.push(tid);
     }

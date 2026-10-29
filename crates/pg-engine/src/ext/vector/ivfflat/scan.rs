@@ -3,22 +3,24 @@
 //! and with an iterative scan, the next lists' entries in batches once those run out.
 
 use super::build::setting;
-use super::page::{self, INVALID};
+use super::page::{self, INVALID, Tuple};
 use super::pairingheap::PairingHeap;
 use super::tuplesort::Sorter;
 use super::types::{Dist, Procs, check_expected_dim};
 use crate::Result;
 use crate::exec::ExecCtx;
 use crate::ext::index_am::{AmIndex, AmScan, AmStore};
+use crate::ext::vector::dist::{self, Dist4};
 use crate::types::Value;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-/// A candidate: its distance, row and the row's indexed value.
+/// A candidate: its distance and its tuple (an index into the scan's `pages`, its offset
+/// there).
 struct Item {
     distance: f64,
-    dkey: Arc<[u8]>,
-    value: Value,
+    page: u32,
+    at: u32,
 }
 
 /// `IvfflatScanOpaqueData`.
@@ -36,6 +38,8 @@ pub(super) struct Scan {
     sorter: Sorter,
     list_pages: Vec<u32>,
     list_index: usize,
+    /// The tuples of the entry pages the sorted items come from, as the scan read them.
+    pages: Vec<Arc<Vec<Tuple>>>,
     out: std::vec::IntoIter<Item>,
 }
 
@@ -64,6 +68,7 @@ pub(super) fn begin(ix: &AmIndex, orderbys: &[Value], ctx: &ExecCtx) -> Result<S
         sorter: Sorter::new(setting(ctx, "work_mem", 4096)),
         list_pages: Vec::new(),
         list_index: 0,
+        pages: Vec::new(),
         out: Vec::new().into_iter(),
     })
 }
@@ -158,6 +163,7 @@ impl Scan {
     fn scan_items(&mut self, ctx: &ExecCtx) -> Result<()> {
         ctx.check()?;
         let dist = self.distfunc();
+        let dist4 = self.value.as_ref().and(self.procs.distance4);
         let q = self.value.clone().unwrap_or(Value::Null);
         self.sorter.reset();
         let mut batch = Vec::new();
@@ -171,26 +177,65 @@ impl Scan {
             batch.push(self.list_pages.get(self.list_index).copied().unwrap_or(INVALID));
             self.list_index += 1;
         }
-        let items = page::with(&self.store, |idx| {
+        // The lists' pages' tuples as they are now (shared, not copied).
+        let pages = page::with(&self.store, |idx| {
             let idx = idx.as_ref().ok_or_else(|| crate::error::internal("ivfflat index is not valid"))?;
-            let mut items = Vec::new();
+            let mut pages = Vec::new();
             for start in batch {
                 // Search all entry pages for list
                 let mut search = start;
                 while search != INVALID {
                     let p = &idx.pages[search as usize];
-                    for t in p.tuples() {
-                        items.push(Item { distance: dist(&t.val, &q), dkey: t.dkey.clone(), value: t.row_value().clone() });
-                    }
+                    pages.extend(p.shared_tuples());
                     search = p.next();
                 }
             }
-            Ok(items)
+            Ok(pages)
         })?;
+        let mut items = Vec::with_capacity(pages.iter().map(|p| p.len()).sum());
+        for (page, tuples) in pages.iter().enumerate() {
+            let mut at = 0;
+            distances(tuples, &q, dist, dist4, |distance| {
+                items.push(Item { distance, page: page as u32, at });
+                at += 1;
+            });
+        }
         // (A tuple of distance float8 and heaptid takes 32 bytes.)
         let sorted = self.sorter.sort(items, |_| 32, |a, b| float8_cmp(a.distance, b.distance));
+        self.pages = pages;
         self.out = sorted.into_iter();
         Ok(())
+    }
+}
+
+/// Each tuple's distance to the query `q`, in their order: four at a time where the kernel
+/// has that form (the next four's values fetched meanwhile), else one by one.
+fn distances(tuples: &[Tuple], q: &Value, dist: Dist, dist4: Option<Dist4>, mut out: impl FnMut(f64)) {
+    let mut i = 0;
+    if let (Some(d4), Value::Ext(_, qb)) = (dist4, q) {
+        fn ext(t: &Tuple) -> Option<&[u8]> {
+            match &t.val {
+                Value::Ext(_, b) => Some(b),
+                _ => None,
+            }
+        }
+        while let Some(g) = tuples.get(i..i + 4) {
+            let (Some(a), Some(b), Some(c), Some(d)) = (ext(&g[0]), ext(&g[1]), ext(&g[2]), ext(&g[3])) else {
+                break;
+            };
+            for t in tuples.iter().skip(i + 4).take(4) {
+                if let Some(b) = ext(t) {
+                    dist::prefetch(b);
+                }
+            }
+            for d in d4(&[a, b, c, d], qb) {
+                out(d);
+            }
+            i += 4;
+        }
+    }
+    for t in &tuples[i..] {
+        out(dist(&t.val, q));
     }
 }
 
@@ -205,7 +250,8 @@ impl AmScan for Scan {
         }
         loop {
             if let Some(it) = self.out.next() {
-                return Ok(Some((it.dkey.to_vec(), it.value)));
+                let t = &self.pages[it.page as usize][it.at as usize];
+                return Ok(Some((t.dkey.to_vec(), t.row_value().clone())));
             }
             if self.list_index == self.max_probes {
                 return Ok(None);

@@ -531,10 +531,6 @@ impl Graph {
 
     /// Write the records changed since the last write (`all`: every record, a build's).
     pub fn flush(&mut self, store: &AmStore, all: bool) -> Result<()> {
-        let mut w: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
-        if self.dirty_meta || all {
-            w.push((vec![META_KEY], Some(self.meta_record())));
-        }
         if all {
             self.dirty_e = (0..self.elems.len() as u32).collect();
             self.dirty_n = self.dirty_e.clone();
@@ -544,20 +540,22 @@ impl Graph {
             self.dirty_n.sort_unstable();
             self.dirty_n.dedup();
         }
-        for &s in &self.dirty_e {
-            w.push((key(ELEM_KEY, s), Some(self.elem_record(s))));
+        let mut w: Vec<(Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        if self.dirty_meta || all {
+            w.push((vec![META_KEY], Some(self.meta_record())));
         }
-        for &s in &self.dirty_n {
-            w.push((key(NEIGHBOR_KEY, s), Some(self.neighbor_record(s))));
+        let (dirty_e, dirty_n) = (std::mem::take(&mut self.dirty_e), std::mem::take(&mut self.dirty_n));
+        // (A build's records go in batches, each made as it is written: the whole index's
+        // records are never in memory at once.)
+        let records = dirty_e.iter().map(|&s| (ELEM_KEY, s)).chain(dirty_n.iter().map(|&s| (NEIGHBOR_KEY, s)));
+        for (kind, s) in records {
+            let rec = if kind == ELEM_KEY { self.elem_record(s) } else { self.neighbor_record(s) };
+            w.push((key(kind, s), Some(rec)));
+            if w.len() == 4096 {
+                store.write(std::mem::take(&mut w))?;
+            }
         }
         self.dirty_meta = false;
-        self.dirty_e.clear();
-        self.dirty_n.clear();
-        // (A build's records go in batches.)
-        while w.len() > 4096 {
-            let rest = w.split_off(4096);
-            store.write(std::mem::replace(&mut w, rest))?;
-        }
         store.write(w)
     }
 

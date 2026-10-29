@@ -222,6 +222,9 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         Plan::Project { input, exprs } => Box::new(ProjectNode {
             input: open_need(input, nd::of(exprs), ctx)?,
             exprs: exprs.clone(),
+            computed: None,
+            tried: false,
+            topk: None,
         }),
         Plan::ProjectSet { input, exprs, srfs } => Box::new(ProjectSetNode {
             input: open(input, ctx)?,
@@ -1532,6 +1535,60 @@ impl Node for FilterNode {
 struct ProjectNode {
     input: BoxNode,
     exprs: Vec<Expr>,
+    /// The expressions a parallel scan below computes in its workers (`compute_in_workers`,
+    /// tried at the first row): the scan row's length without them, and each expression's
+    /// place among them. None: all evaluated here.
+    computed: Option<(usize, Vec<Option<usize>>)>,
+    tried: bool,
+    /// A bounded sort above's wish (`topk_below`), for the scan when the key is computed there.
+    topk: Option<super::TopK>,
+}
+
+impl ProjectNode {
+    /// Hand the expressions worth computing off the executor's thread (pgvector distances:
+    /// their kernels are most of a row's work) to a parallel scan below, when there is one.
+    fn compute_below(&mut self, ctx: &ExecCtx) -> Result<()> {
+        self.tried = true;
+        let mut kernels = Vec::new();
+        let places: Vec<Option<usize>> = self
+            .exprs
+            .iter()
+            .map(|e| match super::kernel::compile(e) {
+                Some(k @ super::kernel::K::Dist(..)) => {
+                    kernels.push(k);
+                    Some(kernels.len() - 1)
+                }
+                _ => None,
+            })
+            .collect();
+        if kernels.is_empty() {
+            return Ok(());
+        }
+        // The columns only the computed expressions read: the workers drop them from the
+        // rows they computed them for (rows a kernel left to `eval` keep them).
+        let reads = |computed: bool| super::need::of(self.exprs.iter().zip(&places).filter(|(_, p)| p.is_some() == computed).map(|(e, _)| e));
+        let drop: Vec<usize> = match (reads(true), reads(false)) {
+            (Some(c), Some(o)) => (0..c.len()).filter(|&i| c[i] && !o.get(i).copied().unwrap_or(false)).collect(),
+            _ => Vec::new(),
+        };
+        // Of those, the ones read only as a distance's column argument: not decoded.
+        let raw = drop
+            .iter()
+            .copied()
+            .filter(|&c| {
+                self.exprs.iter().zip(&places).filter(|(_, p)| p.is_some()).all(|(e, p)| {
+                    let k = &kernels[p.unwrap()];
+                    k.dist_col().is_some_and(|d| d.0 == c) || super::need::of([e]).is_some_and(|n| !n.get(c).copied().unwrap_or(false))
+                })
+            })
+            .collect();
+        // (The sort's key among the computed values.)
+        let topk = self.topk.and_then(|t| Some(super::TopK { col: (*places.get(t.col)?)?, ..t }));
+        if let Some(base) = self.input.compute_in_workers(super::Computed { extra: kernels, drop, raw, topk }, ctx)? {
+            self.computed = Some((base, places));
+        }
+        Ok(())
+    }
 }
 /// Whether a filter or an inner join's condition has quals that gate it (`GateNode`).
 fn gating(pred: &Expr) -> bool {
@@ -1604,10 +1661,40 @@ impl Node for GateNode {
 
 impl Node for ProjectNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        match self.input.next(ctx)? {
-            Some(r) => Ok(Some(eval_all(&self.exprs, &r, ctx)?)),
-            None => Ok(None),
+        if !self.tried {
+            self.compute_below(ctx)?;
         }
+        let Some(mut r) = self.input.next(ctx)? else {
+            return Ok(None);
+        };
+        // A row with the values computed has them after its columns (none of them where a
+        // kernel left one to `eval`: all evaluated here, as without the workers).
+        if let Some((base, places)) = &self.computed
+            && r.len() > *base
+        {
+            let extra = r.split_off(*base);
+            let mut out = Vec::with_capacity(self.exprs.len());
+            for (e, p) in self.exprs.iter().zip(places) {
+                out.push(match p {
+                    Some(j) => extra[*j].clone(),
+                    None => eval(e, &r, ctx)?,
+                });
+            }
+            return Ok(Some(out));
+        }
+        Ok(Some(eval_all(&self.exprs, &r, ctx)?))
+    }
+
+    fn topk_below(&mut self, t: super::TopK) -> bool {
+        if self.tried {
+            return false;
+        }
+        self.topk = Some(t);
+        true
+    }
+
+    fn take_skipped(&mut self) -> usize {
+        self.input.take_skipped()
     }
 }
 
@@ -1950,6 +2037,42 @@ pub fn sort_rows_bounded(
     Ok(sorted.into_iter().map(|(_, r)| r).collect())
 }
 
+/// `sort_rows_bounded` of the input's rows (`bound` > 0), read a row at a time into
+/// tuplesort's bounded sort (`pgsort::Bounded`), so that only the rows that may still be
+/// among the first `bound` are kept: the same rows in the same order.
+fn sort_input_bounded(input: &mut BoxNode, keys: &[SortKey], bound: usize, ctx: &ExecCtx) -> Result<Vec<Row>> {
+    let mut f = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| -> Result<Ordering> {
+        for (i, k) in keys.iter().enumerate() {
+            match compare_values(&a.0[i], &b.0[i], k, ctx)? {
+                Ordering::Equal => {}
+                o => return Ok(o),
+            }
+        }
+        Ok(Ordering::Equal)
+    };
+    let mut cmp = super::pgsort::Cmp::new(&mut f);
+    let mut sort = super::pgsort::Bounded::new(bound);
+    // (The key vector of a row discarded at once serves the next.)
+    let mut spare = Vec::with_capacity(keys.len());
+    while let Some(r) = input.next(ctx)? {
+        ctx.check()?;
+        let mut key: Vec<Value> = std::mem::take(&mut spare);
+        key.clear();
+        for k in keys {
+            key.push(eval(&k.expr, &r, ctx)?);
+        }
+        if let Some((k, _)) = sort.put((key, r), &mut cmp) {
+            spare = k;
+        }
+    }
+    sort.skip(input.take_skipped());
+    let sorted = sort.finish(&mut cmp);
+    if let Some(e) = cmp.err {
+        return Err(e);
+    }
+    Ok(sorted.into_iter().map(|(_, r)| r).collect())
+}
+
 /// An Incremental Sort's rows: the input sorted on the first `presorted` keys already, read
 /// only as far as the sort needs (a LIMIT above may stop it early). `key`: the node's, for
 /// EXPLAIN ANALYZE's counts of its sorts.
@@ -2070,12 +2193,28 @@ impl Node for SortNode {
             self.out = if self.presorted > 0 {
                 incremental_sort_rows(&mut input, &self.keys, self.presorted, self.bound, self.key, ctx)?
             } else {
-                let mut rows = Vec::new();
-                while let Some(r) = input.next(ctx)? {
-                    ctx.check()?;
-                    rows.push(r);
+                match self.bound.filter(|&b| b > 0) {
+                    Some(b) => {
+                        // (One key of the input's columns, in its type's order: the rows a
+                        // parallel scan below can tell its bounded heap would discard may
+                        // stay there.)
+                        if let [k] = self.keys.as_slice()
+                            && k.using.is_none()
+                            && let Expr::Col(col, _) = k.expr
+                        {
+                            input.topk_below(super::TopK { col, desc: k.desc, nulls_first: k.nulls_first, k: b });
+                        }
+                        sort_input_bounded(&mut input, &self.keys, b, ctx)?
+                    }
+                    None => {
+                        let mut rows = Vec::new();
+                        while let Some(r) = input.next(ctx)? {
+                            ctx.check()?;
+                            rows.push(r);
+                        }
+                        sort_rows_bounded(rows, &self.keys, self.bound, ctx)?
+                    }
                 }
-                sort_rows_bounded(rows, &self.keys, self.bound, ctx)?
             }
             .into_iter();
         }

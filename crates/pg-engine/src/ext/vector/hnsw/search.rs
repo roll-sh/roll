@@ -167,6 +167,8 @@ pub(super) struct Disk {
     stamp: Vec<u32>,
     stamp_gen: u32,
     unvisited: Vec<u32>,
+    /// The unvisited elements' distances (`search_layer`).
+    dists: Vec<f64>,
 }
 
 /// "cannot load deleted element".
@@ -254,7 +256,7 @@ impl Disk {
     /// nearest candidates found, furthest first (the list w). With `discarded`, candidates
     /// not kept go there (iterative scans). Also the list's memory (scans).
     #[allow(clippy::too_many_arguments)]
-    pub fn search_layer(&mut self, g: &Graph, dist: super::types::DistFn, q: Option<&[u8]>, ep: &[u32], ef: usize, lc: usize, o: Opts, mut discarded: Option<&mut DHeap>) -> Result<(Vec<u32>, ListMem)> {
+    pub fn search_layer(&mut self, g: &Graph, dist: super::types::Dists, q: Option<&[u8]>, ep: &[u32], ef: usize, lc: usize, o: Opts, mut discarded: Option<&mut DHeap>) -> Result<(Vec<u32>, ListMem)> {
         let m = g.m as usize;
         let lm = layer_m(m, lc);
         let mut c = CHeap::new();
@@ -318,6 +320,19 @@ impl Disk {
             if o.count {
                 self.tuples += self.unvisited.len() as i64;
             }
+            // The unvisited neighbors' distances, four at a time (vector values: a deleted
+            // element's value is still there, and the loop below stops at it first).
+            let four = q.zip(dist.four);
+            if let Some((q, d4)) = four {
+                let u = &self.unvisited;
+                self.dists.clear();
+                let mut i = 0;
+                while let Some(n) = u.get(i..i + 4) {
+                    self.dists.extend(d4(&[g.value(n[0]), g.value(n[1]), g.value(n[2]), g.value(n[3])], q));
+                    i += 4;
+                }
+                self.dists.extend(u[i..].iter().map(|&n| (dist.one)(q, g.value(n))));
+            }
             for i in 0..self.unvisited.len() {
                 let u = self.unvisited[i];
                 let f = w.first();
@@ -327,7 +342,10 @@ impl Disk {
                 if e.deleted {
                     return Err(deleted_element());
                 }
-                let d = q.map_or(0.0, |q| dist(q, g.value(u)));
+                let d = match four {
+                    Some(_) => self.dists[i],
+                    None => q.map_or(0.0, |q| (dist.one)(q, g.value(u))),
+                };
                 // (An element is only loaded when it may be added.)
                 if !(always || discarded.is_some() || d < fdist) {
                     continue;

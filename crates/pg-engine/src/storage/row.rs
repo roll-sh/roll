@@ -434,7 +434,7 @@ pub fn decode_value(b: &[u8], pos: &mut usize) -> Result<Value> {
         }
         tag::EXT => {
             let k = u16::from_le_bytes(take(b, pos, 2)?.try_into().unwrap());
-            Value::Ext(k, take_bytes(b, pos)?.to_vec().into())
+            Value::Ext(k, Arc::from(take_bytes(b, pos)?))
         }
         tag::MACADDR => Value::Macaddr(take(b, pos, 6)?.try_into().unwrap()),
         tag::MACADDR8 => Value::Macaddr8(take(b, pos, 8)?.try_into().unwrap()),
@@ -526,6 +526,12 @@ pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
             take_bytes(b, pos)?;
             return Ok(());
         }
+        tag::EXT => {
+            *pos += 1;
+            take(b, pos, 2)?;
+            take_bytes(b, pos)?;
+            return Ok(());
+        }
         // (The rest: decoded and dropped.)
         _ => {
             decode_value(b, pos)?;
@@ -534,6 +540,25 @@ pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
     };
     take(b, pos, 1 + fixed)?;
     Ok(())
+}
+
+/// The value of column `col` of the encoded row `b` when it is an extension type's (its kind
+/// and bytes, in place), else None.
+pub fn ext_at(b: &[u8], col: usize) -> Option<(u16, &[u8])> {
+    let mut pos = 0;
+    let n = get_varint(b, &mut pos).ok()? as usize;
+    if col >= n {
+        return None;
+    }
+    for _ in 0..col {
+        skip_value(b, &mut pos).ok()?;
+    }
+    if *b.get(pos)? != tag::EXT {
+        return None;
+    }
+    pos += 1;
+    let k = u16::from_le_bytes(take(b, &mut pos, 2).ok()?.try_into().ok()?);
+    Some((k, take_bytes(b, &mut pos).ok()?))
 }
 
 /// What `relsize::heap_tuple_len` gives the stored row `b` (its encoded values) taken as

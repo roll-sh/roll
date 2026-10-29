@@ -474,6 +474,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             streamed: false,
             par: None,
             par_tried: false,
+            in_order: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -525,6 +526,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             streamed: false,
             par: None,
             par_tried: false,
+            in_order: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -585,6 +587,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             streamed: false,
             par: None,
             par_tried: false,
+            in_order: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -769,6 +772,7 @@ fn open_scan_as(
         streamed: false,
         par: None,
         par_tried: false,
+        in_order: None,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1394,6 +1398,7 @@ fn dense_bitmap_scan(
         streamed: false,
         par: None,
         par_tried: false,
+        in_order: None,
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -1520,6 +1525,9 @@ struct ScanNode {
     sorted: Option<std::vec::IntoIter<(Vec<u8>, bytes::Bytes)>>,
     /// A sequential scan of a table whose heap isn't modelled: rows in storage order.
     streamed: bool,
+    /// A sequential scan of a modelled heap: whether its rows are stored in heap order
+    /// (`Heap::in_key_order`), so they're read as they're asked for (None: not decided).
+    in_order: Option<bool>,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -1800,19 +1808,47 @@ impl ScanNode {
             return self.next_stored(ctx);
         }
         if !self.secondary {
-            if self.sorted.is_none() && !self.streamed {
+            if self.sorted.is_none() && !self.streamed && self.in_order.is_none() {
                 self.nblocks = super::sizing::modelled_blocks(self.plan.table.oid, ctx);
                 // A table whose heap isn't modelled (too big) has no heap order to put its
                 // rows in: they come as stored, read as they're asked for.
                 if !super::sizing::heap_modelled(&self.plan.table, ctx) {
                     self.streamed = true;
+                } else {
+                    // (A plain sequential scan's: other reads take their rows in another order.)
+                    let plain = self.keys.is_none() && self.only.is_none() && self.sample.is_none() && self.plan.index.is_none() && self.ranges.len() <= 1;
+                    self.in_order = Some(plain && super::sizing::heap_in_key_order(&self.plan.table, ctx));
                 }
             }
             if self.streamed {
                 return self.next_stored(ctx);
             }
+            // Rows stored in heap order already (a table only inserted into, in key order)
+            // are read as they're asked for, each page pruned as the scan reaches it. A row
+            // without its TID puts the rest in heap order as below: the rows read before it
+            // come before all of them there too.
+            let mut first = None;
+            if self.in_order == Some(true) {
+                match self.next_stored(ctx)? {
+                    Some(r) => match stored_tid(&r.1) {
+                        Some((b, _)) => {
+                            debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
+                            self.prune_to(Some(b + 1), ctx);
+                            return Ok(Some(r));
+                        }
+                        None => {
+                            self.in_order = Some(false);
+                            first = Some(r);
+                        }
+                    },
+                    None => {
+                        self.prune_to(self.nblocks, ctx);
+                        return Ok(None);
+                    }
+                }
+            }
             if self.sorted.is_none() {
-                let mut rows = Vec::new();
+                let mut rows: Vec<_> = first.into_iter().collect();
                 while let Some(r) = self.next_stored(ctx)? {
                     ctx.check()?;
                     rows.push(r);
@@ -2208,6 +2244,7 @@ impl ScanNode {
         &mut self,
         spec: Option<Arc<super::partial::Spec>>,
         stages: Vec<Arc<super::pipe::Stage>>,
+        computed: super::Computed,
         ctx: &ExecCtx,
     ) -> Result<Option<super::parscan::ParScan>> {
         use super::parscan::{Decode, ParScan, split_keys};
@@ -2246,9 +2283,17 @@ impl ScanNode {
         // (Decided as `next_raw` decides it.)
         self.nblocks = super::sizing::modelled_blocks(p.table.oid, ctx);
         if super::sizing::heap_modelled(&p.table, ctx) {
-            return Ok(None);
+            // A modelled heap's rows are read in parallel only when they are stored in heap
+            // order and no page would be pruned as the scan reaches it; and (as for
+            // PostgreSQL's parallel scans, min_parallel_table_scan_size's default) when it
+            // has 8 MB of pages: smaller ones aren't worth the threads.
+            if self.nblocks.is_none_or(|n| n < 1024) || !super::sizing::heap_scan_splits(&p.table, ctx) {
+                return Ok(None);
+            }
+            self.in_order = Some(true);
+        } else {
+            self.streamed = true;
         }
-        self.streamed = true;
         let (start, end) = self.ranges[0].clone();
         let txn = ctx.txn.borrow();
         let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
@@ -2268,8 +2313,19 @@ impl ScanNode {
             .map(|w| Box::new(txn.scan_snap(&w[0], &w[1], &snap)) as super::parscan::Chunk)
             .collect();
         drop(txn);
+        // (The columns decoded for a row whose values come from its stored bytes.)
+        let need_raw = (!computed.raw.is_empty()).then(|| {
+            let mut n: Vec<bool> = self.need.as_deref().map_or_else(|| vec![true; p.table.columns.len()], <[bool]>::to_vec);
+            for &c in &computed.raw {
+                if let Some(x) = n.get_mut(c) {
+                    *x = false;
+                }
+            }
+            Arc::from(n)
+        });
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),
+            need_raw,
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
             with_key: p.with_key,
             filter: p.filter.as_ref().and_then(super::kernel::compile),
@@ -2277,6 +2333,10 @@ impl ScanNode {
             spec,
             stages,
             ios: None,
+            extra: computed.extra,
+            drop: computed.drop,
+            raw: computed.raw,
+            topk: computed.topk,
         };
 
         Ok(ParScan::start(scans, workers, pool, d))
@@ -2366,6 +2426,11 @@ impl ScanNode {
             spec,
             stages,
             ios: self.ios_cols.clone(),
+            extra: Vec::new(),
+            drop: Vec::new(),
+            raw: Vec::new(),
+            need_raw: None,
+            topk: None,
         };
         Ok(ParScan::start(scans, workers, pool, d))
     }
@@ -2397,6 +2462,8 @@ impl ScanNode {
             let Some(piece) = par.next_piece()? else {
                 let n = par.trailing() as i64;
                 self.count_read(n, ctx);
+                // (A modelled heap's pages, as the serial scan's end prunes them.)
+                self.prune_to(self.nblocks, ctx);
                 return Ok(None);
             };
             match piece {
@@ -2437,12 +2504,33 @@ impl Node for ScanNode {
         if above.is_empty() && spec.is_none() {
             return Ok(None);
         }
-        let Some(par) = self.start_parallel(spec, above, ctx)? else {
+        let Some(par) = self.start_parallel(spec, above, super::Computed::default(), ctx)? else {
             return Ok(None);
         };
         self.par_tried = true;
         self.par = Some(par);
         Ok(Some(0))
+    }
+
+    fn compute_in_workers(&mut self, mut c: super::Computed, ctx: &ExecCtx) -> Result<Option<usize>> {
+        if self.par_tried || self.emitted > 0 || self.sorted.is_some() || self.streamed || self.plan.limit.is_some() {
+            return Ok(None);
+        }
+        // (A column the filter reads is decoded.)
+        if let Some(f) = &self.plan.filter {
+            let reads = super::need::of([f]);
+            c.raw.retain(|&i| reads.as_ref().is_some_and(|n| !n.get(i).copied().unwrap_or(false)));
+        }
+        let Some(par) = self.start_parallel(None, Vec::new(), c, ctx)? else {
+            return Ok(None);
+        };
+        self.par_tried = true;
+        self.par = Some(par);
+        Ok(Some(self.plan.table.columns.len() + usize::from(self.plan.with_key)))
+    }
+
+    fn take_skipped(&mut self) -> usize {
+        self.par.as_mut().map_or(0, |p| std::mem::take(&mut p.skipped))
     }
 
     fn next_item(&mut self, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
@@ -2459,7 +2547,7 @@ impl Node for ScanNode {
         if !self.par_tried {
             self.par_tried = true;
             if self.sorted.is_none() && !self.streamed {
-                self.par = self.start_parallel(None, Vec::new(), ctx)?;
+                self.par = self.start_parallel(None, Vec::new(), super::Computed::default(), ctx)?;
             }
         }
         if self.par.is_some() {

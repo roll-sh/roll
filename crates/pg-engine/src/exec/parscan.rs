@@ -26,6 +26,14 @@ pub fn started() -> u64 {
 /// Parallel scans started with hash join probes in their workers (`pipe`; for tests).
 static PIPELINED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Rows the workers dropped for bounded sorts above (`Decode::topk`; for tests).
+static SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many rows the process's parallel scans dropped for bounded sorts above.
+pub fn topk_skipped() -> u64 {
+    SKIPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How many parallel scans the process has started with join probes.
 pub fn pipelined() -> u64 {
     PIPELINED.load(std::sync::atomic::Ordering::Relaxed)
@@ -74,6 +82,69 @@ pub struct Decode {
     /// An index-only scan's columns, read from the entries (`IndexChunk` gives the entry key
     /// for the row): (column, type, DESC).
     pub ios: Option<Vec<(usize, crate::types::DataType, bool)>>,
+    /// Values computed over each row and put after its columns (`Node::compute_in_workers`;
+    /// none where a kernel leaves one to `eval`).
+    pub extra: Vec<K>,
+    /// The columns a row with the values computed doesn't need any more (NULL then).
+    pub drop: Vec<usize>,
+    /// Of those, the ones not decoded: read only as distances' column arguments, which come
+    /// from the stored bytes (`K::dist_raw`; the row decoded whole where one can't).
+    pub raw: Vec<usize>,
+    /// `need` without the `raw` columns (None: no raw columns).
+    pub need_raw: Option<Arc<[bool]>>,
+    /// A bounded sort's wish over computed value `topk.col` (`Node::topk_below`): each
+    /// chunk's rows its own bounded heap discards are dropped (`Top`).
+    pub topk: Option<super::TopK>,
+}
+
+/// A chunk's bounded heap of a bounded sort's keys (`Decode::topk`). A row its heap
+/// discards, once the chunk has had more than twice the bound of the scan's rows, the
+/// sort's own heap would discard too: the chunk's rows before it are rows of the sort's input
+/// before it, so the sort's heap holds keys no greater than this one's then, and the sort
+/// uses its heap at all (more than twice the bound of rows). So it needn't be sent.
+struct Top {
+    t: super::TopK,
+    /// The scan's rows (filtered) of the chunk so far.
+    seen: usize,
+    /// The bound's smallest keys so far, the greatest first.
+    heap: std::collections::BinaryHeap<TopKey>,
+}
+
+struct TopKey(Value, super::TopK);
+
+impl PartialEq for TopKey {
+    fn eq(&self, o: &Self) -> bool {
+        self.cmp(o) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for TopKey {}
+impl PartialOrd for TopKey {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for TopKey {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.1.cmp(&self.0, &o.0)
+    }
+}
+
+impl Top {
+    /// Whether the scan's row with key `key` can be dropped (else it is kept in the heap).
+    fn drops(&mut self, key: &Value) -> bool {
+        self.seen += 1;
+        if self.seen > 2 * self.t.k
+            && self.heap.len() == self.t.k
+            && self.heap.peek().is_some_and(|top| self.t.cmp(key, &top.0) != std::cmp::Ordering::Less)
+        {
+            return true;
+        }
+        self.heap.push(TopKey(key.clone(), self.t));
+        if self.heap.len() > self.t.k {
+            self.heap.pop();
+        }
+        false
+    }
 }
 
 /// What a chunk reads: (data key, stored row) in the scan's order.
@@ -165,6 +236,11 @@ impl Iterator for IndexChunk {
 
 impl Decode {
     pub(super) fn row(&self, key: &[u8], bytes: &[u8]) -> Result<Row> {
+        self.row_with(key, bytes, self.need.as_ref())
+    }
+
+    /// The row with the columns `need` marks decoded (None: all).
+    fn row_with(&self, key: &[u8], bytes: &[u8], need: Option<&Arc<[bool]>>) -> Result<Row> {
         if let Some(cols) = &self.ios {
             // (The index entry: past the table and index ids, its key columns.)
             let mut row = vec![Value::Null; self.missing.len()];
@@ -181,14 +257,14 @@ impl Decode {
             return Ok(row);
         }
         let data = super::scan::row_data(bytes)?;
-        let mut row = match &self.need {
+        let mut row = match need {
             Some(n) => crate::storage::row::decode_row_need(data, n)?,
             None => crate::storage::row::decode_row(data)?,
         };
         let ncols = self.missing.len();
         if row.len() < ncols {
             for i in row.len()..ncols {
-                let needed = self.need.as_ref().is_none_or(|n| n.get(i).copied().unwrap_or(false));
+                let needed = need.is_none_or(|n| n.get(i).copied().unwrap_or(false));
                 row.push(match (&self.missing[i], needed) {
                     (Some(v), true) => v.clone(),
                     _ => Value::Null,
@@ -199,6 +275,39 @@ impl Decode {
         if self.with_key {
             row.push(Value::Bytea(Arc::from(key)));
         }
+        Ok(row)
+    }
+
+    /// `row` with the values of `extra` after its columns and the columns `drop` NULL
+    /// (`done`: the filter is done with it, so nothing else reads them), when the kernels
+    /// give them all; else the row as `row` makes it (the executor's thread evaluates them).
+    /// `row` was decoded without the `raw` columns when `need_raw` is set: their distances
+    /// come from the stored bytes.
+    fn with_extra(&self, key: &[u8], bytes: &[u8], mut row: Row, done: bool) -> Result<Row> {
+        let data = match self.need_raw {
+            Some(_) => Some(super::scan::row_data(bytes)?),
+            None => None,
+        };
+        let mut vals = Vec::with_capacity(self.extra.len());
+        for k in &self.extra {
+            let v = match (data, k.dist_col()) {
+                (Some(data), Some((c, ..))) if self.raw.contains(&c) => k.dist_raw(data),
+                _ => k.run(&row),
+            };
+            match v {
+                Some(v) => vals.push(v),
+                None if data.is_some() => return self.row(key, bytes),
+                None => return Ok(row),
+            }
+        }
+        if done {
+            for &c in &self.drop {
+                if let Some(x) = row.get_mut(c) {
+                    *x = Value::Null;
+                }
+            }
+        }
+        row.extend(vals);
         Ok(row)
     }
 }
@@ -220,7 +329,7 @@ enum Msg {
     Seg(super::partial::Seg),
     Err(Error),
     /// The chunk's end, after this many dropped rows.
-    Done(u32),
+    Done(u32, u32),
 }
 
 struct Job {
@@ -238,6 +347,8 @@ pub struct ParScan {
     batch: std::vec::IntoIter<Item>,
     /// Rows read at the ends of chunks taken, not counted with a row yet.
     carry: u32,
+    /// Rows the workers dropped for a bounded sort above (`Decode::topk`), not taken yet.
+    pub skipped: usize,
     /// Rows of an aggregating scan's segment left to the serial path.
     seg: std::vec::IntoIter<(Row, u8, bool)>,
     /// Set when the scan is dropped: the workers stop.
@@ -268,14 +379,24 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
         let mut read = 0u32;
         let mut n = 0u32;
         let mut err = None;
+        let mut top = d.topk.map(|t| Top { t, seen: 0, heap: std::collections::BinaryHeap::new() });
+        let mut skipped = 0u32;
+        // (A row's length before its computed values.)
+        let base = d.missing.len() + usize::from(d.with_key);
         for r in scan {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
                 return;
             }
             read += 1;
-            let row = r.and_then(|(k, v)| d.row(&k, &v));
-            let row = match row {
+            let (key, bytes) = match r {
+                Ok(kv) => kv,
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            };
+            let row = match d.row_with(&key, &bytes, d.need_raw.as_ref().or(d.need.as_ref())) {
                 Ok(row) => row,
                 Err(e) => {
                     err = Some(e);
@@ -291,6 +412,29 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
                 },
                 (None, true) => false,
             };
+            let row = if d.extra.is_empty() {
+                row
+            } else {
+                match d.with_extra(&key, &bytes, row, done) {
+                    Ok(row) => row,
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
+                }
+            };
+            // (A row the filter is done with is the sort's: counted, and with its key, kept
+            // in the chunk's heap or dropped.)
+            if done && let Some(t) = &mut top {
+                match row.get(base + t.t.col) {
+                    Some(key) if t.drops(key) => {
+                        skipped += 1;
+                        continue;
+                    }
+                    Some(_) => {}
+                    None => t.seen += 1,
+                }
+            }
             if !done || d.stages.is_empty() {
                 batch.push((row, 0, done, std::mem::take(&mut read)));
             } else {
@@ -310,7 +454,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
         scratch.flush(&d.stages);
         let _ = out.send(match err {
             Some(e) => Msg::Err(e),
-            None => Msg::Done(read),
+            None => Msg::Done(read, skipped),
         });
     }
 }
@@ -393,7 +537,7 @@ fn work_partial(
         }
     }
     scratch.flush(&d.stages);
-    send_part(&mut pa, &mut read) && out.send(Msg::Done(0)).is_ok()
+    send_part(&mut pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
 }
 
 /// Keys cutting [lo, hi] into `n` ranges of about equal width (as numbers over the bytes
@@ -459,6 +603,7 @@ impl ParScan {
             seg: Vec::new().into_iter(),
             workers: Vec::new(),
             carry: 0,
+            skipped: 0,
             stop,
         };
         let ahead = workers.len() * AHEAD + 1;
@@ -506,7 +651,9 @@ impl ParScan {
                     self.pending.clear();
                     return Err(e);
                 }
-                Ok(Msg::Done(read)) => {
+                Ok(Msg::Done(read, skipped)) => {
+                    self.skipped += skipped as usize;
+                    SKIPPED.fetch_add(skipped as u64, std::sync::atomic::Ordering::Relaxed);
                     self.carry += read;
                     self.results.pop_front();
                     self.hand_out();

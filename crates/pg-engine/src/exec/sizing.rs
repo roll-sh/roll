@@ -3218,6 +3218,21 @@ pub fn heap_modelled(t: &Table, ctx: &ExecCtx) -> bool {
     matches!(heap_blocks(t, ctx), Ok(Some(_))) && ctx.sess.db.relfiles.lock().heaps.contains_key(&t.oid)
 }
 
+/// Whether the table's modelled heap has its rows in key order (`Heap::in_key_order`): a
+/// scan in storage order reads them in heap order.
+pub fn heap_in_key_order(t: &Table, ctx: &ExecCtx) -> bool {
+    ctx.sess.db.relfiles.lock().heaps.get(&t.oid).is_some_and(Heap::in_key_order)
+}
+
+/// Whether a sequential scan of the table's modelled heap may read it in parallel chunks:
+/// its rows are stored in heap order (`Heap::in_key_order`) and no page has a prunable xid,
+/// so pruning each page as the scan reaches it would prune nothing (a page this statement
+/// makes prunable isn't prunable before it ends, nor one a transaction that ends meanwhile
+/// does, which this scan's snapshot may still see).
+pub fn heap_scan_splits(t: &Table, ctx: &ExecCtx) -> bool {
+    ctx.sess.db.relfiles.lock().heaps.get(&t.oid).is_some_and(|h| h.in_key_order() && !h.any_prunable())
+}
+
 /// The table's current size in pages (None: not modelled).
 pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;

@@ -43,6 +43,9 @@ pub enum K {
     /// A cast that reads no session setting (`cast_pure`): a length coercion, a string type
     /// to another, a number to another, a date to a timestamp.
     Cast(Box<K>, Box<(DataType, DataType)>, bool),
+    /// A pgvector distance function's call (strict, float8): its kernel, when the values'
+    /// dimensions agree (`ext::vector::distance_kernel`).
+    Dist(crate::ext::vector::DistKernel, Box<[K; 2]>),
 }
 
 /// A numeric operator a kernel computes without allocating (`K::Num`).
@@ -143,6 +146,9 @@ pub fn compile(e: &Expr) -> Option<K> {
         Expr::Or(args) => K::Or(args.iter().map(compile).collect::<Option<_>>()?),
         Expr::Not(a) => K::Not(Box::new(compile(a)?)),
         Expr::IsNull(a, neg) => K::IsNull(Box::new(compile(a)?), *neg),
+        Expr::Call(def, args, DataType::Float8) if args.len() == 2 && def.strict && !def.spread && let Some(f) = crate::ext::vector::distance_kernel(def.imp) => {
+            K::Dist(f, Box::new([compile(&args[0])?, compile(&args[1])?]))
+        }
         Expr::Call(def, args, ty)
             if args.len() == 2
                 && def.strict
@@ -193,6 +199,31 @@ pub fn compile(e: &Expr) -> Option<K> {
 }
 
 impl K {
+    /// A distance call over a column and a constant of a type whose kernel reads bytes (the
+    /// column, the constant's bytes, whether the column is the first argument).
+    pub fn dist_col(&self) -> Option<(usize, &[u8], bool)> {
+        let K::Dist(f, args) = self else { return None };
+        let (kind, _) = f.bytes?;
+        match &**args {
+            [K::Col(c), K::Const(Value::Ext(k, q))] if *k == kind => Some((*c, &q[..], true)),
+            [K::Const(Value::Ext(k, q)), K::Col(c)] if *k == kind => Some((*c, &q[..], false)),
+            _ => None,
+        }
+    }
+
+    /// `dist_col`'s value over the encoded row `data` (its column not decoded): None where
+    /// the stored value isn't one of the type or the dimensions differ (leave it to `eval`).
+    pub fn dist_raw(&self, data: &[u8]) -> Option<Value> {
+        let (c, q, first) = self.dist_col()?;
+        let K::Dist(f, _) = self else { return None };
+        let (kind, bf) = f.bytes?;
+        let (k, x) = crate::storage::row::ext_at(data, c)?;
+        if k != kind || !crate::ext::vector::kernel_bytes_agree(kind, x, q) {
+            return None;
+        }
+        Some(Value::Float8(if first { bf(x, q) } else { bf(q, x) }))
+    }
+
     /// An argument's value: a column's or a constant's in place, else computed into `tmp`.
     pub fn arg<'r, R: Cols + ?Sized>(&'r self, row: &'r R, tmp: &'r mut Value) -> Option<&'r Value> {
         match self {
@@ -279,6 +310,19 @@ impl K {
                     return None;
                 }
                 f(x, y, ret).ok()?
+            }
+            K::Dist(f, args) => {
+                let (mut t0, mut t1) = (Value::Null, Value::Null);
+                let x = args[0].arg(row, &mut t0)?;
+                let y = args[1].arg(row, &mut t1)?;
+                if x.is_null() || y.is_null() {
+                    return Some(Value::Null);
+                }
+                // (Dimensions that differ: the function's error, which `eval` reports.)
+                if !crate::ext::vector::kernel_dims_agree(x, y) {
+                    return None;
+                }
+                Value::Float8((f.of)(x, y))
             }
             K::And(args) => {
                 let mut saw_null = false;

@@ -407,3 +407,62 @@ fn parallel_lookups_match_serial_inner() {
     assert!(serial[0].len() > 1000, "{}", serial[0].len());
     assert!(serial[3].iter().any(|r| r.contains("Null")), "{:?}", &serial[3][..3]);
 }
+
+/// Queries over a table small enough for its heap to be modelled (rows in heap order, as
+/// Postgres reads its pages) and big enough for a parallel scan (8 MB): pgvector distances
+/// computed by the workers' kernels, a float sum in the serial order, a filter, a top-k.
+const MODELLED_QUERIES: &[&str] = &[
+    "SELECT id FROM vt WHERE v <-> '[1,2,3,4]' < 3.5",
+    "SELECT sum(v <-> '[1,2,3,4]'), sum(v <#> '[1,0,1,0]'), avg(v <=> '[0.5,1,2,1]') FROM vt",
+    "SELECT g, sum(v <+> '[1,1,1,1]'), count(*) FROM vt WHERE id % 2 = 0 GROUP BY g ORDER BY g",
+    "SELECT id, v <-> '[3,1,4,1]' FROM vt ORDER BY v <-> '[3,1,4,1]' LIMIT 12",
+    "SELECT id, s FROM vt WHERE g = 3 AND id > 60000",
+    // Bounded sorts whose rows the workers drop where their heaps would (ties everywhere:
+    // the small vectors repeat), descending, NULLs first, past an offset, over a filter.
+    "SELECT id FROM vt ORDER BY v <=> '[1,1,0,2]' DESC LIMIT 7 OFFSET 3",
+    "SELECT id, v FROM vt ORDER BY v <+> '[2,2,2,2]' NULLS FIRST LIMIT 30",
+    "SELECT id, g FROM vt WHERE g = 2 ORDER BY v <-> '[0,0,0,0]' LIMIT 40",
+    "SELECT id FROM vt ORDER BY v <#> '[1,2,1,2]' LIMIT 5000",
+    // Dimensions that differ: the function's error, at the first row.
+    "SELECT count(*) FROM vt WHERE v <-> '[1,2,3]' > 0",
+];
+
+#[test]
+fn parallel_scans_of_modelled_heaps() {
+    on_session_thread(parallel_scans_of_modelled_heaps_inner);
+}
+
+fn parallel_scans_of_modelled_heaps_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE EXTENSION vector; CREATE TABLE vt (id int, g int, s text, v vector(4)); \
+         INSERT INTO vt SELECT i, i % 7, repeat(md5(i::text), 3), \
+         CASE WHEN i % 997 = 0 THEN NULL ELSE ARRAY[i % 5, (i * 7) % 11, (i * 3) % 13 / 2.0, i % 3]::real[]::vector END \
+         FROM generate_series(1, 70000) i",
+    )
+    .unwrap();
+    let run = |s: &mut Session| -> Vec<Vec<String>> { MODELLED_QUERIES.iter().map(|q| out(s, q)).collect() };
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let before = pg_engine::exec::parscan::started();
+    let serial = run(&mut s);
+    assert_eq!(pg_engine::exec::parscan::started(), before, "no parallel scan with 0 workers");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let skipped = pg_engine::exec::parscan::topk_skipped();
+    let parallel = run(&mut s);
+    assert!(pg_engine::exec::parscan::started() > before, "the scans ran in parallel");
+    assert!(pg_engine::exec::parscan::topk_skipped() > skipped, "the workers dropped rows for the bounded sorts");
+    for ((q, a), b) in MODELLED_QUERIES.iter().zip(&serial).zip(&parallel) {
+        assert_eq!(a, b, "{q}");
+    }
+    assert!(serial[0].len() > 100 && serial[3].len() == 12, "{:?} {:?}", serial[0].len(), serial[3]);
+    assert!(serial[9][0].starts_with("ERROR: different vector dimensions 4 and 3"), "{:?}", serial[9]);
+    // After an update the heap isn't in key order: serial scans, in the model's order.
+    s.query("UPDATE vt SET g = g + 1 WHERE id % 1000 = 0").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    let after = out(&mut s, "SELECT id FROM vt WHERE g = 1 AND id % 1000 = 0 LIMIT 3");
+    assert_eq!(pg_engine::exec::parscan::started(), started, "{after:?}");
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    assert_eq!(after, out(&mut s, "SELECT id FROM vt WHERE g = 1 AND id % 1000 = 0 LIMIT 3"));
+}

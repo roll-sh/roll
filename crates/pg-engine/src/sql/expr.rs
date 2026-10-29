@@ -849,9 +849,21 @@ impl Expr {
         }
     }
 
-    /// Structural equality (for matching GROUP BY expressions).
+    /// Structural equality (for matching GROUP BY expressions): the same Debug text. (The
+    /// second is compared as it is written, stopping where it differs: expressions holding
+    /// big constants, a pgvector query's, are compared often.)
     pub fn same_as(&self, other: &Expr) -> bool {
-        format!("{self:?}") == format!("{other:?}")
+        // (Once it differs it stays so, should a Debug impl write on past an error.)
+        struct Rest<'a>(Option<&'a str>);
+        impl std::fmt::Write for Rest<'_> {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                self.0 = self.0.and_then(|r| r.strip_prefix(s));
+                self.0.map(|_| ()).ok_or(std::fmt::Error)
+            }
+        }
+        let a = format!("{self:?}");
+        let mut rest = Rest(Some(&a));
+        std::fmt::Write::write_fmt(&mut rest, format_args!("{other:?}")).is_ok() && rest.0 == Some("")
     }
 
     /// `same_as`, where two sublinks are equal when their queries are (Postgres's equal()

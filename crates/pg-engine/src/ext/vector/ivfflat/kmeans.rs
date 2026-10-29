@@ -75,21 +75,47 @@ fn random_centers(lists: usize, dims: usize, procs: &Procs, rng: &Rng) -> Result
     Ok(centers)
 }
 
+/// `dist(&samples[j], c)` (`c_first`: `dist(c, &samples[j])`) for every sample in turn into
+/// `out`: four at a time where the kernel has that form (`Procs::kmeans_distance4`: the same
+/// values, either way round).
+fn distances_to(samples: &[Value], c: &Value, c_first: bool, procs: &Procs, out: &mut Vec<f64>) {
+    out.clear();
+    let mut i = 0;
+    if let (Some(d4), Value::Ext(_, cb)) = (procs.kmeans_distance4, c) {
+        fn ext(v: &Value) -> Option<&[u8]> {
+            match v {
+                Value::Ext(_, b) => Some(b),
+                _ => None,
+            }
+        }
+        while let Some(g) = samples.get(i..i + 4) {
+            let (Some(a), Some(b), Some(x), Some(y)) = (ext(&g[0]), ext(&g[1]), ext(&g[2]), ext(&g[3])) else {
+                break;
+            };
+            out.extend(d4(&[a, b, x, y], cb));
+            i += 4;
+        }
+    }
+    let dist = procs.kmeans_distance;
+    out.extend(samples[i..].iter().map(|s| if c_first { dist(c, s) } else { dist(s, c) }));
+}
+
 /// `InitCenters`: k-means++, filling `lower_bound` with each sample's distance to each
 /// center.
 fn init_centers(samples: &[Value], num_centers: usize, procs: &Procs, lower_bound: &mut [f32], rng: &Rng, ctx: &ExecCtx) -> Result<Vec<Value>> {
     let n = samples.len();
-    let dist = procs.kmeans_distance;
     let mut weight = vec![f32::MAX; n];
     let mut centers = Vec::with_capacity(num_centers);
+    let mut ds = Vec::with_capacity(n);
     // Choose an initial center uniformly at random
     centers.push(samples[(rng.int() % n as u32) as usize].clone());
     for i in 0..num_centers {
         ctx.check()?;
         let mut sum = 0.0f64;
+        // Only need to compute distance for new center
+        distances_to(samples, &centers[i], false, procs, &mut ds);
         for j in 0..n {
-            // Only need to compute distance for new center
-            let mut distance = dist(&samples[j], &centers[i]);
+            let mut distance = ds[j];
             // Set lower bound
             lower_bound[j * num_centers + i] = distance as f32;
             // Use distance squared for weighted probability distribution
@@ -204,14 +230,18 @@ fn elkan(samples: &[Value], num_centers: usize, dims: usize, procs: &Procs, memo
         upper[j] = min;
         closest[j] = c;
     }
+    // (One center's distances to the later ones.)
+    let mut cd = Vec::with_capacity(k);
     // Give 500 iterations to converge
     for iteration in 0..500 {
         let mut changes = 0;
         ctx.check()?;
         // Step 1: For all centers, compute distance
         for j in 0..k {
-            for kk in j + 1..k {
-                let d = (0.5 * dist(&centers[j], &centers[kk])) as f32;
+            distances_to(&centers[j + 1..], &centers[j], true, procs, &mut cd);
+            for (i, &d) in cd.iter().enumerate() {
+                let kk = j + 1 + i;
+                let d = (0.5 * d) as f32;
                 halfcdist[j * k + kk] = d;
                 halfcdist[kk * k + j] = d;
             }

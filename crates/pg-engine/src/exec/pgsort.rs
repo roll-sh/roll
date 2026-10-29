@@ -205,59 +205,122 @@ fn heap_replace_top<T>(heap: &mut [T], n: usize, t: T, cmp: &mut Cmp<T>) {
 /// tuplesort's order of `items` (the first `bound` of them when bounded, as a LIMIT above
 /// the sort asks): a quicksort, or the bounded heap once the input exceeds twice the
 /// bound.
-pub fn tuplesort<T>(mut items: Vec<T>, bound: Option<usize>, cmp: &mut Cmp<T>) -> Vec<T> {
-    let Some(bound) = bound.filter(|b| items.len() > b.saturating_mul(2)) else {
-        pg_qsort(&mut items, cmp);
-        if let Some(b) = bound {
-            items.truncate(b);
+pub fn tuplesort<T>(items: Vec<T>, bound: Option<usize>, cmp: &mut Cmp<T>) -> Vec<T> {
+    match bound {
+        Some(b) if items.len() > b.saturating_mul(2) => {
+            let mut s = Bounded::new(b);
+            for t in items {
+                s.put(t, cmp);
+            }
+            s.finish(cmp)
         }
-        return items;
-    };
-    if bound == 0 {
-        return Vec::new();
+        _ => {
+            let mut items = items;
+            pg_qsort(&mut items, cmp);
+            if let Some(b) = bound {
+                items.truncate(b);
+            }
+            items
+        }
     }
-    // TSS_INITIAL collects 2 * bound + 1 tuples, then make_bounded_heap.
-    let mut rest = items.split_off(2 * bound + 1);
-    let mut heap: Vec<T> = Vec::with_capacity(bound);
-    let feed = |heap: &mut Vec<T>, t: T, cmp: &mut Cmp<T>| {
-        if heap.len() < bound {
+}
+
+/// A bounded tuplesort fed an item at a time (a LIMIT's sort reading its input), keeping
+/// only what may still be among the first `bound`: `finish` returns what `tuplesort` of
+/// all the items put returns.
+pub struct Bounded<T> {
+    bound: usize,
+    /// TSS_INITIAL's items, then (`heap`) the bounded heap.
+    items: Vec<T>,
+    heap: bool,
+    /// Items not put because the bounded heap would have discarded them (`skip`).
+    skipped: usize,
+}
+
+impl<T> Bounded<T> {
+    pub fn new(bound: usize) -> Bounded<T> {
+        Bounded { bound, items: Vec::new(), heap: false, skipped: 0 }
+    }
+
+    /// `n` more items came, which the bounded heap would have discarded as they came (each
+    /// not smaller than the bound's worth of items before it): only their number counts,
+    /// for the heap being used at all (more than twice the bound in all). The heap's
+    /// result is the same without them: a discarded item changes nothing.
+    pub fn skip(&mut self, n: usize) {
+        self.skipped += n;
+    }
+
+    /// tuplesort_puttuple. An item the bounded heap discards at once comes back (its
+    /// caller may reuse it).
+    pub fn put(&mut self, t: T, cmp: &mut Cmp<T>) -> Option<T> {
+        if self.heap {
+            return self.feed(t, cmp);
+        }
+        self.items.push(t);
+        // TSS_INITIAL collects 2 * bound + 1 tuples, then make_bounded_heap.
+        if self.items.len() > self.bound.saturating_mul(2) {
+            self.heap = true;
+            let items = std::mem::replace(&mut self.items, Vec::with_capacity(self.bound));
+            for t in items {
+                self.feed(t, cmp);
+            }
+        }
+        None
+    }
+
+    fn feed(&mut self, t: T, cmp: &mut Cmp<T>) -> Option<T> {
+        let heap = &mut self.items;
+        if heap.len() < self.bound {
             heap_insert(heap, t, cmp);
-        } else if -cmp.cmp(&t, &heap[0]) <= 0 {
+        } else if self.bound == 0 || -cmp.cmp(&t, &heap[0]) <= 0 {
             // Not smaller than everything kept: discarded.
+            return Some(t);
         } else {
             let n = heap.len();
             heap_replace_top(heap, n, t, cmp);
         }
-    };
-    for t in items.drain(..) {
-        feed(&mut heap, t, cmp);
+        None
     }
-    for t in rest.drain(..) {
-        feed(&mut heap, t, cmp);
-    }
-    // sort_bounded_heap: delete-top repeatedly, each freed slot taking the old top.
-    let mut n = heap.len();
-    while n > 1 {
-        heap.swap(0, n - 1);
-        n -= 1;
-        // The element now at 0 (the former last) sifts down within the first n.
-        let mut i = 0usize;
-        loop {
-            let mut j = 2 * i + 1;
-            if j >= n {
-                break;
+
+    /// tuplesort_performsort and the items in order.
+    pub fn finish(mut self, cmp: &mut Cmp<T>) -> Vec<T> {
+        if !self.heap && self.items.len() + self.skipped > self.bound.saturating_mul(2) {
+            // (The items skipped made it more than twice the bound: the heap's, fed the
+            // items put in their order.)
+            self.heap = true;
+            let items = std::mem::replace(&mut self.items, Vec::with_capacity(self.bound));
+            for t in items {
+                self.feed(t, cmp);
             }
-            if j + 1 < n && -cmp.cmp(&heap[j], &heap[j + 1]) > 0 {
-                j += 1;
-            }
-            if -cmp.cmp(&heap[i], &heap[j]) <= 0 {
-                break;
-            }
-            heap.swap(i, j);
-            i = j;
         }
+        if !self.heap {
+            return tuplesort(self.items, Some(self.bound), cmp);
+        }
+        let mut heap = self.items;
+        // sort_bounded_heap: delete-top repeatedly, each freed slot taking the old top.
+        let mut n = heap.len();
+        while n > 1 {
+            heap.swap(0, n - 1);
+            n -= 1;
+            // The element now at 0 (the former last) sifts down within the first n.
+            let mut i = 0usize;
+            loop {
+                let mut j = 2 * i + 1;
+                if j >= n {
+                    break;
+                }
+                if j + 1 < n && -cmp.cmp(&heap[j], &heap[j + 1]) > 0 {
+                    j += 1;
+                }
+                if -cmp.cmp(&heap[i], &heap[j]) <= 0 {
+                    break;
+                }
+                heap.swap(i, j);
+                i = j;
+            }
+        }
+        heap
     }
-    heap
 }
 
 /// An incremental sort's sorts, full ones (0) and of presorted prefix groups (1): how many,
@@ -493,6 +556,47 @@ pub fn incremental_sort<T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Items a chunk's own bounded heap would discard (as a parallel scan's workers drop
+    /// them for a bounded sort above, once the chunk had more than twice the bound) may be
+    /// skipped: the sort comes out the same, ties and all.
+    #[test]
+    fn skipped_items_change_nothing() {
+        let mut x = 12345u64;
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        for round in 0..400 {
+            let len = 1 + next(300) as usize;
+            let keys = 1 + next(if round % 2 == 0 { 6 } else { 1000 });
+            let items: Vec<(u64, usize)> = (0..len).map(|i| (next(keys), i)).collect();
+            let bound = 1 + next(20) as usize;
+            let chunk = 1 + next(80) as usize;
+            let mut f = |a: &(u64, usize), b: &(u64, usize)| Ok(a.0.cmp(&b.0));
+            let want = tuplesort(items.clone(), Some(bound), &mut Cmp::new(&mut f));
+            let mut s = Bounded::new(bound);
+            let mut c = Cmp::new(&mut f);
+            for part in items.chunks(chunk) {
+                let (mut seen, mut heap) = (0, std::collections::BinaryHeap::new());
+                for &t in part {
+                    seen += 1;
+                    if seen > 2 * bound && heap.len() == bound && t.0 >= *heap.peek().unwrap() {
+                        s.skip(1);
+                        continue;
+                    }
+                    heap.push(t.0);
+                    if heap.len() > bound {
+                        heap.pop();
+                    }
+                    s.put(t, &mut c);
+                }
+            }
+            assert_eq!(s.finish(&mut c), want, "round {round}: bound {bound}, chunks of {chunk}");
+        }
+    }
 
     fn sorted(keys: &[(i32, &'static str)], bound: Option<usize>) -> Vec<&'static str> {
         let mut f = |a: &(i32, &str), b: &(i32, &str)| Ok(a.0.cmp(&b.0));

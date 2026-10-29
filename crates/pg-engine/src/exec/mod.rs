@@ -38,6 +38,47 @@ use std::time::Instant;
 
 pub type Row = Vec<Value>;
 
+/// Values a parallel scan's workers compute over its rows for the node above
+/// (`Node::compute_in_workers`).
+#[derive(Default)]
+pub struct Computed {
+    /// The values, put after each row's columns.
+    pub extra: Vec<kernel::K>,
+    /// Columns a row with the values doesn't need any more (read by nothing but them): NULL.
+    pub drop: Vec<usize>,
+    /// Of those, the ones each value reads as a distance's column argument and nothing else
+    /// reads: not decoded, the distance computed over the stored bytes (`K::dist_raw`).
+    pub raw: Vec<usize>,
+    /// A bounded sort's wish over value `topk.col` (`Node::topk_below`).
+    pub topk: Option<TopK>,
+}
+
+/// What a bounded sort wants of the rows below it (`Node::topk_below`): its bound, and its
+/// one key, a column compared by the type's order (no USING operator).
+#[derive(Clone, Copy, Debug)]
+pub struct TopK {
+    pub col: usize,
+    pub desc: bool,
+    pub nulls_first: bool,
+    pub k: usize,
+}
+
+impl TopK {
+    /// `nodes::compare_values` of two values of the key without a USING operator.
+    pub fn cmp(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match (a.is_null(), b.is_null()) {
+            (true, true) => Equal,
+            (true, false) => if self.nulls_first { Less } else { Greater },
+            (false, true) => if self.nulls_first { Greater } else { Less },
+            _ => {
+                let o = a.cmp_total(b);
+                if self.desc { o.reverse() } else { o }
+            }
+        }
+    }
+}
+
 /// A running plan node.
 pub trait Node {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>>;
@@ -94,6 +135,27 @@ pub trait Node {
         _ctx: &ExecCtx,
     ) -> Result<Option<u8>> {
         Ok(None)
+    }
+
+    /// Compute `c.extra` over this scan's rows in a parallel scan's workers, when it can (a
+    /// sequential scan that hasn't started reading and can go parallel). Some(the row's
+    /// length without them): a row with the values computed (all of them: none where a
+    /// kernel left one to `eval`) has them after its columns (`Computed`).
+    fn compute_in_workers(&mut self, _c: Computed, _ctx: &ExecCtx) -> Result<Option<usize>> {
+        Ok(None)
+    }
+
+    /// A bounded sort above reads this node's rows (before its first) and wants only those
+    /// that may be among its first `k` by column `col` (`TopK`): a parallel scan's workers
+    /// computing that column may drop rows its bounded heap would discard as they come
+    /// (`take_skipped` counts them). True when this node passes it on.
+    fn topk_below(&mut self, _t: TopK) -> bool {
+        false
+    }
+
+    /// The rows dropped for `topk_below`, so far.
+    fn take_skipped(&mut self) -> usize {
+        0
     }
 
     /// The next row, with the stages it has been through, or part (after `pipeline`).

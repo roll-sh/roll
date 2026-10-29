@@ -207,6 +207,14 @@ fn sort_tuplen(kind: Kind, v: &Value) -> i64 {
 /// then `InsertTuples`.
 fn create_entry_pages(index: &mut Index, list_info: &[ListInfo], b: &Build, heap: &mut dyn BuildHeap, ctx: &ExecCtx) -> Result<BuildStats> {
     let centers: Vec<Value> = index.lists().map(|(_, l)| l.center.clone()).collect();
+    // (The centers' bytes, for the four-row kernels.)
+    let center_bytes: Option<Vec<&[u8]>> = centers
+        .iter()
+        .map(|c| match c {
+            Value::Ext(_, b) => Some(&b[..]),
+            _ => None,
+        })
+        .collect();
     let mut reltuples = 0f64;
     let mut items = Vec::new();
     for row in heap.scan() {
@@ -228,15 +236,27 @@ fn create_entry_pages(index: &mut Index, list_info: &[ListInfo], b: &Build, heap
         };
         // Check dimensions match index
         check_expected_dim(b.dims, b.kind.dimensions(&value))?;
-        // Find the list that minimizes the distance
+        // Find the list that minimizes the distance (four centers at a time where the kernel
+        // has that form: the same distances, taken in the same order)
         let mut min = f64::MAX;
         let mut closest = 0;
-        for (i, c) in centers.iter().enumerate() {
-            let d = (b.procs.distance)(&value, c);
+        let mut take = |i: usize, d: f64| {
             if d < min {
                 min = d;
                 closest = i;
             }
+        };
+        let mut i = 0;
+        if let (Some(d4), Value::Ext(_, vb), Some(cb)) = (b.procs.distance4, &value, center_bytes.as_ref()) {
+            while let Some(c) = cb.get(i..i + 4) {
+                for (j, d) in d4(&[c[0], c[1], c[2], c[3]], vb).into_iter().enumerate() {
+                    take(i + j, d);
+                }
+                i += 4;
+            }
+        }
+        for (j, c) in centers.iter().enumerate().skip(i) {
+            take(j, (b.procs.distance)(&value, c));
         }
         items.push(Assigned { list: closest as i32, dkey: row.dkey.into(), val: value, orig });
     }

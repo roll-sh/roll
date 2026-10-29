@@ -112,15 +112,15 @@ pub(super) enum Page {
     Meta { dims: i32, lists: i32, kind: Kind },
     /// A list page: its lists in offset order and the next list page.
     Lists { next: u32, lists: Vec<List> },
-    /// An entry page: its tuples in offset order, the bytes they take and the next page of
-    /// the list.
-    Entries { next: u32, tuples: Vec<Tuple>, used: usize },
+    /// An entry page: its tuples in offset order (shared with the scans reading them, copied
+    /// when changed while one does), the bytes they take and the next page of the list.
+    Entries { next: u32, tuples: Arc<Vec<Tuple>>, used: usize },
 }
 
 impl Page {
     /// A new entry page (`IvfflatInitPage`).
     pub(super) fn entries() -> Page {
-        Page::Entries { next: INVALID, tuples: Vec::new(), used: 0 }
+        Page::Entries { next: INVALID, tuples: Arc::new(Vec::new()), used: 0 }
     }
 
     pub(super) fn next(&self) -> u32 {
@@ -139,8 +139,16 @@ impl Page {
     /// An entry page's tuples (none for another page).
     pub(super) fn tuples(&self) -> &[Tuple] {
         match self {
-            Page::Entries { tuples, .. } => tuples,
+            Page::Entries { tuples, .. } => tuples.as_slice(),
             _ => &[],
+        }
+    }
+
+    /// An entry page's tuples as they are now, for a scan to keep (None for another page).
+    pub(super) fn shared_tuples(&self) -> Option<Arc<Vec<Tuple>>> {
+        match self {
+            Page::Entries { tuples, .. } => Some(tuples.clone()),
+            _ => None,
         }
     }
 
@@ -156,7 +164,7 @@ impl Page {
     pub(super) fn add(&mut self, t: Tuple) {
         if let Page::Entries { tuples, used, .. } = self {
             *used += t.size as usize;
-            tuples.push(t);
+            Arc::make_mut(tuples).push(t);
         }
     }
 }
@@ -320,7 +328,7 @@ fn encode(p: &Page) -> Vec<u8> {
             out.push(2);
             put_u32(&mut out, *next);
             put_u32(&mut out, tuples.len() as u32);
-            for t in tuples {
+            for t in tuples.iter() {
                 put_bytes(&mut out, &t.dkey);
                 put_u32(&mut out, t.size);
                 put_value(&mut out, &t.val);
@@ -403,7 +411,7 @@ fn decode(b: &[u8]) -> Result<Page> {
                 used += size as usize;
                 tuples.push(Tuple { dkey, val, orig, size });
             }
-            Page::Entries { next, tuples, used }
+            Page::Entries { next, tuples: Arc::new(tuples), used }
         }
         _ => return Err(invalid()),
     })

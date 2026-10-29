@@ -401,6 +401,35 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       Limit above a resjunk ORDER BY expression leave the expression out (engine-wide, not
       pgvector's: `SELECT id FROM t ORDER BY id * 2.5 LIMIT 5` shows width 4 where PostgreSQL
       shows 36; planner).
+  - Speed (round 21, agent 89; BENCH.md "pgvector round 2"), results still pgvector's bit for
+    bit (pgvector_equality 480 / 480, the suite 915 / 915, every bench hash equal):
+    - Sequential scans of a modelled heap stored in heap order read rows as they are asked
+      for (`ScanNode::in_order`) instead of collecting the table and sorting it by TID: the
+      heap model keeps whether every row was placed after the rows of smaller keys
+      (`Heap::in_key_order`, `disordered`; an update, an insert into earlier free space, a
+      rekey or a layout out of key order clears it). Code that places tuples in the model
+      must go through `Heap::placed` (or set `disordered`). A row without a stored TID puts
+      the rest in heap order as before.
+    - Such scans of 8 MB or more with no page holding a prunable xid run on the parallel
+      scan's workers (`heap_scan_splits`), as big tables' do. pgvector's distance functions
+      are kernels (`K::Dist`, `ext::vector::distance_kernel`; differing dimensions fall back
+      to the evaluator's error), so the workers filter by them, aggregate them (float sums in
+      the serial order), and compute a Project's distances (`Node::compute_in_workers`):
+      over the stored bytes when only the distance reads the column (`Computed::raw`,
+      `K::dist_raw`). Under a bounded sort on such a distance (`Node::topk_below`) each chunk
+      drops the rows its own bounded heap would discard once it has seen more than twice the
+      bound (the sort's heap would discard them too; `pgsort::Bounded::skip` counts them).
+    - A bounded sort reads its input a row at a time into tuplesort's bounded heap
+      (`pgsort::Bounded`), keeping only what may still be among the first rows.
+    - Four-row distance kernels (`dist::distance4`: vector l2 / ip / cosine, halfvec l2 / ip;
+      four independent sums interleaved, each in the reference's order) in ivfflat scans and
+      hnsw searches; bit kernels without copies, with POPCNT. ivfflat scans share the entry
+      pages' tuples (`Arc`, copied on change) and sort 16-byte items. hnsw builds write their
+      records a batch at a time, the build graph freed first.
+    - Stored extension values decode with one copy and are skipped without decoding;
+      `Expr::same_as` compares the second Debug text as it is written.
+    - Open (BENCH.md): index builds' peak memory above pgvector's, the per-row cost of the
+      engine's scans (storage iteration, row decoding) behind the full-scan numbers.
 - **Index access methods of native code** (round 20, agent 70; `src/ext/index_am.rs`): what an
   extension's `CREATE ACCESS METHOD ... HANDLER` names when the handler is a C function the
   engine implements. Another index-type extension adds its routine to `index_am::routine`.

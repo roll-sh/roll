@@ -346,6 +346,45 @@ fn binary_errors() {
     assert_eq!(err(SPARSEVEC, &sparse(3, 0, 7, &[], &[])), "expected unused to be 0, not 7");
 }
 
+/// The four-row kernels give each row the one-row kernel's bits, the stored value on
+/// either side, for every remainder of the four lanes and rows of other lengths.
+#[test]
+fn four_row_kernels_match() {
+    let mut r = Rng(11);
+    let mut v = |n: usize| -> Vec<u8> {
+        (0..n)
+            .flat_map(|_| ((r.below(20001) as f32 - 10000.0) / 977.0 * if r.below(9) == 0 { 1e-3 } else { 1.0 }).to_le_bytes())
+            .collect()
+    };
+    let syms = ["vector_l2_squared_distance", "l2_distance", "inner_product", "vector_negative_inner_product", "cosine_distance"];
+    let half_syms = ["halfvec_l2_squared_distance", "halfvec_l2_distance", "halfvec_inner_product", "halfvec_negative_inner_product"];
+    let halves = |b: &[u8]| -> Vec<u8> { b.chunks(4).flat_map(|c| f32_to_half(f32::from_le_bytes(c.try_into().unwrap())).to_le_bytes()).collect() };
+    for n in (0..41).chain([127, 128, 129, 768, 1536]) {
+        for round in 0..20 {
+            let q = v(n);
+            let mut rows = [v(n), v(n), v(n), v(n)];
+            if round == 0 {
+                rows[2] = v(n + 1);
+            }
+            let refs = [&rows[0][..], &rows[1][..], &rows[2][..], &rows[3][..]];
+            let hq = halves(&q);
+            let hrows = rows.clone().map(|r| halves(&r));
+            let hrefs = [&hrows[0][..], &hrows[1][..], &hrows[2][..], &hrows[3][..]];
+            let cases = syms.iter().map(|s| (*s, VECTOR, &refs, &q)).chain(half_syms.iter().map(|s| (*s, HALFVEC, &hrefs, &hq)));
+            for (sym, kind, refs, q) in cases {
+                let one = super::dist::distance(sym).unwrap();
+                let four = super::dist::distance4(sym).unwrap();
+                let val = |b: &[u8]| Value::Ext(kind, Arc::from(b));
+                let want: Vec<u64> = refs.iter().map(|a| one(&val(a), &val(q)).to_bits()).collect();
+                let got: Vec<u64> = four(refs, q).iter().map(|d| d.to_bits()).collect();
+                assert_eq!(got, want, "{sym} over {n} dimensions");
+                let swapped: Vec<u64> = refs.iter().map(|a| one(&val(q), &val(a)).to_bits()).collect();
+                assert_eq!(swapped, want, "{sym} over {n} dimensions, arguments swapped");
+            }
+        }
+    }
+}
+
 /// Nanoseconds per call of the distances over 1536 dimensions (run with --release).
 #[test]
 #[ignore]
@@ -374,6 +413,17 @@ fn kernel_speed() {
             s += d(std::hint::black_box(x), std::hint::black_box(y));
         }
         eprintln!("{sym}: {:.0} ns ({s})", t.elapsed().as_nanos() as f64 / n as f64);
+    }
+    let (x, y) = (super::common::bytes(&a), super::common::bytes(&b));
+    for sym in ["vector_l2_squared_distance", "vector_negative_inner_product", "cosine_distance"] {
+        let d = super::dist::distance4(sym).unwrap();
+        let n = 50_000;
+        let t = std::time::Instant::now();
+        let mut s = 0.0;
+        for _ in 0..n {
+            s += d(std::hint::black_box(&[x, y, x, y]), std::hint::black_box(x)).iter().sum::<f64>();
+        }
+        eprintln!("{sym}, four rows at once: {:.0} ns a row ({s})", t.elapsed().as_nanos() as f64 / n as f64 / 4.0);
     }
     let t = std::time::Instant::now();
     let out = types::output_plain(VECTOR, super::common::bytes(&a));

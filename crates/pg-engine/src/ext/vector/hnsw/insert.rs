@@ -45,14 +45,14 @@ pub(super) fn find_element_neighbors(st: &mut Disk, g: &Graph, sup: &Support, q:
     let entry_level = st.loaded[st.sc[ep[0] as usize].e as usize].level as usize;
     // 1st phase: greedy search to insert level
     for lc in (level as usize + 1..=entry_level).rev() {
-        ep = st.search_layer(g, sup.dist, Some(q), &ep, 1, lc, o, None)?.0;
+        ep = st.search_layer(g, sup.dists(), Some(q), &ep, 1, lc, o, None)?.0;
     }
     // Add one for existing element
     let ef = ef_construction + skip.is_some() as usize;
     // 2nd phase
     for lc in (0..=(level as usize).min(entry_level)).rev() {
         let lm = layer_m(m, lc);
-        let w = st.search_layer(g, sup.dist, Some(q), &ep, ef, lc, o, None)?.0;
+        let w = st.search_layer(g, sup.dists(), Some(q), &ep, ef, lc, o, None)?.0;
         // Elements being deleted or skipped help the search but aren't neighbors.
         let mut lw: Vec<Cand> = w
             .iter()
