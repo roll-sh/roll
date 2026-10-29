@@ -761,10 +761,75 @@ impl Drop for ConfigGuard<'_> {
     }
 }
 
-/// GetCachedPlan for statement `stmt` of SQL function `f` called with `args` (functions.c's
-/// plans are cached per function for the session): a custom plan (`bind(true)`) the first
-/// five times, then the generic one (`bind(false)`) when it costs less than their average
-/// (choose_custom_plan); plan_cache_mode decides first.
+/// choose_custom_plan for statement `stmt` of SQL function `f` called with `args`
+/// (functions.c's plan sources live for the session, per function): plan_cache_mode
+/// first, a custom plan the first five times, then the generic one when it costs less than
+/// their average (`generic_cost` finds its cost the first time it is asked).
+fn sql_fn_custom(
+    ctx: &ExecCtx,
+    f: &Function,
+    stmt: usize,
+    args: &[Value],
+    generic_cost: impl FnOnce() -> Result<f64>,
+) -> Result<bool> {
+    use crate::session::state::SqlFnPlans;
+    if args.is_empty() {
+        return Ok(false);
+    }
+    match ctx.sess.settings.borrow().get_str("plan_cache_mode") {
+        Some("force_generic_plan") => return Ok(false),
+        Some("force_custom_plan") => return Ok(true),
+        _ => {}
+    }
+    let key = (f.oid, stmt);
+    let (known, avg) = {
+        let mut plans = ctx.sess.sql_fn_plans.borrow_mut();
+        // (A session keeps at most 4,096 functions' counters.)
+        if plans.len() >= 4096 && !plans.contains_key(&key) {
+            plans.clear();
+        }
+        let p = plans.entry(key).or_default();
+        if *p.body != *f.body {
+            *p = SqlFnPlans {
+                body: Arc::from(f.body.as_str()),
+                ..SqlFnPlans::default()
+            };
+        }
+        if p.custom < 5 {
+            return Ok(true);
+        }
+        (p.generic_cost, p.custom_cost / p.custom as f64)
+    };
+    let generic = match known {
+        Some(c) => c,
+        None => {
+            let c = generic_cost()?;
+            if let Some(p) = ctx.sess.sql_fn_plans.borrow_mut().get_mut(&key) {
+                p.generic_cost = Some(c);
+            }
+            c
+        }
+    };
+    Ok(generic >= avg)
+}
+
+/// A custom plan of statement `stmt` of `f` was built, costing `cost` with its planning.
+fn sql_fn_custom_built(ctx: &ExecCtx, f: &Function, stmt: usize, cost: f64) {
+    if let Some(p) = ctx.sess.sql_fn_plans.borrow_mut().get_mut(&(f.oid, stmt)) {
+        p.custom += 1;
+        p.custom_cost += cost;
+    }
+}
+
+/// cached_plan_cost of a SQL function statement's plan, run over `args`.
+fn sql_fn_cost(ctx: &ExecCtx, args: &[Value], plan: &Arc<Plan>, rtes: usize, custom: bool) -> Result<f64> {
+    ctx.with_outer(Rc::new(args.to_vec()), || {
+        Ok(crate::session::plan_cost_estimate(ctx, plan, rtes, custom))
+    })
+}
+
+/// GetCachedPlan for statement `stmt` of SQL function `f` called with `args`: a custom plan
+/// (`bind(true)`) or the generic one (`bind(false)`), as `sql_fn_custom` chooses.
 fn sql_fn_planned<B, C>(
     ctx: &ExecCtx,
     f: &Function,
@@ -772,64 +837,68 @@ fn sql_fn_planned<B, C>(
     args: &[Value],
     bind: impl Fn(bool) -> Result<(B, Plan, C, usize)>,
 ) -> Result<(B, Arc<Plan>, C)> {
-    use crate::session::state::SqlFnPlans;
-    let cost = |plan: &Arc<Plan>, rtes: usize, custom: bool| {
-        ctx.with_outer(Rc::new(args.to_vec()), || {
-            Ok(crate::session::plan_total_cost(ctx, plan, rtes, &[], custom))
-        })
-    };
-    let key = (f.oid, stmt);
-    let mode = ctx.sess.settings.borrow().get_str("plan_cache_mode").map(str::to_string);
-    let custom = match mode.as_deref() {
-        _ if args.is_empty() => Some(false),
-        Some("force_generic_plan") => Some(false),
-        Some("force_custom_plan") => Some(true),
-        _ => {
-            let mut plans = ctx.sess.sql_fn_plans.borrow_mut();
-            let p = plans.entry(key).or_default();
-            if *p.body != *f.body {
-                *p = SqlFnPlans {
-                    body: Arc::from(f.body.as_str()),
-                    ..SqlFnPlans::default()
-                };
-            }
-            (p.custom < 5).then_some(true)
-        }
-    };
-    if custom.is_none() {
-        let (b, plan, cols, rtes) = bind(false)?;
+    let mut generic = None;
+    let custom = sql_fn_custom(ctx, f, stmt, args, || {
+        let (b, plan, cols, _) = bind(false)?;
         let plan = Arc::new(plan);
-        let known = ctx.sess.sql_fn_plans.borrow()[&key].generic_cost;
-        let generic = match known {
-            Some(c) => c,
-            None => {
-                let c = cost(&plan, rtes, false)?;
-                ctx.sess.sql_fn_plans.borrow_mut().get_mut(&key).unwrap().generic_cost = Some(c);
-                c
-            }
+        let c = sql_fn_cost(ctx, args, &plan, 0, false)?;
+        generic = Some((b, plan, cols));
+        Ok(c)
+    })?;
+    if !custom {
+        return match generic {
+            Some(g) => Ok(g),
+            None => bind(false).map(|(b, plan, cols, _)| (b, Arc::new(plan), cols)),
         };
-        let avg = {
-            let plans = ctx.sess.sql_fn_plans.borrow();
-            plans[&key].custom_cost / plans[&key].custom as f64
-        };
-        if generic < avg {
-            return Ok((b, plan, cols));
-        }
     }
-    if custom != Some(false) {
-        let (b, plan, cols, rtes) = bind(true)?;
-        let plan = Arc::new(plan);
-        if mode.as_deref() != Some("force_custom_plan") {
-            let c = cost(&plan, rtes, true)?;
-            if let Some(p) = ctx.sess.sql_fn_plans.borrow_mut().get_mut(&key) {
-                p.custom += 1;
-                p.custom_cost += c;
-            }
-        }
-        return Ok((b, plan, cols));
+    let (b, plan, cols, rtes) = bind(true)?;
+    let plan = Arc::new(plan);
+    let c = sql_fn_cost(ctx, args, &plan, rtes, true)?;
+    sql_fn_custom_built(ctx, f, stmt, c);
+    Ok((b, plan, cols))
+}
+
+/// The function's statement in `p`, the plan of a call's body: without the binder's
+/// projection of the result (and a scalar call's LIMIT 1), which the plan cache's costs
+/// don't see.
+fn statement_plan(p: &Arc<Plan>, scalar: bool) -> &Arc<Plan> {
+    let p = match &**p {
+        Plan::Project { input, .. } => input,
+        _ => p,
+    };
+    match &**p {
+        Plan::Limit {
+            input,
+            limit: Some(Expr::Const(Value::Int8(1), _)),
+            offset: None,
+            ..
+        } if scalar => input,
+        _ => p,
     }
-    let (b, plan, cols, _) = bind(false)?;
-    Ok((b, Arc::new(plan), cols))
+}
+
+/// The plan a SQL function call bound with its statement runs (`Plan::Context`, GetCachedPlan
+/// as functions.c calls it): a custom plan over the arguments, the innermost outer row, or
+/// None for the generic plan bound with the statement.
+pub(crate) fn sql_fn_context_plan(
+    ctx: &ExecCtx,
+    c: &crate::sql::plan::SqlFnCustom,
+    generic: &Arc<Plan>,
+) -> Result<Option<Arc<Plan>>> {
+    let args: Vec<Value> = (0..c.arg_types.len())
+        .map(|i| ctx.outer_value(1, i))
+        .collect::<Result<_>>()?;
+    let f = &*c.func;
+    let scalar = matches!(c.place, crate::sql::plan::SqlFnPlace::Scalar);
+    let generic_cost = || sql_fn_cost(ctx, &args, statement_plan(generic, scalar), 0, false);
+    if !sql_fn_custom(ctx, f, 0, &args, generic_cost)? {
+        return Ok(None);
+    }
+    let (plan, rtes) = crate::sql::binder::Binder::custom_sql_fn(ctx, c, &args)?;
+    let plan = Arc::new(plan);
+    let cost = sql_fn_cost(ctx, &args, statement_plan(&plan, scalar), rtes, true)?;
+    sql_fn_custom_built(ctx, f, 0, cost);
+    Ok(Some(plan))
 }
 
 /// Run a SQL function's statements in order over `args`; the last one's rows are the result,
@@ -1669,6 +1738,9 @@ enum Compiled {
         /// An UPDATE of pg_depend: the plan is `depend_update_query`'s, its rows applied by
         /// `apply_depend_update` (the derived catalog has no heap to update).
         depend_update: bool,
+        /// It reads variables (plpgsql's `paramnos`): SPI plans it with their values
+        /// (custom plans) unless it is a simple expression.
+        uses_vars: bool,
     },
     Utility(Box<Node>),
 }
@@ -1745,6 +1817,8 @@ struct Interp<'c, 'a> {
     /// What `resync` last saw (`sync_key`); None before the routine's first statement.
     synced: Cell<Option<(u64, u64, u32)>>,
     body_key: String,
+    /// A DO block's statements' plan counters (its plans live for its run).
+    do_plans: RefCell<HashMap<(u32, u64, usize), crate::session::state::PlPlans>>,
     fn_name: String,
     /// The routine's OID (PG_ROUTINE_OID); 0 for a DO block.
     fn_oid: u32,
@@ -1914,6 +1988,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             resynced: RefCell::new(None),
             synced: Cell::new(None),
             body_key,
+            do_plans: RefCell::new(HashMap::new()),
             fn_name: fn_name.to_string(),
             fn_oid: 0,
             fn_coll: None,
@@ -2037,9 +2112,106 @@ impl<'c, 'a> Interp<'c, 'a> {
         b
     }
 
-    /// Bind `e` (an expression, or a statement when `stmt`), coercing result columns to
-    /// `targets` when given.
+    /// `e` as SPI plans it to run now (GetCachedPlan): its generic plan, or a custom plan
+    /// with the variables' current values as constants. A simple expression and one that
+    /// reads no variable always take the generic plan.
     fn compile(
+        &self,
+        e: &PlExpr,
+        stmt: bool,
+        targets: Option<&[DataType]>,
+    ) -> Result<Rc<Compiled>> {
+        let c = self.compile_generic(e, stmt, targets)?;
+        let Compiled::Query {
+            plan,
+            simple_expr: false,
+            uses_vars: true,
+            ..
+        } = &*c
+        else {
+            return Ok(c);
+        };
+        if !self.custom_plan(e.id, plan)? {
+            return Ok(c);
+        }
+        let text = if stmt {
+            e.text.clone()
+        } else {
+            format!("SELECT {}", e.text)
+        };
+        let text = self.lexed(e.id, &text)?;
+        let custom = self.bind_text_as(&text, targets, true, true)?;
+        if let Compiled::Query { plan, .. } = &custom {
+            let cost = self.plan_cost(plan, true);
+            self.with_plans(e.id, |p| {
+                p.custom += 1;
+                p.custom_cost += cost;
+            });
+        }
+        Ok(Rc::new(custom))
+    }
+
+    /// choose_custom_plan for statement `id`, whose generic plan is `generic`.
+    fn custom_plan(&self, id: usize, generic: &Arc<Plan>) -> Result<bool> {
+        match self.cx().sess.settings.borrow().get_str("plan_cache_mode") {
+            Some("force_generic_plan") => return Ok(false),
+            Some("force_custom_plan") => return Ok(true),
+            _ => {}
+        }
+        let (custom, avg, known) = self.with_plans(id, |p| {
+            let known = p
+                .generic_cost
+                .as_ref()
+                .filter(|(g, _)| std::ptr::eq(g.as_ptr(), Arc::as_ptr(generic)))
+                .map(|(_, c)| *c);
+            (p.custom, p.custom_cost / p.custom.max(1) as f64, known)
+        });
+        if custom < 5 {
+            return Ok(true);
+        }
+        let cost = match known {
+            Some(c) => c,
+            None => {
+                let c = self.plan_cost(generic, false);
+                self.with_plans(id, |p| p.generic_cost = Some((Arc::downgrade(generic), c)));
+                c
+            }
+        };
+        Ok(cost >= avg)
+    }
+
+    /// The counters of statement `id`'s plan source (a function's are the session's; the
+    /// session keeps at most 4,096).
+    fn with_plans<R>(&self, id: usize, f: impl FnOnce(&mut crate::session::state::PlPlans) -> R) -> R {
+        let body = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.body_key.hash(&mut h);
+            h.finish()
+        };
+        let key = (self.fn_oid, body, id);
+        let mut map = if self.fn_oid == 0 {
+            self.do_plans.borrow_mut()
+        } else {
+            self.cx().sess.pl_plans.borrow_mut()
+        };
+        if map.len() >= 4096 && !map.contains_key(&key) {
+            map.clear();
+        }
+        f(map.entry(key).or_default())
+    }
+
+    /// cached_plan_cost of `plan` run with the variables' current values.
+    fn plan_cost(&self, plan: &Arc<Plan>, custom: bool) -> f64 {
+        let values: Vec<Value> = self.vars.iter().map(|v| v.value.clone()).collect();
+        let cx = self.cx();
+        cx.with_outer(Rc::new(values), || Ok(crate::session::plan_cost_estimate(&cx, plan, 0, custom)))
+            .unwrap_or_default()
+    }
+
+    /// Bind `e` (an expression, or a statement when `stmt`), coercing result columns to
+    /// `targets` when given: its generic plan, cached (`PLANS`).
+    fn compile_generic(
         &self,
         e: &PlExpr,
         stmt: bool,
@@ -2137,6 +2309,18 @@ impl<'c, 'a> Interp<'c, 'a> {
         targets: Option<&[DataType]>,
         with_vars: bool,
     ) -> Result<Compiled> {
+        self.bind_text_as(text, targets, with_vars, false)
+    }
+
+    /// `bind_text`; `consts`: the variables are their current values, as constants (a
+    /// custom plan).
+    fn bind_text_as(
+        &self,
+        text: &str,
+        targets: Option<&[DataType]>,
+        with_vars: bool,
+        consts: bool,
+    ) -> Result<Compiled> {
         let stmts = crate::sql::parse::parse(text)?;
         if stmts.len() != 1 {
             return Err(Error::new(
@@ -2151,6 +2335,26 @@ impl<'c, 'a> Interp<'c, 'a> {
         } else {
             Binder::new(&cx, Vec::new())
         };
+        if consts {
+            let lvl = &mut b.levels[0];
+            lvl.params = self
+                .vars
+                .iter()
+                .map(|v| {
+                    let c = Expr::Const(v.value.clone(), v.ty.clone());
+                    // (A Const with the variable's collation, as the Param it replaces.)
+                    match &v.coll {
+                        Some(coll) if v.ty.collatable() => Expr::Collate(
+                            Box::new(c),
+                            coll.clone(),
+                            crate::sql::binder::IMPLICIT_COLLATE,
+                        ),
+                        _ => c,
+                    }
+                })
+                .collect();
+            lvl.inline_args = true;
+        }
         bind_node(&mut b, *node, targets)
     }
 
@@ -3922,6 +4126,8 @@ impl<'c, 'a> Interp<'c, 'a> {
         let child = cx.child(&vals);
         let r = (|| -> Result<(Vec<Row>, Vec<OutCol>, u64)> {
             let mut b = Binder::new(&child, types.clone());
+            // A one-shot plan: always custom, over the USING values (choose_custom_plan).
+            b.param_consts = !vals.is_empty();
             let compiled = sess.framed(frame(), |_| bind_node(&mut b, *node, None))?;
             let run = || -> Result<(Vec<Row>, Vec<OutCol>, u64)> {
                 match compiled {
@@ -4288,6 +4494,8 @@ impl<'c, 'a> Interp<'c, 'a> {
         let child = cx.child(&vals);
         let r = (|| {
             let mut b = Binder::new(&child, types.clone());
+            // (A plan made for this run: custom over the USING values, choose_custom_plan.)
+            b.param_consts = !vals.is_empty();
             let compiled = sess.framed(frame(), |_| bind_node(&mut b, *node, None))?;
             let Compiled::Query {
                 plan,
@@ -4643,6 +4851,7 @@ fn bind_simple(
         perms: Arc::new(b.perms.clone()),
         simple_expr,
         depend_update: false,
+        uses_vars: b.fn_args_used,
     }))
 }
 
@@ -4670,6 +4879,7 @@ fn bind_node(b: &mut Binder, node: Node, targets: Option<&[DataType]>) -> Result
             perms: Arc::new(Default::default()),
             simple_expr: false,
             depend_update: true,
+            uses_vars: false,
         });
     }
     // A superuser's UPDATE of pg_class / pg_database / pg_constraint (ActiveRecord's EXECUTE
@@ -4717,6 +4927,7 @@ fn bind_node(b: &mut Binder, node: Node, targets: Option<&[DataType]>) -> Result
                 perms: bq.perms.clone(),
                 simple_expr: false,
                 depend_update: false,
+                uses_vars: b.fn_args_used,
             })
         }
         _ => Ok(Compiled::Utility(Box::new(node))),

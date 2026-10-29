@@ -1,0 +1,312 @@
+> CREATE TABLE e(x int)
+-- CREATE TABLE
+
+> CREATE TABLE t AS SELECT g AS x FROM generate_series(1, 3) g
+-- SELECT 3
+
+> CREATE FUNCTION f(n int) RETURNS int LANGUAGE sql AS $$ SELECT 1 / n FROM e $$
+-- CREATE FUNCTION
+
+> SELECT f(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "f" statement 1
+
+> SELECT f(0) FROM t
+ERROR 22012: division by zero
+CONTEXT: SQL function "f" statement 1
+
+> SELECT f(1) FROM t
+f:int4
+NULL
+NULL
+NULL
+-- SELECT 3
+
+> CREATE FUNCTION g(n int) RETURNS SETOF int LANGUAGE sql AS $$ SELECT 1 / n FROM e $$
+-- CREATE FUNCTION
+
+> SELECT * FROM g(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "g" statement 1
+
+> SELECT g(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "g" statement 1
+
+> CREATE FUNCTION f3(n int) RETURNS SETOF int LANGUAGE sql AS $$ SELECT x / n FROM t $$
+-- CREATE FUNCTION
+
+> SELECT * FROM f3(1)
+f3:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT f3(1)
+f3:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT * FROM f3(0)
+ERROR 22012: division by zero
+CONTEXT: SQL function "f3" statement 1
+
+> CREATE FUNCTION f2(n int) RETURNS int LANGUAGE sql AS $$ SELECT 1 / (n - 6) FROM e $$
+-- CREATE FUNCTION
+
+> SELECT count(f2(g)) FROM generate_series(1, 10) g
+ERROR 22012: division by zero
+CONTEXT: SQL function "f2" statement 1
+
+> SELECT count(f2(6))
+ERROR 22012: division by zero
+CONTEXT: SQL function "f2" statement 1
+
+> CREATE TABLE k(id int PRIMARY KEY, v int)
+-- CREATE TABLE
+
+> INSERT INTO k SELECT g, g FROM generate_series(1, 1000) g
+-- INSERT 0 1000
+
+> ANALYZE k
+-- ANALYZE
+
+> CREATE FUNCTION fk(n int) RETURNS int LANGUAGE sql AS $$ SELECT 1 / (n - 7) FROM k WHERE id = n + 2000 $$
+-- CREATE FUNCTION
+
+> SELECT count(fk(g)) FROM generate_series(1, 10) g
+count:int8
+0
+-- SELECT 1
+
+> SELECT fk(7)
+fk:int4
+NULL
+-- SELECT 1
+
+> SET plan_cache_mode = force_custom_plan
+-- SET
+
+> SELECT fk(7)
+ERROR 22012: division by zero
+CONTEXT: SQL function "fk" statement 1
+
+> SET plan_cache_mode = force_generic_plan
+-- SET
+
+> SELECT f(0)
+f:int4
+NULL
+-- SELECT 1
+
+> RESET plan_cache_mode
+-- RESET
+
+> CREATE FUNCTION f4(n anyelement) RETURNS anyelement LANGUAGE sql AS $$ SELECT n FROM t LIMIT 1 $$
+-- CREATE FUNCTION
+
+> SELECT f4(1), f4('a'::text)
+f4:int4 | f4:text
+1 | a
+-- SELECT 1
+
+> CREATE FUNCTION p(n int) RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE r int;
+> BEGIN
+>   SELECT 1 / n INTO r FROM e;
+>   RETURN r;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT p(0)
+ERROR 22012: division by zero
+CONTEXT: SQL statement "SELECT 1 / n        FROM e"
+CONTEXT: PL/pgSQL function p(integer) line 4 at SQL statement
+
+> SELECT p(1)
+p:int4
+NULL
+-- SELECT 1
+
+> CREATE FUNCTION p2(n int) RETURNS int LANGUAGE plpgsql AS $$
+> BEGIN
+>   RETURN (SELECT 1 / n FROM e);
+> END $$
+-- CREATE FUNCTION
+
+> SELECT p2(0)
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL expression "(SELECT 1 / n FROM e)"
+CONTEXT: PL/pgSQL function p2(integer) line 3 at RETURN
+
+> CREATE FUNCTION p3(n int) RETURNS int LANGUAGE plpgsql AS $$
+> BEGIN
+>   IF n = 0 THEN RETURN 1 / n; END IF; RETURN 0;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT p3(1)
+p3:int4
+0
+-- SELECT 1
+
+> CREATE FUNCTION p4(n int) RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE r int := 0;
+> BEGIN
+>   FOR i IN 1..8 LOOP
+>     BEGIN
+>       SELECT 1 / (n - i) INTO r FROM e;
+>     EXCEPTION WHEN division_by_zero THEN RAISE NOTICE 'dz at %', i;
+>     END;
+>   END LOOP;
+>   RETURN r;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT p4(3)
+NOTICE 00000: dz at 3
+CONTEXT: PL/pgSQL function p4(integer) line 7 at RAISE
+p4:int4
+NULL
+-- SELECT 1
+
+> SELECT p4(7)
+NOTICE 00000: dz at 7
+CONTEXT: PL/pgSQL function p4(integer) line 7 at RAISE
+p4:int4
+NULL
+-- SELECT 1
+
+> SET plan_cache_mode = force_generic_plan
+-- SET
+
+> SELECT p4(3)
+p4:int4
+NULL
+-- SELECT 1
+
+> SET plan_cache_mode = force_custom_plan
+-- SET
+
+> SELECT p4(7)
+NOTICE 00000: dz at 7
+CONTEXT: PL/pgSQL function p4(integer) line 7 at RAISE
+p4:int4
+NULL
+-- SELECT 1
+
+> RESET plan_cache_mode
+-- RESET
+
+> CREATE FUNCTION pk(n int) RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE r int := 0;
+> BEGIN
+>   FOR i IN 1..8 LOOP
+>     BEGIN
+>       SELECT 1 / (n - i) INTO r FROM k WHERE id = i + 2000;
+>     EXCEPTION WHEN division_by_zero THEN RAISE NOTICE 'dz at %', i;
+>     END;
+>   END LOOP;
+>   RETURN r;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT pk(3)
+NOTICE 00000: dz at 3
+CONTEXT: PL/pgSQL function pk(integer) line 7 at RAISE
+pk:int4
+NULL
+-- SELECT 1
+
+> SELECT pk(7)
+pk:int4
+NULL
+-- SELECT 1
+
+> DO $$ BEGIN EXECUTE 'SELECT 1 / $1 FROM e' USING 0; END $$
+ERROR 22012: division by zero
+CONTEXT: SQL statement "SELECT 1 / $1 FROM e"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at EXECUTE
+
+> DO $$ DECLARE n int := 0; BEGIN PERFORM 1 / n FROM e; END $$
+ERROR 22012: division by zero
+CONTEXT: SQL statement "SELECT 1 / n FROM e"
+CONTEXT: PL/pgSQL function inline_code_block line 1 at PERFORM
+
+> CREATE FUNCTION p5(r t) RETURNS int LANGUAGE plpgsql AS $$
+> BEGIN RETURN (SELECT 1 / r.x FROM e); END $$
+-- CREATE FUNCTION
+
+> SELECT p5(ROW(0)::t)
+ERROR 22012: division by zero
+CONTEXT: PL/pgSQL expression "(SELECT 1 / r.x FROM e)"
+CONTEXT: PL/pgSQL function p5(t) line 2 at RETURN
+
+> PREPARE q(int) AS SELECT 1 / $1 FROM e
+-- PREPARE
+
+> EXECUTE q(0)
+ERROR 22012: division by zero
+
+> SET plan_cache_mode = force_generic_plan
+-- SET
+
+> EXECUTE q(0)
+?column?:int4
+-- SELECT 0
+
+> RESET plan_cache_mode
+-- RESET
+
+> PREPARE q2(int) AS SELECT * FROM t WHERE x = $1
+-- PREPARE
+
+> EXPLAIN (COSTS OFF) EXECUTE q2(1)
+QUERY PLAN:text
+Seq Scan on t
+  Filter: (x = 1)
+-- EXPLAIN
+
+> EXECUTE q2(1)
+x:int4
+1
+-- SELECT 1
+
+> EXECUTE q2(1)
+x:int4
+1
+-- SELECT 1
+
+> EXECUTE q2(1)
+x:int4
+1
+-- SELECT 1
+
+> EXECUTE q2(1)
+x:int4
+1
+-- SELECT 1
+
+> EXECUTE q2(1)
+x:int4
+1
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) EXECUTE q2(1)
+QUERY PLAN:text
+Seq Scan on t
+  Filter: (x = $1)
+-- EXPLAIN
+
+> SELECT name, generic_plans, custom_plans FROM pg_prepared_statements ORDER BY name
+name:text | generic_plans:int8 | custom_plans:int8
+q | 1 | 0
+q2 | 2 | 5
+-- SELECT 2
+
+> DEALLOCATE ALL
+-- DEALLOCATE ALL
+

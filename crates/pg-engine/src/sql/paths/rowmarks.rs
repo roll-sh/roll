@@ -379,15 +379,18 @@ fn key(p: &Plan) -> Option<Keyed> {
             perms,
             volatile,
             scan,
+            ..
         } => {
             let (i, map, keys) = key(input)?;
             (
+                // (Its rows now carry marks a plan bound again wouldn't: always this one.)
                 Plan::Context {
                     input: Arc::new(i),
                     frame: frame.clone(),
                     perms: perms.clone(),
                     volatile: *volatile,
                     scan: *scan,
+                    custom: None,
                 },
                 map,
                 keys,

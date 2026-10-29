@@ -629,6 +629,9 @@ pub struct Binder<'b, 'a> {
     pub user_fn_loc: Option<i32>,
     /// The next SQL function body bound gets `Level::inline_args`.
     pub fold_args: bool,
+    /// A function argument or PL/pgSQL variable was referenced (the statement has
+    /// parameters: plpgsql's `paramnos`, which custom plans need).
+    pub fn_args_used: bool,
     /// The next SQL function body bound is inlined in place of its call (`in_sql_fn`).
     pub(crate) inline_body: bool,
     /// The level whose expression is being bound (`bind_expr_unmarked`): a
@@ -770,6 +773,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             dml_inh: false,
             user_fn_loc: None,
             fold_args: false,
+            fn_args_used: false,
             inline_body: false,
             expr_top: usize::MAX,
             inlining: Vec::new(),

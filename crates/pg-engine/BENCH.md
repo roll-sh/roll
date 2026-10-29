@@ -2537,6 +2537,38 @@ one statement each, the engine's start included):
   call adds 128 kB to the stack budget, so PostgreSQL's 8,422 levels touch about 280 MB of
   stack segments. They are unmapped when the statement ends.
 
+## Custom plans (round 21, agent 93)
+
+HANDOFF.md, "Custom plans", has the design. Release builds over the wire (pgbench in a
+container on the host network, scale 2, one client unless noted), base `b6659eb9` against
+the change, alternated three times on a loaded shared machine. Wall-clock tps moved ±20%
+between runs, so the measure is the engine process's CPU time for a fixed number of
+transactions (5,000; `/proc/<pid>/stat` utime + stime, in ticks), median of three:
+
+| workload | base | custom plans |
+|---|---|---|
+| `-M prepared -S` | 82 | 73 |
+| `-M prepared -S`, 4 clients | 249 | 232 |
+| `-M prepared` TPC-B | 294 | 275 |
+| PL/pgSQL loop of 10 `SELECT ... INTO` by a variable, prepared | 203 | 176 |
+| the same, simple protocol | 239 | 208 |
+| `sum(f(g))` over 100 calls of a SQL function with a FROM | 970 | 845 |
+| one call of a SQL function with a FROM | 153 | 153 |
+
+- No long-session workload got slower: after five custom plans a session takes the generic
+  plan (bound with the statement, or PL/pgSQL's cached one), and the choice per call is a
+  hash lookup and a comparison.
+- A new session plans each statement again for its first five executions, as PostgreSQL
+  does. With a connection per transaction (`-C`, 1,000 transactions) the PL/pgSQL loop took
+  183 ticks before and 343 after, the 100 SQL function calls 359 and 447: a session that runs
+  a statement only a few times pays up to five more bindings of it. PostgreSQL itself
+  managed 47 and 42 tps there (SCRAM authentication and a backend per connection), the engine
+  250 and 210; with long sessions PostgreSQL did 2,529 tps on the PL/pgSQL loop and 420 on the
+  SQL function calls, the engine about 2,600 and 560.
+- Function and PL/pgSQL plans are costed by `explain::estimate`, not through EXPLAIN's JSON
+  text as prepared statements still are: that took the `-C` PL/pgSQL loop from about 405
+  ticks to 343.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

@@ -785,6 +785,17 @@ impl Binder<'_, '_> {
             Expr::Outer(1, i, _) if l.inline_args && l.fn_args.is_some() => {
                 l.params.get(*i).filter(|p| level_free(p)).cloned()
             }
+            // (A record variable's field over its constant value: that field, as
+            // eval_const_expressions folds a FieldSelect of a constant.)
+            Expr::Field(r, f, t) if matches!(**r, Expr::Outer(1, ..)) => {
+                Some(match self.inline_arg(lvl, r)? {
+                    Expr::Const(Value::Record(v), _) => {
+                        Expr::Const(v.get(*f).cloned().unwrap_or(Value::Null), t.clone())
+                    }
+                    Expr::Const(Value::Null, _) => Expr::Const(Value::Null, t.clone()),
+                    r => Expr::Field(Box::new(r), *f, t.clone()),
+                })
+            }
             _ => None,
         }
     }
@@ -804,6 +815,10 @@ impl Binder<'_, '_> {
         if let (Some(pl), Some(super::VarConflict::UseVariable)) = (pl, conflict)
             && let Some(e) = self.pl_variable(pl, qual, col)
         {
+            self.fn_args_used = true;
+            if let Some(c) = self.inline_arg(pl, &e) {
+                return Ok(Some(c));
+            }
             return Ok(Some(self.lift(pl, e)));
         }
         for lvl in (0..self.levels.len()).rev() {
@@ -1098,6 +1113,9 @@ impl Binder<'_, '_> {
                         name: col.to_string(),
                         refname,
                     });
+                }
+                if self.levels[lvl].fn_args.is_some() && is_arg_ref(&e) {
+                    self.fn_args_used = true;
                 }
                 if let Some(c) = self.inline_arg(lvl, &e) {
                     return Ok(Some(c));
@@ -1409,6 +1427,7 @@ impl Binder<'_, '_> {
                 }
             };
             let e = Expr::Outer(1, i, ty);
+            self.fn_args_used = true;
             if let Some(c) = self.inline_arg(fl, &e) {
                 return Ok(c);
             }
@@ -7788,57 +7807,8 @@ impl Binder<'_, '_> {
             self.call_collation(&args)?;
         }
         let at = self.sql_fn_at(fdef, &args, FnPlace::Run);
-        let (body, cols) = self.in_sql_fn(fdef, at, |b| {
-            let (body, bcols) = b.bind_user_body(fdef, &args)?;
-            if fdef.language == "sql" {
-                check_sql_retval(&b.cat, &b.ctx.search_path, fdef, Some(&bcols))?;
-            }
-            let cols: Vec<OutCol> =
-                if !fdef.out_cols.is_empty() && fdef.out_cols.len() == bcols.len() {
-                    fdef.out_cols
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (n, t))| OutCol::new(out_col_name(n, i), t.clone()))
-                        .collect()
-                } else if let DataType::Row(r) = &fdef.ret
-                    && r.oid != 0
-                    && r.fields.len() == bcols.len()
-                    && bcols.len() > 1
-                {
-                    // The declared composite's columns (and typmods) are the result's.
-                    r.fields
-                        .iter()
-                        .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                        .collect()
-                } else if matches!(fdef.ret, DataType::Record | DataType::Row(_)) {
-                    bcols.clone()
-                } else {
-                    vec![OutCol::new(fdef.name.clone(), fdef.ret.clone())]
-                };
-            if cols.len() != bcols.len() {
-                return Err(Error::new(
-                    code::INVALID_FUNCTION_DEFINITION,
-                    format!(
-                        "return type mismatch in function declared to return {}",
-                        fdef.ret.display()
-                    ),
-                )
-                .detail("Final statement returns too many columns."));
-            }
-            let mut exprs = Vec::new();
-            for (i, (c, bc)) in cols.iter().zip(&bcols).enumerate() {
-                let e = b.coerce_assign(Expr::Col(i, bc.ty.clone()), &c.ty, &c.name)?;
-                exprs.push(b.result_domain(fdef, i, cols.len(), e)?);
-            }
-            Ok((
-                Plan::Project {
-                    input: Arc::new(body),
-                    exprs,
-                },
-                cols,
-            ))
-        })?;
-        let body = self.sql_fn_plan(fdef, at, body);
+        let (body, cols) = self.in_sql_fn(fdef, at, |b| b.srf_fn_body(fdef, &args))?;
+        let body = self.sql_fn_plan(fdef, at, body, Some((crate::sql::plan::SqlFnPlace::Srf, &args)));
         let ncols = cols.len();
         let ty = match &fdef.ret {
             // A named composite stays that type (a field of it, or an argument for it).
@@ -8174,102 +8144,7 @@ impl Binder<'_, '_> {
         }
         let at = self.sql_fn_at(&fdef, &coerced, FnPlace::Scalar);
         let hidden_rtes = self.hidden_rtes;
-        let bound = self.in_sql_fn(&fdef, at, |b| {
-            let (plan, cols) = b.bind_user_body(&fdef, &coerced)?;
-            if fdef.language == "sql" {
-                check_sql_retval(&b.cat, &b.ctx.search_path, &fdef, Some(&cols))?;
-            }
-            let plan = if matches!(ret, DataType::Void) {
-                // A SQL function's void result is NULL; PL/pgSQL's is an empty value.
-                let v = if fdef.language == "sql" {
-                    Value::Null
-                } else {
-                    Value::Text(Arc::from(""))
-                };
-                // (A body computing a void value itself: that value, as inlining keeps it.)
-                let e = if fdef.language == "sql" && cols.len() == 1 && matches!(cols[0].ty, DataType::Void) {
-                    Expr::Col(0, DataType::Void)
-                } else {
-                    Expr::Const(v, DataType::Void)
-                };
-                Plan::Project {
-                    input: Arc::new(plan),
-                    exprs: vec![e],
-                }
-            } else if cols.len() > 1 {
-                // Composite result in a scalar position: one record value.
-                let outs = fdef.out_cols.len() == cols.len();
-                let fields: Vec<(String, DataType)> = if outs {
-                    out_fields(&fdef)
-                } else {
-                    cols.iter()
-                        .map(|c| (c.name.clone(), c.ty.clone()))
-                        .collect()
-                };
-                // A declared composite's columns take its types (and typmods).
-                let declared = match &ret {
-                    DataType::Row(r) if !outs && r.oid != 0 && r.fields.len() == cols.len() => {
-                        Some(r.fields.clone())
-                    }
-                    _ => None,
-                };
-                let mut items = Vec::with_capacity(cols.len());
-                for (i, (c, (name, t))) in cols.iter().zip(&fields).enumerate() {
-                    let e = Expr::Col(i, c.ty.clone());
-                    items.push(match &declared {
-                        Some(f) => b.coerce_assign(e, &f[i].1, &f[i].0)?,
-                        None if outs => b.coerce_assign(e, t, name)?,
-                        None => e,
-                    });
-                }
-                // Of the declared composite type; anonymous for OUT parameters / RECORD
-                // (named by the OUT parameters).
-                let ty = match &ret {
-                    DataType::Row(r) if r.oid != 0 && r.fields.len() == fields.len() => ret.clone(),
-                    _ => DataType::row(fields),
-                };
-                let row = Expr::Row(items, ty);
-                Plan::Project {
-                    input: Arc::new(Plan::Limit {
-                        input: Arc::new(plan),
-                        limit: Some(Expr::Const(Value::Int8(1), DataType::Int8)),
-                        offset: None,
-                        with_ties: None,
-                    }),
-                    exprs: vec![row],
-                }
-            } else {
-                let col = cols.first().map(|c| c.ty.clone()).unwrap_or(DataType::Void);
-                let e = Expr::Col(0, col.clone());
-                let mut e = match &ret {
-                    // One column for a one-field composite result: that field
-                    // (check_sql_fn_retval).
-                    DataType::Row(r)
-                        if r.fields.len() == 1
-                            && !col.same_base(&ret)
-                            && !matches!(col, DataType::Row(_) | DataType::Record) =>
-                    {
-                        let (name, fty) = &r.fields[0];
-                        let f = b.coerce_assign(e, fty, name)?;
-                        Expr::Row(vec![f], ret.clone())
-                    }
-                    _ => b.coerce_assign(e, &ret, "result")?,
-                };
-                if let Some(d) = fdef.ret_domain {
-                    e = b.domain_check(e, d)?;
-                }
-                Plan::Project {
-                    input: Arc::new(Plan::Limit {
-                        input: Arc::new(plan),
-                        limit: Some(Expr::Const(Value::Int8(1), DataType::Int8)),
-                        offset: None,
-                        with_ties: None,
-                    }),
-                    exprs: vec![e],
-                }
-            };
-            Ok((plan, cols))
-        });
+        let bound = self.in_sql_fn(&fdef, at, |b| b.scalar_fn_body(&fdef, &coerced));
         let (plan, cols) = match bound {
             Ok(x) => x,
             // Postgres reads a SQL function's body only when it plans the call (inlining)
@@ -8305,7 +8180,7 @@ impl Binder<'_, '_> {
         // A call that isn't inlined plans its body on its own: the body's relations aren't
         // the statement's (EXPLAIN qualifies columns by the statement's alone).
         self.hidden_rtes = hidden_rtes;
-        let plan = Arc::new(self.sql_fn_plan(&fdef, at, plan));
+        let plan = Arc::new(self.sql_fn_plan(&fdef, at, plan, Some((crate::sql::plan::SqlFnPlace::Scalar, &coerced))));
         let nargs = coerced.len();
         let mut params = coerced;
         let args_null: Vec<Expr> = params
@@ -8494,6 +8369,169 @@ pub(crate) enum FnPlace {
 }
 
 impl Binder<'_, '_> {
+    /// A set-returning call's body in a select list, its columns coerced to the result's:
+    /// bound with the call, and again over constant arguments for a custom plan.
+    pub(crate) fn srf_fn_body(
+        &mut self,
+        fdef: &crate::catalog::Function,
+        args: &[Expr],
+    ) -> Result<(Plan, Vec<OutCol>)> {
+        let b = self;
+        let (body, bcols) = b.bind_user_body(fdef, args)?;
+        if fdef.language == "sql" {
+            check_sql_retval(&b.cat, &b.ctx.search_path, fdef, Some(&bcols))?;
+        }
+        let cols: Vec<OutCol> =
+            if !fdef.out_cols.is_empty() && fdef.out_cols.len() == bcols.len() {
+                fdef.out_cols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (n, t))| OutCol::new(out_col_name(n, i), t.clone()))
+                    .collect()
+            } else if let DataType::Row(r) = &fdef.ret
+                && r.oid != 0
+                && r.fields.len() == bcols.len()
+                && bcols.len() > 1
+            {
+                // The declared composite's columns (and typmods) are the result's.
+                r.fields
+                    .iter()
+                    .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
+                    .collect()
+            } else if matches!(fdef.ret, DataType::Record | DataType::Row(_)) {
+                bcols.clone()
+            } else {
+                vec![OutCol::new(fdef.name.clone(), fdef.ret.clone())]
+            };
+        if cols.len() != bcols.len() {
+            return Err(Error::new(
+                code::INVALID_FUNCTION_DEFINITION,
+                format!(
+                    "return type mismatch in function declared to return {}",
+                    fdef.ret.display()
+                ),
+            )
+            .detail("Final statement returns too many columns."));
+        }
+        let mut exprs = Vec::new();
+        for (i, (c, bc)) in cols.iter().zip(&bcols).enumerate() {
+            let e = b.coerce_assign(Expr::Col(i, bc.ty.clone()), &c.ty, &c.name)?;
+            exprs.push(b.result_domain(fdef, i, cols.len(), e)?);
+        }
+        Ok((
+            Plan::Project {
+                input: Arc::new(body),
+                exprs,
+            },
+            cols,
+        ))
+    }
+
+    /// A scalar call's body (`bind_user_body`) as one row of the result type: bound with
+    /// the call, and again over constant arguments for a custom plan (`custom_sql_fn`).
+    pub(crate) fn scalar_fn_body(
+        &mut self,
+        fdef: &crate::catalog::Function,
+        coerced: &[Expr],
+    ) -> Result<(Plan, Vec<OutCol>)> {
+        let b = self;
+        let ret = fdef.ret.clone();
+        let (plan, cols) = b.bind_user_body(fdef, coerced)?;
+        if fdef.language == "sql" {
+            check_sql_retval(&b.cat, &b.ctx.search_path, fdef, Some(&cols))?;
+        }
+        let plan = if matches!(ret, DataType::Void) {
+            // A SQL function's void result is NULL; PL/pgSQL's is an empty value.
+            let v = if fdef.language == "sql" {
+                Value::Null
+            } else {
+                Value::Text(Arc::from(""))
+            };
+            // (A body computing a void value itself: that value, as inlining keeps it.)
+            let e = if fdef.language == "sql" && cols.len() == 1 && matches!(cols[0].ty, DataType::Void) {
+                Expr::Col(0, DataType::Void)
+            } else {
+                Expr::Const(v, DataType::Void)
+            };
+            Plan::Project {
+                input: Arc::new(plan),
+                exprs: vec![e],
+            }
+        } else if cols.len() > 1 {
+            // Composite result in a scalar position: one record value.
+            let outs = fdef.out_cols.len() == cols.len();
+            let fields: Vec<(String, DataType)> = if outs {
+                out_fields(fdef)
+            } else {
+                cols.iter()
+                    .map(|c| (c.name.clone(), c.ty.clone()))
+                    .collect()
+            };
+            // A declared composite's columns take its types (and typmods).
+            let declared = match &ret {
+                DataType::Row(r) if !outs && r.oid != 0 && r.fields.len() == cols.len() => {
+                    Some(r.fields.clone())
+                }
+                _ => None,
+            };
+            let mut items = Vec::with_capacity(cols.len());
+            for (i, (c, (name, t))) in cols.iter().zip(&fields).enumerate() {
+                let e = Expr::Col(i, c.ty.clone());
+                items.push(match &declared {
+                    Some(f) => b.coerce_assign(e, &f[i].1, &f[i].0)?,
+                    None if outs => b.coerce_assign(e, t, name)?,
+                    None => e,
+                });
+            }
+            // Of the declared composite type; anonymous for OUT parameters / RECORD
+            // (named by the OUT parameters).
+            let ty = match &ret {
+                DataType::Row(r) if r.oid != 0 && r.fields.len() == fields.len() => ret.clone(),
+                _ => DataType::row(fields),
+            };
+            let row = Expr::Row(items, ty);
+            Plan::Project {
+                input: Arc::new(Plan::Limit {
+                    input: Arc::new(plan),
+                    limit: Some(Expr::Const(Value::Int8(1), DataType::Int8)),
+                    offset: None,
+                    with_ties: None,
+                }),
+                exprs: vec![row],
+            }
+        } else {
+            let col = cols.first().map(|c| c.ty.clone()).unwrap_or(DataType::Void);
+            let e = Expr::Col(0, col.clone());
+            let mut e = match &ret {
+                // One column for a one-field composite result: that field
+                // (check_sql_fn_retval).
+                DataType::Row(r)
+                    if r.fields.len() == 1
+                        && !col.same_base(&ret)
+                        && !matches!(col, DataType::Row(_) | DataType::Record) =>
+                {
+                    let (name, fty) = &r.fields[0];
+                    let f = b.coerce_assign(e, fty, name)?;
+                    Expr::Row(vec![f], ret.clone())
+                }
+                _ => b.coerce_assign(e, &ret, "result")?,
+            };
+            if let Some(d) = fdef.ret_domain {
+                e = b.domain_check(e, d)?;
+            }
+            Plan::Project {
+                input: Arc::new(Plan::Limit {
+                    input: Arc::new(plan),
+                    limit: Some(Expr::Const(Value::Int8(1), DataType::Int8)),
+                    offset: None,
+                    with_ties: None,
+                }),
+                exprs: vec![e],
+            }
+        };
+        Ok((plan, cols))
+    }
+
     /// What of SQL function `f` runs for this call, as its errors' CONTEXT shows: the planner
     /// inlining it, or (not inlined, or evaluated over constants) its statement 1. None when
     /// it runs statement by statement when called (several statements, SET clauses), which
@@ -8625,21 +8663,91 @@ impl Binder<'_, '_> {
         f: &crate::catalog::Function,
         at: Option<SqlFnCall>,
         plan: Plan,
+        place: Option<(crate::sql::plan::SqlFnPlace, &[Expr])>,
     ) -> Plan {
         let perms = self.fn_perms.take();
         match at {
             Some(SqlFnCall {
                 at: at @ SqlFnAt::Statement(_),
                 ..
-            }) => Plan::Context {
-                input: Arc::new(plan),
-                frame: sql_fn_frame(f, at),
-                perms: perms.filter(|p| !p.is_empty()).map(Arc::new),
-                volatile: f.volatility == 'v',
-                scan: false,
-            },
+            }) => {
+                // A body run when called (`PlCall`) plans itself; one without arguments always
+                // takes its generic plan (no ParamListInfo: choose_custom_plan).
+                fn runs_when_called(p: &Plan) -> bool {
+                    match p {
+                        Plan::PlCall { .. } => true,
+                        Plan::Project { input, .. } | Plan::Limit { input, .. } => runs_when_called(input),
+                        _ => false,
+                    }
+                }
+                let custom = place
+                    .filter(|_| f.language == "sql" && !f.args.is_empty() && !runs_when_called(&plan))
+                    .map(|(place, args)| {
+                        Arc::new(crate::sql::plan::SqlFnCustom {
+                            func: Arc::new(f.clone()),
+                            place,
+                            arg_types: args.iter().map(Expr::ty).collect(),
+                            coll: self.call_collation(args).unwrap_or(None),
+                        })
+                    });
+                Plan::Context {
+                    input: Arc::new(plan),
+                    frame: sql_fn_frame(f, at),
+                    perms: perms.filter(|p| !p.is_empty()).map(Arc::new),
+                    volatile: f.volatility == 'v',
+                    scan: false,
+                    custom,
+                }
+            }
             _ => plan,
         }
+    }
+
+    /// A custom plan of the statement `c` of a call over `args` (BuildCachedPlan with bound
+    /// parameters): the body bound again with the arguments as constants, wrapped as the
+    /// call's place wraps it; and its range table's size. Errors are the planner's: a
+    /// constant that fails to fold fails here if it is still in the plan.
+    pub(crate) fn custom_sql_fn(
+        ctx: &crate::exec::ExecCtx,
+        c: &crate::sql::plan::SqlFnCustom,
+        args: &[Value],
+    ) -> Result<(Plan, usize)> {
+        use crate::sql::plan::SqlFnPlace;
+        let f = &*c.func;
+        let consts: Vec<Expr> = args
+            .iter()
+            .zip(&c.arg_types)
+            .map(|(v, t)| {
+                let k = Expr::Const(v.clone(), t.clone());
+                // (Its parameter's collation: the call's input collation.)
+                match &c.coll {
+                    Some(coll) if t.collatable() => {
+                        Expr::Collate(Box::new(k), coll.clone(), super::IMPLICIT_COLLATE)
+                    }
+                    _ => k,
+                }
+            })
+            .collect();
+        let mut b = Binder::new(ctx, Vec::new());
+        b.sql_fn_statement = true;
+        let prev = b.fold_err.replace(Vec::new());
+        b.fold_args = true;
+        let r = match &c.place {
+            SqlFnPlace::Scalar => b.scalar_fn_body(f, &consts),
+            SqlFnPlace::Srf => b.srf_fn_body(f, &consts),
+            SqlFnPlace::From { name } => b.range_fn_body(f, &consts, name, &mut None),
+            SqlFnPlace::FromCols { cols, record } => {
+                b.coldef_fn_body(f, &consts, cols.clone(), *record, &mut None)
+            }
+        };
+        let pending = std::mem::replace(&mut b.fold_err, prev).unwrap_or_default();
+        let (plan, _) = r?;
+        if !pending.is_empty()
+            && let Some(e) = super::fold::first_error(&super::settled(&plan), &pending, ctx)
+        {
+            return Err(e);
+        }
+        Ok((plan, b.hidden_rtes))
     }
 }
 
@@ -9828,4 +9936,13 @@ fn drop_void_params(args: &mut Vec<Expr>, names: &mut Vec<Option<String>>) {
     args.retain(|_| *k.next().unwrap());
     let mut k = keep.iter();
     names.retain(|_| *k.next().unwrap());
+}
+
+/// A reference to a function argument or PL/pgSQL variable (of the function's level).
+fn is_arg_ref(e: &Expr) -> bool {
+    match e {
+        Expr::Outer(1, ..) => true,
+        Expr::Field(r, ..) => is_arg_ref(r),
+        _ => false,
+    }
 }

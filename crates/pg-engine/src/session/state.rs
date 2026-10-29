@@ -253,6 +253,9 @@ pub struct SessionState {
     /// The plan cache of SQL functions' statements that run when called (functions.c's
     /// cached plans): by function and statement, how they were planned so far.
     pub sql_fn_plans: RefCell<HashMap<(u32, usize), SqlFnPlans>>,
+    /// PL/pgSQL statements' CachedPlanSource counters, per function (oid, body) and
+    /// statement, for the session (a DO block's are its run's: `Interp::do_plans`).
+    pub pl_plans: RefCell<HashMap<(u32, u64, usize), PlPlans>>,
     /// Session-level advisory locks held: key → count.
     pub advisory: RefCell<HashMap<Vec<u8>, u32>>,
     /// Temporary tables with ON COMMIT DELETE ROWS (false) or DROP (true): what each
@@ -348,6 +351,15 @@ impl Drop for NoticeHold<'_> {
     }
 }
 
+/// One PL/pgSQL statement's CachedPlanSource counters (choose_custom_plan).
+#[derive(Default)]
+pub struct PlPlans {
+    pub custom: u32,
+    pub custom_cost: f64,
+    /// The generic plan's cost, and which plan it is of (a new binding is costed again).
+    pub generic_cost: Option<(std::sync::Weak<crate::sql::plan::Plan>, f64)>,
+}
+
 /// One SQL function statement's CachedPlanSource counters (choose_custom_plan).
 #[derive(Default)]
 pub struct SqlFnPlans {
@@ -421,6 +433,7 @@ impl SessionState {
             seq_cache: RefCell::new(HashMap::new()),
             currval: RefCell::new(HashMap::new()),
             sql_fn_plans: RefCell::new(HashMap::new()),
+            pl_plans: RefCell::new(HashMap::new()),
             advisory: RefCell::new(HashMap::new()),
             on_commit: RefCell::new(Vec::new()),
             on_commit_truncating: std::cell::Cell::new(false),

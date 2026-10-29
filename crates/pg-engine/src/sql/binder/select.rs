@@ -5371,193 +5371,9 @@ impl Binder<'_, '_> {
             // OUT parameters returned as one row value: expanded (and checked) outside the
             // function, as the scan reads its result.
             let mut expand: Option<Vec<OutCol>> = None;
-            let (body, mut cols) = b.in_sql_fn(&fdef, at, |b| {
-                let (body, bcols) = match b.bind_user_body(&fdef, &args) {
-                    Ok(x) => x,
-                    // (Collecting dependencies, which a call records whatever its body reads:
-                    // a body that doesn't bind under this search path stands as a row of its
-                    // declared columns.)
-                    Err(_) if b.deps.is_some() => {
-                        let decl: Vec<(String, DataType)> = match &fdef.ret {
-                            _ if !fdef.out_cols.is_empty() => fdef.out_cols.clone(),
-                            DataType::Row(r) if r.oid != 0 => r.fields.clone(),
-                            t => vec![(name.clone(), t.clone())],
-                        };
-                        let plan = Plan::Project {
-                            input: Arc::new(Plan::One),
-                            exprs: decl.iter().map(|(_, t)| Expr::Const(Value::Null, t.clone())).collect(),
-                        };
-                        (plan, decl.into_iter().map(|(n, t)| OutCol::new(n, t)).collect())
-                    }
-                    Err(e) => return Err(e),
-                };
-                if fdef.language == "sql" {
-                    super::check_sql_retval(&b.cat, &b.ctx.search_path, &fdef, Some(&bcols))?;
-                }
-                // Result columns: TABLE/OUT columns, else one column named after the function.
-                let mut cols: Vec<OutCol> =
-                    if !fdef.out_cols.is_empty() && fdef.out_cols.len() == bcols.len() {
-                        fdef.out_cols
-                            .iter()
-                            .enumerate()
-                            .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
-                            .collect()
-                    } else if let DataType::Row(r) = &fdef.ret
-                        && r.oid != 0
-                        && r.fields.len() == bcols.len()
-                        && !(bcols.len() == 1 && bcols[0].ty.row_oid() == Some(r.oid))
-                    {
-                        // A named composite result: its columns.
-                        r.fields
-                            .iter()
-                            .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                            .collect()
-                    } else if matches!(fdef.ret, DataType::Record | DataType::Row(_)) {
-                        bcols.clone()
-                    } else {
-                        let mut c = OutCol::new(name.clone(), fdef.ret.clone());
-                        c.domain = fdef.ret_domain;
-                        c.domain_array = b.domain_array(c.domain);
-                        vec![c]
-                    };
-                // A named composite result returned as one row value (`select row(r, i)`):
-                // its fields are the columns, checked against them when it runs.
-                if fdef.out_cols.is_empty()
-                    && let DataType::Row(r) = &fdef.ret
-                    && r.oid != 0
-                    && r.fields.len() > 1
-                    && let [one] = &bcols[..]
-                    && (matches!(one.ty, DataType::Record)
-                        || matches!(&one.ty, DataType::Row(x) if x.oid == 0 || x.oid == r.oid))
-                {
-                    expand = Some(
-                        r.fields
-                            .iter()
-                            .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                            .collect(),
-                    );
-                    return Ok((body, bcols));
-                }
-                // OUT parameters returned as one row value (`select (1, 2.1)`): its fields
-                // are the columns, checked against them when it runs.
-                if fdef.out_cols.len() > 1
-                    && let [one] = &bcols[..]
-                    && (matches!(one.ty, DataType::Record)
-                        || matches!(&one.ty, DataType::Row(r) if r.oid == 0))
-                {
-                    let outs: Vec<OutCol> = fdef
-                        .out_cols
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
-                        .collect();
-                    expand = Some(outs);
-                    return Ok((body, bcols));
-                }
-                // A void result: what the body returns is thrown away (no rows of a SETOF
-                // one).
-                if fdef.ret == DataType::Void {
-                    let plan = if fdef.returns_set {
-                        Plan::Empty { ncols: 1, cols: None, info: None }
-                    } else {
-                        // A body run when called (PL/pgSQL, statements) still runs.
-                        let input = if matches!(body, Plan::PlCall { .. }) {
-                            body
-                        } else {
-                            Plan::One
-                        };
-                        Plan::Project {
-                            input: Arc::new(input),
-                            exprs: vec![Expr::Const(Value::Null, DataType::Void)],
-                        }
-                    };
-                    return Ok((plan, vec![OutCol::new(name.clone(), DataType::Void)]));
-                }
-                if cols.len() != bcols.len() {
-                    return Err(Error::new(
-                        code::INVALID_FUNCTION_DEFINITION,
-                        format!(
-                            "return type mismatch in function declared to return {}",
-                            fdef.ret.display()
-                        ),
-                    )
-                    .detail("Final statement returns too many columns."));
-                }
-                // A named composite returned as one value of it: its fields are the
-                // columns.
-                if let DataType::Row(rt) = &fdef.ret
-                    && rt.oid != 0
-                    && fdef.out_cols.is_empty()
-                    && bcols.len() == 1
-                    && bcols[0].ty.row_oid() == Some(rt.oid)
-                {
-                    let row = Expr::Col(0, bcols[0].ty.clone());
-                    let cols: Vec<OutCol> = rt
-                        .fields
-                        .iter()
-                        .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                        .collect();
-                    let exprs = rt
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (_, t))| Expr::Field(Box::new(row.clone()), i, t.clone()))
-                        .collect();
-                    return Ok((
-                        Plan::Project {
-                            input: Arc::new(body),
-                            exprs,
-                        },
-                        cols,
-                    ));
-                }
-                let mut exprs = Vec::new();
-                let n = cols.len();
-                for (i, (c, bc)) in cols.iter_mut().zip(&bcols).enumerate() {
-                    let e = b.coerce_assign(Expr::Col(i, bc.ty.clone()), &c.ty, &c.name)?;
-                    exprs.push(b.result_domain(&fdef, i, n, e)?);
-                }
-                // check_sql_fn_retval: a plain query's own target list takes the
-                // coercions (constants folded with them).
-                let mut body = body;
-                if exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i))
-                    && let Plan::Project { input, exprs: bexprs } = &body
-                    && bexprs.len() == n
-                {
-                    let mut composed = Vec::with_capacity(n);
-                    for (i, (c, be)) in cols.iter().zip(bexprs).enumerate() {
-                        let e = b.coerce_assign(be.clone(), &c.ty, &c.name)?;
-                        composed.push(b.result_domain(&fdef, i, n, e)?);
-                    }
-                    exprs = composed.iter().enumerate().map(|(i, e)| Expr::Col(i, e.ty())).collect();
-                    body = Plan::Project {
-                        input: input.clone(),
-                        exprs: composed,
-                    };
-                }
-                // check_sql_fn_retval: a set operation's columns coerced to the result's
-                // types are a projection over it as a subquery, "*SELECT*".
-                fn setop(p: &Plan) -> bool {
-                    match p {
-                        Plan::Sort { input, .. } | Plan::Limit { input, .. } => setop(input),
-                        p => matches!(p, Plan::SetOp { .. }),
-                    }
-                }
-                if setop(&body)
-                    && exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i))
-                {
-                    let names = unique_colnames(bcols.iter().map(|c| c.name.clone()));
-                    mark_subquery_windows(&mut body, &Arc::new(("*SELECT*".to_string(), names)));
-                }
-                Ok((
-                    Plan::Project {
-                        input: Arc::new(body),
-                        exprs,
-                    },
-                    cols,
-                ))
-            })?;
-            let mut body = b.sql_fn_plan(&fdef, at, body);
+            let (body, mut cols) =
+                b.in_sql_fn(&fdef, at, |b| b.range_fn_body(&fdef, &args, &name, &mut expand))?;
+            let mut body = b.sql_fn_plan(&fdef, at, body, Some((crate::sql::plan::SqlFnPlace::From { name: name.clone() }, &args)));
             mark_scan(&mut body);
             if let Some(outs) = expand {
                 let mut e = Expr::Col(0, cols[0].ty.clone());
@@ -6131,131 +5947,10 @@ impl Binder<'_, '_> {
         // OUT parameters returned as one row value: expanded (and checked) outside the
         // function, as the scan reads its result.
         let mut expand: Option<Vec<OutCol>> = None;
-        let (body, mut cols) = self.in_sql_fn(fdef, at, |b| {
-            let mut cols = cols;
-            // PL/pgSQL returns rows of the column definitions: RETURN NEXT / QUERY check
-            // theirs against them as it runs.
-            if record && fdef.language == "plpgsql" {
-                let mut f = fdef.clone();
-                f.ret = DataType::row(
-                    cols.iter()
-                        .map(|c| (c.name.clone(), c.ty.clone()))
-                        .collect(),
-                );
-                let (body, _) = b.bind_user_body(&f, &args)?;
-                return Ok((body, cols));
-            }
-            let (body, bcols) = b.bind_user_body(fdef, &args)?;
-            if fdef.language == "sql" {
-                super::check_sql_retval(&b.cat, &b.ctx.search_path, fdef, Some(&bcols))?;
-            }
-            if !record {
-                cols = if !fdef.out_cols.is_empty() && fdef.out_cols.len() == bcols.len() {
-                    fdef.out_cols
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
-                        .collect()
-                } else if let DataType::Row(r) = &fdef.ret
-                    && r.oid != 0
-                    && r.fields.len() == bcols.len()
-                    && !(bcols.len() == 1 && bcols[0].ty.row_oid() == Some(r.oid))
-                {
-                    // A named composite result: its columns (names and types).
-                    r.fields
-                        .iter()
-                        .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                        .collect()
-                } else if matches!(fdef.ret, DataType::Record | DataType::Row(_)) {
-                    bcols.clone()
-                } else {
-                    let mut c = OutCol::new(fdef.name.clone(), fdef.ret.clone());
-                    c.domain = fdef.ret_domain;
-                    c.domain_array = b.domain_array(c.domain);
-                    vec![c]
-                };
-                // A named composite result returned as one row value (`select row(r, i)`):
-                // its fields are the columns, checked against them when it runs.
-                if fdef.out_cols.is_empty()
-                    && let DataType::Row(r) = &fdef.ret
-                    && r.oid != 0
-                    && r.fields.len() > 1
-                    && let [one] = &bcols[..]
-                    && (matches!(one.ty, DataType::Record)
-                        || matches!(&one.ty, DataType::Row(x) if x.oid == 0 || x.oid == r.oid))
-                {
-                    expand = Some(
-                        r.fields
-                            .iter()
-                            .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
-                            .collect(),
-                    );
-                    return Ok((body, bcols));
-                }
-                // OUT parameters returned as one row value (`select (1, 2.1)`): its fields
-                // are the columns, checked against them when it runs.
-                if fdef.out_cols.len() > 1
-                    && let [one] = &bcols[..]
-                    && (matches!(one.ty, DataType::Record)
-                        || matches!(&one.ty, DataType::Row(r) if r.oid == 0))
-                {
-                    let outs: Vec<OutCol> = fdef
-                        .out_cols
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
-                        .collect();
-                    expand = Some(outs);
-                    return Ok((body, bcols));
-                }
-            }
-            let mismatch = |d: String| {
-                Error::new(
-                    code::INVALID_FUNCTION_DEFINITION,
-                    format!(
-                        "return type mismatch in function declared to return {}",
-                        fdef.ret.display()
-                    ),
-                )
-                .detail(d)
-            };
-            if bcols.len() != cols.len() {
-                return Err(mismatch(format!(
-                    "Final statement returns too {} columns.",
-                    if bcols.len() > cols.len() {
-                        "many"
-                    } else {
-                        "few"
-                    }
-                )));
-            }
-            let mut exprs = Vec::new();
-            for (i, (c, bc)) in cols.iter().zip(&bcols).enumerate() {
-                let e = if record {
-                    b.coerce_implicit(Expr::Col(i, bc.ty.clone()), &c.ty)
-                        .map_err(|_| {
-                            mismatch(format!(
-                                "Final statement returns {} instead of {} at column {}.",
-                                bc.ty.display(),
-                                c.ty.display(),
-                                i + 1
-                            ))
-                        })?
-                } else {
-                    let e = b.coerce_assign(Expr::Col(i, bc.ty.clone()), &c.ty, &c.name)?;
-                    b.result_domain(fdef, i, cols.len(), e)?
-                };
-                exprs.push(e);
-            }
-            Ok((
-                Plan::Project {
-                    input: Arc::new(body),
-                    exprs,
-                },
-                cols,
-            ))
-        })?;
-        let mut body = self.sql_fn_plan(fdef, at, body);
+        let place = crate::sql::plan::SqlFnPlace::FromCols { cols: cols.clone(), record };
+        let (body, mut cols) =
+            self.in_sql_fn(fdef, at, |b| b.coldef_fn_body(fdef, &args, cols, record, &mut expand))?;
+        let mut body = self.sql_fn_plan(fdef, at, body, Some((place, &args)));
         if let Some(outs) = expand {
             let mut e = Expr::Col(0, cols[0].ty.clone());
             if let (Some(d), true) = (fdef.ret_domain, fdef.out_cols.is_empty()) {
@@ -8597,5 +8292,342 @@ fn mark_scan(p: &mut Plan) {
         Plan::Context { scan, .. } | Plan::PlCall { scan, .. } => *scan = true,
         Plan::Project { input, .. } | Plan::Limit { input, .. } => mark_scan(Arc::make_mut(input)),
         _ => {}
+    }
+}
+
+
+impl Binder<'_, '_> {
+    /// A FROM item's call's body, its columns the result's (`expand`: a row value to
+    /// expand outside the call): bound with the call, and again over constant arguments
+    /// for a custom plan.
+    pub(crate) fn range_fn_body(
+        &mut self,
+        fdef: &crate::catalog::Function,
+        args: &[Expr],
+        name: &str,
+        expand: &mut Option<Vec<OutCol>>,
+    ) -> Result<(Plan, Vec<OutCol>)> {
+        let b = self;
+        let name = name.to_string();
+        let (body, bcols) = match b.bind_user_body(fdef, args) {
+            Ok(x) => x,
+            // (Collecting dependencies, which a call records whatever its body reads:
+            // a body that doesn't bind under this search path stands as a row of its
+            // declared columns.)
+            Err(_) if b.deps.is_some() => {
+                let decl: Vec<(String, DataType)> = match &fdef.ret {
+                    _ if !fdef.out_cols.is_empty() => fdef.out_cols.clone(),
+                    DataType::Row(r) if r.oid != 0 => r.fields.clone(),
+                    t => vec![(name.clone(), t.clone())],
+                };
+                let plan = Plan::Project {
+                    input: Arc::new(Plan::One),
+                    exprs: decl.iter().map(|(_, t)| Expr::Const(Value::Null, t.clone())).collect(),
+                };
+                (plan, decl.into_iter().map(|(n, t)| OutCol::new(n, t)).collect())
+            }
+            Err(e) => return Err(e),
+        };
+        if fdef.language == "sql" {
+            super::check_sql_retval(&b.cat, &b.ctx.search_path, fdef, Some(&bcols))?;
+        }
+        // Result columns: TABLE/OUT columns, else one column named after the function.
+        let mut cols: Vec<OutCol> =
+            if !fdef.out_cols.is_empty() && fdef.out_cols.len() == bcols.len() {
+                fdef.out_cols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
+                    .collect()
+            } else if let DataType::Row(r) = &fdef.ret
+                && r.oid != 0
+                && r.fields.len() == bcols.len()
+                && !(bcols.len() == 1 && bcols[0].ty.row_oid() == Some(r.oid))
+            {
+                // A named composite result: its columns.
+                r.fields
+                    .iter()
+                    .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
+                    .collect()
+            } else if matches!(fdef.ret, DataType::Record | DataType::Row(_)) {
+                bcols.clone()
+            } else {
+                let mut c = OutCol::new(name.clone(), fdef.ret.clone());
+                c.domain = fdef.ret_domain;
+                c.domain_array = b.domain_array(c.domain);
+                vec![c]
+            };
+        // A named composite result returned as one row value (`select row(r, i)`):
+        // its fields are the columns, checked against them when it runs.
+        if fdef.out_cols.is_empty()
+            && let DataType::Row(r) = &fdef.ret
+            && r.oid != 0
+            && r.fields.len() > 1
+            && let [one] = &bcols[..]
+            && (matches!(one.ty, DataType::Record)
+                || matches!(&one.ty, DataType::Row(x) if x.oid == 0 || x.oid == r.oid))
+        {
+            *expand = Some(
+                r.fields
+                    .iter()
+                    .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
+                    .collect(),
+            );
+            return Ok((body, bcols));
+        }
+        // OUT parameters returned as one row value (`select (1, 2.1)`): its fields
+        // are the columns, checked against them when it runs.
+        if fdef.out_cols.len() > 1
+            && let [one] = &bcols[..]
+            && (matches!(one.ty, DataType::Record)
+                || matches!(&one.ty, DataType::Row(r) if r.oid == 0))
+        {
+            let outs: Vec<OutCol> = fdef
+                .out_cols
+                .iter()
+                .enumerate()
+                .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
+                .collect();
+            *expand = Some(outs);
+            return Ok((body, bcols));
+        }
+        // A void result: what the body returns is thrown away (no rows of a SETOF
+        // one).
+        if fdef.ret == DataType::Void {
+            let plan = if fdef.returns_set {
+                Plan::Empty { ncols: 1, cols: None, info: None }
+            } else {
+                // A body run when called (PL/pgSQL, statements) still runs.
+                let input = if matches!(body, Plan::PlCall { .. }) {
+                    body
+                } else {
+                    Plan::One
+                };
+                Plan::Project {
+                    input: Arc::new(input),
+                    exprs: vec![Expr::Const(Value::Null, DataType::Void)],
+                }
+            };
+            return Ok((plan, vec![OutCol::new(name.clone(), DataType::Void)]));
+        }
+        if cols.len() != bcols.len() {
+            return Err(Error::new(
+                code::INVALID_FUNCTION_DEFINITION,
+                format!(
+                    "return type mismatch in function declared to return {}",
+                    fdef.ret.display()
+                ),
+            )
+            .detail("Final statement returns too many columns."));
+        }
+        // A named composite returned as one value of it: its fields are the
+        // columns.
+        if let DataType::Row(rt) = &fdef.ret
+            && rt.oid != 0
+            && fdef.out_cols.is_empty()
+            && bcols.len() == 1
+            && bcols[0].ty.row_oid() == Some(rt.oid)
+        {
+            let row = Expr::Col(0, bcols[0].ty.clone());
+            let cols: Vec<OutCol> = rt
+                .fields
+                .iter()
+                .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
+                .collect();
+            let exprs = rt
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, (_, t))| Expr::Field(Box::new(row.clone()), i, t.clone()))
+                .collect();
+            return Ok((
+                Plan::Project {
+                    input: Arc::new(body),
+                    exprs,
+                },
+                cols,
+            ));
+        }
+        let mut exprs = Vec::new();
+        let n = cols.len();
+        for (i, (c, bc)) in cols.iter_mut().zip(&bcols).enumerate() {
+            let e = b.coerce_assign(Expr::Col(i, bc.ty.clone()), &c.ty, &c.name)?;
+            exprs.push(b.result_domain(fdef, i, n, e)?);
+        }
+        // check_sql_fn_retval: a plain query's own target list takes the
+        // coercions (constants folded with them).
+        let mut body = body;
+        if exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i))
+            && let Plan::Project { input, exprs: bexprs } = &body
+            && bexprs.len() == n
+        {
+            let mut composed = Vec::with_capacity(n);
+            for (i, (c, be)) in cols.iter().zip(bexprs).enumerate() {
+                let e = b.coerce_assign(be.clone(), &c.ty, &c.name)?;
+                composed.push(b.result_domain(fdef, i, n, e)?);
+            }
+            exprs = composed.iter().enumerate().map(|(i, e)| Expr::Col(i, e.ty())).collect();
+            body = Plan::Project {
+                input: input.clone(),
+                exprs: composed,
+            };
+        }
+        // check_sql_fn_retval: a set operation's columns coerced to the result's
+        // types are a projection over it as a subquery, "*SELECT*".
+        fn setop(p: &Plan) -> bool {
+            match p {
+                Plan::Sort { input, .. } | Plan::Limit { input, .. } => setop(input),
+                p => matches!(p, Plan::SetOp { .. }),
+            }
+        }
+        if setop(&body)
+            && exprs.iter().enumerate().any(|(i, e)| !matches!(e, Expr::Col(j, _) if *j == i))
+        {
+            let names = unique_colnames(bcols.iter().map(|c| c.name.clone()));
+            mark_subquery_windows(&mut body, &Arc::new(("*SELECT*".to_string(), names)));
+        }
+        Ok((
+            Plan::Project {
+                input: Arc::new(body),
+                exprs,
+            },
+            cols,
+        ))
+    }
+
+    /// A FROM item's call with a column definition list or ordinality
+    /// (`user_from_function`): its body, the columns `cols` as defined (`record`: by the
+    /// list); bound with the call, and again over constant arguments for a custom plan.
+    pub(crate) fn coldef_fn_body(
+        &mut self,
+        fdef: &crate::catalog::Function,
+        args: &[Expr],
+        cols: Vec<OutCol>,
+        record: bool,
+        expand: &mut Option<Vec<OutCol>>,
+    ) -> Result<(Plan, Vec<OutCol>)> {
+        let b = self;
+        let mut cols = cols;
+        // PL/pgSQL returns rows of the column definitions: RETURN NEXT / QUERY check
+        // theirs against them as it runs.
+        if record && fdef.language == "plpgsql" {
+            let mut f = fdef.clone();
+            f.ret = DataType::row(
+                cols.iter()
+                    .map(|c| (c.name.clone(), c.ty.clone()))
+                    .collect(),
+            );
+            let (body, _) = b.bind_user_body(&f, args)?;
+            return Ok((body, cols));
+        }
+        let (body, bcols) = b.bind_user_body(fdef, args)?;
+        if fdef.language == "sql" {
+            super::check_sql_retval(&b.cat, &b.ctx.search_path, fdef, Some(&bcols))?;
+        }
+        if !record {
+            cols = if !fdef.out_cols.is_empty() && fdef.out_cols.len() == bcols.len() {
+                fdef.out_cols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
+                    .collect()
+            } else if let DataType::Row(r) = &fdef.ret
+                && r.oid != 0
+                && r.fields.len() == bcols.len()
+                && !(bcols.len() == 1 && bcols[0].ty.row_oid() == Some(r.oid))
+            {
+                // A named composite result: its columns (names and types).
+                r.fields
+                    .iter()
+                    .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
+                    .collect()
+            } else if matches!(fdef.ret, DataType::Record | DataType::Row(_)) {
+                bcols.clone()
+            } else {
+                let mut c = OutCol::new(fdef.name.clone(), fdef.ret.clone());
+                c.domain = fdef.ret_domain;
+                c.domain_array = b.domain_array(c.domain);
+                vec![c]
+            };
+            // A named composite result returned as one row value (`select row(r, i)`):
+            // its fields are the columns, checked against them when it runs.
+            if fdef.out_cols.is_empty()
+                && let DataType::Row(r) = &fdef.ret
+                && r.oid != 0
+                && r.fields.len() > 1
+                && let [one] = &bcols[..]
+                && (matches!(one.ty, DataType::Record)
+                    || matches!(&one.ty, DataType::Row(x) if x.oid == 0 || x.oid == r.oid))
+            {
+                *expand = Some(
+                    r.fields
+                        .iter()
+                        .map(|(n, t)| OutCol::new(n.clone(), t.clone()))
+                        .collect(),
+                );
+                return Ok((body, bcols));
+            }
+            // OUT parameters returned as one row value (`select (1, 2.1)`): its fields
+            // are the columns, checked against them when it runs.
+            if fdef.out_cols.len() > 1
+                && let [one] = &bcols[..]
+                && (matches!(one.ty, DataType::Record)
+                    || matches!(&one.ty, DataType::Row(r) if r.oid == 0))
+            {
+                let outs: Vec<OutCol> = fdef
+                    .out_cols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (n, t))| OutCol::new(super::expr::out_col_name(n, i), t.clone()))
+                    .collect();
+                *expand = Some(outs);
+                return Ok((body, bcols));
+            }
+        }
+        let mismatch = |d: String| {
+            Error::new(
+                code::INVALID_FUNCTION_DEFINITION,
+                format!(
+                    "return type mismatch in function declared to return {}",
+                    fdef.ret.display()
+                ),
+            )
+            .detail(d)
+        };
+        if bcols.len() != cols.len() {
+            return Err(mismatch(format!(
+                "Final statement returns too {} columns.",
+                if bcols.len() > cols.len() {
+                    "many"
+                } else {
+                    "few"
+                }
+            )));
+        }
+        let mut exprs = Vec::new();
+        for (i, (c, bc)) in cols.iter().zip(&bcols).enumerate() {
+            let e = if record {
+                b.coerce_implicit(Expr::Col(i, bc.ty.clone()), &c.ty)
+                    .map_err(|_| {
+                        mismatch(format!(
+                            "Final statement returns {} instead of {} at column {}.",
+                            bc.ty.display(),
+                            c.ty.display(),
+                            i + 1
+                        ))
+                    })?
+            } else {
+                let e = b.coerce_assign(Expr::Col(i, bc.ty.clone()), &c.ty, &c.name)?;
+                b.result_domain(fdef, i, cols.len(), e)?
+            };
+            exprs.push(e);
+        }
+        Ok((
+            Plan::Project {
+                input: Arc::new(body),
+                exprs,
+            },
+            cols,
+        ))
     }
 }

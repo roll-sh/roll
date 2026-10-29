@@ -188,6 +188,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             perms,
             volatile,
             scan,
+            custom,
         } => {
             // A volatile SQL function's statement runs as a command of its own.
             let snap = volatile.then(|| ctx.fresh_snapshot());
@@ -195,11 +196,16 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             let run = || {
                 ctx.sess.framed(frame.clone(), |_| {
                     let _frame = crate::stack::FnFrame::enter(pg_frame)?;
+                    // (Planned per call: a custom plan, or the generic one bound here.)
+                    let planned = match custom {
+                        Some(c) => crate::plpgsql::sql_fn_context_plan(ctx, c, input)?,
+                        None => None,
+                    };
                     if let Some(p) = perms {
                         crate::sql::binder::perms::check(p, ctx)?;
                         crate::sql::binder::perms::check_row_security(p, ctx)?;
                     }
-                    open(input, ctx)
+                    open(planned.as_ref().unwrap_or(input), ctx)
                 })
             };
             let input = match &snap {

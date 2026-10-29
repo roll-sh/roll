@@ -831,11 +831,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       (choose_custom_plan, `sql_fn_planned`); plan_cache_mode decides first.
     - *EXPLAIN* (agent 86): a non-inlined call's body doesn't count towards the statement's
       relations, so `f(g)` isn't qualified.
-    - Left open: a call bound with its statement (`Plan::Context`, every non-recursive call
-      that isn't inlined) always runs the generic plan. PostgreSQL's first five calls in a
-      session plan custom, so a body whose constant folding fails errors there even when
-      no row reaches the expression (`SELECT 1 / n FROM empty_table` with `n = 0`: PostgreSQL
-      "division by zero", the engine NULL). PL/pgSQL statements likewise.
+    - *Custom plans everywhere* (round 21, agent 93): see "Custom plans" below.
   - **CREATE VIEW in linear time** (round 20, agent 82): `collation_at` copied every subtree
     it visited, and nodetree asked it for every node, so the cost was cubic. Now it visits
     children in place. nodetree derives a whole expression's collations in one pass
@@ -860,6 +856,38 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - Test: `tests/deep_input.rs` runs every shape through the embedded API on a 2 MB thread
     and on the test thread, in both build profiles. Its goldens, `tests/deep_input.out`, are
     recorded from PostgreSQL (`DEEP_RECORD`).
+- **Custom plans** (round 21, agent 93): plancache.c's choose_custom_plan wherever
+  PostgreSQL goes through it, so constant folding over argument values fails (or raises
+  notices) where PostgreSQL's does, even when no row reaches the expression.
+  - *SQL function calls bound with their statement* (`Plan::Context`, every non-inlined
+    call): the bound body is the generic plan; `Plan::Context::custom` (`SqlFnCustom`: the
+    function, its place, the arguments' types and input collation) lets the executor plan it
+    again per call (`plpgsql::sql_fn_context_plan`) over the arguments as constants (the
+    innermost outer row), wrapped by the same binder code as the call's place
+    (`Binder::scalar_fn_body` / `srf_fn_body` / `range_fn_body` / `coldef_fn_body`,
+    `Binder::custom_sql_fn`). The choice is `sql_fn_custom` (shared with agent 86's
+    `call_sql`): no arguments or a forced mode decide first, five custom plans, then the
+    generic one while it costs less than their average (counters per function and statement
+    for the session, `SessionState::sql_fn_plans`, at most 4,096 functions). Costs are the function statement's
+    own plan without the binder's result projection / LIMIT 1 (`statement_plan`), from
+    `explain::estimate` (`session::plan_cost_estimate`) rather than EXPLAIN's text. Custom
+    plans under force_custom_plan count too, as in PostgreSQL. A row-marked body
+    (`rowmarks.rs`) keeps its generic plan.
+  - *PL/pgSQL*: `Interp::compile` returns a custom plan (`bind_text_as` with the variables'
+    values as constants of their collation, `Level::inline_args`) for a statement or
+    non-simple expression that reads variables (`Compiled::Query::uses_vars`, from
+    `Binder::fn_args_used`: plpgsql's `paramnos`); simple expressions (exec_simple_check_plan)
+    and statements without variables keep the generic plan, as SPI does. Counters per
+    function (oid, body) and statement for the session (`SessionState::pl_plans`, at most
+    4,096 entries), a DO block's per run (`Interp::do_plans`). A record variable's field
+    over its constant folds (`inline_arg`). EXECUTE ... USING and OPEN ... FOR EXECUTE ...
+    USING are one-shot plans: always custom (`param_consts`).
+  - *Prepared statements* (PREPARE / extended protocol) already followed it (custom / generic
+    choice, plan_cache_mode, EXPLAIN EXECUTE's constants or `$n`, pg_prepared_statements'
+    counts); golden `a93_custom_plans` covers them with the rest.
+  - Cost (BENCH.md "Custom plans"): long sessions unchanged (pgbench -M prepared, a
+    PL/pgSQL loop, SQL function calls per row); a new session's first five executions of
+    each statement are planned again, as in PostgreSQL.
 - **TPC-H plans, the tail** (round 21, agent 78; BENCH.md "Round 21", STATUS.md): 16 of the
   22 SF1 plans have PostgreSQL's shape (19 of 22 serial). Fixed: a join OR's per-relation
   restrictions in a pulled-up FROM subquery compensated in the clause (q07: 40 rows for

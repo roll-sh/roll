@@ -3505,6 +3505,22 @@ fn in_parallel_worker(ctx: &crate::exec::ExecCtx, plan: &crate::sql::plan::Plan)
         && crate::sql::paths::parallel::plan_hazard(plan, &ctx.catalog()) == 's'
 }
 
+/// cached_plan_cost as `plan_total_cost`, from the planner's estimate without making
+/// EXPLAIN's text (a SQL function's or PL/pgSQL statement's plan, costed per call).
+pub(crate) fn plan_cost_estimate(
+    ctx: &crate::exec::ExecCtx,
+    plan: &Arc<Plan>,
+    hidden_rtes: usize,
+    planning: bool,
+) -> f64 {
+    let total = crate::sql::explain::estimate(plan, ctx).total;
+    if planning {
+        total + 2.5 * (range_entries(plan) + hidden_rtes + 1) as f64
+    } else {
+        total
+    }
+}
+
 /// cached_plan_cost: `plan`'s total cost, as EXPLAIN shows it; a custom plan's with a charge
 /// for planning it (1000 * cpu_operator_cost per range table entry, plus one).
 pub(crate) fn plan_total_cost(

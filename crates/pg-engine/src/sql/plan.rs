@@ -1239,6 +1239,33 @@ pub struct DummyInfo {
     pub kept_cols: Vec<(usize, Expr)>,
 }
 
+/// A SQL function call's statement bound with its calling statement (`Plan::Context`),
+/// which functions.c plans per call through the plan cache: custom plans bind the body
+/// again with the arguments as constants, wrapped as the call's place wraps it.
+#[derive(Clone, Debug)]
+pub struct SqlFnCustom {
+    pub func: Arc<crate::catalog::Function>,
+    pub place: SqlFnPlace,
+    /// The arguments' types as the call passes them (a polymorphic function's actual ones).
+    pub arg_types: Vec<DataType>,
+    /// The call's input collation, its parameters' collation.
+    pub coll: Option<String>,
+}
+
+/// Which binder wrapping a SQL function's body takes (`Binder::sql_fn_body`).
+#[derive(Clone, Debug)]
+pub enum SqlFnPlace {
+    /// A scalar call (one row, coerced to the result type).
+    Scalar,
+    /// A set-returning call in a select list.
+    Srf,
+    /// A FROM item's call, its column named `name`.
+    From { name: String },
+    /// A FROM item's call with a column definition list or ordinality: the columns as
+    /// defined (`record`: by the list).
+    FromCols { cols: Vec<OutCol>, record: bool },
+}
+
 #[derive(Clone, Debug)]
 pub enum Plan {
     /// One row with no columns (SELECT without FROM).
@@ -1334,6 +1361,9 @@ pub enum Plan {
         /// A FROM item's call (a function scan), whose executor frames count towards the
         /// depth of the calls inside it (`stack::PG_FUNCSCAN_FRAME`).
         scan: bool,
+        /// How to plan the statement again over the call's argument values (a custom plan,
+        /// GetCachedPlan): `input` is its generic plan. None: always `input`.
+        custom: Option<Arc<SqlFnCustom>>,
     },
     Filter {
         input: Arc<Plan>,
