@@ -120,6 +120,8 @@ const RELEASE_CASES: &[(&str, usize)] = &[
     ("sqlfnpl", 1000),
     ("sqlfnsrf", 3000),
     ("sqlfnsrf", 3100),
+    // (CREATE VIEW near PostgreSQL's 4,032 terms: the stored text, deparsed natively.)
+    ("viewdef", 4000),
     ("plpgsql", 925),
     ("plpgsql", 940),
 ];

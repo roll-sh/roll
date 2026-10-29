@@ -1036,8 +1036,25 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     (`Binder::collations_below`), the binder checks collations once per expression instead
     of once per subexpression (`Binder::expr_top`), and a binary operator copies its operands
     only when the catalog has user operators. 2,000 `+` terms took 4.5 minutes in release
-    and now take 0.55 s. What is left is quadratic in a dependency: prost's `encoded_len`
-    when the view's text is deparsed (BENCH.md, "Recursive functions and deep views").
+    and now take 0.55 s. What was left was quadratic in a dependency: prost's `encoded_len`
+    when the view's text was deparsed (BENCH.md, "Recursive functions and deep views");
+    the native deparser (round 21, agent 93, below) removed it.
+  - **Native deparser** (round 21, agent 93; BENCH.md "Native deparser"): the stored texts
+    (`ast::deparse_expr` / `deparse_stmt`: views, rules, defaults, checks, index and
+    statistics expressions, partition bounds, policies, trigger WHEN, publication WHERE,
+    SQL function bodies, PREPARE / COPY queries) are written by `src/sql/deparse/`, a port of
+    libpg_query's `postgres_deparse.c` over the same parse tree, in one pass, under
+    `stack::grow`; anything it doesn't cover falls back to `pg_query::deparse` (nothing in
+    the corpora below does). Byte-identical to the old text: `tests/deparse_identity.rs`
+    (goldens and a fixed corpus: 15,933 statements and 92,560 expressions; PostgreSQL's
+    regress SQL with `DEPARSE_REGRESS_SQL=<src/test/regress/sql>`: 27,731 and 133,529; no
+    difference, no fallback), and `ROLL_DEPARSE_CHECK=<file>`, which makes every call
+    compare with libpg_query's text and log differences and fallbacks there: a full regress
+    run and pg_dump's TAP tests and round trip logged no difference (one expression neither
+    deparser handles, node 58, fails alike). CREATE VIEW over 4,000 `+` terms: 2.7 s and an
+    XX000 "could not parse protobuf" before, 0.3 s now, as PostgreSQL (deep_input `viewdef
+    4000`, release). Stored texts read back parse with stack for their trees
+    (`ast::stored_parse`; `deparse_identity.rs deep_view_on_2mb_thread`).
   - **Regex frames per architecture** (round 20, agent 82): the x86-64 frames come from the
     reference binary's prologues (objdump: return address, pushes, `sub rsp`). The aarch64
     frames are as before. Both are chosen by `cfg(target_arch)`, so each matches the

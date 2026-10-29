@@ -148,6 +148,9 @@ sqlfnsrf 3000 #0	CREATE FUNCTION
 sqlfnsrf 3000 #1	3001|4501500
 sqlfnsrf 3100 #0	CREATE FUNCTION
 sqlfnsrf 3100 #1	ERROR 54001 stack depth limit exceeded HINT: Increase the configuration parameter "max_stack_depth" (currently 2048kB), after ensuring the platform's stack depth limit is adequate.
+viewdef 4000 #0	CREATE VIEW
+viewdef 4000 #1	4000|24036
+viewdef 4000 #2	DROP VIEW
 plpgsql 925 #0	CREATE FUNCTION
 plpgsql 925 #1	925
 plpgsql 940 #0	CREATE FUNCTION
