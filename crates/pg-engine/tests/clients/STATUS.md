@@ -92,6 +92,45 @@ marked open.
 | psycopg_pool (tests/pool, slow ones too) | 3.2.9 | 311 / 0 | 311 / 0 | 0 |
 | pgAdmin 4 / DBeaver metadata queries (replayed) | 9.18 / 26.2.3 | 856 ids | 814 same | catalog values (proargdefaults, relhasrules, FK operator arrays, ...) |
 
+After agent 81's fixes (the engine of 04d7b203 plus b68f2d65, debug build; engine side re-run,
+PostgreSQL's counts as above): GORM, SeaORM, Sequelize, Knex, Laravel, r2dbc, Dapper,
+SQLModel, psycopg_pool 0 (unchanged); Kysely 745 / 0, Diesel 1010 / 19, Ecto 480 / 15,
+Alembic 2152 / 1, jOOQ 141 / 0: 0 differences; sqlc 1626 / 132 after b68f2d65: 1 (Describe of
+an INSERT whose ON CONFLICT has no arbiter fixed; select_sequence still generates a nullable
+`last_value`, though RowDescription, sqlc's column query and attnotnull now match the
+reference at the SQL and wire level: not found yet);
+Postgrex 396 / 8: 2, timing (see below); EF Core 27400 / 10 (from 3,559); MikroORM 1415 / 66:
+1; DBAL: 1; Spring / Flyway / Liquibase 269 / 2; the metadata replay: 32 queries, cosmetic.
+Left, and why:
+- EF Core (6) and MikroORM (1): queries with LIMIT and no ORDER BY over GROUP BY
+  (`Delete_Where_predicate_with_GroupBy_aggregate`, `Take_on_top_level_...outer_apply`,
+  `SelectMany_with_nested_navigations_...`, populate-where-infer). The reference's autovacuum
+  has ANALYZEd the freshly loaded tables (830 rows, 89 groups), so it plans Group over an
+  index-only scan and returns groups in key order; the engine never analyzes on its own, plans
+  from defaults (240 rows, 200 groups) a HashAggregate, and returns other rows. Open: an
+  autovacuum-like analyze of changed tables (`n_mod_since_analyze` past
+  autovacuum_analyze_threshold + scale_factor * reltuples) would close it.
+- EF Core (4): "outer reference without an outer row" in a LEFT JOIN LATERAL over a derived
+  table with an OR qual (`SelectMany_with_predicate_and_DefaultIfEmpty_...`); not reduced to
+  a self-contained repro yet (~/.cache/a81/a81d/repro/q7.sql against Level1).
+- Spring (2): Flyway's three concurrent migrates. Concurrent `CREATE SCHEMA IF NOT EXISTS` /
+  `CREATE TABLE IF NOT EXISTS` of one name don't wait for the other transaction: PostgreSQL's
+  second blocks on the first's uncommitted catalog row, then fails with a unique violation
+  (pg_namespace_nspname_index); the engine's second creates its own and the commits merge
+  (`txn/catmerge.rs`), so a second Flyway sees no history row and runs V1 again. The clean
+  check after it fails from what that left. A catalog-concurrency item (name locks held to
+  commit).
+- DBAL (1): `UPDATE pg_class SET oid = ...` by a superuser (renumbering a relation): refused.
+- Metadata replay (32 queries): pg_stat counters (always 0), pg_node_tree columns holding SQL
+  text, aclexplode orders without ORDER BY; clients read them through pg_get_expr, which
+  matches.
+Slow paths the suites showed (debug build unless said): Postgrex's type bootstrap query 140 ms
+-> 55 ms (regproc output looked names up by scanning ~3,000 built-ins; PostgreSQL 5 ms); its
+first run in a session (per-session catalog caches, `Catalog::rel_rowtype`'s debug assertion)
+~360 ms; numerics of 100,000 digits print ~100x slower than PostgreSQL's (a binary big
+integer converted to decimal, quadratic; PostgreSQL keeps base-10000 digits); jOOQ's codegen
+catalog queries 13 s vs 2.3 s; EF Core's suite 31 min vs 7 min.
+
 ## Differences left, and why
 
 Contrib types (agent 39; binary send / receive and IS DISTINCT FROM since round 19, agent 53):
