@@ -441,6 +441,9 @@ struct Waiter {
     held: u16,
     status: Status,
     since: Instant,
+    /// What the waiting backend sleeps on (its PGPROC semaphore): signalled when the lock
+    /// is granted, so a release wakes the backends it lets in, not every waiter.
+    cv: Arc<Condvar>,
 }
 
 /// A row lock held by a (sub)transaction.
@@ -475,9 +478,43 @@ struct State {
     excl: HashMap<u32, Vec<(Vec<u8>, Vec<u8>, KeyHolder)>>,
 }
 
+/// The lock waits in progress, by their cancel flag's address: what a cancel or terminate
+/// request signals (Postgres's SIGINT sets the waiter's latch), so it ends the wait at
+/// once, not at the next poll. Touched only by backends that wait.
+static SLEEPING: std::sync::LazyLock<Mutex<HashMap<usize, Arc<Condvar>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// A cancel or terminate request set `flag`: wake its backend if it waits for a lock.
+pub fn interrupt(flag: &AtomicBool) {
+    if let Some(cv) = SLEEPING.lock().get(&(flag as *const AtomicBool as usize)) {
+        cv.notify_one();
+    }
+}
+
 /// Whether `key` is a unique key's lock (`UNIQUE_KEY`).
 fn is_unique_key(key: &[u8]) -> bool {
     key.len() >= 8 && key[..7] == [0; 7] && key[7] == UNIQUE_KEY
+}
+
+/// What a compact unique key keeps of its row's storage key: the part after the table's
+/// heap prefix, which the lock key already names (its table's oid follows the tag); none
+/// when the row key isn't under it.
+fn compact_row_payload<'a>(key: &[u8], row_key: Option<&'a [u8]>) -> &'a [u8] {
+    match (key.get(8..12), row_key) {
+        (Some(table), Some(r)) if r.len() > 8 && r[..4] == *table && r[4..8] == [0; 4] => &r[8..],
+        _ => &[],
+    }
+}
+
+/// The row key a compact unique key's payload stands for (`compact_row_payload`).
+fn compact_row_key(key: &[u8], payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.is_empty() {
+        return None;
+    }
+    let mut r = key.get(8..12)?.to_vec();
+    r.extend_from_slice(&[0; 4]);
+    r.extend_from_slice(payload);
+    Some(r)
 }
 
 /// Locks taken into compact sets so far (row locks and unique keys; tests read it).
@@ -507,7 +544,7 @@ impl State {
         let mut found = None;
         'all: for (&owner, b) in self.bulk.iter_mut() {
             for g in &mut b.segs {
-                let row_key = g.ukeys.payload(key).map(<[u8]>::to_vec);
+                let row_key = g.ukeys.payload(key).and_then(|p| compact_row_key(key, p));
                 if g.ukeys.remove(key) {
                     g.moved.push(key.to_vec());
                     found = Some((owner, b.proc, g.holder, g.xid, row_key));
@@ -518,7 +555,6 @@ impl State {
         if let Some((owner, proc, holder, xid, row_key)) = found {
             let e = self.locks.entry(key.to_vec()).or_default();
             e.holds.push(Hold { owner, proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
-            let row_key = row_key.filter(|k| !k.is_empty());
             e.key_holder = Some((owner, KeyHolder { holder, xid, token: None, row: None, row_key }));
         }
     }
@@ -544,7 +580,6 @@ impl State {
 #[derive(Default)]
 pub struct LockManager {
     state: Mutex<State>,
-    cv: Condvar,
 }
 
 /// One heavyweight lock as pg_locks shows it.
@@ -670,6 +705,7 @@ impl LockManager {
             None => e.queue.push(proc),
         }
         let start = Instant::now();
+        let cv = Arc::new(Condvar::new());
         s.waiters.insert(
             proc,
             Waiter {
@@ -679,8 +715,19 @@ impl LockManager {
                 held: my_held,
                 status: Status::Waiting,
                 since: start,
+                cv: cv.clone(),
             },
         );
+        // (Registered for `interrupt` while it waits.)
+        struct Sleeping(usize);
+        impl Drop for Sleeping {
+            fn drop(&mut self) {
+                SLEEPING.lock().remove(&self.0);
+            }
+        }
+        let flag = w.cancel as *const AtomicBool as usize;
+        SLEEPING.lock().insert(flag, cv.clone());
+        let _sleeping = Sleeping(flag);
         // What the statement said so far reaches the client before it waits.
         drop(s);
         crate::exec::flush_live_notices();
@@ -689,6 +736,13 @@ impl LockManager {
         loop {
             if s.waiters.get(&proc).is_some_and(|w| w.status == Status::Granted) {
                 s.waiters.remove(&proc);
+                // A cancel that came while it slept was Postgres's interrupt of the wait, before
+                // the grant: the lock goes back.
+                if w.cancel.load(Ordering::Relaxed) {
+                    drop(s);
+                    self.release(key, owner, mode);
+                    return Err(Error::new(code::QUERY_CANCELED, "canceling statement due to user request"));
+                }
                 return Ok(true);
             }
             let now = Instant::now();
@@ -713,10 +767,8 @@ impl LockManager {
                 checked = true;
                 match self.deadlock_check(&mut s, proc) {
                     Deadlock::Hard(cycle) => Some(self.report(&s, &cycle)),
-                    Deadlock::Soft => {
-                        self.cv.notify_all();
-                        continue;
-                    }
+                    // (Queues reordered: whoever that lets in was woken.)
+                    Deadlock::Soft => continue,
                     Deadlock::None => None,
                 }
             } else {
@@ -725,7 +777,6 @@ impl LockManager {
             if let Some(e) = fail {
                 self.remove_waiter(&mut s, proc);
                 drop(s);
-                self.cv.notify_all();
                 return Err(e);
             }
             let mut wake = now + Duration::from_millis(50);
@@ -741,7 +792,7 @@ impl LockManager {
             if let Some(d) = w.txn_deadline {
                 wake = wake.min(d);
             }
-            self.cv.wait_until(&mut s, wake.max(now + Duration::from_millis(1)));
+            cv.wait_until(&mut s, wake.max(now + Duration::from_millis(1)));
         }
     }
 
@@ -776,6 +827,7 @@ impl LockManager {
             if w.mode.conflicts() & ahead == 0 && !e.conflicts(p, w.mode) {
                 e.grant(w.owner, p, w.mode, key);
                 w.status = Status::Granted;
+                w.cv.notify_one();
                 e.queue.remove(i);
             } else {
                 ahead |= w.mode.bit();
@@ -798,7 +850,6 @@ impl LockManager {
             Self::drop_empty(&mut s, key);
         }
         drop(s);
-        self.cv.notify_all();
     }
 
     /// Release everything `owner` holds of these heavyweight locks.
@@ -836,7 +887,6 @@ impl LockManager {
             }
         }
         drop(s);
-        self.cv.notify_all();
     }
 
     /// Subtransactions aborting: their row locks on `rows` go, then their transaction locks.
@@ -867,7 +917,6 @@ impl LockManager {
             }
         }
         drop(s);
-        self.cv.notify_all();
     }
 
     /// Hold (sub)transaction `holder`'s own lock from when it gets a transaction id
@@ -1114,7 +1163,7 @@ impl LockManager {
                         xid: g.xid,
                         token: None,
                         row: None,
-                        row_key: (!row_key.is_empty()).then(|| row_key.to_vec()),
+                        row_key: compact_row_key(key, row_key),
                     })
                 })
             });
@@ -1432,7 +1481,7 @@ impl LockManager {
         }
         Self::hold_xact(&mut s, holder, owner, proc, xid);
         let b = s.bulk.entry(owner).or_insert_with(|| BulkLocks { proc, segs: Vec::new() });
-        let done = b.seg(holder, xid).ukeys.insert_with(key, 0, row_key.unwrap_or_default());
+        let done = b.seg(holder, xid).ukeys.insert_with(key, 0, compact_row_payload(key, row_key));
         if done {
             COMPACT_HOLDS.fetch_add(1, Ordering::Relaxed);
         }
@@ -1464,7 +1513,7 @@ impl LockManager {
             for (k, _, row_key) in g.ukeys.entries() {
                 let e = s.locks.entry(k.to_vec()).or_default();
                 e.holds.push(Hold { owner, proc: b.proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
-                let row_key = (!row_key.is_empty()).then(|| row_key.to_vec());
+                let row_key = compact_row_key(k, row_key);
                 e.key_holder = Some((owner, KeyHolder { holder: g.holder, xid: g.xid, token: None, row: None, row_key }));
                 keys.push(k.to_vec());
             }

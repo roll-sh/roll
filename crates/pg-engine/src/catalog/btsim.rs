@@ -881,6 +881,73 @@ impl Btree {
         }
     }
 
+    /// `kill`'s walk without its marks: whether it would mark an entry LP_DEAD (`seen`
+    /// as `kill` fills it, up to that entry). Under the models' read lock, so concurrent
+    /// scans of an index with nothing to kill don't serialize.
+    pub fn kill_needed(
+        &self,
+        lo: Option<&[u8]>,
+        hi: Option<&[u8]>,
+        all_dead: &dyn Fn(Tid) -> bool,
+        mut seen: Option<&mut Vec<Tid>>,
+    ) -> bool {
+        let nkey = self.opts.nkey;
+        let Some(mut blk) = self.root else {
+            return false;
+        };
+        // Down to the leaf where `lo` starts (pivots compare as their kept attributes).
+        loop {
+            let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
+                return false;
+            };
+            if p.leaf {
+                break;
+            }
+            let i = match lo {
+                None => 0,
+                Some(lo) => p
+                    .inner
+                    .iter()
+                    .rposition(|(pv, _)| match &pv.key {
+                        None => true,
+                        Some(k) => k.key_bytes(pv.natts.min(nkey)) < lo,
+                    })
+                    .unwrap_or(0),
+            };
+            blk = p.inner[i].1;
+        }
+        // Then right along the leaves until past `hi`. (A storage key goes on with the
+        // row's key: an entry is past `lo` when some row key puts it there.)
+        loop {
+            let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
+                return false;
+            };
+            for it in &p.items {
+                let k = it.key.key_bytes(nkey);
+                if hi.is_some_and(|hi| k >= hi) {
+                    return false;
+                }
+                let above = lo.is_none_or(|lo| {
+                    let m = k.len().min(lo.len());
+                    k[..m] >= lo[..m]
+                });
+                if !it.dead
+                    && above
+                    && let Some(seen) = seen.as_deref_mut()
+                {
+                    seen.extend_from_slice(&it.tids);
+                }
+                if !it.dead && above && it.tids.iter().all(|t| all_dead(*t)) {
+                    return true;
+                }
+            }
+            match p.right {
+                Some(r) => blk = r,
+                None => return false,
+            }
+        }
+    }
+
     /// VACUUM's bulk delete: entries pointing at removed heap tuples go (pages stay).
     pub fn bulk_delete(&mut self, dead: &std::collections::HashSet<Tid>) -> usize {
         let mut removed = 0;

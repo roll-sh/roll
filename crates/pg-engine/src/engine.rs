@@ -938,6 +938,7 @@ impl Engine {
             Some(b) if b.secret == secret => {
                 if let Some(c) = &b.cancel {
                     c.store(true, Ordering::Relaxed);
+                    crate::txn::locks::interrupt(c);
                 }
                 true
             }
@@ -949,6 +950,7 @@ impl Engine {
         b.terminated.store(true, Ordering::Relaxed);
         if let Some(c) = &b.cancel {
             c.store(true, Ordering::Relaxed);
+            crate::txn::locks::interrupt(c);
         }
         if let Some(s) = &b.socket {
             let _ = s.shutdown(Shutdown::Read);
@@ -1829,6 +1831,7 @@ impl Cluster for Engine {
             Some(b) => {
                 if let Some(c) = &b.cancel {
                     c.store(true, Ordering::Relaxed);
+                    crate::txn::locks::interrupt(c);
                 }
                 true
             }

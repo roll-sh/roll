@@ -1252,20 +1252,25 @@ impl Heap {
 
     /// heap_page_prune_opt: what a scan reading the page does.
     pub fn prune_opt(&mut self, blk: u32, v: &Vis) {
+        if self.prune_wanted(blk, v) {
+            self.prune(blk, v, false);
+        }
+    }
+
+    /// Whether `prune_opt` would prune page `blk` (heap_page_prune_opt's tests).
+    pub fn prune_wanted(&self, blk: u32, v: &Vis) -> bool {
         let Some(p) = self.pages.get(blk as usize) else {
-            return;
+            return false;
         };
         if p.prune_xid == 0 || !v.removable(p.prune_xid) {
-            return;
+            return false;
         }
         // (ConditionalLockBufferForCleanup fails while another pin is held.)
         if self.pins.contains_key(&blk) {
-            return;
+            return false;
         }
         let minfree = self.save_free().max(BLCKSZ / 10);
-        if p.full || p.heap_free() < minfree {
-            self.prune(blk, v, false);
-        }
+        p.full || p.heap_free() < minfree
     }
 
     /// A sequential scan reads (and may prune) every page.

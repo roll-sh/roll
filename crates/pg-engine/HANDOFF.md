@@ -1390,7 +1390,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   row in CONTEXT lines, a job queue's `IN (SELECT ... FOR UPDATE SKIP LOCKED)` joins as
   "ANY_subquery" instead of a SubPlan over the whole table, and `tests/app_concurrency.rs`
   runs application patterns (queues, upserts, SERIALIZABLE retries, leader election,
-  NOTIFY order) against the engine and, `against_reference`, PostgreSQL.
+  NOTIFY order) against the engine and, `against_reference`, PostgreSQL. Then lock waits:
+  each waiter sleeps on its own condition variable (a release wakes whom it grants, not
+  every waiter: 2-4x on 64 clients updating hot rows, now ahead of PostgreSQL; the
+  uncontended path unchanged), cancels wake a waiting backend at once (`locks::interrupt`),
+  and the size models are behind a read-write lock so concurrent index scans no longer
+  serialize on them per row.
 
 ## Repository layout
 

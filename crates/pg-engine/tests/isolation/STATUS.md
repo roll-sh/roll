@@ -371,6 +371,67 @@ where the reference does: 20 waits, 27 errors, 19 notifications.)
   LockRows inside), as convert_ANY_sublink_to_join does, and EXPLAIN matches (golden
   `a88_locked_any_sublink`). Oban's pattern went from 30 to 111 transactions/s on 32
   sessions (debug build).
+- **Lock waits woke every waiter**: the lock manager had one condition variable, and every
+  release, grant or cancelled wait broadcast on it, so each of N backends queued for a hot
+  row's transaction lock woke, took the lock manager's mutex and slept again (a thundering
+  herd: TPC-B at scale 4 fell from 2,729 to 1,272 transactions/s going from 16 to 64
+  clients, release build, where PostgreSQL went from 3,510 to 2,767). Each waiter now
+  sleeps on its own condition variable (its PGPROC semaphore), signalled by ProcLockWakeup
+  when it is granted; cancels and timeouts are still polled. One hot row updated by 64
+  clients: 994 / 3,045 / 3,444 transactions/s before, 3,323 / 7,751 / 13,066 after, against
+  PostgreSQL's 3,325 / 3,824 / 5,530 (three interleaved rounds on a loaded machine).
+  (`roll-migration-lock-timeout`: requests queued behind an ALTER TABLE that gives up at
+  its lock_timeout go ahead at once.)
+  A cancel or terminate request wakes its backend's lock wait at once (`locks::interrupt`,
+  Postgres's latch; the broadcast used to do that by accident, and without it a
+  pg_cancel_backend landed after the next step's COMMIT in `roll-detach-finalize-snapshots`),
+  and a wait granted after a cancel came gives the lock back and fails, as the interrupt
+  would have ended it first. The uncontended path is unchanged: a lock that is free costs
+  what it did (single-client pgbench, release builds, three interleaved rounds:
+  select-only 3,277 / 3,245, simple-update 1,124 / 1,124, TPC-B 642 / 652 tps before /
+  after, within noise). Memory: a held lock costs what it did; a backend waiting for one
+  adds 32 bytes (its condition variable, freed when the wait ends); a compact unique key
+  (agent 74's sets) keeps its row's id, 10 bytes more (the row key after its table prefix,
+  which the lock key already has), and compact row locks nothing more (only the
+  unique-key sets carry payloads).
+- **The size models' lock serialized index scans**: every row an index scan fetched took
+  the database-wide mutex over all relations' heap and btree models (`sizing::fetched`,
+  heap_page_prune_opt's model), and every index scan took it once more for the whole range
+  it covered (`index_scanned`, kill_prior_tuple's LP_DEAD marks). The models are behind a
+  read-write lock now; a fetch locates its row and checks whether the page would be pruned
+  under the read lock, a scan checks under it whether any entry would be marked
+  (`Btree::kill_needed`), and only an actual prune or mark takes the write lock.
+  Still open (the size models' owners): `index_scanned` walks the whole range the scan
+  could cover, not just the entries a LIMIT 1 scan reads, so a que-style fetch over a 3,000
+  row queue costs about 10 ms (PostgreSQL: 0.3 ms); and a GiST exclusion constraint's
+  check reads every row of the table (`exclusion_conflict` without a leading `=`): 3,000
+  non-overlapping ranges insert in 37 s in a debug build, PostgreSQL 0.2 s. Planner, found
+  on the way: an UPDATE inside a WITH whose `id IN (SELECT ... LIMIT n)` PostgreSQL joins
+  by unique-ifying the sub-select (HashAggregate, Nested Loop over the pkey) plans as a
+  Hash Semi Join over a scan of the whole table, though it costs it higher (graphile-worker's
+  fetch); and that unique-ifying HashAggregate returns its groups in another order than
+  PostgreSQL's when there are more of them than estimated (`DELETE ... WHERE id IN (SELECT
+  ... LIMIT 2 ...) RETURNING id`, estimated 1 row).
+- **Open: locks of a real parallel plan's lower part** (the round's item 2, not done). What
+  PostgreSQL shows: each worker is a backend of the leader's lock group, so its locks never
+  conflict with the leader's or its siblings', pg_blocking_pids reports the leader's pid
+  for them, the deadlock detector treats the group as one; pg_locks lists the worker's own
+  pid (its AccessShareLock on each relation it scans, its virtualxid, an advisory lock a
+  PARALLEL SAFE function took) and pg_stat_activity the worker (`parallel worker`,
+  leader_pid) while the Gather runs; the worker's locks, session-level ones too, go when it
+  exits at the Gather's end. Which rows a worker processes, and so whether a function's
+  lock outlives the statement, is up to timing while parallel_leader_participation is on
+  (the leader runs the lower part too); with it off only workers run it. The engine runs a
+  real Gather's lower part in the leader (its Gather exists only in EXPLAIN's tree, the
+  executor never sees one), so those locks stay until the transaction ends: one of
+  PostgreSQL's possible schedules with leader participation, not with it off. The plan:
+  the plan nodes under each Gather (`ExNode::key` maps EXPLAIN's nodes to the executor's)
+  run under a lock owner of their own on the leader's backend (`proc`, so conflicts and
+  deadlock detection already treat it as the leader's), shown in pg_locks with a pid of
+  its own and released at the Gather's end, as `run_as_parallel_worker` already releases
+  debug_parallel_query's single worker's transaction locks (that worker's session-level
+  advisory locks and its pg_locks pid aren't its own yet either). Applications don't see
+  this unless a PARALLEL SAFE function takes locks; no client suite or spec does.
 
 ## What round 18 changed (agent 56)
 
