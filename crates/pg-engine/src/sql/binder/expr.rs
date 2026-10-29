@@ -2093,7 +2093,7 @@ impl Binder<'_, '_> {
                 ));
             }
         };
-        if let Some(names) = self.poly_domain_conflict(&res.def.args, &[l.clone(), r.clone()]) {
+        if let Some(names) = self.poly_domain_conflict(&res.def.args, &[&l, &r]) {
             return Err(with_pos(
                 Error::new(code::UNDEFINED_FUNCTION, format!("operator does not exist: {} {op} {}", names[0], names[1]))
                     .hint("No operator matches the given name and argument types. You might need to add explicit type casts."),
@@ -2795,7 +2795,7 @@ impl Binder<'_, '_> {
             return Ok((def, types));
         }
         let res = resolve_binop("=", &l.ty(), &r.ty()).map_err(|e| with_pos(e, loc))?;
-        if let Some(names) = self.poly_domain_conflict(&res.def.args, &[l.clone(), r.clone()]) {
+        if let Some(names) = self.poly_domain_conflict(&res.def.args, &[l, r]) {
             return Err(with_pos(
                 Error::new(code::UNDEFINED_FUNCTION, format!("operator does not exist: {} = {}", names[0], names[1]))
                     .hint("No operator matches the given name and argument types. You might need to add explicit type casts."),
@@ -5239,7 +5239,8 @@ impl Binder<'_, '_> {
         }
         .map_err(|e| with_pos(e, loc))?;
         if !res.def.variadic
-            && let Some(names) = self.poly_domain_conflict(&res.def.args, &args)
+            && res.def.args.iter().filter(|p| p.is_polymorphic()).count() >= 2
+            && let Some(names) = self.poly_domain_conflict(&res.def.args, &args.iter().collect::<Vec<_>>())
         {
             return Err(with_pos(
                 Error::new(code::UNDEFINED_FUNCTION, format!("function {name}({}) does not exist", names.join(", ")))

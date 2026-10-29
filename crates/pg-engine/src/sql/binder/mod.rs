@@ -1844,7 +1844,11 @@ impl<'b, 'a> Binder<'b, 'a> {
     /// `anyrange` arguments are flattened to their base types first, so a domain over int4
     /// against an int4range's element type is no match (`int4range @> d` finds no operator).
     /// The inputs' types as `oper` / `func_get_detail` name them when it isn't consistent.
-    pub(crate) fn poly_domain_conflict(&self, params: &[DataType], args: &[Expr]) -> Option<Vec<String>> {
+    pub(crate) fn poly_domain_conflict(&self, params: &[DataType], args: &[&Expr]) -> Option<Vec<String>> {
+        // (Most calls take no polymorphic argument: nothing to look up.)
+        if params.iter().filter(|p| p.is_polymorphic()).count() < 2 {
+            return None;
+        }
         let doms: Vec<Option<u32>> = args.iter().map(|a| self.declared_domain(a)).collect();
         if doms.iter().all(Option::is_none) {
             return None;
