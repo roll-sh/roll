@@ -300,6 +300,8 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 3 grammar, batch 1 engine before its last fixes | 3030–3329 × 100 | 29,911 | wrong_rows 2, wrong_state 6, wrong_columns 1, tag 7 |
 | round 4 (agent 84), base (2b703e96) | 3330–3479 × 100 | 14,991 | wrong_rows 4, wrong_state 2, engine_error 30, missing_error 64, wrong_error 46, eval_error 77, tag 11 |
 | round 4, batch 1 | 3330–3479 × 100 | 14,991 | wrong_rows 4, wrong_state 2, engine_error 30, missing_error 53, wrong_error 45, eval_error 63, tag 9 |
+| round 4, base (ffceeaa8) | 3480–3533 × 100, then a crash | ~5,400 | aborted at seed 3534 by a stack overflow (fixed in batch 2); 83 serious-or-eval mismatches until then |
+| round 4, batch 2 | 3480–3579 × 100 | 9,941 | 74 over 3480–3533 (none new); in all wrong_rows 1, wrong_state 2, wrong_columns 2, engine_error 20, missing_error 38, wrong_error 11, eval_error 61, tag 6 (the wrong_rows / wrong_state of 3563 and 3570 are the base's too) |
 
 ## Round 4 grammar (agent 84)
 
