@@ -2794,6 +2794,44 @@ range scans 0.99–1.09x, secondary lookups 1.01–1.11x); the analytic queries'
 moved ±12% with spreads of 2x between runs, so their engine CPU was measured over the whole
 suite (5 reps, 3 interleaved runs): 9.75 s up, 9.66 s round 4.
 
+### pgbench tpcb-like: the starting point (agent 85, at `624d619e`)
+
+Scale 10, `-M prepared`, 30 s per client count, release build, servers on cores 16–19 and
+pgbench on 20–23, load 30–38 on the machine. CPU per transaction is the server's CPU time over
+the run divided by the transactions (PostgreSQL: its container's cgroup, every backend and
+background process); peak memory is the engine's VmHWM, PostgreSQL's container memory.peak
+(shared_buffers 2 GB, touched as used):
+
+| clients | pg tps | pg CPU ms / txn | pg peak | engine tps | engine CPU ms / txn | engine peak |
+|---|---|---|---|---|---|---|
+| 1 | 1,187 | 0.43 | 598 MB | 865 | 0.92 | 403 MB |
+| 8 | 5,074 | 0.45 | 695 MB | 3,143 | 0.94 | 403 MB |
+| 32 | 6,068 | 0.59 | 837 MB | 3,062 | 1.16 | 473 MB |
+
+The engine spends 2.1x PostgreSQL's CPU per transaction. Its profile at 8 clients (`perf
+record --call-graph fp`, shares of the engine's samples):
+
+- **The UPDATEs' scans, 32%.** pgbench_branches (10 rows) and pgbench_tellers (100) are
+  updated by sequential scans, as PostgreSQL plans them (one page each). Their rows are hot:
+  every transaction writes a new version, and the store keeps the versions (memtable, then
+  L0 files) until a flush and compaction drop them. The scan's merge over the sources and the
+  seeks past each key's older versions are 14% (`Scan::next`, `Merge::min`), the heap-order
+  bookkeeping for the modelled heap (`heap_order`, `row_tids`, `heap_modelled`) another 6%,
+  decoding 3%. The accounts UPDATE's index scan is 3%. Directions: a seq scan of a small table
+  that answers only one row by a unique equality could read it by its index and still count
+  as a seq scan (seq_scan, seq_tup_read and SIRead relation locks as Postgres); cheaper
+  version skipping for hot keys (the memtable could keep a key's newest committed version
+  apart, or GC versions older than the oldest snapshot on insert).
+- **Socket writes, 12%** (`ready_for_query` → `write_all`): a write per ReadyForQuery, one per
+  statement (seven per transaction: BEGIN, five statements, END); reads 5%.
+- **Bind, 5%**: `describe_here` re-describes the prepared statement on every Bind (2.2% in
+  clones of what it describes): cacheable per statement and catalog version.
+- **Plan opening, 5%** (`open_update` 3.3%): the UPDATE node set up per execution.
+- **Commit, 5%**: the WAL fsync wait 2.2%, memtable inserts 0.9%.
+- RLS checks on update (`update_row_rls`) 2.7%, row locks 1.8%, permission checks 1.3%.
+
+Not optimized in this round: the numbers are the next round's baseline.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
