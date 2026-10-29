@@ -82,7 +82,7 @@ tools/bench/run.sh pg-stop
 
 `BENCH_BIN` / `BENCH_CLIENT` pick other engine / client binaries (a baseline copied aside),
 `BENCH_DATA` another data directory, `SERVER_CPUS` / `CLIENT_CPUS` / `PG_PORT` /
-`ENGINE_PORT` the pinning and ports.
+`ENGINE_PORT` the pinning and ports, `CACHE_MB` the engine's block cache (2048).
 
 ## Results (2026-10-24)
 
@@ -1093,6 +1093,114 @@ left columns to their defaults differed: PostgreSQL's source computes every colu
 (`Result (width=60)` where the engine showed 4, and nextval's cost per row; second batch:
 the engine's source counts them now). Left: an INSERT ... SELECT with ORDER BY keeps
 `Subquery Scan on "*SELECT*"` over the Sort.
+
+## Round 21 (agent 90): analytic executor, second batch: the read path
+
+The same harness, both servers on cores 28-31, the client on 4-5 and 12-13, the machine
+shared with other agents (load 20-32 during these runs; 2 when it was quiet for an hour, too
+short for a full set). **pg** is PostgreSQL 18.6 (`a90-pg`, the bench settings);
+**before** the engine at `b6659eb9` (this round's base); **after** with this batch. Each
+engine run follows a restart and a first read of lineitem, orders and partsupp. Times are
+the median of three interleaved rounds (pg / after / before, before / pg / after, after /
+before / pg) of each round's median of 3; every result hash agrees with PostgreSQL's.
+**Peak memory**: the engine's VmHWM over the round (the warm-up scans included) and its
+sampled RSS; PostgreSQL's container `anon + shmem` sampled during the queries.
+
+| query | pg | before | after | after / pg | after / before |
+|---|---|---|---|---|---|
+| q01 | 2.289 | 3.338 | 2.826 | 0.81x | 1.18x |
+| q02 | 0.247 | 1.415 | 1.404 | 0.18x | 1.01x |
+| q03 | 0.515 | 1.706 | 1.465 | 0.35x | 1.16x |
+| q04 | 0.214 | 0.863 | 0.683 | 0.31x | 1.26x |
+| q05 | 0.404 | 1.419 | 1.215 | 0.33x | 1.17x |
+| q06 | 0.494 | 2.331 | 1.570 | 0.31x | 1.48x |
+| q07 | 0.461 | 7.152 | 3.676 | 0.13x | 1.95x |
+| q08 | 0.229 | 3.747 | 1.485 | 0.15x | 2.52x |
+| q09 | 1.613 | 7.678 | 3.163 | 0.51x | 2.43x |
+| q10 | 0.730 | 4.716 | 3.629 | 0.20x | 1.30x |
+| q11 | 0.109 | 1.320 | 0.371 | 0.29x | 3.56x |
+| q12 | 0.706 | 5.126 | 2.429 | 0.29x | 2.11x |
+| q13 | 0.888 | 5.430 | 5.852 | 0.15x | 0.93x |
+| q14 | 0.227 | 2.782 | 1.867 | 0.12x | 1.49x |
+| q15 | 0.393 | 1.993 | 1.336 | 0.29x | 1.49x |
+| q16 | 0.321 | 1.209 | 1.167 | 0.28x | 1.04x |
+| q17 | 0.983 | 2.833 | 2.879 | 0.34x | 0.98x |
+| q18 | 2.906 | 5.974 | 6.300 | 0.46x | 0.95x |
+| q19 | 0.089 | 0.597 | 0.496 | 0.18x | 1.20x |
+| q20 | 0.124 | 1.048 | 0.837 | 0.15x | 1.25x |
+| q21 | 0.769 | 2.850 | 3.192 | 0.24x | 0.89x |
+| q22 | 0.164 | 0.808 | 0.777 | 0.21x | 1.04x |
+| all 22 | 14.88 | 66.33 | 48.62 | 0.31x | 1.36x |
+| peak memory (MB) | 1,711 | 4,380 | 4,110 | | |
+
+q13, q17, q18 and q21 spend their time on the executor's thread (groupings, sorts, the
+serial plan's joins), which this batch leaves as it was; their differences are within the
+machine's spread. The engine's CPU seconds per run, two alternating pairs: q13 9.2 / 11.3 before, 10.8 / 11.3
+after; q18 14.8 / 17.6 and 14.2 / 16.1; q21 8.5 / 9.9 and 8.6 / 9.7; q17 6.7 / 8.1 and 7.3 /
+7.0. q01 9.8 / 10.3 before and 8.6 / 10.1 after (an earlier build that read a column's number
+again for every aggregate taking it was 22% over: `LazyBuf::nums` keeps it per row).
+
+**pgbench select-only** (scale 10, `-M prepared`, 8 clients, 10 s, three interleaved runs
+after a restart each): before 41,307 / 37,737 / 40,881 TPS (median 40.9k), after 48,047 /
+41,072 / 44,110 (44.1k); peak RSS 346 MB before, 254 MB after (the cache's blocks are
+smaller).
+
+### What the profiles showed
+
+- **Block cache** (q07, q08, q09, q11, q12, q18): zstd and the allocation, page faults and
+  copies of decoding blocks were 25-35% of q09's CPU. TPC-H SF1's SST entries are 2.0 GB
+  decompressed (608 MB on disk), but a cached block also held a copy of every key and an
+  offset table: 3.2 GB in all, so the 2 GB cache held two thirds, and random index fetches
+  mostly decompressed. With the cache at 8 GB the base took 52.9 s in all instead of 80.4 s
+  (q09 10.4 -> 3.6, q07 8.6 -> 3.5, q11 1.9 -> 0.44); the RSS was 4.5 GB.
+- **Row decoding** (q06, q14, q15, q01): a worker made a `Vec<Value>` of every row it read,
+  decoding every needed column (a numeric: an `Arc` and a `BigInt` per value) before the
+  filter ran; with 2% of lineitem passing q06's filter, 98% of that went straight to
+  `drop`.
+- **Serial index scans under merge joins** (q12): the executor runs the serial plan, and
+  q12's is a merge join over a full `orders_pkey` scan: 1.5M point fetches on the executor's
+  thread while the workers waited (the EXPLAIN shows PostgreSQL's parallel hash join).
+
+### What changed
+
+- **Cached blocks hold the file's entries** (`storage/sst.rs` `Block`, `BlockPos`): a whole
+  key every 16 entries (restarts; the writer emits them, an older file's block is rewritten
+  with them in one pass as it is read), a seek searches the restarts, a cursor rebuilds keys
+  as it moves; reverse scans and spill files use `Block::expand` (the old layout, per read).
+  A block now costs its decompressed bytes plus 4 bytes per restart. The file format is the
+  same (a restart is an entry with `shared = 0`).
+- **Rows read in place in the scan workers** (`exec/parscan.rs` `Lazy`): the column offsets
+  walked once, a column decoded when the filter, a join key or an aggregate first reads it,
+  numbers read without making values (`Cols::num`, `row::peek_num`, once per row); a row
+  the filter rejects or the partial aggregate takes is never made. Numeric comparisons in
+  kernels compare exact i128s (`K::NumCmp`), partial sums of a numeric column add its number
+  (`Partials::cols`).
+- **Parallel fetches**: full btree index scans of big tables run in the workers for the
+  executor's thread too (q12 5.1 -> 2.4 s), and a bitmap heap scan that isn't dense fetches
+  its sorted row keys in the workers (`start_parallel_keys`).
+- `get_varint`'s one-byte case inline; `tools/bench/run.sh` takes `CACHE_MB`.
+
+### Where TPC-H is still slower
+
+- The executor runs the serial plan and parallelises its scans and probes: where the serial
+  plan's join order or grouping differs from the parallel one (q13's grouping over a right
+  join, q18's 1.5M-group GroupAggregate merged on the executor's thread, q10 / q03's sorts and
+  merge joins), the executor's thread does PostgreSQL's workers' work. Sorts, window
+  functions and hash builds still run on it.
+- Modelled tables (customer, part, supplier) are read serially (q02, q11, q16, q22).
+- numeric values still take two allocations when made; rows reaching the executor's thread
+  make them.
+- A block of lineitem is still decompressed again when a full scan cycles it out (q01, q06,
+  q14: zstd 6-7%); a scan-resistant cache (a sequential scan's blocks not displacing hot
+  ones, as PostgreSQL's ring buffer) is the next step for the cache.
+
+### Verification (round 21, agent 90)
+
+- `cargo test -p pg-engine` (with `parallel_scan.rs`'s new `parallel_fetches_match_serial`
+  and `sst.rs`'s `block_positions`), `cargo clippy -p pg-engine --all-targets` with no new
+  warnings, `difftest smoke`.
+- The regression suite in full (debug build, private reference): 51,148 / 51,150, no unit
+  changed against the committed baseline (the first batch, and again with the second).
 
 ## Catalog, DDL and sessions (round 18, agent 44)
 
