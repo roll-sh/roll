@@ -110,6 +110,12 @@ Left, and why:
   from defaults (240 rows, 200 groups) a HashAggregate, and returns other rows. Open: an
   autovacuum-like analyze of changed tables (`n_mod_since_analyze` past
   autovacuum_analyze_threshold + scale_factor * reltuples) would close it.
+  Round 22 (agent 99): the engine has autovacuum now (HANDOFF "Autovacuum"), and a LIMIT over
+  a grouping of one scan takes the cheapest fractional path as PostgreSQL does (the second
+  half of the cause: on a reproduction of the shape, 830 rows / 89 groups, PostgreSQL chose
+  the index's grouping even before analyzing). Plans and rows of that reproduction match;
+  the suites themselves weren't re-run (EF Core and MikroORM need their full runs, whose
+  timing decides when the reference's autovacuum ran).
 - EF Core (4): "outer reference without an outer row" in a LEFT JOIN LATERAL over a derived
   table with an OR qual (`SelectMany_with_predicate_and_DefaultIfEmpty_...`); not reduced to
   a self-contained repro yet (~/.cache/a81/a81d/repro/q7.sql against Level1).

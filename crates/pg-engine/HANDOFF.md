@@ -1480,6 +1480,26 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     reloptions, the server log's "canceling autovacuum task" line (tracing only). The golden
     harness's wire engine runs with autovacuum off (its files share one engine for minutes);
     the regress harness keeps it on, as the reference has it. Test `tests/autovacuum.rs`.
+  - Checked against PostgreSQL (830 rows, 89 groups, an index on the key, both servers at
+    default settings): both auto-analyze within the naptime (reltuples 830, the same rows=89
+    estimates). The LIMIT-without-ORDER-BY rows still differed: PostgreSQL takes the grouping
+    over the index for `GROUP BY k LIMIT 5` (before and after the analyze) because it picks
+    the cheapest fractional path (get_cheapest_fractional_path), the engine the cheapest
+    total (hashed). `Planner::hinted_scan` (a grouping or DISTINCT over one scan) now compares
+    startup + LIMIT fraction × run under a LIMIT; golden `a99_limit_grouping`. Found, not
+    fixed (EXPLAIN costs only): a GroupAggregate / HashAggregate doesn't add its aggregates'
+    final function cost per group (sum(numeric): +0.0025 × groups in PostgreSQL), and
+    `LIMIT (SELECT 5)` doesn't show its InitPlan.
+  - Measured (release, pgbench -s 10 -c 8 -j 4 -T 90, autovacuum_naptime 10 s on both, two
+    alternating rounds on a host at load ~30 of 36 cores, so ±10% is noise): engine with
+    autovacuum 2,175 / 2,523 tps, without 2,397 / 2,124; CPU per transaction 1.46 / 1.34 ms
+    with, 1.51 / 1.61 ms without; peak RSS 638 / 668 MB with, 619 / 616 MB without (the
+    ANALYZE sample of pgbench_accounts). 15 autovacuums and 16 autoanalyzes per run
+    (PostgreSQL: 22-25 and 27-29). PostgreSQL 18.6 on the same CPUs: 3,750 / 4,006 tps with,
+    4,338 / 4,099 without. Idle, the launcher doesn't wake (`nothing_changed_nothing_runs`).
+    Verified: crate tests, clippy, difftest smoke, isolation 121 / 122 (1,647 / 1,648), full
+    regress runs (debug, private references) 51,148 / 51,150 with 0 units changed, for each
+    batch.
 
 ## Repository layout
 

@@ -5110,7 +5110,7 @@ impl Planner<'_, '_> {
                 _ => (0, 0.0),
             };
             if let Plan::Agg { input, .. } | Plan::Distinct { input, .. } = p
-                && self.hinted_scan(take(input), &n, keys, distinct, trans)
+                && self.hinted_scan(take(input), &n, keys, distinct, trans, lim)
             {
                 return;
             }
@@ -5804,6 +5804,7 @@ impl Planner<'_, '_> {
         keys: Vec<Expr>,
         distinct: bool,
         trans: (usize, f64),
+        lim: Option<(f64, f64)>,
     ) -> bool {
         let scan_needed = scan_needs(p, needed);
         let Some((s, mapped)) = sort_target(p, keys) else {
@@ -5862,10 +5863,8 @@ impl Planner<'_, '_> {
             !self.g.hashagg as u32,
             c.total + spill + if distinct { groups * costs::CPU_TUPLE_COST } else { 0.0 },
         );
-        let sorted = (
-            c.disabled + !self.g.sort as u32,
-            costs::sort_cost(c.total, c.rows, width, None).1,
-        );
+        let sort_total = costs::sort_cost(c.total, c.rows, width, None).1;
+        let sorted = (c.disabled + !self.g.sort as u32, sort_total);
         let other = if hashed.0 < sorted.0 || (hashed.0 == sorted.0 && hashed.1 <= sorted.1) {
             hashed
         } else {
@@ -5887,6 +5886,39 @@ impl Planner<'_, '_> {
                 best = p.clone();
                 best_cost = cost;
             }
+        }
+        // Under a LIMIT, get_cheapest_fractional_path over the grouping's paths: each one's
+        // startup plus the fraction of its run the LIMIT reads (a grouping hashed or over a
+        // Sort returns its first group only after reading all its input; one over a path in
+        // the keys' order, as soon as that group ends).
+        if let Some((count, offset)) = lim {
+            let f = if count < 0.0 {
+                0.1
+            } else {
+                ((count + offset.max(0.0)) / groups.max(1.0)).min(1.0)
+            };
+            // (Per input row: the key comparisons and transitions; per group: its row out.)
+            let per_input = costs::CPU_OPERATOR_COST * c.rows * (want.merge.len() + trans.0) as f64;
+            let per_group = costs::CPU_TUPLE_COST * groups;
+            let frac = |st: f64, run: f64| st + f * run;
+            let (hst, sst) = (hashed.1 + per_input, sort_total + per_input);
+            let mut pick = if hashed.0 < sorted.0 || (hashed.0 == sorted.0 && hst <= sst) {
+                (c.disabled + hashed.0, frac(hst, per_group), c.clone())
+            } else {
+                (c.disabled + sorted.0, frac(sst, per_group), c.clone())
+            };
+            for p in &list {
+                let n = want.merge.len();
+                let covers = p.keys.len() >= n
+                    && p.keys[..n].iter().all(|k| {
+                        !k.desc && !k.nulls_first && want.merge.iter().any(|m| same_key(m, &k.expr))
+                    });
+                let cost = frac(p.startup, p.total - p.startup + per_input + per_group);
+                if covers && (p.disabled < pick.0 || (p.disabled == pick.0 && cost < pick.1)) {
+                    pick = (p.disabled, cost, p.clone());
+                }
+            }
+            best = pick.2;
         }
         apply(&rel, s, &best);
         // (Its partial paths are built for the keys' orders too: pathkeys_useful_for_grouping.)
