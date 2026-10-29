@@ -13,6 +13,8 @@
 //! - `walsender`: the replication protocol (`replication=database` connections).
 
 pub mod apply;
+mod apply_rows;
+mod apply_stream;
 pub mod cmd;
 pub mod decode;
 pub mod log;

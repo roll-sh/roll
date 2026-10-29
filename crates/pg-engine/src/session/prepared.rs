@@ -124,7 +124,13 @@ impl Session {
         let stats = std::mem::take(&mut t.pgstat);
         let r = if commit {
             t.remove_state_record(gid);
-            self.state.cluster.commit(t).map(|_| ())
+            // (A session origin's position goes with the commit, as with any other.)
+            let origin = crate::repl::origin::before_commit(&self.state, &mut t);
+            let r = self.state.cluster.commit(t).map(|_| ());
+            if let (Ok(()), Some(o)) = (&r, origin) {
+                crate::repl::origin::after_commit(&self.state, o);
+            }
+            r
         } else {
             for (name, owner) in std::mem::take(&mut t.db_owner_undo).into_iter().rev() {
                 let _ = self.state.cluster.set_database_owner(&name, &owner);
@@ -132,8 +138,17 @@ impl Session {
             for (name, o) in std::mem::take(&mut t.db_options_undo).into_iter().rev() {
                 let _ = self.state.cluster.set_database_options(&name, o);
             }
-            let r = crate::repl::log::rollback_prepared(&self.state.db, &t, vec![(twophase::record_key(gid), None)]);
+            let mut writes = vec![(twophase::record_key(gid), None)];
+            // (And with the rollback record: a session origin's position.)
+            let origin = crate::repl::origin::rollback_progress(&self.state);
+            if let Some((id, lsn)) = origin {
+                writes.push((crate::repl::origin::progress_key(id), Some(bytes::Bytes::copy_from_slice(&lsn.to_be_bytes()))));
+            }
+            let r = crate::repl::log::rollback_prepared(&self.state.db, &t, writes);
             t.rollback();
+            if let (Ok(_), Some(o)) = (&r, origin) {
+                crate::repl::origin::after_commit(&self.state, o);
+            }
             r.map(|_| ())
         };
         tp.remove(gid);

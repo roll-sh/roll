@@ -15,6 +15,7 @@
 //! refresh adds are copied between streamed transactions.
 
 use super::walrcv::{self, Fail};
+use super::apply_rows;
 use crate::catalog::{Subscription, quote_ident};
 use crate::engine::Engine;
 use crate::error::{Error, code};
@@ -238,10 +239,12 @@ impl Workers {
     }
 }
 
-/// A worker's life: attempts, each failure logged and retried after RETRY_INTERVAL.
+/// A worker's life: attempts, each failure logged; the next starts RETRY_INTERVAL after the
+/// last one started (the launcher's wal_retrieve_retry_interval between a worker's starts).
 fn worker_main(engine: Weak<Engine>, workers: Arc<Workers>, sub: Subscription, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
         let Some(e) = engine.upgrade() else { return };
+        let started = Instant::now();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&e, &workers, &sub, &stop)));
         drop(e);
         match r {
@@ -249,7 +252,7 @@ fn worker_main(engine: Weak<Engine>, workers: Arc<Workers>, sub: Subscription, s
             Ok(Err(msg)) => tracing::error!(subscription = %sub.name, "{msg}"),
             Err(_) => tracing::error!(subscription = %sub.name, "logical replication apply worker panicked"),
         }
-        let until = Instant::now() + RETRY_INTERVAL;
+        let until = started + RETRY_INTERVAL;
         while Instant::now() < until && !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -339,6 +342,9 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
         repl,
         env,
         rels: HashMap::new(),
+        local: HashMap::new(),
+        stream_block: None,
+        spools: HashMap::new(),
         states: HashMap::new(),
         txn: None,
         stat,
@@ -349,27 +355,54 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
             return Ok(());
         }
         w.load_states();
-        w.sync_tables()?;
-        if !w.stream()? {
+        // (pgstat_report_subscription_error: errors of the copy and of the apply loop.)
+        let count = |w: &Worker, what: &str| {
+            crate::sql::func::pubsub::count_subscription_stat(&w.sess.state.db.catalog(), w.sub.oid, what)
+        };
+        let r = match w.sync_tables() {
+            Err(m) => {
+                count(&w, "sync_error");
+                Err(m)
+            }
+            Ok(()) => match w.stream() {
+                Ok(true) => continue,
+                Ok(false) => return Ok(()),
+                Err(m) => {
+                    if !m.contains("could not connect to the publisher") {
+                        count(&w, "apply_error");
+                    }
+                    Err(m)
+                }
+            },
+        };
+        // disable_on_error (as committed now: maybe_reread_subscription): the error, then the
+        // subscription disabled (the worker ends).
+        if let Err(m) = &r
+            && w.sess.state.db.catalog().subscriptions.get(&sub.oid).is_some_and(|s| s.disable_on_err)
+            && !stop.load(Ordering::SeqCst)
+        {
+            tracing::error!(subscription = %sub.name, "{m}");
+            w.disable()?;
             return Ok(());
         }
+        return r;
     }
 }
 
 /// A remote relation (a Relation message).
 #[derive(Clone, Debug)]
-struct RemoteRel {
-    nsp: String,
-    name: String,
+pub(super) struct RemoteRel {
+    pub nsp: String,
+    pub name: String,
     /// relreplident: 'd' default, 'n' nothing, 'f' full, 'i' index.
-    ident: u8,
+    pub ident: u8,
     /// (name, part of the replica identity).
-    cols: Vec<(String, bool)>,
+    pub cols: Vec<(String, bool)>,
 }
 
 /// A column of a tuple message.
 #[derive(Clone, Debug)]
-enum Col {
+pub(super) enum Col {
     Null,
     Unchanged,
     Text(String),
@@ -378,8 +411,12 @@ enum Col {
 /// The remote transaction being applied.
 struct RemoteTxn {
     final_lsn: u64,
+    /// The publisher's transaction id (the apply error CONTEXT names it).
+    xid: u32,
     /// Applied before (it committed at or before the origin's progress).
     skip: bool,
+    /// ALTER SUBSCRIPTION ... SKIP names it: its changes are left out.
+    skipping: bool,
 }
 
 struct Worker<'a> {
@@ -392,6 +429,12 @@ struct Worker<'a> {
     repl: Arc<super::Repl>,
     env: crate::remote::conn::Env,
     rels: HashMap<u32, RemoteRel>,
+    /// Each remote relation's local table as bound for applying rows (logicalrep_rel_open).
+    local: HashMap<u32, apply_rows::LocalRel>,
+    /// The streamed transaction whose block (Stream Start .. Stream Stop) is being received.
+    stream_block: Option<u32>,
+    /// Streamed transactions in progress (streaming = on / parallel), by top-level xid.
+    spools: HashMap<u32, super::apply_stream::Spool>,
     /// The subscription's tables (local oid): (srsubstate, srsublsn).
     states: HashMap<u32, (char, u64)>,
     txn: Option<RemoteTxn>,
@@ -456,13 +499,6 @@ fn qualified(nsp: &str, name: &str) -> String {
     format!("{}.{}", quote_ident(nsp), quote_ident(name))
 }
 
-fn literal(c: &Col) -> String {
-    match c {
-        Col::Text(s) => walrcv::literal(s),
-        _ => "NULL".into(),
-    }
-}
-
 /// CHECK_FOR_INTERRUPTS of a worker: told to stop.
 fn stop_check(stop: &AtomicBool) -> crate::Result<()> {
     if stop.load(Ordering::SeqCst) {
@@ -518,6 +554,49 @@ impl Worker<'_> {
         for (relid, state, lsn) in changes {
             self.states.insert(*relid, (*state, *lsn));
         }
+        Ok(())
+    }
+
+    /// The subscription's subskiplsn as committed (0: none).
+    fn skip_lsn(&self) -> u64 {
+        self.sess.state.db.catalog().subscriptions.get(&self.sub.oid).map_or(0, |s| s.skiplsn)
+    }
+
+    /// Change the subscription's catalog row in the open local transaction.
+    fn alter_sub(&mut self, f: impl FnOnce(&mut Subscription)) -> Result<(), String> {
+        let t = self.sess.block_txn().ok_or("no local transaction is open")?;
+        let mut c = (*t.borrow().catalog()).clone();
+        if let Some(s) = c.subscriptions.get_mut(&self.sub.oid) {
+            f(s);
+        }
+        t.borrow_mut().set_catalog(c).map_err(|e| e.message)
+    }
+
+    /// clear_subscription_skip_lsn: subskiplsn back to 0/0 with the skipped transaction's
+    /// commit, unless ALTER SUBSCRIPTION ... SKIP changed it meanwhile.
+    fn clear_skip_lsn(&mut self, finish: u64) -> Result<(), String> {
+        if self.skip_lsn() != finish {
+            tracing::warn!(
+                "skip-LSN of subscription \"{}\" cleared\nDETAIL:  Remote transaction's finish WAL location (LSN) {} did not match skip-LSN {}.",
+                self.sub.name,
+                lsn(finish),
+                lsn(self.skip_lsn())
+            );
+            return Ok(());
+        }
+        self.alter_sub(|s| s.skiplsn = 0)
+    }
+
+    /// DisableSubscriptionAndExit: subenabled = false, in a transaction of its own.
+    fn disable(&mut self) -> Result<(), String> {
+        if self.sess.status() != crate::session::TxnStatus::Idle {
+            let _ = self.sess.query("ROLLBACK");
+        }
+        self.txn = None;
+        self.query("BEGIN")?;
+        self.alter_sub(|s| s.enabled = false)?;
+        self.query("COMMIT")?;
+        tracing::info!("subscription \"{}\" has been disabled because of an error", self.sub.name);
         Ok(())
     }
 
@@ -639,7 +718,7 @@ impl Worker<'_> {
 
     /// The origin's progress: the end of the last transaction applied.
     fn progress(&self) -> u64 {
-        self.repl.origins.list().into_iter().find(|o| o.id == self.origin).map_or(0, |o| o.remote_lsn)
+        self.repl.origins.remote_lsn(self.origin)
     }
 
     /// LogicalRepApplyLoop: stream from the subscription's slot, from the origin's progress.
@@ -652,12 +731,35 @@ impl Worker<'_> {
             .map_err(|m| format!("apply worker for subscription \"{}\" could not connect to the publisher: {m}", self.sub.name))?;
         let start = self.progress();
         self.last_received = start;
-        walrcv::start_streaming(&mut c, &slot, start, &self.sub.publications, &self.sub.origin, false, &intr).map_err(|e| e.msg())?;
+        // (A streamed transaction in progress is streamed again from its start.)
+        self.stream_block = None;
+        self.spools.clear();
+        let streaming = match self.sub.stream {
+            'p' => Some("parallel"),
+            't' => Some("on"),
+            _ => None,
+        };
+        // two_phase = true stays pending until every table is ready; then it is enabled
+        // as streaming starts (run_apply_worker).
+        let all_ready = self.states.values().all(|(s, _)| *s == 'r');
+        let two_phase = match self.sub.twophase {
+            'e' => true,
+            'p' if all_ready => {
+                self.query("BEGIN")?;
+                self.alter_sub(|s| s.twophase = 'e')?;
+                self.query("COMMIT")?;
+                true
+            }
+            _ => false,
+        };
+        walrcv::start_streaming(&mut c, &slot, start, &self.sub.publications, &self.sub.origin, streaming, two_phase, &intr)
+            .map_err(|e| e.msg())?;
         let mut last_recv = Instant::now();
         let mut last_check = Instant::now();
         let mut last_fb = Instant::now();
         let mut sent = (0u64, 0u64);
         let mut pinged = false;
+        let mut busy = false;
         loop {
             if self.stop.load(Ordering::SeqCst) {
                 if self.txn.take().is_some() {
@@ -667,15 +769,22 @@ impl Worker<'_> {
                 return Ok(false);
             }
             let mut reply = false;
-            match c.copy_read(Duration::from_millis(100))? {
+            // Feedback goes when what was read is applied, not after every transaction of a
+            // batch (LogicalRepApplyLoop sends it once the data runs out): right after a
+            // message only what is buffered already is read, and running out of it is idle.
+            let wait = if busy { Duration::ZERO } else { Duration::from_millis(100) };
+            let mut idle = true;
+            match c.copy_read(wait)? {
                 Some(Some(d)) => {
                     last_recv = Instant::now();
                     pinged = false;
+                    idle = false;
                     reply = self.message(&d)?;
                 }
                 Some(None) => return Err("data stream from publisher has ended".into()),
                 None => {}
             }
+            busy = !idle;
             if self.txn.is_none() && last_check.elapsed() >= Duration::from_secs(1) {
                 last_check = Instant::now();
                 self.load_states();
@@ -685,9 +794,18 @@ impl Worker<'_> {
                     let _ = c.copy_done();
                     return Ok(true);
                 }
+                if self.sub.twophase == 'p' && !two_phase && self.states.values().all(|(s, _)| *s == 'r') {
+                    tracing::info!(
+                        "logical replication apply worker for subscription \"{}\" will restart so that two_phase can be enabled",
+                        self.sub.name
+                    );
+                    self.feedback(&mut c, false)?;
+                    let _ = c.copy_done();
+                    return Ok(true);
+                }
             }
             let pos = self.positions();
-            if reply || (pos != sent && pos.1 != 0) || last_fb.elapsed() >= STATUS_INTERVAL {
+            if reply || (idle && pos != sent && pos.1 != 0) || last_fb.elapsed() >= STATUS_INTERVAL {
                 self.feedback(&mut c, false)?;
                 sent = pos;
                 last_fb = Instant::now();
@@ -705,7 +823,11 @@ impl Worker<'_> {
     /// (write, flush): what was received, and what is committed locally (all received when
     /// no remote transaction is open: the rest was applied or had nothing to apply).
     fn positions(&self) -> (u64, u64) {
-        let flush = if self.txn.is_some() { self.progress() } else { self.last_received.max(self.progress()) };
+        let flush = if self.txn.is_some() || !self.spools.is_empty() {
+            self.progress()
+        } else {
+            self.last_received.max(self.progress())
+        };
         (self.last_received, flush)
     }
 
@@ -780,14 +902,121 @@ impl Worker<'_> {
     /// apply_dispatch: one pgoutput message.
     fn apply(&mut self, m: &[u8]) -> Result<(), String> {
         let mut r = Reader { b: m, at: 0 };
-        match r.u8()? {
+        let kind = r.u8()?;
+        // In a stream block a change carries its (sub)transaction's xid: spooled without it.
+        if let Some(top) = self.stream_block
+            && matches!(kind, b'I' | b'U' | b'D' | b'T' | b'R' | b'Y')
+        {
+            let xid = r.u32()?;
+            let mut msg = Vec::with_capacity(m.len() - 4);
+            msg.push(kind);
+            msg.extend_from_slice(&m[5..]);
+            let spool = self.spools.get_mut(&top).ok_or("streamed change outside a streamed transaction")?;
+            return spool.write(top, xid, &msg);
+        }
+        match kind {
+            b'S' => {
+                let xid = r.u32()?;
+                let first = r.u8()? == 1;
+                if self.stream_block.is_some() {
+                    return Err("duplicate STREAM START message".into());
+                }
+                if first {
+                    let dir = self.sess.state.db.store.spill_dir();
+                    self.spools.insert(xid, super::apply_stream::Spool::new(&dir)?);
+                } else if !self.spools.contains_key(&xid) {
+                    return Err(format!("streamed transaction {xid} was not started"));
+                }
+                self.stream_block = Some(xid);
+                Ok(())
+            }
+            b'E' => {
+                if self.stream_block.take().is_none() {
+                    return Err("STREAM STOP message without STREAM START".into());
+                }
+                Ok(())
+            }
+            b'A' => {
+                let xid = r.u32()?;
+                let subxid = r.u32()?;
+                if xid == subxid {
+                    self.spools.remove(&xid);
+                } else if let Some(sp) = self.spools.get_mut(&xid) {
+                    sp.abort_sub(subxid)?;
+                }
+                Ok(())
+            }
+            b'b' => {
+                let prepare_lsn = r.u64()?;
+                let _end_lsn = r.u64()?;
+                let _ts = r.u64()?;
+                let xid = r.u32()?;
+                let _gid = r.cstr()?;
+                self.begin_prepare(prepare_lsn, xid)
+            }
+            b'P' => {
+                let _flags = r.u8()?;
+                let prepare_lsn = r.u64()?;
+                let end_lsn = r.u64()?;
+                let _ts = r.u64()?;
+                let _xid = r.u32()?;
+                let _gid = r.cstr()?;
+                self.prepare(prepare_lsn, end_lsn)
+            }
+            b'K' => {
+                let _flags = r.u8()?;
+                let _commit_lsn = r.u64()?;
+                let end_lsn = r.u64()?;
+                let ts = r.u64()? as i64;
+                let xid = r.u32()?;
+                let _gid = r.cstr()?;
+                self.finish_prepared(xid, end_lsn, ts, true)
+            }
+            b'r' => {
+                let _flags = r.u8()?;
+                let _prepare_end_lsn = r.u64()?;
+                let end_lsn = r.u64()?;
+                let _prepare_ts = r.u64()?;
+                let ts = r.u64()? as i64;
+                let xid = r.u32()?;
+                let _gid = r.cstr()?;
+                self.finish_prepared(xid, end_lsn, ts, false)
+            }
+            b'p' => {
+                let _flags = r.u8()?;
+                let prepare_lsn = r.u64()?;
+                let end_lsn = r.u64()?;
+                let _ts = r.u64()?;
+                let xid = r.u32()?;
+                let _gid = r.cstr()?;
+                let spool = self.spools.remove(&xid).ok_or_else(|| format!("streamed transaction {xid} was not started"))?;
+                self.begin_prepare(prepare_lsn, xid)?;
+                spool.replay(|m| self.apply(m))?;
+                self.prepare(prepare_lsn, end_lsn)
+            }
+            b'c' => {
+                let xid = r.u32()?;
+                let _flags = r.u8()?;
+                let commit_lsn = r.u64()?;
+                let end_lsn = r.u64()?;
+                let ts = r.u64()?;
+                let spool = self.spools.remove(&xid).ok_or_else(|| format!("streamed transaction {xid} was not started"))?;
+                self.stream_commit(xid, commit_lsn, end_lsn, ts, spool)
+            }
             b'B' => {
                 let final_lsn = r.u64()?;
+                let _ts = r.u64()?;
+                let xid = r.u32()?;
                 if self.txn.is_some() {
                     return Err("BEGIN message in a transaction".into());
                 }
                 let skip = final_lsn < self.progress();
-                self.txn = Some(RemoteTxn { final_lsn, skip });
+                // maybe_start_skipping_changes: ALTER SUBSCRIPTION ... SKIP named it.
+                let skipping = !skip && final_lsn != 0 && self.skip_lsn() == final_lsn;
+                if skipping {
+                    tracing::info!("logical replication starts skipping transaction at LSN {}", lsn(final_lsn));
+                }
+                self.txn = Some(RemoteTxn { final_lsn, xid, skip, skipping });
                 if !skip {
                     self.query("BEGIN")?;
                 }
@@ -808,14 +1037,21 @@ impl Worker<'_> {
                     return Ok(());
                 }
                 self.ready_tables(end_lsn, false)?;
+                if t.skipping {
+                    self.clear_skip_lsn(t.final_lsn)?;
+                }
                 self.repl.origins.xact_setup(self.pid, end_lsn, ts).map_err(|e| e.message)?;
                 let r = self.query("COMMIT");
                 self.repl.origins.xact_reset(self.pid);
                 r?;
+                if t.skipping {
+                    tracing::info!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn));
+                }
                 Ok(())
             }
             b'R' => {
                 let id = r.u32()?;
+                self.local.remove(&id);
                 let nsp = r.cstr()?;
                 let name = r.cstr()?;
                 let ident = r.u8()?;
@@ -834,60 +1070,35 @@ impl Worker<'_> {
             // Type, origin and logical decoding messages: nothing to apply.
             b'Y' | b'O' | b'M' => Ok(()),
             b'I' => {
-                let rel = self.remote_rel(r.u32()?)?;
+                let id = r.u32()?;
                 if r.u8()? != b'N' {
                     return Err("expected new tuple but got something else".into());
                 }
                 let new = r.tuple()?;
-                let Some(target) = self.target(&rel)? else { return Ok(()) };
-                let (names, vals): (Vec<String>, Vec<String>) = rel
-                    .cols
-                    .iter()
-                    .zip(&new)
-                    .filter(|(_, v)| !matches!(v, Col::Unchanged))
-                    .map(|((n, _), v)| (quote_ident(n), literal(v)))
-                    .unzip();
-                self.query(&format!("INSERT INTO {target} ({}) VALUES ({})", names.join(", "), vals.join(", ")))?;
-                Ok(())
+                self.change(id, Change::Insert(new))
             }
             b'U' => {
-                let rel = self.remote_rel(r.u32()?)?;
+                let id = r.u32()?;
                 let mut old = None;
                 let mut k = r.u8()?;
                 if k == b'K' || k == b'O' {
-                    old = Some((k, r.tuple()?));
+                    old = Some(r.tuple()?);
                     k = r.u8()?;
                 }
                 if k != b'N' {
                     return Err("expected action 'N', got something else".into());
                 }
                 let new = r.tuple()?;
-                let Some(target) = self.target(&rel)? else { return Ok(()) };
-                let set: Vec<String> = rel
-                    .cols
-                    .iter()
-                    .zip(&new)
-                    .filter(|(_, v)| !matches!(v, Col::Unchanged))
-                    .map(|((n, _), v)| format!("{} = {}", quote_ident(n), literal(v)))
-                    .collect();
-                if set.is_empty() {
-                    return Ok(());
-                }
-                let cond = self.find_row(&rel, &target, old.as_ref(), &new)?;
-                let r = self.query(&format!("UPDATE {target} SET {} WHERE {cond}", set.join(", ")))?;
-                self.missing(&r, &target, "update")
+                self.change(id, Change::Update(old, new))
             }
             b'D' => {
-                let rel = self.remote_rel(r.u32()?)?;
+                let id = r.u32()?;
                 let k = r.u8()?;
                 if k != b'K' && k != b'O' {
                     return Err("expected action 'O' or 'K'".into());
                 }
                 let old = r.tuple()?;
-                let Some(target) = self.target(&rel)? else { return Ok(()) };
-                let cond = self.find_row(&rel, &target, Some(&(k, old.clone())), &old)?;
-                let r = self.query(&format!("DELETE FROM {target} WHERE {cond}"))?;
-                self.missing(&r, &target, "delete")
+                self.change(id, Change::Delete(old))
             }
             b'T' => {
                 let n = r.u32()?;
@@ -909,6 +1120,92 @@ impl Worker<'_> {
         }
     }
 
+    /// TwoPhaseTransactionGid: the local name of remote prepared transaction `xid`.
+    fn gid(&self, xid: u32) -> String {
+        format!("pg_gid_{}_{xid}", self.sub.oid)
+    }
+
+    fn prepared_here(&self, gid: &str) -> bool {
+        self.sess.state.db.twophase().list().iter().any(|i| i.gid == gid)
+    }
+
+    /// apply_handle_begin_prepare: like BEGIN; a transaction prepared here already (sent
+    /// again after a restart) is left out.
+    fn begin_prepare(&mut self, prepare_lsn: u64, xid: u32) -> Result<(), String> {
+        if self.txn.is_some() {
+            return Err("BEGIN PREPARE message in a transaction".into());
+        }
+        let skip = prepare_lsn < self.progress() || self.prepared_here(&self.gid(xid));
+        let skipping = !skip && self.skip_lsn() == prepare_lsn;
+        if skipping {
+            tracing::info!("logical replication starts skipping transaction at LSN {}", lsn(prepare_lsn));
+        }
+        self.txn = Some(RemoteTxn { final_lsn: prepare_lsn, xid, skip, skipping });
+        if !skip {
+            self.query("BEGIN")?;
+        }
+        Ok(())
+    }
+
+    /// apply_handle_prepare: the transaction prepared here as pg_gid_<subid>_<xid> (a
+    /// skipped one empty, so its COMMIT PREPARED finds it); the origin moves past it.
+    fn prepare(&mut self, prepare_lsn: u64, end_lsn: u64) -> Result<(), String> {
+        let Some(t) = self.txn.take() else {
+            return Err("PREPARE message without a transaction".into());
+        };
+        if prepare_lsn != t.final_lsn {
+            return Err(format!("incorrect prepare LSN {} in prepare message (expected {})", lsn(prepare_lsn), lsn(t.final_lsn)));
+        }
+        if t.skip {
+            return Ok(());
+        }
+        self.ready_tables(end_lsn, false)?;
+        if t.skipping {
+            self.clear_skip_lsn(t.final_lsn)?;
+        }
+        let gid = self.gid(t.xid);
+        self.query(&format!("PREPARE TRANSACTION {}", walrcv::literal(&gid)))?;
+        self.repl.origins.advance(self.origin, end_lsn, 0, false);
+        if t.skipping {
+            tracing::info!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn));
+        }
+        Ok(())
+    }
+
+    /// apply_handle_commit_prepared / _rollback_prepared: the local prepared transaction
+    /// finished, the origin's position stored with it. One not prepared here (finished before
+    /// a restart) has nothing left to do.
+    fn finish_prepared(&mut self, xid: u32, end_lsn: u64, ts: i64, commit: bool) -> Result<(), String> {
+        let gid = self.gid(xid);
+        if !self.prepared_here(&gid) {
+            if commit && end_lsn > self.progress() {
+                return Err(format!("prepared transaction with identifier \"{gid}\" does not exist"));
+            }
+            return Ok(());
+        }
+        self.repl.origins.xact_setup(self.pid, end_lsn, ts).map_err(|e| e.message)?;
+        let verb = if commit { "COMMIT" } else { "ROLLBACK" };
+        let r = self.query(&format!("{verb} PREPARED {}", walrcv::literal(&gid)));
+        self.repl.origins.xact_reset(self.pid);
+        r.map(|_| ())
+    }
+
+    /// apply_handle_stream_commit: the spooled transaction applied as a remote transaction
+    /// that came whole (its BEGIN, changes and COMMIT).
+    fn stream_commit(&mut self, xid: u32, commit_lsn: u64, end_lsn: u64, ts: u64, spool: super::apply_stream::Spool) -> Result<(), String> {
+        let mut b = vec![b'B'];
+        b.extend_from_slice(&commit_lsn.to_be_bytes());
+        b.extend_from_slice(&ts.to_be_bytes());
+        b.extend_from_slice(&xid.to_be_bytes());
+        self.apply(&b)?;
+        spool.replay(|m| self.apply(m))?;
+        let mut c = vec![b'C', 0];
+        c.extend_from_slice(&commit_lsn.to_be_bytes());
+        c.extend_from_slice(&end_lsn.to_be_bytes());
+        c.extend_from_slice(&ts.to_be_bytes());
+        self.apply(&c)
+    }
+
     fn remote_rel(&self, id: u32) -> Result<RemoteRel, String> {
         self.rels
             .get(&id)
@@ -922,7 +1219,7 @@ impl Worker<'_> {
         let Some(t) = &self.txn else {
             return Err("logical replication change outside a transaction".into());
         };
-        if t.skip {
+        if t.skip || t.skipping {
             return Ok(None);
         }
         let final_lsn = t.final_lsn;
@@ -958,52 +1255,109 @@ impl Worker<'_> {
         Ok(apply.then(|| qualified(&rel.nsp, &rel.name)))
     }
 
-    /// The condition finding the row an UPDATE / DELETE changes: by the replica identity's
-    /// columns (the old key, or the new row's key when it didn't change), or by every column
-    /// of the old row with REPLICA IDENTITY FULL (one such row, as PG takes the first found).
-    fn find_row(&self, rel: &RemoteRel, target: &str, old: Option<&(u8, Vec<Col>)>, new: &[Col]) -> Result<String, String> {
-        let (full, vals) = match old {
-            Some((b'O', t)) => (true, t.as_slice()),
-            Some((_, t)) => (false, t.as_slice()),
-            None => (false, new),
+    /// An INSERT / UPDATE / DELETE message applied (apply_handle_*) as a step of the open
+    /// transaction. A row an UPDATE or DELETE doesn't find is a conflict logged; an error
+    /// rolls the transaction back and carries the CONTEXT naming the change.
+    fn change(&mut self, id: u32, ch: Change) -> Result<(), String> {
+        let Some(rel) = self.rels.get(&id) else {
+            return Err(format!("no relation map entry for remote relation ID {id}"));
         };
-        let mut conds = Vec::new();
-        for ((name, key), v) in rel.cols.iter().zip(vals) {
-            if !full && !key {
-                continue;
+        let Some(t) = &self.txn else {
+            return Err("logical replication change outside a transaction".into());
+        };
+        if t.skip || t.skipping {
+            return Ok(());
+        }
+        let (final_lsn, xid) = (t.final_lsn, t.xid);
+        let (states, local) = (&self.states, &mut self.local);
+        let r = self.sess.apply_step(|ctx| {
+            if local.get(&id).is_none_or(|l| !l.current(ctx)) {
+                local.insert(id, apply_rows::open(rel, ctx)?);
             }
-            let c = quote_ident(name);
-            match v {
-                Col::Unchanged => {}
-                Col::Null => conds.push(format!("{c} IS NULL")),
-                v if full => conds.push(format!("{c} IS NOT DISTINCT FROM {}", literal(v))),
-                v => conds.push(format!("{c} = {}", literal(v))),
+            let lr = &local[&id];
+            // should_apply_changes_for_rel.
+            let apply = match states.get(&lr.relid) {
+                Some(('r', _)) => true,
+                Some(('s', l)) => *l <= final_lsn,
+                _ => false,
+            };
+            if !apply {
+                return Ok(apply_rows::Outcome::Applied);
+            }
+            ctx.txn.borrow_mut().lock_relation(
+                lr.relid,
+                crate::txn::locks::LockMode::RowExclusive,
+                crate::txn::locks::WaitPolicy::Block,
+                &|| rel.name.clone(),
+            )?;
+            match &ch {
+                Change::Insert(new) => apply_rows::insert(lr, rel, new, ctx).map(|_| apply_rows::Outcome::Applied),
+                Change::Update(old, new) => apply_rows::update(lr, rel, old.as_deref(), new, ctx),
+                Change::Delete(old) => apply_rows::delete(lr, rel, old, ctx),
+            }
+        });
+        if let Ok(apply_rows::Outcome::Applied) = r {
+            return Ok(());
+        }
+        let rel = self.rels.get(&id).cloned().unwrap_or_else(|| RemoteRel { nsp: String::new(), name: String::new(), ident: 0, cols: Vec::new() });
+        let context = format!(
+            "processing remote data for replication origin \"pg_{}\" during message type \"{}\" for replication target relation \"{}.{}\" in transaction {xid}, finished at {}",
+            self.sub.oid,
+            ch.name(),
+            rel.nsp,
+            rel.name,
+            lsn(final_lsn)
+        );
+        let cat = self.sess.state.db.catalog();
+        match r {
+            Ok(apply_rows::Outcome::Applied) => Ok(()),
+            Ok(apply_rows::Outcome::Missing(kind, detail)) => {
+                crate::sql::func::pubsub::count_subscription_stat(&cat, self.sub.oid, kind);
+                tracing::info!(
+                    "conflict detected on relation \"{}.{}\": conflict={kind}\nDETAIL:  {detail}\nCONTEXT:  {context}",
+                    rel.nsp,
+                    rel.name
+                );
+                Ok(())
+            }
+            Err(err) => {
+                if err.message.starts_with("conflict detected")
+                    && let Some(kind) = err.message.split("conflict=").nth(1)
+                {
+                    crate::sql::func::pubsub::count_subscription_stat(&cat, self.sub.oid, kind);
+                }
+                drop(cat);
+                if self.sess.status() != crate::session::TxnStatus::Idle {
+                    let _ = self.sess.query("ROLLBACK");
+                }
+                self.txn = None;
+                let mut m = err.message;
+                if let Some(d) = &err.detail {
+                    m.push_str(&format!("\nDETAIL:  {d}"));
+                }
+                if let Some(c) = &err.context {
+                    m.push_str(&format!("\nCONTEXT:  {c}"));
+                }
+                m.push_str(&format!("\nCONTEXT:  {context}"));
+                Err(m)
             }
         }
-        if conds.is_empty() {
-            return Err(format!(
-                "publisher did not send replica identity column expected by the logical replication target relation \"{}.{}\"",
-                rel.nsp, rel.name
-            ));
-        }
-        let cond = conds.join(" AND ");
-        // (One row of those matching, as FindReplTupleInLocalRel takes the first; the
-        // condition again outside, so a row id that moved can't take another row.)
-        Ok(if full || rel.ident == b'n' {
-            format!("ctid = (SELECT ctid FROM {target} WHERE {cond} LIMIT 1) AND {cond}")
-        } else {
-            cond
-        })
     }
+}
 
-    /// A row an UPDATE / DELETE didn't find: logged as PG 18 logs the conflict.
-    fn missing(&self, r: &[crate::session::QueryResult], target: &str, op: &str) -> Result<(), String> {
-        let n: u64 = r.last().and_then(|r| r.tag.rsplit(' ').next()?.parse().ok()).unwrap_or(0);
-        if n == 0 {
-            tracing::info!(
-                "conflict detected on relation {target}: conflict={op}_missing\nDETAIL:  Could not find the row to be {op}d."
-            );
+/// An INSERT, UPDATE (old key or row, if sent; new row) or DELETE (old key or row) message.
+enum Change {
+    Insert(Vec<Col>),
+    Update(Option<Vec<Col>>, Vec<Col>),
+    Delete(Vec<Col>),
+}
+
+impl Change {
+    fn name(&self) -> &'static str {
+        match self {
+            Change::Insert(_) => "INSERT",
+            Change::Update(..) => "UPDATE",
+            Change::Delete(_) => "DELETE",
         }
-        Ok(())
     }
 }

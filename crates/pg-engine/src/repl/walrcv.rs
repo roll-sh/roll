@@ -166,17 +166,27 @@ pub fn published_columns(c: &mut Conn, nsp: &str, rel: &str, pubs: &[String], in
     Ok(r.rows.iter().filter_map(|r| r.first().cloned().flatten()).collect())
 }
 
-/// walrcv_startstreaming (pgoutput, protocol 4, text values, not streamed).
-pub fn start_streaming(c: &mut Conn, slot: &str, start: u64, pubs: &[String], origin: &str, binary: bool, intr: Interrupt) -> Result<(), Fail> {
+/// walrcv_startstreaming (pgoutput, protocol 4, text values): `streaming` 'on' / 'parallel'
+/// (None: off), prepared transactions decoded at PREPARE with `two_phase`.
+#[allow(clippy::too_many_arguments)]
+pub fn start_streaming(
+    c: &mut Conn,
+    slot: &str,
+    start: u64,
+    pubs: &[String],
+    origin: &str,
+    streaming: Option<&str>,
+    two_phase: bool,
+    intr: Interrupt,
+) -> Result<(), Fail> {
     let names = pubs.iter().map(|p| format!("\"{}\"", p.replace('"', "\"\""))).collect::<Vec<_>>().join(",");
-    let mut cmd = format!(
-        "START_REPLICATION SLOT \"{slot}\" LOGICAL {} (proto_version '4', streaming 'off', origin '{origin}', publication_names {}",
-        super::lsn::fmt(start),
-        literal(&names)
-    );
-    if binary {
-        cmd.push_str(", binary 'true'");
+    let mut cmd = format!("START_REPLICATION SLOT \"{slot}\" LOGICAL {} (proto_version '4'", super::lsn::fmt(start));
+    if let Some(s) = streaming {
+        cmd.push_str(&format!(", streaming '{s}'"));
     }
-    cmd.push(')');
+    if two_phase {
+        cmd.push_str(", two_phase 'on'");
+    }
+    cmd.push_str(&format!(", origin '{origin}', publication_names {})", literal(&names)));
     c.start_copy_both(&cmd, intr)?.map_err(|m| remote(format!("could not start WAL streaming: {m}")))
 }

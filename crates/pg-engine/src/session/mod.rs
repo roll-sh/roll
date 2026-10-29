@@ -856,6 +856,18 @@ impl Session {
         self.with_ctx_path(params, None, f)
     }
 
+    /// One change of a logical replication apply worker in its open transaction
+    /// (begin_replication_step .. end_replication_step): `f` runs as a statement of its own,
+    /// with its snapshot and command id, and no SQL text, plan or command tag. An error fails
+    /// the transaction.
+    pub(crate) fn apply_step<T>(&mut self, f: impl FnOnce(&ExecCtx) -> Result<T>) -> Result<T> {
+        let r = crate::stack::grow(|| self.with_ctx(&[], |ctx| ctx.statement(|| f(ctx))));
+        if r.is_err() {
+            self.on_error();
+        }
+        r
+    }
+
     /// `with_ctx`, given the session's search path when the caller has it at hand
     /// (`SessionState::search_path`, after `ensure_txn`).
     fn with_ctx_path<T>(

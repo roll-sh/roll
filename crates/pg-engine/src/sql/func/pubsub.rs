@@ -163,7 +163,41 @@ fn publication_tables(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
 /// like Postgres's statistics, not transactional. By cluster too: subscription oids repeat
 /// across the engines (and stores) of a process; a cluster is its oid counter, held by a
 /// `Weak` so no later counter takes its address.
-type Resets = std::collections::HashMap<(usize, u32), (std::sync::Weak<crate::catalog::shared::OidGen>, i64)>;
+type Resets = std::collections::HashMap<(usize, u32), (std::sync::Weak<crate::catalog::shared::OidGen>, SubStats)>;
+
+/// A subscription's counters (pg_stat_subscription_stats): apply_error_count,
+/// sync_error_count and the conflicts in ConflictType order, and when they were last reset.
+#[derive(Default)]
+struct SubStats {
+    reset: Option<i64>,
+    counts: [i64; 9],
+}
+
+/// The pg_stat_subscription_stats counters, by column (`SUB_STAT_NAMES`).
+pub const SUB_STAT_NAMES: [&str; 9] = [
+    "apply_error",
+    "sync_error",
+    "insert_exists",
+    "update_origin_differs",
+    "update_exists",
+    "update_missing",
+    "delete_origin_differs",
+    "delete_missing",
+    "multiple_unique_conflicts",
+];
+
+/// pgstat_report_subscription_error / _conflict: one more of counter `what` (a
+/// `SUB_STAT_NAMES` entry) for subscription `subid` of `cat`'s cluster.
+pub fn count_subscription_stat(cat: &crate::catalog::Catalog, subid: u32, what: &str) {
+    let Some(i) = SUB_STAT_NAMES.iter().position(|n| *n == what) else { return };
+    let (k, w) = match &cat.oids {
+        Some(g) => (std::sync::Arc::as_ptr(g) as usize, std::sync::Arc::downgrade(g)),
+        None => (0, std::sync::Weak::new()),
+    };
+    let mut r = RESETS.lock();
+    r.retain(|_, v| v.0.strong_count() > 0 || v.0.ptr_eq(&std::sync::Weak::new()));
+    r.entry((k, subid)).or_insert_with(|| (w, SubStats::default())).1.counts[i] += 1;
+}
 static RESETS: std::sync::LazyLock<parking_lot::Mutex<Resets>> = std::sync::LazyLock::new(Default::default);
 
 /// The cluster of the running statement (`RESETS`'s key) and a `Weak` holding it.
@@ -174,20 +208,18 @@ fn cluster(c: &FnCtx) -> (usize, std::sync::Weak<crate::catalog::shared::OidGen>
     }
 }
 
-/// pg_stat_get_subscription_stats(subid): no errors or conflicts counted; when it was last
-/// reset.
+/// pg_stat_get_subscription_stats(subid): the errors and conflicts counted, when they were
+/// last reset.
 fn subscription_stats(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let Some(oid) = a[0].as_i64().map(|o| o as u32) else {
         return Ok(Box::new(std::iter::empty()));
     };
     let (k, _) = cluster(c);
-    let reset = RESETS
-        .lock()
-        .get(&(k, oid))
-        .map_or(Value::Null, |t| Value::Timestamptz(t.1));
+    let r = RESETS.lock();
+    let st = r.get(&(k, oid)).map(|t| &t.1);
     let mut row = vec![Value::Oid(oid)];
-    row.extend((0..9).map(|_| Value::Int8(0)));
-    row.push(reset);
+    row.extend((0..9).map(|i| Value::Int8(st.map_or(0, |s| s.counts[i]))));
+    row.push(st.and_then(|s| s.reset).map_or(Value::Null, Value::Timestamptz));
     Ok(Box::new(std::iter::once(Ok(row))))
 }
 
@@ -199,11 +231,11 @@ pub fn reset_subscription_stats(a: &[Value], c: &FnCtx) -> Result<Value> {
     let mut r = RESETS.lock();
     match a[0].as_i64() {
         Some(o) => {
-            r.insert((k, o as u32), (w, now));
+            r.insert((k, o as u32), (w, SubStats { reset: Some(now), counts: [0; 9] }));
         }
         None => {
             for s in c.exec.catalog().subscriptions.keys() {
-                r.insert((k, *s), (w.clone(), now));
+                r.insert((k, *s), (w.clone(), SubStats { reset: Some(now), counts: [0; 9] }));
             }
         }
     }

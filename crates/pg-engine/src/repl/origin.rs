@@ -35,6 +35,9 @@ pub struct SessionOrigin {
 struct State {
     origins: Vec<Origin>,
     sessions: HashMap<i32, SessionOrigin>,
+    /// Progress moved by commits since the file was last written, and when that was.
+    dirty: bool,
+    saved_at: Option<std::time::Instant>,
 }
 
 pub struct Origins {
@@ -80,6 +83,15 @@ fn no_origin(name: &str) -> Error {
     Error::new(code::UNDEFINED_OBJECT, format!("replication origin \"{name}\" does not exist"))
 }
 
+impl Drop for Origins {
+    fn drop(&mut self) {
+        let mut st = std::mem::take(&mut *self.st.lock());
+        if st.dirty {
+            self.save(&mut st);
+        }
+    }
+}
+
 impl Origins {
     pub fn open(dir: Option<PathBuf>) -> Origins {
         let path = dir.map(|d| d.join("replorigins.json"));
@@ -89,10 +101,12 @@ impl Origins {
             .and_then(|b| serde_json::from_slice::<Stored>(&b).ok())
             .map(|s| s.origins)
             .unwrap_or_default();
-        Origins { st: Mutex::new(State { origins, sessions: HashMap::new() }), sessions_n: AtomicUsize::new(0), path }
+        Origins { st: Mutex::new(State { origins, sessions: HashMap::new(), dirty: false, saved_at: None }), sessions_n: AtomicUsize::new(0), path }
     }
 
-    fn save(&self, st: &State) {
+    fn save(&self, st: &mut State) {
+        st.dirty = false;
+        st.saved_at = Some(std::time::Instant::now());
         let Some(p) = &self.path else { return };
         let tmp = p.with_extension("json.tmp");
         if let Ok(b) = serde_json::to_vec(&Stored { origins: st.origins.clone() })
@@ -104,6 +118,11 @@ impl Origins {
 
     pub fn list(&self) -> Vec<Origin> {
         self.st.lock().origins.clone()
+    }
+
+    /// Origin `id`'s remote position (0: none).
+    pub fn remote_lsn(&self, id: u16) -> u64 {
+        self.st.lock().origins.iter().find(|o| o.id == id).map_or(0, |o| o.remote_lsn)
     }
 
     pub fn by_name(&self, name: &str) -> Option<Origin> {
@@ -129,7 +148,7 @@ impl Origins {
             return Err(Error::new(code::PROGRAM_LIMIT_EXCEEDED, "could not find free replication origin ID"));
         };
         st.origins.push(Origin { id, name: name.to_string(), remote_lsn: 0, local_lsn: 0 });
-        self.save(&st);
+        self.save(&mut st);
         Ok(id)
     }
 
@@ -146,7 +165,7 @@ impl Origins {
             ));
         }
         st.origins.retain(|x| x.id != o.id);
-        self.save(&st);
+        self.save(&mut st);
         Ok(())
     }
 
@@ -161,7 +180,22 @@ impl Origins {
                 o.local_lsn = local;
             }
         }
-        self.save(&st);
+        self.save(&mut st);
+    }
+
+    /// `advance` for a commit that stored the origin's progress itself (`before_commit`'s
+    /// key): the file, which only reports it after a restart, is written at most once a
+    /// second (and when the origins close), not with every applied transaction.
+    pub fn advance_committed(&self, id: u16, remote: u64, local: u64) {
+        let mut st = self.st.lock();
+        if let Some(o) = st.origins.iter_mut().find(|o| o.id == id) {
+            o.remote_lsn = o.remote_lsn.max(remote);
+            o.local_lsn = o.local_lsn.max(local);
+        }
+        st.dirty = true;
+        if st.saved_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+            self.save(&mut st);
+        }
     }
 
     pub fn session(&self, pid: i32) -> Option<SessionOrigin> {
@@ -243,11 +277,19 @@ pub fn before_commit(sess: &crate::session::state::SessionState, txn: &mut crate
     Some((so.id, so.xact_lsn))
 }
 
+/// The session origin's position a ROLLBACK PREPARED stores with its record (no commit of a
+/// transaction carries it): (origin, position), None without one.
+pub fn rollback_progress(sess: &crate::session::state::SessionState) -> Option<(u16, u64)> {
+    let r = sess.db.repl()?;
+    let so = r.origins.session(sess.pid)?;
+    (so.xact_lsn != 0).then_some((so.id, so.xact_lsn))
+}
+
 /// After it committed: the origin's progress in memory (replorigin_session_advance: the local
 /// position moves with every commit, the remote one only with a session origin position).
 pub fn after_commit(sess: &crate::session::state::SessionState, (id, lsn): (u16, u64)) {
     if let Some(r) = sess.db.repl() {
-        r.origins.advance(id, lsn, r.wal.current(), false);
+        r.origins.advance_committed(id, lsn, r.wal.current());
     }
 }
 

@@ -912,7 +912,7 @@ fn row_tid(t: &Table, key: &[u8], ctx: &ExecCtx) -> (u32, u16) {
 }
 
 /// A committed row (or one this transaction wrote) other than `own` with the unique key.
-fn committed_conflict(
+pub(crate) fn committed_conflict(
     t: &Table,
     bix: &BoundIndex,
     vals: &[Value],
@@ -2560,7 +2560,7 @@ fn fk_parent_action(
 
 /// The data key a row is stored under after an update (from its primary key, or the row's
 /// unchanged key `dkey`).
-pub(super) fn stored_key(t: &Table, row: &[Value], dkey: &[u8]) -> Vec<u8> {
+pub(crate) fn stored_key(t: &Table, row: &[Value], dkey: &[u8]) -> Vec<u8> {
     if t.storage_pkey().is_some() {
         data_key(t, row, None)
     } else {

@@ -523,7 +523,9 @@ fn stream_acquired(
                 let m = m?;
                 let mut err = None;
                 dec.decode(&m, &mut |o| {
-                    w.put(b'd', &xlog_data(o.lsn, end, &o.data));
+                    // (A logical walsender's walEnd is the record's own position too,
+                    // WalSndPrepareWrite: a receiver confirming it confirms no later one.)
+                    w.put(b'd', &xlog_data(o.lsn, o.lsn, &o.data));
                     if let Err(e) = w.flush() {
                         err = Some(e);
                     }

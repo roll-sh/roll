@@ -17,6 +17,7 @@ pub mod pipe;
 pub mod pgstat;
 pub mod pgsort;
 pub mod sizing;
+pub mod replication;
 pub mod trigger;
 pub mod window;
 

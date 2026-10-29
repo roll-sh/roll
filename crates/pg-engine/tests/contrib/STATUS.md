@@ -137,6 +137,15 @@ transactional message), stopped with SIGINT, the slot's confirmed position at th
 restarted from there with only the new transaction, --drop-slot.
 - twophase (2): pg_locks rows of a prepared transaction (lock code).
 
+Subscriber, round 20 agent 96 (HANDOFF "Native apply"): one PostgreSQL 18.6 publisher stream
+applied by an engine subscriber and by a PostgreSQL 18.6 subscriber side by side, identical
+at the end (tables, trigger logs, conflict counters), covering every replica identity, a
+partitioned target with partition moves, ALWAYS / REPLICA triggers, local-only columns,
+streamed transactions (logical_decoding_work_mem = 64kB on the publisher) with rolled-back
+savepoints, insert_exists / update_missing / delete_missing, SKIP, disable_on_error and
+two_phase with a streamed PREPARE; the engine publishing to PostgreSQL 18.6 again after the
+walsender's walEnd change. test_decoding unchanged (the tail above is still open).
+
 ### pgvector (round 20, agent 70)
 
 Not a contrib module: pgvector 0.8.7's own suite (`test/sql`, `test/expected` at the v0.8.7

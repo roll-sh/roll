@@ -701,27 +701,99 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     subscription. Table sync copies each table under a temporary slot's snapshot, then the
     pgoutput stream is applied one local transaction per remote one, the subscription's
     origin (`pg_<subid>`) committed with it, so a restart resumes after the last local commit.
-    Apply runs SQL statements as the subscription owner (REPLICA IDENTITY FULL / NOTHING rows
-    by `ctid = (first match) AND <all columns>`); conflicts are logged as PostgreSQL 18 logs
-    them. The launcher looks every 0.5 s while the cluster has subscriptions (or for 10 s after
+    Apply runs as the subscription owner; since round 20's agent 96 it is native (below);
+    conflicts are logged as PostgreSQL 18 logs them. The launcher looks every 0.5 s while the
+    cluster has subscriptions (or for 10 s after
     subscription DDL woke it) and sleeps otherwise: no periodic work without subscriptions.
     Verified (agent 87, debug build, PostgreSQL 18.6 publisher): initial copy of three tables
     (PK, REPLICA IDENTITY FULL, unique), then 10,000 small transactions plus PK updates,
     TRUNCATE and FULL-identity updates, both sides identical (row counts, sums, md5 of every
     row), no conflicts; a restart resumes; regress subset (subscription, publication, ...)
-    unchanged. Open:
+    unchanged.
+  - **Native apply** (round 20, agent 96; `exec/replication.rs` = execReplication.c,
+    `repl/apply_rows.rs` = logicalrep_rel_open / slot_store_data / apply_handle_*): no SQL
+    text, parse or plan per change. A remote relation's local table is bound once per catalog
+    version (`TableRules`, partition routing, how rows are found), each change runs as a step
+    of the open local transaction (`Session::apply_step`: a snapshot and command id, no
+    statement). Values go through the columns' input functions; INSERT through `insert_new` /
+    `insert_routed` (defaults for unsent columns, BEFORE / AFTER ROW triggers as
+    session_replication_role enables them, generated columns, checks, unique keys); UPDATE /
+    DELETE find the row by the replica identity index or primary key (`committed_conflict`'s
+    key lookup), else with the publisher's REPLICA IDENTITY FULL by the first usable
+    btree / hash index's leading columns or a scan, the whole row deciding (tuples_equal; "could
+    not identify an equality operator" for json, point, ...), lock it (a row changed meanwhile
+    is looked for again) and change it through `update_row` / `delete_row`. A partitioned
+    target routes the search row to its leaf; a row leaving its partition is deleted there
+    and inserted through the root (apply_handle_tuple_routing). Never by ctid. AFTER ROW
+    triggers fire at the end of each change, no statement triggers. Conflicts as PostgreSQL
+    18.6: insert_exists / update_exists / multiple_unique_conflicts are errors (23505, DETAIL
+    "Key already exists in unique index ..., modified in transaction N." and "Key ...; existing
+    local row ...; remote row ..."), update_missing / delete_missing are logged; errors carry
+    the "processing remote data for replication origin ..." CONTEXT. pg_stat_subscription_stats
+    counts apply / sync errors and conflicts (`pubsub::count_subscription_stat`); a failed
+    worker starts again 5 s after its last start (wal_retrieve_retry_interval). logicalrep's
+    errors: missing replicated columns, a local generated column the publisher sends, a target
+    that isn't a table, "publisher did not send replica identity column ..." / "has neither
+    REPLICA IDENTITY index nor PRIMARY KEY ...".
+    Speed (release builds, fsync on both, one PostgreSQL 18.6 publisher stream of 20,000
+    pgbench-like transactions (UPDATE of a 10,000-row table, INSERT into an indexed history
+    table, every third a DELETE) made with both subscriptions disabled, each then enabled alone
+    and timed until its slot confirmed the end; machine at load 30-35): PostgreSQL 18.6
+    subscriber 9,000-13,000 transactions/s, the engine 4,300-4,800 (was SQL text per change,
+    ~13/s in a loaded debug build); both end identical. Memory: the engine's RSS grew 68 to 88 MB
+    over the run (memtable included), PostgreSQL's apply worker 25 MB RSS (shared buffers
+    apart). What it took: the origins file was rewritten on every applied commit (31% of the
+    worker's time; now at most once a second, `Origins::advance_committed`, the store's progress
+    key being the durable one), feedback went after every transaction (now when the received
+    data runs out, as LogicalRepApplyLoop). Left: 11% is the WAL fsync each applied commit
+    waits for (synchronous_commit = off, the subscriptions' default, isn't honoured: the store
+    makes a commit visible only once durable, so an async commit needs a visibility change in
+    `Store::commit_grouped`); then allocation and the size model (`btsim`) of every insert.
+    The commit path without slots is unchanged: in-process `bench oltp`, one client on 4 CPUs,
+    6 interleaved rounds of base 7afe80e8 and head at load ~30: insert medians 8.6k / 8.8k tps,
+    update_indexed 6.5k / 6.6k, peak memory alike.
+  - **Streaming, two-phase, SKIP, disable_on_error** (agent 96): streaming = on / parallel
+    asks the publisher to stream; a streamed transaction's changes are spooled to an unnamed
+    file in the store's spill directory (`repl/apply_stream.rs`; memory stays at a 64 kB
+    buffer), a rolled-back subtransaction's cut off at its Stream Abort, the rest applied at
+    Stream Commit (parallel is applied as on: no parallel apply worker rows in
+    pg_stat_subscription). two_phase = true is pending until every table is ready, then
+    enabled as streaming starts; Begin Prepare / Prepare make a local prepared transaction
+    `pg_gid_<subid>_<xid>` (the subscriber needs max_prepared_transactions), Commit / Rollback
+    Prepared finish it with the origin's position stored with them (`finish_prepared` now
+    takes a session origin, as RecordTransactionCommitPrepared does), Stream Prepare too; one
+    sent again after a restart is recognised by its gid. ALTER SUBSCRIPTION ... SKIP leaves out
+    the transaction finishing there and clears subskiplsn with its commit; disable_on_error
+    (as committed when the error happens) disables the subscription after logging the error.
+    The engine's walsender now sends each XLogData's walEnd as the record's position, as
+    PostgreSQL's logical walsender does: it sent the WAL end, and a receiver confirming that
+    after a no-op transaction confirmed transactions it hadn't applied yet (an engine
+    subscriber of the engine lost them after an apply error).
+  - Verified (agent 96): `tests/logical_apply.rs` (engine to engine, in process), and against
+    PostgreSQL 18.6 on one stream into both an engine and a PostgreSQL subscriber (e2e scripts
+    in the round's notes: PK with TOAST unchanged columns, key updates, FULL with and without
+    an index, USING INDEX identity with key changes, a partitioned target with partition
+    moves, ALWAYS / REPLICA / ordinary triggers, defaults and generated columns of local-only
+    columns, varchar / numeric / timestamptz / arrays / jsonb / float edge values, a streamed
+    transaction with a rolled-back savepoint and a rolled-back one, conflicts, SKIP,
+    disable_on_error, two-phase incl. a streamed prepare): identical tables, trigger logs,
+    conflict log lines (but the xids) and statistics; and the engine publishing the same
+    workload to PostgreSQL 18.6, identical. Crate tests, clippy (no new warnings), difftest
+    smoke, test_decoding 1,024 / 1,047 (unchanged), a full regress run on a private reference
+    51,148 / 51,150 with no unit changed against `results.tsv`. Open:
     - **Duplicate ctids after a crash** (engine bug, not replication: reproduced at ea038e8e
       with plain SQL): kill -9 during a stream of `BEGIN; INSERT ...; UPDATE t SET id = k, v
       = ..., n = ... WHERE id = k; COMMIT` transactions, restart, run 1,000 more: `SELECT
       count(*), count(DISTINCT ctid)` gives 5,000 / 4,759. The heap model rebuilt at the
       restart (`sizing`, `heapsim::rewritten`, `row_tids` / `locate`) hands out positions
-      other rows hold. A subscriber's FULL-identity UPDATEs by ctid then changed the wrong rows
-      after a crash (the `AND <all columns>` recheck doesn't stop it: the row a ctid reads and
-      the row it writes differ).
-    - Apply speed: statements as SQL text, about 13 remote transactions a second in a loaded
-      debug build; apply rows natively (as the executor's DML does) to beat PostgreSQL here.
-    - Streaming of in-progress transactions (streaming = on / parallel), two_phase,
-      disable_on_error, run_as_owner details, the copy's parallel table sync workers.
+      other rows hold. (Apply no longer reads ctids.)
+    - Binary transfer (`binary = true` is accepted but values still come as text), parallel
+      apply workers, the copy's parallel table sync workers, run_as_owner's per-table role
+      switch and the RLS / privilege checks of the target (TargetPrivilegesCheck),
+      update_origin_differs / delete_origin_differs (need track_commit_timestamp).
+    - pg_stat_subscription_stats counts of conflicts in no-op transactions sent again after a
+      restart differ with timing (PostgreSQL resends them when its feedback hadn't confirmed
+      them yet).
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
