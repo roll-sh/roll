@@ -201,6 +201,8 @@ impl Hba {
         &self,
         peer: Option<IpAddr>,
         local: bool,
+        // (A physical replication connection matches only `replication` (check_db).)
+        physical_repl: bool,
         database: &str,
         user: &str,
         member: &dyn Fn(&str) -> bool,
@@ -222,6 +224,7 @@ impl Hba {
             };
             addr_ok
                 && l.databases.iter().any(|d| match d.as_str() {
+                    _ if physical_repl => d == "replication",
                     "all" => true,
                     "sameuser" => database == user,
                     "samerole" | "samegroup" => member(database),
@@ -348,10 +351,11 @@ mod tests {
         let no = |_: &str| false;
         let lo: IpAddr = "127.0.0.1".parse().unwrap();
         let far: IpAddr = "10.1.2.3".parse().unwrap();
-        assert_eq!(h.choose(Some(lo), false, "x", "u", &no).map(|l| l.method.as_str()), Some("trust"));
-        assert_eq!(h.choose(Some(far), false, "x", "u", &no).map(|l| l.method.as_str()), Some("scram-sha-256"));
-        assert_eq!(h.choose(Some(far), true, "x", "u", &no).map(|l| l.line), Some(2));
+        assert_eq!(h.choose(Some(lo), false, false, "x", "u", &no).map(|l| l.method.as_str()), Some("trust"));
+        assert_eq!(h.choose(Some(far), false, false, "x", "u", &no).map(|l| l.method.as_str()), Some("scram-sha-256"));
+        assert_eq!(h.choose(Some(far), true, false, "x", "u", &no).map(|l| l.line), Some(2));
+        assert_eq!(h.choose(Some(lo), false, true, "postgres", "u", &no).map(|l| l.line), None);
         let six: IpAddr = "::1".parse().unwrap();
-        assert_eq!(h.choose(Some(six), false, "all", "u", &|r| r == "grp").map(|l| l.method.as_str()), Some("md5"));
+        assert_eq!(h.choose(Some(six), false, false, "all", "u", &|r| r == "grp").map(|l| l.method.as_str()), Some("md5"));
     }
 }

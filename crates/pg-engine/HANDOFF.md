@@ -172,7 +172,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     socket (dblink / postgres_fdw without a host, marked by `hba::mark_local`), as the
     reference's Unix socket ones: `--hba "local all all trust" --hba "host all all all
     scram-sha-256"` is the reference image's policy. trust, reject, scram-sha-256, md5,
-    password; other methods fail as their authentication would. auth_delay (preloaded)
+    password; other methods fail as their authentication would. A physical replication
+    connection (walsender, `replication=true`) matches only `replication` lines; a logical
+    one (`replication=database`) matches as a database connection, as check_db does. auth_delay (preloaded)
     waits auth_delay.milliseconds after a failed authentication.
   - `src/log.rs`, `session/serverlog.rs`: the server log PostgreSQL writes to stderr
     (nothing until an embedder sets a sink; `roll-engine` writes to its stderr):

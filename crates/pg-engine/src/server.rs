@@ -797,7 +797,8 @@ fn handle(
         }
     }
 
-    let method = match hba_method(&engine, peer, &user, &database, opts.auth) {
+    let physical = c.repl == Some(crate::repl::walsender::Mode::Physical);
+    let method = match hba_method(&engine, peer, &user, &database, physical, opts.auth) {
         Ok(m) => m,
         Err(e) => {
             c.error(&e);
@@ -991,6 +992,7 @@ fn hba_method(
     peer: Option<SocketAddr>,
     user: &str,
     database: &str,
+    physical_repl: bool,
     default: AuthMethod,
 ) -> Result<AuthMethod> {
     let Some(hba) = engine.server_conf().hba() else {
@@ -1012,13 +1014,14 @@ fn hba_method(
         })
     };
     let refused = |what: &str| {
-        Error::new(
-            code::INVALID_AUTHORIZATION_SPECIFICATION,
-            format!("{what} for host \"{host}\", user \"{user}\", database \"{database}\", no encryption"),
-        )
-        .fatal()
+        let msg = if physical_repl {
+            format!("{what} for replication connection from host \"{host}\", user \"{user}\", no encryption")
+        } else {
+            format!("{what} for host \"{host}\", user \"{user}\", database \"{database}\", no encryption")
+        };
+        Error::new(code::INVALID_AUTHORIZATION_SPECIFICATION, msg).fatal()
     };
-    let Some(rule) = hba.choose(peer.map(|p| p.ip().to_canonical()), local, database, user, &member) else {
+    let Some(rule) = hba.choose(peer.map(|p| p.ip().to_canonical()), local, physical_repl, database, user, &member) else {
         return Err(refused("no pg_hba.conf entry"));
     };
     Ok(match rule.method.as_str() {
