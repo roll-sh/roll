@@ -207,9 +207,30 @@ pub(crate) fn parse_version() -> i32 {
     })
 }
 
-/// Deparse an expression node back to SQL (stored defaults, checks, index expressions).
+/// Deparse an expression node back to SQL (stored defaults, checks, index expressions):
+/// `crate::sql::deparse`, with libpg_query's deparser for what it doesn't cover.
 pub fn deparse_expr(n: &Node) -> Result<String> {
-    // Deparse `SELECT <expr>` and strip the prefix: the deparser only handles statements.
+    let new = match crate::sql::deparse::expression(n) {
+        Ok(sql) => Ok(fix_xmlparse(n, sql)),
+        Err(_) => deparse_expr_libpg(n),
+    };
+    deparse_check("expr", n, &new, deparse_expr_libpg);
+    new
+}
+
+/// Deparse a whole statement node.
+pub fn deparse_stmt(n: &Node) -> Result<String> {
+    let new = match crate::sql::deparse::statement(n) {
+        Ok(sql) => Ok(fix_xmlparse(n, sql)),
+        Err(_) => deparse_stmt_libpg(n),
+    };
+    deparse_check("stmt", n, &new, deparse_stmt_libpg);
+    new
+}
+
+/// `deparse_expr` through libpg_query's deparser (`pg_query::deparse` of `SELECT <expr>`,
+/// the prefix stripped): what `crate::sql::deparse` must match byte for byte.
+pub fn deparse_expr_libpg(n: &Node) -> Result<String> {
     let target = pb::ResTarget {
         name: String::new(),
         indirection: vec![],
@@ -224,42 +245,67 @@ pub fn deparse_expr(n: &Node) -> Result<String> {
         limit_option: 1,
         ..Default::default()
     };
-    let stmt = pb::RawStmt {
-        stmt: Some(Box::new(Node {
-            node: Some(NodeEnum::SelectStmt(Box::new(sel))),
-        })),
-        stmt_location: 0,
-        stmt_len: 0,
-    };
-    let tree = pb::ParseResult {
-        version: parse_version(),
-        stmts: vec![stmt],
-    };
-    let sql = pg_query::deparse(&tree, Default::default())
-        .map_err(|e| crate::error::internal(format!("deparse: {e}")))?;
-    let sql = fix_xmlparse(&tree, sql);
+    let sql = libpg_deparse(Node {
+        node: Some(NodeEnum::SelectStmt(Box::new(sel))),
+    })?;
+    let sql = fix_xmlparse(n, sql);
     Ok(sql.strip_prefix("SELECT ").unwrap_or(&sql).to_string())
 }
 
-/// Deparse a whole statement node.
-pub fn deparse_stmt(n: &Node) -> Result<String> {
-    let stmt = pb::RawStmt {
-        stmt: Some(Box::new(n.clone())),
-        stmt_location: 0,
-        stmt_len: 0,
-    };
+/// `deparse_stmt` through libpg_query's deparser.
+pub fn deparse_stmt_libpg(n: &Node) -> Result<String> {
+    let sql = libpg_deparse(n.clone())?;
+    Ok(fix_xmlparse(n, sql))
+}
+
+fn libpg_deparse(stmt: Node) -> Result<String> {
     let tree = pb::ParseResult {
         version: parse_version(),
-        stmts: vec![stmt],
+        stmts: vec![pb::RawStmt {
+            stmt: Some(Box::new(stmt)),
+            stmt_location: 0,
+            stmt_len: 0,
+        }],
     };
-    let sql = pg_query::deparse(&tree, Default::default())
-        .map_err(|e| crate::error::internal(format!("deparse: {e}")))?;
-    Ok(fix_xmlparse(&tree, sql))
+    pg_query::deparse(&tree, Default::default())
+        .map_err(|e| crate::error::internal(format!("deparse: {e}")))
+}
+
+/// With `ROLL_DEPARSE_CHECK=<file>` set, every deparse is done by libpg_query too, and
+/// each difference (and each statement the native deparser left to libpg_query) is
+/// appended to the file as a JSON line. Off, it costs one cached lookup.
+fn deparse_check(kind: &str, n: &Node, new: &Result<String>, old: fn(&Node) -> Result<String>) {
+    static FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(path) = FILE.get_or_init(|| std::env::var_os("ROLL_DEPARSE_CHECK").map(Into::into))
+    else {
+        return;
+    };
+    let native = match kind {
+        "expr" => crate::sql::deparse::expression(n).is_ok(),
+        _ => crate::sql::deparse::statement(n).is_ok(),
+    };
+    let text = |r: &Result<String>| match r {
+        Ok(s) => s.clone(),
+        Err(e) => format!("ERROR: {}", e.message),
+    };
+    let (old, new) = (text(&old(n)), text(new));
+    if old == new && native {
+        return;
+    }
+    let line = serde_json::json!({
+        "kind": if old == new { format!("{kind}-fallback") } else { format!("{kind}-mismatch") },
+        "old": old,
+        "new": new,
+    });
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 /// libpg_query's deparser drops XMLPARSE's `PRESERVE WHITESPACE`: put it back into each
 /// `xmlparse(…)` that had it, matching them up in source order.
-fn fix_xmlparse(tree: &pb::ParseResult, sql: String) -> String {
+fn fix_xmlparse(tree: &Node, sql: String) -> String {
     if !sql.contains("xmlparse(") {
         return sql;
     }

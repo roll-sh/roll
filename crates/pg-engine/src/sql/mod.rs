@@ -2,6 +2,7 @@
 
 pub mod binder;
 pub mod costs;
+pub mod deparse;
 pub mod joins;
 pub mod paths;
 pub mod explain;
