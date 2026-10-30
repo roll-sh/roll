@@ -1848,7 +1848,16 @@ pub fn rows_of_rel(table: SysTable, ctx: &ExecCtx, rel: u32) -> Result<Option<Ve
         return Ok(None);
     }
     REL_GENERATED.with(|c| c.set(c.get() + 1));
-    let rows = rows_generated_for(table, ctx, Some(rel))?;
+    // (`rel` is the oid the rows show: a relation's own, or one an UPDATE moved its rows to.)
+    let rows: Vec<Row> = match table {
+        SysTable::PgClass | SysTable::PgAttribute => {
+            let own = ctx.catalog().rel_oid_edits.rel_of(table == SysTable::PgClass, rel);
+            let mut rows = rows_generated_for(table, ctx, Some(own))?;
+            rows.retain(|r| r[0] == Value::Oid(rel));
+            rows
+        }
+        _ => rows_generated_for(table, ctx, Some(rel))?,
+    };
     #[cfg(debug_assertions)]
     {
         let k = rel_column(table).unwrap();
@@ -2076,7 +2085,22 @@ fn rows_generated_chunked(
     Ok(out.into_chunks())
 }
 
+/// `generate_raw`, pg_class's and pg_attribute's oids as a superuser's UPDATE set them
+/// (`Catalog::rel_oid_edits`). `only` is a relation's own oid.
 fn generate(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out) -> Result<()> {
+    let class = table == SysTable::PgClass;
+    if (class || table == SysTable::PgAttribute) && !ctx.catalog().rel_oid_edits.is_empty() {
+        let mut raw = Out::rows();
+        generate_raw(table, ctx, only, &mut raw)?;
+        let mut rows = raw.into_rows();
+        ctx.catalog().rel_oid_edits.apply(class, &mut rows);
+        out.extend(rows);
+        return Ok(());
+    }
+    generate_raw(table, ctx, only, out)
+}
+
+fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out) -> Result<()> {
     use SysTable::*;
     let schema = if table.schema() == PGC {
         "pg_catalog"

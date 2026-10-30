@@ -1951,6 +1951,10 @@ pub struct Catalog {
     /// for what pg_depend shows and for every dependency check (DROP, ALTER COLUMN TYPE).
     #[serde(default, skip_serializing_if = "DependEdits::is_empty")]
     pub depend_edits: DependEdits,
+    /// pg_class.oid / pg_attribute.attrelid as a superuser's UPDATE set them (Doctrine DBAL
+    /// moves a table's columns and then its pg_class row onto a function's oid, then back).
+    #[serde(default, skip_serializing_if = "RelOidEdits::is_empty")]
+    pub rel_oid_edits: RelOidEdits,
     /// pg_class.relpages / reltuples / relallvisible of tables and indexes, as VACUUM,
     /// ANALYZE, CREATE INDEX and TRUNCATE last set them (absent: as created).
     #[serde(default)]
@@ -4388,6 +4392,9 @@ impl Catalog {
         self.remove_name(t.schema, &t.name);
         self.relstats.remove(&oid);
         self.colstats.remove(&oid);
+        if !self.rel_oid_edits.is_empty() {
+            self.rel_oid_edits.forget(oid);
+        }
         self.statistics.retain(|_, x| x.table != oid);
         if let Some(p) = t.pkey_index {
             self.relstats.remove(&p);
@@ -4633,6 +4640,67 @@ impl Catalog {
 /// One pg_depend row: (classid, objid, objsubid), (refclassid, refobjid, refobjsubid),
 /// deptype.
 pub type DependRow = ((u32, u32, i32), (u32, u32, i32), char);
+
+/// Superuser UPDATEs of pg_class.oid and pg_attribute.attrelid (see `Catalog::rel_oid_edits`):
+/// by relation, the oid its pg_class row shows (`class`) and the one its pg_attribute rows
+/// show (`attrs`). Only those rows change, as Postgres's UPDATE changes only them:
+/// pg_type.typrelid, pg_index, pg_depend and the rest still name the relation's own oid, and
+/// the relation is the same one (its data, its name's lookups).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct RelOidEdits {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub class: BTreeMap<u32, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<u32, u32>,
+}
+
+impl RelOidEdits {
+    pub fn is_empty(&self) -> bool {
+        self.class.is_empty() && self.attrs.is_empty()
+    }
+
+    /// The edits of pg_class's rows (`class`) or of pg_attribute's.
+    pub fn of(&self, class: bool) -> &BTreeMap<u32, u32> {
+        if class { &self.class } else { &self.attrs }
+    }
+
+    /// The relation whose rows (pg_class's or pg_attribute's) show `shown`, if an edit moved
+    /// them there. (The maps hold a relation or two at a time.)
+    pub fn moved_to(&self, class: bool, shown: u32) -> Option<u32> {
+        self.of(class).iter().find(|(_, s)| **s == shown).map(|(r, _)| *r)
+    }
+
+    /// The oid `rel`'s rows show.
+    pub fn shown(&self, class: bool, rel: u32) -> u32 {
+        self.of(class).get(&rel).copied().unwrap_or(rel)
+    }
+
+    /// The relation that rows showing `shown` belong to.
+    pub fn rel_of(&self, class: bool, shown: u32) -> u32 {
+        self.moved_to(class, shown).unwrap_or(shown)
+    }
+
+    /// Generated rows of pg_class (`class`) or pg_attribute, their first column as edited.
+    pub fn apply(&self, class: bool, rows: &mut [Vec<crate::types::Value>]) {
+        let map = self.of(class);
+        if map.is_empty() {
+            return;
+        }
+        for r in rows {
+            if let Some(crate::types::Value::Oid(o)) = r.first()
+                && let Some(s) = map.get(o)
+            {
+                r[0] = crate::types::Value::Oid(*s);
+            }
+        }
+    }
+
+    /// A relation dropped: its edits go.
+    pub fn forget(&mut self, rel: u32) {
+        self.class.remove(&rel);
+        self.attrs.remove(&rel);
+    }
+}
 
 /// Superuser DML on pg_depend (see `Catalog::depend_edits`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]

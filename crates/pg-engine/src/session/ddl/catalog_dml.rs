@@ -23,15 +23,21 @@ pub(crate) fn catalog_dml_query(node: &NodeEnum) -> Option<pb::Node> {
         {
             class_update_query(u).ok().map(|q| q.0)
         }
+        NodeEnum::UpdateStmt(u)
+            if is_pg_class_update(u) && u.relation.as_ref().is_some_and(|rv| rv.relname == "pg_attribute") =>
+        {
+            attribute_update_query(u).ok()
+        }
         NodeEnum::UpdateStmt(u) if is_pg_depend_update(u) => depend_update_query(u).ok(),
         _ => None,
     }
 }
 
-/// Whether `s` updates pg_class or pg_database (unqualified or in pg_catalog).
+/// Whether `s` updates pg_class, pg_attribute, pg_database or pg_constraint (unqualified or
+/// in pg_catalog).
 pub(crate) fn is_pg_class_update(s: &pb::UpdateStmt) -> bool {
     s.relation.as_ref().is_some_and(|rv| {
-        matches!(rv.relname.as_str(), "pg_class" | "pg_database" | "pg_constraint")
+        matches!(rv.relname.as_str(), "pg_class" | "pg_attribute" | "pg_database" | "pg_constraint")
             && (rv.schemaname.is_empty() || rv.schemaname == "pg_catalog")
     }) && s.with_clause.is_none()
         && crate::sql::binder::ast::returning(&s.returning_clause).is_empty()
@@ -93,6 +99,9 @@ pub(crate) fn class_update_query(s: &pb::UpdateStmt) -> Result<(pb::Node, Vec<&s
             // (Setting a relation's own name: pgjdbc's updatable result sets write
             // every column back.)
             "relname" => "name",
+            // (Renumbering a relation: Doctrine DBAL's test moves a table onto another
+            // object's oid and back; `Catalog::rel_oid_edits`.)
+            "oid" => "oid",
             other => {
                 return Err(crate::error::unsupported(format!(
                     "UPDATE of pg_class.{other}"
@@ -135,11 +144,15 @@ impl Ddl<'_, '_> {
             return self.update_pg_constraint(s);
         }
         let me = self.ctx.sess.current_role(&self.cat);
+        let attribute = s.relation.as_ref().is_some_and(|rv| rv.relname == "pg_attribute");
         if !self.cat.is_superuser(me) {
             return Err(Error::new(
                 code::INSUFFICIENT_PRIVILEGE,
-                "permission denied for table pg_class",
+                format!("permission denied for table {}", if attribute { "pg_attribute" } else { "pg_class" }),
             ));
+        }
+        if attribute {
+            return self.update_pg_attribute(s);
         }
         let (node, sets) = class_update_query(s)?;
         let query = |this: &mut Self| -> Result<Vec<crate::exec::Row>> {
@@ -175,7 +188,9 @@ impl Ddl<'_, '_> {
             other => other.as_f64().unwrap_or(0.0),
         };
         for r in &rows {
-            let Value::Oid(oid) = r[0] else { continue };
+            let Value::Oid(shown) = r[0] else { continue };
+            // (The relation, whatever oid an earlier UPDATE gave its row.)
+            let oid = self.cat.rel_oid_edits.rel_of(true, shown);
             let mut st = RelStats {
                 pages: num(&r[1]) as i32,
                 tuples: num(&r[2]),
@@ -201,6 +216,10 @@ impl Ddl<'_, '_> {
                             "UPDATE of pg_class.relname to another name (use ALTER ... RENAME)",
                         ));
                     }
+                    continue;
+                }
+                if *name == "oid" {
+                    self.renumber_class(oid, shown, v)?;
                     continue;
                 }
                 if *name == "reloptions" {
@@ -256,6 +275,175 @@ impl Ddl<'_, '_> {
         self.save()?;
         Ok(format!("UPDATE {}", rows.len()))
     }
+}
+
+impl Ddl<'_, '_> {
+    /// UPDATE pg_class SET oid of relation `rel` (its row showing `shown`): the row shows the
+    /// new oid (`Catalog::rel_oid_edits`), unique among pg_class's oids as its index keeps
+    /// them.
+    fn renumber_class(&mut self, rel: u32, shown: u32, v: &Value) -> Result<()> {
+        let new = match v {
+            Value::Null => {
+                return Err(Error::new(
+                    code::NOT_NULL_VIOLATION,
+                    "null value in column \"oid\" of relation \"pg_class\" violates not-null constraint",
+                )
+                .table("pg_catalog", "pg_class")
+                .column("oid"));
+            }
+            v => v.as_i64().unwrap_or(0) as u32,
+        };
+        if new == shown {
+            return Ok(());
+        }
+        if rel < crate::catalog::FIRST_USER_OID {
+            return Err(crate::error::unsupported("UPDATE of pg_class.oid of a system relation"));
+        }
+        if class_oid_shown(&self.cat, new) {
+            return Err(Error::new(
+                code::UNIQUE_VIOLATION,
+                "duplicate key value violates unique constraint \"pg_class_oid_index\"",
+            )
+            .detail(format!("Key (oid)=({new}) already exists."))
+            .table("pg_catalog", "pg_class")
+            .constraint("pg_class_oid_index"));
+        }
+        let e = &mut self.cat.rel_oid_edits;
+        if new == rel {
+            e.class.remove(&rel);
+        } else {
+            e.class.insert(rel, new);
+        }
+        Ok(())
+    }
+
+    /// UPDATE pg_attribute SET attrelid = ... by a superuser, moving every row of a relation
+    /// to another oid (Doctrine DBAL moves a table's columns onto a function's oid, renumbers
+    /// its pg_class row the same way, and moves both back). pg_attribute is derived from the
+    /// relations' columns, so a relation's rows move together (`Catalog::rel_oid_edits`);
+    /// moving some of them, or onto oids another relation's rows show, isn't supported.
+    fn update_pg_attribute(&mut self, s: &pb::UpdateStmt) -> Result<String> {
+        let node = attribute_update_query(s)?;
+        let rows = {
+            let child = self.ctx.child(self.ctx.params);
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(&node)?;
+            crate::exec::collect(&bq.plan, &child, None)?
+        };
+        // Per relation (by the oid its rows show): its rows, those matched, their new oids.
+        let mut rels: std::collections::BTreeMap<u32, (usize, usize, Vec<Value>)> = Default::default();
+        for r in &rows {
+            let Value::Oid(shown) = r[0] else { continue };
+            let e = rels.entry(shown).or_default();
+            e.0 += 1;
+            if r[1] == Value::Bool(true) {
+                e.1 += 1;
+                e.2.push(r[2].clone());
+            }
+        }
+        let mut updated = 0;
+        for (shown, (all, matched, new)) in rels {
+            if matched == 0 {
+                continue;
+            }
+            if new.iter().any(Value::is_null) {
+                return Err(Error::new(
+                    code::NOT_NULL_VIOLATION,
+                    "null value in column \"attrelid\" of relation \"pg_attribute\" violates not-null constraint",
+                )
+                .table("pg_catalog", "pg_attribute")
+                .column("attrelid"));
+            }
+            let rel = self.cat.rel_oid_edits.rel_of(false, shown);
+            let to = new[0].as_i64().unwrap_or(0) as u32;
+            if matched < all || new.iter().any(|v| *v != new[0]) || rel < crate::catalog::FIRST_USER_OID {
+                return Err(crate::error::unsupported(
+                    "UPDATE of pg_attribute.attrelid other than of all of a relation's rows",
+                ));
+            }
+            if to != shown && to != rel && attrs_shown(&self.cat, to) {
+                return Err(crate::error::unsupported(
+                    "UPDATE of pg_attribute.attrelid onto another relation's rows",
+                ));
+            }
+            let e = &mut self.cat.rel_oid_edits;
+            if to == rel {
+                e.attrs.remove(&rel);
+            } else {
+                e.attrs.insert(rel, to);
+            }
+            updated += matched;
+        }
+        self.save()?;
+        Ok(format!("UPDATE {updated}"))
+    }
+}
+
+/// Whether a pg_class row shows `oid`: a relation's own oid not renumbered away, or one a
+/// relation was renumbered to.
+fn class_oid_shown(cat: &crate::catalog::Catalog, oid: u32) -> bool {
+    let e = &cat.rel_oid_edits;
+    e.moved_to(true, oid).is_some() || (!e.class.contains_key(&oid) && is_relation(cat, oid))
+}
+
+/// Whether pg_attribute rows show `oid` as their attrelid.
+fn attrs_shown(cat: &crate::catalog::Catalog, oid: u32) -> bool {
+    let e = &cat.rel_oid_edits;
+    e.moved_to(false, oid).is_some() || (!e.attrs.contains_key(&oid) && is_relation(cat, oid))
+}
+
+/// Whether `oid` is a relation's (pg_class's rows before any renumbering).
+fn is_relation(cat: &crate::catalog::Catalog, oid: u32) -> bool {
+    cat.tables.contains_key(&oid)
+        || cat.views.contains_key(&oid)
+        || cat.sequences.contains_key(&oid)
+        || cat.indexes.contains_key(&oid)
+        || cat.composites.values().any(|c| c.relid == oid)
+        || crate::catalog::static_rows::rows(crate::catalog::system::SysTable::PgClass)
+            .iter()
+            .any(|r| crate::catalog::static_rows::oid_at(r, 0) == oid)
+}
+
+/// UPDATE pg_attribute SET attrelid = <v> WHERE <w> as the query it runs: every row's
+/// attrelid, whether `w` holds for it, and `v` where it does.
+pub(crate) fn attribute_update_query(s: &pb::UpdateStmt) -> Result<pb::Node> {
+    let mut val = None;
+    for t in &s.target_list {
+        let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+            continue;
+        };
+        if rt.name != "attrelid" || !rt.indirection.is_empty() {
+            return Err(crate::error::unsupported(format!("UPDATE of pg_attribute.{}", rt.name)));
+        }
+        val = rt.val.as_deref().cloned();
+    }
+    let val = val.ok_or_else(|| crate::error::unsupported("UPDATE of pg_attribute"))?;
+    let truth = || {
+        mk(NodeEnum::AConst(pb::AConst {
+            isnull: false,
+            val: Some(pb::a_const::Val::Boolval(pb::Boolean { boolval: true })),
+            location: -1,
+        }))
+    };
+    let cond = s.where_clause.as_deref().cloned().unwrap_or_else(truth);
+    let when = |result: pb::Node| {
+        mk(NodeEnum::CaseExpr(Box::new(pb::CaseExpr {
+            args: vec![mk(NodeEnum::CaseWhen(Box::new(pb::CaseWhen {
+                expr: Some(Box::new(cond.clone())),
+                result: Some(Box::new(result)),
+                location: -1,
+                ..Default::default()
+            })))],
+            location: -1,
+            ..Default::default()
+        })))
+    };
+    let sel = pb::SelectStmt {
+        target_list: vec![target(col("attrelid")), target(when(truth())), target(when(cast(val, "oid")))],
+        from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone().unwrap()))],
+        ..Default::default()
+    };
+    Ok(mk(NodeEnum::SelectStmt(Box::new(sel))))
 }
 
 impl Ddl<'_, '_> {

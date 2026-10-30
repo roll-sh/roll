@@ -1320,6 +1320,14 @@ impl Binder<'_, '_> {
                     ty,
                 };
             }
+            // An outer level's row is its columns' references, each lifted (a whole-row Var
+            // of an upper level stays a whole-row Var: coerce_record_to_complex expands it
+            // into a ROW() when it is cast or passed as a named composite; Hasura passes a
+            // FROM subquery's row to a computed field's function from a sub-select).
+            if let Expr::Row(items, ty) = row {
+                let items = items.into_iter().map(|e| self.lift(lvl, e)).collect();
+                return Ok(Some(Expr::Row(items, ty)));
+            }
             return Ok(Some(self.lift(lvl, row)));
         }
         Ok(None)

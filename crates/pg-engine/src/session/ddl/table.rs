@@ -1048,7 +1048,10 @@ impl Ddl<'_, '_> {
                         saw_default = true;
                         continue;
                     }
-                    col.default = Some(ast::deparse_expr(e)?);
+                    col.default = Some(match col.domain {
+                        None => null_default_text(e, &ty).map_or_else(|| ast::deparse_expr(e), Ok)?,
+                        Some(_) => ast::deparse_expr(e)?,
+                    });
                     saw_default = true;
                 }
                 C::ConstrIdentity => {
@@ -1246,7 +1249,13 @@ impl Ddl<'_, '_> {
 
     /// Whether default `e` of a column of type `ty` cooks to a bare NULL constant (`NULL`,
     /// `NULL::<the column's type>`), which Postgres doesn't store (AddRelationNewConstraints).
+    /// A column with a type modifier (`varchar(254)`, `numeric(5,2)`) gets its length
+    /// coercion over the NULL, no bare constant: stored, shown as `NULL::character varying`
+    /// (Metabase's Liquibase changelog has such defaults).
     pub(super) fn is_null_default(&self, e: &pb::Node, ty: &DataType) -> bool {
+        if ty.catalog_typmod() >= 0 {
+            return false;
+        }
         match inner(e) {
             Some(NodeEnum::AConst(c)) => c.isnull,
             Some(NodeEnum::TypeCast(tc)) => {
@@ -4836,7 +4845,10 @@ impl Ddl<'_, '_> {
                         {
                             None
                         } else {
-                            Some(ast::deparse_expr(e)?)
+                            Some(match t.columns[idx].domain {
+                                None => null_default_text(e, &ty).map_or_else(|| ast::deparse_expr(e), Ok)?,
+                                Some(_) => ast::deparse_expr(e)?,
+                            })
                         };
                         // A new pg_attrdef row replaces the old.
                         t.columns[idx].def_oid = self.cat.alloc_oid();
@@ -10801,4 +10813,17 @@ fn fk_types_compatible(a: &DataType, b: &DataType) -> bool {
         // Else an implicit cast from the referencing type to the key's type does
         // (with the key's own equality).
         || crate::sql::func::can_coerce(a, b)
+}
+
+/// A bare NULL default of a column with a type modifier as Postgres stores it: the NULL cast
+/// to the type without its modifier, under the column's length coercion (pg_get_expr shows
+/// `NULL::character varying` for a `varchar(254)` column). None: another default.
+fn null_default_text(e: &pb::Node, ty: &DataType) -> Option<String> {
+    let bare = matches!(inner(e), Some(NodeEnum::AConst(c)) if c.isnull);
+    let base = match ty {
+        DataType::Array(el) => el.as_ref(),
+        t => t,
+    };
+    (bare && ty.catalog_typmod() >= 0 && !matches!(base, DataType::Base(_)))
+        .then(|| format!("NULL::pg_catalog.{}", ty.without_typmod().typname()))
 }

@@ -2226,6 +2226,29 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     kills the linked test process) when its disconnect's cancel request round trip ends,
     before the task's FATAL reply arrives. PostgreSQL's cancel request costs a fork and an
     exit (~5 ms); the engine's closes at once for a pid that is gone. Not changed.
+  - Doctrine DBAL renumbers a table onto a function's oid (`UPDATE pg_attribute SET attrelid`,
+    `UPDATE pg_class SET oid`, then back) and lists its columns in between. Postgres changes
+    only those rows: pg_type.typrelid, pg_index, pg_depend keep the old oid, the table works
+    as before. `Catalog::rel_oid_edits` (`RelOidEdits`, a header field: catalogs without it
+    load as before) holds, per relation, the oid its pg_class row shows and the one its
+    pg_attribute rows show; `system::rows_generated_for` applies them to the generated rows,
+    `rows_of_rel` looks a shown oid up, sysdelta doesn't splice while any are set, DROP
+    forgets them. A relation's attributes move together (moving some is refused, as is
+    moving them onto another relation's); `UPDATE pg_class SET oid` keeps pg_class's oids
+    unique (23505 on pg_class_oid_index). Left: `'t'::regclass` still gives the relation's
+    own oid (Postgres's gives the new one), and nothing else resolves the new oid.
+  - A FROM subquery's whole row referenced from a sub-select (Hasura's computed fields:
+    `article_words("_root.base")` inside the row_to_json sub-select) was lifted into the
+    sub-select as one record-typed parameter, which no cast makes a named composite ("cannot
+    cast type record to articles"); it is now a ROW() of its lifted columns, as an upper
+    level's whole-row Var is (`find_rel_row`). coerce_record_to_complex's per-column error:
+    "cannot cast type record to t" with "Cannot cast type text to integer in column 1."
+  - NULL defaults of a column with a type modifier (`varchar(254) DEFAULT NULL`, Metabase's
+    Liquibase changelog) are kept, shown as `NULL::character varying` (the length coercion
+    over a NULL isn't a bare constant): `ddl::table::null_default_text`, `is_null_default`.
+  - New suites (`suites/apps.py`: HTTP-driven applications, one id per step): Grafana 13.3,
+    Metabase 0.64.3, Hasura 2.51.3, Keycloak 26.8.1, Directus 12.6.0. Golden
+    `a122_client_round6`.
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row

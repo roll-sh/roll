@@ -1546,9 +1546,16 @@ impl<'b, 'a> Binder<'b, 'a> {
                 let n = items.len();
                 let mut items = items.into_iter();
                 let mut out = Vec::with_capacity(tf.len());
-                for (_, ft) in tf.iter() {
+                for (i, (_, ft)) in tf.iter().enumerate() {
                     let item = items.next().ok_or_else(|| cannot("few"))?;
-                    out.push(self.coerce_with(item, ft, cc, err)?);
+                    // (A column that can't be coerced: coerce_record_to_complex's error.)
+                    let from_col = item.ty();
+                    let col_err = |_: &DataType| {
+                        Error::new(code::CANNOT_COERCE, format!("cannot cast type record to {}", to.display())).detail(
+                            format!("Cannot cast type {} to {} in column {}.", from_col.display(), ft.display(), i + 1),
+                        )
+                    };
+                    out.push(self.coerce_with(item, ft, cc, &col_err)?);
                 }
                 if n > tf.len() {
                     return Err(cannot("many"));

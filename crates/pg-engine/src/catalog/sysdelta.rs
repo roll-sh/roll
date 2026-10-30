@@ -122,7 +122,8 @@ fn deparse_same(a: &Catalog, b: &Catalog) -> bool {
 
 /// The relations whose rows may differ between `a` and `b` (None: generate whole).
 fn changed_relations(a: &Catalog, b: &Catalog) -> Option<BTreeSet<u32>> {
-    if !globals_same(a, b) {
+    // (Rows a superuser's UPDATE renumbered aren't their relation's parts: not spliced.)
+    if !globals_same(a, b) || !a.rel_oid_edits.is_empty() || !b.rel_oid_edits.is_empty() {
         return None;
     }
     let mut out = BTreeSet::new();

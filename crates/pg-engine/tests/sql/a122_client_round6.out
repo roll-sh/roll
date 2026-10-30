@@ -1,0 +1,319 @@
+> CREATE TABLE test_oidc (id int NOT NULL, note text)
+-- CREATE TABLE
+
+> COMMENT ON COLUMN test_oidc.note IS 'a note'
+-- COMMENT
+
+> CREATE EXTENSION IF NOT EXISTS pg_prewarm
+-- CREATE EXTENSION
+
+> CREATE TEMP TABLE ids AS
+> SELECT (SELECT oid FROM pg_class WHERE relname = 'test_oidc') AS t,
+>        (SELECT objid FROM pg_depend JOIN pg_extension ex ON ex.oid = pg_depend.refobjid
+>         WHERE ex.extname = 'pg_prewarm' ORDER BY objid LIMIT 1) AS f
+-- SELECT 1
+
+> UPDATE pg_attribute SET attrelid = (SELECT f FROM ids) WHERE attrelid = (SELECT t FROM ids)
+-- UPDATE 8
+
+> SELECT count(*) FROM pg_attribute WHERE attrelid = (SELECT t FROM ids)
+count:int8
+0
+-- SELECT 1
+
+> SELECT attname, attnum FROM pg_attribute WHERE attrelid = (SELECT f FROM ids) ORDER BY attnum
+attname:name | attnum:int2
+tableoid | -6
+cmax | -5
+xmax | -4
+cmin | -3
+xmin | -2
+ctid | -1
+id | 1
+note | 2
+-- SELECT 8
+
+> UPDATE pg_description SET objoid = (SELECT f FROM ids) WHERE objoid = (SELECT t FROM ids)
+-- UPDATE 1
+
+> UPDATE pg_class SET oid = (SELECT f FROM ids) WHERE oid = (SELECT t FROM ids)
+-- UPDATE 1
+
+> SELECT relname, oid = (SELECT f FROM ids) AS moved FROM pg_class WHERE relname = 'test_oidc'
+relname:name | moved:bool
+test_oidc | t
+-- SELECT 1
+
+> SELECT count(*) FROM pg_class WHERE oid = (SELECT t FROM ids)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM pg_class WHERE oid = (SELECT f FROM ids)
+count:int8
+1
+-- SELECT 1
+
+> SELECT quote_ident(c.relname) AS table_name, quote_ident(a.attname) AS field, t.typname,
+>        a.attnotnull, dsc.description
+> FROM pg_attribute a
+> JOIN pg_class c ON c.oid = a.attrelid
+> JOIN pg_namespace n ON n.oid = c.relnamespace
+> JOIN pg_type t ON t.oid = a.atttypid
+> LEFT JOIN pg_depend dep ON dep.objid = c.oid AND dep.deptype = 'e'
+>   AND dep.classid = (SELECT oid FROM pg_class WHERE relname = 'pg_class')
+> LEFT JOIN pg_description dsc ON dsc.objoid = c.oid AND dsc.objsubid = a.attnum
+> WHERE c.relname = 'test_oidc' AND n.nspname = 'public' AND a.attnum > 0 AND dep.refobjid IS NULL
+> ORDER BY a.attnum
+table_name:text | field:text | typname:name | attnotnull:bool | description:text
+test_oidc | id | int4 | t | NULL
+test_oidc | note | text | f | a note
+-- SELECT 2
+
+> INSERT INTO test_oidc VALUES (1, 'x')
+-- INSERT 0 1
+
+> SELECT * FROM test_oidc
+id:int4 | note:text
+1 | x
+-- SELECT 1
+
+> SELECT typrelid = (SELECT t FROM ids) AS typrelid_unchanged FROM pg_type WHERE typname = 'test_oidc'
+typrelid_unchanged:bool
+t
+-- SELECT 1
+
+> CREATE TABLE test_oidc2 (a int)
+-- CREATE TABLE
+
+> DO $$
+> BEGIN
+>   UPDATE pg_class SET oid = (SELECT f FROM ids) WHERE relname = 'test_oidc2';
+> EXCEPTION WHEN unique_violation THEN
+>   RAISE NOTICE '%: %', SQLSTATE, SQLERRM;
+> END $$
+NOTICE 00000: 23505: duplicate key value violates unique constraint "pg_class_oid_index"
+CONTEXT: PL/pgSQL function inline_code_block line 5 at RAISE
+-- DO
+
+> DO $$
+> DECLARE c text; t text; k text;
+> BEGIN
+>   UPDATE pg_class SET oid = NULL WHERE relname = 'test_oidc2';
+> EXCEPTION WHEN not_null_violation THEN
+>   GET STACKED DIAGNOSTICS c = COLUMN_NAME, t = TABLE_NAME, k = SCHEMA_NAME;
+>   RAISE NOTICE '%: % (%.%.%)', SQLSTATE, SQLERRM, k, t, c;
+> END $$
+NOTICE 00000: 23502: null value in column "oid" of relation "pg_class" violates not-null constraint (pg_catalog.pg_class.oid)
+CONTEXT: PL/pgSQL function inline_code_block line 7 at RAISE
+-- DO
+
+> DROP TABLE test_oidc2
+-- DROP TABLE
+
+> UPDATE pg_attribute SET attrelid = (SELECT t FROM ids) WHERE attrelid = (SELECT f FROM ids)
+-- UPDATE 8
+
+> UPDATE pg_description SET objoid = (SELECT t FROM ids) WHERE objoid = (SELECT f FROM ids)
+-- UPDATE 1
+
+> UPDATE pg_class SET oid = (SELECT t FROM ids) WHERE oid = (SELECT f FROM ids)
+-- UPDATE 1
+
+> SELECT relname, oid = (SELECT t FROM ids) AS back FROM pg_class WHERE relname = 'test_oidc'
+relname:name | back:bool
+test_oidc | t
+-- SELECT 1
+
+> SELECT attname FROM pg_attribute WHERE attrelid = (SELECT t FROM ids) AND attnum > 0 ORDER BY attnum
+attname:name
+id
+note
+-- SELECT 2
+
+> SELECT count(*) FROM pg_attribute WHERE attrelid = (SELECT f FROM ids)
+count:int8
+0
+-- SELECT 1
+
+> DROP TABLE IF EXISTS test_oidc
+-- DROP TABLE
+
+> DROP EXTENSION IF EXISTS pg_prewarm
+-- DROP EXTENSION
+
+> DROP TABLE ids
+-- DROP TABLE
+
+> CREATE TABLE rc_t (a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO rc_t VALUES (1, 'x'), (2, 'yy')
+-- INSERT 0 2
+
+> CREATE FUNCTION rc_f(t rc_t) RETURNS int LANGUAGE sql STABLE AS $$ SELECT t.a + length(t.b) $$
+-- CREATE FUNCTION
+
+> SELECT rc_f(s) FROM (SELECT * FROM rc_t) s ORDER BY 1
+rc_f:int4
+2
+4
+-- SELECT 2
+
+> SELECT (SELECT rc_f(s)) FROM (SELECT * FROM rc_t) s ORDER BY 1
+rc_f:int4
+2
+4
+-- SELECT 2
+
+> SELECT (SELECT rc_f(s::rc_t)) FROM (SELECT * FROM rc_t WHERE a = 1) s
+rc_f:int4
+2
+-- SELECT 1
+
+> SELECT row_to_json((SELECT e FROM (SELECT s.a AS a, rc_f(s) AS w) AS e)) FROM (SELECT * FROM rc_t ORDER BY a) AS s
+row_to_json:json
+{"a":1,"w":2}
+{"a":2,"w":4}
+-- SELECT 2
+
+> SELECT coalesce(json_agg(r ORDER BY r.a), '[]') FROM (SELECT b.a, (SELECT rc_f(b)) AS w FROM (SELECT * FROM rc_t) b) r
+ERROR 42883: function rc_f(text) does not exist (at 75)
+HINT: No function matches the given name and argument types. You might need to add explicit type casts.
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT (SELECT rc_f(s)) FROM (SELECT * FROM rc_t WHERE a = 1) s
+QUERY PLAN:text
+Seq Scan on public.rc_t
+  Output: (SubPlan 1)
+  Filter: (rc_t.a = 1)
+  SubPlan 1
+    ->  Result
+          Output: (rc_t.a + length(rc_t.b))
+-- EXPLAIN
+
+> SELECT rc_f(s) FROM (SELECT b, a FROM rc_t) s
+ERROR 42846: cannot cast type record to rc_t (at 13)
+DETAIL: Cannot cast type text to integer in column 1.
+
+> SELECT rc_f(s) FROM (SELECT a, b, 1 AS c FROM rc_t) s
+ERROR 42846: cannot cast type record to rc_t (at 13)
+DETAIL: Input has too many columns.
+
+> SELECT rc_f(s) FROM (SELECT a FROM rc_t) s
+ERROR 42846: cannot cast type record to rc_t (at 13)
+DETAIL: Input has too few columns.
+
+> SELECT rc_f(s) FROM (SELECT a::int8, b FROM rc_t) s
+ERROR 42846: cannot cast type record to rc_t (at 13)
+DETAIL: Cannot cast type bigint to integer in column 1.
+
+> SELECT (SELECT rc_f(s)) FROM (SELECT b, a FROM rc_t) s
+ERROR 42846: cannot cast type record to rc_t (at 21)
+DETAIL: Cannot cast type text to integer in column 1.
+
+> SELECT ROW(1, 2)::rc_t
+row:user
+(1,2)
+-- SELECT 1
+
+> SELECT ROW('x', 'y')::rc_t
+ERROR 22P02: invalid input syntax for type integer: "x" (at 12)
+
+> DROP FUNCTION rc_f(rc_t)
+-- DROP FUNCTION
+
+> DROP TABLE rc_t
+-- DROP TABLE
+
+> CREATE TABLE nd (a int)
+-- CREATE TABLE
+
+> ALTER TABLE nd ADD COLUMN b varchar(254) DEFAULT NULL
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN c varchar(254) DEFAULT NULL::character varying
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN d varchar(254)
+-- ALTER TABLE
+
+> ALTER TABLE nd ALTER COLUMN d SET DEFAULT NULL
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN f text DEFAULT NULL::text
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN g int DEFAULT NULL
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN h numeric(5,2) DEFAULT NULL::numeric
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN i char(3) DEFAULT NULL
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN j timestamp(3) DEFAULT NULL
+-- ALTER TABLE
+
+> ALTER TABLE nd ADD COLUMN k varchar DEFAULT NULL
+-- ALTER TABLE
+
+> CREATE TABLE nd2 (x varchar(10) DEFAULT NULL::varchar, y varchar DEFAULT NULL::varchar, z bit(3) DEFAULT NULL)
+-- CREATE TABLE
+
+> SELECT table_name, column_name, column_default FROM information_schema.columns
+> WHERE table_name IN ('nd', 'nd2') ORDER BY 1, ordinal_position
+table_name:name | column_name:name | column_default:varchar
+nd | a | NULL
+nd | b | NULL::character varying
+nd | c | NULL::character varying
+nd | d | NULL::character varying
+nd | f | NULL
+nd | g | NULL
+nd | h | NULL::numeric
+nd | i | NULL::bpchar
+nd | j | NULL::timestamp without time zone
+nd | k | NULL
+nd2 | x | NULL::character varying
+nd2 | y | NULL
+nd2 | z | NULL::"bit"
+-- SELECT 13
+
+> SELECT adrelid::regclass, adnum, pg_get_expr(adbin, adrelid) FROM pg_attrdef
+> WHERE adrelid IN ('nd'::regclass, 'nd2'::regclass) ORDER BY 1, 2
+adrelid:regclass | adnum:int2 | pg_get_expr:text
+nd | 2 | NULL::character varying
+nd | 3 | NULL::character varying
+nd | 4 | NULL::character varying
+nd | 7 | NULL::numeric
+nd | 8 | NULL::bpchar
+nd | 9 | NULL::timestamp without time zone
+nd2 | 1 | NULL::character varying
+nd2 | 3 | NULL::"bit"
+-- SELECT 8
+
+> SELECT attname, atthasdef FROM pg_attribute WHERE attrelid = 'nd'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | atthasdef:bool
+a | f
+b | t
+c | t
+d | t
+f | f
+g | f
+h | t
+i | t
+j | t
+k | f
+-- SELECT 10
+
+> INSERT INTO nd (a) VALUES (1)
+-- INSERT 0 1
+
+> SELECT * FROM nd
+a:int4 | b:varchar | c:varchar | d:varchar | f:text | g:int4 | h:numeric | i:bpchar | j:timestamp | k:varchar
+1 | NULL | NULL | NULL | NULL | NULL | NULL | NULL | NULL | NULL
+-- SELECT 1
+
+> DROP TABLE nd, nd2
+-- DROP TABLE
+

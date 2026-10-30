@@ -167,6 +167,39 @@ server, raw-protocol probes against both servers):
   pool's exit can beat the task's FATAL reply. A client race, not a wire difference.
 - Knex's cancel with the pool exhausted: passes (523 / 0 on both).
 
+New suites: applications whose own database is the server, driven over HTTP
+(`suites/apps.py`: one id per step, `<step>#<hash>` of the normalized answer; ids, uuids,
+timestamps and other volatile fields dropped; the migrated schema one id per table). Server
+CPU over the whole run (the engine process; PostgreSQL's container):
+
+| suite | what runs | ids | differences | engine CPU | PostgreSQL CPU |
+|---|---|---:|---|---:|---:|
+| Grafana 13.3.0 | ~730 migrations, its API's objects, a PostgreSQL datasource (metadata queries, macros, errors) | 170 | 0 | 5.0 s | 3.5 s |
+| Metabase 0.64.3 | Liquibase migrations, sync + fingerprints + field values, native and MBQL queries, X-ray | 236 | 0 (1 fixed) | 40.9 s | 27.8 s |
+| Hasura 2.51.3 | hdb_catalog, tracking, relationships, permissions, event trigger, introspection, queries, mutations | 47 | 0 (2 fixed) | 1.1 s | 0.8 s |
+| Keycloak 26.8.1 | Liquibase, realms, clients, roles, groups, users, logins, sessions, events, export | 56 | 0 | 17.4 s | |
+| Directus 12.6.0 | migrations, collections / fields / relations made through its API (DDL), items, aggregates, errors | 47 | 0 | 2.0 s | 2.1 s |
+
+Fixed (golden `a122_client_round6`):
+- Hasura's computed fields and tracked functions: a FROM subquery's whole row passed from a
+  sub-select (`article_words("_root.base")`) failed "cannot cast type record to articles": an
+  upper level's whole row is now a ROW() of its lifted columns. coerce_record_to_complex's
+  column errors ("Cannot cast type text to integer in column 1.") too.
+- Metabase's schema: `varchar(254) DEFAULT NULL` keeps its default (`NULL::character
+  varying`), as a column with a type modifier does in PostgreSQL.
+- Doctrine DBAL `testListTableColumnsOidConflictWithNonTableObject`: the renumbering is
+  held (`Catalog::rel_oid_edits`, HANDOFF): DBAL 3558 / 4 on both, 0 differences.
+Normalized in the drivers (not the server): Metabase's t-digest quartiles (it fills them in
+its own order; the rows come in the same order from both servers), its search_index__<random>
+table, Grafana's starred uids, Keycloak's parentId, Directus's uuid-ordered update results.
+
+Re-measured: Kysely 10.2 s engine vs 7.4 s PostgreSQL (round 5: 10.8 vs 7.6; 745 / 0, 0
+differences), after round 21's planning-cost batches (agent 111); agents 115's and 116's
+catalog-regeneration and planner work wasn't upstream yet. The engine also takes more CPU
+than PostgreSQL for Metabase (sync and fingerprint queries over a catalog Liquibase grew),
+Grafana and Keycloak (start-up migrations: DDL per statement); not profiled yet.
+EF Core's PostgreSQL run with max_connections = 500: 186.5 s CPU, no "too many clients".
+
 ## Round 5 (round 22, agent 100)
 
 Release builds on both sides now (the engine `--release`, frame pointers on for perf),

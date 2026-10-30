@@ -525,6 +525,7 @@ stored_fields! {
         members,
         role_settings,
         depend_edits,
+        rel_oid_edits,
         parameters,
         shared_stamp,
         class_tick,
