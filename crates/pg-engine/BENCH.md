@@ -2642,6 +2642,18 @@ restoring either side's dump into the other, every way; dumps 2,720 / 2,733 entr
 New tests: `catalog_format.rs` `records_leave_defaults_out_and_downgrade_whole`, spec
 `roll-concurrent-create`, the debug cross-check of `functions_named` against a scan.
 
+
+### Third batch: Prisma's columns query (round 21, agent 92)
+
+`information_schema.columns` / `.tables` scans reading only the relations their filter names
+(`system::is_rows_named`) took `table_schema = 'x'` but not `table_schema = ANY ('{x}')`, which
+Prisma sends, so its columns query generated every relation's columns (90,000 objects: the
+view's scan alone 1.1 s, against 84 ms with `=`). A one-element `= ANY` now counts as the
+equality. Prisma's columns query at 90,000 objects, over the wire, first / then: 1,135 / 1,111
+ms → 842 / 427 (PostgreSQL 324 / 252). Golden `a92_is_any`. Verified as the second batch was (crate tests, clippy,
+smoke, isolation 121 / 122, regress 51,148 / 51,150 with no unit changed, pg_dump_tap, round trip
+0 errors both ways).
+
 ## Deep input (round 19, agent 63)
 
 The stack grows on demand at recursion points (HANDOFF.md, "Deep input"). This section

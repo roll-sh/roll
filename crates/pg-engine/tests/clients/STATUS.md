@@ -125,7 +125,9 @@ Left, and why:
   (pg_namespace_nspname_index); the engine's second creates its own and the commits merge
   (`txn/catmerge.rs`), so a second Flyway sees no history row and runs V1 again. The clean
   check after it fails from what that left. A catalog-concurrency item (name locks held to
-  commit).
+  commit). The engine side is fixed since round 21 (agent 92, `Ddl::reserve_names`, spec
+  `roll-concurrent-create`): the second CREATE waits and fails as PostgreSQL's does; the suite
+  wasn't re-run.
 - DBAL (1): `UPDATE pg_class SET oid = ...` by a superuser (renumbering a relation): refused.
 - Metadata replay (32 queries): pg_stat counters (always 0), pg_node_tree columns holding SQL
   text, aclexplode orders without ORDER BY; clients read them through pg_get_expr, which

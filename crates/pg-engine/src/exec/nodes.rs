@@ -1364,23 +1364,35 @@ fn is_named_rows(
     split(f, &mut conj);
     let (mut schema, mut name): (Option<String>, Option<String>) = (None, None);
     for c in conj {
-        let Expr::Call(d, args, _) = c else { break };
-        if d.name != "=" || args.len() != 2 || d.oid >= crate::catalog::FIRST_USER_OID {
+        // (`col = v`, or `col = ANY (array of one v)`: Prisma's `table_schema = ANY ($1)`.)
+        let (d, k, other, one) = match c {
+            Expr::Call(d, args, _) if args.len() == 2 => match (&args[0], &args[1]) {
+                (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) if *k == sk || *k == nk => (d, *k, o, false),
+                _ => break,
+            },
+            Expr::ArrayOp { left, right, op, all: false } => match &**left {
+                Expr::Col(k, _) if *k == sk || *k == nk => (op, *k, &**right, true),
+                _ => break,
+            },
+            _ => break,
+        };
+        if d.name != "=" || d.oid >= crate::catalog::FIRST_USER_OID {
             break;
         }
         if d.coll.as_ref().is_some_and(|c| !c.deterministic) {
             break;
         }
-        let (k, other) = match (&args[0], &args[1]) {
-            (Expr::Col(k, _), o) | (o, Expr::Col(k, _)) if *k == sk || *k == nk => (*k, o),
-            _ => break,
-        };
         let mut sub = false;
         other.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
         if sub || !other.columns().is_empty() || other.is_volatile() {
             break;
         }
         let v = crate::sql::expr::eval(other, &[], ctx)?;
+        let v = match (one, &v) {
+            (false, _) => v,
+            (true, Value::Array(a)) if a.items.len() == 1 => a.items[0].clone(),
+            _ => break,
+        };
         let Some(s) = v.as_str() else { break };
         let slot = if k == sk { &mut schema } else { &mut name };
         if slot.as_deref().is_some_and(|x| x != s) {
