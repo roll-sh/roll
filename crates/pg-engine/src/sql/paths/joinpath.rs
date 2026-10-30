@@ -1727,6 +1727,24 @@ impl Search<'_, '_, '_> {
                 Plan::Scan(sp) if matches!(sp.access, Access::Index { ordered: true, .. }) => {
                     break crate::sql::paths::index_order(self.pl.ctx, sp);
                 }
+                // (A sorted grouping's output, its group keys first: the subquery's
+                // GroupAggregate path keeps their order, convert_subquery_pathkeys.)
+                Plan::Agg { groups, sets: None, .. } if !groups.is_empty() => {
+                    let Some(gs) = crate::sql::explain::estimate(&Arc::new(p.clone()), self.pl.ctx).group_sort else {
+                        return Vec::new();
+                    };
+                    break gs
+                        .into_iter()
+                        .filter_map(|(i, desc, nulls_first)| {
+                            groups.get(i).map(|g| crate::sql::plan::SortKey {
+                                expr: Expr::Col(i, g.ty()),
+                                desc,
+                                nulls_first,
+                                using: None,
+                            })
+                        })
+                        .collect();
+                }
                 _ => return Vec::new(),
             }
         };
@@ -9462,7 +9480,18 @@ impl Planner<'_, '_> {
                         .collect();
                     (r.rows, cols)
                 }
-                _ => (est.rows, est.cols.clone()),
+                // (A subquery that groups: its outputs have no statistics, the one GROUP BY
+                // or DISTINCT key as many values as rows, examine_simple_variable.)
+                _ => {
+                    let mut cols = est.cols.clone();
+                    if let Some(unique) = crate::sql::explain::subquery_grouped_outputs(&plan, cols.len()) {
+                        for (c, u) in cols.iter_mut().zip(unique) {
+                            c.1 = None;
+                            c.2 = u.then(|| costs::clamp_rows(est.rows));
+                        }
+                    }
+                    (est.rows, cols)
+                }
             };
             // A partitioned table's Append: its columns are the parent's (whose unique
             // indexes the planner knows), over the members' tuples.

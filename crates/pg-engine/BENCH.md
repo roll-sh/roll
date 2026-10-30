@@ -1487,6 +1487,62 @@ load; the TPC-H row is a later run than the OLTP rows, at another load.
 Memory: the pass's partial paths live with the search (as the serial ones); a skipped pass
 keeps one record per join pair (its relations and clause list), dropped with the search.
 
+## Round 23 (agent 116): plan shapes against PostgreSQL, ORM and TPC-DS-style queries
+
+`tools/bench/plancmp.py` runs `EXPLAIN` of query sets on PostgreSQL 18.6 and the engine and
+reports, per query, whether the plan's node shapes match and whether the text matches with
+costs left out (PostgreSQL's JIT block dropped), with the engine's total cost over
+PostgreSQL's; `SUMMARY shape=N/M` is the number to start from. Sets: the 22 TPC-H queries,
+`tools/bench/plans/orm.sql` (45 queries as Django, Rails, Prisma, EF Core, Hibernate and
+SQLAlchemy write them: lookups, counts, pages, prefetches, EXISTS / IN, LATERAL loads,
+keyset pages, group counts) and `plans/tpcds.sql` (18 TPC-DS-style queries), all over TPC-H
+SF1 loaded by `tools/bench` into both (`a116-pg`, the engine restarted before each run):
+
+```sh
+python3 tools/bench/plancmp.py --pg-port <pg> --engine-port <engine> --db tpch \
+  --sets tpch,orm,tpcds [--serial] [--show q18,orm:keyset_page] [--diff]
+```
+
+| plan shapes matching | base (`6423b044`) | this batch |
+|---|---|---|
+| parallel query at its defaults | 69 / 89 (TPC-H 19 / 22) | **77 / 89** (TPC-H 19 / 22) |
+| `max_parallel_workers_per_gather = 0` | 78 / 89 (TPC-H 19 / 22) | **80 / 89** (TPC-H 19 / 22) |
+
+(The base measured 71 / 89 parallel in an earlier run: q13 and a near-tie flip with the
+restart's heap models.) What changed is in STATUS.md round 23. Left (HANDOFF item 11):
+TPC-H q13 (the restored heap model's pages), q18 and q10 serial (group-useful pathkeys at
+joins), q21 (Gather paths at join relations); ORM `keyset_page` and
+`exists_limit_order_limit` (Gather (Merge) choices under a LIMIT), `efcore_select_many`,
+`prisma_lateral_join` (a LATERAL item's Memoize), `cte_window`; TPC-DS `rollup_nation_year`,
+`except_parts`, `top_customers_by_year`, `union_channels`. Every TPC-H result hash agrees
+with PostgreSQL's (reps 1, after a restart).
+
+**Planning time.** CPU time of the engine process per statement (`/proc/<pid>/stat`), the
+base and this batch interleaved three times, the engine restarted and warmed before each
+(a machine at load 35-45, the engine on four pinned cores). EXPLAIN of pgbench's
+statements and ten ORM-style queries over pgbench_accounts (scale 10, 1,000 each), the
+cheap ones of them executed (400 each), the 45 ORM queries over TPC-H (100 each), the 22
+TPC-H queries (100 each):
+
+| workload | base (3 runs) | batch (3 runs) | batch / base, lower of each | median |
+|---|---|---|---|---|
+| OLTP + ORM over pgbench, EXPLAINed | 576 / 598 / 590 us | 530 / 655 / 523 us | 0.91 | 0.90 |
+| the same, executed | 361 / 396 / 371 us | 357 / 441 / 268 us | 0.74 | 0.96 |
+| ORM queries over TPC-H, EXPLAINed | 1,518 / 1,240 / 1,194 us | 1,320 / 1,510 / 976 us | 0.82 | 1.06 |
+| TPC-H, EXPLAINed | 11.8 / 11.9 / 10.7 ms | 11.5 / 11.1 / 8.4 ms | 0.79 | 0.94 |
+
+The spread between runs (up to 30%) is larger than any difference: planning CPU didn't
+rise. Nothing in the batch runs on a plain OLTP plan: the new work is EXPLAIN-only (a
+Limit's serial alternative, the target list over a relation's ordered alternatives, a
+partial join's filter) or limited to join groups with a grouped FROM item (its outputs'
+statistics, the order of a sorted grouping: one estimate of the item's plan). Peak memory
+(VmHWM) was 349-357 MB for both.
+
+pgbench (scale 10, 4 clients, 20 s, `-M prepared`, base / batch / base / batch): select-only
+24,295 / 28,437 / 26,975 / 26,184 tps; tpcb-like 2,752 / 2,467 / 2,666 / 2,514 tps (synchronous
+commits on a shared disk: the engine's CPU per transaction was 0.77-0.82 ms in all four), peak
+memory 199-278 MB alike. No change on the statement path.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

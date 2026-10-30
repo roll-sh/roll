@@ -3573,7 +3573,8 @@ them all with the "Fixed in round N" sections describing what was already tried.
    of a grouped sub-select's output; fix those first; the parallel q18 also needs partial merge
    joins in the search), q21 (two joins over rows=1 that tie within 0.5), q13 after a restart (a
    cold heap model laid out densely: customer 3,588 pages for 3,640, so its HashAggregate
-   fits hash_mem; storage), q09 / q10 serial (ANALYZE's random sample). The planner
+   fits hash_mem; storage), q09 / q10 serial (ANALYZE's random sample; round 23 found q10's to be q18's cause,
+   item 11, which has what is left of these). The planner
    leftovers passed on: join 355 at the default collapse limit (a LATERAL subquery with
    unread outputs kept as a parameterized item under a Memoize; changes every such LATERAL:
    its own batch with a full run); agent 52's Subquery Scan cost that setrefs
@@ -3617,6 +3618,7 @@ them all with the "Fixed in round N" sections describing what was already tried.
      PostgreSQL's when there are more of them than estimated (the hash table's growth).
    - Agent 99: an aggregate's final function cost per group isn't added (sum(numeric):
      0.0025 x groups below PostgreSQL's total); `LIMIT (SELECT 5)` doesn't show its InitPlan.
+     (Both done in round 23, agent 116.)
    - Agent 103 (index access, 75465ad5): on a GiST box index the engine picks an Index Only
      Scan where PostgreSQL picks a Bitmap Heap / Index Scan (`tools/bench/access.rs`, "GiST box
      &&"); PostgreSQL 18's skip scan costing and plan choice to compare (the executor side is
@@ -3625,6 +3627,72 @@ them all with the "Fixed in round N" sections describing what was already tried.
    - Started, not pushed: a FROM subquery with a written LIMIT / OFFSET settles its own plan
      (a Gather inside it if cheaper) and offers no partial plan above (`node`, after
      `convert` of a Barrier over a Limit), for the first item of this list; unverified.
+     (Done in round 23, agent 116, with the first item, the Subquery Scan of an outer join's
+     filter and agent 99's two cost gaps: STATUS.md round 23.)
+11. **Planner queue after round 23** (agent 116; `tools/bench/plancmp.py` reports the plan
+   shapes against a reference: start from its number, BENCH.md round 23):
+   - **The heap model after a restart** (q13, q18's customer rows; storage, not planner):
+     PostgreSQL's COPY extends a relation in bulk and leaves the pages it didn't fill at the
+     end (customer: rows on 3,588 pages, 3,640 in the file; VACUUM keeps them, under
+     REL_TRUNCATE_MINIMUM). The engine's warm model has them too (relpages 3,640), but a
+     reopened database restores rows at their stored TIDs only (`heapsim::restored`), 3,588
+     pages, so estimate_rel_size scales reltuples to 147,857 and q13's HashAggregate fits
+     hash_mem (no spill: a serial plan at a third of PostgreSQL's cost). Keeping the
+     relation's block count across a clean close (`persist_estimates` keeps it for big
+     tables only) and padding the restored model with new pages would fix it; mind a
+     VACUUM truncation after the last close. (Agent 113's models kept across a clean close,
+     629f3e51, landed while this batch was verified: re-measure q13 after a clean restart
+     before changing anything.)
+   - q18 and q10 serial (one cause; q10 isn't ANALYZE's sample: PostgreSQL's serial q10 kept
+     its plan over five fresh ANALYZEs, a GroupAggregate over an Incremental Sort over a merge
+     join in c_custkey order, as q18's): keep group-useful pathkeys at joins (pathkeys_useful_for_grouping: membership in
+     group_pathkeys after remove_useless_groupby_columns, which the join search's `Order`
+     hint doesn't apply: it has every GROUP BY key, ORDER BY's first) and offer the grouping
+     a sorted join path besides the cheapest (add_paths_to_grouping_rel reads the whole
+     pathlist; `final_path` returns the cheapest for a hint). The Memoize that made agent
+     91's attempt choose a nested loop is fixed (grouped outputs' statistics); its parallel
+     plan needs partial merge joins (`partial.rs` has nested loops and hash joins; EXPLAIN
+     already derives a partial merge join over a partial outer side).
+   - q21 and `EXISTS (... LIMIT 1) ORDER BY x LIMIT n` (ORM): Gather (Merge) paths at base
+     and intermediate join relations feeding serial joins above (generate_useful_gather_paths
+     per join relation in standard_join_search; PostgreSQL gathers q21 below its last two
+     joins). The partial pass runs after the serial search, so this needs gathered paths
+     made per level before the next.
+   - A keyset page (`(a, b) > (x, y) ORDER BY a, b LIMIT 50`): the engine takes the Gather
+     Merge over an incremental sort where the serial incremental sort under the LIMIT is a
+     sixteenth of its cost: the serial alternative is lost in the Sort conversion's
+     settle (`explain.rs` Plan::Sort) before the Limit compares them.
+   - A merge join's input sorted for it gets a Gather Merge of sorted partial plans where
+     PostgreSQL has a Sort over the Gather (generate_useful_gather_paths only makes them for
+     query_pathkeys; the merge's own sort is sort_inner_and_outer's over the cheapest path).
+   - agent 88's `WITH c AS (UPDATE ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP
+     LOCKED))`: a Hash Semi Join where the plain UPDATE gets the unique-ified HashAggregate +
+     Nested Loop; and the row-mark widths of a locked sub-select (`Subquery Scan on
+     "ANY_subquery"` width 32 for 4, LockRows 14 for 10, the Update's 70 for 42).
+   - agent 103's GiST box `&&`: on access.rs's 100,000-box table the plan choice agrees with
+     PostgreSQL's at this round's base already (an Index Only Scan for count(*), a Bitmap
+     Heap Scan for another column), but the index's size doesn't: `gistsim` models the sorted build, which box_ops (no sortsupport) doesn't get;
+     PostgreSQL's insertion build makes 1,011 pages where the model has 610 (scans cost
+     0.15..12.90 for 0.28..33.03). An insertion-build model (gistchoose's penalty, the
+     picksplit already ported) is the fix; gistchoose breaks penalty ties at random.
+   - Agent 120 (server log): a SQL set-returning function in the select list is estimated at
+     1 row where PostgreSQL estimates its prorows (1,000), the ProjectSet multiplying its
+     input's rows by it.
+   - Planning CPU of job-queue fetches (agent 114: Oban 2.3 ms, graphile-worker 1.8 ms to
+     plan, PostgreSQL 0.16 / 0.14; this round measured 1.7 ms warm against 0.26). A profile
+     (frame pointers, `perf` from a privileged helper) of the Oban fetch's EXPLAIN: binding
+     and planning 70%, of which the `ANY_subquery` leaf converted by EXPLAIN's builder three
+     times for its estimates (`explain::estimate_in` 9%, `explain::subquery_paths` 16%: a
+     `level` and a `node` conversion, though without a grouping or DISTINCT it has no other
+     path to offer), mergejoinscansel's `Est::var_range` probing the index for the actual
+     min / max (4%: PostgreSQL's get_variable_range never probes, `#ifdef NOT_USED`, so this
+     is a fidelity bug too), `describe` re-deriving each scan's `Rel` per conversion (9%),
+     zeroed allocations of EXPLAIN nodes (8%). Next: skip `subquery_paths` when the leaf's
+     estimate has no `alt`, drop the probe from `var_range`, cache a statement's scan
+     descriptions.
+   - CTE / UNION ALL Subquery Scans (`cte_window`, `union_channels`), ROLLUP's and EXCEPT's
+     strategy choices (`rollup_nation_year`, `except_parts`), a window over a grouped CTE
+     (`top_customers_by_year`): `plancmp.py --show <name>` prints both plans.
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

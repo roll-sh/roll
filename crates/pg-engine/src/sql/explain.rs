@@ -2196,8 +2196,20 @@ fn group_tlists(root: &Plan) -> GroupTlists {
 /// unique (as many values as the subquery's rows, get_variable_numdistinct's isunique);
 /// any other passes its columns' statistics on.
 fn subquery_var_stats(input: &Plan, cols: &mut [ColInfo], rows: f64) {
+    let Some(unique) = subquery_grouped_outputs(input, cols.len()) else { return };
+    for (c, u) in cols.iter_mut().zip(unique) {
+        c.var = None;
+        c.distinct = u.then(|| costs::clamp_rows(rows));
+    }
+}
+
+/// examine_simple_variable over a subquery's output columns: None when they keep their
+/// statistics; else (a subquery that groups, a DISTINCT, set operations, grouping sets)
+/// per column whether it is unique (the one GROUP BY or DISTINCT key: as many values as
+/// rows), none of them with statistics.
+pub(crate) fn subquery_grouped_outputs(input: &Plan, ncols: usize) -> Option<Vec<bool>> {
     // (Each output column's place in the current node's row, while it is a column.)
-    let mut map: Vec<Option<usize>> = (0..cols.len()).map(Some).collect();
+    let mut map: Vec<Option<usize>> = (0..ncols).map(Some).collect();
     let mut p = input;
     let unique: Option<usize> = loop {
         match p {
@@ -2230,16 +2242,10 @@ fn subquery_var_stats(input: &Plan, cols: &mut [ColInfo], rows: f64) {
             Plan::Agg { groups, sets: None, .. } if !groups.is_empty() => {
                 break (groups.len() == 1).then_some(0);
             }
-            _ => return,
+            _ => return None,
         }
     };
-    for (c, m) in cols.iter_mut().zip(&map) {
-        c.var = None;
-        c.distinct = match (unique, m) {
-            (Some(u), Some(i)) if u == *i => Some(costs::clamp_rows(rows)),
-            _ => None,
-        };
-    }
+    Some(map.iter().map(|m| matches!((unique, m), (Some(u), Some(i)) if u == *i)).collect())
 }
 
 fn barrier_junk(input: &Plan, sorted: Option<usize>) -> Option<(&Arc<Plan>, &Vec<Expr>)> {
@@ -6408,8 +6414,18 @@ impl Builder<'_, '_> {
                     };
                     self.fold_filter(c, minmax_having.as_ref().unwrap_or(pred), key, setop)
                 };
-                // (The subquery's InitPlans are its top node's: under the Subquery Scan.)
+                // (A HAVING's aggregates are the Agg's quals, not its target list: its width
+                // is of the columns read above.)
                 let mut out = out;
+                if matches!(&**input, Plan::Agg { .. })
+                    && out.node.node_type == "Aggregate"
+                    && let Some(m) = self.needed.get(&key)
+                    && m.len() == out.node.cols.len()
+                {
+                    out.node.width =
+                        out.node.cols.iter().zip(m).filter(|(_, n)| **n).map(|(c, _)| c.width).sum();
+                }
+                // (The subquery's InitPlans are its top node's: under the Subquery Scan.)
                 if self.sub_alias.is_some()
                     && out.node.node_type == "Subquery Scan"
                     && let Some(level) = self.inits.last_mut()
@@ -6661,7 +6677,9 @@ impl Builder<'_, '_> {
                     r.width = child.width;
                     r.cols = child.cols.clone();
                     r.startup_cost = child.startup_cost;
-                    r.total_cost = child.total_cost;
+                    // (create_projection_path: cpu_tuple_cost per row, besides the target
+                    // list's evaluation below.)
+                    r.total_cost = child.total_cost + child.rows * costs::CPU_TUPLE_COST;
                     r.key = child.key;
                     r.children.push(child.child("Outer"));
                     c.node = r;
@@ -6794,6 +6812,8 @@ impl Builder<'_, '_> {
                         _ => n.wrapped(),
                     })
                     .collect();
+                // (The target list's SubPlans, for the relation's other paths too.)
+                let proj_subs = if c.node.alt.is_some() { self.pending.clone() } else { Vec::new() };
                 if c.node.node_type == "Aggregate" || c.node.is_join() || c.node.node_type.ends_with(" Scan") {
                     // (ExecInitAgg initializes the projection before the aggregates'
                     // arguments: its SubPlans come first. So do a scan's and a join's
@@ -6989,6 +7009,31 @@ impl Builder<'_, '_> {
                                 }
                             }
                         }
+                    }
+                }
+                // The relation's other paths (in other orders) compute the same target list:
+                // its width, evaluation and SubPlans (apply_scanjoin_target_to_paths).
+                if c.node.alt.is_some() {
+                    let (width, cols, output) = (c.node.width, c.node.cols.clone(), c.node.output.clone());
+                    let mut a = c.node.alt.as_deref_mut();
+                    while let Some(x) = a {
+                        if !keeps_junk {
+                            x.width = width;
+                        }
+                        x.cols = cols.clone();
+                        if self.o.verbose {
+                            x.output = output.clone();
+                        }
+                        x.startup_cost += sp_startup;
+                        x.total_cost += x.rows * per + sp_startup + x.rows * sp_per;
+                        if x.node_type == "Aggregate" || x.is_join() || x.node_type.ends_with(" Scan") {
+                            let mut tl = proj_subs.clone();
+                            tl.append(&mut x.subplans);
+                            x.subplans = tl;
+                        } else {
+                            x.subplans.extend(proj_subs.iter().cloned());
+                        }
+                        a = x.alt.as_deref_mut();
                     }
                 }
                 if into_gather {
@@ -7856,13 +7901,22 @@ impl Builder<'_, '_> {
                 Built::passthrough(n, c.exported)
             }
             // limit_needed: no count and a constant zero (or NULL) offset make no Limit
-            // node (OFFSET 0 only keeps the subquery from being flattened).
+            // node (OFFSET 0 only keeps the subquery from being flattened). A written
+            // OFFSET 0 is still a limit to set_rel_consider_parallel, which sees the
+            // unfolded `int8(0)`: the subquery settles its own plan (a Gather inside it
+            // when cheaper) and offers the level above no partial plan.
             Plan::Limit {
                 input,
                 limit: None,
-                offset: None | Some(Expr::Const(crate::types::Value::Int8(0) | crate::types::Value::Null, _)),
+                offset: offset @ (None | Some(Expr::Const(crate::types::Value::Int8(0) | crate::types::Value::Null, _))),
                 with_ties: None,
-            } => self.node(input),
+            } => {
+                let mut c = self.node(input);
+                if matches!(offset, Some(Expr::Const(crate::types::Value::Int8(0), _))) {
+                    self.settle(&mut c.node);
+                }
+                c
+            }
             Plan::Limit {
                 input,
                 limit,
@@ -7870,16 +7924,39 @@ impl Builder<'_, '_> {
                 ..
             } => {
                 let mut c = self.node(input);
+                // (The serial plan, when a Gather over its partial plan replaces it: add_path
+                // keeps it beside the Gather when it starts fuzzily sooner, as a LIMIT's
+                // consider_startup has it, and the LIMIT reads the cheaper for its rows.)
+                let serial = c.node.partial.is_some().then(|| {
+                    let mut s = c.node.clone();
+                    s.partial = None;
+                    s.partials.clear();
+                    s.wanted_order.clear();
+                    s
+                });
                 self.settle(&mut c.node);
-                // preprocess_limit: a constant count (or offset); -1 when not constant.
-                let est = |e: &Option<Expr>| match e {
+                let serial = serial.filter(|s| {
+                    c.node.node_type != s.node_type && s.startup_cost * 1.01 < c.node.startup_cost
+                });
+                // (A sub-select in the OFFSET or LIMIT: an InitPlan of the level,
+                // preprocess_expression's order, the offset first.)
+                for e in [offset, limit].into_iter().flatten() {
+                    let mut sq = Vec::new();
+                    subqueries_in(e, &mut sq);
+                    if !sq.is_empty() {
+                        let _ = self.show(e, &[], Cx::Upper);
+                    }
+                }
+                // preprocess_limit: a constant count (at least 1) or offset (0 or less is
+                // none); -1 when not constant.
+                let est = |e: &Option<Expr>, least: f64| match e {
                     None => 0.0,
-                    Some(Expr::Const(crate::types::Value::Int8(v), _)) => (*v as f64).max(1.0),
-                    Some(Expr::Const(crate::types::Value::Int4(v), _)) => (*v as f64).max(1.0),
+                    Some(Expr::Const(crate::types::Value::Int8(v), _)) => (*v as f64).max(least),
+                    Some(Expr::Const(crate::types::Value::Int4(v), _)) => (*v as f64).max(least),
                     Some(Expr::Const(crate::types::Value::Null, _)) => 0.0,
                     Some(_) => -1.0,
                 };
-                let (count, off) = (est(limit), est(offset));
+                let (count, off) = (est(limit, 1.0), est(offset, 0.0));
                 // The input's other path (a Gather Merge of sorted partial plans, say):
                 // the Limit over the cheaper of them.
                 let mut next = c.node.alt.take();
@@ -7888,6 +7965,7 @@ impl Builder<'_, '_> {
                     next = a.alt.take();
                     forms.push(*a);
                 }
+                forms.extend(serial);
                 // (A Gather Merge of sorted partial plans: also as create_ordered_paths
                 // costs it for the rows the LIMIT reads.)
                 if count > 0.0 && off >= 0.0 {
@@ -12912,6 +12990,30 @@ impl Builder<'_, '_> {
     }
 
     fn fold_filter(&mut self, mut c: Built, pred: &Expr, key: usize, setop: bool) -> Built {
+        // (A join's own qual that workers can run (an outer join's clause over its nullable
+        // side, checked after the join): its partial join checks it too, and the Gather
+        // stays above, as the join's partial paths have it.)
+        let mut sq = Vec::new();
+        subqueries_in(pred, &mut sq);
+        if !setop
+            && sq.is_empty()
+            && c.node.is_join()
+            && c.node.partial.as_ref().is_some_and(|p| p.is_join())
+            && super::paths::parallel::hazard(pred, &self.ctx.catalog()) == 's'
+        {
+            let part = c.node.partial.take().expect("a partial plan");
+            let pb = Built { node: *part, internal: c.internal.clone(), exported: c.exported.clone() };
+            let pb = self.fold_filter_own(pb, pred, key, setop);
+            let mut c = self.fold_filter_own(c, pred, key, setop);
+            if c.node.is_join() {
+                c.node.partial = Some(Box::new(pb.node));
+            }
+            return c;
+        }
+        self.fold_filter_own(c, pred, key, setop)
+    }
+
+    fn fold_filter_own(&mut self, mut c: Built, pred: &Expr, key: usize, setop: bool) -> Built {
         // (A qual workers can't run keeps the node out of parallel plans; a subquery's
         // Subquery Scan checking it, planned apart, may gather its own plan below it.)
         if super::paths::parallel::hazard(pred, &self.ctx.catalog()) != 's' {
@@ -14162,32 +14264,26 @@ impl Builder<'_, '_> {
                 .collect()
         };
         let ngroups = self.group_num_groups(&kept, &c.node.cols, in_rows);
-        let trans = costs::CPU_OPERATOR_COST
-            * aggs
-                .iter()
-                .map(|a| 1 + a.args.iter().map(costs::ops).sum::<usize>())
-                .sum::<usize>() as f64;
+        let (trans, fin) = crate::sql::paths::parallel::agg_clause_costs(aggs, crate::sql::paths::parallel::AggSplit::Simple);
         let group_ops = costs::CPU_OPERATOR_COST * kept.len() as f64;
         match n.strategy {
             Some("Plain") => {
                 n.rows = 1.0;
                 n.startup_cost = c.node.total_cost + in_rows * trans;
-                n.total_cost = n.startup_cost + costs::CPU_TUPLE_COST;
+                n.total_cost = n.startup_cost + fin + costs::CPU_TUPLE_COST;
             }
             Some("Hashed") if sets.is_none() => {
                 n.rows = ngroups;
                 n.startup_cost = c.node.total_cost + in_rows * (trans + group_ops);
-                n.total_cost = n.startup_cost + ngroups * costs::CPU_TUPLE_COST;
+                n.total_cost = n.startup_cost + ngroups * (fin + costs::CPU_TUPLE_COST);
                 // (Spilling to disk when the groups don't fit in hash_mem.)
-                let space: f64 = aggs
-                    .iter()
-                    .map(|a| crate::sql::paths::parallel::agg_trans_space(a.def.sig.oid))
-                    .sum();
+                // (hash_agg_entry_size: per transition state, as aggregates share them.)
+                let (num_trans, space) = crate::sql::paths::parallel::agg_transitions(aggs);
                 let (s, t, parts) = crate::sql::paths::Gucs::read(self.ctx).hashagg_spill(
                     in_rows,
                     c.node.width,
                     ngroups,
-                    aggs.len(),
+                    num_trans,
                     space,
                 );
                 plan_partitions(&mut n.details, parts);
@@ -14199,11 +14295,11 @@ impl Builder<'_, '_> {
                 n.startup_cost = c.node.startup_cost;
                 n.total_cost = c.node.total_cost
                     + in_rows * (trans + group_ops)
-                    + ngroups * costs::CPU_TUPLE_COST;
+                    + ngroups * (fin + costs::CPU_TUPLE_COST);
             }
             _ => {
                 n.startup_cost = c.node.total_cost + in_rows * (trans + group_ops);
-                n.total_cost = n.startup_cost + n.rows * costs::CPU_TUPLE_COST;
+                n.total_cost = n.startup_cost + n.rows * (fin + costs::CPU_TUPLE_COST);
             }
         }
         // (create_agg_path: the grouping target's group expressions, per group.)
@@ -14425,7 +14521,7 @@ impl Builder<'_, '_> {
                     ga.title = "GroupAggregate".into();
                     ga.total_cost = input.total_cost
                         + in_rows * (trans + group_ops)
-                        + ngroups * costs::CPU_TUPLE_COST;
+                        + ngroups * (fin + costs::CPU_TUPLE_COST);
                 }
                 ga.total_cost += ngroups * gexpr;
                 ga.disabled = false;
@@ -15386,6 +15482,11 @@ impl Builder<'_, '_> {
         // (An input read in the order the query wants: the join keeps that order.)
         let ordered_input = !l.node.wanted_order.is_empty() || !r.node.wanted_order.is_empty();
         let (lgath, rgath) = (parallel::has_gather(&lg.node), parallel::has_gather(&rg.node));
+        // (A merge join reads its sides in its keys' order: a side gathered in no order
+        // isn't one it can read without a sort.)
+        let merge_unordered = meta.method == Some(super::plan::JoinMethod::Merge)
+            && ((lgath && !lg.node.order.starts_with(&l.node.order))
+                || (rgath && !rg.node.order.starts_with(&r.node.order)));
         let nl_inner_gathered = |p: &ExNode| -> bool {
             if !p.title.ends_with("Nested Loop") && !p.title.contains("Nested Loop ") {
                 return false;
@@ -15593,7 +15694,7 @@ impl Builder<'_, '_> {
             if b1.node.partial.as_deref().is_some_and(nl_inner_gathered) {
                 b1.node.partial = None;
             }
-            if lgath || rgath {
+            if (lgath || rgath) && !merge_unordered {
                 let mut b2 = self.join_built(at, kind, left, right, lg, rg, cond, hash, params, meta);
                 if b2.node.subplans.is_empty() {
                     b2.node.subplans = b1.node.subplans.clone();
@@ -21002,6 +21103,10 @@ fn limit_over(mut c: ExNode, count: f64, off: f64) -> ExNode {
     }
     n.width = c.width;
     n.cols = c.cols.clone();
+    // (A Limit returns its input's rows in their order: create_limit_path keeps its
+    // pathkeys.)
+    n.order = c.order.clone();
+    n.order_eq = c.order_eq.clone();
     n.children.push(c.child("Outer"));
     n
 }

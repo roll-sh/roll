@@ -351,6 +351,72 @@ Looked at and left (why):
 - q09, q10 (serial): ANALYZE's random sample (p_name's histogram; Postgres's own plan flips
   between runs of ANALYZE).
 
+## Round 23, agent 116 (planner round 7, first batch: plan shapes of ORM and TPC-DS-style queries)
+
+Measured by a full run of the batch (debug build, private reference `a116-rref`) against the
+committed baseline (`results.tsv`, `9407d0ee`): **51,148 / 51,150, no unit changed**. The
+difftest smoke passes, and 150 seeds x 120 statements with `DIFFTEST_PLAN=0.5` give the same
+mismatch records as the base (`6423b044`), record for record. Isolation 121 / 122 specs,
+1,647 / 1,648 permutations. Every TPC-H SF1 result hash agrees with PostgreSQL's. (The
+generated blocks are left to the next committed full run.)
+
+`tools/bench/plancmp.py` compares `EXPLAIN` of query sets on PostgreSQL 18.6 and the engine
+(node shapes, and the text with costs left out): the 22 TPC-H queries and the files
+`tools/bench/plans/orm.sql` (45 queries as Django, Rails, Prisma, EF Core, Hibernate and
+SQLAlchemy write them, over the TPC-H schema) and `tpcds.sql` (18 TPC-DS-style queries:
+rollups, windows, CTE reuse, set operations, top-N per group). At the base: 50 of 67 ORM and
+TPC-DS shapes matched; now 76 of 89 with TPC-H (BENCH.md, round 23). Fixed (golden
+`a116_planner_fixes`, recorded from PostgreSQL 18.6):
+
+- **An aggregate's final function** costs cpu_operator_cost per group, and calls sharing a
+  transition state (sum and avg of numeric, avg and stddev of float8) or equal calls
+  transition once (get_agg_clause_costs over preprocess_aggrefs' AggInfos and
+  AggTransInfos); a FILTER's evaluation counts per input row; a partial aggregation pays its
+  serialization function per group, a finalizing one its combine and deserialization
+  functions per row (`paths::parallel::agg_clause_costs`). The hashed spill's state count is
+  the shared states'.
+- **A sub-select in LIMIT / OFFSET** is an InitPlan of the level (it wasn't shown, nor
+  charged), the offset's first; an OFFSET of 0 is none in the Limit's estimate (it counted 1:
+  a top-N sort's bound one too many).
+- **A written OFFSET 0 subquery** (Prisma's and SQLAlchemy's count wrappers) is no parallel
+  relation to the query above (set_rel_consider_parallel sees the unfolded `int8(0)`): it
+  settles its own plan, a Gather inside it when cheaper, and offers no partial plan
+  (agent 91's unpushed fix, done again).
+- **A Limit keeps its input's order** (create_limit_path): a query sorting a sorted LIMIT
+  subquery's rows by the same keys sorts no more (`limit_over`).
+- **Under a LIMIT, the serial plan stays beside a Gather** that beat it in total cost when it
+  starts fuzzily sooner (add_path with consider_startup), and the LIMIT reads the cheaper
+  for its rows: `EXISTS (... LIMIT 1) ORDER BY ... LIMIT 21` keeps PostgreSQL's merge semi
+  join over two index scans. A merge join no longer reads a side gathered in no order (it
+  showed a Merge Join over a plain Gather).
+- **A projection's target list is the relation's other paths' too** (apply_scanjoin_target_to_paths):
+  an ORDER BY ... LIMIT over an index path kept as the relation's ordered alternative lost
+  its target list's SubPlans, width and cost (Django's subquery annotation showed no SubPlan
+  and a cost a fiftieth of PostgreSQL's). A projection Result above a Sort, an Append or a
+  ProjectSet pays cpu_tuple_cost per row (create_projection_path).
+- **An outer join's qual over its nullable side** (Rails' `left_outer_joins ... WHERE
+  orders.id IS NULL`) is the partial join's Filter too; the engine gathered the join first
+  and checked it in a `Subquery Scan on unnamed_subquery` above the Gather.
+- **A grouped sub-select's outputs have no statistics** (examine_simple_variable: GROUP BY,
+  DISTINCT, set operations), its one GROUP BY / DISTINCT key unique, as many values as rows;
+  the join search took the base column's (`l_orderkey`, a quarter as many values as rows) and
+  memoized a nested loop over the IN sub-select's keys at a 75% hit ratio (agent 91's q18
+  finding: `IN (SELECT l_orderkey ... GROUP BY l_orderkey HAVING ...)` now merges as
+  PostgreSQL does). A sorted grouping's output is in its group keys' order for the join
+  search (convert_subquery_pathkeys of a GroupAggregate path), and a HAVING's aggregates
+  aren't in the Agg's width (its target list is what is read above).
+
+Checked and left: PostgreSQL 18's skip scan costing matches (`b = c` on an `(a, b)` index,
+ranges, `a IN (...) AND b = c`: same costs; btcostestimate's skip arrays were already
+ported). TPC-H q10's serial plan isn't ANALYZE's sample: PostgreSQL kept it over five fresh
+ANALYZEs (at SF1 every table but lineitem is read whole, 30,000 random rows of it; the
+engine's sample is the same size, block-sampled the same way, from a fixed seed); it is
+q18's sorted grouping over a merge join in c_custkey order. q13 differs after a restart
+only, by the heap model's pages (HANDOFF item 11). The 600k-entry btree whose scans started
+at 0.17 (agent 91's note) didn't reproduce: lineitem_pkey's scans at SF 0.1 start at 0.42 on
+both; the Memoize above was the cause. Open, with causes, in BENCH.md round 23 and HANDOFF
+item 11.
+
 ## Round 22, agent 91 (planner round 6: partial paths in the join search)
 
 Measured by a full run of the batch (debug build, private reference `a91-rref`) against the

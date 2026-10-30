@@ -755,12 +755,12 @@ impl Builder<'_, '_> {
         {
             return None;
         }
-        let trans = costs::CPU_OPERATOR_COST
-            * aggs
-                .iter()
-                .map(|a| 1 + a.args.iter().map(costs::ops).sum::<usize>())
-                .sum::<usize>() as f64;
-        let combine = costs::CPU_OPERATOR_COST * aggs.len() as f64;
+        // (get_agg_clause_costs of the partial aggregation, whose states are serialized per
+        // group, and of the finalizing one, which combines (deserialized) states per row
+        // and runs the final functions per group.)
+        use crate::sql::paths::parallel::{AggSplit, agg_clause_costs};
+        let (trans, pser) = agg_clause_costs(aggs, AggSplit::Partial);
+        let (combine, fin) = agg_clause_costs(aggs, AggSplit::Final);
         let group_ops = costs::CPU_OPERATOR_COST * groups.len() as f64;
         // (The group expressions the grouping targets compute, per group: create_agg_path.)
         let gexpr: f64 = groups
@@ -882,7 +882,7 @@ impl Builder<'_, '_> {
             let mut pa = make("Plain", "Partial", part);
             pa.rows = 1.0;
             pa.startup_cost = pa.children[0].total_cost + in_rows * trans;
-            pa.total_cost = pa.startup_cost + costs::CPU_TUPLE_COST;
+            pa.total_cost = pa.startup_cost + pser + costs::CPU_TUPLE_COST;
             pa.output = partial_out.clone();
             let mut gt = self.gather_of(&pa);
             gt.rows = costs::clamp_rows(pa.rows * cfg.divisor(workers));
@@ -890,7 +890,7 @@ impl Builder<'_, '_> {
             let mut f = make("Plain", "Finalize", gt);
             let gi = &f.children[0];
             f.startup_cost = gi.total_cost + gi.rows * combine;
-            f.total_cost = f.startup_cost + costs::CPU_TUPLE_COST;
+            f.total_cost = f.startup_cost + fin + costs::CPU_TUPLE_COST;
             f.rows = 1.0;
             finals.push(f);
         } else {
@@ -901,7 +901,7 @@ impl Builder<'_, '_> {
             let mut ph = make("Hashed", "Partial", part.clone());
             ph.rows = pgroups;
             ph.startup_cost = part.total_cost + in_rows * (trans + group_ops);
-            ph.total_cost = ph.startup_cost + pgroups * (costs::CPU_TUPLE_COST + gexpr);
+            ph.total_cost = ph.startup_cost + pgroups * (costs::CPU_TUPLE_COST + gexpr + pser);
             // (cost_agg's disk costs when the groups won't fit in hash_mem, partial and
             // finalized alike: the transition states of all the aggregates.)
             let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(aggs);
@@ -916,7 +916,7 @@ impl Builder<'_, '_> {
             ps.rows = pgroups;
             ps.startup_cost = sic.startup_cost;
             ps.total_cost =
-                sic.total_cost + in_rows * (trans + group_ops) + pgroups * (costs::CPU_TUPLE_COST + gexpr);
+                sic.total_cost + in_rows * (trans + group_ops) + pgroups * (costs::CPU_TUPLE_COST + gexpr + pser);
             ps.output = partial_out.clone();
             let gathered = |b: &Self, pa: &ExNode, merge: bool| -> ExNode {
                 let mut gt = if merge { b.gather_merge_of(pa) } else { b.gather_of(pa) };
@@ -940,7 +940,7 @@ impl Builder<'_, '_> {
                 let mut f = make("Hashed", "Finalize", gt);
                 let gi = &f.children[0];
                 f.startup_cost = gi.total_cost + gi.rows * (combine + group_ops);
-                f.total_cost = f.startup_cost + ngroups * (costs::CPU_TUPLE_COST + gexpr);
+                f.total_cost = f.startup_cost + ngroups * (costs::CPU_TUPLE_COST + gexpr + fin);
                 let (s, t, parts) = g.hashagg_spill(gi.rows, gi.width, ngroups, num_trans, trans_space);
                 f.startup_cost += s;
                 f.total_cost += t;
@@ -954,7 +954,7 @@ impl Builder<'_, '_> {
                 f.startup_cost = gi.startup_cost;
                 f.total_cost = gi.total_cost
                     + gi.rows * (combine + group_ops)
-                    + ngroups * (costs::CPU_TUPLE_COST + gexpr);
+                    + ngroups * (costs::CPU_TUPLE_COST + gexpr + fin);
                 f.rows = ngroups;
                 f
             };
@@ -982,7 +982,7 @@ impl Builder<'_, '_> {
                 ps2.startup_cost = sic.startup_cost;
                 ps2.total_cost = sic.total_cost
                     + in_rows * (trans + group_ops)
-                    + pgroups * (costs::CPU_TUPLE_COST + gexpr);
+                    + pgroups * (costs::CPU_TUPLE_COST + gexpr + pser);
                 ps2.output = partial_out.clone();
                 add_partial_path(&mut partials, ps2);
             }

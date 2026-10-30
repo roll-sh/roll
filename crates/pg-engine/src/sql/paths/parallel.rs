@@ -560,6 +560,94 @@ pub fn agg_transitions(aggs: &[crate::sql::plan::AggCall]) -> (usize, f64) {
     (n, space)
 }
 
+/// Which part of the aggregation a node does (AggSplit): all of it, the workers' partial
+/// states (serialized for the Gather), or the states combined and finalized.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AggSplit {
+    Simple,
+    Partial,
+    Final,
+}
+
+/// pg_aggregate's support functions of a built-in aggregate: (aggfinalfn, aggcombinefn,
+/// aggserialfn, aggdeserialfn), 0 for none.
+fn agg_support(oid: u32) -> Option<[u32; 4]> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<u32, [u32; 4]>> = std::sync::OnceLock::new();
+    let m = MAP.get_or_init(|| {
+        include_str!("../../catalog/data/pg_aggregate.tsv")
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                let oid = f.first()?.parse::<u32>().ok()?;
+                let n = |i: usize| f.get(i).and_then(|x| x.parse::<u32>().ok()).unwrap_or(0);
+                Some((oid, [n(4), n(5), n(6), n(7)]))
+            })
+            .collect()
+    });
+    m.get(&oid).copied()
+}
+
+/// get_agg_clause_costs for a level's aggregates as `split` runs them: (per input row, per
+/// group). Per row, each transition state's transition function (combine function and
+/// deserialization when finalizing) and, at the first level, its inputs and FILTER; per
+/// group, each distinct call's final function (none for partial states, which pay their
+/// serialization function instead) and its direct arguments. Equal calls are one, and
+/// calls of one transition function over the same inputs share a state
+/// (preprocess_aggrefs), as `agg_transitions` counts them. Functions cost cpu_operator_cost
+/// each (procost 1, as every built-in support function has).
+pub fn agg_clause_costs(aggs: &[crate::sql::plan::AggCall], split: AggSplit) -> (f64, f64) {
+    use crate::sql::costs::{CPU_OPERATOR_COST, qual_cost};
+    let mut calls: Vec<(u32, String)> = Vec::new();
+    let mut states: Vec<(u32, String)> = Vec::new();
+    let (mut per_row, mut per_group) = (0.0, 0.0);
+    for a in aggs {
+        let inputs = format!("{:?}|{:?}|{}|{:?}|{:?}", a.args, a.filter, a.distinct, a.order_by, a.direct);
+        let oid = a.def.sig.oid;
+        let call = (oid, inputs.clone());
+        if calls.contains(&call) {
+            continue;
+        }
+        calls.push(call);
+        let support = if a.user.is_none() { agg_support(oid) } else { None };
+        let [finalfn, _, serialfn, deserialfn] = support.unwrap_or_default();
+        let has_final = match &a.user {
+            Some(u) => u.final_.is_some(),
+            None => finalfn != 0,
+        };
+        if split != AggSplit::Partial && has_final {
+            per_group += CPU_OPERATOR_COST;
+        }
+        per_group += a.direct.iter().map(qual_cost).sum::<f64>();
+        // (The transition state, unless an earlier call's is shared.)
+        if a.user.is_none()
+            && let Some((t, false)) = agg_transfn(oid)
+            && t != 0
+        {
+            let k = (t, inputs);
+            if states.contains(&k) {
+                continue;
+            }
+            states.push(k);
+        }
+        per_row += CPU_OPERATOR_COST;
+        match split {
+            AggSplit::Final => {
+                if deserialfn != 0 {
+                    per_row += CPU_OPERATOR_COST;
+                }
+            }
+            _ => {
+                per_row += a.args.iter().map(qual_cost).sum::<f64>();
+                per_row += a.filter.as_ref().map_or(0.0, qual_cost);
+                if split == AggSplit::Partial && serialfn != 0 {
+                    per_group += CPU_OPERATOR_COST;
+                }
+            }
+        }
+    }
+    (per_row, per_group)
+}
+
 /// get_agg_clause_costs' transition space of an aggregate: its state's average width when
 /// the state type is passed by reference (MAXALIGNed; an internal state without a declared
 /// size: ALLOCSET_DEFAULT_INITSIZE), else 0.
