@@ -109,6 +109,10 @@ pub fn serve(
 pub fn spawn(engine: Arc<Engine>, addr: &str, opts: ServerOptions) -> std::io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
+    // Noted before this returns: a session opened right after (embedded, not through the
+    // listener) reads `port` and `listen_addresses` from it, and the accept thread may not
+    // have started yet (`SHOW port` read 5432 now and then under load).
+    engine.note_listen_addr(local);
     std::thread::Builder::new()
         .name("roll-accept".into())
         .spawn(move || serve(engine, listener, opts))?;

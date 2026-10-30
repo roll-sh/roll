@@ -260,11 +260,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     analyze of table ..." reports in PostgreSQL's layout, with the engine's pages, tuples,
     visibility map, removal horizon and the worker thread's CPU (getrusage); buffer, WAL and
     I/O figures of a buffer manager it doesn't have read 0, and no per-index lines (test
-    `tests/autovacuum_log.rs`). Not done: log_temp_files (the engine has no temporary
-    files to report), PostgreSQL 18's log_connections aspects
-    "authentication" and "setup_durations", nested statements of SQL-language functions,
-    the shutdown checkpoint's lines, `%L`/inet_* for the engine's own "local" connections
-    (reported as TCP).
+    `tests/autovacuum_log.rs`). (The "Not done" items of this batch: round 22, agent 120,
+    below.)
   - Monitoring tools: 166 queries of pgwatch (59, `_pg_truetypid`'s table_hashes included),
     postgres_exporter (33), pgAdmin's dashboard (23), pg_activity (18) and pganalyze-collector
     (33), run against the engine and a reference with pg_stat_statements on a populated
@@ -280,6 +277,78 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     CPU per transaction, which load moves less than tps): select-only 291–304 µs base, 272–284
     µs with round 21's logging; tpcb-like 1,657–1,712 µs base, 1,595–1,727 µs; peak RSS
     363–375 MB base, 359–385 MB. No regression beyond the noise.
+- **Server administration and the server log, round 3** (round 22, agent 120): checked line
+  by line against a private reference with the same settings (log_line_prefix with every
+  escape, log_connections all, log_disconnections, log_statement all).
+  - log_connections (`log::ConnAspects`): the list and boolean forms with
+    check_log_connections' errors ("Invalid option", "Cannot specify log_connections option
+    "on" in a list with other options", "Invalid list syntax"). receipt, authentication and
+    authorization take the server's value (files, command line), setup_durations the
+    session's (startup options count), as in PostgreSQL. "connection authenticated:
+    identity="x" method=scram-sha-256 (file:line)" after a password, `user="x"` for trust,
+    with the matching pg_hba.conf rule (without rules: line 1, the rule pg_hba_file_rules
+    shows); "connection authorized" / "replication connection authorized" with the startup
+    packet's application_name only when it sent one (pg_clean_ascii'd), logged before the
+    role's checks (no such role, NOLOGIN: `check_role_login`, InitializeSessionUserId's
+    place) and before the startup options apply (a bad one's FATAL follows it); "connection
+    ready: setup total=... ms, fork=... ms, authentication=... ms" at the first
+    ReadyForQuery. Pre-session lines carry %u / %d from the startup packet, %b "not
+    initialized" for the receipt line, "walsender" for replication connections (a physical
+    one with no database: %d "[unknown]", "database=" at its end), %i "authentication" /
+    "startup", %v as PostgreSQL's (empty, then P/1). FATALs sent before the session exists
+    are logged (`impl Drop for Conn`): authentication failures with auth_failed's
+    errdetail_log ("Password does not match for user", "Role ... does not exist", "User ...
+    has no password assigned" / "an expired password" / "does not have a valid SCRAM
+    secret", then "Connection matched file ... line N: "<rule as written>""), no such role
+    or database, a bad startup option, "the database system is shutting down".
+  - Local connections: the engine's connections to itself through libpq's default socket
+    (`hba::mark_local`) are Unix-socket ones everywhere: %r / %h / %L and csvlog / jsonlog
+    "[local]" without a port, "host=[local]" in the received and disconnection lines,
+    inet_client_addr / _port / inet_server_addr / _port NULL, pg_stat_activity client_addr
+    NULL and client_port -1.
+  - Start and end (`log/lifecycle.rs`, `roll-engine`'s signals): "starting PostgreSQL ...",
+    the listening line, the startup process's (pid 32) "database system was shut down at"
+    (pg_control's time: `Registry::time`, the last start or clean shutdown; initdb's for a
+    new cluster), "ready to accept connections". SIGTERM is a smart shutdown (sessions run
+    to their end, new connections get "the database system is shutting down"), SIGINT fast
+    ("aborting any active transactions", each session's FATAL with its STATEMENT, now
+    logged before its disconnection line, pg_terminate_backend's too), both then "background
+    worker "logical replication launcher" (PID 35) exited with exit code 1", the
+    checkpointer's "shutting down", "checkpoint starting: shutdown immediate", "checkpoint
+    complete: ..." around `Engine::shutdown`, "database system is shut down". SIGQUIT is an
+    immediate shutdown: every client gets quickdie's WARNING "terminating connection due to
+    immediate shutdown command", no checkpoint, so the next start recovers as after kill -9:
+    "database system was interrupted; last known up at", "was not properly shut down;
+    automatic recovery in progress", "redo starts at", "invalid record length at ...:
+    expected at least 24, got 0", "redo done at ... system usage: CPU: ...", then the
+    end-of-recovery checkpoint. A later, more urgent signal takes over a shutdown.
+    roll-engine's own tracing now defaults to warnings (RUST_LOG for more): its stderr is
+    the server log.
+  - auto_explain.log_nested_statements covers SQL-language functions: each statement a
+    non-inlined call runs (`call_sql`, and the statements bound into the calling plan,
+    `Plan::Context`, logged when their rows are done), with the function's source as the
+    Query Text and its arguments as Query Parameters, log_analyze included; inlined calls
+    log nothing, as in PostgreSQL. PL/pgSQL's PERFORM and SQL statements are logged whatever
+    their form (SPI runs them; only a simple expression skips the executor), and nested
+    plans reach the client past client_min_messages (auto_explain.log_level = notice).
+    void's typlen is 4 (a void call's width).
+  - Parallel workers' locks (`exec/parallel_part.rs`): with parallel_leader_participation
+    off and workers to launch, the plan node under each Gather / Gather Merge (as EXPLAIN
+    places them, `explain::gather_parts`) runs as the workers' part: the heavyweight locks
+    and session-level advisory locks taken while it runs are released when it has returned
+    its last row (or ends), as the workers' go when they exit. With the leader
+    participating, it running every row (keeping the locks) stays, one of PostgreSQL's
+    schedules. pg_locks doesn't show worker pids during the Gather. Spec
+    `roll-parallel-worker-locks`.
+  - `server::spawn` notes the listen address before returning: a session opened right after
+    it read `port` 5432 when the accept thread hadn't started (`outbound`'s flaky `SHOW port`).
+  - Tests: `tests/connection_log.rs`, `tests/lifecycle_log.rs` (the binary's signals).
+    Left: %v / pg_locks virtualxid local ids count the engine's own transactions (a
+    session's first statement shows 3/6 where PostgreSQL's shows N/2; statement lines show
+    3/0); "connection ready"'s fork / authentication split for an in-process backend (see
+    Decisions); a shutdown checkpoint's distance is 0 when no checkpoint ran since the start;
+    a SQL set-returning function's ProjectSet row estimate (1 where PostgreSQL's prorows
+    gives 1000; agent 116's).
 - **Server configuration, authentication rules and the server log** (round 20, agent 80):
   - `src/sysconf.rs`: postgresql.conf is the pinned image's (its 15 settings at their lines,
     the locale lines what initdb chose); postgresql.auto.conf is ALTER SYSTEM's, kept in the
@@ -3338,6 +3407,23 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   Printing function counts or timings for compilation that never ran would mislead the tools
   that read them (auto_explain logs, pgAdmin / explain.dalibo.com, people tuning
   jit_above_cost); pg_jit_available() is how clients are meant to tell.
+- **log_connections' setup durations for an in-process backend** (round 22, agent 120). The
+  engine has no fork: a connection is a thread. "connection ready: setup total=X ms,
+  fork=Y ms, authentication=Z ms" keeps PostgreSQL's format and meanings mapped onto that:
+  total is from the accept to the first ReadyForQuery (PostgreSQL's socket_create to
+  ready_for_use); fork is from the accept to the connection's thread running (the backend's
+  creation, PostgreSQL's fork_start to fork_end); authentication is pg_hba.conf's choice and
+  the password exchange (auth_start to auth_end). Crash recovery's lines use the engine's
+  WAL positions (redo starts at the last clean shutdown's, the WAL resumes where `WalPos`
+  persisted ahead) and the start's own CPU and time: accepted internal numbers.
+- **log_temp_files has nothing to log** (round 22, agent 120). PostgreSQL's temporary files
+  are its sorts', hashes' and tuplestores' spills past work_mem; the engine's sorts and
+  hashes don't spill to disk, and its one disk spill, a large transaction's write buffer
+  (`txn::spill`), has no PostgreSQL counterpart (PostgreSQL writes those rows to the
+  relation). So nothing is logged and pg_stat_database's temp_files / temp_bytes stay 0, as
+  for a PostgreSQL run whose work fits work_mem. The subscriber's spool of a streamed
+  transaction (`repl/apply_stream`) does stand for PostgreSQL's apply worker BufFile, which
+  log_temp_files reports at its deletion: not logged yet (left).
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for

@@ -73,8 +73,7 @@ it implemented over the old lock manager.
   `lock_excl(1,x) ... LIMIT 1` ran in the leader and kept its exclusive lock until e1c, where
   Postgres's worker gives it back as it ends. The call now carries the alias's oid when the
   two markings differ (`Binder::internal_call`). Locks a real parallel plan's lower part
-  takes, its functions' advisory locks, still stay with the leader: the engine's Gather is
-  an EXPLAIN node, its part below runs in the executor's thread; no spec or client sees it.)
+  takes: round 22, agent 120, below.)
 
 ## Per spec
 
@@ -423,7 +422,11 @@ where the reference does: 20 waits, 27 errors, 19 notifications.)
   fetch); and that unique-ifying HashAggregate returns its groups in another order than
   PostgreSQL's when there are more of them than estimated (`DELETE ... WHERE id IN (SELECT
   ... LIMIT 2 ...) RETURNING id`, estimated 1 row).
-- **Open: locks of a real parallel plan's lower part** (the round's item 2, not done). What
+- **Locks of a real parallel plan's lower part** (round 22, agent 120: done for
+  parallel_leader_participation off, `exec/parallel_part.rs`, spec
+  `roll-parallel-worker-locks`; the plan node under each Gather runs as the workers' part,
+  its transaction and session-level locks released when it has returned its last row.
+  Still not: worker pids in pg_locks and pg_stat_activity during the Gather.) Before: what
   PostgreSQL shows: each worker is a backend of the leader's lock group, so its locks never
   conflict with the leader's or its siblings', pg_blocking_pids reports the leader's pid
   for them, the deadlock detector treats the group as one; pg_locks lists the worker's own
