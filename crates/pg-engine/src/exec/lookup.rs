@@ -205,6 +205,7 @@ impl Lookup {
                 raw: Vec::new(),
                 need_raw: None,
                 topk: None,
+                toast: None,
             },
             filter,
             cond: cond_k,

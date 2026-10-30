@@ -95,6 +95,9 @@ pub struct Decode {
     /// A bounded sort's wish over computed value `topk.col` (`Node::topk_below`): each
     /// chunk's rows its own bounded heap discards are dropped (`Top`).
     pub topk: Option<super::TopK>,
+    /// The rows come as stored (`TxnScan::raw`): the out-of-line values of the columns
+    /// read come from here, read by each worker for the rows it keeps (`LazyBuf::reader`).
+    pub toast: Option<Arc<crate::txn::toast::Source>>,
 }
 
 /// A chunk's bounded heap of a bounded sort's keys (`Decode::topk`). A row its heap
@@ -307,8 +310,8 @@ impl Decode {
     /// (`done`: the filter is done with it, so nothing else reads them), when the kernels
     /// give them all; else the row as `row` makes it (the executor's thread evaluates them).
     /// `row` was decoded without the `raw` columns when `need_raw` is set: their distances
-    /// come from the stored bytes.
-    fn with_extra(&self, key: &[u8], bytes: &[u8], mut row: Row, done: bool) -> Result<Row> {
+    /// come from the stored bytes (an out-of-line value's read through `lazy`'s reader).
+    fn with_extra(&self, key: &[u8], bytes: &[u8], mut row: Row, done: bool, lazy: &LazyBuf) -> Result<Row> {
         let data = match self.need_raw {
             Some(_) => Some(super::scan::row_data(bytes)?),
             None => None,
@@ -318,12 +321,18 @@ impl Decode {
         let n = row.len();
         for k in &self.extra {
             let v = match (data, k.dist_col()) {
-                (Some(data), Some((c, ..))) if self.raw.contains(&c) => k.dist_raw(data),
+                (Some(data), Some((c, ..))) if self.raw.contains(&c) => match crate::storage::toast::pointer_at(data, c) {
+                    Some(id) => {
+                        let x = lazy.fetch(&crate::storage::toast::value_key(key, id))?;
+                        crate::storage::row::ext_value(&x).and_then(|(kind, x)| k.dist_ext(kind, x))
+                    }
+                    None => k.dist_raw(data),
+                },
                 _ => k.run(&row[..n]),
             };
             match v {
                 Some(v) => row.push(v),
-                None if data.is_some() => return self.row(key, bytes),
+                None if data.is_some() => return self.row_with(key, &lazy.splice(key, bytes, self.need.as_deref())?, self.need.as_ref()),
                 None => {
                     row.truncate(n);
                     return Ok(row);
@@ -353,6 +362,8 @@ pub(super) struct LazyBuf {
     nums: Vec<std::cell::OnceCell<Option<Option<(i128, u32)>>>>,
     /// The columns walked: up to the last one the scan reads.
     upto: usize,
+    /// The worker's reader of the rows' out-of-line values (`Decode::toast`).
+    reader: std::cell::RefCell<Option<crate::txn::toast::Reader>>,
 }
 
 impl LazyBuf {
@@ -367,7 +378,26 @@ impl LazyBuf {
             cells: (0..ncols + d.with_key as usize).map(|_| Default::default()).collect(),
             nums: (0..upto).map(|_| Default::default()).collect(),
             upto,
+            reader: std::cell::RefCell::new(d.toast.clone().map(crate::txn::toast::Reader::new)),
         }
+    }
+
+    /// Out-of-line value `key` of the scan's rows (`Decode::toast`).
+    pub(super) fn fetch(&self, key: &[u8]) -> Result<bytes::Bytes> {
+        match &mut *self.reader.borrow_mut() {
+            Some(r) => r.fetch(key),
+            None => Err(internal("an out-of-line value read without its row's storage")),
+        }
+    }
+
+    /// The stored row `bytes` with the out-of-line values of the columns `need` marks
+    /// (None: all) put back, when it has some.
+    pub(super) fn splice<'a>(&self, key: &[u8], bytes: &'a [u8], need: Option<&[bool]>) -> Result<std::borrow::Cow<'a, [u8]>> {
+        if !crate::storage::toast::has_external(bytes) {
+            return Ok(std::borrow::Cow::Borrowed(bytes));
+        }
+        let spliced = crate::storage::toast::splice(key, bytes, need, &mut |k| self.fetch(k))?;
+        Ok(std::borrow::Cow::Owned(spliced))
     }
 
     /// The stored row `bytes` (under `key`) to be read in place: where its columns start,
@@ -421,7 +451,16 @@ impl Lazy<'_> {
         }
         match self.buf.offs[i] {
             u32::MAX => Ok(self.d.missing[i].clone().unwrap_or(Value::Null)),
-            off => crate::storage::row::decode_value(self.data, &mut (off as usize)),
+            off => {
+                let mut pos = off as usize;
+                match crate::storage::toast::read_pointer(self.data, &mut pos)? {
+                    Some((id, _)) => {
+                        let v = self.buf.fetch(&crate::storage::toast::value_key(self.key, id))?;
+                        crate::storage::row::decode_value(&v, &mut 0)
+                    }
+                    None => crate::storage::row::decode_value(self.data, &mut pos),
+                }
+            }
         }
     }
 
@@ -501,6 +540,24 @@ pub struct ParScan {
     seg: std::vec::IntoIter<(Row, u8, bool)>,
     /// Set when the scan is dropped: the workers stop.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// A scan whose chunks run on the executor's thread, one when its rows are asked for
+    /// (`start_inline`): no workers.
+    inline: Option<Box<Inline>>,
+}
+
+/// What an inline scan's chunks run with (a worker's own state, `work`).
+struct Inline {
+    d: Arc<Decode>,
+    scratch: super::pipe::Scratch,
+    lazy: LazyBuf,
+}
+
+/// Scans run inline (`ParScan::start_inline`; for tests).
+static INLINE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many scans the process has run inline.
+pub fn inline_started() -> u64 {
+    INLINE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::atomic::AtomicBool>) {
@@ -513,15 +570,20 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
             Ok(rx) => rx.recv(),
             Err(_) => return,
         };
-        let Ok(Job { scan, out }) = job else { return };
-        if stopped() {
+        let Ok(job) = job else { return };
+        if stopped() || !run_job(job, &d, &stopped, &mut scratch, &mut lazy) {
             return;
         }
+    }
+}
+
+/// One chunk of a scan: its rows (or an aggregating scan's parts) sent to the job's `out`,
+/// on a worker or (`ParScan::inline`) the executor's thread. False: nothing reads them
+/// (the scan was dropped).
+fn run_job(Job { scan, out }: Job, d: &Decode, stopped: &dyn Fn() -> bool, scratch: &mut super::pipe::Scratch, lazy: &mut LazyBuf) -> bool {
+    {
         if let Some(spec) = &d.spec {
-            if !work_partial(scan, &out, &d, spec, &stopped, &mut scratch, &mut lazy) {
-                return;
-            }
-            continue;
+            return work_partial(scan, &out, d, spec, stopped, scratch, lazy);
         }
         let mut batch = Vec::with_capacity(BATCH);
         // (Rows read since the last item sent.)
@@ -535,7 +597,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
         for r in scan {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
-                return;
+                return false;
             }
             read += 1;
             let (key, bytes) = match r {
@@ -550,7 +612,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
             let in_place = d.ios.is_none() && d.extra.is_empty() && d.topk.is_none() && d.need_raw.is_none();
             let (row, done) = match (&d.filter, in_place) {
                 (Some(f), true) => {
-                    let made = lazy.read(&d, &key, &bytes).and_then(|lz| match f.passes(&lz) {
+                    let made = lazy.read(d, &key, &bytes).and_then(|lz| match f.passes(&lz) {
                         Some(false) => Ok(None),
                         pass => Ok(Some((lz.into_row()?, pass.is_some()))),
                     });
@@ -564,7 +626,9 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
                     }
                 }
                 _ => {
-                    let row = match d.row_with(&key, &bytes, d.need_raw.as_ref().or(d.need.as_ref())) {
+                    let mask = d.need_raw.as_ref().or(d.need.as_ref());
+                    let made = lazy.splice(&key, &bytes, mask.map(|m| &m[..])).and_then(|b| d.row_with(&key, &b, mask));
+                    let row = match made {
                         Ok(row) => row,
                         Err(e) => {
                             err = Some(e);
@@ -586,7 +650,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
             let row = if d.extra.is_empty() {
                 row
             } else {
-                match d.with_extra(&key, &bytes, row, done) {
+                match d.with_extra(&key, &bytes, row, done, lazy) {
                     Ok(row) => row,
                     Err(e) => {
                         err = Some(e);
@@ -609,17 +673,17 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
             if !done || d.stages.is_empty() {
                 batch.push((row, 0, done, std::mem::take(&mut read)));
             } else {
-                super::pipe::run_stages(&d.stages, 0, row, &mut scratch, &mut |r, lvl| {
+                super::pipe::run_stages(&d.stages, 0, row, scratch, &mut |r, lvl| {
                     batch.push((r.into_row(), lvl, true, std::mem::take(&mut read)));
                 });
             }
             if batch.len() >= BATCH && out.send(Msg::Rows(std::mem::replace(&mut batch, Vec::with_capacity(BATCH)))).is_err() {
                 // (The scan was dropped: nothing reads on.)
-                return;
+                return false;
             }
         }
         if !batch.is_empty() && out.send(Msg::Rows(batch)).is_err() {
-            return;
+            return false;
         }
         // (The chunk's lookups counted before its end is.)
         scratch.flush(&d.stages);
@@ -627,6 +691,7 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
             Some(e) => Msg::Err(e),
             None => Msg::Done(read, skipped),
         });
+        true
     }
 }
 
@@ -800,6 +865,7 @@ impl ParScan {
             carry: 0,
             skipped: 0,
             stop,
+            inline: None,
         };
         let ahead = workers.len() * AHEAD + 1;
         p.workers = workers;
@@ -809,12 +875,36 @@ impl ParScan {
         Some(p)
     }
 
+    /// The scan run on the executor's thread, a chunk at a time as its rows are asked for:
+    /// what workers do with each row (decoding only what is read, filtering by kernels,
+    /// aggregating, computing), without threads, for a table too small for them to pay.
+    pub fn start_inline(scans: Vec<Chunk>, d: Decode) -> ParScan {
+        INLINE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let lazy = LazyBuf::new(&d);
+        ParScan {
+            pending: scans.into(),
+            results: VecDeque::new(),
+            jobs: None,
+            batch: Vec::new().into_iter(),
+            seg: Vec::new().into_iter(),
+            workers: Vec::new(),
+            carry: 0,
+            skipped: 0,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            inline: Some(Box::new(Inline { d: Arc::new(d), scratch: Default::default(), lazy })),
+        }
+    }
+
     /// How many chunks to cut a scan into for `workers` threads.
     pub fn chunks(workers: usize) -> usize {
         workers * CHUNKS_PER_WORKER
     }
 
     fn hand_out(&mut self) {
+        // (An inline scan runs its chunks as they are reached: `next_piece`.)
+        if self.inline.is_some() {
+            return;
+        }
         let Some(scan) = self.pending.pop_front() else { return };
         let (out, rx) = channel();
         self.results.push_back(rx);
@@ -833,6 +923,14 @@ impl ParScan {
             }
             if let Some((row, lvl, done)) = self.seg.next() {
                 return Ok(Some(Piece::Row(row, lvl, done, std::mem::take(&mut self.carry))));
+            }
+            if self.results.is_empty()
+                && let Some(i) = &mut self.inline
+                && let Some(scan) = self.pending.pop_front()
+            {
+                let (out, rx) = channel();
+                self.results.push_back(rx);
+                run_job(Job { scan, out }, &i.d, &|| false, &mut i.scratch, &mut i.lazy);
             }
             let Some(rx) = self.results.front() else {
                 return Ok(None);

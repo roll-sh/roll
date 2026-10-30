@@ -6,6 +6,7 @@ mod bulklocks;
 pub mod locks;
 pub(crate) mod spill;
 pub mod ssi;
+pub mod toast;
 pub mod twophase;
 pub mod watch;
 pub mod xids;
@@ -701,10 +702,11 @@ impl Database {
             .collect();
         for &oid in &tables {
             let start = crate::storage::keys::index_prefix(oid, 0);
-            let end = crate::storage::keys::index_prefix(oid, u32::MAX);
+            // (Rows, index entries and out-of-line values: `storage::toast`.)
+            let end = crate::storage::keys::prefix_end(&crate::storage::toast::prefix(oid));
             loop {
                 let ts = self.store.visible_ts();
-                let batch: Vec<(Vec<u8>, Option<Bytes>)> = (self.store.scan(&start, &end, ts))
+                let batch: Vec<(Vec<u8>, Option<Bytes>)> = (self.store.scan_raw(&start, &end, ts))
                     .take(10_000)
                     .map(|e| e.map(|(k, _)| (k, None)))
                     .collect::<Result<_>>()?;
@@ -1748,26 +1750,65 @@ impl Txn {
         self.maybe_spill()
     }
 
+    /// Our own write `v` of `key` (as snapshot `st` sees our writes; None: as they are now)
+    /// with a row's out-of-line values put back, read over the store at `ts`.
+    fn resolve_own(&self, key: &[u8], v: Option<Bytes>, st: Option<&SnapState>, ts: u64) -> Result<Option<Bytes>> {
+        let v = match v {
+            Some(v) if crate::storage::toast::has_external(&v) && crate::storage::toast::is_row_key(key) => v,
+            other => return Ok(other),
+        };
+        let view = self.db.store.view();
+        let fetch = &mut |k: &[u8]| {
+            let own = match st {
+                Some(st) => self.snap_get(k, st)?,
+                None => self.buf_get(k)?.map(|e| e.0),
+            };
+            match own {
+                Some(Some(b)) => Ok(b),
+                _ => crate::storage::toast::read_value(&view, k, ts),
+            }
+        };
+        Ok(Some(Bytes::from(crate::storage::toast::splice(key, &v, None, fetch)?)))
+    }
+
     /// Read through this transaction's own writes.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if let Some((v, _)) = self.buf_get(key)? {
-            return Ok(v);
+            return self.resolve_own(key, v, None, self.snapshot_ts);
         }
         self.db.store.get(key, self.snapshot_ts)
+    }
+
+    /// `get`'s value as it is stored (a row's out-of-line values' pointers), for a writer
+    /// that changes the row's bytes and stores them again.
+    pub fn get_raw(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        if let Some((v, _)) = self.buf_get(key)? {
+            return Ok(v);
+        }
+        Ok(self.db.store.get_version_raw(key, self.snapshot_ts)?.and_then(|(_, v)| v))
     }
 
     /// Newest committed version (ignoring our snapshot), for locking reads after a wait.
     pub fn get_latest(&self, key: &[u8]) -> Result<Option<(u64, Option<Bytes>)>> {
         if let Some((v, _)) = self.buf_get(key)? {
-            return Ok(Some((u64::MAX, v)));
+            return Ok(Some((u64::MAX, self.resolve_own(key, v, None, u64::MAX >> 1)?)));
         }
         self.db.store.get_version(key, u64::MAX >> 1)
+    }
+
+    /// `get_latest`'s value as it is stored (a row's out-of-line values' pointers): the
+    /// version a writer holding the row's lock replaces.
+    pub fn get_latest_raw(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        if let Some((v, _)) = self.buf_get(key)? {
+            return Ok(v);
+        }
+        Ok(self.db.store.get_version_raw(key, u64::MAX >> 1)?.and_then(|(_, v)| v))
     }
 
     /// Read through this transaction's own writes over the data committed as of `ts`.
     pub fn get_at(&self, key: &[u8], ts: u64) -> Result<Option<Bytes>> {
         if let Some((v, _)) = self.buf_get(key)? {
-            return Ok(v);
+            return self.resolve_own(key, v, None, ts);
         }
         self.db.store.get(key, ts)
     }
@@ -1835,9 +1876,10 @@ impl Txn {
     }
 
     /// What lies under the buffer in [start, end): the spilled writes as of journal mark
-    /// `mark`, over the store at `ts`.
+    /// `mark`, over the store at `ts` (rows as stored: `TxnScan` puts their out-of-line
+    /// values back).
     fn lower(&self, start: &[u8], end: &[u8], ts: u64, mark: u64) -> Lower {
-        let store = self.db.store.scan(start, end, ts);
+        let store = self.db.store.scan_raw(start, end, ts);
         match &self.runs {
             Some(r) => Lower::Runs(Box::new(Overlay::new(r.scan(start, end, mark), store, false))),
             None => Lower::Store(store),
@@ -1846,11 +1888,41 @@ impl Txn {
 
     /// `lower` in descending key order.
     fn lower_rev(&self, start: &[u8], end: &[u8], ts: u64, mark: u64) -> RevLower {
-        let store = self.db.store.scan_rev(start, end, ts);
+        let store = self.db.store.scan_rev_raw(start, end, ts);
         match &self.runs {
             Some(r) => RevLower::Runs(Box::new(Overlay::new(r.scan_rev(start, end, mark), store, true))),
             None => RevLower::Store(store),
         }
+    }
+
+    /// Where a reader at `ts` of the rows in [start, end) gets their out-of-line values
+    /// (`toast::Source`): our writes as `own` says (our spilled ones as of `mark`) over the
+    /// store's. None when no table row can be in the range.
+    fn toast_source(&self, start: &[u8], end: &[u8], ts: u64, mark: u64, own: OwnVals<'_>) -> Option<Arc<toast::Source>> {
+        use crate::storage::toast as t;
+        if !t::may_hold_rows(start, end) {
+            return None;
+        }
+        let own: Vec<(Vec<u8>, Option<Bytes>)> = if self.writes.is_empty() && !matches!(own, OwnVals::Map(_)) {
+            Vec::new()
+        } else {
+            // (A range of one table's rows: its values' range; else every table's values.)
+            let range = t::value_range(start, end);
+            let (lo, hi) = range.clone().unwrap_or_else(|| (Vec::new(), vec![0xFF; 9]));
+            let keep = |k: &[u8]| range.is_some() || t::is_value_key(k);
+            match own {
+                OwnVals::Runs => Vec::new(),
+                OwnVals::Now => self.mem_in(&lo, &hi).filter(|(k, _)| keep(k)).collect(),
+                OwnVals::Snap(st) => self.snap_own(&lo, &hi, st).into_iter().filter(|(k, _)| keep(k)).collect(),
+                OwnVals::Map(m) => m
+                    .range::<[u8], _>((Bound::Included(&lo[..]), Bound::Excluded(&hi[..])))
+                    .filter(|(k, _)| keep(k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            }
+        };
+        let runs = self.runs.as_ref().and_then(|r| r.view()).map(|v| (v, mark));
+        Some(Arc::new(toast::Source { own, runs, store: self.db.store.clone(), view: Default::default(), ts }))
     }
 
     /// Scan [start, end) at `ts`, merging `own` (all of our writes, captured earlier by
@@ -1865,15 +1937,17 @@ impl Txn {
         match own {
             Some(own) => {
                 let range = (Bound::Included(start), Bound::Excluded(end));
+                let src = self.toast_source(start, end, ts, LATEST, OwnVals::Map(own));
                 let own: Vec<_> = own
                     .range::<[u8], _>(range)
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                TxnScan::new(own, Lower::Store(self.db.store.scan(start, end, ts)))
+                TxnScan::new(own, Lower::Store(self.db.store.scan_raw(start, end, ts)), src)
             }
             None => TxnScan::new(
                 self.mem_in(start, end).collect(),
                 self.lower(start, end, ts, LATEST),
+                self.toast_source(start, end, ts, LATEST, OwnVals::Now),
             ),
         }
     }
@@ -1981,37 +2055,44 @@ impl Txn {
         let st = s.st.borrow();
         if st.mark < self.journal_base {
             // Taken before the last spill: none of the buffer, the runs as they were.
-            return TxnScan::new(Vec::new(), self.lower(start, end, st.ts, st.mark as u64));
+            let src = self.toast_source(start, end, st.ts, st.mark as u64, OwnVals::Runs);
+            return TxnScan::new(Vec::new(), self.lower(start, end, st.ts, st.mark as u64), src);
         }
         // (The runs as of the mark, as `snap_get` reads them.)
         let mark = st.mark as u64;
         if st.prev.is_empty() {
-            return TxnScan::new(self.mem_in(start, end).collect(), self.lower(start, end, st.ts, mark));
+            let src = self.toast_source(start, end, st.ts, mark, OwnVals::Now);
+            return TxnScan::new(self.mem_in(start, end).collect(), self.lower(start, end, st.ts, mark), src);
         }
         let own = self.snap_own(start, end, &st);
-        TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark))
+        let src = self.toast_source(start, end, st.ts, mark, OwnVals::Snap(&st));
+        TxnScan::new(own.into_iter().collect(), self.lower(start, end, st.ts, mark), src)
     }
 
     /// Scan [start, end) in descending key order, as of the snapshot `s` (None: the
     /// transaction's current one, with all its writes).
     pub fn scan_rev(&self, start: &[u8], end: &[u8], s: Option<&Snap>) -> TxnRevScan {
-        let (ts, own, mark) = match s {
+        let (ts, own, mark, src) = match s {
             Some(s) => {
                 self.catch_up(s);
                 let st = s.st.borrow();
                 if st.mark < self.journal_base {
-                    (st.ts, BTreeMap::new(), st.mark as u64)
+                    let src = self.toast_source(start, end, st.ts, st.mark as u64, OwnVals::Runs);
+                    (st.ts, BTreeMap::new(), st.mark as u64, src)
                 } else {
-                    (st.ts, self.snap_own(start, end, &st), st.mark as u64)
+                    let src = self.toast_source(start, end, st.ts, st.mark as u64, OwnVals::Snap(&st));
+                    (st.ts, self.snap_own(start, end, &st), st.mark as u64, src)
                 }
             }
-            None => (self.snapshot_ts, self.mem_in(start, end).collect(), LATEST),
+            None => {
+                let src = self.toast_source(start, end, self.snapshot_ts, LATEST, OwnVals::Now);
+                (self.snapshot_ts, self.mem_in(start, end).collect(), LATEST, src)
+            }
         };
-        TxnRevScan(Overlay::new(
-            own.into_iter().rev().map(Ok as BufFn),
-            self.lower_rev(start, end, ts, mark),
-            true,
-        ))
+        TxnRevScan {
+            inner: Overlay::new(own.into_iter().rev().map(Ok as BufFn), self.lower_rev(start, end, ts, mark), true),
+            src,
+        }
     }
 
     /// The store and the time snapshot `s` reads it at, when this transaction has written
@@ -2031,7 +2112,7 @@ impl Txn {
         self.catch_up(s);
         let st = s.st.borrow();
         match self.snap_get(key, &st)? {
-            Some(v) => Ok(v),
+            Some(v) => self.resolve_own(key, v, Some(&st), st.ts),
             None => self.db.store.get(key, st.ts),
         }
     }
@@ -2046,7 +2127,7 @@ impl Txn {
         let mut reads: Vec<(&[u8], usize)> = Vec::new();
         for (i, key) in keys.iter().enumerate() {
             match self.snap_get(key, &st)? {
-                Some(v) => out[i] = v,
+                Some(v) => out[i] = self.resolve_own(key, v, Some(&st), st.ts)?,
                 None => reads.push((key, i)),
             }
         }
@@ -3334,24 +3415,67 @@ impl Iterator for RevLower {
 }
 
 /// `TxnScan` in descending key order.
-pub struct TxnRevScan(
-    Overlay<Buffered<std::iter::Rev<std::collections::btree_map::IntoIter<Vec<u8>, Option<Bytes>>>>, RevLower>,
-);
+pub struct TxnRevScan {
+    inner: Overlay<Buffered<std::iter::Rev<std::collections::btree_map::IntoIter<Vec<u8>, Option<Bytes>>>>, RevLower>,
+    src: Option<Arc<toast::Source>>,
+}
 
 impl Iterator for TxnRevScan {
     type Item = Result<(Vec<u8>, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+        let item = self.inner.next()?;
+        Some(match &self.src {
+            Some(s) => item.and_then(|(k, v)| s.resolve(&k, v).map(|v| (k, v))),
+            None => item,
+        })
     }
 }
 
-/// Merge of buffered writes over a store scan (and the spilled writes); buffered entries win.
-pub struct TxnScan(Overlay<Buffered<std::vec::IntoIter<(Vec<u8>, Option<Bytes>)>>, Lower>);
+/// Which of a transaction's writes a reader's out-of-line values come from
+/// (`Txn::toast_source`).
+enum OwnVals<'a> {
+    /// None of the buffer (a snapshot from before the last spill: the runs as of its mark).
+    Runs,
+    /// The buffer as it is now.
+    Now,
+    /// The buffer as snapshot `st` sees it.
+    Snap(&'a SnapState),
+    /// Writes captured earlier (`writes_in`).
+    Map(&'a BTreeMap<Vec<u8>, Option<Bytes>>),
+}
+
+/// Merge of buffered writes over a store scan (and the spilled writes); buffered entries
+/// win. Rows come with their out-of-line values put back, unless `raw`.
+pub struct TxnScan {
+    inner: Overlay<Buffered<std::vec::IntoIter<(Vec<u8>, Option<Bytes>)>>, Lower>,
+    /// Where the rows' out-of-line values come from (None: no row in the range).
+    src: Option<Arc<toast::Source>>,
+    resolve: bool,
+    /// The values read so far (made at the first row that has some).
+    reader: Option<toast::Reader>,
+}
 
 impl TxnScan {
-    fn new(buffered: Vec<(Vec<u8>, Option<Bytes>)>, lower: Lower) -> TxnScan {
-        TxnScan(Overlay::new(buffered.into_iter().map(Ok as BufFn), lower, false))
+    fn new(buffered: Vec<(Vec<u8>, Option<Bytes>)>, lower: Lower, src: Option<Arc<toast::Source>>) -> TxnScan {
+        TxnScan {
+            inner: Overlay::new(buffered.into_iter().map(Ok as BufFn), lower, false),
+            src,
+            resolve: true,
+            reader: None,
+        }
+    }
+
+    /// Rows as they are stored: a reader that decodes some columns puts back their values
+    /// itself, from `source`.
+    pub fn raw(mut self) -> TxnScan {
+        self.resolve = false;
+        self
+    }
+
+    /// Where the rows' out-of-line values come from (None: no row in the range).
+    pub fn source(&self) -> Option<&Arc<toast::Source>> {
+        self.src.as_ref()
     }
 }
 
@@ -3359,7 +3483,18 @@ impl Iterator for TxnScan {
     type Item = Result<(Vec<u8>, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+        let item = self.inner.next()?;
+        if !self.resolve {
+            return Some(item);
+        }
+        // (The rows' values in their order, through one cursor: `toast::Reader`.)
+        Some(item.and_then(|(k, v)| match &self.src {
+            Some(s) if crate::storage::toast::has_external(&v) && crate::storage::toast::is_row_key(&k) => {
+                let r = self.reader.get_or_insert_with(|| toast::Reader::new(s.clone()));
+                r.splice(&k, &v, None).map(|v| (k, v))
+            }
+            _ => Ok((k, v)),
+        }))
     }
 }
 

@@ -240,10 +240,17 @@ impl K {
     /// `dist_col`'s value over the encoded row `data` (its column not decoded): None where
     /// the stored value isn't one of the type or the dimensions differ (leave it to `eval`).
     pub fn dist_raw(&self, data: &[u8]) -> Option<Value> {
-        let (c, q, first) = self.dist_col()?;
+        let (c, ..) = self.dist_col()?;
+        let (k, x) = crate::storage::row::ext_at(data, c)?;
+        self.dist_ext(k, x)
+    }
+
+    /// `dist_raw` over the column's value given apart (kind and bytes: one stored out of
+    /// line).
+    pub fn dist_ext(&self, k: u16, x: &[u8]) -> Option<Value> {
+        let (_, q, first) = self.dist_col()?;
         let K::Dist(f, _) = self else { return None };
         let (kind, bf) = f.bytes?;
-        let (k, x) = crate::storage::row::ext_at(data, c)?;
         if k != kind || !crate::ext::vector::kernel_bytes_agree(kind, x, q) {
             return None;
         }

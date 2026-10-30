@@ -3,7 +3,7 @@
 //! actions), ON CONFLICT, row locking with READ COMMITTED re-checks, and RETURNING.
 
 use super::scan::{
-    Locked, NUM_SYS_COLS, data_key, decode_table_row, encode_table_row_at, index_entry_key,
+    Locked, NUM_SYS_COLS, data_key, decode_table_row, index_entry_key,
     index_value_prefix, lock_row, lock_row_mode, sys_values, Xltw,
 };
 use super::trigger::{self, AfterRow};
@@ -2746,7 +2746,7 @@ fn delete_row_with(
     ctx.txn.borrow_mut().row_modified(dkey);
     super::sizing::deleted(t, indexes, dkey, old, ctx)?;
     super::pgstat::count_delete(ctx, t.oid);
-    ctx.txn.borrow_mut().delete(dkey.to_vec())?;
+    super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut())?;
     crate::repl::log::delete(t, old, ctx)?;
     delete_index_entries(t, indexes, old, dkey, defer, ctx)
 }
@@ -2949,7 +2949,7 @@ pub fn update_row_rls(
     let tid = upd.map(|u| u.0);
     super::pgstat::count_update(ctx, t.oid, upd.is_some_and(|u| u.1), false);
     if new_key != dkey {
-        ctx.txn.borrow_mut().delete(dkey.to_vec())?;
+        super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut())?;
     }
     for (i, bix) in rules.indexes.iter().enumerate() {
         if bix.index.id == 0 || !changed[i] {
@@ -2985,9 +2985,15 @@ pub fn update_row_rls(
         }
     }
     let xid = ctx.txn.borrow_mut().cur_xid();
-    ctx.txn
-        .borrow_mut()
-        .put(new_key, encode_table_row_at(&new, xid, tid))?;
+    {
+        // (A row kept under its key keeps its unchanged out-of-line values.)
+        let txn = &mut ctx.txn.borrow_mut();
+        if new_key != dkey {
+            super::toast::put_row(t, new_key, &new, xid, tid, txn)?;
+        } else {
+            super::toast::replace_row(t, new_key, Some(old), &new, xid, tid, txn)?;
+        }
+    }
     crate::repl::log::update(t, old, &new, ctx)?;
     check_view_options(rules, &new, ctx)?;
     Ok(new)
@@ -3369,9 +3375,7 @@ fn store_inserted(
     super::pgstat::count_insert(ctx, t.oid, 1);
     super::pgstat::io_insert(ctx, t, 1, "normal");
     let xid = ctx.txn.borrow_mut().cur_xid();
-    ctx.txn
-        .borrow_mut()
-        .put(dkey.clone(), encode_table_row_at(&row, xid, tid))?;
+    super::toast::put_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
     crate::repl::log::insert(t, &row, ctx)?;
     put_index_entries_with(t, &rules.indexes, &vals.vals, &dkey, ctx)?;
     if trigger::wants_after(&rules.triggers, tt::INSERT, ctx) {
@@ -5240,12 +5244,14 @@ pub(super) fn with_old_new(
 
 /// TRUNCATE: delete every row and index entry of a table.
 pub fn truncate(t: &Arc<Table>, ctx: &ExecCtx) -> Result<()> {
+    // (Rows, index entries and out-of-line values.)
     let start = crate::storage::keys::index_prefix(t.oid, 0);
-    let end = crate::storage::keys::index_prefix(t.oid, u32::MAX);
+    let end = super::toast::table_end(t.oid);
     let keys: Vec<Vec<u8>> = ctx
         .txn
         .borrow()
         .scan(&start, &end)
+        .raw()
         .map(|e| e.map(|(k, _)| k))
         .collect::<Result<_>>()?;
     let mut txn = ctx.txn.borrow_mut();

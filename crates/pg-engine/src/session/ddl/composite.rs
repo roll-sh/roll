@@ -667,10 +667,7 @@ impl Ddl<'_, '_> {
                         .map(|(i, v)| convert(v, &old_cols[i], &new_cols[i], layouts))
                         .collect();
                     let xid = self.ctx.txn.borrow_mut().cur_xid();
-                    self.ctx
-                        .txn
-                        .borrow_mut()
-                        .put(k, crate::exec::scan::encode_table_row(&row, xid))?;
+                    crate::exec::toast::replace_row(&nt, k, None, &row, xid, None, &mut self.ctx.txn.borrow_mut())?;
                 }
             }
             self.cat.put_table(nt);

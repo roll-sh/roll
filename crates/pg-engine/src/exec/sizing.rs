@@ -288,6 +288,11 @@ pub fn heap_fillfactor(t: &Table) -> usize {
         .unwrap_or(100)
 }
 
+/// A table's toast_tuple_target, when set.
+pub fn toast_tuple_target(t: &Table) -> Option<usize> {
+    option(&t.options, "toast_tuple_target").and_then(|v| v.parse().ok())
+}
+
 /// How a btree index behaves (None: another access method).
 fn btree_opts(bix: &BoundIndex) -> Option<BtreeOpts> {
     let ix = &bix.index;
@@ -445,10 +450,10 @@ pub(crate) fn tracked(t: u32) -> bool {
     })
 }
 
-/// Whether reads of table `t` must decode every column for `note_read`: it may hold
-/// compressed or out-of-line datums (`tracked`) and has a column whose values `note_read`
-/// remembers (text, json, bytea and their kin). A table of numbers, dates and extension
-/// types (pgvector's) has none, so a scan of it may decode only the columns it needs.
+/// Whether reads of table `t` must be made on the statement's own thread, for `note_read`
+/// (a thread's record): it may hold compressed or out-of-line datums (`tracked`) and has a
+/// column whose values `note_read` remembers (text, json, bytea and their kin). A table of
+/// numbers, dates and extension types (pgvector's) has none, so its scans may run in parallel.
 pub fn reads_tracked(t: &crate::catalog::Table) -> bool {
     use crate::types::DataType as T;
     tracked(t.oid)
@@ -2951,7 +2956,7 @@ pub fn in_heap_order<T>(t: &Table, rows: &mut Vec<(Vec<u8>, T)>, ctx: &ExecCtx) 
 /// themselves (a heap laid out afresh puts them back there).
 pub fn stamp_tids(keys: &[Vec<u8>], tids: &[Tid], ctx: &ExecCtx) -> Result<()> {
     for (k, tid) in keys.iter().zip(tids) {
-        let cur = ctx.txn.borrow().get(k)?;
+        let cur = ctx.txn.borrow().get_raw(k)?;
         if let Some(bytes) = cur
             && super::scan::stored_tid(&bytes) != Some(*tid)
         {
@@ -3020,7 +3025,7 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
     drop(rf);
     // The rows' stored TIDs follow them to their new places.
     for (k, tid) in keys.into_iter().zip(tids) {
-        let cur = ctx.txn.borrow().get(&k)?;
+        let cur = ctx.txn.borrow().get_raw(&k)?;
         if let Some(bytes) = cur
             && super::scan::stored_tid(&bytes) != Some(tid)
         {

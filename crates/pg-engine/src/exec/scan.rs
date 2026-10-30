@@ -6,26 +6,19 @@ use crate::error::{Error, Result, code};
 use crate::sql::expr::{eval, eval_bool};
 use crate::sql::plan::{Access, BitmapQual, IndexBounds, RowMark, ScanPlan, Wait};
 use crate::storage::keys::{KeyColl, encode_index_value, encode_value, index_prefix, prefix_end};
-use crate::storage::row::decode_row;
+use crate::storage::row::{ROW_HEADER, ROW_HEADER_EXT, ROW_HEADER_TID, ROW_HEADER_TID_EXT, decode_row};
 use crate::txn::TxnScan;
 use crate::txn::locks::{RowLockMode, WaitPolicy};
 use crate::types::Value;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Stored rows start with a header byte (never a value tag) followed by the writing
-/// transaction's id as a varint: the row's `xmin`.
-const ROW_HEADER: u8 = 0xFF;
-/// The header of a row stored with the heap TID its version got (block and offset as
-/// varints after the xmin): a heap model laid out afresh puts the rows back in that
-/// order.
-const ROW_HEADER_TID: u8 = 0xFE;
-
-/// Split a stored row into its xmin, its heap TID if it has one, and the encoded values.
+/// Split a stored row into its xmin, its heap TID if it has one, and the encoded values
+/// (the row's header bytes: `storage::row`).
 fn split_header_tid(bytes: &[u8]) -> Result<(u64, Option<(u32, u16)>, &[u8])> {
     let tid = match bytes.first() {
-        Some(&ROW_HEADER) => false,
-        Some(&ROW_HEADER_TID) => true,
+        Some(&(ROW_HEADER | ROW_HEADER_EXT)) => false,
+        Some(&(ROW_HEADER_TID | ROW_HEADER_TID_EXT)) => true,
         _ => return Ok((0, None, bytes)),
     };
     let mut pos = 1;
@@ -111,7 +104,8 @@ pub fn encode_table_row_at(row: &[Value], xid: u64, tid: Option<(u32, u16)>) -> 
 /// A stored row's bytes with its heap TID replaced (a table rewrite moved it).
 pub fn with_tid(bytes: &[u8], tid: (u32, u16)) -> Result<Vec<u8>> {
     let (xid, _, rest) = split_header_tid(bytes)?;
-    let mut out = vec![ROW_HEADER_TID];
+    let ext = crate::storage::toast::has_external(bytes);
+    let mut out = vec![if ext { ROW_HEADER_TID_EXT } else { ROW_HEADER_TID }];
     crate::storage::sst::put_varint(&mut out, xid);
     crate::storage::sst::put_varint(&mut out, tid.0 as u64);
     crate::storage::sst::put_varint(&mut out, tid.1 as u64);
@@ -354,7 +348,6 @@ fn scan_need(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Option<Rc<[b
         || s.current_of.is_some()
         || s.sample.is_some()
         || ctx.instrumented()
-        || super::sizing::reads_tracked(&s.table)
     {
         return None;
     }
@@ -482,6 +475,8 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             par_tried: false,
             in_order: None,
             prefilter: None,
+            toast: None,
+            filter_cols: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -537,6 +532,8 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             par_tried: false,
             in_order: None,
             prefilter: None,
+            toast: None,
+            filter_cols: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -595,6 +592,8 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             par_tried: false,
             in_order: None,
             prefilter: None,
+            toast: None,
+            filter_cols: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -661,6 +660,8 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             par_tried: false,
             in_order: None,
             prefilter: None,
+            toast: None,
+            filter_cols: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -867,6 +868,8 @@ fn open_scan_as(
         par_tried: false,
         in_order: None,
         prefilter: None,
+        toast: None,
+        filter_cols: None,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1530,6 +1533,8 @@ fn dense_bitmap_scan(
         par_tried: false,
         in_order: None,
         prefilter: None,
+        toast: None,
+        filter_cols: None,
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -1682,6 +1687,11 @@ struct ScanNode {
     in_order: Option<bool>,
     /// `prefilter_mask`, once decided.
     prefilter: Option<Option<Rc<[bool]>>>,
+    /// A plain scan's rows are read as stored (`TxnScan::raw`): the out-of-line values of
+    /// the columns decoded come from here, read for the rows the filter keeps.
+    toast: Option<std::cell::RefCell<crate::txn::toast::Reader>>,
+    /// The columns the filter reads (`external_prefilter`), once decided.
+    filter_cols: Option<Option<Rc<[bool]>>>,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -2000,9 +2010,24 @@ impl ScanNode {
         self.iter = Some(if self.rev {
             StoreIter::Rev(txn.scan_rev(start, end, snap.as_deref()))
         } else {
-            StoreIter::Fwd(match snap.as_deref() {
+            let it = match snap.as_deref() {
                 Some(s) => txn.scan_snap(start, end, s),
                 None => txn.scan(start, end),
+            };
+            // A plain scan of a table's rows reads them as stored: the out-of-line values of
+            // the columns it decodes are read then (`full_row`), for the rows its filter
+            // keeps. (Locking reads, samples and TID scans take whole rows.)
+            let plain = self.plan.mark.is_none()
+                && self.sample.is_none()
+                && self.only.is_none()
+                && !self.plan.sys
+                && !matches!(self.plan.access, Access::Tid { .. } | Access::TidRange(_));
+            StoreIter::Fwd(match it.source() {
+                Some(src) if plain => {
+                    self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src.clone())));
+                    it.raw()
+                }
+                _ => it,
             })
         });
         self.cur_range += 1;
@@ -2295,10 +2320,59 @@ impl ScanNode {
     }
 
     fn full_row(&self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Row> {
+        if self.toast.is_some() && crate::storage::toast::has_external(bytes) {
+            return self.row_ext(key, bytes, self.need.as_deref(), None, ctx);
+        }
         match &self.need {
             Some(need) => scan_row_need(&self.plan, key, bytes, need, ctx),
             None => scan_row(&self.plan, key, bytes, ctx),
         }
+    }
+
+    /// A row read as stored (`toast`) with out-of-line values, as `full_row` makes it: the
+    /// columns `need` marks (None: all) decoded, the out-of-line ones read and decoded in
+    /// place. `done`: the row's columns some decoded already (the filter's, `prefilter`),
+    /// which are kept.
+    fn row_ext(&self, key: &[u8], bytes: &[u8], need: Option<&[bool]>, done: Option<(Row, &[bool])>, ctx: &ExecCtx) -> Result<Row> {
+        let t = &self.plan.table;
+        let ncols = t.columns.len();
+        let (xmin, data) = split_header(bytes)?;
+        let mut mask: Vec<bool> = (0..ncols).map(|i| need.is_none_or(|n| n.get(i).copied().unwrap_or(false))).collect();
+        let mut row = match done {
+            Some((mut r, had)) => {
+                r.truncate(ncols);
+                for (m, h) in mask.iter_mut().zip(had) {
+                    *m &= !*h;
+                }
+                r
+            }
+            None => vec![Value::Null; ncols],
+        };
+        let reader = self.toast.as_ref().expect("a scan reading rows as stored");
+        crate::storage::toast::decode_into(key, data, &mask, &mut row, &mut |k| reader.borrow_mut().fetch(k))?;
+        // (Columns added since the row was stored.)
+        let stored = crate::storage::sst::get_varint(data, &mut 0)? as usize;
+        for (i, c) in t.columns.iter().enumerate().skip(stored) {
+            if mask[i] {
+                row[i] = c.missing.clone().unwrap_or(Value::Null);
+            }
+        }
+        super::sizing::note_read(t.oid, xmin, Some(key), &row);
+        scan_row_rest(&self.plan, key, bytes, row, ctx)
+    }
+
+    /// The columns the filter reads, when a row read as stored has out-of-line values: the
+    /// filter goes first, over those, and the other values are read only for the rows it
+    /// keeps (None: no filter, or the row has none).
+    fn external_prefilter(&mut self, bytes: &[u8]) -> Option<Rc<[bool]>> {
+        if self.toast.is_none() || !crate::storage::toast::has_external(bytes) {
+            return None;
+        }
+        if self.filter_cols.is_none() {
+            let f = self.plan.filter.as_ref();
+            self.filter_cols = Some(f.and_then(|f| super::need::of([f])).map(Rc::from));
+        }
+        self.filter_cols.clone().flatten()
     }
 
     /// An index-only scan's row from its index entry (`ios_cols`): the index's columns,
@@ -2334,10 +2408,12 @@ impl ScanNode {
     }
 }
 
-/// `scan_row` decoding only the table columns `need` marks (the others NULL).
+/// `scan_row` decoding only the table columns `need` marks (the others NULL). The values
+/// decoded are noted as read (`sizing::note_read`) as a whole row's are: a column not
+/// decoded can't be carried anywhere.
 fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx: &ExecCtx) -> Result<Row> {
     let t = &plan.table;
-    let (_, data) = split_header(bytes)?;
+    let (xmin, data) = split_header(bytes)?;
     let mut row = crate::storage::row::decode_row_need(data, need)?;
     if row.len() < t.columns.len() {
         for (i, c) in t.columns.iter().enumerate().skip(row.len()) {
@@ -2348,6 +2424,7 @@ fn scan_row_need(plan: &ScanPlan, key: &[u8], bytes: &[u8], need: &[bool], ctx: 
         }
     }
     row.truncate(t.columns.len());
+    super::sizing::note_read(t.oid, xmin, Some(key), &row);
     scan_row_rest(plan, key, bytes, row, ctx)
 }
 
@@ -2461,6 +2538,13 @@ fn epq_scan(s: &ScanPlan, test: Option<&(Vec<u8>, bytes::Bytes)>, ctx: &ExecCtx)
 /// Worker threads for a parallel scan: max_parallel_workers_per_gather's, plus one in
 /// place of the leader (this thread takes the rows), 0: none; and the pool they come
 /// from (max_parallel_workers, shared by the process's scans).
+/// The chunks an inline scan (`ParScan::start_inline`) is cut into: each one's rows are
+/// held from its reading until they are taken.
+const INLINE_CHUNKS: usize = 16;
+
+/// The least pages of a table scanned inline: under it, the serial path.
+const INLINE_MIN_PAGES: u32 = 32;
+
 fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     let s = ctx.sess.settings.borrow();
     let num = |n: &str, d: usize| s.get_str(n).and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
@@ -2517,18 +2601,30 @@ impl ScanNode {
         }
         // (Decided as `next_raw` decides it.)
         self.nblocks = super::sizing::modelled_blocks(p.table.oid, ctx);
+        // (A heap of a few pages keeps the serial path: the scan's setup would cost more than
+        // its rows.)
+        if self.nblocks.is_some_and(|n| n < INLINE_MIN_PAGES) {
+            return Ok(None);
+        }
+        // What a worker does with a row besides decoding it: filter it by a kernel, aggregate
+        // it, probe joins, compute values. Where it would only decode rows for this thread to
+        // process, workers save no time and cost CPU (BENCH.md, round 21, agent 102: a GROUP
+        // BY over 600,000 rows, 347 ms in parallel against 329 ms, with 41% more CPU).
+        let filter = p.filter.as_ref().and_then(super::kernel::compile);
+        if filter.is_none() && spec.is_none() && stages.is_empty() && computed.extra.is_empty() && computed.topk.is_none() {
+            return Ok(None);
+        }
         // A modelled heap whose rows aren't all stored in heap order (some went into an
         // earlier page's free space, as PostgreSQL's free space map puts them): its rows are
         // read here and put in heap order, as the serial scan puts them (`heap_order`), and
         // the workers take runs of them (filters, probes and lookups above in parallel).
         let mut reordered = false;
         if super::sizing::heap_modelled(&p.table, ctx) {
-            // A modelled heap's rows are read in parallel only when no page would be pruned
-            // as the scan reaches it; and (as for PostgreSQL's parallel scans,
-            // min_parallel_table_scan_size's default) when it has 8 MB of pages: smaller
-            // ones aren't worth the threads. Rows stored in heap order are read in chunks of
-            // keys by the workers themselves.
-            if self.nblocks.is_none_or(|n| n < 1024) || !super::sizing::heap_unprunable(&p.table, ctx) {
+            // A modelled heap's rows are read so only when no page would be pruned as the
+            // scan reaches it, and not by the scan that found it unmodelled (its pages unknown
+            // when it began, `nblocks`: serial). Rows stored in heap order are read in chunks
+            // of keys by the workers themselves.
+            if self.nblocks.is_none() || !super::sizing::heap_unprunable(&p.table, ctx) {
                 return Ok(None);
             }
             reordered = !super::sizing::heap_scan_splits(&p.table, p.sys, ctx);
@@ -2540,8 +2636,19 @@ impl ScanNode {
         } else {
             self.streamed = true;
         }
+        // A modelled heap stored in heap order under 8 MB of pages (min_parallel_table_
+        // scan_size's default, as for PostgreSQL's parallel scans) runs the workers' way of
+        // reading rows on this thread (`ParScan::start_inline`): cheaper per row than the
+        // serial path's, and threads wouldn't pay. A reordered one that small stays serial.
+        let inline = self.nblocks.is_some_and(|n| n < 1024);
+        if inline && reordered {
+            return Ok(None);
+        }
         let (start, end) = self.ranges[0].clone();
         let txn = ctx.txn.borrow();
+        // (Chunks read rows as stored: the workers read the out-of-line values of the columns
+        // they decode, for the rows they keep. Reordered rows come with their values.)
+        let toast = if reordered { None } else { txn.scan_snap(&start, &end, &snap).source().cloned() };
         let scans: Vec<super::parscan::Chunk> = if reordered {
             let mut rows = Vec::new();
             for r in txn.scan_snap(&start, &end, &snap) {
@@ -2561,13 +2668,14 @@ impl ScanNode {
             }
             out
         } else {
-            let lo = txn.scan_snap(&start, &end, &snap).next().transpose()?.map(|(k, _)| k);
+            let lo = txn.scan_snap(&start, &end, &snap).raw().next().transpose()?.map(|(k, _)| k);
             let hi = txn.scan_rev(&start, &end, Some(&*snap)).next().transpose()?.map(|(k, _)| k);
             let (Some(lo), Some(hi)) = (lo, hi) else {
                 return Ok(None);
             };
-            let cuts = split_keys(&lo, &hi, ParScan::chunks(workers));
-            if cuts.is_empty() {
+            // (An inline scan's chunks bound the rows it holds at a time.)
+            let cuts = split_keys(&lo, &hi, if inline { INLINE_CHUNKS } else { ParScan::chunks(workers) });
+            if cuts.is_empty() && !inline {
                 return Ok(None);
             }
             let mut bounds = vec![start];
@@ -2576,7 +2684,10 @@ impl ScanNode {
             let bulk = ctx.sess.db.store.bulk_range(&bounds[0], &bounds[bounds.len() - 1]);
             let scans = bounds
                 .windows(2)
-                .map(|w| super::parscan::chunk(txn.scan_snap(&w[0], &w[1], &snap), bulk))
+                .map(|w| {
+                    let s = txn.scan_snap(&w[0], &w[1], &snap);
+                    super::parscan::chunk(if toast.is_some() { s.raw() } else { s }, bulk)
+                })
                 .collect();
             drop(txn);
             scans
@@ -2599,7 +2710,7 @@ impl ScanNode {
             need_raw,
             missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
             with_key: p.with_key,
-            filter: p.filter.as_ref().and_then(super::kernel::compile),
+            filter,
             filtered: p.filter.is_some(),
             spec,
             stages,
@@ -2608,8 +2719,11 @@ impl ScanNode {
             drop: computed.drop,
             raw: computed.raw,
             topk: computed.topk,
+            toast,
         };
-
+        if inline {
+            return Ok(Some(ParScan::start_inline(scans, d)));
+        }
         Ok(ParScan::start(scans, workers, pool, d))
     }
 
@@ -2708,6 +2822,7 @@ impl ScanNode {
             raw: Vec::new(),
             need_raw: None,
             topk: None,
+            toast: None,
         };
         Ok(ParScan::start(scans, workers, pool, d))
     }
@@ -2774,6 +2889,7 @@ impl ScanNode {
             raw: Vec::new(),
             need_raw: None,
             topk: None,
+            toast: None,
         };
         let par = ParScan::start(scans, workers, pool, d);
         // (No worker started: the keys are read here after all.)
@@ -2992,21 +3108,31 @@ impl Node for ScanNode {
             // (pgvector's): the filter first, over its own columns, and the rest decoded only
             // for the rows it keeps. (Not where a fetched row takes a predicate lock first.)
             let mut prefiltered = false;
+            // (A row with out-of-line values: the filter's columns decoded once, for both.)
+            let mut probed: Option<(Row, Rc<[bool]>)> = None;
             if self.ios_cols.is_none()
-                && let Some(fm) = self.prefilter_mask()
+                && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(&bytes))
                 && !predicate_locked(&self.plan.table, ctx)
                 && let Some(f) = &self.plan.filter
             {
-                let probe = scan_row_need(&self.plan, &key, &bytes, &fm, ctx)?;
+                let ext = self.toast.is_some() && crate::storage::toast::has_external(&bytes);
+                let probe = match ext {
+                    true => self.row_ext(&key, &bytes, Some(&fm), None, ctx)?,
+                    false => scan_row_need(&self.plan, &key, &bytes, &fm, ctx)?,
+                };
                 if !eval_bool(f, &probe, ctx)? {
                     ctx.filtered(self.key);
                     continue;
                 }
                 prefiltered = true;
+                if ext {
+                    probed = Some((probe, fm));
+                }
             }
-            let mut row = match &self.ios_cols {
-                Some(cols) => self.index_row(cols, &key, &bytes, ctx)?,
-                None => self.full_row(&key, &bytes, ctx)?,
+            let mut row = match (&self.ios_cols, probed) {
+                (Some(cols), _) => self.index_row(cols, &key, &bytes, ctx)?,
+                (None, Some((probe, fm))) => self.row_ext(&key, &bytes, self.need.as_deref(), Some((probe, &fm)), ctx)?,
+                (None, None) => self.full_row(&key, &bytes, ctx)?,
             };
             if (self.plan.index.is_some() || self.keys.is_some())
                 && self.only.is_none()

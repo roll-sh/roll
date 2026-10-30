@@ -1783,10 +1783,7 @@ impl Ddl<'_, '_> {
                 self.ctx.txn.borrow_mut().ssi_write(t.oid, &k, None, &[])?;
                 let tid = crate::exec::sizing::inserted(t, bixs, &k, &r, self.ctx)?;
                 let xid = self.ctx.txn.borrow_mut().cur_xid();
-                self.ctx
-                    .txn
-                    .borrow_mut()
-                    .put(k.clone(), crate::exec::scan::encode_table_row_at(&r, xid, tid))?;
+                crate::exec::toast::put_row(t, k.clone(), &r, xid, tid, &mut self.ctx.txn.borrow_mut())?;
                 crate::exec::dml::put_index_entries(t, bixs, &r, &k, self.ctx)?;
             }
             Ok(())

@@ -59,7 +59,7 @@ fn encode(out: &mut Vec<u8>, e: &Ent) {
     }
 }
 
-fn decode(b: Bytes) -> (Option<Bytes>, Option<u32>) {
+pub(super) fn decode_entry(b: Bytes) -> (Option<Bytes>, Option<u32>) {
     let tag = b[0];
     let (cid, at) = if tag & 2 != 0 {
         (Some(u32::from_be_bytes([b[1], b[2], b[3], b[4]])), 5)
@@ -178,7 +178,13 @@ impl Runs {
             .view
             .get_version(key, mark)?
             .and_then(|(_, v)| v)
-            .map(decode))
+            .map(decode_entry))
+    }
+
+    /// The runs' sources (values as `decode_entry` reads them), for reading later
+    /// (`toast::Source`): None while there are none.
+    pub fn view(&self) -> Option<Arc<View>> {
+        (!self.files.is_empty()).then(|| self.view.clone())
     }
 
     /// Keys in [start, end) as of `mark`, ascending: (key, value; None: deleted).
@@ -205,7 +211,7 @@ impl Iterator for RunScan {
     type Item = Result<(Vec<u8>, Option<Bytes>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(self.0.next()?.map(|(k, v)| (k, decode(v).0)))
+        Some(self.0.next()?.map(|(k, v)| (k, decode_entry(v).0)))
     }
 }
 
@@ -215,7 +221,7 @@ impl Iterator for RunRevScan {
     type Item = Result<(Vec<u8>, Option<Bytes>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(self.0.next()?.map(|(k, v)| (k, decode(v).0)))
+        Some(self.0.next()?.map(|(k, v)| (k, decode_entry(v).0)))
     }
 }
 
@@ -261,7 +267,7 @@ impl RawIter {
             if !(self.keep)(ts) {
                 continue;
             }
-            let (v, cid) = decode(b.value(i).expect("a run value"));
+            let (v, cid) = decode_entry(b.value(i).expect("a run value"));
             return Ok(Some((user_key(k).to_vec(), Ent { v, cid, ts })));
         }
     }

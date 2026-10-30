@@ -9,7 +9,7 @@ use crate::catalog::{
 };
 use crate::error::{Error, Result, code};
 use crate::exec::dml::with_failing_row;
-use crate::exec::scan::{data_key, encode_table_row, index_entry_key, index_value_prefix};
+use crate::exec::scan::{data_key, index_entry_key, index_value_prefix};
 use crate::exec::{Row, collect};
 use crate::sql::binder::ast::{self, inner, names, with_pos};
 use crate::sql::binder::{Clause, bound_indexes, resolve_type_name, serial_type};
@@ -3840,10 +3840,7 @@ impl Ddl<'_, '_> {
                 }
             }
             let xid = self.ctx.txn.borrow_mut().cur_xid();
-            self.ctx
-                .txn
-                .borrow_mut()
-                .put(dkey.clone(), encode_table_row(&nr, xid))?;
+            crate::exec::toast::put_row(new, dkey.clone(), &nr, xid, None, &mut self.ctx.txn.borrow_mut())?;
             crate::repl::log::rewrite_insert(new, &nr, self.ctx)?;
             written.push((okey, dkey));
         }
@@ -3873,7 +3870,8 @@ impl Ddl<'_, '_> {
             .ctx
             .txn
             .borrow()
-            .scan(&start, &index_prefix(new.oid, u32::MAX))
+            .scan(&start, &crate::exec::toast::table_end(new.oid))
+            .raw()
             .map(|e| e.map(|(k, _)| k))
             .collect::<Result<_>>()?;
         for k in keys {
@@ -4282,8 +4280,7 @@ impl Ddl<'_, '_> {
         let tids = crate::exec::sizing::loaded(t, &written, frozen, self.ctx);
         let xid = self.ctx.txn.borrow_mut().cur_xid();
         for (i, (k, r)) in written.into_iter().enumerate() {
-            let bytes = crate::exec::scan::encode_table_row_at(&r, xid, tids.get(i).copied());
-            self.ctx.txn.borrow_mut().put(k, bytes)?;
+            crate::exec::toast::put_row(t, k, &r, xid, tids.get(i).copied(), &mut self.ctx.txn.borrow_mut())?;
         }
         Ok(())
     }

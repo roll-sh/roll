@@ -19,6 +19,7 @@ pub mod pgsort;
 pub mod search;
 pub mod sizing;
 pub mod replication;
+pub mod toast;
 pub mod trigger;
 pub mod window;
 

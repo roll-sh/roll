@@ -9,6 +9,7 @@ pub mod cache;
 pub mod keys;
 pub mod row;
 pub mod sst;
+pub mod toast;
 pub mod wal;
 
 use crate::error::{Result, internal};
@@ -491,13 +492,23 @@ impl Store {
     }
 
     /// (commit ts, value) of the newest version visible at `ts`; a tombstone has value None.
+    /// A row's out-of-line values are put back (`toast`).
     pub fn get_version(&self, key: &[u8], ts: u64) -> Result<Option<(u64, Option<Bytes>)>> {
+        let view = self.view();
+        match view.get_version(key, ts)? {
+            Some((vts, Some(v))) => Ok(Some((vts, Some(toast::resolve(&view, key, v, ts)?)))),
+            other => Ok(other),
+        }
+    }
+
+    /// `get_version` with a row's value as it is stored (its out-of-line values' pointers).
+    pub fn get_version_raw(&self, key: &[u8], ts: u64) -> Result<Option<(u64, Option<Bytes>)>> {
         self.view().get_version(key, ts)
     }
 
     /// Commit ts of the newest version of `key`, committed or deleted (for conflict checks).
     pub fn latest_version_ts(&self, key: &[u8]) -> Result<Option<u64>> {
-        Ok(self.get_version(key, u64::MAX >> 1)?.map(|(ts, _)| ts))
+        Ok(self.get_version_raw(key, u64::MAX >> 1)?.map(|(ts, _)| ts))
     }
 }
 
@@ -624,11 +635,27 @@ impl Store {
                 }
             }
         }
+        // (Rows with their out-of-line values put back.)
+        for (i, o) in out.iter_mut().enumerate() {
+            if let Some((_, Some(v))) = o
+                && toast::has_external(v)
+            {
+                *v = toast::resolve(&view, keys[i], v.clone(), ts)?;
+            }
+        }
         Ok(out)
     }
 
-    /// Ascending scan of user keys in [start, end) at snapshot `ts`.
+    /// Ascending scan of user keys in [start, end) at snapshot `ts`, rows with their
+    /// out-of-line values put back (`toast`).
     pub fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
+        let mut s = Scan::new(self.view(), start.to_vec(), end.to_vec(), ts, self.gc_horizon());
+        s.resolve = true;
+        s
+    }
+
+    /// `scan` with rows as they are stored (their out-of-line values' pointers).
+    pub fn scan_raw(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
         Scan::new(self.view(), start.to_vec(), end.to_vec(), ts, self.gc_horizon())
     }
 
@@ -1653,6 +1680,8 @@ pub struct Scan {
     /// No snapshot older than this can read (the store's gc horizon as the scan began).
     horizon: u64,
     _view: Arc<View>,
+    /// Rows come with their out-of-line values put back (`Store::scan`; `toast`).
+    resolve: bool,
 }
 
 impl Scan {
@@ -1680,6 +1709,7 @@ impl Scan {
             newer: None,
             horizon,
             _view: view,
+            resolve: false,
         }
     }
 
@@ -1762,7 +1792,11 @@ impl Iterator for Scan {
             }
             let (mut k, v) = self.merge.sources[i].take();
             k.truncate(k.len().saturating_sub(8));
-            return Some(Ok((k, v.expect("a value"))));
+            let v = v.expect("a value");
+            if self.resolve && toast::has_external(&v) {
+                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
+            }
+            return Some(Ok((k, v)));
         }
     }
 }
@@ -1932,6 +1966,8 @@ pub struct RevScan {
     /// The next user key's entries already read: its first (oldest) one is held here.
     pending: Option<RawEntry>,
     _view: Arc<View>,
+    /// Rows come with their out-of-line values put back (`Store::scan_rev`; `toast`).
+    resolve: bool,
 }
 
 impl RevScan {
@@ -1967,6 +2003,7 @@ impl RevScan {
             ts,
             pending: None,
             _view: view,
+            resolve: false,
         }
     }
 
@@ -2019,6 +2056,9 @@ impl Iterator for RevScan {
                 }
             }
             if let Some(Some(v)) = chosen {
+                if self.resolve && toast::has_external(&v) {
+                    return Some(toast::resolve(&self._view, &uk, v, self.ts).map(|v| (uk, v)));
+                }
                 return Some(Ok((uk, v)));
             }
         }
@@ -2028,6 +2068,13 @@ impl Iterator for RevScan {
 impl Store {
     /// Descending scan of user keys in [start, end) at snapshot `ts`.
     pub fn scan_rev(&self, start: &[u8], end: &[u8], ts: u64) -> RevScan {
+        let mut s = RevScan::new(self.view(), start.to_vec(), end.to_vec(), ts);
+        s.resolve = true;
+        s
+    }
+
+    /// `scan_rev` with rows as they are stored (their out-of-line values' pointers).
+    pub fn scan_rev_raw(&self, start: &[u8], end: &[u8], ts: u64) -> RevScan {
         RevScan::new(self.view(), start.to_vec(), end.to_vec(), ts)
     }
 }

@@ -53,7 +53,25 @@ mod tag {
     pub const SNAPSHOT: u8 = 40;
     /// An extension's native type: kind (u16) and its bytes.
     pub const EXT: u8 = 41;
+    /// A value stored out of line (`storage::toast`): the writing transaction, its sequence
+    /// number there and the value's encoded length, as varints.
+    pub const EXTERNAL: u8 = 42;
 }
+
+/// The tag of a value stored out of line (`storage::toast`).
+pub const EXTERNAL: u8 = tag::EXTERNAL;
+
+/// Stored rows start with a header byte (never a value tag) followed by the writing
+/// transaction's id as a varint: the row's `xmin`.
+pub const ROW_HEADER: u8 = 0xFF;
+/// The header of a row stored with the heap TID its version got (block and offset as
+/// varints after the xmin): a heap model laid out afresh puts the rows back in that
+/// order.
+pub const ROW_HEADER_TID: u8 = 0xFE;
+/// `ROW_HEADER` and `ROW_HEADER_TID` of a row with values stored out of line
+/// (`storage::toast`; builds before it don't read them).
+pub const ROW_HEADER_EXT: u8 = 0xFD;
+pub const ROW_HEADER_TID_EXT: u8 = 0xFC;
 
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
     put_varint(out, b.len() as u64);
@@ -470,6 +488,9 @@ pub fn decode_value(b: &[u8], pos: &mut usize) -> Result<Value> {
             let blk = le!(u32, 4);
             Value::Tid(blk, le!(u16, 2))
         }
+        // (Readers get rows with the out-of-line values they read put back in:
+        // `storage::toast`. A pointer reaching here is a read path that skipped that.)
+        tag::EXTERNAL => return Err(internal("an out-of-line value read without its row's storage")),
         other => return Err(internal(format!("unknown value tag {other}"))),
     })
 }
@@ -560,6 +581,13 @@ pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
             take_bytes(b, pos)?;
             return Ok(());
         }
+        tag::EXTERNAL => {
+            *pos += 1;
+            for _ in 0..3 {
+                get_varint(b, pos)?;
+            }
+            return Ok(());
+        }
         // (The rest: decoded and dropped.)
         _ => {
             decode_value(b, pos)?;
@@ -581,12 +609,33 @@ pub fn ext_at(b: &[u8], col: usize) -> Option<(u16, &[u8])> {
     for _ in 0..col {
         skip_value(b, &mut pos).ok()?;
     }
-    if *b.get(pos)? != tag::EXT {
+    ext_value(&b[pos..])
+}
+
+/// The encoded value `b` (one value, as `encode_value` writes it: an out-of-line value's
+/// stored bytes) when it is an extension type's: its kind and bytes, in place.
+pub fn ext_value(b: &[u8]) -> Option<(u16, &[u8])> {
+    if *b.first()? != tag::EXT {
         return None;
     }
-    pos += 1;
+    let mut pos = 1;
     let k = u16::from_le_bytes(take(b, &mut pos, 2).ok()?.try_into().ok()?);
     Some((k, take_bytes(b, &mut pos).ok()?))
+}
+
+/// Whether column `col` of the encoded row `b` is stored out of line.
+pub fn external_at(b: &[u8], col: usize) -> bool {
+    let mut pos = 0;
+    let Ok(n) = get_varint(b, &mut pos) else { return false };
+    if col >= n as usize {
+        return false;
+    }
+    for _ in 0..col {
+        if skip_value(b, &mut pos).is_err() {
+            return false;
+        }
+    }
+    b.get(pos) == Some(&tag::EXTERNAL)
 }
 
 /// What `relsize::heap_tuple_len` gives the stored row `b` (its encoded values) taken as
