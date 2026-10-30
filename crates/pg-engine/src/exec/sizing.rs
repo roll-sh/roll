@@ -2394,7 +2394,67 @@ fn gin_index_pages(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<u64>> {
+    if let Some(n) = shared_model(t, bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))? {
+        return Ok(n);
+    }
     model_pages(bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))
+}
+
+/// A size model of an index (or what is computed from one), shared by every session
+/// (`txn::watch`, in the index's model slot): what a snapshot that saw every commit up to
+/// `ts` computed, kept while no commit writes the table and the catalog and the index's
+/// build history stay as they were.
+struct Shared<T> {
+    ts: u64,
+    key: (u64, usize),
+    model: T,
+}
+
+/// `build`'s model of index `index` of `t`, shared (`Shared`): built again only when the
+/// table, the catalog or the index's build history changed since. None: not for this
+/// transaction (it has writes of its own, or a snapshot older than the model).
+fn shared_model<T: Clone + Send + 'static>(t: &Table, index: u32, ctx: &ExecCtx, build: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
+    let (writes, snap) = {
+        let txn = ctx.txn.borrow();
+        (txn.journal_pos() > 0 || txn.has_writes(), ctx.snapshot().map_or_else(|| txn.snapshot_ts(), |s| s.ts()))
+    };
+    if writes {
+        return Ok(None);
+    }
+    let db = &ctx.sess.db;
+    let slot = crate::txn::watch::slot(index, true);
+    let key = (ctx.catalog().version, db.relfiles.read().gin_built.get(&index).map_or(0, |h| h.len()));
+    if let Some(st) = db.watch.state(t.oid, slot) {
+        let g = st.lock();
+        if let Some(p) = g.downcast_ref::<Shared<T>>()
+            && p.key == key
+            && snap >= p.ts
+            && db.watch.pending(t.oid, slot, &st).is_some_and(|w| w.is_empty())
+        {
+            return Ok(Some(p.model.clone()));
+        }
+    }
+    // Registered first: every commit after is logged for it.
+    let st: crate::txn::watch::State = Arc::new(parking_lot::Mutex::new(Box::new(())));
+    let mut g = st.lock();
+    let last = db.store.with_commit_lock(|last| {
+        db.watch.register(t.oid, slot, st.clone());
+        last
+    });
+    if snap < last {
+        db.watch.forget_index(t.oid, slot);
+        return Ok(None);
+    }
+    match build() {
+        Ok(model) => {
+            *g = Box::new(Shared { ts: last, key, model: model.clone() });
+            Ok(Some(model))
+        }
+        Err(e) => {
+            db.watch.forget_index(t.oid, slot);
+            Err(e)
+        }
+    }
 }
 
 /// The GIN index as its pages hold it now (None: not modelled).
@@ -2556,7 +2616,22 @@ fn gist_index_pages(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<u64>> {
-    model_pages(bix.index.oid, ctx, || Ok(gist_model(t, bix, indexes, ctx)?.map(|(g, _)| g.nblocks())))
+    Ok(gist_model_shared(t, bix, indexes, ctx)?.as_ref().as_ref().map(|(g, _)| g.nblocks()))
+}
+
+/// A GiST index's model and its rows' data keys (`gist_model`).
+type GistModel = Arc<Option<(crate::catalog::gistsim::Gist, Vec<Vec<u8>>)>>;
+
+/// `gist_model`, built once for every session while the table stays as it was
+/// (`shared_model`); for this transaction alone when it can't be shared, or when the table
+/// is big enough for the model to hold more memory than rebuilding it costs (about 100
+/// bytes a row: past a million rows it isn't kept).
+fn gist_model_shared(t: &Arc<Table>, bix: &BoundIndex, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<GistModel> {
+    let small = ctx.catalog().relstats.get(&t.oid).is_none_or(|r| r.tuples <= 1e6);
+    if small && let Some(m) = shared_model(t, bix.index.oid, ctx, || Ok(Arc::new(gist_model(t, bix, indexes, ctx)?)))? {
+        return Ok(m);
+    }
+    Ok(Arc::new(gist_model(t, bix, indexes, ctx)?))
 }
 
 thread_local! {
@@ -2621,7 +2696,8 @@ pub fn gist_scan_pages(
     let Some(bix) = indexes.iter().find(|b| b.index.oid == index) else {
         return Ok(None);
     };
-    let Some((g, keys)) = gist_model(t, bix, &indexes, ctx)? else {
+    let model = gist_model_shared(t, bix, &indexes, ctx)?;
+    let Some((g, keys)) = model.as_ref() else {
         return Ok(None);
     };
     let read = if pages { g.search_pages(test) } else { Vec::new() };
@@ -2646,7 +2722,8 @@ pub fn gist_insert_page(
     let Some(key) = gist_entry_key(bix, vals.first())? else {
         return Ok(None);
     };
-    let Some((g, _)) = gist_model(t, bix, indexes, ctx)? else {
+    let model = gist_model_shared(t, bix, indexes, ctx)?;
+    let Some((g, _)) = model.as_ref() else {
         return Ok(None);
     };
     Ok(Some(g.leaf_for(key)))

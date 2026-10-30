@@ -3523,6 +3523,127 @@ release builds): select-only 19,634 / 18,048 / 18,832 / 17,142 then 16,286 (afte
 new code (`Kills`) is 0.08% where `index_scanned` was 0.13%. The spread is the shared
 machine's. Peak RSS 369-388 MB select-only, both builds.
 
+## Index access, round 2 (round 22, agent 114)
+
+What changed (HANDOFF "Index access at index cost, round 2"):
+- GIN over arrays, jsonb and tsvector, and pg_trgm `%` / `%>` / `%>>`, read the rows their
+  posting lists select.
+- The GIN size model's page count and the GiST point / range model are shared across
+  statements.
+- Btree skip scans read each distinct leading value's entries.
+- The search structures are compact, and the 4M-row cap is now a memory budget.
+- The planner decodes the built-in operator family members once.
+- Index scans whose rows lie close together in the table fetch them with one range read.
+
+Method: as agent 103's round, `tools/bench` workload `access`, with these new tables:
+- `docs`: 100,000 rows with an `int[]`, two jsonb columns and a tsvector, under GIN with
+  `array_ops`, `jsonb_ops`, `jsonb_path_ops` and `tsvector_ops`.
+- `skip_t`: 1M rows, 10 distinct leading values under `(region, ts)`.
+- `pts`: 100,000 points under GiST.
+
+Setup:
+- Release builds with line-table debuginfo.
+- The server on CPUs 20-23 and the client on 24-27.
+- PostgreSQL 18.6 with `shared_buffers=2GB`, the engine with `--cache-mb 2048`.
+- Rounds interleaved: reference, after, before, after, before, reference.
+  - "before" is `6423b044`, 30 queries a case (its GIN cases take seconds each).
+  - "after" is the same with this round's change, 100 queries a case after 5 warm-up ones.
+- ms is the median latency, averaged over the two rounds. cpu is the server's CPU per query.
+  MB is the server's peak memory (the engine's RSS; the reference container's anon +
+  shmem).
+
+The machine ran at load 20-30 throughout, so allow about 20% between rounds. The job-queue,
+keyset, `max` and nested-loop rows didn't change this round: their differences are that noise.
+
+Three changes came after these rounds and don't touch their cases: the range fetch (below),
+GIN pg_trgm's rule for rows with no shared trigram, and the out-of-line splice. None of these
+cases fetches 16 or more rows lying close together, nor sets a similarity threshold of 0.
+
+| case | PostgreSQL ms (cpu, MB) | before | after |
+|---|---|---|---|
+| que_fetch | 0.433 (0.313, 379) | 0.434 (0.500, 349) | 0.520 (0.450, 93) |
+| oban_fetch | 0.851 (0.754, 379) | 2.954 (3.000, 338) | 2.850 (2.800, 100) |
+| graphile_fetch | 0.642 (0.546, 379) | 2.250 (2.000, 338) | 2.138 (2.000, 105) |
+| solid_queue_fetch | 0.316 (0.217, 379) | 0.410 (0.333, 338) | 0.400 (0.350, 113) |
+| keyset_page | 0.291 (0.203, 379) | 0.712 (0.667, 338) | 0.774 (0.600, 114) |
+| keyset_page_desc | 0.267 (0.169, 379) | 0.628 (0.500, 338) | 0.551 (0.500, 114) |
+| order_desc_limit | 0.184 (0.114, 379) | 0.369 (0.333, 338) | 0.316 (0.200, 114) |
+| max_id | 0.217 (0.145, 379) | 0.768 (0.834, 338) | 0.704 (0.650, 114) |
+| cat_limit | 0.297 (0.172, 379) | 0.510 (0.500, 338) | 0.514 (0.450, 116) |
+| any_lookup | 0.233 (0.157, 379) | 1.075 (1.000, 339) | 1.085 (0.950, 119) |
+| nested_loop | 0.552 (0.504, 379) | 2.484 (2.333, 339) | 2.582 (2.500, 121) |
+| exists_limit | 0.299 (0.221, 379) | 0.465 (0.500, 339) | 0.502 (0.500, 122) |
+| gist_box | 0.257 (0.184, 379) | 1.032 (1.000, 340) | 0.758 (0.900, 162) |
+| trgm_gin_like | 0.442 (0.332, 379) | 28.32 (27.2, 363) | 0.730 (0.700, 195) |
+| trgm_gist_like | 13.72 (13.8, 379) | 0.926 (1.000, 363) | 0.901 (0.900, 221) |
+| trgm_gin_sim | 5.812 (6.676, 380) | 427 (455, 354) | 0.929 (0.900, 221) |
+| trgm_gin_word | 1.235 (1.298, 379) | 447 (462, 354) | 0.861 (0.800, 213) |
+| gin_array | 0.370 (0.420, 379) | 1,764 (1,824, 402) | 2.033 (3.150, 320) |
+| gin_array_overlap | 0.522 (0.583, 380) | 1,754 (1,788, 402) | 3.623 (5.400, 289) |
+| gin_jsonb | 1.255 (1.124, 379) | 2,024 (2,096, 407) | 2.068 (1.800, 271) |
+| gin_jsonb_exists | 0.613 (0.514, 379) | 2,297 (2,329, 409) | 4.377 (4.250, 272) |
+| gin_jsonb_path | 0.480 (0.396, 379) | 1,948 (2,093, 408) | 2.835 (2.600, 274) |
+| gin_tsvector | 0.334 (0.263, 379) | 1,902 (1,981, 408) | 1.402 (1.300, 278) |
+| gin_tsvector_and | 4.860 (4.793, 380) | 1,837 (1,849, 408) | 28.85 (29.5, 282) |
+| skip_scan | 0.835 (0.326, 379) | 407 (410, 353) | 1.897 (1.650, 288) |
+| gist_point_box | 0.249 (0.170, 379) | 194 (199, 398) | 0.629 (0.500, 357) |
+| gist_point_knn | 0.339 (0.231, 379) | 447 (466, 402) | 33.32 (33.3, 343) |
+| brin_range | 4.706 (4.886, 380) | 13.29 (11.8, 400) | 9.933 (10.0, 332) |
+| booking_insert | 0.316 (0.229, 380) | 0.646 (0.666, 367) | 0.536 (0.500, 336) |
+| booking2_insert | 0.273 (0.186, 380) | 0.573 (0.333, 368) | 0.439 (0.500, 337) |
+
+Structure memory against PostgreSQL's index on disk (`heap_bytes`, logged at debug when a
+structure is built; 100,000 rows unless noted):
+
+| index | PostgreSQL | before (agent 103's estimate) | after |
+|---|---|---|---|
+| GiST box (`shapes_b`) | 8.1 MB | about 7 MB (70 bytes a row) | 3.7 MB |
+| pg_trgm GIN / GiST over md5 words | 9.1 MB / 18.3 MB | not measured (4-byte posting entries) | 6.2 MB (shared by both kinds) |
+| GIN `int[]` (`docs_tags`) | 1.1 MB | - (read every row) | 1.8 MB |
+| GIN jsonb_ops (`docs_body`) | 2.5 MB | - | 2.7 MB |
+| GIN jsonb_path_ops (`docs_meta`) | 0.7 MB | - | 1.9 MB |
+| GIN tsvector (`docs_tsv`) | 1.2 MB | - | 1.9 MB |
+| BRIN over 1M rows | 24 kB | 1.0 MB | 1.0 MB (unchanged) |
+
+The GIN structures' floor is the rows' data keys (13 bytes a row for an int key). PostgreSQL's
+GIN keeps compressed TIDs in its leaves, so the engine is bigger where rows have few elements.
+
+The engine's peak RSS over the whole access run: before 409 MB, after 357 MB. That is lower
+because the GIN cases no longer read their table whole. PostgreSQL's is 380 MB.
+
+Agent 107's report: a 580,000-row table made by CREATE TABLE AS, with the primary key added
+after it. An index range over it now fetches its rows with one range read (`fetch_dense`),
+not one lookup each (load ~40, a few runs each):
+
+| query | PostgreSQL | before | after |
+|---|---|---|---|
+| `sum(length(v)) WHERE id <= 116000` (index scan) | 44 ms | 240-570 ms | 112-117 ms |
+| `count(*) WHERE id <= 116000` (index-only scan) | 21-34 ms | 86-142 ms | 70-79 ms |
+| `sum(length(v)) WHERE id <= 11` | 0.2-0.4 ms | 2.8-3.6 ms | 1.1-1.3 ms |
+
+Left, and why:
+- KNN over point_ops traverses the whole model per scan: 33 ms against 0.34. `Gist::search`
+  returns every row in distance order, not lazily.
+- Big GIN results cost what fetching and decoding their rows costs: tsvector `x & common`,
+  2,500 rows, 29 ms against 4.9. A profile shows SST point gets, the heap model's TID
+  lookups and jsonb parsing in whole-row decoding.
+- The Oban and graphile-worker fetches are planning time (HANDOFF): 2.3 ms and 1.8 ms to
+  plan, against PostgreSQL's 0.16 and 0.14.
+
+pgbench (scale 10, 8 clients, 20 s, interleaved before / after twice, release builds, the
+same CPUs):
+- select-only, tps: before 14,908 / 9,414 / 16,889 / 17,637; after 16,380 / 14,942 / 15,643 /
+  17,660. CPU per transaction: before 0.23 / 0.28 / 0.23 / 0.21 ms, after 0.23 / 0.22 / 0.24 /
+  0.22 ms.
+- tpcb-like, tps: before 2,099 / 1,783 / 2,037 / 2,205; after 1,278 / 1,841 / 2,008 / 2,086.
+  CPU per transaction: before 1.40 / 1.53 / 1.42 / 1.35 ms, after 1.75 / 1.56 / 1.51 / 1.36 ms.
+- The first "after" tpcb-like run overlapped a release build that had just started on the
+  machine. The other three are within the spread of "before".
+- pgbench's tables have no GiST, GIN or skip-scan index, so this round's paths stay out of
+  them. A plan pays for the members of the btree families its indexes use, as before.
+- Peak RSS: before 712 MB, after 401-452 MB. The "before" engine had run the access workload
+  first, with its whole-table GIN reads.
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document

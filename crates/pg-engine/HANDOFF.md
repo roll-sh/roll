@@ -2418,6 +2418,164 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     unchanged; pgvector 803 / 915 against a reference built with `-DIVFFLAT_BENCH
     -DHNSW_MEMORY` (its extra notices at hnsw / ivfflat builds and scans: the reference
     differs from `expected/` in those 7 files, the engine's rows don't).
+- **Index access at index cost, round 2** (round 22, agent 114; BENCH.md "Index access,
+  round 2"):
+  - GIN over arrays, jsonb and tsvector reads only candidate rows. `exec/search/gin.rs`
+    (`Elements`) keeps a posting list for each element token, for the GIN columns whose
+    operator class it knows: `array_ops`, intarray's `gin__int_ops`, `jsonb_ops`,
+    `jsonb_path_ops` and `tsvector_ops`.
+    - An array element is keyed by bytes that are equal when the element type's `=` says so:
+      ints are widened to i64, float NaN and -0 are made canonical, numeric is normalised,
+      bpchar is not keyed, and empty arrays and NULL elements get tokens of their own.
+    - A jsonb value is keyed by its object keys and every scalar at any depth.
+    - A tsvector is keyed by its lexemes.
+    - Each operator selects a superset of the rows it holds for: `@>` and `?&` intersect,
+      `&&`, `?` and `?|` take the union, `<@` takes the union plus the empty arrays, and `=`
+      intersects (plus the NULL-element token). `@@` walks the tsquery: `&` and `<->`
+      intersect, `|` takes the union, `!x` narrows nothing, and `x:*` takes a prefix range.
+    - Every candidate's conditions are still checked on its row, as before.
+  - A condition under a nondeterministic collation narrows nothing (`scan::search_keys`),
+    because equal values aren't equal bytes there.
+  - jsonpath `@?` / `@@` isn't narrowed yet.
+  - pg_trgm `%`, `%>` and `%>>` (and so `<%` / `<<%` commuted) narrow at their thresholds.
+    Each of these similarities is at most the share of the query's trigrams that the row has
+    (pg_trgm's GIN consistent function uses the same bound), so a row needs at least
+    `threshold × |query trigrams|` of them (`Trigrams::sharing`). This applies to GIN and
+    GiST alike.
+    - Through GIN, a row also needs at least one of the query's trigrams, and a query with
+      none returns no rows, as gin_trgm_consistent decides, whatever the threshold. Before
+      this round, `w % 'x'` at `pg_trgm.similarity_threshold = 0` returned every row through
+      a GIN index; PostgreSQL returns those sharing a trigram.
+    - GiST at threshold 0 lets every row through, as it did.
+    - Not matched: the transaction's own uncommitted rows are all rechecked, so at threshold
+      0 they match where PostgreSQL's GIN scan would leave them out.
+  - The search structures are smaller. Measured (`heap_bytes`, logged at debug when built)
+    against PostgreSQL's index on disk, for 100,000 rows:
+    - GiST box: 3.7 MB against 8.1 MB.
+    - pg_trgm GIN: 6.2 MB against 9.1 MB (GiST: 18.3 MB).
+    - GIN `int[]`: 1.8 MB against 1.1 MB.
+    - GIN jsonb_ops: 2.7 MB against 2.5 MB.
+    - GIN jsonb_path_ops: 1.9 MB against 0.7 MB.
+    - GIN tsvector: 1.9 MB against 1.2 MB.
+    - BRIN zones over 1M rows: 1.0 MB against 24 kB (zones of 128 rows against PostgreSQL's
+      128 pages).
+
+    What made them smaller:
+    - Rows' data keys are stored back to back (`RowKeys`: 4 bytes plus the key per row, no
+      allocation each).
+    - Posting lists hold the distances between rows in 7-bit groups (`Posting`), as GIN
+      compresses its own.
+    - `Grid` entries map their 64-bit keys onto 32 bits by a quantizer fitted to the
+      0.1th–99.9th percentile of the keys at build time (`Quant`). The map is monotone and
+      clamped, so a mapped test holds wherever the exact one does. Entries are 16 bytes, plus
+      8 for a box's second dimension.
+
+    The 4M-row cap is gone. A structure may now hold up to half the block cache (at least
+    128 MB, `search::budget`); past that its scans read every row, as before.
+  - The GIN size model's page count is shared by every session (`sizing::shared_model`, in
+    the index's model slot of `txn::watch`, `watch::slot`). It used to be cached per
+    transaction, so each autocommit statement rebuilt it.
+    - The shared value is kept while no commit writes the table and the catalog and the
+      index's build history stay as they were.
+    - A transaction with writes of its own, or with a snapshot older than the model, computes
+      it as before.
+    - This is what was left of pg_trgm GIN `LIKE`'s 17 ms.
+  - The GiST point_ops / range_ops model is shared the same way (`gist_model_shared`), for the
+    planner's page counts and for point_ops index scans, so they keep PostgreSQL's index order
+    without a per-scan build. It is kept only for tables of up to a million rows (about 100
+    bytes per row); bigger ones build it per statement, as before.
+  - The planner reads an index's operator family members through `Catalog::opmembers_of`
+    (the built-in pg_amop / pg_amproc rows are decoded once, `userobj::builtin_members`).
+    Before, it decoded every built-in member for each GIN / GiST / SP-GiST / BRIN index on
+    every plan.
+  - PostgreSQL 18 skip scans (`IndexBounds::skip`, `SkipScan`). The planner's `bounds`
+    (`fill_bounds`) looks past the columns the range bounds, for the first later key column
+    with conditions it can bound.
+    - That holds when the earlier columns' keys can be taken apart: bool, ints, oid, dates,
+      timestamps, uuid, and text keyed by bytes, with no outer reference or sub-select in the
+      bounds.
+    - The executor (`scan::Skip`) reads each distinct value of the earlier columns. It reads
+      that value's ranges and then seeks to the next value, or reads through when the next
+      wanted entry is within `SKIP_READS` (8) entries, so many distinct values cost about a
+      plain read.
+    - It works forward and backward, for index, index-only and bitmap index scans
+      (`skip_entries`), and for composite primary keys.
+    - It is not used under EXPLAIN ANALYZE of an index-only scan, nor by parallel index scans.
+      EXPLAIN ANALYZE's `Index Searches` still counts the ranges (PostgreSQL: one per distinct
+      value, plus one).
+  - SP-GiST quad_point_ops over a point with a NaN coordinate fails as PostgreSQL's does,
+    with XX000 "getQuadrant: impossible case" (`dml::quad_insert_check`, `build_index`).
+    - getQuadrant places such a point in no quadrant. PostgreSQL meets it when the root
+      leaf page splits with the point on it, or when it chooses a quadrant once the root is
+      split.
+    - The root holds 226 points (`SPGIST_ROOT_POINTS`, measured against 18.6), so an index
+      build or insert fails once there are more than that with a NaN among them. NULLs don't
+      count. kd_point_ops doesn't fail.
+    - Not modelled: a later split of another leaf that holds the NaN.
+  - The Oban (2.1 ms against 0.84) and graphile-worker (1.7 against 0.65) fetches spend
+    their time in planning, not in the scans or the commit.
+    - Planning time: Oban's UPDATE ... IN (SELECT ... LIMIT 10 FOR UPDATE SKIP LOCKED)
+      2.3 ms against PostgreSQL's 0.16. Graphile's CTE + UPDATE 1.8 against 0.14. The
+      engine's execution of them takes about 0.2–0.5 ms.
+    - Planning each half alone takes 0.46 ms, so the semi-join's planning adds about 1.4 ms.
+    - The flat profile is spread across the binder and planner: allocation, expression
+      clones, `note_alias_families` (every catalog op member, every binder; 4.6%) and
+      `select_candidate`.
+    - For agent 91 (planner) and agent 112. Applications using prepared statements pay
+      it once.
+  - Index scans whose entries name rows close together in the table's own key order fetch
+    them with one range read, not a lookup each (`scan::fetch_dense`). That holds for the
+    ascending keys of one integer key column, a rowid's or an integer primary key's, at least
+    16 a batch, spanning under twice their count. Typical cases are an index made after its
+    table's rows, or a bulk load's.
+    - Agent 107's report, a 580,000-row CREATE TABLE AS with its primary key added after:
+      `sum(length(v)) WHERE id <= 116000` takes 112-117 ms, against 240-570 ms before
+      (PostgreSQL 44 ms; `count(*)`, an index-only scan: 70-79 ms, against 86-142, PostgreSQL
+      21-34). What it saved was the
+      SST point lookups (bloom checks and seeks: 45% of a profile).
+    - The 4.6 s agent 107 measured (before agent 102's batch) didn't reproduce on this base:
+      the first query after a restart planned in 11 ms and ran in 2 ms here. If it comes
+      back, it is the heap model's first build (agent 113's).
+  - Rows a structure takes from the commit log have their out-of-line values put back
+    (`search::spliced`, `storage::toast::splice`: a value's key never changes), so large
+    jsonb or text values still place their rows. A value already gone makes the row one
+    read by every scan, which is correct.
+  - Tests: goldens `a114_gin_search`, `a114_skip_scan`, `a114_gist_point` and
+    `a114_spgist_nan` (recorded from 18.6). `tools/bench/access.rs` has new cases
+    (`gin_*`, `trgm_gin_word`, `skip_scan`, `gist_point_*`) and their tables.
+  - Measured (release, ms, before / after / PostgreSQL 18.6; BENCH.md):
+    - GIN over 100,000 rows: 1,750-2,300 before, 1.4-4.4 after, 0.33-1.3 PostgreSQL.
+    - pg_trgm GIN: `LIKE` 28 / 0.73 / 0.44; `%` 427 / 0.93 / 5.8; `%>` 447 / 0.86 / 1.2.
+    - Skip scan, 1M rows: 407 / 1.9 / 0.84.
+    - GiST point `<@` 194 / 0.63 / 0.25; KNN 447 / 33 / 0.34.
+    - pgbench is unchanged.
+    - Peak RSS over the access run: 409 MB before, 357 MB after, PostgreSQL 380 MB.
+  - Left:
+    - KNN (`ORDER BY p <-> point LIMIT k`) over point_ops still traverses the whole model:
+      33 ms against 0.34 ms. `Gist::search` isn't lazy.
+    - GIN candidates are fetched by point gets, and each row is decoded whole for the
+      recheck (jsonb parsed). Searches returning thousands of rows cost 3-4× PostgreSQL's,
+      e.g. tsvector `x & common`, 2,500 rows: 29 ms against 4.9 ms.
+    - jsonpath operators aren't narrowed.
+    - BRIN zones are finer than BRIN's block ranges (more memory, fewer rows read).
+    - Found, not changed: after an UPDATE that moves points, the GiST point_ops model doesn't
+      put the moved rows where PostgreSQL's tree has them, so an unordered index scan returns
+      them in another order. This was the same before this round (`a114_gist_point` compares
+      those rows by id). Its page count after that UPDATE and a VACUUM is 5 where
+      PostgreSQL's is 7.
+  - Verified: crate tests in debug and release (47 test binaries each, deep_input included), clippy
+    (nothing new: the one warning in a touched file, `StoreIter`'s large variant, comes from
+    the base's `TxnScan`), difftest smoke, isolation 133 / 134 specs with the roll-* ones
+    (1,739 / 1,740 permutations: intra-grant-inplace, as before), a full regress run (debug,
+    private reference) 51,148 / 51,150 with 0 units changed against results.tsv after
+    rebasing onto 3f56fe3f. An earlier full run of the same change on an older base showed
+    partition_aggregate 120 / 122 (parallel aggregate plans); the file alone matched 216 /
+    216, and the run on this base matched them: batch-dependent. Contrib btree_gist 613 /
+    616, pg_trgm 261, cube 316, bloom 58, hstore 309, intarray 182, pgvector 915 / 915
+    against a reference built with OPTFLAGS="" (`a114-pgvector`), all unchanged.
+    pgvector's copy file needs `results/*.bin` writable by both psqls: the reference's
+    `docker exec` runs as root, so pre-create them mode 666 when the engine side gets
+    "Permission denied".
 
 ## Repository layout
 

@@ -1,0 +1,118 @@
+> CREATE TABLE a114_p (p point)
+-- CREATE TABLE
+
+> INSERT INTO a114_p VALUES ('(NaN,1)')
+-- INSERT 0 1
+
+> CREATE INDEX a114_p_q ON a114_p USING spgist (p)
+-- CREATE INDEX
+
+> INSERT INTO a114_p SELECT point(g, g) FROM generate_series(1, 225) g
+-- INSERT 0 225
+
+> SELECT count(*) FROM a114_p
+count:int8
+226
+-- SELECT 1
+
+> INSERT INTO a114_p VALUES ('(1,1)')
+ERROR XX000: getQuadrant: impossible case
+
+> SELECT count(*) FROM a114_p
+count:int8
+226
+-- SELECT 1
+
+> DROP INDEX a114_p_q
+-- DROP INDEX
+
+> INSERT INTO a114_p VALUES (NULL), (NULL)
+-- INSERT 0 2
+
+> CREATE INDEX a114_p_q ON a114_p USING spgist (p)
+-- CREATE INDEX
+
+> SELECT count(*) FROM a114_p WHERE p IS NULL
+count:int8
+2
+-- SELECT 1
+
+> DELETE FROM a114_p WHERE p ~= '(225,225)'
+-- DELETE 1
+
+> CREATE INDEX a114_p_q2 ON a114_p USING spgist (p quad_point_ops)
+-- CREATE INDEX
+
+> CREATE INDEX a114_p_kd ON a114_p USING spgist (p kd_point_ops)
+-- CREATE INDEX
+
+> TRUNCATE a114_p
+-- TRUNCATE TABLE
+
+> INSERT INTO a114_p SELECT point(g, g) FROM generate_series(1, 225) g
+-- INSERT 0 225
+
+> INSERT INTO a114_p VALUES ('(NaN,NaN)')
+-- INSERT 0 1
+
+> CREATE INDEX a114_p_q3 ON a114_p USING spgist (p)
+-- CREATE INDEX
+
+> INSERT INTO a114_p VALUES ('(5,NaN)')
+ERROR XX000: getQuadrant: impossible case
+
+> INSERT INTO a114_p VALUES ('(5,5)')
+ERROR XX000: getQuadrant: impossible case
+
+> SELECT count(*) FROM a114_p
+count:int8
+226
+-- SELECT 1
+
+> CREATE TABLE a114_p2 (p point)
+-- CREATE TABLE
+
+> INSERT INTO a114_p2 SELECT point(g, g) FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> INSERT INTO a114_p2 VALUES ('(NaN,1)')
+-- INSERT 0 1
+
+> CREATE INDEX ON a114_p2 USING spgist (p)
+ERROR XX000: getQuadrant: impossible case
+
+> CREATE INDEX ON a114_p2 USING spgist (p kd_point_ops)
+-- CREATE INDEX
+
+> DELETE FROM a114_p2 WHERE p[0] <> p[0]
+-- DELETE 0
+
+> CREATE INDEX a114_p2_q ON a114_p2 USING spgist (p)
+ERROR XX000: getQuadrant: impossible case
+
+> INSERT INTO a114_p2 VALUES ('(NaN,1)')
+-- INSERT 0 1
+
+> INSERT INTO a114_p2 VALUES ('(1,2)')
+-- INSERT 0 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a114_p2 VALUES ('(NaN,1)')
+-- INSERT 0 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> UPDATE a114_p2 SET p = '(1,NaN)' WHERE p ~= '(1,1)'
+-- UPDATE 1
+
+> SELECT count(*) FROM a114_p2
+count:int8
+303
+-- SELECT 1
+
+> DROP TABLE a114_p, a114_p2
+-- DROP TABLE
+

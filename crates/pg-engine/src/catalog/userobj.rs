@@ -292,6 +292,55 @@ pub struct MemberInfo {
     pub sortfamily: u32,
 }
 
+/// The built-in pg_amop (`func` false) or pg_amproc rows as members, in their order, and
+/// each family's (positions in it): decoded once.
+fn builtin_members(func: bool) -> &'static (Vec<MemberInfo>, std::collections::HashMap<u32, Vec<usize>>) {
+    type Members = (Vec<MemberInfo>, std::collections::HashMap<u32, Vec<usize>>);
+    static OPS: std::sync::OnceLock<Members> = std::sync::OnceLock::new();
+    static PROCS: std::sync::OnceLock<Members> = std::sync::OnceLock::new();
+    let build = || -> Members {
+        let all: Vec<MemberInfo> = if func {
+            rows(SysTable::PgAmproc)
+                .iter()
+                .map(|r| MemberInfo {
+                    oid: oid_at(r, 0),
+                    family: oid_at(r, 1),
+                    func: true,
+                    left: oid_at(r, 2),
+                    right: oid_at(r, 3),
+                    number: int_at(r, 4) as i16,
+                    object: oid_at(r, 5),
+                    purpose: ' ',
+                    method: 0,
+                    sortfamily: 0,
+                })
+                .collect()
+        } else {
+            rows(SysTable::PgAmop)
+                .iter()
+                .map(|r| MemberInfo {
+                    oid: oid_at(r, 0),
+                    family: oid_at(r, 1),
+                    func: false,
+                    left: oid_at(r, 2),
+                    right: oid_at(r, 3),
+                    number: int_at(r, 4) as i16,
+                    purpose: char_at(r, 5),
+                    object: oid_at(r, 6),
+                    method: oid_at(r, 7),
+                    sortfamily: oid_at(r, 8),
+                })
+                .collect()
+        };
+        let mut by_family: std::collections::HashMap<u32, Vec<usize>> = Default::default();
+        for (i, m) in all.iter().enumerate() {
+            by_family.entry(m.family).or_default().push(i);
+        }
+        (all, by_family)
+    };
+    if func { PROCS.get_or_init(build) } else { OPS.get_or_init(build) }
+}
+
 fn char_at(r: &[Value], i: usize) -> char {
     match r.get(i) {
         Some(Value::Char(c)) => *c as char,
@@ -504,41 +553,26 @@ impl Catalog {
 
     /// Every operator (`func` false) or support function of operator families.
     pub fn opmembers_all(&self, func: bool) -> Vec<MemberInfo> {
-        let mut out: Vec<MemberInfo> = if func {
-            rows(SysTable::PgAmproc)
-                .iter()
-                .map(|r| MemberInfo {
-                    oid: oid_at(r, 0),
-                    family: oid_at(r, 1),
-                    func: true,
-                    left: oid_at(r, 2),
-                    right: oid_at(r, 3),
-                    number: int_at(r, 4) as i16,
-                    object: oid_at(r, 5),
-                    purpose: ' ',
-                    method: 0,
-                    sortfamily: 0,
-                })
-                .collect()
-        } else {
-            rows(SysTable::PgAmop)
-                .iter()
-                .map(|r| MemberInfo {
-                    oid: oid_at(r, 0),
-                    family: oid_at(r, 1),
-                    func: false,
-                    left: oid_at(r, 2),
-                    right: oid_at(r, 3),
-                    number: int_at(r, 4) as i16,
-                    purpose: char_at(r, 5),
-                    object: oid_at(r, 6),
-                    method: oid_at(r, 7),
-                    sortfamily: oid_at(r, 8),
-                })
-                .collect()
-        };
-        out.retain(|m| !self.opmembers_removed.contains(&m.oid));
+        let mut out: Vec<MemberInfo> = builtin_members(func).0.iter().filter(|m| !self.opmembers_removed.contains(&m.oid)).cloned().collect();
         for m in self.opmembers.values().filter(|m| m.func == func) {
+            out.push(self.member_info(m));
+        }
+        out
+    }
+
+    /// `opmembers_all`'s members of operator family `family` (the planner asks for an
+    /// index's on every plan: the built-in ones are decoded once).
+    pub fn opmembers_of(&self, func: bool, family: u32) -> Vec<MemberInfo> {
+        let (all, by_family) = builtin_members(func);
+        let mut out: Vec<MemberInfo> = by_family
+            .get(&family)
+            .into_iter()
+            .flatten()
+            .map(|&i| &all[i])
+            .filter(|m| !self.opmembers_removed.contains(&m.oid))
+            .cloned()
+            .collect();
+        for m in self.opmembers.values().filter(|m| m.func == func && m.family == family) {
             out.push(self.member_info(m));
         }
         out

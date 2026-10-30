@@ -245,16 +245,21 @@ fn ranges(
         let p = index_prefix(t.oid, 0);
         return Ok(vec![(p.clone(), prefix_end(&p))]);
     }
-    let mut prefix = index_prefix(t.oid, ix.id);
+    ranges_from(ix, b, index_prefix(t.oid, ix.id), 0, ctx)
+}
+
+/// `ranges` of the entries starting with `prefix` (the index's, and the key bytes of its
+/// first `col0` columns), `b` bounding the columns after.
+fn ranges_from(ix: &Index, b: &IndexBounds, mut prefix: Vec<u8>, col0: usize, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     for (i, e) in b.eq.iter().enumerate() {
         let v = eval(e, &[], ctx)?;
         if v.is_null() {
             return Ok(Vec::new());
         }
-        let c = &ix.columns[i];
-        encode_index_value(&mut prefix, &v, c.desc, c.nulls_first, b.coll(i));
+        let c = &ix.columns[col0 + i];
+        encode_index_value(&mut prefix, &v, c.desc, c.nulls_first, b.coll(col0 + i));
     }
-    let ncol = b.eq.len();
+    let ncol = col0 + b.eq.len();
     if let Some(any) = &b.any {
         let arr = eval(any, &[], ctx)?;
         let Value::Array(a) = arr else {
@@ -462,6 +467,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            skip: None,
             rev: false,
             kills: None,
             secondary: false,
@@ -519,6 +525,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            skip: None,
             rev: false,
             kills: None,
             secondary: false,
@@ -579,6 +586,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            skip: None,
             rev: false,
             kills: None,
             secondary: false,
@@ -647,6 +655,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            skip: None,
             rev: false,
             kills: None,
             secondary: false,
@@ -777,6 +786,13 @@ fn open_scan_as(
     } else {
         None
     };
+    // (An index-only scan under EXPLAIN ANALYZE counts what its whole ranges hold.)
+    let skip = match (&s.index, &only) {
+        (Some((ix, b)), None) if ix.method == "btree" && !ios && s.sample.is_none() => b.skip.as_ref().map(|sk| {
+            Box::new(Skip { scan: (**sk).clone(), main: (Vec::new(), Vec::new()), pre: None, targets: Default::default(), misses: 0, plain: false })
+        }),
+        _ => None,
+    };
     let heap_read = s
         .index
         .as_ref()
@@ -858,6 +874,7 @@ fn open_scan_as(
         ranges,
         cur_range: 0,
         iter: None,
+        skip,
         rev,
         kills,
         secondary,
@@ -1322,6 +1339,9 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                         out.dedup_by(|a, b| a.0 == b.0);
                         out
                     }
+                    None if bounds.skip.is_some() && index.method == "btree" => {
+                        skip_entries(index, bounds.skip.as_deref().expect("a skip scan"), start, end, ctx)?
+                    }
                     None => {
                         let txn = ctx.txn.borrow();
                         let it = match ctx.snapshot().as_deref() {
@@ -1480,7 +1500,8 @@ fn dense_bitmap_scan(
         use crate::sql::expr::Expr;
         Ok(match q {
             BitmapQual::Index { index, quals, bounds, .. } => {
-                if quals.is_empty() {
+                // (A skip scan reads less than its ranges.)
+                if quals.is_empty() || bounds.skip.is_some() {
                     return Ok(None);
                 }
                 // (An index whose search structure narrows the rows: read through it.)
@@ -1560,6 +1581,7 @@ fn dense_bitmap_scan(
         ranges: vec![(p.clone(), prefix_end(&p))],
         cur_range: 0,
         iter: None,
+        skip: None,
         rev: false,
         kills: None,
         secondary: false,
@@ -1689,6 +1711,114 @@ enum StatTarget {
     Fetched(u32),
 }
 
+/// Entries a skip scan reads past what it wants before it seeks instead: a few distinct
+/// values close together are cheaper read through than sought.
+const SKIP_READS: usize = 8;
+
+/// A btree skip scan's place (`IndexBounds::skip`, PostgreSQL 18's skip arrays): within
+/// each of the scan's ranges, the entries of each distinct value of the first key columns
+/// that the bounds on the columns after hold for.
+struct Skip {
+    scan: crate::sql::plan::SkipScan,
+    /// The range being read, the key prefix of the distinct value last met, and its ranges
+    /// not passed yet (in the scan's direction).
+    main: (Vec<u8>, Vec<u8>),
+    pre: Option<Vec<u8>>,
+    targets: std::collections::VecDeque<(Vec<u8>, Vec<u8>)>,
+    /// Entries read since the last one taken or sought.
+    misses: usize,
+    /// A key it couldn't take apart: every entry from there on is taken.
+    plain: bool,
+}
+
+enum SkipStep {
+    Take,
+    Pass,
+    /// Read this range next instead.
+    Seek(Vec<u8>, Vec<u8>),
+}
+
+impl Skip {
+    /// The length of entry key `k`'s prefix up to the skipped columns' end.
+    fn prefix_len(&self, k: &[u8], ix: &Index) -> Option<usize> {
+        let mut pos = 8;
+        for (i, ty) in self.scan.cols.iter().enumerate() {
+            crate::storage::keys::decode_index_value(k, &mut pos, ty, ix.columns.get(i)?.desc)?;
+        }
+        Some(pos)
+    }
+
+    /// What to do with entry `k`.
+    fn step(&mut self, k: &[u8], ix: &Index, rev: bool, ctx: &ExecCtx) -> Result<SkipStep> {
+        if !self.pre.as_ref().is_some_and(|p| k.starts_with(p)) {
+            let Some(n) = self.prefix_len(k, ix) else {
+                self.plain = true;
+                return Ok(SkipStep::Take);
+            };
+            let pre = k[..n].to_vec();
+            let (s, e) = &self.main;
+            let mut t: Vec<(Vec<u8>, Vec<u8>)> = ranges_from(ix, &self.scan.bounds, pre.clone(), self.scan.cols.len(), ctx)?
+                .into_iter()
+                .map(|(a, b)| (a.max(s.clone()), b.min(e.clone())))
+                .filter(|(a, b)| a < b)
+                .collect();
+            if rev {
+                t.reverse();
+            }
+            self.targets = t.into();
+            self.pre = Some(pre);
+            self.misses = 0;
+        }
+        let k = k.to_vec();
+        // Past a target in the scan's direction: done with it.
+        while self.targets.front().is_some_and(|(a, b)| if rev { k < *a } else { k >= *b }) {
+            self.targets.pop_front();
+        }
+        let seek = match self.targets.front() {
+            Some((a, b)) if k >= *a && k < *b => {
+                self.misses = 0;
+                return Ok(SkipStep::Take);
+            }
+            // (Short of the next target: to its start, or going backward its end.)
+            Some((a, b)) => if rev { (self.main.0.clone(), b.clone()) } else { (a.clone(), self.main.1.clone()) },
+            // (Past every one: to the next distinct value.)
+            None => {
+                let pre = self.pre.as_ref().expect("a distinct value");
+                if rev { (self.main.0.clone(), pre.clone()) } else { (prefix_end(pre), self.main.1.clone()) }
+            }
+        };
+        self.misses += 1;
+        if self.misses <= SKIP_READS {
+            return Ok(SkipStep::Pass);
+        }
+        self.misses = 0;
+        Ok(SkipStep::Seek(seek.0, seek.1))
+    }
+}
+
+/// The entries of `[start, end)` a skip scan of `ix` reads (a bitmap index scan's).
+fn skip_entries(ix: &Index, scan: &crate::sql::plan::SkipScan, start: &[u8], end: &[u8], ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, bytes::Bytes)>> {
+    let mut sk = Skip { scan: scan.clone(), main: (start.to_vec(), end.to_vec()), pre: None, targets: Default::default(), misses: 0, plain: false };
+    let open = |a: &[u8], b: &[u8]| {
+        let txn = ctx.txn.borrow();
+        match ctx.snapshot().as_deref() {
+            Some(sn) => txn.scan_snap(a, b, sn),
+            None => txn.scan(a, b),
+        }
+    };
+    let mut it = open(start, end);
+    let mut out = Vec::new();
+    while let Some(r) = it.next() {
+        let (k, v) = r?;
+        match if sk.plain { SkipStep::Take } else { sk.step(&k, ix, false, ctx)? } {
+            SkipStep::Take => out.push((k, v)),
+            SkipStep::Pass => {}
+            SkipStep::Seek(a, b) => it = open(&a, &b),
+        }
+    }
+    Ok(out)
+}
+
 struct ScanNode {
     /// The plan's address (EXPLAIN ANALYZE counts filtered rows by it).
     key: usize,
@@ -1699,6 +1829,8 @@ struct ScanNode {
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
     cur_range: usize,
     iter: Option<StoreIter>,
+    /// A btree skip scan (`IndexBounds::skip`): which entries of its ranges it reads.
+    skip: Option<Box<Skip>>,
     /// A backward index scan: its ranges (last first) read in descending key order.
     rev: bool,
     /// A btree index scan's LP_DEAD marks, made as it passes the entries.
@@ -1888,11 +2020,59 @@ const FETCH_BATCH_MAX: usize = 128;
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
 fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+    if let Some(rows) = fetch_dense(keys, ctx)? {
+        return Ok(rows);
+    }
     let txn = ctx.txn.borrow();
     match ctx.snapshot().as_deref() {
         Some(s) => txn.get_many_snap(keys, s),
         None => keys.iter().map(|k| txn.get(k)).collect(),
     }
+}
+
+/// `fetch_rows` of ascending keys of one integer key column (a rowid table's, or an integer
+/// primary key's) close together, as an index's entries in its table's own order fetch them
+/// (an index made after its table's rows, a bulk load's): one range read, its rows matched
+/// to the keys, instead of a lookup each. None: not such keys.
+fn fetch_dense(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+    let id = |k: &[u8]| -> Option<i64> {
+        let mut pos = 8;
+        match crate::storage::keys::decode_index_value(k, &mut pos, &crate::types::DataType::Int8, false)? {
+            Value::Int8(v) if pos == k.len() => Some(v),
+            _ => None,
+        }
+    };
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else { return Ok(None) };
+    if keys.len() < 16 || first[..8.min(first.len())] != last[..8.min(last.len())] || !keys.windows(2).all(|w| w[0] < w[1]) {
+        return Ok(None);
+    }
+    let (Some(a), Some(b)) = (id(first), id(last)) else { return Ok(None) };
+    // (Mostly the rows between: every other one at most.)
+    if (b as i128 - a as i128) >= 2 * keys.len() as i128 {
+        return Ok(None);
+    }
+    let end = prefix_end(last);
+    let txn = ctx.txn.borrow();
+    let it = match ctx.snapshot().as_deref() {
+        Some(s) => txn.scan_snap(first, &end, s),
+        None => txn.scan(first, &end),
+    };
+    let mut out = Vec::with_capacity(keys.len());
+    let mut want = keys.iter().peekable();
+    for r in it {
+        let (k, v) = r?;
+        while want.next_if(|w| w.as_slice() < k.as_slice()).is_some() {
+            out.push(None);
+        }
+        if want.next_if(|w| w.as_slice() == k.as_slice()).is_some() {
+            out.push(Some(v));
+        }
+        if want.peek().is_none() {
+            break;
+        }
+    }
+    out.resize(keys.len(), None);
+    Ok(Some(out))
 }
 
 /// TABLESAMPLE: keeps a row when the hash of its key (or, for SYSTEM, of its group of
@@ -2108,9 +2288,22 @@ impl ScanNode {
     /// Starts reading the next range (false: none left), in descending key order for a
     /// backward scan.
     fn open_range(&mut self, ctx: &ExecCtx) -> bool {
-        let Some((start, end)) = self.ranges.get(self.cur_range) else {
+        let Some((start, end)) = self.ranges.get(self.cur_range).cloned() else {
             return false;
         };
+        if let Some(sk) = &mut self.skip {
+            sk.main = (start.clone(), end.clone());
+            sk.pre = None;
+            sk.targets.clear();
+            sk.misses = 0;
+        }
+        self.seek(&start, &end, ctx);
+        self.cur_range += 1;
+        true
+    }
+
+    /// Reads entries `[start, end)` next, in the scan's direction.
+    fn seek(&mut self, start: &[u8], end: &[u8], ctx: &ExecCtx) {
         let txn = ctx.txn.borrow();
         let snap = ctx.snapshot();
         self.iter = Some(if self.rev {
@@ -2136,8 +2329,29 @@ impl ScanNode {
                 _ => it,
             })
         });
-        self.cur_range += 1;
-        true
+    }
+
+    /// The current range's next entry (a skip scan's: the next one its bounds hold for).
+    fn iter_next(&mut self, ctx: &ExecCtx) -> Option<Result<(Vec<u8>, bytes::Bytes)>> {
+        if self.skip.as_ref().is_none_or(|s| s.plain) {
+            return self.iter.as_mut()?.next();
+        }
+        loop {
+            let (k, v) = match self.iter.as_mut()?.next()? {
+                Ok(e) => e,
+                Err(e) => return Some(Err(e)),
+            };
+            let step = match (self.skip.as_mut(), self.plan.index.as_ref()) {
+                (Some(sk), Some((ix, _))) => sk.step(&k, ix, self.rev, ctx),
+                _ => Ok(SkipStep::Take),
+            };
+            match step {
+                Ok(SkipStep::Take) => return Some(Ok((k, v))),
+                Ok(SkipStep::Pass) => {}
+                Ok(SkipStep::Seek(a, b)) => self.seek(&a, &b, ctx),
+                Err(e) => return Some(Err(e)),
+            }
+        }
     }
 
     /// Next (data key, stored row bytes), in heap order where Postgres's would be.
@@ -2298,7 +2512,7 @@ impl ScanNode {
                 if self.iter.is_none() && !self.open_range(ctx) {
                     break;
                 }
-                match self.iter.as_mut().unwrap().next() {
+                match self.iter_next(ctx) {
                     Some(r) => {
                         let (k, v) = r?;
                         ents.push((k, v.to_vec()));
@@ -2380,7 +2594,7 @@ impl ScanNode {
             if self.iter.is_none() && !self.open_range(ctx) {
                 return Ok(None);
             }
-            match self.iter.as_mut().unwrap().next() {
+            match self.iter_next(ctx) {
                 Some(r) => {
                     let (k, v) = r?;
                     if self.only.as_ref().is_some_and(|o| *o != k) {
@@ -2860,6 +3074,7 @@ impl ScanNode {
             || ix.method != "btree"
             || !b.eq.is_empty()
             || b.any.is_some()
+            || b.skip.is_some()
             || b.lower.is_some()
             || b.upper.is_some()
             || !b.order.is_empty()
@@ -3511,6 +3726,10 @@ fn search_keys(
         if let crate::sql::expr::Expr::Call(def, args, _) = &q.expr
             && args.len() == 2
         {
+            // (Equal under a nondeterministic collation isn't equal bytes: it narrows nothing.)
+            if def.coll.as_ref().is_some_and(|c| !c.deterministic) {
+                continue;
+            }
             let Ok(v) = eval(&args[1], &[], ctx) else { return Ok(None) };
             conds.push((q.col, def.name, v));
         }

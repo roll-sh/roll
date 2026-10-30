@@ -568,11 +568,8 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             // values back (a GiST fetch function or no compress function; SP-GiST's
             // config canReturnData), and INCLUDE columns.
             Am::Gist | Am::Spgist => {
-                let procs = if am == Am::Gist { cat.opmembers_all(true) } else { Vec::new() };
                 let has = |c: &crate::catalog::userobj::ClassInfo, n: i16| {
-                    procs.iter().any(|m| {
-                        m.family == c.family && m.left == c.intype && m.right == c.intype && m.number == n
-                    })
+                    cat.opmembers_of(true, c.family).iter().any(|m| m.left == c.intype && m.right == c.intype && m.number == n)
                 };
                 for (k, c) in b.keys.iter().zip(&classes) {
                     let Some(c) = c else { continue };
@@ -589,14 +586,12 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             _ => {}
         }
         let fam_ops: Vec<Vec<(u32, char, u32)>> = if am.by_family() {
-            let members = cat.opmembers_all(false);
             classes
                 .iter()
                 .map(|c| {
                     c.as_ref().map_or_else(Vec::new, |c| {
-                        members
+                        cat.opmembers_of(false, c.family)
                             .iter()
-                            .filter(|m| m.family == c.family)
                             .map(|m| (m.object, m.purpose, m.sortfamily))
                             .collect()
                     })
@@ -3779,9 +3774,6 @@ fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
     if ii.am.by_family() {
         return b;
     }
-    let usable = |v: &Expr| {
-        v.columns().is_empty() && !v.is_volatile() && !matches!(v, Expr::Default(_))
-    };
     // An index a made operator class orders: the keys it is in order of.
     if ii.order.iter().any(Option::is_some) {
         for (i, (k, c)) in ii.keys.iter().zip(&ii.ix.columns).enumerate() {
@@ -3803,16 +3795,63 @@ fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
             });
         }
     }
-    for (col, key) in ii.keys.iter().enumerate() {
+    let (stop, skippable) = fill_bounds(ii, quals, 0, &mut b);
+    // A skip scan (PostgreSQL 18): past the columns the range bounds, the first later one
+    // with conditions that bound it, read for each distinct value of the columns before it.
+    if skippable && !ii.order.iter().any(Option::is_some) {
+        for q in stop + 1..ii.keys.len() {
+            let mut sb = IndexBounds { colls: ii.kcolls.clone(), ..IndexBounds::default() };
+            fill_bounds(ii, quals, q, &mut sb);
+            let exprs: Vec<&Expr> = sb.eq.iter().chain(&sb.any).chain(sb.lower.iter().chain(&sb.upper).map(|x| &x.0)).collect();
+            if !exprs.is_empty() {
+                // (Values of this level's own: no outer reference or sub-select to bind; and
+                // keys of the columns skipped over a scan can take apart.)
+                let cols: Vec<DataType> = ii.keys[..q].iter().map(|k| k.ty()).collect();
+                let keyed = cols.iter().enumerate().all(|(i, t)| {
+                    ii.kcolls.get(i).is_none_or(Option::is_none)
+                        && matches!(t, DataType::Bool | DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Oid | DataType::Date
+                            | DataType::Timestamp(_) | DataType::Timestamptz(_) | DataType::Uuid | DataType::Text | DataType::Varchar(_) | DataType::Name)
+                });
+                if keyed && exprs.iter().all(|e| own_level(e)) {
+                    b.skip = Some(Box::new(crate::sql::plan::SkipScan { cols, bounds: sb }));
+                }
+                break;
+            }
+        }
+    }
+    b
+}
+
+/// Whether `e` reads nothing of an enclosing query level and runs no sub-select.
+fn own_level(e: &Expr) -> bool {
+    let mut ok = true;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::Outer(..) | Expr::Subquery(_)) {
+            ok = false;
+        }
+    });
+    ok
+}
+
+/// A bound's value: of no column, not volatile.
+fn usable(v: &Expr) -> bool {
+    v.columns().is_empty() && !v.is_volatile() && !matches!(v, Expr::Default(_))
+}
+
+/// Fills `b` from `quals` on the key columns from `from` on: `=` on each, then `= ANY` or a
+/// range on the next. The column it stopped at, and whether a skip scan may go past it (no
+/// `= ANY` on it, nor a comparison out of its key order).
+fn fill_bounds(ii: &IndexInfo, quals: &[IClause], from: usize, b: &mut IndexBounds) -> (usize, bool) {
+    for (col, key) in ii.keys.iter().enumerate().skip(from) {
         // (Its byte order isn't the made class's: no range from here on.)
         if ii.order.get(col).is_some_and(Option::is_some) {
-            break;
+            return (col, false);
         }
         let kt = key.ty();
         let cs: Vec<&IClause> = quals.iter().filter(|c| c.col == col).collect();
         // (A comparison not in the order of the column's keys: no range from here on.)
         if cs.iter().any(|c| matches!(&c.expr, Expr::Call(d, ..) if !key_order_op(ii, col, d))) {
-            break;
+            return (col, false);
         }
         if let Some(v) = cs.iter().find_map(|c| match (&c.kind, &c.value) {
             (Kind::Op("="), Some(v)) if usable(v) && probe_ok(&kt, &v.ty()) => Some(v.clone()),
@@ -3830,7 +3869,7 @@ fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
             _ => None,
         }) {
             b.any = Some(v);
-            break;
+            return (col, false);
         }
         for c in &cs {
             let (Kind::Op(op), Some(v)) = (&c.kind, &c.value) else {
@@ -3859,9 +3898,9 @@ fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
                 _ => {}
             }
         }
-        break;
+        return (col, true);
     }
-    b
+    (ii.keys.len(), false)
 }
 
 fn index_quals(cs: &[IClause]) -> Vec<IndexQual> {

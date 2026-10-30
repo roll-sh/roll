@@ -154,6 +154,9 @@ pub(crate) fn plan_exprs_mut(p: &mut Plan, f: &mut dyn FnMut(&mut Expr)) {
         if let Some((x, _)) = &mut b.upper {
             f(x);
         }
+        if let Some(s) = &mut b.skip {
+            bounds(&mut s.bounds, f);
+        }
     }
     fn bitmap(q: &mut BitmapQual, f: &mut dyn FnMut(&mut Expr)) {
         match q {

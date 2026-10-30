@@ -3672,7 +3672,17 @@ impl Ddl<'_, '_> {
         let mut direct: Option<bool> = None;
         // (Half the spill threshold, at most 32 MB: a build too big to buffer.)
         let run_bytes = (self.ctx.txn.borrow().db.store.txn_spill_bytes() / 2).min(32 << 20);
+        // (An SP-GiST quad_point_ops build: the points so far, and whether one has a NaN.)
+        let quad = crate::exec::dml::quad_point_index(&bix, self.ctx);
+        let (mut points, mut nan) = (0usize, false);
         let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
+            if quad && let Some(v) = vals.first().filter(|v| !v.is_null()) {
+                points += 1;
+                nan |= crate::exec::dml::nan_point(v);
+                if nan && points > crate::exec::dml::SPGIST_ROOT_POINTS {
+                    return Err(crate::exec::dml::quadrant_error());
+                }
+            }
             if ix.unique && (ix.nulls_not_distinct || !vals.iter().any(Value::is_null)) {
                 let first = seen.insert(unique_key(vals), dkey, |d| {
                     Ok(stored_values(d)?.map(|v| unique_key(&v)))

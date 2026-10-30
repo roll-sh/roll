@@ -8,7 +8,7 @@ use super::{Ctx, MemProbe, MemSampler, mb, must, run_script, timed};
 
 const LOAD: &str = "
 DROP TABLE IF EXISTS que_jobs, oban_jobs, gw_jobs, sq_ready, items, lookup, shapes,
-  words_gin, words_gist, ts_events, bookings, bookings2;
+  words_gin, words_gist, ts_events, bookings, bookings2, docs, skip_t, pts;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE TABLE que_jobs (priority smallint NOT NULL DEFAULT 100, run_at timestamptz NOT NULL DEFAULT now(),
@@ -51,6 +51,21 @@ INSERT INTO ts_events SELECT timestamptz '2026-01-01' + g * interval '1 s', g % 
 CREATE INDEX ts_events_brin ON ts_events USING brin (ts);
 CREATE TABLE bookings (id serial, room int, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&));
 CREATE TABLE bookings2 (id serial, during tsrange, EXCLUDE USING gist (during WITH &&));
+CREATE TABLE docs (id int PRIMARY KEY, tags int[], body jsonb, meta jsonb, tsv tsvector);
+INSERT INTO docs SELECT g, ARRAY[g % 100, g % 1000, 1000 + g % 7],
+  jsonb_build_object('user', g % 5000, 'kind', 'k' || (g % 20), 'flags', jsonb_build_array('f' || (g % 50)), 'p' || (g % 500), true),
+  jsonb_build_object('a', jsonb_build_object('b', g % 2000)), to_tsvector('simple', 'w' || (g % 3000) || ' x' || (g % 40) || ' common')
+  FROM generate_series(1, $SMALL) g;
+CREATE INDEX docs_tags ON docs USING gin (tags);
+CREATE INDEX docs_body ON docs USING gin (body);
+CREATE INDEX docs_meta ON docs USING gin (meta jsonb_path_ops);
+CREATE INDEX docs_tsv ON docs USING gin (tsv);
+CREATE TABLE skip_t (region int NOT NULL, ts int NOT NULL, v int);
+INSERT INTO skip_t SELECT g % 10, g / 10, g FROM generate_series(1, $ROWS) g;
+CREATE INDEX skip_t_rt ON skip_t (region, ts);
+CREATE TABLE pts (id int, p point);
+INSERT INTO pts SELECT g, point((g * 37) % 1000 + (g % 7) / 10.0, (g * 91) % 1000) FROM generate_series(1, $SMALL) g;
+CREATE INDEX pts_p ON pts USING gist (p);
 VACUUM ANALYZE;
 ";
 
@@ -110,6 +125,17 @@ const CASES: &[(&str, &str)] = &[
     ("trgm_gin_like", "SELECT count(*) FROM words_gin WHERE w LIKE '%' || substr(md5($K::text), 3, 5) || '%'"),
     ("trgm_gist_like", "SELECT count(*) FROM words_gist WHERE w LIKE '%' || substr(md5($K::text), 3, 5) || '%'"),
     ("trgm_gin_sim", "SELECT count(*) FROM words_gin WHERE w % md5($K::text)"),
+    ("trgm_gin_word", "SELECT count(*) FROM words_gin WHERE w %> substr(md5($K::text), 1, 8)"),
+    ("gin_array", "SELECT count(*) FROM docs WHERE tags @> ARRAY[$K % 1000]"),
+    ("gin_array_overlap", "SELECT count(*) FROM docs WHERE tags && ARRAY[$K % 1000, ($K + 1) % 1000]"),
+    ("gin_jsonb", "SELECT count(*) FROM docs WHERE body @> jsonb_build_object('user', $K % 5000)"),
+    ("gin_jsonb_exists", "SELECT count(*) FROM docs WHERE body ? ('p' || ($K % 500))"),
+    ("gin_jsonb_path", "SELECT count(*) FROM docs WHERE meta @> jsonb_build_object('a', jsonb_build_object('b', $K % 2000))"),
+    ("gin_tsvector", "SELECT count(*) FROM docs WHERE tsv @@ to_tsquery('simple', 'w' || ($K % 3000))"),
+    ("gin_tsvector_and", "SELECT count(*) FROM docs WHERE tsv @@ to_tsquery('simple', 'x' || ($K % 40) || ' & common')"),
+    ("skip_scan", "SELECT count(*) FROM skip_t WHERE ts = $K % 100000"),
+    ("gist_point_box", "SELECT id FROM pts WHERE p <@ box(point($K % 990, $K % 977), point($K % 990 + 10, $K % 977 + 10)) LIMIT 5"),
+    ("gist_point_knn", "SELECT id FROM pts ORDER BY p <-> point($K % 1000, $K % 977) LIMIT 5"),
     ("brin_range", "SELECT count(*), sum(v) FROM ts_events WHERE ts >= timestamptz '2026-01-01' + $K * interval '1 s' \
       AND ts < timestamptz '2026-01-01' + ($K + 3600) * interval '1 s'"),
     ("booking_insert", "INSERT INTO bookings (room, during) VALUES ($K % 50, tsrange(timestamp '2026-01-01' + $K * interval '1 hour', \

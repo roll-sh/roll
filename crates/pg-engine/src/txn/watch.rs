@@ -15,6 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// A derived structure's state (its owner's type).
 pub type State = Arc<Mutex<Box<dyn Any + Send>>>;
 
+/// A structure's slot among its table's: an index's search structure (`exec::search`) is in
+/// the index's oid, a size model of it (`exec::sizing`) in `MODEL` and the oid.
+pub fn slot(index: u32, model: bool) -> u64 {
+    index as u64 | if model { MODEL } else { 0 }
+}
+
+pub const MODEL: u64 = 1 << 32;
+
 /// Writes a table's log keeps for structures that haven't read them: past that, the table's
 /// structures are dropped (and rebuilt when next needed) rather than the log growing.
 const MAX_LOG: usize = 1 << 18;
@@ -32,8 +40,8 @@ struct Watched {
     /// None: deleted).
     log: VecDeque<(Vec<u8>, Option<Bytes>)>,
     base: u64,
-    /// Each structure (by index oid): its state, and the log position it has read up to.
-    states: HashMap<u32, (State, u64)>,
+    /// Each structure (by slot: `slot`): its state, and the log position it has read up to.
+    states: HashMap<u64, (State, u64)>,
 }
 
 /// The table whose row `key` is (a data key: the table's oid, then index 0).
@@ -77,28 +85,28 @@ impl Watch {
         }
     }
 
-    /// Registers structure `state` of `table` (by `index`), replacing any it had: it reads
+    /// Registers structure `state` of `table` (in `slot`), replacing any it had: it reads
     /// the log from here on. Called under the store's commit lock.
-    pub fn register(&self, table: u32, index: u32, state: State) {
+    pub fn register(&self, table: u32, slot: u64, state: State) {
         let mut tables = self.tables.lock();
         let w = tables.entry(table).or_default();
         let at = w.base + w.log.len() as u64;
-        w.states.insert(index, (state, at));
+        w.states.insert(slot, (state, at));
         self.any.store(true, Ordering::Release);
     }
 
-    /// The structure registered for `index` of `table`, if any.
-    pub fn state(&self, table: u32, index: u32) -> Option<State> {
-        Some(self.tables.lock().get(&table)?.states.get(&index)?.0.clone())
+    /// The structure registered in `slot` of `table`, if any.
+    pub fn state(&self, table: u32, slot: u64) -> Option<State> {
+        Some(self.tables.lock().get(&table)?.states.get(&slot)?.0.clone())
     }
 
-    /// The writes `state` (`index`'s structure) hasn't read yet, now read. None: it isn't
+    /// The writes `state` (the structure in `slot`) hasn't read yet, now read. None: it isn't
     /// registered any more (dropped, or replaced by another), so it may have missed some.
-    pub fn pending(&self, table: u32, index: u32, state: &State) -> Option<Vec<(Vec<u8>, Option<Bytes>)>> {
+    pub fn pending(&self, table: u32, slot: u64, state: &State) -> Option<Vec<(Vec<u8>, Option<Bytes>)>> {
         let mut tables = self.tables.lock();
         let w = tables.get_mut(&table)?;
         let end = w.base + w.log.len() as u64;
-        let (s, at) = w.states.get_mut(&index)?;
+        let (s, at) = w.states.get_mut(&slot)?;
         if !Arc::ptr_eq(s, state) {
             return None;
         }
@@ -120,12 +128,12 @@ impl Watch {
         }
     }
 
-    /// Drops the structure of `index` of `table`.
-    pub fn forget_index(&self, table: u32, index: u32) {
+    /// Drops the structure in `slot` of `table`.
+    pub fn forget_index(&self, table: u32, slot: u64) {
         if self.any.load(Ordering::Acquire)
             && let Some(w) = self.tables.lock().get_mut(&table)
         {
-            w.states.remove(&index);
+            w.states.remove(&slot);
         }
     }
 

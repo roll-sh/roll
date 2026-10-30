@@ -451,6 +451,11 @@ impl Store {
         }
     }
 
+    /// The block cache's size (bytes): memory other caches size themselves by.
+    pub fn cache_capacity(&self) -> usize {
+        self.opts.cache.capacity_bytes()
+    }
+
     /// A snapshot of every committed write, pinned: the timestamp is read under the lock
     /// `gc_horizon` reads it under, so no pruning or compaction can take what it sees
     /// between the two.

@@ -124,6 +124,17 @@ pub struct IndexBounds {
     pub order: Vec<SortKey>,
     /// Per key column, the collation its entries are keyed under (`BoundIndex::colls`).
     pub colls: Vec<Option<crate::storage::keys::KeyColl>>,
+    /// A skip scan (PostgreSQL 18's skip arrays): within the range above, each distinct
+    /// value of the first key columns read with bounds on the columns after.
+    pub skip: Option<Box<SkipScan>>,
+}
+
+/// `IndexBounds::skip`.
+#[derive(Clone, Debug)]
+pub struct SkipScan {
+    /// The types of the key columns skipped over (whose keys a scan takes apart).
+    pub cols: Vec<DataType>,
+    pub bounds: IndexBounds,
 }
 
 impl IndexBounds {

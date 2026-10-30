@@ -1403,10 +1403,77 @@ fn put_index_entries_with(
     Ok(())
 }
 
+/// Points an SP-GiST index's root leaf page holds (8 KB pages: 36 bytes a point and its
+/// line pointer): the next one splits it, and every insertion after goes through the inner
+/// tuples.
+pub const SPGIST_ROOT_POINTS: usize = 226;
+
+/// Whether `bix` is an SP-GiST index over points with quad_point_ops (the default class).
+pub fn quad_point_index(bix: &BoundIndex, ctx: &ExecCtx) -> bool {
+    let [c] = &bix.index.columns[..] else { return false };
+    bix.index.method == "spgist"
+        && matches!(bix.keys.first().map(|k| k.ty()), Some(crate::types::DataType::Point))
+        && (c.opclass == 0 || ctx.catalog().opclasses.values().any(|o| o.oid == c.opclass && o.name == "quad_point_ops"))
+}
+
+/// A point with a NaN coordinate: quad_point_ops' getQuadrant places it in no quadrant (nor
+/// any point around a centroid computed with it).
+pub fn nan_point(v: &Value) -> bool {
+    matches!(v, Value::Geo(g) if matches!(&**g, crate::types::geo::Geo::Point(p) if p.x.is_nan() || p.y.is_nan()))
+}
+
+/// getQuadrant's error (spgquadtreeproc.c), raised where PostgreSQL meets it: splitting the
+/// root leaf page with such a point on it, or choosing a quadrant for one once it is split.
+pub fn quadrant_error() -> Error {
+    crate::error::internal("getQuadrant: impossible case")
+}
+
+/// An insertion of `vals` into quad_point_ops index `bix`: a NaN point fails once the index
+/// has more points than its root page holds, and the insertion that splits the root fails
+/// with one on it.
+fn quad_insert_check(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, ctx: &ExecCtx) -> Result<()> {
+    let Some(v) = vals.and_then(|v| v.first()) else { return Ok(()) };
+    if bix.index.method != "spgist" || v.is_null() || !quad_point_index(bix, ctx) {
+        return Ok(());
+    }
+    let start = index_prefix(t.oid, bix.index.id);
+    let nulls = index_value_prefix(t, &bix.index, &[Value::Null], &bix.colls);
+    let mut dkeys = Vec::new();
+    for r in ctx.txn.borrow().scan(&start, &prefix_end(&start)) {
+        let (k, d) = r?;
+        if !k.starts_with(&nulls) {
+            dkeys.push(d);
+            if dkeys.len() > SPGIST_ROOT_POINTS {
+                break;
+            }
+        }
+    }
+    let split = match dkeys.len() {
+        n if n < SPGIST_ROOT_POINTS => return Ok(()),
+        n if n > SPGIST_ROOT_POINTS => false,
+        _ => true,
+    };
+    if nan_point(v) {
+        return Err(quadrant_error());
+    }
+    if split {
+        // (The root's points, the new one's centroid with them.)
+        for d in &dkeys {
+            let Some(bytes) = ctx.txn.borrow().get(d)? else { continue };
+            let row = decode_table_row(t, &bytes)?;
+            if index_values(bix, &row, ctx)?.as_ref().and_then(|v| v.first()).is_some_and(nan_point) {
+                return Err(quadrant_error());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// aminsert for an index of a native access method (`ext::index_am`): whether `bix` is one.
 /// Its entries are the method's own; a deleted row's stay until VACUUM, as in PostgreSQL.
 /// (`update`: an UPDATE gave the row's key a new value: its older entries no longer hold it.)
 fn am_insert(t: &Table, bix: &BoundIndex, vals: Option<&[Value]>, dkey: &[u8], update: bool, ctx: &ExecCtx) -> Result<bool> {
+    quad_insert_check(t, bix, vals, ctx)?;
     if crate::ext::index_am::builtin_method(&bix.index.method) {
         return Ok(false);
     }

@@ -27,6 +27,115 @@ use crate::types::{DataType, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod gin;
+
+/// Rows' data keys (past the table's prefix), back to back: row `i` of a structure is its
+/// `i`th key (4 bytes and the key's own per row, no allocation each).
+#[derive(Default)]
+struct RowKeys {
+    bytes: Vec<u8>,
+    ends: Vec<u32>,
+}
+
+impl RowKeys {
+    fn push(&mut self, k: &[u8]) -> u32 {
+        self.bytes.extend_from_slice(k);
+        self.ends.push(self.bytes.len() as u32);
+        self.ends.len() as u32 - 1
+    }
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+    fn get(&self, i: u32) -> &[u8] {
+        let i = i as usize;
+        let a = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        &self.bytes[a..self.ends[i] as usize]
+    }
+    /// Row `i`'s data key, after `prefix` (the table's).
+    fn key(&self, prefix: &[u8], i: u32) -> Vec<u8> {
+        let s = self.get(i);
+        let mut k = Vec::with_capacity(prefix.len() + s.len());
+        k.extend_from_slice(prefix);
+        k.extend_from_slice(s);
+        k
+    }
+    /// Whether another key could overflow its offsets.
+    fn full(&self) -> bool {
+        self.bytes.len() > (u32::MAX as usize) - (1 << 20)
+    }
+    fn heap_bytes(&self) -> usize {
+        self.bytes.capacity() + 4 * self.ends.capacity()
+    }
+    fn shrink(&mut self) {
+        self.bytes.shrink_to_fit();
+        self.ends.shrink_to_fit();
+    }
+}
+
+/// A posting list: ascending row numbers, each stored as its distance from the one before
+/// (7 bits a byte, the high bit set on every byte but a number's last), as GIN compresses
+/// its posting lists: a byte or two a row where a list holds many.
+#[derive(Default)]
+struct Posting {
+    bytes: Vec<u8>,
+    last: u32,
+    len: u32,
+}
+
+impl Posting {
+    /// Appends `row` (greater than every row in it).
+    fn push(&mut self, row: u32) {
+        let mut d = if self.len == 0 { row } else { row - self.last };
+        while d >= 0x80 {
+            self.bytes.push((d as u8) | 0x80);
+            d >>= 7;
+        }
+        self.bytes.push(d as u8);
+        self.last = row;
+        self.len += 1;
+    }
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        let mut pos = 0;
+        let mut at = 0u32;
+        std::iter::from_fn(move || {
+            let mut d = 0u32;
+            let mut shift = 0;
+            loop {
+                let b = *self.bytes.get(pos)?;
+                pos += 1;
+                d |= ((b & 0x7F) as u32) << shift;
+                if b & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
+            }
+            at += d;
+            Some(at)
+        })
+    }
+    fn heap_bytes(&self) -> usize {
+        self.bytes.capacity()
+    }
+}
+
+/// The rows of `a` (ascending) also in `b`.
+fn intersect_posting(a: &[u32], b: &Posting) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut it = b.iter().peekable();
+    for &r in a {
+        while it.next_if(|x| *x < r).is_some() {}
+        match it.peek() {
+            Some(x) if *x == r => out.push(r),
+            Some(_) => {}
+            None => break,
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     Range,
@@ -211,9 +320,6 @@ impl Span {
     fn hi_min(&mut self, v: u64) {
         self.hi.0 = self.hi.0.max(v);
     }
-    fn holds(&self, (lo, hi): (u64, u64)) -> bool {
-        self.lo.0 <= lo && lo <= self.lo.1 && self.hi.0 <= hi && hi <= self.hi.1
-    }
 }
 
 /// The rows a scan's conditions may hold for.
@@ -349,10 +455,61 @@ fn query(sh: &Shape, conds: &[(usize, &str, Value)]) -> Query {
 #[derive(Clone, Copy)]
 struct Ent {
     part: u32,
-    lo: u64,
-    hi: u64,
+    lo: u32,
+    hi: u32,
     row: u32,
 }
+
+/// A monotone map of 64-bit keys onto 32 bits (`Grid`'s entries): keys from `base` on,
+/// `shift` bits down, clamped at both ends. A test on mapped keys holds wherever it holds on
+/// the keys, so mapped entries place rows a little more loosely, never wrongly.
+#[derive(Clone, Copy, Debug)]
+struct Quant {
+    base: u64,
+    shift: u32,
+}
+
+impl Quant {
+    /// The top 32 bits.
+    const TOP: Quant = Quant { base: 0, shift: 32 };
+
+    fn q(self, x: u64) -> u32 {
+        (x.saturating_sub(self.base) >> self.shift).min(u32::MAX as u64) as u32
+    }
+
+    /// One that keeps most of `keys` apart: from their 0.1th to their 99.9th percentile
+    /// (unbounded ends left out).
+    fn fit(mut keys: Vec<u64>) -> Quant {
+        keys.retain(|&k| k != 0 && k != u64::MAX);
+        if keys.is_empty() {
+            return Quant::TOP;
+        }
+        let n = keys.len();
+        let lo = *keys.select_nth_unstable(n / 1000).1;
+        let hi = *keys.select_nth_unstable(n - 1 - n / 1000).1;
+        Quant { base: lo, shift: (64 - (hi - lo).leading_zeros()).saturating_sub(32) }
+    }
+
+    fn span(self, s: &Span) -> QSpan {
+        QSpan { lo: (self.q(s.lo.0), self.q(s.lo.1)), hi: (self.q(s.hi.0), self.q(s.hi.1)) }
+    }
+}
+
+/// A `Span` mapped by a `Quant`.
+#[derive(Clone, Copy)]
+struct QSpan {
+    lo: (u32, u32),
+    hi: (u32, u32),
+}
+
+impl QSpan {
+    fn holds(&self, (lo, hi): (u32, u32)) -> bool {
+        self.lo.0 <= lo && lo <= self.lo.1 && self.hi.0 <= hi && hi <= self.hi.1
+    }
+}
+
+/// A row placed while a `Grid` is built, before its keys are mapped: partition, intervals.
+type RawEnt = (u32, (u64, u64), (u64, u64), u32);
 
 /// Entries per block of `Grid::sorted`, whose high ends' range skips it.
 const BLOCK: usize = 64;
@@ -367,12 +524,17 @@ struct Grid {
     parts: HashMap<Vec<u8>, u32>,
     /// Each entry's row: its data key past the table's prefix, and its second interval
     /// (a box's y; two-dimensional shapes only).
-    rows: Vec<Box<[u8]>>,
-    ys: Vec<(u64, u64)>,
+    rows: RowKeys,
+    ys: Vec<(u32, u32)>,
+    /// How its keys are mapped, per dimension; the rows placed as it is built, mapped
+    /// once their keys' spread is known.
+    qx: Quant,
+    qy: Quant,
+    raw: Option<Vec<RawEnt>>,
     /// Entries in (partition, low end) order, the high ends' (min, max) per block, and the
     /// entries added since they were last sorted.
     sorted: Vec<Ent>,
-    blocks: Vec<(u64, u64)>,
+    blocks: Vec<(u32, u32)>,
     delta: Vec<Ent>,
     /// Rows always read (values it can't place) and empty ranges (by partition).
     always: Vec<u32>,
@@ -383,7 +545,23 @@ struct Grid {
 
 impl Grid {
     fn new(shape: Shape, fingerprint: String, ts: u64) -> Grid {
-        Grid { shape, fingerprint, ts, parts: HashMap::new(), rows: Vec::new(), ys: Vec::new(), sorted: Vec::new(), blocks: Vec::new(), delta: Vec::new(), always: Vec::new(), empties: Vec::new(), built: 0 }
+        Grid {
+            shape,
+            fingerprint,
+            ts,
+            parts: HashMap::new(),
+            rows: RowKeys::default(),
+            ys: Vec::new(),
+            qx: Quant::TOP,
+            qy: Quant::TOP,
+            raw: None,
+            sorted: Vec::new(),
+            blocks: Vec::new(),
+            delta: Vec::new(),
+            always: Vec::new(),
+            empties: Vec::new(),
+            built: 0,
+        }
     }
 
     fn two_d(&self) -> bool {
@@ -398,8 +576,7 @@ impl Grid {
     /// Adds row `suffix` (its data key past the table's prefix) with index values `vals`
     /// (None: they couldn't be computed).
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>) {
-        let row = self.rows.len() as u32;
-        self.rows.push(suffix.into());
+        let row = self.rows.push(suffix);
         let place = vals.map_or(Place::Always, |v| place(&self.shape, v));
         let mut y = (0, u64::MAX);
         match place {
@@ -411,14 +588,37 @@ impl Grid {
             Place::At(p, x, yy) => {
                 let part = self.part_id(p);
                 y = yy;
-                self.delta.push(Ent { part, lo: x.0, hi: x.1, row });
+                match &mut self.raw {
+                    Some(raw) => raw.push((part, x, yy, row)),
+                    None => self.delta.push(Ent { part, lo: self.qx.q(x.0), hi: self.qx.q(x.1), row }),
+                }
             }
         }
+        if self.raw.is_some() {
+            return;
+        }
         if self.two_d() {
-            self.ys.push(y);
+            self.ys.push((self.qy.q(y.0), self.qy.q(y.1)));
         }
         if self.delta.len() > 1024.max(self.sorted.len() / 8) {
             self.merge();
+        }
+    }
+
+    /// The rows placed as it was built, mapped by quantizers fit to them.
+    fn map_raw(&mut self) {
+        let Some(raw) = self.raw.take() else { return };
+        self.qx = Quant::fit(raw.iter().flat_map(|e| [e.1.0, e.1.1]).collect());
+        if self.two_d() {
+            self.qy = Quant::fit(raw.iter().flat_map(|e| [e.2.0, e.2.1]).collect());
+            self.ys = vec![(self.qy.q(0), self.qy.q(u64::MAX)); self.rows.len()];
+        }
+        self.delta.reserve(raw.len());
+        for (part, x, y, row) in raw {
+            self.delta.push(Ent { part, lo: self.qx.q(x.0), hi: self.qx.q(x.1), row });
+            if self.two_d() {
+                self.ys[row as usize] = (self.qy.q(y.0), self.qy.q(y.1));
+            }
         }
     }
 
@@ -428,12 +628,12 @@ impl Grid {
         self.blocks = self
             .sorted
             .chunks(BLOCK)
-            .map(|c| c.iter().fold((u64::MAX, 0), |(a, b), e| (a.min(e.hi), b.max(e.hi))))
+            .map(|c| c.iter().fold((u32::MAX, 0), |(a, b), e| (a.min(e.hi), b.max(e.hi))))
             .collect();
     }
 
-    fn ent_ok(&self, q: &Query, e: &Ent) -> bool {
-        q.x.holds((e.lo, e.hi)) && (!self.two_d() || q.y.holds(self.ys[e.row as usize]))
+    fn ent_ok(&self, x: &QSpan, y: &QSpan, e: &Ent) -> bool {
+        x.holds((e.lo, e.hi)) && (!self.two_d() || y.holds(self.ys[e.row as usize]))
     }
 
     /// The rows `q` may hold for.
@@ -453,17 +653,18 @@ impl Grid {
             Some(p) => vec![p],
             None => (0..self.parts.len() as u32).collect(),
         };
+        let (x, y) = (self.qx.span(&q.x), self.qy.span(&q.y));
         for p in parts {
             let s = &self.sorted;
-            let a = s.partition_point(|e| (e.part, e.lo) < (p, q.x.lo.0));
-            let b = s.partition_point(|e| (e.part, e.lo) <= (p, q.x.lo.1));
+            let a = s.partition_point(|e| (e.part, e.lo) < (p, x.lo.0));
+            let b = s.partition_point(|e| (e.part, e.lo) <= (p, x.lo.1));
             let mut i = a;
             while i < b {
                 let blk = i / BLOCK;
                 let end = ((blk + 1) * BLOCK).min(b);
                 let (mn, mx) = self.blocks[blk];
-                if mx >= q.x.hi.0 && mn <= q.x.hi.1 {
-                    out.extend(s[i..end].iter().filter(|e| self.ent_ok(q, e)).map(|e| e.row));
+                if mx >= x.hi.0 && mn <= x.hi.1 {
+                    out.extend(s[i..end].iter().filter(|e| self.ent_ok(&x, &y, e)).map(|e| e.row));
                 }
                 i = end;
             }
@@ -471,7 +672,7 @@ impl Grid {
                 out.extend(self.empties.iter().filter(|(ep, _)| *ep == p).map(|(_, r)| *r));
             }
         }
-        out.extend(self.delta.iter().filter(|e| part.is_none_or(|p| e.part == p) && self.ent_ok(q, e)).map(|e| e.row));
+        out.extend(self.delta.iter().filter(|e| part.is_none_or(|p| e.part == p) && self.ent_ok(&x, &y, e)).map(|e| e.row));
         out.extend(&self.always);
     }
 }
@@ -572,17 +773,20 @@ impl Zones {
     }
 }
 
-/// Rows past which a table's rows aren't placed one by one (about 70 bytes each): its
-/// scans read every row.
-const MAX_ROWS: usize = 4_000_000;
+/// The memory one structure may hold: half the block cache, at least 128 MB (a few million
+/// rows: 30-60 bytes each placed one by one, a byte or two per trigram or element). Past
+/// it, its table's scans read every row.
+fn budget(ctx: &ExecCtx) -> usize {
+    (ctx.sess.db.store.cache_capacity() / 2).max(128 << 20)
+}
 
-/// An index whose table had more than `MAX_ROWS` rows (its definition's fingerprint).
+/// An index whose structure would hold more than `budget` (its definition's fingerprint).
 struct TooBig(String);
 
 /// What `structure` keeps for an index: rows placed one by one (`Grid`), or by zones
 /// (`Zones`, BRIN).
 trait Placing: Send + Sized + 'static {
-    /// Whether it holds every row (`MAX_ROWS`).
+    /// Whether it holds every row (and is kept within `budget`).
     const ROW_CAP: bool;
     fn make(shape: Shape, fingerprint: String, ts: u64) -> Self;
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>);
@@ -590,25 +794,50 @@ trait Placing: Send + Sized + 'static {
     fn fingerprint(&self) -> &str;
     /// Rows added again (written again, deleted) have piled up: built afresh.
     fn stale(&self) -> bool;
+    /// The memory it holds (bytes).
+    fn heap_bytes(&self) -> usize;
+    /// Whether its row keys are as many bytes as it can address.
+    fn full(&self) -> bool {
+        false
+    }
 }
 
 impl Placing for Grid {
     const ROW_CAP: bool = true;
     fn make(shape: Shape, fingerprint: String, ts: u64) -> Grid {
-        Grid::new(shape, fingerprint, ts)
+        Grid { raw: Some(Vec::new()), ..Grid::new(shape, fingerprint, ts) }
     }
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>) {
         Grid::add(self, suffix, vals);
     }
     fn built(&mut self) {
+        self.map_raw();
         self.merge();
         self.built = self.rows.len();
+        self.rows.shrink();
+        self.sorted.shrink_to_fit();
+        self.delta = Vec::new();
+        self.ys.shrink_to_fit();
     }
     fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
     fn stale(&self) -> bool {
         self.rows.len() > 2 * self.built + 4096
+    }
+    fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.rows.heap_bytes()
+            + self.parts.keys().map(|k| k.capacity() + size_of::<(Vec<u8>, u32)>() + 1).sum::<usize>()
+            + self.ys.capacity() * size_of::<(u32, u32)>()
+            + self.raw.as_ref().map_or(0, |r| r.capacity() * size_of::<RawEnt>())
+            + (self.sorted.capacity() + self.delta.capacity()) * size_of::<Ent>()
+            + self.blocks.capacity() * size_of::<(u32, u32)>()
+            + self.always.capacity() * 4
+            + self.empties.capacity() * 8
+    }
+    fn full(&self) -> bool {
+        self.rows.full()
     }
 }
 
@@ -629,6 +858,9 @@ impl Placing for Zones {
     fn stale(&self) -> bool {
         self.rows > 2 * self.built + 4096
     }
+    fn heap_bytes(&self) -> usize {
+        self.zones.capacity() * std::mem::size_of::<Zone>() + self.zones.iter().map(|z| z.first.len() + z.last.len()).sum::<usize>()
+    }
 }
 
 fn fingerprint(bix: &BoundIndex) -> String {
@@ -641,6 +873,18 @@ fn unpredicated(bix: &BoundIndex) -> BoundIndex {
     BoundIndex { predicate: None, ..bix.clone() }
 }
 
+/// A committed row as the log has it, with its out-of-line values put back
+/// (`storage::toast`: they are written once under keys of their own, so the logged row's
+/// pointers still name its values). None: one is gone already (the row is then read by
+/// every scan, as a row it can't place).
+fn spliced(db: &crate::txn::Database, key: &[u8], v: bytes::Bytes) -> Option<bytes::Bytes> {
+    if !crate::storage::toast::has_external(&v) {
+        return Some(v);
+    }
+    let mut fetch = |k: &[u8]| db.store.get(k, u64::MAX)?.ok_or_else(|| crate::error::internal("an out-of-line value is missing"));
+    crate::storage::toast::splice(key, &v, None, &mut fetch).ok().map(bytes::Bytes::from)
+}
+
 /// The values a stored row has for the index (None: its row or values don't decode).
 fn row_values(t: &Table, bix: &BoundIndex, bytes: &[u8], ctx: &ExecCtx) -> Option<Vec<Value>> {
     let row = decode_table_row(t, bytes).ok()?;
@@ -651,19 +895,20 @@ fn row_values(t: &Table, bix: &BoundIndex, bytes: &[u8], ctx: &ExecCtx) -> Optio
 fn structure<P: Placing>(t: &Table, bix: &BoundIndex, sh: &Shape, ctx: &ExecCtx) -> Result<Option<State>> {
     let db = &ctx.sess.db;
     let fp = fingerprint(bix);
-    if let Some(st) = db.watch.state(t.oid, bix.index.oid) {
+    if let Some(st) = db.watch.state(t.oid, crate::txn::watch::slot(bix.index.oid, false)) {
         let mut g = st.lock();
         if g.downcast_ref::<TooBig>().is_some_and(|b| b.0 == fp) {
             return Ok(None);
         }
         if let Some(p) = g.downcast_mut::<P>()
             && p.fingerprint() == fp
-            && let Some(writes) = db.watch.pending(t.oid, bix.index.oid, &st)
+            && let Some(writes) = db.watch.pending(t.oid, crate::txn::watch::slot(bix.index.oid, false), &st)
         {
             let nopred = unpredicated(bix);
             for (k, v) in writes {
                 if let Some(v) = v {
-                    p.add(&k[8..], row_values(t, &nopred, &v, ctx).as_deref());
+                    let v = spliced(db, &k, v);
+                    p.add(&k[8..], v.and_then(|v| row_values(t, &nopred, &v, ctx)).as_deref());
                 }
             }
             if !p.stale() {
@@ -682,13 +927,13 @@ fn build<P: Placing>(t: &Table, bix: &BoundIndex, sh: &Shape, fp: String, ctx: &
     let st: State = Arc::new(parking_lot::Mutex::new(Box::new(())));
     let mut g = st.lock();
     let last = db.store.with_commit_lock(|last| {
-        db.watch.register(t.oid, bix.index.oid, st.clone());
+        db.watch.register(t.oid, crate::txn::watch::slot(bix.index.oid, false), st.clone());
         last
     });
     let waited = std::time::Instant::now();
     while db.store.visible_ts() < last {
         if waited.elapsed() > std::time::Duration::from_secs(5) {
-            db.watch.forget_index(t.oid, bix.index.oid);
+            db.watch.forget_index(t.oid, crate::txn::watch::slot(bix.index.oid, false));
             return Ok(None);
         }
         std::thread::sleep(std::time::Duration::from_micros(50));
@@ -698,6 +943,7 @@ fn build<P: Placing>(t: &Table, bix: &BoundIndex, sh: &Shape, fp: String, ctx: &
     let nopred = unpredicated(bix);
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
+    let budget = budget(ctx);
     let read = (|| -> Result<bool> {
         let mut n = 0usize;
         for r in db.store.scan(&start, &end, pin.ts) {
@@ -705,7 +951,7 @@ fn build<P: Placing>(t: &Table, bix: &BoundIndex, sh: &Shape, fp: String, ctx: &
             ctx.check()?;
             p.add(&k[8..], row_values(t, &nopred, &v, ctx).as_deref());
             n += 1;
-            if P::ROW_CAP && n > MAX_ROWS {
+            if P::ROW_CAP && (p.full() || (n.is_multiple_of(65536) && p.heap_bytes() > budget)) {
                 return Ok(false);
             }
         }
@@ -720,11 +966,12 @@ fn build<P: Placing>(t: &Table, bix: &BoundIndex, sh: &Shape, fp: String, ctx: &
             return Ok(None);
         }
         Err(e) => {
-            db.watch.forget_index(t.oid, bix.index.oid);
+            db.watch.forget_index(t.oid, crate::txn::watch::slot(bix.index.oid, false));
             return Err(e);
         }
     }
     p.built();
+    tracing::debug!(table = t.oid, index = bix.index.oid, bytes = p.heap_bytes(), "search structure built");
     *g = Box::new(p);
     drop(g);
     Ok(Some(st))
@@ -751,6 +998,9 @@ pub fn candidates(
 ) -> Result<Option<Found>> {
     if matches!(bix.index.method.as_str(), "gin" | "gist") && trigram_index(bix, ctx) {
         return trigram_candidates(t, bix, conds, snapshot, ctx);
+    }
+    if bix.index.method == "gin" {
+        return element_candidates(t, bix, conds, snapshot, ctx);
     }
     let Some(sh) = shape(bix) else { return Ok(None) };
     let mut q = query(&sh, conds);
@@ -784,7 +1034,7 @@ pub fn candidates(
             }
             let mut rows = Vec::new();
             grid.search(&q, &mut rows);
-            Found::Keys(rows.into_iter().map(|r| key(&grid.rows[r as usize])).collect())
+            Found::Keys(rows.into_iter().map(|r| grid.rows.key(&prefix, r)).collect())
         } else {
             return Ok(None);
         }
@@ -842,11 +1092,7 @@ fn own_rows(t: &Table, bix: &BoundIndex, sh: &Shape, q: &Query, ctx: &ExecCtx) -
     own.grid.search(q, &mut rows);
     let keys = rows
         .into_iter()
-        .map(|r| {
-            let mut k = prefix.clone();
-            k.extend_from_slice(&own.grid.rows[r as usize]);
-            k
-        })
+        .map(|r| own.grid.rows.key(&prefix, r))
         .collect();
     ctx.txn.borrow_mut().derived.insert(bix.index.oid, Box::new(own));
     Ok(Some(keys))
@@ -857,8 +1103,8 @@ fn own_rows(t: &Table, bix: &BoundIndex, sh: &Shape, q: &Query, ctx: &ExecCtx) -
 struct Trigrams {
     fingerprint: String,
     ts: u64,
-    rows: Vec<Box<[u8]>>,
-    post: HashMap<[u8; 3], Vec<u32>>,
+    rows: RowKeys,
+    post: HashMap<[u8; 3], Posting>,
     always: Vec<u32>,
     built: usize,
 }
@@ -866,11 +1112,10 @@ struct Trigrams {
 impl Placing for Trigrams {
     const ROW_CAP: bool = true;
     fn make(_: Shape, fingerprint: String, ts: u64) -> Trigrams {
-        Trigrams { fingerprint, ts, rows: Vec::new(), post: HashMap::new(), always: Vec::new(), built: 0 }
+        Trigrams { fingerprint, ts, rows: RowKeys::default(), post: HashMap::new(), always: Vec::new(), built: 0 }
     }
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>) {
-        let row = self.rows.len() as u32;
-        self.rows.push(suffix.into());
+        let row = self.rows.push(suffix);
         match vals.and_then(|v| v.first()) {
             Some(Value::Text(s)) => {
                 for t in crate::ext::pg_trgm::trgm::generate(s) {
@@ -884,12 +1129,24 @@ impl Placing for Trigrams {
     }
     fn built(&mut self) {
         self.built = self.rows.len();
+        self.rows.shrink();
+        self.post.values_mut().for_each(|l| l.bytes.shrink_to_fit());
     }
     fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
     fn stale(&self) -> bool {
         self.rows.len() > 2 * self.built + 4096
+    }
+    fn heap_bytes(&self) -> usize {
+        // (A hash table entry: its key and list, and a control byte.)
+        self.rows.heap_bytes()
+            + self.post.capacity() * (std::mem::size_of::<([u8; 3], Posting)>() + 1)
+            + self.post.values().map(Posting::heap_bytes).sum::<usize>()
+            + self.always.capacity() * 4
+    }
+    fn full(&self) -> bool {
+        self.rows.full()
     }
 }
 
@@ -919,41 +1176,128 @@ fn required_trigrams(op: &str, v: &Value) -> Vec<[u8; 3]> {
     out
 }
 
+/// The least share of a query's trigrams a row has for `op` (`%`, `%>`, `%>>`) to hold at
+/// its threshold: similarity and the word similarities are at most the share of the query's
+/// trigrams the row has (pg_trgm's GIN consistent function bounds them by it too).
+fn similarity_share(op: &str, ctx: &ExecCtx) -> Option<f64> {
+    let (name, default) = match op {
+        "%" => ("pg_trgm.similarity_threshold", 0.3),
+        "%>" => ("pg_trgm.word_similarity_threshold", 0.6),
+        "%>>" => ("pg_trgm.strict_word_similarity_threshold", 0.5),
+        _ => return None,
+    };
+    Some(ctx.sess.settings.borrow().get_raw(name).and_then(|v| v.parse().ok()).unwrap_or(default))
+}
+
+impl Trigrams {
+    fn list(&self, t: &[u8; 3]) -> &Posting {
+        self.post.get(t).unwrap_or(&NO_ROWS)
+    }
+
+    /// The rows having at least `need` of trigrams `q`.
+    fn sharing(&self, q: &[[u8; 3]], need: usize) -> Vec<u32> {
+        let lists: Vec<&Posting> = q.iter().map(|t| self.list(t)).collect();
+        let total: usize = lists.iter().map(|l| l.len()).sum();
+        if total * 4 >= self.rows.len() {
+            let mut n = vec![0u16; self.rows.len()];
+            for r in lists.iter().flat_map(|l| l.iter()) {
+                n[r as usize] = n[r as usize].saturating_add(1);
+            }
+            return n.iter().enumerate().filter(|(_, c)| **c as usize >= need).map(|(i, _)| i as u32).collect();
+        }
+        let mut all: Vec<u32> = lists.iter().flat_map(|l| l.iter()).collect();
+        all.sort_unstable();
+        all.chunk_by(|a, b| a == b).filter(|run| run.len() >= need).map(|run| run[0]).collect()
+    }
+
+    /// The rows `op arg` may hold for, through a GIN index (`by_gin`) or a GiST one.
+    fn select(&self, op: &str, arg: &Value, by_gin: bool, ctx: &ExecCtx) -> gin::Sel {
+        if let (Some(share), Value::Text(s)) = (similarity_share(op, ctx), arg) {
+            let q = crate::ext::pg_trgm::trgm::generate(s);
+            // (A little under the bound: pg_trgm compares in float4.)
+            let mut need = (share * q.len() as f64 - 1e-6 * (q.len() as f64 + 1.0)).ceil().max(0.0) as usize;
+            // GIN returns only rows with one of the query's trigrams, and none for a query
+            // without any (gin_trgm_consistent: false when nkeys is 0), whatever the
+            // threshold; GiST every row a threshold of 0 lets through.
+            if by_gin {
+                if q.is_empty() {
+                    return gin::Sel::Rows(Vec::new());
+                }
+                need = need.max(1);
+            }
+            return if need >= 1 { gin::Sel::Rows(self.sharing(&q, need)) } else { gin::Sel::All };
+        }
+        let mut need = required_trigrams(op, arg);
+        need.sort_unstable();
+        need.dedup();
+        if need.is_empty() {
+            return gin::Sel::All;
+        }
+        gin::Sel::Rows(every(need.iter().map(|t| self.list(t)).collect()))
+    }
+}
+
+/// An empty posting list.
+static NO_ROWS: Posting = Posting { bytes: Vec::new(), last: 0, len: 0 };
+
+/// The rows in every one of `lists` (none: no rows).
+fn every(mut lists: Vec<&Posting>) -> Vec<u32> {
+    lists.sort_by_key(|l| l.len());
+    let Some((first, rest)) = lists.split_first() else { return Vec::new() };
+    let mut rows: Vec<u32> = first.iter().collect();
+    for l in rest {
+        if rows.is_empty() {
+            break;
+        }
+        rows = intersect_posting(&rows, l);
+    }
+    rows
+}
+
 /// `candidates` for a pg_trgm index.
 fn trigram_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)], snapshot: Option<u64>, ctx: &ExecCtx) -> Result<Option<Found>> {
-    let mut need: Vec<[u8; 3]> = conds.iter().flat_map(|(_, op, v)| required_trigrams(op, v)).collect();
-    need.sort_unstable();
-    need.dedup();
-    if need.is_empty() {
+    if !conds.iter().any(|(_, op, v)| similarity_share(op, ctx).is_some() || !required_trigrams(op, v).is_empty()) {
         return Ok(None);
     }
     let sh = Shape { dim: None, parts: Vec::new(), tys: Vec::new() };
     let Some(st) = structure::<Trigrams>(t, bix, &sh, ctx)? else { return Ok(None) };
+    let g = st.lock();
+    let Some(tg) = g.downcast_ref::<Trigrams>() else { return Ok(None) };
+    if snapshot.is_some_and(|s| s < tg.ts) {
+        return Ok(None);
+    }
+    let by_gin = bix.index.method == "gin";
+    let sel = conds.iter().fold(gin::Sel::All, |acc, (_, op, v)| acc.and(tg.select(op, v, by_gin, ctx)));
+    selected(t, &tg.rows, sel, &tg.always, ctx)
+}
+
+/// `candidates` for a GIN index over arrays, jsonb or tsvector (`gin::Elements`).
+fn element_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)], snapshot: Option<u64>, ctx: &ExecCtx) -> Result<Option<Found>> {
+    let cols = gin::element_columns(bix, ctx);
+    if !conds.iter().any(|(c, _, _)| cols.contains(c)) {
+        return Ok(None);
+    }
+    let sh = Shape { dim: None, parts: cols, tys: Vec::new() };
+    let Some(st) = structure::<gin::Elements>(t, bix, &sh, ctx)? else { return Ok(None) };
+    let g = st.lock();
+    let Some(el) = g.downcast_ref::<gin::Elements>() else { return Ok(None) };
+    if snapshot.is_some_and(|s| s < el.ts) {
+        return Ok(None);
+    }
+    let sel = conds.iter().fold(gin::Sel::All, |acc, (c, op, v)| acc.and(el.select(*c, op, v)));
+    selected(t, &el.rows, sel, &el.always, ctx)
+}
+
+/// The data keys of the rows `sel` selects of `rows`, those always read and the
+/// transaction's own writes (every one: not in the structure). None: `sel` narrows nothing.
+fn selected(t: &Table, rows: &RowKeys, sel: gin::Sel, always: &[u32], ctx: &ExecCtx) -> Result<Option<Found>> {
+    let gin::Sel::Rows(mut sel) = sel else { return Ok(None) };
+    sel.extend_from_slice(always);
     let prefix = index_prefix(t.oid, 0);
-    let mut keys = {
-        let g = st.lock();
-        let Some(tg) = g.downcast_ref::<Trigrams>() else { return Ok(None) };
-        if snapshot.is_some_and(|s| s < tg.ts) {
-            return Ok(None);
-        }
-        let mut lists: Vec<&[u32]> = need.iter().map(|t| tg.post.get(t).map_or(&[][..], |l| &l[..])).collect();
-        lists.sort_by_key(|l| l.len());
-        let mut rows: Vec<u32> = lists[0].to_vec();
-        for l in &lists[1..] {
-            rows.retain(|r| l.binary_search(r).is_ok());
-        }
-        rows.extend(&tg.always);
-        rows.into_iter()
-            .map(|r| {
-                let mut k = prefix.clone();
-                k.extend_from_slice(&tg.rows[r as usize]);
-                k
-            })
-            .collect::<Vec<_>>()
-    };
-    // (The transaction's own writes: every one is read.)
+    let mut keys: Vec<Vec<u8>> = sel.into_iter().map(|r| rows.key(&prefix, r)).collect();
     keys.extend(ctx.txn.borrow().writes_in(&prefix, &prefix_end(&prefix))?.into_iter().filter(|(_, v)| v.is_some()).map(|(k, _)| k));
     keys.sort_unstable();
     keys.dedup();
     Ok(Some(Found::Keys(keys)))
 }
+

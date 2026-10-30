@@ -1,0 +1,94 @@
+> CREATE TABLE a114_pt (id int, p point)
+-- CREATE TABLE
+
+> INSERT INTO a114_pt SELECT g, point((g * 37) % 100, (g * 91) % 100) FROM generate_series(1, 600) g
+-- INSERT 0 600
+
+> CREATE INDEX a114_pt_p ON a114_pt USING gist (p)
+-- CREATE INDEX
+
+> ANALYZE a114_pt
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SET enable_bitmapscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+QUERY PLAN:text
+Index Scan using a114_pt_p on a114_pt
+  Index Cond: (p <@ '(30,30),(10,10)'::box)
+-- EXPLAIN
+
+> SELECT string_agg(id::text, ',') FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+string_agg:text
+76,176,276,376,476,576,30,130,230,330,430,530,87,187,287,387,487,587,98,198,298,398,498,598
+-- SELECT 1
+
+> SELECT string_agg(id::text, ',') FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+string_agg:text
+76,176,276,376,476,576,30,130,230,330,430,530,87,187,287,387,487,587,98,198,298,398,498,598
+-- SELECT 1
+
+> SELECT string_agg(id::text, ',') FROM (SELECT id FROM a114_pt ORDER BY p <-> point '(50,50)' LIMIT 12) s
+string_agg:text
+50,150,550,450,350,250,561,461,361,161,61,261
+-- SELECT 1
+
+> INSERT INTO a114_pt SELECT g, point((g * 13) % 100, (g * 7) % 100) FROM generate_series(601, 700) g
+-- INSERT 0 100
+
+> SELECT string_agg(id::text, ',') FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+string_agg:text
+76,176,276,376,476,576,30,130,230,330,430,530,87,187,287,387,487,587,617,632,647,98,198,298,398,498,598,602
+-- SELECT 1
+
+> UPDATE a114_pt SET p = point(20, 20) WHERE id % 50 = 0
+-- UPDATE 14
+
+> DELETE FROM a114_pt WHERE id % 7 = 0
+-- DELETE 100
+
+> SELECT string_agg(id::text, ',' ORDER BY id) FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+string_agg:text
+30,50,76,87,100,130,150,176,187,198,200,230,250,276,298,300,330,376,387,398,400,430,450,487,498,500,530,550,576,587,598,600,617,632,647,650
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a114_pt VALUES (5000, point(15, 15))
+-- INSERT 0 1
+
+> SELECT string_agg(id::text, ',' ORDER BY id) FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+string_agg:text
+30,50,76,87,100,130,150,176,187,198,200,230,250,276,298,300,330,376,387,398,400,430,450,487,498,500,530,550,576,587,598,600,617,632,647,650,5000
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT string_agg(id::text, ',' ORDER BY id) FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+string_agg:text
+30,50,76,87,100,130,150,176,187,198,200,230,250,276,298,300,330,376,387,398,400,430,450,487,498,500,530,550,576,587,598,600,617,632,647,650
+-- SELECT 1
+
+> VACUUM a114_pt
+-- VACUUM
+
+> SELECT string_agg(id::text, ',' ORDER BY id) FROM a114_pt WHERE p <@ box '(10,10),(30,30)'
+string_agg:text
+30,50,76,87,100,130,150,176,187,198,200,230,250,276,298,300,330,376,387,398,400,430,450,487,498,500,530,550,576,587,598,600,617,632,647,650
+-- SELECT 1
+
+> RESET enable_seqscan
+-- RESET
+
+> RESET enable_bitmapscan
+-- RESET
+
+> DROP TABLE a114_pt
+-- DROP TABLE
+
