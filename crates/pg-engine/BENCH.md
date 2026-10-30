@@ -4250,6 +4250,71 @@ isolation suite on a private reference: 121 / 122 specs, 1,647 / 1,648 permutati
 `pg_dump_tap` 14,817 / 14,817; `pg_dump_roundtrip` over that run's database: 0 errors restoring
 either side's dump into the other, every way.
 
+### Second batch: restoring PostgreSQL's dump of the regression database
+
+The regression suite's database on a private PostgreSQL 18.6 (`PGREGRESS_KEEP=1`), dumped with
+`pg_dump` (12.9 MB plain, 4,099 statements; the globals restored first), restored into a fresh
+database with psql (`-e`, `\timing`, each statement timed) or with pg_restore from a custom
+dump; release builds:
+
+| restore | PostgreSQL | base | new |
+|---|---|---|---|
+| psql of the plain dump (wall) | 4.2 s | 7.0 s | 7.0 s |
+| pg_restore of the custom dump (wall) | | | 8.5 s |
+| engine CPU, peak RSS (psql) | | 7.0 s, 209 MB | 7.3 s, 223 MB |
+
+`pg_dump_roundtrip`'s 35-90 s for these restores are its debug-built engine's (85 s for the same
+pg_restore). By statement kind (psql; seconds, PostgreSQL / new):
+
+| | PostgreSQL | new |
+|---|---|---|
+| COPY (637) | 0.94 | 2.2-2.6 |
+| CREATE INDEX (106) | 0.78 | 1.85 |
+| CREATE UNIQUE INDEX (42) | 0.07 | 0.33 (0.57 before) |
+| CREATE TABLE (721) | 0.88 | 0.37 |
+| ALTER TABLE ... OWNER TO (724) | 0.18 | 0.26 |
+| ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY (124) | 0.17 | 0.15 |
+
+Expression and partial index builds restricted the search path and pushed the table's owner
+per row (`index_values`); one security-restricted operation per build now, as PostgreSQL's
+index_build: `CREATE INDEX ON t ((seqno + 1))` over 10,000 rows 185 → 97 ms (PostgreSQL 8),
+the regression database's `hash_f8_index_3` 225 → 87 ms. What remains is the bulk write path:
+COPY (quad_poly_tbl 229 ms against 103, agg_data_20k 74 against 14, tenk2 80 against 34) and
+plain btree builds (tenk1_unique1 57 against 6.4 ms: memtable skiplist inserts, the
+transaction's spill map, SST writes), for agent 106's round.
+
+Kysely's suite (agent 100's end-to-end measure of catalog reads after DDL: 745 tests, the engine
+fresh per run, two interleaved rounds): engine CPU 11.8 / 11.9 s for base, 12.9 / 10.9 s for
+new, peak RSS 106-108 / 104-107 MB: unchanged within the noise (agent 100 measured PostgreSQL
+at 7.6 s). Its catalogs after each DDL statement were spliced before this round too; what it
+pays is regeneration of the catalogs that aren't (pg_depend, information_schema) and the
+planning of its catalog joins.
+
+### Verification (round 22, agent 115, second batch)
+
+Both batches rebased onto `3f56fe3f` (agent 100's information_schema views, now kept as shared
+rows, go through the chunked generation too): `cargo test -p pg-engine` debug and release (on
+the rebase before it, `wire_waits`' `waits_end_by_timeouts_and_cancel` failed once under load
+with "error communicating with the server" in place of "connection closed", the
+transaction_timeout flake agent 109 describes, and passed when run again), clippy (no new
+warnings), `difftest smoke`; isolation 121 / 122 specs, 1,647 / 1,648 permutations, and
+`roll-concurrent-create`; the regression suite in full (debug, private reference
+`a115-ref3`): 51,148 / 51,150, no unit changed; `pg_dump_tap` 14,817 / 14,817;
+`pg_dump_roundtrip`: 0 errors restoring the engine's dump into PostgreSQL every way, and
+PostgreSQL's into the engine every way but one run of `pg_restore -j 4` (1 error, below).
+Then rebased onto `898ef33a` and `629f3e51` (no file of these batches changed upstream but
+the docs): crate tests debug and release again (`crash_async_commit`'s
+`kill_during_async_commits`, new upstream, failed once parsing a log line cut short by the
+kill, and passed 5 of 5 runs alone), clippy.
+
+`pg_restore -j 4` of PostgreSQL's regression database into the engine fails one statement in
+about one run in ten, before these batches too: `ALTER TABLE ONLY ... ADD CONSTRAINT ...
+FOREIGN KEY` raises `relation "<oid>" does not exist` (`Ddl::note_lock`: the oid it locks
+isn't in the command's catalog copy), and the constraint's COMMENT then fails with it
+(`clstr_tst_con`, `dropfk_a_fkey`, `comment_test_child_fk`, ...). Release builds, a fresh
+engine per run: `4025ec2b` 6 of 54 runs, `b3568d3e` 1 of 60, these batches 9 of 193 (the
+same rate). The concurrent DDL path is agent 109's area; it was not looked into further here.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

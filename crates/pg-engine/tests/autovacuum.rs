@@ -236,3 +236,34 @@ fn an_analyze_that_waits_keeps_what_it_did_before() {
     drop(s);
     e.shutdown();
 }
+
+/// A CREATE INDEX or TRUNCATE that waits for a table another transaction is analyzing (an
+/// autovacuum worker, which commits first) sees the statistics it committed: both write the
+/// table's statistics, which merged from the catalog before the wait at commit and failed
+/// ("could not serialize access due to concurrent schema change").
+#[test]
+fn index_builds_and_truncates_that_wait_see_the_statistics() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(dir.path(), &[("autovacuum", "off")]);
+    let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+    rows(&mut s, "CREATE TABLE aw_t (a int, b int); INSERT INTO aw_t SELECT i, i % 7 FROM generate_series(0, 199) i; ANALYZE aw_t");
+    // The other transaction's statistics differ from those the waiting command then writes
+    // (it counts the rows left after the deletion), and from the base it started from.
+    for (pid, stmt) in [(4, "CREATE INDEX aw_t_b ON aw_t (b)"), (5, "TRUNCATE aw_t")] {
+        rows(&mut s, "INSERT INTO aw_t SELECT i, i % 7 FROM generate_series(200, 299) i");
+        rows(&mut s, "BEGIN; ANALYZE aw_t; DELETE FROM aw_t WHERE a < 50");
+        let e2 = e.clone();
+        let waiter = std::thread::spawn(move || {
+            let mut s2 = e2.connect(pid, "postgres", "postgres", "t").unwrap();
+            raw(&mut s2, stmt)
+        });
+        std::thread::sleep(Duration::from_millis(1000));
+        rows(&mut s, "COMMIT");
+        let out = waiter.join().unwrap();
+        assert!(!out.contains("ERROR"), "{stmt}: {out}");
+    }
+    assert_eq!(rows(&mut s, "SELECT count(*) FROM pg_index WHERE indrelid = 'aw_t'::regclass"), ["1"]);
+    assert_eq!(rows(&mut s, "SELECT count(*) FROM aw_t"), ["0"]);
+    drop(s);
+    e.shutdown();
+}

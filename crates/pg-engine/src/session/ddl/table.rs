@@ -3711,6 +3711,7 @@ impl Ddl<'_, '_> {
         };
         // (A table too big to model is measured in the same pass: its rows read and its keys
         // computed once.)
+        let scope = IndexScope::enter(&bix, self);
         let measured = if self.measures_in_build(t, ix) {
             self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?
         } else {
@@ -3725,6 +3726,7 @@ impl Ddl<'_, '_> {
                 }
             }
         }
+        drop(scope);
         if direct.is_some() {
             self.ctx
                 .txn
@@ -7616,6 +7618,11 @@ impl Ddl<'_, '_> {
                 tables.push(child);
             }
         }
+        // (Each table's statistics are reset below: `refresh_after_locks`.)
+        let locked: Vec<u32> = tables.iter().map(|t| t.oid).collect();
+        self.refresh_after_locks(&locked)?;
+        let tables: Vec<Arc<Table>> =
+            tables.into_iter().map(|t| self.cat.tables.get(&t.oid).cloned().unwrap_or(t)).collect();
         // BEFORE TRUNCATE triggers of every table fire first, AFTER ones once all are empty.
         use crate::catalog::trigger_type as tt;
         let mut trigs = Vec::with_capacity(tables.len());
@@ -7817,6 +7824,21 @@ impl Ddl<'_, '_> {
         if cur.version != self.base.version {
             self.cat = crate::txn::catmerge::merge(&self.base, &self.cat, &cur)?;
             self.base = cur;
+        }
+        Ok(())
+    }
+
+    /// After locking relations `rels` whose statistics the command then writes (CREATE INDEX's
+    /// table, TRUNCATE's tables): what others committed while the locks were waited for (an
+    /// autovacuum worker's statistics of one of them) is seen, as AcceptInvalidationMessages
+    /// does at every lock, unless one of them is gone meanwhile (that still fails at commit).
+    /// Without it the command's statistics merged from the catalog before the wait, and the
+    /// commit failed as a "concurrent schema change". (Nothing to do when nothing committed
+    /// meanwhile: `refresh_catalog` compares versions.)
+    pub(super) fn refresh_after_locks(&mut self, rels: &[u32]) -> Result<()> {
+        let cur = self.ctx.catalog();
+        if rels.iter().all(|r| cur.tables.contains_key(r)) {
+            self.refresh_catalog()?;
         }
         Ok(())
     }
@@ -9759,9 +9781,15 @@ impl UniqueKeys {
     }
 }
 
-pub(super) fn index_values(ix: &BoundIndex, row: &[Value], d: &Ddl) -> Result<Option<Vec<Value>>> {
-    // Building an index runs its expressions as the table's owner (a security-restricted
-    // operation).
+thread_local! {
+    /// The index whose build's security-restricted operation is under way (`IndexScope`).
+    static INDEX_SCOPE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Index `ix`'s expressions run as its table's owner with search_path restricted (a
+/// security-restricted operation): the owner pushed (when another role runs the statement)
+/// and the settings level begun, None for an index of plain columns.
+fn index_restrict(ix: &BoundIndex, d: &Ddl) -> (bool, Option<usize>) {
     let exprs = ix.predicate.is_some() || ix.keys.iter().any(|k| !matches!(k, Expr::Col(..)));
     let owner = exprs
         .then(|| d.cat.index_table(ix.index.table).map(|t| t.owner))
@@ -9771,6 +9799,49 @@ pub(super) fn index_values(ix: &BoundIndex, row: &[Value], d: &Ddl) -> Result<Op
         d.ctx.sess.definer.borrow_mut().push(o);
     }
     let level = exprs.then(|| d.ctx.sess.settings.borrow_mut().restrict_search_path());
+    (owner.is_some(), level)
+}
+
+fn index_unrestrict(ctx: &crate::exec::ExecCtx, (owner, level): (bool, Option<usize>)) {
+    if let Some(level) = level {
+        ctx.sess.settings.borrow_mut().pop_restricted(level);
+    }
+    if owner {
+        ctx.sess.definer.borrow_mut().pop();
+    }
+}
+
+/// A whole build of an index in one security-restricted operation, as PostgreSQL's
+/// index_build enters it once (`SetUserIdAndSecContext`, `NewGUCNestLevel`,
+/// `RestrictSearchPath`) and ends it after the last row. `index_values` of that index's rows
+/// runs inside it: begun and ended per row, the settings level was most of an expression
+/// index's build (10,000 rows: 185 ms against PostgreSQL's 8).
+pub(super) struct IndexScope<'c, 'a> {
+    ctx: &'c crate::exec::ExecCtx<'a>,
+    entered: (bool, Option<usize>),
+    outer: Option<u32>,
+}
+
+impl<'c, 'a> IndexScope<'c, 'a> {
+    pub(super) fn enter(ix: &BoundIndex, d: &Ddl<'c, 'a>) -> IndexScope<'c, 'a> {
+        let entered = index_restrict(ix, d);
+        let outer = INDEX_SCOPE.with(|s| s.replace(Some(ix.index.oid)));
+        IndexScope { ctx: d.ctx, entered, outer }
+    }
+}
+
+impl Drop for IndexScope<'_, '_> {
+    fn drop(&mut self) {
+        INDEX_SCOPE.with(|s| s.set(self.outer));
+        index_unrestrict(self.ctx, self.entered);
+    }
+}
+
+pub(super) fn index_values(ix: &BoundIndex, row: &[Value], d: &Ddl) -> Result<Option<Vec<Value>>> {
+    // Building an index runs its expressions as the table's owner (a security-restricted
+    // operation), once for the build when it is in an `IndexScope`.
+    let scoped = INDEX_SCOPE.with(|s| s.get()) == Some(ix.index.oid);
+    let entered = if scoped { (false, None) } else { index_restrict(ix, d) };
     let r = (|| {
         if let Some(p) = &ix.predicate
             && eval(p, row, d.ctx)? != Value::Bool(true)
@@ -9783,12 +9854,7 @@ pub(super) fn index_values(ix: &BoundIndex, row: &[Value], d: &Ddl) -> Result<Op
         }
         Ok(Some(out))
     })();
-    if let Some(level) = level {
-        d.ctx.sess.settings.borrow_mut().pop_restricted(level);
-    }
-    if owner.is_some() {
-        d.ctx.sess.definer.borrow_mut().pop();
-    }
+    index_unrestrict(d.ctx, entered);
     r
 }
 

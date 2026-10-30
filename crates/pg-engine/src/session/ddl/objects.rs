@@ -315,6 +315,11 @@ impl Ddl<'_, '_> {
                 .borrow_mut()
                 .wait_for_lockers(t.oid, crate::txn::locks::LockMode::Share)?;
         }
+        // (The build writes the table's statistics: `refresh_after_locks`.)
+        if word == "table" {
+            self.refresh_after_locks(&[t.oid])?;
+        }
+        let t = self.cat.tables.get(&t.oid).cloned().unwrap_or(t);
         self.not_in_use(t.oid, "CREATE INDEX", &t.name)?;
         let spc = self.choose_tablespace(&s.table_space, t.partkey.is_some(), t.temporary, None)?;
         // ProcessUtilitySlow checks the whole partition tree first.

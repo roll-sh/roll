@@ -2105,6 +2105,31 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     of JSON); the first connection (unchanged: parsing the records and building the maps'
     indexes; a stored index and lazily parsed entries are the way to make it constant);
     plain btree index builds and COPY in a restore (storage-bound, for the bulk write path).
+- **Catalog round 7, second batch** (round 22, agent 115; BENCH.md "Catalog round 7"):
+  - Restoring PostgreSQL's dump of the regression database into the engine takes 7.0 s with
+    psql and 8.5 s with pg_restore in a release build (PostgreSQL 4.2 s); the 35-90 s that
+    `pg_dump_roundtrip` reports are its debug engine's. The gap, statement by statement
+    against PostgreSQL's restore of the same dump: COPY 2.2-2.6 s against 0.94 (637 tables)
+    and plain btree builds (tenk1's 10,000 rows: 57 ms against 6.4; the time is in the
+    memtable, the transaction's spill map and SST writes), both on the bulk write path.
+  - An index build is one security-restricted operation (`session/ddl/table.rs`
+    `IndexScope`), as PostgreSQL's index_build enters it once: `index_values` restricted the
+    search path and pushed the owner per row, and the settings level that took was most of
+    an expression or partial index's build (10,000 rows: 185 → 97 ms; PostgreSQL 8). What is
+    left there is `eval` per row (a function call's context reads settings each time).
+  - CREATE INDEX and TRUNCATE see what others committed while their table locks were waited
+    for (`Ddl::refresh_after_locks`, after agent 109's merging `refresh_catalog`): both write
+    the table's statistics, and an autovacuum worker's ANALYZE committed during the wait made
+    the commit fail with "could not serialize access due to concurrent schema change"
+    (`tests/autovacuum.rs` `index_builds_and_truncates_that_wait_see_the_statistics`, which
+    fails without it). REINDEX, CLUSTER and ALTER TABLE's rewrites lock and write statistics
+    too and don't refresh yet; refreshing at every lock (as AcceptInvalidationMessages does)
+    needs `note_lock` to take `&mut self`, and the objects a command copied before the lock
+    to be read again.
+  - Open, found while verifying (before these batches too, about one run in ten): `pg_restore
+    -j 4` of PostgreSQL's regression database fails an `ALTER TABLE ONLY ... ADD CONSTRAINT
+    ... FOREIGN KEY` with `relation "<oid>" does not exist`, from `Ddl::note_lock` (the oid it
+    locks isn't in the command's catalog copy). BENCH.md "Catalog round 7" has the rates.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
