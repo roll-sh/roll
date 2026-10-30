@@ -244,6 +244,11 @@ pub fn run_owner(table: SysTable) -> Option<usize> {
     matches!(table, PgClass | PgAttribute | PgAttrdef | PgIndex).then(|| owner_col(table))
 }
 
+/// The part row `r` of `table` belongs to in `cat` (`chunked`'s).
+pub fn part_key(table: SysTable, cat: &Catalog, r: &Row) -> PartKey {
+    part_of(table, cat, r).key()
+}
+
 /// `rows` (the full generation of `table` for `cat`) in chunks along their parts.
 pub fn chunked(table: SysTable, cat: &Catalog, rows: Vec<Row>) -> Vec<Arc<RowChunk>> {
     super::sysrows::chunk(rows, |r| part_of(table, cat, r).key())
@@ -255,10 +260,10 @@ pub fn parts_hold(table: SysTable, cat: &Catalog, chunks: &[Arc<RowChunk>]) -> b
     chunks.iter().all(|c| {
         let mut a = 0;
         c.parts.iter().all(|&(p, end)| {
-            let ok = a < end && c.rows[a as usize..end as usize].iter().all(|r| part_of(table, cat, r).key() == p);
+            let ok = a < end && c.rows(a as usize, end as usize).all(|r| part_of(table, cat, &r).key() == p);
             a = end;
             ok
-        }) && a as usize == c.rows.len()
+        }) && a as usize == c.len()
     })
 }
 
@@ -423,7 +428,7 @@ pub fn splice(
         ins.sort_unstable();
         let mut ins = ins.into_iter().peekable();
         let old = &chunks[c];
-        let mut rows: Vec<Row> = Vec::with_capacity(old.rows.len() + 8);
+        let mut rows: Vec<Row> = Vec::with_capacity(old.len() + 8);
         let mut parts: Vec<(PartKey, u32)> = Vec::with_capacity(old.parts.len() + 2);
         let fresh = |o: u32, rows: &mut Vec<Row>, parts: &mut Vec<(PartKey, u32)>| -> crate::error::Result<()> {
             let new = regen(table, ctx, &cat, o)?;
@@ -442,7 +447,7 @@ pub fn splice(
                 ins.next();
             }
             if p >> 32 != 0 || !changed.contains(&(p as u32)) {
-                rows.extend(old.rows[a as usize..end as usize].iter().cloned());
+                rows.extend(old.rows(a as usize, end as usize));
                 parts.push((p, rows.len() as u32));
             }
             a = end;

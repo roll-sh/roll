@@ -484,6 +484,11 @@ impl K {
         })
     }
 
+    /// The row's value as a condition (Some(None): NULL; None: leave it to `eval`).
+    pub fn truth<R: Cols + ?Sized>(&self, row: &R) -> Option<Option<bool>> {
+        Some(truthy(&self.run(row)?))
+    }
+
     /// Whether the row passes as a filter (None: leave it to `eval`).
     pub fn passes<R: Cols + ?Sized>(&self, row: &R) -> Option<bool> {
         Some(truthy(&self.run(row)?) == Some(true))

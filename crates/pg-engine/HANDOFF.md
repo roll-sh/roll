@@ -2076,6 +2076,35 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     columns query (4x PostgreSQL), psql `\d`'s indexes query, `\dt` (1.5x); the first
     connection (connect 95-180 ms at 10,000 tables); restoring PostgreSQL's dump of the
     regression database into the engine (35-62 s against 3-4 s the other way).
+- **Catalog round 7, first batch** (round 22, agent 115; BENCH.md "Catalog round 7"):
+  - Generated catalog rows are kept by column (`catalog/sysrows.rs` `RowChunk`): per chunk of
+    about 64 rows, each column is one value, a plain vector (oid, int2, int4, bool, "char"), a
+    dictionary of up to 256 distinct values, or a vector of `Value`s. A row of `Value`s took
+    32 bytes a column and a string per name. Rows are made on demand: `RowChunk::row`,
+    `project` (the columns a plan reads), `fill` (the columns a filter reads, into a scratch
+    row the filter is checked on, `exec/nodes.rs` `filter_reads`). `SysRows::row` / `iter`
+    return owned rows now; `locate` / `places` give (chunk, place) for code that reads a
+    column of each row without making it (`lookup`, `nulls`, `sys_named`).
+  - A whole catalog is chunked as it is generated (`sysrows::Out`, `system::generate` writes
+    into it; `rows_generated_chunked`): the rows of 90,000 objects' pg_attribute are never all
+    held as rows. pg_type, which changes its rows in place after making them all, is still
+    generated whole first. Debug builds compare the chunks with a whole generation.
+  - `relindex`'s multisets (`pmap::Counts`) keep a single member inline (`Counts::One`): every
+    table's constraint, default and row type entries were a `PMap` of one member each, six
+    allocations: a catalog of 10,000 tables 58 → 48 MB of heap.
+  - Catalog scans: an index path's equality is looked up as the index applies it and as the
+    filter wrote it (`q.orig`; `\d`'s pg_constraint scan `contype IN (...) AND conrelid = x`
+    read every constraint); a filter's equality conjunct after conjuncts that can't raise
+    anything picks the rows too (`quiet_filter` now covers `= ANY (const)` and `IN` lists); a
+    filter whose leading conjuncts compile runs them as a kernel and evaluates the rest only
+    for rows they pass (`SysKernel`: Django's `relkind IN (...) AND pg_table_is_visible(oid)`
+    evaluated `relkind`'s test through `eval` on every row). One relation's pg_attribute rows
+    skip the built-in relations' rows (Prisma's columns query generated them per column).
+  - Left: the catalog entries themselves (`Table` 440 bytes, `Column` 240, `Constraint` 192;
+    a table of three columns and its index entries is about 1.7 kB in memory against 0.64 kB
+    of JSON); the first connection (unchanged: parsing the records and building the maps'
+    indexes; a stored index and lazily parsed entries are the way to make it constant);
+    plain btree index builds and COPY in a restore (storage-bound, for the bulk write path).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference

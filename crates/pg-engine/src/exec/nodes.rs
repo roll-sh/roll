@@ -886,7 +886,10 @@ fn sys_equality(
     let mut conj = Vec::new();
     split(f, &mut conj);
     if first_only {
-        conj.truncate(1);
+        // (A later conjunct too when none before it can raise anything: for the rows it
+        // leaves out the conjunction is false, whatever the others give.)
+        let quiet = conj.iter().take_while(|c| quiet_filter(c)).count();
+        conj.truncate((quiet + 1).min(conj.len()));
     }
     for c in conj {
         let Expr::Call(d, args, _) = c else { continue };
@@ -1175,21 +1178,28 @@ fn sys_rescan(
         Some((_, Some(ix))) => Some(ix),
         None => class_name_bounds(table, path, ctx)?.map(|b| sys_named(all, &b)),
     };
-    // (Only the columns read above are copied, `system::project`; an index order a sort
+    // (Only the columns read above are copied, `RowChunk::project`; an index order a sort
     // relies on is found on whole rows first.)
     let ordered = path.filter(|sp| sp.ordered);
     let copy = if ordered.is_some() { None } else { need };
     let mut out = Vec::new();
-    let mut check = |r: &Row| -> Result<()> {
+    // (The filter is checked on a row holding the columns it reads.)
+    let reads = filter_reads(f);
+    let mut scratch: Row = Vec::new();
+    let mut check = |c: &crate::catalog::system::RowChunk, i: usize| -> Result<()> {
         ctx.check()?;
-        if eval_bool(f, r, ctx)? {
-            out.push(crate::catalog::system::project(r, copy));
+        c.fill(i, reads.as_deref(), &mut scratch);
+        if eval_bool(f, &scratch, ctx)? {
+            out.push(c.project(i, copy));
         }
         Ok(())
     };
     match &picked {
-        Some(ix) => ix.iter().try_for_each(|&i| check(all.row(i as usize)))?,
-        None => all.iter().try_for_each(&mut check)?,
+        Some(ix) => ix.iter().try_for_each(|&i| {
+            let (c, k) = all.locate(i as usize);
+            check(c, k)
+        })?,
+        None => all.places().try_for_each(|(_, c, i)| check(c, i))?,
     }
     // An index path a sort relies on: the rows in that index's order.
     if let Some(sp) = ordered {
@@ -1210,7 +1220,11 @@ fn sys_index_equality(
     let crate::sql::plan::Access::Index { quals, .. } = &sp.scan.access else {
         return Ok(None);
     };
-    let conds: Vec<Expr> = quals.iter().map(|q| q.expr.clone()).collect();
+    // (Each as the index applies it, and as the filter wrote it.)
+    let conds: Vec<Expr> = (quals.iter())
+        .flat_map(|q| [Some(q.expr.clone()), (!q.lossy).then(|| q.orig.clone())])
+        .flatten()
+        .collect();
     if conds.is_empty() {
         return Ok(None);
     }
@@ -1306,8 +1320,8 @@ fn sys_shared_scan(
     // An index path a sort relies on: the candidates in that index's order.
     if let Some(sp) = path.filter(|sp| sp.ordered) {
         let cand: Vec<Row> = match &picked {
-            Some(ix) => ix.iter().map(|&i| rows.row(i as usize).clone()).collect(),
-            None => rows.iter().cloned().collect(),
+            Some(ix) => ix.iter().map(|&i| rows.row(i as usize)).collect(),
+            None => rows.iter().collect(),
         };
         let sorted = crate::sql::paths::sys_index_order(cand, &sp.scan, ctx)?.0;
         let node: BoxNode = Box::new(VecNode::new(sorted));
@@ -1319,15 +1333,7 @@ fn sys_shared_scan(
             None => node,
         }));
     }
-    Ok(Some(Box::new(SharedRowsNode {
-        rows,
-        picked,
-        i: 0,
-        chunk: (0, 0),
-        kernel: filter.and_then(super::kernel::compile),
-        filter: filter.cloned(),
-        need: need.map(Rc::from),
-    })))
+    Ok(Some(Box::new(SharedRowsNode::new(rows, picked, filter, need.map(Rc::from)))))
 }
 
 /// The rows an index path's conditions select (all of them for another path).
@@ -1382,9 +1388,9 @@ fn like_prefix_quals(f: &Expr) -> Vec<Expr> {
 
 /// The rows of pg_class's `rows` whose `relname` `bounds` admits, in row order.
 fn sys_named(rows: &crate::catalog::system::SysRows, bounds: &crate::catalog::system::NameBounds) -> Vec<u32> {
-    (rows.iter().enumerate())
-        .filter(|(_, r)| r[1].as_str().is_some_and(|n| bounds.admits(n)))
-        .map(|(i, _)| i as u32)
+    (rows.places())
+        .filter(|&(_, c, i)| c.with_value(i, 1, |v| v.as_str().is_some_and(|n| bounds.admits(n))))
+        .map(|(n, ..)| n as u32)
         .collect()
 }
 
@@ -1463,21 +1469,86 @@ struct SharedRowsNode {
     i: usize,
     /// Reading all of them: the chunk and the row in it next.
     chunk: (usize, usize),
-    filter: Option<Expr>,
+    filter: Option<Rc<Expr>>,
     /// The filter compiled (`exec::kernel`): what most catalog filters are, evaluated without
     /// `eval`'s calls (`relkind IN (...)` over every pg_class row was most of psql's `\dt`).
-    kernel: Option<super::kernel::K>,
+    kernel: Option<SysKernel>,
     /// The columns read above (`exec::need`): only those are copied out of the shared rows.
     need: Option<Rc<[bool]>>,
+    /// The columns the filter reads (None: all), and the row they are set in to check it.
+    reads: Option<Box<[bool]>>,
+    scratch: Row,
+}
+
+/// The columns filter `f` reads (None: all of them), which a catalog scan sets in the row
+/// it checks `f` on (the shared rows are kept by column, `catalog::sysrows`).
+fn filter_reads(f: &Expr) -> Option<Box<[bool]>> {
+    let mut sub = false;
+    f.walk(&mut |e| sub |= matches!(e, Expr::Subquery(_)));
+    if sub { None } else { super::need::of([f]).map(Vec::into_boxed_slice) }
+}
+
+/// A catalog scan's filter compiled (`exec::kernel`): all of it, or its leading conjuncts
+/// that compile and the rest (`relkind IN (...) AND pg_table_is_visible(oid)`, Django's
+/// table list, evaluated `relkind`'s test through `eval` on every pg_class row).
+struct SysKernel {
+    kernel: super::kernel::K,
+    rest: Option<Expr>,
+}
+
+fn sys_kernel(f: &Expr) -> Option<SysKernel> {
+    if let Some(kernel) = super::kernel::compile(f) {
+        return Some(SysKernel { kernel, rest: None });
+    }
+    let Expr::And(items) = f else { return None };
+    (1..items.len()).rev().find_map(|n| {
+        let kernel = super::kernel::compile(&Expr::And(items[..n].to_vec()))?;
+        let rest = match &items[n..] {
+            [one] => one.clone(),
+            more => Expr::And(more.to_vec()),
+        };
+        Some(SysKernel { kernel, rest: Some(rest) })
+    })
+}
+
+/// Whether row `r` passes `f`, the filter (through `kernel`, its compiled form, as far as
+/// it tells: the rest is evaluated after a compiled part that isn't false, as `eval` of the
+/// conjunction would).
+fn sys_passes(kernel: Option<&SysKernel>, f: &Expr, r: &Row, ctx: &ExecCtx) -> Result<bool> {
+    let Some(k) = kernel else { return eval_bool(f, r, ctx) };
+    match (k.kernel.truth(r), &k.rest) {
+        (None, _) => eval_bool(f, r, ctx),
+        (Some(Some(false)), _) => Ok(false),
+        (Some(t), None) => Ok(t == Some(true)),
+        (Some(t), Some(rest)) => Ok(eval_bool(rest, r, ctx)? && t == Some(true)),
+    }
 }
 
 impl SharedRowsNode {
-    /// Whether row `r` passes `f`, the filter.
-    fn passes(&self, f: &Expr, r: &Row, ctx: &ExecCtx) -> Result<bool> {
-        if let Some(b) = self.kernel.as_ref().and_then(|k| k.passes(r)) {
-            return Ok(b);
+    fn new(
+        rows: Arc<crate::catalog::system::SysRows>,
+        picked: Option<Vec<u32>>,
+        filter: Option<&Expr>,
+        need: Option<Rc<[bool]>>,
+    ) -> SharedRowsNode {
+        SharedRowsNode {
+            rows,
+            picked,
+            i: 0,
+            chunk: (0, 0),
+            kernel: filter.and_then(sys_kernel),
+            reads: filter.and_then(filter_reads),
+            filter: filter.cloned().map(Rc::new),
+            need,
+            scratch: Vec::new(),
         }
-        eval_bool(f, r, ctx)
+    }
+
+    /// Whether the row at (`c`, `k`) (`advance`'s) passes the filter `f`.
+    fn passes(&mut self, f: &Expr, c: usize, k: usize, ctx: &ExecCtx) -> Result<bool> {
+        let (chunk, i) = shared_place(&self.rows, c, k);
+        chunk.fill(i, self.reads.as_deref(), &mut self.scratch);
+        sys_passes(self.kernel.as_ref(), f, &self.scratch, ctx)
     }
 
     /// The next row to check, if any.
@@ -1490,7 +1561,7 @@ impl SharedRowsNode {
             }
             None => {
                 let chunks = self.rows.chunks();
-                while self.chunk.0 < chunks.len() && self.chunk.1 >= chunks[self.chunk.0].rows.len() {
+                while self.chunk.0 < chunks.len() && self.chunk.1 >= chunks[self.chunk.0].len() {
                     self.chunk = (self.chunk.0 + 1, 0);
                 }
                 let (c, k) = self.chunk;
@@ -1504,49 +1575,45 @@ impl SharedRowsNode {
     }
 }
 
-/// Row `k` of chunk `c` of `rows` (`c` usize::MAX: row `k` of all).
-fn shared_row(rows: &crate::catalog::system::SysRows, c: usize, k: usize) -> &Row {
-    if c == usize::MAX { rows.row(k) } else { &rows.chunks()[c].rows[k] }
+/// Row `k` of chunk `c` of `rows` (`c` usize::MAX: row `k` of all): its chunk, and its place there.
+fn shared_place(rows: &crate::catalog::system::SysRows, c: usize, k: usize) -> (&crate::catalog::system::RowChunk, usize) {
+    if c == usize::MAX { rows.locate(k) } else { (&rows.chunks()[c], k) }
 }
 
 impl Node for SharedRowsNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        let filter = self.filter.clone();
         while let Some((c, k)) = self.advance() {
-            let r = shared_row(&self.rows, c, k);
-            match &self.filter {
-                Some(f) => {
-                    ctx.check()?;
-                    if self.passes(f, r, ctx)? {
-                        return Ok(Some(crate::catalog::system::project(r, self.need.as_deref())));
-                    }
+            if let Some(f) = &filter {
+                ctx.check()?;
+                if !self.passes(f, c, k, ctx)? {
+                    continue;
                 }
-                None => return Ok(Some(crate::catalog::system::project(r, self.need.as_deref()))),
             }
+            let (chunk, i) = shared_place(&self.rows, c, k);
+            return Ok(Some(chunk.project(i, self.need.as_deref())));
         }
         Ok(None)
     }
 
     fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
         let mut n = 0;
-        if self.filter.is_none() {
+        let Some(f) = self.filter.clone() else {
             // (Nothing to evaluate: what is left.)
             n = match &self.picked {
                 Some(ix) => ix.len().saturating_sub(self.i),
                 None => {
                     let chunks = self.rows.chunks();
-                    (chunks.iter().skip(self.chunk.0).map(|c| c.rows.len()).sum::<usize>())
-                        .saturating_sub(self.chunk.1)
+                    (chunks.iter().skip(self.chunk.0).map(|c| c.len()).sum::<usize>()).saturating_sub(self.chunk.1)
                 }
             } as u64;
             self.picked = Some(Vec::new());
             self.i = 0;
             return Ok(Some(n));
-        }
+        };
         while let Some((c, k)) = self.advance() {
             ctx.check()?;
-            if let Some(f) = &self.filter
-                && self.passes(f, shared_row(&self.rows, c, k), ctx)?
-            {
+            if self.passes(&f, c, k, ctx)? {
                 n += 1;
             }
         }
@@ -1556,7 +1623,7 @@ impl Node for SharedRowsNode {
     fn restrict_keys(&mut self, col: usize, keys: &[u32], _ctx: &ExecCtx) -> Result<()> {
         // (Only before the first row, and when the filter can't raise anything or call
         // anything for the rows left out: a Seq Scan's filter runs on every row.)
-        if self.i != 0 || self.chunk != (0, 0) || !self.filter.as_ref().is_none_or(quiet_filter) {
+        if self.i != 0 || self.chunk != (0, 0) || !self.filter.as_ref().is_none_or(|f| quiet_filter(f)) {
             return Ok(());
         }
         // (Past a quarter of the rows, reading them all costs about as much.)
@@ -1594,15 +1661,8 @@ struct CountedRowsNode {
 impl CountedRowsNode {
     fn rows(&mut self, ctx: &ExecCtx) -> Result<&mut SharedRowsNode> {
         if self.rows.is_none() {
-            self.rows = Some(SharedRowsNode {
-                rows: crate::catalog::system::rows_shared(self.table, ctx)?,
-                picked: None,
-                i: 0,
-                chunk: (0, 0),
-                filter: None,
-                kernel: None,
-                need: self.need.clone(),
-            });
+            let rows = crate::catalog::system::rows_shared(self.table, ctx)?;
+            self.rows = Some(SharedRowsNode::new(rows, None, None, self.need.clone()));
         }
         Ok(self.rows.as_mut().unwrap())
     }
@@ -1619,15 +1679,8 @@ impl Node for CountedRowsNode {
             None => {
                 let n = crate::catalog::system::row_count(self.table, ctx);
                 // (Nothing is left once counted.)
-                self.rows = Some(SharedRowsNode {
-                    rows: Arc::new(crate::catalog::system::SysRows::new(Vec::new())),
-                    picked: None,
-                    i: 0,
-                    chunk: (0, 0),
-                    filter: None,
-                    kernel: None,
-                    need: None,
-                });
+                let none = Arc::new(crate::catalog::system::SysRows::new(Vec::new()));
+                self.rows = Some(SharedRowsNode::new(none, None, None, None));
                 Ok(n.map(|n| n as u64))
             }
         }
@@ -1650,6 +1703,19 @@ fn quiet_filter(e: &Expr) -> bool {
             d.oid < crate::catalog::FIRST_USER_OID
                 && matches!(d.name, "=" | "<>" | "<" | "<=" | ">" | ">=")
                 && args.iter().all(|a| matches!(a, Expr::Col(..) | Expr::Const(..)))
+        }
+        // (`relkind IN ('r', 'p')`, `contype = ANY ('{p,u}')`.)
+        Expr::ArrayOp { left, right, op, .. } => {
+            op.oid < crate::catalog::FIRST_USER_OID
+                && matches!(op.name, "=" | "<>")
+                && matches!(**left, Expr::Col(..) | Expr::Const(..))
+                && matches!(**right, Expr::Const(..))
+        }
+        Expr::InList(x, items, _) => {
+            matches!(**x, Expr::Col(..) | Expr::Const(..))
+                && (items.iter()).all(|(e, d)| {
+                    d.oid < crate::catalog::FIRST_USER_OID && matches!(d.name, "=" | "<>") && matches!(e, Expr::Const(..))
+                })
         }
         _ => false,
     }

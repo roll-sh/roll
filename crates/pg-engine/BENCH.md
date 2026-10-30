@@ -4160,6 +4160,96 @@ each). Machine at load 30-40; rounds interleaved, two at N = 16.
   walsender starts: the base binary came from `cargo test --release`'s feature set, this one
   from `cargo build --release`; compare the growth.)
 - The commit path is unchanged (walsender code only).
+
+## Catalog round 7: catalog rows by column (round 22, agent 115)
+
+Agent 92's catalogs (`scale --keep 1 --schemas 20`: 10,000 tables and a table of 1,000
+partitions; `scale --tables 25000 --parts 10000` then `scale-more`: about 90,000 objects),
+release builds, a fresh copy of the data directory per run, the engine on cores 20-23, psql in
+a container; PostgreSQL 18.6 in `a115-bpg` / `a115-bpg9` (`run.sh pg-start` settings). **base**
+is `4025ec2b`, **new** this batch. The machine was loaded throughout (load 25-55 from other
+agents' builds and suites): runs interleaved, three rounds at 10,000 tables, two at 90,000,
+medians; the engine's CPU is the process's user + system time.
+
+### Memory (engine RSS; PostgreSQL: shared buffers holding catalog pages)
+
+| | PostgreSQL | base | new |
+|---|---|---|---|
+| 10,000 tables: database open | | 108 MB | 99 MB |
+| 10,000 tables: pg_attribute, pg_type, pg_class read | 36 MB of buffers, 2.5 MB a backend (100 MB of catalogs on disk) | 402 MB | 133 MB |
+| 10,000 tables: peak | | 404 MB | 149 MB |
+| 90,000 objects: database open | | 286 MB | 250 MB |
+| 90,000 objects: the three catalogs read | 120 MB of buffers (314 MB on disk) | 1,173 MB | 330 MB |
+| 90,000 objects: peak | | 1,191 MB | 410 MB |
+| engine CPU for the run (10,000 / 90,000) | | 0.98 / 2.6 s | 0.74 / 2.2 s |
+| catalog heap after open, 10,000 tables (counting allocator) | | 58.4 MB | 47.9 MB |
+
+(The engine's figures include its 25 MB at start: binary, built-in catalogs.) What was heavy:
+generated rows as `Vec<Value>`, 32 bytes a column (pg_attribute's 25 columns: 800 bytes a row,
+and a string allocated per name), all of a catalog's rows held before they were chunked
+(the peak), and `relindex`'s one-member multisets (a `PMap` each, six allocations). Rows are
+now kept by column in chunks of about 64 (one value, a plain vector, or a dictionary per
+column), chunked as they are generated, and a multiset of one member is inline.
+
+### Catalog queries (ms, psql over the wire; first in a new session, then again)
+
+| query | PostgreSQL | base | new |
+|---|---|---|---|
+| 10,000 tables: `sum(attnum)` of pg_attribute | 60 / 24 | 381 / 108 | 219 / 62 |
+| `count(typname)` of pg_type | 8.4 / 3.7 | 95 / 15 | 100 / 9.8 |
+| `count(relname)` of pg_class | 13.8 / 6.6 | 113 / 29 | 111 / 20 |
+| 90,000 objects: pg_attribute | 77 / 57 | 966 / 244 | 699 / 156 |
+| pg_type | 25 / 14.5 | 263 / 54 | 310 / 36 |
+| pg_class | 38 / 20 | 314 / 83 | 271 / 56 |
+
+pg_type's first read at 90,000 objects is slower (it is still generated whole and then
+chunked: its rows are changed in place once all are made); every other first read and every
+later one is faster, since rows are made per scan only with the columns a plan reads.
+
+`catalog-tools` at 10,000 tables (ms per query after the first, medians of 2 interleaved
+rounds; the whole session's engine CPU 2.55 s → 1.85 s, RSS 272 → 155 MB):
+
+| query | PostgreSQL | base | new |
+|---|---|---|---|
+| psql `\dt` | 15.0 | 23.8 | 23.0 |
+| psql `\d t` indexes | 1.4 | 13.3 | 6.4 |
+| Django's table list | 19.2 | 46.9 | 26.3 |
+| Prisma's columns of a schema | 138 | 183 | 102 |
+| pgAdmin's table list | 64.9 | 32.5 | 23.9 |
+| the ORM constraints query | 49.0 | 21.1 | 19.4 |
+
+`\d`'s pg_constraint scan (`contype IN ('p','u','x') AND conrelid = x`, its index condition
+derived from the join) read every constraint: the index path's equality is now looked up as
+the filter wrote it too, and a filter's equality after conjuncts that can't raise anything
+picks the rows. Django's `relkind IN (...) AND pg_table_is_visible(oid)` ran `relkind`'s test
+through `eval` on every pg_class row (the filter didn't compile as a whole): its compiled
+prefix now decides first. Prisma's per-column lookups of one relation's pg_attribute rows
+walked the built-in relations' rows each time.
+
+### pgbench
+
+Scale 10, 4 clients, 10,000 transactions each, three interleaved rounds on the loaded machine
+(tps varied 2x between rounds; the engine's CPU per transaction is the steadier measure):
+
+| | base | new |
+|---|---|---|
+| `-S` tps (median) | 5,872 | 6,177 |
+| `-S` engine CPU per 1,000 transactions | 312 ms | 311 ms |
+| `-N` tps (median) | 1,171 | 1,882 |
+| `-N` engine CPU per 1,000 transactions | 1,032 ms | 916 ms |
+
+Unchanged within the noise, as expected: no plan of a user table reads generated catalog rows.
+
+### Verification (round 22, agent 115, first batch)
+
+`cargo test -p pg-engine` debug and release (every test binary, deep_input, catalog_format,
+catalog_storage and ddl_scaling with them), clippy (no new warnings), `difftest smoke`; the
+isolation suite on a private reference: 121 / 122 specs, 1,647 / 1,648 permutations, and
+`roll-concurrent-create`; the regression suite in full (debug build, private reference
+`a115-ref1`) against the committed `results.tsv`: 51,148 / 51,150, no unit changed;
+`pg_dump_tap` 14,817 / 14,817; `pg_dump_roundtrip` over that run's database: 0 errors restoring
+either side's dump into the other, every way.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

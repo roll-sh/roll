@@ -1545,7 +1545,7 @@ struct SysRowsKey {
     settings: Arc<crate::session::settings::ValuesKey>,
 }
 
-pub use super::sysrows::{SysRows, project};
+pub use super::sysrows::{Out, RowChunk, SysRows};
 
 /// `Database::sys_rows`: the catalogs generated last, for every session of the database.
 /// (The catalogs whose rows the next version reuses, `sysdelta::spliced`, hold the catalog
@@ -1653,7 +1653,7 @@ pub fn rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Row>> {
     if !rows_cacheable(table) {
         return rows_generated(table, ctx);
     }
-    Ok(rows_shared(table, ctx)?.iter().cloned().collect())
+    Ok(rows_shared(table, ctx)?.iter().collect())
 }
 
 /// How many rows `rows` gives of pg_class, pg_attribute or pg_attrdef, counted without
@@ -1771,7 +1771,7 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
             #[cfg(debug_assertions)]
             {
                 let full = rows_generated_for(table, ctx, None)?;
-                let got = r.iter().eq(full.iter());
+                let got = r.iter().eq(full);
                 debug_assert!(got, "{}'s rows spliced from an earlier version", table.name());
                 debug_assert!(
                     !super::sysdelta::spliced(table) || super::sysdelta::parts_hold(table, &cat, r.chunks()),
@@ -1782,11 +1782,24 @@ pub fn rows_shared(table: SysTable, ctx: &ExecCtx) -> Result<Arc<SysRows>> {
             r
         }
         None => {
-            let rows = rows_generated(table, ctx)?;
-            Arc::new(match super::sysdelta::spliced(table) {
-                true => SysRows::from_chunks(super::sysdelta::chunked(table, &cat, rows), owner),
-                false => SysRows::new(rows),
-            })
+            let spliced = super::sysdelta::spliced(table);
+            if table == SysTable::PgType {
+                // (Its rows are changed in place once all are made.)
+                let rows = rows_generated(table, ctx)?;
+                Arc::new(SysRows::from_chunks(super::sysdelta::chunked(table, &cat, rows), owner))
+            } else {
+                let part = |r: &Row| match spliced {
+                    true => super::sysdelta::part_key(table, &cat, r),
+                    false => super::sysrows::fixed_key(0),
+                };
+                let rows = SysRows::from_chunks(rows_generated_chunked(table, ctx, &part)?, owner);
+                #[cfg(debug_assertions)]
+                {
+                    let whole = rows_generated_for(table, ctx, None)?;
+                    debug_assert!(rows.iter().eq(whole), "{}'s rows chunked as generated", table.name());
+                }
+                Arc::new(rows)
+            }
         }
     };
     let held = super::sysdelta::kept(table).then(|| cat.clone());
@@ -2045,6 +2058,25 @@ pub fn rel_rows_generated() -> u64 {
 
 /// `rows_generated`, of relation `only`'s rows alone (`rows_of_rel`).
 pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u32>) -> Result<Vec<Row>> {
+    let mut out = Out::rows();
+    generate(table, ctx, only, &mut out)?;
+    Ok(out.into_rows())
+}
+
+/// `table`'s rows, all of them, cut into chunks along their parts (`part` of each) as they are
+/// generated (`sysrows::Out`): a whole catalog's rows aren't all held as rows at once.
+fn rows_generated_chunked(
+    table: SysTable,
+    ctx: &ExecCtx,
+    part: &dyn Fn(&Row) -> super::sysrows::PartKey,
+) -> Result<Vec<Arc<RowChunk>>> {
+    GENERATED.with(|c| c.set(c.get() + 1));
+    let mut out = Out::chunked(part);
+    generate(table, ctx, None, &mut out)?;
+    Ok(out.into_chunks())
+}
+
+fn generate(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out) -> Result<()> {
     use SysTable::*;
     let schema = if table.schema() == PGC {
         "pg_catalog"
@@ -2059,7 +2091,8 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
         ));
     }
     if let Some(sql) = sql_views().get(&(schema, table.name())) {
-        return sql_view_rows(table, sql, ctx);
+        out.set(sql_view_rows(table, sql, ctx)?);
+        return Ok(());
     }
     let cat = ctx.catalog();
     let cat = &*cat;
@@ -2070,7 +2103,6 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
             .map(|r| r.name.clone())
             .unwrap_or_else(|| ctx.sess.user.clone())
     };
-    let mut out: Vec<Row> = Vec::new();
     match table {
         PgNamespace => {
             for s in cat.schemas.values() {
@@ -2285,14 +2317,17 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
             }
         }
         PgAttribute => {
-            let builtin: std::collections::HashSet<u32> = super::static_rows::rows(PgClass)
-                .iter()
+            // (A user relation's rows alone have none of Postgres's own relations': Prisma's
+            // columns query read them per column, each time over the built-in rows.)
+            let user_only = only.is_some_and(|o| o >= super::FIRST_USER_OID);
+            let builtin: std::collections::HashSet<u32> = (super::static_rows::rows(PgClass).iter())
+                .take(if user_only { 0 } else { usize::MAX })
                 .filter(|r| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2)))
                 .map(|r| super::static_rows::oid_at(r, 0))
                 .collect();
             let boot = role_name(OWNER);
-            for r in super::static_rows::rows(table)
-                .iter()
+            for r in (super::static_rows::rows(table).iter())
+                .take(if user_only { 0 } else { usize::MAX })
                 .filter(|r| only.is_none_or(|o| super::static_rows::oid_at(r, 0) == o))
                 .filter(|r| builtin.contains(&super::static_rows::oid_at(r, 0)))
             {
@@ -5753,7 +5788,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
         | IsRoleUsageGrants
         | IsUdtPrivileges
         | IsRoleUdtGrants => {
-            out = privilege_rows(table, ctx, cat);
+            out.set(privilege_rows(table, ctx, cat));
         }
         IsCharacterSets => {
             let enc = crate::types::mbconv::server::name(crate::types::collation::db_locale(cat).encoding);
@@ -5771,7 +5806,7 @@ pub(super) fn rows_generated_for(table: SysTable, ctx: &ExecCtx, only: Option<u3
         // Views computed from their definitions (above), and catalogs that stay empty.
         _ => {}
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The information_schema views over ACLs (aclexplode joined with roles).

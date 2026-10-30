@@ -521,39 +521,80 @@ impl<'de, V: Deserialize<'de> + Clone, I: MapIndex<V>> Deserialize<'de> for Inde
     }
 }
 
-/// A multiset of oids (a count per member), as a persistent map.
+/// A multiset of oids (a count per member). Almost every one the indexes keep has one member
+/// (the table a constraint, a default or a row type belongs to): that one is kept inline, and
+/// a persistent map only from two members on (a `PMap` of one member took six allocations,
+/// about a kilobyte of every table's index entries).
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct Counts(PMap<u32>);
+pub enum Counts {
+    #[default]
+    Empty,
+    /// The member and its count.
+    One(u32, u32),
+    /// Two members or more.
+    Many(PMap<u32>),
+}
 
 impl Counts {
     pub fn add(&mut self, k: u32) {
-        let n = self.0.get(&k).copied().unwrap_or(0);
-        self.0.insert(k, n + 1);
+        match self {
+            Counts::Empty => *self = Counts::One(k, 1),
+            Counts::One(o, n) if *o == k => *n += 1,
+            Counts::One(o, n) => {
+                let mut m = PMap::default();
+                m.insert(*o, *n);
+                m.insert(k, 1);
+                *self = Counts::Many(m);
+            }
+            Counts::Many(m) => {
+                let n = m.get(&k).copied().unwrap_or(0);
+                m.insert(k, n + 1);
+            }
+        }
     }
 
     pub fn remove(&mut self, k: u32) {
-        match self.0.get(&k).copied() {
-            Some(n) if n > 1 => {
-                self.0.insert(k, n - 1);
+        match self {
+            Counts::One(o, n) if *o == k && *n > 1 => *n -= 1,
+            Counts::One(o, _) if *o == k => *self = Counts::Empty,
+            Counts::Many(m) if m.contains_key(&k) => {
+                match m.get(&k).copied() {
+                    Some(n) if n > 1 => {
+                        m.insert(k, n - 1);
+                    }
+                    _ => {
+                        m.remove(&k);
+                    }
+                }
+                if m.len() == 1 {
+                    let (o, n) = m.iter().next().map(|(o, n)| (*o, *n)).unwrap();
+                    *self = Counts::One(o, n);
+                }
             }
-            Some(_) => {
-                self.0.remove(&k);
-            }
-            None => debug_assert!(false, "{k} isn't counted"),
+            _ => debug_assert!(false, "{k} isn't counted"),
         }
     }
 
     pub fn contains(&self, k: u32) -> bool {
-        self.0.contains_key(&k)
+        match self {
+            Counts::Empty => false,
+            Counts::One(o, _) => *o == k,
+            Counts::Many(m) => m.contains_key(&k),
+        }
     }
 
     /// The members, in order.
     pub fn keys(&self) -> impl DoubleEndedIterator<Item = u32> + '_ {
-        self.0.keys().copied()
+        let (one, many) = match self {
+            Counts::Empty => (None, None),
+            Counts::One(o, _) => (Some(*o), None),
+            Counts::Many(m) => (None, Some(m.keys().copied())),
+        };
+        one.into_iter().chain(many.into_iter().flatten())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        matches!(self, Counts::Empty)
     }
 }
 
