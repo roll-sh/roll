@@ -540,7 +540,7 @@ pub fn canonical_name(name: &str) -> String {
 }
 
 /// `parse_bool_with_len`.
-fn parse_bool(v: &str) -> Option<bool> {
+pub(crate) fn parse_bool(v: &str) -> Option<bool> {
     let l = v.to_ascii_lowercase();
     let prefix_of = |word: &str, min: usize| l.len() >= min && word.starts_with(l.as_str());
     match l.chars().next()? {

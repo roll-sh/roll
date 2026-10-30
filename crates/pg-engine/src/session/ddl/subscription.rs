@@ -438,6 +438,12 @@ impl Ddl<'_, '_> {
         walrcv::connect(conninfo, name, &crate::remote::env(self.ctx.sess))
     }
 
+    /// A connection for subscription `x` must have used a password (password_required, an
+    /// owner who isn't superuser).
+    fn must_use_password(&self, x: &Subscription) -> bool {
+        x.password_required && !self.cat.is_superuser(x.owner)
+    }
+
     /// The local table a published `nsp.rel` replicates into (RangeVarGetRelid and
     /// CheckSubscriptionRelkind).
     fn subscription_target(&self, nsp: &str, rel: &str) -> Result<u32> {
@@ -485,6 +491,7 @@ impl Ddl<'_, '_> {
         let mut c = self.publisher(&x.conninfo, &x.name).map_err(|m| {
             Error::new(CONNECTION_FAILURE, format!("subscription \"{}\" could not connect to the publisher: {m}", x.name))
         })?;
+        walrcv::password_check(&c, self.must_use_password(x))?;
         let now = self.published_rels(&mut c, &x.publications, validate, if copy_data { 'i' } else { 'r' })?;
         let mut rels = self.cat.sub_rels.get(&x.oid).cloned().unwrap_or_default();
         rels.retain(|r| now.iter().any(|n| n.relid == r.relid));
@@ -503,6 +510,7 @@ impl Ddl<'_, '_> {
         let mut c = self.publisher(&x.conninfo, &x.name).map_err(|m| {
             Error::new(CONNECTION_FAILURE, format!("subscription \"{}\" could not connect to the publisher: {m}", x.name))
         })?;
+        walrcv::password_check(&c, self.must_use_password(x))?;
         let mut opts = Vec::new();
         if let Some(f) = failover {
             opts.push(format!("FAILOVER {f}"));
@@ -615,6 +623,7 @@ impl Ddl<'_, '_> {
                     format!("subscription \"{}\" could not connect to the publisher: {m}", s.subname),
                 )
             })?;
+            walrcv::password_check(&c, o.password_required && !superuser)?;
             rels = self.published_rels(&mut c, &publications, &publications, if o.copy_data { 'i' } else { 'r' })?;
             if o.create_slot {
                 let slot = slot_name.clone().unwrap_or_default();
@@ -962,6 +971,10 @@ impl Ddl<'_, '_> {
         }
         if let Some(r) = self.ctx.sess.db.repl() {
             let _ = r.origins.drop_origin(&format!("pg_{}", x.oid), true);
+            // (And the table synchronization origins of tables not ready yet.)
+            for rel in self.cat.sub_rels.get(&x.oid).into_iter().flatten() {
+                let _ = r.origins.drop_origin(&format!("pg_{}_{}", x.oid, rel.relid), true);
+            }
         }
         self.cat.subscriptions.remove(&x.oid);
         self.cat.sub_rels.remove(&x.oid);
@@ -979,6 +992,7 @@ impl Ddl<'_, '_> {
             )
             .hint("Use ALTER SUBSCRIPTION ... DISABLE to disable the subscription, and then use ALTER SUBSCRIPTION ... SET (slot_name = NONE) to disassociate it from the slot.")
         })?;
+        walrcv::password_check(&c, self.must_use_password(x))?;
         let intr = crate::remote::interrupts(self.ctx);
         match walrcv::drop_slot(&mut c, slot, &intr) {
             Ok(()) => {

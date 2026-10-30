@@ -2,7 +2,7 @@
 //! functions, and their txid_* forerunners (bigint and txid_snapshot).
 
 use super::{FnCtx, Registry, SrfIter, text};
-use crate::error::{Error, Result, code};
+use crate::error::Result;
 use crate::types::Value;
 use crate::types::snapshot::Snapshot;
 use std::sync::Arc;
@@ -153,13 +153,38 @@ fn mxid_age(a: &[Value], _: &FnCtx) -> Result<Value> {
     Ok(Value::Int4(1u32.wrapping_sub(x) as i32))
 }
 
-/// track_commit_timestamp is off.
-fn commit_ts_disabled(_: &[Value], _: &FnCtx) -> Result<Value> {
-    Err(Error::new(
-        code::OBJECT_NOT_IN_PREREQUISITE_STATE,
-        "could not get commit timestamp data",
-    )
-    .hint("Make sure the configuration parameter \"track_commit_timestamp\" is set."))
+/// pg_xact_commit_timestamp(xid): NULL when there is no data for it.
+fn xact_commit_timestamp(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let db = c.exec.txn.borrow().db.clone();
+    Ok(match crate::repl::commit_ts::get_any(&db, xid_of(&a[0]))? {
+        Some(s) => Value::Timestamptz(s.ts),
+        None => Value::Null,
+    })
+}
+
+/// pg_xact_commit_timestamp_origin(xid): (timestamp, roident), both NULL without data.
+fn xact_commit_timestamp_origin(a: &[Value], c: &FnCtx) -> Result<Value> {
+    let db = c.exec.txn.borrow().db.clone();
+    let v = match crate::repl::commit_ts::get_any(&db, xid_of(&a[0]))? {
+        Some(s) => vec![Value::Timestamptz(s.ts), Value::Oid(s.origin as u32)],
+        None => vec![Value::Null, Value::Null],
+    };
+    Ok(Value::Record(Arc::new(v)))
+}
+
+/// pg_last_committed_xact(): (xid, timestamp, roident) of the latest commit, NULLs before one.
+fn last_committed_xact(_: &[Value], c: &FnCtx) -> Result<Value> {
+    let repl = c.exec.txn.borrow().db.repl();
+    let Some(ct) = repl.as_ref().and_then(|r| r.commit_ts.as_ref()) else {
+        return Err(crate::repl::commit_ts::disabled());
+    };
+    let (xid, s) = ct.last();
+    let v = if xid < crate::txn::xids::FIRST_NORMAL_XID {
+        vec![Value::Null, Value::Null, Value::Null]
+    } else {
+        vec![Value::Oid(xid as u32), Value::Timestamptz(s.ts), Value::Oid(s.origin as u32)]
+    };
+    Ok(Value::Record(Arc::new(v)))
 }
 
 pub fn register(r: &mut Registry) {
@@ -185,7 +210,13 @@ pub fn register(r: &mut Registry) {
     r.from_pg(3939, Some(mxid_age), None);
     r.from_pg(5097, Some(xid8_larger), None);
     r.from_pg(5098, Some(xid8_smaller), None);
-    for oid in [3581, 6168, 3583] {
-        r.from_pg(oid, Some(commit_ts_disabled), None);
-    }
+    // (Their records' fields are known, so `(f(x)).roident` resolves as in PostgreSQL.)
+    let row = |f: &[(&str, crate::types::DataType)]| {
+        super::Ret::Fixed(crate::types::DataType::row(f.iter().map(|(n, t)| (n.to_string(), t.clone())).collect()))
+    };
+    use crate::types::DataType::{Oid, Timestamptz};
+    r.from_pg(3581, Some(xact_commit_timestamp), None);
+    r.from_pg(6168, Some(xact_commit_timestamp_origin), None).ret = row(&[("timestamp", Timestamptz(-1)), ("roident", Oid)]);
+    r.from_pg(3583, Some(last_committed_xact), None).ret =
+        row(&[("xid", crate::types::DataType::Xid), ("timestamp", Timestamptz(-1)), ("roident", Oid)]);
 }

@@ -146,6 +146,17 @@ savepoints, insert_exists / update_missing / delete_missing, SKIP, disable_on_er
 two_phase with a streamed PREPARE; the engine publishing to PostgreSQL 18.6 again after the
 walsender's walEnd change. test_decoding unchanged (the tail above is still open).
 
+Subscriber round 3 (round 21, agent 108; HANDOFF "Round 3"): against PostgreSQL 18.6 both
+ways, identical at the end. PostgreSQL publisher → engine and PostgreSQL subscribers: binary
+= true over 20 column types (numeric, timestamptz, jsonb, arrays, bytea, uuid, inet, macaddr,
+bit, timetz, point, ranges, TOASTed text; binary initial copy), a row-filtered publication
+with a column list, an ALWAYS trigger on a table owned by another role (current_user is the
+owner on both), track_commit_timestamp on both subscribers: update_origin_differs 87 + 1,
+delete_origin_differs 11 + 1 on each, the same DETAIL texts (locally / non-existent origin).
+Engine publisher → PostgreSQL subscriber: binary = true and the filtered, column-listed
+publication, identical; password_required: a non-superuser's CREATE SUBSCRIPTION to a trust
+publisher fails with the same error, DETAIL and HINT on both kinds of subscriber.
+
 ### pgvector (round 20, agent 70)
 
 Not a contrib module: pgvector 0.8.7's own suite (`test/sql`, `test/expected` at the v0.8.7

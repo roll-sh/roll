@@ -2481,6 +2481,8 @@ fn mentions_sys_column(n: &pb::Node) -> bool {
     own || ne.nodes().into_iter().any(|(node, _, _, _)| match node {
         // (pg_query's walker doesn't descend into COLLATE either: look at its argument.)
         pg_query::NodeRef::CollateClause(c) => c.arg.as_deref().is_some_and(mentions_sys_column),
+        // (Nor into an indirection's argument: `(f(xmin)).field`.)
+        pg_query::NodeRef::AIndirection(a) => a.arg.as_deref().is_some_and(mentions_sys_column),
         pg_query::NodeRef::ColumnRef(c) => match c.fields.last().and_then(ast::inner) {
             Some(pg_query::NodeEnum::String(s)) => {
                 crate::exec::scan::SYS_COLS.iter().any(|(n, _)| *n == s.sval)

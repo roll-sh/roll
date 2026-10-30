@@ -1572,6 +1572,16 @@ impl Txn {
         self.maybe_spill()
     }
 
+    /// The subtransaction ids a commit now commits along (its released savepoints').
+    pub fn committed_subxids(&self) -> Vec<u64> {
+        self.sub_committed
+            .iter()
+            .copied()
+            .chain(self.savepoints.iter().flat_map(|sp| sp.committed.iter().copied().chain([sp.xid])))
+            .filter(|&x| x != 0)
+            .collect()
+    }
+
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         if self.read_only && !self.temp_key(&key) {
             bail!(

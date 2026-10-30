@@ -274,6 +274,8 @@ pub struct DbLog {
     /// Transactions log their changes (the database has logical slots, or one is being
     /// made).
     pub capture: AtomicBool,
+    /// track_commit_timestamp is on (`commit_ts`): the one thing a commit checks for it.
+    pub commit_ts: AtomicBool,
     /// Commit positions taken whose commits aren't visible yet.
     pending: Mutex<BTreeSet<u64>>,
     /// Commits logged so far (for decoders waiting for more), signalled on each.

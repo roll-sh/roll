@@ -16,6 +16,7 @@ pub mod apply;
 mod apply_rows;
 mod apply_stream;
 pub mod cmd;
+pub mod commit_ts;
 pub mod decode;
 pub mod log;
 pub mod lsn;
@@ -83,6 +84,8 @@ pub struct Repl {
     pub wal_level: WalLevel,
     pub max_wal_senders: usize,
     pub origins: origin::Origins,
+    /// track_commit_timestamp = on (a server-start setting): the commit timestamps' state.
+    pub commit_ts: Option<commit_ts::CommitTs>,
     /// The open databases, by oid (to switch their change capture on and off).
     dbs: Mutex<HashMap<u32, Weak<Database>>>,
     pub senders: Mutex<Vec<Sender>>,
@@ -90,12 +93,27 @@ pub struct Repl {
 
 impl Repl {
     pub fn new(wal: lsn::WalPos, slots: slot::Slots, origins: origin::Origins, wal_level: WalLevel, max_wal_senders: usize) -> Repl {
-        Repl { wal: Arc::new(wal), slots, wal_level, max_wal_senders, origins, dbs: Mutex::new(HashMap::new()), senders: Mutex::new(Vec::new()) }
+        Repl {
+            wal: Arc::new(wal),
+            slots,
+            wal_level,
+            max_wal_senders,
+            origins,
+            commit_ts: None,
+            dbs: Mutex::new(HashMap::new()),
+            senders: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_commit_ts(mut self, on: bool) -> Repl {
+        self.commit_ts = on.then(Default::default);
+        self
     }
 
     /// A database opened: it logs changes while it has logical slots.
     pub fn attach(&self, db: &Arc<Database>) {
         self.dbs.lock().insert(db.oid, Arc::downgrade(db));
+        db.log.commit_ts.store(self.commit_ts.is_some(), Ordering::Relaxed);
         let on = !self.slots.logical_in(db.oid).is_empty();
         db.log.capture.store(on, Ordering::SeqCst);
         if !on {
@@ -117,6 +135,10 @@ impl Repl {
 
     pub fn open_db(&self, oid: u32) -> Option<Arc<Database>> {
         self.dbs.lock().get(&oid).and_then(Weak::upgrade)
+    }
+
+    pub fn open_dbs(&self) -> Vec<Arc<Database>> {
+        self.dbs.lock().values().filter_map(Weak::upgrade).collect()
     }
 
     /// Database `oid`'s slots changed: capture follows, and what no slot needs any more is

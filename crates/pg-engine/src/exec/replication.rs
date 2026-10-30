@@ -215,16 +215,16 @@ fn locate(rules: &TableRules, how: Search, search: &[Value], ctx: &ExecCtx) -> R
 /// FindReplTupleInLocalRel and the row's lock (LockTupleExclusive): the row matching
 /// `search`, as locked (its key and values); None when there is none. A row changed or
 /// deleted while its lock was waited for is looked for again.
-pub fn find(rules: &TableRules, how: Search, search: &[Value], delete: bool, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, Row)>> {
+pub fn find(rules: &TableRules, how: Search, search: &[Value], delete: bool, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, Row, u64)>> {
     let t = &rules.table;
     loop {
         ctx.check()?;
         let Some(dkey) = locate(rules, how, search, ctx)? else { return Ok(None) };
         let oper = if delete { Xltw::Delete } else { Xltw::Update };
-        let row = match lock_row(t, &dkey, RowMark::Update, Wait::Block, oper, ctx)? {
+        let (row, xmin) = match lock_row(t, &dkey, RowMark::Update, Wait::Block, oper, ctx)? {
             Locked::Skip => continue,
             Locked::Same => match ctx.txn.borrow().get_latest(&dkey)? {
-                Some((_, Some(b))) => decode_table_row(t, &b)?,
+                Some((_, Some(b))) => (decode_table_row(t, &b)?, super::scan::row_xmin(&b)?),
                 _ => continue,
             },
             Locked::Newer(b) => {
@@ -239,10 +239,10 @@ pub fn find(rules: &TableRules, how: Search, search: &[Value], delete: bool, ctx
                 if !still {
                     continue;
                 }
-                row
+                (row, super::scan::row_xmin(&b)?)
             }
         };
-        return Ok(Some((dkey, row)));
+        return Ok(Some((dkey, row, xmin)));
     }
 }
 
@@ -335,6 +335,31 @@ pub fn conflict_message(t: &Table, kind: &str, ctx: &ExecCtx) -> String {
     format!("conflict detected on relation \"{}.{}\": conflict={kind}", ctx.catalog().schema_name(t.schema), t.name)
 }
 
+/// GetTupleTransactionInfo: the commit timestamp and origin of a local row's xmin, when
+/// track_commit_timestamp is on and has them.
+pub fn row_commit(xmin: u64, ctx: &ExecCtx) -> Option<crate::repl::commit_ts::Stamp> {
+    let db = ctx.txn.borrow().db.clone();
+    if !db.log.commit_ts.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    crate::repl::commit_ts::get(&db, xmin).ok().flatten()
+}
+
+/// errdetail_apply_conflict's "modified locally / by origin \"x\" / by a non-existent origin
+/// in transaction N at <time>" (`what` before it, as the conflict words it).
+pub fn modified_by(what: &str, by_origin: &str, xmin: u64, s: crate::repl::commit_ts::Stamp, ctx: &ExecCtx) -> String {
+    let at = crate::types::text::format_value(&Value::Timestamptz(s.ts), &DataType::Timestamptz(-1), ctx.fmt());
+    let xmin = xmin as u32;
+    if s.origin == 0 {
+        return format!("{what} modified locally in transaction {xmin} at {at}.");
+    }
+    let name = ctx.txn.borrow().db.repl().and_then(|r| r.origins.name_of(s.origin));
+    match name {
+        Some(n) => format!("{what} modified by {by_origin}\"{n}\" in transaction {xmin} at {at}."),
+        None => format!("{what} modified by a non-existent origin in transaction {xmin} at {at}."),
+    }
+}
+
 /// BuildIndexValueDescription: "(a)=(1)", when the user may see the key.
 fn index_desc(t: &Table, bix: &crate::sql::plan::BoundIndex, row: &[Value], ctx: &ExecCtx) -> Option<String> {
     let vals = dml::index_values(bix, row, ctx).ok()??;
@@ -419,9 +444,13 @@ fn unique_conflict(e: Error, rules: &TableRules, row: &[Value], own: Option<(&[u
         let Ok(Some(vals)) = dml::index_values(bix, row, ctx) else { continue };
         let Ok(Some(dkey)) = dml::committed_conflict(t, bix, &vals, own.map(|o| o.0), &[], ctx) else { continue };
         let Ok(Some((_, Some(bytes)))) = ctx.txn.borrow().get_latest(&dkey) else { continue };
-        let xmin = super::scan::row_xmin(&bytes).unwrap_or(0) as u32;
+        let xmin = super::scan::row_xmin(&bytes).unwrap_or(0);
         let local = decode_table_row(t, &bytes).ok();
-        let mut d = format!("Key already exists in unique index \"{}\", modified in transaction {xmin}.", bix.index.name);
+        let what = format!("Key already exists in unique index \"{}\",", bix.index.name);
+        let mut d = match row_commit(xmin, ctx) {
+            Some(s) => modified_by(&what, "origin ", xmin, s, ctx),
+            None => format!("{what} modified in transaction {}.", xmin as u32),
+        };
         if let Some(v) = value_details(rules, Some((bix, row)), local.as_deref(), Some(row), own.map(|o| o.1), ctx) {
             d.push('\n');
             d.push_str(&v);

@@ -43,6 +43,17 @@ pub fn connect(conninfo: &str, appname: &str, env: &Env) -> Result<Conn, String>
     conn::connect(&info, env)
 }
 
+/// libpqrcv_connect's must_use_password (password_required, an owner who isn't superuser):
+/// the publisher must have asked for a password.
+pub fn password_check(c: &Conn, must_use_password: bool) -> crate::Result<()> {
+    if must_use_password && !c.used_password {
+        return Err(crate::Error::new("2F003", "password is required")
+            .detail("Non-superuser cannot connect if the server does not request a password.")
+            .hint("Target server's authentication method must be changed, or set password_required=false in the subscription parameters."));
+    }
+    Ok(())
+}
+
 /// walrcv_exec: a command or query, its result (the error as libpq reports it).
 pub fn exec(c: &mut Conn, sql: &str, intr: Interrupt) -> Result<PgResult, Fail> {
     let r = c.exec(sql, intr)?;
@@ -166,6 +177,39 @@ pub fn published_columns(c: &mut Conn, nsp: &str, rel: &str, pubs: &[String], in
     Ok(r.rows.iter().filter_map(|r| r.first().cloned().flatten()).collect())
 }
 
+/// fetch_remote_table_info's relkind and row filters of a published table: its publications'
+/// filters (none when one of them publishes it without a filter).
+pub fn table_filters(c: &mut Conn, nsp: &str, rel: &str, pubs: &[String], intr: Interrupt) -> Result<(char, Vec<String>), Fail> {
+    let fail = |e: Fail| remote(format!("could not fetch table info for table \"{nsp}.{rel}\" from publisher: {}", e.msg()));
+    let class = format!(
+        "SELECT c.oid, c.relkind FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND c.relname = {}",
+        literal(nsp),
+        literal(rel)
+    );
+    let r = exec(c, &class, intr).map_err(fail)?;
+    let Some([Some(oid), Some(kind)]) = r.rows.first().map(|r| [r.first().cloned().flatten(), r.get(1).cloned().flatten()]) else {
+        return Err(remote(format!("table \"{nsp}.{rel}\" not found on publisher")));
+    };
+    let sql = format!(
+        "SELECT DISTINCT pg_catalog.pg_get_expr(gpt.qual, gpt.relid)\
+         \n  FROM pg_catalog.pg_publication p,\
+         \n  LATERAL pg_catalog.pg_get_publication_tables(p.pubname) gpt\
+         \n  WHERE gpt.relid = {oid} AND p.pubname IN ( {} )",
+        publications_str(pubs, true)
+    );
+    let r = exec(c, &sql, intr).map_err(fail)?;
+    let mut quals = Vec::new();
+    for row in &r.rows {
+        match row.first().cloned().flatten() {
+            Some(q) => quals.push(q),
+            // (A publication without a filter: every row.)
+            None => return Ok((kind.chars().next().unwrap_or('r'), Vec::new())),
+        }
+    }
+    Ok((kind.chars().next().unwrap_or('r'), quals))
+}
+
 /// walrcv_startstreaming (pgoutput, protocol 4, text values): `streaming` 'on' / 'parallel'
 /// (None: off), prepared transactions decoded at PREPARE with `two_phase`.
 #[allow(clippy::too_many_arguments)]
@@ -177,6 +221,7 @@ pub fn start_streaming(
     origin: &str,
     streaming: Option<&str>,
     two_phase: bool,
+    binary: bool,
     intr: Interrupt,
 ) -> Result<(), Fail> {
     let names = pubs.iter().map(|p| format!("\"{}\"", p.replace('"', "\"\""))).collect::<Vec<_>>().join(",");
@@ -187,6 +232,10 @@ pub fn start_streaming(
     if two_phase {
         cmd.push_str(", two_phase 'on'");
     }
-    cmd.push_str(&format!(", origin '{origin}', publication_names {})", literal(&names)));
+    cmd.push_str(&format!(", origin '{origin}', publication_names {}", literal(&names)));
+    if binary {
+        cmd.push_str(", binary 'true'");
+    }
+    cmd.push(')');
     c.start_copy_both(&cmd, intr)?.map_err(|m| remote(format!("could not start WAL streaming: {m}")))
 }

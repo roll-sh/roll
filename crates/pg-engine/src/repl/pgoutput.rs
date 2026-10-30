@@ -321,7 +321,8 @@ impl PgOutput {
                 i8(b, b'n');
             } else if toast.contains(&i) {
                 i8(b, b'u');
-            } else if self.binary {
+            } else if self.binary && crate::types::binary::supports_binary(&col.ty) {
+                // (logicalrep_write_tuple: a type without a send function goes as text.)
                 i8(b, b'b');
                 let mut out = bytes::BytesMut::new();
                 crate::types::binary::encode(v, &col.ty, &c.fmt, &mut out)?;

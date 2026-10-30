@@ -445,6 +445,11 @@ impl Engine {
         };
         let slots = crate::repl::slot::Slots::open(Some(opts.data_dir.clone()), count("max_replication_slots", 10)?)?;
         let max_wal_senders = count("max_wal_senders", 10)?;
+        let track_commit_ts = match setting("track_commit_timestamp") {
+            Some(v) => crate::session::settings::parse_bool(&v)
+                .ok_or_else(|| internal("parameter \"track_commit_timestamp\" requires a Boolean value".to_string()))?,
+            None => false,
+        };
         let next_lsn = registry.next_lsn;
         let origins_dir = opts.data_dir.clone();
         let statements = opts
@@ -499,7 +504,7 @@ impl Engine {
                     }
                 }
             });
-            let repl = Arc::new(crate::repl::Repl::new(wal, slots, crate::repl::origin::Origins::open(Some(origins_dir)), wal_level, max_wal_senders));
+            let repl = Arc::new(crate::repl::Repl::new(wal, slots, crate::repl::origin::Origins::open(Some(origins_dir)), wal_level, max_wal_senders).with_commit_ts(track_commit_ts));
             // One WAL position: the statistics' moves go to the change stream's counter.
             stats.lock().wal = Some(repl.wal.clone());
             Engine {

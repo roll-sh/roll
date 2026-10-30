@@ -931,13 +931,74 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     51,148 / 51,150 with no unit changed against `results.tsv`. Open:
     - (Fixed, round 21, agent 95: duplicate ctids after a crash or restart. See "Crash
       recovery" below.)
-    - Binary transfer (`binary = true` is accepted but values still come as text), parallel
-      apply workers, the copy's parallel table sync workers, run_as_owner's per-table role
-      switch and the RLS / privilege checks of the target (TargetPrivilegesCheck),
-      update_origin_differs / delete_origin_differs (need track_commit_timestamp).
+    - Parallel apply workers and the copy's parallel table sync workers (round 3 below).
     - pg_stat_subscription_stats counts of conflicts in no-op transactions sent again after a
       restart differ with timing (PostgreSQL resends them when its feedback hadn't confirmed
       them yet).
+  - **Round 3 (agent 108): binary transfer, commit timestamps, origin conflicts, security,
+    row filters.**
+    - **binary = true** both ways. The subscriber asks for `binary 'true'` (after
+      publication_names, as libpqrcv_startstreaming) and reads 'b' columns through the
+      types' receive functions (`types::binary::decode`; bytes left over are "incorrect
+      binary data format in logical replication column N", 22P03); a publisher of 16 or
+      later copies in `COPY ... WITH (FORMAT binary)`, fed to the local COPY a chunk of whole
+      tuples at a time (`copy_binary_tuples`: the stream's header again, a trailer). The
+      engine's pgoutput sends a type without a send function as text (logicalrep_write_tuple).
+      Tuple columns now borrow the message's bytes (`Col<'a>`), no String per value.
+    - **track_commit_timestamp** (`repl/commit_ts.rs`, a server-start setting as in
+      PostgreSQL): a commit with an xid writes one 10-byte record per (sub)transaction id into
+      its own commit (`PREFIX 0x32 xid` → timestamp, origin): durable and atomic with it, no
+      extra fsync or file. The timestamp is a session origin's remote commit time when it set
+      one (RecordTransactionCommit), so applied rows carry the publisher's. Off, a commit only
+      reads one relaxed atomic (`DbLog::commit_ts`). pg_xact_commit_timestamp[_origin] and
+      pg_last_committed_xact with PostgreSQL's errors (xid 0 an error always, 1 and 2 NULL,
+      normal ids "could not get commit timestamp data" while off), their records typed so
+      `(f(x)).roident` resolves. Lookups read the database's store (an xid of another open
+      database is found there; one of a closed database is NULL).
+    - **Origin conflicts**: with the setting on, an UPDATE / DELETE whose local row's last
+      commit came from another origin (or locally) logs update_origin_differs /
+      delete_origin_differs with PostgreSQL 18's DETAIL ("Updating the row that was modified
+      locally / by a different origin \"x\" / by a non-existent origin in transaction N at
+      T." plus existing local row, remote row, replica identity) and applies; insert_exists /
+      update_exists say "modified locally / by origin \"x\" in transaction N at T"; counters
+      in pg_stat_subscription_stats. The initial copy now commits under the table's
+      synchronization origin `pg_<subid>_<relid>` (made for the copy, dropped once the table
+      is ready, as tablesync.c does), so copied rows show origin differences later exactly as
+      on a PostgreSQL subscriber (the same counts and DETAIL text, "non-existent origin"
+      included).
+    - **Security**: run_as_owner = false (the default) runs each change and the initial copy
+      as the table's owner (SwitchToUntrustedUser: "role \"a\" cannot SET ROLE to \"b\""; no
+      switch when each can become the other; else a security-restricted operation), so
+      triggers see the owner as current_user. TargetPrivilegesCheck: INSERT / UPDATE / DELETE
+      on the target ("permission denied for table t") and no row-level security for that user
+      ("user \"u\" cannot replicate into relation with row-level security enabled: \"t\"",
+      42501 in apply, 0A000 in the copy). password_required: a connection of a subscription
+      whose owner isn't superuser must have used a password ("password is required", 2F003,
+      with PostgreSQL's DETAIL and HINT) in CREATE / ALTER / DROP SUBSCRIPTION and the
+      workers (not counted as an apply error). DROP SUBSCRIPTION drops the synchronization
+      origins of tables not ready yet.
+    - **Row filters and column lists** in the initial copy: a table with filters (or not a
+      plain table) is copied through `COPY (SELECT cols FROM ONLY t WHERE f1 OR f2) TO
+      STDOUT` (fetch_remote_table_info's filters; none when one publication has none). The
+      stream already applied them; both directions verified against PostgreSQL 18.6.
+    - **Apply speed**: BEGIN / COMMIT of an applied transaction no longer go through SQL text
+      (`Session::apply_begin` / `apply_commit`). 60,000 pgbench-like transactions (BENCH.md
+      "Logical replication apply"): the engine 7.0-8.1 s (was 9.0-9.3), PostgreSQL 18.6's
+      subscriber 3.5-3.8 s. Where the rest goes (perf, release build): the WAL fsync each
+      applied commit waits for 11% (agent 105's synchronous_commit = off removes it), the
+      btree / heap size models 11% (`btsim::insert`, `cmp_keys`, `heapsim::locate`), memtable
+      skiplist searches ~8%, allocation ~8%; the remainder is flat. Beating PostgreSQL's
+      subscriber needs the engine's own write path faster (the apply layer itself is a few
+      percent); not done.
+    - Binder fix found on the way: a system column under an indirection (`(f(xmin)).x`,
+      `(ROW(xmin, id)).f2`) is found (`mentions_sys_column` didn't look into A_Indirection's
+      argument: "column xmin does not exist"). Golden `a108_commit_ts_off`.
+    - Not done: parallel apply workers (streaming = parallel is applied as on: the leader
+      spools; the deadlock handling between the leader and a worker holding row locks is the
+      hard part), parallel table sync, failover slot synchronization, the test_decoding tail.
+      Scalar built-ins with OUT parameters registered through `from_pg` other than the three
+      above return an anonymous record in expressions, so a field of their call (`(f()).x`)
+      is "could not identify column"; `from_pg` could give them all their row type.
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages

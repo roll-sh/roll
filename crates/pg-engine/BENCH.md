@@ -3488,6 +3488,33 @@ Left, measured but not XML:
   `xb_t_10m` (116,000 such rows) took 1.6 s against 7 ms. table_to_xml at 10 MB pays that.
 - string_agg(format(...)) building the same document as text is 1.8x slower at 50 MB.
 
+## Logical replication apply (round 21, agent 108)
+
+One PostgreSQL 18.6 publisher stream (`a108-pub`) of 60,000 pgbench-like transactions (UPDATE
+of a 10,000-row table by key, INSERT into an indexed history table, every third a DELETE of
+its oldest row; 4 pgbench clients) made with both subscriptions disabled, then each enabled
+alone and timed until its slot confirmed the end. Release build, fsync on both sides,
+default synchronous_commit of a subscription (off: PostgreSQL's apply doesn't wait for its
+WAL flush; the engine still does, see below). Both end identical (row counts, sums, md5 of
+every row). Machine at load 25-40; rounds interleaved.
+
+| subscriber | text | binary = true | apply worker RSS |
+|---|---|---|---|
+| PostgreSQL 18.6 | 3.5-3.8 s (16-17k tx/s) | 4.0-5.2 s (loaded rounds) | 34 MB (+ shared buffers) |
+| engine, base adda959c | 9.0-9.3 s (6.5k tx/s) | (values came as text) | whole process 69 → 125 MB |
+| engine, this round | 7.0-8.1 s (7.4-8.6k tx/s) | about as text | whole process 69 → 125 MB |
+
+- The gain is BEGIN / COMMIT without SQL text per applied transaction.
+- The engine's growth is its memtable (the store's, not the worker's); PostgreSQL's worker
+  RSS excludes the shared buffers the changes land in.
+- Where the engine's apply thread goes (perf, 6 s, dwarf stacks): the WAL fsync of each
+  commit 11% (synchronous_commit = off, agent 105's, takes it away), the btree and heap size
+  models 11% (`btsim::insert` / `cmp_keys`, `heapsim::locate`), memtable skiplist searches
+  ~8%, allocation ~8%, WAL writes 3%; the apply layer itself (message parsing, value input,
+  row binding) a few percent. The rest is the engine's ordinary write path, so beating
+  PostgreSQL's subscriber needs that path faster; binary values change little because value
+  input was never a large share.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

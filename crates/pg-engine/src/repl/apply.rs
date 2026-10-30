@@ -368,7 +368,7 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
                 Ok(true) => continue,
                 Ok(false) => return Ok(()),
                 Err(m) => {
-                    if !m.contains("could not connect to the publisher") {
+                    if !m.contains("could not connect to the publisher") && !m.starts_with("password is required") {
                         count(&w, "apply_error");
                     }
                     Err(m)
@@ -400,12 +400,14 @@ pub(super) struct RemoteRel {
     pub cols: Vec<(String, bool)>,
 }
 
-/// A column of a tuple message.
-#[derive(Clone, Debug)]
-pub(super) enum Col {
+/// A column of a tuple message (its bytes borrowed from the message).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Col<'a> {
     Null,
     Unchanged,
-    Text(String),
+    Text(&'a [u8]),
+    /// binary = true: the type's send format.
+    Binary(&'a [u8]),
 }
 
 /// The remote transaction being applied.
@@ -448,8 +450,8 @@ struct Reader<'a> {
     at: usize,
 }
 
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], String> {
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
         let s = self.b.get(self.at..self.at + n).ok_or("invalid logical replication message: too short")?;
         self.at += n;
         Ok(s)
@@ -473,7 +475,7 @@ impl Reader<'_> {
         Ok(String::from_utf8_lossy(&rest[..n]).into_owned())
     }
     /// logicalrep_read_tuple.
-    fn tuple(&mut self) -> Result<Vec<Col>, String> {
+    fn tuple(&mut self) -> Result<Vec<Col<'a>>, String> {
         let n = self.u16()?;
         let mut out = Vec::with_capacity(n as usize);
         for _ in 0..n {
@@ -482,12 +484,47 @@ impl Reader<'_> {
                 b'u' => Col::Unchanged,
                 b't' => {
                     let len = self.u32()? as usize;
-                    Col::Text(String::from_utf8_lossy(self.take(len)?).into_owned())
+                    Col::Text(self.take(len)?)
+                }
+                b'b' => {
+                    let len = self.u32()? as usize;
+                    Col::Binary(self.take(len)?)
                 }
                 k => return Err(format!("unrecognized data representation type '{}'", k as char)),
             });
         }
         Ok(out)
+    }
+}
+
+/// The length of a binary COPY stream's header (signature, flags, extension area), once
+/// `b` holds all of it.
+fn copy_binary_header(b: &[u8]) -> Option<usize> {
+    let ext = u32::from_be_bytes(b.get(15..19)?.try_into().ok()?) as usize;
+    (b.len() >= 19 + ext).then_some(19 + ext)
+}
+
+/// Where the complete tuples of binary COPY data `b` (after its header) end, scanning from
+/// `from` (a tuple boundary); the trailer is left out.
+fn copy_binary_tuples(b: &[u8], from: usize) -> usize {
+    let mut end = from;
+    let mut at = from;
+    loop {
+        let Some(n) = b.get(at..at + 2) else { return end };
+        let n = i16::from_be_bytes([n[0], n[1]]);
+        if n < 0 {
+            return end;
+        }
+        at += 2;
+        for _ in 0..n {
+            let Some(l) = b.get(at..at + 4) else { return end };
+            let l = i32::from_be_bytes([l[0], l[1], l[2], l[3]]);
+            at += 4 + l.max(0) as usize;
+        }
+        if at > b.len() {
+            return end;
+        }
+        end = at;
     }
 }
 
@@ -508,6 +545,31 @@ fn stop_check(stop: &AtomicBool) -> crate::Result<()> {
 }
 
 impl Worker<'_> {
+    /// The worker's session origin becomes origin `name` (made if missing).
+    fn use_origin(&mut self, name: &str) -> Result<(), String> {
+        let o = &self.repl.origins;
+        let _ = o.session_reset(self.pid);
+        if o.by_name(name).is_none() {
+            o.create(name).map_err(|e| e.message.to_string())?;
+        }
+        o.session_setup(self.pid, name, 0).map_err(|e| e.message.to_string())
+    }
+
+    /// The connection's must_use_password check (password_required, an owner who isn't
+    /// superuser, as the subscription is now).
+    fn password_check(&self, c: &Conn) -> Result<(), String> {
+        let cat = self.sess.state.db.catalog();
+        let must = cat.subscriptions.get(&self.sub.oid).unwrap_or(self.sub).password_required && !cat.is_superuser(self.sub.owner);
+        walrcv::password_check(c, must).map_err(|e| {
+            let mut m = e.message.to_string();
+            for (k, v) in [("DETAIL", e.detail.as_deref()), ("HINT", e.hint.as_deref())] {
+                if let Some(v) = v {
+                    m.push_str(&format!("\n{k}:  {v}"));
+                }
+            }
+            m
+        })
+    }
 
     fn query(&mut self, sql: &str) -> Result<Vec<crate::session::QueryResult>, String> {
         match self.sess.query(sql) {
@@ -645,6 +707,7 @@ impl Worker<'_> {
         let mut c = walrcv::connect(&self.sub.conninfo, &appname, &self.env).map_err(|m| {
             format!("table synchronization worker for subscription \"{}\" could not connect to the publisher: {m}", self.sub.name)
         })?;
+        self.password_check(&c)?;
         let sysid = walrcv::identify_system(&mut c, &intr).map_err(fail)?;
         walrcv::exec(&mut c, "BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ", &intr).map_err(fail)?;
         let slot = format!("pg_{}_sync_{relid}_{sysid}", self.sub.oid);
@@ -659,14 +722,46 @@ impl Worker<'_> {
             ));
         }
         let collist = cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
-        let r = c.exec(&format!("COPY {} ({collist}) TO STDOUT", qualified(&nsp, &rel)), &intr).map_err(|e| e.message)?;
+        // copy_table: binary = true copies in binary from a publisher of 16 or later.
+        let major = c.parameter("server_version").and_then(|v| v.split(['.', ' ']).next()?.parse::<u32>().ok());
+        let binary = self.sub.binary && major.is_some_and(|v| v >= 16);
+        let with = if binary { " WITH (FORMAT binary)" } else { "" };
+        // A table with row filters (or not a plain table: a partitioned one published through
+        // its root) is copied through a query: ONLY the table, its filters OR'ed.
+        let (kind, quals) = walrcv::table_filters(&mut c, &nsp, &rel, &self.sub.publications, &intr).map_err(fail)?;
+        let source = if kind == 'r' && quals.is_empty() {
+            format!("{} ({collist})", qualified(&nsp, &rel))
+        } else {
+            let only = if kind == 'r' { "ONLY " } else { "" };
+            let filter = if quals.is_empty() { String::new() } else { format!(" WHERE {}", quals.join(" OR ")) };
+            format!("(SELECT {collist} FROM {only}{}{filter})", qualified(&nsp, &rel))
+        };
+        let r = c.exec(&format!("COPY {source} TO STDOUT{with}"), &intr).map_err(|e| e.message)?;
         if r.status != Status::CopyOut {
             let m = r.error.map_or_else(|| c.error_text(), |e| e.text().trim_end_matches('\n').to_string());
             return Err(format!("could not start initial contents copy for table \"{nsp}.{rel}\": {m}"));
         }
-        let into = format!("COPY {} ({collist}) FROM STDIN", qualified(&nsp, &rel));
+        let into = format!("COPY {} ({collist}) FROM STDIN{with}", qualified(&nsp, &rel));
+        // (The copy commits under the table's synchronization origin, as a tablesync worker's
+        // does: its rows' commit origin isn't the subscription's.)
+        self.use_origin(&format!("pg_{}_{relid}", self.sub.oid))?;
         self.query("BEGIN")?;
-        let r = self.copy_rows(&mut c, &into, &intr);
+        // (The copy runs as the table's owner unless run_as_owner is set.)
+        let run_as_owner = self.sub.run_as_owner;
+        let switched = match self.sess.apply_step(|ctx| apply_rows::sync_check(relid, run_as_owner, ctx)) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = self.sess.query("ROLLBACK");
+                return Err(e.message);
+            }
+        };
+        let r = self.copy_rows(&mut c, &into, binary, &intr);
+        if switched {
+            let _ = self.sess.apply_step(|ctx| {
+                apply_rows::switch_back(ctx);
+                Ok(())
+            });
+        }
         if r.is_err() && self.sess.status() != crate::session::TxnStatus::Idle {
             let _ = self.sess.query("ROLLBACK");
         }
@@ -677,6 +772,7 @@ impl Worker<'_> {
         walrcv::exec(&mut c, "COMMIT", &intr).map_err(fail)?;
         self.set_states(&[(relid, 's', point)])?;
         self.query("COMMIT")?;
+        self.use_origin(&format!("pg_{}", self.sub.oid))?;
         drop(c);
         tracing::info!(
             "logical replication table synchronization worker for subscription \"{}\", table \"{rel}\" has finished ({rows} rows at {})",
@@ -686,10 +782,14 @@ impl Worker<'_> {
         Ok(())
     }
 
-    /// The COPY OUT's rows into the local table, a chunk of whole lines at a time; how many.
-    fn copy_rows(&mut self, c: &mut Conn, into: &str, intr: &dyn Fn() -> crate::Result<()>) -> Result<u64, String> {
+    /// The COPY OUT's rows into the local table, a chunk of whole rows at a time (lines; in
+    /// binary, tuples between the stream's header and a trailer); how many.
+    fn copy_rows(&mut self, c: &mut Conn, into: &str, binary: bool, intr: &dyn Fn() -> crate::Result<()>) -> Result<u64, String> {
         let mut buf: Vec<u8> = Vec::new();
         let mut rows = 0u64;
+        // Binary: the header, once read; where the complete tuples in `buf` end.
+        let mut header: Option<Vec<u8>> = None;
+        let mut whole = 0usize;
         loop {
             intr().map_err(|e| e.message)?;
             match c.copy_read(Duration::from_secs(1))? {
@@ -697,15 +797,39 @@ impl Worker<'_> {
                 Some(None) => break,
                 None => continue,
             }
-            if buf.len() >= COPY_CHUNK
-                && let Some(i) = buf.iter().rposition(|b| *b == b'\n')
-            {
-                let rest = buf.split_off(i + 1);
-                rows += self.copy_in(into, &buf)?;
+            if buf.len() < COPY_CHUNK {
+                continue;
+            }
+            if !binary {
+                if let Some(i) = buf.iter().rposition(|b| *b == b'\n') {
+                    let rest = buf.split_off(i + 1);
+                    rows += self.copy_in(into, &buf)?;
+                    buf = rest;
+                }
+                continue;
+            }
+            if header.is_none() {
+                let Some(n) = copy_binary_header(&buf) else { continue };
+                header = Some(buf.drain(..n).collect());
+                whole = 0;
+            }
+            whole = copy_binary_tuples(&buf, whole);
+            if whole > 0 {
+                let rest = buf.split_off(whole);
+                let mut chunk = header.clone().unwrap_or_default();
+                chunk.extend_from_slice(&buf);
+                chunk.extend_from_slice(&(-1i16).to_be_bytes());
+                rows += self.copy_in(into, &chunk)?;
                 buf = rest;
+                whole = 0;
             }
         }
         if !buf.is_empty() {
+            if let Some(h) = header {
+                let mut chunk = h;
+                chunk.extend_from_slice(&buf);
+                buf = chunk;
+            }
             rows += self.copy_in(into, &buf)?;
         }
         Ok(rows)
@@ -729,6 +853,7 @@ impl Worker<'_> {
         let slot = self.sub.slot_name.clone().ok_or("subscription has no replication slot set")?;
         let mut c = walrcv::connect(&self.sub.conninfo, &self.sub.name, &self.env)
             .map_err(|m| format!("apply worker for subscription \"{}\" could not connect to the publisher: {m}", self.sub.name))?;
+        self.password_check(&c)?;
         let start = self.progress();
         self.last_received = start;
         // (A streamed transaction in progress is streamed again from its start.)
@@ -752,7 +877,7 @@ impl Worker<'_> {
             }
             _ => false,
         };
-        walrcv::start_streaming(&mut c, &slot, start, &self.sub.publications, &self.sub.origin, streaming, two_phase, &intr)
+        walrcv::start_streaming(&mut c, &slot, start, &self.sub.publications, &self.sub.origin, streaming, two_phase, self.sub.binary, &intr)
             .map_err(|e| e.msg())?;
         let mut last_recv = Instant::now();
         let mut last_check = Instant::now();
@@ -896,6 +1021,10 @@ impl Worker<'_> {
         if own {
             self.query("COMMIT")?;
         }
+        // (A ready table's synchronization origin goes.)
+        for (relid, _, _) in &ready {
+            let _ = self.repl.origins.drop_origin(&format!("pg_{}_{relid}", self.sub.oid), true);
+        }
         Ok(())
     }
 
@@ -1018,7 +1147,7 @@ impl Worker<'_> {
                 }
                 self.txn = Some(RemoteTxn { final_lsn, xid, skip, skipping });
                 if !skip {
-                    self.query("BEGIN")?;
+                    self.sess.apply_begin();
                 }
                 Ok(())
             }
@@ -1041,7 +1170,10 @@ impl Worker<'_> {
                     self.clear_skip_lsn(t.final_lsn)?;
                 }
                 self.repl.origins.xact_setup(self.pid, end_lsn, ts).map_err(|e| e.message)?;
-                let r = self.query("COMMIT");
+                let r = self.sess.apply_commit().map_err(|e| match &e.detail {
+                    Some(d) => format!("{}\nDETAIL:  {d}", e.message),
+                    None => e.message.to_string(),
+                });
                 self.repl.origins.xact_reset(self.pid);
                 r?;
                 if t.skipping {
@@ -1269,6 +1401,8 @@ impl Worker<'_> {
             return Ok(());
         }
         let (final_lsn, xid) = (t.final_lsn, t.xid);
+        let origin = self.origin;
+        let run_as_owner = self.sub.run_as_owner;
         let (states, local) = (&self.states, &mut self.local);
         let r = self.sess.apply_step(|ctx| {
             if local.get(&id).is_none_or(|l| !l.current(ctx)) {
@@ -1290,11 +1424,17 @@ impl Worker<'_> {
                 crate::txn::locks::WaitPolicy::Block,
                 &|| rel.name.clone(),
             )?;
-            match &ch {
+            // (Any user code runs as the table's owner unless run_as_owner is set.)
+            let switched = !run_as_owner && apply_rows::switch_to_owner(lr.owner(), ctx)?;
+            let r = match &ch {
                 Change::Insert(new) => apply_rows::insert(lr, rel, new, ctx).map(|_| apply_rows::Outcome::Applied),
-                Change::Update(old, new) => apply_rows::update(lr, rel, old.as_deref(), new, ctx),
-                Change::Delete(old) => apply_rows::delete(lr, rel, old, ctx),
+                Change::Update(old, new) => apply_rows::update(lr, rel, old.as_deref(), new, origin, ctx),
+                Change::Delete(old) => apply_rows::delete(lr, rel, old, origin, ctx),
+            };
+            if switched {
+                apply_rows::switch_back(ctx);
             }
+            r
         });
         if let Ok(apply_rows::Outcome::Applied) = r {
             return Ok(());
@@ -1311,7 +1451,7 @@ impl Worker<'_> {
         let cat = self.sess.state.db.catalog();
         match r {
             Ok(apply_rows::Outcome::Applied) => Ok(()),
-            Ok(apply_rows::Outcome::Missing(kind, detail)) => {
+            Ok(apply_rows::Outcome::Logged(kind, detail)) => {
                 crate::sql::func::pubsub::count_subscription_stat(&cat, self.sub.oid, kind);
                 tracing::info!(
                     "conflict detected on relation \"{}.{}\": conflict={kind}\nDETAIL:  {detail}\nCONTEXT:  {context}",
@@ -1346,13 +1486,13 @@ impl Worker<'_> {
 }
 
 /// An INSERT, UPDATE (old key or row, if sent; new row) or DELETE (old key or row) message.
-enum Change {
-    Insert(Vec<Col>),
-    Update(Option<Vec<Col>>, Vec<Col>),
-    Delete(Vec<Col>),
+enum Change<'a> {
+    Insert(Vec<Col<'a>>),
+    Update(Option<Vec<Col<'a>>>, Vec<Col<'a>>),
+    Delete(Vec<Col<'a>>),
 }
 
-impl Change {
+impl Change<'_> {
     fn name(&self) -> &'static str {
         match self {
             Change::Insert(_) => "INSERT",

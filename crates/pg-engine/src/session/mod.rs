@@ -671,9 +671,13 @@ impl Session {
                 let notes = std::mem::take(&mut t.notifies);
                 stats = std::mem::take(&mut t.pgstat);
                 let origin = crate::repl::origin::before_commit(&self.state, &mut t);
+                let stamp = crate::repl::commit_ts::before_commit(&self.state, &mut t);
                 let r = self.state.cluster.commit(t).map(|_| ());
                 if let (Ok(()), Some(o)) = (&r, origin) {
                     crate::repl::origin::after_commit(&self.state, o);
+                }
+                if let (Ok(()), Some(s)) = (&r, stamp) {
+                    crate::repl::commit_ts::after_commit(&self.state, s);
                 }
                 committed_notify(&self.state, r.is_ok(), &notes);
                 r
@@ -866,6 +870,27 @@ impl Session {
             self.on_error();
         }
         r
+    }
+
+    /// BEGIN as the apply worker runs it, without a statement: a transaction block with the
+    /// session's default options (its transaction starts with the first step).
+    pub(crate) fn apply_begin(&mut self) {
+        if self.status != TxnStatus::Idle {
+            return;
+        }
+        let opts = self.default_txn_opts();
+        default_deferrable(&self.state);
+        self.implicit = false;
+        self.txn_time = Self::now();
+        self.txn_opts = Some(opts);
+        self.status = TxnStatus::InBlock;
+    }
+
+    /// COMMIT as the apply worker runs it: the block's transaction commits (a failed one rolls
+    /// back).
+    pub(crate) fn apply_commit(&mut self) -> Result<()> {
+        let failed = self.status == TxnStatus::Failed;
+        crate::stack::grow(|| self.finish_txn(!failed))
     }
 
     /// `with_ctx`, given the session's search path when the caller has it at hand

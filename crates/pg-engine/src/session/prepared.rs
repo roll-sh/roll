@@ -126,9 +126,13 @@ impl Session {
             t.remove_state_record(gid);
             // (A session origin's position goes with the commit, as with any other.)
             let origin = crate::repl::origin::before_commit(&self.state, &mut t);
+            let stamp = crate::repl::commit_ts::before_commit(&self.state, &mut t);
             let r = self.state.cluster.commit(t).map(|_| ());
             if let (Ok(()), Some(o)) = (&r, origin) {
                 crate::repl::origin::after_commit(&self.state, o);
+            }
+            if let (Ok(()), Some(s)) = (&r, stamp) {
+                crate::repl::commit_ts::after_commit(&self.state, s);
             }
             r
         } else {
