@@ -468,6 +468,8 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            rev: false,
+            kills: None,
             secondary: false,
             emitted: 0,
             keys: Some(keys.into_iter()),
@@ -521,6 +523,8 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            rev: false,
+            kills: None,
             secondary: false,
             emitted: 0,
             keys: Some(keys.into_iter()),
@@ -541,6 +545,64 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             nblocks: None,
             last_block: None,
             fetched: Default::default(),
+            batch: FETCH_BATCH_MIN,
+            ios_cols: None,
+            am: None,
+        }));
+    }
+    // A GiST or SP-GiST index scan (not read by its entries: `reads_entries`): the rows
+    // its search structure places near the conditions (`search`), those they hold for, in
+    // heap order.
+    if s.current_of.is_none()
+        && let (Access::Index { quals, .. }, Some((ix, b))) = (&s.access, &s.index)
+        && !reads_entries(ix)
+        && matches!(ix.method.as_str(), "gist" | "spgist")
+        && b.order.is_empty()
+        // (An index-only scan under EXPLAIN ANALYZE counts its heap fetches as it goes.)
+        && !(matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented())
+        && let Some(rows) = searched_rows(&s.table, ix, quals, ctx)?
+    {
+        let mut plan = s.clone();
+        plan.access = Access::Seq;
+        plan.index = None;
+        let stat = if super::pgstat::scan_counts(ctx) {
+            super::pgstat::count_index_scan(ctx, ix.oid);
+            StatTarget::Index(ix.oid)
+        } else {
+            StatTarget::Off
+        };
+        return Ok(Box::new(ScanNode {
+            stat,
+            sample: None,
+            only: None,
+            key: s as *const ScanPlan as usize,
+            need: None,
+            plan,
+            ranges: Vec::new(),
+            cur_range: 0,
+            iter: None,
+            rev: false,
+            kills: None,
+            secondary: false,
+            emitted: 0,
+            keys: Some(Vec::new().into_iter()),
+            ios: false,
+            ios_entries: None,
+            tid_order: false,
+            sorted: None,
+            streamed: false,
+            par: None,
+            par_tried: false,
+            in_order: None,
+            prefilter: None,
+            run: Default::default(),
+            pending: None,
+            one_run: false,
+            blocks: Default::default(),
+            prune_next: 0,
+            nblocks: None,
+            last_block: None,
+            fetched: rows.into_iter().map(|(k, r)| (Vec::new(), k, Some(r))).collect(),
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
             am: None,
@@ -585,6 +647,8 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            rev: false,
+            kills: None,
             secondary: false,
             emitted: 0,
             keys: None,
@@ -643,8 +707,15 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             emitted: 0,
         }));
     }
-    if s.reverse && s.index.is_some() && s.current_of.is_none() {
-        // A backward index scan: the forward one's rows, last first.
+    if s.reverse
+        && s.index.is_some()
+        && s.current_of.is_none()
+        && matches!(s.access, Access::Index { only: true, .. })
+        && ctx.instrumented()
+    {
+        // A backward index-only scan under EXPLAIN ANALYZE: the forward one's rows, last
+        // first (its heap fetches are the forward scan's, apportioned). Otherwise a backward
+        // scan reads its ranges in descending order, as far as its rows are asked for.
         let mut fwd = s.clone();
         fwd.reverse = false;
         fwd.limit = None;
@@ -665,27 +736,38 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
 fn open_scan_as(
     s: &ScanPlan,
     key: usize,
-    ranges: Vec<(Vec<u8>, Vec<u8>)>,
+    mut ranges: Vec<(Vec<u8>, Vec<u8>)>,
     need: Option<Rc<[bool]>>,
     ctx: &ExecCtx,
 ) -> Result<BoxNode> {
     let secondary = s.current_of.is_none() && s.index.as_ref().is_some_and(|(ix, _)| reads_entries(ix));
     let only = s.current_of.as_ref().map(|_| ranges[0].0.clone());
+    let rev = s.reverse && s.index.is_some() && only.is_none();
+    if rev {
+        ranges.reverse();
+    }
     let sample = s
         .sample
         .as_deref()
         .map(|ts| Sampler::new(ts, ctx))
         .transpose()?;
-    // A btree index scan marks the dead entries it passes (kill_prior_tuple).
+    // A btree index scan marks the dead entries it passes (kill_prior_tuple): as it passes
+    // them, or (an index-only scan under EXPLAIN ANALYZE, which counts the heap fetches of
+    // the entries it passes) the whole of its ranges now.
     let ios = matches!(s.access, Access::Index { only: true, .. }) && ctx.instrumented();
     let mut ios_entries = None;
+    let mut kills = None;
     if let (Some((ix, _)), None) = (&s.index, &s.current_of)
         && ix.method == "btree"
         && matches!(s.access, Access::Index { .. } | Access::Unplanned)
     {
         let prefix = index_prefix(s.table.oid, ix.id);
-        ios_entries = super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, ios, ctx)
-            .map(IosEntries::new);
+        if ios {
+            ios_entries = super::sizing::index_scanned(s.table.oid, ix.oid, &prefix, &ranges, true, ctx)
+                .map(IosEntries::new);
+        } else {
+            kills = super::sizing::Kills::new(s.table.oid, ix.oid, &prefix, &ranges, rev, ctx);
+        }
     }
     let ios_cols = if secondary && only.is_none() {
         index_only_columns(s, ctx)
@@ -771,6 +853,8 @@ fn open_scan_as(
         ranges,
         cur_range: 0,
         iter: None,
+        rev,
+        kills,
         secondary,
         emitted: 0,
         keys: None,
@@ -1198,14 +1282,44 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
             let tuples = ctx.catalog().relstats.get(&t.oid).map_or(-1.0, |r| r.tuples);
             let dense = secondary && tuples > 0.0 && super::sizing::is_estimated(t.oid, &ctx.sess.db);
             let mut sorted_keys: Vec<Vec<u8>> = Vec::new();
+            // An index not read by its entries (GIN, GiST, SP-GiST, BRIN): the rows its
+            // search structure places near the conditions, else every row.
+            let searched = if !reads_entries(index) { search_keys(t, index, quals, ctx)? } else { None };
             for (start, end) in &ranges {
-                let entries: Vec<(Vec<u8>, bytes::Bytes)> = {
-                    let txn = ctx.txn.borrow();
-                    let it = match ctx.snapshot().as_deref() {
-                        Some(sn) => txn.scan_snap(start, end, sn),
-                        None => txn.scan(start, end),
-                    };
-                    it.collect::<Result<_>>()?
+                let entries: Vec<(Vec<u8>, bytes::Bytes)> = match &searched {
+                    Some(super::search::Found::Keys(keys)) => {
+                        let rows = fetch_rows(keys, ctx)?;
+                        keys.iter().zip(rows).filter_map(|(k, r)| Some((k.clone(), r?))).collect()
+                    }
+                    // (BRIN: the rows of the key ranges its zones may hold in, and the
+                    // transaction's own writes.)
+                    Some(super::search::Found::Ranges(rs, own)) => {
+                        let mut out: Vec<(Vec<u8>, bytes::Bytes)> = Vec::new();
+                        let txn = ctx.txn.borrow();
+                        for (a, b) in rs {
+                            let it = match ctx.snapshot().as_deref() {
+                                Some(sn) => txn.scan_snap(a, b, sn),
+                                None => txn.scan(a, b),
+                            };
+                            for r in it {
+                                out.push(r?);
+                            }
+                        }
+                        drop(txn);
+                        let rows = fetch_rows(own, ctx)?;
+                        out.extend(own.iter().zip(rows).filter_map(|(k, r)| Some((k.clone(), r?))));
+                        out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        out.dedup_by(|a, b| a.0 == b.0);
+                        out
+                    }
+                    None => {
+                        let txn = ctx.txn.borrow();
+                        let it = match ctx.snapshot().as_deref() {
+                            Some(sn) => txn.scan_snap(start, end, sn),
+                            None => txn.scan(start, end),
+                        };
+                        it.collect::<Result<_>>()?
+                    }
                 };
                 if dense && entries.len() as f64 * 32.0 >= tuples {
                     sorted_keys.extend(entries.into_iter().map(|(_, v)| v.to_vec()));
@@ -1334,6 +1448,10 @@ fn dense_bitmap_scan(
                 if quals.is_empty() {
                     return Ok(None);
                 }
+                // (An index whose search structure narrows the rows: read through it.)
+                if !reads_entries(index) && search_keys(t, index, quals, ctx)?.is_some() {
+                    return Ok(None);
+                }
                 let mut n = 0i64;
                 for (start, end) in ranges(t, index, bounds, ctx)? {
                     let txn = ctx.txn.borrow();
@@ -1398,6 +1516,8 @@ fn dense_bitmap_scan(
         ranges: vec![(p.clone(), prefix_end(&p))],
         cur_range: 0,
         iter: None,
+        rev: false,
+        kills: None,
         secondary: false,
         emitted: 0,
         keys: None,
@@ -1494,6 +1614,23 @@ fn collation_equal_run(s: &ScanPlan) -> bool {
     })
 }
 
+/// A scan's storage iterator over one range: ascending, or descending for a backward scan.
+enum StoreIter {
+    Fwd(TxnScan),
+    Rev(crate::txn::TxnRevScan),
+}
+
+impl Iterator for StoreIter {
+    type Item = Result<(Vec<u8>, bytes::Bytes)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            StoreIter::Fwd(i) => i.next(),
+            StoreIter::Rev(i) => i.next(),
+        }
+    }
+}
+
 /// What a scan's rows count in the cumulative statistics (`pgstat`).
 #[derive(Clone, Copy)]
 enum StatTarget {
@@ -1515,7 +1652,11 @@ struct ScanNode {
     plan: ScanPlan,
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
     cur_range: usize,
-    iter: Option<TxnScan>,
+    iter: Option<StoreIter>,
+    /// A backward index scan: its ranges (last first) read in descending key order.
+    rev: bool,
+    /// A btree index scan's LP_DEAD marks, made as it passes the entries.
+    kills: Option<super::sizing::Kills>,
     secondary: bool,
     emitted: usize,
     /// `WHERE CURRENT OF`: the one key wanted.
@@ -1814,11 +1955,71 @@ fn heap_order(
     Some(blocks)
 }
 
+/// A backward btree scan's run of rows with equal keys (entry key columns `key`) in
+/// PostgreSQL's order: index tuples last first, a posting list's TIDs ascending, as
+/// _bt_readpage saves them going backward. Without the index's model (or a row it doesn't
+/// place): heap order reversed.
+fn backward_order(s: &ScanPlan, key: &[u8], run: &mut Vec<(Vec<u8>, bytes::Bytes)>, ctx: &ExecCtx) {
+    let placed = (|| {
+        let (ix, _) = s.index.as_ref()?;
+        let attrs = key.strip_prefix(&index_prefix(s.table.oid, ix.id)[..])?;
+        let groups = super::sizing::btree_postings(ix.oid, attrs, &ctx.sess.db)?;
+        let keys: Vec<Vec<u8>> = run.iter().map(|(k, _)| k.clone()).collect();
+        let roots = super::sizing::row_roots(&s.table, &keys, ctx)?;
+        let mut at = std::collections::HashMap::new();
+        for (g, tids) in groups.iter().enumerate() {
+            for (i, t) in tids.iter().enumerate() {
+                at.insert(*t, (std::cmp::Reverse(g), i));
+            }
+        }
+        roots.iter().map(|r| at.get(&(*r)?).copied()).collect::<Option<Vec<_>>>()
+    })();
+    match placed {
+        Some(rank) => {
+            let mut order: Vec<usize> = (0..run.len()).collect();
+            order.sort_by_key(|&i| rank[i]);
+            let mut slots: Vec<Option<(Vec<u8>, bytes::Bytes)>> = run.drain(..).map(Some).collect();
+            run.extend(order.into_iter().filter_map(|i| slots[i].take()));
+        }
+        None => {
+            let _ = heap_order(&s.table, run, ctx);
+            run.reverse();
+        }
+    }
+}
+
 impl ScanNode {
+    /// Starts reading the next range (false: none left), in descending key order for a
+    /// backward scan.
+    fn open_range(&mut self, ctx: &ExecCtx) -> bool {
+        let Some((start, end)) = self.ranges.get(self.cur_range) else {
+            return false;
+        };
+        let txn = ctx.txn.borrow();
+        let snap = ctx.snapshot();
+        self.iter = Some(if self.rev {
+            StoreIter::Rev(txn.scan_rev(start, end, snap.as_deref()))
+        } else {
+            StoreIter::Fwd(match snap.as_deref() {
+                Some(s) => txn.scan_snap(start, end, s),
+                None => txn.scan(start, end),
+            })
+        });
+        self.cur_range += 1;
+        true
+    }
+
     /// Next (data key, stored row bytes), in heap order where Postgres's would be.
     fn next_raw(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, bytes::Bytes)>> {
         if !self.tid_order {
-            return self.next_stored(ctx);
+            let r = self.next_stored(ctx)?;
+            if let Some(k) = &mut self.kills {
+                match &r {
+                    Some((key, _)) => k.passed(key),
+                    None => k.done(),
+                }
+            }
+            return Ok(r);
         }
         if !self.secondary {
             if self.sorted.is_none() && !self.streamed && self.in_order.is_none() {
@@ -1888,7 +2089,12 @@ impl ScanNode {
             Some(p) => p,
             None => match self.next_entry(ctx)? {
                 Some(e) => e,
-                None => return Ok(None),
+                None => {
+                    if let Some(k) = &mut self.kills {
+                        k.done();
+                    }
+                    return Ok(None);
+                }
             },
         };
         let mut run = vec![(first.1, first.2)];
@@ -1904,7 +2110,14 @@ impl ScanNode {
             }
         }
         if run.len() > 1 {
-            let _ = heap_order(&self.plan.table, &mut run, ctx);
+            if self.rev {
+                backward_order(&self.plan, &prefix, &mut run, ctx);
+            } else {
+                let _ = heap_order(&self.plan.table, &mut run, ctx);
+            }
+        }
+        if let Some(k) = &mut self.kills {
+            k.passed(&prefix);
         }
         self.run = run.into();
         Ok(self.run.pop_front())
@@ -1951,17 +2164,8 @@ impl ScanNode {
             let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
             let mut ents: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(want);
             while ents.len() < want {
-                if self.iter.is_none() {
-                    let Some((start, end)) = self.ranges.get(self.cur_range) else {
-                        break;
-                    };
-                    let txn = ctx.txn.borrow();
-                    self.iter = Some(match ctx.snapshot().as_deref() {
-                        Some(s) => txn.scan_snap(start, end, s),
-                        None => txn.scan(start, end),
-                    });
-                    drop(txn);
-                    self.cur_range += 1;
+                if self.iter.is_none() && !self.open_range(ctx) {
+                    break;
                 }
                 match self.iter.as_mut().unwrap().next() {
                     Some(r) => {
@@ -2042,17 +2246,8 @@ impl ScanNode {
             return Ok(self.next_indexed(ctx)?.map(|(_, dkey, row)| (dkey, row)));
         }
         loop {
-            if self.iter.is_none() {
-                let Some((start, end)) = self.ranges.get(self.cur_range) else {
-                    return Ok(None);
-                };
-                let txn = ctx.txn.borrow();
-                self.iter = Some(match ctx.snapshot().as_deref() {
-                    Some(s) => txn.scan_snap(start, end, s),
-                    None => txn.scan(start, end),
-                });
-                drop(txn);
-                self.cur_range += 1;
+            if self.iter.is_none() && !self.open_range(ctx) {
+                return Ok(None);
             }
             match self.iter.as_mut().unwrap().next() {
                 Some(r) => {
@@ -3060,6 +3255,66 @@ pub fn lock_row_mode(
 }
 
 /// A condition of a GiST point_ops scan, as gist_point_consistent tests it.
+/// The data keys an index scan of `ix` (one not read by its entries) with
+/// conditions `quals` may return, from its search structure (`search`): more than it
+/// returns, never fewer. None: every row is to be read (no structure, or a condition's
+/// argument fails to evaluate: reading the rows raises that as it did).
+fn search_keys(
+    t: &Table,
+    ix: &Index,
+    quals: &[crate::sql::plan::IndexQual],
+    ctx: &ExecCtx,
+) -> Result<Option<super::search::Found>> {
+    if predicate_locked(t, ctx) {
+        return Ok(None);
+    }
+    let t = Arc::new(t.clone());
+    let Some(bix) = crate::sql::binder::bound_indexes(&t, ctx)?.into_iter().find(|b| b.index.oid == ix.oid) else {
+        return Ok(None);
+    };
+    let mut conds = Vec::new();
+    for q in quals {
+        if let crate::sql::expr::Expr::Call(def, args, _) = &q.expr
+            && args.len() == 2
+        {
+            let Ok(v) = eval(&args[1], &[], ctx) else { return Ok(None) };
+            conds.push((q.col, def.name, v));
+        }
+    }
+    let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
+    super::search::candidates(&t, &bix, &conds, Some(snap), ctx)
+}
+
+/// `search_keys`' rows that `quals` hold for, in heap order (None: every row is to be read).
+fn searched_rows(
+    t: &Table,
+    ix: &Index,
+    quals: &[crate::sql::plan::IndexQual],
+    ctx: &ExecCtx,
+) -> Result<Option<Vec<(Vec<u8>, bytes::Bytes)>>> {
+    let Some(super::search::Found::Keys(keys)) = search_keys(t, ix, quals, ctx)? else {
+        return Ok(None);
+    };
+    let rows = fetch_rows(&keys, ctx)?;
+    let mut out = Vec::new();
+    for (k, r) in keys.into_iter().zip(rows) {
+        let Some(bytes) = r else { continue };
+        let row = decode_table_row(t, &bytes)?;
+        let mut ok = true;
+        for q in quals {
+            if !eval_bool(&q.orig, &row, ctx)? {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            out.push((k, bytes));
+        }
+    }
+    let _ = heap_order(t, &mut out, ctx);
+    Ok(Some(out))
+}
+
 enum PointCond {
     /// << >> <<| |>> (and <^ >^) against a point: (strategy name, point).
     Pos(&'static str, crate::types::geo::Point),

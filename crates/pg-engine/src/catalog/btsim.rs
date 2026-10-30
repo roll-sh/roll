@@ -784,6 +784,35 @@ impl Btree {
         }
     }
 
+    /// The index tuples whose key attributes are `key` (their encoding), in index order:
+    /// each one's heap TIDs, ascending (a posting list's). What orders a backward scan's
+    /// equal keys: tuples last first, a posting list's TIDs ascending (_bt_readpage).
+    pub fn postings(&self, key: &[u8]) -> Vec<Vec<Tid>> {
+        let nkey = self.opts.nkey;
+        let mut out = Vec::new();
+        let Some(mut blk) = self.descend(Some(key)) else {
+            return out;
+        };
+        loop {
+            let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
+                return out;
+            };
+            for it in &p.items {
+                let k = it.key.key_bytes(nkey);
+                if k > key {
+                    return out;
+                }
+                if k == key {
+                    out.push(it.tids.clone());
+                }
+            }
+            match p.right {
+                Some(r) => blk = r,
+                None => return out,
+            }
+        }
+    }
+
     /// The leaf page an entry with key `key` goes on (what an insertion's SSI check names).
     pub fn leaf_for(&self, key: &Key) -> Option<u32> {
         self.descend(Some(key.key_bytes(self.opts.nkey)))

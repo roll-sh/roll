@@ -1980,6 +1980,42 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     Verified: crate tests, clippy, difftest smoke, isolation 121 / 122 (1,647 / 1,648), full
     regress runs (debug, private references) 51,148 / 51,150 with 0 units changed, for each
     batch.
+- **Index access at index cost** (round 22, agent 103; BENCH.md "Index access"):
+  - Btree scans read only what they return. A backward scan reads its ranges in descending
+    key order (`Txn::scan_rev`, `scan::StoreIter`) as far as rows are asked for (it used to
+    read the whole forward scan and reverse it: `ORDER BY id DESC LIMIT 10`, `max()` and
+    keyset pages going backward read the table); equal keys come in PostgreSQL's backward
+    order (index tuples last first, a posting list's TIDs ascending: `backward_order`,
+    `Btree::postings`). LP_DEAD marking (`sizing::Kills`) follows the rows a scan returns
+    (a batch at a time, a range's rest once the scan is past it, up to the last row's key
+    when it is dropped) instead of walking every range at open, as kill_prior_tuple marks
+    only what the scan passed. An EXISTS / scalar initplan stops at the rows its kind needs
+    (ExecSetParamPlan). Kept on the old path: a backward index-only scan under EXPLAIN
+    ANALYZE (its Heap Fetches are apportioned from the forward scan's).
+  - GiST, SP-GiST, BRIN and pg_trgm GIN / GiST indexes have search structures
+    (`exec/search.rs`), derived from the table, never stored: rows placed by a range,
+    geometric or ordered scalar column (an interval, two for a box) and partitioned by
+    integer-like `=` columns (`Grid`), by key-ordered zones of 128 rows (`Zones`, BRIN), or
+    by word trigrams (`Trigrams`). Scans (`scan::search_keys`: plain GiST / SP-GiST index
+    scans and every bitmap index scan of these methods) and exclusion checks
+    (`dml::exclusion_conflict` without a leading `=`) read the candidates and check their
+    conditions as before, so a loose placement costs a read, never a result. Kept current
+    by `txn/watch.rs`: a structure registers under the commit lock, reads the table as of a
+    time every earlier commit is visible at, and takes later commits' writes from a log
+    filled under the commit lock (a spilled commit drops the table's structures); the
+    transaction's own writes come from its journal (`Txn::written_since`, an overlay per
+    index in `Txn::derived`). A snapshot older than the structure, SERIALIZABLE (its
+    predicate locks are the full scan's), conditions that narrow nothing, and tables past
+    4M rows (`MAX_ROWS`; zones have no cap) read every row as before. The planner's GIN /
+    GiST page counts (`sizing::model_pages`) are cached per snapshot instead of rebuilding
+    the size model on every plan.
+  - Tests: goldens `a103_index_scans`, `a103_search`; isolation spec
+    `roll-search-structures`.
+  - Left: merge joins still build their inner side (hash-join executor; agent 101's), GIN
+    over arrays / jsonb / tsvector and pg_trgm `%` similarity read every row, point_ops GiST
+    scans keep their per-scan model build (`gist_point_scan`, for PostgreSQL's index order),
+    PG 18 skip scans read the whole leading-column range, and the engine plans an Index Only
+    Scan over a GiST box index where PostgreSQL plans a bitmap scan (planner).
 
 ## Repository layout
 

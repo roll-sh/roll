@@ -1,0 +1,812 @@
+> CREATE EXTENSION IF NOT EXISTS btree_gist
+-- CREATE EXTENSION
+
+> CREATE TABLE a103_r (id int, r int4range, ts tsrange, d daterange, f float8)
+-- CREATE TABLE
+
+> INSERT INTO a103_r SELECT g, int4range(g, g + (g % 5) + 1), tsrange(timestamp '2026-01-01' + g * interval '1 h', timestamp '2026-01-01' + (g + 2) * interval '1 h'),
+>   daterange(date '2026-01-01' + g, NULL), g / 3.0 FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> INSERT INTO a103_r VALUES (1001, 'empty', 'empty', 'empty', 'NaN'), (1002, '(,5)', '(,)', '[2025-01-01,)', '-0'),
+>   (1003, '[290,)', '[2026-01-10,infinity)', '[-infinity,2026-01-03)', 'Infinity'), (1004, NULL, NULL, NULL, NULL)
+-- INSERT 0 4
+
+> CREATE INDEX a103_r_r ON a103_r USING gist (r)
+-- CREATE INDEX
+
+> CREATE INDEX a103_r_ts ON a103_r USING spgist (ts)
+-- CREATE INDEX
+
+> CREATE INDEX a103_r_d ON a103_r USING gist (d, id)
+-- CREATE INDEX
+
+> CREATE INDEX a103_r_f ON a103_r USING gist (f)
+-- CREATE INDEX
+
+> ANALYZE a103_r
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT id, r FROM a103_r WHERE r && int4range(10, 13) ORDER BY id
+id:int4 | r:3904
+8 | [8,12)
+9 | [9,14)
+10 | [10,11)
+11 | [11,13)
+12 | [12,15)
+-- SELECT 5
+
+> SELECT id, r FROM a103_r WHERE r @> 100 ORDER BY id
+id:int4 | r:3904
+98 | [98,102)
+99 | [99,104)
+100 | [100,101)
+-- SELECT 3
+
+> SELECT id, r FROM a103_r WHERE r @> int4range(100, 102) ORDER BY id
+id:int4 | r:3904
+98 | [98,102)
+99 | [99,104)
+-- SELECT 2
+
+> SELECT id, r FROM a103_r WHERE r <@ int4range(1, 9) ORDER BY id
+id:int4 | r:3904
+1 | [1,3)
+2 | [2,5)
+3 | [3,7)
+4 | [4,9)
+5 | [5,6)
+6 | [6,8)
+1001 | empty
+-- SELECT 7
+
+> SELECT id, r FROM a103_r WHERE r = int4range(7, 10) ORDER BY id
+id:int4 | r:3904
+7 | [7,10)
+-- SELECT 1
+
+> SELECT id, r FROM a103_r WHERE r << int4range(4, 10) ORDER BY id
+id:int4 | r:3904
+1 | [1,3)
+-- SELECT 1
+
+> SELECT id, r FROM a103_r WHERE r >> int4range(1, 296) ORDER BY id
+id:int4 | r:3904
+296 | [296,298)
+297 | [297,300)
+298 | [298,302)
+299 | [299,304)
+300 | [300,301)
+-- SELECT 5
+
+> SELECT id, r FROM a103_r WHERE r &< int4range(1, 5) ORDER BY id
+id:int4 | r:3904
+1 | [1,3)
+2 | [2,5)
+1002 | (,5)
+-- SELECT 3
+
+> SELECT id, r FROM a103_r WHERE r &> int4range(296, 400) ORDER BY id
+id:int4 | r:3904
+296 | [296,298)
+297 | [297,300)
+298 | [298,302)
+299 | [299,304)
+300 | [300,301)
+-- SELECT 5
+
+> SELECT id, r FROM a103_r WHERE r -|- int4range(50, 51) ORDER BY id
+id:int4 | r:3904
+47 | [47,50)
+51 | [51,53)
+-- SELECT 2
+
+> SELECT id, r FROM a103_r WHERE r <@ 'empty'::int4range ORDER BY id
+id:int4 | r:3904
+1001 | empty
+-- SELECT 1
+
+> SELECT id, r FROM a103_r WHERE r && 'empty'::int4range ORDER BY id
+id:int4 | r:3904
+-- SELECT 0
+
+> SELECT id, r FROM a103_r WHERE r && int4range(NULL, 3) AND id > 1 ORDER BY id
+id:int4 | r:3904
+2 | [2,5)
+1002 | (,5)
+-- SELECT 2
+
+> SELECT id, ts FROM a103_r WHERE ts && tsrange('2026-01-05 10:00', '2026-01-05 12:00') ORDER BY id
+id:int4 | ts:3908
+105 | ["2026-01-05 09:00:00","2026-01-05 11:00:00")
+106 | ["2026-01-05 10:00:00","2026-01-05 12:00:00")
+107 | ["2026-01-05 11:00:00","2026-01-05 13:00:00")
+1002 | (,)
+-- SELECT 4
+
+> SELECT id, ts FROM a103_r WHERE ts @> timestamp '2026-01-03 00:30' ORDER BY id
+id:int4 | ts:3908
+47 | ["2026-01-02 23:00:00","2026-01-03 01:00:00")
+48 | ["2026-01-03 00:00:00","2026-01-03 02:00:00")
+1002 | (,)
+-- SELECT 3
+
+> SELECT id FROM a103_r WHERE ts @> 'infinity'::timestamp ORDER BY id
+id:int4
+1002
+-- SELECT 1
+
+> SELECT id, d FROM a103_r WHERE d @> date '2026-01-02' AND id < 5 ORDER BY id
+id:int4 | d:3912
+1 | [2026-01-02,)
+-- SELECT 1
+
+> SELECT id, d FROM a103_r WHERE d && daterange('2025-06-01', '2025-06-02') ORDER BY id
+id:int4 | d:3912
+1002 | [2025-01-01,)
+1003 | [-infinity,2026-01-03)
+-- SELECT 2
+
+> SELECT id, f FROM a103_r WHERE f < 1 ORDER BY id
+id:int4 | f:float8
+1 | 0.3333333333333333
+2 | 0.6666666666666666
+1002 | -0
+-- SELECT 3
+
+> SELECT id, f FROM a103_r WHERE f = 0 ORDER BY id
+id:int4 | f:float8
+1002 | -0
+-- SELECT 1
+
+> SELECT id, f FROM a103_r WHERE f > 99.5 ORDER BY id
+id:int4 | f:float8
+299 | 99.66666666666667
+300 | 100
+1001 | NaN
+1003 | Infinity
+-- SELECT 4
+
+> SELECT id, f FROM a103_r WHERE f >= 'NaN' ORDER BY id
+id:int4 | f:float8
+1001 | NaN
+-- SELECT 1
+
+> SELECT count(*) FROM a103_r WHERE f > 50 AND f <= 60
+count:int8
+30
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a103_r WHERE r && int4range(10, 13)
+QUERY PLAN:text
+Bitmap Heap Scan on a103_r
+  Recheck Cond: (r && '[10,13)'::int4range)
+  ->  Bitmap Index Scan on a103_r_r
+        Index Cond: (r && '[10,13)'::int4range)
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a103_r VALUES (2001, int4range(11, 12), NULL, NULL, 0.5)
+-- INSERT 0 1
+
+> UPDATE a103_r SET r = int4range(500, 600) WHERE id = 12
+-- UPDATE 1
+
+> SELECT id, r FROM a103_r WHERE r && int4range(10, 13) ORDER BY id
+id:int4 | r:3904
+8 | [8,12)
+9 | [9,14)
+10 | [10,11)
+11 | [11,13)
+2001 | [11,12)
+-- SELECT 5
+
+> SELECT id, r FROM a103_r WHERE r && int4range(550, 551) ORDER BY id
+id:int4 | r:3904
+12 | [500,600)
+1003 | [290,)
+-- SELECT 2
+
+> SELECT id, f FROM a103_r WHERE f < 1 ORDER BY id
+id:int4 | f:float8
+1 | 0.3333333333333333
+2 | 0.6666666666666666
+1002 | -0
+2001 | 0.5
+-- SELECT 4
+
+> ROLLBACK
+-- ROLLBACK
+
+> UPDATE a103_r SET r = int4range(700, 701) WHERE id = 11
+-- UPDATE 1
+
+> DELETE FROM a103_r WHERE id = 10
+-- DELETE 1
+
+> SELECT id, r FROM a103_r WHERE r && int4range(10, 13) ORDER BY id
+id:int4 | r:3904
+8 | [8,12)
+9 | [9,14)
+12 | [12,15)
+-- SELECT 3
+
+> SELECT id, r FROM a103_r WHERE r && int4range(700, 701) ORDER BY id
+id:int4 | r:3904
+11 | [700,701)
+1003 | [290,)
+-- SELECT 2
+
+> SET enable_indexscan = off
+-- SET
+
+> SELECT id FROM a103_r WHERE r && int4range(20, 22) OR ts @> timestamp '2026-01-04 00:30' ORDER BY id
+id:int4
+18
+19
+20
+21
+71
+72
+1002
+-- SELECT 7
+
+> SELECT count(*) FROM a103_r WHERE r && int4range(1, 200) AND d @> date '2026-03-01'
+count:int8
+58
+-- SELECT 1
+
+> RESET enable_indexscan
+-- RESET
+
+> CREATE TABLE a103_g (id int, b box, p point, c circle, pg polygon)
+-- CREATE TABLE
+
+> INSERT INTO a103_g SELECT g, box(point(g % 20, g / 20), point(g % 20 + 1.5, g / 20 + 1.5)), point(g % 20, g / 20),
+>   circle(point(g % 20, g / 20), 0.5), polygon(box(point(g % 20, g / 20), point(g % 20 + 0.5, g / 20 + 2))) FROM generate_series(0, 399) g
+-- INSERT 0 400
+
+> INSERT INTO a103_g VALUES (900, '(1e-7,1e-7),(0,0)', '(5.0000001,5)', '<(0,0),0>', '((0,0),(0,0),(0,0))'), (901, NULL, NULL, NULL, NULL)
+-- INSERT 0 2
+
+> CREATE INDEX a103_g_b ON a103_g USING gist (b)
+-- CREATE INDEX
+
+> CREATE INDEX a103_g_p ON a103_g USING spgist (p)
+-- CREATE INDEX
+
+> CREATE INDEX a103_g_c ON a103_g USING gist (c)
+-- CREATE INDEX
+
+> CREATE INDEX a103_g_pg ON a103_g USING gist (pg)
+-- CREATE INDEX
+
+> ANALYZE a103_g
+-- ANALYZE
+
+> SELECT id FROM a103_g WHERE b && box(point(3, 3), point(4, 4)) ORDER BY id
+id:int4
+42
+43
+44
+62
+63
+64
+82
+83
+84
+-- SELECT 9
+
+> SELECT id FROM a103_g WHERE b @> box(point(3.2, 3.2), point(3.4, 3.4)) ORDER BY id
+id:int4
+42
+43
+62
+63
+-- SELECT 4
+
+> SELECT id FROM a103_g WHERE b <@ box(point(0, 0), point(3, 2)) ORDER BY id
+id:int4
+0
+1
+900
+-- SELECT 3
+
+> SELECT id FROM a103_g WHERE b ~= box(point(5, 5), point(6.5, 6.5)) ORDER BY id
+id:int4
+105
+-- SELECT 1
+
+> SELECT id FROM a103_g WHERE b << box(point(1, 18), point(2, 19)) ORDER BY id
+id:int4
+900
+-- SELECT 1
+
+> SELECT id FROM a103_g WHERE b >> box(point(17, 0), point(17.6, 0.1)) AND id < 30 ORDER BY id
+id:int4
+18
+19
+-- SELECT 2
+
+> SELECT id FROM a103_g WHERE b <<| box(point(0, 0.5), point(1, 1)) ORDER BY id
+id:int4
+900
+-- SELECT 1
+
+> SELECT id FROM a103_g WHERE b |>> box(point(0, 18), point(1, 18.4)) AND id > 370 ORDER BY id
+id:int4
+380
+381
+382
+383
+384
+385
+386
+387
+388
+389
+390
+391
+392
+393
+394
+395
+396
+397
+398
+399
+-- SELECT 20
+
+> SELECT id FROM a103_g WHERE b &< box(point(0, 0), point(1.5, 1)) AND id < 45 ORDER BY id
+id:int4
+0
+20
+40
+-- SELECT 3
+
+> SELECT id FROM a103_g WHERE b &> box(point(18.5, 0), point(19, 1)) AND id < 45 ORDER BY id
+id:int4
+19
+39
+-- SELECT 2
+
+> SELECT id FROM a103_g WHERE b && box(point(0, 0), point(0, 0)) ORDER BY id
+id:int4
+0
+900
+-- SELECT 2
+
+> SELECT id FROM a103_g WHERE p <@ box(point(4, 4), point(5, 5)) ORDER BY id
+id:int4
+84
+85
+104
+105
+-- SELECT 4
+
+> SELECT id FROM a103_g WHERE p ~= point(5, 5) ORDER BY id
+id:int4
+105
+900
+-- SELECT 2
+
+> SELECT id FROM a103_g WHERE p << point(1, 0) AND id < 50 ORDER BY id
+id:int4
+0
+20
+40
+-- SELECT 3
+
+> SELECT id FROM a103_g WHERE p <^ point(0, 1) ORDER BY id
+id:int4
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+-- SELECT 20
+
+> SELECT id FROM a103_g WHERE p >^ point(0, 18) ORDER BY id
+id:int4
+380
+381
+382
+383
+384
+385
+386
+387
+388
+389
+390
+391
+392
+393
+394
+395
+396
+397
+398
+399
+-- SELECT 20
+
+> SELECT id FROM a103_g WHERE p <@ circle(point(10, 10), 1.01) ORDER BY id
+id:int4
+190
+209
+210
+211
+230
+-- SELECT 5
+
+> SELECT id FROM a103_g WHERE p <@ polygon '((0,0),(2,0),(0,2))' ORDER BY id
+id:int4
+0
+1
+2
+20
+21
+40
+-- SELECT 6
+
+> SELECT id FROM a103_g WHERE c && circle(point(3, 3), 0.1) ORDER BY id
+id:int4
+63
+-- SELECT 1
+
+> SELECT id FROM a103_g WHERE c @> point(7.2, 7.2) ORDER BY id
+id:int4
+147
+-- SELECT 1
+
+> SELECT id FROM a103_g WHERE pg && polygon '((1,1),(1.2,1),(1.2,1.2))' ORDER BY id
+id:int4
+1
+21
+-- SELECT 2
+
+> SELECT id FROM a103_g WHERE pg @> point(4.25, 5.5) ORDER BY id
+id:int4
+84
+104
+-- SELECT 2
+
+> SELECT id FROM a103_g WHERE pg <@ polygon '((0,0),(3,0),(3,3),(0,3))' ORDER BY id
+id:int4
+0
+1
+2
+20
+21
+22
+900
+-- SELECT 7
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE TABLE a103_b (ts timestamptz, v int)
+-- CREATE TABLE
+
+> INSERT INTO a103_b SELECT timestamptz '2026-01-01 00:00+00' + g * interval '1 min', g FROM generate_series(1, 5000) g
+-- INSERT 0 5000
+
+> CREATE INDEX a103_b_ts ON a103_b USING brin (ts) WITH (pages_per_range = 2)
+-- CREATE INDEX
+
+> CREATE INDEX a103_b_v ON a103_b USING brin (v)
+-- CREATE INDEX
+
+> ANALYZE a103_b
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT count(*), min(v), max(v) FROM a103_b WHERE ts >= '2026-01-02 00:00+00' AND ts < '2026-01-02 01:00+00'
+count:int8 | min:int4 | max:int4
+60 | 1440 | 1499
+-- SELECT 1
+
+> SELECT count(*) FROM a103_b WHERE v = 77
+count:int8
+1
+-- SELECT 1
+
+> SELECT count(*) FROM a103_b WHERE v < 10 OR v > 4990
+count:int8
+19
+-- SELECT 1
+
+> UPDATE a103_b SET v = -v WHERE v % 1000 = 0
+-- UPDATE 5
+
+> SELECT v FROM a103_b WHERE v < 0 ORDER BY v
+v:int4
+-5000
+-4000
+-3000
+-2000
+-1000
+-- SELECT 5
+
+> RESET enable_seqscan
+-- RESET
+
+> CREATE TABLE a103_book (id serial, room int, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&))
+-- CREATE TABLE
+
+> INSERT INTO a103_book (room, during) SELECT g % 10, tsrange(timestamp '2026-01-01' + g * interval '1 h', timestamp '2026-01-01' + (g + 10) * interval '1 h')
+>   FROM generate_series(0, 399, 10) g
+-- INSERT 0 40
+
+> INSERT INTO a103_book (room, during) VALUES (0, '[2026-01-01 05:00, 2026-01-01 06:00)')
+ERROR 23P01: conflicting key value violates exclusion constraint "a103_book_room_during_excl"
+DETAIL: Key (room, during)=(0, ["2026-01-01 05:00:00","2026-01-01 06:00:00")) conflicts with existing key (room, during)=(0, ["2026-01-01 00:00:00","2026-01-01 10:00:00")).
+OBJECTS: schema=public table=a103_book constraint=a103_book_room_during_excl
+
+> INSERT INTO a103_book (room, during) VALUES (0, '[2026-01-01 10:00, 2026-01-01 11:00)')
+ERROR 23P01: conflicting key value violates exclusion constraint "a103_book_room_during_excl"
+DETAIL: Key (room, during)=(0, ["2026-01-01 10:00:00","2026-01-01 11:00:00")) conflicts with existing key (room, during)=(0, ["2026-01-01 10:00:00","2026-01-01 20:00:00")).
+OBJECTS: schema=public table=a103_book constraint=a103_book_room_during_excl
+
+> INSERT INTO a103_book (room, during) VALUES (1, '[2026-01-01 05:00, 2026-01-01 06:00)')
+-- INSERT 0 1
+
+> INSERT INTO a103_book (room, during) VALUES (3, '(,)')
+-- INSERT 0 1
+
+> INSERT INTO a103_book (room, during) VALUES (5, 'empty'), (5, 'empty')
+-- INSERT 0 2
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a103_book (room, during) VALUES (11, '[2026-02-01, 2026-02-02)')
+-- INSERT 0 1
+
+> INSERT INTO a103_book (room, during) VALUES (11, '[2026-02-01 12:00, 2026-02-03)')
+ERROR 23P01: conflicting key value violates exclusion constraint "a103_book_room_during_excl"
+DETAIL: Key (room, during)=(11, ["2026-02-01 12:00:00","2026-02-03 00:00:00")) conflicts with existing key (room, during)=(11, ["2026-02-01 00:00:00","2026-02-02 00:00:00")).
+OBJECTS: schema=public table=a103_book constraint=a103_book_room_during_excl
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM a103_book WHERE room = 2 AND during @> timestamp '2026-01-01 21:00'
+-- DELETE 0
+
+> INSERT INTO a103_book (room, during) VALUES (2, '[2026-01-01 21:00, 2026-01-01 22:00)')
+-- INSERT 0 1
+
+> UPDATE a103_book SET during = '[2026-01-01 05:30, 2026-01-01 05:45)' WHERE room = 2 AND during @> timestamp '2026-01-01 21:30'
+-- UPDATE 1
+
+> COMMIT
+-- COMMIT
+
+> UPDATE a103_book SET room = 4 WHERE during @> timestamp '2026-01-01 21:30'
+ERROR 23P01: conflicting key value violates exclusion constraint "a103_book_room_during_excl"
+DETAIL: Key (room, during)=(4, (,)) conflicts with existing key (room, during)=(4, ["2026-01-01 20:00:00","2026-01-02 06:00:00")).
+OBJECTS: schema=public table=a103_book constraint=a103_book_room_during_excl
+
+> INSERT INTO a103_book (room, during) VALUES (7, '[2026-01-01 05:00, 2026-01-01 06:00)') ON CONFLICT DO NOTHING
+-- INSERT 0 1
+
+> INSERT INTO a103_book (room, during) VALUES (7, '[2026-01-03 05:00, 2026-01-03 06:00)') ON CONFLICT DO NOTHING
+-- INSERT 0 1
+
+> SELECT room, during FROM a103_book WHERE room IN (0, 2, 4, 7) ORDER BY room, during
+room:int4 | during:3908
+0 | ["2026-01-01 00:00:00","2026-01-01 10:00:00")
+0 | ["2026-01-01 10:00:00","2026-01-01 20:00:00")
+0 | ["2026-01-01 20:00:00","2026-01-02 06:00:00")
+0 | ["2026-01-02 06:00:00","2026-01-02 16:00:00")
+0 | ["2026-01-02 16:00:00","2026-01-03 02:00:00")
+0 | ["2026-01-03 02:00:00","2026-01-03 12:00:00")
+0 | ["2026-01-03 12:00:00","2026-01-03 22:00:00")
+0 | ["2026-01-03 22:00:00","2026-01-04 08:00:00")
+0 | ["2026-01-04 08:00:00","2026-01-04 18:00:00")
+0 | ["2026-01-04 18:00:00","2026-01-05 04:00:00")
+0 | ["2026-01-05 04:00:00","2026-01-05 14:00:00")
+0 | ["2026-01-05 14:00:00","2026-01-06 00:00:00")
+0 | ["2026-01-06 00:00:00","2026-01-06 10:00:00")
+0 | ["2026-01-06 10:00:00","2026-01-06 20:00:00")
+0 | ["2026-01-06 20:00:00","2026-01-07 06:00:00")
+0 | ["2026-01-07 06:00:00","2026-01-07 16:00:00")
+0 | ["2026-01-07 16:00:00","2026-01-08 02:00:00")
+0 | ["2026-01-08 02:00:00","2026-01-08 12:00:00")
+0 | ["2026-01-08 12:00:00","2026-01-08 22:00:00")
+0 | ["2026-01-08 22:00:00","2026-01-09 08:00:00")
+0 | ["2026-01-09 08:00:00","2026-01-09 18:00:00")
+0 | ["2026-01-09 18:00:00","2026-01-10 04:00:00")
+0 | ["2026-01-10 04:00:00","2026-01-10 14:00:00")
+0 | ["2026-01-10 14:00:00","2026-01-11 00:00:00")
+0 | ["2026-01-11 00:00:00","2026-01-11 10:00:00")
+0 | ["2026-01-11 10:00:00","2026-01-11 20:00:00")
+0 | ["2026-01-11 20:00:00","2026-01-12 06:00:00")
+0 | ["2026-01-12 06:00:00","2026-01-12 16:00:00")
+0 | ["2026-01-12 16:00:00","2026-01-13 02:00:00")
+0 | ["2026-01-13 02:00:00","2026-01-13 12:00:00")
+0 | ["2026-01-13 12:00:00","2026-01-13 22:00:00")
+0 | ["2026-01-13 22:00:00","2026-01-14 08:00:00")
+0 | ["2026-01-14 08:00:00","2026-01-14 18:00:00")
+0 | ["2026-01-14 18:00:00","2026-01-15 04:00:00")
+0 | ["2026-01-15 04:00:00","2026-01-15 14:00:00")
+0 | ["2026-01-15 14:00:00","2026-01-16 00:00:00")
+0 | ["2026-01-16 00:00:00","2026-01-16 10:00:00")
+0 | ["2026-01-16 10:00:00","2026-01-16 20:00:00")
+0 | ["2026-01-16 20:00:00","2026-01-17 06:00:00")
+0 | ["2026-01-17 06:00:00","2026-01-17 16:00:00")
+2 | ["2026-01-01 05:30:00","2026-01-01 05:45:00")
+7 | ["2026-01-01 05:00:00","2026-01-01 06:00:00")
+7 | ["2026-01-03 05:00:00","2026-01-03 06:00:00")
+-- SELECT 43
+
+> CREATE TABLE a103_book2 (id int, c circle, EXCLUDE USING gist (c WITH &&))
+-- CREATE TABLE
+
+> INSERT INTO a103_book2 SELECT g, circle(point(g * 3, 0), 1) FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> INSERT INTO a103_book2 VALUES (500, '<(31,1),0.5>')
+ERROR 23P01: conflicting key value violates exclusion constraint "a103_book2_c_excl"
+DETAIL: Key (c)=(<(31,1),0.5>) conflicts with existing key (c)=(<(30,0),1>).
+OBJECTS: schema=public table=a103_book2 constraint=a103_book2_c_excl
+
+> INSERT INTO a103_book2 VALUES (501, '<(32.5,1.8),0.4>')
+-- INSERT 0 1
+
+> DELETE FROM a103_r WHERE id > 1000 OR (id > 1 AND id % 7 <> 0)
+-- DELETE 260
+
+> ALTER TABLE a103_r ADD CONSTRAINT a103_r_excl EXCLUDE USING gist (r WITH &&)
+-- ALTER TABLE
+
+> INSERT INTO a103_r (id, r) VALUES (3000, int4range(8, 9))
+ERROR 23P01: conflicting key value violates exclusion constraint "a103_r_excl"
+DETAIL: Key (r)=([8,9)) conflicts with existing key (r)=([7,10)).
+OBJECTS: schema=public table=a103_r constraint=a103_r_excl
+
+> INSERT INTO a103_r (id, r) VALUES (3001, int4range(5, 7))
+-- INSERT 0 1
+
+> DROP TABLE a103_r, a103_g, a103_b, a103_book, a103_book2
+-- DROP TABLE
+
+> CREATE EXTENSION IF NOT EXISTS pg_trgm
+-- CREATE EXTENSION
+
+> CREATE TABLE a103_w (id int, w text)
+-- CREATE TABLE
+
+> INSERT INTO a103_w SELECT g, md5(g::text) || CASE WHEN g % 50 = 0 THEN ' Hello-World x' ELSE '' END FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> INSERT INTO a103_w VALUES (5000, NULL), (5001, ''), (5002, 'ab'), (5003, 'Ünïcode abc1 straße'), (5004, 'a\b%c_d')
+-- INSERT 0 5
+
+> CREATE INDEX a103_w_gin ON a103_w USING gin (w gin_trgm_ops)
+-- CREATE INDEX
+
+> CREATE TABLE a103_w2 (id int, w varchar(80))
+-- CREATE TABLE
+
+> INSERT INTO a103_w2 SELECT * FROM a103_w
+-- INSERT 0 2005
+
+> CREATE INDEX a103_w2_gist ON a103_w2 USING gist (w gist_trgm_ops)
+-- CREATE INDEX
+
+> ANALYZE a103_w, a103_w2
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT id FROM a103_w WHERE w LIKE '%abc1%' ORDER BY id
+id:int4
+154
+5003
+-- SELECT 2
+
+> SELECT id FROM a103_w WHERE w ILIKE '%HELLO-wor%' ORDER BY id LIMIT 5
+id:int4
+50
+100
+150
+200
+250
+-- SELECT 5
+
+> SELECT count(*) FROM a103_w WHERE w LIKE '%hello%'
+count:int8
+0
+-- SELECT 1
+
+> SELECT id FROM a103_w WHERE w LIKE 'c4ca%' ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM a103_w WHERE w LIKE '%stra%e%' ORDER BY id
+id:int4
+5003
+-- SELECT 1
+
+> SELECT id FROM a103_w WHERE w LIKE '%\%c%' ORDER BY id
+id:int4
+5004
+-- SELECT 1
+
+> SELECT id FROM a103_w WHERE w LIKE '%ab%' AND id > 1990 ORDER BY id
+id:int4
+5002
+5003
+-- SELECT 2
+
+> SELECT id FROM a103_w2 WHERE w LIKE '%abc1%' ORDER BY id
+id:int4
+154
+5003
+-- SELECT 2
+
+> SELECT id FROM a103_w2 WHERE w ILIKE '%world x' ORDER BY id LIMIT 3
+id:int4
+50
+100
+150
+-- SELECT 3
+
+> SELECT id FROM a103_w2 WHERE w = 'c4ca4238a0b923820dcc509a6f75849b' ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> INSERT INTO a103_w VALUES (6000, 'zzabc1zz')
+-- INSERT 0 1
+
+> UPDATE a103_w SET w = 'nothing here' WHERE id = 5003
+-- UPDATE 1
+
+> SELECT id FROM a103_w WHERE w LIKE '%abc1%' ORDER BY id
+id:int4
+154
+6000
+-- SELECT 2
+
+> ROLLBACK
+-- ROLLBACK
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE a103_w, a103_w2
+-- DROP TABLE
+

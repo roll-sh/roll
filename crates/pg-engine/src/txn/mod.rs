@@ -7,6 +7,7 @@ pub mod locks;
 pub(crate) mod spill;
 pub mod ssi;
 pub mod twophase;
+pub mod watch;
 pub mod xids;
 
 use crate::catalog::{Catalog, Sequence, persist};
@@ -97,6 +98,8 @@ pub struct Database {
     /// move (the deletion that left the old partition): what a transaction waiting for one
     /// learns (Postgres's moved-partitions ctid).
     pub moved: Mutex<HashMap<Vec<u8>, u64>>,
+    /// Writes to tables structures are derived from, logged as they commit (`watch`).
+    pub watch: watch::Watch,
     seqs: Mutex<HashMap<u32, SeqState>>,
     next_txn: AtomicU64,
     /// Open sessions; the engine closes a database once it reaches 0 and stays idle.
@@ -195,6 +198,7 @@ impl Database {
             locks: LockManager::default(),
             ssi: Default::default(),
             moved: Mutex::new(HashMap::new()),
+            watch: Default::default(),
             seqs: Mutex::new(HashMap::new()),
             next_txn: AtomicU64::new(1),
             sessions: AtomicUsize::new(0),
@@ -368,6 +372,7 @@ impl Database {
             xmin: None,
             writes: BTreeMap::new(),
             journal: Vec::new(),
+            derived: HashMap::new(),
             journal_base: 0,
             runs: None,
             buf_bytes: 0,
@@ -799,6 +804,10 @@ pub struct Txn {
     journal: Vec<(Vec<u8>, Option<Ent>)>,
     /// The journal position of `journal[0]`: writes before it were spilled to `runs`.
     journal_base: usize,
+    /// Structures over this transaction's own writes (`exec::search`), by index: dropped by
+    /// a savepoint rollback or a spill, past which the journal positions they read to mean
+    /// nothing.
+    pub derived: HashMap<u32, Box<dyn std::any::Any + Send>>,
     /// The writes spilled so far (`spill`), every version (None: none yet).
     runs: Option<Box<Runs>>,
     /// About how many bytes `writes` and `journal` hold.
@@ -1332,6 +1341,7 @@ impl Txn {
     }
 
     fn spill(&mut self) -> Result<()> {
+        self.derived.clear();
         TXN_SPILLS.fetch_add(1, Ordering::Relaxed);
         let mut older: Vec<(Vec<u8>, Ent)> = self
             .journal
@@ -1775,6 +1785,29 @@ impl Txn {
     /// Scan [start, end) merging our buffered writes over the data committed as of `ts`.
     pub fn scan_at(&self, start: &[u8], end: &[u8], ts: u64) -> TxnScan {
         self.scan_overlay(start, end, ts, None)
+    }
+
+    /// The journal position the next write takes.
+    pub fn journal_pos(&self) -> usize {
+        self.journal_base + self.journal.len()
+    }
+
+    /// Each write at journal position `from` or later to a key in [start, end): the key,
+    /// its value now and the one the write replaced (both this transaction's; None:
+    /// deleted, or none). None: the journal before `from` was spilled.
+    #[allow(clippy::type_complexity)]
+    pub fn written_since(&self, start: &[u8], end: &[u8], from: usize) -> Option<Vec<(Vec<u8>, Option<Bytes>, Option<Bytes>)>> {
+        if from < self.journal_base || self.runs.is_some() {
+            return None;
+        }
+        let at = (from - self.journal_base).min(self.journal.len());
+        Some(
+            self.journal[at..]
+                .iter()
+                .filter(|(k, _)| k.as_slice() >= start && k.as_slice() < end)
+                .map(|(k, prev)| (k.clone(), self.writes.get(k).and_then(|e| e.v.clone()), prev.as_ref().and_then(|p| p.v.clone())))
+                .collect(),
+        )
     }
 
     /// Our writes in [start, end), as they are now (the spilled ones too).
@@ -2517,6 +2550,7 @@ impl Txn {
 
     /// ROLLBACK TO SAVEPOINT: undo writes after it; the savepoint stays.
     pub fn rollback_to(&mut self, name: &str) -> Result<()> {
+        self.derived.clear();
         let i = self.find_savepoint(name)?;
         if let Some(l) = &mut self.log {
             l.rolled_back();
@@ -2812,6 +2846,8 @@ impl Txn {
                     None => writes.push(rec),
                 }
             }
+            // (Under the commit lock, before the writes are visible: `watch`.)
+            db.watch.committing(writes);
             Ok(())
         };
         let db2 = self.db.clone();
@@ -2828,6 +2864,8 @@ impl Txn {
         };
         let result = if let Some((keys, mut stream)) = spilled {
             // (A snapshot transaction's conflict check, key by key as they are written.)
+            let store_watch = self.db.clone();
+            let store_watch = &store_watch.watch;
             let each = |store: &Store, k: &[u8]| -> Result<()> {
                 if strict && store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
                     return Err(Error::new(
@@ -2835,6 +2873,8 @@ impl Txn {
                         "could not serialize access due to concurrent update",
                     ));
                 }
+                // (Too many to log: the structures over its tables are dropped, `watch`.)
+                store_watch.committing_unlogged(k);
                 Ok(())
             };
             let mut catalog_records = std::mem::take(&mut writes);
@@ -3099,6 +3139,13 @@ pub struct Snap {
     /// The command it was taken for (the snapshot's curcid).
     pub cid: u32,
     st: RefCell<SnapState>,
+}
+
+impl Snap {
+    /// The store time its committed reads are at.
+    pub fn ts(&self) -> u64 {
+        self.st.borrow().ts
+    }
 }
 
 struct SnapState {

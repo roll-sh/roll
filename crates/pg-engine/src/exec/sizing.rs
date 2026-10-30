@@ -1957,9 +1957,21 @@ pub fn index_scanned(
     entries: bool,
     ctx: &ExecCtx,
 ) -> Option<Vec<(Tid, bool)>> {
-    let db = &ctx.sess.db;
-    let xids = db.xids();
+    let xids = ctx.sess.db.xids();
     let v = vis_for(&xids, table, ctx);
+    let ranges: Vec<_> = ranges.iter().map(|(lo, hi)| (lo.strip_prefix(prefix), hi.strip_prefix(prefix))).collect();
+    mark_passed(&ctx.sess.db, table, index, &v, &ranges, entries)
+}
+
+/// `index_scanned`'s marks over model key ranges (None: unbounded).
+fn mark_passed(
+    db: &Database,
+    table: u32,
+    index: u32,
+    v: &Vis,
+    ranges: &[(Option<&[u8]>, Option<&[u8]>)],
+    entries: bool,
+) -> Option<Vec<(Tid, bool)>> {
     // First under the read lock: an index whose entries have nothing to kill (the usual
     // case) changes nothing, and concurrent scans of it don't serialize.
     {
@@ -1967,11 +1979,11 @@ pub fn index_scanned(
         let (Some(heap), Some(bt)) = (rf.heaps.get(&table), rf.btrees.get(&index)) else {
             return None;
         };
-        let all_dead = |t: Tid| heap.chain_dead(t, &v);
+        let all_dead = |t: Tid| heap.chain_dead(t, v);
         let mut seen = entries.then(Vec::new);
         let mut kill = false;
         for (lo, hi) in ranges {
-            if bt.kill_needed(lo.strip_prefix(prefix), hi.strip_prefix(prefix), &all_dead, seen.as_mut()) {
+            if bt.kill_needed(*lo, *hi, &all_dead, seen.as_mut()) {
                 kill = true;
                 break;
             }
@@ -1985,14 +1997,135 @@ pub fn index_scanned(
     let (Some(heap), Some(bt)) = (rf.heaps.get(&table), rf.btrees.get_mut(&index)) else {
         return None;
     };
-    let all_dead = |t: Tid| heap.chain_dead(t, &v);
+    let all_dead = |t: Tid| heap.chain_dead(t, v);
     let mut seen = entries.then(Vec::new);
     for (lo, hi) in ranges {
-        let lo = lo.strip_prefix(prefix);
-        let hi = hi.strip_prefix(prefix);
-        bt.kill(lo, hi, &all_dead, seen.as_mut());
+        bt.kill(*lo, *hi, &all_dead, seen.as_mut());
     }
     seen.map(|s| s.into_iter().map(|t| (t, !heap.page_all_visible(t.0))).collect())
+}
+
+/// `index_scanned` as the scan goes: kill_prior_tuple marks only the entries an index scan
+/// passes, so one a LIMIT stops leaves the rest of its ranges alone. The scan reports the
+/// key columns of each row it returns (`passed`) and when it has returned them all
+/// (`done`); the entries passed are marked a batch at a time, a range's rest once a row
+/// past it comes out, and those up to the last row's (its equal keys too) when the scan is
+/// dropped before its end.
+pub struct Kills {
+    db: Arc<Database>,
+    table: u32,
+    index: u32,
+    prefix: Vec<u8>,
+    /// A temporary table's: the transaction's xid (`vis_for`).
+    temp: Option<Option<u64>>,
+    rev: bool,
+    /// The ranges not passed yet (model keys; None: unbounded), in scan order, and where
+    /// marking resumes in the first: from its start going forward, its end going backward.
+    ranges: std::collections::VecDeque<(Option<Vec<u8>>, Option<Vec<u8>>)>,
+    from: Option<Vec<u8>>,
+    /// The key columns of the last row returned in the first range, and keys returned
+    /// since the last marking.
+    at: Option<Vec<u8>>,
+    since: usize,
+    every: usize,
+}
+
+impl Kills {
+    /// A scan of storage key `ranges` (in the order it reads them). None: the index isn't
+    /// modelled.
+    pub fn new(table: u32, index: u32, prefix: &[u8], ranges: &[(Vec<u8>, Vec<u8>)], rev: bool, ctx: &ExecCtx) -> Option<Kills> {
+        if !ctx.sess.db.relfiles.read().btrees.contains_key(&index) {
+            return None;
+        }
+        let cat = ctx.catalog();
+        let temp = cat
+            .tables
+            .get(&table)
+            .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+            .then(|| ctx.txn.borrow().xid_if_assigned());
+        let strip = |k: &[u8]| k.strip_prefix(prefix).map(<[u8]>::to_vec);
+        let ranges = ranges.iter().map(|(lo, hi)| (strip(lo), strip(hi))).collect();
+        let mut k = Kills { db: ctx.sess.db.clone(), table, index, prefix: prefix.to_vec(), temp, rev, ranges, from: None, at: None, since: 0, every: 1 };
+        k.from = k.start();
+        Some(k)
+    }
+
+    /// Where the first range starts, in scan order.
+    fn start(&self) -> Option<Vec<u8>> {
+        let r = self.ranges.front()?;
+        if self.rev { r.1.clone() } else { r.0.clone() }
+    }
+
+    /// The rest of the first range, from where marking stopped.
+    fn rest(&mut self) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        let (lo, hi) = self.ranges.pop_front().unwrap_or_default();
+        let from = self.from.take();
+        self.from = self.start();
+        self.at = None;
+        if self.rev { (lo, from) } else { (from, hi) }
+    }
+
+    /// A row whose entry's key columns are `key` (a storage key, the index's prefix first)
+    /// comes out: the entries before it were passed.
+    pub fn passed(&mut self, key: &[u8]) {
+        let Some(k) = key.strip_prefix(&self.prefix[..]).map(<[u8]>::to_vec) else { return };
+        // Ranges the scan has gone past.
+        while let Some((lo, hi)) = self.ranges.front() {
+            let past = if self.rev { lo.as_ref().is_some_and(|lo| k < *lo) } else { hi.as_ref().is_some_and(|hi| k >= *hi) };
+            if !past {
+                break;
+            }
+            let r = self.rest();
+            self.mark(r);
+        }
+        if self.at.as_deref() != Some(&k[..]) {
+            self.since += 1;
+        }
+        if self.since >= self.every {
+            self.since = 0;
+            self.every = (self.every * 2).min(1024);
+            // (Strictly before the key going forward, after it going backward: a long run
+            // of equal keys is walked once, after it.)
+            let next = if self.rev { prefix_end(&k) } else { k.clone() };
+            let r = if self.rev { (Some(next.clone()), self.from.take()) } else { (self.from.take(), Some(next.clone())) };
+            self.mark(r);
+            self.from = Some(next);
+        }
+        self.at = Some(k);
+    }
+
+    /// The scan returned its last row: every range was read to its end.
+    pub fn done(&mut self) {
+        while !self.ranges.is_empty() {
+            let r = self.rest();
+            self.mark(r);
+        }
+    }
+
+    fn mark(&self, (lo, hi): (Option<Vec<u8>>, Option<Vec<u8>>)) {
+        if let (Some(l), Some(h)) = (&lo, &hi)
+            && l >= h
+        {
+            return;
+        }
+        let xids = self.db.xids();
+        let v = match self.temp {
+            Some(xid) => Vis::temp(&xids, xid),
+            None => Vis::new(&xids),
+        };
+        mark_passed(&self.db, self.table, self.index, &v, &[(lo.as_deref(), hi.as_deref())], false);
+    }
+}
+
+impl Drop for Kills {
+    /// Stopped before its end: the entries up to the last row's were passed.
+    fn drop(&mut self) {
+        if let Some(at) = self.at.take() {
+            let from = self.from.take();
+            let r = if self.rev { (Some(at), from) } else { (from, Some(prefix_end(&at))) };
+            self.mark(r);
+        }
+    }
 }
 
 /// What gave relation `rel` new storage (TRUNCATE, a rewrite) rolled back: its old files
@@ -2256,7 +2389,7 @@ fn gin_index_pages(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<u64>> {
-    Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks()))
+    model_pages(bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))
 }
 
 /// The GIN index as its pages hold it now (None: not modelled).
@@ -2418,7 +2551,42 @@ fn gist_index_pages(
     indexes: &[BoundIndex],
     ctx: &ExecCtx,
 ) -> Result<Option<u64>> {
-    Ok(gist_model(t, bix, indexes, ctx)?.map(|(g, _)| g.nblocks()))
+    model_pages(bix.index.oid, ctx, || Ok(gist_model(t, bix, indexes, ctx)?.map(|(g, _)| g.nblocks())))
+}
+
+thread_local! {
+    /// GIN and GiST models' page counts, by index, with what they were computed from.
+    static MODEL_PAGES: std::cell::RefCell<HashMap<u32, ((u64, u64, u64, u64, usize), Option<u64>)>> = Default::default();
+}
+
+/// A GIN or GiST index's modelled pages (`pages`, which reads every row of its table):
+/// computed again only when something it depends on may have changed: the snapshot, the
+/// catalog, the index's build history. (Not cached for a transaction with writes of its
+/// own, which a savepoint rollback may undo.) The planner asks for them on every plan.
+fn model_pages(index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<u64>>) -> Result<Option<u64>> {
+    let (writes, id) = {
+        let txn = ctx.txn.borrow();
+        (txn.journal_pos() > 0 || txn.has_writes(), txn.id)
+    };
+    if writes {
+        return pages();
+    }
+    let history = ctx.sess.db.relfiles.read().gin_built.get(&index).map_or(0, |h| h.len());
+    // (The rows it reads are the snapshot's: `txn.scan`.)
+    let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
+    let key = (ctx.sess.db.instance, snap, ctx.catalog().version, id, history);
+    if let Some(n) = MODEL_PAGES.with(|m| m.borrow().get(&index).filter(|(k, _)| *k == key).map(|(_, n)| *n)) {
+        return Ok(n);
+    }
+    let n = pages()?;
+    MODEL_PAGES.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 1024 {
+            m.clear();
+        }
+        m.insert(index, (key, n));
+    });
+    Ok(n)
 }
 
 /// A GiST index scan of a modelled point_ops or range_ops index: the data keys of the rows
@@ -2688,6 +2856,8 @@ pub fn dropped(oids: &[u32], db: &Database) {
         rf.hash_est.remove(o);
         rf.gin_built.remove(o);
         rf.brin.remove(o);
+        // (A dropped table's search structures: `exec::search`.)
+        db.watch.forget(*o);
     }
 }
 
@@ -3272,6 +3442,11 @@ pub fn entry_pages(
 }
 
 /// A btree index's size in pages, if modelled.
+/// Modelled btree `index`'s index tuples with key attributes `key` (`Btree::postings`).
+pub fn btree_postings(index: u32, key: &[u8], db: &Database) -> Option<Vec<Vec<Tid>>> {
+    Some(db.relfiles.read().btrees.get(&index)?.postings(key))
+}
+
 pub fn btree_blocks(index: u32, db: &Database) -> Option<u32> {
     db.relfiles.read().btrees.get(&index).map(Btree::nblocks)
 }

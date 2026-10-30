@@ -414,7 +414,9 @@ where the reference does: 20 waits, 27 errors, 19 notifications.)
   could cover, not just the entries a LIMIT 1 scan reads, so a que-style fetch over a 3,000
   row queue costs about 10 ms (PostgreSQL: 0.3 ms); and a GiST exclusion constraint's
   check reads every row of the table (`exclusion_conflict` without a leading `=`): 3,000
-  non-overlapping ranges insert in 37 s in a debug build, PostgreSQL 0.2 s. Planner, found
+  non-overlapping ranges insert in 37 s in a debug build, PostgreSQL 0.2 s. (Both done in
+  round 22, agent 103: lazy LP_DEAD marking and search structures, HANDOFF "Index access
+  at index cost"; spec `roll-search-structures`.) Planner, found
   on the way: an UPDATE inside a WITH whose `id IN (SELECT ... LIMIT n)` PostgreSQL joins
   by unique-ifying the sub-select (HashAggregate, Nested Loop over the pkey) plans as a
   Hash Semi Join over a scan of the whole table, though it costs it higher (graphile-worker's

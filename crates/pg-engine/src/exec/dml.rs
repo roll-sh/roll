@@ -1141,8 +1141,31 @@ pub fn exclusion_conflict(
             }
             rows
         } else {
-            let start = index_prefix(t.oid, 0);
-            ctx.txn.borrow().scan_latest(&start, &prefix_end(&start)).collect::<Result<_>>()?
+            // The rows the index's search structure places near ours (`search`), else
+            // every row.
+            let conds: Vec<(usize, &str, Value)> = ops
+                .iter()
+                .enumerate()
+                .filter_map(|(i, op)| match op {
+                    crate::sql::expr::Expr::Call(def, args, _) if args.len() == 2 => Some((i, def.name, vals[i].clone())),
+                    _ => None,
+                })
+                .collect();
+            match super::search::candidates(t, bix, &conds, None, ctx)? {
+                Some(super::search::Found::Keys(dkeys)) => {
+                    let mut rows = Vec::with_capacity(dkeys.len());
+                    for dkey in dkeys {
+                        if let Some((_, Some(bytes))) = ctx.txn.borrow().get_latest(&dkey)? {
+                            rows.push((dkey, bytes));
+                        }
+                    }
+                    rows
+                }
+                _ => {
+                    let start = index_prefix(t.oid, 0);
+                    ctx.txn.borrow().scan_latest(&start, &prefix_end(&start)).collect::<Result<_>>()?
+                }
+            }
         };
         let mut modified = None;
         for (dkey, bytes) in rows {

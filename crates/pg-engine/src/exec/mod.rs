@@ -16,6 +16,7 @@ pub mod pghash;
 pub mod pipe;
 pub mod pgstat;
 pub mod pgsort;
+pub mod search;
 pub mod sizing;
 pub mod replication;
 pub mod trigger;
@@ -1162,7 +1163,10 @@ impl<'a> ExecCtx<'a> {
             if let Some(r) = self.subq_cache.borrow().get(&s.id) {
                 return Ok(r.clone());
             }
-            let rows = Rc::new(collect(&s.plan, self, None)?);
+            // (Read as far as its kind needs, as ExecSetParamPlan does: an EXISTS initplan
+            // stops at its first row. Every use of one subquery is of its one kind, so it
+            // always asks for as many.)
+            let rows = Rc::new(collect(&s.plan, self, limit)?);
             self.subq_cache.borrow_mut().insert(s.id, rows.clone());
             return Ok(rows);
         }

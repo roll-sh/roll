@@ -8,6 +8,7 @@
 //! ddl, scale, idle,
 //! startup, startup-catalog, vector (pgvector). Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
 
+mod access;
 mod tpch;
 
 use bytes::BytesMut;
@@ -1459,6 +1460,8 @@ fn main() {
             "stream-load" => stream_load(&cx),
             "stream" => stream(&cx),
             "vector" => vector_bench(&cx),
+            "access-load" => access::load(&cx),
+            "access" => access::run(&cx),
             "ddl" => ddl(&cx),
             "scale" => scale(&cx),
             "scale-ops" => scale_ops(&cx),

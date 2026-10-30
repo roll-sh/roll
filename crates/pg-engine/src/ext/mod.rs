@@ -29,7 +29,7 @@ mod isn;
 mod lo;
 mod ltree;
 mod pg_buffercache;
-mod pg_trgm;
+pub(crate) mod pg_trgm;
 mod pgcrypto;
 pub(crate) mod relinfo;
 mod pgrowlocks;

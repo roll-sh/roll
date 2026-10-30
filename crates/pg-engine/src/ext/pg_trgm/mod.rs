@@ -4,7 +4,7 @@
 //! classes' support functions are never called with keys; called from SQL they fail as
 //! PostgreSQL's do.
 
-mod trgm;
+pub(crate) mod trgm;
 mod word;
 
 use super::native::Native;
