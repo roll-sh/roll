@@ -2226,15 +2226,22 @@ impl<'b, 'a> Binder<'b, 'a> {
     /// `folded`, the constant `e` folds into, keeps the collation `e` derives when that
     /// isn't its type's default (a name's C through a cast to text, say).
     pub(crate) fn note_const_coll(&mut self, e: &Expr, folded: &Expr) {
+        if !matches!(folded, Expr::Const(Value::Text(_), ty) if ty.collatable()) {
+            return;
+        }
+        if let Ok(c) = self.collation_of(e) {
+            self.note_coll_of(folded, c);
+        }
+    }
+
+    /// `folded`, a constant, keeps the collation `c` when that isn't its type's default.
+    pub(crate) fn note_coll_of(&mut self, folded: &Expr, c: Coll) {
         let Expr::Const(v @ Value::Text(t), ty) = folded else {
             return;
         };
         if !ty.collatable() {
             return;
         }
-        let Ok(c) = self.collation_of(e) else {
-            return;
-        };
         let default = ty.default_collation().unwrap_or_default();
         if matches!(&c, Coll::None) || matches!(&c, Coll::Implicit(n) if n == default) {
             return;

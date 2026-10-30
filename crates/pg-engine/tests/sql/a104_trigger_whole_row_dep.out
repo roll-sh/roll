@@ -1,0 +1,77 @@
+> CREATE TABLE a104_tw (id int, a int, b int, c text)
+-- CREATE TABLE
+
+> CREATE TABLE a104_twlog (tg text, v text)
+-- CREATE TABLE
+
+> CREATE FUNCTION a104_twf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO a104_twlog VALUES (TG_NAME, NEW::text); RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a104_tw1 AFTER UPDATE ON a104_tw FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION a104_twf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER a104_tw2 AFTER UPDATE ON a104_tw FOR EACH ROW WHEN (OLD.a IS DISTINCT FROM NEW.a) EXECUTE FUNCTION a104_twf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER a104_tw3 AFTER UPDATE OF b ON a104_tw FOR EACH ROW EXECUTE FUNCTION a104_twf()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER a104_tw4 BEFORE UPDATE ON a104_tw FOR EACH ROW WHEN (NEW.* IS NOT DISTINCT FROM OLD.* AND OLD.c IS NOT NULL) EXECUTE FUNCTION a104_twf()
+-- CREATE TRIGGER
+
+> SELECT tgname, objsubid, refobjsubid, deptype FROM pg_depend d JOIN pg_trigger t ON t.oid = d.objid WHERE d.classid = 'pg_trigger'::regclass AND t.tgrelid = 'a104_tw'::regclass AND d.refclassid = 'pg_class'::regclass ORDER BY 1, 2, 3, 4
+tgname:name | objsubid:int4 | refobjsubid:int4 | deptype:char
+a104_tw1 | 0 | 0 | a
+a104_tw2 | 0 | 0 | a
+a104_tw2 | 0 | 2 | n
+a104_tw3 | 0 | 0 | a
+a104_tw3 | 0 | 3 | n
+a104_tw4 | 0 | 0 | a
+a104_tw4 | 0 | 4 | n
+-- SELECT 7
+
+> INSERT INTO a104_tw VALUES (1, 1, 1, 'x'), (2, 2, 2, NULL)
+-- INSERT 0 2
+
+> ALTER TABLE a104_tw DROP COLUMN a
+ERROR 2BP01: cannot drop column a of table a104_tw because other objects depend on it
+DETAIL: trigger a104_tw2 on table a104_tw depends on column a of table a104_tw
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE a104_tw DROP COLUMN c
+ERROR 2BP01: cannot drop column c of table a104_tw because other objects depend on it
+DETAIL: trigger a104_tw4 on table a104_tw depends on column c of table a104_tw
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> ALTER TABLE a104_tw DROP COLUMN b
+ERROR 2BP01: cannot drop column b of table a104_tw because other objects depend on it
+DETAIL: trigger a104_tw3 on table a104_tw depends on column b of table a104_tw
+HINT: Use DROP ... CASCADE to drop the dependent objects too.
+
+> SELECT tgname, pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'a104_tw'::regclass ORDER BY 1
+tgname:name | pg_get_triggerdef:text
+a104_tw1 | CREATE TRIGGER a104_tw1 AFTER UPDATE ON public.a104_tw FOR EACH ROW WHEN ((old.* IS DISTINCT FROM new.*)) EXECUTE FUNCTION a104_twf()
+a104_tw2 | CREATE TRIGGER a104_tw2 AFTER UPDATE ON public.a104_tw FOR EACH ROW WHEN ((old.a IS DISTINCT FROM new.a)) EXECUTE FUNCTION a104_twf()
+a104_tw3 | CREATE TRIGGER a104_tw3 AFTER UPDATE OF b ON public.a104_tw FOR EACH ROW EXECUTE FUNCTION a104_twf()
+a104_tw4 | CREATE TRIGGER a104_tw4 BEFORE UPDATE ON public.a104_tw FOR EACH ROW WHEN (((NOT (new.* IS DISTINCT FROM old.*)) AND (old.c IS NOT NULL))) EXECUTE FUNCTION a104_twf()
+-- SELECT 4
+
+> UPDATE a104_tw SET b = b + 1 WHERE id = 1
+-- UPDATE 1
+
+> UPDATE a104_tw SET b = b WHERE id = 2
+-- UPDATE 1
+
+> SELECT * FROM a104_twlog ORDER BY 1, 2
+tg:text | v:text
+a104_tw1 | (1,1,2,x)
+a104_tw3 | (1,1,2,x)
+a104_tw3 | (2,2,2,)
+-- SELECT 3
+
+> DROP TABLE a104_tw, a104_twlog
+-- DROP TABLE
+
+> DROP FUNCTION a104_twf()
+-- DROP FUNCTION
+

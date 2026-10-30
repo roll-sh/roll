@@ -496,9 +496,14 @@ impl Accum for AvgInt {
     }
 }
 
+/// IntervalAggState: the finite values' sum and count, the infinities counted apart (so a
+/// finite sum overflows whatever infinities come with it).
+#[derive(Default)]
 struct IntervalAgg {
-    sum: Option<Interval>,
+    sum: Interval,
     n: i64,
+    pinf: i64,
+    ninf: i64,
     avg: bool,
 }
 impl Accum for IntervalAgg {
@@ -506,24 +511,34 @@ impl Accum for IntervalAgg {
         let Value::Interval(i) = &a[0] else {
             return Ok(());
         };
-        self.sum = Some(match self.sum {
-            None => *i,
-            Some(s) => crate::types::datetime::interval_add(&s, i)?,
-        });
-        self.n += 1;
+        if i.is_neg_inf() {
+            self.ninf += 1;
+        } else if i.is_pos_inf() {
+            self.pinf += 1;
+        } else {
+            self.sum = crate::types::datetime::interval_add(&self.sum, i)?;
+            self.n += 1;
+        }
         Ok(())
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {
-        let Some(s) = self.sum else {
+        if self.n + self.pinf + self.ninf == 0 {
             return Ok(Value::Null);
-        };
-        if self.avg {
-            return Ok(Value::Interval(crate::types::datetime::interval_mul(
-                &s,
-                1.0 / self.n as f64,
-            )?));
         }
-        Ok(Value::Interval(s))
+        // (Infinities of both signs: no result.)
+        if self.pinf > 0 && self.ninf > 0 {
+            return Err(err!(DATETIME_FIELD_OVERFLOW, "interval out of range"));
+        }
+        if self.pinf > 0 {
+            return Ok(Value::Interval(Interval::POS_INF));
+        }
+        if self.ninf > 0 {
+            return Ok(Value::Interval(Interval::NEG_INF));
+        }
+        if self.avg {
+            return Ok(Value::Interval(crate::types::datetime::interval_div(&self.sum, self.n as f64)?));
+        }
+        Ok(Value::Interval(self.sum))
     }
 }
 
@@ -1297,11 +1312,7 @@ fn register(b: &mut Builder) {
         }))
     });
     b.norm("sum", vec![Interval(-1)], Interval(-1), |_| {
-        Ok(Box::new(IntervalAgg {
-            sum: None,
-            n: 0,
-            avg: false,
-        }))
+        Ok(Box::new(IntervalAgg::default()))
     });
     b.norm("sum", vec![Money], Money, |_| Ok(Box::new(MoneySum(None))));
     for t in [Int2, Int4, Int8] {
@@ -1321,11 +1332,7 @@ fn register(b: &mut Builder) {
         });
     }
     b.norm("avg", vec![Interval(-1)], Interval(-1), |_| {
-        Ok(Box::new(IntervalAgg {
-            sum: None,
-            n: 0,
-            avg: true,
-        }))
+        Ok(Box::new(IntervalAgg { avg: true, ..Default::default() }))
     });
     for (name, kind) in [
         ("variance", StatKind::VarSamp),

@@ -1,0 +1,45 @@
+> CREATE TYPE a104_ct AS (x int, y text)
+-- CREATE TYPE
+
+> CREATE TABLE a104_cj (id int, cs a104_ct[], c a104_ct)
+-- CREATE TABLE
+
+> INSERT INTO a104_cj VALUES (1, ARRAY[ROW(1, 'a')::a104_ct, ROW(NULL, 'b')::a104_ct], ROW(2, 'c')), (2, '{}', NULL), (3, NULL, ROW(NULL, NULL)), (4, '{"(5,q)",NULL}', '(6,r)')
+-- INSERT 0 4
+
+> SELECT id, to_jsonb(cs), to_json(cs), array_to_json(cs), to_jsonb(c), row_to_json(cs[1]) FROM a104_cj ORDER BY id
+id:int4 | to_jsonb:jsonb | to_json:json | array_to_json:json | to_jsonb:jsonb | row_to_json:json
+1 | [{"x": 1, "y": "a"}, {"x": null, "y": "b"}] | [{"x":1,"y":"a"},{"x":null,"y":"b"}] | [{"x":1,"y":"a"},{"x":null,"y":"b"}] | {"x": 2, "y": "c"} | {"x":1,"y":"a"}
+2 | [] | [] | [] | NULL | NULL
+3 | NULL | NULL | NULL | {"x": null, "y": null} | NULL
+4 | [{"x": 5, "y": "q"}, null] | [{"x":5,"y":"q"},null] | [{"x":5,"y":"q"},null] | {"x": 6, "y": "r"} | {"x":5,"y":"q"}
+-- SELECT 4
+
+> SELECT to_jsonb(ARRAY[ROW(1, 'a')::a104_ct]), to_json(ARRAY[ROW(1, 'a')::a104_ct])
+to_jsonb:jsonb | to_json:json
+[{"x": 1, "y": "a"}] | [{"x":1,"y":"a"}]
+-- SELECT 1
+
+> SELECT jsonb_agg(cs ORDER BY id), json_agg(cs ORDER BY id) FROM a104_cj
+jsonb_agg:jsonb | json_agg:json
+[[{"x": 1, "y": "a"}, {"x": null, "y": "b"}], [], null, [{"x": 5, "y": "q"}, null]] | [[{"x":1,"y":"a"},{"x":null,"y":"b"}], 
+ [], null, 
+ [{"x":5,"y":"q"},null]]
+-- SELECT 1
+
+> SELECT jsonb_build_object('k', cs), json_build_array(cs) FROM a104_cj WHERE id = 1
+jsonb_build_object:jsonb | json_build_array:json
+{"k": [{"x": 1, "y": "a"}, {"x": null, "y": "b"}]} | [[{"x":1,"y":"a"},{"x":null,"y":"b"}]]
+-- SELECT 1
+
+> SELECT to_jsonb(ARRAY[[ROW(1, 'a')::a104_ct], [ROW(2, 'b')::a104_ct]])
+to_jsonb:jsonb
+[[{"x": 1, "y": "a"}], [{"x": 2, "y": "b"}]]
+-- SELECT 1
+
+> DROP TABLE a104_cj
+-- DROP TABLE
+
+> DROP TYPE a104_ct
+-- DROP TYPE
+

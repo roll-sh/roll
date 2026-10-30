@@ -4,6 +4,7 @@
 use super::{FnCtx, Registry, Ret, SrfIter, int_arg, text, text_arg};
 use crate::error::{Error, Result, code};
 use crate::types::array::ArrayValue;
+use crate::types::collation::Collation;
 use crate::types::datetime;
 use crate::types::numeric::Numeric;
 use crate::types::text::format_value;
@@ -235,12 +236,21 @@ fn cardinality(a: &[Value], _: &FnCtx) -> Result<Value> {
         .unwrap_or(Value::Null))
 }
 
-fn eq(x: &Value, y: &Value) -> bool {
-    // NULL-aware "IS NOT DISTINCT FROM" for array searching.
+fn eq(c: Option<&Collation>, x: &Value, y: &Value) -> bool {
+    // NULL-aware "IS NOT DISTINCT FROM" for array searching, under the call's input
+    // collation (a nondeterministic one finds `'Z'` in `{z}`).
     match (x.is_null(), y.is_null()) {
         (true, true) => true,
-        (false, false) => x.cmp_total(y) == std::cmp::Ordering::Equal,
+        (false, false) => same(c, x, y),
         _ => false,
+    }
+}
+
+/// The element type's equality under the collation `c`.
+fn same(c: Option<&Collation>, x: &Value, y: &Value) -> bool {
+    match c {
+        Some(c) => crate::types::collation::eq_values(c, x, y),
+        None => x.cmp_total(y) == std::cmp::Ordering::Equal,
     }
 }
 
@@ -254,7 +264,7 @@ fn one_dim(x: &ArrayValue) -> Result<()> {
     Ok(())
 }
 
-fn array_position(a: &[Value], _: &FnCtx) -> Result<Value> {
+fn array_position(a: &[Value], c: &FnCtx) -> Result<Value> {
     let Some(x) = arr(&a[0]) else {
         return Ok(Value::Null);
     };
@@ -265,11 +275,11 @@ fn array_position(a: &[Value], _: &FnCtx) -> Result<Value> {
         .iter()
         .enumerate()
         .skip(start)
-        .find(|(_, v)| eq(v, &a[1]))
+        .find(|(_, v)| eq(c.coll, v, &a[1]))
         .map(|(i, _)| Value::Int4((i as i64 + lb) as i32))
         .unwrap_or(Value::Null))
 }
-fn array_positions(a: &[Value], _: &FnCtx) -> Result<Value> {
+fn array_positions(a: &[Value], c: &FnCtx) -> Result<Value> {
     let Some(x) = arr(&a[0]) else {
         return Ok(Value::Null);
     };
@@ -279,12 +289,12 @@ fn array_positions(a: &[Value], _: &FnCtx) -> Result<Value> {
         .items
         .iter()
         .enumerate()
-        .filter(|(_, v)| eq(v, &a[1]))
+        .filter(|(_, v)| eq(c.coll, v, &a[1]))
         .map(|(i, _)| Value::Int4((i as i64 + lb) as i32))
         .collect();
     Ok(mk(T::Int4, items))
 }
-fn array_remove(a: &[Value], _: &FnCtx) -> Result<Value> {
+fn array_remove(a: &[Value], c: &FnCtx) -> Result<Value> {
     let Some(x) = arr(&a[0]) else {
         return Ok(Value::Null);
     };
@@ -294,7 +304,7 @@ fn array_remove(a: &[Value], _: &FnCtx) -> Result<Value> {
             "removing elements from multidimensional arrays is not supported"
         );
     }
-    let items: Vec<Value> = x.items.iter().filter(|v| !eq(v, &a[1])).cloned().collect();
+    let items: Vec<Value> = x.items.iter().filter(|v| !eq(c.coll, v, &a[1])).cloned().collect();
     // (array_replace_internal: the result keeps the array's lower bound; none left is the
     // empty array.)
     match x.dims.first() {
@@ -306,13 +316,13 @@ fn array_remove(a: &[Value], _: &FnCtx) -> Result<Value> {
         _ => Ok(mk(x.elem.clone(), items)),
     }
 }
-fn array_replace(a: &[Value], _: &FnCtx) -> Result<Value> {
+fn array_replace(a: &[Value], c: &FnCtx) -> Result<Value> {
     let Some(x) = arr(&a[0]) else {
         return Ok(Value::Null);
     };
     let mut out = x.clone();
     for v in out.items.iter_mut() {
-        if eq(v, &a[1]) {
+        if eq(c.coll, v, &a[1]) {
             *v = a[2].clone();
         }
     }
@@ -594,36 +604,28 @@ fn array_sample(a: &[Value], c: &FnCtx) -> Result<Value> {
     })))
 }
 
-fn contains_all(x: &ArrayValue, y: &ArrayValue) -> bool {
-    y.items.iter().all(|v| {
-        !v.is_null()
-            && x.items
-                .iter()
-                .any(|w| !w.is_null() && w.cmp_total(v) == std::cmp::Ordering::Equal)
-    })
+fn contains_all(c: Option<&Collation>, x: &ArrayValue, y: &ArrayValue) -> bool {
+    y.items.iter().all(|v| !v.is_null() && x.items.iter().any(|w| !w.is_null() && same(c, w, v)))
 }
-fn op_contains(a: &[Value], _: &FnCtx) -> Result<Value> {
+fn op_contains(a: &[Value], c: &FnCtx) -> Result<Value> {
     let (Some(x), Some(y)) = (arr(&a[0]), arr(&a[1])) else {
         return Ok(Value::Null);
     };
-    Ok(Value::Bool(contains_all(x, y)))
+    Ok(Value::Bool(contains_all(c.coll, x, y)))
 }
-fn op_contained(a: &[Value], _: &FnCtx) -> Result<Value> {
+fn op_contained(a: &[Value], c: &FnCtx) -> Result<Value> {
     let (Some(x), Some(y)) = (arr(&a[0]), arr(&a[1])) else {
         return Ok(Value::Null);
     };
-    Ok(Value::Bool(contains_all(y, x)))
+    Ok(Value::Bool(contains_all(c.coll, y, x)))
 }
-fn op_overlap(a: &[Value], _: &FnCtx) -> Result<Value> {
+fn op_overlap(a: &[Value], c: &FnCtx) -> Result<Value> {
     let (Some(x), Some(y)) = (arr(&a[0]), arr(&a[1])) else {
         return Ok(Value::Null);
     };
-    Ok(Value::Bool(x.items.iter().any(|v| {
-        !v.is_null()
-            && y.items
-                .iter()
-                .any(|w| !w.is_null() && w.cmp_total(v) == std::cmp::Ordering::Equal)
-    })))
+    Ok(Value::Bool(
+        x.items.iter().any(|v| !v.is_null() && y.items.iter().any(|w| !w.is_null() && same(c.coll, w, v))),
+    ))
 }
 
 // ── set-returning ──

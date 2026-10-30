@@ -1211,15 +1211,20 @@ fn derived_depends(ctx: &ExecCtx, cat: &Arc<Catalog>, scope: Option<&Scope>) -> 
             let mut b = dep_binder(ctx, cat);
             if let Ok(e) = b.bind_trigger_when(t, w) {
                 let n = t.columns.len();
-                let mut refs = Vec::new();
-                e.walk(&mut |x| {
-                    if let Expr::Col(i, _) = x {
-                        let a = (REL, t.oid, (i % n) as i32 + 1);
-                        if !refs.contains(&a) {
-                            refs.push(a);
+                // (A whole-row `OLD.*` depends on no column: its columns are counted out.)
+                let mut uses: std::collections::BTreeMap<usize, i64> = Default::default();
+                e.walk(&mut |x| match x {
+                    Expr::Col(i, _) => *uses.entry(i % n).or_default() += 1,
+                    Expr::Row(items, _) if crate::sql::binder::is_whole_row(x) => {
+                        for it in items {
+                            if let Expr::Col(i, _) = it {
+                                *uses.entry(i % n).or_default() -= 1;
+                            }
                         }
                     }
+                    _ => {}
                 });
+                let refs: Vec<_> = uses.into_iter().filter(|&(_, k)| k > 0).map(|(i, _)| (REL, t.oid, i as i32 + 1)).collect();
                 let mut others = Vec::new();
                 expr_refs(cat, &e, None, &mut others);
                 binder_refs(cat, &b, &mut others);

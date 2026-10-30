@@ -1719,6 +1719,21 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   item), `.double()` keeps a numeric, SQL/JSON paths run with time zones, sum of -0 floats is
   -0, `NOT (x < ANY ('{}'))` doesn't reduce an outer join, planning errors wait for parse
   analysis's.
+  Round 21, agent 104 (difftest round 5): a grammar for seeds from 5000 on (`difftest/round5.rs`:
+  DDL between DML with each table's catalog description compared, triggers with WHEN and
+  transition tables, rules, views WITH CHECK OPTION and INSTEAD OF triggers, cursors across
+  savepoints, PREPARE with 44 parameter types, COPY in and out, collations, full text search,
+  ranges, composite arrays, big numerics and intervals), and every seed's final state compared
+  (tables and their contents, `Runner::final_state`). Fixes: array searches and containment
+  under the input collation, IN lists under one collation and a one-value IN as `=`, constant
+  calls under COLLATE fail while planning, trigger WHEN bound behind a barrier (PL/pgSQL
+  variables don't shadow OLD / NEW) and a whole-row WHEN depending on no column, PREPARE
+  parameters without typmods, COPY csv quoting of empty strings and skip notices before a
+  failing record, JSON of stored composite arrays, virtual columns not evaluated by ADD COLUMN
+  / SET EXPRESSION, interval sum / avg as IntervalAggState, to_char of huge intervals wrapping,
+  check options after unique keys, ALTER TYPE's conversion checked before its dependents.
+  Open (STATUS.md): cursor plans for cursor_tuple_fraction (scrollability, CURRENT OF), COPY's
+  CIM_SINGLE row-at-a-time order.
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified

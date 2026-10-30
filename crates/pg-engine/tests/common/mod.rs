@@ -191,8 +191,10 @@ pub fn engine_query(s: &mut Session, stmt: &str) -> Vec<Event> {
                             })
                             .collect(),
                     ),
-                    // COPY TO STDOUT: one text row per line.
-                    None if !q.rows.is_empty() => (
+                    // COPY TO STDOUT: one text row per line (none at all, still a COPY out,
+                    // as the server's CopyOutResponse says).
+                    None if !q.rows.is_empty()
+                        || q.tag.starts_with("COPY") && sql.to_ascii_uppercase().contains("TO STDOUT") => (
                         Some(vec![("copy".to_string(), 25)]),
                         q.rows
                             .iter()

@@ -4918,7 +4918,7 @@ impl Ddl<'_, '_> {
                 if t.columns[idx].generated.is_some() && cd.raw_default.is_some() {
                     return Err(with_pos(
                         Error::new(
-                            code::INVALID_TABLE_DEFINITION,
+                            code::INVALID_COLUMN_DEFINITION,
                             "cannot specify USING when altering type of generated column",
                         )
                         .detail(format!("Column \"{}\" is a generated column.", cmd.name)),
@@ -5327,8 +5327,14 @@ impl Ddl<'_, '_> {
                     let nt = Arc::new(t.clone());
                     let rules = crate::sql::binder::table_rules(&nt, self.ctx)?;
                     let g = rules.generated[idx].clone().unwrap();
+                    // (A virtual one is computed when read: an error computing it now isn't
+                    // the statement's, `exec::dml::generated_value`.)
+                    let virt = t.columns[idx].virtual_gen;
                     self.rewrite(&old, &t, |mut r| {
-                        r[idx] = eval(&g, &r, self.ctx)?;
+                        r[idx] = match eval(&g, &r, self.ctx) {
+                            Err(_) if virt => Value::Null,
+                            v => v?,
+                        };
                         Ok(r)
                     })?;
                     if t.columns[idx].virtual_gen && t.columns[idx].not_null {
@@ -5788,10 +5794,16 @@ impl Ddl<'_, '_> {
             self.rewrite_later(t.oid, 2);
         }
         if let Some(g) = rules.generated[idx].clone() {
+            // (A virtual one is computed when read: an expression failing for some row fails
+            // only the queries reading it, `exec::dml::generated_value`.)
+            let virt = t.columns[idx].virtual_gen;
             if has_rows {
                 self.rewrite(old, t, |mut r| {
                     r.resize(idx + 1, Value::Null);
-                    r[idx] = eval(&g, &r, self.ctx)?;
+                    r[idx] = match eval(&g, &r, self.ctx) {
+                        Err(_) if virt => Value::Null,
+                        v => v?,
+                    };
                     Ok(r)
                 })?;
             }
@@ -6022,29 +6034,6 @@ impl Ddl<'_, '_> {
                 self.cat.put_sequence(q);
             }
         }
-        if t.columns[idx].generated.is_some() && cd.raw_default.is_some() {
-            return Err(Error::new(
-                code::FEATURE_NOT_SUPPORTED,
-                "cannot alter type of a column used by a generated column",
-            ));
-        }
-        if let Some(g) = t.columns.iter().enumerate().find(|(j, c)| {
-            *j != idx
-                && !c.dropped
-                && c.generated
-                    .as_deref()
-                    .is_some_and(|g| view_mentions(g, &colname))
-        }) {
-            return Err(Error::new(
-                code::FEATURE_NOT_SUPPORTED,
-                "cannot alter type of a column used by a generated column",
-            )
-            .detail(format!(
-                "Column \"{colname}\" is used by generated column \"{}\".",
-                g.1.name
-            )));
-        }
-        self.column_type_dependents(t.oid, idx, &colname)?;
         // A foreign table has no rows to convert; its row type mustn't be used (for other
         // tables that is checked when they are rewritten).
         // Conversion: USING expression over the old row, or an assignment cast. (With several
@@ -6109,6 +6098,31 @@ impl Ddl<'_, '_> {
                 })?
             }
         };
+        // (What uses the column, ATExecAlterColumnType's RememberAllDependentForRebuilding:
+        // after the conversion is known to exist, ATPrepAlterColumnType's.)
+        if t.columns[idx].generated.is_some() && cd.raw_default.is_some() {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                "cannot alter type of a column used by a generated column",
+            ));
+        }
+        if let Some(g) = t.columns.iter().enumerate().find(|(j, c)| {
+            *j != idx
+                && !c.dropped
+                && c.generated
+                    .as_deref()
+                    .is_some_and(|g| view_mentions(g, &colname))
+        }) {
+            return Err(Error::new(
+                code::FEATURE_NOT_SUPPORTED,
+                "cannot alter type of a column used by a generated column",
+            )
+            .detail(format!(
+                "Column \"{colname}\" is used by generated column \"{}\".",
+                g.1.name
+            )));
+        }
+        self.column_type_dependents(t.oid, idx, &colname)?;
         // find_composite_type_dependencies (for a table, when ATRewriteTables would convert
         // its rows).
         if let Some((tn, c)) = self.column_using(t.rowtype) {

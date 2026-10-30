@@ -541,7 +541,7 @@ pub fn value_to_jsonb(v: &Value, ty: &T, fmt: &FormatCtx) -> Result<Jsonb> {
             Value::Null => Jsonb::Null,
             other => value_to_jsonb(&other, &T::Jsonb, fmt)?,
         },
-        Value::Array(a) => array_to_jsonb(a, fmt)?,
+        Value::Array(a) => array_to_jsonb(a, elem_type(a, ty), fmt)?,
         Value::Record(fields) => {
             let types = crate::types::record_field_types(ty, fields.len());
             Jsonb::object(
@@ -575,23 +575,32 @@ fn json_datetime(v: &Value, ty: &T, fmt: &FormatCtx) -> String {
     }
 }
 
-fn array_to_jsonb(a: &ArrayValue, fmt: &FormatCtx) -> Result<Jsonb> {
+/// The element type of array `a` of type `ty`: the declared composite type, whose field names
+/// an array read back from storage (elements of an anonymous record type) doesn't carry.
+fn elem_type<'a>(a: &'a ArrayValue, ty: &'a T) -> &'a T {
+    match ty {
+        T::Array(e) if matches!(**e, T::Row(_)) => e,
+        _ => &a.elem,
+    }
+}
+
+fn array_to_jsonb(a: &ArrayValue, et: &T, fmt: &FormatCtx) -> Result<Jsonb> {
     if a.dims.is_empty() {
         return Ok(Jsonb::Array(Vec::new()));
     }
-    fn rec(a: &ArrayValue, d: usize, off: usize, fmt: &FormatCtx) -> Result<Jsonb> {
+    fn rec(a: &ArrayValue, et: &T, d: usize, off: usize, fmt: &FormatCtx) -> Result<Jsonb> {
         let stride: usize = a.dims[d + 1..].iter().map(|x| x.0).product();
         let mut out = Vec::new();
         for i in 0..a.dims[d].0 {
             if d + 1 == a.dims.len() {
-                out.push(value_to_jsonb(&a.items[off + i], &a.elem, fmt)?);
+                out.push(value_to_jsonb(&a.items[off + i], et, fmt)?);
             } else {
-                out.push(rec(a, d + 1, off + i * stride, fmt)?);
+                out.push(rec(a, et, d + 1, off + i * stride, fmt)?);
             }
         }
         Ok(Jsonb::Array(out))
     }
-    rec(a, 0, 0, fmt)
+    rec(a, et, 0, 0, fmt)
 }
 
 /// Convert a SQL value to json text (to_json semantics: json keeps its text).
@@ -618,6 +627,7 @@ pub fn value_to_json_text(v: &Value, ty: &T, fmt: &FormatCtx, out: &mut String) 
             }
             fn rec(
                 a: &ArrayValue,
+                et: &T,
                 d: usize,
                 off: usize,
                 fmt: &FormatCtx,
@@ -630,15 +640,15 @@ pub fn value_to_json_text(v: &Value, ty: &T, fmt: &FormatCtx, out: &mut String) 
                         out.push(',');
                     }
                     if d + 1 == a.dims.len() {
-                        value_to_json_text(&a.items[off + i], &a.elem, fmt, out)?;
+                        value_to_json_text(&a.items[off + i], et, fmt, out)?;
                     } else {
-                        rec(a, d + 1, off + i * stride, fmt, out)?;
+                        rec(a, et, d + 1, off + i * stride, fmt, out)?;
                     }
                 }
                 out.push(']');
                 Ok(())
             }
-            rec(a, 0, 0, fmt, out)?;
+            rec(a, elem_type(a, ty), 0, 0, fmt, out)?;
         }
         Value::Text(s) if !matches!(ty, T::Json | T::Jsonb) => write_json_string(out, s),
         // A type with a cast to json (JSONTYPE_CAST): the cast's json text.

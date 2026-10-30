@@ -319,7 +319,13 @@ pub fn check_row_rls(
             .constraint(name));
         }
     }
-    check_view_options(rules, row, ctx)
+    // (The views' check options come after the row is written and its unique keys checked,
+    // ExecInsert / ExecUpdate's WCO_VIEW_CHECK: `store_inserted`, `update_row_rls`. A
+    // foreign table's row is checked here, before the server writes it.)
+    if t.foreign.is_some() {
+        return check_view_options(rules, row, ctx);
+    }
+    Ok(())
 }
 
 /// WITH CHECK OPTION of the views written through (on a row an INSTEAD OF trigger of the
@@ -2960,6 +2966,7 @@ pub fn update_row_rls(
         .borrow_mut()
         .put(new_key, encode_table_row_at(&new, xid, tid))?;
     crate::repl::log::update(t, old, &new, ctx)?;
+    check_view_options(rules, &new, ctx)?;
     Ok(new)
 }
 
@@ -3352,6 +3359,7 @@ fn store_inserted(
             key: dkey.clone(),
         });
     }
+    check_view_options(rules, &row, ctx)?;
     Ok((row, dkey))
 }
 

@@ -10,6 +10,8 @@ use std::fmt::Write as _;
 
 #[path = "round4.rs"]
 mod round4;
+#[path = "round5.rs"]
+mod round5;
 
 /// splitmix64: small, fast and good enough to drive a generator.
 pub struct Rng(u64);
@@ -144,6 +146,8 @@ pub struct Schema {
     pub composite: Option<(&'static str, bool)>,
     /// Round 4: the tables `tj4` and `tp4` exist (`round4::schema`).
     pub round4: bool,
+    /// Round 5: the `r5*` objects exist (`round5::schema`).
+    pub round5: bool,
 }
 
 /// A column visible to an expression: its qualified reference and type.
@@ -210,6 +214,10 @@ pub const R3_SEEDS: u64 = 3000;
 /// SQL/JSON, window frames, LATERAL set-returning functions, MERGE and RETURNING old / new over
 /// sub-partitioned tables with default partitions, numeric edges, time zones.
 pub const R4_SEEDS: u64 = 4000;
+/// The first seed generated with round 5's objects and statements (`round5.rs`): DDL between
+/// DML, triggers, rules and views with check options, cursors across savepoints, prepared
+/// statements, COPY, collations, full text search, ranges, composite arrays, big numerics.
+pub const R5_SEEDS: u64 = 5000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
@@ -2254,6 +2262,10 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
         out.extend(round4::schema(&mut Rng::new(seed ^ 0x4444_4444)));
         s.round4 = true;
     }
+    if seed >= R5_SEEDS {
+        out.extend(round5::schema(&mut Rng::new(seed ^ 0x5555_5555)));
+        s.round5 = true;
+    }
     (s, out)
 }
 
@@ -2395,6 +2407,10 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     });
     while out.len() < n {
         g.alias = 0;
+        if s.round5 && g.rng.chance(0.35) {
+            out.extend(g.round5_stmt());
+            continue;
+        }
         if s.round4 && g.rng.chance(0.25) {
             out.extend(g.round4_stmt());
             continue;

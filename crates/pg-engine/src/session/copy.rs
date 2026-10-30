@@ -1273,10 +1273,10 @@ impl CopyReader<'_> {
         while !self.eof && !self.null_stop && !self.batch_full() {
             let before = self.st.rows.len();
             let mut notices = Vec::new();
-            match (self.read)()? {
+            let parsed = match (self.read)()? {
                 Some(chunk) => {
                     self.pending.extend_from_slice(&chunk);
-                    let took = parse_copy_data(
+                    parse_copy_data(
                         self.c,
                         &mut self.st,
                         &self.pending,
@@ -1284,11 +1284,14 @@ impl CopyReader<'_> {
                         self.fmt,
                         self.enc,
                         &mut |n| notices.push(n),
-                    )?;
-                    self.pending.drain(..took);
+                    )
+                    .map(|took| {
+                        self.pending.drain(..took);
+                    })
                 }
                 None => {
                     let data = std::mem::take(&mut self.pending);
+                    self.eof = true;
                     parse_copy_data(
                         self.c,
                         &mut self.st,
@@ -1297,13 +1300,15 @@ impl CopyReader<'_> {
                         self.fmt,
                         self.enc,
                         &mut |n| notices.push(n),
-                    )?;
-                    self.eof = true;
+                    )
+                    .map(|_| ())
                 }
-            }
+            };
+            // (The rows skipped before a record that fails: their notices came first.)
             for n in notices {
                 ctx.notice(n);
             }
+            parsed?;
             self.batch_bytes += self.st.lines[before..].iter().map(|l| l.1.len()).sum::<usize>();
             // A row a NOT NULL column refuses fails the COPY as it is read: the rows up to it
             // go in, and its own error is the one inserting them raises.
@@ -1846,7 +1851,6 @@ fn text_escape_into(out: &mut String, s: &str, delim: char) {
 /// would read as the end-of-data marker).
 fn csv_field(s: &str, f: &CopyFormat, force: bool, single: bool) -> String {
     let needs = force
-        || s.is_empty() && !f.null.is_empty()
         || s == f.null
         || s.contains(f.delimiter)
         || s.contains(f.quote)

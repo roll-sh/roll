@@ -1064,7 +1064,8 @@ pub fn interval_to_char(iv: &crate::types::value::Interval, fmt: &str) -> Result
         mon: itm.mon,
         year: itm.year,
         wday: 0,
-        yday: (itm.year * 12 + itm.mon) * 30 + itm.mday,
+        // (int arithmetic, which Postgres compiles with -fwrapv: 178000000 years wrap.)
+        yday: itm.year.wrapping_mul(12).wrapping_add(itm.mon).wrapping_mul(30).wrapping_add(itm.mday),
         gmtoff: 0,
         fsec: itm.usec,
         tzn: None,

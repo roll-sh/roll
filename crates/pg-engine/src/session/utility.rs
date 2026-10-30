@@ -551,7 +551,8 @@ impl Session {
             let Some(NodeEnum::TypeName(tn)) = inner(a) else {
                 continue;
             };
-            types.push(resolve_type_name(&cat, &path, tn)?.0);
+            // (PrepareQuery keeps the type's oid alone: `numeric(5,2)` takes 123.456 whole.)
+            types.push(resolve_type_name(&cat, &path, tn)?.0.without_typmod());
         }
         let query = s
             .query

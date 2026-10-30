@@ -779,8 +779,20 @@ pub fn actual_version(provider: char, locale: &str) -> Result<Option<String>> {
 pub fn sensitive(def: &crate::sql::func::FuncDef) -> bool {
     matches!(
         def.name,
-        "hashtext" | "hashtextextended" | "string_to_array" | "string_to_table" | "array_sort"
-    )
+        "hashtext"
+            | "hashtextextended"
+            | "string_to_array"
+            | "string_to_table"
+            | "array_sort"
+            | "array_position"
+            | "array_positions"
+            | "array_remove"
+            | "array_replace"
+            | "arraycontains"
+            | "arraycontained"
+            | "arrayoverlap"
+    ) || (matches!(def.name, "@>" | "<@" | "&&")
+        && matches!(def.args.first(), Some(crate::types::DataType::AnyArray)))
 }
 
 /// `def` running under the collation named `name` (an input collation the binder derived),

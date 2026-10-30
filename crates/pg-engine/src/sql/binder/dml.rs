@@ -201,17 +201,20 @@ impl Binder<'_, '_> {
         .rels
         .pop()
         .unwrap();
-        let saved = std::mem::replace(
-            &mut self.level().scope,
-            Scope {
-                rels: vec![old, new],
-            },
-        );
+        // (A level of its own behind a barrier: nothing of the statement's, nor a PL/pgSQL
+        // function's variables when the statement runs in one, is visible to it; `OLD.a`
+        // in a trigger function's UPDATE isn't ambiguous.)
+        let mut lvl = super::Level::new();
+        lvl.barrier = true;
+        lvl.scope = Scope {
+            rels: vec![old, new],
+        };
+        self.levels.push(lvl);
         let r = (|| {
             let e = self.in_clause(Clause::Where, |b| b.bind_expr(node))?;
             self.coerce_implicit(e, &DataType::Bool)
         })();
-        self.level().scope = saved;
+        self.levels.pop();
         r
     }
 

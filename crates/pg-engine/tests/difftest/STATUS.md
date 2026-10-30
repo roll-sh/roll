@@ -302,6 +302,125 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 4, batch 1 | 3330–3479 × 100 | 14,991 | wrong_rows 4, wrong_state 2, engine_error 30, missing_error 53, wrong_error 45, eval_error 63, tag 9 |
 | round 4, base (ffceeaa8) | 3480–3533 × 100, then a crash | ~5,400 | aborted at seed 3534 by a stack overflow (fixed in batch 2); 83 serious-or-eval mismatches until then |
 | round 4, batch 2 | 3480–3579 × 100 | 9,941 | 74 over 3480–3533 (none new); in all wrong_rows 1, wrong_state 2, wrong_columns 2, engine_error 20, missing_error 38, wrong_error 11, eval_error 61, tag 6 (the wrong_rows / wrong_state of 3563 and 3570 are the base's too) |
+| round 5 grammar (agent 104), engine before batch 1's fixes | 5006–5105 × 100 | 9,807 | crash 3, wrong_rows 59, wrong_state 7, wrong_columns 7, engine_error 14, missing_error 20, wrong_error 22, eval_error 53, tag 5 |
+| round 5, base (0f9f0609, round 5 generator) | 5106–5255 × 100 | 14,256 | crash 6, wrong_rows 64, wrong_state 15, engine_error 25, missing_error 10, wrong_error 42, eval_error 65, notice 5, tag 1 |
+| round 5, batch 1 (before its last fix) | 5106–5255 × 100 | 15,161 | wrong_rows 9, engine_error 11, missing_error 10, wrong_error 37, eval_error 28, tag 1 (213 mismatches above error_message in the base, 93 here; 134 gone; 6 new, the trigger WHEN of seeds 5130 / 5207, fixed in the batch; 8 more only past a seed's divergence in the base) |
+
+## Round 5 grammar (agent 104)
+
+Seeds from `R5_SEEDS` (5000) on add the `r5*` objects (`round5.rs`, its own generator) and make
+about a third of the statements `round5_stmt`'s; every seed also ends with its **final state**
+compared: the list of tables, views and sequences, and every table's contents
+(`Runner::final_state`, class `wrong_state`). The objects: `r5a` (int, text under one of 13
+collations: C, POSIX, ucs_basic, pg_c_utf8, unicode, ICU locales and three created ones, two
+of them nondeterministic; huge / tiny / NaN / infinite numerics; intervals at their limits;
+int4range and int4multirange; documents and a stored tsvector with a GIN index; an array of
+the composite `r5ct`; stored and virtual generated columns), with BEFORE / AFTER row triggers
+(WHEN on columns and on the whole row) and statement triggers over transition tables logging
+into `r5log`; updatable views over it with LOCAL / CASCADED check options, one over the other,
+a view with a computed column and an ALSO rule, a join view with INSTEAD OF triggers; a table
+`r5r` with conditional INSTEAD / ALSO / NOTHING rules; `r5p` range-partitioned (a list
+sub-partition, a default partition or not) and `r5px` to attach. The statements:
+
+- DDL between DML, each followed by the table's contents and its catalog description (columns
+  with types, NOT NULL, generated kind, default expression, collation; constraints with
+  `convalidated` and their definitions): ALTER COLUMN TYPE (with and without USING, over
+  generated columns, indexes and views), SET / DROP DEFAULT, ADD COLUMN (defaults, NOT NULL,
+  stored and virtual generated), DROP COLUMN, SET EXPRESSION / DROP EXPRESSION, CHECK and
+  FOREIGN KEY constraints NOT VALID then VALIDATE, NOT NULL (PostgreSQL 18's `NOT NULL ...
+  NOT VALID` too), UNIQUE [NULLS NOT DISTINCT] under the column's collation; partitions
+  attached (rows inside or outside the bound, a default partition holding them), detached,
+  created over existing rows.
+- DML through the triggers, views, rules and partitions: INSERT (ON CONFLICT DO UPDATE ...
+  WHERE), UPDATE (FROM, of composite array elements' fields, of generated columns), DELETE,
+  MERGE with RETURNING old / new, row movement; the log's contents after each.
+- Transactions with cursors (SCROLL / NO SCROLL / WITH HOLD, FOR UPDATE with WHERE CURRENT OF)
+  across savepoints rolled back or released, errors inside, COMMIT / ROLLBACK / COMMIT AND
+  CHAIN, `pg_cursors`.
+- PREPARE / EXECUTE with parameters of 44 types (with typmods, arrays, ranges, composites,
+  network, bit, money, text search, reg* types) and values valid, NULL, out of range or
+  malformed; inferred parameter types; a statement kept across later DDL; DML.
+- COPY TO (text / csv, HEADER, delimiters, NULL markers, quoting, FORCE_QUOTE, FORCE_NOT_NULL,
+  a query, generated columns, a partitioned table, a view) and COPY FROM (good and bad lines,
+  NULL markers, DEFAULT, ON_ERROR ignore with LOG_VERBOSITY and REJECT_LIMIT, through the
+  triggers). Case files write COPY data as psql scripts do, so `probe` / `reduce` read them.
+- Collations in ORDER BY, GROUP BY, DISTINCT, joins, set operations, LIKE / ILIKE / regular
+  expressions, case mapping and window functions (written so that which of several equal
+  values a nondeterministic collation keeps doesn't show); full text search (to_tsvector in
+  four configurations, every tsquery parser, `@@`, ranking with weights and normalizations,
+  headlines with options, ts_stat, ts_debug, tsquery operators); range and multirange
+  operators, functions and aggregates; arrays of composites (field access, unnest, containment,
+  JSON); numerics up to 10^1000 and intervals at their limits (arithmetic, aggregates, extract,
+  justify, to_char, date_bin).
+
+Backward fetches and WHERE CURRENT OF go only to cursors that say whether they may (SCROLL /
+NO SCROLL, FOR UPDATE): otherwise PostgreSQL decides from the cursor's plan, made for
+cursor_tuple_fraction (Open below).
+
+## Round 5 (agent 104)
+
+Batch 1 (`a104_*` goldens), agent 84's wrong results first, then the round 5 grammar's:
+
+- **Wrong rows (seed 3563 #88, in the base too)**: array searches and containment ignored the
+  call's input collation: under a nondeterministic one `'{z}' @> ARRAY['Z']`, `<@`, `&&`,
+  array_position(s), array_remove and array_replace now compare as the element type's `=`
+  under it (`collation::sensitive`, `array.rs` `same`), so a RIGHT JOIN ON such a containment
+  kept its matches (`a104_array_collation`).
+- **Missing error / wrong state (seed 3570 #67, in the base too)**: a constant call under a
+  COLLATE (`starts_with('é' COLLATE ci, 'a')`) wasn't seen as foldable by the planning-time
+  error pass (`fold::foldable`), and a CASE folded to one of its arms lost the collation the
+  whole CASE derives (`bind_case`: `note_coll_of`), so "nondeterministic collations are not
+  supported for substring searches" never came over an empty table, and the MERGE went on
+  (`a104_fold_collate`).
+- **Wrong rows (IN lists)**: `b IN ('E', 'A' COLLATE "de-x-icu")` compared each value under its
+  own collation; transformAExprIn makes the values without the level's columns one array, whose
+  comparison derives one collation from the left side and all of them (`a104_in_collation`).
+- **Missing error (agent 84's open item)**: a one-value IN is `x = v` (NOT IN `x <> v`) as
+  make_op resolves it, so `ARRAY[d] IN ('{1}'::int4[])` over a domain finds no operator as
+  `=` doesn't (`a104_in_single`).
+- **Wrong state (INSTEAD OF triggers)**: a trigger's WHEN was bound in the scope of the
+  statement firing it, so from a PL/pgSQL trigger function (an INSTEAD OF trigger's INSERT ...
+  ON CONFLICT DO UPDATE) `OLD.a` was "ambiguous" with the function's OLD; it binds behind a
+  barrier now (`a104_trigger_when_plpgsql`).
+- **Engine error / wrong state (DROP COLUMN)**: a trigger whose WHEN reads the whole row
+  (`OLD.* IS DISTINCT FROM NEW.*`) depended on every column, so DROP COLUMN wanted CASCADE;
+  a whole-row reference depends on no column (`a104_trigger_whole_row_dep`).
+- **Wrong rows (prepared statements)**: PREPARE's parameter types keep only the type
+  (PrepareQuery): `numeric(5,2)`, `varchar(3)`, `char(2)`, `bit(4)`, `interval(0)` parameters
+  took their values through the typmod (`a104_prepare_typmod`).
+- **Wrong rows (COPY TO csv)**: an empty string was quoted whenever the NULL marker wasn't
+  empty; CopyAttributeOutCSV quotes it only when it is the marker (`a104_copy_csv`). Rows
+  skipped by ON_ERROR ignore before a record that fails give their LOG_VERBOSITY notices
+  (`a104_copy_notice`).
+- **Wrong rows (JSON of composite arrays)**: `to_jsonb(cs)` / `to_json(cs)` of a stored array
+  of a composite named the fields f1, f2: the element type is the declared composite
+  (`json.rs` `elem_type`, `a104_composite_array_json`).
+- **Eval errors (virtual generated columns)**: ADD COLUMN ... VIRTUAL and SET EXPRESSION on a
+  virtual column evaluated the expression over every row (a division by zero failed the ALTER,
+  and the column was never added); it is computed when read (`a104_virtual_add`).
+- **Eval error (interval aggregates)**: sum / avg of intervals add the finite values apart
+  from the infinities, as IntervalAggState does: an overflow there fails next to an infinity,
+  infinities of both signs fail, avg divides (interval_div) (`a104_interval_agg`).
+- **Crash (debug builds)**: to_char of an interval of 178,000,000 years overflowed the day of
+  year (`(year * 12 + mon) * 30 + mday`); Postgres's int arithmetic wraps (-fwrapv)
+  (`a104_interval_to_char`).
+- **Wrong errors (error order)**: a view's WITH CHECK OPTION is checked after the row's unique
+  keys (ExecInsert / ExecUpdate's WCO_VIEW_CHECK comes after the index entries:
+  `store_inserted`, `update_row_rls`), so a duplicate key wins (`a104_wco_order`); ALTER COLUMN
+  TYPE checks the conversion before what uses the column (a generated column, a view), and
+  USING on a generated column is 42611 (`a104_alter_type_order`).
+- Harness: COPY TO STDOUT of no rows is still a COPY out on the engine side (column `copy`).
+
+Verified (0f9f0609 + the batch, debug): crate tests, clippy (no new warnings), the smoke
+(no new mismatch; the known list unchanged), the pair run above, isolation 121 / 122
+(1,647 / 1,648), the regression suite in full on a private reference: 51,148 / 51,150, no unit
+changed against results.tsv. Cost: the per-row changes are an `Option` test per array element
+compared, the infinities' counters of interval sums, and the views' check options moved after
+the write (no work without views). Release builds side by side over 2M rows (medians of 7
+alternated runs, load about 22): `ta @> ARRAY['a7']` 1,412 / 1,371 ms (base / head), `&&` 1,403
+/ 1,458, `sum(array_position(..))` 1,167 / 1,035, `array_remove` 1,503 / 1,594, `sum(iv),
+avg(iv)` 729 / 680, COPY TO csv 1,597 / 1,528, an UPDATE of 500k rows 6,112 / 5,898: within the
+run-to-run noise.
 
 ## Round 4 grammar (agent 84)
 
@@ -610,6 +729,30 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 
 ## Open
 
+- **Round 5 seeds, found, not fixed**:
+  - Cursor plans: PostgreSQL plans a DECLAREd query for cursor_tuple_fraction (0.1), and
+    whether a cursor without [NO] SCROLL may fetch backwards (ExecSupportsBackwardScan) and
+    whether a cursor without FOR UPDATE is simply updatable (search_plan_tree: no Sort, no
+    join) are read off that plan; the engine reads its logical plan, so a Sort over a scan PG
+    replaces with an index scan, or a merge join it chooses for a fast start, decide
+    differently (seeds 5032, 5033, 5039, 5046, 5072; `is_scrollable` in pg_cursors). The
+    generator avoids both since batch 1.
+  - COPY FROM into a table with BEFORE ROW triggers or volatile defaults (CopyFrom's
+    CIM_SINGLE) inserts each row as it is read, so an earlier row's unique violation comes
+    before a later row's format error; the engine parses a whole chunk first (seeds 5021,
+    5058). `parse_copy_data` would need a row limit.
+  - Error order: `INSERT INTO view (.., computed_col) VALUES (fewer values)` gives the view
+    column's 0A000 before parse analysis's "more target columns than expressions" (seed 5022);
+    ALTER COLUMN TYPE converts the rows (22P02) before re-making a GiST index the new type has
+    no operator class for (42704, seed 5052); COPY TO's option errors (FORCE_NOT_NULL with
+    COPY TO) come before DoCopy's column checks (42703 / 42P10) and BeginCopyTo's relation
+    kind check (42809) (seeds 5011, 5074, 5085).
+  - Executor laziness: `DELETE FROM t USING v` over an empty `t` computes the view's failing
+    output (a hash join's inner side built first), where PostgreSQL never does; its statement
+    trigger then never fires (seed 5069).
+  - EXPLAIN only: a comparison of a domain column shows `(d = 1)` where PostgreSQL shows the
+    relabel to the base type, `((d)::integer = 1)` (`=`, `<>`, `= ANY`, a one-value IN).
+
 - **Round 4 seeds, reduced, not fixed** (cases in the round's notes above):
   - FULL JOIN error where PostgreSQL first reduces it: `t1 FULL JOIN t3 t5 ON (SELECT true)
     WHERE extract(dow FROM t5.b) = 0` errors in the engine (0A000), while `WHERE t5.c = 0`
@@ -626,8 +769,6 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     JOIN on a domain column against a nondeterministic one, in a cursor (seed 4033 #102).
   - FOR NO KEY UPDATE over a join with a FULL JOIN subquery under `WHERE false` isn't refused
     (seed 4082 #55; the locked-nullable-side item below).
-  - A one-item IN over an array of a domain against the base type's array
-    (`ARRAY[d] IN ('{1}'::int4[])`) isn't refused, where `=` and NULLIF are.
 
 - **Wrong rows (JSON_VALUE / JSON_QUERY, a PostgreSQL 18.6 quirk)**: after a row whose call
   fell back to its ON ERROR (or, without an ON ERROR step, ON EMPTY) default, a row whose

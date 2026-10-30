@@ -1,0 +1,54 @@
+> CREATE TABLE a104_wco (id int PRIMARY KEY, a int, CHECK (a > -100))
+-- CREATE TABLE
+
+> INSERT INTO a104_wco VALUES (1, 5), (2, 50)
+-- INSERT 0 2
+
+> CREATE VIEW a104_wcov AS SELECT id, a FROM a104_wco WHERE a < 10 WITH CHECK OPTION
+-- CREATE VIEW
+
+> INSERT INTO a104_wcov VALUES (1, 20)
+ERROR 23505: duplicate key value violates unique constraint "a104_wco_pkey"
+DETAIL: Key (id)=(1) already exists.
+OBJECTS: schema=public table=a104_wco constraint=a104_wco_pkey
+
+> INSERT INTO a104_wcov VALUES (3, 20)
+ERROR 44000: new row violates check option for view "a104_wcov"
+DETAIL: Failing row contains (3, 20).
+
+> INSERT INTO a104_wcov VALUES (3, -200)
+ERROR 23514: new row for relation "a104_wco" violates check constraint "a104_wco_a_check"
+DETAIL: Failing row contains (3, -200).
+OBJECTS: schema=public table=a104_wco constraint=a104_wco_a_check
+
+> UPDATE a104_wcov SET id = 2, a = 30 WHERE id = 1
+ERROR 23505: duplicate key value violates unique constraint "a104_wco_pkey"
+DETAIL: Key (id)=(2) already exists.
+OBJECTS: schema=public table=a104_wco constraint=a104_wco_pkey
+
+> UPDATE a104_wcov SET a = 30 WHERE id = 1
+ERROR 44000: new row violates check option for view "a104_wcov"
+DETAIL: Failing row contains (1, 30).
+
+> INSERT INTO a104_wcov VALUES (1, 20) ON CONFLICT (id) DO UPDATE SET a = 40
+ERROR 44000: new row violates check option for view "a104_wcov"
+DETAIL: Failing row contains (1, 40).
+
+> INSERT INTO a104_wcov VALUES (4, 1) RETURNING *
+id:int4 | a:int4
+4 | 1
+-- INSERT 0 1
+
+> SELECT * FROM a104_wco ORDER BY id
+id:int4 | a:int4
+1 | 5
+2 | 50
+4 | 1
+-- SELECT 3
+
+> DROP VIEW a104_wcov
+-- DROP VIEW
+
+> DROP TABLE a104_wco
+-- DROP TABLE
+

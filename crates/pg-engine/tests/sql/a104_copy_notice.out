@@ -1,0 +1,30 @@
+> CREATE TABLE a104_cn (id int PRIMARY KEY, a int, b text)
+-- CREATE TABLE
+
+> COPY a104_cn (id, a, b) FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose)
+>> 37	\N	x
+>> 26		tab\tx
+>> 1
+NOTICE 00000: skipping row due to data type incompatibility at line 2 for column "a": ""
+CONTEXT: COPY a104_cn
+ERROR 22P04: missing data for column "a"
+CONTEXT: COPY a104_cn, line 3: "1"
+
+> COPY a104_cn (id, a, b) FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose)
+>> 37	\N	x
+>> 26	q	y
+>> 5	6	z
+NOTICE 00000: skipping row due to data type incompatibility at line 2 for column "a": "q"
+CONTEXT: COPY a104_cn
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 2
+
+> SELECT * FROM a104_cn ORDER BY id
+id:int4 | a:int4 | b:text
+5 | 6 | z
+37 | NULL | x
+-- SELECT 2
+
+> DROP TABLE a104_cn
+-- DROP TABLE
+

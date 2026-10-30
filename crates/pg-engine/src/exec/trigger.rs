@@ -162,6 +162,8 @@ fn when_ok(
     let Some(w) = &bt.when else { return Ok(true) };
     let n = t.columns.len();
     let mut r: Row = old.cloned().unwrap_or_else(|| vec![Value::Null; n]);
+    // (NEW's columns start at n whatever OLD's row holds.)
+    r.resize(n, Value::Null);
     r.extend(new.cloned().unwrap_or_else(|| vec![Value::Null; n]));
     eval_bool(w, &r, ctx)
 }

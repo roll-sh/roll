@@ -2852,6 +2852,13 @@ impl Binder<'_, '_> {
                 Expr::Or(parts)
             });
         }
+        // (transformAExprIn: a single value is no array but `x = v` (NOT IN: `x <> v`),
+        // make_op's resolution: `ARRAY[d] IN ('{1}'::int4[])` over a domain finds no operator
+        // as `=` doesn't.)
+        if items.len() == 1 && !self.deparse {
+            let it = items.into_iter().next().unwrap();
+            return self.binop(if not { "<>" } else { "=" }, l, it, loc);
+        }
         // (transformAExprIn: values of an array type have no array type of their own to
         // probe, get_array_type: the comparisons ORed, NOT IN's `<>` ANDed.)
         if items.len() > 1 && items.iter().filter(|e| e.columns().is_empty()).count() > 1 {
@@ -2931,6 +2938,15 @@ impl Binder<'_, '_> {
                 })
                 .collect();
             if let (Ok(left), Ok(rights)) = (left, rights) {
+                // (transformAExprIn: the values without the level's columns are one array,
+                // whose comparison derives its collation from the left side and all of them
+                // together: `b IN ('E', 'A' COLLATE "de-x-icu")` compares under de-x-icu.)
+                let plain = |r: &Expr| r.columns().is_empty();
+                let shared = (rights.iter().filter(|r| plain(r)).count() > 1).then(|| {
+                    let mut args = vec![left.clone()];
+                    args.extend(rights.iter().filter(|r| plain(r)).cloned());
+                    (self.input_collation_def(res.def.clone(), &args), args)
+                });
                 // All constants: one array probe.
                 if !self.deparse
                     && rights.iter().all(|r| matches!(r, Expr::Const(..)))
@@ -2957,7 +2973,10 @@ impl Binder<'_, '_> {
                         && let Ok(ne) = resolve_binop("<>", &res.arg_types[0], &res.arg_types[1])
                         && ne.arg_types == res.arg_types
                     {
-                        let op = self.collated(ne.def.clone(), &[&left, &right]);
+                        let op = match &shared {
+                            Some((_, args)) => self.input_collation_def(ne.def.clone(), args),
+                            None => self.collated(ne.def.clone(), &[&left, &right]),
+                        };
                         return Ok(Expr::ArrayOp {
                             left: Box::new(left),
                             right: Box::new(right),
@@ -2965,7 +2984,10 @@ impl Binder<'_, '_> {
                             all: true,
                         });
                     }
-                    let op = self.collated(res.def.clone(), &[&left, &right]);
+                    let op = match &shared {
+                        Some((d, _)) => d.clone(),
+                        None => self.collated(res.def.clone(), &[&left, &right]),
+                    };
                     let e = Expr::ArrayOp {
                         left: Box::new(left),
                         right: Box::new(right),
@@ -2977,7 +2999,10 @@ impl Binder<'_, '_> {
                 let list = rights
                     .into_iter()
                     .map(|r| {
-                        let def = self.collated(res.def.clone(), &[&left, &r]);
+                        let def = match &shared {
+                            Some((d, _)) if plain(&r) => d.clone(),
+                            _ => self.collated(res.def.clone(), &[&left, &r]),
+                        };
                         (r, def)
                     })
                     .collect();
@@ -3614,6 +3639,16 @@ impl Binder<'_, '_> {
                 ty,
             });
         }
+        // (The collation the whole CASE derives, which the constant it may fold into keeps:
+        // assign_collations runs before eval_const_expressions.)
+        let case_coll = ty.collatable().then(|| {
+            self.collation_of(&Expr::Case {
+                operand: None,
+                whens: conds.iter().cloned().zip(results.iter().cloned()).collect(),
+                else_: else_.clone(),
+                ty: ty.clone(),
+            })
+        });
         // The CASE's type stays (a typmod the branches disagree on is dropped).
         let typed = |r: Expr| {
             if r.ty() == ty {
@@ -3660,7 +3695,11 @@ impl Binder<'_, '_> {
             },
         };
         if whens.is_empty() {
-            return Ok(typed(default));
+            let folded = typed(default);
+            if let Some(Ok(c)) = case_coll {
+                self.note_coll_of(&folded, c);
+            }
+            return Ok(folded);
         }
         let else_ = match default {
             Expr::Const(Value::Null, _) if c.defresult.is_none() => None,

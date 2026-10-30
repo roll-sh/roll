@@ -1,0 +1,42 @@
+> SELECT sum(v), avg(v) FROM (VALUES (interval '-infinity'), ('-178000000 years'), ('-178000000 years')) t(v)
+ERROR 22008: interval out of range
+
+> SELECT sum(v), avg(v) FROM (VALUES (interval '-infinity'), ('-1 year'), ('infinity')) t(v)
+ERROR 22008: interval out of range
+
+> SELECT sum(v), avg(v) FROM (VALUES (interval 'infinity'), ('1 year'), (NULL)) t(v)
+sum:interval | avg:interval
+infinity | infinity
+-- SELECT 1
+
+> SELECT sum(v), avg(v) FROM (VALUES (interval '-infinity'), ('1 year')) t(v)
+sum:interval | avg:interval
+-infinity | -infinity
+-- SELECT 1
+
+> SELECT sum(v), avg(v) FROM (VALUES (interval '1 day 1 sec'), ('2 mons'), ('7 days 00:00:00.000001')) t(v)
+sum:interval | avg:interval
+2 mons 8 days 00:00:01.000001 | 22 days 16:00:00.333334
+-- SELECT 1
+
+> SELECT avg(v) FROM (VALUES (interval '1 mon'), ('1 mon'), ('1 day')) t(v)
+avg:interval
+20 days 08:00:00
+-- SELECT 1
+
+> SELECT avg(v) FROM (VALUES (interval '1 sec'), ('0'), ('0')) t(v)
+avg:interval
+00:00:00.333333
+-- SELECT 1
+
+> SELECT sum(v), avg(v) FROM (VALUES (NULL::interval)) t(v)
+sum:interval | avg:interval
+NULL | NULL
+-- SELECT 1
+
+> SELECT sum(v) FROM (VALUES (interval '2147483647 days'), ('1 day')) t(v)
+ERROR 22008: interval out of range
+
+> SELECT k, sum(v) OVER (ORDER BY k), avg(v) OVER (ORDER BY k ROWS 1 PRECEDING) FROM (VALUES (1, interval '1 day'), (2, 'infinity'), (3, '2 days'), (4, '-infinity')) t(k, v)
+ERROR 22008: interval out of range
+

@@ -25,10 +25,15 @@ use crate::types::Value;
 /// NULLIF of constants.
 fn foldable(e: &Expr) -> bool {
     match e {
-        Expr::Call(def, args, _) => {
+        Expr::Call(def, args, ty) => {
             def.volatility == 'i'
                 && !def.is_srf()
-                && args.iter().all(Expr::is_const)
+                // (A constant under a COLLATE is one, for a result without a collation, as
+                // `Binder::fold_call` has it: `starts_with('é' COLLATE ci, 'a')`.)
+                && args.iter().all(|a| match a {
+                    Expr::Collate(x, ..) => x.is_const() && !ty.collatable(),
+                    a => a.is_const(),
+                })
                 && !(def.strict && args.iter().any(|a| matches!(a, Expr::Const(v, _) if v.is_null())))
         }
         Expr::Cast(a, ..) => a.is_const() && e.is_immutable(),

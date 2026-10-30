@@ -420,12 +420,12 @@ impl Case {
         }
         s.push('\n');
         for st in &self.setup {
-            let _ = writeln!(s, "{st};\n");
+            let _ = writeln!(s, "{}\n", copy_text(st));
         }
         if let Some(o) = &self.other {
             let _ = writeln!(s, "-- other\n{o};\n");
         }
-        let _ = writeln!(s, "-- statement\n{};", self.stmt);
+        let _ = writeln!(s, "-- statement\n{}", copy_text(&self.stmt));
         s
     }
 
@@ -461,6 +461,14 @@ impl Case {
             .filter(|s| !s.is_empty())
             .collect();
         Case { class, ordered, setup, stmt: strip_comments(stmt).trim_end_matches(';').to_string(), other, note }
+    }
+}
+
+/// A statement as a script has it, with its `;`: COPY FROM STDIN's data after it, up to `\.`.
+fn copy_text(st: &str) -> String {
+    match common::split_copy(st) {
+        (sql, Some(data)) => format!("{sql};\n{data}\\."),
+        (sql, None) => format!("{sql};"),
     }
 }
 
@@ -539,6 +547,8 @@ impl Runner {
         self.score.seeds += 1;
         let stmts = statements(seed, &sch, n);
         let mut rng = generate::Rng::new(seed ^ 0xABCD);
+        let mut diverged = false;
+        let last = stmts.len();
         for (i, st) in stmts.into_iter().enumerate() {
             let idx = i + 1;
             self.score.statements += 1;
@@ -586,6 +596,7 @@ impl Runner {
                     if class == Class::WrongState {
                         // The two sides' data diverged: the rest of the seed would only repeat it.
                         eprintln!("  seed {seed}: data diverged after #{idx}, next seed");
+                        diverged = true;
                         break;
                     }
                 }
@@ -621,7 +632,33 @@ impl Runner {
                 self.oracles(&mut pair, &sch, &history, seed, idx, rng.next());
             }
         }
+        if !diverged {
+            self.final_state(&mut pair, &history, seed, last + 1);
+        }
         drop(pair);
+    }
+
+    /// The database's final state: which tables there are, and every table's contents.
+    fn final_state(&mut self, pair: &mut Pair, history: &[String], seed: u64, idx: usize) {
+        pair.run("ROLLBACK");
+        let list = "SELECT relname, relkind FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p', 'v', 'S') ORDER BY 1 COLLATE \"C\"";
+        let mut qs = vec![list.to_string()];
+        let (_, r) = pair.run(list);
+        qs.extend(
+            r.rows
+                .iter()
+                .filter_map(|row| row.strip_suffix(" | r").or(row.strip_suffix(" | p")))
+                .map(|t| format!("SELECT * FROM \"{t}\" x ORDER BY x::text COLLATE \"C\"")),
+        );
+        for q in qs {
+            let (e, r) = pair.run(&q);
+            if let Some((class, detail)) = compare(&e, &r, true) {
+                let class = if matches!(class, Class::WrongRows | Class::WrongOrder) { Class::WrongState } else { class };
+                let case = Case { class, ordered: true, setup: history.to_vec(), stmt: q, other: None, note: format!("final state: {detail}") };
+                self.record(seed, idx, case, Some(&e), Some(&r), &detail);
+                return;
+            }
+        }
     }
 
     /// TLP and NoREC on the engine: a query must return the same rows as its predicate

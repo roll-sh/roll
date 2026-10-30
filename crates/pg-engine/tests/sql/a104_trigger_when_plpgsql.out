@@ -1,0 +1,79 @@
+> CREATE TABLE a104_w (id int PRIMARY KEY, a int, g int GENERATED ALWAYS AS (a * 2) STORED)
+-- CREATE TABLE
+
+> CREATE TABLE a104_wlog (tg text, k int, v text)
+-- CREATE TABLE
+
+> CREATE FUNCTION a104_wl() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO a104_wlog VALUES (TG_NAME, NEW.id, OLD.a || '>' || NEW.a || '/' || NEW.g); RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a104_wu AFTER UPDATE ON a104_w FOR EACH ROW WHEN (OLD.a IS DISTINCT FROM NEW.a) EXECUTE FUNCTION a104_wl()
+-- CREATE TRIGGER
+
+> CREATE TRIGGER a104_wg BEFORE UPDATE ON a104_w FOR EACH ROW WHEN (NEW.a > OLD.a AND NEW.id = OLD.id) EXECUTE FUNCTION a104_wl()
+-- CREATE TRIGGER
+
+> CREATE VIEW a104_wv AS SELECT x.id, x.a, 'w' AS w FROM a104_w x
+-- CREATE VIEW
+
+> CREATE FUNCTION a104_wt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+>   IF TG_OP = 'INSERT' THEN
+>     INSERT INTO a104_w (id, a) VALUES (NEW.id, NEW.a) ON CONFLICT (id) DO UPDATE SET a = EXCLUDED.a;
+>     RETURN NEW;
+>   END IF;
+>   UPDATE a104_w SET a = NEW.a WHERE id = OLD.id;
+>   RETURN NEW;
+> END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a104_wt INSTEAD OF INSERT OR UPDATE ON a104_wv FOR EACH ROW EXECUTE FUNCTION a104_wt()
+-- CREATE TRIGGER
+
+> INSERT INTO a104_wv VALUES (1, 5), (2, 7) RETURNING *
+id:int4 | a:int4 | w:text
+1 | 5 | NULL
+2 | 7 | NULL
+-- INSERT 0 2
+
+> INSERT INTO a104_wv VALUES (1, 6) RETURNING *
+id:int4 | a:int4 | w:text
+1 | 6 | NULL
+-- INSERT 0 1
+
+> UPDATE a104_wv SET a = a - 1 WHERE id = 2 RETURNING *
+id:int4 | a:int4 | w:text
+2 | 6 | w
+-- UPDATE 1
+
+> UPDATE a104_wv SET a = a + 10 RETURNING *
+id:int4 | a:int4 | w:text
+1 | 16 | w
+2 | 16 | w
+-- UPDATE 2
+
+> SELECT * FROM a104_w ORDER BY id
+id:int4 | a:int4 | g:int4
+1 | 16 | 32
+2 | 16 | 32
+-- SELECT 2
+
+> SELECT * FROM a104_wlog ORDER BY tg, k, v
+tg:text | k:int4 | v:text
+a104_wg | 1 | NULL
+a104_wg | 1 | NULL
+a104_wg | 2 | NULL
+a104_wu | 1 | 5>6/12
+a104_wu | 1 | 6>16/32
+a104_wu | 2 | 6>16/32
+a104_wu | 2 | 7>6/12
+-- SELECT 7
+
+> DROP VIEW a104_wv
+-- DROP VIEW
+
+> DROP TABLE a104_w, a104_wlog
+-- DROP TABLE
+
+> DROP FUNCTION a104_wl(), a104_wt()
+-- DROP FUNCTION
+
