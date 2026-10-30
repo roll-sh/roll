@@ -1284,6 +1284,9 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
             // key order, rather than a lookup each.)
             let tuples = ctx.catalog().relstats.get(&t.oid).map_or(-1.0, |r| r.tuples);
             let dense = secondary && tuples > 0.0 && super::sizing::is_estimated(t.oid, &ctx.sess.db);
+            // (Quals reading only index columns whose entries give their values back are
+            // checked on the entries: the rows aren't read here and again by the heap scan.)
+            let ecols = entry_columns(t, index, bounds, quals, ctx);
             let mut sorted_keys: Vec<Vec<u8>> = Vec::new();
             // An index not read by its entries (GIN, GiST, SP-GiST, BRIN): the rows its
             // search structure places near the conditions, else every row.
@@ -1324,6 +1327,31 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                         it.collect::<Result<_>>()?
                     }
                 };
+                if let Some(cols) = &ecols {
+                    let mut left = Vec::new();
+                    for (k, v) in entries {
+                        ctx.check()?;
+                        let Some(row) = entry_row(t.columns.len(), cols, &k) else {
+                            left.push((k, v));
+                            continue;
+                        };
+                        let mut ok = true;
+                        for c in quals {
+                            if !eval_bool(&c.orig, &row, ctx)? {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            out.push(v.to_vec());
+                        }
+                    }
+                    if left.is_empty() {
+                        continue;
+                    }
+                    sorted_keys.extend(left.into_iter().map(|(_, v)| v.to_vec()));
+                    continue;
+                }
                 if dense && entries.len() as f64 * 32.0 >= tuples {
                     sorted_keys.extend(entries.into_iter().map(|(_, v)| v.to_vec()));
                     continue;
@@ -1456,6 +1484,9 @@ fn dense_bitmap_scan(
                     return Ok(None);
                 }
                 let mut n = 0i64;
+                // (The range can be wider than the quals, as for a date column's bound by a
+                // timestamp: entries whose values fail them aren't the bitmap's.)
+                let ecols = entry_columns(t, index, bounds, quals, ctx);
                 for (start, end) in ranges(t, index, bounds, ctx)? {
                     let txn = ctx.txn.borrow();
                     let it = match ctx.snapshot().as_deref() {
@@ -1463,7 +1494,13 @@ fn dense_bitmap_scan(
                         None => txn.scan(&start, &end),
                     };
                     for r in it {
-                        r?;
+                        let (k, _) = r?;
+                        if let Some(cols) = &ecols
+                            && let Some(row) = entry_row(t.columns.len(), cols, &k)
+                            && !quals.iter().all(|c| eval_bool(&c.orig, &row, ctx).unwrap_or(true))
+                        {
+                            continue;
+                        }
                         n += 1;
                     }
                 }
@@ -1727,6 +1764,63 @@ struct ScanNode {
 /// Rows index-only scans made from index entries alone (`ScanNode::index_row`), for tests.
 #[doc(hidden)]
 pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The index columns (table column, type, direction) a bitmap's quals can be checked on
+/// from the index entries alone: a btree's plain columns of the types `index_only_columns`
+/// reads back, under its conditions, with quals reading nothing else.
+fn entry_columns(
+    t: &Table,
+    ix: &crate::catalog::Index,
+    b: &crate::sql::plan::IndexBounds,
+    quals: &[crate::sql::plan::IndexQual],
+    ctx: &ExecCtx,
+) -> Option<Vec<(usize, crate::types::DataType, bool)>> {
+    use crate::catalog::IndexKey;
+    use crate::types::DataType as T;
+    if !reads_entries(ix)
+        || ix.method != "btree"
+        || !ix.include.is_empty()
+        || b.colls.iter().any(Option::is_some)
+        || !super::sizing::is_estimated(t.oid, &ctx.sess.db)
+        || super::sizing::tracked(t.oid)
+        || predicate_locked(t, ctx)
+    {
+        return None;
+    }
+    let cols: Vec<_> = ix
+        .columns
+        .iter()
+        .map(|c| {
+            let IndexKey::Column(i) = c.key else { return None };
+            let ty = t.columns.get(i)?.ty.clone();
+            matches!(
+                ty,
+                T::Bool | T::Int2 | T::Int4 | T::Int8 | T::Oid | T::Date | T::Timestamp(_) | T::Timestamptz(_) | T::Uuid
+            )
+            .then_some((i, ty, c.desc))
+        })
+        .collect::<Option<_>>()?;
+    let mut read = Vec::new();
+    for q in quals {
+        if !super::need::mark(&q.orig, &mut read) {
+            return None;
+        }
+    }
+    let ok = read.iter().enumerate().all(|(i, &r)| !r || cols.iter().any(|c| c.0 == i));
+    ok.then_some(cols)
+}
+
+/// A row of `width` columns with the values of index entry `entry` (`entry_columns`), the
+/// others NULL; None when one doesn't decode.
+fn entry_row(width: usize, cols: &[(usize, crate::types::DataType, bool)], entry: &[u8]) -> Option<Row> {
+    let mut row = vec![Value::Null; width];
+    // (Past the table and index ids.)
+    let mut pos = 8;
+    for (col, ty, desc) in cols {
+        row[*col] = crate::storage::keys::decode_index_value(entry, &mut pos, ty, *desc)?;
+    }
+    Some(row)
+}
 
 /// An index-only scan whose rows can come from the index entries alone: a btree's over
 /// plain columns of types whose key encoding gives the value back (`decode_index_value`),

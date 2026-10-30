@@ -22,38 +22,70 @@ const MINUS_INF: usize = 8;
 
 /// An index tuple's key: each attribute's order-preserving encoding (key attributes,
 /// then INCLUDE ones), and the tuple's size when only its first k attributes are kept.
+/// One allocation (a model holds one per index entry of every modelled table): the
+/// attribute and size counts, each attribute's end and each prefix's size as u16s, then
+/// the attributes' bytes.
 #[derive(Clone, Debug)]
 pub struct Key {
-    bytes: Box<[u8]>,
-    ends: Box<[u16]>,
-    sizes: Box<[u16]>,
+    buf: Box<[u8]>,
 }
 
 impl Key {
     /// `atts`: per-attribute encodings; `sizes[k]`: the MAXALIGNed index tuple size
     /// holding the first k+1 attributes.
     pub fn new(atts: &[Vec<u8>], sizes: &[usize]) -> Key {
-        let mut bytes = Vec::new();
-        let mut ends = Vec::with_capacity(atts.len());
+        let len: usize = atts.iter().map(Vec::len).sum();
+        let mut buf = Vec::with_capacity(2 + 2 * (atts.len() + sizes.len()) + len);
+        buf.push(atts.len() as u8);
+        buf.push(sizes.len() as u8);
+        let mut end = 0u16;
         for a in atts {
-            bytes.extend_from_slice(a);
-            ends.push(bytes.len() as u16);
+            end += a.len() as u16;
+            buf.extend_from_slice(&end.to_le_bytes());
         }
-        Key {
-            bytes: bytes.into(),
-            ends: ends.into(),
-            sizes: sizes.iter().map(|&s| s as u16).collect(),
+        for &z in sizes {
+            buf.extend_from_slice(&(z as u16).to_le_bytes());
         }
+        for a in atts {
+            buf.extend_from_slice(a);
+        }
+        Key { buf: buf.into() }
+    }
+
+    fn u16_at(&self, i: usize) -> usize {
+        u16::from_le_bytes([self.buf[2 + 2 * i], self.buf[3 + 2 * i]]) as usize
+    }
+
+    fn natts(&self) -> usize {
+        self.buf[0] as usize
+    }
+
+    fn nsizes(&self) -> usize {
+        self.buf[1] as usize
+    }
+
+    /// Where the attributes' bytes start.
+    fn data(&self) -> usize {
+        2 + 2 * (self.natts() + self.nsizes())
+    }
+
+    /// Where attribute `a`'s bytes end (from `data`).
+    fn end(&self, a: usize) -> usize {
+        self.u16_at(a)
     }
 
     fn seg(&self, a: usize) -> &[u8] {
-        let start = if a == 0 { 0 } else { self.ends[a - 1] as usize };
-        &self.bytes[start..self.ends[a] as usize]
+        let start = if a == 0 { 0 } else { self.end(a - 1) };
+        let d = self.data();
+        &self.buf[d + start..d + self.end(a)]
     }
 
     /// The whole tuple's size (no posting list).
     fn size(&self) -> usize {
-        *self.sizes.last().unwrap_or(&8) as usize
+        match self.nsizes() {
+            0 => 8,
+            n => self.u16_at(self.natts() + n - 1),
+        }
     }
 
     /// The size of a tuple keeping only the first `natts` attributes.
@@ -61,14 +93,15 @@ impl Key {
         if natts == 0 {
             MINUS_INF
         } else {
-            self.sizes[(natts - 1).min(self.sizes.len() - 1)] as usize
+            self.u16_at(self.natts() + (natts - 1).min(self.nsizes() - 1))
         }
     }
 
     /// The key attributes' encodings, as an index entry's storage key has them.
     fn key_bytes(&self, nkey: usize) -> &[u8] {
-        let n = nkey.min(self.ends.len());
-        &self.bytes[..if n == 0 { 0 } else { self.ends[n - 1] as usize }]
+        let n = nkey.min(self.natts());
+        let d = self.data();
+        &self.buf[d..d + if n == 0 { 0 } else { self.end(n - 1) }]
     }
 
     fn cmp_keys(&self, o: &Key, nkey: usize) -> Ordering {
@@ -92,11 +125,53 @@ impl Key {
     }
 }
 
+/// An item's heap TIDs, ascending: one inline (the common case, no allocation), or a
+/// posting list's.
+#[derive(Clone, Debug)]
+enum Tids {
+    One(Tid),
+    Many(Box<[Tid]>),
+}
+
+impl std::ops::Deref for Tids {
+    type Target = [Tid];
+    fn deref(&self) -> &[Tid] {
+        match self {
+            Tids::One(t) => std::slice::from_ref(t),
+            Tids::Many(v) => v,
+        }
+    }
+}
+
+impl From<Vec<Tid>> for Tids {
+    fn from(v: Vec<Tid>) -> Tids {
+        match v[..] {
+            [t] => Tids::One(t),
+            _ => Tids::Many(v.into()),
+        }
+    }
+}
+
+impl Tids {
+    fn retain(&mut self, f: impl FnMut(&Tid) -> bool) {
+        let mut v = self.to_vec();
+        v.retain(f);
+        *self = v.into();
+    }
+
+    fn into_vec(self) -> Vec<Tid> {
+        match self {
+            Tids::One(t) => vec![t],
+            Tids::Many(v) => v.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Item {
     key: Arc<Key>,
     /// Heap TIDs, ascending (more than one: a posting list tuple).
-    tids: Vec<Tid>,
+    tids: Tids,
     size: usize,
     /// LP_DEAD: an index scan found every heap tuple it points at dead to everyone
     /// (_bt_killitems).
@@ -108,13 +183,14 @@ impl Item {
         let size = key.size();
         Item {
             key,
-            tids: vec![tid],
+            tids: Tids::One(tid),
             size,
             dead: false,
         }
     }
 
-    fn posting(key: Arc<Key>, tids: Vec<Tid>) -> Item {
+    fn posting(key: Arc<Key>, tids: impl Into<Tids>) -> Item {
+        let tids = tids.into();
         let size = if tids.len() > 1 {
             maxalign(key.size() + 6 * tids.len())
         } else {
@@ -552,7 +628,7 @@ impl Btree {
                     singleval = false;
                 }
             }
-            pending = Some((it.key, it.tids, 1));
+            pending = Some((it.key, it.tids.into_vec(), 1));
         }
         finish(pending.take(), &mut out, &mut nintervals);
         let p = self.page(blk);
@@ -803,7 +879,7 @@ impl Btree {
                     return out;
                 }
                 if k == key {
-                    out.push(it.tids.clone());
+                    out.push(it.tids.to_vec());
                 }
             }
             match p.right {

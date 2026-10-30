@@ -1252,6 +1252,27 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - `tools/bench/bench.rs` reports the server's CPU seconds per query (`cpu_s`).
   - Verified: crate tests debug and release, clippy, difftest smoke, isolation 121 / 122, a
     full regress run (debug, private reference) 51,148 / 51,150 with no unit changed.
+  - **Batch 2** (TPC-H 58.0 -> 48.3 s, CPU 139 -> 118 s, q14 3.0 -> 1.1 s):
+    - A date index column compared with a timestamp (`d < date '..' + interval '1'
+      month`, TPC-H q04 / q10 / q14) takes the timestamp's date as an inclusive bound
+      (`sql/paths.rs`, after `probe_ok`; the quals are checked on each row). Without it the
+      range ran to the index's end and q14's bitmap became a full scan of lineitem.
+      Golden `a112_date_ts_bounds` (midnight and not, both directions, infinities).
+    - A bitmap's index quals are checked on the index entries when they read only btree
+      columns of fixed-width types (`exec/scan.rs` `entry_columns`, `entry_row`, in
+      `bitmap_keys` and `dense_bitmap_scan`'s count); before, every selected row was read
+      and decoded once for the check and again by the heap scan. Test
+      `parallel_scan.rs` `bitmap_quals_on_entries` (deleted rows, the transaction's own
+      deletes, a cross-type bound, an OR).
+    - Hash join tables keep only the inner columns the output, condition and keys read
+      (`exec/pipe.rs` `Built::compact`, `Inner`; `joined` maps them back, the others NULL).
+    - btree models: `btsim::Key` one allocation, a single TID inline (`Tids`).
+  - Left (BENCH.md "Where memory and time still go"): peak 2.05 GB against PostgreSQL's
+    1.71-1.85 (cache ~1.45 GB, models ~110 MB, wide sort rows); point lookups at 5-7 µs
+    (q02, q20); merge joins as streaming merges with mark / restore (agent 103); parallel
+    hash builds, gather-merge sorts and right-join groupings; numerics' two allocations.
+    Agent 102's inline scans: +6.5% CPU on q03 / q05 / q06 / q10 (q06 +12%), likely the
+    per-row decode rather than the scan policy.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

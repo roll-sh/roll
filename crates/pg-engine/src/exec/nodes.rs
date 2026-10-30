@@ -3987,7 +3987,16 @@ impl HashJoinNode {
         }
         let keep = matches!(self.kind, JoinKind::Right | JoinKind::Full);
         // (A merge join meets equal inner rows in their (sorted) order.)
-        let built = build_hash(rows, &self.rkeys, &self.rnorm, self.nbuckets, keep, self.merge, ctx)?;
+        let mut built = build_hash(rows, &self.rkeys, &self.rnorm, self.nbuckets, keep, self.merge, ctx)?;
+        // (The inner columns the output and condition read, and the keys' (the outer side's
+        // restriction evaluates them again): the table keeps only those.)
+        if let Some(k) = &self.keep {
+            let mut inner = k.get(self.nleft..).map(<[bool]>::to_vec).unwrap_or_default();
+            inner.resize(self.nright.max(inner.len()), false);
+            if self.rkeys.iter().all(|e| super::need::mark(e, &mut inner)) {
+                built.compact(&inner);
+            }
+        }
         self.matched = vec![false; built.rows.len()];
         self.table = Some(Arc::new(built));
         Ok(())
@@ -4207,8 +4216,8 @@ impl HashJoinNode {
             {
                 let mut keys = Vec::with_capacity(t.rows.len());
                 let mut oids = true;
-                for r in &t.rows {
-                    match eval(rkey, r, ctx)? {
+                for j in 0..t.rows.len() {
+                    match eval(rkey, &t.inner(j).to_row(), ctx)? {
                         Value::Oid(o) => keys.push(o),
                         Value::Null => {}
                         _ => oids = false,
@@ -4223,11 +4232,11 @@ impl HashJoinNode {
         let level = self.level;
         loop {
             if let Some(it) = self.unmatched_right.as_mut() {
-                let rows = &self.table.as_ref().unwrap().rows;
+                let t = self.table.as_ref().unwrap();
                 for j in it.by_ref() {
                     if !self.matched[j] {
                         let mut out = vec![Value::Null; self.nleft];
-                        out.extend(rows[j].iter().cloned());
+                        out.extend(t.inner(j).to_row());
                         return Ok(Some(Item::Row(out, level)));
                     }
                 }
@@ -4286,7 +4295,7 @@ impl HashJoinNode {
             while *i < span.1 {
                 let j = t.cand(*span, *i);
                 *i += 1;
-                let combined = super::pipe::joined(l, &t.rows[j], self.keep.as_deref());
+                let combined = super::pipe::joined(l, t.inner(j), self.keep.as_deref());
                 if let Some(c) = &self.cond
                     && !eval_bool(c, &combined, ctx)?
                 {

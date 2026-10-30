@@ -566,3 +566,59 @@ fn parallel_fetches_match_serial_inner() {
     assert!(!a.is_empty(), "{stat_serial}");
     assert_eq!(b, a.iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_serial} {stat_parallel}");
 }
+
+/// A bitmap whose quals read only index columns of fixed-width types checks them on the
+/// index entries instead of reading each row (`scan::entry_columns`): the same rows as a
+/// sequential scan, deleted rows (committed, and the transaction's own) left out, a
+/// cross-type bound and an OR of two indexes included.
+#[test]
+fn bitmap_quals_on_entries() {
+    on_session_thread(bitmap_quals_on_entries_inner);
+}
+
+fn bitmap_quals_on_entries_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE big4 (id int PRIMARY KEY, v int, d date, s text); \
+         INSERT INTO big4 SELECT i, i % 1000, date '2020-01-01' + i % 3000, md5(i::text) FROM generate_series(1, 420000) i; \
+         CREATE INDEX big4_v ON big4 (v); CREATE INDEX big4_d ON big4 (d); \
+         DELETE FROM big4 WHERE id % 7 = 0",
+    )
+    .unwrap();
+    s.query("VACUUM ANALYZE big4").unwrap();
+    let queries = [
+        "SELECT count(*), sum(id) FROM big4 WHERE v BETWEEN 10 AND 30",
+        "SELECT count(*), sum(id) FROM big4 WHERE d >= date '2021-01-01' AND d < timestamp '2021-02-01 00:00'",
+        "SELECT count(*) FROM big4 WHERE v < 10::bigint AND s LIKE 'a%'",
+        "SELECT id FROM big4 WHERE (v = 3 OR d = date '2020-01-05') AND id < 5000 ORDER BY id",
+    ];
+    let run = |s: &mut Session, bitmap: bool| -> Vec<Vec<String>> {
+        let set = if bitmap {
+            "SET enable_indexscan = off; SET enable_seqscan = off; RESET enable_bitmapscan"
+        } else {
+            "SET enable_indexscan = off; RESET enable_seqscan; SET enable_bitmapscan = off"
+        };
+        s.query(set).unwrap();
+        queries
+            .iter()
+            .map(|q| {
+                let plan = out(s, &format!("EXPLAIN (COSTS OFF) {q}")).join("\n");
+                assert_eq!(plan.contains("Bitmap Heap Scan"), bitmap, "{q}\n{plan}");
+                out(s, q)
+            })
+            .collect()
+    };
+    for own_deletes in [false, true] {
+        if own_deletes {
+            s.query("BEGIN; DELETE FROM big4 WHERE v = 20 OR d = date '2021-01-10'").unwrap();
+        }
+        let (a, b) = (run(&mut s, true), run(&mut s, false));
+        for ((q, a), b) in queries.iter().zip(&a).zip(&b) {
+            assert_eq!(a, b, "{q}");
+        }
+        assert!(a[0][0].contains("Int8("), "{:?}", a[0]);
+    }
+    s.query("ROLLBACK").unwrap();
+}

@@ -111,6 +111,8 @@ pub struct Built {
     map: KeyMap,
     cands: Vec<u32>,
     pub table: super::pghash::JoinTable,
+    /// Each inner column's place in a compacted row (`compact`; `u32::MAX`: not kept).
+    cols: Option<Box<[u32]>>,
 }
 
 impl Built {
@@ -160,7 +162,7 @@ impl Built {
             }
             KeyMap::Vals(out)
         };
-        Built { rows, map, cands, table }
+        Built { rows, map, cands, table, cols: None }
     }
 
     /// The candidates of a normalised probe key (none for a NULL in it).
@@ -183,22 +185,102 @@ impl Built {
     pub fn cand(&self, span: Span, i: u32) -> usize {
         self.cands[(span.0 + i) as usize] as usize
     }
+
+    /// Inner row `j`, as the join reads it.
+    #[inline]
+    pub fn inner(&self, j: usize) -> Inner<'_> {
+        Inner { vals: &self.rows[j], map: self.cols.as_deref() }
+    }
+
+    /// Keep only the inner columns in `keep` (what the join's output, its condition and
+    /// anything above read): the table holds each row's needed values and nothing for the
+    /// others, which read as NULL (`Inner`). A row of 16 columns of which 3 are read took
+    /// 16 values of 32 bytes.
+    pub fn compact(&mut self, keep: &[bool]) {
+        let width = self.rows.first().map_or(keep.len(), Vec::len);
+        if self.cols.is_some() || keep.len() < width || keep.iter().take(width).all(|&k| k) {
+            return;
+        }
+        let mut map = vec![u32::MAX; width];
+        let mut n = 0;
+        for (i, m) in map.iter_mut().enumerate() {
+            if keep[i] {
+                *m = n;
+                n += 1;
+            }
+        }
+        for r in &mut self.rows {
+            let mut c = Vec::with_capacity(n as usize);
+            c.extend(r.iter_mut().zip(keep).filter(|(_, k)| **k).map(|(v, _)| std::mem::replace(v, Value::Null)));
+            *r = c;
+        }
+        self.cols = Some(map.into());
+    }
+}
+
+/// An inner row of a hash table (`Built::inner`) or a plain row: column `i` of the inner
+/// relation, NULL when the table didn't keep it.
+#[derive(Clone, Copy)]
+pub struct Inner<'a> {
+    vals: &'a [Value],
+    /// Each column's place in `vals` (`u32::MAX`: not kept); None: `vals` is the row.
+    map: Option<&'a [u32]>,
+}
+
+static NULL: Value = Value::Null;
+
+impl<'a> Inner<'a> {
+    pub fn plain(vals: &'a [Value]) -> Inner<'a> {
+        Inner { vals, map: None }
+    }
+
+    /// The inner relation's width.
+    #[inline]
+    pub fn width(&self) -> usize {
+        self.map.map_or(self.vals.len(), <[u32]>::len)
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<&'a Value> {
+        match self.map {
+            None => self.vals.get(i),
+            Some(m) => match *m.get(i)? {
+                u32::MAX => Some(&NULL),
+                c => self.vals.get(c as usize),
+            },
+        }
+    }
+
+    /// The whole row (the columns not kept NULL).
+    pub fn to_row(&self) -> Row {
+        match self.map {
+            None => self.vals.to_vec(),
+            Some(_) => (0..self.width()).map(|i| self.get(i).cloned().unwrap_or(Value::Null)).collect(),
+        }
+    }
 }
 
 /// A row of `l`'s columns then `r`'s, copying only the columns in `keep` (None: all;
 /// the others are NULL: nothing above reads them).
-pub fn joined(l: &[Value], r: &[Value], keep: Option<&[bool]>) -> Row {
-    let mut out = Vec::with_capacity(l.len() + r.len());
-    match keep {
-        None => {
+pub fn joined(l: &[Value], r: Inner, keep: Option<&[bool]>) -> Row {
+    let mut out = Vec::with_capacity(l.len() + r.width());
+    match (keep, r.map) {
+        (None, None) => {
             out.extend_from_slice(l);
-            out.extend_from_slice(r);
+            out.extend_from_slice(r.vals);
         }
-        Some(k) => {
+        (None, Some(_)) => {
+            out.extend_from_slice(l);
+            out.extend((0..r.width()).map(|i| r.get(i).cloned().unwrap_or(Value::Null)));
+        }
+        (Some(k), _) => {
             let kept = |i: usize| k.get(i).copied().unwrap_or(false);
             out.extend(l.iter().enumerate().map(|(i, v)| if kept(i) { v.clone() } else { Value::Null }));
             let n = l.len();
-            out.extend(r.iter().enumerate().map(|(i, v)| if kept(n + i) { v.clone() } else { Value::Null }));
+            out.extend((0..r.width()).map(|i| match r.get(i) {
+                Some(v) if kept(n + i) => v.clone(),
+                _ => Value::Null,
+            }));
         }
     }
     out
@@ -227,7 +309,7 @@ pub struct Probe {
 /// not copied yet (the next consumer may read it as it is: the partial aggregation).
 pub enum Joined<'a> {
     Row(Row),
-    Pair { l: &'a [Value], r: &'a [Value], keep: Option<&'a [bool]> },
+    Pair { l: &'a [Value], r: Inner<'a>, keep: Option<&'a [bool]> },
 }
 
 impl Joined<'_> {
@@ -277,7 +359,7 @@ impl Probe {
         for i in 0..span.1 {
             let j = t.cand(span, i);
             if let Some(c) = &self.cond {
-                let view = Joined::Pair { l, r: &t.rows[j], keep: None };
+                let view = Joined::Pair { l, r: t.inner(j), keep: None };
                 match c.passes(&view) {
                     Some(true) => {}
                     Some(false) => continue,
@@ -311,7 +393,7 @@ impl Probe {
             }
             _ => {
                 for &j in matches {
-                    f(Joined::Pair { l: &l, r: &t.rows[j as usize], keep: self.keep.as_deref() });
+                    f(Joined::Pair { l: &l, r: t.inner(j as usize), keep: self.keep.as_deref() });
                 }
             }
         }

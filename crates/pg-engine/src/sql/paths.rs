@@ -3829,6 +3829,18 @@ fn bounds(ii: &IndexInfo, quals: &[IClause]) -> IndexBounds {
             let (Kind::Op(op), Some(v)) = (&c.kind, &c.value) else {
                 continue;
             };
+            // (A date column against a timestamp, as `d < date '..' + interval '1' month`
+            // makes it: the range of the timestamp's dates, both ends inclusive, which holds
+            // every date the comparison can pass; the quals are checked on each row.)
+            if matches!(kt, DataType::Date) && matches!(v.ty(), DataType::Timestamp(_)) && usable(v) {
+                let day = Expr::Cast(Box::new(v.clone()), v.ty(), DataType::Date, true);
+                match *op {
+                    ">" | ">=" => b.lower = Some((day, true)),
+                    "<" | "<=" => b.upper = Some((day, true)),
+                    _ => {}
+                }
+                continue;
+            }
             if !usable(v) || !probe_ok(&kt, &v.ty()) {
                 continue;
             }

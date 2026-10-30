@@ -1383,6 +1383,72 @@ after `select 1` (catalogs, sessions); the size models of part (+~70 MB) and cus
 and a TID vector each); per-query working memory 100-250 MB above that (q10's and q13's
 hash builds and sorts of wide rows).
 
+### Batch 2: bitmap quals on index entries, date ranges bounded by timestamps, compact hash tables and btree models
+
+**before** is the branch at `7bdb4584` (agent 102's batch, with batch 1), **after** this
+batch on top of it; the first pair of rounds (the second ran during a load spike, load 44:
+58.0 / 81.8 s before, 48.3 / 98.2 s after, every query slower in both binaries):
+
+| query | pg | before | after | CPU s pg | CPU s before | CPU s after |
+|---|---|---|---|---|---|---|
+| q14 | 0.25 | 3.01 | **1.08** | 0.6 | 5.7 | **1.3** |
+| q04 | 0.25 | 1.86 | 0.78 | 0.7 | 3.5 | 2.2 |
+| q06 | 0.67 | 4.32 | 2.03 | 1.7 | 7.9 | 4.9 |
+| q20 | 0.18 | 0.90 | 1.06 | 0.2 | 0.9 | 1.1 |
+| all 22 | 19.54 | 57.97 | 48.26 | 49.4 | 139.3 | 118.3 |
+| peak memory (MB) | 1,847 | 2,077 | 2,051 | | | |
+
+Every result hash equal to PostgreSQL's in all rounds. **pgbench** (scale 10, `-M
+prepared`, 8 clients, 10 s, fresh engine, before / after / before / after): select-only
+60.7k / 65.0k / 55.8k / 52.6k TPS, tpcb-like 4.24k / 4.47k / 4.48k / 3.70k (the spread of
+this machine; neither workload runs the paths changed); peak RSS 285 / 252 / 273 / 288 MB.
+
+- **q14's root cause** (profile: 80% in a parallel full scan of lineitem): the bitmap's
+  range on `l_shipdate` stopped at `1995-09-01` only. The upper bound is a timestamp (`date
+  '1995-09-01' + interval '1' month`), and a date column took no bound of another type, so
+  the range ran to the end of the index (2.4M entries), counted as 40% of the table, and
+  `dense_bitmap_scan` read all 6M rows. Now (`sql/paths.rs`) a date column compared with a
+  timestamp takes the timestamp's date as an inclusive bound (a superset; the quals are
+  checked on each row), and the density count checks the quals on the entries. q04 and
+  q10's `o_orderdate` ranges have the same shape.
+- **Bitmap quals checked on the entries** (`exec/scan.rs` `entry_columns`, `entry_row`):
+  `bitmap_keys` read every row its index range selected (a point lookup and a decode of
+  every column each) to check the index quals, and the heap scan read the rows again.
+  When the quals read only btree columns of fixed-width types whose entries give their
+  values back (`index_only_columns`' conditions), they are checked on the entries. The
+  80,409-row date range of q14 alone: 580 -> 169 ms.
+- **Hash tables keep only the columns read** (`exec/pipe.rs` `Built::compact`, `Inner`): a
+  hash join's inner rows keep the columns its output, condition and keys read; the others
+  read as NULL. q10's lineitem ⋈ orders build (114K rows of 25 columns, 3 read) took 800
+  bytes a row for the values alone.
+- **btree models in fewer allocations** (`catalog/btsim.rs`): a `Key` is one allocation
+  (counts, ends and sizes as u16s, then the bytes) instead of four, and an item's single
+  TID is inline (`Tids`). Models of part, customer and supplier: 23 MB less (fresh engine,
+  `--cache-mb 64`: 312 -> 289 MB after reading the three).
+
+**Agent 102's inline scans** (`7bdb4584^` against `7bdb4584`, q03 / q05 / q06 / q10, three
+interleaved rounds): wall times varied 2x between rounds of one binary (load 40), so only
+CPU says anything: 33.7 CPU s before and 35.9 after on average (+6.5%), q06 +12% (7.5 ->
+8.4), q10 +8%, q03 and q05 the same. q06 is a parallel scan of lineitem past 1,023 pages,
+so neither scan policy applies to it; the per-row decode (the out-of-line checks) is the
+likelier cause, which agent 117's per-row scan work covers.
+
+### Where memory and time still go
+
+- Peak 2.05 GB against PostgreSQL's 1.71-1.85 GB: about 1.45 GB of cache (everything
+  TPC-H reads), 96 MB after the first statement, ~110 MB of size models, and per-query
+  working memory. The largest working sets are sorts of wide rows (q10's Sort over a
+  37-column join keeps every column, NULLs included: compact them as the hash tables are)
+  and q13's grouping.
+- Point lookups cost 5-7 µs (q02's 158K partsupp fetches by `ps_suppkey`, q20's 8,332
+  SubPlan runs): `Store::get_versions` per key over the memtable and every L0 file (bloom,
+  block index, cache shard lock, a block seek of up to 15 entries), then a decode of every
+  column.
+- Merge joins build their whole inner side (agent 103's finding): a streaming merge with
+  mark / restore would read only what a LIMIT needs and hold nothing.
+- Not done this round: parallel hash builds, sorts with gather merge, groupings over
+  right joins in the workers, numeric values' two allocations.
+
 ## Round 22 (agent 91): partial paths in the join search
 
 The same plan comparison as round 21's (`EXPLAIN` of the 22 TPC-H queries at SF1, PostgreSQL

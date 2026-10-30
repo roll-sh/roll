@@ -253,7 +253,7 @@ impl Lookup {
         sc.loops += 1;
         sc.fetched += found.len() as u64;
         for r in found.iter() {
-            let view = Joined::Pair { l, r, keep: None };
+            let view = Joined::Pair { l, r: super::pipe::Inner::plain(r), keep: None };
             let mut pass = true;
             for k in [&self.filter, &self.cond].into_iter().flatten() {
                 match k.passes(&view) {
@@ -324,7 +324,7 @@ impl Lookup {
             }
             _ => {
                 for r in rows {
-                    f(Joined::Pair { l: &l, r, keep: self.keep.as_deref() });
+                    f(Joined::Pair { l: &l, r: super::pipe::Inner::plain(r), keep: self.keep.as_deref() });
                 }
             }
         }
