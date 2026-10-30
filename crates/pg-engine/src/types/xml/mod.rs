@@ -344,11 +344,17 @@ pub struct Parsed {
 
 /// `xml_parse`.
 pub fn xml_parse(s: &str, option: XmlOption, preserve_whitespace: bool) -> Result<Parsed> {
-    xml_parse_bytes(s.as_bytes(), option, preserve_whitespace)
+    xml_parse_bytes(s.as_bytes(), option, preserve_whitespace, true)
 }
 
-/// `xml_parse` of bytes that should be UTF-8 (libxml reports where they aren't).
-fn xml_parse_bytes(b: &[u8], option: XmlOption, preserve_whitespace: bool) -> Result<Parsed> {
+/// `xml_parse` of bytes that should be UTF-8 (libxml reports where they aren't); without
+/// `tree`, only checked (the document's content isn't built).
+fn xml_parse_bytes(
+    b: &[u8],
+    option: XmlOption,
+    preserve_whitespace: bool,
+    tree: bool,
+) -> Result<Parsed> {
     let s = &*String::from_utf8_lossy(b);
     let mut as_document = option == XmlOption::Document;
     let mut count = 0;
@@ -376,6 +382,7 @@ fn xml_parse_bytes(b: &[u8], option: XmlOption, preserve_whitespace: bool) -> Re
             dtd_attr: true,
         };
         let mut p = Parser::new(Doc::new(None), opts);
+        p.tree = tree;
         let ok = p.parse_document(b);
         let detail = report(&p.errors, Strictness::WellFormed);
         if !ok || detail.is_some() {
@@ -411,6 +418,7 @@ fn xml_parse_bytes(b: &[u8], option: XmlOption, preserve_whitespace: bool) -> Re
         dtd_attr: false,
     };
     let mut p = Parser::new(doc, opts);
+    p.tree = tree;
     let nodes = p.parse_balanced_chunk(rest);
     let detail = report(&p.errors, Strictness::WellFormed);
     if !p.well_formed || detail.is_some() {
@@ -427,9 +435,10 @@ fn xml_parse_bytes(b: &[u8], option: XmlOption, preserve_whitespace: bool) -> Re
     })
 }
 
-/// `xml_in` / `xmlparse`: check the text, keep it as written.
+/// `xml_in` / `xmlparse`: check the text, keep it as written. Nothing is built: the errors
+/// are the parse's, whatever the tree would have been.
 pub fn validate(s: &str, option: XmlOption, preserve_whitespace: bool) -> Result<()> {
-    xml_parse(s, option, preserve_whitespace).map(|_| ())
+    xml_parse_bytes(s.as_bytes(), option, preserve_whitespace, false).map(|_| ())
 }
 
 /// `xml_recv`: binary input is in the encoding its XML declaration names (UTF-8 without
@@ -450,7 +459,7 @@ pub fn xml_recv(b: &[u8], option: XmlOption) -> Result<String> {
     };
     // UTF-8 goes to libxml unchecked; other encodings are converted first.
     if enc == 6 {
-        xml_parse_bytes(b, option, true)?;
+        xml_parse_bytes(b, option, true, false)?;
         return Ok(String::from_utf8_lossy(b).into_owned());
     }
     let s = crate::types::encnames::to_utf8(b, enc)?;
@@ -611,45 +620,88 @@ fn split_decl(s: &str) -> (XmlDecl, &str) {
     }
 }
 
-/// `xmlconcat`.
-pub fn concat(values: &[&str]) -> String {
-    let mut global_standalone = 1;
-    let mut global_version: Option<String> = None;
-    let mut version_no_value = false;
-    let mut buf = String::new();
-    for v in values {
-        let (d, rest) = split_decl(v);
-        if d.standalone == 0 && global_standalone == 1 {
-            global_standalone = 0;
+/// `xmlconcat`'s merging of the values' declarations.
+struct DeclFold {
+    standalone: i32,
+    version: Option<String>,
+    version_no_value: bool,
+}
+
+impl DeclFold {
+    fn new() -> DeclFold {
+        DeclFold {
+            standalone: 1,
+            version: None,
+            version_no_value: false,
+        }
+    }
+
+    fn add(&mut self, d: XmlDecl) {
+        if d.standalone == 0 && self.standalone == 1 {
+            self.standalone = 0;
         }
         if d.standalone < 0 {
-            global_standalone = -1;
+            self.standalone = -1;
         }
         match d.version {
-            None => version_no_value = true,
-            Some(ver) => match &global_version {
-                None => global_version = Some(ver),
-                Some(g) if *g != ver => version_no_value = true,
+            None => self.version_no_value = true,
+            Some(ver) => match &self.version {
+                None => self.version = Some(ver),
+                Some(g) if *g != ver => self.version_no_value = true,
                 _ => {}
             },
         }
-        buf.push_str(rest);
     }
-    if !version_no_value || global_standalone >= 0 {
-        let mut out = String::new();
-        print_xml_decl(
-            &mut out,
-            if version_no_value {
+
+    /// The result's declaration.
+    fn head(&self, out: &mut String) {
+        if !self.version_no_value || self.standalone >= 0 {
+            let version = if self.version_no_value {
                 None
             } else {
-                global_version.as_deref()
-            },
-            global_standalone,
-        );
-        out.push_str(&buf);
-        return out;
+                self.version.as_deref()
+            };
+            print_xml_decl(out, version, self.standalone);
+        }
     }
-    buf
+}
+
+/// `xmlconcat`.
+pub fn concat(values: &[&str]) -> String {
+    let mut fold = DeclFold::new();
+    let mut buf = String::new();
+    for v in values {
+        let (d, rest) = split_decl(v);
+        fold.add(d);
+        buf.push_str(rest);
+    }
+    let mut out = String::new();
+    fold.head(&mut out);
+    if out.is_empty() {
+        return buf;
+    }
+    out.push_str(&buf);
+    out
+}
+
+/// `*acc = concat(&[acc, v])` (`xmlconcat2`, xmlagg's step), appending in place unless the
+/// declaration changes: xmlagg over many rows is linear, not quadratic.
+pub fn concat_into(acc: &mut String, v: &str) {
+    let mut fold = DeclFold::new();
+    let (d1, rest1) = split_decl(acc);
+    let start = acc.len() - rest1.len();
+    fold.add(d1);
+    let (d2, rest2) = split_decl(v);
+    fold.add(d2);
+    let mut head = String::new();
+    fold.head(&mut head);
+    if acc[..start] != head {
+        let body = acc.split_off(start);
+        acc.clear();
+        acc.push_str(&head);
+        acc.push_str(&body);
+    }
+    acc.push_str(rest2);
 }
 
 /// `xmlroot`: `standalone` is the `XML_STANDALONE_*` value.
@@ -709,7 +761,7 @@ pub fn comment(s: &str) -> Result<String> {
 
 /// `xml_is_document`.
 pub fn is_document(s: &str) -> bool {
-    xml_parse(s, XmlOption::Document, true).is_ok()
+    validate(s, XmlOption::Document, true).is_ok()
 }
 
 /// `xmltotext_with_options` (XMLSERIALIZE).
@@ -722,11 +774,12 @@ pub fn to_text_with_options(s: &str, document: bool, indent: bool) -> Result<Str
     } else {
         XmlOption::Content
     };
-    let parsed = xml_parse(s, opt, !indent)
-        .map_err(|_| Error::new(code::NOT_AN_XML_DOCUMENT, "not an XML document"))?;
+    let not_doc = |_| Error::new(code::NOT_AN_XML_DOCUMENT, "not an XML document");
     if !indent {
+        validate(s, opt, true).map_err(not_doc)?;
         return Ok(s.to_string());
     }
+    let parsed = xml_parse(s, opt, false).map_err(not_doc)?;
     let decl_len = parse_xml_decl(s).map(|d| d.len).unwrap_or(0);
     let mut sv = save::Saver::new(&parsed.doc, true, decl_len == 0);
     if parsed.option == XmlOption::Document {

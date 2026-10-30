@@ -159,10 +159,11 @@ impl<'d> Saver<'d> {
 
     /// `xmlAttrSerializeContent`: an attribute's value, escaped.
     fn attr_content(&mut self, id: NodeId) {
-        for &c in &self.doc.nodes[id].children {
-            let n = &self.doc.nodes[c];
+        let doc = self.doc;
+        for c in doc.children(id) {
+            let n = &doc.nodes[c];
             match n.kind {
-                Kind::Text => self.attr_text(&n.content),
+                Kind::Text => self.attr_text(doc.text(n)),
                 Kind::EntityRef => {
                     self.out.push('&');
                     self.out.push_str(&n.name);
@@ -197,10 +198,10 @@ impl<'d> Saver<'d> {
         let n = &self.doc.nodes[id];
         self.out.push('<');
         self.qname(id);
-        for ns in &n.ns_defs {
+        for ns in n.ns_defs() {
             self.ns_def(ns.prefix.as_deref(), ns.href.as_deref());
         }
-        let mut any = !n.ns_defs.is_empty();
+        let mut any = !n.ns_defs().is_empty();
         if let Some((root, extra)) = self.extra_ns.take() {
             if root == id {
                 for ns in &extra {
@@ -233,17 +234,17 @@ impl<'d> Saver<'d> {
                     self.indent(self.level);
                 }
                 self.start_tag(id);
-                for &a in &n.attrs {
+                for a in doc.attrs(id) {
                     self.attr(a);
                 }
-                if n.children.is_empty() {
+                if !doc.has_children(id) {
                     self.out.push_str("/>");
                     return;
                 }
                 let saved = self.format;
                 let mut unformatted = false;
                 if self.format == 1
-                    && n.children.iter().any(|&c| {
+                    && doc.children(id).any(|c| {
                         matches!(
                             doc.nodes[c].kind,
                             Kind::Text | Kind::CData | Kind::EntityRef
@@ -260,7 +261,7 @@ impl<'d> Saver<'d> {
                 if self.level >= 0 {
                     self.level += 1;
                 }
-                for &c in &n.children {
+                for c in doc.children(id) {
                     self.node(c, false);
                     if self.format == 1 {
                         self.out.push('\n');
@@ -280,8 +281,8 @@ impl<'d> Saver<'d> {
                 }
             }
             // libxslt's disable-output-escaping text (xmlStringTextNoenc).
-            Kind::Text if n.name == "textnoenc" => self.out.push_str(&n.content),
-            Kind::Text => self.escape_text(&n.content),
+            Kind::Text if n.name == "textnoenc" => self.out.push_str(doc.text(n)),
+            Kind::Text => self.escape_text(doc.text(n)),
             Kind::Pi => {
                 if !is_root && self.format == 1 {
                     self.indent(self.level);
@@ -290,7 +291,7 @@ impl<'d> Saver<'d> {
                 self.out.push_str(&n.name);
                 if !n.no_content {
                     self.out.push(' ');
-                    self.out.push_str(&n.content);
+                    self.out.push_str(doc.text(n));
                 }
                 self.out.push_str("?>");
             }
@@ -299,7 +300,7 @@ impl<'d> Saver<'d> {
                     self.indent(self.level);
                 }
                 self.out.push_str("<!--");
-                self.out.push_str(&n.content);
+                self.out.push_str(doc.text(n));
                 self.out.push_str("-->");
             }
             Kind::EntityRef => {
@@ -308,7 +309,7 @@ impl<'d> Saver<'d> {
                 self.out.push(';');
             }
             Kind::CData => {
-                let c = &n.content;
+                let c = doc.text(n);
                 if c.is_empty() {
                     self.out.push_str("<![CDATA[]]>");
                 } else {
@@ -368,7 +369,7 @@ impl<'d> Saver<'d> {
             self.out.push_str("?>\n");
         }
         let xhtml = self.is_xhtml();
-        for &c in &doc.nodes[super::tree::DOC].children {
+        for c in doc.children(super::tree::DOC) {
             self.level = 0;
             if xhtml {
                 self.xhtml_node(c, true);
@@ -385,7 +386,7 @@ impl<'d> Saver<'d> {
         let Some(Decl::Dtd {
             external_id,
             system_id,
-        }) = self.doc.int_subset.map(|d| &self.doc.nodes[d].decl)
+        }) = self.doc.int_subset.map(|d| self.doc.nodes[d].decl())
         else {
             return false;
         };
@@ -435,22 +436,22 @@ impl<'d> Saver<'d> {
         self.xhtml_attrs(id);
         // The head of the root html element gets a Content-Type meta unless it has one.
         let addmeta = n.name == "head"
-            && n.parent.is_some_and(|p| {
+            && doc.parent(id).is_some_and(|p| {
                 doc.nodes[p].kind == Kind::Element
                     && doc.nodes[p].name == "html"
-                    && doc.nodes[p].parent == Some(super::tree::DOC)
+                    && doc.parent(p) == Some(super::tree::DOC)
             })
-            && !n.children.iter().any(|&c| {
+            && !doc.children(id).any(|c| {
                 let m = &doc.nodes[c];
                 m.kind == Kind::Element
                     && m.name == "meta"
-                    && m.attrs.iter().any(|&a| {
+                    && doc.attrs(c).any(|a| {
                         doc.nodes[a].name == "http-equiv"
                             && doc.content(a).eq_ignore_ascii_case("Content-Type")
                     })
             });
         let prefixed = n.ns.as_ref().is_some_and(|ns| ns.prefix.is_some());
-        if n.children.is_empty() {
+        if !doc.has_children(id) {
             // C.2 (empty elements) and C.3 (no minimized form for the others).
             if !prefixed && !addmeta && xhtml_is_empty(n) {
                 self.out.push_str(" />");
@@ -483,9 +484,8 @@ impl<'d> Saver<'d> {
         let saved = self.format;
         let mut unformatted = false;
         if self.format == 1
-            && n.children
-                .iter()
-                .any(|&c| matches!(doc.nodes[c].kind, Kind::Text | Kind::EntityRef))
+            && doc.children(id)
+                .any(|c| matches!(doc.nodes[c].kind, Kind::Text | Kind::EntityRef))
         {
             self.format = 0;
             unformatted = true;
@@ -496,7 +496,7 @@ impl<'d> Saver<'d> {
         if self.level >= 0 {
             self.level += 1;
         }
-        for &c in &n.children {
+        for c in doc.children(id) {
             self.xhtml_node(c, false);
             if self.format == 1 {
                 self.out.push('\n');
@@ -521,7 +521,7 @@ impl<'d> Saver<'d> {
     fn xhtml_attrs(&mut self, id: NodeId) {
         let doc = self.doc;
         let (mut id_attr, mut name, mut lang, mut xml_lang) = (None, None, None, None);
-        for &a in &doc.nodes[id].attrs {
+        for a in doc.attrs(id) {
             let an = &doc.nodes[a];
             match (&an.ns, an.name.as_str()) {
                 (None, "id") => id_attr = Some(a),
@@ -567,7 +567,7 @@ impl<'d> Saver<'d> {
         if let Decl::Dtd {
             external_id,
             system_id,
-        } = &n.decl
+        } = n.decl()
         {
             if let Some(e) = external_id {
                 self.out.push_str(" PUBLIC ");
@@ -610,7 +610,7 @@ impl<'d> Saver<'d> {
         let (format, level) = (self.format, self.level);
         self.format = 0;
         self.level = -1;
-        for &c in &n.children {
+        for c in doc.children(id) {
             if self.copy
                 && !matches!(
                     doc.nodes[c].kind,
@@ -679,7 +679,7 @@ impl<'d> Saver<'d> {
             etype,
             content,
             prefix,
-        } = &n.decl
+        } = n.decl()
         else {
             return;
         };
@@ -715,7 +715,7 @@ impl<'d> Saver<'d> {
             def,
             default,
             tree,
-        } = &n.decl
+        } = n.decl()
         else {
             return;
         };
@@ -762,7 +762,7 @@ impl<'d> Saver<'d> {
 
     /// `xmlBufDumpEntityDecl`.
     fn entity_decl(&mut self, id: NodeId) {
-        let Decl::Entity(e) = self.doc.nodes[id].decl else {
+        let Decl::Entity(e) = *self.doc.nodes[id].decl() else {
             return;
         };
         let ent = &self.doc.entities[e];
@@ -818,10 +818,9 @@ impl<'d> Saver<'d> {
     }
 }
 
-/// `xhtmlIsEmpty`: a childless XHTML element whose content model is EMPTY.
+/// `xhtmlIsEmpty` (for a childless element): an XHTML element whose content model is EMPTY.
 fn xhtml_is_empty(n: &Node) -> bool {
     n.kind == Kind::Element
-        && n.children.is_empty()
         && n.ns
             .as_ref()
             .is_none_or(|ns| ns.href.as_deref() == Some("http://www.w3.org/1999/xhtml"))

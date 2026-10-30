@@ -1,0 +1,201 @@
+> SELECT xmlagg(x ORDER BY i) FROM (VALUES
+>   (1, '<?xml version="1.1"?><a/>'::xml), (2, '<b/>'::xml)) v(i, x)
+xmlagg:xml
+<a/><b/>
+-- SELECT 1
+
+> SELECT xmlagg(x ORDER BY i) FROM (VALUES
+>   (1, '<?xml version="1.1" standalone="yes"?><a/>'::xml),
+>   (2, '<?xml version="1.1" standalone="yes"?><b/>'::xml),
+>   (3, '<?xml version="1.1" standalone="no"?><c/>'::xml)) v(i, x)
+xmlagg:xml
+<?xml version="1.1" standalone="no"?><a/><b/><c/>
+-- SELECT 1
+
+> SELECT xmlagg(x ORDER BY i) FROM (VALUES
+>   (1, '<?xml version="1.0" standalone="yes"?><a/>'::xml),
+>   (2, '<b/>'::xml), (3, '<?xml version="1.0" standalone="yes"?><c/>'::xml)) v(i, x)
+xmlagg:xml
+<a/><b/><c/>
+-- SELECT 1
+
+> SELECT xmlagg(x ORDER BY i) FROM (VALUES
+>   (1, '<a/>'::xml), (2, '<?xml version="1.1"?><b/>'::xml), (3, 'text'::xml)) v(i, x)
+xmlagg:xml
+<a/><b/>text
+-- SELECT 1
+
+> SELECT xmlagg(x ORDER BY i) FROM (VALUES (1, '<?xml version="1.1"?><only/>'::xml)) v(i, x)
+xmlagg:xml
+<?xml version="1.1"?><only/>
+-- SELECT 1
+
+> SELECT xmlagg(x ORDER BY i) FROM (VALUES (1, NULL::xml), (2, '<a/>'::xml), (3, NULL)) v(i, x)
+xmlagg:xml
+<a/>
+-- SELECT 1
+
+> SELECT length(xmlagg(xmlelement(name r, i))::text) FROM generate_series(1, 20000) i
+length:int4
+228894
+-- SELECT 1
+
+> SELECT xmlelement(name rows, xmlagg(xmlelement(name row, xmlattributes(i AS id),
+>   xmlforest(i AS a, i * 2 AS b)) ORDER BY i)) FROM generate_series(1, 3) i
+xmlelement:xml
+<rows><row id="1"><a>1</a><b>2</b></row><row id="2"><a>2</a><b>4</b></row><row id="3"><a>3</a><b>6</b></row></rows>
+-- SELECT 1
+
+> SELECT '<a><b></a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Opening and ending tag mismatch: b line 1 and a
+DETAIL: <a><b></a>
+DETAIL:           ^
+
+> SELECT '<a>&undefined;</a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Entity 'undefined' not defined
+DETAIL: <a>&undefined;</a>
+DETAIL:               ^
+
+> SELECT '<!DOCTYPE a [<!ENTITY e "<b>x</b>">]><a>&e;&e;</a>'::xml
+xml:xml
+<!DOCTYPE a [<!ENTITY e "<b>x</b>">]><a>&e;&e;</a>
+-- SELECT 1
+
+> SELECT '<!DOCTYPE a [<!ENTITY e "<b>">]><a>&e;</a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Premature end of data in tag b line 1
+DETAIL: <b>
+DETAIL:    ^
+
+> SELECT '<!DOCTYPE a [<!ENTITY e "&e;">]><a>&e;</a>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Detected an entity reference loop
+DETAIL: &e;
+DETAIL:    ^
+
+> SELECT '<a xmlns:p="u"><p:b p:c="1"/><q:d/></a>'::xml
+xml:xml
+<a xmlns:p="u"><p:b p:c="1"/><q:d/></a>
+-- SELECT 1
+
+> SELECT '<a xmlns="x" xmlns="y"/>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Attribute xmlns redefined
+DETAIL: <a xmlns="x" xmlns="y"/>
+DETAIL:                       ^
+
+> SELECT '<a b="1" b="2"/>'::xml
+ERROR 2200N: invalid XML content (at 8)
+DETAIL: line 1: Attribute b redefined
+DETAIL: <a b="1" b="2"/>
+DETAIL:               ^
+
+> SELECT xmlparse(document '<!DOCTYPE a [<!ELEMENT a (b)*><!ELEMENT b EMPTY>]><a>  <b/>  </a>')
+xmlparse:xml
+<!DOCTYPE a [<!ELEMENT a (b)*><!ELEMENT b EMPTY>]><a>  <b/>  </a>
+-- SELECT 1
+
+> SELECT xmlparse(content '  <a/> text <b/><!-- c --><?pi d?>')
+xmlparse:xml
+  <a/> text <b/><!-- c --><?pi d?>
+-- SELECT 1
+
+> SELECT xmlparse(content '<a>&amp;</a><?xml version="1.0"?>')
+ERROR 2200N: invalid XML content
+DETAIL: line 1: XML declaration allowed only at the start of the document
+DETAIL: <a>&amp;</a><?xml version="1.0"?>
+DETAIL:                  ^
+
+> SELECT xml_is_well_formed('<a><b/></a>'), xml_is_well_formed('<a><b></a>'),
+>   xml_is_well_formed_document('<a/><b/>'), xml_is_well_formed_content('<a/><b/>')
+xml_is_well_formed:bool | xml_is_well_formed:bool | xml_is_well_formed_document:bool | xml_is_well_formed_content:bool
+t | f | f | t
+-- SELECT 1
+
+> SELECT xmlserialize(document '<a><b/></a>' AS text)
+xmlserialize:text
+<a><b/></a>
+-- SELECT 1
+
+> SELECT xmlserialize(document '<a/><b/>' AS text)
+ERROR 2200L: not an XML document
+
+> SELECT xmlserialize(content '<a><b>1</b></a><c/>' AS text indent)
+xmlserialize:text
+<a>
+  <b>1</b>
+</a>
+<c/>
+-- SELECT 1
+
+> SELECT xmlserialize(document '<!DOCTYPE a [<!ENTITY e "v">]><a>&e;<b/></a>' AS text indent)
+xmlserialize:text
+<!DOCTYPE a [
+<!ENTITY e "v">
+]>
+<a>v<b/></a>
+-- SELECT 1
+
+> SELECT xpath('//b/following-sibling::*', '<a><b/><c/><d/></a>')
+xpath:143
+{<c/>,<d/>}
+-- SELECT 1
+
+> SELECT xpath('//d/preceding-sibling::node()', '<a><b/>t<c/><d/></a>')
+xpath:143
+{<b/>,t,<c/>}
+-- SELECT 1
+
+> SELECT xpath('//@*', '<a x="1" y="2"><b z="3"/></a>')
+xpath:143
+{1,2,3}
+-- SELECT 1
+
+> SELECT xpath('/a/@y/following-sibling::node()', '<a x="1" y="2"/>')
+xpath:143
+{}
+-- SELECT 1
+
+> SELECT xpath('string(/a)', '<!DOCTYPE a [<!ENTITY e "<b>in</b>t">]><a>x&e;y</a>')
+xpath:143
+{xinty}
+-- SELECT 1
+
+> SELECT xpath('/a/node()', '<!DOCTYPE a [<!ENTITY e "<b>in</b>t">]><a>x&e;y</a>')
+xpath:143
+{x,y}
+-- SELECT 1
+
+> SELECT xpath('//p:c', '<a xmlns:p="u"><b><p:c>1</p:c></b></a>', ARRAY[ARRAY['p', 'u']])
+xpath:143
+{"<p:c xmlns:p=\"u\">1</p:c>"}
+-- SELECT 1
+
+> SELECT xpath('//c', '<a xmlns:p="u"><b xmlns:q="v"><c p:x="1" q:y="2"/></b></a>')
+xpath:143
+{"<c xmlns:p=\"u\" xmlns:q=\"v\" p:x=\"1\" q:y=\"2\"/>"}
+-- SELECT 1
+
+> SELECT xpath('//namespace::*', '<a xmlns:p="u"><b xmlns="v"/></a>')
+WARNING 01000: line 1: xmlns: URI v is not absolute
+<a xmlns:p="u"><b xmlns="v"/></a>
+                           ^
+CONTEXT: SQL function "xpath" statement 1
+xpath:143
+{http://www.w3.org/XML/1998/namespace,u,http://www.w3.org/XML/1998/namespace,u,v}
+-- SELECT 1
+
+> SELECT * FROM xmltable('/r/x' PASSING '<r xmlns:p="u"><x p:a="1"><p:y>2</p:y></x><x/></r>'
+>   COLUMNS n FOR ORDINALITY, a text PATH '@*', y xml PATH '*', s xml PATH '.')
+n:int4 | a:text | y:xml | s:xml
+1 | 1 | <p:y xmlns:p="u">2</p:y> | <x xmlns:p="u" p:a="1"><p:y>2</p:y></x>
+2 | NULL | NULL | <x/>
+-- SELECT 2
+
+> SELECT xpath('count(//*)', xmlelement(name a, xmlagg(xmlelement(name b, i)))) FROM generate_series(1, 100) i
+xpath:143
+{101}
+-- SELECT 1
+

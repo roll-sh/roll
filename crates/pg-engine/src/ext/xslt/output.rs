@@ -40,21 +40,22 @@ pub(super) fn finish(sheet: &Sheet, out: &mut Doc, html: bool) -> bool {
     let r = &out.nodes[root];
     let name = match r.ns.as_ref().and_then(|ns| ns.prefix.as_deref()) {
         Some(p) => format!("{p}:{}", r.name),
-        None => r.name.clone(),
+        None => r.name.to_string(),
     };
     let mut dtd = Node::new(Kind::Dtd, name);
-    dtd.decl = Decl::Dtd { external_id: o.doctype_public.clone(), system_id: o.doctype_system.clone() };
-    dtd.parent = Some(DOC);
+    dtd.set_decl(Decl::Dtd { external_id: o.doctype_public.clone(), system_id: o.doctype_system.clone() });
     let id = out.add(dtd);
-    out.nodes[DOC].children.insert(0, id);
+    out.prepend(DOC, id);
     out.int_subset = Some(id);
     false
 }
 
 /// `xsltSaveResultToString`: None where it fails (PostgreSQL returns NULL then).
 pub(super) fn save(sheet: &Sheet, mut out: Doc, html: bool) -> crate::Result<Option<String>> {
-    let kids = &out.nodes[DOC].children;
-    if kids.is_empty() || (kids.len() == 1 && out.nodes[kids[0]].kind == Kind::Dtd) {
+    let only_dtd = out.first_child(DOC).is_some_and(|f| {
+        out.next_sibling(f).is_none() && out.nodes[f].kind == Kind::Dtd
+    });
+    if !out.has_children(DOC) || only_dtd {
         return Ok(Some(String::new()));
     }
     let o = &sheet.output;
@@ -83,14 +84,13 @@ pub(super) fn save(sheet: &Sheet, mut out: Doc, html: bool) -> crate::Result<Opt
         }
         s.push_str("?>\n");
     }
-    let kids = out.nodes[DOC].children.clone();
-    for (i, &c) in kids.iter().enumerate() {
+    for c in out.children(DOC) {
         let mut sv = Saver::new(&out, o.indent == 1, false);
         sv.node_dump_output(out.encoding.is_none());
         sv.save_tree(c);
         s.push_str(&sv.out);
         let k = out.nodes[c].kind;
-        if o.indent != 0 && (k == Kind::Dtd || (k == Kind::Comment && i + 1 < kids.len())) {
+        if o.indent != 0 && (k == Kind::Dtd || (k == Kind::Comment && out.next_sibling(c).is_some())) {
             s.push('\n');
         }
     }
@@ -120,10 +120,10 @@ fn text(b: Vec<u8>) -> crate::Result<String> {
 
 /// The text method: text nodes only (not CDATA), in document order.
 fn text_content(d: &Doc, id: usize, out: &mut String) {
-    for &c in &d.nodes[id].children {
+    for c in d.children(id) {
         let n = &d.nodes[c];
         match n.kind {
-            Kind::Text => out.push_str(&n.content),
+            Kind::Text => out.push_str(d.text(n)),
             Kind::Element => text_content(d, c, out),
             _ => {}
         }

@@ -4,11 +4,15 @@
 
 use super::exec::Exec;
 use super::style::*;
-use crate::types::xml::tree::{Kind, Node, NodeId, Ns};
+use crate::types::xml::tree::{Kind, Name, Node, NodeId, Ns, NsRef, ns_ref};
 use crate::types::xml::xpath::{XNode, XValue};
 
-const TEXT: &str = "text";
 const NOENC: &str = "textnoenc";
+
+/// libxslt's `xmlStringTextNoenc` or libxml's `xmlStringText`, the name of a text node.
+fn text_name(noenc: bool) -> Name {
+    if noenc { Name::from(NOENC) } else { Name::text() }
+}
 
 impl Exec<'_, '_> {
     /// `xsltAddChild` of a new node to the insertion point.
@@ -17,18 +21,20 @@ impl Exec<'_, '_> {
         self.out.append(p, id);
     }
 
-    /// `xmlAddChild` of a new node: text merges into a last text child of the same name.
-    pub fn add_node(&mut self, n: Node) {
+    /// `xmlAddChild` of a new node with `content`: text merges into a last text child of the
+    /// same name.
+    pub fn add_node(&mut self, n: Node, content: &str) {
         let p = self.insert;
         if n.kind == Kind::Text
-            && let Some(&last) = self.out.nodes[p].children.last()
+            && let Some(last) = self.out.last_child(p)
             && self.out.nodes[last].kind == Kind::Text
             && self.out.nodes[last].name == n.name
         {
-            self.out.nodes[last].content.push_str(&n.content);
+            self.out.push_text(last, content);
             return;
         }
         let id = self.out.add(n);
+        self.out.set_text(id, content);
         self.out.append(p, id);
     }
 
@@ -43,11 +49,11 @@ impl Exec<'_, '_> {
             return false;
         }
         let uri = t.ns.as_ref().and_then(|n| n.href.clone());
-        self.s.output.cdata_elements.iter().any(|(u, l)| *u == uri && *l == t.name)
+        self.s.output.cdata_elements.iter().any(|(u, l)| *u == uri && t.name == *l)
     }
 
     fn last_child(&self) -> Option<NodeId> {
-        self.out.nodes[self.insert].children.last().copied()
+        self.out.last_child(self.insert)
     }
 
     /// `xsltCopyTextString`.
@@ -58,32 +64,28 @@ impl Exec<'_, '_> {
         };
         if self.cdata_target() {
             if is(self, Kind::CData, None) {
-                self.out.nodes[last.unwrap()].content.push_str(s);
+                self.out.push_text(last.unwrap(), s);
                 return;
             }
-            let mut n = Node::new(Kind::CData, "");
-            n.content = s.to_string();
-            let id = self.out.add(n);
+            let id = self.out.new_node(Kind::CData, "", s);
             self.append(id);
             return;
         }
-        let name = if noesc { NOENC } else { TEXT };
-        if is(self, Kind::Text, Some(name)) {
-            self.out.nodes[last.unwrap()].content.push_str(s);
+        let name = text_name(noesc);
+        if is(self, Kind::Text, Some(&name)) {
+            self.out.push_text(last.unwrap(), s);
             return;
         }
-        let mut n = Node::new(Kind::Text, name);
-        n.content = s.to_string();
-        let id = self.out.add(n);
+        let id = self.out.new_node(Kind::Text, name, s);
         self.append(id);
     }
 
     /// `xsltCopyText` of a source text or CDATA node.
     pub fn copy_text(&mut self, src: NodeId) {
-        let (content, name) = {
-            let n = &self.x.doc.nodes[src];
-            (n.content.clone(), if n.kind == Kind::Text { n.name.clone() } else { String::new() })
-        };
+        let doc = &self.x.doc;
+        let n = &doc.nodes[src];
+        let content = doc.text(n).to_string();
+        let name = if n.kind == Kind::Text { n.name.clone() } else { Name::default() };
         if self.cdata_target() {
             self.add_text(&content, false);
             return;
@@ -91,46 +93,44 @@ impl Exec<'_, '_> {
         if let Some(l) = self.last_child() {
             let ln = &self.out.nodes[l];
             if (ln.kind == Kind::Text && ln.name == name) || (ln.kind == Kind::CData && name == NOENC) {
-                self.out.nodes[l].content.push_str(&content);
+                self.out.push_text(l, &content);
                 return;
             }
         }
-        let mut n = Node::new(Kind::Text, if name == NOENC { NOENC } else { TEXT });
-        n.content = content;
-        self.add_node(n);
+        self.add_node(Node::new(Kind::Text, text_name(name == NOENC)), &content);
     }
 
     // --- namespaces in the result
 
     /// `xmlSearchNs` in the result tree.
-    pub fn out_search_ns(&self, id: NodeId, prefix: Option<&str>) -> Option<Ns> {
+    pub fn out_search_ns(&self, id: NodeId, prefix: Option<&str>) -> Option<NsRef> {
         if prefix == Some("xml") {
-            return Some(Ns { prefix: Some("xml".into()), href: Some(XML_NS.into()) });
+            return Some(ns_ref(Some("xml"), Some(XML_NS)));
         }
         let mut cur = Some(id);
         while let Some(c) = cur {
             let n = &self.out.nodes[c];
             if n.kind == Kind::Element
-                && let Some(d) = n.ns_defs.iter().find(|d| d.prefix.as_deref() == prefix)
+                && let Some(d) = n.ns_defs().iter().find(|d| d.prefix.as_deref() == prefix)
             {
                 return Some(d.clone());
             }
-            cur = n.parent;
+            cur = n.parent();
         }
         None
     }
 
     /// `xmlSearchNsByHref` in the result tree: a declaration of `href` whose prefix isn't
     /// shadowed at `id`.
-    fn out_search_ns_by_href(&self, id: NodeId, href: &str) -> Option<Ns> {
+    fn out_search_ns_by_href(&self, id: NodeId, href: &str) -> Option<NsRef> {
         if href == XML_NS {
-            return Some(Ns { prefix: Some("xml".into()), href: Some(XML_NS.into()) });
+            return Some(ns_ref(Some("xml"), Some(XML_NS)));
         }
         let mut cur = Some(id);
         while let Some(c) = cur {
             let n = &self.out.nodes[c];
             if n.kind == Kind::Element {
-                for d in &n.ns_defs {
+                for d in n.ns_defs() {
                     if d.href.as_deref() == Some(href)
                         && self.out_search_ns(id, d.prefix.as_deref()).is_some_and(|f| f.href.as_deref() == Some(href))
                     {
@@ -138,37 +138,36 @@ impl Exec<'_, '_> {
                     }
                 }
             }
-            cur = n.parent;
+            cur = n.parent();
         }
         None
     }
 
     /// `xmlNewNs` on a result element: None if the prefix is declared there already.
-    pub fn new_ns(&mut self, el: NodeId, href: Option<String>, prefix: Option<String>) -> Option<Ns> {
+    pub fn new_ns(&mut self, el: NodeId, href: Option<String>, prefix: Option<String>) -> Option<NsRef> {
         if prefix.as_deref() == Some("xml") {
             return None;
         }
         let n = &mut self.out.nodes[el];
-        if n.ns_defs.iter().any(|d| d.prefix == prefix) {
+        if n.ns_defs().iter().any(|d| d.prefix == prefix) {
             return None;
         }
-        let ns = Ns { prefix, href };
-        n.ns_defs.push(ns.clone());
+        let ns = NsRef::new(Ns { prefix, href });
+        n.ns_defs_mut().push(ns.clone());
         Some(ns)
     }
-
     /// `xsltGetSpecialNamespace`: a binding of `uri` (preferably with `prefix`) in scope at
     /// `target`, declared there if need be.
-    pub fn special_ns(&mut self, uri: Option<&str>, prefix: Option<&str>, target: NodeId) -> Option<Ns> {
+    pub fn special_ns(&mut self, uri: Option<&str>, prefix: Option<&str>, target: NodeId) -> Option<NsRef> {
         if self.out.nodes[target].kind != Kind::Element {
             return None;
         }
         if prefix.is_none() && uri.is_none_or(str::is_empty) {
-            if let Some(d) = self.out.nodes[target].ns_defs.iter().find(|d| d.prefix.is_none()) {
+            if let Some(d) = self.out.nodes[target].ns_defs().iter().find(|d| d.prefix.is_none()) {
                 let _ = d;
                 return None;
             }
-            if let Some(p) = self.out.nodes[target].parent
+            if let Some(p) = self.out.parent(target)
                 && self.out.nodes[p].kind == Kind::Element
             {
                 self.out.nodes[p].ns.as_ref()?;
@@ -184,7 +183,7 @@ impl Exec<'_, '_> {
             return self.out_search_ns(target, Some("xml"));
         }
         let mut occupied = false;
-        if let Some(d) = self.out.nodes[target].ns_defs.iter().find(|d| d.prefix.as_deref() == prefix) {
+        if let Some(d) = self.out.nodes[target].ns_defs().iter().find(|d| d.prefix.as_deref() == prefix) {
             if d.href.as_deref() == uri {
                 return Some(d.clone());
             }
@@ -198,7 +197,7 @@ impl Exec<'_, '_> {
             }
             return self.declare_new_prefix(uri, prefix, target);
         }
-        let parent = self.out.nodes[target].parent.filter(|&p| self.out.nodes[p].kind == Kind::Element);
+        let parent = self.out.parent(target).filter(|&p| self.out.nodes[p].kind == Kind::Element);
         let Some(p) = parent else {
             return self.new_ns(target, uri.map(str::to_string), prefix.map(str::to_string));
         };
@@ -213,7 +212,7 @@ impl Exec<'_, '_> {
             if ns.href.as_deref() == uri {
                 return Some(ns);
             }
-            let attrs = self.out.nodes[target].attrs.clone();
+            let attrs: Vec<NodeId> = self.out.attrs(target).collect();
             for a in attrs {
                 if self.out.nodes[a].ns.as_ref().is_some_and(|n| n.prefix.as_deref() == prefix) {
                     if let Some(u) = uri
@@ -228,7 +227,7 @@ impl Exec<'_, '_> {
         self.new_ns(target, uri.map(str::to_string), prefix.map(str::to_string))
     }
 
-    fn declare_new_prefix(&mut self, uri: Option<&str>, prefix: Option<&str>, target: NodeId) -> Option<Ns> {
+    fn declare_new_prefix(&mut self, uri: Option<&str>, prefix: Option<&str>, target: NodeId) -> Option<NsRef> {
         let base = prefix.unwrap_or("ns");
         for counter in 1..=1000 {
             let p = format!("{base}_{counter}");
@@ -240,7 +239,7 @@ impl Exec<'_, '_> {
     }
 
     /// `xsltGetNamespace`: a stylesheet namespace (aliased) for a result element.
-    pub fn get_namespace(&mut self, ns: &Ns, out: NodeId) -> Option<Ns> {
+    pub fn get_namespace(&mut self, ns: &Ns, out: NodeId) -> Option<NsRef> {
         let alias = ns.href.as_ref().and_then(|h| self.s.aliases.get(h)).cloned();
         match alias {
             Some(None) => self.special_ns(None, None, out),
@@ -251,7 +250,7 @@ impl Exec<'_, '_> {
 
     /// `xsltCopyNamespaceList` (literal result elements: XSLT's namespace left out, aliases
     /// applied) or `xsltCopyNamespaceListInternal` (copies).
-    pub fn copy_ns_list(&mut self, el: NodeId, defs: &[Ns], lre: bool) {
+    pub fn copy_ns_list(&mut self, el: NodeId, defs: &[NsRef], lre: bool) {
         for d in defs {
             if let Some(ens) = &self.out.nodes[el].ns
                 && ens.prefix == d.prefix
@@ -287,7 +286,7 @@ impl Exec<'_, '_> {
         if self.out.nodes[el].kind != Kind::Element {
             return;
         }
-        if !self.out.nodes[el].children.is_empty() {
+        if self.out.has_children(el) {
             self.failed = true;
             return;
         }
@@ -298,7 +297,7 @@ impl Exec<'_, '_> {
         } else if ns.prefix.as_deref() == Some("xml") {
             return;
         }
-        if let Some(d) = self.out.nodes[el].ns_defs.iter().find(|d| d.prefix == ns.prefix) {
+        if let Some(d) = self.out.nodes[el].ns_defs().iter().find(|d| d.prefix == ns.prefix) {
             let _ = d;
             return;
         }
@@ -309,38 +308,34 @@ impl Exec<'_, '_> {
     }
 
     /// `xmlSetNsProp`: replaces an attribute of the same name and namespace.
-    pub fn set_attr(&mut self, el: NodeId, ns: Option<Ns>, name: &str, value: &str, noenc: bool) {
-        let href = ns.as_ref().and_then(|n| n.href.clone());
-        let existing = self.out.nodes[el].attrs.iter().copied().find(|&a| {
+    pub fn set_attr(&mut self, el: NodeId, ns: Option<NsRef>, name: &str, value: &str, noenc: bool) {
+        let href = ns.as_ref().and_then(|n| n.href.as_deref());
+        let existing = self.out.attrs(el).find(|&a| {
             let an = &self.out.nodes[a];
-            an.name == name && an.ns.as_ref().and_then(|n| n.href.clone()) == href
+            an.name == name && an.ns.as_ref().and_then(|n| n.href.as_deref()) == href
         });
-        let mut t = Node::new(Kind::Text, if noenc { NOENC } else { TEXT });
-        t.content = value.to_string();
-        let tid = self.out.add(t);
+        let tid = self.out.new_node(Kind::Text, text_name(noenc), value);
         let a = match existing {
             Some(a) => {
-                self.out.nodes[a].children.clear();
+                self.out.clear_children(a);
                 self.out.nodes[a].ns = ns;
                 a
             }
             None => {
                 let mut n = Node::new(Kind::Attribute, name);
                 n.ns = ns;
-                n.parent = Some(el);
                 let a = self.out.add(n);
-                self.out.nodes[el].attrs.push(a);
+                self.out.append_attr(el, a);
                 a
             }
         };
-        self.out.nodes[tid].parent = Some(a);
-        self.out.nodes[a].children.push(tid);
+        self.out.append(a, tid);
     }
 
     /// `xsltShallowCopyAttr`.
     pub fn copy_attr(&mut self, src: NodeId) {
         let target = self.insert;
-        if self.out.nodes[target].kind != Kind::Element || !self.out.nodes[target].children.is_empty() {
+        if self.out.nodes[target].kind != Kind::Element || self.out.has_children(target) {
             self.failed = true;
             return;
         }
@@ -362,7 +357,7 @@ impl Exec<'_, '_> {
     /// `xsltShallowCopyElem` for xsl:copy (not a literal result element).
     pub fn shallow_copy_element(&mut self, src: NodeId) -> NodeId {
         let s = &self.x.doc.nodes[src];
-        let (name, ns, defs) = (s.name.clone(), s.ns.clone(), s.ns_defs.clone());
+        let (name, ns, defs) = (s.name.clone(), s.ns.clone(), s.ns_defs().to_vec());
         let el = self.out.add(Node::new(Kind::Element, name));
         self.append(el);
         if !defs.is_empty() {
@@ -380,7 +375,7 @@ impl Exec<'_, '_> {
     }
 
     fn parent_ns(&self, el: NodeId) -> bool {
-        self.out.nodes[el].parent.is_some_and(|p| self.out.nodes[p].kind == Kind::Element && self.out.nodes[p].ns.is_some())
+        self.out.parent(el).is_some_and(|p| self.out.nodes[p].kind == Kind::Element && self.out.nodes[p].ns.is_some())
     }
 
     /// xsl:copy-of (xsltCopyOf).
@@ -395,8 +390,10 @@ impl Exec<'_, '_> {
                         }
                         XNode::Node(id) => match self.x.doc.nodes[id].kind {
                             Kind::Document => {
-                                for c in self.x.doc.nodes[id].children.clone() {
-                                    self.copy_tree(c, false);
+                                let mut c = self.x.doc.first_child(id);
+                                while let Some(k) = c {
+                                    self.copy_tree(k, false);
+                                    c = self.x.doc.next_sibling(k);
                                 }
                             }
                             Kind::Attribute => self.copy_attr(id),
@@ -420,12 +417,12 @@ impl Exec<'_, '_> {
         match kind {
             Kind::Text => {
                 let n = &self.x.doc.nodes[src];
-                let (c, noenc) = (n.content.clone(), n.name == NOENC);
+                let (c, noenc) = (self.x.doc.text(n).to_string(), n.name == NOENC);
                 self.add_text(&c, noenc);
                 return;
             }
             Kind::CData => {
-                let c = self.x.doc.nodes[src].content.clone();
+                let c = self.x.doc.text_of(src).to_string();
                 self.add_text(&c, false);
                 return;
             }
@@ -435,14 +432,15 @@ impl Exec<'_, '_> {
             }
             Kind::Comment | Kind::Pi => {
                 let n = &self.x.doc.nodes[src];
-                let mut m = Node::new(kind, n.name.clone());
-                m.content = n.content.clone();
-                self.add_node(m);
+                let (m, c) = (Node::new(kind, n.name.clone()), self.x.doc.text(n).to_string());
+                self.add_node(m, &c);
                 return;
             }
             Kind::Document => {
-                for c in self.x.doc.nodes[src].children.clone() {
-                    self.copy_tree(c, top_visited);
+                let mut c = self.x.doc.first_child(src);
+                while let Some(k) = c {
+                    self.copy_tree(k, top_visited);
+                    c = self.x.doc.next_sibling(k);
                 }
                 return;
             }
@@ -451,7 +449,7 @@ impl Exec<'_, '_> {
         }
         let (name, ns, defs, parent) = {
             let s = &self.x.doc.nodes[src];
-            (s.name.clone(), s.ns.clone(), s.ns_defs.clone(), self.x.parent(src))
+            (s.name.clone(), s.ns.clone(), s.ns_defs().to_vec(), self.x.parent(src))
         };
         let el = self.out.add(Node::new(Kind::Element, name));
         self.append(el);
@@ -482,29 +480,28 @@ impl Exec<'_, '_> {
                 }
             }
         }
-        let attrs = self.x.doc.nodes[src].attrs.clone();
         let old = std::mem::replace(&mut self.insert, el);
-        for a in attrs {
-            let an = &self.x.doc.nodes[a];
+        let mut a = self.x.doc.first_attr(src);
+        while let Some(at) = a {
+            let an = &self.x.doc.nodes[at];
             let (aname, ans) = (an.name.clone(), an.ns.clone());
-            let value = self.x.doc.content(a);
+            let value = self.x.doc.content(at);
             let cns = match ans {
                 Some(n) => self.special_ns(n.href.as_deref(), n.prefix.as_deref(), el),
                 None => None,
             };
             let mut node = Node::new(Kind::Attribute, aname);
             node.ns = cns;
-            node.parent = Some(el);
             let aid = self.out.add(node);
-            let mut t = Node::new(Kind::Text, TEXT);
-            t.content = value;
-            t.parent = Some(aid);
-            let tid = self.out.add(t);
-            self.out.nodes[aid].children.push(tid);
-            self.out.nodes[el].attrs.push(aid);
+            let tid = self.out.new_text(&value);
+            self.out.append(aid, tid);
+            self.out.append_attr(el, aid);
+            a = self.x.doc.next_sibling(at);
         }
-        for c in self.x.doc.nodes[src].children.clone() {
-            self.copy_tree(c, true);
+        let mut c = self.x.doc.first_child(src);
+        while let Some(k) = c {
+            self.copy_tree(k, true);
+            c = self.x.doc.next_sibling(k);
         }
         self.insert = old;
     }

@@ -17,7 +17,7 @@ const WRITERS: [(&str, &str); 4] = [
 impl Compiler<'_> {
     /// A template's leading xsl:param elements and the rest of its content.
     pub(super) fn template_body(&mut self, id: NodeId) -> (Vec<VarDecl>, Vec<Instr>) {
-        let kids = self.doc.nodes[id].children.clone();
+        let kids: Vec<NodeId> = self.doc.children(id).collect();
         let mut params = Vec::new();
         let (mut i, mut start) = (0, 0);
         while i < kids.len() {
@@ -41,12 +41,12 @@ impl Compiler<'_> {
 
     /// The content of a literal-result-element stylesheet: its root element.
     pub(super) fn body_of_doc(&mut self) -> Vec<Instr> {
-        let kids = self.doc.nodes[DOC].children.clone();
+        let kids: Vec<NodeId> = self.doc.children(DOC).collect();
         self.sequence(&kids)
     }
 
     pub(super) fn body(&mut self, id: NodeId) -> Vec<Instr> {
-        let kids = self.doc.nodes[id].children.clone();
+        let kids: Vec<NodeId> = self.doc.children(id).collect();
         self.sequence(&kids)
     }
 
@@ -73,7 +73,7 @@ impl Compiler<'_> {
             None => None,
         };
         // (Only xsl:variable: xsl:param and xsl:with-param warn.)
-        if select.is_some() && !self.doc.nodes[id].children.is_empty() && self.doc.nodes[id].name == "variable" {
+        if select.is_some() && self.doc.has_children(id) && self.doc.nodes[id].name == "variable" {
             self.errors += 1;
         }
         let body = if select.is_some() { Vec::new() } else { self.body(id) };
@@ -152,7 +152,7 @@ impl Compiler<'_> {
     }
 
     pub(super) fn sorts_and_params(&mut self, id: NodeId) -> (Vec<Sort>, Vec<VarDecl>, Vec<NodeId>) {
-        let kids = self.doc.nodes[id].children.clone();
+        let kids: Vec<NodeId> = self.doc.children(id).collect();
         self.sorts_of(&kids)
     }
 
@@ -199,7 +199,7 @@ impl Compiler<'_> {
     pub(super) fn instruction(&mut self, id: NodeId) -> Option<Instr> {
         let n = &self.doc.nodes[id];
         match n.kind {
-            Kind::Text | Kind::CData => return Some(Instr::Text(n.content.clone(), false)),
+            Kind::Text | Kind::CData => return Some(Instr::Text(self.doc.text(n).to_string(), false)),
             Kind::Element => {}
             _ => return None,
         }
@@ -218,7 +218,7 @@ impl Compiler<'_> {
             return Some(self.fallbacks(id));
         }
         let mut attrs = Vec::new();
-        for a in n.attrs.clone() {
+        for a in self.doc.attrs(id).collect::<Vec<_>>() {
             let an = &self.doc.nodes[a];
             if an.ns.as_ref().and_then(|ns| ns.href.as_deref()) == Some(XSLT_NS) {
                 continue;
@@ -243,7 +243,7 @@ impl Compiler<'_> {
     /// An element libxslt can't run: its xsl:fallback children's bodies.
     fn fallbacks(&mut self, id: NodeId) -> Instr {
         let mut bodies = Vec::new();
-        for c in self.doc.nodes[id].children.clone() {
+        for c in self.doc.children(id).collect::<Vec<_>>() {
             if is_xslt(&self.doc, c) && self.doc.nodes[c].name == "fallback" {
                 bodies.push(self.body(c));
             }

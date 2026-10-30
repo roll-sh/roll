@@ -72,13 +72,12 @@ fn html_ids(version: &str) -> Option<(Option<&'static str>, Option<&'static str>
 /// `xmlCreateIntSubset` on an HTML document: the doctype node goes first.
 fn add_doctype(doc: &mut Doc, name: &str, public: Option<&str>, system: Option<&str>) {
     let mut n = Node::new(Kind::Dtd, name);
-    n.decl = Decl::Dtd {
+    n.set_decl(Decl::Dtd {
         external_id: public.map(str::to_string),
         system_id: system.map(str::to_string),
-    };
-    n.parent = Some(DOC);
+    });
     let id = doc.add(n);
-    doc.nodes[DOC].children.insert(0, id);
+    doc.prepend(DOC, id);
     doc.int_subset = Some(id);
 }
 
@@ -149,7 +148,7 @@ pub(crate) fn detect_html(
     if r.ns.is_some() || !r.name.eq_ignore_ascii_case("html") {
         return false;
     }
-    for &c in &doc.nodes[DOC].children {
+    for c in doc.children(DOC) {
         if c == root {
             break;
         }
@@ -157,8 +156,8 @@ pub(crate) fn detect_html(
         match n.kind {
             Kind::Element => return false,
             Kind::Text
-                if !n
-                    .content
+                if !doc
+                    .text(n)
                     .bytes()
                     .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r')) =>
             {
@@ -200,8 +199,10 @@ pub(crate) fn save_html_bytes(
     indent: bool,
     xhtml: bool,
 ) -> Vec<u8> {
-    let kids = &doc.nodes[DOC].children;
-    if kids.is_empty() || (kids.len() == 1 && doc.nodes[kids[0]].kind == Kind::Dtd) {
+    let only_dtd = doc.first_child(DOC).is_some_and(|f| {
+        doc.next_sibling(f).is_none() && doc.nodes[f].kind == Kind::Dtd
+    });
+    if !doc.has_children(DOC) || only_dtd {
         return Vec::new();
     }
     set_meta_encoding(doc, encoding.unwrap_or("UTF-8"));
@@ -238,19 +239,15 @@ fn is_elem(doc: &Doc, id: NodeId, name: &str) -> bool {
 
 /// The attribute's value when it is a single text node (what `htmlSetMetaEncoding` reads).
 fn single_text(doc: &Doc, attr: NodeId) -> Option<&str> {
-    match doc.nodes[attr].children.as_slice() {
-        [t] if doc.nodes[*t].kind == Kind::Text => Some(&doc.nodes[*t].content),
-        _ => None,
-    }
+    let t = doc.first_child(attr)?;
+    (doc.next_sibling(t).is_none() && doc.nodes[t].kind == Kind::Text).then(|| doc.text_of(t))
 }
 
 fn new_attr(doc: &mut Doc, elem: NodeId, name: &str, value: &str) {
-    let mut a = Node::new(Kind::Attribute, name);
-    a.parent = Some(elem);
-    let a = doc.add(a);
-    let t = doc.text(value);
+    let a = doc.add(Node::new(Kind::Attribute, name));
+    let t = doc.new_text(value);
     doc.append(a, t);
-    doc.nodes[elem].attrs.push(a);
+    doc.append_attr(elem, a);
 }
 
 /// `xmlStrcasestr`.
@@ -273,11 +270,11 @@ fn set_meta_encoding(doc: &mut Doc, encoding: &str) {
         }
         newcontent.truncate(end);
     }
-    // Where the search for meta elements starts: (parent, index of the first sibling).
+    // Where the search for meta elements starts: the first sibling to look at.
     let mut head: Option<NodeId> = None;
-    let mut scan: Option<(NodeId, usize)> = None;
+    let mut scan: Option<Option<NodeId>> = None;
     let mut html = None;
-    for (i, &c) in doc.nodes[DOC].children.iter().enumerate() {
+    for c in doc.children(DOC) {
         if is_elem(doc, c, "html") {
             html = Some(c);
             break;
@@ -287,19 +284,19 @@ fn set_meta_encoding(doc: &mut Doc, encoding: &str) {
             break;
         }
         if is_elem(doc, c, "meta") {
-            scan = Some((DOC, i));
+            scan = Some(Some(c));
             break;
         }
     }
     if let Some(h) = html {
-        for (i, &c) in doc.nodes[h].children.iter().enumerate() {
+        for c in doc.children(h) {
             if is_elem(doc, c, "head") {
                 head = Some(c);
                 break;
             }
             if is_elem(doc, c, "meta") {
                 head = Some(h);
-                scan = Some((h, i));
+                scan = Some(Some(c));
                 break;
             }
         }
@@ -312,17 +309,17 @@ fn set_meta_encoding(doc: &mut Doc, encoding: &str) {
     if scan.is_none()
         && let Some(h) = head
     {
-        scan = Some((h, 0));
+        scan = Some(doc.first_child(h));
     }
     let mut meta: Option<(NodeId, String)> = None;
-    if let Some((parent, from)) = scan {
-        'siblings: for &c in &doc.nodes[parent].children[from..] {
+    if let Some(from) = scan {
+        'siblings: for c in doc.following(from) {
             if !is_elem(doc, c, "meta") {
                 continue;
             }
             let mut http = false;
             let mut content: Option<&str> = None;
-            for &a in &doc.nodes[c].attrs {
+            for a in doc.attrs(c) {
                 let Some(value) = single_text(doc, a) else {
                     continue;
                 };
@@ -344,10 +341,8 @@ fn set_meta_encoding(doc: &mut Doc, encoding: &str) {
     match meta {
         None => {
             let Some(head) = head else { return };
-            let mut m = Node::new(Kind::Element, "meta");
-            m.parent = Some(head);
-            let m = doc.add(m);
-            doc.nodes[head].children.insert(0, m);
+            let m = doc.add(Node::new(Kind::Element, "meta"));
+            doc.prepend(head, m);
             new_attr(doc, m, "http-equiv", "Content-Type");
             new_attr(doc, m, "content", &newcontent);
         }
@@ -356,16 +351,14 @@ fn set_meta_encoding(doc: &mut Doc, encoding: &str) {
                 return;
             }
             // xmlSetProp: the un-namespaced attribute named exactly "content".
-            let existing = doc.nodes[m]
-                .attrs
-                .iter()
-                .copied()
+            let existing = doc
+                .attrs(m)
                 .find(|&a| doc.nodes[a].ns.is_none() && doc.nodes[a].name == "content");
             match existing {
                 Some(a) => {
-                    let t = doc.text(&newcontent);
-                    doc.nodes[t].parent = Some(a);
-                    doc.nodes[a].children = vec![t];
+                    let t = doc.new_text(&newcontent);
+                    doc.clear_children(a);
+                    doc.append(a, t);
                 }
                 None => new_attr(doc, m, "content", &newcontent),
             }
@@ -595,10 +588,8 @@ impl Dumper<'_> {
     }
 
     fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
-        let p = self.doc.nodes[id].parent?;
-        let sibs = &self.doc.nodes[p].children;
-        let i = sibs.iter().position(|&c| c == id)?;
-        sibs.get(i + 1).copied()
+        self.doc.parent(id)?;
+        self.doc.next_sibling(id)
     }
 
     fn is_text_or_ref(&self, id: NodeId) -> bool {
@@ -611,7 +602,7 @@ impl Dumper<'_> {
         if let Some(dtd) = doc.int_subset {
             self.doctype(dtd);
         }
-        for &c in &doc.nodes[DOC].children {
+        for c in doc.children(DOC) {
             self.node(c);
         }
         self.out.push('\n');
@@ -625,7 +616,7 @@ impl Dumper<'_> {
         if let Decl::Dtd {
             external_id,
             system_id,
-        } = &n.decl
+        } = n.decl()
         {
             if let Some(p) = external_id {
                 self.out.push_str(" PUBLIC ");
@@ -659,15 +650,15 @@ impl Dumper<'_> {
         let a = &doc.nodes[id];
         self.out.push(' ');
         self.qname(id);
-        if a.children.is_empty() || is_boolean_attr(&a.name) {
+        if !doc.has_children(id) || is_boolean_attr(&a.name) {
             return;
         }
         // xmlNodeListGetString(doc, children, 0): attribute-escaped text, references kept.
         let mut value = String::new();
-        for &c in &a.children {
+        for c in doc.children(id) {
             let n = &doc.nodes[c];
             match n.kind {
-                Kind::Text | Kind::CData => encode_entities(&mut value, &n.content, true),
+                Kind::Text | Kind::CData => encode_entities(&mut value, doc.text(n), true),
                 Kind::EntityRef => {
                     value.push('&');
                     value.push_str(&n.name);
@@ -677,7 +668,7 @@ impl Dumper<'_> {
             }
         }
         self.out.push('=');
-        let parent = a.parent.map(|p| &doc.nodes[p]);
+        let parent = doc.parent(id).map(|p| &doc.nodes[p]);
         let uri = a.ns.is_none()
             && parent.is_some_and(|p| p.ns.is_none())
             && (["href", "action", "src"]
@@ -704,21 +695,21 @@ impl Dumper<'_> {
             Kind::Attribute => self.attr(id),
             Kind::Text => {
                 let raw = n.name == "textnoenc"
-                    || n.parent.is_some_and(|p| {
+                    || doc.parent(id).is_some_and(|p| {
                         let p = &doc.nodes[p];
                         p.kind == Kind::Element
                             && (p.name.eq_ignore_ascii_case("script")
                                 || p.name.eq_ignore_ascii_case("style"))
                     });
                 if raw {
-                    self.out.push_str(&n.content);
+                    self.out.push_str(doc.text(n));
                 } else {
-                    encode_entities(&mut self.out, &n.content, false);
+                    encode_entities(&mut self.out, doc.text(n), false);
                 }
             }
             Kind::Comment => {
                 self.out.push_str("<!--");
-                self.out.push_str(&n.content);
+                self.out.push_str(doc.text(n));
                 self.out.push_str("-->");
             }
             Kind::Pi => {
@@ -726,7 +717,7 @@ impl Dumper<'_> {
                 self.out.push_str(&n.name);
                 if !n.no_content {
                     self.out.push(' ');
-                    self.out.push_str(&n.content);
+                    self.out.push_str(doc.text(n));
                 }
                 self.out.push('>');
             }
@@ -736,7 +727,7 @@ impl Dumper<'_> {
                 self.out.push(';');
             }
             // HTML_PRESERVE_NODE is XML_CDATA_SECTION_NODE: its content as is.
-            Kind::CData => self.out.push_str(&n.content),
+            Kind::CData => self.out.push_str(doc.text(n)),
             _ => {}
         }
     }
@@ -752,7 +743,7 @@ impl Dumper<'_> {
         let block = info.is_some_and(|d| !d.inline());
         self.out.push('<');
         self.qname(id);
-        for ns in &n.ns_defs {
+        for ns in n.ns_defs() {
             // xmlNsListDumpOutput: no document, so non-ASCII as character references.
             let Some(href) = &ns.href else { continue };
             if ns.prefix.as_deref() == Some("xml") {
@@ -769,19 +760,19 @@ impl Dumper<'_> {
             attr_escape(&mut self.out, href);
             self.out.push('"');
         }
-        for &a in &n.attrs {
+        for a in doc.attrs(id) {
             self.attr(a);
         }
         if info.is_some_and(Desc::empty) {
             self.out.push('>');
-        } else if let (Some(&first), Some(&last)) = (n.children.first(), n.children.last()) {
+        } else if let (Some(first), Some(last)) = (doc.first_child(id), doc.last_child(id)) {
             self.out.push('>');
-            let several = n.children.len() > 1;
+            let several = first != last;
             let p_name = self.name_starts_with_p(id);
             if self.format && block && !self.is_text_or_ref(first) && several && !p_name {
                 self.out.push('\n');
             }
-            for &c in &n.children {
+            for c in doc.children(id) {
                 self.node(c);
             }
             if self.format && block && !self.is_text_or_ref(last) && several && !p_name {
@@ -802,7 +793,7 @@ impl Dumper<'_> {
             && block
             && let Some(next) = self.next_sibling(id)
             && !self.is_text_or_ref(next)
-            && let Some(p) = n.parent
+            && let Some(p) = doc.parent(id)
             && p != DOC
             && !self.name_starts_with_p(p)
         {
@@ -922,35 +913,27 @@ mod tests {
     fn graft(src: &Doc, id: NodeId, dst: &mut Doc, parent: NodeId) {
         let s = &src.nodes[id];
         if s.kind == Kind::Element && s.name == "doe" {
-            for &c in &s.children {
-                let mut t = src.nodes[c].clone();
-                t.name = "textnoenc".into();
-                t.children.clear();
-                let t = dst.add(t);
+            for c in src.children(id) {
+                let t = dst.import(src, c);
+                dst.nodes[t].name = "textnoenc".into();
                 dst.append(parent, t);
             }
             return;
         }
-        let mut n = s.clone();
-        n.children.clear();
-        n.attrs.clear();
-        if n.kind == Kind::CData {
-            n.kind = Kind::Text;
-            n.name = "text".into();
+        let new = dst.import(src, id);
+        if dst.nodes[new].kind == Kind::CData {
+            dst.nodes[new].kind = Kind::Text;
+            dst.nodes[new].name = "text".into();
         }
-        let new = dst.add(n);
         dst.append(parent, new);
-        for &a in &s.attrs {
-            let mut an = src.nodes[a].clone();
-            an.children.clear();
-            an.parent = Some(new);
-            let na = dst.add(an);
-            dst.nodes[new].attrs.push(na);
-            for &c in &src.nodes[a].children {
+        for a in src.attrs(id) {
+            let na = dst.import(src, a);
+            dst.append_attr(new, na);
+            for c in src.children(a) {
                 graft(src, c, dst, na);
             }
         }
-        for &c in &s.children {
+        for c in src.children(id) {
             graft(src, c, dst, new);
         }
     }
@@ -958,7 +941,7 @@ mod tests {
     fn fill(dst: &mut Doc, xml: &str) {
         let src = parse(xml);
         let r = src.root_element().unwrap();
-        for &c in &src.nodes[r].children {
+        for c in src.children(r) {
             graft(&src, c, dst, DOC);
         }
     }

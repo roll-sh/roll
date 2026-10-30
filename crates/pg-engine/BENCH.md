@@ -3165,6 +3165,90 @@ release builds): select-only 19,634 / 18,048 / 18,832 / 17,142 then 16,286 (afte
 new code (`Kills`) is 0.08% where `index_scanned` was 0.13%. The spread is the shared
 machine's. Peak RSS 369-388 MB select-only, both builds.
 
+## XML: the tree, input checks and building (round 21, agent 107)
+
+`tools/bench/xml.sh` measures every XML entry point against the reference on one document
+shape at five sizes (1 KB, 100 KB, 1 MB, 10 MB, 50 MB: `<rows>` of `<row id="i"><a>md5</a>
+<b>i</b><c>x &amp; y</c></row>` lines, one single-row table per size). Each case runs in a
+fresh connection (and, for the engine, a fresh engine process), reads its data once, then
+runs with the server process's peak RSS reset (`/proc/<pid>/clear_refs`) and reports the
+peak over the RSS before it, then 5 more times (2 at 10 MB, none at 50 MB) for the time (the
+minimum, client-side) and CPU. Release builds, both servers on the same loaded machine, the
+cases interleaved (reference, before, after for each). Before is `33a341fe`, after is this
+round's first batch.
+
+The engine's RSS undercounts small peaks: its allocator keeps freed memory resident, and a
+case that fits in what an earlier statement freed doesn't raise the high-water mark. Peaks
+below ~20 MB are better read from `tests/xml_memory.rs` (a counting allocator, heap bytes,
+below). From 10 MB up the RSS peaks are the tree's.
+
+| entry point | 1 MB: ms (PG / before / after) | big: size | ms (PG / before / after) | peak MB (PG / before / after) |
+|---|---|---|---|---|
+| reading the row (`length(t)`) | 7.1 / 20.2 / 25.7 | 50 MB | 333 / 46 / 56 | 73 / 11 / 24 |
+| `t::xml` (xml_in) | 59.9 / 35.5 / 16.2 | 50 MB | 2,957 / 3,744 / 924 | 1,001 / 2,957 / 6 |
+| XMLPARSE(DOCUMENT) | 39.6 / 80.6 / 43.2 | 50 MB | 2,592 / 3,916 / 1,053 | 815 / 2,779 / 6 |
+| XMLPARSE(CONTENT) | 53.1 / 37.8 / 18.5 | 50 MB | 3,972 / 3,933 / 1,007 | 915 / 2,780 / 6 |
+| xml_is_well_formed_document | 43.5 / 54.5 / 29.0 | 50 MB | 2,099 / 3,555 / 788 | 888 / 2,955 / 6 |
+| `d::text` (xml_out) | 4.3 / 0.9 / 0.6 | 50 MB | 184 / 40 / 38 | 73 / 11 / 11 |
+| XMLSERIALIZE(DOCUMENT) | 39.6 / 59.1 / 29.3 | 50 MB | 2,229 / 3,662 / 889 | 889 / 2,956 / 5 |
+| XMLSERIALIZE(... INDENT) | 61.3 / 40.5 / 29.5 | 50 MB | 2,839 / 3,798 / 2,159 | 990 / 2,856 / 819 |
+| xmlconcat(d, d) | 10.9 / 28.3 / 27.8 | 50 MB | 493 / 133 / 143 | 305 / 105 / 107 |
+| xpath() of 11,600 text nodes | 52.0 / 56.4 / 27.3 | 50 MB | 2,797 / 4,599 / 1,910 | 978 / 3,071 / 681 |
+| xpath('count(...)') | 37.8 / 59.2 / 36.9 | 50 MB | 1,977 / 3,751 / 1,491 | 894 / 3,075 / 680 |
+| xpath_exists | 49.5 / 47.3 / 24.0 | 50 MB | 2,451 / 4,280 / 1,692 | 893 / 3,070 / 858 |
+| XMLTABLE, 3 scalar columns | 65.6 / 81.5 / 51.4 | 50 MB | 3,379 / 5,532 / 2,510 | 950 / 3,120 / 872 |
+| XMLTABLE, an xml column (the row) | 137.6 / 110.2 / 57.3 | 50 MB | 9,382 / 7,593 / 4,265 | 949 / 3,119 / 725 |
+| xmlelement(xmlagg(xmlelement(xmlattributes, xmlforest))) | 6,566 / 835 / 320 | 1 MB | (the reference's xmlagg is quadratic) | |
+| xmlagg(xmlelement) | 3,473 / 461 / 375 | 1 MB | | |
+| table_to_xml | 32.6 / 22.5 / 24.9 | 50 MB | 1,685 / 3,260 / 3,316 | 4,225 / 337 / 128 |
+| xml2 xpath_string | 42.9 / 55.9 / 54.1 | 50 MB | 2,038 / 3,571 / 1,425 | 844 / 3,071 / 708 |
+| xml2 xpath_nodeset | 47.6 / 59.0 / 27.6 | 50 MB | 2,721 / 4,358 / 2,115 | 895 / 3,069 / 828 |
+| xml2 xpath_list | 36.9 / 76.4 / 35.7 | 50 MB | 2,339 / 4,095 / 1,619 | 862 / 3,068 / 910 |
+| xml2 xpath_number | 36.9 / 36.2 / 19.2 | 50 MB | 2,014 / 3,877 / 1,315 | 844 / 3,062 / 668 |
+| xml2 xpath_bool | 48.9 / 66.4 / 34.6 | 50 MB | 2,459 / 4,079 / 1,483 | 844 / 3,073 / 671 |
+| xml2 xpath_table | 35,930 / 110,773 / 37,485 | 1 MB | (quadratic in both) | |
+| xslt_process, identity | 100.2 / 132.4 / 87.3 | 50 MB | 5,443 / 7,931 / 3,556 | 1,741 / 4,976 / 1,166 |
+
+Heap peaks at 1 MB (`cargo test -p pg-engine --test xml_memory -- --nocapture`, which
+fails if any goes over the reference's RSS growth for the same statement): xml_in and
+XMLPARSE 2.9 MB (PostgreSQL 22.6 / 17.3), XMLSERIALIZE 3.9 (20.0), with INDENT 17.0 (21.8),
+xpath / xpath_exists / XMLTABLE / the xml2 functions 17.0–17.9 (20.5), xslt_process 26.6
+(57.0), the xmlagg build 3.2 (5.0). Before this round, parsing that document took about
+200 MB (agent 98).
+
+What changed:
+- **The tree** (`types/xml/tree.rs`). A node was ~300 bytes plus a heap string for its name,
+  one for its content, a `Vec` for its children and one for its attributes, and two strings
+  per namespace. It is 72 bytes and allocates nothing: libxml's parent / first / last /
+  next / prev links and the first attribute as `u32` indexes into the arena (the sibling
+  positions XPath kept in side vectors are gone), names shared through an interner (`Name`,
+  an `Arc<str>`), namespaces as shared `xmlNs` (`NsRef`; an element's namespace is one of
+  its ancestors' declarations, as in libxml), content as a span of the document's one text
+  buffer (`Doc::text`, `push_text`, `set_text`), and namespace declarations / DTD
+  declarations boxed out of line. Copies within a document (`Doc::dup`, `copy_node`) and
+  across documents (`Doc::import`, `absorb` for XSLT's result tree fragments) are explicit,
+  since a span means nothing in another document. Deep copies and text content no longer
+  recurse.
+- **Checking without a tree** (`Parser::tree = false`): xml_in, XMLPARSE, the
+  xml_is_well_formed functions, xml_recv, XMLSERIALIZE without INDENT and IS DOCUMENT parse
+  without building content nodes (the DTD's declarations are still kept: they change how the
+  rest parses). Errors, warnings and their positions come from the parse, so they are the
+  same; the parser's open-element stack keeps its depth.
+- **xmlagg** (`xml::concat_into`): each row's xmlconcat2 appended in place unless the merged
+  declaration changes, instead of copying everything aggregated so far (quadratic, like the
+  reference's own; 1 MB took 0.8 s, 10 MB minutes).
+- The parser's character data goes straight from the input buffer to the tree (it was copied
+  twice on the way).
+
+Left, measured but not XML: reading one row of `xb_docs` (a table of all five documents,
+filtered on its key) raised the engine's RSS by ~380 MB, so the bench keeps one document per
+table; `select * from xb_rows where id <= 116000` (an index
+range over a 580,000-row table, two int and one text column) takes 4.6 s against 25 ms; a
+`count(*)` over `xb_t_10m` (116,000 such rows, made by CREATE TABLE AS) 1.6 s against
+7 ms. query_to_xml and table_to_xml are
+dominated by those scans (their XML part is faster than the reference's: 0.45 s against 0.9 s
+for 116,000 generated rows). The 1 MB rows' 10–20 ms reading the row is the same effect.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

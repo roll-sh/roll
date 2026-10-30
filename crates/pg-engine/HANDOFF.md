@@ -127,14 +127,35 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     transformations take 113 / 107, 11 / 39 and 211 / 238 ms. libxslt numbers the source
     document (xmlXPathOrderDocElems) so document-order comparisons are lookups; the engine
     does the same for xslt_process's source (`XDoc::order_nodes`; grouping took 9.2 s before).
-    Peak memory is the open item: parsing that 1 MB document takes about 200 MB in the engine
-    (xpath_string alone peaks at 210 MB; the reference's backend grows 57 MB for all three
-    transformations). That is the libxml tree model's node size (`tree::Node` carries a
-    `Decl` and its own name string; boxing the declaration and interning names would cut it),
-    shared by every XML function, not XSLT's. pg_overexplain 36 / 37: LOAD gives EXPLAIN
+    Peak memory was the open item (parsing that 1 MB document took about 200 MB): agent 107's
+    compact tree, below. pg_overexplain 36 / 37: LOAD gives EXPLAIN
   its DEBUG and RANGE_TABLE options (`sql/explain/overexplain.rs`), plan node ids and range
   table indexes modelled from the engine's plan as PostgreSQL numbers one of that shape;
   golden `a80a_overexplain`.
+- **The XML tree and entry points** (round 21, agent 107; BENCH.md "XML"): every XML
+  function shares `types/xml` (parser, tree, XPath, serializer). The tree is libxml's
+  model, made compact: 72-byte nodes with no heap allocations of their own (`u32` parent /
+  first / last / next / prev / first-attribute links in the arena, interned `Name`s, shared
+  `NsRef` namespaces, content as spans of one text buffer per document, namespace and DTD
+  declarations boxed). Use `Doc::children` / `attrs` / `first_child` / `next_sibling` /
+  `parent`, `Doc::text(&node)` / `text_of(id)` for content and `append` / `append_attr` /
+  `insert_before` / `unlink` to change the tree; `Doc::dup` / `copy_node` copy within a
+  document, `Doc::import` / `absorb` across documents (a span is only valid in its own
+  document, so `Node` has no `Clone`). An entity's top-level replacement nodes have no
+  parent in the `Doc`; `XDoc::parent` gives their declaration, as libxml's `ent` is.
+  Checking input doesn't build a tree (`Parser::tree = false`: xml_in, XMLPARSE,
+  xml_is_well_formed*, xml_recv, IS DOCUMENT, XMLSERIALIZE without INDENT); the errors are
+  the parse's, so they're unchanged. xmlagg appends in place (`xml::concat_into`; it was
+  quadratic). A 1 MB document's peak heap: 2.9 MB to check, 17 MB for XPath / XMLTABLE /
+  xml2 (it was ~200 MB), 27 MB for xslt_process; at 50 MB the engine peaks at 0.7–1.2 GB
+  where the reference's backend peaks at 0.8–1.7 GB (and 2.8–5.0 GB before), and is faster
+  there on every entry point but query_to_xml / table_to_xml (at 1 MB, xml2's xpath_string
+  and xmlconcat are behind, by the cost of reading the row). Tests: `tests/xml_memory.rs` (heap peaks at
+  1 MB against the reference's, a counting allocator), golden `a107_xml_tree`; bench
+  `tools/bench/xml.sh`. Left: query_to_xml / table_to_xml and reading a row of a table of
+  large values are slower than the reference because of the scans under them, not XML
+  (BENCH.md, "XML", last paragraph); xml2's xpath_table is quadratic in both (37 s / 36 s
+  for 1 MB).
 - **Monitoring views and functions** (round 20, agent 80b): what postgres_exporter,
   pgAdmin's dashboard, pg_activity and pgwatch read. Their queries (extracted from each tool's
   source: the exporter's collectors, pgAdmin's dashboard templates, pg_activity's

@@ -252,7 +252,7 @@ fn xmloption(c: &FnCtx) -> XmlOption {
 }
 
 fn well_formed(s: &str, opt: XmlOption) -> Value {
-    Value::Bool(xml::xml_parse(s, opt, true).is_ok())
+    Value::Bool(xml::validate(s, opt, true).is_ok())
 }
 
 pub fn register(r: &mut Registry) {

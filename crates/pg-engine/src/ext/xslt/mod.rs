@@ -168,16 +168,17 @@ fn strip_spaces(sheet: &Sheet, doc: &mut Doc) {
             continue;
         }
         let uri = n.ns.as_ref().and_then(|ns| ns.href.clone());
-        let rule = sheet.space.get(&(n.name.clone(), uri.clone())).copied().or_else(|| {
+        let rule = sheet.space.get(&(n.name.to_string(), uri.clone())).copied().or_else(|| {
             uri.as_ref().and_then(|_| sheet.space.get(&("*".to_string(), uri.clone())).copied())
         });
         let strip = rule.unwrap_or(sheet.strip_all == 1);
         if strip {
-            let kids: Vec<NodeId> = doc.nodes[id].children.clone();
-            let keep: Vec<NodeId> = kids.into_iter().filter(|&c| !compile::is_blank_text(doc, c)).collect();
-            doc.nodes[id].children = keep;
+            let blank: Vec<NodeId> = doc.children(id).filter(|&c| compile::is_blank_text(doc, c)).collect();
+            for c in blank {
+                doc.unlink(c);
+            }
         }
-        stack.extend(doc.nodes[id].children.iter().copied());
+        stack.extend(doc.children(id));
     }
 }
 
@@ -191,7 +192,7 @@ fn param_name(sheet: &Sheet, name: &str) -> Option<QName> {
     match name.split_once(':') {
         Some((p, l)) => {
             let root = sheet.doc.root_element()?;
-            let href = compile::search_ns(&sheet.doc, root, Some(p)).and_then(|ns| ns.href);
+            let href = compile::search_ns(&sheet.doc, root, Some(p)).and_then(|ns| ns.href.clone());
             Some((href, l.to_string()))
         }
         None => Some((None, name.to_string())),

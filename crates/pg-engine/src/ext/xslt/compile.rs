@@ -4,7 +4,7 @@
 
 use super::Diag;
 use super::style::*;
-use crate::types::xml::tree::{Doc, Kind, NodeId, Ns};
+use crate::types::xml::tree::{Doc, Kind, NodeId, NsRef, ns_ref};
 use crate::types::xml::xpath::{self, NsMap};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -21,48 +21,46 @@ pub(super) struct Compiler<'d> {
 }
 
 /// `xmlGetNsList`: the declarations in scope at `id`, innermost first, one per prefix.
-pub(super) fn ns_list(doc: &Doc, id: NodeId) -> Vec<Ns> {
-    let mut out: Vec<Ns> = Vec::new();
+pub(super) fn ns_list(doc: &Doc, id: NodeId) -> Vec<NsRef> {
+    let mut out: Vec<NsRef> = Vec::new();
     let mut cur = Some(id);
     while let Some(c) = cur {
         let n = &doc.nodes[c];
         if n.kind == Kind::Element {
-            for d in &n.ns_defs {
+            for d in n.ns_defs() {
                 if !out.iter().any(|o| o.prefix == d.prefix) {
                     out.push(d.clone());
                 }
             }
         }
-        cur = n.parent;
+        cur = n.parent();
     }
     out
 }
 
 /// `xmlSearchNs(doc, node, prefix)`.
-pub(super) fn search_ns(doc: &Doc, id: NodeId, prefix: Option<&str>) -> Option<Ns> {
+pub(super) fn search_ns(doc: &Doc, id: NodeId, prefix: Option<&str>) -> Option<NsRef> {
     if prefix == Some("xml") {
-        return Some(Ns { prefix: Some("xml".into()), href: Some(XML_NS.into()) });
+        return Some(ns_ref(Some("xml"), Some(XML_NS)));
     }
     let mut cur = Some(id);
     while let Some(c) = cur {
         let n = &doc.nodes[c];
         if n.kind == Kind::Element
-            && let Some(d) = n.ns_defs.iter().find(|d| d.prefix.as_deref() == prefix)
+            && let Some(d) = n.ns_defs().iter().find(|d| d.prefix.as_deref() == prefix)
         {
             return Some(d.clone());
         }
-        cur = n.parent;
+        cur = n.parent();
     }
     None
 }
 
 /// An attribute without a namespace (`xmlGetNsProp(node, name, NULL)`).
 pub(super) fn attr(doc: &Doc, id: NodeId, name: &str) -> Option<String> {
-    doc.nodes[id]
-        .attrs
-        .iter()
-        .find(|&&a| doc.nodes[a].name == name && doc.nodes[a].ns.is_none())
-        .map(|&a| doc.content(a))
+    doc.attrs(id)
+        .find(|&a| doc.nodes[a].name == name && doc.nodes[a].ns.is_none())
+        .map(|a| doc.content(a))
 }
 
 pub(super) fn is_xslt(doc: &Doc, id: NodeId) -> bool {
@@ -73,13 +71,11 @@ pub(super) fn is_xslt(doc: &Doc, id: NodeId) -> bool {
 /// `IS_BLANK_NODE`: a text node of blanks only.
 pub(super) fn is_blank_text(doc: &Doc, id: NodeId) -> bool {
     let n = &doc.nodes[id];
-    n.kind == Kind::Text && n.content.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+    n.kind == Kind::Text && doc.text(n).bytes().all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 fn detach(doc: &mut Doc, id: NodeId) {
-    if let Some(p) = doc.nodes[id].parent.take() {
-        doc.nodes[p].children.retain(|&c| c != id);
-    }
+    doc.unlink(id);
 }
 
 /// `xmlNodeGetSpacePreserve`: 1 under xml:space="preserve", 0 under "default", -1 otherwise.
@@ -88,7 +84,7 @@ fn space_preserve(doc: &Doc, id: Option<NodeId>) -> i32 {
     while let Some(c) = cur {
         let n = &doc.nodes[c];
         if n.kind == Kind::Element {
-            for &a in &n.attrs {
+            for a in doc.attrs(c) {
                 let an = &doc.nodes[a];
                 if an.name == "space" && an.ns.as_ref().and_then(|ns| ns.href.as_deref()) == Some(XML_NS) {
                     match doc.content(a).as_str() {
@@ -99,7 +95,7 @@ fn space_preserve(doc: &Doc, id: Option<NodeId>) -> i32 {
                 }
             }
         }
-        cur = n.parent;
+        cur = n.parent();
     }
     -1
 }
@@ -167,7 +163,7 @@ impl<'d> Compiler<'d> {
     pub fn qname(&mut self, id: NodeId, s: &str) -> Option<QName> {
         match s.split_once(':') {
             Some((p, l)) if !p.is_empty() => match search_ns(&self.doc, id, Some(p)) {
-                Some(ns) => Some((ns.href, l.to_string())),
+                Some(ns) => Some((ns.href.clone(), l.to_string())),
                 None => {
                     self.error();
                     None
@@ -189,7 +185,7 @@ impl<'d> Compiler<'d> {
         for p in v.split([' ', '\t', '\n', '\r']).filter(|p| !p.is_empty()) {
             let prefix = (p != "#default").then_some(p);
             if let Some(ns) = search_ns(&self.doc, id, prefix)
-                && let Some(h) = ns.href
+                && let Some(h) = ns.href.clone()
             {
                 self.excluded.push(h);
                 n += 1;
@@ -209,7 +205,7 @@ impl<'d> Compiler<'d> {
         for p in v.split([' ', '\t', '\n', '\r']).filter(|p| !p.is_empty()) {
             let prefix = (p != "#default").then_some(p);
             if let Some(ns) = search_ns(&self.doc, id, prefix)
-                && let Some(h) = ns.href
+                && let Some(h) = ns.href.clone()
             {
                 self.extension.push(h);
             }
@@ -232,22 +228,22 @@ impl<'d> Compiler<'d> {
         } else {
             pushed = self.exclude_prefixes(id, false);
         }
-        if id != root && !self.excluded.is_empty() && !self.doc.nodes[id].ns_defs.is_empty() {
-            let defs = std::mem::take(&mut self.doc.nodes[id].ns_defs);
-            let (moved, kept): (Vec<Ns>, Vec<Ns>) = defs.into_iter().partition(|ns| {
+        if id != root && !self.excluded.is_empty() && !self.doc.nodes[id].ns_defs().is_empty() {
+            let defs = std::mem::take(self.doc.nodes[id].ns_defs_mut());
+            let (moved, kept): (Vec<NsRef>, Vec<NsRef>) = defs.into_iter().partition(|ns| {
                 ns.prefix.is_some() && self.excluded.iter().any(|e| Some(e) == ns.href.as_ref())
             });
-            self.doc.nodes[id].ns_defs = kept;
+            *self.doc.nodes[id].ns_defs_mut() = kept;
             for ns in moved.into_iter().rev() {
-                self.doc.nodes[root].ns_defs.insert(0, ns);
+                self.doc.nodes[root].ns_defs_mut().insert(0, ns);
             }
         }
-        let skip = style_elem && self.doc.nodes[id].parent == Some(root) && {
+        let skip = style_elem && self.doc.parent(id) == Some(root) && {
             let uri = self.doc.nodes[id].ns.as_ref().and_then(|ns| ns.href.clone());
             uri.is_some() && uri.as_deref() != Some(XSLT_NS) && !self.is_extension(uri.as_deref())
         };
         if !skip {
-            let kids = self.doc.nodes[id].children.clone();
+            let kids: Vec<NodeId> = self.doc.children(id).collect();
             for c in kids {
                 match self.doc.nodes[c].kind {
                     Kind::Element => self.preprocess_node(c, root, style_elem),
@@ -267,12 +263,10 @@ impl<'d> Compiler<'d> {
 
 /// An attribute in the XSLT namespace (`xmlGetNsProp(node, name, XSLT_NAMESPACE)`).
 pub(super) fn ns_attr(doc: &Doc, id: NodeId, name: &str) -> Option<String> {
-    doc.nodes[id]
-        .attrs
-        .iter()
-        .find(|&&a| {
+    doc.attrs(id)
+        .find(|&a| {
             let n = &doc.nodes[a];
             n.name == name && n.ns.as_ref().and_then(|ns| ns.href.as_deref()) == Some(XSLT_NS)
         })
-        .map(|&a| doc.content(a))
+        .map(|a| doc.content(a))
 }

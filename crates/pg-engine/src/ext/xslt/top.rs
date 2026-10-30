@@ -5,7 +5,7 @@ use super::Diag;
 use super::compile::{Compiler, attr, is_blank_text, is_xslt, ns_list, search_ns};
 use super::pattern;
 use super::style::*;
-use crate::types::xml::tree::{Doc, Kind, NodeId, Ns};
+use crate::types::xml::tree::{Doc, Kind, NodeId, NsRef};
 use crate::types::xml::xpath;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -67,7 +67,7 @@ impl Compiler<'_> {
         if let Some(v) = self.attr(root, "version") {
             self.set_forwards(&v);
         }
-        let kids = self.doc.nodes[root].children.clone();
+        let kids: Vec<NodeId> = self.doc.children(root).collect();
         let mut imports = true;
         let mut sets = Vec::new();
         for id in kids {
@@ -186,7 +186,7 @@ impl Compiler<'_> {
                 let name = match e.split_once(':') {
                     Some(_) => self.qname(id, e),
                     // An unprefixed name is in the default namespace here.
-                    None => Some((search_ns(&self.doc, id, None).and_then(|ns| ns.href), e.to_string())),
+                    None => Some((search_ns(&self.doc, id, None).and_then(|ns| ns.href.clone()), e.to_string())),
                 };
                 if let Some(n) = name {
                     sheet.output.cdata_elements.push(n);
@@ -265,7 +265,7 @@ impl Compiler<'_> {
                 sets.len() - 1
             }
         };
-        for c in self.doc.nodes[id].children.clone() {
+        for c in self.doc.children(id).collect::<Vec<_>>() {
             if is_xslt(&self.doc, c) && self.doc.nodes[c].name == "attribute" {
                 let key = self.static_attr_name(c);
                 if let Some(ins) = self.instruction(c) {
@@ -289,7 +289,7 @@ impl Compiler<'_> {
         let uri = match ns {
             Some(n) if !n.contains('{') => (!n.is_empty()).then_some(n),
             Some(_) => None,
-            None => prefix.and_then(|p| search_ns(&self.doc, c, Some(&p))).and_then(|n| n.href),
+            None => prefix.and_then(|p| search_ns(&self.doc, c, Some(&p))).and_then(|n| n.href.clone()),
         };
         (Some(local), uri)
     }
@@ -350,12 +350,12 @@ impl Compiler<'_> {
             return;
         };
         let lookup = |c: &Self, p: &str| search_ns(&c.doc, id, (p != "#default").then_some(p));
-        let Some(s) = lookup(self, &sp).and_then(|n| n.href) else {
+        let Some(s) = lookup(self, &sp).and_then(|n| n.href.clone()) else {
             self.errors += 1;
             return;
         };
         let r = match lookup(self, &rp) {
-            Some(n) => n.href,
+            Some(n) => n.href.clone(),
             None if rp == "#default" => None,
             None => {
                 self.errors += 1;
@@ -410,7 +410,7 @@ impl Compiler<'_> {
     }
 
     /// `xsltGetInheritedNsList`.
-    fn inherited_ns(&self, id: NodeId) -> Vec<Ns> {
+    fn inherited_ns(&self, id: NodeId) -> Vec<NsRef> {
         ns_list(&self.doc, id)
             .into_iter()
             .filter(|ns| {

@@ -3,7 +3,7 @@
 
 use super::exec::{Exec, R, Stop};
 use super::style::*;
-use crate::types::xml::tree::Kind;
+use crate::types::xml::tree::{Kind, NodeId};
 use crate::types::xml::xpath::{self, XNode, XValue};
 use std::rc::Rc;
 
@@ -70,7 +70,7 @@ impl Exec<'_, '_> {
                 return Ok(());
             }
             Kind::Attribute => {
-                let t = self.x.doc.nodes[id].children.iter().copied().find(|&t| self.x.doc.nodes[t].kind == Kind::Text);
+                let t = self.x.doc.children(id).find(|&t| self.x.doc.nodes[t].kind == Kind::Text);
                 if let Some(t) = t {
                     self.copy_text(t);
                 } else {
@@ -80,7 +80,7 @@ impl Exec<'_, '_> {
             }
             _ => return Ok(()),
         }
-        let kids = self.x.doc.nodes[id].children.clone();
+        let kids: Vec<NodeId> = self.x.doc.children(id).collect();
         let real = |k: Kind| matches!(k, Kind::Element | Kind::Text | Kind::CData | Kind::Comment | Kind::Pi);
         let size = kids.iter().filter(|&&k| real(self.x.doc.nodes[k].kind)).count() as i32;
         for (i, &k) in kids.iter().enumerate() {
@@ -202,7 +202,7 @@ impl Exec<'_, '_> {
             },
             None => {
                 let XNode::Node(id) = c.node else { return Ok(()) };
-                let kids: Vec<XNode> = self.x.doc.nodes[id].children.iter().map(|&k| XNode::Node(k)).collect();
+                let kids: Vec<XNode> = self.x.doc.children(id).map(XNode::Node).collect();
                 if sorts.is_empty() || kids.len() < 2 { kids } else { self.sort(kids, sorts, c)? }
             }
         };

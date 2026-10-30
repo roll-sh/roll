@@ -39,7 +39,7 @@ impl Exec<'_, '_> {
         if self.x.doc.nodes[n].kind == Kind::Attribute {
             return Ok(k);
         }
-        for &s in &self.x.doc.nodes[p].children {
+        for s in self.x.doc.children(p) {
             if s == n {
                 break;
             }
@@ -127,13 +127,14 @@ impl Exec<'_, '_> {
         if self.x.doc.nodes[n].kind == Kind::Attribute {
             return Some(p);
         }
-        let sibs = &self.x.doc.nodes[p].children;
-        let i = sibs.iter().position(|&s| s == n)?;
-        if i == 0 {
-            return Some(p);
+        // (An entity's top-level nodes aren't among their declaration's children.)
+        if self.x.doc.parent(n) != Some(p) {
+            return None;
         }
-        let mut c = sibs[i - 1];
-        while let Some(&l) = self.x.doc.nodes[c].children.last() {
+        let Some(mut c) = self.x.doc.prev_sibling(n) else {
+            return Some(p);
+        };
+        while let Some(l) = self.x.doc.last_child(c) {
             c = l;
         }
         Some(c)

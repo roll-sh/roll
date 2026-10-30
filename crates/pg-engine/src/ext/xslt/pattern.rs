@@ -143,10 +143,7 @@ impl P<'_, '_, '_> {
     }
 
     fn uri(&mut self, prefix: &str) -> Option<Option<String>> {
-        match search_ns(&self.c.doc, self.id, Some(prefix)) {
-            Some(ns) => Some(ns.href),
-            None => None,
-        }
+        search_ns(&self.c.doc, self.id, Some(prefix)).map(|ns| ns.href.clone())
     }
 
     fn alt(&mut self) -> Option<Alt> {
@@ -442,9 +439,8 @@ impl Step {
         // pass the node test, then those each predicate keeps.
         let mut set: Vec<XNode> = match x.parent(*id) {
             Some(p) => {
-                let pn = &x.doc.nodes[p];
-                let sibs = if self.attr { &pn.attrs } else { &pn.children };
-                sibs.iter().map(|&s| XNode::Node(s)).filter(|s| self.test.matches(x, s, self.attr)).collect()
+                let sibs = if self.attr { x.doc.attrs(p) } else { x.doc.children(p) };
+                sibs.map(XNode::Node).filter(|s| self.test.matches(x, s, self.attr)).collect()
             }
             None => vec![node.clone()],
         };

@@ -48,7 +48,7 @@ impl Compiler<'_> {
             "apply-imports" => Instr::ApplyImports,
             "for-each" => {
                 let select = self.required(id, "select")?;
-                let kids = self.doc.nodes[id].children.clone();
+                let kids: Vec<NodeId> = self.doc.children(id).collect();
                 let n = kids.iter().take_while(|&&k| is_xslt(&self.doc, k) && self.doc.nodes[k].name == "sort").count();
                 let (sorts, _, _) = self.sorts_of(&kids[..n]);
                 let mut body = Vec::new();
@@ -77,7 +77,7 @@ impl Compiler<'_> {
             "choose" => {
                 // Consecutive xsl:when from the first child, then an xsl:otherwise right
                 // after them; nothing else runs. Without a first xsl:when it fails.
-                let kids = self.doc.nodes[id].children.clone();
+                let kids: Vec<NodeId> = self.doc.children(id).collect();
                 let is = |c: &Self, k: usize, n: &str| {
                     kids.get(k).is_some_and(|&x| is_xslt(&c.doc, x) && c.doc.nodes[x].name == n)
                 };
@@ -149,8 +149,8 @@ impl Compiler<'_> {
             "text" => {
                 let noesc = self.yes(id, "disable-output-escaping");
                 let mut s = String::new();
-                for c in self.doc.nodes[id].children.clone() {
-                    s.push_str(&self.doc.nodes[c].content);
+                for c in self.doc.children(id).collect::<Vec<_>>() {
+                    s.push_str(self.doc.text_of(c));
                 }
                 Instr::Text(s, noesc)
             }
@@ -177,7 +177,7 @@ impl Compiler<'_> {
 
     fn unknown(&mut self, id: NodeId) -> Instr {
         let mut bodies = Vec::new();
-        for c in self.doc.nodes[id].children.clone() {
+        for c in self.doc.children(id).collect::<Vec<_>>() {
             if is_xslt(&self.doc, c) && self.doc.nodes[c].name == "fallback" {
                 bodies.push(self.body(c));
             }

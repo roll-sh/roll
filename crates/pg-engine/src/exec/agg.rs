@@ -771,10 +771,10 @@ struct XmlAgg(Option<String>);
 impl Accum for XmlAgg {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
         let Value::Text(v) = &a[0] else { return Ok(()) };
-        self.0 = Some(match self.0.take() {
-            None => v.to_string(),
-            Some(st) => crate::types::xml::concat(&[&st, v]),
-        });
+        match &mut self.0 {
+            None => self.0 = Some(v.to_string()),
+            Some(st) => crate::types::xml::concat_into(st, v),
+        }
         Ok(())
     }
     fn result(&self, _: &ExecCtx) -> Result<Value> {

@@ -127,9 +127,7 @@ impl Exec<'_, '_> {
                 if v.ends_with('-') || v.contains("--") {
                     self.failed = true;
                 }
-                let mut n = Node::new(Kind::Comment, "comment");
-                n.content = v;
-                self.add_node(n);
+                self.add_node(Node::new(Kind::Comment, "comment"), &v);
             }
             Instr::Pi(name, body) => {
                 let name = self.avt(name, &c.node, c.pos, c.size)?;
@@ -138,9 +136,7 @@ impl Exec<'_, '_> {
                     self.failed = true;
                     return Ok(());
                 }
-                let mut n = Node::new(Kind::Pi, name);
-                n.content = v;
-                self.add_node(n);
+                self.add_node(Node::new(Kind::Pi, name), &v);
             }
             Instr::Number(n) => self.number(n, c)?,
             Instr::Message { terminate, body } => {
@@ -174,7 +170,7 @@ impl Exec<'_, '_> {
         let src = &sd.nodes[l.node];
         let el = self.out.add(Node::new(Kind::Element, src.name.clone()));
         self.append(el);
-        let defs = src.ns_defs.clone();
+        let defs = src.ns_defs().to_vec();
         if !defs.is_empty() {
             self.copy_ns_list(el, &defs, true);
         }
@@ -235,7 +231,7 @@ impl Exec<'_, '_> {
     }
 
     fn parent_has_ns(&self, el: usize) -> bool {
-        self.out.nodes[el].parent.is_some_and(|p| self.out.nodes[p].kind == Kind::Element && self.out.nodes[p].ns.is_some())
+        self.out.parent(el).is_some_and(|p| self.out.nodes[p].kind == Kind::Element && self.out.nodes[p].ns.is_some())
     }
 
     /// xsl:copy (xsltCopy).
@@ -273,9 +269,8 @@ impl Exec<'_, '_> {
             }
             Kind::Comment | Kind::Pi => {
                 let src = &self.x.doc.nodes[id];
-                let mut n = Node::new(src.kind, src.name.clone());
-                n.content = src.content.clone();
-                self.add_node(n);
+                let (n, c) = (Node::new(src.kind, src.name.clone()), self.x.doc.text(src).to_string());
+                self.add_node(n, &c);
                 Ok(())
             }
             _ => Ok(()),
@@ -299,7 +294,7 @@ impl Exec<'_, '_> {
                 (!u.is_empty()).then_some(u)
             }
             None => match search_ns(&self.s.doc, inst, prefix.as_deref()) {
-                Some(ns) => ns.href,
+                Some(ns) => ns.href.clone(),
                 None if prefix.is_some() => {
                     self.failed = true;
                     return Ok(());
@@ -334,7 +329,7 @@ impl Exec<'_, '_> {
         if self.out.nodes[target].kind != Kind::Element {
             return Ok(());
         }
-        if !self.out.nodes[target].children.is_empty() {
+        if self.out.has_children(target) {
             self.failed = true;
             return Ok(());
         }
@@ -365,7 +360,7 @@ impl Exec<'_, '_> {
             }
         } else if let Some(p) = &prefix {
             match search_ns(&self.s.doc, inst, Some(p)) {
-                Some(ns) => uri = ns.href,
+                Some(ns) => uri = ns.href.clone(),
                 None => self.failed = true,
             }
         }

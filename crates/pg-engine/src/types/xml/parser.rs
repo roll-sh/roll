@@ -103,6 +103,12 @@ pub(crate) struct Parser {
     atts_default: HashMap<(String, Option<String>), Vec<DefAttr>>,
     atts_special: HashMap<(String, String), AttrType>,
     load_subset: bool,
+    /// Names interned for the tree, and recently used namespace bindings.
+    interned: Names,
+    ns_cache: Vec<NsRef>,
+    /// Build the document's content (false: only check it, as `xml_in` needs; the
+    /// declarations a DTD makes are kept, they change how the rest parses).
+    pub tree: bool,
 }
 
 const MAX_NAME_LENGTH: usize = 50000;
@@ -306,6 +312,9 @@ impl Parser {
             atts_default: HashMap::new(),
             atts_special: HashMap::new(),
             load_subset: opts.dtd_attr,
+            interned: Names::default(),
+            ns_cache: Vec::new(),
+            tree: true,
         }
     }
 
@@ -1577,35 +1586,38 @@ impl Parser {
             return false;
         };
         let n = &self.doc.nodes[node];
-        let prefix = n.ns.as_ref().and_then(|ns| ns.prefix.clone());
-        if let Some(&d) = self.doc.elem_decls.get(&(n.name.clone(), prefix))
-            && let Decl::Element { etype, .. } = &self.doc.nodes[d].decl
-        {
-            match etype {
-                ElemType::Element => return true,
-                ElemType::Any | ElemType::Mixed => return false,
-                ElemType::Empty => {}
+        if !self.doc.elem_decls.is_empty() {
+            let prefix = n.ns.as_ref().and_then(|ns| ns.prefix.clone());
+            if let Some(&d) = self.doc.elem_decls.get(&(n.name.to_string(), prefix))
+                && let Decl::Element { etype, .. } = self.doc.nodes[d].decl()
+            {
+                match etype {
+                    ElemType::Element => return true,
+                    ElemType::Any | ElemType::Mixed => return false,
+                    ElemType::Empty => {}
+                }
             }
         }
         let raw = self.cur();
         if raw != b'<' && raw != 0xd {
             return false;
         }
-        if n.children.is_empty() && raw == b'<' && self.b(1) == b'/' {
+        let doc = &self.doc;
+        if !doc.has_children(node) && raw == b'<' && self.b(1) == b'/' {
             return false;
         }
-        match n.children.last() {
+        match doc.last_child(node) {
             None => {
-                if n.kind != Kind::Element && !n.content.is_empty() {
+                if n.kind != Kind::Element && !doc.text(n).is_empty() {
                     return false;
                 }
             }
-            Some(&last) => {
-                if self.doc.nodes[last].kind == Kind::Text {
+            Some(last) => {
+                if doc.nodes[last].kind == Kind::Text {
                     return false;
                 }
-                if let Some(&first) = n.children.first()
-                    && self.doc.nodes[first].kind == Kind::Text
+                if let Some(first) = doc.first_child(node)
+                    && doc.nodes[first].kind == Kind::Text
                 {
                     return false;
                 }
@@ -1664,12 +1676,12 @@ impl Parser {
                 let start = self.inp().cur;
                 if k > start {
                     self.inp_mut().cur = k;
-                    let s = buf[start..k].to_vec();
+                    let s = &buf[start..k];
                     if self.sax() {
                         if !self.opts.keep_blanks {
-                            if self.are_blanks(&s, true) {
+                            if self.are_blanks(s, true) {
                             } else {
-                                self.sax_text(&lossy(&s), Kind::Text);
+                                self.sax_text(&String::from_utf8_lossy(s), Kind::Text);
                                 if let Some(sp) = self.spaces.last_mut()
                                     && *sp == -1
                                 {
@@ -1677,7 +1689,7 @@ impl Parser {
                                 }
                             }
                         } else {
-                            self.sax_text(&lossy(&s), Kind::Text);
+                            self.sax_text(&String::from_utf8_lossy(s), Kind::Text);
                         }
                     }
                 }
@@ -1714,11 +1726,11 @@ impl Parser {
             }
             let start = self.inp().cur;
             if k > start {
-                let s = buf[start..k].to_vec();
+                let s = &buf[start..k];
                 if self.sax() && !self.opts.keep_blanks && is_blank(s[0]) {
                     self.inp_mut().cur = k;
-                    if !self.are_blanks(&s, false) {
-                        self.sax_text(&lossy(&s), Kind::Text);
+                    if !self.are_blanks(s, false) {
+                        self.sax_text(&String::from_utf8_lossy(s), Kind::Text);
                         if let Some(sp) = self.spaces.last_mut()
                             && *sp == -1
                         {
@@ -1728,7 +1740,7 @@ impl Parser {
                     line = self.inp().line;
                     col = self.inp().col;
                 } else if self.sax() {
-                    self.sax_text(&lossy(&s), Kind::Text);
+                    self.sax_text(&String::from_utf8_lossy(s), Kind::Text);
                     line = self.inp().line;
                     col = self.inp().col;
                 }
@@ -3345,13 +3357,13 @@ impl Parser {
         }
         if !self.opts.replace_entities {
             self.sax_reference(&name);
-        } else if !self.nodes.is_empty() {
+        } else if !self.nodes.is_empty() && self.tree {
             let kids = self.doc.entities[e].children.clone();
             let n = kids.len();
             for (i, &k) in kids.iter().enumerate() {
                 let kind = self.doc.nodes[k].kind;
                 if (i == 0 || i + 1 == n) && matches!(kind, Kind::Text | Kind::CData) {
-                    let c = self.doc.nodes[k].content.clone();
+                    let c = self.doc.text_of(k).to_string();
                     self.sax_text(&c, kind);
                     continue;
                 }
@@ -3426,10 +3438,7 @@ impl Parser {
         if self.well_formed
             && let Some(r) = root
         {
-            list = std::mem::take(&mut self.doc.nodes[r].children);
-            for &c in &list {
-                self.doc.nodes[c].parent = None;
-            }
+            list = self.doc.take_children(r);
         }
         if build {
             self.nodes.truncate(depth - 1);
@@ -3796,37 +3805,45 @@ impl Parser {
         let Some(&node) = self.nodes.last() else {
             return;
         };
-        if let Some(&last) = self.doc.nodes[node].children.last()
-            && self.doc.nodes[last].kind == kind
-        {
-            self.doc.nodes[last].content.push_str(s);
+        if !self.tree {
             return;
         }
-        let mut n = Node::new(kind, if kind == Kind::Text { "text" } else { "" });
-        n.content = s.to_string();
-        n.line = self.inputs.last().map_or(0, |i| i.line.max(0) as u32);
-        let id = self.doc.add(n);
+        if let Some(last) = self.doc.last_child(node)
+            && self.doc.nodes[last].kind == kind
+        {
+            self.doc.push_text(last, s);
+            return;
+        }
+        let name = if kind == Kind::Text { Name::text() } else { Name::default() };
+        let id = self.doc.new_node(kind, name, s);
+        self.doc.nodes[id].line = self.inputs.last().map_or(0, |i| i.line.max(0) as u32);
         self.doc.append(node, id);
     }
 
     fn sax_comment(&mut self, s: &str) {
-        let mut n = Node::new(Kind::Comment, "comment");
-        n.content = s.to_string();
-        let id = self.doc.add(n);
+        if !self.tree {
+            return;
+        }
+        let id = self.doc.new_node(Kind::Comment, "comment", s);
         self.append_child(id);
     }
 
     fn sax_pi(&mut self, target: &str, data: Option<&str>) {
-        let mut n = Node::new(Kind::Pi, target);
-        n.content = data.unwrap_or("").to_string();
-        n.no_content = data.is_none();
-        let id = self.doc.add(n);
+        if !self.tree {
+            return;
+        }
+        let name = self.interned.get(target);
+        let id = self.doc.new_node(Kind::Pi, name, data.unwrap_or(""));
+        self.doc.nodes[id].no_content = data.is_none();
         self.append_child(id);
     }
 
     fn sax_reference(&mut self, name: &str) {
-        let n = Node::new(Kind::EntityRef, name);
-        let id = self.doc.add(n);
+        if !self.tree {
+            return;
+        }
+        let name = self.interned.get(name);
+        let id = self.doc.add(Node::new(Kind::EntityRef, name));
         self.append_child(id);
     }
 
@@ -3837,20 +3854,15 @@ impl Parser {
         system_id: Option<String>,
     ) {
         let mut n = Node::new(Kind::Dtd, name.unwrap_or(""));
-        n.decl = Decl::Dtd {
+        n.set_decl(Decl::Dtd {
             external_id,
             system_id,
-        };
+        });
         let id = self.doc.add(n);
         // xmlCreateIntSubset puts the DTD before the root element.
-        self.doc.nodes[id].parent = Some(DOC);
-        let at = self.doc.nodes[DOC]
-            .children
-            .iter()
-            .position(|&c| self.doc.nodes[c].kind == Kind::Element);
-        match at {
-            Some(i) => self.doc.nodes[DOC].children.insert(i, id),
-            None => self.doc.nodes[DOC].children.push(id),
+        match self.doc.root_element() {
+            Some(r) => self.doc.insert_before(r, id),
+            None => self.doc.append(DOC, id),
         }
         self.doc.int_subset = Some(id);
     }
@@ -3920,7 +3932,7 @@ impl Parser {
             self.doc.parameter.insert(name.to_string(), idx);
         }
         let mut n = Node::new(Kind::EntityDecl, name);
-        n.decl = Decl::Entity(idx);
+        n.set_decl(Decl::Entity(idx));
         let id = self.doc.add(n);
         let dtd = self.doc.int_subset.unwrap();
         self.doc.append(dtd, id);
@@ -3947,14 +3959,14 @@ impl Parser {
             return;
         }
         let mut n = Node::new(Kind::AttributeDecl, name);
-        n.decl = Decl::Attribute {
+        n.set_decl(Decl::Attribute {
             elem: elem.to_string(),
             prefix,
             atype,
             def,
             default,
             tree,
-        };
+        });
         let id = self.doc.add(n);
         self.doc.attr_decls.insert(key, id);
         self.doc.append(dtd, id);
@@ -3979,14 +3991,32 @@ impl Parser {
             return;
         }
         let mut n = Node::new(Kind::ElementDecl, name);
-        n.decl = Decl::Element {
+        n.set_decl(Decl::Element {
             etype,
             content,
             prefix,
-        };
+        });
         let id = self.doc.add(n);
         self.doc.elem_decls.insert(key, id);
         self.doc.append(dtd, id);
+    }
+
+    /// The shared `xmlNs` for a binding: a recent one when equal, so a document's elements
+    /// in one namespace share it.
+    fn ns_ref(&mut self, prefix: Option<&str>, href: &str) -> NsRef {
+        if let Some(r) = self
+            .ns_cache
+            .iter()
+            .find(|r| r.prefix.as_deref() == prefix && r.href.as_deref() == Some(href))
+        {
+            return r.clone();
+        }
+        let r = ns_ref(prefix, Some(href));
+        if self.ns_cache.len() >= 8 {
+            self.ns_cache.remove(0);
+        }
+        self.ns_cache.push(r.clone());
+        r
     }
 
     #[allow(clippy::type_complexity)]
@@ -3998,66 +4028,61 @@ impl Parser {
         ns_defs: Vec<(Option<String>, String)>,
         atts: Vec<(String, Option<String>, Option<String>, String, bool)>,
     ) {
+        if !self.tree {
+            // The open elements' depth still counts (entity content, areBlanks).
+            self.nodes.push(DOC);
+            return;
+        }
         let name = match (prefix, uri) {
-            (Some(p), None) => format!("{p}:{localname}"),
-            _ => localname.to_string(),
+            (Some(p), None) => self.interned.get(&format!("{p}:{localname}")),
+            _ => self.interned.get(localname),
         };
         let mut n = Node::new(Kind::Element, name);
-        for (p, u) in &ns_defs {
-            let ns = Ns {
-                prefix: p.clone(),
-                href: Some(u.clone()),
-            };
-            if uri.is_some() && p.as_deref() == prefix && n.ns.is_none() {
-                n.ns = Some(ns.clone());
+        if !ns_defs.is_empty() {
+            let mut defs = Vec::with_capacity(ns_defs.len());
+            for (p, u) in &ns_defs {
+                let ns = self.ns_ref(p.as_deref(), u);
+                if uri.is_some() && p.as_deref() == prefix && n.ns.is_none() {
+                    n.ns = Some(ns.clone());
+                }
+                defs.push(ns);
             }
-            n.ns_defs.push(ns);
+            *n.ns_defs_mut() = defs;
+        }
+        if let Some(u) = uri
+            && n.ns.is_none()
+        {
+            n.ns = Some(self.ns_ref(prefix, u));
         }
         let id = self.doc.add(n);
         self.append_child(id);
         self.nodes.push(id);
-        if let Some(u) = uri
-            && self.doc.nodes[id].ns.is_none()
-        {
-            self.doc.nodes[id].ns = Some(Ns {
-                prefix: prefix.map(str::to_string),
-                href: Some(u.to_string()),
-            });
-        }
         for (aname, aprefix, auri, value, defaulted) in atts {
             if defaulted && !self.opts.dtd_attr {
                 continue;
             }
             let (aname, ns) = match (&aprefix, &auri) {
-                (Some(p), None) => (format!("{p}:{aname}"), None),
-                (Some(p), Some(u)) => (
-                    aname,
-                    Some(Ns {
-                        prefix: Some(p.clone()),
-                        href: Some(u.clone()),
-                    }),
-                ),
-                _ => (aname, None),
+                (Some(p), None) => (self.interned.get(&format!("{p}:{aname}")), None),
+                (Some(p), Some(u)) => (self.interned.get(&aname), Some(self.ns_ref(Some(p), u))),
+                _ => (self.interned.get(&aname), None),
             };
             let mut a = Node::new(Kind::Attribute, aname);
             a.ns = ns;
             let aid = self.doc.add(a);
-            self.doc.nodes[aid].parent = Some(id);
-            let kids = self.attr_children(&value);
-            for k in kids {
-                self.doc.append(aid, k);
-            }
-            self.doc.nodes[id].attrs.push(aid);
+            self.attr_children(aid, &value);
+            self.doc.append_attr(id, aid);
         }
     }
 
     /// The attribute's children: text, with `&name;` references kept as nodes when entities
     /// aren't substituted (`xmlNodeParseContent`).
-    fn attr_children(&mut self, value: &str) -> Vec<NodeId> {
+    fn attr_children(&mut self, attr: NodeId, value: &str) {
         if self.opts.replace_entities || !value.contains('&') {
-            return vec![self.doc.text(value)];
+            let t = self.doc.new_text(value);
+            self.doc.append(attr, t);
+            return;
         }
-        let mut out = Vec::new();
+        let mut any = false;
         let mut text = String::new();
         let b = value.as_bytes();
         let mut i = 0;
@@ -4079,9 +4104,13 @@ impl Parser {
                     text.push_str(p);
                 } else {
                     if !text.is_empty() {
-                        out.push(self.doc.text(&std::mem::take(&mut text)));
+                        let t = self.doc.new_text(&std::mem::take(&mut text));
+                        self.doc.append(attr, t);
                     }
-                    out.push(self.doc.add(Node::new(Kind::EntityRef, r)));
+                    let name = self.interned.get(r);
+                    let e = self.doc.add(Node::new(Kind::EntityRef, name));
+                    self.doc.append(attr, e);
+                    any = true;
                 }
                 i += end + 1;
                 continue;
@@ -4090,10 +4119,10 @@ impl Parser {
             text.push(ch);
             i += ch.len_utf8();
         }
-        if !text.is_empty() || out.is_empty() {
-            out.push(self.doc.text(&text));
+        if !text.is_empty() || !any {
+            let t = self.doc.new_text(&text);
+            self.doc.append(attr, t);
         }
-        out
     }
 
     /// `xmlDocCopyNode(node, doc, 1)` within the same document.
@@ -4102,22 +4131,27 @@ impl Parser {
     }
 }
 
-/// Deep copy of `id` (detached).
+/// Deep copy of `id` (detached), without recursion.
 pub fn copy_node(doc: &mut Doc, id: NodeId, recursive: bool) -> NodeId {
-    let mut n = doc.nodes[id].clone();
-    n.parent = None;
-    let kids = std::mem::take(&mut n.children);
-    let attrs = std::mem::take(&mut n.attrs);
-    let new = doc.add(n);
-    for a in attrs {
-        let c = copy_node(doc, a, true);
-        doc.nodes[c].parent = Some(new);
-        doc.nodes[new].attrs.push(c);
-    }
-    if recursive {
-        for k in kids {
-            let c = copy_node(doc, k, true);
-            doc.append(new, c);
+    let new = doc.dup(id);
+    // (source, copy) pairs whose attributes and children are still to copy
+    let mut work = vec![(id, new)];
+    while let Some((src, dst)) = work.pop() {
+        let mut a = doc.first_attr(src);
+        while let Some(s) = a {
+            let c = doc.dup(s);
+            doc.append_attr(dst, c);
+            work.push((s, c));
+            a = doc.next_sibling(s);
+        }
+        if recursive || src != id {
+            let mut k = doc.first_child(src);
+            while let Some(s) = k {
+                let c = doc.dup(s);
+                doc.append(dst, c);
+                work.push((s, c));
+                k = doc.next_sibling(s);
+            }
         }
     }
     new

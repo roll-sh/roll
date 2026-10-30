@@ -3,7 +3,7 @@
 //! body compiled to instructions.
 
 use super::pattern::Pattern;
-use crate::types::xml::tree::{Doc, NodeId, Ns};
+use crate::types::xml::tree::{Doc, NodeId, NsRef};
 use crate::types::xml::xpath::{Compiled, NsMap};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -160,7 +160,7 @@ pub struct Template {
     pub body: Rc<Vec<Instr>>,
     /// Namespaces in scope at xsl:template, less XSLT's and the excluded ones
     /// (xsltGetInheritedNsList), declared on the body's top-level literal elements.
-    pub inherited_ns: Vec<Ns>,
+    pub inherited_ns: Vec<NsRef>,
 }
 
 /// A global xsl:variable or xsl:param.

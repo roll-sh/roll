@@ -132,14 +132,14 @@ impl XNode {
     }
 }
 
-/// A parsed document with libxml's links: the parent, sibling and child pointers XPath walks,
-/// including the entity-reference → entity-declaration → replacement-text linkage.
+/// A parsed document with libxml's links XPath walks, including the entity-reference →
+/// entity-declaration → replacement-text linkage.
 pub struct XDoc {
     pub doc: Doc,
-    parent: Vec<Option<NodeId>>,
-    pos: Vec<u32>,
     /// Entity index → its declaration node in the DTD.
     decl_of: Vec<Option<NodeId>>,
+    /// The parent of an entity's top-level replacement nodes: its declaration (`ent`).
+    ent_parent: HashMap<NodeId, NodeId>,
     ids: OnceCell<HashMap<String, NodeId>>,
     /// Document order of the source tree's nodes (1-based; 0: not ordered), as libxslt's
     /// `xmlXPathOrderDocElems` makes comparisons constant-time. Empty unless ordered.
@@ -153,36 +153,28 @@ impl XDoc {
     }
 
     pub fn new(doc: Doc) -> XDoc {
-        let n = doc.nodes.len();
-        let mut parent: Vec<Option<NodeId>> = doc.nodes.iter().map(|x| x.parent).collect();
-        let mut pos = vec![0u32; n];
-        for node in &doc.nodes {
-            for (i, &c) in node.children.iter().enumerate() {
-                pos[c] = i as u32;
-            }
-            for (i, &a) in node.attrs.iter().enumerate() {
-                pos[a] = i as u32;
-            }
-        }
         let mut decl_of = vec![None; doc.entities.len()];
-        for (id, node) in doc.nodes.iter().enumerate() {
-            if let (Kind::EntityDecl, Decl::Entity(e)) = (node.kind, &node.decl)
-                && *e < decl_of.len()
-            {
-                decl_of[*e] = Some(id);
+        let mut ent_parent = HashMap::new();
+        if !doc.entities.is_empty() {
+            for (id, node) in doc.nodes.iter().enumerate() {
+                if let (Kind::EntityDecl, Decl::Entity(e)) = (node.kind, node.decl())
+                    && *e < decl_of.len()
+                {
+                    decl_of[*e] = Some(id);
+                }
             }
-        }
-        for (e, ent) in doc.entities.iter().enumerate() {
-            for (i, &c) in ent.children.iter().enumerate() {
-                parent[c] = decl_of[e];
-                pos[c] = i as u32;
+            for (e, ent) in doc.entities.iter().enumerate() {
+                if let Some(d) = decl_of[e] {
+                    for &c in &ent.children {
+                        ent_parent.insert(c, d);
+                    }
+                }
             }
         }
         XDoc {
             doc,
-            parent,
-            pos,
             decl_of,
+            ent_parent,
             ids: OnceCell::new(),
             order: Vec::new(),
         }
@@ -194,12 +186,15 @@ impl XDoc {
 
     /// The parent XPath sees: an attribute's element, an entity's declaration.
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
-        self.parent[id]
+        match self.doc.parent(id) {
+            None if !self.ent_parent.is_empty() => self.ent_parent.get(&id).copied(),
+            p => p,
+        }
     }
 
     /// The document node `id` belongs to.
     pub fn doc_of(&self, mut id: NodeId) -> NodeId {
-        while let Some(p) = self.parent[id] {
+        while let Some(p) = self.parent(id) {
             id = p;
         }
         id
@@ -219,11 +214,11 @@ impl XDoc {
             if n.kind == Kind::EntityRef || n.kind == Kind::Dtd {
                 continue;
             }
-            for &a in &n.attrs {
+            for a in self.doc.attrs(id) {
                 k += 1;
                 order[a] = k;
             }
-            stack.extend(n.children.iter().rev().copied());
+            stack.extend(self.doc.children(id).rev());
         }
         self.order = order;
     }
@@ -239,56 +234,15 @@ impl XDoc {
     /// evaluation reaches nodes of both; returns its document node, which has no parent.
     /// Entities aren't carried over: the trees grafted have no entity references.
     pub fn graft(&mut self, other: Doc) -> NodeId {
-        let base = self.doc.nodes.len();
-        for mut n in other.nodes {
-            n.parent = n.parent.map(|p| p + base);
-            for c in n.children.iter_mut().chain(n.attrs.iter_mut()) {
-                *c += base;
-            }
-            self.parent.push(n.parent);
-            self.pos.push(0);
-            self.doc.nodes.push(n);
-        }
-        for id in base..self.doc.nodes.len() {
-            let n = &self.doc.nodes[id];
-            for (i, &c) in n.children.iter().enumerate() {
-                self.pos[c] = i as u32;
-            }
-            for (i, &a) in n.attrs.iter().enumerate() {
-                self.pos[a] = i as u32;
-            }
-        }
-        base
-    }
-
-    fn siblings(&self, id: NodeId) -> &[NodeId] {
-        let Some(p) = self.parent[id] else { return &[] };
-        if self.doc.nodes[id].kind == Kind::Attribute {
-            return &self.doc.nodes[p].attrs;
-        }
-        let pn = &self.doc.nodes[p];
-        if let (Kind::EntityDecl, Decl::Entity(e)) = (pn.kind, &pn.decl) {
-            return &self.doc.entities[*e].children;
-        }
-        &pn.children
+        self.doc.absorb(other)
     }
 
     fn next(&self, id: NodeId) -> Option<NodeId> {
-        let s = self.siblings(id);
-        let i = self.pos[id] as usize;
-        if s.get(i) != Some(&id) {
-            return None;
-        }
-        s.get(i + 1).copied()
+        self.doc.next_sibling(id)
     }
 
     fn prev(&self, id: NodeId) -> Option<NodeId> {
-        let s = self.siblings(id);
-        let i = self.pos[id] as usize;
-        if i == 0 || s.get(i) != Some(&id) {
-            return None;
-        }
-        s.get(i - 1).copied()
+        self.doc.prev_sibling(id)
     }
 
     /// The entity declaration an entity reference points at (`ref->children`).
@@ -298,7 +252,7 @@ impl XDoc {
     }
 
     fn entity_children(&self, id: NodeId) -> &[NodeId] {
-        match &self.doc.nodes[id].decl {
+        match self.doc.nodes[id].decl() {
             Decl::Entity(e) => &self.doc.entities[*e].children,
             _ => &[],
         }
@@ -308,7 +262,7 @@ impl XDoc {
         match self.kind(id) {
             Kind::EntityRef => self.ref_target(id),
             Kind::EntityDecl => self.entity_children(id).first().copied(),
-            _ => self.doc.nodes[id].children.first().copied(),
+            _ => self.doc.first_child(id),
         }
     }
 
@@ -316,7 +270,7 @@ impl XDoc {
         match self.kind(id) {
             Kind::EntityRef => self.ref_target(id),
             Kind::EntityDecl => self.entity_children(id).last().copied(),
-            _ => self.doc.nodes[id].children.last().copied(),
+            _ => self.doc.last_child(id),
         }
     }
 
@@ -338,13 +292,13 @@ impl XDoc {
                     return String::new();
                 };
                 if matches!(self.kind(c), Kind::Text | Kind::CData) && self.next(c).is_none() {
-                    return self.doc.nodes[c].content.clone();
+                    return self.doc.text_of(c).to_string();
                 }
                 let mut out = String::new();
                 self.child_content(id, &mut out, &mut Vec::new());
                 out
             }
-            Kind::Text | Kind::CData | Kind::Comment | Kind::Pi => n.content.clone(),
+            Kind::Text | Kind::CData | Kind::Comment | Kind::Pi => self.doc.text(n).to_string(),
             Kind::Document => {
                 let mut out = String::new();
                 self.child_content(id, &mut out, &mut Vec::new());
@@ -388,7 +342,7 @@ impl XDoc {
         let mut cur = self.first_child(tree);
         while let Some(c) = cur {
             match self.kind(c) {
-                Kind::Text | Kind::CData => out.push_str(&self.doc.nodes[c].content),
+                Kind::Text | Kind::CData => out.push_str(self.doc.text_of(c)),
                 Kind::EntityRef => self.entity_ref_content(c, out, expanding),
                 _ => {
                     if let Some(f) = self.first_child(c) {
@@ -419,7 +373,7 @@ impl XDoc {
         };
         let mut node = id;
         if self.kind(node) == Kind::Document {
-            let root = self.doc.nodes[node].children.iter().copied().find(|&c| self.kind(c) == Kind::Element);
+            let root = self.doc.children(node).find(|&c| self.kind(c) == Kind::Element);
             match root.or_else(|| self.first_child(node)) {
                 Some(n) => node = n,
                 None => return 0,
@@ -427,7 +381,7 @@ impl XDoc {
         }
         let mut tmp = match self.kind(node) {
             Kind::Comment | Kind::Pi | Kind::CData | Kind::Text => {
-                return string_hash(&self.doc.nodes[node].content);
+                return string_hash(self.doc.text_of(node));
             }
             Kind::Attribute | Kind::Element => self.first_child(node),
             _ => return 0,
@@ -436,7 +390,7 @@ impl XDoc {
         let mut ret: u32 = 0;
         while let Some(t) = tmp {
             let s = match self.kind(t) {
-                Kind::CData | Kind::Text => Some(self.doc.nodes[t].content.as_bytes()),
+                Kind::CData | Kind::Text => Some(self.doc.text_of(t).as_bytes()),
                 _ => None,
             };
             if let Some(s) = s
@@ -622,15 +576,15 @@ impl XDoc {
             while let Some(n) = stack.pop() {
                 let node = &self.doc.nodes[n];
                 if node.kind == Kind::Element {
-                    for &a in &node.attrs {
+                    for a in self.doc.attrs(n) {
                         let an = &self.doc.nodes[a];
-                        let [t] = an.children.as_slice() else {
+                        let (Some(t), None) = (self.doc.first_child(a), self.doc.first_child(a).and_then(|t| self.doc.next_sibling(t))) else {
                             continue;
                         };
-                        if self.doc.nodes[*t].kind != Kind::Text {
+                        if self.doc.nodes[t].kind != Kind::Text {
                             continue;
                         }
-                        let value = &self.doc.nodes[*t].content;
+                        let value = self.doc.text_of(t);
                         if value.is_empty() {
                             continue;
                         }
@@ -638,10 +592,10 @@ impl XDoc {
                         let is_id = if aprefix.as_deref() == Some("xml") && an.name == "id" {
                             true
                         } else if has_dtd {
-                            let key = (self.doc.qname(n), an.name.clone(), aprefix);
+                            let key = (self.doc.qname(n), an.name.to_string(), aprefix);
                             self.doc.attr_decls.get(&key).is_some_and(|&d| {
                                 matches!(
-                                    self.doc.nodes[d].decl,
+                                    self.doc.nodes[d].decl(),
                                     Decl::Attribute {
                                         atype: AttrType::Id,
                                         ..
@@ -652,12 +606,12 @@ impl XDoc {
                             false
                         };
                         if is_id && !ids.contains_key(value) {
-                            ids.insert(value.clone(), a);
+                            ids.insert(value.to_string(), a);
                         }
                     }
                 }
                 if matches!(node.kind, Kind::Element | Kind::Document) {
-                    for &c in node.children.iter().rev() {
+                    for c in self.doc.children(n).rev() {
                         if self.doc.nodes[c].kind == Kind::Element {
                             stack.push(c);
                         }
@@ -2708,7 +2662,7 @@ impl<'a> Ctx<'a> {
                         }
                         Some(XNode::Node(c))
                     }
-                    Kind::Document => x.doc.nodes[id].children.iter().copied().find(|&c| is_elem(c)).map(XNode::Node),
+                    Kind::Document => x.doc.children(id).find(|&c| is_elem(c)).map(XNode::Node),
                     _ => None,
                 }
             }
@@ -2949,7 +2903,7 @@ impl<'a> Ctx<'a> {
             let mut node = Some(id);
             while let Some(n) = node {
                 if x.kind(n) == Kind::Element {
-                    for d in &x.doc.nodes[n].ns_defs {
+                    for d in x.doc.nodes[n].ns_defs() {
                         if !self.tmp_ns.iter().any(|t| t.prefix == d.prefix) {
                             self.tmp_ns.push(Arc::new(NsNode {
                                 parent: None,
@@ -2977,7 +2931,7 @@ impl<'a> Ctx<'a> {
             return None;
         }
         match cur {
-            None => x.doc.nodes[id].attrs.first().copied().map(XNode::Node),
+            None => x.doc.first_attr(id).map(XNode::Node),
             Some(c) => x.next(c.id()?).map(XNode::Node),
         }
     }
@@ -4578,7 +4532,7 @@ impl Ctx<'_> {
         match n {
             XNode::Ns(ns) => ns.prefix.clone().unwrap_or_default(),
             XNode::Node(id) => match self.x.kind(*id) {
-                Kind::Element | Kind::Attribute | Kind::Pi => self.x.doc.nodes[*id].name.clone(),
+                Kind::Element | Kind::Attribute | Kind::Pi => self.x.doc.nodes[*id].name.to_string(),
                 _ => String::new(),
             },
         }
@@ -4619,7 +4573,7 @@ impl Ctx<'_> {
                 let n = &self.x.doc.nodes[*id];
                 match n.ns.as_ref().and_then(|ns| ns.prefix.as_deref()) {
                     Some(p) => format!("{p}:{}", n.name),
-                    None => n.name.clone(),
+                    None => n.name.to_string(),
                 }
             }
             Some(n) => self.local_name_of(n),
@@ -4883,7 +4837,7 @@ impl Ctx<'_> {
         };
         while let Some(c) = cur {
             if x.kind(c) == Kind::Element
-                && let Some(&a) = x.doc.nodes[c].attrs.iter().find(|&&a| {
+                && let Some(a) = x.doc.attrs(c).find(|&a| {
                     let an = &x.doc.nodes[a];
                     an.name == "lang"
                         && an.ns.as_ref().and_then(|n| n.href.as_deref()) == Some(XML_NS)
@@ -5176,7 +5130,7 @@ fn copy_namespaces(x: &XDoc, root: NodeId) -> Vec<Ns> {
         let mut n = el;
         loop {
             if d.nodes[n]
-                .ns_defs
+                .ns_defs()
                 .iter()
                 .any(|ns| ns.prefix.as_deref() == prefix && ns.href.is_some())
             {
@@ -5192,7 +5146,7 @@ fn copy_namespaces(x: &XDoc, root: NodeId) -> Vec<Ns> {
             if n == root {
                 return extra.iter().any(|ns| ns.prefix.as_deref() == prefix);
             }
-            match d.nodes[n].parent {
+            match d.parent(n) {
                 Some(p) => n = p,
                 None => return false,
             }
@@ -5206,20 +5160,20 @@ fn copy_namespaces(x: &XDoc, root: NodeId) -> Vec<Ns> {
                 break;
             }
             if let Some(ns) = d.nodes[e]
-                .ns_defs
+                .ns_defs()
                 .iter()
                 .find(|ns| ns.prefix.as_deref() == prefix && ns.href.is_some())
             {
-                return Some(ns.clone());
+                return Some(Ns::clone(ns));
             }
             if e != el
                 && let Some(ns) = &d.nodes[e].ns
                 && ns.prefix.as_deref() == prefix
                 && ns.href.is_some()
             {
-                return Some(ns.clone());
+                return Some(Ns::clone(ns));
             }
-            n = d.nodes[e].parent;
+            n = d.parent(e);
         }
         None
     };
@@ -5229,8 +5183,9 @@ fn copy_namespaces(x: &XDoc, root: NodeId) -> Vec<Ns> {
         }
         if let Some(ns) = original(el, prefix)
             && !d.nodes[root]
-                .ns_defs
+                .ns_defs()
                 .iter()
+                .map(|n| &**n)
                 .chain(extra.iter())
                 .any(|o| o.prefix == ns.prefix)
         {
@@ -5246,12 +5201,12 @@ fn copy_namespaces(x: &XDoc, root: NodeId) -> Vec<Ns> {
         if let Some(ns) = &n.ns {
             add(&mut extra, el, ns.prefix.as_deref());
         }
-        for &a in &n.attrs {
+        for a in d.attrs(el) {
             if let Some(ns) = &d.nodes[a].ns {
                 add(&mut extra, el, ns.prefix.as_deref());
             }
         }
-        for &c in n.children.iter().rev() {
+        for c in d.children(el).rev() {
             stack.push(c);
         }
     }

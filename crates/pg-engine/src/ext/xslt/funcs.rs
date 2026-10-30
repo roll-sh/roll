@@ -279,13 +279,9 @@ impl Exec<'_, '_> {
             let mut order = Vec::new();
             while let Some(id) = stack.pop() {
                 order.push(id);
-                let n = &self.x.doc.nodes[id];
-                for &c in n.children.iter().rev() {
-                    stack.push(c);
-                }
-                for &a in n.attrs.iter().rev() {
-                    stack.push(a);
-                }
+                stack.extend(self.x.doc.children(id).rev());
+                let attrs: Vec<_> = self.x.doc.attrs(id).collect();
+                stack.extend(attrs.into_iter().rev());
             }
             for id in order {
                 let node = XNode::Node(id);
