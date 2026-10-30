@@ -1094,17 +1094,40 @@ impl Engine {
         }
     }
 
-    /// CancelRequest: true if the key matched a backend.
-    pub fn cancel(&self, pid: i32, secret: i32) -> bool {
+    /// A CancelRequest connection's work: cancel, then wait (briefly) for the backend to act
+    /// on it before the connection closes. Postgres's request is a signal the backend
+    /// handles at once, while the process that took the request is still exiting, so the
+    /// canceled statement's error reaches its client before the request's connection
+    /// closes; clients rely on that order (Postgrex closes its connection once the cancel's
+    /// closes, and reads the error first). Acted on: the backend read its next message (the
+    /// flag cleared), or no longer runs a statement.
+    pub fn cancel_request(&self, pid: i32, secret: i32) {
+        let Some(flag) = self.cancel_flag(pid, secret) else {
+            return;
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while flag.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+            let running = self
+                .backends
+                .lock()
+                .get(&pid)
+                .is_some_and(|b| matches!(b.activity.state.as_str(), "active" | "fastpath function call"));
+            if !running {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(500));
+        }
+    }
+
+    fn cancel_flag(&self, pid: i32, secret: i32) -> Option<Arc<AtomicBool>> {
         match self.backends.lock().get(&pid) {
             Some(b) if b.secret == secret => {
-                if let Some(c) = &b.cancel {
-                    c.store(true, Ordering::Relaxed);
-                    crate::txn::locks::interrupt(c);
-                }
-                true
+                let c = b.cancel.as_ref()?;
+                c.store(true, Ordering::Relaxed);
+                crate::txn::locks::interrupt(c);
+                Some(c.clone())
             }
-            _ => false,
+            _ => None,
         }
     }
 

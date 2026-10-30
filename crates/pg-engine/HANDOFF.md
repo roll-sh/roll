@@ -2210,6 +2210,22 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - Server CPU per suite against PostgreSQL's (release, both sides): lower for 19 of 20
     suites (STATUS.md's table); Kysely 10 s vs 7.6 s (catalog joins replanned and catalog
     rows regenerated after each DDL).
+- **Client suites round 6** (round 23, agent 122; tests/clients/STATUS.md "Round 6"):
+  - Cancels act at once and in PostgreSQL's order. pg_sleep waited in 20 ms polls, so a cancel
+    in a sleep's last interval went unnoticed; the statement ended and the next message read
+    discarded the request (DoingCommandRead). asyncpg's executemany timeout (its cancel lands
+    near a statement boundary every time) committed all 128 rows. pg_sleep now waits on a
+    latch the request wakes (`txn::locks::latch_sleep`, `interrupt`). A CancelRequest's
+    connection closes once the backend has acted on it (its flag cleared by the next message
+    read, or the backend no longer running a statement; at most 100 ms:
+    `Engine::cancel_request`): Postgrex closes its connection as soon as the cancel's closes and
+    needs the canceled statement's error first (its "active client timeout"). Wire test
+    `cancel_request_closes_after_the_error`. Knex's cancel with the pool exhausted reads
+    pg_stat_activity right after pg_cancel_backend: it passes with the latch.
+  - Postgrex's "terminate backend during query" is a race in the client: the pool dies (and
+    kills the linked test process) when its disconnect's cancel request round trip ends,
+    before the task's FATAL reply arrives. PostgreSQL's cancel request costs a fork and an
+    exit (~5 ms); the engine's closes at once for a pid that is gone. Not changed.
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row

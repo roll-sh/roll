@@ -142,6 +142,31 @@ first run in a session (per-session catalog caches, `Catalog::rel_rowtype`'s deb
 integer converted to decimal, quadratic; PostgreSQL keeps base-10000 digits); jOOQ's codegen
 catalog queries 13 s vs 2.3 s; EF Core's suite 31 min vs 7 min.
 
+## Round 6 (round 23, agent 122)
+
+Release engine, a private reference of the pinned image (`-c max_connections=500`).
+
+Timing differences of round 5, found at the protocol level (logging proxy between client and
+server, raw-protocol probes against both servers):
+- asyncpg `test_executemany_timeout` (and `..._server_failure_during_writes`): the timeout's
+  CancelRequest lands about 0.5 s in, at the end of the 5th `pg_sleep(0.1)`. The engine's
+  pg_sleep polled every 20 ms and returned at its end without looking again, so a cancel in
+  the last interval was left for the next message read, which discards it (as PostgreSQL does
+  for a cancel that comes while it waits for input): all 128 rows committed. pg_sleep now
+  waits on a latch the cancel wakes. 3 runs of `-k executemany` and the full suite: 0
+  differences (262 / 5 on both).
+- Postgrex "active client timeout": on its deadline Postgrex sends a CancelRequest, waits for
+  that connection to close, then closes its own. PostgreSQL's cancel connection closes after
+  the signal, and the backend's ErrorResponse is out first; the engine closed it at once and
+  the error came up to 20 ms later, after the client's close: the client saw `closed` in
+  recv_bind, retried the checkout against its stopped pool and exited `killed`. A
+  CancelRequest's connection now closes once the backend has acted on it. Passes.
+- Postgrex "terminate backend during query": passes alone (3 of 3) and failed in a full run:
+  the test process is linked to the pool, which stops when the disconnect's own cancel request
+  returns; PostgreSQL's takes a fork and an exit (~5 ms), the engine's is immediate, so the
+  pool's exit can beat the task's FATAL reply. A client race, not a wire difference.
+- Knex's cancel with the pool exhausted: passes (523 / 0 on both).
+
 ## Round 5 (round 22, agent 100)
 
 Release builds on both sides now (the engine `--release`, frame pointers on for perf),

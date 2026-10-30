@@ -524,10 +524,51 @@ struct State {
 static SLEEPING: std::sync::LazyLock<Mutex<HashMap<usize, Arc<Condvar>>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// A cancel or terminate request set `flag`: wake its backend if it waits for a lock.
+/// A cancel or terminate request set `flag`: wake its backend if it waits for a lock or
+/// sleeps (`latch_sleep`).
 pub fn interrupt(flag: &AtomicBool) {
-    if let Some(cv) = SLEEPING.lock().get(&(flag as *const AtomicBool as usize)) {
+    let key = flag as *const AtomicBool as usize;
+    if let Some(cv) = SLEEPING.lock().get(&key) {
         cv.notify_one();
+    }
+    let latches = LATCHES.lock().get(&key).cloned().unwrap_or_default();
+    for l in latches {
+        // (Under the latch's mutex: the sleeper checks the flag and waits under it, so the
+        // wakeup can't fall between the two.)
+        let _g = l.0.lock();
+        l.1.notify_all();
+    }
+}
+
+/// Backends sleeping in `latch_sleep`, by their cancel flag's address (parallel workers
+/// share their leader's flag).
+type Latch = Arc<(Mutex<()>, Condvar)>;
+static LATCHES: std::sync::LazyLock<Mutex<HashMap<usize, Vec<Latch>>>> = std::sync::LazyLock::new(Default::default);
+
+/// Sleep up to `d`, ending at once when a cancel or terminate request sets `flag`: pg_sleep's
+/// WaitLatch on MyLatch, which the request's signal sets. (A poll would let a request that
+/// comes in its last interval go unnoticed: the statement ends, and the next message read
+/// discards the request, as ProcessInterrupts does while DoingCommandRead.)
+pub fn latch_sleep(flag: &AtomicBool, d: Duration) {
+    let key = flag as *const AtomicBool as usize;
+    let latch: Latch = Arc::new((Mutex::new(()), Condvar::new()));
+    LATCHES.lock().entry(key).or_default().push(latch.clone());
+    struct Registered(usize, Latch);
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            let mut all = LATCHES.lock();
+            if let Some(v) = all.get_mut(&self.0) {
+                v.retain(|l| !Arc::ptr_eq(l, &self.1));
+                if v.is_empty() {
+                    all.remove(&self.0);
+                }
+            }
+        }
+    }
+    let _registered = Registered(key, latch.clone());
+    let mut g = latch.0.lock();
+    if !flag.load(Ordering::Relaxed) {
+        latch.1.wait_for(&mut g, d);
     }
 }
 

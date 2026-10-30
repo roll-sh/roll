@@ -12,6 +12,8 @@ pub struct Raw {
     s: TcpStream,
     /// The last ReadyForQuery's transaction status.
     pub status: u8,
+    /// BackendKeyData: the process id and the cancel key.
+    pub key: (i32, i32),
 }
 
 impl Raw {
@@ -21,7 +23,7 @@ impl Raw {
         body.extend_from_slice(format!("user\0{user}\0database\0postgres\0\0").as_bytes());
         let mut m = ((body.len() + 4) as i32).to_be_bytes().to_vec();
         m.extend_from_slice(&body);
-        let mut r = Raw { s, status: b'I' };
+        let mut r = Raw { s, status: b'I', key: (0, 0) };
         r.s.write_all(&m).unwrap();
         r.read();
         r
@@ -80,6 +82,26 @@ impl Raw {
         (h[0], b)
     }
 
+    /// Send a CancelRequest for this session on a connection of its own, and wait for the
+    /// server to close that connection.
+    pub fn cancel(&self, addr: &str) {
+        let mut c = TcpStream::connect(addr).unwrap();
+        let mut m = 16i32.to_be_bytes().to_vec();
+        for v in [80877102, self.key.0, self.key.1] {
+            m.extend_from_slice(&v.to_be_bytes());
+        }
+        c.write_all(&m).unwrap();
+        let _ = c.read(&mut [0u8; 1]);
+    }
+
+    /// Whether a message has arrived and waits to be read (without blocking).
+    pub fn has_input(&self) -> bool {
+        self.s.set_nonblocking(true).unwrap();
+        let got = self.s.peek(&mut [0u8; 1]);
+        self.s.set_nonblocking(false).unwrap();
+        matches!(got, Ok(n) if n > 0)
+    }
+
     /// The next message, if one comes within `wait` (its type and body).
     pub fn next_within(&mut self, wait: std::time::Duration) -> Option<(u8, Vec<u8>)> {
         self.s.set_read_timeout(Some(wait)).unwrap();
@@ -119,7 +141,8 @@ impl Raw {
                 b'C' => out.push(format!("C {}", String::from_utf8_lossy(&b[..b.len() - 1]))),
                 b's' => out.push("s".into()),
                 b'n' => out.push("n".into()),
-                b'N' | b'S' | b'1' | b'2' | b'3' | b't' | b'K' | b'R' => {}
+                b'K' => self.key = (i32::from_be_bytes(b[..4].try_into().unwrap()), i32::from_be_bytes(b[4..8].try_into().unwrap())),
+                b'N' | b'S' | b'1' | b'2' | b'3' | b't' | b'R' => {}
                 t => out.push((t as char).to_string()),
             }
         }

@@ -187,6 +187,10 @@ fn pg_sleep(a: &[Value], c: &FnCtx) -> Result<Value> {
         } else {
             secs.clamp(0.0, 1e7)
         });
+    let (cancel, txn_deadline) = {
+        let t = c.exec.txn.borrow();
+        (t.cancel.clone(), t.txn_deadline)
+    };
     loop {
         let now = std::time::Instant::now();
         if now >= end {
@@ -201,7 +205,13 @@ fn pg_sleep(a: &[Value], c: &FnCtx) -> Result<Value> {
                 "canceling statement due to statement timeout",
             ));
         }
-        std::thread::sleep((end - now).min(std::time::Duration::from_millis(20)));
+        // Until the end, the statement's or the transaction's timeout, or a cancel /
+        // terminate request (the latch).
+        let mut wake = end;
+        for d in [c.exec.deadline, txn_deadline].into_iter().flatten() {
+            wake = wake.min(d + std::time::Duration::from_millis(1));
+        }
+        crate::txn::locks::latch_sleep(&cancel, wake.saturating_duration_since(now));
     }
     Ok(Value::Null)
 }

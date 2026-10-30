@@ -3775,3 +3775,30 @@ fn cached_plan_result_change_before_result_formats() {
     });
     s.engine.shutdown();
 }
+
+/// A CancelRequest's connection closes once the canceled statement's error is on its way:
+/// Postgrex closes its connection as soon as the cancel's closes, and reads the error first
+/// (its "active client timeout"). Postgres's cancel is a signal its backend acts on while
+/// the process that took the request is still exiting.
+#[test]
+fn cancel_request_closes_after_the_error() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    for _ in 0..3 {
+        // Two statements in one pipeline: the cancel lands in the first.
+        c.parse("", "SELECT pg_sleep(30)");
+        c.bind("", "");
+        c.execute("", 0);
+        c.parse("", "SELECT 1");
+        c.bind("", "");
+        c.execute("", 0);
+        std::thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
+        c.cancel(&s.addr);
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(c.has_input(), "the error comes before the cancel's connection closes");
+        assert_eq!(c.sync(), ["E 57014"]);
+    }
+    assert_eq!(c.query("SELECT 1"), ["T ?column?:23/-1", "D 1", "C SELECT 1"]);
+    s.engine.shutdown();
+}

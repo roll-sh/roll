@@ -745,7 +745,7 @@ fn handle(
             }
             CANCEL_REQUEST => {
                 let (pid, secret) = (b.i32().map_err(io_err)?, b.i32().map_err(io_err)?);
-                engine.cancel(pid, secret);
+                engine.cancel_request(pid, secret);
                 return Ok(());
             }
             v if v >> 16 == 3 => {
