@@ -9,6 +9,8 @@ pub mod explain;
 pub mod expr;
 pub mod extstat;
 pub mod func;
+pub mod literals;
+pub mod nodewalk;
 pub mod parse;
 pub mod plan;
 pub mod nodetree;

@@ -9507,7 +9507,7 @@ fn missing_rel(rel: &str, loc: i32) -> Error {
 }
 
 /// A numeric literal: int8 if it is an integer that fits, otherwise numeric.
-fn numeric_const(s: &str) -> Result<Expr> {
+pub(crate) fn numeric_const(s: &str) -> Result<Expr> {
     if !s.contains(['.', 'e', 'E']) {
         let digits = s.replace('_', "");
         if let Ok(i) = digits.parse::<i64>() {

@@ -402,6 +402,69 @@ struct Hold {
     /// Taken through the fast path (a weak relation lock while no strong one was held or
     /// asked for), as pg_locks shows.
     fastpath: bool,
+    /// When it was taken (`next_seq`): holds moved in from the fast path go in that order.
+    seq: u64,
+}
+
+/// A process-wide order of holds.
+fn next_seq() -> u64 {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Hold {
+    fn new(owner: u64, proc: u64, mode: LockMode, fastpath: bool) -> Hold {
+        Hold { owner, proc, mode, count: 1, fastpath, seq: next_seq() }
+    }
+}
+
+/// A backend's weak relation locks taken on the fast path (PGPROC's fpRelId / fpLockBits):
+/// AccessShare, RowShare and RowExclusive locks of relations of the database, taken while no
+/// backend holds or waits for a lock of a stronger mode on any relation of the key's
+/// partition (`FastPath::strong`), without the lock table's mutex. A strong request first
+/// counts itself there, then moves every backend's fast-path holds of its relation into the
+/// lock table (FastPathTransferRelationLocks); a backend checks the count under its own
+/// slot's mutex, so it either sees it or had its hold moved. The rare readers of every hold
+/// (pg_locks, prepared transactions, WaitForLockers) move them all first, still shown as
+/// fast-path locks.
+pub struct FastSlot {
+    proc: u64,
+    holds: Mutex<Vec<FastHold>>,
+}
+
+struct FastHold {
+    key: Vec<u8>,
+    owner: u64,
+    mode: LockMode,
+    count: u32,
+    seq: u64,
+}
+
+const FAST_PARTITIONS: usize = 1024;
+
+struct FastPath {
+    /// Per partition of relation keys, how many keys have a strong lock held or awaited
+    /// (FastPathStrongRelationLocks): kept by the lock table (`State::strong_keys`).
+    strong: Arc<[std::sync::atomic::AtomicU32]>,
+    slots: parking_lot::RwLock<HashMap<u64, Arc<FastSlot>>>,
+}
+
+impl Default for FastPath {
+    fn default() -> Self {
+        FastPath {
+            strong: (0..FAST_PARTITIONS).map(|_| std::sync::atomic::AtomicU32::new(0)).collect(),
+            slots: Default::default(),
+        }
+    }
+}
+
+fn fast_partition(key: &[u8]) -> usize {
+    be32(&key[12..], 0) as usize % FAST_PARTITIONS
+}
+
+/// Whether a lock of `mode` on `key` conflicts with the fast path's (ConflictsWithRelationFastPath).
+fn strong_relation_lock(key: &[u8], mode: LockMode) -> bool {
+    mode > LockMode::ShareUpdateExclusive && is_local_relation(key)
 }
 
 #[derive(Default)]
@@ -448,7 +511,7 @@ impl Entry {
                 let fastpath = mode <= LockMode::RowExclusive
                     && is_local_relation(key)
                     && !self.holds.iter().any(|h| h.mode > LockMode::ShareUpdateExclusive);
-                self.holds.push(Hold { owner, proc, mode, count: 1, fastpath })
+                self.holds.push(Hold::new(owner, proc, mode, fastpath))
             }
         }
     }
@@ -516,6 +579,34 @@ struct State {
     excl: HashMap<u32, Vec<(Vec<u8>, Vec<u8>, KeyHolder)>>,
     /// Autovacuum workers' backends, with what cancels each one's work.
     autovacuum: HashMap<u64, std::sync::Arc<AtomicBool>>,
+    /// Relation keys with a strong lock held or awaited, counted in `strong` (the fast path's
+    /// partitions: `FastPath::strong`).
+    strong_keys: std::collections::HashSet<Vec<u8>>,
+    strong: Arc<[std::sync::atomic::AtomicU32]>,
+}
+
+impl State {
+    /// A strong lock of relation `key` is held or asked for.
+    fn mark_strong(&mut self, key: &[u8]) {
+        if self.strong_keys.insert(key.to_vec()) {
+            self.strong[fast_partition(key)].fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// `key` marked strong, but no longer held or awaited in a strong mode: unmark it.
+    fn sync_strong(&mut self, key: &[u8]) {
+        if !self.strong_keys.contains(key) {
+            return;
+        }
+        let strong = self.locks.get(key).is_some_and(|e| {
+            e.holds.iter().any(|h| strong_relation_lock(key, h.mode))
+                || e.queue.iter().any(|p| self.waiters.get(p).is_some_and(|w| strong_relation_lock(key, w.mode)))
+        });
+        if !strong {
+            self.strong_keys.remove(key);
+            self.strong[fast_partition(key)].fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 /// The lock waits in progress, by their cancel flag's address: what a cancel or terminate
@@ -635,7 +726,7 @@ impl State {
         }
         if let Some((owner, proc, holder, xid, row_key)) = found {
             let e = self.locks.entry(key.to_vec()).or_default();
-            e.holds.push(Hold { owner, proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
+            e.holds.push(Hold::new(owner, proc, LockMode::Exclusive, false));
             e.key_holder = Some((owner, KeyHolder { holder, xid, token: None, row: None, row_key }));
         }
     }
@@ -658,9 +749,17 @@ impl State {
     }
 }
 
-#[derive(Default)]
 pub struct LockManager {
     state: Mutex<State>,
+    fast: FastPath,
+}
+
+impl Default for LockManager {
+    fn default() -> Self {
+        let fast = FastPath::default();
+        let state = State { strong: fast.strong.clone(), ..Default::default() };
+        LockManager { state: Mutex::new(state), fast }
+    }
 }
 
 /// One heavyweight lock as pg_locks shows it.
@@ -732,6 +831,103 @@ enum Deadlock {
     Hard(Vec<(u64, Vec<u8>, LockMode)>),
 }
 
+/// The fast path (`FastSlot`).
+impl LockManager {
+    /// Backend `proc`'s fast-path slot (a session's backend only: a transaction without one
+    /// has a backend of its own).
+    pub fn fast_slot(&self, proc: u64) -> Option<Arc<FastSlot>> {
+        if proc >> 63 == 0 {
+            return None;
+        }
+        if let Some(s) = self.fast.slots.read().get(&proc) {
+            return Some(s.clone());
+        }
+        let mut slots = self.fast.slots.write();
+        Some(slots.entry(proc).or_insert_with(|| Arc::new(FastSlot { proc, holds: Mutex::new(Vec::new()) })).clone())
+    }
+
+    /// Backend `proc` is gone: its slot too.
+    pub fn end_proc(&self, proc: u64) {
+        let Some(slot) = self.fast.slots.write().remove(&proc) else { return };
+        if !slot.holds.lock().is_empty() {
+            // (Not expected: what it still held goes to the main table.)
+            let mut s = self.state.lock();
+            Self::move_slot(&mut s, &slot, None);
+        }
+    }
+
+    /// Lock `key` in `mode` for `owner` on the fast path, when it can be (a weak lock of a
+    /// relation of the database, no strong one held or asked for in its partition).
+    pub fn acquire_fast(&self, slot: &FastSlot, key: &[u8], owner: u64, mode: LockMode) -> bool {
+        if mode > LockMode::RowExclusive || !is_local_relation(key) {
+            return false;
+        }
+        let mut holds = slot.holds.lock();
+        if self.fast.strong[fast_partition(key)].load(Ordering::SeqCst) != 0 {
+            return false;
+        }
+        match holds.iter_mut().find(|h| h.owner == owner && h.mode == mode && h.key == key) {
+            Some(h) => h.count += 1,
+            None => holds.push(FastHold { key: key.to_vec(), owner, mode, count: 1, seq: next_seq() }),
+        }
+        true
+    }
+
+    /// Release one of `owner`'s fast-path holds of `key` in `mode`; false when it has none
+    /// there (it is in the main table).
+    pub fn release_fast(&self, slot: &FastSlot, key: &[u8], owner: u64, mode: LockMode) -> bool {
+        let mut holds = slot.holds.lock();
+        let Some(i) = holds.iter().position(|h| h.owner == owner && h.mode == mode && h.key == key) else {
+            return false;
+        };
+        holds[i].count -= 1;
+        if holds[i].count == 0 {
+            holds.swap_remove(i);
+        }
+        true
+    }
+
+    /// Release every fast-path hold of `owner`.
+    pub fn release_fast_owner(&self, slot: &FastSlot, owner: u64) {
+        slot.holds.lock().retain(|h| h.owner != owner);
+    }
+
+    /// Move the fast-path holds of relation `key` (every relation: None) into the main table,
+    /// in the order they were taken among the holds there.
+    fn move_fast(&self, s: &mut State, key: Option<&[u8]>) {
+        let slots: Vec<Arc<FastSlot>> = self.fast.slots.read().values().cloned().collect();
+        for slot in slots {
+            Self::move_slot(s, &slot, key);
+        }
+    }
+
+    fn move_slot(s: &mut State, slot: &FastSlot, key: Option<&[u8]>) {
+        let mut holds = slot.holds.lock();
+        if holds.is_empty() {
+            return;
+        }
+        let moved: Vec<FastHold> = match key {
+            Some(k) if holds.iter().any(|h| h.key == k) => {
+                let (m, kept) = std::mem::take(&mut *holds).into_iter().partition(|h| h.key == k);
+                *holds = kept;
+                m
+            }
+            Some(_) => return,
+            None => std::mem::take(&mut *holds),
+        };
+        for h in moved {
+            let e = s.locks.entry(h.key).or_default();
+            if let Some(x) = e.holds.iter_mut().find(|x| x.owner == h.owner && x.proc == slot.proc && x.mode == h.mode) {
+                x.count += h.count;
+                continue;
+            }
+            let at = e.holds.iter().position(|x| x.seq > h.seq).unwrap_or(e.holds.len());
+            let hold = Hold { owner: h.owner, proc: slot.proc, mode: h.mode, count: h.count, fastpath: true, seq: h.seq };
+            e.holds.insert(at, hold);
+        }
+    }
+}
+
 impl LockManager {
     /// Acquire heavyweight lock `key` in `mode` for `owner`, of backend `proc`. Ok(false)
     /// only for SKIP LOCKED when it isn't free; NOWAIT errors with "could not obtain lock on
@@ -748,6 +944,12 @@ impl LockManager {
         let mut s = self.state.lock();
         // (A compact unique-key lock someone else asks for goes to the main table first.)
         s.materialize(key);
+        // A strong relation lock: counted for the fast path, whose holds of the relation move
+        // here (FastPathTransferRelationLocks).
+        if strong_relation_lock(key, mode) {
+            s.mark_strong(key);
+            self.move_fast(&mut s, Some(key));
+        }
         if let Some(pid) = pid_of(proc) {
             s.pids.insert(proc, pid);
         }
@@ -956,6 +1158,7 @@ impl LockManager {
     }
 
     fn drop_empty(s: &mut State, key: &[u8]) {
+        s.sync_strong(key);
         if s.locks.get(key).is_some_and(|e| e.holds.is_empty() && e.queue.is_empty()) {
             s.locks.remove(key);
         }
@@ -1104,7 +1307,7 @@ impl LockManager {
             e.xid = xid;
         }
         if !e.holds.iter().any(|h| h.owner == owner) {
-            e.holds.push(Hold { owner, proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
+            e.holds.push(Hold::new(owner, proc, LockMode::Exclusive, false));
         }
     }
 
@@ -1257,7 +1460,8 @@ impl LockManager {
     /// GetLockConflicts: the transactions (owners) of other backends than `proc` holding
     /// heavyweight lock `key` in a mode conflicting with `mode`.
     pub fn conflicting_owners(&self, key: &[u8], mode: LockMode, proc: u64) -> Vec<u64> {
-        let s = self.state.lock();
+        let mut s = self.state.lock();
+        self.move_fast(&mut s, Some(key));
         let mut out = Vec::new();
         if let Some(e) = s.locks.get(key) {
             for h in &e.holds {
@@ -1478,7 +1682,8 @@ impl LockManager {
 
     /// Every heavyweight lock held or awaited (pg_locks).
     pub fn snapshot(&self) -> Vec<LockInfo> {
-        let s = self.state.lock();
+        let mut s = self.state.lock();
+        self.move_fast(&mut s, None);
         let mut out = Vec::new();
         for (k, e) in &s.locks {
             let tag = tag_of(k, e.xid);
@@ -1523,7 +1728,8 @@ impl LockManager {
 
     /// The keys `owner` holds, with the modes (pg_locks).
     pub fn held_by(&self, owner: u64) -> Vec<(Vec<u8>, LockMode)> {
-        let s = self.state.lock();
+        let mut s = self.state.lock();
+        self.move_fast(&mut s, None);
         let mut v = Vec::new();
         for (k, e) in &s.locks {
             for h in e.holds.iter().filter(|h| h.owner == owner) {
@@ -1539,6 +1745,7 @@ impl LockManager {
     /// too, and pg_blocking_pids reports it as 0.
     pub fn transfer(&self, owner: u64, proc: u64) {
         let mut s = self.state.lock();
+        self.move_fast(&mut s, None);
         s.prepared.insert(proc);
         for e in s.locks.values_mut() {
             for h in e.holds.iter_mut().filter(|h| h.owner == owner) {
@@ -1564,7 +1771,8 @@ impl LockManager {
     /// AtPrepare_Locks' check: a lock `owner` holds that `peer` (its session's own owner)
     /// holds too.
     pub fn held_by_both(&self, owner: u64, peer: u64) -> bool {
-        let s = self.state.lock();
+        let mut s = self.state.lock();
+        self.move_fast(&mut s, None);
         s.locks.values().any(|e| {
             e.holds.iter().any(|h| h.owner == owner) && e.holds.iter().any(|h| h.owner == peer)
         })
@@ -1632,7 +1840,8 @@ impl LockManager {
     /// Whether anyone holds a lock (for idle detection and tests).
     pub fn held_count(&self) -> usize {
         let s = self.state.lock();
-        s.locks.len() + s.rows.len() + s.bulk.values().map(BulkLocks::len).sum::<usize>()
+        let fast: usize = self.fast.slots.read().values().map(|f| f.holds.lock().len()).sum();
+        fast + s.locks.len() + s.rows.len() + s.bulk.values().map(BulkLocks::len).sum::<usize>()
     }
 
     /// Take unique key lock `key` (Exclusive) for (sub)transaction `holder` (transaction id
@@ -1686,7 +1895,7 @@ impl LockManager {
             }
             for (k, _, row_key) in g.ukeys.entries() {
                 let e = s.locks.entry(k.to_vec()).or_default();
-                e.holds.push(Hold { owner, proc: b.proc, mode: LockMode::Exclusive, count: 1, fastpath: false });
+                e.holds.push(Hold::new(owner, b.proc, LockMode::Exclusive, false));
                 let row_key = compact_row_key(k, row_key);
                 e.key_holder = Some((owner, KeyHolder { holder: g.holder, xid: g.xid, token: None, row: None, row_key }));
                 keys.push(k.to_vec());

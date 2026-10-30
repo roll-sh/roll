@@ -14,6 +14,7 @@ mod serverlog;
 pub use serverlog::truncate_param as serverlog_truncate;
 pub mod state;
 mod pgss;
+mod litplan;
 mod prepared;
 pub mod sink;
 mod utility;
@@ -110,6 +111,9 @@ pub struct Prepared {
     bound: Mutex<Option<(u64, Vec<String>, (u32, bool), Arc<BoundQuery>)>>,
     /// The plans it ran (plan cache choices, pg_prepared_statements).
     plans: Mutex<PlanUses>,
+    /// A simple query's literals and template (`litplan`): its plan may be one kept for the
+    /// template's other queries.
+    lit: Option<Box<litplan::LitStmt>>,
 }
 
 /// How often a prepared statement ran a generic plan and a custom one (bound with its
@@ -279,6 +283,8 @@ pub struct Session {
     pub prepared: HashMap<String, Arc<Prepared>>,
     /// Named prepared statements: (statement text, prepare time, from SQL PREPARE).
     prepared_meta: HashMap<String, (String, i64, bool)>,
+    /// Plans of simple queries kept by template (`litplan`).
+    lit_plans: litplan::LitPlans,
     pub portals: HashMap<String, Portal>,
     pub cancel: Arc<AtomicBool>,
     /// The running statement's waits are armed (`exec::arm_statement_waits`): its
@@ -414,6 +420,7 @@ impl Session {
             txn_time: 0,
             prepared: HashMap::new(),
             prepared_meta: HashMap::new(),
+            lit_plans: Default::default(),
             portals: HashMap::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             waits_armed: false,
@@ -992,7 +999,9 @@ impl Session {
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema(&self.state.temp_schema());
         self.sync_lex();
+        crate::sql::literals::take_last();
         let parsed = crate::sql::parse::parse_live(sql);
+        let lit = crate::sql::literals::take_last();
         self.take_lex_warnings();
         let (text, stmts) = parsed?;
         self.source = sql.to_string();
@@ -1000,6 +1009,9 @@ impl Session {
             std::borrow::Cow::Owned(t) => Some((t.clone(), sql.to_string())),
             _ => None,
         });
+        let mut lit = lit
+            .filter(|_| stmts.len() == 1)
+            .map(|(scan, tpl)| Box::new(litplan::LitStmt { text: sql.into(), scan, tpl }));
         let sql = &*text;
         Ok(stmts
             .into_iter()
@@ -1013,6 +1025,7 @@ impl Session {
                     param_types: Vec::new(),
                     bound: Mutex::new(None),
                     plans: Default::default(),
+                    lit: lit.take(),
                 })
             })
             .collect())
@@ -1753,7 +1766,25 @@ impl Session {
         self.ensure_txn();
         let fetch = std::mem::take(&mut self.fetch_limit);
         let planning = std::time::Instant::now();
-        let mut bq = self.planned(p, stmt, params)?.0;
+        // (A simple query's template's kept plan, run with its literals' values.)
+        let (mut bq, mut lit_vals) = match self.lit_plan_for(p, params) {
+            Some(kept) => {
+                // (Debug builds: the kept plan is the one the query plans to.)
+                #[cfg(debug_assertions)]
+                {
+                    let own = self.planned(p, stmt, params)?.0;
+                    assert!(litplan::same_plan(&own, &kept.0, &kept.0.params, &kept.1), "kept plan of {:?}", p.sql);
+                }
+                kept
+            }
+            None => {
+                let bq = self.planned(p, stmt, params)?.0;
+                if p.lit.is_some() && params.is_empty() {
+                    self.lit_learn(p, stmt, &bq);
+                }
+                (bq, Vec::new())
+            }
+        };
         self.pgss_planned(planning.elapsed());
         // Its relations are locked before it runs; a wait for a lock may end with another
         // transaction's DDL committed, which the statement then sees (Postgres analyzes it
@@ -1766,7 +1797,10 @@ impl Session {
                 break;
             }
             bq = self.planned(p, stmt, params)?.0;
+            lit_vals.clear();
         }
+        let lit_vals = lit_vals;
+        let params: &[Value] = if lit_vals.is_empty() { params } else { &lit_vals };
         self.pgss_measure(false);
         // A SELECT's rows go out as they're made (PORTAL_ONE_SELECT); a data-modifying
         // query's when it has finished.
@@ -1978,6 +2012,7 @@ impl Session {
             param_types: types,
             bound: Mutex::new(None),
             plans: Default::default(),
+            lit: None,
         };
         // exec_parse_message: a failed transaction parses only its end.
         if self.status == TxnStatus::Failed

@@ -498,7 +498,9 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
         let pages = crate::exec::sizing::fork_blocks(ix.oid, crate::exec::sizing::Fork::Main, ctx)
             .ok()
             .flatten()
-            .unwrap_or(1) as f64;
+            .unwrap_or(1);
+        crate::sql::literals::note_read(|| crate::sql::literals::SizeRead::Fork(ix.oid, pages));
+        let pages = pages as f64;
         let mut pred = Vec::new();
         if let Some(p) = b.predicate.clone() {
             conjuncts(p, &mut pred);
@@ -532,7 +534,11 @@ fn index_infos(ctx: &ExecCtx, t: &Arc<Table>, rel_tuples: f64) -> Vec<IndexInfo>
             Am::Btree => {
                 let width: u32 = b.keys.iter().map(|k| costs::type_width(&k.ty())).sum();
                 let relpages = cat.relstats.get(&ix.oid).map_or(0.0, |s| s.pages as f64);
-                crate::exec::sizing::btree_level(ix.oid, pages.max(relpages), width, db) as i32
+                let level = crate::exec::sizing::btree_level(ix.oid, pages.max(relpages), width, db);
+                crate::sql::literals::note_read(|| {
+                    crate::sql::literals::SizeRead::BtreeLevel(ix.oid, pages.max(relpages).to_bits(), width, level)
+                });
+                level as i32
             }
             _ => -1,
         };

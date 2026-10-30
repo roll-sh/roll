@@ -2639,6 +2639,65 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     (`btsim::child_for`, checked against the linear search in debug builds).
   - Wire: protocol output was already buffered and flushed at ReadyForQuery, errors and
     COPY as PostgreSQL does (`server.rs` `Conn::flush`): one send per Sync, as PostgreSQL.
+- **OLTP round 2** (round 22, agent 123; BENCH.md "OLTP round 2"): simple-protocol parse
+  and plan, weak relation locks.
+  - *Statement templates* (`sql/literals.rs`): a simple query's text with its numeric and
+    string literals taken out, each literal's bytes replaced by its class (int4-sized,
+    int8-sized, numeric, string), so the key keeps every other byte where it was. Queries
+    with one key scan into the same tokens but for those values, so the grammar makes the
+    same tree but for their A_Consts: one tree per key is kept (`lru::Shared`, process-wide,
+    16 MB) with which A_Const holds which literal (negated once per unary minus before it,
+    doNegate), and another query's tree is that one with its values put in. Not templated:
+    dollar quotes, E'' / B'' / X'' / U&'' strings, exponents, `0x` / `1_000` numbers, string
+    continuations, several statements, scanner settings other than the defaults, a literal
+    the grammar keeps outside an A_Const (`COMMENT ... IS 'x'`, `float(5)`). Debug builds parse
+    every templated query again and assert the trees are equal. `sql/nodewalk.rs` (every
+    node of a tree, mutably) is generated from pg_query's protobuf.rs by
+    `tools/gen_nodewalk.py`: run it again when the pg_query dependency changes.
+  - *Kept plans of templates* (`session/litplan.rs`): a template whose plan can't depend on
+    its literals' values is bound once with those literals as parameters (the generic
+    binding) and its later queries run that plan with their values, skipping binding and
+    planning. Parameters only where no value changes what the planner decides: in WHERE, a
+    value compared by `=` with a column a unique single-column btree index covers, every
+    conjunct being one such comparison (the planner estimates 1 / rows for any value, and no
+    conjunct reads anything that changes with time); in SET / a single VALUES row, a value
+    stored as it is or combined with a column by `+ - *`. Other literals stay constants and
+    the plan is kept for their texts. One plain table (no rules, row security, inheritance,
+    partitions), no sub-select or window. When it is made, the query's own plan is compared
+    with it (Debug text of the plan, parameters put in as the constants): any folding,
+    coercion or estimate a value changed shows there, and then no plan is kept. Used while
+    the catalog version, settings generation, search_path, role and row_security are the
+    same and every relation size the planner read reads the same (`literals::SizeRead`,
+    noted in `costs::rel_size` and `paths::index_infos`; a column's endpoints read from its
+    rows, `scan::column_range`, mean no plan is kept); a size that changed binds the generic
+    statement again, which is the plan the query would get. Not while auto_explain is
+    loaded (it would show `$n`). Learned the second time a session sees the template. Debug
+    builds plan every query that uses a kept plan the usual way too and assert the plans
+    are the same. Tests: `tests/kept_plans.rs`, golden `oltp_templates`.
+  - *Fast-path relation locks* (`txn/locks.rs` `FastSlot`): AccessShare, RowShare and
+    RowExclusive locks of a database's relations taken by a session's transactions go to
+    the backend's own slot without the lock table's mutex while no strong lock (Share and
+    up) of a relation in the key's partition (1,024, by relation oid) is held or awaited
+    (FastPathStrongRelationLocks, kept by `State::mark_strong` / `sync_strong` in
+    `drop_empty`). A strong request counts itself, then moves every backend's holds of that
+    relation into the table (FastPathTransferRelationLocks); pg_locks, PREPARE, WaitForLockers
+    and AtPrepare_Locks' check move them all first. Moved holds keep their place by when they
+    were taken (`Hold::seq`) and show `fastpath = true` until a strong request clears it, as
+    before.
+  - For agents 111 / 116 (one split serving custom plans): the kept plans above are what a
+    custom plan of a value-independent statement is, whatever the values; the same check
+    (`litplan::candidates` over ParamRefs instead of A_Consts, `same_plan` once) could let
+    prepared statements' and PL/pgSQL's first five custom plans run the generic binding,
+    counted and costed as custom (`PlanUses::custom`, `custom_cost` + the planning charge).
+    A DML statement's binding is split from planning already (`bind_statement_body`: the
+    unplanned plan, then `paths::plan_query`); a SELECT plans each level as it is bound
+    (`select.rs` `plan_query_limited`), so re-planning an analyzed tree needs that deferred.
+  - Verified: crate tests debug and release (deep_input, crash_async_commit, the crash
+    tests), clippy (no new warnings), difftest smoke, isolation 121 / 122 plus the 13 roll-*
+    specs (95 / 95 permutations), the regression suite in full (debug, private reference):
+    51,148 / 51,150, no unit changed against `results.tsv`; client suites against the base
+    engine and this one, test by test: psycopg 3 (4,924 pass), pgx (1,217), node-postgres
+    (146), asyncpg (261), pgjdbc (8,220), no difference.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.

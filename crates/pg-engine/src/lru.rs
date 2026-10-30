@@ -204,6 +204,7 @@ pub fn set_plan_cache_bytes(bytes: usize) {
 pub fn footprints() -> Vec<(&'static str, Footprint)> {
     vec![
         crate::sql::parse::parsed_footprint(),
+        crate::sql::literals::templates_footprint(),
         crate::plpgsql::compiled_footprint(),
     ]
 }

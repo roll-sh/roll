@@ -4575,6 +4575,73 @@ smaller mix on a database just opened, in-process with a counting allocator: +80
 heap at the peak (release and debug), +640 MB with every session building its own models; it
 fails over 40 MB + 0.8 MB a session (`MEMLOAD_SESSIONS`, `MEMLOAD_SECS` for bigger bursts).
 
+## OLTP round 2 (round 22, agent 123)
+
+HANDOFF.md, "OLTP round 2", has what changed: statement templates and kept plans for simple
+queries, fast-path relation locks. Release builds with frame pointers, pgbench in a container
+on the host network, scale 10, 15 s per run after a 4 s warm-up, the engine restarted per
+binary; servers on cores 24–27, pgbench on 28–31; PostgreSQL 18.6 on the host network
+(shared_buffers 2 GB). The machine ran other agents' builds and suites throughout (load
+15–35, every core 75–100% busy), so CPU time moves a lot between runs; instructions per
+transaction (`perf stat` of the engine process, PostgreSQL's cgroup) move less, but include
+the engine's background flushes and compactions, which explains most single-run outliers.
+**base** is `629f3e51`, **new** this round on it; one interleaved run each (CPU ms /
+kinstr per transaction, peak memory: the engine's VmHWM, PostgreSQL's memory.peak).
+
+**Simple protocol** (`-M simple`, pgbench's default; ORMs' unnamed statements are next):
+
+| workload | clients | base | new | PostgreSQL | new peak (base) |
+|---|---|---|---|---|---|
+| tpcb-like | 1 | 1.44 ms / 1,765 | 0.87 / 1,572 | 0.73 / 1,013 | 281 MB (517) |
+| tpcb-like | 8 | 1.36 / 1,720 | 0.73 / 1,176 | 0.60 / 1,033 | 317 MB (571) |
+| tpcb-like | 32 | 1.28 / 2,054 | 0.93 / 1,327 | 0.72 / 1,092 | 341 MB (648) |
+| tpcb-like | 64 | 1.57 / 2,201 | 0.98 / 1,434 | 0.84 / 1,174 | 417 MB (618) |
+| web-app mix | 1 | 1.91 / 1,976 | 1.07 / 1,239 | 0.89 / 1,182 | 241 MB (464) |
+| web-app mix | 8 | 1.76 / 2,417 | 1.11 / 1,566 | 0.79 / 1,183 | 191 MB (917) |
+| web-app mix | 32 | 1.76 / 2,362 | 1.16 / 1,692 | 0.74 / 1,182 | 227 MB (532) |
+| web-app mix | 64 | 1.79 / 2,440 | 1.40 / 1,895 | 0.89 / 1,193 | 258 MB (705) |
+
+tpcb-like over the simple protocol now costs the engine about what it costs over prepared
+statements (0.6–0.9 ms) and 1.2–1.5x PostgreSQL's CPU (was 2–2.3x). Its five statements are
+all templated and all keep plans (the accounts / tellers / branches UPDATEs, the SELECT by
+key, the history INSERT); BEGIN / END have no literals. In the web-app mix the
+`count(*) ... WHERE aid = $n` (a non-unique column: its estimate depends on the value) is
+parsed through its template but planned each time. Peak memory fell with it: the base's
+binding of every statement allocates more than the kept plans hold (a few KB per template
+per session). A profile of the new engine's simple tpcb-like at 8 clients: no query is bound
+the usual way any more; 8% is binding a template's generic statement again after a size the
+planner reads changed (the tellers' and branches' modelled heaps change size every few
+transactions, as PostgreSQL's would and its planner would read), 6% the parse through the
+template (scan, shared-cache lookup, tree copy), 3.5% re-reading the sizes a kept plan
+depends on.
+
+**Prepared statements** (`-M prepared`): no change beyond noise, as expected (the kept plans
+are for simple queries; the fast path saves the lock table's mutex for about ten relation
+locks per tpcb-like transaction). Three interleaved rounds, kinstr per transaction:
+
+| workload | clients | base | new |
+|---|---|---|---|
+| tpcb-like | 8 | 1,136 / 1,164 / 1,111 | 1,117 / 1,143 / 1,136 |
+| tpcb-like | 64 | 1,263 / 1,252 / 1,210 | 1,242 / 1,249 / 1,170 |
+| simple-update | 1 | 510 / 1,212 / 1,263 | 878 / 554 / 543 |
+| web-app mix | 1 | 1,008 / 1,021 / 2,062 | 1,019 / 1,420 / 1,010 |
+
+(The 1-client rows' spread is the background compactions the whole-process count includes.)
+One interleaved matrix run, prepared, CPU ms per transaction base / new / PostgreSQL:
+tpcb-like 0.91 / 0.91 / 0.52 at 1 client, 0.91 / 0.90 / 0.49 at 8, 0.98 / 0.77 / 0.64 at 32,
+0.82 / 0.88 / 0.67 at 64; select-only 0.089 / 0.067 / 0.060, 0.068 / 0.075 / 0.055, 0.076 /
+0.096 / 0.064, 0.098 / 0.090 / 0.078; web-app 0.85 / 0.90 / 0.58, 0.85 / 0.84 / 0.55, 0.96 /
+0.85 / 0.53, 1.20 / 1.10 / 0.64. Peak memory within 10% of the base's for every row but
+web-app at 64 clients (538 MB against 452: its events table, grown by the runs before).
+
+**Where tpcb-like's CPU goes at 32 clients (prepared)**: the accounts UPDATE's index lookup
+and row fetch 24% (agent 121's point lookups), sending 14% (one send per Sync), commit 7%,
+row locks 5%, `update_row_rls` 4%, relation locks 3% before the fast path, the size model's
+`sizing::updated` 2% (agent 126). What is left of this round's list: the prepared and
+PL/pgSQL first five custom plans could use the same check to run the generic binding
+(HANDOFF.md, "OLTP round 2"); unnamed extended-protocol statements likewise; the web-app
+mix's non-unique `count(*)` and its bigserial INSERT; hot-row lock waits at 32+ clients.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

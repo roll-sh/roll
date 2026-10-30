@@ -401,6 +401,7 @@ impl Database {
             read_catalog: None,
             locks_held: HashMap::new(),
             lock_journal: Vec::new(),
+            fast_slot: std::sync::OnceLock::new(),
             row_locks: Vec::new(),
             unique_keys_taken: 0,
             xact_locks: Vec::new(),
@@ -863,6 +864,8 @@ pub struct Txn {
     locks_held: HashMap<HeldLock, usize>,
     /// The order they were taken in (released by ROLLBACK TO in reverse).
     lock_journal: Vec<HeldLock>,
+    /// Its backend's fast-path slot for weak relation locks (`locks::FastSlot`), once looked up.
+    fast_slot: std::sync::OnceLock<Option<Arc<locks::FastSlot>>>,
     /// Rows locked (or written) here, with the depth that locked them.
     row_locks: Vec<(Vec<u8>, usize)>,
     /// Unique key locks taken the usual way (past `bulklocks::compact_after()`, plain ones go
@@ -2346,14 +2349,16 @@ impl Txn {
         if self.locks_held.contains_key(&k) {
             return Ok(true);
         }
-        let got = self.db.locks.acquire(
-            key,
-            self.id,
-            self.lock_proc(),
-            mode,
-            &self.waits(policy),
-            what,
-        )?;
+        let fast = self.fast().is_some_and(|s| self.db.locks.acquire_fast(s, key, self.id, mode));
+        let got = fast
+            || self.db.locks.acquire(
+                key,
+                self.id,
+                self.lock_proc(),
+                mode,
+                &self.waits(policy),
+                what,
+            )?;
         if got {
             self.lock_journal.push(k.clone());
             self.locks_held.insert(k, self.savepoints.len());
@@ -2424,7 +2429,7 @@ impl Txn {
         while self.lock_journal.len() > mark {
             let k = self.lock_journal.pop().unwrap();
             self.locks_held.remove(&k);
-            self.db.locks.release(&k.0, self.id, k.1);
+            self.release_key(&k.0, k.1);
         }
     }
 
@@ -2442,7 +2447,7 @@ impl Txn {
     pub fn release_held(&mut self, held: Vec<HeldLock>) {
         for k in held {
             if self.locks_held.remove(&k).is_some() {
-                self.db.locks.release(&k.0, self.id, k.1);
+                self.release_key(&k.0, k.1);
             }
         }
     }
@@ -2498,7 +2503,19 @@ impl Txn {
         if let Some(i) = self.lock_journal.iter().rposition(|j| *j == k) {
             self.lock_journal.remove(i);
         }
-        self.db.locks.release(key, self.id, mode);
+        self.release_key(key, mode);
+    }
+
+    /// The backend's fast-path slot (`locks::FastSlot`).
+    fn fast(&self) -> Option<&Arc<locks::FastSlot>> {
+        self.fast_slot.get_or_init(|| self.db.locks.fast_slot(self.lock_proc())).as_ref()
+    }
+
+    /// Release one hold of heavyweight lock `key` in `mode`: on the fast path or not.
+    fn release_key(&self, key: &[u8], mode: LockMode) {
+        if !self.fast().is_some_and(|s| self.db.locks.release_fast(s, key, self.id, mode)) {
+            self.db.locks.release(key, self.id, mode);
+        }
     }
 
     /// Take unique key lock `key` (Exclusive, with `policy`) for this (sub)transaction's
@@ -3254,7 +3271,7 @@ impl Txn {
         while self.lock_journal.len() > journal_len {
             let k = self.lock_journal.pop().unwrap();
             self.locks_held.remove(&k);
-            self.db.locks.release(&k.0, self.id, k.1);
+            self.release_key(&k.0, k.1);
         }
         let holders: Vec<u64> = self.savepoints[i..]
             .iter()
@@ -3289,6 +3306,9 @@ impl Txn {
         }
         if self.locks_held.is_empty() && self.row_locks.is_empty() && self.xact_locks.is_empty() {
             return;
+        }
+        if let Some(s) = self.fast() {
+            self.db.locks.release_fast_owner(s, self.id);
         }
         let mut keys: Vec<Vec<u8>> = self.locks_held.drain().map(|((k, _), _)| k).collect();
         keys.sort();

@@ -96,7 +96,7 @@ fn parse_scanned(sql: &str, o: super::scs::LexOpts) -> Result<(std::borrow::Cow<
         Ok(_) => None,
     };
     if o.is_default() {
-        let r = with_param_junk(sql, true, parse(sql));
+        let r = with_param_junk(sql, true, parse_templated(sql));
         scs::push_warnings(scs::with_long_identifiers(sql, true, stop_at(&r), Vec::new()));
         return Ok((Cow::Borrowed(sql), r?));
     }
@@ -127,6 +127,21 @@ fn parse_scanned(sql: &str, o: super::scs::LexOpts) -> Result<(std::borrow::Cow<
         }
         None => Ok((Cow::Borrowed(sql), stmts)),
     }
+}
+
+/// `parse`, through the query's template when it has literals (`literals`).
+fn parse_templated(sql: &str) -> Result<Vec<RawStmt>> {
+    let Some(sc) = super::literals::scan(sql) else {
+        return parse(sql);
+    };
+    let r = super::literals::parse(sql, sc, || parse_opts(sql, 0));
+    #[cfg(debug_assertions)]
+    if let Ok(t) = &r {
+        crate::stack::with_headroom(crate::stack::tree_headroom(sql.len()), || {
+            assert!(parse_uncached(sql, 0).ok().as_ref() == Some(t), "template parse of {sql:?} differs");
+        });
+    }
+    r
 }
 
 /// Postgres's scanner rejects `$1a` ("trailing junk after parameter"), which libpg_query reads
@@ -272,12 +287,17 @@ pub fn cached_parse(
 /// every list a vector). `tests/memory_load.rs` checks it against an allocator's count. The
 /// text's length times 8 (the estimate until round 22) was a tenth of it: the cache "of 32
 /// MB" held 300 MB of trees after a few thousand ORM-style queries.
-fn tree_bytes(r: &Result<Vec<RawStmt>>) -> usize {
-    use prost::Message;
+pub(crate) fn tree_bytes(r: &Result<Vec<RawStmt>>) -> usize {
     match r {
-        Ok(v) => v.iter().map(|s| s.encoded_len()).sum::<usize>() * TREE_BYTES_PER_ENCODED,
+        Ok(v) => stmts_bytes(v),
         Err(e) => e.message.len() + 256,
     }
+}
+
+/// `tree_bytes` of parsed statements.
+pub(crate) fn stmts_bytes(v: &[RawStmt]) -> usize {
+    use prost::Message;
+    v.iter().map(|s| s.encoded_len()).sum::<usize>() * TREE_BYTES_PER_ENCODED
 }
 
 const TREE_BYTES_PER_ENCODED: usize = 56;

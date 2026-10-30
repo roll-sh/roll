@@ -382,6 +382,7 @@ impl Session {
             param_types: f.args.iter().map(|a| a.0.clone()).collect(),
             bound: Mutex::new(None),
             plans: Default::default(),
+            lit: None,
         });
         let Outcome::Done(r) = self.execute_with(&p, &values, 0)? else {
             return Err(crate::error::internal("fastpath call returned no rows"));

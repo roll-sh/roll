@@ -1035,6 +1035,7 @@ pub(super) fn predicate_locked(t: &Table, ctx: &ExecCtx) -> bool {
 /// A column's smallest and largest non-null value among the table's current rows (what
 /// get_actual_variable_range reads from an index's ends); None when it has none.
 pub fn column_range(t: &Table, col: usize, ctx: &ExecCtx) -> Result<Option<(Value, Value)>> {
+    crate::sql::literals::note_read(|| crate::sql::literals::SizeRead::Data);
     if let Some(r) = column_range_by_index(t, col, ctx)? {
         return Ok(r);
     }

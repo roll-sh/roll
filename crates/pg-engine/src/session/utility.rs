@@ -570,6 +570,7 @@ impl Session {
             param_types: types,
             bound: Mutex::new(None),
             plans: Default::default(),
+            lit: None,
         };
         // SELECT ... INTO: its parameters are the query's.
         let select_into = match p.stmt.as_ref().and_then(inner) {
@@ -593,6 +594,7 @@ impl Session {
                 param_types: p.param_types.clone(),
                 bound: Mutex::new(None),
                 plans: Default::default(),
+                lit: None,
             };
             self.infer_params = true;
             let b = self.bound(&q, &stmt, &[]);
@@ -804,6 +806,7 @@ impl Session {
                 param_types: Vec::new(),
                 bound: Mutex::new(None),
                 plans: Default::default(),
+                lit: None,
             }),
         };
         if !p.is_query() {
@@ -988,6 +991,7 @@ impl Session {
             param_types: Vec::new(),
             bound: Mutex::new(None),
             plans: Default::default(),
+            lit: None,
         };
         let bq = self.bound_as(&p, q, params, true)?;
         if bq.plan.writes() {
