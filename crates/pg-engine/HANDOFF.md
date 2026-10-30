@@ -993,6 +993,24 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     - Binder fix found on the way: a system column under an indirection (`(f(xmin)).x`,
       `(ROW(xmin, id)).f2`) is found (`mentions_sys_column` didn't look into A_Indirection's
       argument: "column xmin does not exist"). Golden `a108_commit_ts_off`.
+    - test_decoding 1,029 / 1,047 (was 1,024): CREATE TABLE AS's rows are logged as inserts
+      (decoding_into_rel 16 / 16; a rewrite's or a materialized view's new storage isn't,
+      `write_new_rows`' `logged`); pg_locks lists one holder's modes of a lock in lockdefs.h
+      order (`Locks::snapshot`), and CLUSTER holds the ShareLock its reindex takes besides
+      its AccessExclusiveLock (twophase 83 / 83).
+    - Verified (agent 108): crate tests (`logical_apply`: binary_transfer,
+      commit_timestamps_and_origin_differs, run_as_owner_and_privileges,
+      row_filters_and_column_lists added), clippy without new warnings, difftest smoke, a full
+      regress run on a private reference at 871a0a4 (the first batch before its rebase onto
+      02d9a7cd): 51,148 / 51,150, no unit changed against `results.tsv`; the second batch a
+      subset (lock, advisory_lock, cluster, select_into, matview, write_parallel, create_am,
+      vacuum, namespace, tidscan, privileges, create_table, sysviews) 3,070 / 3,070, none
+      changed; test_decoding 1,029 / 1,047; the e2e scripts both ways against PostgreSQL 18.6
+      (contrib STATUS "Subscriber round 3"). No-slot commit path: in-process `bench oltp`, one
+      client on 4 CPUs, 22 interleaved rounds of base 7bb31b96 and head at load 18-40 (both
+      orders): insert medians 23.6k / 20.8k and 13.6k / 12.6k tps within spreads of 2.6k-36k,
+      update_indexed 12.4k / 12.6k; the commit path's only addition is one relaxed atomic load
+      (`DbLog::commit_ts`), so re-measure on a quiet machine before reading the insert gap.
     - Not done: parallel apply workers (streaming = parallel is applied as on: the leader
       spools; the deadlock handling between the leader and a worker holding row locks is the
       hard part), parallel table sync, failover slot synchronization, the test_decoding tail.

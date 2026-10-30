@@ -87,7 +87,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | spi | 52 | 52 | done (round 20, agent 80a) |
 | xml2 | 29 | 29 | done: xslt_process is a native XSLT 1.0 processor (see below) |
 | pg_overexplain | 37 | 36 | DEBUG / RANGE_TABLE done; internals' numbers (see below) |
-| test_decoding | 1047 | 1024 | logical decoding (round 20, agents 79 and 87; see below) |
+| test_decoding | 1047 | 1029 | logical decoding (round 20, agents 79 and 87; round 21, agent 108; see below) |
 
 ### test_decoding (round 20, agents 79 and 87)
 
@@ -124,8 +124,8 @@ INSERT VALUES (s.*), and `-c` settings stored normalized (RESET logical_decoding
   side, so its rows come out in another order (PostgreSQL hashes the target there); three
   slot-creating function scans in one FROM are joined s3 first (PostgreSQL: s1, s2, s3), so
   the slots take other places in pg_replication_slots.
-- **decoding_into_rel** (3): decoding into a table in the transaction that reads the slot.
-- twophase (2): pg_locks rows of a prepared transaction (lock code).
+- (Fixed, round 21, agent 108: **decoding_into_rel** 3, CREATE TABLE AS's rows weren't logged;
+  **twophase** 2, pg_locks' order of one holder's modes and CLUSTER's ShareLock. 1,029 / 1,047.)
 
 End to end (agent 87, debug build, PostgreSQL 18.6 in a host-network container): a
 PostgreSQL subscriber (`CREATE SUBSCRIPTION ... PUBLICATION p1` against the engine) copies the
@@ -135,7 +135,6 @@ both sides identical (row counts, sums, md5 of every row). pg_recvlogical: --cre
 test_decoding, --start with plugin options writing a file (inserts, update, delete,
 transactional message), stopped with SIGINT, the slot's confirmed position at the WAL end,
 restarted from there with only the new transaction, --drop-slot.
-- twophase (2): pg_locks rows of a prepared transaction (lock code).
 
 Subscriber, round 20 agent 96 (HANDOFF "Native apply"): one PostgreSQL 18.6 publisher stream
 applied by an engine subscriber and by a PostgreSQL 18.6 subscriber side by side, identical

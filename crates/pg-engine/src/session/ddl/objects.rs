@@ -1654,7 +1654,7 @@ impl Ddl<'_, '_> {
             self.refresh_concurrently(v, storage, bixs, rows)?;
         } else {
             crate::exec::dml::truncate(storage, self.ctx)?;
-            self.write_new_rows(storage, rows)?;
+            self.write_new_rows(storage, rows, false)?;
             // The new heap is unmeasured; rebuilding its indexes measures them (and it).
             self.reset_stats(storage);
             for b in bixs {

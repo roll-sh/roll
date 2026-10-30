@@ -1061,7 +1061,10 @@ impl Ddl<'_, '_> {
         if pushed {
             self.ctx.sess.definer.borrow_mut().pop();
         }
-        r
+        r?;
+        // (finish_heap_swap's reindex_relation opens the table again with ShareLock: a lock
+        // the transaction holds besides its AccessExclusiveLock, pg_locks shows it.)
+        self.note_lock(t.oid, super::table::lockmode::SHARE)
     }
 
     fn cluster_rel_inner(&mut self, t: &Arc<Table>, ix: &Index, verbose: bool) -> Result<()> {
@@ -1113,7 +1116,7 @@ impl Ddl<'_, '_> {
             // Rows are stored by rowid: new rowids in index order put them in that order.
             crate::exec::dml::truncate(t, self.ctx)?;
             let rows: Vec<crate::exec::Row> = items.into_iter().map(|(_, (_, _, r))| r).collect();
-            self.write_new_rows(t, rows)?;
+            self.write_new_rows(t, rows, false)?;
             let built: Vec<Index> = bixs.iter().map(|b| (*b.index).clone()).collect();
             for i in &built {
                 self.build_index(t, i)?;

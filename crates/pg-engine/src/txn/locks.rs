@@ -1415,6 +1415,7 @@ impl LockManager {
         let mut out = Vec::new();
         for (k, e) in &s.locks {
             let tag = tag_of(k, e.xid);
+            let first = out.len();
             for h in &e.holds {
                 if out.iter().any(|i: &LockInfo| {
                     i.tag == tag && i.owner == h.owner && i.mode == h.mode && i.granted
@@ -1431,6 +1432,11 @@ impl LockManager {
                     wait_start: None,
                 });
             }
+            // (pg_lock_status: one holder's modes of a lock in lockdefs.h order, whatever the
+            // order they were taken in; holders in their first hold's order.)
+            let held = &mut out[first..];
+            let rank: Vec<u64> = held.iter().map(|i| i.owner).collect();
+            held.sort_by_key(|i| (rank.iter().position(|o| *o == i.owner), i.mode));
             for p in &e.queue {
                 if let Some(w) = s.waiters.get(p) {
                     out.push(LockInfo {

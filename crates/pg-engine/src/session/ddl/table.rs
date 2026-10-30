@@ -4251,7 +4251,7 @@ impl Ddl<'_, '_> {
             self.cat.put_table(t.clone());
         }
         self.save()?;
-        self.write_new_rows(&t, rows)?;
+        self.write_new_rows(&t, rows, true)?;
         Ok(tag)
     }
 
@@ -4265,8 +4265,9 @@ impl Ddl<'_, '_> {
         crate::exec::sizing::stamp_tids(&keys, &tids, self.ctx)
     }
 
-    /// Insert rows into a table with no indexes (fresh CTAS / matview storage).
-    pub(super) fn write_new_rows(&self, t: &Table, rows: Vec<Row>) -> Result<()> {
+    /// Insert rows into a table with no indexes (fresh CTAS / matview storage); `logged`:
+    /// into the change stream too (CREATE TABLE AS).
+    pub(super) fn write_new_rows(&self, t: &Table, rows: Vec<Row>, logged: bool) -> Result<()> {
         let mut written = Vec::with_capacity(rows.len());
         for r in rows {
             let id = self.ctx.sess.db.nextval_by_one(t.oid, || rowid_sequence(t))?;
@@ -4281,6 +4282,11 @@ impl Ddl<'_, '_> {
         let xid = self.ctx.txn.borrow_mut().cur_xid();
         for (i, (k, r)) in written.into_iter().enumerate() {
             crate::exec::toast::put_row(t, k, &r, xid, tids.get(i).copied(), &mut self.ctx.txn.borrow_mut())?;
+            // (CREATE TABLE AS's rows are logically logged inserts, decoded as any others; a
+            // rewrite's new storage and a materialized view's aren't.)
+            if logged && !frozen {
+                crate::repl::log::insert(t, &r, self.ctx)?;
+            }
         }
         Ok(())
     }
