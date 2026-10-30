@@ -48,6 +48,11 @@ pub fn set_user_casts<'a>(casts: impl Iterator<Item = &'a crate::catalog::userob
     });
 }
 
+/// Whether the catalog the binder runs over has made casts (`set_user_casts`).
+pub fn has_user_casts() -> bool {
+    USER_CASTS.with(|u| !u.borrow().is_empty())
+}
+
 fn user_cast_context(from: u32, to: u32) -> Option<CastContext> {
     USER_CASTS.with(|u| {
         u.borrow()

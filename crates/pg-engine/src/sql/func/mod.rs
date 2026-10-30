@@ -699,6 +699,7 @@ pub fn operator_by_oid(oid: u32) -> Option<OperInfo> {
 }
 
 /// A resolved call: the definition, the types each argument must be coerced to, and the result.
+#[derive(Clone)]
 pub struct Resolved {
     pub def: Arc<FuncDef>,
     pub arg_types: Vec<DataType>,
@@ -1339,7 +1340,61 @@ pub fn no_function(name: &str, inputs: &[DataType]) -> Error {
         .hint("No function matches the given name and argument types. You might need to add explicit type casts.")
 }
 
+thread_local! {
+    /// `resolve_binop`'s answers over built-in scalar types while the catalog has no made
+    /// cast (one can make another coercion implicit): by operator and the two types. Every
+    /// binding of an operator asks; the answer reads only the built-in operators then.
+    static BINOPS: std::cell::RefCell<HashMap<(Box<str>, DataType, DataType), Result<Resolved>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Whether resolving an operator over `t` reads only the built-in tables (not the catalog).
+fn builtin_scalar(t: &DataType) -> bool {
+    use DataType as T;
+    matches!(
+        t,
+        T::Unknown
+            | T::Bool
+            | T::Int2
+            | T::Int4
+            | T::Int8
+            | T::Float4
+            | T::Float8
+            | T::Numeric(_)
+            | T::Text
+            | T::Varchar(_)
+            | T::Bpchar(_)
+            | T::Name
+            | T::Date
+            | T::Timestamp(_)
+            | T::Timestamptz(_)
+            | T::Interval(_)
+            | T::Uuid
+            | T::Oid
+            | T::Bytea
+    )
+}
+
 pub fn resolve_binop(op: &str, l: &DataType, r: &DataType) -> Result<Resolved> {
+    if !(builtin_scalar(l) && builtin_scalar(r)) || crate::types::cast::has_user_casts() {
+        return resolve_binop_builtin(op, l, r);
+    }
+    let key = (Box::<str>::from(op), l.clone(), r.clone());
+    if let Some(res) = BINOPS.with(|b| b.borrow().get(&key).cloned()) {
+        return res;
+    }
+    let res = resolve_binop_builtin(op, l, r);
+    BINOPS.with(|b| {
+        let mut b = b.borrow_mut();
+        if b.len() >= 4096 {
+            b.clear();
+        }
+        b.insert(key, res.clone());
+    });
+    res
+}
+
+fn resolve_binop_builtin(op: &str, l: &DataType, r: &DataType) -> Result<Resolved> {
     let reg = registry();
     let inputs = [l.clone(), r.clone()];
     let err = || {

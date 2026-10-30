@@ -1531,7 +1531,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     join search (`Search::scansels`, RestrictInfo's scansel_cache); an EXPLAIN / estimate
     scan's partial paths from one look at the relation (`parallel::partial_scans`, was
     `partial_scan` and `ordered_partial_scans`); `Expr::same_as` of two columns without
-    writing them; join MCV lists through the slot cache.
+    writing them; join MCV lists through the slot cache; a built-in operator over built-in
+    scalar types resolved once per thread while the catalog has no made cast
+    (`func::BINOPS`, batch 2).
   - Found on the way: `SessionState::pl_compiled` / `pl_validated` / `pl_lexed` were
     thread-locals, so two sessions of one database on one thread (an embedder's, the
     golden harness's) shared compile warnings and the scanner settings a function was
@@ -2847,6 +2849,9 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     settings (`paths::Gucs`, `parallel::ParCfg`), read once per settings generation.
   - `lru::footprints()` lists the shared caches' entries, bytes, capacity, hits, misses and
     evictions.
+  - `func::BINOPS` (round 21, agent 111, per thread): `resolve_binop`'s answers by operator
+    and the two types, only for built-in scalar types and only while `cast::USER_CASTS` is
+    empty (a made cast can make another coercion implicit); at most 4,096, then cleared.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by
     `FormatCtx::settings` (the settings' generation; 0, a context not made from a session's
     settings, isn't cached), the type and the texts; dates and times only (whose input reads
