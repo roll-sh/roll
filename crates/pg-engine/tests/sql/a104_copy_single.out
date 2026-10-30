@@ -1,0 +1,61 @@
+> CREATE TABLE a104_cs (id int PRIMARY KEY, a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO a104_cs VALUES (3, 1, 'x')
+-- INSERT 0 1
+
+> COPY a104_cs (id, a, b) FROM STDIN
+>> 3	1	y
+>> 1
+ERROR 22P04: missing data for column "a"
+CONTEXT: COPY a104_cs, line 2: "1"
+
+> CREATE FUNCTION a104_csf() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'row %', NEW.id; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER a104_cst BEFORE INSERT ON a104_cs FOR EACH ROW EXECUTE FUNCTION a104_csf()
+-- CREATE TRIGGER
+
+> COPY a104_cs (id, a, b) FROM STDIN
+>> 3	1	y
+>> 1
+NOTICE 00000: row 3
+CONTEXT: PL/pgSQL function a104_csf() line 1 at RAISE
+CONTEXT: COPY a104_cs, line 1: "3	1	y"
+ERROR 23505: duplicate key value violates unique constraint "a104_cs_pkey"
+DETAIL: Key (id)=(3) already exists.
+CONTEXT: COPY a104_cs, line 1: "3	1	y"
+OBJECTS: schema=public table=a104_cs constraint=a104_cs_pkey
+
+> COPY a104_cs (id, a, b) FROM STDIN
+>> 4	1	y
+>> 5	x	z
+NOTICE 00000: row 4
+CONTEXT: PL/pgSQL function a104_csf() line 1 at RAISE
+CONTEXT: COPY a104_cs, line 1: "4	1	y"
+ERROR 22P02: invalid input syntax for type integer: "x"
+CONTEXT: COPY a104_cs, line 2, column a: "x"
+
+> COPY a104_cs (id, a, b) FROM STDIN (ON_ERROR ignore, LOG_VERBOSITY verbose)
+>> 8	x	a
+>> 9	1	b
+>> 1
+NOTICE 00000: skipping row due to data type incompatibility at line 1 for column "a": "x"
+CONTEXT: COPY a104_cs
+NOTICE 00000: row 9
+CONTEXT: PL/pgSQL function a104_csf() line 1 at RAISE
+CONTEXT: COPY a104_cs, line 2: "9	1	b"
+ERROR 22P04: missing data for column "a"
+CONTEXT: COPY a104_cs, line 3: "1"
+
+> SELECT * FROM a104_cs ORDER BY id
+id:int4 | a:int4 | b:text
+3 | 1 | x
+-- SELECT 1
+
+> DROP TABLE a104_cs
+-- DROP TABLE
+
+> DROP FUNCTION a104_csf()
+-- DROP FUNCTION
+

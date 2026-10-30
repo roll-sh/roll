@@ -305,6 +305,8 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 5 grammar (agent 104), engine before batch 1's fixes | 5006–5105 × 100 | 9,807 | crash 3, wrong_rows 59, wrong_state 7, wrong_columns 7, engine_error 14, missing_error 20, wrong_error 22, eval_error 53, tag 5 |
 | round 5, base (0f9f0609, round 5 generator) | 5106–5255 × 100 | 14,256 | crash 6, wrong_rows 64, wrong_state 15, engine_error 25, missing_error 10, wrong_error 42, eval_error 65, notice 5, tag 1 |
 | round 5, batch 1 (before its last fix) | 5106–5255 × 100 | 15,161 | wrong_rows 9, engine_error 11, missing_error 10, wrong_error 37, eval_error 28, tag 1 (213 mismatches above error_message in the base, 93 here; 134 gone; 6 new, the trigger WHEN of seeds 5130 / 5207, fixed in the batch; 8 more only past a seed's divergence in the base) |
+| round 5, base (0f9f0609, round 5 generator) | 5256–5355 × 100 | 9,697 | crash 2, wrong_rows 39, wrong_state 7, engine_error 14, missing_error 8, wrong_error 28, eval_error 26, notice 7, tag 1 |
+| round 5, batch 2 | 5256–5355 × 100 | 10,064 | wrong_rows 1, wrong_state 2, engine_error 8, missing_error 12, wrong_error 21, eval_error 13, notice 3, tag 1 (110 above error_message in the base, 52 here; 64 gone; none new but 6 past a base divergence; the wrong_rows / wrong_state are the old grammar's, the base's too: DISTINCT ON's physical order, a failing UPDATE condition, ANALYZE's sample) |
 
 ## Round 5 grammar (agent 104)
 
@@ -421,6 +423,17 @@ alternated runs, load about 22): `ta @> ARRAY['a7']` 1,412 / 1,371 ms (base / he
 / 1,458, `sum(array_position(..))` 1,167 / 1,035, `array_remove` 1,503 / 1,594, `sum(iv),
 avg(iv)` 729 / 680, COPY TO csv 1,597 / 1,528, an UPDATE of 500k rows 6,112 / 5,898: within the
 run-to-run noise.
+
+Batch 2 (`a104_copy_single`): COPY FROM into a table with BEFORE ROW triggers or volatile
+defaults (CopyFrom's CIM_SINGLE, `!copy.multi`) inserts each row as it is read, so an earlier
+row's unique violation, or its trigger's notice, comes before a later record's format error
+(seeds 5021, 5058): a record failing to parse keeps its error (`CopyReader::failed`) until the
+records before it in the chunk have gone in. Buffered COPYs (no such trigger) still fail on the
+record first, as PostgreSQL's multi-insert buffer does. Cost: none per row (one `Option` per
+batch). Verified: crate tests (wire_waits' transaction_timeout transcript failed once on the
+client's wording for a closed connection and passed alone), clippy (no new warnings), the
+pair run above, regress files copy, copy2, copydml, copyselect, copyencoding, triggers and
+updatable_views (2,757 units, none changed against results.tsv).
 
 ## Round 4 grammar (agent 84)
 
@@ -737,10 +750,9 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     replaces with an index scan, or a merge join it chooses for a fast start, decide
     differently (seeds 5032, 5033, 5039, 5046, 5072; `is_scrollable` in pg_cursors). The
     generator avoids both since batch 1.
-  - COPY FROM into a table with BEFORE ROW triggers or volatile defaults (CopyFrom's
-    CIM_SINGLE) inserts each row as it is read, so an earlier row's unique violation comes
-    before a later row's format error; the engine parses a whole chunk first (seeds 5021,
-    5058). `parse_copy_data` would need a row limit.
+  - COPY FROM one row at a time (batch 2): a CSV quoting error (`unterminated CSV quoted
+    field`) is found splitting the whole chunk, before the rows ahead of it go in, where
+    PostgreSQL inserts those first (their triggers' notices, a unique violation).
   - Error order: `INSERT INTO view (.., computed_col) VALUES (fewer values)` gives the view
     column's 0A000 before parse analysis's "more target columns than expressions" (seed 5022);
     ALTER COLUMN TYPE converts the rows (22P02) before re-making a GiST index the new type has

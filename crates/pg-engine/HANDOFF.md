@@ -1826,8 +1826,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   failing record, JSON of stored composite arrays, virtual columns not evaluated by ADD COLUMN
   / SET EXPRESSION, interval sum / avg as IntervalAggState, to_char of huge intervals wrapping,
   check options after unique keys, ALTER TYPE's conversion checked before its dependents.
-  Open (STATUS.md): cursor plans for cursor_tuple_fraction (scrollability, CURRENT OF), COPY's
-  CIM_SINGLE row-at-a-time order.
+  Batch 2: COPY FROM row at a time (CIM_SINGLE) raises a record's parse error after the rows
+  before it went in. Open (STATUS.md): cursor plans for cursor_tuple_fraction (scrollability,
+  CURRENT OF).
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified

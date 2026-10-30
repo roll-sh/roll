@@ -1066,6 +1066,7 @@ impl Session {
                 read,
                 excluded: 0,
                 null_stop: false,
+                failed: None,
                 batch_bytes: 0,
             };
             let rules = table_rules(&t, ctx)?;
@@ -1188,6 +1189,10 @@ struct CopyReader<'a> {
     excluded: i64,
     /// A row a NOT NULL column refuses was read: it is the last to go in, and fails.
     null_stop: bool,
+    /// One row at a time (CopyFrom's CIM_SINGLE, `!copy.multi`): the error of a record that
+    /// failed to parse, raised once the records before it have gone in (whose unique
+    /// violations, triggers' errors and notices come first).
+    failed: Option<Error>,
     /// The bytes of the lines in the batch being read.
     batch_bytes: usize,
 }
@@ -1270,6 +1275,9 @@ impl CopyReader<'_> {
         copy: &crate::sql::plan::CopyLines,
         ctx: &ExecCtx,
     ) -> Result<()> {
+        if let Some(e) = self.failed.take() {
+            return Err(e);
+        }
         while !self.eof && !self.null_stop && !self.batch_full() {
             let before = self.st.rows.len();
             let mut notices = Vec::new();
@@ -1308,7 +1316,14 @@ impl CopyReader<'_> {
             for n in notices {
                 ctx.notice(n);
             }
-            parsed?;
+            if let Err(e) = parsed {
+                if copy.multi || self.st.rows.len() == before {
+                    return Err(e);
+                }
+                self.failed = Some(e);
+                self.eof = true;
+                self.st.lines.truncate(self.st.rows.len());
+            }
             self.batch_bytes += self.st.lines[before..].iter().map(|l| l.1.len()).sum::<usize>();
             // A row a NOT NULL column refuses fails the COPY as it is read: the rows up to it
             // go in, and its own error is the one inserting them raises.
@@ -1331,7 +1346,8 @@ impl CopyReader<'_> {
         feed.fed += rows.len();
         feed.rows
             .extend(rows.into_iter().zip(lines).map(|(r, (line, raw))| (r, line, raw)));
-        if self.eof || self.null_stop {
+        // (Not done with a record's error still to raise: the next batch raises it.)
+        if (self.eof || self.null_stop) && self.failed.is_none() {
             feed.done = true;
             let skipped = self.st.skipped;
             feed.skipped_notice = (skipped > 0 && self.c.format.log_verbosity >= 1).then(|| {
