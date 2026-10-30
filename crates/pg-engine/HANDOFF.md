@@ -2371,6 +2371,59 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   reference): 51,148 / 51,150, no unit changed against `results.tsv`; isolation spot checks
   (nowait*, skip-locked*, eval-plan-qual, deadlock, ...: as before); and the client suites in
   tests/clients/STATUS.md (ruby-pg now matches PostgreSQL).
+- **Memory under load** (round 22, agent 125; BENCH.md "Memory under load"): what many
+  sessions running at once cost.
+  - *Measure*: `bench burst-load` / `burst` (`tools/bench/burst.rs`): `--sessions 10,50,100,200`
+    clients run agent 111's mix (a PL/pgSQL loop, a SQL function over a FROM, an ORM-style
+    four-table join, psql's and information_schema's column queries, pgbench's TPC-B) for
+    `--secs`, the server's RSS sampled every 50 ms, then read `--after` seconds later with the
+    sessions idle and again 5 s after they close (`--reconnect N`: a new connection every N
+    operations; `--mix` adds `sort`, `agg`).
+  - *Attribute*: `roll-engine --features heapprof` with `ROLL_HEAPPROF=<file>` keeps a sampling
+    heap profile (one allocation per 256 kB, its stack; live and at the peak), and
+    `tools/heapprof.py <binary> <file>.peak` sums it by the first engine frame (build with
+    `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for inlined frames). A separate target
+    dir: the feature rebuilds the crate.
+  - *The 4-8 GB peak* was size models built once per session: a database just opened (or a
+    table whose model was dropped) and 100 sessions planning over it at once each scanned the
+    table and laid out its heap and btree models (`sizing::ensure`), up to 400,000 rows each,
+    and all but one copy were thrown away. One session builds a table's model now while the
+    others wait for it (`sizing::claim_build`: by database instance and table; a build inside
+    a build on the same thread doesn't wait, and a wait gives up after 10 s, so two builds
+    waiting for each other's go on).
+  - *The parse tree cache* (`sql::parse::PARSED`) counted a tree at 8 bytes per byte of its
+    text and held about ten times its "32 MB" bound (300 MB after a few thousand ORM
+    queries). A tree now counts 56 bytes per byte of its protobuf encoding (`tree_bytes`),
+    within 30% of what an allocator counts (`tests/memory_load.rs`: 33.5 MB held, 32.0 counted).
+  - *Memory back to the system*: `roll-engine` runs mimalloc's collection once a second on a
+    thread of its own (`roll-trim`): memory freed by busy threads or by threads that ended
+    went back only when a thread ran the collection, so a quiet process kept its peak.
+  - *Operator settings* (engine options, not PostgreSQL settings): `--cache-mb` (block cache,
+    64), `--plan-cache-mb` (parse trees and PL/pgSQL compiles, 36: `lru::set_plan_cache_bytes`),
+    `--memory-budget-mb` (both, 3 : 1). Not under a byte bound yet: size models (per table, up
+    to 400,000 rows: agent 113), generated catalog rows (32 per database: agent 115), hot
+    ranges (64 x 1 MB per database), memtables (8 MB per database), a transaction's buffered
+    writes (64 MB, then spilled).
+  - Numbers (BENCH.md "Memory under load", cold engine per size): 100 sessions peak 3,172 MB
+    -> 593 MB (PostgreSQL 412), 200 sessions 4,697 -> 760 MB (686) and 63 -> 1,143 ops/s;
+    after the database closes 634 -> 190 MB. pgbench -S / TPC-B CPU per transaction and
+    TPC-H SF 0.2 time, CPU and peak unchanged or lower. Test `tests/memory_load.rs`
+    `many_sessions_stay_bounded` (100 sessions on a database just opened: +80-90 MB of heap,
+    +640 MB without the single build; bound 40 MB + 0.8 MB a session).
+  - Left: per-statement working memory ignores work_mem. 100 sessions adding a sort under a
+    LIMIT and a 50,000-group grouping of 200,000 rows peak at 5.3 GB (PostgreSQL 733 MB):
+    a sequential scan of a table whose rows moved collects every row to return them in heap
+    order (`scan.rs` `next_raw`, agent 117), and HashAggregate keeps all its groups (each key
+    twice, `agg.rs`; `pghash::GroupOrder` 16 bytes per input row) where PostgreSQL spills past
+    hash_mem. Byte bounds for size models (agent 113) and generated catalog rows (agent 115).
+    The idle-RSS difference agent 119 saw between two release binaries of one tree isn't the
+    build: pg-engine's dependencies have the same features with and without dev-dependencies
+    (only syn's `visit-mut`, a proc-macro's), and `cargo build --release` and `cargo test
+    --release` binaries both start at 26-33 MB on a fresh data directory; look at the data
+    directory (models kept across a clean close, catalogs) and `--cache-mb` instead.
+  - Verified: crate tests debug and release (deep_input, parallel tests), clippy (no new
+    warnings), difftest smoke, isolation 121 / 122, a full regress run (debug, private
+    reference) 51,148 / 51,150 with no unit changed against results.tsv.
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index
@@ -3413,7 +3466,8 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     compare every splice and reuse with the full generation, and every chunk's runs with its
     rows (`sysdelta::parts_hold`). Test `ddl_scaling.rs more_catalogs_after_ddl_are_spliced_or_kept`.
   - `sql::parse` `PARSED` (parse trees, shared by every session of the process since round 21
-    agent 111, `lru::Shared`: bounded by an estimate of the trees' bytes, evicted by CLOCK;
+    agent 111, `lru::Shared`: bounded by an estimate of the trees' bytes (56 per byte of their
+    protobuf encoding since round 22, agent 125), evicted by CLOCK;
     a tree is dropped by its last holder with stack for its depth): by the text and the
     parser options (a pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under
     tags of their own.

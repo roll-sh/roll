@@ -12,8 +12,17 @@ use std::time::Duration;
 // The engine allocates per row and per value; mimalloc does that markedly faster than the
 // system allocator, from many sessions' threads at once (BENCH.md). Embedders choose their
 // own global allocator.
+#[cfg(not(feature = "heapprof"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// A sampling heap profile of where memory goes (`ROLL_HEAPPROF`, see the module).
+#[cfg(feature = "heapprof")]
+#[path = "roll-engine/heapprof.rs"]
+mod heapprof;
+#[cfg(feature = "heapprof")]
+#[global_allocator]
+static GLOBAL: heapprof::Prof = heapprof::Prof;
 
 /// `--version`: the build profile too, which the regress harness records with a run (a few
 /// limits depend on frame sizes, so on the profile).
@@ -41,9 +50,18 @@ struct Args {
     /// (default: scram-sha-256 with --password, else trust).
     #[arg(long, value_parser = |s: &str| AuthMethod::parse(s).ok_or("trust, password, md5 or scram-sha-256"))]
     auth: Option<AuthMethod>,
-    /// Block cache shared by all databases, in MiB.
-    #[arg(long, default_value_t = 64)]
-    cache_mb: usize,
+    /// Block cache shared by all databases, in MiB (default 64, or three quarters of
+    /// --memory-budget-mb).
+    #[arg(long)]
+    cache_mb: Option<usize>,
+    /// Parse trees and PL/pgSQL compiles shared by all sessions, in MiB (default 36, or a
+    /// quarter of --memory-budget-mb).
+    #[arg(long)]
+    plan_cache_mb: Option<usize>,
+    /// What the caches shared by all sessions may hold together, in MiB: the block cache and
+    /// the plan caches, 3 : 1 (--cache-mb or --plan-cache-mb, when given, set that part).
+    #[arg(long)]
+    memory_budget_mb: Option<usize>,
     /// Close a database this many seconds after its last session ends.
     #[arg(long, default_value_t = 60)]
     idle_close_secs: u64,
@@ -162,6 +180,8 @@ impl InitdbArgs {
 }
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "heapprof")]
+    heapprof::start();
     idle::setup();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -187,9 +207,11 @@ fn main() -> anyhow::Result<()> {
         AuthMethod::Trust
     });
     let data_dir = a.data.clone();
+    let plan_mb = a.plan_cache_mb.unwrap_or(a.memory_budget_mb.map_or(pg_engine::lru::PLAN_CACHE_BYTES >> 20, |b| b / 4));
+    pg_engine::lru::set_plan_cache_bytes(plan_mb << 20);
     let engine = Engine::open(EngineOptions {
         data_dir: a.data,
-        cache_bytes: a.cache_mb << 20,
+        cache_bytes: a.cache_mb.unwrap_or(a.memory_budget_mb.map_or(64, |b| b * 3 / 4)) << 20,
         sync: !a.no_sync,
         idle_close: Duration::from_secs(a.idle_close_secs),
         superuser: a.user,
@@ -360,6 +382,20 @@ mod idle {
         // SAFETY: prctl with PR_SET_THP_DISABLE only sets a flag of this process.
         unsafe { prctl(PR_SET_THP_DISABLE, 1 as c_ulong, 0 as c_ulong, 0 as c_ulong, 0 as c_ulong) };
         pg_engine::server::set_idle_hook(trim);
+        // Memory freed by busy threads, or by threads that ended, goes back to the system
+        // only when some thread runs the allocator's collection: after a burst of sessions
+        // nothing would, and the process would keep its peak (BENCH.md "Memory under
+        // load"). A normal collection returns what was freed over a second ago.
+        let _ = std::thread::Builder::new()
+            .name("roll-trim".into())
+            .stack_size(64 << 10)
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    // SAFETY: as in `trim`.
+                    unsafe { mi_collect(false) };
+                }
+            });
     }
 
     fn trim() {

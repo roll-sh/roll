@@ -215,7 +215,7 @@ fn char_to_byte(s: &str, p: usize) -> usize {
 static PARSED: crate::lru::Shared<(c_int, Box<str>), std::sync::Arc<Trees>> =
     crate::lru::Shared::new("parse trees", PARSE_CACHE_BYTES);
 
-const PARSE_CACHE_BYTES: usize = 32 << 20;
+const PARSE_CACHE_BYTES: usize = crate::lru::PLAN_CACHE_BYTES / 9 * 8;
 /// Longer texts aren't kept.
 const PARSE_CACHE_MAX_TEXT: usize = 16 << 10;
 
@@ -233,6 +233,11 @@ impl Drop for Trees {
 /// The parse tree cache's footprint (`lru::footprints`).
 pub(crate) fn parsed_footprint() -> (&'static str, crate::lru::Footprint) {
     PARSED.footprint()
+}
+
+/// `PARSED`'s bound (`lru::set_plan_cache_bytes`).
+pub(crate) fn set_parse_cache_bytes(bytes: usize) {
+    drop(PARSED.set_capacity(bytes));
 }
 
 /// `parse` through `PARSED` (a copy of the tree kept for `tag` and `sql`).
@@ -253,11 +258,29 @@ pub fn cached_parse(
         return copy(&t.0);
     }
     let r = parse();
-    // (Trees are a few times their text.)
+    // (Measuring recurses as deep as copying.)
+    let bytes = crate::stack::with_headroom(crate::stack::tree_headroom(sql.len()), || tree_bytes(&r))
+        + 2 * sql.len()
+        + 128;
     let trees = std::sync::Arc::new(Trees(copy(&r), sql.len()));
-    drop(PARSED.insert(key, trees, sql.len() * 8 + 256));
+    drop(PARSED.insert(key, trees, bytes));
     r
 }
+
+/// What a parse's trees hold on the heap, about: their protobuf encoding's length times the
+/// in-memory trees' size per encoded byte (every node a box of its message's whole struct,
+/// every list a vector). `tests/memory_load.rs` checks it against an allocator's count. The
+/// text's length times 8 (the estimate until round 22) was a tenth of it: the cache "of 32
+/// MB" held 300 MB of trees after a few thousand ORM-style queries.
+fn tree_bytes(r: &Result<Vec<RawStmt>>) -> usize {
+    use prost::Message;
+    match r {
+        Ok(v) => v.iter().map(|s| s.encoded_len()).sum::<usize>() * TREE_BYTES_PER_ENCODED,
+        Err(e) => e.message.len() + 256,
+    }
+}
+
+const TREE_BYTES_PER_ENCODED: usize = 56;
 
 fn parse_opts(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
     cached_parse(options, sql, || parse_uncached(sql, options))

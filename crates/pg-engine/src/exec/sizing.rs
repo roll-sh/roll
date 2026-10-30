@@ -441,6 +441,51 @@ fn mark_tracked(db: u64, t: u32) {
     }
 }
 
+/// Tables (by database instance) whose model a session is laying out (`ensure`).
+static BUILDING: (std::sync::Mutex<Vec<(u64, u32)>>, std::sync::Condvar) =
+    (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+thread_local! {
+    /// This thread is laying out a model: a model it needs meanwhile (an index expression's
+    /// query) is built without waiting, so it never waits for itself.
+    static BUILDING_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A claimed model build, released (waking the sessions waiting for it) when dropped.
+struct BuildClaim((u64, u32));
+
+impl Drop for BuildClaim {
+    fn drop(&mut self) {
+        BUILDING_HERE.with(|b| b.set(false));
+        let mut s = BUILDING.0.lock().unwrap_or_else(|e| e.into_inner());
+        s.retain(|k| *k != self.0);
+        BUILDING.1.notify_all();
+    }
+}
+
+/// Wait while another session lays out table `t`'s model, then claim its build. None (build
+/// unclaimed) inside another build on this thread, or after waiting 10 s: two sessions'
+/// builds that each wait for the other's (index expressions querying each other's
+/// tables) go on.
+fn claim_build(db: u64, t: u32) -> Option<BuildClaim> {
+    if BUILDING_HERE.with(|b| b.get()) {
+        return None;
+    }
+    let key = (db, t);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut s = BUILDING.0.lock().unwrap_or_else(|e| e.into_inner());
+    while s.contains(&key) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        s = BUILDING.1.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
+    }
+    s.push(key);
+    BUILDING_HERE.with(|b| b.set(true));
+    Some(BuildClaim(key))
+}
+
 /// Whether values read from table `t` (of the running statement's database) may be
 /// compressed or out-of-line datums.
 pub(crate) fn tracked(t: u32) -> bool {
@@ -1221,17 +1266,27 @@ fn entries_with(
 /// aren't from the rows there now. False when the table is too big to model.
 fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     let db = &ctx.sess.db;
-    let (heap_missing, missing): (bool, Vec<&BoundIndex>) = {
+    let wanted = || -> Option<(bool, Vec<&BoundIndex>)> {
         let rf = db.relfiles.read();
         if rf.untracked.contains(&t.oid) {
-            return Ok(false);
+            return None;
         }
         let missing = indexes
             .iter()
             .filter(|b| btree_opts(b).is_some() && !rf.btrees.contains_key(&b.index.oid))
             .collect();
-        (!rf.heaps.contains_key(&t.oid), missing)
+        Some((!rf.heaps.contains_key(&t.oid), missing))
     };
+    let Some((heap_missing, missing)) = wanted() else { return Ok(false) };
+    if !heap_missing && missing.is_empty() {
+        return Ok(true);
+    }
+    // One session builds a table's model while the others needing it wait for it: each
+    // building its own (all but one thrown away) took 100-400 MB per session at once when
+    // many sessions planned over a table whose database had just opened (BENCH.md "Memory
+    // under load").
+    let _claim = claim_build(db.instance, t.oid);
+    let Some((heap_missing, missing)) = wanted() else { return Ok(false) };
     if !heap_missing && missing.is_empty() {
         return Ok(true);
     }

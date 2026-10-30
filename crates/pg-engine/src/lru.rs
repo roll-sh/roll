@@ -23,7 +23,8 @@ pub struct Footprint {
 /// A process-wide cache of at most `capacity` estimated bytes.
 pub struct Shared<K, V> {
     name: &'static str,
-    capacity: usize,
+    /// (`set_capacity`: the engine's options size it.)
+    capacity: std::sync::atomic::AtomicUsize,
     inner: Mutex<Option<Clock<K, V>>>,
 }
 
@@ -46,7 +47,7 @@ impl<K: Hash + Eq, V: Clone> Shared<K, V> {
     pub const fn new(name: &'static str, capacity: usize) -> Self {
         Shared {
             name,
-            capacity,
+            capacity: std::sync::atomic::AtomicUsize::new(capacity),
             inner: Mutex::new(None),
         }
     }
@@ -79,7 +80,8 @@ impl<K: Hash + Eq, V: Clone> Shared<K, V> {
     /// key another session cached meanwhile.
     pub fn insert(&self, key: K, value: V, bytes: usize) -> Vec<V> {
         let mut out = Vec::new();
-        if bytes > self.capacity / 8 {
+        let capacity = self.capacity();
+        if bytes > capacity / 8 {
             out.push(value);
             return out;
         }
@@ -95,7 +97,7 @@ impl<K: Hash + Eq, V: Clone> Shared<K, V> {
             out.push(value);
             return out;
         }
-        while c.use_.bytes + bytes > self.capacity && c.use_.entries > 0 {
+        while c.use_.bytes + bytes > capacity && c.use_.entries > 0 {
             out.push(c.evict());
         }
         let key = Arc::new(key);
@@ -134,10 +136,27 @@ impl<K: Hash + Eq, V: Clone> Shared<K, V> {
         out
     }
 
+    pub fn capacity(&self) -> usize {
+        self.capacity.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Bound the cache at `bytes` from now on; returns what that evicts, as `insert` does.
+    pub fn set_capacity(&self, bytes: usize) -> Vec<V> {
+        self.capacity.store(bytes, std::sync::atomic::Ordering::Relaxed);
+        let mut g = self.inner.lock();
+        let mut out = Vec::new();
+        if let Some(c) = g.as_mut() {
+            while c.use_.bytes > bytes && c.use_.entries > 0 {
+                out.push(c.evict());
+            }
+        }
+        out
+    }
+
     pub fn footprint(&self) -> (&'static str, Footprint) {
         let g = self.inner.lock();
         let mut f = g.as_ref().map(|c| c.use_).unwrap_or_default();
-        f.capacity = self.capacity;
+        f.capacity = self.capacity();
         (self.name, f)
     }
 }
@@ -168,6 +187,17 @@ impl<K: Hash + Eq, V> Clock<K, V> {
             return s.value;
         }
     }
+}
+
+/// The parse tree and PL/pgSQL compile caches' bound together, unless set.
+pub const PLAN_CACHE_BYTES: usize = 36 << 20;
+
+/// Bound the caches of parse trees and of PL/pgSQL compiles at `bytes` together (8 : 1),
+/// for the whole process (an operator setting: `roll-engine --plan-cache-mb`). Lowering it
+/// evicts at once.
+pub fn set_plan_cache_bytes(bytes: usize) {
+    crate::sql::parse::set_parse_cache_bytes(bytes / 9 * 8);
+    crate::plpgsql::set_compiled_bytes(bytes / 9);
 }
 
 /// Every shared cache's footprint, by name.

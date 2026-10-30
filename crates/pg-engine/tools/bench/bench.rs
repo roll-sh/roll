@@ -5,10 +5,11 @@
 //!     bench --target inproc --data <dir> <workload> [options]
 //!
 //! Workloads: oltp-load, oltp, analytic-load, analytic, tpch-load, tpch, bulk, stream-load, stream,
-//! ddl, scale, idle,
+//! ddl, scale, idle, burst-load, burst,
 //! startup, startup-catalog, vector (pgvector). Results are printed as `RESULT\t<label>\t<workload>\t<case>\t<k=v>...` lines.
 
 mod access;
+mod burst;
 mod tpch;
 
 use bytes::BytesMut;
@@ -1494,6 +1495,8 @@ fn main() {
             "vector" => vector_bench(&cx),
             "access-load" => access::load(&cx),
             "access" => access::run(&cx),
+            "burst-load" => burst::load(&cx),
+            "burst" => burst::run(&cx),
             "ddl" => ddl(&cx),
             "scale" => scale(&cx),
             "scale-ops" => scale_ops(&cx),

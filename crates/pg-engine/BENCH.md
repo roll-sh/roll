@@ -4315,6 +4315,85 @@ isn't in the command's catalog copy), and the constraint's COMMENT then fails wi
 engine per run: `4025ec2b` 6 of 54 runs, `b3568d3e` 1 of 60, these batches 9 of 193 (the
 same rate). The concurrent DDL path is agent 109's area; it was not looked into further here.
 
+## Memory under load (round 22, agent 125)
+
+HANDOFF.md, "Memory under load", has what changed. Release builds over the wire on one
+machine shared with other agents' builds (load average 25-30, so CPU figures vary by about
+10%); `base` is d6746f74 (this round's start), `new` this round's first batch. PostgreSQL
+18.6 is the pinned image with its defaults (`shared_buffers` 128 MB, `work_mem` 4 MB) and
+`max_connections=300`; its memory is the container's anon + shmem, the engine's its RSS.
+Workload `bench burst` (`tools/bench/burst.rs`) at `burst-load --scale 2`: agent 111's mix
+round-robin per session (a PL/pgSQL loop of 10 primary-key lookups, `sum()` of 100 calls of a
+SQL function over a FROM, a four-table 36-column join by a random customer, psql's `\d`
+column query and an information_schema.columns query, pgbench's TPC-B) for 20 s. The engine
+starts afresh for each size (block cache 64 MB, the server's default), so the burst's first
+statements open the database: that is the case the 4-8 GB peaks came from.
+
+### Peak and after (MB; `after`: 60 s after the burst with the sessions idle; `closed`: 5 s after they disconnect)
+
+| sessions | | ops/s | CPU µs/op | connected | peak | after | closed |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 10 | PostgreSQL | 2,912 | 2,037 | 114 | 138 | 132 | 104 |
+| | base | 1,222 | 3,040 | 791 | 1,197 | 569 | 556 |
+| | new | 1,574 | 2,600 | 158 | 375 | 356 | 351 |
+| 50 | PostgreSQL | 1,777 | 2,339 | 174 | 253 | 245 | 105 |
+| | base | 844 | 5,678 | 1,130 | 3,654 | 591 | 580 |
+| | new | 1,102 | 2,914 | 179 | 477 | 425 | 394 |
+| 100 | PostgreSQL | 4,817 | 2,198 | 245 | 412 | 388 | 108 |
+| | base | 886 | 6,642 | 1,665 | 3,172 | 650 | 628 |
+| | new | 1,116 | 2,880 | 215 | 593 | 491 | 424 |
+| 200 | PostgreSQL | 3,047 | 2,351 | 389 | 686 | 669 | 110 |
+| | base | 63 | 75,315 | 2,483 | 4,697 | 701 | 660 |
+| | new | 1,143 | 3,063 | 243 | 760 | 603 | 485 |
+
+- **Where base's peak went** (sampling heap profile, `--features heapprof`, 200 sessions, 9.0
+  GB live at the peak): 89% in `sizing::ensure`, every session laying out its own heap and
+  btree models of pgbench_accounts (200,000 rows) and b_item: the rows read, their layouts and
+  index keys, all but one copy thrown away. At 200 sessions the builds also starved the CPU
+  (63 operations a second). `new` builds each model once (peak at 200 sessions 4.7 GB -> 760
+  MB, 18x the operations).
+- **The parse tree cache** held 297 MB of trees (of the 490 MB live after a warm 200-session
+  run) under its "32 MB" bound: it counted 8 bytes per byte of text, a tenth of what the trees
+  take. It holds 32 MB now (`tests/memory_load.rs`: 33.5 MB freed by emptying it, 32.0 MB
+  counted).
+- **After the burst**: `new` at 100 sessions (in another run) 579 MB at the end, 431 MB once
+  the sessions closed, 434 MB until the database closed (60 s idle), then 190 MB; `base` 717
+  MB closed and 634 MB three minutes later, the database closed too: nothing ran the
+  allocator's collection, so the freed memory stayed. What `new` keeps with the database open
+  is mostly live (264 MB live of 506 MB RSS 55 s after a 100-session burst: the size models
+  ~130 MB, the block cache 64 MB, the parse trees 32 MB) plus mimalloc's partly used pages.
+  PostgreSQL's backends keep their memory until they disconnect, then it is gone (104-110
+  MB with shared buffers).
+- mimalloc's purge delay (`MIMALLOC_PURGE_DELAY`, default 1,000 ms): 10 ms gave a 531 MB
+  peak at 100 sessions (593), 0 ms 488 MB, at 3-9% more CPU per operation; left at the
+  default.
+- **Not fixed: per-statement working memory.** The mix with `--mix sort,agg` added (a sort of
+  20,000 rows under a LIMIT, a grouping of all 200,000 accounts into 50,000 groups) at 100
+  sessions: the engine peaked at 5,274 MB and 53 ops/s, PostgreSQL at 733 MB and 902 ops/s.
+  The profile (sort and grouping only, 5.2 GB peak): 30% a sequential scan collecting the
+  table's rows to return them in heap order (`scan.rs` `next_raw`: 200,000 rows of a table
+  whose updates moved rows, about 13 MB per session; agent 117's scan path), 22% the grouping's
+  states (`agg.rs` `states`), 22% its keys (each group's key twice: `groups` and `index`),
+  7% the hashed order's lookups (`pghash::GroupOrder`, 16 bytes per input row), 4% the hash
+  table's growth. PostgreSQL's HashAggregate stays within hash_mem (8 MB) and spills; the
+  engine keeps every group (about 45 MB per session here). Spilling where PostgreSQL spills
+  (and its EXPLAIN ANALYZE lines, which the engine models already) is the next step.
+
+### Other workloads, base -> new
+
+| | base | new |
+|---|---:|---:|
+| pgbench -S, 8 clients, prepared: CPU µs / transaction (3 alternated runs) | 112, 119, 119 | 108, 114, 113 |
+| pgbench TPC-B, 8 clients, prepared: CPU µs / transaction | 861, 903, 934 | 829, 900, 904 |
+| RSS after those runs (MB) | 316-341 | 151-188 |
+| TPC-H SF 0.2, 22 queries, sum of medians of 3 (s) | 33.2 | 31.9 |
+| TPC-H SF 0.2: server CPU (s), peak RSS (MB) | 57.1, 648 | 56.8, 518 |
+
+The test `tests/memory_load.rs` `many_sessions_stay_bounded` runs 100 sessions of a
+smaller mix on a database just opened, in-process with a counting allocator: +80-90 MB of
+heap at the peak (release and debug), +640 MB with every session building its own models; it
+fails over 40 MB + 0.8 MB a session (`MEMLOAD_SESSIONS`, `MEMLOAD_SECS` for bigger bursts).
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

@@ -63,6 +63,8 @@ zstd.workspace = true
 # ICU4X in place of ICU4C where the ICU4C build (crates/pg-icu) is unavailable: an
 # approximation of the reference server's ICU.
 icu4x = ["dep:icu_casemap", "dep:icu_collator", "dep:icu_locale_core", "dep:icu_provider", "dep:icu_segmenter"]
+# roll-engine with a sampling heap profiler (`ROLL_HEAPPROF`, src/bin/roll-engine/heapprof.rs).
+heapprof = []
 
 [dev-dependencies]
 fallible-iterator.workspace = true

@@ -231,11 +231,16 @@ fn compile_spec(ctx: &ExecCtx, f: &Function, pseudo_array: bool) -> Result<()> {
 /// compile for a call succeeded without warnings, in any session: another session's first
 /// call of one would compile it alike, so it needn't (`compile_for_call`).
 static COMPILED_CLEAN: crate::lru::Shared<String, ()> =
-    crate::lru::Shared::new("PL/pgSQL functions compiled", 4 << 20);
+    crate::lru::Shared::new("PL/pgSQL functions compiled", crate::lru::PLAN_CACHE_BYTES / 9);
 
 /// The footprint of `COMPILED_CLEAN` (`lru::footprints`).
 pub(crate) fn compiled_footprint() -> (&'static str, crate::lru::Footprint) {
     COMPILED_CLEAN.footprint()
+}
+
+/// `COMPILED_CLEAN`'s bound (`lru::set_plan_cache_bytes`).
+pub(crate) fn set_compiled_bytes(bytes: usize) {
+    drop(COMPILED_CLEAN.set_capacity(bytes));
 }
 
 /// `compile_spec`, and whether compiling warned (whether or not the warning was shown).
