@@ -6,6 +6,7 @@
 //! of a key has the newest one.
 
 pub mod cache;
+mod hot;
 pub mod keys;
 pub mod row;
 pub mod sst;
@@ -233,6 +234,14 @@ pub struct Store {
     bg: Mutex<()>,
     bg_running: AtomicBool,
     closed: AtomicBool,
+    /// Small ranges scanned whole again and again, kept as version chains (`hot`).
+    hot: hot::Hot,
+    /// The last commit that waits for its WAL fsync before it is visible (an asynchronous
+    /// commit after it waits for that fsync too: `commit_async`).
+    sync_assigned: AtomicU64,
+    /// A WAL writer thread is running (`wal_writer`), and how long it sleeps (ms).
+    wal_writer: AtomicBool,
+    wal_writer_delay: AtomicU64,
 }
 
 /// Keeps versions visible at `ts` from being compacted away.
@@ -380,6 +389,10 @@ impl Store {
             bg: Mutex::new(()),
             bg_running: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            hot: hot::Hot::default(),
+            sync_assigned: AtomicU64::new(0),
+            wal_writer: AtomicBool::new(false),
+            wal_writer_delay: AtomicU64::new(200),
         });
         if replayed > 0 {
             debug!(dir = %dir.display(), records = replayed, "replayed WAL");
@@ -649,14 +662,57 @@ impl Store {
     /// Ascending scan of user keys in [start, end) at snapshot `ts`, rows with their
     /// out-of-line values put back (`toast`).
     pub fn scan(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
-        let mut s = Scan::new(self.view(), start.to_vec(), end.to_vec(), ts, self.gc_horizon());
+        let mut s = self.scan_raw(start, end, ts);
         s.resolve = true;
         s
     }
 
     /// `scan` with rows as they are stored (their out-of-line values' pointers).
     pub fn scan_raw(&self, start: &[u8], end: &[u8], ts: u64) -> Scan {
+        if let Some(rows) = self.hot.scan(start, end, ts) {
+            return Scan::of_rows(self.view(), rows, ts);
+        }
+        if let Some(p) = hot::whole(start, end)
+            && self.hot.note_whole_scan(p)
+        {
+            // (Kept from now on; a failure to read it leaves it to the merging scan.)
+            if self.keep_hot(p).is_ok()
+                && let Some(rows) = self.hot.scan(start, end, ts)
+            {
+                return Scan::of_rows(self.view(), rows, ts);
+            }
+        }
         Scan::new(self.view(), start.to_vec(), end.to_vec(), ts, self.gc_horizon())
+    }
+
+    /// Keep relation range `p` as version chains (`hot`), read from the sources under the
+    /// commit lock. (Not waited for long: a scan under the commit lock, or a busy one,
+    /// leaves it to a later scan.)
+    fn keep_hot(&self, p: hot::Prefix) -> Result<()> {
+        let Some(_c) = self.commit.try_lock_for(std::time::Duration::from_millis(2)) else {
+            return Err(internal("commit lock busy"));
+        };
+        let horizon = self.gc_horizon();
+        let end = keys::prefix_end(&p);
+        let view = self.view();
+        let mut merge = Merge::new(sources(&view, &p, &end), end);
+        let mut entries = std::iter::from_fn(|| match merge.min() {
+            Ok(Some(i)) => Some(Ok(merge.sources[i].take())),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        });
+        self.hot.build(p, &mut entries, horizon)
+    }
+
+    /// A commit's writes at `ts` into the kept hot ranges (under the commit lock), the
+    /// versions their chains drop pruned from the memtables of `view` as well.
+    fn apply_hot(&self, ts: u64, writes: &[(Vec<u8>, Option<Bytes>)], view: &View) {
+        self.hot.apply(ts, writes, || self.gc_horizon(), |k, t| {
+            let key = mvcc_key(k, t);
+            for m in view.memtables() {
+                m.map.remove(key.as_slice());
+            }
+        });
     }
 
     /// Atomically apply `writes` at a new commit timestamp. `check` runs under the commit lock
@@ -750,7 +806,10 @@ impl Store {
             ts = self.assigned.load(Ordering::Acquire) + 1;
             c.wal.append(ts, &writes)?;
             self.assigned.store(ts, Ordering::Release);
-            let mem = self.view.read().mem.clone();
+            self.sync_assigned.store(ts, Ordering::Release);
+            let view = self.view.read().clone();
+            self.apply_hot(ts, &writes, &view);
+            let mem = view.mem.clone();
             for (k, v) in writes {
                 mem.insert(mvcc_key(&k, ts), v, ts);
             }
@@ -764,6 +823,101 @@ impl Store {
             self.schedule_background();
         }
         Ok(ts)
+    }
+
+    /// `commit` for `synchronous_commit = off` (PostgreSQL's asynchronous commit): the
+    /// writes go into the WAL and the memtable under the commit lock as `commit_grouped`'s
+    /// do, and are visible (and this returns) without waiting for the WAL fsync. The WAL
+    /// writer fsyncs them within `wal_writer_delay_ms` (PostgreSQL: wal_writer_delay, at
+    /// most three times it); a later synchronous commit's fsync covers them too. A crash
+    /// before that loses them, and only a suffix of commits: the WAL is replayed in commit
+    /// order up to its last whole record. (A synchronous commit before it still waiting for
+    /// its fsync is waited for: commits become visible in timestamp order, and that one
+    /// mustn't be seen before it is durable.)
+    pub fn commit_async(
+        self: &Arc<Self>,
+        mut writes: Vec<(Vec<u8>, Option<Bytes>)>,
+        check: impl FnOnce(&Store, &mut Vec<(Vec<u8>, Option<Bytes>)>) -> Result<()>,
+        wal_writer_delay_ms: u64,
+    ) -> Result<u64> {
+        if !self.opts.sync || self.ingests(&writes) {
+            return self.commit_with(writes, check, |_| {});
+        }
+        let (ts, before, rotate);
+        {
+            let mut c = self.commit.lock();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(internal("database is closed"));
+            }
+            check(self, &mut writes)?;
+            if writes.is_empty() {
+                return Ok(self.visible_ts());
+            }
+            ts = self.assigned.load(Ordering::Acquire) + 1;
+            c.wal.append(ts, &writes)?;
+            self.assigned.store(ts, Ordering::Release);
+            before = self.sync_assigned.load(Ordering::Acquire);
+            let view = self.view.read().clone();
+            self.apply_hot(ts, &writes, &view);
+            let mem = view.mem.clone();
+            for (k, v) in writes {
+                mem.insert(mvcc_key(&k, ts), v, ts);
+            }
+            rotate = mem.bytes() >= self.opts.memtable_bytes;
+        }
+        if self.durable.load(Ordering::Acquire) < before {
+            self.wait_durable(before)?;
+        }
+        self.visible.fetch_max(ts, Ordering::AcqRel);
+        self.wal_writer_delay.store(wal_writer_delay_ms.max(1), Ordering::Relaxed);
+        self.wal_writer();
+        if rotate {
+            self.rotate()?;
+            self.schedule_background();
+        }
+        Ok(ts)
+    }
+
+    /// Make sure the WAL writer runs: a thread that fsyncs the WAL every
+    /// `wal_writer_delay` while asynchronous commits wait for it, and ends when none do.
+    fn wal_writer(self: &Arc<Self>) {
+        if self.wal_writer.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let store = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new().name("roll-walwriter".into()).spawn(move || {
+            loop {
+                let delay = match store.upgrade() {
+                    Some(s) => s.wal_writer_delay.load(Ordering::Relaxed),
+                    None => return,
+                };
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                let Some(s) = store.upgrade() else { return };
+                if s.closed.load(Ordering::Acquire) {
+                    s.wal_writer.store(false, Ordering::Release);
+                    return;
+                }
+                let upto = s.assigned.load(Ordering::Acquire);
+                if s.durable.load(Ordering::Acquire) < upto {
+                    // (A failed fsync closes the store: `wait_durable`.)
+                    let _ = s.wait_durable(upto);
+                    continue;
+                }
+                // Nothing to write: done, unless a commit came in meanwhile (it found the
+                // flag still set and left the writing to this thread).
+                s.wal_writer.store(false, Ordering::Release);
+                if s.durable.load(Ordering::Acquire) >= s.assigned.load(Ordering::Acquire)
+                    || s.wal_writer.swap(true, Ordering::AcqRel)
+                {
+                    return;
+                }
+            }
+        });
+        if spawned.is_err() {
+            // (No thread: the commit waits for its own fsync instead.)
+            self.wal_writer.store(false, Ordering::Release);
+            let _ = self.wait_durable(self.assigned.load(Ordering::Acquire));
+        }
     }
 
     /// Like `commit`, and `after(ts)` runs under the commit lock once the writes are visible
@@ -801,7 +955,9 @@ impl Store {
                     c.wal.sync()?;
                 }
                 self.assigned.store(ts, Ordering::Release);
-                let mem = self.view.read().mem.clone();
+                let view = self.view.read().clone();
+                self.apply_hot(ts, &writes, &view);
+                let mem = view.mem.clone();
                 for (k, v) in writes {
                     mem.insert(mvcc_key(&k, ts), v, ts);
                 }
@@ -881,6 +1037,8 @@ impl Store {
         extra: Vec<(Vec<u8>, Option<Bytes>)>,
         each: &dyn Fn(&Store, &[u8]) -> Result<()>,
     ) -> Result<()> {
+        // (Its writes don't go through `apply_hot`.)
+        self.hot.clear();
         self.rotate_locked(c)?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // (Uncompressed: the commit waits for this file, and compaction, in the background,
@@ -1682,24 +1840,47 @@ pub struct Scan {
     _view: Arc<View>,
     /// Rows come with their out-of-line values put back (`Store::scan`; `toast`).
     resolve: bool,
+    /// The rows of a hot range's chains (`hot`), read already: no merge.
+    rows: Option<std::vec::IntoIter<(Vec<u8>, Bytes)>>,
+}
+
+/// A cursor per source of `view` over [start, end), newest source first.
+fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
+    let mut sources = Vec::new();
+    sources.push(Cursor::mem(view.mem.clone(), start, end));
+    for f in &view.imm {
+        sources.push(match f {
+            Frozen::Mem(m) => Cursor::mem(m.clone(), start, end),
+            Frozen::Sst(s) => Cursor::level(vec![s.clone()], start, end),
+        });
+    }
+    for s in &view.l0 {
+        sources.push(Cursor::level(vec![s.clone()], start, end));
+    }
+    if !view.l1.is_empty() {
+        sources.push(Cursor::level(view.l1.clone(), start, end));
+    }
+    sources
 }
 
 impl Scan {
+    fn of_rows(view: Arc<View>, rows: Vec<(Vec<u8>, Bytes)>, ts: u64) -> Scan {
+        Scan {
+            merge: Merge::new(Vec::new(), Vec::new()),
+            ts,
+            decided: None,
+            decided_ts: 0,
+            skipped: 0,
+            newer: None,
+            horizon: 0,
+            _view: view,
+            resolve: false,
+            rows: Some(rows.into_iter()),
+        }
+    }
+
     fn new(view: Arc<View>, start: Vec<u8>, end: Vec<u8>, ts: u64, horizon: u64) -> Scan {
-        let mut sources = Vec::new();
-        sources.push(Cursor::mem(view.mem.clone(), &start, &end));
-        for f in &view.imm {
-            sources.push(match f {
-                Frozen::Mem(m) => Cursor::mem(m.clone(), &start, &end),
-                Frozen::Sst(s) => Cursor::level(vec![s.clone()], &start, &end),
-            });
-        }
-        for s in &view.l0 {
-            sources.push(Cursor::level(vec![s.clone()], &start, &end));
-        }
-        if !view.l1.is_empty() {
-            sources.push(Cursor::level(view.l1.clone(), &start, &end));
-        }
+        let sources = sources(&view, &start, &end);
         Scan {
             merge: Merge::new(sources, end),
             ts,
@@ -1710,6 +1891,7 @@ impl Scan {
             horizon,
             _view: view,
             resolve: false,
+            rows: None,
         }
     }
 
@@ -1736,6 +1918,13 @@ impl Iterator for Scan {
     type Item = Result<(Vec<u8>, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(rows) = &mut self.rows {
+            let (k, v) = rows.next()?;
+            if self.resolve && toast::has_external(&v) {
+                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
+            }
+            return Some(Ok((k, v)));
+        }
         loop {
             let i = match self.merge.min() {
                 Ok(Some(i)) => i,
@@ -2161,6 +2350,113 @@ mod tests {
                 assert_eq!(fwd, rev, "ts {ts}, range {a:?}..{b:?}");
             }
         }
+    }
+
+    /// A relation range scanned whole again and again is read from its version chains
+    /// (`hot`): what every snapshot sees stays what the merging scan and the model show,
+    /// through hot-key updates, deletions, pruning under pinned snapshots, flushes,
+    /// compactions and a commit ingested as an SST (which drops the kept ranges).
+    #[test]
+    fn hot_ranges_match_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            dir.path(),
+            StoreOptions { memtable_bytes: 64 << 10, sync: false, ..StoreOptions::default() },
+        )
+        .unwrap();
+        let rel = keys::index_prefix(16_384, 0);
+        let end = keys::prefix_end(&rel);
+        let key = |i: u32| {
+            let mut k = rel.clone();
+            k.extend_from_slice(&i.to_be_bytes());
+            k
+        };
+        // A key of the next relation: never in the range's scans.
+        let mut other = keys::index_prefix(16_384, 1);
+        other.push(1);
+        let mut model: BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>> = BTreeMap::new();
+        let mut pins: Vec<SnapshotPin> = Vec::new();
+        let check = |model: &BTreeMap<Vec<u8>, Vec<(u64, Option<Bytes>)>>, ts: u64, what: &str| {
+            let expect: Vec<(Vec<u8>, Bytes)> = model
+                .range(rel.clone()..end.clone())
+                .filter_map(|(k, vs)| Some((k.clone(), vs.iter().rev().find(|(t, _)| *t <= ts)?.1.clone()?)))
+                .collect();
+            let merged: Vec<_> = store.view().scan(&rel, &end, ts).map(|r| r.unwrap()).collect();
+            assert_eq!(merged, expect, "merging scan, {what}, ts {ts}");
+            let hot: Vec<_> = store.scan(&rel, &end, ts).map(|r| r.unwrap()).collect();
+            assert_eq!(hot, expect, "hot scan, {what}, ts {ts}");
+            let (a, b) = (key(3), key(7));
+            let part: Vec<_> = store.scan(&a, &b, ts).map(|r| r.unwrap()).collect();
+            let want: Vec<_> = expect.iter().filter(|(k, _)| *k >= a && *k < b).cloned().collect();
+            assert_eq!(part, want, "part of the range, {what}, ts {ts}");
+        };
+        for round in 0..40u32 {
+            // Each commit updates a hot key or two (now and then deleting one), and a key
+            // outside the range.
+            let mut writes = vec![
+                (key(round % 10), (round % 9 != 8).then(|| Bytes::from(format!("v{round}")))),
+                (other.clone(), Some(Bytes::from_static(b"x"))),
+            ];
+            if round % 3 == 0 {
+                writes.push((key(10 + round % 4), Some(Bytes::from(format!("w{round}")))));
+            }
+            writes.sort_by(|a, b| a.0.cmp(&b.0));
+            let ts = store.commit(writes.clone(), |_| Ok(())).unwrap();
+            for (k, v) in writes {
+                model.entry(k).or_default().push((ts, v));
+            }
+            if round % 5 == 0 {
+                pins.push(store.pin_visible());
+            }
+            if round % 11 == 10 {
+                // An old snapshot ends: its versions may go.
+                pins.remove(0);
+            }
+            match round {
+                15 => {
+                    store.rotate().unwrap();
+                    store.flush_all().unwrap();
+                }
+                25 => store.compact().unwrap(),
+                30 => {
+                    // A commit big enough to be ingested as an SST of its own.
+                    let big: Vec<_> =
+                        (100..400u32).map(|i| (key(i), Some(Bytes::from(vec![b'b'; 64])))).collect();
+                    let ts = store.commit(big.clone(), |_| Ok(())).unwrap();
+                    for (k, v) in big {
+                        model.entry(k).or_default().push((ts, v));
+                    }
+                }
+                _ => {}
+            }
+            for p in &pins {
+                check(&model, p.ts, &format!("round {round}"));
+            }
+            check(&model, store.visible_ts(), &format!("round {round}"));
+        }
+        assert!(store.hot.any.load(Ordering::Acquire), "the range is kept");
+    }
+
+    /// An asynchronous commit is visible as soon as it returns, and the WAL writer makes it
+    /// durable within its delay; a synchronous commit after it covers it at once.
+    #[test]
+    fn async_commits_visible_then_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), StoreOptions { sync: true, ..StoreOptions::default() }).unwrap();
+        let t1 = store.commit_async(vec![(b"a".to_vec(), Some(Bytes::from_static(b"1")))], |_, _| Ok(()), 50).unwrap();
+        assert_eq!(store.visible_ts(), t1);
+        assert_eq!(store.get(b"a", t1).unwrap().as_deref(), Some(&b"1"[..]));
+        let start = std::time::Instant::now();
+        while store.durable.load(Ordering::Acquire) < t1 {
+            assert!(start.elapsed() < std::time::Duration::from_secs(5), "never made durable");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let t2 = store.commit_async(vec![(b"b".to_vec(), Some(Bytes::from_static(b"2")))], |_, _| Ok(()), 10_000).unwrap();
+        let t3 = put(&store, "c", Some("3"));
+        assert!(t3 > t2 && store.durable.load(Ordering::Acquire) >= t3);
+        drop(store);
+        let store = Store::open(dir.path(), StoreOptions::default()).unwrap();
+        assert_eq!(scan_all(&store, store.visible_ts()).len(), 3);
     }
 
     fn opts() -> StoreOptions {

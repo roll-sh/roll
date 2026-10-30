@@ -2282,6 +2282,12 @@ impl Settings {
         self.derived().fmt.clone()
     }
 
+    /// (client_encoding, server_encoding) as encoding ids, as `format_ctx` has them.
+    pub fn encodings(&self) -> (i32, i32) {
+        let f = &self.derived().fmt;
+        (f.client_encoding, f.server_encoding)
+    }
+
     fn build_format_ctx(&self) -> FormatCtx {
         FormatCtx {
             tz: self

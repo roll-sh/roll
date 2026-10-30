@@ -3499,7 +3499,7 @@ fn reads_only_others(p: &crate::sql::plan::Plan, t: &crate::catalog::Table) -> b
 }
 
 pub struct InsertNode {
-    plan: Box<InsertPlan>,
+    plan: super::planref::PlanRef<InsertPlan>,
     source: BoxNode,
     done: bool,
     /// Rows changed by ON CONFLICT DO UPDATE in this command.
@@ -3525,7 +3525,7 @@ pub struct InsertNode {
 }
 
 impl InsertNode {
-    pub fn new(plan: Box<InsertPlan>, ctx: &ExecCtx) -> Result<Self> {
+    pub fn new(plan: super::planref::PlanRef<InsertPlan>, ctx: &ExecCtx) -> Result<Self> {
         // (ExecutorStart: es_output_cid, which the next command moves past.)
         ctx.txn.borrow_mut().output_cid();
         let rules = &plan.rules;
@@ -4236,7 +4236,7 @@ pub(super) fn reads_transition(trigs: &[crate::sql::plan::BoundTrigger], event: 
 }
 
 pub struct UpdateNode {
-    plan: Box<UpdatePlan>,
+    plan: super::planref::PlanRef<UpdatePlan>,
     source: BoxNode,
     /// The rows updated so far, when the source can return a row more than once (a join).
     seen: Option<super::fasthash::HashSet<Vec<u8>>>,
@@ -4269,7 +4269,7 @@ fn take_capture(after: &mut Vec<AfterRow>) -> Vec<AfterRow> {
 }
 
 impl UpdateNode {
-    pub fn new(plan: Box<UpdatePlan>, ctx: &ExecCtx) -> Result<Self> {
+    pub fn new(plan: super::planref::PlanRef<UpdatePlan>, ctx: &ExecCtx) -> Result<Self> {
         // (ExecInitModifyTable: a foreign member can't give its rows to the transition
         // tables.)
         if plan.inh && reads_transition(&plan.rules.triggers, tt::UPDATE) && plan.members.iter().any(|m| m.rules.table.foreign.is_some()) {
@@ -4903,7 +4903,7 @@ impl Node for UpdateNode {
 // ── DELETE ──
 
 pub struct DeleteNode {
-    plan: Box<DeletePlan>,
+    plan: super::planref::PlanRef<DeletePlan>,
     source: BoxNode,
     /// The rows deleted so far, when the source can return a row more than once (a join).
     seen: Option<super::fasthash::HashSet<Vec<u8>>>,
@@ -4933,7 +4933,7 @@ impl DeleteNode {
             && !crate::sql::paths::plan_volatile_deep(&plan.source)
     }
 
-    pub fn new(plan: Box<DeletePlan>, ctx: &ExecCtx) -> Result<Self> {
+    pub fn new(plan: super::planref::PlanRef<DeletePlan>, ctx: &ExecCtx) -> Result<Self> {
         if plan.inh && reads_transition(&plan.triggers, tt::DELETE) && plan.members.iter().any(|m| m.table.foreign.is_some()) {
             return Err(crate::ext::postgres_fdw::modify::transition_error());
         }

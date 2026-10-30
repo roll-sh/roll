@@ -448,13 +448,7 @@ thread_local! {
 
 /// Take up the session's client_encoding for the messages that follow.
 fn sync_client_encoding(s: &Session) {
-    let st = s.state.settings.borrow();
-    let id = |name| {
-        st.get_str(name)
-            .and_then(crate::types::encnames::encoding_id)
-            .unwrap_or(crate::types::mbconv::UTF8)
-    };
-    let e = (id("client_encoding"), id("server_encoding"));
+    let e = s.state.settings.borrow().encodings();
     CLIENT_ENC.with(|c| c.set(e));
 }
 

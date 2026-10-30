@@ -10,6 +10,7 @@ pub mod lookup;
 pub mod need;
 pub mod parscan;
 pub mod partial;
+pub mod planref;
 pub mod nodes;
 pub mod scan;
 pub mod pghash;

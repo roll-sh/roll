@@ -412,6 +412,7 @@ impl Database {
             notifies: Vec::new(),
             lo_descs: Vec::new(),
             publish: false,
+            async_commit: None,
             new_storage: HashMap::new(),
             si_locks: Vec::new(),
             sxact: false,
@@ -887,6 +888,9 @@ pub struct Txn {
     pub lo_descs: Vec<Option<crate::largeobj::Desc>>,
     /// It only brings the cluster-wide catalogs up to date (another database changed them).
     pub publish: bool,
+    /// Commit without waiting for the WAL fsync (`synchronous_commit = off`), the WAL
+    /// writer's delay in ms (wal_writer_delay): `Store::commit_async`. None: synchronous.
+    pub async_commit: Option<u64>,
     /// Relations given new storage (TRUNCATE, a rewrite) in this transaction, by the
     /// subtransaction depth that gave it (rd_newRelfilelocatorSubid).
     new_storage: HashMap<u32, usize>,
@@ -2892,6 +2896,9 @@ impl Txn {
         let log = if xid != 0 { self.log.take().filter(|l| l.seq > 0 || new_catalog) } else { None };
         let repl = if log.is_some() { self.db.repl() } else { None };
         let sealed = std::cell::Cell::new(None);
+        // (Decoders read a commit once it is visible: one they decode waits for its fsync, as
+        // PostgreSQL's walsenders send only flushed WAL.)
+        let decoded = repl.is_some();
         let placeholder = if repl.is_some() { crate::repl::log::placeholder_key() } else { Vec::new() };
         if repl.is_some() {
             writes.push((placeholder.clone(), None));
@@ -2991,6 +2998,10 @@ impl Txn {
                 }
             };
             self.db.store.commit_grouped(writes, check, appended, publish_catalog)
+        } else if let Some(delay) = self.async_commit.filter(|_| !self.prepared && !decoded) {
+            // (RecordTransactionCommit: asynchronous unless it changed the catalog; COMMIT
+            // PREPARED always waits.)
+            self.db.store.commit_async(writes, check, delay)
         } else {
             self.db.store.commit_grouped(writes, check, |_| {}, |_| {})
         };

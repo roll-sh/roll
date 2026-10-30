@@ -226,6 +226,26 @@ impl Pivot {
             size: MINUS_INF,
         }
     }
+
+    /// Below `lo` (minus infinity is below everything), comparing its kept attributes.
+    fn below(&self, lo: &[u8], nkey: usize) -> bool {
+        match &self.key {
+            None => true,
+            Some(k) => k.key_bytes(self.natts.min(nkey)) < lo,
+        }
+    }
+}
+
+/// Which child of an inner page's pivots (in key order) a descent to `lo` takes: the last
+/// one below it (else the first). A binary search: inner pages hold hundreds of pivots.
+fn child_for(inner: &[(Pivot, u32)], lo: &[u8], nkey: usize) -> usize {
+    let i = inner.partition_point(|(pv, _)| pv.below(lo, nkey)).saturating_sub(1);
+    debug_assert_eq!(
+        i,
+        inner.iter().rposition(|(pv, _)| pv.below(lo, nkey)).unwrap_or(0),
+        "pivots out of order"
+    );
+    i
 }
 
 #[derive(Clone, Debug, Default)]
@@ -847,14 +867,7 @@ impl Btree {
             }
             let i = match lo {
                 None => 0,
-                Some(lo) => p
-                    .inner
-                    .iter()
-                    .rposition(|(pv, _)| match &pv.key {
-                        None => true,
-                        Some(k) => k.key_bytes(pv.natts.min(nkey)) < lo,
-                    })
-                    .unwrap_or(0),
+                Some(lo) => child_for(&p.inner, lo, nkey),
             };
             blk = p.inner[i].1;
         }
@@ -943,14 +956,7 @@ impl Btree {
             }
             let i = match lo {
                 None => 0,
-                Some(lo) => p
-                    .inner
-                    .iter()
-                    .rposition(|(pv, _)| match &pv.key {
-                        None => true,
-                        Some(k) => k.key_bytes(pv.natts.min(nkey)) < lo,
-                    })
-                    .unwrap_or(0),
+                Some(lo) => child_for(&p.inner, lo, nkey),
             };
             blk = p.inner[i].1;
         }
@@ -1010,14 +1016,7 @@ impl Btree {
             }
             let i = match lo {
                 None => 0,
-                Some(lo) => p
-                    .inner
-                    .iter()
-                    .rposition(|(pv, _)| match &pv.key {
-                        None => true,
-                        Some(k) => k.key_bytes(pv.natts.min(nkey)) < lo,
-                    })
-                    .unwrap_or(0),
+                Some(lo) => child_for(&p.inner, lo, nkey),
             };
             blk = p.inner[i].1;
         }

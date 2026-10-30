@@ -34,19 +34,19 @@ pub fn open_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx) -> Re
 /// An UPDATE's node: a postgres_fdw statement sent whole, or ModifyTable's. (Out of
 /// `open_node`, whose frame is on every plan level's stack.)
 #[inline(never)]
-fn open_update(p: &crate::sql::plan::UpdatePlan, ctx: &ExecCtx) -> Result<BoxNode> {
+fn open_update(plan: &Arc<Plan>, p: &crate::sql::plan::UpdatePlan, ctx: &ExecCtx) -> Result<BoxNode> {
     match crate::ext::postgres_fdw::direct::open_update(p, ctx)? {
         Some(n) => Ok(n),
-        None => Ok(Box::new(super::dml::UpdateNode::new(Box::new(p.clone()), ctx)?)),
+        None => Ok(Box::new(super::dml::UpdateNode::new(super::planref::update(plan).expect("an UPDATE"), ctx)?)),
     }
 }
 
 /// A DELETE's node: a postgres_fdw statement sent whole, or ModifyTable's.
 #[inline(never)]
-fn open_delete(p: &crate::sql::plan::DeletePlan, ctx: &ExecCtx) -> Result<BoxNode> {
+fn open_delete(plan: &Arc<Plan>, p: &crate::sql::plan::DeletePlan, ctx: &ExecCtx) -> Result<BoxNode> {
     match crate::ext::postgres_fdw::direct::open_delete(p, ctx)? {
         Some(n) => Ok(n),
-        None => Ok(Box::new(super::dml::DeleteNode::new(Box::new(p.clone()), ctx)?)),
+        None => Ok(Box::new(super::dml::DeleteNode::new(super::planref::delete(plan).expect("a DELETE"), ctx)?)),
     }
 }
 
@@ -87,7 +87,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             rows: rows.clone(),
             i: 0,
         }),
-        Plan::Scan(s) => super::scan::open_scan(s, need, ctx)?,
+        Plan::Scan(s) => super::scan::open_scan(s, Some(plan), need, ctx)?,
         Plan::SysScan { mark: Some(_), .. } => open_locked_sys_scan(plan, need, ctx)?,
         Plan::SysScan { table, filter, path, .. } => {
             if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), need, ctx)? {
@@ -561,9 +561,9 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 width: *width,
             })
         }
-        Plan::Insert(p) => Box::new(super::dml::InsertNode::new(p.clone(), ctx)?),
-        Plan::Update(p) => open_update(p, ctx)?,
-        Plan::Delete(p) => open_delete(p, ctx)?,
+        Plan::Insert(_) => Box::new(super::dml::InsertNode::new(super::planref::insert(plan).expect("an INSERT"), ctx)?),
+        Plan::Update(p) => open_update(plan, p, ctx)?,
+        Plan::Delete(p) => open_delete(plan, p, ctx)?,
         Plan::Merge(p) => Box::new(super::merge::MergeNode::new(p.clone(), ctx)?),
         Plan::Foreign(f) => crate::ext::fdw::open(f, ctx)?,
     })

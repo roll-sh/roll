@@ -191,6 +191,17 @@ impl Prepared {
     }
 }
 
+/// Whether a commit now is asynchronous (synchronous_commit = off: `Store::commit_async`),
+/// with the WAL writer's delay (wal_writer_delay, ms). Its other levels (local,
+/// remote_write, remote_apply, on) all wait for the local WAL fsync: no synchronous standby.
+fn async_commit(state: &SessionState) -> Option<u64> {
+    let st = state.settings.borrow();
+    let off = st
+        .get_str("synchronous_commit")
+        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "off" | "false" | "no" | "0"));
+    off.then(|| st.int("wal_writer_delay").max(1) as u64)
+}
+
 /// A bound portal (extended protocol), run on Execute; rows beyond `max_rows` wait here.
 pub struct Portal {
     pub stmt: Arc<Prepared>,
@@ -679,6 +690,7 @@ impl Session {
                 stats = std::mem::take(&mut t.pgstat);
                 let origin = crate::repl::origin::before_commit(&self.state, &mut t);
                 let stamp = crate::repl::commit_ts::before_commit(&self.state, &mut t);
+                t.async_commit = async_commit(&self.state);
                 let r = self.state.cluster.commit(t).map(|_| ());
                 if let (Ok(()), Some(o)) = (&r, origin) {
                     crate::repl::origin::after_commit(&self.state, o);
@@ -2104,20 +2116,20 @@ impl Session {
         // (`pg_temp` is this session's while it binds, on a thread another session may
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema(&self.state.temp_schema());
-        let Some(stmt) = p.stmt.clone() else {
+        let Some(stmt) = p.stmt.as_ref() else {
             return Ok(None);
         };
         let r = (|| -> Result<Option<Vec<OutCol>>> {
-            match inner(&stmt) {
+            match inner(stmt) {
                 // (DML on a derived system catalog: no RETURNING, no rows.)
                 Some(n) if ddl::catalog_dml_query(n).is_some() => Ok(None),
                 // (Describe doesn't plan: what fails only when planned, ON CONFLICT's arbiter
                 // inference say, is described by the statement's analysis.)
-                Some(NodeEnum::SelectStmt(_)) => Ok(Some(match self.bound(p, &stmt, &[]) {
+                Some(NodeEnum::SelectStmt(_)) => Ok(Some(match self.bound(p, stmt, &[]) {
                     Ok(b) => b.cols.clone(),
                     Err(e) if is_result_change(&e) => return Err(e),
 
-                    Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
+                    Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1,
                 })),
                 Some(
                     NodeEnum::InsertStmt(_)
@@ -2125,11 +2137,11 @@ impl Session {
                     | NodeEnum::DeleteStmt(_)
                     | NodeEnum::MergeStmt(_),
                 ) => {
-                    let cols = match self.bound(p, &stmt, &[]) {
+                    let cols = match self.bound(p, stmt, &[]) {
                         Ok(b) => b.cols.clone(),
                             Err(e) if is_result_change(&e) => return Err(e),
 
-                            Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
+                            Err(e) => self.analyzed_params(stmt, &p.param_types, e)?.1,
                     };
                     Ok((!cols.is_empty()).then_some(cols))
                 }
@@ -3364,6 +3376,7 @@ pub(crate) fn end_txn_midway(ctx: &ExecCtx, commit: bool, chain: bool) -> Result
     let stats = std::mem::take(&mut old.pgstat);
     let r = if commit {
         let notes = std::mem::take(&mut old.notifies);
+        old.async_commit = async_commit(ctx.sess);
         let r = ctx.sess.cluster.commit(old).map(Some);
         committed_notify(ctx.sess, r.is_ok(), &notes);
         r

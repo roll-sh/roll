@@ -377,7 +377,8 @@ fn open_foreign(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<Bo
     Err(cat.fdw_routine_error(&s.table).unwrap_or_else(|| crate::error::internal("foreign table without a wrapper")))
 }
 
-pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+/// (`shared`: the plan node `s` is the part of, which the scan's node reads `s` through.)
+pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
     if ctx.gone_rels.borrow().contains(&s.table.oid) {
         return Ok(Box::new(super::nodes::VecNode::new(Vec::new())));
     }
@@ -457,7 +458,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             only: None,
             key: s as *const ScanPlan as usize,
             need: if matches!(s.access, Access::Bitmap(..)) && s.index.is_none() { need } else { None },
-            plan,
+            plan: super::planref::PlanRef::Own(Box::new(plan)),
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
@@ -514,7 +515,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             only: None,
             key: s as *const ScanPlan as usize,
             need: if matches!(s.access, Access::Bitmap(..)) && s.index.is_none() { need } else { None },
-            plan,
+            plan: super::planref::PlanRef::Own(Box::new(plan)),
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
@@ -574,7 +575,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             only: None,
             key: s as *const ScanPlan as usize,
             need: None,
-            plan,
+            plan: super::planref::PlanRef::Own(Box::new(plan)),
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
@@ -642,7 +643,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             // (Only the columns read above: a candidate the filter drops needn't have its
             // vector decoded.)
             need: need.clone(),
-            plan,
+            plan: super::planref::PlanRef::Own(Box::new(plan)),
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
@@ -689,7 +690,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         let mut fwd = s.clone();
         fwd.reverse = false;
         fwd.limit = None;
-        let inner = open_scan_as(&fwd, s as *const ScanPlan as usize, ranges, None, ctx)?;
+        let inner = open_scan_as(&fwd, None, s as *const ScanPlan as usize, ranges, None, ctx)?;
         // A GiST circle or polygon distance is lossy (rechecked on the heap row), which an
         // index-only scan can't do.
         let lossy_ios = matches!(s.access, Access::Index { only: true, .. })
@@ -720,7 +721,7 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         let mut fwd = s.clone();
         fwd.reverse = false;
         fwd.limit = None;
-        let inner = open_scan_as(&fwd, s as *const ScanPlan as usize, ranges, need, ctx)?;
+        let inner = open_scan_as(&fwd, None, s as *const ScanPlan as usize, ranges, need, ctx)?;
         return Ok(Box::new(Backward {
             inner: Some(inner),
             rows: Vec::new(),
@@ -730,12 +731,13 @@ pub fn open_scan(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             fetches: None,
         }));
     }
-    open_scan_as(s, s as *const ScanPlan as usize, ranges, need, ctx)
+    open_scan_as(s, shared, s as *const ScanPlan as usize, ranges, need, ctx)
 }
 
 /// A scan over `ranges`, counted (EXPLAIN ANALYZE) as the scan `key`.
 fn open_scan_as(
     s: &ScanPlan,
+    shared: Option<&Arc<crate::sql::plan::Plan>>,
     key: usize,
     mut ranges: Vec<(Vec<u8>, Vec<u8>)>,
     need: Option<Rc<[bool]>>,
@@ -850,7 +852,9 @@ fn open_scan_as(
         only,
         key,
         need,
-        plan: s.clone(),
+        plan: shared
+            .and_then(super::planref::scan)
+            .unwrap_or_else(|| super::planref::PlanRef::Own(Box::new(s.clone()))),
         ranges,
         cur_range: 0,
         iter: None,
@@ -1552,7 +1556,7 @@ fn dense_bitmap_scan(
         only: None,
         key: s as *const ScanPlan as usize,
         need,
-        plan,
+        plan: super::planref::PlanRef::Own(Box::new(plan)),
         ranges: vec![(p.clone(), prefix_end(&p))],
         cur_range: 0,
         iter: None,
@@ -1691,7 +1695,7 @@ struct ScanNode {
     /// The table columns decoded (`scan_need`; None: all).
     need: Option<Rc<[bool]>>,
     stat: StatTarget,
-    plan: ScanPlan,
+    plan: super::planref::PlanRef<ScanPlan>,
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
     cur_range: usize,
     iter: Option<StoreIter>,
@@ -2397,8 +2401,9 @@ impl ScanNode {
 
 impl ScanNode {
     /// A stored row as this scan emits it: columns, then the key and system columns if asked.
-    /// The columns a row's filter reads, when the row's other columns read include an
-    /// extension type's (decided once; None: the filter goes over the whole row).
+    /// The columns a row's filter reads, when the row's other columns read include one
+    /// passed by reference (text, numeric, an extension type's: decoding allocates) the
+    /// filter doesn't read (decided once; None: the filter goes over the whole row).
     fn prefilter_mask(&mut self) -> Option<Rc<[bool]>> {
         if self.prefilter.is_none() {
             let p = &self.plan;
@@ -2410,7 +2415,8 @@ impl ScanNode {
                         p.table.columns.iter().enumerate().any(|(i, c)| {
                             need(i)
                                 && !fm.get(i).copied().unwrap_or(false)
-                                && matches!(&c.ty, crate::types::DataType::Base(b) if b.ext != 0)
+                                && (matches!(&c.ty, crate::types::DataType::Base(b) if b.ext != 0)
+                                    || !c.ty.by_value())
                         })
                     })
                 }

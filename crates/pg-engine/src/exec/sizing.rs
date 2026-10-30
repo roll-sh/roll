@@ -3548,6 +3548,22 @@ pub fn heap_unprunable(t: &Table, ctx: &ExecCtx) -> bool {
 
 /// The table's current size in pages (None: not modelled).
 pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
+    // The heap and every btree index laid out already (`ensure` has nothing to do): no need
+    // to bind the indexes (a scan of a small table asks per statement).
+    {
+        let rf = ctx.sess.db.relfiles.read();
+        if let Some(h) = rf.heaps.get(&t.oid)
+            && !rf.untracked.contains(&t.oid)
+        {
+            let cat = ctx.catalog();
+            let modelled = |oid: &u32| {
+                cat.indexes.get(oid).is_none_or(|i| i.method != "btree") || rf.btrees.contains_key(oid)
+            };
+            if t.indexes.iter().all(modelled) && t.pkey_index.as_ref().is_none_or(modelled) {
+                return Ok(Some(h.nblocks()));
+            }
+        }
+    }
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
     if !ensure(t, &indexes, ctx)? {
         return Ok(ctx.sess.db.relfiles.read().estimated.get(&t.oid).map(|e| e.pages));
