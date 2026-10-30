@@ -1530,8 +1530,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     settings generation (`Settings::planner`); a merge clause's mergejoinscansel once per
     join search (`Search::scansels`, RestrictInfo's scansel_cache); an EXPLAIN / estimate
     scan's partial paths from one look at the relation (`parallel::partial_scans`, was
-    `partial_scan` and `ordered_partial_scans`); `Expr::same_as` of two columns without
-    writing them; join MCV lists through the slot cache; a built-in operator over built-in
+    `partial_scan` and `ordered_partial_scans`); join MCV lists through the slot cache; a
+    built-in operator over built-in
     scalar types resolved once per thread while the catalog has no made cast
     (`func::BINOPS`, batch 2).
   - Found on the way: `SessionState::pl_compiled` / `pl_validated` / `pl_lexed` were
