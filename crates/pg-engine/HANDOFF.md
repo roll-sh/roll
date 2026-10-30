@@ -2016,6 +2016,14 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     scans keep their per-scan model build (`gist_point_scan`, for PostgreSQL's index order),
     PG 18 skip scans read the whole leading-column range, and the engine plans an Index Only
     Scan over a GiST box index where PostgreSQL plans a bitmap scan (planner).
+  - Verified: crate tests in debug and release (deep_input included), clippy (nothing new),
+    difftest smoke, isolation 132 / 133 specs with the roll-* ones (1,728 / 1,729
+    permutations: intra-grant-inplace, as before), a full regress run (debug, private
+    reference) 51,148 / 51,150 with 0 units changed, before and after rebasing onto agent
+    101's and 99's batches; contrib btree_gist 613 / 616, pg_trgm 261, cube 316, bloom 58
+    unchanged; pgvector 803 / 915 against a reference built with `-DIVFFLAT_BENCH
+    -DHNSW_MEMORY` (its extra notices at hnsw / ivfflat builds and scans: the reference
+    differs from `expected/` in those 7 files, the engine's rows don't).
 
 ## Repository layout
 
