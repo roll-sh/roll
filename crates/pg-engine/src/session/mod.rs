@@ -132,6 +132,13 @@ struct PlanUses {
     fixed_result: Option<Vec<(String, u32, i32)>>,
 }
 
+/// RevalidateCachedQuery's error: a prepared statement whose result row the catalog changed
+/// fails as such at Describe and Bind (before Bind checks its result formats against the
+/// columns: pgx's statement cache retries on it), not described by its analysis.
+fn is_result_change(e: &Error) -> bool {
+    e.code == code::FEATURE_NOT_SUPPORTED && e.message == "cached plan must not change result type"
+}
+
 fn result_row(cols: &[OutCol]) -> Vec<(String, u32, i32)> {
     cols.iter()
         .map(|c| (c.name.clone(), c.type_oid(), c.ty.typmod()))
@@ -2108,6 +2115,8 @@ impl Session {
                 // inference say, is described by the statement's analysis.)
                 Some(NodeEnum::SelectStmt(_)) => Ok(Some(match self.bound(p, &stmt, &[]) {
                     Ok(b) => b.cols.clone(),
+                    Err(e) if is_result_change(&e) => return Err(e),
+
                     Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
                 })),
                 Some(
@@ -2118,6 +2127,8 @@ impl Session {
                 ) => {
                     let cols = match self.bound(p, &stmt, &[]) {
                         Ok(b) => b.cols.clone(),
+                            Err(e) if is_result_change(&e) => return Err(e),
+
                             Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
                     };
                     Ok((!cols.is_empty()).then_some(cols))

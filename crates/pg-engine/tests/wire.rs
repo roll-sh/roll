@@ -3748,3 +3748,30 @@ fn listen_settings_and_connection_addresses() {
     });
     s.engine.shutdown();
 }
+
+/// A prepared statement whose result row a later ALTER TABLE changed fails at Bind with
+/// RevalidateCachedQuery's error, before the Bind's result formats (one per described column)
+/// are checked against the new columns: pgx's statement cache drops the statement on it and
+/// prepares it again (its TestStmtCacheInvalidationConn).
+#[test]
+fn cached_plan_result_change_before_result_formats() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        c.batch_execute(
+            "CREATE TABLE drop_cols (id serial PRIMARY KEY, f1 int NOT NULL, f2 int NOT NULL); INSERT INTO drop_cols (f1, f2) VALUES (1, 2)",
+        )
+        .await
+        .unwrap();
+        let st = c.prepare("SELECT * FROM drop_cols WHERE id = $1").await.unwrap();
+        assert_eq!(c.query(&st, &[&1i32]).await.unwrap().len(), 1);
+        c.batch_execute("ALTER TABLE drop_cols DROP COLUMN f1").await.unwrap();
+        let e = c.query(&st, &[&1i32]).await.unwrap_err();
+        let d = e.as_db_error().expect("db error");
+        assert_eq!((d.code().code(), d.message()), ("0A000", "cached plan must not change result type"));
+        // Prepared again, it runs over the new columns.
+        let st = c.prepare("SELECT * FROM drop_cols WHERE id = $1").await.unwrap();
+        assert_eq!(c.query(&st, &[&1i32]).await.unwrap()[0].len(), 2);
+    });
+    s.engine.shutdown();
+}
