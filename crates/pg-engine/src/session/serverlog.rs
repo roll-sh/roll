@@ -28,14 +28,15 @@ impl Session {
         let lxid = self.txn.as_ref().map_or(0, |t| t.borrow().id as u32);
         Who {
             pid: self.state.pid,
-            backend_type: "client backend",
+            backend_type: conn.backend_type(),
             start: self.state.backend_start,
             remote: conn.remote.clone(),
             local: conn.local.clone(),
             lines: conn.lines.clone(),
             session: Some(SessionWho {
                 user: st.session_authorization().to_string(),
-                database: self.state.database.clone(),
+                // (The startup packet's: none for a physical walsender.)
+                database: conn.startup.as_ref().map_or_else(|| self.state.database.clone(), |s| s.database.clone()),
                 // (Not applied yet while authenticating.)
                 application_name: if *self.log_tag.borrow() == "authentication" { String::new() } else { st.show_value("application_name") },
                 command_tag: self.log_tag.borrow().clone(),

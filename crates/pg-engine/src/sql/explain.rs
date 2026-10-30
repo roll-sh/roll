@@ -19861,6 +19861,26 @@ pub fn gather_workers(plan: &Arc<Plan>, ctx: &ExecCtx) -> usize {
     sum(&b.level(plan))
 }
 
+/// The plan nodes under each Gather and Gather Merge of `plan` (the top of the part its
+/// workers run), as EXPLAIN places them.
+pub fn gather_parts(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<usize> {
+    fn first_key(n: &ExNode) -> Option<usize> {
+        n.key.or_else(|| n.children.iter().find_map(first_key))
+    }
+    fn walk(n: &ExNode, out: &mut Vec<usize>) {
+        if matches!(n.node_type, "Gather" | "Gather Merge") {
+            out.extend(n.children.first().and_then(first_key));
+            return;
+        }
+        n.children.iter().for_each(|c| walk(c, out));
+    }
+    let o = estimate_options();
+    let mut b = estimate_builder(plan, ctx, &o);
+    let mut out = Vec::new();
+    walk(&b.level(plan), &mut out);
+    out
+}
+
 /// `estimate` of a sub-select's plan (a level of its own): every `Outer(d, ..)` in it is a
 /// value of an enclosing level, so a sub-select of it reading only those is an InitPlan its
 /// top node pays for once (SS_charge_for_initplans), not a SubPlan run per row.

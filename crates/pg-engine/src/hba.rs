@@ -22,6 +22,8 @@ pub struct HbaLine {
     pub netmask: Option<String>,
     pub method: String,
     pub options: Vec<String>,
+    /// The line as written (an authentication failure's log DETAIL quotes it).
+    pub raw: String,
     /// (address, prefix bits) for host lines with an address (not all / samehost / samenet).
     net: Option<(IpAddr, u8)>,
     pub error: Option<String>,
@@ -98,6 +100,7 @@ impl HbaLine {
             netmask: None,
             method: String::new(),
             options: Vec::new(),
+            raw: String::new(),
             net: None,
             error: Some(msg.into()),
         }
@@ -161,7 +164,8 @@ fn parse_hba_line(line: u32, l: &str) -> Option<HbaLine> {
     if let Some(o) = options.iter().find(|o| !o.contains('=')) {
         return Some(HbaLine::error(line, format!("authentication option not in name=value format: {o}")));
     }
-    Some(HbaLine { line, conn_type, databases, users, address, netmask, method, options, net, error: None })
+    let raw = l.trim_end_matches('\r').to_string();
+    Some(HbaLine { line, conn_type, databases, users, address, netmask, method, options, raw, net, error: None })
 }
 
 fn mask_text(ip: IpAddr, bits: u8) -> String {

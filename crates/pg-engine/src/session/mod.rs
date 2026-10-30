@@ -1746,6 +1746,7 @@ impl Session {
         let mut parallel = false;
         // pg_stat_statements: the workers the plan's Gathers launch.
         let count_workers = self.pgss_counts_workers();
+        let parallel_workers_alone = self.state.settings.borrow().workers_alone();
         let mut workers = 0;
         // auto_explain (explain_ExecutorStart / End): the plan, with what ran, when it took
         // long enough.
@@ -1761,6 +1762,11 @@ impl Session {
             let ae_start = std::time::Instant::now();
             if count_workers {
                 workers = crate::sql::explain::gather_workers(&bq.plan, ctx) as i64;
+            }
+            // (The part below each Gather that only the workers would run: its locks end
+            // with them.)
+            if parallel_workers_alone && !bq.plan.writes() {
+                *ctx.worker_parts.borrow_mut() = crate::exec::parallel_part::worker_parts(&bq.plan, ctx);
             }
             // ExecutorRun begins (past ExecutorStart's permission checks): the RowDescription
             // goes out, so an error from here on follows it.

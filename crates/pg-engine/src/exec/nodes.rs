@@ -16,7 +16,10 @@ use std::sync::Arc;
 pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
     // (Taken first: a mask is for this node alone, whatever happens next.)
     let need = ctx.need.take();
-    let node = crate::stack::guard(|| open_node(plan, need.as_deref(), ctx))?;
+    let mut node = crate::stack::guard(|| open_node(plan, need.as_deref(), ctx))?;
+    if !ctx.worker_parts.borrow().is_empty() && ctx.worker_parts.borrow().contains(&(Arc::as_ptr(plan) as usize)) {
+        node = super::parallel_part::WorkerPart::wrap(node);
+    }
     Ok(match &*ctx.instr.borrow() {
         Some(i) => super::InstrNode::wrap(node, Arc::as_ptr(plan) as usize, i.clone()),
         None => node,
@@ -193,7 +196,19 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             // A volatile SQL function's statement runs as a command of its own.
             let snap = volatile.then(|| ctx.fresh_snapshot());
             let pg_frame = sql_fn_frame(*scan);
-            let run = || {
+            // auto_explain.log_nested_statements: the statement is an executor run of its
+            // own in PostgreSQL (fmgr_sql's), its plan logged when it ends.
+            let mut explain = if crate::log::logs_nested() {
+                crate::ext::auto_explain::start(&ctx.sess.settings.borrow(), true).map(|run| {
+                    let instr = run.opts.analyze.then(|| Rc::new(super::Instr::default()));
+                    (run, instr)
+                })
+            } else {
+                None
+            };
+            let outer_instr = explain.as_ref().map(|(_, i)| ctx.instr.replace(i.clone()));
+            let mut ran = None;
+            let mut run = || {
                 ctx.sess.framed(frame.clone(), |_| {
                     let _frame = crate::stack::FnFrame::enter(pg_frame)?;
                     // (Planned per call: a custom plan, or the generic one bound here.)
@@ -205,18 +220,46 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                         crate::sql::binder::perms::check(p, ctx)?;
                         crate::sql::binder::perms::check_row_security(p, ctx)?;
                     }
-                    open(planned.as_ref().unwrap_or(input), ctx)
+                    let plan = planned.unwrap_or_else(|| input.clone());
+                    let node = open(&plan, ctx);
+                    ran = Some(plan);
+                    node
                 })
             };
-            let input = match &snap {
-                Some(s) => ctx.with_snapshot(s.clone(), run)?,
-                None => run()?,
+            let opened = match &snap {
+                Some(s) => ctx.with_snapshot(s.clone(), run),
+                None => run(),
+            };
+            if let Some(outer) = outer_instr {
+                *ctx.instr.borrow_mut() = outer;
+            }
+            let input = opened?;
+            let explain = match (explain.take(), ran) {
+                (Some((run, instr)), Some(plan)) => {
+                    let params = custom.as_ref().map_or_else(Vec::new, |c| {
+                        (0..c.arg_types.len())
+                            .map(|i| match ctx.outer_value(1, i) {
+                                Ok(Value::Null) | Err(_) => None,
+                                Ok(v) => Some(crate::types::text::format_value(&v, &c.arg_types[i], ctx.fmt())),
+                            })
+                            .collect()
+                    });
+                    let query = match frame {
+                        crate::error::Frame::SqlFn { src, .. } => src.clone(),
+                        _ => Arc::from(""),
+                    };
+                    let scalar = custom.as_ref().is_some_and(|c| matches!(c.place, crate::sql::plan::SqlFnPlace::Scalar));
+                    let started = std::time::Instant::now();
+                    Some(Box::new(NestedExplain { run, instr, plan, params, query, scalar, started }))
+                }
+                _ => None,
             };
             Box::new(ContextNode {
                 input,
                 frame: frame.clone(),
                 snap,
                 pg_frame,
+                explain,
             })
         }
         // create_gating_plan: the quals that read no column of the row (pseudoconstant) run
@@ -4703,6 +4746,33 @@ struct ContextNode {
     snap: Option<Rc<crate::txn::Snap>>,
     /// Postgres's stack its call holds while it runs (`sql_fn_frame`).
     pg_frame: usize,
+    /// auto_explain's nested statement, logged when its rows are done.
+    explain: Option<Box<NestedExplain>>,
+}
+
+struct NestedExplain {
+    run: crate::ext::auto_explain::Run,
+    instr: Option<Rc<super::Instr>>,
+    plan: Arc<Plan>,
+    params: Vec<Option<String>>,
+    query: Arc<str>,
+    /// A scalar call's (its plan's LIMIT 1 is the call's, not the statement's).
+    scalar: bool,
+    started: std::time::Instant,
+}
+
+impl NestedExplain {
+    fn log(self, ctx: &ExecCtx) {
+        let secs = self.started.elapsed().as_secs_f64();
+        if self.run.message(secs * 1000.0, "", "", &[]).is_none() {
+            return;
+        }
+        let plan = crate::plpgsql::statement_plan(&self.plan, self.scalar);
+        let text = crate::sql::explain::explain(plan, 0, &self.run.opts, ctx, &[], self.instr.as_deref(), 0.0, secs);
+        if let Some(m) = self.run.message(secs * 1000.0, &text, &self.query, &self.params) {
+            crate::ext::auto_explain::emit_nested(ctx, self.run.level, &m);
+        }
+    }
 }
 
 /// Postgres's stack a SQL function's call holds while its statement runs: fmgr_sql's, and
@@ -4729,6 +4799,11 @@ impl Node for ContextNode {
             None => run(),
         };
         ctx.processed.set(processed);
+        if matches!(r, Ok(None))
+            && let Some(e) = self.explain.take()
+        {
+            e.log(ctx);
+        }
         r
     }
 }

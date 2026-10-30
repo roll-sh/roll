@@ -8,6 +8,7 @@ pub mod merge;
 pub mod kernel;
 pub mod lookup;
 pub mod need;
+pub mod parallel_part;
 pub mod parscan;
 pub mod partial;
 pub mod planref;
@@ -323,6 +324,9 @@ pub struct ExecCtx<'a> {
     pub enrs: RefCell<Vec<Rc<Enr>>>,
     /// EXPLAIN ANALYZE: per-node counters (nested statements aren't instrumented).
     pub instr: RefCell<Option<Rc<Instr>>>,
+    /// The plan nodes PostgreSQL's parallel workers alone would run (`parallel_part`; set
+    /// for a top-level statement with such a Gather, else empty).
+    pub worker_parts: RefCell<Vec<usize>>,
     /// EXPLAIN ANALYZE of a utility statement (CREATE TABLE AS): the plan it ran, with its
     /// hidden range-table count.
     pub explained: RefCell<Option<(Arc<Plan>, usize)>>,
@@ -693,6 +697,7 @@ impl<'a> ExecCtx<'a> {
             ticks: Cell::new(0),
             enrs: RefCell::new(Vec::new()),
             instr: RefCell::new(None),
+            worker_parts: RefCell::new(Vec::new()),
             explained: RefCell::new(None),
             moved: RefCell::default(),
             defer_after: Cell::new(false),
@@ -819,6 +824,7 @@ impl<'a> ExecCtx<'a> {
             ticks: Cell::new(0),
             enrs: RefCell::new(self.enrs.borrow().clone()),
             instr: RefCell::new(None),
+            worker_parts: RefCell::new(Vec::new()),
             explained: RefCell::new(None),
             moved: RefCell::default(),
             defer_after: Cell::new(false),

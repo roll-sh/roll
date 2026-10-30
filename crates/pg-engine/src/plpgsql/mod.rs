@@ -897,7 +897,7 @@ fn sql_fn_planned<B, C>(
 /// The function's statement in `p`, the plan of a call's body: without the binder's
 /// projection of the result (and a scalar call's LIMIT 1), which the plan cache's costs
 /// don't see.
-fn statement_plan(p: &Arc<Plan>, scalar: bool) -> &Arc<Plan> {
+pub(crate) fn statement_plan(p: &Arc<Plan>, scalar: bool) -> &Arc<Plan> {
     let p = match &**p {
         Plan::Project { input, .. } => input,
         _ => p,
@@ -1010,13 +1010,32 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                         let run = || {
                             ctx.with_outer(Rc::new(args.clone()), || collect(&plan, ctx, None))
                         };
+                        // auto_explain.log_nested_statements: the statement's own executor
+                        // run (an inlined call has none).
+                        let ae = if crate::log::logs_nested() {
+                            crate::ext::auto_explain::start(&ctx.sess.settings.borrow(), true)
+                        } else {
+                            None
+                        };
+                        let ae_instr = ae.as_ref().filter(|a| a.opts.analyze).map(|_| {
+                            let i = Rc::new(crate::exec::Instr::default());
+                            (ctx.instr.replace(Some(i.clone())), i)
+                        });
                         // Each statement of a volatile function is a command of its own.
                         let started = std::time::Instant::now();
                         let rows = if f.volatility == 'v' {
-                            ctx.new_statement(run)?
+                            ctx.new_statement(run)
                         } else {
-                            ctx.statement(run)?
+                            ctx.statement(run)
                         };
+                        let instr = ae_instr.map(|(outer, i)| {
+                            *ctx.instr.borrow_mut() = outer;
+                            i
+                        });
+                        let rows = rows?;
+                        if let Some(a) = &ae {
+                            sql_fn_explain(ctx, f, a, &plan, b.hidden_rtes, &args, instr.as_deref(), started);
+                        }
                         sql_fn_pgss(ctx, f, &text, rows.len() as u64, started);
                         if final_stmt {
                             last = (rows, cols);
@@ -1084,6 +1103,37 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
     match result {
         Some(rows) => Ok(rows),
         None => sql_result(caller, f, last),
+    }
+}
+
+/// auto_explain's line for a statement of SQL function `f` that ran `plan` over `args`:
+/// the function's source as the query text, its arguments as the parameters.
+#[allow(clippy::too_many_arguments)]
+fn sql_fn_explain(
+    ctx: &ExecCtx,
+    f: &Function,
+    a: &crate::ext::auto_explain::Run,
+    plan: &Arc<Plan>,
+    rtes: usize,
+    args: &[Value],
+    instr: Option<&crate::exec::Instr>,
+    started: std::time::Instant,
+) {
+    let secs = started.elapsed().as_secs_f64();
+    if a.message(secs * 1000.0, "", "", &[]).is_none() {
+        return;
+    }
+    let text = crate::sql::explain::explain(plan, rtes, &a.opts, ctx, &[], instr, 0.0, secs);
+    let params: Vec<Option<String>> = args
+        .iter()
+        .zip(&f.args)
+        .map(|(v, (_, t))| match v {
+            Value::Null => None,
+            v => Some(crate::types::text::format_value(v, t, ctx.fmt())),
+        })
+        .collect();
+    if let Some(m) = a.message(secs * 1000.0, &text, &f.body, &params) {
+        crate::ext::auto_explain::emit_nested(ctx, a.level, &m);
     }
 }
 
@@ -2406,13 +2456,14 @@ impl<'c, 'a> Interp<'c, 'a> {
             coerce,
             perms,
             depend_update,
+            simple_expr,
             ..
         } = c
         else {
             unreachable!()
         };
         let plan = plan.unwrap_or(own);
-        let simple = if std::ptr::eq(plan.as_ref(), own.as_ref()) {
+        let mut simple = if std::ptr::eq(plan.as_ref(), own.as_ref()) {
             simple
         } else {
             &None
@@ -2421,12 +2472,29 @@ impl<'c, 'a> Interp<'c, 'a> {
         let values: Vec<Value> = self.vars.iter().map(|v| v.value.clone()).collect();
         let cx = self.cx();
         let child = cx.child(&[]);
-        // auto_explain.log_nested_statements: the plan of a query run through SPI (not a
-        // simple expression's, which skips the executor).
-        let ae = if simple.is_none() && crate::log::logs_nested() {
-            crate::ext::auto_explain::start(&cx.sess.settings.borrow(), true)
+        // auto_explain.log_nested_statements: the plan of a query run through SPI. Only an
+        // expression PostgreSQL evaluates as a simple one skips the executor: a statement
+        // (PERFORM, a SQL statement) runs through SPI whatever its form, and so does an
+        // expression with a sub-select; the engine's FROM-less form then runs as a Result.
+        let ae = if crate::log::logs_nested() {
+            let statement = cx.sess.frames.borrow().iter().rev().find_map(|f| match f {
+                crate::error::Frame::Query { kind, .. } => Some(*kind == "SQL statement"),
+                _ => None,
+            });
+            (simple.is_none() || !*simple_expr || statement == Some(true))
+                .then(|| crate::ext::auto_explain::start(&cx.sess.settings.borrow(), true))
+                .flatten()
         } else {
             None
+        };
+        let projected;
+        let plan = match simple {
+            Some(exprs) if ae.is_some() => {
+                projected = Arc::new(Plan::Project { input: Arc::new(Plan::One), exprs: exprs.clone() });
+                simple = &None;
+                &projected
+            }
+            _ => plan,
         };
         let ae_instr = ae.as_ref().filter(|a| a.opts.analyze).map(|_| {
             let i = Rc::new(crate::exec::Instr::default());
@@ -2469,7 +2537,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                     _ => None,
                 });
                 if let Some(m) = a.message(secs * 1000.0, &text, query.as_deref().unwrap_or(""), &[]) {
-                    crate::log::backend(&crate::log::Message { severity: Some(a.level), ..crate::log::Message::log(&m) });
+                    crate::ext::auto_explain::emit_nested(&child, a.level, &m);
                 }
             }
         }

@@ -37,6 +37,8 @@ pub(crate) fn type_layout(ty: &DataType) -> (isize, usize) {
         | T::Regcollation
         | T::Xid
         | T::Cid
+        // (pg_type's void: typlen 4, as a void function's call is costed.)
+        | T::Void
         | T::Enum(..) => (4, 4),
         T::Int8
         | T::Float8

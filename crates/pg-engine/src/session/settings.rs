@@ -497,6 +497,9 @@ struct Derived {
     /// The planner's settings (`paths::Gucs::read`, `parallel::ParCfg::read`), read on first
     /// use: every planning pass and cost estimate asks for them.
     planner: std::sync::OnceLock<(crate::sql::paths::Gucs, crate::sql::paths::parallel::ParCfg)>,
+    /// parallel_leader_participation off: a Gather's part runs in the workers alone, whose
+    /// locks end with them (`exec::parallel_part`).
+    workers_alone: bool,
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1036,6 +1039,10 @@ fn normalize(def: &Def, raw: &str) -> Result<String> {
                 plpgsql_extra_checks(name, raw)?;
                 raw.to_string()
             }
+            "log_connections" => {
+                crate::log::ConnAspects::parse(raw).map_err(|d| invalid_value(name, raw).detail(d))?;
+                raw.to_string()
+            }
             "restrict_nonsystem_relation_kind" => {
                 restrict_kinds(raw).map_err(|d| invalid_value(name, raw).detail(d))?;
                 raw.to_string()
@@ -1400,6 +1407,7 @@ impl Settings {
                     || self.int("log_min_duration_sample") >= 0,
                 logs_inside: self.bool("log_lock_waits")
                     || self.get_str("auto_explain.log_nested_statements") == Some("on"),
+                workers_alone: !self.bool("parallel_leader_participation"),
             })
         })
     }
@@ -1417,6 +1425,11 @@ impl Settings {
     /// Whether a statement writes log lines from inside it (`Derived::logs_inside`).
     pub fn logs_inside(&self) -> bool {
         self.derived().logs_inside
+    }
+
+    /// Whether parallel workers alone run a Gather's part (`Derived::workers_alone`).
+    pub fn workers_alone(&self) -> bool {
+        self.derived().workers_alone
     }
 
     /// Whether `session_replication_role` is `replica`.

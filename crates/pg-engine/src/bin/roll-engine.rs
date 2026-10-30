@@ -165,7 +165,9 @@ fn main() -> anyhow::Result<()> {
     idle::setup();
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            // (stderr is the server log's, PostgreSQL's lines: the engine's own tracing shows
+            // warnings unless RUST_LOG asks for more.)
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
     let a = Args::parse();
@@ -213,26 +215,34 @@ fn main() -> anyhow::Result<()> {
         engine.shutdown();
         return Ok(());
     }
-    // SIGTERM / SIGINT: a clean shutdown (pg_ctl stop's smart / fast modes end sessions the
-    // same way here), so sequences keep their positions.
+    // The postmaster's signals: SIGTERM a smart shutdown (sessions run to their end, new
+    // connections are refused), SIGINT a fast one (sessions end now), both with a shutdown
+    // checkpoint (sequences keep their positions); SIGQUIT an immediate one (no checkpoint:
+    // the next start recovers, as after a crash). A later, more urgent signal takes over.
+    // SIGHUP reloads the configuration files.
     {
         let engine = engine.clone();
         std::thread::spawn(move || {
+            use pg_engine::log::lifecycle::{self, Shutdown};
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
             let Ok(rt) = rt else { return };
-            rt.block_on(async {
+            let mode = rt.block_on(async {
                 use tokio::signal::unix::{SignalKind, signal};
-                let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+                let (Ok(mut term), Ok(mut int), Ok(mut quit), Ok(mut hup)) = (
                     signal(SignalKind::terminate()),
                     signal(SignalKind::interrupt()),
+                    signal(SignalKind::quit()),
                     signal(SignalKind::hangup()),
                 ) else {
-                    return;
+                    return None;
                 };
+                let mut mode: Option<Shutdown> = None;
+                let mut tick = tokio::time::interval(Duration::from_millis(20));
                 loop {
-                    tokio::select! {
-                        _ = term.recv() => break,
-                        _ = int.recv() => break,
+                    let asked = tokio::select! {
+                        _ = term.recv() => Some(Shutdown::Smart),
+                        _ = int.recv() => Some(Shutdown::Fast),
+                        _ = quit.recv() => Some(Shutdown::Immediate),
                         // SIGHUP: the configuration files again, as pg_reload_conf().
                         _ = hup.recv() => {
                             let conf = engine.server_conf();
@@ -242,26 +252,53 @@ fn main() -> anyhow::Result<()> {
                                 pg_engine::log::postmaster(Some(&files), pg_engine::error::Severity::Log, &m);
                             }
                             pg_engine::log::collector::reload(engine.command_line_values(), &files);
+                            None
                         }
+                        _ = tick.tick(), if mode.is_some() => None,
+                    };
+                    if let Some(m) = asked.filter(|m| mode.is_none_or(|cur| *m > cur)) {
+                        mode = Some(m);
+                        m.log_request(&engine);
+                        engine.refuse_connections();
+                        match m {
+                            Shutdown::Smart => {}
+                            Shutdown::Fast => engine.terminate_client_backends(),
+                            Shutdown::Immediate => return Some(m),
+                        }
+                    }
+                    if mode.is_some() && engine.client_backends() == 0 {
+                        return mode;
                     }
                 }
             });
-            for (cache, f) in pg_engine::lru::footprints() {
-                tracing::info!(
-                    cache,
-                    entries = f.entries,
-                    bytes = f.bytes,
-                    capacity = f.capacity,
-                    hits = f.hits,
-                    misses = f.misses,
-                    evictions = f.evictions,
-                    "shared cache"
-                );
+            match mode {
+                Some(Shutdown::Immediate) => {
+                    // (Sessions end with the process, without a shutdown checkpoint.)
+                    pg_engine::server::quit_clients(&engine);
+                    lifecycle::shut_down_immediately(&engine);
+                    pg_engine::log::flush();
+                    std::process::exit(0);
+                }
+                Some(_) => {
+                    for (cache, f) in pg_engine::lru::footprints() {
+                        tracing::info!(
+                            cache,
+                            entries = f.entries,
+                            bytes = f.bytes,
+                            capacity = f.capacity,
+                            hits = f.hits,
+                            misses = f.misses,
+                            evictions = f.evictions,
+                            "shared cache"
+                        );
+                    }
+                    tracing::info!("shutting down");
+                    lifecycle::shutdown(&engine);
+                    pg_engine::log::flush();
+                    std::process::exit(0);
+                }
+                None => {}
             }
-            tracing::info!("shutting down");
-            engine.shutdown();
-            pg_engine::log::flush();
-            std::process::exit(0);
         });
     }
     let listener = std::net::TcpListener::bind(&a.listen)?;
@@ -285,6 +322,7 @@ fn main() -> anyhow::Result<()> {
         // (A previous run's collector's list of files is stale.)
         let _ = std::fs::remove_file(data_dir.join("current_logfiles"));
     }
+    pg_engine::log::lifecycle::starting(&engine);
     pg_engine::log::postmaster(
         Some(&files),
         pg_engine::error::Severity::Log,
@@ -293,6 +331,7 @@ fn main() -> anyhow::Result<()> {
             listener.local_addr()?.ip(),
             listener.local_addr()?.port()),
     );
+    pg_engine::log::lifecycle::startup(&engine);
     pg_engine::log::postmaster(Some(&files), pg_engine::error::Severity::Log, "database system is ready to accept connections");
     pg_engine::server::serve(engine, listener, ServerOptions { auth })?;
     Ok(())

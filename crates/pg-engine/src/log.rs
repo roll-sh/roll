@@ -12,6 +12,7 @@
 
 pub mod collector;
 mod formats;
+pub mod lifecycle;
 
 use crate::error::{Error, Severity};
 use crate::types::datetime::{TimeZone, timestamp2tm};
@@ -176,20 +177,33 @@ pub struct Who {
     pub backend_type: &'static str,
     /// When the process started (MyStartTime; microseconds since 2000-01-01).
     pub start: i64,
-    /// A client backend's client address and port (None: no network client).
-    pub remote: Option<(String, u16)>,
+    /// A client backend's client address and port (None: no client; "[local]" without a
+    /// port: a Unix-socket one).
+    pub remote: Option<(String, Option<u16>)>,
     /// A client backend's server address (%L; None: "[local]").
     pub local: Option<String>,
     pub lines: Arc<Lines>,
 }
 
 impl Who {
-    /// A client backend before its session exists (connection received, authentication).
+    /// A client backend before its session exists: "not initialized" until the startup
+    /// packet is read (connection received), then its user and database (authentication).
     pub fn backend(pid: i32, start: i64, conn: &Conn) -> Who {
         Who {
             pid,
-            session: None,
-            backend_type: "client backend",
+            session: conn.startup.as_ref().map(|s| SessionWho {
+                user: s.user.clone(),
+                database: s.database.clone(),
+                command_tag: s.ps.into(),
+                // (InitPostgres's transaction, the backend's first; none before it, while
+                // the startup packet is checked.)
+                vxid: if s.ps.is_empty() { String::new() } else { "3/1".into() },
+                ..SessionWho::default()
+            }),
+            backend_type: match &conn.startup {
+                None => "not initialized",
+                Some(_) => conn.backend_type(),
+            },
             start,
             remote: conn.remote.clone(),
             local: conn.local.clone(),
@@ -218,26 +232,106 @@ impl Who {
         }
     }
 
+    /// A process with a client connection (MyProcPort), the not yet initialized backend
+    /// that received it included.
     fn is_client(&self) -> bool {
-        self.backend_type == "client backend"
+        matches!(self.backend_type, "client backend" | "walsender" | "not initialized")
     }
 }
 
 /// What the log reads of a client connection (MyProcPort), kept for its whole life.
 #[derive(Clone, Debug, Default)]
 pub struct Conn {
-    pub remote: Option<(String, u16)>,
+    pub remote: Option<(String, Option<u16>)>,
     pub local: Option<String>,
     pub lines: Arc<Lines>,
+    /// The startup packet's user and database, and the process title (empty until
+    /// authentication starts), until the session exists.
+    pub startup: Option<Startup>,
+    /// A replication connection's (`replication=...`): a walsender.
+    pub walsender: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Startup {
+    pub user: String,
+    pub database: String,
+    pub ps: &'static str,
 }
 
 impl Conn {
-    pub fn new(peer: Option<std::net::SocketAddr>, local: Option<std::net::SocketAddr>) -> Conn {
+    /// `unix`: a connection standing for a Unix-socket one (`hba::mark_local`): "[local]",
+    /// no port, no server address.
+    pub fn new(peer: Option<std::net::SocketAddr>, local: Option<std::net::SocketAddr>, unix: bool) -> Conn {
         Conn {
-            remote: peer.map(|p| (p.ip().to_canonical().to_string(), p.port())),
-            local: local.map(|l| l.ip().to_canonical().to_string()),
+            remote: if unix {
+                Some(("[local]".into(), None))
+            } else {
+                peer.map(|p| (p.ip().to_canonical().to_string(), Some(p.port())))
+            },
+            local: local.filter(|_| !unix).map(|l| l.ip().to_canonical().to_string()),
             lines: Arc::default(),
+            startup: None,
+            walsender: false,
         }
+    }
+
+    /// %b once the startup packet is read.
+    pub fn backend_type(&self) -> &'static str {
+        if self.walsender { "walsender" } else { "client backend" }
+    }
+}
+
+/// log_connections' aspects: PostgreSQL 18's list (receipt, authentication, authorization,
+/// setup_durations, all), or one of the booleans alone (on: the first three).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ConnAspects {
+    pub receipt: bool,
+    pub authentication: bool,
+    pub authorization: bool,
+    pub setup_durations: bool,
+}
+
+impl ConnAspects {
+    /// check_log_connections: the aspects of a value, or the DETAIL of an invalid one.
+    pub fn parse(raw: &str) -> std::result::Result<ConnAspects, String> {
+        if raw.trim().is_empty() {
+            return Ok(ConnAspects::default());
+        }
+        let Some(list) = crate::session::settings::split_identifiers(raw) else {
+            return Err("Invalid list syntax in parameter \"log_connections\".".into());
+        };
+        let on = ConnAspects { receipt: true, authentication: true, authorization: true, setup_durations: false };
+        let mut a = ConnAspects::default();
+        if let Some(first) = list.first() {
+            let compat = match first.to_ascii_lowercase().as_str() {
+                "off" | "false" | "no" | "0" => Some(ConnAspects::default()),
+                "on" | "true" | "yes" | "1" => Some(on),
+                _ => None,
+            };
+            if let Some(c) = compat {
+                if list.len() > 1 {
+                    return Err(format!("Cannot specify log_connections option \"{first}\" in a list with other options."));
+                }
+                return Ok(c);
+            }
+        }
+        for item in &list {
+            match item.to_ascii_lowercase().as_str() {
+                "receipt" => a.receipt = true,
+                "authentication" => a.authentication = true,
+                "authorization" => a.authorization = true,
+                "setup_durations" => a.setup_durations = true,
+                "all" => a = ConnAspects { setup_durations: true, ..on },
+                _ => return Err(format!("Invalid option \"{item}\".")),
+            }
+        }
+        Ok(a)
+    }
+
+    /// A value already checked (an invalid one logs nothing).
+    pub fn of(raw: &str) -> ConnAspects {
+        ConnAspects::parse(raw).unwrap_or_default()
     }
 }
 
@@ -409,7 +503,10 @@ fn prefix(f: &Format, who: &Who, now: i64, sqlstate: &str, line: u64) -> String 
             's' => Some(stamp(who.start, &f.tz, false)),
             'i' if client => Some(s.map_or(String::new(), |s| s.command_tag.clone())),
             'e' => Some(sqlstate.to_string()),
-            'r' => who.remote.as_ref().map(|(h, p)| format!("{h}({p})")),
+            'r' => who.remote.as_ref().map(|(h, p)| match p {
+                Some(p) => format!("{h}({p})"),
+                None => h.clone(),
+            }),
             'h' => who.remote.as_ref().map(|(h, _)| h.clone()),
             'L' if client => Some(who.local.clone().unwrap_or_else(|| "[local]".into())),
             'L' => Some("[none]".into()),

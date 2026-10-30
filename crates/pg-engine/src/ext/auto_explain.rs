@@ -110,6 +110,17 @@ impl Run {
     }
 }
 
+/// A nested statement's plan (log_nested_statements) at `level`, as ereport sends it: to the
+/// server log past log_min_messages (the running statement's log context), and to the
+/// client past client_min_messages, before the outer statement's own.
+pub fn emit_nested(ctx: &crate::exec::ExecCtx, level: Severity, text: &str) {
+    crate::log::backend(&crate::log::Message { severity: Some(level), ..crate::log::Message::log(text) });
+    if crate::session::settings::notice_wanted(&ctx.sess.settings.borrow(), level) {
+        let code = if level == Severity::Warning { "01000" } else { "00000" };
+        ctx.notice(crate::error::Error { severity: level, ..crate::error::Error::new(code, text.to_string()) });
+    }
+}
+
 fn json_str(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {

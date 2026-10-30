@@ -790,6 +790,9 @@ pub struct DeferredFk {
     pub stmt: bool,
 }
 
+/// A heavyweight lock a transaction holds: its key and mode.
+pub type HeldLock = (Vec<u8>, LockMode);
+
 pub struct Txn {
     /// Lock owner id (every transaction has one).
     pub id: u64,
@@ -855,9 +858,9 @@ pub struct Txn {
     /// lock. (Never older than `stmt_catalog`, which stays the base of its DDL.)
     read_catalog: Option<Arc<Catalog>>,
     /// Heavyweight locks held, by key and mode, with the subtransaction depth that took them.
-    locks_held: HashMap<(Vec<u8>, LockMode), usize>,
+    locks_held: HashMap<HeldLock, usize>,
     /// The order they were taken in (released by ROLLBACK TO in reverse).
-    lock_journal: Vec<(Vec<u8>, LockMode)>,
+    lock_journal: Vec<HeldLock>,
     /// Rows locked (or written) here, with the depth that locked them.
     row_locks: Vec<(Vec<u8>, usize)>,
     /// Unique key locks taken the usual way (past `bulklocks::compact_after()`, plain ones go
@@ -2291,6 +2294,25 @@ impl Txn {
             let k = self.lock_journal.pop().unwrap();
             self.locks_held.remove(&k);
             self.db.locks.release(&k.0, self.id, k.1);
+        }
+    }
+
+    /// The heavyweight locks taken since `mark`, out of the order ROLLBACK TO releases in
+    /// (still held): a parallel worker part's, released with `release_held` when it ends.
+    pub fn take_locks_since(&mut self, mark: usize) -> Vec<HeldLock> {
+        if self.lock_journal.len() <= mark {
+            return Vec::new();
+        }
+        self.lock_journal.split_off(mark)
+    }
+
+    /// Release locks `take_locks_since` took out (one the transaction asked for again
+    /// meanwhile, finding it held, goes too).
+    pub fn release_held(&mut self, held: Vec<HeldLock>) {
+        for k in held {
+            if self.locks_held.remove(&k).is_some() {
+                self.db.locks.release(&k.0, self.id, k.1);
+            }
         }
     }
 

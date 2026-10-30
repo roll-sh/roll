@@ -631,7 +631,7 @@ fn log_report(st: &crate::session::settings::Settings, pid: i32, database: &crat
 }
 
 /// This thread's user and system CPU time (microseconds; getrusage RUSAGE_THREAD).
-fn thread_cpu() -> (i64, i64) {
+pub(crate) fn thread_cpu() -> (i64, i64) {
     #[cfg(target_os = "linux")]
     {
         #[repr(C)]

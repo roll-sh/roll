@@ -88,6 +88,8 @@ pub fn serve(
                 continue;
             }
         };
+        // (log_connections' setup_durations: "fork" is this thread's start, the backend's.)
+        let accepted = std::time::Instant::now();
         let engine = engine.clone();
         let opts = opts.clone();
         std::thread::Builder::new()
@@ -95,7 +97,7 @@ pub fn serve(
             .stack_size(THREAD_STACK)
             .spawn(move || {
                 let peer = stream.peer_addr().ok();
-                if let Err(e) = handle(engine, stream, peer, &opts) {
+                if let Err(e) = handle(engine, stream, peer, &opts, accepted) {
                     debug!(error = %e, "connection ended");
                 }
             })?;
@@ -227,6 +229,9 @@ struct Conn {
     /// What the server log reads of the connection, and when it started (MyStartTime).
     log: crate::log::Conn,
     started: i64,
+    /// The backend's pid and the server's log format once it is registered: the errors it
+    /// sends before its session exists are logged with them (`Drop`).
+    pre_session_log: Option<(i32, crate::log::Format)>,
     /// A walsender connection (`replication=...` in the startup packet).
     repl: Option<crate::repl::walsender::Mode>,
     /// The snapshot its last CREATE_REPLICATION_SLOT exported.
@@ -504,6 +509,22 @@ fn cstr(b: &mut BytesMut, s: &str) {
     b.put_u8(0);
 }
 
+/// An immediate shutdown (SIGQUIT): quickdie's WARNING_CLIENT_ONLY to every client, whose
+/// connection then closes (PostgreSQL's backends exit right after it).
+pub fn quit_clients(engine: &Engine) {
+    let e = Error {
+        severity: crate::error::Severity::Warning,
+        ..Error::new(code::ADMIN_SHUTDOWN, "terminating connection due to immediate shutdown command")
+    };
+    let mut b = BytesMut::new();
+    b.put_u8(b'N');
+    b.put_i32(0);
+    error_fields(&mut b, &e, e.severity.as_str());
+    let len = (b.len() - 1) as i32;
+    b[1..5].copy_from_slice(&len.to_be_bytes());
+    engine.quit_client_backends(&b);
+}
+
 fn error_fields(b: &mut BytesMut, e: &Error, severity: &str) {
     for (t, v) in [
         (b'S', severity),
@@ -624,6 +645,29 @@ struct BackendGuard<'a> {
     pid: i32,
 }
 
+/// A backend that ends before its session exists (authentication failed, no such role or
+/// database, a bad startup option) logs the FATAL it sent, as PostgreSQL's does.
+impl Drop for Conn {
+    fn drop(&mut self) {
+        if let Some((pid, f)) = &self.pre_session_log {
+            for e in std::mem::take(&mut self.sent) {
+                let who = crate::log::Who::backend(*pid, self.started, &self.log);
+                crate::log::write(f, &who, &crate::log::Message::error(&e, None));
+            }
+        }
+    }
+}
+
+impl Conn {
+    /// A LOG line of the backend before its session exists, under the server's settings.
+    fn log_pre_session(&self, text: &str) {
+        if let Some((pid, f)) = &self.pre_session_log {
+            let who = crate::log::Who::backend(*pid, self.started, &self.log);
+            crate::log::write(f, &who, &crate::log::Message::log(text));
+        }
+    }
+}
+
 impl Drop for BackendGuard<'_> {
     fn drop(&mut self) {
         self.engine.unregister_backend(self.pid);
@@ -635,7 +679,9 @@ fn handle(
     stream: TcpStream,
     peer: Option<SocketAddr>,
     opts: &ServerOptions,
+    accepted: std::time::Instant,
 ) -> std::io::Result<()> {
+    let forked = std::time::Instant::now();
     crate::stack::set_limit(THREAD_STACK - (2 << 20));
     stream.set_nodelay(true)?;
     let mut c = Conn {
@@ -651,8 +697,9 @@ fn handle(
         repl: None,
         exported: None,
         errors: 0,
-        log: crate::log::Conn::new(peer, stream.local_addr().ok()),
+        log: crate::log::Conn::new(peer, stream.local_addr().ok(), false),
         started: crate::types::datetime::Clock::system().now,
+        pre_session_log: None,
     };
     // Notices a statement raises before it waits for a lock go out then, as Postgres
     // flushes each notice: after what the connection had buffered (`Conn::unflushed`).
@@ -746,6 +793,14 @@ fn handle(
         .map(str::to_string)
         .or_else(|| engine.server_conf().loaded().values.get("log_connections").map(|v| v.value.clone()))
         .unwrap_or_default();
+    let lc = crate::log::ConnAspects::of(&lc);
+    // The engine's connections to itself through libpq's default socket stand for Unix-socket
+    // ones: no client or server address ("[local]"), pg_hba.conf's `local` lines.
+    let unix = peer.is_some_and(crate::hba::take_local);
+    let peer = peer.filter(|_| !unix);
+    if unix {
+        c.log = crate::log::Conn::new(None, None, true);
+    }
     let (pid, secret, terminated) =
         engine.register_backend(stream.try_clone().ok(), peer);
     let _guard = BackendGuard {
@@ -753,12 +808,16 @@ fn handle(
         pid,
     };
     c.terminated = Some(terminated.clone());
-    if conn_logging(&lc, "receipt") && crate::log::active() {
-        let (host, port) = peer.map_or(("[local]".to_string(), String::new()), |p| (p.ip().to_canonical().to_string(), p.port().to_string()));
-        let who = crate::log::Who::backend(pid, c.started, &c.log);
+    if crate::log::active() {
         let files = engine.server_conf().loaded();
-        let f = crate::log::Format::from_files(Some(&files));
-        crate::log::write(&f, &who, &crate::log::Message::log(&format!("connection received: host={host} port={port}")));
+        c.pre_session_log = Some((pid, crate::log::Format::from_files(Some(&files))));
+    }
+    if lc.receipt {
+        let host = match peer {
+            Some(p) => format!("{} port={}", p.ip().to_canonical(), p.port()),
+            None => "[local]".into(),
+        };
+        c.log_pre_session(&format!("connection received: host={host}"));
     }
     let get = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     let Some(user) = get("user").filter(|u| !u.is_empty()) else {
@@ -803,19 +862,85 @@ fn handle(
     }
 
     let physical = c.repl == Some(crate::repl::walsender::Mode::Physical);
-    let method = match hba_method(&engine, peer, &user, &database, physical, opts.auth) {
+    // (A physical walsender has no database: %d "[unknown]", "database=" at its end.)
+    let log_database = if physical { String::new() } else { database.clone() };
+    c.log.walsender = c.repl.is_some();
+    c.log.startup = Some(crate::log::Startup { user: user.clone(), database: log_database.clone(), ps: "" });
+    // (ProcessStartupPacket's canAcceptConnections: a smart or fast shutdown is under way.)
+    if engine.refusing_connections() {
+        c.error(&Error::new(code::CANNOT_CONNECT_NOW, "the database system is shutting down").fatal());
+        return c.flush();
+    }
+    if let Some(s) = c.log.startup.as_mut() {
+        s.ps = "authentication";
+    }
+    let auth_start = std::time::Instant::now();
+    let (method, hba_line, hba_raw) = match hba_method(&engine, peer, unix, &user, &database, physical, opts.auth) {
         Ok(m) => m,
         Err(e) => {
             c.error(&e);
             return c.flush();
         }
     };
-    if let Err(e) = authenticate(&mut c, &engine, &user, &database, method) {
+    let hba_file = || {
+        engine.server_conf().auth_files().hba_file.as_ref().map_or_else(
+            || crate::session::settings::Settings::new().get_raw("hba_file").unwrap_or_default(),
+            |p| p.to_string_lossy().into_owned(),
+        )
+    };
+    let mut why = None;
+    if let Err(e) = authenticate(&mut c, &engine, &user, &database, method, &mut why) {
         auth_delay(&engine);
+        c.error(&e);
+        // auth_failed's errdetail_log: why, and the rule the connection matched.
+        if e.code == code::INVALID_PASSWORD
+            && let Some(logged) = c.sent.last_mut()
+        {
+            let matched = format!("Connection matched file \"{}\" line {hba_line}: \"{hba_raw}\"", hba_file());
+            logged.detail = Some(match why {
+                Some(w) => format!("{w}\n{matched}"),
+                None => matched,
+            });
+        }
+        return c.flush();
+    }
+    let auth_time = auth_start.elapsed();
+    let app = get("application_name").unwrap_or("").to_string();
+    if lc.authentication {
+        // (set_authn_id names the identity a password proved; trust proves none.)
+        let who = if method == AuthMethod::Trust { "user" } else { "identity" };
+        let file = hba_file();
+        c.log_pre_session(&format!(
+            "connection authenticated: {who}=\"{user}\" method={} ({file}:{hba_line})",
+            method.name()
+        ));
+    }
+    if lc.authorization {
+        // PerformAuthentication's line: the startup packet's application_name, if it had one
+        // (pg_clean_ascii'd), before any setting or role check applies.
+        let mut line = if c.repl.is_some() {
+            format!("replication connection authorized: user={user}")
+        } else {
+            format!("connection authorized: user={user} database={database}")
+        };
+        if let Some(a) = get("application_name") {
+            line.push_str(" application_name=");
+            for b in a.bytes() {
+                match b {
+                    32..=126 => line.push(b as char),
+                    _ => line.push_str(&format!("\\x{b:02x}")),
+                }
+            }
+        }
+        c.log_pre_session(&line);
+    }
+    if let Some(s) = c.log.startup.as_mut() {
+        s.ps = "startup";
+    }
+    if let Err(e) = check_role_login(&engine, &user, &database) {
         c.error(&e);
         return c.flush();
     }
-    let app = get("application_name").unwrap_or("").to_string();
     let mut s = match engine.connect(pid, &database, &user, &app) {
         Ok(s) => s,
         Err(e) => {
@@ -862,17 +987,9 @@ fn handle(
         }
     }
     s.state.peer.set(peer);
-    s.state.local_addr.set(c.wr.local_addr().ok());
+    s.state.local_addr.set(c.wr.local_addr().ok().filter(|_| !unix));
     *s.state.log_conn.borrow_mut() = c.log.clone();
     s.preload_libraries();
-    if conn_logging(&s.state.settings.borrow().get_raw("log_connections").unwrap_or_default(), "authorization") {
-        let app = s.state.settings.borrow().show_value("application_name");
-        let line = format!("connection authorized: user={user} database={database} application_name={app}");
-        // (PerformAuthentication logs it before the startup packet's settings apply.)
-        *s.log_tag.borrow_mut() = "authentication".into();
-        s.log_message(&line, None);
-        s.notices.clear();
-    }
     s.take_changed_settings();
     // (process_startup_options' NOTICEs: an application_name truncated.)
     let startup_notices = crate::session::settings::take_name_notices();
@@ -910,23 +1027,30 @@ fn handle(
     if let Err(e) = s.run_login_triggers() {
         s.notices.push(e);
     }
+    // log_connections' setup_durations (the session's value: the startup packet's options
+    // count): PostgresMain's line at the first ReadyForQuery. The engine has no fork:
+    // "fork" is from the accept to the connection's thread running, "authentication"
+    // pg_hba.conf's choice and the password exchange, "total" from the accept to here.
+    if crate::log::active()
+        && crate::log::ConnAspects::of(&s.state.settings.borrow().get_raw("log_connections").unwrap_or_default())
+            .setup_durations
+    {
+        let ms = |d: std::time::Duration| d.as_micros() as f64 / 1000.0;
+        let line = format!(
+            "connection ready: setup total={:.3} ms, fork={:.3} ms, authentication={:.3} ms",
+            ms(accepted.elapsed()),
+            ms(forked - accepted),
+            ms(auth_time)
+        );
+        s.set_ps_idle();
+        s.log_message(&line, None);
+    }
     send_notices(&mut c, &mut s);
     ready_for_query(&mut c, &s)?;
 
     let started = std::time::Instant::now();
     let r = message_loop(&mut c, &engine, &mut s, pid, &terminated);
-    c.log_sent(Some(&s), pid, None);
-    if s.state.settings.borrow().bool("log_disconnections") {
-        // (The backend has left the proc array: no virtual transaction id.)
-        s.log_exiting.set(true);
-        let t = started.elapsed();
-        let (h, m, sec, ms) = (t.as_secs() / 3600, t.as_secs() / 60 % 60, t.as_secs() % 60, t.subsec_millis());
-        let (host, port) = peer.map_or(("[local]".to_string(), String::new()), |p| (p.ip().to_canonical().to_string(), p.port().to_string()));
-        let line = format!(
-            "disconnection: session time: {h}:{m:02}:{sec:02}.{ms:03} user={user} database={database} host={host} port={port}"
-        );
-        s.log_message(&line, None);
-    }
+    // (An idle session's FATAL is logged too, before its disconnection line.)
     if terminated.load(Ordering::Relaxed) && !c.fatal {
         c.error(
             &Error::new(
@@ -936,6 +1060,21 @@ fn handle(
             .fatal(),
         );
         let _ = c.flush();
+    }
+    c.log_sent(Some(&s), pid, None);
+    if s.state.settings.borrow().bool("log_disconnections") {
+        // (The backend has left the proc array: no virtual transaction id.)
+        s.log_exiting.set(true);
+        let t = started.elapsed();
+        let (h, m, sec, ms) = (t.as_secs() / 3600, t.as_secs() / 60 % 60, t.as_secs() % 60, t.subsec_millis());
+        let host = match peer {
+            Some(p) => format!("{} port={}", p.ip().to_canonical(), p.port()),
+            None => "[local]".into(),
+        };
+        let line = format!(
+            "disconnection: session time: {h}:{m:02}:{sec:02}.{ms:03} user={user} database={log_database} host={host}"
+        );
+        s.log_message(&line, None);
     }
     // Nothing more goes out: the client sees the end (FIN) right after the last message, as
     // when a backend exits, not after the session's teardown below (rollback, locks, the
@@ -991,37 +1130,25 @@ fn parse_options(s: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Whether log_connections (PostgreSQL 18's list: receipt, authentication, authorization,
-/// setup_durations; on / all) covers `aspect`.
-fn conn_logging(v: &str, aspect: &str) -> bool {
-    let v = v.trim().to_ascii_lowercase();
-    match v.as_str() {
-        "on" | "true" | "yes" | "1" => aspect != "setup_durations",
-        "all" => true,
-        _ => v.split(',').any(|a| a.trim() == aspect),
-    }
-}
-
-/// check_hba: the method pg_hba.conf's first matching rule names (without rules, the
-/// server's `--auth` method for everyone); `reject` and no matching rule end the connection.
+/// check_hba: the method pg_hba.conf's first matching rule names, with the rule's line
+/// number and text (without rules, the server's `--auth` method for everyone, line 1 as
+/// pg_hba_file_rules shows it); `reject` and no matching rule end the connection. `local`:
+/// a connection standing for a Unix-socket one (no `peer`).
 fn hba_method(
     engine: &Engine,
     peer: Option<SocketAddr>,
+    local: bool,
     user: &str,
     database: &str,
     physical_repl: bool,
     default: AuthMethod,
-) -> Result<AuthMethod> {
+) -> Result<(AuthMethod, u32, String)> {
     let Some(hba) = engine.server_conf().hba() else {
-        if let Some(p) = peer {
-            crate::hba::take_local(p);
-        }
-        return Ok(default);
+        return Ok((default, 1, format!("host all all all {}", default.name())));
     };
-    let local = peer.is_some_and(crate::hba::take_local);
     let host = match peer {
-        Some(p) if !local => p.ip().to_canonical().to_string(),
-        _ => "[local]".to_string(),
+        Some(p) => p.ip().to_canonical().to_string(),
+        None => "[local]".to_string(),
     };
     let cat = engine.auth_catalog(database).ok();
     let member = |role: &str| {
@@ -1041,7 +1168,7 @@ fn hba_method(
     let Some(rule) = hba.choose(peer.map(|p| p.ip().to_canonical()), local, physical_repl, database, user, &member) else {
         return Err(refused("no pg_hba.conf entry"));
     };
-    Ok(match rule.method.as_str() {
+    let method = match rule.method.as_str() {
         "trust" => AuthMethod::Trust,
         "scram-sha-256" => AuthMethod::ScramSha256,
         "md5" => AuthMethod::Md5,
@@ -1065,7 +1192,8 @@ fn hba_method(
             )
             .fatal());
         }
-    })
+    };
+    Ok((method, rule.line, rule.raw.clone()))
 }
 
 /// auth_delay (preloaded): a failed authentication waits auth_delay.milliseconds before the
@@ -1091,9 +1219,18 @@ fn authenticate(
     user: &str,
     database: &str,
     method: AuthMethod,
+    // Why a password check failed, for the server log (get_role_password's logdetail).
+    why: &mut Option<String>,
 ) -> Result<()> {
     let cat = engine.auth_catalog(database)?;
     let role = cat.role_by_name(user).cloned();
+    let now = crate::types::datetime::Clock::system().now;
+    let shadow_detail = match &role {
+        None => Some(format!("Role \"{user}\" does not exist.")),
+        Some(r) if r.password.is_none() => Some(format!("User \"{user}\" has no password assigned.")),
+        Some(r) if r.valid_until.is_some_and(|t| t < now) => Some(format!("User \"{user}\" has an expired password.")),
+        Some(_) => None,
+    };
     let failed = || {
         Error::new(
             code::INVALID_PASSWORD,
@@ -1102,23 +1239,9 @@ fn authenticate(
         .fatal()
     };
     match method {
-        AuthMethod::Trust => {
-            let Some(role) = role else {
-                return Err(Error::new(
-                    code::INVALID_AUTHORIZATION_SPECIFICATION,
-                    format!("role \"{user}\" does not exist"),
-                )
-                .fatal());
-            };
-            if !role.login {
-                return Err(Error::new(
-                    code::INVALID_AUTHORIZATION_SPECIFICATION,
-                    format!("role \"{user}\" is not permitted to log in"),
-                )
-                .fatal());
-            }
-            Ok(())
-        }
+        // (Whether the role exists and may log in is InitializeSessionUserId's, after
+        // authentication: `check_role_login`.)
+        AuthMethod::Trust => Ok(()),
         AuthMethod::Password | AuthMethod::Md5 if role.is_some() || method == AuthMethod::Password => {
             let shadow = role.as_ref().and_then(|r| r.password.clone());
             let md5_stored = shadow
@@ -1144,9 +1267,10 @@ fn authenticate(
                     .is_some_and(|want| want == given)
             } else {
                 // A SCRAM secret under md5: the SCRAM exchange (CheckPWChallengeAuth).
-                return authenticate(c, engine, user, database, AuthMethod::ScramSha256);
+                return authenticate(c, engine, user, database, AuthMethod::ScramSha256, why);
             };
-            check_login(role.as_ref(), user, ok, failed)
+            *why = shadow_detail.or_else(|| (!ok).then(|| format!("Password does not match for user \"{user}\".")));
+            check_login(role.as_ref(), ok, failed)
         }
         // (Password never gets here: its arm above takes every role.)
         AuthMethod::ScramSha256 | AuthMethod::Md5 | AuthMethod::Password => {
@@ -1157,6 +1281,10 @@ fn authenticate(
                 .and_then(|r| r.password.as_deref())
                 .and_then(parse_verifier);
             let real = stored.is_some();
+            *why = match shadow_detail {
+                None if !real => Some(format!("User \"{user}\" does not have a valid SCRAM secret.")),
+                d => d,
+            };
             let verifier = match stored {
                 Some(v) => v,
                 None => parse_verifier(&hash_password(&format!("{:x}", rand_u64())))
@@ -1194,15 +1322,8 @@ fn authenticate(
                 .as_ref()
                 .and_then(|r| r.valid_until)
                 .is_some_and(|t| t < crate::types::datetime::Clock::system().now);
-            if !real || expired || !role.as_ref().is_some_and(|r| r.login) {
-                return Err(match role {
-                    Some(r) if real && !expired && !r.login => Error::new(
-                        code::INVALID_AUTHORIZATION_SPECIFICATION,
-                        format!("role \"{user}\" is not permitted to log in"),
-                    )
-                    .fatal(),
-                    _ => failed(),
-                });
+            if !real || expired {
+                return Err(failed());
             }
             c.auth(12, server_final.as_bytes());
             Ok(())
@@ -1210,25 +1331,26 @@ fn authenticate(
     }
 }
 
-/// After a password check: an expired password fails like a wrong one; a role without LOGIN
-/// can't log in.
-fn check_login(
-    role: Option<&crate::catalog::Role>,
-    user: &str,
-    ok: bool,
-    failed: impl Fn() -> Error,
-) -> Result<()> {
+/// After a password check: an expired password fails like a wrong one.
+fn check_login(role: Option<&crate::catalog::Role>, ok: bool, failed: impl Fn() -> Error) -> Result<()> {
     let expired = role
         .and_then(|r| r.valid_until)
         .is_some_and(|t| t < crate::types::datetime::Clock::system().now);
     match role {
-        Some(r) if ok && !expired && !r.login => Err(Error::new(
-            code::INVALID_AUTHORIZATION_SPECIFICATION,
-            format!("role \"{user}\" is not permitted to log in"),
-        )
-        .fatal()),
         Some(_) if ok && !expired => Ok(()),
         _ => Err(failed()),
+    }
+}
+
+/// InitializeSessionUserId: the role must exist and may log in (after the authorization
+/// line, before the database's checks).
+fn check_role_login(engine: &Engine, user: &str, database: &str) -> Result<()> {
+    let cat = engine.auth_catalog(database)?;
+    let refused = |m: String| Error::new(code::INVALID_AUTHORIZATION_SPECIFICATION, m).fatal();
+    match cat.role_by_name(user) {
+        None => Err(refused(format!("role \"{user}\" does not exist"))),
+        Some(r) if !r.login => Err(refused(format!("role \"{user}\" is not permitted to log in"))),
+        Some(_) => Ok(()),
     }
 }
 

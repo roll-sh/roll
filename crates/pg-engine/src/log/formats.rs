@@ -27,8 +27,10 @@ pub fn csv(f: &Format, who: &Who, now: i64, line: u64, m: &Message) -> String {
     csv_lit(&mut b, s.map(|s| s.database.as_str()));
     b.push(',');
     field(&mut b, &who.pid.to_string());
-    if let Some((h, p)) = &who.remote {
-        b.push_str(&format!("\"{h}:{p}\""));
+    match &who.remote {
+        Some((h, Some(p))) => b.push_str(&format!("\"{h}:{p}\"")),
+        Some((h, None)) => b.push_str(&format!("\"{h}\"")),
+        None => {}
     }
     b.push(',');
     field(&mut b, &session_id(who));
@@ -122,7 +124,9 @@ pub fn json(f: &Format, who: &Who, now: i64, line: u64, m: &Message) -> String {
     kv(&mut b, "pid", Some(&who.pid.to_string()), false);
     if let Some((h, p)) = &who.remote {
         kv(&mut b, "remote_host", Some(h), true);
-        kv(&mut b, "remote_port", Some(&p.to_string()), false);
+        if let Some(p) = p {
+            kv(&mut b, "remote_port", Some(&p.to_string()), false);
+        }
     }
     kv(&mut b, "session_id", Some(&session_id(who)), true);
     kv(&mut b, "line_num", Some(&line.to_string()), false);

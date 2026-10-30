@@ -187,6 +187,25 @@ struct Registry {
     /// (`Engine::unlogged_reset`).
     #[serde(default)]
     running: bool,
+    /// pg_control's time: when this server last started or shut down cleanly (microseconds
+    /// since 2000-01-01; 0: not kept, a registry from before it was).
+    #[serde(default)]
+    time: i64,
+}
+
+/// What the startup process reports of the last server's end (StartupXLOG's lines).
+#[derive(Clone, Debug)]
+pub struct StartupReport {
+    /// The last server crashed (or was stopped by an immediate shutdown).
+    pub crashed: bool,
+    /// pg_control's time before this start ("shut down at", "last known up at").
+    pub last_time: i64,
+    /// Where redo starts (the last clean shutdown's position) and where the WAL resumes.
+    pub redo_start: u64,
+    pub resumed: u64,
+    /// The main thread's CPU (user, system; microseconds) and the time the start took.
+    pub cpu: (i64, i64),
+    pub elapsed: std::time::Duration,
 }
 
 /// A connected client, for pg_stat_activity and cancel / terminate.
@@ -255,6 +274,9 @@ pub struct Engine {
     index_upgrade: Mutex<()>,
     started: i64,
     stopped: AtomicBool,
+    /// A smart or fast shutdown is under way: connections are refused.
+    refusing: AtomicBool,
+    startup: Mutex<Option<StartupReport>>,
     me: Weak<Engine>,
     server_files: Option<crate::server_files::ServerFiles>,
     /// The directory server programs run in, when they're allowed.
@@ -307,6 +329,7 @@ impl Engine {
     }
 
     pub fn open(opts: EngineOptions) -> Result<Arc<Engine>> {
+        let opening = std::time::Instant::now();
         let server_files = match &opts.server_files {
             Some(d) => Some(crate::server_files::ServerFiles::new(d).map_err(|e| {
                 internal(format!("server files directory \"{}\": {e}", d.display()))
@@ -361,6 +384,8 @@ impl Engine {
                         entry("postgres", 5, true),
                     ],
                     config: init.config.clone(),
+                    // (initdb's shutdown: "database system was shut down at" its time.)
+                    time: crate::types::datetime::Clock::system().now,
                     ..Registry::default()
                 };
                 write_registry(&opts.data_dir, &r)?;
@@ -377,7 +402,9 @@ impl Engine {
         if crashed {
             info!("database system was not properly shut down; resetting unlogged relations");
         }
+        let (last_time, redo_start) = (registry.time, registry.wal_lsn);
         registry.running = true;
+        registry.time = crate::types::datetime::Clock::system().now;
         write_registry(&opts.data_dir, &registry)?;
         // (Durable before anything is written: a crash from here on must be seen as one.)
         if opts.sync {
@@ -526,6 +553,8 @@ impl Engine {
                 next_pid: AtomicI32::new(1000 + (std::process::id() as i32 % 1000) * 10),
                 started: crate::types::datetime::Clock::system().now,
                 stopped: AtomicBool::new(false),
+                refusing: AtomicBool::new(false),
+                startup: Mutex::new(None),
                 me: me.clone(),
                 server_files,
                 server_programs,
@@ -577,7 +606,60 @@ impl Engine {
             .autovacuum
             .start()
             .map_err(|e| internal(format!("spawn autovacuum launcher: {e}")))?;
+        let resumed = engine.stats.lock().wal_lsn();
+        *engine.startup.lock() = Some(StartupReport {
+            crashed,
+            last_time,
+            redo_start,
+            resumed,
+            cpu: crate::autovacuum::thread_cpu(),
+            elapsed: opening.elapsed(),
+        });
         Ok(engine)
+    }
+
+    /// The cluster's fixed-numbered statistics and WAL position.
+    pub fn cluster_stats(&self) -> crate::exec::pgstat::ClusterStats {
+        self.stats.clone()
+    }
+
+    /// How this start found the last server's end (None: not opened by `open`).
+    pub fn startup_report(&self) -> Option<StartupReport> {
+        self.startup.lock().clone()
+    }
+
+    /// Smart shutdown: new connections are refused ("the database system is shutting
+    /// down") while the sessions there are run to their end.
+    pub fn refuse_connections(&self) {
+        self.refusing.store(true, Ordering::Release);
+    }
+
+    pub fn refusing_connections(&self) -> bool {
+        self.refusing.load(Ordering::Acquire)
+    }
+
+    /// Client backends connected (not the engine's own workers).
+    pub fn client_backends(&self) -> usize {
+        self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()).count()
+    }
+
+    /// Immediate shutdown: `message` (quickdie's WARNING) goes to every client backend's
+    /// client, whose connection then closes; the process exits next.
+    pub fn quit_client_backends(&self, message: &[u8]) {
+        for b in self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()) {
+            if let Some(mut s) = b.socket.as_ref() {
+                let _ = std::io::Write::write_all(&mut s, message);
+                let _ = s.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    /// Fast shutdown: every client backend's session ends ("terminating connection due to
+    /// administrator command").
+    pub fn terminate_client_backends(&self) {
+        for b in self.backends.lock().values().filter(|b| b.activity.backend_type.is_none()) {
+            Self::terminate(b);
+        }
     }
 
     /// Every database's subscriptions, as committed.
@@ -1758,6 +1840,7 @@ impl Engine {
         let mut r = self.registry.lock();
         r.wal_lsn = self.stats.lock().wal_lsn();
         r.running = false;
+        r.time = crate::types::datetime::Clock::system().now;
         if let Err(e) = self.save(&r) {
             warn!(error = %e, "saving the registry failed");
         }

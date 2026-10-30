@@ -740,9 +740,24 @@ fn session_lock(a: &[Value], c: &FnCtx, shared: bool, policy: WaitPolicy) -> Res
     if got {
         let mut k = key;
         k.push(shared as u8);
+        crate::exec::parallel_part::note_session_advisory(&k);
         *c.exec.sess.advisory.borrow_mut().entry(k).or_insert(0) += 1;
     }
     Ok(got)
+}
+
+/// A parallel worker's session-level advisory lock goes as the worker exits: one hold of
+/// `held` (its key with the mode byte).
+pub fn release_session_advisory(ctx: &crate::exec::ExecCtx, held: &[u8]) {
+    let Some((&shared, key)) = held.split_last() else { return };
+    let mut map = ctx.sess.advisory.borrow_mut();
+    let Some(n) = map.get_mut(held) else { return };
+    *n -= 1;
+    if *n == 0 {
+        map.remove(held);
+    }
+    let mode = if shared == 1 { LockMode::Share } else { LockMode::Exclusive };
+    ctx.sess.db.locks.release(key, ctx.sess.lock_owner, mode);
 }
 
 fn xact_lock(a: &[Value], c: &FnCtx, shared: bool, policy: WaitPolicy) -> Result<bool> {

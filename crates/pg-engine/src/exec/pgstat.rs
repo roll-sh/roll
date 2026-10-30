@@ -1020,17 +1020,35 @@ pub fn report_checkpoint(
     log_checkpoints: bool,
     flush: impl FnOnce() -> crate::error::Result<()>,
 ) -> crate::error::Result<()> {
+    let fixed = db.pgstat.lock().fixed.clone();
+    checkpoint(&fixed, "immediate force wait", log_checkpoints, flush)
+}
+
+/// A checkpoint of the cluster's (`flags` as LogCheckpointStart names them: "immediate force
+/// wait" for CHECKPOINT, "shutdown immediate" at a smart or fast shutdown, "end-of-recovery
+/// immediate wait" after a crash), `flush` making everything durable.
+pub fn checkpoint(
+    fixed: &ClusterStats,
+    flags: &str,
+    log_checkpoints: bool,
+    flush: impl FnOnce() -> crate::error::Result<()>,
+) -> crate::error::Result<()> {
     let started = Instant::now();
     let logging = log_checkpoints && crate::log::active();
     if logging {
-        checkpointer_log("checkpoint starting: immediate force wait".into());
+        checkpointer_log(format!("checkpoint starting: {flags}"));
     }
     flush()?;
-    let fixed = db.pgstat.lock().fixed.clone();
+    let shutdown = flags.starts_with("shutdown");
     let mut s = fixed.lock();
-    s.checkpoints_requested += 1;
+    if !shutdown {
+        s.checkpoints_requested += 1;
+    }
+    // (A shutdown or end-of-recovery checkpoint's record is its own redo point.)
+    let own_redo = shutdown || flags.starts_with("end-of-recovery");
     let prev_redo = s.checkpoint.map(|(_, redo, _)| redo);
     let (redo, ckpt) = s.checkpoint_at(now());
+    let ckpt = if own_redo { redo } else { ckpt };
     s.checkpoints_performed += 1;
     for op in ["writes", "fsyncs"] {
         *s.io
@@ -1074,7 +1092,7 @@ pub fn report_checkpoint(
 }
 
 /// A LOG line of the checkpointer (its pid in pg_stat_activity).
-fn checkpointer_log(text: String) {
+pub fn checkpointer_log(text: String) {
     static LINES: std::sync::OnceLock<std::sync::Arc<crate::log::Lines>> = std::sync::OnceLock::new();
     let f = crate::log::Format::from_files(None);
     crate::log::write(&f, &crate::log::Who::aux(30, "checkpointer", &LINES), &crate::log::Message::log(&text));
