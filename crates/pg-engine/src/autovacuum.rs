@@ -108,6 +108,8 @@ pub struct Launcher {
     pub wakeups: AtomicU64,
     /// Tables processed (vacuumed or analyzed) by workers.
     pub processed: AtomicU64,
+    /// CPU time the workers used, in nanoseconds (Linux: getrusage of each worker thread).
+    pub cpu_ns: AtomicU64,
     /// The engine went without a shutdown (`dropped`).
     gone: AtomicBool,
 }
@@ -121,6 +123,7 @@ impl Launcher {
             anchor: Instant::now(),
             wakeups: AtomicU64::new(0),
             processed: AtomicU64::new(0),
+            cpu_ns: AtomicU64::new(0),
             gone: AtomicBool::new(false),
         }
     }
@@ -223,6 +226,11 @@ impl Launcher {
                     tracing::error!(database = db, "autovacuum worker panicked");
                 }
             }
+            // (The thread is the worker's own: its CPU time is the visit's.)
+            let (user, sys) = thread_cpu();
+            let ns = ((user + sys).max(0) as u64) * 1000;
+            let total = me.cpu_ns.fetch_add(ns, Ordering::Relaxed) + ns;
+            tracing::debug!(database = db, "autovacuum worker: cpu {} ms, all workers {} ms", ns / 1_000_000, total / 1_000_000);
             let mut st = me.st.lock();
             st.running.remove(&db);
             me.wake.notify_all();
@@ -342,7 +350,7 @@ impl Launcher {
                 break;
             }
             let (shown, sql) = w.commands();
-            let count = |db: &crate::txn::Database| {
+            let count =|db: &crate::txn::Database| {
                 db.pgstat.lock().tables.get(&w.rel).map_or(0, |t| t.autovacuum_count + t.autoanalyze_count)
             };
             let before = count(&database);
@@ -484,7 +492,19 @@ pub fn needs(cat: &crate::catalog::Catalog, rel: u32, e: &crate::exec::pgstat::T
     let anlthresh = f(anl_base) + f(anl_scale) * f(reltuples);
     let vacuum = (e.dead_tuples as f32) > vacthresh || (ins_base >= 0.0 && (e.ins_since_vacuum as f32) > insthresh);
     let analyze = (e.mod_since_analyze as f32) > anlthresh;
-    (vacuum || analyze).then(|| Work { rel, schema: cat.schema_name(schema).to_string(), name, vacuum, analyze })
+    if !(vacuum || analyze) {
+        return None;
+    }
+    let schema = cat.schema_name(schema).to_string();
+    // (RUST_LOG=pg_engine::autovacuum=debug: what each table's work came from.)
+    tracing::debug!(
+        "autovacuum: {schema}.{name}: vacuum {vacuum} (dead {} > {vacthresh}, inserted {} > {insthresh}), \
+         analyze {analyze} (changed {} > {anlthresh}), reltuples {reltuples}",
+        e.dead_tuples,
+        e.ins_since_vacuum,
+        e.mod_since_analyze,
+    );
+    Some(Work { rel, schema, name, vacuum, analyze })
 }
 
 /// Background work yields to sessions: the worker thread runs at a lower priority.

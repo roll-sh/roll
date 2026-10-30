@@ -241,10 +241,10 @@ pub struct Shared {
     /// User tables whose modification counters (n_mod_since_analyze, n_ins_since_vacuum,
     /// n_dead_tup) moved since autovacuum last looked at the database.
     pub av_changed: std::collections::HashSet<u32>,
-    /// The autovacuum launcher (when the database has one) and whether it has been told
-    /// about this database's changes (a visit is due).
+    /// The autovacuum launcher (when the database has one), and the time of the changes it
+    /// has been told about (a visit is due then).
     pub av: Option<crate::autovacuum::Hook>,
-    pub av_noted: bool,
+    pub av_noted: Option<Instant>,
 }
 
 /// A pg_stat_io cell: (backend type, object, context, operation).
@@ -1292,11 +1292,16 @@ fn modifies(c: &TabCounts) -> bool {
     c.changed_tuples != 0 || c.tuples_inserted != 0 || c.delta_dead_tuples != 0 || c.truncdropped
 }
 
-/// Tell the database's autovacuum launcher (once until it visits) that tables changed, or
-/// will have once counts kept unflushed until `at` are flushed.
+/// Tell the database's autovacuum launcher (once until it visits, unless the changes come
+/// sooner than it was told) that tables changed, or will have once counts kept unflushed
+/// until `at` are flushed. (Counts kept for an idle timeout, then flushed by the backend's
+/// next statement, are due now: told only once, the launcher waited for the timeout.)
 fn note_autovacuum(s: &mut Shared, at: Instant) {
-    if !s.av_noted && let Some(h) = &s.av {
-        s.av_noted = h.note(at);
+    if s.av_noted.is_none_or(|n| at < n)
+        && let Some(h) = &s.av
+        && h.note(at)
+    {
+        s.av_noted = Some(at);
     }
 }
 
@@ -1305,7 +1310,7 @@ fn note_autovacuum(s: &mut Shared, at: Instant) {
 /// launcher told again about counts still kept unflushed (their idle timeout comes later).
 pub fn take_autovacuum_changes(db: &crate::txn::Database) -> (Vec<u32>, HashMap<u32, TabEntry>) {
     let mut s = shared(db);
-    s.av_noted = false;
+    s.av_noted = None;
     let changed: Vec<u32> = std::mem::take(&mut s.av_changed).into_iter().collect();
     let entries = changed.iter().filter_map(|r| s.tables.get(r).map(|e| (*r, e.clone()))).collect();
     let later = s
@@ -1578,10 +1583,12 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
     // PGSTAT_MIN_INTERVAL of the last flush.
     let overdue = p.pending_since.is_some_and(|t| now.duration_since(t) >= MAX_INTERVAL);
     if !force && !overdue && p.last_flush.is_some_and(|t| now.duration_since(t) < MIN_INTERVAL) {
-        p.pending_since.get_or_insert(now);
-        u.due = Some(now + IDLE_INTERVAL);
+        // (The idle timeout runs from the first count kept, as PostgreSQL's
+        // PGSTAT_IDLE_INTERVAL - (now - pending_since).)
+        let due = *p.pending_since.get_or_insert(now) + IDLE_INTERVAL;
+        u.due = Some(due);
         if u.tabs.iter().any(|(r, c)| *r >= crate::catalog::FIRST_USER_OID && modifies(c)) {
-            note_autovacuum(&mut s, now + IDLE_INTERVAL);
+            note_autovacuum(&mut s, due);
         }
         s.unflushed.insert(sess.pid, u);
         p.parked = true;

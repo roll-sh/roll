@@ -5660,7 +5660,7 @@ impl Ddl<'_, '_> {
             }
         }
         if waited {
-            self.refresh_catalog();
+            self.refresh_catalog()?;
         }
         // Objects initdb made are pinned (DROP_RESTRICT on them fails before anything else).
         for r in &roots {

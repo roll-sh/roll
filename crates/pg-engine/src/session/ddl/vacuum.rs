@@ -418,7 +418,7 @@ impl Ddl<'_, '_> {
                         self.note_lock(c, super::table::lockmode::ACCESS_SHARE)?;
                     }
                 }
-                self.refresh_catalog();
+                self.refresh_catalog()?;
                 let r = match self.cat.tables.get(&r.oid).cloned() {
                     Some(r) => r,
                     None if self.cat.views.values().any(|v| v.storage.as_ref().is_some_and(|s| s.oid == r.oid)) => r,

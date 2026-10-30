@@ -699,7 +699,7 @@ impl Ddl<'_, '_> {
             }
         }
         if locked {
-            self.refresh_catalog();
+            self.refresh_catalog()?;
         }
         for r in &s.roles {
             let Some(NodeEnum::RoleSpec(rs)) = inner(r) else {

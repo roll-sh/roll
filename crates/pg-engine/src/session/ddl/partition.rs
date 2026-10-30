@@ -1042,7 +1042,7 @@ impl Ddl<'_, '_> {
                 lockmode::ACCESS_EXCLUSIVE
             },
         )?;
-        self.refresh_catalog();
+        self.refresh_catalog()?;
         let t = self.cat.tables.get(&t.oid).cloned().unwrap_or(t);
         if t.partbound.is_none() || t.inherits.first() != Some(&parent.oid) {
             return Err(Error::new(
@@ -1156,7 +1156,7 @@ impl Ddl<'_, '_> {
         let rv = cmd.name.as_ref().unwrap();
         let t = self.table(rv)?;
         self.note_lock(t.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
-        self.refresh_catalog();
+        self.refresh_catalog()?;
         let t = self.cat.tables.get(&t.oid).cloned().unwrap_or(t);
         // WaitForOlderSnapshots: a canceled concurrent detach finalized at once must still
         // not finish under queries whose snapshots planned with the partition (they may

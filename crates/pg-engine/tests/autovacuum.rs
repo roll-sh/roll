@@ -180,3 +180,44 @@ fn a_conflicting_lock_cancels_the_worker() {
     drop(s);
     e.shutdown();
 }
+
+/// An ANALYZE of a partitioned table that waits for a partition another transaction is
+/// analyzing (an autovacuum worker, which commits first) keeps the parent's statistics it
+/// made before the wait: they were dropped with the catalog copy it refreshed, and the
+/// table's plans changed (partition_join's units came and went with autovacuum's timing).
+#[test]
+fn an_analyze_that_waits_keeps_what_it_did_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = engine(dir.path(), &[("autovacuum", "off")]);
+    let mut s = e.connect(1, "postgres", "postgres", "t").unwrap();
+    rows(
+        &mut s,
+        "CREATE TABLE aw_p (a int, b int) PARTITION BY RANGE (a);
+         CREATE TABLE aw_p1 PARTITION OF aw_p FOR VALUES FROM (0) TO (100);
+         CREATE TABLE aw_p2 PARTITION OF aw_p FOR VALUES FROM (100) TO (200);
+         INSERT INTO aw_p SELECT i, i % 7 FROM generate_series(0, 199) i",
+    );
+    // The other transaction holds aw_p1's ANALYZE lock until it commits.
+    rows(&mut s, "BEGIN; ANALYZE aw_p1");
+    let e2 = e.clone();
+    let waiter = std::thread::spawn(move || {
+        let mut s2 = e2.connect(2, "postgres", "postgres", "t").unwrap();
+        rows(&mut s2, "ANALYZE aw_p");
+    });
+    std::thread::sleep(Duration::from_millis(1000));
+    rows(&mut s, "COMMIT");
+    waiter.join().unwrap();
+    assert_eq!(
+        rows(&mut s, "SELECT relname, reltuples FROM pg_class WHERE relname LIKE 'aw\\_p%' ORDER BY 1"),
+        ["aw_p | 200", "aw_p1 | 100", "aw_p2 | 100"]
+    );
+    assert_eq!(
+        rows(
+            &mut s,
+            "SELECT tablename, inherited, count(*) FROM pg_stats WHERE tablename LIKE 'aw\\_p%' GROUP BY 1, 2 ORDER BY 1, 2"
+        ),
+        ["aw_p | t | 2", "aw_p1 | f | 2", "aw_p2 | f | 2"]
+    );
+    drop(s);
+    e.shutdown();
+}

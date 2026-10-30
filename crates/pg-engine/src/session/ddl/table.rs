@@ -7790,15 +7790,25 @@ impl Ddl<'_, '_> {
 
     /// After waiting for a lock: the catalog as other transactions left it (what Postgres
     /// sees through the invalidations its lock acquisition accepts), while this
-    /// transaction hasn't changed it itself.
-    pub(super) fn refresh_catalog(&mut self) {
-        let txn = self.ctx.txn.borrow();
-        if txn.changed_catalog().is_none() {
-            let cur = txn.catalog();
-            if cur.version != self.cat.version {
-                self.cat = (*cur).clone();
+    /// transaction hasn't changed it itself, with this command's edits so far carried onto
+    /// it (an ANALYZE's relations before the one it waited for), and `base` moved along.
+    /// (It took `cur` without them, and kept the old base: the edits were lost, and the
+    /// commit merged from the old base, so a record the other transaction and this command
+    /// both changed since, an autovacuum worker's statistics of a table this command then
+    /// rewrote or dropped, failed as a "concurrent schema change".)
+    pub(super) fn refresh_catalog(&mut self) -> Result<()> {
+        let cur = {
+            let txn = self.ctx.txn.borrow();
+            if txn.changed_catalog().is_some() {
+                return Ok(());
             }
+            txn.catalog()
+        };
+        if cur.version != self.base.version {
+            self.cat = crate::txn::catmerge::merge(&self.base, &self.cat, &cur)?;
+            self.base = cur;
         }
+        Ok(())
     }
 
     /// Lock relation `oid` in `mode` (a lockdefs.h number) until the transaction ends;
@@ -8805,7 +8815,7 @@ impl Ddl<'_, '_> {
             &|| relname.clone(),
         )?;
         // (Dropped, or renamed, while the lock was waited for.)
-        self.refresh_catalog();
+        self.refresh_catalog()?;
         let still = self
             .cat
             .find_toast(schema, &rv.relname, self.search_path())
