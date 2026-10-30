@@ -841,6 +841,7 @@ fn set_slot(
                 coll,
                 numbers: None,
                 values: None,
+                parsed: Default::default(),
             });
             slots.len() - 1
         }
@@ -863,6 +864,7 @@ fn set_slot(
     }
     if values.is_some() {
         s.values = values;
+        s.parsed = Default::default();
     }
     Ok(())
 }

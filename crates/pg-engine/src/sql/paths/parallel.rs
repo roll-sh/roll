@@ -26,14 +26,19 @@ pub struct ParCfg {
 impl ParCfg {
     pub fn read(ctx: &ExecCtx) -> ParCfg {
         let s = ctx.sess.settings.borrow();
-        let on = |n: &str| s.get_raw(n).is_none_or(|v| v != "off" && v != "false");
+        let (g, p) = s.planner(super::Gucs::read_both);
+        // (Planning starts: its sorts' memory, `costs::work_mem`.)
+        crate::sql::costs::set_work_mem(g.work_mem);
+        p.clone()
+    }
+
+    pub(super) fn from_settings(s: &crate::session::settings::Settings) -> ParCfg {
+        let on = |n: &str| s.get_str(n).is_none_or(|v| v != "off" && v != "false");
         let num = |n: &str, d: f64| {
-            s.get_raw(n)
+            s.get_str(n)
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(d)
         };
-        // (Planning starts: its sorts' memory, `costs::work_mem`.)
-        crate::sql::costs::set_work_mem(num("work_mem", 4096.0));
         ParCfg {
             setup_cost: num("parallel_setup_cost", 1000.0),
             tuple_cost: num("parallel_tuple_cost", 0.1),
@@ -239,15 +244,16 @@ pub struct PartialScan {
 }
 
 /// set_plain_rel_pathlist's partial paths for a scan whose output columns `needed` are
-/// used above (empty: all). `member`: an appendrel member. None when the relation can't
-/// be scanned in parallel or no scan of it gets workers.
-/// None: the scan isn't parallel safe; Some(None): it is, but gets no workers.
-pub fn partial_scan(
+/// used above (empty: all). `member`: an appendrel member. The cheapest partial path, and
+/// the others add_partial_path keeps because they come in an order (parallel index scans),
+/// each as the cheapest is given, in total-cost order: one look at the relation for both.
+/// None: the scan isn't parallel safe; Some(None): it is, but no scan of it gets workers.
+pub fn partial_scans(
     ctx: &ExecCtx,
     s: &ScanPlan,
     needed: &[bool],
     member: bool,
-) -> Option<Option<PartialScan>> {
+) -> Option<Option<(PartialScan, Vec<PartialScan>)>> {
     let cfg = ParCfg::read(ctx);
     if cfg.max_workers == 0
         || s.table.temporary
@@ -264,22 +270,14 @@ pub fn partial_scan(
     {
         return None;
     }
-    Some(partial_scan_safe(ctx, &p, &cfg, s, needed, member))
-}
-
-fn partial_scan_safe(
-    ctx: &ExecCtx,
-    p: &Planner,
-    cfg: &ParCfg,
-    s: &ScanPlan,
-    needed: &[bool],
-    member: bool,
-) -> Option<PartialScan> {
-    let cfg = cfg.clone();
-    let rel = p.rel(s, needed)?;
-    let mut best: Option<(Path, usize)> = None;
-    for (path, workers) in p.partial_paths(&rel, &cfg, member, &s.useful) {
-        let better = match &best {
+    let Some(rel) = p.rel(s, needed) else {
+        return Some(None);
+    };
+    let paths = p.partial_paths(&rel, &cfg, member, &s.useful);
+    let mut best: Option<&(Path, usize)> = None;
+    for cand in &paths {
+        let (path, _) = cand;
+        let better = match best {
             None => true,
             Some((b, _)) => {
                 (path.disabled, path.total) < (b.disabled, b.total)
@@ -289,11 +287,25 @@ fn partial_scan_safe(
             }
         };
         if better {
-            best = Some((path, workers));
+            best = Some(cand);
         }
     }
-    let (path, workers) = best?;
-    partial_of(ctx, &rel, &cfg, s, &path, workers)
+    let Some((path, workers)) = best else {
+        return Some(None);
+    };
+    let Some(cheapest) = partial_of(ctx, &rel, &cfg, s, path, *workers) else {
+        return Some(None);
+    };
+    let mut list: Vec<(Path, usize)> = Vec::new();
+    for path in paths {
+        add_partial_path(&mut list, path);
+    }
+    let others = list
+        .iter()
+        .filter(|(path, _)| !path.keys.is_empty())
+        .filter_map(|(path, w)| partial_of(ctx, &rel, &cfg, s, path, *w))
+        .collect();
+    Some(Some((cheapest, others)))
 }
 
 fn partial_of(
@@ -363,44 +375,6 @@ fn add_partial_path(list: &mut Vec<(Path, usize)>, new: (Path, usize)) {
         }
     }
     list.insert(insert_at, new);
-}
-
-/// The partial paths of a scan's relation other than its cheapest one that add_partial_path
-/// keeps because they come in an order (parallel index scans), each as `partial_scan`
-/// gives the cheapest: in total-cost order.
-pub fn ordered_partial_scans(
-    ctx: &ExecCtx,
-    s: &ScanPlan,
-    needed: &[bool],
-    member: bool,
-) -> Vec<PartialScan> {
-    let cfg = ParCfg::read(ctx);
-    if cfg.max_workers == 0
-        || s.table.temporary
-        || s.sample.is_some()
-        || s.current_of.is_some()
-        || s.mark.is_some()
-        || s.table.is_foreign()
-    {
-        return Vec::new();
-    }
-    let p = Planner::new(ctx);
-    if let Some(f) = &s.filter
-        && hazard(f, &p.cat) != 's'
-    {
-        return Vec::new();
-    }
-    let Some(rel) = p.rel(s, needed) else {
-        return Vec::new();
-    };
-    let mut list: Vec<(Path, usize)> = Vec::new();
-    for path in p.partial_paths(&rel, &cfg, member, &s.useful) {
-        add_partial_path(&mut list, path);
-    }
-    list.iter()
-        .filter(|(path, _)| !path.keys.is_empty())
-        .filter_map(|(path, w)| partial_of(ctx, &rel, &cfg, s, path, *w))
-        .collect()
 }
 
 impl Planner<'_, '_> {

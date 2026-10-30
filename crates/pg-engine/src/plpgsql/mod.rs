@@ -37,10 +37,6 @@ thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
     static PARSED: RefCell<HashMap<String, Rc<Block>>> = RefCell::new(HashMap::new());
     static PLANS: RefCell<HashMap<String, Rc<Compiled>>> = RefCell::new(HashMap::new());
-    /// Statements and expressions of a function as first scanned in this session, with
-    /// standard literals: what a cached plan's raw parse tree keeps (later settings of
-    /// standard_conforming_strings don't change it, and its warnings are given once).
-    static LEXED: RefCell<HashMap<String, Rc<str>>> = RefCell::new(HashMap::new());
 }
 
 /// The first use of PL/pgSQL in a session loads it, which reserves the `plpgsql.` prefix:
@@ -84,13 +80,13 @@ pub fn validate_function(ctx: &ExecCtx, f: &Function, sql: &str) -> Result<()> {
     if no_input_collation(f) && !f.args.iter().any(|(_, t)| t.is_polymorphic()) {
         compiled_signature(ctx, f, signature_version(f));
     }
-    VALIDATED.with(|v| {
-        let mut v = v.borrow_mut();
+    {
+        let mut v = ctx.sess.pl_validated.borrow_mut();
         if v.len() > 256 {
             v.clear();
         }
         v.insert((ctx.sess.db.instance, f.schema, f.name.clone(), f.body.clone()));
-    });
+    }
     parse::parse(&f.body)
         .map(|_| ())
         .map_err(|e| body_position(compile_context(e, &f.name), sql, &f.body))
@@ -157,14 +153,6 @@ fn compile_checked(ctx: &ExecCtx, body: &str, spec: &compile::Spec, sql: &str) -
     }
 }
 
-thread_local! {
-    /// Functions (database, oid and body) compiled for a call in this session. (By
-    /// `Database::instance`: oids repeat in other engines' databases on the thread.)
-    static COMPILED: RefCell<HashSet<(u64, u32, String)>> = RefCell::new(HashSet::new());
-    /// Functions (schema, name and body) the validator compiled in this session, kept for
-    /// calls whose input collation is the validator's (none: no collatable arguments).
-    static VALIDATED: RefCell<HashSet<(u64, u32, String, String)>> = RefCell::new(HashSet::new());
-}
 
 /// Whether a call's input collation is none, as the validator compiles with.
 fn no_input_collation(f: &Function) -> bool {
@@ -182,29 +170,76 @@ fn compile_for_call(ctx: &ExecCtx, f: &Function) -> Result<()> {
         return compile_spec(ctx, f, true);
     }
     let key = (ctx.sess.db.instance, f.oid, f.body.clone());
-    if COMPILED.with(|c| c.borrow().contains(&key)) {
+    if ctx.sess.pl_compiled.borrow().contains(&key) {
         return Ok(());
     }
     // What the validator compiled is the cached function (`cached_function_compile`).
     let validated = (ctx.sess.db.instance, f.schema, f.name.clone(), f.body.clone());
-    if no_input_collation(f) && VALIDATED.with(|v| v.borrow_mut().remove(&validated)) {
-        COMPILED.with(|c| c.borrow_mut().insert(key));
+    if no_input_collation(f) && ctx.sess.pl_validated.borrow_mut().remove(&validated) {
+        ctx.sess.pl_compiled.borrow_mut().insert(key);
         return Ok(());
     }
-    compile_spec(ctx, f, false)?;
-    COMPILED.with(|c| {
-        let mut c = c.borrow_mut();
+    // A compile that succeeded without a warning over this catalog, search path and scanner
+    // settings does so in every session (`COMPILED_CLEAN`): only its first is done. (A
+    // session's temporary schema that doesn't exist yet finds nothing: one entry for all.)
+    let cat = ctx.catalog();
+    let path: Vec<&str> = ctx
+        .search_path
+        .iter()
+        .map(|s| {
+            if s.starts_with("pg_temp_") && cat.schema_by_name(s).is_none() {
+                "pg_temp"
+            } else {
+                s.as_str()
+            }
+        })
+        .collect();
+    let clean = format!(
+        "{}#{}#{}#{:?}#{:?}#{}",
+        ctx.sess.db.instance,
+        cat.version,
+        f.oid,
+        path,
+        crate::sql::scs::opts(),
+        f.body
+    );
+    drop(cat);
+    if COMPILED_CLEAN.get(&clean).is_none() {
+        let warned = compile_spec_warned(ctx, f, false)?;
+        if !warned {
+            let bytes = clean.len() + 64;
+            COMPILED_CLEAN.insert(clean, (), bytes);
+        }
+    }
+    {
+        let mut c = ctx.sess.pl_compiled.borrow_mut();
         if c.len() > 256 {
             c.clear();
         }
         c.insert(key);
-    });
+    }
     Ok(())
 }
 
 /// Compile `f` as called (its parameters' actual types). `pseudo_array`: an `anyarray`
 /// parameter is that pseudo-type itself (a statistics column passed), which can't be accepted.
 fn compile_spec(ctx: &ExecCtx, f: &Function, pseudo_array: bool) -> Result<()> {
+    compile_spec_warned(ctx, f, pseudo_array).map(|_| ())
+}
+
+/// Functions (database, catalog version, oid, search path, scanner settings, body) whose
+/// compile for a call succeeded without warnings, in any session: another session's first
+/// call of one would compile it alike, so it needn't (`compile_for_call`).
+static COMPILED_CLEAN: crate::lru::Shared<String, ()> =
+    crate::lru::Shared::new("PL/pgSQL functions compiled", 4 << 20);
+
+/// The footprint of `COMPILED_CLEAN` (`lru::footprints`).
+pub(crate) fn compiled_footprint() -> (&'static str, crate::lru::Footprint) {
+    COMPILED_CLEAN.footprint()
+}
+
+/// `compile_spec`, and whether compiling warned (whether or not the warning was shown).
+fn compile_spec_warned(ctx: &ExecCtx, f: &Function, pseudo_array: bool) -> Result<bool> {
     let mut spec = function_spec(f, false, None);
     if pseudo_array {
         for (p, (_, t, _)) in spec.params.iter_mut().zip(f.all_params()) {
@@ -218,6 +253,7 @@ fn compile_spec(ctx: &ExecCtx, f: &Function, pseudo_array: bool) -> Result<()> {
         warnings: Vec::new(),
     };
     let r = compile::compile(&f.body, &spec, &mut env);
+    let warned = !env.warnings.is_empty();
     for w in std::mem::take(&mut env.warnings) {
         if w.code == code::NONSTANDARD_USE_OF_ESCAPE_CHARACTER {
             ctx.notice(w);
@@ -233,7 +269,7 @@ fn compile_spec(ctx: &ExecCtx, f: &Function, pseudo_array: bool) -> Result<()> {
             f.name, fail.line
         )));
     }
-    Ok(())
+    Ok(warned)
 }
 
 /// `plpgsql.extra_errors` / `plpgsql.extra_warnings`: for each of shadowed_variables,
@@ -2272,8 +2308,8 @@ impl<'c, 'a> Interp<'c, 'a> {
     }
 
     /// `text` (expression or statement `id` of the body) as first scanned here
-    /// (`LEXED`), its scanner warnings reported then.
-    fn lexed(&self, id: usize, text: &str) -> Result<Rc<str>> {
+    /// (`SessionState::pl_lexed`), its scanner warnings reported then.
+    fn lexed(&self, id: usize, text: &str) -> Result<Arc<str>> {
         // (Per function, as Postgres compiles each: another function with the same body
         // first ran under another setting.)
         let key = (self.fn_name != "inline_code_block").then(|| {
@@ -2281,7 +2317,7 @@ impl<'c, 'a> Interp<'c, 'a> {
         });
         if let Some(t) = key
             .as_ref()
-            .and_then(|k| LEXED.with(|l| l.borrow().get(k).cloned()))
+            .and_then(|k| self.cx().sess.pl_lexed.borrow().get(k).cloned())
         {
             return Ok(t);
         }
@@ -2289,15 +2325,14 @@ impl<'c, 'a> Interp<'c, 'a> {
         for w in crate::sql::scs::take_warnings() {
             self.cx().notice(w);
         }
-        let t: Rc<str> = Rc::from(&*r?.0);
+        let t: Arc<str> = Arc::from(&*r?.0);
         if let Some(k) = key {
-            LEXED.with(|l| {
-                let mut l = l.borrow_mut();
-                if l.len() > 4096 {
-                    l.clear();
-                }
-                l.insert(k, t.clone());
-            });
+            let cx = self.cx();
+            let mut l = cx.sess.pl_lexed.borrow_mut();
+            if l.len() > 4096 {
+                l.clear();
+            }
+            l.insert(k, t.clone());
         }
         Ok(t)
     }

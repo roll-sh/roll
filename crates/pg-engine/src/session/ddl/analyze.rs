@@ -625,6 +625,7 @@ impl Ddl<'_, '_> {
                 coll: 0,
                 numbers: None,
                 values: Some((range_ty.clone(), vals)),
+                parsed: Default::default(),
             });
             for r in &nonempty {
                 lengths.push(match (&r.lower, &r.upper) {
@@ -648,6 +649,7 @@ impl Ddl<'_, '_> {
             coll: 0,
             numbers: Some(vec![(empty_cnt as f64 / non_null as f64) as f32]),
             values: Some((DataType::Float8, length_hist)),
+            parsed: Default::default(),
         });
         let _ = tg.coll;
         Some(st)
@@ -1297,6 +1299,7 @@ fn scalar_stats(
                     .collect(),
             ),
             values: Some(slot_values(&tg.ty, &vals, fmt)),
+            parsed: Default::default(),
         });
     }
     let num_bins = tg.stattarget as usize;
@@ -1330,6 +1333,7 @@ fn scalar_stats(
             coll,
             numbers: None,
             values: Some(slot_values(&tg.ty, &vals, fmt)),
+            parsed: Default::default(),
         });
     }
     if values_cnt > 1 {
@@ -1343,6 +1347,7 @@ fn scalar_stats(
             coll,
             numbers: Some(vec![corr as f32]),
             values: None,
+            parsed: Default::default(),
         });
     }
     Some(st)
@@ -1479,6 +1484,7 @@ fn distinct_stats(
                     .collect(),
             ),
             values: Some(slot_values(&tg.ty, &vals, fmt)),
+            parsed: Default::default(),
         });
     }
     Some(st)
@@ -1611,6 +1617,7 @@ fn array_stats(
             coll: tg.coll,
             numbers: Some(numbers),
             values: Some(slot_values(elem, &vals, fmt)),
+            parsed: Default::default(),
         });
     }
     if !counts.is_empty() {
@@ -1635,6 +1642,7 @@ fn array_stats(
             coll: tg.coll,
             numbers: Some(hist),
             values: None,
+            parsed: Default::default(),
         });
     }
 }

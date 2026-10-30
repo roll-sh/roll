@@ -329,7 +329,47 @@ fn catalog_rows_shared_by_sessions_follow_their_state() {
     });
 }
 
-/// A made range type's constructors are its own database's type's.
+/// What sessions share of planning (parse trees, PL/pgSQL compiles that succeeded without a
+/// warning, statistics' parsed values) is shared only under the same search path, scanner
+/// settings and catalog: a later session's compile still fails, warns or estimates as it
+/// would alone.
+#[test]
+fn shared_planning_follows_path_settings_and_catalog() {
+    on_thread(|| {
+        shared_rows_check(
+            "CREATE SCHEMA s1;
+             CREATE TYPE s1.mood AS ENUM ('a', 'b');
+             CREATE FUNCTION f() RETURNS text LANGUAGE plpgsql AS $$ DECLARE m mood := 'a'; BEGIN RETURN m::text; END $$;
+             CREATE FUNCTION g() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN 'a\\b'; END $$;
+             CREATE TABLE st (a int, b text);
+             INSERT INTO st SELECT g % 10, (g % 7)::text FROM generate_series(1, 1000) g;
+             ANALYZE st",
+            &[
+                (
+                    "postgres",
+                    "SET search_path = s1, public;
+                     SELECT f();
+                     SELECT g();
+                     EXPLAIN SELECT * FROM st WHERE a = 3;
+                     EXPLAIN SELECT * FROM st WHERE b = '3';",
+                ),
+                ("postgres", "SELECT f();"),
+                (
+                    "postgres",
+                    "SET standard_conforming_strings = off;
+                     SELECT g();",
+                ),
+                (
+                    "postgres",
+                    "SELECT pg_restore_attribute_stats('schemaname', 'public', 'relname', 'st', 'attname', 'a',
+                         'inherited', false, 'most_common_vals', '{3}'::text, 'most_common_freqs', '{0.9}'::real[]);
+                     EXPLAIN SELECT * FROM st WHERE a = 3;
+                     EXPLAIN SELECT * FROM st WHERE b = '3';",
+                ),
+            ],
+        );
+    });
+}
 #[test]
 fn range_constructors_per_database() {
     check(

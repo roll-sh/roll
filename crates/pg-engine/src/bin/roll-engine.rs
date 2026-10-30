@@ -246,6 +246,18 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             });
+            for (cache, f) in pg_engine::lru::footprints() {
+                tracing::info!(
+                    cache,
+                    entries = f.entries,
+                    bytes = f.bytes,
+                    capacity = f.capacity,
+                    hits = f.hits,
+                    misses = f.misses,
+                    evictions = f.evictions,
+                    "shared cache"
+                );
+            }
             tracing::info!("shutting down");
             engine.shutdown();
             pg_engine::log::flush();

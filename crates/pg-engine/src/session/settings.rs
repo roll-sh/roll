@@ -494,6 +494,9 @@ struct Derived {
     /// log_lock_waits or auto_explain.log_nested_statements: a statement then carries its log
     /// context (`log::set_backend`), for the lock manager and nested statements.
     logs_inside: bool,
+    /// The planner's settings (`paths::Gucs::read`, `parallel::ParCfg::read`), read on first
+    /// use: every planning pass and cost estimate asks for them.
+    planner: std::sync::OnceLock<(crate::sql::paths::Gucs, crate::sql::paths::parallel::ParCfg)>,
 }
 
 /// A session's search path (`session_search_path`) for a `$user` and backend id: what every
@@ -1333,6 +1336,15 @@ impl Settings {
         self.derived().values_key.clone()
     }
 
+    /// The planner's settings as `read` gives them from these settings, read once per
+    /// generation.
+    pub(crate) fn planner(
+        &self,
+        read: impl FnOnce(&Settings) -> (crate::sql::paths::Gucs, crate::sql::paths::parallel::ParCfg),
+    ) -> &(crate::sql::paths::Gucs, crate::sql::paths::parallel::ParCfg) {
+        self.derived().planner.get_or_init(|| read(self))
+    }
+
     fn derived(&self) -> &Derived {
         self.derived.0.get_or_init(|| {
             static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1372,6 +1384,7 @@ impl Settings {
                     .unwrap_or_default()
                     .to_string(),
                 path_memo: PathMemo::default(),
+                planner: std::sync::OnceLock::new(),
                 default_txn: (
                     self.get_str("default_transaction_isolation")
                         .and_then(crate::txn::Isolation::parse)

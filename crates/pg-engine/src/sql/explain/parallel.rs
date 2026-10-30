@@ -622,38 +622,25 @@ impl Builder<'_, '_> {
     }
 
     /// A scan's partial plan (the cheapest partial path of its relation), as the scan
-    /// node `serial` shows it but parallel-aware.
-    pub(super) fn partial_scan(
+    /// node `serial` shows it but parallel-aware, and its other partial paths, kept for
+    /// their order (`ExNode::partials`). None: not parallel safe; an empty node: parallel
+    /// safe, though no worker to scan it.
+    pub(super) fn partial_scans(
         &mut self,
         p: &Arc<Plan>,
         s: &ScanPlan,
         names: &[Name],
         serial: &ExNode,
-    ) -> Option<ExNode> {
+    ) -> Option<(ExNode, Vec<ExNode>)> {
         self.par.as_ref()?;
         let needed = self.needed.get(&addr(p)).cloned().unwrap_or_default();
-        let ps = crate::sql::paths::parallel::partial_scan(self.ctx, s, &needed, self.member_scan)?;
-        // (Parallel safe, though no worker to scan it.)
-        let Some(ps) = ps else {
-            return Some(ExNode::default());
+        let ps = crate::sql::paths::parallel::partial_scans(self.ctx, s, &needed, self.member_scan)?;
+        let Some((cheapest, others)) = ps else {
+            return Some((ExNode::default(), Vec::new()));
         };
-        Some(self.partial_scan_node(p, s, ps, names, serial))
-    }
-
-    /// The scan's other partial paths, kept for their order (`ExNode::partials`).
-    pub(super) fn ordered_partial_scans(
-        &mut self,
-        p: &Arc<Plan>,
-        s: &ScanPlan,
-        names: &[Name],
-        serial: &ExNode,
-    ) -> Vec<ExNode> {
-        if self.par.is_none() {
-            return Vec::new();
-        }
-        let needed = self.needed.get(&addr(p)).cloned().unwrap_or_default();
-        let list = crate::sql::paths::parallel::ordered_partial_scans(self.ctx, s, &needed, self.member_scan);
-        list.into_iter().map(|ps| self.partial_scan_node(p, s, ps, names, serial)).collect()
+        let n = self.partial_scan_node(p, s, cheapest, names, serial);
+        let others = others.into_iter().map(|ps| self.partial_scan_node(p, s, ps, names, serial)).collect();
+        Some((n, others))
     }
 
     fn partial_scan_node(

@@ -1705,10 +1705,15 @@ impl Session {
         Ok((bq, false))
     }
 
-    /// cached_plan_cost (`plan_total_cost`).
+    /// cached_plan_cost (`plan_cost_estimate`).
     fn plan_cost(&mut self, bq: &BoundQuery, params: &[Value], planning: bool) -> f64 {
-        self.with_ctx(params, |ctx| Ok(plan_total_cost(ctx, &bq.plan, bq.hidden_rtes, params, planning)))
-            .unwrap_or_default()
+        self.with_ctx(params, |ctx| {
+            let cost = plan_cost_estimate(ctx, &bq.plan, bq.hidden_rtes, planning);
+            #[cfg(debug_assertions)]
+            check_cost_estimate(ctx, bq, params, planning, cost);
+            Ok(cost)
+        })
+        .unwrap_or_default()
     }
 
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
@@ -3607,8 +3612,9 @@ fn in_parallel_worker(ctx: &crate::exec::ExecCtx, plan: &crate::sql::plan::Plan)
         && crate::sql::paths::parallel::plan_hazard(plan, &ctx.catalog()) == 's'
 }
 
-/// cached_plan_cost as `plan_total_cost`, from the planner's estimate without making
-/// EXPLAIN's text (a SQL function's or PL/pgSQL statement's plan, costed per call).
+/// cached_plan_cost: `plan`'s total cost, from the planner's estimate without making EXPLAIN's
+/// text; a custom plan's with a charge for planning it (1000 * cpu_operator_cost per range
+/// table entry, plus one). Prepared statements, SQL functions and PL/pgSQL statements.
 pub(crate) fn plan_cost_estimate(
     ctx: &crate::exec::ExecCtx,
     plan: &Arc<Plan>,
@@ -3623,9 +3629,37 @@ pub(crate) fn plan_cost_estimate(
     }
 }
 
-/// cached_plan_cost: `plan`'s total cost, as EXPLAIN shows it; a custom plan's with a charge
-/// for planning it (1000 * cpu_operator_cost per range table entry, plus one).
-pub(crate) fn plan_total_cost(
+/// Debug builds: `plan_cost_estimate`'s `cost` is the total EXPLAIN (FORMAT JSON) shows for the
+/// plan, to its two decimals (what prepared statements were costed by before). (Unless the
+/// estimate changed meanwhile: another session's writes grew a table it reads.)
+#[cfg(debug_assertions)]
+fn check_cost_estimate(
+    ctx: &crate::exec::ExecCtx,
+    bq: &BoundQuery,
+    params: &[Value],
+    planning: bool,
+    cost: f64,
+) {
+    let shown = plan_total_cost(ctx, &bq.plan, bq.hidden_rtes, params, planning);
+    if plan_cost_estimate(ctx, &bq.plan, bq.hidden_rtes, planning) != cost {
+        return;
+    }
+    let planned = if planning {
+        2.5 * (range_entries(&bq.plan) + bq.hidden_rtes + 1) as f64
+    } else {
+        0.0
+    };
+    let est = cost - planned;
+    assert!(
+        (est - (shown - planned)).abs() <= 0.005 + est.abs() * 1e-12,
+        "a prepared statement's estimated cost {est} isn't EXPLAIN's {}",
+        shown - planned
+    );
+}
+
+/// `plan_cost_estimate` read from EXPLAIN (FORMAT JSON)'s text (debug builds' check).
+#[cfg(debug_assertions)]
+fn plan_total_cost(
     ctx: &crate::exec::ExecCtx,
     plan: &Arc<Plan>,
     hidden_rtes: usize,

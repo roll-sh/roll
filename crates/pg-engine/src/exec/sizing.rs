@@ -3546,24 +3546,41 @@ pub fn heap_unprunable(t: &Table, ctx: &ExecCtx) -> bool {
     ctx.sess.db.relfiles.read().heaps.get(&t.oid).is_some_and(|h| !h.any_prunable())
 }
 
+/// Whether `t`'s heap and every btree index of it are modelled already: what `ensure` finds
+/// without binding the indexes (which every estimate of a scan of the table would; the other
+/// access methods have no model to make).
+fn modelled(rf: &RelFiles, cat: &Catalog, t: &Table) -> bool {
+    let index_done = |oid: &u32| {
+        cat.indexes.get(oid).is_none_or(|i| i.method != "btree") || rf.btrees.contains_key(oid)
+    };
+    !rf.untracked.contains(&t.oid)
+        && rf.heaps.contains_key(&t.oid)
+        && t.indexes.iter().all(index_done)
+        && t.pkey_index.as_ref().is_none_or(index_done)
+}
+
 /// The table's current size in pages (None: not modelled).
 pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
-    // The heap and every btree index laid out already (`ensure` has nothing to do): no need
-    // to bind the indexes (a scan of a small table asks per statement).
-    {
+    // (What `ensure` finds without binding the indexes: a table too big to model has its
+    // estimate, a modelled one its heap.)
+    let known = {
         let rf = ctx.sess.db.relfiles.read();
-        if let Some(h) = rf.heaps.get(&t.oid)
-            && !rf.untracked.contains(&t.oid)
-        {
-            let cat = ctx.catalog();
-            let modelled = |oid: &u32| {
-                cat.indexes.get(oid).is_none_or(|i| i.method != "btree") || rf.btrees.contains_key(oid)
-            };
-            if t.indexes.iter().all(modelled) && t.pkey_index.as_ref().is_none_or(modelled) {
-                return Ok(Some(h.nblocks()));
-            }
+        let cat = ctx.catalog();
+        if rf.untracked.contains(&t.oid) {
+            Some(rf.estimated.get(&t.oid).map(|e| e.pages))
+        } else if modelled(&rf, &cat, t) {
+            rf.heaps.get(&t.oid).map(|h| Some(h.nblocks()))
+        } else {
+            None
         }
+    };
+    if let Some(n) = known {
+        return Ok(n);
     }
+    heap_blocks_ensured(t, ctx)
+}
+
+fn heap_blocks_ensured(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
     if !ensure(t, &indexes, ctx)? {
         return Ok(ctx.sess.db.relfiles.read().estimated.get(&t.oid).map(|e| e.pages));
@@ -3903,6 +3920,49 @@ fn estimated_heap(t: &Table, ctx: &ExecCtx) -> Result<u32> {
 
 /// Blocks in one fork of a relation (None: no such relation).
 pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
+    // A table's or a valid btree index's main fork, the table too big to model or modelled
+    // with all its indexes: what binding its indexes would find (`fork_blocks_bound`; the
+    // planner asks for every relation and index it costs).
+    if fork == Fork::Main
+        && let Some(n) = main_blocks_known(oid, ctx)
+    {
+        return Ok(Some(n));
+    }
+    fork_blocks_bound(oid, fork, ctx)
+}
+
+fn main_blocks_known(oid: u32, ctx: &ExecCtx) -> Option<u64> {
+    let cat = ctx.catalog();
+    match rel_of(&cat, oid)? {
+        Rel::Heap(t) => {
+            let rf = ctx.sess.db.relfiles.read();
+            if rf.untracked.contains(&t.oid) {
+                rf.estimated.get(&t.oid).map(|e| e.pages as u64)
+            } else if modelled(&rf, &cat, &t) {
+                rf.heaps.get(&t.oid).map(|h| h.nblocks() as u64)
+            } else {
+                None
+            }
+        }
+        Rel::Index(t, _) => {
+            let ix = cat.indexes.get(&oid)?;
+            if ix.method != "btree" || !ix.valid || !(t.indexes.contains(&oid) || t.pkey_index == Some(oid)) {
+                return None;
+            }
+            let rf = ctx.sess.db.relfiles.read();
+            if rf.untracked.contains(&t.oid) {
+                Some(cat.relstats.get(&oid).map_or(1, |s| s.pages.max(1) as u64))
+            } else if modelled(&rf, &cat, &t) {
+                rf.btrees.get(&oid).map(|b| b.nblocks() as u64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
     let cat = ctx.catalog();
     let Some(rel) = rel_of(&cat, oid) else {
         // A system relation: its size in a fresh database.

@@ -84,7 +84,18 @@ pub struct Gucs {
 
 impl Gucs {
     pub fn read(ctx: &ExecCtx) -> Gucs {
-        let s = ctx.sess.settings.borrow();
+        let g = ctx.sess.settings.borrow().planner(Self::read_both).0.clone();
+        // (Planning starts: its sorts' memory, `costs::work_mem`.)
+        costs::set_work_mem(g.work_mem);
+        g
+    }
+
+    /// The planner's settings and the parallel ones, from `s`.
+    fn read_both(s: &crate::session::settings::Settings) -> (Gucs, parallel::ParCfg) {
+        (Self::from_settings(s), parallel::ParCfg::from_settings(s))
+    }
+
+    fn from_settings(s: &crate::session::settings::Settings) -> Gucs {
         let on = |n: &str| s.get_str(n).is_none_or(|v| v != "off" && v != "false");
         let num = |n: &str, d: f64| {
             s.get_str(n)
@@ -104,11 +115,7 @@ impl Gucs {
             random_page_cost: num("random_page_cost", 4.0),
             seq_page_cost: num("seq_page_cost", 1.0),
             cache_pages: num("effective_cache_size", 524288.0),
-            work_mem: {
-                let w = num("work_mem", 4096.0);
-                costs::set_work_mem(w);
-                w
-            },
+            work_mem: num("work_mem", 4096.0),
             hash_mem_multiplier: num("hash_mem_multiplier", 2.0),
         }
     }

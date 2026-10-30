@@ -208,25 +208,31 @@ fn char_to_byte(s: &str, p: usize) -> usize {
         .map_or(s.len(), |(b, _)| b)
 }
 
-/// Parse trees of texts parsed lately on this thread, by (options, text): a parse is a pure
-/// function of them, and the same texts come again and again (a client's repeated simple
-/// queries, stored defaults, checks and view bodies deparsed for each catalog read).
-/// Cleared whole when full.
-struct ParseCache {
-    map: std::collections::HashMap<(c_int, Box<str>), Result<Vec<RawStmt>>>,
-    bytes: usize,
-}
+/// Parse trees of texts parsed lately, by (options, text), shared by every session: a parse
+/// is a pure function of them, and the same texts come again and again (a client's repeated
+/// simple queries, function bodies, stored defaults, checks and view bodies deparsed for
+/// each catalog read), from new connections too. Bounded by an estimate of the trees' bytes.
+static PARSED: crate::lru::Shared<(c_int, Box<str>), std::sync::Arc<Trees>> =
+    crate::lru::Shared::new("parse trees", PARSE_CACHE_BYTES);
 
-const PARSE_CACHE_ENTRIES: usize = 2048;
-const PARSE_CACHE_BYTES: usize = 8 << 20;
+const PARSE_CACHE_BYTES: usize = 32 << 20;
 /// Longer texts aren't kept.
 const PARSE_CACHE_MAX_TEXT: usize = 16 << 10;
 
-thread_local! {
-    static PARSED: std::cell::RefCell<ParseCache> = std::cell::RefCell::new(ParseCache {
-        map: std::collections::HashMap::new(),
-        bytes: 0,
-    });
+/// A cached parse and the length of its text: whichever session drops it last drops it with
+/// the stack its depth needs.
+struct Trees(Result<Vec<RawStmt>>, usize);
+
+impl Drop for Trees {
+    fn drop(&mut self) {
+        let trees = std::mem::replace(&mut self.0, Ok(Vec::new()));
+        crate::stack::drop_deep(trees, self.1);
+    }
+}
+
+/// The parse tree cache's footprint (`lru::footprints`).
+pub(crate) fn parsed_footprint() -> (&'static str, crate::lru::Footprint) {
+    PARSED.footprint()
 }
 
 /// `parse` through `PARSED` (a copy of the tree kept for `tag` and `sql`).
@@ -243,26 +249,13 @@ pub fn cached_parse(
         crate::stack::with_headroom(crate::stack::tree_headroom(sql.len()), || r.clone())
     };
     let key = (tag, Box::<str>::from(sql));
-    if let Some(r) = PARSED.with(|c| c.borrow().map.get(&key).map(copy)) {
-        return r;
+    if let Some(t) = PARSED.get(&key) {
+        return copy(&t.0);
     }
     let r = parse();
-    let old = PARSED.with(|c| {
-        let mut c = c.borrow_mut();
-        let old = if c.map.len() >= PARSE_CACHE_ENTRIES || c.bytes >= PARSE_CACHE_BYTES {
-            c.bytes = 0;
-            std::mem::take(&mut c.map)
-        } else {
-            Default::default()
-        };
-        // (Trees are a few times their text.)
-        c.bytes += sql.len() * 8;
-        c.map.insert(key, copy(&r));
-        old
-    });
-    for ((_, text), trees) in old {
-        crate::stack::drop_deep(trees, text.len());
-    }
+    // (Trees are a few times their text.)
+    let trees = std::sync::Arc::new(Trees(copy(&r), sql.len()));
+    drop(PARSED.insert(key, trees, sql.len() * 8 + 256));
     r
 }
 

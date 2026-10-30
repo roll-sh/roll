@@ -773,16 +773,12 @@ pub fn mergejoin(
 // ── selectivity ──
 
 /// A statistics slot's values and numbers (MCV: kind 1).
-fn mcvs(cat: &Catalog, v: &VarRef, fmt: &FormatCtx) -> Option<(Vec<Value>, Vec<f64>)> {
+fn mcvs(cat: &Catalog, v: &VarRef, fmt: &FormatCtx) -> Option<(std::sync::Arc<Vec<Value>>, Vec<f64>)> {
     let s = costs::col_stats_of(cat, v)?;
     let sl = s.slots.iter().find(|x| x.kind == 1)?;
     let numbers: Vec<f64> = sl.numbers.as_ref()?.iter().map(|x| *x as f64).collect();
     let (ty, vals) = sl.values.as_ref()?;
-    let values = vals
-        .iter()
-        .map(|x| crate::types::text::parse_value(x, ty, fmt))
-        .collect::<crate::error::Result<Vec<_>>>()
-        .ok()?;
+    let values = costs::slot_values(sl, ty, vals, fmt)?;
     Some((values, numbers))
 }
 

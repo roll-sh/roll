@@ -1509,6 +1509,37 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - Cost (BENCH.md "Custom plans"): long sessions unchanged (pgbench -M prepared, a
     PL/pgSQL loop, SQL function calls per row); a new session's first five executions of
     each statement are planned again, as in PostgreSQL.
+- **Planning cost** (round 21, agent 111; BENCH.md "Planning cost"): what producing a plan
+  costs, for short sessions especially, without changing a plan, a cost or a result.
+  - *Shared across sessions* (`lru::Shared`, process-wide, bounded by bytes, CLOCK eviction,
+    `lru::footprints()`, logged at shutdown): parse trees by text (were per thread, so every
+    new connection parsed everything again); PL/pgSQL compiles that succeeded without a
+    warning (`COMPILED_CLEAN`, see "Session and thread state"). Statistics slots' values are
+    parsed once per slot (`StatSlot::parsed`) instead of per estimate.
+  - *Kept per session on purpose*: custom plans (they fold constants and may raise errors
+    or notices), and generic plans: a plan reads relation sizes and index endpoints
+    (get_actual_variable_range) when it is made, which a new PostgreSQL backend reads anew,
+    so a generic plan from another session could differ from the one PostgreSQL would make
+    (row order of an unordered FOR loop, auto_explain). Agent 105 owns `Prepared::bound`
+    and the per-execution costs.
+  - *Cheaper passes*: prepared statements' custom/generic costs come from
+    `explain::estimate` (`plan_cost_estimate`) instead of EXPLAIN (FORMAT JSON)'s text,
+    with debug builds comparing the two; a heap's and a btree index's blocks without binding
+    the table's indexes when the model (or a too-big table's estimate) answers
+    (`sizing::modelled`, `main_blocks_known`); the planner's settings read once per
+    settings generation (`Settings::planner`); a merge clause's mergejoinscansel once per
+    join search (`Search::scansels`, RestrictInfo's scansel_cache); an EXPLAIN / estimate
+    scan's partial paths from one look at the relation (`parallel::partial_scans`, was
+    `partial_scan` and `ordered_partial_scans`); `Expr::same_as` of two columns without
+    writing them; join MCV lists through the slot cache.
+  - Found on the way: `SessionState::pl_compiled` / `pl_validated` / `pl_lexed` were
+    thread-locals, so two sessions of one database on one thread (an embedder's, the
+    golden harness's) shared compile warnings and the scanner settings a function was
+    first scanned under. Test `session_state.rs shared_planning_follows_path_settings_and_catalog`.
+  - Left: `exec::pghash::presorted_keys` runs `explain::estimate` at every plan open (a
+    sixth of an ORM-style join's CPU per execution; agent 105's area); the binder and
+    planner run whole for each custom plan (PostgreSQL re-plans the analyzed tree), so a
+    custom plan of a primary-key lookup still costs about 200 µs.
 - **TPC-H plans, the tail** (round 21, agent 78; BENCH.md "Round 21", STATUS.md): 16 of the
   22 SF1 plans have PostgreSQL's shape (19 of 22 serial). Fixed: a join OR's per-relation
   restrictions in a pulled-up FROM subquery compensated in the clause (q07: 40 rows for
@@ -2711,9 +2742,12 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
   - PL/pgSQL (`plpgsql/mod.rs`): `PLANS` (body, statement, `Database::instance`, catalog
     version, search path, role, row_security, variable types, a DO block's
     standard_conforming_strings; the search path is the one `Interp::resync` found for the
-    statement, the session's as it is when the statement runs), `LEXED` (database, function oid, body: each function is
-    scanned at its own first run), `PARSED` (body; a DO block's with
-    standard_conforming_strings), `COMPILED` / `VALIDATED` (database, oid / schema + name, body),
+    statement, the session's as it is when the statement runs), `SessionState::pl_lexed`
+    (per session since round 21 agent 111; database, function oid, body: each function is
+    scanned at its own first run in the session), `PARSED` (body; a DO block's with
+    standard_conforming_strings), `SessionState::pl_compiled` / `pl_validated` (per session
+    since round 21 agent 111, which found two sessions of one database on a thread sharing
+    them, the second missing its compile warnings; database, oid / schema + name, body),
     `pl_conflicts` / `pl_strict_params` (per session, by function and body),
     `SessionState::pl_signatures` (per session, by oid with a hash of schema, name,
     arguments and body: the signature formatted at the function's validation or first call).
@@ -2794,11 +2828,29 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     copies only the columns its plan's `need` mask marks (`system::project`). Debug builds
     compare every splice and reuse with the full generation, and every chunk's runs with its
     rows (`sysdelta::parts_hold`). Test `ddl_scaling.rs more_catalogs_after_ddl_are_spliced_or_kept`.
-  - `sql::parse` `PARSED` (parse trees, per thread): by the text and the parser options (a
-    pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under tags of their own.
+  - `sql::parse` `PARSED` (parse trees, shared by every session of the process since round 21
+    agent 111, `lru::Shared`: bounded by an estimate of the trees' bytes, evicted by CLOCK;
+    a tree is dropped by its last holder with stack for its depth): by the text and the
+    parser options (a pure function); `ast::parse_exprs` / `parse_stmt` (stored texts) under
+    tags of their own.
+  - PL/pgSQL `COMPILED_CLEAN` (round 21, agent 111, `lru::Shared`): functions whose compile
+    for a call succeeded without a warning, by database instance, catalog version, oid,
+    search path, scanner settings and body; another session's first call of one skips the
+    compile (`compile_for_call`). A compile that warned or failed is never kept, so each
+    session still shows its warnings and errors. `pl_compiled` stays per session.
+  - `StatSlot::parsed` (round 21, agent 111): a statistics slot's values parsed once, for
+    types whose input reads nothing but the text (integers, floats, numeric, text types,
+    bool, uuid, oid), shared by every reader of the catalog value and its copies; whoever
+    changes `values` resets it (`stats_import`). Debug builds compare every use with a fresh
+    parse. Dates and times keep `costs::SLOT_VALUES`.
+  - `Settings`' derived cache (`Settings::planner`, round 21, agent 111): the planner's
+    settings (`paths::Gucs`, `parallel::ParCfg`), read once per settings generation.
+  - `lru::footprints()` lists the shared caches' entries, bytes, capacity, hits, misses and
+    evictions.
   - `costs::SLOT_VALUES` (statistics slots' parsed values, per thread): by
     `FormatCtx::settings` (the settings' generation; 0, a context not made from a session's
-    settings, isn't cached), the type and the texts; plain scalar types only.
+    settings, isn't cached), the type and the texts; dates and times only (whose input reads
+    the settings; the other plain types are `StatSlot::parsed`).
   - `sizing::TRACKED` (tables that ever stored a compressed or out-of-line datum, whose
     values `note_read` remembers; process-wide): by `Database::instance` and table, only
     ever added to.

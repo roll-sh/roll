@@ -11609,12 +11609,11 @@ impl Builder<'_, '_> {
             n.key = Some(addr(p));
             n.subplans.append(&mut self.pending);
             if gating.is_empty() && s.mark.is_none() {
-                match self.partial_scan(p, s, &names, &n) {
-                    Some(pn) if pn.node_type.is_empty() => n.par_safe = true,
-                    Some(pn) => {
+                match self.partial_scans(p, s, &names, &n) {
+                    Some((pn, _)) if pn.node_type.is_empty() => n.par_safe = true,
+                    Some((pn, others)) => {
                         n.par_safe = true;
                         n.partial = Some(Box::new(pn));
-                        let others = self.ordered_partial_scans(p, s, &names, &n);
                         let cheapest = n.partial.as_deref().map(|c| (c.title.clone(), c.order.clone()));
                         n.partials = others
                             .into_iter()

@@ -22,6 +22,7 @@ pub mod scoped;
 pub mod server_files;
 pub mod sysconf;
 pub mod log;
+pub mod lru;
 pub mod server_programs;
 pub mod session;
 pub mod sort;

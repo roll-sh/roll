@@ -589,6 +589,27 @@ pub struct StatSlot {
     pub numbers: Option<Vec<f32>>,
     /// The values' type and their text forms (default output style).
     pub values: Option<(DataType, Vec<String>)>,
+    /// `values` parsed, for a type whose input reads nothing but the text
+    /// (`costs::slot_values`): shared by every planner reading this catalog value or a copy.
+    /// Whoever changes `values` resets it.
+    #[serde(skip)]
+    pub parsed: SlotValues,
+}
+
+/// A statistics slot's parsed values, made on first use (not stored, not compared).
+#[derive(Clone, Default)]
+pub struct SlotValues(pub std::sync::OnceLock<Option<Arc<Vec<crate::types::Value>>>>);
+
+impl std::fmt::Debug for SlotValues {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SlotValues")
+    }
+}
+
+impl PartialEq for SlotValues {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 thread_local! {

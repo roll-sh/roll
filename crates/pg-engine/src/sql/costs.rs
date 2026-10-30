@@ -378,7 +378,7 @@ fn slot(
     s: &ColStats,
     kind: i16,
     fmt: &FormatCtx,
-) -> Option<(Vec<Value>, Vec<f64>)> {
+) -> Option<(Arc<Vec<Value>>, Vec<f64>)> {
     let sl = s.slots.iter().find(|x| x.kind == kind)?;
     let numbers = sl
         .numbers
@@ -386,34 +386,43 @@ fn slot(
         .map(|n| n.iter().map(|x| *x as f64).collect())
         .unwrap_or_default();
     let values = match &sl.values {
-        Some((ty, vals)) => slot_values(ty, vals, fmt)?,
-        None => Vec::new(),
+        Some((ty, vals)) => slot_values(sl, ty, vals, fmt)?,
+        None => Arc::default(),
     };
     Some((values, numbers))
 }
 
 thread_local! {
-    /// Statistics slots' values parsed lately (every estimate of a clause over a column
-    /// parses its histogram or MCV list, which planning a custom plan per execution does
-    /// again and again): by the settings' generation, the type and the texts.
-    static SLOT_VALUES: std::cell::RefCell<std::collections::VecDeque<(u64, DataType, Vec<String>, std::rc::Rc<Vec<Value>>)>> =
+    /// Statistics slots' values parsed lately, of types whose input reads the settings
+    /// (dates and times; every estimate of a clause over a column parses its histogram or
+    /// MCV list, which planning a custom plan per execution does again and again): by the
+    /// settings' generation, the type and the texts.
+    static SLOT_VALUES: std::cell::RefCell<std::collections::VecDeque<(u64, DataType, Vec<String>, Arc<Vec<Value>>)>> =
         Default::default();
 }
 
 const SLOT_VALUES_CACHED: usize = 64;
 
-/// A slot's values parsed as the column's type under `fmt` (None: one doesn't parse).
-fn slot_values(ty: &DataType, vals: &[String], fmt: &FormatCtx) -> Option<Vec<Value>> {
+/// Slot `sl`'s values (`vals`, of type `ty`) parsed as the column's type under `fmt` (None:
+/// one doesn't parse).
+pub(crate) fn slot_values(
+    sl: &crate::catalog::StatSlot,
+    ty: &DataType,
+    vals: &[String],
+    fmt: &FormatCtx,
+) -> Option<Arc<Vec<Value>>> {
     let parse = || {
         vals.iter()
             .map(|v| crate::types::text::parse_value(v, ty, fmt))
             .collect::<crate::error::Result<Vec<_>>>()
             .ok()
+            .map(Arc::new)
     };
-    // (Types whose input reads nothing but the text and the settings: not enums, reg*
-    // types, domains or composites, whose input reads the catalog.)
+    // Types whose input reads nothing but the text are parsed once per slot, for every
+    // session (`StatSlot::parsed`). (Not enums, reg* types, domains or composites, whose
+    // input reads the catalog.)
     use DataType as T;
-    let plain = matches!(
+    if matches!(
         ty,
         T::Bool
             | T::Int2
@@ -426,15 +435,24 @@ fn slot_values(ty: &DataType, vals: &[String], fmt: &FormatCtx) -> Option<Vec<Va
             | T::Varchar(_)
             | T::Bpchar(_)
             | T::Name
-            | T::Date
-            | T::Time(_)
-            | T::Timestamp(_)
-            | T::Timestamptz(_)
-            | T::Interval(_)
             | T::Uuid
             | T::Oid
+    ) {
+        let v = sl.parsed.0.get_or_init(parse);
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            format!("{:?}", v.as_deref()),
+            format!("{:?}", parse()),
+            "a statistics slot's values parsed for another text"
+        );
+        return v.clone();
+    }
+    // Those whose input reads the settings too, by the settings.
+    let by_settings = matches!(
+        ty,
+        T::Date | T::Time(_) | T::Timestamp(_) | T::Timestamptz(_) | T::Interval(_)
     );
-    if fmt.settings == 0 || !plain {
+    if fmt.settings == 0 || !by_settings {
         return parse();
     }
     let hit = SLOT_VALUES.with(|c| {
@@ -444,7 +462,7 @@ fn slot_values(ty: &DataType, vals: &[String], fmt: &FormatCtx) -> Option<Vec<Va
             .map(|e| e.3.clone())
     });
     if let Some(v) = hit {
-        return Some(v.as_ref().clone());
+        return Some(v);
     }
     let parsed = parse()?;
     SLOT_VALUES.with(|c| {
@@ -452,7 +470,7 @@ fn slot_values(ty: &DataType, vals: &[String], fmt: &FormatCtx) -> Option<Vec<Va
         if c.len() >= SLOT_VALUES_CACHED {
             c.pop_front();
         }
-        c.push_back((fmt.settings, ty.clone(), vals.to_vec(), std::rc::Rc::new(parsed.clone())));
+        c.push_back((fmt.settings, ty.clone(), vals.to_vec(), parsed.clone()));
     });
     Some(parsed)
 }
@@ -1351,9 +1369,10 @@ impl Est<'_> {
 
     /// ineq_histogram_selectivity (-1: no histogram).
     fn hist_ineq(&self, v: &VarRef, s: &ColStats, c: &Value, gt: bool, eq: bool) -> f64 {
-        let Some((mut vals, _)) = slot(s, 2, self.fmt) else {
+        let Some((vals, _)) = slot(s, 2, self.fmt) else {
             return -1.0;
         };
+        let mut vals = Arc::unwrap_or_clone(vals);
         let n = vals.len();
         if n < 2 {
             return -1.0;
@@ -1475,7 +1494,7 @@ impl Est<'_> {
             range = Some((a.clone(), b.clone()));
         }
         if let Some((vals, _)) = slot(s, 1, self.fmt) {
-            for x in vals {
+            for x in vals.iter().cloned() {
                 if x.is_null() {
                     continue;
                 }

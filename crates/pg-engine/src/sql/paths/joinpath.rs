@@ -555,6 +555,9 @@ struct Search<'s, 'c, 'a> {
     /// (get_joinrel_parampathinfo, get_parameterized_joinrel_size), which every path of
     /// that parameterization has.
     ppi: std::cell::RefCell<Vec<(u32, u32, f64)>>,
+    /// `scansel`'s answers by (clause, outer side): every merge path over a clause asks
+    /// (RestrictInfo's scansel_cache).
+    scansels: std::cell::RefCell<std::collections::HashMap<(usize, bool), (f64, f64, f64, f64)>>,
     /// Per equivalence class with a constant that the restrictions of several items
     /// equate with it (`a.x = 0 AND b.y = 0`: one class, no join clause; or `t1.a = t4.a`
     /// with `t4.a = 1`, the join clause replaced by both restrictions), those items
@@ -5782,8 +5785,24 @@ impl Search<'_, '_, '_> {
         add_jpath(&mut self.rels[ri].paths, jp, startup);
     }
 
-    /// mergejoinscansel of a merge clause: (outer start, outer end, inner start, inner end).
+    /// mergejoinscansel of a merge clause: (outer start, outer end, inner start, inner end),
+    /// worked out once per clause and side.
     fn scansel(&self, c: usize, outer_is_a: bool) -> (f64, f64, f64, f64) {
+        if let Some(&r) = self.scansels.borrow().get(&(c, outer_is_a)) {
+            #[cfg(debug_assertions)]
+            assert_eq!(
+                format!("{r:?}"),
+                format!("{:?}", self.scansel_of(c, outer_is_a)),
+                "a merge clause's cached scan selectivities"
+            );
+            return r;
+        }
+        let r = self.scansel_of(c, outer_is_a);
+        self.scansels.borrow_mut().insert((c, outer_is_a), r);
+        r
+    }
+
+    fn scansel_of(&self, c: usize, outer_is_a: bool) -> (f64, f64, f64, f64) {
         let (a, b, _, _) = self.clauses[c].eq.as_ref().unwrap();
         let (oe, ie) = if outer_is_a { (a, b) } else { (b, a) };
         let (Some(og), Some(ig)) = (key_col(oe), key_col(ie)) else {
@@ -8880,6 +8899,7 @@ impl Planner<'_, '_> {
             phvs,
             derives: Default::default(),
             ppi: Default::default(),
+            scansels: Default::default(),
             const_ecs: Vec::new(),
             xm: Vec::new(),
             kept_at: group_kept,

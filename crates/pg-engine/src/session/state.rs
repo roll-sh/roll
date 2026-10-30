@@ -371,6 +371,15 @@ pub struct SessionState {
     /// Each PL/pgSQL function's signature as CONTEXT lines show it, formatted at its first
     /// run in this session (by oid, with a hash of its schema, name, arguments and body).
     pub pl_signatures: RefCell<HashMap<u32, (u64, String)>>,
+    /// PL/pgSQL functions (database, oid and body) compiled for a call in this session, and
+    /// those (database, schema, name and body) its validator compiled, kept for calls whose
+    /// input collation is the validator's (`plpgsql::compile_for_call`).
+    pub pl_compiled: RefCell<std::collections::HashSet<(u64, u32, String)>>,
+    pub pl_validated: RefCell<std::collections::HashSet<(u64, u32, String, String)>>,
+    /// PL/pgSQL statements and expressions as first scanned in this session, with standard
+    /// literals: what a cached plan's raw parse tree keeps (later settings of
+    /// standard_conforming_strings don't change it, and its warnings are given once).
+    pub pl_lexed: RefCell<HashMap<String, std::sync::Arc<str>>>,
     /// LISTEN (true) / UNLISTEN of a channel (None: all) in the current transaction, applied
     /// when it commits.
     pub listen_actions: RefCell<Vec<(bool, Option<String>)>>,
@@ -532,6 +541,9 @@ impl SessionState {
             pl_conflicts: RefCell::new(HashMap::new()),
             pl_strict_params: RefCell::new(HashMap::new()),
             pl_signatures: RefCell::new(HashMap::new()),
+            pl_compiled: Default::default(),
+            pl_validated: Default::default(),
+            pl_lexed: Default::default(),
             listen_actions: RefCell::new(Vec::new()),
             ever_listened: Cell::new(false),
             copy_progress: RefCell::new(None),
