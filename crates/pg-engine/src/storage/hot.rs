@@ -29,9 +29,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(super) const PREFIX: usize = 8;
 pub(super) type Prefix = [u8; PREFIX];
 
-/// Scans of a whole range before it is kept.
+/// Scans in a range before it is kept.
 const BUILD_AFTER: i32 = 8;
-/// A range refused (too big) is tried again after this many more whole scans.
+/// A range refused (too big) is tried again after this many more scans, doubling with each
+/// refusal (up to 256 times as many).
 const RETRY_AFTER: i32 = 4096;
 /// Most keys / bytes a kept range may hold (more: dropped, and tried again later).
 const MAX_KEYS: usize = 2048;
@@ -115,19 +116,20 @@ pub(super) struct Hot {
     /// Any range kept (commits skip `apply`'s lookups otherwise).
     pub(super) any: AtomicBool,
     ranges: RwLock<HashMap<Prefix, Arc<Mutex<Chains>>>>,
-    /// Whole scans of ranges not kept (negative: refused, counting up to a retry).
-    seen: Mutex<HashMap<Prefix, i32>>,
+    /// Scans in ranges not kept (negative: refused, counting up to a retry), and how often
+    /// each was refused.
+    seen: Mutex<HashMap<Prefix, (i32, u32)>>,
 }
 
 /// The prefix of a scan of [start, end) that reads one whole relation's range.
-pub(super) fn whole(start: &[u8], end: &[u8]) -> Option<Prefix> {
+fn whole(start: &[u8], end: &[u8]) -> Option<Prefix> {
     let p: Prefix = start.try_into().ok()?;
     let last = p.iter().rposition(|b| *b != 0xFF)?;
     (end.len() == last + 1 && end[..last] == p[..last] && end[last] == p[last] + 1).then_some(p)
 }
 
 /// The relation range [start, end) lies in, if it lies in one.
-fn covering(start: &[u8], end: &[u8]) -> Option<Prefix> {
+pub(super) fn covering(start: &[u8], end: &[u8]) -> Option<Prefix> {
     let p: Prefix = start.get(..PREFIX)?.try_into().ok()?;
     let inside = end.get(..PREFIX) == Some(&p[..]) || whole(&p, end).is_some();
     inside.then_some(p)
@@ -146,19 +148,51 @@ impl Hot {
         Some(c.visible(start, end, ts))
     }
 
-    /// Count a whole scan of `p`'s range, which isn't kept: true when it is time to keep it.
-    pub(super) fn note_whole_scan(&self, p: Prefix) -> bool {
+    /// Count a scan in `p`'s range, which isn't kept (a sequential scan of the relation, an
+    /// index scan of a few of its keys): true when it is time to keep it.
+    pub(super) fn note_scan(&self, p: Prefix) -> bool {
         let mut seen = self.seen.lock();
         if seen.len() > 64 * MAX_RANGES {
             seen.clear();
         }
-        let n = seen.entry(p).or_insert(0);
+        let (n, _) = seen.entry(p).or_insert((0, 0));
         *n += 1;
         if *n >= BUILD_AFTER {
-            seen.remove(&p);
+            *n = 0;
             return true;
         }
         false
+    }
+
+    /// `get_version` of each of `keys` (ascending) at `ts` that a kept range holds: Some(the
+    /// answer) for those, None for the others.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn get_many(&self, keys: &[&[u8]], ts: u64) -> Option<Vec<Option<Option<(u64, Option<Bytes>)>>>> {
+        if !self.any.load(Ordering::Acquire) {
+            return None;
+        }
+        let ranges = self.ranges.read();
+        let mut out = Vec::with_capacity(keys.len());
+        let mut cur: Option<(Prefix, Option<parking_lot::MutexGuard<'_, Chains>>)> = None;
+        for k in keys {
+            let Some(p) = k.get(..PREFIX).and_then(|p| Prefix::try_from(p).ok()) else {
+                out.push(None);
+                continue;
+            };
+            if cur.as_ref().is_none_or(|(q, _)| *q != p) {
+                cur = Some((p, ranges.get(&p).map(|r| r.lock())));
+            }
+            out.push(match &mut cur {
+                Some((_, Some(c))) => {
+                    c.idle = 0;
+                    // (A key the range holds no version of at `ts`: the store answers, with
+                    // the deletion every snapshot sees that the chain dropped.)
+                    c.keys.get(*k).and_then(|chain| chain.iter().find(|(t, _)| *t <= ts)).map(|v| Some(v.clone()))
+                }
+                _ => None,
+            });
+        }
+        Some(out)
     }
 
     /// Keep `p`'s range, built from `entries`: every stored version in it, in storage order
@@ -222,7 +256,10 @@ impl Hot {
     }
 
     fn refuse(&self, p: Prefix) {
-        self.seen.lock().insert(p, BUILD_AFTER - RETRY_AFTER);
+        let mut seen = self.seen.lock();
+        let (n, times) = seen.entry(p).or_insert((0, 0));
+        *n = BUILD_AFTER - (RETRY_AFTER << (*times).min(8));
+        *times += 1;
     }
 
     /// A commit's writes at `ts` (under the commit lock, before it is visible): added to the

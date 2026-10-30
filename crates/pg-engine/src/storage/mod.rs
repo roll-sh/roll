@@ -599,9 +599,21 @@ impl Store {
         debug_assert!(keys.windows(2).all(|w| w[0] < w[1]));
         let view = self.view();
         let mut out: Vec<Option<(u64, Option<Bytes>)>> = vec![None; keys.len()];
+        // The keys no source has answered yet (the hot ranges' first: `hot`).
+        let mut left: Vec<usize> = match self.hot.get_many(keys, ts) {
+            Some(hot) => {
+                let mut left = Vec::new();
+                for (i, h) in hot.into_iter().enumerate() {
+                    match h {
+                        Some(v) => out[i] = v,
+                        None => left.push(i),
+                    }
+                }
+                left
+            }
+            None => (0..keys.len()).collect(),
+        };
         let seeks: Vec<Vec<u8>> = keys.iter().map(|k| mvcc_key(k, ts)).collect();
-        // The keys no source has answered yet.
-        let mut left: Vec<usize> = (0..keys.len()).collect();
         let mut found = Vec::new();
         let mem_get = |m: &Memtable, left: &mut Vec<usize>, out: &mut Vec<Option<(u64, Option<Bytes>)>>| {
             if m.is_empty() {
@@ -672,8 +684,8 @@ impl Store {
         if let Some(rows) = self.hot.scan(start, end, ts) {
             return Scan::of_rows(self.view(), rows, ts);
         }
-        if let Some(p) = hot::whole(start, end)
-            && self.hot.note_whole_scan(p)
+        if let Some(p) = hot::covering(start, end)
+            && self.hot.note_scan(p)
         {
             // (Kept from now on; a failure to read it leaves it to the merging scan.)
             if self.keep_hot(p).is_ok()
@@ -1841,7 +1853,7 @@ pub struct Scan {
     /// Rows come with their out-of-line values put back (`Store::scan`; `toast`).
     resolve: bool,
     /// The rows of a hot range's chains (`hot`), read already: no merge.
-    rows: Option<std::vec::IntoIter<(Vec<u8>, Bytes)>>,
+    rows: Option<Box<std::vec::IntoIter<(Vec<u8>, Bytes)>>>,
 }
 
 /// A cursor per source of `view` over [start, end), newest source first.
@@ -1875,7 +1887,7 @@ impl Scan {
             horizon: 0,
             _view: view,
             resolve: false,
-            rows: Some(rows.into_iter()),
+            rows: Some(Box::new(rows.into_iter())),
         }
     }
 
@@ -2389,6 +2401,16 @@ mod tests {
             let part: Vec<_> = store.scan(&a, &b, ts).map(|r| r.unwrap()).collect();
             let want: Vec<_> = expect.iter().filter(|(k, _)| *k >= a && *k < b).cloned().collect();
             assert_eq!(part, want, "part of the range, {what}, ts {ts}");
+            // Point reads: the newest version at `ts`. (A deletion every snapshot sees may
+            // be gone, as compaction drops it: no version and a deletion read alike.)
+            let keys: Vec<Vec<u8>> = model.keys().cloned().collect();
+            let refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+            let got = store.get_versions(&refs, ts).unwrap();
+            let live = |v: Option<(u64, Option<Bytes>)>| v.and_then(|(t, v)| Some((t, v?)));
+            for (k, g) in keys.iter().zip(got) {
+                let want = model[k].iter().rev().find(|(t, _)| *t <= ts).cloned();
+                assert_eq!(live(g), live(want), "get_versions {k:?}, {what}, ts {ts}");
+            }
         };
         for round in 0..40u32 {
             // Each commit updates a hot key or two (now and then deleting one), and a key

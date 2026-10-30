@@ -2872,9 +2872,13 @@ impl AggNode {
             // results depend on their rows' order (float sums, array_agg, ties of min /
             // max) show.
             let presort = presort.or_else(|| {
+                // (Estimated only when it can matter: a plain aggregate has one group.)
+                if self.groups.is_empty() || self.aggs.iter().all(order_insensitive) {
+                    return None;
+                }
                 let e = super::pghash::agg_estimate(self.plan.as_ref()?, ctx);
                 let sorted = e.presort.as_ref()?;
-                (!self.groups.is_empty() && !self.aggs.iter().all(order_insensitive)).then(|| {
+                Some(
                     sorted
                         .iter()
                         .filter(|(i, _, _)| *i < self.groups.len())
@@ -2884,8 +2888,8 @@ impl AggNode {
                             nulls_first,
                             using: None,
                         })
-                        .collect()
-                })
+                        .collect(),
+                )
             });
             if let Some(keys) = presort {
                 let mut rows = Vec::new();

@@ -1887,6 +1887,47 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   reference): 51,148 / 51,150, no unit changed against `results.tsv`; isolation spot checks
   (nowait*, skip-locked*, eval-plan-qual, deadlock, ...: as before); and the client suites in
   tests/clients/STATUS.md (ruby-pg now matches PostgreSQL).
+- **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
+  transactions.
+  - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index
+    prefix) scanned again and again is also kept as version chains, newest first, trimmed on
+    every commit to what a snapshot at or after the store's gc horizon reads (PostgreSQL's HOT
+    pruning); scans in the range read the chains instead of merging the memtables and files
+    and seeking past each key's old versions, and the versions a trim drops leave the
+    memtables too; point reads of keys in a kept range (`get_versions`: index scans' row
+    fetches) read the chains too. Kept after 8 scans in the range (a sequential scan of the
+    relation or an index scan of a few of its keys), at most 2,048 keys / 1 MB per range and 64
+    ranges per store (a range refused for size is tried again after 4,096 scans, doubling up
+    to 256 times that); a range written 8,192 times without a scan goes; an ingested commit (a
+    big one, `ingest_stream_locked`) drops them all; the build takes the commit lock for 2 ms
+    at most. The LSM stays the store of record. Test `storage::tests::hot_ranges_match_the_store`
+    (model of every version, pinned snapshots, deletions, flush, compaction, ingest).
+  - *synchronous_commit = off* (`Store::commit_async`): PostgreSQL's asynchronous commit. The
+    commit is visible and returns before its WAL fsync; a WAL writer thread (`roll-walwriter`,
+    started on demand, ending when idle) fsyncs every wal_writer_delay; a later synchronous
+    commit's fsync covers it. A crash loses only a suffix of commits (the WAL replays in commit
+    order). Synchronous unless the transaction changed the catalog, is a COMMIT PREPARED or
+    is decoded by a logical slot (decoders read what is visible: PostgreSQL's walsenders send
+    only flushed WAL; agent 108 may want decoders to read up to the durable point instead and
+    lift that). An asynchronous commit after a synchronous one still waiting for its fsync
+    waits for that fsync (commits become visible in timestamp order). Tests:
+    `tests/crash_async_commit.rs` (kill -9 mid-stream: a prefix of whole transactions, every
+    synchronous commit kept; quiet for 3 x wal_writer_delay: nothing lost),
+    `storage::tests::async_commits_visible_then_durable`.
+  - Executor nodes read their plan node through the prepared plan's `Arc` instead of a copy
+    per execution (`exec/planref.rs`: UPDATE / DELETE / INSERT / scan nodes; a scan made from
+    a changed copy owns it).
+  - A plain aggregate (no GROUP BY) no longer builds EXPLAIN's estimate of its plan per
+    execution (`AggNode::run`'s presort is for grouped aggregates only): 18% of the web-app
+    mix's CPU.
+  - Smaller: `sizing::heap_blocks` answers without binding the table's indexes when they are
+    all modelled; Bind no longer copies the statement's parse tree (`describe_here`); the
+    session's encodings come from the derived settings; a filtered scan decodes the filter's
+    columns first when the row's other columns read are passed by reference (text, numeric:
+    was only extension types); btree model descents binary-search inner pages
+    (`btsim::child_for`, checked against the linear search in debug builds).
+  - Wire: protocol output was already buffered and flushed at ReadyForQuery, errors and
+    COPY as PostgreSQL does (`server.rs` `Conn::flush`): one send per Sync, as PostgreSQL.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.

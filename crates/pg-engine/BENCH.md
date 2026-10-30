@@ -3581,6 +3581,126 @@ every row). Machine at load 25-40; rounds interleaved.
   PostgreSQL's subscriber needs that path faster; binary values change little because value
   input was never a large share.
 
+## OLTP round 1 (round 22, agent 105)
+
+HANDOFF.md, "OLTP round 1", has what changed. Release builds (frame pointers), pgbench in a
+container on the host network, `-M prepared`, scale 10, 20 s per run; servers on cores
+24–27, pgbench on 28–31, machine load 18–32 (other agents' builds and regress runs).
+
+**PostgreSQL on the host network.** Agent 85's PostgreSQL (`run.sh pg-start`) is reached
+through a published port, so every message goes through docker-proxy and the bridge: at 1
+client it ran 891–1,114 tps where the same image on the host network (`--network host`,
+same settings) runs 1,696–1,800, and its CPU per transaction drops (0.54 → 0.39 ms at 1
+client). The tables below compare with PostgreSQL on the host network, as the engine is
+reached. CPU per transaction is the server's (PostgreSQL: its cgroup), peak memory the
+engine's VmHWM and PostgreSQL's memory.peak over the same workload (the container restarted
+before each).
+
+| workload | clients | PG tps | PG CPU/txn | PG peak | engine tps | engine CPU/txn | engine peak |
+|---|---|---|---|---|---|---|---|
+| tpcb-like | 1 | 1,696 | 0.415 ms | 451 MB | 1,062 | 0.690 ms | 335 MB |
+| tpcb-like | 8 | 6,339 | 0.445 ms | 547 MB | 3,798 | 0.665 ms | 352 MB |
+| tpcb-like | 32 | 6,630 | 0.539 ms | 664 MB | 3,285 | 0.853 ms | 429 MB |
+| tpcb-like | 64 | 6,042 | 0.604 ms | 763 MB | 2,803 | 0.979 ms | 431 MB |
+| simple-update (`-N`) | 1 | 2,274 | 0.289 ms | 372 MB | 2,161 | 0.325 ms | 327 MB |
+| simple-update | 8 | 8,733 | 0.292 ms | 453 MB | 9,081 | 0.359 ms | 361 MB |
+| simple-update | 32 | 11,213 | 0.316 ms | 568 MB | 9,302 | 0.400 ms | 633 MB |
+| simple-update | 64 | 10,143 | 0.365 ms | 676 MB | 8,517 | 0.445 ms | 633 MB |
+| select-only (`-S`) | 1 | 8,413 | 0.072 ms | 405 MB | 9,765 | 0.073 ms | 288 MB |
+| select-only | 8 | 46,153 | 0.063 ms | 416 MB | 49,023 | 0.070 ms | 288 MB |
+| select-only | 32 | 55,604 | 0.068 ms | 466 MB | 53,428 | 0.074 ms | 294 MB |
+| select-only | 64 | 51,495 | 0.077 ms | 526 MB | 61,671 | 0.065 ms | 304 MB |
+| web-app mix | 1 | 1,526 | 0.458 ms | 169 MB | 970 | 0.859 ms | 935 MB |
+| web-app mix | 8 | 6,324 | 0.449 ms | 237 MB | 4,409 | 0.717 ms | 935 MB |
+| web-app mix | 32 | 6,958 | 0.554 ms | 509 MB | 4,577 | 0.833 ms | 935 MB |
+| web-app mix | 64 | 6,127 | 0.630 ms | 630 MB | 4,274 | 0.917 ms | 935 MB |
+
+The web-app mix (`tools/bench` doesn't have it; the script is below) is per transaction:
+BEGIN, three point selects (accounts, tellers, branches by key), `count(*)` of an
+events table by an indexed column, an INSERT into it with a bigserial key, an UPDATE of the
+account, COMMIT. Its events table grows by every run (to about 400,000 rows here): the
+engine's 935 MB peak is the size model's first look at a table that size after a restart
+(`sizing::ensure` reads up to `MAX_VERSIONS` rows to lay its heap out), not this round's.
+
+```
+\set aid random(1, 100000 * :scale)
+\set bid random(1, 1 * :scale)
+\set tid random(1, 10 * :scale)
+\set delta random(-5000, 5000)
+BEGIN;
+SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+SELECT tbalance, bid FROM pgbench_tellers WHERE tid = :tid;
+SELECT bid, bbalance FROM pgbench_branches WHERE bid = :bid;
+SELECT count(*) FROM webapp_events WHERE aid = :aid;
+INSERT INTO webapp_events (aid, tid, payload) VALUES (:aid, :tid, 'clicked');
+UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+COMMIT;
+-- setup: CREATE TABLE webapp_events (id bigserial PRIMARY KEY, aid int NOT NULL,
+--   tid int NOT NULL, created timestamptz NOT NULL DEFAULT now(), payload text);
+--   CREATE INDEX ON webapp_events (aid);
+```
+
+**This round against its base** (`7bb31b96`, built the same way; engine restarted per
+binary, warmed up 5 s, interleaved; instructions per transaction from `perf stat` of the
+engine over the run, which the machine's load moves far less than CPU time):
+
+| workload | clients | base kinstr/txn | round kinstr/txn | base CPU/txn | round CPU/txn |
+|---|---|---|---|---|---|
+| tpcb-like | 1 | 1,090–1,109 | 930–960 | 0.54–0.66 ms | 0.44–0.61 ms |
+| tpcb-like | 8 | 1,196–1,310 | 1,082–1,174 | 0.55–0.67 ms | 0.49–0.65 ms |
+| web-app mix | 8 | 1,746 (batch 1) | 1,331 | 0.92 ms | 0.75 ms |
+
+- tpcb-like: the hot ranges (pgbench_branches / _tellers read whole, then, once updates have
+  grown them past a page, through their keys' index ranges and point reads) and the smaller
+  items; peak memory unchanged (hot ranges hold at most 1 MB each).
+- web-app mix: `count(*)` without GROUP BY built EXPLAIN's estimate of its plan on every
+  execution (`AggNode::run`'s presort, needed only for grouped aggregates whose result
+  depends on row order): 18% of the engine's CPU.
+- `synchronous_commit = off` (PGOPTIONS, both servers; PostgreSQL bridged here): the engine
+  0.41 ms / 1,755 tps at 1 client (PostgreSQL 0.44 / 1,114), 0.47 / 5,730 at 8 (0.32 / 7,315).
+  With it on, waiting for the WAL fsync costs the engine about 0.1–0.2 ms of CPU per
+  transaction in futex waits and wake-ups at these rates.
+
+**Where tpcb-like's CPU goes now** (8 clients, `perf record --call-graph fp`): the kernel's
+TCP send / receive 23–29% (one send per Sync, as PostgreSQL; `nf_hook_slow` 6% of it is the
+host's nftables rules on loopback), the accounts UPDATE's and SELECT's index lookups 12–14%
+(an index range scan merging every source for one key, the row's point read, and the btree
+model's dead-entry check `kill_needed` → `Heap::chain_dead`, 2%), plan opening 7–10%, commit
+7–9% (the fsync wait 3%), Bind 3%, per-statement relation locks through the lock manager 2%
+(PostgreSQL takes them on its fast path), row locks and their waits, and allocation (10% of
+samples in mimalloc). The gap to PostgreSQL grows with clients: at 32 and 64 the engine waits
+on the hot rows' locks and on the size model's `relfiles` lock more, and the planner turns the
+branches / tellers UPDATEs into bitmap scans once dead versions grow their modelled heaps
+(PostgreSQL's plans do the same as its tables bloat).
+
+What is left, biggest first: a point lookup by a unique index answered without a range
+merge (a point read of the entry, its bloom filters skipping files); a fast path for weak
+relation locks; the size model's per-row bookkeeping on hot tables and its `relfiles` lock;
+lock waits on hot rows at 32+ clients.
+
+**The simple protocol** (`-M simple`, pgbench's default; ORMs sending unnamed statements pay
+the same per statement): tpcb-like at 8 clients took the engine 1.93 ms of CPU per transaction
+(680 tps) and PostgreSQL 0.81 ms (2,605 tps; the machine was busier than for the tables
+above). Of the engine's, parsing is 17% (libpg_query's parse and its protobuf round trip,
+`pg_query_parse_protobuf_opts` 9%, `pg_query_nodes_to_protobuf` 5%: every statement's text
+differs by its literals, so the parse cache by text doesn't hit) and binding and planning
+32%. Parsing straight into the engine's AST, and caching a statement's binding by its text
+with the literals taken out (PostgreSQL plans each simple statement afresh, but much more
+cheaply), are the next steps there.
+
+**Agent 103's select-only check.** `534eef2b` (before index access at index cost) against
+`95270b8e` (it), select-only, 1 and 8 clients, three interleaved rounds each: 162–166
+thousand instructions per transaction for both, at every client count and round; cycles
+per transaction 244–331 thousand for the first and 264–316 for the second, moving with the
+machine's load (tps 4,389–10,520 for both). The 8–10% seen was load, not the change.
+
+**Agent 108's insert check.** `2d117d62^` against `2d117d62` (track_commit_timestamp),
+single-row INSERTs with a bigserial key and an index (`-M prepared`), the table made afresh
+before every measurement, three interleaved rounds: at 8 clients 436–578 thousand
+instructions per transaction before and 519–532 after, 6,479–9,376 tps before and
+10,067–11,567 after; at 1 client both spread 220–928. No regression shows; the spread is
+the background flushes and compactions the whole-process count includes.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
