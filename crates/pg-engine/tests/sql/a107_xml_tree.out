@@ -199,3 +199,39 @@ xpath:143
 {101}
 -- SELECT 1
 
+> CREATE EXTENSION xml2
+-- CREATE EXTENSION
+
+> CREATE TABLE xt (id int, doc text)
+-- CREATE TABLE
+
+> INSERT INTO xt VALUES (1, '<r><a>1</a><a>2</a><b>x</b></r>'), (2, '<r><a>3</a></r>'),
+>   (3, 'bad<'), (4, '<r/>')
+-- INSERT 0 4
+
+> SELECT * FROM xpath_table('id', 'doc', 'xt', '/r/a|/r/b|count(/r/a)|string(/r/b)', 'true')
+>   AS t(id int, a text, b text, c text, d text) ORDER BY id, a
+NOTICE 00000: unsupported XQuery result: 3
+NOTICE 00000: unsupported XQuery result: 3
+NOTICE 00000: unsupported XQuery result: 3
+NOTICE 00000: unsupported XQuery result: 3
+NOTICE 00000: unsupported XQuery result: 3
+NOTICE 00000: unsupported XQuery result: 3
+id:int4 | a:text | b:text | c:text | d:text
+1 | 1 | x | <unsupported/> | x
+1 | 2 | NULL | <unsupported/> | x
+2 | 3 | NULL | <unsupported/> | 
+3 | NULL | NULL | NULL | NULL
+-- SELECT 4
+
+> SELECT * FROM xpath_table('id', 'doc', 'xt', 'string(/r/b)', 'true') AS t(id int, d text) ORDER BY id
+id:int4 | d:text
+3 | NULL
+-- SELECT 1
+
+> DROP TABLE xt
+-- DROP TABLE
+
+> DROP EXTENSION xml2
+-- DROP EXTENSION
+

@@ -14,6 +14,11 @@
 # for the time (the minimum, client-side, psql \timing) and the CPU per run (utime + stime of
 # the backend, or of the engine process). psql runs in a container of the pinned image on the
 # host network and pid namespace (xmlmem.sh). Every query returns one short row.
+#
+# The engine: `XB_REPS=0 ... run engine` for peaks (a fresh engine per case, freed memory
+# returned at once), then `XB_RESTART=0 ... run engine` on an engine that has run a while for
+# times. XB_PREFIX names the containers and ports' owner (default a107); XB_PG, XB_PG_PORT,
+# XB_ENGINE_PORT, XB_DATA, XB_SIZES override the rest.
 set -eu
 if [ -z "${XB_SG:-}" ] && ! docker info >/dev/null 2>&1; then
   q=""; for a in "$0" "$@"; do q="$q '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"; done
@@ -62,8 +67,9 @@ xpath_count|select (xpath('count(/rows/row)', d))[1]::text from xb_d_SIZE
 xpath_exists|select xpath_exists('/rows/row[b = 5]', d) from xb_d_SIZE
 xmltable|select count(*), sum(x.b) from xb_d_SIZE, xmltable('/rows/row' passing d columns id int path '@id', a text path 'a', b int path 'b') x
 xmltable_xml|select count(*), sum(length(x.r::text)) from xb_d_SIZE, xmltable('/rows/row' passing d columns r xml path '.') x
-build_xmlagg|select length(xmlelement(name rows, xmlagg(xmlelement(name row, xmlattributes(id as id), xmlforest(a, b))))::text) from xb_rows where id <= ROWS
-build_xmlagg_flat|select length(xmlagg(xmlelement(name r, a))::text) from xb_rows where id <= ROWS
+build_xmlagg|select length(xmlelement(name rows, xmlagg(xmlelement(name row, xmlattributes(i as id), xmlforest(md5(i::text) as a, i * 2 as b))))::text) from generate_series(1, ROWS) i
+build_xmlagg_flat|select length(xmlagg(xmlelement(name r, md5(i::text)))::text) from generate_series(1, ROWS) i
+build_string_agg|select length('<rows>' || string_agg(format('<row id="%s"><a>%s</a><b>%s</b></row>', i, md5(i::text), i * 2), '') || '</rows>') from generate_series(1, ROWS) i
 query_to_xml|select length(query_to_xml('select i id, md5(i::text) a, i * 2 b from generate_series(1, ROWS) i', true, false, '')::text)
 table_to_xml|select length(table_to_xml('xb_t_SIZE', true, false, '')::text)
 xml2_xpath_string|select length(xpath_string(t, '/rows/row[last()]/a')) from xb_d_SIZE
@@ -79,6 +85,9 @@ EOF
 engine_start() {
   if ss -ltn | grep -q ":$ENGINE_PORT "; then echo "port $ENGINE_PORT busy" >&2; exit 1; fi
   mkdir -p "$DATA/engine"
+  # A memory pass (XB_REPS=0): mimalloc gives freed pages back at once, so RSS follows the
+  # heap instead of staying at what earlier statements used.
+  if [ "${XB_REPS:-}" = 0 ]; then export MIMALLOC_PURGE_DELAY=0; fi
   "$BIN" --data "$DATA/engine" --listen 127.0.0.1:$ENGINE_PORT --password pw >>"$DATA/engine.log" 2>&1 &
   echo $! >"$DATA/engine.pid"
   i=0; until ss -ltn | grep -q ":$ENGINE_PORT "; do sleep 0.2; i=$((i+1)); [ $i -lt 300 ]; done
@@ -128,9 +137,12 @@ run)
       # 1 MB over a minute).
       case $name:$s in build_xmlagg*:10m | build_xmlagg*:50m | xml2_xpath_table:10m | xml2_xpath_table:50m) continue ;; esac
       sq=$(echo "$q" | sed "s/SIZE/$s/g; s/ROWS/$(rows "$s")/g")
-      case $s in 10m) reps=2;; 50m) reps=0;; *) reps=${XB_REPS:-5};; esac
+      case $s in 10m) reps=2;; 50m) reps=0;; *) reps=5;; esac
+      reps=${XB_REPS:-$reps}
       # The engine is one process whose allocator keeps freed memory for reuse: a fresh one
-      # per case, so a case's peak isn't hidden by what an earlier one left resident.
+      # per case, so a case's peak isn't hidden by what an earlier one left resident. (A
+      # fresh engine is slower for its first seconds: take times from a run with
+      # XB_RESTART=0, peaks from one with XB_REPS=0.)
       if [ "$side" = engine ] && [ "${XB_RESTART:-1}" = 1 ]; then engine_stop; engine_start; fi
       out=$({
         # printf, not echo: dash's echo reads \t in \timing as a tab

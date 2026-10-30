@@ -400,10 +400,65 @@ impl Node {
     }
 }
 
+/// log2 of the nodes per chunk of the arena.
+const CHUNK_BITS: usize = 12;
+const CHUNK: usize = 1 << CHUNK_BITS;
+
+/// The node arena: chunks of `CHUNK` nodes (the first grows up to that), so a big
+/// document's arena grows without copying itself into an allocation twice its size.
+#[derive(Debug, Default)]
+pub struct Nodes {
+    chunks: Vec<Vec<Node>>,
+    len: usize,
+}
+
+impl Nodes {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn push(&mut self, n: Node) {
+        match self.chunks.last_mut() {
+            Some(c) if c.len() < CHUNK => c.push(n),
+            _ => {
+                let mut c = Vec::with_capacity(if self.chunks.is_empty() { 4 } else { CHUNK });
+                c.push(n);
+                self.chunks.push(c);
+            }
+        }
+        self.len += 1;
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Node> {
+        self.chunks.iter().flatten()
+    }
+
+    fn into_nodes(self) -> impl Iterator<Item = Node> {
+        self.chunks.into_iter().flatten()
+    }
+}
+
+impl std::ops::Index<usize> for Nodes {
+    type Output = Node;
+    fn index(&self, i: usize) -> &Node {
+        &self.chunks[i >> CHUNK_BITS][i & (CHUNK - 1)]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Nodes {
+    fn index_mut(&mut self, i: usize) -> &mut Node {
+        &mut self.chunks[i >> CHUNK_BITS][i & (CHUNK - 1)]
+    }
+}
+
 /// Children or attributes in order: a sibling chain.
 #[derive(Clone)]
 pub struct Siblings<'d> {
-    nodes: &'d [Node],
+    nodes: &'d Nodes,
     front: u32,
     back: u32,
 }
@@ -438,7 +493,7 @@ impl DoubleEndedIterator for Siblings<'_> {
 /// An `xmlDoc`: node 0 is the document node.
 #[derive(Debug)]
 pub struct Doc {
-    pub nodes: Vec<Node>,
+    pub nodes: Nodes,
     /// Every node's content, each a span of this.
     buf: String,
     pub version: Option<String>,
@@ -459,7 +514,11 @@ pub const DOC: NodeId = 0;
 impl Doc {
     pub fn new(version: Option<&str>) -> Doc {
         Doc {
-            nodes: vec![Node::new(Kind::Document, "")],
+            nodes: {
+                let mut n = Nodes::default();
+                n.push(Node::new(Kind::Document, ""));
+                n
+            },
             buf: String::new(),
             version: version.map(str::to_string),
             encoding: None,
@@ -749,7 +808,7 @@ impl Doc {
         let shift = |l: u32| if l == NIL { NIL } else { link(Some(l as usize + base)) };
         let toff = u32::try_from(self.buf.len()).expect("XML text over 4 GB");
         self.buf.push_str(&other.buf);
-        for mut n in other.nodes {
+        for mut n in other.nodes.into_nodes() {
             n.parent = shift(n.parent);
             n.first = shift(n.first);
             n.last = shift(n.last);

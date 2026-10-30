@@ -51,3 +51,15 @@ SELECT xpath('//namespace::*', '<a xmlns:p="u"><b xmlns="v"/></a>');
 SELECT * FROM xmltable('/r/x' PASSING '<r xmlns:p="u"><x p:a="1"><p:y>2</p:y></x><x/></r>'
   COLUMNS n FOR ORDINALITY, a text PATH '@*', y xml PATH '*', s xml PATH '.');
 SELECT xpath('count(//*)', xmlelement(name a, xmlagg(xmlelement(name b, i)))) FROM generate_series(1, 100) i;
+
+-- xml2's xpath_table: a row per position of the node sets, each path evaluated once per
+-- document (the reference evaluates it again per row: the same values, the same notices).
+CREATE EXTENSION xml2;
+CREATE TABLE xt (id int, doc text);
+INSERT INTO xt VALUES (1, '<r><a>1</a><a>2</a><b>x</b></r>'), (2, '<r><a>3</a></r>'),
+  (3, 'bad<'), (4, '<r/>');
+SELECT * FROM xpath_table('id', 'doc', 'xt', '/r/a|/r/b|count(/r/a)|string(/r/b)', 'true')
+  AS t(id int, a text, b text, c text, d text) ORDER BY id, a;
+SELECT * FROM xpath_table('id', 'doc', 'xt', 'string(/r/b)', 'true') AS t(id int, d text) ORDER BY id;
+DROP TABLE xt;
+DROP EXTENSION xml2;

@@ -245,18 +245,21 @@ fn xpath_table(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
             Ok(v) => v,
             Err(e) => return Err(e.clone()),
         };
+        // xml2 evaluates every path again for each row it returns (quadratic in the
+        // document); the results are the same each time, so each is evaluated once here.
+        let results: Vec<Option<XValue>> = comps.iter().map(|comp| eval_in(&x, comp)).collect();
         let mut rownr = 0;
         loop {
             let mut had_values = false;
-            for (j, comp) in comps.iter().enumerate() {
-                if let Some(v) = eval_in(&x, comp) {
+            for (j, v) in results.iter().enumerate() {
+                if let Some(v) = v {
                     values[j + 1] = match v {
                         XValue::NodeSet(set) => set.get(rownr).map(|n| {
                             had_values = true;
                             xpath::cast_node_to_string(&x, n)
                         }),
-                        XValue::String(s) => Some(s),
-                        v => Some(unsupported(c, &v)),
+                        XValue::String(s) => Some(s.clone()),
+                        v => Some(unsupported(c, v)),
                     };
                 }
             }

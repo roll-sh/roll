@@ -137,7 +137,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   model, made compact: 72-byte nodes with no heap allocations of their own (`u32` parent /
   first / last / next / prev / first-attribute links in the arena, interned `Name`s, shared
   `NsRef` namespaces, content as spans of one text buffer per document, namespace and DTD
-  declarations boxed). Use `Doc::children` / `attrs` / `first_child` / `next_sibling` /
+  declarations boxed, the arena in chunks of 4,096 nodes). Use `Doc::children` / `attrs` / `first_child` / `next_sibling` /
   `parent`, `Doc::text(&node)` / `text_of(id)` for content and `append` / `append_attr` /
   `insert_before` / `unlink` to change the tree; `Doc::dup` / `copy_node` copy within a
   document, `Doc::import` / `absorb` across documents (a span is only valid in its own
@@ -146,16 +146,19 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   Checking input doesn't build a tree (`Parser::tree = false`: xml_in, XMLPARSE,
   xml_is_well_formed*, xml_recv, IS DOCUMENT, XMLSERIALIZE without INDENT); the errors are
   the parse's, so they're unchanged. xmlagg appends in place (`xml::concat_into`; it was
-  quadratic). A 1 MB document's peak heap: 2.9 MB to check, 17 MB for XPath / XMLTABLE /
-  xml2 (it was ~200 MB), 27 MB for xslt_process; at 50 MB the engine peaks at 0.7–1.2 GB
+  quadratic), and xml2's xpath_table evaluates each path once per document (the reference
+  again per row: 65 s for 1 MB, the engine 52 ms). A 1 MB document's peak heap: 2.9 MB to
+  check, 11.6 MB for XPath / xml2, 13.8 for XMLTABLE (it was ~200 MB), 20.5 MB for
+  xslt_process; at 50 MB the engine peaks at 0.15 GB to check and 0.55–1.0 GB to query
   where the reference's backend peaks at 0.8–1.7 GB (and 2.8–5.0 GB before), and is faster
-  there on every entry point but query_to_xml / table_to_xml (at 1 MB, xml2's xpath_string
-  and xmlconcat are behind, by the cost of reading the row). Tests: `tests/xml_memory.rs` (heap peaks at
-  1 MB against the reference's, a counting allocator), golden `a107_xml_tree`; bench
-  `tools/bench/xml.sh`. Left: query_to_xml / table_to_xml and reading a row of a table of
-  large values are slower than the reference because of the scans under them, not XML
-  (BENCH.md, "XML", last paragraph); xml2's xpath_table is quadratic in both (37 s / 36 s
-  for 1 MB).
+  there on every entry point. Tests: `tests/xml_memory.rs` (heap peaks at 1 MB against the
+  reference's, a counting allocator), golden `a107_xml_tree`; bench `tools/bench/xml.sh`.
+  Left (BENCH.md, "XML", "Left"): reading a row with large values costs the engine 10–45 ms
+  and ~22 MB per MB-sized row the first time in a connection and decodes every column, so
+  1 MB times are behind on some entry points and `d::text` of a 50 MB value peaks at 150 MB
+  against 73; index range reads over a 580,000-row table made by CREATE TABLE AS were
+  hundreds of times slower than the reference's (table_to_xml at 10 MB pays it). Neither is
+  XML's; both are measured there.
 - **Monitoring views and functions** (round 20, agent 80b): what postgres_exporter,
   pgAdmin's dashboard, pg_activity and pgwatch read. Their queries (extracted from each tool's
   source: the exporter's collectors, pgAdmin's dashboard templates, pg_activity's
