@@ -633,11 +633,68 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       masks and parallel scans when none of their columns is of a type `note_read` remembers
       (`sizing::reads_tracked`).
     - Open (BENCH.md "pgvector round 2"): filtered queries over 768- and 1,536-dimension
-      vectors (PostgreSQL's heap holds only TOAST pointers there; the engine stores vectors
-      inline and reads every row's bytes: out-of-line storage of big values is the fix, a
-      row format change); index builds' peak memory (hnsw: the graph and its records both in
-      memory; ivfflat at 128 dimensions); the per-row cost of the storage iteration and row
-      decoding behind full scans of small rows.
+      vectors (done in round 21, agent 102: out-of-line storage and inline scans, below);
+      index builds' peak memory (hnsw: the graph and its records both in memory; ivfflat at
+      128 dimensions; agent 102's measurements in BENCH.md "Out-of-line storage"); the
+      per-row cost of the storage iteration and row decoding behind full scans of small rows.
+- **Out-of-line storage of large values, inline scans** (round 21, agent 102; BENCH.md
+  "Out-of-line storage"): the engine's TOAST, for every type.
+  - Format (`storage/toast.rs`, `storage/row.rs`): a value whose encoding reaches its
+    column's threshold is stored under a key of its own, `table | u32::MAX | row key suffix |
+    xid | seq` (`toast::SPACE`: where an index id goes; index ids are oids), and the row
+    holds a pointer (value tag `EXTERNAL`: xid, seq, length) under the headers `0xFD` /
+    `0xFC` (`ROW_HEADER_EXT`, `_TID_EXT`). Thresholds follow the column (`exec/toast.rs`):
+    PLAIN never, MAIN from 8,160 bytes, EXTENDED / EXTERNAL from 2,032 or the table's
+    toast_tuple_target if lower. Rows written before (and values under the thresholds) stay
+    inline and read as before; a row written again is stored the new way. Builds before this
+    one can't read rows with pointers (downgrade only before writing any). What PostgreSQL
+    shows of TOAST (pg_column_size, pg_column_compression, the TOAST relation and its sizes,
+    reltoastrelid, SET STORAGE / COMPRESSION) is still the size model's (`sizing`): unchanged.
+    Physical compression is the SST blocks' zstd.
+  - Writes (`exec/toast.rs`: `put_row`, `replace_row`, `delete_row`; every row writer goes
+    through them): a value is written once, under a key no other write uses; an UPDATE in
+    place keeps the pointer of a value whose encoding is unchanged (nothing written), and
+    deletes the values it drops; DELETE, a key change, TRUNCATE (`toast::table_end`: the
+    value space too) and DROP delete them. Writers that read a row to store its bytes again
+    (TID stamps: `stamp_tids`, `rewritten`) read it raw (`Txn::get_raw`).
+  - Reads: every read of the store (`Store::get`, `get_version(s)`, `scan`, `scan_rev`) and
+    of a transaction (`Txn::get*`, `TxnScan`, `TxnRevScan`) gives rows with their values put
+    back (`toast::splice`), so code reading stored rows sees what it saw before; `_raw`
+    variants and `TxnScan::raw` give them as stored. A value is read as its key's newest
+    version, else (a deletion) as of the reader's snapshot: values never change, and the
+    newest version also finds one a READ COMMITTED UPDATE kept from a version newer than
+    its snapshot. A transaction's own values come from its buffer and spilled runs as the
+    reader's snapshot sees them (`txn::toast::Source`). Values are read in their rows' order
+    through a cursor (`txn::toast::Reader`), by key when they are far apart.
+  - Plain sequential scans read rows as stored (`ScanNode::toast`): the filter first over
+    its own columns, then only the decoded columns' values, decoded in place
+    (`toast::decode_into`); parallel and inline scans' workers likewise (`LazyBuf::fetch`,
+    distances over a fetched vector: `K::dist_ext`). Masked scans of tables whose datums
+    `note_read` tracks are allowed now: the masked decode notes its values too.
+  - Inline scans (`ParScan::start_inline`): a plain sequential scan of 32 or more modelled
+    pages and under 8 MB of a modelled heap whose rows' work a
+    worker would do (a filter kernel, partial aggregation, join probes, computed distances)
+    runs the workers' code on the executor's thread, a chunk at a time: the serial path's
+    per-row decoding and `eval` were 2–3x the workers' per row. And a scan whose workers
+    would only decode rows (no filter kernel, nothing aggregated or computed) no longer
+    goes parallel: no wall-time gain, 41% more CPU (BENCH.md). max_parallel_workers_per_gather
+    = 0 still keeps every scan on the serial path. Found, not investigated: run inline over a
+    table too big to model (`big_tables` `deferred_entry_deletes`, `with_max_versions`) in a
+    transaction that had deleted and re-inserted rows, the worker code counted 1,984 rows
+    where the serial scan and the index counted 1,982; the test keeps worker scans off for
+    that table, and inline scans are limited to modelled heaps (whose pending deletes make
+    pages prunable, which keeps the serial path).
+  - Tests: `tests/toast_storage.rs` (every write path with a restart, values written and
+    read counted: `exec::toast::VALUES_WRITTEN`, `storage::toast::VALUES_READ`;
+    `parscan::inline_started`).
+  - Verified (debug engine unless said): crate tests debug and release (deep_input,
+    big_tables), toast and spill tests with `ROLL_TXN_SPILL_BYTES=4096`, clippy (no new
+    warnings), pgvector_equality 480 / 480, contrib pgvector 915 / 915, bloom 58, pg_trgm
+    261, btree_gist 613 / 616, cube 316 (unchanged), difftest smoke, isolation 121 / 122,
+    a full regress run on a private reference 51,148 / 51,150 with no unit changed against
+    results.tsv, pg_dump_tap 14,817 / 14,817. pgvector's own suite needs a reference built
+    with `OPTFLAGS=""`: the bench's seeded build (`-DIVFFLAT_BENCH -DHNSW_MEMORY`) prints
+    notices of its own (800 / 915 against it).
 - **Index access methods of native code** (round 20, agent 70; `src/ext/index_am.rs`): what an
   extension's `CREATE ACCESS METHOD ... HANDLER` names when the handler is a C function the
   engine implements. Another index-type extension adds its routine to `index_am::routine`.
@@ -2485,7 +2542,9 @@ What outlives a statement today, and what keys or invalidates it (round 16 audit
     cluster (its `OidGen`, held by a `Weak`) and the subscription. `types::collation::get`: by the whole definition. `regex::compile`: by
     pattern, flags and strategy. `string::LIKE_LAST` (the last LIKE pattern compiled, per
     thread): by pattern and escape. Interners (`func::intern`), the built-in registries and the
-    `include_str!` tables are pure.
+    `include_str!` tables are pure. `exec::toast::SEQ` (out-of-line values' numbers, unique
+    with the writing transaction's xid) and the counters `VALUES_WRITTEN`, `VALUES_READ`,
+    `parscan::INLINE` only count.
   - `exec::parscan` (round 18, agent 42): a parallel scan's worker threads run only kernels
     (`exec::kernel`, pure functions of a row) and row decoding, never `eval` or anything of a
     session; the process-wide `ACTIVE` counts running workers against max_parallel_workers,

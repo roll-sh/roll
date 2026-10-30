@@ -388,6 +388,11 @@ impl MemProbe {
                 .unwrap_or(0.0),
         }
     }
+
+    /// `cpu_secs` in microseconds.
+    fn cpu_us(&self) -> u64 {
+        (self.cpu_secs() * 1e6) as u64
+    }
 }
 
 /// Samples memory every 50 ms while alive; `stop` returns the peak.
@@ -1612,12 +1617,14 @@ fn vector_bench(cx: &Ctx) {
     };
     let table = format!("vb_{ty}_{dim}");
     let mut c = cx.conn();
-    let run = |c: &mut dyn Conn, case: &str, sql: &str| -> (u64, f64, u64) {
+    // (hash, seconds, peak memory above the start, the server's CPU microseconds.)
+    let run = |c: &mut dyn Conn, case: &str, sql: &str| -> (u64, f64, u64, u64) {
         let before = cx.mem.bytes();
+        let cpu = cx.mem.cpu_us();
         let sampler = MemSampler::start(&cx.mem);
         let (r, s) = timed(|| c.simple(sql));
         let peak = sampler.stop();
-        (must(r, case).1, s, peak.saturating_sub(before))
+        (must(r, case).1, s, peak.saturating_sub(before), cx.mem.cpu_us().saturating_sub(cpu))
     };
     run_script(c.as_mut(), "CREATE EXTENSION IF NOT EXISTS vector; SET max_parallel_maintenance_workers = 0");
     let load = |c: &mut dyn Conn, from: u64, to: u64| -> f64 {
@@ -1644,6 +1651,7 @@ fn vector_bench(cx: &Ctx) {
         let mut lat = Vec::with_capacity(qs.len());
         let mut hash = 0u64;
         let before = cx.mem.bytes();
+        let cpu = cx.mem.cpu_us();
         let sampler = MemSampler::start(&cx.mem);
         let start = Instant::now();
         for (i, q) in qs.iter().enumerate() {
@@ -1662,12 +1670,13 @@ fn vector_bench(cx: &Ctx) {
             ("p50_ms", format!("{:.3}", pct(&lat, 0.5))),
             ("p99_ms", format!("{:.3}", pct(&lat, 0.99))),
             ("peak_mb", mb(peak.saturating_sub(before))),
+            ("cpu_ms_per_query", format!("{:.3}", cx.mem.cpu_us().saturating_sub(cpu) as f64 / 1000.0 / qs.len() as f64)),
             ("hash", format!("{hash:016x}")),
         ]);
     };
     let build = |c: &mut dyn Conn, case: &str, sql: &str| {
-        let (_, s, peak) = run(c, case, sql);
-        cx.report("vector", case, &[("secs", format!("{s:.3}")), ("peak_mb", mb(peak))]);
+        let (_, s, peak, cpu) = run(c, case, sql);
+        cx.report("vector", case, &[("secs", format!("{s:.3}")), ("peak_mb", mb(peak)), ("cpu_s", format!("{:.3}", cpu as f64 / 1e6))]);
     };
     // An index's size as pg_relation_size reports it (KB, through COPY's byte count).
     let size = |c: &mut dyn Conn, case: &str, index: &str| {
@@ -1717,18 +1726,21 @@ fn vector_bench(cx: &Ctx) {
         cases.retain(|(case, _)| only.is_empty() || only.split(',').any(|x| x == *case));
         for (case, sql) in cases {
             let mut secs = Vec::new();
-            let (mut hash, mut peak) = (0u64, 0u64);
+            let (mut hash, mut peak, mut cpu) = (0u64, 0u64, 0u64);
             for rep in 0..reps {
-                let (h, s, p) = run(c.as_mut(), case, &sql.replace("%Q", &lit(&qs[rep % qs.len()])));
+                let (h, s, p, u) = run(c.as_mut(), case, &sql.replace("%Q", &lit(&qs[rep % qs.len()])));
                 hash = hash.rotate_left(5) ^ h;
                 secs.push(s);
                 peak = peak.max(p);
+                cpu += u;
             }
             secs.sort_by(f64::total_cmp);
             cx.report("vector", case, &[
                 ("secs", format!("{:.4}", secs[secs.len() / 2])),
                 ("min", format!("{:.4}", secs[0])),
                 ("peak_mb", mb(peak)),
+                // (Mean over the repetitions; the engine's count is in 10 ms ticks.)
+                ("cpu_ms", format!("{:.1}", cpu as f64 / 1000.0 / reps as f64)),
                 ("hash", format!("{hash:016x}")),
             ]);
         }

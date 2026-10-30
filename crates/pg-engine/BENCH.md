@@ -2355,6 +2355,136 @@ Where it is slower, and why:
   engine's storage iteration (merge of the LSM's sources, block lookups) and row decoding;
   sparsevec's filtered scans and bit's sums are where that shows most.
 
+## Out-of-line storage, inline scans, parallel-worker CPU (round 21, agent 102)
+
+What changed (HANDOFF "Out-of-line storage of large values, inline scans"): big values of
+every type are stored apart from their rows; plain sequential scans read the rows as stored
+and only the values of the columns they decode, for the rows their filter keeps; scans under
+8 MB run the parallel workers' code (kernels, in-place decoding, partial aggregation) on the
+executor's thread; scans whose workers would only decode rows stay serial.
+
+Method: release builds, the baseline (`69743b6c` + inert parts) and this round's engine each
+over a data directory it loaded itself, against PostgreSQL 18.6 + pgvector 0.8.7 (the
+`a89-pgvector` image, `shared_buffers=2GB`); servers on CPUs 16-19, clients on 20-23, the
+engine restarted and warmed before each round; rounds interleaved. CPU: the server's user +
+system time over the statements (the engine process with its worker threads, in 10 ms
+ticks; the container's cgroup `usage_usec`), per statement. The machine was at load 25–35
+on all 36 CPUs throughout: times and CPU moved by up to ±30% between rounds, so each figure is
+a median of 5–9 statements, two or more rounds; differences under ~25% aren't findings.
+Scripts: `tools/bench` `vector` (it now reports `cpu_ms` / `cpu_s` / `cpu_ms_per_query`),
+plus psql loops for the cases below.
+
+### vector(1536), 20,000 rows (the heap: 148 pages of TOAST pointers in PostgreSQL)
+
+| case (CPU ms / wall ms per statement) | PostgreSQL | engine before | engine now |
+|---|---|---|---|
+| `count(*) WHERE cat = 7` | 3 / 1.2 | 14–21 / 16–21 | 6–8 / 5–9 |
+| exact k-NN, `WHERE cat = 7` | 9–10 / 7.8 | 20–21 / 18–23 | 12–15 / 14–16 |
+| exact k-NN (every vector) | 286–337 / 272–355 | 46–60 / 40–60 | 42–51 / 37–57 |
+| `sum(embedding <-> q)` | 319–386 / 297–337 | 44–58 / 42–59 | 54–62 / 55–62 |
+
+The filtered scans read 20,000 small rows and 400 vectors instead of 120 MB of rows. What is
+left against PostgreSQL there is per row: the engine reads a row through a merge of the LSM's
+sources at ~250–400 ns of CPU (PostgreSQL ~50 ns from a shared buffer page). Full reads
+of the vectors stay 5–6x faster than PostgreSQL (which detoasts each); the sum is within the
+noise of the baseline (its rounds: 44–58 against 54–62).
+
+### Parallel workers' CPU where PostgreSQL runs serially
+
+PostgreSQL's plans: on vector(128) × 100,000 (7,168 pages) only the unfiltered exact k-NN
+runs parallel; a filtered count over a 1,600-page table is serial; over 8,000 pages
+(600,000 rows) its aggregates go parallel. The engine reads in workers from 1,024 pages.
+
+| case (CPU ms / wall ms) | PostgreSQL | engine, workers | engine, serial path |
+|---|---|---|---|
+| 128-d, `count(*) WHERE cat = 7` (PG serial) | 19 / 17 | 42 / 15 | 55 / 56 |
+| 128-d, `sum(embedding <-> q)` (PG serial) | 35 / 33 | 71 / 25 | 68 / 67 |
+| 128-d, k-NN `WHERE cat = 7` (PG serial) | 20 / 18 | 51 / 23 | 60 / 58 |
+| 1,600 pages, `count(*) WHERE a = 7` (PG serial) | 12 / 11 | 47 / 19 | 74 / 79 |
+| 600,000 rows, `GROUP BY a % 10` (PG parallel) | 184 / 71 | 513 / 347 | 363 / 329 |
+
+Where the workers filter by kernels or aggregate, they cost *less* CPU than the engine's own
+serial path (it decodes every row into values and evaluates the filter with `eval`) and run
+2–4x faster: raising the threshold would add CPU and time. The engine's CPU above
+PostgreSQL's there is per row, in both paths, not the threads. Where the workers only decode
+rows for the executor's thread (the `GROUP BY a % 10`: no kernel for its grouping, no filter),
+they bought nothing (347 against 329 ms) for 41% more CPU: such scans now stay serial. And
+the serial path's cost is why tables under 8 MB now run the workers' code inline: the
+vector(1536) filtered count above went from 14–21 to 6–8 ms of CPU that way.
+
+### The bench's `vector` workload again: vector(128), 100,000 rows (1 round each)
+
+128-dimension vectors stay in their rows (516 bytes, under the threshold), and a 7,168-page
+table reads in workers as before: this is the check that nothing else moved. Every query
+case's result hash is equal on the three sides.
+
+| case | PostgreSQL | engine before | engine now |
+|---|---|---|---|
+| COPY 100k | 4.27 s | 2.43 s | 2.74 s |
+| CREATE INDEX hnsw (time; peak MB, sampled RSS / anon + shmem; CPU s) | 204 s; 108; 203 | 126 s; 85; 128 | 134 s; 110; 134 |
+| hnsw queries (qps; CPU ms / query) | 503; 1.8 | 555; 3.7 | 542; 3.4 |
+| hnsw filtered, strict / relaxed (qps) | 45.6 / 71.0 | 51.7 / 72.4 | 56.9 / 72.6 |
+| COPY 10k more into hnsw | 37.8 s | 27.0 s | 26.6 s |
+| CREATE INDEX ivfflat (time; peak MB) | 1.13 s; 55 | 2.06 s; 6 | 1.77 s; 10 |
+| ivfflat queries / filtered (qps) | 200 / 160 | 157 / 100 | 164 / 119 |
+| exact k-NN / filtered (ms; CPU ms) | 28.5; 70 / 17.5; 17 | 27.8; 62 / 24.4; 54 | 36.2; 80 / 27.5; 70 |
+| `sum` l2 / cosine / ip (ms) | 31.0 / 29.9 / 29.2 | 26.8 / 27.7 / 25.8 | 30.0 / 28.2 / 37.0 |
+
+(The full scans' single rounds sit inside this machine's ±30%; the interleaved rounds above
+had them even.) The engine's CPU per hnsw query is about twice PostgreSQL's at a higher qps,
+before and after this round (not profiled here).
+
+### pgbench tpcb-like (scale 10, 30 s, prepared)
+
+Interleaved rounds (engine before / now / before / now), CPU per transaction from the server's
+CPU over the run:
+
+| clients | PostgreSQL (tps; CPU ms / txn) | engine before | engine now |
+|---|---|---|---|
+| 1 | 1,133; 0.44 | 735, 721; 1.17, 1.03 | 466, 664; 1.18, 1.15 |
+| 8 | 4,529; 0.44 | 2,310, 2,691; 1.25, 1.08 | 2,217, 2,624; 1.16, 1.13 |
+
+The same within the machine's noise (tps moved 30–40% between rounds of one build; CPU per
+transaction is the steadier figure). A first, sequential round had the new build 18–35%
+behind on tps; interleaving showed it was the load. Scans of pgbench's small tables keep the
+serial path (`INLINE_MIN_PAGES`), and now skip the heap-model check that preceded the
+parallel decision for them.
+
+### TPC-H subset, SF 0.2 (median of 3 runs; server CPU s per run)
+
+Two interleaved rounds per engine (each on a data directory it loaded), PostgreSQL once.
+Every query's result hash is equal on the three sides.
+
+| query | PostgreSQL | engine before | engine now |
+|---|---|---|---|
+| q01 | 0.56 s; 1.5 | 0.88, 0.68 s; 2.6, 2.3 | 0.88, 0.88 s; 2.7, 2.5 |
+| q03 | 0.12 s; 0.3 | 1.40, 0.97 s; 2.3, 2.3 | 1.46, 1.36 s; 2.9, 2.3 |
+| q05 | 0.09 s; 0.1 | 1.72, 1.53 s; 1.7, 1.6 | 1.82, 1.70 s; 1.8, 1.6 |
+| q06 | 0.06 s; 0.1 | 0.57, 0.48 s; 1.0, 0.9 | 0.62, 0.62 s; 1.1, 1.0 |
+| q10 | 0.18 s; 0.4 | 1.64, 1.69 s; 2.4, 2.6 | 1.88, 1.77 s; 2.8, 2.8 |
+| q12 | 0.16 s; 0.4 | 0.78, 1.08 s; 1.4, 1.6 | 0.81, 0.64 s; 1.5, 1.3 |
+| q14 | 0.05 s; 0.06 | 0.48, 0.95 s; 1.0, 1.2 | 0.59, 0.50 s; 1.1, 1.0 |
+| q19 | 0.02 s; 0.02 | 0.16, 0.29 s; 0.16, 0.18 | 0.11, 0.16 s; 0.12, 0.15 |
+
+q03, q05, q06 and q10 came out 5–15% behind in both rounds, the others level or ahead; that
+is at the edge of this machine's noise, and the new engine's data directory was the younger
+(less compacted) one. Not resolved: if real, the candidates are the per-value pointer check
+in the workers' decode (`Lazy::decode`) and the raw chunk scans' value source.
+
+### hnsw build memory (item 2: measured, not changed)
+
+vector(128) × 100,000, m 16, ef_construction 64, maintenance_work_mem 64 MB on both sides:
+PostgreSQL + pgvector 243 s, 242 s CPU, peak +66 MB (anon + shmem; the graph outgrows
+maintenance_work_mem after 54,687 tuples and the rest go in on disk). The engine 124–147 s,
+123–146 s CPU (the same switch, 54,681–54,709 tuples, the levels unseeded), peak by its RSS
+high-water mark reset before the statement: +38 MB and +48 MB in fresh processes (one after
+the index was dropped and the engine restarted), +123 MB for a second build in a process
+that had built and dropped one (memory the first build left to the allocator and the block
+cache). The engine's index is an object model held whole in memory (`hnsw::graph::Graph`:
+every vector and neighbor list) while the build's on-disk phase inserts into it; bounding it
+at maintenance_work_mem needs that phase to page the graph through `AmStore` (records read
+and evicted on demand), which is the next step.
+
 ## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
 
 Same harness and catalogs as agent 58's: PostgreSQL in `a62-pg` (pinned image and settings),
