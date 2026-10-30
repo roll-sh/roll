@@ -1699,7 +1699,7 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     statements: 100,000-digit output 2.33 s -> 0.05 s (PostgreSQL 0.14 s); 1M-row numeric sum
     0.30 -> 0.21 s (PG 0.41); 200k numeric divisions 0.19 -> 0.10 s (PG 0.11); a 20,000 by
     10,000-digit division 0.09 s (PG 0.07). Rows store values up to i128 as before; longer ones
-    under a new tag (`row::tag::NUMERIC_DEC`: sign and limbs), which older builds can't read.
+    under a new tag (`row::tag::NUMERIC_DEC`, 43: sign and limbs), which older builds can't read.
   - information_schema views run from PostgreSQL's definitions (`sys_views.tsv`) are kept per
     catalog version like the Rust-generated ones (`system::is_sql_view`): jOOQ's codegen read
     `parameters` once per routine (60-100 ms each), now generated once per catalog.

@@ -213,6 +213,12 @@ Fixed (goldens `a100_client_round5`, `a100_client_round5b`):
   FROM-clause function's rows went up before its later rows failed (PostgreSQL makes them all
   first); an index scan returned a row updated in place (HOT) after its equal-keyed
   neighbours, where the btree has it at its chain's root.
+- pgx TestStmtCacheInvalidationConn / Tx (a regression of round 4's "Describe of what fails
+  when planned describes its analysis"): after `ALTER TABLE ... DROP COLUMN` a cached
+  statement's Bind (three result formats) failed with "bind message has 3 result formats but
+  query has 2 columns"; PostgreSQL revalidates the plan first and fails with "cached plan
+  must not change result type", on which pgx drops the statement. Describe now passes that
+  error on (wire test `cached_plan_result_change_before_result_formats`).
 
 Memory and the gaps left:
 - pgx's peak was the engine's 3.5 GB (its whole run; PostgreSQL's container 3.5 GB over all
