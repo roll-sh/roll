@@ -943,6 +943,12 @@ fn handle(
         );
         let _ = c.flush();
     }
+    // Nothing more goes out: the client sees the end (FIN) right after the last message, as
+    // when a backend exits, not after the session's teardown below (rollback, locks, the
+    // backend's entry). In that window a client that had read a FATAL could send its next
+    // query, still unread when the socket closed: a reset ("error communicating with the
+    // server") instead of the end of the connection.
+    let _ = c.wr.shutdown(std::net::Shutdown::Write);
     r
 }
 
