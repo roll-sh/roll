@@ -16,9 +16,11 @@
 
 use super::walrcv::{self, Fail};
 use super::apply_rows;
+
+mod parallel;
 use crate::catalog::{Subscription, quote_ident};
 use crate::engine::Engine;
-use crate::error::{Error, code};
+use crate::error::{Error, Severity, code};
 use crate::remote::conn::{Conn, Status};
 use crate::session::Session;
 use crate::session::state::Cluster;
@@ -41,6 +43,11 @@ pub struct WorkerStat {
     pub last_receipt: Option<i64>,
     pub latest_end_lsn: u64,
     pub latest_end_time: Option<i64>,
+    /// A parallel apply worker's leader.
+    pub leader_pid: Option<i32>,
+    /// Its place in LogicalRepCtx->workers (the first free one when it started), the order
+    /// pg_stat_get_subscription lists workers in.
+    pub slot: usize,
 }
 
 struct Running {
@@ -97,14 +104,22 @@ impl Workers {
 
     fn set_stat(&self, s: &WorkerStat) {
         let mut st = self.st.lock();
-        match st.stats.iter_mut().find(|x| x.subid == s.subid && x.relid == s.relid) {
-            Some(x) => *x = s.clone(),
-            None => st.stats.push(s.clone()),
+        match st.stats.iter_mut().find(|x| x.pid == s.pid && x.relid == s.relid) {
+            Some(x) => *x = WorkerStat { slot: x.slot, ..s.clone() },
+            None => {
+                let slot = (0..).find(|i| !st.stats.iter().any(|x| x.slot == *i)).unwrap_or(0);
+                st.stats.push(WorkerStat { slot, ..s.clone() });
+            }
         }
     }
 
-    fn clear_stat(&self, subid: u32, relid: Option<u32>) {
-        self.st.lock().stats.retain(|x| !(x.subid == subid && x.relid == relid));
+    fn clear_stat(&self, pid: i32, relid: Option<u32>) {
+        self.st.lock().stats.retain(|x| !(x.pid == pid && x.relid == relid));
+    }
+
+    /// The workers running (logical replication worker slots in use).
+    fn slots_used(&self) -> usize {
+        self.st.lock().stats.len()
     }
 
     /// A subscription changed: the launcher looks now.
@@ -249,7 +264,8 @@ fn worker_main(engine: Weak<Engine>, workers: Arc<Workers>, sub: Subscription, s
         drop(e);
         match r {
             Ok(Ok(())) => return,
-            Ok(Err(msg)) => tracing::error!(subscription = %sub.name, "{msg}"),
+            Ok(Err(None)) => {}
+            Ok(Err(Some(msg))) => tracing::error!(subscription = %sub.name, "{msg}"),
             Err(_) => tracing::error!(subscription = %sub.name, "logical replication apply worker panicked"),
         }
         let until = started + RETRY_INTERVAL;
@@ -263,8 +279,8 @@ fn worker_main(engine: Weak<Engine>, workers: Arc<Workers>, sub: Subscription, s
 struct Backend<'a> {
     e: &'a Arc<Engine>,
     workers: &'a Workers,
-    subid: u32,
     pid: i32,
+    relid: Option<u32>,
 }
 
 impl Drop for Backend<'_> {
@@ -273,7 +289,7 @@ impl Drop for Backend<'_> {
             r.origins.backend_exit(self.pid);
         }
         self.e.unregister_backend(self.pid);
-        self.workers.clear_stat(self.subid, None);
+        self.workers.clear_stat(self.pid, self.relid);
     }
 }
 
@@ -281,8 +297,72 @@ fn now() -> i64 {
     crate::types::datetime::Clock::system().now
 }
 
-/// One attempt: Ok when told to stop, Err (the message to log) on any failure.
-fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool) -> Result<(), String> {
+/// One attempt: Ok when told to stop, Err (the message to log, None when the worker logged
+/// it) on any failure.
+fn run(e: &Arc<Engine>, workers: &Arc<Workers>, sub: &Subscription, stop: &AtomicBool) -> Result<(), Option<String>> {
+    let mut w = open_worker(e, workers, sub, stop, Role::Apply).map_err(Some)?;
+    let r = run_apply(&mut w);
+    if let Err(m) = &r {
+        w.log(Severity::Error, m);
+        w.exited();
+    }
+    r.map_err(|_| None)
+}
+
+/// What a worker is (LogicalRepWorkerType).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// The subscription's leader apply worker.
+    Apply,
+    /// A parallel apply worker of the leader with this pid (it shares the leader's origin).
+    Parallel(i32),
+    /// A table synchronization worker of this table (its origin is the table's own).
+    Sync(u32),
+}
+
+/// TablesyncWorkerMain: copy table `relid` (true: it is synchronized).
+fn sync_main(engine: Weak<Engine>, workers: Arc<Workers>, sub: Subscription, relid: u32, stop: Arc<AtomicBool>) -> bool {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(e) = engine.upgrade() else { return false };
+        let mut w = match open_worker(&e, &workers, &sub, &stop, Role::Sync(relid)) {
+            Ok(w) => w,
+            Err(m) => {
+                tracing::error!(subscription = %sub.name, "{m}");
+                return false;
+            }
+        };
+        w.load_states();
+        let Err(m) = w.sync_table(relid) else { return true };
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        crate::sql::func::pubsub::count_subscription_stat(&w.sess.state.db.catalog(), sub.oid, "sync_error");
+        w.log(Severity::Error, &m);
+        w.exited();
+        if w.sess.state.db.catalog().subscriptions.get(&sub.oid).is_some_and(|s| s.disable_on_err) {
+            let _ = w.disable();
+        }
+        false
+    }));
+    r.unwrap_or(false)
+}
+
+/// A worker's backend, session and state (InitializeLogRepWorker).
+fn open_worker<'a>(
+    e: &'a Arc<Engine>,
+    workers: &'a Arc<Workers>,
+    sub: &'a Subscription,
+    stop: &'a AtomicBool,
+    role: Role,
+) -> Result<Worker<'a>, String> {
+    let leader = match role {
+        Role::Parallel(l) => Some(l),
+        _ => None,
+    };
+    let relid = match role {
+        Role::Sync(r) => Some(r),
+        _ => None,
+    };
     let dbname = e
         .databases()
         .into_iter()
@@ -290,7 +370,7 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
         .map(|d| d.1)
         .ok_or_else(|| format!("database {} of subscription \"{}\" does not exist", sub.dbid, sub.name))?;
     let (pid, _, _) = e.register_backend(None, None);
-    let _backend = Backend { e, workers, subid: sub.oid, pid };
+    let backend = Backend { e, workers, pid, relid };
     let msg = |err: Error| err.message;
     let mut sess = e.connect(pid, &dbname, &e.bootstrap_superuser(), &sub.name).map_err(msg)?;
     let owner = sess
@@ -315,10 +395,13 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
         Some(o) => o.id,
         None => repl.origins.create(&origin_name).map_err(msg)?,
     };
-    repl.origins.session_setup(pid, &origin_name, 0).map_err(msg)?;
+    if relid.is_none() {
+        repl.origins.session_setup(pid, &origin_name, leader.unwrap_or(0)).map_err(msg)?;
+    }
     // The progress the last commit stored (the origin file may be behind it after a crash).
     let db = sess.state.db.clone();
-    if let Ok(Some(b)) = db.store.get(&super::origin::progress_key(origin), db.store.visible_ts())
+    if role == Role::Apply
+        && let Ok(Some(b)) = db.store.get(&super::origin::progress_key(origin), db.store.visible_ts())
         && let Ok(b) = <[u8; 8]>::try_from(&b[..])
     {
         repl.origins.advance(origin, u64::from_be_bytes(b), 0, false);
@@ -329,10 +412,15 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
         local_port: u16::try_from(sess.state.settings.borrow().int("port")).unwrap_or(5432),
         default_user: e.bootstrap_superuser(),
     };
-    tracing::info!("logical replication apply worker for subscription \"{}\" has started", sub.name);
-    let stat = WorkerStat { subid: sub.oid, pid, worker_type: "apply", ..Default::default() };
+    let worker_type = match role {
+        Role::Apply => "apply",
+        Role::Parallel(_) => "parallel apply",
+        Role::Sync(_) => "table synchronization",
+    };
+    let stat = WorkerStat { subid: sub.oid, relid, pid, leader_pid: leader, worker_type, ..Default::default() };
     workers.set_stat(&stat);
-    let mut w = Worker {
+    let w = Worker {
+        e,
         workers,
         sub,
         stop,
@@ -349,7 +437,27 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
         txn: None,
         stat,
         last_received: 0,
+        role,
+        pa: None,
+        pool: parallel::Pool::default(),
+        subxacts: Vec::new(),
+        nchanges: 0,
+        apply_locks: Vec::new(),
+        sync_retry: HashMap::new(),
+        errctx: None,
+        lines: std::sync::OnceLock::new(),
+        _backend: backend,
     };
+    // (A table synchronization worker says it started once it knows the table's name.)
+    if relid.is_none() {
+        w.log(Severity::Log, &format!("logical replication apply worker for subscription \"{}\" has started", sub.name));
+    }
+    Ok(w)
+}
+
+/// The leader's attempt (after open_worker): copy what needs copying, stream, apply.
+fn run_apply(w: &mut Worker) -> Result<(), String> {
+    let (sub, stop) = (w.sub, w.stop);
     loop {
         if stop.load(Ordering::SeqCst) {
             return Ok(());
@@ -361,7 +469,7 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
         };
         let r = match w.sync_tables() {
             Err(m) => {
-                count(&w, "sync_error");
+                count(w, "sync_error");
                 Err(m)
             }
             Ok(()) => match w.stream() {
@@ -369,7 +477,7 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
                 Ok(false) => return Ok(()),
                 Err(m) => {
                     if !m.contains("could not connect to the publisher") && !m.starts_with("password is required") {
-                        count(&w, "apply_error");
+                        count(w, "apply_error");
                     }
                     Err(m)
                 }
@@ -381,7 +489,7 @@ fn run(e: &Arc<Engine>, workers: &Workers, sub: &Subscription, stop: &AtomicBool
             && w.sess.state.db.catalog().subscriptions.get(&sub.oid).is_some_and(|s| s.disable_on_err)
             && !stop.load(Ordering::SeqCst)
         {
-            tracing::error!(subscription = %sub.name, "{m}");
+            w.log(Severity::Error, m);
             w.disable()?;
             return Ok(());
         }
@@ -422,7 +530,8 @@ struct RemoteTxn {
 }
 
 struct Worker<'a> {
-    workers: &'a Workers,
+    e: &'a Arc<Engine>,
+    workers: &'a Arc<Workers>,
     sub: &'a Subscription,
     stop: &'a AtomicBool,
     sess: Session,
@@ -442,6 +551,67 @@ struct Worker<'a> {
     txn: Option<RemoteTxn>,
     stat: WorkerStat,
     last_received: u64,
+    role: Role,
+    /// A parallel apply worker's state shared with its leader (None in a leader).
+    pa: Option<Arc<parallel::Shared>>,
+    /// A leader's parallel apply workers.
+    pool: parallel::Pool,
+    /// A parallel apply worker's subtransactions with a savepoint (subxactlist).
+    subxacts: Vec<u32>,
+    /// Changes a parallel apply worker applied in the current stream block.
+    nchanges: u64,
+    /// The applytransaction locks the worker holds (session locks).
+    apply_locks: Vec<(Vec<u8>, crate::txn::locks::LockMode)>,
+    /// Tables whose synchronization failed, not tried again before then (wal_retrieve_retry_interval).
+    sync_retry: HashMap<u32, Instant>,
+    /// The CONTEXT of the message being applied (apply_error_callback).
+    errctx: Option<String>,
+    /// The worker's server log line counters.
+    lines: std::sync::OnceLock<Arc<crate::log::Lines>>,
+    /// (Last: released after everything else.)
+    _backend: Backend<'a>,
+}
+
+impl Drop for Worker<'_> {
+    fn drop(&mut self) {
+        // logicalrep_worker_detach: a leader's parallel apply workers stop with it.
+        self.pool.shutdown();
+        let owner = self.sess.state.lock_owner;
+        for (key, mode) in std::mem::take(&mut self.apply_locks) {
+            self.sess.state.db.locks.release(&key, owner, mode);
+        }
+    }
+}
+
+/// A worker's log message as one string ("text\nDETAIL:  ...\nHINT:  ...\nCONTEXT:  ...",
+/// CONTEXT lines possibly more than one) split into its fields.
+fn split_message(m: &str) -> (&str, Option<&str>, Option<&str>, Option<String>) {
+    let (mut text, mut detail, mut hint, mut context) = (m, None, None, Vec::new());
+    let mut rest = m;
+    let mut first = true;
+    let markers = ["\nDETAIL:  ", "\nHINT:  ", "\nCONTEXT:  "];
+    loop {
+        let next = markers.iter().filter_map(|k| rest.find(k).map(|i| (i, *k))).min();
+        let (part, after) = match next {
+            Some((i, _)) => (&rest[..i], Some(i)),
+            None => (rest, None),
+        };
+        if first {
+            text = part;
+            first = false;
+        }
+        let Some(i) = after else { break };
+        let (_, k) = next.unwrap();
+        let body = &rest[i + k.len()..];
+        let end = markers.iter().filter_map(|k| body.find(k)).min().unwrap_or(body.len());
+        match k {
+            "\nDETAIL:  " => detail = Some(&body[..end]),
+            "\nHINT:  " => hint = Some(&body[..end]),
+            _ => context.push(&body[..end]),
+        }
+        rest = &body[end..];
+    }
+    (text, detail, hint, (!context.is_empty()).then(|| context.join("\n")))
 }
 
 /// A protocol message's reader.
@@ -545,6 +715,46 @@ fn stop_check(stop: &AtomicBool) -> crate::Result<()> {
 }
 
 impl Worker<'_> {
+    /// A line of the worker's server log, as its background worker writes it (without a
+    /// server log, the engine's own).
+    fn log(&self, sev: Severity, m: &str) {
+        if !crate::log::active() {
+            match sev {
+                Severity::Error | Severity::Fatal => tracing::error!(subscription = %self.sub.name, "{m}"),
+                Severity::Warning => tracing::warn!("{m}"),
+                Severity::Debug => tracing::debug!("{m}"),
+                _ => tracing::info!("{m}"),
+            }
+            return;
+        }
+        let (text, detail, hint, context) = split_message(m);
+        let context = context.or_else(|| self.errctx.clone());
+        let f = crate::log::Format::from_settings(&self.sess.state.settings.borrow());
+        let kind = self.kind();
+        let code = match sev {
+            Severity::Error | Severity::Fatal => "XX000",
+            Severity::Warning => "01000",
+            _ => "00000",
+        };
+        let msg = crate::log::Message { severity: Some(sev), code, text, detail, hint, context: context.as_deref(), ..Default::default() };
+        crate::log::write(&f, &crate::log::Who::aux(self.pid, kind, &self.lines), &msg);
+    }
+
+    /// The worker's background worker type (bgw_type).
+    fn kind(&self) -> &'static str {
+        match self.role {
+            Role::Apply => "logical replication apply worker",
+            Role::Parallel(_) => "logical replication parallel worker",
+            Role::Sync(_) => "logical replication tablesync worker",
+        }
+    }
+
+    /// The postmaster's line when the worker ended with an error (it is started again).
+    fn exited(&self) {
+        let text = format!("background worker \"{}\" (PID {}) exited with exit code 1", self.kind(), self.pid);
+        crate::log::postmaster(None, Severity::Log, &text);
+    }
+
     /// The worker's session origin becomes origin `name` (made if missing).
     fn use_origin(&mut self, name: &str) -> Result<(), String> {
         let o = &self.repl.origins;
@@ -596,14 +806,45 @@ impl Worker<'_> {
             .unwrap_or_default();
     }
 
-    fn needs_sync(&self) -> bool {
-        self.states.values().any(|(s, _)| matches!(s, 'i' | 'd' | 'f'))
+    /// Tables to synchronize now (not waiting to be tried again after a failure).
+    fn sync_todo(&self) -> Vec<u32> {
+        let now = Instant::now();
+        let mut v: Vec<u32> = self
+            .states
+            .iter()
+            .filter(|(r, (s, _))| matches!(s, 'i' | 'd' | 'f') && self.sync_retry.get(r).is_none_or(|t| *t <= now))
+            .map(|(r, _)| *r)
+            .collect();
+        v.sort_unstable();
+        v
     }
 
-    /// UpdateSubscriptionRelState in the open local transaction.
+    fn needs_sync(&self) -> bool {
+        !self.sync_todo().is_empty()
+    }
+
+    /// UpdateSubscriptionRelState in the open local transaction. It holds the subscription
+    /// (LockSharedObject AccessShareLock) until it ends, as ALTER / DROP SUBSCRIPTION's
+    /// AccessExclusiveLock waits for: table synchronization workers each change their own
+    /// table's row at once, and their commits merge (the rows are items of one catalog list).
     fn set_states(&mut self, changes: &[(u32, char, u64)]) -> Result<(), String> {
         let subid = self.sub.oid;
         let t = self.sess.block_txn().ok_or("no local transaction is open")?;
+        let key = crate::txn::locks::object_key(0, crate::catalog::depend::SUBSCRIPTION, subid, 0);
+        // (Waited for in steps, so that a worker told to stop by the DDL holding it does.)
+        loop {
+            let got = t
+                .borrow_mut()
+                .lock(&key, crate::txn::locks::LockMode::AccessShare, crate::txn::locks::WaitPolicy::SkipLocked, &|| format!("subscription {subid}"))
+                .map_err(|e| e.message)?;
+            if got {
+                break;
+            }
+            if self.stop.load(Ordering::SeqCst) {
+                return Err("terminating logical replication worker due to administrator command".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let mut c = (*t.borrow().catalog()).clone();
         let rels = c.sub_rels.entry(subid).or_default();
         for (relid, state, lsn) in changes {
@@ -638,12 +879,12 @@ impl Worker<'_> {
     /// commit, unless ALTER SUBSCRIPTION ... SKIP changed it meanwhile.
     fn clear_skip_lsn(&mut self, finish: u64) -> Result<(), String> {
         if self.skip_lsn() != finish {
-            tracing::warn!(
+            self.log(Severity::Warning, &format!(
                 "skip-LSN of subscription \"{}\" cleared\nDETAIL:  Remote transaction's finish WAL location (LSN) {} did not match skip-LSN {}.",
                 self.sub.name,
                 lsn(finish),
                 lsn(self.skip_lsn())
-            );
+            ));
             return Ok(());
         }
         self.alter_sub(|s| s.skiplsn = 0)
@@ -658,45 +899,83 @@ impl Worker<'_> {
         self.query("BEGIN")?;
         self.alter_sub(|s| s.enabled = false)?;
         self.query("COMMIT")?;
-        tracing::info!("subscription \"{}\" has been disabled because of an error", self.sub.name);
+        self.log(Severity::Log, &format!("subscription \"{}\" has been disabled because of an error", self.sub.name));
         Ok(())
     }
 
-    /// Copy every table not synchronized yet.
+    /// process_syncing_tables_for_apply's launches: a table synchronization worker for each
+    /// table not synchronized yet, at most max_sync_workers_per_subscription at once (and
+    /// none past max_logical_replication_workers). Each copies its table under a slot's
+    /// snapshot of its own; the leader waits between transactions meanwhile, so every table's
+    /// synchronization point is past what it applied (where PostgreSQL's workers catch up
+    /// on their slot's stream instead). A failed table is tried again after
+    /// wal_retrieve_retry_interval, while the leader streams.
     fn sync_tables(&mut self) -> Result<(), String> {
-        let mut todo: Vec<u32> = self.states.iter().filter(|(_, (s, _))| matches!(s, 'i' | 'd' | 'f')).map(|(r, _)| *r).collect();
-        todo.sort_unstable();
-        for relid in todo {
-            if self.stop.load(Ordering::SeqCst) {
-                return Ok(());
+        let mut running: Vec<(u32, Arc<AtomicBool>, std::thread::JoinHandle<bool>)> = Vec::new();
+        loop {
+            let stopping = self.stop.load(Ordering::SeqCst);
+            let max = if stopping { 0 } else { self.setting_int("max_sync_workers_per_subscription").max(0) as usize };
+            for relid in self.sync_todo() {
+                if running.len() >= max || running.iter().any(|r| r.0 == relid) {
+                    continue;
+                }
+                if self.workers.slots_used() >= self.setting_int("max_logical_replication_workers").max(0) as usize {
+                    self.log(
+                        Severity::Warning,
+                        "out of logical replication worker slots\nHINT:  You might need to increase \"max_logical_replication_workers\".",
+                    );
+                    break;
+                }
+                let stop = Arc::new(AtomicBool::new(false));
+                let (engine, workers, sub, st) = (Arc::downgrade(self.e), self.workers.clone(), self.sub.clone(), stop.clone());
+                let t = std::thread::Builder::new()
+                    .name(format!("roll-sync-{relid}"))
+                    .spawn(move || sync_main(engine, workers, sub, relid, st))
+                    .map_err(|e| format!("could not start table synchronization worker: {e}"))?;
+                running.push((relid, stop, t));
             }
-            let r = self.sync_table(relid);
-            self.workers.clear_stat(self.sub.oid, Some(relid));
-            r?;
+            if running.is_empty() {
+                break;
+            }
+            if stopping {
+                for r in &running {
+                    r.1.store(true, Ordering::SeqCst);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            let mut i = 0;
+            while i < running.len() {
+                if running[i].2.is_finished() {
+                    let (relid, _, t) = running.swap_remove(i);
+                    if !t.join().unwrap_or(false) {
+                        self.sync_retry.insert(relid, Instant::now() + RETRY_INTERVAL);
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            self.load_states();
         }
         Ok(())
     }
 
+    fn setting_int(&self, name: &str) -> i64 {
+        self.sess.state.settings.borrow().int(name)
+    }
+
     /// LogicalRepSyncTableStart: copy table `relid` as of a temporary slot's snapshot, in one
-    /// local transaction that also records the slot's consistent point (state 's').
+    /// local transaction that also records the end of the copy (state 'f'), then its slot's
+    /// consistent point (state 's').
     fn sync_table(&mut self, relid: u32) -> Result<(), String> {
         let cat = self.sess.state.db.catalog();
         let Some(t) = cat.tables.get(&relid) else { return Ok(()) };
         let (nsp, rel) = (cat.schema_name(t.schema).to_string(), t.name.clone());
         let local_cols: Vec<String> = t.columns.iter().filter(|c| !c.dropped).map(|c| c.name.clone()).collect();
         drop(cat);
-        let stat = WorkerStat {
-            subid: self.sub.oid,
-            relid: Some(relid),
-            pid: self.pid,
-            worker_type: "table synchronization",
-            ..Default::default()
-        };
-        self.workers.set_stat(&stat);
-        tracing::info!(
+        self.log(Severity::Log, &format!(
             "logical replication table synchronization worker for subscription \"{}\", table \"{rel}\" has started",
             self.sub.name
-        );
+        ));
         self.query("BEGIN")?;
         self.set_states(&[(relid, 'd', 0)])?;
         self.query("COMMIT")?;
@@ -770,15 +1049,18 @@ impl Worker<'_> {
             .map_err(|e| e.message)?
             .map_err(|m| format!("error while copying table \"{nsp}.{rel}\": {m}"))?;
         walrcv::exec(&mut c, "COMMIT", &intr).map_err(fail)?;
+        // (FINISHEDCOPY with the copy, then SYNCDONE at the slot's consistent point.)
+        self.set_states(&[(relid, 'f', 0)])?;
+        self.query("COMMIT")?;
+        drop(c);
+        self.query("BEGIN")?;
         self.set_states(&[(relid, 's', point)])?;
         self.query("COMMIT")?;
-        self.use_origin(&format!("pg_{}", self.sub.oid))?;
-        drop(c);
-        tracing::info!(
-            "logical replication table synchronization worker for subscription \"{}\", table \"{rel}\" has finished ({rows} rows at {})",
+        tracing::debug!(relid, rows, "table synchronized at {}", lsn(point));
+        self.log(Severity::Log, &format!(
+            "logical replication table synchronization worker for subscription \"{}\", table \"{rel}\" has finished",
             self.sub.name,
-            lsn(point)
-        );
+        ));
         Ok(())
     }
 
@@ -859,6 +1141,7 @@ impl Worker<'_> {
         // (A streamed transaction in progress is streamed again from its start.)
         self.stream_block = None;
         self.spools.clear();
+        self.pool.shutdown();
         let streaming = match self.sub.stream {
             'p' => Some("parallel"),
             't' => Some("on"),
@@ -910,6 +1193,9 @@ impl Worker<'_> {
                 None => {}
             }
             busy = !idle;
+            // (ConfigReloadPending: a reload's settings.)
+            self.sess.poll_config();
+            self.pa_check()?;
             if self.txn.is_none() && last_check.elapsed() >= Duration::from_secs(1) {
                 last_check = Instant::now();
                 self.load_states();
@@ -920,10 +1206,10 @@ impl Worker<'_> {
                     return Ok(true);
                 }
                 if self.sub.twophase == 'p' && !two_phase && self.states.values().all(|(s, _)| *s == 'r') {
-                    tracing::info!(
+                    self.log(Severity::Log, &format!(
                         "logical replication apply worker for subscription \"{}\" will restart so that two_phase can be enabled",
                         self.sub.name
-                    );
+                    ));
                     self.feedback(&mut c, false)?;
                     let _ = c.copy_done();
                     return Ok(true);
@@ -948,7 +1234,7 @@ impl Worker<'_> {
     /// (write, flush): what was received, and what is committed locally (all received when
     /// no remote transaction is open: the rest was applied or had nothing to apply).
     fn positions(&self) -> (u64, u64) {
-        let flush = if self.txn.is_some() || !self.spools.is_empty() {
+        let flush = if self.txn.is_some() || !self.spools.is_empty() || self.pool.busy() {
             self.progress()
         } else {
             self.last_received.max(self.progress())
@@ -1028,53 +1314,48 @@ impl Worker<'_> {
         Ok(())
     }
 
-    /// apply_dispatch: one pgoutput message.
+    /// apply_dispatch: one pgoutput message, its errors (and log lines) with
+    /// apply_error_callback's CONTEXT.
     fn apply(&mut self, m: &[u8]) -> Result<(), String> {
-        let mut r = Reader { b: m, at: 0 };
-        let kind = r.u8()?;
-        // In a stream block a change carries its (sub)transaction's xid: spooled without it.
+        let ctx = self.message_context(m);
+        let prev = std::mem::replace(&mut self.errctx, ctx.clone());
+        let r = self.apply_message(m);
+        self.errctx = prev;
+        r.map_err(|e| match ctx {
+            Some(c) if !e.contains("\nCONTEXT:  processing remote data") => format!("{e}\nCONTEXT:  {c}"),
+            _ => e,
+        })
+    }
+
+    fn apply_message(&mut self, m: &[u8]) -> Result<(), String> {
+        let kind = *m.first().ok_or("invalid logical replication message: empty")?;
+        // In a stream block a change carries its (sub)transaction's xid (handle_streamed_transaction).
         if let Some(top) = self.stream_block
             && matches!(kind, b'I' | b'U' | b'D' | b'T' | b'R' | b'Y')
         {
-            let xid = r.u32()?;
+            if !self.streamed_change(top, kind, m)? {
+                return Ok(());
+            }
             let mut msg = Vec::with_capacity(m.len() - 4);
             msg.push(kind);
             msg.extend_from_slice(&m[5..]);
-            let spool = self.spools.get_mut(&top).ok_or("streamed change outside a streamed transaction")?;
-            return spool.write(top, xid, &msg);
+            return self.dispatch(&msg);
         }
         match kind {
-            b'S' => {
-                let xid = r.u32()?;
-                let first = r.u8()? == 1;
-                if self.stream_block.is_some() {
-                    return Err("duplicate STREAM START message".into());
-                }
-                if first {
-                    let dir = self.sess.state.db.store.spill_dir();
-                    self.spools.insert(xid, super::apply_stream::Spool::new(&dir)?);
-                } else if !self.spools.contains_key(&xid) {
-                    return Err(format!("streamed transaction {xid} was not started"));
-                }
-                self.stream_block = Some(xid);
-                Ok(())
-            }
-            b'E' => {
-                if self.stream_block.take().is_none() {
-                    return Err("STREAM STOP message without STREAM START".into());
-                }
-                Ok(())
-            }
-            b'A' => {
-                let xid = r.u32()?;
-                let subxid = r.u32()?;
-                if xid == subxid {
-                    self.spools.remove(&xid);
-                } else if let Some(sp) = self.spools.get_mut(&xid) {
-                    sp.abort_sub(subxid)?;
-                }
-                Ok(())
-            }
+            b'S' => self.stream_start(m),
+            b'E' => self.stream_stop(m),
+            b'A' => self.stream_abort(m),
+            b'c' => self.stream_commit_msg(m),
+            b'p' => self.stream_prepare_msg(m),
+            _ => self.dispatch(m),
+        }
+    }
+
+    /// apply_dispatch for messages outside stream blocks (and changes without their xid).
+    fn dispatch(&mut self, m: &[u8]) -> Result<(), String> {
+        let mut r = Reader { b: m, at: 0 };
+        let kind = r.u8()?;
+        match kind {
             b'b' => {
                 let prepare_lsn = r.u64()?;
                 let _end_lsn = r.u64()?;
@@ -1111,27 +1392,6 @@ impl Worker<'_> {
                 let _gid = r.cstr()?;
                 self.finish_prepared(xid, end_lsn, ts, false)
             }
-            b'p' => {
-                let _flags = r.u8()?;
-                let prepare_lsn = r.u64()?;
-                let end_lsn = r.u64()?;
-                let _ts = r.u64()?;
-                let xid = r.u32()?;
-                let _gid = r.cstr()?;
-                let spool = self.spools.remove(&xid).ok_or_else(|| format!("streamed transaction {xid} was not started"))?;
-                self.begin_prepare(prepare_lsn, xid)?;
-                spool.replay(|m| self.apply(m))?;
-                self.prepare(prepare_lsn, end_lsn)
-            }
-            b'c' => {
-                let xid = r.u32()?;
-                let _flags = r.u8()?;
-                let commit_lsn = r.u64()?;
-                let end_lsn = r.u64()?;
-                let ts = r.u64()?;
-                let spool = self.spools.remove(&xid).ok_or_else(|| format!("streamed transaction {xid} was not started"))?;
-                self.stream_commit(xid, commit_lsn, end_lsn, ts, spool)
-            }
             b'B' => {
                 let final_lsn = r.u64()?;
                 let _ts = r.u64()?;
@@ -1143,7 +1403,7 @@ impl Worker<'_> {
                 // maybe_start_skipping_changes: ALTER SUBSCRIPTION ... SKIP named it.
                 let skipping = !skip && final_lsn != 0 && self.skip_lsn() == final_lsn;
                 if skipping {
-                    tracing::info!("logical replication starts skipping transaction at LSN {}", lsn(final_lsn));
+                    self.log(Severity::Log, &format!("logical replication starts skipping transaction at LSN {}", lsn(final_lsn)));
                 }
                 self.txn = Some(RemoteTxn { final_lsn, xid, skip, skipping });
                 if !skip {
@@ -1177,7 +1437,7 @@ impl Worker<'_> {
                 self.repl.origins.xact_reset(self.pid);
                 r?;
                 if t.skipping {
-                    tracing::info!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn));
+                    self.log(Severity::Log, &format!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn)));
                 }
                 Ok(())
             }
@@ -1270,7 +1530,7 @@ impl Worker<'_> {
         let skip = prepare_lsn < self.progress() || self.prepared_here(&self.gid(xid));
         let skipping = !skip && self.skip_lsn() == prepare_lsn;
         if skipping {
-            tracing::info!("logical replication starts skipping transaction at LSN {}", lsn(prepare_lsn));
+            self.log(Severity::Log, &format!("logical replication starts skipping transaction at LSN {}", lsn(prepare_lsn)));
         }
         self.txn = Some(RemoteTxn { final_lsn: prepare_lsn, xid, skip, skipping });
         if !skip {
@@ -1299,7 +1559,7 @@ impl Worker<'_> {
         self.query(&format!("PREPARE TRANSACTION {}", walrcv::literal(&gid)))?;
         self.repl.origins.advance(self.origin, end_lsn, 0, false);
         if t.skipping {
-            tracing::info!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn));
+            self.log(Severity::Log, &format!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn)));
         }
         Ok(())
     }
@@ -1403,13 +1663,23 @@ impl Worker<'_> {
         let (final_lsn, xid) = (t.final_lsn, t.xid);
         let origin = self.origin;
         let run_as_owner = self.sub.run_as_owner;
+        let parallel = self.pa.is_some().then(|| self.sub.name.clone());
         let (states, local) = (&self.states, &mut self.local);
         let r = self.sess.apply_step(|ctx| {
             if local.get(&id).is_none_or(|l| !l.current(ctx)) {
                 local.insert(id, apply_rows::open(rel, ctx)?);
             }
             let lr = &local[&id];
-            // should_apply_changes_for_rel.
+            // should_apply_changes_for_rel (a parallel apply worker doesn't synchronize).
+            if let Some(name) = &parallel
+                && states.get(&lr.relid).is_some_and(|(s, _)| *s != 'r')
+            {
+                return Err(Error::new(
+                    code::OBJECT_NOT_IN_PREREQUISITE_STATE,
+                    format!("logical replication parallel apply worker for subscription \"{name}\" will stop"),
+                )
+                .detail("Cannot handle streamed replication transactions using parallel apply workers until all tables have been synchronized."));
+            }
             let apply = match states.get(&lr.relid) {
                 Some(('r', _)) => true,
                 Some(('s', l)) => *l <= final_lsn,
@@ -1436,28 +1706,38 @@ impl Worker<'_> {
             }
             r
         });
+        // (A parallel apply worker's error the leader learns of while it applies a change,
+        // as PostgreSQL's leader does in its waits: with the change's CONTEXT.)
+        let r = match r {
+            Ok(o) if self.pool.busy() => match self.pa_check() {
+                Ok(()) => Ok(o),
+                Err(m) => Err(Error::new(code::OBJECT_NOT_IN_PREREQUISITE_STATE, m)),
+            },
+            r => r,
+        };
         if let Ok(apply_rows::Outcome::Applied) = r {
             return Ok(());
         }
         let rel = self.rels.get(&id).cloned().unwrap_or_else(|| RemoteRel { nsp: String::new(), name: String::new(), ident: 0, cols: Vec::new() });
+        // (A parallel apply worker doesn't know the finish position.)
+        let at = if final_lsn == 0 { String::new() } else { format!(", finished at {}", lsn(final_lsn)) };
         let context = format!(
-            "processing remote data for replication origin \"pg_{}\" during message type \"{}\" for replication target relation \"{}.{}\" in transaction {xid}, finished at {}",
+            "processing remote data for replication origin \"pg_{}\" during message type \"{}\" for replication target relation \"{}.{}\" in transaction {xid}{at}",
             self.sub.oid,
             ch.name(),
             rel.nsp,
             rel.name,
-            lsn(final_lsn)
         );
         let cat = self.sess.state.db.catalog();
         match r {
             Ok(apply_rows::Outcome::Applied) => Ok(()),
             Ok(apply_rows::Outcome::Logged(kind, detail)) => {
                 crate::sql::func::pubsub::count_subscription_stat(&cat, self.sub.oid, kind);
-                tracing::info!(
+                self.log(Severity::Log, &format!(
                     "conflict detected on relation \"{}.{}\": conflict={kind}\nDETAIL:  {detail}\nCONTEXT:  {context}",
                     rel.nsp,
                     rel.name
-                );
+                ));
                 Ok(())
             }
             Err(err) => {

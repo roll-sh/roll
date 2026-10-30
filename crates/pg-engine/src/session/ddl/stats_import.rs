@@ -1024,6 +1024,10 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
                 };
                 ("advisory", Value::Oid(db), n(), n(), Value::Oid(c), Value::Oid(o), Value::Int2(sub))
             }
+            // (lockfuncs.c: the subscription in objid, the remote xid in transactionid.)
+            Tag::ApplyTransaction { db, sub, xid, objid } => {
+                ("applytransaction", Value::Oid(*db), n(), Value::Oid(*xid), n(), Value::Oid(*sub), Value::Int2(*objid as i16))
+            }
             _ => continue,
         };
         let wait_start = l.wait_start.map_or(Value::Null, |w| {

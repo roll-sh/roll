@@ -184,6 +184,8 @@ pub const TUPLE: u8 = 7;
 pub const TRANSACTION: u8 = 8;
 pub const OBJECT: u8 = 9;
 pub const SPECTOKEN: u8 = 10;
+/// A parallel apply lock (LOCKTAG_APPLY_TRANSACTION, `apply_transaction_key`).
+pub const APPLY_TRANSACTION: u8 = 13;
 /// A system catalog row's key for row locks (`catalog_row_key`).
 pub const CATALOG_ROW: u8 = 11;
 /// A unique index key's lock (the engine's in-progress index entry, `unique_key_lock`).
@@ -211,6 +213,18 @@ pub fn excl_entry_key(con: u32, row: &[u8]) -> Vec<u8> {
     let mut k = prefixed(EXCL_ENTRY);
     k.extend_from_slice(&con.to_be_bytes());
     k.extend_from_slice(row);
+    k
+}
+
+/// A logical replication parallel apply lock (LOCKTAG_APPLY_TRANSACTION) on remote
+/// transaction `xid` of subscription `sub`: `objid` 0 the leader's stream lock, 1 the
+/// parallel apply worker's transaction lock (applyparallelworker.c's PARALLEL_APPLY_LOCK_*).
+pub fn apply_transaction_key(db: u32, sub: u32, xid: u32, objid: u16) -> Vec<u8> {
+    let mut k = prefixed(APPLY_TRANSACTION);
+    k.extend_from_slice(&db.to_be_bytes());
+    k.extend_from_slice(&sub.to_be_bytes());
+    k.extend_from_slice(&xid.to_be_bytes());
+    k.extend_from_slice(&objid.to_be_bytes());
     k
 }
 
@@ -296,6 +310,8 @@ pub enum Tag {
     Advisory(Vec<u8>),
     /// A speculative insertion's token.
     SpecToken { xid: u64, token: u32 },
+    /// A parallel apply lock on a remote transaction of a subscription.
+    ApplyTransaction { db: u32, sub: u32, xid: u32, objid: u16 },
     /// The engine's own locks (unique keys, exclusion constraints, large objects).
     Other(Vec<u8>),
 }
@@ -331,6 +347,12 @@ pub fn tag_of(key: &[u8], xid: u64) -> Tag {
             xid: b.get(..8).map_or(0, |s| u64::from_be_bytes(s.try_into().unwrap())),
             token: be32(b, 8),
         },
+        APPLY_TRANSACTION => Tag::ApplyTransaction {
+            db: be32(b, 0),
+            sub: be32(b, 4),
+            xid: be32(b, 8),
+            objid: b.get(12..14).map_or(0, |s| u16::from_be_bytes(s.try_into().unwrap())),
+        },
         _ => Tag::Other(key.to_vec()),
     }
 }
@@ -362,6 +384,9 @@ fn describe(tag: &Tag, db: u32) -> String {
         }
         Tag::SpecToken { xid, token } => {
             format!("speculative token {token} of transaction {xid}")
+        }
+        Tag::ApplyTransaction { db, sub, xid, .. } => {
+            format!("remote transaction {xid} of subscription {sub} of database {db}")
         }
         Tag::Other(_) => "a row".to_string(),
     }
@@ -634,6 +659,7 @@ fn log_wait(s: &State, key: &[u8], proc: u64, mode: LockMode, start: Instant, wh
         Tag::Transaction { id, .. } => format!("virtual transaction 3/{}", id as u32),
         Tag::Object { db, class, obj, .. } => format!("object {obj} of class {class} of database {db}"),
         Tag::SpecToken { xid, token } => format!("speculative token {token} of transaction {xid}"),
+        Tag::ApplyTransaction { db, sub, xid, .. } => format!("remote transaction {xid} of subscription {sub} of database {db}"),
         Tag::Advisory(_) | Tag::Other(_) => "advisory lock".to_string(),
     };
     let us = start.elapsed().as_micros();

@@ -1055,6 +1055,60 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       Scalar built-ins with OUT parameters registered through `from_pg` other than the three
       above return an anonymous record in expressions, so a field of their call (`(f()).x`)
       is "could not identify column"; `from_pg` could give them all their row type.
+  - **Round 4 (agent 119): parallel apply, parallel table sync.**
+    - **streaming = parallel** (`repl/apply/parallel.rs` = applyparallelworker.c): the leader
+      hands each streamed transaction (Stream Start with its first segment) to a parallel
+      apply worker, a thread with its own backend and session, when pa_can_start allows it
+      (streaming = parallel, no subskiplsn, every table ready): one of the pool's free
+      workers or a new one, at most max_parallel_apply_workers_per_subscription (sighup) and
+      none past max_logical_replication_workers ("out of logical replication worker slots").
+      The leader passes the stream's messages on through a 16 MB queue (DSM_QUEUE_SIZE); the
+      worker applies them as they come in a local transaction it keeps open across blocks
+      (subtransactions as savepoints `pg_sp_<subid>_<xid>`, a Stream Abort rolls back to one
+      or the whole transaction, the abort's position stored as the origin's), and commits
+      or prepares at the Stream Commit / Prepare under the leader's origin (shared:
+      `replorigin_session_setup`'s acquired_by is now checked as PostgreSQL does, so several
+      workers join their leader). The leader waits for that commit before it goes on
+      (commit order). Locks as in PostgreSQL, in the lock manager: `applytransaction` locks
+      (`locks::apply_transaction_key`, pg_locks' locktype, DescribeLockTag's "remote
+      transaction N of subscription S of database D"): the leader's stream lock between
+      blocks (the worker waits for it in AccessShare mode after its last block), the
+      worker's transaction lock (the leader waits for it at the transaction's end). So a
+      unique key the leader's transaction waits for while the worker holding it waits for its
+      next block, or a chain through a second worker, is a cycle DeadLockCheck reports
+      ("deadlock detected", the same DETAIL); the error goes to the leader ("logical
+      replication parallel apply worker exited due to error" with the worker's CONTEXT,
+      "logical replication parallel apply worker" and the leader's own), both restart. A
+      queue full for 10 s, or debug_logical_replication_streaming = immediate, turns the rest
+      into a file the worker applies at the end ("will serialize the remaining changes of
+      remote transaction N to a file"), and such a worker stops afterwards (pa_free_worker),
+      as one past half of the maximum does ("has finished"). pg_stat_subscription: 'parallel
+      apply' rows with leader_pid, in worker slot order (pg_stat_get_subscription(subid)
+      returns its first worker only, as there).
+    - **Worker log lines** go to the server log in its format (the engine's tracing only
+      without one): the backend types of PostgreSQL's background workers, apply_error_callback's
+      CONTEXT on every message's errors and lines ("during message type \"STREAM STOP\" in
+      transaction N[, finished at L]"), DEBUG1's "applied N changes in the streaming chunk",
+      "finished processing the STREAM COMMIT command", ..., and the postmaster's "background
+      worker ... exited with exit code 1". Workers take a reload's settings
+      (`Session::poll_config`) as ProcessConfigFile does.
+    - **Parallel table sync** (max_sync_workers_per_subscription): each table not ready is
+      copied by a table synchronization worker of its own (its pid, pg_stat_subscription row
+      and log lines; states i -> d -> f -> s, then r from the leader), at most the setting at
+      once. Unlike PostgreSQL's, the leader waits between transactions while copies run (each
+      table's synchronization point is then past what it applied; PostgreSQL's workers catch
+      up on their own slot's stream instead), and a temporary slot is used (PostgreSQL's
+      permanent one is dropped on a retry with a NOTICE the engine doesn't print). A failed
+      table is tried again after wal_retrieve_retry_interval while the leader streams. "has
+      finished" no longer adds the row count and position (PostgreSQL's text).
+      Catalog design (agent 115's area): a subscription's pg_subscription_rel rows stay one
+      catalog record (`sub_rels`, a list per subscription); concurrent workers each change
+      their own table's item, and their commits merge as the three-way merge merges lists
+      (items only one side changed). What the merge can't order (a REFRESH removing a table
+      while its worker records a state would bring the item back) is serialized as in
+      PostgreSQL: UpdateSubscriptionRelState takes the subscription's shared object lock in
+      AccessShareLock (`set_states`), ALTER / DROP SUBSCRIPTION in AccessExclusiveLock
+      (`lock_object` locks subscriptions as shared objects now).
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages

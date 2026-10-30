@@ -700,6 +700,8 @@ impl Ddl<'_, '_> {
         const TAG: &str = "ALTER SUBSCRIPTION";
         let mut x = self.subscription_named(&s.subname)?;
         self.alter_subscription_checks(&x)?;
+        // (Table synchronization workers updating its tables' states hold it in AccessShareLock.)
+        self.lock_object(crate::catalog::depend::SUBSCRIPTION, x.oid, crate::txn::locks::LockMode::AccessExclusive)?;
         let refresh_disabled = |what: &str| {
             Error::new(
                 code::OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -952,6 +954,7 @@ impl Ddl<'_, '_> {
             Err(e) => return Err(e),
         };
         self.require_owner(x.owner, "subscription", &x.name)?;
+        self.lock_object(crate::catalog::depend::SUBSCRIPTION, x.oid, crate::txn::locks::LockMode::AccessExclusive)?;
         if x.slot_name.is_some() {
             super::prevent_in_block("DROP SUBSCRIPTION")?;
         }

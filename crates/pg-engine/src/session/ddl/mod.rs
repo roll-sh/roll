@@ -558,7 +558,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
     /// Lock database object (`class`, `oid`) in `mode` (LockDatabaseObject; a role's
     /// is a shared object's, LockSharedObject) until the transaction ends.
     pub(super) fn lock_object(&self, class: u32, oid: u32, mode: crate::txn::locks::LockMode) -> Result<()> {
-        let db = if matches!(class, ROLE_CLASS | AUTH_MEMBERS_CLASS | 1262 | 1213) { 0 } else { self.ctx.sess.db.oid };
+        let db = if matches!(class, ROLE_CLASS | AUTH_MEMBERS_CLASS | 1262 | 1213 | 6100) { 0 } else { self.ctx.sess.db.oid };
         let key = crate::txn::locks::object_key(db, class, oid, 0);
         self.ctx
             .txn

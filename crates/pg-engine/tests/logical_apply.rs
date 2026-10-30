@@ -319,3 +319,48 @@ fn row_filters_and_column_lists() {
     x.same("SELECT id, v, NULL::text, n FROM f WHERE id % 2 = 0 ORDER BY id");
     assert_eq!(rows(&mut x.s, "SELECT count(*) FROM f WHERE secret IS NOT NULL"), vec!["[Int8(0)]".to_string()]);
 }
+
+/// streaming = parallel: streamed transactions go to a parallel apply worker (its
+/// pg_stat_subscription row, a savepoint rolled back, an aborted transaction, a streamed
+/// PREPARE), and with debug_logical_replication_streaming = immediate the leader serializes
+/// them to a file the worker applies at their end.
+#[test]
+fn parallel_apply() {
+    for immediate in [false, true] {
+        let settings: &[(&str, &str)] =
+            if immediate { &[("debug_logical_replication_streaming", "immediate")] } else { &[] };
+        let mut x = pair_with(settings);
+        x.both("CREATE TABLE t (id int PRIMARY KEY, v text)");
+        rows(&mut x.p, "CREATE PUBLICATION p FOR TABLE t");
+        x.subscribe("s", "p", "copy_data = false, streaming = parallel, two_phase = true");
+        wait_for(&mut x.s, "SELECT subtwophasestate FROM pg_subscription", &["[Char(101)]".to_string()]);
+        rows(&mut x.p, "INSERT INTO t VALUES (0, 'small')");
+        rows(
+            &mut x.p,
+            "BEGIN; INSERT INTO t SELECT g, 's' FROM generate_series(1, 2000) g; SAVEPOINT a; \
+             INSERT INTO t SELECT g, 'rb' FROM generate_series(2001, 3000) g; ROLLBACK TO a; \
+             UPDATE t SET v = 'u' WHERE id % 7 = 0; COMMIT",
+        );
+        rows(&mut x.p, "BEGIN; INSERT INTO t SELECT g, 'abort' FROM generate_series(5001, 7000) g; ROLLBACK");
+        rows(&mut x.p, "INSERT INTO t VALUES (9000, 'after')");
+        x.same("SELECT id, v FROM t ORDER BY id");
+        // The worker stays in the pool (max_parallel_apply_workers_per_subscription = 2),
+        // unless its transaction was serialized (pa_free_worker stops it then).
+        let mut want = vec!["[Text(\"apply\"), Null, Bool(true), Bool(false)]".to_string()];
+        if !immediate {
+            want.push("[Text(\"parallel apply\"), Bool(true), Bool(true), Bool(true)]".to_string());
+        }
+        wait_for(
+            &mut x.s,
+            "SELECT worker_type, leader_pid = (SELECT pid FROM pg_stat_subscription WHERE worker_type = 'apply'), \
+             relid IS NULL, received_lsn IS NULL FROM pg_stat_subscription ORDER BY worker_type",
+            &want,
+        );
+        rows(&mut x.p, "BEGIN; INSERT INTO t SELECT g, 'p' FROM generate_series(10001, 12000) g; PREPARE TRANSACTION 'g1'");
+        wait_for(&mut x.s, "SELECT count(*) FROM pg_prepared_xacts", &["[Int8(1)]".to_string()]);
+        rows(&mut x.p, "COMMIT PREPARED 'g1'");
+        x.same("SELECT count(*), sum(id) FROM t");
+        wait_for(&mut x.s, "SELECT count(*) FROM pg_prepared_xacts", &["[Int8(0)]".to_string()]);
+        rows(&mut x.s, "DROP SUBSCRIPTION s");
+    }
+}

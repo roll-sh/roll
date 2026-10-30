@@ -99,7 +99,11 @@ fn subscription(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
     let lsn = |l: u64| if l == 0 { Value::Null } else { Value::PgLsn(l) };
     let ts = |t: Option<i64>| t.map_or(Value::Null, Value::Timestamptz);
     let mut v: Vec<_> = w.stats().into_iter().filter(|s| want.is_none_or(|o| o == s.subid)).collect();
-    v.sort_by_key(|s| (s.subid, s.relid));
+    // (In LogicalRepCtx->workers order; for one subscription only its first worker.)
+    v.sort_by_key(|s| s.slot);
+    if want.is_some() {
+        v.truncate(1);
+    }
     rows(v
         .into_iter()
         .map(|s| {
@@ -107,7 +111,7 @@ fn subscription(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
                 Value::Oid(s.subid),
                 s.relid.map_or(Value::Null, Value::Oid),
                 Value::Int4(s.pid),
-                Value::Null,
+                s.leader_pid.map_or(Value::Null, Value::Int4),
                 lsn(s.received_lsn),
                 ts(s.last_send),
                 ts(s.last_receipt),
@@ -441,6 +445,7 @@ fn lock_waits(c: &FnCtx) -> std::collections::HashMap<i32, &'static str> {
                 Tag::SpecToken { .. } => "spectoken",
                 Tag::Object { .. } => "object",
                 Tag::Advisory(_) => "advisory",
+                Tag::ApplyTransaction { .. } => "applytransaction",
                 Tag::Other(_) => "transactionid",
             };
             out.insert(pid, kind);

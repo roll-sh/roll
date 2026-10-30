@@ -29,6 +29,8 @@ pub struct SessionOrigin {
     /// pg_replication_origin_xact_setup's: the remote commit's position and time.
     pub xact_lsn: u64,
     pub xact_time: i64,
+    /// The acquired_by it joined the origin with (0: it acquired it).
+    pub joined: i32,
 }
 
 #[derive(Default)]
@@ -212,13 +214,31 @@ impl Origins {
             return Err(Error::new(code::OBJECT_IN_USE, "cannot setup replication origin when one is already setup"));
         }
         let Some(o) = st.origins.iter().find(|o| o.name == name).cloned() else { return Err(no_origin(name)) };
-        if let Some((other, _)) = st.sessions.iter().find(|(p, s)| s.id == o.id && **p != acquired_by) {
-            return Err(Error::new(
-                code::OBJECT_IN_USE,
-                format!("replication origin with ID {} is already active for PID {other}", o.id),
-            ));
+        // (replorigin_session_setup: the process that has it is its acquired_by; another may
+        // join it only naming that process, as parallel apply workers name their leader.)
+        let owner = st.sessions.iter().find(|(_, s)| s.id == o.id && s.joined == 0).map(|(p, _)| *p);
+        match owner {
+            Some(other) if acquired_by == 0 => {
+                return Err(Error::new(
+                    code::OBJECT_IN_USE,
+                    format!("replication origin with ID {} is already active for PID {other}", o.id),
+                ));
+            }
+            Some(other) if other != acquired_by => {
+                return Err(crate::error::internal(format!(
+                    "could not find replication state slot for replication origin with OID {} which was acquired by {acquired_by}",
+                    o.id
+                )));
+            }
+            None if acquired_by != 0 => {
+                return Err(crate::error::internal(format!(
+                    "cannot use PID {acquired_by} for inactive replication origin with ID {}",
+                    o.id
+                )));
+            }
+            _ => {}
         }
-        st.sessions.insert(pid, SessionOrigin { id: o.id, ..Default::default() });
+        st.sessions.insert(pid, SessionOrigin { id: o.id, joined: acquired_by, ..Default::default() });
         self.sessions_n.store(st.sessions.len(), Ordering::Release);
         Ok(())
     }
