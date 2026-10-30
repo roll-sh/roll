@@ -9,7 +9,7 @@ use crate::ext::postgres_fdw::join as pj;
 use std::sync::Arc as SArc;
 
 /// postgres_fdw's DEFAULT_FDW_SORT_MULTIPLIER: a sort sent without remote estimates.
-const DEFAULT_FDW_SORT_MULTIPLIER: f64 = 1.2;
+pub(in crate::sql::paths) const DEFAULT_FDW_SORT_MULTIPLIER: f64 = 1.2;
 
 impl Search<'_, '_, '_> {
     /// A base relation's description by its wrapper (GetForeignRelSize's fpinfo): a scan

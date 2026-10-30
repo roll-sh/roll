@@ -1,0 +1,132 @@
+> CREATE SCHEMA a110s
+-- CREATE SCHEMA
+
+> CREATE TYPE a110s.mood AS ENUM ('foo', 'bar')
+-- CREATE TYPE
+
+> CREATE TABLE a110_t (id int PRIMARY KEY, m a110s.mood, c6 varchar(10), c3 text, n int)
+-- CREATE TABLE
+
+> INSERT INTO a110_t VALUES (1, 'foo', 'foo', 'a', 10), (2, 'bar', 'x', 'b', 20), (3, 'foo', 'y', 'c', 30)
+-- INSERT 0 3
+
+> SELECT * FROM a110_t WHERE m LIKE 'foo'
+ERROR 42883: operator does not exist: a110s.mood ~~ unknown (at 30)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SELECT * FROM a110_t WHERE m = 'foo'::text
+ERROR 42883: operator does not exist: a110s.mood = text (at 30)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> SET search_path = a110s, public
+-- SET
+
+> SELECT * FROM a110_t WHERE m LIKE 'foo'
+ERROR 42883: operator does not exist: mood ~~ unknown (at 30)
+HINT: No operator matches the given name and argument types. You might need to add explicit type casts.
+
+> RESET search_path
+-- RESET
+
+> CREATE FUNCTION a110_least_accum(anyelement, variadic anyarray) RETURNS anyelement
+>   LANGUAGE sql AS 'SELECT least($1, min($2[i])) FROM generate_subscripts($2, 1) g(i)'
+-- CREATE FUNCTION
+
+> CREATE AGGREGATE a110_least_agg(variadic items anyarray) (stype = anyelement, sfunc = a110_least_accum)
+-- CREATE AGGREGATE
+
+> CREATE VIEW a110_v AS SELECT a110_least_agg(n) AS a, a110_least_agg(VARIADIC ARRAY[n, id]) AS b FROM a110_t
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('a110_v')
+pg_get_viewdef:text
+ SELECT a110_least_agg(VARIADIC ARRAY[n]) AS a,
+    a110_least_agg(VARIADIC ARRAY[n, id]) AS b
+   FROM a110_t;
+-- SELECT 1
+
+> SELECT * FROM a110_v
+a:int4 | b:int4
+10 | 1
+-- SELECT 1
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT a110_least_agg(n, id) FROM a110_t
+QUERY PLAN:text
+Aggregate
+  Output: a110_least_agg(VARIADIC ARRAY[n, id])
+  ->  Seq Scan on public.a110_t
+        Output: id, m, c6, c3, n
+-- EXPLAIN
+
+> EXPLAIN (VERBOSE, COSTS OFF) SELECT id FROM a110_t WHERE CASE c6 WHEN 'foo' THEN true ELSE c3 < 'bar' END
+QUERY PLAN:text
+Seq Scan on public.a110_t
+  Output: id
+  Filter: CASE a110_t.c6 WHEN 'foo'::text THEN true ELSE (a110_t.c3 < 'bar'::text) END
+-- EXPLAIN
+
+> CREATE VIEW a110_w AS SELECT CASE c6 WHEN 'foo' THEN 1 WHEN 'x' THEN 2 END AS k FROM a110_t
+-- CREATE VIEW
+
+> SELECT pg_get_viewdef('a110_w')
+pg_get_viewdef:text
+ SELECT
+        CASE c6
+            WHEN 'foo'::text THEN 1
+            WHEN 'x'::text THEN 2
+            ELSE NULL::integer
+        END AS k
+   FROM a110_t;
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) WITH u AS (UPDATE a110_t SET n = n + 1 WHERE id = 2 RETURNING *) SELECT * FROM u
+QUERY PLAN:text
+CTE Scan on u
+  CTE u
+    ->  Update on a110_t
+          ->  Index Scan using a110_t_pkey on a110_t
+                Index Cond: (id = 2)
+-- EXPLAIN
+
+> WITH u AS (UPDATE a110_t SET n = n + 1 WHERE id = 2 RETURNING *) SELECT * FROM u
+id:int4 | m:user | c6:varchar | c3:text | n:int4
+2 | bar | x | b | 21
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) WITH d AS (DELETE FROM a110_t WHERE id = 3 RETURNING id) SELECT count(*) FROM d
+QUERY PLAN:text
+Aggregate
+  CTE d
+    ->  Delete on a110_t
+          ->  Index Scan using a110_t_pkey on a110_t
+                Index Cond: (id = 3)
+  ->  CTE Scan on d
+-- EXPLAIN
+
+> WITH d AS (DELETE FROM a110_t WHERE id = 3 RETURNING id) SELECT count(*) FROM d
+count:int8
+1
+-- SELECT 1
+
+> SELECT * FROM a110_t ORDER BY id
+id:int4 | m:user | c6:varchar | c3:text | n:int4
+1 | foo | foo | a | 10
+2 | bar | x | b | 21
+-- SELECT 2
+
+> DROP VIEW a110_v, a110_w
+-- DROP VIEW
+
+> DROP AGGREGATE a110_least_agg(anyarray)
+-- DROP AGGREGATE
+
+> DROP FUNCTION a110_least_accum(anyelement, anyarray)
+-- DROP FUNCTION
+
+> DROP TABLE a110_t
+-- DROP TABLE
+
+> DROP SCHEMA a110s CASCADE
+NOTICE 00000: drop cascades to type a110s.mood
+-- DROP SCHEMA
+

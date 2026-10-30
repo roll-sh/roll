@@ -135,6 +135,26 @@ impl Back {
         Back { cols: (0..t.columns.len()).filter(|i| used[*i] && !t.columns[*i].dropped).collect(), ctid }
     }
 
+    /// RETURNING old.* / new.*'s columns too (pull_varattnos counts an old or new
+    /// reference as the table's column).
+    pub fn with_old_new(mut self, t: &Table, on: Option<&crate::sql::plan::OldNew>, exprs: &[&Expr]) -> Back {
+        let Some(on) = on else {
+            return self;
+        };
+        let n = t.columns.len();
+        for c in exprs.iter().flat_map(|e| e.columns()) {
+            let Some(k) = c.checked_sub(on.width) else {
+                continue;
+            };
+            let col = if k < on.ncols { k } else { k.wrapping_sub(on.ncols + 1) };
+            if col < n && !t.columns[col].dropped && !self.cols.contains(&col) {
+                self.cols.push(col);
+            }
+        }
+        self.cols.sort_unstable();
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.cols.is_empty() && !self.ctid
     }
@@ -436,6 +456,24 @@ pub fn update_sql(cat: &crate::catalog::Catalog, t: &Table, cols: &[usize]) -> S
         })
         .collect();
     format!("UPDATE {} SET {} WHERE ctid = $1", relation_name(cat, t), sets.join(", "))
+}
+
+/// A foreign inheritance member's own columns that the named table lacks, read by the
+/// row's remote ctid into `row` (PostgreSQL's member scan returns the member's whole row
+/// for its row triggers and for an UPDATE sending every column; the engine's scan returns
+/// the named table's columns). A row gone meanwhile leaves them NULL.
+pub fn fill_member_row(t: &Table, row: &mut [Value], missing: &[usize], key: &[u8], ctx: &ExecCtx) -> Result<()> {
+    let cat = ctx.catalog();
+    let names: Vec<String> = missing.iter().map(|i| quote_ident(&column_name(t, *i))).collect();
+    let sql = format!("SELECT {} FROM {} WHERE ctid = $1", names.join(", "), relation_name(&cat, t));
+    if let Some(vals) = run(t, &sql, &[Some(key_ctid(key))], ctx)? {
+        for (k, &i) in missing.iter().enumerate() {
+            if let (Some(Some(s)), Some(slot)) = (vals.get(k), row.get_mut(i)) {
+                *slot = crate::types::text::parse_value(s, &t.columns[i].ty, ctx.fmt())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// UPDATE of the row at remote ctid `key` to `new`: the stored row, as the remote server

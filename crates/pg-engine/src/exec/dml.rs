@@ -4204,6 +4204,15 @@ fn member_row(
                 row[*c] = v.clone();
             }
         }
+        // (Its own columns the named table lacks, when its row triggers see the row or
+        // a BEFORE ROW trigger makes the UPDATE send every column.)
+        let missing: Vec<usize> = (0..t.columns.len()).filter(|c| !t.columns[*c].dropped && !map.contains(&Some(*c))).collect();
+        if !missing.is_empty()
+            && crate::ext::postgres_fdw::scan::is_postgres_fdw(&ctx.catalog(), t)
+            && crate::ext::postgres_fdw::modify::catalog_tgtypes(&ctx.catalog(), t.oid).iter().any(|ty| ty & crate::catalog::trigger_type::ROW != 0)
+        {
+            crate::ext::postgres_fdw::modify::fill_member_row(t, &mut row, &missing, dkey, ctx)?;
+        }
         return Ok(row);
     }
     let bytes = ctx.txn.borrow().get_latest(dkey)?.and_then(|(_, b)| b);
@@ -4818,7 +4827,8 @@ impl Node for UpdateNode {
                 // RETURNING, the views' check options and AFTER ROW triggers; the views'
                 // check options run on it.)
                 let exprs: Vec<&Expr> = self.plan.returning.iter().chain(rules.view_checks.iter().map(|(_, e)| e)).collect();
-                let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(&rules.triggers), tt::UPDATE, &exprs, self.plan.sys.then_some(n + 1));
+                let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(&rules.triggers), tt::UPDATE, &exprs, self.plan.sys.then_some(n + 1))
+                    .with_old_new(&t, self.plan.old_new.as_ref(), &exprs);
                 let _back = crate::ext::postgres_fdw::modify::with_back(back);
                 let stored = crate::ext::postgres_fdw::modify::with_set_cols(set_cols, || update_row(rules, &dkey, &old, new, ctx))?;
                 check_view_options(rules, &stored, ctx)?;
@@ -5145,7 +5155,8 @@ impl Node for DeleteNode {
                 let _back = t.foreign.is_some().then(|| {
                     let exprs: Vec<&Expr> = self.plan.returning.iter().collect();
                     let n = self.plan.table.columns.len();
-                    let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1));
+                    let back = crate::ext::postgres_fdw::modify::Back::of(&t, &crate::ext::postgres_fdw::modify::tgtypes(triggers), tt::DELETE, &exprs, self.plan.sys.then_some(n + 1))
+                        .with_old_new(&t, self.plan.old_new.as_ref(), &exprs);
                     crate::ext::postgres_fdw::modify::with_back(back)
                 });
                 delete_row_with(&t, indexes, &dkey, &old, self.defer_entries, ctx)?;

@@ -21,6 +21,10 @@ pub trait ForeignRelOps: Send + Sync + 'static {
     fn output(&self, _fr: &ForeignRel) -> Option<(Vec<crate::sql::expr::Expr>, Vec<crate::sql::plan::AggCall>)> {
         None
     }
+    /// The relation row's columns it returns only for a sort it sends (none by default).
+    fn sort_only_cols(&self, _fr: &ForeignRel) -> Vec<usize> {
+        Vec::new()
+    }
     /// The conditions checked locally on its rows (EXPLAIN's Filter), over the relation's
     /// row.
     fn filter(&self) -> Vec<crate::sql::expr::Expr> {

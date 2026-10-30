@@ -57,6 +57,17 @@ impl crate::ext::fdw::ForeignRelOps for UpperScan {
         Ok(Box::new(UpperNode {
             cur: super::scan::Cursor::new(key, self.input.info.opts.fetch_size, sql, params),
             types: self.tlist.iter().map(|e| e.ty()).collect(),
+            // (conversion_error_callback: a plain column names itself, anything else its
+            // place in the remote select list.)
+            contexts: self
+                .tlist
+                .iter()
+                .enumerate()
+                .map(|(i, e)| match e {
+                    Expr::Col(g, _) => self.input.col_context(*g),
+                    _ => format!("processing expression at position {} in select list", i + 1),
+                })
+                .collect(),
             local: self.local.clone(),
         }))
     }
@@ -87,6 +98,7 @@ impl crate::ext::fdw::ForeignRelOps for UpperScan {
 struct UpperNode {
     cur: super::scan::Cursor,
     types: Vec<crate::types::DataType>,
+    contexts: Vec<String>,
     local: Vec<Expr>,
 }
 
@@ -95,9 +107,9 @@ impl Node for UpperNode {
         loop {
             let Some(vals) = self.cur.next(ctx)? else { return Ok(None) };
             let mut row = Vec::with_capacity(self.types.len());
-            for (ty, v) in self.types.iter().zip(vals) {
+            for ((ty, what), v) in self.types.iter().zip(&self.contexts).zip(vals) {
                 row.push(match v {
-                    Some(s) => crate::types::text::parse_value(&s, ty, ctx.fmt())?,
+                    Some(s) => crate::types::text::parse_value(&s, ty, ctx.fmt()).map_err(|e| e.context(what.clone()))?,
                     None => Value::Null,
                 });
             }

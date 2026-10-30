@@ -587,6 +587,10 @@ struct ExNode {
     /// plain columns, no node of Postgres's): the scan's physical target list, which it
     /// returns where its consumer takes any (`physical_input`).
     physical: Vec<String>,
+    /// A foreign join's columns its remote SELECT returns for a sort it sends and the plan
+    /// above doesn't read (fdw_scan_tlist's resjunk entries): shown when it is the level's
+    /// top.
+    fdw_junk: Vec<String>,
     /// A join: the tuples its quals other than the hash / merge clauses are checked on
     /// (final_cost_nestloop's ntuples, final_cost_hashjoin's hashjointuples,
     /// final_cost_mergejoin's mergejointuples), what a filter over it costs per row of.
@@ -6428,6 +6432,7 @@ impl Builder<'_, '_> {
             }
             Plan::Project { input, exprs } => {
                 let under_filter = FILTER_OVER_WINDOW.with(|f| f.replace(false));
+                let foreign_top = FOREIGN_TOP.with(|f| f.replace(false));
                 // (The target list over windows: the input columns it reads, in order.)
                 let tl: Vec<usize> = match &**input {
                     Plan::Window { input: wi, .. } => {
@@ -6505,7 +6510,16 @@ impl Builder<'_, '_> {
                         .collect();
                     self.order_hint = Some((addr(input), through));
                 }
+                // (A top projection dropping the resjunk columns of one computing the
+                // target list over a foreign join or upper relation: that one is the
+                // level's top, the Foreign Scan whose target list keeps them.)
+                let foreign_junk = self.o.verbose
+                    && junk_only
+                    && (addr(p) == self.top || self.level_tops.contains(&addr(p)))
+                    && matches!(&**input, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Foreign(_)));
+                FOREIGN_TOP.with(|f| f.set(foreign_junk));
                 let mut c = self.node(input);
+                FOREIGN_TOP.with(|f| f.set(false));
                 self.order_hint = saved_hint;
                 // (A scan returning its physical target list under a selection of its
                 // columns.)
@@ -6539,6 +6553,7 @@ impl Builder<'_, '_> {
                 if (self.o.verbose || c.node.node_type == "ProjectSet")
                     && (addr(p) == self.top || self.level_tops.contains(&addr(p)))
                     && (matches!(c.node.node_type, "Sort" | "Incremental Sort" | "Limit" | "LockRows" | "ProjectSet")
+                        || foreign_junk
                         || c.node.node_type == "Result" && matches!(&**input, Plan::Project { .. })
                         // (A scan read in the ORDER BY's order computing its keys.)
                         || matches!(&**input, Plan::Project { input: pi, .. } if matches!(&**pi, Plan::Scan(_))))
@@ -6897,7 +6912,8 @@ impl Builder<'_, '_> {
                 if self.o.verbose {
                     // (The Result over a Sort computes the whole target list, its resjunk
                     // sort columns too.)
-                    let mask = if sort_above { None } else { self.needed.get(&addr(p)).cloned() };
+                    let foreign_top = foreign_top && matches!(&**input, Plan::Foreign(_));
+                    let mask = if sort_above || foreign_top { None } else { self.needed.get(&addr(p)).cloned() };
                     c.node.output = internal
                         .iter()
                         .enumerate()
@@ -6909,6 +6925,18 @@ impl Builder<'_, '_> {
                     // (A LockRows computing it returns its rows' marks too, resjunk, as do
                     // the Limits over it.)
                     lock_junk(&mut c.node);
+                    // (A foreign join's or upper relation's Foreign Scan at a level's top
+                    // returns the level's resjunk columns too, the sort and group keys
+                    // the projection drops: its target list is the level's whole one.)
+                    if matches!(&**input, Plan::Foreign(_)) && (foreign_top || addr(p) == self.top || self.level_tops.contains(&addr(p))) {
+                        let read: Vec<usize> = exprs.iter().flat_map(|e| e.columns()).collect();
+                        let unread: Vec<String> = c.internal.iter().enumerate().filter(|(i, _)| !read.contains(i)).map(|(_, n)| self.pick(n, Cx::Output)).collect();
+                        for shown in unread.into_iter().chain(std::mem::take(&mut c.node.fdw_junk)) {
+                            if !c.node.output.contains(&shown) {
+                                c.node.output.push(shown);
+                            }
+                        }
+                    }
                     let out = c.node.output.clone();
                     for pt in c.node.partials_mut() {
                         pt.output = out.clone();
@@ -8671,7 +8699,8 @@ impl Builder<'_, '_> {
                 let members: Vec<Arc<crate::catalog::Table>> =
                     up.members.iter().map(|m| m.rules.table.clone()).collect();
                 let returning = shown_returning(&up.returning);
-                self.inherited_dml(key, "Update", &up.rules.table, &members, &up.sets, &returning, up.old_new.as_ref(), up.sys, &up.source)
+                let checks: Vec<&Expr> = up.rules.view_checks.iter().map(|(_, e)| e).collect();
+                self.inherited_dml(key, "Update", &up.rules.table, &members, &up.sets, &returning, &checks, up.old_new.as_ref(), up.sys, &up.source)
             }
             Plan::Delete(dp)
                 if dp.inh
@@ -8681,7 +8710,7 @@ impl Builder<'_, '_> {
                 let members: Vec<Arc<crate::catalog::Table>> =
                     dp.members.iter().map(|m| m.table.clone()).collect();
                 let returning = shown_returning(&dp.returning);
-                self.inherited_dml(key, "Delete", &dp.table, &members, &[], &returning, dp.old_new.as_ref(), dp.sys, &dp.source)
+                self.inherited_dml(key, "Delete", &dp.table, &members, &[], &returning, &[], dp.old_new.as_ref(), dp.sys, &dp.source)
             }
             // A single member needs no Append (Postgres removes it).
             Plan::Append {
@@ -10171,6 +10200,7 @@ impl Builder<'_, '_> {
         members: &[Arc<crate::catalog::Table>],
         sets: &[(usize, Expr)],
         returning: &[Expr],
+        checks: &[&Expr],
         old_new: Option<&super::plan::OldNew>,
         sys: bool,
         source: &Arc<Plan>,
@@ -10227,7 +10257,7 @@ impl Builder<'_, '_> {
             if t.foreign.is_some() {
                 title = format!("Foreign {title}");
                 if self.o.verbose
-                    && let Some(sql) = self.member_remote_sql(op, pt, t, sets, returning, sys)
+                    && let Some(sql) = self.member_remote_sql(op, pt, t, sets, returning, checks, sys)
                 {
                     title.push_str("\n  Remote SQL: ");
                     title.push_str(&sql);
@@ -11881,7 +11911,8 @@ impl Builder<'_, '_> {
         if self.o.verbose && crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, t) {
             let cols = modify::target_cols(t, up.sets.iter().map(|(c, _)| *c), &up.rules.generated, &modify::tgtypes(&up.rules.triggers));
             let exprs: Vec<&Expr> = up.returning.iter().chain(up.rules.view_checks.iter().map(|(_, e)| e)).collect();
-            let back = modify::Back::of(t, &modify::tgtypes(&up.rules.triggers), crate::catalog::trigger_type::UPDATE, &exprs, up.sys.then_some(t.columns.len() + 1));
+            let back = modify::Back::of(t, &modify::tgtypes(&up.rules.triggers), crate::catalog::trigger_type::UPDATE, &exprs, up.sys.then_some(t.columns.len() + 1))
+                .with_old_new(t, up.old_new.as_ref(), &exprs);
             n.details.push(Detail::Text("Remote SQL", modify::update_sql(&cat, t, &cols) + &back.sql(t)));
         }
     }
@@ -11917,7 +11948,8 @@ impl Builder<'_, '_> {
         use crate::ext::postgres_fdw::modify;
         let t = &dp.table;
         let exprs: Vec<&Expr> = dp.returning.iter().collect();
-        let back = modify::Back::of(t, &modify::tgtypes(&dp.triggers), crate::catalog::trigger_type::DELETE, &exprs, dp.sys.then_some(t.columns.len() + 1));
+        let back = modify::Back::of(t, &modify::tgtypes(&dp.triggers), crate::catalog::trigger_type::DELETE, &exprs, dp.sys.then_some(t.columns.len() + 1))
+            .with_old_new(t, dp.old_new.as_ref(), &exprs);
         self.foreign_returning(n, t, back);
     }
 
@@ -11942,6 +11974,7 @@ impl Builder<'_, '_> {
         t: &crate::catalog::Table,
         sets: &[(usize, Expr)],
         returning: &[Expr],
+        checks: &[&Expr],
         sys: bool,
     ) -> Option<String> {
         use crate::catalog::trigger_type as tt;
@@ -11953,7 +11986,8 @@ impl Builder<'_, '_> {
         let by_name = |c: usize| pt.columns.get(c).and_then(|pc| t.columns.iter().position(|x| !x.dropped && x.name == pc.name));
         let trigs = modify::catalog_tgtypes(&cat, t.oid);
         let event = if op == "Update" { tt::UPDATE } else { tt::DELETE };
-        let exprs: Vec<&Expr> = returning.iter().collect();
+        // (The RETURNING list's and the views' check options' columns.)
+        let exprs: Vec<&Expr> = returning.iter().chain(checks.iter().copied()).collect();
         let back = modify::Back::of(pt, &trigs, event, &exprs, sys.then_some(pt.columns.len() + 1));
         let back = modify::Back {
             cols: if trigs.iter().any(|ty| ty & tt::ROW != 0 && ty & (tt::BEFORE | tt::INSTEAD) == 0 && ty & event != 0) {
@@ -12069,6 +12103,13 @@ impl Builder<'_, '_> {
                 .collect(),
             None => f.out.iter().map(|&c| names.get(c).cloned().unwrap_or_else(|| Name::same("?"))).collect(),
         };
+        n.fdw_junk = f
+            .private
+            .0
+            .sort_only_cols(f)
+            .iter()
+            .map(|c| self.pick(names.get(*c).unwrap_or(&Name::same("?")), Cx::Output))
+            .collect();
         let filter = f.private.0.filter();
         if !filter.is_empty() {
             let texts = filter.iter().map(|e| self.show(e, &names, Cx::Scan)).collect();
@@ -12077,6 +12118,11 @@ impl Builder<'_, '_> {
         }
         for (label, text) in f.private.0.explain(f, &|i| refs.get(i).cloned().unwrap_or_default(), self.ctx, self.o.verbose) {
             n.details.push(Detail::Text(label, text));
+        }
+        // (Shown only when it is the level's top itself, no projection over it: its
+        // target list keeps the sort columns.)
+        if !(self.o.verbose && (addr(p) == self.top || self.level_tops.contains(&addr(p)))) {
+            n.fdw_junk.clear();
         }
         Built::passthrough(n, out)
     }
@@ -17306,6 +17352,9 @@ thread_local! {
     static CTE_ORDERS: std::cell::RefCell<Vec<(String, Vec<SortKey>)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// Converting a filter's input that is a FROM subquery's windows.
     static FILTER_OVER_WINDOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Converting the projection under a top one that only drops resjunk columns, over a
+    /// foreign join or upper relation: it is the level's top (`foreign_junk`).
+    static FOREIGN_TOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Converting the members of a Merge Append (`merge_appended`).
     static MERGE_MEMBERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Explaining a partitionwise join's child joins (a sub-partitioned partition's own
@@ -17489,6 +17538,11 @@ fn merge_appended(p: &Plan) -> bool {
                 true
             }
             Plan::Scan(s) if matches!(s.access, super::plan::Access::Index { ordered: true, .. }) => {
+                *leaves += 1;
+                true
+            }
+            // (A foreign member its server sorts: the remote ORDER BY.)
+            Plan::Scan(s) if s.fdw.as_ref().is_some_and(|f| !f.order.is_empty()) => {
                 *leaves += 1;
                 true
             }
@@ -18220,7 +18274,12 @@ impl Render<'_> {
         if !n.output.is_empty()
             && !matches!(n.node_type, "Append" | "Merge Append" | "Recursive Union")
         {
-            self.w.list("Output", &n.output);
+            if n.fdw_junk.is_empty() {
+                self.w.list("Output", &n.output);
+            } else {
+                let all: Vec<String> = n.output.iter().chain(n.fdw_junk.iter().filter(|j| !n.output.contains(j))).cloned().collect();
+                self.w.list("Output", &all);
+            }
         }
         let executed = self.o.analyze && self.stats(n.key).is_some();
         let text = self.w.format == Format::Text;

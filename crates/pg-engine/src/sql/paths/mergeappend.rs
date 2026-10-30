@@ -96,7 +96,19 @@ impl Planner<'_, '_> {
     /// A member's path in the order: its cheapest one already in it (by total cost, or
     /// by startup cost for the fast-start Merge Append), else its cheapest one sorted
     /// (generate_orderedappend_paths).
-    fn member_path(&self, rel: &Rel, keys: &[Expr], dirs: &[(bool, bool)], colls: &[u32], width: u32, startup: bool, limit: Option<f64>) -> Option<Path> {
+    /// A postgres_fdw member its server can sort (the keys shippable): its sorted path is
+    /// the remote ORDER BY's, DEFAULT_FDW_SORT_MULTIPLIER times the scan's cost
+    /// (estimate_path_cost_size without remote estimates), not a local Sort's.
+    fn remote_sorted(&self, s: &ScanPlan, keys: &[Expr]) -> bool {
+        if s.with_key || s.mark.is_some() || !crate::ext::postgres_fdw::scan::is_postgres_fdw(&self.cat, &s.table) {
+            return false;
+        }
+        let d = crate::ext::postgres_fdw::deparse::Deparser::new(&self.cat, &s.table, self.ctx.fmt());
+        keys.iter().all(|k| matches!(k, Expr::Const(..)) || d.shippable(k))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn member_path(&self, rel: &Rel, keys: &[Expr], dirs: &[(bool, bool)], colls: &[u32], width: u32, startup: bool, limit: Option<f64>, remote: bool) -> Option<Path> {
         // (Less the keys a clause of the member equates with a constant: redundant.)
         let want = Want {
             keys: keys
@@ -132,7 +144,12 @@ impl Planner<'_, '_> {
             return Some(b.clone());
         }
         let c = cheapest(&list)?;
-        let (st, tot) = costs::sort_cost(c.total, c.rows, width, limit);
+        let (st, tot) = if remote {
+            let m = super::joinpath::foreign::DEFAULT_FDW_SORT_MULTIPLIER;
+            (c.startup * m, c.total * m)
+        } else {
+            costs::sort_cost(c.total, c.rows, width, limit)
+        };
         Some(Path {
             kind: PathKind::Sort(Box::new(c.clone())),
             startup: st,
@@ -222,7 +239,7 @@ impl Planner<'_, '_> {
             let (mut m_startup, mut m_run, mut m_disabled) = (0.0, 0.0, 0u32);
             let mut ps = Vec::new();
             for (l, rel) in found.iter().zip(&rels) {
-                let Some(o) = self.member_path(rel, &l.keys, &dirs, &colls, l.width, startup, limit_tuples) else {
+                let Some(o) = self.member_path(rel, &l.keys, &dirs, &colls, l.width, startup, limit_tuples, self.remote_sorted(l.scan, &l.keys)) else {
                     return false;
                 };
                 m_startup += o.startup;
@@ -309,7 +326,9 @@ impl Planner<'_, '_> {
         let mut indexed = false;
         for l in &found {
             let rel = self.rel(l.scan, &l.needed)?;
-            let o = self.member_path(&rel, &l.keys, &dirs, &colls, l.width, startup, None)?;
+            // (The join search's ordered appends keep a local Sort's cost for a foreign
+            // member: what a merge join's input costs there is the base relation's.)
+            let o = self.member_path(&rel, &l.keys, &dirs, &colls, l.width, startup, None, false)?;
             indexed |= !matches!(o.kind, PathKind::Sort(_));
             m_startup += o.startup;
             m_run += o.total - o.startup;
@@ -370,7 +389,8 @@ impl Planner<'_, '_> {
                     let Some(rel) = self.rel(s, &sneeded) else {
                         continue;
                     };
-                    let Some(path) = self.member_path(&rel, &skeys, &dirs, &colls, width, startup, limit) else {
+                    let remote = self.remote_sorted(s, &skeys);
+                    let Some(path) = self.member_path(&rel, &skeys, &dirs, &colls, width, startup, limit, remote) else {
                         continue;
                     };
                     match &path.kind {

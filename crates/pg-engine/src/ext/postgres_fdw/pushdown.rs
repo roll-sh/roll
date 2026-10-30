@@ -56,6 +56,9 @@ fn order_for(cat: &Catalog, fmt: &crate::types::text::FormatCtx, input: &Plan, k
     if s.table.foreign.is_none() || !is_postgres_fdw(cat, &s.table) || s.fdw.is_some() || s.mark.is_some() || s.with_key {
         return None;
     }
+    // (Constant keys don't order anything: not sent, as an equivalence class with a
+    // constant makes no useful pathkey.)
+    let mapped: Vec<SortKey> = mapped.into_iter().filter(|k| !matches!(k.expr, Expr::Const(..))).collect();
     let d = Deparser::new(cat, &s.table, fmt);
     let ok = mapped.iter().all(|k| d.sort_op_shippable(k) && d.shippable(&k.expr) && k.expr.columns().iter().all(|c| *c < s.table.columns.len()));
     ok.then_some((mapped, path))
@@ -169,6 +172,8 @@ fn mark_target(cat: &Catalog, source: &mut Arc<Plan>, oid: u32, update: bool) {
 fn has_foreign(p: &Plan) -> bool {
     match p {
         Plan::Scan(s) => s.table.foreign.is_some(),
+        // (A data-modifying CTE of a foreign table too: plan_inputs has only the body.)
+        Plan::With { ctes, body, .. } => ctes.iter().any(|(_, c)| has_foreign(c)) || has_foreign(body),
         p => crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_foreign(c)),
     }
 }
@@ -185,6 +190,16 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
     push(&cat, ctx.fmt(), p);
     // (Again: a LIMIT over a sort the first pass sent.)
     push(&cat, ctx.fmt(), p);
+    // (A target list computed over a projection that only drops a foreign relation's
+    // resjunk columns: the Foreign Scan computes it, those columns its resjunk entries.)
+    if let Plan::Project { input, .. } = p
+        && let Plan::Project { input: fi, exprs } = &**input
+        && matches!(&**fi, Plan::Foreign(_))
+        && exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+    {
+        let fi = fi.clone();
+        *input = fi;
+    }
 }
 
 /// A filter over a foreign join (a WHERE clause over an outer join): its conditions the

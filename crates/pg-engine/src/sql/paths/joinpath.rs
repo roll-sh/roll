@@ -10,7 +10,7 @@ use crate::sql::joins::{self, In, InKind, JoinGucs, Jt, QualCost, Semi};
 use crate::sql::plan::{JoinMeta, JoinMethod};
 use std::rc::Rc;
 
-mod foreign;
+pub(super) mod foreign;
 mod lift;
 mod partial;
 

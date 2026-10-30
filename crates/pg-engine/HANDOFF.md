@@ -490,6 +490,44 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   varying from run to run (15 units, then 3 others); a run of that base alone was clean;
   runs on the next base were clean on both sides. (Cause found and fixed in round 22 by agent
   109: an ANALYZE that waited for a lock lost the work it had done before; see Autovacuum.)
+  Round 22 (agent 110, postgres_fdw 1,916 / 2,053): correctness first. A foreign inheritance
+  member with row triggers fetches its own columns the named table lacks by remote ctid
+  (`modify::fill_member_row`): the member scan returns the named table's columns, so a
+  BEFORE ROW trigger's UPDATE sent NULL for them (data loss) and the triggers saw NULL
+  (PostgreSQL's scan returns the member's whole row; this costs a round trip per such row).
+  A SELECT's data-modifying CTEs are planned (`plan_query` in `bind_select_stmt_here`; a
+  SELECT plans only its own levels, so their scans were never planned and a postgres_fdw
+  target never marked: `invalid input syntax for type tid: ""`), and `pushdown::has_foreign`
+  looks into CTEs. A VARIADIC user aggregate's call is aggvariadic (`spread` on its AggDef
+  signature): ruleutils and deparse write `VARIADIC ARRAY[...]` (the server took the array
+  as one element). Pending batched inserts are flushed before BEFORE ROW DELETE triggers
+  too. Deparse: the parser's implicit `ELSE NULL::type`, a CaseTestExpr with its CASE
+  operand's collation state (`Deparser::case_arg`), regconfig / regdictionary constants
+  shippable only built in or from a listed extension and written qualified
+  (set_transmission_modes' search_path), remote conditions in order_qual_clauses order
+  (`optimize::order_by_cost`, stable over baserestrictinfo order), RETURNING old / new
+  columns in the remote RETURNING (`Back::with_old_new`), an inherited member's Remote SQL
+  returning its views' check option columns. A missing operator's error qualifies types
+  the search path doesn't see (`Binder::qualify_op_error`: `public.user_enum ~~ unknown` in a
+  postgres_fdw session). A simple CASE whose operand is implicitly coerced deparses
+  (`case_test_under`; it printed debug text). EXPLAIN: a level's top Foreign Scan of a join
+  or upper relation shows the resjunk sort / group columns (`FOREIGN_TOP`,
+  `ForeignRelOps::sort_only_cols`, an identity projection under a computing one removed in
+  `push_level`). Merge Append members that are postgres_fdw scans cost the remote ORDER BY
+  (DEFAULT_FDW_SORT_MULTIPLIER, `remote_sorted`), constant sort keys aren't sent.
+  Remote protocol: the deferred START / SAVEPOINT / CLOSE go as a simple Query message in the
+  same write as an extended-protocol query (`Conn::pipeline_deferred`; their results read
+  through, the first error reported as the query's). `fdw_traffic` (debug, loopback):
+  single-row INSERTs 3.00 -> 2.00 remote writes per statement (START + INSERT, COMMIT;
+  PostgreSQL itself sends START, the prepared statement's Parse, its Execute, DEALLOCATE and
+  COMMIT apart), 300 inserts 1,791 -> 1,516 ms, other phases unchanged (point lookups 2.01,
+  direct updates 2.00), peak RSS 141.6 -> 141.8 MB. Verified: a full regress run on a
+  private reference of this batch rebased on 6423b044 (51,148 / 51,150, no unit changed
+  against results.tsv), crate tests, clippy (no new warnings), the difftest smoke, contrib
+  postgres_fdw 1,916 (24 units gained, none lost), dblink 218, file_fdw 187; after the
+  rebase onto the next commits (none near this code) crate tests, clippy and contrib again.
+  `outbound::local_reaches_the_engine` failed once on `SHOW port` and passed on the rerun
+  (three tests in one process each serve a port: suspect the port setting is shared).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

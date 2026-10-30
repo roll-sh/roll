@@ -2968,6 +2968,12 @@ pub fn order_quals(parts: &mut [Expr]) {
     });
 }
 
+/// Clauses already in baserestrictinfo order sorted by cost alone, stably
+/// (order_qual_clauses over a foreign scan's clauses).
+pub fn order_by_cost(parts: &mut [Expr]) {
+    parts.sort_by(|a, b| qual_cost(a).total_cmp(&qual_cost(b)));
+}
+
 /// Estimated evaluation cost of a qual in operator calls (cost_qual_eval): calls and
 /// comparisons cost one, `= ANY (array)` half per element, a sub-select a lot; column
 /// references, constants and IS NULL tests are free.

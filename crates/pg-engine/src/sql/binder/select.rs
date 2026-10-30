@@ -133,6 +133,17 @@ impl Binder<'_, '_> {
                 self.bind_select_body(s)
             }
         }?;
+        // A data-modifying CTE of a SELECT: its access paths, as a data-modifying
+        // statement's (a SELECT's own queries plan themselves; a statement that is one
+        // plans its WITH with it).
+        let mut r = r;
+        if !self.deparse
+            && let Plan::With { ctes, .. } = &mut r.0
+        {
+            for (_, c) in ctes.iter_mut().filter(|(_, c)| c.writes()) {
+                self.hidden_rtes += crate::sql::paths::plan_query(self.ctx, Arc::make_mut(c));
+            }
+        }
         // free_parsestate: MaxTupleAttributeNumber, once the level is analyzed.
         if r.1.len() > 1664 {
             return Err(Error::new(

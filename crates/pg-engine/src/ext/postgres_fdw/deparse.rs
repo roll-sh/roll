@@ -37,6 +37,9 @@ pub struct Deparser<'a> {
     /// An upper relation's aggregates, which `Expr::Agg(i)` names (their arguments over the
     /// join row).
     pub aggs: &'a [crate::sql::plan::AggCall],
+    /// The collation states of the CASE operands being walked, innermost last: a
+    /// CaseTestExpr has its CASE's (foreign_expr_walker's case_arg_cxt).
+    case_arg: std::cell::RefCell<Vec<(Coll, Option<String>)>>,
 }
 
 /// One relation of a join being deparsed (`Deparser::rels`).
@@ -127,6 +130,7 @@ impl<'a> Deparser<'a> {
             subq: Default::default(),
             placeholders: false,
             aggs: &[],
+            case_arg: Default::default(),
         }
     }
 
@@ -334,7 +338,7 @@ impl<'a> Deparser<'a> {
             }
             Expr::Outer(..) | Expr::Param(..) => (Coll::None, None),
             Expr::Const(v, ty) => {
-                if let (Value::Oid(o), DataType::Regproc | DataType::Regprocedure | DataType::Regoper | DataType::Regoperator | DataType::Regclass | DataType::Regtype | DataType::Regnamespace | DataType::Regrole | DataType::Regcollation) = (v, ty)
+                if let (Value::Oid(o), DataType::Regproc | DataType::Regprocedure | DataType::Regoper | DataType::Regoperator | DataType::Regclass | DataType::Regtype | DataType::Regnamespace | DataType::Regrole | DataType::Regcollation | DataType::Regconfig | DataType::Regdictionary) = (v, ty)
                     && !self.object_shippable(*o)
                 {
                     return false;
@@ -409,9 +413,16 @@ impl<'a> Deparser<'a> {
                 (Coll::None, None)
             }
             Expr::Case { operand, whens, else_, ty } => {
-                let mut ok = operand.as_ref().is_none_or(|o| self.walk(o, &mut (Coll::None, None)));
+                let mut arg = (Coll::None, None);
+                let mut ok = operand.as_ref().is_none_or(|o| self.walk(o, &mut arg));
+                if operand.is_some() {
+                    self.case_arg.borrow_mut().push(arg);
+                }
                 for (w, t) in whens {
                     ok &= self.walk(w, &mut (Coll::None, None)) && self.walk(t, &mut inner);
+                }
+                if operand.is_some() {
+                    self.case_arg.borrow_mut().pop();
                 }
                 ok &= else_.as_ref().is_none_or(|x| self.walk(x, &mut inner));
                 if !ok {
@@ -419,7 +430,7 @@ impl<'a> Deparser<'a> {
                 }
                 derived(&inner, ty, None)
             }
-            Expr::CaseTest(_) => (Coll::None, None),
+            Expr::CaseTest(_) => self.case_arg.borrow().last().cloned().unwrap_or((Coll::None, None)),
             Expr::Array(xs, ty) => {
                 if !xs.iter().all(|x| self.walk(x, &mut inner)) {
                     return false;
@@ -524,7 +535,16 @@ impl Deparser<'_> {
         if v.is_null() {
             return if showtype >= 0 { format!("NULL::{}", type_name(self.cat, ty)) } else { "NULL".into() };
         }
-        let text = crate::types::text::format_value(v, ty, &self.fmt);
+        // (Under set_transmission_modes' search_path, pg_catalog: a text search object
+        // outside it is written qualified.)
+        let ts = match (v, ty) {
+            (Value::Oid(o), DataType::Regconfig) => Some((*o, crate::catalog::tsearch::TsKind::Config)),
+            (Value::Oid(o), DataType::Regdictionary) => Some((*o, crate::catalog::tsearch::TsKind::Dict)),
+            _ => None,
+        };
+        let text = ts
+            .and_then(|(o, k)| self.cat.ts_display(k, o, &["pg_catalog".to_string()]))
+            .unwrap_or_else(|| crate::types::text::format_value(v, ty, &self.fmt));
         let (mut isfloat, mut isstring) = (false, false);
         let mut out = match ty {
             DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Oid | DataType::Float4 | DataType::Float8 | DataType::Numeric(_) => {
@@ -622,7 +642,7 @@ impl Deparser<'_> {
             Expr::ArrayOp { left, right, op, all } => {
                 format!("({} {} {} ({}))", self.expr(left), op.name, if *all { "ALL" } else { "ANY" }, self.expr(right))
             }
-            Expr::Case { operand, whens, else_, .. } => {
+            Expr::Case { operand, whens, else_, ty } => {
                 let mut s = "(CASE".to_string();
                 if let Some(o) = operand {
                     s.push_str(&format!(" {}", self.expr(o)));
@@ -634,8 +654,11 @@ impl Deparser<'_> {
                     };
                     s.push_str(&format!(" WHEN {w} THEN {}", self.expr(t)));
                 }
-                if let Some(x) = else_ {
-                    s.push_str(&format!(" ELSE {}", self.expr(x)));
+                // (The parser's implicit ELSE NULL is written, as deparseCaseExpr writes
+                // the defresult.)
+                match else_ {
+                    Some(x) => s.push_str(&format!(" ELSE {}", self.expr(x))),
+                    None => s.push_str(&format!(" ELSE NULL::{}", type_name(self.cat, ty))),
                 }
                 s.push_str(" END)");
                 s

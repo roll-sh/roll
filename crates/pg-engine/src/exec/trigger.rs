@@ -432,6 +432,10 @@ pub fn before_row_in(
 
 /// BEFORE ROW DELETE triggers: false skips the delete.
 pub fn before_delete(trigs: &[BoundTrigger], t: &Table, old: &Row, ctx: &ExecCtx) -> Result<bool> {
+    // (Pending batched inserts go first, so the triggers see their rows: ExecBRDeleteTriggers.)
+    if trigs.iter().any(|b| applies(b, true, true, tt::DELETE, ctx)) {
+        crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
+    }
     for bt in trigs
         .iter()
         .filter(|b| applies(b, true, true, tt::DELETE, ctx))

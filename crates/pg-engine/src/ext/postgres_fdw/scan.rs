@@ -67,7 +67,9 @@ pub fn spec_with(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate
     }
     // (The conditions in baserestrictinfo order, those the scan still checks: a clause a
     // join took over is out of its filter.)
-    let order: Vec<Expr> = if s.written.is_empty() {
+    // (create_foreignscan_plan's order_qual_clauses, which postgresGetForeignPlan's
+    // remote_exprs keep.)
+    let mut order: Vec<Expr> = if s.written.is_empty() {
         filter.clone()
     } else {
         let mut w = Vec::new();
@@ -76,6 +78,7 @@ pub fn spec_with(s: &ScanPlan, need: Option<&[bool]>, cat: &Catalog, fmt: &crate
         w.extend(filter.iter().filter(|f| !w.iter().any(|c| c.same_as(f))).cloned().collect::<Vec<_>>());
         w
     };
+    crate::sql::binder::optimize::order_by_cost(&mut order);
     let remote: Vec<Expr> = order.into_iter().filter(|c| d.shippable(c)).collect();
     let local: Vec<Expr> = filter.into_iter().filter(|c| !remote.iter().any(|r| r.same_as(c))).collect();
     let n = t.columns.len();

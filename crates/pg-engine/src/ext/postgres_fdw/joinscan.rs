@@ -32,7 +32,7 @@ impl JoinScan {
 
     /// conversion_error_callback: the column a value failed for, by the names the query
     /// knows it by.
-    fn col_context(&self, g: usize) -> String {
+    pub(super) fn col_context(&self, g: usize) -> String {
         let Some((b, k)) = self.bases.iter().find_map(|b| b.col(g).map(|k| (b, k))) else { return String::new() };
         let s = &b.scan;
         let Some(c) = s.table.columns.get(k) else { return String::new() };
@@ -84,6 +84,12 @@ impl JoinScan {
 }
 
 impl crate::ext::fdw::ForeignRelOps for JoinScan {
+    fn sort_only_cols(&self, fr: &ForeignRel) -> Vec<usize> {
+        if self.order.is_empty() {
+            return Vec::new();
+        }
+        self.tlist.iter().copied().filter(|g| !fr.out.contains(g) && self.order.iter().any(|(e, ..)| e.columns().contains(g))).collect()
+    }
     fn open(&self, fr: &ForeignRel, ctx: &ExecCtx) -> Result<BoxNode> {
         let (sql, params) = self.sql(ctx);
         let first = &self.bases[0].scan;

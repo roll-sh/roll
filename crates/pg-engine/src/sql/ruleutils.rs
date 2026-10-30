@@ -1388,8 +1388,9 @@ impl Deparser<'_, '_> {
                     self.keyword("WHEN ", 0, 0, 0);
                     match (operand, w) {
                         // Only the right side of the `CASE x WHEN v` comparison.
+                        // (An implicit coercion of the CaseTestExpr stripped.)
                         (Some(_), Expr::Call(_, args, _))
-                            if args.len() == 2 && matches!(args[0], Expr::CaseTest(_)) =>
+                            if args.len() == 2 && case_test_under(&args[0]) =>
                         {
                             self.expr(&args[1], false)?
                         }
@@ -1864,6 +1865,16 @@ impl Deparser<'_, '_> {
         }
         if a.args.is_empty() {
             self.buf.push('*');
+        } else if a.def.sig.spread
+            && let Some((last, rest)) = a.args.split_last()
+        {
+            // (aggvariadic: the variadic arguments' array, as written or as built.)
+            self.list(rest)?;
+            if !rest.is_empty() {
+                self.buf.push_str(", ");
+            }
+            self.buf.push_str("VARIADIC ");
+            self.expr(last, true)?;
         } else {
             self.list(&a.args)?;
         }
@@ -2455,5 +2466,14 @@ fn const_row(e: &Expr) -> Option<Value> {
             items.iter().map(const_row).collect::<Option<Vec<_>>>()?,
         ))),
         _ => None,
+    }
+}
+
+/// A CASE operand's placeholder under implicit coercions (strip_implicit_coercions).
+fn case_test_under(e: &Expr) -> bool {
+    match e {
+        Expr::CaseTest(_) => true,
+        Expr::Cast(x, _, _, false) | Expr::Relabel(x, _) => case_test_under(x),
+        _ => false,
     }
 }

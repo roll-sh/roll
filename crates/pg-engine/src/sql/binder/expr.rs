@@ -2087,7 +2087,7 @@ impl Binder<'_, '_> {
         }
         let res = match (resolve_binop(op, &l.ty(), &r.ty()), schema) {
             (Ok(res), None | Some("pg_catalog")) => res,
-            (Err(e), None) => return Err(with_pos(e, loc)),
+            (Err(e), None) => return Err(with_pos(self.qualify_op_error(e, op, &l.ty(), &r.ty()), loc)),
             (_, Some(sc)) => {
                 return Err(with_pos(
                     Error::new(code::UNDEFINED_FUNCTION, format!("operator does not exist: {} {sc}.{op} {}", l.ty().without_typmod().display(), r.ty().without_typmod().display()))
@@ -2791,6 +2791,17 @@ impl Binder<'_, '_> {
         Ok(e)
     }
 
+    /// A missing built-in operator's error naming its argument types as format_type_be does:
+    /// qualified when the search path doesn't see them (`public.user_enum ~~ unknown` in a
+    /// postgres_fdw session, whose search_path is pg_catalog).
+    fn qualify_op_error(&self, e: Error, op: &str, l: &DataType, r: &DataType) -> Error {
+        if e.code != code::UNDEFINED_FUNCTION || !e.message.starts_with("operator does not exist: ") {
+            return e;
+        }
+        let shown = |t: &DataType| self.cat.format_type(&t.without_typmod(), None, &self.ctx.search_path);
+        Error { message: format!("operator does not exist: {} {op} {}", shown(l), shown(r)), ..e }
+    }
+
     /// The `=` IS DISTINCT FROM and NULLIF compare with (make_distinct_op's
     /// make_op): an extension's or a user's operator as `oper` picks it, else the built-in;
     /// with the argument types it takes.
@@ -2798,7 +2809,7 @@ impl Binder<'_, '_> {
         if let Some((def, types)) = self.user_op_def("=", &l.ty(), &r.ty(), loc)? {
             return Ok((def, types));
         }
-        let res = resolve_binop("=", &l.ty(), &r.ty()).map_err(|e| with_pos(e, loc))?;
+        let res = resolve_binop("=", &l.ty(), &r.ty()).map_err(|e| with_pos(self.qualify_op_error(e, "=", &l.ty(), &r.ty()), loc))?;
         if let Some(names) = self.poly_domain_conflict(&res.def.args, &[l, r]) {
             return Err(with_pos(
                 Error::new(code::UNDEFINED_FUNCTION, format!("operator does not exist: {} = {}", names[0], names[1]))
@@ -5790,8 +5801,15 @@ impl Binder<'_, '_> {
             .position(|d| Arc::ptr_eq(d, &res.def))
             .map(|i| users[i].clone());
         let def = match &user {
-            Some(_) => Arc::new(crate::exec::agg::AggDef {
-                sig: res.def.clone(),
+            Some(u) => Arc::new(crate::exec::agg::AggDef {
+                // aggvariadic: a VARIADIC aggregate's arguments go as one array, built here
+                // or written with VARIADIC (not for `VARIADIC "any"`, which takes them as
+                // they are); ruleutils and deparse show it.
+                sig: if u.is_variadic() && !ordered_set && !matches!(u.args.last().map(|a| &a.1), Some(DataType::Any)) {
+                    Arc::new(FuncDef { spread: true, ..(*res.def).clone() })
+                } else {
+                    res.def.clone()
+                },
                 make: crate::exec::agg::user_accum,
                 kind: crate::exec::agg::AggKind::Normal,
                 skip_nulls: false,

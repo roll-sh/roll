@@ -183,6 +183,11 @@ pub struct Conn {
     /// transaction's START), sent ahead of the next query in its message: a round trip
     /// fewer each (`defer`).
     deferred: Vec<String>,
+    /// ReadyForQuery messages still to come that end the deferred commands sent in the same
+    /// write as an extended-protocol query (`pipeline_deferred`), not the query itself.
+    pipelined: usize,
+    /// The first error among those deferred commands' results, reported as the query's.
+    pipe_error: Option<PgResult>,
     /// The blocking read timeout the socket has now (None: not known), so that a read
     /// sets it only when it changes.
     read_timeout: Option<Duration>,
@@ -320,6 +325,8 @@ fn connect_one(info: &ConnInfo, env: &Env, host: &str, hostaddr: &str, port: u16
         bad: false,
         info: info.clone(),
         deferred: Vec::new(),
+        pipelined: 0,
+        pipe_error: None,
         read_timeout: None,
     };
     let user = conninfo::effective(info, "user").unwrap_or_else(|| env.default_user.clone());
@@ -574,7 +581,11 @@ impl Conn {
             }
             backend::Message::ReadyForQuery(r) => {
                 self.tx = tx_status(r.status());
-                self.ready = true;
+                if self.pipelined > 0 {
+                    self.pipelined -= 1;
+                } else {
+                    self.ready = true;
+                }
             }
             // Notices of the remote session are logged, not passed on (libpq's default
             // notice processor writes them to the server's stderr).
@@ -595,6 +606,8 @@ impl Conn {
         self.results.clear();
         self.cur = None;
         self.ready = false;
+        self.pipelined = 0;
+        self.pipe_error = None;
         self.error_message.clear();
         Ok(())
     }
@@ -648,21 +661,38 @@ impl Conn {
         self.sent(&buf)
     }
 
-    /// The deferred commands sent and their results read before an extended-protocol
-    /// query: an error result (the connection's), or None.
-    fn flush_deferred(&mut self, intr: Interrupt) -> crate::Result<Option<PgResult>> {
+    /// The deferred commands as a simple Query message at the head of `buf`, ahead of an
+    /// extended-protocol query sent in the same write: one round trip for both. Their
+    /// results are read through (`pipelined`), and the first error among them is the
+    /// query's result (`take_pipe_error`), as when they went in a round trip of their own.
+    fn pipeline_deferred(&mut self, buf: &mut BytesMut) -> Result<(), String> {
         if self.deferred.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
         let text = std::mem::take(&mut self.deferred).join("; ");
-        let r = self.exec(&text, intr)?;
-        Ok((!matches!(r.status, Status::CommandOk | Status::TuplesOk)).then_some(r))
+        frontend::query(&text, buf).map_err(|e| e.to_string())?;
+        self.pipelined = 1;
+        Ok(())
+    }
+
+    /// The query's result, unless a deferred command sent ahead of it failed.
+    fn take_pipe_error(&mut self, r: PgResult) -> PgResult {
+        match self.pipe_error.take() {
+            Some(e) => {
+                if let Some(f) = &e.error {
+                    self.error_message = f.text();
+                }
+                e
+            }
+            None => r,
+        }
     }
 
     /// PQsendQueryParams / PQsendQueryPrepared (`name` Some): parameters and results in text.
     pub fn send_query_params(&mut self, sql: &str, name: Option<&str>, params: &[Option<String>]) -> Result<(), String> {
         self.begin_send()?;
         let mut buf = BytesMut::new();
+        self.pipeline_deferred(&mut buf)?;
         let io = |e: std::io::Error| e.to_string();
         if name.is_none() {
             frontend::parse("", sql, std::iter::empty(), &mut buf).map_err(io)?;
@@ -696,13 +726,13 @@ impl Conn {
     /// PQprepare: parse `sql` as statement `name` with `nparams` parameters of unspecified
     /// types. The result is CommandOk or the error.
     pub fn prepare(&mut self, name: &str, sql: &str, intr: Interrupt) -> crate::Result<PgResult> {
-        if let Some(r) = self.flush_deferred(intr)? {
-            return Ok(r);
-        }
         if let Err(e) = self.begin_send() {
             return Ok(self.failed(e));
         }
         let mut buf = BytesMut::new();
+        if let Err(e) = self.pipeline_deferred(&mut buf) {
+            return Ok(self.failed(e));
+        }
         let _ = frontend::parse(name, sql, std::iter::empty(), &mut buf);
         frontend::sync(&mut buf);
         if let Err(e) = self.sent(&buf) {
@@ -712,7 +742,7 @@ impl Conn {
         while let Some(r) = self.get_result(intr)? {
             last = r;
         }
-        Ok(last)
+        Ok(self.take_pipe_error(last))
     }
 
     /// A result standing for a failure of the connection itself.
@@ -728,6 +758,13 @@ impl Conn {
         }
         loop {
             if let Some(r) = self.results.pop_front() {
+                // A deferred command's result, read through (`pipeline_deferred`).
+                if self.pipelined > 0 {
+                    if r.status == Status::FatalError && self.pipe_error.is_none() {
+                        self.pipe_error = Some(r);
+                    }
+                    continue;
+                }
                 return Ok(Some(r));
             }
             if self.ready {
@@ -758,6 +795,7 @@ impl Conn {
         self.bad = true;
         self.busy = false;
         self.ready = false;
+        self.pipelined = 0;
         self.tx = TxStatus::Unknown;
         self.failed(format!("{e}\n"))
     }
@@ -796,13 +834,11 @@ impl Conn {
 
     /// PQexecParams / PQexecPrepared.
     pub fn exec_params(&mut self, sql: &str, name: Option<&str>, params: &[Option<String>], intr: Interrupt) -> crate::Result<PgResult> {
-        if let Some(r) = self.flush_deferred(intr)? {
-            return Ok(r);
-        }
         if let Err(e) = self.send_query_params(sql, name, params) {
             return Ok(self.failed(e));
         }
-        self.last_result(intr)
+        let r = self.last_result(intr)?;
+        Ok(self.take_pipe_error(r))
     }
 
     fn last_result(&mut self, intr: Interrupt) -> crate::Result<PgResult> {
