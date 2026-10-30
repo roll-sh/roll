@@ -1691,6 +1691,41 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   BY over GROUP BY depends on autovacuum's statistics (autovacuum since round 22, agent 99);
   concurrent CREATE SCHEMA / TABLE of one name don't wait for each other (Flyway's
   concurrent migrates); a LATERAL "outer reference" error (EF Core); slow paths listed.
+- **Client suites round 5** (round 22, agent 100; tests/clients/STATUS.md "Round 5"):
+  - Numerics are decimal now: `types/decint.rs` (`DecInt`, base-10^9 limbs, two inline;
+    schoolbook and Karatsuba multiplication, Knuth division, Newton square roots) replaces
+    num-bigint in `Numeric` and `Var`. Text and binary output and input are linear, scaling by
+    10^k is a limb shift, rounding reads the dropped digit. Release build, server CPU per 20
+    statements: 100,000-digit output 2.33 s -> 0.05 s (PostgreSQL 0.14 s); 1M-row numeric sum
+    0.30 -> 0.21 s (PG 0.41); 200k numeric divisions 0.19 -> 0.10 s (PG 0.11); a 20,000 by
+    10,000-digit division 0.09 s (PG 0.07). Rows store values up to i128 as before; longer ones
+    under a new tag (`row::tag::NUMERIC_DEC`: sign and limbs), which older builds can't read.
+  - information_schema views run from PostgreSQL's definitions (`sys_views.tsv`) are kept per
+    catalog version like the Rust-generated ones (`system::is_sql_view`): jOOQ's codegen read
+    `parameters` once per routine (60-100 ms each), now generated once per catalog.
+  - Planner: `Expr::same_as` answers from shapes where they settle it (`same_shape`, checked
+    against the text in debug builds); `width_of` computes each clause's columns once.
+    pgjdbc's getImportedKeys over 9 catalogs plans in ~22 ms (was 45; PostgreSQL ~12 ms).
+    Left: catalog joins still plan 2-3x slower than PostgreSQL's (no single hot spot: path
+    building allocates), and a Sort over a join decides Incremental Sort by building the
+    EXPLAIN tree at run time (`pghash::presorted_keys`, ~10% of such queries).
+  - Found by PostgREST (new suite, 116 requests) and fixed: `schema.table.f` functional
+    notation (computed columns) and "column t.c does not exist" naming the relation alone;
+    ExecCheckXactReadOnly (`perms::check_xact_read_only`, `Perms::command`) for functions'
+    statements too, before they run; a column definition list's domains checked as the
+    function returns its rows (`SrfCall::domains`); FROM-clause functions make all their rows
+    before the first goes up (ExecMakeTableFunctionResult; series and unnest stream); an
+    index scan's equal keys in their HOT chains' roots' order (`scan::heap_order`).
+    Goldens `a100_client_round5`, `a100_client_round5b`.
+  - New suites: PostgREST v16.5, PgBouncer 1.24.1 in front of the server: 0 differences.
+    sqlc's "nullable select_sequence" was its analysis cache (keyed without the server):
+    each run now gets a fresh SQLCCACHE; sqlc matches PostgreSQL.
+  - Parse of a statement with many parameters (pgx's 65,535): `session::param_numbers` scans
+    the tree's Debug text as it is written instead of building it, and the parsed tree is
+    moved, not copied: peak 970 MB -> 700 MB. The rest is libpg_query's protobuf round trip.
+  - Server CPU per suite against PostgreSQL's (release, both sides): lower for 19 of 20
+    suites (STATUS.md's table); Kysely 10 s vs 7.6 s (catalog joins replanned and catalog
+    rows regenerated after each DDL).
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row

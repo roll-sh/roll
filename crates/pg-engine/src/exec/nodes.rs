@@ -2105,7 +2105,7 @@ impl FunctionScanNode {
             n: 0,
             materialize: calls
                 .iter()
-                .map(|c| c.body.is_some() || !matches!(&*c.func.name, "generate_series" | "unnest" | "generate_subscripts"))
+                .map(|c| c.body.is_some() || !matches!(c.func.name, "generate_series" | "unnest" | "generate_subscripts"))
                 .collect(),
             started: false,
             domains: calls

@@ -142,6 +142,99 @@ first run in a session (per-session catalog caches, `Catalog::rel_rowtype`'s deb
 integer converted to decimal, quadratic; PostgreSQL keeps base-10000 digits); jOOQ's codegen
 catalog queries 13 s vs 2.3 s; EF Core's suite 31 min vs 7 min.
 
+## Round 5 (round 22, agent 100)
+
+Release builds on both sides now (the engine `--release`, frame pointers on for perf),
+PostgreSQL the pinned image. Times are the server's CPU seconds over the whole suite (the
+engine process; for PostgreSQL every process of its container, exited backends included),
+a fairer measure than wall time on a loaded machine; PostgreSQL's wall times include each
+suite's first download.
+
+| suite | PostgreSQL CPU | engine CPU | engine wall | differences |
+|---|---:|---:|---:|---|
+| psycopg2 | 17.3 s | 9.4 s | 39.5 s | 0 (2 PG-only failures: notice order) |
+| lib/pq | 5.2 s | 0.6 s | 12.7 s | 0 |
+| pgx | 97.4 s | 45.0 s (34.7 s alone) | 59.7 s | 0 (PostgreSQL's pgxpool hangs 30 min, as in round 18); peak memory below |
+| node-postgres | 5.7 s | 2.2 s | 27.9 s | 0 (gh-issues/1105 passes in a release build) |
+| postgres.js | 2.2 s | 1.0 s | 19.8 s | 0 |
+| tokio-postgres | 6.1 s | 1.4 s | 16.3 s | 0 |
+| sqlx | 8.6 s | 2.2 s | 43.1 s | 0 |
+| GORM | 22.6 s | 21.5 s | 134.4 s | 0 |
+| Knex | 9.5 s | 6.2 s | 19.6 s | 1: a cancel with the pool exhausted (timing) |
+| Kysely | 7.6 s | 10.8 s | 16.6 s | 0 |
+| Sequelize | 138.4 s | 91.1 s | 142.9 s | 0 (an id with the run's timestamp) |
+| Laravel | 70.8 s | 44.6 s | 86.6 s | 0 |
+| asyncpg | 19.1 s | 14.0 s | 73.7 s | 1: test_executemany_timeout (timing) |
+| psycopg 3 | 59.2 s | 13.1 s | 84.1 s | 0 |
+| Drizzle | 97.3 s | 13.3 s | 34.3 s | 0 |
+| Prisma | 3.2 s | 1.9 s | 21.8 s | 0 |
+| Ecto SQL | 5.2 s | 3.2 s | 31.3 s | 0 |
+| Postgrex | 12.5 s | 6.0 s | 27.3 s | 2: an active-client timeout and a terminate during a query (timing; the wire transcript of a terminate matches) |
+| SeaORM | 34.4 s | 7.2 s | 48.3 s | 0 |
+| Diesel | 172.2 s | 47.3 s | 162.5 s | 0 |
+| jOOQ (statements' own time, log_min_duration_statement) | 1.17 s | 2.0 s | | 0 |
+| sqlc | | | 67 s | 0 (was 1: its analysis cache, below) |
+| Doctrine DBAL | | | 36 s | 1: renumbering pg_class.oid (open) |
+| PostgREST v16.5 (new) | 2.7 s | 1.0 s | 2.6 s | 0 (8 before the fixes below) |
+| PgBouncer 1.24.1 (new) | 0.7 s | 1.6 s | 4.0 s | 0 |
+
+New suites:
+- `postgrest`: PostgREST's static binary over its own fixture (postgrest.setup.sql): its schema
+  cache queries at startup, then 116 HTTP requests over a Unix socket (filters, embedding
+  through one-to-many, many-to-many, self and composite keys, computed columns, counts,
+  aggregates, the OpenAPI document, RPC, inserts, upserts, updates, deletes, errors), one id
+  per request with a hash of status, headers and body.
+- `pgbouncer`: PgBouncer 1.24.1 (Debian trixie's package, unpacked without root) in front of
+  the server: SCRAM through auth_query (pg_shadow read as postgres), transaction pooling with
+  protocol-level prepared statements re-prepared on other server connections, session pooling
+  with DISCARD ALL, statement pooling, COPY, cancels and statement timeouts through it,
+  server-side cursors, LISTEN / NOTIFY, eight clients over two server connections.
+
+Fixed (goldens `a100_client_round5`, `a100_client_round5b`):
+- Numerics are kept in decimal digits (`types/decint.rs`): output, input and scaling are
+  linear (100,000 digits: 46x faster than before, 3x PostgreSQL's), sums and divisions of
+  small values faster than both (HANDOFF has the numbers).
+- jOOQ's codegen: information_schema views run from PostgreSQL's definitions are kept per
+  catalog version (`parameters` was regenerated, 60-100 ms, for every routine), and the
+  planner compares expressions and counts join widths with less work. Its statements: 2.8 s
+  -> 2.0 s (PostgreSQL 1.17 s); left: catalog joins (pgjdbc's DatabaseMetaData) plan 2-3x
+  slower than PostgreSQL's, with no single hot spot.
+- sqlc's select_sequence: not the engine. sqlc caches a managed database's analysis of each
+  query (SQLCCACHE, keyed by its version, config, schema and query, not by server), so a run
+  replayed the answer an older engine gave. The suite now starts each run with an empty
+  cache: 1628 / 130 on both, 0 differences.
+- PostgREST: computed columns (`"api"."authors"."book_count"`, functional notation over a
+  schema-qualified relation) failed; "column authors.x does not exist" named the schema too;
+  an RPC call's UPDATE in a read-only transaction failed with "cannot execute this statement"
+  only when it changed a row, PostgreSQL's ExecCheckXactReadOnly refuses it before it runs
+  ("cannot execute UPDATE in a read-only transaction", a function's statements too); a
+  column definition list's domain (`json_to_record(..) AS _(isbn api.isbn)`) was checked
+  only where the column was read, so an INSERT took a sequence value before failing; a
+  FROM-clause function's rows went up before its later rows failed (PostgreSQL makes them all
+  first); an index scan returned a row updated in place (HOT) after its equal-keyed
+  neighbours, where the btree has it at its chain's root.
+
+Memory and the gaps left:
+- pgx's peak was the engine's 3.5 GB (its whole run; PostgreSQL's container 3.5 GB over all
+  suites): TestConnExec*MaxNumberOfParams, a VALUES of 65,535 parameters. Parse formatted the
+  whole parse tree as text twice to find its `$n` (`session::param_numbers` now scans the
+  text as it is written) and copied the tree twice (now moved): 970 MB -> 700 MB, 1.3 s
+  (PostgreSQL 0.4 s). What is left is libpg_query's protobuf of the tree and its decoding
+  (`sql::parse::parse_live`, 40% of the time): the parser's interface, not the engine.
+- Kysely (the one suite where the engine used more CPU): its introspection query (five
+  catalogs joined, run 385 times between DDL statements) takes 5 ms against PostgreSQL's
+  2.2 ms: 3 ms planning the join and the catalogs' rows regenerated after each DDL.
+- EF Core: PostgreSQL's run this round hit "too many clients already" (10,340 times: the
+  reference had connections left from earlier suites); its timing comparison wasn't redone.
+
+Left from round 4 and why:
+- Doctrine DBAL `testListTableColumnsOidConflictWithNonTableObject`: `UPDATE pg_attribute SET
+  attrelid = <a function's oid>` then `UPDATE pg_class SET oid = ...`. The engine's
+  pg_attribute rows are its tables' columns, so moving them to an oid no relation has is a
+  state it can't hold; renumbering a relation would have to move every row that names it.
+  Open (the test only checks the column list read before the renumbering).
+- Metadata replay, Hibernate testOverriddenPar: not re-run this round.
+
 ## Differences left, and why
 
 Contrib types (agent 39; binary send / receive and IS DISTINCT FROM since round 19, agent 53):

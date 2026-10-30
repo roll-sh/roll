@@ -1905,10 +1905,8 @@ impl Session {
                     })?
             });
         }
-        let stmt = stmts.first().and_then(|s| {
-            s.stmt.as_deref().map(|n| {
-                crate::sql::binder::ast::select_into_as_ctas(n).unwrap_or_else(|| n.clone())
-            })
+        let stmt = stmts.into_iter().next().and_then(|s| {
+            s.stmt.map(|n| crate::sql::binder::ast::select_into_as_ctas(&n).unwrap_or(*n))
         });
         let mut p = Prepared {
             sql: sql.to_string(),
@@ -1937,7 +1935,8 @@ impl Session {
             })?;
             p.plans.lock().fixed_result = Some(result_row(&[]));
         } else if p.is_query() {
-            let stmt = p.stmt.clone().unwrap();
+            // (Taken and put back: a statement of 65,535 VALUES rows is a big tree to copy.)
+            let stmt = p.stmt.take().unwrap();
             {
                 let cat = self.visible_catalog();
                 p.plans.lock().param_oids = param_oids
@@ -1980,7 +1979,9 @@ impl Session {
             };
             // The query as written types its parameters, before rules rewrite it (an INSERT
             // a DO INSTEAD NOTHING rule drops still has its $n).
-            if p.param_types.len() < max_param(&stmt) {
+            let used = param_numbers(&stmt);
+            let max = used.iter().copied().max().unwrap_or(0).max(0) as usize;
+            if p.param_types.len() < max {
                 let types = p.param_types.clone();
                 if let Ok(t) = self.with_ctx(&[], |ctx| {
                     let mut b = Binder::new(ctx, types);
@@ -1994,7 +1995,6 @@ impl Session {
             }
             // exec_parse_message: a parameter the query never reads has no type.
             if stmt.node.is_some() {
-                let used = param_numbers(&stmt);
                 for i in 0..p.param_types.len() {
                     if !used.contains(&(i as i32 + 1)) && param_oids.get(i).is_none_or(|o| *o == 0)
                     {
@@ -2005,9 +2005,11 @@ impl Session {
                     }
                 }
             }
+            p.stmt = Some(stmt);
         } else if let Some(NodeEnum::CallStmt(c)) = p.stmt.as_ref().and_then(inner).cloned() {
             // CALL: parameter types from the procedure's.
-            while p.param_types.len() < max_param(p.stmt.as_ref().unwrap()) {
+            let max = max_param(p.stmt.as_ref().unwrap());
+            while p.param_types.len() < max {
                 p.param_types.push(DataType::Unknown);
             }
             let types = p.param_types.clone();
@@ -2116,7 +2118,7 @@ impl Session {
                 ) => {
                     let cols = match self.bound(p, &stmt, &[]) {
                         Ok(b) => b.cols.clone(),
-                        Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
+                            Err(e) => self.analyzed_params(&stmt, &p.param_types, e)?.1,
                     };
                     Ok((!cols.is_empty()).then_some(cols))
                 }
@@ -3435,20 +3437,55 @@ fn max_param(n: &Node) -> usize {
 }
 
 /// The `$n` a statement reads. (pg_query's node walker skips some clauses, an INSERT's
-/// VALUES lists among them: the whole tree is read.)
+/// VALUES lists among them: the whole tree is read, through its Debug text, scanned as it is
+/// written: a VALUES of 65,535 parameters once made a text of hundreds of megabytes.)
 fn param_numbers(n: &Node) -> std::collections::HashSet<i32> {
+    const NEEDLE: &str = "ParamRef { number: ";
+    struct Scan {
+        buf: String,
+        found: std::collections::HashSet<i32>,
+    }
+    impl Scan {
+        /// The numbers of the complete matches in `buf`; keeps what may start one.
+        fn drain(&mut self, last: bool) {
+            let mut keep_from = self.buf.len().saturating_sub(NEEDLE.len() + 12);
+            let mut at = 0;
+            while let Some(i) = self.buf[at..].find(NEEDLE) {
+                let start = at + i + NEEDLE.len();
+                let digits = self.buf[start..].bytes().take_while(u8::is_ascii_digit).count();
+                if start + digits == self.buf.len() && !last {
+                    // (Its digits may go on in the next write.)
+                    keep_from = keep_from.min(at + i);
+                    break;
+                }
+                if let Ok(v) = self.buf[start..start + digits].parse() {
+                    self.found.insert(v);
+                }
+                at = start + digits;
+            }
+            keep_from = keep_from.max(at.min(self.buf.len()));
+            while !self.buf.is_char_boundary(keep_from) {
+                keep_from -= 1;
+            }
+            self.buf.drain(..keep_from);
+        }
+    }
+    impl std::fmt::Write for Scan {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.buf.push_str(s);
+            if self.buf.len() > 4096 {
+                self.drain(false);
+            }
+            Ok(())
+        }
+    }
     if n.node.is_none() {
         return Default::default();
     }
-    let dump = format!("{n:?}");
-    dump.split("ParamRef { number: ")
-        .skip(1)
-        .filter_map(|rest| {
-            rest.split(|c: char| !c.is_ascii_digit())
-                .next()
-                .and_then(|n| n.parse().ok())
-        })
-        .collect()
+    let mut scan = Scan { buf: String::new(), found: Default::default() };
+    let _ = std::fmt::Write::write_fmt(&mut scan, format_args!("{n:?}"));
+    scan.drain(true);
+    scan.found
 }
 
 /// About how many range table entries the planned statement has (relations, functions and
