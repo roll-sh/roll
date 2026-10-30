@@ -5659,7 +5659,21 @@ impl Ddl<'_, '_> {
                 waited = true;
             }
         }
-        if waited {
+        // The relations were locked above: what others committed while those locks were
+        // waited for (an autovacuum worker's statistics of the table) is seen too, as
+        // AcceptInvalidationMessages does at every lock, or the commit merged from before it
+        // and failed as a concurrent schema change. (Unless one of them is gone meanwhile:
+        // that still fails at commit.)
+        let rels_kept = || {
+            let cur = self.ctx.catalog();
+            roots.iter().filter(|r| r.0 == REL).all(|r| {
+                cur.tables.contains_key(&r.1)
+                    || cur.indexes.contains_key(&r.1)
+                    || cur.views.contains_key(&r.1)
+                    || cur.sequences.contains_key(&r.1)
+            })
+        };
+        if waited || (roots.iter().any(|r| r.0 == REL) && rels_kept()) {
             self.refresh_catalog()?;
         }
         // Objects initdb made are pinned (DROP_RESTRICT on them fails before anything else).

@@ -488,8 +488,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   reference, next to a run of the base it was rebased on. On the base of 59504ede (with
   d3a1d2a8's autovacuum) two full runs showed partition_join plan units of plain tables
   varying from run to run (15 units, then 3 others); a run of that base alone was clean;
-  runs on the next base were clean on both sides. Suspect autovacuum's ANALYZE timing if
-  partition_join units come and go.
+  runs on the next base were clean on both sides. (Cause found and fixed in round 22 by agent
+  109: an ANALYZE that waited for a lock lost the work it had done before; see Autovacuum.)
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
@@ -2064,6 +2064,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   the simple protocol, its errors print tersely). `tests/wire_waits.rs` ends every kind of
   wait by statement_timeout, lock_timeout, SET LOCAL lock_timeout and a CancelRequest, over the
   simple and the extended protocol, against PostgreSQL's transcript (`wire_waits.expected`).
+  (It failed about 1 run in 12 under load, agents 85 / 97 / 109: a client that read a FATAL
+  sent its next query while the session tore down, the socket closed with it unread and the
+  client saw a reset. The server now shuts the write side down right after the last message,
+  as a backend's exit does: 50 of 50 runs pass, round 22, agent 109.)
   Fixed: a SERIALIZABLE DEFERRABLE safe-snapshot wait ignored statement_timeout and lost an
   extended-protocol cancel; a statement's timeout restarted with each of its phases (waits are
   armed once per statement, `exec::arm_statement_waits`); a cancel arriving while idle in a
@@ -2154,6 +2158,54 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     Verified: crate tests, clippy, difftest smoke, isolation 121 / 122 (1,647 / 1,648), full
     regress runs (debug, private references) 51,148 / 51,150 with 0 units changed, for each
     batch.
+  - **Regress determinism with autovacuum** (round 22, agent 109). Agent 94's partition_join
+    units that came and went, a "could not serialize access due to concurrent schema change"
+    on a DROP in triggers (agent 95) and on `VACUUM FULL vactst` had one cause:
+    `Ddl::refresh_catalog`, which a command calls after a lock wait to see what other
+    transactions committed meanwhile, took the committed catalog without the command's own
+    edits so far and kept the old merge base. So an `ANALYZE prt2_l` (the parent first, then
+    each partition, waiting for one an autovacuum worker held) or `ANALYZE sb_1, sb_2` during
+    which a worker committed lost the relations it had done before (the parent's reltuples
+    -1 and no inherited pg_stats; sb_1 at reltuples 0) and the plans changed; and a command
+    that then changed a record the worker had also changed (its statistics) merged from the
+    stale base at commit and failed. It now merges the command's edits onto the refreshed
+    catalog and moves the base (`catmerge::merge`, as `absorb_nested` does). DROP of a
+    relation didn't refresh at all after its relation locks (only after other objects'):
+    `DROP TABLE mcv_lists_partial` in stats_ext, waiting for a worker's VACUUM ANALYZE of
+    it, deleted the statistics record the worker had just changed and failed at commit; it
+    refreshes now (unless a relation is gone meanwhile). Test `tests/autovacuum.rs`
+    `an_analyze_that_waits_keeps_what_it_did_before`. Left: other DDL that locks a relation
+    and then writes its statistics without refreshing (CREATE INDEX's index_update_stats,
+    TRUNCATE) can still fail the same way if a worker commits that table's statistics while
+    the lock is waited for (not seen in any run; a general refresh in `note_lock` would
+    have to re-read every object a command copied before its locks). Not autovacuum's
+    triggering or its statistics: an auto-ANALYZE's are a manual one's (fixed-seed sample),
+    and the re-analyses right after a test's own ANALYZE are PostgreSQL's too (the backend's
+    unflushed counts land after the ANALYZE reset n_mod_since_analyze).
+  - How it was found: 7 full runs at 2f5a4c6f with autovacuum on and 5 with it off were all
+    51,148 / 51,150 with no unit varying (the race needs a worker commit inside a
+    multi-relation ANALYZE, rare at a 60 s naptime). A full run with `autovacuum_naptime = 1`
+    (a wrapper adding `-c autovacuum_naptime=1` as `PGREGRESS_ENGINE_BIN`) reproduced it:
+    51,140, partition_join 114 / 158 / 202 / 207 / 237 / 238, stats_ext 867, vacuum 78. With
+    the fix the same stress run is 51,148 / 51,150, 0 changed. `RUST_LOG=pg_engine::autovacuum=debug`
+    logs each table's counts and thresholds and each worker's CPU time.
+  - Launcher scheduling: counts kept for the idle timeout tell the launcher "due in 10 s";
+    when the backend's next statement flushed them, the launcher wasn't told again
+    (`av_noted` was a flag), so a visit waited up to 10 s past its naptime tick. It is told
+    again whenever the changes come sooner, and the idle timeout runs from the first count
+    kept (PGSTAT_IDLE_INTERVAL - (now - pending_since)), not from the last.
+  - Measured. Autovacuum's CPU in a full debug regress run (default settings, the workers'
+    getrusage summed, `Launcher::cpu_ns`): 7.6-10.9 s over 31-35 worker visits and 102-109
+    tables in a 35-38 min run; with naptime 1 s, 16.8 s over 633 visits and 186 tables. pgbench
+    (release, -s 10 -c 8 -j 4 -T 90, -M prepared, naptime 10 s, server on 4 CPUs, alternating
+    rounds on a host at load ~22 of 36): base 3,696 / 3,441 tps, 0.77 / 0.88 ms CPU per
+    transaction, peak RSS 521 / 470 MB, 12-15 autovacuums and 14-16 autoanalyzes; with the
+    fix 3,786 / 3,603 tps, 0.67 / 0.84 ms, 493 / 479 MB, 25-26 and 29, as PostgreSQL's 22-25
+    and 27-29 (the visits no longer wait for the 10 s idle timeout).
+  - Verified: crate tests (deep_input too), clippy (no new warnings), difftest smoke,
+    isolation 121 / 122 (1,647 / 1,648), wire_waits 50 / 50 runs, 5 consecutive full
+    regress runs (debug, private references, autovacuum on) at 51,148 / 51,150 with no unit
+    varying, and the naptime-1 s stress run at 51,148 / 51,150.
 - **Index access at index cost** (round 22, agent 103; BENCH.md "Index access"):
   - Btree scans read only what they return. A backward scan reads its ranges in descending
     key order (`Txn::scan_rev`, `scan::StoreIter`) as far as rows are asked for (it used to

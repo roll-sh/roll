@@ -218,6 +218,21 @@ fn an_analyze_that_waits_keeps_what_it_did_before() {
         ),
         ["aw_p | t | 2", "aw_p1 | f | 2", "aw_p2 | f | 2"]
     );
+    // A DROP that waited for a table another transaction was analyzing sees its statistics
+    // (it merged from before them at commit: "could not serialize access due to concurrent
+    // schema change", stats_ext's DROP TABLE mcv_lists_partial after an autovacuum).
+    rows(&mut s, "INSERT INTO aw_p SELECT i, i % 5 FROM generate_series(100, 199) i");
+    rows(&mut s, "BEGIN; ANALYZE aw_p2");
+    let e2 = e.clone();
+    let dropper = std::thread::spawn(move || {
+        let mut s2 = e2.connect(3, "postgres", "postgres", "t").unwrap();
+        raw(&mut s2, "DROP TABLE aw_p2")
+    });
+    std::thread::sleep(Duration::from_millis(1000));
+    rows(&mut s, "COMMIT");
+    let dropped = dropper.join().unwrap();
+    assert!(!dropped.contains("ERROR"), "{dropped}");
+    assert_eq!(rows(&mut s, "SELECT count(*) FROM pg_class WHERE relname = 'aw_p2'"), ["0"]);
     drop(s);
     e.shutdown();
 }
