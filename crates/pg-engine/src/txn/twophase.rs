@@ -272,6 +272,45 @@ impl<'a> Dec<'a> {
 
 const MAGIC: &[u8] = b"R2PC\x01";
 
+/// State record `b` without the writes whose keys `drop` picks (None: it has none), the rest
+/// as it was. After a crash, unlogged relations are reset before prepared transactions are
+/// recovered, and their writes to those relations go with the relations' contents, as in
+/// PostgreSQL: COMMIT PREPARED then finds nothing of them to apply.
+pub fn without_writes(b: &[u8], drop: impl Fn(&[u8]) -> bool) -> Result<Option<Vec<u8>>> {
+    let mut d = Dec::new(b);
+    if d.take(MAGIC.len())? != MAGIC {
+        return Err(corrupt());
+    }
+    d.str()?;
+    d.take(8 + 8 + 4 + 4)?;
+    d.str()?;
+    d.u8()?;
+    for _ in 0..d.u64()? {
+        d.u64()?;
+    }
+    let head = d.at;
+    let n = d.u64()?;
+    let mut kept = Vec::new();
+    for _ in 0..n {
+        let k = d.bytes()?;
+        let v = d.opt_bytes()?;
+        if !drop(k) {
+            kept.push((k, v));
+        }
+    }
+    if kept.len() as u64 == n {
+        return Ok(None);
+    }
+    let mut e = Enc(b[..head].to_vec());
+    e.u64(kept.len() as u64);
+    for (k, v) in kept {
+        e.bytes(k);
+        e.opt_bytes(v);
+    }
+    e.0.extend_from_slice(&b[d.at..]);
+    Ok(Some(e.0))
+}
+
 /// Past every key (a key's first bytes are its relation's oid).
 const ALL_END: &[u8] = &[0xff; 16];
 

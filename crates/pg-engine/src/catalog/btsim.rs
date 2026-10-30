@@ -31,6 +31,27 @@ pub struct Key {
 }
 
 impl Key {
+    /// Its one allocation as it is (`sizing`'s models kept across a restart).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+
+    /// A key from `as_bytes`, when they hold one.
+    pub fn from_bytes(buf: Vec<u8>) -> Option<Key> {
+        let (&natts, &nsizes) = (buf.first()?, buf.get(1)?);
+        let data = 2 + 2 * (natts as usize + nsizes as usize);
+        let at = |i: usize| buf.get(2 + 2 * i..4 + 2 * i).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+        let mut prev = 0;
+        for a in 0..natts as usize {
+            let end = at(a)?;
+            if end < prev {
+                return None;
+            }
+            prev = end;
+        }
+        (data <= buf.len() && data + prev == buf.len()).then(|| Key { buf: buf.into() })
+    }
+
     /// `atts`: per-attribute encodings; `sizes[k]`: the MAXALIGNed index tuple size
     /// holding the first k+1 attributes.
     pub fn new(atts: &[Vec<u8>], sizes: &[usize]) -> Key {
@@ -336,6 +357,12 @@ impl Btree {
 
     pub fn nblocks(&self) -> u32 {
         self.pages.len() as u32
+    }
+
+    /// Every leaf entry's key and heap TID (each TID of a posting list), in index order.
+    pub fn entries(&self) -> impl Iterator<Item = (&Arc<Key>, Tid)> {
+        let leaves = self.leaf_pages(None, None).into_iter().filter_map(|b| self.pages.get(b as usize)?.as_ref());
+        leaves.flat_map(|p| p.items.iter()).flat_map(|it| it.tids.iter().map(move |t| (&it.key, *t)))
     }
 
     /// pgstatindex's walk over the pages after the metapage: (root block, internal pages,

@@ -673,19 +673,24 @@ impl Engine {
         self.repl.attach(&db);
         // After a crash, unlogged relations come back empty (before prepared transactions
         // take their locks again).
+        let mut reset = Vec::new();
         if self.unlogged_reset.lock().remove(&entry.oid) {
-            let n = db.reset_unlogged()?;
-            if n > 0 {
-                info!(database = %entry.name, relations = n, "reset unlogged relations");
+            reset = db.reset_unlogged()?;
+            if !reset.is_empty() {
+                info!(database = %entry.name, relations = reset.len(), "reset unlogged relations");
             }
         }
-        // Its prepared transactions, with their locks, before any session can see it.
-        if db.recover_prepared()? == 0 {
+        // Its prepared transactions, with their locks, before any session can see it (less
+        // their writes to the relations just reset).
+        if db.recover_prepared(&reset)? == 0 {
             let mut r = self.registry.lock();
             if r.prepared_dbs.remove(&entry.oid) {
                 let _ = self.save(&r);
             }
         }
+        // The models its last clean close kept (valid until the next one; dropped now if
+        // there was none).
+        crate::exec::sizing::kept::open(&db, &reset)?;
         info!(database = %entry.name, "opened database");
         open.dbs.insert(entry.oid, db.clone());
         Ok(db)
@@ -960,7 +965,8 @@ impl Engine {
             let ready = self
                 .ensure_synced(&db)
                 .and_then(|_| self.upgrade_index_keys(&db))
-                .and_then(|_| self.upgrade_storage(&db));
+                .and_then(|_| self.upgrade_storage(&db))
+                .and_then(|_| self.repair_tids(&db));
             let open = self.open.lock();
             if !open.dbs.get(&entry.oid).is_some_and(|d| Arc::ptr_eq(d, &db)) {
                 continue;
@@ -1071,6 +1077,7 @@ impl Engine {
             if let Err(e) = db.persist_sequences() {
                 warn!(database = %db.name, error = %e, "saving sequence positions failed");
             }
+            crate::exec::sizing::kept::persist(&db);
             match db.store.close() {
                 Ok(()) => info!(database = %db.name, "closed idle database"),
                 Err(e) => warn!(database = %db.name, error = %e, "closing idle database failed"),
@@ -1235,6 +1242,45 @@ impl Engine {
             info!(database = %db.name, tables = keyed.len(), rows, "re-keyed primary-keyed tables for the current storage format");
         }
         Self::set_storage_format(db, crate::storage::keys::STORAGE_FORMAT)
+    }
+
+    /// Rows that builds before 9a6faba8 stored with a TID another row of their table holds
+    /// (or with none) get one of their own (`sizing::duplicate_tids`), so ctids stay unique
+    /// and the table's heap model is laid out at its rows' stored TIDs. Once per database,
+    /// before its first session; a database checked (or new) has a key saying so and reads
+    /// nothing again.
+    fn repair_tids(&self, db: &Arc<Database>) -> Result<()> {
+        use crate::exec::sizing;
+        if sizing::tids_checked(db)? {
+            return Ok(());
+        }
+        let _g = self.index_upgrade.lock();
+        if sizing::tids_checked(db)? {
+            return Ok(());
+        }
+        let tables: Vec<u32> = db.catalog().tables.values().filter(|t| !t.temporary).map(|t| t.oid).collect();
+        let mut moved = 0;
+        for oid in tables {
+            let fix = sizing::duplicate_tids(db, oid)?;
+            for batch in fix.chunks(10_000) {
+                Self::upgrade_batch(db, &mut |txn| {
+                    for (k, tid) in batch {
+                        if let Some(b) = txn.get(k)? {
+                            txn.put(k.clone(), crate::exec::scan::with_tid(&b, *tid)?)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            if !fix.is_empty() {
+                moved += fix.len();
+                sizing::dropped(&[oid], db);
+            }
+        }
+        if moved > 0 {
+            info!(database = %db.name, rows = moved, "gave rows stored with another row's TID one of their own");
+        }
+        sizing::set_tids_checked(db)
     }
 
     /// Run one batch of the storage upgrade in a transaction of its own (`f` writes it),
@@ -1625,6 +1671,37 @@ impl Engine {
         Ok((cat.storage_format, keyed))
     }
 
+    /// Testing the TID repair (`repair_tids`): store the last `n` rows of `table` (in storage
+    /// order) with the TIDs of its first `n`, as builds before 9a6faba8 could, and forget
+    /// that the database was checked (`n` 0: only count the rows stored with a TID another
+    /// holds). Returns that count, before the change.
+    #[doc(hidden)]
+    pub fn duplicate_tids_for_test(&self, dbname: &str, table: &str, n: usize) -> Result<usize> {
+        use crate::exec::{scan, sizing};
+        let entry = self
+            .entry(dbname)
+            .ok_or_else(|| internal(format!("no database {dbname}")))?;
+        let db = self.open_db(&entry)?;
+        let oid = (db.catalog().tables.values().find(|t| t.name == table).map(|t| t.oid))
+            .ok_or_else(|| internal(format!("no table {table}")))?;
+        let bad = sizing::duplicate_tids(&db, oid)?.len();
+        if n == 0 {
+            return Ok(bad);
+        }
+        let start = crate::storage::keys::index_prefix(oid, 0);
+        let end = crate::storage::keys::prefix_end(&start);
+        let rows: Vec<(Vec<u8>, bytes::Bytes)> = db.store.scan(&start, &end, db.store.visible_ts()).collect::<Result<_>>()?;
+        let mut writes = Vec::new();
+        for ((k, v), (_, w)) in rows[rows.len() - n..].iter().zip(&rows[..n]) {
+            let tid = scan::stored_tid(w).ok_or_else(|| internal("a row without a TID"))?;
+            writes.push((k.clone(), Some(bytes::Bytes::from(scan::with_tid(v, tid)?))));
+        }
+        db.store.commit(writes, |_| Ok(()))?;
+        sizing::forget_tids_checked(&db)?;
+        sizing::dropped(&[oid], &db);
+        Ok(bad)
+    }
+
     /// Testing the upgrade: `dbname`'s recorded index key format.
     #[doc(hidden)]
     pub fn index_key_format_for_test(&self, dbname: &str) -> Result<u32> {
@@ -1664,6 +1741,11 @@ impl Engine {
             crate::exec::sizing::persist_estimates(&db);
             if let Err(e) = db.persist_sequences() {
                 warn!(database = %db.name, error = %e, "saving sequence positions failed");
+            }
+            // (Not while a terminated session may still commit: its database's models are
+            // laid out from its rows at the next open, as after a crash.)
+            if db.sessions.load(Ordering::Acquire) == 0 {
+                crate::exec::sizing::kept::persist(&db);
             }
             if let Err(e) = db.store.close() {
                 warn!(database = %db.name, error = %e, "close failed");

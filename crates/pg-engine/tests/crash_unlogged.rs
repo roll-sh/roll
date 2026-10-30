@@ -14,6 +14,7 @@ fn open(dir: &Path) -> std::sync::Arc<Engine> {
         sync: true,
         idle_close: Duration::from_secs(600),
         superuser: "postgres".into(),
+        max_prepared_transactions: 5,
         ..Default::default()
     })
     .unwrap()
@@ -87,6 +88,74 @@ fn unlogged_relations_reset_after_a_crash() {
     let eng = open(tmp.path());
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     assert_eq!(one(&mut s, "SELECT count(*) FROM u"), "[[Int8(1)]]");
+    drop(s);
+    eng.shutdown();
+}
+
+/// The child of `prepared_writes_to_unlogged_tables_lost_in_a_crash`: a prepared transaction
+/// that wrote to an unlogged and a logged table, then SIGKILL.
+#[test]
+fn crash_unlogged_prepared_child() {
+    let Ok(dir) = std::env::var("CRASH_UNLOGGED_PREPARED_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    let eng = open(dir);
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE UNLOGGED TABLE pu (id int PRIMARY KEY, v int);
+         CREATE TABLE pl (id int PRIMARY KEY, v int);
+         INSERT INTO pu SELECT g, g FROM generate_series(1, 10) g;
+         INSERT INTO pl SELECT g, g FROM generate_series(1, 10) g",
+    )
+    .unwrap();
+    drop(s);
+    eng.shutdown();
+    drop(eng);
+    let eng = open(dir);
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "BEGIN;
+         INSERT INTO pu SELECT g, g FROM generate_series(11, 15) g;
+         UPDATE pu SET v = -1 WHERE id = 3;
+         DELETE FROM pu WHERE id = 4;
+         INSERT INTO pl SELECT g, g FROM generate_series(11, 15) g;
+         UPDATE pl SET v = -1 WHERE id = 3;
+         PREPARE TRANSACTION 'pu1'",
+    )
+    .unwrap();
+    std::fs::write(dir.join("ready"), "").unwrap();
+    let me = std::process::id().to_string();
+    std::process::Command::new("kill").args(["-9", &me]).status().unwrap();
+    unreachable!("still alive after SIGKILL");
+}
+
+/// A prepared transaction's writes to an unlogged table go with the table's contents when a
+/// crash resets it: COMMIT PREPARED applies only its other writes (checked against PostgreSQL
+/// 18.6 killed with SIGKILL), also after a clean restart in between.
+#[test]
+fn prepared_writes_to_unlogged_tables_lost_in_a_crash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "crash_unlogged_prepared_child", "--nocapture", "--test-threads=1"])
+        .env("CRASH_UNLOGGED_PREPARED_DIR", tmp.path())
+        .output()
+        .unwrap();
+    assert!(tmp.path().join("ready").exists(), "{}", String::from_utf8_lossy(&out.stderr));
+    let eng = open(tmp.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    assert_eq!(one(&mut s, "SELECT count(*) FROM pu"), "[[Int8(0)]]");
+    assert_eq!(one(&mut s, "SELECT gid FROM pg_prepared_xacts"), "[[Text(\"pu1\")]]");
+    drop(s);
+    eng.shutdown();
+    drop(eng);
+    let eng = open(tmp.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query("COMMIT PREPARED 'pu1'").unwrap();
+    assert_eq!(one(&mut s, "SELECT count(*) FROM pu"), "[[Int8(0)]]");
+    assert_eq!(one(&mut s, "SELECT count(*), sum(v) FROM pl"), "[[Int8(15), Int8(116)]]");
+    s.query("INSERT INTO pu VALUES (11, 1), (3, 3)").unwrap();
+    assert_eq!(one(&mut s, "SELECT count(*) FROM pu"), "[[Int8(2)]]");
     drop(s);
     eng.shutdown();
 }

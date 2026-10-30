@@ -256,3 +256,38 @@ fn ctids_survive_a_restart() {
     drop(s);
     eng.shutdown();
 }
+
+/// A database a build before 9a6faba8 wrote can hold rows stored with another row's TID.
+/// The first session after the database opens gives each its own, once; the ctids are then
+/// unique, fetch their rows and stay across a restart.
+#[test]
+fn old_duplicate_ctids_repaired_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let eng = open(tmp.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    setup(&mut s);
+    let mut rng = Rng(0x0dd_c71d);
+    for i in 0..300 {
+        step(&mut s, &mut rng, i, true);
+    }
+    drop(s);
+    assert_eq!(eng.duplicate_tids_for_test("postgres", "t", 0).unwrap(), 0);
+    eng.duplicate_tids_for_test("postgres", "t", 40).unwrap();
+    assert_eq!(eng.duplicate_tids_for_test("postgres", "t", 0).unwrap(), 40);
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    assert_eq!(eng.duplicate_tids_for_test("postgres", "t", 0).unwrap(), 0);
+    check_unique(&mut s, "after the repair");
+    for i in 0..200 {
+        step(&mut s, &mut rng, 300 + i, true);
+    }
+    check_unique(&mut s, "200 transactions after the repair");
+    let after = ctids(&mut s);
+    drop(s);
+    eng.shutdown();
+    drop(eng);
+    let eng = open(tmp.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    assert!(ctids(&mut s) == after, "rows moved across a restart");
+    drop(s);
+    eng.shutdown();
+}

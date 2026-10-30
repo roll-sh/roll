@@ -23,6 +23,8 @@ use crate::types::{DataType, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod kept;
+
 /// Tables with more row versions than this aren't modelled (their sizes are estimated).
 const MAX_VERSIONS: usize = 400_000;
 
@@ -89,6 +91,14 @@ pub struct RelFiles {
     /// The dead tuples the last VACUUM of each table had to keep (what it reports as the
     /// table's dead tuples), until reported.
     vacuum_kept: HashMap<u32, i64>,
+    /// Tables whose models the last clean close kept (`kept`), not laid out yet.
+    kept: HashSet<u32>,
+    /// Tables with a kept record in the store.
+    kept_stored: HashSet<u32>,
+    /// The kept records loaded, by table (a hash: what the close needn't write again).
+    kept_hash: HashMap<u32, u64>,
+    /// The database's stored TIDs were checked (`tids_checked`).
+    tids_checked: bool,
 }
 
 /// A BRIN index's summarized page ranges: those its build covered (the heap's pages then,
@@ -1251,12 +1261,15 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         set_estimated(db, t, Some(EstHeap { pages, room: 0, reusable: 0 }));
         return Ok(false);
     }
+    // A table first used since its database last closed cleanly: the models that close
+    // kept, without reading the rows (`kept`).
+    let restore = if cold { kept::take(t, &missing, ctx) } else { None };
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
     // (Read up to the limit; a bigger table's rest is only measured, a row at a time.)
     let mut raw: Vec<(Vec<u8>, bytes::Bytes)> = Vec::new();
     let mut est = None;
-    {
+    if restore.is_none() {
         // (The scan holds no borrow of the transaction: `layout` may take one.)
         let mut it = ctx.txn.borrow().scan(&start, &end);
         for r in it.by_ref() {
@@ -1310,24 +1323,40 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         raw = tagged.into_iter().map(|x| x.2).collect();
     }
     // (Each row decoded in turn, its layout and index keys taken, then dropped: the model of
-    // a table at the limit's size doesn't hold every row decoded at once.)
+    // a table at the limit's size doesn't hold every row decoded at once. An index entry
+    // names its row by its place in `rows`, or in `keys` when the heap is modelled already.)
     let mut lens = Vec::new();
+    let mut keys = Vec::new();
     let mut exts = Vec::new();
-    let mut built: Vec<(u32, BtreeOpts, Vec<(Arc<Key>, Vec<u8>)>)> = missing
+    let mut built: Vec<(u32, BtreeOpts, Vec<(Arc<Key>, usize)>)> = missing
         .iter()
         .map(|bix| (bix.index.oid, btree_opts(bix).unwrap_or_else(default_opts), Vec::new()))
         .collect();
-    for (k, v) in raw {
+    for (i, (k, v)) in raw.into_iter().enumerate() {
         let r = decode_table_row(t, &v)?;
-        if heap_missing {
-            let (len, e) = layout(t, &r, ctx, &HashSet::new());
-            lens.push((k.clone(), len));
-            exts.push((k.clone(), e));
-        }
         for (bix, (_, _, ents)) in missing.iter().zip(&mut built) {
             if let Some(vals) = index_values(bix, &r, ctx)? {
-                ents.push((index_key(t, bix, vals, &r, ctx), k.clone()));
+                ents.push((index_key(t, bix, vals, &r, ctx), i));
             }
+        }
+        if heap_missing {
+            let (len, e) = layout(t, &r, ctx, &HashSet::new());
+            if !e.is_empty() {
+                exts.push((k.clone(), e));
+            }
+            lens.push((k, len));
+        } else {
+            keys.push(k);
+        }
+    }
+    let mut rows: Vec<(Vec<u8>, usize, Option<Tid>)> =
+        lens.into_iter().zip(stored).map(|((k, len), tid)| (k, len, tid)).collect();
+    if let Some(r) = restore {
+        rows = r.rows;
+        exts = r.exts;
+        let mut kept = r.btrees;
+        for (oid, _, ents) in &mut built {
+            *ents = kept.remove(oid).unwrap_or_default();
         }
     }
     // Prepared transactions' writes (a restart recovers them before any model exists): each
@@ -1352,14 +1381,28 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     if heap_missing && exts.iter().any(|(_, e)| !e.is_empty()) {
         mark_tracked(db.instance, t.oid);
     }
+    // Each row's TID in the heap laid out here (None: modelled already, by keys).
+    let mut placed: Option<Vec<Tid>> = None;
     if heap_missing && !rf.heaps.contains_key(&t.oid) {
         // (Every row where its stored TID says: rows never move when a database reopens, nor
         // when a rolled-back TRUNCATE or rewrite gives the table its old storage back.)
-        let rows = lens.into_iter().zip(stored).map(|((k, len), tid)| (k, len, tid)).collect();
-        let (mut h, mut moved) = heapsim::restored(heap_fillfactor(t), rows);
+        let (mut h, mut moved, mut tids) = heapsim::restored(heap_fillfactor(t), std::mem::take(&mut rows));
+        // (A row a prepared transaction rewrote: its entries point at the version it made, as
+        // its key does.)
+        let mut remap = HashMap::new();
         for (xid, k, new) in pending {
-            moved |= h.restore_pending(xid, k, new);
+            let old = h.tid_of(&k);
+            moved |= h.restore_pending(xid, k.clone(), new);
+            if let (Some(o), Some(n)) = (old, h.tid_of(&k))
+                && o != n
+            {
+                remap.insert(o, n);
+            }
         }
+        if !remap.is_empty() {
+            tids.iter_mut().for_each(|t| *t = remap.get(t).copied().unwrap_or(*t));
+        }
+        placed = Some(tids);
         h.unstamped = moved;
         // (The first model of the table since the database was opened: the pages its
         // last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
@@ -1378,7 +1421,13 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         }
         let ents: Vec<(Arc<Key>, Tid)> = ents
             .into_iter()
-            .filter_map(|(key, k)| heap.tid_of(&k).map(|tid| (key, tid)))
+            .filter_map(|(key, i)| {
+                let tid = match &placed {
+                    Some(tids) => Some(tids[i]),
+                    None => heap.tid_of(keys.get(i).unwrap_or_else(|| &rows[i].0)),
+                };
+                tid.map(|tid| (key, tid))
+            })
             .collect();
         rf.btrees.insert(oid, Btree::build(opts, ents));
     }
@@ -1396,6 +1445,7 @@ fn default_opts() -> BtreeOpts {
 
 /// Forget a table's files (`keep_untracked`: unless it is too big to model).
 fn forget(rf: &mut RelFiles, t: &Table) {
+    kept::forget(rf, t.oid);
     rf.dropped.insert(t.oid);
     rf.heaps.remove(&t.oid);
     for i in t.indexes.iter().chain(&t.pkey_index) {
@@ -2930,6 +2980,7 @@ fn gin_cleaned(t: &Table, only: Option<u32>, ctx: &ExecCtx) -> Result<()> {
 pub fn dropped(oids: &[u32], db: &Database) {
     let mut rf = db.relfiles.write();
     for o in oids {
+        kept::forget(&mut rf, *o);
         rf.heaps.remove(o);
         rf.btrees.remove(o);
         rf.untracked.remove(o);
@@ -3027,6 +3078,88 @@ pub fn in_heap_order<T>(t: &Table, rows: &mut Vec<(Vec<u8>, T)>, ctx: &ExecCtx) 
     });
     let mut slots: Vec<Option<(Vec<u8>, T)>> = rows.drain(..).map(Some).collect();
     rows.extend(tagged.into_iter().filter_map(|(_, i)| slots[i].take()));
+}
+
+/// Present once a database's stored TIDs were checked (`duplicate_tids`): not a format
+/// change (older builds ignore the key).
+const TIDS_CHECKED: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0x25];
+
+/// Whether the database's stored TIDs were checked (kept in memory after the first look).
+pub fn tids_checked(db: &Database) -> Result<bool> {
+    if db.relfiles.read().tids_checked {
+        return Ok(true);
+    }
+    let checked = db.store.get(TIDS_CHECKED, db.store.visible_ts())?.is_some();
+    db.relfiles.write().tids_checked |= checked;
+    Ok(checked)
+}
+
+pub fn set_tids_checked(db: &Database) -> Result<()> {
+    db.store.commit(vec![(TIDS_CHECKED.to_vec(), Some(bytes::Bytes::new()))], |_| Ok(()))?;
+    db.relfiles.write().tids_checked = true;
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn forget_tids_checked(db: &Database) -> Result<()> {
+    db.store.commit(vec![(TIDS_CHECKED.to_vec(), None)], |_| Ok(()))?;
+    db.relfiles.write().tids_checked = false;
+    Ok(())
+}
+
+/// Rows of table `oid` whose stored TID can't be theirs: a TID an earlier row (in TID, then
+/// storage order) holds already, none, or one past a heap's limits. Builds before 9a6faba8
+/// laid a reopened table's heap out afresh and gave new versions TIDs that live rows still
+/// held. Returns each such row's key with a TID of its own past the table's last block, the
+/// rows packed onto pages by their stored length (as `heapsim::restored` would append
+/// them, near enough). Reads keys and row headers only.
+pub fn duplicate_tids(db: &Database, oid: u32) -> Result<Vec<(Vec<u8>, Tid)>> {
+    use heapsim::{BLCKSZ, ITEM_ID, MAX_HEAP_TUPLES, PAGE_HEADER, maxalign};
+    let start = index_prefix(oid, 0);
+    let end = prefix_end(&start);
+    let ts = db.store.visible_ts();
+    // (Each row's stored TID, block << 16 | offset (u64::MAX: none), and its place in storage
+    // order: the first holder keeps a TID.)
+    let mut tids: Vec<(u64, u32)> = Vec::new();
+    for (i, r) in db.store.scan(&start, &end, ts).enumerate() {
+        let (_, v) = r?;
+        let tid = super::scan::stored_tid(&v).filter(|t| t.1 != 0 && (t.1 as usize) <= MAX_HEAP_TUPLES);
+        tids.push((tid.map_or(u64::MAX, |t| (t.0 as u64) << 16 | t.1 as u64), i as u32));
+    }
+    tids.sort_unstable();
+    let mut bad: Vec<u32> = Vec::new();
+    let mut last_block = None;
+    for (n, &(t, i)) in tids.iter().enumerate() {
+        if t != u64::MAX && (n == 0 || tids[n - 1].0 != t) {
+            last_block = Some((t >> 16) as u32);
+        } else {
+            bad.push(i);
+        }
+    }
+    drop(tids);
+    if bad.is_empty() {
+        return Ok(Vec::new());
+    }
+    bad.sort_unstable();
+    let mut out = Vec::with_capacity(bad.len());
+    let (mut blk, mut off, mut used) = (last_block.map_or(0, |b| b + 1), 0u16, 0usize);
+    let mut want = bad.iter().peekable();
+    for (i, r) in db.store.scan(&start, &end, ts).enumerate() {
+        let Some(&&j) = want.peek() else { break };
+        if i as u32 != j {
+            continue;
+        }
+        want.next();
+        let (k, v) = r?;
+        let need = maxalign(v.len()) + ITEM_ID;
+        if off as usize >= MAX_HEAP_TUPLES || (off > 0 && used + need > BLCKSZ - PAGE_HEADER) {
+            (blk, off, used) = (blk + 1, 0, 0);
+        }
+        off += 1;
+        used += need;
+        out.push((k, (blk, off)));
+    }
+    Ok(out)
 }
 
 /// Record the heap TIDs a new heap gave the rows stored under `keys` in the rows

@@ -519,6 +519,15 @@ fn crash_round(dir: &Path, seed: u64, round: u64) {
     check(&mut s, seed, &m, &format!("round {round}, 100 steps after recovering"));
     drop(s);
     eng.shutdown();
+    drop(eng);
+    // A clean restart: the models its close kept (`sizing::kept`), then 50 more steps.
+    let eng = open(&dir.join("data"));
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    check(&mut s, seed, &m, &format!("round {round}, after a clean restart"));
+    run_steps(&mut s, dir, seed, &mut m, n + 100, n + 150, None);
+    check(&mut s, seed, &m, &format!("round {round}, 50 steps after a clean restart"));
+    drop(s);
+    eng.shutdown();
 }
 
 #[test]

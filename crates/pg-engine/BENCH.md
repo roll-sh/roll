@@ -3887,6 +3887,67 @@ instructions per transaction before and 519–532 after, 6,479–9,376 tps befor
 10,067–11,567 after; at 1 client both spread 220–928. No regression shows; the spread is
 the background flushes and compactions the whole-process count includes.
 
+## Restart cost (round 21, agent 113)
+
+HANDOFF.md, "Models kept across a restart", has the design. `tests/restart_cost.rs`
+(`#[ignore]`d) loads a pgbench_accounts-shaped table (int primary key, two ints, char(84)),
+updates a tenth of its rows, and closes cleanly or exits as a crash would (with
+`sync` on). A second process reopens it, times its first statements, and prints its CPU
+time and VmHWM. Release builds with mimalloc, the open phase pinned to 4 cores of a
+shared machine at load 30-50. Base is `67d7d5ca` (its own checkout and target dir), runs
+interleaved: two rounds at load ~30, then three at load ~50 (the second range of each cell).
+
+300,000 rows (22 MB of data; the kept record is 222 KB):
+
+| | first statement | process CPU | peak RSS |
+|---|---|---|---|
+| clean restart, base | 0.94-0.99 / 1.40-1.87 s | 0.96-0.99 / 1.36-1.52 s | 271-287 MB |
+| clean restart, kept models | 0.29-0.34 / 0.37-0.53 s | 0.30-0.35 / 0.36-0.47 s | 179-195 MB |
+| after a crash, base | 0.89-1.14 / 1.37-1.46 s | 0.90-1.16 / 1.38-1.45 s | 270-289 MB |
+| after a crash, cheaper layout | 0.57-0.74 / 0.83-0.97 s | 0.57-0.75 / 0.81-0.85 s | 244-265 MB |
+
+- What's left of the clean case is the layout: about 70 ms to decode the record, the rest
+  inserting 300,000 keys into the heap model's map and building the btree (with the page
+  faults of the new allocations: `clear_page_erms` and huge-page compaction were 10-20% of
+  the profile).
+- 3,000,000 rows (too big to model, so its size is the estimate kept at close): 0.014 s
+  base, 0.008 s new. pgbench scale 200's accounts are the same case.
+- 360,000 rows (396,000 versions after the updates, just under the modelling limit; agent
+  105 saw a ~400,000-row table's first use after a restart take the web-app mix's peak to
+  935 MB): clean restart 0.89 → 0.28 s and peak RSS 312 → 204 MB; after a crash 0.99 →
+  0.61 s and 313 → 279 MB.
+- Shutdown pays for the records: 0.12 s for the 300,000 rows when the model changed since
+  it was loaded (base 0.03 s; nothing more when the model didn't change). It was 0.26-0.33 s
+  until `committed_rows` stopped looking each key up again.
+- The one-time TID check (`repair_tids`) on a database the base build wrote: the first
+  session of the 300,000-row database opened in 0.168 s instead of 0.017 s, once.
+- pgbench tpcb-like, scale 10, 4 clients, 30 s, two interleaved rounds: base 1,998 / 2,041
+  tps, 9,402 / 9,625 CPU ticks, VmHWM 408 / 406 MB; new 1,933 / 1,963 tps, 9,001 / 9,821
+  ticks, 398 / 433 MB (the commit path didn't change). Clean shutdown after it 0.09 → 0.14 s
+  (pgbench_history's record).
+
+Many tables (`m1..mN`, each a primary key, an index and a row; every table read once before
+a clean shutdown, then a restart). Engine over the wire (psql through `docker exec`, about
+0.1 s of each "first query"); PostgreSQL 18.6 run by `pg_ctl` in a container, timed inside
+it (fast shutdown, start with `-w`):
+
+| | 2,000 tables | 10,000 tables |
+|---|---|---|
+| shutdown, engine (base / kept models) | 0.03-0.06 s / 0.05-0.19 s | 0.12 s / 0.26-0.48 s |
+| shutdown, PostgreSQL | 1.21 s | 0.42 s |
+| start to listening, engine | 0.07-0.22 s | 0.09-0.10 s |
+| start, PostgreSQL | 0.11 s | 0.11 s |
+| first query, engine (incl. docker exec) | 0.12-0.27 s | 0.19-0.26 s |
+| first query, PostgreSQL | 0.03 s | 0.02 s |
+| on disk, engine / PostgreSQL | 3 / 183 MB | 12 / 91 MB |
+
+- The records cost the shutdown 14 µs per table (encoding, and the definition hash's JSON);
+  still under PostgreSQL's shutdown checkpoint.
+- After the restart, reading each of 10,000 tables once took 3.9 s, and again 3.3 s: the
+  first touch of a table costs about 60 µs (its models). The rest is the per-statement cost
+  of 10,000 distinct simple queries (0.33 ms each; PostgreSQL about 0.11 ms with `docker
+  exec` included): parsing, binding, `pgstat::report`, nothing restart-specific.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

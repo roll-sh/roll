@@ -1293,8 +1293,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     PostgreSQL 18.6 killed with SIGKILL: same counts and nextval values.
     - An engine that is dropped without `shutdown()` counts as crashed, as it would for
       PostgreSQL.
-    - Left open: a prepared transaction's writes to an unlogged table still apply at
-      COMMIT PREPARED after the reset. PostgreSQL loses them with the rest of the relation.
+    - A prepared transaction's writes to an unlogged table go with the reset (agent 113):
+      `Database::recover_prepared` gets the relations `reset_unlogged` emptied and drops
+      their keys from each state record (`twophase::without_writes`), in the store too, so
+      a later clean restart doesn't bring them back. COMMIT PREPARED then applies only the
+      other writes. Checked against PostgreSQL 18.6 killed with SIGKILL (the same counts and
+      sums; `crash_unlogged.rs` `prepared_writes_to_unlogged_tables_lost_in_a_crash`).
   - Verified (4b1ee945, rebased onto 30111bb9):
     - the crate suite in debug and in release, deep_input included;
     - clippy, with no new warnings;
@@ -1325,8 +1329,96 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       reads the whole table to lay out its heap model. For 300,000 rows that is 1.8-2.1 s, and
       0.4 s less than the old dense layout (3 interleaved rounds each). Peak RSS is up about
       7% (322-346 MB against 304-320 MB), because the restored model keeps the dead line
-      pointers and gaps that PostgreSQL's heap also has. Persisting the models, or building
-      them in the background, would remove that cost.
+      pointers and gaps that PostgreSQL's heap also has. (Agent 113: models kept across a
+      clean close, and a cheaper layout; see "Models kept across a restart" below.)
+  - **Models kept across a restart** (agent 113; `exec/sizing/kept.rs`, `tests/models_kept.rs`).
+    A clean close (shutdown, or an idle database closing) writes, per modelled table, what
+    `ensure` would otherwise compute from the rows: each committed row's key, tuple length,
+    TID and out-of-line values, and each btree index's key per row (key `[0; 7] ++ [0x23] ++
+    oid`; prefix-compressed varints, zstd level 1 from 1 KB on). The table's first
+    statement after the next open lays the models out from that record with the same code
+    (`heapsim::restored`, `Btree::build`, `rebuild_toast`), without reading or decoding a
+    row.
+    - Validity: the close writes a marker (`[0; 7] ++ [0x24]`, listing the tables kept) in
+      the same commit as the records. Opening the database deletes the marker before any
+      session can write (`kept::open`), so after a crash nothing kept is used and every
+      record is deleted then; the rows are read as before. A record must also match the
+      table's relfilenode, fillfactor and definition (a hash of the table's and its
+      indexes' catalog entries: ALTER TABLE ... ADD COLUMN, CREATE INDEX on it, a rename
+      make it stale). A model dropped, truncated or rewritten loses its record
+      (`sizing::forget`, `dropped`). A table unchanged since its record was loaded isn't
+      written again at the next close (the record's hash).
+    - Not kept: tables a prepared transaction wrote to (their versions in progress are
+      added from the state records, as before), unstamped heaps (rows not at their stored
+      TIDs), temporary and too-big tables. A shutdown while a terminated session may still
+      commit keeps nothing (`Engine::shutdown` checks `sessions`).
+    - The record comes from the live models: rows by `Heap::committed_rows` (inserted by a
+      committed transaction, not deleted by one), index keys by `Btree::entries` (in index
+      order) mapped through each row's HOT chain root. `models_kept.rs` checks that the
+      models laid out from it decide everything as models laid out from the rows do (ctids
+      of new versions after updates, deletes, HOT updates, TOASTed values, a partial index,
+      VACUUM and VACUUM FULL; page counts; plans), across two restarts; `crash_random`'s
+      rounds now end with a clean restart, a check and 50 more steps.
+    - Index pages after a restart are still those of a fresh sorted build of the index (as
+      before: the record keeps keys, not pages). PostgreSQL keeps its index pages; keeping
+      the btree pages too would be the next step (`models_kept.rs` documents the case:
+      `km2_x` 12 pages before a restart, 11 after).
+    - `ensure`'s layout got cheaper for both paths: index entries name their row by its
+      place (no key clone per entry and no `tid_of` lookup), out-of-line values are kept
+      only for rows that have them, `restored` reserves the key map and returns each row's
+      TID.
+    - Costs (BENCH.md, "Restart cost"): 300,000 rows, first statement after a clean restart
+      0.94-1.87 s → 0.29-0.53 s (load 30-50), after a crash 0.89-1.46 s → 0.57-0.97 s, peak
+      RSS 271-287 → 179-195 MB (clean) and 270-289 → 244-265 MB (crash). The record is
+      222 KB for a 22 MB table. Shutdown takes longer by the records' encoding (0.03 → 0.12 s
+      for the 300,000 rows; pgbench scale 10's tables 0.09 → 0.14 s).
+    - Left: the layout itself (the heap key map's inserts and page faults) is most of what
+      remains; readers still wait for it. Building kept tables' models in the background as
+      the database opens, or answering page counts from the record until the model exists,
+      would take it off the first statement. (A background build alone helps less than it
+      seems: a database opened by its first connection gets that connection's first query
+      a few milliseconds later.)
+    - Many tables (BENCH.md): with 2,000 and 10,000 small tables the clean shutdown takes
+      0.05-0.19 s and 0.26-0.48 s (PostgreSQL's fast shutdown 1.21 s and 0.42 s), the start
+      0.07-0.22 s and 0.09 s to listening (PostgreSQL 0.11 s). The records cost 14 µs per
+      table at shutdown; a table's first touch after the restart about 60 µs. Reading each
+      of 10,000 tables once costs about 3x PostgreSQL either way: per-statement parsing,
+      binding and `pgstat::report`, not restart work.
+    - `crash_random`, seeds 1-30 × 4 rounds (release, each round now ending with a clean
+      restart and 50 more steps): clean.
+    - Per-write model upkeep (asked after agent 108 measured 11% in logical apply): over
+      the wire, pgbench tpcb-like at scale 10 (accounts too big to model) spends 1.7% of
+      the engine's samples in sizing / heapsim / btsim, at scale 1 (every table modelled)
+      4.1%. The biggest single item is `Btree::kill_needed` (1.4%: each index scan walks
+      the inner pages' pivots and the first leaf's items linearly to reach `lo`; both are
+      sorted, so a binary search would do). Then the fast path of `ensure` (0.4%: it runs
+      `btree_opts` for every index, parsing the options strings, on every call),
+      `heap_blocks` / `fork_blocks` binding the table's indexes (and cloning the table) on
+      every planner size lookup even when every model exists (0.5%; `heap_blocks` has
+      skipped that since 1ebff508's OLTP round), `Heap::prune` and `locate`. Kept models
+      don't change any of it: they cost nothing between restarts.
+    - Verified (agent 113, on 3f56fe3f): the crate suite in debug and in release (deep_input
+      included), clippy without new warnings, the difftest smoke, isolation 121 / 122, a
+      full regress run on a private reference (debug) 51,148 / 51,150 with no unit changed
+      against `results.tsv`; after rebasing onto 1ebff508 (the OLTP round's hot ranges),
+      the crate suite in both profiles and clippy again. The timings above were measured
+      on builds of 67d7d5ca; the rebase onto agent 112's one-allocation btree keys changed
+      the record's key encoding to the key's own bytes (`Key::as_bytes` / `from_bytes`,
+      checked when decoded). `outbound.rs` `local_reaches_the_engine` fails now and then
+      in release (also run alone): `server::spawn` returns before its thread records the
+      listening port, so `SHOW port` can still say 5432. Not from this change.
+  - **Old databases with duplicate stored TIDs** (agent 113; `Engine::repair_tids`,
+    `sizing::duplicate_tids`, `crash_ctids.rs` `old_duplicate_ctids_repaired_once`). Builds
+    before 9a6faba8 could store a row with a TID another live row of its table held (or a
+    row has none, from before stored TIDs). Once per database, before its first session,
+    each table's keys and row headers are read (no decoding); a row whose TID an earlier one
+    (in TID, then storage order) holds, or with none, gets a TID of its own past the
+    table's last block, packed by its stored length, written in batches as the storage
+    upgrade writes. Then the key `[0; 7] ++ [0x25]` records the check; a database that has
+    it (every one after its first open by this build, new ones from their first) reads
+    nothing again. Not a format change: older builds ignore the key. The check holds 16
+    bytes per row of the table it reads (sorting the TIDs); a 300,000-row database's first
+    session opened 0.15 s later, once.
     - pgbench tpcb-like (scale 10, 4 clients, 30 s, sync on, 3 interleaved rounds, load ~30):
       base 852 / 1,653 / 1,494 tps, head 1,523 / 1,327 / 1,602 tps. VmHWM was 435-461 MB on
       both, with CPU seconds alike. The fix is not on the commit path: it runs only when a

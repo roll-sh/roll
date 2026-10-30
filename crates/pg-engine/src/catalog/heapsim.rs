@@ -920,6 +920,29 @@ impl Heap {
         cur
     }
 
+    /// The rows a scan of the stored data finds (inserted by a committed transaction, not
+    /// deleted by one): (TID, key, tuple length), in TID order.
+    pub fn committed_rows(&self, v: &Vis) -> Vec<(Tid, &Vec<u8>, u32)> {
+        let mut out = Vec::with_capacity(self.keys.len());
+        for (k, &latest) in &self.keys {
+            // (`locate` from the latest version: past versions aborted to the one they replaced.)
+            let mut tid = Some(latest);
+            while let Some(t) = tid.and_then(|t| self.tuple(t))
+                && v.state(t.xmin) == Xs::Aborted
+            {
+                tid = t.prev;
+            }
+            if let Some(tid) = tid
+                && let Some(t) = self.tuple(tid)
+                && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress)
+            {
+                out.push((tid, k, t.len));
+            }
+        }
+        out.sort_unstable_by_key(|x| x.0);
+        out
+    }
+
     pub fn tid_of(&self, key: &[u8]) -> Option<Tid> {
         self.keys.get(key).copied()
     }
@@ -1689,29 +1712,33 @@ impl Heap {
 /// order, and rows without a TID come last. A row
 /// without a TID, or whose TID an earlier row already holds (a database written before
 /// restored models existed), goes where a rewrite would put it. Returns whether any row's
-/// place differs from its stored TID.
-pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> (Heap, bool) {
+/// place differs from its stored TID, and each row's place (in the order given).
+pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> (Heap, bool, Vec<Tid>) {
     let mut h = Heap::new(fillfactor);
+    h.keys.reserve(rows.len());
     let mut moved = false;
+    let mut tids = vec![(0, 0); rows.len()];
     let mut rest = Vec::new();
-    for (k, len, stored) in rows {
+    for (i, (k, len, stored)) in rows.into_iter().enumerate() {
         match stored.filter(|&tid| h.place_at(tid, Heap::new_tup(len, 0))) {
             Some(tid) => {
                 h.placed(&k, tid);
                 h.keys.insert(k, tid);
+                tids[i] = tid;
             }
             None => {
                 moved |= stored.is_some();
-                rest.push((k, len));
+                rest.push((i, k, len));
             }
         }
     }
-    for (k, len) in rest {
+    for (i, k, len) in rest {
         let tid = h.append(Heap::new_tup(len, 0));
         h.placed(&k, tid);
         h.keys.insert(k, tid);
+        tids[i] = tid;
     }
-    (h, moved)
+    (h, moved, tids)
 }
 
 impl Heap {

@@ -322,13 +322,23 @@ impl Database {
     /// The prepared transactions whose state records this database's store holds, made again
     /// (`twophase::recover`) and registered; how many. Run when the database opens, after it
     /// joined the cluster's transaction ids and registry.
-    pub fn recover_prepared(self: &Arc<Self>) -> Result<usize> {
+    /// `reset`: the unlogged relations reset as this open began (after a crash); prepared
+    /// transactions' writes to them are dropped, from their state records too.
+    pub fn recover_prepared(self: &Arc<Self>, reset: &[u32]) -> Result<usize> {
         let (from, to) = twophase::record_range();
         let ts = self.store.visible_ts();
         let records: Vec<(Vec<u8>, Bytes)> = self.store.scan(from, to, ts).collect::<Result<_>>()?;
         let tp = self.twophase();
         let mut n = 0;
-        for (_, v) in &records {
+        let reset: std::collections::HashSet<u32> = reset.iter().copied().collect();
+        // (A key's first 4 bytes are its relation's oid, as `index_prefix` writes it.)
+        let dropped = |k: &[u8]| k.get(..4).is_some_and(|o| reset.contains(&u32::from_be_bytes(o.try_into().expect("4 bytes"))));
+        for (key, v) in &records {
+            let filtered = if reset.is_empty() { None } else { twophase::without_writes(v, dropped)? };
+            if let Some(f) = &filtered {
+                self.store.commit(vec![(key.clone(), Some(Bytes::copy_from_slice(f)))], |_| Ok(()))?;
+            }
+            let v = filtered.as_deref().unwrap_or(&v[..]);
             if let Some((info, mut txn)) = twophase::recover(self, v)? {
                 crate::repl::log::recovered(self, &mut txn, &info.gid)?;
                 tp.recovered(info, txn);
@@ -690,8 +700,8 @@ impl Database {
     /// ResetUnloggedRelations, when the database first opens after a crash. Every unlogged
     /// table loses its rows and index entries, and unlogged sequences start over, which is
     /// what copying their init forks does. Runs before any session can see the database.
-    /// Returns how many relations were reset.
-    pub fn reset_unlogged(&self) -> Result<usize> {
+    /// Returns the relations reset.
+    pub fn reset_unlogged(&self) -> Result<Vec<u32>> {
         let cat = self.catalog();
         let tables: Vec<u32> = cat.tables.values().filter(|t| t.unlogged && !t.temporary).map(|t| t.oid).collect();
         let seqs: Vec<u32> = (cat.sequences.values())
@@ -720,7 +730,7 @@ impl Database {
         for &oid in &seqs {
             self.reset_seq(oid, None)?;
         }
-        Ok(tables.len() + seqs.len())
+        Ok(tables.into_iter().chain(seqs).collect())
     }
 }
 
