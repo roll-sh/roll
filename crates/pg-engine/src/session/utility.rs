@@ -737,6 +737,8 @@ impl Session {
         let mut values = params.to_vec();
         let mut ctas = None;
         let mut ctas_types = Vec::new();
+        // EXPLAIN DECLARE: the cursor's plan (`bound_as`).
+        let mut declare = false;
         match inner(&q).cloned() {
             Some(NodeEnum::ExecuteStmt(e)) => {
                 let (p, v) = self.prepared_args(&e)?;
@@ -788,6 +790,7 @@ impl Session {
             Some(NodeEnum::DeclareCursorStmt(d)) => {
                 // CURSOR_OPT_SCROLL
                 o.scroll = d.options & 0x0002 != 0;
+                declare = true;
                 q = (*d.query.unwrap()).clone()
             }
             _ => {}
@@ -851,7 +854,7 @@ impl Session {
             let bq = if !generic && !values.is_empty() && !p.param_types.is_empty() {
                 self.bound_custom(&p, &q, &values)
             } else {
-                self.bound(&p, &q, &values)
+                self.bound_as(&p, &q, &values, declare)
             };
             self.infer_params = false;
             (bq?, generic)
@@ -860,6 +863,9 @@ impl Session {
         let planning = start.elapsed().as_secs_f64();
         let out = self.with_ctx(&values, |ctx| {
             bq.check_perms(ctx)?;
+            let _serial = crate::scoped::set(&crate::sql::paths::parallel::SERIAL, declare, "parallel::SERIAL");
+            let frac = if declare { crate::sql::explain::cursor_fraction(ctx) } else { 0.0 };
+            let _frac = crate::scoped::set(&crate::sql::explain::CURSOR_FRACTION, frac, "explain::CURSOR_FRACTION");
             let mut run = None;
             let mut plan = (bq.plan.clone(), bq.hidden_rtes);
             if o.analyze {
@@ -983,7 +989,7 @@ impl Session {
             bound: Mutex::new(None),
             plans: Default::default(),
         };
-        let bq = self.bound(&p, q, params)?;
+        let bq = self.bound_as(&p, q, params, true)?;
         if bq.plan.writes() {
             return Err(Error::new(
                 code::FEATURE_NOT_SUPPORTED,
@@ -1004,8 +1010,20 @@ impl Session {
             ));
         }
         let keyed = crate::session::cursor::keyed_plan(&bq.plan);
+        let row_marks = crate::session::cursor::has_row_marks(&bq.plan);
+        // What only the plan PostgreSQL builds for it shows (a sort it reads an index for
+        // instead, a join in order, an incremental sort, a merged Append): EXPLAIN's.
+        let planned = (!row_marks && crate::session::cursor::plan_decides(&bq.plan)).then(|| {
+            self.with_ctx(params, |ctx| {
+                Ok(crate::sql::explain::cursor_plan(&bq.plan, bq.hidden_rtes, ctx, params))
+            })
+        });
+        let planned = planned.transpose()?;
         let scroll = if s.options & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL) == 0 {
-            crate::session::cursor::scrollable(&bq.plan)
+            !row_marks
+                && planned
+                    .as_ref()
+                    .map_or_else(|| crate::session::cursor::scrollable(&bq.plan), |p| p.backward)
         } else {
             s.options & CURSOR_OPT_SCROLL != 0
         };
@@ -1038,7 +1056,8 @@ impl Session {
         let mut c = c;
         c.subxact = self.txn.as_ref().map_or(0, |t| t.borrow().subtxn_depth());
         c.rels = bq.perms.rels.iter().map(|r| r.oid).collect();
-        c.row_marks = crate::session::cursor::has_row_marks(&bq.plan);
+        c.row_marks = row_marks;
+        c.simple = planned.map(|p| p.scans);
         self.state
             .cursors
             .borrow_mut()

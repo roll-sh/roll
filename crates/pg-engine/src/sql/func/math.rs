@@ -795,7 +795,7 @@ fn factorial(a: &[Value], _: &FnCtx) -> Result<Value> {
     let n = int_arg(&a[0]);
     if n < 0 {
         return Err(err!(
-            INVALID_PARAMETER_VALUE,
+            NUMERIC_VALUE_OUT_OF_RANGE,
             "factorial of a negative number is undefined"
         ));
     }

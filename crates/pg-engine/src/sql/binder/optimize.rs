@@ -463,7 +463,7 @@ pub fn add_filter(cat: &Catalog, plan: Plan, pred: Expr) -> Plan {
             let mut all = all;
             // restriction_is_always_true / _false: IS [NOT] NULL of a NOT NULL column.
             let not_null = |x: &Expr| {
-                matches!(x, Expr::Col(c, _) if s.table.columns.get(*c).is_some_and(|col| col.not_null))
+                matches!(x, Expr::Col(c, _) if s.table.known_not_null(*c))
             };
             let qual_false = all.iter().find(|q| super::refute::always_false(q)).cloned();
             reduce_null_tests(&mut all, &not_null);
@@ -3532,7 +3532,7 @@ fn reduce_null_tests(all: &mut Vec<Expr>, nonnull: &dyn Fn(&Expr) -> bool) {
 /// Column `col` of `plan`'s output is a NOT NULL table column no outer join below nulls.
 fn nonnullable_col(plan: &Plan, col: usize) -> bool {
     match plan {
-        Plan::Scan(s) => s.table.columns.get(col).is_some_and(|c| c.not_null),
+        Plan::Scan(s) => s.table.known_not_null(col),
         Plan::Filter { input, .. }
         | Plan::Sort { input, .. }
         | Plan::Limit { input, .. }

@@ -1,0 +1,105 @@
+> CREATE TABLE t (id int PRIMARY KEY, a int, b text)
+-- CREATE TABLE
+
+> INSERT INTO t VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)
+-- INSERT 0 6
+
+> ANALYZE t
+-- ANALYZE
+
+> EXPLAIN SELECT id, a FROM t ORDER BY id LIMIT 4
+QUERY PLAN:text
+Limit  (cost=1.14..1.15 rows=4 width=8)
+  ->  Sort  (cost=1.14..1.15 rows=6 width=8)
+        Sort Key: id
+        ->  Seq Scan on t  (cost=0.00..1.06 rows=6 width=8)
+-- EXPLAIN
+
+> EXPLAIN DECLARE c CURSOR FOR SELECT id, a FROM t ORDER BY id LIMIT 4
+QUERY PLAN:text
+Limit  (cost=0.13..8.19 rows=4 width=8)
+  ->  Index Scan using t_pkey on t  (cost=0.13..12.22 rows=6 width=8)
+-- EXPLAIN
+
+> EXPLAIN DECLARE c CURSOR FOR SELECT id, a FROM t ORDER BY id LIMIT 1
+QUERY PLAN:text
+Limit  (cost=0.13..2.15 rows=1 width=8)
+  ->  Index Scan using t_pkey on t  (cost=0.13..12.22 rows=6 width=8)
+-- EXPLAIN
+
+> EXPLAIN DECLARE c CURSOR FOR SELECT id, a FROM t ORDER BY a LIMIT 4
+QUERY PLAN:text
+Limit  (cost=1.14..1.15 rows=4 width=8)
+  ->  Sort  (cost=1.14..1.15 rows=6 width=8)
+        Sort Key: a
+        ->  Seq Scan on t  (cost=0.00..1.06 rows=6 width=8)
+-- EXPLAIN
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c CURSOR FOR SELECT id, a FROM t ORDER BY id LIMIT 4
+-- DECLARE CURSOR
+
+> FETCH 2 FROM c
+id:int4 | a:int4
+1 | 1
+2 | 2
+-- FETCH 2
+
+> UPDATE t SET a = -a WHERE CURRENT OF c RETURNING id, a
+id:int4 | a:int4
+2 | -2
+-- UPDATE 1
+
+> FETCH PRIOR FROM c
+id:int4 | a:int4
+1 | 1
+-- FETCH 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c NO SCROLL CURSOR FOR SELECT id, a FROM t
+-- DECLARE CURSOR
+
+> FETCH NEXT FROM c
+id:int4 | a:int4
+1 | 1
+-- FETCH 1
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> FETCH RELATIVE -1 FROM c
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+
+> ROLLBACK TO SAVEPOINT s
+-- ROLLBACK
+
+> DELETE FROM t WHERE CURRENT OF c RETURNING id
+ERROR 24000: cursor "c" is held from a previous transaction
+
+> FETCH NEXT FROM c
+ERROR 25P02: current transaction is aborted, commands ignored until end of transaction block
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT factorial(-1)
+ERROR 22003: factorial of a negative number is undefined
+
+> SELECT array_agg(DISTINCT abs((SELECT 1)) ORDER BY abs((SELECT 1))) FROM t
+array_agg:int4[]
+{1}
+-- SELECT 1
+
+> SELECT array_agg(DISTINCT abs((SELECT t.a)) ORDER BY abs((SELECT t.a))) FROM t
+array_agg:int4[]
+{1,2,3,4,5,6}
+-- SELECT 1
+

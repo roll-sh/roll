@@ -1228,8 +1228,7 @@ impl Binder<'_, '_> {
                         && !c.merged
                         && c.attnum > 0
                         && r.table.as_ref().is_some_and(|t| {
-                            t.oid == c.table
-                                && t.columns.get(c.attnum as usize - 1).is_some_and(|col| col.not_null)
+                            t.oid == c.table && t.known_not_null(c.attnum as usize - 1)
                         })
                 });
                 match not_null {
@@ -1939,15 +1938,11 @@ impl Binder<'_, '_> {
                 );
                 let between = |b: &mut Self, lo: Expr, hi: Expr| -> Result<Expr> {
                     if not {
-                        Ok(Expr::Or(vec![
-                            b.binop("<", x.clone(), lo, loc)?,
-                            b.binop(">", x.clone(), hi, loc)?,
-                        ]))
+                        let parts = vec![b.binop("<", x.clone(), lo, loc)?, b.binop(">", x.clone(), hi, loc)?];
+                        Ok(b.simplify_bool(false, parts))
                     } else {
-                        Ok(Expr::And(vec![
-                            b.binop(">=", x.clone(), lo, loc)?,
-                            b.binop("<=", x.clone(), hi, loc)?,
-                        ]))
+                        let parts = vec![b.binop(">=", x.clone(), lo, loc)?, b.binop("<=", x.clone(), hi, loc)?];
+                        Ok(b.simplify_bool(true, parts))
                     }
                 };
                 let e1 = between(self, lo.clone(), hi.clone())?;
@@ -1955,11 +1950,7 @@ impl Binder<'_, '_> {
                     return Ok(e1);
                 }
                 let e2 = between(self, hi, lo)?;
-                Ok(if not {
-                    Expr::And(vec![e1, e2])
-                } else {
-                    Expr::Or(vec![e1, e2])
-                })
+                Ok(self.simplify_bool(not, vec![e1, e2]))
             }
             _ => Err(crate::error::unsupported("this operator form")),
         }
@@ -2992,7 +2983,7 @@ impl Binder<'_, '_> {
                             Some((_, args)) => self.input_collation_def(ne.def.clone(), args),
                             None => self.collated(ne.def.clone(), &[&left, &right]),
                         };
-                        return Ok(Expr::ArrayOp {
+                        return self.fold_in_list(Expr::ArrayOp {
                             left: Box::new(left),
                             right: Box::new(right),
                             op,
@@ -3003,13 +2994,17 @@ impl Binder<'_, '_> {
                         Some((d, _)) => d.clone(),
                         None => self.collated(res.def.clone(), &[&left, &right]),
                     };
-                    let e = Expr::ArrayOp {
+                    let e = self.fold_in_list(Expr::ArrayOp {
                         left: Box::new(left),
                         right: Box::new(right),
                         op,
                         all: false,
-                    };
-                    return Ok(if not { Expr::Not(Box::new(e)) } else { e });
+                    })?;
+                    return Ok(match e {
+                        Expr::Const(Value::Bool(b), t) if not => Expr::Const(Value::Bool(!b), t),
+                        e if not => Expr::Not(Box::new(e)),
+                        e => e,
+                    });
                 }
                 let list = rights
                     .into_iter()
@@ -3021,7 +3016,7 @@ impl Binder<'_, '_> {
                         (r, def)
                     })
                     .collect();
-                return Ok(Expr::InList(Box::new(left), list, not));
+                return self.fold_in_list(Expr::InList(Box::new(left), list, not));
             }
         }
         // A type with only a user-defined `=` (and `<>`): `x = ANY (...)` with it, the
@@ -3062,7 +3057,62 @@ impl Binder<'_, '_> {
             let def = self.collated(res.def, &[&left, &it]);
             list.push((it, def));
         }
-        Ok(Expr::InList(Box::new(left), list, not))
+        self.fold_in_list(Expr::InList(Box::new(left), list, not))
+    }
+
+    /// An IN list (or `= ANY` of an array) of constants with immutable `=`s evaluated now
+    /// (eval_const_expressions folds the ScalarArrayOpExpr it is); one that fails stays, as
+    /// a call does (`fold_call`).
+    fn fold_in_list(&mut self, e: Expr) -> Result<Expr> {
+        let constant = match &e {
+            Expr::InList(l, list, _) => l.is_const() && list.iter().all(|(x, d)| x.is_const() && d.volatility == 'i'),
+            Expr::ArrayOp { left, right, op, .. } => left.is_const() && right.is_const() && op.volatility == 'i',
+            _ => false,
+        };
+        if self.deparse || !constant {
+            return Ok(e);
+        }
+        match eval(&e, &[], self.ctx) {
+            Ok(v) => Ok(Expr::Const(v, DataType::Bool)),
+            Err(err) => {
+                self.fold_failed(&e, err)?;
+                Ok(e)
+            }
+        }
+    }
+
+    /// simplify_and_arguments / simplify_or_arguments over bound arguments: TRUE (for OR,
+    /// FALSE) constants drop out, a FALSE (TRUE) one decides it, NULLs leave one NULL; with
+    /// nothing left, TRUE (FALSE) or that NULL. Left alone while an argument failed to fold
+    /// (`fold::fails`), whose error the statement still raises.
+    fn simplify_bool(&self, and: bool, args: Vec<Expr>) -> Expr {
+        let mk = |args: Vec<Expr>| if and { Expr::And(args) } else { Expr::Or(args) };
+        let constant = |a: &Expr| matches!(a, Expr::Const(Value::Bool(_) | Value::Null, _));
+        if self.deparse
+            || !args.iter().any(constant)
+            || (self.folds_failed()
+                && args.iter().any(|a| super::fold::fails(a, self.ctx, self.fold_err.as_deref().unwrap_or(&[]))))
+        {
+            return mk(args);
+        }
+        let mut out = Vec::with_capacity(args.len());
+        let mut null = false;
+        for a in args {
+            match a {
+                Expr::Const(Value::Bool(b), _) if b == and => {}
+                Expr::Const(Value::Bool(b), t) => return Expr::Const(Value::Bool(b), t),
+                Expr::Const(Value::Null, _) => null = true,
+                a => out.push(a),
+            }
+        }
+        if null {
+            out.push(Expr::Const(Value::Null, DataType::Bool));
+        }
+        match out.len() {
+            0 => Expr::Const(Value::Bool(and), DataType::Bool),
+            1 => out.pop().expect("one argument"),
+            _ => mk(out),
+        }
     }
 
     /// IN as Postgres's parser leaves it (what deparsing shows): the items that read no column
@@ -3262,8 +3312,8 @@ impl Binder<'_, '_> {
             }
         }
         Ok(match op {
-            pb::BoolExprType::AndExpr => Expr::And(args),
-            pb::BoolExprType::OrExpr => Expr::Or(args),
+            pb::BoolExprType::AndExpr => self.simplify_bool(true, args),
+            pb::BoolExprType::OrExpr => self.simplify_bool(false, args),
             _ => {
                 let a = args.pop().unwrap();
                 match a {
@@ -5892,7 +5942,7 @@ impl Binder<'_, '_> {
                 let explicit_cast = matches!(&k.expr, Expr::Cast(_, _, _, true));
                 if !a2.iter().any(|a| {
                     let s = strip(a);
-                    s.same_as(&k.expr) && (!explicit_cast || matches!(s, Expr::Cast(_, _, _, true)))
+                    s.same_query_as(&k.expr) && (!explicit_cast || matches!(s, Expr::Cast(_, _, _, true)))
                 }) {
                     return Err(with_pos(
                         Error::new(

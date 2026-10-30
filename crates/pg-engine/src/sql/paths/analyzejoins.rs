@@ -680,7 +680,7 @@ impl Planner<'_, '_> {
                 if let Expr::IsNull(x, true) = &q
                     && let Expr::Col(c, _) = &**x
                     && let Plan::Scan(ks) = &leaves[k].0
-                    && ks.table.columns.get(*c).is_some_and(|c| c.not_null)
+                    && ks.table.known_not_null(*c)
                 {
                     continue;
                 }

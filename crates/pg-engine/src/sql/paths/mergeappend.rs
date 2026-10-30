@@ -226,7 +226,7 @@ impl Planner<'_, '_> {
         let mut best: Option<(Path, bool)> = None;
         let fraction = |p: &Path| match lim {
             Some((count, offset)) => {
-                let f = if count < 0.0 || (count > 0.0 && offset < 0.0) { 0.1 } else { 1.0 };
+                let f = super::lim_fraction(count, offset);
                 let (st, tot) = limit_costs(p, count, offset);
                 st + f * (tot - st)
             }
@@ -672,7 +672,7 @@ fn interleaved(level: &crate::sql::plan::PartLevel) -> Vec<crate::catalog::PartB
 /// nodes, over its members' paths `ps` (cost_append with pathkeys).
 fn ordered_cost(o: &[PartOrder], ps: &[Path]) -> (f64, f64, f64, u32) {
     let (mut st, mut tot, mut rows, mut dis) = (0.0, 0.0, 0.0, 0u32);
-    for (n, m) in o.iter().enumerate() {
+    for m in o {
         let (s, t, r, d) = match m {
             PartOrder::Leaf(i) => (ps[*i].startup, ps[*i].total, ps[*i].rows, ps[*i].disabled),
             PartOrder::Append(sub) => ordered_cost(sub, ps),
@@ -687,9 +687,8 @@ fn ordered_cost(o: &[PartOrder], ps: &[Path]) -> (f64, f64, f64, u32) {
                 (s, s + run + r * cmp * logn + CPU_TUPLE_COST * 0.5 * r, r, d)
             }
         };
-        if n == 0 {
-            st = s;
-        }
+        // (Every member's startup, as PostgreSQL 18 sums them.)
+        st += s;
         tot += t;
         rows += r;
         dis += d;

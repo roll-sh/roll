@@ -569,8 +569,17 @@ impl Session {
                     .hint("Anyone can COPY to stdout or from stdin. psql's \\copy command also works for anyone."));
             }
         }
-        let format = CopyFormat::parse(&s.options, s.is_from)?;
         let cols = names(&s.attlist);
+        // DoCopy opens the relation and resolves the column list (CopyGetAttnums) before
+        // BeginCopyFrom / BeginCopyTo process the options; COPY TO refuses what it can't
+        // read before them too.
+        let format = match CopyFormat::parse(&s.options, s.is_from) {
+            Ok(f) => f,
+            Err(e) => return Err(self.copy_relation_error(s, &cols).unwrap_or(e)),
+        };
+        if let Some(e) = self.copy_relation_error(s, &cols) {
+            return Err(e);
+        }
         if s.is_from {
             let rv = s.relation.as_ref().unwrap();
             let cat = {
@@ -824,6 +833,9 @@ impl Session {
                         }
                     }
                     Some(Relation::View(v)) => {
+                        if let Some(c) = view_column_error(&v, &cols) {
+                            return Err(c);
+                        }
                         return Err(Error::new(
                             code::WRONG_OBJECT_TYPE,
                             format!("cannot copy from view \"{}\"", v.name),
@@ -1319,7 +1331,8 @@ impl CopyReader<'_> {
                 ctx.notice(n);
             }
             if let Err(e) = parsed {
-                if copy.multi || self.st.rows.len() == before {
+                // (Rows read earlier in this batch are still to go in first.)
+                if copy.multi || self.st.rows.is_empty() {
                     return Err(e);
                 }
                 self.failed = Some(e);
@@ -1332,6 +1345,12 @@ impl CopyReader<'_> {
             if let Some(k) = self.null_violation(before) {
                 self.st.rows.truncate(k + 1);
                 self.st.lines.truncate(k + 1);
+                // (Buffered, the rows before it never go in: ExecConstraints refuses it
+                // before CopyMultiInsertBufferFlush inserts them, so it is the error.)
+                if copy.multi {
+                    self.st.rows.drain(..k);
+                    self.st.lines.drain(..k);
+                }
                 self.null_stop = true;
             }
         }
@@ -1485,12 +1504,20 @@ pub(crate) fn parse_copy_data(
     enc: i32,
     notice: &mut dyn FnMut(Error),
 ) -> Result<usize> {
-    // (After the end-of-copy marker or the binary trailer the rest is ignored.)
+    let f = &c.format;
+    // NextCopyFrom after the binary trailer: the protocol's end must follow at once.
+    let after_trailer = |records: usize| {
+        Error::new(code::BAD_COPY_FILE_FORMAT, "received copy data after EOF marker")
+            .context(format!("COPY {}, line {}", c.table.name, records + 1))
+    };
+    // (After the end-of-copy marker the rest is ignored.)
     if st.ended {
+        if f.binary && !data.is_empty() {
+            return Err(after_trailer(st.records));
+        }
         st.bytes += data.len();
         return Ok(data.len());
     }
-    let f = &c.format;
     if f.binary {
         let (rows, took, ended) = binary_copy_in(data, c, fmt, st, last)?;
         for row in rows {
@@ -1500,6 +1527,9 @@ pub(crate) fn parse_copy_data(
         }
         st.ended = ended;
         st.bytes += took;
+        if ended && took < data.len() {
+            return Err(after_trailer(st.records));
+        }
         return Ok(took);
     }
     let take = if last {
@@ -1536,12 +1566,12 @@ pub(crate) fn parse_copy_data(
         )
     })?;
     let t = c.table.clone();
-    let records = if f.csv {
-        split_csv(text, f)?
+    let (records, open_quote) = if f.csv {
+        split_csv(text, f)
     } else {
         let (records, ended) = split_text(text, f, &t.name, st.records)?;
         st.ended = ended;
-        records
+        (records, None)
     };
     let first = st.records;
     st.records += records.len();
@@ -1663,6 +1693,11 @@ pub(crate) fn parse_copy_data(
         }
         rows.push(row);
         lines.push((line, raw));
+    }
+    // (Its line: the physical line the data ended on, the record's text with its newlines.)
+    if let Some(raw) = open_quote {
+        return Err(Error::new(code::BAD_COPY_FILE_FORMAT, "unterminated CSV quoted field")
+            .context(format!("COPY {}, line {}: \"{raw}\"", t.name, st.phys_lines + 1)));
     }
     Ok(take)
 }
@@ -1786,6 +1821,64 @@ impl InField<'_> {
 type Records<'a> = Vec<(String, Vec<InField<'a>>)>;
 
 /// Columns a COPY reads or writes; generated columns can't be listed.
+/// CopyGetAttnums over a view's columns (DoCopy resolves them before BeginCopyTo refuses a
+/// view).
+fn view_column_error(v: &crate::catalog::ViewDef, cols: &[String]) -> Option<Error> {
+    for (k, c) in cols.iter().enumerate() {
+        if !v.columns.iter().any(|(n, _)| n == c) {
+            return Some(Error::new(
+                code::UNDEFINED_COLUMN,
+                format!("column \"{c}\" of relation \"{}\" does not exist", v.name),
+            ));
+        }
+        if cols[..k].contains(c) {
+            return Some(Error::new(code::DUPLICATE_COLUMN, format!("column \"{c}\" specified more than once")));
+        }
+    }
+    None
+}
+
+impl crate::session::Session {
+    /// What DoCopy (and, for COPY TO, BeginCopyTo before ProcessCopyOptions) refuses about a
+    /// COPY's relation and column list: a missing relation, a column list naming no column
+    /// or one twice, a relation COPY TO can't read.
+    fn copy_relation_error(&mut self, s: &pb::CopyStmt, cols: &[String]) -> Option<Error> {
+        let rv = s.relation.as_ref().filter(|_| s.query.is_none())?;
+        self.ensure_txn();
+        let cat = self.txn.as_ref()?.borrow().catalog();
+        let schema = (!rv.schemaname.is_empty()).then_some(rv.schemaname.as_str());
+        let rel = match cat.lookup(schema, &rv.relname, &self.state.search_path()) {
+            Ok(Some(r)) => r,
+            Ok(None) if crate::catalog::system::SysTable::lookup(schema, &rv.relname, &self.state.search_path()).is_some() => return None,
+            Ok(None) => return Some(crate::catalog::no_such_relation(schema, &rv.relname)),
+            Err(e) => return Some(e),
+        };
+        let refused = |kind: &str, name: &str| {
+            (!s.is_from).then(|| {
+                Error::new(code::WRONG_OBJECT_TYPE, format!("cannot copy from {kind} \"{name}\""))
+                    .hint("Try the COPY (SELECT ...) TO variant.")
+            })
+        };
+        match rel {
+            Relation::Table(t) => target_columns(&t, cols).err().or_else(|| {
+                if t.is_foreign() {
+                    refused("foreign table", &t.name)
+                } else if t.partkey.is_some() {
+                    refused("partitioned table", &t.name)
+                } else {
+                    None
+                }
+            }),
+            Relation::View(v) if v.materialized => match &v.storage {
+                Some(t) => target_columns(t, cols).err(),
+                None => None,
+            },
+            Relation::View(v) => view_column_error(&v, cols).or_else(|| refused("view", &v.name)),
+            _ => None,
+        }
+    }
+}
+
 fn target_columns(t: &Table, cols: &[String]) -> Result<Vec<usize>> {
     if cols.is_empty() {
         return Ok(t
@@ -1992,8 +2085,10 @@ fn split_text_escaped(line: &str, f: &CopyFormat, table: &str, lineno: usize) ->
     }
 }
 
-/// Split CSV data (quoted fields may span lines).
-fn split_csv(data: &str, f: &CopyFormat) -> Result<Records<'static>> {
+/// Split CSV data (quoted fields may span lines); a quoted field left open at the end: the
+/// records before it and that record's text, whose error comes after they went in
+/// (CopyReadLineText finds it reading that record).
+fn split_csv(data: &str, f: &CopyFormat) -> (Records<'static>, Option<String>) {
     let mut out = Vec::new();
     let mut fields: Vec<InField> = Vec::new();
     let mut cur = String::new();
@@ -2051,16 +2146,13 @@ fn split_csv(data: &str, f: &CopyFormat) -> Result<Records<'static>> {
         }
     }
     if in_quotes {
-        return Err(Error::new(
-            code::BAD_COPY_FILE_FORMAT,
-            "unterminated CSV quoted field",
-        ));
+        return (out, Some(line));
     }
     if !cur.is_empty() || !fields.is_empty() || quoted {
         finish_field(&mut cur, &mut quoted, &mut fields);
         out.push((line, fields));
     }
-    Ok(out)
+    (out, None)
 }
 
 /// COPY TO in binary format: the signature, flags and extension area, then each row as a
@@ -2305,9 +2397,10 @@ fn binary_copy_in(
             }
             break;
         };
+        // (The trailer: whatever follows it is an error, `parse_copy_data`.)
         if n == -1 {
             ended = true;
-            done = data.len();
+            done = p;
             break;
         }
         if n as usize != c.ncols {

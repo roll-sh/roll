@@ -155,10 +155,31 @@ pub fn split_copy(stmt: &str) -> (&str, Option<String>) {
     }
 }
 
+/// COPY FROM STDIN's data as sent: written `\binary ` and hex digits (binary COPY's), those bytes.
+pub fn copy_bytes(data: &str) -> Vec<u8> {
+    let Some(hex) = data.strip_prefix("\\binary ") else {
+        return data.as_bytes().to_vec();
+    };
+    let digits: Vec<u8> = hex.bytes().filter(u8::is_ascii_hexdigit).collect();
+    digits
+        .chunks(2)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap_or("0"), 16).unwrap_or(0))
+        .collect()
+}
+
+/// A binary COPY TO's CopyData message as compared: `\x` and its bytes in hex.
+pub fn copy_hex(b: &[u8]) -> String {
+    let mut s = String::from("\\x");
+    for x in b {
+        s.push_str(&format!("{x:02x}"));
+    }
+    s
+}
+
 /// Run one statement on the engine, reporting what a client would see.
 pub fn engine_query(s: &mut Session, stmt: &str) -> Vec<Event> {
     let (sql, data) = split_copy(stmt);
-    let r = s.query_copy(sql, data.as_deref().unwrap_or("").as_bytes());
+    let r = s.query_copy(sql, &copy_bytes(data.as_deref().unwrap_or("")));
     let mut events: Vec<Event> = s
         .notices
         .drain(..)
@@ -203,6 +224,7 @@ pub fn engine_query(s: &mut Session, stmt: &str) -> Vec<Event> {
                                     pg_engine::types::Value::Text(t) => {
                                         Some(t.trim_end_matches('\n').to_string())
                                     }
+                                    pg_engine::types::Value::Bytea(b) => Some(copy_hex(b)),
                                     _ => None,
                                 }]
                             })

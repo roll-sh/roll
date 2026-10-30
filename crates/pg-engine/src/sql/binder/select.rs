@@ -250,7 +250,12 @@ impl Binder<'_, '_> {
         w: &pb::WithClause,
         body: impl FnOnce(&mut Self) -> Result<(Plan, Vec<OutCol>)>,
     ) -> Result<(Plan, Vec<OutCol>)> {
-        let (mut plans, mut cte_names) = self.define_ctes(w)?;
+        // (A FOR UPDATE pushed down into this level from a query above locks its FROM
+        // items, not its CTEs: markQueryForLocking skips RTE_CTE.)
+        let saved_push = self.pushed_lock.take();
+        let defined = self.define_ctes(w);
+        self.pushed_lock = saved_push;
+        let (mut plans, mut cte_names) = defined?;
         // (The body is planned now: its CTE Scans' sizes are the queries' estimates.)
         let pushed = crate::sql::explain::CteEstimatesPushed(if self.deparse {
             0
@@ -2064,8 +2069,13 @@ impl Binder<'_, '_> {
             ));
         }
         let has_aggs = !st.aggs.is_empty() || grouped || having.is_some();
-        // CheckSelectLocking, in its order; LCS_asString of the first locking clause.
-        if locking.is_some() {
+        // CheckSelectLocking, in its order; LCS_asString of the first locking clause. (Parse
+        // analysis checks a FROM subquery a lock is pushed into; in a view's query the
+        // rewriter marks only relations and subqueries, and the planner checks a level with
+        // row marks: one reading none of them, only its CTEs say, isn't checked.)
+        if locking.is_some()
+            && (!s.locking_clause.is_empty() || self.view_stack.is_empty() || self.lockable_from(&s.from_clause))
+        {
             let what = if distinct_all || !distinct_on.is_empty() {
                 Some("DISTINCT clause")
             } else if grouped {
@@ -3754,6 +3764,22 @@ impl Binder<'_, '_> {
             out.clauses.extend(p.clauses.iter().cloned());
         }
         Ok((!out.clauses.is_empty()).then_some(out))
+    }
+
+    /// Whether a FROM list has an item a pushed-down lock marks (markQueryForLocking: a
+    /// relation, a view, a subquery; not a CTE reference, a function, VALUES).
+    fn lockable_from(&self, from: &[pb::Node]) -> bool {
+        from.iter().any(|n| match inner(n) {
+            Some(NodeEnum::RangeVar(rv)) => {
+                !(rv.schemaname.is_empty() && self.ctes.iter().flatten().any(|c| c.name == rv.relname))
+            }
+            Some(NodeEnum::RangeSubselect(_)) => true,
+            Some(NodeEnum::JoinExpr(j)) => {
+                let side = |x: &Option<Box<pb::Node>>| x.as_deref().is_some_and(|n| self.lockable_from(std::slice::from_ref(n)));
+                side(&j.larg) || side(&j.rarg)
+            }
+            _ => false,
+        })
     }
 
     /// The FOR UPDATE / SHARE of the query above pushed into a FROM subquery or a view's

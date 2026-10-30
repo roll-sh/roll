@@ -41,84 +41,57 @@ cmp_fns! {
     op_ge => |o| o != Ordering::Less,
 }
 
-/// record_cmp / record_eq's checks of the two row types, column by column: the same
-/// types, the same number of columns, and a comparison (`ordering`) or equality for each.
-fn check_record_types(lt: &T, rt: &T, c: &FnCtx, ordering: bool) -> Result<()> {
+/// record_eq / record_cmp's checks, made as they reach each column (columns after the first
+/// pair that differs, or after a NULL against a value, are never looked at): the two columns'
+/// types must be the same and have an equality (comparison) function; a field whose row
+/// types declare different collations has none (`ROW(x COLLATE "C", 1)` against `ROW(x, 1)`),
+/// which fails as a string comparison without a collation does; and when every column
+/// compared equal, the rows must have as many columns.
+fn check_record_columns(lt: &T, rt: &T, a: &Value, b: &Value, c: &FnCtx, ordering: bool) -> Result<()> {
     let (T::Row(l), T::Row(r)) = (lt, rt) else {
         return Ok(());
     };
     if l.fields.is_empty() || r.fields.is_empty() {
         return Ok(());
     }
-    for i in 0..l.fields.len().max(r.fields.len()) {
-        let (Some((_, lt)), Some((_, rt))) = (l.fields.get(i), r.fields.get(i)) else {
-            return Err(err!(
-                DATATYPE_MISMATCH,
-                "cannot compare record types with different numbers of columns"
-            ));
-        };
-        if lt.oid() != rt.oid() {
-            return Err(err!(
-                DATATYPE_MISMATCH,
-                "cannot compare dissimilar column types {} and {} at record column {}",
-                lt.without_typmod().display(),
-                rt.without_typmod().display(),
-                i + 1
-            ));
-        }
-        if c.exec.catalog().default_opclass(403, lt) == 0
-            && !matches!(lt, T::Row(_) | T::Record | T::Array(_))
-        {
-            return Err(if ordering {
-                err!(
-                    UNDEFINED_FUNCTION,
-                    "could not identify a comparison function for type {}",
-                    lt.without_typmod().display()
-                )
-            } else {
-                err!(
-                    UNDEFINED_FUNCTION,
-                    "could not identify an equality operator for type {}",
-                    lt.without_typmod().display()
-                )
-            });
-        }
-    }
-    Ok(())
-}
-
-/// record_cmp / record_eq take a field's collation from both row types; when they declare
-/// different ones (`ROW(x COLLATE "C", 1)` against `ROW(x, 1)`) the field has none, and
-/// comparing two values of it fails as a string comparison without a collation does. The
-/// fields are compared in order, so the comparison fails only on reaching such a field with
-/// two values.
-fn check_record_collations(lt: &T, rt: &T, a: &Value, b: &Value, c: &FnCtx) -> Result<()> {
-    let (T::Row(l), T::Row(r), Value::Record(x), Value::Record(y)) = (lt, rt, a, b) else {
+    let (Value::Record(x), Value::Record(y)) = (a, b) else {
         return Ok(());
     };
     // (`colls` isn't part of a row type's equality.)
-    if l.oid == r.oid && (l.oid != 0 || l.colls == r.colls) {
-        return Ok(());
-    }
+    let same_colls = l.oid == r.oid && (l.oid != 0 || l.colls == r.colls);
     let cat = c.exec.catalog();
     let field = |rt: &crate::types::RowType, i: usize| {
         crate::types::collation::field_collation(&cat, rt, i).unwrap_or_else(|| "default".into())
     };
-    let conflict = |i: usize| {
-        matches!((l.fields.get(i), r.fields.get(i)), (Some((_, t)), Some(_)) if t.collatable())
-            && field(l, i) != field(r, i)
-    };
-    if !(0..l.fields.len()).any(conflict) {
-        return Ok(());
-    }
     let fields = c.coll.and_then(|k| k.fields.as_ref());
-    for (i, (p, q)) in x.iter().zip(y.iter()).enumerate() {
+    let n = l.fields.len().min(r.fields.len());
+    for i in 0..n {
+        let ((_, ft), (_, gt)) = (&l.fields[i], &r.fields[i]);
+        if ft.oid() != gt.oid() {
+            return Err(err!(
+                DATATYPE_MISMATCH,
+                "cannot compare dissimilar column types {} and {} at record column {}",
+                ft.without_typmod().display(),
+                gt.without_typmod().display(),
+                i + 1
+            ));
+        }
+        if cat.default_opclass(403, ft) == 0 && !matches!(ft, T::Row(_) | T::Record | T::Array(_)) {
+            return Err(if ordering {
+                err!(UNDEFINED_FUNCTION, "could not identify a comparison function for type {}", ft.without_typmod().display())
+            } else {
+                err!(UNDEFINED_FUNCTION, "could not identify an equality operator for type {}", ft.without_typmod().display())
+            });
+        }
+        let (Some(p), Some(q)) = (x.get(i), y.get(i)) else {
+            return Ok(());
+        };
         match (p.is_null(), q.is_null()) {
             (true, true) => continue,
             (false, false) => {}
             _ => return Ok(()),
         }
-        if conflict(i) {
+        if !same_colls && ft.collatable() && field(l, i) != field(r, i) {
             return Err(err!(
                 INDETERMINATE_COLLATION,
                 "could not determine which collation to use for string comparison"
@@ -133,6 +106,12 @@ fn check_record_collations(lt: &T, rt: &T, a: &Value, b: &Value, c: &FnCtx) -> R
             return Ok(());
         }
     }
+    if l.fields.len() != r.fields.len() {
+        return Err(err!(
+            DATATYPE_MISMATCH,
+            "cannot compare record types with different numbers of columns"
+        ));
+    }
     Ok(())
 }
 
@@ -140,8 +119,7 @@ macro_rules! record_cmp_fns {
     ($($name:ident => ($ordering:expr, $test:expr)),* $(,)?) => {
         $(fn $name(a: &[Value], c: &FnCtx) -> Result<Value> {
             let (lt, rt) = (c.arg_type(0), c.arg_type(1));
-            check_record_types(&lt, &rt, c, $ordering)?;
-            check_record_collations(&lt, &rt, &a[0], &a[1], c)?;
+            check_record_columns(&lt, &rt, &a[0], &a[1], c, $ordering)?;
             let o = cmp_in(&a[0], &a[1], c);
             Ok(Value::Bool($test(o)))
         })*

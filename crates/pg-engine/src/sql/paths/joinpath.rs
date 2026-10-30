@@ -6267,11 +6267,7 @@ impl Search<'_, '_, '_> {
             }
             return best.cloned().or(Some((cheapest, false)));
         };
-        let fraction = if count < 0.0 || (count > 0.0 && offset < 0.0) {
-            0.1
-        } else {
-            1.0
-        };
+        let fraction = super::lim_fraction(count, offset);
         let mut best: Option<((JP, bool), f64, f64)> = None;
         for x in &out {
             let p = Path {
@@ -7732,24 +7728,15 @@ impl Planner<'_, '_> {
 
     /// `plan_joins` under a LIMIT (no order): the cheapest path for the rows it reads.
     pub(super) fn plan_joins_limited(&self, p: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> bool {
-        match lim {
-            Some((c, off)) if c > 0.0 && off >= 0.0 => {
-                let order = Order {
-                    keys: Vec::new(),
-                    complete: true,
-                    limit: Some((c, off)),
-                    width: 0,
-                    hint: false,
-                };
-                self.plan_joins_ordered(p, needed, Some(&order)).is_some()
-            }
-            _ => self.plan_joins(p, needed),
+        match limit_order(lim) {
+            Some(order) => self.plan_joins_ordered(p, needed, Some(&order)).is_some(),
+            None => self.plan_joins(p, needed),
         }
     }
 
     /// A WHERE filter over a join tree with outer joins inside: its clauses join the
     /// group, checked as low as the outer joins allow. False (nothing done) otherwise.
-    pub(super) fn plan_filtered_join(&self, p: &mut Plan, needed: &[bool]) -> bool {
+    pub(super) fn plan_filtered_join(&self, p: &mut Plan, needed: &[bool], lim: Option<(f64, f64)>) -> bool {
         let Plan::Filter { input, pred } = p else {
             return false;
         };
@@ -7789,7 +7776,8 @@ impl Planner<'_, '_> {
         }
         let mut join = (**input).clone();
         self.absorbed.replace(absorb);
-        let done = self.plan_joins_with(&mut join, &need, None, &[]).is_some();
+        let order = limit_order(lim).filter(|o| o.limit.is_some_and(|l| super::cursor_fraction(l.0).is_some()));
+        let done = self.plan_joins_with(&mut join, &need, order.as_ref(), &[]).is_some();
         self.absorbed.take();
         if !done {
             return false;
@@ -10090,4 +10078,19 @@ pub(super) fn lateral_join_leaf(p: &Plan) -> bool {
         q = input;
     }
     matches!(q, Plan::Join { .. })
+}
+
+/// The order a LIMIT that reads a constant number of rows, or a cursor's tuple fraction,
+/// plans a join group for (no keys): its cheapest path for that fraction.
+fn limit_order(lim: Option<(f64, f64)>) -> Option<Order> {
+    match lim {
+        Some((c, off)) if (c > 0.0 && off >= 0.0) || super::cursor_fraction(c).is_some() => Some(Order {
+            keys: Vec::new(),
+            complete: true,
+            limit: Some((c, off)),
+            width: 0,
+            hint: false,
+        }),
+        _ => None,
+    }
 }

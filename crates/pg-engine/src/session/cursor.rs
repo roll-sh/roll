@@ -62,6 +62,10 @@ pub struct Cursor {
     pub rels: Vec<u32>,
     /// Its query locks rows (FOR UPDATE / SHARE).
     pub row_marks: bool,
+    /// Without row locks, when its plan as PostgreSQL builds it decides it (a sort, an
+    /// Append: `explain::cursor_plan`): the tables `WHERE CURRENT OF` finds a row of, once
+    /// per scan (search_plan_tree).
+    pub simple: Option<Vec<u32>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -568,6 +572,7 @@ impl Cursor {
             subxact: 0,
             rels: Vec::new(),
             row_marks: false,
+            simple: None,
         };
         for r in rows {
             c.push_row(r);
@@ -1058,8 +1063,9 @@ impl Cursor {
         table_name: &str,
         cat: &crate::catalog::Catalog,
     ) -> Result<Option<Arc<[u8]>>> {
-        // A holdable cursor's rows are a store once its transaction has committed.
-        if self.hold && self.lazy.is_none() {
+        // A holdable cursor's rows are a store once its transaction has committed; a failed
+        // portal has no executor either (execCurrentOf: no QueryDesc).
+        if (self.hold && self.lazy.is_none()) || self.failed {
             return Err(Error::new(
                 code::INVALID_CURSOR_STATE,
                 format!("cursor \"{name}\" is held from a previous transaction"),
@@ -1082,6 +1088,11 @@ impl Cursor {
         let Some((t, keys)) = &self.keys else {
             return Err(not_simple());
         };
+        if let Some(simple) = &self.simple
+            && simple.iter().filter(|o| **o == table).count() != 1
+        {
+            return Err(not_simple());
+        }
         // Several locking scans (`marked_keyed_plan`): the one of this table.
         let of_table = |k: &[u8]| {
             k.get(..4).is_some_and(|b| {
@@ -1104,7 +1115,8 @@ impl Cursor {
                     ));
                 }
             }
-        } else if *t != table && !cat.inheritors(*t).contains(&table) {
+        // (A plan that decided it, `simple`, found the table's scan: an Append's member.)
+        } else if self.simple.is_none() && *t != table && !cat.inheritors(*t).contains(&table) {
             return Err(not_simple());
         }
         if self.pos == 0 || self.pos > keys.len() {
@@ -1134,7 +1146,19 @@ impl Cursor {
 pub fn scrollable(plan: &Plan) -> bool {
     fn go(p: &Plan) -> bool {
         match p {
-            Plan::Scan(s) => s.mark.is_none(),
+            // (A bitmap heap scan can't; an index scan as its access method says,
+            // amcanbackward.)
+            Plan::Scan(s) => {
+                s.mark.is_none()
+                    && match &s.access {
+                        crate::sql::plan::Access::Bitmap(..) => false,
+                        crate::sql::plan::Access::Index { .. } => s
+                            .index
+                            .as_ref()
+                            .is_none_or(|(ix, _)| matches!(ix.method.as_str(), "btree" | "hash")),
+                        _ => true,
+                    }
+            }
             Plan::SysScan { .. }
             | Plan::FunctionScan { .. }
             | Plan::PlCall { .. }
@@ -1152,6 +1176,22 @@ pub fn scrollable(plan: &Plan) -> bool {
         }
     }
     go(plan)
+}
+
+/// Whether what a cursor over `plan` can do (`scrollable`, `keyed_plan`) depends on choices
+/// only the plan PostgreSQL builds shows (`explain::cursor_plan`): a sort it may replace
+/// with an ordered path (an index, a join, an incremental sort) or an Append it may merge.
+pub fn plan_decides(plan: &Plan) -> bool {
+    match plan {
+        Plan::Sort { .. } | Plan::Append { .. } => true,
+        Plan::Filter { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::With { body: input, .. }
+        | Plan::Barrier { input, .. }
+        | Plan::Context { input, .. } => plan_decides(input),
+        _ => false,
+    }
 }
 
 /// `plan` changed to also return each row's storage key as a trailing column, when it is a
@@ -1257,12 +1297,9 @@ pub fn keyed_plan(plan: &Plan) -> Option<(Plan, u32)> {
                     sh,
                 )
             }
-            // An inheritance tree's scans: each row's key names its own table.
-            Plan::Append {
-                inputs,
-                inh: inh @ Some(_),
-                ..
-            } => {
+            // An inheritance tree's scans, or a UNION ALL's (search_plan_tree descends an
+            // Append): each row's key names its own table.
+            Plan::Append { inputs, inh, .. } => {
                 let mut out = Vec::with_capacity(inputs.len());
                 let mut first: Option<(u32, usize)> = None;
                 for p in inputs {

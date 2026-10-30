@@ -4589,7 +4589,7 @@ impl Builder<'_, '_> {
                         .iter()
                         .any(|c| c.kind.index() == Some(ix.oid) && c.deferrable);
                     let not_null = ix.nulls_not_distinct
-                        || cols.iter().all(|&k| t.columns.get(k).is_some_and(|c| c.not_null));
+                        || cols.iter().all(|&k| t.known_not_null(k));
                     if !ix.unique
                         || !ix.valid
                         || deferrable
@@ -7733,7 +7733,7 @@ impl Builder<'_, '_> {
                     self.sort_costs(&mut sn, &c.node);
                     let alt = &alts[i];
                     if parallel::disabled_nodes(alt) <= parallel::disabled_nodes(&c.node)
-                        && alt.total_cost <= sn.total_cost
+                        && final_cheaper(p, (alt.startup_cost, alt.total_cost), (sn.startup_cost, sn.total_cost))
                     {
                         c.node = alts.remove(i);
                     }
@@ -17539,7 +17539,8 @@ fn ordered_append(order: &[crate::sql::paths::PartOrder], slots: &mut [Option<Ex
     }
     a.rows = a.children.iter().map(|k| k.rows).sum();
     a.width = a.children.iter().map(|k| k.width).max().unwrap_or(0);
-    a.startup_cost = a.children.first().map_or(0.0, |k| k.startup_cost);
+    // (cost_append with pathkeys: every member's startup.)
+    a.startup_cost = a.children.iter().map(|k| k.startup_cost).sum();
     a.total_cost = a.children.iter().map(|k| k.total_cost).sum::<f64>() + costs::CPU_TUPLE_COST * 0.5 * a.rows;
     a.order = list.to_vec();
     a
@@ -20370,6 +20371,23 @@ thread_local! {
     /// explained (remove_unused_subquery_outputs' NULLs are constants there).
     static UNREAD_NULLS: std::cell::RefCell<std::collections::HashSet<usize>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+    /// Explaining a DECLAREd cursor's plan: its tuple fraction (cursor_tuple_fraction,
+    /// `paths::cursor_limit`; 0: none).
+    pub static CURSOR_FRACTION: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// The node of the plan being explained that is its final relation's (under its
+    /// projections), with the cursor's fraction it is chosen for
+    /// (get_cheapest_fractional_path).
+    static FINAL_NODE: std::cell::Cell<Option<(usize, f64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether path costs (startup, total) `a` are no more than `b`'s for the rows read: the
+/// cursor's fraction of them at the query's final node `p` (compare_fractional_path_costs),
+/// else all.
+fn final_cheaper(p: &Plan, a: (f64, f64), b: (f64, f64)) -> bool {
+    match FINAL_NODE.get() {
+        Some((at, f)) if at == addr(p) => a.0 + f * (a.1 - a.0) <= b.0 + f * (b.1 - b.0),
+        _ => a.1 <= b.1,
+    }
 }
 
 /// The statement's select-list projection when only nodes with set_dummy_tlist_references'
@@ -20623,167 +20641,7 @@ pub fn explain(
     // (The planner made the copies already; a plan built otherwise gets them here.)
     let split = if instr.is_none() { split_shared_subqueries(plan) } else { None };
     let plan = split.as_ref().unwrap_or(plan);
-    // (Built again when it groups partitionwise: the parents' names go unused then.)
-    // (An inheritance tree that is a UNION ALL's arm is flattened into its Append: the
-    // parent's name goes unused too.)
-    if std::env::var_os("ROLL_DUMP_PLAN").is_some() {
-        dump_plan(plan, 0);
-    }
-    UNREAD_NULLS.with(|u| {
-        let mut set = std::collections::HashSet::new();
-        select_lists(plan, &mut set);
-        *u.borrow_mut() = set;
-    });
-    let mut skip: Vec<usize> = Vec::new();
-    union_inh_appends(plan, &mut skip);
-    let mut pw_named = false;
-    let mut orders: Vec<Vec<usize>> = Vec::new();
-    let mut ordered = false;
-    let gtl = std::rc::Rc::new(group_tlists(plan));
-    let mut renumber: Option<std::rc::Rc<Vec<usize>>> = None;
-    let mut fresh_hashed: Option<std::rc::Rc<std::collections::HashSet<usize>>> = None;
-    let mut sub_ranks: Option<std::rc::Rc<HashMap<usize, usize>>> = None;
-    let root = loop {
-    let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip, &orders, sub_ranks.as_deref());
-    // ON CONFLICT DO UPDATE's EXCLUDED is a range table entry of its own.
-    // (Under a rule's actions too: a CTE of them, a frame.)
-    fn excluded_rte(p: &Plan) -> bool {
-        match p {
-            Plan::Insert(i) => i
-                .on_conflict
-                .as_ref()
-                .is_some_and(|oc| matches!(oc.action, ConflictAction::Update { .. })),
-            Plan::Context { input, .. } | Plan::Project { input, .. } => excluded_rte(input),
-            Plan::With { body, ctes, .. } => excluded_rte(body) || ctes.iter().any(|(_, c)| excluded_rte(c)),
-            _ => false,
-        }
-    }
-    let excluded = excluded_rte(plan) as usize;
-    let names_before = refnames.clone();
-    let mut b = Builder {
-        ctx,
-        o,
-        // (An inheritance tree's parent is a range table entry besides its members.)
-        prefix: refnames.len() + hidden_rtes + results + excluded + inh_parents(plan) + dummy_merge_target(plan) > 1,
-        refnames,
-        labels: HashMap::new(),
-        plan_ids: 0,
-        outer: Vec::new(),
-        outer_depth: Vec::new(),
-        depth: 0,
-        pending: Vec::new(),
-        inits: Vec::new(),
-        params,
-        ctes: HashMap::new(),
-        needed: {
-            let mut n = needed_masks(plan);
-            grouping_needs(plan, &gtl, &mut n);
-            n
-        },
-        num_exec: None,
-        top: 0,
-        // (standard_planner: a parallel unsafe function anywhere in the query means no
-        // parallel plan at all.)
-        par: super::paths::parallel::ParCfg::read(ctx)
-            .enabled()
-            .filter(|_| super::paths::parallel::plan_hazard(plan, &ctx.catalog()) != 'u'),
-        member_scan: false,
-        group_order: None,
-        group_order_full: false,
-        group_named: Vec::new(),
-        whole_vars: HashMap::new(),
-        unplanned_cols: Default::default(),
-        sub_alias: None,
-        json_casts: Vec::new(),
-        proj_depth: 0,
-        level_tops: std::collections::HashSet::new(),
-        group_tops: std::collections::HashSet::new(),
-        json_aggs: HashMap::new(),
-        gtl: gtl.clone(),
-        carried: HashMap::new(),
-        renumber: renumber.clone(),
-        events: Vec::new(),
-        lvl_stack: Vec::new(),
-        lvl_next: 0,
-        spans: Vec::new(),
-        key_sub_ids: Default::default(),
-        key_subs: HashMap::new(),
-        phantoms: HashMap::new(),
-        samples: unrepeatable_samples(plan),
-        having: None,
-        pw_aggs: Vec::new(),
-        pw_partial: false,
-        join_force: None,
-        order_hint: None,
-        agg_key: None,
-        agg_input: None,
-        unique_sides: Default::default(),
-        plain_distinct: None,
-        shown: shown_subqueries(plan, &needed_masks(plan)),
-        rowmarks: rowmark_scans(plan),
-        rowmark_junk: Default::default(),
-        copy_marks: copy_mark_leaves(plan),
-        plain_consts: plain_const_lists(plan),
-        alts: Default::default(),
-        sub_params: Vec::new(),
-        detach: false,
-        unattached: HashMap::new(),
-        fresh_hashed: fresh_hashed.clone().unwrap_or_default(),
-        dummy_target: None,
-    };
-    b.top = addr(plan);
-    b.group_tops.insert(grouping_top(plan));
-    if let Plan::Merge(m) = &**plan
-        && dummy_merge_target(plan) == 1
-    {
-        b.dummy_target = Some(m.alias.clone().unwrap_or_else(|| m.rules.table.name.clone()));
-    }
-    let root = b.level(plan);
-    if !pw_named && !b.pw_aggs.is_empty() {
-        pw_named = true;
-        skip.extend(b.pw_aggs.iter().copied());
-        continue;
-    }
-    // (Again when a Parallel Append runs a UNION ALL's arms kept subqueries in another
-    // order than the query lists them: setrefs names their relations in the plan's.)
-    if !ordered {
-        ordered = true;
-        let mut o2 = Vec::new();
-        arm_orders(&root, &mut o2);
-        if !o2.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &o2, sub_ranks.as_deref()).0 != b.refnames {
-            orders = o2;
-            continue;
-        }
-    }
-    // (Again with the SubPlans numbered in the order Postgres plans them.)
-    if renumber.is_none()
-        && let Some(r) = renumbering(&b.events, &b.spans, matches!(&**plan, Plan::Merge(_)))
-    {
-        renumber = Some(std::rc::Rc::new(r));
-        continue;
-    }
-    // (Again with the SubPlans' relations named in their numbers' order.)
-    if sub_ranks.is_none() {
-        let r = b.sub_ranks();
-        let again = !r.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &orders, Some(&r)).0 != names_before;
-        sub_ranks = Some(std::rc::Rc::new(r));
-        if again {
-            continue;
-        }
-    }
-    // (Again with the hashed alternatives shown beside their plain ones named apart.)
-    if fresh_hashed.is_none() {
-        let both: std::collections::HashSet<usize> =
-            b.alts.iter().filter(|(_, a)| a.shown == [true, true]).map(|(id, _)| *id).collect();
-        let again = !both.is_empty();
-        fresh_hashed = Some(std::rc::Rc::new(both));
-        if again {
-            continue;
-        }
-    }
-    let root = b.single_copy(plan, root);
-    break if o.scroll && !backward_ok(&root) { b.materialize_top(root) } else { root };
-    };
+    let root = explained_tree(plan, hidden_rtes, o, ctx, params);
     parallel::note_shown(&root);
     let mut root = root;
     let overex = (o.debug || o.range_table).then(|| {
@@ -21157,18 +21015,273 @@ fn quoted_constant(o: &str) -> bool {
     })
 }
 
-/// ExecSupportsBackwardScan over the explained plan.
-fn backward_ok(n: &ExNode) -> bool {
+
+/// The plan tree EXPLAIN shows for `plan` (a SCROLL cursor's with a Materialize on top
+/// when it can't run backward).
+fn explained_tree(plan: &Arc<Plan>, hidden_rtes: usize, o: &Options, ctx: &ExecCtx, params: &[crate::types::Value]) -> ExNode {
+    // (Built again when it groups partitionwise: the parents' names go unused then.)
+    // (An inheritance tree that is a UNION ALL's arm is flattened into its Append: the
+    // parent's name goes unused too.)
+    if std::env::var_os("ROLL_DUMP_PLAN").is_some() {
+        dump_plan(plan, 0);
+    }
+    let f = CURSOR_FRACTION.get();
+    FINAL_NODE.set((f > 0.0 && f < 1.0).then(|| {
+        let mut q: &Plan = plan;
+        while let Plan::Project { input, .. } | Plan::Context { input, .. } = q {
+            q = input;
+        }
+        (addr(q), f)
+    }));
+    UNREAD_NULLS.with(|u| {
+        let mut set = std::collections::HashSet::new();
+        select_lists(plan, &mut set);
+        *u.borrow_mut() = set;
+    });
+    let mut skip: Vec<usize> = Vec::new();
+    union_inh_appends(plan, &mut skip);
+    let mut pw_named = false;
+    let mut orders: Vec<Vec<usize>> = Vec::new();
+    let mut ordered = false;
+    let gtl = std::rc::Rc::new(group_tlists(plan));
+    let mut renumber: Option<std::rc::Rc<Vec<usize>>> = None;
+    let mut fresh_hashed: Option<std::rc::Rc<std::collections::HashSet<usize>>> = None;
+    let mut sub_ranks: Option<std::rc::Rc<HashMap<usize, usize>>> = None;
+    loop {
+    let (refnames, results) = assign_refnames_skip(plan, Some(ctx), &skip, &orders, sub_ranks.as_deref());
+    // ON CONFLICT DO UPDATE's EXCLUDED is a range table entry of its own.
+    // (Under a rule's actions too: a CTE of them, a frame.)
+    fn excluded_rte(p: &Plan) -> bool {
+        match p {
+            Plan::Insert(i) => i
+                .on_conflict
+                .as_ref()
+                .is_some_and(|oc| matches!(oc.action, ConflictAction::Update { .. })),
+            Plan::Context { input, .. } | Plan::Project { input, .. } => excluded_rte(input),
+            Plan::With { body, ctes, .. } => excluded_rte(body) || ctes.iter().any(|(_, c)| excluded_rte(c)),
+            _ => false,
+        }
+    }
+    let excluded = excluded_rte(plan) as usize;
+    let names_before = refnames.clone();
+    let mut b = Builder {
+        ctx,
+        o,
+        // (An inheritance tree's parent is a range table entry besides its members.)
+        prefix: refnames.len() + hidden_rtes + results + excluded + inh_parents(plan) + dummy_merge_target(plan) > 1,
+        refnames,
+        labels: HashMap::new(),
+        plan_ids: 0,
+        outer: Vec::new(),
+        outer_depth: Vec::new(),
+        depth: 0,
+        pending: Vec::new(),
+        inits: Vec::new(),
+        params,
+        ctes: HashMap::new(),
+        needed: {
+            let mut n = needed_masks(plan);
+            grouping_needs(plan, &gtl, &mut n);
+            n
+        },
+        num_exec: None,
+        top: 0,
+        // (standard_planner: a parallel unsafe function anywhere in the query means no
+        // parallel plan at all.)
+        par: super::paths::parallel::ParCfg::read(ctx)
+            .enabled()
+            .filter(|_| super::paths::parallel::plan_hazard(plan, &ctx.catalog()) != 'u'),
+        member_scan: false,
+        group_order: None,
+        group_order_full: false,
+        group_named: Vec::new(),
+        whole_vars: HashMap::new(),
+        unplanned_cols: Default::default(),
+        sub_alias: None,
+        json_casts: Vec::new(),
+        proj_depth: 0,
+        level_tops: std::collections::HashSet::new(),
+        group_tops: std::collections::HashSet::new(),
+        json_aggs: HashMap::new(),
+        gtl: gtl.clone(),
+        carried: HashMap::new(),
+        renumber: renumber.clone(),
+        events: Vec::new(),
+        lvl_stack: Vec::new(),
+        lvl_next: 0,
+        spans: Vec::new(),
+        key_sub_ids: Default::default(),
+        key_subs: HashMap::new(),
+        phantoms: HashMap::new(),
+        samples: unrepeatable_samples(plan),
+        having: None,
+        pw_aggs: Vec::new(),
+        pw_partial: false,
+        join_force: None,
+        order_hint: None,
+        agg_key: None,
+        agg_input: None,
+        unique_sides: Default::default(),
+        plain_distinct: None,
+        shown: shown_subqueries(plan, &needed_masks(plan)),
+        rowmarks: rowmark_scans(plan),
+        rowmark_junk: Default::default(),
+        copy_marks: copy_mark_leaves(plan),
+        plain_consts: plain_const_lists(plan),
+        alts: Default::default(),
+        sub_params: Vec::new(),
+        detach: false,
+        unattached: HashMap::new(),
+        fresh_hashed: fresh_hashed.clone().unwrap_or_default(),
+        dummy_target: None,
+    };
+    b.top = addr(plan);
+    b.group_tops.insert(grouping_top(plan));
+    if let Plan::Merge(m) = &**plan
+        && dummy_merge_target(plan) == 1
+    {
+        b.dummy_target = Some(m.alias.clone().unwrap_or_else(|| m.rules.table.name.clone()));
+    }
+    let root = b.level(plan);
+    if !pw_named && !b.pw_aggs.is_empty() {
+        pw_named = true;
+        skip.extend(b.pw_aggs.iter().copied());
+        continue;
+    }
+    // (Again when a Parallel Append runs a UNION ALL's arms kept subqueries in another
+    // order than the query lists them: setrefs names their relations in the plan's.)
+    if !ordered {
+        ordered = true;
+        let mut o2 = Vec::new();
+        arm_orders(&root, &mut o2);
+        if !o2.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &o2, sub_ranks.as_deref()).0 != b.refnames {
+            orders = o2;
+            continue;
+        }
+    }
+    // (Again with the SubPlans numbered in the order Postgres plans them.)
+    if renumber.is_none()
+        && let Some(r) = renumbering(&b.events, &b.spans, matches!(&**plan, Plan::Merge(_)))
+    {
+        renumber = Some(std::rc::Rc::new(r));
+        continue;
+    }
+    // (Again with the SubPlans' relations named in their numbers' order.)
+    if sub_ranks.is_none() {
+        let r = b.sub_ranks();
+        let again = !r.is_empty() && assign_refnames_skip(plan, Some(ctx), &skip, &orders, Some(&r)).0 != names_before;
+        sub_ranks = Some(std::rc::Rc::new(r));
+        if again {
+            continue;
+        }
+    }
+    // (Again with the hashed alternatives shown beside their plain ones named apart.)
+    if fresh_hashed.is_none() {
+        let both: std::collections::HashSet<usize> =
+            b.alts.iter().filter(|(_, a)| a.shown == [true, true]).map(|(id, _)| *id).collect();
+        let again = !both.is_empty();
+        fresh_hashed = Some(std::rc::Rc::new(both));
+        if again {
+            continue;
+        }
+    }
+    let root = b.single_copy(plan, root);
+    break if o.scroll && !backward_ok(&root, &scan_plans(plan)) { b.materialize_top(root) } else { root };
+    }
+}
+
+/// The table scans of `plan` by their address (`ExNode::key`).
+fn scan_plans(plan: &Plan) -> HashMap<usize, &ScanPlan> {
+    fn go<'p>(p: &'p Plan, out: &mut HashMap<usize, &'p ScanPlan>) {
+        if let Plan::Scan(s) = p {
+            out.insert(addr(p), s);
+        }
+        for c in plan_inputs(p) {
+            go(c, out);
+        }
+    }
+    let mut out = HashMap::new();
+    go(plan, &mut out);
+    out
+}
+
+/// ExecSupportsBackwardScan over the explained plan (`scans`: its table scans, whose
+/// index's access method says whether an index scan can run backward, amcanbackward).
+fn backward_ok(n: &ExNode, scans: &HashMap<usize, &ScanPlan>) -> bool {
+    if n.parallel_aware {
+        return false;
+    }
     match n.node_type {
         "Result" | "Limit" | "LockRows" | "Subquery Scan" => n
             .children
             .iter()
             .find(|c| matches!(c.relationship, Some("Outer" | "Subquery")))
-            .is_some_and(backward_ok),
-        "Append" => n.children.iter().filter(|c| c.relationship == Some("Member")).all(backward_ok),
+            .is_some_and(|c| backward_ok(c, scans)),
+        "Append" => n.children.iter().filter(|c| c.relationship == Some("Member")).all(|c| backward_ok(c, scans)),
         "Seq Scan" | "Tid Scan" | "Tid Range Scan" | "Function Scan" | "Values Scan" | "CTE Scan"
-        | "Materialize" | "Sort" | "Index Scan" | "Index Only Scan" => true,
+        | "Materialize" | "Sort" => true,
+        "Index Scan" | "Index Only Scan" => n
+            .key
+            .and_then(|k| scans.get(&k))
+            .and_then(|s| s.index.as_ref())
+            .is_none_or(|(ix, _)| matches!(ix.method.as_str(), "btree" | "hash")),
         _ => false,
+    }
+}
+
+/// The tuple fraction a cursor is planned for, from cursor_tuple_fraction as
+/// standard_planner takes it (0: 1 or more, all rows; at least 1e-10).
+pub fn cursor_fraction(ctx: &ExecCtx) -> f64 {
+    let f = ctx
+        .sess
+        .settings
+        .borrow()
+        .get_raw("cursor_tuple_fraction")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.1);
+    if f >= 1.0 { 0.0 } else { f.max(1e-10) }
+}
+
+/// What a DECLAREd cursor's plan, as EXPLAIN shows it (planned for cursor_tuple_fraction:
+/// `paths::cursor_limit`), lets it do.
+pub struct CursorPlan {
+    /// Fetch backward though declared without SCROLL (PerformCursorOpen:
+    /// ExecSupportsBackwardScan, and no row marks).
+    pub backward: bool,
+    /// The tables whose current row `WHERE CURRENT OF` finds in a cursor without FOR
+    /// UPDATE / SHARE (execCurrentOf's search_plan_tree: the scans reached through Result,
+    /// Limit, Subquery Scan and Append nodes), once per scan.
+    pub scans: Vec<u32>,
+}
+
+pub fn cursor_plan(plan: &Arc<Plan>, hidden_rtes: usize, ctx: &ExecCtx, params: &[Value]) -> CursorPlan {
+    fn reach(n: &ExNode, scans: &HashMap<usize, &ScanPlan>, out: &mut Vec<u32>) {
+        match n.node_type {
+            "Result" | "Limit" | "Subquery Scan" | "Append" => {
+                for c in n.children.iter().filter(|c| matches!(c.relationship, Some("Outer" | "Subquery" | "Member"))) {
+                    reach(c, scans, out);
+                }
+            }
+            "Seq Scan" | "Sample Scan" | "Index Scan" | "Index Only Scan" | "Bitmap Heap Scan" | "Tid Scan"
+            | "Tid Range Scan" | "Foreign Scan" => {
+                if let Some(s) = n.key.and_then(|k| scans.get(&k)) {
+                    out.push(s.table.oid);
+                }
+            }
+            _ => {}
+        }
+    }
+    let _serial = crate::scoped::set(&super::paths::parallel::SERIAL, true, "parallel::SERIAL");
+    let _frac = crate::scoped::set(&CURSOR_FRACTION, cursor_fraction(ctx), "explain::CURSOR_FRACTION");
+    let split = split_shared_subqueries(plan);
+    let plan = split.as_ref().unwrap_or(plan);
+    let root = explained_tree(plan, hidden_rtes, &estimate_options(), ctx, params);
+    let scans = scan_plans(plan);
+    let mut reached = Vec::new();
+    reach(&root, &scans, &mut reached);
+    CursorPlan {
+        backward: backward_ok(&root, &scans),
+        scans: reached,
     }
 }
 

@@ -2870,10 +2870,13 @@ impl AggNode {
             // A GroupAggregate over a Sort (which the plan here doesn't run): its
             // aggregates see each group's rows in the sort's order, which aggregates whose
             // results depend on their rows' order (float sums, array_agg, ties of min /
-            // max) show.
+            // max) show; and a group shows the key of its first row in that order, which
+            // keys whose equal values look different (`1 mon` / `30 days`, 1.0 / 1.00, -0 /
+            // 0, under a nondeterministic collation) show.
             let presort = presort.or_else(|| {
                 // (Estimated only when it can matter: a plain aggregate has one group.)
-                if self.groups.is_empty() || self.aggs.iter().all(order_insensitive) {
+                let shown = colls.iter().any(Option::is_some) || self.groups.iter().any(|g| equal_apart(&g.ty()));
+                if self.groups.is_empty() || (!shown && self.aggs.iter().all(order_insensitive)) {
                     return None;
                 }
                 let e = super::pghash::agg_estimate(self.plan.as_ref()?, ctx);
@@ -3492,6 +3495,17 @@ fn through_projection(e: &crate::sql::expr::Expr, proj: &[crate::sql::expr::Expr
 
 /// Whether an aggregate's result is the same whatever order its rows come in (counts,
 /// exact sums and averages, min / max of types whose equal values are the same).
+/// Whether two equal values of type `t` can look different (interval_eq, numeric_eq,
+/// float8eq over -0 / 0, jsonb's numbers, arrays and ranges of them).
+fn equal_apart(t: &crate::types::DataType) -> bool {
+    use crate::types::DataType as D;
+    match t {
+        D::Interval(..) | D::Numeric(_) | D::Float4 | D::Float8 | D::Jsonb => true,
+        D::Array(e) => equal_apart(e),
+        _ => false,
+    }
+}
+
 fn order_insensitive(a: &AggCall) -> bool {
     use crate::types::DataType as D;
     if a.user.is_some() || a.distinct || !a.order_by.is_empty() {

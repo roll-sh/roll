@@ -1157,10 +1157,14 @@ impl Session {
                 }
                 Ok(Outcome::CopyOut(c)) => {
                     let mut r = QueryResult::command(c.tag.clone());
+                    // (Binary COPY's messages as their bytes.)
                     r.rows = c
                         .data
                         .iter()
-                        .map(|d| vec![Value::Text(String::from_utf8_lossy(d).into())])
+                        .map(|d| match c.binary {
+                            true => vec![Value::Bytea(d.as_slice().into())],
+                            false => vec![Value::Text(String::from_utf8_lossy(d).into())],
+                        })
                         .collect();
                     out.push(r);
                     self.notices.extend(c.trailing);
@@ -1526,6 +1530,18 @@ impl Session {
 
     /// Bind (or reuse the cached binding of) a query statement.
     fn bound(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<Arc<BoundQuery>> {
+        self.bound_as(p, stmt, params, false)
+    }
+
+    /// `bound`, for a DECLAREd cursor's query when `cursor`: planned for
+    /// cursor_tuple_fraction of its rows (CURSOR_OPT_FAST_PLAN), never kept.
+    pub(super) fn bound_as(
+        &mut self,
+        p: &Prepared,
+        stmt: &Node,
+        params: &[Value],
+        cursor: bool,
+    ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
         let version = self
             .txn
@@ -1544,7 +1560,8 @@ impl Session {
                     != Some("off"),
             )
         };
-        if let Some((v, sp, w, b)) = &*p.bound.lock()
+        if !cursor
+            && let Some((v, sp, w, b)) = &*p.bound.lock()
             && *v == version
             && *sp == path
             && *w == who
@@ -1556,10 +1573,23 @@ impl Session {
         // (Parameters a Parse message declared as domains keep them: a bare `$n` of a
         // domain-array parameter is a column of that type; sqlx.)
         let domains = p.plans.lock().param_oids.clone();
+        let fraction = cursor.then(|| {
+            self.state
+                .settings
+                .borrow()
+                .get_raw("cursor_tuple_fraction")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.1)
+        });
         let b = self.with_ctx_path(params, Some(path.clone()), |ctx| {
             let mut b = Binder::new(ctx, types);
             b.no_params = no_params;
             b.param_domains = domains;
+            // (The query's own level: 1.)
+            if let Some(f) = fraction {
+                b.arm_limit = crate::sql::paths::cursor_limit(f).map(|(c, o)| (1, c, o));
+            }
+            let _serial = crate::scoped::set(&crate::sql::paths::parallel::SERIAL, cursor, "parallel::SERIAL");
             b.bind_statement(stmt)
         })?;
         if let Some(fixed) = &p.plans.lock().fixed_result
@@ -1572,6 +1602,9 @@ impl Session {
             .routine("RevalidateCachedQuery"));
         }
         let b = Arc::new(b);
+        if cursor {
+            return Ok(b);
+        }
         *p.bound.lock() = Some((version, path, who, b.clone()));
         Ok(b)
     }

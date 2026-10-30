@@ -165,7 +165,7 @@ impl Binder<'_, '_> {
                 continue;
             };
             let when = match &trig.when {
-                Some(w) => Some(self.bind_trigger_when(t, w)?),
+                Some(w) => Some(self.bind_trigger_when_as(t, &ast::parse_expr(w)?, true)?),
                 None => None,
             };
             out.push(BoundTrigger {
@@ -192,10 +192,22 @@ impl Binder<'_, '_> {
 
     /// `bind_trigger_when` of the condition as written (errors point into the statement).
     pub(crate) fn bind_trigger_when_node(&mut self, t: &Arc<Table>, node: &Node) -> Result<Expr> {
+        self.bind_trigger_when_as(t, node, false)
+    }
+
+    /// A trigger's WHEN; to fire it (`firing`), its virtual generated columns read as their
+    /// expressions over the row, as ExecInitExpr gets them expanded (its dependencies are
+    /// the columns as written).
+    fn bind_trigger_when_as(&mut self, t: &Arc<Table>, node: &Node, firing: bool) -> Result<Expr> {
         let n = t.columns.len();
-        let old = table_rel(t, "old", None);
+        let mut old = table_rel(t, "old", None);
+        let mut new = table_rel(t, "new", None);
+        if firing {
+            self.virtual_columns(t, &mut old)?;
+            self.virtual_columns(t, &mut new)?;
+        }
         let new = Scope {
-            rels: vec![table_rel(t, "new", None)],
+            rels: vec![new],
         }
         .shifted(n)
         .rels
@@ -641,6 +653,26 @@ impl Binder<'_, '_> {
             .find(|r| !r.anonymous && r.alias == alias)
             .cloned();
         let nrels = self.scope().rels.len();
+        // A virtual generated column reads as its expression over the row, as the rewriter
+        // expands it (computing it can fail: the row written has NULL there).
+        let at = self.scope().rels.iter().position(|r| !r.anonymous && r.alias == alias);
+        let original = at.map(|at| (at, self.scope().rels[at].clone()));
+        let mut base = base;
+        if let (Some(b), Some(at)) = (&mut base, at)
+            && let Some(t) = b.table.clone().filter(|t| t.columns.iter().any(|c| c.virtual_gen && !c.dropped))
+        {
+            let mut vr = super::table_rel(&t, &t.name, None);
+            self.virtual_columns(&t, &mut vr)?;
+            for c in b.cols.iter_mut().filter(|c| c.table == t.oid && c.attnum > 0) {
+                let i = c.attnum as usize - 1;
+                if t.columns.get(i).is_some_and(|x| x.virtual_gen && !x.dropped)
+                    && let Some(v) = vr.cols.iter().find(|v| v.attnum == c.attnum)
+                {
+                    c.expr = v.expr.clone().shift_cols(start as isize);
+                }
+            }
+            self.level().scope.rels[at] = b.clone();
+        }
         let aliases = (
             crate::sql::func::intern(old.as_deref().unwrap_or("old")),
             crate::sql::func::intern(new.as_deref().unwrap_or("new")),
@@ -681,6 +713,9 @@ impl Binder<'_, '_> {
         }
         let targets = self.in_clause(Clause::Returning, |b| b.bind_targets(list));
         self.level().scope.rels.truncate(nrels);
+        if let Some((at, r)) = original {
+            self.level().scope.rels[at] = r;
+        }
         let targets = targets?;
         if targets.is_empty() {
             return Err(with_pos(
@@ -765,9 +800,9 @@ impl Binder<'_, '_> {
         let over_user = overriding == pb::OverridingKind::OverridingUserValue;
 
         // Target columns. An updatable view without a column list takes as many columns
-        // as values are given.
+        // as values are given (with one, fewer values fail first: `insert_targets`).
         let given = match &view {
-            Some(_) if s.cols.is_empty() => {
+            Some(_) => {
                 let sel = s.select_stmt.as_deref().and_then(|n| match inner(n) {
                     Some(NodeEnum::SelectStmt(sel)) => Some(sel.as_ref()),
                     _ => None,
@@ -1126,6 +1161,14 @@ impl Binder<'_, '_> {
                     format!("multiple assignments to same column \"{}\"", t.columns[b].name),
                 )
             };
+            // (Fewer values than the columns named: parse analysis's error
+            // (transformInsertRow) comes before the rewriter's (rewriteTargetView).)
+            let fewer = || {
+                with_pos(
+                    Error::new(code::SYNTAX_ERROR, "INSERT has more target columns than expressions"),
+                    ast::location(&cols[given]),
+                )
+            };
             if cols.is_empty() {
                 for (k, c) in v.cols.iter().enumerate().take(given.min(v.cols.len())) {
                     let Some(b) = c.base else {
@@ -1155,6 +1198,9 @@ impl Binder<'_, '_> {
                         ));
                     };
                     let Some(i) = v.cols[k].base else {
+                        if given > 0 && given < cols.len() {
+                            return Err(fewer());
+                        }
                         return Err(nonupd(&rt.name));
                     };
                     if let Some(p) = target.iter().position(|c| *c == i)

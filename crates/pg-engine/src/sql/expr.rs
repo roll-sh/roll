@@ -898,6 +898,15 @@ impl Expr {
                     && a.left.iter().zip(&b.left).all(|(x, y)| x.same_query_as(y))
                     && without_bound_ids(&format!("{:?}", a.plan)) == without_bound_ids(&format!("{:?}", b.plan))
             }
+            // (Sublinks below a call or a cast: `abs((SELECT 1))`.)
+            (Expr::Call(d, a, t), Expr::Call(e, b, u)) => {
+                d.oid == e.oid
+                    && d.name == e.name
+                    && t == u
+                    && a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| x.same_query_as(y))
+            }
+            (Expr::Cast(x, f, t, k), Expr::Cast(y, g, u, l)) => f == g && t == u && k == l && x.same_query_as(y),
             _ => false,
         }
     }

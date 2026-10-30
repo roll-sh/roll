@@ -2487,8 +2487,19 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   / SET EXPRESSION, interval sum / avg as IntervalAggState, to_char of huge intervals wrapping,
   check options after unique keys, ALTER TYPE's conversion checked before its dependents.
   Batch 2: COPY FROM row at a time (CIM_SINGLE) raises a record's parse error after the rows
-  before it went in. Open (STATUS.md): cursor plans for cursor_tuple_fraction (scrollability,
-  CURRENT OF).
+  before it went in.
+  Round 22, agent 118 (difftest round 6): a grammar for seeds from 6000 on (`difftest/round6.rs`:
+  cursors with backward fetches and WHERE CURRENT OF on any query, EXPLAIN DECLARE, binary COPY
+  in and out, ORM upserts, CTEs with DML, window functions, JSON, migrations, ORM query shapes,
+  OUT-parameter built-ins). Fixes: cursors planned for cursor_tuple_fraction without parallel
+  workers (`paths::cursor_limit`), their scrollability and CURRENT OF read off that plan
+  (`explain::cursor_plan`), EXPLAIN DECLARE showing it; an ordered Append's startup the sum of
+  its members'; GroupAggregate keys shown as their first row in sort order; virtual columns
+  computed for RETURNING, trigger WHEN and CHECK; NOT NULL NOT VALID not trusted by the planner;
+  record comparisons checking columns lazily; constant AND / OR / IN folding; FOR UPDATE pushed
+  past CTEs; error order of COPY (CSV quotes, NOT NULL in buffers, relation before options),
+  INSERT into views and ALTER TYPE over indexes; binary COPY's trailer and numeric infinities;
+  table statistics after a rewrite. Agent 104's memory figure was not reproduced (noise).
   Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified

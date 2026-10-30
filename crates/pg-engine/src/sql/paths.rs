@@ -3485,11 +3485,7 @@ impl Planner<'_, '_> {
         };
         // The Limit over each (adjust_limit_rows_costs), then get_cheapest_fractional_path:
         // a constant LIMIT compares total costs, another one a tenth of the rows.
-        let fraction = if count < 0.0 || (count > 0.0 && offset < 0.0) {
-            0.1
-        } else {
-            1.0
-        };
+        let fraction = lim_fraction(count, offset);
         let mut best: Option<(Path, f64)> = None;
         for p in &out {
             let (st, tot) = limit_costs(p, count, offset);
@@ -3524,8 +3520,47 @@ fn cheapest_owned(list: &[Path]) -> Path {
     cheapest(list).cloned().expect("a path")
 }
 
-/// adjust_limit_rows_costs: (startup, total) of a LIMIT over `p`.
+/// The `lim` a DECLAREd cursor's query is planned for: standard_planner's tuple_fraction
+/// under CURSOR_OPT_FAST_PLAN, from cursor_tuple_fraction (None: 1 or more, all rows). It
+/// is carried as a LIMIT count that isn't constant (negative: a fast start wanted), minus
+/// the fraction, above -1 where a LIMIT's that isn't constant is -1; no Limit node scales
+/// its rows.
+pub fn cursor_limit(fraction: f64) -> Option<(f64, f64)> {
+    if fraction >= 1.0 {
+        return None;
+    }
+    Some((-fraction.max(1e-10), 0.0))
+}
+
+/// A cursor's tuple fraction carried by a `lim` count (`cursor_limit`).
+pub(crate) fn cursor_fraction(count: f64) -> Option<f64> {
+    (count < 0.0 && count > -1.0).then_some(-count)
+}
+
+/// get_cheapest_fractional_path's fraction of a level's run a `lim` reads: a tenth under a
+/// LIMIT or OFFSET that isn't constant, a cursor's tuple fraction, else all of it (the
+/// Limit's costs cover the rest).
+pub(crate) fn lim_fraction(count: f64, offset: f64) -> f64 {
+    match cursor_fraction(count) {
+        Some(f) => f,
+        None if count < 0.0 || (count > 0.0 && offset < 0.0) => 0.1,
+        None => FINAL_FRACTION.get().unwrap_or(1.0),
+    }
+}
+
+thread_local! {
+    /// A cursor's tuple fraction over its query's own constant LIMIT: standard_planner picks
+    /// the final relation's path for it (get_cheapest_fractional_path of the Limit paths),
+    /// whatever preprocess_limit made of the LIMIT for the levels below.
+    static FINAL_FRACTION: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// adjust_limit_rows_costs: (startup, total) of a LIMIT over `p` (a cursor's fraction: no
+/// LIMIT, `p`'s own).
 fn limit_costs(p: &Path, count: f64, offset: f64) -> (f64, f64) {
+    if cursor_fraction(count).is_some() {
+        return (p.startup, p.total);
+    }
     let rows_in = p.rows;
     let run = p.total - p.startup;
     let (mut st, mut tot, mut rows) = (p.startup, p.total, rows_in);
@@ -5089,7 +5124,7 @@ impl Planner<'_, '_> {
         if matches!(p, Plan::Join { .. }) {
             self.settle_laterals(p);
         }
-        if matches!(p, Plan::Filter { .. }) && self.plan_filtered_join(p, needed) {
+        if matches!(p, Plan::Filter { .. }) && self.plan_filtered_join(p, needed, lim) {
             return;
         }
         // (A filter over an outer join that stays above it: its cost is the join's.)
@@ -5346,6 +5381,9 @@ impl Planner<'_, '_> {
                 Some((limit_est(limit, true), limit_est(offset, false)))
             }
             Plan::Project { .. } | Plan::With { .. } => lim,
+            // (A cursor's fraction of the rows is the same fraction of the scan / join
+            // under the qual: one relation's paths, as PostgreSQL has them.)
+            Plan::Filter { .. } if lim.is_some_and(|l| cursor_fraction(l.0).is_some()) => lim,
             // (A UNION ALL's arms are planned for the fraction the LIMIT reads:
             // set_subquery_pathlist passes the tuple_fraction down.)
             Plan::Append { inh: None, .. }
@@ -5395,13 +5433,18 @@ impl Planner<'_, '_> {
             | Plan::Agg { input, .. }
             | Plan::Window { input, .. }
             | Plan::Sort { input, .. }
-            | Plan::Limit { input, .. }
             | Plan::Distinct { input, .. }
             | Plan::LockRows { input, .. }
             | Plan::Context { input, .. } => visit(input, lim_in),
+            Plan::Limit { input, .. } => {
+                let f = lim.and_then(|l| cursor_fraction(l.0)).or(FINAL_FRACTION.get());
+                let _f = crate::scoped::set(&FINAL_FRACTION, f, "paths::FINAL_FRACTION");
+                visit(input, lim_in)
+            }
             // (A query level of its own: its joins its topmost scan/join relation.)
             Plan::Barrier { input, .. } => {
                 let nested = self.join_nested.replace(false);
+                let _f = crate::scoped::set(&FINAL_FRACTION, None, "paths::FINAL_FRACTION");
                 visit(input, lim_in);
                 self.join_nested.set(nested);
             }
@@ -5954,7 +5997,7 @@ impl Planner<'_, '_> {
         // the keys' order, as soon as that group ends).
         if let Some((count, offset)) = lim {
             let f = if count < 0.0 {
-                0.1
+                lim_fraction(count, offset)
             } else {
                 ((count + offset.max(0.0)) / groups.max(1.0)).min(1.0)
             };

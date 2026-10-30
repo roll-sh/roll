@@ -722,6 +722,17 @@ impl Table {
     }
 
 
+    /// Whether column `i` is known never to hold NULL: a validated NOT NULL constraint (one
+    /// added NOT VALID and not validated since proves nothing to the planner: PostgreSQL 18's
+    /// attnullability, ATTNULLABLE_VALID only).
+    pub fn known_not_null(&self, i: usize) -> bool {
+        self.columns.get(i).is_some_and(|c| c.not_null)
+            && !self
+                .constraints
+                .iter()
+                .any(|c| !c.validated && matches!(c.kind, ConstraintKind::NotNull { column } if column == i))
+    }
+
     pub fn live_columns(&self) -> impl Iterator<Item = (usize, &Column)> {
         self.columns.iter().enumerate().filter(|(_, c)| !c.dropped)
     }

@@ -308,6 +308,133 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 5, base (0f9f0609, round 5 generator) | 5256–5355 × 100 | 9,697 | crash 2, wrong_rows 39, wrong_state 7, engine_error 14, missing_error 8, wrong_error 28, eval_error 26, notice 7, tag 1 |
 | round 5, batch 2 | 5256–5355 × 100 | 10,064 | wrong_rows 1, wrong_state 2, engine_error 8, missing_error 12, wrong_error 21, eval_error 13, notice 3, tag 1 (110 above error_message in the base, 52 here; 64 gone; none new but 6 past a base divergence; the wrong_rows / wrong_state are the old grammar's, the base's too: DISTINCT ON's physical order, a failing UPDATE condition, ANALYZE's sample) |
 
+## Round 6 grammar (agent 118)
+
+Seeds from `R6_SEEDS` (6000) on add the `r6*` objects (`round6.rs`, its own generator; the
+round 5 objects exist too) and make about a third of the statements `round6_stmt`'s, picked by
+what applications send most:
+
+- Cursors over every kind of query (in index order or not, joins, partitions, groupings,
+  DISTINCT, UNION ALL, LIMIT), declared with or without SCROLL / NO SCROLL / WITH HOLD, with
+  fetches in every direction (PRIOR, BACKWARD, ABSOLUTE, LAST, MOVE BACKWARD ALL) and WHERE
+  CURRENT OF on any of them, each step in a savepoint rolled back after it; `pg_cursors`'
+  `is_scrollable`; EXPLAIN (COSTS OFF) DECLARE under cursor_tuple_fraction settings. The round 5
+  restriction (backward fetches and CURRENT OF only where the cursor says) is gone.
+- Binary COPY: out of tables and queries over many types (typsend of numerics with their
+  specials, intervals, ranges, multiranges, arrays, records, json, inet, bit), and into `r6u`
+  from streams well formed or not (signature, flags, field counts and lengths, the trailer
+  missing, data after it, invalid UTF-8, NULL keys). Case files write the stream as `\x` and hex
+  digits after `\copy-data` (`common::copy_bytes`); a binary COPY TO's messages compare as hex.
+- Upserts as ORMs write them (ON CONFLICT on the key, a unique column, a constraint name, a
+  partial unique index with its WHERE; DO NOTHING / DO UPDATE with EXCLUDED, a WHERE, an
+  optimistic version, a sub-select; several rows, one twice; RETURNING with old / new);
+  data-modifying CTEs feeding each other; MATERIALIZED / NOT MATERIALIZED CTEs; recursive CTEs
+  with SEARCH / CYCLE; window functions as reports use them; JSON building and paths
+  (jsonb_build_object / jsonb_agg with FILTER and ORDER BY, row_to_json, jsonb_set, `#-`,
+  jsonb_to_recordset, jsonb_populate_record, jsonb_path_query_first); migrations between DML
+  (columns added with defaults and NOT NULL, renamed, retyped with USING, dropped; constraints
+  NOT VALID; identity restarts; indexes); ORM query shapes (keyset pages over row comparisons,
+  OFFSET pages, EXISTS, LATERAL top-N, DISTINCT ON, a wrapped count, `= ANY` lookups, ILIKE);
+  built-in functions with OUT parameters read as `(f()).x`, `(f()).*` and in FROM.
+
+## Round 6 (agent 118)
+
+Batch 1 (`a118_cursor_plan`, `a118_round6_fixes`, `a118_error_order`, `a118_round6_b`):
+
+- **Cursor plans (round 5's open item)**: a DECLAREd query is planned for cursor_tuple_fraction
+  (CURSOR_OPT_FAST_PLAN) and without parallel workers (no CURSOR_OPT_PARALLEL_OK): the binder
+  plans its level with the fraction as a `lim` (`paths::cursor_limit`: a LIMIT count that isn't
+  constant, minus the fraction, which no Limit node scales; `lim_fraction`), which reaches the
+  scan choice, the join search (`limit_order`, through a WHERE over the joins) and the merge
+  append choice; EXPLAIN's Sort over a presorted alternative compares the fractional costs at
+  the query's final node (`explain::final_cheaper`). Whether a cursor declared without SCROLL /
+  NO SCROLL can fetch backward, and which tables WHERE CURRENT OF finds a row of in a cursor
+  without FOR UPDATE, are read off the plan EXPLAIN shows (`explain::cursor_plan`:
+  ExecSupportsBackwardScan with the index's access method, search_plan_tree through Result,
+  Limit, Subquery Scan and Append) when the logical plan can't say (a sort, an Append:
+  `cursor::plan_decides`), else off the planned scans (a bitmap scan, a GiST index scan can't
+  run backward). A cursor over a UNION ALL is keyed (`keyed_plan`). EXPLAIN DECLARE shows the
+  cursor's plan. An ordered Append's startup is every member's (cost_append in PostgreSQL 18;
+  the engine took the first member's), in the planner and EXPLAIN alike.
+- **Wrong rows (GROUP BY, seeds 5276, 5299, 5375, 5377)**: a GroupAggregate shows each group's
+  key as its first row in the sort's order (pg_qsort over all the rows): keys whose equal
+  values look different (`1 mon` / `30 days`, 1.0 / 1.00, -0 / 0, a nondeterministic collation)
+  are presorted as order-sensitive aggregates are (`agg::equal_apart`).
+- **Wrong state (virtual generated columns, seed 5309)**: RETURNING and a trigger's WHEN read a
+  virtual column as its expression over the row (`bind_returning`, `bind_trigger_when_as`), and
+  a CHECK or NOT NULL reading one makes its error the statement's (`dml::generated_value`): an
+  `INSERT ... RETURNING *` whose virtual column overflows fails instead of storing the row.
+- **Wrong rows (NOT NULL NOT VALID, seed 5319)**: only a validated NOT NULL proves a column
+  non-null to the planner (`Table::known_not_null`, PostgreSQL 18's attnullability): `WHERE doc
+  IS NULL` was dropped as always false.
+- **Wrong state (record comparisons, seeds 5290, 5325)**: record_eq / record_cmp check a
+  column's types, operator and collations only as they reach it (`ops::check_record_columns`):
+  `OLD.* IS DISTINCT FROM NEW.*` over a row with a json column after a differing one no longer
+  fails "could not identify an equality operator for type json".
+- **Engine errors**: a DISTINCT aggregate's ORDER BY sub-select matches its argument as equal()
+  does (`same_query_as`, seeds 5265, 5268); AND / OR with constant arguments simplify as
+  simplify_and_arguments does, BETWEEN's too, and IN lists / `= ANY` / `<> ALL` of constants
+  fold (`fold_in_list`), so a FULL JOIN ON `1 IN (2, 3)` or a CASE over `1 BETWEEN 0 AND 2` is a
+  constant (seeds 5298, 5359); a FOR UPDATE pushed into a subquery or view isn't applied to its
+  CTEs (markQueryForLocking skips RTE_CTE), and a level it marks nothing in (only CTE
+  references) isn't checked for aggregates (the planner's CheckSelectLocking needs row marks).
+- **Error order (round 5's open items)**: COPY FROM a row at a time inserts the rows before an
+  unterminated CSV quoted field (`split_csv` returns them with the error) and before any later
+  record's parse error read in the same batch (`next_batch`: rows still pending, not only the
+  parse's own); buffered COPY's NOT NULL row fails before the rows buffered ahead of it reach
+  their unique checks; INSERT into a view with fewer values than columns named gives parse
+  analysis's 42601 before the rewriter's 0A000; ALTER COLUMN TYPE fails on an index whose
+  access method has no default operator class for the new type before converting any row
+  (42704 before 22P02); COPY resolves its relation and column list (DoCopy) and COPY TO refuses
+  a view, a partitioned or a foreign table (BeginCopyTo) before the options are processed
+  (`copy_relation_error`).
+- **Binary COPY**: data after the trailer fails "received copy data after EOF marker"; numeric
+  ±Infinity are sent with PostgreSQL's display scale 32 (numeric_send).
+- **Statistics after a rewrite**: an ALTER TABLE that rewrites an indexed table measures it as
+  reindex_relation's index_update_stats does (`reindexed`), so pg_class has its tuples and pages
+  where it had -1 / 0, and plans after it match (seed 6008: an index scan PostgreSQL wouldn't
+  pick).
+- From the round 6 grammar's first run: a cursor with a LIMIT of its own is planned for its
+  tuple fraction of the Limit's paths (standard_planner's get_cheapest_fractional_path takes
+  the caller's fraction, whatever preprocess_limit made of the LIMIT below:
+  `paths::FINAL_FRACTION`), so `ORDER BY id LIMIT 4` reads the key's index as PostgreSQL's
+  does and WHERE CURRENT OF works over it; a cursor whose FETCH failed (rolled back to a
+  savepoint) refuses WHERE CURRENT OF as "held from a previous transaction" (execCurrentOf finds
+  no QueryDesc); factorial of a negative number is 22003; a DISTINCT aggregate's ORDER BY
+  matches a call over a sub-select (`abs((SELECT 1))`) to its argument.
+- Harness: binary COPY in and out (above); the embedded API returns a binary COPY TO's messages
+  as bytea, not lossy text. `pk_clustered`'s layout parity runs its UPDATE ... RETURNING after
+  the SET LOGGED rewrite in key order: with the table measured after the rewrite (as
+  PostgreSQL's reindex leaves it) the UPDATE scans the heap, whose order is the layout's.
+
+Memory (agent 104's 362 / 317 MB): not reproduced. Same seeds 5106–5255, the engine of
+534eef2b^ with cdb8d269's harness against cdb8d269, two runs each: peak 577 / 612 MB (base)
+and 598 / 606 MB (head), final RSS 194–222 MB on both, the same binary varying by up to 35 MB
+between runs (the test binary uses the system allocator; what is left at the end is mostly
+freed memory it kept). Neither commit adds retained state (no new caches, per-session or
+per-plan structures).
+
+Pair run, fresh seeds 5406–5555 (round 5 grammar, 150 statements each) against the base
+(d0c965fb): wrong_rows 51 → 9, wrong_error 41 → 17, eval_error 41 → 29, missing_error 19 →
+18, tag 2 → 1; 79 mismatches fewer, none new. Peak RSS of the run 200.6 / 201.1 MB (base /
+head, debug). Smoke: no new mismatch, the known list unchanged. The round 6 grammar's first
+100 seeds (6000–6099), 15,445 statements: before the fixes from its own runs wrong_rows 5,
+wrong_state 1, engine_error 37, missing_error 10, wrong_error 6, eval_error 7; after them
+wrong_rows 2, engine_error 2, missing_error 4, wrong_error 6, eval_error 4 (Open below).
+Isolation 121 / 122 (1,647 / 1,648). Regression suite in full on a private reference (debug):
+51,148 / 51,150, no unit changed against results.tsv. Crate tests debug and release.
+
+Cost: a DECLARE whose plan has a sort or an Append on top builds EXPLAIN's tree once
+(`cursor_plan`); everything else is planning-time only (one more fraction test at the
+fractional-cost sites, a NOT VALID scan of the constraints per not-null test). pgbench, release
+builds alternated three times (4 clients, 20 s each, server CPUs pinned, a busy machine: load
+6–13): select-only and TPC-B within the run-to-run noise (select-only spread 5,300–10,700 tps on
+the base alone); a cursor script (two DECLAREs, one ORDER BY over an unindexed column, FETCH,
+CLOSE) 1,256 / 1,160 tps median (base / head), inside the spread of either (1,012–1,322);
+engine peak RSS 399–409 MB on both. If the DECLARE cost shows on a quiet machine, the plan
+can be built only when a backward fetch, `pg_cursors` or WHERE CURRENT OF needs it (at the
+risk of a plan made from statistics newer than the DECLARE's).
+
 ## Round 5 grammar (agent 104)
 
 Seeds from `R5_SEEDS` (5000) on add the `r5*` objects (`round5.rs`, its own generator) and make
@@ -742,28 +869,50 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 
 ## Open
 
-- **Round 5 seeds, found, not fixed**:
-  - Cursor plans: PostgreSQL plans a DECLAREd query for cursor_tuple_fraction (0.1), and
-    whether a cursor without [NO] SCROLL may fetch backwards (ExecSupportsBackwardScan) and
-    whether a cursor without FOR UPDATE is simply updatable (search_plan_tree: no Sort, no
-    join) are read off that plan; the engine reads its logical plan, so a Sort over a scan PG
-    replaces with an index scan, or a merge join it chooses for a fast start, decide
-    differently (seeds 5032, 5033, 5039, 5046, 5072; `is_scrollable` in pg_cursors). The
-    generator avoids both since batch 1.
-  - COPY FROM one row at a time (batch 2): a CSV quoting error (`unterminated CSV quoted
-    field`) is found splitting the whole chunk, before the rows ahead of it go in, where
-    PostgreSQL inserts those first (their triggers' notices, a unique violation).
-  - Error order: `INSERT INTO view (.., computed_col) VALUES (fewer values)` gives the view
-    column's 0A000 before parse analysis's "more target columns than expressions" (seed 5022);
-    ALTER COLUMN TYPE converts the rows (22P02) before re-making a GiST index the new type has
-    no operator class for (42704, seed 5052); COPY TO's option errors (FORCE_NOT_NULL with
-    COPY TO) come before DoCopy's column checks (42703 / 42P10) and BeginCopyTo's relation
-    kind check (42809) (seeds 5011, 5074, 5085).
-  - Executor laziness: `DELETE FROM t USING v` over an empty `t` computes the view's failing
-    output (a hash join's inner side built first), where PostgreSQL never does; its statement
-    trigger then never fires (seed 5069).
-  - EXPLAIN only: a comparison of a domain column shows `(d = 1)` where PostgreSQL shows the
-    relabel to the base type, `((d)::integer = 1)` (`=`, `<>`, `= ANY`, a one-value IN).
+- **Round 6 seeds, found, not fixed** (agent 118):
+  - FULL JOIN checks run per query level as it is planned: a FULL JOIN in a FROM subquery that a
+    strict WHERE above reduces after pull-up (`(SELECT f2.b c0 FROM f1 FULL JOIN f2 ON f1.a >
+    f2.b) s WHERE s.c0 > 0`), or in a correlated sub-select whose outer join to it is removed,
+    fails in the engine (0A000) where PostgreSQL first reduces it. Dropping the level's
+    deferred error when the statement's final plan has no such join was tried and backed out:
+    a sub-select PostgreSQL plans apart (and fails) can be gone from the engine's final plan
+    (seed 5517 #133).
+  - Executor laziness (round 5): `DELETE FROM t USING v` over an empty `t` computes the view's
+    failing output (the hash join builds its inner side first; ExecHashJoin reads the outer
+    side's first row first when its startup cost is below the hash's total: an empty outer side
+    builds nothing); its statement trigger then never fires (seed 5069). Agent 112's area
+    (`exec/nodes.rs` HashJoinNode, whose parallel probe pipeline a first-row peek would bypass).
+  - EXPLAIN only (round 5): a comparison of a domain column shows `(d = 1)` where PostgreSQL
+    shows the relabel to the base type, `((d)::integer = 1)`.
+  - Cursor plans: EXPLAIN's other choices at the final node (a grouping hashed or sorted with
+    no ORDER BY, a DISTINCT) still compare total costs, not the cursor's fraction; a plain
+    `SELECT DISTINCT a ... ORDER BY a` is a HashAggregate under a Sort where PostgreSQL's
+    add_path keeps the Unique over a Sort within its fuzz factor (`fuzzy_better`, the Plan
+    choice item below). PL/pgSQL cursors (OPEN, explicit cursors) aren't planned for the
+    fraction yet.
+  - Built-in functions with OUT parameters: `(f()).x` works over a direct call; the engine also
+    resolves it through a sub-select or VALUES column of type record, where PostgreSQL fails
+    ("could not identify column ... in record data type", "record type has not been
+    registered"); `pg_get_object_address('table', '{pg_catalog,pg_class}', '{}')` doesn't find
+    the catalog; `pg_stat_get_backend_subxact` is missing.
+  - A virtual generated column in a whole-row NULL test (`t.* IS NULL`) is computed; PostgreSQL
+    splits the test per field and stops before it.
+  - Reduced from seeds 6000–6099, not fixed: a CASE folded at bind time loses the explicit
+    collation its arms derive, so a later conflict (42P21) isn't raised (`bind_case`,
+    `note_coll_of` keeps it only for a constant); LEAST / GREATEST over constants aren't folded
+    (`greatest(70000, 1)::int2` over an empty table, 22003 in PostgreSQL); a pulled-up
+    subquery's constant outputs aren't folded again into the expressions above
+    (`SELECT s.c2::int2 FROM (SELECT 2147483647 AS c2 FROM t2) s`); deferred folding errors
+    come out in bind order, not subquery_planner's (the target list before the quals, only
+    referenced outputs); a FULL JOIN whose clause failed to fold reports the FULL JOIN error
+    instead of the folding error; PostgreSQL's merge join costing (mergejoinscansel over
+    histograms) raises 42P22 for a join of columns under conflicting collations whatever join
+    it picks, the engine only when it picks a merge join; an outer-level aggregate in a
+    sub-select in WHERE gives a later column error first; float input of hex (`'0x10'::float8`,
+    strtod) is refused; a JSON error's token after `-` is one character (`found "-"` for
+    `"-13"`); binary COPY checks a stream's framing (data after the trailer) before a row
+    before it fails NOT NULL; a FULL JOIN on a pulled-up subquery's constant output fails once
+    a join above reads it (the output isn't a PlaceHolderVar there).
 
 - **Round 4 seeds, reduced, not fixed** (cases in the round's notes above):
   - FULL JOIN error where PostgreSQL first reduces it: `t1 FULL JOIN t3 t5 ON (SELECT true)

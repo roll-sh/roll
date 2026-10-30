@@ -160,6 +160,7 @@ impl PgClient {
         let mut events = Vec::new();
         let mut cols: Option<Vec<(String, u32)>> = None;
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        let mut binary_out = false;
         loop {
             match self.read()? {
                 Message::RowDescription(d) => {
@@ -194,8 +195,9 @@ impl PgClient {
                 Message::CopyInResponse(_) => {
                     let mut out = BytesMut::new();
                     if let Some(d) = &copy_data {
+                        let d = super::copy_bytes(d);
                         if !d.is_empty() {
-                            frontend::CopyData::new(d.as_bytes())?.write(&mut out);
+                            frontend::CopyData::new(&d[..])?.write(&mut out);
                         }
                         frontend::copy_done(&mut out);
                     } else {
@@ -203,7 +205,8 @@ impl PgClient {
                     }
                     self.stream.write_all(&out)?;
                 }
-                Message::CopyOutResponse(_) => {
+                Message::CopyOutResponse(r) => {
+                    binary_out = r.format() == 1;
                     cols = Some(vec![("copy".into(), 25)]);
                 }
                 Message::CopyData(d) => {
@@ -212,11 +215,11 @@ impl PgClient {
                     while b.has_remaining() {
                         s.push(b.get_u8());
                     }
-                    rows.push(vec![Some(
-                        String::from_utf8_lossy(&s)
-                            .trim_end_matches('\n')
-                            .to_string(),
-                    )]);
+                    rows.push(vec![Some(if binary_out {
+                        super::copy_hex(&s)
+                    } else {
+                        String::from_utf8_lossy(&s).trim_end_matches('\n').to_string()
+                    })]);
                 }
                 Message::ReadyForQuery(_) => return Ok(events),
                 _ => {}

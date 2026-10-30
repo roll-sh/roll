@@ -2840,12 +2840,17 @@ fn xact_columns_unavailable() -> Error {
 }
 
 /// A generated column's value for a new row. A virtual one is computed when it is read: an
-/// error computing it here isn't the statement's.
+/// error computing it here is the statement's only when a CHECK or NOT NULL constraint reads
+/// it (ExecConstraints expands it there; RETURNING reads its expression, `bind_returning`).
 fn generated_value(rules: &TableRules, i: usize, e: &crate::sql::expr::Expr, row: &[Value], ctx: &ExecCtx) -> Result<Value> {
     match eval(e, row, ctx) {
         Ok(v) => Ok(v),
-        Err(_) if rules.table.columns.get(i).is_some_and(|c| c.virtual_gen) => Ok(Value::Null),
-        Err(err) => Err(err),
+        Err(err) => match rules.table.columns.get(i) {
+            Some(c) if c.virtual_gen && !c.not_null && !rules.checks.iter().any(|(_, x)| x.columns().contains(&i)) => {
+                Ok(Value::Null)
+            }
+            _ => Err(err),
+        },
     }
 }
 

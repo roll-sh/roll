@@ -4269,6 +4269,18 @@ impl Ddl<'_, '_> {
 
     /// ATRewriteTable: the rows copied into a new heap in the order a sequential scan of
     /// the old one reads them, each recording its new place.
+    /// finish_heap_swap's reindex_relation after a rewrite: each index built anew measures
+    /// it and its table (index_update_stats), where the swapped-in heap had no statistics.
+    fn reindexed(&mut self, t: &Table) -> Result<()> {
+        // (The primary key's index too: `pkey_index`, apart from `indexes`.)
+        for ixo in t.indexes.iter().chain(t.pkey_index.iter()) {
+            if let Some(ix) = self.cat.index(*ixo).cloned() {
+                self.index_built(t, &ix)?;
+            }
+        }
+        Ok(())
+    }
+
     fn rewrite_heap_rows(&self, t: &Table) -> Result<()> {
         let mut rows = self.table_rows(t)?;
         crate::exec::sizing::in_heap_order(t, &mut rows, self.ctx);
@@ -4554,12 +4566,14 @@ impl Ddl<'_, '_> {
                 self.cat.rewrite_heap(&mut t, false);
                 self.set_frozen_xid(&t.clone(), xmin);
                 self.rewrite_heap_rows(&t)?;
+                self.reindexed(&t)?;
             } else if let Some(c) = self.cat.tables.get(&oid).cloned() {
                 let mut c = (*c).clone();
                 self.cat.add_toast(&mut c);
                 self.cat.rewrite_heap(&mut c, false);
                 self.set_frozen_xid(&c, xmin);
                 self.rewrite_heap_rows(&c)?;
+                self.reindexed(&c)?;
                 self.cat.put_table(c);
             }
         }
@@ -6273,6 +6287,34 @@ impl Ddl<'_, '_> {
                 || !utc_swap && type_change_rewrites(&from, &ty))
         {
             self.rewrite_later(t.oid, 4);
+        }
+        // The column's indexes are made anew over the new type before any row converts
+        // (ATPostAlterTypeCleanup in ATRewriteCatalogs, ahead of ATRewriteTables): one whose
+        // access method has no default operator class for it fails first.
+        for ixo in t.indexes.iter().chain(t.pkey_index.iter()) {
+            let Some(ix) = self.cat.index(*ixo).cloned() else {
+                continue;
+            };
+            for c in &ix.columns {
+                if c.opclass != 0 || !matches!(c.key, IndexKey::Column(k) if k == idx) {
+                    continue;
+                }
+                let am = self
+                    .cat
+                    .access_method_by_name(&ix.method)
+                    .map_or_else(|| system::access_method_oid(&ix.method), |a| a.oid);
+                if self.cat.default_opclass(am, &ty) == 0 {
+                    return Err(Error::new(
+                        code::UNDEFINED_OBJECT,
+                        format!(
+                            "data type {} has no default operator class for access method \"{}\"",
+                            ty.without_typmod().display(),
+                            ix.method
+                        ),
+                    )
+                    .hint("You must specify an operator class for the index or define a default operator class for the data type."));
+                }
+            }
         }
         // Converted with the statement's others, in one rewrite at its end.
         if let Some((_, convs)) = &mut self.combined_types {

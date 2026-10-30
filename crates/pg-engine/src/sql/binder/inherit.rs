@@ -169,7 +169,7 @@ impl super::Binder<'_, '_> {
         }
         self.perms = saved;
         for (i, c) in t.live_columns() {
-            if c.not_null {
+            if t.known_not_null(i) {
                 out.push(Expr::IsNull(Box::new(Expr::Col(i, c.ty.clone())), true));
             }
         }

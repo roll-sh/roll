@@ -618,13 +618,15 @@ fn encode_numeric(n: &Numeric, out: &mut BytesMut) {
             out.put_i16(0);
             out.put_i16(0);
             out.put_u16(0xD000);
-            out.put_i16(0);
+            // (numeric_send's NUMERIC_DSCALE of the special header: its 0x1F80 bits.)
+            out.put_i16(32);
         }
         Numeric::NegInf => {
             out.put_i16(0);
             out.put_i16(0);
             out.put_u16(0xF000);
-            out.put_i16(0);
+            // (numeric_send's NUMERIC_DSCALE of the special header: its 0x1F80 bits.)
+            out.put_i16(32);
         }
         Numeric::Finite { int, scale } => {
             let sign: u16 = if int.is_negative() { 0x4000 } else { 0 };

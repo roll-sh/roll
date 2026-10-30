@@ -1,0 +1,133 @@
+> CREATE TABLE eo (id int PRIMARY KEY, b text)
+-- CREATE TABLE
+
+> CREATE FUNCTION eo_tr() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'row %', NEW.id; RETURN NEW; END $$
+-- CREATE FUNCTION
+
+> CREATE TRIGGER eo_b BEFORE INSERT ON eo FOR EACH ROW EXECUTE FUNCTION eo_tr()
+-- CREATE TRIGGER
+
+> INSERT INTO eo VALUES (2, 'x')
+NOTICE 00000: row 2
+CONTEXT: PL/pgSQL function eo_tr() line 1 at RAISE
+-- INSERT 0 1
+
+> COPY eo FROM STDIN (FORMAT csv)
+>> 1,a
+>> 3,"b
+NOTICE 00000: row 1
+CONTEXT: PL/pgSQL function eo_tr() line 1 at RAISE
+CONTEXT: COPY eo, line 1: "1,a"
+ERROR 22P04: unterminated CSV quoted field
+CONTEXT: COPY eo, line 3: "3,"b
+CONTEXT: "
+
+> COPY eo FROM STDIN (FORMAT csv)
+>> 1,a
+>> 2,b
+>> 3,"c
+NOTICE 00000: row 1
+CONTEXT: PL/pgSQL function eo_tr() line 1 at RAISE
+CONTEXT: COPY eo, line 1: "1,a"
+NOTICE 00000: row 2
+CONTEXT: PL/pgSQL function eo_tr() line 1 at RAISE
+CONTEXT: COPY eo, line 2: "2,b"
+ERROR 23505: duplicate key value violates unique constraint "eo_pkey"
+DETAIL: Key (id)=(2) already exists.
+CONTEXT: COPY eo, line 2: "2,b"
+OBJECTS: schema=public table=eo constraint=eo_pkey
+
+> SELECT * FROM eo ORDER BY id
+id:int4 | b:text
+2 | x
+-- SELECT 1
+
+> DROP TRIGGER eo_b ON eo
+-- DROP TRIGGER
+
+> COPY eo FROM STDIN (FORMAT csv)
+>> 5,a
+>> 6,"b
+ERROR 22P04: unterminated CSV quoted field
+CONTEXT: COPY eo, line 3: "6,"b
+CONTEXT: "
+
+> SELECT * FROM eo ORDER BY id
+id:int4 | b:text
+2 | x
+-- SELECT 1
+
+> CREATE VIEW eov AS SELECT id, b, id + 1 AS c FROM eo
+-- CREATE VIEW
+
+> INSERT INTO eov (id, c) VALUES (7)
+ERROR 42601: INSERT has more target columns than expressions (at 22)
+
+> INSERT INTO eov (id, c, b) VALUES (7, 1)
+ERROR 42601: INSERT has more target columns than expressions (at 25)
+
+> INSERT INTO eov (id, c) VALUES (7, 1)
+ERROR 0A000: cannot insert into column "c" of view "eov"
+DETAIL: View columns that are not columns of their base relation are not updatable.
+
+> INSERT INTO eov (c, id) VALUES (7)
+ERROR 42601: INSERT has more target columns than expressions (at 21)
+
+> CREATE TABLE eog (id int, r int4range)
+-- CREATE TABLE
+
+> INSERT INTO eog VALUES (1, '[1,3)')
+-- INSERT 0 1
+
+> CREATE INDEX eog_r ON eog USING gist (r)
+-- CREATE INDEX
+
+> ALTER TABLE eog ALTER COLUMN r TYPE int USING lower(r) / 0
+ERROR 42704: data type integer has no default operator class for access method "gist"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> ALTER TABLE eog ALTER COLUMN r TYPE int4multirange USING 'x'
+ERROR 22P02: malformed multirange literal: "x" (at 58)
+DETAIL: Missing left brace.
+
+> ALTER TABLE eog ALTER COLUMN r TYPE text
+ERROR 42704: data type text has no default operator class for access method "gist"
+HINT: You must specify an operator class for the index or define a default operator class for the data type.
+
+> SELECT * FROM eog
+id:int4 | r:3904
+1 | [1,3)
+-- SELECT 1
+
+> CREATE VIEW eocv AS SELECT * FROM eo
+-- CREATE VIEW
+
+> COPY eo (id, nosuch) TO STDOUT (FORMAT csv, FORCE_NOT_NULL (b))
+ERROR 42703: column "nosuch" of relation "eo" does not exist
+
+> COPY eo (id, id) TO STDOUT (FORMAT csv, FORCE_NOT_NULL (b))
+ERROR 42701: column "id" specified more than once
+
+> COPY eocv TO STDOUT (FORMAT csv, FORCE_NOT_NULL (b))
+ERROR 42809: cannot copy from view "eocv"
+HINT: Try the COPY (SELECT ...) TO variant.
+
+> COPY eocv (id) TO STDOUT (FORMAT text, HEADER match)
+ERROR 42809: cannot copy from view "eocv"
+HINT: Try the COPY (SELECT ...) TO variant.
+
+> COPY eo (nosuch) TO STDOUT (DELIMITER 'ab')
+ERROR 42703: column "nosuch" of relation "eo" does not exist
+
+> COPY eocv (nosuch) TO STDOUT
+ERROR 42703: column "nosuch" of relation "eocv" does not exist
+
+> COPY eocv TO STDOUT (FORMAT binary, HEADER)
+ERROR 42809: cannot copy from view "eocv"
+HINT: Try the COPY (SELECT ...) TO variant.
+
+> COPY eo (nosuch) FROM STDIN (FORMAT binary, HEADER)
+>> COPY nosuch TO STDOUT (FORMAT binary, HEADER);
+>> COPY (SELECT 1) TO STDOUT (FORMAT binary, HEADER);
+ERROR 42703: column "nosuch" of relation "eo" does not exist
+

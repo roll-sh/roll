@@ -1,0 +1,322 @@
+> CREATE TABLE ca (id int PRIMARY KEY, a int, b text)
+-- CREATE TABLE
+
+> CREATE TABLE cb (k int PRIMARY KEY, w text)
+-- CREATE TABLE
+
+> INSERT INTO ca SELECT g, g % 7, 'x' || g FROM generate_series(1, 30) g
+-- INSERT 0 30
+
+> INSERT INTO cb SELECT g, 'w' || g FROM generate_series(1, 10) g
+-- INSERT 0 10
+
+> CREATE TABLE cp (k int, v text, PRIMARY KEY (k, v)) PARTITION BY RANGE (k)
+-- CREATE TABLE
+
+> CREATE TABLE cp1 PARTITION OF cp FOR VALUES FROM (MINVALUE) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE cp2 PARTITION OF cp FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> INSERT INTO cp SELECT g, 'v' || g FROM generate_series(1, 19) g
+-- INSERT 0 19
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c1 CURSOR FOR SELECT id, a FROM ca ORDER BY id
+-- DECLARE CURSOR
+
+> DECLARE c2 CURSOR FOR SELECT id, a FROM ca WHERE a > 0 ORDER BY a DESC, id
+-- DECLARE CURSOR
+
+> DECLARE c3 CURSOR FOR SELECT k, v FROM cp ORDER BY k, v
+-- DECLARE CURSOR
+
+> DECLARE c4 CURSOR FOR SELECT x.id, y.w FROM ca x LEFT JOIN cb y ON y.k = x.a ORDER BY x.id
+-- DECLARE CURSOR
+
+> DECLARE c5 CURSOR FOR SELECT id, a FROM ca WHERE id = 3
+-- DECLARE CURSOR
+
+> DECLARE c7 CURSOR FOR SELECT a, count(*) FROM ca GROUP BY a
+-- DECLARE CURSOR
+
+> DECLARE c8 CURSOR FOR SELECT DISTINCT a FROM ca
+-- DECLARE CURSOR
+
+> DECLARE c9 CURSOR FOR SELECT id FROM ca UNION ALL SELECT k FROM cb
+-- DECLARE CURSOR
+
+> DECLARE c10 CURSOR FOR SELECT x.id, y.w FROM ca x JOIN cb y ON y.k = x.id
+-- DECLARE CURSOR
+
+> SELECT name, is_scrollable FROM pg_cursors ORDER BY name
+name:text | is_scrollable:bool
+c1 | t
+c10 | f
+c2 | t
+c3 | t
+c4 | f
+c5 | t
+c7 | f
+c8 | f
+c9 | t
+-- SELECT 9
+
+> FETCH 2 FROM c1
+id:int4 | a:int4
+1 | 1
+2 | 2
+-- FETCH 2
+
+> UPDATE ca SET b = 'u' WHERE CURRENT OF c1
+-- UPDATE 1
+
+> FETCH PRIOR FROM c1
+id:int4 | a:int4
+1 | 1
+-- FETCH 1
+
+> FETCH 2 FROM c4
+id:int4 | w:text
+1 | w1
+2 | w2
+-- FETCH 2
+
+> SAVEPOINT s
+-- SAVEPOINT
+
+> FETCH PRIOR FROM c4
+ERROR 55000: cursor can only scan forward
+HINT: Declare it with SCROLL option to enable backward scan.
+
+> ROLLBACK TO s
+-- ROLLBACK
+
+> FETCH 1 FROM c5
+id:int4 | a:int4
+3 | 3
+-- FETCH 1
+
+> UPDATE ca SET b = 'v' WHERE CURRENT OF c5 RETURNING *
+id:int4 | a:int4 | b:text
+3 | 3 | v
+-- UPDATE 1
+
+> FETCH 2 FROM c2
+id:int4 | a:int4
+13 | 6
+6 | 6
+-- FETCH 2
+
+> UPDATE ca SET b = 'u' WHERE CURRENT OF c2
+ERROR 24000: cursor "c2" is not a simply updatable scan of table "ca"
+
+> COMMIT
+-- ROLLBACK
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c3 CURSOR FOR SELECT k, v FROM cp ORDER BY k, v
+-- DECLARE CURSOR
+
+> FETCH 2 FROM c3
+k:int4 | v:text
+1 | v1
+2 | v2
+-- FETCH 2
+
+> DELETE FROM cp WHERE CURRENT OF c3 RETURNING *
+k:int4 | v:text
+2 | v2
+-- DELETE 1
+
+> FETCH PRIOR FROM c3
+k:int4 | v:text
+1 | v1
+-- FETCH 1
+
+> COMMIT
+-- COMMIT
+
+> ANALYZE ca
+-- ANALYZE
+
+> ANALYZE cb
+-- ANALYZE
+
+> ANALYZE cp
+-- ANALYZE
+
+> BEGIN
+-- BEGIN
+
+> DECLARE c3 CURSOR FOR SELECT k, v FROM cp ORDER BY k, v
+-- DECLARE CURSOR
+
+> DECLARE c4 CURSOR FOR SELECT x.id, y.w FROM ca x LEFT JOIN cb y ON y.k = x.a ORDER BY x.id
+-- DECLARE CURSOR
+
+> SELECT name, is_scrollable FROM pg_cursors ORDER BY name
+name:text | is_scrollable:bool
+c3 | t
+c4 | f
+-- SELECT 2
+
+> FETCH 2 FROM c3
+k:int4 | v:text
+1 | v1
+3 | v3
+-- FETCH 2
+
+> DELETE FROM cp WHERE CURRENT OF c3
+ERROR 24000: cursor "c3" is not a simply updatable scan of table "cp1"
+
+> COMMIT
+-- ROLLBACK
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT id, a FROM ca ORDER BY id
+QUERY PLAN:text
+Index Scan using ca_pkey on ca
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT x.id, y.w FROM ca x LEFT JOIN cb y ON y.k = x.a ORDER BY x.id
+QUERY PLAN:text
+Nested Loop Left Join
+  Join Filter: (y.k = x.a)
+  ->  Index Scan using ca_pkey on ca x
+  ->  Materialize
+        ->  Seq Scan on cb y
+-- EXPLAIN
+
+> EXPLAIN DECLARE c CURSOR FOR SELECT k, v FROM cp ORDER BY k, v
+QUERY PLAN:text
+Sort  (cost=2.65..2.69 rows=18 width=8)
+  Sort Key: cp.k, cp.v
+  ->  Append  (cost=0.00..2.27 rows=18 width=8)
+        ->  Seq Scan on cp1 cp_1  (cost=0.00..1.08 rows=8 width=7)
+        ->  Seq Scan on cp2 cp_2  (cost=0.00..1.10 rows=10 width=8)
+-- EXPLAIN
+
+> EXPLAIN DECLARE c CURSOR FOR SELECT x.id, y.w FROM ca x JOIN cb y ON y.k = x.id
+QUERY PLAN:text
+Nested Loop  (cost=0.00..6.80 rows=10 width=7)
+  Join Filter: (x.id = y.k)
+  ->  Seq Scan on ca x  (cost=0.00..1.30 rows=30 width=4)
+  ->  Materialize  (cost=0.00..1.15 rows=10 width=7)
+        ->  Seq Scan on cb y  (cost=0.00..1.10 rows=10 width=7)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT x.id, y.w FROM ca x JOIN cb y ON y.k = x.id
+QUERY PLAN:text
+Materialize
+  ->  Nested Loop
+        Join Filter: (x.id = y.k)
+        ->  Seq Scan on ca x
+        ->  Materialize
+              ->  Seq Scan on cb y
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT x.id, y.w FROM ca x LEFT JOIN cb y ON y.k = x.a WHERE y.w IS NULL OR x.id > 3
+QUERY PLAN:text
+Nested Loop Left Join
+  Join Filter: (y.k = x.a)
+  Filter: ((y.w IS NULL) OR (x.id > 3))
+  ->  Seq Scan on ca x
+  ->  Materialize
+        ->  Seq Scan on cb y
+-- EXPLAIN
+
+> SET cursor_tuple_fraction = 1.0
+-- SET
+
+> EXPLAIN DECLARE c CURSOR FOR SELECT x.id, y.w FROM ca x JOIN cb y ON y.k = x.id
+QUERY PLAN:text
+Hash Join  (cost=1.23..2.61 rows=10 width=7)
+  Hash Cond: (x.id = y.k)
+  ->  Seq Scan on ca x  (cost=0.00..1.30 rows=30 width=4)
+  ->  Hash  (cost=1.10..1.10 rows=10 width=7)
+        ->  Seq Scan on cb y  (cost=0.00..1.10 rows=10 width=7)
+-- EXPLAIN
+
+> SET cursor_tuple_fraction = 0.0
+-- SET
+
+> EXPLAIN DECLARE c CURSOR FOR SELECT x.id, y.w FROM ca x JOIN cb y ON y.k = x.id
+QUERY PLAN:text
+Nested Loop  (cost=0.00..6.80 rows=10 width=7)
+  Join Filter: (x.id = y.k)
+  ->  Seq Scan on ca x  (cost=0.00..1.30 rows=30 width=4)
+  ->  Materialize  (cost=0.00..1.15 rows=10 width=7)
+        ->  Seq Scan on cb y  (cost=0.00..1.10 rows=10 width=7)
+-- EXPLAIN
+
+> RESET cursor_tuple_fraction
+-- RESET
+
+> SET max_parallel_workers_per_gather = 4
+-- SET
+
+> SET parallel_setup_cost = 0
+-- SET
+
+> SET parallel_tuple_cost = 0
+-- SET
+
+> SET min_parallel_table_scan_size = 0
+-- SET
+
+> EXPLAIN (COSTS OFF) DECLARE c CURSOR FOR SELECT count(*) FROM ca
+QUERY PLAN:text
+Aggregate
+  ->  Seq Scan on ca
+-- EXPLAIN
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> RESET parallel_setup_cost
+-- RESET
+
+> RESET parallel_tuple_cost
+-- RESET
+
+> RESET min_parallel_table_scan_size
+-- RESET
+
+> CREATE TABLE cq (k int, v text, PRIMARY KEY (k, v)) PARTITION BY RANGE (k)
+-- CREATE TABLE
+
+> CREATE TABLE cq1 PARTITION OF cq FOR VALUES FROM (MINVALUE) TO (10)
+-- CREATE TABLE
+
+> CREATE TABLE cq2 PARTITION OF cq FOR VALUES FROM (10) TO (20)
+-- CREATE TABLE
+
+> CREATE TABLE cq3 PARTITION OF cq FOR VALUES FROM (20) TO (30)
+-- CREATE TABLE
+
+> EXPLAIN SELECT * FROM cq ORDER BY k, v LIMIT 1
+QUERY PLAN:text
+Limit  (cost=0.46..0.51 rows=1 width=36)
+  ->  Append  (cost=0.46..208.66 rows=3810 width=36)
+        ->  Index Only Scan using cq1_pkey on cq1 cq_1  (cost=0.15..63.20 rows=1270 width=36)
+        ->  Index Only Scan using cq2_pkey on cq2 cq_2  (cost=0.15..63.20 rows=1270 width=36)
+        ->  Index Only Scan using cq3_pkey on cq3 cq_3  (cost=0.15..63.20 rows=1270 width=36)
+-- EXPLAIN
+
+> EXPLAIN SELECT * FROM cq WHERE k > 3 ORDER BY k DESC LIMIT 2
+QUERY PLAN:text
+Limit  (cost=0.46..0.71 rows=2 width=36)
+  ->  Append  (cost=0.46..161.01 rows=1269 width=36)
+        ->  Index Only Scan Backward using cq3_pkey on cq3 cq_3  (cost=0.15..51.56 rows=423 width=36)
+              Index Cond: (k > 3)
+        ->  Index Only Scan Backward using cq2_pkey on cq2 cq_2  (cost=0.15..51.56 rows=423 width=36)
+              Index Cond: (k > 3)
+        ->  Index Only Scan Backward using cq1_pkey on cq1 cq_1  (cost=0.15..51.56 rows=423 width=36)
+              Index Cond: (k > 3)
+-- EXPLAIN
+

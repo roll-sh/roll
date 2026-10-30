@@ -7,6 +7,12 @@
 use super::*;
 use crate::catalog::Catalog;
 
+thread_local! {
+    /// Planning a query that may not run in workers: a DECLAREd cursor's (standard_planner
+    /// without CURSOR_OPT_PARALLEL_OK).
+    pub static SERIAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The parallel query settings.
 #[derive(Clone, Debug)]
 pub struct ParCfg {
@@ -44,7 +50,11 @@ impl ParCfg {
             tuple_cost: num("parallel_tuple_cost", 0.1),
             min_table_pages: num("min_parallel_table_scan_size", 1024.0),
             min_index_pages: num("min_parallel_index_scan_size", 64.0),
-            max_workers: num("max_parallel_workers_per_gather", 2.0).max(0.0) as usize,
+            max_workers: if SERIAL.get() {
+                0
+            } else {
+                num("max_parallel_workers_per_gather", 2.0).max(0.0) as usize
+            },
             leader: on("parallel_leader_participation"),
             append: on("enable_parallel_append"),
             hash: on("enable_parallel_hash"),
