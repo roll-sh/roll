@@ -3094,6 +3094,77 @@ statement alone), base 31bb2756 against this:
   expressions, no difference, nothing left to libpg_query. `ROLL_DEPARSE_CHECK=<file>` makes
   every call compare the two and log differences and fallbacks there.
 
+## Index access (round 22, agent 103)
+
+What changed (HANDOFF "Index access at index cost"): btree scans read only the entries they
+return (backward scans in descending key order, LP_DEAD marking as rows come out, EXISTS
+initplans stop at their first row); GiST, SP-GiST, BRIN and pg_trgm indexes are searched
+through structures derived from the table instead of reading every row, and so are
+exclusion checks without a leading `=`.
+
+Method: `tools/bench` workload `access` (`access-load`: a 1M-row `items` table with its
+pkey and `(cat, id)`, 10,000-job que / Oban / graphile-worker / solid_queue tables with
+their fetch indexes, 100,000 GiST boxes, 100,000 md5 words under GIN and GiST trigram
+indexes, a 1M-row time series under BRIN, two exclusion-constrained booking tables). Release
+builds, the server on 4 CPUs and the client on 4 others, the reference PostgreSQL 18.6 with
+`shared_buffers=2GB`, the engine `--cache-mb 2048`. Rounds interleaved (reference, before,
+after, after, before, reference), 100 queries per case after 5 warm-up ones, simple query
+protocol; ms is the median latency, cpu the server's CPU per query, MB the server's peak
+memory during the case (the engine's RSS; the reference container's anon + shmem). A
+shared machine (load 20-40): about 15% between rounds. "before" is `043e8c2d`, "after" the
+same with this round's change. Bulk rows: one statement inserting 3,000 bookings
+(`booking_bulk`, no `=` column) and a PL/pgSQL loop inserting 3,000 one by one in one
+transaction (`booking_loop`, `room WITH =`), ms per run.
+
+| case | PostgreSQL ms (cpu, MB) | before | after |
+|---|---|---|---|
+| que fetch (`LIMIT 1 FOR UPDATE SKIP LOCKED`) | 0.436 (0.33, 166) | 0.829 (0.80, 74) | 0.446 (0.40, 74) |
+| Oban fetch (`UPDATE ... IN (SELECT ... LIMIT 10 SKIP LOCKED)`) | 0.837 (0.71, 166) | 4.348 (4.05, 88) | 2.120 (2.15, 82) |
+| graphile-worker fetch (CTE + UPDATE) | 0.651 (0.56, 166) | 2.800 (2.65, 85) | 1.719 (1.75, 87) |
+| solid_queue fetch | 0.370 (0.26, 166) | 0.907 (0.80, 92) | 0.403 (0.40, 94) |
+| keyset page `id > k ORDER BY id LIMIT 20` | 0.418 (0.23, 166) | 0.773 (0.65, 96) | 0.435 (0.40, 99) |
+| keyset page backward `id < k ORDER BY id DESC LIMIT 20` | 0.302 (0.19, 166) | 827.9 (836, 440) | 0.584 (0.55, 101) |
+| `ORDER BY id DESC LIMIT 10`, 1M rows | 0.203 (0.12, 166) | 695.5 (1786, 480) | 0.368 (0.30, 101) |
+| `max(id)`, 1M rows | 0.245 (0.17, 166) | 286.0 (578, 481) | 0.545 (0.60, 101) |
+| `cat = c ORDER BY id LIMIT 5` | 0.323 (0.20, 166) | 0.532 (0.60, 470) | 0.402 (0.45, 105) |
+| `id = ANY (5 values)` | 0.427 (0.24, 166) | 0.912 (0.90, 389) | 0.613 (0.60, 112) |
+| nested loop, 100 pkey lookups | 0.746 (0.68, 166) | 3.099 (2.85, 389) | 1.477 (1.60, 116) |
+| `EXISTS (... cat = c AND id > 10)` | 0.307 (0.26, 166) | 2.207 (2.10, 389) | 0.540 (0.45, 117) |
+| GiST box `&&` (100,000 boxes) | 0.265 (0.20, 166) | 237.2 (210, 295) | 0.748 (0.85, 170) |
+| pg_trgm GIN `LIKE '%xxxxx%'` | 0.890 (0.56, 166) | 129.9 (127, 319) | 17.04 (19.2, 218) |
+| pg_trgm GiST `LIKE '%xxxxx%'` | 14.60 (14.0, 166) | 65.45 (64.3, 340) | 0.901 (0.80, 254) |
+| pg_trgm GIN `%` similarity | 6.591 (6.75, 167) | 448.3 (468, 340) | 388.6 (402, 259) |
+| BRIN one hour of a 1M-row series | 3.324 (3.54, 166) | 342.7 (551, 361) | 8.025 (8.45, 286) |
+| booking insert, `room WITH =, during WITH &&` | 0.263 (0.20, 167) | 0.682 (0.65, 373) | 0.515 (0.50, 294) |
+| booking insert, `during WITH &&` | 0.271 (0.20, 167) | 1.570 (1.50, 375) | 0.507 (0.55, 296) |
+| 3,000 bookings in one INSERT (`during WITH &&`) | 91.2 (93, 167) | 14,841 (17,860, 358) | 612 (615, 288) |
+| 3,000 bookings in a loop, one transaction (`room WITH =`) | 101.8 (102, 168) | 1,477 (1,978, 442) | 1,401 (1,783, 341) |
+
+The single bookings were inserted into tables of 200 rows; their cost grew with the table
+before (an exclusion check read every row), as the bulk insert shows. Peak memory falls
+where the old scans read whole tables (440-480 MB before for the backward scans, about
+100 MB after). The engine's RSS grows through the run as it caches the tables and builds
+structures (cases run in table order: 74 MB at the first, 296 MB at the last, against the
+reference's 166 MB); the structures are estimates of about 70 bytes per row placed one by
+one (GiST, SP-GiST; trigram posting lists 4 bytes per distinct trigram of a row) and a few
+bytes per 128 rows for BRIN zones. Not measured separately.
+
+Left, and why: pg_trgm `%` similarity still reads every row (it would need
+`pg_trgm.similarity_threshold`'s bound on shared trigrams); the GIN `LIKE` case's remaining
+17 ms is the GIN size model the planner and the bitmap scan still build (cached per
+snapshot for page counts only); the job-queue fetches that UPDATE (Oban, graphile-worker)
+and the nested loop spend their time outside the scans (the UPDATE's row versions and index
+entries, a scan's open per outer row); the loop of single bookings is PL/pgSQL and insert
+cost, not the check (its leading `=` already read only the room's rows).
+
+pgbench (scale 10, 8 clients, 20 s, interleaved before / after / before / after twice,
+release builds): select-only 19,634 / 18,048 / 18,832 / 17,142 then 16,286 (after) /
+18,871 (before) / 16,228 / 17,140 tps; tpcb-like 2,409 / 1,758 / 1,545 / 1,632 then 1,742 /
+1,482 / 1,677 / 2,334. A profile of each under select-only (perf, 10 s, 62,000 samples:
+19,752 tps after, 18,791 before in that run) shows the same functions in the same shares; the
+new code (`Kills`) is 0.08% where `index_scanned` was 0.13%. The spread is the shared
+machine's. Peak RSS 369-388 MB select-only, both builds.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
