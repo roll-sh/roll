@@ -3192,6 +3192,71 @@ transactions (5,000; `/proc/<pid>/stat` utime + stime, in ticks), median of thre
   text as prepared statements still are: that took the `-C` PL/pgSQL loop from about 405
   ticks to 343.
 
+## Planning cost (round 21, agent 111)
+
+HANDOFF.md, "Planning cost", has what changed. Release builds over the wire, scale 2,
+pgbench in a container on the host network, one client; PostgreSQL 18.6 (the pinned image,
+`shared_buffers=1GB`, SCRAM) and three engines side by side: `base` (49cc6830, before agent
+93's custom plans), `head` (3bb5431b, this round's start) and `new` (this round: batch 1,
+measured with batch 2's operator-resolution memo, 1–2% of a custom plan). The
+measure is CPU ticks (utime + stime of the engine process, the PostgreSQL container's
+cgroup usage), median of three alternated runs, for 300 transactions with a connection each
+(`-C`) or 1,000–4,000 in one session (`L`). Workloads: pgbench's select-only (`S`) and
+TPC-B; `pl`, a PL/pgSQL function looping 10 times over `SELECT abalance INTO v FROM
+pgbench_accounts WHERE aid = i`; `fn`, `sum(fa(g))` over 100 calls of a SQL function with a
+FROM; `orm`, a 36-column join of four tables (customer, order, item, product) by a random
+customer; `cat`, psql's `\d` column query and an information_schema.columns query.
+
+| workload | PostgreSQL | base | head | new |
+|---|---|---|---|---|
+| `-C` S simple | 490¹ | 48 | 49 | 45 |
+| `-C` S prepared | 486¹ | 69 | 71 | 61 |
+| `-C` TPC-B simple | 594¹ | 112 | 107 | 104 |
+| `-C` TPC-B prepared | 614¹ | 185 | 170 | 136 |
+| `-C` pl simple | 573¹ | 84 | 141 | 125 |
+| `-C` pl prepared | 567¹ | 88 | 152 | 118 |
+| `-C` fn simple | 615¹ | 141 | 195 | 161 |
+| `-C` orm simple | 732¹ | 251 | 254 | 160 |
+| `-C` orm prepared | 785¹ | 384 | 395 | 244 |
+| `-C` cat simple | 1,341¹ | 201 | 207 | 177 |
+| `L` S prepared, 4,000 | 23² | 53 | 56 | 50 |
+| `L` TPC-B prepared, 2,000 | 138² | 170 | 166 | 149 |
+| `L` pl simple, 2,000 | 84² | 106 | 119 | 105 |
+| `L` pl prepared, 2,000 | 77² | 111 | 107 | 93 |
+| `L` fn prepared, 1,000 | 609² | 256 | 252 | 237 |
+| `L` orm simple, 1,500 | 393² | 869 | 913 | 475 |
+| `L` orm prepared, 2,000 | 140² | 356 | 363 | 311 |
+
+¹ 500 transactions (the engines' rows are 300). ² 3,000 transactions. PostgreSQL's `-C`
+CPU is mostly a forked backend and its SCRAM exchange per connection.
+
+- No workload got slower than `head`. The ORM-style join is 1.6x (`-C`) and 1.9x (one
+  session, simple protocol) cheaper: mergejoinscansel per merge path was a third of its
+  planning, statistics slots were parsed per estimate. `-C` prepared statements no longer
+  render EXPLAIN as JSON per custom plan.
+- Agent 93's regression is about half won back: the `-C` PL/pgSQL loop costs 125 ticks
+  (base 84, head 141), 100 SQL-function calls 161 (base 141, head 195). What is left is the
+  five custom plans per statement and session that PostgreSQL makes too: a custom plan of
+  the loop's primary-key lookup took 283 µs of CPU at `head` and 205 µs now (`SET
+  plan_cache_mode = force_custom_plan`, 20,000 plans in one session), about half of it
+  binding and planning, the rest `explain::estimate`'s cost. The engine binds and plans the
+  statement again for each; PostgreSQL re-plans the analyzed tree.
+- Connection setup: pgbench's average connection time is 13.5–14 ms for every engine build
+  (PostgreSQL 18–19 ms); the engine's CPU per connection (the `-C` S row) is unchanged
+  within noise, its parse work for later statements now shared.
+- Memory per idle connection after running the whole mix once (100 connections, RSS
+  growth): `new` 0.3–0.6 MB, `head` 2.1 MB, `base` 1.9 MB, PostgreSQL 2.7 MB (anonymous
+  memory of its container). The parse cache was 8 MB per thread; the shared one is bounded
+  at 32 MB for the process, the PL/pgSQL compile set at 4 MB. While 100 sessions run the mix
+  at once the engine's RSS peaks at 4–8 GB in all three builds (allocator heaps kept
+  until a connection's idle trim); that peak is older than this round.
+- Shared caches' footprint (`lru::footprints`, logged at shutdown as `shared cache` lines)
+  after all the runs above in one engine: parse trees 7,307 entries, 15.2 MB estimated of
+  32 MB, 117,806 hits and 7,306 misses (most misses are select-only's texts, a new
+  constant each); PL/pgSQL compiles 9 entries, 3 kB, 2,393 hits, 12 misses.
+
+Verification: HANDOFF.md, "Planning cost".
+
 ## Round 20 (agent 85): write path round 4
 
 Profiled first (frame-pointer release build, `perf record --call-graph fp` of the engine during
