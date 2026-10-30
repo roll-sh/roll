@@ -1100,6 +1100,19 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       base 852 / 1,653 / 1,494 tps, head 1,523 / 1,327 / 1,602 tps. VmHWM was 435-461 MB on
       both, with CPU seconds alike. The fix is not on the commit path: it runs only when a
       model is built, and in VACUUM FULL.
+- **Executor memory, round 4** (round 22, agent 112; BENCH.md "Round 22 (agent 112)"):
+  - **Cached blocks in a compact form** (`storage/sst.rs` `Block::decode`): a block read
+    into the cache leaves out a key's 8-byte version when it is the block's (`F_TS`) and an
+    index entry's value when it is the row's storage key the index key ends with
+    (`F_DERIVED`: the cursor makes it, `BlockPos::dval`); `expand` copies values out for
+    blocks with derived ones. TPC-H SF1's entries take ~1.45 GB of cache instead of 2.14 GB
+    (the indexes were 830 MB against PostgreSQL's 330 MB), so the 2 GB cache no longer
+    fills: peak 3.07 GB -> 2.09 GB, time and pgbench unchanged. The file format is the same.
+    `sst.rs` `block_positions` covers index-like entries (versions not the block's, values
+    not derivable, short keys).
+  - `tools/bench/bench.rs` reports the server's CPU seconds per query (`cpu_s`).
+  - Verified: crate tests debug and release, clippy, difftest smoke, isolation 121 / 122, a
+    full regress run (debug, private reference) 51,148 / 51,150 with no unit changed.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

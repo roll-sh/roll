@@ -1336,6 +1336,53 @@ lookups, or a row cache) would make it worth it; LZ4 alone saves 4% CPU (q01 -14
   regression suite in full (debug, private reference) 51,148 / 51,150 with no unit changed
   against `results.tsv`; every TPC-H result hash equal to PostgreSQL's in all four rounds.
 
+## Round 22 (agent 112): executor memory, round 4
+
+Same harness and settings; both servers on cores 28-31, the client on 6-7, the machine
+shared (load 20-32 throughout). **pg** is PostgreSQL 18.6 (`a112-pg`); **base** the branch
+at `7bb31b96`. Each engine round is a fresh start, a first read of lineitem, orders and
+partsupp, then the 22 queries 3 times each; rounds interleaved (pg, base, new, pg, base,
+new). **CPU** is the server's user + system seconds per run (`bench` reports it now:
+`cpu_s`, the process's or the container cgroup's). Every result hash agrees with
+PostgreSQL's in every round. Peak memory is the engine's VmHWM over the round and
+PostgreSQL's sampled `anon + shmem`.
+
+### Batch 1: cached blocks in a compact form
+
+| | pg | base | batch 1 |
+|---|---|---|---|
+| all 22, s (two rounds) | 14.96 / 14.27 | 44.66 / 42.83 | 40.37 / 50.21 |
+| CPU s | 35.4 / 35.2 | 106.3 / 102.6 | 95.5 / 120.5 |
+| peak memory (MB) | 1,846 / 1,850 | 2,990 / 3,000 | **2,053 / 2,027** |
+
+Times are within the machine's spread (the second batch-1 round ran during a load spike;
+an interleaved run of q10, q12, q14, q15 and q18 alone gave 10.52 s / 28.3 CPU s base and
+10.73 / 28.8 batch 1). **pgbench** (scale 10, `-M prepared`, 8 clients, 10 s, fresh engine,
+base / new / base / new): select-only 43.7k / 45.2k / 46.4k / 45.0k TPS, tpcb-like 2.67k /
+2.99k / 2.74k / 2.83k; peak RSS 287 / 266 / 295 / 274 MB.
+
+**What the cache held.** TPC-H SF1's SST entries are 2.14 GB decompressed (`a112`'s
+scan of every file): row values 1.56 GB, key suffixes 0.47 GB, entry headers 0.11 GB. The
+tables alone (1.31 GB) are PostgreSQL's size (1.34 GB of heap); the excess was the
+indexes: 830 MB against PostgreSQL's 330 MB. Two things each entry repeats: the 8-byte
+version at the end of every key (33.1M of the 33.3M entries carry their block's), and a
+secondary index entry's value, which is the row's storage key (17 bytes: the table's
+prefix and the row key the index key already ends with; 420 MB in all).
+
+**What changed** (`storage/sst.rs`, `Block::decode`): a block read into the cache is
+written in a compact form of the file's: an entry whose version is its block's leaves it
+out (`F_TS`, put back as the cursor rebuilds the key), and an index entry whose value is
+derivable from its key stores only the length of the key's tail (`F_DERIVED`; the cursor
+makes the value). The file format is unchanged. The working set now takes about 1.45 GB of
+cache instead of 2.14 GB, so the 2 GB cache no longer fills: the peak fell 1.0 GB, and
+random lookups (q07, q09, q20, q21) stop decompressing blocks the cache dropped.
+
+**What else holds memory** (fresh engine, `--cache-mb 64`, RSS after each statement): 96 MB
+after `select 1` (catalogs, sessions); the size models of part (+~70 MB) and customer
+(+~65 MB), whose btree models took ~180 bytes an entry (`btsim::Key` in four allocations
+and a TID vector each); per-query working memory 100-250 MB above that (q10's and q13's
+hash builds and sorts of wide rows).
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

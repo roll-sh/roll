@@ -364,6 +364,30 @@ impl MemProbe {
                 .unwrap_or(0),
         }
     }
+
+    /// The server's CPU time so far, in seconds (user + system: the process's, or the
+    /// cgroup's `usage_usec`).
+    fn cpu_secs(&self) -> f64 {
+        match self {
+            MemProbe::None => 0.0,
+            MemProbe::Pid(p) => std::fs::read_to_string(format!("/proc/{p}/stat"))
+                .ok()
+                .and_then(|s| {
+                    // (Fields after the command's closing parenthesis; utime and stime are
+                    // the 14th and 15th of the whole line.)
+                    let f: Vec<&str> = s.rsplit_once(')')?.1.split_whitespace().collect();
+                    Some((f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?) / 100.0)
+                })
+                .unwrap_or(0.0),
+            MemProbe::Cgroup(dir) => std::fs::read_to_string(format!("{dir}/cpu.stat"))
+                .ok()
+                .and_then(|s| {
+                    let l = s.lines().find(|l| l.starts_with("usage_usec "))?;
+                    Some(l.split_whitespace().nth(1)?.parse::<f64>().ok()? / 1e6)
+                })
+                .unwrap_or(0.0),
+        }
+    }
 }
 
 /// Samples memory every 50 ms while alive; `stop` returns the peak.
@@ -695,6 +719,7 @@ fn run_queries(cx: &Ctx, workload: &str, queries: &[(&str, &str)]) {
         let mut out = (0, 0);
         let mut error = String::new();
         let sampler = MemSampler::start(&cx.mem);
+        let cpu0 = cx.mem.cpu_secs();
         for _ in 0..reps {
             let (r, s) = timed(|| c.simple(sql));
             match r {
@@ -709,6 +734,7 @@ fn run_queries(cx: &Ctx, workload: &str, queries: &[(&str, &str)]) {
             }
         }
         let peak = sampler.stop();
+        let cpu = (cx.mem.cpu_secs() - cpu0) / times.len().max(1) as f64;
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let mut kv = vec![
             ("min_s", times.first().map(|t| format!("{t:.4}")).unwrap_or_default()),
@@ -717,6 +743,7 @@ fn run_queries(cx: &Ctx, workload: &str, queries: &[(&str, &str)]) {
             ("rows", out.0.to_string()),
             ("hash", format!("{:016x}", out.1)),
             ("peak_mem_mb", mb(peak)),
+            ("cpu_s", format!("{cpu:.2}")),
         ];
         if !error.is_empty() {
             kv.push(("error", error.replace(['\t', '\n'], " ")));
