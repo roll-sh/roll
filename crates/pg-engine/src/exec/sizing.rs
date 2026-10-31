@@ -4174,7 +4174,7 @@ impl CopyLoad {
     /// Whether the rows stored from now on are left alone until `finish`: past the model's
     /// size, or waiting to be modelled then (their TIDs stamped only then, if at all).
     pub fn rows_wait(&self) -> bool {
-        let rf = self.db.relfiles.read();
+        let rf = self.db.relfiles.of(self.key.0).read();
         rf.untracked.contains(&self.key.0)
             || rf.bulk.get(&self.key).and_then(|b| b.defer.as_ref()).is_some_and(|d| d.deferring())
     }
