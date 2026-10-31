@@ -349,6 +349,16 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     Decisions); a shutdown checkpoint's distance is 0 when no checkpoint ran since the start;
     a SQL set-returning function's ProjectSet row estimate (1 where PostgreSQL's prorows
     gives 1000; agent 116's).
+  - Verified: crate tests debug and release (deep_input, log_collector, server_log,
+    autovacuum_log, connection_log, lifecycle_log), clippy (no new warnings), the difftest
+    smoke, isolation 121 / 122 suite specs plus the 13 roll-* specs (134 / 135, 1,742 / 1,743
+    permutations: intra-grant-inplace, L2, as before), a full regress run (debug, private
+    reference) 51,148 / 51,150 with 0 units changed against results.tsv, pg_contrib
+    auto_explain 12 / 12 and pg_stat_statements 1,013 / 1,013 (both again after the rebase,
+    with the crate tests, clippy and the roll-* specs). pgbench (release, scale 10, 8 clients,
+    20 s, default logging, a machine at load 35-60, so tps follows run order; engine CPU per
+    transaction): select-only 289-294 us base, 286-297 us this batch; tpcb-like 1,609-1,685 us
+    base, 1,612-1,671 us; peak RSS 355-364 MB base, 336-387 MB. No regression beyond noise.
 - **Server configuration, authentication rules and the server log** (round 20, agent 80):
   - `src/sysconf.rs`: postgresql.conf is the pinned image's (its 15 settings at their lines,
     the locale lines what initdb chose); postgresql.auto.conf is ALTER SYSTEM's, kept in the
