@@ -53,4 +53,14 @@ if [ "${INC_GB:-0}" -ge "$MAX_INCREMENTAL_GB" ] || [ "${FREE_GB:-0}" -lt $((MIN_
   rm -rf "$INC"
   echo "heavy.sh: incremental ${INC_GB:-0}G, ${FREE_GB}G free, cleared target/debug/incremental" >&2
 fi
-"$@"
+# The machine is shared: heavy jobs run at the lowest priority, and a number in $LOCK.jobs caps
+# cargo's build jobs and each test binary's threads for every agent at once (test binaries
+# otherwise start one thread per core). An explicit RUST_TEST_THREADS below the cap is kept.
+JOBS=$(cat "$LOCK.jobs" 2>/dev/null)
+if [ -n "$JOBS" ]; then
+  CARGO_BUILD_JOBS=$JOBS
+  [ "${RUST_TEST_THREADS:-$JOBS}" -gt "$JOBS" ] && RUST_TEST_THREADS=$JOBS
+  : "${RUST_TEST_THREADS:=$JOBS}"
+  export CARGO_BUILD_JOBS RUST_TEST_THREADS
+fi
+nice -n "${HEAVY_NICE:-19}" "$@"

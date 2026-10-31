@@ -3872,8 +3872,10 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
   golden runs. It runs `HEAVY_SLOTS` jobs at once across agents (default 1; 2 is fine on a
   62 GB / 16-core machine). A number in `/tmp/pg-engine-heavy.lock.slots` overrides it for
   every agent and is re-read while jobs wait, so whoever coordinates can retune all agents at
-  once. Hold a slot only for the command itself.
-- **`CARGO_BUILD_JOBS=2`**, and wrap long cargo commands with a timeout.
+  once. Hold a slot only for the command itself. Jobs run under `nice -n 19`, and a number in
+  `/tmp/pg-engine-heavy.lock.jobs` caps `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` the same way.
+- **`CARGO_BUILD_JOBS=2`**, and wrap long cargo commands with a timeout. Run engines and
+  benchmarks you start outside `heavy.sh` under `nice -n 19` too.
 - **Disk:** on macOS the default `split-debuginfo = unpacked` leaves every build's `*.o` files in
   `target/debug/deps`. 1.5 million of them (~500 GB) once filled the disk. `heavy.sh` prunes
   ones older than 4 hours. It also builds with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`
