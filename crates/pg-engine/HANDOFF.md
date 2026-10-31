@@ -2923,6 +2923,76 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     autovacuum's: "concurrent schema change"), matching when rerun, and a full run of the
     base beside them differed in 4 units of partition_join: plans that move with
     autovacuum's timing on a machine at load 40.
+- **Write path, round 6** (round 22, agent 134; BENCH.md "Bulk writes, round 6"): COPY in
+  1.4x, CREATE INDEX 1.7x and UNIQUE 1.9x (parallel), VACUUM 2x, pgbench -i -s 50 1.8x
+  (primary keys 4x), bytes written by pgbench -i 1,598 → 860 MB; a 10,000-row expression
+  index build 4x.
+  - **COPY's sink** (`Txn::open_sink`, `flush_sink`, `close_sink`): a COPY whose rows and
+    entries nothing reads before it ends (COPY's multi-insert rule, `model_deferrable`, a
+    table keyed by row ids, only plain btree indexes, none unique or exclusion; AFTER
+    triggers and foreign keys fire after the sink closes) hands its fresh writes
+    (`put_fresh`) to a sink of key and value bytes back to back instead of the write buffer's
+    map and journal. The sink opens once the rows stored are left alone until the load ends
+    (`CopyLoad::rows_wait`: past the model's size, or deferred to the end: TID stamping
+    rewrites rows in the buffer, `Txn::restamp`), and goes to disk as a sorted linkable run
+    (`spill::Runs::write_fresh`, encoded from the slices) once the table is past the model's
+    size; otherwise, or below a megabyte, its writes go into the buffer as before. A run's
+    writes take one journal place of their own (a placeholder entry in the journal): no
+    snapshot taken before sees them (a cursor declared before the COPY), every one after
+    does. `begin_statement` and `commit` close a sink left open (a failed COPY). Not with a
+    savepoint open, in a read-only or SSI-tracked transaction.
+  - **A spilled commit's fresh buffer linked** (`Txn::link_fresh_buffer`, `stale_segs`): the
+    buffer's writes of tables and indexes the transaction wrote only fresh keys of since the
+    last spill (every non-fresh `record` notes its key's 8-byte table / index prefix) become
+    one more linkable run at commit, so a COPY into a table with indexes links (its last
+    buffer held entries in every run's index range) and those writes aren't merged into the
+    commit's file. Anything new that writes into the buffer without `record` must note its
+    prefix in `stale_segs` unless its keys are fresh.
+  - **Parallel btree builds** (`session/ddl/parbuild.rs`): CREATE INDEX of plain columns
+    without a predicate over a table too big to model takes plan_create_index_workers' count
+    of workers (heap pages against min_parallel_table_scan_size, tripling per worker, the
+    table's parallel_workers, at most max_parallel_maintenance_workers, fewer while
+    maintenance_work_mem gives a participant under 32 MB; from max_parallel_workers' pool,
+    `parscan::reserve_workers`) plus the leader. They read the rows in key ranges
+    (`scan::keyed_cuts`), each decoding, measuring (`measure_rows_with`'s numbers: the same
+    pg_class pages and tuples) and sorting its entries in an arena (16 bytes an entry plus the
+    key; the value is the table prefix and the key's tail); each participant's sorted entries
+    go in as one linked run (`Txn::put_index_runs`). A unique index's duplicates are found
+    merging them; the one reported is the serial build's (the key whose second row comes
+    first in the table's order, with its first row's values), so the error and DETAIL don't
+    depend on the workers. pg_stat_progress_create_index isn't reported by the engine at all
+    (serial or parallel); that is still to do.
+  - **An index's measure after its build** computes its expressions in one
+    security-restricted operation (`IndexScope` in `measure_rows_with`), as the build does
+    since agent 115: entered per row, it was most of a 10,000-row expression or partial
+    index's build.
+  - **VACUUM** of a table too big to model finds its TOAST table's oldest xmin in the
+    measure's pass too (only a row past TOAST_TUPLE_THRESHOLD can have values out of line),
+    so a table with a TOAST table isn't read a second time (`advance_frozen_xid`,
+    `measured_xmin`'s fourth field).
+  - **ADD PRIMARY KEY** over columns already validly NOT NULL (as the statement began)
+    doesn't scan for nulls (`Ddl::not_null_holds`; PostgreSQL's set_attnotnull leaves a
+    valid attnotnull alone): pgbench -i's primary keys read each table once fewer.
+  - COPY's values are taken as read rather than evaluated as constants (`next_copied`).
+  - Tests: `tests/big_tables.rs` `copy_through_the_sink` (sink runs and links into a table
+    with an index, a cursor declared before, writes over linked keys later in the
+    transaction, a failed COPY, a restart, the TOAST table's relfrozenxid) and
+    `parallel_index_builds` (entries, pg_class numbers and unique errors with and without
+    workers).
+  - Not done: DELETE's per-row lock and tombstones (`lock_row_mode` 17% and the row's
+    tombstone 6% of the DELETE thread; a deferred tombstone run like the entry deletes' is
+    the next step, its snapshot place one past the statement's, see below), VACUUM skipping
+    what nothing changed (it still reads a big table once; a record of the last measure with
+    the store's newest version in the table's range, and COPY FREEZE's load, would let it
+    skip), COPY's remaining per-row cost (parsing 26%, the heap estimate per row
+    `sizing::inserted_with` 11%, the row id's sequence 4%), small plain btree builds
+    (10,000 rows 28 ms against 6.4: the btree model's build and the buffer's commit through
+    the memtable), pg_stat_progress_create_index.
+  - Found: a DELETE's deferred entry deletes (`put_entry_deletes`) are written at the
+    journal place `position()`, which a snapshot taken right before the statement (a
+    cursor declared just before, with nothing written between) also has, so such a cursor
+    could miss rows through an index; the sink's runs take a place of their own
+    (a placeholder journal entry) for this reason. Not reproduced or changed.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

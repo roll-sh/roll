@@ -3903,6 +3903,77 @@ HANDOFF.md, "Write path, round 5".
   (PostgreSQL sets xmax).
 - VACUUM of a big table measures every row (PostgreSQL skips all-frozen pages).
 
+## Bulk writes, round 6 (round 22, agent 134)
+
+Profiled first (frame-pointer release build, `perf record --call-graph fp` of the engine during
+each step): COPY's thread spent 27% in `put_new_row` (the write buffer's map insert and journal
+entry 15%, its spills 6%), 26% reading and parsing the data, 11.5% in the heap estimate per row
+and 5% evaluating each value as a constant; CREATE UNIQUE INDEX's single thread decoded,
+measured and sorted every entry, with the unique hash set 10% and the runs 10%; DELETE's thread
+spent 17% in the row lock and 6% on the row's tombstone; VACUUM read a table with a TOAST table
+twice (31% of it in `advance_frozen_xid`'s second pass); pgbench -i's primary keys scanned each
+table for nulls its NOT NULL columns can't hold; a 10,000-row expression index's measure after
+its build entered the index's security-restricted operation per row (51% of the builds' time).
+What changed: HANDOFF.md's "Write path, round 6".
+
+### Bulk, 1M rows
+
+Medians of 3 interleaved rounds (base, this round, PostgreSQL; each engine from a fresh data
+directory), seconds, wall and the server's CPU over the step, through psql as rounds 4 and 5 ran
+them (`\copy` of the same 1M-row file), servers on cores 16-19; machine load 30-40 on 36 cores,
+with another agent's full test runs beside it, so walls are 20-40% above round 5's. **base** is
+`57d7da04` (this round's base after its rebase), **round 6** is it with this round's commits.
+Every client sets `maintenance_work_mem = 256MB`, as the reference server runs (round 5's engine
+had the default; it decides the parallel build's workers, 2 here as PostgreSQL's).
+
+| step | pg wall | pg cpu | base wall | base cpu | round 6 wall | round 6 cpu |
+|---|---|---|---|---|---|---|
+| COPY in | 1.34 | 1.34 | 4.22 | 3.75 | 3.08 | 2.84 |
+| CREATE INDEX | 0.48 | 1.03 | 2.66 | 2.72 | 1.57 | 2.91 |
+| CREATE UNIQUE INDEX | 0.40 | 0.63 | 2.20 | 3.26 | 1.13 | 2.87 |
+| COPY out | 0.57 | 0.58 | 1.74 | 3.60 | 1.46 | 2.95 |
+| INSERT … SELECT | 1.26 | 1.18 | 3.61 | 3.71 | 4.06 | 4.49 |
+| UPDATE half | 7.34 | 7.50 | 4.59 | 7.77 | 4.23 | 7.74 |
+| DELETE a quarter | 0.37 | 0.40 | 2.44 | 2.42 | 1.99 | 2.53 |
+| VACUUM | 0.40 | 0.55 | 1.41 | 1.30 | 0.67 | 0.67 |
+| ANALYZE | 0.20 | 0.22 | 0.62 | 0.62 | 0.57 | 0.56 |
+| count(*) after | 0.07 | 0.15 | 0.40 | 0.67 | 0.35 | 0.62 |
+| TRUNCATE (1M rows, no index) | 0.03 | 0.04 | 0.00 | 0.01 | 0.00 | 0.02 |
+| DROP TABLE (750k rows, two indexes) | 0.06 | 0.07 | 0.00 | 0.14 | 0.00 | 0.16 |
+
+| resources | PostgreSQL | base | round 6 |
+|---|---|---|---|
+| server CPU over the twelve steps | 14 s | 31 s | 28 s |
+| peak memory (VmHWM; the container's memory.peak) | 923 MB | 342 MB | 367 MB |
+| written over the run (`/proc/<pid>/io`; the container's io.stat) | 1,776 MB | 393 MB | 396 MB |
+| on disk before the DROP / at the end | 615 / 391 MB | 90 / 1 MB | 90 / 1 MB |
+
+- A step's CPU includes the background flushes and compactions running during it: the
+  parallel builds' CPU is the workers' (2.9 s against 2.7 for one thread), and their linked
+  files are compacted during the steps after them.
+- INSERT … SELECT: 15-30% slower in three of five interleaved runs and 4% faster in the
+  other two (2.53 against 2.65 s, after 15 s of quiet); its path (`deferred_inserts`, no sink)
+  is unchanged and its flat profiles are alike (the buffer's map insert 4.9% both, zstd and
+  SST writes): the machine's load, as far as found.
+- Peak memory +25 MB: the parallel build's sorted arenas (16 bytes an entry plus the key,
+  where the serial build held 32 MB batches).
+
+### pgbench -i -s 50
+
+Two interleaved runs each (PostgreSQL one), seconds as pgbench reports its phases, the
+server's CPU over the run:
+
+| | total | generate (COPY) | vacuum | primary keys | server CPU | peak memory | written | on disk |
+|---|---|---|---|---|---|---|---|---|
+| PostgreSQL 18.6 | 8.96 | 6.67 | 0.28 | 2.00 | 10.1 s | 1,705 MB | 2,522 MB | 1,395 MB |
+| base | 68.41 | 37.48 | 9.54 | 21.37 | 59.5 s | 1,521 MB | 1,598 MB | 243 MB |
+| round 6 | 37.64 | 23.45 | 8.78 | 5.40 | 38.9 s | 1,586 MB | 860 MB | 245 MB |
+
+(Round 5 measured its base at 51 s and itself at 32 s on a less loaded machine.) The COPYs go
+through the sink and link; the primary keys build in parallel and no longer scan for nulls;
+VACUUM ANALYZE still reads pgbench_accounts once (PostgreSQL skips the pages COPY FREEZE left
+all-frozen).
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,
