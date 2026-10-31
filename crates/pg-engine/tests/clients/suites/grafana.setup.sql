@@ -39,3 +39,6 @@ CREATE SCHEMA reports;
 CREATE TABLE reports.daily (day date PRIMARY KEY, total numeric, note text);
 INSERT INTO reports.daily VALUES ('2026-01-01', 12.5, 'first'), ('2026-01-02', NULL, NULL);
 COMMENT ON TABLE metrics IS 'per-minute host metrics';
+-- (Analyzed now, so plans don't depend on when autovacuum gets to the tables: avg(cpu)'s
+-- float sums follow the plan's row order.)
+ANALYZE;
