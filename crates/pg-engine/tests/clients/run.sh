@@ -22,6 +22,8 @@
 #                    -e POSTGRES_INITDB_ARGS="--locale=C --encoding=UTF8" <PG_IMAGE below> \
 #                    (default settings, as roll-engine-ref)
 #   CLIENTS_CPUS   docker --cpus (default 4)
+#   APP_PORT       an application suite's HTTP port (its default otherwise; agents sharing a
+#                  machine use one of their own range)
 #   CLIENTS_NAME   the suite container's name prefix (default clients; agents sharing a
 #                  machine use their own, so two runs of one suite don't collide)
 #
@@ -71,7 +73,7 @@ docker run --rm --network host --cpus="${CLIENTS_CPUS:-4}" --name "${CLIENTS_NAM
   --user "$(id -u):$(id -g)" -e HOME=/cache/home \
   -v "$CACHE:/cache" -v "$HERE:/harness:ro" \
   -e PGHOST=127.0.0.1 -e PGPORT="$PORT" -e PGUSER=postgres -e PGPASSWORD=pw -e PGDATABASE=postgres \
-  -e TARGET="$TARGET" -e SRC="/cache/src/$SUITE" -e OUT="/cache/results/$SUITE-$TARGET.d" \
+  ${APP_PORT:+-e APP_PORT=$APP_PORT} -e TARGET="$TARGET" -e SRC="/cache/src/$SUITE" -e OUT="/cache/results/$SUITE-$TARGET.d" \
   -w "/cache/src/$SUITE" "$IMAGE" sh /harness/suites/"$SUITE".sh "$@" > "$OUT.log" 2>&1
 STATUS=$?
 set -e

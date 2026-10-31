@@ -5158,7 +5158,10 @@ Fixed here:
   plan is made, not as the first runs: a driver's unnamed statement, parsed again for every
   execution (pgjdbc below prepareThreshold, Go's database/sql, Npgsql), runs once and never
   needs it. One custom plan is kept per prepared statement until then (after DDL in between,
-  the second plan's cost stands in for the first's).
+  the second plan's cost stands in for the first's). Measured before OLTP round 3 (agent
+  136), which runs an unnamed statement's value-independent custom plans as its generic
+  binding with their costs likewise deferred (`PlanUses::uncosted`); statements whose text
+  it keeps bindings for are costed as their plans are made, as it needs.
 - `session::pgss::jumble_cached`: top-level statements' query ids, kept per thread by text,
   position, catalog and search_path (512 entries), as PostgreSQL computes them at parse
   analysis rather than per execution.

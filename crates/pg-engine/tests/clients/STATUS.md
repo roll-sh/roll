@@ -142,6 +142,67 @@ first run in a session (per-session catalog caches, `Catalog::rel_rowtype`'s deb
 integer converted to decimal, quadratic; PostgreSQL keeps base-10000 digits); jOOQ's codegen
 catalog queries 13 s vs 2.3 s; EF Core's suite 31 min vs 7 min.
 
+## Round 7 (round 24, agent 133)
+
+Release engines (line tables, frame pointers for the profiles), private references of the
+pinned image: one default (`-c max_connections=500`), one with `pg_stat_statements` (track =
+all, track_planning on) for per-statement times on both sides. Server CPU is the engine
+process's (utime + stime) and the reference container's cgroup; each run against a fresh
+engine, the two engines' runs interleaved. BENCH.md "Application CPU" has the profiles, the
+causes by owner and the reproducers.
+
+New suites (`suites/apps.py` style, one id per step, hashed answers; both run twice on
+PostgreSQL with the same ids):
+
+| suite | what runs | ids | differences | engine CPU | PostgreSQL CPU |
+|---|---|---:|---|---:|---:|
+| Gitea 28.2.0 (release binary, `golang` image for its git) | xorm migrations and sync (~120 tables), users, orgs, teams, repositories with files and branches, labels, milestones, issues, comments, reactions, the database issue indexer, a pull request reviewed and merged, releases, stars, webhooks, admin lists, errors, deletes | 209 | 0 | 4.2 s | 3.2 s |
+| Supabase Auth 2.197.0 (GoTrue release binary) | 75 migrations as `supabase_auth_admin` into its own `auth` schema, sign-ups, password logins, refresh-token rotation and reuse, the user record and metadata, TOTP enrolment, admin create / list / pages / update / ban / delete, error answers, the auth tables after | 67 | 0 (1 fixed) | 1.2 s | 2.2 s |
+
+Fixed (golden `a133_client_round7`):
+- Supabase Auth's `auth.users.phone_change` (`varchar(15) DEFAULT ''`, later `ALTER COLUMN
+  ... TYPE text`) showed `''::text` as its default; PostgreSQL keeps the cooked default and
+  coerces it implicitly, so it still shows `''::character varying` (`'z'::bpchar` for a
+  char(n) made text, `'q'::text` for a text made varchar). A changed column's default is
+  now kept as it showed under the old type, and must convert from that type ("default for
+  column ... cannot be cast automatically", as for `varchar DEFAULT '7'` made int).
+- `'t'::regclass` after DBAL's renumbering (`UPDATE pg_class SET oid`) gives the oid
+  pg_class shows, and the new oid prints as the table's name, the old one as a number
+  (round 6's left item).
+- pg_stat_activity.query keeps track_activity_query_size - 1 bytes, cut at a character
+  boundary, as pgstat_report_activity does: pgAdmin's dashboard (`servers/sql/stats.sql`)
+  showed the engine's whole statement. Wire test `activity_query_clipped_to_track_activity_query_size`.
+- The metadata replay masks the client address:port column (it changed between runs).
+
+The pgAdmin / DBeaver replay, both servers fresh: 831 of 856 the same, 25 differ, every one
+cosmetic and of round 4's kinds: pg_node_tree columns holding SQL text (10: typdefaultbin,
+conbin, indexprs / indpred, relpartbound, proargdefaults, ev_action, tgqual: what clients
+read through pg_get_expr / pg_get_*def, which match), pg_statio block counters (5: the
+engine has no buffer pool to count), and array_agg / aclexplode element orders and row
+orders without ORDER BY (10: acl.sql of schemas, tables, views, mviews, foreign tables and
+the catalog; DBeaver's dependency lists; pgAdmin's catalog_object nodes and properties). Oids
+are PostgreSQL's statement by statement (a trace of the setup, `max(oid)` after each
+statement on both servers: every statement allocates as many). Matching the node trees would
+mean storing PostgreSQL's node text for every expression in the catalog: not worth its cost
+for clients that all deparse.
+
+Re-measured (base: branch head 177b53e9; release, fresh engines, two interleaved runs each):
+
+| suite | engine before | engine after | PostgreSQL |
+|---|---:|---:|---:|
+| Kysely | 10.2, 10.1 s (pgss: 11.2, 12.0) | 9.2, 9.7 s (pgss: 9.3, 9.5) | 7.6 s (pgss) |
+| Grafana | 5.0, 4.8 s (pgss: 6.2, 5.6) | 4.0, 4.3 s (pgss: 4.7, 4.3) | 4.1 s (pgss), 3.5 s (round 6) |
+| Keycloak | 17.5, 18.2 s (pgss: 21.4, 20.8) | 17.4, 16.6 s (pgss: 18.2, 18.4) | 6.9-9.5 s (pgss), 6.3 s (round 6) |
+| Metabase | 37.9 s | 36.2 s (peak 174 MB) | 13.2 s |
+| EF Core | 919 s, peak 763 MB | 935 s (pgss), peak 841 MB | 172 s (pgss) |
+
+All five with 0 differences (EF Core: the 4 LIMIT-without-ORDER-BY-over-GROUP-BY tests, as
+in round 6). EF Core's gap is four Northwind queries (about 530 s of the engine's 805 s of
+statement time; PostgreSQL runs each in under 0.5 s), see BENCH.md.
+
+Postgrex's "terminate backend during query": a client race, not matched (HANDOFF.md,
+Decisions: "A CancelRequest's connection closes when the backend has acted").
+
 ## Round 6 (round 23, agent 122)
 
 Release engine, a private reference of the pinned image (`-c max_connections=500`).

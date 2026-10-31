@@ -425,7 +425,7 @@ NEEDS = {"data", "where", "where_clause", "condition", "keys", "fdwdata", "grant
 VOLATILE = re.compile(r"(size|xmin|xmax|xid|time|vacuum|analyze|scan|tup|blks|_read|_fetch|"
                       r"relpages|relfilenode|relallvisible|frozen|age$|lsn|pid|backend|"
                       r"stats_reset|xact|conflict|deadlock|temp_|checksum|session|last_value|"
-                      r"log_cnt|is_called|tuples|rows|cost|version|reltuples)", re.I)
+                      r"log_cnt|is_called|tuples|rows|cost|version|reltuples|^client$|client_port)", re.I)
 DSN = (f"host={os.environ['PGHOST']} port={os.environ['PGPORT']} user=postgres "
        f"password={os.environ['PGPASSWORD']} dbname=a81_meta")
 
