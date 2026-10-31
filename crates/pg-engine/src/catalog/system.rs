@@ -1663,7 +1663,6 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
     use SysTable::*;
     let held = ctx.catalog();
     let cat = &*held;
-    let in_schema = |r: &&Row| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2));
     // (The relation maps keep their relations' row counts: `relindex::RelRows`.)
     let rels = [
         cat.tables.ix().rows,
@@ -1672,23 +1671,32 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
         cat.indexes.ix().rows,
     ];
     let sum = |f: fn(&super::relindex::RelRows) -> i64| rels.iter().map(f).sum::<i64>() as usize;
-    let n = match table {
-        PgClass => {
-            super::static_rows::rows(PgClass).iter().filter(in_schema).count()
-                + sum(|r| r.class)
-                + cat.composites.len()
+    // Postgres's own relations' pg_class and pg_attribute rows per schema, counted once: the
+    // planner asks for these counts on every plan of a catalog scan, and each call counted
+    // the built-in rows again (a set of pg_class's 400 oids, then pg_attribute's 3,000 rows).
+    static BUILTIN: std::sync::OnceLock<Vec<(u32, usize, usize)>> = std::sync::OnceLock::new();
+    let builtin = BUILTIN.get_or_init(|| {
+        let mut per: std::collections::BTreeMap<u32, (usize, usize)> = Default::default();
+        let mut ns_of: std::collections::HashMap<u32, u32> = Default::default();
+        for r in super::static_rows::rows(PgClass).iter() {
+            let ns = super::static_rows::oid_at(r, 2);
+            ns_of.insert(super::static_rows::oid_at(r, 0), ns);
+            per.entry(ns).or_default().0 += 1;
         }
+        for r in super::static_rows::rows(PgAttribute).iter() {
+            if let Some(ns) = ns_of.get(&super::static_rows::oid_at(r, 0)) {
+                per.entry(*ns).or_default().1 += 1;
+            }
+        }
+        per.into_iter().map(|(ns, (c, a))| (ns, c, a)).collect()
+    });
+    let present = || builtin.iter().filter(|b| cat.schemas.contains_key(&b.0));
+    let n = match table {
+        PgClass => present().map(|b| b.1).sum::<usize>() + sum(|r| r.class) + cat.composites.len(),
         PgAttribute => {
-            let builtin: std::collections::HashSet<u32> = super::static_rows::rows(PgClass)
-                .iter()
-                .filter(in_schema)
-                .map(|r| super::static_rows::oid_at(r, 0))
-                .collect();
-            let fixed = super::static_rows::rows(PgAttribute)
-                .iter()
-                .filter(|r| builtin.contains(&super::static_rows::oid_at(r, 0)))
-                .count();
-            fixed + sum(|r| r.attribute) + cat.composites.values().map(|c| c.fields.len()).sum::<usize>()
+            present().map(|b| b.2).sum::<usize>()
+                + sum(|r| r.attribute)
+                + cat.composites.values().map(|c| c.fields.len()).sum::<usize>()
         }
         PgAttrdef => sum(|r| r.attrdef),
         PgIndex => super::static_rows::rows(PgIndex).len() + sum(|r| r.index),
@@ -2083,6 +2091,128 @@ fn rows_generated_chunked(
     let mut out = Out::chunked(part);
     generate(table, ctx, None, &mut out)?;
     Ok(out.into_chunks())
+}
+
+/// pg_type's rows of user types finished one at a time as they are made (`generate`'s PgType),
+/// so they are chunked as they come: what a row takes from the catalog besides its type, and
+/// what an array takes from its element type's row.
+struct TypeRows<'c> {
+    cat: &'c Catalog,
+    /// The collations of the types made so far that have one (information_schema's domains'
+    /// "C" in place of their base type's): an array shows its element type's. (An element type
+    /// is made before its array.)
+    colls: std::collections::HashMap<u32, Value>,
+    /// User base types by their array type (whose delimiter, alignment and collation follow
+    /// them).
+    base_arrays: std::collections::HashMap<u32, &'c Arc<super::userobj::BaseTypeDef>>,
+}
+
+impl<'c> TypeRows<'c> {
+    fn new(cat: &'c Catalog) -> Self {
+        let mut base_arrays = std::collections::HashMap::new();
+        for d in cat.base_types.values() {
+            base_arrays.entry(d.ty.array_oid).or_insert(d);
+        }
+        TypeRows { cat, colls: Default::default(), base_arrays }
+    }
+
+    /// Finish `row` as made; whether it is shown (Postgres's own types are shown as it has
+    /// them, `static_rows`: theirs are made for their collations only).
+    fn finish(&mut self, ctx: &ExecCtx, row: &mut Row) -> bool {
+        let cat = self.cat;
+        let Value::Oid(oid) = row[0] else {
+            return false;
+        };
+        // information_schema declares its text domains COLLATE "C".
+        if row[28] != o(0) && cat.domains.get(&oid).is_some_and(|d| d.schema == INF) {
+            row[28] = o(950);
+        }
+        if row[28] != o(0) {
+            self.colls.insert(oid, row[28].clone());
+        }
+        if oid < super::FIRST_USER_OID {
+            return false;
+        }
+        // Support functions, and what arrays and domains take from their element / base type.
+        for (i, p) in type_procs(cat, oid).into_iter().enumerate() {
+            row[if i == 0 { 12 } else { 14 + i }] = o(p);
+        }
+        if let Some(d) = cat.domains.get(&oid) {
+            // (The array bounds written after the base type's name.)
+            if d.parent.is_none() && matches!(d.base, DataType::Array(_)) {
+                row[27] = i4(1);
+            }
+        } else if let Value::Oid(elem) = row[13]
+            && elem != 0
+            && row[7] == c('A')
+        {
+            row[28] = self.colls.get(&elem).cloned().unwrap_or(o(0));
+        }
+        if let Some(d) = cat.domains.get(&oid) {
+            if let Some(def) = &d.default {
+                let shown = crate::sql::ruleutils::domain_default(ctx, &d.base, def)
+                    .unwrap_or_else(|| def.clone());
+                row[29] = nm(&shown);
+                row[30] = nm(shown);
+            }
+            if let Some(coll) = &d.collation
+                && type_collation(&d.base) != 0
+            {
+                row[28] = o(collation_oid(coll).unwrap_or(100));
+            }
+        }
+        // A made base type's own attributes (its array's alignment follows it).
+        if let Some(d) = cat.base_types.get(&oid) {
+            row[9] = b(!d.is_shell());
+            row[10] = c(d.delimiter);
+            if d.ty.collatable {
+                row[28] = o(100);
+            }
+            if let Some(def) = &d.default {
+                row[30] = nm(def);
+            }
+        } else if let Some(d) = self.base_arrays.get(&oid) {
+            row[10] = c(d.delimiter);
+            row[22] = c(if d.ty.align == 'd' { 'd' } else { 'i' });
+            if d.ty.collatable {
+                row[28] = o(100);
+            }
+        }
+        // Owners and privileges of user types (arrays follow their element type).
+        let elem = match row[13] {
+            Value::Oid(e) if e != 0 => e,
+            _ => oid,
+        };
+        let owner = cat
+            .enums
+            .get(&elem)
+            .map(|e| e.owner)
+            .or_else(|| cat.composites.get(&elem).map(|c| c.owner))
+            .or_else(|| cat.domains.get(&elem).map(|d| d.owner))
+            .or_else(|| cat.base_types.get(&elem).map(|d| d.owner))
+            .or_else(|| {
+                cat.ranges
+                    .values()
+                    .find(|r| r.oid == elem || r.multi_oid == elem)
+                    .map(|r| r.owner)
+            })
+            .or_else(|| match cat.tables.ix().rowtypes.get(&elem) {
+                Some(&(t, false)) => cat.tables.get(&t).map(|t| t.owner),
+                _ => None,
+            })
+            .or_else(|| match cat.views.ix().rowtypes.get(&elem) {
+                Some(&(v, false)) => cat.views.get(&v).map(|v| v.owner),
+                _ => None,
+            });
+        if let Some(owner) = owner {
+            row[3] = o(owner);
+        }
+        if let Some(a) = cat.acl(ObjKind::Type, elem, 0) {
+            let n = row.len();
+            row[n - 1] = acl_value(cat, Some(a));
+        }
+        true
+    }
 }
 
 /// `generate_raw`, pg_class's and pg_attribute's oids as a superuser's UPDATE set them
@@ -2579,6 +2709,29 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             }
         }
         PgType => {
+            // Postgres's own types as it has them (in schemas still there), then ours, each
+            // finished as it is made (`TypeRows::finish`) and pushed: the rows are chunked as
+            // they come. (They were all made, changed in place, then chunked: pg_type's first
+            // read at 90,000 objects held every row.)
+            if only.is_none() {
+                for r in (super::static_rows::rows(table).iter())
+                    .filter(|r| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2)))
+                {
+                    let mut r = r.clone();
+                    let (oid, elem) = (
+                        super::static_rows::oid_at(&r, 0),
+                        super::static_rows::oid_at(&r, 13),
+                    );
+                    if let Some(a) =
+                        cat.acl(ObjKind::Type, if elem != 0 && r[7] == c('A') { elem } else { oid }, 0)
+                    {
+                        let n = r.len();
+                        r[n - 1] = acl_value(cat, Some(a));
+                    }
+                    out.push(r);
+                }
+            }
+            let mut rows = TypeRows::new(cat);
             let mut push = |oid: u32,
                             name: String,
                             ns: u32,
@@ -2590,7 +2743,12 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                             typmod: i32,
                             notnull: bool,
                             relid: u32| {
-                out.push(vec![
+                // (One relation's rows, `sysdelta`: Postgres's own types aren't among them, nor
+                // read by them.)
+                if only.is_some() && oid < super::FIRST_USER_OID {
+                    return;
+                }
+                let mut row = vec![
                     o(oid),
                     nm(name),
                     o(ns),
@@ -2633,7 +2791,10 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     N,
                     N,
                     N,
-                ]);
+                ];
+                if rows.finish(ctx, &mut row) {
+                    out.push(row);
+                }
             };
             for t in DataType::all_scalars() {
                 let typtype = match t {
@@ -2966,156 +3127,6 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     0,
                 );
             }
-            // information_schema declares its text domains COLLATE "C".
-            for row in out.iter_mut() {
-                if let Value::Oid(oid) = row[0]
-                    && cat.domains.get(&oid).is_some_and(|d| d.schema == INF)
-                    && row[28] != o(0)
-                {
-                    row[28] = o(950);
-                }
-            }
-            // Support functions, and what arrays and domains take from their element / base type.
-            let collations: std::collections::HashMap<u32, Value> = out
-                .iter()
-                .filter_map(|r| {
-                    if let Value::Oid(oid) = r[0] {
-                        Some((oid, r[28].clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for row in out.iter_mut() {
-                let Value::Oid(oid) = row[0] else { continue };
-                for (i, p) in type_procs(cat, oid).into_iter().enumerate() {
-                    row[if i == 0 { 12 } else { 14 + i }] = o(p);
-                }
-                if let Some(d) = cat.domains.get(&oid) {
-                    // (The array bounds written after the base type's name.)
-                    if d.parent.is_none() && matches!(d.base, DataType::Array(_)) {
-                        row[27] = i4(1);
-                    }
-                } else if let Value::Oid(elem) = row[13]
-                    && elem != 0
-                    && row[7] == c('A')
-                    && let Some(coll) = collations.get(&elem)
-                {
-                    row[28] = coll.clone();
-                }
-            }
-            // Owners and privileges of user types (arrays follow their element type).
-            let mut base_arrays: std::collections::HashMap<u32, &Arc<super::userobj::BaseTypeDef>> =
-                std::collections::HashMap::new();
-            for d in cat.base_types.values() {
-                base_arrays.entry(d.ty.array_oid).or_insert(d);
-            }
-            for row in out.iter_mut() {
-                let Value::Oid(oid) = row[0] else { continue };
-                if let Some(&(_, _, len, align)) =
-                    crate::types::oid::OTHER_PSEUDO.iter().find(|p| p.0 == oid)
-                {
-                    row[4] = i2(len as i64);
-                    row[5] = b(true);
-                    row[22] = c(align);
-                    row[23] = c('p');
-                }
-                if let Some(d) = cat.domains.get(&oid) {
-                    if let Some(def) = &d.default {
-                        let shown = crate::sql::ruleutils::domain_default(ctx, &d.base, def)
-                            .unwrap_or_else(|| def.clone());
-                        row[29] = nm(&shown);
-                        row[30] = nm(shown);
-                    }
-                    if let Some(coll) = &d.collation
-                        && type_collation(&d.base) != 0
-                    {
-                        row[28] = o(collation_oid(coll).unwrap_or(100));
-                    }
-                }
-                // A made base type's own attributes (its array's alignment follows it).
-                if let Some(d) = cat.base_types.get(&oid) {
-                    row[9] = b(!d.is_shell());
-                    row[10] = c(d.delimiter);
-                    if d.ty.collatable {
-                        row[28] = o(100);
-                    }
-                    if let Some(def) = &d.default {
-                        row[30] = nm(def);
-                    }
-                } else if let Some(d) = base_arrays.get(&oid) {
-                    row[10] = c(d.delimiter);
-                    row[22] = c(if d.ty.align == 'd' { 'd' } else { 'i' });
-                    if d.ty.collatable {
-                        row[28] = o(100);
-                    }
-                }
-                if oid < super::FIRST_USER_OID {
-                    continue;
-                }
-                let elem = match row[13] {
-                    Value::Oid(e) if e != 0 => e,
-                    _ => oid,
-                };
-                let owner = cat
-                    .enums
-                    .get(&elem)
-                    .map(|e| e.owner)
-                    .or_else(|| cat.composites.get(&elem).map(|c| c.owner))
-                    .or_else(|| cat.domains.get(&elem).map(|d| d.owner))
-                    .or_else(|| cat.base_types.get(&elem).map(|d| d.owner))
-                    .or_else(|| {
-                        cat.ranges
-                            .values()
-                            .find(|r| r.oid == elem || r.multi_oid == elem)
-                            .map(|r| r.owner)
-                    })
-                    .or_else(|| match cat.tables.ix().rowtypes.get(&elem) {
-                        Some(&(t, false)) => cat.tables.get(&t).map(|t| t.owner),
-                        _ => None,
-                    })
-                    .or_else(|| match cat.views.ix().rowtypes.get(&elem) {
-                        Some(&(v, false)) => cat.views.get(&v).map(|v| v.owner),
-                        _ => None,
-                    });
-                if let Some(owner) = owner {
-                    row[3] = o(owner);
-                }
-                if let Some(a) = cat.acl(ObjKind::Type, elem, 0) {
-                    let n = row.len();
-                    row[n - 1] = acl_value(cat, Some(a));
-                }
-            }
-            // Postgres's own types as it has them (in schemas still there), then ours.
-            let mine: Vec<Row> = out
-                .drain(..)
-                .filter(|r| matches!(r[0], Value::Oid(oid) if oid >= super::FIRST_USER_OID))
-                .collect();
-            for r in super::static_rows::rows(table)
-                .iter()
-                .filter(|_| only.is_none())
-                .filter(|r| cat.schemas.contains_key(&super::static_rows::oid_at(r, 2)))
-            {
-                let mut r = r.clone();
-                let (oid, elem) = (
-                    super::static_rows::oid_at(&r, 0),
-                    super::static_rows::oid_at(&r, 13),
-                );
-                if let Some(a) = cat.acl(
-                    ObjKind::Type,
-                    if elem != 0 && r[7] == c('A') {
-                        elem
-                    } else {
-                        oid
-                    },
-                    0,
-                ) {
-                    let n = r.len();
-                    r[n - 1] = acl_value(cat, Some(a));
-                }
-                out.push(r);
-            }
-            out.extend(mine);
         }
         PgIndex => {
             out.extend(
@@ -6808,13 +6819,24 @@ pub fn builtin_description(
     if cat.comment(oid, sub).is_some() {
         return None;
     }
-    let found = super::static_rows::rows(SysTable::PgDescription)
-        .iter()
-        .find(|r| {
-            super::static_rows::oid_at(r, 0) == oid
-                && r[2] == Value::Int4(sub)
-                && class.is_none_or(|c| super::static_rows::oid_at(r, 1) == c)
-        })
+    // Postgres's own descriptions by (objoid, objsubid), in pg_description's order: ORMs call
+    // col_description / obj_description per column, and each call read all 5,000 rows (a
+    // user object's too, which has none).
+    static BY_OBJECT: std::sync::OnceLock<std::collections::HashMap<(u32, i32), Vec<u32>>> =
+        std::sync::OnceLock::new();
+    let rows = super::static_rows::rows(SysTable::PgDescription);
+    let by_object = BY_OBJECT.get_or_init(|| {
+        let mut m: std::collections::HashMap<(u32, i32), Vec<u32>> = Default::default();
+        for (i, r) in rows.iter().enumerate() {
+            if let Value::Int4(s) = r[2] {
+                m.entry((super::static_rows::oid_at(r, 0), s)).or_default().push(i as u32);
+            }
+        }
+        m
+    });
+    let found = (by_object.get(&(oid, sub)).into_iter().flatten())
+        .map(|&i| &rows[i as usize])
+        .find(|r| class.is_none_or(|c| super::static_rows::oid_at(r, 1) == c))
         .filter(|r| builtin_object_exists(cat, oid, super::static_rows::oid_at(r, 1)))
         .map(|r| super::static_rows::text_at(r, 3).to_string());
     found.or_else(|| {

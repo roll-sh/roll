@@ -2494,6 +2494,56 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     version compare, and what was committed is merged by pointer (`catmerge::merge`). What a
     command copied before its lock must not be written back after a refresh (it would undo
     the other commit): the helper returns the copy to use.
+- **Catalog round 8, second batch** (round 23, agent 131; BENCH.md "Catalog round 8"):
+  - pg_type is chunked as it is generated, like the other catalogs: Postgres's own rows (its
+    static rows) are pushed first, then each user type's row is finished as it is made
+    (`system.rs` `TypeRows::finish`: support functions, owner, ACL, domain defaults and
+    collations, base types' attributes) instead of all rows being made, changed in place three
+    times and only then chunked. An array takes its element type's collation from the rows
+    made before it (an element type is always made just before its array). One relation's
+    rows (`sysdelta`'s splice) no longer make Postgres's 600 built-in types each time. pg_type
+    of the kept regression database is byte-identical before and after, both in generation
+    order and by oid.
+  - Introspection's per-row and per-plan catalog work: `builtin_description` (col_description,
+    obj_description, pg_description's key checks) scanned all of Postgres's 5,000
+    descriptions on every call, even for user objects; they are indexed by (objoid,
+    objsubid) once per process. `system::row_count` (the planner's row counts of pg_class and
+    pg_attribute, on every plan of a catalog scan) counted the built-in rows again each time;
+    the per-schema counts are made once. `pg_get_serial_sequence` scanned every sequence per
+    call; it reads the table's owned sequences (`SeqIx::owned`).
+  - Kysely's introspection (agent 140 has the planning part, reported): after each DDL statement
+    it plans in 5.2 ms against PostgreSQL's 1.4, and its plan's join order differs from
+    PostgreSQL's (PostgreSQL drives the join from pg_attribute). Execution is 2.9 against 1.4
+    ms: the new catalog version's SysRows build their per-column hashes (`by_col`, pg_type's
+    oid) and runs again. Carrying those across splices, or a direct oid → part lookup for
+    pg_type, is next. pg_depend and information_schema aren't read by Kysely's suite
+    (pg_stat_statements over a whole run): splicing them doesn't help it.
+  - Stored texts parsed as statements are (after agent 141's 74a3ad38): a column rename's
+    rewrite of stored expressions (`table.rs` `rename_column_in_query`: extended statistics)
+    and the columns a view's query mentions (`views.rs` `mentioned_columns`, the owner's
+    SELECT check of a write through the view) ran a bare `pg_query::parse`; they go through
+    `parse::parse_uncached`, and walk, deparse and drop the tree with `tree_headroom`. The
+    deep_input case `viewcols 2000` (recorded from PostgreSQL) then crashed the process with a
+    stack overflow in `exec::kernel::compile`: an UPDATE through a view whose WHERE is 2,000
+    terms deep compiled it into a kernel with unguarded recursion. Kernels nest at most 256
+    levels now (`MAX_KERNEL_DEPTH`); deeper expressions are evaluated as expressions.
+  - Left from this round's list (not started; measured): the first connection at 10,000
+    tables is 106-129 ms over the wire (engine CPU 0.21 s, RSS 107 MB) and 89-136 ms
+    in-process. The server's profile: JSON parsing 30% (serde_json's string reads and UTF-8
+    checks), page faults 20%, the maps' and `relindex` indexes' inserts 17% (the names
+    `PHash` rehashing as it grows among them), allocation 14%, SST reads 9%. In-process a
+    fifth of it is transparent huge pages zeroed (the bench binary, unlike `roll-engine`,
+    doesn't set PR_SET_THP_DISABLE). Constant needs the indexes stored as records (a catalog
+    format change with its downgrade) and `PMap` chunks that keep their records' bytes and
+    parse an entry on first use; `Catalog::reindex`'s upgrade checks (row types, pg_attrdef
+    oids) visit every table on every open and would have to move to the format upgrade.
+    The catalog entries' size (a table of three columns about 1.7 kB): `Column` is 240 bytes,
+    most of it optional fields kept inline (defaults, identity, generation, missing value,
+    collation, options). pg_depend and information_schema's views aren't spliced yet (none of
+    the measured tools reads them after DDL). test_decoding's `UPDATE pg_attribute SET
+    attstorage` of an index column fails ("not supported yet": index columns' storage
+    follows their table's column; it needs a per-index override, cleared by ALTER TABLE
+    ... SET STORAGE as ATExecSetStorage does).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference

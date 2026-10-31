@@ -96,6 +96,7 @@ const CASES: &[(&str, usize)] = &[
     ("colplus", 100_000),
     ("viewdef", 300),
     ("viewdef", 2000),
+    ("viewcols", 2000),
     ("explain", 2000),
     ("deepjsonb", 18_000),
     ("setting", 0),
@@ -199,6 +200,27 @@ fn statements_of(shape: &str, n: usize) -> Vec<String> {
                 format!("CREATE VIEW deep_v AS SELECT {} AS s FROM (VALUES (1)) t(x)", join("x", "+")),
                 "SELECT s, length(pg_get_viewdef('deep_v')) FROM deep_v".into(),
                 "DROP VIEW deep_v".into(),
+            ];
+        }
+        // A column renamed under a deep statistics expression (`rename_column_in`), and an
+        // UPDATE through a view whose deep WHERE mentions only the column its owner may read
+        // (`mentioned_columns`: a stored text it failed to parse read as `*`, every column).
+        "viewcols" => {
+            return vec![
+                "CREATE TABLE deep_t (x int, y int)".into(),
+                format!("CREATE STATISTICS deep_s ON ({}) FROM deep_t", join("x", "+")),
+                "ALTER TABLE deep_t RENAME COLUMN x TO z".into(),
+                "SELECT length(pg_get_statisticsobjdef(oid)) FROM pg_statistic_ext WHERE stxname = 'deep_s'".into(),
+                format!("CREATE VIEW deep_uv AS SELECT z FROM deep_t WHERE {} > -1", join("z", "+")),
+                "CREATE ROLE regress_deep_r".into(),
+                "GRANT SELECT (z), UPDATE (z) ON deep_t TO regress_deep_r".into(),
+                "ALTER VIEW deep_uv OWNER TO regress_deep_r".into(),
+                "INSERT INTO deep_t VALUES (1, 2)".into(),
+                "UPDATE deep_uv SET z = z + 1".into(),
+                "SELECT z, y FROM deep_t".into(),
+                "DROP VIEW deep_uv".into(),
+                "DROP TABLE deep_t".into(),
+                "DROP ROLE regress_deep_r".into(),
             ];
         }
         "explain" => format!(

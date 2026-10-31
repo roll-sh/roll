@@ -9972,13 +9972,24 @@ pub(super) fn rename_column_in(sql: &str, old: &str, new: &str) -> Result<String
     Ok(q.strip_prefix("SELECT ").unwrap_or(&q).to_string())
 }
 
-/// Rename column references in a stored query.
+/// Rename column references in a stored query. (Parsed as statements are,
+/// `parse::parse_uncached`: a bare `pg_query::parse` ran with whatever depth limit the
+/// thread's last parse left, and a deep view's text failed to parse.)
 fn rename_column_in_query(sql: &str, old: &str, new: &str) -> Result<String> {
-    let mut tree = pg_query::parse(sql, 0)
-        .map_err(|e| crate::error::internal(format!("stored query: {e}")))?;
-    rename_column_refs(&mut tree.protobuf, old, new);
-    tree.deparse(Default::default())
-        .map_err(|e| crate::error::internal(format!("deparse: {e}")))
+    let stmts = crate::sql::parse::parse_uncached(sql, 0).map_err(|e| {
+        if e.code == code::STATEMENT_TOO_COMPLEX {
+            e
+        } else {
+            crate::error::internal(format!("stored query: {}", e.message))
+        }
+    })?;
+    let mut tree = pb::ParseResult { version: crate::sql::binder::ast::parse_version(), stmts };
+    // (Walking, deparsing and dropping the tree recurse as deep as it goes.)
+    crate::stack::with_headroom(crate::stack::tree_headroom(sql.len()), move || {
+        rename_column_refs(&mut tree, old, new);
+        pg_query::deparse(&tree, Default::default())
+    })
+    .map_err(|e| crate::error::internal(format!("deparse: {e}")))
 }
 
 /// Rename the column references `…old` in `tree`.

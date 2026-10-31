@@ -693,12 +693,11 @@ fn pg_get_serial_sequence(a: &[Value], c: &FnCtx) -> Result<Value> {
     let col = text_arg(&a[1]);
     let (idx, column) = t.column(col)?;
     // The first sequence pg_depend has the column owning (auto or internal): the oldest.
-    let owned = cat
-        .sequences
-        .values()
-        .filter(|s| s.owned_by == Some((t.oid, idx)))
-        .min_by_key(|s| s.oid)
-        .map(|s| s.oid);
+    // (Of the table's owned sequences, in oid order: ORMs' introspection calls this per
+    // column, and it scanned every sequence.)
+    let owned = (cat.sequences.ix().owned.get(&t.oid).into_iter())
+        .flat_map(|v| v.iter().copied())
+        .find(|s| cat.sequences.get(s).is_some_and(|s| s.owned_by == Some((t.oid, idx))));
     Ok(match owned.or(column.seq).and_then(|s| cat.sequences.get(&s)) {
         Some(s) => text(format!(
             "{}.{}",

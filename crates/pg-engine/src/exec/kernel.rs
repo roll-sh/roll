@@ -146,8 +146,37 @@ fn pure_call(def: &crate::sql::func::FuncDef, ty: &DataType) -> Option<PureFn> {
     pure(def.imp)
 }
 
-/// `e` as a kernel (None: it holds something kernels don't do).
+/// How deep a kernel may nest: compiling and running one recurse as deep as it goes, with no
+/// stack check, so a deeper expression (an UPDATE through a view whose WHERE is 2,000 terms
+/// deep overflowed a 2 MB thread here) is evaluated as an expression, whose recursion is
+/// guarded.
+const MAX_KERNEL_DEPTH: u32 = 256;
+
+thread_local! {
+    static COMPILE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// `e` as a kernel (None: it holds something kernels don't do, or nests too deep).
 pub fn compile(e: &Expr) -> Option<K> {
+    struct Level;
+    impl Drop for Level {
+        fn drop(&mut self) {
+            COMPILE_DEPTH.with(|d| d.set(d.get() - 1));
+        }
+    }
+    if COMPILE_DEPTH.with(|d| {
+        d.set(d.get() + 1);
+        d.get()
+    }) > MAX_KERNEL_DEPTH
+    {
+        COMPILE_DEPTH.with(|d| d.set(d.get() - 1));
+        return None;
+    }
+    let _level = Level;
+    compile_node(e)
+}
+
+fn compile_node(e: &Expr) -> Option<K> {
     Some(match e {
         Expr::Col(i, _) => K::Col(*i),
         Expr::Const(v, _) => K::Const(v.clone()),

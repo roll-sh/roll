@@ -5100,6 +5100,50 @@ on upstream's head alone as well, not through this batch: `deep_input`'s `viewde
 limit exceeded" reading a 2,000-term view; they passed on `77a38372`), and `wire`'s
 `cancel_request_closes_after_the_error` flakes (4 of 5 runs pass).
 
+### Second batch: pg_type chunked as generated, introspection's per-row catalog work
+
+**base** is the first batch (`41fc8981`), **new** the second; release builds, interleaved.
+
+| | base | new |
+|---|---|---|
+| 90,000 objects: first `count(typname)` of pg_type in a new session (3 rounds, ms) | 501 / 432 / 459 | 430 / 288 / 338 |
+| the same, again in that session | 48 / 36 / 40 | 34 / 35 / 42 |
+| 90,000 objects: the run's engine CPU, peak RSS (pg_type, pg_class, pg_attribute read twice) | 2.74-2.88 s, 367-374 MB | 2.69-2.71 s, 359-365 MB |
+| 150 x (CREATE TABLE; Kysely's introspection query; DROP TABLE): engine CPU (3 rounds) | 1.79 / 1.78 / 1.77 s | 1.51 / 1.44 / 1.46 s |
+| Kysely's suite: engine CPU (2 rounds), peak RSS | 12.6 / 12.1 s, 105 MB | 11.7 / 12.3 s, 99-101 MB |
+| `catalog-tools` at 10,000 tables: engine CPU (2 rounds), RSS | 1.94 / 1.88 s, 172-175 MB | 1.91 / 1.66 s, 168 MB |
+| pgbench `-S` tps (3 rounds) | 11,253 / 7,366 / 8,076 | 8,213 / 12,982 / 9,337 |
+| `-S` engine CPU per 1,000 transactions | 127-145 ms | 122-141 ms |
+| pgbench `-N` tps | 1,675 / 2,216 / 2,391 | 1,386 / 2,558 / 1,570 |
+| `-N` engine CPU per 1,000 transactions | 491-556 ms | 484-560 ms |
+
+(pgbench as in the first batch; tps varied 1.8x between rounds on the loaded machine, CPU per
+transaction is unchanged. pg_type's remaining first-read time is building the column chunks
+from rows and the Values' drops, `sysdelta::part_of` and the row-type lookups per row.)
+
+`catalog-tools` at 10,000 tables, first query of each kind in a session (ms, medians of 2
+rounds): Django's tables 54 → 26, Rails' columns 118 → 76, psql `\df` 50 → 30, `\d` lookup
+33 → 22 (each plan's pg_class / pg_attribute row counts, and col_description's scan of
+Postgres's descriptions); the repeated queries are unchanged within the noise.
+
+Kysely's introspection right after DDL, on its test schema (ms, the engine / PostgreSQL 18.6):
+planning 5.2 / 1.4 (unchanged; agent 140's, reported with the plan shapes), execution 2.9 / 1.4.
+Its suite's engine CPU hardly moves (11-13 s, PostgreSQL 7.6 s): pg_stat_statements over a
+whole run puts 17 of its 29 s of statement time in that query, mostly planning, and none in
+pg_depend or information_schema.
+
+### Verification (round 23, agent 131, second batch)
+
+On `86cc9dea` (the batch before the deep-text changes): `cargo test -p pg-engine` debug and
+release (debug: all but upstream's two deep-view tests, then broken on its head, fixed by
+74a3ad38), clippy (no new warnings), the regression suite in full (debug, private reference):
+51,148 / 51,150, no unit changed against `results.tsv`; `pg_dump_tap` 14,817 / 14,817;
+`pg_dump_roundtrip` 0 errors every way; pg_type, col_description / obj_description of every
+object, pg_get_serial_sequence of every column and the planner's row estimates of the kept
+regression database identical before and after. Then rebased onto 74a3ad38 and `ebae3258`
+with the deep-text and kernel-depth changes: `cargo test -p pg-engine` in debug again
+(deep_input with the new `viewcols 2000`, deparse_identity), clippy, the isolation specs.
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per

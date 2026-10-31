@@ -608,22 +608,28 @@ impl Binder<'_, '_> {
     }
 }
 
-/// The column names a view's query mentions (None: a `*`).
+/// The column names a view's query mentions (None: a `*`). (Parsed as statements are,
+/// `parse::parse_uncached`: a bare `pg_query::parse` of a deep view's text could fail on the
+/// depth limit the thread's last parse left, and read as a `*`. Walking and dropping the tree
+/// recurse as deep as it goes: with the stack for it.)
 fn mentioned_columns(query: &str) -> Vec<Option<String>> {
-    let Ok(tree) = pg_query::parse(query, 0) else {
-        return vec![None];
-    };
-    let mut out = Vec::new();
-    for (node, ..) in tree.protobuf.nodes() {
-        if let pg_query::NodeRef::ColumnRef(c) = node {
-            match c.fields.last().and_then(|f| f.node.as_ref()) {
-                Some(NodeEnum::String(s)) => out.push(Some(s.sval.clone())),
-                Some(NodeEnum::AStar(_)) => out.push(None),
-                _ => {}
+    crate::stack::with_headroom(crate::stack::tree_headroom(query.len()), || {
+        let Ok(stmts) = crate::sql::parse::parse_uncached(query, 0) else {
+            return vec![None];
+        };
+        let tree = pg_query::protobuf::ParseResult { version: super::ast::parse_version(), stmts };
+        let mut out = Vec::new();
+        for (node, ..) in tree.nodes() {
+            if let pg_query::NodeRef::ColumnRef(c) = node {
+                match c.fields.last().and_then(|f| f.node.as_ref()) {
+                    Some(NodeEnum::String(s)) => out.push(Some(s.sval.clone())),
+                    Some(NodeEnum::AStar(_)) => out.push(None),
+                    _ => {}
+                }
             }
         }
-    }
-    out
+        out
+    })
 }
 
 const SINGLE: &str =
