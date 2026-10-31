@@ -4869,6 +4869,56 @@ makes no timing or memory claim. A new comparison must build that base and the f
 change with the same profile, data, cache settings, and workload, check results and errors,
 and interleave repeated runs through `tools/heavy.sh`.
 
+Measured before the pause (2026-10-31 to 11-01; not repeated on the resumed base). EF Core's
+Northwind pattern (BENCH "Application CPU"): there is no Northwind dump on the
+machine, so a reproducer of its shape stands in: `Customers` (91 rows, `CustomerID char(5)`
+primary key), `Orders` (830 rows, a `CustomerID` index), `Order Details` (2,155 rows), plus
+the 20,000-row char(5) table from "Application CPU". Release builds, fresh data directories,
+loaded once each, engine at nice 19. Median of 10 after 3 warm-up queries, psql over TCP;
+cpu is the engine's CPU per query. "before" is `aa8218a2`, "after" this change rebased onto
+`15a77038`.
+
+| query | PostgreSQL ms | before ms (cpu) | after ms (cpu) |
+|---|---:|---:|---:|
+| `count(*) WHERE c = 'ZZZZZ'` (20,000 rows, none match) | 0.135 | 34.6 (38.5) | 0.249 (0.77) |
+| correlated `count(*)` of each customer's orders | 0.968 | 102.7 (106.2) | 2.43 (2.31) |
+| each customer's first order (`ORDER BY "OrderDate" LIMIT 1` sub-select) | 0.824 | 83.2 (86.9) | 3.51 (3.08) |
+| `EXISTS` of an order with `"Freight" > 90` per customer | 0.733 | 2.00 (2.31) | 1.42 (2.31) |
+
+Peak RSS over the run: 86 MB before, 88 MB after (the load dominates it).
+
+Engine / PostgreSQL after the change: 1.8x (the empty count), 2.5x, 4.3x and 1.9x the time.
+The char(n) scans now read only what they return. What is left is per-row executor and
+sub-select cost, so the engine still trails PostgreSQL on all four.
+
+`tools/bench/access.rs` (`access-load` with its defaults, `--cache-mb 2048`, each engine its
+own data directory loaded once; 60 queries per case, rounds interleaved after, before, after,
+before; all at nice 19 on a loaded machine). ms is the mean of the two rounds' medians, cpu
+the engine's CPU ms per query (10 ms ticks over 60 queries: ±0.17), MB its peak RSS:
+
+| case | before ms (cpu, MB) | after ms (cpu, MB) |
+|---|---|---|
+| char_eq (`ords`, 100,000 rows, a char(5) key) | 143 (148, 462) | 0.734 (0.667, 457) |
+| char_correlated (99 customers' order counts) | 217 (223, 447) | 1.68 (1.75, 457) |
+| nested_loop | 1.00 (1.0, 447) | 1.16 (2.0, 527) |
+| keyset_page | 0.607 (0.58, 447) | 0.436 (0.75, 519) |
+| any_lookup | 0.418 (0.5, 447) | 0.557 (0.83, 520) |
+| cat_limit | 0.319 (0.33, 447) | 0.387 (0.33, 519) |
+| skip_scan | 0.661 (0.58, 448) | 0.565 (0.67, 443) |
+| gist_box | 0.387 (0.42, 447) | 0.304 (0.5, 543) |
+| gist_point_knn | 0.342 (0.33, 484) | 0.301 (0.25, 456) |
+| btree_gist_knn | 0.328 (0.25, 486) | 0.259 (0.17, 456) |
+| gin_tsvector_and | 11.5 (12, 448) | 11.4 (12.1, 444) |
+
+The cases the change doesn't touch moved both ways between rounds of one build (any_lookup
+after: 0.66 / 0.46). Peak RSS at the end: before 680 MB, after 689 MB.
+
+pgbench (scale 10, 8 clients, 20 s, prepared; before / after interleaved twice, by
+themselves, at nice 19; tps and the engine's CPU ms per transaction):
+- select-only: before 73,841 / 74,935 (0.078 / 0.076); after 75,982 / 74,862 (0.076 / 0.077).
+- tpcb-like: before 11,439 / 11,875 (0.54 / 0.51); after 11,784 / 11,794 (0.51 / 0.52).
+- Level. Peak RSS: before 370 / 367 MB, after 374 / 381 MB.
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document
