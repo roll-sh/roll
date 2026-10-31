@@ -144,6 +144,50 @@ fn copy_past_the_model() {
     });
 }
 
+/// COPY through the transaction's sink (`Txn::open_sink`): rows and entries written as
+/// sorted runs and linked at commit, into a table with an index; a cursor declared before
+/// doesn't see them, statements after do; a failed COPY leaves nothing; writes over the
+/// linked keys later in the transaction; a restart.
+#[test]
+fn copy_through_the_sink() {
+    let dir = tempfile::tempdir().unwrap();
+    pg_engine::storage::set_default_txn_spill_bytes(64 << 10);
+    let eng = open(dir.path());
+    pg_engine::storage::set_default_txn_spill_bytes(0);
+    let queries = ["SELECT count(*), sum(a) FROM cs", "SELECT a, count(*) FROM cs WHERE a < 9 GROUP BY a ORDER BY a"];
+    let data = |from: i32, to: i32| -> String { (from..=to).map(|i| format!("{i}\t{}\tt{i}\n", i % 37)).collect() };
+    let before = with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE cs (id int NOT NULL, a int, t text);\nCREATE INDEX cs_a ON cs (a)");
+        let linked = pg_engine::storage::LINKED_RUNS.load(Ordering::Relaxed);
+        let sunk = pg_engine::txn::SINK_RUNS.load(Ordering::Relaxed);
+        s.query_copy("COPY cs FROM STDIN", data(1, 20000).as_bytes()).unwrap();
+        assert!(pg_engine::txn::SINK_RUNS.load(Ordering::Relaxed) > sunk, "runs from the sink");
+        assert!(pg_engine::storage::LINKED_RUNS.load(Ordering::Relaxed) > linked, "runs linked");
+        same_both_ways(&mut s, &queries);
+        run(&mut s, "BEGIN;\nDECLARE c CURSOR FOR SELECT count(*) FROM cs");
+        s.query_copy("COPY cs FROM STDIN", data(20001, 30000).as_bytes()).unwrap();
+        assert_eq!(rows(&mut s, "FETCH c"), ["[Int8(20000)]"]);
+        assert_eq!(rows(&mut s, "SELECT count(*) FROM cs WHERE id > 20000"), ["[Int8(10000)]"]);
+        run(&mut s, "UPDATE cs SET a = a + 100 WHERE id % 1000 = 7;\nDELETE FROM cs WHERE id % 1000 = 8;\nCOMMIT");
+        same_both_ways(&mut s, &queries);
+        // (VACUUM's measure finds the TOAST table's oldest xmin too: no value is out of line,
+        // so its relfrozenxid passes the table's, held back by the rows' xmins.)
+        run(&mut s, "VACUUM cs");
+        let q = "SELECT c.relfrozenxid::text::bigint < t.relfrozenxid::text::bigint FROM pg_class c JOIN pg_class t ON t.oid = c.reltoastrelid WHERE c.relname = 'cs'";
+        assert_eq!(rows(&mut s, q), ["[Bool(true)]"]);
+        let bad = format!("{}x\t1\tbad\n", data(30001, 39000));
+        assert!(s.query_copy("COPY cs FROM STDIN", bad.as_bytes()).is_err());
+        assert_eq!(rows(&mut s, "SELECT count(*), max(id) FROM cs"), ["[Int8(29970), Int4(30000)]"]);
+        let r = (rows(&mut s, queries[0]), rows(&mut s, queries[1]));
+        eng.shutdown();
+        r
+    });
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    assert_eq!((rows(&mut s, queries[0]), rows(&mut s, queries[1])), before);
+}
+
 /// What bulk statements leave in the heap model when their rows past the first few are
 /// modelled at the end (`sizing::with_defer_after`): the same TIDs and sizes as modelled row
 /// by row, for COPY and INSERT … SELECT, a failed COPY, and loads past the model's size

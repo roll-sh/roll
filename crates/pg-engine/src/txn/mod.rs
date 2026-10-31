@@ -34,6 +34,9 @@ const SEQ_PREFIX: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 2];
 /// Write buffers spilled to disk so far (`txn::spill`), for tests.
 pub static TXN_SPILLS: AtomicUsize = AtomicUsize::new(0);
 
+/// Runs written from bulk loads' sinks (`Txn::open_sink`), for tests.
+pub static SINK_RUNS: AtomicUsize = AtomicUsize::new(0);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Isolation {
     ReadUncommitted,
@@ -442,6 +445,8 @@ impl Database {
             entry_deletes_direct: None,
             rdels: Vec::new(),
             gen_fresh: true,
+            sink: None,
+            stale_segs: Vec::new(),
         }
     }
 
@@ -955,6 +960,39 @@ pub struct Txn {
     /// Every write since the last spill was fresh (`put_fresh`): the buffer's next run can
     /// be linked into the store at commit (`spill::Runs::take_linkable`).
     gen_fresh: bool,
+    /// A bulk load's sink for its fresh writes, while open (`open_sink`).
+    sink: Option<Box<Sink>>,
+    /// The tables' and indexes' key prefixes (`seg_of`) the buffer holds writes of that
+    /// aren't fresh, since the last spill: the buffer's writes in the others are linked at
+    /// commit as a run of their own (`link_fresh_buffer`).
+    stale_segs: Vec<[u8; 8]>,
+}
+
+/// A key's table and index ids (its first 8 bytes, zero-padded): what a run's linkable
+/// segments are cut by (`spill::Runs::segs`).
+fn seg_of(key: &[u8]) -> [u8; 8] {
+    let mut s = [0u8; 8];
+    let n = key.len().min(8);
+    s[..n].copy_from_slice(&key[..n]);
+    s
+}
+
+/// Fresh writes of a bulk load (`Txn::open_sink`): keys and values back to back in `data`,
+/// each (offset, key length, value length) in `ents`.
+#[derive(Default)]
+struct Sink {
+    data: Vec<u8>,
+    ents: Vec<(u32, u32, u32)>,
+    /// They may go to a run (`Txn::sink_runs_ok`).
+    runs_ok: bool,
+}
+
+impl Sink {
+    fn push(&mut self, k: &[u8], v: &[u8]) {
+        self.ents.push((self.data.len() as u32, k.len() as u32, v.len() as u32));
+        self.data.extend_from_slice(k);
+        self.data.extend_from_slice(v);
+    }
 }
 
 impl Txn {
@@ -1096,6 +1134,7 @@ impl Txn {
     pub fn begin_statement(&mut self, needs_snapshot: bool) -> Result<()> {
         // (What an earlier statement deferred is the next one's to see.)
         self.flush_entry_deletes()?;
+        self.close_sink()?;
         if self.catalog.is_none() {
             let c = self.db.catalog();
             self.read_catalog = Some(c.clone());
@@ -1367,6 +1406,10 @@ impl Txn {
             if let Some(r) = &mut self.runs {
                 r.invalidate(&key);
             }
+            let seg = seg_of(&key);
+            if self.stale_segs.last() != Some(&seg) && !self.stale_segs.contains(&seg) {
+                self.stale_segs.push(seg);
+            }
         }
         self.buf_bytes += 2 * key.len() + value.as_ref().map_or(0, |v| v.len()) + 120;
         let ent = Ent {
@@ -1421,6 +1464,7 @@ impl Txn {
         });
         runs.write(&mut versions, self.gen_fresh && no_older)?;
         self.gen_fresh = true;
+        self.stale_segs.clear();
         self.journal_base = self.position();
         // (Its room kept: the buffer fills again as it did.)
         self.journal.clear();
@@ -1716,10 +1760,138 @@ impl Txn {
                 "cannot execute this statement in a read-only transaction"
             );
         }
+        if let Some(s) = &mut self.sink {
+            s.push(&key, &value);
+            self.wrote = true;
+            if s.data.len() + 12 * s.ents.len() >= self.db.store.txn_spill_bytes() {
+                return self.flush_sink(false);
+            }
+            return Ok(());
+        }
         self.record(key, Some(Bytes::from(value)), true);
         self.wrote = true;
         self.cur_xid();
         self.maybe_spill()
+    }
+
+    /// A bulk load (COPY FROM) whose rows and entries nothing reads before it ends opens a
+    /// sink: its fresh writes (`put_fresh`) are kept as bytes and go to disk as sorted runs,
+    /// linked at commit, instead of through the write buffer and its journal (a map insert
+    /// and an undo record per key). Not with a savepoint open (nothing may roll back to
+    /// within the load), in a read-only or SSI-tracked transaction. Returns whether it
+    /// opened. Until `close_sink` nothing reads the sink's writes: the caller sees to that.
+    pub fn open_sink(&mut self) -> bool {
+        if self.read_only || !self.savepoints.is_empty() || self.serializable_tracked() {
+            return false;
+        }
+        self.cur_xid();
+        self.sink = Some(Box::default());
+        true
+    }
+
+    /// Whether the sink's writes may go to runs (else, when it fills, into the buffer): nothing
+    /// will rewrite them in place, as TID stamping does (`Txn::restamp`).
+    pub fn sink_runs_ok(&mut self) {
+        if let Some(s) = &mut self.sink {
+            s.runs_ok = true;
+        }
+    }
+
+    pub fn sink_open(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// The load is done (or something is about to read its writes): what the sink holds goes
+    /// in, as a run when that may and it is big enough, else into the buffer.
+    pub fn close_sink(&mut self) -> Result<()> {
+        if self.sink.is_none() {
+            return Ok(());
+        }
+        self.flush_sink(true)
+    }
+
+    /// At the commit of a transaction that spilled: the buffer's writes in tables and indexes
+    /// it wrote only fresh keys of since the last spill (`stale_segs`) go to a linkable run of
+    /// their own, so the runs of a load into a table with indexes link (the buffer's last
+    /// entries are in every run's index range) and these aren't merged into the commit's
+    /// file either. (Journal places mean nothing past the commit.)
+    fn link_fresh_buffer(&mut self, runs: &mut Runs) -> Result<()> {
+        let stale = &self.stale_segs;
+        let fresh = |k: &[u8]| k != CATALOG_KEY && !stale.contains(&seg_of(k));
+        if !self.writes.keys().any(|k| fresh(k)) {
+            return Ok(());
+        }
+        let mut linkable = Vec::new();
+        let mut rest = Vec::new();
+        for (k, e) in std::mem::take(&mut self.writes) {
+            if fresh(&k) && e.v.is_some() {
+                linkable.push((k, e));
+            } else {
+                rest.push((k, e));
+            }
+        }
+        self.writes = rest.into_iter().collect();
+        runs.write(&mut linkable.into_iter(), true)
+    }
+
+    /// The sink's writes go in (`open_sink`): sorted, as one linkable run of the spilled
+    /// writes, stamped with a journal place of their own (a placeholder in the journal: no
+    /// snapshot taken before sees them, every one after does), or into the buffer. `last`:
+    /// the sink closes.
+    fn flush_sink(&mut self, last: bool) -> Result<()> {
+        let Some(mut s) = self.sink.take() else {
+            return Ok(());
+        };
+        // (Below a megabyte, or a quarter of the buffer's size, a run isn't worth a file of
+        // the store's.)
+        if s.runs_ok && s.data.len() >= (self.db.store.txn_spill_bytes() / 4).min(1 << 20) {
+            let data = std::mem::take(&mut s.data);
+            {
+                let key = |e: &(u32, u32, u32)| &data[e.0 as usize..(e.0 + e.1) as usize];
+                // (By each key's first 16 bytes, then the keys themselves where those tie.)
+                let word = |k: &[u8]| {
+                    let mut b = [0u8; 16];
+                    let n = k.len().min(16);
+                    b[..n].copy_from_slice(&k[..n]);
+                    u128::from_be_bytes(b)
+                };
+                let mut order: Vec<(u128, u32)> = s.ents.iter().enumerate().map(|(i, e)| (word(key(e)), i as u32)).collect();
+                order.sort_unstable_by(|a, b| {
+                    a.0.cmp(&b.0).then_with(|| key(&s.ents[a.1 as usize]).cmp(key(&s.ents[b.1 as usize])))
+                });
+                let ts = self.position() as u64 + 1;
+                self.journal.push((Vec::new(), None));
+                self.derived.clear();
+                let dir = self.db.store.spill_dir().join(self.id.to_string());
+                let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+                let mut items = order.iter().map(|&(_, i)| {
+                    let e = s.ents[i as usize];
+                    let k = (e.0 + e.1) as usize;
+                    (&data[e.0 as usize..k], &data[k..k + e.2 as usize])
+                });
+                runs.write_fresh(&mut items, self.write_cid, ts)?;
+                SINK_RUNS.fetch_add(1, Ordering::Relaxed);
+            }
+            s.ents.clear();
+            s.data = data;
+            s.data.clear();
+        } else {
+            let data = std::mem::take(&mut s.data);
+            for e in std::mem::take(&mut s.ents) {
+                let k = (e.0 + e.1) as usize;
+                let v = Bytes::copy_from_slice(&data[k..k + e.2 as usize]);
+                self.record(data[e.0 as usize..k].to_vec(), Some(v), true);
+                self.maybe_spill()?;
+            }
+            if !last {
+                self.sink = Some(s);
+            }
+            return Ok(());
+        }
+        if !last {
+            self.sink = Some(s);
+        }
+        Ok(())
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
@@ -3018,6 +3190,7 @@ impl Txn {
     pub fn commit(mut self) -> Result<u64> {
         // (A statement's deferred index entry deletes go in at its end at the latest.)
         self.flush_entry_deletes()?;
+        self.close_sink()?;
         if self.sxact
             && !self.prepared
             && let Err(e) = self.db.ssi.pre_commit(self.id)
@@ -3057,6 +3230,11 @@ impl Txn {
                             return Err(e);
                         }
                     };
+                if let Err(e) = self.link_fresh_buffer(&mut runs) {
+                    self.finish_xid(false);
+                    self.release_locks();
+                    return Err(e);
+                }
                 let writes = &self.writes;
                 (linked, linked_tables) = runs.take_linkable(|a, b| {
                     writes.range::<[u8], _>((Bound::Included(a), Bound::Included(b))).next().is_some()

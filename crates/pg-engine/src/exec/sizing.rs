@@ -336,7 +336,7 @@ struct Toast {
 }
 
 /// TOAST_TUPLE_THRESHOLD and TOAST_TUPLE_TARGET.
-const TOAST_THRESHOLD: usize = 2032;
+pub(crate) const TOAST_THRESHOLD: usize = 2032;
 /// TOAST_TUPLE_TARGET_MAIN.
 const TOAST_TARGET_MAIN: usize = 8160;
 /// TOAST_MAX_CHUNK_SIZE.
@@ -4169,6 +4169,14 @@ impl CopyLoad {
             key,
             toast: t.toast,
         }
+    }
+
+    /// Whether the rows stored from now on are left alone until `finish`: past the model's
+    /// size, or waiting to be modelled then (their TIDs stamped only then, if at all).
+    pub fn rows_wait(&self) -> bool {
+        let rf = self.db.relfiles.read();
+        rf.untracked.contains(&self.key.0)
+            || rf.bulk.get(&self.key).and_then(|b| b.defer.as_ref()).is_some_and(|d| d.deferring())
     }
 
     /// A line was read and its row stored (or skipped): the buffer is flushed once full.

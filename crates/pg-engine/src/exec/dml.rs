@@ -1017,7 +1017,17 @@ pub const NEED_COPY_ROWS: &str = "XXCPY";
 fn next_copied(c: &CopyLines, ctx: &ExecCtx) -> Result<Option<(Row, (usize, String))>> {
     let next = c.feed.lock().unwrap().rows.pop_front();
     match next {
-        Some((exprs, line, raw)) => Ok(Some((eval_all(&exprs, &[], ctx)?, (line, raw)))),
+        // (The values read are constants, taken as they are; defaults are evaluated.)
+        Some((exprs, line, raw)) => {
+            let mut row = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                row.push(match e {
+                    Expr::Const(v, _) => v,
+                    e => eval(&e, &[], ctx)?,
+                });
+            }
+            Ok(Some((row, (line, raw))))
+        }
         None if c.feed.lock().unwrap().done => Ok(None),
         None => Err(Error::new(NEED_COPY_ROWS, "COPY FROM needs its next rows")),
     }
@@ -3598,6 +3608,9 @@ pub struct InsertNode {
     copy_line: (usize, String),
     /// COPY FROM's bulk insert into the table's modelled heap.
     copy_load: Option<super::sizing::CopyLoad>,
+    /// COPY's fresh writes through the transaction's sink (`Txn::open_sink`): None, not
+    /// for this load; Some(false) once it may, Some(true) while open.
+    sink: Option<bool>,
     /// The last row went to a partition laid out as the root: RETURNING reads it from the
     /// routing's own (virtual) slot, which has no transaction system columns.
     virtual_slot: bool,
@@ -3644,6 +3657,16 @@ impl InsertNode {
             }
             _ => None,
         };
+        // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
+        // rule, no RETURNING, RLS or unique / exclusion check, plain btree indexes; AFTER
+        // triggers fire once the sink is closed) writes them through the sink.
+        let sink = (plan.copy.as_ref().is_some_and(|c| c.multi)
+            && copy_load.is_some()
+            && rules.table.has_rowid()
+            && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
+            && model_deferrable(&plan, ctx)
+            && !ctx.txn.borrow().sink_open())
+        .then_some(false);
         Ok(InsertNode {
             plan,
             source,
@@ -3654,6 +3677,7 @@ impl InsertNode {
             last_table,
             copy_line: (0, String::new()),
             copy_load,
+            sink,
             virtual_slot: false,
             queue_mark: None,
             retry: None,
@@ -3807,6 +3831,20 @@ impl InsertNode {
         src: Row,
         ctx: &ExecCtx,
     ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
+        // (The sink opens once the rows stored are left alone until the load ends; its writes
+        // go to runs once the table is past the model's size: nothing stamps them then.)
+        match self.sink {
+            Some(false) if self.copy_load.as_ref().is_some_and(|l| l.rows_wait()) => {
+                self.sink = ctx.txn.borrow_mut().open_sink().then_some(true);
+            }
+            Some(true)
+                if ctx.processed.get().is_multiple_of(1024)
+                    && super::sizing::is_estimated(self.plan.rules.table.oid, &ctx.sess.db) =>
+            {
+                ctx.txn.borrow_mut().sink_runs_ok();
+            }
+            _ => {}
+        }
         let (line, raw) = std::mem::take(&mut self.copy_line);
         let raw_len = raw.len();
         let frames = &ctx.sess.frames;
@@ -4097,6 +4135,14 @@ impl Node for InsertNode {
                     }
                     None => e,
                 })?;
+                if self.sink == Some(true) {
+                    self.sink = None;
+                    let mut txn = ctx.txn.borrow_mut();
+                    if super::sizing::is_estimated(self.plan.rules.table.oid, &ctx.sess.db) {
+                        txn.sink_runs_ok();
+                    }
+                    txn.close_sink()?;
+                }
                 if let Some(l) = self.copy_load.take() {
                     l.finish(ctx);
                 }

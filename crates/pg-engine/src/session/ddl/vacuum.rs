@@ -636,9 +636,11 @@ impl Ddl<'_, '_> {
         let old_toast = self.cat.frozen_xids.get(&t.toast).copied().unwrap_or(first);
         let (mut new, mut new_toast) = (oldest, oldest);
         let measured = self.measured_xmin.take().filter(|m| m.0 == t.oid && m.1 == old);
-        if !freeze && !toast && let Some((_, _, m)) = measured {
+        let measured_toast = measured.and_then(|m| m.3).filter(|m| m.0 == old_toast).map(|m| m.1);
+        if !freeze && let Some((_, _, m, _)) = measured && (!toast || measured_toast.is_some()) {
             // (Seen by the measure's pass over the rows.)
             new = new.min(m);
+            new_toast = new_toast.min(measured_toast.unwrap_or(u64::MAX));
         } else if !freeze {
             let start = crate::storage::keys::index_prefix(t.oid, 0);
             let end = crate::storage::keys::prefix_end(&start);
@@ -1352,6 +1354,13 @@ impl Ddl<'_, '_> {
             self.cat.frozen_xids.get(&t.oid).copied().unwrap_or(crate::txn::xids::FIRST_NORMAL_XID)
         });
         let mut oldest_xmin = u64::MAX;
+        // (And the TOAST table's: the oldest xmin past its frozen one of a row with values
+        // out of line, which only a row past TOAST_TUPLE_THRESHOLD can have.)
+        let toast_frozen = frozen.filter(|_| t.toast != 0).map(|_| {
+            self.cat.frozen_xids.get(&t.toast).copied().unwrap_or(crate::txn::xids::FIRST_NORMAL_XID)
+        });
+        let mut oldest_toast = u64::MAX;
+        let unpinned = std::collections::HashSet::new();
         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
         for r in scan {
             self.ctx.check()?;
@@ -1375,6 +1384,18 @@ impl Ddl<'_, '_> {
                 None => crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask),
                 Some(_) => None,
             };
+            if let Some(floor) = toast_frozen {
+                let x = crate::exec::scan::row_xmin(&bytes)?;
+                if x >= floor
+                    && x < oldest_toast
+                    && stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD)
+                    && !crate::exec::sizing::layout(t, &crate::exec::scan::decode_table_row(t, &bytes)?, self.ctx, &unpinned)
+                        .1
+                        .is_empty()
+                {
+                    oldest_toast = x;
+                }
+            }
             let mut row = match &need {
                 Some(need) if modelled.is_some() || stored.is_some() => {
                     crate::exec::scan::decode_table_row_need(t, &bytes, need)?
@@ -1428,7 +1449,7 @@ impl Ddl<'_, '_> {
             }
         }
         if let Some(old) = frozen {
-            self.measured_xmin.set(Some((t.oid, old, oldest_xmin)));
+            self.measured_xmin.set(Some((t.oid, old, oldest_xmin, toast_frozen.map(|f| (f, oldest_toast)))));
         }
         let (modelled, live) = match modelled {
             Some(n) => (Some(n), n),

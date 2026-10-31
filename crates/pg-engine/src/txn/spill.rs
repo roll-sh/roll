@@ -114,6 +114,56 @@ impl Runs {
         let Some(f) = self.write_file(&mut versions.map(Ok))? else {
             return Ok(());
         };
+        self.add_file(f, linkable)
+    }
+
+    /// `write` of fresh writes (`Txn::put_fresh`) given as slices in key order, each key
+    /// once, all of command `cid` at journal place `ts`: a linkable run, encoded straight
+    /// from the slices (a bulk load's sink, `Txn::flush_sink`).
+    pub fn write_fresh<'a>(&mut self, items: &mut dyn Iterator<Item = (&'a [u8], &'a [u8])>, cid: u32, ts: u64) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut w = SstWriter::create_temp(&self.dir, id)?;
+        let mut val = Vec::new();
+        let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut seg: Option<(&[u8], &[u8])> = None;
+        for (k, v) in items {
+            val.clear();
+            val.push(3);
+            val.extend_from_slice(&cid.to_be_bytes());
+            val.extend_from_slice(v);
+            if let Err(err) = w.add(&mvcc_key(k, ts), Some(&val)) {
+                w.abandon();
+                return Err(err);
+            }
+            // (The table's and index's ids: 8 bytes.)
+            seg = match seg {
+                Some((first, _)) if first.get(..8) == k.get(..8) => Some((first, k)),
+                Some((first, last)) => {
+                    segs.push((first.to_vec(), last.to_vec()));
+                    Some((k, k))
+                }
+                None => Some((k, k)),
+            };
+        }
+        if let Some((first, last)) = seg {
+            segs.push((first.to_vec(), last.to_vec()));
+        }
+        if w.entries() == 0 {
+            w.abandon();
+            return Ok(());
+        }
+        let meta = w.finish()?;
+        let r = SstReader::open(&self.dir, meta, self.cache.clone())?;
+        r.mark_obsolete();
+        self.segs.insert(r.meta.id, segs);
+        self.add_file(Arc::new(r), true)
+    }
+
+    /// A new run of level 0 joins the others, merging the newest runs of a level once
+    /// enough share it.
+    fn add_file(&mut self, f: Arc<SstReader>, linkable: bool) -> Result<()> {
         self.files.push((f, 0, linkable));
         loop {
             let n = self.files.len();

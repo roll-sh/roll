@@ -258,8 +258,9 @@ pub(crate) struct Ddl<'c, 'a> {
     pub attaching: bool,
     /// The oldest row xmin at or past the table's frozen xid that VACUUM's measure of it saw:
     /// (table, that frozen xid, the xmin; u64::MAX: none), so `advance_frozen_xid` doesn't
-    /// read the table again.
-    pub measured_xmin: std::cell::Cell<Option<(u32, u64, u64)>>,
+    /// read the table again; with a TOAST table, the same of the rows with values stored out
+    /// of line (its frozen xid, the xmin).
+    pub measured_xmin: std::cell::Cell<Option<(u32, u64, u64, Option<(u64, u64)>)>>,
 }
 
 impl<'c, 'a> Ddl<'c, 'a> {

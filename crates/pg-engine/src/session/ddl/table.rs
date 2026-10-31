@@ -2390,7 +2390,7 @@ impl Ddl<'_, '_> {
                     // A primary key's columns get their not-nulls first.
                     if primary {
                         for c in &cols {
-                            if existing {
+                            if existing && !self.not_null_holds(&t, *c) {
                                 self.check_not_null(&t, *c)?;
                             }
                             t.columns[*c].not_null = true;
@@ -2744,7 +2744,7 @@ impl Ddl<'_, '_> {
                 })
                 .collect();
             for c in cols {
-                if existing {
+                if existing && !self.not_null_holds(t, c) {
                     self.check_not_null(t, c)?;
                 }
                 t.columns[c].not_null = true;
@@ -2905,6 +2905,20 @@ impl Ddl<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// Whether column `col` of `t` had a validated NOT NULL constraint before this statement,
+    /// so no stored row can hold a null there: a primary key over it needn't read the table
+    /// (PostgreSQL's set_attnotnull leaves a valid attnotnull alone).
+    fn not_null_holds(&self, t: &Table, col: usize) -> bool {
+        let before = self.ctx.txn.borrow().catalog();
+        let Some(old) = before.tables.get(&t.oid) else {
+            return false;
+        };
+        old.columns.get(col).is_some_and(|c| c.not_null && !c.dropped)
+            && old.constraints.iter().any(|k| {
+                matches!(k.kind, ConstraintKind::NotNull { column } if column == col) && k.validated && k.oid != 0
+            })
     }
 
     pub(super) fn check_not_null(&self, t: &Table, col: usize) -> Result<()> {
