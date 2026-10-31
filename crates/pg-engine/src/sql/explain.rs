@@ -14628,9 +14628,11 @@ impl Builder<'_, '_> {
                     ga.startup_cost <= n.startup_cost * FUZZ
                 }
             };
-            if !can_hash {
+            if !can_hash || removes {
+                // (add_path rejects the hashed one: none of the relation's paths, it can't
+                // be a LIMIT's choice either.)
                 n = ga;
-            } else if removes || parallel::cheaper(&ga, &n) {
+            } else if parallel::cheaper(&ga, &n) {
                 let mut hashed = std::mem::replace(&mut n, ga);
                 hashed.alt = n.alt.take();
                 n.alt = Some(Box::new(hashed));
@@ -18989,6 +18991,9 @@ pub struct PlanEstimate {
     pub cols: Vec<(u32, Option<costs::VarRef>, Option<f64>)>,
     /// Its disabled nodes (add_path compares them before costs).
     pub disabled: usize,
+    /// The top node has other paths beside it (`ExNode::alt`: a grouping's sorted form, a
+    /// relation's paths in other orders).
+    pub has_alt: bool,
 }
 
 /// cost_subplan for the sub-selects in `exprs`: (startup, per evaluation). A hashed one
@@ -20036,6 +20041,7 @@ fn estimate_in(plan: &Arc<Plan>, ctx: &ExecCtx, sublevel: bool, parallel: bool) 
         node_type: n.node_type,
         presorted,
         disabled: parallel::disabled_nodes(&n),
+        has_alt: n.alt.is_some(),
         cols,
     }
 }

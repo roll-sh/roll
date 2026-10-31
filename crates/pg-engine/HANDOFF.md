@@ -4178,8 +4178,9 @@ them all with the "Fixed in round N" sections describing what was already tried.
      relation's block count across a clean close (`persist_estimates` keeps it for big
      tables only) and padding the restored model with new pages would fix it; mind a
      VACUUM truncation after the last close. (Agent 113's models kept across a clean close,
-     629f3e51, landed while this batch was verified: re-measure q13 after a clean restart
-     before changing anything.)
+     629f3e51, landed while this batch was verified; customer still has 3,588 pages after a
+     clean restart with it: the kept record has rows and TIDs, not the relation's trailing
+     empty pages.)
    - q18 and q10 serial (one cause; q10 isn't ANALYZE's sample: PostgreSQL's serial q10 kept
      its plan over five fresh ANALYZEs, a GroupAggregate over an Incremental Sort over a merge
      join in c_custkey order, as q18's): keep group-useful pathkeys at joins (pathkeys_useful_for_grouping: membership in
@@ -4224,9 +4225,32 @@ them all with the "Fixed in round N" sections describing what was already tried.
      path to offer), mergejoinscansel's `Est::var_range` probing the index for the actual
      min / max (4%: PostgreSQL's get_variable_range never probes, `#ifdef NOT_USED`, so this
      is a fidelity bug too), `describe` re-deriving each scan's `Rel` per conversion (9%),
-     zeroed allocations of EXPLAIN nodes (8%). Next: skip `subquery_paths` when the leaf's
-     estimate has no `alt`, drop the probe from `var_range`, cache a statement's scan
-     descriptions.
+     zeroed allocations of EXPLAIN nodes (8%). Round 23's second batch: `subquery_paths`
+     skipped when the leaf's estimate has no `alt` and its level is a table scan's
+     (`own_level_groups`), and `var_range` no longer probes (golden `a116_planner_batch2`):
+     planning 1.6-1.7 ms -> 1.0 ms warm (EXPLAIN CPU 2.0 -> 1.3 ms; graphile-worker 2.0 ->
+     1.5). Left in that profile: the leaf's own estimate through EXPLAIN's builder (13%),
+     binding the IN sub-select (13%, its planning 6%), scalarineqsel's index endpoint probes
+     (4%: `Planner::endpoint` caches per Planner, and each nested Planner probes again;
+     `exec::scan::column_range` decodes the heap row too), `describe` (6%).
+   - Agent 115 (catalog): psql's `\dt` at 10,000 tables takes 1.5x PostgreSQL's time, the
+     engine joining its catalogs by a nested loop where PostgreSQL doesn't; Kysely's
+     introspection (11-13 s of engine CPU) is partly the planning of its catalog joins.
+   - Agent 123 (OLTP, 75a179d5): keeping plans of unnamed extended-protocol statements and
+     of the first five custom plans needs SELECT planning out of binding (each level is
+     planned while it is bound today; DML has the split; HANDOFF "OLTP round 2" has the
+     design). Agent 116 didn't start it: it is agent 136's (OLTP round 3) to do, and the
+     planner rounds after it should plan from the analyzed tree.
+   - Agent 124 (postgres_fdw; agent 137 owns it next and may send reproducers): projections
+     aren't pushed into partition members (postgres_fdw units 1751, 1766, 1768; local
+     partitions too), and the orientation of shipped / deparsed quals (unit 123) comes from
+     the planner's clause order.
+   - Agent 118 (difftest round 6; reproducers in tests/difftest/STATUS.md round 6): EXPLAIN
+     shows a domain comparison without PostgreSQL's `(d)::integer` relabel; a cursor's
+     grouping and DISTINCT choices without ORDER BY ignore cursor_tuple_fraction, and
+     PL/pgSQL cursors aren't planned for the fraction; a FULL JOIN in a sub-select that
+     PostgreSQL reduces later still errors (a fix was backed out: it hid a real error in
+     seed 5517).
    - CTE / UNION ALL Subquery Scans (`cte_window`, `union_channels`), ROLLUP's and EXCEPT's
      strategy choices (`rollup_nation_year`, `except_parts`), a window over a grouped CTE
      (`top_customers_by_year`): `plancmp.py --show <name>` prints both plans.

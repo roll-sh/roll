@@ -1623,6 +1623,29 @@ pgbench (scale 10, 4 clients, 20 s, `-M prepared`, base / batch / base / batch):
 commits on a shared disk: the engine's CPU per transaction was 0.77-0.82 ms in all four), peak
 memory 199-278 MB alike. No change on the statement path.
 
+**Second batch: job-queue planning.** Agent 114 found Oban's and graphile-worker's fetches
+slow by planning (2.3 / 1.8 ms to plan against PostgreSQL's 0.16 / 0.14). Measured here on
+10,000-row tables (`tools/bench/access.rs`'s schema): PostgreSQL plans Oban's fetch in
+0.26 ms warm (1.8 ms in a session's first statement), the engine in 1.6-1.7 ms. A profile
+(a release build with frame pointers and line tables, perf from a privileged helper) put a
+quarter of it in converting the `ANY_subquery` leaf with EXPLAIN's builder for paths it
+doesn't have, and 4% in mergejoinscansel probing the index for actual column ranges, which
+PostgreSQL doesn't do (STATUS.md round 23). After the batch, interleaved twice (EXPLAIN in a
+session, 1,000 each; the warm `Planning Time` of 5 in a session):
+
+| | first batch | second batch |
+|---|---|---|
+| Oban fetch, EXPLAIN CPU | 2,160 / 1,890 us | 1,510 / 1,050 us |
+| Oban fetch, Planning Time (warm) | 1.67-1.84 ms | 0.99-1.10 ms |
+| graphile-worker fetch, EXPLAIN CPU | 2,050 / 1,820 us | 1,610 / 1,360 us |
+
+Planning CPU of the round's workloads, first batch / second batch interleaved three times
+(lower of each; medians in brackets): OLTP + ORM over pgbench EXPLAINed 593 / 463 us (630 /
+507), the same executed 373 / 361 us (396 / 368), ORM over TPC-H 1,174 / 980 us (1,264 /
+1,014), TPC-H 9.7 / 7.0 ms (10.2 / 7.8): lower in every round. Plan shapes 77 / 89 as before;
+every TPC-H result hash agrees. Left (HANDOFF item 11): the leaf's own estimate through
+EXPLAIN's builder, the IN sub-select's binding, endpoint probes per nested Planner.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

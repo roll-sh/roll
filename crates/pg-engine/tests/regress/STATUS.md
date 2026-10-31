@@ -417,6 +417,17 @@ at 0.17 (agent 91's note) didn't reproduce: lineitem_pkey's scans at SF 0.1 star
 both; the Memoize above was the cause. Open, with causes, in BENCH.md round 23 and HANDOFF
 item 11.
 
+Second batch (golden `a116_planner_batch2`): mergejoinscansel's column ranges come from the
+statistics only (`Est::var_range`; PostgreSQL's get_variable_range has its index probe under
+`#ifdef NOT_USED`): a merge join whose columns' histograms start apart starts where
+PostgreSQL's does (it started at the index's actual minimum). A sorted grouping fuzzily as
+cheap as the hashed one now removes it (add_path's pathkeys rule) instead of keeping it as
+an alternative a LIMIT could pick. And a FROM subquery over one table scan with no `alt` in
+its estimate isn't converted again for its other paths (`subquery_alt_paths`): planning of
+Oban's fetch 1.6-1.7 -> 1.0 ms. Measured as the first batch: full regress run (debug,
+`a116-rref`) against `results.tsv`, difftest smoke and the 150-seed pair against the first
+batch's binary (identical records), isolation 121 / 122.
+
 ## Round 22, agent 91 (planner round 6: partial paths in the join search)
 
 Measured by a full run of the batch (debug build, private reference `a91-rref`) against the

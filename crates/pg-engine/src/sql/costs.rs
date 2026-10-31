@@ -1480,14 +1480,10 @@ impl Est<'_> {
 }
 
 impl Est<'_> {
-    /// get_variable_range: a column's minimum and maximum (actual ones through an index,
-    /// else the histogram's ends and the most common values).
+    /// get_variable_range: a column's minimum and maximum from its statistics, the
+    /// histogram's ends and the most common values. (Never the actual ones through an index:
+    /// PostgreSQL leaves that out of mergejoinscansel, `#ifdef NOT_USED`, for planning speed.)
     pub fn var_range(&self, v: &VarRef) -> Option<(Value, Value)> {
-        if let Some(f) = self.endpoint
-            && let (Some(a), Some(b)) = (f(v, true), f(v, false))
-        {
-            return Some((a, b));
-        }
         let s = v.stats(self.cat)?;
         let mut range: Option<(Value, Value)> = None;
         if let Some((vals, _)) = slot(s, 2, self.fmt)

@@ -58,6 +58,8 @@ struct Leaf {
     sys: Option<(crate::catalog::system::SysTable, Option<String>)>,
     /// The disabled nodes of the item's own plan (add_path compares them first).
     disabled: u32,
+    /// Its estimate's top node has other paths beside it (`PlanEstimate::has_alt`).
+    has_alt: bool,
     /// A whole-row mark's width (ROW_MARK_COPY, `Planner::copy_marks`): set_rel_width's
     /// whole-row Var, part of the relation's reltarget and every join's above it.
     whole: u32,
@@ -648,6 +650,23 @@ pub(super) struct Order {
     /// The order of a grouping above (its query_pathkeys): useful to the joins' paths,
     /// but the group isn't sorted for it here.
     pub hint: bool,
+}
+
+/// A subquery's own level is more than one table scan under projections, filters, sorts,
+/// limits and locks: a grouping, DISTINCT, window, set operation or join of its own, which
+/// may keep paths beside its cheapest.
+fn own_level_groups(p: &Plan) -> bool {
+    match p {
+        Plan::Barrier { input, .. }
+        | Plan::Project { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Sort { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Context { input, .. } => own_level_groups(input),
+        Plan::Scan(_) => false,
+        _ => true,
+    }
 }
 
 /// The column a key expression is, through the binder's widening casts.
@@ -2094,7 +2113,12 @@ impl Search<'_, '_, '_> {
         if !(0..leaf.ncols).any(|k| self.ec_has_other(leaf.off + k, set) || q.iter().any(|x| x.ec == self.ec[leaf.off + k])) {
             return Vec::new();
         }
-        let mut variants = vec![leaf.plan.clone()];
+        // (The subquery's own plan offers paths besides its cheapest only through a grouping,
+        // a DISTINCT or a relation's ordered alternatives, which its estimate shows as `alt`s:
+        // without one there is nothing to add, and converting it again for its paths was a
+        // quarter of a job-queue fetch's planning.)
+        let own = leaf.has_alt || own_level_groups(&leaf.plan);
+        let mut variants = if own { vec![leaf.plan.clone()] } else { Vec::new() };
         variants.extend(self.pl.grouping_variants(&leaf.plan));
         let mut out = Vec::new();
         for (vi, v) in variants.into_iter().enumerate() {
@@ -2102,7 +2126,7 @@ impl Search<'_, '_, '_> {
             let paths = crate::sql::explain::subquery_paths(&v, self.pl.ctx);
             for (pi, p) in paths.iter().enumerate() {
                 // (The leaf's own cheapest path is there already.)
-                if (vi == 0 && pi == 0) || p.order.is_empty() {
+                if (own && vi == 0 && pi == 0) || p.order.is_empty() {
                     continue;
                 }
                 let mut gk: Vec<GKey> = Vec::new();
@@ -9425,6 +9449,7 @@ impl Planner<'_, '_> {
                     node_type: "Seq Scan",
                     presorted: 0,
                     disabled: 0,
+                    has_alt: false,
                     cols: Vec::new(),
                 },
                 _ => crate::sql::explain::estimate(&Arc::new(plan.clone()), self.ctx),
@@ -9705,6 +9730,7 @@ impl Planner<'_, '_> {
                 startup: est.startup,
                 total: est.total,
                 disabled: est.disabled as u32,
+                has_alt: est.has_alt,
                 kind,
                 cols,
                 fromless,
