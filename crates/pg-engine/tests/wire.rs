@@ -2590,6 +2590,30 @@ fn rechecks_after_concurrent_updates() {
     s.engine.shutdown();
 }
 
+/// pg_stat_activity.query keeps track_activity_query_size - 1 bytes (1023 by default) of a
+/// longer statement, cut at a character boundary (pgstat_report_activity, pg_mbcliplen).
+#[test]
+fn activity_query_clipped_to_track_activity_query_size() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        // ASCII, then two-byte characters across the 1,023rd byte.
+        let sql = format!(
+            "SELECT octet_length(query), right(query, 3) FROM pg_stat_activity WHERE pid = pg_backend_pid() AND '{}{}' <> ''",
+            "x".repeat(800),
+            "é".repeat(100)
+        );
+        let pre = sql.find('é').unwrap();
+        let want = pre + (1023 - pre) / 2 * 2;
+        let rows = c.query(sql.as_str(), &[]).await.unwrap();
+        assert_eq!(rows[0].get::<_, i32>(0) as usize, want);
+        assert_eq!(rows[0].get::<_, String>(1), "ééé");
+        let short = lines(&c, "SELECT query FROM pg_stat_activity WHERE pid = pg_backend_pid()").await.unwrap();
+        assert_eq!(short, ["SELECT query FROM pg_stat_activity WHERE pid = pg_backend_pid()"]);
+    });
+    s.engine.shutdown();
+}
+
 /// A SELECT's rows go out as the executor makes them (printtup): the first while the
 /// statement still runs, the rows before an error ahead of it, notices in order with them;
 /// COPY TO's data too. What PostgreSQL runs to completion first (EXECUTE, RETURNING, a

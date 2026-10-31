@@ -40,6 +40,12 @@ enum Mode {
 }
 
 impl Jumble {
+    /// What normalizing reads (the constants' locations), without the jumbled bytes the id
+    /// was hashed from.
+    pub fn locations(&self) -> Jumble {
+        Jumble { buf: Vec::new(), locs: self.locs.clone(), highest_extern_param: self.highest_extern_param, squashed: self.squashed }
+    }
+
     fn put(&mut self, s: &str) {
         self.buf.extend_from_slice(s.as_bytes());
         self.buf.push(0);

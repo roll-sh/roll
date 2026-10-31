@@ -2577,6 +2577,48 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - New suites (`suites/apps.py`: HTTP-driven applications, one id per step): Grafana 13.3,
     Metabase 0.64.3, Hasura 2.51.3, Keycloak 26.8.1, Directus 12.6.0. Golden
     `a122_client_round6`.
+- **Client suites round 7** (round 24, agent 133; tests/clients/STATUS.md "Round 7", BENCH.md
+  "Application CPU"):
+  - Application CPU profiled (perf with frame pointers, pg_stat_statements on both sides,
+    folded stacks by phase). Fixed in the session's own work around a statement:
+    `paths::parallel::may_gather` (pg_stat_statements' parallel_workers_to_launch built an
+    EXPLAIN tree for every execution; now only when a relation read could get a partial path),
+    `PlanUses::first_custom` (a prepared statement's first custom plan is costed when its
+    second is made: an unnamed statement run once never needs the cost; costs are read from
+    the sixth execution on), `session::pgss::jumble_cached` (query ids kept per thread by
+    text, position, catalog and search_path). Kysely, Grafana and Keycloak 5–23% less engine
+    CPU (more with pg_stat_statements loaded); pgbench unchanged.
+  - Left for their owners, with reproducers in BENCH.md: char(n) equality index scans read
+    every entry and per-row InitPlan re-evaluation inside correlated sub-selects (EF Core's
+    four Northwind queries: ~530 s of its 805 s; scans 130, executor 121); Liquibase's
+    pg_attribute EXISTS check kept a SubPlan (planner 140); Parse- and Bind-time planning
+    (planner 140); Incremental Sort's presorted keys from an EXPLAIN tree at run time
+    (executor 121); COMMIT and FOR UPDATE costs (OLTP 123).
+  - `'t'::regclass` after DBAL's renumbering gives pg_class's shown oid (`Names::rel_oid`
+    applies `rel_oid_edits`; `rel_name` answers to the shown oid and prints the own one as a
+    number).
+  - ALTER COLUMN ... TYPE keeps a default as it showed under the old type
+    (`catalog::system::shown_default`, then the coercion from that type): PostgreSQL keeps
+    the cooked expression and coerces it implicitly (`''::character varying` for a
+    `varchar DEFAULT ''` made text; Supabase Auth's auth.users.phone_change).
+  - pg_stat_activity.query is clipped to track_activity_query_size - 1 bytes at a character
+    boundary (`server::start_activity`; wire test
+    `activity_query_clipped_to_track_activity_query_size`).
+  - New suites: Gitea 28.2.0 (`suites/gitea.*`, image golang:1.24-bookworm for its git;
+    `suites/wheels.sh` puts psycopg's wheels on a path where python3-venv is missing) and
+    Supabase Auth 2.197.0 (`suites/supabaseauth.*`): 0 differences. `run.sh` passes
+    `APP_PORT` into the suite containers (the application suites' default ports are in agent
+    122's range). Golden `a133_client_round7`.
+  - The pgAdmin / DBeaver replay: 25 of 856 differ, all cosmetic (STATUS.md has the classes);
+    oids are allocated as PostgreSQL's statement by statement.
+  - Verified: crate tests in debug and release (wire's `cancel_request_closes_after_the_error`
+    flakes under load, 1 of ~19 runs: the race between the error's flush and the cancel's
+    close that round 6 narrowed), clippy
+    (no new warnings), difftest smoke, isolation 121 / 122 plus the 13 roll-* specs (134 /
+    135, 1,742 / 1,743 permutations), the regression suite in full (debug, private reference):
+    51,148 / 51,150, no unit changed against `results.tsv`; pg_contrib pg_stat_statements
+    1,013 / 1,013 (its parallel tests, with `may_gather`'s debug assertion); the client suites
+    above against PostgreSQL, 0 differences; pgbench select-only and tpcb-like.
 - **Storage and bulk performance** (round 18, agent 43): compact SST blocks, batched heap
   fetches for index scans (`Store::get_versions`, `Txn::get_many_snap`), index-only scans of
   big tables answered from the index entries (an entry visible to a snapshot points at a row
@@ -4359,6 +4401,19 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   for a PostgreSQL run whose work fits work_mem. The subscriber's spool of a streamed
   transaction (`repl/apply_stream`) does stand for PostgreSQL's apply worker BufFile, which
   log_temp_files reports at its deletion: not logged yet (left).
+- **A CancelRequest's connection closes when the backend has acted, not after a fork's
+  time** (round 24, agent 133). PostgreSQL's postmaster forks a backend for every
+  CancelRequest, which reads the packet, signals the target and exits: the client sees the
+  cancel connection close a few milliseconds later, and a request for a pid that is gone
+  costs the same. The engine's closes at once for a pid that is gone and, for a running one,
+  once that backend has acted on it (round 23: its error is out first, which Postgrex's
+  active-client timeout needs). The only client that observes the rest is Postgrex's own
+  "terminate backend during query" test: its pool stops (killing the linked test process)
+  when its disconnect's cancel round trip ends, which races the terminated task's FATAL
+  reply. libpq, pgjdbc, Npgsql, asyncpg, pgx and Postgrex itself treat the close as "sent"
+  and wait for the statement's own result; no protocol rule ties the two. Holding the
+  connection open for a fork's worth of time would add that latency to every cancel to
+  reproduce a cost, not a behaviour: not matched.
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for

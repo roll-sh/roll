@@ -6937,7 +6937,8 @@ pub fn builtin_shdescription(
 }
 
 /// A column default as `pg_get_expr(adbin, adrelid)` prints it.
-fn shown_default(ctx: &ExecCtx, t: &Arc<Table>, d: &str, ty: &DataType) -> String {
+/// A column default's text as pg_get_expr shows it (`d` under the column's type `ty`).
+pub(crate) fn shown_default(ctx: &ExecCtx, t: &Arc<Table>, d: &str, ty: &DataType) -> String {
     stored_expr(ctx, t, d, Stored::Default(ty), false).unwrap_or_else(|| d.to_string())
 }
 

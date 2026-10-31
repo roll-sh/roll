@@ -128,6 +128,13 @@ struct PlanUses {
     /// The generic plan's cost, and which binding it is of (generic_cost; None: not built).
     /// (A `Weak`, not an address: a later binding could take a dropped one's address.)
     generic_cost: Option<(std::sync::Weak<BoundQuery>, f64)>,
+    /// The first custom plan and its parameters, its cost not found yet: costs are read only
+    /// from the sixth execution on, and most statements run once (a driver's unnamed
+    /// statement, re-parsed for every execution), so the first one's is found when a second
+    /// custom plan is made, or never (`Session::planned`). With the catalog version it was
+    /// bound under: after DDL its plan may name what is gone, and the second plan's cost
+    /// stands in for it.
+    first_custom: Option<(Arc<BoundQuery>, Vec<Value>, u64)>,
     /// The type oid a ParameterDescription gives a parameter in place of its value type's: a
     /// domain (named by the Parse message, or the type a cast gave it).
     param_oids: Vec<(usize, u32)>,
@@ -1763,10 +1770,22 @@ impl Session {
                         c
                     }
                 };
-                // (The unnamed statement's custom plans whose costs waited.)
+                // (The unnamed statement's custom plans whose costs waited, and a first custom
+                // plan's: after DDL since, the others' average stands in for it.)
                 let uncosted = std::mem::take(&mut p.plans.lock().uncosted);
                 for (bq, vals) in uncosted {
                     let c = self.plan_cost(&bq, &vals, true);
+                    p.plans.lock().custom_cost += c;
+                }
+                let first = p.plans.lock().first_custom.take();
+                if let Some((b, v, at)) = first {
+                    let version = self.txn.as_ref().map_or(0, |t| t.borrow().catalog().version);
+                    let c = if at == version {
+                        self.plan_cost(&b, &v, true)
+                    } else {
+                        let plans = p.plans.lock();
+                        plans.custom_cost / (plans.custom.max(2) - 1) as f64
+                    };
                     p.plans.lock().custom_cost += c;
                 }
                 let plans = p.plans.lock();
@@ -1807,13 +1826,27 @@ impl Session {
                 return Ok((bq, true));
             }
             let bq = self.bound_custom(p, stmt, params)?;
-            let cost = self.plan_cost(&bq, params, true);
+            let version = self.txn.as_ref().map_or(0, |t| t.borrow().catalog().version);
+            let first = p.plans.lock().first_custom.take();
+            let learns = share && self.param_learns(p);
+            let cost = if p.plans.lock().custom == 0 && !learns {
+                None
+            } else {
+                Some(self.plan_cost(&bq, params, true))
+            };
+            let first = first.map(|(b, v, at)| match cost {
+                Some(c) if at != version => c,
+                _ => self.plan_cost(&b, &v, true),
+            });
             let mut plans = p.plans.lock();
             plans.custom += 1;
-            plans.custom_cost += cost;
+            plans.custom_cost += first.unwrap_or(0.0) + cost.unwrap_or(0.0);
+            if cost.is_none() {
+                plans.first_custom = Some((bq.clone(), params.to_vec(), version));
+            }
             plans.cols = Some(bq.cols.iter().map(|c| c.ty.clone()).collect());
             drop(plans);
-            if share {
+            if let Some(cost) = cost.filter(|_| learns) {
                 self.param_learn(p, stmt, &bq, params, cost);
             }
             return Ok((bq, true));
@@ -1900,7 +1933,11 @@ impl Session {
             });
             let ae_start = std::time::Instant::now();
             if count_workers {
-                workers = crate::sql::explain::gather_workers(&bq.plan, ctx) as i64;
+                if crate::sql::paths::parallel::may_gather(&bq.plan, &bq.perms.locks, ctx) {
+                    workers = crate::sql::explain::gather_workers(&bq.plan, ctx) as i64;
+                } else {
+                    debug_assert_eq!(crate::sql::explain::gather_workers(&bq.plan, ctx), 0);
+                }
             }
             // (The part below each Gather that only the workers would run: its locks end
             // with them.)

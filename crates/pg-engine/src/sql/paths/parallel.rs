@@ -81,6 +81,65 @@ impl ParCfg {
     }
 }
 
+/// Whether a plan over these relations (a statement's `Perms::locks`: what it reads, its
+/// appendrel members and their indexes) can show a Gather at all: some relation may get a
+/// partial path. compute_workers gives none to a scan reading fewer pages than
+/// min_parallel_table_scan_size (an index scan's heap pages are at most the table's) unless
+/// the table sets parallel_workers or is an appendrel member; temporary and foreign tables get
+/// none. A UNION ALL's or an inheritance tree's Append makes its members appendrel members
+/// of any size. A cheap bound to check before building the plan's EXPLAIN tree to count its
+/// workers (pg_stat_statements' parallel_workers_to_launch) on every execution.
+pub fn may_gather(plan: &Plan, rels: &[(u32, crate::txn::locks::LockMode)], ctx: &ExecCtx) -> bool {
+    fn has_append(p: &Plan) -> bool {
+        if matches!(p, Plan::Append { .. }) {
+            return true;
+        }
+        let mut exprs = Vec::new();
+        crate::sql::explain::node_exprs(p, &mut exprs);
+        let mut found = false;
+        for e in exprs {
+            e.walk(&mut |x| {
+                if let Expr::Subquery(s) = x {
+                    found = found || has_append(&s.plan);
+                }
+            });
+        }
+        found || crate::sql::explain::plan_inputs(p).into_iter().any(|c| has_append(c))
+    }
+    let debug = ctx
+        .sess
+        .settings
+        .borrow()
+        .get_raw("debug_parallel_query")
+        .is_some_and(|v| !matches!(v.as_str(), "off" | "false" | "no" | "0"));
+    if debug {
+        return true;
+    }
+    let cfg = ParCfg::read(ctx);
+    if cfg.max_workers == 0 {
+        return false;
+    }
+    if has_append(plan) {
+        return true;
+    }
+    let cat = ctx.catalog();
+    rels.iter().any(|&(oid, _)| {
+        if let Some(t) = cat.tables.get(&oid) {
+            if t.temporary || t.is_foreign() {
+                return false;
+            }
+            rel_parallel_workers(t).is_some()
+                || !t.inherits.is_empty()
+                || t.partkey.is_some()
+                || costs::rel_size(t, ctx).pages >= cfg.min_table_pages
+        } else if let Some(st) = crate::catalog::system::SysTable::by_oid(oid) {
+            syscat::sys_size(st, ctx).pages >= cfg.min_table_pages
+        } else {
+            false
+        }
+    })
+}
+
 /// A table's `parallel_workers` storage parameter.
 pub fn rel_parallel_workers(t: &Table) -> Option<usize> {
     t.options.iter().find_map(|o| {

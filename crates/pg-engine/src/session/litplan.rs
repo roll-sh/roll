@@ -479,6 +479,12 @@ impl Session {
         Some((bq, cost))
     }
 
+    /// Whether `param_learn` may note something of `p` (its text has generic bindings kept):
+    /// then its custom plan's cost is needed as the plan is made.
+    pub(super) fn param_learns(&self, p: &Prepared) -> bool {
+        self.param_plans.map.contains_key(&*p.sql)
+    }
+
     /// After a custom plan `custom` (costing `cost`) of `p` with `params` was made the usual
     /// way: note whether its custom plans are its generic binding, when not known yet.
     pub(super) fn param_learn(&mut self, p: &Prepared, stmt: &Node, custom: &BoundQuery, params: &[Value], cost: f64) {

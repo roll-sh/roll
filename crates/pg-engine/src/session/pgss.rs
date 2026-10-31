@@ -80,6 +80,41 @@ fn nested_query(node: &NodeEnum) -> Option<NodeEnum> {
 
 use crate::ext::pg_stat_statements::jumble_in;
 
+/// Jumbled top-level statements, by text and position in their query string, catalog and
+/// search_path (what `jumble_in` reads besides the tree): a driver's statement re-parsed for
+/// every execution, or a prepared one run again, is jumbled once, as PostgreSQL computes a
+/// query id at parse analysis rather than per execution. (By the catalog's address, with a
+/// `Weak` keeping the allocation so a later catalog can't take it.)
+type JumbleKey = (String, usize, usize, Vec<String>);
+type JumbleCache = std::collections::HashMap<JumbleKey, (std::sync::Weak<crate::catalog::Catalog>, i64, jumble::Jumble)>;
+thread_local! {
+    static JUMBLED: std::cell::RefCell<JumbleCache> = std::cell::RefCell::new(JumbleCache::new());
+}
+
+fn jumble_cached(s: &super::SessionState, p: &Prepared, n: &NodeEnum) -> (i64, jumble::Jumble) {
+    let cat = s.db.catalog();
+    let key: JumbleKey = (p.sql.clone(), p.offset, Arc::as_ptr(&cat) as usize, s.search_path());
+    let hit = JUMBLED.with(|m| {
+        m.borrow()
+            .get(&key)
+            .filter(|(w, ..)| w.strong_count() > 0)
+            .map(|(_, id, j)| (*id, j.locations()))
+    });
+    if let Some(r) = hit {
+        return r;
+    }
+    let (id, j) = jumble_in(s, n);
+    JUMBLED.with(|m| {
+        let mut m = m.borrow_mut();
+        // (Bounded: dropped whole when full, or when it holds catalogs no longer in use.)
+        if m.len() >= 512 {
+            m.clear();
+        }
+        m.insert(key, (Arc::downgrade(&cat), id, j.locations()));
+    });
+    (id, j)
+}
+
 impl Session {
     /// The query string statement `p` came in, when this session's source is it.
     fn pgss_source(&self, p: &Prepared) -> Arc<str> {
@@ -142,7 +177,7 @@ impl Session {
             }
             n => {
                 let utility = !jumble::is_query(n);
-                let (id, j) = jumble_in(&self.state, n);
+                let (id, j) = jumble_cached(&self.state, p, n);
                 let stmt = Stmt { source: &source, location, len };
                 if enabled && !j.locs.is_empty() {
                     pgss::store(&self.state, &stmt, id, &j, level, None, Usage::default());

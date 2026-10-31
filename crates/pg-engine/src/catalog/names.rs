@@ -327,6 +327,14 @@ impl NameResolver for CatalogNames {
 
     fn rel_name(&self, oid: u32) -> Option<String> {
         let c = &self.catalog;
+        // A renumbered relation (`Catalog::rel_oid_edits`) answers to the oid its pg_class row
+        // shows; its own oid then names no pg_class row, and prints as a number.
+        let e = &c.rel_oid_edits;
+        let oid = match e.moved_to(true, oid) {
+            Some(rel) => rel,
+            None if e.shown(true, oid) != oid => return None,
+            None => oid,
+        };
         let (schema, name) = if let Some(t) = c.tables.get(&oid) {
             (t.schema, t.name.clone())
         } else if let Some(v) = c.views.get(&oid) {
@@ -393,7 +401,7 @@ impl NameResolver for CatalogNames {
             }
         };
         if let Some(r) = self.catalog.find(schema, rel, &self.search_path) {
-            return Ok(r.oid());
+            return Ok(self.catalog.rel_oid_edits.shown(true, r.oid()));
         }
         if let Some(t) = SysTable::lookup(schema, rel, &self.search_path) {
             return Ok(t.oid());

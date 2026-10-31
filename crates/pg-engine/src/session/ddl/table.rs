@@ -6247,8 +6247,13 @@ impl Ddl<'_, '_> {
         t.columns[idx].collation = collation;
         t.columns[idx].ndims = Some(tn.array_bounds.len() as i16);
         t.columns[idx].missing = None;
-        // The default must still convert; it is stored anew.
+        // The default must still convert; it is stored anew. PostgreSQL keeps the cooked
+        // expression and coerces it to the new type, implicitly (deparsed without the cast):
+        // it is the default as it showed under the old type (`''::character varying` of a
+        // varchar column made text; Supabase Auth's phone_change), and converts from that type.
         if let Some(d) = t.columns[idx].default.clone() {
+            let d = crate::catalog::system::shown_default(self.ctx, &Arc::new(old.clone()), &d, &from);
+            t.columns[idx].default = Some(d.clone());
             let n = ast::parse_expr(&d)?;
             let e = b.bind_scalar(&n, Clause::Default)?;
             b.coerce_assign(e, &ty, &colname).map_err(|_| {

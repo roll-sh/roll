@@ -1423,6 +1423,20 @@ fn statement_done_activity(engine: &Engine, pid: i32, s: &Session) {
 fn start_activity(engine: &Engine, pid: i32, s: &Session, state: &str, sql: Option<String>) {
     let now = crate::types::datetime::Clock::system().now;
     let xmin = s.state.db.xids().current_xmin();
+    // pgstat_report_activity keeps track_activity_query_size - 1 bytes of the text, cut at a
+    // character boundary (pg_mbcliplen): pgAdmin's dashboard shows the clipped text.
+    let sql = sql.map(|mut q| {
+        let size = s.state.settings.borrow().get_str("track_activity_query_size").and_then(|v| v.parse::<usize>().ok());
+        let max = size.unwrap_or(1024).saturating_sub(1);
+        if q.len() > max {
+            let mut n = max;
+            while !q.is_char_boundary(n) {
+                n -= 1;
+            }
+            q.truncate(n);
+        }
+        q
+    });
     engine.set_activity(pid, |a| {
         if a.state != state {
             a.state = state.into();

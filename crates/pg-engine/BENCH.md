@@ -5123,6 +5123,95 @@ order (new ran after base in every round, so it often paid for base's writes: th
   142 takes the size model's locking (their batch 2); the lock table's state mutex and the
   waiters' wake-up are next in this area.
 
+## Application CPU (round 24, agent 133)
+
+Server CPU of the application suites (tests/clients, STATUS.md "Round 7"), profiled with perf
+(release engine, line tables and frame pointers, `--call-graph fp`, 199–499 Hz, from a
+privileged container on the host's pid namespace) and per statement with pg_stat_statements
+on both sides (track = all; the reference with track_planning on, so its planning time counts
+as the engine's does). Folded stacks were grouped by phase.
+
+Where the engine's CPU goes (share of samples, base 177b53e9):
+
+| phase | Keycloak | Kysely | EF Core (first 180 s) | owner |
+|---|---:|---:|---:|---|
+| Parse message: binding and planning the statement (`bound_as`) | 9.6% | 14.6% | 25.6% | planner (140) |
+| Bind: the custom plan bound afresh (`bound_custom`) | 15.1% | 9.7% | 1.9% | planner (140) |
+| of which path search (`plan_query_limited`) | 13.4% | 14.2% | 23.4% | planner (140) |
+| pg_stat_statements' parallel-worker count, an EXPLAIN tree per execution | 12.4% | | | fixed here |
+| custom plan cost (`plan_cost_estimate`, an EXPLAIN tree per custom plan) | 6.8% | 6.6% | 1.5% | fixed here, mostly |
+| pg_stat_statements' query jumble (the parse tree through serde_json) | 5.4% | | | fixed here |
+| Incremental Sort's presorted keys, an EXPLAIN tree per Sort at run time | 6.1% | 3.3% | 3.1% | executor (121) |
+| correlated sub-selects run (`eval_subquery`), mostly bitmap scans | 7.9% | | 35.8% | scans (130) |
+| commit (`finish_txn`) | 0.5% | 9.1% | 0.9% | OLTP (123) / catalog (131) |
+
+(The Keycloak and Kysely columns ran with pg_stat_statements loaded; without it its rows are 0.)
+
+Fixed here:
+- `paths::parallel::may_gather`: pg_stat_statements counts each execution's parallel workers
+  from the plan's EXPLAIN tree (`explain::gather_workers`); the tree is built now only when
+  some relation the statement reads could get a partial path (min_parallel_table_scan_size,
+  a parallel_workers option, an appendrel member, a UNION ALL / inheritance Append, or
+  debug_parallel_query). Debug builds assert the tree's count is 0 otherwise.
+- `PlanUses::first_custom`: the cost of a prepared statement's first custom plan (read only
+  from the sixth execution on, against the generic plan's) is found when its second custom
+  plan is made, not as the first runs: a driver's unnamed statement, parsed again for every
+  execution (pgjdbc below prepareThreshold, Go's database/sql, Npgsql), runs once and never
+  needs it. One custom plan is kept per prepared statement until then (after DDL in between,
+  the second plan's cost stands in for the first's).
+- `session::pgss::jumble_cached`: top-level statements' query ids, kept per thread by text,
+  position, catalog and search_path (512 entries), as PostgreSQL computes them at parse
+  analysis rather than per execution.
+
+Before and after (release, fresh engines, two interleaved runs each; with and without
+pg_stat_statements loaded):
+
+| suite | before | after | PostgreSQL |
+|---|---:|---:|---:|
+| Kysely | 10.2 / 10.1 s; pgss 11.2 / 12.0 s | 9.2 / 9.7 s; pgss 9.3 / 9.5 s | 7.6 s (pgss) |
+| Grafana | 5.0 / 4.8 s; pgss 6.2 / 5.6 s | 4.0 / 4.3 s; pgss 4.7 / 4.3 s | 4.1 s (pgss) |
+| Keycloak | 17.5 / 18.2 s; pgss 21.4 / 20.8 s | 17.4 / 16.6 s; pgss 18.2 / 18.4 s | 6.9–9.5 s (pgss) |
+| Metabase | 37.9 s | 36.2 s | 13.2 s |
+
+Peak RSS of those runs 98–125 MB (Metabase 174–178 MB) either way (the kept first custom
+plans: 0–4 MB more).
+pgbench (scale 10, 8 clients, `-M prepared`, 20 s, interleaved twice): select-only 0.115 /
+0.116 ms of server CPU per transaction before, 0.110 / 0.110 after (peak 346 / 350 MB
+before, 337 / 347 after); tpcb-like 0.755 / 0.768 before, 0.752 / 0.770 after.
+
+EF Core: 919 s of engine CPU (peak 763 MB; 935 s and 841 MB with pg_stat_statements) against
+172 s on PostgreSQL. Metabase's gap is mostly Liquibase's column check below (49 calls,
+110 ms each) and its own application queries (`SELECT * FROM (SELECT "t"."active", ...`:
+~10 ms against ~0.15 ms a call; not profiled further). Most of EF Core's gap is four Northwind
+queries, about 530 s of the engine's 805 s of statement time (PostgreSQL: under 0.5 s each),
+for the scans' and executor's owners:
+- `char(n)` equality index conditions read every entry: on a 20,000-row table,
+  `SELECT count(*) FROM t WHERE c = 'ZZZZZ'` (c char(5), btree) is an Index Only Scan with
+  "Heap Fetches: 20000" and 0 rows, 84–96 ms (PostgreSQL 0.2 ms, 2 buffers). Northwind's
+  CustomerID is char(5): every correlated `o0."CustomerID" = c."CustomerID"` sub-select (a
+  Bitmap Heap Scan per outer row) reads all 830 orders, ~3.6 ms a run (PostgreSQL ~10 µs).
+  `int` keys don't (0.8 ms for none), but 5,000 matching int rows still take 46 ms
+  (PostgreSQL 1.3 ms).
+- A sub-select's InitPlans that read only the outer query's row (`(SELECT o1."OrderID" ...
+  WHERE c."CustomerID" = o1."CustomerID" ORDER BY ... LIMIT 1) = o."OrderID"` inside a
+  correlated sub-select) are evaluated per row of the sub-select's own scan, not once per
+  run: "Order Details" (2,155 rows) times two InitPlans per customer, 92 s for 8 customers
+  where the plan (the same as PostgreSQL's) says Index Only Scan with `Index Cond:
+  ("OrderID" = (InitPlan 2).col1)`.
+
+For the planner's owner: Liquibase's column check (Keycloak, Metabase), `SELECT 1 FROM
+pg_attribute a WHERE EXISTS (SELECT 1 FROM pg_class JOIN pg_catalog.pg_namespace ns ON ns.oid
+= pg_class.relnamespace WHERE lower(ns.nspname) = 'public' AND lower(relname) = 't77' AND
+pg_class.oid = a.attrelid) AND lower(a.attname) = 'c5'`, isn't pulled up to a semi join
+(PostgreSQL: a HashAggregate of the pg_class ⋈ pg_namespace side, then an index scan of
+pg_attribute); the engine runs a SubPlan per pg_attribute row (6,401 loops): 74–110 ms a call
+against 1 ms. Any qual on the namespace side keeps it a SubPlan (without one it is pulled
+up), and the SubPlan's EXPLAIN shows `Recheck Cond: (oid = ns.oid)`, an equivalence the query
+doesn't have (the rows are right). pgjdbc's getTables / getImportedKeys / getIndexInfo cost
+5–40x PostgreSQL's per call (Keycloak's Liquibase calls getTables 991 times). For OLTP:
+Grafana's 1,430 COMMITs average 157 µs against 1 µs (`--no-sync`), and Metabase's `SELECT *
+FROM QRTZ_LOCKS ... FOR UPDATE` 6.7 ms against 0.4 ms.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
