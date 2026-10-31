@@ -469,6 +469,9 @@ pub struct PlPlans {
     pub custom_cost: f64,
     /// The generic plan's cost, and which plan it is of (a new binding is costed again).
     pub generic_cost: Option<(std::sync::Weak<crate::sql::plan::Plan>, f64)>,
+    /// Whether its custom plans are that generic plan (`plpgsql`'s `value_free_vars`): the
+    /// variables it reads when they are, None when they may not be.
+    pub custom_generic: Option<(std::sync::Weak<crate::sql::plan::Plan>, Option<Vec<usize>>)>,
 }
 
 /// One SQL function statement's CachedPlanSource counters (choose_custom_plan).

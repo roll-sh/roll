@@ -3533,7 +3533,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     thread of its own (`roll-trim`): memory freed by busy threads or by threads that ended
     went back only when a thread ran the collection, so a quiet process kept its peak.
   - *Operator settings* (engine options, not PostgreSQL settings): `--cache-mb` (block cache,
-    64), `--plan-cache-mb` (parse trees and PL/pgSQL compiles, 36: `lru::set_plan_cache_bytes`),
+    64), `--plan-cache-mb` (parse trees, statement templates and PL/pgSQL compiles, 36, split
+    6 : 2 : 1 since round 24's agent 145: `lru::set_plan_cache_bytes`; the templates were a
+    fixed 16 MB outside it; `memory_load`'s `statement_templates_hold_what_they_count`
+    checks their accounting with the parse trees),
     `--memory-budget-mb` (both, 3 : 1). Not under a byte bound yet: size models (per table, up
     to 400,000 rows: agent 113), generated catalog rows (32 per database: agent 115), hot
     ranges (64 x 1 MB per database), memtables (8 MB per database), a transaction's buffered
@@ -3825,6 +3828,91 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     (146), asyncpg (262), pgjdbc (8,221), no difference. Rebased onto `74a3ad38` (size models
     round 2, executor round 6, catalog round 8): clippy, kept_plans, deep_input,
     deparse_identity, wire, poisoned_caches, session_state, golden `oltp*`.
+- **OLTP round 4** (round 24, agent 145): simple-protocol
+  statements by shape, kept plans shared by sessions and watched, PL/pgSQL custom plans as
+  the generic plan.
+  - *Template shapes* (`sql/literals.rs` `Scan::shape`): besides its key (each literal's
+    bytes replaced by its class, so the tree's locations are one key's), a scan gives the
+    text with each literal one byte of its class: queries whose literals have other lengths
+    are one shape. A session's kept plans (256 keys at most, then cleared) were previously
+    learned and planned again per key. Kept plans
+    (`session/litplan.rs` `LitPlans`) are by shape; a unary minus is part of the shape. A
+    text holding a byte the key uses for a class (1-4) isn't templated (`SELECT 5, \x01`
+    shared the key of `SELECT 5, 6`, whose template has a literal the other's scan lacks).
+  - *Trees made when read* (`litplan::StmtTree`, `Prepared::stmt`): a simple query read
+    through a template keeps the template and its literals (`literals::Stmts::Template`,
+    `parse::parse_live_lazy`); its tree is instantiated the first time something reads it
+    (`Deref`). A plain SELECT / INSERT / UPDATE / DELETE (`session::plain_query`: none of
+    the system-catalog DML `dispatch` runs otherwise) runs on the template's tree
+    (`StmtTree::shape`: its kind, relations, locking clause) and binding reads its own:
+    a query run with a kept plan makes no tree. The process title / command tag
+    (`serverlog::set_ps`) and the empty-query check read the shape. Debug builds compare
+    every templated parse with the parser's at parse time.
+  - *Kept plans shared by sessions* (`litplan::SHARED`): when a size a kept plan read
+    changes, the first session to see it plans again and publishes the plan (by database
+    instance, catalog version, settings by value (`Settings::values_key`), search_path,
+    role, the template's shape and its constant literals); the others take it while what
+    it read holds. Not in a session with a temporary schema. 128 shapes, 2 plans each;
+    plans of a database's older catalog versions go when a newer is shared.
+  - *Analyses kept, not bindings* (agent 140's split): kept plans and Parse bindings keep
+    an `Analyzed` when `Analyzed::replannable()` (`litplan::analyzed_bound`) and plan it
+    again when a size changes: plain SELECTs no longer bind again. `binder::UnplannedDml`,
+    `bind_keeping_analysis` and their thread-locals are gone.
+  - *Size watches* (agent 142's `sizing::size_watch`): a kept plan's and Parse binding's
+    reads (`litplan::Watched`) carry a watch per read, taken before the reads were last
+    found to hold; while every watch holds, checking them is an atomic load each, no
+    catalog read. A read the model doesn't answer (an estimate) has none and is compared
+    as before; a watch that fired with the value unchanged (an fsm page) is taken again.
+  - *PL/pgSQL custom plans* (`plpgsql` `compile`, `value_free_vars`, `same_as_generic`):
+    the first time a statement's custom plan is made, when it equals the generic plan
+    with the variables' values put in and every variable it reads is a parameter the
+    `litplan::candidates` rule allows (the statement with each variable a ParamRef; a name
+    that is also a column of the table, a qualified variable, a sub-select, a window: no),
+    its later custom plans (the first five, or all under force_custom_plan) run the generic
+    plan, counted and costed as custom (`plan_cost(.., true)`). Not with a null value.
+    Debug builds bind each such custom plan and assert it is the generic plan.
+  - *Bind* plans the query before it checks the result formats (GetCachedPlan and
+    PortalStart, then PortalSetResultFormat): a parameter that fails to fold is its error,
+    not 08P01 (agent 138's difftest round 7). An array of a domain sent in binary names
+    the domain as its element type (`NameResolver::array_domain_elem`, `put_data_row`).
+  - *pg_stat_statements' COMMIT / ROLLBACK* leave out the transaction's end
+    (`finish_txn_untimed`), which PostgreSQL runs after the statement
+    (finish_xact_command).
+  - The statement templates are inside the plan-cache budget: `lru::set_plan_cache_bytes`
+    splits it 6 : 2 : 1 between parse trees, templates and PL/pgSQL compiles (24 / 8 / 4 MB
+    of the default 36; the templates were a fixed 16 MB outside it). memory_load:
+    `statement_templates_hold_what_they_count`.
+  - Resume verification (2026-11-01, base `29e882c9`): kept_plans (6 tests) and wire
+    (67 tests) pass. `a145_oltp_plans` is recorded from PostgreSQL 18.6 and matches in
+    engine and wire mode; it covers PL/pgSQL auto/forced custom plans, NULL and overflow,
+    changing literal lengths, table growth and prepared-plan invalidation. A second
+    session in kept_plans exercises shared replans, settings, temporary tables and DDL.
+    The private regression subset (test_setup, create_misc, create_table, create_index,
+    select, subselect, prepare, plpgsql) matches 2,640/2,640 statements; pg_stat_statements
+    and auto_explain match 1,025/1,025; eight isolation specs match 343/343 permutations.
+    These are subset results, not a regenerated full-suite score.
+  - **Recovered memory failure corrected:** 15 alternating runs per side of
+    `memory_load::many_sessions_stay_bounded`, debug, 100 sessions, three seconds, on
+    `29e882c9` and the recovered a145 code: base 15/15 passed (peak above connected heap
+    74.3–114.2 MB, median 98.7 MB); recovery 13/15 passed (76.5–127.8 MB, median 97.4 MB).
+    The recovered runs at +123.7 and +127.8 MB exceeded the unchanged 120 MB bound.
+    Heap samples traced the workload spike to debug `row_count` / `rows_of_rel` checks
+    generating full vectors of pg_attribute rows per concurrent query. Those checks now
+    keep the complete reference catalog in existing compact RowChunks (`system::check_rows`),
+    then count or filter them, preserving both assertions and the generation counters.
+    Production code is unchanged by this correction. The corrected memory test passes
+    10/10 fresh runs (+52.4–54.8 MB); all three memory_load tests pass, including templates
+    and parse trees holding 33.7 MB for 32.0 MB counted. No bound or workload was weakened.
+    The jemalloc diagnostic runs changed allocation scheduling and failed on both sides;
+    they establish allocation sites, not production memory or throughput measurements.
+    No saved throughput claims were revalidated. Logs, binaries and runners are in
+    `/home/meszmate/.cache/a145-resume/`; the old checkout and scratch data were read only.
+  - Final checks pass: `cargo build -p pg-engine`, the complete `cargo test -p pg-engine
+    --no-fail-fast`, and `cargo clippy -p pg-engine` (the baseline's ten warnings).
+    `pnpm test:pg --unit` also ran and passed. The Docker portion was not repeated: the
+    parent's `3069ca91` baseline passed 12 cases and failed four WAL-recovery cases because
+    compute-to-host HTTP fetches timed out (`~/.cache/pg-engine-sol-resume/postgres-check.log`).
+    All four containers used for this verification are stopped, with their data retained.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -5630,14 +5718,11 @@ them all with the "Fixed in round N" sections describing what was already tried.
      agent 136): `Binder::analyze_statement` -> `Analyzed`, `Analyzed::plan` (`bind_statement`
      is both). The statement's own level is planned there for a plain SELECT (no WITH, set
      operation or VALUES) and for DML; a sub-select, FROM subquery, CTE or set operation arm
-     is still planned while it is bound, and `Analyzed::replannable` is false then. Left for
-     the OLTP owner (agent 145): move litplan's `lit_bind` / `lit_replan` and `bound_as`'s
-     `keep_unplanned` / `param_parsed` re-plan to a kept `Analyzed` and delete
-     `binder::UnplannedDml` / `bind_keeping_analysis` (now made from the `Analyzed`; debug
-     builds assert each re-plan equals a re-bind). For the planner: defer the inner levels too
-     (each binder plan site records what `plan_query_limited` needs: the arm's LIMIT, the
-     pushed and own locks, the CTE estimates in scope), so every statement re-plans alone.
-     PL/pgSQL's first five custom plans still bind afresh.
+     is still planned while it is bound, and `Analyzed::replannable` is false then. Kept
+     plans and Parse bindings keep an `Analyzed` and plan it again (round 24, agent 145;
+     `binder::UnplannedDml` is gone). For the planner: defer the inner levels too (each
+     binder plan site records what `plan_query_limited` needs: the arm's LIMIT, the pushed
+     and own locks, the CTE estimates in scope), so every statement re-plans alone.
    - Agent 124 (postgres_fdw; agent 137 owns it next and may send reproducers): projections
      aren't pushed into partition members (postgres_fdw units 1751, 1766, 1768; local
      partitions too), and the orientation of shipped / deparsed quals (unit 123) comes from

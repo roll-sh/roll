@@ -54,7 +54,7 @@ struct Args {
     /// --memory-budget-mb).
     #[arg(long)]
     cache_mb: Option<usize>,
-    /// Parse trees and PL/pgSQL compiles shared by all sessions, in MiB (default 36, or a
+    /// Parse trees, statement templates and PL/pgSQL compiles shared by all sessions, in MiB (default 36, or a
     /// quarter of --memory-budget-mb).
     #[arg(long)]
     plan_cache_mb: Option<usize>,

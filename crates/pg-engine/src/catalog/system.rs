@@ -1709,7 +1709,7 @@ pub fn row_count(table: SysTable, ctx: &ExecCtx) -> Option<usize> {
     // catalog: pgjdbc's TypeCacheDLLStressTest.)
     #[cfg(debug_assertions)]
     {
-        let generated = rows_generated_for(table, ctx, None).ok().map(|r| r.len());
+        let generated = check_rows(table, ctx).ok().map(|chunks| chunks.iter().map(|c| c.len()).sum());
         if std::sync::Arc::ptr_eq(&held, &ctx.catalog()) {
             assert_eq!(Some(n), generated, "{}'s row count", table.name());
         }
@@ -1870,8 +1870,10 @@ pub fn rows_of_rel(table: SysTable, ctx: &ExecCtx, rel: u32) -> Result<Option<Ve
     #[cfg(debug_assertions)]
     {
         let k = rel_column(table).unwrap();
-        let all: Vec<Row> = rows_generated_for(table, ctx, None)?
-            .into_iter()
+        let chunks = check_rows(table, ctx)?;
+        let all: Vec<Row> = chunks
+            .iter()
+            .flat_map(|c| c.rows(0, c.len()))
             .filter(|r| r[k] == Value::Oid(rel))
             .collect();
         debug_assert!(all == rows, "{}'s rows of relation {rel}", table.name());
@@ -2067,6 +2069,21 @@ pub fn is_rows_named(
 
 thread_local! {
     static REL_GENERATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The complete generated catalog for debug comparisons, held in compact chunks. A
+/// concurrent lookup must not retain a full vector of pg_attribute rows for its check.
+#[cfg(debug_assertions)]
+fn check_rows(table: SysTable, ctx: &ExecCtx) -> Result<Vec<Arc<RowChunk>>> {
+    let row = std::cell::Cell::new(0u64);
+    let part = |_: &Row| {
+        let i = row.get();
+        row.set(i + 1);
+        i
+    };
+    let mut out = Out::chunked(&part);
+    generate(table, ctx, None, &mut out)?;
+    Ok(out.into_chunks())
 }
 
 /// How many times a relation's rows alone were generated on this thread (`rows_of_rel`).

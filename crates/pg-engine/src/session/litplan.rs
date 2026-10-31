@@ -25,7 +25,7 @@
 
 use super::{Prepared, Session};
 use crate::catalog::Catalog as Cat;
-use crate::sql::binder::{Binder, BoundQuery, UnplannedDml};
+use crate::sql::binder::{Analyzed, Binder, BoundQuery};
 use crate::sql::expr::Expr;
 use crate::sql::literals::{LitKind, Scan, SizeRead, Template};
 use crate::types::{DataType, Value};
@@ -39,6 +39,70 @@ pub(crate) struct LitStmt {
     pub text: Box<str>,
     pub scan: Scan,
     pub tpl: Arc<Template>,
+}
+
+/// A statement's parse tree. One read through a template is made from the template and its
+/// literals the first time something reads it: a query run with a plan kept for its
+/// template's shape needs no tree of its own, and `shape` (the template's tree, whose
+/// literals are another query's) answers what kind of statement it is.
+pub struct StmtTree {
+    tree: std::sync::OnceLock<Option<Node>>,
+    lit: Option<Arc<LitStmt>>,
+}
+
+impl StmtTree {
+    pub fn new(tree: Option<Node>) -> Self {
+        StmtTree { tree: std::sync::OnceLock::from(tree), lit: None }
+    }
+
+    /// The statement of `l`, its tree made when it is read (None: `l`'s template isn't one
+    /// statement that is read as it is).
+    pub(super) fn lazy(l: Arc<LitStmt>) -> Option<Self> {
+        let [s] = &l.tpl.stmts[..] else { return None };
+        let n = s.stmt.as_deref()?;
+        // (SELECT ... INTO is read as CREATE TABLE AS.)
+        if crate::sql::binder::ast::select_into_as_ctas(n).is_some() {
+            return None;
+        }
+        Some(StmtTree { tree: std::sync::OnceLock::new(), lit: Some(l) })
+    }
+
+    /// The statement's shape: its tree, or while it hasn't been made its template's (the
+    /// same statement but for its literals' values and locations).
+    pub(crate) fn shape(&self) -> Option<&Node> {
+        match (self.tree.get(), &self.lit) {
+            (Some(t), _) => t.as_ref(),
+            (None, Some(l)) => l.tpl.stmts[0].stmt.as_deref(),
+            (None, None) => None,
+        }
+    }
+}
+
+impl From<Option<Node>> for StmtTree {
+    fn from(tree: Option<Node>) -> Self {
+        StmtTree::new(tree)
+    }
+}
+
+impl std::ops::Deref for StmtTree {
+    type Target = Option<Node>;
+
+    fn deref(&self) -> &Option<Node> {
+        self.tree.get_or_init(|| {
+            let l = self.lit.as_deref().expect("a statement tree to make");
+            let stmts = crate::stack::with_headroom(crate::stack::tree_headroom(l.text.len()), || {
+                crate::sql::literals::instantiate(&l.tpl, &l.text, &l.scan)
+            });
+            stmts.into_iter().next().and_then(|s| s.stmt).map(|n| *n)
+        })
+    }
+}
+
+impl std::ops::DerefMut for StmtTree {
+    fn deref_mut(&mut self) -> &mut Option<Node> {
+        let _ = &**self;
+        self.tree.get_mut().expect("made")
+    }
 }
 
 impl LitStmt {
@@ -67,7 +131,8 @@ impl LitStmt {
     }
 }
 
-/// A session's plans of templates, by template key.
+/// A session's plans of templates, by shape (`Scan::shape`: queries whose literals have other
+/// lengths have other keys and one shape).
 #[derive(Default)]
 pub(crate) struct LitPlans {
     map: HashMap<Box<str>, KeyPlans>,
@@ -95,16 +160,37 @@ struct Kept {
     /// The statement with those literals as parameters.
     generic: Node,
     bq: Arc<BoundQuery>,
-    /// A data-modifying statement's analysis, planned again when a size changes.
-    unplanned: Option<Arc<UnplannedDml>>,
+    /// Its analysis, planned again when a size changes (`Analyzed::replannable`).
+    unplanned: Option<Arc<Analyzed>>,
     env: Env,
-    reads: Vec<SizeRead>,
+    reads: Watched,
 }
 
-/// A binding, and its analysis before planning when it is a data-modifying statement's.
+/// What a plan read (`SizeRead`), with a watch on each read's relation taken before the
+/// reads were last found to read the same (`sizing::size_watch`): while every watch holds,
+/// so do the reads, with no lock and nothing read again. (None: a size the model doesn't
+/// answer, an estimate, compared again each time.)
+#[derive(Clone, Default)]
+pub(super) struct Watched {
+    reads: Arc<[SizeRead]>,
+    watches: Arc<[Option<crate::catalog::heapsim::SizeWatch>]>,
+}
+
+impl Watched {
+    fn new(reads: Vec<SizeRead>) -> Self {
+        Watched { reads: reads.into(), watches: Arc::new([]) }
+    }
+
+    /// Whether every read is watched and its watch holds.
+    fn watched(&self) -> bool {
+        self.watches.len() == self.reads.len() && self.watches.iter().all(|w| w.as_ref().is_some_and(|w| w.holds()))
+    }
+}
+
+/// A binding, and its analysis when planning it again gives what binding it again would.
 struct Bound {
     bq: BoundQuery,
-    unplanned: Option<Arc<UnplannedDml>>,
+    unplanned: Option<Arc<Analyzed>>,
 }
 
 /// What a binding depends on besides relation sizes.
@@ -145,11 +231,11 @@ impl Session {
 
     fn lit_plan(&mut self, p: &Prepared) -> Option<(Arc<BoundQuery>, Vec<Value>)> {
         let l = p.lit.as_deref()?;
-        if self.lit_plans.map.get(&l.scan.key)?.plans.is_empty() {
+        if self.lit_plans.map.get(&l.scan.shape)?.plans.is_empty() {
             return None;
         }
         let env = self.lit_env();
-        let kp = self.lit_plans.map.get(&l.scan.key)?;
+        let kp = self.lit_plans.map.get(&l.scan.shape)?;
         let at = kp.plans.iter().position(|k| k.fixed.iter().all(|(i, t)| l.lit_text(*i) == &**t))?;
         let k = &kp.plans[at];
         if k.env != env {
@@ -163,20 +249,32 @@ impl Session {
             }
             vals.push(v);
         }
-        let (bq, reads) = (k.bq.clone(), k.reads.clone());
-        let fresh = self.reads_hold(&reads);
-        if fresh {
+        if k.reads.watched() {
+            return Some((k.bq.clone(), vals));
+        }
+        let (bq, mut reads) = (k.bq.clone(), k.reads.clone());
+        if self.reads_hold(&mut reads) {
+            self.lit_plans.map.get_mut(&l.scan.shape)?.plans[at].reads = reads;
             return Some((bq, vals));
+        }
+        // A size changed: the plan another session made since, while what it read holds.
+        let shared = self.shared_env(&env);
+        let k = &self.lit_plans.map.get(&l.scan.shape)?.plans[at];
+        if let Some(mut s) = shared.as_ref().and_then(|e| shared_plan(&l.scan.shape, e, k))
+            && self.reads_hold(&mut s.2)
+        {
+            let k = &mut self.lit_plans.map.get_mut(&l.scan.shape)?.plans[at];
+            (k.bq, k.unplanned, k.reads) = (s.0.clone(), s.1, s.2);
+            return Some((s.0, vals));
         }
         // A relation's size changed: the template's binding planned again, as the query would
         // be (its plan doesn't depend on the values, whatever the sizes); a data-modifying
         // statement's analysis is kept, and only its access paths are planned again.
-        let k = &self.lit_plans.map.get(&l.scan.key)?.plans[at];
+        let k = &self.lit_plans.map.get(&l.scan.shape)?.plans[at];
         let (generic, types) = (k.generic.clone(), k.params.iter().map(|p| p.2.clone()).collect());
         let (bound, reads) = match k.unplanned.clone() {
             Some(u) => {
-                let old = k.bq.clone();
-                let (b, reads) = self.lit_replan(&u, &old, &env.path);
+                let (b, reads) = self.lit_replan(&u, &env.path);
                 // (Debug builds: what binding it again gives.)
                 #[cfg(debug_assertions)]
                 {
@@ -191,13 +289,16 @@ impl Session {
             }
             None => self.lit_bind(&generic, types, &env.path),
         };
-        let kp = self.lit_plans.map.get_mut(&l.scan.key)?;
+        let kp = self.lit_plans.map.get_mut(&l.scan.shape)?;
         match bound {
             Some(b) => {
                 let k = &mut kp.plans[at];
                 k.bq = Arc::new(b.bq);
                 k.unplanned = b.unplanned;
-                k.reads = reads;
+                k.reads = Watched::new(reads);
+                if let Some(e) = shared {
+                    share_plan(&l.scan.shape, e, k);
+                }
                 Some((k.bq.clone(), vals))
             }
             None => {
@@ -212,17 +313,17 @@ impl Session {
     fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &[String]) -> (Option<Bound>, Vec<SizeRead>) {
         let (bound, reads) = crate::sql::literals::recording(|| {
             self.with_ctx_path(&[], Some(path.to_vec()), |ctx| {
-                let (bq, unplanned) = Binder::new(ctx, types).bind_keeping_analysis(generic)?;
+                let (bq, unplanned) = analyzed_bound(Binder::new(ctx, types).analyze_statement(generic)?, ctx)?;
                 Ok(Bound { bq, unplanned })
             })
         });
         (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
     }
 
-    /// `u`'s statement (bound as `old`) planned again, and what the planner read.
-    fn lit_replan(&mut self, u: &UnplannedDml, old: &BoundQuery, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
+    /// `u`'s statement planned again, and what the planner read.
+    fn lit_replan(&mut self, u: &Analyzed, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
         let (bound, reads) =
-            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.to_vec()), |ctx| u.plan(old, ctx)));
+            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.to_vec()), |ctx| u.plan(ctx)));
         (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
     }
 
@@ -236,19 +337,19 @@ impl Session {
         // (Not the first time the session sees the template: a query sent once isn't bound
         // twice.)
         let full = self.lit_plans.map.len() >= MAX_KEYS;
-        match self.lit_plans.map.get(&l.scan.key) {
+        match self.lit_plans.map.get(&l.scan.shape) {
             None if !full => {
-                self.lit_plans.map.insert(l.scan.key.clone(), KeyPlans::default());
+                self.lit_plans.map.insert(l.scan.shape.clone(), KeyPlans::default());
                 return;
             }
             Some(kp) if kp.failures >= MAX_FAILURES => return,
             _ => {}
         }
         let kept = self.lit_make(l, stmt, planned);
-        if self.lit_plans.map.len() >= MAX_KEYS && !self.lit_plans.map.contains_key(&l.scan.key) {
+        if self.lit_plans.map.len() >= MAX_KEYS && !self.lit_plans.map.contains_key(&l.scan.shape) {
             self.lit_plans.map.clear();
         }
-        let kp = self.lit_plans.map.entry(l.scan.key.clone()).or_default();
+        let kp = self.lit_plans.map.entry(l.scan.shape.clone()).or_default();
         match kept {
             Some(k) => {
                 kp.plans.retain(|o| o.fixed != k.fixed);
@@ -303,8 +404,85 @@ impl Session {
             .filter(|&k| kept_const[k as usize] || !params.iter().any(|p| p.0 == k))
             .map(|k| (k, Box::from(l.lit_text(k))))
             .collect();
-        Some(Kept { fixed, params, generic, bq: Arc::new(bq), unplanned, env, reads })
+        Some(Kept { fixed, params, generic, bq: Arc::new(bq), unplanned, env, reads: Watched::new(reads) })
     }
+
+    /// What a plan kept now may be shared under (`SHARED`): None in a session with
+    /// temporary objects, which its plans may name where another session's would name its own.
+    fn shared_env(&self, env: &Env) -> Option<SharedEnv> {
+        let cat = self.txn.as_ref()?.borrow().next_catalog();
+        if cat.schema_oid(&self.state.temp_schema()).is_ok() {
+            return None;
+        }
+        Some(SharedEnv {
+            db: self.state.db.instance,
+            version: env.version,
+            values: self.state.settings.borrow().values_key(),
+            path: env.path.clone(),
+            who: env.who,
+        })
+    }
+}
+
+/// Plans of templates as a size change left them, shared by the process's sessions: the
+/// first session to see a relation's size change plans the template again, and the others
+/// take that plan while what it read reads the same. By shape, at most
+/// `MAX_SHARED_KEYS` shapes and `MAX_SHARED_PER_KEY` plans each.
+static SHARED: std::sync::LazyLock<std::sync::Mutex<HashMap<Box<str>, Vec<SharedKept>>>> =
+    std::sync::LazyLock::new(Default::default);
+const MAX_SHARED_KEYS: usize = 128;
+const MAX_SHARED_PER_KEY: usize = 2;
+
+/// What a shared plan was made under: a session's `Env` in its database, settings by value.
+#[derive(PartialEq)]
+struct SharedEnv {
+    db: u64,
+    version: u64,
+    values: Arc<crate::session::settings::ValuesKey>,
+    path: Vec<String>,
+    who: (u32, bool),
+}
+
+struct SharedKept {
+    env: SharedEnv,
+    fixed: Vec<(u32, Box<str>)>,
+    params: Vec<(u32, bool, DataType)>,
+    bq: Arc<BoundQuery>,
+    unplanned: Option<Arc<Analyzed>>,
+    reads: Watched,
+}
+
+type SharedPlan = (Arc<BoundQuery>, Option<Arc<Analyzed>>, Watched);
+
+/// The plan of `shape` shared under `env` for `k`'s literals.
+fn shared_plan(shape: &str, env: &SharedEnv, k: &Kept) -> Option<SharedPlan> {
+    let map = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    let s = map.get(shape)?.iter().find(|s| s.env == *env && s.fixed == k.fixed && s.params == k.params)?;
+    Some((s.bq.clone(), s.unplanned.clone(), s.reads.clone()))
+}
+
+/// Share `k`, planned again under `env`.
+fn share_plan(shape: &str, env: SharedEnv, k: &Kept) {
+    let mut map = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    // (What goes is dropped once the lock is let go.)
+    let mut gone = Vec::new();
+    if map.len() >= MAX_SHARED_KEYS && !map.contains_key(shape) {
+        gone.extend(map.drain().flat_map(|(_, v)| v));
+    }
+    let v = map.entry(shape.into()).or_default();
+    // (Plans of older catalogs of the database go: an analysis holds its catalog.)
+    let (old, keep): (Vec<_>, Vec<_>) =
+        std::mem::take(v).into_iter().partition(|s| s.env.db == env.db && s.env.version < env.version);
+    (*v, gone) = (keep, old.into_iter().chain(gone).collect());
+    if let Some(at) = v.iter().position(|s| s.env == env && s.fixed == k.fixed && s.params == k.params) {
+        gone.push(v.remove(at));
+    } else if v.len() >= MAX_SHARED_PER_KEY {
+        gone.push(v.remove(0));
+    }
+    let (bq, unplanned, reads) = (k.bq.clone(), k.unplanned.clone(), k.reads.clone());
+    v.push(SharedKept { env, fixed: k.fixed.clone(), params: k.params.clone(), bq, unplanned, reads });
+    drop(map);
+    drop(gone);
 }
 
 /// Extended-protocol statements' bindings by text and the Parse message's parameter types.
@@ -326,10 +504,10 @@ pub(crate) struct ParamPlans {
 struct ParamEntry {
     oids: Box<[u32]>,
     env: Env,
-    reads: Vec<SizeRead>,
+    reads: Watched,
     parsed: Parsed,
-    /// A data-modifying statement's analysis, planned again when a size changes.
-    unplanned: Option<Arc<UnplannedDml>>,
+    /// Its analysis, planned again when a size changes (`Analyzed::replannable`).
+    unplanned: Option<Arc<Analyzed>>,
     /// Whether its custom plans are its binding (None: not checked yet).
     custom_is_generic: Option<bool>,
     /// A custom plan's cost, planning charged.
@@ -359,9 +537,25 @@ impl Session {
         self.param_plans.map.get_mut(sql)?.iter_mut().find(|e| &*e.oids == oids)
     }
 
+    /// Whether `w`'s reads read now what they read: while each watch holds, they do; else
+    /// they are read again (and watched again when they read the same).
+    fn reads_hold(&mut self, w: &mut Watched) -> bool {
+        if w.watched() {
+            return true;
+        }
+        // (Watched before they are read: a change after the read is one the watch sees.)
+        let cat = self.txn.as_ref().unwrap().borrow().next_catalog();
+        let watches: Vec<_> = w.reads.iter().map(|r| r.watch(&cat, &self.state.db)).collect();
+        if !self.values_hold(&w.reads) {
+            return false;
+        }
+        w.watches = watches.into();
+        true
+    }
+
     /// Whether `reads` read now what they read (the size model's answers first, without a
     /// statement).
-    fn reads_hold(&mut self, reads: &[SizeRead]) -> bool {
+    fn values_hold(&mut self, reads: &[SizeRead]) -> bool {
         if reads.is_empty() {
             return true;
         }
@@ -387,16 +581,21 @@ impl Session {
         if e.env != env {
             return None;
         }
-        let (parsed, reads, custom) = (e.parsed.clone(), e.reads.clone(), e.custom_is_generic == Some(true));
-        if self.reads_hold(&reads) {
+        let custom = e.custom_is_generic == Some(true);
+        if e.reads.watched() {
+            return Some((e.parsed.clone(), env.version, env.path, env.who, custom));
+        }
+        let (parsed, mut reads) = (e.parsed.clone(), e.reads.clone());
+        if self.reads_hold(&mut reads) {
+            self.param_entry(sql, oids)?.reads = reads;
             return Some((parsed, env.version, env.path, env.who, custom));
         }
-        // A size changed: a data-modifying statement's access paths planned again.
+        // A size changed: its analysis planned again (`Analyzed::replannable`).
         let u = self.param_entry(sql, oids)?.unplanned.clone()?;
-        let (bq, reads) = self.lit_replan(&u, &parsed.bq, &env.path);
+        let (bq, reads) = self.lit_replan(&u, &env.path);
         let parsed = Parsed { bq: Arc::new(bq?), ..parsed };
         let e = self.param_entry(sql, oids)?;
-        (e.parsed, e.reads, e.custom_cost) = (parsed.clone(), reads, None);
+        (e.parsed, e.reads, e.custom_cost) = (parsed.clone(), Watched::new(reads), None);
         Some((parsed, env.version, env.path, env.who, custom))
     }
 
@@ -408,7 +607,7 @@ impl Session {
         oids: &[u32],
         parsed: Parsed,
         reads: Vec<SizeRead>,
-        unplanned: Option<Arc<UnplannedDml>>,
+        unplanned: Option<Arc<Analyzed>>,
     ) -> bool {
         if sql.len() > MAX_PARAM_SQL || reads.contains(&SizeRead::Data) {
             return false;
@@ -419,12 +618,13 @@ impl Session {
             if e.env != env {
                 e.custom_is_generic = None;
             }
-            (e.env, e.reads, e.parsed, e.unplanned, e.custom_cost) = (env, reads, parsed, unplanned, None);
+            (e.env, e.reads, e.parsed, e.unplanned, e.custom_cost) = (env, Watched::new(reads), parsed, unplanned, None);
             return e.custom_is_generic == Some(true);
         }
         if self.param_plans.map.len() >= MAX_PARAM_KEYS {
             self.param_plans.map.clear();
         }
+        let reads = Watched::new(reads);
         let e = ParamEntry { oids: oids.into(), env, reads, parsed, unplanned, custom_is_generic: None, custom_cost: None };
         self.param_plans.map.entry(sql.into()).or_default().push(e);
         false
@@ -462,10 +662,11 @@ impl Session {
         if e.custom_is_generic != Some(true) || e.env != env || e.parsed.param_types != p.param_types {
             return None;
         }
-        let (bq, reads, cost) = (e.parsed.bq.clone(), e.reads.clone(), e.custom_cost);
-        if !self.reads_hold(&reads) {
+        let (bq, mut reads, cost) = (e.parsed.bq.clone(), e.reads.clone(), e.custom_cost);
+        if !self.reads_hold(&mut reads) {
             return None;
         }
+        self.param_entry(&p.sql, &oids)?.reads = reads;
         let cost = match cost {
             _ if unnamed => None,
             Some(c) => Some(c),
@@ -497,9 +698,9 @@ impl Session {
         if e.custom_is_generic.is_some() || e.env != env || e.parsed.param_types != p.param_types {
             return;
         }
-        let (bq, reads) = (e.parsed.bq.clone(), e.reads.clone());
+        let (bq, mut reads) = (e.parsed.bq.clone(), e.reads.clone());
         // (Bound over other sizes, it could differ by its estimates alone: checked later.)
-        if !self.reads_hold(&reads) {
+        if !self.reads_hold(&mut reads) {
             return;
         }
         let ok = params_free(self, stmt, custom) && same_plan(custom, &bq, &p.param_types, params);
@@ -523,6 +724,16 @@ fn params_free(s: &Session, stmt: &Node, planned: &BoundQuery) -> bool {
         _ => {}
     });
     ok
+}
+
+/// `a` planned, with `a` itself when planning it again gives what analyzing and planning it
+/// again would (`Analyzed::replannable`).
+pub(super) fn analyzed_bound(a: Analyzed, ctx: &crate::exec::ExecCtx) -> crate::error::Result<(BoundQuery, Option<Arc<Analyzed>>)> {
+    if a.replannable() {
+        Ok((a.plan(ctx)?, Some(Arc::new(a))))
+    } else {
+        Ok((a.into_bound(ctx)?, None))
+    }
 }
 
 /// Whether `generic` with `vals` for its parameters is the plan `planned` is.
@@ -561,7 +772,7 @@ fn planned_table(s: &Session, planned: &BoundQuery) -> Option<(Arc<Cat>, Arc<cra
 
 /// The literals and parameters of `stmt` (on `table`) whose values may be parameters of a
 /// plan kept for every value (see above); None when the statement keeps no plan.
-pub(super) fn candidates(stmt: &Node, cat: &Cat, table: &crate::catalog::Table) -> Option<Vec<Slot>> {
+pub(crate) fn candidates(stmt: &Node, cat: &Cat, table: &crate::catalog::Table) -> Option<Vec<Slot>> {
     let mut out = Vec::new();
     let rel = match stmt.node.as_ref()? {
         NodeEnum::UpdateStmt(u) => {
@@ -624,7 +835,7 @@ pub(super) fn candidates(stmt: &Node, cat: &Cat, table: &crate::catalog::Table) 
 
 /// A literal (its A_Const's location) or a parameter (its number) of a statement.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) enum Slot {
+pub(crate) enum Slot {
     Const(i32),
     Param(i32),
 }

@@ -664,6 +664,13 @@ impl NameResolver for CatalogNames {
         self.catalog.enums.get(&oid).map(|e| e.labels.clone())
     }
 
+    fn array_domain_elem(&self, array: u32) -> Option<u32> {
+        match self.catalog.domain_type(array)? {
+            (d, true) => Some(d.oid),
+            _ => None,
+        }
+    }
+
     fn field_domain(&self, rowtype: u32, i: usize) -> Option<u32> {
         let cat = &self.catalog;
         if let Some(ct) = cat.composites.get(&rowtype) {

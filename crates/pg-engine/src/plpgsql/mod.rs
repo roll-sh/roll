@@ -2225,6 +2225,31 @@ impl<'c, 'a> Interp<'c, 'a> {
         if !self.custom_plan(e.id, plan)? {
             return Ok(c);
         }
+        // A custom plan known to be the generic one (`value_free_vars`): that, counted and
+        // costed as the custom plan it is.
+        let generic = Arc::downgrade(plan);
+        let known = self.with_plans(e.id, |p| match &p.custom_generic {
+            Some((g, slots)) if g.ptr_eq(&generic) => Some(slots.clone()),
+            _ => None,
+        });
+        if let Some(Some(slots)) = &known
+            && slots.iter().all(|&i| self.vars.get(i).is_some_and(|v| !v.value.is_null()))
+        {
+            let cost = self.plan_cost(plan, true);
+            // (Debug builds: the custom plan is that plan.)
+            #[cfg(debug_assertions)]
+            {
+                let text = self.lexed(e.id, &e.text)?;
+                if let Compiled::Query { plan: own, .. } = self.bind_text_as(&text, targets, true, true)? {
+                    assert!(self.same_as_generic(&own, plan), "custom plan of {:?}", e.text);
+                }
+            }
+            self.with_plans(e.id, |p| {
+                p.custom += 1;
+                p.custom_cost += cost;
+            });
+            return Ok(c);
+        }
         let text = if stmt {
             e.text.clone()
         } else {
@@ -2232,14 +2257,82 @@ impl<'c, 'a> Interp<'c, 'a> {
         };
         let text = self.lexed(e.id, &text)?;
         let custom = self.bind_text_as(&text, targets, true, true)?;
-        if let Compiled::Query { plan, .. } = &custom {
-            let cost = self.plan_cost(plan, true);
+        if let Compiled::Query { plan: own, .. } = &custom {
+            let cost = self.plan_cost(own, true);
             self.with_plans(e.id, |p| {
                 p.custom += 1;
                 p.custom_cost += cost;
             });
+            if known.is_none() {
+                let slots = (stmt && self.same_as_generic(own, plan)).then(|| self.value_free_vars(&text, &c)).flatten();
+                self.with_plans(e.id, |p| p.custom_generic = Some((generic, slots)));
+            }
         }
         Ok(Rc::new(custom))
+    }
+
+    /// Whether custom plan `own` is generic plan `generic` with the variables' current values
+    /// put in (the same plan and estimates).
+    fn same_as_generic(&self, own: &Plan, generic: &Plan) -> bool {
+        let mut g = format!("{generic:?}");
+        for (i, v) in self.vars.iter().enumerate() {
+            if v.coll.is_some() || v.value.is_null() {
+                continue;
+            }
+            let var = format!("{:?}", Expr::Outer(1, i, v.ty.clone()));
+            g = g.replace(&var, &format!("{:?}", Expr::Const(v.value.clone(), v.ty.clone())));
+        }
+        g == format!("{own:?}")
+    }
+
+    /// The variables statement `text` (bound as `c`) reads, when no value of theirs can
+    /// change its plan (`litplan::candidates`, over the statement with each variable a
+    /// parameter): None when one may, or when a name could be a column too.
+    fn value_free_vars(&self, text: &str, c: &Compiled) -> Option<Vec<usize>> {
+        let Compiled::Query { perms, .. } = c else { return None };
+        let [rel] = &perms.rels[..] else { return None };
+        let cat = self.cx().catalog();
+        let table = cat.table(rel.oid)?.clone();
+        let mut stmt = *crate::sql::parse::parse(text).ok()?.into_iter().next()?.stmt?;
+        let (sig, _, aliases) = self.signature();
+        let slot = |name: &str| {
+            sig.iter().position(|(n, _)| n.as_deref() == Some(name)).or_else(|| aliases.iter().find(|(n, _)| n == name).map(|(_, i)| *i))
+        };
+        let (mut slots, mut ok) = (Vec::new(), true);
+        crate::sql::nodewalk::node(&mut stmt, &mut |n| match &n.node {
+            Some(NodeEnum::SubLink(_)) => ok = false,
+            Some(NodeEnum::FuncCall(f)) if f.over.is_some() => ok = false,
+            Some(NodeEnum::ParamRef(_)) => ok = false,
+            Some(NodeEnum::ColumnRef(r)) => {
+                let names: Vec<&str> = r
+                    .fields
+                    .iter()
+                    .filter_map(|f| match &f.node {
+                        Some(NodeEnum::String(s)) => Some(s.sval.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let column = |c: &str| table.columns.iter().any(|col| !col.dropped && col.name == c);
+                match names[..] {
+                    [name] if names.len() == r.fields.len() => match (slot(name), column(name)) {
+                        (Some(i), false) => {
+                            let location = r.location;
+                            n.node = Some(NodeEnum::ParamRef(pg_query::protobuf::ParamRef { number: i as i32 + 1, location }));
+                            slots.push(i);
+                        }
+                        (None, true) => {}
+                        _ => ok = false,
+                    },
+                    // (`t.col`, a column of the table: a variable `t.x` isn't read here.)
+                    [q, col] if q == table.name && column(col) && slot(q).is_none() => {}
+                    _ => ok = false,
+                }
+            }
+            _ => {}
+        });
+        let cands = crate::session::litplan::candidates(&stmt, &cat, &table)?;
+        let free = slots.iter().all(|&i| cands.contains(&crate::session::litplan::Slot::Param(i as i32 + 1)));
+        (ok && free && !slots.is_empty()).then_some(slots)
     }
 
     /// choose_custom_plan for statement `id`, whose generic plan is `generic`.

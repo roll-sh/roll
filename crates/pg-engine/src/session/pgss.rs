@@ -146,6 +146,7 @@ impl Session {
         let st = |text: &Arc<str>, location: i32, len: i32| (text.clone(), location, len);
         let enabled = pgss::enabled(&self.state, level);
         let started = std::time::Instant::now();
+        self.pgss_untimed = Default::default();
         // (Temporary blocks count from the statement's start.)
         let _ = self.state.temp.take_blocks();
         match node {
@@ -280,7 +281,7 @@ impl Session {
     }
 
     fn pgss_finish(&mut self, t: Tracked, tag: &str) {
-        let millis = t.started.elapsed().as_secs_f64() * 1000.0;
+        let millis = t.started.elapsed().saturating_sub(std::mem::take(&mut self.pgss_untimed)).as_secs_f64() * 1000.0;
         let shown = self.state.pgss.borrow_mut().utility_rows.take();
         let rows = if t.utility {
             if tag.starts_with("REFRESH") { shown.unwrap_or(0) } else { utility_rows(tag) }

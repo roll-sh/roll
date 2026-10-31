@@ -189,14 +189,15 @@ impl<K: Hash + Eq, V> Clock<K, V> {
     }
 }
 
-/// The parse tree and PL/pgSQL compile caches' bound together, unless set.
+/// The parse tree, statement template and PL/pgSQL compile caches' bound together, unless set.
 pub const PLAN_CACHE_BYTES: usize = 36 << 20;
 
-/// Bound the caches of parse trees and of PL/pgSQL compiles at `bytes` together (8 : 1),
-/// for the whole process (an operator setting: `roll-engine --plan-cache-mb`). Lowering it
-/// evicts at once.
+/// Bound the caches of parse trees, of statement templates and of PL/pgSQL compiles at
+/// `bytes` together (6 : 2 : 1), for the whole process (an operator setting: `roll-engine
+/// --plan-cache-mb`, and its share of `--memory-budget-mb`). Lowering it evicts at once.
 pub fn set_plan_cache_bytes(bytes: usize) {
-    crate::sql::parse::set_parse_cache_bytes(bytes / 9 * 8);
+    crate::sql::parse::set_parse_cache_bytes(bytes / 9 * 6);
+    crate::sql::literals::set_templates_bytes(bytes / 9 * 2);
     crate::plpgsql::set_compiled_bytes(bytes / 9);
 }
 

@@ -2,6 +2,7 @@
 //!
 //! - the parse tree cache holds about the bytes it counts against its bound (it once counted
 //!   a tenth of them: "32 MB" held 300 MB);
+//! - so do the statement templates (`sql::literals`), within their share of the plan caches;
 //! - many sessions starting a mixed workload at once on a database just opened (the
 //!   tables' size models not yet built) stay within a bound of heap over what they held
 //!   connected: each session used to build its own copy of a table's model, 100-400 MB
@@ -103,6 +104,39 @@ fn parse_cache_holds_what_it_counts() {
     assert!(counted > (1 << 20) as f64, "nothing cached");
     let r = held / counted;
     assert!((0.7..=1.3).contains(&r), "the parse cache holds {r:.2}x the bytes it counts");
+}
+
+fn cache_bytes(name: &str) -> usize {
+    pg_engine::lru::footprints().iter().find(|(n, _)| *n == name).map_or(0, |(_, f)| f.bytes)
+}
+
+#[test]
+fn statement_templates_hold_what_they_count() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // Simple queries of many shapes read through templates (a template's first query is
+    // parsed into the parse tree cache too): what emptying both frees is what they held.
+    pg_engine::lru::set_plan_cache_bytes(0);
+    pg_engine::lru::set_plan_cache_bytes(pg_engine::lru::PLAN_CACHE_BYTES);
+    for i in 0..1500 {
+        let texts = [
+            format!("UPDATE pgbench_accounts SET abalance = abalance + {i} WHERE aid = 7 AND bid{i} = 'x'"),
+            format!("SELECT c{i}, 'a' || 'b', 3.5 FROM b_orders o JOIN b_item it ON it.order_id = o.id WHERE o.id IN (1, 2, {i})"),
+        ];
+        for t in &texts {
+            pg_engine::sql::parse::parse_live(t).unwrap();
+        }
+    }
+    let templates = cache_bytes("statement templates") as f64;
+    let counted = templates + parse_cache_bytes() as f64;
+    let before = MINE.with(|m| m.get());
+    pg_engine::lru::set_plan_cache_bytes(0);
+    let held = (before - MINE.with(|m| m.get())) as f64;
+    pg_engine::lru::set_plan_cache_bytes(pg_engine::lru::PLAN_CACHE_BYTES);
+    eprintln!("templates: {:.1} MB counted; with the parse cache {:.1} MB held, {:.1} MB counted", templates / MB, held / MB, counted / MB);
+    assert!(templates > (1 << 20) as f64, "no templates");
+    assert!(templates <= (pg_engine::lru::PLAN_CACHE_BYTES / 9 * 2) as f64, "past their share");
+    let r = held / counted;
+    assert!((0.7..=1.3).contains(&r), "the templates and parse cache hold {r:.2}x the bytes they count");
 }
 
 const SETUP: &str = "

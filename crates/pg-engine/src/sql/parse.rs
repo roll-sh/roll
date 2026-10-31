@@ -62,6 +62,15 @@ pub fn parse(sql: &str) -> Result<Vec<RawStmt>> {
 /// query with its ordinary literals made standard (character positions kept). Warnings go
 /// to `scs::take_warnings`.
 pub fn parse_live(sql: &str) -> Result<(std::borrow::Cow<'_, str>, Vec<RawStmt>)> {
+    let (text, stmts) = parse_live_lazy(sql)?;
+    let trees = stmts.into_trees(&text);
+    Ok((text, trees))
+}
+
+/// `parse_live`, a statement read through a template left as its template and literals
+/// (`literals::Stmts`).
+pub fn parse_live_lazy(sql: &str) -> Result<(std::borrow::Cow<'_, str>, super::literals::Stmts)> {
+    use super::literals::Stmts;
     use super::scs;
     use std::borrow::Cow;
     let o = scs::opts();
@@ -79,25 +88,21 @@ pub fn parse_live(sql: &str) -> Result<(std::borrow::Cow<'_, str>, Vec<RawStmt>)
             scs::push_warnings(all);
         }
         let (t, stmts) = r?;
-        return Ok((Cow::Owned(t.into_owned()), stmts));
+        let trees = stmts.into_trees(&t);
+        return Ok((Cow::Owned(t.into_owned()), Stmts::Trees(trees)));
     }
     parse_scanned(sql, o)
 }
 
-fn parse_scanned(sql: &str, o: super::scs::LexOpts) -> Result<(std::borrow::Cow<'_, str>, Vec<RawStmt>)> {
+fn parse_scanned(sql: &str, o: super::scs::LexOpts) -> Result<(std::borrow::Cow<'_, str>, super::literals::Stmts)> {
+    use super::literals::Stmts;
     use super::scs;
     use std::borrow::Cow;
     // Where a syntax error stopped the scanner.
-    let stop_at = |r: &Result<Vec<RawStmt>>| match r {
-        Err(e) => Some(
-            e.position
-                .map_or(sql.len(), |p| char_to_byte(sql, p as usize)),
-        ),
-        Ok(_) => None,
-    };
+    let stop_at = |e: Option<&Error>| e.map(|e| e.position.map_or(sql.len(), |p| char_to_byte(sql, p as usize)));
     if o.is_default() {
         let r = with_param_junk(sql, true, parse_templated(sql));
-        scs::push_warnings(scs::with_long_identifiers(sql, true, stop_at(&r), Vec::new()));
+        scs::push_warnings(scs::with_long_identifiers(sql, true, stop_at(r.as_ref().err()), Vec::new()));
         return Ok((Cow::Borrowed(sql), r?));
     }
     let mut bits = 0;
@@ -109,10 +114,10 @@ fn parse_scanned(sql: &str, o: super::scs::LexOpts) -> Result<(std::borrow::Cow<
     }
     let checked = with_param_junk(sql, o.standard_strings, parse_opts(sql, bits));
     // Warnings come from the tokens scanned before an error.
-    let stop = stop_at(&checked);
+    let stop = stop_at(checked.as_ref().err());
     if o.standard_strings {
         scs::push_warnings(scs::with_long_identifiers(sql, true, stop, Vec::new()));
-        return checked.map(|s| (Cow::Borrowed(sql), s));
+        return checked.map(|s| (Cow::Borrowed(sql), Stmts::Trees(s)));
     }
     let scan = scs::scan(sql, o, stop);
     scs::push_warnings(scs::with_long_identifiers(sql, false, stop, scan.warnings));
@@ -123,22 +128,28 @@ fn parse_scanned(sql: &str, o: super::scs::LexOpts) -> Result<(std::borrow::Cow<
     match scan.rewritten {
         Some(text) => {
             let stmts = parse(&text)?;
-            Ok((Cow::Owned(text), stmts))
+            Ok((Cow::Owned(text), Stmts::Trees(stmts)))
         }
-        None => Ok((Cow::Borrowed(sql), stmts)),
+        None => Ok((Cow::Borrowed(sql), Stmts::Trees(stmts))),
     }
 }
 
 /// `parse`, through the query's template when it has literals (`literals`).
-fn parse_templated(sql: &str) -> Result<Vec<RawStmt>> {
+fn parse_templated(sql: &str) -> Result<super::literals::Stmts> {
+    use super::literals::Stmts;
     let Some(sc) = super::literals::scan(sql) else {
-        return parse(sql);
+        return parse(sql).map(Stmts::Trees);
     };
     let r = super::literals::parse(sql, sc, || parse_opts(sql, 0));
+    // (Debug builds: the tree the template makes is the parser's.)
     #[cfg(debug_assertions)]
-    if let Ok(t) = &r {
+    if let Ok(s) = &r {
         crate::stack::with_headroom(crate::stack::tree_headroom(sql.len()), || {
-            assert!(parse_uncached(sql, 0).ok().as_ref() == Some(t), "template parse of {sql:?} differs");
+            let made = match s {
+                Stmts::Trees(t) => t.clone(),
+                Stmts::Template(sc, t) => super::literals::instantiate(t, sql, sc),
+            };
+            assert!(parse_uncached(sql, 0).ok().as_ref() == Some(&made), "template parse of {sql:?} differs");
         });
     }
     r
@@ -146,7 +157,7 @@ fn parse_templated(sql: &str) -> Result<Vec<RawStmt>> {
 
 /// Postgres's scanner rejects `$1a` ("trailing junk after parameter"), which libpg_query reads
 /// as `$1 a`: that error, unless the parse failed earlier in the text.
-fn with_param_junk(sql: &str, standard: bool, r: Result<Vec<RawStmt>>) -> Result<Vec<RawStmt>> {
+fn with_param_junk<T>(sql: &str, standard: bool, r: Result<T>) -> Result<T> {
     let Some((s, e)) = super::scs::param_junk(sql, standard) else {
         return r;
     };
@@ -230,7 +241,7 @@ fn char_to_byte(s: &str, p: usize) -> usize {
 static PARSED: crate::lru::Shared<(c_int, Box<str>), std::sync::Arc<Trees>> =
     crate::lru::Shared::new("parse trees", PARSE_CACHE_BYTES);
 
-const PARSE_CACHE_BYTES: usize = crate::lru::PLAN_CACHE_BYTES / 9 * 8;
+const PARSE_CACHE_BYTES: usize = crate::lru::PLAN_CACHE_BYTES / 9 * 6;
 /// Longer texts aren't kept.
 const PARSE_CACHE_MAX_TEXT: usize = 16 << 10;
 

@@ -14,7 +14,7 @@ mod serverlog;
 pub use serverlog::truncate_param as serverlog_truncate;
 pub mod state;
 mod pgss;
-mod litplan;
+pub(crate) mod litplan;
 mod prepared;
 pub mod sink;
 mod utility;
@@ -103,7 +103,7 @@ pub struct Prepared {
     /// statements): positions in the statement count from the start of that string.
     pub offset: usize,
     /// None: the empty query.
-    pub stmt: Option<Node>,
+    pub stmt: litplan::StmtTree,
     /// Declared or inferred parameter types.
     pub param_types: Vec<DataType>,
     /// Cached binding, valid for a catalog version, search_path, and the role and row_security
@@ -113,7 +113,7 @@ pub struct Prepared {
     plans: Mutex<PlanUses>,
     /// A simple query's literals and template (`litplan`): its plan may be one kept for the
     /// template's other queries.
-    lit: Option<Box<litplan::LitStmt>>,
+    lit: Option<Arc<litplan::LitStmt>>,
 }
 
 /// How often a prepared statement ran a generic plan and a custom one (bound with its
@@ -304,8 +304,9 @@ pub struct Session {
     lit_plans: litplan::LitPlans,
     /// Extended-protocol statements' bindings by text (`litplan::ParamPlans`).
     param_plans: litplan::ParamPlans,
-    /// The analysis of the data-modifying statement a Parse last bound (`Binder::bind_keeping_analysis`).
-    last_unplanned: Option<Arc<crate::sql::binder::UnplannedDml>>,
+    /// The analysis of the statement a Parse last bound, when it plans again alone
+    /// (`litplan::analyzed_bound`).
+    last_unplanned: Option<Arc<crate::sql::binder::Analyzed>>,
     pub portals: HashMap<String, Portal>,
     pub cancel: Arc<AtomicBool>,
     /// The server's loop clears `cancel` when it waits for the client (else a transaction's
@@ -341,6 +342,9 @@ pub struct Session {
     /// pg_stat_statements: the top-level statement running, and the parallel workers its
     /// plan used.
     pgss_tracked: Option<pgss::Tracked>,
+    /// Time the tracked statement spent that pg_stat_statements doesn't count
+    /// (`finish_txn_untimed`).
+    pgss_untimed: std::time::Duration,
     pgss_workers: i64,
     /// A COPY FROM STDIN waiting for its data, to be counted when it ends.
     pgss_copy: Option<pgss::Tracked>,
@@ -460,6 +464,7 @@ impl Session {
             row_sink: None,
             sent: None,
             pgss_tracked: None,
+            pgss_untimed: Default::default(),
             pgss_workers: 0,
             pgss_copy: None,
             fetch_limit: 0,
@@ -662,6 +667,15 @@ impl Session {
             default_deferrable(&self.state);
         }
         self.txn = Some(RefCell::new(txn));
+    }
+
+    /// `finish_txn` for COMMIT / ROLLBACK, which PostgreSQL runs after the statement
+    /// (finish_xact_command): pg_stat_statements' time for the statement leaves it out.
+    fn finish_txn_untimed(&mut self, commit: bool) -> Result<()> {
+        let started = std::time::Instant::now();
+        let r = self.finish_txn(commit);
+        self.pgss_untimed += started.elapsed();
+        r
     }
 
     /// End the current transaction.
@@ -1031,9 +1045,7 @@ impl Session {
         // have run on: an embedder's Parse / Describe before any execute.)
         crate::catalog::set_session_temp_schema(&self.state.temp_schema());
         self.sync_lex();
-        crate::sql::literals::take_last();
-        let parsed = crate::sql::parse::parse_live(sql);
-        let lit = crate::sql::literals::take_last();
+        let parsed = crate::sql::parse::parse_live_lazy(sql);
         self.take_lex_warnings();
         let (text, stmts) = parsed?;
         self.source = sql.to_string();
@@ -1041,24 +1053,36 @@ impl Session {
             std::borrow::Cow::Owned(t) => Some((t.clone(), sql.to_string())),
             _ => None,
         });
-        let mut lit = lit
-            .filter(|_| stmts.len() == 1)
-            .map(|(scan, tpl)| Box::new(litplan::LitStmt { text: sql.into(), scan, tpl }));
-        let sql = &*text;
+        let prepared = |s: &pg_query::protobuf::RawStmt, stmt: litplan::StmtTree, lit| {
+            Arc::new(Prepared {
+                sql: crate::sql::parse::stmt_text(&text, s).to_string(),
+                offset: crate::sql::parse::stmt_offset(&text, s),
+                stmt,
+                param_types: Vec::new(),
+                bound: Mutex::new(None),
+                plans: Default::default(),
+                lit,
+            })
+        };
+        let (stmts, lit) = match stmts {
+            // (A query read through a template: its tree is made only if something reads
+            // it; a plan kept for its template's shape needs none.)
+            crate::sql::literals::Stmts::Template(scan, tpl) => {
+                let l = Arc::new(litplan::LitStmt { text: sql.into(), scan, tpl });
+                if let Some(stmt) = litplan::StmtTree::lazy(l.clone()) {
+                    return Ok(vec![prepared(&l.clone().tpl.stmts[0], stmt, Some(l))]);
+                }
+                let headroom = crate::stack::tree_headroom(sql.len());
+                (crate::stack::with_headroom(headroom, || crate::sql::literals::instantiate(&l.tpl, sql, &l.scan)), Some(l))
+            }
+            crate::sql::literals::Stmts::Trees(t) => (t, None),
+        };
+        let mut lit = lit.filter(|_| stmts.len() == 1);
         Ok(stmts
             .into_iter()
-            .map(|s| {
-                Arc::new(Prepared {
-                    sql: crate::sql::parse::stmt_text(sql, &s).to_string(),
-                    offset: crate::sql::parse::stmt_offset(sql, &s),
-                    stmt: s.stmt.map(|n| {
-                        crate::sql::binder::ast::select_into_as_ctas(&n).unwrap_or(*n)
-                    }),
-                    param_types: Vec::new(),
-                    bound: Mutex::new(None),
-                    plans: Default::default(),
-                    lit: lit.take(),
-                })
+            .map(|mut s| {
+                let tree = s.stmt.take().map(|n| crate::sql::binder::ast::select_into_as_ctas(&n).unwrap_or(*n));
+                prepared(&s, tree.into(), lit.take())
             })
             .collect())
     }
@@ -1277,7 +1301,15 @@ impl Session {
     fn execute_statement(&mut self, p: &Arc<Prepared>, params: &[Value]) -> Result<Outcome> {
         // (The caller holds `p`: its statement is borrowed, not copied.)
         let p = p.clone();
-        let Some(stmt) = p.stmt.as_ref() else {
+        // A plain query read through a template runs on its template's tree until something
+        // needs its own (`StmtTree::shape`): only binding it reads its literals' values
+        // (`run_query`). Any other statement runs on its own tree.
+        let shape = p.stmt.shape();
+        let stmt = match shape.and_then(inner) {
+            Some(n) if plain_query(n) => shape,
+            _ => p.stmt.as_ref(),
+        };
+        let Some(stmt) = stmt else {
             return Ok(Outcome::Done(QueryResult::command("")));
         };
         let node = inner(stmt);
@@ -1371,6 +1403,8 @@ impl Session {
             }
         }
         match node {
+            // (First: a statement that may be its template's tree goes nowhere else.)
+            n if plain_query(n) => done(self.run_query(p, stmt, params)?),
             // SELECT ... INTO t is CREATE TABLE t AS SELECT ...
             NodeEnum::SelectStmt(sel) if crate::sql::binder::ast::select_into(sel).is_some() => {
                 let ctas = crate::sql::binder::ast::select_into_as_ctas(stmt)
@@ -1637,7 +1671,7 @@ impl Session {
             }
             let _serial = crate::scoped::set(&crate::sql::paths::parallel::SERIAL, cursor, "parallel::SERIAL");
             if keep_unplanned {
-                b.bind_keeping_analysis(stmt)
+                litplan::analyzed_bound(b.analyze_statement(stmt)?, ctx)
             } else {
                 b.bind_statement(stmt).map(|bq| (bq, None))
             }
@@ -1876,25 +1910,30 @@ impl Session {
         .unwrap_or_default()
     }
 
+    /// Run query `p`; `stmt` is its tree or its template's (`StmtTree::shape`): only its
+    /// kind is read from it, and `own` is its own.
     fn run_query(&mut self, p: &Prepared, stmt: &Node, params: &[Value]) -> Result<QueryResult> {
         self.ensure_txn();
         let fetch = std::mem::take(&mut self.fetch_limit);
         let planning = std::time::Instant::now();
+        fn own(p: &Prepared) -> Result<&Node> {
+            p.stmt.as_ref().ok_or_else(|| Error::new(code::INTERNAL_ERROR, "a query without a tree"))
+        }
         // (A simple query's template's kept plan, run with its literals' values.)
         let (mut bq, mut lit_vals) = match self.lit_plan_for(p, params) {
             Some(kept) => {
                 // (Debug builds: the kept plan is the one the query plans to.)
                 #[cfg(debug_assertions)]
                 {
-                    let own = self.planned(p, stmt, params)?.0;
+                    let own = self.planned(p, own(p)?, params)?.0;
                     assert!(litplan::same_plan(&own, &kept.0, &kept.0.params, &kept.1), "kept plan of {:?}", p.sql);
                 }
                 kept
             }
             None => {
-                let bq = self.planned(p, stmt, params)?.0;
+                let bq = self.planned(p, own(p)?, params)?.0;
                 if p.lit.is_some() && params.is_empty() {
-                    self.lit_learn(p, stmt, &bq);
+                    self.lit_learn(p, own(p)?, &bq);
                 }
                 (bq, Vec::new())
             }
@@ -1910,7 +1949,7 @@ impl Session {
             if version(self) == before {
                 break;
             }
-            bq = self.planned(p, stmt, params)?.0;
+            bq = self.planned(p, own(p)?, params)?.0;
             lit_vals.clear();
         }
         let lit_vals = lit_vals;
@@ -2119,7 +2158,7 @@ impl Session {
         let mut p = Prepared {
             sql: sql.to_string(),
             offset: 0,
-            stmt,
+            stmt: stmt.into(),
             param_types: types,
             bound: Mutex::new(None),
             plans: Default::default(),
@@ -2254,7 +2293,7 @@ impl Session {
                 p.plans.lock().fresh_generic = custom;
             }
             p.plans.lock().parse_oids = Some(param_oids.into());
-            p.stmt = Some(stmt);
+            *p.stmt = Some(stmt);
         } else if let Some(NodeEnum::CallStmt(c)) = p.stmt.as_ref().and_then(inner).cloned() {
             // CALL: parameter types from the procedure's.
             let max = max_param(p.stmt.as_ref().unwrap());
@@ -2595,6 +2634,15 @@ impl Session {
             && result_formats.len() > 1
             && result_formats.len() != cols.len()
         {
+            // (After GetCachedPlan and PortalStart: an error planning the query or starting
+            // its executor comes first. The query is planned at Execute otherwise.)
+            if p.is_query()
+                && let Some(stmt) = p.stmt.as_ref()
+            {
+                self.ensure_txn();
+                let bq = self.planned(&p, stmt, &values)?.0;
+                self.with_ctx(&values, |ctx| bq.check_perms(ctx))?;
+            }
             return Err(Error::new(
                 code::PROTOCOL_VIOLATION,
                 format!(
@@ -2955,7 +3003,7 @@ impl Session {
                         "there is no transaction in progress",
                     ));
                 }
-                self.finish_txn(!failed)?;
+                self.finish_txn_untimed(!failed)?;
                 Ok(QueryResult::command(if failed {
                     "ROLLBACK"
                 } else {
@@ -2972,7 +3020,7 @@ impl Session {
                         "there is no transaction in progress",
                     ));
                 }
-                self.finish_txn(false)?;
+                self.finish_txn_untimed(false)?;
                 Ok(QueryResult::command("ROLLBACK"))
             }
             K::TransStmtSavepoint => {
@@ -3695,6 +3743,21 @@ pub(crate) fn notice(msg: impl Into<String>) -> Error {
     let mut e = Error::new(code::SUCCESSFUL_COMPLETION, msg);
     e.severity = crate::error::Severity::Notice;
     e
+}
+
+/// A SELECT, INSERT, UPDATE or DELETE `dispatch` runs as a query (`run_query`), none of the
+/// statements on system catalogs it runs otherwise: one read through a template may run on
+/// its template's tree (`StmtTree::shape`).
+fn plain_query(n: &NodeEnum) -> bool {
+    match n {
+        NodeEnum::SelectStmt(s) => crate::sql::binder::ast::select_into(s).is_none(),
+        NodeEnum::InsertStmt(i) => !ddl::is_pg_depend_insert(i) && !ddl::is_pg_description_dml(n),
+        NodeEnum::UpdateStmt(u) => {
+            !ddl::is_pg_class_update(u) && !ddl::is_pg_depend_update(u) && !ddl::is_pg_description_dml(n)
+        }
+        NodeEnum::DeleteStmt(d) => !ddl::is_pg_depend_delete(d) && !ddl::is_pg_description_dml(n),
+        _ => false,
+    }
 }
 
 /// The command tag of a finished query.

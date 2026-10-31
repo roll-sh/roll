@@ -1807,6 +1807,16 @@ fn put_data_row(b: &mut BytesMut, row: &[crate::types::Value], cols: &[OutCol], 
             b.put_i32(0);
             if result_format(formats, i) == 1 {
                 crate::types::binary::encode(v, ty, fmt, b)?;
+                // (array_send writes its element type: an array of a domain's is the
+                // domain, where the value's type is the base type's array.)
+                if let Some(elem) = cols
+                    .get(i)
+                    .and_then(|c| c.domain_array)
+                    .and_then(|a| fmt.names.as_ref()?.array_domain_elem(a))
+                    && b.len() >= at + 16
+                {
+                    b[at + 12..at + 16].copy_from_slice(&elem.to_be_bytes());
+                }
             } else {
                 b.put_slice(&to_client(&format_value(v, ty, fmt))?);
             }
@@ -1940,7 +1950,7 @@ fn simple_query(c: &mut Conn, s: &mut Session, sql: &str) -> std::io::Result<()>
             return Ok(());
         }
     };
-    if stmts.is_empty() || stmts.iter().all(|p| p.stmt.is_none()) {
+    if stmts.is_empty() || stmts.iter().all(|p| p.stmt.shape().is_none()) {
         c.msg(b'I', |_| {});
         return Ok(());
     }

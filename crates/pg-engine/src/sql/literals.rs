@@ -49,7 +49,13 @@ pub struct Lit {
 
 #[derive(Debug)]
 pub struct Scan {
+    /// The text with each literal's bytes replaced by its class (the tree's locations are
+    /// the same for every query of a key).
     pub key: Box<str>,
+    /// The text with each literal replaced by one byte of its class: the queries of a shape
+    /// are the same statement but for their literals' values and the locations after them
+    /// (plans kept for a template are kept by shape, `session::litplan`).
+    pub shape: Box<str>,
     pub lits: Vec<Lit>,
 }
 
@@ -110,10 +116,13 @@ fn quote_follows(s: &[u8], mut i: usize) -> bool {
 /// exponents, non-decimal or underscored numbers, several statements).
 pub fn scan(sql: &str) -> Option<Scan> {
     let s = sql.as_bytes();
-    if s.len() > MAX_TEXT {
+    // (The class bytes stand for literals only: a text with such a byte of its own isn't
+    // templated.)
+    if s.len() > MAX_TEXT || s.iter().any(|&b| (1..=4).contains(&b)) {
         return None;
     }
     let mut key = Vec::with_capacity(s.len());
+    let mut shape = Vec::with_capacity(s.len());
     let mut lits = Vec::new();
     let mut ended = false;
     let mut i = 0;
@@ -144,6 +153,7 @@ pub fn scan(sql: &str) -> Option<Scan> {
                 }
                 lits.push(Lit { start, end: i, kind: LitKind::Str });
                 key.resize(key.len() + (i - start), LitKind::Str.mark());
+                shape.push(LitKind::Str.mark());
                 continue;
             }
             b'"' => {
@@ -191,6 +201,7 @@ pub fn scan(sql: &str) -> Option<Scan> {
                 }
                 lits.push(Lit { start, end: i, kind });
                 key.resize(key.len() + (i - start), kind.mark());
+                shape.push(kind.mark());
                 continue;
             }
             b'.' if s.get(i + 1).is_some_and(u8::is_ascii_digit) => return None,
@@ -206,11 +217,13 @@ pub fn scan(sql: &str) -> Option<Scan> {
             _ => i += 1,
         }
         key.extend_from_slice(&s[start..i]);
+        shape.extend_from_slice(&s[start..i]);
     }
     if lits.is_empty() {
         return None;
     }
-    Some(Scan { key: String::from_utf8(key).ok()?.into_boxed_str(), lits })
+    let text = |v: Vec<u8>| String::from_utf8(v).ok().map(String::into_boxed_str);
+    Some(Scan { key: text(key)?, shape: text(shape)?, lits })
 }
 
 /// The value literal `l` of `sql` gives its A_Const (negated by unary minus signs or not).
@@ -301,21 +314,36 @@ impl Drop for Entry {
 
 /// Templates by key, shared by every session (a template is a pure function of its key).
 static TEMPLATES: crate::lru::Shared<Box<str>, Arc<Entry>> =
-    crate::lru::Shared::new("statement templates", 16 << 20);
+    crate::lru::Shared::new("statement templates", crate::lru::PLAN_CACHE_BYTES / 9 * 2);
 
 /// The template cache's footprint (`lru::footprints`).
 pub(crate) fn templates_footprint() -> (&'static str, crate::lru::Footprint) {
     TEMPLATES.footprint()
 }
 
-thread_local! {
-    /// The last query `parse` read through a template, with it (`take_last`).
-    static LAST: RefCell<Option<(Scan, Arc<Template>)>> = const { RefCell::new(None) };
+/// The templates' bound (`lru::set_plan_cache_bytes`).
+pub(crate) fn set_templates_bytes(bytes: usize) {
+    drop(TEMPLATES.set_capacity(bytes));
 }
 
-/// The scan and template of the query this thread last parsed through one (and forget it).
-pub fn take_last() -> Option<(Scan, Arc<Template>)> {
-    LAST.with(|l| l.borrow_mut().take())
+/// A query's statements: its trees, or its template and literals (one statement read
+/// through a template), whose tree is made only when something needs it (`instantiate`):
+/// a statement run with a plan kept for its template needs none.
+pub enum Stmts {
+    Trees(Vec<RawStmt>),
+    Template(Scan, Arc<Template>),
+}
+
+impl Stmts {
+    /// The trees (`sql` is the query the template was scanned from).
+    pub fn into_trees(self, sql: &str) -> Vec<RawStmt> {
+        match self {
+            Stmts::Trees(t) => t,
+            Stmts::Template(sc, t) => {
+                crate::stack::with_headroom(crate::stack::tree_headroom(sql.len()), || instantiate(&t, sql, &sc))
+            }
+        }
+    }
 }
 
 /// The template of `sc`'s key: made from `parse(sql)` the first time (None when the query
@@ -344,17 +372,13 @@ fn template(
     }
 }
 
-/// `sql` parsed through its template (`parse` parses it when there is none).
-pub fn parse(sql: &str, sc: Scan, parse: impl Fn() -> Result<Vec<RawStmt>>) -> Result<Vec<RawStmt>> {
+/// `sql` read through its template (`parse` parses it when there is none).
+pub fn parse(sql: &str, sc: Scan, parse: impl Fn() -> Result<Vec<RawStmt>>) -> Result<Stmts> {
     match template(sql, &sc, &parse) {
-        Ok(Some(t)) => {
-            let headroom = crate::stack::tree_headroom(sql.len());
-            let stmts = crate::stack::with_headroom(headroom, || instantiate(&t, sql, &sc));
-            LAST.with(|l| *l.borrow_mut() = Some((sc, t)));
-            Ok(stmts)
-        }
-        Ok(None) => parse(),
-        Err(r) => r,
+        Ok(Some(t)) if t.stmts.len() == 1 => Ok(Stmts::Template(sc, t)),
+        Ok(Some(t)) => Ok(Stmts::Trees(Stmts::Template(sc, t).into_trees(sql))),
+        Ok(None) => parse().map(Stmts::Trees),
+        Err(r) => r.map(Stmts::Trees),
     }
 }
 
@@ -412,6 +436,21 @@ impl SizeRead {
         }
     }
 
+    /// A watch on the sizes this read (`sizing::size_watch`): None when the model doesn't
+    /// answer them (then compare them again).
+    pub fn watch(&self, cat: &crate::catalog::Catalog, db: &crate::txn::Database) -> Option<crate::catalog::heapsim::SizeWatch> {
+        use crate::exec::sizing::size_watch;
+        match self {
+            SizeRead::Heap(oid, _) => size_watch(cat.tables.get(oid)?, *oid, cat, db),
+            SizeRead::Fork(oid, _) => match cat.tables.get(oid) {
+                Some(t) => size_watch(t, *oid, cat, db),
+                None => size_watch(cat.tables.get(&cat.indexes.get(oid)?.table)?, *oid, cat, db),
+            },
+            SizeRead::BtreeLevel(t, ix, ..) => size_watch(cat.tables.get(t)?, *ix, cat, db),
+            SizeRead::Data => None,
+        }
+    }
+
     /// `holds`, when the size model answers without binding a table's indexes (None: ask
     /// `holds`), over catalog `cat` of database `db`.
     pub fn holds_known(&self, cat: &crate::catalog::Catalog, db: &crate::txn::Database) -> Option<bool> {
@@ -449,6 +488,18 @@ mod tests {
         assert_eq!(key("SELECT 'ab' -- 12\n"), key("SELECT 'cd' -- 12\n"));
         assert_ne!(key("SELECT 'ab' -- 12\n"), key("SELECT 'ab' -- 13\n"));
         assert_eq!(key("SELECT t1.c2 FROM t1 WHERE c2 = $1"), None);
+        // Shapes: literals of any length, still by class.
+        let shape = |q: &str| scan(q).map(|s| s.shape);
+        assert_eq!(shape("UPDATE t SET a = a + 5 WHERE id = 12;"), shape("UPDATE t SET a = a + 5000 WHERE id = 999999;"));
+        assert_ne!(shape("SELECT 5"), shape("SELECT -5"));
+        assert_eq!(shape("SELECT 'a' || 'bcd'"), shape("SELECT '' || 'it''s'"));
+        assert_ne!(shape("SELECT 1"), shape("SELECT 'x'"));
+        assert_ne!(shape("SELECT 2147483647"), shape("SELECT 2147483648"));
+        assert_ne!(shape("SELECT 1.5"), shape("SELECT 15"));
+        // (A text with a byte the key uses for a literal: `SELECT 5, \x01` would share the
+        // key of `SELECT 5, 6`.)
+        assert!(scan("SELECT 5, \u{1}").is_none());
+        assert!(scan("SELECT 5 AS \"\u{4}\"").is_none());
         for q in [
             "SELECT E'x'",
             "SELECT U&'x'",

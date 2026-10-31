@@ -5704,3 +5704,20 @@ file skips itself, `\quit`, so it has no units either way).
 | fast_default | 275 | 275 | 100% | yes | yes |  |
 | tablespace | 261 | 261 | 100% | yes | yes |  |
 <!-- end generated: per file -->
+
+## A145 resume validation (2026-11-01)
+
+Recovered the saved OLTP batch onto `29e882c9` through cherry-pick. A private PostgreSQL
+18.6 subset of test_setup, create_misc, create_table, create_index, select, subselect,
+prepare and plpgsql matches 2,640/2,640 statements. The pg_stat_statements and auto_explain
+contrib subsets match 1,025/1,025 statements, and the eight targeted isolation specs match
+343/343 permutations. Reports are under `/home/meszmate/.cache/a145-resume/` in
+`regress-report/`, `contrib-report/` and `isolation-report/`. No generated full-suite counts
+were changed. The focused `a145_oltp_plans` golden was recorded from PostgreSQL 18.6.
+
+The initial recovered code failed 2/15 debug runs of `many_sessions_stay_bounded` against
+its unchanged 120 MB bound, versus 0/15 on this base. Heap samples identified whole-catalog
+row vectors retained by concurrent debug assertions. Keeping those reference rows in the
+existing compact RowChunks preserves the comparisons; the corrected test passes 10/10
+fresh runs (+52.4–54.8 MB). HANDOFF.md's OLTP round 4 section records the evidence and the
+profiling limitations. These are independent memory checks, not generated parity counts.

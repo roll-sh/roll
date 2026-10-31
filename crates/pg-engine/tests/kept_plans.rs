@@ -126,3 +126,117 @@ fn extended_custom_plans_run_the_generic_binding() {
     }
     assert_eq!(one(&mut s, "SELECT v FROM t WHERE id = 1495"), Some(Value::Int4(2)));
 }
+
+/// Queries whose literals have other lengths are one shape (`literals::Scan::shape`): one
+/// plan kept for them all, and each query's errors at its own positions.
+#[test]
+fn kept_plans_serve_literals_of_any_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "shapes");
+    s.query("CREATE TABLE t (id int PRIMARY KEY, v int NOT NULL DEFAULT 0)").unwrap();
+    s.query("INSERT INTO t SELECT g, g * 2 FROM generate_series(1, 20000) g").unwrap();
+    // (Learned the second time the shape is seen.)
+    assert_eq!(one(&mut s, "SELECT v FROM t WHERE id = 1"), Some(Value::Int4(2)));
+    assert_eq!(one(&mut s, "SELECT v FROM t WHERE id = 22"), Some(Value::Int4(44)));
+    let used = s.kept_plan_uses();
+    for i in [333, 4444, 7, 19999, 55] {
+        assert_eq!(one(&mut s, &format!("SELECT v FROM t WHERE id = {i}")), Some(Value::Int4(2 * i)));
+        s.query(&format!("UPDATE t SET v = v + {} WHERE id = {i}", -i)).unwrap();
+        s.query(&format!("UPDATE t SET v = v + {i} WHERE id = {i}")).unwrap();
+    }
+    // (Each UPDATE shape is learned the second time it is seen and kept from the third: 5 + 3 + 3.)
+    assert!(s.kept_plan_uses() >= used + 11, "kept plans used {} times", s.kept_plan_uses() - used);
+    for (id, want) in [(1, 38), (22222, 42)] {
+        let q = format!("SELECT v FROM t WHERE id = {id} AND v = 'x'");
+        let e = s.query(&q).unwrap_err();
+        assert_eq!(e.position, Some(want), "{q}: {e:?}");
+    }
+}
+
+#[test]
+fn kept_plans_follow_size_changes_across_sessions() {
+    use pg_engine::session::{Session, state::SessionState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = engine_session(open_store(dir.path()), "shared");
+    let mut b = Session::new(SessionState::new(a.state.db.clone(), a.state.cluster.clone(), "postgres", 4243));
+    a.query("CREATE TABLE t (id int PRIMARY KEY, v int)").unwrap();
+    a.query("INSERT INTO t SELECT g, g * 2 FROM generate_series(1, 50) g").unwrap();
+    for s in [&mut a, &mut b] {
+        assert_eq!(one(s, "SELECT v FROM t WHERE id = 1"), Some(Value::Int4(2)));
+        assert_eq!(one(s, "SELECT v FROM t WHERE id = 22"), Some(Value::Int4(44)));
+    }
+    // Each growth invalidates both sessions' plans. The first replan can be shared with
+    // the second session, whose literals have different lengths.
+    for end in [5000, 10000] {
+        let start = if end == 5000 { 51 } else { 5001 };
+        a.query(&format!("INSERT INTO t SELECT g, g * 2 FROM generate_series({start}, {end}) g")).unwrap();
+        assert_eq!(one(&mut a, &format!("SELECT v FROM t WHERE id = {end}")), Some(Value::Int4(end * 2)));
+        assert_eq!(one(&mut b, "SELECT v FROM t WHERE id = 7"), Some(Value::Int4(14)));
+    }
+    b.query("SET enable_indexscan = off").unwrap();
+    assert_eq!(one(&mut b, "SELECT v FROM t WHERE id = 9999"), Some(Value::Int4(19998)));
+    b.query("RESET enable_indexscan").unwrap();
+    b.query("CREATE TEMP TABLE t (id int PRIMARY KEY, v int)").unwrap();
+    b.query("INSERT INTO t VALUES (7, 777)").unwrap();
+    for _ in 0..3 {
+        assert_eq!(one(&mut b, "SELECT v FROM t WHERE id = 7"), Some(Value::Int4(777)));
+        assert_eq!(one(&mut a, "SELECT v FROM t WHERE id = 7"), Some(Value::Int4(14)));
+    }
+    a.query("ALTER TABLE t ALTER COLUMN v TYPE bigint").unwrap();
+    assert_eq!(one(&mut a, "SELECT v FROM t WHERE id = 7"), Some(Value::Int8(14)));
+    b.query("DROP TABLE t").unwrap();
+    assert_eq!(one(&mut b, "SELECT v FROM t WHERE id = 7"), Some(Value::Int8(14)));
+}
+
+/// Bind makes the custom plan (GetCachedPlan) before it checks the result formats
+/// (PortalSetResultFormat): a parameter that fails to fold is that error, not 08P01.
+#[test]
+fn bind_plans_before_checking_result_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "bindfmt");
+    let q = "SELECT $1::int8 + 1, $2::int2, $3::int8 * 2";
+    let vals = |v: &str| vec![Some(b"1".to_vec()), Some(b"2".to_vec()), Some(v.as_bytes().to_vec())];
+    s.parse_message("", q, &[]).unwrap();
+    let e = s.bind_message("", "", vals("-9223372036854775808"), &[], vec![0, 0]).unwrap_err();
+    assert_eq!(e.code, "22003", "{e:?}");
+    s.sync().unwrap();
+    s.parse_message("", q, &[]).unwrap();
+    let e = s.bind_message("", "", vals("5"), &[], vec![0, 0]).unwrap_err();
+    assert_eq!(e.code, "08P01", "{e:?}");
+    s.sync().unwrap();
+}
+
+/// PL/pgSQL statements whose variables can't change their plan run the generic plan as
+/// their first five custom plans (debug builds bind each custom plan too and assert it is
+/// that plan); others, and variables that are also column names, bind each custom plan.
+#[test]
+fn plpgsql_custom_plans_as_the_generic_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = engine_session(open_store(dir.path()), "plcustom");
+    s.query("CREATE TABLE t (id int PRIMARY KEY, v int NOT NULL DEFAULT 0, c int)").unwrap();
+    s.query("INSERT INTO t SELECT g, 0, g % 3 FROM generate_series(1, 300) g").unwrap();
+    s.query("ANALYZE t").unwrap();
+    s.query(
+        "CREATE FUNCTION bump(k int, d int) RETURNS int LANGUAGE plpgsql AS $$
+         DECLARE r int; n bigint; c int := 1;
+         BEGIN
+           UPDATE t SET v = v + d WHERE id = k;
+           SELECT v INTO r FROM t WHERE id = k;
+           SELECT count(*) INTO n FROM t WHERE t.c = (k % 3);
+           RETURN r + n::int;
+         END $$",
+    )
+    .unwrap();
+    for mode in ["auto", "force_custom_plan"] {
+        s.query(&format!("SET plan_cache_mode = {mode}")).unwrap();
+        for k in 1..=12 {
+            let want = s.query(&format!("SELECT v + {k} FROM t WHERE id = {k}")).unwrap().last().unwrap().rows[0][0].clone();
+            let n = (1..=300).filter(|g| g % 3 == k % 3).count() as i32;
+            let Value::Int4(w) = want else { panic!() };
+            assert_eq!(one(&mut s, &format!("SELECT bump({k}, {k})")), Some(Value::Int4(w + n)), "{mode} {k}");
+        }
+    }
+    // A null value folds the comparison: planned with it.
+    assert_eq!(one(&mut s, "SELECT bump(NULL, 1)"), Some(Value::Null));
+}

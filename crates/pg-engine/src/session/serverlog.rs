@@ -64,7 +64,7 @@ impl Session {
     /// command tag while it runs (only kept while the log is written).
     pub fn set_ps(&self, p: &Prepared) {
         if crate::log::active() {
-            *self.log_tag.borrow_mut() = p.stmt.as_ref().and_then(|n| inner(n)).map_or_else(|| "???".into(), ps_tag);
+            *self.log_tag.borrow_mut() = p.stmt.shape().and_then(inner).map_or_else(|| "???".into(), ps_tag);
             // (log_lock_waits, nested auto_explain: lines from inside the statement.)
             if self.state.settings.borrow().logs_inside() {
                 let st = self.state.settings.borrow();

@@ -31,6 +31,11 @@ pub trait NameResolver: Send + Sync {
     fn field_domain(&self, _rowtype: u32, _i: usize) -> Option<u32> {
         None
     }
+    /// The domain whose array type `array` is (what array_send puts on the wire as its
+    /// element type).
+    fn array_domain_elem(&self, _array: u32) -> Option<u32> {
+        None
+    }
     fn enum_labels(&self, _oid: u32) -> Option<Vec<String>> {
         None
     }

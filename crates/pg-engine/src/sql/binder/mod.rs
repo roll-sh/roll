@@ -203,59 +203,6 @@ impl BoundQuery {
     }
 }
 
-/// A data-modifying statement analysed, its access paths not planned yet (what
-/// `bind_statement_body` has before `paths::plan_query`; none failed to fold).
-#[derive(Debug)]
-pub struct UnplannedDml {
-    plan: Plan,
-    hidden_rtes: usize,
-    perms: perms::Perms,
-}
-
-thread_local! {
-    /// The binder `bind_keeping_analysis` runs (its address; not a field: a binder per query
-    /// level sits on the stack of a deep statement), and the analysis it kept.
-    static KEEP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static KEPT: std::cell::Cell<Option<Arc<UnplannedDml>>> = const { std::cell::Cell::new(None) };
-}
-
-impl Binder<'_, '_> {
-    /// `bind_statement`, with a data-modifying statement's analysis before its access paths
-    /// were planned (planned again when a size it read changes: `session::litplan`).
-    pub fn bind_keeping_analysis(&mut self, n: &pb::Node) -> Result<(BoundQuery, Option<Arc<UnplannedDml>>)> {
-        let prev = KEEP.replace(self as *const Self as usize);
-        let r = self.bind_statement(n);
-        KEEP.set(prev);
-        let kept = KEPT.take();
-        r.map(|q| (q, kept))
-    }
-}
-
-impl UnplannedDml {
-    /// The statement `bound` (bound from this analysis) planned again now: what binding it
-    /// again would give, as relation sizes read now.
-    pub fn plan(&self, bound: &BoundQuery, ctx: &ExecCtx) -> Result<BoundQuery> {
-        let mut plan = self.plan.clone();
-        let hidden_rtes = self.hidden_rtes + crate::sql::paths::plan_query(ctx, &mut plan);
-        check_merge_keys(ctx, &mut plan)?;
-        if fold::const_params(&plan)
-            && let Some(e) = fold::first_error(&settled(&plan), &[], ctx)
-        {
-            return Err(e);
-        }
-        let mut perms = self.perms.clone();
-        perms.add_plan_locks(&plan, &ctx.catalog());
-        Ok(BoundQuery {
-            plan: Arc::new(plan),
-            cols: bound.cols.clone(),
-            params: bound.params.clone(),
-            perms: Arc::new(perms),
-            hidden_rtes,
-            param_domains: bound.param_domains.clone(),
-        })
-    }
-}
-
 /// A column visible to name resolution.
 #[derive(Clone, Debug)]
 pub struct ScopeCol {
@@ -1240,15 +1187,6 @@ impl<'b, 'a> Binder<'b, 'a> {
         let fold_err = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
         let mut a = r?;
         a.plan_err = plan_err;
-        // (A data-modifying statement's analysis kept for `bind_keeping_analysis`; not when
-        // something failed to fold: planned again, it would have no record of it.)
-        if KEEP.get() == self as *const Self as usize && fold_err.is_empty() && matches!(a.step, Step::Dml) && a.check_keys {
-            KEPT.set(Some(Arc::new(UnplannedDml {
-                plan: a.plan.clone(),
-                hidden_rtes: a.hidden_rtes,
-                perms: a.perms.clone(),
-            })));
-        }
         a.fold_err = fold_err;
         Ok(a)
     }

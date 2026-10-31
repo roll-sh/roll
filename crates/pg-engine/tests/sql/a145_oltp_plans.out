@@ -1,0 +1,133 @@
+> CREATE TABLE a145_t (id int PRIMARY KEY, v int NOT NULL DEFAULT 0, c int)
+-- CREATE TABLE
+
+> INSERT INTO a145_t SELECT g, 0, g % 3 FROM generate_series(1, 300) g
+-- INSERT 0 300
+
+> ANALYZE a145_t
+-- ANALYZE
+
+> CREATE FUNCTION a145_bump(k int, d int) RETURNS int LANGUAGE plpgsql AS $$
+> DECLARE r int; n bigint; c int := 1;
+> BEGIN
+>   UPDATE a145_t SET v = v + d WHERE id = k;
+>   SELECT v INTO r FROM a145_t WHERE id = k;
+>   SELECT count(*) INTO n FROM a145_t WHERE a145_t.c = (k % 3);
+>   RETURN r + n::int;
+> END $$
+-- CREATE FUNCTION
+
+> SELECT g, a145_bump(g, g) FROM generate_series(1, 12) g
+g:int4 | a145_bump:int4
+1 | 101
+10 | 110
+11 | 111
+12 | 112
+2 | 102
+3 | 103
+4 | 104
+5 | 105
+6 | 106
+7 | 107
+8 | 108
+9 | 109
+-- SELECT 12
+
+> SET plan_cache_mode = force_custom_plan
+-- SET
+
+> SELECT g, a145_bump(g, g) FROM generate_series(1, 12) g
+g:int4 | a145_bump:int4
+1 | 102
+10 | 120
+11 | 122
+12 | 124
+2 | 104
+3 | 106
+4 | 108
+5 | 110
+6 | 112
+7 | 114
+8 | 116
+9 | 118
+-- SELECT 12
+
+> SELECT a145_bump(NULL, 1)
+a145_bump:int4
+NULL
+-- SELECT 1
+
+> SELECT a145_bump(1, 2147483647)
+ERROR 22003: integer out of range
+CONTEXT: SQL statement "UPDATE a145_t SET v = v + d WHERE id = k"
+CONTEXT: PL/pgSQL function a145_bump(integer,integer) line 4 at SQL statement
+
+> SELECT a145_bump(1, 1)
+a145_bump:int4
+103
+-- SELECT 1
+
+> RESET plan_cache_mode
+-- RESET
+
+> SELECT v FROM a145_t WHERE id = 1
+v:int4
+3
+-- SELECT 1
+
+> SELECT v FROM a145_t WHERE id = 22
+v:int4
+0
+-- SELECT 1
+
+> SELECT v FROM a145_t WHERE id = 300
+v:int4
+0
+-- SELECT 1
+
+> INSERT INTO a145_t SELECT g, g, 0 FROM generate_series(301, 10000) g
+-- INSERT 0 9700
+
+> SELECT v FROM a145_t WHERE id = 9999
+v:int4
+9999
+-- SELECT 1
+
+> SELECT v FROM a145_t WHERE id = 7
+v:int4
+14
+-- SELECT 1
+
+> PREPARE a145_q(int) AS SELECT v FROM a145_t WHERE id = $1
+-- PREPARE
+
+> EXECUTE a145_q(7)
+v:int4
+14
+-- SELECT 1
+
+> INSERT INTO a145_t SELECT g, g, 0 FROM generate_series(10001, 15000) g
+-- INSERT 0 5000
+
+> EXECUTE a145_q(14999)
+v:int4
+14999
+-- SELECT 1
+
+> ALTER TABLE a145_t ADD COLUMN added text
+-- ALTER TABLE
+
+> EXECUTE a145_q(12)
+v:int4
+24
+-- SELECT 1
+
+> DEALLOCATE a145_q
+-- DEALLOCATE
+
+> DROP FUNCTION a145_bump(int, int)
+-- DROP FUNCTION
+
+> DROP TABLE a145_t
+-- DROP TABLE
+

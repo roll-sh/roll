@@ -1345,6 +1345,28 @@ fn range_binary_format() {
     s.engine.shutdown();
 }
 
+/// array_send of an array of a domain names the domain as its element type (the column's
+/// type is the domain's array type).
+#[test]
+fn domain_array_binary_element_type() {
+    let s = server(AuthMethod::Trust);
+    runtime().block_on(async {
+        let c = s.connect("postgres").await;
+        c.batch_execute("CREATE DOMAIN wire_posint AS int CHECK (VALUE > 0)").await.unwrap();
+        let d: u32 = c.query_one("SELECT 'wire_posint'::regtype::oid", &[]).await.unwrap().get(0);
+        for q in ["SELECT '{1,2}'::wire_posint[]", "SELECT '{}'::wire_posint[]", "SELECT '{{1},{2}}'::wire_posint[]"] {
+            let r = c.query_one(q, &[]).await.unwrap();
+            let raw = r.get::<_, Raw>(0).0;
+            assert_eq!(u32::from_be_bytes(raw[8..12].try_into().unwrap()), d, "{q}");
+        }
+        // (An array of the base type: int4's.)
+        let r = c.query_one("SELECT '{1,2}'::int[]", &[]).await.unwrap();
+        assert_eq!(u32::from_be_bytes(r.get::<_, Raw>(0).0[8..12].try_into().unwrap()), 23);
+        c.batch_execute("DROP DOMAIN wire_posint").await.unwrap();
+    });
+    s.engine.shutdown();
+}
+
 async fn heap_positions(c: &Client) -> Vec<(i64, i32)> {
     c.query(
         "SELECT n::int8, id FROM (SELECT id, row_number() OVER () n FROM t) s \

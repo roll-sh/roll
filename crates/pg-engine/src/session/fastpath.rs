@@ -378,7 +378,7 @@ impl Session {
         let p = Arc::new(Prepared {
             sql,
             offset: 0,
-            stmt,
+            stmt: stmt.into(),
             param_types: f.args.iter().map(|a| a.0.clone()).collect(),
             bound: Mutex::new(None),
             plans: Default::default(),

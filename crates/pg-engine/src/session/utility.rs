@@ -566,7 +566,7 @@ impl Session {
         let mut p = Prepared {
             sql,
             offset: 0,
-            stmt: query,
+            stmt: query.into(),
             param_types: types,
             bound: Mutex::new(None),
             plans: Default::default(),
@@ -590,7 +590,7 @@ impl Session {
             let q = Prepared {
                 sql: String::new(),
                 offset: 0,
-                stmt: Some(stmt.clone()),
+                stmt: Some(stmt.clone()).into(),
                 param_types: p.param_types.clone(),
                 bound: Mutex::new(None),
                 plans: Default::default(),
@@ -805,7 +805,7 @@ impl Session {
             None => Arc::new(Prepared {
                 sql: String::new(),
                 offset: 0,
-                stmt: Some(q.clone()),
+                stmt: Some(q.clone()).into(),
                 // (Bound parameters make a custom plan below, as BuildCachedPlan's
                 // boundParams do: partitions pruned and NULL comparisons folded at planning.)
                 param_types: param_types.to_vec(),
@@ -992,7 +992,7 @@ impl Session {
         let p = Prepared {
             sql: String::new(),
             offset: 0,
-            stmt: Some(q.clone()),
+            stmt: Some(q.clone()).into(),
             param_types: Vec::new(),
             bound: Mutex::new(None),
             plans: Default::default(),
