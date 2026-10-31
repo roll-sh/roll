@@ -1762,7 +1762,12 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     fresh sorted build: `mw1_pkey` 357 → 166 pages), the fsm and vm forks, and the dead
     tuples' space, so its later inserts went elsewhere. Dead tuples come back dead to
     everyone (xmax FrozenTransactionId), with a prunable hint where the page had one.
-    Format-1 records aren't read (the rows are, once). `models_kept.rs` now checks a clean
+    Format-1 records aren't read (the rows are, once). Agent 116's TPC-H q13 case
+    (customer back with 3,588 pages for PostgreSQL's 3,640 after a restart: the empty pages
+    at the end were lost, and its HashAggregate fit hash_mem) is the same loss: a clean
+    restart keeps every page now. After a crash the models are still laid out from the rows
+    and lose trailing pages without rows (PostgreSQL's file keeps them); keeping the page
+    count durably as the heap extends would cover that. `models_kept.rs` now checks a clean
     restart against an engine that never restarted (`kept_models_match_models_never_restarted`),
     and a crash against the rows' places (`models_after_a_crash_keep_the_rows_in_place`:
     after a crash the models are still laid out from the rows, index pages a fresh build).
@@ -1792,6 +1797,24 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     what keeps it), line pointers packed per page (length and flags in 4-6 bytes; xids only
     for versions not yet all-visible), and btree leaves as counts and sizes per page rather
     than keys (the keys are in the index's storage). That is the next step.
+  - **Interfaces for the scan side** (batch 2; agent 127's items, for agents 117 / 139):
+    `sizing::fetched_batch(table, keys, last, ctx)` is `fetched` for rows fetched one after
+    another, one horizon and one shard lock per batch (the write lock only from the first
+    page that needs pruning on), each key's page back; the index scan still calls `fetched`
+    per row (`exec/scan.rs`), whoever batches its heap fetches can switch.
+    `sizing::btree_leaf_for(table, index, prefix, starts, db)` gives, per scan start (a
+    storage key), the leaf page a scan from it reads first (`Btree::scan_leaf`: the descent,
+    then right while the page has no entry past the start): starts on one leaf need no new
+    descent, which is what PostgreSQL 18's skip scan "Index Searches" counts.
+  - **Fixed: `detach-partition-concurrently-3` flaking when run alone** (item 6; batch 2,
+    `server.rs` `ready_for_query`, not the size models). A READ COMMITTED transaction lets
+    go of its statement's snapshot when it goes idle (`Session::note_idle`), but it did so
+    after sending ReadyForQuery. The isolation tester sends the next step the moment it
+    reads that, so `s2detachfinal`'s WaitForOlderSnapshots could still find s1's snapshot
+    of `s1s` and wait for s1 (`<waiting ...>` where PostgreSQL, which releases the snapshot
+    before ReadyForQuery, doesn't). About 1 run in 30 alone, on base as well. Proof: with a
+    30 ms sleep between ReadyForQuery and `note_idle` the permutation failed 3 / 3; with
+    `note_idle` before ReadyForQuery (and the sleep still after it) 3 / 3 matched.
   - Left: the first statement after a restart still waits for its own table's layout
     (`heapsim::restored`'s key map inserts are 59% of it, `Btree::read_image`'s allocations
     13%; both go with the compact model above). Agent 123 measured re-binding when

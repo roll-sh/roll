@@ -480,7 +480,7 @@ impl Session {
         }
     }
 
-    /// The session has sent ReadyForQuery and waits for its client: a READ COMMITTED
+    /// The session is about to send ReadyForQuery and wait for its client: a READ COMMITTED
     /// transaction's statement snapshot goes, unless a cursor or a suspended portal still
     /// reads with it (their snapshots stay registered, as Postgres's do).
     pub fn note_idle(&self) {

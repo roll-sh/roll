@@ -2192,21 +2192,51 @@ pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
 /// may be pruned when the scan moves to it (heapam_index_fetch_tuple). Returns the page,
 /// so the caller can tell when it moves (None: not modelled).
 pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Option<u32> {
+    fetched_batch(table, &[key], last, ctx)?.pop().flatten()
+}
+
+/// `fetched` for rows fetched one after another (`last`: the page the scan was on before
+/// the first): each one's page (None: not found), one lock and one horizon for the batch.
+/// None when the table isn't modelled.
+pub fn fetched_batch(table: u32, keys: &[&[u8]], last: Option<u32>, ctx: &ExecCtx) -> Option<Vec<Option<u32>>> {
     let db = &ctx.sess.db;
     let xids = db.xids();
     let v = vis_for(&xids, table, ctx);
-    // (Under the models' read lock: concurrent index scans don't serialize on it. Only a
-    // page heap_page_prune_opt would prune takes the write lock.)
-    let (blk, prune) = {
+    let mut out = Vec::with_capacity(keys.len());
+    let mut last = last;
+    // (Under the shard's read lock until a page heap_page_prune_opt would prune: concurrent
+    // index scans don't serialize on it. From there on, under the write lock.)
+    {
         let rf = db.relfiles.of(table).read();
         let heap = rf.heaps.get(&table)?;
-        let blk = heap.locate(key, &v)?.0;
-        (blk, last != Some(blk) && heap.prune_wanted(blk, &v))
-    };
-    if prune && let Some(heap) = db.relfiles.of(table).write().heaps.get_mut(&table) {
-        heap.prune_opt(blk, &v);
+        for key in keys {
+            let blk = heap.locate(key, &v).map(|t| t.0);
+            if let Some(b) = blk
+                && last != Some(b)
+            {
+                if heap.prune_wanted(b, &v) {
+                    break;
+                }
+                last = Some(b);
+            }
+            out.push(blk);
+        }
     }
-    Some(blk)
+    if out.len() < keys.len() {
+        let mut rf = db.relfiles.of(table).write();
+        let heap = rf.heaps.get_mut(&table)?;
+        for key in &keys[out.len()..] {
+            let blk = heap.locate(key, &v).map(|t| t.0);
+            if let Some(b) = blk
+                && last != Some(b)
+            {
+                heap.prune_opt(b, &v);
+                last = Some(b);
+            }
+            out.push(blk);
+        }
+    }
+    Some(out)
 }
 
 /// An index scan of btree `index` over storage key ranges `ranges` (each key starting
@@ -3863,6 +3893,16 @@ pub fn btree_leaf_pages(
         }
     }
     Some(out)
+}
+
+/// For each storage key in `starts` (with the index's key prefix), the leaf page of btree
+/// `index` a scan starting there reads first (`Btree::scan_leaf`): starts sharing a leaf
+/// are read without a new descent (a skip scan's "Index Searches"). None when the index
+/// isn't modelled.
+pub fn btree_leaf_for(table: u32, index: u32, prefix: &[u8], starts: &[Vec<u8>], db: &Database) -> Option<Vec<Option<u32>>> {
+    let rf = db.relfiles.of(table).read();
+    let bt = rf.btrees.get(&index)?;
+    Some(starts.iter().map(|k| bt.scan_leaf(k.strip_prefix(prefix)?)).collect())
 }
 
 /// The index pages a row's new entries go to: (index, leaf page; None when the index

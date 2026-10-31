@@ -241,7 +241,9 @@ it implemented over the old lock manager.
     agent 73, a READ COMMITTED transaction waiting for its client lets go of its last
     statement's xmin unless a cursor or suspended portal reads with it, `Session::note_idle`;
     it used to keep it until its next statement, holding back pruning and making a DETACH
-    ... FINALIZE wait for it, detach-partition-concurrently-3.)
+    ... FINALIZE wait for it, detach-partition-concurrently-3. Since round 22, agent 126, it
+    lets go before sending ReadyForQuery, as Postgres does: when it let go after it, the spec
+    run alone still waited about 1 time in 30.)
 - (T2 was a fixed cap on PL/pgSQL nesting, not the stack: gone in round 18. D2's TOAST
   relations are modelled since round 18: the engine still stores out-of-line values in its
   rows' keyspace, and the TOAST table is a name, locks and its size model's chunks.)

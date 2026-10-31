@@ -1037,6 +1037,31 @@ impl Btree {
         }
     }
 
+    /// The leaf page a scan starting at model key `lo` reads first: the one with its first
+    /// entry past `lo` (a following page when the page the descent reaches has none), or
+    /// the last leaf the descent reached. None: no leaf.
+    pub fn scan_leaf(&self, lo: &[u8]) -> Option<u32> {
+        let nkey = self.opts.nkey;
+        let mut blk = self.root?;
+        loop {
+            let p = self.pages.get(blk as usize)?.as_ref()?;
+            if p.leaf {
+                break;
+            }
+            blk = p.inner[child_for(&p.inner, lo, nkey)].1;
+        }
+        loop {
+            let p = self.pages.get(blk as usize)?.as_ref()?;
+            if first_above(&p.items, lo, nkey) < p.items.len() {
+                return Some(blk);
+            }
+            match p.right {
+                Some(r) => blk = r,
+                None => return Some(blk),
+            }
+        }
+    }
+
     /// `kill`'s walk without its marks: whether it would mark an entry LP_DEAD (`seen`
     /// as `kill` fills it, up to that entry). Under the models' read lock, so concurrent
     /// scans of an index with nothing to kill don't serialize.

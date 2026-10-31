@@ -1672,9 +1672,12 @@ fn ready_for_query(c: &mut Conn, s: &Session) -> std::io::Result<()> {
             notification(&mut c.out, &n);
         }
     }
+    // (The statement's snapshot goes before the client hears the session is idle, as
+    // Postgres releases it before ReadyForQuery: otherwise a client acting on the
+    // ReadyForQuery, a DETACH ... FINALIZE's WaitForOlderSnapshots, could still see it.)
+    s.note_idle();
     c.ready(s.status())?;
     s.notifications_idle();
-    s.note_idle();
     c.at_ready = true;
     Ok(())
 }
