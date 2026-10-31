@@ -177,7 +177,7 @@ CPU over the whole run (the engine process; PostgreSQL's container):
 | Grafana 13.3.0 | ~730 migrations, its API's objects, a PostgreSQL datasource (metadata queries, macros, errors) | 170 | 0 | 5.0 s | 3.5 s |
 | Metabase 0.64.3 | Liquibase migrations, sync + fingerprints + field values, native and MBQL queries, X-ray | 236 | 0 (1 fixed) | 40.9 s | 27.8 s |
 | Hasura 2.51.3 | hdb_catalog, tracking, relationships, permissions, event trigger, introspection, queries, mutations | 47 | 0 (2 fixed) | 1.1 s | 0.8 s |
-| Keycloak 26.8.1 | Liquibase, realms, clients, roles, groups, users, logins, sessions, events, export | 56 | 0 | 17.4 s | |
+| Keycloak 26.8.1 | Liquibase, realms, clients, roles, groups, users, logins, sessions, events, export | 56 | 0 | 17.4 s | 6.3 s |
 | Directus 12.6.0 | migrations, collections / fields / relations made through its API (DDL), items, aggregates, errors | 47 | 0 | 2.0 s | 2.1 s |
 
 Fixed (golden `a122_client_round6`):
@@ -198,7 +198,14 @@ differences), after round 21's planning-cost batches (agent 111); agents 115's a
 catalog-regeneration and planner work wasn't upstream yet. The engine also takes more CPU
 than PostgreSQL for Metabase (sync and fingerprint queries over a catalog Liquibase grew),
 Grafana and Keycloak (start-up migrations: DDL per statement); not profiled yet.
-EF Core's PostgreSQL run with max_connections = 500: 186.5 s CPU, no "too many clients".
+EF Core with max_connections = 500 on the reference (no "too many clients"): 27410 / 0 on
+PostgreSQL, 27406 / 4 on the engine (the 4 LIMIT-without-ORDER-BY-over-GROUP-BY tests, agent
+116's item). Server CPU 635.7 s on the engine against 186.5 s on PostgreSQL (engine peak RSS
+1.7 GB): the largest gap of any suite, not profiled yet.
+Re-run, round 4's items: Hibernate PackagedEntityManagerTest (testOverriddenPar included) 14 /
+0 on both; the pgAdmin / DBeaver metadata replay, both servers fresh: 831 of 856 same, 25
+differ (was 32), all of round 4's kinds: pg_node_tree columns holding SQL text (typdefaultbin,
+indexprs / indpred, tgqual, polqual), pg_stat counters, aclexplode orders without ORDER BY.
 
 ## Round 5 (round 22, agent 100)
 
