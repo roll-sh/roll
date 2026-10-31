@@ -455,7 +455,7 @@ impl Worker<'_> {
 
     /// pa_can_start.
     fn pa_can_start(&self) -> bool {
-        self.pa.is_none() && self.sub.stream == 'p' && self.skip_lsn() == 0 && self.states.values().all(|(s, _)| *s == 'r')
+        self.role == super::Role::Apply && self.sub.stream == 'p' && self.skip_lsn() == 0 && self.states.values().all(|(s, _)| *s == 'r')
     }
 
     /// pa_allocate_worker: transaction `xid` goes to a free worker of the pool or a new one,

@@ -963,8 +963,19 @@ impl Ddl<'_, '_> {
         if let Some(w) = &workers {
             w.stop(x.oid, true);
         }
-        if let Some(slot) = &x.slot_name {
-            let r = self.drop_remote_slot(&x, slot);
+        // The table synchronization slots of tables still being synchronized (not SYNCDONE or
+        // READY: the worker dropped its slot then), and the subscription's slot.
+        let syncing: Vec<String> = self
+            .cat
+            .sub_rels
+            .get(&x.oid)
+            .into_iter()
+            .flatten()
+            .filter(|r| !matches!(r.state, 'r' | 's'))
+            .map(|r| format!("pg_{}_sync_{}_{}", x.oid, r.relid, crate::repl::SYSTEM_IDENTIFIER))
+            .collect();
+        if x.slot_name.is_some() || !syncing.is_empty() {
+            let r = self.drop_remote_slots(&x, x.slot_name.as_deref(), &syncing);
             if r.is_err()
                 && let Some(w) = &workers
             {
@@ -986,9 +997,17 @@ impl Ddl<'_, '_> {
         Ok(TAG.into())
     }
 
-    /// ReplicationSlotDropAtPubNode for DROP SUBSCRIPTION.
-    fn drop_remote_slot(&self, x: &Subscription, slot: &str) -> Result<()> {
-        let mut c = self.publisher(&x.conninfo, &x.name).map_err(|m| {
+    /// ReplicationSlotDropAtPubNode for DROP SUBSCRIPTION: table synchronization slots
+    /// (missing ones are a LOG line), then the subscription's `slot`. Without a slot, a
+    /// publisher it can't reach leaves the synchronization slots behind.
+    fn drop_remote_slots(&self, x: &Subscription, slot: Option<&str>, syncing: &[String]) -> Result<()> {
+        let conn = self.publisher(&x.conninfo, &x.name);
+        let Some(slot) = slot else {
+            let Ok(mut c) = conn else { return Ok(()) };
+            walrcv::password_check(&c, self.must_use_password(x))?;
+            return self.drop_sync_slots(&mut c, syncing);
+        };
+        let mut c = conn.map_err(|m| {
             Error::new(
                 CONNECTION_FAILURE,
                 format!("could not connect to publisher when attempting to drop replication slot \"{slot}\": {m}"),
@@ -996,6 +1015,7 @@ impl Ddl<'_, '_> {
             .hint("Use ALTER SUBSCRIPTION ... DISABLE to disable the subscription, and then use ALTER SUBSCRIPTION ... SET (slot_name = NONE) to disassociate it from the slot.")
         })?;
         walrcv::password_check(&c, self.must_use_password(x))?;
+        self.drop_sync_slots(&mut c, syncing)?;
         let intr = crate::remote::interrupts(self.ctx);
         match walrcv::drop_slot(&mut c, slot, &intr) {
             Ok(()) => {
@@ -1008,6 +1028,28 @@ impl Ddl<'_, '_> {
                 format!("could not drop replication slot \"{slot}\" on publisher: {msg}"),
             )),
         }
+    }
+
+    /// Table synchronization slots dropped (missing_ok): a NOTICE for each dropped, a LOG
+    /// line for one the publisher doesn't have.
+    fn drop_sync_slots(&self, c: &mut Conn, slots: &[String]) -> Result<()> {
+        let intr = crate::remote::interrupts(self.ctx);
+        for s in slots {
+            match walrcv::drop_slot(c, s, &intr) {
+                Ok(()) => self.notice(format!("dropped replication slot \"{s}\" on publisher")),
+                Err(Fail::Interrupt(e)) => return Err(e),
+                Err(Fail::Remote { msg, sqlstate }) if sqlstate.as_deref() == Some("42704") => {
+                    tracing::info!("could not drop replication slot \"{s}\" on publisher: {msg}");
+                }
+                Err(Fail::Remote { msg, .. }) => {
+                    return Err(Error::new(
+                        CONNECTION_FAILURE,
+                        format!("could not drop replication slot \"{s}\" on publisher: {msg}"),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// ALTER SUBSCRIPTION ... RENAME TO (AlterObjectRename_internal).

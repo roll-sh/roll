@@ -150,7 +150,7 @@ pub fn exec(w: &mut dyn Wire, s: &mut Session, mode: Mode, cmd: Cmd, exported: &
                 w,
                 &[("systemid", TEXT), ("timeline", INT4), ("xlogpos", TEXT), ("dbname", TEXT)],
                 &[vec![
-                    Some("7000000000000000001".into()),
+                    Some(super::SYSTEM_IDENTIFIER.into()),
                     Some("1".into()),
                     Some(super::lsn::fmt(r.wal.current())),
                     db,

@@ -36,6 +36,10 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
+/// The cluster's system identifier (IDENTIFY_SYSTEM's systemid; part of a table
+/// synchronization slot's name, ReplicationSlotNameForTablesync).
+pub const SYSTEM_IDENTIFIER: &str = "7000000000000000001";
+
 /// wal_level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WalLevel {

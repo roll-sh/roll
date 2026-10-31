@@ -7,17 +7,17 @@
 //! transaction commits the origin's position with its changes (`origin::before_commit`),
 //! so a restart, even after a crash, resumes START_REPLICATION right after the last local
 //! commit, and feedback only ever confirms what was committed: nothing is lost or applied
-//! twice. Table synchronization (tablesync.c, simplified): the apply worker itself copies a
-//! table in one local transaction under a temporary slot's snapshot (SNAPSHOT 'use') and
-//! records the slot's consistent point as srsublsn with state 's'. The stream skips the
-//! table's changes of transactions that committed before that point (PG's
-//! should_apply_changes_for_rel), and the table is 'r' once the stream passed it. Tables a
-//! refresh adds are copied between streamed transactions.
+//! twice. Table synchronization (tablesync.c, `tablesync`): a worker per table copies it
+//! under a permanent slot's snapshot and catches up on that slot while the leader keeps
+//! applying; srsublsn with state 's' is where it stopped. The stream skips the table's
+//! changes of transactions that committed before that point (PG's
+//! should_apply_changes_for_rel), and the table is 'r' once the stream passed it.
 
 use super::walrcv::{self, Fail};
 use super::apply_rows;
 
 mod parallel;
+mod tablesync;
 use crate::catalog::{Subscription, quote_ident};
 use crate::engine::Engine;
 use crate::error::{Error, Severity, code};
@@ -74,6 +74,9 @@ struct State {
 pub struct Workers {
     st: Mutex<State>,
     wake: Condvar,
+    /// Table synchronization workers' states in memory, by (subscription, table):
+    /// `tablesync`'s SYNCWAIT and CATCHUP.
+    relstates: Mutex<HashMap<(u32, u32), (char, u64)>>,
 }
 
 /// How long the launcher waits between looks at the subscriptions.
@@ -398,14 +401,6 @@ fn open_worker<'a>(
     if relid.is_none() {
         repl.origins.session_setup(pid, &origin_name, leader.unwrap_or(0)).map_err(msg)?;
     }
-    // The progress the last commit stored (the origin file may be behind it after a crash).
-    let db = sess.state.db.clone();
-    if role == Role::Apply
-        && let Ok(Some(b)) = db.store.get(&super::origin::progress_key(origin), db.store.visible_ts())
-        && let Ok(b) = <[u8; 8]>::try_from(&b[..])
-    {
-        repl.origins.advance(origin, u64::from_be_bytes(b), 0, false);
-    }
     let env = crate::remote::conn::Env {
         outbound: e.outbound().cloned(),
         local: e.listen_addr(),
@@ -445,11 +440,17 @@ fn open_worker<'a>(
         subxacts: Vec::new(),
         nchanges: 0,
         apply_locks: Vec::new(),
-        sync_retry: HashMap::new(),
+        syncs: Default::default(),
+        catchup: None,
+        synced_at: None,
         errctx: None,
         lines: std::sync::OnceLock::new(),
         _backend: backend,
     };
+    // The progress the last commit stored (the origin file may be behind it after a crash).
+    if role == Role::Apply {
+        w.load_progress();
+    }
     // (A table synchronization worker says it started once it knows the table's name.)
     if relid.is_none() {
         w.log(Severity::Log, &format!("logical replication apply worker for subscription \"{}\" has started", sub.name));
@@ -469,21 +470,15 @@ fn run_apply(w: &mut Worker) -> Result<(), String> {
         let count = |w: &Worker, what: &str| {
             crate::sql::func::pubsub::count_subscription_stat(&w.sess.state.db.catalog(), w.sub.oid, what)
         };
-        let r = match w.sync_tables() {
+        let r = match w.stream() {
+            Ok(true) => continue,
+            Ok(false) => return Ok(()),
             Err(m) => {
-                count(w, "sync_error");
+                if !m.contains("could not connect to the publisher") && !m.starts_with("password is required") {
+                    count(w, "apply_error");
+                }
                 Err(m)
             }
-            Ok(()) => match w.stream() {
-                Ok(true) => continue,
-                Ok(false) => return Ok(()),
-                Err(m) => {
-                    if !m.contains("could not connect to the publisher") && !m.starts_with("password is required") {
-                        count(w, "apply_error");
-                    }
-                    Err(m)
-                }
-            },
         };
         // disable_on_error (as committed now: maybe_reread_subscription): the error, then the
         // subscription disabled (the worker ends).
@@ -569,8 +564,12 @@ struct Worker<'a> {
     nchanges: u64,
     /// The applytransaction locks the worker holds (session locks).
     apply_locks: Vec<(Vec<u8>, crate::txn::locks::LockMode)>,
-    /// Tables whose synchronization failed, not tried again before then (wal_retrieve_retry_interval).
-    sync_retry: HashMap<u32, Instant>,
+    /// A leader's table synchronization workers.
+    syncs: tablesync::Syncs,
+    /// A table synchronization worker's catch-up: how far (the leader's position), and
+    /// where it got to (SYNCDONE's position).
+    catchup: Option<u64>,
+    synced_at: Option<u64>,
     /// The CONTEXT of the message being applied (apply_error_callback).
     errctx: Option<String>,
     /// The worker's server log line counters.
@@ -813,23 +812,6 @@ impl Worker<'_> {
             .unwrap_or_default();
     }
 
-    /// Tables to synchronize now (not waiting to be tried again after a failure).
-    fn sync_todo(&self) -> Vec<u32> {
-        let now = Instant::now();
-        let mut v: Vec<u32> = self
-            .states
-            .iter()
-            .filter(|(r, (s, _))| matches!(s, 'i' | 'd' | 'f') && self.sync_retry.get(r).is_none_or(|t| *t <= now))
-            .map(|(r, _)| *r)
-            .collect();
-        v.sort_unstable();
-        v
-    }
-
-    fn needs_sync(&self) -> bool {
-        !self.sync_todo().is_empty()
-    }
-
     /// UpdateSubscriptionRelState in the open local transaction. It holds the subscription
     /// (LockSharedObject AccessShareLock) until it ends, as ALTER / DROP SUBSCRIPTION's
     /// AccessExclusiveLock waits for: table synchronization workers each change their own
@@ -910,95 +892,33 @@ impl Worker<'_> {
         Ok(())
     }
 
-    /// process_syncing_tables_for_apply's launches: a table synchronization worker for each
-    /// table not synchronized yet, at most max_sync_workers_per_subscription at once (and
-    /// none past max_logical_replication_workers). Each copies its table under a slot's
-    /// snapshot of its own; the leader waits between transactions meanwhile, so every table's
-    /// synchronization point is past what it applied (where PostgreSQL's workers catch up
-    /// on their slot's stream instead). A failed table is tried again after
-    /// wal_retrieve_retry_interval, while the leader streams.
-    fn sync_tables(&mut self) -> Result<(), String> {
-        let mut running: Vec<(u32, Arc<AtomicBool>, std::thread::JoinHandle<bool>)> = Vec::new();
-        loop {
-            let stopping = self.stop.load(Ordering::SeqCst);
-            let max = if stopping { 0 } else { self.setting_int("max_sync_workers_per_subscription").max(0) as usize };
-            for relid in self.sync_todo() {
-                if running.len() >= max || running.iter().any(|r| r.0 == relid) {
-                    continue;
-                }
-                if self.workers.slots_used() >= self.setting_int("max_logical_replication_workers").max(0) as usize {
-                    self.log(
-                        Severity::Warning,
-                        "out of logical replication worker slots\nHINT:  You might need to increase \"max_logical_replication_workers\".",
-                    );
-                    break;
-                }
-                let stop = Arc::new(AtomicBool::new(false));
-                let (engine, workers, sub, st) = (Arc::downgrade(self.e), self.workers.clone(), self.sub.clone(), stop.clone());
-                let t = std::thread::Builder::new()
-                    .name(format!("roll-sync-{relid}"))
-                    .spawn(move || sync_main(engine, workers, sub, relid, st))
-                    .map_err(|e| format!("could not start table synchronization worker: {e}"))?;
-                running.push((relid, stop, t));
-            }
-            if running.is_empty() {
-                break;
-            }
-            if stopping {
-                for r in &running {
-                    r.1.store(true, Ordering::SeqCst);
-                }
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            let mut i = 0;
-            while i < running.len() {
-                if running[i].2.is_finished() {
-                    let (relid, _, t) = running.swap_remove(i);
-                    if !t.join().unwrap_or(false) {
-                        self.sync_retry.insert(relid, Instant::now() + RETRY_INTERVAL);
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-            self.load_states();
-        }
-        Ok(())
-    }
-
     fn setting_int(&self, name: &str) -> i64 {
         self.sess.state.settings.borrow().int(name)
     }
 
-    /// LogicalRepSyncTableStart: copy table `relid` as of a temporary slot's snapshot, in one
-    /// local transaction that also records the end of the copy (state 'f'), then its slot's
-    /// consistent point (state 's').
-    fn sync_table(&mut self, relid: u32) -> Result<(), String> {
-        let cat = self.sess.state.db.catalog();
-        let Some(t) = cat.tables.get(&relid) else { return Ok(()) };
-        let (nsp, rel) = (cat.schema_name(t.schema).to_string(), t.name.clone());
-        let local_cols: Vec<String> = t.columns.iter().filter(|c| !c.dropped).map(|c| c.name.clone()).collect();
-        drop(cat);
-        self.log(Severity::Log, &format!(
-            "logical replication table synchronization worker for subscription \"{}\", table \"{rel}\" has started",
-            self.sub.name
-        ));
-        self.query("BEGIN")?;
-        self.set_states(&[(relid, 'd', 0)])?;
-        self.query("COMMIT")?;
+    /// LogicalRepSyncTableStart's copy: table `relid` copied as of a permanent slot's
+    /// snapshot (`retry`: a worker failed during an earlier copy, whose slot goes first), in
+    /// one local transaction that records the end of the copy (state 'f') and the slot's
+    /// consistent point as the synchronization origin's progress; that point.
+    fn copy_table(&mut self, relid: u32, nsp: &str, rel: &str, local_cols: &[String], retry: bool) -> Result<u64, String> {
         let stop = self.stop;
         let intr = move || stop_check(stop);
         let fail = |e: Fail| e.msg();
-        let appname = format!("pg_{}_sync_{relid}", self.sub.oid);
-        let mut c = walrcv::connect(&self.sub.conninfo, &appname, &self.env).map_err(|m| {
+        let slot = tablesync::slot_name(self.sub.oid, relid);
+        let mut c = walrcv::connect(&self.sub.conninfo, &slot, &self.env).map_err(|m| {
             format!("table synchronization worker for subscription \"{}\" could not connect to the publisher: {m}", self.sub.name)
         })?;
         self.password_check(&c)?;
-        let sysid = walrcv::identify_system(&mut c, &intr).map_err(fail)?;
+        if retry {
+            self.drop_sync_slot(&mut c, &slot, true)?;
+        }
+        self.query("BEGIN")?;
+        self.set_states(&[(relid, 'd', 0)])?;
+        self.query("COMMIT")?;
+        walrcv::identify_system(&mut c, &intr).map_err(fail)?;
         walrcv::exec(&mut c, "BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ", &intr).map_err(fail)?;
-        let slot = format!("pg_{}_sync_{relid}_{sysid}", self.sub.oid);
-        let point = walrcv::create_slot(&mut c, &slot, true, false, false, "use", &intr).map_err(fail)?;
-        let cols = walrcv::published_columns(&mut c, &nsp, &rel, &self.sub.publications, &intr).map_err(fail)?;
+        let point = walrcv::create_slot(&mut c, &slot, false, false, false, "use", &intr).map_err(fail)?;
+        let cols = walrcv::published_columns(&mut c, nsp, rel, &self.sub.publications, &intr).map_err(fail)?;
         let missing: Vec<String> = cols.iter().filter(|c| !local_cols.contains(c)).map(|c| format!("\"{c}\"")).collect();
         if !missing.is_empty() {
             return Err(format!(
@@ -1014,20 +934,20 @@ impl Worker<'_> {
         let with = if binary { " WITH (FORMAT binary)" } else { "" };
         // A table with row filters (or not a plain table: a partitioned one published through
         // its root) is copied through a query: ONLY the table, its filters OR'ed.
-        let (kind, quals) = walrcv::table_filters(&mut c, &nsp, &rel, &self.sub.publications, &intr).map_err(fail)?;
+        let (kind, quals) = walrcv::table_filters(&mut c, nsp, rel, &self.sub.publications, &intr).map_err(fail)?;
         let source = if kind == 'r' && quals.is_empty() {
-            format!("{} ({collist})", qualified(&nsp, &rel))
+            format!("{} ({collist})", qualified(nsp, rel))
         } else {
             let only = if kind == 'r' { "ONLY " } else { "" };
             let filter = if quals.is_empty() { String::new() } else { format!(" WHERE {}", quals.join(" OR ")) };
-            format!("(SELECT {collist} FROM {only}{}{filter})", qualified(&nsp, &rel))
+            format!("(SELECT {collist} FROM {only}{}{filter})", qualified(nsp, rel))
         };
         let r = c.exec(&format!("COPY {source} TO STDOUT{with}"), &intr).map_err(|e| e.message)?;
         if r.status != Status::CopyOut {
             let m = r.error.map_or_else(|| c.error_text(), |e| e.text().trim_end_matches('\n').to_string());
             return Err(format!("could not start initial contents copy for table \"{nsp}.{rel}\": {m}"));
         }
-        let into = format!("COPY {} ({collist}) FROM STDIN{with}", qualified(&nsp, &rel));
+        let into = format!("COPY {} ({collist}) FROM STDIN{with}", qualified(nsp, rel));
         // (The copy commits under the table's synchronization origin, as a tablesync worker's
         // does: its rows' commit origin isn't the subscription's.)
         self.use_origin(&format!("pg_{}_{relid}", self.sub.oid))?;
@@ -1056,19 +976,15 @@ impl Worker<'_> {
             .map_err(|e| e.message)?
             .map_err(|m| format!("error while copying table \"{nsp}.{rel}\": {m}"))?;
         walrcv::exec(&mut c, "COMMIT", &intr).map_err(fail)?;
-        // (FINISHEDCOPY with the copy, then SYNCDONE at the slot's consistent point.)
+        // FINISHEDCOPY with the copy, the origin at the slot's consistent point (where the
+        // catch-up, or a worker started again after a failure, streams from).
         self.set_states(&[(relid, 'f', 0)])?;
-        self.query("COMMIT")?;
-        drop(c);
-        self.query("BEGIN")?;
-        self.set_states(&[(relid, 's', point)])?;
-        self.query("COMMIT")?;
-        tracing::debug!(relid, rows, "table synchronized at {}", lsn(point));
-        self.log(Severity::Log, &format!(
-            "logical replication table synchronization worker for subscription \"{}\", table \"{rel}\" has finished",
-            self.sub.name,
-        ));
-        Ok(())
+        self.repl.origins.xact_setup(self.pid, point, 0).map_err(|e| e.message)?;
+        let r = self.query("COMMIT");
+        self.repl.origins.xact_reset(self.pid);
+        r?;
+        tracing::debug!(relid, rows, "table copied at {}", lsn(point));
+        Ok(point)
     }
 
     /// The COPY OUT's rows into the local table, a chunk of whole rows at a time (lines; in
@@ -1129,19 +1045,40 @@ impl Worker<'_> {
         Ok(r.last().and_then(|r| r.tag.rsplit(' ').next()?.parse().ok()).unwrap_or(0))
     }
 
+    /// The origin's progress as its last commit stored it (the origin file may be behind it
+    /// after a crash).
+    fn load_progress(&self) {
+        let db = &self.sess.state.db;
+        if let Ok(Some(b)) = db.store.get(&super::origin::progress_key(self.origin), db.store.visible_ts())
+            && let Ok(b) = <[u8; 8]>::try_from(&b[..])
+        {
+            self.repl.origins.advance(self.origin, u64::from_be_bytes(b), 0, false);
+        }
+    }
+
     /// The origin's progress: the end of the last transaction applied.
     fn progress(&self) -> u64 {
         self.repl.origins.remote_lsn(self.origin)
     }
 
     /// LogicalRepApplyLoop: stream from the subscription's slot, from the origin's progress.
-    /// Ok(true): tables to copy came up (between transactions); Ok(false): told to stop.
+    /// Ok(true): it should start again (two_phase can be enabled); Ok(false): told to stop, or
+    /// a table synchronization worker's catch-up is done (`synced_at`).
     fn stream(&mut self) -> Result<bool, String> {
         let stop = self.stop;
         let intr = move || stop_check(stop);
-        let slot = self.sub.slot_name.clone().ok_or("subscription has no replication slot set")?;
-        let mut c = walrcv::connect(&self.sub.conninfo, &self.sub.name, &self.env)
-            .map_err(|m| format!("apply worker for subscription \"{}\" could not connect to the publisher: {m}", self.sub.name))?;
+        let sync = match self.role {
+            Role::Sync(r) => Some(r),
+            _ => None,
+        };
+        let (slot, appname) = match sync {
+            Some(r) => (tablesync::slot_name(self.sub.oid, r), tablesync::slot_name(self.sub.oid, r)),
+            None => (self.sub.slot_name.clone().ok_or("subscription has no replication slot set")?, self.sub.name.clone()),
+        };
+        let mut c = walrcv::connect(&self.sub.conninfo, &appname, &self.env).map_err(|m| match sync {
+            Some(_) => format!("table synchronization worker for subscription \"{}\" could not connect to the publisher: {m}", self.sub.name),
+            None => format!("apply worker for subscription \"{}\" could not connect to the publisher: {m}", self.sub.name),
+        })?;
         self.password_check(&c)?;
         let start = self.progress();
         self.last_received = start;
@@ -1158,9 +1095,11 @@ impl Worker<'_> {
             _ => None,
         };
         // two_phase = true stays pending until every table is ready; then it is enabled
-        // as streaming starts (run_apply_worker).
+        // as streaming starts (run_apply_worker). A table synchronization worker's stream
+        // has it off (set_stream_options).
         let all_ready = self.states.values().all(|(s, _)| *s == 'r');
         let two_phase = match self.sub.twophase {
+            _ if sync.is_some() => false,
             'e' => true,
             'p' if all_ready => {
                 self.query("BEGIN")?;
@@ -1206,15 +1145,24 @@ impl Worker<'_> {
             // (ConfigReloadPending: a reload's settings.)
             self.sess.poll_config();
             self.pa_check()?;
-            if self.txn.is_none() && last_check.elapsed() >= Duration::from_secs(1) {
-                last_check = Instant::now();
-                self.load_states();
-                self.ready_tables(self.last_received, true)?;
-                if self.needs_sync() {
+            let between = self.txn.is_none() && self.spools.is_empty() && self.stream_block.is_none();
+            if let Some(target) = self.catchup {
+                // process_syncing_tables_for_sync: a table synchronization worker that reached
+                // the leader's position (its last commit's end, or what it received when idle)
+                // is done there.
+                let at = if idle { self.last_received.max(self.progress()) } else { self.progress() };
+                if between && at >= target {
+                    self.synced_at = Some(at);
                     self.feedback(&mut c, false)?;
                     let _ = c.copy_done();
-                    return Ok(true);
+                    return Ok(false);
                 }
+            } else if sync.is_none() && between && idle {
+                self.sync_for_apply(self.last_received.max(self.progress()))?;
+            }
+            if sync.is_none() && self.txn.is_none() && last_check.elapsed() >= Duration::from_secs(1) {
+                last_check = Instant::now();
+                self.load_states();
                 if self.sub.twophase == 'p' && !two_phase && self.states.values().all(|(s, _)| *s == 'r') {
                     self.log(Severity::Log, &format!(
                         "logical replication apply worker for subscription \"{}\" will restart so that two_phase can be enabled",
@@ -1452,7 +1400,9 @@ impl Worker<'_> {
                 if t.skip {
                     return Ok(());
                 }
-                self.ready_tables(end_lsn, false)?;
+                if self.role == Role::Apply {
+                    self.ready_tables(end_lsn, false)?;
+                }
                 if t.skipping {
                     self.clear_skip_lsn(t.final_lsn)?;
                 }
@@ -1465,6 +1415,10 @@ impl Worker<'_> {
                 r?;
                 if t.skipping {
                     self.log(Severity::Log, &format!("logical replication completed skipping transaction at LSN {}", lsn(t.final_lsn)));
+                }
+                // (process_syncing_tables after the commit.)
+                if self.role == Role::Apply {
+                    self.sync_for_apply(end_lsn)?;
                 }
                 Ok(())
             }
@@ -1666,9 +1620,11 @@ impl Worker<'_> {
                 missing.join(", ")
             ));
         }
-        let apply = match self.states.get(&table.oid) {
-            Some(('r', _)) => true,
-            Some(('s', l)) => *l <= final_lsn,
+        // should_apply_changes_for_rel: a table synchronization worker applies its table's.
+        let apply = match (self.role, self.states.get(&table.oid)) {
+            (Role::Sync(r), _) => r == table.oid,
+            (_, Some(('r', _))) => true,
+            (_, Some(('s', l))) => *l <= final_lsn,
             _ => false,
         };
         Ok(apply.then(|| qualified(&rel.nsp, &rel.name)))
@@ -1691,6 +1647,7 @@ impl Worker<'_> {
         let origin = self.origin;
         let run_as_owner = self.sub.run_as_owner;
         let parallel = self.pa.is_some().then(|| self.sub.name.clone());
+        let role = self.role;
         let (states, local) = (&self.states, &mut self.local);
         let r = self.sess.apply_step(|ctx| {
             if local.get(&id).is_none_or(|l| !l.current(ctx)) {
@@ -1707,9 +1664,10 @@ impl Worker<'_> {
                 )
                 .detail("Cannot handle streamed replication transactions using parallel apply workers until all tables have been synchronized."));
             }
-            let apply = match states.get(&lr.relid) {
-                Some(('r', _)) => true,
-                Some(('s', l)) => *l <= final_lsn,
+            let apply = match (role, states.get(&lr.relid)) {
+                (Role::Sync(r), _) => r == lr.relid,
+                (_, Some(('r', _))) => true,
+                (_, Some(('s', l))) => *l <= final_lsn,
                 _ => false,
             };
             if !apply {

@@ -451,3 +451,43 @@ fn shared_decoding_keeps_each_output() {
     rows(&mut s2, "DROP SUBSCRIPTION s_even");
     rows(&mut s3, "DROP SUBSCRIPTION s_cols");
 }
+
+/// Table synchronization (tablesync.c): the leader keeps applying while a table is copied
+/// (here held up by a lock), the worker catches up on its own permanent slot, which it
+/// drops when done; a copy that fails leaves its slot, which the retry drops first.
+#[test]
+fn table_sync_catches_up_on_its_own_slot() {
+    let mut x = pair();
+    x.both("CREATE TABLE a (id int PRIMARY KEY, v text)");
+    x.both("CREATE TABLE b (id int PRIMARY KEY, v text)");
+    x.both("CREATE TABLE c (id int PRIMARY KEY, v text)");
+    rows(&mut x.s, "ALTER TABLE c ADD CONSTRAINT small CHECK (id < 100)");
+    rows(&mut x.p, "INSERT INTO a SELECT g, 'a' FROM generate_series(1, 50) g");
+    rows(&mut x.p, "INSERT INTO b SELECT g, 'b' FROM generate_series(1, 500) g");
+    rows(&mut x.p, "INSERT INTO c SELECT g, 'c' FROM generate_series(1, 200) g");
+    rows(&mut x.p, "CREATE PUBLICATION p FOR TABLE a, b, c");
+    let mut locker = x._sub_engine.connect(9, "postgres", "postgres", "t").unwrap();
+    rows(&mut locker, "BEGIN; LOCK TABLE b IN ACCESS EXCLUSIVE MODE");
+    x.subscribe("s", "p", "copy_data = true");
+    let ready_a = "SELECT srsubstate FROM pg_subscription_rel WHERE srrelid = 'a'::regclass";
+    wait_for(&mut x.s, ready_a, &["[Char(114)]".to_string()]);
+    // b's copy waits for the lock, c's fails again and again: the leader applies a's rows.
+    rows(&mut x.p, "INSERT INTO a VALUES (100, 'while b copies')");
+    rows(&mut x.p, "INSERT INTO b VALUES (1000, 'while b copies')");
+    x.same("SELECT * FROM a ORDER BY id");
+    let sync_slots = "SELECT count(*) FILTER (WHERE temporary), count(*) FILTER (WHERE NOT temporary) \
+                      FROM pg_replication_slots WHERE slot_name LIKE 'pg\\_%\\_sync\\_%'";
+    // (b's slot, and c's left by its failed copy: permanent.)
+    wait_for(&mut x.p, sync_slots, &["[Int8(0), Int8(2)]".to_string()]);
+    rows(&mut locker, "COMMIT");
+    rows(&mut x.s, "ALTER TABLE c DROP CONSTRAINT small");
+    rows(&mut x.p, "UPDATE c SET v = 'after' WHERE id % 10 = 0");
+    let all_ready = "SELECT count(*) FROM pg_subscription_rel WHERE srsubstate <> 'r'";
+    wait_for(&mut x.s, all_ready, &["[Int8(0)]".to_string()]);
+    for t in ["a", "b", "c"] {
+        x.same(&format!("SELECT * FROM {t} ORDER BY id"));
+    }
+    wait_for(&mut x.p, sync_slots, &["[Int8(0), Int8(0)]".to_string()]);
+    rows(&mut x.p, "INSERT INTO b VALUES (2000, 'ready')");
+    x.same("SELECT * FROM b ORDER BY id");
+}
