@@ -12,11 +12,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn open(data: &Path, outbound: &[&str], settings: &[(&str, &str)]) -> Arc<Engine> {
+    open_fsync(data, outbound, settings, false)
+}
+
+fn open_fsync(data: &Path, outbound: &[&str], settings: &[(&str, &str)], sync: bool) -> Arc<Engine> {
     Engine::open(EngineOptions {
         data_dir: data.to_path_buf(),
         cache_bytes: 4 << 20,
         memtable_bytes: 1 << 20,
-        sync: false,
+        sync,
         idle_close: Duration::from_secs(60),
         superuser: "postgres".into(),
         password: None,
@@ -65,10 +69,15 @@ fn pair() -> Pair {
 
 /// A pair whose subscriber starts with `settings` (track_commit_timestamp, ...).
 fn pair_with(settings: &[(&str, &str)]) -> Pair {
+    pair_fsync(settings, false)
+}
+
+/// `pair_with`, the subscriber fsyncing its WAL (`sync`) or not.
+fn pair_fsync(settings: &[(&str, &str)], sync: bool) -> Pair {
     let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let publisher = open(d1.path(), &[], &[("wal_level", "logical"), ("logical_decoding_work_mem", "64kB")]);
     let port = pg_engine::server::spawn(publisher.clone(), "127.0.0.1:0", ServerOptions { auth: AuthMethod::Trust }).unwrap().port();
-    let subscriber = open(d2.path(), &["127.0.0.1"], settings);
+    let subscriber = open_fsync(d2.path(), &["127.0.0.1"], settings, sync);
     let p = publisher.connect(1, "postgres", "postgres", "t").unwrap();
     let s = subscriber.connect(1, "postgres", "postgres", "t").unwrap();
     Pair { _dirs: (d1, d2), _pub_engine: publisher, _sub_engine: subscriber, p, s, port }
@@ -363,4 +372,82 @@ fn parallel_apply() {
         wait_for(&mut x.s, "SELECT count(*) FROM pg_prepared_xacts", &["[Int8(0)]".to_string()]);
         rows(&mut x.s, "DROP SUBSCRIPTION s");
     }
+}
+
+/// synchronous_commit = off (a subscription's default): applied transactions commit without
+/// waiting for the WAL fsync, and the publisher hears them flushed only once they are
+/// durable (send_feedback's get_flush_position), so a crash before that resends them.
+#[test]
+fn asynchronous_apply_confirms_durable_only() {
+    let mut x = pair_fsync(&[("wal_writer_delay", "10s")], true);
+    x.both("CREATE TABLE t (id int PRIMARY KEY, v text)");
+    rows(&mut x.p, "CREATE PUBLICATION p FOR TABLE t");
+    x.subscribe("s", "p", "copy_data = false");
+    let flushed = "SELECT confirmed_flush_lsn >= pg_current_wal_lsn() FROM pg_replication_slots WHERE slot_name = 's'";
+    rows(&mut x.p, "INSERT INTO t VALUES (0, 'warm-up')");
+    x.same("SELECT * FROM t ORDER BY id");
+    // A synchronous commit flushes what came before; then the WAL writer finds nothing left
+    // and stops, so the next asynchronous commit waits its whole wal_writer_delay.
+    rows(&mut x.s, "CREATE TABLE local_only ()");
+    let yes = rows(&mut x.p, "SELECT true");
+    wait_for(&mut x.p, flushed, &yes);
+    std::thread::sleep(Duration::from_millis(10_500));
+    rows(&mut x.p, "INSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 100) g");
+    x.same("SELECT count(*) FROM t");
+    // Applied and visible, not yet durable: not confirmed.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(rows(&mut x.p, flushed), rows(&mut x.p, "SELECT false"));
+    // Another synchronous commit makes it durable: confirmed at once.
+    rows(&mut x.s, "DROP TABLE local_only");
+    let start = Instant::now();
+    let yes = rows(&mut x.p, "SELECT true");
+    wait_for(&mut x.p, flushed, &yes);
+    assert!(start.elapsed() < Duration::from_secs(5), "confirmed after {:?}", start.elapsed());
+}
+
+/// Walsenders of one database decode each transaction once between them (`decode::Shared`),
+/// and each still sends exactly its own output: a row-filtered publication, a column list,
+/// binary and text transfer, and test_decoding through the SQL functions, read at once.
+#[test]
+fn shared_decoding_keeps_each_output() {
+    let mut x = pair();
+    let ddl = "CREATE TABLE t (id int PRIMARY KEY, a int, b text)";
+    x.both(ddl);
+    rows(&mut x.s, "CREATE DATABASE d2");
+    rows(&mut x.s, "CREATE DATABASE d3");
+    let mut s2 = x._sub_engine.connect(2, "d2", "postgres", "t").unwrap();
+    let mut s3 = x._sub_engine.connect(3, "d3", "postgres", "t").unwrap();
+    rows(&mut s2, ddl);
+    rows(&mut s3, ddl);
+    rows(&mut x.p, "CREATE PUBLICATION p_all FOR TABLE t");
+    rows(&mut x.p, "CREATE PUBLICATION p_even FOR TABLE t WHERE (id % 2 = 0)");
+    rows(&mut x.p, "CREATE PUBLICATION p_cols FOR TABLE t (id, a)");
+    rows(&mut x.p, "SELECT 'init' FROM pg_create_logical_replication_slot('td', 'test_decoding')");
+    x.subscribe("s_all", "p_all", "copy_data = false, binary = true");
+    let conn = format!("host=127.0.0.1 port={} user=postgres dbname=postgres", x.port);
+    rows(&mut s2, &format!("CREATE SUBSCRIPTION s_even CONNECTION '{conn}' PUBLICATION p_even WITH (copy_data = false)"));
+    rows(&mut s3, &format!("CREATE SUBSCRIPTION s_cols CONNECTION '{conn}' PUBLICATION p_cols WITH (copy_data = false)"));
+    wait_for(&mut x.p, "SELECT count(*) FROM pg_stat_replication", &["[Int8(3)]".to_string()]);
+    for i in 0..60 {
+        rows(&mut x.p, &format!("INSERT INTO t SELECT g, g * 3, 'b' || g FROM generate_series({}, {}) g", i * 10, i * 10 + 9));
+        if i % 5 == 4 {
+            rows(&mut x.p, &format!("UPDATE t SET a = a + 1, b = b || 'u' WHERE id % 3 = {}", i % 3));
+        }
+        if i % 7 == 6 {
+            rows(&mut x.p, &format!("DELETE FROM t WHERE id % 11 = {}", i % 11));
+        }
+    }
+    x.same("SELECT * FROM t ORDER BY id");
+    let even = rows(&mut x.p, "SELECT * FROM t WHERE id % 2 = 0 ORDER BY id");
+    wait_for(&mut s2, "SELECT * FROM t ORDER BY id", &even);
+    let cols = rows(&mut x.p, "SELECT id, a, true FROM t ORDER BY id");
+    wait_for(&mut s3, "SELECT id, a, b IS NULL FROM t ORDER BY id", &cols);
+    let td = rows(
+        &mut x.p,
+        "SELECT count(*) FILTER (WHERE data LIKE 'table public.t: INSERT:%'), \
+         count(*) FILTER (WHERE data LIKE 'table public.t: DELETE:%') FROM pg_logical_slot_peek_changes('td', NULL, NULL)",
+    );
+    assert_eq!(td, rows(&mut x.p, "SELECT 600::bigint, 600 - count(*) FROM t"));
+    rows(&mut s2, "DROP SUBSCRIPTION s_even");
+    rows(&mut s3, "DROP SUBSCRIPTION s_cols");
 }

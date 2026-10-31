@@ -437,6 +437,8 @@ fn open_worker<'a>(
         txn: None,
         stat,
         last_received: 0,
+        unflushed: Default::default(),
+        flushed: 0,
         role,
         pa: None,
         pool: parallel::Pool::default(),
@@ -551,6 +553,11 @@ struct Worker<'a> {
     txn: Option<RemoteTxn>,
     stat: WorkerStat,
     last_received: u64,
+    /// lsn_mapping: applied transactions' remote ends with the local commit timestamp each
+    /// must be durable at (an asynchronous commit, synchronous_commit = off, returns before
+    /// its WAL fsync), oldest first; and the last remote end known durable.
+    unflushed: std::collections::VecDeque<(u64, u64)>,
+    flushed: u64,
     role: Role,
     /// A parallel apply worker's state shared with its leader (None in a leader).
     pa: Option<Arc<parallel::Shared>>,
@@ -1138,6 +1145,9 @@ impl Worker<'_> {
         self.password_check(&c)?;
         let start = self.progress();
         self.last_received = start;
+        // (What a restart starts from was durable: the origin's stored progress.)
+        self.unflushed.clear();
+        self.flushed = start;
         // (A streamed transaction in progress is streamed again from its start.)
         self.stream_block = None;
         self.spools.clear();
@@ -1165,7 +1175,7 @@ impl Worker<'_> {
         let mut last_recv = Instant::now();
         let mut last_check = Instant::now();
         let mut last_fb = Instant::now();
-        let mut sent = (0u64, 0u64);
+        let mut sent = (0u64, 0u64, 0u64);
         let mut pinged = false;
         let mut busy = false;
         loop {
@@ -1231,25 +1241,42 @@ impl Worker<'_> {
         }
     }
 
-    /// (write, flush): what was received, and what is committed locally (all received when
-    /// no remote transaction is open: the rest was applied or had nothing to apply).
-    fn positions(&self) -> (u64, u64) {
-        let flush = if self.txn.is_some() || !self.spools.is_empty() || self.pool.busy() {
-            self.progress()
+    /// (write, flush, apply) as send_feedback reports them: what was received; what is
+    /// applied and durable locally (get_flush_position: all received when no applied
+    /// transaction still waits for its WAL fsync and no remote transaction is open); and
+    /// what is applied.
+    fn positions(&mut self) -> (u64, u64, u64) {
+        let applied = self.progress();
+        let store = &self.sess.state.db.store;
+        // (store_flush_position: a commit that moved the origin is at or before the last
+        // timestamp handed out once it has returned.)
+        if applied > self.unflushed.back().map_or(self.flushed, |e| e.0) {
+            self.unflushed.push_back((applied, store.assigned_ts()));
+        }
+        let durable = store.durable_ts();
+        while let Some(&(end, ts)) = self.unflushed.front()
+            && ts <= durable
+        {
+            self.flushed = self.flushed.max(end);
+            self.unflushed.pop_front();
+        }
+        let open = self.txn.is_some() || !self.spools.is_empty() || self.pool.busy();
+        if open || !self.unflushed.is_empty() {
+            (self.last_received, self.flushed, applied)
         } else {
-            self.last_received.max(self.progress())
-        };
-        (self.last_received, flush)
+            let all = self.last_received.max(applied);
+            (self.last_received, all, all)
+        }
     }
 
     /// send_feedback: a Standby Status Update.
     fn feedback(&mut self, c: &mut Conn, request_reply: bool) -> Result<(), String> {
-        let (write, flush) = self.positions();
+        let (write, flush, apply) = self.positions();
         let mut b = Vec::with_capacity(34);
         b.push(b'r');
         b.extend_from_slice(&write.to_be_bytes());
         b.extend_from_slice(&flush.to_be_bytes());
-        b.extend_from_slice(&flush.to_be_bytes());
+        b.extend_from_slice(&apply.to_be_bytes());
         b.extend_from_slice(&now().to_be_bytes());
         b.push(request_reply as u8);
         c.copy_send(&b)

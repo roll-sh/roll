@@ -438,6 +438,22 @@ impl Store {
         self.visible.load(Ordering::Acquire)
     }
 
+    /// The last commit timestamp handed out: every commit that has returned is at or
+    /// before it (an asynchronous one possibly not durable yet).
+    pub fn assigned_ts(&self) -> u64 {
+        self.assigned.load(Ordering::Acquire)
+    }
+
+    /// Every commit up to this timestamp is durable (GetFlushRecPtr): what an asynchronous
+    /// commit's caller waits for before calling it flushed. Without fsync (`--no-fsync`)
+    /// every commit counts as flushed, as PostgreSQL's fsync = off reports its writes.
+    pub fn durable_ts(&self) -> u64 {
+        if !self.opts.sync {
+            return self.assigned.load(Ordering::Acquire);
+        }
+        self.durable.load(Ordering::Acquire)
+    }
+
     /// The last commit timestamp handed out: no version newer than it can be read
     /// (commits waiting for their WAL fsync included).
     pub fn last_assigned_ts(&self) -> u64 {

@@ -43,6 +43,9 @@ pub struct PgOutput {
     two_phase: bool,
     origin_none: bool,
     entries: HashMap<u32, (Arc<RelDesc>, Arc<Entry>)>,
+    /// The catalog version `entries` were worked out under (rel_sync_cache_publication_cb:
+    /// a relation's description is the same `Arc` across transactions, `decode::Shared`).
+    entries_catalog: u64,
     /// Relations whose schema went out (per streamed transaction, or outside streaming).
     sent: HashSet<u32>,
     stream_sent: HashSet<u32>,
@@ -121,6 +124,15 @@ impl PgOutput {
     fn xid(&self, b: &mut Vec<u8>, t: &TxnInfo) {
         if self.in_stream {
             i32(b, t.xid as i32);
+        }
+    }
+
+    /// What `entries` holds is worked out again after DDL (publications, their tables).
+    fn invalidate(&mut self, c: &Ctx) {
+        let v = c.db.catalog().version;
+        if v != self.entries_catalog {
+            self.entries.clear();
+            self.entries_catalog = v;
         }
     }
 
@@ -654,8 +666,9 @@ impl Plugin for PgOutput {
         Ok(())
     }
 
-    fn begin(&mut self, _c: &mut Ctx, _t: &TxnInfo) -> Result<()> {
+    fn begin(&mut self, c: &mut Ctx, _t: &TxnInfo) -> Result<()> {
         self.sent_begin = false;
+        self.invalidate(c);
         Ok(())
     }
 
@@ -691,6 +704,7 @@ impl Plugin for PgOutput {
 
     fn begin_prepare(&mut self, c: &mut Ctx, t: &TxnInfo) -> Result<()> {
         self.sent_begin = true;
+        self.invalidate(c);
         c.write(Self::gid_msg(b'b', false, &[t.final_lsn, t.end_lsn], &[t.time], t));
         Ok(())
     }
@@ -714,6 +728,7 @@ impl Plugin for PgOutput {
     fn stream_start(&mut self, c: &mut Ctx, t: &TxnInfo) -> Result<()> {
         let first = !self.in_stream && self.stream_sent.is_empty();
         self.in_stream = true;
+        self.invalidate(c);
         let mut b = vec![b'S'];
         i32(&mut b, t.xid as i32);
         i8(&mut b, first as u8);

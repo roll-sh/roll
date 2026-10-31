@@ -285,6 +285,8 @@ pub struct DbLog {
     descs: Mutex<HashMap<u32, (u64, Arc<Vec<u8>>)>>,
     /// Records ending at or before this position were removed (`gc_writes`).
     pub gc_upto: AtomicU64,
+    /// What the database's decoders share (`decode::Shared`).
+    pub decoded: super::decode::Shared,
 }
 
 impl DbLog {

@@ -10,6 +10,7 @@ use super::slot::SlotStats;
 use crate::error::{Error, Result, code};
 use crate::txn::Database;
 use crate::types::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -173,6 +174,8 @@ pub struct Decoder<'a> {
     /// Replay a transaction without its changes (`outgrows_work_mem` and `rolled_back`).
     skip_changes: bool,
     output_rewrites: bool,
+    /// Counted among the database's decoders (`decode::Shared`).
+    _reader: decode::Reader,
 }
 
 /// How a decoding context is set up.
@@ -215,6 +218,7 @@ impl<'a> Decoder<'a> {
             rows: 0,
             skip_changes: false,
             output_rewrites: st.output_rewrites,
+            _reader: decode::Shared::reader(db),
         })
     }
 
@@ -305,7 +309,7 @@ impl<'a> Decoder<'a> {
     fn outgrows_work_mem(&mut self, m: &Marker) -> Result<bool> {
         let store = self.ctx.db.store.clone();
         let mut size = 0usize;
-        for c in decode::changes(&store, m) {
+        for c in decode::changes(&store, &self.ctx.db.log.decoded, m) {
             let c = c?;
             if let Rec::Rel(d) = &c.rec {
                 self.ctx.rels.insert(d.oid, d.clone());
@@ -339,12 +343,19 @@ impl<'a> Decoder<'a> {
         let store = self.ctx.db.store.clone();
         let mut size = 0usize;
         let mut total = 0usize;
-        let mut pending: Vec<Change> = Vec::new();
+        let mut pending: Vec<Cow<Change>> = Vec::new();
         let mut streamed = false;
         let mut began = false;
         let mut spilled = false;
         let keep = if self.skip_changes { 0 } else { usize::MAX };
-        for c in decode::changes(&store, m).take(keep) {
+        let db = self.ctx.db;
+        // (Decoded once for the database's decoders when it can be kept: `decode::Shared`.)
+        let shared = if keep == 0 { None } else { db.log.decoded.txn(&store, m)? };
+        let changes: Box<dyn Iterator<Item = Result<Cow<Change>>>> = match &shared {
+            Some(cs) => Box::new(cs.iter().map(|c| Ok(Cow::Borrowed(c)))),
+            None => Box::new(decode::changes(&store, &db.log.decoded, m).take(keep).map(|c| c.map(Cow::Owned))),
+        };
+        for c in changes {
             let c = c?;
             if let Rec::Rel(d) = &c.rec {
                 self.ctx.rels.insert(d.oid, d.clone());
@@ -426,7 +437,7 @@ impl<'a> Decoder<'a> {
     fn stream_block(
         &mut self,
         t: &TxnInfo,
-        pending: &mut Vec<Change>,
+        pending: &mut Vec<Cow<Change>>,
         streamed: &mut bool,
         size: usize,
         sink: &mut dyn FnMut(Output) -> Result<()>,
