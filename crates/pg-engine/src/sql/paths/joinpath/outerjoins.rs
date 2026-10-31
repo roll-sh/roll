@@ -374,7 +374,7 @@ fn strict_items(e: &Expr, item: &dyn Fn(usize) -> u32) -> u32 {
             it.fold(first, |m, x| m & x)
         }
         Expr::Call(d, args, _) if d.strict => args.iter().fold(0, |m, a| m | strict_items(a, item)),
-        Expr::Cast(x, ..) | Expr::Relabel(x, _) | Expr::Not(x) => strict_items(x, item),
+        Expr::Cast(x, ..) | Expr::Relabel(x, _) | Expr::Not(x) | Expr::SqlSyntax(x) => strict_items(x, item),
         Expr::IsNull(x, true) => strict_items(x, item),
         Expr::ArrayOp { left, right, all, op } if op.strict && (!*all || crate::sql::paths::reducejoins::saop_nonempty(right)) => {
             strict_items(left, item)

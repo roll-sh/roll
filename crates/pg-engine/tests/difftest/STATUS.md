@@ -407,6 +407,13 @@ Batch 1 (`a118_cursor_plan`, `a118_round6_fixes`, `a118_error_order`, `a118_roun
   the SET LOGGED rewrite in key order: with the table measured after the rewrite (as
   PostgreSQL's reindex leaves it) the UPDATE scans the heap, whose order is the layout's.
 
+Batch 2 (`a118_round6_d`), agent 84's extract() item at its source: a call written in SQL
+syntax (EXTRACT, SUBSTRING, POSITION, TRIM, OVERLAY, ...) is bound wrapped as `Expr::SqlSyntax`
+(for its display), which the strictness analyses didn't look through, so a WHERE over one never
+reduced an outer join (seeds 4005, 4014, 4045, 4047: FULL JOIN errors; LEFT JOINs kept where
+PostgreSQL has inner joins). `reducejoins::value_cols` / `nonnull_cols`, `outerjoins::
+strict_items` and `nulls_with_row` see through it: in PostgreSQL it is the same FuncExpr.
+
 Memory (agent 104's 362 / 317 MB): not reproduced. Same seeds 5106–5255, the engine of
 534eef2b^ with cdb8d269's harness against cdb8d269, two runs each: peak 577 / 612 MB (base)
 and 598 / 606 MB (head), final RSS 194–222 MB on both, the same binary varying by up to 35 MB
@@ -915,10 +922,6 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     a join above reads it (the output isn't a PlaceHolderVar there).
 
 - **Round 4 seeds, reduced, not fixed** (cases in the round's notes above):
-  - FULL JOIN error where PostgreSQL first reduces it: `t1 FULL JOIN t3 t5 ON (SELECT true)
-    WHERE extract(dow FROM t5.b) = 0` errors in the engine (0A000), while `WHERE t5.c = 0`
-    reduces as PostgreSQL does; extract over a date isn't seen as strict by the reduction
-    (seeds 4005 #1, 4014, 4045, 4047, and the 0A000 wrong_errors after them).
   - Errors PostgreSQL raises while planning that the engine never raises: a regular
     expression under a nondeterministic collation in a qual over an empty table (seed 4066
     #49: patternsel compiles it for its estimate); an implicit-collation conflict in a CASE's

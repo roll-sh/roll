@@ -1,0 +1,60 @@
+> CREATE TABLE x1 (a int, b date)
+-- CREATE TABLE
+
+> CREATE TABLE x3 (a int, b date, c int, s text)
+-- CREATE TABLE
+
+> INSERT INTO x1 VALUES (1, '2025-01-05')
+-- INSERT 0 1
+
+> INSERT INTO x3 VALUES (1, '2025-01-05', 0, 'abc'), (2, '2025-01-06', 1, NULL)
+-- INSERT 0 2
+
+> SELECT * FROM x1 FULL JOIN x3 t5 ON (SELECT true) WHERE extract(dow FROM t5.b) = 0
+a:int4 | b:date | a:int4 | b:date | c:int4 | s:text
+1 | 2025-01-05 | 1 | 2025-01-05 | 0 | abc
+-- SELECT 1
+
+> SELECT * FROM x1 FULL JOIN x3 t5 ON x1.a > t5.a WHERE extract(dow FROM t5.b) = 0
+a:int4 | b:date | a:int4 | b:date | c:int4 | s:text
+NULL | NULL | 1 | 2025-01-05 | 0 | abc
+-- SELECT 1
+
+> EXPLAIN (COSTS OFF) SELECT * FROM x1 LEFT JOIN x3 t5 ON x1.a = t5.a WHERE extract(dow FROM t5.b) > 0
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (x1.a = t5.a)
+  ->  Seq Scan on x1
+  ->  Hash
+        ->  Seq Scan on x3 t5
+              Filter: (EXTRACT(dow FROM b) > '0'::numeric)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM x1 LEFT JOIN x3 t5 ON x1.a = t5.a WHERE substring(t5.s FROM 1 FOR 1) = 'a'
+QUERY PLAN:text
+Hash Join
+  Hash Cond: (x1.a = t5.a)
+  ->  Seq Scan on x1
+  ->  Hash
+        ->  Seq Scan on x3 t5
+              Filter: (SUBSTRING(s FROM 1 FOR 1) = 'a'::text)
+-- EXPLAIN
+
+> EXPLAIN (COSTS OFF) SELECT * FROM x1 LEFT JOIN x3 t5 ON x1.a = t5.a WHERE position('b' IN t5.s) IS NOT NULL
+QUERY PLAN:text
+Merge Join
+  Merge Cond: (t5.a = x1.a)
+  ->  Sort
+        Sort Key: t5.a
+        ->  Seq Scan on x3 t5
+              Filter: (POSITION(('b'::text) IN (s)) IS NOT NULL)
+  ->  Sort
+        Sort Key: x1.a
+        ->  Seq Scan on x1
+-- EXPLAIN
+
+> SELECT x1.a, t5.s FROM x1 LEFT JOIN x3 t5 ON x1.a = t5.a WHERE position('b' IN t5.s) IS NOT NULL
+a:int4 | s:text
+1 | abc
+-- SELECT 1
+

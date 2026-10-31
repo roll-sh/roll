@@ -22,7 +22,8 @@ fn value_cols(e: &Expr, out: &mut Cols) {
             args.iter().take(1).for_each(|a| value_cols(a, out))
         }
         Expr::Call(d, args, _) if d.strict => args.iter().for_each(|a| value_cols(a, out)),
-        Expr::Cast(x, ..) | Expr::Relabel(x, _) | Expr::Collate(x, ..) => value_cols(x, out),
+        // (A call in SQL syntax, `EXTRACT(dow FROM d)`, is its function's call.)
+        Expr::Cast(x, ..) | Expr::Relabel(x, _) | Expr::Collate(x, ..) | Expr::SqlSyntax(x) => value_cols(x, out),
         _ => {}
     }
 }
@@ -44,7 +45,7 @@ fn nonnull_cols(e: &Expr, top: bool) -> Cols {
         Expr::Call(d, args, _) if d.strict && d.name != crate::sql::binder::INDETERMINATE_HASH => {
             args.iter().flat_map(|a| nonnull_cols(a, false)).collect()
         }
-        Expr::Cast(x, ..) | Expr::Relabel(x, _) | Expr::Collate(x, ..) => nonnull_cols(x, top),
+        Expr::Cast(x, ..) | Expr::Relabel(x, _) | Expr::Collate(x, ..) | Expr::SqlSyntax(x) => nonnull_cols(x, top),
         Expr::IsNull(x, true) if top && !is_row(&x.ty()) => nonnull_cols(x, false),
         Expr::BoolTest(x, BoolTest::IsTrue | BoolTest::IsFalse | BoolTest::IsNotUnknown)
             if top =>

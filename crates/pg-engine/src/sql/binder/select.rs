@@ -8183,7 +8183,7 @@ fn nulls_with_row(e: &Expr) -> bool {
     }
     let mut strict = true;
     e.walk(&mut |x| match x {
-        Expr::Col(..) | Expr::Const(..) | Expr::Cast(..) | Expr::Relabel(..) | Expr::Collate(..) => {}
+        Expr::Col(..) | Expr::Const(..) | Expr::Cast(..) | Expr::Relabel(..) | Expr::Collate(..) | Expr::SqlSyntax(..) => {}
         Expr::Call(d, ..) if d.strict => {}
         _ => strict = false,
     });
