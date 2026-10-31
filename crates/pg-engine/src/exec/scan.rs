@@ -38,6 +38,21 @@ pub(crate) fn row_data(bytes: &[u8]) -> Result<&[u8]> {
     split_header(bytes).map(|(_, d)| d)
 }
 
+/// `row_data` stepping over the header's numbers without reading them (None: not a row
+/// with a header, or a truncated one).
+fn row_data_fast(bytes: &[u8]) -> Option<&[u8]> {
+    let n = match *bytes.first()? {
+        ROW_HEADER | ROW_HEADER_EXT => 1,
+        ROW_HEADER_TID | ROW_HEADER_TID_EXT => 3,
+        _ => return None,
+    };
+    let mut pos = 1;
+    for _ in 0..n {
+        pos += bytes.get(pos..)?.iter().position(|b| *b < 0x80)? + 1;
+    }
+    bytes.get(pos..)
+}
+
 /// Split a stored row into its xmin and the encoded values.
 fn split_header(bytes: &[u8]) -> Result<(u64, &[u8])> {
     let (xid, _, rest) = split_header_tid(bytes)?;
@@ -46,7 +61,14 @@ fn split_header(bytes: &[u8]) -> Result<(u64, &[u8])> {
 
 /// The heap TID a stored row was written with (None: it has none).
 pub fn stored_tid(bytes: &[u8]) -> Option<(u32, u16)> {
-    split_header_tid(bytes).ok().and_then(|(_, t, _)| t)
+    if !matches!(bytes.first(), Some(&(ROW_HEADER_TID | ROW_HEADER_TID_EXT))) {
+        return None;
+    }
+    // (The xmin stepped over unread.)
+    let mut pos = 1 + bytes.get(1..)?.iter().position(|b| *b < 0x80)? + 1;
+    let block = crate::storage::sst::get_varint(bytes, &mut pos).ok()?;
+    let off = crate::storage::sst::get_varint(bytes, &mut pos).ok()?;
+    Some((block as u32, off as u16))
 }
 
 /// Decode a stored row, filling columns added after it was written.
@@ -485,6 +507,14 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            rb: Default::default(),
+            rb_max: RB_MIN,
+            held: false,
+            one: None,
+            run_blocks: Vec::new(),
+            hstream: None,
+            hstream_tried: false,
+            any_order: false,
             skip: None,
             rev: false,
             kills: None,
@@ -565,6 +595,14 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            rb: Default::default(),
+            rb_max: RB_MIN,
+            held: false,
+            one: None,
+            run_blocks: Vec::new(),
+            hstream: None,
+            hstream_tried: false,
+            any_order: false,
             skip: None,
             rev: false,
             kills: None,
@@ -635,6 +673,14 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             ranges: Vec::new(),
             cur_range: 0,
             iter: None,
+            rb: Default::default(),
+            rb_max: RB_MIN,
+            held: false,
+            one: None,
+            run_blocks: Vec::new(),
+            hstream: None,
+            hstream_tried: false,
+            any_order: false,
             skip: None,
             rev: false,
             kills: None,
@@ -855,6 +901,14 @@ fn open_scan_as(
         ranges,
         cur_range: 0,
         iter: None,
+        rb: Default::default(),
+        rb_max: RB_MIN,
+        held: false,
+        one: None,
+        run_blocks: Vec::new(),
+        hstream: None,
+        hstream_tried: false,
+        any_order: false,
         skip,
         rev,
         kills,
@@ -1585,6 +1639,14 @@ fn dense_bitmap_scan(
         ranges: vec![(p.clone(), prefix_end(&p))],
         cur_range: 0,
         iter: None,
+        rb: Default::default(),
+        rb_max: RB_MIN,
+        held: false,
+        one: None,
+        run_blocks: Vec::new(),
+        hstream: None,
+        hstream_tried: false,
+        any_order: false,
         skip: None,
         rev: false,
         kills: None,
@@ -1965,6 +2027,25 @@ struct ScanNode {
     ranges: Vec<(Vec<u8>, Vec<u8>)>,
     cur_range: usize,
     iter: Option<StoreIter>,
+    /// The rows `iter` gave and the plain path hasn't returned yet, by reference into the
+    /// store's blocks (`TxnScan::fill_batch`; `refill`), `rb_max` at a time.
+    rb: crate::storage::batch::RowBatch,
+    rb_max: usize,
+    /// `rb`'s row at its cursor was handed out by reference (`next_plain`): passed at the
+    /// next call.
+    held: bool,
+    /// A row `next_raw_ref` handed out owned (the paths that don't read through `rb`).
+    one: Option<(Vec<u8>, bytes::Bytes)>,
+    /// The heap blocks of the rows `pass_run` passed last without pruning them (under heap
+    /// order), for the caller to prune as it reaches them.
+    run_blocks: Vec<u32>,
+    /// A heap-order scan of rows not stored in heap order, streamed (`heaporder`), once
+    /// started; `hstream_tried`: decided whether it can be.
+    hstream: Option<Box<super::heaporder::Stream>>,
+    hstream_tried: bool,
+    /// count(*)'s rows, whose order nothing observes: a heap-order scan reads them as
+    /// stored (`count_rest`).
+    any_order: bool,
     /// A btree skip scan (`IndexBounds::skip`): which entries of its ranges it reads.
     skip: Option<Box<Skip>>,
     /// A backward index scan: its ranges (last first) read in descending key order.
@@ -2039,6 +2120,13 @@ struct ScanNode {
 /// Rows index-only scans made from index entries alone (`ScanNode::index_row`), for tests.
 #[doc(hidden)]
 pub static ROWS_FROM_INDEX_ENTRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Heap-order scans streamed (`ScanNode::next_heap_ordered`), and the displaced rows they
+/// held, for tests.
+#[doc(hidden)]
+pub static HEAP_ORDER_STREAMED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[doc(hidden)]
+pub static HEAP_ORDER_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The index columns (table column, type, direction) a bitmap's quals can be checked on
 /// from the index entries alone: a btree's plain columns of the types `index_only_columns`
@@ -2155,6 +2243,11 @@ fn index_only_columns(s: &ScanPlan, ctx: &ExecCtx) -> Option<Vec<(usize, crate::
 const FETCH_BATCH_MIN: usize = 4;
 const FETCH_BATCH_MAX: usize = 128;
 
+/// A plain scan's rows read from storage together (`ScanNode::rb`), from this many up to
+/// `RB_MAX` as the scan goes on (a LIMIT may want one).
+const RB_MIN: usize = 16;
+const RB_MAX: usize = 256;
+
 /// The rows stored under `keys` (None: none visible), as the statement's snapshot sees
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
@@ -2164,9 +2257,30 @@ pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<b
     }
     let txn = ctx.txn.borrow();
     match ctx.snapshot().as_deref() {
-        Some(s) => txn.get_many_snap(keys, s),
+        Some(s) => get_sorted(&txn, keys, s, true),
         None => keys.iter().map(|k| txn.get(k)).collect(),
     }
+}
+
+/// `get_many_snap` (`resolve`) or `get_many_snap_raw` of `keys`: ascending ones as a sorted
+/// batch of reads (`Txn::get_sorted_snap_into`), the store sought forward from key to key
+/// instead of a lookup each.
+fn get_sorted(txn: &crate::txn::Txn, keys: &[Vec<u8>], s: &crate::txn::Snap, resolve: bool) -> Result<Vec<Option<bytes::Bytes>>> {
+    if keys.len() < 2 || !keys.windows(2).all(|w| w[0] < w[1]) {
+        return match resolve {
+            true => txn.get_many_snap(keys, s),
+            false => txn.get_many_snap_raw(keys, s),
+        };
+    }
+    let mut b = crate::storage::batch::RowBatch::default();
+    txn.get_sorted_snap_into(keys, s, resolve, &mut b)?;
+    Ok(keys
+        .iter()
+        .map(|k| match b.peek() {
+            Some((bk, _)) if bk == k.as_slice() => b.take().map(|r| r.1),
+            _ => None,
+        })
+        .collect())
 }
 
 /// `fetch_rows` of ascending keys of one integer key column (a rowid table's, or an integer
@@ -2493,6 +2607,23 @@ impl ScanNode {
         }
     }
 
+    /// A sequential scan's heap order, decided at its first row: `streamed` (not modelled),
+    /// or rows stored in heap order (`in_order`) or to be put in it.
+    fn heap_mode(&mut self, ctx: &ExecCtx) {
+        if self.sorted.is_none() && !self.streamed && self.in_order.is_none() {
+            self.nblocks = super::sizing::modelled_blocks(self.plan.table.oid, ctx);
+            // A table whose heap isn't modelled (too big) has no heap order to put its
+            // rows in: they come as stored, read as they're asked for.
+            if !super::sizing::heap_modelled(&self.plan.table, ctx) {
+                self.streamed = true;
+            } else {
+                // (A plain sequential scan's: other reads take their rows in another order.)
+                let plain = self.keys.is_none() && self.only.is_none() && self.sample.is_none() && self.plan.index.is_none() && self.ranges.len() <= 1;
+                self.in_order = Some(plain && super::sizing::heap_in_key_order(&self.plan.table, ctx));
+            }
+        }
+    }
+
     /// Next (data key, stored row bytes), in heap order where Postgres's would be.
     fn next_raw(&mut self, ctx: &ExecCtx) -> Result<Option<(Vec<u8>, bytes::Bytes)>> {
         if !self.tid_order {
@@ -2506,18 +2637,7 @@ impl ScanNode {
             return Ok(r);
         }
         if !self.secondary {
-            if self.sorted.is_none() && !self.streamed && self.in_order.is_none() {
-                self.nblocks = super::sizing::modelled_blocks(self.plan.table.oid, ctx);
-                // A table whose heap isn't modelled (too big) has no heap order to put its
-                // rows in: they come as stored, read as they're asked for.
-                if !super::sizing::heap_modelled(&self.plan.table, ctx) {
-                    self.streamed = true;
-                } else {
-                    // (A plain sequential scan's: other reads take their rows in another order.)
-                    let plain = self.keys.is_none() && self.only.is_none() && self.sample.is_none() && self.plan.index.is_none() && self.ranges.len() <= 1;
-                    self.in_order = Some(plain && super::sizing::heap_in_key_order(&self.plan.table, ctx));
-                }
-            }
+            self.heap_mode(ctx);
             if self.streamed {
                 return self.next_stored(ctx);
             }
@@ -2735,24 +2855,291 @@ impl ScanNode {
             // Index entry → its row.
             return Ok(self.next_indexed(ctx)?.map(|(_, dkey, row)| (dkey, row)));
         }
+        if !self.next_plain(ctx)? {
+            return Ok(None);
+        }
+        self.held = false;
+        Ok(self.rb.take())
+    }
+
+    /// The ranges' next row (`only` and `sample` applied) at `rb`'s cursor (false: none
+    /// left), handed out by reference until the next call.
+    fn next_plain(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        if std::mem::take(&mut self.held) {
+            self.rb.advance();
+        }
+        loop {
+            let Some((k, v)) = self.rb.peek() else {
+                if !self.refill(ctx)? {
+                    return Ok(false);
+                }
+                continue;
+            };
+            let skip = self.only.as_ref().is_some_and(|o| o.as_slice() != k)
+                || self.sample.as_mut().is_some_and(|s| !s.keep(k, v));
+            if skip {
+                self.rb.advance();
+                continue;
+            }
+            self.held = true;
+            return Ok(true);
+        }
+    }
+
+    /// `rb` emptied and filled with the ranges' next rows (false: none left): a batch of the
+    /// store's rows by reference, or the next row of a skip scan or a backward one.
+    fn refill(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        self.rb.clear();
         loop {
             if self.iter.is_none() && !self.open_range(ctx) {
+                return Ok(false);
+            }
+            match &mut self.iter {
+                Some(StoreIter::Fwd(it)) if self.skip.as_ref().is_none_or(|s| s.plain) => {
+                    it.fill_batch(&mut self.rb, self.rb_max)?;
+                    self.rb_max = (self.rb_max * 2).min(RB_MAX);
+                }
+                _ => {
+                    if let Some(r) = self.iter_next(ctx) {
+                        let (k, v) = r?;
+                        self.rb.push(&k, v);
+                    }
+                }
+            }
+            if !self.rb.is_empty() {
+                return Ok(true);
+            }
+            self.iter = None;
+        }
+    }
+
+    /// `next_raw`'s row by reference (`entry`; false: none left): a plain scan's rows from
+    /// `rb` as the store gave them, the other paths' as `next_raw` makes them (`one`).
+    fn next_raw_ref(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        self.one = None;
+        if self.am.is_none() && self.keys.is_none() && !self.secondary {
+            if !self.tid_order && self.kills.is_none() {
+                return self.next_plain(ctx);
+            }
+            if self.tid_order {
+                self.heap_mode(ctx);
+                if self.streamed {
+                    return self.next_plain(ctx);
+                }
+                if self.any_order {
+                    // (Rows as stored; every page pruned once they are read.)
+                    let more = self.next_plain(ctx)?;
+                    if !more {
+                        self.prune_to(self.nblocks, ctx);
+                    }
+                    return Ok(more);
+                }
+                if self.in_order == Some(true) {
+                    if !self.next_plain(ctx)? {
+                        self.prune_to(self.nblocks, ctx);
+                        return Ok(false);
+                    }
+                    if let Some((b, _)) = self.rb.peek().and_then(|(_, v)| stored_tid(v)) {
+                        debug_assert!(b + 1 >= self.prune_next, "rows out of heap order");
+                        self.prune_to(Some(b + 1), ctx);
+                        return Ok(true);
+                    }
+                    // (A row without its TID: `next_raw` takes it again, and the rest in
+                    // heap order.)
+                    self.held = false;
+                }
+                if self.in_order == Some(false)
+                    && self.sorted.is_none()
+                    && let Some(r) = self.next_heap_ordered(ctx)?
+                {
+                    return Ok(r);
+                }
+            }
+        }
+        self.one = self.next_raw(ctx)?;
+        Ok(self.one.is_some())
+    }
+
+    /// After `next_raw_ref` handed out a row of `rb`: passes the rows after it in `rb` that
+    /// it would hand out next as they are (all of them on a plain or streamed scan; under
+    /// heap order those with their TID, the pages pruned up to the last one's when `prune`,
+    /// else left to the caller: `run_blocks`), leaving the last one handed out. How many.
+    fn pass_run(&mut self, ctx: &ExecCtx, prune: bool) -> usize {
+        self.run_blocks.clear();
+        if !self.held || self.one.is_some() || self.only.is_some() || self.sample.is_some() {
+            return 0;
+        }
+        let in_order = self.tid_order && !self.streamed && !self.any_order;
+        if (!self.tid_order && self.kills.is_some()) || (in_order && self.in_order != Some(true)) {
+            return 0;
+        }
+        let (mut n, mut block) = (0, None);
+        while self.rb.remaining() > 1 {
+            if in_order {
+                match stored_tid(self.rb.get(self.rb.pos() + 1).1) {
+                    Some((b, _)) => block = Some(b),
+                    None => break,
+                }
+                if !prune {
+                    self.run_blocks.push(block.unwrap_or_default());
+                }
+            }
+            self.rb.advance();
+            n += 1;
+        }
+        if let Some(b) = block.filter(|_| prune) {
+            self.prune_to(Some(b + 1), ctx);
+        }
+        n
+    }
+
+    /// The scan's range read again from its start.
+    fn restart(&mut self) {
+        self.cur_range = 0;
+        self.iter = None;
+        self.rb.clear();
+        self.held = false;
+        self.rb_max = RB_MIN;
+    }
+
+    /// `next_raw_ref` for a sequential scan of a modelled heap whose rows aren't stored in
+    /// heap order: rows streamed in heap order (`heaporder`), none of them held but the
+    /// displaced ones. None when the scan can't (no statement snapshot to read the range
+    /// again at, rows stored without their TIDs or a heap laid out afresh, other reads than
+    /// a plain one): `next_raw` reads them all and sorts them.
+    fn next_heap_ordered(&mut self, ctx: &ExecCtx) -> Result<Option<bool>> {
+        use super::heaporder::{Stream, displaced, is_set, tid_rank};
+        if self.hstream.is_none() {
+            if std::mem::replace(&mut self.hstream_tried, true) {
                 return Ok(None);
             }
-            match self.iter_next(ctx) {
-                Some(r) => {
-                    let (k, v) = r?;
-                    if self.only.as_ref().is_some_and(|o| *o != k) {
-                        continue;
+            let plain = ctx.snapshot().is_some()
+                && self.only.is_none()
+                && self.sample.is_none()
+                && self.kills.is_none()
+                && self.ranges.len() <= 1
+                && self.cur_range == 0
+                && self.iter.is_none()
+                && !super::sizing::heap_unstamped(&self.plan.table, ctx);
+            if !plain {
+                return Ok(None);
+            }
+            self.hstream = Some(Box::new(Stream::Tids(Vec::new())));
+        }
+        let tid = |v: &[u8]| stored_tid(v).map(tid_rank);
+        loop {
+            match self.hstream.as_deref_mut().expect("a stream") {
+                Stream::Tids(tids) => {
+                    let mut tids = std::mem::take(tids);
+                    // (The batch's rows read where they are.)
+                    while self.next_plain(ctx)? {
+                        ctx.check()?;
+                        loop {
+                            let Some(t) = self.rb.peek().and_then(|(_, v)| tid(v)) else {
+                                // (A row without its TID: all of them read and sorted.)
+                                self.hstream = None;
+                                self.restart();
+                                return Ok(None);
+                            };
+                            tids.push(t);
+                            if self.rb.remaining() <= 1 {
+                                break;
+                            }
+                            self.rb.advance();
+                        }
                     }
-                    if let Some(s) = &mut self.sample
-                        && !s.keep(&k, &v)
-                    {
-                        continue;
+                    let (bits, early_bits) = displaced(&tids);
+                    drop(tids);
+                    self.restart();
+                    if bits.iter().all(|w| *w == 0) {
+                        // (In heap order after all.)
+                        self.hstream = None;
+                        self.in_order = Some(true);
+                        return self.next_raw_ref(ctx).map(Some);
                     }
-                    return Ok(Some((k, v)));
+                    // The early displaced rows, read beforehand (when there are any).
+                    let mut early = Vec::new();
+                    if early_bits.iter().any(|w| *w != 0) {
+                        let mut at = 0;
+                        while self.next_plain(ctx)? {
+                            ctx.check()?;
+                            loop {
+                                at += 1;
+                                if is_set(&early_bits, at - 1) {
+                                    let (k, v) = self.rb.take().expect("a row");
+                                    early.push((tid(&v).unwrap_or(u64::MAX), k, v));
+                                    if self.rb.remaining() == 0 {
+                                        self.held = false;
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                if self.rb.remaining() <= 1 {
+                                    break;
+                                }
+                                self.rb.advance();
+                            }
+                        }
+                        early.sort_unstable_by_key(|r| r.0);
+                        self.restart();
+                    }
+                    HEAP_ORDER_STREAMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let held: u32 = bits.iter().map(|w| w.count_ones()).sum();
+                    HEAP_ORDER_HELD.fetch_add(held as u64, std::sync::atomic::Ordering::Relaxed);
+                    self.hstream = Some(Box::new(Stream::Merge {
+                        bits,
+                        early_bits,
+                        pos: 0,
+                        ready: None,
+                        early: early.into(),
+                        late: Default::default(),
+                    }));
                 }
-                None => self.iter = None,
+                Stream::Merge { bits, early_bits, pos, ready, early, late } => {
+                    // A held row of a lesser TID than the run's next row first, else that row;
+                    // with the run done, the held rows left, then the end.
+                    if ready.is_some() || *pos == usize::MAX {
+                        let t = *ready;
+                        let (t, row) = match Stream::pop_below(early, late, t) {
+                            Some((d, k, v)) => (d, Some((k, v))),
+                            None => match t {
+                                Some(t) => {
+                                    *ready = None;
+                                    self.held = true;
+                                    (t, None)
+                                }
+                                None => {
+                                    self.prune_to(self.nblocks, ctx);
+                                    return Ok(Some(false));
+                                }
+                            },
+                        };
+                        self.one = row;
+                        self.prune_to(Some(((t >> 16) as u32).saturating_add(1)), ctx);
+                        return Ok(Some(true));
+                    }
+                    // The run's next row; the late displaced rows before it held.
+                    let (bits, early_bits, mut at) = (std::mem::take(bits), std::mem::take(early_bits), *pos);
+                    let (mut next, mut met) = (None, Vec::new());
+                    while self.next_plain(ctx)? {
+                        at += 1;
+                        if !is_set(&bits, at - 1) {
+                            next = Some(self.rb.peek().and_then(|(_, v)| tid(v)).unwrap_or(u64::MAX));
+                            self.held = false;
+                            break;
+                        }
+                        if !is_set(&early_bits, at - 1) {
+                            let (k, v) = self.rb.peek().expect("a row");
+                            met.push((tid(v).unwrap_or(u64::MAX), k.to_vec(), bytes::Bytes::copy_from_slice(v)));
+                        }
+                    }
+                    let Stream::Merge { bits: b, early_bits: eb, pos, ready, late, .. } = self.hstream.as_deref_mut().expect("a stream") else {
+                        unreachable!()
+                    };
+                    late.extend(met.into_iter().map(std::cmp::Reverse));
+                    (*b, *eb, *ready) = (bits, early_bits, next);
+                    *pos = if next.is_some() { at } else { usize::MAX };
+                }
             }
         }
     }
@@ -2764,6 +3151,8 @@ impl ScanNode {
 struct LazyScan {
     d: super::parscan::Decode,
     buf: super::parscan::LazyBuf,
+    /// The filter as comparisons run over the stored values (`kernel::StoredCmps`).
+    cmps: Option<super::kernel::StoredCmps>,
 }
 
 impl ScanNode {
@@ -2790,7 +3179,7 @@ impl ScanNode {
             };
             self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src)));
         }
-        txn.get_many_snap_raw(keys, &snap)
+        get_sorted(&txn, keys, &snap, false)
     }
 
     /// Whether this scan's rows go through `LazyScan` (decided once): a plain sequential
@@ -2826,7 +3215,8 @@ impl ScanNode {
                     toast: None,
                 };
                 let buf = super::parscan::LazyBuf::new(&d);
-                Box::new(LazyScan { d, buf })
+                let cmps = d.filter.as_ref().and_then(super::kernel::StoredCmps::of);
+                Box::new(LazyScan { d, buf, cmps })
             }));
         }
         self.lazy.as_mut().unwrap().as_deref_mut()
@@ -2841,15 +3231,48 @@ impl ScanNode {
         if crate::storage::toast::has_external(bytes) || super::sizing::tracked(t) {
             return Ok(None);
         }
-        let Some(LazyScan { d, buf }) = self.lazy_scan() else {
+        let Some(LazyScan { d, buf, cmps }) = self.lazy_scan() else {
             return Ok(None);
         };
+        // (Comparisons over the stored values first: a row they reject is never read.)
+        let fast = match cmps {
+            Some(c) => row_data_fast(bytes).and_then(|d| c.passes(d)),
+            None => None,
+        };
+        if fast == Some(false) {
+            return Ok(Some((None, true)));
+        }
         let row = buf.read(d, key, bytes)?;
-        let pass = d.filter.as_ref().and_then(|f| f.passes(&row));
+        let pass = fast.or_else(|| d.filter.as_ref().and_then(|f| f.passes(&row)));
         if pass == Some(false) {
             return Ok(Some((None, true)));
         }
         Ok(Some((Some(row.into_row()?), pass.is_some())))
+    }
+
+    /// Whether the filter keeps the stored row `bytes` under `key` (count(*)'s rows: read
+    /// in place through `LazyScan` where `lazy_row` would, no row made when the kernel
+    /// decides).
+    fn count_keeps(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<bool> {
+        let t = self.plan.table.oid;
+        if !crate::storage::toast::has_external(bytes)
+            && !super::sizing::tracked(t)
+            && let Some(LazyScan { d, buf, cmps }) = self.lazy_scan()
+        {
+            if let Some(c) = cmps
+                && let Some(pass) = row_data_fast(bytes).and_then(|d| c.passes(d))
+            {
+                return Ok(pass);
+            }
+            let row = buf.read(d, key, bytes)?;
+            if let Some(pass) = d.filter.as_ref().and_then(|f| f.passes(&row)) {
+                return Ok(pass);
+            }
+            let r = row.into_row()?;
+            return eval_bool(self.plan.filter.as_ref().expect("a filter"), &r, ctx);
+        }
+        let r = self.full_row(key, bytes, ctx)?;
+        eval_bool(self.plan.filter.as_ref().expect("a filter"), &r, ctx)
     }
 }
 
@@ -3632,31 +4055,65 @@ impl Node for ScanNode {
             return Ok(None);
         }
         self.par_tried = true;
+        // (Nothing observes the order of the rows counted, under a filter of kernels either:
+        // rows not stored in heap order are counted as stored, not put in it.)
+        if self.tid_order
+            && !self.secondary
+            && self.am.is_none()
+            && self.keys.is_none()
+            && self.only.is_none()
+            && self.sample.is_none()
+            && (self.plan.filter.is_none() || self.lazy_scan().is_some())
+        {
+            self.heap_mode(ctx);
+            self.any_order = self.in_order == Some(false) && self.sorted.is_none() && self.hstream.is_none();
+        }
         let mut n = 0u64;
-        while let Some((key, bytes)) = self.next_raw(ctx)? {
+        while self.next_raw_ref(ctx)? {
             ctx.check()?;
-            if let StatTarget::Seq(t) = self.stat {
-                super::pgstat::count_returned(ctx, t, 1);
-            }
-            if self.plan.filter.is_some() {
-                let row = match self.lazy_row(&key, &bytes)? {
-                    Some((None, _)) => None,
-                    Some((Some(_), true)) => Some(None),
-                    Some((Some(r), false)) => Some(Some(r)),
-                    None => Some(Some(self.full_row(&key, &bytes, ctx)?)),
-                };
-                let keep = match row {
-                    None => false,
-                    Some(None) => true,
-                    Some(Some(r)) => eval_bool(self.plan.filter.as_ref().unwrap(), &r, ctx)?,
-                };
-                if !keep {
-                    ctx.filtered(self.key);
-                    continue;
+            // (The rest of the batch counted with it: all of it without a filter, else when
+            // the filter is a kernel's, which nothing it calls can observe the order of.)
+            let filtered = self.plan.filter.is_some();
+            let run = if !filtered || self.lazy_scan().is_some() { self.pass_run(ctx, !filtered) } else { 0 };
+            let rows = 1 + run as u64;
+            let (kept, read) = match filtered {
+                false => (Ok(rows), rows),
+                true => {
+                    // (The rows borrowed from the batch while the filter runs over them, each
+                    // page pruned as the scan reaches it; the rows up to one the filter fails
+                    // on counted as read.)
+                    let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
+                    let (mut kept, mut read) = (Ok(0), 0);
+                    let rows_of = |i: usize| match &one {
+                        Some((k, v)) => (&k[..], &v[..]),
+                        None => rb.get(i),
+                    };
+                    for (j, i) in (rb.pos() - run..=rb.pos()).enumerate() {
+                        let (k, v) = rows_of(i);
+                        if let Some(&b) = j.checked_sub(1).and_then(|j| self.run_blocks.get(j)) {
+                            self.prune_to(Some(b + 1), ctx);
+                        }
+                        read += 1;
+                        match self.count_keeps(k, v, ctx) {
+                            Ok(keep) => kept = kept.map(|n| n + u64::from(keep)),
+                            Err(e) => {
+                                kept = Err(e);
+                                break;
+                            }
+                        }
+                    }
+                    self.rb = rb;
+                    // (No `ctx.filtered` per row rejected: count_rest runs only where
+                    // nothing is instrumented.)
+                    (kept, read)
                 }
+            };
+            if let StatTarget::Seq(t) = self.stat {
+                super::pgstat::count_returned(ctx, t, read as i64);
             }
-            n += 1;
-            self.emitted += 1;
+            let kept = kept?;
+            n += kept;
+            self.emitted += kept as usize;
         }
         Ok(Some(n))
     }
@@ -3761,7 +4218,7 @@ impl Node for ScanNode {
         }
         loop {
             ctx.check()?;
-            let Some((key, bytes)) = self.next_raw(ctx)? else {
+            if !self.next_raw_ref(ctx)? {
                 // (The entries after the last row returned were passed too.)
                 if let Some(e) = &mut self.ios_entries {
                     let n = e.rest();
@@ -3771,151 +4228,169 @@ impl Node for ScanNode {
                 }
                 return Ok(None);
             };
-            match self.stat {
-                StatTarget::Off => {}
-                StatTarget::Seq(t) => super::pgstat::count_returned(ctx, t, 1),
-                StatTarget::Index(ix) => {
-                    super::pgstat::count_returned(ctx, ix, 1);
-                    super::pgstat::count_fetched(ctx, ix, 1);
-                    super::pgstat::count_blocks(ctx, ix, 1);
-                }
-                StatTarget::Fetched(t) => super::pgstat::count_fetched(ctx, t, 1),
+            // (The row borrowed from the batch while its row is made.)
+            let (rb, one) = (std::mem::take(&mut self.rb), self.one.take());
+            let (key, bytes) = match &one {
+                Some((k, v)) => (&k[..], &v[..]),
+                None => rb.peek().expect("a row handed out"),
+            };
+            let r = self.emit(key, bytes, ctx);
+            self.rb = rb;
+            if let Some(row) = r? {
+                return Ok(Some(row));
             }
-            if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {
-                // Fetching from a heap page may prune it.
-                let b = super::sizing::fetched(self.plan.table.oid, &key, self.last_block, ctx);
-                if b.is_some() {
-                    self.last_block = b;
-                }
+        }
+    }
+}
+
+impl ScanNode {
+    /// What `next` returns for the stored row `bytes` under `key`: counted, read, checked
+    /// against the filter and locked (None: skipped).
+    fn emit(&mut self, key: &[u8], bytes: &[u8], ctx: &ExecCtx) -> Result<Option<Row>> {
+        match self.stat {
+            StatTarget::Off => {}
+            StatTarget::Seq(t) => super::pgstat::count_returned(ctx, t, 1),
+            StatTarget::Index(ix) => {
+                super::pgstat::count_returned(ctx, ix, 1);
+                super::pgstat::count_fetched(ctx, ix, 1);
+                super::pgstat::count_blocks(ctx, ix, 1);
             }
-            if self.ios {
-                let counted = match &mut self.ios_entries {
-                    Some(e) => e.upto_row(&self.plan.table, &key, ctx),
-                    None => None,
-                };
-                let fetches = match counted {
-                    Some(n) => n,
-                    None => {
-                        let fetch = super::sizing::row_locations(
-                            &self.plan.table,
-                            std::slice::from_ref(&key),
-                            ctx,
-                        )
-                        .and_then(|l| l.into_iter().next().flatten())
-                        .is_none_or(|(_, all_visible)| !all_visible);
-                        u64::from(fetch)
-                    }
-                };
-                if fetches > 0 {
-                    ctx.count(self.key, |s| s.fetches += fetches);
-                }
+            StatTarget::Fetched(t) => super::pgstat::count_fetched(ctx, t, 1),
+        }
+        if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {
+            // Fetching from a heap page may prune it.
+            let b = super::sizing::fetched(self.plan.table.oid, key, self.last_block, ctx);
+            if b.is_some() {
+                self.last_block = b;
             }
-            // (An index-only scan from the entries never takes predicate locks:
-            // `index_only_columns`.)
-            // A filter over a few columns of rows whose other columns read include big values
-            // (pgvector's): the filter first, over its own columns, and the rest decoded only
-            // for the rows it keeps. (Not where a fetched row takes a predicate lock first.)
-            // A plain sequential scan's row read in place, the filter's kernel first (`LazyScan`).
-            let lazy = match self.lazy_row(&key, &bytes)? {
-                Some((None, _)) => {
-                    ctx.filtered(self.key);
-                    continue;
-                }
-                Some((Some(r), decided)) => Some((r, decided)),
+        }
+        if self.ios {
+            let counted = match &mut self.ios_entries {
+                Some(e) => e.upto_row(&self.plan.table, key, ctx),
                 None => None,
             };
-            let mut prefiltered = false;
-            // (A row with out-of-line values: the filter's columns decoded once, for both.)
-            let mut probed: Option<(Row, Rc<[bool]>)> = None;
-            if lazy.is_none()
-                && self.ios_cols.is_none()
-                && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(&bytes))
-                && !predicate_locked(&self.plan.table, ctx)
-                && let Some(f) = &self.plan.filter
-            {
-                let ext = self.toast.is_some() && crate::storage::toast::has_external(&bytes);
-                let probe = match ext {
-                    true => self.row_ext(&key, &bytes, Some(&fm), None, ctx)?,
-                    false => scan_row_need(&self.plan, &key, &bytes, &fm, ctx)?,
-                };
-                if !eval_bool(f, &probe, ctx)? {
-                    ctx.filtered(self.key);
-                    continue;
+            let fetches = match counted {
+                Some(n) => n,
+                None => {
+                    let fetch = super::sizing::row_locations(
+                        &self.plan.table,
+                        &[key.to_vec()],
+                        ctx,
+                    )
+                    .and_then(|l| l.into_iter().next().flatten())
+                    .is_none_or(|(_, all_visible)| !all_visible);
+                    u64::from(fetch)
                 }
-                prefiltered = true;
-                if ext {
-                    probed = Some((probe, fm));
-                }
-            }
-            let mut row = match (lazy, &self.ios_cols, probed) {
-                (Some((r, decided)), ..) => {
-                    prefiltered = decided;
-                    r
-                }
-                (None, Some(cols), _) => self.index_row(cols, &key, &bytes, ctx)?,
-                (None, None, Some((probe, fm))) => self.row_ext(&key, &bytes, self.need.as_deref(), Some((probe, &fm)), ctx)?,
-                (None, None, None) => self.full_row(&key, &bytes, ctx)?,
             };
-            if (self.plan.index.is_some() || self.keys.is_some())
-                && self.only.is_none()
-                && self.ios_cols.is_none()
-                && predicate_locked(&self.plan.table, ctx)
-            {
-                ssi_fetched(&self.plan.table, &key, &bytes, ctx)?;
+            if fetches > 0 {
+                ctx.count(self.key, |s| s.fetches += fetches);
             }
-            // SSI: a TID scan locks each tuple it fetches (before its other quals are
-            // checked): here, the rows its TID conditions select.
-            let fetched = |row: &Row| match &self.plan.access {
-                Access::Tid { quals, .. } => {
-                    quals.iter().any(|q| eval_bool(q, row, ctx).unwrap_or(false))
-                }
-                Access::TidRange(quals) => {
-                    quals.iter().all(|q| eval_bool(q, row, ctx).unwrap_or(false))
-                }
-                _ => false,
-            };
-            if matches!(self.plan.access, Access::Tid { .. } | Access::TidRange(_))
-                && predicate_locked(&self.plan.table, ctx)
-                && fetched(&row)
-            {
-                let tid = match stored_tid(&bytes) {
-                    Some(t) => t,
-                    None => match ctid_of(&key) {
-                        Value::Tid(b, o) => (b, o),
-                        _ => (0, 1),
-                    },
-                };
-                ctx.txn
-                    .borrow_mut()
-                    .predicate_lock(self.plan.table.oid, Some(tid));
-                let me = ctx.txn.borrow().id;
-                ctx.sess.db.ssi.read_row(me, self.plan.table.oid, &key)?;
-            }
-            if !prefiltered
-                && let Some(f) = &self.plan.filter
-                && !eval_bool(f, &row, ctx)?
-            {
+        }
+        // (An index-only scan from the entries never takes predicate locks:
+        // `index_only_columns`.)
+        // A filter over a few columns of rows whose other columns read include big values
+        // (pgvector's): the filter first, over its own columns, and the rest decoded only
+        // for the rows it keeps. (Not where a fetched row takes a predicate lock first.)
+        // A plain sequential scan's row read in place, the filter's kernel first (`LazyScan`).
+        let lazy = match self.lazy_row(key, bytes)? {
+            Some((None, _)) => {
                 ctx.filtered(self.key);
-                continue;
+                return Ok(None);
             }
-            if let Some((mark, wait)) = self.plan.mark {
-                match lock_row(&self.plan.table, &key, mark, wait, Xltw::Lock, ctx)? {
-                    Locked::Skip => continue,
-                    Locked::Same => {}
-                    Locked::Newer(fresh) => {
-                        // READ COMMITTED: re-check the newest version against the filter.
-                        row = self.full_row(&key, &fresh, ctx)?;
-                        if let Some(f) = &self.plan.filter
-                            && !eval_bool(f, &row, ctx)?
-                        {
-                            continue;
-                        }
+            Some((Some(r), decided)) => Some((r, decided)),
+            None => None,
+        };
+        let mut prefiltered = false;
+        // (A row with out-of-line values: the filter's columns decoded once, for both.)
+        let mut probed: Option<(Row, Rc<[bool]>)> = None;
+        if lazy.is_none()
+            && self.ios_cols.is_none()
+            && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(bytes))
+            && !predicate_locked(&self.plan.table, ctx)
+            && let Some(f) = &self.plan.filter
+        {
+            let ext = self.toast.is_some() && crate::storage::toast::has_external(bytes);
+            let probe = match ext {
+                true => self.row_ext(key, bytes, Some(&fm), None, ctx)?,
+                false => scan_row_need(&self.plan, key, bytes, &fm, ctx)?,
+            };
+            if !eval_bool(f, &probe, ctx)? {
+                ctx.filtered(self.key);
+                return Ok(None);
+            }
+            prefiltered = true;
+            if ext {
+                probed = Some((probe, fm));
+            }
+        }
+        let mut row = match (lazy, &self.ios_cols, probed) {
+            (Some((r, decided)), ..) => {
+                prefiltered = decided;
+                r
+            }
+            (None, Some(cols), _) => self.index_row(cols, key, bytes, ctx)?,
+            (None, None, Some((probe, fm))) => self.row_ext(key, bytes, self.need.as_deref(), Some((probe, &fm)), ctx)?,
+            (None, None, None) => self.full_row(key, bytes, ctx)?,
+        };
+        if (self.plan.index.is_some() || self.keys.is_some())
+            && self.only.is_none()
+            && self.ios_cols.is_none()
+            && predicate_locked(&self.plan.table, ctx)
+        {
+            ssi_fetched(&self.plan.table, key, bytes, ctx)?;
+        }
+        // SSI: a TID scan locks each tuple it fetches (before its other quals are
+        // checked): here, the rows its TID conditions select.
+        let fetched = |row: &Row| match &self.plan.access {
+            Access::Tid { quals, .. } => {
+                quals.iter().any(|q| eval_bool(q, row, ctx).unwrap_or(false))
+            }
+            Access::TidRange(quals) => {
+                quals.iter().all(|q| eval_bool(q, row, ctx).unwrap_or(false))
+            }
+            _ => false,
+        };
+        if matches!(self.plan.access, Access::Tid { .. } | Access::TidRange(_))
+            && predicate_locked(&self.plan.table, ctx)
+            && fetched(&row)
+        {
+            let tid = match stored_tid(bytes) {
+                Some(t) => t,
+                None => match ctid_of(key) {
+                    Value::Tid(b, o) => (b, o),
+                    _ => (0, 1),
+                },
+            };
+            ctx.txn
+                .borrow_mut()
+                .predicate_lock(self.plan.table.oid, Some(tid));
+            let me = ctx.txn.borrow().id;
+            ctx.sess.db.ssi.read_row(me, self.plan.table.oid, key)?;
+        }
+        if !prefiltered
+            && let Some(f) = &self.plan.filter
+            && !eval_bool(f, &row, ctx)?
+        {
+            ctx.filtered(self.key);
+            return Ok(None);
+        }
+        if let Some((mark, wait)) = self.plan.mark {
+            match lock_row(&self.plan.table, key, mark, wait, Xltw::Lock, ctx)? {
+                Locked::Skip => return Ok(None),
+                Locked::Same => {}
+                Locked::Newer(fresh) => {
+                    // READ COMMITTED: re-check the newest version against the filter.
+                    row = self.full_row(key, &fresh, ctx)?;
+                    if let Some(f) = &self.plan.filter
+                        && !eval_bool(f, &row, ctx)?
+                    {
+                        return Ok(None);
                     }
                 }
             }
-            self.emitted += 1;
-            return Ok(Some(row));
         }
+        self.emitted += 1;
+        Ok(Some(row))
     }
 }
 
@@ -4494,6 +4969,14 @@ fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCt
         ranges: Vec::new(),
         cur_range: 0,
         iter: None,
+        rb: Default::default(),
+        rb_max: RB_MIN,
+        held: false,
+        one: None,
+        run_blocks: Vec::new(),
+        hstream: None,
+        hstream_tried: false,
+        any_order: false,
         skip: None,
         rev: false,
         kills: None,

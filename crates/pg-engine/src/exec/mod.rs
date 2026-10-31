@@ -10,6 +10,7 @@ pub mod lookup;
 pub mod nearest;
 pub mod need;
 pub mod parallel_part;
+mod heaporder;
 pub mod parscan;
 pub mod partial;
 pub mod planref;

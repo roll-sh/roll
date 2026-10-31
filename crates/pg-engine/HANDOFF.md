@@ -963,6 +963,83 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     0 units changed against results.tsv, pg_dump_tap 14,817 / 14,817, contrib pgvector
     915 / 915 (own reference, OPTFLAGS=""), pgvector_equality 480 / 480, bloom / pg_trgm / btree_gist / cube unchanged,
     every TPC-H result hash equal to PostgreSQL's.
+- **Scan cost, round 2: rows by reference, heap order streamed, index drops as range deletions, sorted point
+  reads, deleted runs stepped over** (round 23, agent 130; BENCH.md "Scan cost, round 2"):
+  - Rows a batch at a time (`storage/batch.rs`): a `RowBatch` holds up to 256 (key, stored row)
+    rows, the keys copied into one reused buffer and the values left in the block (or
+    memtable entry) holding them, referenced once per block. `Scan::fill_batch` fills it from
+    the LSM merge with the same version logic as `next` (`Scan::position`), and goes straight
+    through a block while one source holds the range (`Cursor::run_into`: the same user key
+    as the row before is told by `BlockPos::shared`, no comparison); `TxnScan::fill_batch`
+    passes the store's rows through when none of the transaction's writes are left in the
+    range and nothing is put back (raw scans), else its rows as `next` gives them (one per
+    call when out-of-line values are put back, so values are read only for rows taken).
+    `FillRows` / `BulkFill` are the trait the workers' chunks switch to (agent 135).
+  - The scan node (`exec/scan.rs`): the plain path reads through `rb` (`next_plain`, `refill`;
+    16 rows first, doubling to 256: a LIMIT may want one); `next_raw_ref` hands out a row by
+    reference (at `rb.peek()`, or owned in `one` from the paths that don't batch: index,
+    bitmap, skip and backward scans, the sorted heap-order fallback); `next()` makes rows
+    from the borrowed slices (`emit`); `pass_run` passes the rest of a batch that would be
+    handed out unchanged (TIDs checked under heap order, pages pruned) and `count_rest`
+    counts and filters a batch at a time. Use `next_raw_ref` / `pass_run` to get stored
+    rows with heap-order semantics; don't read `rb` around them.
+  - Filters over stored rows (`exec/kernel.rs`): `NumCmp` covers integer columns too, and a
+    filter of comparisons of numeric columns with constants (one, or ANDed) runs over the
+    stored bytes (`StoredCmps`: the columns walked once with `row::skip_value_fast`, compared
+    with `peek_num`, nothing decoded) before `LazyScan` reads the row.
+  - Heap order streamed (`exec/heaporder.rs`, agent 125's finding: a sequential scan of a
+    disordered heap held every row to sort them by TID, 13 MB a session): with a statement
+    snapshot, stored TIDs and a plain scan, the rows' TIDs are read first (8 bytes a row,
+    dropped), the longest run whose TIDs increase with their keys streams in storage order,
+    and only the others are held: the early ones (a TID below a run row stored before them:
+    rows put in free space) read beforehand, the late ones (rows an update moved) from where
+    the stream meets them; each merged in by TID (`next_heap_ordered`). Otherwise (no
+    snapshot, rows without TIDs, an unstamped heap) the old read-all-and-sort path.
+    count(*) over such a heap reads rows as stored (`any_order`: the order of rows counted,
+    under a kernel filter too, is unobservable), every page pruned at the end.
+  - Drops: TRUNCATE and DROP TABLE are agent 106's range deletions (`storage::rdel`,
+    `Txn::delete_range`); DROP INDEX of a built-in method is one too now
+    (`delete_index_storage`: one marker, nothing collected, O(1) writes). A native method's
+    index (hnsw, ivfflat, bloom) still deletes its records a key at a time: they are written
+    outside transactions, a rebuild's before its commit, which a range deletion would hide.
+  - Sorted point reads (`Scan::fetch_sorted`, `Store::get_sorted_into`,
+    `Txn::get_sorted_snap_into`): ascending keys read by seeking one merge forward (a source
+    stays in its block while the next key is there), rows by reference; index and bitmap
+    heap fetches of ascending keys use them (`exec/scan.rs` `get_sorted`; others as before).
+    Agent 135 owns single-key fetches (`get_versions*`, `ssts_get`, `Block::seek`).
+  - Deleted runs stepped over once (`storage/dead.rs`, agent 140's queue table: min() after
+    100,000 head rows were deleted): a store scan that steps over 256 or more deleted keys
+    before its first live key records "[start, live) holds nothing visible at ts"; a later
+    `Store::scan_raw` at a snapshot at or after ts starting inside it starts at `live` (hints
+    chain). Every commit's key span is logged under the commit lock before its writes go in
+    and drops the hints it writes into; a hint is recorded only if no logged commit since the
+    scan's snapshot wrote into its range (an ingested file's span is every key; the log keeps
+    4,096 commits). PostgreSQL's LP_DEAD model stays agent 139's (`sizing::Kills`), metadata
+    only. The queue's `DELETE ... WHERE hid = (SELECT min(hid) ...)` is still slow: its outer
+    index scan on the InitPlan's param reads the whole pkey range (planner / index access).
+  - Left: the parallel workers' chunks still read rows one by one (`parscan::Chunk`; agent
+    143 switches them to `FillRows`); filtered counts are 1.5x PostgreSQL's CPU (the
+    per-row checks of `count_keeps`, the stored row's TID parsed for pruning); a sum over a
+    disordered heap is the executor's per-row cost above the stream; hnsw builds still hold
+    the whole graph through the on-disk phase (+217 MB fresh against pgvector's +66 MB:
+    `Graph` is the object model every search reads, so bounding it at maintenance_work_mem
+    means paging elements through `AmStore` behind a cache, agent 127's eviction alongside);
+    a native method's DROP INDEX still deletes its records a key at a time (a range deletion
+    that leaves records written after the transaction's snapshot alone would do).
+  - Tests: `tests/heap_order_scan.rs` (streamed heap order = `ORDER BY ctid`, own writes, a
+    scan feeding an UPDATE of its table, LIMIT, counts; `exec::scan::HEAP_ORDER_STREAMED` /
+    `_HELD`), `tests/drop_storage.rs`, storage unit tests (batched scans and sorted reads in
+    the model test, `scans_step_over_deleted_runs_once`, `dead::tests`).
+  - Verified (debug engine unless said; on top of b0c4238b): crate tests debug and release
+    (deep_input, deparse_identity, big_tables included), the toast / spill / drop / heap-order
+    tests with `ROLL_TXN_SPILL_BYTES=4096`, clippy (14 warnings, none new), difftest smoke,
+    isolation 134 / 136 specs with the roll-* ones, 1,749 / 1,751 permutations
+    (intra-grant-inplace as before; reindex-schema's "file numbers of relations that are
+    gone" debug assertion fails with origin's own build too: catalog, not this round), a
+    full regress run on a private reference 51,148 / 51,150 with 0 units changed against
+    results.tsv, pg_dump_tap 14,817 / 14,817, contrib pgvector 915 / 915 (own reference,
+    OPTFLAGS=""), pgvector_equality ok, bloom 58, pg_trgm 261, btree_gist 613 / 616, cube 316,
+    every TPC-H SF1 result hash equal to PostgreSQL's (release).
 - **Index access methods of native code** (round 20, agent 70; `src/ext/index_am.rs`): what an
   extension's `CREATE ACCESS METHOD ... HANDLER` names when the handler is a C function the
   engine implements. Another index-type extension adds its routine to `index_am::routine`.

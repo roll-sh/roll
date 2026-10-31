@@ -2927,6 +2927,94 @@ reference) 51,148 / 51,150 with 0 units changed against `results.tsv`, pg_dump_t
 14,817, contrib pgvector 915 / 915 (own reference, `OPTFLAGS=""`), pgvector_equality 480 /
 480 (own seeded reference), bloom 58, pg_trgm 261, btree_gist 613 / 616, cube 316 (unchanged).
 
+## Scan cost, round 2 (round 23, agent 130)
+
+What changed (HANDOFF "Scan cost, round 2"): storage hands rows to the scan node a batch at a
+time by reference (no key allocation or value refcount per row), a block's run of rows goes
+through without the merge per row, count(*) counts and filters a batch at a time, comparisons
+of numeric columns with constants run over the stored bytes, heap-order scans of disordered
+heaps stream instead of holding every row, deleted runs are stepped over once (dead-range
+hints), sorted point reads, and built-in DROP INDEX as a range deletion.
+
+Method: release builds; **base** is `184f719f` (agent 117's round), **new** this round's;
+in-process figures are instruction counts (`perf stat -e instructions:u`, a run with N
+statements minus one with none), the machine at load 25-30 of 36 CPUs. Wire figures: the
+server's CPU per statement over 5 runs in one session, two interleaved rounds, PostgreSQL 18.6
+(the pinned image, the bench settings) and the engine pinned to CPUs 12-15.
+
+### Instructions per row, in process (`examples/scan_bench.rs sql`, compacted data)
+
+`n`: 1M rows (int, int, int); `w`: 500k rows of 10 columns; `m`: 150k rows of `n`'s shape.
+
+| query | base w0 | new w0 | base w2 | new w2 |
+|---|---|---|---|---|
+| `count(*) FROM n` | 1,141 | 395 | 1,436 | 1,426 |
+| `sum(b) FROM n` | 2,472 | 2,089 | 1,848 | 1,838 |
+| `count(*) FROM n WHERE b = 7` | 1,967 | 752 | 1,692 | 1,726 |
+| `count(*) FROM w` | 1,323 | 586 | 1,727 | 1,731 |
+| `sum(h) FROM w` | 3,205 | 2,829 | 2,627 | 2,582 |
+| `count(*) FROM w WHERE e = 'x7'` | 2,761 | 2,061 | | |
+| `count(*) FROM m WHERE b = 7` | 2,219 | 1,015 | 1,760 | 1,795 |
+| `sum(b) FROM m` | 2,706 | 2,364 | 1,916 | 1,906 |
+
+w2 (workers or the inline scan) is unchanged: the workers' chunks still read row by row
+(agent 143 moves them onto `FillRows`). Where `count(*) FROM n` goes now (395 per row, ~50 of
+them the first scan's block decompression): the block's entry decoding ~100, the batch fill
+and run ~75, the batch push ~70, the scan node ~30.
+
+### Wire, CPU ms per statement (two rounds; `n` 2M rows, `w` 1M, `s` 300k, `u` 300k with 5% updated)
+
+| query | PostgreSQL | new | (agent 117's round) |
+|---|---|---|---|
+| serial `count(*) FROM n` | 135, 129 / 118, 97 | 88, 74, 92 | 408, 376 |
+| serial `count(*) FROM n WHERE b = 7` | 172, 165 / 149, 135 | 218, 230, 224 | 586, 758 |
+| serial `count(*) FROM w` | 84, 79 | 66 | 311, 211 |
+| serial `count(*) FROM w WHERE e = 'x7'` | 155, 160 | 382 | 496, 410 |
+| serial `count(*) FROM s WHERE b = 7` | 34, 33 | 52 | 256, 110 |
+| serial `count(*) FROM u` (disordered heap) | 20, 28 | 14, 14 | |
+| serial `count(*) FROM u WHERE b = 7` | 36, 34 | 34, 44 | |
+| serial `sum(c) FROM u` | 37, 41 | 194, 216 (302 before the heap-order changes) | |
+
+Serial counts are now below PostgreSQL's CPU; filtered ones are within 1.5x except the text
+filter (`e = 'x7'`: the kernel's string comparison over a decoded value, not run over stored
+bytes yet). `sum` is the executor's per-row cost above the scan (agent 143).
+
+### Heap-order scans of a disordered heap (agent 125's finding)
+
+A sequential scan whose heap isn't in key order held every row (key, value, the blocks they
+pinned) to sort them by TID. Now only the displaced rows are held: `tests/heap_order_scan.rs`
+streams 3,000 rows of which a key range and scattered rows were updated and rows were put in
+free space, holding the displaced ones only (under 1,000 of ~2,980; the test asserts it). The
+TIDs pass reads 8 bytes a row, dropped before the rows are returned.
+
+### Deleted runs (agent 140's queue table: 200,000 rows, the first 100,000 deleted)
+
+`SELECT min(hid)`: PostgreSQL 0.98, 0.91 ms; the engine 42, 11 ms before; new 109 ms (the scan
+recording the hint), then 8.6 and 2.1 ms. `DELETE ... WHERE hid = (SELECT min(hid) ...)`
+stays at ~360 ms: its outer index scan doesn't take the InitPlan's value as a bound (planner,
+agent 140 / 139), not storage.
+
+### hnsw build and DROP INDEX memory (vector(128) x 100,000, m 16, ef_construction 64, maintenance_work_mem 64 MB)
+
+Fresh process each, peak over the RSS before the statement: build base +216 MB, new +217 MB
+(unchanged: the graph is held whole, HANDOFF "Left"); DROP INDEX base +78 / +16 MB, new +57 /
++33 MB (two rounds; noisy at this size). pgvector: +66 MB (agent 102).
+
+### TPC-H SF1 (CPU s per run of 3, two interleaved rounds; every hash equal to PostgreSQL's)
+
+All 22: PostgreSQL 48.6 / 53.5 CPU s; base 131.2 / 117.8; new 116.2 / 130.4 (within the noise);
+peak memory base 1,971 / 1,946 MB, new 1,958 / 1,924 MB (PostgreSQL 1,999). q06 CPU s: base
+4.61 / 4.48, new 4.62 / 4.99; q10: base 10.07 / 8.41, new 8.34 / 10.20.
+
+### Verification (round 23, agent 130)
+
+As HANDOFF "Scan cost, round 2": crate tests debug and release, spill tests, clippy (none
+new), difftest smoke, isolation 1,749 / 1,751 permutations (reindex-schema fails with origin's
+own build too), regress 51,148 / 51,150 with 0 units changed, pg_dump_tap 14,817 / 14,817,
+contrib unchanged (pgvector 915 / 915), pgvector_equality ok, TPC-H hashes equal. pgbench:
+measured after the push (below, "pgbench"); every commit now also logs its key span for
+the dead-range hints (a mutex and a min / max over its keys).
+
 ## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
 
 Same harness and catalogs as agent 58's: PostgreSQL in `a62-pg` (pinned image and settings),

@@ -577,6 +577,23 @@ pub fn peek_num(b: &[u8], pos: usize) -> Option<Option<(i128, u32)>> {
     }))
 }
 
+/// `skip_value` with the common fixed-size values stepped over in place.
+#[inline]
+pub fn skip_value_fast(b: &[u8], pos: &mut usize) -> Result<()> {
+    let n = match b.get(*pos) {
+        Some(&tag::NULL) => 0,
+        Some(&tag::INT2) => 2,
+        Some(&(tag::INT4 | tag::FLOAT4 | tag::DATE)) => 4,
+        Some(&(tag::INT8 | tag::FLOAT8 | tag::TIMESTAMP | tag::TIMESTAMPTZ)) => 8,
+        _ => return skip_value(b, pos),
+    };
+    if *pos + 1 + n > b.len() {
+        return skip_value(b, pos);
+    }
+    *pos += 1 + n;
+    Ok(())
+}
+
 /// Step over one encoded value without building it.
 pub fn skip_value(b: &[u8], pos: &mut usize) -> Result<()> {
     let t = *b.get(*pos).ok_or_else(|| internal("truncated row"))?;

@@ -19,6 +19,15 @@ impl Ddl<'_, '_> {
         }
         let start = index_prefix(t.oid, ix.id);
         let end = prefix_end(&start);
+        if crate::ext::index_am::builtin_method(&ix.method) {
+            // (One range deletion, however many entries: `storage::rdel`. Entries a rebuild
+            // writes go in through this transaction, after it. A native method's records are
+            // written outside transactions, a rebuild's before this commits, which a range
+            // deletion would hide: those go a key at a time.)
+            self.ctx.txn.borrow_mut().delete_range(start.clone(), end)?;
+            crate::ext::index_am::evict(self.ctx.sess.db.instance, &start);
+            return Ok(());
+        }
         let mut keys: Vec<Vec<u8>> = self
             .ctx
             .txn

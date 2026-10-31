@@ -4041,6 +4041,12 @@ pub fn heap_modelled(t: &Table, ctx: &ExecCtx) -> bool {
     matches!(heap_blocks(t, ctx), Ok(Some(_))) && ctx.sess.db.relfiles.of(t.oid).read().heaps.contains_key(&t.oid)
 }
 
+/// Whether the table's modelled heap was laid out afresh (`Heap::unstamped`): its rows'
+/// places are the model's, not the TIDs they were stored with.
+pub fn heap_unstamped(t: &Table, ctx: &ExecCtx) -> bool {
+    ctx.sess.db.relfiles.of(t.oid).read().heaps.get(&t.oid).is_none_or(|h| h.unstamped)
+}
+
 /// Whether the table's modelled heap has its rows in key order (`Heap::in_key_order`): a
 /// scan in storage order reads them in heap order.
 pub fn heap_in_key_order(t: &Table, ctx: &ExecCtx) -> bool {

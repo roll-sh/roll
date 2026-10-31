@@ -2251,7 +2251,7 @@ impl Txn {
         let store = self.db.store.scan_raw(start, end, ts).excluding(&self.own_excluded(start, end, mark));
         match &self.runs {
             Some(r) => Lower::Runs(Box::new(Overlay::new(r.scan(start, end, mark), store, false))),
-            None => Lower::Store(store),
+            None => Lower::Store(Box::new(store)),
         }
     }
 
@@ -2312,7 +2312,7 @@ impl Txn {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 let store = self.db.store.scan_raw(start, end, ts).excluding(&self.own_excluded(start, end, LATEST));
-                TxnScan::new(own, Lower::Store(store), src)
+                TxnScan::new(own, Lower::Store(Box::new(store)), src)
             }
             None => TxnScan::new(
                 self.mem_in(start, end).collect(),
@@ -2531,6 +2531,29 @@ impl Txn {
             out[i] = got[u].as_ref().and_then(|(_, v)| v.clone());
         }
         Ok(out)
+    }
+
+    /// `get_many_snap` (`resolve`) or `get_many_snap_raw` of strictly ascending `keys`, the
+    /// rows found pushed into `out` in their order: from the store by reference, a sorted
+    /// batch of reads (`Store::get_sorted_into`), when none of the keys is one of this
+    /// transaction's writes; else as `get_many_snap_with` reads them, owned.
+    pub fn get_sorted_snap_into(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool, out: &mut crate::storage::batch::RowBatch) -> Result<()> {
+        debug_assert!(keys.windows(2).all(|w| w[0] < w[1]), "keys strictly ascending");
+        self.catch_up(s);
+        let own = {
+            let st = s.st.borrow();
+            keys.iter().map(|k| self.snap_get(k, &st)).find_map(|r| r.transpose()).transpose()?.is_some()
+        };
+        if !own {
+            let ts = s.st.borrow().ts;
+            return self.db.store.get_sorted_into(keys, ts, resolve, out);
+        }
+        for (k, v) in keys.iter().zip(self.get_many_snap_with(keys, s, resolve)?) {
+            if let Some(v) = v {
+                out.push(k, v);
+            }
+        }
+        Ok(())
     }
 
     /// Whether this transaction holds heavyweight lock `key` (in any mode).
@@ -3861,7 +3884,7 @@ where
 
 /// What a scan merges the buffer over: the store, or a transaction's spilled writes over it.
 enum Lower {
-    Store(crate::storage::Scan),
+    Store(Box<crate::storage::Scan>),
     Runs(Box<Overlay<spill::RunScan, crate::storage::Scan>>),
 }
 
@@ -3955,6 +3978,48 @@ impl TxnScan {
     /// Where the rows' out-of-line values come from (None: no row in the range).
     pub fn source(&self) -> Option<&Arc<toast::Source>> {
         self.src.as_ref()
+    }
+
+    /// Up to `max` more rows into `batch` (none: the scan is done). With none of the
+    /// transaction's writes left in the range and no values to put back, the store's rows
+    /// pass through by reference, a batch at a time (`Scan::fill_batch`); else rows as
+    /// `next` gives them, and only one when it puts values back (they are read only for the
+    /// rows a reader takes).
+    pub fn fill_batch(&mut self, batch: &mut crate::storage::batch::RowBatch, max: usize) -> Result<()> {
+        let resolving = self.resolve && self.src.is_some();
+        let o = &mut self.inner;
+        if !resolving && o.upper_head.is_none() && !o.upper_done {
+            match o.upper.next() {
+                Some(e) => o.upper_head = Some(e?),
+                None => o.upper_done = true,
+            }
+        }
+        if !resolving
+            && o.upper_done
+            && o.upper_head.is_none()
+            && let Lower::Store(s) = &mut o.lower
+        {
+            let target = batch.len() + max;
+            if let Some((k, v)) = o.lower_head.take() {
+                batch.push(&k, v);
+            }
+            if !o.lower_done && batch.len() < target {
+                s.fill_batch(batch, target - batch.len())?;
+            }
+            return Ok(());
+        }
+        for _ in 0..if resolving { 1 } else { max } {
+            let Some(r) = self.next() else { break };
+            let (k, v) = r?;
+            batch.push(&k, v);
+        }
+        Ok(())
+    }
+}
+
+impl crate::storage::batch::FillRows for TxnScan {
+    fn fill(&mut self, b: &mut crate::storage::batch::RowBatch, max: usize) -> Result<()> {
+        self.fill_batch(b, max)
     }
 }
 

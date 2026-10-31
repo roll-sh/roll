@@ -443,6 +443,8 @@ const F_DERIVED: usize = 2;
 pub struct BlockPos {
     i: usize,
     next: u32,
+    /// `shared` of entry `i`.
+    shared: u32,
     key: Vec<u8>,
     val_off: u32,
     /// `TOMBSTONE`: a deletion; `DERIVED`: the value is `dval`.
@@ -462,9 +464,29 @@ impl BlockPos {
     pub fn key(&self) -> &[u8] {
         &self.key
     }
+
+    /// The length of the key's prefix stored as the entry before's: what it shares with that
+    /// key's user key, at most (0 at a restart, every `RESTART` entries).
+    pub fn shared(&self) -> usize {
+        self.shared as usize
+    }
+}
+
+/// `v` extended by `s`: a few bytes (a key's tail after the one before) copied in place, not
+/// by a call.
+#[inline]
+pub fn extend_short(v: &mut Vec<u8>, s: &[u8]) {
+    if s.len() > 4 {
+        return v.extend_from_slice(s);
+    }
+    v.reserve(s.len());
+    for &x in s {
+        v.push(x);
+    }
 }
 
 /// The header of the entry at `pos`: (shared, unshared, value field), `pos` past it.
+#[inline]
 fn entry_head(b: &[u8], pos: &mut usize) -> Result<(usize, usize, usize)> {
     let shared = get_varint(b, pos)? as usize;
     let unshared = get_varint(b, pos)? as usize;
@@ -514,8 +536,9 @@ impl Block {
         // (`decode` wrote every entry of the block.)
         let (shared, us, vf) = entry_head(b, &mut p).expect("a checked block");
         let unshared = us >> 2;
+        pos.shared = shared as u32;
         pos.key.truncate(shared);
-        pos.key.extend_from_slice(&b[p..p + unshared]);
+        extend_short(&mut pos.key, &b[p..p + unshared]);
         p += unshared;
         if us & F_TS != 0 {
             pos.key.extend_from_slice(&self.ts);
@@ -603,6 +626,16 @@ impl Block {
             TOMBSTONE => None,
             DERIVED => Some(&pos.dval),
             n => Some(&self.data[pos.val_off as usize..(pos.val_off + n) as usize]),
+        }
+    }
+
+    /// The entry at `pos` (not a tombstone) into `batch` under `key`: its value referenced in
+    /// the block's bytes, or copied when derived.
+    pub fn push_value(&self, pos: &BlockPos, key: &[u8], batch: &mut super::batch::RowBatch) {
+        match pos.val_len {
+            TOMBSTONE => debug_assert!(false, "a tombstone pushed"),
+            DERIVED => batch.push_copy(key, &pos.dval),
+            n => batch.push_in(key, &self.data, pos.val_off as usize, n as usize),
         }
     }
 

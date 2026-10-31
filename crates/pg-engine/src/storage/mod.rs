@@ -5,7 +5,9 @@
 //! frozen memtables, L0 newest first, then L1), so the first source holding a visible version
 //! of a key has the newest one.
 
+pub mod batch;
 pub mod cache;
+mod dead;
 mod hot;
 pub mod keys;
 pub mod rdel;
@@ -243,6 +245,8 @@ pub struct Store {
     closed: AtomicBool,
     /// Small ranges scanned whole again and again, kept as version chains (`hot`).
     hot: hot::Hot,
+    /// Ranges scans found holding no live row (`dead`).
+    dead: Arc<dead::DeadRanges>,
     /// The last commit that waits for its WAL fsync before it is visible (an asynchronous
     /// commit after it waits for that fsync too: `commit_async`).
     sync_assigned: AtomicU64,
@@ -397,6 +401,7 @@ impl Store {
             bg_running: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             hot: hot::Hot::default(),
+            dead: Arc::default(),
             sync_assigned: AtomicU64::new(0),
             wal_writer: AtomicBool::new(false),
             wal_writer_delay: AtomicU64::new(200),
@@ -651,6 +656,20 @@ impl Store {
         self.get_versions_with(keys, ts, false)
     }
 
+    /// The rows visible at `ts` under `keys` (strictly ascending) into `batch`, those that
+    /// exist, in their order, by reference (`Scan::fetch_sorted`); with their out-of-line
+    /// values put back when `resolve`.
+    pub fn get_sorted_into<K: AsRef<[u8]>>(&self, keys: &[K], ts: u64, resolve: bool, batch: &mut batch::RowBatch) -> Result<()> {
+        let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+            return Ok(());
+        };
+        // (Past every version of the last key: storage keys end in their version.)
+        let end = [last.as_ref(), &[0xFF; 9]].concat();
+        let mut s = Scan::new(self.view(), first.as_ref().to_vec(), end, ts, self.gc_horizon());
+        s.resolve = resolve;
+        s.fetch_sorted(keys, batch)
+    }
+
     fn get_versions_with(&self, keys: &[&[u8]], ts: u64, resolve: bool) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
         debug_assert!(keys.windows(2).all(|w| w[0] < w[1]));
         let view = self.view();
@@ -762,7 +781,16 @@ impl Store {
                 return Scan::of_rows(self.view(), rows, ts);
             }
         }
-        Scan::new(self.view(), start.to_vec(), end.to_vec(), ts, self.gc_horizon())
+        // (A run of deleted keys a scan found before at a snapshot at or before this one,
+        // nothing written into it since, is stepped over: `dead`.)
+        let start = match self.dead.skip(start, ts) {
+            Some(live) if !end.is_empty() && live.as_slice() >= end => return Scan::of_rows(self.view(), Vec::new(), ts),
+            Some(live) => live,
+            None => start.to_vec(),
+        };
+        let mut s = Scan::new(self.view(), start.clone(), end.to_vec(), ts, self.gc_horizon());
+        s.dead = Some((self.dead.clone(), start));
+        s
     }
 
     /// Keep relation range `p` as version chains (`hot`), read from the sources under the
@@ -791,6 +819,8 @@ impl Store {
     /// A commit's writes at `ts` into the kept hot ranges (under the commit lock), the
     /// versions their chains drop pruned from the memtables of `view` as well.
     fn apply_hot(&self, ts: u64, writes: &[(Vec<u8>, Option<Bytes>)], view: &View) {
+        // (The commit's span, before its writes go in: `dead`.)
+        self.dead.note(ts, Some(&mut writes.iter().map(|w| w.0.as_slice())));
         self.hot.apply(ts, writes, || self.gc_horizon(), |k, t| {
             let key = mvcc_key(k, t);
             for m in view.memtables() {
@@ -1131,6 +1161,7 @@ impl Store {
     ) -> Result<()> {
         // (Its writes don't go through `apply_hot`.)
         self.hot.clear();
+        self.dead.note(ts, None);
         self.rotate_locked(c)?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // (Uncompressed: the commit waits for this file, and compaction, in the background,
@@ -1950,6 +1981,58 @@ impl Cursor {
         }
     }
 
+    /// The head entry (not a tombstone) into `batch` under its first `ulen` key bytes (the
+    /// user key), by reference; the cursor stays on it.
+    fn push_head(&self, ulen: usize, batch: &mut batch::RowBatch) {
+        match self {
+            Cursor::Mem { buf, .. } => {
+                let (k, v) = buf.front().expect("a head entry");
+                batch.push(&k[..ulen], v.clone().expect("a value"));
+            }
+            Cursor::Level { block, pos, .. } => {
+                let b = block.as_ref().expect("a head entry");
+                b.push_value(pos, &pos.key()[..ulen], batch);
+            }
+        }
+    }
+
+    /// Entries of the current block from the head on into `batch`, under their user keys,
+    /// while each is what `Scan::position` would hand out next without looking at another
+    /// source: below `bound` (the other sources' smallest head) and the end, the first entry
+    /// of a key after the last row pushed, a version at or before `ts`, not a deletion, and
+    /// (`resolve`) without out-of-line values. Up to `max`; how many, and the last version.
+    fn run_into(&mut self, ts: u64, bound: Option<&[u8]>, resolve: bool, batch: &mut batch::RowBatch, max: usize) -> (usize, u64) {
+        let Cursor::Level { block: Some(b), pos, end, whole, .. } = self else {
+            return (0, 0);
+        };
+        let (mut n, mut last) = (0, 0);
+        while n < max && pos.index() < b.len() {
+            let k = pos.key();
+            if (!*whole && !end.is_empty() && k >= end.as_slice()) || bound.is_some_and(|x| k >= x) || k.len() < 8 {
+                break;
+            }
+            let (uk, kts) = (user_key(k), key_ts(k));
+            // (The entry before is the last row pushed: the same user key when it shares
+            // all of it, as user keys are prefix-free; compared at a restart.)
+            let prev = batch.last_key().map_or(0, <[u8]>::len);
+            let same = pos.shared() >= prev || (pos.shared() == 0 && batch.last_key() == Some(uk));
+            if kts > ts || same {
+                break;
+            }
+            let Some(v) = b.value_ref(pos) else {
+                break;
+            };
+            if resolve && toast::has_external(v) {
+                break;
+            }
+            b.push_value(pos, uk, batch);
+            b.step(pos);
+            n += 1;
+            last = kts;
+        }
+        (n, last)
+    }
+
     fn advance(&mut self) {
         match self {
             Cursor::Mem { buf, .. } => {
@@ -2115,6 +2198,10 @@ pub struct Scan {
     resolve: bool,
     /// The rows of a hot range's chains (`hot`), read already: no merge.
     rows: Option<Box<std::vec::IntoIter<(Vec<u8>, Bytes)>>>,
+    /// Where the scan started, while it has stepped over only deleted keys (`dead`: a hint
+    /// is recorded at its first live key past `dead::MIN_DEAD` of them); None: not looked for.
+    dead: Option<(Arc<dead::DeadRanges>, Vec<u8>)>,
+    dead_run: u32,
 }
 
 /// A cursor per source of `view` over [start, end), newest source first.
@@ -2157,6 +2244,8 @@ impl Scan {
             resolve: false,
             rows: Some(Box::new(rows.into_iter())),
             rdels: Box::default(),
+            dead: None,
+            dead_run: 0,
         }
     }
 
@@ -2176,6 +2265,8 @@ impl Scan {
             _view: view,
             resolve: false,
             rows: None,
+            dead: None,
+            dead_run: 0,
         }
     }
 
@@ -2213,29 +2304,13 @@ impl Scan {
     }
 }
 
-impl Iterator for Scan {
-    type Item = Result<(Vec<u8>, Bytes)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(rows) = &mut self.rows {
-            // (A hot range's rows: committed range deletions drop the chains, so only the
-            // reader's own, `excluding`, can cover one.)
-            let (k, v) = loop {
-                let (k, v) = rows.next()?;
-                if !self.rdels.iter().any(|r| r.contains(&k)) {
-                    break (k, v);
-                }
-            };
-            if self.resolve && toast::has_external(&v) {
-                return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
-            }
-            return Some(Ok((k, v)));
-        }
+impl Scan {
+    /// The source whose head is the next visible row (None: none left), the versions and
+    /// deletions before it passed. The row stays at the head until taken or advanced.
+    fn position(&mut self) -> Result<Option<usize>> {
         loop {
-            let i = match self.merge.min() {
-                Ok(Some(i)) => i,
-                Ok(None) => return None,
-                Err(e) => return Some(Err(e)),
+            let Some(i) = self.merge.min()? else {
+                return Ok(None);
             };
             // (Entries passed over are never copied.)
             let (k, v) = self.merge.sources[i].head().expect("a head entry");
@@ -2258,6 +2333,8 @@ impl Iterator for Scan {
             }
             let ts = key_ts(k);
             if ts > self.ts {
+                // (A key not visible yet: not a deleted one.)
+                self.dead = None;
                 // Versions newer than the snapshot: past a second one, a seek to the newest
                 // one it sees.
                 if self.newer.as_deref() == Some(uk) {
@@ -2271,8 +2348,7 @@ impl Iterator for Scan {
                 continue;
             }
             self.skipped = 0;
-            // (The decided key's buffer is reused, and the entry's own key cut to the user
-            // key: one allocation per row.)
+            // (The decided key's buffer is reused: no allocation per row.)
             match &mut self.decided {
                 Some(d) => {
                     d.clear();
@@ -2282,29 +2358,145 @@ impl Iterator for Scan {
             }
             self.decided_ts = ts;
             if v.is_none() {
+                self.dead_run += 1;
                 self.merge.sources[i].advance();
                 continue;
             }
             if !self.rdels.is_empty()
                 && let Some(r) = rdel::covering(&self.rdels, uk, ts, self.ts)
             {
-                // Deleted with its range; a range left out whole is passed at once.
+                // Deleted with its range; a range left out whole is passed at once. (One the
+                // transaction left out itself isn't deleted for others: no hint from it.)
                 if r.ts == rdel::ALL {
+                    self.dead = None;
                     let end = r.end.clone();
                     self.merge.seek(&end);
                 } else {
+                    self.dead_run += 1;
                     self.merge.sources[i].advance();
                 }
                 continue;
             }
-            let (mut k, v) = self.merge.sources[i].take();
-            k.truncate(k.len().saturating_sub(8));
-            let v = v.expect("a value");
+            // (The first live key past a run of deleted ones: `dead`.)
+            if let Some((d, start)) = self.dead.take()
+                && self.dead_run >= dead::MIN_DEAD
+            {
+                d.record(&start, uk, self.ts);
+            }
+            return Ok(Some(i));
+        }
+    }
+
+    /// Up to `max` more rows into `batch` (none: the scan is done), by reference: the values
+    /// stay in the blocks holding them. Rows with out-of-line values a resolving scan puts
+    /// back, and a hot range's rows, are pushed owned.
+    pub fn fill_batch(&mut self, batch: &mut batch::RowBatch, max: usize) -> Result<()> {
+        let target = batch.len() + max;
+        if self.rows.is_some() {
+            while batch.len() < target {
+                let Some(r) = self.next() else { break };
+                let (k, v) = r?;
+                batch.push(&k, v);
+            }
+            return Ok(());
+        }
+        while batch.len() < target {
+            let Some(i) = self.position()? else {
+                break;
+            };
+            let c = &mut self.merge.sources[i];
+            let (k, v) = c.head().expect("a head entry");
+            if self.resolve && v.is_some_and(toast::has_external) {
+                let (mut k, v) = c.take();
+                k.truncate(k.len().saturating_sub(8));
+                let v = toast::resolve(&self._view, &k, v.expect("a value"), self.ts)?;
+                batch.push(&k, v);
+                continue;
+            }
+            c.push_head(k.len().saturating_sub(8), batch);
+            c.advance();
+            // (The rows after it in its block that need no other source: a block at a time;
+            // under range deletions a row at a time, each checked.)
+            if !self.rdels.is_empty() {
+                continue;
+            }
+            let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
+            let (n, last) = c.run_into(self.ts, bound, self.resolve, batch, target - batch.len());
+            if n > 0 {
+                let d = self.decided.get_or_insert_with(Vec::new);
+                d.clear();
+                d.extend_from_slice(batch.last_key().expect("a row"));
+                self.decided_ts = last;
+            }
+        }
+        Ok(())
+    }
+    /// The rows stored under `keys` (strictly ascending, within the scan's range) into
+    /// `batch`, those it has, in their order: the merge sought forward from key to key, a
+    /// source staying in its block while the next key is there (a sorted batch of point
+    /// reads without a lookup each). Rows are by reference, as `fill_batch` gives them.
+    pub fn fetch_sorted<K: AsRef<[u8]>>(&mut self, keys: &[K], batch: &mut batch::RowBatch) -> Result<()> {
+        debug_assert!(self.rows.is_none(), "a merging scan");
+        self.dead = None;
+        for k in keys {
+            let k = k.as_ref();
+            // (A key's versions are all after it: user keys are prefix-free.)
+            self.merge.seek(k);
+            self.decided = None;
+            self.newer = None;
+            self.skipped = 0;
+            let Some(i) = self.position()? else {
+                return Ok(());
+            };
+            let c = &mut self.merge.sources[i];
+            let (sk, v) = c.head().expect("a head entry");
+            if user_key(sk) != k {
+                continue;
+            }
+            if self.resolve && v.is_some_and(toast::has_external) {
+                let (mut sk, v) = c.take();
+                sk.truncate(sk.len().saturating_sub(8));
+                let v = toast::resolve(&self._view, &sk, v.expect("a value"), self.ts)?;
+                batch.push(&sk, v);
+                continue;
+            }
+            c.push_head(sk.len().saturating_sub(8), batch);
+        }
+        Ok(())
+    }
+}
+
+impl Iterator for Scan {
+    type Item = Result<(Vec<u8>, Bytes)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(rows) = &mut self.rows {
+            // (A hot range's rows: committed range deletions drop the chains, so only the
+            // reader's own, `excluding`, can cover one.)
+            let (k, v) = loop {
+                let (k, v) = rows.next()?;
+                if !self.rdels.iter().any(|r| r.contains(&k)) {
+                    break (k, v);
+                }
+            };
             if self.resolve && toast::has_external(&v) {
                 return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
             }
             return Some(Ok((k, v)));
         }
+        let i = match self.position() {
+            Ok(Some(i)) => i,
+            Ok(None) => return None,
+            Err(e) => return Some(Err(e)),
+        };
+        // (The entry's own key cut to the user key: one allocation per row.)
+        let (mut k, v) = self.merge.sources[i].take();
+        k.truncate(k.len().saturating_sub(8));
+        let v = v.expect("a value");
+        if self.resolve && toast::has_external(&v) {
+            return Some(toast::resolve(&self._view, &k, v, self.ts).map(|v| (k, v)));
+        }
+        Some(Ok((k, v)))
     }
 }
 
@@ -2724,6 +2916,27 @@ mod tests {
             let part: Vec<_> = store.scan(&a, &b, ts).map(|r| r.unwrap()).collect();
             let want: Vec<_> = expect.iter().filter(|(k, _)| *k >= a && *k < b).cloned().collect();
             assert_eq!(part, want, "part of the range, {what}, ts {ts}");
+            // A batch at a time (small batches: runs end mid-block), and sorted point reads
+            // of every other key (some never written).
+            let mut batched = Vec::new();
+            let mut s = store.view().scan(&rel, &end, ts);
+            loop {
+                let mut b = batch::RowBatch::default();
+                s.fill_batch(&mut b, 7).unwrap();
+                if b.is_empty() {
+                    break;
+                }
+                while let Some(r) = b.take() {
+                    batched.push(r);
+                }
+            }
+            assert_eq!(batched, expect, "batched scan, {what}, ts {ts}");
+            let wanted: Vec<Vec<u8>> = (0..400u32).step_by(2).map(key).collect();
+            let mut b = batch::RowBatch::default();
+            store.get_sorted_into(&wanted, ts, false, &mut b).unwrap();
+            let got: Vec<_> = std::iter::from_fn(|| b.take()).collect();
+            let want: Vec<_> = expect.iter().filter(|(k, _)| wanted.contains(k)).cloned().collect();
+            assert_eq!(got, want, "sorted point reads, {what}, ts {ts}");
             // Point reads: the newest version at `ts`. (A deletion every snapshot sees may
             // be gone, as compaction drops it: no version and a deletion read alike.)
             let keys: Vec<Vec<u8>> = model.keys().cloned().collect();
@@ -2819,6 +3032,41 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn scans_step_over_deleted_runs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions { memtable_bytes: 1 << 20, sync: false, ..Default::default() }).unwrap();
+        let key = |i: u32| format!("q{i:05}");
+        let all: Vec<_> = (0..2000).map(|i| (key(i).into_bytes(), Some(Bytes::from_static(b"v")))).collect();
+        s.commit(all, |_| Ok(())).unwrap();
+        let old = s.visible_ts();
+        let del: Vec<_> = (0..1500).map(|i| (key(i).into_bytes(), None)).collect();
+        s.commit(del, |_| Ok(())).unwrap();
+        let first = |ts: u64| -> Option<String> {
+            let r = s.scan_raw(b"q", b"r", ts).next()?.unwrap();
+            Some(String::from_utf8(r.0).unwrap())
+        };
+        let ts = s.visible_ts();
+        assert_eq!(first(ts).as_deref(), Some("q01500"));
+        assert_eq!(s.dead.skip(b"q", ts).as_deref(), Some(&b"q01500"[..]), "a hint recorded");
+        assert_eq!(first(ts).as_deref(), Some("q01500"));
+        assert_eq!(first(old).as_deref(), Some("q00000"), "an older snapshot sees the rows");
+        // A row put back into the run, then deleted again; the head deleted one by one.
+        let t = put(&s, "q00300", Some("w"));
+        assert_eq!(first(t).as_deref(), Some("q00300"));
+        put(&s, "q00300", None);
+        put(&s, "q01500", None);
+        let t = put(&s, "q01501", None);
+        assert_eq!(first(t).as_deref(), Some("q01502"));
+        assert_eq!(s.scan_raw(b"q", b"r", t).count(), 498);
+        // Through flushes and compaction.
+        s.flush_memtables().unwrap();
+        s.compact().unwrap();
+        let t = s.visible_ts();
+        assert_eq!(first(t).as_deref(), Some("q01502"));
+        assert_eq!(s.scan_raw(b"q01000", b"q01600", t).count(), 98);
     }
 
     fn scan_all(s: &Store, ts: u64) -> Vec<(String, String)> {
