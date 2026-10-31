@@ -5175,9 +5175,26 @@ order (new ran after base in every round, so it often paid for base's writes: th
   engine runs out of tps before CPU at 32+ (1.7 of its 4 cores busy): off-CPU, about a fifth
   of its threads' context switches are `sched_yield` spinning on the size model's relfiles
   lock (`Kills::new`, `ensure` from `updated`, `fetched`, `is_estimated`, `CopyLoad::register`;
-  on-CPU `exec::sizing` is 13.9%), 6.5% the row and xact lock waits, 4% the WAL fsync. Agent
-  142 takes the size model's locking (their batch 2); the lock table's state mutex and the
-  waiters' wake-up are next in this area.
+  on-CPU `exec::sizing` is 13.9%), 6.5% the row and xact lock waits, 4% the WAL fsync.
+- **Hot rows after the size model's shard locks** (`b0c4238b`, which has agent 142's
+  6b079926; two rounds, the machine quieter): engine tps at 1 / 8 / 32 / 64 / 128 clients
+  1,612–1,626 / 6,595–6,732 / 6,100–6,698 / 5,194–5,699 / 4,027–4,636, CPU per transaction
+  0.49 / 0.47–0.49 / 0.53–0.57 / 0.63–0.64 / 0.78–0.85 ms; PostgreSQL 1,886 / 10,156 / 9,880 /
+  8,309 / 7,470 tps, 0.35 / 0.29 / 0.37 / 0.46 / 0.51 ms. The same curve at about two thirds
+  of the tps, CPU-bound on the 4 server cores (3.5 busy at 32 clients): the gap is CPU per
+  transaction now. Off-CPU at 32: xact-lock waits on the hot rows 8% of the context switches,
+  the WAL fsync 5%, `wait_durable`'s sync mutex spinning 4%, the size model's `is_estimated`
+  under the branches / tellers bitmap scans 6%, the lock table's mutex under `lock_row` 2%.
+  Waking the commits an fsync covers together (a condvar in `wait_durable`) changed neither
+  tps nor CPU (1,588–1,732 / 5,826–6,877 / 5,796–6,267 / 4,934–5,593 / 4,272–4,306 tps,
+  interleaved with the rows above) and was left out.
+- **Agent 133's reproducers**: Metabase's Quartz lock query (`SELECT * FROM qrtz_locks WHERE
+  sched_name = .. AND lock_name = .. FOR UPDATE`, its own transaction): 0.107 ms CPU prepared
+  and 0.20 simple at 1 client (PostgreSQL 0.136 / 0.154), 16,791 tps at 4 clients on one row
+  (PostgreSQL 6,616): the application's 6.7 ms is time waiting for the scheduler transaction
+  that holds the row. tpcb-like's END (`pgbench -r -M prepared`, engine `--no-sync`):
+  0.060 ms against PostgreSQL's 0.099 with fsync, so a row-writing commit isn't Grafana's
+  157 µs average (its migrations' DDL commits are the likely cause, not measured here).
 
 ## Application CPU (round 24, agent 133)
 

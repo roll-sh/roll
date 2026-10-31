@@ -3082,13 +3082,27 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     `--password` (SCRAM) measures the client's PBKDF2 (13 ms in pgbench's container), not
     the server. The web-app mix's bigserial INSERT is 6% of its CPU: the size model's
     index_insert (1.3%), the unique key's conflict probe (1.6%), nextval 0.4%.
-  - Hot rows at 32+ clients (tpcb-like): the engine's tps halves from 8 to 32 clients
-    while PostgreSQL's holds, with a quarter to half of its 4 cores idle: off-CPU, a fifth
-    of the context switches are the size model's relfiles lock spinning (`sizing::Kills::new`,
-    `ensure`, `fetched`, `is_estimated`, `updated`, `CopyLoad::register`: agent 142's batch 2)
-    and the row and xact locks' waits (`LockManager::acquire`, `lock_row`). Left for the next
-    round: the lock table's single state mutex under `lock_row` / `release_locks`, and
-    waking a hot row's waiters one at a time.
+  - Hot rows at 32+ clients (tpcb-like `-M prepared`): before the size model's per-shard
+    locks (6b079926) the engine's tps halved from 8 to 32 clients while PostgreSQL's held,
+    with its cores idle and a fifth of its context switches the relfiles lock spinning. On
+    `b0c4238b` (with them) it follows PostgreSQL's curve at about two thirds of its tps
+    (1,600 / 6,700 / 6,400 / 5,400 / 4,300 at 1 / 8 / 32 / 64 / 128 clients against 1,900 /
+    10,200 / 9,900 / 8,300 / 7,500) and is CPU-bound (0.53–0.85 ms per transaction against
+    0.29–0.51 on 4 cores): what is left is CPU per transaction (executor, wire), not waiting.
+    Off-CPU at 32: the hot rows' xact-lock waits 8% of switches (PostgreSQL waits there too),
+    the WAL fsync 5%, `wait_durable`'s sync mutex spinning 4%, the size model's `is_estimated`
+    from bitmap scans of branches / tellers 6% (agent 142), the lock table's state mutex
+    under `lock_row` 2%. Tried and left out: waking the commits an fsync covers together (a
+    condvar instead of handing the sync mutex from one to the next): no change in tps or CPU
+    per transaction at 1–128 clients, two interleaved rounds.
+  - Agent 133's application reproducers: Metabase's Quartz lock (`SELECT * FROM QRTZ_LOCKS
+    WHERE SCHED_NAME = .. AND LOCK_NAME = .. FOR UPDATE` in its own transaction) costs the
+    engine 0.11 ms prepared / 0.20 simple at one client against PostgreSQL's 0.14 / 0.16, and
+    at four clients on one row 16,800 tps against 6,600: the 6.7 ms in Metabase is the wait
+    for the scheduler transaction holding the row, so its length, not the lock. tpcb-like's
+    COMMIT (`pgbench -r`, `--no-sync`) is 0.06 ms against PostgreSQL's 0.10 (with fsync):
+    Grafana's 157 µs average comes from other commits (its migrations' DDL commits are
+    the candidates), not from the commit path of a row-writing transaction.
   - Verified: crate tests debug and release, clippy (no new
     warnings), difftest smoke, isolation 121 / 122 plus the 13 roll-* specs (1,742 / 1,743
     permutations), the regression suite in full (debug, private reference): 51,145 / 51,150,
