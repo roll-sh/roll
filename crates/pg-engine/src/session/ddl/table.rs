@@ -4484,6 +4484,8 @@ impl Ddl<'_, '_> {
         }
         self.not_in_use(t.oid, "ALTER TABLE", &t.name)?;
         self.note_alter_locks(&t, &s.cmds)?;
+        // The table as others left it once its locks are held (`lock_and_reread`).
+        let t = self.reread(t.oid)?;
         let mut t = (*t).clone();
         let orig = t.clone();
         // Several ALTER COLUMN TYPEs: their USINGs all read the row as it was, converted
@@ -7897,6 +7899,29 @@ impl Ddl<'_, '_> {
         Ok(())
     }
 
+    /// table_open(oid, mode) of a command that then rewrites the table or writes its catalog
+    /// entries (REINDEX, CLUSTER, ALTER TABLE; VACUUM's loop and CREATE INDEX / TRUNCATE refresh
+    /// the same way): the lock, then the catalog as others left it once the lock is held
+    /// (`refresh_catalog`, the AcceptInvalidationMessages of LockRelationOid), and the table (or
+    /// materialized view's storage) read again from it. What the command copied before the lock
+    /// is stale: a copy written back would undo what was committed meanwhile, or fail the commit
+    /// as a concurrent schema change (a statistics target set, an autovacuum worker's ANALYZE).
+    /// Only the command's own relations are read again, never the whole catalog: the refresh
+    /// costs nothing when nothing committed meanwhile, and what did is merged by pointer.
+    pub(super) fn lock_and_reread(&mut self, oid: u32, mode: i32) -> Result<Arc<Table>> {
+        self.note_lock(oid, mode)?;
+        self.reread(oid)
+    }
+
+    /// The table `oid` read again once the command's locks are held (`lock_and_reread`).
+    pub(super) fn reread(&mut self, oid: u32) -> Result<Arc<Table>> {
+        let name = crate::sql::binder::perms::rel_word(&self.cat, oid).1;
+        self.refresh_catalog()?;
+        self.cat
+            .index_table(oid)
+            .ok_or_else(|| crate::catalog::no_such_relation(None, &name))
+    }
+
     /// Lock relation `oid` in `mode` (a lockdefs.h number) until the transaction ends;
     /// pg_locks shows it.
     pub(super) fn note_lock(&self, oid: u32, mode: i32) -> Result<()> {
@@ -9337,6 +9362,8 @@ impl Ddl<'_, '_> {
                 self.note_lock(toast_rel, heap_mode)?;
                 self.note_lock(toast_rel + 1, index_mode)?;
             }
+            // (What others committed while the locks were waited for: `lock_and_reread`.)
+            self.refresh_after_locks(&[table])?;
             // ReindexRelationConcurrently's phases: writers out before the build and again
             // before the validation (ShareLock), the transactions with older snapshots
             // (WaitForOlderSnapshots), then every transaction using the table before the

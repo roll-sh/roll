@@ -897,6 +897,19 @@ impl Ddl<'_, '_> {
                 if let Some(t) = self.cat.index_table(ix.table) {
                     self.require_owner(t.owner, "index", &ix.name)?;
                 }
+                // AlterTableGetLockLevel: the index, at the strongest level its subcommands
+                // need (it took none: two sessions' ALTER INDEX ran at once), then read again
+                // as others left it (`lock_and_reread`; each subcommand reads it from `cat`).
+                if let Some(level) = (s.cmds.iter())
+                    .filter_map(|c| match inner(c) {
+                        Some(NodeEnum::AlterTableCmd(c)) => Some(super::table::alter_cmd_lock(c)),
+                        _ => None,
+                    })
+                    .max()
+                {
+                    self.note_lock(ix.oid, level)?;
+                    self.refresh_catalog()?;
+                }
                 for c in &s.cmds {
                     let Some(NodeEnum::AlterTableCmd(cmd)) = inner(c) else {
                         continue;
@@ -4785,6 +4798,12 @@ impl Ddl<'_, '_> {
             d.cat
                 .lookup(schema, &name, d.search_path())?
                 .ok_or_else(|| crate::catalog::no_such_relation(schema, &name))
+                // CommentObject's get_object_address: the relation (of a column, constraint,
+                // trigger, policy) locked SHARE UPDATE EXCLUSIVE.
+                .and_then(|r| {
+                    d.note_lock(r.oid(), super::table::lockmode::SHARE_UPDATE_EXCLUSIVE)?;
+                    Ok(r)
+                })
         };
         if kind == O::ObjectLargeobject {
             let oid = super::privs::node_oid(obj, self.ctx.fmt())?;

@@ -4885,6 +4885,70 @@ allocations), the record's decoding 23% (`Btree::read_image` 13%), `read_shape` 
 table's models are laid out 156.7 MB, about 356 bytes per row with the primary key (1.2 GB per
 million rows; PostgreSQL's pages for them: 44 MB heap and 6.8 MB index).
 
+## Catalog round 8 (round 23, agent 131)
+
+Release builds; **base** is `77a38372` (the branch's head when the round began), **new** each
+batch. The machine was loaded throughout (load 25-45 from other agents): runs interleaved,
+the engine pinned to four cores, its CPU time from `/proc/<pid>/stat`, peak RSS `VmHWM`.
+
+### First batch: `pg_restore -j 4`'s foreign keys, DDL after its locks
+
+PostgreSQL's regression database (a private PostgreSQL 18.6 after a full `pg_regress` run with
+`PGREGRESS_KEEP=1`, `pg_dump -Fc`: 3.4 MB, 1,669 relations, 65 foreign keys) restored with
+`pg_restore -j 4` into a fresh engine per run:
+
+| | runs | runs failing a statement |
+|---|---|---|
+| base | 95 | 5 (`relation "21402" does not exist`, ...: one FOREIGN KEY each) |
+| new | 200 | 0 |
+
+The oid was an index's: `perms::rel_word` didn't name indexes, and `Ddl::note_lock` took a
+relation it couldn't name for one dropped while its lock was waited for whenever another
+session's DDL committed between its two catalog reads; an RI check locks both tables'
+indexes. Spec `roll-ddl-after-lock-waits` reproduces it every time (an ALTER INDEX waiting for
+another ALTER INDEX's lock, which now exists).
+
+| | base | new |
+|---|---|---|
+| restore wall (15 interleaved runs each, median; a build running alongside) | 5.3 s | 5.2 s |
+| pgbench `-S` tps (3 rounds) | 9,672 / 9,014 / 10,449 | 9,634 / 9,278 / 11,264 |
+| `-S` engine CPU per 1,000 transactions | 236-248 ms | 251-265 ms |
+| pgbench `-N` tps | 2,846 / 3,303 / 3,402 | 2,870 / 3,151 / 3,272 |
+| `-N` engine CPU per 1,000 transactions | 703-803 ms | 699-763 ms |
+| pgbench peak RSS (`-N`) | 489-519 MB | 494-518 MB |
+| Kysely's suite: engine CPU (2 rounds), peak RSS | 11.8 / 11.0 s, 100-103 MB | 11.1 / 10.5 s, 101-103 MB |
+| `catalog-tools` at 10,000 tables: engine CPU, RSS | 1.88 / 1.83 s, 170-174 MB | 1.90 / 1.86 s, 172 MB |
+
+(pgbench: scale 10, 4 clients, 10,000 transactions each, `--no-sync`. Unchanged within the
+noise, as expected: the batch changes which locks DDL takes and when it reads the catalog
+again, not the statements' own work.)
+
+`catalog-tools` at 10,000 tables (ms, first in the session / again; medians of 2 rounds):
+unchanged within the noise (psql `\dt` 140 / 23.0 → 148 / 22.3, `\d t` indexes 50 / 4.0 →
+51 / 4.2, Django's tables 27.5 / 26.4 → 29.2 / 26.3, Prisma's columns 124 / 104 → 104 / 106,
+the ORM constraints query 19.3 / 17.6 → 22.2 / 19.4).
+
+### Verification (round 23, agent 131, first batch)
+
+`cargo test -p pg-engine` debug and release (every test binary, deep_input and autovacuum
+with them; release `wire_waits`' `waits_end_by_timeouts_and_cancel` failed once with "error
+communicating with the server" in place of "connection closed", the transaction_timeout flake
+agents 109 and 115 describe, and passed 3 of 3 runs alone), clippy (no new warnings),
+`difftest smoke`; the isolation suite on a private reference: 121 / 122 specs, 1,647 / 1,648
+permutations, and all 14 roll-* specs (`roll-concurrent-create` and the new
+`roll-ddl-after-lock-waits` with them); the regression suite in full (debug, private reference
+`a131-ref1`) against the committed `results.tsv`: 51,148 / 51,150, no unit changed;
+`pg_dump_tap` 14,817 / 14,817; `pg_dump_roundtrip` over that run's database: 0 errors restoring
+either side's dump into the other, every way.
+
+Then rebased onto `3b55b060`, `fd250f0b` and `57d7da04` (upstream changed `session/ddl/table.rs`,
+`vacuum.rs` and the lock manager's fast path): debug crate tests again, clippy, the isolation
+suite (the same 121 / 122 and 14 roll-* specs) and 60 more restores (0 failing). Two tests fail
+on upstream's head alone as well, not through this batch: `deep_input`'s `viewdef 2000` and
+`deparse_identity`'s `deep_view_on_2mb_thread` ("stored query: Invalid statement: stack depth
+limit exceeded" reading a 2,000-term view; they passed on `77a38372`), and `wire`'s
+`cancel_request_closes_after_the_error` flakes (4 of 5 runs pass).
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

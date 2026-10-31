@@ -953,7 +953,7 @@ impl Ddl<'_, '_> {
             }
         };
         self.require_rel_priv(t.oid, crate::catalog::acl::MAINTAIN, false)?;
-        self.note_lock(t.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+        let t = self.lock_and_reread(t.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
         let ix = if s.indexname.is_empty() {
             self.clustered_index(&t).ok_or_else(|| {
                 Error::new(
@@ -987,7 +987,10 @@ impl Ddl<'_, '_> {
                     ));
                     continue;
                 }
-                self.note_lock(leaf.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+                let leaf = self.lock_and_reread(leaf.oid, super::table::lockmode::ACCESS_EXCLUSIVE)?;
+                let Some(lix) = self.cat.indexes.get(&lix.oid).cloned() else {
+                    continue;
+                };
                 self.cluster_rel(&leaf, &lix, verbose)?;
             }
         } else {

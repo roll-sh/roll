@@ -2364,6 +2364,34 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     -j 4` of PostgreSQL's regression database fails an `ALTER TABLE ONLY ... ADD CONSTRAINT
     ... FOREIGN KEY` with `relation "<oid>" does not exist`, from `Ddl::note_lock` (the oid it
     locks isn't in the command's catalog copy). BENCH.md "Catalog round 7" has the rates.
+    (Fixed in round 8: the oid was an index's, below.)
+- **Catalog round 8, first batch** (round 23, agent 131; BENCH.md "Catalog round 8"):
+  - `pg_restore -j 4`'s `relation "<oid>" does not exist` was an index lock: `perms::rel_word`
+    named tables, views, sequences and TOAST relations but not indexes, so `Ddl::note_lock`
+    took an index for a relation dropped while its lock was waited for whenever any other
+    session's DDL committed between its two catalog reads (`before` / `now`). A foreign key's
+    RI check locks both tables' indexes; REINDEX and ALTER INDEX lock indexes too. Indexes are
+    named now (lock waits' messages name them as PostgreSQL does). Release builds, a fresh
+    engine per run: before 5 of 95 runs failed, after 0 of 200. Spec
+    `roll-ddl-after-lock-waits` (its first permutation fails without the fix, deterministically:
+    an ALTER INDEX waiting for another's lock while that one commits).
+  - ALTER INDEX took no lock at all (two sessions' ALTER INDEX ran at once): it locks the
+    index at AlterTableGetLockLevel's level now. COMMENT locks the relation it comments on
+    (or the relation of the column, constraint, trigger or policy) SHARE UPDATE EXCLUSIVE, as
+    CommentObject's get_object_address does (an ALTER TABLE rewrite didn't wait for it).
+    `catalog_storage.rs` `merged_concurrent_ddl_is_stored` commented on a table another open
+    transaction was indexing; it comments on another table now (it would wait in PostgreSQL).
+  - Refresh after locks, one helper for DDL that rewrites a table or writes its entries:
+    `Ddl::lock_and_reread(oid, mode)` (and `reread` when the locks are held already) locks,
+    takes in what others committed while it waited (`refresh_catalog`, the
+    AcceptInvalidationMessages of LockRelationOid) and reads the table again from the refreshed
+    catalog. CLUSTER (and each partition it clusters), ALTER TABLE (after `note_alter_locks`)
+    and ALTER INDEX use it; REINDEX refreshes after its table's and indexes' locks (it reads
+    them by oid afterwards); VACUUM (FULL), CREATE INDEX and TRUNCATE already did. It reads
+    again only the command's own relations: a refresh with nothing committed meanwhile is a
+    version compare, and what was committed is merged by pointer (`catmerge::merge`). What a
+    command copied before its lock must not be written back after a refresh (it would undo
+    the other commit): the helper returns the copy to use.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference

@@ -312,6 +312,12 @@ pub fn rel_word(cat: &crate::catalog::Catalog, oid: u32) -> (&'static str, Strin
     if let Some(s) = cat.sequences.get(&oid) {
         return ("sequence", s.name.clone());
     }
+    // (An index was "relation <oid>": `Ddl::note_lock` took that for one dropped while its
+    // lock was waited for whenever any DDL committed meanwhile, and failed pg_restore -j's
+    // foreign keys, REINDEX and ALTER INDEX with "relation <oid> does not exist".)
+    if let Some(i) = cat.indexes.get(&oid) {
+        return ("index", i.name.clone());
+    }
     if let Some((t, index)) = cat.toast_owner(oid) {
         return (if index { "index" } else { "table" }, t.toast_relname(index));
     }

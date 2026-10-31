@@ -213,9 +213,10 @@ fn merged_concurrent_ddl_is_stored() {
     let engine = open(dir.path());
     let mut a = engine.connect(1, "postgres", "postgres", "t").unwrap();
     let mut b = engine.connect(2, "postgres", "postgres", "t").unwrap();
-    run(&mut a, "CREATE TABLE base_t (id int PRIMARY KEY, v text)");
+    run(&mut a, "CREATE TABLE base_t (id int PRIMARY KEY, v text);\nCREATE TABLE base_u (id int)");
     run(&mut a, "BEGIN;\nCREATE TABLE from_a (x int);\nCREATE INDEX base_t_v ON base_t (v)");
-    run(&mut b, "CREATE TABLE from_b (y text DEFAULT 'b');\nCOMMENT ON TABLE base_t IS 'by b'");
+    // (A COMMENT ON TABLE base_t would wait for the CREATE INDEX's lock, as in PostgreSQL.)
+    run(&mut b, "CREATE TABLE from_b (y text DEFAULT 'b');\nCOMMENT ON TABLE base_u IS 'by b'");
     run(&mut a, "COMMIT");
     let before = catalog_of(&mut a);
     for t in ["from_a", "from_b", "base_t_v"] {
