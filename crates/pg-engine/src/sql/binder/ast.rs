@@ -401,8 +401,8 @@ fn fix_xmlparse(tree: &Node, sql: String) -> String {
     out
 }
 
-/// `cached_parse` tags of the stored texts parsed through `pg_query::parse` (whose errors
-/// read differently from `sql::parse`'s): apart from every parser option bit.
+/// `cached_parse` tags of the stored texts (`stored_parse`, whose errors read differently
+/// from `sql::parse`'s): apart from every parser option bit.
 const STORED_EXPR: i32 = -1;
 const STORED_STMT: i32 = -2;
 
@@ -417,15 +417,7 @@ pub fn parse_expr(sql: &str) -> Result<Node> {
 /// Parse a comma-separated list of SQL expressions.
 pub fn parse_exprs(sql: &str) -> Result<Vec<Node>> {
     let text = format!("SELECT {sql}");
-    let stmts = crate::sql::parse::cached_parse(
-        STORED_EXPR,
-        &text,
-        || {
-            stored_parse(&text)
-                .map(|r| r.protobuf.stmts)
-                .map_err(|e| crate::error::internal(format!("stored expression: {e}")))
-        },
-    )?;
+    let stmts = crate::sql::parse::cached_parse(STORED_EXPR, &text, || stored_parse(&text, "stored expression"))?;
     let stmt = stmts
         .into_iter()
         .next()
@@ -446,24 +438,24 @@ pub fn parse_exprs(sql: &str) -> Result<Vec<Node>> {
         .collect()
 }
 
-/// Parse a statement (view bodies).
-/// `pg_query::parse` of a stored text, with stack for the parser and for decoding the tree:
-/// stored texts can nest as deep as the statements that made them.
-fn stored_parse(sql: &str) -> pg_query::Result<pg_query::ParseResult> {
-    let room = crate::stack::tree_headroom(sql.len()).max(3 << 20);
-    crate::stack::with_headroom(room, || pg_query::parse(sql, 0))
+/// A stored text, parsed as the statement that made it was (`parse::parse_uncached`): stored
+/// texts nest as deep as those statements. (A bare `pg_query::parse` ran with whatever depth
+/// limit the thread's last parse left, so a deep view read back only while its tree stayed in
+/// the parse cache: f39d3f79's cache bound stopped caching it.) Depth errors are Postgres's;
+/// any other is internal, `what: message`.
+fn stored_parse(sql: &str, what: &str) -> Result<Vec<pg_query::protobuf::RawStmt>> {
+    crate::sql::parse::parse_uncached(sql, 0).map_err(|e| {
+        if e.code == crate::error::code::STATEMENT_TOO_COMPLEX {
+            e
+        } else {
+            crate::error::internal(format!("{what}: {}", e.message))
+        }
+    })
 }
 
+/// Parse a statement (view bodies).
 pub fn parse_stmt(sql: &str) -> Result<Node> {
-    let stmts = crate::sql::parse::cached_parse(
-        STORED_STMT,
-        sql,
-        || {
-            stored_parse(sql)
-                .map(|r| r.protobuf.stmts)
-                .map_err(|e| crate::error::internal(format!("stored query: {e}")))
-        },
-    )?;
+    let stmts = crate::sql::parse::cached_parse(STORED_STMT, sql, || stored_parse(sql, "stored query"))?;
     stmts
         .into_iter()
         .next()

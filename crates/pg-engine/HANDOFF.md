@@ -2001,6 +2001,18 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       definition. Upstream (libpg_query `18-latest`, pg_query.rs `main`) still has 10,000.
       Raising it means vendoring the 61 MB crate or forking it, and reading the C parse tree
       without protobuf means bindings for every node type. Neither is clean.
+    - **Parse deep text through `sql::parse` (`parse_uncached`), never a bare
+      `pg_query::parse`** (agent 141). libpg_query's depth limit is thread-local: a call
+      on an engine segment keeps whatever limit the thread's last parse left (2 MB, or 31 MB
+      after a deep retry). Stored view and default texts (`binder/ast.rs` `stored_parse`) were
+      parsed bare, so a view of 2,000 `+` terms read back only when its tree was still in the
+      parse cache or an earlier deep parse had raised the limit: f39d3f79's bound by real
+      tree bytes stopped caching that tree, and `deep_input viewdef 2000` / `deparse_identity
+      deep_view_on_2mb_thread` failed in debug ("stored query: stack depth limit exceeded";
+      run alone from f39d3f79 on, in deep_input's full run only later, since its earlier
+      cases' deep parses had raised the limit). Stored texts now
+      go through `parse_uncached`. Still bare, on stored texts: `ddl/table.rs`
+      `rename_column_in_query`, `binder/views.rs` `mentioned_columns`.
   - **The depth limit.** The budget is `max_stack_depth` × `SCALE` bytes of the engine's
     own stack, summed over segments: SCALE is 32 in release and 160 in debug. These are the
     deepest inputs that still work, on a release build at the default 2 MB (bisected to

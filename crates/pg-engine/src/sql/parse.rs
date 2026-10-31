@@ -306,7 +306,11 @@ fn parse_opts(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
     cached_parse(options, sql, || parse_uncached(sql, options))
 }
 
-fn parse_uncached(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
+/// A libpg_query parse with the engine's stack handling: the parser's depth limit is set for
+/// each call and a parse that limit stopped is retried on the deep stack (a bare
+/// `pg_query::parse` keeps whatever limit the thread's last parse left). Parse deep text,
+/// stored texts included, through here.
+pub(crate) fn parse_uncached(sql: &str, options: c_int) -> Result<Vec<RawStmt>> {
     let input = CString::new(sql).map_err(|_| {
         Error::new(
             code::SYNTAX_ERROR,
