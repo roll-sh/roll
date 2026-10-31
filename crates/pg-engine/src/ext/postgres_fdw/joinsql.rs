@@ -35,6 +35,8 @@ pub struct Tail {
     /// The row-marked relations' whole rows (ROW_MARK_COPY's junk columns), after the
     /// select list.
     pub rows: Vec<String>,
+    /// Whole rows in the select list: (position, text), inserted in order.
+    pub whole: Vec<(usize, String)>,
 }
 
 fn jointype_name(jt: JoinKind) -> &'static str {
@@ -123,6 +125,10 @@ impl<'a> Sql<'a> {
             Some(t) => t.iter().map(|e| self.expr(rel, e)).collect(),
             None => rel.reltarget.iter().map(|&g| self.expr(rel, &Expr::Col(g, crate::types::DataType::Unknown))).collect(),
         };
+        let mut list = list;
+        for (at, w) in &tail.whole {
+            list.insert((*at).min(list.len()), w.clone());
+        }
         let list: Vec<String> = list.into_iter().chain(tail.rows.iter().cloned()).collect();
         let mut sql = format!("SELECT {}", if list.is_empty() { "NULL".to_string() } else { list.join(", ") });
         let mut additional = Vec::new();

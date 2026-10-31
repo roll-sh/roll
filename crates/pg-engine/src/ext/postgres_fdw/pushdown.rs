@@ -248,6 +248,76 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
         let fi = fi.clone();
         *input = fi;
     }
+    whole_rows(p);
+}
+
+/// A Foreign Scan of a join under a projection reading a base relation's whole row (`t`,
+/// `t.*`): the remote query returns that row as one ROW (`JoinScan::whole`), the relation's
+/// columns read on their own besides it, as postgres_fdw's fdw_scan_tlist has a whole-row
+/// Var.
+fn whole_rows(p: &mut Plan) {
+    if let Plan::Project { input, exprs } = p
+        && let Plan::Foreign(f) = &**input
+        && let Some(js) = f.private.0.as_any().downcast_ref::<super::joinscan::JoinScan>()
+        && js.whole.is_empty()
+    {
+        let live = |k: usize| -> Vec<usize> {
+            let t = &js.bases[k].scan.table;
+            (0..t.columns.len()).filter(|&i| !t.columns[i].dropped).filter_map(|i| js.bases[k].cols.get(i).copied().flatten()).collect()
+        };
+        let out = |j: usize| f.out.get(j).copied();
+        let mut whole: Vec<usize> = Vec::new();
+        let mut single: Vec<usize> = Vec::new();
+        for e in exprs.iter() {
+            let row = crate::sql::binder::nullable_whole_row(e).or(crate::sql::binder::is_whole_row(e).then_some(e));
+            let gs: Option<Vec<usize>> = match row {
+                Some(Expr::Row(items, _)) => items.iter().map(|x| if let Expr::Col(j, _) = x { out(*j) } else { None }).collect(),
+                _ => None,
+            };
+            match gs.and_then(|gs| (0..js.bases.len()).find(|&k| !gs.is_empty() && live(k) == gs)) {
+                Some(k) => {
+                    if !whole.contains(&k) {
+                        whole.push(k);
+                    }
+                }
+                None => single.extend(e.columns().into_iter().filter_map(out)),
+            }
+        }
+        if whole.is_empty() {
+            return;
+        }
+        // (What the scan reads on its own: sort keys, local conditions.)
+        for (e, ..) in &js.order {
+            single.extend(e.columns());
+        }
+        for c in &js.info.local_conds {
+            single.extend(c.columns());
+        }
+        let in_whole = |g: usize| whole.iter().any(|&k| live(k).contains(&g));
+        let kept: Vec<usize> = js.tlist.iter().copied().filter(|&g| !in_whole(g) || single.contains(&g)).collect();
+        let mut at: Vec<(usize, usize)> = whole
+            .iter()
+            .map(|&k| {
+                let cols = live(k);
+                let first = js.tlist.iter().position(|g| cols.contains(g)).unwrap_or(js.tlist.len());
+                (js.tlist[..first].iter().filter(|g| kept.contains(g)).count(), k)
+            })
+            .collect();
+        at.sort();
+        let mut js = js.clone();
+        js.tlist = kept;
+        js.whole = at;
+        let mut f = (**f).clone();
+        f.private = crate::sql::plan::FdwPrivate(Arc::new(js));
+        *input = Arc::new(Plan::Foreign(Box::new(f)));
+        return;
+    }
+    // (Under the level's other projections and its LIMIT.)
+    if let Plan::Project { input, .. } | Plan::Limit { input, .. } = p
+        && matches!(&**input, Plan::Project { .. } | Plan::Limit { .. })
+    {
+        whole_rows(Arc::make_mut(input));
+    }
 }
 
 /// `p`, a projection computing values over one that only places a Foreign Scan's columns

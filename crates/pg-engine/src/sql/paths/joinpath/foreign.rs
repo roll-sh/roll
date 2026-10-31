@@ -25,7 +25,6 @@ impl Search<'_, '_, '_> {
             || leaf.proj.is_some()
             || s.with_key
             || s.sys
-            || (s.mark.is_some() && !self.fdw_lock_level())
             || s.rtindex.0 == 0
             || s.current_of.is_some()
         {
@@ -133,6 +132,13 @@ impl Search<'_, '_, '_> {
             return;
         }
         self.fdw_tried.push(set);
+        // (A locking level with relations a remote query can't lock, local ones: the level's
+        // row marks go up from every relation to its LockRows, so that EvalPlanQual can
+        // recheck a row with the others' copies. A Foreign Scan of a join doesn't return
+        // them, nor has an outer plan to recheck with (fdw_outerpath): the join runs here.)
+        if self.leaves.iter().any(|l| l.scan.as_ref().is_some_and(|(s, _)| s.mark.is_some())) && !self.fdw_lock_level() {
+            return;
+        }
         let (oset, iset) = (self.rels[outer].set, self.rels[inner].set);
         let (Some(o), Some(i)) = (self.fdw_rel(oset), self.fdw_rel(iset)) else { return };
         let kind = match (jt, uniq) {
@@ -573,7 +579,7 @@ impl Search<'_, '_, '_> {
             scans.push(Arc::new(Plan::Scan(Box::new(b.scan.clone()))));
             cols.push(b.cols.clone());
         }
-        let private = crate::ext::postgres_fdw::joinscan::JoinScan { info: info.clone(), bases, tlist, order: Vec::new(), limit: None };
+        let private = crate::ext::postgres_fdw::joinscan::JoinScan { info: info.clone(), bases, tlist, order: Vec::new(), limit: None, whole: Vec::new() };
         let fr = crate::sql::plan::ForeignRel {
             scans,
             cols,

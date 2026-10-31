@@ -126,3 +126,44 @@ fn direct_members() {
     assert_eq!(r.last().unwrap().tag, "DELETE 3");
     assert!(run(&mut s, "SELECT * FROM loct2").is_empty());
 }
+
+/// A pushed join whose relation's whole row is read above it fetches that row as one ROW
+/// (NULL for a null-extended row), and a value that doesn't convert names the whole-row
+/// reference. A locking level with a local relation joins its foreign ones here, under
+/// one LockRows over the whole level.
+#[test]
+fn whole_rows_and_locks_in_joins() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    for q in [
+        "CREATE TABLE t4 (c1 int, c2 int, c3 text)",
+        "CREATE TABLE t5 (c1 int, c2 int, c3 text)",
+        "INSERT INTO t4 SELECT i, i + 1, 'A' || i FROM generate_series(1, 6) i",
+        "INSERT INTO t5 SELECT i * 2, i * 3, 'B' || i FROM generate_series(1, 3) i",
+        "CREATE FOREIGN TABLE f4 (c1 int, c2 int, c3 text) SERVER loopback OPTIONS (table_name 't4')",
+        "CREATE FOREIGN TABLE f5 (c1 int, c2 int, c3 text) SERVER loopback OPTIONS (table_name 't5')",
+        "CREATE FOREIGN TABLE f4i (c1 int, c2 int, c3 int) SERVER loopback OPTIONS (table_name 't4')",
+        "CREATE TABLE l (i int)",
+        "INSERT INTO l VALUES (2), (3)",
+    ] {
+        run(&mut s, q);
+    }
+    let q = "SELECT f5, f5.c1, f4.c1 FROM f5 LEFT JOIN f4 ON f5.c1 = f4.c1 WHERE f4.c1 BETWEEN 2 AND 4 ORDER BY f5.c1, f4.c1";
+    let plan = run(&mut s, &format!("EXPLAIN (VERBOSE, COSTS OFF) {q}"));
+    assert!(
+        plan.iter().any(|l| l.contains("Remote SQL: SELECT CASE WHEN (r1.*)::text IS NOT NULL THEN ROW(r1.c1, r1.c2, r1.c3) END, r1.c1, r2.c1 FROM")),
+        "{plan:#?}"
+    );
+    assert_eq!(
+        run(&mut s, q),
+        vec![
+            r#"[Record([Int4(2), Int4(3), Text("B1")]), Int4(2), Int4(2)]"#,
+            r#"[Record([Int4(4), Int4(6), Text("B2")]), Int4(4), Int4(4)]"#,
+        ]
+    );
+    let e = s.query("SELECT x.a, x FROM f4i x(a, b, c) JOIN f5 ON x.a = f5.c1 WHERE x.a = 2").expect_err("an error");
+    assert_eq!(e.message, "invalid input syntax for type integer: \"A2\"");
+    assert_eq!(e.context.as_deref(), Some("whole-row reference to foreign table \"x\""));
+    let plan = run(&mut s, "EXPLAIN (COSTS OFF) SELECT l.i FROM l, f4, f5 WHERE l.i = f4.c1 AND f4.c1 = f5.c1 FOR UPDATE OF l");
+    assert_eq!(plan.first().map(String::as_str), Some(r#"[Text("LockRows")]"#), "{plan:#?}");
+}

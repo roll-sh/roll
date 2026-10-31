@@ -814,7 +814,22 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   clippy (no new warnings), the difftest smoke, isolation 121 / 122 plus the roll-* specs, a
   full regress run on a private reference (51,148 / 51,150, no unit changed against
   results.tsv), contrib postgres_fdw 1,941 (10 units gained, none lost), dblink 218,
-  file_fdw 187.
+  file_fdw 187 (74a3ad38 fixed those two tests since).
+  Second batch (1,944): a level locking a local relation no longer joins its foreign ones
+  remotely (`paths/joinpath/foreign.rs` `foreign_join_path`): a Foreign Scan of a join
+  returns no row marks and has no outer plan to recheck with, and with one the hoist failed
+  and each scan locked its rows as read, under the join (rows of the local relation that
+  joined nothing were locked; 267's row order). Its foreign scans do get the wrapper's
+  base paths (`fdw_base`: parameterized and sorted ones, `... WHERE ((a = $1::integer)) FOR
+  UPDATE`). A pushed join whose relation's whole row the projection above reads (`t`,
+  `t.*`, `binder::is_whole_row` / `nullable_whole_row`) fetches it as one `CASE WHEN
+  (rN.*)::text IS NOT NULL THEN ROW(...) END` where its first column would be, and only the
+  columns read on their own besides (`pushdown::whole_rows`, `JoinScan::whole`); the row's
+  fields go to their columns' slots, a value that doesn't convert naming the "whole-row
+  reference to foreign table" (259, 530). The EPQ outer plan for pushed joins under such
+  levels (198, 266, 268, 272, 275) is the item that remains: `JNode::Foreign` would keep
+  GetExistingLocalJoinPath's local path, the Foreign Scan return each base's copy as a
+  mark key (its remote whole rows) and run the outer plan in a recheck.
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
