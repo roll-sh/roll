@@ -508,6 +508,9 @@ fn stream_acquired(
     let mut last_recv = Instant::now();
     let mut last_keepalive = Instant::now();
     let mut ping_sent = false;
+    // (What the client reported having written and flushed.)
+    let mut client = (confirmed, confirmed);
+    let mut keepalive_at = 0u64;
     r.senders.lock().push(Sender { pid, state: "catchup", sent_lsn: sent, slot: name.clone(), ..Default::default() });
     let update = |f: &dyn Fn(&mut Sender)| {
         if let Some(x) = r.senders.lock().iter_mut().find(|x| x.pid == pid) {
@@ -522,15 +525,28 @@ fn stream_acquired(
             for m in super::decode::markers(&db.store, pos, end) {
                 let m = m?;
                 let mut err = None;
+                // (Written out every 64 kB and at each transaction's end, not after every
+                // message: a write per change was most of a walsender's CPU.)
+                let mut unflushed = 0usize;
                 dec.decode(&m, &mut |o| {
                     // (A logical walsender's walEnd is the record's own position too,
                     // WalSndPrepareWrite: a receiver confirming it confirms no later one.)
                     w.put(b'd', &xlog_data(o.lsn, o.lsn, &o.data));
-                    if let Err(e) = w.flush() {
-                        err = Some(e);
+                    unflushed += o.data.len() + 25;
+                    if unflushed >= 64 << 10 {
+                        unflushed = 0;
+                        if let Err(e) = w.flush() {
+                            err = Some(e);
+                        }
                     }
                     Ok(())
                 })?;
+                if err.is_none()
+                    && unflushed > 0
+                    && let Err(e) = w.flush()
+                {
+                    err = Some(e);
+                }
                 if let Some(e) = err {
                     return Err(e.into());
                 }
@@ -552,6 +568,7 @@ fn stream_acquired(
             match t {
                 b'd' if body.first() == Some(&b'r') => {
                     let (wr, fl, ap, reply) = (be64(&body, 1), be64(&body, 9), be64(&body, 17), body.get(33) == Some(&1));
+                    client = (wr, fl);
                     update(&|x: &mut Sender| {
                         x.write_lsn = wr;
                         x.flush_lsn = fl;
@@ -586,6 +603,15 @@ fn stream_acquired(
                     return Err(Error::new(code::PROTOCOL_VIOLATION, format!("unexpected message type \"{}\"", t as char)).fatal());
                 }
             }
+        }
+        // WalSndWaitForWal: caught up, with the client not having reported what was sent, a
+        // keepalive tells it where the WAL ends, so it confirms past what it had nothing to
+        // apply for (a subscriber did so only at the 10 s keepalive: slots and lag behind).
+        if client.0 < sent && client.1 < sent && keepalive_at != sent && db.log.commit_count() == seen {
+            w.put(b'd', &keepalive(sent, false));
+            w.flush()?;
+            keepalive_at = sent;
+            last_keepalive = Instant::now();
         }
         if confirmed > saved && last_save.elapsed() >= Duration::from_secs(1) {
             save(r, db, &name, confirmed);

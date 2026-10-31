@@ -1188,6 +1188,32 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       PostgreSQL: UpdateSubscriptionRelState takes the subscription's shared object lock in
       AccessShareLock (`set_states`), ALTER / DROP SUBSCRIPTION in AccessExclusiveLock
       (`lock_object` locks subscriptions as shared objects now).
+    - **Walsender** (round 4, second batch; BENCH.md "Logical replication publishers"): a
+      keepalive as soon as the walsender has caught up and the client hasn't reported what
+      was sent (WalSndWaitForWal), so subscribers confirm the end at once (it waited for the
+      10 s keepalive: a 20,000-transaction catch-up took 10 s at every N against PostgreSQL's
+      2.5 s); output written every 64 kB and at each transaction's end, not per message (half
+      the CPU). Per subscriber the engine still decodes on its own (0.6 s CPU per 20,000
+      transactions against PostgreSQL's 0.3 s): a shared per-database cache of decoded
+      transactions, and shared pgoutput bytes for senders with the same options, is next.
+    - Verified (agent 119): crate tests debug and release (`logical_apply::parallel_apply`
+      added), clippy without new warnings, difftest smoke, isolation 121 / 122, a full regress
+      run on a private reference 51,148 / 51,150 with no unit changed against `results.tsv`,
+      test_decoding 1,029 / 1,047 (unchanged); against PostgreSQL 18.6 side by side (e2e
+      scripts: 015_stream.pl's parallel section, a streamed transaction applied by a parallel
+      apply worker, the leader / worker and the two-worker deadlocks (same ERROR, DETAIL and
+      CONTEXT lines but pids), serialization under debug_logical_replication_streaming =
+      immediate, savepoints and aborts in parallel; five 200,000-row tables synchronized two at
+      a time with changes meanwhile, a table failing its copy again and again): identical
+      tables (md5 of every row), worker rows and log lines.
+    - Not done: the leader still waits while tables are copied (PostgreSQL's tablesync
+      catch-up on its own slot), shared decoding for many subscribers, the test_decoding tail
+      (streaming of rolled-back subtransactions: PostgreSQL decodes a subtransaction's
+      changes before it learns it rolled back, the engine's records go with ROLLBACK TO;
+      catalog-table cases and the UPDATE of pg_attribute are the catalog's, agent 115; the
+      MERGE and function-scan join orders the planner's). Apply speed: the apply layer is a
+      few percent of the apply thread; the rest is the write path (agent 108's profile; agent
+      105's synchronous_commit = off hasn't landed).
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages

@@ -3948,6 +3948,40 @@ it (fast shutdown, start with `-w`):
   of 10,000 distinct simple queries (0.33 ms each; PostgreSQL about 0.11 ms with `docker
   exec` included): parsing, binding, `pgstat::report`, nothing restart-specific.
 
+
+## Logical replication publishers (round 22, agent 119)
+
+The engine (release, 4 pinned CPUs) or PostgreSQL 18.6 (4 CPUs) holds a backlog of 20,000
+pgbench-like transactions (UPDATE of a 10,000-row table by key, INSERT into a history table; 4
+clients); N PostgreSQL 18.6 subscriptions of one publication, each applying into a database of
+its own on one subscriber, are enabled at once and timed until every slot confirmed the
+backlog's end. CPU: the engine process / PostgreSQL's walsender processes over the catch-up;
+memory: the engine process's RSS growth / the walsenders' summed RSS (shared memory counted in
+each). Machine at load 30-40; rounds interleaved, two at N = 16.
+
+| N | PostgreSQL 18.6 | engine, base (batch 1, 15f967cd) | engine, this round |
+|---|---|---|---|
+| 1 | 2.5-2.8 s, CPU 0.28-0.30 s, 17 MB | 10.3-10.6 s, CPU 1.8-1.9 s, +16-44 MB | 2.7 s, CPU 0.74 s, +52 MB |
+| 4 | 2.5-3.4 s, CPU 1.1 s, 68 MB | 10.9 s, CPU 6.1-6.3 s, +25 MB | 4.6 s, CPU 2.9 s, +52 MB |
+| 16 | 7.7-8.1 s, CPU 4.7-5.3 s, 271-274 MB | 12.4-13.2 s, CPU 17-19 s, +50-76 MB | 6.7-10.2 s, CPU 9.4-10.2 s, +55-58 MB |
+
+- **Wall time** was the walsender's keepalive: a subscriber confirms a position past what it
+  had to apply (its flush = the received end, when no transaction is pending) only once a
+  keepalive tells it where the WAL ends, and the engine sent one every 10 s.
+  WalSndWaitForWal sends one as soon as the walsender has caught up and the client hasn't
+  reported what was sent; the engine now does too (slots and pg_stat_replication's lag follow
+  at once).
+- **CPU**: the walsender wrote (a syscall) after every message; it now writes every 64 kB and at
+  each transaction's end (half the CPU). What is left is each walsender decoding the same
+  transactions on its own (`decode::changes` and pgoutput per sender, linear in N: 0.6 s per
+  subscriber against PostgreSQL's 0.3 s). Sharing it, a per-database cache of decoded
+  transactions (`Rec`s, keyed by commit position, kept while a slot behind needs it) and the
+  pgoutput bytes of senders with the same options and publications, is the next step.
+- **Memory**: one process's growth against PostgreSQL's per-process walsenders (16 MB each).
+  (The "before" RSS of the two engine builds differs, 120-140 MB / 370 MB, before any
+  walsender starts: the base binary came from `cargo test --release`'s feature set, this one
+  from `cargo build --release`; compare the growth.)
+- The commit path is unchanged (walsender code only).
 ## Where it is still slower, and why
 
 In rough order of what it costs users:
