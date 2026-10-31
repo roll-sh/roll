@@ -551,10 +551,34 @@ pub struct ParScan {
 
 /// What an inline scan's chunks run with (a worker's own state, `work`).
 struct Inline {
+    /// The chunk being read, a slice at a time (`INLINE_SLICE`).
+    cur: Option<Chunk>,
     d: Arc<Decode>,
     scratch: super::pipe::Scratch,
     lazy: LazyBuf,
 }
+
+thread_local! {
+    /// Whether an aggregating scan with workers off runs inline (`without_serial_inline`).
+    static SERIAL_INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Whether an aggregating scan with max_parallel_workers_per_gather = 0 runs inline on this
+/// thread.
+pub(super) fn serial_inline() -> bool {
+    SERIAL_INLINE.with(|c| c.get())
+}
+
+/// Run `f` with aggregating scans under max_parallel_workers_per_gather = 0 on the serial
+/// path (tests compare the two).
+#[doc(hidden)]
+pub fn without_serial_inline<R>(f: impl FnOnce() -> R) -> R {
+    let _g = crate::scoped::set(&SERIAL_INLINE, false, "parscan::SERIAL_INLINE");
+    f()
+}
+
+/// The rows of an inline scan's chunk read at a time.
+const INLINE_SLICE: usize = 1 << 16;
 
 /// Scans run inline (`ParScan::start_inline`; for tests).
 static INLINE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -585,6 +609,18 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
 /// on a worker or (`ParScan::inline`) the executor's thread. False: nothing reads them
 /// (the scan was dropped).
 fn run_job(Job { scan, out }: Job, d: &Decode, stopped: &dyn Fn() -> bool, scratch: &mut super::pipe::Scratch, lazy: &mut LazyBuf) -> bool {
+    run_rows(scan, out, d, stopped, scratch, lazy)
+}
+
+/// `run_job` over any run of rows (an inline scan's slice of a chunk).
+fn run_rows<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
+    scan: I,
+    out: Sender<Msg>,
+    d: &Decode,
+    stopped: &dyn Fn() -> bool,
+    scratch: &mut super::pipe::Scratch,
+    lazy: &mut LazyBuf,
+) -> bool {
     {
         if let Some(spec) = &d.spec {
             return work_partial(scan, &out, d, spec, stopped, scratch, lazy);
@@ -719,8 +755,8 @@ fn filter_pass<R: super::kernel::Cols + ?Sized>(d: &Decode, row: &R) -> Option<b
 const PART_ROWS: usize = 1 << 16;
 
 /// A chunk aggregated (`partial`): false when nothing receives any more.
-fn work_partial(
-    scan: Chunk,
+fn work_partial<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
+    scan: I,
     out: &Sender<Msg>,
     d: &Decode,
     spec: &super::partial::Spec,
@@ -895,7 +931,7 @@ impl ParScan {
             carry: 0,
             skipped: 0,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            inline: Some(Box::new(Inline { d: Arc::new(d), scratch: Default::default(), lazy })),
+            inline: Some(Box::new(Inline { cur: None, d: Arc::new(d), scratch: Default::default(), lazy })),
         }
     }
 
@@ -930,11 +966,22 @@ impl ParScan {
             }
             if self.results.is_empty()
                 && let Some(i) = &mut self.inline
-                && let Some(scan) = self.pending.pop_front()
             {
-                let (out, rx) = channel();
-                self.results.push_back(rx);
-                run_job(Job { scan, out }, &i.d, &|| false, &mut i.scratch, &mut i.lazy);
+                // (A slice of the chunk at a time: what it holds and how long the executor's
+                // thread goes without checking for a cancel stay bounded.)
+                let Inline { cur, d, scratch, lazy } = &mut **i;
+                if cur.is_none() {
+                    *cur = self.pending.pop_front();
+                }
+                if let Some(c) = cur {
+                    let (out, rx) = channel();
+                    self.results.push_back(rx);
+                    let mut taken = 0usize;
+                    run_rows(c.by_ref().take(INLINE_SLICE).inspect(|_| taken += 1), out, d, &|| false, scratch, lazy);
+                    if taken < INLINE_SLICE {
+                        *cur = None;
+                    }
+                }
             }
             let Some(rx) = self.results.front() else {
                 return Ok(None);
@@ -946,6 +993,9 @@ impl ParScan {
                 Ok(Msg::Err(e)) => {
                     self.results.clear();
                     self.pending.clear();
+                    if let Some(i) = &mut self.inline {
+                        i.cur = None;
+                    }
                     return Err(e);
                 }
                 Ok(Msg::Done(read, skipped)) => {

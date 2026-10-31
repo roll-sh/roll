@@ -1449,6 +1449,101 @@ likelier cause, which agent 117's per-row scan work covers.
 - Not done this round: parallel hash builds, sorts with gather merge, groupings over
   right joins in the workers, numeric values' two allocations.
 
+## Executor, round 6 (round 24, agent 135)
+
+Release builds. **base** is the branch at `3b55b060`; **new** is batch 1 on top of it. Each
+engine has a data directory of its own (one loaded, the other a copy of it). The servers ran
+on CPUs 28-31 and the clients on 32-35, against PostgreSQL 18.6 (the pinned image, the bench
+settings, `--network host`). The machine was at load ~34 of 36 CPUs, so the primary measure
+is user-space instructions (`perf stat -e instructions:u`).
+
+### Instructions per row, in process (`examples/scan_bench.rs sql`, compacted data)
+
+A run with 3 statements minus one with none. `n`, `w` and `m` are agent 117's tables.
+
+| query | base w0 | new w0 | base w2 | new w2 |
+|---|---|---|---|---|
+| `count(*) FROM n` | 1,207 | 1,200 | 1,504 | 1,344 |
+| `sum(b) FROM n` | 2,545 | **1,654** | 1,918 | **1,663** |
+| `count(*) FROM n WHERE b = 7` | 2,034 | 2,027 | 1,762 | 1,752 |
+| `count(*) FROM w` | 1,478 | 1,471 | 1,892 | 1,770 |
+| `sum(h) FROM w` | 3,357 | **2,409** | 2,738 | **2,514** |
+| `count(*) FROM w WHERE e = 'x7'` | 2,916 | 2,909 | 2,799 | 2,948 |
+| `count(*) FROM m WHERE b = 7` | 2,289 | 2,283 | 1,836 | 1,830 |
+| `sum(b) FROM m` | 2,774 | **1,739** | 1,991 | **1,739** |
+
+- w0 is serial (`max_parallel_workers_per_gather = 0`). An aggregation over the scan now runs
+  the workers' code on the executor's thread: rows are read in place and aggregated in parts.
+- The ungrouped fast path (`Partials::fast_row`) counts and sums columns as numbers in place.
+  That is the w2 gain.
+- The filtered `count(*)`s take `count_rest` serially (unchanged).
+- What is left under `sum` is the storage iteration (~1,100 a row, `count(*)`'s) plus ~450 for
+  the lazy row and the part. PostgreSQL's seq scan plus sum is 60-80 ns of CPU a row.
+
+### TPC-H SF1 (user instructions per query, 10^9; one fresh engine each, a warm-up run first)
+
+| | base | new (two runs) |
+|---|---|---|
+| all 22 | 418.7 | 419.2 (+0.1%) |
+| per query | | each within -0.6% .. +0.9% of base |
+| peak (VmHWM) | 2,124 MB | 2,124 MB |
+
+All 22 result hashes are equal to PostgreSQL's in both builds. This batch doesn't change
+the parallel plans' work. Wall time over the 22 queries, one run each at load ~34: PostgreSQL 22.4 s,
+base 31.8 s, new 25.7 s and 30.0 s. That spread is the machine's, not this batch's.
+
+### TID scans (pgbench `-M prepared -c 1`, 5 s, TPS)
+
+| | base | new |
+|---|---|---|
+| `SELECT ... WHERE ctid = '(5,7)'`, 2,000 rows | 447 | **12,027** |
+| `UPDATE ... WHERE ctid = (SELECT ctid ...)`, 2,000 rows | 291 | **4,844** |
+| the same SELECT, 100,000 rows | 14.8 | **3,098** |
+| the same UPDATE, 100,000 rows | 9.7 | **4,795** |
+
+Before, a Tid Scan read and decoded the whole table. postgres_fdw's non-direct UPDATE / DELETE
+fetch rows this way.
+
+### pgbench (scale 10, `-M prepared`, 15 s after a 5 s warm-up, fresh engine; base, new, new, base)
+
+| | base | new |
+|---|---|---|
+| select-only, 8 clients: instructions per transaction | 88.0k, 90.6k | 88.0k, 92.1k |
+| tpcb-like, 8 clients | 659k, 749k | 698k, 729k |
+| tpcb-like, 32 clients | 754k, 1,003k | 810k, 789k |
+| peak RSS | 307, 353 MB | 311, 326 MB |
+
+These are within the spread between rounds of one build. The tpcb counts grow with the
+tables' history (each run's updates are the next one's dead versions). TPS moved by 30%
+between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
+
+### Where the time goes (measured, not changed)
+
+- **q20**: the fetches take 36%: `Store::get_versions_with`, with `Block::seek` 15%,
+  `sst::entry_head` 10% and `BlockCache::get` 5.6%. Opening the SubPlan's plan 8,332 times
+  is 1.9%, so a rescan would save little.
+- **pgbench tpcb, 32 clients**: the costs are diffuse. The accounts UPDATE's index range
+  scan setup (`Txn::scan_snap`, `Store::scan_raw`, `Hot::scan`) is ~4%, the row lock 4.4%,
+  decoding the fetched row with its system columns 3.9%, and zeroed allocations
+  (`_mi_page_malloc_zero`) 8% across many callers.
+
+### Verification (round 24, agent 135, batch 1)
+
+- `cargo test -p pg-engine` passes in release, deep_input and the parallel tests included.
+  In debug it passes too, except deep_input `viewdef 2000` and deparse_identity
+  `deep_view_on_2mb_thread`, which fail the same way at `3b55b060` (agent 141 is bisecting
+  them).
+- `cargo clippy -p pg-engine --all-targets` shows no warning in the files changed.
+- The difftest smoke passes.
+- Isolation: 134 / 135 specs, the suite's 122 plus the roll-* specs (1,742 / 1,743
+  permutations). The engine's output equals expected in 121 of 122.
+- The regression suite in full (debug, private reference): 51,148 / 51,150, with no unit
+  changed against `results.tsv`.
+- Goldens `a135_tid_fetch` and `a135_hash_empty`, recorded from PostgreSQL 18.6.
+- Tests `parallel_scan` `parallel_scans_match_serial`: serial, serial inline and parallel
+  runs agree, statistics included. `big_tables` `deferred_entry_deletes`: inline over a
+  table too big to model.
+
 ## Round 23 (agent 121): executor speed and memory, round 5
 
 Same harness and settings; both servers on cores 28-31, the client on 6-7. **pg** is

@@ -1904,6 +1904,60 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     difftest smoke, isolation 121 / 122 (1,647 / 1,648), a full regress run (debug, private
     reference) 51,148 / 51,150 with no unit changed against `results.tsv`; every TPC-H
     result hash equal to PostgreSQL's.
+- **Executor, round 6, batch 1** (round 24, agent 135; BENCH.md "Executor, round 6"):
+  - **Serial aggregation through the workers' code** (`exec/scan.rs` `start_parallel`,
+    `parscan::serial_inline`): with max_parallel_workers_per_gather = 0, an aggregation right
+    above a plain sequential scan (no join stages between) runs inline: rows read in place
+    (`parscan::Lazy`) and aggregated in parts (`partial`), never made a `Vec<Value>`. Tables
+    too big to model are taken too (agent 102's 1,984-for-1,982 rows came from the chunk
+    cuts agent 106 fixed in 80b46ae1; `big_tables` `deferred_entry_deletes` checks the
+    inline scan against the serial path in a transaction that deleted and inserted rows
+    again). The plan stays serial. Only exact aggregates go to parts: float sums keep their
+    order (`Partial::Floats`). `parscan::without_serial_inline` keeps the old path, for tests
+    comparing the two.
+  - **Ungrouped counts and exact sums without values** (`partial::Partials::fast_row`):
+    count(*), count(col), sum / avg of int2/4/8 and numeric columns read each argument as
+    a number in place (`Cols::num`, `row::peek_num`). Anything else (another type, a value
+    past the row's end, an overflow) takes the general path, which leaves the row to the
+    serial path as before.
+  - Inline scans run a chunk in slices of 64k rows (`INLINE_SLICE`). Before, a whole chunk
+    (a sixteenth of the table) ran before its first row was returned. That bounded neither
+    memory nor the time between cancel checks.
+  - In-process (`scan_bench sql`, compacted, instructions a row): `sum(b) FROM n` serial
+    2,545 -> 1,654 (`count(*)` 1,207), `sum(h) FROM w` 3,357 -> 2,409, `sum(b) FROM m`
+    2,774 -> 1,739; with workers 1,918 -> 1,663. Still above PostgreSQL's per-row CPU: the
+    storage iteration under it is ~1,100 (agent 130's batch API, `storage::batch::RowBatch` /
+    `FillRows`, is what `parscan::Chunk` should move to next).
+  - **TID scans fetch their rows** (`exec/scan.rs` `tid_keys`, `sizing::tid_row_keys`,
+    `heapsim::Heap::keys_at`): `ctid = c`, `= ANY (array)` and ORed equalities are evaluated
+    once (TidListEval: NULLs left out, sorted, each once). The heap model maps each TID to the
+    key of the row whose latest version is there. Each row is fetched and its stored TID
+    checked: the model is only a guide. Every TID must be confirmed; otherwise the scan reads
+    every row as before (a TID no row has, an older version's, a heap laid out afresh, SSI,
+    EXPLAIN ANALYZE). A Tid Scan that fetches no longer counts as a sequential scan in
+    pg_stat, because heap_fetch counts nothing. The fallback still counts one. postgres_fdw's UPDATE / DELETE by ctid: 2,000 rows 291 -> 4,844 TPS,
+    100,000 rows 9.7 -> 4,795. Left: the model's search is over its key map (O(rows), about
+    0.25 ms at 100k); a TID with no row still reads the table; agent 130's sorted batch fetch
+    should replace the double fetch. Golden `a135_tid_fetch`. Found:
+    `EXECUTE p((SELECT ...))` fails with 42703 where PostgreSQL gives 0A000 ("cannot use
+    subquery in EXECUTE parameter").
+  - **Hash joins skip a side as ExecHashJoin does** (`exec/nodes.rs` `HashJoinNode`,
+    `JoinMeta::outer_first` set in `sql/paths/joinpath.rs`): an empty hash table returns
+    at once for inner, semi and right joins (the outer side never runs, and isn't
+    pipelined). When ExecHashJoin would read an outer row before building (it fills the
+    outer side, or the outer path's startup cost is below the inner's total), a failed build
+    returns nothing when the outer side has no row. Under EXPLAIN ANALYZE the outer row is
+    read first, so the Hash shows "never executed". difftest seed 5069 (`DELETE ... USING` a
+    view over an empty table). Golden `a135_hash_empty`. Not exact: a build that succeeds
+    still runs before an empty outer side is seen, which matters only for its side effects
+    (notices, volatile calls). That keeps parallel probe pipelines.
+  - Measured, not changed: q20's 8,332 SubPlan runs reopen their plan, but opening is 1.9% of
+    q20 (the fetches are 36%: `Store::get_versions_with`, `Block::seek` 15%, `entry_head`
+    10%, the cache lookup 5.6%). A rescan (ExecReScan) would save little. The block seek is
+    the next item for point lookups (agent 130 owns the batch fetch; single-key fetches are
+    the executor's).
+  - Base debug builds fail `deep_input` `viewdef 2000` ("stored query: Invalid statement:
+    stack depth limit exceeded") before this batch: it happens at 3b55b060 too.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

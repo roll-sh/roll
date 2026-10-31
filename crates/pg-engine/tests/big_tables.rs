@@ -63,6 +63,20 @@ fn same_both_ways(s: &mut Session, queries: &[&str]) {
     }
 }
 
+/// With workers off, an aggregation over a sequential scan of a table too big to model runs
+/// inline (the workers' code on the session's thread, chunks cut by `scan::keyed_cuts`): the
+/// rows the serial path gives, in a transaction that deleted and inserted rows again too
+/// (agent 102 found 1,984 rows for 1,982 before 80b46ae1 fixed the cuts).
+fn same_inline(s: &mut Session, q: &str) {
+    run(s, "SET max_parallel_workers_per_gather = 0;\nSET enable_indexscan = off;\nSET enable_indexonlyscan = off;\nSET enable_bitmapscan = off");
+    let serial = pg_engine::exec::parscan::without_serial_inline(|| rows(s, q));
+    let inlined = pg_engine::exec::parscan::inline_started();
+    let inline = rows(s, q);
+    assert!(pg_engine::exec::parscan::inline_started() > inlined, "{q}: inline");
+    run(s, "RESET max_parallel_workers_per_gather;\nRESET enable_indexscan;\nRESET enable_indexonlyscan;\nRESET enable_bitmapscan");
+    assert_eq!(serial, inline, "{q}");
+}
+
 #[test]
 fn index_only_scans_from_entries() {
     let dir = tempfile::tempdir().unwrap();
@@ -319,6 +333,7 @@ fn deferred_entry_deletes() {
         let started = pg_engine::exec::parscan::started();
         same_both_ways(&mut s, &queries);
         assert!(pg_engine::exec::parscan::started() > started, "a parallel scan");
+        same_inline(&mut s, queries[1]);
         run(&mut s, "SET enable_seqscan = off;\nSET enable_bitmapscan = off");
         assert_eq!(rows(&mut s, "SELECT id, t FROM dd WHERE a = 6 ORDER BY id"), ["[Int4(6), Text(\"again\")]"]);
         run(&mut s, "SAVEPOINT p;\nDELETE FROM dd WHERE a = 1;\nROLLBACK TO p;\nDELETE FROM dd WHERE a = 2");
@@ -327,6 +342,7 @@ fn deferred_entry_deletes() {
         same_both_ways(&mut s, &queries);
         run(&mut s, "BEGIN;\nINSERT INTO dd SELECT g, g % 50, 'n' FROM generate_series(10001, 12000) g;\nDELETE FROM dd WHERE id > 10000 AND a < 25;\nCOMMIT");
         same_both_ways(&mut s, &queries);
+        same_inline(&mut s, queries[1]);
         let e = s.query("INSERT INTO dd VALUES (10030, 0, 'dup')").unwrap_err();
         assert!(format!("{e:?}").contains("duplicate key"), "{e:?}");
         run(&mut s, "INSERT INTO dd VALUES (10001, 0, 'ok')");

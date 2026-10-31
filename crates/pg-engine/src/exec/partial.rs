@@ -261,6 +261,11 @@ pub struct Partials<'a> {
     /// Per aggregate, a numeric sum's column read as its exact number (`Cols::num`: a
     /// stored row read in place makes no value; Some(None): NULL).
     cols: Vec<Option<Option<(i128, u32)>>>,
+    /// An ungrouped aggregation whose arguments are columns (or none) and whose states are
+    /// counts and exact sums: rows taken by `fast_row`, their columns read as numbers in
+    /// place. `vals` holds a row's numbers (None: NULL).
+    fast: bool,
+    vals: Vec<Option<(i128, u32)>>,
 }
 
 /// A kernel's value over `row`: a column's or constant's in place, else the next of the
@@ -346,7 +351,69 @@ impl<'a> Partials<'a> {
             args: Vec::with_capacity(spec.aggs.len()),
             nums: Vec::with_capacity(spec.aggs.len()),
             cols: Vec::with_capacity(spec.aggs.len()),
+            fast: spec.keys.is_empty()
+                && !spec.seq
+                && spec.aggs.iter().all(|(a, _, p)| {
+                    matches!(a, None | Some(K::Col(_)))
+                        && matches!(p, Partial::Count(_) | Partial::SumInt(_) | Partial::AvgInt(..) | Partial::SumNum(_))
+                }),
+            vals: Vec::with_capacity(spec.aggs.len()),
         }
+    }
+
+    /// `row` for a `fast` spec: Some(()) when it took the row, None when the general path
+    /// decides (a column that isn't a small number, past the row's end, a state that can't
+    /// take its value): nothing changed then.
+    #[inline]
+    fn fast_row<R: Cols + ?Sized>(&mut self, row: &R) -> Option<()> {
+        self.vals.clear();
+        for (a, skip, p) in &self.spec.aggs {
+            let v = match (a, p) {
+                // (count(*): a non-NULL stand-in.)
+                (None, _) => Some((1, 0)),
+                (Some(K::Col(i)), Partial::Count(_)) => (!row.col(*i)?.is_null()).then_some((1, 0)),
+                (Some(K::Col(i)), _) => row.num(*i)?,
+                _ => return None,
+            };
+            if v.is_none() && !*skip {
+                return None;
+            }
+            self.vals.push(v);
+        }
+        if self.part.groups.is_empty() {
+            let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
+            self.part.groups.push((Vec::new(), states));
+        }
+        let states = &mut self.part.groups[0].1;
+        // (Checked before anything changes, as `row` does.)
+        for (st, v) in states.iter().zip(&self.vals) {
+            let Some((x, sc)) = *v else { continue };
+            match st {
+                Partial::SumInt(s) => {
+                    let x = i64::try_from(x).ok().filter(|_| sc == 0)?;
+                    s.unwrap_or(0).checked_add(x)?;
+                }
+                Partial::AvgInt(..) => {
+                    i64::try_from(x).ok().filter(|_| sc == 0)?;
+                }
+                _ => {}
+            }
+        }
+        for (st, v) in states.iter_mut().zip(&self.vals) {
+            let Some((x, sc)) = *v else { continue };
+            match st {
+                Partial::Count(n) => *n += 1,
+                Partial::SumInt(s) => *s = Some(s.unwrap_or(0) + x as i64),
+                Partial::AvgInt(sum, n) => {
+                    *sum += x;
+                    *n += 1;
+                }
+                Partial::SumNum(sn) => sn.add_wide(x, sc),
+                _ => {}
+            }
+        }
+        self.part.rows += 1;
+        Some(())
     }
 
     /// Rows read (the scan's: what its statistics count), aggregated or not.
@@ -357,6 +424,9 @@ impl<'a> Partials<'a> {
     /// A row that passed the filter: aggregated (true), or left for the serial path
     /// (false; the caller ends the part first: `take`). Its columns are read in place.
     pub fn row<R: Cols + ?Sized>(&mut self, row: &R) -> bool {
+        if self.fast && self.fast_row(row).is_some() {
+            return true;
+        }
         self.key.clear();
         for (k, t) in self.spec.keys.iter().zip(&self.spec.trim) {
             if !computed(k) && !*t {

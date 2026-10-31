@@ -4167,6 +4167,8 @@ struct HashJoinNode {
     /// Whether its outer side was asked to leave out rows of keys the inner side lacks
     /// (`Node::restrict_keys`).
     restricted: bool,
+    /// ExecHashJoin reads an outer row before building (`JoinMeta::outer_first`).
+    outer_first: bool,
 }
 
 /// What a join's output needs copied: `need` and the columns its condition reads.
@@ -4222,6 +4224,26 @@ impl HashJoinNode {
             merged: Vec::new().into_iter(),
             first: None,
             kbuf: Vec::new(),
+            outer_first: meta.outer_first,
+        }
+    }
+
+    /// Whether ExecHashJoin would read the outer side's first row before building the hash
+    /// table: it fills the outer side, or the outer side starts sooner than the hash is
+    /// built, and it doesn't fill the inner side.
+    fn reads_outer_first(&self) -> bool {
+        !self.merge
+            && !matches!(self.kind, JoinKind::Right | JoinKind::Full)
+            && (self.outer_first || matches!(self.kind, JoinKind::Left | JoinKind::Anti))
+    }
+
+    /// The build failed with `e`: as ExecHashJoin, which would have read the outer side
+    /// first, nothing when that has no row (the inner side never ran), else the error (the
+    /// outer side's own first, if it fails).
+    fn outer_empty_or(&mut self, e: crate::error::Error, ctx: &ExecCtx) -> Result<Option<super::pipe::Item>> {
+        match self.left.next(ctx)? {
+            None => Ok(None),
+            Some(_) => Err(e),
         }
     }
 
@@ -4468,6 +4490,10 @@ impl HashJoinNode {
         }
         self.build(ctx)?;
         let built = self.table.clone().unwrap();
+        // (An empty table that leaves the outer side unread: `step` returns at once.)
+        if built.rows.is_empty() && matches!(self.kind, JoinKind::Inner | JoinKind::Semi | JoinKind::Right) {
+            return Ok(None);
+        }
         let matched = matches!(self.kind, JoinKind::Right | JoinKind::Full).then(|| {
             (0..built.rows.len()).map(|_| std::sync::atomic::AtomicBool::new(false)).collect::<Arc<[_]>>()
         });
@@ -4503,16 +4529,44 @@ impl HashJoinNode {
             };
             self.first = Some(l);
         }
+        // ExecHashJoin's first outer row before the build, read here under EXPLAIN ANALYZE
+        // (its Hash shows "never executed" over an empty outer side); otherwise the build
+        // comes first, so the probes can run in a parallel scan's workers, and only its
+        // failure asks whether the outer side has a row.
+        let outer_first = self.table.is_none() && self.reads_outer_first();
+        if outer_first && self.first.is_none() && ctx.instrumented() {
+            match self.left.next(ctx)? {
+                None => return Ok(None),
+                Some(l) => self.first = Some(l),
+            }
+        }
         // (Its probes in the workers of a parallel scan below, when it has one.)
         if !self.tried && self.table.is_none() {
             self.tried = true;
-            if let Some(p) = self.probe_stage(ctx)?
+            let p = match self.probe_stage(ctx) {
+                Err(e) if outer_first && self.first.is_none() => return self.outer_empty_or(e, ctx),
+                p => p?,
+            };
+            if let Some(p) = p
                 && let Some(l) = self.left.pipeline(vec![p], None, ctx)?
             {
                 self.level = l + 1;
             }
         }
-        self.build(ctx)?;
+        match self.build(ctx) {
+            Err(e) if outer_first && self.first.is_none() => return self.outer_empty_or(e, ctx),
+            r => r?,
+        }
+        // An empty hash table: no outer row can match, and one that needs no NULL-extended
+        // output isn't read (ExecHashJoin's totalTuples == 0).
+        if !self.merge
+            && self.cur.is_none()
+            && self.unmatched_right.is_none()
+            && matches!(self.kind, JoinKind::Inner | JoinKind::Semi | JoinKind::Right)
+            && self.table.as_ref().is_some_and(|t| t.rows.is_empty())
+        {
+            return Ok(None);
+        }
         // An inner or semi join on one oid column: the outer side may leave out the rows of
         // keys the inner side lacks (a catalog scan reads the others through its hash).
         if !self.restricted {

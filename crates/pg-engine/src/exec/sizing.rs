@@ -4027,6 +4027,16 @@ pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Optio
     Some(keys.iter().map(|k| h.locate_for(k, &v, &mine).map(|tid| h.hot_root(tid))).collect())
 }
 
+/// The rows whose latest versions the heap model has at `tids` (ascending, each once; a
+/// TID scan's): (TID, key), in that order (`Heap::keys_at`). None: the heap isn't modelled,
+/// or is laid out afresh (`unstamped`: its places aren't the TIDs rows show).
+pub fn tid_row_keys(t: &Table, tids: &[Tid], ctx: &ExecCtx) -> Option<Vec<(Tid, Vec<u8>)>> {
+    heap_blocks(t, ctx).ok().flatten()?;
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
+    let h = rf.heaps.get(&t.oid).filter(|h| !h.unstamped)?;
+    Some(h.keys_at(tids))
+}
+
 /// Whether the table's heap is modelled page by page (`row_tids` places its rows),
 /// deciding it on first use.
 pub fn heap_modelled(t: &Table, ctx: &ExecCtx) -> bool {

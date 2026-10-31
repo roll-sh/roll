@@ -157,9 +157,19 @@ fn parallel_scans_match_serial_inner() {
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let serial_plans: Vec<&str> = QUERIES.iter().map(|q| grouping(&mut s, q)).collect();
     let before = pg_engine::exec::parscan::started();
-    let serial = run_all(&mut s);
+    let serial = pg_engine::exec::parscan::without_serial_inline(|| run_all(&mut s));
     assert_eq!(pg_engine::exec::parscan::started(), before, "no parallel scan with 0 workers");
     let stat_serial = seq_read(&mut s);
+    // With workers off, aggregations over the scan run the workers' code inline: the serial
+    // plan's rows, in its order, its errors and its statistics.
+    let inlined = pg_engine::exec::parscan::inline_started();
+    let serial_inline = run_all(&mut s);
+    assert!(pg_engine::exec::parscan::inline_started() > inlined, "aggregations ran inline");
+    assert_eq!(pg_engine::exec::parscan::started(), before, "no parallel scan with 0 workers");
+    for ((q, a), b) in QUERIES.iter().zip(&serial).zip(&serial_inline) {
+        assert_eq!(a, b, "{q}: inline with workers off");
+    }
+    let stat_inline = seq_read(&mut s);
     s.query("SET max_parallel_workers_per_gather = 2").unwrap();
     let parallel = run_all(&mut s);
     assert!(pg_engine::exec::parscan::started() > before, "the scans ran in parallel");
@@ -175,11 +185,13 @@ fn parallel_scans_match_serial_inner() {
             .map(|x| x.split(')').next().unwrap().parse().unwrap())
             .collect()
     };
-    let (a, b) = (n(&stat_serial), n(&stat_parallel));
+    let (a, i, b) = (n(&stat_serial), n(&stat_inline), n(&stat_parallel));
     assert_eq!(a.len(), 2, "{stat_serial}");
-    // (seq_scan and seq_tup_read: twice the serial run's, less the stats query itself.)
-    assert_eq!(b[0], 2 * a[0], "{stat_serial} {stat_parallel}");
-    assert_eq!(b[1], 2 * a[1], "{stat_serial} {stat_parallel}");
+    // (seq_scan and seq_tup_read: twice and three times the serial run's, less the stats
+    // query itself.)
+    assert_eq!(i, [2 * a[0], 2 * a[1]], "{stat_serial} {stat_inline}");
+    assert_eq!(b[0], 3 * a[0], "{stat_serial} {stat_parallel}");
+    assert_eq!(b[1], 3 * a[1], "{stat_serial} {stat_parallel}");
     // Errors came out as errors.
     assert!(serial[10][0].starts_with("ERROR: integer out of range"), "{:?}", serial[10]);
     assert!(serial[11][0].starts_with("ERROR: LIKE pattern must not end"), "{:?}", serial[11]);

@@ -950,6 +950,26 @@ impl Heap {
         self.keys.get(key).copied()
     }
 
+    /// The rows whose latest versions are at `tids` (ascending, each once): (TID, key), in
+    /// that order; a TID no row's latest version is at has none.
+    pub fn keys_at(&self, tids: &[Tid]) -> Vec<(Tid, Vec<u8>)> {
+        let mut found: Vec<Option<&Vec<u8>>> = vec![None; tids.len()];
+        // (Offset 0 is no line pointer's.)
+        let mut left = tids.iter().filter(|t| t.1 > 0 && self.tuple(**t).is_some()).count();
+        if left > 0 {
+            for (k, t) in &self.keys {
+                if let Ok(i) = tids.binary_search(t) {
+                    found[i] = Some(k);
+                    left -= 1;
+                    if left == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        tids.iter().zip(found).filter_map(|(t, k)| Some((*t, k?.clone()))).collect()
+    }
+
     /// The tuple at `tid`, if it is a normal one.
     pub fn tuple(&self, tid: Tid) -> Option<&Tup> {
         self.pages.get(tid.0 as usize)?.tup(tid.1)

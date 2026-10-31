@@ -1,0 +1,193 @@
+> CREATE TABLE a135_t (id int PRIMARY KEY, v text, n int)
+-- CREATE TABLE
+
+> INSERT INTO a135_t SELECT i, 'v' || i, i % 7 FROM generate_series(1, 2000) i
+-- INSERT 0 2000
+
+> VACUUM ANALYZE a135_t
+-- VACUUM
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a135_t WHERE ctid = '(3,5)'
+QUERY PLAN:text
+Tid Scan on a135_t
+  TID Cond: (ctid = '(3,5)'::tid)
+-- EXPLAIN
+
+> SELECT ctid, id, v FROM a135_t WHERE ctid = '(3,5)'
+ctid:27 | id:int4 | v:text
+(3,5) | 560 | v560
+-- SELECT 1
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(3,5)' AND n = 0
+ctid:27 | id:int4
+(3,5) | 560
+-- SELECT 1
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(3,5)' AND n = 1
+ctid:27 | id:int4
+-- SELECT 0
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(900,1)'
+ctid:27 | id:int4
+-- SELECT 0
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(0,0)'
+ctid:27 | id:int4
+-- SELECT 0
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(2,300)'
+ctid:27 | id:int4
+-- SELECT 0
+
+> EXPLAIN (COSTS OFF) SELECT id FROM a135_t WHERE ctid = ANY (ARRAY['(5,1)', '(0,2)', '(5,1)', NULL, '(1,7)']::tid[])
+QUERY PLAN:text
+Tid Scan on a135_t
+  TID Cond: (ctid = ANY ('{"(5,1)","(0,2)","(5,1)",NULL,"(1,7)"}'::tid[]))
+-- EXPLAIN
+
+> SELECT ctid, id FROM a135_t WHERE ctid = ANY (ARRAY['(5,1)', '(0,2)', '(5,1)', NULL, '(1,7)']::tid[])
+ctid:27 | id:int4
+(0,2) | 2
+(1,7) | 192
+(5,1) | 926
+-- SELECT 3
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(4,2)' OR ctid = '(0,3)' OR ctid = '(4,2)'
+ctid:27 | id:int4
+(0,3) | 3
+(4,2) | 742
+-- SELECT 2
+
+> SELECT ctid, id FROM a135_t WHERE ctid = NULL::tid
+ctid:27 | id:int4
+-- SELECT 0
+
+> SELECT ctid, id FROM a135_t WHERE ctid = ANY (NULL::tid[])
+ctid:27 | id:int4
+-- SELECT 0
+
+> SELECT count(*) FROM a135_t WHERE ctid = ANY (ARRAY(SELECT ('(' || b || ',' || o || ')')::tid FROM generate_series(0, 12) b, generate_series(1, 200, 37) o))
+count:int8
+55
+-- SELECT 1
+
+> UPDATE a135_t SET v = 'changed' WHERE id = 20
+-- UPDATE 1
+
+> SELECT ctid, id, v FROM a135_t WHERE id = 20
+ctid:27 | id:int4 | v:text
+(10,151) | 20 | changed
+-- SELECT 1
+
+> SELECT ctid, id, v FROM a135_t WHERE ctid = (SELECT ctid FROM a135_t WHERE id = 20)
+ctid:27 | id:int4 | v:text
+(10,151) | 20 | changed
+-- SELECT 1
+
+> SELECT ctid, id, v FROM a135_t WHERE ctid = '(0,20)'
+ctid:27 | id:int4 | v:text
+-- SELECT 0
+
+> BEGIN
+-- BEGIN
+
+> UPDATE a135_t SET v = 'again' WHERE id = 21
+-- UPDATE 1
+
+> SELECT ctid, id, v FROM a135_t WHERE ctid = (SELECT ctid FROM a135_t WHERE id = 21)
+ctid:27 | id:int4 | v:text
+(0,186) | 21 | again
+-- SELECT 1
+
+> SELECT ctid, id, v FROM a135_t WHERE ctid = '(0,21)'
+ctid:27 | id:int4 | v:text
+-- SELECT 0
+
+> DELETE FROM a135_t WHERE id = 22
+-- DELETE 1
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(0,22)'
+ctid:27 | id:int4
+-- SELECT 0
+
+> INSERT INTO a135_t VALUES (5000, 'new', 1)
+-- INSERT 0 1
+
+> SELECT ctid, id, v FROM a135_t WHERE ctid = (SELECT ctid FROM a135_t WHERE id = 5000)
+ctid:27 | id:int4 | v:text
+(10,152) | 5000 | new
+-- SELECT 1
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT ctid, id, v FROM a135_t WHERE ctid = '(0,21)'
+ctid:27 | id:int4 | v:text
+(0,21) | 21 | v21
+-- SELECT 1
+
+> SELECT ctid, id FROM a135_t WHERE ctid = '(0,22)'
+ctid:27 | id:int4
+(0,22) | 22
+-- SELECT 1
+
+> PREPARE a135_upd (tid, text) AS UPDATE a135_t SET v = $2 WHERE ctid = $1 RETURNING id, v
+-- PREPARE
+
+> EXECUTE a135_upd ('(1,10)', 'fdw1')
+id:int4 | v:text
+195 | fdw1
+-- UPDATE 1
+
+> EXECUTE a135_upd ('(1,10)', 'fdw2')
+id:int4 | v:text
+-- UPDATE 0
+
+> PREPARE a135_del (tid) AS DELETE FROM a135_t WHERE ctid = $1 RETURNING id
+-- PREPARE
+
+> EXECUTE a135_del ('(2,4)')
+id:int4
+374
+-- DELETE 1
+
+> EXECUTE a135_del ('(2,4)')
+id:int4
+-- DELETE 0
+
+> SELECT id, v FROM a135_t WHERE v LIKE 'fdw%' ORDER BY id
+id:int4 | v:text
+195 | fdw1
+-- SELECT 1
+
+> CREATE TABLE a135_c (c tid, k int)
+-- CREATE TABLE
+
+> INSERT INTO a135_c VALUES ('(0,5)', 1), ('(3,9)', 2), ('(77,1)', 3), (NULL, 4), ('(0,5)', 5)
+-- INSERT 0 5
+
+> SET enable_hashjoin = off
+-- SET
+
+> SET enable_mergejoin = off
+-- SET
+
+> SELECT c.k, t.id FROM a135_c c JOIN a135_t t ON t.ctid = c.c ORDER BY c.k
+k:int4 | id:int4
+1 | 5
+2 | 564
+5 | 5
+-- SELECT 3
+
+> RESET enable_hashjoin
+-- RESET
+
+> RESET enable_mergejoin
+-- RESET
+
+> DROP TABLE a135_c
+-- DROP TABLE
+
+> DROP TABLE a135_t
+-- DROP TABLE
+

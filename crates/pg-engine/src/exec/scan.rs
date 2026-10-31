@@ -444,24 +444,33 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
     if s.index.is_some() && s.current_of.is_none() {
         ctx.searched(s as *const ScanPlan as usize, ranges.len());
     }
-    // A bitmap heap scan: the rows the bitmap selects, in heap order.
-    if let (Access::Bitmap(q, _), None) = (&s.access, &s.current_of) {
-        if let Some(node) = dense_bitmap_scan(s, q, raw_need, ctx)? {
-            return Ok(node);
+    // A bitmap heap scan: the rows the bitmap selects, in heap order. A TID scan: the rows
+    // at its TIDs, when the heap model says which (`tid_keys`), their conditions checked
+    // on each (the filter has them).
+    let keyed = match (&s.access, &s.current_of) {
+        (Access::Bitmap(q, _), None) => {
+            if let Some(node) = dense_bitmap_scan(s, q, raw_need, ctx)? {
+                return Ok(node);
+            }
+            let stat = if super::pgstat::scan_counts(ctx) {
+                StatTarget::Fetched(s.table.oid)
+            } else {
+                StatTarget::Off
+            };
+            let (keys, rows) = bitmap_rows(s, q, ctx)?;
+            // (Rows the bitmap index scans read already are taken as they are.)
+            Some(match rows {
+                Some(rows) => (Vec::new(), keys.into_iter().zip(rows).map(|(k, r)| (Vec::<u8>::new(), k, Some(r))).collect(), stat),
+                None => (keys, Default::default(), stat),
+            })
         }
-        let (keys, rows) = bitmap_rows(s, q, ctx)?;
-        // (Rows the bitmap index scans read already are taken as they are.)
-        let (keys, fetched) = match rows {
-            Some(rows) => (Vec::new(), keys.into_iter().zip(rows).map(|(k, r)| (Vec::<u8>::new(), k, Some(r))).collect()),
-            None => (keys, Default::default()),
-        };
+        // (heap_fetch counts nothing in the statistics.)
+        (Access::Tid { quals, .. }, None) => tid_keys(s, quals, ctx)?.map(|k| (k, Default::default(), StatTarget::Off)),
+        _ => None,
+    };
+    if let Some((keys, fetched, stat)) = keyed {
         let mut plan = s.clone();
         plan.access = Access::Seq;
-        let stat = if super::pgstat::scan_counts(ctx) {
-            StatTarget::Fetched(s.table.oid)
-        } else {
-            StatTarget::Off
-        };
         return Ok(Box::new(ScanNode {
             stat,
             sample: None,
@@ -1770,6 +1779,67 @@ fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, ctx: &ExecCtx) -> Result<(Vec<Vec<u
     }
     let rows = kept.filter(|_| !keys.is_empty()).and_then(|k| k.take(&keys));
     Ok((keys, rows))
+}
+
+/// A TID scan's rows as keys to fetch (TidListEval: the TIDs its conditions give, NULLs
+/// left out, ascending and each once; then the keys of the rows the heap model has there,
+/// each checked against the row it fetches). None: every row is read and its TID checked
+/// (conditions reading columns, a heap the model can't map, a TID no row it finds shows,
+/// SSI's tuple locks, EXPLAIN ANALYZE).
+fn tid_keys(s: &ScanPlan, quals: &[crate::sql::expr::Expr], ctx: &ExecCtx) -> Result<Option<Vec<Vec<u8>>>> {
+    use crate::sql::expr::Expr;
+    if quals.is_empty() || s.mark.is_some() || ctx.instrumented() || predicate_locked(&s.table, ctx) {
+        return Ok(None);
+    }
+    let mut tids: Vec<(u32, u16)> = Vec::new();
+    for q in quals {
+        let vals = match q {
+            Expr::Call(_, args, _) if args.len() == 2 => {
+                let other = match (args[0].columns().is_empty(), args[1].columns().is_empty()) {
+                    (false, true) => &args[1],
+                    (true, false) => &args[0],
+                    _ => return Ok(None),
+                };
+                vec![eval(other, &[], ctx)?]
+            }
+            Expr::ArrayOp { right, .. } if right.columns().is_empty() => match eval(right, &[], ctx)? {
+                Value::Array(a) => a.items.clone(),
+                Value::Null => Vec::new(),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        for v in vals {
+            match v {
+                Value::Tid(b, o) => tids.push((b, o)),
+                Value::Null => {}
+                _ => return Ok(None),
+            }
+        }
+    }
+    tids.sort_unstable();
+    tids.dedup();
+    let Some(found) = super::sizing::tid_row_keys(&s.table, &tids, ctx) else {
+        return Ok(None);
+    };
+    // Every TID must be the one its row shows, as the statement's snapshot reads the row: the
+    // model is a guide, the stored row the truth. A TID without such a row (none there, an
+    // older version, one the model places elsewhere) takes the full scan, which finds
+    // whatever row shows it.
+    if found.len() != tids.len() {
+        return Ok(None);
+    }
+    let mut sorted: Vec<Vec<u8>> = found.iter().map(|(_, k)| k.clone()).collect();
+    sorted.sort_unstable();
+    let rows = fetch_rows(&sorted, ctx)?;
+    for (tid, key) in &found {
+        let Ok(i) = sorted.binary_search(key) else { return Ok(None) };
+        let shown = rows[i].as_deref().map(|b| stored_tid(b).map_or_else(|| ctid_of(key), |(b, o)| Value::Tid(b, o)));
+        if shown != Some(Value::Tid(tid.0, tid.1)) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(found.into_iter().map(|(_, k)| k).collect()))
 }
 
 /// An index scan with an equality on its first column under that column's nondeterministic
@@ -3160,7 +3230,13 @@ impl ScanNode {
         let Some(snap) = ctx.snapshot() else {
             return Ok(None);
         };
-        if workers == 0 {
+        // With workers off, an aggregation right above (no joins between) still takes the
+        // workers' code, on this thread (`ParScan::start_inline`): its rows are read in place
+        // and aggregated in parts, never made (BENCH.md "Executor, round 6": sum over 1M rows
+        // 2,545 -> 1,654 instructions a row). The plan stays serial; parts of exact
+        // aggregates combine to what the serial path gives.
+        let serial = workers == 0;
+        if serial && (spec.is_none() || !stages.is_empty() || !super::parscan::serial_inline()) {
             return Ok(None);
         }
         // (Decided as `next_raw` decides it.)
@@ -3204,7 +3280,8 @@ impl ScanNode {
         // scan_size's default, as for PostgreSQL's parallel scans) runs the workers' way of
         // reading rows on this thread (`ParScan::start_inline`): cheaper per row than the
         // serial path's, and threads wouldn't pay. A reordered one that small stays serial.
-        let inline = self.nblocks.is_some_and(|n| n < INLINE_MAX_PAGES);
+        // So does any aggregating scan with workers off (`serial`), modelled or not.
+        let inline = serial || self.nblocks.is_some_and(|n| n < INLINE_MAX_PAGES);
         if inline && reordered {
             return Ok(None);
         }

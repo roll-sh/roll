@@ -7291,6 +7291,7 @@ impl Search<'_, '_, '_> {
                         unique_inner: matches!(inner.node, JNode::Unique { .. }),
                         hash_buckets: (*method == JoinMethod::Hash)
                             .then(|| joins::hash_table_size(inner.rows, inner.width, &self.g).0),
+                        outer_first: *method == JoinMethod::Hash && outer.startup < inner.total,
                         memoize: match &inner.node {
                             JNode::Memoize {
                                 keys,
