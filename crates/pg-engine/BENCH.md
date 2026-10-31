@@ -5044,6 +5044,85 @@ on upstream's head alone as well, not through this batch: `deep_input`'s `viewde
 limit exceeded" reading a 2,000-term view; they passed on `77a38372`), and `wire`'s
 `cancel_request_closes_after_the_error` flakes (4 of 5 runs pass).
 
+## OLTP round 3 (round 23, agent 136)
+
+HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per
+text, their custom plans run as the generic binding when that is provably their plan, kept
+plans by non-unique columns without a most-common-values list, DML re-planned without
+re-binding, kept plans' sizes checked without a statement. Release builds with frame
+pointers, pgbench in a container on the host network, scale 10, 10 s per run after a 4 s
+warm-up, the engine restarted per binary and round; servers on cores 24–27, pgbench on
+28–31; PostgreSQL 18.6 on the host network (shared_buffers 2 GB). **base** is `fd250f0b`,
+**new** this round on it; three interleaved rounds (base, new, PostgreSQL), each cell the
+range over the rounds: CPU ms per transaction (the engine process; PostgreSQL's cgroup),
+in brackets the engine's thousand instructions per transaction (`perf stat` of the
+process), then the median tps and the peak memory (the engine's VmHWM over the round's
+runs; PostgreSQL's memory.peak, cumulative). The machine ran at load 40–55 throughout (other
+agents' builds, suites and benchmarks), so single numbers move a lot; the whole-process
+instruction count includes background flushes and compactions, whose timing follows the run
+order (new ran after base in every round, so it often paid for base's writes: the
+`ckinstr` runs below count only the connection threads).
+
+| workload | mode | clients | base | new | PostgreSQL |
+|---|---|---|---|---|---|
+| tpcb-like | extended | 1 | 1.89–2.93 (2,821–3,066) / 396 / 381 MB | 0.59–0.83 (928–942) / 1,012 / 365 MB | 0.69–1.00 / 975 |
+| tpcb-like | extended | 8 | 1.96–3.10 (2,822–4,679) / 1,241 | 0.83–1.01 (1,060–1,599) / 3,098 | 0.66–1.04 / 3,480 |
+| tpcb-like | extended | 32 | 2.20–2.93 (3,275–4,591) / 1,243 | 0.97–1.34 (1,384–1,940) / 2,120 | 0.89–1.33 / 3,641 |
+| select-only | extended | 1 | 0.44–0.48 (550–767) / 2,015 | 0.13–0.16 (140–219) / 4,418 | 0.12–0.15 / 6,158 |
+| select-only | extended | 8 | 0.39–0.45 (557–571) / 9,148 | 0.11–0.13 (145–156) / 31,846 | 0.12–0.13 / 30,502 |
+| select-only | extended | 32 | 0.41–0.44 (559–564) / 9,263 | 0.10–0.13 (142–152) / 32,454 | 0.14–0.15 / 28,187 |
+| web-app mix | extended | 1 | 2.94–4.61 (3,530–8,400) / 261 | 1.06–1.42 (1,130–2,337) / 716 | 0.87–1.24 / 816 |
+| web-app mix | extended | 8 | 2.81–3.35 (3,551–5,606) / 1,225 | 0.96–1.18 (1,051–1,582) / 2,781 | 0.81–1.12 / 3,736 |
+| web-app mix | extended | 32 | 2.81–3.06 (3,581–3,780) / 1,266 | 1.14–1.65 (1,777–2,828) / 3,151 | 0.91–1.34 / 4,126 |
+| tpcb-like | simple | 1 | 0.83–1.10 (879–2,833) / 1,065 / 309 MB | 0.74–0.81 (866–897) / 903 / 242 MB | 0.56–0.89 / 1,127 |
+| tpcb-like | simple | 8 | 0.74–0.98 (945–1,048) / 3,128 | 0.91–1.02 (1,456–1,597) / 2,993 | 0.60–0.88 / 4,370 |
+| tpcb-like | simple | 32 | 1.08–1.42 (1,458–2,135) / 2,321 | 1.14–1.38 (1,528–2,263) / 2,015 | 0.76–1.22 / 4,538 |
+| web-app mix | simple | 1 | 1.07–1.59 (1,243–1,397) / 642 | 1.04–1.30 (1,161–2,331) / 724 | 0.62–1.05 / 978 |
+| web-app mix | simple | 8 | 1.03–1.29 (1,268–2,081) / 2,581 | 0.85–1.22 (1,245–2,283) / 2,950 | 0.65–0.93 / 4,473 |
+| web-app mix | simple | 32 | 1.21–1.42 (1,333–1,922) / 3,036 | 1.11–1.34 (1,152–2,233) / 2,850 | 0.76–1.23 / 4,856 |
+| tpcb-like | prepared | 1 | 0.73–0.91 (844–2,043) / 1,080 / 416 MB | 0.49–0.77 (828–881) / 1,115 / 374 MB | 0.37–0.55 / 1,594 |
+| tpcb-like | prepared | 8 | 0.68–0.89 (923–1,442) / 3,166 | 0.69–0.76 (888–1,322) / 2,883 | 0.41–0.65 / 5,515 |
+| tpcb-like | prepared | 32 | 0.89–1.09 (1,299–1,488) / 2,364 | 0.73–1.08 (1,155–1,994) / 2,455 | 0.49–0.91 / 6,019 |
+| select-only | prepared | 8 | 0.09–0.10 (123–127) / 37,291 | 0.08–0.11 (120–134) / 33,635 | 0.06–0.07 / 46,186 |
+| select-only | simple | 8 | 0.09–0.10 (129–133) / 35,599 | 0.09–0.11 (125–134) / 36,279 | 0.09–0.12 / 35,582 |
+| web-app mix | prepared | 8 | 0.89–1.02 (1,526–1,986) / 3,482 | 0.75–0.87 (1,011–1,751) / 4,078 | 0.47–0.60 / 5,737 |
+
+- **Extended protocol** (pgbench `-M extended`: Parse / Bind / Describe / Execute / Sync of
+  the unnamed statement, what pgx, node-postgres, JDBC before prepareThreshold and asyncpg's
+  unnamed statements send): 2.3–3.0x less CPU per transaction. Select-only now costs what
+  PostgreSQL's does (0.10–0.16 ms against 0.12–0.15); tpcb-like and the web-app mix are within
+  10–25% of PostgreSQL (were 2.5–3.5x). The base bound every unnamed statement twice (the
+  Parse's generic binding, then the Bind's custom plan). Peak memory unchanged (365 MB against
+  381 at tpcb-like; the select rows' 522 against 431 is the web-app events table, which grows
+  by every run and is first looked at by the size model in new's runs).
+- **Simple protocol**: unchanged beyond noise in this matrix; the profile of tpcb-like at 8
+  clients shows binding and planning down from 8.0% to 7.2% of the engine's samples (the
+  accounts UPDATE re-planned, not re-bound, when its heap grows: 42% of executions; its
+  re-bind's analysis was a smaller part than round 2 thought, plan_query is 3.1%), size
+  checks 1.1% (were a statement snapshot each). A direct A/B of the connection threads'
+  instructions only (`ckinstr`, three rounds at 8 clients): base 1,075–2,551, new 1,036–2,689
+  thousand per transaction; the whole-process count's 1,456–1,597 against 945–1,048 above is
+  background work, which ran in new's runs.
+- **Web-app mix**: `count(*) ... WHERE aid = $n` keeps its plan (no most-common-values list
+  on `aid`); its bigserial INSERT is 6% of the mix's CPU (size model 1.3%, the unique key's
+  conflict probe 1.6%, nextval 0.4%), none of it planning.
+- **Connection per transaction** (`pgbench -C`, `SELECT 1`, both servers trusting the
+  client): the engine 0.55 ms of CPU per connection and 1,170 connections a second from one
+  client, 2,073 from eight; PostgreSQL 7.6 ms (its fork and backend start) and 209 / 421. With
+  the engine's `--password` (SCRAM) and PostgreSQL's image trusting 127.0.0.1, pgbench
+  showed 49 against 134: the client's PBKDF2 (13 ms per connection in pgbench's loaded
+  container) against none, measured phase by phase (startup to AuthenticationSASL 0.2 ms,
+  SCRAM's server side 0.4 ms, the first ReadyForQuery 0.06 ms).
+- **Hot rows** (tpcb-like `-M prepared`, one round): engine / PostgreSQL tps at 1, 8, 32, 64,
+  128 clients 1,184 / 1,528, 3,140 / 4,757, 1,478 / 3,068, 1,358 / 3,253, 1,586 / 3,069; CPU
+  per transaction 0.67 / 0.45, 0.91 / 0.51, 1.15 / 0.78, 1.11 / 0.92, 1.38 / 1.03 ms. The
+  engine runs out of tps before CPU at 32+ (1.7 of its 4 cores busy): off-CPU, about a fifth
+  of its threads' context switches are `sched_yield` spinning on the size model's relfiles
+  lock (`Kills::new`, `ensure` from `updated`, `fetched`, `is_estimated`, `CopyLoad::register`;
+  on-CPU `exec::sizing` is 13.9%), 6.5% the row and xact lock waits, 4% the WAL fsync. Agent
+  142 takes the size model's locking (their batch 2); the lock table's state mutex and the
+  waiters' wake-up are next in this area.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

@@ -2983,6 +2983,79 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     51,148 / 51,150, no unit changed against `results.tsv`; client suites against the base
     engine and this one, test by test: psycopg 3 (4,924 pass), pgx (1,217), node-postgres
     (146), asyncpg (261), pgjdbc (8,220), no difference.
+- **OLTP round 3** (round 23, agent 136; BENCH.md "OLTP round 3"): the extended protocol
+  without re-binding, kept plans by non-unique columns, DML re-planned without re-binding.
+  - *Extended-protocol bindings by text* (`session/litplan.rs` `ParamPlans`): a Parse binds
+    its query (the generic binding, which reads relation sizes); what it found (parameter
+    types, domain parameters, fixed result row, the binding) is kept per session by the text
+    and the Parse message's types (256 texts, 8 KB of text at most), and the next Parse of
+    that text uses it while the catalog version, settings generation, search_path, role and
+    row_security are the same and every size the planner read reads the same (`SizeRead`).
+    Not kept: a binding that read a column's data, raised a notice or failed (analyzed
+    only). Debug builds bind every such Parse again and assert the plans are equal.
+  - *Custom plans as the generic binding*: PostgreSQL plans the unnamed statement on every
+    Bind, and a named one's first five executions (and every one under force_custom_plan),
+    with the parameters' values as constants. When every `$n` of a statement is one whose
+    value can't change its plan (`litplan::candidates` over ParamRefs: `col = $n` on a
+    value-free column, a stored `$n`, `col + - * $n`; no sub-select or window; one plain
+    table) and one custom plan was found equal to the generic binding (`same_plan`, per
+    entry, again after a catalog or settings change), its custom plans run the generic
+    binding: counted as custom (pg_prepared_statements' custom_plans, the five-then-cost
+    choice) and costed as custom (`plan_cost(.., true)`, the planning charge). Not with a
+    null value (it folds the comparison), domain parameters, auto_explain loaded, or for
+    EXPLAIN EXECUTE (`planned_as(.., share = false)`: it prints the values). The unnamed
+    statement's custom costs wait in `PlanUses::uncosted` (only a sixth Bind without a Parse
+    reads them, and its plans are the generic one either way); the Bind right after the
+    Parse that checked the sizes doesn't check them again (`PlanUses::fresh_generic`). Debug
+    builds bind every such custom plan the usual way and assert plan and cost are equal.
+    PL/pgSQL's first five custom plans still bind afresh (its variables are ColumnRefs the
+    binder resolves, not ParamRefs: the candidates rule needs a variable-aware walk).
+  - *Value-free columns* (`litplan::value_free_column`): `col = value` keeps a plan when a
+    unique single-column btree index covers `col` (as before), or `col` has no
+    most-common-values list and its table no extended statistics: var_eq_const then
+    estimates (1 - nullfrac) / ndistinct for every value, as var_eq_non_const does. The
+    web-app mix's `count(*) ... WHERE aid = $n` keeps its plan; an ANALYZE that makes a list
+    changes the catalog version, and the template plans each value again.
+  - *DML re-planned, not re-bound*: `Binder::bind_keeping_analysis` keeps a data-modifying
+    statement's analysis before its access paths (`binder::UnplannedDml`: the unplanned
+    plan, perms, hidden_rtes; not when a constant failed to fold), and when a size its plan
+    read changes, litplan (templates) and ParamPlans (Parse) run `UnplannedDml::plan`
+    (plan_query, check_merge_keys, the constant-parameter fold check, plan locks) instead of
+    binding the tree again. Debug builds bind again too and assert the plans are equal.
+    The binder keeps the analysis through a thread-local keyed by the binder's address, not
+    a field: a binder per query level sits on the stack of a deep statement.
+    The SELECT bind/plan split is agent 140's (planner): `Binder::analyze_statement` /
+    `Analyzed::plan`, to replace `UnplannedDml` and cover SELECTs and sub-SELECT levels.
+  - *Size reads without a statement*: `SizeRead::holds_known` answers from the size model
+    (`sizing::heap_blocks_known` / `main_blocks_known`, split out of `heap_blocks` /
+    `fork_blocks`) over `Txn::next_catalog` (the catalog the next statement begins with),
+    so checking a kept plan's sizes no longer takes a statement snapshot (`with_ctx`).
+    Agent 142's `sizing::size_watch` (an atomic per model) is to replace the comparison.
+    `lit_env` reads `Txn::next_catalog` too, so another session's committed DDL is seen
+    before a kept plan is picked, not only after the relation locks.
+  - Measured, not changed: connection per transaction (`pgbench -C`) costs the engine
+    0.55 ms of CPU per connection against PostgreSQL's 7.6 ms (its fork and backend start),
+    1,170 against 209 connections a second from one client, with the same authentication
+    (trust): the docker image trusts 127.0.0.1, so a comparison with the engine's
+    `--password` (SCRAM) measures the client's PBKDF2 (13 ms in pgbench's container), not
+    the server. The web-app mix's bigserial INSERT is 6% of its CPU: the size model's
+    index_insert (1.3%), the unique key's conflict probe (1.6%), nextval 0.4%.
+  - Hot rows at 32+ clients (tpcb-like): the engine's tps halves from 8 to 32 clients
+    while PostgreSQL's holds, with a quarter to half of its 4 cores idle: off-CPU, a fifth
+    of the context switches are the size model's relfiles lock spinning (`sizing::Kills::new`,
+    `ensure`, `fetched`, `is_estimated`, `updated`, `CopyLoad::register`: agent 142's batch 2)
+    and the row and xact locks' waits (`LockManager::acquire`, `lock_row`). Left for the next
+    round: the lock table's single state mutex under `lock_row` / `release_locks`, and
+    waking a hot row's waiters one at a time.
+  - Verified: crate tests debug and release, clippy (no new
+    warnings), difftest smoke, isolation 121 / 122 plus the 13 roll-* specs (1,742 / 1,743
+    permutations), the regression suite in full (debug, private reference): 51,145 / 51,150,
+    the 3 units against `results.tsv` partition_aggregate's ANALYZE meeting autovacuum's
+    ("concurrent schema change"), which match when rerun; client suites against the base
+    engine and this one, test by test: psycopg 3 (4,924 pass), pgx (1,217), node-postgres
+    (146), asyncpg (262), pgjdbc (8,221), no difference. Rebased onto `74a3ad38` (size models
+    round 2, executor round 6, catalog round 8): clippy, kept_plans, deep_input,
+    deparse_identity, wire, poisoned_caches, session_state, golden `oltp*`.
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.
@@ -4525,11 +4598,13 @@ them all with the "Fixed in round N" sections describing what was already tried.
    - Agent 115 (catalog): psql's `\dt` at 10,000 tables takes 1.5x PostgreSQL's time, the
      engine joining its catalogs by a nested loop where PostgreSQL doesn't; Kysely's
      introspection (11-13 s of engine CPU) is partly the planning of its catalog joins.
-   - Agent 123 (OLTP, 75a179d5): keeping plans of unnamed extended-protocol statements and
-     of the first five custom plans needs SELECT planning out of binding (each level is
-     planned while it is bound today; DML has the split; HANDOFF "OLTP round 2" has the
-     design). Agent 116 didn't start it: it is agent 136's (OLTP round 3) to do, and the
-     planner rounds after it should plan from the analyzed tree.
+   - Agent 123 / 136 (OLTP): unnamed extended-protocol statements and the first five custom
+     plans run the generic binding when it is provably their plan (round 3, without the
+     split); what's left needs SELECT planning out of binding (each level is planned while it
+     is bound today): re-planning a kept SELECT when a size changes re-binds it. Agent 140
+     (planner) does the split (`Binder::analyze_statement` / `Analyzed::plan`, replacing
+     `binder::UnplannedDml`), and agent 136's litplan / ParamPlans then keep an `Analyzed`.
+     PL/pgSQL's first five custom plans still bind afresh.
    - Agent 124 (postgres_fdw; agent 137 owns it next and may send reproducers): projections
      aren't pushed into partition members (postgres_fdw units 1751, 1766, 1768; local
      partitions too), and the orientation of shipped / deparsed quals (unit 123) comes from

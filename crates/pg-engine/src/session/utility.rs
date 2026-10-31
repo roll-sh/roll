@@ -842,7 +842,7 @@ impl Session {
         // EXPLAIN EXECUTE takes the plan EXECUTE would (and counts it); otherwise parameter
         // values make a custom plan, unless a generic one is asked for.
         let (bq, generic) = if prepared.is_some() {
-            let (bq, custom) = self.planned(&p, &q, &values)?;
+            let (bq, custom) = self.planned_as(&p, &q, &values, false)?;
             (bq, !custom)
         } else {
             let generic = o.generic_plan

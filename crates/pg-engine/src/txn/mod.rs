@@ -1187,6 +1187,15 @@ impl Txn {
         }
     }
 
+    /// The catalog the next statement begins with (`begin_statement`): the transaction's own,
+    /// or the one published now.
+    pub fn next_catalog(&self) -> Arc<Catalog> {
+        match &self.catalog {
+            Some(c) => c.clone(),
+            None => self.db.catalog(),
+        }
+    }
+
     pub fn catalog(&self) -> Arc<Catalog> {
         match &self.catalog {
             Some(c) => c.clone(),

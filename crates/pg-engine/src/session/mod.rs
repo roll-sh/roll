@@ -134,6 +134,16 @@ struct PlanUses {
     /// The result row a Parse described (CompleteCachedPlan's fixed_result): a later binding
     /// (after DDL) must give the same names and types.
     fixed_result: Option<Vec<(String, u32, i32)>>,
+    /// A query made by a Parse message: the types it gave (`litplan::ParamPlans`' key).
+    parse_oids: Option<Box<[u32]>>,
+    /// Its binding, as the Parse found it (sizes read then), is its custom plan
+    /// (`litplan::ParamPlans`): for the Bind that follows.
+    fresh_generic: bool,
+    /// The unnamed statement's custom plans that ran as its generic binding, their costs not
+    /// added to `custom_cost` yet: only a sixth execution (a Bind again without a Parse) reads
+    /// it, and their plan is the generic one whichever it chooses.
+    uncosted: Vec<(Arc<BoundQuery>, Vec<Value>)>,
+    unnamed: bool,
 }
 
 /// RevalidateCachedQuery's error: a prepared statement whose result row the catalog changed
@@ -285,6 +295,10 @@ pub struct Session {
     prepared_meta: HashMap<String, (String, i64, bool)>,
     /// Plans of simple queries kept by template (`litplan`).
     lit_plans: litplan::LitPlans,
+    /// Extended-protocol statements' bindings by text (`litplan::ParamPlans`).
+    param_plans: litplan::ParamPlans,
+    /// The analysis of the data-modifying statement a Parse last bound (`Binder::bind_keeping_analysis`).
+    last_unplanned: Option<Arc<crate::sql::binder::UnplannedDml>>,
     pub portals: HashMap<String, Portal>,
     pub cancel: Arc<AtomicBool>,
     /// The running statement's waits are armed (`exec::arm_statement_waits`): its
@@ -421,6 +435,8 @@ impl Session {
             prepared: HashMap::new(),
             prepared_meta: HashMap::new(),
             lit_plans: Default::default(),
+            param_plans: Default::default(),
+            last_unplanned: None,
             portals: HashMap::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             waits_armed: false,
@@ -1594,7 +1610,8 @@ impl Session {
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(0.1)
         });
-        let b = self.with_ctx_path(params, Some(path.clone()), |ctx| {
+        let keep_unplanned = self.infer_params && !cursor;
+        let (b, unplanned) = self.with_ctx_path(params, Some(path.clone()), |ctx| {
             let mut b = Binder::new(ctx, types);
             b.no_params = no_params;
             b.param_domains = domains;
@@ -1603,8 +1620,14 @@ impl Session {
                 b.arm_limit = crate::sql::paths::cursor_limit(f).map(|(c, o)| (1, c, o));
             }
             let _serial = crate::scoped::set(&crate::sql::paths::parallel::SERIAL, cursor, "parallel::SERIAL");
-            b.bind_statement(stmt)
+            if keep_unplanned {
+                b.bind_keeping_analysis(stmt)
+            } else {
+                b.bind_statement(stmt).map(|bq| (bq, None))
+            }
         })?;
+        // (A Parse's binding: `litplan::ParamPlans` may plan its analysis again.)
+        self.last_unplanned = unplanned;
         if let Some(fixed) = &p.plans.lock().fixed_result
             && *fixed != result_row(&b.cols)
         {
@@ -1708,6 +1731,19 @@ impl Session {
         stmt: &Node,
         params: &[Value],
     ) -> Result<(Arc<BoundQuery>, bool)> {
+        self.planned_as(p, stmt, params, true)
+    }
+
+    /// `planned`; a custom plan that is the generic binding (`litplan::ParamPlans`) is that
+    /// binding when `share` (not for EXPLAIN, which shows the values in place of `$n`).
+    pub(super) fn planned_as(
+        &mut self,
+        p: &Prepared,
+        stmt: &Node,
+        params: &[Value],
+        share: bool,
+    ) -> Result<(Arc<BoundQuery>, bool)> {
+        let fresh = std::mem::take(&mut p.plans.lock().fresh_generic);
         let custom = match self.custom_plan(p, params) {
             Some(c) => c,
             None => {
@@ -1727,6 +1763,12 @@ impl Session {
                         c
                     }
                 };
+                // (The unnamed statement's custom plans whose costs waited.)
+                let uncosted = std::mem::take(&mut p.plans.lock().uncosted);
+                for (bq, vals) in uncosted {
+                    let c = self.plan_cost(&bq, &vals, true);
+                    p.plans.lock().custom_cost += c;
+                }
                 let plans = p.plans.lock();
                 let avg = plans.custom_cost / plans.custom as f64;
                 drop(plans);
@@ -1738,12 +1780,42 @@ impl Session {
             }
         };
         if custom {
+            if share && let Some((bq, cost)) = self.param_custom(p, params, fresh) {
+                // (Debug builds: it is the custom plan, costing what that does.)
+                #[cfg(debug_assertions)]
+                {
+                    let own = self.bound_custom(p, stmt, params)?;
+                    assert!(litplan::same_plan(&own, &bq, &p.param_types, params), "custom plan of {:?}", p.sql);
+                    let c = self.plan_cost(&own, params, true);
+                    let cost = cost.unwrap_or_else(|| self.plan_cost(&bq, params, true));
+                    assert!((c - cost).abs() <= 1e-9 * c.abs().max(1.0), "custom cost of {:?}: {c} {cost}", p.sql);
+                }
+                let mut plans = p.plans.lock();
+                plans.custom += 1;
+                match cost {
+                    Some(c) => plans.custom_cost += c,
+                    None => plans.uncosted.push((bq.clone(), params.to_vec())),
+                }
+                plans.cols = Some(bq.cols.iter().map(|c| c.ty.clone()).collect());
+                // (Kept few: only an unnamed statement bound again and again has more.)
+                let fold = (plans.uncosted.len() > 4).then(|| std::mem::take(&mut plans.uncosted));
+                drop(plans);
+                for (b, vals) in fold.into_iter().flatten() {
+                    let c = self.plan_cost(&b, &vals, true);
+                    p.plans.lock().custom_cost += c;
+                }
+                return Ok((bq, true));
+            }
             let bq = self.bound_custom(p, stmt, params)?;
             let cost = self.plan_cost(&bq, params, true);
             let mut plans = p.plans.lock();
             plans.custom += 1;
             plans.custom_cost += cost;
             plans.cols = Some(bq.cols.iter().map(|c| c.ty.clone()).collect());
+            drop(plans);
+            if share {
+                self.param_learn(p, stmt, &bq, params, cost);
+            }
             return Ok((bq, true));
         }
         let bq = self.bound(p, stmt, params)?;
@@ -1963,6 +2035,7 @@ impl Session {
         let r = self.parse_message_inner(sql, param_oids);
         match r {
             Ok(p) => {
+                p.plans.lock().unnamed = name.is_empty();
                 self.prepared.insert(name.to_string(), p.clone());
                 self.prepared_meta
                     .insert(name.to_string(), (sql.to_string(), Self::now(), false));
@@ -2032,6 +2105,29 @@ impl Session {
                 Binder::new(ctx, types).bind_statement(&q).map(|b| b.params)
             })?;
             p.plans.lock().fixed_result = Some(result_row(&[]));
+        } else if p.is_query()
+            && let Some((parsed, version, path, who, custom)) = self.param_parsed(sql, param_oids)
+        {
+            // Bound by an earlier Parse of the text, as binding it now would (`litplan`).
+            // (Debug builds: binding it now gives that.)
+            #[cfg(debug_assertions)]
+            if let Some(stmt) = p.stmt.as_ref() {
+                self.infer_params = true;
+                let own = self.bound(&p, stmt, &[]);
+                self.infer_params = false;
+                *p.bound.lock() = None;
+                let own = own.expect("a kept Parse binding binds again");
+                assert!(litplan::same_plan(&own, &parsed.bq, &[], &[]), "kept Parse binding of {sql:?}");
+                assert_eq!(own.params, parsed.param_types, "parameter types of {sql:?}");
+            }
+            p.param_types = parsed.param_types;
+            let mut plans = p.plans.lock();
+            plans.param_oids = parsed.param_oids;
+            plans.fixed_result = parsed.fixed_result;
+            plans.parse_oids = Some(param_oids.into());
+            plans.fresh_generic = custom;
+            drop(plans);
+            *p.bound.lock() = Some((version, path, who, parsed.bq));
         } else if p.is_query() {
             // (Taken and put back: a statement of 65,535 VALUES rows is a big tree to copy.)
             let stmt = p.stmt.take().unwrap();
@@ -2045,7 +2141,10 @@ impl Session {
                     .collect();
             }
             self.infer_params = true;
-            let b = self.bound(&p, &stmt, &[]);
+            let notices = self.notices.len();
+            let (b, reads) = crate::sql::literals::recording(|| self.bound(&p, &stmt, &[]));
+            let unplanned = self.last_unplanned.take();
+            let keep = b.is_ok() && self.notices.len() == notices;
             self.infer_params = false;
             p.param_types = match b {
                 Ok(b) => {
@@ -2103,6 +2202,20 @@ impl Session {
                     }
                 }
             }
+            let bound = p.bound.lock().as_ref().map(|b| b.3.clone());
+            if let Some(bq) = bound.filter(|bq| keep && bq.params == p.param_types) {
+                let plans = p.plans.lock();
+                let parsed = litplan::Parsed {
+                    param_types: p.param_types.clone(),
+                    param_oids: plans.param_oids.clone(),
+                    fixed_result: plans.fixed_result.clone(),
+                    bq,
+                };
+                drop(plans);
+                let custom = self.param_keep(sql, param_oids, parsed, reads, unplanned);
+                p.plans.lock().fresh_generic = custom;
+            }
+            p.plans.lock().parse_oids = Some(param_oids.into());
             p.stmt = Some(stmt);
         } else if let Some(NodeEnum::CallStmt(c)) = p.stmt.as_ref().and_then(inner).cloned() {
             // CALL: parameter types from the procedure's.

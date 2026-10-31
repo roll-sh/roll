@@ -25,7 +25,7 @@
 
 use super::{Prepared, Session};
 use crate::catalog::Catalog as Cat;
-use crate::sql::binder::{Binder, BoundQuery};
+use crate::sql::binder::{Binder, BoundQuery, UnplannedDml};
 use crate::sql::expr::Expr;
 use crate::sql::literals::{LitKind, Scan, SizeRead, Template};
 use crate::types::{DataType, Value};
@@ -95,8 +95,16 @@ struct Kept {
     /// The statement with those literals as parameters.
     generic: Node,
     bq: Arc<BoundQuery>,
+    /// A data-modifying statement's analysis, planned again when a size changes.
+    unplanned: Option<Arc<UnplannedDml>>,
     env: Env,
     reads: Vec<SizeRead>,
+}
+
+/// A binding, and its analysis before planning when it is a data-modifying statement's.
+struct Bound {
+    bq: BoundQuery,
+    unplanned: Option<Arc<UnplannedDml>>,
 }
 
 /// What a binding depends on besides relation sizes.
@@ -111,7 +119,9 @@ struct Env {
 impl Session {
     fn lit_env(&mut self) -> Env {
         self.ensure_txn();
-        let cat = self.txn.as_ref().unwrap().borrow().catalog();
+        // (The catalog the statement will begin with: another session's DDL may have
+        // committed since the last one began.)
+        let cat = self.txn.as_ref().unwrap().borrow().next_catalog();
         let st = self.state.settings.borrow();
         let who = (self.state.current_role(&cat), st.get_str("row_security") != Some("off"));
         Env { version: cat.version, settings: st.generation(), path: self.state.search_path(), who }
@@ -154,20 +164,39 @@ impl Session {
             vals.push(v);
         }
         let (bq, reads) = (k.bq.clone(), k.reads.clone());
-        let fresh = self.with_ctx(&[], |ctx| Ok(reads.iter().all(|r| r.holds(ctx)))).unwrap_or(false);
+        let fresh = self.reads_hold(&reads);
         if fresh {
             return Some((bq, vals));
         }
         // A relation's size changed: the template's binding planned again, as the query would
-        // be (its plan doesn't depend on the values, whatever the sizes).
+        // be (its plan doesn't depend on the values, whatever the sizes); a data-modifying
+        // statement's analysis is kept, and only its access paths are planned again.
         let k = &self.lit_plans.map.get(&l.scan.key)?.plans[at];
         let (generic, types) = (k.generic.clone(), k.params.iter().map(|p| p.2.clone()).collect());
-        let (bound, reads) = self.lit_bind(&generic, types, &env.path);
+        let (bound, reads) = match k.unplanned.clone() {
+            Some(u) => {
+                let old = k.bq.clone();
+                let (b, reads) = self.lit_replan(&u, &old, &env.path);
+                // (Debug builds: what binding it again gives.)
+                #[cfg(debug_assertions)]
+                {
+                    let again = self.lit_bind(&generic, types, &env.path).0;
+                    match (&b, again) {
+                        (Some(b), Some(again)) => assert!(same_plan(&again.bq, b, &[], &[]), "re-planned {:?}", p.sql),
+                        (None, None) => {}
+                        (b, again) => panic!("re-planned {:?}: {} where binding gives {}", p.sql, b.is_some(), again.is_some()),
+                    }
+                }
+                (b.map(|bq| Bound { bq, unplanned: Some(u) }), reads)
+            }
+            None => self.lit_bind(&generic, types, &env.path),
+        };
         let kp = self.lit_plans.map.get_mut(&l.scan.key)?;
         match bound {
-            Some(bq) => {
+            Some(b) => {
                 let k = &mut kp.plans[at];
-                k.bq = Arc::new(bq);
+                k.bq = Arc::new(b.bq);
+                k.unplanned = b.unplanned;
                 k.reads = reads;
                 Some((k.bq.clone(), vals))
             }
@@ -180,10 +209,20 @@ impl Session {
 
     /// Bind `generic` (a template with parameters of `types`), and what the planner read
     /// (None when it failed, or read a column's data).
-    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
+    fn lit_bind(&mut self, generic: &Node, types: Vec<DataType>, path: &[String]) -> (Option<Bound>, Vec<SizeRead>) {
         let (bound, reads) = crate::sql::literals::recording(|| {
-            self.with_ctx_path(&[], Some(path.to_vec()), |ctx| Binder::new(ctx, types).bind_statement(generic))
+            self.with_ctx_path(&[], Some(path.to_vec()), |ctx| {
+                let (bq, unplanned) = Binder::new(ctx, types).bind_keeping_analysis(generic)?;
+                Ok(Bound { bq, unplanned })
+            })
         });
+        (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
+    }
+
+    /// `u`'s statement (bound as `old`) planned again, and what the planner read.
+    fn lit_replan(&mut self, u: &UnplannedDml, old: &BoundQuery, path: &[String]) -> (Option<BoundQuery>, Vec<SizeRead>) {
+        let (bound, reads) =
+            crate::sql::literals::recording(|| self.with_ctx_path(&[], Some(path.to_vec()), |ctx| u.plan(old, ctx)));
         (bound.ok().filter(|_| !reads.contains(&SizeRead::Data)), reads)
     }
 
@@ -238,7 +277,7 @@ impl Session {
                 let slot = l.tpl.consts.get(j).copied().flatten();
                 j += 1;
                 let Some((k, neg)) = slot else { return };
-                let value = cands.contains(&c.location).then(|| l.value(k, neg)).flatten();
+                let value = cands.contains(&Slot::Const(c.location)).then(|| l.value(k, neg)).flatten();
                 let Some((v, ty)) = value else {
                     kept_const[k as usize] = true;
                     return;
@@ -256,7 +295,7 @@ impl Session {
         let env = self.lit_env();
         let types: Vec<DataType> = params.iter().map(|p| p.2.clone()).collect();
         let (bound, reads) = self.lit_bind(&generic, types.clone(), &env.path);
-        let bq = bound?;
+        let Bound { bq, unplanned } = bound?;
         if !same_plan(planned, &bq, &types, &vals) {
             return None;
         }
@@ -264,8 +303,220 @@ impl Session {
             .filter(|&k| kept_const[k as usize] || !params.iter().any(|p| p.0 == k))
             .map(|k| (k, Box::from(l.lit_text(k))))
             .collect();
-        Some(Kept { fixed, params, generic, bq: Arc::new(bq), env, reads })
+        Some(Kept { fixed, params, generic, bq: Arc::new(bq), unplanned, env, reads })
     }
+}
+
+/// Extended-protocol statements' bindings by text and the Parse message's parameter types.
+///
+/// A Parse binds its query (the generic plan, which reads relation sizes); the binding is
+/// kept for the next Parse of the same text while what it depends on reads the same, so an
+/// unnamed statement sent again isn't bound again. And PostgreSQL plans an unnamed statement,
+/// and a named one's first five executions, afresh with the parameters' values as constants
+/// (custom plans): a statement whose plan can't depend on those values (`candidates` over
+/// its parameters, checked once against a custom plan with `same_plan`) runs the generic
+/// binding instead, counted and costed as the custom plan it is.
+#[derive(Default)]
+pub(crate) struct ParamPlans {
+    map: HashMap<Box<str>, Vec<ParamEntry>>,
+    /// Custom plans run with the generic binding (tests).
+    uses: u64,
+}
+
+struct ParamEntry {
+    oids: Box<[u32]>,
+    env: Env,
+    reads: Vec<SizeRead>,
+    parsed: Parsed,
+    /// A data-modifying statement's analysis, planned again when a size changes.
+    unplanned: Option<Arc<UnplannedDml>>,
+    /// Whether its custom plans are its binding (None: not checked yet).
+    custom_is_generic: Option<bool>,
+    /// A custom plan's cost, planning charged.
+    custom_cost: Option<f64>,
+}
+
+/// What a Parse of a query found.
+#[derive(Clone)]
+pub(super) struct Parsed {
+    pub param_types: Vec<DataType>,
+    pub param_oids: Vec<(usize, u32)>,
+    pub fixed_result: Option<Vec<(String, u32, i32)>>,
+    pub bq: Arc<BoundQuery>,
+}
+
+const MAX_PARAM_KEYS: usize = 256;
+/// Longer statements aren't kept: their trees are big, and seldom sent again and again.
+const MAX_PARAM_SQL: usize = 8192;
+
+impl Session {
+    /// How many custom plans ran with their statement's generic binding.
+    pub fn generic_custom_uses(&self) -> u64 {
+        self.param_plans.uses
+    }
+
+    fn param_entry(&mut self, sql: &str, oids: &[u32]) -> Option<&mut ParamEntry> {
+        self.param_plans.map.get_mut(sql)?.iter_mut().find(|e| &*e.oids == oids)
+    }
+
+    /// Whether `reads` read now what they read (the size model's answers first, without a
+    /// statement).
+    fn reads_hold(&mut self, reads: &[SizeRead]) -> bool {
+        if reads.is_empty() {
+            return true;
+        }
+        let cat = self.txn.as_ref().unwrap().borrow().next_catalog();
+        let mut unknown = false;
+        for r in reads {
+            match r.holds_known(&cat, &self.state.db) {
+                Some(false) => return false,
+                Some(true) => {}
+                None => unknown = true,
+            }
+        }
+        !unknown || self.with_ctx(&[], |ctx| Ok(reads.iter().all(|r| r.holds(ctx)))).unwrap_or(false)
+    }
+
+    /// What a Parse of `sql` with `oids` found before, with the binding's catalog version,
+    /// search_path and role, when binding it now would find the same; and whether its custom
+    /// plans are that binding.
+    pub(super) fn param_parsed(&mut self, sql: &str, oids: &[u32]) -> Option<(Parsed, u64, Vec<String>, (u32, bool), bool)> {
+        self.param_plans.map.get(sql)?;
+        let env = self.lit_env();
+        let e = self.param_entry(sql, oids)?;
+        if e.env != env {
+            return None;
+        }
+        let (parsed, reads, custom) = (e.parsed.clone(), e.reads.clone(), e.custom_is_generic == Some(true));
+        if self.reads_hold(&reads) {
+            return Some((parsed, env.version, env.path, env.who, custom));
+        }
+        // A size changed: a data-modifying statement's access paths planned again.
+        let u = self.param_entry(sql, oids)?.unplanned.clone()?;
+        let (bq, reads) = self.lit_replan(&u, &parsed.bq, &env.path);
+        let parsed = Parsed { bq: Arc::new(bq?), ..parsed };
+        let e = self.param_entry(sql, oids)?;
+        (e.parsed, e.reads, e.custom_cost) = (parsed.clone(), reads, None);
+        Some((parsed, env.version, env.path, env.who, custom))
+    }
+
+    /// Keep what a Parse of `sql` with `oids` found, its binding having read `reads`; whether
+    /// its custom plans are known to be that binding.
+    pub(super) fn param_keep(
+        &mut self,
+        sql: &str,
+        oids: &[u32],
+        parsed: Parsed,
+        reads: Vec<SizeRead>,
+        unplanned: Option<Arc<UnplannedDml>>,
+    ) -> bool {
+        if sql.len() > MAX_PARAM_SQL || reads.contains(&SizeRead::Data) {
+            return false;
+        }
+        let env = self.lit_env();
+        if let Some(e) = self.param_entry(sql, oids) {
+            // (The same catalog and settings: whether custom plans are the binding stands.)
+            if e.env != env {
+                e.custom_is_generic = None;
+            }
+            (e.env, e.reads, e.parsed, e.unplanned, e.custom_cost) = (env, reads, parsed, unplanned, None);
+            return e.custom_is_generic == Some(true);
+        }
+        if self.param_plans.map.len() >= MAX_PARAM_KEYS {
+            self.param_plans.map.clear();
+        }
+        let e = ParamEntry { oids: oids.into(), env, reads, parsed, unplanned, custom_is_generic: None, custom_cost: None };
+        self.param_plans.map.entry(sql.into()).or_default().push(e);
+        false
+    }
+
+    /// Whether a custom plan of `p` with `params` may be its generic binding: values not
+    /// null, no domain parameters, no auto_explain (which would show `$n`); the Parse's types.
+    fn param_custom_key(&self, p: &Prepared, params: &[Value]) -> Option<Box<[u32]>> {
+        let plans = p.plans.lock();
+        let oids = plans.parse_oids.clone()?;
+        let plain = plans.param_oids.is_empty()
+            && !params.is_empty()
+            && !params.iter().any(Value::is_null)
+            && !self.state.settings.borrow().module_loaded("auto_explain");
+        plain.then_some(oids)
+    }
+
+    /// A custom plan of `p` with `params` when it is the statement's generic binding: that
+    /// binding, and the custom plan's cost (None for the unnamed statement: found when a later
+    /// execution needs it, `PlanUses::uncosted`). `fresh`: the Bind right after a Parse that
+    /// found the binding to be its custom plan (`PlanUses::fresh_generic`).
+    pub(super) fn param_custom(&mut self, p: &Prepared, params: &[Value], fresh: bool) -> Option<(Arc<BoundQuery>, Option<f64>)> {
+        let unnamed = p.plans.lock().unnamed;
+        let oids = self.param_custom_key(p, params)?;
+        if fresh
+            && unnamed
+            && let Some(bq) = p.bound.lock().as_ref().map(|b| b.3.clone())
+        {
+            self.param_plans.uses += 1;
+            return Some((bq, None));
+        }
+        self.param_plans.map.get(&*p.sql)?;
+        let env = self.lit_env();
+        let e = self.param_entry(&p.sql, &oids)?;
+        if e.custom_is_generic != Some(true) || e.env != env || e.parsed.param_types != p.param_types {
+            return None;
+        }
+        let (bq, reads, cost) = (e.parsed.bq.clone(), e.reads.clone(), e.custom_cost);
+        if !self.reads_hold(&reads) {
+            return None;
+        }
+        let cost = match cost {
+            _ if unnamed => None,
+            Some(c) => Some(c),
+            None => {
+                let c = self.plan_cost(&bq, params, true);
+                self.param_entry(&p.sql, &oids)?.custom_cost = Some(c);
+                Some(c)
+            }
+        };
+        self.param_plans.uses += 1;
+        Some((bq, cost))
+    }
+
+    /// After a custom plan `custom` (costing `cost`) of `p` with `params` was made the usual
+    /// way: note whether its custom plans are its generic binding, when not known yet.
+    pub(super) fn param_learn(&mut self, p: &Prepared, stmt: &Node, custom: &BoundQuery, params: &[Value], cost: f64) {
+        let Some(oids) = self.param_custom_key(p, params) else { return };
+        if !self.param_plans.map.contains_key(&*p.sql) {
+            return;
+        }
+        let env = self.lit_env();
+        let Some(e) = self.param_entry(&p.sql, &oids) else { return };
+        if e.custom_is_generic.is_some() || e.env != env || e.parsed.param_types != p.param_types {
+            return;
+        }
+        let (bq, reads) = (e.parsed.bq.clone(), e.reads.clone());
+        // (Bound over other sizes, it could differ by its estimates alone: checked later.)
+        if !self.reads_hold(&reads) {
+            return;
+        }
+        let ok = params_free(self, stmt, custom) && same_plan(custom, &bq, &p.param_types, params);
+        if let Some(e) = self.param_entry(&p.sql, &oids) {
+            e.custom_is_generic = Some(ok);
+            e.custom_cost = ok.then_some(cost);
+        }
+    }
+}
+
+/// Whether every parameter of `stmt` (planned as `planned`) is one whose value can't change
+/// its plan (`candidates`), with no sub-select or window function.
+fn params_free(s: &Session, stmt: &Node, planned: &BoundQuery) -> bool {
+    let Some((cat, table)) = planned_table(s, planned) else { return false };
+    let Some(cands) = candidates(stmt, &cat, &table) else { return false };
+    let mut ok = true;
+    crate::sql::nodewalk::node(&mut stmt.clone(), &mut |n| match &n.node {
+        Some(NodeEnum::SubLink(_)) => ok = false,
+        Some(NodeEnum::FuncCall(f)) if f.over.is_some() => ok = false,
+        Some(NodeEnum::ParamRef(r)) => ok &= cands.contains(&Slot::Param(r.number)),
+        _ => {}
+    });
+    ok
 }
 
 /// Whether `generic` with `vals` for its parameters is the plan `planned` is.
@@ -302,9 +553,9 @@ fn planned_table(s: &Session, planned: &BoundQuery) -> Option<(Arc<Cat>, Arc<cra
     plain.then_some((cat, t))
 }
 
-/// The locations of the A_Consts of `stmt` (on `table`) whose values may be parameters of
-/// a plan kept for every value (see above); None when the statement keeps no plan.
-fn candidates(stmt: &Node, cat: &Cat, table: &crate::catalog::Table) -> Option<Vec<i32>> {
+/// The literals and parameters of `stmt` (on `table`) whose values may be parameters of a
+/// plan kept for every value (see above); None when the statement keeps no plan.
+pub(super) fn candidates(stmt: &Node, cat: &Cat, table: &crate::catalog::Table) -> Option<Vec<Slot>> {
     let mut out = Vec::new();
     let rel = match stmt.node.as_ref()? {
         NodeEnum::UpdateStmt(u) => {
@@ -336,9 +587,7 @@ fn candidates(stmt: &Node, cat: &Cat, table: &crate::catalog::Table) -> Option<V
             let [row] = &s.values_lists[..] else { return None };
             let Some(NodeEnum::List(row)) = &row.node else { return None };
             for v in &row.items {
-                if let Some(NodeEnum::AConst(c)) = &v.node {
-                    out.push(c.location);
-                }
+                out.extend(v.node.as_ref().and_then(slot));
             }
             i.relation.as_ref()?
         }
@@ -367,18 +616,32 @@ fn candidates(stmt: &Node, cat: &Cat, table: &crate::catalog::Table) -> Option<V
     (rel.relname == table.name).then_some(out)
 }
 
-/// A value stored (an A_Const), or combined with a column by `+`, `-` or `*`: its A_Const.
-fn stored(n: &Node, out: &mut Vec<i32>) {
+/// A literal (its A_Const's location) or a parameter (its number) of a statement.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Slot {
+    Const(i32),
+    Param(i32),
+}
+
+fn slot(n: &NodeEnum) -> Option<Slot> {
+    match n {
+        NodeEnum::AConst(c) => Some(Slot::Const(c.location)),
+        NodeEnum::ParamRef(p) => Some(Slot::Param(p.number)),
+        _ => None,
+    }
+}
+
+/// A value stored (a literal or a parameter), or combined with a column by `+`, `-` or `*`.
+fn stored(n: &Node, out: &mut Vec<Slot>) {
     match n.node.as_ref() {
-        Some(NodeEnum::AConst(c)) => out.push(c.location),
         Some(NodeEnum::AExpr(e)) if e.kind == pb::AExprKind::AexprOp as i32 && matches!(op_name(e), Some("+" | "-" | "*")) => {
             match (e.lexpr.as_deref().and_then(|x| x.node.as_ref()), e.rexpr.as_deref().and_then(|x| x.node.as_ref())) {
-                (Some(NodeEnum::ColumnRef(_)), Some(NodeEnum::AConst(c)))
-                | (Some(NodeEnum::AConst(c)), Some(NodeEnum::ColumnRef(_))) => out.push(c.location),
+                (Some(NodeEnum::ColumnRef(_)), Some(v)) | (Some(v), Some(NodeEnum::ColumnRef(_))) => out.extend(slot(v)),
                 _ => {}
             }
         }
-        _ => {}
+        Some(v) => out.extend(slot(v)),
+        None => {}
     }
 }
 
@@ -397,7 +660,7 @@ fn quals(
     rel: &pb::RangeVar,
     cat: &Cat,
     table: &crate::catalog::Table,
-    out: &mut Vec<i32>,
+    out: &mut Vec<Slot>,
 ) -> Option<()> {
     match n.node.as_ref()? {
         NodeEnum::BoolExpr(b) if b.boolop == pb::BoolExprType::AndExpr as i32 => {
@@ -408,7 +671,7 @@ fn quals(
         }
         NodeEnum::AExpr(e) if e.kind == pb::AExprKind::AexprOp as i32 && op_name(e) == Some("=") => {
             let (col, c) = match (e.lexpr.as_deref()?.node.as_ref()?, e.rexpr.as_deref()?.node.as_ref()?) {
-                (NodeEnum::ColumnRef(r), NodeEnum::AConst(c)) | (NodeEnum::AConst(c), NodeEnum::ColumnRef(r)) => (r, c),
+                (NodeEnum::ColumnRef(r), v) | (v, NodeEnum::ColumnRef(r)) => (r, slot(v)?),
                 _ => return None,
             };
             let names: Vec<&str> = col
@@ -424,18 +687,38 @@ fn quals(
                 [q, c] if q == rel.alias.as_ref().map_or(rel.relname.as_str(), |a| a.aliasname.as_str()) => c,
                 _ => return None,
             };
-            unique_column(cat, table, name)?;
-            out.push(c.location);
+            value_free_column(cat, table, name)?;
+            out.push(c);
             Some(())
         }
         _ => None,
     }
 }
 
-/// Column `name` of `table`, when a valid unique btree index on it alone (no predicate)
-/// covers it.
-fn unique_column(cat: &Cat, table: &crate::catalog::Table, name: &str) -> Option<()> {
+/// Column `name` of `table`, when what the planner estimates for `name = value` can't depend
+/// on the value: a valid unique btree index on it alone (no predicate) covers it (1 / rows),
+/// or it has no most-common-values list and no extended statistics (var_eq_const's estimate
+/// is then the same for every value: the fraction not null over the distinct values).
+fn value_free_column(cat: &Cat, table: &crate::catalog::Table, name: &str) -> Option<()> {
     let col = table.columns.iter().position(|c| !c.dropped && c.name == name)?;
+    if unique_column(cat, table, col) {
+        return Some(());
+    }
+    if cat.statistics.contains_key(&table.oid) {
+        return None;
+    }
+    let stats = cat.colstats.get(&table.oid);
+    let mcv = stats.is_some_and(|all| {
+        all.iter()
+            .filter(|s| s.attnum as usize == col + 1)
+            .any(|s| s.slots.iter().any(|sl| sl.kind == 1))
+    });
+    (!mcv).then_some(())
+}
+
+/// Whether a valid unique btree index on column `col` of `table` alone (no predicate)
+/// covers it.
+fn unique_column(cat: &Cat, table: &crate::catalog::Table, col: usize) -> bool {
     table
         .indexes
         .iter()
@@ -449,5 +732,4 @@ fn unique_column(cat: &Cat, table: &crate::catalog::Table, name: &str) -> Option
                 && ix.columns.len() == 1
                 && matches!(ix.columns[0].key, crate::catalog::IndexKey::Column(c) if c == col)
         })
-        .then_some(())
 }

@@ -4084,23 +4084,23 @@ fn modelled(rf: &RelFiles, cat: &Catalog, t: &Table) -> bool {
 
 /// The table's current size in pages (None: not modelled).
 pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
-    // (What `ensure` finds without binding the indexes: a table too big to model has its
-    // estimate, a modelled one its heap.)
-    let known = {
-        let rf = ctx.sess.db.relfiles.of(t.oid).read();
-        let cat = ctx.catalog();
-        if rf.untracked.contains(&t.oid) {
-            Some(rf.estimated.get(&t.oid).map(|e| e.pages))
-        } else if modelled(&rf, &cat, t) {
-            rf.heaps.get(&t.oid).map(|h| Some(h.nblocks()))
-        } else {
-            None
-        }
-    };
-    if let Some(n) = known {
+    if let Some(n) = heap_blocks_known(t, &ctx.catalog(), &ctx.sess.db) {
         return Ok(n);
     }
     heap_blocks_ensured(t, ctx)
+}
+
+/// `heap_blocks` when it answers without binding the table's indexes: a table too big to
+/// model has its estimate, a modelled one its heap.
+pub fn heap_blocks_known(t: &Table, cat: &Catalog, db: &Database) -> Option<Option<u32>> {
+    let rf = db.relfiles.of(t.oid).read();
+    if rf.untracked.contains(&t.oid) {
+        Some(rf.estimated.get(&t.oid).map(|e| e.pages))
+    } else if modelled(&rf, cat, t) {
+        rf.heaps.get(&t.oid).map(|h| Some(h.nblocks()))
+    } else {
+        None
+    }
 }
 
 fn heap_blocks_ensured(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
@@ -4450,21 +4450,21 @@ pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
     // with all its indexes: what binding its indexes would find (`fork_blocks_bound`; the
     // planner asks for every relation and index it costs).
     if fork == Fork::Main
-        && let Some(n) = main_blocks_known(oid, ctx)
+        && let Some(n) = main_blocks_known(oid, &ctx.catalog(), &ctx.sess.db)
     {
         return Ok(Some(n));
     }
     fork_blocks_bound(oid, fork, ctx)
 }
 
-fn main_blocks_known(oid: u32, ctx: &ExecCtx) -> Option<u64> {
-    let cat = ctx.catalog();
-    match rel_of(&cat, oid)? {
+/// `fork_blocks` of a main fork when it answers without binding indexes (see above).
+pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64> {
+    match rel_of(cat, oid)? {
         Rel::Heap(t) => {
-            let rf = ctx.sess.db.relfiles.of(t.oid).read();
+            let rf = db.relfiles.of(t.oid).read();
             if rf.untracked.contains(&t.oid) {
                 rf.estimated.get(&t.oid).map(|e| e.pages as u64)
-            } else if modelled(&rf, &cat, &t) {
+            } else if modelled(&rf, cat, &t) {
                 rf.heaps.get(&t.oid).map(|h| h.nblocks() as u64)
             } else {
                 None
@@ -4475,10 +4475,10 @@ fn main_blocks_known(oid: u32, ctx: &ExecCtx) -> Option<u64> {
             if ix.method != "btree" || !ix.valid || !(t.indexes.contains(&oid) || t.pkey_index == Some(oid)) {
                 return None;
             }
-            let rf = ctx.sess.db.relfiles.of(t.oid).read();
+            let rf = db.relfiles.of(t.oid).read();
             if rf.untracked.contains(&t.oid) {
                 Some(cat.relstats.get(&oid).map_or(1, |s| s.pages.max(1) as u64))
-            } else if modelled(&rf, &cat, &t) {
+            } else if modelled(&rf, cat, &t) {
                 rf.btrees.get(&oid).map(|b| b.nblocks() as u64)
             } else {
                 None

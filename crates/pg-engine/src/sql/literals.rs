@@ -411,6 +411,23 @@ impl SizeRead {
             SizeRead::Data => false,
         }
     }
+
+    /// `holds`, when the size model answers without binding a table's indexes (None: ask
+    /// `holds`), over catalog `cat` of database `db`.
+    pub fn holds_known(&self, cat: &crate::catalog::Catalog, db: &crate::txn::Database) -> Option<bool> {
+        use crate::exec::sizing;
+        match self {
+            SizeRead::Heap(oid, n) => match cat.table(*oid) {
+                Some(t) => Some(sizing::heap_blocks_known(t, cat, db)?.unwrap_or(0) == *n),
+                None => Some(false),
+            },
+            SizeRead::Fork(oid, n) => Some(sizing::main_blocks_known(*oid, cat, db)? == *n),
+            SizeRead::BtreeLevel(t, ix, pages, width, level) => {
+                Some(sizing::btree_level(*t, *ix, f64::from_bits(*pages), *width, db) == *level)
+            }
+            SizeRead::Data => Some(false),
+        }
+    }
 }
 
 #[cfg(test)]
