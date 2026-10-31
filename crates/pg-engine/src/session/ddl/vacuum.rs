@@ -1354,6 +1354,13 @@ impl Ddl<'_, '_> {
             self.cat.frozen_xids.get(&t.oid).copied().unwrap_or(crate::txn::xids::FIRST_NORMAL_XID)
         });
         let mut oldest_xmin = u64::MAX;
+        // (One index's expressions computed for every row in one security-restricted
+        // operation, as its build computes them: `IndexScope`. Entered per row, that was
+        // most of a 10,000-row expression index's build.)
+        let _scope = match &ixs[..] {
+            [ix] => Some(super::table::IndexScope::enter(&ix.bix, self)),
+            _ => None,
+        };
         // (And the TOAST table's: the oldest xmin past its frozen one of a row with values
         // out of line, which only a row past TOAST_TUPLE_THRESHOLD can have.)
         let toast_frozen = frozen.filter(|_| t.toast != 0).map(|_| {
