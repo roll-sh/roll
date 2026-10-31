@@ -66,6 +66,64 @@ fn defer_after() -> usize {
 pub const COPY_TUPLES: usize = 1000;
 pub const COPY_BYTES: usize = 65535;
 
+/// A database's size models, locked per shard of tables. Everything modelled for a table
+/// (its heap, its indexes', its TOAST relation's and index's, and the bookkeeping kept by
+/// its oid) is in the shard of the table's oid, so writes to different tables don't wait
+/// for one lock, and each table's models change in the order its writers take its shard.
+/// Nothing locks two shards at once.
+pub struct Models {
+    shards: Box<[parking_lot::RwLock<RelFiles>]>,
+    /// The database's stored TIDs were checked (`tids_checked`).
+    tids_checked: std::sync::atomic::AtomicBool,
+    /// Signalled when a kept table's models are laid out (`kept::Building`).
+    built: (parking_lot::Mutex<()>, parking_lot::Condvar),
+}
+
+/// (A power of two: hot tables' oids are usually close together, and land in shards of
+/// their own.)
+const SHARDS: usize = 64;
+
+impl Default for Models {
+    fn default() -> Models {
+        Models {
+            shards: (0..SHARDS).map(|_| Default::default()).collect(),
+            tids_checked: Default::default(),
+            built: Default::default(),
+        }
+    }
+}
+
+impl Models {
+    /// The shard with table `table`'s models. An index's or a TOAST relation's are in its
+    /// table's: pass the table's oid.
+    pub fn of(&self, table: u32) -> &parking_lot::RwLock<RelFiles> {
+        &self.shards[table as usize % SHARDS]
+    }
+
+    /// Every shard, one at a time.
+    fn all(&self) -> impl Iterator<Item = &parking_lot::RwLock<RelFiles>> {
+        self.shards.iter()
+    }
+
+    /// Wait until table `table`'s kept models are no longer being laid out.
+    fn wait_built(&self, table: u32) {
+        while self.of(table).read().building.contains(&table) {
+            let mut g = self.built.0.lock();
+            // (Checked again under the mutex the builder signals under; and a timeout, as
+            // `kept::forget` clears the mark without a signal.)
+            if self.of(table).read().building.contains(&table) {
+                self.built.1.wait_for(&mut g, std::time::Duration::from_millis(20));
+            }
+        }
+    }
+
+    fn notify_built(&self) {
+        let _g = self.built.0.lock();
+        self.built.1.notify_all();
+    }
+}
+
+/// One shard of a database's models (`Models`): the tables whose oids fall in it.
 #[derive(Default)]
 pub struct RelFiles {
     heaps: HashMap<u32, Heap>,
@@ -96,12 +154,12 @@ pub struct RelFiles {
     vacuum_kept: HashMap<u32, i64>,
     /// Tables whose models the last clean close kept (`kept`), not laid out yet.
     kept: HashSet<u32>,
+    /// Kept tables whose models are being laid out (`kept::Building`).
+    building: HashSet<u32>,
     /// Tables with a kept record in the store.
     kept_stored: HashSet<u32>,
     /// The kept records loaded, by table (a hash: what the close needn't write again).
     kept_hash: HashMap<u32, u64>,
-    /// The database's stored TIDs were checked (`tids_checked`).
-    tids_checked: bool,
 }
 
 /// A BRIN index's summarized page ranges: those its build covered (the heap's pages then,
@@ -171,13 +229,13 @@ fn estimate_rows<'a>(t: &Table, rows: impl Iterator<Item = &'a [Value]>, ctx: &E
 
 /// Whether table `t` is too big to model (its sizes are estimates).
 pub fn is_estimated(t: u32, db: &Database) -> bool {
-    db.relfiles.read().untracked.contains(&t)
+    db.relfiles.of(t).read().untracked.contains(&t)
 }
 
 /// Whether table `t` is modelled and within the model's size (a bulk load can leave a
 /// bigger table modelled until something checks it).
 pub fn within_model(t: u32, db: &Database) -> bool {
-    let rf = db.relfiles.read();
+    let rf = db.relfiles.of(t).read();
     !rf.untracked.contains(&t) && rf.heaps.get(&t).is_some_and(|h| h.versions() <= max_versions())
 }
 
@@ -185,7 +243,7 @@ pub fn within_model(t: u32, db: &Database) -> bool {
 /// packed afresh: the space beyond them is free for new row versions. Its estimated pages
 /// (the file doesn't shrink), None when it is modelled.
 pub fn measured_live(t: u32, live: u32, db: &Database) -> Option<u32> {
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t).write();
     let e = rf.estimated.get_mut(&t)?;
     e.pages = e.pages.max(live);
     e.reusable = (e.pages - live) as usize * (heapsim::BLCKSZ - heapsim::PAGE_HEADER);
@@ -308,7 +366,8 @@ pub fn toast_tuple_target(t: &Table) -> Option<usize> {
     option(&t.options, "toast_tuple_target").and_then(|v| v.parse().ok())
 }
 
-/// How a btree index behaves (None: another access method).
+/// How a btree index behaves (None: another access method, exactly when its method isn't
+/// "btree": per-row paths test that without parsing the options).
 fn btree_opts(bix: &BoundIndex) -> Option<BtreeOpts> {
     let ix = &bix.index;
     if ix.method != "btree" {
@@ -1253,7 +1312,7 @@ fn entries_with(
 ) -> Result<Vec<(u32, Arc<Key>)>> {
     let mut out = Vec::new();
     for (i, bix) in indexes.iter().enumerate() {
-        if btree_opts(bix).is_none() {
+        if bix.index.method != "btree" {
             continue;
         }
         let vals = match known {
@@ -1272,13 +1331,13 @@ fn entries_with(
 fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     let db = &ctx.sess.db;
     let wanted = || -> Option<(bool, Vec<&BoundIndex>)> {
-        let rf = db.relfiles.read();
+        let rf = db.relfiles.of(t.oid).read();
         if rf.untracked.contains(&t.oid) {
             return None;
         }
         let missing = indexes
             .iter()
-            .filter(|b| btree_opts(b).is_some() && !rf.btrees.contains_key(&b.index.oid))
+            .filter(|b| b.index.method == "btree" && !rf.btrees.contains_key(&b.index.oid))
             .collect();
         Some((!rf.heaps.contains_key(&t.oid), missing))
     };
@@ -1298,7 +1357,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     // A table first touched since its database opened that its last VACUUM or ANALYZE found
     // too big to model: its size is the pages they counted, without reading it again (the
     // planner reads only pg_class and pg_statistic, as Postgres's does).
-    let cold = heap_missing && !db.relfiles.read().dropped.contains(&t.oid);
+    let cold = heap_missing && !db.relfiles.of(t.oid).read().dropped.contains(&t.oid);
     let known_big = if cold {
         ctx.catalog()
             .relstats
@@ -1323,7 +1382,14 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     }
     // A table first used since its database last closed cleanly: the models that close
     // kept, without reading the rows (`kept`).
-    let restore = if cold { kept::take(t, &missing, ctx) } else { None };
+    let (restore, _building) = match cold.then(|| kept::take(t, &missing, ctx)) {
+        Some(kept::Take::Restore(r, b)) => (Some(r), Some(b)),
+        Some(kept::Take::Wait) => {
+            db.relfiles.wait_built(t.oid);
+            return ensure(t, indexes, ctx);
+        }
+        _ => (None, None),
+    };
     let start = index_prefix(t.oid, 0);
     let end = prefix_end(&start);
     // (Read up to the limit; a bigger table's rest is only measured, a row at a time.)
@@ -1411,13 +1477,14 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     }
     let mut rows: Vec<(Vec<u8>, usize, Option<Tid>)> =
         lens.into_iter().zip(stored).map(|((k, len), tid)| (k, len, tid)).collect();
+    // (A kept record's btrees as their pages were, and its heap's shape.)
+    let mut trees = HashMap::new();
+    let mut shape = None;
     if let Some(r) = restore {
         rows = r.rows;
         exts = r.exts;
-        let mut kept = r.btrees;
-        for (oid, _, ents) in &mut built {
-            *ents = kept.remove(oid).unwrap_or_default();
-        }
+        trees = r.btrees;
+        shape = Some(r.shape);
     }
     // Prepared transactions' writes (a restart recovers them before any model exists): each
     // write's xid, key, and the version it made (its length and stored TID; None: a delete).
@@ -1436,7 +1503,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             }
         }
     }
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     let rf = &mut *rf;
     if heap_missing && exts.iter().any(|(_, e)| !e.is_empty()) {
         mark_tracked(db.instance, t.oid);
@@ -1464,9 +1531,11 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
         }
         placed = Some(tids);
         h.unstamped = moved;
-        // (The first model of the table since the database was opened: the pages its
-        // last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
-        if !rf.dropped.contains(&t.oid)
+        // (Kept: its pages, line pointers, visibility map and free space map as they were.
+        // Otherwise, the first model of the table since the database was opened: the pages
+        // its last VACUUM left all-visible stay so, as Postgres's visibility map keeps them.)
+        if shape.as_ref().is_some_and(|s| h.read_shape(s).is_some()) {
+        } else if !rf.dropped.contains(&t.oid)
             && let Some(st) = ctx.catalog().relstats.get(&t.oid)
         {
             h.seed_all_visible(st.allvisible.max(0) as u32);
@@ -1477,6 +1546,10 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     let heap = &rf.heaps[&t.oid];
     for (oid, opts, ents) in built {
         if rf.btrees.contains_key(&oid) {
+            continue;
+        }
+        if let Some(tree) = trees.remove(&oid) {
+            rf.btrees.insert(oid, tree);
             continue;
         }
         let ents: Vec<(Arc<Key>, Tid)> = ents
@@ -1528,7 +1601,7 @@ fn untrack(db: &Database, t: &Table, est: Option<EstHeap>) {
 }
 
 fn set_estimated(db: &Database, t: &Table, est: Option<EstHeap>) -> EstHeap {
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     let est = est
         .or_else(|| rf.heaps.get(&t.oid).map(EstHeap::from_heap))
         .unwrap_or_default();
@@ -1576,7 +1649,8 @@ fn stored_estimate(t: &Table, ctx: &ExecCtx) -> Option<u32> {
 /// Keep the estimates of the database's tables too big to model for its next open (it is
 /// closing).
 pub fn persist_estimates(db: &Database) {
-    let est: Vec<(u32, u32)> = db.relfiles.read().estimated.iter().map(|(o, e)| (*o, e.pages)).collect();
+    let est: Vec<(u32, u32)> =
+        db.relfiles.all().flat_map(|s| s.read().estimated.iter().map(|(o, e)| (*o, e.pages)).collect::<Vec<_>>()).collect();
     for (oid, pages) in est {
         store_estimate(db, oid, pages);
     }
@@ -1585,7 +1659,7 @@ pub fn persist_estimates(db: &Database) {
 fn check_size(db: &Database, t: &Table) {
     let big = db
         .relfiles
-        .read()
+        .of(t.oid).read()
         .heaps
         .get(&t.oid)
         .is_some_and(|h| h.versions() > max_versions());
@@ -1671,7 +1745,7 @@ fn untracked_write(
     {
         lock_toast(t, ctx)?;
     }
-    if let Some(e) = ctx.sess.db.relfiles.write().estimated.get_mut(&t.oid) {
+    if let Some(e) = ctx.sess.db.relfiles.of(t.oid).write().estimated.get_mut(&t.oid) {
         e.add(len, heap_fillfactor(t));
     }
     Ok(())
@@ -1691,13 +1765,14 @@ fn toast_gone(t: &Table, old: &[Value], new: Option<&[Value]>, ctx: &ExecCtx) ->
 /// The entries a new heap tuple with these values gets in those of `indexes` whose
 /// history is kept (`gistlog`; `vals`: as `inserted_with`'s).
 fn gist_entries(
+    table: u32,
     indexes: &[BoundIndex],
     row: &[Value],
     vals: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
 ) -> Result<Vec<(u32, Option<crate::catalog::gistsim::Key>)>> {
     let logged: Vec<usize> = {
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(table).read();
         if rf.gist_logs.is_empty() {
             return Ok(Vec::new());
         }
@@ -1766,14 +1841,14 @@ pub fn inserted_with(
         lock_toast(t, ctx)?;
     }
     let entries = entries_with(t, indexes, row, vals, ctx)?;
-    let gist = gist_entries(indexes, row, vals, ctx)?;
+    let gist = gist_entries(t.oid, indexes, row, vals, ctx)?;
     let xid = ctx.txn.borrow_mut().cur_xid();
     let cid = ctx.txn.borrow_mut().output_cid();
     let txn = ctx.txn.borrow().id;
     let db = &ctx.sess.db;
     let xids = db.xids();
     let tid = {
-        let mut rf = db.relfiles.write();
+        let mut rf = db.relfiles.of(t.oid).write();
         let RelFiles {
             heaps,
             btrees,
@@ -1873,6 +1948,26 @@ pub(crate) fn index_columns(bix: &BoundIndex, out: &mut HashSet<usize>) {
     out.extend(bix.index.include.iter().copied());
 }
 
+/// Whether every column index `bix`'s entries depend on (`index_columns`) is the same in
+/// `old` and `new`.
+fn columns_unchanged(bix: &BoundIndex, old: &[Value], new: &[Value]) -> bool {
+    let mut unchanged = true;
+    let mut check = |e: &Expr| {
+        e.walk(&mut |x| {
+            if let Expr::Col(i, _) = x {
+                unchanged &= same(old.get(*i), new.get(*i));
+            }
+        })
+    };
+    for k in &bix.keys {
+        check(k);
+    }
+    if let Some(p) = &bix.predicate {
+        check(p);
+    }
+    unchanged && bix.index.include.iter().all(|&i| same(old.get(i), new.get(i)))
+}
+
 fn same(a: Option<&Value>, b: Option<&Value>) -> bool {
     let enc = |v: Option<&Value>| {
         let mut out = Vec::new();
@@ -1897,14 +1992,19 @@ pub fn updated(
     new: &[Value],
     ctx: &ExecCtx,
 ) -> Result<Option<(Tid, bool)>> {
-    note_compression(t, new, Some(new_key), ctx);
+    // (The new version's length, once for all three uses.)
+    let tuple = {
+        let fmt = ctx.fmt();
+        row_len(t, new, &|v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, fmt))
+    };
+    note_compression_len(t, new, Some(new_key), ctx, Some(tuple));
     if !ensure(t, indexes, ctx)? {
-        untracked_write(t, new, Some(old), ctx, None)?;
+        untracked_write(t, new, Some(old), ctx, Some(tuple))?;
         return Ok(None);
     }
     let db = &ctx.sess.db;
     // Out-of-line values the new version keeps as they are.
-    let old_exts: Vec<Ext> = (db.relfiles.read().toast.get(&t.oid))
+    let old_exts: Vec<Ext> = (db.relfiles.of(t.oid).read().toast.get(&t.oid))
         .and_then(|tt| tt.rows.get(old_key).cloned())
         .unwrap_or_default();
     let pinned: HashSet<usize> = old_exts
@@ -1912,22 +2012,22 @@ pub fn updated(
         .filter(|e| new.get(e.col).is_some_and(|v| value_sig(v) == e.sig))
         .map(|e| e.col)
         .collect();
-    let (len, exts) = layout(t, new, ctx, &pinned);
+    let (len, exts) = layout_len(t, new, ctx, &pinned, Some(tuple));
     // New values saved out of line, or old ones deleted (toast_save_datum /
     // toast_delete_datum): the TOAST relation is opened.
     if !exts.is_empty() || old_exts.iter().any(|e| !pinned.contains(&e.col)) {
         lock_toast(t, ctx)?;
     }
     // (A summarizing index, BRIN, doesn't keep an update from being HOT.)
-    let mut cols = HashSet::new();
-    for bix in indexes.iter().filter(|b| b.index.method != "brin") {
-        index_columns(bix, &mut cols);
-    }
-    let hot_ok = old_key == new_key && cols.iter().all(|&c| same(old.get(c), new.get(c)));
+    let hot_ok = old_key == new_key
+        && indexes
+            .iter()
+            .filter(|b| b.index.method != "brin")
+            .all(|bix| columns_unchanged(bix, old, new));
     let xid = ctx.txn.borrow_mut().cur_xid();
     let xids = db.xids();
     let (tid, hot) = {
-        let mut rf = db.relfiles.write();
+        let mut rf = db.relfiles.of(t.oid).write();
         let RelFiles {
             heaps,
             btrees,
@@ -1972,7 +2072,7 @@ pub fn updated(
     if !hot {
         let mut ents = Vec::new();
         for bix in indexes {
-            if btree_opts(bix).is_none() {
+            if bix.index.method != "btree" {
                 continue;
             }
             let Some(nv) = index_values(bix, new, ctx)? else {
@@ -1981,8 +2081,8 @@ pub fn updated(
             let unchanged = index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
             ents.push((bix.index.oid, index_key(t, bix, nv, new, ctx), unchanged));
         }
-        let gist = gist_entries(indexes, new, None, ctx)?;
-        let mut rf = db.relfiles.write();
+        let gist = gist_entries(t.oid, indexes, new, None, ctx)?;
+        let mut rf = db.relfiles.of(t.oid).write();
         let RelFiles { heaps, btrees, gist_logs, .. } = &mut *rf;
         if let Some(heap) = heaps.get(&t.oid) {
             index_insert(btrees, heap, &xids, ents, tid);
@@ -2014,7 +2114,7 @@ fn mark_cmax(heap: &mut Heap, key: &[u8], v: &Vis, ctx: &ExecCtx) {
 
 /// The raw command id (cmin / cmax) of the tuple at `tid` of `table`, when modelled.
 pub fn raw_cid(table: u32, tid: Tid, db: &Database) -> Option<u32> {
-    let rf = db.relfiles.read();
+    let rf = db.relfiles.of(table).read();
     rf.heaps.get(&table)?.tuple(tid).map(|t| t.cid)
 }
 
@@ -2028,7 +2128,7 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     }
     let db = &ctx.sess.db;
     // toast_delete: a row with out-of-line values opens the TOAST relation.
-    let external = (db.relfiles.read().toast.get(&t.oid))
+    let external = (db.relfiles.of(t.oid).read().toast.get(&t.oid))
         .and_then(|tt| tt.rows.get(key))
         .is_some_and(|e| !e.is_empty());
     if external {
@@ -2037,7 +2137,7 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
     let xid = ctx.txn.borrow_mut().cur_xid();
     let xids = db.xids();
     let v = vis_for(&xids, t.oid, ctx);
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     let RelFiles { heaps, toast, .. } = &mut *rf;
     if let Some(heap) = heaps.get_mut(&t.oid) {
         mark_cmax(heap, key, &v, ctx);
@@ -2052,14 +2152,14 @@ pub fn deleted(t: &Table, indexes: &[BoundIndex], key: &[u8], old: &[Value], ctx
 /// Where the heap model has row `key`'s latest version, one another transaction is writing
 /// included (a wait for that transaction names it). None when the table isn't modelled.
 pub fn modelled_tid(table: u32, key: &[u8], ctx: &ExecCtx) -> Option<Tid> {
-    ctx.sess.db.relfiles.read().heaps.get(&table)?.tid_of(key)
+    ctx.sess.db.relfiles.of(table).read().heaps.get(&table)?.tid_of(key)
 }
 
 /// A sequential scan of the table starts: every page it reads may be pruned.
 pub fn scanned(table: u32, ctx: &ExecCtx) {
     let db = &ctx.sess.db;
     let xids = db.xids();
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(table).write();
     if let Some(heap) = rf.heaps.get_mut(&table) {
         heap.prune_all(&vis_for(&xids, table, ctx));
     }
@@ -2070,7 +2170,7 @@ pub fn scanned(table: u32, ctx: &ExecCtx) {
 pub fn scanned_pages(table: u32, from: u32, to: Option<u32>, ctx: &ExecCtx) {
     let db = &ctx.sess.db;
     let xids = db.xids();
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(table).write();
     if let Some(heap) = rf.heaps.get_mut(&table) {
         let v = vis_for(&xids, table, ctx);
         let end = to.unwrap_or(heap.nblocks()).min(heap.nblocks());
@@ -2084,7 +2184,7 @@ pub fn scanned_pages(table: u32, from: u32, to: Option<u32>, ctx: &ExecCtx) {
 /// (`fetched`'s pruning, `index_scanned`'s LP_DEAD marks): neither is modelled, or every
 /// page of the heap is all-visible (nothing to prune, no dead tuple an entry points at).
 pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
-    let rf = db.relfiles.read();
+    let rf = db.relfiles.of(table).read();
     rf.heaps.get(&table).is_none_or(|h| h.all_visible_pages() >= h.nblocks())
 }
 
@@ -2098,12 +2198,12 @@ pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Opti
     // (Under the models' read lock: concurrent index scans don't serialize on it. Only a
     // page heap_page_prune_opt would prune takes the write lock.)
     let (blk, prune) = {
-        let rf = db.relfiles.read();
+        let rf = db.relfiles.of(table).read();
         let heap = rf.heaps.get(&table)?;
         let blk = heap.locate(key, &v)?.0;
         (blk, last != Some(blk) && heap.prune_wanted(blk, &v))
     };
-    if prune && let Some(heap) = db.relfiles.write().heaps.get_mut(&table) {
+    if prune && let Some(heap) = db.relfiles.of(table).write().heaps.get_mut(&table) {
         heap.prune_opt(blk, &v);
     }
     Some(blk)
@@ -2141,7 +2241,7 @@ fn mark_passed(
     // First under the read lock: an index whose entries have nothing to kill (the usual
     // case) changes nothing, and concurrent scans of it don't serialize.
     {
-        let rf = db.relfiles.read();
+        let rf = db.relfiles.of(table).read();
         let (Some(heap), Some(bt)) = (rf.heaps.get(&table), rf.btrees.get(&index)) else {
             return None;
         };
@@ -2158,7 +2258,7 @@ fn mark_passed(
             return seen.map(|s| s.into_iter().map(|t| (t, !heap.page_all_visible(t.0))).collect());
         }
     }
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(table).write();
     let rf = &mut *rf;
     let (Some(heap), Some(bt)) = (rf.heaps.get(&table), rf.btrees.get_mut(&index)) else {
         return None;
@@ -2200,7 +2300,7 @@ impl Kills {
     /// A scan of storage key `ranges` (in the order it reads them). None: the index isn't
     /// modelled.
     pub fn new(table: u32, index: u32, prefix: &[u8], ranges: &[(Vec<u8>, Vec<u8>)], rev: bool, ctx: &ExecCtx) -> Option<Kills> {
-        if !ctx.sess.db.relfiles.read().btrees.contains_key(&index) {
+        if !ctx.sess.db.relfiles.of(table).read().btrees.contains_key(&index) {
             return None;
         }
         let cat = ctx.catalog();
@@ -2298,7 +2398,8 @@ impl Drop for Kills {
 /// are in use again, laid out afresh from its rows (in their heap order) when next needed.
 pub fn storage_rolled_back(rel: u32, db: &Database) {
     let cat = db.catalog();
-    let mut rf = db.relfiles.write();
+    let owner = cat.toast_owner(rel).map_or(rel, |(t, _)| t.oid);
+    let mut rf = db.relfiles.of(owner).write();
     match cat.tables.get(&rel) {
         Some(t) => forget(&mut rf, t),
         None => {
@@ -2318,7 +2419,7 @@ pub fn trigger_pin(table: u32, key: &[u8], old_too: bool, ctx: &ExecCtx) -> Vec<
     }
     let db = &ctx.sess.db;
     let xids = db.xids();
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(table).write();
     let Some(heap) = rf.heaps.get_mut(&table) else {
         return Vec::new();
     };
@@ -2340,7 +2441,7 @@ pub fn trigger_unpin(table: u32, pins: &[u32], ctx: &ExecCtx) {
     if pins.is_empty() {
         return;
     }
-    let mut rf = ctx.sess.db.relfiles.write();
+    let mut rf = ctx.sess.db.relfiles.of(table).write();
     if let Some(heap) = rf.heaps.get_mut(&table) {
         for b in pins {
             heap.pin(*b, false);
@@ -2353,7 +2454,7 @@ pub fn trigger_unpin(table: u32, pins: &[u32], ctx: &ExecCtx) {
 pub fn toast_chunk_id(v: &Value, ctx: &ExecCtx) -> Option<u32> {
     let (t, col, (_, key)) = read_from(v)?;
     let key = key?;
-    let rf = ctx.sess.db.relfiles.read();
+    let rf = ctx.sess.db.relfiles.of(t).read();
     let ext = rf.toast.get(&t)?.rows.get(&key[..])?.iter().find(|e| e.col == col)?;
     Some(ext.id as u32)
 }
@@ -2366,7 +2467,7 @@ pub fn toast_chunks(t: &Table, ctx: &ExecCtx) -> Result<Vec<(u32, i32, Vec<u8>)>
         return Ok(Vec::new());
     }
     let rows: Vec<(Vec<u8>, Vec<Ext>)> = {
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
         rf.toast.get(&t.oid).map_or_else(Vec::new, |tt| {
             tt.rows.iter().map(|(k, e)| (k.clone(), e.clone())).collect()
         })
@@ -2396,12 +2497,12 @@ pub fn toast_chunks(t: &Table, ctx: &ExecCtx) -> Result<Vec<(u32, i32, Vec<u8>)>
 
 /// The table's size in pages as modelled (None: not modelled).
 pub fn modelled_blocks(table: u32, ctx: &ExecCtx) -> Option<u32> {
-    ctx.sess.db.relfiles.read().heaps.get(&table).map(Heap::nblocks)
+    ctx.sess.db.relfiles.of(table).read().heaps.get(&table).map(Heap::nblocks)
 }
 
 /// The table was emptied (TRUNCATE): new, empty files.
 pub fn truncated(t: &Table, db: &Database) {
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     rf.untracked.remove(&t.oid);
     rf.estimated.remove(&t.oid);
     forget(&mut rf, t);
@@ -2413,7 +2514,7 @@ pub fn truncated(t: &Table, db: &Database) {
 pub fn indexes_emptied(t: &Table, ctx: &ExecCtx) {
     let est = crate::sql::costs::empty_rel_tuples(t, ctx);
     let cat = ctx.catalog();
-    let mut rf = ctx.sess.db.relfiles.write();
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     for ix in &t.indexes {
         rf.hash_est.insert(*ix, est);
         if cat.index(*ix).is_none_or(|i| models_build(&i.method)) {
@@ -2559,7 +2660,7 @@ fn gin_index_pages(
     if let Some(n) = shared_model(t, bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))? {
         return Ok(n);
     }
-    model_pages(bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))
+    model_pages(t.oid, bix.index.oid, ctx, || Ok(gin_model(t, bix, indexes, ctx)?.map(|g| g.nblocks())))
 }
 
 /// A size model of an index (or what is computed from one), shared by every session
@@ -2586,7 +2687,7 @@ fn shared_model<T: Clone + Send + 'static>(t: &Table, index: u32, ctx: &ExecCtx,
     let db = &ctx.sess.db;
     let slot = crate::txn::watch::slot(index, true);
     let key = {
-        let rf = db.relfiles.read();
+        let rf = db.relfiles.of(t.oid).read();
         (ctx.catalog().version, rf.gin_built.get(&index).map_or(0, |h| h.len()), rf.gist_logs.get(&index).map_or(0, |l| l.version()))
     };
     if let Some(st) = db.watch.state(t.oid, slot) {
@@ -2646,7 +2747,7 @@ fn gin_model(
     {
         let xids = ctx.sess.db.xids();
         let v = Vis::new(&xids);
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let Some(heap) = rf.heaps.get(&t.oid) else {
             return Ok(None);
         };
@@ -2671,7 +2772,7 @@ fn gin_model(
         .sess
         .db
         .relfiles
-        .read()
+        .of(t.oid).read()
         .gin_built
         .get(&bix.index.oid)
         .cloned()
@@ -2809,7 +2910,7 @@ thread_local! {
 /// computed again only when something it depends on may have changed: the snapshot, the
 /// catalog, the index's build history. (Not cached for a transaction with writes of its
 /// own, which a savepoint rollback may undo.) The planner asks for them on every plan.
-fn model_pages(index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<u64>>) -> Result<Option<u64>> {
+fn model_pages(table: u32, index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<u64>>) -> Result<Option<u64>> {
     let (writes, id) = {
         let txn = ctx.txn.borrow();
         (txn.journal_pos() > 0 || txn.has_writes(), txn.id)
@@ -2820,7 +2921,7 @@ fn model_pages(index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<
     // (A VACUUM or an aborted insert changes a GiST index's pages without a commit:
     // `GistLog::version`.)
     let history = {
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(table).read();
         rf.gin_built.get(&index).map_or(0, |h| h.len()) + (rf.gist_logs.get(&index).map_or(0, |l| l.version()) << 32)
     };
     // (The rows it reads are the snapshot's: `txn.scan`.)
@@ -2996,7 +3097,7 @@ fn gist_model(
     {
         let xids = ctx.sess.db.xids();
         let v = Vis::new(&xids);
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let Some(heap) = rf.heaps.get(&t.oid) else {
             return Ok(None);
         };
@@ -3037,20 +3138,20 @@ fn gist_model(
     // (In the order of the TIDs index entries name, as the build reads its rows.)
     rows.sort_by_key(|r| r.3);
     // The index as its history built it, while that accounts for every row.
-    let log = ctx.sess.db.relfiles.read().gist_logs.get(&bix.index.oid).cloned();
+    let log = ctx.sess.db.relfiles.of(t.oid).read().gist_logs.get(&bix.index.oid).cloned();
     let roots: Vec<(Tid, Vec<u8>, Option<Key>)> = rows.iter().map(|r| (r.3, r.1.clone(), r.2)).collect();
     if let Some(m) = log.and_then(|l| l.replay(&roots)) {
         return Ok(Some(m));
     }
     // The rows the build read (all of them when it wasn't seen), then the rest.
-    let built = ctx.sess.db.relfiles.read().gin_built.get(&bix.index.oid).and_then(|h| h.first().cloned());
+    let built = ctx.sess.db.relfiles.of(t.oid).read().gin_built.get(&bix.index.oid).and_then(|h| h.first().cloned());
     let (first, later): (Vec<_>, Vec<_>) =
         rows.into_iter().partition(|r| built.as_ref().is_none_or(|b| b.contains(&r.1)));
     // (Its history starts again from here.)
     if roots.len() <= gistlog::MAX_ENTRIES {
         let build: Vec<(Tid, Option<Key>)> = first.iter().map(|r| (r.3, r.2)).collect();
         let log = gistlog::GistLog::new(build, later.iter().map(|r| (r.3, r.2)).collect());
-        ctx.sess.db.relfiles.write().gist_logs.insert(bix.index.oid, Arc::new(log));
+        ctx.sess.db.relfiles.of(t.oid).write().gist_logs.insert(bix.index.oid, Arc::new(log));
     }
     let mut keys: Vec<Vec<u8>> = Vec::new();
     let mut g = sorted_build_rows(
@@ -3077,7 +3178,7 @@ pub fn gin_vacuumed(t: &Table, ctx: &ExecCtx) -> Result<()> {
 /// The pending lists of `t`'s GIN indexes (or just `only`) were cleaned up.
 fn gin_cleaned(t: &Table, only: Option<u32>, ctx: &ExecCtx) -> Result<()> {
     let has = {
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
         t.indexes
             .iter()
             .any(|ix| only.is_none_or(|o| o == *ix) && rf.gin_built.contains_key(ix))
@@ -3093,7 +3194,7 @@ fn gin_cleaned(t: &Table, only: Option<u32>, ctx: &ExecCtx) -> Result<()> {
         .scan(&start, &end)
         .map(|r| r.map(|(k, _)| k))
         .collect::<Result<_>>()?;
-    let mut rf = ctx.sess.db.relfiles.write();
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     for ix in t.indexes.iter().filter(|ix| only.is_none_or(|o| o == **ix)) {
         if let Some(h) = rf.gin_built.get_mut(ix) {
             let new: HashSet<Vec<u8>> = keys
@@ -3111,26 +3212,36 @@ fn gin_cleaned(t: &Table, only: Option<u32>, ctx: &ExecCtx) -> Result<()> {
 
 /// The relation's files are gone (DROP).
 pub fn dropped(oids: &[u32], db: &Database) {
-    let mut rf = db.relfiles.write();
+    // (In every shard: an index or TOAST relation is in its table's, which the catalog may
+    // no longer name.)
+    for shard in db.relfiles.all() {
+        let mut rf = shard.write();
+        for o in oids {
+            forget_dropped(&mut rf, o);
+        }
+    }
     for o in oids {
-        kept::forget(&mut rf, *o);
-        rf.heaps.remove(o);
-        rf.btrees.remove(o);
-        rf.untracked.remove(o);
-        rf.estimated.remove(o);
-        rf.toast.remove(o);
-        rf.hash_est.remove(o);
-        rf.gin_built.remove(o);
-        rf.gist_logs.remove(o);
-        rf.brin.remove(o);
         // (A dropped table's search structures: `exec::search`.)
         db.watch.forget(*o);
     }
 }
 
+fn forget_dropped(rf: &mut RelFiles, o: &u32) {
+    kept::forget(rf, *o);
+    rf.heaps.remove(o);
+    rf.btrees.remove(o);
+    rf.untracked.remove(o);
+    rf.estimated.remove(o);
+    rf.toast.remove(o);
+    rf.hash_est.remove(o);
+    rf.gin_built.remove(o);
+    rf.gist_logs.remove(o);
+    rf.brin.remove(o);
+}
+
 /// The table's relcache entry was rebuilt: its cached insertion target is forgotten.
 pub fn invalidated(table: u32, db: &Database) {
-    if let Some(h) = db.relfiles.write().heaps.get_mut(&table) {
+    if let Some(h) = db.relfiles.of(table).write().heaps.get_mut(&table) {
         h.invalidate();
     }
 }
@@ -3163,7 +3274,7 @@ pub fn loaded(
         .map(|(_, r)| layout(t, r, ctx, &HashSet::new()))
         .collect();
     let xids = ctx.sess.db.xids();
-    let mut rf = ctx.sess.db.relfiles.write();
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     rf.untracked.remove(&t.oid);
     rf.estimated.remove(&t.oid);
     forget(&mut rf, t);
@@ -3197,7 +3308,7 @@ pub fn in_heap_order<T>(t: &Table, rows: &mut Vec<(Vec<u8>, T)>, ctx: &ExecCtx) 
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
     let locs: Vec<Option<Tid>> = {
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let Some(h) = rf.heaps.get(&t.oid) else {
             return;
         };
@@ -3220,24 +3331,25 @@ const TIDS_CHECKED: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0x25];
 
 /// Whether the database's stored TIDs were checked (kept in memory after the first look).
 pub fn tids_checked(db: &Database) -> Result<bool> {
-    if db.relfiles.read().tids_checked {
+    use std::sync::atomic::Ordering::Relaxed;
+    if db.relfiles.tids_checked.load(Relaxed) {
         return Ok(true);
     }
     let checked = db.store.get(TIDS_CHECKED, db.store.visible_ts())?.is_some();
-    db.relfiles.write().tids_checked |= checked;
+    db.relfiles.tids_checked.fetch_or(checked, Relaxed);
     Ok(checked)
 }
 
 pub fn set_tids_checked(db: &Database) -> Result<()> {
     db.store.commit(vec![(TIDS_CHECKED.to_vec(), Some(bytes::Bytes::new()))], |_| Ok(()))?;
-    db.relfiles.write().tids_checked = true;
+    db.relfiles.tids_checked.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 
 #[doc(hidden)]
 pub fn forget_tids_checked(db: &Database) -> Result<()> {
     db.store.commit(vec![(TIDS_CHECKED.to_vec(), None)], |_| Ok(()))?;
-    db.relfiles.write().tids_checked = false;
+    db.relfiles.tids_checked.store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 
@@ -3326,12 +3438,12 @@ pub fn rewritten(t: &Table, order: Option<&[Vec<u8>]>, ctx: &ExecCtx) -> Result<
             let (_, v) = r?;
             est.add(layout(t, &decode_table_row(t, &v)?, ctx, &HashSet::new()).0, ff);
         }
-        ctx.sess.db.relfiles.write().estimated.insert(t.oid, est);
+        ctx.sess.db.relfiles.of(t.oid).write().estimated.insert(t.oid, est);
         return Ok(());
     }
     let db = &ctx.sess.db;
     let xids = db.xids();
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     let Some(heap) = rf.heaps.get_mut(&t.oid) else {
         return Ok(());
     };
@@ -3389,7 +3501,7 @@ pub struct Detached {
 
 /// Take a table's models out (its rows are about to be stored under new keys).
 pub fn detach(t: &Table, db: &Database) -> Detached {
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     rf.dropped.insert(t.oid);
     let heap = rf.heaps.remove(&t.oid);
     let btrees = t
@@ -3409,7 +3521,7 @@ pub fn detach(t: &Table, db: &Database) -> Detached {
 /// Put a table's models back, its rows now stored under new keys (old key, new key).
 /// Indexes it no longer has are dropped.
 pub fn reattach(t: &Table, d: Detached, rekey: &[(Vec<u8>, Vec<u8>)], db: &Database) {
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     let Some(mut heap) = d.heap else {
         // Not modelled: laid out from its rows when next needed.
         rf.heaps.remove(&t.oid);
@@ -3440,7 +3552,7 @@ pub fn reattach(t: &Table, d: Detached, rekey: &[(Vec<u8>, Vec<u8>)], db: &Datab
 pub fn gin_rekeyed(t: &Table, rekey: &[(Vec<u8>, Vec<u8>)], db: &Database) {
     let renamed: HashMap<&[u8], &Vec<u8>> =
         rekey.iter().map(|(o, n)| (o.as_slice(), n)).collect();
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     for ix in t.indexes.iter().chain(&t.pkey_index) {
         if let Some(sets) = rf.gin_built.get_mut(ix) {
             for set in sets.iter_mut() {
@@ -3464,8 +3576,8 @@ pub fn models_build(method: &str) -> bool {
 /// CREATE INDEX (or a rebuild): the index is built afresh from the table's rows.
 /// An index made with its (empty) table: every row is inserted into it later.
 /// (`build`: `models_build`.)
-pub fn index_created(index: u32, build: bool, ctx: &ExecCtx) {
-    let mut rf = ctx.sess.db.relfiles.write();
+pub fn index_created(table: u32, index: u32, build: bool, ctx: &ExecCtx) {
+    let mut rf = ctx.sess.db.relfiles.of(table).write();
     rf.gist_logs.remove(&index);
     if build {
         rf.gin_built.insert(index, vec![HashSet::new()]);
@@ -3489,14 +3601,14 @@ pub fn index_built(t: &Table, index: u32, build: bool, ctx: &ExecCtx) -> Result<
             .scan(&start, &end)
             .map(|r| r.map(|(k, _)| k))
             .collect::<Result<_>>()?;
-        let mut rf = ctx.sess.db.relfiles.write();
+        let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
         rf.gin_built.insert(index, vec![keys]);
         rf.gist_logs.remove(&index);
     } else {
-        ctx.sess.db.relfiles.write().gin_built.remove(&index);
+        ctx.sess.db.relfiles.of(t.oid).write().gin_built.remove(&index);
     }
     {
-        let mut rf = ctx.sess.db.relfiles.write();
+        let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
         rf.btrees.remove(&index);
         rf.hash_est.insert(index, est);
         if let Some(h) = rf.heaps.get_mut(&t.oid) {
@@ -3507,7 +3619,7 @@ pub fn index_built(t: &Table, index: u32, build: bool, ctx: &ExecCtx) -> Result<
     ensure(t, &indexes, ctx)?;
     // A BRIN build summarizes every range of the heap's pages (the first even when empty).
     let blocks = heap_blocks(t, ctx)?.unwrap_or(0);
-    ctx.sess.db.relfiles.write().brin.insert(
+    ctx.sess.db.relfiles.of(t.oid).write().brin.insert(
         index,
         BrinRanges {
             built_blocks: blocks,
@@ -3537,7 +3649,7 @@ pub fn brin_summarize(
 ) -> Result<i64> {
     let ppr = brin_pages_per_range(ix);
     let blocks = heap_blocks(t, ctx)?.unwrap_or(0);
-    let mut rf = ctx.sess.db.relfiles.write();
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     let st = rf.brin.entry(ix.oid).or_insert_with(|| BrinRanges {
         built_blocks: blocks,
         ..Default::default()
@@ -3561,7 +3673,7 @@ pub fn brin_summarize(
 pub fn brin_desummarize(t: &Table, ix: &crate::catalog::Index, block: u32, ctx: &ExecCtx) -> Result<()> {
     let ppr = brin_pages_per_range(ix);
     let blocks = heap_blocks(t, ctx)?.unwrap_or(0);
-    let mut rf = ctx.sess.db.relfiles.write();
+    let mut rf = ctx.sess.db.relfiles.of(t.oid).write();
     let st = rf.brin.entry(ix.oid).or_insert_with(|| BrinRanges {
         built_blocks: blocks,
         ..Default::default()
@@ -3597,7 +3709,7 @@ pub fn set_vacuum_truncate(v: Option<bool>) {
 /// The dead tuples the last VACUUM of `table` had to keep, still visible to someone
 /// (pgstat_report_vacuum's dead tuples; 0 when the heap isn't modelled).
 pub fn take_vacuum_kept(table: u32, db: &Database) -> i64 {
-    db.relfiles.write().vacuum_kept.remove(&table).unwrap_or(0)
+    db.relfiles.of(table).write().vacuum_kept.remove(&table).unwrap_or(0)
 }
 
 /// What VACUUM found and left.
@@ -3619,7 +3731,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     }
     let db = &ctx.sess.db;
     let xids = db.xids();
-    let mut rf = db.relfiles.write();
+    let mut rf = db.relfiles.of(t.oid).write();
     let RelFiles { heaps, btrees, vacuum_kept, gist_logs, .. } = &mut *rf;
     let Some(heap) = heaps.get_mut(&t.oid) else {
         return Ok(None);
@@ -3688,7 +3800,7 @@ pub fn measured(t: &Table, ctx: &ExecCtx) -> Result<Option<(i32, i32, HashMap<u3
     if !ensure(t, &indexes, ctx)? {
         return Ok(None);
     }
-    let rf = ctx.sess.db.relfiles.read();
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
     let Some(heap) = rf.heaps.get(&t.oid) else {
         return Ok(None);
     };
@@ -3708,15 +3820,15 @@ pub fn measured(t: &Table, ctx: &ExecCtx) -> Result<Option<(i32, i32, HashMap<u3
 }
 
 /// A btree index's root level, if modelled.
-pub fn btree_height(index: u32, db: &Database) -> Option<u32> {
-    db.relfiles.read().btrees.get(&index).map(Btree::height)
+pub fn btree_height(table: u32, index: u32, db: &Database) -> Option<u32> {
+    db.relfiles.of(table).read().btrees.get(&index).map(Btree::height)
 }
 
 /// A btree index's root level for the planner (_bt_getrootheight): the model's, else, for an
 /// index too big to model, the levels a sorted build stacks over its `pages` (inner pages
 /// 70% full of downlinks to keys `key_width` bytes wide: TPC-H's lineitem_pkey has 2).
-pub fn btree_level(index: u32, pages: f64, key_width: u32, db: &Database) -> u32 {
-    if let Some(h) = btree_height(index, db) {
+pub fn btree_level(table: u32, index: u32, pages: f64, key_width: u32, db: &Database) -> u32 {
+    if let Some(h) = btree_height(table, index, db) {
         return h;
     }
     let downlink = (8 + key_width as usize).div_ceil(8) * 8 + heapsim::ITEM_ID;
@@ -3734,12 +3846,13 @@ pub fn btree_level(index: u32, pages: f64, key_width: u32, db: &Database) -> u32
 /// The leaf pages of btree `index` an index scan over these entry ranges (with the
 /// index's key prefix) reads; None when the index isn't modelled.
 pub fn btree_leaf_pages(
+    table: u32,
     index: u32,
     prefix: &[u8],
     ranges: &[(Vec<u8>, Vec<u8>)],
     db: &Database,
 ) -> Option<Vec<u32>> {
-    let rf = db.relfiles.read();
+    let rf = db.relfiles.of(table).read();
     let bt = rf.btrees.get(&index)?;
     let mut out: Vec<u32> = Vec::new();
     for (lo, hi) in ranges {
@@ -3794,7 +3907,7 @@ pub fn entry_pages(
                 _ => None,
             },
             _ => {
-                let rf = ctx.sess.db.relfiles.read();
+                let rf = ctx.sess.db.relfiles.of(t.oid).read();
                 es.iter()
                     .find(|(ix, _)| *ix == bix.index.oid)
                     .filter(|_| modelled)
@@ -3808,12 +3921,12 @@ pub fn entry_pages(
 
 /// A btree index's size in pages, if modelled.
 /// Modelled btree `index`'s index tuples with key attributes `key` (`Btree::postings`).
-pub fn btree_postings(index: u32, key: &[u8], db: &Database) -> Option<Vec<Vec<Tid>>> {
-    Some(db.relfiles.read().btrees.get(&index)?.postings(key))
+pub fn btree_postings(table: u32, index: u32, key: &[u8], db: &Database) -> Option<Vec<Vec<Tid>>> {
+    Some(db.relfiles.of(table).read().btrees.get(&index)?.postings(key))
 }
 
-pub fn btree_blocks(index: u32, db: &Database) -> Option<u32> {
-    db.relfiles.read().btrees.get(&index).map(Btree::nblocks)
+pub fn btree_blocks(table: u32, index: u32, db: &Database) -> Option<u32> {
+    db.relfiles.of(table).read().btrees.get(&index).map(Btree::nblocks)
 }
 
 /// Where each row (by data key) is in the table's heap, and whether the visibility map
@@ -3828,7 +3941,7 @@ pub fn row_locations(
     let v = Vis::new(&xids);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
-    let rf = ctx.sess.db.relfiles.read();
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
     let h = rf.heaps.get(&t.oid)?;
     // (A version whose insert aborted leads back to the one it replaced.)
     Some(
@@ -3847,7 +3960,7 @@ pub fn row_tids(t: &Table, rows: &[(Vec<u8>, bytes::Bytes)], ctx: &ExecCtx) -> O
         .iter()
         .map(|(_, b)| super::scan::stored_tid(b))
         .collect();
-    let rf = ctx.sess.db.relfiles.read();
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
     let h = rf.heaps.get(&t.oid)?;
     if h.unstamped || out.iter().any(Option::is_none) {
         let xids = ctx.sess.db.xids();
@@ -3869,7 +3982,7 @@ pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Optio
     let v = Vis::new(&xids);
     let txn = ctx.txn.borrow();
     let mine = |x: u64| txn.is_current_xid(x);
-    let rf = ctx.sess.db.relfiles.read();
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
     let h = rf.heaps.get(&t.oid)?;
     Some(keys.iter().map(|k| h.locate_for(k, &v, &mine).map(|tid| h.hot_root(tid))).collect())
 }
@@ -3877,13 +3990,13 @@ pub fn row_roots(t: &Table, keys: &[Vec<u8>], ctx: &ExecCtx) -> Option<Vec<Optio
 /// Whether the table's heap is modelled page by page (`row_tids` places its rows),
 /// deciding it on first use.
 pub fn heap_modelled(t: &Table, ctx: &ExecCtx) -> bool {
-    matches!(heap_blocks(t, ctx), Ok(Some(_))) && ctx.sess.db.relfiles.read().heaps.contains_key(&t.oid)
+    matches!(heap_blocks(t, ctx), Ok(Some(_))) && ctx.sess.db.relfiles.of(t.oid).read().heaps.contains_key(&t.oid)
 }
 
 /// Whether the table's modelled heap has its rows in key order (`Heap::in_key_order`): a
 /// scan in storage order reads them in heap order.
 pub fn heap_in_key_order(t: &Table, ctx: &ExecCtx) -> bool {
-    ctx.sess.db.relfiles.read().heaps.get(&t.oid).is_some_and(Heap::in_key_order)
+    ctx.sess.db.relfiles.of(t.oid).read().heaps.get(&t.oid).is_some_and(Heap::in_key_order)
 }
 
 /// Whether a sequential scan of the table's modelled heap may read it in parallel chunks:
@@ -3895,7 +4008,7 @@ pub fn heap_in_key_order(t: &Table, ctx: &ExecCtx) -> bool {
 /// laid out afresh at a restart (`unstamped`, its TIDs the model's, not the stored ones)
 /// still reads in storage order.
 pub fn heap_scan_splits(t: &Table, tids_read: bool, ctx: &ExecCtx) -> bool {
-    ctx.sess.db.relfiles.read().heaps.get(&t.oid).is_some_and(|h| {
+    ctx.sess.db.relfiles.of(t.oid).read().heaps.get(&t.oid).is_some_and(|h| {
         (if tids_read { h.in_key_order() } else { h.keys_in_heap_order() }) && !h.any_prunable()
     })
 }
@@ -3903,7 +4016,7 @@ pub fn heap_scan_splits(t: &Table, tids_read: bool, ctx: &ExecCtx) -> bool {
 /// Whether no page of the table's modelled heap has a prunable xid: a scan reaching its
 /// pages prunes nothing (`heap_scan_splits`).
 pub fn heap_unprunable(t: &Table, ctx: &ExecCtx) -> bool {
-    ctx.sess.db.relfiles.read().heaps.get(&t.oid).is_some_and(|h| !h.any_prunable())
+    ctx.sess.db.relfiles.of(t.oid).read().heaps.get(&t.oid).is_some_and(|h| !h.any_prunable())
 }
 
 /// Whether `t`'s heap and every btree index of it are modelled already: what `ensure` finds
@@ -3924,7 +4037,7 @@ pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
     // (What `ensure` finds without binding the indexes: a table too big to model has its
     // estimate, a modelled one its heap.)
     let known = {
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
         let cat = ctx.catalog();
         if rf.untracked.contains(&t.oid) {
             Some(rf.estimated.get(&t.oid).map(|e| e.pages))
@@ -3943,13 +4056,13 @@ pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
 fn heap_blocks_ensured(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
     let indexes = crate::sql::binder::bound_indexes(&Arc::new(t.clone()), ctx)?;
     if !ensure(t, &indexes, ctx)? {
-        return Ok(ctx.sess.db.relfiles.read().estimated.get(&t.oid).map(|e| e.pages));
+        return Ok(ctx.sess.db.relfiles.of(t.oid).read().estimated.get(&t.oid).map(|e| e.pages));
     }
     Ok(ctx
         .sess
         .db
         .relfiles
-        .read()
+        .of(t.oid).read()
         .heaps
         .get(&t.oid)
         .map(Heap::nblocks))
@@ -4002,7 +4115,7 @@ impl CopyLoad {
     ) -> CopyLoad {
         let key = (t.oid, txn);
         let db = ctx.sess.db.clone();
-        db.relfiles.write().bulk.insert(key, Bulk { mode, batch, defer });
+        db.relfiles.of(t.oid).write().bulk.insert(key, Bulk { mode, batch, defer });
         CopyLoad {
             db,
             key,
@@ -4013,7 +4126,7 @@ impl CopyLoad {
     /// A line was read and its row stored (or skipped): the buffer is flushed once full.
     pub fn row_done(&self, line_len: usize, ctx: &ExecCtx) {
         let full = {
-            let mut rf = self.db.relfiles.write();
+            let mut rf = self.db.relfiles.of(self.key.0).write();
             match rf.bulk.get_mut(&self.key).and_then(|b| b.batch.as_mut()) {
                 Some(b) if !b.rows.is_empty() => {
                     b.bytes += line_len;
@@ -4030,7 +4143,7 @@ impl CopyLoad {
     fn flush(&self, ctx: &ExecCtx) {
         let xid = ctx.txn.borrow_mut().cur_xid();
         let cid = ctx.txn.borrow_mut().output_cid();
-        let mut rf = self.db.relfiles.write();
+        let mut rf = self.db.relfiles.of(self.key.0).write();
         let RelFiles { heaps, bulk, .. } = &mut *rf;
         let Some(b) = bulk.get_mut(&self.key) else {
             return;
@@ -4077,7 +4190,7 @@ impl CopyLoad {
         let xids = self.db.xids();
         let table = self.key.0;
         for mut rows in batches {
-            let mut rf = self.db.relfiles.write();
+            let mut rf = self.db.relfiles.of(self.key.0).write();
             let RelFiles { heaps, btrees, bulk, toast, gist_logs, .. } = &mut *rf;
             let mut single = InsertMode::single();
             let mode = bulk.get_mut(&self.key).map_or(&mut single, |b| &mut b.mode);
@@ -4135,7 +4248,7 @@ impl CopyLoad {
 
     /// The rows waiting, taken: (batches, multi, xid, cid).
     fn take_deferred(&self) -> Option<(Vec<Vec<Pending>>, bool, u64, u32)> {
-        let mut rf = self.db.relfiles.write();
+        let mut rf = self.db.relfiles.of(self.key.0).write();
         let d = rf.bulk.get_mut(&self.key)?.defer.as_mut()?;
         if d.batches.is_empty() {
             return None;
@@ -4179,7 +4292,7 @@ impl Drop for CopyLoad {
         if let Some((batches, multi, xid, cid)) = self.take_deferred() {
             self.model(batches, multi, xid, cid, None);
         }
-        self.db.relfiles.write().bulk.remove(&self.key);
+        self.db.relfiles.of(self.key.0).write().bulk.remove(&self.key);
     }
 }
 
@@ -4298,7 +4411,7 @@ fn main_blocks_known(oid: u32, ctx: &ExecCtx) -> Option<u64> {
     let cat = ctx.catalog();
     match rel_of(&cat, oid)? {
         Rel::Heap(t) => {
-            let rf = ctx.sess.db.relfiles.read();
+            let rf = ctx.sess.db.relfiles.of(t.oid).read();
             if rf.untracked.contains(&t.oid) {
                 rf.estimated.get(&t.oid).map(|e| e.pages as u64)
             } else if modelled(&rf, &cat, &t) {
@@ -4312,7 +4425,7 @@ fn main_blocks_known(oid: u32, ctx: &ExecCtx) -> Option<u64> {
             if ix.method != "btree" || !ix.valid || !(t.indexes.contains(&oid) || t.pkey_index == Some(oid)) {
                 return None;
             }
-            let rf = ctx.sess.db.relfiles.read();
+            let rf = ctx.sess.db.relfiles.of(t.oid).read();
             if rf.untracked.contains(&t.oid) {
                 Some(cat.relstats.get(&oid).map_or(1, |s| s.pages.max(1) as u64))
             } else if modelled(&rf, &cat, &t) {
@@ -4356,7 +4469,7 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
             }
             let indexes = crate::sql::binder::bound_indexes(&t, ctx)?;
             if !ensure(&t, &indexes, ctx)? {
-                let est = ctx.sess.db.relfiles.read().estimated.get(&t.oid).map(|e| e.pages);
+                let est = ctx.sess.db.relfiles.of(t.oid).read().estimated.get(&t.oid).map(|e| e.pages);
                 return Ok(Some(match fork {
                     Fork::Main => match est {
                         Some(p) => p as u64,
@@ -4365,7 +4478,7 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
                     _ => 0,
                 }));
             }
-            let rf = ctx.sess.db.relfiles.read();
+            let rf = ctx.sess.db.relfiles.of(t.oid).read();
             let h = rf.heaps.get(&t.oid);
             h.map_or(0, |h| match fork {
                 Fork::Main => h.nblocks(),
@@ -4407,7 +4520,7 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
                     _ => 0,
                 }));
             }
-            if btree_opts(bix).is_none() {
+            if bix.index.method != "btree" {
                 // Other access methods aren't modelled: the size they have empty.
                 let empty = match bix.index.method.as_str() {
                     "hash" => 10,
@@ -4432,11 +4545,11 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
                 let pages = ctx.catalog().relstats.get(&ix).map_or(1, |s| s.pages.max(1) as u64);
                 return Ok(Some(pages));
             }
-            let rf = ctx.sess.db.relfiles.read();
+            let rf = ctx.sess.db.relfiles.of(t.oid).read();
             rf.btrees.get(&ix).map_or(1, |b| b.nblocks()) as u64
         }
         Rel::Toast(t, is_index) => {
-            let rf = ctx.sess.db.relfiles.read();
+            let rf = ctx.sess.db.relfiles.of(t.oid).read();
             if is_index {
                 match fork {
                     Fork::Main => rf.btrees.get(&(t.toast + 1)).map_or(1, |b| b.nblocks()) as u64,
@@ -4461,12 +4574,12 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
 pub fn visibility(oid: u32, ctx: &ExecCtx) -> Result<Option<Vec<(bool, bool, bool)>>> {
     let main = fork_blocks(oid, Fork::Main, ctx)?.unwrap_or(0) as u32;
     let cat = ctx.catalog();
-    let heap = match rel_of(&cat, oid) {
-        Some(Rel::Heap(t)) => t.oid,
-        Some(Rel::Toast(t, false)) => t.toast,
+    let (owner, heap) = match rel_of(&cat, oid) {
+        Some(Rel::Heap(t)) => (t.oid, t.oid),
+        Some(Rel::Toast(t, false)) => (t.oid, t.toast),
         _ => return Ok(None),
     };
-    let rf = ctx.sess.db.relfiles.read();
+    let rf = ctx.sess.db.relfiles.of(owner).read();
     Ok(Some(
         (0..main)
             .map(|b| match rf.heaps.get(&heap) {
@@ -4483,14 +4596,14 @@ pub fn visibility(oid: u32, ctx: &ExecCtx) -> Result<Option<Vec<(bool, bool, boo
 pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64, u64, u64)>> {
     fork_blocks(oid, Fork::Main, ctx)?;
     let cat = ctx.catalog();
-    let heap = match rel_of(&cat, oid) {
-        Some(Rel::Heap(t)) => t.oid,
-        Some(Rel::Toast(t, false)) => t.toast,
+    let (owner, heap) = match rel_of(&cat, oid) {
+        Some(Rel::Heap(t)) => (t.oid, t.oid),
+        Some(Rel::Toast(t, false)) => (t.oid, t.toast),
         _ => return Ok(None),
     };
     let xids = ctx.sess.db.xids();
     let v = heapsim::Vis::new(&xids);
-    let rf = ctx.sess.db.relfiles.read();
+    let rf = ctx.sess.db.relfiles.of(owner).read();
     Ok(match rf.heaps.get(&heap) {
         Some(h) => Some(h.tuple_stats(&v)),
         None if rf.untracked.contains(&heap) => None,
@@ -4501,7 +4614,11 @@ pub fn heap_tuple_stats(oid: u32, ctx: &ExecCtx) -> Result<Option<(u64, u64, u64
 /// pgstatindex's counts of btree `ix` (the model's), its pages; None when not modelled.
 pub fn btree_page_stats(ix: u32, ctx: &ExecCtx) -> Result<Option<(crate::catalog::btsim::BtPageStats, u32, u32)>> {
     let blocks = fork_blocks(ix, Fork::Main, ctx)?.unwrap_or(0) as u32;
-    let rf = ctx.sess.db.relfiles.read();
+    let owner = match rel_of(&ctx.catalog(), ix) {
+        Some(Rel::Index(t, _) | Rel::Toast(t, _)) => t.oid,
+        _ => return Ok(None),
+    };
+    let rf = ctx.sess.db.relfiles.of(owner).read();
     Ok(rf.btrees.get(&ix).map(|b| (b.page_stats(), b.height(), blocks)))
 }
 
@@ -4509,12 +4626,12 @@ pub fn btree_page_stats(ix: u32, ctx: &ExecCtx) -> Result<Option<(crate::catalog
 pub fn truncate_vm(oid: u32, ctx: &ExecCtx) -> Result<()> {
     fork_blocks(oid, Fork::Main, ctx)?;
     let cat = ctx.catalog();
-    let heap = match rel_of(&cat, oid) {
-        Some(Rel::Heap(t)) => t.oid,
-        Some(Rel::Toast(t, false)) => t.toast,
+    let (owner, heap) = match rel_of(&cat, oid) {
+        Some(Rel::Heap(t)) => (t.oid, t.oid),
+        Some(Rel::Toast(t, false)) => (t.oid, t.toast),
         _ => return Ok(()),
     };
-    if let Some(h) = ctx.sess.db.relfiles.write().heaps.get_mut(&heap) {
+    if let Some(h) = ctx.sess.db.relfiles.of(owner).write().heaps.get_mut(&heap) {
         h.truncate_vm();
     }
     Ok(())
@@ -4528,13 +4645,13 @@ pub fn recorded_free_space(oid: u32, blk: u64, ctx: &ExecCtx) -> Result<i64> {
     // (Brings the relation's model up to date.)
     let main = fork_blocks(oid, Fork::Main, ctx)?.unwrap_or(0);
     let cat = ctx.catalog();
-    let heap = |h: u32| -> i64 {
-        let mut rf = ctx.sess.db.relfiles.write();
+    let heap = |owner: u32, h: u32| -> i64 {
+        let mut rf = ctx.sess.db.relfiles.of(owner).write();
         rf.heaps.get_mut(&h).map_or(0, |h| h.recorded_free(blk.min(u32::MAX as u64) as u32)) as i64
     };
     Ok(match rel_of(&cat, oid) {
-        Some(Rel::Heap(t)) => heap(t.oid),
-        Some(Rel::Toast(t, false)) => heap(t.toast),
+        Some(Rel::Heap(t)) => heap(t.oid, t.oid),
+        Some(Rel::Toast(t, false)) => heap(t.oid, t.toast),
         Some(Rel::Index(_, ix)) => {
             let brin = cat.indexes.get(&ix).is_some_and(|i| i.method == "brin");
             // (Past the metapage and the revmap: the regular pages, nearly empty.)
@@ -4612,7 +4729,7 @@ fn hash_codes(
         keys.push(k.clone());
     }
     let est = {
-        let rf = ctx.sess.db.relfiles.read();
+        let rf = ctx.sess.db.relfiles.of(t.oid).read();
         if let Some(h) = rf.heaps.get(&t.oid) {
             for (c, k) in codes.iter_mut().zip(&keys) {
                 c.0 = h.tid_of(k);

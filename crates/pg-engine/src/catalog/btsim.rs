@@ -3,7 +3,7 @@
 //! suffix-truncated high keys), page splits at the point nbtsplitloc.c would choose,
 //! deduplication passes that put off splits, and new levels as the root splits.
 
-use super::heapsim::{BLCKSZ, ITEM_ID, PAGE_HEADER, Tid, maxalign};
+use super::heapsim::{BLCKSZ, ITEM_ID, PAGE_HEADER, Tid, get_varint as get, maxalign, put_varint as put};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -266,6 +266,23 @@ fn child_for(inner: &[(Pivot, u32)], lo: &[u8], nkey: usize) -> usize {
         inner.iter().rposition(|(pv, _)| pv.below(lo, nkey)).unwrap_or(0),
         "pivots out of order"
     );
+    i
+}
+
+/// Whether a leaf item is past model key `lo` for a scan: some row key `lo` goes on with
+/// puts it there (a storage key is the entry's key attributes, then the row's key).
+fn above(it: &Item, lo: &[u8], nkey: usize) -> bool {
+    let k = it.key.key_bytes(nkey);
+    let m = k.len().min(lo.len());
+    k[..m] >= lo[..m]
+}
+
+/// The first of a leaf's items (in key order) past `lo`. A binary search: the key
+/// attributes' encodings are self-delimiting, so no item past `lo` is followed by one
+/// that isn't.
+fn first_above(items: &[Item], lo: &[u8], nkey: usize) -> usize {
+    let i = items.partition_point(|it| !above(it, lo, nkey));
+    debug_assert!(items[i..].iter().all(|it| above(it, lo, nkey)), "items out of order");
     i
 }
 
@@ -989,26 +1006,27 @@ impl Btree {
         }
         // Then right along the leaves until past `hi`. (A storage key goes on with the
         // row's key: an entry is past `lo` when some row key puts it there.)
+        // (Once a leaf has an item past `lo`, every item after it is.)
+        let mut lo = lo;
         loop {
             let Some(p) = self.pages.get_mut(blk as usize).and_then(|p| p.as_mut()) else {
                 return;
             };
-            for it in &mut p.items {
+            let from = lo.map_or(0, |l| first_above(&p.items, l, nkey));
+            if from < p.items.len() {
+                lo = None;
+            }
+            for it in &mut p.items[from..] {
                 let k = it.key.key_bytes(nkey);
                 if hi.is_some_and(|hi| k >= hi) {
                     return;
                 }
-                let above = lo.is_none_or(|lo| {
-                    let m = k.len().min(lo.len());
-                    k[..m] >= lo[..m]
-                });
                 if !it.dead
-                    && above
                     && let Some(seen) = seen.as_deref_mut()
                 {
                     seen.extend_from_slice(&it.tids);
                 }
-                if !it.dead && above && it.tids.iter().all(|t| all_dead(*t)) {
+                if !it.dead && it.tids.iter().all(|t| all_dead(*t)) {
                     it.dead = true;
                 }
             }
@@ -1049,26 +1067,26 @@ impl Btree {
         }
         // Then right along the leaves until past `hi`. (A storage key goes on with the
         // row's key: an entry is past `lo` when some row key puts it there.)
+        let mut lo = lo;
         loop {
             let Some(p) = self.pages.get(blk as usize).and_then(|p| p.as_ref()) else {
                 return false;
             };
-            for it in &p.items {
+            let from = lo.map_or(0, |l| first_above(&p.items, l, nkey));
+            if from < p.items.len() {
+                lo = None;
+            }
+            for it in &p.items[from..] {
                 let k = it.key.key_bytes(nkey);
                 if hi.is_some_and(|hi| k >= hi) {
                     return false;
                 }
-                let above = lo.is_none_or(|lo| {
-                    let m = k.len().min(lo.len());
-                    k[..m] >= lo[..m]
-                });
                 if !it.dead
-                    && above
                     && let Some(seen) = seen.as_deref_mut()
                 {
                     seen.extend_from_slice(&it.tids);
                 }
-                if !it.dead && above && it.tids.iter().all(|t| all_dead(*t)) {
+                if !it.dead && it.tids.iter().all(|t| all_dead(*t)) {
                     return true;
                 }
             }
@@ -1685,6 +1703,175 @@ enum Entry {
 impl Btree {
     fn page_slot(&mut self, b: u32) -> &mut Option<BPage> {
         &mut self.pages[b as usize]
+    }
+}
+
+// ── Page images ──
+//
+// A tree's pages as they are (items, posting lists, LP_DEAD marks, pivots, links), for a
+// model kept across a restart of its database (`exec::sizing::kept`): PostgreSQL keeps its
+// index pages, so the model does too. Varints; a key after the bytes it shares with the
+// previous one on its page.
+
+fn take<'a>(b: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+    let (a, rest) = (b.get(..n)?, b.get(n..)?);
+    *b = rest;
+    Some(a)
+}
+
+fn put_tid(out: &mut Vec<u8>, (blk, off): Tid) {
+    put(out, blk as u64);
+    put(out, off as u64);
+}
+
+fn get_tid(b: &mut &[u8]) -> Option<Tid> {
+    Some((u32::try_from(get(b)?).ok()?, u16::try_from(get(b)?).ok()?))
+}
+
+fn put_pivot(out: &mut Vec<u8>, p: &Pivot) {
+    put(out, p.key.is_some() as u64 | (p.tid.is_some() as u64) << 1);
+    put(out, p.natts as u64);
+    put(out, p.size as u64);
+    if let Some(k) = &p.key {
+        put(out, k.as_bytes().len() as u64);
+        out.extend_from_slice(k.as_bytes());
+    }
+    if let Some(t) = p.tid {
+        put_tid(out, t);
+    }
+}
+
+fn get_pivot(b: &mut &[u8]) -> Option<Pivot> {
+    let flags = get(b)?;
+    let (natts, size) = (get(b)? as usize, get(b)? as usize);
+    let key = if flags & 1 != 0 {
+        let n = get(b)? as usize;
+        Some(Arc::new(Key::from_bytes(take(b, n)?.to_vec())?))
+    } else {
+        None
+    };
+    let tid = if flags & 2 != 0 { Some(get_tid(b)?) } else { None };
+    Some(Pivot { key, natts, tid, size })
+}
+
+impl Btree {
+    /// The tree's image (`read_image`), its options with it.
+    pub fn write_image(&self, out: &mut Vec<u8>) {
+        let o = &self.opts;
+        put(out, o.nkey as u64);
+        put(out, o.unique as u64 | (o.dedup as u64) << 1);
+        put(out, o.fillfactor as u64);
+        put(out, self.pages.len() as u64);
+        put(out, self.root.map_or(0, |r| r as u64 + 1));
+        put(out, self.tuples as u64);
+        for p in self.pages.iter().skip(1) {
+            let Some(p) = p else {
+                put(out, 0);
+                continue;
+            };
+            let flags = 1 | (p.leaf as u64) << 1 | (p.right.is_some() as u64) << 2 | (p.high.is_some() as u64) << 3;
+            put(out, flags);
+            if let Some(r) = p.right {
+                put(out, r as u64);
+            }
+            if let Some(h) = &p.high {
+                put_pivot(out, h);
+            }
+            put(out, p.used as u64);
+            if !p.leaf {
+                put(out, p.inner.len() as u64);
+                for (pv, child) in &p.inner {
+                    put_pivot(out, pv);
+                    put(out, *child as u64);
+                }
+                continue;
+            }
+            put(out, p.items.len() as u64);
+            let mut prev: &[u8] = &[];
+            for it in &p.items {
+                let tids: &[Tid] = &it.tids;
+                let derived = Item::posting(it.key.clone(), tids.to_vec()).size;
+                put(out, it.dead as u64 | ((it.size != derived) as u64) << 1);
+                let k = it.key.as_bytes();
+                let shared = prev.iter().zip(k).take_while(|(a, b)| a == b).count();
+                put(out, shared as u64);
+                put(out, (k.len() - shared) as u64);
+                out.extend_from_slice(&k[shared..]);
+                prev = k;
+                put(out, tids.len() as u64);
+                for &t in tids {
+                    put_tid(out, t);
+                }
+                if it.size != derived {
+                    put(out, it.size as u64);
+                }
+            }
+        }
+    }
+
+    /// A tree from `write_image`'s bytes (advanced past them); None when they don't hold
+    /// one.
+    pub fn read_image(b: &mut &[u8]) -> Option<Btree> {
+        let nkey = get(b)? as usize;
+        let flags = get(b)?;
+        let fillfactor = get(b)? as usize;
+        let opts = BtreeOpts { nkey, unique: flags & 1 != 0, dedup: flags & 2 != 0, fillfactor };
+        let n = get(b)? as usize;
+        if n == 0 || n > 1 << 24 {
+            return None;
+        }
+        let blk = |v: u64| u32::try_from(v).ok().filter(|&x| x >= 1 && (x as usize) < n);
+        let root = match get(b)? {
+            0 => None,
+            r => Some(blk(r - 1)?),
+        };
+        let tuples = get(b)? as usize;
+        let mut pages = Vec::with_capacity(n);
+        pages.push(None);
+        for _ in 1..n {
+            let flags = get(b)?;
+            if flags & 1 == 0 {
+                pages.push(None);
+                continue;
+            }
+            let leaf = flags & 2 != 0;
+            let right = if flags & 4 != 0 { Some(blk(get(b)?)?) } else { None };
+            let high = if flags & 8 != 0 { Some(get_pivot(b)?) } else { None };
+            let used = get(b)? as usize;
+            let mut p = BPage { leaf, right, high, used, ..Default::default() };
+            let m = get(b)? as usize;
+            if !leaf {
+                for _ in 0..m {
+                    let pv = get_pivot(b)?;
+                    p.inner.push((pv, blk(get(b)?)?));
+                }
+            } else {
+                let mut prev: Vec<u8> = Vec::new();
+                for _ in 0..m {
+                    let f = get(b)?;
+                    let shared = get(b)? as usize;
+                    let len = get(b)? as usize;
+                    let mut k = Vec::with_capacity(shared + len);
+                    k.extend_from_slice(prev.get(..shared)?);
+                    k.extend_from_slice(take(b, len)?);
+                    let key = Arc::new(Key::from_bytes(k.clone())?);
+                    prev = k;
+                    let nt = get(b)? as usize;
+                    if nt == 0 || nt > 1 << 16 {
+                        return None;
+                    }
+                    let tids: Vec<Tid> = (0..nt).map(|_| get_tid(b)).collect::<Option<_>>()?;
+                    let mut it = Item::posting(key, tids);
+                    it.dead = f & 1 != 0;
+                    if f & 2 != 0 {
+                        it.size = get(b)? as usize;
+                    }
+                    p.items.push(it);
+                }
+            }
+            pages.push(Some(p));
+        }
+        Some(Btree { opts, pages, root, tuples })
     }
 }
 

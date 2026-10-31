@@ -854,7 +854,7 @@ fn open_scan_as(
             Some((ix, _)) if ix.id != 0 => {
                 let prefix = index_prefix(s.table.oid, ix.id);
                 let pages = match ix.method.as_str() {
-                    "btree" => super::sizing::btree_leaf_pages(ix.oid, &prefix, &ranges, &ctx.sess.db),
+                    "btree" => super::sizing::btree_leaf_pages(s.table.oid, ix.oid, &prefix, &ranges, &ctx.sess.db),
                     "hash" => hash_scan_buckets(s, ix, ctx)?,
                     _ => None,
                 };
@@ -953,7 +953,7 @@ fn ssi_bitmap_index(
     let table = Arc::new(t.clone());
     let prefix = index_prefix(t.oid, ix.id);
     let pages = match ix.method.as_str() {
-        "btree" => super::sizing::btree_leaf_pages(ix.oid, &prefix, ranges, &ctx.sess.db),
+        "btree" => super::sizing::btree_leaf_pages(t.oid, ix.oid, &prefix, ranges, &ctx.sess.db),
         "hash" => hash_buckets(&table, ix, b, ctx)?,
         "gin" => {
             let indexes = crate::sql::binder::bound_indexes(&table, ctx)?;
@@ -2365,7 +2365,7 @@ fn backward_order(s: &ScanPlan, key: &[u8], run: &mut Vec<(Vec<u8>, bytes::Bytes
     let placed = (|| {
         let (ix, _) = s.index.as_ref()?;
         let attrs = key.strip_prefix(&index_prefix(s.table.oid, ix.id)[..])?;
-        let groups = super::sizing::btree_postings(ix.oid, attrs, &ctx.sess.db)?;
+        let groups = super::sizing::btree_postings(s.table.oid, ix.oid, attrs, &ctx.sess.db)?;
         let keys: Vec<Vec<u8>> = run.iter().map(|(k, _)| k.clone()).collect();
         let roots = super::sizing::row_roots(&s.table, &keys, ctx)?;
         let mut at = std::collections::HashMap::new();

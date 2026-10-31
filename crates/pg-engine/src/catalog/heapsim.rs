@@ -692,6 +692,9 @@ pub struct Heap {
     pub disordered: bool,
     /// The last row placed in key order: its key and TID.
     last_placed: Option<(Vec<u8>, Tid)>,
+    /// Deleted rows' last versions, by TID, with their keys: once pruning or VACUUM makes
+    /// the line pointer unused (reusable by another row), the key no longer names it.
+    deleted: HashMap<Tid, Vec<u8>>,
 }
 
 impl Heap {
@@ -1223,6 +1226,24 @@ impl Heap {
         }
         p.set_prunable(xid);
         p.all_visible = false;
+        self.deleted.insert((b, off), key.to_vec());
+    }
+
+    /// Line pointers `freed` are unused now: a deleted row's key that still names one of
+    /// them (its last version) goes, as nothing is left of the row. (Before, a later row
+    /// given the line pointer was found under the deleted row's key too: a VACUUM FULL
+    /// copied it twice.)
+    fn forget_deleted(&mut self, freed: &[Tid]) {
+        if self.deleted.is_empty() {
+            return;
+        }
+        for tid in freed {
+            if let Some(k) = self.deleted.remove(tid)
+                && self.keys.get(&k) == Some(tid)
+            {
+                self.keys.remove(&k);
+            }
+        }
     }
 
     /// heap_update: the new version goes on the old one's page if it fits (a HOT update
@@ -1480,6 +1501,7 @@ impl Heap {
             p.prune_xid = prune_xid;
             p.full = false;
         }
+        let mut freed = Vec::new();
         if do_prune {
             for (off, st) in new.into_iter().enumerate().skip(1) {
                 if let Some(st) = st {
@@ -1487,11 +1509,16 @@ impl Heap {
                         p.used -= maxalign(t.len as usize);
                         self.versions -= 1;
                     }
+                    if matches!(st, Lp::Unused) {
+                        freed.push((blk, off as u16));
+                    }
                     p.lps[off - 1] = st;
                 }
             }
             p.repair();
         }
+        self.forget_deleted(&freed);
+        let p = &mut self.pages[blk as usize];
         // What VACUUM needs to know about the page now.
         let mut hastup = false;
         let mut dead = Vec::new();
@@ -1609,6 +1636,9 @@ impl Heap {
             }
         }
         self.targets.clear();
+        let freed = std::mem::take(&mut res.dead);
+        self.forget_deleted(&freed);
+        res.dead = freed;
         res.pages = pages;
         res.all_visible = self.all_visible_pages();
         res
@@ -1719,6 +1749,210 @@ impl Heap {
             Some(Lp::Dead) | Some(Lp::Unused) | None => true,
             Some(Lp::Redirect(_)) => false,
         }
+    }
+}
+
+/// A varint (the kept models' records: `exec::sizing::kept`).
+pub(crate) fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+/// A varint `put_varint` wrote, advancing `b` past it.
+pub(crate) fn get_varint(b: &mut &[u8]) -> Option<u64> {
+    let mut v = 0u64;
+    for shift in (0..64).step_by(7) {
+        let (&x, rest) = b.split_first()?;
+        *b = rest;
+        v |= ((x & 0x7f) as u64) << shift;
+        if x < 0x80 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+impl Heap {
+    /// What `restored` can't tell from the rows, for a heap kept across a clean restart
+    /// (`exec::sizing::kept`; `read_shape`): every page's line pointers as they are (unused,
+    /// dead, redirects, the dead tuples still taking space, HOT chain links: `is_row` names
+    /// the rows `restored` puts back), its visibility map bit, PD_PAGE_FULL and whether it
+    /// has a prunable xid, and the free space map's pages and the visibility map's length.
+    /// PostgreSQL's files keep all of it.
+    pub fn write_shape(&self, out: &mut Vec<u8>, is_row: &dyn Fn(Tid) -> bool) {
+        put_varint(out, self.pages.len() as u64);
+        for (b, p) in self.pages.iter().enumerate() {
+            put_varint(out, p.lps.len() as u64);
+            let flags = p.all_visible as u64 | (p.full as u64) << 1 | (p.free_lps as u64) << 2 | ((p.prune_xid != 0) as u64) << 3;
+            put_varint(out, flags);
+            for (i, lp) in p.lps.iter().enumerate() {
+                match lp {
+                    Lp::Unused => put_varint(out, 0),
+                    Lp::Dead => put_varint(out, 1),
+                    Lp::Redirect(o) => {
+                        put_varint(out, 2);
+                        put_varint(out, *o as u64);
+                    }
+                    Lp::Normal(t) => {
+                        let row = is_row((b as u32, i as u16 + 1));
+                        let links = t.heap_only || t.hot_updated;
+                        put_varint(out, 3 + row as u64 * 2 + links as u64);
+                        if !row {
+                            put_varint(out, t.len as u64);
+                        }
+                        if links {
+                            put_varint(out, t.heap_only as u64 | (t.hot_updated as u64) << 1);
+                            put_varint(out, t.next as u64);
+                        }
+                    }
+                }
+            }
+        }
+        put_varint(out, self.vm_blocks as u64);
+        put_varint(out, self.fsm.blocks as u64);
+        let mut fsm: Vec<(&u32, &FsmPage)> = self.fsm.pages.iter().collect();
+        fsm.sort_unstable_by_key(|(b, _)| **b);
+        put_varint(out, fsm.len() as u64);
+        for (b, p) in fsm {
+            put_varint(out, *b as u64);
+            put_varint(out, p.next as u64);
+            let set: Vec<(usize, u8)> =
+                p.nodes.iter().enumerate().filter(|(_, v)| **v != 0).map(|(i, v)| (i, *v)).collect();
+            put_varint(out, set.len() as u64);
+            let mut prev = 0;
+            for (i, v) in set {
+                put_varint(out, (i - prev) as u64);
+                out.push(v);
+                prev = i;
+            }
+        }
+    }
+
+    /// Give a heap `restored` from its kept rows the shape `write_shape` kept: its rows
+    /// stay where they are, everything else on the pages comes back (dead tuples dead to
+    /// everyone, as after a restart). None (the heap as it was) when the bytes don't hold a
+    /// shape, or hold one the rows don't fit.
+    pub fn read_shape(&mut self, mut b: &[u8]) -> Option<()> {
+        let b = &mut b;
+        let n = get_varint(b)? as usize;
+        if n < self.pages.len() || n > 1 << 22 {
+            return None;
+        }
+        // (Read whole and checked against the rows, then applied.)
+        enum L {
+            Unused,
+            Dead,
+            Redirect(u16),
+            Row(u8, u16),
+            Gone(u32, u8, u16),
+        }
+        let mut pages = Vec::with_capacity(n);
+        for i in 0..n {
+            let nlps = get_varint(b)? as usize;
+            let flags = get_varint(b)?;
+            let have = self.pages.get(i).map_or(&[][..], |p| &p.lps[..]);
+            if nlps < have.len() || nlps > MAX_HEAP_TUPLES {
+                return None;
+            }
+            let mut lps = Vec::with_capacity(nlps);
+            for j in 0..nlps {
+                let code = get_varint(b)?;
+                let placed = matches!(have.get(j), Some(Lp::Normal(_)));
+                let links = |b: &mut &[u8]| -> Option<(u8, u16)> { Some((get_varint(b)? as u8 & 3, u16::try_from(get_varint(b)?).ok()?)) };
+                let lp = match code {
+                    0 => L::Unused,
+                    1 => L::Dead,
+                    2 => L::Redirect(u16::try_from(get_varint(b)?).ok().filter(|&o| o >= 1 && o as usize <= nlps)?),
+                    3 | 4 => {
+                        let len = u32::try_from(get_varint(b)?).ok()?;
+                        let (f, next) = if code == 4 { links(b)? } else { (0, 0) };
+                        L::Gone(len, f, next)
+                    }
+                    5 => L::Row(0, 0),
+                    6 => {
+                        let (f, next) = links(b)?;
+                        L::Row(f, next)
+                    }
+                    _ => return None,
+                };
+                if matches!(lp, L::Row(..)) != placed {
+                    return None;
+                }
+                lps.push(lp);
+            }
+            pages.push((flags, lps));
+        }
+        let vm_blocks = u32::try_from(get_varint(b)?).ok()?;
+        let fsm_blocks = u32::try_from(get_varint(b)?).ok()?;
+        let mut fsm = HashMap::default();
+        for _ in 0..get_varint(b)? {
+            let blk = u32::try_from(get_varint(b)?).ok()?;
+            let mut p = FsmPage::new();
+            p.next = get_varint(b)? as usize;
+            let mut at = 0;
+            for _ in 0..get_varint(b)? {
+                at += get_varint(b)? as usize;
+                let (&v, rest) = b.split_first()?;
+                *b = rest;
+                *p.nodes.get_mut(at)? = v;
+            }
+            fsm.insert(blk, p);
+        }
+        if !b.is_empty() {
+            return None;
+        }
+        self.pages.resize_with(n, Page::fresh);
+        for (blk, (p, (flags, lps))) in self.pages.iter_mut().zip(pages).enumerate() {
+            p.lps.resize(lps.len(), Lp::Dead);
+            let mut prev = Vec::new();
+            for (j, lp) in lps.into_iter().enumerate() {
+                let mut chain = |t: &mut Tup, f: u8, next: u16| {
+                    (t.heap_only, t.hot_updated, t.next) = (f & 1 != 0, f & 2 != 0, next);
+                    if t.hot_updated && next != 0 {
+                        prev.push((next, j as u16 + 1));
+                    }
+                };
+                match lp {
+                    L::Unused => p.lps[j] = Lp::Unused,
+                    L::Dead => p.lps[j] = Lp::Dead,
+                    L::Redirect(o) => {
+                        p.lps[j] = Lp::Redirect(o);
+                        prev.push((o, j as u16 + 1));
+                    }
+                    L::Row(f, next) => {
+                        if let Lp::Normal(t) = &mut p.lps[j] {
+                            chain(t, f, next);
+                        }
+                    }
+                    L::Gone(len, f, next) => {
+                        // (Dead to everyone: FrozenTransactionId deleted it.)
+                        let mut t = Heap::new_tup(len as usize, 0);
+                        t.xmax = crate::txn::xids::FIRST_NORMAL_XID - 1;
+                        chain(&mut t, f, next);
+                        p.used += maxalign(len as usize);
+                        self.versions += 1;
+                        p.lps[j] = Lp::Normal(t);
+                    }
+                }
+            }
+            // (Each chain member's way back, as `update` and pruning leave it.)
+            for (to, from) in prev {
+                if let Some(Lp::Normal(t)) = p.lps.get_mut(to as usize - 1) {
+                    t.prev = Some((blk as u32, from));
+                }
+            }
+            p.all_visible = flags & 1 != 0;
+            p.full = flags & 2 != 0;
+            p.free_lps = flags & 4 != 0;
+            p.prune_xid = if flags & 8 != 0 { crate::txn::xids::FIRST_NORMAL_XID - 1 } else { 0 };
+            p.new = false;
+        }
+        self.vm_blocks = vm_blocks;
+        self.fsm = Fsm { blocks: fsm_blocks, pages: fsm };
+        Some(())
     }
 }
 

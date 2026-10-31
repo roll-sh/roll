@@ -1,7 +1,8 @@
 //! Heap and btree models kept across a clean restart (`sizing::kept`): a table's first
 //! statement after one loads them instead of reading its rows, and everything the models
-//! decide (ctids of new versions, page counts, plans, VACUUM) comes out as when they are laid
-//! out from the rows, which is what a restart after a crash does.
+//! decide (ctids of new versions, page counts, plans, VACUUM) comes out as if the database
+//! had never restarted, as PostgreSQL's files keep their pages (heap and index pages, line
+//! pointers, free space and visibility maps).
 
 use pg_engine::engine::{Engine, EngineOptions};
 use pg_engine::session::Session;
@@ -81,19 +82,25 @@ fn prepare(dir: &Path, clean: bool) {
 fn after_restart(dir: &Path, clean: bool) -> Vec<Vec<String>> {
     let eng = open(dir);
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-    let mut out: Vec<Vec<String>> = CHECKS.iter().map(|q| rows(&mut s, q)).collect();
-    exec(&mut s, MORE);
-    out.extend(CHECKS.iter().map(|q| rows(&mut s, q)));
-    exec(&mut s, "VACUUM km; VACUUM km2");
-    out.extend(CHECKS.iter().map(|q| rows(&mut s, q)));
-    s.query("INSERT INTO km SELECT g, 1, 'again', NULL FROM generate_series(6001, 6200) g").unwrap();
-    out.extend(CHECKS.iter().map(|q| rows(&mut s, q)));
-    s.query("VACUUM FULL km").unwrap();
-    out.extend(CHECKS.iter().map(|q| rows(&mut s, q)));
+    let out = steps(&mut s);
     drop(s);
     if clean {
         eng.shutdown();
     }
+    out
+}
+
+/// The checks, then more writes, VACUUM, VACUUM FULL, with the checks after each.
+fn steps(s: &mut Session) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = CHECKS.iter().map(|q| rows(s, q)).collect();
+    exec(s, MORE);
+    out.extend(CHECKS.iter().map(|q| rows(s, q)));
+    exec(s, "VACUUM km; VACUUM km2");
+    out.extend(CHECKS.iter().map(|q| rows(s, q)));
+    s.query("INSERT INTO km SELECT g, 1, 'again', NULL FROM generate_series(6001, 6200) g").unwrap();
+    out.extend(CHECKS.iter().map(|q| rows(s, q)));
+    s.query("VACUUM FULL km").unwrap();
+    out.extend(CHECKS.iter().map(|q| rows(s, q)));
     out
 }
 
@@ -103,21 +110,51 @@ fn reopened(dir: &Path) -> Vec<Vec<String>> {
     CHECKS.iter().map(|q| rows(&mut s, q)).collect()
 }
 
+/// A clean restart changes nothing the models decide: the same steps on an engine that
+/// never restarted give the same results, before the next restart and after it.
 #[test]
-fn kept_models_match_models_laid_out_from_rows() {
+fn kept_models_match_models_never_restarted() {
     let kept = tempfile::tempdir().unwrap();
-    let laid = tempfile::tempdir().unwrap();
+    let never = tempfile::tempdir().unwrap();
     prepare(kept.path(), true);
-    prepare(laid.path(), false);
     let a = after_restart(kept.path(), true);
-    let b = after_restart(laid.path(), false);
+    let (b, last) = {
+        let eng = open(never.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        exec(&mut s, SETUP);
+        for q in CHECKS {
+            rows(&mut s, q);
+        }
+        let b = steps(&mut s);
+        let last: Vec<Vec<String>> = CHECKS.iter().map(|q| rows(&mut s, q)).collect();
+        (b, last)
+    };
     assert_eq!(a.len(), b.len());
     for (i, (x, y)) in a.iter().zip(&b).enumerate() {
-        assert_eq!(x, y, "{}", CHECKS[i % CHECKS.len()]);
+        let d = x.iter().zip(y).find(|(p, q)| p != q);
+        assert_eq!(x, y, "step {} {}: first difference {d:?}", i / CHECKS.len(), CHECKS[i % CHECKS.len()]);
     }
     // Once more: the records the first restart's close kept (after VACUUM FULL, from models
-    // that were kept themselves), against a layout from the rows.
-    assert_eq!(reopened(kept.path()), reopened(laid.path()));
+    // that were kept themselves).
+    assert_eq!(reopened(kept.path()), last);
+}
+
+/// After a crash nothing kept is used: the models are laid out from the rows, every row at
+/// its stored TID, and what they decide about the rows' places is the same.
+#[test]
+fn models_after_a_crash_keep_the_rows_in_place() {
+    let crashed = tempfile::tempdir().unwrap();
+    let kept = tempfile::tempdir().unwrap();
+    prepare(crashed.path(), false);
+    prepare(kept.path(), true);
+    let a = after_restart(crashed.path(), false);
+    let b = after_restart(kept.path(), true);
+    // (The rows' ctids and the heaps' sizes; index pages are those of a fresh build.)
+    for (i, (x, y)) in a.iter().zip(&b).enumerate().take(CHECKS.len()) {
+        if i < 2 {
+            assert_eq!(x, y, "{}", CHECKS[i]);
+        }
+    }
 }
 
 /// A kept record isn't trusted after a crash, nor once its table changed: DDL that changes

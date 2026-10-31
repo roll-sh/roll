@@ -11864,11 +11864,11 @@ impl Builder<'_, '_> {
                 correlation *= 0.75;
             }
             let db = &self.ctx.sess.db;
-            let ix_pages = crate::exec::sizing::btree_blocks(ix.oid, db).unwrap_or(1) as f64;
+            let ix_pages = crate::exec::sizing::btree_blocks(t.oid, ix.oid, db).unwrap_or(1) as f64;
             let scan = costs::IndexScan {
                 heap: size,
                 index_pages: ix_pages,
-                tree_height: crate::exec::sizing::btree_level(ix.oid, ix_pages, 8 * ix.columns.len() as u32, db),
+                tree_height: crate::exec::sizing::btree_level(t.oid, ix.oid, ix_pages, 8 * ix.columns.len() as u32, db),
                 index_sel,
                 boundary_sel: index_sel,
                 unique_eq: (ix.unique || ix.primary)

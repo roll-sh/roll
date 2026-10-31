@@ -4389,7 +4389,6 @@ it (fast shutdown, start with `-w`):
   of 10,000 distinct simple queries (0.33 ms each; PostgreSQL about 0.11 ms with `docker
   exec` included): parsing, binding, `pgstat::report`, nothing restart-specific.
 
-
 ## Logical replication publishers (round 22, agent 119)
 
 The engine (release, 4 pinned CPUs) or PostgreSQL 18.6 (4 CPUs) holds a backlog of 20,000
@@ -4808,6 +4807,83 @@ IDENTITY FULL updates and a partitioned engine target with partition moves; a Po
 and an engine subscriber of a PostgreSQL publisher (streaming = on) and of an engine
 publisher (streaming = parallel): md5 of every row identical on all three, no
 synchronization slot left on the publisher.
+
+## Size models, round 2 (round 22, agent 126)
+
+HANDOFF.md, "Size models, round 2", has what changed. Release builds with frame pointers, the
+engine pinned to cores 24-27 and pgbench (`-M prepared`, a container on the host network) to
+28-31, scale 10, 20 s per run after a 5 s warm-up, the engine restarted per binary on one
+data directory, base (`629f3e51`) and head interleaved. The machine was saturated (load
+40-50, every core 94-99% busy), so tps and CPU
+per transaction moved by up to 2x between identical runs; context switches per transaction
+(`perf stat -e context-switches` of the engine) are what the change is about and held still.
+
+| workload | clients | base tps | head tps | base CPU/txn | head CPU/txn | base cs/txn | head cs/txn | base VmHWM | head VmHWM |
+|---|---|---|---|---|---|---|---|---|---|
+| tpcb-like | 8 | 4,947 / 3,005 | 5,560 / 3,045 | 0.54 / 0.79 ms | 0.53 / 0.73 ms | 14.6 / 15.7 | 13.3 / 13.0 | 305 / 286 MB | 306 / 296 MB |
+| tpcb-like | 32 | 5,500 / 1,549 | 4,274 / 2,646 | 0.60 / 1.09 ms | 0.76 / 0.97 ms | 20.7 / 21.0 | 19.7 / 17.9 | 342 / 342 MB | 334 / 333 MB |
+| tpcb-like | 64 | 3,311 / 2,135 | 2,863 / 3,092 | 0.76 / 1.12 ms | 0.99 / 1.07 ms | 33.5 / 30.8 | 28.8 / 24.8 | 421 / 390 MB | 439 / 401 MB |
+| simple-update | 8 | 7,372 / 4,335 | 6,574 / 8,228 | 0.43 / 0.45 ms | 0.44 / 0.39 ms | 9.5 / 8.7 | 9.1 / 9.3 | 313 / 301 MB | 305 / 329 MB |
+| simple-update | 32 | 9,097 / 8,943 | 7,532 / 8,751 | 0.41 / 0.42 ms | 0.46 / 0.44 ms | 8.4 / 8.5 | 8.1 / 8.2 | 351 / 360 MB | 381 / 388 MB |
+| simple-update | 64 | 7,952 / 6,892 | 8,472 / 8,379 | 0.47 / 0.50 ms | 0.45 / 0.45 ms | 8.3 / 8.3 | 8.0 / 8.0 | 469 / 454 MB | 543 / 514 MB |
+
+- Off-CPU (`perf record -e sched:sched_switch -g`, 64 clients of tpcb-like, 16 s; the first
+  engine frame under each switch): base 650,000 switches at 2,100 tps, of them 245,000 under
+  the size models' lock (`ensure` 10.8%, `fetched` 7.3%, `is_estimated` 5.6%, `updated`
+  5.2%, `CopyLoad::register` 4.7%, `check_size`, `untracked_write`, `inserted_with`,
+  `mark_passed`), about 7 per transaction; head 116,000 at 1,080 tps, 4,400 of them in the
+  models (0.25 per transaction). The rest are the client's round trips, the WAL fsync wait
+  and the row locks on pgbench_branches.
+- simple-update writes no modelled table at scale 10 but pgbench_history, so it changes
+  little. Its VmHWM at 64 clients was 40-75 MB higher on head in both rounds (allocation by
+  more threads at once, no model grows); agent 125's area, to watch.
+- Per-write profile after the change (8 clients, `perf record -g -a` on the engine's cores):
+  scale 1 9.8% of the engine's samples in the models (`fetched` → `Heap::prune_opt` 2.7%,
+  `Kills::mark` → `kill_needed` 1.6%, `updated` 1.9%, `inserted_with` 0.5%), scale 10 5.5%
+  (`row_roots` 1.5%, `updated` 1.5%, `inserted_with` 0.7%, `fetched` 0.6%).
+
+**A clean restart against PostgreSQL 18.6** (a mixed workload, then each relation's pages per
+fork and two EXPLAINs, a restart, the same again, then inserts before and after a VACUUM):
+
+```
+CREATE TABLE mw1 (id int PRIMARY KEY, k int, v text, pad char(40)); CREATE INDEX mw1_k ON mw1 (k);
+CREATE INDEX mw1_v ON mw1 (v); CREATE TABLE mw2 (id bigserial PRIMARY KEY, ref int, note text);
+CREATE INDEX mw2_ref ON mw2 (ref);
+INSERT INTO mw1 SELECT g, g % 1000, md5(g::text), 'p' FROM generate_series(1, 60000) g;
+INSERT INTO mw2 (ref, note) SELECT g % 5000, repeat('n', g % 40) FROM generate_series(1, 40000) g;
+UPDATE mw1 SET k = k + 1 WHERE id % 7 = 0; UPDATE mw1 SET pad = 'q' WHERE id % 5 = 0;
+UPDATE mw1 SET v = md5(v) WHERE id % 11 = 0; DELETE FROM mw1 WHERE id % 13 = 0;
+DELETE FROM mw2 WHERE id % 3 = 0; VACUUM mw2;
+INSERT INTO mw1 SELECT g, g % 50, md5((g * 3)::text), 'r' FROM generate_series(60001, 70000) g;
+INSERT INTO mw2 (ref, note) SELECT g % 700, 'again' FROM generate_series(1, 8000) g;
+UPDATE mw2 SET note = note || '!' WHERE ref % 9 = 0; DELETE FROM mw1 WHERE id BETWEEN 20000 AND 26000;
+```
+
+| pages (main / fsm / vm) | PostgreSQL, before = after | head, before = after | base before | base after |
+|---|---|---|---|---|
+| mw1 | 1176 / 3 / 0 | 1176 / 3 / 0 | 1176 / 3 / 0 | 1176 / 0 / 0 |
+| mw1_pkey | 357 | 357 | 357 | 166 |
+| mw1_k | 100 | 100 | 100 | 53 |
+| mw1_v | 725 | 721 | 721 | 434 |
+| mw2 | 315 / 3 / 1 | 315 / 3 / 1 | 315 / 3 / 1 | 315 / 0 / 0 |
+| mw2_pkey | 134 | 134 | 134 | 97 |
+| mw2_ref | 65 | 65 | 65 | 46 |
+
+Inserts after the restart: 300 rows into mw1 at (1175,60)-(1178,91), 300 into mw2 at
+(217,43)-(225,116), after VACUUM 500 rows into mw1 at (0,7)-(22,33): head's are PostgreSQL's
+(base's went to (314,35) and (0,5)). `mw1_v`'s 721 pages against 725 is the model's before the
+restart too (md5 text keys' page splits), not the restart's.
+
+**First statement after a clean restart** (300,000 rows of pgbench_accounts' shape, a tenth
+updated; over the wire, psql's `\timing`; two interleaved rounds at load ~40): base 186 / 202
+ms, head 172 / 181 ms, VmHWM 145-148 MB both. The database opens on its first connection, so
+the background builder is laying out that very table when the first statement asks for it.
+What's left of the layout (perf): `heapsim::restored` 59% (the key map's inserts and their
+allocations), the record's decoding 23% (`Btree::read_image` 13%), `read_shape` 2%.
+
+**Model memory** (item 5): VmRSS of a freshly opened engine 49.7 MB; after the 300,000-row
+table's models are laid out 156.7 MB, about 356 bytes per row with the primary key (1.2 GB per
+million rows; PostgreSQL's pages for them: 44 MB heap and 6.8 MB index).
 
 ## Where it is still slower, and why
 

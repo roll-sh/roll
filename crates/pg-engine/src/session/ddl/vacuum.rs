@@ -1243,7 +1243,7 @@ impl Ddl<'_, '_> {
         ix.id != 0
             && ix.method == "btree"
             && crate::exec::sizing::is_estimated(t.oid, db)
-            && crate::exec::sizing::btree_blocks(ix.oid, db).is_none()
+            && crate::exec::sizing::btree_blocks(t.oid, ix.oid, db).is_none()
     }
 
     /// `measure_rows`, handing `each` (when given) each row's data key and key values of
@@ -1300,7 +1300,7 @@ impl Ddl<'_, '_> {
                     let r = crate::ext::index_am::routine_by_name(&self.cat, &bix.index.method).expect("routine");
                     Some(r.am.blocks(&a, self.ctx)? as u32)
                 } else {
-                    crate::exec::sizing::btree_blocks(bix.index.oid, db)
+                    crate::exec::sizing::btree_blocks(t.oid, bix.index.oid, db)
                 };
                 // (By the model's sorted build only for a table small enough to model: for a
                 // bigger one, a key object per row costs more than its pages are worth.)

@@ -775,6 +775,7 @@ impl Engine {
         // The models its last clean close kept (valid until the next one; dropped now if
         // there was none).
         crate::exec::sizing::kept::open(&db, &reset)?;
+        crate::exec::sizing::kept::build_in_background(db.clone());
         info!(database = %entry.name, "opened database");
         open.dbs.insert(entry.oid, db.clone());
         Ok(db)

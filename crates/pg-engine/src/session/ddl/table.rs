@@ -2802,7 +2802,7 @@ impl Ddl<'_, '_> {
             self.build_index(t, &index)?;
             self.validate_exclusion(t, ix_oid, &name)?;
         } else {
-            crate::exec::sizing::index_created(ix_oid, crate::exec::sizing::models_build(&index.method), self.ctx);
+            crate::exec::sizing::index_created(t.oid, ix_oid, crate::exec::sizing::models_build(&index.method), self.ctx);
         }
         Ok(())
     }

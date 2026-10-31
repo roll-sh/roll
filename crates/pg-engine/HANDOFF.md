@@ -1657,10 +1657,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       of new versions after updates, deletes, HOT updates, TOASTed values, a partial index,
       VACUUM and VACUUM FULL; page counts; plans), across two restarts; `crash_random`'s
       rounds now end with a clean restart, a check and 50 more steps.
-    - Index pages after a restart are still those of a fresh sorted build of the index (as
-      before: the record keeps keys, not pages). PostgreSQL keeps its index pages; keeping
-      the btree pages too would be the next step (`models_kept.rs` documents the case:
-      `km2_x` 12 pages before a restart, 11 after).
+    - (Superseded by agent 126's record format 2, "Size models, round 2" below: the record
+      keeps the btree pages and the heap's line pointers, free space and visibility maps, so
+      nothing changes across a clean restart.)
     - `ensure`'s layout got cheaper for both paths: index entries name their row by its
       place (no key clone per entry and no `tid_of` lookup), out-of-line values are kept
       only for rows that have them, `restored` reserves the key map and returns each row's
@@ -1721,6 +1720,90 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       base 852 / 1,653 / 1,494 tps, head 1,523 / 1,327 / 1,602 tps. VmHWM was 435-461 MB on
       both, with CPU seconds alike. The fix is not on the commit path: it runs only when a
       model is built, and in VACUUM FULL.
+- **Size models, round 2** (round 22, agent 126; BENCH.md "Size models, round 2"): locking,
+  per-write upkeep, restarts.
+  - **A lock per shard of tables** (`exec/sizing.rs` `Models`, `Database::relfiles`). The
+    models were one `RwLock<RelFiles>` per database: every write to a modelled table took it
+    for writing, and every read of any table's model (`ensure`'s fast path, `is_estimated`,
+    `fetched`, `Kills::new`) queued behind it. At 64 clients of tpcb-like it was 38% of the
+    engine's context switches (off-CPU stacks: `ensure`, `fetched`, `is_estimated`, `updated`,
+    `CopyLoad::register`), about 7 per transaction. Now `RelFiles` is one of 64 shards; a
+    table's heap, its indexes', its TOAST relation's and its bookkeeping are all in the shard
+    of the table's oid (`Models::of(table)`; an index's or TOAST relation's: its table's, so
+    the index-only lookups `btree_blocks`, `btree_level`, `btree_height`, `btree_postings`,
+    `btree_leaf_pages`, `index_created` take the table's oid too). Nothing locks two shards;
+    a table's models change in the order its writers take its shard, as PostgreSQL's pages
+    change in the order their buffer locks are taken. Whole-database passes (`dropped`, the
+    estimates and records at close, `kept::open`) visit the shards one at a time. The 64
+    empty shards cost an open database about 53 KB. Context
+    switches per transaction at 64 clients: 31-34 → 25-29 (those from the size models: ~7 →
+    0.25).
+  - **Per-write upkeep**: `Btree::kill_needed` / `kill` find the first leaf item past `lo` by
+    binary search (`first_above`, checked against a linear pass in debug builds: key
+    encodings are self-delimiting); the per-row paths (`ensure`'s fast path, `entries_with`,
+    `updated`) test `method == "btree"` instead of parsing every index's options
+    (`btree_opts`); `updated` measures the new version once (`row_len`, as `inserted_with`
+    does) and checks HOT eligibility column by column without building a set. What's left
+    (perf, 8 clients): scale 1 (every table modelled) 9.8% of the engine's samples in the
+    models, 3.6% of it `fetched` → `Heap::prune_opt` (pgbench_branches' one page pruned as
+    often as PostgreSQL prunes it), `Kills` 1.7%, `updated` 1.9%; scale 10 5.5%
+    (`row_roots` 1.5%: the bitmap heap scans of tellers / branches walk HOT chains).
+  - **Kept models, record format 2** (`exec/sizing/kept.rs` `VERSION`, `Heap::write_shape` /
+    `read_shape`, `Btree::write_image` / `read_image`). The record now keeps, besides the
+    rows, every heap page's line pointers as they were (unused, dead, redirects, dead tuples
+    still taking space, HOT chain links), its visibility map bit, PD_PAGE_FULL and prunable
+    hint, the free space map's pages and the visibility map's length, and each btree's pages
+    as they were (items, posting lists, LP_DEAD marks, pivots, high keys, links, options).
+    A clean restart now changes nothing the models decide: checked against PostgreSQL 18.6
+    restarted after a mixed workload (inserts, HOT and non-HOT updates, deletes, VACUUM; the
+    script is in BENCH.md), every relation's main / fsm / vm pages and the EXPLAIN
+    costs are the same before and after the restart on both, and the ctids of rows inserted
+    after it (before and after a VACUUM) are PostgreSQL's. Base lost the index pages (a
+    fresh sorted build: `mw1_pkey` 357 → 166 pages), the fsm and vm forks, and the dead
+    tuples' space, so its later inserts went elsewhere. Dead tuples come back dead to
+    everyone (xmax FrozenTransactionId), with a prunable hint where the page had one.
+    Format-1 records aren't read (the rows are, once). `models_kept.rs` now checks a clean
+    restart against an engine that never restarted (`kept_models_match_models_never_restarted`),
+    and a crash against the rows' places (`models_after_a_crash_keep_the_rows_in_place`:
+    after a crash the models are still laid out from the rows, index pages a fresh build).
+  - **Kept models laid out in the background** (`kept::build_in_background`, from
+    `Engine::open_db`): a thread (`roll-models`) lays out every kept table's models as the
+    database opens, outside any lock but the shard's final insert. A table it hasn't reached
+    is laid out by its first user (`ensure` → `kept::take`); one it is laying out makes that
+    table's users wait (`kept::Building`, `Models::wait_built`), nobody else. A database
+    opens on its first connection, so that connection's first statement still waits for
+    its own table (300,000 rows: 172-181 ms, base 186-202 ms); the other tables are ready
+    sooner. Answering page counts from the record without the model was not done: reads
+    prune and set LP_DEAD hints through the models (PostgreSQL's reads do), so a read that
+    skipped them would leave the models different from PostgreSQL's pages.
+  - **Fixed: VACUUM FULL copied rows twice** (`Heap::forget_deleted`). A deleted row's key
+    kept naming its last version's line pointer after VACUUM (or pruning) made it unused; a
+    new row given that line pointer was then found under both keys, and VACUUM FULL laid out
+    the deleted one again: 4,128 tuples for 4,055 rows (PostgreSQL 4,055), a page more. The
+    key goes when its line pointer is freed. Golden `a126_vacuum_full_reused_lp`.
+  - **Big tables** (item 5, measured, not changed): a modelled table costs about 356 bytes
+    per row with its primary key (VmRSS after the model of 300,000 rows was laid out: +107
+    MB; about 1.2 GB per million rows, against 0.17 GB of PostgreSQL pages for the same
+    rows). Most of it is per row: the heap's key map (`HashMap<Vec<u8>, Tid>`: an
+    allocation per key), a 48-byte line pointer per version, and a btree item plus an
+    `Arc<Key>` allocation per entry. Raising `MAX_VERSIONS` would make the engine heavier
+    than PostgreSQL; it stays at 400,000. Modelling any size cheaply needs the key map gone
+    (every stored row carries its TID, which the writer has in hand; `locate` by key is
+    what keeps it), line pointers packed per page (length and flags in 4-6 bytes; xids only
+    for versions not yet all-visible), and btree leaves as counts and sizes per page rather
+    than keys (the keys are in the index's storage). That is the next step.
+  - Left: the first statement after a restart still waits for its own table's layout
+    (`heapsim::restored`'s key map inserts are 59% of it, `Btree::read_image`'s allocations
+    13%; both go with the compact model above). Agent 123 measured re-binding when
+    pgbench_tellers' and _branches' page counts change at 8% of simple-protocol tpcb-like
+    (agent 136's area now): those counts are PostgreSQL's (RelationGetNumberOfBlocks moves
+    as the relation extends, and EXPLAIN shows it), so they can't change less often; a bind
+    cache could key on what the plan choice depends on rather than the count itself.
+  - Verified (on 5a551300): the crate suite in debug and in release (deep_input,
+    models_kept, crash_ctids, crash_unlogged, big_tables included), crash_random seeds 1-30
+    × 4 rounds (release), clippy without new warnings, the difftest smoke, isolation 121 /
+    122, a full regress run on a private reference (debug) 51,148 / 51,150 with no unit
+    changed against `results.tsv`, pg_dump_tap 14,817 / 14,817.
 - **Executor memory, round 4** (round 22, agent 112; BENCH.md "Round 22 (agent 112)"):
   - **Cached blocks in a compact form** (`storage/sst.rs` `Block::decode`): a block read
     into the cache leaves out a key's 8-byte version when it is the block's (`F_TS`) and an

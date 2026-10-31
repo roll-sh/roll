@@ -368,8 +368,8 @@ pub enum SizeRead {
     Heap(u32, u32),
     /// An index's blocks (`paths::index_infos`).
     Fork(u32, u64),
-    /// A btree's height: (index, the pages it was asked for, key width, height).
-    BtreeLevel(u32, u64, u32, u32),
+    /// A btree's height: (its table, index, the pages it was asked for, key width, height).
+    BtreeLevel(u32, u32, u64, u32, u32),
     Data,
 }
 
@@ -405,8 +405,8 @@ impl SizeRead {
             SizeRead::Fork(oid, n) => {
                 sizing::fork_blocks(*oid, sizing::Fork::Main, ctx).ok().flatten().unwrap_or(1) == *n
             }
-            SizeRead::BtreeLevel(ix, pages, width, level) => {
-                sizing::btree_level(*ix, f64::from_bits(*pages), *width, &ctx.sess.db) == *level
+            SizeRead::BtreeLevel(t, ix, pages, width, level) => {
+                sizing::btree_level(*t, *ix, f64::from_bits(*pages), *width, &ctx.sess.db) == *level
             }
             SizeRead::Data => false,
         }

@@ -120,8 +120,9 @@ pub struct Database {
     xids: RwLock<Arc<xids::Xids>>,
     /// Prepared transactions (the engine's registry, shared by every database).
     twophase: RwLock<Arc<twophase::TwoPhase>>,
-    /// The modelled on-disk layout of tables and indexes (`exec::sizing`).
-    pub relfiles: RwLock<crate::exec::sizing::RelFiles>,
+    /// The modelled on-disk layout of tables and indexes (`exec::sizing`), locked per
+    /// shard of tables.
+    pub relfiles: crate::exec::sizing::Models,
     /// The cumulative statistics (`exec::pgstat`).
     pub pgstat: Mutex<crate::exec::pgstat::Shared>,
     /// System catalogs' rows generated for its sessions' statements, for the next ones that
@@ -210,7 +211,7 @@ impl Database {
             last_local: AtomicU64::new(version),
             xids: RwLock::new(Arc::new(xids::Xids::local())),
             twophase: RwLock::new(Arc::new(twophase::TwoPhase::local())),
-            relfiles: RwLock::new(Default::default()),
+            relfiles: Default::default(),
             pgstat: Mutex::new(Default::default()),
             sys_rows: Mutex::new(Default::default()),
             detach_marks: Mutex::new(HashMap::new()),
