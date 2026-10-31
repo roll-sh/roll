@@ -2375,6 +2375,98 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     leaving index entries for VACUUM as Postgres does (every reader of entries would check the
     row), ANALYZE's full measure (its sample depends on the measured pages, so it can't share
     the pass).
+    (Round 22, agent 106, below: DROP / TRUNCATE, the parallel scan, linked runs and ANALYZE
+    are done.)
+- **Write path, round 5** (round 22, agent 106; BENCH.md's agent 106 section): TRUNCATE and
+  DROP TABLE O(files), ANALYZE without a measure, spilled runs linked into their commits, a
+  parallel scan bug and an L1 compaction bug fixed.
+  - **Range deletions** (`storage/rdel.rs`): `Txn::delete_range` (TRUNCATE, DROP TABLE, a
+    rewrite's old rows: `dml::truncate`, over the table's rows, index entries and out-of-line
+    values, up to `toast::table_end`) writes one marker, `[0; 7] ++ 0x2a ++ start` = `end`,
+    with the transaction's other writes, so it commits and is replayed atomically with them.
+    The store keeps the committed markers in its view (`View::rdels`): a version in [start,
+    end) older than the marker's commit is gone for readers at that ts or later (older
+    snapshots still read it), in `get_version`, `get_versions`, `Scan` and `RevScan`
+    (`rdel::relevant` picks the few that can matter per scan: nothing per key without one).
+    Compaction drops what they cover once no snapshot is older; `Store::collect_ranges` (the
+    background thread, after compaction) drops whole files they cover without reading them,
+    rewrites L1 files they cover in part, and retires (deletes) a marker nothing older is left
+    under, conditionally on it being still the newest. Inside the transaction its own range
+    deletions hide the store's versions (`Scan::excluding`), its spilled ones
+    (`Runs::set_rdels`, by journal place) and its buffered ones (removed, journaled, so
+    savepoints and cursors still see them). `Store::open` reloads the markers;
+    `Store::close` applies what is pending (compaction, collection, retirement) so a build
+    from before reads a cleanly shut down database as it is. Markers are not data: snapshot
+    conflict checks leave them out. Tests: `storage::tests::range_deletions_and_crash_recovery`
+    (a model of every version through flushes, compactions, collection, retirement and
+    crashes, pinned snapshots read at every step), `tests/txn_spill.rs` (TRUNCATE / DROP with
+    savepoints and spills).
+  - **Linked runs** (format 2: `SstMeta::commit_ts`, read by `sst::relink` when a block is
+    loaded and by the index at open; files without it read as before): a spilled run whose
+    every write was fresh (`Txn::put_fresh`: a new row's key, a fresh row id, and its index
+    entries; an index build's sorted runs; a DELETE's deferred entry deletes) becomes a file
+    of its commit as it is (`Store::link_run`: fsynced, renamed into the store, read as
+    versions at the commit ts) instead of being merged into the commit's SST. Any other write
+    in a run's key range keeps it out (`Runs::invalidate`, and `take_linkable` checks the
+    buffer and the other runs at commit), by the run's keys per table or index
+    (`Runs::segs`: a run's whole range spans every table between its first and last key, so
+    pgbench -i's TRUNCATE and COPYs of three tables in one transaction linked nothing).
+    Linked runs merge in tiers of 16, not 4.
+    `Store::close` compacts linked files away. COPY's 64 MB runs are linked; its last
+    buffer still goes into the commit's file.
+  - **ANALYZE of a table too big to model** doesn't measure it: its pages are the estimate kept
+    as it grew (`sizing::heap_blocks`), its tuples the rows the sample's pass counts, and its
+    indexes' tuples and pages follow (`Ddl::sampled_counts`; an index's pages grow with its
+    tuples, never shrink). PostgreSQL reads the table once too. Past the sample's pages
+    (300 × the statistics target), only the chosen pages are read: the estimate's pages laid
+    over the row ids from the first row's to the last's (`Ddl::rowid_blocks`), each a range
+    scan, and the tuples estimated from them as acquire_sample_rows estimates them
+    (`analyze_samples_pages_of_big_tables`).
+  - **VACUUM** of a table too big to model finds the oldest xmin past the frozen one in its
+    measure's pass (`Ddl::measured_xmin`) instead of a second pass that held every row in
+    memory (`advance_frozen_xid`: pgbench -i -s 50 peaked at 1.6 GB).
+  - **Parallel scan bug** (agent 85's 42 rows): chunk bounds interpolated by `split_keys` could
+    extend a key; the store bounds its sources by keys with their versions appended, the
+    transaction its own writes by keys alone, so that key went to the chunk after the cut from
+    the store and its delete to the chunk before. A table's rows by row id are keys of one
+    length, so their cuts are cut to that length and extend none; other cuts (a secondary
+    index's entries) move onto keys there are, a seek each (`scan::keyed_cuts`; seeking for
+    every row cut too cost the 200k analytic queries up to 3x). Agent 102 saw the same bug
+    (1,984 rows for 1,982); `deferred_entry_deletes` runs with parallel workers again.
+  - **L1 compaction bug**: compaction split its output into L1 files mid-key (the size check
+    ignored its own comment), so a point read at an old snapshot could miss a version in the
+    next file (`sst_get` reads one L1 file per key); files now split between keys.
+  - Kernels evaluate integer `%` (`ops::p_int_mod`; int8 minimum % -1 is 0, not a panic), so a
+    parallel scan's filter like `id % 4 = 1` runs in the workers; a COPY past the model's size
+    places its waiting rows on pages without keeping their keys (`Heap::multi_place`); a
+    measure's index keys sort by 16-byte prefixes, a key that fits in its prefix kept no copy
+    (`vacuum::key_prefix`).
+  - Search structures (agent 103's `txn::watch`) see neither a range deletion's rows nor a
+    linked run's: a commit with either drops the structures of their tables
+    (`Watch::committing_table`), and `Txn::written_since` answers None past a range the
+    transaction deleted (a103_search failed under 4 kB spill without it). Agent 105's hot
+    ranges (`storage::hot`) are all dropped by a commit with a range deletion and not kept
+    while one covers them (`Store::keep_hot`); a hot scan leaves out the reader's own range
+    deletions (`Scan::excluding`).
+  - Not done: a parallel CREATE INDEX, COPY's per-row write buffer (its map insert and
+    journal entry), linking a COPY into a table with indexes, DELETE's per-row lock and
+    tombstones, VACUUM skipping what nothing changed (BENCH.md's agent 106 section, "Still
+    slower"). Small builds and loads too (agent 115, restoring the regression dump, release:
+    7.0 s with psql, 8.5 s with pg_restore, PostgreSQL 4.2 s): COPY 2.2–2.6 s against 0.94 s;
+    tenk1's 10,000-row btree build 57 ms against 6.4 ms, in memtable skiplist inserts, the
+    transaction's write buffer and SST writes (a build below the spill size never takes the
+    sorted-run path: a sorted build straight to one SST would skip all three); an expression
+    or partial index over 10,000 rows 97 ms against 8 ms.
+  - Verified (debug unless noted, at `898ef33a` plus this round): crate tests (debug, with
+    `ROLL_TXN_SPILL_BYTES=4096`, release), clippy (nothing new), difftest smoke, isolation
+    121 / 122 (1,647 / 1,648), pg_dump_tap 14,817 / 14,817, agent 95's crash harness
+    (`crash_random`, `crash_bulk`), a full regress run on a private reference 51,148 /
+    51,150 with 0 units changed; after the rebase onto `5a551300`, clippy and the storage,
+    big-table, spill, crash, out-of-line and outbound tests. Earlier full runs (at
+    `2d117d62`) differed in 1–4 units of partition_aggregate / stats_ext (an ANALYZE meeting
+    autovacuum's: "concurrent schema change"), matching when rerun, and a full run of the
+    base beside them differed in 4 units of partition_join: plans that move with
+    autovacuum's timing on a machine at load 40.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

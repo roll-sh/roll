@@ -3604,6 +3604,107 @@ record --call-graph fp`, shares of the engine's samples):
 
 Not optimized in this round: the numbers are the next round's baseline.
 
+## Round 22 (agent 106): write path round 5
+
+Profiled first (frame-pointer release build, `perf record --call-graph fp` of the engine during
+each step): DROP TABLE and TRUNCATE wrote a tombstone per row and index entry; ANALYZE of a
+table too big to model measured every row and key, then read the table again for its sample;
+DELETE's filter (`id % 4 = 1`) ran on the executor's thread, as kernels had no `%` (8.7% of it
+in `eval_bool`), with row locks 11.6% and the deferred entry deletes' run 10.5%; COPY spent 14%
+placing rows past the model's size in a heap model it dropped next, and its commit merged its
+spilled runs into one more file; CREATE INDEX wrote its entries as runs, merged them in tiers
+of 4 and again at commit, and sorted its measured keys (a copy of each) for 15%. What changed:
+HANDOFF.md's "Write path, round 5".
+
+### Bulk, 1M rows
+
+Medians of 3 interleaved rounds (base, this round; each engine from a fresh data directory),
+seconds, wall and the server's CPU over the step, through psql as round 4 ran them; machine
+load 20–35 on 36 cores, servers on cores 16–19. **base** is `67d7d5ca` (this round's base after
+its rebase), **round 5** is it with this round's commits. PostgreSQL's three runs came after
+the engines' (the idle timer had stopped its container).
+
+| step | pg wall | pg cpu | base wall | base cpu | round 5 wall | round 5 cpu |
+|---|---|---|---|---|---|---|
+| COPY in | 1.27 | 1.32 | 4.67 | 4.60 | 2.96 | 2.93 |
+| CREATE INDEX | 0.53 | 0.96 | 3.10 | 3.04 | 1.84 | 2.36 |
+| CREATE UNIQUE INDEX | 0.33 | 0.53 | 2.63 | 2.64 | 1.60 | 2.67 |
+| COPY out | 0.55 | 0.56 | 1.20 | 2.80 | 1.11 | 2.85 |
+| INSERT … SELECT | 0.93 | 0.92 | 3.26 | 3.85 | 2.81 | 3.65 |
+| UPDATE half | 6.06 | 6.31 | 4.30 | 4.91 | 3.82 | 7.39 |
+| DELETE a quarter | 0.28 | 0.29 | 2.05 | 2.84 | 1.59 | 2.22 |
+| VACUUM | 0.33 | 0.49 | 1.31 | 2.67 | 0.97 | 0.97 |
+| ANALYZE | 0.20 | 0.21 | 1.39 | 2.87 | 0.44 | 0.44 |
+| count(*) after | 0.04 | 0.09 | 0.20 | 0.48 | 0.25 | 0.63 |
+| TRUNCATE (1M rows, no index) | 0.03 | 0.04 | 1.34 | 1.34 | 0.00 | 0.02 |
+| DROP TABLE (750k rows, two indexes) | 0.06 | 0.07 | 3.92 | 3.84 | 0.00 | 0.11 |
+
+| resources | base | round 5 |
+|---|---|---|
+| peak memory (VmHWM) | 579 MB | 371 MB |
+| written over the run (`/proc/<pid>/io`) | 734 MB | 388 MB |
+| on disk at the end | 103 MB | 95 MB |
+
+The server's CPU over all twelve steps: 35.9 s base, 26.2 s round 5. After the rebase onto
+`2d117d62` (agents 102 and 103: out-of-line values, search structures) the round's runs are
+still linked and one run measured COPY in 2.37 s, CREATE INDEX 1.53, COPY out 0.98; rounds
+interleaved with the base then ran beside this round's own verification and spread 2x.
+A step's CPU includes the
+background flushes and compactions running during it, and those moved: round 5's UPDATE row
+carries the compaction of the index builds' linked files. With the UPDATE alone, 10 s after
+its load settled: 2.85 s wall / 3.57 s CPU base, 2.63 / 3.36 round 5 (serial, workers off:
+3.59 / 3.58 and 3.08 / 3.06).
+
+### pgbench -i -s 50 (5M accounts: COPY, VACUUM, primary keys)
+
+Agent 95's measurement (207 s at scale 200, PostgreSQL 24 s) is the target; scale 50, one run
+each, seconds as pgbench reports its phases:
+
+| | total | generate (COPY) | vacuum | primary keys | server CPU | on disk |
+|---|---|---|---|---|---|---|
+| PostgreSQL 18.6 | 6.95 | 5.15 | 0.30 | 1.50 | 8.6 s | 1,846 MB |
+| base | 51.32 | 27.15 | 7.38 | 16.79 | 50.9 s | 767 MB |
+| round 5 | 32.35 | 18.12 | 4.21 | 10.02 | 35.8 s | 246 MB |
+
+pgbench's COPYs run in one transaction after a TRUNCATE of all four tables: their spilled runs
+weren't linked at first, as a run's whole key range spanned every table between its first and
+last key (`Runs::segs` now tests a run's keys per table and index). Peak memory is 1.6 GB
+either way: the block cache (2 GB here) filling during VACUUM's reads, not the second scan
+that held every row (`advance_frozen_xid`, now folded into the measure). PostgreSQL's VACUUM
+skips the pages COPY FREEZE left all-frozen; the engine's still reads the table once.
+
+### Reads and pgbench: no regression found
+
+Release builds of the rebased base (`2d117d62`) and this round, on a machine at load 30–50:
+
+- pgbench tpcb-like, scale 10, 8 clients, 30 s, prepared, 2 interleaved runs: base 3,484 /
+  3,678 tps (0.92 / 0.91 ms engine CPU a transaction), round 5 4,391 / 3,118 (0.67 / 0.95).
+- `bench oltp` (1M rows, 8 s, 1 and 8 clients): in the first interleaved pair every workload
+  was within the run-to-run spread (round 5 / base: 0.92–1.26 at 1 client, 0.82–1.02 at 8);
+  in the second the round 5 engine ran through a load spike (select_1 too fell 47%).
+- The 200k analytic suite, the engine's CPU over 5 reps, 3 interleaved rounds: base 16.25 /
+  16.00 / 17.74 s, round 5 14.41 / 16.73 / 17.66 s. (Before the row scans' cuts were cut to
+  their keys' length, `keyed_cuts` sought a key for each of a parallel scan's 192 cuts and
+  this suite's short queries took up to 3x as long: caught here.)
+
+
+No step of any run reported an error (the script prints psql's); verification of the round:
+HANDOFF.md, "Write path, round 5".
+
+### Still slower
+
+- COPY (2.3x): the per-row insert path (`store_inserted`; the write buffer's map insert and
+  journal entry), the heap estimate per row, parsing. Only its 64 MB runs are linked: its last
+  buffer still goes into the commit's file, and a COPY into a table with indexes links nothing
+  (its buffer holds entries in every run's index ranges).
+- CREATE INDEX (3–5x): one thread reads, decodes and measures the rows and computes and
+  sorts the entries; a parallel build (a key range per worker, a sorted run each, linked as it
+  is) is the next step. Unique checks keep every key in a hash set.
+- DELETE (5.7x): per deleted row, a row lock in the lock manager (one mutex; compact sets past
+  2,048), the transaction's own-write checks, a tombstone for the row and one per index entry
+  (PostgreSQL sets xmax).
+- VACUUM of a big table measures every row (PostgreSQL skips all-frozen pages).
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,
