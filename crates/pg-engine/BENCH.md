@@ -3045,6 +3045,13 @@ contrib unchanged (pgvector 915 / 915), pgvector_equality ok, TPC-H hashes equal
 measured after the push (below, "pgbench"); every commit now also logs its key span for
 the dead-range hints (a mutex and a min / max over its keys).
 
+### pgbench (scale 10, 8 clients, prepared, 30 s; base `15a77038`, new `7c1f72b3`, one data directory, two interleaved rounds)
+
+Select-only: base 64.4k / 66.3k TPS, 0.050 / 0.049 engine CPU ms per transaction; new 64.7k /
+65.8k, 0.050 / 0.049. tpcb-like: base 7.1k / 7.9k TPS, 0.457 / 0.407 ms; new 7.2k / 8.2k,
+0.437 / 0.406 ms. No change: the commit span log and the boxed store scan cost nothing
+measurable.
+
 ## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
 
 Same harness and catalogs as agent 58's: PostgreSQL in `a62-pg` (pinned image and settings),
