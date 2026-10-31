@@ -41,7 +41,7 @@ PGCONTRIB_ONLY=uuid-ossp,citext PGREGRESS_DIR=$D PGREGRESS_CONTAINER=a39-ref \
 
 ## Scores
 
-Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 20 (agent 83): postgres_fdw 1,856 / 2,053 (90.4%; dblink 218, file_fdw 187 unchanged). Round 21 (agent 94): postgres_fdw 1,890 / 2,053 (92.1%; dblink 218, file_fdw 187 unchanged). Round 22 (agent 110): postgres_fdw 1,916 / 2,053 (93.3%; dblink 218, file_fdw 187 unchanged). Round 23 (agent 124): postgres_fdw 1,930 / 2,053 (94.0%; dblink 218, file_fdw 187 unchanged). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Round 20 (agent 70): pgvector 915 / 915, bloom 58 / 58 (pg_trgm, btree_gist and cube unchanged at 261, 613 and 316). Baseline (before any
+Last full run (round 19, agent 53, `tests/contrib/REPORT.md`): 4,153 / 4,158 units of 19 modules (99.9%), pg_stat_statements 996 / 1,013 (1,013 / 1,013 since round 19, agent 71: a run of that module). Round 19 (agent 59): dblink 218 / 218, postgres_fdw 1,664 / 2,053; agent 72: postgres_fdw 1,802 / 2,053 (87.8%). Round 20 (agent 83): postgres_fdw 1,856 / 2,053 (90.4%; dblink 218, file_fdw 187 unchanged). Round 21 (agent 94): postgres_fdw 1,890 / 2,053 (92.1%; dblink 218, file_fdw 187 unchanged). Round 22 (agent 110): postgres_fdw 1,916 / 2,053 (93.3%; dblink 218, file_fdw 187 unchanged). Round 23 (agent 124): postgres_fdw 1,931 / 2,053 (94.1%; dblink 218, file_fdw 187 unchanged). Round 19 (agent 66): file_fdw 187 / 187. Round 19 (agent 71), a full run of every module: 7,683 / 8,270 units of 34 modules (pageinspect not applicable, postgres_fdw 1,664 then); the 10 modules with tests added this round 346 / 350 (tsm_system_time 14 / 16, auto_explain 10 / 12, the rest whole); amcheck 203 / 204 in a run after it. Round 20 (agent 70): pgvector 915 / 915, bloom 58 / 58 (pg_trgm, btree_gist and cube unchanged at 261, 613 and 316). Baseline (before any
 extension was ported; CREATE EXTENSION was a stand-in): 2,752 / 7,733
 units (35.6%). The reference matches `expected/` for every module except dblink (the reference
 has no `regress.so`, whose functions dblink's test creates).
@@ -69,7 +69,7 @@ has no `regress.so`, whose functions dblink's test creates).
 | amcheck | 204 | 203 | applicable checks only (see below) |
 | pageinspect | 291 | — | not applicable (not available) |
 | pg_buffercache | 38 | 38 | done (no buffer pool: every buffer unused) |
-| postgres_fdw | 2053 | 1930 | see below |
+| postgres_fdw | 2053 | 1931 | see below |
 | file_fdw | 187 | 187 | done (files are the server files of `--allow-server-files`; programs refused) |
 | tsm_system_rows | 16 | 16 | done (round 19, agent 71) |
 | tsm_system_time | 16 | 16 | done (round 20, agent 80a: the Materialize) |
@@ -442,8 +442,9 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   Foreign Scan under the level's target list shows its resjunk sort columns (172, 174, 289); a
   LIMIT over a sort of a locally run join goes with the join's Foreign Scan (CROSS JOIN 239);
   user functions and operators of listed extensions shipped, qualified (142, 144, 146, 220,
-  493); IMPORT FOREIGN SCHEMA's errors as an internal query (1447).
-  Left (123 units in round 23's run): row locking over foreign tables (21
+  493); IMPORT FOREIGN SCHEMA's errors as an internal query (1447). Second batch (1,931): every
+  async member's request sent when the Append starts, one per connection (1857).
+  Left (122 units in round 23's run): row locking over foreign tables (21
   units: whole-row `t.*` marks instead of ctids under a LockRows, a foreign join's EPQ
   outer plan, pushed joins under locks with local relations, the non-target relations'
   ctid / whole-row marks in an UPDATE / DELETE), direct modification of foreign members inside an inherited UPDATE /
@@ -453,7 +454,7 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   partitionwise foreign joins and aggregates (5), merge-join side choice over sorted foreign
   joins (5), a CTE's resjunk sort column under a LIMIT (232), local Sort vs. a pushed ORDER BY by cost (9), output lists (dropped columns'
   `NULL::integer`, cast and column order details: about 17), parameterized async Append
-  members (1820, 1821) and the round-robin of async requests (1857), function / operator
+  members (1820, 1821), function / operator
   shippability (one left), gating One-Time
   Filters for `CURRENT_USER = SESSION_USER` (4), join orders of three relations (3), the
   view owner's user mapping (301, 302, 294), parallel_commit / parallel_abort,

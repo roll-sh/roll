@@ -203,6 +203,16 @@ pub fn async_order(inputs: Vec<Arc<crate::sql::plan::Plan>>, ctx: &ExecCtx) -> (
     (sync.into_iter().chain(asy).map(|(p, _)| p).collect(), Some(first))
 }
 
+/// The connection (its user mapping's oid) an async member's scan reads through.
+pub fn async_conn(p: &crate::sql::plan::Plan, ctx: &ExecCtx) -> Option<u32> {
+    let mut q = p;
+    while let crate::sql::plan::Plan::Project { input, .. } = q {
+        q = input;
+    }
+    let crate::sql::plan::Plan::Scan(s) = q else { return None };
+    mapping_for(&s.table, s.check_as, ctx).ok().map(|m| m.mapping.oid)
+}
+
 fn has_foreign_scan(p: &crate::sql::plan::Plan) -> bool {
     match p {
         crate::sql::plan::Plan::Scan(s) => s.table.foreign.is_some(),

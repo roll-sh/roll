@@ -73,7 +73,7 @@ fn open_append(inputs: &[Arc<Plan>], inh: bool, ctx: &ExecCtx) -> BoxNode {
         i: 0,
         cur: None,
         first_async,
-        pre: None,
+        pre: Vec::new(),
         dml,
         done: Vec::new(),
         capture: false,
@@ -3447,10 +3447,10 @@ struct AppendNode {
     /// Each input is a command of its own (a rule's actions and the statement): it sees
     /// what the ones before it wrote.
     commands: bool,
-    /// The first Async Foreign Scan member (its request sent when the Append starts) and
-    /// its node once opened.
+    /// The first Async Foreign Scan member (the members' requests sent when the Append
+    /// starts) and the members' nodes opened then, by place.
     first_async: Option<usize>,
-    pre: Option<BoxNode>,
+    pre: Vec<(usize, BoxNode)>,
 }
 
 impl Node for AppendNode {
@@ -3478,18 +3478,28 @@ impl Node for AppendNode {
                 if self.commands && self.i > 0 {
                     ctx.next_command();
                 }
-                // (ExecAppendAsyncBegin: the first async member's request goes out now.)
+                // (ExecAppendAsyncBegin: each async member's request goes out now, one per
+                // connection: a member sharing one sends its own when its turn comes.)
                 if self.i == 0
                     && let Some(k) = self.first_async
-                    && let Some(q) = self.inputs.get(k)
                 {
-                    let mut n = open(q, ctx)?;
-                    n.prefetch(ctx)?;
-                    self.pre = Some(n);
+                    let mut used = Vec::new();
+                    for j in k..self.inputs.len() {
+                        let q = self.inputs[j].clone();
+                        let Some(key) = crate::ext::postgres_fdw::scan::async_conn(&q, ctx) else { continue };
+                        if used.contains(&key) {
+                            continue;
+                        }
+                        used.push(key);
+                        let mut n = open(&q, ctx)?;
+                        n.prefetch(ctx)?;
+                        self.pre.push((j, n));
+                    }
                 }
                 ctx.defer_after.set(self.dml);
                 ctx.capture.set(self.capture && self.i > 0);
-                let opened = match self.pre.take_if(|_| self.first_async == Some(self.i)) {
+                let pre = self.pre.iter().position(|(j, _)| *j == self.i).map(|x| self.pre.remove(x).1);
+                let opened = match pre {
                     Some(n) => Ok(n),
                     None => open(p, ctx),
                 };

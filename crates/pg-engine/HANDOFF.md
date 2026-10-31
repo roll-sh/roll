@@ -649,6 +649,13 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   isolation 121 / 122, a full regress run on a private reference (51,148 / 51,150, no unit
   changed against results.tsv), contrib postgres_fdw 1,930 (14 units gained, none lost),
   dblink 218, file_fdw 187.
+  Second batch (1,931): an async Append sends every async member's request when it starts,
+  one per connection (ExecAppendAsyncBegin; `exec/nodes.rs` AppendNode's `pre`,
+  `scan::async_conn`): a member whose connection another member's request holds sends its own
+  when its turn comes; the same requests as before, sent earlier (1857: a member PostgreSQL
+  starts shows its loop under a LIMIT the synchronous member satisfies). Verified the same way
+  (regress 51,148 / 51,150 with no unit changed, isolation 121 / 122, contrib 1,931 / 218 /
+  187).
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a
