@@ -151,7 +151,10 @@ fn copy_past_the_model() {
 #[test]
 fn copy_through_the_sink() {
     let dir = tempfile::tempdir().unwrap();
-    pg_engine::storage::set_default_txn_spill_bytes(64 << 10);
+    // (A buffer that holds the load's first batch until its TIDs are stamped, as the usual
+    // 64 MB one does: stamped after a spill, those rows are rewritten, and the spilled run
+    // with them, whose entries span the index's range, keeps the sink's runs from linking.)
+    pg_engine::storage::set_default_txn_spill_bytes(1 << 20);
     let eng = open(dir.path());
     pg_engine::storage::set_default_txn_spill_bytes(0);
     let queries = ["SELECT count(*), sum(a) FROM cs", "SELECT a, count(*) FROM cs WHERE a < 9 GROUP BY a ORDER BY a"];

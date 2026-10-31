@@ -2940,7 +2940,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     writes take one journal place of their own (a placeholder entry in the journal): no
     snapshot taken before sees them (a cursor declared before the COPY), every one after
     does. `begin_statement` and `commit` close a sink left open (a failed COPY). Not with a
-    savepoint open, in a read-only or SSI-tracked transaction.
+    savepoint open, in a read-only or SSI-tracked transaction. A COPY whose first batch spilled
+    before its TIDs were stamped (a buffer already nearly full) rewrites those rows
+    (`restamp` falls back to `put`), and their run, no longer linkable, spans the indexes'
+    ranges: the sink's runs then merge into the commit as before instead of linking.
   - **A spilled commit's fresh buffer linked** (`Txn::link_fresh_buffer`, `stale_segs`): the
     buffer's writes of tables and indexes the transaction wrote only fresh keys of since the
     last spill (every non-fresh `record` notes its key's 8-byte table / index prefix) become
@@ -2993,6 +2996,19 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     cursor declared just before, with nothing written between) also has, so such a cursor
     could miss rows through an index; the sink's runs take a place of their own
     (a placeholder journal entry) for this reason. Not reproduced or changed.
+  - Verified at `f4f7485b` (batches 1 and 2 on `57d7da04`; debug unless noted): crate tests
+    with `ROLL_TXN_SPILL_BYTES=4096` (failing as on the base: `storage_upgrade_batches`
+    `large_table_rekeyed_in_batches`, which fails on `57d7da04` too under the small buffer;
+    deep_input / deparse_identity's stack depth, fixed by 74a3ad38; `wire`
+    `cancel_request_closes_after_the_error` and `logical_apply`
+    `asynchronous_apply_confirms_durable_only` failed once under load and pass alone, as on the
+    base where another logical_apply test failed once instead), release crate tests (deep_input
+    and the crash harness included), clippy (nothing new), difftest smoke, isolation 121 / 122
+    (1,647 / 1,648) and the roll specs 13 / 13, a full regress run on a private reference
+    51,148 / 51,150 with 0 units changed against results.tsv, pg_dump_tap 14,817 / 14,817.
+    After the rebase onto `74a3ad38`, with the IndexScope measure: compile, clippy, goldens,
+    the big-table, spill, deep-input, deparse, crash and storage-upgrade tests, and a regress
+    subset of the index files.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
