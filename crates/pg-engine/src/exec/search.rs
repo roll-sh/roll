@@ -12,7 +12,9 @@
 //! for a box), and the columns of integer-like types compared by `=` (a partition each).
 //! Other conditions narrow nothing; an index with nothing to key, a scan whose snapshot is
 //! older than the structure, or a serializable scan (its predicate locks are the full
-//! scan's) reads every row.
+//! scan's) reads every row. KNN scans walk a structure nearest-first instead (`near`,
+//! `exec/nearest.rs`), serializable ones too: they lock the index relation, as the full
+//! scan did, and the rows they fetch.
 
 use super::ExecCtx;
 use super::dml::index_values;
@@ -28,6 +30,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod gin;
+mod near;
+
+pub use near::Near;
 
 /// Rows' data keys (past the table's prefix), back to back: row `i` of a structure is its
 /// `i`th key (4 bytes and the key's own per row, no allocation each).
@@ -259,12 +264,13 @@ fn range_keys(v: &Value) -> Option<Option<(u64, u64)>> {
     Some(Some((lo, hi)))
 }
 
-/// Where a row goes: its partition, its intervals; or always a candidate (None), or an
-/// empty range.
+/// Where a row goes: its partition, its intervals; or always a candidate (None, or a null
+/// key), or an empty range.
 enum Place {
     At(Vec<u8>, (u64, u64), (u64, u64)),
     Empty(Vec<u8>),
     Always,
+    Null,
 }
 
 fn place(sh: &Shape, vals: &[Value]) -> Place {
@@ -278,7 +284,7 @@ fn place(sh: &Shape, vals: &[Value]) -> Place {
     };
     let v = &vals[i];
     if v.is_null() {
-        return Place::Always;
+        return Place::Null;
     }
     match kind {
         Kind::Range => match range_keys(v) {
@@ -536,9 +542,15 @@ struct Grid {
     sorted: Vec<Ent>,
     blocks: Vec<(u32, u32)>,
     delta: Vec<Ent>,
-    /// Rows always read (values it can't place) and empty ranges (by partition).
+    /// Rows always read (values it can't place, and null keys apart) and empty ranges (by
+    /// partition).
     always: Vec<u32>,
+    nulls: Vec<u32>,
     empties: Vec<(u32, u32)>,
+    /// How many times `sorted` was merged (a nearest-first walk's positions in it stay
+    /// valid while this does), and the largest high end up to each block.
+    merges: u64,
+    pmax: Vec<u32>,
     /// Rows when it was built: past twice that (rows written again, deleted) it is rebuilt.
     built: usize,
 }
@@ -559,7 +571,10 @@ impl Grid {
             blocks: Vec::new(),
             delta: Vec::new(),
             always: Vec::new(),
+            nulls: Vec::new(),
             empties: Vec::new(),
+            merges: 0,
+            pmax: Vec::new(),
             built: 0,
         }
     }
@@ -581,6 +596,7 @@ impl Grid {
         let mut y = (0, u64::MAX);
         match place {
             Place::Always => self.always.push(row),
+            Place::Null => self.nulls.push(row),
             Place::Empty(p) => {
                 let p = self.part_id(p);
                 self.empties.push((p, row));
@@ -630,6 +646,8 @@ impl Grid {
             .chunks(BLOCK)
             .map(|c| c.iter().fold((u32::MAX, 0), |(a, b), e| (a.min(e.hi), b.max(e.hi))))
             .collect();
+        self.pmax = self.blocks.iter().scan(0, |m, b| { *m = b.1.max(*m); Some(*m) }).collect();
+        self.merges += 1;
     }
 
     fn ent_ok(&self, x: &QSpan, y: &QSpan, e: &Ent) -> bool {
@@ -644,6 +662,7 @@ impl Grid {
                 // (No row of that partition.)
                 None => {
                     out.extend(&self.always);
+                    out.extend(&self.nulls);
                     return;
                 }
             },
@@ -674,6 +693,7 @@ impl Grid {
         }
         out.extend(self.delta.iter().filter(|e| part.is_none_or(|p| e.part == p) && self.ent_ok(&x, &y, e)).map(|e| e.row));
         out.extend(&self.always);
+        out.extend(&self.nulls);
     }
 }
 
@@ -745,7 +765,7 @@ impl Zones {
         let z = &mut self.zones[i];
         z.n += 1;
         match vals.map_or(Place::Always, |v| place(&self.shape, v)) {
-            Place::Always => z.always = true,
+            Place::Always | Place::Null => z.always = true,
             Place::Empty(_) => z.empties = true,
             Place::At(_, x, y) => {
                 widen(&mut z.x, x);
@@ -832,8 +852,8 @@ impl Placing for Grid {
             + self.ys.capacity() * size_of::<(u32, u32)>()
             + self.raw.as_ref().map_or(0, |r| r.capacity() * size_of::<RawEnt>())
             + (self.sorted.capacity() + self.delta.capacity()) * size_of::<Ent>()
-            + self.blocks.capacity() * size_of::<(u32, u32)>()
-            + self.always.capacity() * 4
+            + (self.blocks.capacity() + self.pmax.capacity() / 2) * size_of::<(u32, u32)>()
+            + (self.always.capacity() + self.nulls.capacity()) * 4
             + self.empties.capacity() * 8
     }
     fn full(&self) -> bool {
@@ -1057,6 +1077,72 @@ pub fn candidates(
     Ok(Some(found))
 }
 
+/// A nearest-first walk of index `bix`'s structure for a KNN scan, `ORDER BY` index column
+/// `col` `op` `arg` (GiST: `<->` from a point over a geometric column or from a value over
+/// an ordered scalar one, as btree_gist; pg_trgm's `<->`, `<->>`, `<->>>`), its candidates
+/// narrowed by `conds`, under `snapshot`. None: no structure for it (or one newer than the
+/// snapshot): the scan reads every candidate and sorts them.
+#[allow(clippy::too_many_arguments)]
+pub fn nearest(
+    t: &Table,
+    bix: &BoundIndex,
+    col: usize,
+    op: &str,
+    arg: &Value,
+    conds: &[(usize, &str, Value)],
+    snapshot: Option<u64>,
+    ctx: &ExecCtx,
+) -> Result<Option<Near>> {
+    if bix.index.method != "gist" {
+        return Ok(None);
+    }
+    let prefix = index_prefix(t.oid, 0);
+    let walk = if trigram_index(bix, ctx) {
+        let Value::Text(s) = arg else { return Ok(None) };
+        if col != 0 || !matches!(op, "<->" | "<->>" | "<->>>") {
+            return Ok(None);
+        }
+        let sh = Shape { dim: None, parts: Vec::new(), tys: Vec::new() };
+        let Some(st) = structure::<Trigrams>(t, bix, &sh, ctx)? else { return Ok(None) };
+        let g = st.lock();
+        let Some(tg) = g.downcast_ref::<Trigrams>().filter(|tg| snapshot.is_none_or(|s| s >= tg.ts)) else {
+            return Ok(None);
+        };
+        near::Walk::Trgm(near::TrgmNear::new(st.clone(), tg, prefix.clone(), op, s))
+    } else {
+        let Some(sh) = shape(bix) else { return Ok(None) };
+        let Some((i, kind)) = sh.dim.filter(|(i, _)| *i == col && op == "<->") else { return Ok(None) };
+        let (at, float) = match (kind, arg) {
+            (Kind::Geo, Value::Geo(g)) => match &**g {
+                Geo::Point(p) => ((p.x, p.y), true),
+                _ => return Ok(None),
+            },
+            // (btree_gist's distances of these are numbers; of timestamps, intervals.)
+            (Kind::Scalar, v) if fits(&sh.tys[i], v) => match v {
+                Value::Int2(x) => ((*x as f64, 0.0), false),
+                Value::Int4(x) | Value::Date(x) => ((*x as f64, 0.0), false),
+                Value::Int8(x) => ((*x as f64, 0.0), false),
+                Value::Float4(x) => ((*x as f64, 0.0), true),
+                Value::Float8(x) => ((*x, 0.0), true),
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        let at_key = if float { ord_key(&Value::Float8(at.0)) } else { ord_key(arg) };
+        let Some(at_key) = at_key.filter(|_| at.0.is_finite() && at.1.is_finite()) else { return Ok(None) };
+        let q = query(&sh, conds);
+        let Some(st) = structure::<Grid>(t, bix, &sh, ctx)? else { return Ok(None) };
+        let g = st.lock();
+        let Some(grid) = g.downcast_ref::<Grid>().filter(|g| snapshot.is_none_or(|s| s >= g.ts)) else {
+            return Ok(None);
+        };
+        near::Walk::Grid(near::GridNear::new(st.clone(), grid, prefix.clone(), at, at_key, float, q))
+    };
+    // (Its own writes, rows written again or deleted too: read first, each by its row.)
+    let own: Vec<Vec<u8>> = ctx.txn.borrow().writes_in(&prefix, &prefix_end(&prefix))?.into_keys().collect();
+    Ok(Some(Near { own: own.into_iter(), walk }))
+}
+
 /// A transaction's own writes to the table placed for index `bix` (`Txn::derived`), and
 /// the journal position it has read them to.
 struct Own {
@@ -1105,32 +1191,49 @@ struct Trigrams {
     ts: u64,
     rows: RowKeys,
     post: HashMap<[u8; 3], Posting>,
+    /// Each row's number of trigrams (at most `u16::MAX`), for KNN's bounds.
+    counts: Vec<u16>,
     always: Vec<u32>,
+    nulls: Vec<u32>,
     built: usize,
 }
 
 impl Placing for Trigrams {
     const ROW_CAP: bool = true;
     fn make(_: Shape, fingerprint: String, ts: u64) -> Trigrams {
-        Trigrams { fingerprint, ts, rows: RowKeys::default(), post: HashMap::new(), always: Vec::new(), built: 0 }
+        Trigrams {
+            fingerprint,
+            ts,
+            rows: RowKeys::default(),
+            post: HashMap::new(),
+            counts: Vec::new(),
+            always: Vec::new(),
+            nulls: Vec::new(),
+            built: 0,
+        }
     }
     fn add(&mut self, suffix: &[u8], vals: Option<&[Value]>) {
         let row = self.rows.push(suffix);
+        let mut n = 0;
         match vals.and_then(|v| v.first()) {
             Some(Value::Text(s)) => {
-                for t in crate::ext::pg_trgm::trgm::generate(s) {
+                let ts = crate::ext::pg_trgm::trgm::generate(s);
+                n = ts.len().min(u16::MAX as usize) as u16;
+                for t in ts {
                     self.post.entry(t).or_default().push(row);
                 }
             }
             // (NULL: no operator holds for it.)
-            Some(Value::Null) => {}
+            Some(Value::Null) => self.nulls.push(row),
             _ => self.always.push(row),
         }
+        self.counts.push(n);
     }
     fn built(&mut self) {
         self.built = self.rows.len();
         self.rows.shrink();
         self.post.values_mut().for_each(|l| l.bytes.shrink_to_fit());
+        self.counts.shrink_to_fit();
     }
     fn fingerprint(&self) -> &str {
         &self.fingerprint
@@ -1143,7 +1246,8 @@ impl Placing for Trigrams {
         self.rows.heap_bytes()
             + self.post.capacity() * (std::mem::size_of::<([u8; 3], Posting)>() + 1)
             + self.post.values().map(Posting::heap_bytes).sum::<usize>()
-            + self.always.capacity() * 4
+            + self.counts.capacity() * 2
+            + (self.always.capacity() + self.nulls.capacity()) * 4
     }
     fn full(&self) -> bool {
         self.rows.full()
@@ -1196,18 +1300,23 @@ impl Trigrams {
 
     /// The rows having at least `need` of trigrams `q`.
     fn sharing(&self, q: &[[u8; 3]], need: usize) -> Vec<u32> {
+        self.shared(q).into_iter().filter(|(_, c)| *c as usize >= need).map(|(r, _)| r).collect()
+    }
+
+    /// The rows having any of trigrams `q` (distinct), ascending, and how many of them.
+    fn shared(&self, q: &[[u8; 3]]) -> Vec<(u32, u32)> {
         let lists: Vec<&Posting> = q.iter().map(|t| self.list(t)).collect();
         let total: usize = lists.iter().map(|l| l.len()).sum();
         if total * 4 >= self.rows.len() {
-            let mut n = vec![0u16; self.rows.len()];
+            let mut n = vec![0u32; self.rows.len()];
             for r in lists.iter().flat_map(|l| l.iter()) {
-                n[r as usize] = n[r as usize].saturating_add(1);
+                n[r as usize] += 1;
             }
-            return n.iter().enumerate().filter(|(_, c)| **c as usize >= need).map(|(i, _)| i as u32).collect();
+            return n.iter().enumerate().filter(|(_, c)| **c > 0).map(|(i, c)| (i as u32, *c)).collect();
         }
         let mut all: Vec<u32> = lists.iter().flat_map(|l| l.iter()).collect();
         all.sort_unstable();
-        all.chunk_by(|a, b| a == b).filter(|run| run.len() >= need).map(|run| run[0]).collect()
+        all.chunk_by(|a, b| a == b).map(|run| (run[0], run.len() as u32)).collect()
     }
 
     /// The rows `op arg` may hold for, through a GIN index (`by_gin`) or a GiST one.

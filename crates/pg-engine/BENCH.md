@@ -4180,6 +4180,62 @@ build against `629f3e51`):
   transaction 1.56-1.59 ms after, 1.51-1.62 before.
 - Peak RSS 548-596 MB after, 558-599 MB before.
 
+## Index access, round 4 (round 22, agent 139)
+
+What changed (HANDOFF "Index access at index cost, round 4"):
+- GiST KNN over box, circle, polygon, btree_gist and pg_trgm reads nearest-first: a search
+  structure walked by lower bounds, then a reorder queue.
+- point_ops `<@ circle / polygon` and SERIALIZABLE point_ops scans search the model as rows
+  are asked for.
+- GiST scans mark dead entries LP_DEAD (modelled).
+
+Method:
+- Agent 114's `access` workload with six new cases over 100,000-row tables whose keys don't
+  repeat (`boxes`, `circles`, `polys`, `nums`; `words_gist` for pg_trgm).
+- Release builds. The server on CPUs 20-23, the client on 24-27. PostgreSQL 18.6 with
+  `shared_buffers=2GB` on the host network; the engine with `--cache-mb 2048`.
+- "before" is `46f5e9cb`; "after" is this round's change on it. Each engine had its own
+  data directory, loaded once (a second `access-load` into the same directory made every
+  btree case 2-4x slower: the dropped tables' versions).
+- Rounds interleaved after, before, after, before; 60 queries after 5 warm-up ones. ms is the
+  median averaged over the two rounds, cpu the server's CPU ms per query, MB its peak
+  memory. The PostgreSQL column is from an earlier interleaved run of the same build
+  (pg, after, before, after, before, pg).
+- Every process ran at nice 19 from midway (the machine rule), at load 30-50. Cases the
+  change doesn't touch (btree, GIN) moved by up to ±50% between rounds of one build.
+
+| case | PostgreSQL ms (cpu) | before ms (cpu, MB) | after ms (cpu, MB) |
+|---|---|---|---|
+| gist_box_knn | 0.392 (0.285) | 279 (287, 344) | 0.915 (0.75, 343) |
+| gist_circle_knn | 0.542 (0.393) | 180 (195, 396) | 0.913 (0.834, 367) |
+| gist_polygon_knn | 0.54 (0.323) | 335 (339, 405) | 0.858 (0.834, 375) |
+| btree_gist_knn | 0.359 (0.307) | 140 (142, 400) | 0.354 (0.334, 382) |
+| trgm_gist_knn | 105 (102) | 482 (505, 405) | 1.68 (1.58, 382) |
+| gist_point_knn | 0.355 (0.298) | 0.396 (0.416, 344) | 0.468 (0.416, 353) |
+| gist_point_circle | 0.456 (0.322) | 1.1 (1.17, 344) | 1.84 (1.83, 353) |
+| gist_point_box | 0.245 (0.214) | 0.276 (0.333, 344) | 0.282 (0.25, 352) |
+| gist_box | 0.293 (0.253) | 0.301 (0.333, 131) | 0.434 (0.417, 129) |
+| keyset_page | 0.256 (0.208) | 0.417 (0.5, 94) | 0.51 (0.5, 95) |
+| nested_loop | 1.52 (0.877) | 1.13 (1.08, 98) | 2.13 (2.08, 98) |
+| gin_tsvector_and | 6.58 (6.32) | 12.5 (13.1, 236) | 16.3 (15.6, 237) |
+
+- The KNN cases read about k rows instead of every row: 150-400x faster, and less memory.
+  The engine's pg_trgm KNN is 60x faster than PostgreSQL's, whose GiST signatures are
+  lossy.
+- `gist_point_circle` (`<@ circle` LIMIT 5) costs more: it takes one key at a time, so an
+  operator error comes from the pages PostgreSQL reads.
+- nested_loop's rounds were after 2.64 / 1.61 and before 0.98 / 1.28. The btree paths it
+  runs are unchanged; the first round of each pair ran slower.
+- Peak RSS after each round (VmHWM): after 578 / 634 MB, before 577 / 609 MB.
+
+pgbench (scale 10, 8 clients, 20 s; after / before interleaved three times, by themselves,
+at nice 19; tps and the engine's CPU ms per transaction):
+- select-only: after 53,760 / 52,939 / 59,013 (0.068 / 0.067 / 0.060); before 59,562 /
+  46,062 / 50,574 (0.062 / 0.075 / 0.063).
+- tpcb-like: after 5,005 / 5,090 / 4,180 (0.65 / 0.66 / 0.64); before 3,421 / 5,214 /
+  6,040 (0.71 / 0.62 / 0.59).
+- Level, within the noise. Peak RSS: after 417 / 428 / 439 MB, before 411 / 421 / 437 MB.
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document

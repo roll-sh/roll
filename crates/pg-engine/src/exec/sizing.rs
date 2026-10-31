@@ -2971,6 +2971,32 @@ fn model_pages(table: u32, index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Re
     Ok(n)
 }
 
+/// The version of the history of GiST index `index` on `table` (None: it has none).
+pub fn gist_log_version(table: u32, index: u32, ctx: &ExecCtx) -> Option<usize> {
+    ctx.sess.db.relfiles.of(table).read().gist_logs.get(&index).map(|l| l.version())
+}
+
+/// kill_prior_tuple in a GiST index scan (gistkillitems): of entries `entries` (ascending,
+/// by number in the model of history `version`) the scan returned from a page it has left,
+/// those whose heap tuples are dead to every transaction are marked LP_DEAD, while the
+/// history is still that version (gistkillitems marks a page only while its LSN is
+/// unchanged). The history's version after (None: it changed, nothing marked).
+pub fn gist_kill(table: u32, index: u32, version: usize, entries: &[u32], ctx: &ExecCtx) -> Option<usize> {
+    let xids = ctx.sess.db.xids();
+    let v = vis_for(&xids, table, ctx);
+    let mut rf = ctx.sess.db.relfiles.of(table).write();
+    let RelFiles { heaps, gist_logs, .. } = &mut *rf;
+    let (heap, log) = (heaps.get(&table)?, gist_logs.get_mut(&index)?);
+    if log.version() != version {
+        return None;
+    }
+    let dead: Vec<u32> = log.tids(entries).into_iter().filter(|(_, t)| heap.chain_dead(*t, &v)).map(|(e, _)| e).collect();
+    if !dead.is_empty() {
+        Arc::make_mut(log).kill(dead);
+    }
+    Some(log.version())
+}
+
 /// A modelled point_ops or range_ops GiST index's model, for a scan to search as it goes
 /// (None: the index isn't modelled).
 pub fn gist_model_of(t: &Arc<Table>, index: u32, ctx: &ExecCtx) -> Result<Option<GistModel>> {
@@ -2980,34 +3006,6 @@ pub fn gist_model_of(t: &Arc<Table>, index: u32, ctx: &ExecCtx) -> Result<Option
     };
     let model = gist_model_shared(t, bix, &indexes, ctx)?;
     Ok(model.is_some().then_some(model))
-}
-
-/// `gist_scan`, with the pages the scan reads (its SIRead locks) when `pages`.
-#[allow(clippy::type_complexity)]
-pub fn gist_scan_pages(
-    t: &Arc<Table>,
-    index: u32,
-    orderbys: usize,
-    test: &mut dyn FnMut(Option<&crate::catalog::gistsim::Key>, bool) -> Option<Vec<Option<f64>>>,
-    pages: bool,
-    ctx: &ExecCtx,
-) -> Result<Option<(Vec<Vec<u8>>, Vec<u32>)>> {
-    let indexes = crate::sql::binder::bound_indexes(t, ctx)?;
-    let Some(bix) = indexes.iter().find(|b| b.index.oid == index) else {
-        return Ok(None);
-    };
-    let model = gist_model_shared(t, bix, &indexes, ctx)?;
-    let Some((g, keys)) = model.as_ref() else {
-        return Ok(None);
-    };
-    let read = if pages { g.search_pages(test) } else { Vec::new() };
-    Ok(Some((
-        g.search(orderbys, test)
-            .into_iter()
-            .filter_map(|r| keys.get(r as usize).filter(|k| !k.is_empty()).cloned())
-            .collect(),
-        read,
-    )))
 }
 
 /// The leaf page of GiST index `bix` a row with these index values goes to (None: not

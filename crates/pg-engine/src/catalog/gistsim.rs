@@ -126,14 +126,15 @@ pub enum Key {
     Range(RKey),
 }
 
-/// A tuple: its key (None for a null), size, the child block an inner tuple links, and
-/// the row a leaf tuple points to (NO_ROW when not tracked).
+/// A tuple: its key (None for a null), size, the child block an inner tuple links, the row
+/// a leaf tuple points to (NO_ROW when not tracked), and whether a scan marked it LP_DEAD.
 #[derive(Clone, Copy, Debug)]
 struct Tup {
     key: Option<Key>,
     size: usize,
     child: u32,
     row: u32,
+    dead: bool,
 }
 
 /// A leaf tuple whose row isn't tracked.
@@ -146,7 +147,7 @@ impl Tup {
             Some(Key::Box(_)) => BOX_TUPLE,
             Some(Key::Range(r)) => r.tuple_size(),
         };
-        Tup { key, size, child: 0, row: NO_ROW }
+        Tup { key, size, child: 0, row: NO_ROW, dead: false }
     }
 
     fn linking(key: Option<Key>, child: u32) -> Tup {
@@ -969,6 +970,11 @@ impl Gist {
         let page = &self.pages[blk];
         let deleted = old.map_or(0, |o| page.tups[o].size + ITEM_ID);
         let need: usize = tuples.iter().map(|t| t.size + ITEM_ID).sum();
+        // A full leaf page drops its LP_DEAD tuples first (gistprunepage).
+        if free_space(&page.tups) + deleted < need && page.leaf && page.tups.iter().any(|t| t.dead) {
+            self.pages[blk].tups.retain(|t| !t.dead);
+        }
+        let page = &self.pages[blk];
         if free_space(&page.tups) + deleted >= need {
             let page = &mut self.pages[blk];
             match old {
@@ -1024,6 +1030,16 @@ impl Gist {
         let off = path.pop().unwrap().off;
         self.place(&path, vec![info[0], info[1]], off);
         true
+    }
+
+    /// gistkillitems: the leaf tuples of rows `rows` marked LP_DEAD (scans skip them, a full
+    /// page drops them before it splits).
+    pub fn kill(&mut self, rows: &std::collections::HashSet<u32>) {
+        for p in self.pages.iter_mut().filter(|p| p.leaf) {
+            for t in p.tups.iter_mut().filter(|t| rows.contains(&t.row)) {
+                t.dead = true;
+            }
+        }
     }
 
     /// gistdoinsert of a tuple with this key.
@@ -1243,11 +1259,13 @@ pub struct Search {
     /// An unordered scan's matching rows of the leaf page read last.
     page: std::collections::VecDeque<u32>,
     started: bool,
+    /// The pages read (gistScanPage's SIRead locks), for the caller to take.
+    pub read: Vec<u32>,
 }
 
 impl Search {
     pub fn new(orderbys: usize) -> Search {
-        Search { orderbys, queue: PairingHeap::default(), page: Default::default(), started: false }
+        Search { orderbys, queue: PairingHeap::default(), page: Default::default(), started: false, read: Vec::new() }
     }
 
     /// The scan's next row over index `g` (`test`: see `Gist::search`; it must be the
@@ -1259,6 +1277,7 @@ impl Search {
     ) -> Option<u32> {
         if !self.started {
             self.started = true;
+            self.read.push(0);
             g.scan_page(0, self.orderbys, &mut self.queue, &mut self.page, test);
         }
         loop {
@@ -1268,7 +1287,10 @@ impl Search {
             let item = self.queue.remove_first()?;
             match item.row {
                 Some(r) => return Some(r),
-                None => g.scan_page(item.blk, self.orderbys, &mut self.queue, &mut self.page, test),
+                None => {
+                    self.read.push(item.blk);
+                    g.scan_page(item.blk, self.orderbys, &mut self.queue, &mut self.page, test)
+                }
             }
         }
     }
@@ -1304,6 +1326,10 @@ impl Gist {
     ) {
         let page = &self.pages[blk as usize];
         for t in &page.tups {
+            // (ignore_killed_tuples.)
+            if t.dead {
+                continue;
+            }
             let Some(mut dist) = test(t.key.as_ref(), page.leaf) else {
                 continue;
             };
@@ -1316,29 +1342,6 @@ impl Gist {
                 queue.add(SearchItem { dist, row: None, blk: t.child });
             }
         }
-    }
-
-    /// The pages a scan reads (gistScanPage locks each one): the root, then every page a
-    /// downlink `test` accepts leads to.
-    pub fn search_pages(
-        &self,
-        test: &mut dyn FnMut(Option<&Key>, bool) -> Option<Vec<Option<f64>>>,
-    ) -> Vec<u32> {
-        let mut out = Vec::new();
-        let mut todo = vec![0u32];
-        while let Some(blk) = todo.pop() {
-            let Some(page) = self.pages.get(blk as usize) else { continue };
-            out.push(blk);
-            if page.leaf {
-                continue;
-            }
-            for t in &page.tups {
-                if test(t.key.as_ref(), false).is_some() {
-                    todo.push(t.child);
-                }
-            }
-        }
-        out
     }
 
     /// The leaf page an insertion of `key` goes to (gistdoinsert's descent, gistchoose at

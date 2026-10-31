@@ -524,52 +524,11 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
         plan.access = Access::Seq;
         plan.index = None;
         plan.filter = filter;
-        let stat = if super::pgstat::scan_counts(ctx) {
-            super::pgstat::count_index_scan(ctx, ix.oid);
-            StatTarget::Index(ix.oid)
-        } else {
-            StatTarget::Off
-        };
-        return Ok(Box::new(ScanNode {
-            stat,
-            sample: None,
-            only: None,
-            key: s as *const ScanPlan as usize,
-            need: if matches!(s.access, Access::Bitmap(..)) && s.index.is_none() { need } else { None },
-            plan: super::planref::PlanRef::Own(Box::new(plan)),
-            ranges: Vec::new(),
-            cur_range: 0,
-            iter: None,
-            skip: None,
-            rev: false,
-            kills: None,
-            secondary: false,
-            emitted: 0,
-            keys: Some(keys),
-            ios: false,
-            ios_entries: None,
-            tid_order: false,
-            sorted: None,
-            streamed: false,
-            par: None,
-            par_tried: false,
-            in_order: None,
-            prefilter: None,
-            toast: None,
-            filter_cols: None,
-            lazy: None,
-            run: Default::default(),
-            pending: None,
-            one_run: false,
-            blocks: Default::default(),
-            prune_next: 0,
-            nblocks: None,
-            last_block: None,
-            fetched: Default::default(),
-            batch: FETCH_BATCH_MIN,
-            ios_cols: None,
-            am: None,
-        }));
+        return Ok(keyed_scan(s, plan, ix, keys, ctx));
+    }
+    // A KNN scan of a GiST index the search structures place: nearest-first (`knn_scan`).
+    if let Some(node) = knn_scan(s, &ranges, ctx)? {
+        return Ok(node);
     }
     // A GiST or SP-GiST index scan (not read by its entries: `reads_entries`): the rows
     // its search structure places near the conditions (`search`), those they hold for, in
@@ -2195,7 +2154,7 @@ const FETCH_BATCH_MAX: usize = 128;
 /// The rows stored under `keys` (None: none visible), as the statement's snapshot sees
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
-fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
     if let Some(rows) = fetch_dense(keys, ctx)? {
         return Ok(rows);
     }
@@ -2744,6 +2703,9 @@ impl ScanNode {
                 am.pending.extend(checks.into_iter().zip(batch).zip(rows).map(|((c, k), r)| (c, k, r)));
             }
         }
+        if let Some(Keys::Near(n)) = &mut self.keys {
+            return n.next(ctx);
+        }
         if self.keys.is_some() {
             loop {
                 while let Some((_, k, row)) = self.fetched.pop_front() {
@@ -2752,7 +2714,10 @@ impl ScanNode {
                     }
                 }
                 let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
-                let batch: Vec<Vec<u8>> = self.keys.as_mut().map_or_else(Vec::new, |k| k.by_ref().take(want).collect());
+                let batch = match self.keys.as_mut() {
+                    Some(k) => k.take(want, ctx)?,
+                    None => Vec::new(),
+                };
                 if batch.is_empty() {
                     return Ok(None);
                 }
@@ -3514,7 +3479,10 @@ impl ScanNode {
         let Some(fetch) = ctx.txn.borrow().store_reader(&snap) else {
             return Ok(None);
         };
-        let keys: Arc<[Vec<u8>]> = self.keys.take().into_iter().flatten().collect();
+        let keys: Arc<[Vec<u8>]> = match self.keys.take() {
+            Some(Keys::List(l)) => l.collect(),
+            _ => Arc::new([]),
+        };
         let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
         let scans = (0..keys.len())
             .step_by(per)
@@ -4117,6 +4085,14 @@ fn search_keys(
     let Some(bix) = crate::sql::binder::bound_indexes(&t, ctx)?.into_iter().find(|b| b.index.oid == ix.oid) else {
         return Ok(None);
     };
+    let Some(conds) = search_conds(quals, ctx) else { return Ok(None) };
+    let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
+    super::search::candidates(&t, &bix, &conds, Some(snap), ctx)
+}
+
+/// An index scan's conditions as the search structures take them: (index column,
+/// operator, argument). None: an argument fails to evaluate (reading the rows raises it).
+fn search_conds(quals: &[crate::sql::plan::IndexQual], ctx: &ExecCtx) -> Option<Vec<(usize, &'static str, Value)>> {
     let mut conds = Vec::new();
     for q in quals {
         if let crate::sql::expr::Expr::Call(def, args, _) = &q.expr
@@ -4126,12 +4102,11 @@ fn search_keys(
             if def.coll.as_ref().is_some_and(|c| !c.deterministic) {
                 continue;
             }
-            let Ok(v) = eval(&args[1], &[], ctx) else { return Ok(None) };
+            let Ok(v) = eval(&args[1], &[], ctx) else { return None };
             conds.push((q.col, def.name, v));
         }
     }
-    let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
-    super::search::candidates(&t, &bix, &conds, Some(snap), ctx)
+    Some(conds)
 }
 
 /// `search_keys`' rows that `quals` hold for, in heap order (None: every row is to be read).
@@ -4261,18 +4236,79 @@ struct GistKeys {
     model: super::sizing::GistModel,
     search: crate::catalog::gistsim::Search,
     query: PointQuery,
+    /// The index, and whether the scan takes SIRead locks on the pages it reads.
+    index: u32,
+    ssi: bool,
+    /// An unordered scan: the table, its index's history version (None: no history), and
+    /// the dead entries returned from the leaf page read last (kill_prior_tuple: marked
+    /// LP_DEAD once the scan reads another page).
+    kill: Option<(u32, usize)>,
+    dead: Vec<u32>,
 }
 
-impl Iterator for GistKeys {
-    type Item = Vec<u8>;
-    fn next(&mut self) -> Option<Vec<u8>> {
-        let (g, keys) = self.model.as_ref().as_ref()?;
-        let q = &self.query;
-        loop {
-            let r = self.search.next(g, &mut |k, leaf| q.test(k, leaf, &mut |_, _| true))?;
-            if let Some(k) = keys.get(r as usize).filter(|k| !k.is_empty()) {
-                return Some(k.clone());
+impl GistKeys {
+    /// Up to `n` more rows' keys: one at a time when a condition runs its operator on the
+    /// leaves (which may fail), so that only the pages PostgreSQL's scan would read before
+    /// a LIMIT stops it are read. SSI: gistScanPage's SIRead lock on each page read, and the
+    /// conflicts out to the transactions adding entries there.
+    fn take(&mut self, n: usize, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
+        use crate::sql::expr::Expr;
+        use crate::types::geo::{Geo, Point};
+        let n = if self.query.evaluates() { 1 } else { n };
+        let mut out = Vec::new();
+        let mut err: Option<Error> = None;
+        let mut left: Vec<u32> = Vec::new();
+        if let Some((g, keys)) = self.model.as_ref().as_ref() {
+            let mut within = |e: &Expr, p: Point| {
+                let pt = Expr::Const(Value::Geo(Arc::new(Geo::Point(p))), crate::types::DataType::Point);
+                let Expr::Call(d, args, ty) = e else { return false };
+                let call = Expr::Call(d.clone(), vec![pt, args[1].clone()], ty.clone());
+                match eval_bool(&call, &[], ctx) {
+                    Ok(b) => b,
+                    Err(x) => {
+                        err.get_or_insert(x);
+                        false
+                    }
+                }
+            };
+            let q = &self.query;
+            let mut pages = self.search.read.len();
+            while out.len() < n {
+                // (The scan's end marks the last page's too: gistgettuple asked once more.)
+                let Some(r) = self.search.next(g, &mut |k, leaf| q.test(k, leaf, &mut within)) else {
+                    left.append(&mut self.dead);
+                    break;
+                };
+                if self.search.read.len() != pages {
+                    pages = self.search.read.len();
+                    left.append(&mut self.dead);
+                }
+                match keys.get(r as usize).filter(|k| !k.is_empty()) {
+                    Some(k) => out.push(k.clone()),
+                    // (Another version's entry, or a dead tuple's: the heap fetch finds it
+                    // dead.)
+                    None if self.kill.is_some() => self.dead.push(r),
+                    None => {}
+                }
             }
+        }
+        if let Some((table, version)) = self.kill
+            && !left.is_empty()
+        {
+            left.sort_unstable();
+            self.kill = super::sizing::gist_kill(table, self.index, version, &left, ctx).map(|v| (table, v));
+        }
+        if self.ssi && !self.search.read.is_empty() {
+            let pages = std::mem::take(&mut self.search.read);
+            for p in &pages {
+                ctx.txn.borrow_mut().predicate_lock_page(self.index, *p);
+            }
+            let me = ctx.txn.borrow().id;
+            ctx.sess.db.ssi.read_pages(me, self.index, &pages)?;
+        }
+        match err {
+            Some(e) => Err(e),
+            None => Ok(out),
         }
     }
 }
@@ -4282,6 +4318,8 @@ impl Iterator for GistKeys {
 enum Keys {
     List(std::vec::IntoIter<Vec<u8>>),
     Gist(Box<GistKeys>),
+    /// A KNN scan's rows, read already (`ScanNode::next_keyed` takes them as they are).
+    Near(Box<super::nearest::NearestRows>),
 }
 
 impl Keys {
@@ -4289,17 +4327,16 @@ impl Keys {
     fn len(&self) -> usize {
         match self {
             Keys::List(l) => l.len(),
-            Keys::Gist(_) => 0,
+            Keys::Gist(_) | Keys::Near(_) => 0,
         }
     }
-}
 
-impl Iterator for Keys {
-    type Item = Vec<u8>;
-    fn next(&mut self) -> Option<Vec<u8>> {
+    /// Up to `n` more (a KNN scan's rows aren't taken as keys: `ScanNode::next_keyed`).
+    fn take(&mut self, n: usize, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
         match self {
-            Keys::List(l) => l.next(),
-            Keys::Gist(g) => g.next(),
+            Keys::List(l) => Ok(l.by_ref().take(n).collect()),
+            Keys::Gist(g) => g.take(n, ctx),
+            Keys::Near(_) => Ok(Vec::new()),
         }
     }
 }
@@ -4390,49 +4427,143 @@ fn gist_point_scan(
             _ => Some(Expr::And(rest)),
         }
     });
-    let ssi = predicate_locked(&s.table, ctx);
-    // Searched as the rows are asked for, unless the scan takes SIRead locks on the pages
-    // it reads or a condition runs an operator (which may fail) on each leaf.
-    if !ssi && !query.evaluates() {
-        let Some(model) = super::sizing::gist_model_of(&s.table, ix.oid, ctx)? else {
-            return Ok(None);
-        };
-        let search = crate::catalog::gistsim::Search::new(query.origins.len());
-        return Ok(Some((Keys::Gist(Box::new(GistKeys { model, search, query })), filter)));
-    }
-    let mut err: Option<crate::error::Error> = None;
-    let found = {
-        let mut within = |e: &Expr, p: Point| {
-            let pt = Expr::Const(Value::Geo(Arc::new(Geo::Point(p))), DataType::Point);
-            let Expr::Call(d, args, ty) = e else { unreachable!() };
-            let call = Expr::Call(d.clone(), vec![pt, args[1].clone()], ty.clone());
-            match eval_bool(&call, &[], ctx) {
-                Ok(b) => b,
-                Err(x) => {
-                    err.get_or_insert(x);
-                    false
-                }
-            }
-        };
-        let mut test = |k: Option<&crate::catalog::gistsim::Key>, leaf: bool| query.test(k, leaf, &mut within);
-        super::sizing::gist_scan_pages(&s.table, ix.oid, query.origins.len(), &mut test, ssi, ctx)?
-    };
-    let Some((keys, pages)) = found else {
+    // Searched as the rows are asked for: a KNN scan under a LIMIT, or a LIMITed `<@
+    // polygon / circle` (its operator runs on the leaves of the pages read), reads the pages
+    // PostgreSQL's scan reads, and SSI locks those.
+    let Some(model) = super::sizing::gist_model_of(&s.table, ix.oid, ctx)? else {
         return Ok(None);
     };
-    // SSI: gistScanPage's SIRead lock on every page the scan reads, and the conflicts out
-    // to the transactions adding entries there.
-    if ssi {
-        for p in &pages {
-            ctx.txn.borrow_mut().predicate_lock_page(ix.oid, *p);
-        }
+    let search = crate::catalog::gistsim::Search::new(query.origins.len());
+    let ssi = predicate_locked(&s.table, ctx);
+    let kill = if query.origins.is_empty() { super::sizing::gist_log_version(s.table.oid, ix.oid, ctx).map(|v| (s.table.oid, v)) } else { None };
+    let keys = GistKeys { model, search, query, index: ix.oid, ssi, kill, dead: Vec::new() };
+    Ok(Some((Keys::Gist(Box::new(keys)), filter)))
+}
+
+/// A scan of `s`'s index `ix` reading the rows `keys` name, in their order, as `plan`.
+#[inline(never)]
+fn keyed_scan(s: &ScanPlan, plan: ScanPlan, ix: &Index, keys: Keys, ctx: &ExecCtx) -> BoxNode {
+    let stat = if super::pgstat::scan_counts(ctx) {
+        super::pgstat::count_index_scan(ctx, ix.oid);
+        StatTarget::Index(ix.oid)
+    } else {
+        StatTarget::Off
+    };
+    Box::new(ScanNode {
+        stat,
+        sample: None,
+        only: None,
+        key: s as *const ScanPlan as usize,
+        need: None,
+        plan: super::planref::PlanRef::Own(Box::new(plan)),
+        ranges: Vec::new(),
+        cur_range: 0,
+        iter: None,
+        skip: None,
+        rev: false,
+        kills: None,
+        secondary: false,
+        emitted: 0,
+        keys: Some(keys),
+        ios: false,
+        ios_entries: None,
+        tid_order: false,
+        sorted: None,
+        streamed: false,
+        par: None,
+        par_tried: false,
+        in_order: None,
+        prefilter: None,
+        toast: None,
+        filter_cols: None,
+        lazy: None,
+        run: Default::default(),
+        pending: None,
+        one_run: false,
+        blocks: Default::default(),
+        prune_next: 0,
+        nblocks: None,
+        last_block: None,
+        fetched: Default::default(),
+        batch: FETCH_BATCH_MIN,
+        ios_cols: None,
+        am: None,
+    })
+}
+
+/// A KNN scan of a GiST index the search structures place (box, circle, polygon,
+/// btree_gist, pg_trgm): its rows nearest-first (`exec/nearest.rs`), read as they are asked
+/// for. SSI: the index's relation lock, as the scan reading every row took, and the rows it
+/// fetches (PostgreSQL locks the pages it reads; these trees are built by inserts, their
+/// pages not modelled). (Not inlined: `open_scan`'s frame is on deep plans' stacks.)
+#[inline(never)]
+fn knn_scan(s: &ScanPlan, ranges: &[(Vec<u8>, Vec<u8>)], ctx: &ExecCtx) -> Result<Option<BoxNode>> {
+    let (Access::Index { quals, only, .. }, Some((ix, b))) = (&s.access, &s.index) else { return Ok(None) };
+    if s.current_of.is_some() || s.reverse || (*only && ctx.instrumented()) || b.order.is_empty() {
+        return Ok(None);
+    }
+    let Some(near) = nearest_scan(s, ix, quals, b, ctx)? else { return Ok(None) };
+    if predicate_locked(&s.table, ctx) {
         let me = ctx.txn.borrow().id;
-        ctx.sess.db.ssi.read_pages(me, ix.oid, &pages)?;
+        ctx.txn.borrow_mut().predicate_lock(ix.oid, None);
+        ctx.sess.db.ssi.read_entries(me, ix.oid, ranges)?;
     }
-    if let Some(e) = err {
-        return Err(e);
+    let mut parts = Vec::new();
+    if let Some(f) = &s.filter {
+        crate::sql::binder::optimize::conjuncts(f.clone(), &mut parts);
     }
-    Ok(Some((Keys::List(keys.into_iter()), filter)))
+    for q in quals {
+        if !parts.iter().any(|p| p.same_as(&q.orig)) {
+            parts.push(q.orig.clone());
+        }
+    }
+    let mut plan = s.clone();
+    plan.access = Access::Seq;
+    plan.index = None;
+    plan.filter = match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(crate::sql::expr::Expr::And(parts)),
+    };
+    Ok(Some(keyed_scan(s, plan, ix, Keys::Near(Box::new(near)), ctx)))
+}
+
+/// A KNN scan's rows nearest-first (`nearest`; None: not one the search structures place,
+/// read every row and sort them).
+fn nearest_scan(
+    s: &ScanPlan,
+    ix: &Index,
+    quals: &[crate::sql::plan::IndexQual],
+    b: &IndexBounds,
+    ctx: &ExecCtx,
+) -> Result<Option<super::nearest::NearestRows>> {
+    use crate::sql::expr::Expr;
+    use crate::types::DataType;
+    let [k] = &b.order[..] else { return Ok(None) };
+    let Expr::Call(def, args, _) = &k.expr else { return Ok(None) };
+    if ix.method != "gist"
+        || k.desc
+        || k.nulls_first
+        || k.using.is_some()
+        || args.len() != 2
+        || !matches!(k.expr.ty(), DataType::Int2 | DataType::Int4 | DataType::Int8 | DataType::Float4 | DataType::Float8)
+        // (A lossy distance in an index-only scan fails: `Reordered`.)
+        || (matches!(s.access, Access::Index { only: true, .. }) && matches!(args[0].ty(), DataType::Circle | DataType::Polygon))
+    {
+        return Ok(None);
+    }
+    let t = s.table.clone();
+    let Some(bix) = crate::sql::binder::bound_indexes(&t, ctx)?.into_iter().find(|b| b.index.oid == ix.oid) else {
+        return Ok(None);
+    };
+    let Some(col) = bix.keys.iter().position(|e| e.same_as(&args[0])) else { return Ok(None) };
+    let Ok(arg) = eval(&args[1], &[], ctx) else { return Ok(None) };
+    let Some(conds) = search_conds(quals, ctx) else { return Ok(None) };
+    let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
+    let Some(near) = super::search::nearest(&t, &bix, col, def.name, &arg, &conds, Some(snap), ctx)? else {
+        return Ok(None);
+    };
+    Ok(Some(super::nearest::NearestRows::new(near, t, k.expr.clone())))
 }
 
 /// computeDistance for an inner GiST point_ops key: the distance from `p` to the box.

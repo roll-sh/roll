@@ -3756,6 +3756,110 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     - GIN with thousands of rows (tsvector `x & common`, 2,500 rows): 33 -> 23 ms against
       6.5. Left: SST point gets (`sst::entry_head` 10%, bloom checks 4%: a sorted batch
       could reuse its block positions, storage's) and decoding.
+- **Index access at index cost, round 4** (round 22, agent 139; BENCH.md "Index access,
+  round 4"):
+  - KNN over GiST box, circle, polygon, btree_gist and pg_trgm indexes reads nearest-first.
+    `search/near.rs` walks a structure in ascending order of a lower bound on each
+    candidate's distance. `exec/nearest.rs` (`NearestRows`, a `scan::Keys::Near` source)
+    reads each candidate, computes its distance with the ORDER BY operator itself, and
+    returns a row once its distance is at most every remaining bound. That is
+    IndexNextWithReorder's queue, used for every class here: the bounds are inexact, as
+    circle and polygon distances are in PostgreSQL.
+    - A `Grid` is walked outward from the origin's x along its (partition, low end) order.
+      Rightward chunks are bounded by their low end. Leftward chunks are bounded by the
+      greatest high end up to their block (`Grid::pmax`, kept by `merge`).
+    - Each entry's bound is the distance to its mapped box (`Quant` is monotone, so the box
+      holds the value), a little under for rounding (`under`).
+    - Null keys go last (`Grid::nulls`). Values the grid can't place, and the transaction's
+      own writes, are read first.
+    - A merge of `sorted` while the walk runs starts it again; rows already read aren't
+      read twice (`NearestRows::seen`).
+    - btree_gist scalars (int2/4/8, date, float4/8) use the one-dimensional grid. Timestamp
+      distances are intervals and keep the old path.
+    - pg_trgm (`TrgmNear`) bounds a row by the query trigrams it shares, from the postings
+      (`Trigrams::shared`) and each row's trigram count (`Trigrams::counts`, 2 bytes a row):
+      - `<->`: c / (n + m - c), exact up to float4.
+      - `<->>` and `<->>>`: c / m.
+      - Rows sharing none are at distance exactly 1, null text last.
+    - Anything else (several ORDER BY keys, DESC, a reverse scan, IOS under EXPLAIN ANALYZE,
+      a lossy IOS, no structure, a snapshot older than it) keeps `Reordered`: every
+      candidate read and sorted.
+    - Measured: box KNN over 100,000 rows 435 -> 0.65 ms (PostgreSQL 0.25), btree_gist
+      223 -> 0.29 ms, trgm 604 -> 1.4 ms (PostgreSQL 76).
+  - point_ops `<@ polygon / circle` under a LIMIT, and SERIALIZABLE point_ops scans, search
+    the model lazily too.
+    - `GistKeys::take` hands out one key at a time while a condition runs its operator on
+      leaves, so an operator error (float overflow in point_inside) comes from the pages
+      PostgreSQL's scan reads.
+    - SSI locks each page as `gistsim::Search` reads it (`Search::read`, gistScanPage's
+      PredicateLockPage), not every page a full traversal would reach.
+    - The eager `gist_scan_pages` / `Gist::search_pages` are gone.
+  - Killed GiST entries (kill_prior_tuple, gistkillitems). A plain unordered point_ops /
+    range_ops index scan marks the dead entries it returned from a leaf page when it moves
+    to another page, and at its end, but not when a LIMIT stops it there (gistgettuple only
+    marks on the next call).
+    - The marks go into the index's history as `gistlog::Op::Kill` (entry numbers, those
+      whose heap chains `chain_dead` says are dead to everyone; only while the history's
+      version is the one the scan's model came from, as the page-LSN check).
+    - Replayed models skip killed tuples in scans (ignore_killed_tuples). A full leaf drops
+      them before it splits (gistprunepage). KNN scans don't mark (getNextNearest).
+    - Golden `a139_gist_kill`: the KNN order of equally distant rows after the marking
+      scans, and the page count after more inserts (9, was 11), match 18.6.
+    - Not matched: a scan whose fetch batch reads past a page boundary a LIMIT stops before
+      marks that page where PostgreSQL wouldn't.
+  - Tests: goldens `a139_knn` (box, circle, polygon, btree_gist, pg_trgm KNN; NULLs, index
+    conditions, a partition column, own writes, later commits, SERIALIZABLE; point_ops
+    `<@ circle / polygon` with LIMIT) and `a139_gist_kill`. `tools/bench/access.rs`:
+    `gist_point_circle`, `gist_box_knn`, `gist_circle_knn`, `gist_polygon_knn`,
+    `btree_gist_knn`, `trgm_gist_knn`, over new tables with jittered keys (`boxes`,
+    `circles`, `polys`, `nums`).
+  - Decisions:
+    - Rows at equal distances come in the order the walk reads them (data key order within
+      a fetch batch), not PostgreSQL's. Box, circle, polygon and gist_trgm_ops trees are
+      insertion-built, and gistchoose breaks equal penalties at random, so PostgreSQL's order
+      there isn't deterministic. btree_gist builds sorted in 18, so its tie order is
+      deterministic there; modelling it needs a btree_gist tree model (its picksplit and
+      penalty), not done.
+    - Equal distances whose bounds can't be told apart from them (duplicated values) are
+      all read before the first is returned. A column with many equal keys near the origin
+      costs a read each; PostgreSQL's exact leaf keys don't.
+    - SERIALIZABLE KNN over these classes takes the index relation's SIRead lock, as the
+      full scan did, and locks only the tuples it fetches. PostgreSQL locks the pages it
+      reads; these trees aren't modelled page by page.
+  - Coordination:
+    - Agent 130 (storage) skips dead key runs with dead-range hints in storage/mod.rs. The
+      LP_DEAD models (sizing::Kills, the GiST kill log) stay metadata and never choose
+      storage keys.
+    - Agent 140 (planner) has three items from this round:
+      - `'q' <<-> t` isn't commuted to an index Order By.
+      - btree_gist `ORDER BY a <-> c` picks a (part, a) index over (a).
+      - `usable()` (sql/paths.rs) counts an uncorrelated scalar sub-select volatile, so an
+        InitPlan operand never bounds a btree scan (`id = (SELECT 500000)`: 600 ms against
+        0.8). That is agent 130's and 140's queue-table DELETE.
+  - Left:
+    - Skip scans' `Index Searches` (agent 126's `sizing::btree_leaf_for` exists now).
+    - The SP-GiST quad tree model for a NaN's later split.
+    - GIN with thousands of rows (no batch point fetch from storage yet; agent 130).
+    - `sizing::fetched_batch` on the index-scan side. Not switched: pruning a batch's pages
+      before its rows are returned would run ahead of an UPDATE's HOT decisions in the same
+      statement, and of where a LIMIT stops.
+    - The GiST size model for classes without sort support (agent 103's box case: 610
+      pages against 1,011).
+  - Verified, on `46f5e9cb`:
+    - Crate tests in debug and release. The debug deep_input / deparse_identity deep-view
+      failures were the base's, fixed by 74a3ad38. A timing-sensitive wire cancel test
+      failed once at nice 19.
+    - Clippy: nothing new.
+    - Difftest smoke.
+    - Isolation 134 / 135 specs with the roll-* ones (1,742 / 1,743 permutations:
+      intra-grant-inplace, as before).
+    - A full regress run (debug, private reference): 51,148 / 51,150, 0 units changed
+      against results.tsv.
+    - Contrib (private references): btree_gist 613 / 616, pg_trgm 261, cube 316, bloom 58,
+      hstore 309, intarray 182, pgvector 915 / 915 (OPTFLAGS="" reference, `results/*.bin`
+      pre-created mode 666), all unchanged.
+    - After rebasing onto 74a3ad38, which changed scan.rs (agent 135): clippy, goldens,
+      deep_input, deparse_identity, wire, memory_load.
 
 ## Repository layout
 
@@ -4414,6 +4518,13 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   and wait for the statement's own result; no protocol rule ties the two. Holding the
   connection open for a fork's worth of time would add that latency to every cancel to
   reproduce a cost, not a behaviour: not matched.
+- **GiST KNN tie order** (round 22, agent 139): rows at equal distances from a box, circle,
+  polygon, btree_gist or pg_trgm KNN scan come in the order the nearest-first walk reads
+  them. PostgreSQL's order among them follows trees it builds by inserts, with gistchoose
+  breaking equal penalties at random, so it isn't deterministic (btree_gist's sorted build
+  is the exception, not modelled). point_ops and range_ops keep PostgreSQL's queue order
+  over their modelled trees. A serializable KNN scan of these classes takes the index
+  relation's SIRead lock rather than page locks.
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for

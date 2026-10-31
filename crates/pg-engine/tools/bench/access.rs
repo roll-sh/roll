@@ -8,7 +8,7 @@ use super::{Ctx, MemProbe, MemSampler, mb, must, run_script, timed};
 
 const LOAD: &str = "
 DROP TABLE IF EXISTS que_jobs, oban_jobs, gw_jobs, sq_ready, items, lookup, shapes,
-  words_gin, words_gist, ts_events, bookings, bookings2, docs, skip_t, pts;
+  words_gin, words_gist, ts_events, bookings, bookings2, docs, skip_t, pts, boxes, circles, polys, nums;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE TABLE que_jobs (priority smallint NOT NULL DEFAULT 100, run_at timestamptz NOT NULL DEFAULT now(),
@@ -66,6 +66,22 @@ CREATE INDEX skip_t_rt ON skip_t (region, ts);
 CREATE TABLE pts (id int, p point);
 INSERT INTO pts SELECT g, point((g * 37) % 1000 + (g % 7) / 10.0, (g * 91) % 1000) FROM generate_series(1, $SMALL) g;
 CREATE INDEX pts_p ON pts USING gist (p);
+CREATE TABLE boxes (id int, b box);
+INSERT INTO boxes SELECT g, box(point((g * 37) % 1000 + (g % 7) / 10.0, (g * 91) % 1000 + (g % 11) / 10.0),
+  point((g * 37) % 1000 + 3, (g * 91) % 1000 + 3)) FROM generate_series(1, $SMALL) g;
+CREATE INDEX boxes_b ON boxes USING gist (b);
+CREATE TABLE circles (id int, c circle);
+INSERT INTO circles SELECT g, circle(point((g * 37) % 1000 + (g % 7) / 10.0, (g * 91) % 1000 + (g % 11) / 10.0), 1 + g % 5)
+  FROM generate_series(1, $SMALL) g;
+CREATE INDEX circles_c ON circles USING gist (c);
+CREATE TABLE polys (id int, p polygon);
+INSERT INTO polys SELECT g, polygon(box(point((g * 37) % 1000 + (g % 7) / 10.0, (g * 91) % 1000 + (g % 11) / 10.0),
+  point((g * 37) % 1000 + 2, (g * 91) % 1000 + 1.5)))
+  FROM generate_series(1, $SMALL) g;
+CREATE INDEX polys_p ON polys USING gist (p);
+CREATE TABLE nums (id int, a int);
+INSERT INTO nums SELECT g, (g * 7919) % $ROWS FROM generate_series(1, $SMALL) g;
+CREATE INDEX nums_a ON nums USING gist (a);
 VACUUM ANALYZE;
 ";
 
@@ -136,6 +152,12 @@ const CASES: &[(&str, &str)] = &[
     ("skip_scan", "SELECT count(*) FROM skip_t WHERE ts = $K % 100000"),
     ("gist_point_box", "SELECT id FROM pts WHERE p <@ box(point($K % 990, $K % 977), point($K % 990 + 10, $K % 977 + 10)) LIMIT 5"),
     ("gist_point_knn", "SELECT id FROM pts ORDER BY p <-> point($K % 1000, $K % 977) LIMIT 5"),
+    ("gist_point_circle", "SELECT id FROM pts WHERE p <@ circle(point($K % 990, $K % 977), 30) LIMIT 5"),
+    ("gist_box_knn", "SELECT id FROM boxes ORDER BY b <-> point($K % 1000, $K % 977) LIMIT 5"),
+    ("gist_circle_knn", "SELECT id FROM circles ORDER BY c <-> point($K % 1000, $K % 977) LIMIT 5"),
+    ("gist_polygon_knn", "SELECT id FROM polys ORDER BY p <-> point($K % 1000, $K % 977) LIMIT 5"),
+    ("btree_gist_knn", "SELECT id FROM nums ORDER BY a <-> $K LIMIT 5"),
+    ("trgm_gist_knn", "SELECT id FROM words_gist ORDER BY w <-> md5($K::text) LIMIT 5"),
     ("brin_range", "SELECT count(*), sum(v) FROM ts_events WHERE ts >= timestamptz '2026-01-01' + $K * interval '1 s' \
       AND ts < timestamptz '2026-01-01' + ($K + 3600) * interval '1 s'"),
     ("booking_insert", "INSERT INTO bookings (room, during) VALUES ($K % 50, tsrange(timestamp '2026-01-01' + $K * interval '1 hour', \

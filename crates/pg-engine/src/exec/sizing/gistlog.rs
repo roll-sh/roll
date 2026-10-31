@@ -24,6 +24,7 @@ pub struct GistLog {
     ops: Vec<Op>,
     entries: usize,
     vacuums: usize,
+    kills: usize,
 }
 
 #[derive(Clone)]
@@ -32,6 +33,8 @@ enum Op {
     Insert(Tid, Option<Key>),
     /// gistbulkdelete of the entries of these heap tuples.
     Vacuum(Vec<Tid>),
+    /// gistkillitems of these entries (by number: the build's, then the insertions').
+    Kill(Vec<u32>),
 }
 
 impl GistLog {
@@ -39,7 +42,7 @@ impl GistLog {
     /// insertions.
     pub fn new(build: Vec<(Tid, Option<Key>)>, inserted: Vec<(Tid, Option<Key>)>) -> GistLog {
         let entries = build.len() + inserted.len();
-        GistLog { build, ops: inserted.into_iter().map(|(t, k)| Op::Insert(t, k)).collect(), entries, vacuums: 0 }
+        GistLog { build, ops: inserted.into_iter().map(|(t, k)| Op::Insert(t, k)).collect(), entries, vacuums: 0, kills: 0 }
     }
 
     /// An entry was inserted for the heap tuple at `tid` (false: the history is full).
@@ -55,10 +58,36 @@ impl GistLog {
         self.ops.push(Op::Vacuum(dead.to_vec()));
     }
 
-    /// Its entries and VACUUMs: a model built before it grew is stale (an aborted
-    /// transaction's entries, or a VACUUM, change the index without a commit).
+    /// A scan marked these entries LP_DEAD.
+    pub fn kill(&mut self, entries: Vec<u32>) {
+        self.kills += 1;
+        self.ops.push(Op::Kill(entries));
+    }
+
+    /// The heap tuples entries `es` (ascending) name.
+    pub fn tids(&self, es: &[u32]) -> Vec<(u32, Tid)> {
+        let inserted = self.ops.iter().filter_map(|o| match o {
+            Op::Insert(t, _) => Some(t),
+            _ => None,
+        });
+        let mut want = es.iter().peekable();
+        let mut out = Vec::with_capacity(es.len());
+        for (e, t) in self.build.iter().map(|(t, _)| t).chain(inserted).enumerate() {
+            while want.next_if(|&&w| (w as usize) < e).is_some() {}
+            if want.next_if(|&&w| w as usize == e).is_some() {
+                out.push((e as u32, *t));
+            }
+            if want.peek().is_none() {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Its entries, VACUUMs and kills: a model built before it grew is stale (an aborted
+    /// transaction's entries, a VACUUM or a scan's kills change the index without a commit).
     pub fn version(&self) -> usize {
-        self.entries + self.vacuums
+        self.entries + self.vacuums + self.kills
     }
 
     /// The index as the history built it, with the data key of each live entry's row (by
@@ -72,7 +101,7 @@ impl GistLog {
         let mut latest: HashMap<Tid, u32> = HashMap::with_capacity(rows.len());
         for (t, k) in self.build.iter().map(|(t, k)| (t, k)).chain(self.ops.iter().filter_map(|o| match o {
             Op::Insert(t, k) => Some((t, k)),
-            Op::Vacuum(_) => None,
+            Op::Vacuum(_) | Op::Kill(_) => None,
         })) {
             tids.push(*t);
             keys.push(*k);
@@ -91,6 +120,7 @@ impl GistLog {
                 Op::Vacuum(dead) => dead.iter().for_each(|t| {
                     latest.remove(t);
                 }),
+                Op::Kill(_) => {}
             }
         }
         let mut data = vec![Vec::new(); tids.len()];
@@ -114,6 +144,7 @@ impl GistLog {
                     let n = e;
                     g.vacuum(&|r| (r as usize) < n && dead.contains(&tids[r as usize]));
                 }
+                Op::Kill(rows) => g.kill(&rows.iter().copied().collect()),
             }
         }
         Some((g, data))

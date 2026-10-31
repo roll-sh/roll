@@ -7,6 +7,7 @@ pub mod fastsort;
 pub mod merge;
 pub mod kernel;
 pub mod lookup;
+pub mod nearest;
 pub mod need;
 pub mod parallel_part;
 pub mod parscan;
