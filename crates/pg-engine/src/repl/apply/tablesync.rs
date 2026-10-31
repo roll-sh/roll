@@ -61,6 +61,17 @@ impl Workers {
         self.relstates.lock().get(&(subid, relid)).copied()
     }
 
+    /// logicalrep_worker_stop for table `relid`'s synchronization worker (a refresh removed
+    /// the table): it stops, and this waits for it (at most 30 s).
+    pub fn stop_sync(&self, subid: u32, relid: u32) {
+        let Some(f) = self.sync_stops.lock().get(&(subid, relid)).cloned() else { return };
+        f.store(true, Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_secs(30);
+        while self.sync_stops.lock().contains_key(&(subid, relid)) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn set_relstate(&self, subid: u32, relid: u32, s: Option<(char, u64)>) {
         let mut m = self.relstates.lock();
         match s {
@@ -90,6 +101,12 @@ impl Worker<'_> {
         if self.syncs.runs.is_empty() && self.states.values().all(|(s, _)| *s == 'r') {
             return Ok(());
         }
+        // (A worker of a table a refresh removed stops.)
+        for r in &self.syncs.runs {
+            if !self.states.contains_key(&r.relid) {
+                r.stop.store(true, Ordering::SeqCst);
+            }
+        }
         self.ready_tables(current, true)?;
         let mut todo: Vec<u32> = self.states.iter().filter(|(_, (s, _))| matches!(s, 'i' | 'd' | 'f')).map(|(r, _)| *r).collect();
         todo.sort_unstable();
@@ -118,10 +135,15 @@ impl Worker<'_> {
             }
             let stop = Arc::new(AtomicBool::new(false));
             let (engine, workers, sub, st) = (Arc::downgrade(self.e), self.workers.clone(), self.sub.clone(), stop.clone());
+            // (Registered before it starts: it removes itself as it ends.)
+            self.workers.sync_stops.lock().insert((subid, relid), stop.clone());
             let thread = std::thread::Builder::new()
                 .name(format!("roll-sync-{relid}"))
                 .spawn(move || sync_main(engine, workers, sub, relid, st))
-                .map_err(|e| format!("could not start table synchronization worker: {e}"))?;
+                .map_err(|e| {
+                    self.workers.sync_stops.lock().remove(&(subid, relid));
+                    format!("could not start table synchronization worker: {e}")
+                })?;
             self.syncs.started.insert(relid, Instant::now());
             self.syncs.runs.push(Run { relid, stop, thread });
         }

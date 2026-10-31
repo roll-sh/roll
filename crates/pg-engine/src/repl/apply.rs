@@ -77,6 +77,9 @@ pub struct Workers {
     /// Table synchronization workers' states in memory, by (subscription, table):
     /// `tablesync`'s SYNCWAIT and CATCHUP.
     relstates: Mutex<HashMap<(u32, u32), (char, u64)>>,
+    /// Running table synchronization workers' stop flags, by (subscription, table), each
+    /// removed as its worker ends (`stop_sync`).
+    sync_stops: Mutex<HashMap<(u32, u32), Arc<AtomicBool>>>,
 }
 
 /// How long the launcher waits between looks at the subscriptions.
@@ -325,6 +328,13 @@ enum Role {
 
 /// TablesyncWorkerMain: copy table `relid` (true: it is synchronized).
 fn sync_main(engine: Weak<Engine>, workers: Arc<Workers>, sub: Subscription, relid: u32, stop: Arc<AtomicBool>) -> bool {
+    struct Ended<'a>(&'a Workers, u32, u32);
+    impl Drop for Ended<'_> {
+        fn drop(&mut self) {
+            self.0.sync_stops.lock().remove(&(self.1, self.2));
+        }
+    }
+    let _ended = Ended(&workers, sub.oid, relid);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let Some(e) = engine.upgrade() else { return false };
         let mut w = match open_worker(&e, &workers, &sub, &stop, Role::Sync(relid)) {

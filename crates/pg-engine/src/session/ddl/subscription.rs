@@ -494,6 +494,25 @@ impl Ddl<'_, '_> {
         walrcv::password_check(&c, self.must_use_password(x))?;
         let now = self.published_rels(&mut c, &x.publications, validate, if copy_data { 'i' } else { 'r' })?;
         let mut rels = self.cat.sub_rels.get(&x.oid).cloned().unwrap_or_default();
+        // A removed table still being synchronized: its worker stops, its synchronization
+        // slot (unless SYNCDONE: dropped already) and origin go.
+        let removed: Vec<SubRel> =
+            rels.iter().filter(|r| r.state != 'r' && !now.iter().any(|n| n.relid == r.relid)).cloned().collect();
+        let workers = self.ctx.sess.cluster.logical_workers();
+        for r in &removed {
+            if let Some(w) = &workers {
+                w.stop_sync(x.oid, r.relid);
+            }
+            if let Some(repl) = self.ctx.sess.db.repl() {
+                let _ = repl.origins.drop_origin(&format!("pg_{}_{}", x.oid, r.relid), true);
+            }
+        }
+        let slots: Vec<String> = removed
+            .iter()
+            .filter(|r| r.state != 's')
+            .map(|r| format!("pg_{}_sync_{}_{}", x.oid, r.relid, crate::repl::SYSTEM_IDENTIFIER))
+            .collect();
+        self.drop_sync_slots(&mut c, &slots)?;
         rels.retain(|r| now.iter().any(|n| n.relid == r.relid));
         for n in now {
             if !rels.iter().any(|r| r.relid == n.relid) {

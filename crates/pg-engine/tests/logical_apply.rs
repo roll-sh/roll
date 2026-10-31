@@ -490,4 +490,17 @@ fn table_sync_catches_up_on_its_own_slot() {
     wait_for(&mut x.p, sync_slots, &["[Int8(0), Int8(0)]".to_string()]);
     rows(&mut x.p, "INSERT INTO b VALUES (2000, 'ready')");
     x.same("SELECT * FROM b ORDER BY id");
+    // A refresh removing a table being copied stops its worker and drops its slot.
+    x.both("CREATE TABLE d (id int PRIMARY KEY)");
+    rows(&mut x.p, "INSERT INTO d SELECT generate_series(1, 10)");
+    rows(&mut locker, "BEGIN; LOCK TABLE d IN ACCESS EXCLUSIVE MODE");
+    rows(&mut x.p, "ALTER PUBLICATION p ADD TABLE d");
+    rows(&mut x.s, "ALTER SUBSCRIPTION s REFRESH PUBLICATION");
+    wait_for(&mut x.p, sync_slots, &["[Int8(0), Int8(1)]".to_string()]);
+    rows(&mut x.p, "ALTER PUBLICATION p DROP TABLE d");
+    rows(&mut x.s, "ALTER SUBSCRIPTION s REFRESH PUBLICATION");
+    rows(&mut locker, "COMMIT");
+    assert_eq!(rows(&mut x.p, sync_slots), vec!["[Int8(0), Int8(0)]".to_string()]);
+    assert_eq!(rows(&mut x.s, "SELECT count(*) FROM pg_subscription_rel"), vec!["[Int8(3)]".to_string()]);
+    assert_eq!(rows(&mut x.s, "SELECT count(*) FROM d"), vec!["[Int8(0)]".to_string()]);
 }
