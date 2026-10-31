@@ -1785,7 +1785,14 @@ impl Txn {
             return false;
         }
         self.cur_xid();
-        self.sink = Some(Box::default());
+        // (Its room taken at once: grown by doubling, its bytes passed the buffer's size by
+        // up to half again while being copied. Untouched pages cost nothing.)
+        let room = self.db.store.txn_spill_bytes();
+        self.sink = Some(Box::new(Sink {
+            data: Vec::with_capacity(room),
+            ents: Vec::with_capacity(room / 64),
+            runs_ok: false,
+        }));
         true
     }
 

@@ -3974,6 +3974,24 @@ through the sink and link; the primary keys build in parallel and no longer scan
 VACUUM ANALYZE still reads pgbench_accounts once (PostgreSQL skips the pages COPY FREEZE left
 all-frozen).
 
+### Small index builds (tenk1's shape, 10,000 rows)
+
+Medians of 30 builds each, two interleaved runs, release, the engine niced (the machine's
+new rule), ms: a plain btree on `unique1` 16.8 / 17.0 base, 17.8 / 17.3 round 6 (PostgreSQL
+6.4 in agent 115's measurement); an expression index with a predicate (`(unique1 + unique2)
+WHERE ten < 5`) 52.1 / 52.0 base, 16.0 / 16.1 round 6 (PostgreSQL 8): its measure after the
+build no longer enters the index's security-restricted operation per row.
+
+### pgbench tpcb-like: no regression found
+
+Scale 10 (loaded by pgbench -i, so through the sink), 8 clients, 20 s, prepared, release,
+servers niced on cores 16-19, four interleaved pairs (base / round 6): 8,063 / 7,636,
+8,294 / 8,098, 7,267 / 7,147, 7,162 / 6,411 tps; engine CPU per transaction 0.430 / 0.445,
+0.419 / 0.421, 0.451 / 0.456, 0.465 / 0.487 ms; peak RSS 427 / 471, 419 / 471 MB with the sink's
+buffer grown by doubling, then (its room taken at once) 407 / 404, 403 / 450 MB. The OLTP path
+changed by a 8-byte prefix test per non-fresh write (`stale_segs`); the spread is the loaded
+machine's (the last pair ran beside another agent's build).
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,
