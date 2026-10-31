@@ -372,6 +372,10 @@ fn scan_need(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Option<Rc<[b
 /// A foreign table's scan: postgres_fdw's (another wrapper fails as planning would).
 #[inline(never)]
 fn open_foreign(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    let epq = ctx.epq.borrow().clone();
+    if let Some(test) = epq.as_ref().and_then(|m| m.get(&(s as *const ScanPlan as usize))) {
+        return epq_copy_scan(s, test.as_ref().map(|(k, _)| &k[..]), ctx);
+    }
     let cat = ctx.catalog();
     if crate::ext::postgres_fdw::scan::is_postgres_fdw(&cat, &s.table) {
         return crate::ext::postgres_fdw::scan::open(s, need, ctx);
@@ -3091,6 +3095,37 @@ fn epq_scan(s: &ScanPlan, test: Option<&(Vec<u8>, bytes::Bytes)>, ctx: &ExecCtx)
         };
     }
     Ok(Box::new(super::nodes::VecNode::new(if ok { vec![row] } else { Vec::new() })))
+}
+
+/// A foreign row's copy as its row mark's key (ROW_MARK_COPY's whole-row column): the
+/// table's key prefix, as a stored row's (so an inheritance tree's mark names its member),
+/// then the row's columns encoded.
+pub fn copy_key(oid: u32, cols: &[Value]) -> Vec<u8> {
+    let mut k = crate::storage::keys::index_prefix(oid, 0);
+    crate::storage::row::encode_row_into(&mut k, cols);
+    k
+}
+
+/// EvalPlanQual over a foreign table's scan: its row mark's copy of the row (`copy_key`),
+/// if it has one and the copy still passes the scan's conditions, remote ones included
+/// (ForeignRecheck's fdw_recheck_quals); else nothing. No remote query runs.
+fn epq_copy_scan(s: &ScanPlan, key: Option<&[u8]>, ctx: &ExecCtx) -> Result<BoxNode> {
+    let none = || Ok(Box::new(super::nodes::VecNode::new(Vec::new())) as BoxNode);
+    let Some(key) = key.filter(|k| k.len() >= 8) else { return none() };
+    let mut row = crate::storage::row::decode_row(&key[8..])?;
+    row.resize(s.table.columns.len(), Value::Null);
+    if s.with_key {
+        row.push(Value::Bytea(Arc::from(key)));
+    }
+    if s.sys {
+        row.extend([Value::Tid(u32::MAX, 0), Value::Oid(0), Value::Oid(0), Value::Oid(0), Value::Oid(0), Value::Oid(s.table.oid)]);
+    }
+    if let Some(f) = &s.filter
+        && !eval_bool(f, &row, ctx)?
+    {
+        return none();
+    }
+    Ok(Box::new(super::nodes::VecNode::new(vec![row])))
 }
 
 /// Worker threads for a parallel scan: max_parallel_workers_per_gather's, plus one in

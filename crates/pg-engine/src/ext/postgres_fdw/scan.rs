@@ -285,6 +285,8 @@ struct ScanNode {
     retrieved: Vec<usize>,
     ctid: bool,
     with_key: bool,
+    /// The key column is the row's copy (`FdwPushdown::copy_mark`), not its remote ctid.
+    copy: bool,
     sys: bool,
     local: Vec<Expr>,
     /// The FROM item's alias and column aliases (conversion errors name them).
@@ -317,7 +319,8 @@ fn make_row(n: &ScanNode, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Ro
     }
     let ctid = if n.ctid { vals.get(n.retrieved.len()).cloned().flatten() } else { None };
     if n.with_key {
-        row.push(Value::Bytea(Arc::from(super::modify::row_key(t.oid, ctid.as_deref().unwrap_or("")))));
+        let key = if n.copy { crate::exec::scan::copy_key(t.oid, &row) } else { super::modify::row_key(t.oid, ctid.as_deref().unwrap_or("")) };
+        row.push(Value::Bytea(Arc::from(key)));
     }
     if n.sys {
         let tid = ctid
@@ -334,6 +337,9 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
     if s.current_of.is_some() {
         return Err(unsupported("WHERE CURRENT OF is not supported for this table type"));
     }
+    if let Some(dm) = s.fdw.as_ref().and_then(|f| f.direct.as_ref()) {
+        return super::direct::open_member(s, dm, ctx);
+    }
     let cat = ctx.catalog();
     let spec = spec(s, need, &cat, ctx.fmt());
     let m = mapping_for(&s.table, s.check_as, ctx)?;
@@ -344,6 +350,7 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
         retrieved: spec.retrieved,
         ctid: spec.ctid,
         with_key: s.with_key,
+        copy: s.fdw.as_ref().is_some_and(|f| f.copy_mark),
         sys: s.sys,
         local: spec.local,
         alias: s.alias.clone(),
@@ -509,6 +516,7 @@ pub fn remote_rows(t: &Table, ctx: &ExecCtx) -> Result<(Vec<Row>, i32)> {
         retrieved: cols,
         ctid: false,
         with_key: false,
+        copy: false,
         sys: false,
         local: Vec::new(),
         alias: None,

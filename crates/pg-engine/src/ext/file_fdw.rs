@@ -472,6 +472,7 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
         defaults,
         filter: s.filter.clone(),
         with_key: s.with_key,
+        copy: s.fdw.as_ref().is_some_and(|f| f.copy_mark),
         sys: s.sys,
         key: s as *const ScanPlan as usize,
         n: 0,
@@ -484,6 +485,8 @@ struct FileScan {
     defaults: Vec<Option<Expr>>,
     filter: Option<Expr>,
     with_key: bool,
+    /// The key column is the row's copy (`FdwPushdown::copy_mark`).
+    copy: bool,
     sys: bool,
     /// The scan's plan address (instrumentation's key).
     key: usize,
@@ -505,7 +508,9 @@ impl Node for FileScan {
             let mut row = self.reader.row(rec, &self.defaults, ctx)?;
             self.n += 1;
             if self.with_key {
-                row.push(Value::Bytea(Arc::from(&self.n.to_be_bytes()[..])));
+                // (A row mark's copy of the row, ROW_MARK_COPY, `FdwPushdown::copy_mark`.)
+                let key = if self.copy { crate::exec::scan::copy_key(self.reader.copy.table.oid, &row) } else { self.n.to_be_bytes().to_vec() };
+                row.push(Value::Bytea(Arc::from(key)));
             }
             if self.sys {
                 let oid = self.reader.copy.table.oid;

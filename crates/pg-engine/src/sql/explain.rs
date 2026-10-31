@@ -5457,6 +5457,7 @@ impl Builder<'_, '_> {
             // do the Limits over it, which return their input's target list.)
             lock_junk(&mut node);
             copy_mark_rows(&mut node);
+            direct_member_outputs(&mut node);
         }
         if shared {
             return node;
@@ -10330,11 +10331,14 @@ impl Builder<'_, '_> {
             let mut tmp = ExNode::default();
             self.target(&mut tmp, Some("Relation Name"), Some(&t.name), Some(&schema), r);
             // (A foreign member: "Foreign <op>", and VERBOSE, its statement for each row
-            // under it: ExplainForeignModify.)
+            // under it: ExplainForeignModify. Not one changed by a statement of its own, which
+            // its Append child shows: ExplainDirectModify.)
             let mut title = format!("{op}{}", tmp.title);
             if t.foreign.is_some() {
                 title = format!("Foreign {title}");
+                let direct = matches!(target_scan(source, t.oid), Some(Plan::Scan(s)) if s.fdw.as_ref().is_some_and(|f| f.direct.is_some()));
                 if self.o.verbose
+                    && !direct
                     && let Some(sql) = self.member_remote_sql(op, pt, t, sets, returning, checks, sys)
                 {
                     title.push_str("\n  Remote SQL: ");
@@ -11613,7 +11617,13 @@ impl Builder<'_, '_> {
             .collect();
         let mut width: u32 = cols.iter().map(|c| c.width).sum();
         if s.with_key {
-            names.push(Name::col(&refname, "ctid"));
+            // (A foreign table's row mark copies its whole row, ROW_MARK_COPY's `t.*`.)
+            if s.fdw.as_ref().is_some_and(|f| f.copy_mark) {
+                let q = format!("{}.*", quote_ident(&refname));
+                names.push(Name { plain: q.clone(), full: q });
+            } else {
+                names.push(Name::col(&refname, "ctid"));
+            }
             width += 6;
             cols.push(ColInfo {
                 width: 6,
@@ -11638,10 +11648,17 @@ impl Builder<'_, '_> {
                 .sum();
         }
         if self.rowmarks.contains(&addr(p)) {
-            width += 6;
             // (Its ctid; an inheritance parent's (relhassubclass) tableoid too, after every
-            // relation's ctid: expand_inherited_rtentry adds it.)
-            let mut junk = vec![((0, s.rti), format!("{}.ctid", quote_ident(&refname)))];
+            // relation's ctid: expand_inherited_rtentry adds it. A foreign table's whole row
+            // instead, ROW_MARK_COPY: a tuple header and its columns, set_rel_width.)
+            let mark = if t.foreign.is_some() {
+                width += 24 + cols.iter().map(|c| c.width).sum::<u32>();
+                format!("{}.*", quote_ident(&refname))
+            } else {
+                width += 6;
+                format!("{}.ctid", quote_ident(&refname))
+            };
+            let mut junk = vec![((0, s.rti), mark)];
             if cat.class_has_subclass.contains(&t.oid) {
                 junk.push(((1, s.rti), format!("{}.tableoid", quote_ident(&refname))));
             }
@@ -12249,7 +12266,12 @@ impl Builder<'_, '_> {
         if let Some(f) = &fspec {
             d.filter = f.local.clone();
         }
+        let direct = s.fdw.as_ref().and_then(|f| f.direct.clone());
         let mut n = match &s.access {
+            // (A member changed by a statement of its own: ExplainDirectModify.)
+            _ if fspec.is_some() && direct.is_some() => {
+                ExNode::new(if direct.as_ref().is_some_and(|d| d.update) { "Foreign Update" } else { "Foreign Delete" })
+            }
             _ if fspec.is_some() => ExNode::new("Foreign Scan"),
             Access::Index { only, .. } => {
                 let ix_name = s.index.as_ref().map(|i| i.0.name.clone()).unwrap_or_default();
@@ -12400,7 +12422,11 @@ impl Builder<'_, '_> {
         }
         if let Some(f) = fspec {
             if self.o.verbose {
-                n.details.push(Detail::Text("Remote SQL", f.sql));
+                let sql = match &direct {
+                    Some(dm) => crate::ext::postgres_fdw::direct::member_sql(s, dm, &self.ctx.catalog(), self.ctx.fmt()).0,
+                    None => f.sql,
+                };
+                n.details.push(Detail::Text("Remote SQL", sql));
             }
             return n;
         }
@@ -17124,6 +17150,17 @@ fn unique_for(cat: &crate::catalog::Catalog, p: &Plan, keys: &[&Expr]) -> bool {
                 })
         }
         _ => false,
+    }
+}
+
+/// An inherited UPDATE / DELETE's member changed by a statement of its own (its Append
+/// child's Foreign Update / Delete) returns its RETURNING rows, no target list of its own.
+fn direct_member_outputs(n: &mut ExNode) {
+    for c in &mut n.children {
+        if matches!(c.node_type, "Foreign Update" | "Foreign Delete") && c.relationship == Some("Member") {
+            c.output.clear();
+        }
+        direct_member_outputs(c);
     }
 }
 

@@ -97,6 +97,11 @@ fn loopback_traffic() {
         "CREATE FOREIGN TABLE fkid (extra int) INHERITS (par) SERVER loop OPTIONS (table_name 'kid')".into(),
         "CREATE FUNCTION keep() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'".into(),
         "CREATE TRIGGER keep BEFORE UPDATE ON fkid FOR EACH ROW EXECUTE FUNCTION keep()".into(),
+        // (The same without the trigger: the member's change sent whole.)
+        "CREATE TABLE kid2 (id int, v text, extra int)".into(),
+        "INSERT INTO kid2 SELECT g, 'k' || g, g FROM generate_series(1, 2000) g".into(),
+        "CREATE TABLE par2 (id int, v text)".into(),
+        "CREATE FOREIGN TABLE fkid2 (extra int) INHERITS (par2) SERVER loop OPTIONS (table_name 'kid2')".into(),
     ] {
         run(&mut s, &q);
     }
@@ -123,5 +128,9 @@ fn loopback_traffic() {
     phase(&mut s, "direct updates", &upd);
     let inh: Vec<String> = (0..20).map(|i| format!("UPDATE par SET v = v || 'z' WHERE id BETWEEN {} AND {}", i * 50, i * 50 + 49)).collect();
     phase(&mut s, "inherited updates, row trigger (50 rows)", &inh);
+    let inh2: Vec<String> = (0..20).map(|i| format!("UPDATE par2 SET v = v || 'z' WHERE id BETWEEN {} AND {}", i * 50, i * 50 + 49)).collect();
+    phase(&mut s, "inherited updates, sent whole (50 rows)", &inh2);
+    let locked: Vec<String> = (0..20).map(|i| format!("SELECT loc.id, ft.v FROM loc JOIN ft ON ft.id = loc.id WHERE loc.id < {} FOR UPDATE OF loc", 300 + i)).collect();
+    phase(&mut s, "locked local join foreign", &locked);
     println!("peak RSS {} kB (after setup {} kB)", peak_kb(), base);
 }

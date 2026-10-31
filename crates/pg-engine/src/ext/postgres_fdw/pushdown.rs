@@ -138,6 +138,9 @@ pub fn push(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
         }
         _ => {}
     }
+    if matches!(p, Plan::Update(_) | Plan::Delete(_)) {
+        super::direct::mark_members(cat, fmt, p);
+    }
     for c in crate::sql::explain::plan_inputs_mut(p) {
         if has_foreign(c) {
             push(cat, fmt, Arc::make_mut(c));
@@ -170,6 +173,41 @@ fn mark_target(cat: &Catalog, source: &mut Arc<Plan>, oid: u32, update: bool) {
     }
 }
 
+/// An UPDATE / DELETE / MERGE's foreign relations other than its target: their row marks
+/// copy whole rows (ROW_MARK_COPY, preprocess_rowmarks; EXPLAIN's `t.*`), so their scans
+/// read every column (`FdwPushdown::copy_mark`).
+fn dml_copies(p: &mut Plan) {
+    fn level(source: &mut Arc<Plan>) {
+        if !has_foreign(source) {
+            return;
+        }
+        match Arc::make_mut(source) {
+            Plan::Scan(s) => {
+                if s.table.foreign.is_some() && !s.with_key && s.mark.is_none() && s.rti.0 != 0 && !s.fdw.as_ref().is_some_and(|f| f.target) {
+                    let mut f = s.fdw.as_deref().cloned().unwrap_or_default();
+                    f.copy_mark = true;
+                    s.fdw = Some(Arc::new(f));
+                }
+            }
+            // (Sources planned apart: a subquery's, a CTE's relations have no row marks.)
+            Plan::Barrier { .. } | Plan::With { .. } | Plan::CteScan { .. } | Plan::LockRows { .. } => {}
+            p => crate::sql::explain::plan_inputs_mut(p).into_iter().for_each(level),
+        }
+    }
+    match p {
+        Plan::Update(up) => level(&mut up.source),
+        Plan::Delete(dp) => level(&mut dp.source),
+        Plan::Merge(mp) => level(&mut mp.source),
+        p => {
+            for c in crate::sql::explain::plan_inputs_mut(p) {
+                if has_foreign(c) {
+                    dml_copies(Arc::make_mut(c));
+                }
+            }
+        }
+    }
+}
+
 fn has_foreign(p: &Plan) -> bool {
     match p {
         Plan::Scan(s) => s.table.foreign.is_some(),
@@ -199,6 +237,7 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
     {
         compose_over_foreign(Arc::make_mut(input));
     }
+    dml_copies(p);
     // (A target list computed over a projection that only drops a foreign relation's
     // resjunk columns: the Foreign Scan computes it, those columns its resjunk entries.)
     if let Plan::Project { input, .. } = p
@@ -393,7 +432,8 @@ fn set_remote_locks(p: &mut Plan, marks: &[crate::sql::plan::LockMark], ok: &mut
         return;
     };
     match marks.iter().find(|m| m.tables.iter().any(|t| t.oid == s.table.oid)) {
-        Some(m) if s.with_key && !s.sys && s.fdw.is_none() => {
+        // (The key `rowmarks` gave it is its row's copy: nothing else sent yet.)
+        Some(m) if s.with_key && !s.sys && s.fdw.as_deref().is_none_or(|f| f.copy_mark && f.order.is_empty() && !f.has_limit && !f.target) => {
             s.with_key = false;
             s.mark = m.lock;
             s.fdw = Some(Arc::new(FdwPushdown { copy_mark: true, ..Default::default() }));

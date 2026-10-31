@@ -341,8 +341,17 @@ fn key(p: &Plan) -> Option<Keyed> {
             let mut s = s.clone();
             s.with_key = true;
             // (A foreign table's rows are locked by its remote query's locking clause
-            // (postgres_fdw's deparseLockingClause): its scan keeps the lock too.)
-            let lock = if s.table.foreign.is_some() { s.mark } else { s.mark.take() };
+            // (postgres_fdw's deparseLockingClause): its scan keeps the lock too. Its row mark
+            // is a copy of the whole row (ROW_MARK_COPY: no wrapper here chooses another), the
+            // key column `exec::scan::copy_key`'s, which EvalPlanQual returns again.)
+            let lock = if s.table.foreign.is_some() {
+                let mut f = s.fdw.as_deref().cloned().unwrap_or_default();
+                f.copy_mark = true;
+                s.fdw = Some(Arc::new(f));
+                s.mark
+            } else {
+                s.mark.take()
+            };
             let n = s.table.columns.len();
             let key = Key {
                 col: n,

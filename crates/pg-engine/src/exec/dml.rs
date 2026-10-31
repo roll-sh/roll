@@ -4741,6 +4741,17 @@ impl Node for UpdateNode {
                 return Ok(Some(eval_all(&self.plan.returning, &out, ctx)?));
             }
             let dkey = key_of(&src[n])?;
+            // (A member row its remote statement changed already, `FdwPushdown::direct`:
+            // counted there, returned here.)
+            if crate::ext::postgres_fdw::direct::is_member_key(&dkey) {
+                if self.plan.returning.is_empty() {
+                    continue;
+                }
+                let mut out = src[..n].to_vec();
+                out.push(Value::Null);
+                out.extend(src[n + 1..].iter().cloned());
+                return Ok(Some(eval_all(&self.plan.returning, &out, ctx)?));
+            }
             // The row is changed in the table it is in: the one named, or a member.
             let member = member_at(&self.plan.members, |m| m.rules.table.oid, &dkey);
             let (rules, msets, map, cols, owner) = match member {
@@ -5175,6 +5186,13 @@ impl Node for DeleteNode {
                 return Ok(Some(eval_all(&self.plan.returning, &src, ctx)?));
             }
             let dkey = key_of(&src[n])?;
+            // (A member row its remote statement deleted already, `FdwPushdown::direct`.)
+            if crate::ext::postgres_fdw::direct::is_member_key(&dkey) {
+                if self.plan.returning.is_empty() {
+                    continue;
+                }
+                return Ok(Some(eval_all(&self.plan.returning, &src, ctx)?));
+            }
             // The row is deleted from the table it is in: the one named, or a member.
             let member = member_at(&self.plan.members, |m| m.table.oid, &dkey);
             let (t, triggers, indexes, map, owner) = match member {

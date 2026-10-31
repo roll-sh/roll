@@ -279,6 +279,23 @@ pub struct FdwPushdown {
     /// the named table lacks too) is kept for the DML node (`modify::keep_member_row`), as
     /// PostgreSQL's member scan returns it, so no row is read again by its ctid.
     pub member: bool,
+    /// The target is an inheritance member (or a partition) of an UPDATE / DELETE whose
+    /// change the wrapper sends whole (postgresPlanDirectModify of an Append's child): the
+    /// scan runs the remote statement and returns its RETURNING rows, not rows to change.
+    pub direct: Option<Arc<DirectMember>>,
+}
+
+/// `FdwPushdown::direct`: what the member's remote UPDATE / DELETE sends.
+#[derive(Clone, Debug)]
+pub struct DirectMember {
+    /// An UPDATE (else a DELETE).
+    pub update: bool,
+    /// The member's column, its new value over the member's row.
+    pub sets: Vec<(usize, Expr)>,
+    /// The member's columns RETURNING reads, in column order.
+    pub returned: Vec<usize>,
+    /// The statement has a RETURNING list (a row per row changed goes up).
+    pub returning: bool,
 }
 
 /// `ScanPlan::params`.

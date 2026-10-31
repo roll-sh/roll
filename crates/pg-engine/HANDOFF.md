@@ -656,6 +656,42 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   starts shows its loop under a LIMIT the synchronous member satisfies). Verified the same way
   (regress 51,148 / 51,150 with no unit changed, isolation 121 / 122, contrib 1,931 / 218 /
   187).
+  Round 24 (agent 137, postgres_fdw 1,941 / 2,053): foreign rows under row marks are copies
+  (ROW_MARK_COPY). A foreign scan under a LockRows returns its whole row as its mark's key
+  (`rowmarks::key` sets `FdwPushdown::copy_mark` with `with_key`; the key is
+  `exec::scan::copy_key`, the table's key prefix then the row encoded; postgres_fdw and
+  file_fdw make it), so the remote query reads every column and no ctid, and EXPLAIN shows
+  `t.*`. EvalPlanQual rechecks with that copy: `LockRowsNode::recheck` gives a foreign mark
+  its key as the test row, and a foreign scan in a recheck returns it if it passes the scan's
+  conditions, remote ones included (`scan::epq_copy_scan`, ForeignRecheck), sending nothing.
+  Before, the recheck looked the foreign row up in local storage, found none and ran the
+  remote query again, pairing every rechecked row with the first remote row
+  (`tests/fdw_loopback.rs` `recheck_keeps_foreign_rows`). An UPDATE / DELETE / MERGE's foreign
+  relations other than the target are whole-row marked too (`pushdown::dml_copies`: every
+  column read, EXPLAIN's `t.*`). Direct modification of inheritance members and partitions
+  (postgresPlanDirectModify of an Append child): `direct::mark_members` (run from
+  `pushdown::push` on an inherited UPDATE / DELETE whose source is only projections over the
+  tree's Appends) gives a foreign member with no row triggers of the event, no stored
+  generated columns, shippable new values and conditions and no transition tables on the
+  named table a `DirectMember` (`FdwPushdown::direct`); its scan runs the remote UPDATE /
+  DELETE ... RETURNING (parameters as literals, as cursors send them) and returns the
+  RETURNING rows keyed `direct::member_key`, which `exec/dml.rs` UpdateNode / DeleteNode only
+  return (the count is the remote statement's). EXPLAIN shows the member's Foreign Update /
+  Delete as the Append child with its Remote SQL and no Output, the ModifyTable's member line
+  without it. `fdw_traffic`'s new phase (20 inherited UPDATEs of 50 rows, no trigger; debug,
+  loopback): 51.95 -> 2.00 remote writes per statement, 112.7 -> 3.1 kB out, 78.0 -> 1.2 kB
+  in, 19.0 -> 0.45 s; the other phases the same writes and bytes, peak RSS 152.9 -> 153.2 MB.
+  Still open there: inheritance trees mixing local and foreign members under a LockRows
+  (PostgreSQL's mark has a ctid, a whole row and a tableoid, every member returning all
+  three; 1058-1068), a foreign join's EPQ outer plan (fdw_outerpath) and its whole-row
+  marks in levels locking local relations (198, 266, 268, 272, 275).
+  `deep_input` (viewdef 2000) and `deparse_identity` `deep_view_on_2mb_thread` fail on
+  3b55b060 without this round's changes too (stack depth in a stored view's parse; debug
+  only, release passes). Verified: crate tests (debug and release, but for those two),
+  clippy (no new warnings), the difftest smoke, isolation 121 / 122 plus the roll-* specs, a
+  full regress run on a private reference (51,148 / 51,150, no unit changed against
+  results.tsv), contrib postgres_fdw 1,941 (10 units gained, none lost), dblink 218,
+  file_fdw 187.
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

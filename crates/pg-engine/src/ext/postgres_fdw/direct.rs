@@ -258,3 +258,280 @@ impl Node for DirectNode {
         Ok(next)
     }
 }
+
+/// The scans of an inherited UPDATE / DELETE's members that are its Appends' children (the
+/// source no more than projections over the tree's Appends: no join, PostgreSQL's
+/// find_modifytable_subplan).
+fn member_scans<'p>(p: &'p mut Plan, out: &mut Vec<&'p mut ScanPlan>) -> bool {
+    match p {
+        Plan::Scan(s) => {
+            if s.table.foreign.is_some() && s.with_key {
+                out.push(s);
+            }
+            true
+        }
+        Plan::Project { input, .. } => member_scans(Arc::make_mut(input), out),
+        Plan::Append { inputs, inh: Some(_), .. } => inputs.iter_mut().all(|i| member_scans(Arc::make_mut(i), out)),
+        Plan::Empty { .. } => true,
+        _ => false,
+    }
+}
+
+/// `e` over the named table's columns as over the member's (`map`), when it reads no other.
+fn as_member(e: &Expr, map: &[Option<usize>]) -> Option<Expr> {
+    let mut ok = true;
+    let e = e
+        .clone()
+        .transform(&mut |x| {
+            Ok(match x {
+                Expr::Col(c, t) => match map.get(c).copied().flatten() {
+                    Some(j) => Expr::Col(j, t),
+                    None => {
+                        ok = false;
+                        Expr::Col(c, t)
+                    }
+                },
+                x => x,
+            })
+        })
+        .ok()?;
+    ok.then_some(e)
+}
+
+/// The member columns RETURNING reads (the named table's, mapped; its tableoid is the
+/// node's own), None when it reads another relation's or a system column.
+fn member_returned(list: &[Expr], named: usize, map: &[Option<usize>], member: &Table) -> Option<Vec<usize>> {
+    let tableoid = named + 1 + crate::exec::scan::NUM_SYS_COLS - 1;
+    let mut used = vec![false; member.columns.len()];
+    for e in list {
+        for c in e.columns() {
+            if c == tableoid {
+                continue;
+            }
+            used[map.get(c).copied().flatten()?] = true;
+        }
+    }
+    Some((0..used.len()).filter(|i| used[*i] && !member.columns[*i].dropped).collect())
+}
+
+/// postgresPlanDirectModify for an inherited UPDATE / DELETE's foreign members (each an
+/// Append child of its own): a member with no row triggers of the event (nor stored
+/// generated columns for an UPDATE), all of whose conditions and new values ship, is
+/// changed by one remote statement its scan runs (`FdwPushdown::direct`).
+pub fn mark_members(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan) {
+    struct M {
+        table: Arc<Table>,
+        row_trigs: bool,
+        sets: Option<Vec<(usize, Expr)>>,
+        map: Vec<Option<usize>>,
+        checks: bool,
+    }
+    // (A named table with transition tables: its members' rows go through the node, whose
+    // ExecInitModifyTable refuses foreign members.)
+    let (trigs, ev) = match p {
+        Plan::Update(up) => (&up.rules.triggers, tt::UPDATE),
+        Plan::Delete(dp) => (&dp.triggers, tt::DELETE),
+        _ => return,
+    };
+    if trigs.iter().any(|b| b.trig.tgtype & ev != 0 && (b.trig.old_table.is_some() || b.trig.new_table.is_some())) {
+        return;
+    }
+    let (source, members, returning, named, event) = match p {
+        Plan::Update(up) => {
+            if !up.inh || up.rules.view || up.old_new.is_some() || !up.rules.rls_checks.is_empty() || !up.rules.view_checks.is_empty() {
+                return;
+            }
+            let members: Vec<M> = up
+                .members
+                .iter()
+                .map(|m| M {
+                    table: m.rules.table.clone(),
+                    row_trigs: has_row_triggers(&m.rules.triggers, tt::UPDATE),
+                    sets: Some(m.sets.clone()),
+                    map: m.map.clone(),
+                    checks: !m.rules.rls_checks.is_empty() || !m.rules.view_checks.is_empty(),
+                })
+                .collect();
+            (&mut up.source, members, up.returning.clone(), up.rules.table.columns.len(), tt::UPDATE)
+        }
+        Plan::Delete(dp) => {
+            if !dp.inh || dp.view || dp.old_new.is_some() {
+                return;
+            }
+            let members: Vec<M> = dp
+                .members
+                .iter()
+                .map(|m| M { table: m.table.clone(), row_trigs: has_row_triggers(&m.triggers, tt::DELETE), sets: None, map: m.map.clone(), checks: false })
+                .collect();
+            (&mut dp.source, members, dp.returning.clone(), dp.table.columns.len(), tt::DELETE)
+        }
+        _ => return,
+    };
+    if !members.iter().any(|m| m.table.foreign.is_some() && is_postgres_fdw(cat, &m.table)) {
+        return;
+    }
+    let mut scans = Vec::new();
+    if !member_scans(Arc::make_mut(source), &mut scans) {
+        return;
+    }
+    for s in scans {
+        let Some(m) = members.iter().find(|m| m.table.oid == s.table.oid) else { continue };
+        let t = &m.table;
+        if !is_postgres_fdw(cat, t)
+            || m.checks
+            || m.row_trigs
+            || s.mark.is_some()
+            || s.current_of.is_some()
+            || s.sample.is_some()
+            || s.fdw.as_ref().is_some_and(|f| f.member || !f.order.is_empty() || f.has_limit)
+            || (event == tt::UPDATE && t.columns.iter().any(|c| c.generated.is_some() && !c.virtual_gen && !c.dropped))
+            || !super::scan::spec(s, None, cat, fmt).local.is_empty()
+        {
+            continue;
+        }
+        let d = Deparser::new(cat, t, fmt);
+        let mut sets = Vec::new();
+        if let Some(list) = &m.sets {
+            let n = t.columns.len();
+            let mut ok = true;
+            for (c, e) in list {
+                match as_member(e, &m.map) {
+                    Some(x) if *c < n && d.shippable(&x) => sets.push((*c, x)),
+                    _ => ok = false,
+                }
+            }
+            if !ok {
+                continue;
+            }
+            sets.sort_by_key(|x| x.0);
+        }
+        let Some(returned) = member_returned(&returning, named, &m.map, t) else { continue };
+        let mut f = s.fdw.as_deref().cloned().unwrap_or_default();
+        f.direct = Some(Arc::new(crate::sql::plan::DirectMember { update: m.sets.is_some(), sets, returned, returning: !returning.is_empty() }));
+        s.fdw = Some(Arc::new(f));
+    }
+}
+
+/// A member's remote statement (deparseDirectUpdateSql / deparseDirectDeleteSql) and its
+/// parameters.
+pub fn member_sql(s: &ScanPlan, dm: &crate::sql::plan::DirectMember, cat: &Catalog, fmt: &crate::types::text::FormatCtx) -> (String, Vec<Expr>) {
+    let t = &s.table;
+    let spec = super::scan::spec(s, None, cat, fmt);
+    let d = Deparser::new(cat, t, fmt);
+    let mut sql = if dm.update {
+        let parts: Vec<String> = dm.sets.iter().map(|(c, e)| format!("{} = {}", d.column(*c), d.expr(e))).collect();
+        format!("UPDATE {} SET {}", relation_name(cat, t), parts.join(", "))
+    } else {
+        format!("DELETE FROM {}", relation_name(cat, t))
+    };
+    if !spec.remote.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&d.conditions(&spec.remote));
+    }
+    if !dm.returned.is_empty() {
+        let list = dm.returned.iter().map(|i| d.column(*i)).collect::<Vec<_>>().join(", ");
+        sql.push_str(&format!(" RETURNING {list}"));
+    }
+    let params = d.params.borrow().clone();
+    (sql, params)
+}
+
+/// The key of a member row its remote statement changed (`FdwPushdown::direct`): the
+/// member's key prefix and no remote ctid; the DML node only returns it.
+pub fn member_key(oid: u32) -> Vec<u8> {
+    let mut k = crate::storage::keys::index_prefix(oid, 0);
+    k.push(0xff);
+    k
+}
+
+/// Whether `key` is a `member_key`.
+pub fn is_member_key(key: &[u8]) -> bool {
+    key.len() == 9 && key[8] == 0xff
+}
+
+/// A member's direct modification: at the first row asked for, the remote statement; then
+/// its RETURNING rows as the member's scan returns rows (columns, `member_key`).
+pub fn open_member(s: &ScanPlan, dm: &crate::sql::plan::DirectMember, ctx: &ExecCtx) -> Result<BoxNode> {
+    let (sql, params) = member_sql(s, dm, &ctx.catalog(), ctx.fmt());
+    Ok(Box::new(MemberNode { table: s.table.clone(), sql, params, returned: dm.returned.clone(), returning: dm.returning, sys: s.sys, rows: None }))
+}
+
+struct MemberNode {
+    table: Arc<Table>,
+    sql: String,
+    params: Vec<Expr>,
+    returned: Vec<usize>,
+    returning: bool,
+    /// The scan returns the system columns after the key (a foreign row's: no ctid).
+    sys: bool,
+    rows: Option<std::vec::IntoIter<Row>>,
+}
+
+impl MemberNode {
+    fn run(&mut self, ctx: &ExecCtx) -> Result<Vec<Row>> {
+        // (Parameters as literals of their types, as a scan's cursor sends them.)
+        let fmt = super::deparse::transmission_fmt(ctx.fmt());
+        let mut sql = self.sql.clone();
+        for (i, p) in self.params.iter().enumerate().rev() {
+            let v = crate::sql::expr::eval(p, &[], ctx)?;
+            let lit = if v.is_null() {
+                "NULL".to_string()
+            } else {
+                super::deparse::string_literal(&crate::types::text::format_value(&v, &p.ty(), &fmt))
+            };
+            sql = sql.replace(&format!("${}::", i + 1), &format!("{lit}::"));
+        }
+        let m = super::scan::mapping_for(&self.table, None, ctx)?;
+        let key = connection::get_connection(ctx, &m, false)?;
+        let intr = crate::remote::interrupts(ctx);
+        let r = connection::with_conn(ctx, key, |c| {
+            let r = c.exec(&sql, &intr)?;
+            if !matches!(r.status, Status::CommandOk | Status::TuplesOk) {
+                return Err(connection::report(&r, c, Some(&sql)));
+            }
+            Ok(r)
+        });
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                connection::note_error(ctx, key);
+                return Err(e);
+            }
+        };
+        ctx.processed.set(ctx.processed.get() + r.cmd_tuples());
+        if !self.returning {
+            return Ok(Vec::new());
+        }
+        let t = &self.table;
+        let mkey = Value::Bytea(Arc::from(member_key(t.oid)));
+        // (Nothing returned remotely: a row of NULLs per row changed, for RETURNING.)
+        let rows: Vec<Vec<Option<String>>> = if self.returned.is_empty() { vec![Vec::new(); r.cmd_tuples() as usize] } else { r.rows };
+        let mut out = Vec::with_capacity(rows.len());
+        for vals in rows {
+            let mut row = vec![Value::Null; t.columns.len()];
+            for (k, &i) in self.returned.iter().enumerate() {
+                if let Some(Some(s)) = vals.get(k) {
+                    let col = &t.columns[i];
+                    row[i] = crate::types::text::parse_value(s, &col.ty, ctx.fmt())
+                        .map_err(|e| e.context(format!("column \"{}\" of foreign table \"{}\"", col.name, t.name)))?;
+                }
+            }
+            row.push(mkey.clone());
+            if self.sys {
+                row.extend([Value::Tid(u32::MAX, 0), Value::Oid(0), Value::Oid(0), Value::Oid(0), Value::Oid(0), Value::Oid(t.oid)]);
+            }
+            out.push(row);
+        }
+        Ok(out)
+    }
+}
+
+impl Node for MemberNode {
+    fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        if self.rows.is_none() {
+            let rows = self.run(ctx)?;
+            self.rows = Some(rows.into_iter());
+        }
+        Ok(self.rows.as_mut().and_then(Iterator::next))
+    }
+}

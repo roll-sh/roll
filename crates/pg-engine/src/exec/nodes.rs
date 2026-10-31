@@ -651,6 +651,11 @@ impl LockRowsNode {
             let test = match test {
                 None => None,
                 Some((k, Some(b))) => Some((k, b)),
+                // (A foreign table's mark is a copy of its row, ROW_MARK_COPY: the key holds
+                // it, `scan::copy_key`; nothing to read.)
+                Some((k, None)) if scans.iter().any(|s| s.table.foreign.is_some() && s.table.oid == key_table(&k)) => {
+                    Some((k, bytes::Bytes::new()))
+                }
                 Some((k, None)) => {
                     let b = match snap.as_deref() {
                         Some(s) => ctx.txn.borrow().get_snap(&k, s)?,
