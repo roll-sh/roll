@@ -382,6 +382,36 @@ impl Search<'_, '_, '_> {
         }
         Some((self.alt_plan(pp, layout)?, pp.total))
     }
+
+    /// Under a grouping (the `Order` hint): the top relation's cheapest path whose leading
+    /// keys are group keys (pathkeys_useful_for_grouping; the rest sorted incrementally, as
+    /// add_paths_to_grouping_rel's sorts), as a plan returning the serial plan's row, when
+    /// it joins otherwise than `best` (`JoinMeta::ord_alt`).
+    pub(super) fn ord_alt(&self, best: &JP, layout: &[usize]) -> Option<Plan> {
+        let o = self.order.as_ref().filter(|o| o.hint)?;
+        let want = self.query_keys();
+        let rel = self.rels.iter().find(|r| r.set == best.set)?;
+        let mut pick: Option<(&JP, f64)> = None;
+        for p in rel.paths.iter().filter(|p| p.req == 0) {
+            let pre = p.keys.iter().take_while(|k| want.contains(k)).count();
+            if pre == 0 || (pre < want.len() && !self.g.incremental_sort) {
+                continue;
+            }
+            let total = if pre >= want.len() {
+                p.total
+            } else {
+                costs::incremental_sort_cost(p.startup, p.total, p.rows, o.width, p.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT), None).1
+            };
+            if pick.is_none_or(|(_, t)| total < t) {
+                pick = Some((p, total));
+            }
+        }
+        let (p, _) = pick?;
+        if same_tree(p, best) {
+            return None;
+        }
+        self.alt_plan(p, layout)
+    }
 }
 
 /// Two paths join the same relations the same way round by the same methods over the same

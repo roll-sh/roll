@@ -351,6 +351,59 @@ Looked at and left (why):
 - q09, q10 (serial): ANALYZE's random sample (p_name's histogram; Postgres's own plan flips
   between runs of ANALYZE).
 
+## Round 24, agent 140 (planner round 8, first batch: groupings over sorted joins, SELECT analysis apart from planning, InitPlan keys)
+
+Measured by a full run of the batch (debug build, private reference `a140-rref`) against the
+committed baseline (`results.tsv`, `9407d0ee`): **51,148 / 51,150, no unit changed**. The
+difftest smoke passes, and 150 seeds x 120 statements with `DIFFTEST_PLAN=0.5` give the same mismatch records as the base (`4153f12f`), record for record (544).
+Isolation: the suite 121 / 122 as before, plus reindex-schema, which fails on the base
+(`4153f12f`) the same way ("file numbers of relations that are gone"; not this batch), and
+every roll-* spec. Every TPC-H SF1 result hash agrees with PostgreSQL's. `plancmp.py`: 77 / 89
+at the defaults (TPC-H 19 / 22), **81 / 89 serial** (TPC-H 21 / 22; the base measured 79 / 89:
+q10 and q18 match now). (The generated blocks are left to the next committed full run.)
+
+- **A grouping over a join reads the join relation's sorted paths** (add_paths_to_grouping_rel
+  over the pathlist, pathkeys_useful_for_grouping). The join search's grouping hint now has
+  the group keys remove_useless_groupby_columns leaves (no key a table's primary key, or a
+  unique index of NOT NULL columns, among the keys determines: `explain::unique_key_redundant`,
+  shared with EXPLAIN's `redundant_keys`), so a path sorted on c_custkey is useful to TPC-H
+  q18's and q10's groupings. The top join keeps, beside its cheapest tree, the cheapest path
+  whose leading keys are group keys (the rest sorted incrementally) as `JoinMeta::ord_alt`
+  (`paths/joinpath/partial.rs` `ord_alt`); EXPLAIN's grouping builds it as another input of
+  the sorted grouping (`explain/parallel.rs` `ord_alt_node`, its nodes' output columns from an
+  Agg over it), and EXPLAIN ANALYZE runs the tree shown (`analyzed_plan`). The executor runs
+  the serial tree and puts the groups in the shown grouping's order, as before. TPC-H q18 and
+  q10 have PostgreSQL's serial plans now (a GroupAggregate over an Incremental Sort over a
+  merge join in c_custkey order); q18's parallel plan still needs partial merge joins.
+- **SELECT analysis apart from planning** (`Binder::analyze_statement` -> `Analyzed`,
+  `Analyzed::plan`; agreed with agent 136, who re-plans kept plans from it): a plain SELECT's
+  own query level is planned by `Analyzed::plan` (its LIMIT, pushed and own row locks, the
+  statement's row-level security state, the deferred plan and fold errors, the DML
+  statement's untyped-parameter error after its planning's, in `bind_statement`'s order);
+  `bind_statement` is analysis then planning. A level planned while analyzing (a sub-select,
+  a FROM subquery, a CTE, set operation arms, rules) or an estimate read then is counted
+  (`Binder::planned_in_analysis`); `Analyzed::replannable` says whether planning it again
+  alone equals a new bind after the relations' sizes change. DML is analyzed the same way.
+- **An uncorrelated sub-select bounds an index scan**: it is an InitPlan's Param to
+  PostgreSQL, a runtime key (ExecIndexEvalRuntimeKeys). The scan's bounds took no
+  sub-select (`paths::usable` refused anything `is_volatile` calls volatile), so `WHERE id =
+  (SELECT min(id) FROM t)` read the whole index and filtered: agent 129's queue-table DELETE
+  (`DELETE ... WHERE hid = (SELECT min(hid) ...)`, 435 ms -> 1 ms against PostgreSQL's 1 ms
+  with 100,000 dead keys ahead) and agent 139's `id = (SELECT 500000)` (600 ms -> 1 ms).
+- **A KNN ordering written the other way round** (pg_trgm's `'x' <<-> t`) commutes to the
+  index's operator (`t <->> 'x'`): the families' operators' commutators that aren't in them
+  are known to the index (`user_ops`), as match_clause_to_ordering_op's get_commutator.
+
+Golden `a140_planner_batch1` (recorded from PostgreSQL 18.6): q18's and q10's shapes at a
+small scale (work_mem 64kB), the InitPlan bounds, the commuted KNN orderings.
+
+Found and routed: a HashAggregate's group order over a hash join differs from PostgreSQL's
+with a redundant group key (agent 143, executor); the GiST size model of btree_gist's
+opclasses (relpages 11 / 11 / 11 against 9 / 13 / 17) makes a KNN pick another index
+(storage, HANDOFF item 11); `deep_input` (viewdef 2000) and `deparse_identity`
+(deep_view_on_2mb_thread) fail on the base already (debug builds; a stored view's parse
+over libpg_query's depth limit).
+
 ## Round 23, agent 116 (planner round 7, first batch: plan shapes of ORM and TPC-DS-style queries)
 
 Measured by a full run of the batch (debug build, private reference `a116-rref`) against the

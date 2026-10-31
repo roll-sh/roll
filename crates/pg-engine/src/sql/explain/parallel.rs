@@ -1234,6 +1234,40 @@ impl Builder<'_, '_> {
     }
 }
 
+impl Builder<'_, '_> {
+    /// A grouping's input along its join group's tree sorted on some of the group keys
+    /// (`JoinMeta::ord_alt`, through the projections over the join), built as
+    /// `main` is: add_paths_to_grouping_rel reads the relation's other paths besides the
+    /// cheapest. Not under ANALYZE (`analyzed_plan` has swapped in the tree shown).
+    pub(super) fn ord_alt_node(&mut self, input: &Arc<Plan>, groups: &[Expr], aggs: &[AggCall], main: &Built) -> Option<ExNode> {
+        fn swapped(p: &Plan) -> Option<Plan> {
+            match p {
+                Plan::Project { input, exprs } => Some(Plan::Project { input: Arc::new(swapped(input)?), exprs: exprs.clone() }),
+                Plan::Join { meta, .. } => meta.ord_alt.0.as_ref().map(|a| (**a).clone()),
+                _ => None,
+            }
+        }
+        if self.o.analyze {
+            return None;
+        }
+        let alt = Arc::new(swapped(input)?);
+        self.alt_refnames(input, &alt);
+        // (The columns its nodes return: what the grouping reads of it, as of `input`.)
+        let over = Plan::Agg { input: alt.clone(), groups: groups.to_vec(), sets: None, aggs: aggs.to_vec() };
+        for (k, v) in super::needed_masks_of(&over) {
+            self.needed.entry(k).or_insert(v);
+        }
+        let saved = std::mem::take(&mut self.pending);
+        let saved_input = self.agg_input.replace(addr(&alt));
+        let a = self.node(&alt);
+        self.agg_input = saved_input;
+        self.pending = saved;
+        let same_names = a.exported.len() == main.exported.len()
+            && a.exported.iter().zip(&main.exported).all(|(x, y)| x.full == y.full);
+        (same_names && !a.node.order.is_empty()).then_some(a.node)
+    }
+}
+
 thread_local! {
     /// While `analyzed_plan` asks: the plan nodes the explained plan shows.
     pub(super) static SHOWN_KEYS: std::cell::RefCell<Option<std::collections::HashSet<usize>>> =
@@ -1256,8 +1290,9 @@ pub(super) fn note_shown(n: &ExNode) {
 }
 
 /// The plan EXPLAIN ANALYZE runs: the statement's plan with each join group whose
-/// parallel plan EXPLAIN shows along its partial path's tree (`JoinMeta::par_alt`) running
-/// that tree, so the nodes shown are the nodes run. None: the plan as it is.
+/// parallel plan EXPLAIN shows along its partial path's tree (`JoinMeta::par_alt`), or
+/// whose grouping reads its sorted tree (`JoinMeta::ord_alt`), running that tree, so the
+/// nodes shown are the nodes run. None: the plan as it is.
 pub fn analyzed_plan(
     plan: &Arc<Plan>,
     hidden_rtes: usize,
@@ -1266,7 +1301,8 @@ pub fn analyzed_plan(
     params: &[crate::types::Value],
 ) -> Option<Arc<Plan>> {
     fn has_alt(p: &Plan) -> bool {
-        matches!(p, Plan::Join { meta, .. } if meta.par_alt.0.is_some()) || plan_inputs(p).into_iter().any(|c| has_alt(c))
+        matches!(p, Plan::Join { meta, .. } if meta.par_alt.0.is_some() || meta.ord_alt.0.is_some())
+            || plan_inputs(p).into_iter().any(|c| has_alt(c))
     }
     fn keys(p: &Plan, out: &mut Vec<usize>) {
         out.push(addr(p));
@@ -1275,14 +1311,14 @@ pub fn analyzed_plan(
         }
     }
     fn swap(p: &mut Plan, shown: &std::collections::HashSet<usize>) -> bool {
-        if let Plan::Join { meta, .. } = p
-            && let Some(alt) = meta.par_alt.0.clone()
-        {
-            let mut ks = Vec::new();
-            keys(&alt, &mut ks);
-            if ks.iter().any(|k| shown.contains(k)) {
-                *p = (*alt).clone();
-                return true;
+        if let Plan::Join { meta, .. } = p {
+            for alt in [meta.par_alt.0.clone(), meta.ord_alt.0.clone()].into_iter().flatten() {
+                let mut ks = Vec::new();
+                keys(&alt, &mut ks);
+                if ks.iter().any(|k| shown.contains(k)) {
+                    *p = (*alt).clone();
+                    return true;
+                }
             }
         }
         let mut any = false;

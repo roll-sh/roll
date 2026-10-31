@@ -486,6 +486,11 @@ pub struct JoinMeta {
     pub par_alt: FdwAlt,
     /// That partial path's total cost as the search estimated it.
     pub par_alt_cost: AltCost,
+    /// A grouping's join group's top join, when the relation's cheapest path sorted on some
+    /// of the group keys (pathkeys_useful_for_grouping) is another than this tree: that
+    /// path's tree, over this join's row. EXPLAIN's grouping reads it besides this one
+    /// (add_paths_to_grouping_rel); the executor runs this tree.
+    pub ord_alt: FdwAlt,
 }
 
 /// `JoinMeta::fdw_alt`. Not part of its Debug text.

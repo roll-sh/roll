@@ -1251,6 +1251,7 @@ impl Binder<'_, '_> {
             _ => return Err(crate::error::internal("not a rule action")),
         };
         if !self.deparse {
+            self.planned_in_analysis += 1;
             self.hidden_rtes += crate::sql::paths::plan_query(self.ctx, &mut plan);
             if !self.unplanned {
                 super::check_merge_keys(self.ctx, &mut plan)?;

@@ -1741,6 +1741,36 @@ Planning CPU of the round's workloads, first batch / second batch interleaved th
 every TPC-H result hash agrees. Left (HANDOFF item 11): the leaf's own estimate through
 EXPLAIN's builder, the IN sub-select's binding, endpoint probes per nested Planner.
 
+## Round 24 (agent 140): groupings over sorted joins, SELECT analysis apart from planning
+
+`tools/bench/plancmp.py` over TPC-H SF1 (`a140-pg`, the engine restarted before each run):
+
+| plan shapes matching | base (`e3bb8262`) | this batch |
+|---|---|---|
+| parallel query at its defaults | 77 / 89 (TPC-H 19 / 22) | 77 / 89 (TPC-H 19 / 22) |
+| `max_parallel_workers_per_gather = 0` | 79 / 89 (TPC-H 19 / 22) | **81 / 89** (TPC-H 21 / 22) |
+
+(Round 23 measured 80 / 89 serial; `orm:exists_limit_order_limit` flips between runs.) q10 and
+q18 serial now have PostgreSQL's GroupAggregate over an Incremental Sort over a merge join in
+c_custkey order; q18 at the defaults still needs partial merge joins, q21 Gather paths at
+intermediate join relations. Every TPC-H result hash agrees with PostgreSQL's.
+
+Engine CPU of EXPLAINing the 89 queries (two interleaved runs, a restarted engine each):
+base 0.20 / 0.18 s, this batch 0.16 / 0.16 s. Peak memory (VmHWM, including the restart's
+models) 222-298 MB base, 287-320 MB this batch: within the restarts' spread.
+
+pgbench (scale 10, 4 clients, 20 s after 10 s warm, `-M prepared`; engine CPU per transaction
+from /proc; a loaded machine, base `e3bb8262` / this batch, three interleaved pairs):
+select-only 38,250 / 40,274, 39,963 / 40,590, 40,501 / 43,411 tps (72.4 / 66.5 us CPU a
+transaction in the last pair); tpcb-like 4,638 / 5,123, 4,869 / 5,245, 5,623 / 4,747 tps
+(531 / 554 us); peak memory 229-311 MB alike. No change on the statement path: a plain SELECT
+is analyzed then planned in one call, as before.
+
+The queue-table DELETE agent 129 found slow (`DELETE ... WHERE hid = (SELECT min(hid) ...)`
+after deleting the first 100,000 of 200,000 keys): 435-490 ms a statement before, as an
+uncorrelated sub-select never bounded the index scan; now the InitPlan's value is a runtime
+key (STATUS.md round 24). Agent 130's dead-range hints make the min() itself cheap.
+
 ## Catalog, DDL and sessions (round 18, agent 44)
 
 Measured on the same machine and harness as above (PostgreSQL in `a44-pg`, the pinned image

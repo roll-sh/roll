@@ -4988,16 +4988,12 @@ them all with the "Fixed in round N" sections describing what was already tried.
      629f3e51, landed while this batch was verified; customer still has 3,588 pages after a
      clean restart with it: the kept record has rows and TIDs, not the relation's trailing
      empty pages.)
-   - q18 and q10 serial (one cause; q10 isn't ANALYZE's sample: PostgreSQL's serial q10 kept
-     its plan over five fresh ANALYZEs, a GroupAggregate over an Incremental Sort over a merge
-     join in c_custkey order, as q18's): keep group-useful pathkeys at joins (pathkeys_useful_for_grouping: membership in
-     group_pathkeys after remove_useless_groupby_columns, which the join search's `Order`
-     hint doesn't apply: it has every GROUP BY key, ORDER BY's first) and offer the grouping
-     a sorted join path besides the cheapest (add_paths_to_grouping_rel reads the whole
-     pathlist; `final_path` returns the cheapest for a hint). The Memoize that made agent
-     91's attempt choose a nested loop is fixed (grouped outputs' statistics); its parallel
-     plan needs partial merge joins (`partial.rs` has nested loops and hash joins; EXPLAIN
-     already derives a partial merge join over a partial outer side).
+   - q18 and q10 serial: done in round 24 (agent 140, STATUS.md round 24): the grouping hint
+     has the keys remove_useless_groupby_columns leaves, and the top join keeps the cheapest
+     path sorted on group keys as `JoinMeta::ord_alt`, which EXPLAIN's grouping reads besides
+     the cheapest. Left: q18's parallel plan needs partial merge joins (`partial.rs` has nested
+     loops and hash joins; EXPLAIN already derives a partial merge join over a partial outer
+     side); ord_alt is the top join's only (an inner join group's grouping, a DISTINCT's).
    - q21 and `EXISTS (... LIMIT 1) ORDER BY x LIMIT n` (ORM): Gather (Merge) paths at base
      and intermediate join relations feeding serial joins above (generate_useful_gather_paths
      per join relation in standard_join_search; PostgreSQL gathers q21 below its last two
@@ -5045,10 +5041,17 @@ them all with the "Fixed in round N" sections describing what was already tried.
      introspection (11-13 s of engine CPU) is partly the planning of its catalog joins.
    - Agent 123 / 136 (OLTP): unnamed extended-protocol statements and the first five custom
      plans run the generic binding when it is provably their plan (round 3, without the
-     split); what's left needs SELECT planning out of binding (each level is planned while it
-     is bound today): re-planning a kept SELECT when a size changes re-binds it. Agent 140
-     (planner) does the split (`Binder::analyze_statement` / `Analyzed::plan`, replacing
-     `binder::UnplannedDml`), and agent 136's litplan / ParamPlans then keep an `Analyzed`.
+     split). SELECT planning apart from binding: done in round 24 (agent 140, agreed with
+     agent 136): `Binder::analyze_statement` -> `Analyzed`, `Analyzed::plan` (`bind_statement`
+     is both). The statement's own level is planned there for a plain SELECT (no WITH, set
+     operation or VALUES) and for DML; a sub-select, FROM subquery, CTE or set operation arm
+     is still planned while it is bound, and `Analyzed::replannable` is false then. Left for
+     the OLTP owner (agent 145): move litplan's `lit_bind` / `lit_replan` and `bound_as`'s
+     `keep_unplanned` / `param_parsed` re-plan to a kept `Analyzed` and delete
+     `binder::UnplannedDml` / `bind_keeping_analysis` (now made from the `Analyzed`; debug
+     builds assert each re-plan equals a re-bind). For the planner: defer the inner levels too
+     (each binder plan site records what `plan_query_limited` needs: the arm's LIMIT, the
+     pushed and own locks, the CTE estimates in scope), so every statement re-plans alone.
      PL/pgSQL's first five custom plans still bind afresh.
    - Agent 124 (postgres_fdw; agent 137 owns it next and may send reproducers): projections
      aren't pushed into partition members (postgres_fdw units 1751, 1766, 1768; local
@@ -5063,6 +5066,28 @@ them all with the "Fixed in round N" sections describing what was already tried.
    - CTE / UNION ALL Subquery Scans (`cte_window`, `union_channels`), ROLLUP's and EXCEPT's
      strategy choices (`rollup_nation_year`, `except_parts`), a window over a grouped CTE
      (`top_customers_by_year`): `plancmp.py --show <name>` prints both plans.
+   - Round 24 (agent 140) found and left: under a LIMIT straight over a grouping of a join,
+     PostgreSQL's join relations consider_startup and the grouping reads the cheapest-to-start
+     sorted path (`GROUP BY c_custkey, c_name LIMIT 8` over customer x orders: a GroupAggregate
+     over a nested loop of the pkey's Index Scan). VACUUM ANALYZE leaves an index's pg_class
+     row at relpages 1 / reltuples 0 (PostgreSQL: 19 / 6000; storage / statistics). The GiST
+     size model of btree_gist's opclasses (no sort support: an insertion build) gives 11 / 11 / 11 pages where PostgreSQL has 9 / 13 / 17
+     (agent 139's `ORDER BY a <-> 50000 LIMIT 5` picks the (part, a) index; agent 126's item,
+     unowned now). Kysely's getTables (agent 131): 5.2 ms to plan against 1.37 ms, and the
+     join order differs (PostgreSQL drives from pg_attribute; the engine from pg_class with a
+     Materialize over pg_namespace). Gather paths at intermediate join relations (q21) and the
+     job-queue planning CPU are as above. Agent 133 (application CPU, BENCH.md "Application
+     CPU"): Liquibase's column-exists check (Keycloak, Metabase) is never made a semi join (a
+     sub-select per pg_attribute row, 74-110 ms a call against 1 ms; its EXPLAIN shows a wrong
+     `Recheck Cond: (oid = ns.oid)`, the rows right); planning at Parse and Bind is 25-50% of
+     those applications' CPU; pgjdbc's metadata queries cost 5-40x PostgreSQL's a call. Agent
+     139 (char(n) keys, EF Core Northwind, high priority): `probe_ok` (binder/optimize.rs) has
+     no bpchar arm, so `fill_bounds` never bounds a char(n) equality and the scan reads the
+     whole index (`c = 'ZZZZZ'` on a 20,000-row char(5) key: 250-320 ms); the plan: accept
+     bpchar for `=` / `= ANY` only (not ranges: bpcharcmp trims first), and in
+     `scan::ranges_from` probe a char(n) key with pad(trim_end(v), n) from the column's typmod,
+     no range when it is longer than n; a golden with `c = 'AB'`, `c = 'AB   '`, an over-long
+     probe and `= ANY`.
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

@@ -4549,69 +4549,9 @@ impl Builder<'_, '_> {
             _ => None,
         };
         let common = |k: usize| sets.is_none_or(|ss| ss.iter().all(|s| s.contains(&k)));
-        let mut out = vec![false; groups.len()];
-        if groups.len() >= 2 {
-            let cat = self.ctx.catalog();
-            let mut done: Vec<u32> = Vec::new();
-            for i in 0..groups.len() {
-                let Some(v) = var(i).filter(|_| common(i)) else { continue };
-                let t = &v.table;
-                if done.contains(&t.oid) {
-                    continue;
-                }
-                done.push(t.oid);
-                // (The table's grouped columns.)
-                let grouped: Vec<usize> = (0..groups.len())
-                    .filter(|&k| common(k))
-                    .filter_map(|k| var(k).filter(|w| w.table.oid == t.oid).map(|w| w.col))
-                    .collect();
-                // (The primary key first, then the indexes.)
-                let pk_deferrable = t.constraints.iter().any(|c| {
-                    matches!(c.kind, crate::catalog::ConstraintKind::PrimaryKey { .. }) && c.deferrable
-                });
-                let mut best: Option<Vec<usize>> = t
-                    .pkey
-                    .clone()
-                    .filter(|pk| !pk_deferrable && pk.iter().all(|k| grouped.contains(k)));
-                for ix in cat.table_indexes(t) {
-                    // (Of the grouping's own equality: default operator classes.)
-                    let cols: Option<Vec<usize>> = ix
-                        .columns
-                        .iter()
-                        .map(|c| match c.key {
-                            crate::catalog::IndexKey::Column(k) if c.opclass == 0 => Some(k),
-                            _ => None,
-                        })
-                        .collect();
-                    let Some(cols) = cols else { continue };
-                    let deferrable = t
-                        .constraints
-                        .iter()
-                        .any(|c| c.kind.index() == Some(ix.oid) && c.deferrable);
-                    let not_null = ix.nulls_not_distinct
-                        || cols.iter().all(|&k| t.known_not_null(k));
-                    if !ix.unique
-                        || !ix.valid
-                        || deferrable
-                        || ix.predicate.is_some()
-                        || !not_null
-                        || !cols.iter().all(|k| grouped.contains(k))
-                    {
-                        continue;
-                    }
-                    if best.as_ref().is_none_or(|b| cols.len() < b.len()) {
-                        best = Some(cols);
-                    }
-                }
-                if let Some(b) = best {
-                    for (k, o) in out.iter_mut().enumerate() {
-                        if common(k) && var(k).is_some_and(|w| w.table.oid == t.oid && !b.contains(&w.col)) {
-                            *o = true;
-                        }
-                    }
-                }
-            }
-        }
+        let mut out = unique_key_redundant(&self.ctx.catalog(), groups.len(), &|k| {
+            var(k).filter(|_| common(k)).map(|v| (v.table.clone(), v.col))
+        });
         // (A key fixed to a constant by an equality: a redundant pathkey, out of
         // processed_groupClause.)
         if sets.is_none() {
@@ -13338,6 +13278,9 @@ impl Builder<'_, '_> {
         let saved_keys = std::mem::replace(&mut self.key_sub_ids, key_ids);
         let mut c = self.node(input);
         self.agg_input = saved_input;
+        // (The join group's tree sorted on some group keys, `JoinMeta::ord_alt`: an input
+        // of the sorted grouping too.)
+        let mut ord_in = if sets.is_none() && !groups.is_empty() { self.ord_alt_node(input, groups, aggs, &c) } else { None };
         // (A projection computing a key: its target list is the grouping's input target,
         // the keys first in the level's target list's order, make_group_input_target.)
         if self.o.verbose
@@ -13398,6 +13341,9 @@ impl Builder<'_, '_> {
             .sum();
         if gexpr > 0.0 {
             c.node.total_cost += c.node.rows * gexpr;
+            if let Some(a) = &mut ord_in {
+                a.total_cost += a.rows * gexpr;
+            }
             for pi in part_in.iter_mut().map(|b| &mut **b).chain(part_others.iter_mut()) {
                 pi.total_cost += pi.rows * gexpr;
             }
@@ -14391,10 +14337,11 @@ impl Builder<'_, '_> {
                 None => (0..groups.len()).map(|i| (i, coll_sfx[i].clone())).collect(),
             };
             let mut orders: Vec<Vec<(usize, String)>> = vec![base.clone()];
-            // The input's order, as far as group keys go.
+            // The input's order, as far as group keys go (the sorted tree's too).
+            for input_node in std::iter::once(&c.node).chain(ord_in.as_ref()) {
             let mut pre: Vec<(usize, String)> = Vec::new();
-            for (oi, o) in c.node.order.iter().enumerate() {
-                let eqs = c.node.order_eq.get(oi).cloned().unwrap_or_default();
+            for (oi, o) in input_node.order.iter().enumerate() {
+                let eqs = input_node.order_eq.get(oi).cloned().unwrap_or_default();
                 let found = names_all.iter().enumerate().find_map(|(i, k)| {
                     std::iter::once(o).chain(eqs.iter()).find_map(|o| {
                         let rest = o.strip_prefix(k.as_str())?;
@@ -14414,6 +14361,7 @@ impl Builder<'_, '_> {
                 if !orders.contains(&ord) {
                     orders.push(ord);
                 }
+            }
             }
             // (An ORDER BY of just the group keys: an ordering other than its own needs the
             // grouping's output sorted again, create_ordered_paths.)
@@ -14470,6 +14418,7 @@ impl Builder<'_, '_> {
                 }
                 let cands: Vec<(ExNode, bool)> = std::iter::once((c.node.clone(), true))
                     .chain(gathered.iter().map(|x| (x.clone(), false)))
+                    .chain(ord_in.iter().map(|x| (x.clone(), false)))
                     .collect();
                 for (cand, cheapest) in cands {
                 let common = keys_ord
@@ -19691,6 +19640,74 @@ pub fn set_group_estimates(
             b.num_groups(&cols, n.rows)
         })
         .collect()
+}
+
+/// remove_useless_groupby_columns over a grouping's keys: of a table whose primary key, or
+/// a unique index of NOT NULL columns, it groups by all of, its other keys group nothing
+/// more. `var(k)`: the table and column key `k` is (None: an expression, or a key not in
+/// every grouping set).
+pub(crate) fn unique_key_redundant(
+    cat: &crate::catalog::Catalog,
+    n: usize,
+    var: &dyn Fn(usize) -> Option<(Arc<crate::catalog::Table>, usize)>,
+) -> Vec<bool> {
+    let mut out = vec![false; n];
+    if n < 2 {
+        return out;
+    }
+    let vars: Vec<Option<(Arc<crate::catalog::Table>, usize)>> = (0..n).map(var).collect();
+    let mut done: Vec<u32> = Vec::new();
+    for (t, _) in vars.iter().flatten() {
+        if done.contains(&t.oid) {
+            continue;
+        }
+        done.push(t.oid);
+        // (The table's grouped columns.)
+        let grouped: Vec<usize> = vars.iter().flatten().filter(|w| w.0.oid == t.oid).map(|w| w.1).collect();
+        // (The primary key first, then the indexes.)
+        let pk_deferrable = t
+            .constraints
+            .iter()
+            .any(|c| matches!(c.kind, crate::catalog::ConstraintKind::PrimaryKey { .. }) && c.deferrable);
+        let mut best: Option<Vec<usize>> = t
+            .pkey
+            .clone()
+            .filter(|pk| !pk_deferrable && pk.iter().all(|k| grouped.contains(k)));
+        for ix in cat.table_indexes(t) {
+            // (Of the grouping's own equality: default operator classes.)
+            let cols: Option<Vec<usize>> = ix
+                .columns
+                .iter()
+                .map(|c| match c.key {
+                    crate::catalog::IndexKey::Column(k) if c.opclass == 0 => Some(k),
+                    _ => None,
+                })
+                .collect();
+            let Some(cols) = cols else { continue };
+            let deferrable = t.constraints.iter().any(|c| c.kind.index() == Some(ix.oid) && c.deferrable);
+            let not_null = ix.nulls_not_distinct || cols.iter().all(|&k| t.known_not_null(k));
+            if !ix.unique
+                || !ix.valid
+                || deferrable
+                || ix.predicate.is_some()
+                || !not_null
+                || !cols.iter().all(|k| grouped.contains(k))
+            {
+                continue;
+            }
+            if best.as_ref().is_none_or(|b| cols.len() < b.len()) {
+                best = Some(cols);
+            }
+        }
+        if let Some(b) = best {
+            for (k, o) in out.iter_mut().enumerate() {
+                if vars[k].as_ref().is_some_and(|w| w.0.oid == t.oid && !b.contains(&w.1)) {
+                    *o = true;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The grouping keys of an aggregation over `input` that group nothing more (EXPLAIN's

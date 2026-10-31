@@ -4526,6 +4526,7 @@ impl Binder<'_, '_> {
             let mut p = Arc::unwrap_or_clone(plan);
             let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, false, "rowmarks::PUSHED_LEVEL");
             let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, false, "rowmarks::OWN_LOCK");
+            self.planned_in_analysis += 1;
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut p, None);
             drop(_own);
             drop(_pushed);

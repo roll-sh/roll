@@ -652,6 +652,27 @@ pub(super) struct Order {
     pub hint: bool,
 }
 
+/// The table and column a join group's column `c` is (through projections of plain
+/// columns and filters): a plain table scan's.
+fn group_col_table(p: &Plan, c: usize) -> Option<(Arc<crate::catalog::Table>, usize)> {
+    match p {
+        Plan::Project { input, exprs } => match exprs.get(c)? {
+            Expr::Col(j, _) => group_col_table(input, *j),
+            _ => None,
+        },
+        Plan::Filter { input, .. } => group_col_table(input, c),
+        Plan::Join { left, right, nleft, .. } => {
+            if c < *nleft {
+                group_col_table(left, c)
+            } else {
+                group_col_table(right, c - nleft)
+            }
+        }
+        Plan::Scan(s) if s.table.partkey.is_none() && c < s.table.columns.len() => Some((s.table.clone(), c)),
+        _ => None,
+    }
+}
+
 /// A subquery's own level is more than one table scan under projections, filters, sorts,
 /// limits and locks: a grouping, DISTINCT, window, set operation or join of its own, which
 /// may keep paths beside its cheapest.
@@ -7313,6 +7334,7 @@ impl Search<'_, '_, '_> {
                         fdw_alt: Default::default(),
                         par_alt: Default::default(),
                         par_alt_cost: Default::default(),
+                        ord_alt: Default::default(),
                         semi_carried: if kind == JoinKind::Semi {
                             let mut w = 0;
                             for (l, leaf) in self.leaves.iter().enumerate() {
@@ -7982,9 +8004,15 @@ impl Planner<'_, '_> {
                 _ => return false,
             }
         }
+        // (group_pathkeys after remove_useless_groupby_columns: no key a table's unique key
+        // among them determines.)
+        let redundant = crate::sql::explain::unique_key_redundant(&self.cat, key_exprs.len(), &|k| match super::key_operand(&key_exprs[k]) {
+            Expr::Col(g, _) => group_col_table(cur, *g),
+            _ => None,
+        });
         let mut okeys = Vec::new();
         let mut complete = true;
-        for (e, o) in key_exprs.iter().zip(&order) {
+        for ((e, o), _) in key_exprs.iter().zip(&order).zip(&redundant).filter(|(_, r)| !**r) {
             match key_operand(e) {
                 Expr::Col(g, _) => okeys.push((*g, o.1, o.2)),
                 _ => {
@@ -10003,6 +10031,7 @@ impl Planner<'_, '_> {
                 meta.par_alt = crate::sql::plan::FdwAlt(Some(Arc::new(alt)));
                 meta.par_alt_cost = crate::sql::plan::AltCost(cost);
             }
+            meta.ord_alt = crate::sql::plan::FdwAlt(s.ord_alt(&best, &layout).map(Arc::new));
         }
         // The columns of equalities turned into constants stay needed up to the join.
         let kept: Vec<usize> = match &*p {

@@ -69,6 +69,133 @@ pub struct BoundQuery {
     pub param_domains: Vec<(usize, u32)>,
 }
 
+/// A statement after parse analysis (`Binder::analyze_statement`), its top query level not
+/// planned yet: `plan` makes the `BoundQuery` `bind_statement` returns, errors and their
+/// order included, from the relations' sizes and statistics at the time it is called.
+#[derive(Clone)]
+pub struct Analyzed {
+    plan: Plan,
+    cols: Vec<OutCol>,
+    params: Vec<DataType>,
+    perms: perms::Perms,
+    hidden_rtes: usize,
+    param_domains: Vec<(usize, u32)>,
+    cat: Arc<Catalog>,
+    step: Step,
+    /// Not a query bound only to be stored (`Binder::unplanned`): a merge join's keys are
+    /// checked, and constants that failed to fold raise their errors.
+    check_keys: bool,
+    check_folds: bool,
+    /// A DML statement's untyped parameter: raised after its planning's errors.
+    untyped: Option<crate::error::Error>,
+    /// The first error of planning a level while analyzing (`Binder::defer_plan`).
+    plan_err: Option<crate::error::Error>,
+    /// Constant expressions that failed to fold, with their errors (`Binder::fold_err`).
+    fold_err: Vec<(Expr, crate::error::Error)>,
+    /// The statement's row-level security, as its planning reads it.
+    rls: optimize::StatementRls,
+    replannable: bool,
+}
+
+/// What `Analyzed::plan` plans.
+#[derive(Clone, Copy)]
+enum Step {
+    /// Nothing: its levels were planned as they were bound.
+    Planned,
+    /// The SELECT's own level, as `bind_simple_select` would have.
+    Select(TopStep),
+    /// The data-modifying statement's scans.
+    Dml,
+}
+
+/// How a SELECT's deferred top level is planned: the LIMIT its arm reads under, whether a
+/// lock pushed into it or its own locking clause applies.
+#[derive(Clone, Copy)]
+pub(crate) struct TopStep {
+    pub lim: Option<(f64, f64)>,
+    pub pushed: bool,
+    pub own: bool,
+}
+
+impl Analyzed {
+    /// Whether `plan` alone gives what a new analysis and planning would after the
+    /// relations' sizes change: nothing was planned or estimated while analyzing.
+    pub fn replannable(&self) -> bool {
+        self.replannable && !matches!(self.step, Step::Planned)
+    }
+
+    /// Plan the statement (again).
+    pub fn plan(&self, ctx: &ExecCtx) -> Result<BoundQuery> {
+        let (plan, hidden_rtes) = self.planned(self.plan.clone(), ctx)?;
+        let mut perms = self.perms.clone();
+        perms.add_plan_locks(&plan, &self.cat);
+        Ok(BoundQuery {
+            plan: Arc::new(plan),
+            cols: self.cols.clone(),
+            params: self.params.clone(),
+            perms: Arc::new(perms),
+            hidden_rtes,
+            param_domains: self.param_domains.clone(),
+        })
+    }
+
+    /// `plan`, once.
+    pub fn into_bound(mut self, ctx: &ExecCtx) -> Result<BoundQuery> {
+        let plan = std::mem::replace(&mut self.plan, Plan::One);
+        let (plan, hidden_rtes) = self.planned(plan, ctx)?;
+        self.perms.add_plan_locks(&plan, &self.cat);
+        Ok(BoundQuery {
+            plan: Arc::new(plan),
+            cols: self.cols,
+            params: self.params,
+            perms: Arc::new(self.perms),
+            hidden_rtes,
+            param_domains: self.param_domains,
+        })
+    }
+
+    /// The plan, planned, with the range table entries it hides.
+    fn planned(&self, mut plan: Plan, ctx: &ExecCtx) -> Result<(Plan, usize)> {
+        let mut hidden_rtes = self.hidden_rtes;
+        let mut planned = |plan: &mut Plan, lim: Option<(f64, f64)>, locks: Option<(bool, bool)>| {
+            crate::stack::guard(|| {
+                let _rls = optimize::resume_statement_rls(&self.rls);
+                let _locks = locks.map(|(pushed, own)| {
+                    (
+                        crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL"),
+                        crate::scoped::set(&crate::sql::paths::OWN_LOCK, own, "rowmarks::OWN_LOCK"),
+                    )
+                });
+                hidden_rtes += crate::sql::paths::plan_query_limited(ctx, plan, lim);
+                drop(_locks);
+                if self.check_keys {
+                    check_merge_keys(ctx, plan)?;
+                }
+                Ok(())
+            })
+        };
+        match self.step {
+            Step::Planned | Step::Select(_) if self.plan_err.is_some() => {
+                return Err(self.plan_err.clone().unwrap());
+            }
+            Step::Planned => {}
+            Step::Select(t) => planned(&mut plan, t.lim, Some((t.pushed, t.own)))?,
+            Step::Dml => {
+                planned(&mut plan, None, None)?;
+                if let Some(e) = self.untyped.clone().or_else(|| self.plan_err.clone()) {
+                    return Err(e);
+                }
+            }
+        }
+        if (!self.fold_err.is_empty() || (self.check_folds && fold::const_params(&plan)))
+            && let Some(e) = fold::first_error(&settled(&plan), &self.fold_err, ctx)
+        {
+            return Err(e);
+        }
+        Ok((plan, hidden_rtes))
+    }
+}
+
 impl BoundQuery {
     /// Check the privileges the statement needs, as the current user.
     pub fn check_perms(&self, ctx: &ExecCtx) -> Result<()> {
@@ -639,6 +766,15 @@ pub struct Binder<'b, 'a> {
     /// it is at, whose planning waits; `deferred` once it did.
     pub(crate) defer_level: Option<usize>,
     pub(crate) deferred: bool,
+    /// The statement's own query level, while its planning waits for `Analyzed::plan` (a
+    /// plain SELECT: `bind_statement` analyzes, then plans); `top_step` once its analysis
+    /// reached the point where it would have been planned.
+    pub(crate) defer_top: Option<(usize, usize)>,
+    pub(crate) top_step: Option<TopStep>,
+    /// Planner calls made while analyzing: query levels planned, estimates read. The
+    /// statement's top level waits only when none came before it, and an analyzed tree
+    /// replans on its own (`Analyzed::replannable`) only with none.
+    pub(crate) planned_in_analysis: usize,
     /// IN / ANY sub-selects as bound, before their level was planned (by subquery id):
     /// pull_up_sublinks pulls a join tree up from these (Postgres pulls sublinks up before
     /// planning anything); one that stays a SubPlan runs the plan made of it.
@@ -815,6 +951,9 @@ impl<'b, 'a> Binder<'b, 'a> {
             setop_coerced: false,
             defer_level: None,
             deferred: false,
+            defer_top: None,
+            top_step: None,
+            planned_in_analysis: 0,
             unplanned_subs: Default::default(),
             defer_fold: false,
             fold_err: None,
@@ -1066,6 +1205,12 @@ impl<'b, 'a> Binder<'b, 'a> {
 
     /// Bind a statement that runs as a plan: SELECT / VALUES / INSERT / UPDATE / DELETE.
     pub fn bind_statement(&mut self, n: &pb::Node) -> Result<BoundQuery> {
+        self.analyze_statement(n)?.into_bound(self.ctx)
+    }
+
+    /// Parse analysis of a statement that runs as a plan: `bind_statement` without the
+    /// planning of its top query level (`Analyzed::plan` does it, as often as asked).
+    pub fn analyze_statement(&mut self, n: &pb::Node) -> Result<Analyzed> {
         // Postgres folds constant calls when it plans, after parse analysis: a call that
         // fails to fold fails only once the whole statement has been analysed.
         let prev = self.fold_err.replace(Vec::new());
@@ -1073,22 +1218,21 @@ impl<'b, 'a> Binder<'b, 'a> {
         // analysis's errors, a later level's ungrouped column say, come first.)
         self.defer_plan.borrow_mut().push(None);
         let r = crate::stack::guard(|| self.bind_statement_inner(n));
-        let planned = self.defer_plan.borrow_mut().pop().flatten();
-        let pending = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
-        // (Planned again, it would have no record of what failed to fold.)
-        if (!pending.is_empty() || r.is_err()) && KEEP.get() == self as *const Self as usize {
-            KEPT.take();
+        let plan_err = self.defer_plan.borrow_mut().pop().flatten();
+        let fold_err = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
+        let mut a = r?;
+        a.plan_err = plan_err;
+        // (A data-modifying statement's analysis kept for `bind_keeping_analysis`; not when
+        // something failed to fold: planned again, it would have no record of it.)
+        if KEEP.get() == self as *const Self as usize && fold_err.is_empty() && matches!(a.step, Step::Dml) && a.check_keys {
+            KEPT.set(Some(Arc::new(UnplannedDml {
+                plan: a.plan.clone(),
+                hidden_rtes: a.hidden_rtes,
+                perms: a.perms.clone(),
+            })));
         }
-        if let (Ok(_), Some(e)) = (&r, planned) {
-            return Err(e);
-        }
-        match r {
-            Ok(q) if !pending.is_empty() || (!self.deparse && !self.unplanned && fold::const_params(&q.plan)) => match fold::first_error(&settled(&q.plan), &pending, self.ctx) {
-                Some(e) => Err(e),
-                None => Ok(q),
-            },
-            r => r,
-        }
+        a.fold_err = fold_err;
+        Ok(a)
     }
 
     /// A SQL function's statement planned when its call runs (`call_sql`), with the errors
@@ -1147,7 +1291,7 @@ impl<'b, 'a> Binder<'b, 'a> {
         self.fold_err.as_ref().is_some_and(|l| !l.is_empty())
     }
 
-    fn bind_statement_inner(&mut self, n: &pb::Node) -> Result<BoundQuery> {
+    fn bind_statement_inner(&mut self, n: &pb::Node) -> Result<Analyzed> {
         crate::stack::check()?;
         let _rls = optimize::begin_statement_rls();
         // (Row-level security applying to a table the statement names: its own quals
@@ -1168,7 +1312,9 @@ impl<'b, 'a> Binder<'b, 'a> {
                 optimize::mark_statement_rls();
             }
         }
-        self.bind_statement_body(n)
+        let mut a = self.bind_statement_body(n)?;
+        a.rls = optimize::statement_rls();
+        Ok(a)
     }
 
     /// exec_parse_message: a parameter still of unknown type has no type to take.
@@ -1213,58 +1359,56 @@ impl<'b, 'a> Binder<'b, 'a> {
         };
     }
 
-    fn bind_statement_body(&mut self, n: &pb::Node) -> Result<BoundQuery> {
+    fn bind_statement_body(&mut self, n: &pb::Node) -> Result<Analyzed> {
         self.want_sys |= mentions_sys_column(n);
         // A relation with rules: the statements they make of it (planned already).
         if let Some((plan, cols)) = self.bind_rewritten(n)? {
             self.check_untyped_params()?;
-            let params = self
-                .params
-                .iter()
-                .map(|t| {
-                    if matches!(t, DataType::Unknown) {
-                        DataType::Text
-                    } else {
-                        t.clone()
-                    }
-                })
-                .collect();
-            let mut perms = self.perms.clone();
-            perms.add_plan_locks(&plan, &self.cat);
-            return Ok(BoundQuery {
-                plan: Arc::new(plan),
-                cols,
-                params,
-                perms: Arc::new(perms),
-                hidden_rtes: self.hidden_rtes,
-                param_domains: self.param_domains.clone(),
-            });
+            self.planned_in_analysis += 1;
+            return Ok(self.analyzed(plan, cols, Step::Planned, None, 0));
         }
         self.note_command(n);
-        let (plan, cols) = match ast::inner(n) {
-            Some(pg_query::NodeEnum::SelectStmt(s)) => self.bind_select_stmt(s)?,
-            Some(pg_query::NodeEnum::InsertStmt(s)) => self.bind_insert(s)?,
-            Some(pg_query::NodeEnum::UpdateStmt(s)) => self.bind_update(s)?,
-            Some(pg_query::NodeEnum::DeleteStmt(s)) => self.bind_delete(s)?,
-            Some(pg_query::NodeEnum::MergeStmt(s)) => self.bind_merge(s)?,
-            _ => return Err(crate::error::internal("not a query statement")),
+        let start = self.planned_in_analysis;
+        let select = matches!(ast::inner(n), Some(pg_query::NodeEnum::SelectStmt(_)));
+        // (A plain SELECT's own level is planned by `Analyzed::plan`: one with a WITH plans
+        // its body under its CTEs' estimates, a set operation its arms, as they are bound.)
+        let saved_top = (self.defer_top.take(), self.top_step.take());
+        if let Some(pg_query::NodeEnum::SelectStmt(s)) = ast::inner(n)
+            && !self.deparse
+            && s.with_clause.is_none()
+            && s.values_lists.is_empty()
+            && s.larg.is_none()
+        {
+            self.defer_top = Some((self.levels.len(), self.planned_in_analysis));
+        }
+        let r = match ast::inner(n) {
+            Some(pg_query::NodeEnum::SelectStmt(s)) => self.bind_select_stmt(s),
+            Some(pg_query::NodeEnum::InsertStmt(s)) => self.bind_insert(s),
+            Some(pg_query::NodeEnum::UpdateStmt(s)) => self.bind_update(s),
+            Some(pg_query::NodeEnum::DeleteStmt(s)) => self.bind_delete(s),
+            Some(pg_query::NodeEnum::MergeStmt(s)) => self.bind_merge(s),
+            _ => Err(crate::error::internal("not a query statement")),
         };
-        // Access paths of a data-modifying statement's scans (SELECTs plan their own).
-        let mut plan = plan;
-        if !self.deparse && !matches!(ast::inner(n), Some(pg_query::NodeEnum::SelectStmt(_))) {
-            if KEEP.get() == self as *const Self as usize && !self.unplanned {
-                KEPT.set(Some(Arc::new(UnplannedDml {
-                    plan: plan.clone(),
-                    hidden_rtes: self.hidden_rtes,
-                    perms: self.perms.clone(),
-                })));
-            }
-            self.hidden_rtes += crate::sql::paths::plan_query(self.ctx, &mut plan);
-            if !self.unplanned {
-                check_merge_keys(self.ctx, &mut plan)?;
-            }
+        let top = std::mem::replace(&mut self.top_step, saved_top.1);
+        self.defer_top = saved_top.0;
+        let (plan, cols) = r?;
+        // Access paths of a data-modifying statement's scans (SELECTs plan their own),
+        // planned by `Analyzed::plan`; an error PostgreSQL's parse analysis raises, the
+        // untyped parameter's, comes after its planning's.
+        if !self.deparse && !select {
+            let untyped = self.check_untyped_params().err();
+            return Ok(self.analyzed(plan, cols, Step::Dml, untyped, start));
         }
         self.check_untyped_params()?;
+        let step = match top {
+            Some(t) => Step::Select(t),
+            None => Step::Planned,
+        };
+        Ok(self.analyzed(plan, cols, step, None, start))
+    }
+
+    /// The statement analyzed, `start` the planner calls made before its analysis began.
+    fn analyzed(&self, plan: Plan, cols: Vec<OutCol>, step: Step, untyped: Option<crate::error::Error>, start: usize) -> Analyzed {
         let params = self
             .params
             .iter()
@@ -1276,16 +1420,23 @@ impl<'b, 'a> Binder<'b, 'a> {
                 }
             })
             .collect();
-        let mut perms = self.perms.clone();
-        perms.add_plan_locks(&plan, &self.cat);
-        Ok(BoundQuery {
-            plan: Arc::new(plan),
+        Analyzed {
+            plan,
             cols,
             params,
-            perms: Arc::new(perms),
+            perms: self.perms.clone(),
             hidden_rtes: self.hidden_rtes,
             param_domains: self.param_domains.clone(),
-        })
+            cat: self.cat.clone(),
+            step,
+            check_keys: !self.unplanned,
+            check_folds: !self.deparse && !self.unplanned,
+            untyped,
+            plan_err: None,
+            fold_err: Vec::new(),
+            rls: Default::default(),
+            replannable: self.planned_in_analysis == start,
+        }
     }
 
     /// Bind a scalar expression with no FROM (defaults, CALL arguments).

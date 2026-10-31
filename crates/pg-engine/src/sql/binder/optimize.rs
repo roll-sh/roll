@@ -183,6 +183,22 @@ pub fn mark_statement_rls() {
     crate::scoped::checkpoint("optimize::QUERY_RLS");
 }
 
+/// The statement's row-level security as its analysis left it (`begin_statement_rls`), for
+/// planning it later (`Analyzed::plan`).
+#[derive(Clone, Default)]
+pub struct StatementRls(bool, Vec<Expr>);
+
+pub fn statement_rls() -> StatementRls {
+    StatementRls(QUERY_RLS.get(), LEVEL0_QUALS.with_borrow(|l| l.clone()))
+}
+
+pub fn resume_statement_rls(s: &StatementRls) -> (crate::scoped::CellGuard<bool>, crate::scoped::RefGuard<Vec<Expr>>) {
+    (
+        crate::scoped::set(&QUERY_RLS, s.0, "optimize::QUERY_RLS.resume"),
+        crate::scoped::set_ref(&LEVEL0_QUALS, s.1.clone(), "optimize::LEVEL0_QUALS.resume"),
+    )
+}
+
 
 /// Add row-level security quals over `plan`: on a scan they go ahead of the quals already
 /// there (the statement's own), as a SELECT's do (security level 0 vs 1).

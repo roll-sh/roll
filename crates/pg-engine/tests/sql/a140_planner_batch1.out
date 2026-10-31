@@ -1,0 +1,253 @@
+> CREATE TABLE a140_cust (c_custkey int PRIMARY KEY, c_name text, c_nationkey int, c_acctbal numeric)
+-- CREATE TABLE
+
+> CREATE TABLE a140_ord (o_orderkey int PRIMARY KEY, o_custkey int, o_totalprice numeric, o_orderdate date)
+-- CREATE TABLE
+
+> CREATE TABLE a140_line (l_orderkey int, l_linenumber int, l_quantity numeric, l_extendedprice numeric, PRIMARY KEY (l_orderkey, l_linenumber))
+-- CREATE TABLE
+
+> INSERT INTO a140_cust SELECT g, 'Customer#' || g, g % 25, (g * 7919) % 10000 FROM generate_series(1, 6000) g
+-- INSERT 0 6000
+
+> INSERT INTO a140_ord SELECT g, 1 + (g * 7) % 6000, (g * 31) % 50000, date '1992-01-01' + (g % 2400) FROM generate_series(1, 60000) g
+-- INSERT 0 60000
+
+> INSERT INTO a140_line SELECT o, l, 1 + (o * 13 + l * 7) % 50, ((o * 13 + l * 7) % 50) * 10.5 FROM generate_series(1, 60000) o, generate_series(1, 4) l
+-- INSERT 0 240000
+
+> VACUUM ANALYZE a140_cust, a140_ord, a140_line
+-- VACUUM
+
+> SET max_parallel_workers_per_gather = 0
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT c_custkey, count(*) FROM a140_cust, a140_ord
+> WHERE c_custkey = o_custkey AND o_orderdate < date '1992-02-01'
+> GROUP BY c_custkey, c_name
+QUERY PLAN:text
+HashAggregate
+  Group Key: a140_cust.c_custkey
+  ->  Hash Join
+        Hash Cond: (a140_ord.o_custkey = a140_cust.c_custkey)
+        ->  Seq Scan on a140_ord
+              Filter: (o_orderdate < '1992-02-01'::date)
+        ->  Hash
+              ->  Seq Scan on a140_cust
+-- EXPLAIN
+
+> SET work_mem = '64kB'
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum(l_quantity)
+> FROM a140_cust, a140_ord, a140_line
+> WHERE o_orderkey IN (SELECT l_orderkey FROM a140_line GROUP BY l_orderkey HAVING sum(l_quantity) > 150)
+>   AND c_custkey = o_custkey AND o_orderkey = l_orderkey
+> GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+> ORDER BY o_totalprice DESC, o_orderdate LIMIT 10
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: a140_ord.o_totalprice DESC, a140_ord.o_orderdate
+        ->  GroupAggregate
+              Group Key: a140_cust.c_custkey, a140_ord.o_orderkey
+              ->  Incremental Sort
+                    Sort Key: a140_cust.c_custkey, a140_ord.o_orderkey
+                    Presorted Key: a140_cust.c_custkey
+                    ->  Nested Loop
+                          ->  Merge Join
+                                Merge Cond: (a140_cust.c_custkey = a140_ord.o_custkey)
+                                ->  Index Scan using a140_cust_pkey on a140_cust
+                                ->  Materialize
+                                      ->  Sort
+                                            Sort Key: a140_ord.o_custkey
+                                            ->  Merge Join
+                                                  Merge Cond: (a140_ord.o_orderkey = a140_line_1.l_orderkey)
+                                                  ->  Index Scan using a140_ord_pkey on a140_ord
+                                                  ->  GroupAggregate
+                                                        Group Key: a140_line_1.l_orderkey
+                                                        Filter: (sum(a140_line_1.l_quantity) > '150'::numeric)
+                                                        ->  Index Scan using a140_line_pkey on a140_line a140_line_1
+                          ->  Index Scan using a140_line_pkey on a140_line
+                                Index Cond: (l_orderkey = a140_ord.o_orderkey)
+-- EXPLAIN
+
+> SELECT c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum(l_quantity)
+> FROM a140_cust, a140_ord, a140_line
+> WHERE o_orderkey IN (SELECT l_orderkey FROM a140_line GROUP BY l_orderkey HAVING sum(l_quantity) > 150)
+>   AND c_custkey = o_custkey AND o_orderkey = l_orderkey
+> GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+> ORDER BY o_totalprice DESC, o_orderdate LIMIT 10
+c_name:text | c_custkey:int4 | o_orderkey:int4 | o_orderdate:date | o_totalprice:numeric | sum:numeric
+Customer#1031 | 1031 | 11290 | 1996-08-17 | 49990 | 154
+Customer#2770 | 2770 | 20967 | 1996-11-02 | 49977 | 158
+Customer#4181 | 4181 | 17740 | 1994-07-29 | 49940 | 154
+Customer#5920 | 5920 | 27417 | 1994-10-14 | 49927 | 158
+Customer#1331 | 1331 | 24190 | 1992-07-09 | 49890 | 154
+Customer#3070 | 3070 | 33867 | 1992-09-24 | 49877 | 158
+Customer#4481 | 4481 | 30640 | 1997-01-14 | 49840 | 154
+Customer#220 | 220 | 40317 | 1997-04-01 | 49827 | 158
+Customer#1631 | 1631 | 37090 | 1994-12-26 | 49790 | 154
+Customer#3370 | 3370 | 46767 | 1995-03-13 | 49777 | 158
+-- SELECT 10
+
+> EXPLAIN (COSTS OFF) SELECT c_custkey, c_name, sum(l_extendedprice) AS revenue, c_acctbal
+> FROM a140_cust, a140_ord, a140_line
+> WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
+>   AND o_orderdate >= date '1993-10-01' AND o_orderdate < date '1994-01-01'
+> GROUP BY c_custkey, c_name, c_acctbal
+> ORDER BY revenue DESC LIMIT 20
+QUERY PLAN:text
+Limit
+  ->  Sort
+        Sort Key: (sum(a140_line.l_extendedprice)) DESC
+        ->  GroupAggregate
+              Group Key: a140_cust.c_custkey
+              ->  Merge Join
+                    Merge Cond: (a140_cust.c_custkey = a140_ord.o_custkey)
+                    ->  Index Scan using a140_cust_pkey on a140_cust
+                    ->  Materialize
+                          ->  Sort
+                                Sort Key: a140_ord.o_custkey
+                                ->  Hash Join
+                                      Hash Cond: (a140_line.l_orderkey = a140_ord.o_orderkey)
+                                      ->  Seq Scan on a140_line
+                                      ->  Hash
+                                            ->  Seq Scan on a140_ord
+                                                  Filter: ((o_orderdate >= '1993-10-01'::date) AND (o_orderdate < '1994-01-01'::date))
+-- EXPLAIN
+
+> SELECT c_custkey, c_name, sum(l_extendedprice) AS revenue, c_acctbal
+> FROM a140_cust, a140_ord, a140_line
+> WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
+>   AND o_orderdate >= date '1993-10-01' AND o_orderdate < date '1994-01-01'
+> GROUP BY c_custkey, c_name, c_acctbal
+> ORDER BY revenue DESC, c_custkey LIMIT 20
+c_custkey:int4 | c_name:text | revenue:numeric | c_acctbal:numeric
+220 | Customer#220 | 8085.0 | 2180
+1070 | Customer#1070 | 8085.0 | 3330
+1420 | Customer#1420 | 8085.0 | 4980
+2270 | Customer#2270 | 8085.0 | 6130
+2620 | Customer#2620 | 8085.0 | 7780
+3470 | Customer#3470 | 8085.0 | 8930
+3820 | Customer#3820 | 8085.0 | 580
+4670 | Customer#4670 | 8085.0 | 1730
+5020 | Customer#5020 | 8085.0 | 3380
+5870 | Customer#5870 | 8085.0 | 4530
+31 | Customer#31 | 7875.0 | 5489
+881 | Customer#881 | 7875.0 | 6639
+1231 | Customer#1231 | 7875.0 | 8289
+2081 | Customer#2081 | 7875.0 | 9439
+2431 | Customer#2431 | 7875.0 | 1089
+3281 | Customer#3281 | 7875.0 | 2239
+3631 | Customer#3631 | 7875.0 | 3889
+4481 | Customer#4481 | 7875.0 | 5039
+4831 | Customer#4831 | 7875.0 | 6689
+5681 | Customer#5681 | 7875.0 | 7839
+-- SELECT 20
+
+> RESET work_mem
+-- RESET
+
+> RESET max_parallel_workers_per_gather
+-- RESET
+
+> DELETE FROM a140_ord WHERE o_orderkey <= 30000
+-- DELETE 30000
+
+> EXPLAIN (COSTS OFF) DELETE FROM a140_ord WHERE o_orderkey = (SELECT min(o_orderkey) FROM a140_ord)
+QUERY PLAN:text
+Delete on a140_ord
+  InitPlan 2
+    ->  Result
+          InitPlan 1
+            ->  Limit
+                  ->  Index Only Scan using a140_ord_pkey on a140_ord a140_ord_1
+  ->  Index Scan using a140_ord_pkey on a140_ord
+        Index Cond: (o_orderkey = (InitPlan 2).col1)
+-- EXPLAIN
+
+> DELETE FROM a140_ord WHERE o_orderkey = (SELECT min(o_orderkey) FROM a140_ord) RETURNING o_orderkey
+o_orderkey:int4
+30001
+-- DELETE 1
+
+> DELETE FROM a140_ord WHERE o_orderkey = (SELECT min(o_orderkey) FROM a140_ord) RETURNING o_orderkey
+o_orderkey:int4
+30002
+-- DELETE 1
+
+> SELECT o_orderkey FROM a140_ord WHERE o_orderkey >= (SELECT 59998) ORDER BY o_orderkey
+o_orderkey:int4
+59998
+59999
+60000
+-- SELECT 3
+
+> SELECT o_orderkey FROM a140_ord WHERE o_orderkey < (SELECT 30005) ORDER BY o_orderkey DESC
+o_orderkey:int4
+30004
+30003
+-- SELECT 2
+
+> SELECT count(*) FROM a140_ord WHERE o_orderkey = (SELECT NULL::int)
+count:int8
+0
+-- SELECT 1
+
+> SELECT count(*) FROM a140_ord WHERE o_orderkey = ANY (ARRAY(SELECT g FROM generate_series(30010, 30012) g))
+count:int8
+3
+-- SELECT 1
+
+> DROP TABLE a140_cust, a140_ord, a140_line
+-- DROP TABLE
+
+> CREATE EXTENSION IF NOT EXISTS pg_trgm
+-- CREATE EXTENSION
+
+> CREATE TABLE a140_trgm (t text)
+-- CREATE TABLE
+
+> INSERT INTO a140_trgm SELECT md5(g::text) FROM generate_series(1, 2000) g
+-- INSERT 0 2000
+
+> CREATE INDEX a140_trgm_idx ON a140_trgm USING gist (t gist_trgm_ops)
+-- CREATE INDEX
+
+> ANALYZE a140_trgm
+-- ANALYZE
+
+> SET enable_seqscan = off
+-- SET
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a140_trgm ORDER BY 'c4ca42' <<-> t LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Scan using a140_trgm_idx on a140_trgm
+        Order By: (t <->> 'c4ca42'::text)
+-- EXPLAIN
+
+> SELECT t FROM a140_trgm ORDER BY 'c4ca42' <<-> t, t LIMIT 3
+t:text
+c4ca4238a0b923820dcc509a6f75849b
+89fcd07f20b6785b92134bd6c1d0fa42
+c4015b7f368e6b4871809f49debe0579
+-- SELECT 3
+
+> EXPLAIN (COSTS OFF) SELECT t FROM a140_trgm ORDER BY 'c4ca42' <<<-> t LIMIT 3
+QUERY PLAN:text
+Limit
+  ->  Index Scan using a140_trgm_idx on a140_trgm
+        Order By: (t <->>> 'c4ca42'::text)
+-- EXPLAIN
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE a140_trgm
+-- DROP TABLE
+
+> DROP EXTENSION pg_trgm
+-- DROP EXTENSION
+

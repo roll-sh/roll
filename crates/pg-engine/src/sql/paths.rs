@@ -360,7 +360,7 @@ fn user_ops(cat: &crate::catalog::Catalog, fam_ops: &[Vec<(u32, char, u32)>]) ->
         d.name = crate::sql::func::intern(&o.name);
         Some(Arc::new(d))
     };
-    fam_ops
+    let mut out: Vec<UserOp> = fam_ops
         .iter()
         .flatten()
         .filter_map(|(oid, _, _)| {
@@ -368,7 +368,23 @@ fn user_ops(cat: &crate::catalog::Catalog, fam_ops: &[Vec<(u32, char, u32)>]) ->
             let com = (o.commutator != 0).then(|| target(o.commutator).map(|d| (o.commutator, d))).flatten();
             Some(UserOp { oid: o.oid, name: o.name.clone(), func: o.func, com })
         })
-        .collect()
+        .collect();
+    // (And the families' operators' commutators that aren't in them: a clause or an
+    // ordering written the other way round commutes to the family's operator, as
+    // match_clause_to_ordering_op's get_commutator does: pg_trgm's `'x' <<-> t`.)
+    let fam: Vec<u32> = out.iter().map(|u| u.oid).collect();
+    let mut extra: Vec<UserOp> = Vec::new();
+    for u in &out {
+        let Some((c, _)) = &u.com else { continue };
+        if fam.contains(c) || extra.iter().any(|e| e.oid == *c) {
+            continue;
+        }
+        if let Some(o) = cat.operators.get(c) {
+            extra.push(UserOp { oid: o.oid, name: o.name.clone(), func: o.func, com: target(u.oid).map(|d| (u.oid, d)) });
+        }
+    }
+    out.extend(extra);
+    out
 }
 
 /// A base relation as path generation sees it.
@@ -3874,9 +3890,19 @@ fn own_level(e: &Expr) -> bool {
     ok
 }
 
-/// A bound's value: of no column, not volatile.
+/// A bound's value: of no column, not volatile. An uncorrelated sub-select is an InitPlan's
+/// Param to Postgres, a runtime key the scan evaluates once as it starts
+/// (ExecIndexEvalRuntimeKeys), whatever its own query calls.
 fn usable(v: &Expr) -> bool {
-    v.columns().is_empty() && !v.is_volatile() && !matches!(v, Expr::Default(_))
+    let mut volatile = false;
+    v.walk(&mut |e| match e {
+        Expr::Call(d, ..) if d.volatility == 'v' => volatile = true,
+        Expr::Subquery(s) if s.func.is_none() && s.params.is_empty() => {}
+        Expr::Subquery(s) if matches!(s.func, Some('i' | 's')) => {}
+        Expr::Subquery(_) => volatile = true,
+        _ => {}
+    });
+    v.columns().is_empty() && !volatile && !matches!(v, Expr::Default(_))
 }
 
 /// Fills `b` from `quals` on the key columns from `from` on: `=` on each, then `= ANY` or a

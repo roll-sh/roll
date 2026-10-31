@@ -141,6 +141,7 @@ impl Binder<'_, '_> {
             && let Plan::With { ctes, .. } = &mut r.0
         {
             for (_, c) in ctes.iter_mut().filter(|(_, c)| c.writes()) {
+                self.planned_in_analysis += 1;
                 self.hidden_rtes += crate::sql::paths::plan_query(self.ctx, Arc::make_mut(c));
             }
         }
@@ -257,6 +258,7 @@ impl Binder<'_, '_> {
         self.pushed_lock = saved_push;
         let (mut plans, mut cte_names) = defined?;
         // (The body is planned now: its CTE Scans' sizes are the queries' estimates.)
+        self.planned_in_analysis += 1;
         let pushed = crate::sql::explain::CteEstimatesPushed(if self.deparse {
             0
         } else {
@@ -511,6 +513,7 @@ impl Binder<'_, '_> {
                 deferred,
             });
             if !self.deparse && self.ctes.last().and_then(|l| l.last()).is_some_and(|c| c.inline.is_none()) {
+                self.planned_in_analysis += 1;
                 pushed.0 += crate::sql::explain::push_cte_estimates(
                     &[(id, Arc::new(plan.clone()))],
                     std::slice::from_ref(&cte.ctename),
@@ -678,6 +681,7 @@ impl Binder<'_, '_> {
         // term.)
         let work = !self.deparse;
         if work {
+            self.planned_in_analysis += 1;
             crate::sql::explain::push_work_estimate(id, &Arc::new(base.clone()), self.ctx);
         }
         let r = self.in_sibling(|b| b.bind_select_stmt(rarg));
@@ -1633,6 +1637,7 @@ impl Binder<'_, '_> {
         plan = self.apply_limit(plan, s, None)?;
         // (A UNION ALL's arms are planned; its order may merge them.)
         if !self.deparse {
+            self.planned_in_analysis += 1;
             crate::sql::paths::plan_ordered_append(self.ctx, &mut plan);
         }
         Ok((plan, cols))
@@ -3060,6 +3065,13 @@ impl Binder<'_, '_> {
                 return Err(nullable_lock_error(m));
             }
             let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, own, "rowmarks::OWN_LOCK");
+            // (The statement's own level, when nothing was planned before it: planned by
+            // `Analyzed::plan`.)
+            if self.defer_top.take_if(|t| t.0 == self.levels.len()).is_some_and(|t| t.1 == self.planned_in_analysis) {
+                self.top_step = Some(super::TopStep { lim, pushed, own });
+                return Ok((plan, cols));
+            }
+            self.planned_in_analysis += 1;
             self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
             drop(_own);
             drop(_pushed);
@@ -4131,6 +4143,7 @@ impl Binder<'_, '_> {
                     let lim = self.arm_limit.filter(|a| a.0 == sub_level).map(|a| (a.1, a.2));
                     let _pushed = crate::scoped::set(&crate::sql::paths::PUSHED_LEVEL, pushed, "rowmarks::PUSHED_LEVEL");
                     let _own = crate::scoped::set(&crate::sql::paths::OWN_LOCK, false, "rowmarks::OWN_LOCK");
+                    self.planned_in_analysis += 1;
                     self.hidden_rtes += crate::sql::paths::plan_query_limited(self.ctx, &mut plan, lim);
                     drop(_pushed);
                     if let Err(e) = super::check_merge_keys(self.ctx, &mut plan) {
