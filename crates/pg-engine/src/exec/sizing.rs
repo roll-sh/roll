@@ -299,7 +299,7 @@ struct Pending {
     key: Vec<u8>,
     len: usize,
     exts: Vec<NewExt>,
-    entries: Vec<(u32, Arc<Key>)>,
+    entries: Vec<(u32, Key)>,
     /// Its GiST indexes' entries (`gist_entries`).
     gist: Vec<(u32, Option<crate::catalog::gistsim::Key>)>,
 }
@@ -409,11 +409,8 @@ fn toast_key(id: u64, seq: u32) -> Vec<u8> {
     k
 }
 
-fn toast_index_key(id: u64, seq: u32) -> Arc<Key> {
-    Arc::new(Key::new(
-        &[id.to_be_bytes().to_vec(), seq.to_be_bytes().to_vec()],
-        &[16, 16],
-    ))
+fn toast_index_key(id: u64, seq: u32) -> Key {
+    Key::new(&[id.to_be_bytes().to_vec(), seq.to_be_bytes().to_vec()], &[16, 16])
 }
 
 /// A TOAST chunk tuple's t_len: (chunk_id oid, chunk_seq int4, chunk_data bytea).
@@ -1242,7 +1239,7 @@ fn index_key(
     mut vals: Vec<Value>,
     row: &[Value],
     ctx: &ExecCtx,
-) -> Arc<Key> {
+) -> Key {
     // (name_ops keeps a name key as a cstring: opckeytype.)
     let mut types: Vec<DataType> = bix
         .keys
@@ -1268,12 +1265,12 @@ fn index_key(
         atts.push(b);
         sizes.push(relsize::index_tuple(&types[..=n], &vals[..=n], &text));
     }
-    Arc::new(Key::new(&atts, &sizes))
+    Key::new(&atts, &sizes)
 }
 
 /// `row`'s key in btree index `bix` as the model holds it (`index_key`), for measuring an
 /// index the model doesn't hold (`btree_build_blocks`).
-pub fn btree_key(t: &Table, bix: &BoundIndex, vals: Vec<Value>, row: &[Value], ctx: &ExecCtx) -> Arc<Key> {
+pub fn btree_key(t: &Table, bix: &BoundIndex, vals: Vec<Value>, row: &[Value], ctx: &ExecCtx) -> Key {
     index_key(t, bix, vals, row, ctx)
 }
 
@@ -1281,7 +1278,7 @@ pub fn btree_key(t: &Table, bix: &BoundIndex, vals: Vec<Value>, row: &[Value], c
 /// gives, in the rows' order (their TIDs only order equal keys): `Btree::build`'s layout,
 /// with the index's fillfactor and deduplication, as the model has it for the indexes it
 /// holds. None for an index that isn't a btree.
-pub fn btree_build_blocks(bix: &BoundIndex, keys: Vec<Arc<Key>>) -> Option<u32> {
+pub fn btree_build_blocks(bix: &BoundIndex, keys: Vec<Key>) -> Option<u32> {
     let opts = btree_opts(bix)?;
     let entries = keys
         .into_iter()
@@ -1297,7 +1294,7 @@ fn entries(
     indexes: &[BoundIndex],
     row: &[Value],
     ctx: &ExecCtx,
-) -> Result<Vec<(u32, Arc<Key>)>> {
+) -> Result<Vec<(u32, Key)>> {
     entries_with(t, indexes, row, None, ctx)
 }
 
@@ -1309,7 +1306,7 @@ fn entries_with(
     row: &[Value],
     known: Option<&[Option<Vec<Value>>]>,
     ctx: &ExecCtx,
-) -> Result<Vec<(u32, Arc<Key>)>> {
+) -> Result<Vec<(u32, Key)>> {
     let mut out = Vec::new();
     for (i, bix) in indexes.iter().enumerate() {
         if bix.index.method != "btree" {
@@ -1454,7 +1451,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     let mut lens = Vec::new();
     let mut keys = Vec::new();
     let mut exts = Vec::new();
-    let mut built: Vec<(u32, BtreeOpts, Vec<(Arc<Key>, usize)>)> = missing
+    let mut built: Vec<(u32, BtreeOpts, Vec<(Key, usize)>)> = missing
         .iter()
         .map(|bix| (bix.index.oid, btree_opts(bix).unwrap_or_else(default_opts), Vec::new()))
         .collect();
@@ -1552,7 +1549,7 @@ fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
             rf.btrees.insert(oid, tree);
             continue;
         }
-        let ents: Vec<(Arc<Key>, Tid)> = ents
+        let ents: Vec<(Key, Tid)> = ents
             .into_iter()
             .filter_map(|(key, i)| {
                 let tid = match &placed {
@@ -1686,7 +1683,7 @@ fn index_insert(
     btrees: &mut HashMap<u32, Btree>,
     heap: &Heap,
     xids: &Xids,
-    entries: Vec<(u32, Arc<Key>, bool)>,
+    entries: Vec<(u32, Key, bool)>,
     tid: Tid,
 ) {
     let v = Vis::new(xids);
@@ -2003,10 +2000,15 @@ pub fn updated(
         return Ok(None);
     }
     let db = &ctx.sess.db;
-    // Out-of-line values the new version keeps as they are.
-    let old_exts: Vec<Ext> = (db.relfiles.of(t.oid).read().toast.get(&t.oid))
-        .and_then(|tt| tt.rows.get(old_key).cloned())
-        .unwrap_or_default();
+    // Out-of-line values the new version keeps as they are (none without a TOAST relation:
+    // no shard lock taken for them).
+    let old_exts: Vec<Ext> = if t.toast == 0 {
+        Vec::new()
+    } else {
+        (db.relfiles.of(t.oid).read().toast.get(&t.oid))
+            .and_then(|tt| tt.rows.get(old_key).cloned())
+            .unwrap_or_default()
+    };
     let pinned: HashSet<usize> = old_exts
         .iter()
         .filter(|e| new.get(e.col).is_some_and(|v| value_sig(v) == e.sig))
@@ -2026,6 +2028,9 @@ pub fn updated(
             .all(|bix| columns_unchanged(bix, old, new));
     let xid = ctx.txn.borrow_mut().cur_xid();
     let xids = db.xids();
+    // (The horizon before the shard's lock: other sessions' readers wait while it is held.)
+    let v = vis_for(&xids, t.oid, ctx);
+    let big;
     let (tid, hot) = {
         let mut rf = db.relfiles.of(t.oid).write();
         let RelFiles {
@@ -2037,7 +2042,6 @@ pub fn updated(
         if !heaps.contains_key(&t.oid) {
             return Ok(None);
         }
-        let v = vis_for(&xids, t.oid, ctx);
         if !old_exts.is_empty() || !exts.is_empty() {
             let tt = toast.entry(t.oid).or_default();
             let mut keep: Vec<Ext> = Vec::new();
@@ -2065,8 +2069,9 @@ pub fn updated(
         };
         mark_cmax(heap, old_key, &v, ctx);
         let cid = ctx.txn.borrow_mut().output_cid();
-        let r = heap.update(old_key, new_key.to_vec(), len, xid, hot_ok, &v);
+        let r = heap.update(old_key, new_key, len, xid, hot_ok, &v);
         heap.set_raw_cid(r.0, cid);
+        big = heap.versions() > max_versions();
         r
     };
     if !hot {
@@ -2089,7 +2094,9 @@ pub fn updated(
         }
         gist_log(gist_logs, &gist, tid);
     }
-    check_size(db, t);
+    if big {
+        untrack(db, t, None);
+    }
     Ok(Some((tid, hot)))
 }
 
@@ -3532,6 +3539,10 @@ pub fn detach(t: &Table, db: &Database) -> Detached {
     let mut rf = db.relfiles.of(t.oid).write();
     rf.dropped.insert(t.oid);
     let heap = rf.heaps.remove(&t.oid);
+    // (Its sizes aren't the model's until it is back: kept plans check again.)
+    if let Some(h) = &heap {
+        h.sizes.bump();
+    }
     let btrees = t
         .indexes
         .iter()
@@ -3961,6 +3972,18 @@ pub fn entry_pages(
 /// Modelled btree `index`'s index tuples with key attributes `key` (`Btree::postings`).
 pub fn btree_postings(table: u32, index: u32, key: &[u8], db: &Database) -> Option<Vec<Vec<Tid>>> {
     Some(db.relfiles.of(table).read().btrees.get(&index)?.postings(key))
+}
+
+/// About the bytes the database's size models hold (heaps and btrees; for the memory
+/// budget). Walks every model's pages: call it now and then, not per statement.
+pub fn model_bytes(db: &Database) -> usize {
+    db.relfiles
+        .all()
+        .map(|s| {
+            let rf = s.read();
+            rf.heaps.values().map(Heap::bytes).sum::<usize>() + rf.btrees.values().map(Btree::bytes).sum::<usize>()
+        })
+        .sum()
 }
 
 pub fn btree_blocks(table: u32, index: u32, db: &Database) -> Option<u32> {
@@ -4467,6 +4490,23 @@ pub fn fork_blocks(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
         return Ok(Some(n));
     }
     fork_blocks_bound(oid, fork, ctx)
+}
+
+/// A watch on the planner-visible sizes of `rel` (table `t` itself, or one of its btree
+/// indexes): `SizeWatch::holds` stays true, without a lock, until the main, fsm or vm
+/// pages (a heap) or the pages or height (a btree) the model answers could differ, and
+/// turns false for good once the model is dropped or replaced. None when the relation's
+/// sizes don't come from a model (an estimate, or not laid out yet): compare the values.
+pub fn size_watch(t: &Table, rel: u32, cat: &Catalog, db: &Database) -> Option<heapsim::SizeWatch> {
+    let rf = db.relfiles.of(t.oid).read();
+    if !modelled(&rf, cat, t) {
+        return None;
+    }
+    if rel == t.oid {
+        rf.heaps.get(&rel).map(|h| h.sizes.watch())
+    } else {
+        rf.btrees.get(&rel).map(|b| b.sizes.watch())
+    }
 }
 
 /// `fork_blocks` of a main fork when it answers without binding indexes (see above).

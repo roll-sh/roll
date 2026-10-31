@@ -1288,7 +1288,7 @@ impl Ddl<'_, '_> {
             keys: Vec<(u128, Vec<u8>, usize)>,
             /// A btree's keys as its model has them, when its pages aren't modelled: sized
             /// by the model's sorted build (`sizing::btree_build_blocks`).
-            btree_keys: Option<Vec<Arc<crate::catalog::btsim::Key>>>,
+            btree_keys: Option<Vec<crate::catalog::btsim::Key>>,
         }
         let mut ixs: Vec<Ix> = Vec::new();
         if let Some(only) = indexes {

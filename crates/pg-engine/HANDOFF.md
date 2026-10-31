@@ -1940,6 +1940,105 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     × 4 rounds (release), clippy without new warnings, the difftest smoke, isolation 121 /
     122, a full regress run on a private reference (debug) 51,148 / 51,150 with no unit
     changed against `results.tsv`, pg_dump_tap 14,817 / 14,817.
+- **Size models, round 3** (round 23, agent 142; BENCH.md "Size models, round 3"): smaller
+  models, a row table that answers TIDs, size watches for kept plans.
+  - **Compact models.** At 300,000 rows of pgbench_accounts' shape with the primary key, the
+    models went from 74.4 to 46.9 MB of live allocations (counting allocator in
+    `tests/restart_cost.rs`), about 237 → 145 bytes per row. VmHWM after the first
+    statement went from 144 to 116-136 MB. PostgreSQL's pages for the same rows are 51 MB
+    (44 MB heap, 6.8 MB index).
+    - The heap's key map is a row table (`catalog/keymap.rs` `KeyMap`). Each row key gets a
+      row number, and the row keeps its key's bytes in one arena (varint length, then the
+      bytes) with its current version's TID (12 bytes). A `hashbrown::HashTable<u32>` of
+      row numbers finds a key. There is no allocation per key.
+    - A removed key (a deleted row whose last line pointer was freed, a row moved to
+      another key) keeps its row for the versions still naming it.
+      `Heap::compact_rows` drops such rows once they outnumber the live keys (and are
+      65,536 or more), and renumbers every version's row.
+    - Line pointers are 32 bytes (`Tup`, a `const` assert): t_len is a u16 (a longer
+      tuple is held as u16::MAX, which no page has room for either). Each version carries
+      its row (u32). Its previous version is an offset on its own page. A previous
+      version on another page (a non-HOT update's) is `FAR_PREV`, kept in
+      `Heap::far_prev` only while the updater may still abort: `settle` drops it with the
+      pending entry.
+    - `pending` and `deleted` name rows (u32) instead of holding key copies, so an
+      update allocates nothing per row for them. `Heap::update` takes the new key by
+      reference.
+    - btree keys (`btsim::Key`) are a thin pointer to their own bytes, which give their
+      own length (counts, then the last attribute's end). There is no reference count and
+      no second allocation. An item's size is derived from its key and TIDs
+      (`Item::size`), so items are 32 bytes (`const` assert). A clone copies the bytes;
+      only pivots clone keys. Kept record format 2 is unchanged: the "explicit size" flag
+      is read and skipped, never written.
+    - `sizing::model_bytes(db)` estimates the bytes a database's heap and btree models
+      hold (`Heap::bytes`, `Btree::bytes`; it walks the pages). It is for agent 132's
+      memory budget, not for per-statement use.
+    - `MAX_VERSIONS` stays at 400,000, so the models are still not cheaper than
+      PostgreSQL's pages. What is left per row (heap): line pointers 32 bytes per version
+      plus `Vec` slack, the row table about 35 (12-byte row, hash slot, the key's bytes).
+      Per btree entry: 32 bytes plus the key's own allocation (about 16). Next steps:
+      settled versions in 4-8 bytes (length and flags; xids, cid and row only for
+      versions not all-visible, in a side table per page), and leaf pages keeping their
+      keys in one buffer per page instead of an allocation per entry. Both are inside
+      heapsim / btsim. Then the 400k limit can go.
+  - **TIDs give their rows** (for agent 143's TID scans): `Heap::key_at(tid)` is the key
+    of the row whose version is at `tid`, for any normal tuple. An older version answers
+    with the key it had then, and a deleted row's versions answer with its key.
+    `Heap::keys_at(tids)` is one lookup per TID (it was a pass over every key, and only
+    current versions answered). `rekey` renumbers rows, so every version follows its
+    row to the new key. A row not listed is forgotten. Test
+    `heapsim::tests::key_at_answers_every_version`.
+  - **Size watches for kept plans** (for agent 136): `sizing::size_watch(t, rel, cat, db)
+    -> Option<heapsim::SizeWatch>` for a table or one of its btree indexes. It takes the
+    shard's read lock once. `SizeWatch::holds()` is one atomic load with no lock. It stays
+    true until the main / fsm / vm pages (heap) or the pages or height (btree) change, and
+    is false for good once the model is dropped, replaced or detached. Every
+    `Heap` / `Btree` carries a `SizeGen` (`Arc<AtomicU64>`): the heap bumps it when the
+    signature of (nblocks, fsm blocks, vm blocks) changes (`note_size`: in `get_buffer`,
+    `vm_pin`, `vacuum`, `truncate_vm`, `read_shape`), and the btree on every page
+    allocation. A clone of a model gets a fresh generation, and dropping it retires the
+    old one. None when the sizes don't come from a model (an estimate, or not laid out
+    yet): compare the values then. Unit tests `size_watch_follows_forks` /
+    `size_watch_follows_pages`. Not wired in yet. Agent 136 finished before it landed, so
+    the switch is open for the next OLTP agent: `literals::SizeRead` stores (watch,
+    value), and `SizeRead::holds_known` / `Session::reads_hold` (session/litplan.rs) check
+    `watch.holds()` first and compare the value only on a miss. A changed watch whose value
+    is the same takes a fresh watch and keeps the plan.
+  - **Per-write upkeep, the lock side** (agent 136 measured `sched_yield` spinning on the
+    shard locks at 32 clients of tpcb-like). `updated` computes the pruning horizon
+    (`vis_for`: the catalog and the xid table) before it takes the shard's write lock,
+    checks the size limit within the same hold instead of taking the read lock again
+    (`check_size`), and skips the TOAST read lock for a table without a TOAST relation.
+    `index_insert` still computes its own horizon under the lock. Next steps: move that
+    out, and have `Kills::new` / `is_estimated` / `fetched` take one read lock per
+    statement instead of one each. On agent 136's last HEAD, `is_estimated` under the
+    tellers / branches bitmap scans was still about 6% of the off-CPU switches at 32
+    clients. Agent 139 chose not to move index scans to `fetched_batch`: pruning a whole
+    batch's pages before its rows come out would run ahead of an UPDATE's HOT decisions in
+    the same statement, and past where a LIMIT stops.
+  - Page counts against PostgreSQL 18.6 (BENCH.md's mixed workload, before and after a
+    restart, then inserts before and after a VACUUM): at 60,000 rows every relation's main
+    / fsm / vm pages, every ctid and both EXPLAINs match, except `mw1_v` 721 against 725 (as
+    in round 2). At 300,000 rows everything matches except the two secondary indexes:
+    `mw1_k` 485 against 487 and `mw1_v` 3,696 against 3,706. Base (57d7da04) gives exactly
+    the same output, so these are older btree split differences (low-cardinality
+    duplicates, md5 text keys), still to find. Tables past 400,000 rows are estimated
+    (unchanged).
+  - Verified on this batch, rebased onto d4575cb9:
+    - The crate suite in debug and in release: 54 test binaries, deep_input and
+      deparse_identity included. In release, crash_random ran seeds 1-30 × 4 rounds
+      (`CRASH_SEEDS` takes a comma list, not a range).
+    - clippy, with no warnings in the files touched.
+    - A full regress run on a private reference (debug): 51,148 / 51,150, no unit changed
+      against `results.tsv`.
+    - pg_dump_tap 14,817 / 14,817.
+    - The difftest smoke.
+    - isolation 120 / 122 (roll-* extra 134 / 136). `intra-grant-inplace` is the known
+      difference. `reindex-schema` is new against the committed report: after its wait,
+      REINDEX SCHEMA fails with the debug assertion "file numbers of relations that are
+      gone" (`session/ddl/mod.rs`, a concurrently dropped table's filenode). That is not
+      the size models' code. It most likely comes from 41fc8981 ("DDL reads its tables
+      again after its locks"), and is for the catalog owner.
 - **Executor memory, round 4** (round 22, agent 112; BENCH.md "Round 22 (agent 112)"):
   - **Cached blocks in a compact form** (`storage/sst.rs` `Block::decode`): a block read
     into the cache leaves out a key's 8-byte version when it is the block's (`F_TS`) and an

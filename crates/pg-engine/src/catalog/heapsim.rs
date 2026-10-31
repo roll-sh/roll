@@ -39,6 +39,52 @@ pub fn maxalign(n: usize) -> usize {
 /// A heap tuple's address: (block, offset from 1).
 pub type Tid = (u32, u16);
 
+/// A model's planner-visible size generation (`sizing::size_watch`): bumped whenever the
+/// page counts the planner reads change (a heap's main, fsm and vm forks; a btree's pages
+/// and height), retired when the model goes. A clone is a model of its own: a fresh one.
+#[derive(Debug, Default)]
+pub struct SizeGen(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Clone for SizeGen {
+    fn clone(&self) -> SizeGen {
+        SizeGen::default()
+    }
+}
+
+impl Drop for SizeGen {
+    fn drop(&mut self) {
+        self.0.store(u64::MAX, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl SizeGen {
+    pub fn bump(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn watch(&self) -> SizeWatch {
+        SizeWatch {
+            seen: self.0.load(std::sync::atomic::Ordering::Acquire),
+            cell: self.0.clone(),
+        }
+    }
+}
+
+/// What a model's sizes were when it was taken (`SizeGen::watch`).
+#[derive(Clone, Debug)]
+pub struct SizeWatch {
+    cell: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    seen: u64,
+}
+
+impl SizeWatch {
+    /// Whether the relation's planner-visible sizes are still what they were (one atomic
+    /// load, no lock). False after any change, and once the model is gone.
+    pub fn holds(&self) -> bool {
+        self.cell.load(std::sync::atomic::Ordering::Acquire) == self.seen
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Xs {
     Committed,
@@ -132,25 +178,35 @@ enum Htsv {
     DeleteInProgress,
 }
 
+/// (32 bytes: a model holds one per row version.)
 #[derive(Clone, Debug)]
 pub struct Tup {
-    /// t_len (the tuple takes MAXALIGN(len) on the page).
-    pub len: u32,
     pub xmin: u64,
     /// The deleting or updating transaction (0: none).
     pub xmax: u64,
-    heap_only: bool,
-    hot_updated: bool,
-    /// The next version's offset on this page (HOT chains).
-    next: u16,
-    /// The version this one replaced (followed back when this one's insert aborted).
-    prev: Option<Tid>,
     /// t_cid: the inserting command's id, the deleting one's, or a combo command id for
     /// both (what the cmin and cmax system columns show).
     pub cid: u32,
+    /// The row it is a version of (`KeyMap`; `NO_ROW`: none).
+    row: u32,
+    /// The version this one replaced (followed back when this one's insert aborted): its
+    /// offset on this page, 0 for none, or `FAR_PREV` for one on another page, kept in
+    /// `Heap::far_prev` while this version's transaction may still abort.
+    prev_off: u16,
+    /// The next version's offset on this page (HOT chains).
+    next: u16,
+    /// t_len (the tuple takes MAXALIGN(len) on the page; at most MaxHeapTupleSize, a
+    /// longer one held as u16::MAX, which no page has room for either).
+    pub len: u16,
+    heap_only: bool,
+    hot_updated: bool,
 }
 
+/// `Tup::prev_off` of a version whose previous one is on another page.
+const FAR_PREV: u16 = u16::MAX;
+
 impl Tup {
+
     fn status(&self, v: &Vis) -> Htsv {
         match v.state(self.xmin) {
             Xs::Aborted => Htsv::Dead,
@@ -249,14 +305,15 @@ impl Page {
     }
 
     fn tup(&self, off: u16) -> Option<&Tup> {
-        match self.lps.get(off as usize - 1) {
+        // (Offset 0 is no line pointer's: a TID asked for can have it.)
+        match self.lps.get((off as usize).wrapping_sub(1)) {
             Some(Lp::Normal(t)) => Some(t),
             _ => None,
         }
     }
 
     fn tup_mut(&mut self, off: u16) -> Option<&mut Tup> {
-        match self.lps.get_mut(off as usize - 1) {
+        match self.lps.get_mut((off as usize).wrapping_sub(1)) {
             Some(Lp::Normal(t)) => Some(t),
             _ => None,
         }
@@ -663,7 +720,7 @@ pub struct VacuumResult {
 #[derive(Debug, Default)]
 pub struct Heap {
     pages: Vec<Page>,
-    keys: HashMap<Vec<u8>, Tid>,
+    keys: super::keymap::KeyMap,
     /// The relation's cached insertion target (smgr_targblock), per session: each
     /// backend keeps its own (sessions are told apart by their threads, a session
     /// running on one thread of its own).
@@ -678,7 +735,7 @@ pub struct Heap {
     /// key, the new version, the key the row had before when that differs). An aborted
     /// one's row goes back to the version it replaced (`settle`) before pruning can
     /// remove the way back.
-    pending: HashMap<u64, Vec<(Vec<u8>, Tid, Option<Vec<u8>>)>>,
+    pending: HashMap<u64, Vec<(u32, Tid, Option<u32>)>>,
     /// Pages pinned by something else while a scan reads them (an AFTER ROW trigger's
     /// tuple slot): pruning them needs a cleanup lock it can't get.
     pins: HashMap<u32, usize>,
@@ -694,7 +751,13 @@ pub struct Heap {
     last_placed: Option<(Vec<u8>, Tid)>,
     /// Deleted rows' last versions, by TID, with their keys: once pruning or VACUUM makes
     /// the line pointer unused (reusable by another row), the key no longer names it.
-    deleted: HashMap<Tid, Vec<u8>>,
+    deleted: HashMap<Tid, u32>,
+    /// The previous versions on other pages of versions whose transactions may still abort
+    /// (`Tup::prev_off` `FAR_PREV`), until `settle` finds them ended.
+    far_prev: HashMap<Tid, Tid>,
+    /// Bumped when (main, fsm, vm) pages change (`size_sig`, `note_size`).
+    pub sizes: SizeGen,
+    size_sig: (u32, u32, u32),
 }
 
 impl Heap {
@@ -759,6 +822,15 @@ impl Heap {
         self.pages.len() as u32
     }
 
+    /// Bump `sizes` if a fork's length changed since the last call.
+    fn note_size(&mut self) {
+        let sig = (self.pages.len() as u32, self.fsm.blocks, self.vm_blocks);
+        if sig != self.size_sig {
+            self.size_sig = sig;
+            self.sizes.bump();
+        }
+    }
+
     pub fn fsm_blocks(&self) -> u32 {
         self.fsm.blocks
     }
@@ -776,6 +848,18 @@ impl Heap {
 
     pub fn vm_blocks(&self) -> u32 {
         self.vm_blocks
+    }
+
+    /// About the bytes the model holds (pages and their line pointers, the rows, the free
+    /// space map's pages, the bookkeeping maps), for memory accounting.
+    pub fn bytes(&self) -> usize {
+        let lps: usize = self.pages.iter().map(|p| p.lps.capacity()).sum();
+        self.pages.capacity() * size_of::<Page>()
+            + lps * size_of::<Lp>()
+            + self.keys.bytes()
+            + self.fsm.pages.len() * (size_of::<FsmPage>() + 16)
+            + (self.deleted.len() + self.far_prev.len()) * 24
+            + self.pending.values().map(|l| l.capacity() * 20 + 16).sum::<usize>()
     }
 
     pub fn versions(&self) -> usize {
@@ -817,6 +901,7 @@ impl Heap {
             p.all_visible = false;
         }
         self.vm_blocks = 0;
+        self.note_size();
     }
 
     /// pgstat_heap's counts over every page: (live tuples, their bytes, dead tuples, their
@@ -872,14 +957,14 @@ impl Heap {
     /// The version `locate` finds, and the one it replaced (an update's old version).
     pub fn locate_with_prev(&self, key: &[u8], v: &Vis) -> Option<(Tid, Option<Tid>)> {
         let tid = self.locate(key, v)?;
-        let prev = self.pages.get(tid.0 as usize)?.tup(tid.1)?.prev;
+        let prev = self.prev_of(tid);
         Some((tid, prev))
     }
 
     /// The version of the row a reader sees: past versions still being written by other
     /// transactions (`mine`: the reader's own transaction ids) to the one they replace.
     pub fn locate_for(&self, key: &[u8], v: &Vis, mine: &dyn Fn(u64) -> bool) -> Option<Tid> {
-        let mut tid = *self.keys.get(key)?;
+        let mut tid = self.keys.get(key)?;
         loop {
             let t = self.pages.get(tid.0 as usize)?.tup(tid.1)?;
             match v.state(t.xmin) {
@@ -887,7 +972,7 @@ impl Heap {
                 Xs::Running if !mine(t.xmin) => {}
                 _ => return Some(tid),
             }
-            match t.prev {
+            match self.prev_of(tid) {
                 Some(p) => tid = p,
                 // (A row another transaction is inserting: where it is.)
                 None => return Some(tid),
@@ -895,14 +980,54 @@ impl Heap {
         }
     }
 
+    /// The version the one at `tid` replaced, if known (`Tup::prev_off`).
+    fn prev_of(&self, tid: Tid) -> Option<Tid> {
+        match self.tuple(tid)?.prev_off {
+            0 => None,
+            FAR_PREV => self.far_prev.get(&tid).copied(),
+            off => Some((tid.0, off)),
+        }
+    }
+
+    /// The version at `tid` replaced the one at `prev`.
+    fn set_prev(&mut self, tid: Tid, prev: Option<Tid>) {
+        let off = match prev {
+            None => 0,
+            Some(p) if p.0 == tid.0 => p.1,
+            Some(p) => {
+                self.far_prev.insert(tid, p);
+                FAR_PREV
+            }
+        };
+        if let Some(t) = self.pages.get_mut(tid.0 as usize).and_then(|p| p.tup_mut(tid.1)) {
+            t.prev_off = off;
+        }
+    }
+
+    /// The row under `key` has its current version at `tid` (`KeyMap::insert`), and that
+    /// version is the row's.
+    fn keyed(&mut self, key: &[u8], tid: Tid) -> u32 {
+        let row = self.keys.insert(key, tid);
+        if let Some(t) = self.pages.get_mut(tid.0 as usize).and_then(|p| p.tup_mut(tid.1)) {
+            t.row = row;
+        }
+        row
+    }
+
+    /// The key of the row whose version is at `tid` (any version: an older one's row is the
+    /// key it had then).
+    pub fn key_at(&self, tid: Tid) -> Option<&[u8]> {
+        self.keys.key(self.tuple(tid)?.row)
+    }
+
     pub fn locate(&self, key: &[u8], v: &Vis) -> Option<Tid> {
-        let mut tid = *self.keys.get(key)?;
+        let mut tid = self.keys.get(key)?;
         loop {
             let t = self.pages.get(tid.0 as usize)?.tup(tid.1)?;
             if v.state(t.xmin) != Xs::Aborted {
                 return Some(tid);
             }
-            tid = t.prev?;
+            tid = self.prev_of(tid)?;
         }
     }
 
@@ -915,7 +1040,7 @@ impl Heap {
             if !t.heap_only {
                 return cur;
             }
-            match t.prev {
+            match self.prev_of(cur) {
                 Some(p) if p.0 == cur.0 && p != cur => cur = p,
                 _ => return cur,
             }
@@ -925,21 +1050,22 @@ impl Heap {
 
     /// The rows a scan of the stored data finds (inserted by a committed transaction, not
     /// deleted by one): (TID, key, tuple length), in TID order.
-    pub fn committed_rows(&self, v: &Vis) -> Vec<(Tid, &Vec<u8>, u32)> {
+    pub fn committed_rows(&self, v: &Vis) -> Vec<(Tid, &[u8], u32)> {
         let mut out = Vec::with_capacity(self.keys.len());
-        for (k, &latest) in &self.keys {
+        for (k, _, latest) in self.keys.iter() {
             // (`locate` from the latest version: past versions aborted to the one they replaced.)
             let mut tid = Some(latest);
-            while let Some(t) = tid.and_then(|t| self.tuple(t))
+            while let Some(at) = tid
+                && let Some(t) = self.tuple(at)
                 && v.state(t.xmin) == Xs::Aborted
             {
-                tid = t.prev;
+                tid = self.prev_of(at);
             }
             if let Some(tid) = tid
                 && let Some(t) = self.tuple(tid)
                 && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress)
             {
-                out.push((tid, k, t.len));
+                out.push((tid, k, t.len as u32));
             }
         }
         out.sort_unstable_by_key(|x| x.0);
@@ -947,27 +1073,13 @@ impl Heap {
     }
 
     pub fn tid_of(&self, key: &[u8]) -> Option<Tid> {
-        self.keys.get(key).copied()
+        self.keys.get(key)
     }
 
-    /// The rows whose latest versions are at `tids` (ascending, each once): (TID, key), in
-    /// that order; a TID no row's latest version is at has none.
+    /// The rows whose versions are at `tids` (each version's row: `key_at`): (TID, key), in
+    /// the order given; a TID of no normal tuple, or of one with no row, has none.
     pub fn keys_at(&self, tids: &[Tid]) -> Vec<(Tid, Vec<u8>)> {
-        let mut found: Vec<Option<&Vec<u8>>> = vec![None; tids.len()];
-        // (Offset 0 is no line pointer's.)
-        let mut left = tids.iter().filter(|t| t.1 > 0 && self.tuple(**t).is_some()).count();
-        if left > 0 {
-            for (k, t) in &self.keys {
-                if let Ok(i) = tids.binary_search(t) {
-                    found[i] = Some(k);
-                    left -= 1;
-                    if left == 0 {
-                        break;
-                    }
-                }
-            }
-        }
-        tids.iter().zip(found).filter_map(|(t, k)| Some((*t, k?.clone()))).collect()
+        tids.iter().filter_map(|&t| Some((t, self.key_at(t)?.to_vec()))).collect()
     }
 
     /// The tuple at `tid`, if it is a normal one.
@@ -985,6 +1097,7 @@ impl Heap {
     fn vm_pin(&mut self, blk: u32) {
         let need = blk / VM_HEAPBLOCKS as u32 + 1;
         self.vm_blocks = self.vm_blocks.max(need);
+        self.note_size();
     }
 
     /// Read a page for writing: a never-initialized one is initialized.
@@ -1083,6 +1196,7 @@ impl Heap {
             let free = self.pages[b as usize].heap_free();
             if target_free <= free {
                 self.set_target(b);
+                self.note_size();
                 return b;
             }
             if let Some(bs) = bi.as_deref_mut().filter(|bs| bs.next_free.is_some()) {
@@ -1117,6 +1231,7 @@ impl Heap {
         }
         let b = self.add_blocks(bi, num_pages, use_fsm);
         self.set_target(b);
+        self.note_size();
         b
     }
 
@@ -1138,13 +1253,14 @@ impl Heap {
 
     fn new_tup(len: usize, xmin: u64) -> Tup {
         Tup {
-            len: len as u32,
+            len: len.min(u16::MAX as usize) as u16,
             xmin,
             xmax: 0,
             heap_only: false,
             hot_updated: false,
             next: 0,
-            prev: None,
+            row: super::keymap::NO_ROW,
+            prev_off: 0,
             cid: 0,
         }
     }
@@ -1155,7 +1271,7 @@ impl Heap {
         let xmin = if mode.frozen { 0 } else { xmin };
         let tid = self.put(blk, Self::new_tup(len, xmin), mode.frozen);
         self.placed(&key, tid);
-        self.keys.insert(key, tid);
+        self.keyed(&key, tid);
         tid
     }
 
@@ -1170,7 +1286,7 @@ impl Heap {
         let out = self.multi_place(&lens, xmin, mode);
         for ((k, _), tid) in rows.into_iter().zip(&out) {
             self.placed(&k, *tid);
-            self.keys.insert(k, *tid);
+            self.keyed(&k, *tid);
         }
         out
     }
@@ -1240,13 +1356,17 @@ impl Heap {
             return;
         };
         let p = &mut self.pages[b as usize];
+        let mut row = super::keymap::NO_ROW;
         if let Some(t) = p.tup_mut(off) {
             t.xmax = xid;
             t.hot_updated = false;
+            row = t.row;
         }
         p.set_prunable(xid);
         p.all_visible = false;
-        self.deleted.insert((b, off), key.to_vec());
+        if row != super::keymap::NO_ROW {
+            self.deleted.insert((b, off), row);
+        }
     }
 
     /// Line pointers `freed` are unused now: a deleted row's key that still names one of
@@ -1258,12 +1378,11 @@ impl Heap {
             return;
         }
         for tid in freed {
-            if let Some(k) = self.deleted.remove(tid)
-                && self.keys.get(&k) == Some(tid)
-            {
-                self.keys.remove(&k);
+            if let Some(row) = self.deleted.remove(tid) {
+                self.keys.remove_row_at(row, *tid);
             }
         }
+        self.compact_rows();
     }
 
     /// heap_update: the new version goes on the old one's page if it fits (a HOT update
@@ -1272,14 +1391,14 @@ impl Heap {
     pub fn update(
         &mut self,
         old_key: &[u8],
-        new_key: Vec<u8>,
+        new_key: &[u8],
         len: usize,
         xid: u64,
         hot: bool,
         v: &Vis,
     ) -> (Tid, bool) {
         let Some((ob, ooff)) = self.locate(old_key, v) else {
-            let tid = self.insert(new_key, len, xid, &mut InsertMode::single());
+            let tid = self.insert(new_key.to_vec(), len, xid, &mut InsertMode::single());
             return (tid, false);
         };
         // (No pruning here: heap_update leaves that to the scans that read the page.)
@@ -1293,36 +1412,39 @@ impl Heap {
         let hot = same && hot;
         let mut t = Self::new_tup(len, xid);
         t.heap_only = hot;
-        t.prev = Some((ob, ooff));
         let (_, noff) = self.put(nb, t, false);
+        self.set_prev((nb, noff), Some((ob, ooff)));
         let op = &mut self.pages[ob as usize];
+        let mut old_row = super::keymap::NO_ROW;
         if let Some(o) = op.tup_mut(ooff) {
             o.xmax = xid;
             o.hot_updated = hot;
             o.next = if hot { noff } else { 0 };
+            old_row = o.row;
         }
         if !same {
             op.full = true;
         }
         op.set_prunable(xid);
         op.all_visible = false;
-        let moved = (old_key != new_key.as_slice()).then(|| old_key.to_vec());
-        if moved.is_some() {
+        let moved = old_key != new_key;
+        if moved {
             self.keys.remove(old_key);
         }
+        self.disordered = true;
+        let row = self.keyed(new_key, (nb, noff));
         if xid >= crate::txn::xids::FIRST_NORMAL_XID {
             self.pending
                 .entry(xid)
                 .or_default()
-                .push((new_key.clone(), (nb, noff), moved));
+                .push((row, (nb, noff), moved.then_some(old_row)));
         }
-        self.disordered = true;
-        self.keys.insert(new_key, (nb, noff));
         ((nb, noff), hot)
     }
 
     /// Rows whose last update's transaction aborted point at the version it replaced
-    /// again (see `pending`); those of transactions that ended otherwise are forgotten.
+    /// again (see `pending`); those of transactions that ended otherwise are forgotten,
+    /// with the links back to other pages their new versions kept (`far_prev`).
     fn settle(&mut self, v: &Vis) {
         if self.pending.is_empty() {
             return;
@@ -1332,26 +1454,27 @@ impl Heap {
             .collect();
         for x in ended {
             let list = self.pending.remove(&x).unwrap_or_default();
-            if v.state(x) != Xs::Aborted {
-                continue;
-            }
-            for (key, tid, moved) in list.into_iter().rev() {
-                if self.keys.get(&key) != Some(&tid) {
-                    continue;
-                }
-                let back = self.locate(&key, v);
-                match moved {
-                    Some(old) => {
+            if v.state(x) == Xs::Aborted {
+                for &(row, tid, moved) in list.iter().rev() {
+                    // (Rare: the keys are copied out of the map they go back into.)
+                    let Some(key) = self.keys.key(row).map(<[u8]>::to_vec) else { continue };
+                    if self.keys.get(&key) != Some(tid) {
+                        continue;
+                    }
+                    let back = self.locate(&key, v);
+                    if let Some(old) = moved {
                         self.keys.remove(&key);
-                        if let Some(b) = back {
-                            self.keys.insert(old, b);
+                        if let (Some(b), Some(k)) = (back, self.keys.key(old).map(<[u8]>::to_vec)) {
+                            self.keyed(&k, b);
                         }
+                    } else if let Some(b) = back {
+                        self.keyed(&key, b);
                     }
-                    None => {
-                        if let Some(b) = back {
-                            self.keys.insert(key, b);
-                        }
-                    }
+                }
+            }
+            if !self.far_prev.is_empty() {
+                for (_, tid, _) in &list {
+                    self.far_prev.remove(tid);
                 }
             }
         }
@@ -1661,6 +1784,7 @@ impl Heap {
         res.dead = freed;
         res.pages = pages;
         res.all_visible = self.all_visible_pages();
+        self.note_size();
         res
     }
 
@@ -1669,7 +1793,7 @@ impl Heap {
             self.versions -= p.lps.iter().filter(|l| matches!(l, Lp::Normal(_))).count();
         }
         self.pages.truncate(pages as usize);
-        self.keys.retain(|_, t| t.0 < pages);
+        self.keys.retain(|t| t.0 < pages);
         self.fsm.truncate(pages);
         if self.vm_blocks > 0 {
             let blk = pages as usize / VM_HEAPBLOCKS;
@@ -1695,27 +1819,66 @@ impl Heap {
 
     /// Rows stored under new keys (old, new); rows not listed are forgotten.
     pub fn rekey(&mut self, pairs: &[(Vec<u8>, Vec<u8>)]) {
-        let mut keys = HashMap::with_capacity_and_hasher(pairs.len(), Default::default());
+        let mut keys = super::keymap::KeyMap::default();
+        keys.reserve(pairs.len(), pairs.iter().map(|(_, n)| n.len()).sum());
+        let mut map = vec![super::keymap::NO_ROW; self.keys.rows()];
         for (old, new) in pairs {
-            if let Some(tid) = self.keys.get(old) {
-                keys.insert(new.clone(), *tid);
+            if let Some(row) = self.keys.find(old) {
+                map[row as usize] = keys.insert(new, self.keys.tid(row));
             }
         }
         self.keys = keys;
         self.disordered = true;
         // (A row that moved back from an aborted update is under its old key: forgotten.)
-        let renamed: HashMap<&[u8], &Vec<u8>> =
-            pairs.iter().map(|(o, n)| (o.as_slice(), n)).collect();
+        self.renumber_rows(&map);
         for list in self.pending.values_mut() {
-            list.retain_mut(|(k, _, moved)| match renamed.get(k.as_slice()) {
-                Some(n) => {
-                    *k = (*n).clone();
-                    *moved = None;
-                    true
-                }
-                None => false,
+            list.retain_mut(|(row, _, moved)| {
+                *moved = None;
+                *row != super::keymap::NO_ROW
             });
         }
+    }
+
+    /// Rows renumbered (`map`: each old row's new number, or `NO_ROW`): every version's,
+    /// and those `pending` and `deleted` name.
+    fn renumber_rows(&mut self, map: &[u32]) {
+        let to = |r: u32| map.get(r as usize).copied().unwrap_or(super::keymap::NO_ROW);
+        for p in &mut self.pages {
+            for l in &mut p.lps {
+                if let Lp::Normal(t) = l {
+                    t.row = to(t.row);
+                }
+            }
+        }
+        for list in self.pending.values_mut() {
+            for (row, _, moved) in list.iter_mut() {
+                *row = to(*row);
+                *moved = moved.map(to);
+            }
+        }
+        self.deleted.retain(|_, r| {
+            *r = to(*r);
+            *r != super::keymap::NO_ROW
+        });
+    }
+
+    /// Drop the rows of removed keys no version names any more (`KeyMap::wasteful`).
+    fn compact_rows(&mut self) {
+        if !self.keys.wasteful() {
+            return;
+        }
+        let mut keep = vec![false; self.keys.rows()];
+        for p in &self.pages {
+            for l in &p.lps {
+                if let Lp::Normal(t) = l
+                    && let Some(k) = keep.get_mut(t.row as usize)
+                {
+                    *k = true;
+                }
+            }
+        }
+        let map = self.keys.compact(&keep);
+        self.renumber_rows(&map);
     }
 
     /// The rows whose current version is live, in physical order: (key, t_len).
@@ -1724,8 +1887,8 @@ impl Heap {
     /// old key.
     pub fn live_rows(&mut self, v: &Vis) -> Vec<(Vec<u8>, usize)> {
         self.settle(v);
-        let mut out: Vec<(Tid, &Vec<u8>, usize)> = Vec::new();
-        for k in self.keys.keys() {
+        let mut out: Vec<(Tid, &[u8], usize)> = Vec::new();
+        for (k, _, _) in self.keys.iter() {
             if let Some(tid) = self.locate(k, v)
                 && let Some(t) = self.tuple(tid)
                 && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress | Htsv::InsertInProgress)
@@ -1734,7 +1897,7 @@ impl Heap {
             }
         }
         out.sort_by_key(|x| x.0);
-        out.into_iter().map(|(_, k, l)| (k.clone(), l)).collect()
+        out.into_iter().map(|(_, k, l)| (k.to_vec(), l)).collect()
     }
 
     /// Whether the version at `tid` is gone for everyone (bottom-up index deletion).
@@ -1925,7 +2088,7 @@ impl Heap {
             return None;
         }
         self.pages.resize_with(n, Page::fresh);
-        for (blk, (p, (flags, lps))) in self.pages.iter_mut().zip(pages).enumerate() {
+        for (p, (flags, lps)) in self.pages.iter_mut().zip(pages) {
             p.lps.resize(lps.len(), Lp::Dead);
             let mut prev = Vec::new();
             for (j, lp) in lps.into_iter().enumerate() {
@@ -1961,7 +2124,7 @@ impl Heap {
             // (Each chain member's way back, as `update` and pruning leave it.)
             for (to, from) in prev {
                 if let Some(Lp::Normal(t)) = p.lps.get_mut(to as usize - 1) {
-                    t.prev = Some((blk as u32, from));
+                    t.prev_off = from;
                 }
             }
             p.all_visible = flags & 1 != 0;
@@ -1972,6 +2135,7 @@ impl Heap {
         }
         self.vm_blocks = vm_blocks;
         self.fsm = Fsm { blocks: fsm_blocks, pages: fsm };
+        self.note_size();
         Some(())
     }
 }
@@ -1985,7 +2149,7 @@ impl Heap {
 /// place differs from its stored TID, and each row's place (in the order given).
 pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> (Heap, bool, Vec<Tid>) {
     let mut h = Heap::new(fillfactor);
-    h.keys.reserve(rows.len());
+    h.keys.reserve(rows.len(), rows.iter().map(|r| r.0.len()).sum());
     let mut moved = false;
     let mut tids = vec![(0, 0); rows.len()];
     let mut rest = Vec::new();
@@ -1993,7 +2157,7 @@ pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> 
         match stored.filter(|&tid| h.place_at(tid, Heap::new_tup(len, 0))) {
             Some(tid) => {
                 h.placed(&k, tid);
-                h.keys.insert(k, tid);
+                h.keyed(&k, tid);
                 tids[i] = tid;
             }
             None => {
@@ -2005,7 +2169,7 @@ pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> 
     for (i, k, len) in rest {
         let tid = h.append(Heap::new_tup(len, 0));
         h.placed(&k, tid);
-        h.keys.insert(k, tid);
+        h.keyed(&k, tid);
         tids[i] = tid;
     }
     (h, moved, tids)
@@ -2054,7 +2218,7 @@ impl Heap {
     /// This is what `update` / `delete` would have left, so COMMIT PREPARED and ROLLBACK
     /// PREPARED settle it the same way. Returns whether the new version had to go elsewhere.
     pub fn restore_pending(&mut self, xid: u64, key: Vec<u8>, new: Option<(usize, Option<Tid>)>) -> bool {
-        let old = self.keys.get(&key).copied();
+        let old = self.keys.get(&key);
         if let Some((b, off)) = old {
             let p = &mut self.pages[b as usize];
             if let Some(t) = p.tup_mut(off) {
@@ -2066,15 +2230,15 @@ impl Heap {
         let Some((len, stored)) = new else {
             return false;
         };
-        let mut t = Self::new_tup(len, xid);
-        t.prev = old;
+        let t = Self::new_tup(len, xid);
         let tid = match stored.filter(|&tid| self.place_at(tid, t.clone())) {
             Some(tid) => tid,
             None => self.append(t),
         };
-        self.pending.entry(xid).or_default().push((key.clone(), tid, None));
+        self.set_prev(tid, old);
         self.disordered = true;
-        self.keys.insert(key, tid);
+        let row = self.keyed(&key, tid);
+        self.pending.entry(xid).or_default().push((row, tid, None));
         stored.is_some_and(|s| s != tid)
     }
 }
@@ -2096,8 +2260,74 @@ pub fn rewritten(fillfactor: usize, rows: Vec<(Vec<u8>, usize)>) -> (Heap, Vec<T
         let b = h.pages.len() as u32 - 1;
         let tid = h.put(b, Heap::new_tup(len, 0), false);
         h.placed(&k, tid);
-        h.keys.insert(k, tid);
+        h.keyed(&k, tid);
         tids.push(tid);
     }
     (h, tids)
+}
+
+// (A model holds one per entry / version.)
+const _: () = assert!(size_of::<Lp>() == 32);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A TID gives the key of the row its version belongs to: the current version's, an
+    /// older version's (its key as it was when the row moved to another key), a deleted
+    /// row's; and none for a TID with no tuple.
+    #[test]
+    fn key_at_answers_every_version() {
+        let xids = Xids::new(10, |_| {});
+        let v = Vis::new(&xids);
+        let mut h = Heap::new(100);
+        let mut mode = InsertMode::single();
+        let a = h.insert(b"a".to_vec(), 100, 2, &mut mode);
+        let b = h.insert(b"b".to_vec(), 100, 2, &mut mode);
+        let (a2, hot) = h.update(b"a", b"a", 100, 2, true, &v);
+        assert!(hot);
+        let (c, _) = h.update(b"b", b"c", 100, 2, false, &v);
+        h.delete(b"a", 2, &v);
+        assert_eq!(h.key_at(a), Some(&b"a"[..]));
+        assert_eq!(h.key_at(a2), Some(&b"a"[..]));
+        assert_eq!(h.key_at(b), Some(&b"b"[..]));
+        assert_eq!(h.key_at(c), Some(&b"c"[..]));
+        assert_eq!(h.key_at((7, 1)), None);
+        assert_eq!(h.key_at((0, 0)), None, "offset 0 is no line pointer's");
+        assert_eq!(h.tid_of(b"b"), None);
+        assert_eq!(h.tid_of(b"c"), Some(c));
+        let got = h.keys_at(&[a, (7, 1), c]);
+        assert_eq!(got, vec![(a, b"a".to_vec()), (c, b"c".to_vec())]);
+        // Rows stored under new keys: every version follows its row.
+        h.rekey(&[(b"a".to_vec(), b"x".to_vec()), (b"c".to_vec(), b"y".to_vec())]);
+        assert_eq!(h.key_at(a), Some(&b"x"[..]));
+        assert_eq!(h.key_at(c), Some(&b"y"[..]));
+        assert_eq!(h.key_at(b), None, "a row not listed is forgotten");
+    }
+
+    /// A heap's size watch holds while inserts fit its pages and fails once one extends the
+    /// heap, VACUUM truncates it, or the model goes.
+    #[test]
+    fn size_watch_follows_forks() {
+        let mut h = Heap::new(100);
+        // (Frozen inserts: the vm fork exists.)
+        let mut mode = InsertMode { frozen: true, ..InsertMode::single() };
+        h.insert(vec![0], 100, 2, &mut mode);
+        let w = h.sizes.watch();
+        let mut i = 1u32;
+        while h.nblocks() == 1 {
+            assert!(w.holds(), "no page added yet ({i} rows)");
+            h.insert(i.to_be_bytes().to_vec(), 100, 2, &mut mode);
+            i += 1;
+        }
+        assert!(!w.holds());
+        let w = h.sizes.watch();
+        h.insert(vec![9; 9], 100, 2, &mut mode);
+        assert!(w.holds());
+        h.truncate_vm();
+        assert!(!w.holds(), "the vm fork went");
+        let w = h.sizes.watch();
+        drop(h);
+        assert!(!w.holds());
+    }
 }

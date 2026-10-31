@@ -14,9 +14,35 @@
 use pg_engine::engine::{Engine, EngineOptions};
 use std::time::{Duration, Instant};
 
-// (The server's allocator: these numbers are of allocation-heavy work.)
+// (The server's allocator: these numbers are of allocation-heavy work.) Counting the bytes
+// live, so a statement's lasting allocations (a table's models laid out) show exactly.
+struct Counting;
+
+static LIVE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+use std::alloc::GlobalAlloc;
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        LIVE.fetch_add(l.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        unsafe { mimalloc::MiMalloc.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
+        LIVE.fetch_sub(l.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        unsafe { mimalloc::MiMalloc.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
+        LIVE.fetch_add(n as isize - l.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        unsafe { mimalloc::MiMalloc.realloc(p, l, n) }
+    }
+}
+
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: Counting = Counting;
+
+fn live_mb() -> f64 {
+    LIVE.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6
+}
 
 fn open(dir: &std::path::Path) -> std::sync::Arc<Engine> {
     Engine::open(EngineOptions {
@@ -86,7 +112,7 @@ fn restart_cost() {
     let eng = open(&dir);
     let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
     let opened = t0.elapsed();
-    println!("open+connect {:.3} s", opened.as_secs_f64());
+    println!("open+connect {:.3} s, live {:.1} MB", opened.as_secs_f64(), live_mb());
     let stmts = std::env::var("RESTART_STATEMENTS").unwrap_or_else(|_| {
         "SELECT abalance FROM acc WHERE aid = 777;\
          SELECT ctid FROM acc WHERE aid = 778;\
@@ -99,7 +125,7 @@ fn restart_cost() {
         let t = Instant::now();
         let r = s.query(q).unwrap_or_else(|e| panic!("{q}: {e:?}"));
         let first = r.last().and_then(|r| r.rows.first().map(|row| format!("{row:?}")));
-        println!("{:.3} s  {q}  -> {}", t.elapsed().as_secs_f64(), first.unwrap_or_default());
+        println!("{:.3} s  live {:.1} MB  {q}  -> {}", t.elapsed().as_secs_f64(), live_mb(), first.unwrap_or_default());
     }
     println!("total {:.3} s, cpu {:.2} s, VmHWM {} kB", t0.elapsed().as_secs_f64(), cpu_secs(), status("VmHWM:"));
     drop(s);

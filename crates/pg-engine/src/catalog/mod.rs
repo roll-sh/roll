@@ -11,6 +11,7 @@ pub mod ginsim;
 pub mod gistsim;
 pub mod hashidx;
 pub mod heapsim;
+pub mod keymap;
 pub mod jsonbin;
 pub mod lz4;
 pub mod persist;

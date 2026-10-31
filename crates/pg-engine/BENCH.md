@@ -5611,6 +5611,52 @@ sorts of 2M rows now spill at the default work_mem as PostgreSQL's do; their tim
 against base), the difftest process's growth over 150 seeds (agent 118's), and the pgbench
 simple-update peak at 64 clients after 57d7da04 (agent 126's).
 
+## Size models, round 3 (round 23, agent 142)
+
+HANDOFF.md, "Size models, round 3", has what changed. Base is 57d7da04, head is this batch.
+These are release builds. The engine ran on cores 24-27 and pgbench (`-M prepared`, a
+container on the host network) on 28-31, everything under `nice -n 19`, at scale 10, 20 s
+per run after a 5 s warm-up. The engine was restarted per run on one data directory, with
+base and head interleaved. Load was 40-50. Wall times and tps moved by 15% between
+identical runs, so CPU per transaction (the engine's utime + stime) is the figure to read.
+
+**Model memory and the first statement after a clean restart.** `tests/restart_cost.rs`:
+300,000 rows of pgbench_accounts' shape with its primary key, a tenth updated, then a clean
+restart. The test now counts live allocations. Two interleaved rounds:
+
+| | base | head |
+|---|---|---|
+| live after the first statement (models laid out) | 74.4 MB | 46.9 MB |
+| per row | ~237 bytes | ~145 bytes |
+| first statement (point SELECT, waits for the layout) | 0.39 / 0.48 s | 0.29 / 0.35 s |
+| process CPU | 0.62 / 0.80 s | 0.78 / 0.56 s |
+| VmHWM | 144 / 144 MB | 116 / 136 MB |
+
+PostgreSQL's pages for these rows: 44 MB heap, 6.8 MB index. The intermediate step (key
+arena plus 32-byte line pointers, before thin btree keys) measured 56.9 MB.
+
+**pgbench, 8 clients**:
+
+| workload | base tps | head tps | base CPU ms/txn | head CPU ms/txn | base VmHWM | head VmHWM |
+|---|---|---|---|---|---|---|
+| select-only | 60,809 / 61,355 / 53,946 | 61,543 / 53,188 / 54,213 | 0.063 / 0.063 / 0.069 | 0.063 / 0.069 / 0.069 | 151 / 187 / 149 MB | 182 / 145 / 148 MB |
+| simple-update | 11,733 | 12,160 | 0.266 | 0.258 | 262 MB | 244 MB |
+| tpcb-like | 6,126 | 6,361 | 0.474 | 0.479 | 239 MB | 230 MB |
+
+At scale 10, pgbench_accounts is past the 400,000-row limit, so only tellers, branches and
+history are modelled. Nothing moved beyond the noise.
+
+**Page counts against PostgreSQL 18.6**: round 2's mixed workload (the script above, with
+mw1's row count as a parameter, mw2 at 2/3 of it). It reports pages before and after a
+clean restart, then inserts and their ctids before and after a VACUUM:
+
+| rows | differs from PostgreSQL |
+|---|---|
+| 60,000 | `mw1_v` 721 against 725 (as in round 2); all else equal (main / fsm / vm, 1,100 ctids, EXPLAIN costs) |
+| 300,000 | `mw1_k` 485 against 487, `mw1_v` 3,696 against 3,706; all else equal |
+
+Base's output at 300,000 rows is identical to head's.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

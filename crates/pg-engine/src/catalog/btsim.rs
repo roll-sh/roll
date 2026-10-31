@@ -5,7 +5,6 @@
 
 use super::heapsim::{BLCKSZ, ITEM_ID, PAGE_HEADER, Tid, get_varint as get, maxalign, put_varint as put};
 use std::cmp::Ordering;
-use std::sync::Arc;
 
 /// BTPageOpaqueData, MAXALIGNed.
 const SPECIAL: usize = 16;
@@ -25,19 +24,66 @@ const MINUS_INF: usize = 8;
 /// One allocation (a model holds one per index entry of every modelled table): the
 /// attribute and size counts, each attribute's end and each prefix's size as u16s, then
 /// the attributes' bytes.
-#[derive(Clone, Debug)]
+/// A thin pointer to the bytes, which say their own length (the counts and the last
+/// attribute's end): a leaf item is 32 bytes and its key's bytes, nothing else. A clone
+/// copies them (only pivots clone keys, a few per page split).
 pub struct Key {
-    buf: Box<[u8]>,
+    ptr: std::ptr::NonNull<u8>,
 }
 
+// SAFETY: the bytes are owned and never change after `wrap`.
+unsafe impl Send for Key {}
+unsafe impl Sync for Key {}
+
 impl Key {
-    /// Its one allocation as it is (`sizing`'s models kept across a restart).
+    /// The length of the encoding at `p` (its header is valid: `wrap` checked it).
+    fn len_at(p: *const u8) -> usize {
+        // SAFETY: the header (counts, then the attributes' ends) is within the allocation.
+        unsafe {
+            let (natts, nsizes) = (*p as usize, *p.add(1) as usize);
+            let data = 2 + 2 * (natts + nsizes);
+            if natts == 0 {
+                return data;
+            }
+            let at = p.add(2 + 2 * (natts - 1));
+            data + u16::from_le_bytes([*at, *at.add(1)]) as usize
+        }
+    }
+
+    fn layout(n: usize) -> std::alloc::Layout {
+        std::alloc::Layout::from_size_align(n.max(1), 1).expect("key layout")
+    }
+
+    /// `buf` must be a well-formed encoding (`new`, or checked by `from_bytes`).
+    fn wrap(buf: &[u8]) -> Key {
+        debug_assert!(buf.len() >= 2 && Self::len_at(buf.as_ptr()) == buf.len());
+        let layout = Self::layout(buf.len());
+        // SAFETY: a non-zero-sized layout; the copy fills what was allocated.
+        unsafe {
+            let p = std::alloc::alloc(layout);
+            let Some(ptr) = std::ptr::NonNull::new(p) else {
+                std::alloc::handle_alloc_error(layout)
+            };
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), p, buf.len());
+            Key { ptr }
+        }
+    }
+
+    /// Byte `i` of the header (the counts, ends and sizes).
+    fn byte(&self, i: usize) -> u8 {
+        // SAFETY: header bytes are within the allocation.
+        unsafe { *self.ptr.as_ptr().add(i) }
+    }
+
+    /// Its encoding (`sizing`'s models kept across a restart store it as it is).
     pub fn as_bytes(&self) -> &[u8] {
-        &self.buf
+        let p = self.ptr.as_ptr();
+        // SAFETY: the allocation holds exactly the encoding, `len_at` long.
+        unsafe { std::slice::from_raw_parts(p, Self::len_at(p)) }
     }
 
     /// A key from `as_bytes`, when they hold one.
-    pub fn from_bytes(buf: Vec<u8>) -> Option<Key> {
+    pub fn from_bytes(buf: &[u8]) -> Option<Key> {
         let (&natts, &nsizes) = (buf.first()?, buf.get(1)?);
         let data = 2 + 2 * (natts as usize + nsizes as usize);
         let at = |i: usize| buf.get(2 + 2 * i..4 + 2 * i).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
@@ -49,7 +95,7 @@ impl Key {
             }
             prev = end;
         }
-        (data <= buf.len() && data + prev == buf.len()).then(|| Key { buf: buf.into() })
+        (data <= buf.len() && data + prev == buf.len()).then(|| Key::wrap(buf))
     }
 
     /// `atts`: per-attribute encodings; `sizes[k]`: the MAXALIGNed index tuple size
@@ -70,19 +116,19 @@ impl Key {
         for a in atts {
             buf.extend_from_slice(a);
         }
-        Key { buf: buf.into() }
+        Key::wrap(&buf)
     }
 
     fn u16_at(&self, i: usize) -> usize {
-        u16::from_le_bytes([self.buf[2 + 2 * i], self.buf[3 + 2 * i]]) as usize
+        u16::from_le_bytes([self.byte(2 + 2 * i), self.byte(3 + 2 * i)]) as usize
     }
 
     fn natts(&self) -> usize {
-        self.buf[0] as usize
+        self.byte(0) as usize
     }
 
     fn nsizes(&self) -> usize {
-        self.buf[1] as usize
+        self.byte(1) as usize
     }
 
     /// Where the attributes' bytes start.
@@ -98,7 +144,7 @@ impl Key {
     fn seg(&self, a: usize) -> &[u8] {
         let start = if a == 0 { 0 } else { self.end(a - 1) };
         let d = self.data();
-        &self.buf[d + start..d + self.end(a)]
+        &self.as_bytes()[d + start..d + self.end(a)]
     }
 
     /// The whole tuple's size (no posting list).
@@ -122,7 +168,7 @@ impl Key {
     fn key_bytes(&self, nkey: usize) -> &[u8] {
         let n = nkey.min(self.natts());
         let d = self.data();
-        &self.buf[d..d + if n == 0 { 0 } else { self.end(n - 1) }]
+        &self.as_bytes()[d..d + if n == 0 { 0 } else { self.end(n - 1) }]
     }
 
     fn cmp_keys(&self, o: &Key, nkey: usize) -> Ordering {
@@ -143,6 +189,26 @@ impl Key {
             }
         }
         nkey + 1
+    }
+}
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        let n = Self::len_at(self.ptr.as_ptr());
+        // SAFETY: allocated by `wrap` with this layout.
+        unsafe { std::alloc::dealloc(self.ptr.as_ptr(), Self::layout(n)) }
+    }
+}
+
+impl Clone for Key {
+    fn clone(&self) -> Key {
+        Key::wrap(self.as_bytes())
+    }
+}
+
+impl std::fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Key({:?})", self.as_bytes())
     }
 }
 
@@ -190,49 +256,49 @@ impl Tids {
 
 #[derive(Clone, Debug)]
 struct Item {
-    key: Arc<Key>,
+    key: Key,
     /// Heap TIDs, ascending (more than one: a posting list tuple).
     tids: Tids,
-    size: usize,
     /// LP_DEAD: an index scan found every heap tuple it points at dead to everyone
     /// (_bt_killitems).
     dead: bool,
 }
 
 impl Item {
-    fn plain(key: Arc<Key>, tid: Tid) -> Item {
-        let size = key.size();
+    fn plain(key: Key, tid: Tid) -> Item {
         Item {
             key,
             tids: Tids::One(tid),
-            size,
             dead: false,
         }
     }
 
-    fn posting(key: Arc<Key>, tids: impl Into<Tids>) -> Item {
-        let tids = tids.into();
-        let size = if tids.len() > 1 {
-            maxalign(key.size() + 6 * tids.len())
-        } else {
-            key.size()
-        };
+    fn posting(key: Key, tids: impl Into<Tids>) -> Item {
         Item {
             key,
-            tids,
-            size,
+            tids: tids.into(),
             dead: false,
+        }
+    }
+
+    /// The tuple's size: its key's, a posting list's TIDs with it (a function of the two,
+    /// so not kept: a model holds an item per index entry).
+    fn size(&self) -> usize {
+        if self.tids.len() > 1 {
+            maxalign(self.key.size() + 6 * self.tids.len())
+        } else {
+            self.key.size()
         }
     }
 
     fn posting_bytes(&self) -> usize {
-        self.size - self.key.size()
+        self.size() - self.key.size()
     }
 }
 
 #[derive(Clone, Debug)]
 struct Pivot {
-    key: Option<Arc<Key>>,
+    key: Option<Key>,
     natts: usize,
     tid: Option<Tid>,
     size: usize,
@@ -360,6 +426,8 @@ pub struct Btree {
     root: Option<u32>,
     /// Heap TIDs indexed.
     pub tuples: usize,
+    /// Bumped when its pages or height change.
+    pub sizes: super::heapsim::SizeGen,
 }
 
 impl Btree {
@@ -369,7 +437,20 @@ impl Btree {
             pages: vec![None],
             root: None,
             tuples: 0,
+            sizes: Default::default(),
         }
+    }
+
+    /// About the bytes the model holds (pages, items and their keys, pivots), for memory
+    /// accounting.
+    pub fn bytes(&self) -> usize {
+        let mut n = self.pages.capacity() * size_of::<Option<BPage>>();
+        for p in self.pages.iter().flatten() {
+            n += p.items.capacity() * size_of::<Item>() + p.inner.capacity() * size_of::<(Pivot, u32)>();
+            n += p.items.iter().map(|i| i.key.as_bytes().len() + if i.tids.len() > 1 { 6 * i.tids.len() } else { 0 }).sum::<usize>();
+            n += p.inner.iter().filter_map(|(pv, _)| pv.key.as_ref()).map(|k| k.as_bytes().len()).sum::<usize>();
+        }
+        n
     }
 
     pub fn nblocks(&self) -> u32 {
@@ -377,7 +458,7 @@ impl Btree {
     }
 
     /// Every leaf entry's key and heap TID (each TID of a posting list), in index order.
-    pub fn entries(&self) -> impl Iterator<Item = (&Arc<Key>, Tid)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&Key, Tid)> {
         let leaves = self.leaf_pages(None, None).into_iter().filter_map(|b| self.pages.get(b as usize)?.as_ref());
         leaves.flat_map(|p| p.items.iter()).flat_map(|it| it.tids.iter().map(move |t| (&it.key, *t)))
     }
@@ -431,6 +512,7 @@ impl Btree {
 
     fn alloc(&mut self, p: BPage) -> u32 {
         self.pages.push(Some(p));
+        self.sizes.bump();
         self.pages.len() as u32 - 1
     }
 
@@ -455,7 +537,7 @@ impl Btree {
     }
 
     /// A sorted build (CREATE INDEX, REINDEX, a rewrite) over entries in index order.
-    pub fn build(opts: BtreeOpts, mut entries: Vec<(Arc<Key>, Tid)>) -> Btree {
+    pub fn build(opts: BtreeOpts, mut entries: Vec<(Key, Tid)>) -> Btree {
         let nkey = opts.nkey;
         entries.sort_by(|a, b| {
             a.0.cmp_keys(&b.0, nkey).then_with(|| a.1.cmp(&b.1))
@@ -468,7 +550,7 @@ impl Btree {
         let leaf_full = BLCKSZ * (100 - opts.fillfactor) / 100;
         if opts.dedup && !opts.unique {
             const MAX_POSTING: usize = (BLCKSZ * 10 / 100) / 8 * 8 - ITEM_ID;
-            let mut pending: Option<(Arc<Key>, Vec<Tid>)> = None;
+            let mut pending: Option<(Key, Vec<Tid>)> = None;
             for (k, t) in entries {
                 if let Some((base, tids)) = &mut pending
                     && base.keep_natts(&k, nkey) > nkey
@@ -498,7 +580,7 @@ impl Btree {
     }
 
     /// Insert one entry (_bt_doinsert).
-    pub fn insert(&mut self, key: Arc<Key>, tid: Tid, hint: &InsertHint) {
+    pub fn insert(&mut self, key: Key, tid: Tid, hint: &InsertHint) {
         self.tuples += 1;
         let Some(root) = self.root else {
             let b = self.alloc(BPage {
@@ -508,7 +590,7 @@ impl Btree {
             self.root = Some(b);
             let p = self.page(b);
             let it = Item::plain(key, tid);
-            p.used += it.size;
+            p.used += it.size();
             p.items.push(it);
             return;
         };
@@ -536,20 +618,20 @@ impl Btree {
                 Ordering::Equal => it.tids[0] < tid,
             }
         });
-        let new = Item::plain(key.clone(), tid);
-        let itemsz = new.size;
+        let new = Item::plain(key, tid);
+        let itemsz = new.size();
         let uniquedup = self.opts.unique
             && [pos.checked_sub(1), Some(pos)]
                 .into_iter()
                 .flatten()
                 .filter_map(|i| p.items.get(i))
-                .any(|it| it.key.keep_natts(&key, nkey) > nkey);
+                .any(|it| it.key.keep_natts(&new.key, nkey) > nkey);
         if p.free() < itemsz {
-            self.delete_or_dedup(blk, &key, itemsz, uniquedup, hint);
+            self.delete_or_dedup(blk, &new.key, itemsz, uniquedup, hint);
         }
         let p = self.pages[blk as usize].as_ref().expect("btree page");
         let pos = p.items.partition_point(|it| {
-            match it.key.cmp_keys(&key, nkey) {
+            match it.key.cmp_keys(&new.key, nkey) {
                 Ordering::Less => true,
                 Ordering::Greater => false,
                 Ordering::Equal => it.tids[0] < tid,
@@ -602,7 +684,7 @@ impl Btree {
                 kept.push(it);
             }
             p.items = kept;
-            p.used = p.items.iter().map(|i| i.size).sum();
+            p.used = p.items.iter().map(|i| i.size()).sum();
             if p.free() >= itemsz {
                 return;
             }
@@ -617,18 +699,18 @@ impl Btree {
             let mut freed = 0;
             let mut kept = Vec::with_capacity(p.items.len());
             for mut it in std::mem::take(&mut p.items) {
-                let before = it.size;
+                let before = it.size();
                 it.tids.retain(|t| !(hint.dead)(*t));
                 if it.tids.is_empty() {
                     freed += before + ITEM_ID;
                     continue;
                 }
                 let it = Item::posting(it.key, it.tids);
-                freed += before - it.size;
+                freed += before - it.size();
                 kept.push(it);
             }
             p.items = kept;
-            p.used = p.items.iter().map(|i| i.size).sum();
+            p.used = p.items.iter().map(|i| i.size()).sum();
             let _ = freed;
             if p.free() + ITEM_ID >= (BLCKSZ / 16).max(itemsz) {
                 return;
@@ -655,8 +737,8 @@ impl Btree {
         let mut nmaxitems = 0;
         let mut nintervals = 0;
         let mut out: Vec<Item> = Vec::with_capacity(p.items.len());
-        let mut pending: Option<(Arc<Key>, Vec<Tid>, usize)> = None;
-        let finish = |pending: Option<(Arc<Key>, Vec<Tid>, usize)>,
+        let mut pending: Option<(Key, Vec<Tid>, usize)> = None;
+        let finish = |pending: Option<(Key, Vec<Tid>, usize)>,
                       out: &mut Vec<Item>,
                       nintervals: &mut usize| {
             if let Some((k, tids, nitems)) = pending {
@@ -696,7 +778,7 @@ impl Btree {
         }
         finish(pending.take(), &mut out, &mut nintervals);
         let p = self.page(blk);
-        p.used = out.iter().map(|i| i.size).sum();
+        p.used = out.iter().map(|i| i.size()).sum();
         p.items = out;
     }
 
@@ -751,10 +833,10 @@ impl Btree {
                 is_leaf: true,
                 is_rightmost: rightmost,
                 hk: p.high.as_ref().map(|h| h.size),
-                sizes: p.items.iter().map(|i| i.size).collect(),
+                sizes: p.items.iter().map(|i| i.size()).collect(),
                 posting: p.items.iter().map(|i| i.posting_bytes()).collect(),
                 newitemoff: pos,
-                newitemsz: new.size,
+                newitemsz: new.size(),
                 fillfactor,
                 nkey,
             };
@@ -811,7 +893,7 @@ impl Btree {
         let old_right = old.right;
         let right = BPage {
             leaf: true,
-            used: right_items.iter().map(|i| i.size).sum(),
+            used: right_items.iter().map(|i| i.size()).sum(),
             items: right_items,
             inner: Vec::new(),
             high: old_high,
@@ -819,7 +901,7 @@ impl Btree {
         };
         let rblk = self.alloc(right);
         let left = self.page(blk);
-        left.used = all.iter().map(|i| i.size).sum();
+        left.used = all.iter().map(|i| i.size()).sum();
         left.items = all;
         left.high = Some(high.clone());
         left.right = Some(rblk);
@@ -1138,7 +1220,7 @@ impl Btree {
                     kept.push(Item::posting(it.key, it.tids));
                 }
             }
-            p.used = kept.iter().map(|i| i.size).sum();
+            p.used = kept.iter().map(|i| i.size()).sum();
             p.items = kept;
         }
         self.tuples = self.tuples.saturating_sub(removed);
@@ -1615,7 +1697,7 @@ impl Builder {
         let nkey = self.tree.opts.nkey;
         let isleaf = level == 0;
         let itupsz = match &e {
-            Entry::Leaf(i) => i.size,
+            Entry::Leaf(i) => i.size(),
             Entry::Inner(p, _) => p.size,
         };
         let st = &mut self.levels[level];
@@ -1639,7 +1721,7 @@ impl Builder {
             };
             let high = if isleaf {
                 let last = st.page.items.pop().expect("item");
-                st.page.used -= last.size;
+                st.page.used -= last.size();
                 let lastleft = st.page.items.last().expect("item");
                 let k = lastleft.key.keep_natts(&last.key, nkey);
                 let high = if k <= nkey {
@@ -1657,7 +1739,7 @@ impl Builder {
                         size: last.key.prefix_size(nkey) + PIVOT_TID,
                     }
                 };
-                newpage.used += last.size;
+                newpage.used += last.size();
                 newpage.items.push(last);
                 high
             } else {
@@ -1685,7 +1767,7 @@ impl Builder {
         }
         match e {
             Entry::Leaf(i) => {
-                st.page.used += i.size;
+                st.page.used += i.size();
                 st.page.items.push(i);
             }
             Entry::Inner(p, child) => {
@@ -1771,7 +1853,7 @@ fn get_pivot(b: &mut &[u8]) -> Option<Pivot> {
     let (natts, size) = (get(b)? as usize, get(b)? as usize);
     let key = if flags & 1 != 0 {
         let n = get(b)? as usize;
-        Some(Arc::new(Key::from_bytes(take(b, n)?.to_vec())?))
+        Some(Key::from_bytes(take(b, n)?)?)
     } else {
         None
     };
@@ -1815,8 +1897,8 @@ impl Btree {
             let mut prev: &[u8] = &[];
             for it in &p.items {
                 let tids: &[Tid] = &it.tids;
-                let derived = Item::posting(it.key.clone(), tids.to_vec()).size;
-                put(out, it.dead as u64 | ((it.size != derived) as u64) << 1);
+                // (Bit 2: an explicit size follows. Sizes are always derived now.)
+                put(out, it.dead as u64);
                 let k = it.key.as_bytes();
                 let shared = prev.iter().zip(k).take_while(|(a, b)| a == b).count();
                 put(out, shared as u64);
@@ -1826,9 +1908,6 @@ impl Btree {
                 put(out, tids.len() as u64);
                 for &t in tids {
                     put_tid(out, t);
-                }
-                if it.size != derived {
-                    put(out, it.size as u64);
                 }
             }
         }
@@ -1879,7 +1958,7 @@ impl Btree {
                     let mut k = Vec::with_capacity(shared + len);
                     k.extend_from_slice(prev.get(..shared)?);
                     k.extend_from_slice(take(b, len)?);
-                    let key = Arc::new(Key::from_bytes(k.clone())?);
+                    let key = Key::from_bytes(&k)?;
                     prev = k;
                     let nt = get(b)? as usize;
                     if nt == 0 || nt > 1 << 16 {
@@ -1888,17 +1967,21 @@ impl Btree {
                     let tids: Vec<Tid> = (0..nt).map(|_| get_tid(b)).collect::<Option<_>>()?;
                     let mut it = Item::posting(key, tids);
                     it.dead = f & 1 != 0;
+                    // (An explicit size: never other than the derived one, which is used.)
                     if f & 2 != 0 {
-                        it.size = get(b)? as usize;
+                        get(b)?;
                     }
                     p.items.push(it);
                 }
             }
             pages.push(Some(p));
         }
-        Some(Btree { opts, pages, root, tuples })
+        Some(Btree { opts, pages, root, tuples, sizes: Default::default() })
     }
 }
+
+// (A model holds one per entry / version.)
+const _: () = assert!(size_of::<Item>() == 32);
 
 #[cfg(test)]
 mod tests {
@@ -1911,5 +1994,29 @@ mod tests {
         let mut w = v.clone();
         w.sort();
         assert_eq!(v, w);
+    }
+
+    /// A size watch holds until the index gains a page, and fails for good once the model goes.
+    #[test]
+    fn size_watch_follows_pages() {
+        let opts = BtreeOpts { nkey: 1, unique: true, dedup: false, fillfactor: 90 };
+        let mut b = Btree::new(opts);
+        let hint = InsertHint { unchanged: false, dead: &|_| false };
+        let key = |i: u32| Key::new(&[i.to_be_bytes().to_vec()], &[16]);
+        b.insert(key(0), (0, 1), &hint);
+        let w = b.sizes.watch();
+        let pages = b.nblocks();
+        let mut i = 1;
+        while b.nblocks() == pages {
+            assert!(w.holds(), "no page added yet ({i} entries)");
+            b.insert(key(i), (i / 200, (i % 200) as u16 + 1), &hint);
+            i += 1;
+        }
+        assert!(!w.holds());
+        let w = b.sizes.watch();
+        b.insert(key(i), (i / 200, 1), &hint);
+        assert!(w.holds());
+        drop(b);
+        assert!(!w.holds());
     }
 }
