@@ -110,6 +110,12 @@ fn cache() -> &'static Cache {
     C.get_or_init(Default::default)
 }
 
+/// Cached indexes of database `instance` whose records start with `prefix` let go
+/// (`index_am::evict`).
+pub(crate) fn evict(instance: u64, prefix: &[u8]) {
+    cache().lock().retain(|k, _| !(k.0 == instance && k.1.starts_with(prefix)));
+}
+
 /// An index's state: cached, else read from its records (a page per record; key 0 the
 /// metapage).
 fn state(store: &AmStore) -> Result<Arc<Mutex<State>>> {
@@ -187,7 +193,14 @@ impl IndexAm for Bloom {
         }
         let blocks: Vec<u32> = (0..st.pages.len() as u32).map(|i| i + HEAD).collect();
         save(&ix.store, &st, &blocks)?;
-        cache().lock().insert(ix.store.id(), Arc::new(Mutex::new(st)));
+        // (The index's other storage generations, a TRUNCATE's or REINDEX's earlier ones,
+        // leave the cache: a rollback reads them back.)
+        let id = ix.store.id();
+        let base = &id.1[..id.1.len().saturating_sub(4)];
+        let mut c = cache().lock();
+        c.retain(|k, _| !(k.0 == id.0 && k.1.len() == id.1.len() && k.1.starts_with(base)));
+        c.insert(id, Arc::new(Mutex::new(st)));
+        drop(c);
         Ok(BuildStats { heap_tuples: n, index_tuples: n, removed: 0.0 })
     }
 

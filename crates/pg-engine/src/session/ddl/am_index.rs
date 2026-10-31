@@ -38,6 +38,7 @@ impl Ddl<'_, '_> {
         for k in keys {
             txn.delete(k)?;
         }
+        crate::ext::index_am::evict(self.ctx.sess.db.instance, &start);
         Ok(())
     }
 

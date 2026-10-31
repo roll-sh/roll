@@ -70,9 +70,16 @@ fn elem_bytes(v: &Value, ty: &DataType) -> Option<Vec<u8>> {
 }
 
 /// A jsonb value's tokens: every object key (`k`), and every scalar (`s` strings, `#`
-/// numbers, `t` / `f`, `z` null) at any depth. A value containing another (`@>`) has every
-/// token of it; one with key or element `k` at its top (`?`) has `k` or `s` of it.
+/// numbers, `t` / `f`, `z` null) at any depth, a string array element (a raw scalar's too)
+/// as `e`: jsonb_ops keys those as it keys object keys, its other strings apart. A value
+/// containing another (`@>`) has every token of it; one with key or element `k` at its top
+/// (`?`) has `k` or `e` of it.
 fn json_tokens(col: usize, j: &Jsonb, out: &mut Vec<Vec<u8>>) {
+    // (A raw scalar is a one-element array's.)
+    if let Jsonb::String(s) = j {
+        out.push(token(col, b'e', s.as_bytes()));
+        return;
+    }
     let mut stack = vec![j];
     while let Some(j) = stack.pop() {
         match j {
@@ -82,7 +89,14 @@ fn json_tokens(col: usize, j: &Jsonb, out: &mut Vec<Vec<u8>>) {
                     stack.push(v);
                 }
             }
-            Jsonb::Array(items) => stack.extend(items.iter()),
+            Jsonb::Array(items) => {
+                for it in items {
+                    match it {
+                        Jsonb::String(s) => out.push(token(col, b'e', s.as_bytes())),
+                        it => stack.push(it),
+                    }
+                }
+            }
             Jsonb::String(s) => out.push(token(col, b's', s.as_bytes())),
             Jsonb::Number(n) => out.push(token(col, b'#', n.normalize().to_string().as_bytes())),
             Jsonb::Bool(b) => out.push(token(col, if *b { b't' } else { b'f' }, &[])),
@@ -267,8 +281,8 @@ impl Elements {
         if !self.cols.contains(&col) {
             return Sel::All;
         }
-        // `?` a key: the key of an object, or a string element or scalar.
-        let key = |s: &str| [token(col, b'k', s.as_bytes()), token(col, b's', s.as_bytes())];
+        // `?` a key: the key of an object, or a string element (a raw scalar's too).
+        let key = |s: &str| [token(col, b'k', s.as_bytes()), token(col, b'e', s.as_bytes())];
         let texts = |a: &crate::types::array::ArrayValue| -> Vec<std::sync::Arc<str>> {
             a.items.iter().filter_map(|v| if let Value::Text(s) = v { Some(s.clone()) } else { None }).collect()
         };
@@ -342,4 +356,168 @@ pub(super) fn element_columns(bix: &crate::sql::plan::BoundIndex, ctx: &super::E
         }
     }
     cols
+}
+
+/// A jsonpath item of a path GIN extracts conditions along (jsonb_gin.c's
+/// JsonPathGinPathItem): a key, `.**`, `.*`, or an array accessor.
+#[derive(Clone)]
+enum PathItem {
+    Key(String),
+    Any,
+    AnyKey,
+    Array,
+}
+
+/// The GIN entries a jsonpath condition needs (JsonPathGinNode): the rows having one of
+/// these tokens, those every node selects, those any node selects.
+enum JpNode {
+    Entry(Vec<Vec<u8>>),
+    And(Vec<JpNode>),
+    Or(Vec<JpNode>),
+}
+
+/// gin_extract_jsonb_query's jsonpath extraction (extract_jsp_query) for `@?` and `@@`,
+/// under jsonb_ops or jsonb_path_ops (`path_ops`), over column `col`'s tokens. A
+/// jsonb_ops key entry selects object keys and string array elements, both of which this
+/// structure keys (`k`, `s`); jsonb_path_ops' entry, a hash of the path's keys and the
+/// value, selects the rows having each of those keys and the value.
+struct JpExtract {
+    col: usize,
+    path_ops: bool,
+    lax: bool,
+}
+
+impl JpExtract {
+    /// jsonb_ops__add_path_item / jsonb_path_ops__add_path_item (false: not supported).
+    fn add(&self, path: &mut Vec<PathItem>, base: &crate::types::jsonpath::Node, acc: Option<&crate::types::jsonpath::Acc>) -> bool {
+        use crate::types::jsonpath::{Acc, Node};
+        match (base, acc) {
+            (Node::Root, None) => path.clear(),
+            (_, Some(Acc::Key(k))) => path.push(PathItem::Key(k.clone())),
+            (_, Some(Acc::Index(_) | Acc::AnyArray)) => path.push(PathItem::Array),
+            (_, Some(Acc::Any(..))) if !self.path_ops => path.push(PathItem::Any),
+            (_, Some(Acc::AnyKey)) if !self.path_ops => path.push(PathItem::AnyKey),
+            _ => return false,
+        }
+        true
+    }
+
+    /// A key entry for string `s`: an object key, or a string element.
+    fn key(&self, s: &str) -> Vec<Vec<u8>> {
+        vec![token(self.col, b'k', s.as_bytes()), token(self.col, b'e', s.as_bytes())]
+    }
+
+    /// jsonb_ops__extract_nodes / jsonb_path_ops__extract_nodes.
+    fn extract_nodes(&self, path: &[PathItem], scalar: Option<&crate::types::jsonpath::Node>, nodes: &mut Vec<JpNode>) {
+        use crate::types::jsonpath::Node;
+        let Some(scalar) = scalar else { return };
+        for it in path {
+            if let PathItem::Key(k) = it {
+                nodes.push(JpNode::Entry(if self.path_ops { vec![token(self.col, b'k', k.as_bytes())] } else { self.key(k) }));
+            }
+        }
+        let col = self.col;
+        nodes.push(JpNode::Entry(match scalar {
+            Node::Null => vec![token(col, b'z', &[])],
+            Node::Bool(b) => vec![token(col, if *b { b't' } else { b'f' }, &[])],
+            Node::Num(x) => vec![token(col, b'#', x.normalize().to_string().as_bytes())],
+            // (jsonb_path_ops: a value at the path, an element or not. jsonb_ops: a key
+            // entry, a value's, or both (lax, or after `.**`), as the last item says.)
+            Node::Str(s) if self.path_ops => vec![token(col, b's', s.as_bytes()), token(col, b'e', s.as_bytes())],
+            Node::Str(s) => {
+                let last = path.last();
+                let key = !self.lax && matches!(last, Some(PathItem::Array));
+                let value = !self.lax && !matches!(last, Some(PathItem::Array | PathItem::Any));
+                let mut t = if value { Vec::new() } else { self.key(s) };
+                if !key {
+                    t.push(token(col, b's', s.as_bytes()));
+                }
+                t
+            }
+            _ => return,
+        }));
+    }
+
+    /// extract_jsp_path_expr: `EXISTS(n)`, or `n == scalar`.
+    fn path_expr(&self, mut path: Vec<PathItem>, n: &crate::types::jsonpath::Node, scalar: Option<&crate::types::jsonpath::Node>) -> Option<JpNode> {
+        use crate::types::jsonpath::{Acc, Node};
+        let mut nodes = Vec::new();
+        let (base, accs): (&Node, &[Acc]) = match n {
+            Node::Chain(b, a) => (b, a),
+            n => (n, &[]),
+        };
+        let supported = (matches!(base, Node::Current) || self.add(&mut path, base, None))
+            && accs.iter().all(|a| match a {
+                Acc::Filter(f) => {
+                    nodes.extend(self.bool_expr(path.clone(), f, false));
+                    true
+                }
+                a => self.add(&mut path, base, Some(a)),
+            });
+        if supported {
+            self.extract_nodes(&path, scalar, &mut nodes);
+        }
+        match nodes.len() {
+            0 => None,
+            1 => nodes.pop(),
+            _ => Some(JpNode::And(nodes)),
+        }
+    }
+
+    /// extract_jsp_bool_expr.
+    fn bool_expr(&self, path: Vec<PathItem>, n: &crate::types::jsonpath::Node, not: bool) -> Option<JpNode> {
+        use crate::types::jsonpath::{CmpOp, Node};
+        crate::stack::grow(|| match n {
+            Node::And(l, r) | Node::Or(l, r) => {
+                let and = matches!(n, Node::And(..));
+                match (self.bool_expr(path.clone(), l, not), self.bool_expr(path, r, not)) {
+                    (Some(l), Some(r)) => Some(if not ^ and { JpNode::And(vec![l, r]) } else { JpNode::Or(vec![l, r]) }),
+                    _ if !and => None,
+                    (l, r) => l.or(r),
+                }
+            }
+            Node::Not(e) => self.bool_expr(path, e, !not),
+            Node::Exists(e) if !not => self.path_expr(path, e, None),
+            Node::Cmp(CmpOp::Eq, l, r) if !not => {
+                let scalar = |x: &Node| matches!(x, Node::Null | Node::Bool(_) | Node::Num(_) | Node::Str(_));
+                let (p, s) = if scalar(l) {
+                    (r, l)
+                } else if scalar(r) {
+                    (l, r)
+                } else {
+                    return None;
+                };
+                self.path_expr(path, p, Some(s))
+            }
+            _ => None,
+        })
+    }
+}
+
+impl Elements {
+    fn jp_rows(&self, n: &JpNode) -> Sel {
+        match n {
+            JpNode::Entry(toks) => self.any(toks),
+            JpNode::And(xs) => xs.iter().fold(Sel::All, |acc, x| acc.and(self.jp_rows(x))),
+            JpNode::Or(xs) => xs.iter().map(|x| self.jp_rows(x)).reduce(Sel::or).unwrap_or(Sel::All),
+        }
+    }
+
+    /// The rows jsonb column `col` `@?` (`exists`) or `@@` jsonpath `path` may hold for,
+    /// as gin_extract_jsonb_query's entries for it select them (under jsonb_path_ops when
+    /// `path_ops`): every row when it extracts none.
+    pub(super) fn jsonpath(&self, col: usize, exists: bool, path_ops: bool, path: &str) -> Sel {
+        if !self.cols.contains(&col) {
+            return Sel::All;
+        }
+        let Ok(jp) = crate::types::jsonpath::parse(path) else { return Sel::All };
+        let x = JpExtract { col, path_ops, lax: !jp.strict };
+        let node = if exists { x.path_expr(Vec::new(), &jp.expr, None) } else { x.bool_expr(Vec::new(), &jp.expr, false) };
+        node.map_or(Sel::All, |n| self.jp_rows(&n))
+    }
+}
+
+/// Whether index `bix`'s column `col` has jsonb_path_ops.
+pub(super) fn path_ops(bix: &crate::sql::plan::BoundIndex, col: usize) -> bool {
+    bix.index.columns.get(col).and_then(|c| crate::catalog::system::opclass_name(c.opclass)).is_some_and(|(n, _)| n == "jsonb_path_ops")
 }

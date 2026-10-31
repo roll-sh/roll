@@ -449,7 +449,12 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
         if let Some(node) = dense_bitmap_scan(s, q, raw_need, ctx)? {
             return Ok(node);
         }
-        let keys = bitmap_rows(s, q, ctx)?;
+        let (keys, rows) = bitmap_rows(s, q, ctx)?;
+        // (Rows the bitmap index scans read already are taken as they are.)
+        let (keys, fetched) = match rows {
+            Some(rows) => (Vec::new(), keys.into_iter().zip(rows).map(|(k, r)| (Vec::<u8>::new(), k, Some(r))).collect()),
+            None => (keys, Default::default()),
+        };
         let mut plan = s.clone();
         plan.access = Access::Seq;
         let stat = if super::pgstat::scan_counts(ctx) {
@@ -472,7 +477,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             kills: None,
             secondary: false,
             emitted: 0,
-            keys: Some(keys.into_iter()),
+            keys: Some(Keys::List(keys.into_iter())),
             ios: false,
             ios_entries: None,
             tid_order: false,
@@ -492,7 +497,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             prune_next: 0,
             nblocks: None,
             last_block: None,
-            fetched: Default::default(),
+            fetched,
             batch: FETCH_BATCH_MIN,
             ios_cols: None,
             am: None,
@@ -531,7 +536,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             kills: None,
             secondary: false,
             emitted: 0,
-            keys: Some(keys.into_iter()),
+            keys: Some(keys),
             ios: false,
             ios_entries: None,
             tid_order: false,
@@ -593,7 +598,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             kills: None,
             secondary: false,
             emitted: 0,
-            keys: Some(Vec::new().into_iter()),
+            keys: Some(Keys::List(Vec::new().into_iter())),
             ios: false,
             ios_entries: None,
             tid_order: false,
@@ -1292,7 +1297,7 @@ impl Node for Backward {
 
 /// The data keys of the rows a bitmap selects, each leaf's index conditions checked on
 /// the row; counted per bitmap node for EXPLAIN ANALYZE.
-fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
+fn bitmap_keys(t: &Table, q: &BitmapQual, kept: &mut Option<KeptRows>, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
     let key = q as *const BitmapQual as usize;
     let out = match q {
         BitmapQual::Index {
@@ -1413,7 +1418,12 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                     } else {
                         (k, v)
                     };
-                    let row = qual_row(t, &dkey, &bytes, qneed.as_deref(), &mut values)?;
+                    // (Rows with no reader of their out-of-line values: the quals' columns
+                    // decoded alone.)
+                    let row = match &qneed {
+                        Some(n) if values.is_none() && !secondary => decode_table_row_need(t, &bytes, n)?,
+                        _ => qual_row(t, &dkey, &bytes, qneed.as_deref(), &mut values)?,
+                    };
                     let mut ok = true;
                     for c in quals {
                         if !eval_bool(&c.orig, &row, ctx)? {
@@ -1422,6 +1432,9 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                         }
                     }
                     if ok {
+                        if !secondary && let Some(kr) = kept.as_mut() {
+                            kr.keep(&dkey, bytes);
+                        }
                         out.push(dkey);
                     }
                 }
@@ -1462,7 +1475,7 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
         BitmapQual::And(list) => {
             let mut acc: Option<Vec<Vec<u8>>> = None;
             for x in list {
-                let ks = bitmap_keys(t, x, ctx)?;
+                let ks = bitmap_keys(t, x, kept, ctx)?;
                 acc = Some(match acc {
                     None => ks,
                     Some(a) => {
@@ -1476,7 +1489,7 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
         BitmapQual::Or(list) => {
             let mut all = Vec::new();
             for x in list {
-                all.extend(bitmap_keys(t, x, ctx)?);
+                all.extend(bitmap_keys(t, x, kept, ctx)?);
             }
             all.sort();
             all.dedup();
@@ -1697,11 +1710,51 @@ fn qual_row(t: &Table, key: &[u8], bytes: &[u8], need: Option<&[bool]>, values: 
     Ok(row)
 }
 
+/// The rows a bitmap index scan read to check its conditions on (a GIN, GiST, SP-GiST or
+/// BRIN index's candidates: `bitmap_keys`), by data key, for the heap scan to take rather
+/// than fetch them again. Up to `KEPT_BYTES` of them; past that none are kept.
+struct KeptRows {
+    rows: std::collections::HashMap<Vec<u8>, bytes::Bytes>,
+    bytes: usize,
+    over: bool,
+}
+
+const KEPT_BYTES: usize = 8 << 20;
+
+impl KeptRows {
+    fn keep(&mut self, key: &[u8], row: bytes::Bytes) {
+        if self.over {
+            return;
+        }
+        self.bytes += key.len() + row.len() + 48;
+        if self.bytes > KEPT_BYTES {
+            self.over = true;
+            self.rows = Default::default();
+            return;
+        }
+        self.rows.insert(key.to_vec(), row);
+    }
+
+    /// Every one of `keys`' rows, when each was kept.
+    fn take(mut self, keys: &[Vec<u8>]) -> Option<Vec<bytes::Bytes>> {
+        if self.over {
+            return None;
+        }
+        keys.iter().map(|k| self.rows.remove(k)).collect()
+    }
+}
+
 /// A bitmap heap scan's rows: the bitmap's keys in heap order (TID order when the heap
-/// is modelled), the pages they are on counted.
-fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>> {
-    let mut keys = bitmap_keys(&s.table, q, ctx)?;
-    if let Some(locs) = super::sizing::row_roots(&s.table, &keys, ctx) {
+/// is modelled), the pages they are on counted; with their rows when the bitmap
+/// index scans read each of them (`KeptRows`; only under a snapshot, which the rows read
+/// later would be read at too).
+fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, ctx: &ExecCtx) -> Result<(Vec<Vec<u8>>, Option<Vec<bytes::Bytes>>)> {
+    let mut kept = ctx.snapshot().is_some().then(|| KeptRows { rows: Default::default(), bytes: 0, over: false });
+    let mut keys = bitmap_keys(&s.table, q, &mut kept, ctx)?;
+    // (Rows stored in heap order are in it by key already, as the bitmap's keys come:
+    // looking each one's TID up is for EXPLAIN ANALYZE's pages.)
+    let in_order = !ctx.instrumented() && super::sizing::heap_in_key_order(&s.table, ctx);
+    if !in_order && let Some(locs) = super::sizing::row_roots(&s.table, &keys, ctx) {
         let mut pairs: Vec<(Option<(u32, u16)>, Vec<u8>)> = locs.into_iter().zip(keys).collect();
         pairs.sort_by(|a, b| match (a.0, b.0) {
             (Some(x), Some(y)) => x.cmp(&y),
@@ -1715,7 +1768,8 @@ fn bitmap_rows(s: &ScanPlan, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8
         ctx.count(s as *const ScanPlan as usize, |st| st.pages += n);
         keys = pairs.into_iter().map(|p| p.1).collect();
     }
-    Ok(keys)
+    let rows = kept.filter(|_| !keys.is_empty()).and_then(|k| k.take(&keys));
+    Ok((keys, rows))
 }
 
 /// An index scan with an equality on its first column under that column's nondeterministic
@@ -1890,7 +1944,7 @@ struct ScanNode {
     only: Option<Vec<u8>>,
     sample: Option<Sampler>,
     /// A bitmap heap scan: the data keys of the rows to read.
-    keys: Option<std::vec::IntoIter<Vec<u8>>>,
+    keys: Option<Keys>,
     /// An index-only scan under EXPLAIN ANALYZE: count the heap fetches.
     ios: bool,
     /// Its index's entries in the scanned ranges, when the index is modelled: the heap
@@ -3407,7 +3461,7 @@ impl ScanNode {
         };
         let par = ParScan::start(scans, workers, pool, d);
         // (No worker started: the keys are read here after all.)
-        self.keys = Some(if par.is_some() { Vec::new() } else { keys.to_vec() }.into_iter());
+        self.keys = Some(Keys::List(if par.is_some() { Vec::new() } else { keys.to_vec() }.into_iter()));
         Ok(par)
     }
 
@@ -4014,10 +4068,14 @@ fn searched_rows(
         return Ok(None);
     };
     let rows = fetch_rows(&keys, ctx)?;
+    let need = super::need::of(quals.iter().map(|q| &q.orig));
     let mut out = Vec::new();
     for (k, r) in keys.into_iter().zip(rows) {
         let Some(bytes) = r else { continue };
-        let row = decode_table_row(t, &bytes)?;
+        let row = match &need {
+            Some(n) => decode_table_row_need(t, &bytes, n)?,
+            None => decode_table_row(t, &bytes)?,
+        };
         let mut ok = true;
         for q in quals {
             if !eval_bool(&q.orig, &row, ctx)? {
@@ -4045,16 +4103,139 @@ enum PointCond {
     Null(bool),
 }
 
+/// A point_ops scan's conditions and ordering operators (the points `p <-> point` measures
+/// from; None for a null one).
+struct PointQuery {
+    conds: Vec<PointCond>,
+    origins: Vec<Option<crate::types::geo::Point>>,
+    /// A condition against a null: no rows.
+    none: bool,
+}
+
+impl PointQuery {
+    /// Whether a `<@ polygon / circle` condition runs its operator on each leaf.
+    fn evaluates(&self) -> bool {
+        self.conds.iter().any(|c| matches!(c, PointCond::Within(..)))
+    }
+
+    /// The scan's consistent and distance functions (`Gist::search`'s `test`); `within`
+    /// runs a `Within` condition's operator on a leaf's point.
+    fn test(
+        &self,
+        key: Option<&crate::catalog::gistsim::Key>,
+        leaf: bool,
+        within: &mut dyn FnMut(&crate::sql::expr::Expr, crate::types::geo::Point) -> bool,
+    ) -> Option<Vec<Option<f64>>> {
+        use crate::types::geo::{GBox, Point};
+        const EPS: f64 = 1.0e-6;
+        let fp_lt = |a: f64, b: f64| a + EPS < b;
+        let fp_le = |a: f64, b: f64| a <= b + EPS;
+        let fp_gt = |a: f64, b: f64| a > b + EPS;
+        let fp_ge = |a: f64, b: f64| a + EPS >= b;
+        let fp_eq = |a: f64, b: f64| a == b || (a - b).abs() <= EPS;
+        let box_ov = |k: &crate::catalog::gistsim::GBox, q: &GBox| {
+            fp_le(k.lx, q.high.x) && fp_le(q.low.x, k.hx) && fp_le(k.ly, q.high.y) && fp_le(q.low.y, k.hy)
+        };
+        if self.none {
+            return None;
+        }
+        let k = key.and_then(crate::catalog::gistsim::Gist::key_box);
+        for c in &self.conds {
+            let ok = match (c, &k) {
+                (PointCond::Null(want), _) => k.is_none() == *want,
+                (_, None) => false,
+                (PointCond::Pos(op, p), Some(k)) => match *op {
+                    "<<" => fp_lt(k.lx, p.x),
+                    ">>" => fp_gt(k.hx, p.x),
+                    "<<|" | "<^" => fp_lt(k.ly, p.y),
+                    _ => fp_gt(k.hy, p.y),
+                },
+                (PointCond::Same(p), Some(k)) => {
+                    if leaf {
+                        fp_eq(k.lx, p.x) && fp_eq(k.ly, p.y)
+                    } else {
+                        fp_le(p.x, k.hx) && fp_ge(p.x, k.lx) && fp_le(p.y, k.hy) && fp_ge(p.y, k.ly)
+                    }
+                }
+                (PointCond::InBox(q), Some(k)) => {
+                    k.hx >= q.low.x && k.lx <= q.high.x && k.hy >= q.low.y && k.ly <= q.high.y
+                }
+                (PointCond::Within(bb, e), Some(k)) => box_ov(k, bb) && (!leaf || within(e, Point { x: k.lx, y: k.ly })),
+            };
+            if !ok {
+                return None;
+            }
+        }
+        Some(
+            self.origins
+                .iter()
+                .map(|o| {
+                    let (o, k) = ((*o)?, k?);
+                    Some(if leaf { crate::types::geo::hypot(o.x - k.lx, o.y - k.ly) } else { gist_box_distance(&k, &o) })
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A GiST point_ops index scan searched as its rows are asked for (`gistsim::Search`): a
+/// KNN scan under a LIMIT reads the entries nearest its point, not the whole index.
+struct GistKeys {
+    model: super::sizing::GistModel,
+    search: crate::catalog::gistsim::Search,
+    query: PointQuery,
+}
+
+impl Iterator for GistKeys {
+    type Item = Vec<u8>;
+    fn next(&mut self) -> Option<Vec<u8>> {
+        let (g, keys) = self.model.as_ref().as_ref()?;
+        let q = &self.query;
+        loop {
+            let r = self.search.next(g, &mut |k, leaf| q.test(k, leaf, &mut |_, _| true))?;
+            if let Some(k) = keys.get(r as usize).filter(|k| !k.is_empty()) {
+                return Some(k.clone());
+            }
+        }
+    }
+}
+
+/// The data keys of the rows a scan reads, in its order: listed (a bitmap's, a searched
+/// structure's), or a GiST scan's as it goes.
+enum Keys {
+    List(std::vec::IntoIter<Vec<u8>>),
+    Gist(Box<GistKeys>),
+}
+
+impl Keys {
+    /// How many are left (a GiST scan's: not known, 0).
+    fn len(&self) -> usize {
+        match self {
+            Keys::List(l) => l.len(),
+            Keys::Gist(_) => 0,
+        }
+    }
+}
+
+impl Iterator for Keys {
+    type Item = Vec<u8>;
+    fn next(&mut self) -> Option<Vec<u8>> {
+        match self {
+            Keys::List(l) => l.next(),
+            Keys::Gist(g) => g.next(),
+        }
+    }
+}
+
 /// The rows of a GiST index scan over a point_ops index (in its order), and the scan's
 /// filter without the conditions the index checked exactly. None: not modelled.
-#[allow(clippy::type_complexity)]
 fn gist_point_scan(
     s: &ScanPlan,
     ix: &Index,
     quals: &[crate::sql::plan::IndexQual],
     b: &IndexBounds,
     ctx: &ExecCtx,
-) -> Result<Option<(Vec<Vec<u8>>, Option<crate::sql::expr::Expr>)>> {
+) -> Result<Option<(Keys, Option<crate::sql::expr::Expr>)>> {
     use crate::sql::expr::Expr;
     use crate::types::DataType;
     use crate::types::geo::{GBox, Geo, Point};
@@ -4117,95 +4298,7 @@ fn gist_point_scan(
             _ => return Ok(None),
         }
     }
-    const EPS: f64 = 1.0e-6;
-    let fp_lt = |a: f64, b: f64| a + EPS < b;
-    let fp_le = |a: f64, b: f64| a <= b + EPS;
-    let fp_gt = |a: f64, b: f64| a > b + EPS;
-    let fp_ge = |a: f64, b: f64| a + EPS >= b;
-    let fp_eq = |a: f64, b: f64| a == b || (a - b).abs() <= EPS;
-    let box_ov = |k: &crate::catalog::gistsim::GBox, q: &GBox| {
-        fp_le(k.lx, q.high.x) && fp_le(q.low.x, k.hx) && fp_le(k.ly, q.high.y) && fp_le(q.low.y, k.hy)
-    };
-    let mut err: Option<crate::error::Error> = None;
-    let mut test = |key: Option<&crate::catalog::gistsim::Key>, leaf: bool| -> Option<Vec<Option<f64>>> {
-        if none {
-            return None;
-        }
-        let k = key.and_then(crate::catalog::gistsim::Gist::key_box);
-        for c in &conds {
-            let ok = match (c, &k) {
-                (PointCond::Null(want), _) => k.is_none() == *want,
-                (_, None) => false,
-                (PointCond::Pos(op, p), Some(k)) => match *op {
-                    "<<" => fp_lt(k.lx, p.x),
-                    ">>" => fp_gt(k.hx, p.x),
-                    "<<|" | "<^" => fp_lt(k.ly, p.y),
-                    _ => fp_gt(k.hy, p.y),
-                },
-                (PointCond::Same(p), Some(k)) => {
-                    if leaf {
-                        fp_eq(k.lx, p.x) && fp_eq(k.ly, p.y)
-                    } else {
-                        fp_le(p.x, k.hx) && fp_ge(p.x, k.lx) && fp_le(p.y, k.hy) && fp_ge(p.y, k.ly)
-                    }
-                }
-                (PointCond::InBox(q), Some(k)) => {
-                    k.hx >= q.low.x && k.lx <= q.high.x && k.hy >= q.low.y && k.ly <= q.high.y
-                }
-                (PointCond::Within(bb, e), Some(k)) => {
-                    box_ov(k, bb)
-                        && (!leaf || {
-                            let pt = Expr::Const(
-                                Value::Geo(Arc::new(Geo::Point(Point { x: k.lx, y: k.ly }))),
-                                DataType::Point,
-                            );
-                            let Expr::Call(d, args, ty) = e else { unreachable!() };
-                            let call = Expr::Call(d.clone(), vec![pt, args[1].clone()], ty.clone());
-                            match eval_bool(&call, &[], ctx) {
-                                Ok(b) => b,
-                                Err(x) => {
-                                    err.get_or_insert(x);
-                                    false
-                                }
-                            }
-                        })
-                }
-            };
-            if !ok {
-                return None;
-            }
-        }
-        let dist = origins
-            .iter()
-            .map(|o| {
-                let (o, k) = ((*o)?, k?);
-                Some(if leaf {
-                    crate::types::geo::hypot(o.x - k.lx, o.y - k.ly)
-                } else {
-                    gist_box_distance(&k, &o)
-                })
-            })
-            .collect();
-        Some(dist)
-    };
-    let ssi = predicate_locked(&s.table, ctx);
-    let Some((keys, pages)) =
-        super::sizing::gist_scan_pages(&s.table, ix.oid, origins.len(), &mut test, ssi, ctx)?
-    else {
-        return Ok(None);
-    };
-    // SSI: gistScanPage's SIRead lock on every page the scan reads, and the conflicts out
-    // to the transactions adding entries there.
-    if ssi {
-        for p in &pages {
-            ctx.txn.borrow_mut().predicate_lock_page(ix.oid, *p);
-        }
-        let me = ctx.txn.borrow().id;
-        ctx.sess.db.ssi.read_pages(me, ix.oid, &pages)?;
-    }
-    if let Some(e) = err {
-        return Err(e);
-    }
+    let query = PointQuery { conds, origins, none };
     // The filter without the conditions the index applied (exactly, for point_ops).
     let filter = s.filter.as_ref().and_then(|f| {
         let mut parts = Vec::new();
@@ -4220,7 +4313,49 @@ fn gist_point_scan(
             _ => Some(Expr::And(rest)),
         }
     });
-    Ok(Some((keys, filter)))
+    let ssi = predicate_locked(&s.table, ctx);
+    // Searched as the rows are asked for, unless the scan takes SIRead locks on the pages
+    // it reads or a condition runs an operator (which may fail) on each leaf.
+    if !ssi && !query.evaluates() {
+        let Some(model) = super::sizing::gist_model_of(&s.table, ix.oid, ctx)? else {
+            return Ok(None);
+        };
+        let search = crate::catalog::gistsim::Search::new(query.origins.len());
+        return Ok(Some((Keys::Gist(Box::new(GistKeys { model, search, query })), filter)));
+    }
+    let mut err: Option<crate::error::Error> = None;
+    let found = {
+        let mut within = |e: &Expr, p: Point| {
+            let pt = Expr::Const(Value::Geo(Arc::new(Geo::Point(p))), DataType::Point);
+            let Expr::Call(d, args, ty) = e else { unreachable!() };
+            let call = Expr::Call(d.clone(), vec![pt, args[1].clone()], ty.clone());
+            match eval_bool(&call, &[], ctx) {
+                Ok(b) => b,
+                Err(x) => {
+                    err.get_or_insert(x);
+                    false
+                }
+            }
+        };
+        let mut test = |k: Option<&crate::catalog::gistsim::Key>, leaf: bool| query.test(k, leaf, &mut within);
+        super::sizing::gist_scan_pages(&s.table, ix.oid, query.origins.len(), &mut test, ssi, ctx)?
+    };
+    let Some((keys, pages)) = found else {
+        return Ok(None);
+    };
+    // SSI: gistScanPage's SIRead lock on every page the scan reads, and the conflicts out
+    // to the transactions adding entries there.
+    if ssi {
+        for p in &pages {
+            ctx.txn.borrow_mut().predicate_lock_page(ix.oid, *p);
+        }
+        let me = ctx.txn.borrow().id;
+        ctx.sess.db.ssi.read_pages(me, ix.oid, &pages)?;
+    }
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(Some((Keys::List(keys.into_iter()), filter)))
 }
 
 /// computeDistance for an inner GiST point_ops key: the distance from `p` to the box.

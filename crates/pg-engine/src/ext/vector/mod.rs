@@ -15,6 +15,12 @@ pub(crate) mod dist;
 mod halfvec;
 mod hnsw;
 mod ivfflat;
+
+/// The vector index methods' caches of indexes under `prefix` let go (`index_am::evict`).
+pub(crate) fn evict(instance: u64, prefix: &[u8]) {
+    hnsw::evict(instance, prefix);
+    ivfflat::page::evict(instance, prefix);
+}
 mod sparsevec;
 #[cfg(test)]
 mod tests;

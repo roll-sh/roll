@@ -4003,6 +4003,65 @@ same CPUs):
 - Peak RSS: before 712 MB, after 401-452 MB. The "before" engine had run the access workload
   first, with its whole-table GIN reads.
 
+## Index access, round 3 (round 22, agent 127)
+
+What changed (HANDOFF "Index access at index cost, round 3"): GiST point_ops scans search
+the model as rows are asked for (KNN reads about k entries); the GiST model replays the
+index's history (dead entries, VACUUM); jsonb `@?` / `@@` jsonpath narrow GIN scans as
+gin_extract_jsonb_query does; bitmap heap scans take the rows their GIN / GiST / BRIN
+candidates were checked on instead of fetching them again, and skip TID lookups for heaps in
+key order.
+
+Method: agent 114's `access` workload (same tables, `access-load`), plus agent 107's case (a
+580,000-row CREATE TABLE AS with its primary key added after, `ctas`) and two jsonpath
+queries over `docs`. Release builds; the server on CPUs 12-15, the client on 16-19;
+PostgreSQL 18.6 with `shared_buffers=2GB`, the engine `--cache-mb 2048`. Rounds interleaved:
+reference, after, before, after, before, reference; access cases 60 queries after 5 warm-up
+ones, the single queries 15 runs through psql (median). "before" is `629f3e51`, "after" the
+same with this round's change (before the rebase onto agent 117's `184f719f`). ms is the
+median averaged over two rounds; cpu the server's CPU ms per query; MB the server's peak
+memory. Load 30-40 throughout (other agents' builds and a regress run): allow 20-30%.
+
+| case | PostgreSQL ms (cpu, MB) | before | after |
+|---|---|---|---|
+| SELECT sum(length(v)) FROM ctas WHERE id <= 116000 | 40.4 | 152 | 141 |
+| SELECT count(*) FROM ctas WHERE id <= 116000 | 14.8 | 79.6 | 100 |
+| SELECT count(*) FROM docs WHERE tsv @@ to_tsquery('simple',  | 6.12 | 32.8 | 20.9 |
+| SELECT id FROM pts ORDER BY p <-> point(500, 300) LIMIT 5 | 0.386 | 29.2 | 0.541 |
+| SELECT count(*) FROM docs WHERE body @? '$.user ? (@ == 77)' | 1.45 | 544 | 1.71 |
+| SELECT count(*) FROM docs WHERE meta @@ '$.a.b == 77' | 0.461 | 617 | 3.84 |
+| SELECT count(*) FROM docs WHERE tags @> ARRAY[7] | 2.31 | 13.6 | 9.86 |
+| keyset_page | 0.257 (0.179, 430) | 0.72 (0.833, 176) | 0.777 (0.834, 182) |
+| nested_loop | 0.708 (0.639, 430) | 2.78 (2.75, 179) | 2.48 (2.33, 185) |
+| gist_box | 0.26 (0.194, 431) | 0.573 (0.75, 211) | 0.467 (0.667, 212) |
+| trgm_gin_sim | 10.2 (9.62, 431) | 0.762 (0.833, 238) | 0.65 (0.666, 236) |
+| gin_array | 0.496 (0.575, 431) | 2.37 (3.5, 228) | 1.3 (1.92, 237) |
+| gin_array_overlap | 0.575 (0.684, 431) | 3.83 (5.75, 230) | 2.27 (3.25, 238) |
+| gin_jsonb | 1.57 (1.43, 431) | 1.5 (1.33, 230) | 1.26 (1.17, 239) |
+| gin_jsonb_exists | 0.77 (0.691, 431) | 4.4 (4.25, 230) | 3.58 (3.42, 239) |
+| gin_jsonb_path | 0.64 (0.548, 431) | 2.87 (2.75, 231) | 2.48 (2.33, 240) |
+| gin_tsvector | 0.423 (0.348, 431) | 1.09 (1.25, 232) | 0.967 (1.08, 241) |
+| gin_tsvector_and | 6.47 (6.2, 431) | 32.9 (33.2, 234) | 23.3 (22.5, 242) |
+| skip_scan | 0.95 (0.455, 431) | 1.26 (1.33, 238) | 1.87 (1.42, 247) |
+| gist_point_box | 0.242 (0.175, 431) | 0.51 (0.5, 249) | 0.444 (0.583, 257) |
+| gist_point_knn | 0.388 (0.271, 431) | 33.1 (31.7, 274) | 0.605 (0.667, 258) |
+
+Peak RSS over the run: after 261-264 MB, before 275-280 MB (the engine's VmHWM after each
+round). The GiST histories hold about 50 bytes an entry (5 MB for `pts`' 100,000); the
+KNN scans no longer fill a queue with every entry.
+
+Agent 107's range read and the 2,500-row GIN case still cost what reading and decoding
+their rows costs (profiles in HANDOFF): `ctas` 141-152 ms against 40 (flat per-row scan
+work), tsvector `x & common` 23 against 6.5 (SST point gets 14%, decoding).
+
+pgbench (scale 10, 8 clients, 20 s, interleaved after / before three times, the rebased
+build against `629f3e51`):
+- select-only tps: after 16,846 / 13,921 / 16,159; before 13,263 / 16,111 / 14,896. CPU per
+  transaction 0.23 ms both.
+- tpcb-like tps: after 1,760 / 1,854 / 1,872; before 1,751 / 2,099 / 1,450. CPU per
+  transaction 1.56-1.59 ms after, 1.51-1.62 before.
+- Peak RSS 548-596 MB after, 558-599 MB before.
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document

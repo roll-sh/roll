@@ -120,7 +120,7 @@ fn zorder(b: &GBox) -> u64 {
 }
 
 /// A key: a point_ops box or a range.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Key {
     Box(GBox),
     Range(RKey),
@@ -278,7 +278,7 @@ fn union_of(tups: &[Tup]) -> Option<Key> {
 
 /// A range of an integer-like subtype (int4, int8, date, timestamp[tz]) as range_gist
 /// sees it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RKey {
     pub empty: bool,
     pub lower: Option<i64>,
@@ -821,6 +821,10 @@ pub struct Gist {
     pages: Vec<Page>,
     levels: Vec<Level>,
     clock: u64,
+    /// Leaf pages the last VACUUM deleted (recyclable after the next one), and those free
+    /// to reuse (the free space map's: gistNewBuffer takes one before extending).
+    deleted: Vec<u32>,
+    free: std::collections::BTreeSet<u32>,
 }
 
 /// A step of an insertion's path: the block, the clock when it was read, and the offset
@@ -834,8 +838,51 @@ struct Step {
 
 impl Gist {
     fn alloc(&mut self, leaf: bool, tups: Vec<Tup>) -> u32 {
+        if let Some(b) = self.free.pop_first() {
+            self.pages[b as usize] = Page { leaf, tups, nsn: 0 };
+            return b;
+        }
         self.pages.push(Page { leaf, tups, nsn: 0 });
         (self.pages.len() - 1) as u32
+    }
+
+    /// gistbulkdelete: the leaf tuples whose rows `dead` names removed, and the leaf pages
+    /// left empty deleted (gistvacuum_delete_empty_pages: their downlinks removed, each
+    /// internal page keeping one at least, the root staying). A deleted page stays in the
+    /// file; the VACUUM after next finds it recyclable and later splits reuse it.
+    pub fn vacuum(&mut self, dead: &dyn Fn(u32) -> bool) {
+        let recyclable = std::mem::take(&mut self.deleted);
+        self.free.extend(recyclable);
+        let gone: std::collections::HashSet<u32> = self.free.iter().copied().collect();
+        let mut empty = std::collections::HashSet::new();
+        for (b, p) in self.pages.iter_mut().enumerate() {
+            if !p.leaf || gone.contains(&(b as u32)) {
+                continue;
+            }
+            p.tups.retain(|t| t.row == NO_ROW || !dead(t.row));
+            if b != 0 && p.tups.is_empty() {
+                empty.insert(b as u32);
+            }
+        }
+        for b in 0..self.pages.len() {
+            if empty.is_empty() {
+                break;
+            }
+            let p = &self.pages[b];
+            if p.leaf || gone.contains(&(b as u32)) {
+                continue;
+            }
+            let mut i = 0;
+            while i < self.pages[b].tups.len() && self.pages[b].tups.len() > 1 {
+                let child = self.pages[b].tups[i].child;
+                if empty.remove(&child) {
+                    self.pages[b].tups.remove(i);
+                    self.deleted.push(child);
+                } else {
+                    i += 1;
+                }
+            }
+        }
     }
 
     /// gist_indexsortbuild_levelstate_add.
@@ -1053,7 +1100,13 @@ pub fn sorted_build_rows(keys: Vec<(Option<Key>, u32)>) -> Gist {
         .then(a.0.cmp(&b.0))
     });
     // Block 0 is the root's.
-    let mut g = Gist { pages: vec![Page::default()], levels: vec![Level { pages: vec![Vec::new()] }], clock: 0 };
+    let mut g = Gist {
+        pages: vec![Page::default()],
+        levels: vec![Level { pages: vec![Vec::new()] }],
+        clock: 0,
+        deleted: Vec::new(),
+        free: Default::default(),
+    };
     for (_, k, _, row) in keyed {
         g.add(0, Tup { row, ..Tup::of(k) });
     }
@@ -1181,6 +1234,46 @@ impl PairingHeap {
     }
 }
 
+/// A GiST index scan in progress (gistgettuple's queue): rows come out as they're asked
+/// for, so a scan wanting k rows (`ORDER BY p <-> q LIMIT k`) reads about the pages and
+/// entries nearest the query, not the whole index.
+pub struct Search {
+    orderbys: usize,
+    queue: PairingHeap,
+    /// An unordered scan's matching rows of the leaf page read last.
+    page: std::collections::VecDeque<u32>,
+    started: bool,
+}
+
+impl Search {
+    pub fn new(orderbys: usize) -> Search {
+        Search { orderbys, queue: PairingHeap::default(), page: Default::default(), started: false }
+    }
+
+    /// The scan's next row over index `g` (`test`: see `Gist::search`; it must be the
+    /// same function every call).
+    pub fn next(
+        &mut self,
+        g: &Gist,
+        test: &mut dyn FnMut(Option<&Key>, bool) -> Option<Vec<Option<f64>>>,
+    ) -> Option<u32> {
+        if !self.started {
+            self.started = true;
+            g.scan_page(0, self.orderbys, &mut self.queue, &mut self.page, test);
+        }
+        loop {
+            if let Some(r) = self.page.pop_front() {
+                return Some(r);
+            }
+            let item = self.queue.remove_first()?;
+            match item.row {
+                Some(r) => return Some(r),
+                None => g.scan_page(item.blk, self.orderbys, &mut self.queue, &mut self.page, test),
+            }
+        }
+    }
+}
+
 impl Gist {
     /// A GiST index scan (gistgettuple): the rows of the leaf tuples `test` accepts, in the
     /// order the scan returns them. `test(key, leaf)` is the consistent function: None to
@@ -1191,32 +1284,38 @@ impl Gist {
         orderbys: usize,
         test: &mut dyn FnMut(Option<&Key>, bool) -> Option<Vec<Option<f64>>>,
     ) -> Vec<u32> {
+        let mut s = Search::new(orderbys);
         let mut out = Vec::new();
-        let mut queue = PairingHeap::default();
-        let mut scan_page = |blk: u32, queue: &mut PairingHeap, out: &mut Vec<u32>| {
-            let page = &self.pages[blk as usize];
-            for t in &page.tups {
-                let Some(mut dist) = test(t.key.as_ref(), page.leaf) else {
-                    continue;
-                };
-                dist.resize(orderbys, None);
-                if page.leaf && orderbys == 0 {
-                    out.push(t.row);
-                } else if page.leaf {
-                    queue.add(SearchItem { dist, row: Some(t.row), blk: 0 });
-                } else {
-                    queue.add(SearchItem { dist, row: None, blk: t.child });
-                }
-            }
-        };
-        scan_page(0, &mut queue, &mut out);
-        while let Some(item) = queue.remove_first() {
-            match item.row {
-                Some(r) => out.push(r),
-                None => scan_page(item.blk, &mut queue, &mut out),
-            }
+        while let Some(r) = s.next(self, test) {
+            out.push(r);
         }
         out
+    }
+
+    /// One page of a scan (gistScanPage): an unordered scan's matching leaf rows go to
+    /// `out`, everything else into the queue.
+    fn scan_page(
+        &self,
+        blk: u32,
+        orderbys: usize,
+        queue: &mut PairingHeap,
+        out: &mut std::collections::VecDeque<u32>,
+        test: &mut dyn FnMut(Option<&Key>, bool) -> Option<Vec<Option<f64>>>,
+    ) {
+        let page = &self.pages[blk as usize];
+        for t in &page.tups {
+            let Some(mut dist) = test(t.key.as_ref(), page.leaf) else {
+                continue;
+            };
+            dist.resize(orderbys, None);
+            if page.leaf && orderbys == 0 {
+                out.push_back(t.row);
+            } else if page.leaf {
+                queue.add(SearchItem { dist, row: Some(t.row), blk: 0 });
+            } else {
+                queue.add(SearchItem { dist, row: None, blk: t.child });
+            }
+        }
     }
 
     /// The pages a scan reads (gistScanPage locks each one): the root, then every page a

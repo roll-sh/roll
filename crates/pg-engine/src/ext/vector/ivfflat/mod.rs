@@ -16,7 +16,7 @@
 mod build;
 mod kmeans;
 mod modify;
-mod page;
+pub(super) mod page;
 mod pairingheap;
 mod sampling;
 mod scan;

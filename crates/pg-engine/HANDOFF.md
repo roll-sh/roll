@@ -3293,6 +3293,76 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     pgvector's copy file needs `results/*.bin` writable by both psqls: the reference's
     `docker exec` runs as root, so pre-create them mode 666 when the engine side gets
     "Permission denied".
+- **Index access at index cost, round 3** (round 22, agent 127; BENCH.md "Index access,
+  round 3"):
+  - GiST KNN reads about k entries. `gistsim::Search` is gistgettuple's queue (the pairing
+    heap, its distance order and ties: heap items before pages) run as rows are asked for;
+    a point_ops scan (`scan::GistKeys`, a `scan::Keys` source) searches the shared model as
+    the scan node takes keys, so `ORDER BY p <-> q LIMIT k` and a LIMITed `<@` stop early.
+    Kept eager: SERIALIZABLE (its SIRead page locks) and `<@ polygon / circle` (the operator
+    runs on each leaf and may fail).
+  - The GiST point_ops / range_ops model replays the index's history (`sizing/gistlog.rs`,
+    `RelFiles::gist_logs`): the build's entries, then each entry inserted (INSERT, a non-HOT
+    UPDATE's new version, an aborted transaction's too, deferred and COPY rows when they are
+    modelled) and each VACUUM's removals, in order. Dead entries split pages as they do in
+    PostgreSQL; VACUUM (`Gist::vacuum`) removes the dead leaf tuples and deletes emptied leaf
+    pages the way gistvacuum_delete_empty_pages does (an internal page keeps one downlink, the
+    root stays), the VACUUM after next finds them recyclable and splits reuse them
+    (`Gist::alloc`). VACUUM now reports GiST relpages (gistvacuumcleanup); the model caches
+    are keyed by the history's version, since a VACUUM or an aborted insert changes the index
+    without a commit. A history is used only while it accounts for every row the snapshot
+    sees, with its key (else the model is built from the rows as before and the history
+    starts again from that build), so a missed hook costs fidelity, never rows; past 1M
+    entries none is kept. Rows are ordered by the TID index entries name (the HOT root).
+    `a127_gist_history` (recorded from 18.6): page counts after UPDATE / DELETE / a rolled
+    back INSERT / VACUUM / later inserts, and the unordered scans' order, all match.
+    - Not modelled: LP_DEAD. A scan that meets a dead entry marks it (kill_prior_tuple) and
+      later scans skip it, which changes the pairing heap's shape and so the order of
+      equally distant KNN rows while dead entries are in the index (the golden's comment).
+      gistprunepage's removal of LP_DEAD tuples before a split isn't modelled either.
+  - jsonb `@?` / `@@` jsonpath over GIN narrow as gin_extract_jsonb_query's jsonpath
+    extraction does (`search/gin.rs`, `JpExtract`: extract_jsp_bool_expr /
+    extract_jsp_path_expr, both operator classes, lax and strict, filters, AND / OR / NOT,
+    EXISTS, `==` scalars; what it can't extract reads every row, as GIN_SEARCH_MODE_ALL).
+    jsonb tokens now key string array elements (a raw scalar's too) apart (`e`) from object
+    string values (`s`), as jsonb_ops does: `strict $ == "v1"` over a raw scalar `"v1"`
+    finds nothing through jsonb_ops in PostgreSQL (a non-key entry), and now in the engine;
+    `?` / `?|` / `?&` select keys and string elements only. Golden `a127_gin_jsonpath`.
+  - Bitmap scans over GIN / GiST / SP-GiST / BRIN candidates: the rows the bitmap index
+    scan fetched to check its conditions are handed to the heap scan (`KeptRows`, up to 8 MB,
+    under a snapshot) instead of fetched again; the check decodes only the quals' columns
+    (with agent 117's `qual_row` for rows with out-of-line values); a heap in key order skips
+    the per-key TID lookups that only sort keys already sorted (kept under EXPLAIN ANALYZE
+    for Heap Blocks).
+  - DROP INDEX, DROP TABLE and TRUNCATE let go of hnsw's, ivfflat's and bloom's cached
+    copies of the index (`index_am::evict`, prefix-matched; a rollback reloads them from the
+    restored records); bloom's build drops its earlier storage generations as ivfflat's does.
+  - Left:
+    - Box, circle, polygon, btree_gist and pg_trgm KNN still read every candidate and sort
+      (`scan::Reordered`). Their trees are insertion-built (box / circle / polygon: no sort
+      support) and gistchoose breaks equal penalties randomly, so PostgreSQL's order of
+      equal distances isn't deterministic there; btree_gist builds sorted in 18. A lazy
+      version needs a distance-ordered walk of `exec/search.rs`'s `Grid` (lower bounds from
+      its quantized boxes) plus IndexNextWithReorder's queue for the lossy circle / polygon
+      distances.
+    - SP-GiST quad NaN after a later split: a NaN can only reach a non-root leaf through an
+      allTheSame inner tuple (spg_quad_choose doesn't call getQuadrant there); modelling it
+      needs an SP-GiST quad tree model (leaf capacity, allTheSame splits). Not done.
+    - Skip scans' `Index Searches`: PostgreSQL 18 counts _bt_first calls, decided by
+      _bt_advance_array_keys against each leaf page's finaltup (truncated high-key
+      attributes count as satisfied; a primitive scan past its first page, or with more than
+      NSKIPADVANCES_THRESHOLD advances, continues instead). Measured: (a, b) with 7 distinct
+      a, `b = 7`: 6; 10 distinct leading values, a range: 11, an equality: 12; 3,000
+      distinct, one per page group: 5. Needs btsim's leaf boundaries and high keys; not done.
+    - Range read after CREATE TABLE AS + a later primary key (`sum(length(v))`, 116,000
+      rows): 141-152 ms against 40. The profile is flat per-row scan work: LSM iteration
+      (Cursor::head, Merge::min, Scan::next: 16%), allocation (11%), eval (7%), decode (6%):
+      agent 117's. Index access's own share: `sizing::fetched` per row (a `vis_for` with
+      catalog lookups, the models' read lock, a heap key lookup: about 5%), worth doing per
+      fetch batch.
+    - GIN with thousands of rows (tsvector `x & common`, 2,500 rows): 33 -> 23 ms against
+      6.5. Left: SST point gets (`sst::entry_head` 10%, bloom checks 4%: a sorted batch
+      could reuse its block positions, storage's) and decoding.
 
 ## Repository layout
 

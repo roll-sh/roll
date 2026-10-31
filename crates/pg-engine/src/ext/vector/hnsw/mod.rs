@@ -78,6 +78,12 @@ fn cache() -> &'static Cache {
     C.get_or_init(Default::default)
 }
 
+/// Cached indexes of database `instance` whose records start with `prefix` let go
+/// (`index_am::evict`).
+pub(crate) fn evict(instance: u64, prefix: &[u8]) {
+    cache().lock().retain(|k, _| !(k.0 == instance && k.1.starts_with(prefix)));
+}
+
 /// The cached graphs of indexes whose records are gone (dropped, or given new storage) let
 /// go: a graph holds every vector of its index. Run as an index is loaded or built.
 fn evict_dropped(c: &mut HashMap<(u64, Vec<u8>), Arc<Shared>>) {

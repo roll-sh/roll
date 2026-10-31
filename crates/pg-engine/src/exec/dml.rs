@@ -5350,6 +5350,8 @@ pub fn truncate(t: &Arc<Table>, ctx: &ExecCtx) -> Result<()> {
     let end = super::toast::table_end(t.oid);
     // (One range deletion, however many rows, entries and values: `storage::rdel`.)
     ctx.txn.borrow_mut().delete_range(start, end)?;
+    // (Its indexes' cached entries go with their records: `index_am::evict`.)
+    crate::ext::index_am::evict(ctx.sess.db.instance, &crate::storage::keys::index_prefix(t.oid, 0)[..4]);
     super::sizing::truncated(t, &ctx.sess.db);
     super::sizing::indexes_emptied(t, ctx);
     Ok(())

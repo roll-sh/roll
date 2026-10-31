@@ -23,6 +23,7 @@ use crate::types::{DataType, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod gistlog;
 pub mod kept;
 
 /// Tables with more row versions than this aren't modelled (their sizes are estimated).
@@ -86,6 +87,8 @@ pub struct RelFiles {
     /// GIN indexes: the rows (data keys) their build read; rows written later went to the
     /// pending list.
     gin_built: HashMap<u32, Vec<HashSet<Vec<u8>>>>,
+    /// GiST point_ops / range_ops indexes' histories (`gistlog`), by index.
+    gist_logs: HashMap<u32, Arc<gistlog::GistLog>>,
     /// BRIN indexes: which page ranges have a summary.
     brin: HashMap<u32, BrinRanges>,
     /// The dead tuples the last VACUUM of each table had to keep (what it reports as the
@@ -239,6 +242,8 @@ struct Pending {
     len: usize,
     exts: Vec<NewExt>,
     entries: Vec<(u32, Arc<Key>)>,
+    /// Its GiST indexes' entries (`gist_entries`).
+    gist: Vec<(u32, Option<crate::catalog::gistsim::Key>)>,
 }
 
 /// A value a row's tuple stores out of line: its column, the bytes saved in TOAST chunks
@@ -1505,6 +1510,7 @@ fn forget(rf: &mut RelFiles, t: &Table) {
     rf.heaps.remove(&t.oid);
     for i in t.indexes.iter().chain(&t.pkey_index) {
         rf.btrees.remove(i);
+        rf.gist_logs.remove(i);
     }
     if t.toast != 0 {
         rf.heaps.remove(&t.toast);
@@ -1682,6 +1688,49 @@ fn toast_gone(t: &Table, old: &[Value], new: Option<&[Value]>, ctx: &ExecCtx) ->
 }
 
 /// A row is about to be inserted (heap_insert and its index entries).
+/// The entries a new heap tuple with these values gets in those of `indexes` whose
+/// history is kept (`gistlog`; `vals`: as `inserted_with`'s).
+fn gist_entries(
+    indexes: &[BoundIndex],
+    row: &[Value],
+    vals: Option<&[Option<Vec<Value>>]>,
+    ctx: &ExecCtx,
+) -> Result<Vec<(u32, Option<crate::catalog::gistsim::Key>)>> {
+    let logged: Vec<usize> = {
+        let rf = ctx.sess.db.relfiles.read();
+        if rf.gist_logs.is_empty() {
+            return Ok(Vec::new());
+        }
+        (0..indexes.len()).filter(|&i| rf.gist_logs.contains_key(&indexes[i].index.oid)).collect()
+    };
+    let mut out = Vec::new();
+    for i in logged {
+        let bix = &indexes[i];
+        let v = match vals.and_then(|v| v.get(i)) {
+            Some(v) => v.clone(),
+            None => index_values(bix, row, ctx)?,
+        };
+        // (A row a partial index leaves out has no entry.)
+        if let Some(v) = v
+            && let Some(k) = gist_entry_key(bix, v.first())?
+        {
+            out.push((bix.index.oid, k));
+        }
+    }
+    Ok(out)
+}
+
+/// `entries` (`gist_entries`) went into their indexes for the heap tuple at `tid`.
+fn gist_log(logs: &mut HashMap<u32, Arc<gistlog::GistLog>>, entries: &[(u32, Option<crate::catalog::gistsim::Key>)], tid: Tid) {
+    for (ix, k) in entries {
+        if let Some(l) = logs.get_mut(ix)
+            && !Arc::make_mut(l).insert(tid, *k)
+        {
+            logs.remove(ix);
+        }
+    }
+}
+
 pub fn inserted(
     t: &Table,
     indexes: &[BoundIndex],
@@ -1717,6 +1766,7 @@ pub fn inserted_with(
         lock_toast(t, ctx)?;
     }
     let entries = entries_with(t, indexes, row, vals, ctx)?;
+    let gist = gist_entries(indexes, row, vals, ctx)?;
     let xid = ctx.txn.borrow_mut().cur_xid();
     let cid = ctx.txn.borrow_mut().output_cid();
     let txn = ctx.txn.borrow().id;
@@ -1729,6 +1779,7 @@ pub fn inserted_with(
             btrees,
             bulk,
             toast,
+            gist_logs,
             ..
         } = &mut *rf;
         if !heaps.contains_key(&t.oid) {
@@ -1744,6 +1795,7 @@ pub fn inserted_with(
                 len,
                 exts,
                 entries,
+                gist,
             });
             return Ok(None);
         }
@@ -1759,6 +1811,7 @@ pub fn inserted_with(
                 len,
                 exts,
                 entries,
+                gist,
             });
             d.rows += 1;
             (d.xid, d.cid) = (xid, cid);
@@ -1795,6 +1848,7 @@ pub fn inserted_with(
         heap.set_raw_cid(tid, cid);
         let entries = entries.into_iter().map(|(o, k)| (o, k, false)).collect();
         index_insert(btrees, heap, &xids, entries, tid);
+        gist_log(gist_logs, &gist, tid);
         tid
     };
     check_size(db, t);
@@ -1927,11 +1981,13 @@ pub fn updated(
             let unchanged = index_values(bix, old, ctx)?.is_some_and(|ov| same_vals(&ov, &nv));
             ents.push((bix.index.oid, index_key(t, bix, nv, new, ctx), unchanged));
         }
+        let gist = gist_entries(indexes, new, None, ctx)?;
         let mut rf = db.relfiles.write();
-        let RelFiles { heaps, btrees, .. } = &mut *rf;
+        let RelFiles { heaps, btrees, gist_logs, .. } = &mut *rf;
         if let Some(heap) = heaps.get(&t.oid) {
             index_insert(btrees, heap, &xids, ents, tid);
         }
+        gist_log(gist_logs, &gist, tid);
     }
     check_size(db, t);
     Ok(Some((tid, hot)))
@@ -2363,6 +2419,7 @@ pub fn indexes_emptied(t: &Table, ctx: &ExecCtx) {
         if cat.index(*ix).is_none_or(|i| models_build(&i.method)) {
             rf.gin_built.insert(*ix, vec![HashSet::new()]);
         }
+        rf.gist_logs.remove(ix);
         rf.brin.insert(*ix, BrinRanges::default());
     }
 }
@@ -2511,7 +2568,7 @@ fn gin_index_pages(
 /// build history stay as they were.
 struct Shared<T> {
     ts: u64,
-    key: (u64, usize),
+    key: (u64, usize, usize),
     model: T,
 }
 
@@ -2528,7 +2585,10 @@ fn shared_model<T: Clone + Send + 'static>(t: &Table, index: u32, ctx: &ExecCtx,
     }
     let db = &ctx.sess.db;
     let slot = crate::txn::watch::slot(index, true);
-    let key = (ctx.catalog().version, db.relfiles.read().gin_built.get(&index).map_or(0, |h| h.len()));
+    let key = {
+        let rf = db.relfiles.read();
+        (ctx.catalog().version, rf.gin_built.get(&index).map_or(0, |h| h.len()), rf.gist_logs.get(&index).map_or(0, |l| l.version()))
+    };
     if let Some(st) = db.watch.state(t.oid, slot) {
         let g = st.lock();
         if let Some(p) = g.downcast_ref::<Shared<T>>()
@@ -2724,8 +2784,9 @@ fn gist_index_pages(
     Ok(gist_model_shared(t, bix, indexes, ctx)?.as_ref().as_ref().map(|(g, _)| g.nblocks()))
 }
 
-/// A GiST index's model and its rows' data keys (`gist_model`).
-type GistModel = Arc<Option<(crate::catalog::gistsim::Gist, Vec<Vec<u8>>)>>;
+/// A GiST index's model and its entries' rows' data keys (`gist_model`; empty for an
+/// entry of a dead tuple).
+pub type GistModel = Arc<Option<(crate::catalog::gistsim::Gist, Vec<Vec<u8>>)>>;
 
 /// `gist_model`, built once for every session while the table stays as it was
 /// (`shared_model`); for this transaction alone when it can't be shared, or when the table
@@ -2756,7 +2817,12 @@ fn model_pages(index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<
     if writes {
         return pages();
     }
-    let history = ctx.sess.db.relfiles.read().gin_built.get(&index).map_or(0, |h| h.len());
+    // (A VACUUM or an aborted insert changes a GiST index's pages without a commit:
+    // `GistLog::version`.)
+    let history = {
+        let rf = ctx.sess.db.relfiles.read();
+        rf.gin_built.get(&index).map_or(0, |h| h.len()) + (rf.gist_logs.get(&index).map_or(0, |l| l.version()) << 32)
+    };
     // (The rows it reads are the snapshot's: `txn.scan`.)
     let snap = ctx.snapshot().map_or_else(|| ctx.txn.borrow().snapshot_ts(), |s| s.ts());
     let key = (ctx.sess.db.instance, snap, ctx.catalog().version, id, history);
@@ -2774,17 +2840,15 @@ fn model_pages(index: u32, ctx: &ExecCtx, pages: impl FnOnce() -> Result<Option<
     Ok(n)
 }
 
-/// A GiST index scan of a modelled point_ops or range_ops index: the data keys of the rows
-/// `test` (the scan's consistent and distance functions, see `Gist::search`) returns, in
-/// the scan's order (None: the index isn't modelled).
-pub fn gist_scan(
-    t: &Arc<Table>,
-    index: u32,
-    orderbys: usize,
-    test: &mut dyn FnMut(Option<&crate::catalog::gistsim::Key>, bool) -> Option<Vec<Option<f64>>>,
-    ctx: &ExecCtx,
-) -> Result<Option<Vec<Vec<u8>>>> {
-    Ok(gist_scan_pages(t, index, orderbys, test, false, ctx)?.map(|r| r.0))
+/// A modelled point_ops or range_ops GiST index's model, for a scan to search as it goes
+/// (None: the index isn't modelled).
+pub fn gist_model_of(t: &Arc<Table>, index: u32, ctx: &ExecCtx) -> Result<Option<GistModel>> {
+    let indexes = crate::sql::binder::bound_indexes(t, ctx)?;
+    let Some(bix) = indexes.iter().find(|b| b.index.oid == index) else {
+        return Ok(None);
+    };
+    let model = gist_model_shared(t, bix, &indexes, ctx)?;
+    Ok(model.is_some().then_some(model))
 }
 
 /// `gist_scan`, with the pages the scan reads (its SIRead locks) when `pages`.
@@ -2809,7 +2873,7 @@ pub fn gist_scan_pages(
     Ok(Some((
         g.search(orderbys, test)
             .into_iter()
-            .filter_map(|r| keys.get(r as usize).cloned())
+            .filter_map(|r| keys.get(r as usize).filter(|k| !k.is_empty()).cloned())
             .collect(),
         read,
     )))
@@ -2927,7 +2991,8 @@ fn gist_model(
     let end = prefix_end(&start);
     let raw: Vec<(Vec<u8>, bytes::Bytes)> =
         ctx.txn.borrow().scan(&start, &end).collect::<Result<_>>()?;
-    let mut rows: Vec<((u32, u16), Vec<u8>, Option<Key>)> = Vec::new();
+    // (TID, data key, key, the TID index entries name: its HOT chain's root.)
+    let mut rows: Vec<((u32, u16), Vec<u8>, Option<Key>, Tid)> = Vec::new();
     {
         let xids = ctx.sess.db.xids();
         let v = Vis::new(&xids);
@@ -2966,14 +3031,27 @@ fn gist_model(
             let Some(tid) = heap.locate(k, &v) else {
                 continue;
             };
-            rows.push((tid, k.clone(), key));
+            rows.push((tid, k.clone(), key, heap.hot_root(tid)));
         }
     }
-    rows.sort_by_key(|r| r.0);
+    // (In the order of the TIDs index entries name, as the build reads its rows.)
+    rows.sort_by_key(|r| r.3);
+    // The index as its history built it, while that accounts for every row.
+    let log = ctx.sess.db.relfiles.read().gist_logs.get(&bix.index.oid).cloned();
+    let roots: Vec<(Tid, Vec<u8>, Option<Key>)> = rows.iter().map(|r| (r.3, r.1.clone(), r.2)).collect();
+    if let Some(m) = log.and_then(|l| l.replay(&roots)) {
+        return Ok(Some(m));
+    }
     // The rows the build read (all of them when it wasn't seen), then the rest.
     let built = ctx.sess.db.relfiles.read().gin_built.get(&bix.index.oid).and_then(|h| h.first().cloned());
     let (first, later): (Vec<_>, Vec<_>) =
         rows.into_iter().partition(|r| built.as_ref().is_none_or(|b| b.contains(&r.1)));
+    // (Its history starts again from here.)
+    if roots.len() <= gistlog::MAX_ENTRIES {
+        let build: Vec<(Tid, Option<Key>)> = first.iter().map(|r| (r.3, r.2)).collect();
+        let log = gistlog::GistLog::new(build, later.iter().map(|r| (r.3, r.2)).collect());
+        ctx.sess.db.relfiles.write().gist_logs.insert(bix.index.oid, Arc::new(log));
+    }
     let mut keys: Vec<Vec<u8>> = Vec::new();
     let mut g = sorted_build_rows(
         first
@@ -3043,6 +3121,7 @@ pub fn dropped(oids: &[u32], db: &Database) {
         rf.toast.remove(o);
         rf.hash_est.remove(o);
         rf.gin_built.remove(o);
+        rf.gist_logs.remove(o);
         rf.brin.remove(o);
         // (A dropped table's search structures: `exec::search`.)
         db.watch.forget(*o);
@@ -3387,6 +3466,7 @@ pub fn models_build(method: &str) -> bool {
 /// (`build`: `models_build`.)
 pub fn index_created(index: u32, build: bool, ctx: &ExecCtx) {
     let mut rf = ctx.sess.db.relfiles.write();
+    rf.gist_logs.remove(&index);
     if build {
         rf.gin_built.insert(index, vec![HashSet::new()]);
     } else {
@@ -3409,7 +3489,9 @@ pub fn index_built(t: &Table, index: u32, build: bool, ctx: &ExecCtx) -> Result<
             .scan(&start, &end)
             .map(|r| r.map(|(k, _)| k))
             .collect::<Result<_>>()?;
-        ctx.sess.db.relfiles.write().gin_built.insert(index, vec![keys]);
+        let mut rf = ctx.sess.db.relfiles.write();
+        rf.gin_built.insert(index, vec![keys]);
+        rf.gist_logs.remove(&index);
     } else {
         ctx.sess.db.relfiles.write().gin_built.remove(&index);
     }
@@ -3538,7 +3620,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     let db = &ctx.sess.db;
     let xids = db.xids();
     let mut rf = db.relfiles.write();
-    let RelFiles { heaps, btrees, vacuum_kept, .. } = &mut *rf;
+    let RelFiles { heaps, btrees, vacuum_kept, gist_logs, .. } = &mut *rf;
     let Some(heap) = heaps.get_mut(&t.oid) else {
         return Ok(None);
     };
@@ -3556,6 +3638,11 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
     };
     let res = heap.vacuum(&v, indexes.len(), truncate("vacuum_truncate"));
     vacuum_kept.insert(t.oid, res.recently_dead as i64);
+    for bix in &indexes {
+        if let Some(l) = gist_logs.get_mut(&bix.index.oid) {
+            Arc::make_mut(l).vacuum(&res.dead);
+        }
+    }
     let mut out = Vacuumed {
         pages: res.pages as i32,
         tuples: res.live,
@@ -3581,6 +3668,14 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
             && let Some(bt) = btrees.get_mut(&(t.toast + 1))
         {
             bt.bulk_delete(&r.dead.iter().copied().collect());
+        }
+    }
+    drop(rf);
+    // gistvacuumcleanup: the GiST indexes' pages (their models replay this VACUUM).
+    let ta = Arc::new(t.clone());
+    for bix in indexes.iter().filter(|b| b.index.method == "gist") {
+        if let Some(n) = gist_index_pages(&ta, bix, &indexes, ctx)? {
+            out.indexes.push((bix.index.oid, n as i32, res.live));
         }
     }
     Ok(Some(out))
@@ -3983,7 +4078,7 @@ impl CopyLoad {
         let table = self.key.0;
         for mut rows in batches {
             let mut rf = self.db.relfiles.write();
-            let RelFiles { heaps, btrees, bulk, toast, .. } = &mut *rf;
+            let RelFiles { heaps, btrees, bulk, toast, gist_logs, .. } = &mut *rf;
             let mut single = InsertMode::single();
             let mode = bulk.get_mut(&self.key).map_or(&mut single, |b| &mut b.mode);
             let mut tids = Vec::with_capacity(rows.len());
@@ -4024,6 +4119,7 @@ impl CopyLoad {
                 };
                 let entries = p.entries.into_iter().map(|(o, k)| (o, k, false)).collect();
                 index_insert(btrees, heap, &xids, entries, tids[i]);
+                gist_log(gist_logs, &p.gist, tids[i]);
                 keys.push(p.key);
             }
             let big = heaps.get(&table).is_some_and(|h| h.versions() > max_versions());

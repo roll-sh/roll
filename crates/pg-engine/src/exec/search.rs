@@ -1284,7 +1284,15 @@ fn element_candidates(t: &Table, bix: &BoundIndex, conds: &[(usize, &str, Value)
     if snapshot.is_some_and(|s| s < el.ts) {
         return Ok(None);
     }
-    let sel = conds.iter().fold(gin::Sel::All, |acc, (c, op, v)| acc.and(el.select(*c, op, v)));
+    let sel = conds.iter().fold(gin::Sel::All, |acc, (c, op, v)| {
+        acc.and(match (*op, v) {
+            // (jsonb `@?` / `@@` jsonpath: the jsonpath's text.)
+            ("@?" | "@@", Value::Text(p)) if bix.keys.get(*c).is_some_and(|k| k.ty() == DataType::Jsonb) => {
+                el.jsonpath(*c, *op == "@?", gin::path_ops(bix, *c), p)
+            }
+            _ => el.select(*c, op, v),
+        })
+    });
     selected(t, &el.rows, sel, &el.always, ctx)
 }
 

@@ -417,6 +417,15 @@ fn updated_cache() -> &'static UpdatedSets {
     C.get_or_init(Default::default)
 }
 
+/// The caches native index methods keep of indexes whose records start with `prefix`
+/// (one index's, or a table's every index's) let go: DROP INDEX, DROP TABLE and TRUNCATE
+/// delete those records (a rollback reads them back from the records it restores). hnsw's
+/// graphs, ivfflat's lists and bloom's pages hold every entry of their index.
+pub fn evict(instance: u64, prefix: &[u8]) {
+    crate::ext::vector::evict(instance, prefix);
+    crate::ext::bloom::evict(instance, prefix);
+}
+
 /// An index's records: under the index's key prefix and relfilenode (so TRUNCATE and REINDEX,
 /// which give it a new relfilenode, start an empty set, and their rollback finds the old one),
 /// written at once rather than at commit, as PostgreSQL writes index pages.
