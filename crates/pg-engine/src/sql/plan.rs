@@ -275,6 +275,10 @@ pub struct FdwPushdown {
     /// The scan's row mark is a whole-row copy (ROW_MARK_COPY), its rows locked by the
     /// remote query's locking clause: no ctid, no LockRows.
     pub copy_mark: bool,
+    /// The target is an inheritance member with row triggers: its whole row (its own columns
+    /// the named table lacks too) is kept for the DML node (`modify::keep_member_row`), as
+    /// PostgreSQL's member scan returns it, so no row is read again by its ctid.
+    pub member: bool,
 }
 
 /// `ScanPlan::params`.

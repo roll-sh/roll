@@ -106,6 +106,13 @@ pub fn string_literal(s: &str) -> String {
     out
 }
 
+/// A call of a user function the planner keeps as a call (not inlined): its function and
+/// arguments.
+fn user_call(sq: &crate::sql::expr::Subquery) -> Option<(&crate::sql::func::FuncDef, &[Expr])> {
+    let c = sq.call.as_ref()?;
+    (!c.inline && sq.params.len() == c.nargs && c.def.oid >= FIRST_GENBKI).then(|| (&*c.def, &sq.params[..]))
+}
+
 /// Whether a function or operator is an operator (its name is a symbol).
 pub fn is_operator(name: &str) -> bool {
     name.chars().next().is_some_and(|c| !c.is_alphanumeric() && c != '_' && c != '"')
@@ -158,7 +165,43 @@ impl<'a> Deparser<'a> {
         } else {
             builtin(reg.funcs.get(def.name))
         };
-        (found && def.oid < FIRST_GENBKI) || (!self.extensions.is_empty() && def.oid >= FIRST_GENBKI && self.object_shippable(def.oid))
+        if found && def.oid < FIRST_GENBKI {
+            return true;
+        }
+        if self.extensions.is_empty() {
+            return false;
+        }
+        // (An operator is shipped by its own oid, whatever function implements it.)
+        match self.user_operator(def) {
+            Some(o) => self.object_shippable(o.oid),
+            None => !is_operator(def.name) && def.oid >= FIRST_GENBKI && self.object_shippable(def.oid),
+        }
+    }
+
+    /// The user operator a call of an operator is (by name, function and argument types).
+    fn user_operator(&self, def: &crate::sql::func::FuncDef) -> Option<&'a crate::catalog::Operator> {
+        if !is_operator(def.name) {
+            return None;
+        }
+        let cat: &'a Catalog = self.cat;
+        cat.operators.values().map(|o| &**o).find(|o| {
+            o.oid >= FIRST_GENBKI
+                && o.name == def.name
+                && o.func == def.oid
+                && match (&o.left, def.args.as_slice()) {
+                    (Some(l), [a, b]) => l == a && &o.right == b,
+                    (None, [b]) => &o.right == b,
+                    _ => false,
+                }
+        })
+    }
+
+    /// deparseOperatorName: an operator outside pg_catalog as `OPERATOR(schema.name)`.
+    fn operator_name(&self, o: &crate::catalog::Operator) -> String {
+        if o.schema == crate::catalog::PG_CATALOG_OID {
+            return o.name.clone();
+        }
+        format!("OPERATOR({}.{})", quote_ident(self.cat.schema_name(o.schema)), o.name)
     }
 
     fn type_shippable(&self, ty: &DataType) -> bool {
@@ -357,6 +400,18 @@ impl<'a> Deparser<'a> {
                     return false;
                 }
                 derived(&inner, ty, incoll)
+            }
+            // (A call of a user function the planner keeps: a listed extension's.)
+            Expr::Subquery(sq) if user_call(sq).is_some() => {
+                let (def, args) = user_call(sq).expect("checked");
+                if def.srf.is_some() || !self.object_shippable(def.oid) || !args.iter().all(|a| self.walk(a, &mut inner)) {
+                    return false;
+                }
+                let incoll = def.coll.as_ref().map(|c| c.name.clone());
+                if !input_ok(&inner, &args.iter().collect::<Vec<_>>(), incoll.clone()) {
+                    return false;
+                }
+                derived(&inner, &sq.ty, incoll)
             }
             Expr::IsDistinct(a, b, _, def) | Expr::NullIf(a, b, def, _) => {
                 if matches!(e, Expr::NullIf(..)) || !self.object_shippable(def.oid) {
@@ -597,8 +652,12 @@ impl Deparser<'_> {
             Expr::Const(v, ty) => self.constant(v, ty, 0),
             Expr::Outer(..) | Expr::Param(..) => self.param(e),
             Expr::Call(def, args, _) if is_operator(def.name) => {
+                let name = match self.user_operator(def) {
+                    Some(o) => self.operator_name(o),
+                    None => def.name.to_string(),
+                };
                 if args.len() == 1 {
-                    return format!("({} {})", def.name, self.expr(&args[0]));
+                    return format!("({name} {})", self.expr(&args[0]));
                 }
                 let (l, r) = (&args[0], &args[1]);
                 let same = l.ty().oid() == r.ty().oid();
@@ -610,11 +669,16 @@ impl Deparser<'_> {
                     Expr::Const(v, t) if same && !matches!(l, Expr::Const(..)) && self.plain_var(l) => self.constant(v, t, -2),
                     r => self.expr(r),
                 };
-                format!("({ls} {} {rs})", def.name)
+                format!("({ls} {name} {rs})")
             }
             Expr::Call(def, args, _) => {
                 let args: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
-                format!("{}({})", quote_ident(def.name), args.join(", "))
+                format!("{}({})", self.function_name(def.oid, def.name), args.join(", "))
+            }
+            Expr::Subquery(sq) if user_call(sq).is_some() => {
+                let (def, args) = user_call(sq).expect("checked");
+                let args: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                format!("{}({})", self.function_name(def.oid, def.name), args.join(", "))
             }
             Expr::Cast(x, _, to, true) => format!("{}::{}", self.expr(x), type_name(self.cat, to)),
             Expr::Cast(x, ..) | Expr::Relabel(x, _) => self.expr(x),

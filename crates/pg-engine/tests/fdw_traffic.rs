@@ -89,6 +89,14 @@ fn loopback_traffic() {
         "CREATE TABLE loc (id int)".into(),
         "INSERT INTO loc SELECT g * 7 FROM generate_series(1, 200) g".into(),
         "ANALYZE loc".into(),
+        // (An inheritance tree with a foreign member having a column of its own, and a row
+        // trigger on it.)
+        "CREATE TABLE kid (id int, v text, extra int)".into(),
+        "INSERT INTO kid SELECT g, 'k' || g, g FROM generate_series(1, 2000) g".into(),
+        "CREATE TABLE par (id int, v text)".into(),
+        "CREATE FOREIGN TABLE fkid (extra int) INHERITS (par) SERVER loop OPTIONS (table_name 'kid')".into(),
+        "CREATE FUNCTION keep() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'".into(),
+        "CREATE TRIGGER keep BEFORE UPDATE ON fkid FOR EACH ROW EXECUTE FUNCTION keep()".into(),
     ] {
         run(&mut s, &q);
     }
@@ -113,5 +121,7 @@ fn loopback_traffic() {
     phase(&mut s, "single-row inserts", &ins);
     let upd: Vec<String> = (0..100).map(|i| format!("UPDATE ft SET v = 'y' WHERE id = {}", 100000 + i)).collect();
     phase(&mut s, "direct updates", &upd);
+    let inh: Vec<String> = (0..20).map(|i| format!("UPDATE par SET v = v || 'z' WHERE id BETWEEN {} AND {}", i * 50, i * 50 + 49)).collect();
+    phase(&mut s, "inherited updates, row trigger (50 rows)", &inh);
     println!("peak RSS {} kB (after setup {} kB)", peak_kb(), base);
 }

@@ -694,6 +694,11 @@ impl Node for LockRowsNode {
                     tests.push(Some((key, None)));
                     continue;
                 };
+                // (A foreign table's row: locked by the scan's remote query.)
+                if t.foreign.is_some() {
+                    tests.push(Some((key, None)));
+                    continue;
+                }
                 match lock_row(t, &key, mark, wait, Xltw::Lock, ctx)? {
                     Locked::Skip => continue 'rows,
                     Locked::Same => tests.push(Some((key, None))),

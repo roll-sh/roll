@@ -25,6 +25,11 @@ pub trait ForeignRelOps: Send + Sync + 'static {
     fn sort_only_cols(&self, _fr: &ForeignRel) -> Vec<usize> {
         Vec::new()
     }
+    /// Its scans whose whole rows it returns as row marks' junk columns (ROW_MARK_COPY),
+    /// in the marks' order (EXPLAIN shows them as `t.*` after its other columns).
+    fn mark_rows(&self, _fr: &ForeignRel) -> Vec<usize> {
+        Vec::new()
+    }
     /// The conditions checked locally on its rows (EXPLAIN's Filter), over the relation's
     /// row.
     fn filter(&self) -> Vec<crate::sql::expr::Expr> {

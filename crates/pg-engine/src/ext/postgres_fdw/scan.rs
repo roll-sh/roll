@@ -280,6 +280,8 @@ struct ScanNode {
     /// The FROM item's alias and column aliases (conversion errors name them).
     alias: Option<String>,
     col_aliases: Option<Arc<Vec<(String, String)>>>,
+    /// `FdwPushdown::member`: each row returned is kept whole for the DML node.
+    member: bool,
 }
 
 /// make_tuple_from_result_row: a remote row as the table's row (columns not retrieved are
@@ -336,6 +338,7 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
         local: spec.local,
         alias: s.alias.clone(),
         col_aliases: s.col_aliases.clone(),
+        member: s.fdw.as_ref().is_some_and(|f| f.member) && s.with_key,
     }))
 }
 
@@ -447,6 +450,11 @@ impl Node for ScanNode {
                 }
             }
             if ok {
+                if self.member
+                    && let Some(Value::Bytea(k)) = row.get(self.table.columns.len())
+                {
+                    super::modify::keep_member_row(k.to_vec(), row[..self.table.columns.len()].to_vec());
+                }
                 return Ok(Some(row));
             }
         }
@@ -495,6 +503,7 @@ pub fn remote_rows(t: &Table, ctx: &ExecCtx) -> Result<(Vec<Row>, i32)> {
         local: Vec::new(),
         alias: None,
         col_aliases: None,
+        member: false,
     };
     let rows = res.rows.into_iter().map(|v| make_row(&node, v, ctx)).collect::<Result<Vec<_>>>()?;
     Ok((rows, pages))

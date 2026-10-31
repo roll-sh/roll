@@ -390,7 +390,11 @@ impl Ddl<'_, '_> {
             let node = NodeEnum::CreateForeignTableStmt(cs);
             let ctx = self.ctx;
             ctx.sess.framed(crate::error::Frame::Text(format!("importing foreign table \"{table}\"")), |_| {
-                super::run_nested(|| super::execute(ctx, &node, &sql)).map(|_| ())
+                // (import_error_callback: a position is one in the command's own text.)
+                super::run_nested(|| super::execute(ctx, &node, &sql)).map(|_| ()).map_err(|e| match e.position {
+                    Some(p) => e.internal_query(p, &sql),
+                    None => e,
+                })
             })?;
             self.reload_catalog();
         }

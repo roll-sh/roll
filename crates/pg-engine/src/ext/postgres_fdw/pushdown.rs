@@ -158,9 +158,10 @@ fn mark_target(cat: &Catalog, source: &mut Arc<Plan>, oid: u32, update: bool) {
         // (An inheritance member too: its scan returns the key as the root's does.)
         if s.table.foreign.is_some() && s.with_key && (s.table.oid == oid || !s.table.inherits.is_empty()) {
             use crate::catalog::trigger_type as tt;
-            let wholerow = update
-                || cat.triggers.values().any(|tg| tg.table == s.table.oid && tg.tgtype & tt::ROW != 0 && tg.tgtype & tt::DELETE != 0);
-            s.fdw = Some(Arc::new(FdwPushdown { target: true, wholerow, ..Default::default() }));
+            let row_tg = |ty: u16| cat.triggers.values().any(|tg| tg.table == s.table.oid && tg.tgtype & tt::ROW != 0 && tg.tgtype & ty != 0);
+            let wholerow = update || row_tg(tt::DELETE);
+            let member = wholerow && s.table.oid != oid && row_tg(u16::MAX);
+            s.fdw = Some(Arc::new(FdwPushdown { target: true, wholerow, member, ..Default::default() }));
         }
         return;
     }
@@ -190,6 +191,14 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
     push(&cat, ctx.fmt(), p);
     // (Again: a LIMIT over a sort the first pass sent.)
     push(&cat, ctx.fmt(), p);
+    // (A target list computed over a projection that only places a foreign relation's
+    // columns in the join row: computed over the Foreign Scan itself, which then is the
+    // level's top under the projection dropping the resjunk columns.)
+    if !compose_over_foreign(p)
+        && let Plan::Project { input, .. } = p
+    {
+        compose_over_foreign(Arc::make_mut(input));
+    }
     // (A target list computed over a projection that only drops a foreign relation's
     // resjunk columns: the Foreign Scan computes it, those columns its resjunk entries.)
     if let Plan::Project { input, .. } = p
@@ -200,6 +209,36 @@ pub fn push_level(ctx: &crate::exec::ExecCtx, p: &mut Plan) {
         let fi = fi.clone();
         *input = fi;
     }
+}
+
+/// `p`, a projection computing values over one that only places a Foreign Scan's columns
+/// (and NULLs), made one projection over the Foreign Scan.
+fn compose_over_foreign(p: &mut Plan) -> bool {
+    let Plan::Project { input, exprs } = p else { return false };
+    let Plan::Project { input: fi, exprs: inner } = &**input else { return false };
+    if !matches!(&**fi, Plan::Foreign(_))
+        || !inner.iter().all(|e| matches!(e, Expr::Col(..) | Expr::Const(..)))
+        || exprs.iter().enumerate().all(|(i, e)| matches!(e, Expr::Col(j, _) if *j == i))
+    {
+        return false;
+    }
+    let composed: Vec<Expr> = exprs
+        .iter()
+        .map(|e| {
+            e.clone()
+                .transform(&mut |x| {
+                    Ok(match x {
+                        Expr::Col(k, t) => inner.get(k).cloned().unwrap_or(Expr::Col(k, t)),
+                        x => x,
+                    })
+                })
+                .unwrap_or_else(|_| e.clone())
+        })
+        .collect();
+    let fi = fi.clone();
+    *exprs = composed;
+    *input = fi;
+    true
 }
 
 /// A filter over a foreign join (a WHERE clause over an outer join): its conditions the
@@ -394,6 +433,16 @@ fn foreign_below(p: &Plan) -> Option<(&crate::sql::plan::ForeignRel, Vec<Expr>)>
     }
 }
 
+/// `p` with the local join under its projections replaced by the Foreign Scan of the same
+/// join the search had (`JoinMeta::fdw_alt`), when it had one.
+fn with_fdw_alt(p: &Plan) -> Option<Plan> {
+    match p {
+        Plan::Join { meta, .. } => meta.fdw_alt.0.as_ref().map(|a| (**a).clone()),
+        Plan::Project { input, exprs } => Some(Plan::Project { input: Arc::new(with_fdw_alt(input)?), exprs: exprs.clone() }),
+        _ => None,
+    }
+}
+
 /// Replace the foreign join under `p`'s projections with `f`.
 fn put_foreign(p: &mut Plan, f: crate::sql::plan::ForeignRel) {
     match p {
@@ -414,6 +463,19 @@ fn push_foreign(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan
         },
         Plan::Sort { input, keys } => (Some(keys), None, &**input),
         _ => return false,
+    };
+    // (add_foreign_final_paths over a join the search ran locally: a LIMIT over a sort of
+    // it is cheaper sent with the join, whose remote query then returns only those rows.)
+    let alt;
+    let (below, final_only) = match foreign_below(below) {
+        None if sort.is_some() && limit.is_some() => match with_fdw_alt(below) {
+            Some(a) => {
+                alt = a;
+                (&alt, true)
+            }
+            None => return false,
+        },
+        _ => (below, false),
     };
     let Some((f, cols)) = foreign_below(below) else { return false };
     if let Some(up) = f.private.0.as_any().downcast_ref::<super::upper::UpperScan>() {
@@ -454,6 +516,9 @@ fn push_foreign(cat: &Catalog, fmt: &crate::types::text::FormatCtx, p: &mut Plan
         let ok = |e: &Option<Expr>| e.as_ref().is_none_or(|x| x.columns().is_empty() && q.shippable(&js.info, x));
         (ok(l) && ok(o)).then(|| (l.clone(), o.clone()))
     });
+    if final_only && lim.is_none() {
+        return false;
+    }
     js.limit = lim.clone();
     let mut nf = f.clone();
     nf.private = crate::sql::plan::FdwPrivate(Arc::new(js));

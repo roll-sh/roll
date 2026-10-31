@@ -32,6 +32,9 @@ pub struct Tail {
     pub limit: Option<(Option<Expr>, Option<Expr>)>,
     /// FOR UPDATE / FOR SHARE (with `OF rN` for joins).
     pub lock: String,
+    /// The row-marked relations' whole rows (ROW_MARK_COPY's junk columns), after the
+    /// select list.
+    pub rows: Vec<String>,
 }
 
 fn jointype_name(jt: JoinKind) -> &'static str {
@@ -120,6 +123,7 @@ impl<'a> Sql<'a> {
             Some(t) => t.iter().map(|e| self.expr(rel, e)).collect(),
             None => rel.reltarget.iter().map(|&g| self.expr(rel, &Expr::Col(g, crate::types::DataType::Unknown))).collect(),
         };
+        let list: Vec<String> = list.into_iter().chain(tail.rows.iter().cloned()).collect();
         let mut sql = format!("SELECT {}", if list.is_empty() { "NULL".to_string() } else { list.join(", ") });
         let mut additional = Vec::new();
         sql.push_str(" FROM ");

@@ -25,7 +25,7 @@ impl Search<'_, '_, '_> {
             || leaf.proj.is_some()
             || s.with_key
             || s.sys
-            || s.mark.is_some()
+            || (s.mark.is_some() && !self.fdw_lock_level())
             || s.rtindex.0 == 0
             || s.current_of.is_some()
         {
@@ -70,6 +70,20 @@ impl Search<'_, '_, '_> {
         }
         self.fdw_list.borrow_mut().push(pj::Base::at(s.clone(), off, leaf.ncols, r.size.tuples));
         Some(info)
+    }
+
+    /// A locking level whose every relation is a plain scan of a table postgres_fdw joins
+    /// remotely: its locked relations join remotely too, the remote query locking their
+    /// rows (`FOR UPDATE OF rN`) with no LockRows over it when it is the level's whole join.
+    fn fdw_lock_level(&self) -> bool {
+        self.leaves.iter().all(|l| {
+            l.scan.as_ref().is_some_and(|(s, _)| {
+                s.table.foreign.is_some()
+                    && !s.with_key
+                    && !s.sys
+                    && crate::ext::fdw::wrapper_of(&self.pl.cat, &s.table).is_some()
+            })
+        })
     }
 
     /// A FROM item planned on its own whose plan is a foreign join (an outer join's side

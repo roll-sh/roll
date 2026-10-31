@@ -51,9 +51,62 @@ impl JoinScan {
         let fmt = ctx.fmt();
         let q = Sql::new(&cat, fmt, &self.bases);
         let tlist: Vec<Expr> = self.tlist.iter().map(|&g| Expr::Col(g, self.col_type(g))).collect();
-        let tail = Tail { order: self.order.clone(), limit: self.limit.clone(), ..Default::default() };
+        let (lock, rows) = self.row_marks();
+        let tail = Tail { order: self.order.clone(), limit: self.limit.clone(), lock, rows, ..Default::default() };
         let sql = q.select(&self.info, Some(&tlist), &self.info.remote_conds, &tail);
         (sql, q.params.take())
+    }
+
+    /// The base relations whose whole rows the remote query returns (a locking level's
+    /// ROW_MARK_COPY marks, every relation's): the locked ones in their clauses' order,
+    /// then the others in range table order (preprocess_rowmarks).
+    pub fn mark_bases(&self) -> Vec<usize> {
+        if !self.bases.iter().any(|b| b.scan.mark.is_some()) {
+            return Vec::new();
+        }
+        let mut order: Vec<usize> = (0..self.bases.len()).collect();
+        order.sort_by_key(|&k| {
+            let s = &self.bases[k].scan;
+            (s.mark.is_none(), s.mark.map(|_| s.lock_order), s.rti.0)
+        });
+        order
+    }
+
+    /// deparseLockingClause (`FOR UPDATE OF rN` per locked relation, in range table order,
+    /// not those of a lower subquery) and the marked relations' whole rows
+    /// (`CASE WHEN (rN.*)::text IS NOT NULL THEN ROW(...) END`).
+    fn row_marks(&self) -> (String, Vec<String>) {
+        let marked = self.mark_bases();
+        if marked.is_empty() {
+            return Default::default();
+        }
+        let alias = |k: usize| format!("r{}", self.bases[k].scan.rtindex.0);
+        let rows = marked
+            .iter()
+            .map(|&k| {
+                let t = &self.bases[k].scan.table;
+                let cols: Vec<String> = (0..t.columns.len())
+                    .filter(|&i| !t.columns[i].dropped)
+                    .map(|i| format!("{}.{}", alias(k), quote_ident(&super::deparse::column_name(t, i))))
+                    .collect();
+                let list = if cols.is_empty() { "NULL".to_string() } else { cols.join(", ") };
+                format!("CASE WHEN ({}.*)::text IS NOT NULL THEN ROW({list}) END", alias(k))
+            })
+            .collect();
+        let mut by_rti: Vec<usize> = (0..self.bases.len()).filter(|k| self.info.lower_subquery >> k & 1 == 0).collect();
+        by_rti.sort_by_key(|&k| self.bases[k].scan.rtindex.0);
+        let mut lock = String::new();
+        for k in by_rti {
+            let Some((m, _)) = self.bases[k].scan.mark else { continue };
+            lock.push_str(match m {
+                crate::sql::plan::RowMark::Update | crate::sql::plan::RowMark::NoKeyUpdate => " FOR UPDATE",
+                crate::sql::plan::RowMark::Share | crate::sql::plan::RowMark::KeyShare => " FOR SHARE",
+            });
+            if self.info.relids.count_ones() > 1 {
+                lock.push_str(&format!(" OF {}", alias(k)));
+            }
+        }
+        (lock, rows)
     }
 
     /// fpinfo->relation_name, with EXPLAIN's names of the base relations.
@@ -124,6 +177,10 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
 
     fn filter(&self) -> Vec<Expr> {
         self.info.local_conds.clone()
+    }
+
+    fn mark_rows(&self, _fr: &ForeignRel) -> Vec<usize> {
+        self.mark_bases()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

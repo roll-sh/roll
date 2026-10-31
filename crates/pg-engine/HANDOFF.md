@@ -607,6 +607,48 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   rebase onto the next commits (none near this code) crate tests, clippy and contrib again.
   `outbound::local_reaches_the_engine` failed once on `SHOW port` and passed on the rerun
   (three tests in one process each serve a port: suspect the port setting is shared).
+  Round 23 (agent 124, postgres_fdw 1,930 / 2,053): an inherited UPDATE / DELETE's foreign
+  member under row triggers takes its whole row from its own target scan
+  (`FdwPushdown::member`, set by `pushdown::mark_target`; the scan keeps each row it returns
+  by row key, `modify::keep_member_row`, and `exec/dml.rs` `member_row` takes it,
+  `take_member_row`, falling back to the read by remote ctid; the node's end and an aborted
+  statement forget the rest, `forget_member_rows`), as PostgreSQL's member scan returns the
+  member's whole row: `fdw_traffic`'s new phase (20 inherited UPDATEs of 50 rows each, a
+  BEFORE ROW trigger on the foreign member with a column of its own; debug, loopback) went
+  101.90 -> 51.95 remote writes per statement, 244.7 -> 146.4 kB out, 152.8 -> 78.0 kB in,
+  49.8 -> 24.2 s, peak RSS 149.0 -> 148.9 MB (the other phases unchanged). The rest of that
+  phase's time is the loopback server's Tid Scan: `WHERE ctid = $1` reads the table to find the
+  row (~16 ms per lookup in a 2,000-row debug table), not postgres_fdw's.
+  The target list over a projection that only places a foreign join's columns in the join row
+  is composed into one projection over the Foreign Scan (`pushdown::compose_over_foreign`), so
+  the scan is the level's top and shows the resjunk sort columns (172, 174, 289). A LIMIT over
+  a sort of a join the search ran locally goes with the join's Foreign Scan alternative
+  (`JoinMeta::fdw_alt`, `pushdown::with_fdw_alt`; add_foreign_final_paths: CROSS JOIN 239),
+  only when the LIMIT is sent too. A user function the planner keeps as a call (an
+  `Expr::Subquery` with `FnShow`, `deparse::user_call`) is shippable as a member of a listed
+  extension and deparses schema-qualified; a user operator is shipped by its own oid
+  (`Deparser::user_operator`, is_shippable of the pg_operator row, not its function's) as
+  `OPERATOR(schema.op)` (142, 144, 146, 220, 493). IMPORT FOREIGN SCHEMA's command errors
+  carry their position as an internal query (`session/ddl/foreign.rs`, import_error_callback:
+  QUERY and LINE of the CREATE FOREIGN TABLE, 1447).
+  Row locks: a foreign table's scan under a LockRows keeps its lock (`paths/rowmarks.rs`
+  `key`), so its remote query sends FOR UPDATE / FOR SHARE as deparseLockingClause does
+  (before, a level joining foreign tables locally locked nothing remotely: LockRows took
+  local locks on the rows' pseudo-keys, which `exec/nodes.rs` LockRowsNode no longer takes
+  for foreign rows). A locking level whose every relation is a postgres_fdw table lets its
+  locked scans into foreign joins (`paths/joinpath/foreign.rs` `fdw_lock_level`): the
+  join's remote query ends with `FOR UPDATE OF rN` per locked relation (range table order,
+  none for a lower subquery's) and returns every relation's whole row as ROW_MARK_COPY's
+  junk (`CASE WHEN (rN.*)::text IS NOT NULL THEN ROW(...) END`, in row mark order;
+  `JoinScan::mark_bases`, EXPLAIN's `t.*` through `ForeignRelOps::mark_rows`); with the
+  whole join remote the plan has no LockRows (rowmarks' `key` stops at a Foreign Scan,
+  add_foreign_final_paths). Still open there: whole-row marks (`t.*`) instead of ctids for
+  foreign scans under a LockRows, the foreign join's EPQ outer plan, an EvalPlanQual
+  recheck reading a foreign row (it re-reads by key from local storage and finds none).
+  Verified: crate tests (debug and release), clippy (no new warnings), the difftest smoke,
+  isolation 121 / 122, a full regress run on a private reference (51,148 / 51,150, no unit
+  changed against results.tsv), contrib postgres_fdw 1,930 (14 units gained, none lost),
+  dblink 218, file_fdw 187.
 - **file_fdw** (round 19, agent 66): native (`src/ext/file_fdw.rs`), 187 / 187 of its
   contrib test. Foreign scans of a file_fdw table read the file with COPY FROM's parser
   (`session/copy.rs` `parse_copy_data`, shared with COPY) a chunk at a time; the file is a

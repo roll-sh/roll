@@ -4263,8 +4263,12 @@ fn member_row(
     if t.columns.len() == n && map.iter().enumerate().all(|(i, m)| *m == Some(i)) {
         return Ok(src[..n].to_vec());
     }
-    // (A foreign member's row is its server's: the named table's columns put in place.)
+    // (A foreign member's row is its server's: as its target scan returned it whole, else the
+    // named table's columns put in place.)
     if t.foreign.is_some() {
+        if let Some(row) = crate::ext::postgres_fdw::modify::take_member_row(dkey) {
+            return Ok(row);
+        }
         let mut row = vec![Value::Null; t.columns.len()];
         for (i, m) in map.iter().enumerate() {
             if let (Some(c), Some(v)) = (m, src.get(i)) {
@@ -4685,6 +4689,7 @@ impl Node for UpdateNode {
             let Some(mut src) = self.source.next(ctx)? else {
                 self.done = true;
                 crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
+                crate::ext::postgres_fdw::modify::forget_member_rows();
                 check_statement_rechecks(ctx)?;
                 if self.plan.inh {
                     trigger::batch(ctx, || self.finish_tree(ctx))?;
@@ -5123,6 +5128,7 @@ impl Node for DeleteNode {
             let Some(mut src) = self.source.next(ctx)? else {
                 self.done = true;
                 crate::ext::postgres_fdw::modify::flush_pending(ctx)?;
+                crate::ext::postgres_fdw::modify::forget_member_rows();
                 if self.defer_entries {
                     ctx.txn.borrow_mut().flush_entry_deletes()?;
                 }

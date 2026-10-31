@@ -29,6 +29,9 @@ thread_local! {
     /// the partition).
     static ROUTED_BACK: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
     /// The foreign partitions the running UPDATE changes, while it moves a row.
+    /// The whole rows of inheritance members' target scans (`FdwPushdown::member`) by row
+    /// key, until the DML node takes them (`take_member_row`).
+    static MEMBER_ROWS: std::cell::RefCell<std::collections::HashMap<Vec<u8>, Row>> = Default::default();
     static UPDATE_TARGETS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -413,6 +416,26 @@ pub fn flush_pending(ctx: &ExecCtx) -> Result<()> {
 /// Rows of a statement that failed: never sent.
 pub fn discard_pending() {
     PENDING.with_borrow_mut(|p| p.clear());
+    forget_member_rows();
+}
+
+/// A member's whole row as its target scan returned it, for the DML node (`member_row`).
+pub fn keep_member_row(key: Vec<u8>, row: Row) {
+    MEMBER_ROWS.with_borrow_mut(|m| m.insert(key, row));
+}
+
+/// The whole row a member's target scan kept for this row key, if any.
+pub fn take_member_row(key: &[u8]) -> Option<Row> {
+    MEMBER_ROWS.with_borrow_mut(|m| if m.is_empty() { None } else { m.remove(key) })
+}
+
+/// The kept rows no DML node took (a join above dropped them; the node's end).
+pub fn forget_member_rows() {
+    MEMBER_ROWS.with_borrow_mut(|m| {
+        if !m.is_empty() {
+            *m = Default::default();
+        }
+    });
 }
 
 /// The columns a remote UPDATE sets (postgresPlanForeignModify): every column under a BEFORE

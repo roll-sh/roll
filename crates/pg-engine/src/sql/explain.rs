@@ -12187,6 +12187,8 @@ impl Builder<'_, '_> {
             .iter()
             .map(|c| self.pick(names.get(*c).unwrap_or(&Name::same("?")), Cx::Output))
             .collect();
+        // (A locking level's whole-row marks of its relations, after them, wherever it is.)
+        let marks: Vec<String> = f.private.0.mark_rows(f).into_iter().map(|k| format!("{}.*", refs.get(k).cloned().unwrap_or_default())).collect();
         let filter = f.private.0.filter();
         if !filter.is_empty() {
             let texts = filter.iter().map(|e| self.show(e, &names, Cx::Scan)).collect();
@@ -12201,6 +12203,7 @@ impl Builder<'_, '_> {
         if !(self.o.verbose && (addr(p) == self.top || self.level_tops.contains(&addr(p)))) {
             n.fdw_junk.clear();
         }
+        n.fdw_junk.extend(marks);
         Built::passthrough(n, out)
     }
 

@@ -340,7 +340,9 @@ fn key(p: &Plan) -> Option<Keyed> {
             }
             let mut s = s.clone();
             s.with_key = true;
-            let lock = s.mark.take();
+            // (A foreign table's rows are locked by its remote query's locking clause
+            // (postgres_fdw's deparseLockingClause): its scan keeps the lock too.)
+            let lock = if s.table.foreign.is_some() { s.mark } else { s.mark.take() };
             let n = s.table.columns.len();
             let key = Key {
                 col: n,
