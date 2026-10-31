@@ -1143,12 +1143,32 @@ impl Heap {
         xmin: u64,
         mode: &mut InsertMode,
     ) -> Vec<Tid> {
+        let lens: Vec<usize> = rows.iter().map(|r| r.1).collect();
+        let out = self.multi_place(&lens, xmin, mode);
+        for ((k, _), tid) in rows.into_iter().zip(&out) {
+            self.placed(&k, *tid);
+            self.keys.insert(k, *tid);
+        }
+        out
+    }
+
+    /// `insert` of a row only its page needs (a model dropped next, whose pages are
+    /// estimated from it: `sizing::past_model`): no key kept.
+    pub fn insert_unkeyed(&mut self, len: usize, xmin: u64, mode: &mut InsertMode) {
+        let blk = self.get_buffer(len, None, mode.use_fsm, mode.bistate.as_mut(), 1);
+        let xmin = if mode.frozen { 0 } else { xmin };
+        self.put(blk, Self::new_tup(len, xmin), mode.frozen);
+    }
+
+    /// `multi_insert` of rows of these lengths onto their pages, without their keys (as
+    /// `insert_unkeyed`; the pages are the same).
+    pub fn multi_place(&mut self, lens: &[usize], xmin: u64, mode: &mut InsertMode) -> Vec<Tid> {
         let save = self.save_free();
         let pages_needed = |from: usize| {
             let mut avail = BLCKSZ - PAGE_HEADER - save;
             let mut n = 1;
-            for r in &rows[from..] {
-                let sz = ITEM_ID + maxalign(r.1);
+            for &len in &lens[from..] {
+                let sz = ITEM_ID + maxalign(len);
                 if avail < sz {
                     n += 1;
                     avail = BLCKSZ - PAGE_HEADER - save;
@@ -1157,10 +1177,10 @@ impl Heap {
             }
             n
         };
-        let mut out = Vec::with_capacity(rows.len());
+        let mut out = Vec::with_capacity(lens.len());
         let (mut done, mut npages, mut used) = (0, 0, 0);
         let mut empty_start = false;
-        while done < rows.len() {
+        while done < lens.len() {
             if done == 0 || !empty_start {
                 npages = pages_needed(done);
                 used = 0;
@@ -1168,7 +1188,7 @@ impl Heap {
                 used += 1;
             }
             let blk = self.get_buffer(
-                rows[done].1,
+                lens[done],
                 None,
                 mode.use_fsm,
                 mode.bistate.as_mut(),
@@ -1176,8 +1196,8 @@ impl Heap {
             );
             empty_start = self.pages[blk as usize].lps.is_empty();
             let mut n = 0;
-            while done + n < rows.len() {
-                let len = rows[done + n].1;
+            while done + n < lens.len() {
+                let len = lens[done + n];
                 if n > 0 && self.pages[blk as usize].heap_free() < maxalign(len) + save {
                     break;
                 }
@@ -1187,10 +1207,6 @@ impl Heap {
                 n += 1;
             }
             done += n;
-        }
-        for ((k, _), tid) in rows.into_iter().zip(&out) {
-            self.placed(&k, *tid);
-            self.keys.insert(k, *tid);
         }
         out
     }

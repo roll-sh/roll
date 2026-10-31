@@ -1372,15 +1372,17 @@ pub fn put_index_entries(
         .iter()
         .map(|bix| if bix.index.id == 0 { Ok(None) } else { index_values(bix, row, ctx) })
         .collect::<Result<Vec<_>>>()?;
-    put_index_entries_with(t, indexes, &vals, dkey, ctx)
+    put_index_entries_with(t, indexes, &vals, dkey, false, ctx)
 }
 
-/// Write a row's index entries from its index values (one per index).
+/// Write a row's index entries from its index values (one per index). `fresh`: the row's
+/// key was never used before, so neither were its entries' (`Txn::put_fresh`).
 fn put_index_entries_with(
     t: &Table,
     indexes: &[BoundIndex],
     vals: &[Option<Vec<Value>>],
     dkey: &[u8],
+    fresh: bool,
     ctx: &ExecCtx,
 ) -> Result<()> {
     for (bix, vals) in indexes.iter().zip(vals) {
@@ -1397,7 +1399,11 @@ fn put_index_entries_with(
                 let me = ctx.txn.borrow().id;
                 ctx.sess.db.ssi.wrote_entry(me, bix.index.oid, &k);
             }
-            ctx.txn.borrow_mut().put(k, dkey.to_vec())?;
+            if fresh {
+                ctx.txn.borrow_mut().put_fresh(k, dkey.to_vec())?;
+            } else {
+                ctx.txn.borrow_mut().put(k, dkey.to_vec())?;
+            }
         }
     }
     Ok(())
@@ -3447,9 +3453,15 @@ fn store_inserted(
     super::pgstat::count_insert(ctx, t.oid, 1);
     super::pgstat::io_insert(ctx, t, 1, "normal");
     let xid = ctx.txn.borrow_mut().cur_xid();
-    super::toast::put_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
+    // (A row of a table keyed by row ids has a key never used before.)
+    let fresh = t.has_rowid();
+    if fresh {
+        super::toast::put_new_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
+    } else {
+        super::toast::put_row(t, dkey.clone(), &row, xid, tid, &mut ctx.txn.borrow_mut())?;
+    }
     crate::repl::log::insert(t, &row, ctx)?;
-    put_index_entries_with(t, &rules.indexes, &vals.vals, &dkey, ctx)?;
+    put_index_entries_with(t, &rules.indexes, &vals.vals, &dkey, fresh, ctx)?;
     if trigger::wants_after(&rules.triggers, tt::INSERT, ctx) {
         after.push(AfterRow {
             event: tt::INSERT,
@@ -5336,18 +5348,8 @@ pub fn truncate(t: &Arc<Table>, ctx: &ExecCtx) -> Result<()> {
     // (Rows, index entries and out-of-line values.)
     let start = crate::storage::keys::index_prefix(t.oid, 0);
     let end = super::toast::table_end(t.oid);
-    let keys: Vec<Vec<u8>> = ctx
-        .txn
-        .borrow()
-        .scan(&start, &end)
-        .raw()
-        .map(|e| e.map(|(k, _)| k))
-        .collect::<Result<_>>()?;
-    let mut txn = ctx.txn.borrow_mut();
-    for k in keys {
-        txn.delete(k)?;
-    }
-    drop(txn);
+    // (One range deletion, however many rows, entries and values: `storage::rdel`.)
+    ctx.txn.borrow_mut().delete_range(start, end)?;
     super::sizing::truncated(t, &ctx.sess.db);
     super::sizing::indexes_emptied(t, ctx);
     Ok(())

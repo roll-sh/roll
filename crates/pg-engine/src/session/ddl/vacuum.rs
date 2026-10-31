@@ -635,14 +635,18 @@ impl Ddl<'_, '_> {
         let toast = toast && t.toast != 0;
         let old_toast = self.cat.frozen_xids.get(&t.toast).copied().unwrap_or(first);
         let (mut new, mut new_toast) = (oldest, oldest);
-        if !freeze {
+        let measured = self.measured_xmin.take().filter(|m| m.0 == t.oid && m.1 == old);
+        if !freeze && !toast && let Some((_, _, m)) = measured {
+            // (Seen by the measure's pass over the rows.)
+            new = new.min(m);
+        } else if !freeze {
             let start = crate::storage::keys::index_prefix(t.oid, 0);
             let end = crate::storage::keys::prefix_end(&start);
-            let entries: Vec<(Vec<u8>, bytes::Bytes)> = (self.ctx.txn.borrow())
-                .scan(&start, &end)
-                .collect::<Result<_>>()?;
+            // (Read as it goes: a big table's rows aren't held.)
+            let scan = self.ctx.txn.borrow().scan(&start, &end);
             let none = std::collections::HashSet::new();
-            for (_, v) in entries {
+            for r in scan {
+                let (_, v) = r?;
                 let x = crate::exec::scan::row_xmin(&v)?;
                 if main && x >= old && x < new {
                     new = x;
@@ -794,6 +798,27 @@ impl Ddl<'_, '_> {
             return Ok(v.tuples);
         }
         // (ANALYZE measures the indexes too, from the same pass over the rows.)
+        // A table too big to model isn't measured by ANALYZE: its pages are the estimate kept
+        // as it grew (acquire_sample_rows takes the relation's block count), and its tuples
+        // and indexes are counted by the sample's own pass (`analyze_columns`,
+        // `sampled_counts`), as PostgreSQL reads the table once.
+        if !vacuum
+            && crate::exec::sizing::is_estimated(t.oid, &self.ctx.sess.db)
+            && let Some(pages) = crate::exec::sizing::heap_blocks(t, self.ctx)?
+        {
+            let prev = self.cat.relstats.get(&t.oid).cloned();
+            let tuples = prev.as_ref().map_or(-1.0, |s| s.tuples);
+            self.cat.relstats.insert(
+                t.oid,
+                RelStats {
+                    pages: pages as i32,
+                    tuples,
+                    allvisible: prev.as_ref().map_or(0, |s| s.allvisible.min(pages as i32)),
+                    allfrozen: prev.as_ref().map_or(0, |s| s.allfrozen),
+                },
+            );
+            return Ok(tuples);
+        }
         let m = self.measure_rows(t, (!vacuum).then_some(None))?;
         let pages = self.heap_pages(t, &m);
         let tuples = m.rows as f64;
@@ -1255,7 +1280,7 @@ impl Ddl<'_, '_> {
             modelled: Option<u32>,
             tuples: usize,
             /// (sort key, index tuple size), when its pages aren't modelled.
-            keys: Vec<(u64, Vec<u8>, usize)>,
+            keys: Vec<(u128, Vec<u8>, usize)>,
             /// A btree's keys as its model has them, when its pages aren't modelled: sized
             /// by the model's sorted build (`sizing::btree_build_blocks`).
             btree_keys: Option<Vec<Arc<crate::catalog::btsim::Key>>>,
@@ -1319,11 +1344,22 @@ impl Ddl<'_, '_> {
         // (A VACUUM's pages, for its delay points and pg_stat_progress_vacuum.)
         let per_page = self.cat.relstats.get(&t.oid).filter(|s| s.pages > 0).map_or(64, |s| ((s.tuples / s.pages as f64) as usize).max(1));
         let progress = self.ctx.sess.in_vacuum.get().then(|| self.ctx.sess.progress.clone());
+        // (VACUUM: the oldest xmin past the frozen one, for `advance_frozen_xid`, in this pass.)
+        let frozen = self.ctx.sess.in_vacuum.get().then(|| {
+            self.cat.frozen_xids.get(&t.oid).copied().unwrap_or(crate::txn::xids::FIRST_NORMAL_XID)
+        });
+        let mut oldest_xmin = u64::MAX;
         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
         for r in scan {
             self.ctx.check()?;
             let (dkey, bytes) = r?;
             rows += 1;
+            if let Some(old) = frozen {
+                let x = crate::exec::scan::row_xmin(&bytes)?;
+                if x >= old {
+                    oldest_xmin = oldest_xmin.min(x);
+                }
+            }
             if let Some(p) = &progress
                 && rows.is_multiple_of(per_page)
             {
@@ -1353,9 +1389,15 @@ impl Ddl<'_, '_> {
                 if let Some(keys) = &mut ix.btree_keys {
                     keys.push(crate::exec::sizing::btree_key(t, &ix.bix, vals, &row, self.ctx));
                 } else if ix.modelled.is_none() {
-                    let sort = super::table::key_bytes(&vals);
+                    let mut sort = super::table::key_bytes(&vals);
                     vals.extend(ix.bix.index.include.iter().map(|&i| row[i].clone()));
-                    ix.keys.push((key_prefix(&sort), sort, relsize::index_tuple(&ix.types, &vals, &text)));
+                    let prefix = key_prefix(&sort);
+                    // (A key of up to 16 bytes is its prefix: keys are prefix-free, so equal
+                    // prefixes are equal keys, and no copy of it is kept to compare.)
+                    if sort.len() <= 16 {
+                        sort = Vec::new();
+                    }
+                    ix.keys.push((prefix, sort, relsize::index_tuple(&ix.types, &vals, &text)));
                 }
             }
             if modelled.is_none() {
@@ -1382,6 +1424,9 @@ impl Ddl<'_, '_> {
                 sizes.push(relsize::heap_tuple(&types, &row, &text));
             }
         }
+        if let Some(old) = frozen {
+            self.measured_xmin.set(Some((t.oid, old, oldest_xmin)));
+        }
         let (modelled, live) = match modelled {
             Some(n) => (Some(n), n),
             None => (None, relsize::heap_pages(sizes.into_iter())),
@@ -1404,7 +1449,7 @@ impl Ddl<'_, '_> {
                         && ix.types.iter().all(relsize::equal_image)
                         && ix.bix.colls.iter().flatten().all(|k| k.coll.deterministic);
                     let mut sizes = Vec::with_capacity(ix.keys.len());
-                    for group in ix.keys.chunk_by(|a, b| dedup && a.1 == b.1) {
+                    for group in ix.keys.chunk_by(|a, b| dedup && a.0 == b.0 && a.1 == b.1) {
                         relsize::posting_tuples(group[0].2, group.len(), &mut sizes);
                     }
                     relsize::btree_pages(&sizes)
@@ -1459,13 +1504,13 @@ impl Ddl<'_, '_> {
     }
 }
 
-/// A sort key's first 8 bytes, big-endian, zero-padded: ordering by it, then by the whole key,
+/// A sort key's first 16 bytes, big-endian, zero-padded: ordering by it, then by the whole key,
 /// orders keys as the whole key does.
-fn key_prefix(k: &[u8]) -> u64 {
-    let mut b = [0u8; 8];
-    let n = k.len().min(8);
+fn key_prefix(k: &[u8]) -> u128 {
+    let mut b = [0u8; 16];
+    let n = k.len().min(16);
     b[..n].copy_from_slice(&k[..n]);
-    u64::from_be_bytes(b)
+    u128::from_be_bytes(b)
 }
 
 /// A boolean VACUUM option's value (no argument: true).

@@ -4062,12 +4062,14 @@ impl CopyLoad {
 /// of its rows, the free space single inserts fill first), then let go. Only the heap's
 /// pages are placed: the table's model (its TIDs, indexes, TOAST) is dropped next.
 fn past_model(heap: &mut Heap, d: &mut Defer, mode: &mut InsertMode) -> EstHeap {
+    // (The rows' keys aren't kept: the model they would find TIDs in goes.)
     for rows in std::mem::take(&mut d.batches) {
         if d.multi {
-            heap.multi_insert(rows.into_iter().map(|p| (p.key, p.len)).collect(), d.xid, mode);
+            let lens: Vec<usize> = rows.iter().map(|p| p.len).collect();
+            heap.multi_place(&lens, d.xid, mode);
         } else {
             for p in rows {
-                heap.insert(p.key, p.len, d.xid, mode);
+                heap.insert_unkeyed(p.len, d.xid, mode);
             }
         }
     }

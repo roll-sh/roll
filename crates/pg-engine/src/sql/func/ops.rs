@@ -374,11 +374,7 @@ fn int_div(a: &[Value], c: &FnCtx) -> Result<Value> {
     int_result(i(&a[0]) / d, c.ret)
 }
 fn int_mod(a: &[Value], c: &FnCtx) -> Result<Value> {
-    let d = i(&a[1]);
-    if d == 0 {
-        return Err(err!(DIVISION_BY_ZERO, "division by zero"));
-    }
-    int_result(i(&a[0]) % d, c.ret)
+    p_int_mod(&a[0], &a[1], c.ret)
 }
 fn int_neg(a: &[Value], c: &FnCtx) -> Result<Value> {
     int_result(-i(&a[0]), c.ret)
@@ -1407,6 +1403,14 @@ fn p_int_sub(x: &Value, y: &Value, r: &T) -> Result<Value> {
 fn p_int_mul(x: &Value, y: &Value, r: &T) -> Result<Value> {
     int_result(i(x) * i(y), r)
 }
+fn p_int_mod(x: &Value, y: &Value, r: &T) -> Result<Value> {
+    let d = i(y);
+    if d == 0 {
+        return Err(err!(DIVISION_BY_ZERO, "division by zero"));
+    }
+    // (int8 minimum % -1 is 0, as Postgres has it, not an overflow.)
+    int_result(i(x).wrapping_rem(d), r)
+}
 fn p_fl_add(x: &Value, y: &Value, r: &T) -> Result<Value> {
     let (x, y) = (f(x), f(y));
     float_result(x + y, r, x.is_finite() && y.is_finite(), true)
@@ -1486,7 +1490,7 @@ pub fn cmp_op(imp: super::FnImpl) -> Option<fn(Ordering) -> bool> {
 
 /// The pure implementation of built-in `imp`, when it has one.
 pub fn pure(imp: super::FnImpl) -> Option<PureFn> {
-    let table: [(super::FnImpl, PureFn); 27] = [
+    let table: [(super::FnImpl, PureFn); 28] = [
         (dt_eq, p_dt_eq),
         (dt_ne, p_dt_ne),
         (dt_lt, p_dt_lt),
@@ -1508,6 +1512,7 @@ pub fn pure(imp: super::FnImpl) -> Option<PureFn> {
         (int_add, p_int_add),
         (int_sub, p_int_sub),
         (int_mul, p_int_mul),
+        (int_mod, p_int_mod),
         (fl_add, p_fl_add),
         (fl_sub, p_fl_sub),
         (fl_mul, p_fl_mul),

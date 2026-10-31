@@ -209,7 +209,9 @@ fn measured_sizes_from_stored_rows() {
         run(&mut s, "INSERT INTO m2 SELECT g, g % 2 = 0, g % 100, g * 1000, g / 3.0, g / 7.0, date '2000-01-01' + g, timestamp '2000-01-01' + g * interval '1 hour', timestamptz '2000-01-01 00:00+00' + g * interval '1 minute', CASE WHEN g % 5 = 0 THEN NULL ELSE repeat('x', g % 300) END, CASE WHEN g % 3 = 0 THEN NULL ELSE 'v' || g END FROM generate_series(1, 1500) g");
         let sized = pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed);
         run(&mut s, "CREATE INDEX m2_i ON m2 (i);\nCREATE UNIQUE INDEX m2_l ON m2 (l) INCLUDE (t);\nANALYZE m2;\nVACUUM m2");
-        assert!(pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed) >= sized + 4 * 1500, "sized from the stored bytes");
+        // (The two builds and VACUUM measure the rows; ANALYZE of a table too big to model
+        // only samples them.)
+        assert!(pg_engine::storage::row::STORED_SIZES.load(Ordering::Relaxed) >= sized + 3 * 1500, "sized from the stored bytes");
         let pages = rows(&mut s, "SELECT relpages > 0, reltuples FROM pg_class WHERE relname = 'm2'");
         assert_eq!(pages, ["[Bool(true), Float4(1500.0)]"]);
     });
@@ -306,16 +308,17 @@ fn deferred_entry_deletes() {
     let eng = open(dir.path());
     with_max_versions(500, || {
         let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
-        // (Parallel workers don't run under `with_max_versions`: a seq scan of this "big"
-        // table in them counted 42 deleted rows, deferred or not.)
-        run(&mut s, "SET max_parallel_workers_per_gather = 0");
         run(&mut s, "CREATE TABLE dd (id int PRIMARY KEY, a int, t text);
              CREATE INDEX dd_a ON dd (a);
              INSERT INTO dd SELECT g, g % 50, 'v' || g FROM generate_series(1, 3000) g;
              VACUUM ANALYZE dd");
         let queries = ["SELECT count(*) FROM dd", "SELECT a, count(*) FROM dd WHERE a < 10 GROUP BY a ORDER BY a"];
         run(&mut s, "BEGIN;\nDELETE FROM dd WHERE a % 3 = 0;\nINSERT INTO dd VALUES (3, 3, 'again'), (6, 6, 'again')");
+        // (By rows, the count is a parallel scan's: its chunks' bounds once let rows the
+        // transaction deleted come back, `scan::keyed_cuts`.)
+        let started = pg_engine::exec::parscan::started();
         same_both_ways(&mut s, &queries);
+        assert!(pg_engine::exec::parscan::started() > started, "a parallel scan");
         run(&mut s, "SET enable_seqscan = off;\nSET enable_bitmapscan = off");
         assert_eq!(rows(&mut s, "SELECT id, t FROM dd WHERE a = 6 ORDER BY id"), ["[Int4(6), Text(\"again\")]"]);
         run(&mut s, "SAVEPOINT p;\nDELETE FROM dd WHERE a = 1;\nROLLBACK TO p;\nDELETE FROM dd WHERE a = 2");
@@ -385,5 +388,32 @@ fn estimate_kept_across_restart() {
         let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
         assert_eq!(rows(&mut s, explain), before);
         assert_eq!(rows(&mut s, "SELECT pg_relation_size('est')"), size);
+    });
+}
+
+/// ANALYZE of a table too big to model, with more pages than its sample takes: only the
+/// sampled pages' rows are read (`Ddl::rowid_blocks`), its tuples estimated from them as
+/// PostgreSQL estimates them, near the count; its pages are the estimate it had; the
+/// statistics come from the sample.
+#[test]
+fn analyze_samples_pages_of_big_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        run(&mut s, "CREATE TABLE sa (id int, a int, t text);
+             INSERT INTO sa SELECT g, g % 10, repeat('x', 100) FROM generate_series(1, 40000) g;
+             DELETE FROM sa WHERE id % 4 = 0;
+             SET default_statistics_target = 1;
+             ANALYZE sa");
+        let r = rows(&mut s, "SELECT relpages, reltuples FROM pg_class WHERE relname = 'sa'");
+        let v: Vec<f64> = r[0]
+            .trim_matches(|c| c == '[' || c == ']')
+            .split(", ")
+            .map(|x| x.trim_end_matches(')').rsplit('(').next().unwrap().parse().unwrap())
+            .collect();
+        assert!(v[0] > 300.0, "{r:?}");
+        assert!((v[1] - 30000.0).abs() < 3000.0, "{r:?}");
+        assert_eq!(rows(&mut s, "SELECT n_distinct FROM pg_stats WHERE tablename = 'sa' AND attname = 'a'"), ["[Float4(10.0)]"]);
     });
 }

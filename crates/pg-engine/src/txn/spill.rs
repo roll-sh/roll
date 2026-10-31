@@ -36,14 +36,27 @@ pub(crate) const LATEST: u64 = u64::MAX >> 1;
 /// O(log n) times; a scan reads every run).
 const MERGE_FAN: usize = 4;
 
+/// The fan of runs that are linked at commit (`take_linkable`): merging them would write
+/// again what linking saves writing, so more of them are read side by side first.
+const LINKED_MERGE_FAN: usize = 16;
+
 pub(crate) struct Runs {
     dir: PathBuf,
     next_id: u64,
     cache: Arc<BlockCache>,
-    /// Oldest first, each with its tier.
-    files: Vec<(Arc<SstReader>, u32)>,
+    /// Oldest first, each with its tier and whether it can be linked into the store as it
+    /// is at commit (`take_linkable`): every key in it written once in the whole
+    /// transaction, by a write of a key nothing held before (`Txn::put_fresh`).
+    files: Vec<(Arc<SstReader>, u32, bool)>,
     /// The files newest first, as the store reads its sources.
     view: Arc<View>,
+    /// The transaction's range deletions (`Txn::delete_range`), at their journal places:
+    /// versions before one in its range are gone as of it.
+    rdels: Vec<crate::storage::rdel::RangeDel>,
+    /// Each file's keys (by file id) as ranges, one per index or table they are in: what
+    /// `invalidate` and `take_linkable` test writes against (a run's whole range spans every
+    /// table in between).
+    segs: std::collections::HashMap<u64, Vec<(Vec<u8>, Vec<u8>)>>,
 }
 
 /// A run value: a tag (bit 0: a value follows, bit 1: a command id follows), the command
@@ -77,6 +90,16 @@ impl Runs {
             cache: BlockCache::new(8 << 20),
             files: Vec::new(),
             view: View::of_files(Vec::new()),
+            rdels: Vec::new(),
+            segs: Default::default(),
+        }
+    }
+
+    /// The transaction's range deletions now (`rdels`).
+    pub fn set_rdels(&mut self, rdels: &[crate::storage::rdel::RangeDel]) {
+        if self.rdels != rdels {
+            self.rdels = rdels.to_vec();
+            self.reset_view();
         }
     }
 
@@ -85,25 +108,28 @@ impl Runs {
         self.files.iter().map(|f| f.0.meta.entries as usize).sum()
     }
 
-    /// Write a run of `versions`: in key order, a key's newest first.
-    pub fn write(&mut self, versions: &mut dyn Iterator<Item = (Vec<u8>, Ent)>) -> Result<()> {
+    /// Write a run of `versions`: in key order, a key's newest first. `linkable`: each
+    /// key's one version anywhere in the transaction (`files`).
+    pub fn write(&mut self, versions: &mut dyn Iterator<Item = (Vec<u8>, Ent)>, linkable: bool) -> Result<()> {
         let Some(f) = self.write_file(&mut versions.map(Ok))? else {
             return Ok(());
         };
-        self.files.push((f, 0));
+        self.files.push((f, 0, linkable));
         loop {
             let n = self.files.len();
             let level = self.files[n - 1].1;
-            if n < MERGE_FAN || self.files[n - MERGE_FAN..].iter().any(|f| f.1 != level) {
+            let fan = if self.files[n - 1].2 { LINKED_MERGE_FAN } else { MERGE_FAN };
+            if n < fan || self.files[n - fan..].iter().any(|f| f.1 != level || f.2 != self.files[n - 1].2) {
                 break;
             }
-            let tail: Vec<RawIter> = self.files[n - MERGE_FAN..]
+            let tail: Vec<RawIter> = self.files[n - fan..]
                 .iter()
                 .map(|f| RawIter::new(f.0.clone(), |_| true))
                 .collect();
+            let linkable = self.files[n - fan..].iter().all(|f| f.2);
             let merged = self.write_file(&mut merge(tail))?;
-            self.files.truncate(n - MERGE_FAN);
-            self.files.extend(merged.map(|m| (m, level + 1)));
+            self.files.truncate(n - fan);
+            self.files.extend(merged.map(|m| (m, level + 1, linkable)));
         }
         self.reset_view();
         Ok(())
@@ -118,6 +144,7 @@ impl Runs {
         self.next_id += 1;
         let mut w = SstWriter::create_temp(&self.dir, id)?;
         let mut val = Vec::new();
+        let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         for item in versions {
             let (k, e) = match item {
                 Ok(x) => x,
@@ -131,6 +158,11 @@ impl Runs {
                 w.abandon();
                 return Err(err);
             }
+            // (The table's and index's ids: 8 bytes.)
+            match segs.last_mut() {
+                Some(g) if g.0.get(..8) == k.get(..8) => g.1 = k,
+                _ => segs.push((k.clone(), k)),
+            }
         }
         if w.entries() == 0 {
             w.abandon();
@@ -140,33 +172,82 @@ impl Runs {
         let r = SstReader::open(&self.dir, meta, self.cache.clone())?;
         // (Deleted when the last reader drops it: the run is replaced or the transaction ends.)
         r.mark_obsolete();
+        self.segs.insert(r.meta.id, segs);
         Ok(Some(Arc::new(r)))
     }
 
     fn reset_view(&mut self) {
-        self.view = View::of_files(self.files.iter().rev().map(|f| f.0.clone()).collect());
+        self.view = View::of_files_with(self.files.iter().rev().map(|f| f.0.clone()).collect(), self.rdels.clone());
     }
 
     /// Drop every version past `mark` (ROLLBACK TO a savepoint taken before a spill): runs
     /// wholly past it go, one straddling it is rewritten without them.
     pub fn truncate(&mut self, mark: u64) -> Result<()> {
         let mut kept = Vec::with_capacity(self.files.len());
-        for (f, level) in self.files.clone() {
+        for (f, level, linkable) in self.files.clone() {
             if f.meta.min_ts > mark {
                 continue;
             }
             if f.meta.max_ts <= mark {
-                kept.push((f, level));
+                kept.push((f, level, linkable));
                 continue;
             }
             let mut it = RawIter::new(f, move |ts| ts <= mark);
             // (On an error the runs stay as they were.)
             let rest = self.write_file(&mut std::iter::from_fn(|| it.next_entry().transpose()))?;
-            kept.extend(rest.map(|r| (r, level)));
+            kept.extend(rest.map(|r| (r, level, linkable)));
         }
         self.files = kept;
         self.reset_view();
         Ok(())
+    }
+
+    /// A write of `key` that isn't fresh: no run holding a key around it is linked.
+    pub fn invalidate(&mut self, key: &[u8]) {
+        self.invalidate_range(key, &[]);
+    }
+
+    /// `invalidate` of every key in [start, end] (an empty `end`: `start` alone).
+    pub fn invalidate_range(&mut self, start: &[u8], end: &[u8]) {
+        let end = if end.is_empty() { start } else { end };
+        for f in self.files.iter_mut().filter(|f| f.2) {
+            if self.segs.get(&f.0.meta.id).is_none_or(|g| g.iter().any(|(a, b)| a.as_slice() <= end && start <= b.as_slice())) {
+                tracing::debug!(key = ?start, "a run can't be linked: its key range written again");
+                f.2 = false;
+            }
+        }
+    }
+
+    /// The runs linked into the store as they are at commit (`files`), taken out of these.
+    /// (As a check, none whose keys' range another run or the buffer, `held`, writes in.)
+    pub fn take_linkable(&mut self, held: impl Fn(&[u8], &[u8]) -> bool) -> (Vec<Arc<SstReader>>, Vec<u32>) {
+        let none = Vec::new();
+        let segs = |f: &SstReader| self.segs.get(&f.meta.id).unwrap_or(&none);
+        let others: Vec<&(Vec<u8>, Vec<u8>)> = self.files.iter().filter(|f| !f.2).flat_map(|f| segs(&f.0)).collect();
+        let keep: Vec<bool> = self
+            .files
+            .iter()
+            .map(|f| {
+                f.2 && !segs(&f.0).is_empty()
+                    && segs(&f.0).iter().all(|(a, b)| !held(a, b) && !others.iter().any(|(x, y)| x <= b && a <= y))
+            })
+            .collect();
+        for (f, k) in self.files.iter_mut().zip(keep) {
+            f.2 = k;
+        }
+        let (linked, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.files).into_iter().partition(|f| f.2);
+        tracing::debug!(linked = linked.len(), merged = kept.len(), "runs at commit");
+        self.files = kept;
+        self.reset_view();
+        // (The tables their keys are in: what `watch` drops structures of.)
+        let mut tables: Vec<u32> = linked
+            .iter()
+            .flat_map(|f| self.segs.get(&f.0.meta.id).into_iter().flatten())
+            .filter_map(|(k, _)| k.get(..4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])))
+            .collect();
+        tables.sort_unstable();
+        tables.dedup();
+        (linked.into_iter().map(|f| f.0).collect(), tables)
     }
 
     /// The newest version of `key` at `mark`: (value, command id); None: not written.

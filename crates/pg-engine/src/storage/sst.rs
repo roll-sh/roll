@@ -98,6 +98,11 @@ pub struct SstMeta {
     pub last_key: Vec<u8>,
     pub min_ts: u64,
     pub max_ts: u64,
+    /// A transaction's spilled run linked in as its commit's file (`Store::commit_sorted`):
+    /// every entry is a version at this commit ts, whatever the run's keys say (format 2;
+    /// files without it are read as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_ts: Option<u64>,
 }
 
 mod hex_bytes {
@@ -377,6 +382,7 @@ impl SstWriter {
                 self.min_ts
             },
             max_ts: self.max_ts,
+            commit_ts: None,
         })
     }
 
@@ -761,6 +767,55 @@ impl Expanded {
     }
 }
 
+/// Replace a storage key's version with `ts`.
+pub fn set_ts(key: &mut [u8], ts: u64) {
+    let n = key.len();
+    if n >= 8 {
+        key[n - 8..].copy_from_slice(&(!ts).to_be_bytes());
+    }
+}
+
+/// A block of a linked run (`SstMeta::commit_ts`) in the store's format: every key's version
+/// is the commit's, and the run's values (a tag, the command id, the value: `txn::spill`)
+/// are plain ones, a delete a tombstone. (A linked run has one version of each key.)
+fn relink(raw: &[u8], ts: u64) -> Result<Bytes> {
+    let mut out = Vec::with_capacity(raw.len());
+    let (mut key, mut prev) = (Vec::new(), Vec::new());
+    let (mut pos, mut n) = (0usize, 0usize);
+    while pos < raw.len() {
+        let (shared, unshared, vl) = entry_head(raw, &mut pos)?;
+        key.truncate(shared);
+        key.extend_from_slice(raw.get(pos..pos + unshared).ok_or_else(|| internal("truncated sst entry"))?);
+        pos += unshared;
+        let value = if vl == 0 {
+            None
+        } else {
+            let v = raw.get(pos..pos + vl - 1).ok_or_else(|| internal("truncated sst entry"))?;
+            pos += vl - 1;
+            let tag = *v.first().ok_or_else(|| internal("a run value without its tag"))?;
+            let at = if tag & 2 != 0 { 5 } else { 1 };
+            (tag & 1 != 0).then(|| &v[at.min(v.len())..])
+        };
+        let mut k = key.clone();
+        set_ts(&mut k, ts);
+        let sh = if n.is_multiple_of(RESTART) {
+            0
+        } else {
+            prev.iter().zip(&k).take_while(|(a, b)| a == b).count()
+        };
+        put_varint(&mut out, sh as u64);
+        put_varint(&mut out, (k.len() - sh) as u64);
+        put_varint(&mut out, value.map_or(0, |v| v.len() as u64 + 1));
+        out.extend_from_slice(&k[sh..]);
+        if let Some(v) = value {
+            out.extend_from_slice(v);
+        }
+        prev = k;
+        n += 1;
+    }
+    Ok(Bytes::from(out))
+}
+
 impl SstReader {
     pub fn open(dir: &Path, meta: SstMeta, cache: Arc<BlockCache>) -> Result<SstReader> {
         let path = sst_path(dir, meta.id);
@@ -784,7 +839,10 @@ impl SstReader {
         let mut index = Vec::with_capacity(n);
         for _ in 0..n {
             let kl = get_varint(&index_buf, &mut pos)? as usize;
-            let k = index_buf[pos..pos + kl].to_vec();
+            let mut k = index_buf[pos..pos + kl].to_vec();
+            if let Some(ts) = meta.commit_ts {
+                set_ts(&mut k, ts);
+            }
             pos += kl;
             let off = get_varint(&index_buf, &mut pos)?;
             let l = get_varint(&index_buf, &mut pos)? as u32;
@@ -802,6 +860,10 @@ impl SstReader {
             cache_id,
             obsolete: AtomicBool::new(false),
         })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Delete the file once the last reader drops it.
@@ -862,6 +924,10 @@ impl SstReader {
                 )
             }
             _ => return Err(internal("unknown block compression")),
+        };
+        let raw = match self.meta.commit_ts {
+            Some(ts) => relink(&raw, ts)?,
+            None => raw,
         };
         let block = Arc::new(Block::decode(raw)?);
         if fill {

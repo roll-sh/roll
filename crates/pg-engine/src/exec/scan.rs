@@ -3025,6 +3025,43 @@ fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     (if n == 0 { 0 } else { (n + 1).min(8) }, pool.max(n + 1))
 }
 
+/// A parallel scan's chunk boundaries in [start, end): `split_keys`' cuts moved onto the
+/// keys there are (ascending, each once). A cut made of interpolated bytes can extend a
+/// key: the store bounds its sources by keys with their versions appended, the transaction
+/// its own writes by keys alone, so such a key went to the chunk after the cut from the
+/// store and its own write (a delete) to the chunk before: deleted rows came back. A key
+/// itself never extends another (keys are prefix-free), so both agree on it. `fixed`: every
+/// key in the range is as long as `fixed`'s (a table's rows by row id): a cut cut to that length
+/// extends none, and no key is looked up.
+fn keyed_cuts(
+    txn: &crate::txn::Txn,
+    cuts: Vec<Vec<u8>>,
+    start: &[u8],
+    end: &[u8],
+    snap: &crate::txn::Snap,
+    fixed: Option<usize>,
+) -> Result<Vec<Vec<u8>>> {
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(cuts.len());
+    if let Some(n) = fixed {
+        for mut c in cuts {
+            c.truncate(n);
+            if c.as_slice() > start && c.as_slice() < end && out.last().is_none_or(|l| *l < c) {
+                out.push(c);
+            }
+        }
+        return Ok(out);
+    }
+    for c in cuts {
+        let Some((k, _)) = txn.scan_snap(&c, end, snap).next().transpose()? else {
+            break;
+        };
+        if k.as_slice() > start && out.last().is_none_or(|l| *l < k) {
+            out.push(k);
+        }
+    }
+    Ok(out)
+}
+
 impl ScanNode {
     /// A sequential scan of a big table (its heap not modelled: rows in storage order)
     /// read by worker threads, when nothing it does needs this thread per row.
@@ -3145,8 +3182,11 @@ impl ScanNode {
             let (Some(lo), Some(hi)) = (lo, hi) else {
                 return Ok(None);
             };
-            // (An inline scan's chunks bound the rows it holds at a time.)
-            let cuts = split_keys(&lo, &hi, if inline { INLINE_CHUNKS } else { ParScan::chunks(workers) });
+            // (An inline scan's chunks bound the rows it holds at a time. A table's rows by
+            // row id: keys of one length.)
+            let fixed = (p.table.has_rowid() && lo.len() == hi.len()).then_some(lo.len());
+            let n = if inline { INLINE_CHUNKS } else { ParScan::chunks(workers) };
+            let cuts = keyed_cuts(&txn, split_keys(&lo, &hi, n), &start, &end, &snap, fixed)?;
             if cuts.is_empty() && !inline {
                 return Ok(None);
             }
@@ -3263,7 +3303,7 @@ impl ScanNode {
         let (Some(lo), Some(hi)) = (lo, hi) else {
             return Ok(None);
         };
-        let cuts = split_keys(&lo, &hi, ParScan::chunks(workers));
+        let cuts = keyed_cuts(&txn, split_keys(&lo, &hi, ParScan::chunks(workers)), &start, &end, &snap, None)?;
         if cuts.is_empty() {
             return Ok(None);
         }

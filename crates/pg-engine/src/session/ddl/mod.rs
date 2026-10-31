@@ -256,6 +256,10 @@ pub(crate) struct Ddl<'c, 'a> {
     /// (AttachPartitionEnsureIndexes): an invalid one isn't taken. (CREATE INDEX on the
     /// parent takes it, and is invalid itself then.)
     pub attaching: bool,
+    /// The oldest row xmin at or past the table's frozen xid that VACUUM's measure of it saw:
+    /// (table, that frozen xid, the xmin; u64::MAX: none), so `advance_frozen_xid` doesn't
+    /// read the table again.
+    pub measured_xmin: std::cell::Cell<Option<(u32, u64, u64)>>,
 }
 
 impl<'c, 'a> Ddl<'c, 'a> {
@@ -281,6 +285,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
             combined_types: None,
             attaching: false,
             lock_nowait: false,
+            measured_xmin: Default::default(),
         }
     }
 

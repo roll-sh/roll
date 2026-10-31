@@ -74,6 +74,15 @@ impl Watch {
 
     /// A commit too big to log (a spilled transaction's) writes `key`: its table's
     /// structures are dropped.
+    /// A commit changes `table`'s rows without listing them (a range deletion, runs linked
+    /// in as they are: `storage::rdel`, `spill::Runs::take_linkable`): its structures are
+    /// dropped (rebuilt when next needed).
+    pub fn committing_table(&self, table: u32) {
+        if self.any.load(Ordering::Acquire) && table != 0 {
+            self.tables.lock().remove(&table);
+        }
+    }
+
     pub fn committing_unlogged(&self, key: &[u8]) {
         if self.any.load(Ordering::Acquire)
             && let Some(t) = table_of(key)

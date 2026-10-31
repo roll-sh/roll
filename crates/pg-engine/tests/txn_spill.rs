@@ -111,11 +111,85 @@ const SCRIPT: &[&str] = &[
     "INSERT INTO t VALUES (30001, 'dup', 0)",
     "ROLLBACK",
     "SELECT count(*) FROM t WHERE id >= 30000",
+    // TRUNCATE and DROP TABLE (range deletions): the transaction's own writes before them,
+    // savepoints around them, writes after them.
+    "BEGIN",
+    "INSERT INTO t SELECT g, 'w', 1 FROM generate_series(40000, 42000) g",
+    "SAVEPOINT tr",
+    "TRUNCATE t",
+    "SELECT count(*) FROM t",
+    "INSERT INTO t SELECT g, 'after', 2 FROM generate_series(1, 1500) g",
+    "SET enable_seqscan = off",
+    "SELECT count(*) FROM t WHERE n = 2",
+    "SELECT id, v FROM t WHERE id = 7",
+    "RESET enable_seqscan",
+    "ROLLBACK TO tr",
+    "SELECT count(*), sum(n) FROM t",
+    "TRUNCATE t",
+    "INSERT INTO t SELECT g, 'kept', g % 5 FROM generate_series(1, 2500) g",
+    "SELECT count(*), sum(id) FROM t",
+    "SELECT id, v FROM t ORDER BY id DESC LIMIT 2",
+    "COMMIT",
+    "SELECT count(*), sum(id), sum(n) FROM t",
+    "CREATE TABLE t2 AS SELECT g AS id FROM generate_series(1, 3000) g",
+    "BEGIN",
+    "DROP TABLE t2",
+    "ROLLBACK",
+    "SELECT count(*) FROM t2",
+    "DROP TABLE t2",
+    "CREATE TABLE t2 (id int)",
+    "INSERT INTO t2 VALUES (1)",
+    "SELECT count(*) FROM t2",
+    // New rows of a table without indexes, and an index build: their runs are linked into
+    // the commits as they are.
+    "CREATE TABLE b (id int, v text)",
+    "INSERT INTO b SELECT g, repeat('b', 40) || g FROM generate_series(1, 5000) g",
+    "CREATE INDEX b_v ON b (v)",
+    "SET enable_seqscan = off",
+    "SELECT id FROM b WHERE v = repeat('b', 40) || 4321",
+    "RESET enable_seqscan",
+    "SELECT count(*), sum(id), sum(length(v)) FROM b",
+    // Values stored out of line go with their rows' range.
+    "CREATE TABLE tv (id int, v text)",
+    "INSERT INTO tv SELECT g, repeat(md5(g::text), 300) FROM generate_series(1, 40) g",
+    "BEGIN",
+    "TRUNCATE tv",
+    "INSERT INTO tv VALUES (1, repeat('z', 9000))",
+    "SELECT count(*), sum(length(v)) FROM tv",
+    "ROLLBACK",
+    "SELECT count(*), sum(length(v)), min(left(v, 3)) FROM tv",
+    "TRUNCATE tv",
+    "INSERT INTO tv VALUES (2, repeat('y', 9000))",
+    "SELECT count(*), sum(length(v)), min(left(v, 3)) FROM tv",
+    // A small table scanned whole again and again (a hot range: `storage::hot`), truncated
+    // in a transaction and for good.
+    "CREATE TABLE h (id int, v int)",
+    "INSERT INTO h SELECT g, g FROM generate_series(1, 10) g",
+    "SELECT sum(v) FROM h", "SELECT sum(v) FROM h", "SELECT sum(v) FROM h", "SELECT sum(v) FROM h",
+    "SELECT sum(v) FROM h", "SELECT sum(v) FROM h", "SELECT sum(v) FROM h", "SELECT sum(v) FROM h",
+    "SELECT sum(v) FROM h", "SELECT sum(v) FROM h",
+    "UPDATE h SET v = v + 1 WHERE id = 1",
+    "BEGIN",
+    "TRUNCATE h",
+    "SELECT count(*) AS truncated_here FROM h",
+    "INSERT INTO h VALUES (11, 100)",
+    "SELECT sum(v) AS after_insert FROM h",
+    "ROLLBACK",
+    "SELECT sum(v) AS rolled_back FROM h",
+    "TRUNCATE h",
+    "SELECT count(*) AS truncated FROM h",
+    "INSERT INTO h VALUES (12, 7)",
+    "SELECT sum(v) AS refilled FROM h", "SELECT sum(v) AS refilled FROM h",
 ];
 
 const AFTER_REOPEN: &[&str] = &[
     "SELECT count(*), sum(id), sum(length(v)), sum(n) FROM t",
     "SELECT count(*) FROM t WHERE n = 3",
+    "SELECT count(*) FROM t2",
+    "SELECT count(*), sum(id), sum(length(v)) FROM b",
+    "SET enable_seqscan = off",
+    "SELECT id, v FROM b WHERE v = repeat('b', 40) || 77",
+    "SELECT count(*), sum(length(v)), min(left(v, 3)) FROM tv",
 ];
 
 fn script_on(dir: &std::path::Path, spill: usize) -> Vec<String> {
@@ -142,14 +216,32 @@ fn spilled_transactions_read_like_buffered_ones() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     let before = TXN_SPILLS.load(Ordering::Relaxed);
+    let linked = pg_engine::storage::LINKED_RUNS.load(Ordering::Relaxed);
     let spilled = script_on(a.path(), 2048);
     let spills = TXN_SPILLS.load(Ordering::Relaxed) - before;
+    // (Runs of new rows and of index builds go into their commits as they are.)
+    let linked = pg_engine::storage::LINKED_RUNS.load(Ordering::Relaxed) - linked;
+    assert!(linked > 10, "{linked} runs linked");
     let buffered = script_on(b.path(), 0);
     assert!(spills > 100, "only {spills} spills");
     for (x, y) in spilled.iter().zip(&buffered) {
         assert_eq!(x, y);
     }
     assert_eq!(spilled.len(), buffered.len());
+    let line = |q: &str| spilled.iter().find(|l| l.starts_with(&format!("{q} =>"))).unwrap().clone();
+    assert!(line("SELECT count(*) FROM t WHERE n = 2").contains("Int8(1500)"));
+    assert!(line("SELECT count(*), sum(id), sum(n) FROM t").contains("[Int8(2500), Int8(3126250), Int8(5000)]"));
+    assert!(line("SELECT count(*) FROM t2").contains("Int8(3000)"));
+    assert!(line("SELECT id FROM b WHERE v = repeat('b', 40) || 4321").contains("Int4(4321)"));
+    assert!(line("SELECT count(*), sum(length(v)), min(left(v, 3)) FROM tv").contains("[Int8(40), Int8(384000)"));
+    assert!(line("SELECT count(*) AS truncated_here FROM h").contains("Int8(0)"));
+    assert!(line("SELECT sum(v) AS after_insert FROM h").contains("Int8(100)"));
+    assert!(line("SELECT sum(v) AS rolled_back FROM h").contains("Int8(56)"));
+    assert!(line("SELECT count(*) AS truncated FROM h").contains("Int8(0)"));
+    assert!(line("SELECT sum(v) AS refilled FROM h").contains("Int8(7)"));
+    let after = &spilled[spilled.len() - 2];
+    assert!(after.contains("Int4(77)"), "{after}");
+    assert!(spilled.last().unwrap().contains("[Int8(1), Int8(9000), Text(\"yyy\")]"), "{:?}", spilled.last());
     // Only the two duplicate keys fail.
     let errors: Vec<_> = spilled.iter().filter(|l| l.contains("=> ERROR")).collect();
     assert_eq!(errors.len(), 2, "{errors:#?}");

@@ -327,7 +327,7 @@ impl Txn {
 
     /// COMMIT PREPARED: its state record goes in the commit of its writes.
     pub fn remove_state_record(&mut self, gid: &str) {
-        self.record(record_key(gid), None);
+        self.record(record_key(gid), None, false);
     }
 
     /// The checks a commit makes that a prepared transaction's commit mustn't fail on, run
@@ -343,7 +343,7 @@ impl Txn {
             return Err(e);
         }
         if self.isolation.txn_snapshot() {
-            for k in self.writes_in(&[], ALL_END)?.keys().filter(|k| k.as_slice() != super::CATALOG_KEY) {
+            for k in self.writes_in(&[], ALL_END)?.keys().filter(|k| k.as_slice() != super::CATALOG_KEY && !crate::storage::rdel::is_marker(k)) {
                 if self.db.store.latest_version_ts(k)?.is_some_and(|ts| ts > self.start_ts) {
                     return Err(Error::new(
                         code::SERIALIZATION_FAILURE,
@@ -496,7 +496,7 @@ pub fn recover(db: &Arc<Database>, b: &[u8]) -> Result<Option<(Info, Txn)>> {
     for _ in 0..d.u64()? {
         let k = d.bytes()?.to_vec();
         let v = d.opt_bytes()?.map(Bytes::copy_from_slice);
-        t.record(k, v);
+        t.record(k, v, false);
     }
     let id = t.id;
     let none = AtomicBool::new(false);
@@ -547,7 +547,7 @@ pub fn recover(db: &Arc<Database>, b: &[u8]) -> Result<Option<(Info, Txn)>> {
         t.catalog = Some(Arc::new(mine));
         t.catalog_base = Some(cur.version);
         t.catalog_base_cat = Some(cur);
-        t.record(super::CATALOG_KEY.to_vec(), Some(Bytes::new()));
+        t.record(super::CATALOG_KEY.to_vec(), Some(Bytes::new()), false);
     }
     if d.u8()? != 0 {
         let mut locks = Vec::new();

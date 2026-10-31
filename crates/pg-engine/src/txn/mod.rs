@@ -438,6 +438,8 @@ impl Database {
             entry_deletes: Vec::new(),
             entry_deletes_bytes: 0,
             entry_deletes_direct: None,
+            rdels: Vec::new(),
+            gen_fresh: true,
         }
     }
 
@@ -943,6 +945,12 @@ pub struct Txn {
     entry_deletes_bytes: usize,
     /// How the statement's earlier batch of them went in (true: as a run).
     entry_deletes_direct: Option<bool>,
+    /// Key ranges it deleted whole (`delete_range`), each at its marker write's journal
+    /// place: older versions in the range, its own and the store's, are gone from there on.
+    rdels: Vec<crate::storage::rdel::RangeDel>,
+    /// Every write since the last spill was fresh (`put_fresh`): the buffer's next run can
+    /// be linked into the store at commit (`spill::Runs::take_linkable`).
+    gen_fresh: bool,
 }
 
 impl Txn {
@@ -1267,7 +1275,7 @@ impl Txn {
             self.catalog_base_cat = Some(base);
         }
         c.bump();
-        self.record(CATALOG_KEY.to_vec(), Some(Bytes::new()));
+        self.record(CATALOG_KEY.to_vec(), Some(Bytes::new()), false);
         self.wrote = true;
         c.freeze();
         self.catalog = Some(Arc::new(c));
@@ -1324,7 +1332,7 @@ impl Txn {
     }
 
     fn buffer(&mut self, key: Vec<u8>, value: Option<Bytes>) {
-        self.record(key, value);
+        self.record(key, value, false);
         self.wrote = true;
         self.cur_xid();
     }
@@ -1335,7 +1343,18 @@ impl Txn {
     }
 
     /// Put a write in the buffer, stamped with the current command id, and journal it.
-    fn record(&mut self, key: Vec<u8>, value: Option<Bytes>) {
+    /// `fresh`: a key no version of which exists anywhere (`put_fresh`); any other write
+    /// keeps the runs around its key from being linked at commit.
+    fn record(&mut self, key: Vec<u8>, value: Option<Bytes>, fresh: bool) {
+        if !fresh {
+            if self.gen_fresh {
+                tracing::debug!(key = ?key, "a write that isn't fresh: the buffer's next run won't be linked");
+            }
+            self.gen_fresh = false;
+            if let Some(r) = &mut self.runs {
+                r.invalidate(&key);
+            }
+        }
         self.buf_bytes += 2 * key.len() + value.as_ref().map_or(0, |v| v.len()) + 120;
         let ent = Ent {
             v: value,
@@ -1368,8 +1387,9 @@ impl Txn {
             .filter_map(|(k, prev)| prev.clone().map(|e| (k.clone(), e)))
             .collect();
         older.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.ts.cmp(&a.1.ts)));
+        let no_older = older.is_empty();
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = self.runs.get_or_insert_with(|| Box::new(Runs::new(dir)));
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
         // Each key's newest version (the buffer's) before its older ones (the journal's).
         let mut cur = self.writes.iter().peekable();
         let mut old = older.into_iter().peekable();
@@ -1386,7 +1406,8 @@ impl Txn {
                 old.next()
             }
         });
-        runs.write(&mut versions)?;
+        runs.write(&mut versions, self.gen_fresh && no_older)?;
+        self.gen_fresh = true;
         self.journal_base = self.position();
         // (Its room kept: the buffer fills again as it did.)
         self.journal.clear();
@@ -1403,11 +1424,83 @@ impl Txn {
         }
     }
 
+    /// The runs, made now if there are none yet.
+    fn runs_in<'a>(
+        runs: &'a mut Option<Box<Runs>>,
+        dir: std::path::PathBuf,
+        rdels: &[crate::storage::rdel::RangeDel],
+    ) -> &'a mut Runs {
+        runs.get_or_insert_with(|| {
+            let mut r = Box::new(Runs::new(dir));
+            r.set_rdels(rdels);
+            r
+        })
+    }
+
+    /// `runs_get`, a key in a range this transaction deleted as of `mark` reading as its
+    /// delete (it writes no older version there).
+    fn runs_get_cov(&self, key: &[u8], mark: u64) -> Result<Option<(Option<Bytes>, Option<u32>)>> {
+        match self.runs_get(key, mark)? {
+            Some(w) => Ok(Some(w)),
+            None => Ok(self.own_covers(key, mark).then_some((None, None))),
+        }
+    }
+
+    /// Whether `key` lies in a range this transaction deleted as of journal mark `mark`.
+    fn own_covers(&self, key: &[u8], mark: u64) -> bool {
+        self.rdels.iter().any(|r| r.ts <= mark && r.contains(key))
+    }
+
+    /// The ranges in [start, end) this transaction deleted as of `mark`: what its reads of
+    /// the store leave out (`Scan::excluding`).
+    fn own_excluded(&self, start: &[u8], end: &[u8], mark: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.rdels
+            .iter()
+            .filter(|r| r.ts <= mark && r.overlaps(start, end))
+            .map(|r| (r.start.clone(), r.end.clone()))
+            .collect()
+    }
+
+    /// Delete every key in [start, end) (TRUNCATE, DROP TABLE): one marker write that the
+    /// store applies to the whole range at commit (`storage::rdel`) instead of a delete per
+    /// key. Its own buffered writes in the range go (journaled, for savepoints and
+    /// snapshots); its spilled ones and the store's are hidden from the marker's place on.
+    pub fn delete_range(&mut self, start: Vec<u8>, end: Vec<u8>) -> Result<()> {
+        if self.read_only && !self.temp_key(&start) {
+            bail!(
+                READ_ONLY_SQL_TRANSACTION,
+                "cannot execute this statement in a read-only transaction"
+            );
+        }
+        let gone: Vec<Vec<u8>> = self
+            .writes
+            .range::<[u8], _>((Bound::Included(start.as_slice()), Bound::Excluded(end.as_slice())))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in gone {
+            let prev = self.writes.remove(&k);
+            self.buf_bytes += k.len() + 120;
+            self.journal.push((k, prev));
+        }
+        let marker = crate::storage::rdel::marker_key(&start);
+        let ts = self.position() as u64 + 1;
+        self.buffer(marker, Some(Bytes::from(end.clone())));
+        if let Some(r) = &mut self.runs {
+            // (What it hides of a run would come back if the run were linked as it is.)
+            r.invalidate_range(&start, &end);
+        }
+        self.rdels.push(crate::storage::rdel::RangeDel { start, end, ts });
+        if let Some(r) = &mut self.runs {
+            r.set_rdels(&self.rdels);
+        }
+        self.maybe_spill()
+    }
+
     /// This transaction's latest write of `key`: (value, command id); None: it wrote none.
     fn buf_get(&self, key: &[u8]) -> Result<Option<(Option<Bytes>, Option<u32>)>> {
         match self.writes.get(key) {
             Some(e) => Ok(Some((e.v.clone(), e.cid))),
-            None => self.runs_get(key, LATEST),
+            None => self.runs_get_cov(key, LATEST),
         }
     }
 
@@ -1584,7 +1677,7 @@ impl Txn {
 
     /// A change stream record (`repl::log`), in a read-only transaction too.
     pub fn put_log(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        self.record(key, Some(Bytes::from(value)));
+        self.record(key, Some(Bytes::from(value)), false);
         self.wrote = true;
         self.maybe_spill()
     }
@@ -1597,6 +1690,23 @@ impl Txn {
             .chain(self.savepoints.iter().flat_map(|sp| sp.committed.iter().copied().chain([sp.xid])))
             .filter(|&x| x != 0)
             .collect()
+    }
+
+    /// `put` of a key no version of which exists anywhere, in the store or among this
+    /// transaction's writes: a new row's (a row id never handed out before) and its index
+    /// entries (which end with it). A run of such writes alone is linked into the store at
+    /// commit instead of being written again (`spill::Runs::take_linkable`).
+    pub fn put_fresh(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        if self.read_only && !self.temp_key(&key) {
+            bail!(
+                READ_ONLY_SQL_TRANSACTION,
+                "cannot execute this statement in a read-only transaction"
+            );
+        }
+        self.record(key, Some(Bytes::from(value)), true);
+        self.wrote = true;
+        self.cur_xid();
+        self.maybe_spill()
     }
 
     pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
@@ -1689,11 +1799,12 @@ impl Txn {
         sort_by_key_after(&mut entries, start.len(), |e| e.0.as_slice());
         let (cid, ts) = (Some(self.write_cid), self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = self.runs.get_or_insert_with(|| Box::new(Runs::new(dir)));
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        // (Keys of a new index, none written before: linked at commit as they are.)
         runs.write(&mut entries.into_iter().map(|(k, v)| {
             let v = Some(Bytes::from(v));
             (k, Ent { v, cid, ts })
-        }))?;
+        }), true)?;
         self.wrote = true;
         self.cur_xid();
         Ok(true)
@@ -1759,8 +1870,8 @@ impl Txn {
         }
         let (cid, ts) = (Some(self.write_cid), self.position() as u64);
         let dir = self.db.store.spill_dir().join(self.id.to_string());
-        let runs = self.runs.get_or_insert_with(|| Box::new(Runs::new(dir)));
-        runs.write(&mut keys.into_iter().map(|k| (k, Ent { v: None, cid, ts })))?;
+        let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        runs.write(&mut keys.into_iter().map(|k| (k, Ent { v: None, cid, ts })), true)?;
         self.wrote = true;
         self.cur_xid();
         Ok(())
@@ -1868,6 +1979,10 @@ impl Txn {
         if from < self.journal_base || self.runs.is_some() {
             return None;
         }
+        // (A range it deleted since doesn't list the rows it took: `delete_range`.)
+        if self.rdels.iter().any(|r| r.ts as usize > from && r.overlaps(start, end)) {
+            return None;
+        }
         let at = (from - self.journal_base).min(self.journal.len());
         Some(
             self.journal[at..]
@@ -1906,7 +2021,7 @@ impl Txn {
     /// `mark`, over the store at `ts` (rows as stored: `TxnScan` puts their out-of-line
     /// values back).
     fn lower(&self, start: &[u8], end: &[u8], ts: u64, mark: u64) -> Lower {
-        let store = self.db.store.scan_raw(start, end, ts);
+        let store = self.db.store.scan_raw(start, end, ts).excluding(&self.own_excluded(start, end, mark));
         match &self.runs {
             Some(r) => Lower::Runs(Box::new(Overlay::new(r.scan(start, end, mark), store, false))),
             None => Lower::Store(store),
@@ -1915,7 +2030,7 @@ impl Txn {
 
     /// `lower` in descending key order.
     fn lower_rev(&self, start: &[u8], end: &[u8], ts: u64, mark: u64) -> RevLower {
-        let store = self.db.store.scan_rev_raw(start, end, ts);
+        let store = self.db.store.scan_rev_raw(start, end, ts).excluding(&self.own_excluded(start, end, mark));
         match &self.runs {
             Some(r) => RevLower::Runs(Box::new(Overlay::new(r.scan_rev(start, end, mark), store, true))),
             None => RevLower::Store(store),
@@ -1969,7 +2084,8 @@ impl Txn {
                     .range::<[u8], _>(range)
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                TxnScan::new(own, Lower::Store(self.db.store.scan_raw(start, end, ts)), src)
+                let store = self.db.store.scan_raw(start, end, ts).excluding(&self.own_excluded(start, end, LATEST));
+                TxnScan::new(own, Lower::Store(store), src)
             }
             None => TxnScan::new(
                 self.mem_in(start, end).collect(),
@@ -2046,16 +2162,16 @@ impl Txn {
     /// not written then.
     fn snap_get(&self, key: &[u8], st: &SnapState) -> Result<Option<Option<Bytes>>> {
         if st.mark < self.journal_base {
-            return Ok(self.runs_get(key, st.mark as u64)?.map(|e| e.0));
+            return Ok(self.runs_get_cov(key, st.mark as u64)?.map(|e| e.0));
         }
         match st.prev.get(key) {
             Some(Some(v)) => Ok(Some(v.clone())),
             // (Nothing in the buffer then: a spilled write, or none. The runs as of the mark:
             // a run written since, a statement's deferred entry deletes, isn't seen.)
-            Some(None) => Ok(self.runs_get(key, st.mark as u64)?.map(|e| e.0)),
+            Some(None) => Ok(self.runs_get_cov(key, st.mark as u64)?.map(|e| e.0)),
             None => match self.writes.get(key) {
                 Some(e) => Ok(Some(e.v.clone())),
-                None => Ok(self.runs_get(key, st.mark as u64)?.map(|e| e.0)),
+                None => Ok(self.runs_get_cov(key, st.mark as u64)?.map(|e| e.0)),
             },
         }
     }
@@ -2734,6 +2850,12 @@ impl Txn {
                 }
             }
         }
+        if self.rdels.iter().any(|r| r.ts > target as u64) {
+            self.rdels.retain(|r| r.ts <= target as u64);
+            if let Some(r) = &mut self.runs {
+                r.set_rdels(&self.rdels);
+            }
+        }
         self.catalog = catalog;
         if self.catalog.is_none() {
             self.catalog_base = None;
@@ -2883,6 +3005,10 @@ impl Txn {
         // A transaction that spilled streams its writes into the commit (`Store::
         // commit_sorted`: the buffer's over the runs'); `writes` then gets the catalog's only.
         let mut spilled: Option<(usize, SpilledWrites)> = None;
+        // Runs of fresh writes alone go into the store as they are, as files of the commit
+        // (`Store::commit_sorted`), instead of being merged into it.
+        let mut linked = Vec::new();
+        let mut linked_tables: Vec<u32> = Vec::new();
         match self.runs.take() {
             None => {
                 writes.reserve(self.writes.len());
@@ -2894,7 +3020,7 @@ impl Txn {
                     }
                 }
             }
-            Some(runs) => {
+            Some(mut runs) => {
                 new_catalog = self.writes.contains_key(CATALOG_KEY)
                     || match runs.get(CATALOG_KEY, LATEST) {
                         Ok(w) => w.is_some(),
@@ -2904,6 +3030,10 @@ impl Txn {
                             return Err(e);
                         }
                     };
+                let writes = &self.writes;
+                (linked, linked_tables) = runs.take_linkable(|a, b| {
+                    writes.range::<[u8], _>((Bound::Included(a), Bound::Included(b))).next().is_some()
+                });
                 let keys = self.writes.len() + runs.entries();
                 spilled = Some((keys, spilled_writes(std::mem::take(&mut self.writes), runs)));
             }
@@ -2916,7 +3046,8 @@ impl Txn {
         // them since.)
         let strict = self.isolation.txn_snapshot() && !self.prepared;
         let keys: Vec<Vec<u8>> = if strict {
-            writes.iter().map(|(k, _)| k.clone()).collect()
+            // (Range deletion markers aren't data: the store retires them on its own.)
+            writes.iter().filter(|(k, _)| !crate::storage::rdel::is_marker(k)).map(|(k, _)| k.clone()).collect()
         } else {
             Vec::new()
         };
@@ -2991,8 +3122,15 @@ impl Txn {
                     None => writes.push(rec),
                 }
             }
-            // (Under the commit lock, before the writes are visible: `watch`.)
+            // (Under the commit lock, before the writes are visible: `watch`. Range
+            // deletions and linked runs change rows the writes don't list.)
             db.watch.committing(writes);
+            for (k, _) in writes.iter().filter(|w| crate::storage::rdel::is_marker(&w.0)) {
+                db.watch.committing_table(Txn::marker_table(k));
+            }
+            for &t in &linked_tables {
+                db.watch.committing_table(t);
+            }
             Ok(())
         };
         let db2 = self.db.clone();
@@ -3012,7 +3150,7 @@ impl Txn {
             let store_watch = self.db.clone();
             let store_watch = &store_watch.watch;
             let each = |store: &Store, k: &[u8]| -> Result<()> {
-                if strict && store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
+                if strict && !crate::storage::rdel::is_marker(k) && store.latest_version_ts(k)?.is_some_and(|ts| ts > start) {
                     return Err(Error::new(
                         code::SERIALIZATION_FAILURE,
                         "could not serialize access due to concurrent update",
@@ -3020,6 +3158,9 @@ impl Txn {
                 }
                 // (Too many to log: the structures over its tables are dropped, `watch`.)
                 store_watch.committing_unlogged(k);
+                if crate::storage::rdel::is_marker(k) {
+                    store_watch.committing_table(Txn::marker_table(k));
+                }
                 Ok(())
             };
             let mut catalog_records = std::mem::take(&mut writes);
@@ -3032,6 +3173,7 @@ impl Txn {
                 },
                 &each,
                 publish_catalog,
+                linked,
             )
         } else if writes.is_empty() {
             Ok(self.db.store.visible_ts())
@@ -3076,6 +3218,13 @@ impl Txn {
             Err(_) => self.ssi_finish(false, 0),
         }
         result
+    }
+
+    /// The table whose range a range deletion's marker deletes (`storage::rdel`: the range
+    /// starts with the table's oid).
+    fn marker_table(marker: &[u8]) -> u32 {
+        let p = crate::storage::rdel::PREFIX.len();
+        marker.get(p..p + 4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
     /// The writes storing catalog `c` over the one this transaction's DDL started from

@@ -149,6 +149,13 @@ pub fn put_row(t: &Table, key: Vec<u8>, row: &[Value], xid: u64, tid: Option<(u3
     txn.put(key, bytes)
 }
 
+/// `put_row` of a new row under a key never used before (a fresh row id: `Txn::put_fresh`,
+/// whose runs are linked into the commit as they are).
+pub fn put_new_row(t: &Table, key: Vec<u8>, row: &[Value], xid: u64, tid: Option<(u32, u16)>, txn: &mut Txn) -> Result<()> {
+    let (bytes, _) = encode(t, &key, row, xid, tid, &[], None, txn)?;
+    txn.put_fresh(key, bytes)
+}
+
 /// The pointers of the version stored under `key` now (the one a writer holding its lock
 /// replaces), when `old` (its values; None: unknown) may have values out of line.
 fn current_pointers(key: &[u8], old: Option<&[Value]>, txn: &Txn) -> Result<Vec<(usize, ValueId)>> {

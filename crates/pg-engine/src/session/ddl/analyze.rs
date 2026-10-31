@@ -3,7 +3,7 @@
 //! compute_trivial_stats), array_typanalyze and range_typanalyze do.
 
 use super::Ddl;
-use crate::catalog::{ColStats, IndexKey, StatExt, StatExtData, StatSlot, Table, relsize};
+use crate::catalog::{ColStats, IndexKey, RelStats, StatExt, StatExtData, StatSlot, Table, relsize};
 use crate::error::Result;
 use crate::error::code;
 use crate::exec::Row;
@@ -194,31 +194,64 @@ impl Ddl<'_, '_> {
                 .relstats
                 .get(&t.oid)
                 .map_or((0, 0.0), |s| (s.pages.max(0) as usize, s.tuples));
-            let chosen = sampled_blocks(pages, want);
+            let estimated = crate::exec::sizing::is_estimated(t.oid, &self.ctx.sess.db);
+            // (Rows map to pages by the tuples last counted: none yet, every row is offered;
+            // unless pages are row id ranges, below.)
+            let chosen = if tuples > 0.0 || estimated && t.has_rowid() { sampled_blocks(pages, want) } else { None };
             progress.set(1, chosen.as_ref().map_or(pages, |c| c.iter().filter(|b| **b).count()) as i64);
             let (mut block, mut blocks_done) = (usize::MAX, 0i64);
-            let scan = self.ctx.txn.borrow().scan(&start, &end);
-            for (i, r) in scan.enumerate() {
-                self.ctx.check()?;
-                let (_, bytes) = r?;
-                all_rows += 1;
-                // (The page row i is on, the rows filling the pages evenly in table order.)
-                let b = ((i as f64 * pages as f64 / tuples.max(1.0)) as usize).min(pages.max(1) - 1);
-                if let Some(c) = &chosen
-                    && !c[b]
-                {
-                    continue;
-                }
-                if b != block {
-                    block = b;
+            // A table too big to model, keyed by row ids, sampled by pages: only the chosen
+            // pages are read, each a row id range of the estimate's pages over the ids there
+            // are (acquire_sample_rows' two stages: the block sampler, then the reservoir),
+            // and its tuples are estimated from them, as PostgreSQL's are.
+            let ranges = match &chosen {
+                Some(c) if estimated && t.has_rowid() => self.rowid_blocks(t, &start, &end, c)?,
+                _ => None,
+            };
+            if let Some(ranges) = ranges {
+                let mut seen = 0usize;
+                for (a, z) in &ranges {
+                    self.ctx.check()?;
                     blocks_done += 1;
                     progress.set(2, blocks_done);
                     self.vacuum_delay_point(1)?;
+                    let scan = self.ctx.txn.borrow().scan(a, z);
+                    for r in scan {
+                        let (_, bytes) = r?;
+                        seen += 1;
+                        offer(&mut || Err(bytes.to_vec()));
+                    }
                 }
-                offer(&mut || Err(bytes.to_vec()));
+                // (totalrows = floor(liverows / blocks read * total blocks + 0.5).)
+                all_rows = (seen as f64 / ranges.len().max(1) as f64 * pages as f64 + 0.5) as usize;
+            } else {
+                let scan = self.ctx.txn.borrow().scan(&start, &end);
+                for (i, r) in scan.enumerate() {
+                    self.ctx.check()?;
+                    let (_, bytes) = r?;
+                    all_rows += 1;
+                    // (The page row i is on, the rows filling the pages evenly in table order.)
+                    let b = ((i as f64 * pages as f64 / tuples.max(1.0)) as usize).min(pages.max(1) - 1);
+                    if let Some(c) = &chosen
+                        && tuples > 0.0
+                        && !c[b]
+                    {
+                        continue;
+                    }
+                    if b != block {
+                        block = b;
+                        blocks_done += 1;
+                        progress.set(2, blocks_done);
+                        self.vacuum_delay_point(1)?;
+                    }
+                    offer(&mut || Err(bytes.to_vec()));
+                }
             }
             sampled = chosen.is_some();
             local = Some(all_rows);
+            if estimated {
+                self.sampled_counts(t, all_rows);
+            }
         }
         // (Sampled by pages: the table's rows all the same.)
         let total = if sampled { all_rows } else { total };
@@ -279,6 +312,61 @@ impl Ddl<'_, '_> {
             store(&mut self.cat.colstats, bix.index.oid, false, computed);
         }
         Ok(local)
+    }
+
+    /// The row id ranges [from, to) of the `chosen` pages of a table keyed by row ids: its
+    /// estimated pages laid over the ids from its first row's to its last's. None: no rows,
+    /// or keys of another shape.
+    fn rowid_blocks(&self, t: &Table, start: &[u8], end: &[u8], chosen: &[bool]) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>> {
+        // (A row key: the table's and index 0's ids, then the row id as an int8 key.)
+        let id = |k: &[u8]| -> Option<i64> {
+            let b: [u8; 8] = k.get(start.len() + 1..)?.try_into().ok()?;
+            Some((u64::from_be_bytes(b) ^ (1 << 63)) as i64)
+        };
+        let txn = self.ctx.txn.borrow();
+        let first = txn.scan(start, end).next().transpose()?.map(|(k, _)| k);
+        let last = txn.scan_rev(start, end, None).next().transpose()?.map(|(k, _)| k);
+        let (Some(lo), Some(hi)) = (first.as_deref().and_then(id), last.as_deref().and_then(id)) else {
+            return Ok(None);
+        };
+        let per = (hi - lo + 1) as f64 / chosen.len() as f64;
+        let key = |r: i64| crate::exec::scan::data_key(t, &[], Some(r));
+        Ok(Some(
+            chosen
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c)
+                .map(|(b, _)| {
+                    let to = if b + 1 == chosen.len() { hi + 1 } else { lo + ((b + 1) as f64 * per) as i64 };
+                    (key(lo + (b as f64 * per) as i64), key(to))
+                })
+                .filter(|(a, z)| a < z)
+                .collect(),
+        ))
+    }
+
+    /// ANALYZE of a table too big to model, which isn't measured (`Ddl::measure_quiet`):
+    /// its tuples are the rows the sample's pass read, its indexes' tuples follow them, and
+    /// their pages grow with them (an index's file doesn't shrink), as PostgreSQL's ANALYZE
+    /// reads the table once and takes the files' sizes.
+    fn sampled_counts(&mut self, t: &Table, rows: usize) {
+        let Some(st) = self.cat.relstats.get(&t.oid).copied() else {
+            return;
+        };
+        let rows = rows as f64;
+        self.cat.relstats.insert(t.oid, RelStats { tuples: rows, ..st });
+        for oid in t.indexes.iter().chain(t.pkey_index.iter()) {
+            let Some(s) = self.cat.relstats.get(oid).copied() else {
+                continue;
+            };
+            let tuples = if st.tuples > 0.0 { (s.tuples * rows / st.tuples).round() } else { rows };
+            let pages = if s.tuples > 0.0 && tuples > s.tuples {
+                (s.pages as f64 * tuples / s.tuples).ceil() as i32
+            } else {
+                s.pages
+            };
+            self.cat.relstats.insert(*oid, RelStats { pages, tuples, ..s });
+        }
     }
 
     /// BuildRelationExtStatistics: the statistics objects on `t`, from the same sample.
