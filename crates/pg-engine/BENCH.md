@@ -1449,6 +1449,86 @@ likelier cause, which agent 117's per-row scan work covers.
 - Not done this round: parallel hash builds, sorts with gather merge, groupings over
   right joins in the workers, numeric values' two allocations.
 
+## Round 23 (agent 121): executor speed and memory, round 5
+
+Same harness and settings; both servers on cores 28-31, the client on 6-7. **pg** is
+PostgreSQL 18.6 (`a121-pg`); **base** the branch at `ff187f1f`, **new** batch 1 on top. Wall
+times and even CPU seconds varied 1.5x between rounds of one binary (load 2 to 50 over the
+session), so the primary measure is the engine's **user-space instructions** per query
+(`perf stat -e instructions:u` on the engine process, a fresh engine, a warm-up run of the
+queries first, one run each), which repeat within 1-2% between runs. Every result hash
+agrees with PostgreSQL's in every round.
+
+### Batch 1: narrowed rows, scans of the files in range, row fetches, numeric sizes
+
+| | base | new |
+|---|---|---|
+| TPC-H, all 22, user instructions (10^9) | 455.6 | **448.5** (-1.6%) |
+| q02 | 5.49 | **4.94** (-10%) |
+| q14 | 3.94 | **2.93** (-25%) |
+| q18 | 73.4 | **67.6** (-8%) |
+| q07 / q03 / q12 | 10.8 / 17.3 / 42.2 | 10.2 / 16.7 / 41.2 |
+| peak memory (VmHWM over the run, MB) | 2,089 | 2,064 |
+
+Two interleaved full rounds (base, new, new, base; time s / CPU s): base 46.1 / 107.1 and
+36.1 / 89.5, new 53.7 / 115.6 (during a load spike: q01, which this batch doesn't change,
+took 4.1 s against 2.2-3.0) and 35.7 / 89.7; PostgreSQL 16.2 / 38.7. Peak 1,992-1,995 MB base,
+1,968-1,985 new, PostgreSQL 1,612. On the batch's first base (`3f56fe3f`, before agent 105's
+hot ranges and agent 117's scan work landed) the same changes took q02 7.0 -> 5.6, q10
+54.7 -> 38.5 and q20 3.8 -> 3.0 (10^9 instructions; a profile of that base's q10 had
+`Cursor::head` and `Merge::min` at 22%, the merge of a dozen small L0 files per scan). The
+rebased base already runs q10 in 40.2, so upstream's work since covers most of that share.
+
+**pgbench select-only** (scale 10, `-M prepared`, 8 clients, 10 s, fresh engine each, base /
+new / base / new, cores 24-27): 65.8k / 67.9k / 65.9k / 65.7k TPS, 110.4k / 109.3k / 111.6k /
+110.0k user instructions per transaction, VmHWM 199-201 MB each.
+
+- **Narrowed rows** (`exec/nodes.rs` `Narrow`, `exec::collect_need`, `pipe::Built::narrowed`):
+  a full sort keeps only the columns read above it and by its keys; a hash join's inner side
+  is read with the mask of the columns its output, condition and keys read and its rows
+  narrowed as they arrive (before, every inner row was collected whole, all its columns
+  decoded, and compacted afterwards); a nested loop's inner side is read with its mask (q02's
+  partsupp fetches no longer decode `ps_comment`).
+- **Range scans merge only the files in range** (`storage::sources`): a scan had a cursor
+  per L0 file and the whole of L1, and `Merge::min` compared every source's head per entry
+  (landed concurrently in agent 117's 184f719f, which the measurements' base predates; after
+  the rebase the files are compared by user keys).
+- **Row fetches skip L1's bloom filters** (`Store::get_versions`): the keys come from index
+  entries and reach L1 only when no newer source had them.
+- **numeric sizes without text** (`relsize::small_numeric_digits`): a hash table's tuple
+  lengths (`minimal_len`, where buckets are rebuilt) and the size models counted a numeric's
+  base-10000 groups by formatting it.
+
+### What holds memory (measured, not changed)
+
+A fresh engine with `--cache-mb 64`, after q03, then q10's joins alone (j2) and q10 (j3):
+VmHWM +110 MB and +125 MB. A heap-growth profile (a counting global allocator logging the
+allocating stack every 2 MB past the live peak; a throwaway build) put j3's growth in the
+block cache's fill, customer's rows read on the executor's thread for heap order
+(`scan::heap_order`, the rows, keys and TID vectors: ~40 MB) and allocator slack: RSS 545
+MB against a live peak of 372 MB. With `MIMALLOC_PURGE_DELAY=0` the same run peaked 40 MB
+lower and ended at 273 MB RSS instead of 536. q10's 37-column Sort isn't run (its grouping
+is partial in the workers), so narrowing sorts doesn't move the TPC-H peak; it is the cache
+(~1.45 GB) plus per-query working memory that PostgreSQL bounds by work_mem and spills.
+
+### Where time still goes
+
+- Point lookups (q02, q20): per fetch a block-cache lookup, a block seek and the merge of
+  sources; q20's 8,332 SubPlan runs open the inner plan anew each time.
+- Above unfiltered scans (agent 117): a `Vec<Value>` per row and expression evaluation;
+  `sum` 2,331 instructions a row against 1,067 for `count(*)` (`examples/scan_bench.rs`).
+- Not done: streaming merge joins, parallel hash builds, gather-merge sorts, right-join
+  groupings in the workers.
+
+### Verification (round 23, agent 121, batch 1)
+
+- `cargo test -p pg-engine` in debug (before the last rebase) and release (after; deep_input
+  and the parallel tests included), `cargo clippy -p pg-engine --all-targets` with no warning
+  in the files changed, the difftest smoke, the isolation suite 121 / 122 specs (1,647 /
+  1,648 permutations), the regression suite in full (debug, private reference) 51,148 /
+  51,150 with no unit changed against `results.tsv`; golden `a121_narrow_rows`, unit test
+  `relsize::tests::small_numeric_digits_match_text`.
+
 ## Round 22 (agent 91): partial paths in the join search
 
 The same plan comparison as round 21's (`EXPLAIN` of the 22 TPC-H queries at SF1, PostgreSQL

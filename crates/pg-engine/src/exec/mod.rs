@@ -1523,6 +1523,19 @@ pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<
     })
 }
 
+/// `collect` of a plan whose rows' columns outside `need` nothing reads (they may be NULL),
+/// each row through `f` as it comes (`nodes::Narrow::shrink`).
+pub fn collect_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx, mut f: impl FnMut(Row) -> Row) -> Result<Vec<Row>> {
+    ctx.statement(|| {
+        let mut node = nodes::open_need(plan, need, ctx)?;
+        let mut out = Vec::new();
+        while let Some(r) = node.next(ctx)? {
+            out.push(f(r));
+        }
+        Ok(out)
+    })
+}
+
 /// Run a query, handing each row to `f` as the executor returns it (a DestReceiver's
 /// receiveSlot): the rows before an error have been handed over; an error of `f` ends it.
 pub fn run_each(plan: &Arc<Plan>, ctx: &ExecCtx, mut f: impl FnMut(Row) -> Result<()>) -> Result<()> {

@@ -95,6 +95,39 @@ fn numeric_digits(s: &str) -> usize {
     }
 }
 
+/// `numeric_digits` of a finite numeric whose digits fit an i128, without its text: the
+/// integer part's base-10000 groups from the decimal point leftwards, the fraction's
+/// rightwards (padded to whole groups), less the zero groups at both ends.
+fn small_numeric_digits(n: &crate::types::numeric::Numeric) -> Option<usize> {
+    let crate::types::numeric::Numeric::Finite { int, scale } = n else { return None };
+    let pad = (4 - *scale % 4) % 4;
+    if *scale + pad > 36 {
+        return None;
+    }
+    let v = int.to_i128()?.unsigned_abs();
+    let p = 10u128.pow(*scale);
+    let (mut ip, fp) = (v / p, (v % p) * 10u128.pow(pad));
+    // Groups, least significant first: the fraction's, then the integer part's.
+    let mut groups = [0u16; 20];
+    let mut n = 0;
+    let mut f = fp;
+    for _ in 0..(*scale + pad) / 4 {
+        groups[n] = (f % 10_000) as u16;
+        f /= 10_000;
+        n += 1;
+    }
+    while ip > 0 {
+        groups[n] = (ip % 10_000) as u16;
+        ip /= 10_000;
+        n += 1;
+    }
+    let g = &groups[..n];
+    match (g.iter().position(|&x| x != 0), g.iter().rposition(|&x| x != 0)) {
+        (Some(lo), Some(hi)) => Some(hi - lo + 1),
+        _ => Some(0),
+    }
+}
+
 /// A numeric's datum size with a 4-byte header: the short format when the scale and weight
 /// fit, else the long one.
 fn numeric_datum(s: &str) -> usize {
@@ -396,7 +429,7 @@ fn varlena_payload(v: &Value, ty: &DataType, text: &dyn Fn(&Value, &DataType) ->
         Value::TsVector(t) => t.varsize() - 4,
         Value::TsQuery(q) => q.varsize() - 4,
         // Short numeric: a 2-byte header and the base-10000 digits.
-        Value::Numeric(_) => 2 + 2 * numeric_digits(&text(v, ty)),
+        Value::Numeric(n) => 2 + 2 * small_numeric_digits(n).unwrap_or_else(|| numeric_digits(&text(v, ty))),
         Value::Bits(n, _) => 4 + (*n as usize).div_ceil(8),
         Value::Inet(a, _) => 3 + a.len(),
         Value::Ext(k, b) if let Some(n) = crate::ext::types::stored_payload(*k, b) => n,
@@ -741,4 +774,34 @@ pub fn btree_pages(tuples: &[(usize, usize)]) -> i32 {
         pages += level.len();
     }
     pages as i32
+}
+
+#[cfg(test)]
+mod tests {
+    /// `small_numeric_digits` counts what `numeric_digits` counts of the value's text.
+    #[test]
+    fn small_numeric_digits_match_text() {
+        use crate::types::numeric::Numeric;
+        let mut cases: Vec<String> = [
+            "0", "0.0", "-0.00", "1", "-1", "10000", "9999", "0.0001", "0.00001", "123456789.123456789", "100000000",
+            "0.10000", "-77.5", "123456789012345678901234567890123456", "0.000000000000000000000000000001",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for i in 0..400u64 {
+            let x = i.wrapping_mul(2654435761) % 100_000_007;
+            cases.push(format!("{}.{:0w$}", x / 1000, x % 1000, w = (i % 5) as usize + 1));
+            cases.push(format!("-{}", x * 10u64.pow((i % 7) as u32)));
+        }
+        let mut fast = 0;
+        for c in &cases {
+            let n: Numeric = c.parse().unwrap();
+            if let Some(d) = super::small_numeric_digits(&n) {
+                assert_eq!(d, super::numeric_digits(&n.to_string()), "{c}");
+                fast += 1;
+            }
+        }
+        assert!(fast > 700);
+    }
 }

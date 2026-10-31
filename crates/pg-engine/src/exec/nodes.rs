@@ -183,6 +183,8 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             bound: None,
             presorted: 0,
             key: 0,
+            need: None,
+            narrow: None,
         }),
         Plan::Barrier { input, .. } => return open(input, ctx),
         Plan::Context {
@@ -362,15 +364,20 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     keys: keys.clone(),
                     out: Vec::new().into_iter(),
                     bound,
+                    need: None,
+                    narrow: None,
                 }));
             }
+            let need = nd::add(need.map(<[bool]>::to_vec), nd::keys(keys));
             Box::new(SortNode {
                 presorted: super::pghash::presorted_keys(plan, ctx).min(keys.len()),
                 key: Arc::as_ptr(plan) as usize,
-                input: Some(open_need(input, nd::add(need.map(<[bool]>::to_vec), nd::keys(keys)), ctx)?),
+                input: Some(open_need(input, need.clone(), ctx)?),
                 keys: keys.clone(),
                 out: Vec::new().into_iter(),
                 bound,
+                need: need.map(Box::from),
+                narrow: None,
             })
         }
         Plan::Limit {
@@ -2560,6 +2567,98 @@ struct SortNode {
     presorted: usize,
     /// The plan node's address (EXPLAIN ANALYZE's key).
     key: usize,
+    /// The input columns read above the sort and by its keys (None: all).
+    need: Option<Box<[bool]>>,
+    /// The full sort held its rows narrowed to `need` (`Narrow`; its keys over them): they
+    /// come out widened.
+    narrow: Option<(Narrow, Vec<SortKey>)>,
+}
+
+/// Rows held with only the columns read of them: a full sort's (the columns read above it
+/// and its keys) and a hash join's inner rows (its output's, condition's and keys'). The
+/// others are NULL in what the node gives out anyway (`need`); a row of a wide join (q10's
+/// sort holds 37 columns, 9 of them read) took 32 bytes a column.
+pub(super) struct Narrow {
+    /// The columns kept, in order.
+    cols: Box<[u32]>,
+    width: usize,
+}
+
+impl Narrow {
+    /// For rows of `width` columns: None when too few columns would go (the copies cost
+    /// more than they save).
+    pub(super) fn of(need: &[bool], width: usize) -> Option<Narrow> {
+        let cols: Box<[u32]> = (0..width).filter(|&i| need.get(i).copied().unwrap_or(false)).map(|i| i as u32).collect();
+        (width - cols.len() >= 4).then_some(Narrow { cols, width })
+    }
+
+    /// Column `i`'s place in a narrowed row.
+    pub(super) fn place(&self, i: usize) -> Option<usize> {
+        self.cols.binary_search(&(i as u32)).ok()
+    }
+
+    /// Each column's place in a narrowed row (`u32::MAX`: not kept).
+    pub(super) fn places(&self) -> Box<[u32]> {
+        let mut m = vec![u32::MAX; self.width];
+        for (p, &c) in self.cols.iter().enumerate() {
+            m[c as usize] = p as u32;
+        }
+        m.into()
+    }
+
+    /// `e` over the narrowed rows, when every column it reads is kept.
+    pub(super) fn expr(&self, e: &Expr) -> Option<Expr> {
+        if let Expr::Col(i, t) = e {
+            return Some(Expr::Col(self.place(*i)?, t.clone()));
+        }
+        let mut read = Vec::new();
+        if !super::need::mark(e, &mut read) || read.iter().enumerate().any(|(i, &r)| r && self.place(i).is_none()) {
+            return None;
+        }
+        Some(e.clone().remap_cols(&|i| self.place(i).unwrap_or(usize::MAX)))
+    }
+
+    pub(super) fn shrink(&self, mut r: Row) -> Row {
+        debug_assert_eq!(r.len(), self.width);
+        self.cols.iter().map(|&c| std::mem::replace(&mut r[c as usize], Value::Null)).collect()
+    }
+
+    fn widen(&self, r: Row) -> Row {
+        let mut out = vec![Value::Null; self.width];
+        for (v, &c) in r.into_iter().zip(&*self.cols) {
+            out[c as usize] = v;
+        }
+        out
+    }
+}
+
+/// A full sort's input rows, narrowed (`Narrow`) when `need` leaves enough columns out.
+#[inline(never)]
+fn read_sort_input(
+    input: &mut BoxNode,
+    need: Option<&[bool]>,
+    keys: &[SortKey],
+    ctx: &ExecCtx,
+) -> Result<(Vec<Row>, Option<(Narrow, Vec<SortKey>)>)> {
+    let mut rows = Vec::new();
+    let mut narrow = None;
+    while let Some(r) = input.next(ctx)? {
+        ctx.check()?;
+        if rows.is_empty() {
+            narrow = need.and_then(|n| Narrow::of(n, r.len())).and_then(|n| {
+                let keys = keys
+                    .iter()
+                    .map(|k| Some(SortKey { expr: n.expr(&k.expr)?, ..k.clone() }))
+                    .collect::<Option<Vec<_>>>()?;
+                Some((n, keys))
+            });
+        }
+        rows.push(match &narrow {
+            Some((n, _)) => n.shrink(r),
+            None => r,
+        });
+    }
+    Ok((rows, narrow))
 }
 
 impl Node for SortNode {
@@ -2600,18 +2699,19 @@ impl Node for SortNode {
                         sort_input_bounded(&mut input, &self.keys, b, ctx)?
                     }
                     None => {
-                        let mut rows = Vec::new();
-                        while let Some(r) = input.next(ctx)? {
-                            ctx.check()?;
-                            rows.push(r);
-                        }
-                        sort_rows_bounded(rows, &self.keys, self.bound, ctx)?
+                        let (rows, narrow) = read_sort_input(&mut input, self.need.as_deref(), &self.keys, ctx)?;
+                        self.narrow = narrow;
+                        let keys = self.narrow.as_ref().map_or(&self.keys, |(_, k)| k);
+                        sort_rows_bounded(rows, keys, self.bound, ctx)?
                     }
                 }
             }
             .into_iter();
         }
-        Ok(self.out.next())
+        Ok(match (self.out.next(), &self.narrow) {
+            (Some(r), Some((n, _))) => Some(n.widen(r)),
+            (r, _) => r,
+        })
     }
 }
 
@@ -3675,11 +3775,18 @@ impl NestLoopNode {
         }
     }
 
+    /// The inner side's rows, read with only the columns the join's output and condition
+    /// read (the others NULL: a scan doesn't decode them).
+    fn collect_right(&self, ctx: &ExecCtx) -> Result<Vec<Row>> {
+        let need = self.keep.as_ref().map(|k| (self.nleft..self.nleft + self.nright).map(|i| k.get(i).copied().unwrap_or(false)).collect());
+        super::collect_need(&self.right_plan, need, ctx, |r| r)
+    }
+
     fn right_rows(&mut self, left: &[Value], ctx: &ExecCtx) -> Result<Rc<Vec<Row>>> {
         if self.fixed {
             if self.right.is_none() {
                 let p = eval_all(&self.params, &[], ctx)?;
-                let rows = ctx.with_outer(Rc::new(p), || collect(&self.right_plan, ctx, None))?;
+                let rows = ctx.with_outer(Rc::new(p), || self.collect_right(ctx))?;
                 self.right_matched = vec![false; rows.len()];
                 self.right = Some(Rc::new(rows));
             }
@@ -3721,7 +3828,7 @@ impl NestLoopNode {
                 return Ok(rows.clone());
             }
             let p = eval_all(&self.params, left, ctx)?;
-            let rows = ctx.with_outer(Rc::new(p), || collect(&self.right_plan, ctx, None))?;
+            let rows = ctx.with_outer(Rc::new(p), || self.collect_right(ctx))?;
             let rows = Rc::new(rows);
             if let (Some(m), Some(k)) = (&mut self.memo, memo_key) {
                 // EMPTY_ENTRY_MEMORY_BYTES and CACHE_TUPLE_BYTES.
@@ -3756,7 +3863,7 @@ impl NestLoopNode {
             return Ok(rows);
         }
         if self.right.is_none() {
-            let rows = collect(&self.right_plan, ctx, None)?;
+            let rows = self.collect_right(ctx)?;
             self.right_matched = vec![false; rows.len()];
             self.right = Some(Rc::new(rows));
         }
@@ -4112,7 +4219,13 @@ impl HashJoinNode {
         if self.table.is_some() {
             return Ok(());
         }
-        let rows = collect(&self.right_plan, ctx, None)?;
+        // (The inner columns the output and condition read, and the keys': the inner rows are
+        // read with only those, the keys over them.)
+        let narrow = self.inner_narrow(ctx);
+        let rows = match &narrow {
+            Some((n, need, _)) => super::collect_need(&self.right_plan, Some(need.clone()), ctx, |r| n.shrink(r))?,
+            None => collect(&self.right_plan, ctx, None)?,
+        };
         // (EXPLAIN ANALYZE: how the rows bunch on their keys, which batching can't split.)
         if let Some(instr) = ctx.instr.borrow().clone() {
             let mut counts: HashMap<String, u64> = HashMap::default();
@@ -4155,10 +4268,13 @@ impl HashJoinNode {
         }
         let keep = matches!(self.kind, JoinKind::Right | JoinKind::Full);
         // (A merge join meets equal inner rows in their (sorted) order.)
-        let mut built = build_hash(rows, &self.rkeys, &self.rnorm, self.nbuckets, keep, self.merge, ctx)?;
+        let rkeys = narrow.as_ref().map_or(&self.rkeys, |(_, _, k)| k);
+        let mut built = build_hash(rows, rkeys, &self.rnorm, self.nbuckets, keep, self.merge, ctx)?;
         // (The inner columns the output and condition read, and the keys' (the outer side's
         // restriction evaluates them again): the table keeps only those.)
-        if let Some(k) = &self.keep {
+        if let Some((n, ..)) = &narrow {
+            built.narrowed(n.places());
+        } else if let Some(k) = &self.keep {
             let mut inner = k.get(self.nleft..).map(<[bool]>::to_vec).unwrap_or_default();
             inner.resize(self.nright.max(inner.len()), false);
             if self.rkeys.iter().all(|e| super::need::mark(e, &mut inner)) {
@@ -4172,6 +4288,23 @@ impl HashJoinNode {
 }
 
 impl HashJoinNode {
+    /// The inner rows narrowed to the columns the join's output, its condition and its keys
+    /// read (`Narrow`), the mask the inner side is opened with, and the keys over the
+    /// narrowed rows. None: whole rows (under EXPLAIN ANALYZE, whose sizes read them).
+    fn inner_narrow(&self, ctx: &ExecCtx) -> Option<(Narrow, Vec<bool>, Vec<Expr>)> {
+        if ctx.instrumented() {
+            return None;
+        }
+        let mut inner = self.keep.as_ref()?.get(self.nleft..).map(<[bool]>::to_vec).unwrap_or_default();
+        inner.resize(self.nright.max(inner.len()), false);
+        if !self.rkeys.iter().all(|e| super::need::mark(e, &mut inner)) {
+            return None;
+        }
+        let n = Narrow::of(&inner, self.nright)?;
+        let keys = self.rkeys.iter().map(|e| n.expr(e)).collect::<Option<Vec<_>>>()?;
+        Some((n, inner, keys))
+    }
+
     /// A Merge Right / Full Join (nodeMergejoin.c): both inputs sorted on the keys, walked
     /// together; an inner row nothing matched comes out when the walk passes it.
     fn merge_outer(&mut self, ctx: &ExecCtx) -> Result<Vec<Row>> {

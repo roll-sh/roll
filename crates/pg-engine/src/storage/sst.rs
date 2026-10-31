@@ -871,6 +871,11 @@ impl SstReader {
         self.obsolete.store(true, Ordering::Release);
     }
 
+    /// Whether the file may hold a user key in [start, end) (an empty `end`: unbounded).
+    pub fn overlaps(&self, start: &[u8], end: &[u8]) -> bool {
+        user_key(&self.meta.last_key) >= start && (end.is_empty() || user_key(&self.meta.first_key) < end)
+    }
+
     pub fn may_contain(&self, user_key: &[u8]) -> bool {
         if self.bloom.is_empty() {
             return true;

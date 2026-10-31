@@ -692,7 +692,10 @@ impl Store {
             match f {
                 Err(m) => mem_get(m, &mut left, &mut out),
                 Ok(ssts) => {
-                    ssts_get(ssts, keys, &seeks, &left, &mut found)?;
+                    // (The keys are rows' an index or a bitmap named: the last level holds
+                    // the ones no newer source had, so its bloom filters would only cost.)
+                    let last = std::ptr::eq(ssts, view.l1.as_slice());
+                    ssts_get(ssts, keys, &seeks, &left, !last, &mut found)?;
                     for (i, hit) in found.drain(..) {
                         out[i] = Some(hit);
                     }
@@ -1689,6 +1692,7 @@ fn ssts_get(
     keys: &[&[u8]],
     seeks: &[Vec<u8>],
     left: &[usize],
+    bloom: bool,
     found: &mut Vec<(usize, (u64, Option<Bytes>))>,
 ) -> Result<()> {
     let mut file = 0;
@@ -1700,7 +1704,7 @@ fn ssts_get(
             file += 1;
         }
         let Some(sst) = ssts.get(file) else { break };
-        if key < user_key(&sst.meta.first_key) || !sst.may_contain(key) {
+        if key < user_key(&sst.meta.first_key) || bloom && !sst.may_contain(key) {
             continue;
         }
         let mut b = sst.find_block(seek);
@@ -2101,7 +2105,9 @@ pub struct Scan {
 fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
     // (Files holding no key of the range aren't sources: each source is looked at whenever
     // the merge changes sources.)
-    let overlaps = |s: &&Arc<SstReader>| s.meta.last_key.as_slice() >= start && (end.is_empty() || s.meta.first_key.as_slice() < end);
+    // (By user keys: a file's first key with its version appended can sort past an `end`
+    // that its user key is a prefix of.)
+    let overlaps = |s: &&Arc<SstReader>| s.overlaps(start, end);
     let mut sources = Vec::new();
     sources.push(Cursor::mem(view.mem.clone(), start, end));
     for f in &view.imm {

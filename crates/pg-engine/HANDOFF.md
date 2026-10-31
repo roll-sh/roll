@@ -1670,6 +1670,49 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     hash builds, gather-merge sorts and right-join groupings; numerics' two allocations.
     Agent 102's inline scans: +6.5% CPU on q03 / q05 / q06 / q10 (q06 +12%), likely the
     per-row decode rather than the scan policy.
+- **Executor speed and memory, round 5, batch 1** (round 23, agent 121; BENCH.md "Round 23
+  (agent 121)"): TPC-H user instructions -1.6% in all (q02 -10%, q14 -25%, q18 -8%), times
+  and peak within the machine's spread; pgbench select-only -1% instructions per transaction.
+  - **Narrowed rows** (`exec/nodes.rs` `Narrow`): a full sort holds only the columns read
+    above it and by its keys, widened (the others NULL) as rows come out; a hash join's inner
+    side is opened with the mask of the columns its output, condition and keys read
+    (`exec::collect_need`), its rows narrowed as they arrive and the keys remapped
+    (`pipe::Built::narrowed`), so the build never holds whole rows (before, `Built::compact`
+    ran after every row had been collected whole); a nested loop's inner side is read with
+    its mask (`NestLoopNode::collect_right`). Not under EXPLAIN ANALYZE. A hash table's
+    tuple lengths (`minimal_len`, for ExecHashIncreaseNumBuckets' chunk order) are now of
+    the narrowed rows: PostgreSQL's Hash tuples hold only those columns too (CP_SMALL_TLIST).
+    Golden `a121_narrow_rows` (right / full joins, expression keys, sorts with and without
+    LIMIT, nested loops).
+  - **Range scans leave out files outside the range** (`storage::sources`,
+    `SstReader::overlaps`): every scan merged a cursor per L0 file and all of L1; an index
+    lookup's one-key range now merges only the files whose keys can fall in it (TPC-H SF1's
+    database has a dozen small L0 files of other tables). Agent 117's 184f719f did the same
+    concurrently; the merge keeps its code and compares user keys (a first key with its
+    version appended can sort past an `end` its user key is a prefix of).
+  - **Row fetches skip L1's bloom filters** (`Store::get_versions`, `ssts_get(.., bloom)`):
+    the keys come from index entries, so the last level holds the ones no newer source had.
+    Single-key reads (`get_version`, conflict checks on new keys) still use them.
+  - **numeric sizes without text** (`catalog/relsize.rs` `small_numeric_digits`): a finite
+    numeric whose digits fit an i128 counts its base-10000 groups arithmetically instead of
+    formatting itself (hash tuple lengths, size models); unit test against the text count.
+  - Measured, not changed: q10's peak (+190 MB over q09) is not its sort, which the executor
+    doesn't run (its grouping is partial in the workers); a heap-growth profile (a counting
+    global allocator logging the stack every 2 MB past the peak) put it in the cache's fill,
+    customer's rows read for heap order (`heap_order`, ~40 MB) and allocator slack (RSS 545
+    MB against 372 MB live in a 64 MB-cache run; `MIMALLOC_PURGE_DELAY=0` took 40 MB off the
+    peak). numeric values already take one allocation since agent 100's `decint`.
+  - Left: peak memory (1.99 GB against PostgreSQL's 1.61 GB here, the cache ~1.45 GB of it;
+    PostgreSQL's per-query memory is bounded by work_mem and spills, the engine's isn't);
+    point lookups (q20's 8,332 subplan runs reopen the plan each time; per fetch: block
+    cache lookup, block seek, the merge of sources); streaming merge joins; parallel hash
+    builds / gather-merge sorts / right-join groupings; agent 117's items (per-row `Vec<Value>`
+    and expression evaluation above unfiltered scans: `sum` 2,331 instructions a row
+    against 1,067 for `count(*)`, `examples/scan_bench.rs`).
+  - Verified: crate tests debug (before the rebase) and release, clippy (no new warnings),
+    difftest smoke, isolation 121 / 122 (1,647 / 1,648), a full regress run (debug, private
+    reference) 51,148 / 51,150 with no unit changed against `results.tsv`; every TPC-H
+    result hash equal to PostgreSQL's.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

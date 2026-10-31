@@ -192,6 +192,12 @@ impl Built {
         Inner { vals: &self.rows[j], map: self.cols.as_deref() }
     }
 
+    /// The rows were built narrowed (`nodes::Narrow`): `places` is each inner column's
+    /// place in them (`u32::MAX`: not kept, read as NULL).
+    pub fn narrowed(&mut self, places: Box<[u32]>) {
+        self.cols = Some(places);
+    }
+
     /// Keep only the inner columns in `keep` (what the join's output, its condition and
     /// anything above read): the table holds each row's needed values and nothing for the
     /// others, which read as NULL (`Inner`). A row of 16 columns of which 3 are read took
