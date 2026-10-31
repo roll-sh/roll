@@ -4724,6 +4724,91 @@ PL/pgSQL first five custom plans could use the same check to run the generic bin
 (HANDOFF.md, "OLTP round 2"); unnamed extended-protocol statements likewise; the web-app
 mix's non-unique `count(*)` and its bigserial INSERT; hot-row lock waits at 32+ clients.
 
+## Replication, round 5 (round 22, agent 129)
+
+HANDOFF.md "Round 5 (agent 129)" has what changed. Release builds; every engine with
+`--cache-mb 64` (the default) on a fresh data directory, pinned with `taskset`; PostgreSQL
+18.6 (the pinned image) in containers on the host network with `--cpuset-cpus`; machine
+load 20-45 from other agents. Scripts were in `~/.cache/a129/bench` (apply.sh, pubn.sh,
+pgb.sh, e2e.sh; gone with the cache), described here so they can be rebuilt.
+
+**Apply** (`apply.sh`; agent 119's benchmark gave both subscriptions the slot `asub`, so its
+PostgreSQL rounds never ran: each subscription now has a slot of its own, made before the
+backlog). A publisher holds 60,000 pgbench-like transactions (4 clients: UPDATE of a
+10,000-row table by key and INSERT into an indexed history table; one in three also DELETEs
+the history's oldest row); each subscriber, created disabled with copy_data = false on its
+own slot, is enabled alone and timed until its slot confirmed the end. Default
+synchronous_commit of a subscription (off). CPU: the engine process, PostgreSQL's whole
+container (apply worker, walwriter, checkpointer). Rounds interleaved, the order rotating.
+All subscribers end identical to the publisher (md5 of every row of both tables).
+
+| publisher | subscriber | time | CPU | memory |
+|---|---|---|---|---|
+| PostgreSQL 18.6 | PostgreSQL 18.6 | 2.8-3.1 s | 3.1-3.3 s | apply worker 33 MB RSS |
+| PostgreSQL 18.6 | engine, base ff187f1f | 4.7-5.4 s | 4.3-4.9 s | process +49-52 MB |
+| PostgreSQL 18.6 | engine, this round | 4.6-5.1 s | 3.9-4.6 s | process +44-52 MB |
+| engine | PostgreSQL 18.6 | 4.3-5.4 s | 4.3-5.3 s | apply worker 34 MB RSS |
+| engine | engine, base | 7.0 s | 5.7-6.8 s | process +38-81 MB |
+| engine | engine, this round | 7.5-8.1 s | 6.4-6.7 s | process +38-68 MB |
+
+(Load 22 for the PostgreSQL-publisher rows, 20-40 for the engine-publisher ones; in one
+round of each engine build the RSS fell, the previous round's memtable going.)
+- The apply worker no longer waits for the WAL fsync of each commit: that came with
+  b7d5f1fe (its session runs `SET synchronous_commit = off`); agent 119's 15.5 s / 8.6 s CPU
+  predates it. Wall time is now about CPU time. What this round changed is the feedback: it
+  reports flush only once the commit is durable (`Store::durable_ts`), at no measurable cost.
+- The rest of the gap (about 1.3x PostgreSQL's CPU) is the engine's write path (agent 108's
+  profile: the size models, memtable searches, allocation), not the apply layer.
+- Engine publisher rows: the walsender side costs the engine 0.8-2.1 s CPU against
+  PostgreSQL's 0.9-1.5 s; one in three backlog transactions' `DELETE ... WHERE hid = (SELECT
+  min(hid) ...)` made the engine's pgbench run take minutes (not replication: the engine's
+  min() over a big table with dead versions at its start; left for the planner / storage).
+
+**Fan-out** (`pubn.sh`, agent 119's publisher benchmark): a backlog of 20,000 transactions
+(UPDATE by key, INSERT into a history table; 4 clients); N PostgreSQL 18.6 subscriptions of
+one publication, each into a database of its own, enabled at once and timed until every
+slot confirmed the end. CPU: the engine process / PostgreSQL's walsenders; memory: the
+engine's RSS peak over its RSS before / the walsenders' summed RSS peak. Two interleaved
+rounds of each.
+
+| N | PostgreSQL 18.6 | engine, base ff187f1f | engine, this round |
+|---|---|---|---|
+| 1 | 1.3-2.1 s, CPU 0.16-0.29 s, 18 MB | 2.3-2.7 s, CPU 0.55-0.81 s, +28-43 MB | 2.5-2.7 s, CPU 0.46 s, +46-50 MB |
+| 4 | 1.8-2.1 s, CPU 1.4-1.7 s, 71 MB | 2.8-3.4 s, CPU 2.6-3.0 s, +33-34 MB | 2.9-3.3 s, CPU 0.86-1.06 s, +36-39 MB |
+| 16 | 5.5-6.6 s, CPU 4.6-6.9 s, 283 MB | 6.2-6.8 s, CPU 8.4-9.8 s, +36 MB | 6.9-7.2 s, CPU 3.7-3.9 s, +44 MB |
+
+- CPU per walsender went from about 0.55 s per 20,000 transactions to about 0.2 s, under
+  PostgreSQL's 0.3-0.4 at N = 4 and 16: decoded once (`decode::Shared`), each relation
+  description parsed once (its JSON was a fifth of the profile) and pgoutput's relation
+  entries kept across transactions (they were worked out again every transaction).
+- Memory: the shared cache's bound is 16 MB of decoded changes per database. The peaks
+  above (+28-50 MB over the run, both builds) are mostly the memtable's growth and vary by
+  round as much as between the builds; at N = 16 the engine's whole growth is a sixth of
+  PostgreSQL's walsenders (17 MB each).
+- Wall time is the PostgreSQL subscribers' (both publishers wait for them).
+
+**pgbench check of agent 119's batches** (`pgb.sh`: scale 10, `-M prepared`, 8 clients, 20 s,
+`--cache-mb 2048` as tools/bench uses; CPU per transaction of the engine process, VmHWM; 4
+rounds interleaved at load 40-45, medians and spread):
+
+| build | select-only CPU / txn | tpcb-like CPU / txn | VmHWM |
+|---|---|---|---|
+| 898ef33a (before 15f967cd) | 0.100 ms (0.086-0.105) | 0.893 ms (0.825-0.929) | 384 MB (381-392) |
+| ff187f1f (agent 119's last) | 0.091 ms (0.084-0.103) | 0.870 ms (0.843-0.952) | 391 MB (390-397) |
+| this round | 0.097 ms (0.090-0.101) | 0.904 ms (0.774-0.922) | 385 MB (382-391) |
+
+No regression beyond the rounds' spread (this round's build, which changes nothing on the
+OLTP path, moved by as much as the two bases differ). An earlier pair of 3 rounds at load
+30-35 agrees (select-only 0.078-0.082 / 0.070-0.089 ms, tpcb-like 0.62-0.78 / 0.74-0.84 ms).
+
+**Side by side** (`e2e.sh`): initial synchronization of four tables (one of 200,000 rows)
+under two pgbench clients changing them, then 015_stream.pl-style streamed transactions
+(logical_decoding_work_mem = 64kB) with a rolled-back savepoint and an aborted one, REPLICA
+IDENTITY FULL updates and a partitioned engine target with partition moves; a PostgreSQL
+and an engine subscriber of a PostgreSQL publisher (streaming = on) and of an engine
+publisher (streaming = parallel): md5 of every row identical on all three, no
+synchronization slot left on the publisher.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

@@ -1329,6 +1329,84 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       MERGE and function-scan join orders the planner's). Apply speed: the apply layer is a
       few percent of the apply thread; the rest is the write path (agent 108's profile; agent
       105's synchronous_commit = off hasn't landed).
+  - **Round 5 (agent 129): durable feedback, shared decoding, table-sync catch-up.**
+    BENCH.md "Replication, round 5" has the numbers.
+    - **Apply and synchronous_commit**: since b7d5f1fe an apply worker's commit already is
+      asynchronous under the subscription's default synchronous_commit = off (its session
+      runs `SET synchronous_commit = <subsynccommit>`); agent 119's "waits for the fsync"
+      measurement predates it (its benchmark also gave both subscriptions slot `asub`, so the
+      PostgreSQL rounds never ran). What was wrong is the feedback: it reported the origin's
+      in-memory progress as flushed, so a crash could lose transactions the publisher had
+      been told were durable. `repl/apply.rs` now keeps get_flush_position's lsn_mapping
+      (`unflushed`: each applied transaction's remote end with `Store::assigned_ts()` after
+      its commit) and reports flush / apply only up to what `Store::durable_ts()` covers;
+      with nothing pending and no remote transaction open, the received end, as
+      send_feedback does. (`Store::assigned_ts` / `durable_ts` are read-only accessors;
+      `commit_async` is unchanged. Agent 136 owns the commit path now.) Test
+      `logical_apply::asynchronous_apply_confirms_durable_only` (wal_writer_delay = 10s: not
+      confirmed while only visible, confirmed at once after a synchronous commit).
+    - **Shared decoding** (`repl/decode.rs` `Shared`, in `DbLog::decoded`): relation
+      description records are parsed once per definition and the same `Arc<RelDesc>` goes
+      to every decoder (each transaction's description was a JSON parse, and a new `Arc`
+      made pgoutput's RelationSyncEntry cache miss every transaction; pgoutput now keeps its
+      entries across transactions and clears them when the catalog version changes). While
+      two or more decoders of a database run (`decode::Reader`, held by each `Decoder`), a
+      transaction one of them decoded is kept as `Arc<[Change]>` for the others: **bound
+      16 MB of decoded changes per database** (`SHARED_BYTES`, oldest dropped first; a
+      transaction past 2 MB of WAL isn't kept, each decoder reads it as one alone does), and
+      nothing once fewer than two decoders are left (agent 125: that is the cache's whole
+      memory, per database with two or more walsenders). Output (pgoutput / test_decoding,
+      row filters, column lists, binary, streaming) is still per sender. Test
+      `logical_apply::shared_decoding_keeps_each_output` (three walsenders with a row
+      filter, a column list and binary, plus test_decoding through the SQL functions).
+      Left: sharing the pgoutput bytes of senders with the same options and publications
+      (pgoutput's per-sender state, sent Relation messages, makes the key the state as well),
+      and the commit-record scan, still per sender.
+    - **Table synchronization** (`repl/apply/tablesync.rs`, tablesync.c): the leader streams
+      from the start and handles synchronization between transactions (after each commit and
+      when idle: process_syncing_tables_for_apply), launching a worker per table not ready
+      (max_sync_workers_per_subscription, a table again only after wal_retrieve_retry_interval
+      since its last start). A worker copies under a **permanent** slot
+      `pg_<subid>_sync_<relid>_<sysid>` (sysid: the subscriber's, `repl::SYSTEM_IDENTIFIER`;
+      it was the publisher's) created with SNAPSHOT 'use', commits the rows with state 'f'
+      and its origin `pg_<subid>_<relid>` at the slot's consistent point, sets SYNCWAIT in
+      memory (`Workers::relstates`), and the leader answers CATCHUP with its own position and
+      waits for SYNCDONE. The worker streams its slot (Role::Sync: only its table applied, no
+      two-phase, no parallel apply), and once its last commit (or, idle, what it received)
+      reaches that position records 's' there, drops its slot (NOTICE) and its origin. A
+      worker failing after the copy resumes from its origin ('f'); one failing during it
+      leaves its slot, which the next attempt drops first ("could not drop replication slot
+      ... on publisher" as a LOG line when it is missing). DROP SUBSCRIPTION drops the
+      synchronization slots of tables not SYNCDONE / READY (NOTICE per slot dropped), as
+      DropSubscription does. Test `logical_apply::table_sync_catches_up_on_its_own_slot`
+      (a table's copy held by a lock while the leader applies another's rows; a copy failing
+      again and again keeps its permanent slot; all slots gone at the end).
+      ALTER SUBSCRIPTION ... REFRESH PUBLICATION removing a table still being synchronized
+      stops its worker (`Workers::stop_sync`), drops its origin and, unless SYNCDONE, its
+      slot (missing_ok), as AlterSubscription_refresh does. Left: the LOG lines for missing
+      slots in DROP SUBSCRIPTION / REFRESH go to the engine's tracing, not the server log.
+    - **test_decoding tail** (streaming of rolled-back subtransactions, stream 3,
+      twophase_stream 2, decoding_in_xact 1): not done. It needs a subtransaction's change
+      records to survive its ROLLBACK TO (rewritten as an aborted subtransaction's, with an
+      abort record at the ROLLBACK TO's position) and the decoder to replay
+      ReorderBuffer's memory accounting: stream what was decoded when the transaction
+      outgrew logical_decoding_work_mem, aborted subtransactions included, then "aborting
+      streamed (sub)transaction" at the abort; non-streamed replay skips them.
+    - **pgbench** (agent 119's two batches had no pgbench check): select-only and tpcb-like CPU
+      per transaction and peak RSS at 898ef33a (before 15f967cd) against this round, BENCH.md.
+    - Verified (agent 129): crate tests debug and release (incl. deep_input, logical_apply),
+      clippy without new warnings, difftest smoke, isolation 121 / 122 with the roll-* specs,
+      a full regress run on a private reference 51,148 / 51,150 with no unit changed against
+      `results.tsv`, test_decoding 1,029 / 1,047, and side by side with PostgreSQL 18.6
+      (e2e: initial synchronization of four tables, one of 200,000 rows, under concurrent
+      writes, then 015_stream.pl-style streamed transactions with rolled-back savepoints and
+      an aborted one, REPLICA IDENTITY FULL, a partitioned target with partition moves;
+      PostgreSQL and engine publishers, PostgreSQL and engine subscribers): md5 of every row
+      identical on all three, no synchronization slot left. (Isolation: one run of the
+      second batch had detach-partition-concurrently-3 wait differently under load 40; alone
+      it matches. After rebasing onto 46f5e9cb, `deep_input`'s `viewdef 2000` fails in debug
+      builds with "stack depth limit exceeded": it does at 46f5e9cb without this round's
+      commits too, and passed at ff187f1f; one of the commits in between, not replication.)
 - **TPC-H plans and analytic speed** (round 20, agent 64; BENCH.md "Round 20", STATUS.md):
   the engine's plans at SF1 compared with PostgreSQL 18.6's on the same data, both analyzed,
   and the causes of the differences fixed in statistics and estimates: ANALYZE samples pages
@@ -3967,6 +4045,15 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   not supported by this server", with a hint to use logical replication). Physical slots exist
   (pg_create_physical_replication_slot, pg_copy_physical_replication_slot) as registry entries.
   Logical replication is the supported path (below, "Logical replication").
+- **Table synchronization slots are permanent, as PostgreSQL's** (round 5 of replication,
+  agent 129). The engine used temporary slots, which a client can't tell from nothing only
+  while the copy runs; with a catch-up on the worker's own slot, a temporary slot would make
+  a worker failing after its copy copy again (PostgreSQL resumes from the origin), and the
+  publisher's pg_replication_slots, DROP SUBSCRIPTION's NOTICEs ("dropped replication slot
+  ... on publisher") and a retry's slot drop would differ. So the engine names, creates,
+  keeps and drops them as tablesync.c does (`pg_<subid>_sync_<relid>_<sysid>` with the
+  subscriber's system identifier); a failed copy's slot stays on the publisher until the
+  next attempt or DROP SUBSCRIPTION, as there.
 - **JIT: the engine is a PostgreSQL 18.6 whose JIT provider isn't installed** (round 22,
   agent 91). It compiles no expressions to machine code, so it reports none: `jit` and the
   other jit settings exist with PostgreSQL's defaults and checks (`jit = on`,
