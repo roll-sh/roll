@@ -877,6 +877,12 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 ## Open
 
 - **Round 6 seeds, found, not fixed** (agent 118):
+  - Memory: the difftest process (one engine per seed, in-process, debug) ends 50 seeds
+    (5556–5605) at 424–431 MB resident from 93244ee3 on, against 193 MB at d0c965fb; bisected
+    to 93244ee3 alone (planning cost, batch 1: parse trees shared by every session, the
+    process-wide `lru::Shared` caches bounded at 32 MB by `tree_bytes` estimates). Over 150
+    seeds 201 → 664 MB. Likely the estimates undercount the trees' real bytes; agent 111's
+    area, not reduced further.
   - FULL JOIN checks run per query level as it is planned: a FULL JOIN in a FROM subquery that a
     strict WHERE above reduces after pull-up (`(SELECT f2.b c0 FROM f1 FULL JOIN f2 ON f1.a >
     f2.b) s WHERE s.c0 > 0`), or in a correlated sub-select whose outer join to it is removed,
