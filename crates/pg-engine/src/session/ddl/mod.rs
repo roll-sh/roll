@@ -42,6 +42,7 @@ mod tblspc;
 mod stored;
 mod tsearch;
 mod vacuum;
+mod parbuild;
 
 pub(crate) use stored::mentions;
 pub(crate) use table::rowid_sequence;

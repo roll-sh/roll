@@ -1867,7 +1867,7 @@ impl Txn {
                 let mut items = order.iter().map(|&(_, i)| {
                     let e = s.ents[i as usize];
                     let k = (e.0 + e.1) as usize;
-                    (&data[e.0 as usize..k], &data[k..k + e.2 as usize])
+                    (&data[e.0 as usize..k], [&data[k..k + e.2 as usize], &[][..]])
                 });
                 runs.write_fresh(&mut items, self.write_cid, ts)?;
                 SINK_RUNS.fetch_add(1, Ordering::Relaxed);
@@ -1993,6 +1993,41 @@ impl Txn {
         self.wrote = true;
         self.cur_xid();
         Ok(true)
+    }
+
+    /// Whether a new index's entries in [start, end) can go in as sorted runs
+    /// (`put_new_index_entries`' rule): nothing written there, no savepoint open.
+    pub fn index_runs_direct(&self, start: &[u8], end: &[u8]) -> Result<bool> {
+        if self.read_only || !self.savepoints.is_empty() {
+            return Ok(false);
+        }
+        if self.writes.range::<[u8], _>((Bound::Included(start), Bound::Excluded(end))).next().is_some() {
+            return Ok(false);
+        }
+        Ok(match &self.runs {
+            Some(r) => r.scan(start, end, LATEST).next().transpose()?.is_none(),
+            None => true,
+        })
+    }
+
+    /// A parallel index build's sorted entries (`index_runs_direct` said they may): each
+    /// participant's entry keys back to back, (offset, key length, tail length) in key
+    /// order, as one linkable run. An entry's value is its row's data key: `table` (the
+    /// table's 8-byte prefix) and the key's last `tail` bytes (`index_entry_key`).
+    pub fn put_index_runs(&mut self, table: &[u8], runs: Vec<(Vec<u8>, Vec<(u32, u32, u32)>)>) -> Result<()> {
+        let (cid, ts) = (self.write_cid, self.position() as u64);
+        let dir = self.db.store.spill_dir().join(self.id.to_string());
+        let r = Self::runs_in(&mut self.runs, dir, &self.rdels);
+        for (data, ents) in &runs {
+            let mut items = ents.iter().map(|e| {
+                let k = &data[e.0 as usize..(e.0 + e.1) as usize];
+                (k, [table, &k[k.len() - e.2 as usize..]])
+            });
+            r.write_fresh(&mut items, cid, ts)?;
+        }
+        self.wrote = true;
+        self.cur_xid();
+        Ok(())
     }
 
     /// `delete` of an index entry by a statement nothing in which can read the index

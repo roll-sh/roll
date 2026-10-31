@@ -3735,7 +3735,17 @@ impl Ddl<'_, '_> {
         // (A table too big to model is measured in the same pass: its rows read and its keys
         // computed once.)
         let scope = IndexScope::enter(&bix, self);
-        let measured = if self.measures_in_build(t, ix) {
+        // (With workers, as max_parallel_maintenance_workers has it: `parbuild`.)
+        let parallel = match self.measures_in_build(t, ix) && !quad {
+            true => match super::parbuild::index_workers(self, t, crate::exec::sizing::heap_blocks(t, self.ctx)?.unwrap_or(0)) {
+                0 => None,
+                w => self.build_index_parallel(t, ix, &bix, w)?,
+            },
+            false => None,
+        };
+        let measured = if parallel.is_some() {
+            parallel
+        } else if self.measures_in_build(t, ix) {
             self.measure_rows_with(t, Some(Some(ix.oid)), Some(&mut step))?
         } else {
             None
@@ -3765,7 +3775,7 @@ impl Ddl<'_, '_> {
         self.index_built_from(t, ix, measured)
     }
 
-    fn duplicate_key(&self, t: &Table, bix: &BoundIndex, vals: &[Value], name: &str) -> Error {
+    pub(super) fn duplicate_key(&self, t: &Table, bix: &BoundIndex, vals: &[Value], name: &str) -> Error {
         let fmt = self.ctx.fmt();
         let cols: Vec<String> = bix
             .index

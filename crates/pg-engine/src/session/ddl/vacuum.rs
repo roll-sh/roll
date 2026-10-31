@@ -1463,21 +1463,7 @@ impl Ddl<'_, '_> {
                 .and_then(|keys| crate::exec::sizing::btree_build_blocks(&ix.bix, keys));
             let pages = match ix.modelled.or(built) {
                 Some(n) => n as i32,
-                None => {
-                    // (By the first 8 bytes, then the key, then the size: the keys' order, the
-                    // prefix compared without reading the key. Unstable: entries equal as
-                    // (key, size) are interchangeable.)
-                    ix.keys.sort_unstable();
-                    let dedup = !ix.bix.index.unique
-                        && ix.bix.index.include.is_empty()
-                        && ix.types.iter().all(relsize::equal_image)
-                        && ix.bix.colls.iter().flatten().all(|k| k.coll.deterministic);
-                    let mut sizes = Vec::with_capacity(ix.keys.len());
-                    for group in ix.keys.chunk_by(|a, b| dedup && a.0 == b.0 && a.1 == b.1) {
-                        relsize::posting_tuples(group[0].2, group.len(), &mut sizes);
-                    }
-                    relsize::btree_pages(&sizes)
-                }
+                None => btree_pages_of(&ix.bix, &ix.types, std::mem::take(&mut ix.keys)),
             };
             measured.push((ix.bix.index.oid, pages, ix.tuples as f64));
         }
@@ -1516,6 +1502,36 @@ pub(super) struct RowMeasure {
     indexes: Vec<(u32, i32, f64)>,
 }
 
+impl RowMeasure {
+    /// The measure of a table too big to model (`parbuild`).
+    pub(super) fn new(rows: usize, live: i32, indexes: Vec<(u32, i32, f64)>) -> RowMeasure {
+        RowMeasure {
+            rows,
+            modelled: None,
+            live,
+            indexes,
+        }
+    }
+}
+
+/// A btree's pages by its keys (sort key, key bytes, index tuple size; `measure_rows_with`):
+/// sorted, deduplicated where PostgreSQL's btree would, packed as its build packs them.
+pub(super) fn btree_pages_of(bix: &crate::sql::plan::BoundIndex, types: &[DataType], mut keys: Vec<(u128, Vec<u8>, usize)>) -> i32 {
+    // (By the first 8 bytes, then the key, then the size: the keys' order, the prefix
+    // compared without reading the key. Unstable: entries equal as (key, size) are
+    // interchangeable.)
+    keys.sort_unstable();
+    let dedup = !bix.index.unique
+        && bix.index.include.is_empty()
+        && types.iter().all(relsize::equal_image)
+        && bix.colls.iter().flatten().all(|k| k.coll.deterministic);
+    let mut sizes = Vec::with_capacity(keys.len());
+    for group in keys.chunk_by(|a, b| dedup && a.0 == b.0 && a.1 == b.1) {
+        relsize::posting_tuples(group[0].2, group.len(), &mut sizes);
+    }
+    relsize::btree_pages(&sizes)
+}
+
 impl Ddl<'_, '_> {
     /// The heap's pages as `measure_rows` found them: a table too big to model keeps its
     /// estimated pages (its file doesn't shrink), the space past the live rows free.
@@ -1530,7 +1546,7 @@ impl Ddl<'_, '_> {
 
 /// A sort key's first 16 bytes, big-endian, zero-padded: ordering by it, then by the whole key,
 /// orders keys as the whole key does.
-fn key_prefix(k: &[u8]) -> u128 {
+pub(super) fn key_prefix(k: &[u8]) -> u128 {
     let mut b = [0u8; 16];
     let n = k.len().min(16);
     b[..n].copy_from_slice(&k[..n]);

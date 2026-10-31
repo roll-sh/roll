@@ -56,6 +56,28 @@ fn reserve(want: usize, pool: usize) -> usize {
     }
 }
 
+/// Workers for another parallel operation (a parallel index build), up to `want` from what
+/// is left of max_parallel_workers' pool (`pool`): how many it got, given back with
+/// `release_workers`.
+pub(crate) fn reserve_workers(want: usize, pool: usize) -> usize {
+    reserve(want, pool)
+}
+
+pub(crate) fn release_workers(n: usize) {
+    ACTIVE.fetch_sub(n, std::sync::atomic::Ordering::AcqRel);
+}
+
+static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Parallel index builds run so far (`session::ddl::parbuild`), for tests.
+pub fn index_builds() -> u64 {
+    BUILDS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn count_index_build() {
+    BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Rows a worker sends at a time.
 const BATCH: usize = 512;
 /// Chunks per worker: small enough that the rows read ahead stay few.

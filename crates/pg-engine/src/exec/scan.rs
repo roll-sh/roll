@@ -3158,7 +3158,7 @@ fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
 /// itself never extends another (keys are prefix-free), so both agree on it. `fixed`: every
 /// key in the range is as long as `fixed`'s (a table's rows by row id): a cut cut to that length
 /// extends none, and no key is looked up.
-fn keyed_cuts(
+pub(crate) fn keyed_cuts(
     txn: &crate::txn::Txn,
     cuts: Vec<Vec<u8>>,
     start: &[u8],

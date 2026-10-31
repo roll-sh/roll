@@ -119,8 +119,9 @@ impl Runs {
 
     /// `write` of fresh writes (`Txn::put_fresh`) given as slices in key order, each key
     /// once, all of command `cid` at journal place `ts`: a linkable run, encoded straight
-    /// from the slices (a bulk load's sink, `Txn::flush_sink`).
-    pub fn write_fresh<'a>(&mut self, items: &mut dyn Iterator<Item = (&'a [u8], &'a [u8])>, cid: u32, ts: u64) -> Result<()> {
+    /// from the slices (a bulk load's sink, `Txn::flush_sink`; a parallel index build's
+    /// entries). Each value comes in two parts, put end to end.
+    pub fn write_fresh<'a>(&mut self, items: &mut dyn Iterator<Item = (&'a [u8], [&'a [u8]; 2])>, cid: u32, ts: u64) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let id = self.next_id;
         self.next_id += 1;
@@ -128,11 +129,12 @@ impl Runs {
         let mut val = Vec::new();
         let mut segs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut seg: Option<(&[u8], &[u8])> = None;
-        for (k, v) in items {
+        for (k, [v1, v2]) in items {
             val.clear();
             val.push(3);
             val.extend_from_slice(&cid.to_be_bytes());
-            val.extend_from_slice(v);
+            val.extend_from_slice(v1);
+            val.extend_from_slice(v2);
             if let Err(err) = w.add(&mvcc_key(k, ts), Some(&val)) {
                 w.abandon();
                 return Err(err);
