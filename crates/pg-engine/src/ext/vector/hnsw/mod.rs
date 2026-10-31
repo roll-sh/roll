@@ -21,7 +21,7 @@ mod vacuum;
 use crate::Result;
 use crate::error::Error;
 use crate::exec::ExecCtx;
-use crate::ext::index_am::{AmIndex, AmProps, AmRoutine, AmScan, BuildHeap, BuildStats, CostInput, CostOutput, IndexAm};
+use crate::ext::index_am::{AmIndex, AmProps, AmStore, AmRoutine, AmScan, BuildHeap, BuildStats, CostInput, CostOutput, IndexAm};
 use crate::types::{DataType, Value};
 use graph::Graph;
 use std::collections::HashMap;
@@ -67,6 +67,8 @@ pub(super) fn notice(msg: String) -> Error {
 /// An index's state, shared by the sessions (None until it is loaded or built).
 struct Shared {
     graph: parking_lot::Mutex<Option<Graph>>,
+    /// Its records (`evict_dropped`).
+    store: AmStore,
 }
 
 type Cache = parking_lot::Mutex<HashMap<(u64, Vec<u8>), Arc<Shared>>>;
@@ -74,6 +76,12 @@ type Cache = parking_lot::Mutex<HashMap<(u64, Vec<u8>), Arc<Shared>>>;
 fn cache() -> &'static Cache {
     static C: OnceLock<Cache> = OnceLock::new();
     C.get_or_init(Default::default)
+}
+
+/// The cached graphs of indexes whose records are gone (dropped, or given new storage) let
+/// go: a graph holds every vector of its index. Run as an index is loaded or built.
+fn evict_dropped(c: &mut HashMap<(u64, Vec<u8>), Arc<Shared>>) {
+    c.retain(|_, s| s.store.has_records());
 }
 
 /// HnswGetM / HnswGetEfConstruction.
@@ -101,8 +109,10 @@ fn shared(ix: &AmIndex) -> Result<Arc<Shared>> {
             g
         }
     };
-    let s = Arc::new(Shared { graph: parking_lot::Mutex::new(Some(g)) });
-    Ok(cache().lock().entry(id).or_insert(s).clone())
+    let s = Arc::new(Shared { graph: parking_lot::Mutex::new(Some(g)), store: ix.store.clone() });
+    let mut c = cache().lock();
+    evict_dropped(&mut c);
+    Ok(c.entry(id).or_insert(s).clone())
 }
 
 /// A setting's number.
@@ -167,7 +177,8 @@ impl IndexAm for Hnsw {
         let mut c = cache().lock();
         let base = &id.1[..id.1.len().saturating_sub(4)];
         c.retain(|k, _| !(k.0 == id.0 && k.1.len() == id.1.len() && k.1.starts_with(base)));
-        c.insert(id, Arc::new(Shared { graph: parking_lot::Mutex::new(Some(g)) }));
+        evict_dropped(&mut c);
+        c.insert(id, Arc::new(Shared { graph: parking_lot::Mutex::new(Some(g)), store: ix.store.clone() }));
         Ok(BuildStats { heap_tuples: reltuples, index_tuples: indtuples, removed: 0.0 })
     }
 

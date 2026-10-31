@@ -2147,6 +2147,17 @@ impl Txn {
     /// `get_snap` of each of `keys` (any order), the store's reads made together
     /// (`Store::get_versions`).
     pub fn get_many_snap(&self, keys: &[Vec<u8>], s: &Snap) -> Result<Vec<Option<Bytes>>> {
+        self.get_many_snap_with(keys, s, true)
+    }
+
+    /// `get_many_snap` with rows as they are stored (their out-of-line values' pointers: a
+    /// reader decoding some columns reads their values itself, from the source of a scan at
+    /// `s`, `TxnScan::source`).
+    pub fn get_many_snap_raw(&self, keys: &[Vec<u8>], s: &Snap) -> Result<Vec<Option<Bytes>>> {
+        self.get_many_snap_with(keys, s, false)
+    }
+
+    fn get_many_snap_with(&self, keys: &[Vec<u8>], s: &Snap, resolve: bool) -> Result<Vec<Option<Bytes>>> {
         self.catch_up(s);
         let st = s.st.borrow();
         let mut out: Vec<Option<Bytes>> = vec![None; keys.len()];
@@ -2154,7 +2165,8 @@ impl Txn {
         let mut reads: Vec<(&[u8], usize)> = Vec::new();
         for (i, key) in keys.iter().enumerate() {
             match self.snap_get(key, &st)? {
-                Some(v) => out[i] = self.resolve_own(key, v, Some(&st), st.ts)?,
+                Some(v) if resolve => out[i] = self.resolve_own(key, v, Some(&st), st.ts)?,
+                Some(v) => out[i] = v,
                 None => reads.push((key, i)),
             }
         }
@@ -2164,7 +2176,10 @@ impl Txn {
         reads.sort_unstable();
         let mut uniq: Vec<&[u8]> = reads.iter().map(|r| r.0).collect();
         uniq.dedup();
-        let got = self.db.store.get_versions(&uniq, st.ts)?;
+        let got = match resolve {
+            true => self.db.store.get_versions(&uniq, st.ts)?,
+            false => self.db.store.get_versions_raw(&uniq, st.ts)?,
+        };
         let mut u = 0;
         for (key, i) in reads {
             while uniq[u] != key {
@@ -3398,6 +3413,18 @@ where
     type Item = Result<(Vec<u8>, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // (No entries of `upper` left: `lower`'s, as they come.)
+        if self.upper_done && self.upper_head.is_none() {
+            return match self.lower_head.take() {
+                Some(e) => Some(Ok(e)),
+                None if self.lower_done => None,
+                None => {
+                    let r = self.lower.next();
+                    self.lower_done = r.is_none();
+                    r
+                }
+            };
+        }
         loop {
             if self.lower_head.is_none() && !self.lower_done {
                 match self.lower.next() {

@@ -258,6 +258,13 @@ impl Graph {
 
     /// A new element (slot) with no place yet.
     fn new_elem(&mut self, level: u8, heaptids: &[u32], value: &[u8], esize: usize) -> u32 {
+        let slot = self.push_elem(level, heaptids, esize);
+        self.set_value(slot, value);
+        slot
+    }
+
+    /// `new_elem` without its value.
+    fn push_elem(&mut self, level: u8, heaptids: &[u32], esize: usize) -> u32 {
         let slot = self.elems.len() as u32;
         let mut h = [NONE; HEAPTIDS];
         h[..heaptids.len()].copy_from_slice(heaptids);
@@ -277,8 +284,19 @@ impl Graph {
             nversion: 1,
             neighbors: vec![NONE; ncount].into_boxed_slice(),
         });
-        self.set_value(slot, value);
         slot
+    }
+
+    /// The values a build placed (`place_built_at`), taken over whole: a graph with no
+    /// values yet holds them where they are, none copied.
+    pub fn adopt_values(&mut self, data: Vec<u8>) {
+        assert!(self.vdata.is_empty() && self.vstart.is_empty(), "values adopted by a graph that has some");
+        self.vdata = data;
+    }
+
+    /// Bytes `start..start + len` of the values (`adopt_values`).
+    pub fn value_bytes(&self, start: usize, len: usize) -> &[u8] {
+        &self.vdata[start..start + len]
     }
 }
 
@@ -286,7 +304,8 @@ impl Graph {
     /// One element of CreateGraphPages (in the build's list order): placed after the last
     /// element, on a new page when the tuples don't fit (element and neighbors on one page
     /// when they can be). Its neighbor tuple is filled later (WriteNeighborTuples).
-    pub fn place_built(&mut self, level: u8, heaptids: &[u32], value: &[u8], varsize: usize) -> Result<u32> {
+    /// Its value is at `start..start + len` of the values the graph adopted (`adopt_values`).
+    pub fn place_built_at(&mut self, level: u8, heaptids: &[u32], (start, len): (usize, usize), varsize: usize) -> Result<u32> {
         if self.pages.is_empty() {
             self.append_page();
         }
@@ -301,7 +320,9 @@ impl Graph {
         if free < esize || (combined <= MAX_SIZE && free < combined) {
             blk = self.append_page();
         }
-        let slot = self.new_elem(level, heaptids, value, esize);
+        let slot = self.push_elem(level, heaptids, esize);
+        self.vstart.push(start);
+        self.vlen.push(len as u32);
         let offno = self.page(blk).add(slot, esize);
         let mut nblk = blk;
         if self.page(blk).free() < nsize {

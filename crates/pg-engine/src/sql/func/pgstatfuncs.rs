@@ -90,15 +90,11 @@ fn tab_entry(a: &[Value], c: &FnCtx) -> Option<TabEntry> {
 /// the live subtransactions' inserted / updated / deleted.
 fn xact_count(a: &[Value], c: &FnCtx, get: fn(&TabCounts) -> i64, live: u8) -> Result<Value> {
     let rel = oid_arg(&a[0]);
-    let mut counts = c
-        .exec
-        .sess
-        .pgstat
-        .borrow()
-        .tabs
-        .get(&rel)
-        .copied()
-        .unwrap_or_default();
+    let mut counts = {
+        let mut p = c.exec.sess.pgstat.borrow_mut();
+        p.flush_returned();
+        p.tabs.get(&rel).copied().unwrap_or_default()
+    };
     // (Counts of earlier transactions not flushed yet are pending too.)
     if let Some(u) = pgstat::unflushed_table(c.exec.sess, rel) {
         let mut sum = u;

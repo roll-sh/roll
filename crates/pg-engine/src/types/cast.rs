@@ -655,6 +655,11 @@ pub fn cast_value(
         (Value::Text(s), T::Char) => Value::Char(super::text::parse_char(s)),
         // strings to strings
         (Value::Text(s), T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name) => {
+            // (Into text without a length: the same string, not copied: a big value read out
+            // of line and cast, xml to text, is held once.)
+            if !matches!(from, T::Bpchar(_)) && matches!(to, T::Text) {
+                return Ok(Value::Text(s.clone()));
+            }
             let s = if matches!(from, T::Bpchar(_)) && !matches!(to, T::Bpchar(_)) {
                 super::text::bpchar_trim(s)
             } else {

@@ -601,6 +601,15 @@ impl Store {
         keys: &[&[u8]],
         ts: u64,
     ) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
+        self.get_versions_with(keys, ts, true)
+    }
+
+    /// `get_versions` with rows as they are stored (their out-of-line values' pointers).
+    pub fn get_versions_raw(&self, keys: &[&[u8]], ts: u64) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
+        self.get_versions_with(keys, ts, false)
+    }
+
+    fn get_versions_with(&self, keys: &[&[u8]], ts: u64, resolve: bool) -> Result<Vec<Option<(u64, Option<Bytes>)>>> {
         debug_assert!(keys.windows(2).all(|w| w[0] < w[1]));
         let view = self.view();
         let mut out: Vec<Option<(u64, Option<Bytes>)>> = vec![None; keys.len()];
@@ -666,7 +675,7 @@ impl Store {
             }
         }
         // (Rows with their out-of-line values put back.)
-        for (i, o) in out.iter_mut().enumerate() {
+        for (i, o) in out.iter_mut().enumerate().filter(|_| resolve) {
             if let Some((_, Some(v))) = o
                 && toast::has_external(v)
             {
@@ -1293,6 +1302,13 @@ impl Store {
         }
     }
 
+    /// Freeze the memtable and write it, with every frozen one, to L0 (benches and tests
+    /// that want the data in files).
+    pub fn flush_memtables(&self) -> Result<()> {
+        self.rotate()?;
+        self.flush_all()
+    }
+
     /// Merge L0 into L1 once L0 has enough files, dropping versions no snapshot can see.
     pub fn maybe_compact(&self) -> Result<()> {
         if self.view.read().l0.len() < self.opts.l0_compaction_trigger {
@@ -1567,6 +1583,8 @@ enum Cursor {
         started: bool,
         /// Blocks read from the files go into the block cache (not for compaction).
         fill: bool,
+        /// Every key of `block` is below `end` (no comparison per entry).
+        whole: bool,
     },
 }
 
@@ -1594,6 +1612,7 @@ impl Cursor {
             start: start.to_vec(),
             started: false,
             fill: true,
+            whole: false,
         }
     }
 
@@ -1648,10 +1667,11 @@ impl Cursor {
                 block,
                 block_idx,
                 pos,
-                end: _,
+                end,
                 start,
                 started,
                 fill,
+                whole,
             } => loop {
                 if *file >= ssts.len() {
                     return Ok(());
@@ -1670,6 +1690,7 @@ impl Cursor {
                         if *block_idx < sst.block_count() {
                             let b = sst.block_with(*block_idx, *fill)?;
                             b.seek(start, pos);
+                            *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end.as_slice());
                             *block = Some(b);
                         }
                     }
@@ -1683,6 +1704,7 @@ impl Cursor {
                     }
                     let b = sst.block_with(*block_idx, *fill)?;
                     b.at(0, pos);
+                    *whole = end.is_empty() || b.last_key().is_none_or(|k| k < end.as_slice());
                     *block = Some(b);
                 }
                 if pos.index() >= block.as_ref().unwrap().len() {
@@ -1705,6 +1727,7 @@ impl Cursor {
                 block,
                 pos,
                 end,
+                whole,
                 ..
             } => {
                 if *file >= ssts.len() {
@@ -1715,7 +1738,7 @@ impl Cursor {
                     return None;
                 }
                 let k = pos.key();
-                (end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref(pos)))
+                (*whole || end.is_empty() || k < end.as_slice()).then(|| (k, b.value_ref(pos)))
             }
         }
     }
@@ -1803,38 +1826,75 @@ impl Cursor {
 struct Merge {
     sources: Vec<Cursor>,
     end: Vec<u8>,
+    /// The source `min` chose last, while no other source has moved since: the others'
+    /// smallest head is `bound` (`bounded` false: they have none left), so entries of `cur`
+    /// below it come next without looking at the others (a range held by one file, or runs
+    /// of keys from one source, cost a key comparison per entry).
+    cur: Option<usize>,
+    bound: Vec<u8>,
+    bounded: bool,
 }
 
 impl Merge {
     fn new(sources: Vec<Cursor>, end: Vec<u8>) -> Merge {
-        Merge { sources, end }
+        Merge { sources, end, cur: None, bound: Vec::new(), bounded: false }
     }
 
     /// The source holding the smallest raw entry left (None: none below the end). Identical
     /// storage keys can't occur in two sources (a commit ts belongs to one memtable), so
-    /// ties don't need breaking.
+    /// ties don't need breaking. Only the source chosen last may have moved since (`cur`).
     fn min(&mut self) -> Result<Option<usize>> {
+        if let Some(i) = self.cur {
+            let c = &mut self.sources[i];
+            c.fill()?;
+            // (A source's entries stop at the end: `head`, the memtables' ranges.)
+            match c.head() {
+                Some((k, _)) if !self.bounded || k < self.bound.as_slice() => return Ok(Some(i)),
+                None if !self.bounded => return Ok(None),
+                _ => {}
+            }
+        }
         for c in &mut self.sources {
             c.fill()?;
         }
         let mut best: Option<(usize, &[u8])> = None;
+        let mut second: Option<&[u8]> = None;
         for (i, c) in self.sources.iter().enumerate() {
             let Some((k, _)) = c.head() else {
                 continue;
             };
-            if best.is_none_or(|(_, b)| k < b) {
-                best = Some((i, k));
+            match best {
+                Some((_, b)) if k >= b => {
+                    if second.is_none_or(|s| k < s) {
+                        second = Some(k);
+                    }
+                }
+                _ => {
+                    second = best.map(|(_, b)| b);
+                    best = Some((i, k));
+                }
             }
         }
-        let Some((i, k)) = best else { return Ok(None) };
+        let Some((i, k)) = best else {
+            self.cur = None;
+            return Ok(None);
+        };
         if !self.end.is_empty() && k >= self.end.as_slice() {
+            self.cur = None;
             return Ok(None);
         }
+        self.bound.clear();
+        if let Some(s) = second {
+            self.bound.extend_from_slice(s);
+        }
+        self.bounded = second.is_some();
+        self.cur = Some(i);
         Ok(Some(i))
     }
 
     /// Every source on to its first entry >= `target`.
     fn seek(&mut self, target: &[u8]) {
+        self.cur = None;
         for c in &mut self.sources {
             c.seek(target);
         }
@@ -1863,19 +1923,24 @@ pub struct Scan {
 
 /// A cursor per source of `view` over [start, end), newest source first.
 fn sources(view: &View, start: &[u8], end: &[u8]) -> Vec<Cursor> {
+    // (Files holding no key of the range aren't sources: each source is looked at whenever
+    // the merge changes sources.)
+    let overlaps = |s: &&Arc<SstReader>| s.meta.last_key.as_slice() >= start && (end.is_empty() || s.meta.first_key.as_slice() < end);
     let mut sources = Vec::new();
     sources.push(Cursor::mem(view.mem.clone(), start, end));
     for f in &view.imm {
-        sources.push(match f {
-            Frozen::Mem(m) => Cursor::mem(m.clone(), start, end),
-            Frozen::Sst(s) => Cursor::level(vec![s.clone()], start, end),
-        });
+        match f {
+            Frozen::Mem(m) => sources.push(Cursor::mem(m.clone(), start, end)),
+            Frozen::Sst(s) if overlaps(&s) => sources.push(Cursor::level(vec![s.clone()], start, end)),
+            Frozen::Sst(_) => {}
+        }
     }
-    for s in &view.l0 {
+    for s in view.l0.iter().filter(overlaps) {
         sources.push(Cursor::level(vec![s.clone()], start, end));
     }
-    if !view.l1.is_empty() {
-        sources.push(Cursor::level(view.l1.clone(), start, end));
+    let l1: Vec<_> = view.l1.iter().filter(overlaps).cloned().collect();
+    if !l1.is_empty() {
+        sources.push(Cursor::level(l1, start, end));
     }
     sources
 }

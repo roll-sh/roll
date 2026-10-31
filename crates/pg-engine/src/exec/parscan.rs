@@ -321,7 +321,7 @@ impl Decode {
         let n = row.len();
         for k in &self.extra {
             let v = match (data, k.dist_col()) {
-                (Some(data), Some((c, ..))) if self.raw.contains(&c) => match crate::storage::toast::pointer_at(data, c) {
+                (Some(data), Some((c, ..))) if self.raw.contains(&c) => match crate::storage::toast::has_external(bytes).then(|| crate::storage::toast::pointer_at(data, c)).flatten() {
                     Some(id) => {
                         let x = lazy.fetch(&crate::storage::toast::value_key(key, id))?;
                         crate::storage::row::ext_value(&x).and_then(|(kind, x)| k.dist_ext(kind, x))
@@ -421,7 +421,8 @@ impl LazyBuf {
         for c in &mut self.nums {
             c.take();
         }
-        Ok(Lazy { d, key, data, buf: self })
+        let ext = crate::storage::toast::has_external(bytes);
+        Ok(Lazy { d, key, data, ext, buf: self })
     }
 }
 
@@ -432,6 +433,8 @@ pub(super) struct Lazy<'a> {
     d: &'a Decode,
     key: &'a [u8],
     data: &'a [u8],
+    /// The row points at out-of-line values (else no value is looked at for a pointer).
+    ext: bool,
     buf: &'a mut LazyBuf,
 }
 
@@ -451,6 +454,7 @@ impl Lazy<'_> {
         }
         match self.buf.offs[i] {
             u32::MAX => Ok(self.d.missing[i].clone().unwrap_or(Value::Null)),
+            off if !self.ext => crate::storage::row::decode_value(self.data, &mut (off as usize)),
             off => {
                 let mut pos = off as usize;
                 match crate::storage::toast::read_pointer(self.data, &mut pos)? {

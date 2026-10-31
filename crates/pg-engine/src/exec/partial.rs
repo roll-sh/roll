@@ -403,7 +403,11 @@ impl<'a> Partials<'a> {
         // (A column's number stands in for its value: NULL or not is what's read of it.)
         let stand_in = |c: &Option<(i128, u32)>| if c.is_some() { &Value::Bool(true) } else { &Value::Null };
         let kr = KeyRef { keys: &self.spec.keys, trim: &self.spec.trim, row, computed: &self.key };
-        let g = self.index.get(&kr).map(|g| *g as usize);
+        // (No grouping: the one group, once it is made.)
+        let g = match self.spec.keys.is_empty() {
+            true => (!self.part.groups.is_empty()).then_some(0),
+            false => self.index.get(&kr).map(|g| *g as usize),
+        };
         // (A state that can't take its value leaves the whole row to the serial path:
         // checked before anything changes.)
         let skipped = |a: &Option<K>, skip: bool, v: &Value| a.is_some() && skip && v.is_null();

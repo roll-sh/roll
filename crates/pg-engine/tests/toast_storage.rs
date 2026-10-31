@@ -83,6 +83,34 @@ const FILL: &str = "INSERT INTO big SELECT id, id % 10, 0, repeat(md5(id::text |
     FROM generate_series(1, 200) id";
 
 #[test]
+fn index_fetches_read_only_the_values_they_decode() {
+    let _g = counters();
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    run(&mut s, "CREATE TABLE big (id int PRIMARY KEY, cat int, gen int, t text, b bytea, j jsonb, a int[]);\nCREATE INDEX big_cat ON big (cat)");
+    run(&mut s, FILL);
+    run(&mut s, "ANALYZE big;\nSET enable_seqscan = off;\nSET enable_bitmapscan = off");
+    // A point lookup and an index scan: the values of the columns decoded only.
+    let (_, r) = counted(|| assert_eq!(one(&mut s, "SELECT id, cat FROM big WHERE id = 7"), "[Int4(7), Int4(7)]"));
+    assert_eq!(r, 0);
+    let (_, r) = counted(|| assert_eq!(one(&mut s, "SELECT length(t) FROM big WHERE id = 7"), "[Int4(2560)]"));
+    assert_eq!(r, 1);
+    let (_, r) = counted(|| assert_eq!(one(&mut s, "SELECT count(*), sum(gen) FROM big WHERE cat = 3"), "[Int8(20), Int8(0)]"));
+    assert_eq!(r, 0);
+    // A bitmap heap scan's fetches likewise.
+    run(&mut s, "SET enable_indexscan = off;\nSET enable_bitmapscan = on");
+    let (_, r) = counted(|| assert_eq!(one(&mut s, "SELECT count(*), sum(length(b)) FROM big WHERE cat = 3"), "[Int8(20), Int8(44800)]"));
+    assert_eq!(r, 20);
+    // Inside a transaction that wrote the rows: its own values.
+    run(&mut s, "BEGIN;\nUPDATE big SET t = t || 'x', gen = 1 WHERE cat = 3");
+    let (_, r) = counted(|| assert_eq!(one(&mut s, "SELECT count(*), sum(length(t)) FROM big WHERE cat = 3"), "[Int8(20), Int8(51220)]"));
+    assert_eq!(r, 0, "the transaction's own values");
+    run(&mut s, "COMMIT;\nRESET enable_indexscan;\nRESET enable_bitmapscan;\nRESET enable_seqscan");
+    assert_eq!(one(&mut s, CHECK), "[Int8(180), Int8(200)]");
+}
+
+#[test]
 fn values_round_trip_through_writes() {
     let _g = counters();
     let dir = tempfile::tempdir().unwrap();

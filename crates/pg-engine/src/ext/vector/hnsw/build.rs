@@ -357,14 +357,15 @@ impl Build {
     /// then WriteNeighborTuples), the memory graph let go.
     pub fn flush(&mut self) -> Result<()> {
         let mut slot = vec![NONE; self.elems.len()];
+        // (The graph takes the values over where they are: never held twice.)
+        self.graph.adopt_values(std::mem::take(&mut self.vdata));
         for &e in self.list.iter().rev() {
             let el = &self.elems[e as usize];
             let (level, heaptids) = (el.level, el.heaptids);
             let nheap = el.nheap as usize;
-            let s = self.vstart[e as usize];
-            let value = &self.vdata[s..s + self.vlen[e as usize] as usize];
-            let varsize = self.sup.varsize(value);
-            slot[e as usize] = self.graph.place_built(level, &heaptids[..nheap], value, varsize)?;
+            let (s, n) = (self.vstart[e as usize], self.vlen[e as usize] as usize);
+            let varsize = self.sup.varsize(self.graph.value_bytes(s, n));
+            slot[e as usize] = self.graph.place_built_at(level, &heaptids[..nheap], (s, n), varsize)?;
         }
         self.graph.finish_built(if self.entry == NONE { NONE } else { slot[self.entry as usize] });
         let m = self.m;

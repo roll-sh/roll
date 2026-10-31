@@ -434,6 +434,12 @@ impl AmStore {
         (self.instance, self.prefix.clone())
     }
 
+    /// Whether the index has any record (its storage dropped, a cache of it can go).
+    pub fn has_records(&self) -> bool {
+        let end = crate::storage::keys::prefix_end(&self.prefix);
+        self.store.scan_raw(&self.prefix, &end, self.store.visible_ts()).next().is_some()
+    }
+
     /// Every record of the method's (keys not starting with 0xFF): (key after the prefix,
     /// value), in key order.
     pub fn load(&self) -> Result<Vec<(Vec<u8>, bytes::Bytes)>> {

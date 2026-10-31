@@ -734,14 +734,17 @@ pub fn decode_row_need_spare(b: &[u8], need: &[bool], spare: usize) -> Result<Ve
     let mut pos = 0;
     let n = get_varint(b, &mut pos)? as usize;
     let mut row = Vec::with_capacity(n + spare);
-    for i in 0..n {
-        if need.get(i).copied().unwrap_or(false) {
+    // (The values after the last column needed aren't walked.)
+    let last = need[..need.len().min(n)].iter().rposition(|&x| x).map_or(0, |i| i + 1);
+    for &want in &need[..last] {
+        if want {
             row.push(decode_value(b, &mut pos)?);
         } else {
             skip_value(b, &mut pos)?;
             row.push(Value::Null);
         }
     }
+    row.resize(n, Value::Null);
     Ok(row)
 }
 

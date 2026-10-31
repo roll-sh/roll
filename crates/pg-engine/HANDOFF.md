@@ -795,7 +795,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       vectors (done in round 21, agent 102: out-of-line storage and inline scans, below);
       index builds' peak memory (hnsw: the graph and its records both in memory; ivfflat at
       128 dimensions; agent 102's measurements in BENCH.md "Out-of-line storage"); the
-      per-row cost of the storage iteration and row decoding behind full scans of small rows.
+      per-row cost of the storage iteration and row decoding behind full scans of small rows
+      (round 22, agent 117: below, "The scan path's per-row cost").
 - **Out-of-line storage of large values, inline scans** (round 21, agent 102; BENCH.md
   "Out-of-line storage"): the engine's TOAST, for every type.
   - Format (`storage/toast.rs`, `storage/row.rs`): a value whose encoding reaches its
@@ -854,6 +855,71 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     results.tsv, pg_dump_tap 14,817 / 14,817. pgvector's own suite needs a reference built
     with `OPTFLAGS=""`: the bench's seeded build (`-DIVFFLAT_BENCH -DHNSW_MEMORY`) prints
     notices of its own (800 / 915 against it).
+- **The scan path's per-row cost, index fetches of wide rows, hnsw build memory** (round 22,
+  agent 117; BENCH.md "Scan path per row (round 22, agent 117)"):
+  - Where a serial scan's row went (in-process, instructions per row of `SELECT count(*)` over
+    a compacted 1M-row table: ~2,500; PostgreSQL's seq scan ~30-60 ns of CPU): no single
+    hotspot. About a quarter the LSM iteration (`Merge::min` and `Cursor::head` looking at
+    every source per entry, the key's allocation and the value's `Bytes` refcount), a third
+    the scan node and row decoding (a `Vec<Value>` per row, every column walked even after the
+    last one read, pg_stat's per-row SipHash lookup), the rest the aggregation above.
+    `examples/scan_bench.rs` measures it: `store` (the iterator alone) and `sql` (scans through
+    SQL, fresh or compacted data, serial and as planned; `SCAN_QUERY` / `SCAN_WORKERS` /
+    `SCAN_REPS` / `SCAN_STATE` pick one case, for `perf stat` / `perf record`).
+  - Storage (`storage/mod.rs`): the merge keeps the source it chose last and the other
+    sources' smallest head (`Merge::cur`, `bound`): entries of that source below it come next
+    without looking at the others, so a range held by one file costs a key comparison per
+    entry, and runs from one source likewise; only a seek resets it. A scan's sources are the
+    files overlapping its range (an L0 file of another table isn't one). A block wholly below
+    the scan's end isn't compared with it per entry (`Cursor::Level::whole`).
+    `Store::flush_memtables` (benches, tests). `Store::get_versions_raw`.
+  - Rows (`storage/row.rs`): `decode_row_need` stops at the last column needed.
+  - Transactions (`txn/mod.rs`): a scan with none of the transaction's writes left in its range
+    passes the store's rows through (`Overlay`); `Txn::get_many_snap_raw`.
+  - Serial scans (`exec/scan.rs`): a plain sequential scan with a filter that has a kernel
+    reads its rows as the parallel workers do (`LazyScan`: `parscan::Lazy`, the kernel over
+    the stored row in place, a row made only for the rows it keeps); a row with out-of-line
+    values, or of a table whose reads are noted (`sizing::tracked`), takes the old path.
+    `count(*)` over a plain sequential scan counts the rows without making them
+    (`ScanNode::count_rest`, filtered through `LazyScan`), except where the aggregation would
+    run in workers (a table not modelled or of 1,024 pages or more with workers allowed: its
+    partial counts, PostgreSQL's parallel plan). pg_stat's pending table counts use the fast
+    hasher, and tuples returned by one relation in a row add up before going into them
+    (`Pending::returned_run`, flushed before anything reads them).
+  - Workers (`exec/parscan.rs`, `exec/partial.rs`): a row without out-of-line values isn't
+    looked at for pointers (agent 112's per-row check after 7bdb4584: `Lazy::ext`, and
+    `with_extra`'s walk to a distance column); an ungrouped partial aggregate goes to its one
+    group without a hash lookup.
+  - Index fetches read rows as stored (agent 107's wide rows): index and bitmap heap scans of
+    a table that ever stored a value out of line fetch its rows raw and read only the decoded
+    columns' values (`ScanNode::fetch_stored`, the plain scan's `toast` reader over a source
+    of the table's rows); a bitmap index scan that checks its quals on fetched rows decodes
+    only their columns (`qual_row`), also over `rows_in_order`'s dense reads. Before, a point
+    lookup of a row with two 1 MB values read both. Test `toast_storage`
+    `index_fetches_read_only_the_values_they_decode`. A cast into text without a length
+    (xml::text, text::text) keeps the string instead of copying it (`types/cast.rs`).
+  - hnsw build memory (`ext/vector/hnsw/`): measured from fresh processes and in one that
+    built and dropped an index before (BENCH.md). Found: a graph of a dropped index stayed in
+    the process's index cache for good (no hook on DROP); it is let go when another index is
+    loaded or built (`evict_dropped`: entries whose records are gone,
+    `AmStore::has_records`). The build's flush copied every value into the graph while the
+    build still held them; the graph now takes the build's value buffer over
+    (`Graph::adopt_values`, `place_built_at`). Measured the rest: a DROP INDEX of a 100,000-row
+    hnsw index adds ~130 MB transiently (the drop's deletes of the index's records, not hnsw
+    code); the graph held whole through the on-disk phase is still the peak's largest part.
+  - Left: paging the hnsw graph through `AmStore` in the on-disk phase (bounded by
+    maintenance_work_mem; the graph is an object model every search reads from); a lending
+    iterator from the store to the scan node (the key's allocation and the value's refcount
+    per row, ~15% of the iterator); the executor's per-row `Vec<Value>` and `eval` above
+    unfiltered scans (agent 112's area); ivfflat's and bloom's caches keep a dropped index's
+    pages the same way hnsw's did; workers running only decodes stay off as agent 102 left
+    them.
+  - Verified: crate tests in debug and release (deep_input, big_tables, parallel tests), the
+    toast and spill tests with `ROLL_TXN_SPILL_BYTES=4096`, clippy (no new warnings), difftest
+    smoke, isolation 121 / 122 specs (1,647 / 1,648 permutations), a full regress run on a private reference 51,148 / 51,150 with
+    0 units changed against results.tsv, pg_dump_tap 14,817 / 14,817, contrib pgvector
+    915 / 915 (own reference, OPTFLAGS=""), pgvector_equality 480 / 480, bloom / pg_trgm / btree_gist / cube unchanged,
+    every TPC-H result hash equal to PostgreSQL's.
 - **Index access methods of native code** (round 20, agent 70; `src/ext/index_am.rs`): what an
   extension's `CREATE ACCESS METHOD ... HANDLER` names when the handler is a C function the
   engine implements. Another index-type extension adds its routine to `index_am::routine`.

@@ -474,7 +474,10 @@ pub struct Pending {
     pub io_run: Option<(IoKey, i64)>,
     /// The backend's own WAL (pg_stat_get_backend_wal): records and bytes.
     pub wal: (i64, i64),
-    pub tabs: HashMap<u32, TabCounts>,
+    pub tabs: super::fasthash::HashMap<u32, TabCounts>,
+    /// Tuples returned by scans of one relation in a row (`count_returned`, a row at a
+    /// time), not yet in `tabs` (`flush_returned`).
+    returned_run: Option<(u32, i64)>,
     pub funcs: HashMap<u32, FuncCounts>,
     /// New sessions to count in the database's entry.
     pub sessions: i64,
@@ -512,7 +515,15 @@ impl Pending {
     }
 
     pub fn tab(&mut self, rel: u32) -> &mut TabCounts {
+        self.flush_returned();
         self.tabs.entry(rel).or_default()
+    }
+
+    /// `returned_run` into `tabs`: before anything reads them.
+    pub fn flush_returned(&mut self) {
+        if let Some((rel, n)) = self.returned_run.take() {
+            self.tabs.entry(rel).or_default().tuples_returned += n;
+        }
     }
 
     /// pgstat_clear_snapshot.
@@ -747,7 +758,14 @@ pub fn scan_counts(ctx: &ExecCtx) -> bool {
 /// pgstat_count_index_tuples).
 pub fn count_returned(ctx: &ExecCtx, rel: u32, n: i64) {
     if n > 0 {
-        ctx.sess.pgstat.borrow_mut().tab(rel).tuples_returned += n;
+        let mut p = ctx.sess.pgstat.borrow_mut();
+        match &mut p.returned_run {
+            Some((r, c)) if *r == rel => *c += n,
+            _ => {
+                p.flush_returned();
+                p.returned_run = Some((rel, n));
+            }
+        }
     }
 }
 
@@ -1553,6 +1571,7 @@ fn end_xact_counts(
 /// waited PGSTAT_MAX_INTERVAL, or when the last flush was PGSTAT_MIN_INTERVAL ago or more.
 fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &crate::catalog::Catalog) {
     let mut p = sess.pgstat.borrow_mut();
+    p.flush_returned();
     // (The forced flush is absorbed even with nothing to flush.)
     if std::mem::take(&mut p.force_next) {
         force = true;

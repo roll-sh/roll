@@ -2607,6 +2607,128 @@ every vector and neighbor list) while the build's on-disk phase inserts into it;
 at maintenance_work_mem needs that phase to page the graph through `AmStore` (records read
 and evicted on demand), which is the next step.
 
+## Scan path per row (round 22, agent 117)
+
+What changed (HANDOFF "The scan path's per-row cost"): the LSM merge stays on one source while
+its keys come first, a scan's sources are only the files overlapping its range, rows decode up
+to the last column read, a serial filtered sequential scan reads rows as the workers do (the
+filter's kernel over the stored row), `count(*)` over a serial scan counts rows without making
+them, pg_stat's per-row count no longer hashes with SipHash, workers skip the out-of-line
+pointer checks for rows without any, index and bitmap fetches read only the decoded columns'
+out-of-line values, an hnsw build no longer holds its values twice and a dropped index's graph
+is let go.
+
+Method: release builds; **base** is `3f56fe3f` (this round's base) and **new** this round's
+engine, each on a data directory of its own (one loaded, the other a copy of it), against
+PostgreSQL 18.6 (the pinned image, the bench settings); servers on CPUs 24-27, clients on
+32-35. The machine was at load 25-45 of 36 CPUs throughout: wall and CPU moved by up to 2x
+between runs of one build, so the in-process figures below are instruction counts (`perf stat
+-e instructions:u`, a run with N statements minus one with none, so the setup cancels), the
+measure that load doesn't move; wire figures are two interleaved rounds.
+
+### Instructions per row, in process (`examples/scan_bench.rs sql`, compacted data)
+
+`n`: 1M rows (int, int, int); `w`: 500k rows of 10 columns (~150 bytes); `m`: 150k rows of
+`n`'s shape (a modelled heap under 8 MB). w0: `max_parallel_workers_per_gather = 0`; w2: as
+planned (workers, or the inline scan), all threads counted.
+
+| query | base w0 | new w0 | base w2 | new w2 |
+|---|---|---|---|---|
+| `count(*) FROM n` | 2,512 | 1,067 | 1,643 | 1,415 |
+| `sum(b) FROM n` | 2,545 | 2,331 | 2,077 | 1,819 |
+| `count(*) FROM n WHERE b = 7` | 2,895 | 1,879 | 1,836 | 1,665 |
+| `count(*) FROM w` | 3,262 | 1,251 | 1,995 | 1,742 |
+| `sum(h) FROM w` | 3,312 | 3,063 | 2,850 | 2,533 |
+| `count(*) FROM w WHERE e = 'x7'` | 3,909 | 2,675 | 2,867 | 2,598 |
+| `count(*) FROM m WHERE b = 7` | 3,109 | 2,123 | 1,908 | see note |
+| `sum(b) FROM m` | 2,757 | 2,556 | 2,140 | 1,878 |
+
+(Note: the measured build counted `m`'s filtered rows serially even with workers allowed
+(2,124 against the inline scan's 1,908); `count(*)` now leaves any table the partial
+aggregation can take to it, inline or in workers.) The store's iterator alone
+(`scan_bench store`): 136-176 ns/row before on a quiet core, the per-source work gone for a
+range held by one file; with a memtable, an L0 file and L1 interleaved, 156 -> 96 ns/row.
+
+Where the rest goes, `count(*) FROM n` counted without making rows (1,067 instructions per
+row): the store's `Scan::next` 12%, `TxnScan` / `Lower` 10%, `Cursor::head` 7%, the value's
+`Bytes` refcount and the key's allocation 15%, block entry decoding 8%, the scan node 10%.
+PostgreSQL's seq scan: 30-60 ns of CPU per row.
+
+### Wire, CPU ms per statement (two rounds; `n` 2M rows, `w` 1M, `s` 300k)
+
+| query | PostgreSQL | base | new |
+|---|---|---|---|
+| serial `count(*) FROM n` | 140, 115 | 1,188, 1,113 | 408, 376 |
+| serial `sum(b) FROM n` | 162, 132 | 1,255, 873 | 718, 1,000 |
+| serial `count(*) FROM n WHERE b = 7` | 157, 157 | 1,278, 873 | 586, 758 |
+| serial `count(*) FROM w` | 111, 56 | 830, 661 | 311, 211 |
+| serial `sum(h) FROM w` | 136, 141 | 755, 778 | 631, 470 |
+| serial `count(*) FROM w WHERE e = 'x7'` | 136, 135 | 936, 960 | 496, 410 |
+| serial `count(*) FROM s WHERE b = 7` | 27, 23 | 355, 228 | 256, 110 |
+| parallel `count(*) FROM n` (wall ms) | 137, 134 (63, 65) | 751, 791 (297, 397) | 553, 531 (229, 211) |
+| parallel `sum(b) FROM n` | 219, 185 (83, 75) | 945, 1,015 (360, 434) | 711, 603 (272, 258) |
+| parallel `count(*) FROM w WHERE e = 'x7'` | 196, 200 (70, 74) | 601, 603 (330, 339) | 500, 458 (204, 164) |
+| as planned `count(*) FROM s WHERE b = 7` | 37, 37 (21, 21) | 148, 140 (150, 130) | 108, 111 (57, 39) |
+
+### TPC-H SF1 (CPU s per run of 3, two interleaved rounds; every hash equal to PostgreSQL's)
+
+All 22: PostgreSQL 21.3 s, 48.5 CPU s; base 46.4 / 56.0 s, 113.9 / 128.6 CPU s; new 48.8 /
+47.9 s, 115.5 / 113.3 CPU s; peak memory base 1,976 / 1,956 MB, new 1,975 / 1,960 MB (PostgreSQL
+2,115). Within the noise: the queries' time is the executor's above the scan.
+q06 and q10 against `7bdb4584^` (agent 112's per-row regression after the out-of-line
+values), three alternating rounds of 5 runs, CPU s per run: q06 `7bdb4584^` 6.03 / 5.44 /
+5.33, base 5.61 / 5.68 / 4.96, new 4.70 / 4.82 / 4.46; q10 11.35 / 11.03 / 10.15, 11.44 /
+11.27 / 10.47, 10.20 / 9.45 / 10.31.
+
+### pgbench (scale 10, 8 clients, prepared, 30 s; instructions per transaction over 20 s)
+
+Select-only: base 113.9k / 113.2k instructions per transaction, new 113.3k / 112.6k; tpcb-like
+1,024k against 839k (one run each; autovacuum included). TPS moved 30-50% between rounds of
+one build (select-only base 30.5k / 30.2k, new 25.3k / 32.0k, PostgreSQL 22.5k in the
+loaded round; 42.8k / 40.7k, 39.6k / 40.3k, 39.0k in a quieter one). CPU ms per transaction:
+select-only base 0.102 / 0.104, new 0.102 / 0.099 (PostgreSQL 0.076); tpcb-like 0.837 /
+0.844, 0.800 / 0.869 (0.562). Peak RSS unchanged (the 2 GB cache).
+
+### hnsw build memory (vector(128) x 100,000, m 16, ef_construction 64, maintenance_work_mem 64 MB)
+
+Two rounds, each engine fresh: build, drop, build again, drop. Peak over the RSS before the
+statement (VmHWM reset), and the RSS after.
+
+| | base | new |
+|---|---|---|
+| first build, fresh process (RSS before 25-27 MB) | +226, +227 MB | +213, +218 MB |
+| RSS after the first DROP INDEX | 289, 289 MB | 302, 288 MB |
+| second build's peak (absolute) | 416, 412 MB | 412, 391 MB |
+| RSS after the second build | 399, 396 MB | 412, 318 MB |
+| RSS after the second DROP INDEX | 377, 365 MB | 286, 289 MB |
+
+The first build's +213-227 MB is the index's graph kept for queries (~90 MB: what is still
+resident once the allocator returns the rest), the table's blocks in the cache (~55 MB), the
+memtables and the build's transient structures. What made agent 102's "+123 MB for a rebuild"
+was the process, not the build: DROP INDEX adds ~130 MB transiently (the drop's deletes of
+the index's records), and the dropped index's graph stayed cached for good; it is let go at
+the next build or load now (the second DROP leaves 286-289 MB, not 365-377). pgvector peaked
+at +66 MB (agent 102). Bounding the build at maintenance_work_mem needs the on-disk phase to
+page the graph through storage: not done.
+
+### Wide rows (agent 107's case: 4 rows of two 1 MB values; a 50 MB xml value)
+
+`toast_storage` `index_fetches_read_only_the_values_they_decode`: a point lookup of `id, n`
+reads none of the row's values (it read all), `length(t)` one, a bitmap heap scan's 20 rows
+of `sum(length(b))` 20 (100 before). The first statement in a fresh process (`SELECT id, n
+FROM big2 WHERE id = 3`): base +407 MB, 444 ms; new +48 MB, 271 ms (PostgreSQL ~110 ms,
+client included). `length(d::text)` of the 50 MB xml in a second session: base +95 MB, new 0
+(the cast into text keeps the string).
+
+### Verification (round 22, agent 117)
+
+Crate tests in debug and release (deep_input, big_tables, the parallel tests), the toast and
+spill tests with `ROLL_TXN_SPILL_BYTES=4096`, clippy (no new warnings), difftest smoke,
+isolation 121 / 122 specs (1,647 / 1,648 permutations), a full regress run (debug, private
+reference) 51,148 / 51,150 with 0 units changed against `results.tsv`, pg_dump_tap 14,817 /
+14,817, contrib pgvector 915 / 915 (own reference, `OPTFLAGS=""`), pgvector_equality 480 /
+480 (own seeded reference), bloom 58, pg_trgm 261, btree_gist 613 / 616, cube 316 (unchanged).
+
 ## Catalog round 4: racing DDL commits, catalogs after DDL (round 19, agent 62)
 
 Same harness and catalogs as agent 58's: PostgreSQL in `a62-pg` (pinned image and settings),

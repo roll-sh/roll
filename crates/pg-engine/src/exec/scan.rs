@@ -484,6 +484,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             prefilter: None,
             toast: None,
             filter_cols: None,
+            lazy: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -542,6 +543,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             prefilter: None,
             toast: None,
             filter_cols: None,
+            lazy: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -603,6 +605,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             prefilter: None,
             toast: None,
             filter_cols: None,
+            lazy: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -672,6 +675,7 @@ pub fn open_scan(s: &ScanPlan, shared: Option<&Arc<crate::sql::plan::Plan>>, nee
             prefilter: None,
             toast: None,
             filter_cols: None,
+            lazy: None,
             run: Default::default(),
             pending: None,
             one_run: false,
@@ -891,6 +895,7 @@ fn open_scan_as(
         prefilter: None,
         toast: None,
         filter_cols: None,
+        lazy: None,
         run: Default::default(),
         pending: None,
         blocks: Default::default(),
@@ -1312,6 +1317,16 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
             // An index not read by its entries (GIN, GiST, SP-GiST, BRIN): the rows its
             // search structure places near the conditions, else every row.
             let searched = if !reads_entries(index) { search_keys(t, index, quals, ctx)? } else { None };
+            // (Rows fetched to check the quals are read as stored, the quals' columns'
+            // out-of-line values read for them: `qual_row`.)
+            let qneed = super::need::of(quals.iter().map(|c| &c.orig));
+            let mut values: QualValues = match ctx.snapshot().as_deref() {
+                Some(sn) if secondary && super::sizing::tracked(t.oid) => {
+                    let (a, b) = (index_prefix(t.oid, 0), index_prefix(t.oid, 1));
+                    ctx.txn.borrow().scan_snap(&a, &b, sn).source().cloned().map(crate::txn::toast::Reader::new)
+                }
+                _ => None,
+            };
             for (start, end) in &ranges {
                 let entries: Vec<(Vec<u8>, bytes::Bytes)> = match &searched {
                     Some(super::search::Found::Keys(keys)) => {
@@ -1385,6 +1400,8 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                     let (dkey, bytes) = if secondary {
                         let dkey = v.to_vec();
                         let row = match ctx.snapshot().as_deref() {
+                            // (As stored: the quals' columns' values read by `qual_row`.)
+                            Some(sn) if values.is_some() => ctx.txn.borrow().get_many_snap_raw(std::slice::from_ref(&dkey), sn)?.pop().flatten(),
                             Some(sn) => ctx.txn.borrow().get_snap(&dkey, sn)?,
                             None => ctx.txn.borrow().get(&dkey)?,
                         };
@@ -1395,7 +1412,7 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
                     } else {
                         (k, v)
                     };
-                    let row = decode_table_row(t, &bytes)?;
+                    let row = qual_row(t, &dkey, &bytes, qneed.as_deref(), &mut values)?;
                     let mut ok = true;
                     for c in quals {
                         if !eval_bool(&c.orig, &row, ctx)? {
@@ -1411,9 +1428,10 @@ fn bitmap_keys(t: &Table, q: &BitmapQual, ctx: &ExecCtx) -> Result<Vec<Vec<u8>>>
             if !sorted_keys.is_empty() {
                 sorted_keys.sort_unstable();
                 sorted_keys.dedup();
-                for (dkey, bytes) in rows_in_order(sorted_keys, ctx)? {
+                let (rows, mut values) = rows_in_order(sorted_keys, ctx)?;
+                for (dkey, bytes) in rows {
                     ctx.check()?;
-                    let row = decode_table_row(t, &bytes)?;
+                    let row = qual_row(t, &dkey, &bytes, qneed.as_deref(), &mut values)?;
                     let mut ok = true;
                     for c in quals {
                         if !eval_bool(&c.orig, &row, ctx)? {
@@ -1598,6 +1616,7 @@ fn dense_bitmap_scan(
         prefilter: None,
         toast: None,
         filter_cols: None,
+        lazy: None,
         run: Default::default(),
         pending: None,
         one_run: false,
@@ -1614,9 +1633,9 @@ fn dense_bitmap_scan(
 
 /// The visible rows with these data keys (sorted, distinct), by one range scan from the
 /// first to the last, in key order: what a lookup of each finds.
-fn rows_in_order(keys: Vec<Vec<u8>>, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, bytes::Bytes)>> {
+fn rows_in_order(keys: Vec<Vec<u8>>, ctx: &ExecCtx) -> Result<(Vec<(Vec<u8>, bytes::Bytes)>, QualValues)> {
     let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
     let end = prefix_end(last);
     let txn = ctx.txn.borrow();
@@ -1624,6 +1643,9 @@ fn rows_in_order(keys: Vec<Vec<u8>>, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, byte
         Some(s) => txn.scan_snap(first, &end, s),
         None => txn.scan(first, &end),
     };
+    // (Rows as stored: `qual_row` reads the values of the columns the quals read.)
+    let src = it.source().cloned().map(crate::txn::toast::Reader::new);
+    let it = if src.is_some() { it.raw() } else { it };
     let mut want = keys.iter().peekable();
     let mut out = Vec::with_capacity(keys.len());
     let mut n = 0u32;
@@ -1645,7 +1667,33 @@ fn rows_in_order(keys: Vec<Vec<u8>>, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, byte
             None => break,
         }
     }
-    Ok(out)
+    Ok((out, src))
+}
+
+/// Where a bitmap index scan's rows read as stored get their out-of-line values (None: the
+/// rows come with them).
+type QualValues = Option<crate::txn::toast::Reader>;
+
+/// The row a bitmap index scan checks its quals against: the table's columns `need` marks
+/// (None: all) decoded from the row stored under `key`, out-of-line values read through
+/// `values` (rows read with their values when None).
+fn qual_row(t: &Table, key: &[u8], bytes: &[u8], need: Option<&[bool]>, values: &mut QualValues) -> Result<Row> {
+    let Some(reader) = values.as_mut().filter(|_| crate::storage::toast::has_external(bytes)) else {
+        return decode_table_row(t, bytes);
+    };
+    let ncols = t.columns.len();
+    let (_, data) = split_header(bytes)?;
+    let mask: Vec<bool> = (0..ncols).map(|i| need.is_none_or(|n| n.get(i).copied().unwrap_or(false))).collect();
+    let mut row = vec![Value::Null; ncols];
+    crate::storage::toast::decode_into(key, data, &mask, &mut row, &mut |k| reader.fetch(k))?;
+    // (Columns added since the row was stored.)
+    let stored = crate::storage::sst::get_varint(data, &mut 0)? as usize;
+    for (i, c) in t.columns.iter().enumerate().skip(stored) {
+        if mask[i] {
+            row[i] = c.missing.clone().unwrap_or(Value::Null);
+        }
+    }
+    Ok(row)
 }
 
 /// A bitmap heap scan's rows: the bitmap's keys in heap order (TID order when the heap
@@ -1684,8 +1732,8 @@ fn collation_equal_run(s: &ScanPlan) -> bool {
 
 /// A scan's storage iterator over one range: ascending, or descending for a backward scan.
 enum StoreIter {
-    Fwd(TxnScan),
-    Rev(crate::txn::TxnRevScan),
+    Fwd(Box<TxnScan>),
+    Rev(Box<crate::txn::TxnRevScan>),
 }
 
 impl Iterator for StoreIter {
@@ -1865,6 +1913,9 @@ struct ScanNode {
     toast: Option<std::cell::RefCell<crate::txn::toast::Reader>>,
     /// The columns the filter reads (`external_prefilter`), once decided.
     filter_cols: Option<Option<Rc<[bool]>>>,
+    /// A plain sequential scan's rows read in place, as the parallel workers read them
+    /// (`lazy_scan`), once decided.
+    lazy: Option<Option<Box<LazyScan>>>,
     /// Such a scan read by worker threads (`parscan`), once decided (`par_tried`).
     par: Option<super::parscan::ParScan>,
     par_tried: bool,
@@ -2307,7 +2358,7 @@ impl ScanNode {
         let txn = ctx.txn.borrow();
         let snap = ctx.snapshot();
         self.iter = Some(if self.rev {
-            StoreIter::Rev(txn.scan_rev(start, end, snap.as_deref()))
+            StoreIter::Rev(Box::new(txn.scan_rev(start, end, snap.as_deref())))
         } else {
             let it = match snap.as_deref() {
                 Some(s) => txn.scan_snap(start, end, s),
@@ -2321,13 +2372,13 @@ impl ScanNode {
                 && self.only.is_none()
                 && !self.plan.sys
                 && !matches!(self.plan.access, Access::Tid { .. } | Access::TidRange(_));
-            StoreIter::Fwd(match it.source() {
+            StoreIter::Fwd(Box::new(match it.source() {
                 Some(src) if plain => {
                     self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src.clone())));
                     it.raw()
                 }
                 _ => it,
-            })
+            }))
         });
     }
 
@@ -2533,7 +2584,7 @@ impl ScanNode {
                 continue;
             }
             let (iks, dks): (Vec<Vec<u8>>, Vec<Vec<u8>>) = ents.into_iter().unzip();
-            let rows = fetch_rows(&dks, ctx)?;
+            let rows = self.fetch_stored(&dks, ctx)?;
             self.fetched
                 .extend(iks.into_iter().zip(dks).zip(rows).map(|((k, d), r)| (k, d, r)));
         }
@@ -2568,7 +2619,7 @@ impl ScanNode {
                 am.pending.extend(checks.into_iter().zip(batch).zip(rows).map(|((c, k), r)| (c, k, r)));
             }
         }
-        if let Some(keys) = &mut self.keys {
+        if self.keys.is_some() {
             loop {
                 while let Some((_, k, row)) = self.fetched.pop_front() {
                     if let Some(row) = row {
@@ -2576,12 +2627,12 @@ impl ScanNode {
                     }
                 }
                 let want = if ctx.snapshot().is_some() { self.batch } else { 1 };
-                let batch: Vec<Vec<u8>> = keys.by_ref().take(want).collect();
+                let batch: Vec<Vec<u8>> = self.keys.as_mut().map_or_else(Vec::new, |k| k.by_ref().take(want).collect());
                 if batch.is_empty() {
                     return Ok(None);
                 }
                 self.batch = (self.batch * 2).min(FETCH_BATCH_MAX);
-                let rows = fetch_rows(&batch, ctx)?;
+                let rows = self.fetch_stored(&batch, ctx)?;
                 self.fetched
                     .extend(batch.into_iter().zip(rows).map(|(k, r)| (Vec::new(), k, r)));
             }
@@ -2610,6 +2661,101 @@ impl ScanNode {
                 None => self.iter = None,
             }
         }
+    }
+}
+
+/// A serial scan reading its rows as the parallel workers do (`parscan::Lazy`): the filter's
+/// kernel over the stored row in place, the columns decoded as it reads them, and a row made
+/// only for the rows it keeps. The workers' per-row path, on the executor's thread.
+struct LazyScan {
+    d: super::parscan::Decode,
+    buf: super::parscan::LazyBuf,
+}
+
+impl ScanNode {
+    /// The rows under `keys` an index or bitmap heap scan fetches: as stored, read as a
+    /// plain sequential scan reads its rows (`toast`: the out-of-line values of the columns
+    /// decoded, read then), when the statement has a snapshot and the rows aren't locked or
+    /// read with their system columns; else with every value put back (`fetch_rows`).
+    fn fetch_stored(&mut self, keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
+        // (A table that never stored a value out of line has rows only as stored.)
+        let Some(snap) = ctx
+            .snapshot()
+            .filter(|_| self.plan.mark.is_none() && !self.plan.sys && super::sizing::tracked(self.plan.table.oid))
+        else {
+            return fetch_rows(keys, ctx);
+        };
+        let txn = ctx.txn.borrow();
+        if self.toast.is_none() {
+            // (The source of the table's rows' values, as a scan of its rows has it.)
+            let t = self.plan.table.oid;
+            let (start, end) = (index_prefix(t, 0), index_prefix(t, 1));
+            let Some(src) = txn.scan_snap(&start, &end, &snap).source().cloned() else {
+                drop(txn);
+                return fetch_rows(keys, ctx);
+            };
+            self.toast = Some(std::cell::RefCell::new(crate::txn::toast::Reader::new(src)));
+        }
+        txn.get_many_snap_raw(keys, &snap)
+    }
+
+    /// Whether this scan's rows go through `LazyScan` (decided once): a plain sequential
+    /// scan, its filter one with a kernel, no row locks, system columns or index entries.
+    fn lazy_scan(&mut self) -> Option<&mut LazyScan> {
+        if self.lazy.is_none() {
+            let p = &self.plan;
+            let plain = self.ios_cols.is_none()
+                && self.am.is_none()
+                && self.keys.is_none()
+                && self.only.is_none()
+                && self.sample.is_none()
+                && p.index.is_none()
+                && matches!(p.access, Access::Seq | Access::Unplanned)
+                && p.mark.is_none()
+                && !p.sys;
+            let filter = p.filter.as_ref().filter(|_| plain).and_then(super::kernel::compile);
+            self.lazy = Some(filter.map(|f| {
+                let d = super::parscan::Decode {
+                    need: self.need.as_deref().map(Arc::from),
+                    need_raw: None,
+                    missing: p.table.columns.iter().map(|c| c.missing.clone()).collect(),
+                    with_key: p.with_key,
+                    filter: Some(f),
+                    filtered: true,
+                    spec: None,
+                    stages: Vec::new(),
+                    ios: None,
+                    extra: Vec::new(),
+                    drop: Vec::new(),
+                    raw: Vec::new(),
+                    topk: None,
+                    toast: None,
+                };
+                let buf = super::parscan::LazyBuf::new(&d);
+                Box::new(LazyScan { d, buf })
+            }));
+        }
+        self.lazy.as_mut().unwrap().as_deref_mut()
+    }
+
+    /// The row stored under `key` through `LazyScan`: None when this scan or this row
+    /// doesn't go that way (a row with out-of-line values, or of a table whose reads are
+    /// noted: `sizing::note_read`); Some((None, _)) when the filter rejects it; else the row,
+    /// and whether the filter was decided on it.
+    fn lazy_row(&mut self, key: &[u8], bytes: &[u8]) -> Result<Option<(Option<Row>, bool)>> {
+        let t = self.plan.table.oid;
+        if crate::storage::toast::has_external(bytes) || super::sizing::tracked(t) {
+            return Ok(None);
+        }
+        let Some(LazyScan { d, buf }) = self.lazy_scan() else {
+            return Ok(None);
+        };
+        let row = buf.read(d, key, bytes)?;
+        let pass = d.filter.as_ref().and_then(|f| f.passes(&row));
+        if pass == Some(false) {
+            return Ok(Some((None, true)));
+        }
+        Ok(Some((Some(row.into_row()?), pass.is_some())))
     }
 }
 
@@ -2867,6 +3013,10 @@ const INLINE_CHUNKS: usize = 16;
 /// The least pages of a table scanned inline: under it, the serial path.
 const INLINE_MIN_PAGES: u32 = 32;
 
+/// The pages from which a modelled heap's scan runs in workers rather than inline (8 MB,
+/// min_parallel_table_scan_size's default).
+const INLINE_MAX_PAGES: u32 = 1024;
+
 fn parallel_workers(ctx: &ExecCtx) -> (usize, usize) {
     let s = ctx.sess.settings.borrow();
     let num = |n: &str, d: usize| s.get_str(n).and_then(|v| v.parse::<usize>().ok()).unwrap_or(d);
@@ -2962,7 +3112,7 @@ impl ScanNode {
         // scan_size's default, as for PostgreSQL's parallel scans) runs the workers' way of
         // reading rows on this thread (`ParScan::start_inline`): cheaper per row than the
         // serial path's, and threads wouldn't pay. A reordered one that small stays serial.
-        let inline = self.nblocks.is_some_and(|n| n < 1024);
+        let inline = self.nblocks.is_some_and(|n| n < INLINE_MAX_PAGES);
         if inline && reordered {
             return Ok(None);
         }
@@ -3276,6 +3426,66 @@ impl ScanNode {
 }
 
 impl Node for ScanNode {
+    /// count(*) over a plain sequential scan: its rows counted as `next` would return them
+    /// (pruned, counted in the statistics, filtered as `LazyScan` filters them), none made.
+    fn count_rest(&mut self, ctx: &ExecCtx) -> Result<Option<u64>> {
+        let p = &self.plan;
+        // (A scan the aggregation's partial counts can take, `partial_run`, is left to them:
+        // in workers, PostgreSQL's parallel plan in its time, or inline, the workers' code on
+        // this thread, which counts a filtered modelled heap's rows for less.)
+        if !self.par_tried
+            && parallel_workers(ctx).0 > 0
+            && super::sizing::modelled_blocks(p.table.oid, ctx).is_none_or(|n| n >= INLINE_MIN_PAGES)
+        {
+            return Ok(None);
+        }
+        if self.par.is_some()
+            || self.emitted > 0
+            || ctx.instrumented()
+            || p.limit.is_some()
+            || self.ios_cols.is_some()
+            || self.am.is_some()
+            || self.keys.is_some()
+            || self.only.is_some()
+            || self.sample.is_some()
+            || p.index.is_some()
+            || !matches!(p.access, Access::Seq | Access::Unplanned)
+            || p.mark.is_some()
+            || p.sys
+            || !matches!(self.stat, StatTarget::Off | StatTarget::Seq(_))
+        {
+            return Ok(None);
+        }
+        self.par_tried = true;
+        let mut n = 0u64;
+        while let Some((key, bytes)) = self.next_raw(ctx)? {
+            ctx.check()?;
+            if let StatTarget::Seq(t) = self.stat {
+                super::pgstat::count_returned(ctx, t, 1);
+            }
+            if self.plan.filter.is_some() {
+                let row = match self.lazy_row(&key, &bytes)? {
+                    Some((None, _)) => None,
+                    Some((Some(_), true)) => Some(None),
+                    Some((Some(r), false)) => Some(Some(r)),
+                    None => Some(Some(self.full_row(&key, &bytes, ctx)?)),
+                };
+                let keep = match row {
+                    None => false,
+                    Some(None) => true,
+                    Some(Some(r)) => eval_bool(self.plan.filter.as_ref().unwrap(), &r, ctx)?,
+                };
+                if !keep {
+                    ctx.filtered(self.key);
+                    continue;
+                }
+            }
+            n += 1;
+            self.emitted += 1;
+        }
+        Ok(Some(n))
+    }
+
     fn key_order(&self) -> Option<Vec<(usize, bool, bool)>> {
         use crate::catalog::IndexKey;
         let p = &self.plan;
@@ -3430,10 +3640,20 @@ impl Node for ScanNode {
             // A filter over a few columns of rows whose other columns read include big values
             // (pgvector's): the filter first, over its own columns, and the rest decoded only
             // for the rows it keeps. (Not where a fetched row takes a predicate lock first.)
+            // A plain sequential scan's row read in place, the filter's kernel first (`LazyScan`).
+            let lazy = match self.lazy_row(&key, &bytes)? {
+                Some((None, _)) => {
+                    ctx.filtered(self.key);
+                    continue;
+                }
+                Some((Some(r), decided)) => Some((r, decided)),
+                None => None,
+            };
             let mut prefiltered = false;
             // (A row with out-of-line values: the filter's columns decoded once, for both.)
             let mut probed: Option<(Row, Rc<[bool]>)> = None;
-            if self.ios_cols.is_none()
+            if lazy.is_none()
+                && self.ios_cols.is_none()
                 && let Some(fm) = self.prefilter_mask().or_else(|| self.external_prefilter(&bytes))
                 && !predicate_locked(&self.plan.table, ctx)
                 && let Some(f) = &self.plan.filter
@@ -3452,10 +3672,14 @@ impl Node for ScanNode {
                     probed = Some((probe, fm));
                 }
             }
-            let mut row = match (&self.ios_cols, probed) {
-                (Some(cols), _) => self.index_row(cols, &key, &bytes, ctx)?,
-                (None, Some((probe, fm))) => self.row_ext(&key, &bytes, self.need.as_deref(), Some((probe, &fm)), ctx)?,
-                (None, None) => self.full_row(&key, &bytes, ctx)?,
+            let mut row = match (lazy, &self.ios_cols, probed) {
+                (Some((r, decided)), ..) => {
+                    prefiltered = decided;
+                    r
+                }
+                (None, Some(cols), _) => self.index_row(cols, &key, &bytes, ctx)?,
+                (None, None, Some((probe, fm))) => self.row_ext(&key, &bytes, self.need.as_deref(), Some((probe, &fm)), ctx)?,
+                (None, None, None) => self.full_row(&key, &bytes, ctx)?,
             };
             if (self.plan.index.is_some() || self.keys.is_some())
                 && self.only.is_none()
