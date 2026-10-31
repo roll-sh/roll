@@ -1125,6 +1125,7 @@ impl Session {
                 table: t.name.as_str().into(),
                 multi,
                 freeze: f.freeze,
+                binary: f.binary,
                 feed: Default::default(),
             });
             let plan = Arc::new(Plan::Insert(Box::new(InsertPlan {
@@ -1331,8 +1332,10 @@ impl CopyReader<'_> {
                 ctx.notice(n);
             }
             if let Err(e) = parsed {
-                // (Rows read earlier in this batch are still to go in first.)
-                if copy.multi || self.st.rows.is_empty() {
+                // (Rows read earlier in this batch are still to go in first; buffered, a row
+                // of them NOT NULL refuses still fails first: ExecConstraints checks each row
+                // as it is read, before the next.)
+                if self.st.rows.is_empty() || copy.multi && self.null_violation(before).is_none() {
                     return Err(e);
                 }
                 self.failed = Some(e);
@@ -1519,12 +1522,14 @@ pub(crate) fn parse_copy_data(
         return Ok(data.len());
     }
     if f.binary {
-        let (rows, took, ended) = binary_copy_in(data, c, fmt, st, last)?;
+        let mut rows = Vec::new();
+        let r = binary_copy_in(data, c, fmt, st, last, &mut rows);
         for row in rows {
             st.records += 1;
             st.rows.push(row);
             st.lines.push((st.records, String::new()));
         }
+        let (took, ended) = r?;
         st.ended = ended;
         st.bytes += took;
         if ended && took < data.len() {
@@ -2329,15 +2334,17 @@ impl CopyDest<'_> {
 
 /// COPY FROM in binary format: each tuple's fields through the columns' typreceive. Reads
 /// the header (once) and the complete tuples at the start of `data` (when not `last`, an
-/// incomplete one waits for more data); returns the rows, the bytes taken and whether the
-/// trailer came.
+/// incomplete one waits for more data) into `out` (those before a tuple that fails stay
+/// there: NextCopyFrom read them first); returns the bytes taken and whether the trailer
+/// came.
 fn binary_copy_in(
     data: &[u8],
     c: &CopyIn,
     fmt: &crate::types::text::FormatCtx,
     st: &mut CopyInParsed,
     last: bool,
-) -> Result<(Vec<Vec<Expr>>, usize, bool)> {
+    out: &mut Vec<Vec<Expr>>,
+) -> Result<(usize, bool)> {
     let t = &c.table;
     let bad = |m: &str| Error::new(code::BAD_COPY_FILE_FORMAT, m.to_string());
     let take = |p: &mut usize, n: usize| -> Option<&[u8]> {
@@ -2352,14 +2359,14 @@ fn binary_copy_in(
         // (Each part of the header is checked once it is all there.)
         let have = |n: usize| last || data.len() >= n;
         if !have(SIG.len()) {
-            return Ok((Vec::new(), 0, false));
+            return Ok((0, false));
         }
         if data.len() < SIG.len() || &data[..SIG.len()] != SIG {
             return Err(bad("COPY file signature not recognized"));
         }
         p = SIG.len();
         if !have(p + 4) {
-            return Ok((Vec::new(), 0, false));
+            return Ok((0, false));
         }
         let flags = take(&mut p, 4)
             .map(i32_at)
@@ -2371,20 +2378,19 @@ fn binary_copy_in(
             return Err(bad("unrecognized critical flags in COPY file header"));
         }
         if !have(p + 4) {
-            return Ok((Vec::new(), 0, false));
+            return Ok((0, false));
         }
         let ext = take(&mut p, 4)
             .map(i32_at)
             .ok_or_else(|| bad("invalid COPY file header (missing length)"))?;
         if ext >= 0 && !have(p + ext as usize) {
-            return Ok((Vec::new(), 0, false));
+            return Ok((0, false));
         }
         if ext < 0 || take(&mut p, ext as usize).is_none() {
             return Err(bad("invalid COPY file header (wrong length)"));
         }
         st.header = true;
     }
-    let mut out = Vec::new();
     let mut ended = false;
     let mut done = p;
     loop {
@@ -2449,5 +2455,5 @@ fn binary_copy_in(
         out.push(row);
         done = p;
     }
-    Ok((out, done, ended))
+    Ok((done, ended))
 }

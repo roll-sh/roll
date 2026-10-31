@@ -1296,7 +1296,7 @@ impl Ddl<'_, '_> {
                 err
             }
         })?;
-        b.coerce_assign(ex, ty, colname)?;
+        b.coerce_default(ex, ty, colname)?;
         Ok(())
     }
 
@@ -1414,7 +1414,7 @@ impl Ddl<'_, '_> {
                 err
             });
         }
-        b.coerce_assign(e, &col.ty, &col.name)?;
+        b.coerce_default(e, &col.ty, &col.name)?;
         Ok(())
     }
 

@@ -1,0 +1,154 @@
+> CREATE TABLE a138f (id int, f float8)
+-- CREATE TABLE
+
+> INSERT INTO a138f VALUES (1, 1e300), (2, 0.5)
+-- INSERT 0 2
+
+> SELECT sum(f) FROM a138f
+sum:float8
+1e+300
+-- SELECT 1
+
+> SELECT sum(f), count(f), max(f) FROM a138f
+sum:float8 | count:int8 | max:float8
+1e+300 | 2 | 1e+300
+-- SELECT 1
+
+> SELECT avg(f) FROM a138f
+ERROR 22003: value out of range: overflow
+
+> SELECT stddev(f) FROM a138f
+ERROR 22003: value out of range: overflow
+
+> SELECT sum(f) FROM (VALUES (1e308::float8), (1e308)) v(f)
+ERROR 22003: value out of range: overflow
+
+> SELECT sum(f) FROM (VALUES ('Infinity'::float8), (1e308), (1e308)) v(f)
+sum:float8
+Infinity
+-- SELECT 1
+
+> SELECT sum(f) FROM (VALUES ('-0'::float8), ('-0')) v(f)
+sum:float8
+-0
+-- SELECT 1
+
+> SELECT '0x10'::float8, ' 0x1p3 '::float8, '-0X1.8p1'::float8, '0x.8'::float8, '0xAp-2'::float4
+float8:float8 | float8:float8 | float8:float8 | float8:float8 | float4:float4
+16 | 8 | -3 | 0.5 | 2.5
+-- SELECT 1
+
+> SELECT '0x1.fffffffffffffp1023'::float8, '0x1p-1074'::float8, '0x0'::float8, '-0x0p0'::float8
+float8:float8 | float8:float8 | float8:float8 | float8:float8
+1.7976931348623157e+308 | 5e-324 | 0 | -0
+-- SELECT 1
+
+> SELECT '0x123456789abcdef0123456789abcdef'::float8
+float8:float8
+1.512366075204171e+36
+-- SELECT 1
+
+> SELECT '0x1p1024'::float8
+float8:float8
+Infinity
+-- SELECT 1
+
+> SELECT '0x1p-1080'::float8
+ERROR 22003: "0x1p-1080" is out of range for type double precision (at 8)
+
+> SELECT '0x'::float8
+ERROR 22P02: invalid input syntax for type double precision: "0x" (at 8)
+
+> SELECT '0x1q'::float8
+ERROR 22P02: invalid input syntax for type double precision: "0x1q" (at 8)
+
+> SELECT '0x1p'::float8
+ERROR 22P02: invalid input syntax for type double precision: "0x1p" (at 8)
+
+> CREATE TABLE a138d1 (b bool DEFAULT 0)
+ERROR 42804: column "b" is of type boolean but default expression is of type integer
+HINT: You will need to rewrite or cast the expression.
+
+> CREATE TABLE a138d2 (b bool GENERATED ALWAYS AS (1) STORED)
+ERROR 42804: column "b" is of type boolean but default expression is of type integer
+HINT: You will need to rewrite or cast the expression.
+
+> CREATE TABLE a138d3 (b int, v text GENERATED ALWAYS AS (b + 1) VIRTUAL)
+-- CREATE TABLE
+
+> CREATE DOMAIN a138dd AS bool DEFAULT 0
+ERROR 42804: column "a138dd" is of type boolean but default expression is of type integer
+HINT: You will need to rewrite or cast the expression.
+
+> CREATE DOMAIN a138de AS bool
+-- CREATE DOMAIN
+
+> ALTER DOMAIN a138de SET DEFAULT 1
+ERROR 42804: column "a138de" is of type boolean but default expression is of type integer
+HINT: You will need to rewrite or cast the expression.
+
+> CREATE TABLE a138d4 (b int)
+-- CREATE TABLE
+
+> ALTER TABLE a138d4 ALTER COLUMN b SET DEFAULT now()
+ERROR 42804: column "b" is of type integer but default expression is of type timestamp with time zone
+HINT: You will need to rewrite or cast the expression.
+
+> ALTER TABLE a138d4 ADD COLUMN c bool DEFAULT 0
+ERROR 42804: column "c" is of type boolean but default expression is of type integer
+HINT: You will need to rewrite or cast the expression.
+
+> CREATE VIEW a138v AS SELECT b FROM a138d4
+-- CREATE VIEW
+
+> ALTER VIEW a138v ALTER COLUMN b SET DEFAULT 'x'::text
+ERROR 42804: column "b" is of type integer but default expression is of type text
+HINT: You will need to rewrite or cast the expression.
+
+> CREATE TABLE a138c (id int PRIMARY KEY, email text UNIQUE, name text, n int NOT NULL DEFAULT 0)
+-- CREATE TABLE
+
+> COPY a138c (id, email, name) FROM STDIN (FORMAT binary)
+>> \binary 5047434f 50590aff 0d0a00 00000000 00000000 0003 ffffffff 00000001 61 00000001 62 0003 00000008 00000000 0000000f 00000001 63 00000001 64 ffff
+ERROR 23502: null value in column "id" of relation "a138c" violates not-null constraint
+DETAIL: Failing row contains (null, a, b, 0).
+CONTEXT: COPY a138c, line 1
+OBJECTS: schema=public table=a138c column=id
+
+> SELECT count(*) FROM a138c
+count:int8
+0
+-- SELECT 1
+
+> COPY a138c (id, email, name) FROM STDIN (FORMAT binary)
+>> \binary 5047434f 50590aff 0d0a00 00000000 00000000 0003 00000008 00000000 0000000f 00000001 61 00000001 62 0003 ffffffff 00000001 63 00000001 64 ffff
+ERROR 22P03: incorrect binary data format
+CONTEXT: COPY a138c, line 1, column id
+
+> SELECT count(*) FROM a138c
+count:int8
+0
+-- SELECT 1
+
+> COPY a138c (id, email, name) FROM STDIN (FORMAT binary)
+>> \binary 5047434f 50590aff 0d0a00 00000000 00000000 0003 00000004 00000001 00000001 61 00000001 62 0003 ffffffff 00000001 63 00000001 64 0003 00000004 00000003 00000001 65 00000001 66 ffff
+ERROR 23502: null value in column "id" of relation "a138c" violates not-null constraint
+DETAIL: Failing row contains (null, c, d, 0).
+CONTEXT: COPY a138c, line 2
+OBJECTS: schema=public table=a138c column=id
+
+> SELECT count(*) FROM a138c
+count:int8
+0
+-- SELECT 1
+
+> COPY a138c (id, email, name) FROM STDIN (FORMAT binary)
+>> \binary 5047434f 50590aff 0d0a00 00000000 00000000 0003 00000004 00000001 00000001 61 00000001 62 0003 00000002 0001 00000001 63 00000001 64 ffff
+ERROR 08P01: insufficient data left in message
+CONTEXT: COPY a138c, line 2, column id
+
+> SELECT count(*) FROM a138c
+count:int8
+0
+-- SELECT 1
+

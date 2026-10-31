@@ -176,7 +176,7 @@ impl Ddl<'_, '_> {
                 Some(e) => {
                     let mut b = self.binder();
                     let x = b.bind_scalar(e, Clause::Default)?;
-                    b.coerce_assign(x, &d.base, "")?;
+                    b.coerce_default(x, &d.base, &d.name)?;
                     nd.default = Some(ast::deparse_expr(e)?);
                 }
                 None => nd.default = None,

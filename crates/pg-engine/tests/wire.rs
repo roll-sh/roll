@@ -3826,3 +3826,61 @@ fn cancel_request_closes_after_the_error() {
     assert_eq!(c.query("SELECT 1"), ["T ?column?:23/-1", "D 1", "C SELECT 1"]);
     s.engine.shutdown();
 }
+
+/// Bind with text parameters (NULL for None) and `result_formats`.
+fn bind_text(c: &mut raw::Raw, params: &[Option<&str>], result_formats: &[i16]) {
+    let mut b = b"\0\0".to_vec();
+    b.extend_from_slice(&0i16.to_be_bytes());
+    b.extend_from_slice(&(params.len() as i16).to_be_bytes());
+    for p in params {
+        match p {
+            None => b.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(p) => {
+                b.extend_from_slice(&(p.len() as i32).to_be_bytes());
+                b.extend_from_slice(p.as_bytes());
+            }
+        }
+    }
+    b.extend_from_slice(&(result_formats.len() as i16).to_be_bytes());
+    for f in result_formats {
+        b.extend_from_slice(&f.to_be_bytes());
+    }
+    c.send(b'B', &b);
+}
+
+/// Difftest round 7 (agent 138), checked against PostgreSQL 18.6: a parameter of a domain
+/// type is checked at Bind (domain_in), whether the statement reads it or not, and before the
+/// result formats are; EXPLAIN with bound parameters plans them as constants (a custom plan:
+/// partitions pruned and `= NULL` folded while planning).
+#[test]
+fn bound_parameters_of_domains_and_explain() {
+    let s = server(AuthMethod::Trust);
+    let mut c = raw::Raw::connect(&s.addr, "postgres");
+    c.query("CREATE DOMAIN wd AS text CHECK (VALUE ~ '^[A-Z]$')");
+    c.query("CREATE TABLE wp (id int, r text) PARTITION BY LIST (r)");
+    c.query("CREATE TABLE wp_a PARTITION OF wp FOR VALUES IN ('a')");
+    c.query("CREATE TABLE wp_b PARTITION OF wp FOR VALUES IN ('b')");
+    for (sql, params, formats, want) in [
+        ("SELECT $1::wd WHERE false", vec![Some("x")], vec![], vec!["E 23514"]),
+        ("SELECT $1::wd", vec![Some("x")], vec![0, 0], vec!["E 23514"]),
+        ("SELECT $1::wd", vec![Some("Q")], vec![], vec!["D Q", "C SELECT 1"]),
+        (
+            "EXPLAIN (COSTS OFF) SELECT * FROM wp WHERE r = $1",
+            vec![Some("a")],
+            vec![],
+            vec!["D Seq Scan on wp_a wp", "D   Filter: (r = 'a'::text)", "C EXPLAIN"],
+        ),
+        (
+            "EXPLAIN (COSTS OFF) SELECT * FROM wp WHERE r = $1::text",
+            vec![None],
+            vec![],
+            vec!["D Result", "D   One-Time Filter: false", "C EXPLAIN"],
+        ),
+    ] {
+        c.parse("", sql);
+        bind_text(&mut c, &params, &formats);
+        c.execute("", 0);
+        assert_eq!(c.sync(), want, "{sql}");
+    }
+    s.engine.shutdown();
+}

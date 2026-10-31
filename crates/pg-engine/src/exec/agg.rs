@@ -338,17 +338,19 @@ struct FloatStats {
 }
 
 impl FloatStats {
-    fn push(&mut self, x: f64) -> Result<()> {
+    /// `sxx_too`: Sxx is wanted (float8_accum). sum(float8) is float8pl alone: its Sx can't
+    /// overflow where only Sxx would (`sum` of 1e300 and 0.5 is 1e300).
+    fn push(&mut self, x: f64, sxx_too: bool) -> Result<()> {
         let n = self.n + 1.0;
         let sx = self.sx + x;
         let mut sxx = self.sxx;
-        if self.n > 0.0 {
+        if sxx_too && self.n > 0.0 {
             let tmp = x * n - sx;
             sxx += tmp * tmp / (n * self.n);
             if sxx.is_infinite() && !x.is_infinite() && !self.sx.is_infinite() {
                 bail!(NUMERIC_VALUE_OUT_OF_RANGE, "value out of range: overflow");
             }
-        } else if x.is_nan() || x.is_infinite() {
+        } else if sxx_too && (x.is_nan() || x.is_infinite()) {
             sxx = f64::NAN;
         }
         if sx.is_infinite() && !x.is_infinite() && !self.sx.is_infinite() {
@@ -378,7 +380,8 @@ struct FloatAgg {
 }
 impl Accum for FloatAgg {
     fn add(&mut self, a: &[Value], _: &ExecCtx) -> Result<()> {
-        self.st.push(a[0].as_f64().unwrap_or(0.0))
+        let sxx = !matches!(self.kind, StatKind::Sum);
+        self.st.push(a[0].as_f64().unwrap_or(0.0), sxx)
     }
     // (The values come in their serial order and are pushed in it: the same float sums.)
     fn partial(&self) -> Option<Partial> {
@@ -386,8 +389,9 @@ impl Accum for FloatAgg {
     }
     fn merge(&mut self, p: Partial) -> Result<()> {
         if let Partial::Floats(xs) = p {
+            let sxx = !matches!(self.kind, StatKind::Sum);
             for x in xs {
-                self.st.push(x)?;
+                self.st.push(x, sxx)?;
             }
         }
         Ok(())

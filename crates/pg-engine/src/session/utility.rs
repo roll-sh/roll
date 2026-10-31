@@ -727,10 +727,13 @@ impl Session {
 
     // ── EXPLAIN ──
 
+    /// `param_types`: the types of the statement's parameters (`params`), when EXPLAIN came
+    /// over the extended protocol with them.
     pub(super) fn explain_stmt(
         &mut self,
         s: &pb::ExplainStmt,
         params: &[Value],
+        param_types: &[DataType],
     ) -> Result<QueryResult> {
         use crate::sql::explain::{Format, explain};
         let mut o = crate::sql::explain::options_with(&s.options, self.state.overexplain.get())?;
@@ -803,7 +806,9 @@ impl Session {
                 sql: String::new(),
                 offset: 0,
                 stmt: Some(q.clone()),
-                param_types: Vec::new(),
+                // (Bound parameters make a custom plan below, as BuildCachedPlan's
+                // boundParams do: partitions pruned and NULL comparisons folded at planning.)
+                param_types: param_types.to_vec(),
                 bound: Mutex::new(None),
                 plans: Default::default(),
                 lit: None,

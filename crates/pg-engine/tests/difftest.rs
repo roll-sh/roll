@@ -27,6 +27,8 @@
 mod common;
 #[path = "difftest/generate.rs"]
 mod generate;
+#[path = "difftest/wire.rs"]
+mod wire;
 
 use common::pgclient::PgClient;
 use common::{Event, Field, engine_query, engine_session, open_store};
@@ -128,6 +130,8 @@ enum Class {
     WrongRows,
     WrongOrder,
     WrongState,
+    /// A statement of a wire session waits for a lock on one side only.
+    Lock,
     Tlp,
     Norec,
     PlanVariance,
@@ -150,6 +154,7 @@ impl Class {
             Class::WrongRows => "wrong_rows",
             Class::WrongOrder => "wrong_order",
             Class::WrongState => "wrong_state",
+            Class::Lock => "lock",
             Class::Tlp => "tlp",
             Class::Norec => "norec",
             Class::PlanVariance => "plan_variance",
@@ -175,6 +180,7 @@ const ALL_CLASSES: &[Class] = &[
     Class::WrongRows,
     Class::WrongOrder,
     Class::WrongState,
+    Class::Lock,
     Class::Tlp,
     Class::Norec,
     Class::PlanVariance,
@@ -198,6 +204,14 @@ fn noise(f: &Field) -> bool {
 fn compare(e: &Out, r: &Out, ordered: bool) -> Option<(Class, String)> {
     if let Some(p) = &e.panic {
         return Some((Class::Crash, p.clone()));
+    }
+    if let Some(f) = e.error.as_ref().filter(|f| f.code == "HANG") {
+        return Some((Class::Hang, f.message.clone()));
+    }
+    // A wire session's statement waiting for a lock on one side only.
+    let waits = |o: &Out| o.tag == "(waiting)";
+    if waits(e) != waits(r) {
+        return Some((Class::Lock, format!("{} vs {}", e.tag, r.tag)));
     }
     // A data error (22xxx, 21000) on one side only, or two different ones: which rows and
     // expressions get evaluated (and folded while planning) differs. Separate from errors
@@ -311,9 +325,17 @@ fn install() {
 
 struct Pair {
     eng: Session,
-    _dir: tempfile::TempDir,
+    /// The engine's store (None: a database of the shared engine, `wire::shared`).
+    _dir: Option<tempfile::TempDir>,
     refc: PgClient,
     db: String,
+    /// Round 7: sessions 2 and 3 over the wire (with the shared engine).
+    wire: Option<wire::Wire>,
+}
+
+/// Whether a case needs the shared engine: steps of the wire sessions, round 7's objects.
+fn wants_shared<'a>(mut stmts: impl Iterator<Item = &'a str>) -> bool {
+    stmts.any(|s| s.starts_with('\\') || s.contains("r7"))
 }
 
 const SESSION_SETUP: &[&str] = &[
@@ -334,7 +356,8 @@ fn admin() -> PgClient {
 }
 
 impl Pair {
-    fn open(db: &str) -> Pair {
+    /// Fresh databases on both sides; `shared`: on the shared engine, with the wire sessions.
+    fn open(db: &str, shared: bool) -> Pair {
         let mut a = admin();
         a.simple_query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)")).unwrap();
         let ev = a
@@ -344,13 +367,24 @@ impl Pair {
             .unwrap();
         assert!(!ev.iter().any(|e| matches!(e, Event::Error(_))), "{ev:?}");
         let refc = PgClient::connect(&ref_addr(), "postgres", &env("DIFFTEST_PASSWORD", "pw"), db).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let eng = engine_session(open_store(dir.path()), db);
-        let mut p = Pair { eng, _dir: dir, refc, db: db.to_string() };
+        let mut p = if shared {
+            let (eng, pid) = wire::create_db(db);
+            Pair { eng, _dir: None, refc, db: db.to_string(), wire: None }.with_wire(pid)
+        } else {
+            let dir = tempfile::tempdir().unwrap();
+            let eng = engine_session(open_store(dir.path()), db);
+            Pair { eng, _dir: Some(dir), refc, db: db.to_string(), wire: None }
+        };
         for s in SESSION_SETUP {
             p.run(s);
         }
         p
+    }
+
+    fn with_wire(mut self, eng_pid: i32) -> Pair {
+        let ref_pid = self.reference("SELECT pg_backend_pid()").rows.first().and_then(|r| r.parse().ok()).unwrap_or(0);
+        self.wire = Some(wire::Wire::open(&self.db, eng_pid, ref_pid, &ref_addr(), &env("DIFFTEST_PASSWORD", "pw")));
+        self
     }
 
     fn engine(&mut self, sql: &str) -> Out {
@@ -376,6 +410,11 @@ impl Pair {
     }
 
     fn run(&mut self, sql: &str) -> (Out, Out) {
+        if let Some(step) = sql.strip_prefix('\\')
+            && let Some(w) = self.wire.as_mut()
+        {
+            return w.run(step);
+        }
         let r = self.reference(sql);
         let e = self.engine(sql);
         (e, r)
@@ -384,6 +423,13 @@ impl Pair {
 
 impl Drop for Pair {
     fn drop(&mut self) {
+        if let Some(w) = self.wire.take() {
+            let hung = w.hung;
+            drop(w);
+            if !hung {
+                wire::drop_db(&mut self.eng, &self.db);
+            }
+        }
         let mut a = admin();
         let _ = a.simple_query(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.db));
     }
@@ -516,7 +562,7 @@ impl Runner {
         let sig = signature(case.class, detail);
         let fresh = self.seen.insert(sig.clone());
         let name = format!("{}-s{seed}-{idx}.sql", case.class.name());
-        if fresh || matches!(case.class, Class::WrongRows | Class::Crash | Class::Tlp | Class::Norec | Class::PlanVariance | Class::WrongState | Class::WrongOrder) {
+        if fresh || matches!(case.class, Class::WrongRows | Class::Crash | Class::Hang | Class::Lock | Class::Tlp | Class::Norec | Class::PlanVariance | Class::WrongState | Class::WrongOrder) {
             let _ = std::fs::write(self.out.join(&name), case.text(e, r));
         }
         eprintln!("  [{}] seed {seed} #{idx}: {}", case.class.name(), detail.chars().take(160).collect::<String>());
@@ -524,7 +570,7 @@ impl Runner {
 
     fn run_seed(&mut self, seed: u64, n: usize, db_prefix: &str) {
         let (mut sch, setup) = schema(seed);
-        let mut pair = Pair::open(&format!("{db_prefix}_{seed}"));
+        let mut pair = Pair::open(&format!("{db_prefix}_{seed}"), seed >= generate::R7_SEEDS);
         let mut history: Vec<String> = Vec::new();
         for st in &setup {
             let (e, r) = pair.run(st);
@@ -581,6 +627,12 @@ impl Runner {
             if let Some((class, detail)) = &mismatch {
                 let case = Case { class: *class, ordered, setup: history.clone(), stmt: sql.clone(), other: None, note: detail.clone() };
                 self.record(seed, idx, case, Some(&e), Some(&r), detail);
+                if *class == Class::Hang {
+                    // A wire session stuck in the engine: the rest of the seed can't run.
+                    eprintln!("  seed {seed}: a session hung at #{idx}, next seed");
+                    diverged = true;
+                    break;
+                }
             }
             if !matches!(st, Stmt::Query(_)) {
                 history.push(sql.clone());
@@ -623,7 +675,7 @@ impl Runner {
                 if let Some((class, detail)) = compare(&e2, &r2, q.ordered) {
                     let case = Case { class, ordered: q.ordered, setup: setup.clone(), stmt: q.sql.clone(), other: None, note: format!("{} [{}]", detail, sets.join("; ")) };
                     self.record(seed, idx, case, Some(&e2), Some(&r2), &detail);
-                } else if ok && e2.error.is_none() && e2.panic.is_none() && e.sorted() != e2.sorted() {
+                } else if ok && !q.sql.contains("EXPLAIN") && e2.error.is_none() && e2.panic.is_none() && e.sorted() != e2.sorted() {
                     let case = Case { class: Class::PlanVariance, ordered: false, setup, stmt: q.sql.clone(), other: None, note: sets.join("; ") };
                     self.record(seed, idx, case, Some(&e2), Some(&e), "rows depend on planner settings");
                 }
@@ -897,7 +949,7 @@ fn replay(case: &Case, db: &str) -> (Out, Out, Option<(Out, Out)>) {
         let reuse = pure && k.as_ref().is_some_and(|(s, p)| *s == case.setup && p.db == db);
         if !reuse {
             *k = None;
-            let mut p = Pair::open(db);
+            let mut p = Pair::open(db, wants_shared(case.setup.iter().chain([&case.stmt]).map(String::as_str)));
             for s in &case.setup {
                 p.run(s);
             }
@@ -968,9 +1020,9 @@ fn probe() {
     on_big_stack(move || {
         install();
         let src = std::fs::read_to_string(&path).unwrap();
-        let mut p = Pair::open(&format!("{}_probe", env("DIFFTEST_DB", "difftest")));
-        for s in common::statements(&src) {
-            let s = strip_comments(&s);
+        let stmts: Vec<String> = common::statements(&src).iter().map(|s| strip_comments(s)).collect();
+        let mut p = Pair::open(&format!("{}_probe", env("DIFFTEST_DB", "difftest")), wants_shared(stmts.iter().map(String::as_str)));
+        for s in stmts {
             if s.is_empty() {
                 continue;
             }

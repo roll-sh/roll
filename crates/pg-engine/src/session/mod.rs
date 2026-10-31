@@ -1462,7 +1462,7 @@ impl Session {
             }
             NodeEnum::ExecuteStmt(s) => self.execute_stmt(s),
             NodeEnum::DeallocateStmt(s) => done(self.deallocate_stmt(s)?),
-            NodeEnum::ExplainStmt(s) => done(self.explain_stmt(s, params)?),
+            NodeEnum::ExplainStmt(s) => done(self.explain_stmt(s, params, &p.param_types)?),
             NodeEnum::DeclareCursorStmt(s) => {
                 let text = self.whole_query(p);
                 done(self.declare_cursor(s, params, &text)?)
@@ -2514,6 +2514,12 @@ impl Session {
             self.state.settings.borrow().format_ctx()
         };
         let mut values = Vec::with_capacity(params.len());
+        // Parameters of a domain type: their input is domain_in / domain_recv, which checks
+        // the domain's constraints here, whether or not the statement reads them.
+        let domains = {
+            let plans = p.plans.lock();
+            (!plans.param_oids.is_empty()).then(|| plans.param_oids.clone())
+        };
         for (i, raw) in params.into_iter().enumerate() {
             let f = match formats.len() {
                 0 => 0,
@@ -2566,6 +2572,21 @@ impl Session {
                         .map_err(|e| param_err(e, Some(&s)))?
                 }
             });
+            if let Some(d) = domains.as_ref().and_then(|ds| ds.iter().find(|(j, _)| *j == i)).map(|(_, d)| *d) {
+                let v = &values[i];
+                let named = match portal {
+                    "" => format!("unnamed portal parameter ${}", i + 1),
+                    p => format!("portal \"{p}\" parameter ${}", i + 1),
+                };
+                self.ensure_txn();
+                self.with_ctx(&[], |ctx| {
+                    if let Some(dc) = crate::sql::binder::Binder::new(ctx, Vec::new()).domain_coerce(d)? {
+                        dc.check(v, ctx)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.context(named))?;
+            }
         }
         let cols = self.describe(&p)?;
         // PortalSetResultFormat

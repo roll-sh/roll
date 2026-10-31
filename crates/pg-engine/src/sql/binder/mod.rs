@@ -2397,6 +2397,17 @@ impl<'b, 'a> Binder<'b, 'a> {
         self.coerce_assign_to(e, to, None, column)
     }
 
+    /// cookDefault's coercion of a DEFAULT or generation expression to column (or domain)
+    /// `column`'s type: a mismatch is the "default expression"'s.
+    pub fn coerce_default(&mut self, e: Expr, to: &DataType, column: &str) -> Result<Expr> {
+        self.coerce_assign(e, to, column).map_err(|mut err| {
+            if err.code == code::DATATYPE_MISMATCH && err.message.starts_with("column \"") {
+                err.message = err.message.replacen(" but expression ", " but default expression ", 1);
+            }
+            err
+        })
+    }
+
     /// Assignment coercion to a column declared as domain (or array-of-domain) type
     /// `to_domain` (of base type `to`), which a type mismatch names.
     pub fn coerce_assign_to(

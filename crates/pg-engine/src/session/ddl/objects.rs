@@ -1440,7 +1440,7 @@ impl Ddl<'_, '_> {
                                     let ty = nv.columns[i].1.clone();
                                     let mut b = self.binder();
                                     let e = b.bind_scalar(d, crate::sql::binder::Clause::Default)?;
-                                    b.coerce_assign(e, &ty, &cmd.name)?;
+                                    b.coerce_default(e, &ty, &cmd.name)?;
                                     Some(ast::deparse_expr(d)?)
                                 }
                                 None => None,
@@ -3111,7 +3111,7 @@ impl Ddl<'_, '_> {
                     saw_default = true;
                     let e = c.raw_expr.as_deref().unwrap();
                     let x = b.bind_scalar(e, Clause::Default)?;
-                    b.coerce_assign(x, &base, "")?;
+                    b.coerce_default(x, &base, &name)?;
                     d.default = Some(ast::deparse_expr(e)?);
                 }
                 C::ConstrCheck => {

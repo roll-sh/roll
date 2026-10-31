@@ -308,6 +308,105 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 5, base (0f9f0609, round 5 generator) | 5256–5355 × 100 | 9,697 | crash 2, wrong_rows 39, wrong_state 7, engine_error 14, missing_error 8, wrong_error 28, eval_error 26, notice 7, tag 1 |
 | round 5, batch 2 | 5256–5355 × 100 | 10,064 | wrong_rows 1, wrong_state 2, engine_error 8, missing_error 12, wrong_error 21, eval_error 13, notice 3, tag 1 (110 above error_message in the base, 52 here; 64 gone; none new but 6 past a base divergence; the wrong_rows / wrong_state are the old grammar's, the base's too: DISTINCT ON's physical order, a failing UPDATE condition, ANALYZE's sample) |
 
+## Round 7 grammar (agent 138)
+
+Seeds from `R7_SEEDS` (7000) on run on one engine for the whole process (`difftest/wire.rs`:
+a database per seed, served on the first free port of `DIFFTEST_WIRE_PORTS`, 52761-52779),
+so that what the engine keeps across sessions and databases (statement templates, kept plans)
+is shared as in a server, and sessions 2 and 3 reach both servers over the wire with the same
+client. The `r7*` objects (`round7.rs`) exist besides the earlier rounds', and 45 % of the
+statements are `round7_stmt`'s:
+
+- **Statements that differ only in their literals** (a third of them): 35 templates over the
+  `r7*` tables, each sent two to four times with other literals, of other types too (`1`,
+  `2147483648`, `1.5`, `'3'`, NULL, edge values), in WHERE, ORDER BY / GROUP BY positions,
+  LIMIT / OFFSET, LIKE patterns (index or not), EXPLAIN (plans that depend on the value), DML
+  and upserts; from session 1 (in-process), 2 and 3 (simple protocol over the wire), and over
+  the extended protocol with the literals as parameters (typed or not, text or binary, results
+  in text, binary or per column, row limits that suspend the portal), and as a named statement
+  bound five to eight times (past the custom plans).
+- **Savepoints and errors inside transactions** on any session: errors before and after
+  savepoints, `ROLLBACK TO` / `RELEASE` of missing ones, an extended-protocol error inside a
+  block, `SET TRANSACTION` too late, COMMIT of a failed block, `COMMIT AND CHAIN`; a wire
+  session's tag shows the transaction status after each statement (`[I]` / `[T]` / `[E]`).
+- **Two sessions interleaved**, deterministic by construction: a statement that must wait is
+  sent with `\s3&` (it either finishes or waits for a lock, which
+  `pg_isolation_test_session_is_blocked` decides, never a timer) and collected with `\s3.`
+  after the other session ends its transaction. Row locks of every strength waited for and
+  re-checked (READ COMMITTED's EvalPlanQual, REPEATABLE READ's serialization failure), SKIP
+  LOCKED, NOWAIT, lock_timeout, LOCK TABLE modes, advisory locks, rows moved to another
+  partition meanwhile, a unique key inserted by both, a deadlock (session 3 has the short
+  deadlock_timeout, so it alone finds it), serializable write skew. A statement waiting on one
+  side only is class `lock`; a wire session the engine never answers is `hang` (the seed
+  stops, its sessions are left).
+- MERGE with every action (MATCHED / NOT MATCHED [BY TARGET] / NOT MATCHED BY SOURCE, UPDATE,
+  DELETE, INSERT, DO NOTHING, conditions, RETURNING merge_action() / old / new, source keys
+  repeated) into plain, partitioned (rows moving), generated-column, identity (OVERRIDING
+  SYSTEM VALUE) and domain tables; partition moves and the default partition; stored and
+  virtual generated columns, identity ALWAYS / BY DEFAULT; domains with CHECK / NOT NULL and
+  arrays of them (ALTER DOMAIN between DML).
+- ICU and nondeterministic collations, time zones around DST changes (New York, Berlin,
+  Lord Howe, Kathmandu, Chatham), numeric and float edges (NaN, infinities, -0, overflow,
+  denormals, rounding, display with extra_float_digits 0 and 1).
+- GRANT / REVOKE (table and column privileges) and row security (permissive and restrictive
+  policies, FORCE, policies per role) with statements as `r7_alice` or `r7_bob` on any
+  session. The roles are the cluster's, made when missing and never dropped (other seeds'
+  databases hold grants to them); nothing changes role memberships, since runs share the
+  reference.
+
+Case files write a wire session's step as a statement starting with a backslash
+(`wire.rs`'s header has the syntax); `replay_case`, `probe` and `reduce` open the shared
+engine when a case has one, or names an `r7` object. Binary results show user types' oids
+(an oid-valued column, an array's element type) as `<user>`.
+
+## Round 7 (agent 138)
+
+Batch 1 (`a138_round7`, wire test `bound_parameters_of_domains_and_explain`):
+
+- **EXPLAIN with bound parameters** (the extended protocol, as drivers send `EXPLAIN ... $1`):
+  planned with the values as constants, as PostgreSQL's custom plan does (partitions pruned
+  while planning, `= NULL` folded to `One-Time Filter: false`); the engine planned it
+  generically (run-time pruning, `Subplans Removed`). `explain_stmt` now gets the protocol
+  statement's parameter types (`session/utility.rs`). Most of round 7's wrong_rows in the
+  base.
+- **A parameter of a domain type is checked at Bind** (domain_in / domain_recv), whether the
+  statement reads it or not and before the result formats are: `SELECT $1::d WHERE false`
+  with a value the domain refuses fails (`session/mod.rs` bind).
+- **cookDefault's message**: a DEFAULT, a generation expression or a domain's DEFAULT of the
+  wrong type says "default expression" (and names the domain), `Binder::coerce_default`.
+- **Binary COPY**: a row NOT NULL refuses fails before a later tuple's format error in a
+  buffered COPY (ExecConstraints checks each row as NextCopyFrom reads it): the tuples read
+  before a failing one are kept (`binary_copy_in` fills the caller's rows) and the batch's
+  NOT NULL check runs before the read error is raised (`next_batch`); a binary row's CONTEXT
+  has no line text (`CopyLines::binary`); a receive function's leftover bytes are
+  "incorrect binary data format" (the bind path adds "in bind parameter n").
+- **sum(float8) of 1e300 and 0.5** failed "value out of range: overflow": it shared avg's
+  Youngs-Cramer state, whose Sxx overflows; sum is float8pl alone (`exec/agg.rs`
+  `FloatStats::push`).
+- `pg_get_object_address('table', '{pg_catalog,pg_class}', '{}')` finds system catalogs (and
+  refuses a system view as a table), round 6's item (`catalog/identify.rs`).
+- Float input of hexadecimal constants (`'0x10'::float8`, `'-0X1.8p1'`), round 6's item: read
+  as strtod reads them, correctly rounded; as the reference's musl does, one that overflows is
+  ±Infinity and one that underflows to zero is out of range (`types/text.rs` `hex_float`).
+- Harness: round 7's grammar and the wire sessions (above); the plan-variance oracle leaves
+  EXPLAIN out (its rows are the plan); a reference-side failure of a wire step is an error
+  outcome, so the reducer rejects a candidate that lost the other session's COMMIT.
+
+Pair runs (debug, the engine of fd250f0b with this batch's harness against this batch,
+150 statements a seed, a private reference): round 6 seeds 6100-6249 (23,418 statements):
+wrong_error 9 -> 5, eval_error 9 -> 7, error_message 33 -> 14, 25 mismatches fewer, nothing
+new. Round 7 seeds 7000-7149 (23,267 statements, 8,272 queries): wrong_rows 140 -> 36,
+wrong_error 17 -> 11, eval_error 7 -> 4, error_message 13 -> 8, 100 mismatches fewer, nothing
+new; no `lock` or `hang` mismatch in either (every lock wait, SKIP LOCKED, NOWAIT,
+EvalPlanQual re-check, deadlock and serialization failure agreed). Smoke: no new mismatch.
+
+Memory of the difftest process (item 4, agent 118's 201 -> 664 MB over 150 seeds): not
+reproduced at fd250f0b. Round 6 seeds, 150 of them: 159 MB after the first seeds, 168 / 174 /
+177 MB at a third, two thirds and the end (peak 176.6 MB base, 176.1 MB head); round 7 (the
+shared engine's databases dropped per seed): peak 187.0 MB base, 186.7 MB head, 184.5 /
+183.9 MB at the end. Growth over 150 seeds is ~17 MB, not 460: the `lru::Shared` parse-tree
+caches' bound holds now (agent 132's area).
+
 ## Round 6 grammar (agent 118)
 
 Seeds from `R6_SEEDS` (6000) on add the `r6*` objects (`round6.rs`, its own generator; the
@@ -876,6 +975,29 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 
 ## Open
 
+- **Round 7 seeds, found, not fixed** (agent 138; routed):
+  - Protocol (agent 136): an array of a domain sent in binary carries the base type's oid as
+    its element type where array_send writes the domain's (`CREATE DOMAIN d AS int CHECK
+    (VALUE > 0)`, then `SELECT '{1,2}'::d[]` with result format 1: PostgreSQL's header has d's
+    oid, the engine 23). `put_data_row` / `binary::encode_array` have no catalog to find it.
+  - Protocol (agent 136): Bind checks the result-format count before the custom plan is made,
+    PostgreSQL after (GetCachedPlan, then PortalSetResultFormat): `SELECT $1 + $2, $3::int2,
+    $4 * 2` bound with `$4` = -9223372036854775808 and two result formats for three columns is
+    22003 (bigint out of range, folding the parameter) in PostgreSQL, 08P01 in the engine.
+  - Not reproduced as a difftest mismatch but failing on fd250f0b itself: `deep_input`'s
+    `viewdef 2000` (debug build) is "stored query: Invalid statement: stack depth limit
+    exceeded" where it was `2000|12036` (both deep_input tests, base and this batch alike).
+  - Left in this area: `(x).f` over a VALUES column of type record resolves where PostgreSQL
+    fails ("record type has not been registered": expandRecordVariable doesn't look into a
+    VALUES RTE; the binder's scope columns don't say where they come from);
+    `pg_stat_get_backend_subxact(bid)` (oid 6107, per-backend subtransaction counts) is
+    missing.
+  - The rest of round 7's 150 seeds are earlier rounds' open classes: FULL JOIN decisions
+    (0A000 vs 22023 / 42P01, 3 + 3), a regular expression under a nondeterministic
+    collation over an empty table (round 4), string hashing under a nondeterministic
+    collation (round 4), `width_bucket('NaN', ...)` in a sub-select PostgreSQL evaluates and
+    the engine doesn't (2, eval_error), a CASE / division folding order (1).
+
 - **Round 6 seeds, found, not fixed** (agent 118):
   - Memory: the difftest process (one engine per seed, in-process, debug) ends 50 seeds
     (5556–5605) at 424–431 MB resident from 93244ee3 on, against 193 MB at d0c965fb; bisected
@@ -906,8 +1028,8 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
   - Built-in functions with OUT parameters: `(f()).x` works over a direct call; the engine also
     resolves it through a sub-select or VALUES column of type record, where PostgreSQL fails
     ("could not identify column ... in record data type", "record type has not been
-    registered"); `pg_get_object_address('table', '{pg_catalog,pg_class}', '{}')` doesn't find
-    the catalog; `pg_stat_get_backend_subxact` is missing.
+    registered"); `pg_stat_get_backend_subxact` is missing (`pg_get_object_address` of a
+    `pg_catalog` name: fixed in round 7).
   - A virtual generated column in a whole-row NULL test (`t.* IS NULL`) is computed; PostgreSQL
     splits the test per field and stops before it.
   - Reduced from seeds 6000–6099, not fixed: a CASE folded at bind time loses the explicit
@@ -921,10 +1043,11 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
     instead of the folding error; PostgreSQL's merge join costing (mergejoinscansel over
     histograms) raises 42P22 for a join of columns under conflicting collations whatever join
     it picks, the engine only when it picks a merge join; an outer-level aggregate in a
-    sub-select in WHERE gives a later column error first; float input of hex (`'0x10'::float8`,
-    strtod) is refused; a JSON error's token after `-` is one character (`found "-"` for
-    `"-13"`); binary COPY checks a stream's framing (data after the trailer) before a row
-    before it fails NOT NULL; a FULL JOIN on a pulled-up subquery's constant output fails once
+    sub-select in WHERE gives a later column error first; (float input of hex: fixed in round
+    7) a JSON error's token after `-` is one character (`found "-"` for `"-13"`; not reproduced
+    at fd250f0b: every `-` token probed agrees); binary COPY checks a stream's framing (data
+    after the trailer) before a row before it fails NOT NULL (round 7 keeps the NOT NULL row's
+    error first in a buffered COPY); a FULL JOIN on a pulled-up subquery's constant output fails once
     a join above reads it (the output isn't a PlaceHolderVar there).
 
 - **Round 4 seeds, reduced, not fixed** (cases in the round's notes above):

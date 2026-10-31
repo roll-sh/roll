@@ -406,6 +406,56 @@ pub fn parse_float4(s: &str) -> Result<f32> {
     Ok(f)
 }
 
+/// A hexadecimal floating constant as strtod reads it (`[+-]0x<hex>[.<hex>][p[+-]<dec>]`,
+/// float8in takes them: `'0x10'::float8` is 16), correctly rounded, and whether its mantissa
+/// isn't zero.
+fn hex_float(t: &str) -> Option<(f64, bool)> {
+    let (neg, r) = match t.as_bytes().first()? {
+        b'-' => (true, &t[1..]),
+        b'+' => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let r = r.strip_prefix("0x").or_else(|| r.strip_prefix("0X"))?;
+    let (mant, exp) = match r.find(['p', 'P']) {
+        Some(i) => (&r[..i], r[i + 1..].parse::<i64>().ok()?),
+        None => (r, 0),
+    };
+    let (ip, fp) = mant.split_once('.').unwrap_or((mant, ""));
+    if ip.is_empty() && fp.is_empty() || !ip.bytes().chain(fp.bytes()).all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    // The first 30 significant digits exactly (120 bits), the rest as a sticky bit.
+    let (mut m, mut shift, mut sticky, mut digits) = (0u128, exp, false, 0);
+    for (i, c) in ip.bytes().chain(fp.bytes()).enumerate() {
+        let d = (c as char).to_digit(16).unwrap() as u128;
+        if i >= ip.len() {
+            shift -= 4;
+        }
+        if digits < 30 {
+            m = m * 16 + d;
+            digits += (m != 0) as usize;
+        } else {
+            sticky |= d != 0;
+            shift += 4;
+        }
+    }
+    let nonzero = m != 0 || sticky;
+    let m = (m << 1 | sticky as u128) as f64;
+    let mut v = m;
+    let mut k = shift - 1;
+    while k > 0 {
+        let step = k.min(1000);
+        v *= 2f64.powi(step as i32);
+        k -= step;
+    }
+    while k < 0 {
+        let step = (-k).min(1000);
+        v /= 2f64.powi(step as i32);
+        k += step;
+    }
+    Some((if neg { -v } else { v }, nonzero))
+}
+
 fn parse_float(s: &str, tname: &str) -> Result<f64> {
     // (The common case: digits with a point, an optional minus, no exponent; finite and,
     // with a nonzero digit, not rounded to zero.)
@@ -425,24 +475,38 @@ fn parse_float(s: &str, tname: &str) -> Result<f64> {
         "nan" | "+nan" | "-nan" => return Ok(f64::NAN),
         "infinity" | "+infinity" | "inf" | "+inf" => return Ok(f64::INFINITY),
         "-infinity" | "-inf" => return Ok(f64::NEG_INFINITY),
-        _ => {
-            let ok = !t.is_empty()
-                && t.bytes()
-                    .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-'))
-                && t.bytes().any(|b| b.is_ascii_digit());
-            if !ok {
-                bail!(
-                    INVALID_TEXT_REPRESENTATION,
-                    "invalid input syntax for type {tname}: \"{s}\""
-                );
+        _ => match hex_float(t) {
+            // (The reference's strtod, musl's, overflows a hexadecimal constant to ±Infinity
+            // without ERANGE, and sets it for one that underflows to zero.)
+            Some((v, nonzero)) => {
+                if v == 0.0 && nonzero {
+                    bail!(
+                        NUMERIC_VALUE_OUT_OF_RANGE,
+                        "\"{t}\" is out of range for type {tname}"
+                    );
+                }
+                return Ok(v);
             }
-            t.parse::<f64>().map_err(|_| {
-                err!(
-                    INVALID_TEXT_REPRESENTATION,
-                    "invalid input syntax for type {tname}: \"{s}\""
-                )
-            })?
-        }
+            None => {
+                let ok = !t.is_empty()
+                    && t.bytes().all(|b| {
+                        b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-')
+                    })
+                    && t.bytes().any(|b| b.is_ascii_digit());
+                if !ok {
+                    bail!(
+                        INVALID_TEXT_REPRESENTATION,
+                        "invalid input syntax for type {tname}: \"{s}\""
+                    );
+                }
+                t.parse::<f64>().map_err(|_| {
+                    err!(
+                        INVALID_TEXT_REPRESENTATION,
+                        "invalid input syntax for type {tname}: \"{s}\""
+                    )
+                })?
+            }
+        },
     };
     if v.is_infinite() {
         bail!(

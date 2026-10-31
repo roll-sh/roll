@@ -14,6 +14,8 @@ mod round4;
 mod round5;
 #[path = "round6.rs"]
 mod round6;
+#[path = "round7.rs"]
+mod round7;
 
 /// splitmix64: small, fast and good enough to drive a generator.
 pub struct Rng(u64);
@@ -152,6 +154,8 @@ pub struct Schema {
     pub round5: bool,
     /// Round 6: the `r6*` objects exist (`round6::schema`).
     pub round6: bool,
+    /// Round 7: the `r7*` objects exist (`round7::schema`), and sessions 2 and 3.
+    pub round7: bool,
 }
 
 /// A column visible to an expression: its qualified reference and type.
@@ -226,6 +230,12 @@ pub const R5_SEEDS: u64 = 5000;
 /// planned for cursor_tuple_fraction, binary COPY, upserts, CTEs with DML, window functions,
 /// JSON, migrations, ORM query shapes, OUT-parameter built-ins.
 pub const R6_SEEDS: u64 = 6000;
+/// The first seed generated with round 7's objects and statements (`round7.rs`), on the
+/// shared engine with sessions over the wire: prepared statements over the extended protocol,
+/// savepoints and errors in transactions, two-session lock waits, MERGE, partitions,
+/// generated and identity columns, domains, collations, time zones, numeric edges, roles and
+/// row security, and statements that differ only in their literals.
+pub const R7_SEEDS: u64 = 7000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
@@ -2278,6 +2288,10 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
         out.extend(round6::schema(&mut Rng::new(seed ^ 0x6666_6666)));
         s.round6 = true;
     }
+    if seed >= R7_SEEDS {
+        out.extend(round7::schema(&mut Rng::new(seed ^ 0x7777_7777)));
+        s.round7 = true;
+    }
     (s, out)
 }
 
@@ -2419,6 +2433,10 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     });
     while out.len() < n {
         g.alias = 0;
+        if s.round7 && g.rng.chance(0.45) {
+            out.extend(g.round7_stmt());
+            continue;
+        }
         if s.round6 && g.rng.chance(0.35) {
             out.extend(g.round6_stmt());
             continue;

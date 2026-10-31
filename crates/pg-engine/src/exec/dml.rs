@@ -3853,7 +3853,7 @@ impl InsertNode {
             f.push(Frame::Copy {
                 table: c.table.clone(),
                 line,
-                raw: Some(raw),
+                raw: (!c.binary).then_some(raw),
             });
             f.len() - 1
         };

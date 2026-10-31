@@ -14,6 +14,32 @@ use super::{Event, Field};
 pub struct PgClient {
     stream: TcpStream,
     buf: BytesMut,
+    /// The transaction status of the last ReadyForQuery: `I`, `T` or `E`.
+    pub status: u8,
+    /// COPY FROM STDIN's data for the query in flight (`send_query`).
+    copy_data: Option<String>,
+    /// The result formats of the portal being read (`extended`): one for all, or per column.
+    binary_cols: Vec<i16>,
+    /// Report the portal's executions as one result (`extended`).
+    merge: bool,
+    /// The read timeout (`set_timeout`): a statement running longer fails the read.
+    timeout: Option<std::time::Duration>,
+}
+
+/// A binary column value as compared: `\x` and hex, with the oids of user types (which
+/// differ between servers) shown as `<user>`: an oid-valued type's value, an array's element
+/// type.
+fn binary_shown(ty: u32, b: &[u8]) -> String {
+    let word = |at: usize| b.get(at..at + 4).map(|w| u32::from_be_bytes(w.try_into().unwrap()));
+    if matches!(ty, 26 | 2205 | 2206 | 4096 | 4089) && b.len() == 4 && word(0).is_some_and(|o| o >= 16384) {
+        return "\\x<user>".into();
+    }
+    let s = super::copy_hex(b);
+    // (An array: ndim, the null flag, the element type.)
+    if b.len() >= 12 && word(0).is_some_and(|n| n <= 6) && word(4).is_some_and(|f| f <= 1) && word(8).is_some_and(|o| o >= 16384) {
+        return format!("{}<user>{}", &s[..2 + 16], &s[2 + 24..]);
+    }
+    s
 }
 
 fn fields(mut f: ErrorFields<'_>) -> Field {
@@ -77,6 +103,11 @@ impl PgClient {
         let mut c = PgClient {
             stream,
             buf: BytesMut::new(),
+            status: b'I',
+            copy_data: None,
+            timeout: None,
+            binary_cols: Vec::new(),
+            merge: false,
         };
         let mut out = BytesMut::new();
         frontend::startup_message(
@@ -153,10 +184,116 @@ impl PgClient {
     /// Run one simple query; returns what the server sent, in order. A statement carrying COPY
     /// data (see `split_copy`) sends it when the server asks.
     pub fn simple_query(&mut self, stmt: &str) -> std::io::Result<Vec<Event>> {
+        self.send_query(stmt)?;
+        self.results()
+    }
+
+    /// Send a simple query without reading its results (`results` reads them): a statement
+    /// that may wait for a lock another session holds.
+    pub fn send_query(&mut self, stmt: &str) -> std::io::Result<()> {
         let (sql, copy_data) = super::split_copy(stmt);
         let mut out = BytesMut::new();
         frontend::query(sql, &mut out)?;
+        self.copy_data = copy_data;
+        self.stream.write_all(&out)
+    }
+
+    /// Whether the server sent something within `wait` (a statement sent with `send_query`
+    /// finished, or failed, rather than waiting).
+    pub fn readable_within(&mut self, wait: std::time::Duration) -> std::io::Result<bool> {
+        if !self.buf.is_empty() {
+            return Ok(true);
+        }
+        self.stream.set_read_timeout(Some(wait.max(std::time::Duration::from_millis(1))))?;
+        let mut tmp = [0u8; 65536];
+        let r = self.stream.read(&mut tmp);
+        self.stream.set_read_timeout(self.timeout)?;
+        match r {
+            Ok(0) => Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed")),
+            Ok(n) => {
+                self.buf.extend_from_slice(&tmp[..n]);
+                Ok(true)
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fail reads that wait longer than `t` (a hang).
+    pub fn set_timeout(&mut self, t: Option<std::time::Duration>) -> std::io::Result<()> {
+        self.timeout = t;
+        self.stream.set_read_timeout(t)
+    }
+
+    /// The extended protocol: Parse `sql` as statement `name` with `param_types` (unless
+    /// `parse` is false: the statement exists), Describe it when `describe`, then Bind
+    /// `params` (format, value) with `result_formats` to the unnamed portal, Describe and
+    /// Execute it (at most `max_rows` rows a time, 0: all, executing again while suspended),
+    /// and Sync. A binary column value is shown as `\x` and its bytes in hex.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extended(
+        &mut self,
+        name: &str,
+        sql: Option<&str>,
+        param_types: &[u32],
+        describe: bool,
+        params: &[(i16, Option<Vec<u8>>)],
+        result_formats: &[i16],
+        max_rows: i32,
+    ) -> std::io::Result<Vec<Event>> {
+        let mut out = BytesMut::new();
+        if let Some(sql) = sql {
+            frontend::parse(name, sql, param_types.iter().copied(), &mut out)?;
+        }
+        if describe {
+            frontend::describe(b'S', name, &mut out)?;
+        }
+        let mut body = vec![0u8];
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for (f, _) in params {
+            body.extend_from_slice(&f.to_be_bytes());
+        }
+        body.extend_from_slice(&(params.len() as i16).to_be_bytes());
+        for (_, v) in params {
+            match v {
+                None => body.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(b) => {
+                    body.extend_from_slice(&(b.len() as i32).to_be_bytes());
+                    body.extend_from_slice(b);
+                }
+            }
+        }
+        body.extend_from_slice(&(result_formats.len() as i16).to_be_bytes());
+        for f in result_formats {
+            body.extend_from_slice(&f.to_be_bytes());
+        }
+        out.extend_from_slice(b"B");
+        out.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
+        out.extend_from_slice(&body);
+        frontend::describe(b'P', "", &mut out)?;
+        frontend::execute("", max_rows, &mut out)?;
+        if max_rows > 0 {
+            // (A suspended portal runs again: twice more at most, then the rest.)
+            frontend::execute("", max_rows, &mut out)?;
+            frontend::execute("", 0, &mut out)?;
+        }
+        frontend::sync(&mut out);
         self.stream.write_all(&out)?;
+        self.copy_data = None;
+        self.binary_cols = result_formats.to_vec();
+        self.merge = true;
+        let r = self.results();
+        self.binary_cols.clear();
+        self.merge = false;
+        r
+    }
+
+    /// Read what the server sends up to ReadyForQuery.
+    pub fn results(&mut self) -> std::io::Result<Vec<Event>> {
+        let copy_data = self.copy_data.take();
+        let mut merged: Option<Vec<String>> = self.merge.then(Vec::new);
         let mut events = Vec::new();
         let mut cols: Option<Vec<(String, u32)>> = None;
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -177,12 +314,24 @@ impl PgClient {
                     let mut ranges = r.ranges();
                     let mut row = Vec::new();
                     while let Some(rg) = ranges.next()? {
-                        row.push(rg.map(|rg| String::from_utf8_lossy(&buf[rg]).into_owned()));
+                        let i = row.len();
+                        let bin = match self.binary_cols.len() {
+                            0 => false,
+                            1 => self.binary_cols[0] == 1,
+                            _ => self.binary_cols.get(i) == Some(&1),
+                        };
+                        let ty = cols.as_ref().and_then(|c| c.get(i)).map_or(0, |c| c.1);
+                        row.push(rg.map(|rg| if bin { binary_shown(ty, &buf[rg]) } else { String::from_utf8_lossy(&buf[rg]).into_owned() }));
                     }
                     rows.push(row);
                 }
                 Message::CommandComplete(c) => {
                     let tag = c.tag().map_err(std::io::Error::other)?.to_string();
+                    if let Some(t) = merged.as_mut() {
+                        // (The extended protocol's executions of one portal: one result.)
+                        t.push(tag);
+                        continue;
+                    }
                     events.push(Event::Result {
                         cols: cols.take(),
                         rows: std::mem::take(&mut rows),
@@ -221,7 +370,23 @@ impl PgClient {
                         String::from_utf8_lossy(&s).trim_end_matches('\n').to_string()
                     })]);
                 }
-                Message::ReadyForQuery(_) => return Ok(events),
+                Message::ReadyForQuery(r) => {
+                    self.status = r.status();
+                    if let Some(t) = merged.filter(|t| !t.is_empty() || cols.is_some()) {
+                        events.push(Event::Result { cols: cols.take(), rows, tag: t.join("; ") });
+                    }
+                    return Ok(events);
+                }
+                Message::ParameterDescription(d) => {
+                    let mut p = d.parameters();
+                    let mut v = Vec::new();
+                    while let Some(t) = p.next()? {
+                        v.push(t.min(16384).to_string());
+                    }
+                    events.push(Event::Notice(super::Field { severity: "PARAMS".into(), message: v.join(","), ..Default::default() }));
+                }
+                Message::NoData => cols = None,
+                Message::PortalSuspended => merged.get_or_insert_default().push("(suspended)".into()),
                 _ => {}
             }
         }

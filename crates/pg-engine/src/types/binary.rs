@@ -725,17 +725,14 @@ fn decode_numeric(mut b: &[u8]) -> Result<Numeric> {
 
 pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
     use DataType as T;
-    // A fixed-size type's recv: too few bytes is pq_getmsg*'s error; bytes left over are
-    // exec_bind_message's (which names the parameter).
+    // A fixed-size type's recv: too few bytes is pq_getmsg*'s error; bytes left over are its
+    // caller's (exec_bind_message names the parameter, CopyReadBinaryAttribute doesn't).
     let need = |n: usize| -> Result<()> {
         if b.len() < n {
             bail!(PROTOCOL_VIOLATION, "insufficient data left in message");
         }
         if b.len() > n {
-            bail!(
-                INVALID_BINARY_REPRESENTATION,
-                "incorrect binary data format in bind parameter"
-            );
+            bail!(INVALID_BINARY_REPRESENTATION, "incorrect binary data format");
         }
         Ok(())
     };

@@ -3372,7 +3372,23 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   past CTEs; error order of COPY (CSV quotes, NOT NULL in buffers, relation before options),
   INSERT into views and ALTER TYPE over indexes; binary COPY's trailer and numeric infinities;
   table statistics after a rewrite. Agent 104's memory figure was not reproduced (noise).
-  Open: tests/difftest/STATUS.md.
+  Round 23, agent 138 (difftest round 7): a grammar for seeds from 7000 on (`difftest/round7.rs`)
+  that runs on one engine per process, served on a port (`difftest/wire.rs`: a database per
+  seed), with sessions 2 and 3 over the wire: templates sent again with other literals (and
+  literal types) from every session and over the extended protocol (parameters typed or not,
+  text or binary, results binary, portals suspended, named statements past the custom plans),
+  savepoints and errors in transactions with the transaction status after each statement,
+  two-session lock waits decided by `pg_isolation_test_session_is_blocked` (EvalPlanQual,
+  SKIP LOCKED, NOWAIT, lock_timeout, LOCK TABLE, advisory locks, partition moves, concurrent
+  unique keys, deadlocks, write skew; class `lock`), MERGE with every action, partitions,
+  generated / identity columns, domains and their arrays, ICU collations, DST edges, numeric
+  edges, GRANT / REVOKE and row security under two roles. Fixes: EXPLAIN with bound parameters
+  planned as a custom plan (`explain_stmt` gets the protocol's parameter types), domain-typed
+  parameters checked at Bind, cookDefault's "default expression" message, binary COPY's error
+  order (a NOT NULL row before a later tuple's format error) and CONTEXT, sum(float8) without
+  avg's Sxx overflow, `pg_get_object_address` of system catalogs, hexadecimal float input.
+  The difftest process's memory growth (agent 118's 201 -> 664 MB) is gone at fd250f0b (~17 MB
+  over 150 seeds). Open: tests/difftest/STATUS.md.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
   (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round

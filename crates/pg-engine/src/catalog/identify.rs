@@ -925,13 +925,22 @@ pub fn object_address(
                 ));
             }
         };
-        let oid = cat
-            .find(schema, name, sp)
-            .map(|r| r.oid())
+        // (System catalogs and views: their fixed oids, as the relation cache has them.)
+        if let Some(r) = cat.find(schema, name, sp) {
+            return Ok((r.oid(), name.to_string()));
+        }
+        let oid = super::system::SysTable::lookup(schema, name, sp)
+            .map(|t| t.oid())
             .ok_or_else(|| super::no_such_relation(schema, name))?;
         Ok((oid, name.to_string()))
     };
     let relkind = |oid: u32, name: &str, kind: &str| -> Result<()> {
+        if let Some(t) = super::system::SysTable::by_oid(oid) {
+            return match (kind, t.is_view()) {
+                ("table", false) | ("view", true) => Ok(()),
+                _ => Err(super::wrong_kind(name, kind)),
+            };
+        }
         let ok = match kind {
             "table" => cat.tables.get(&oid).is_some_and(|t| !t.is_foreign()),
             "foreign table" => cat.tables.get(&oid).is_some_and(|t| t.is_foreign()),

@@ -1060,6 +1060,9 @@ pub struct CopyLines {
     pub multi: bool,
     /// FREEZE: the rows go in frozen (HEAP_INSERT_FROZEN), their new pages all-visible.
     pub freeze: bool,
+    /// FORMAT binary: an error's CONTEXT names the line without its text
+    /// (CopyFromErrorCallback).
+    pub binary: bool,
     /// The rows read and not inserted yet: COPY FROM reads its data a batch at a time as
     /// the insert takes it (`session::copy`), as CopyFrom does.
     pub feed: std::sync::Mutex<CopyFeed>,
