@@ -330,6 +330,8 @@ pub struct SessionState {
     pub no_snapshot: std::cell::Cell<bool>,
     /// The backend's pending cumulative statistics (`exec::pgstat`).
     pub pgstat: RefCell<crate::exec::pgstat::Pending>,
+    /// The session's spill files (temp_file_limit, their statistics: `exec::spill`).
+    pub temp: Arc<crate::exec::spill::TempUsage>,
     /// The current transaction used temporary objects (XACT_FLAGS_ACCESSEDTEMPNAMESPACE).
     pub temp_used: std::cell::Cell<bool>,
     /// The failing statement committed part of its work in transactions of its own (a
@@ -529,6 +531,7 @@ impl SessionState {
             vacuum_cost: std::cell::Cell::new((0, 0.0, 200, 1, false)),
             no_snapshot: Default::default(),
             pgstat: RefCell::new(crate::exec::pgstat::Pending::new_session()),
+            temp: Arc::default(),
             temp_used: std::cell::Cell::new(false),
             commit_on_error: std::cell::Cell::new(false),
             temp_ever: std::cell::Cell::new(false),

@@ -146,6 +146,8 @@ impl Session {
         let st = |text: &Arc<str>, location: i32, len: i32| (text.clone(), location, len);
         let enabled = pgss::enabled(&self.state, level);
         let started = std::time::Instant::now();
+        // (Temporary blocks count from the statement's start.)
+        let _ = self.state.temp.take_blocks();
         match node {
             // EXECUTE: the prepared query runs, under its PREPARE's entry.
             NodeEnum::ExecuteStmt(e) => {
@@ -295,6 +297,7 @@ impl Session {
             local_blks: if t.target.is_some_and(|x| x.1) { t.blocks_added } else { 0 },
             workers_to_launch: self.pgss_workers,
             workers_launched: self.pgss_workers,
+            temp_blks: self.state.temp.take_blocks(),
         };
         // The query a utility statement ran, one level down (track = all).
         if let Some((q, source)) = &t.nested

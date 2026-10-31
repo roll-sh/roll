@@ -3160,7 +3160,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     TPC-H SF 0.2 time, CPU and peak unchanged or lower. Test `tests/memory_load.rs`
     `many_sessions_stay_bounded` (100 sessions on a database just opened: +80-90 MB of heap,
     +640 MB without the single build; bound 40 MB + 0.8 MB a session).
-  - Left: per-statement working memory ignores work_mem. 100 sessions adding a sort under a
+  - Left (done for sorts and hash aggregations in round 23, agent 132: "Query memory and
+    spilling" below): per-statement working memory ignored work_mem. 100 sessions adding a sort under a
     LIMIT and a 50,000-group grouping of 200,000 rows peak at 5.3 GB (PostgreSQL 733 MB):
     a sequential scan of a table whose rows moved collects every row to return them in heap
     order (`scan.rs` `next_raw`, agent 117), and HashAggregate keeps all its groups (each key
@@ -3174,6 +3175,85 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - Verified: crate tests debug and release (deep_input, parallel tests), clippy (no new
     warnings), difftest smoke, isolation 121 / 122, a full regress run (debug, private
     reference) 51,148 / 51,150 with no unit changed against results.tsv.
+- **Query memory and spilling** (round 23, agent 132; BENCH.md "Query memory and spilling"):
+  work_mem and hash_mem_multiplier honoured by the executor, the way PostgreSQL honours them.
+  - *The rule* (Decisions: "Where a node spills"): a node spills where PostgreSQL's would,
+    decided by PostgreSQL's own count of its memory, not the engine's bytes
+    (`exec/workmem.rs`): `minimal_tuple_len` is a MinimalTuple's t_len of a row (heap
+    layout, null bitmap, short varlenas), `SortMem` is tuplesort's USEMEM / LACKMEM /
+    grow_memtuples, `HashAggMem` nodeAgg's meta / table (bump) / per-tuple contexts with
+    their block growth, `Blocks` aset.c / bump.c blocks. The engine's rows are 2-4x
+    PostgreSQL's tuples, so a node holds a small multiple of work_mem; what EXPLAIN ANALYZE
+    shows, and the order of equal keys or of a spilled hash table's groups, are
+    PostgreSQL's because the switch points are.
+  - *Sort* (`exec/extsort.rs`, SortNode in nodes.rs): rows go to `ExtSort::put`; where
+    tuplesort dumps a run, the rows so far are sorted (pg_qsort's order) and written as a run;
+    runs are dealt to merge-order tapes (selectnewtape), merged in passes while a tape holds
+    more than one, and the final merge runs as rows are read, through tuplesort's heap
+    (insert / replace_top / delete_top), so ties come out in PostgreSQL's order (goldens at
+    64 kB-2 MB match the reference's md5 of the output). A key that isn't an input column is
+    evaluated as the row comes and kept as a column (PostgreSQL's resjunk entry: it counts in
+    the tuple); columns nothing above reads count as NULL (remove_unused_subquery_outputs:
+    `ExecCtx::logical_need` carries the mask under EXPLAIN ANALYZE too). A one-column input is
+    a datum sort (its values count 0 bytes, as in tuplesort_putdatum). Bounded sorts (a LIMIT
+    above) stay in memory (`pgsort::Bounded`, at most 2 x bound rows); their top-N / quicksort
+    memory is `extsort::bounded_stats` (a text first key adds a copy of the value per kept
+    tuple: measured, 26 kB for LIMIT 10 of md5 rows). EXPLAIN ANALYZE prints
+    `NodeStats::sort`; the old estimate from rows x width is the fallback.
+  - *HashAggregate* (`exec/hashspill.rs`, agg.rs plain GROUP BY): each new group is counted
+    (`HashAggMem::new_group`); past hash_agg_set_limits' limits the node enters spill mode:
+    groups in the table keep aggregating (looked up without the table model growing, as
+    SH_LOOKUP), other rows go to partitions by their key hash's next bits
+    (hash_choose_num_partitions), with a HyperLogLog per partition (hyperloglog.c, width 5).
+    The table's groups come out, then each partition as a batch (the last made first; the
+    table emptied, its size kept, as ResetTupleHashTable), which may spill again. Batches,
+    peak memory and disk go to `NodeStats::hashagg`. Measured on PostgreSQL 18.6 (goldens
+    `a132_hashagg_spill`): batch counts match at 64 kB-4 MB for int / text keys with
+    by-value transitions; the in-memory group count before the first spill doesn't always
+    (64 kB, 5,000 int groups: PostgreSQL keeps 1,357 in memory, the model 1,696: its
+    meta context isn't modelled exactly), so the groups' order after a spill can differ from
+    PostgreSQL's, and by-reference transitions (numeric sums, avg) are counted from the
+    planner's transition space (21 batches where PostgreSQL makes 85). A HashAggregate that
+    may spill isn't aggregated in parts by a parallel scan (`partial_run`).
+  - *Spill files* (`exec/spill.rs`): one temporary file per node in `<db>/spill/tmp`
+    (removed at `Store::open` with the rest of `spill/`), unlinked as soon as it is made, so
+    it goes when dropped (statement end, error, cancel) or when the process dies. Rows are
+    `storage::row` encodings, written in 256 kB appends (16 kB per hash partition) and read
+    back in 64 kB reads. Not compressed: the row encoding is already 2-3x smaller than
+    PostgreSQL's tuples on tape (BENCH). What a file counts (`TempFile::pg_size`) is
+    PostgreSQL's size of its tapes: temp_file_limit ("temporary file size exceeds
+    "temp_file_limit" (NkB)", 53400) and pg_stat_database temp_files / temp_bytes (at the
+    file's removal, `TempUsage::take_stats` in `pgstat::report`), pg_stat_statements
+    temp_blks_read / written (`TempUsage::take_blocks`).
+  - *For agent 128 (logging)*: log_temp_files' lines are queued at each file's removal,
+    `SessionState::temp.take_logged()` -> (path `base/pgsql_tmp/pgsql_tmp<pid>.<n>`, size);
+    the server log prints "temporary file: path \"...\", size N" with the STATEMENT.
+  - *For agent 121 (executor)*: `GroupOrder` models the table live (`size` first, else the
+    lookups are kept until `order`), `SimpleHash` slots are 8 bytes, `fasthash::KeyIndex`
+    keeps group numbers by key (the keys live once, in `groups`), `AggState`'s rarely used
+    fields are one `AggExtra` box (24 bytes a state). `sort_input_bounded` returns the rows
+    read too. A full sort's rows go to `ExtSort::put` as they're read, narrowed there by your
+    `Narrow` (`narrow_sort` decides it at the first row, as `read_sort_input` did; the sizes
+    PostgreSQL counts are taken before the row is narrowed) and widened as they come out
+    (`SortNode::next_out`).
+  - Verified (on 41fc8981, then rebased onto 74a3ad38): crate tests debug (deep_input /
+    deparse_identity failed on that base too, fixed by 74a3ad38; wire
+    `cancel_request_closes_after_the_error` flaky under load on both) and release (all pass),
+    clippy (no new warnings), difftest smoke, isolation 134 / 136 with the roll-* specs
+    (intra-grant-inplace as before; reindex-schema fails on origin's head too:
+    "file numbers of relations that are gone" after a concurrent DROP, not this batch),
+    a full regress run (debug, private reference) 51,148 / 51,150 with 0 units changed against
+    results.tsv; after the rebase, aggregates / groupingsets / select_distinct / tuplesort /
+    partition_aggregate / union / window / explain / incremental_sort / memoize: window 394-395
+    and memoize 3, 23 differ on origin's head as well (08fef0f0's plans and merge-join reads),
+    nothing else; contrib pg_stat_statements + auto_explain 1,025 / 1,025; pgbench unchanged
+    (BENCH).
+  - Not spilling yet (in memory as before): Hash Join batches (EXPLAIN models them,
+    `explain.rs` HashInfo), Materialize / CTE / tuplestores, window partitions, Memoize (has
+    its own bound), set operations, recursive unions, grouping sets (`hashed_sets`),
+    DISTINCT without aggregates (`hashed_distinct`), array_agg / string_agg states. Disk sizes
+    of sorts merged in several passes are a block or few under PostgreSQL's (its
+    intermediate merges' allocation isn't modelled).
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index
@@ -4804,6 +4884,18 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   is the exception, not modelled). point_ops and range_ops keep PostgreSQL's queue order
   over their modelled trees. A serializable KNN scan of these classes takes the index
   relation's SIRead lock rather than page locks.
+- **Where a node spills** (round 23, agent 132): sorts and hash aggregations spill where
+  PostgreSQL's would, decided by PostgreSQL's count of their memory (`exec/workmem.rs`:
+  MinimalTuple sizes, tuplesort's and nodeAgg's accounting, aset.c / bump.c blocks), not by
+  the engine's own bytes; their temporary files count PostgreSQL's tape sizes
+  (temp_file_limit, pg_stat_database temp_files / temp_bytes, pg_stat_statements temp
+  blocks, log_temp_files). Memory and disk numbers in EXPLAIN ANALYZE are the model's: within
+  a few blocks of PostgreSQL's (sort Disk exact for one merge pass, quicksort Memory exact,
+  HashAggregate Memory Usage within 8 kB without by-reference transitions), accepted as
+  internal differences; methods and batch counts are PostgreSQL's. A large transaction's
+  write buffer (`txn::spill`) has no PostgreSQL counterpart and counts as no temporary file.
+  The subscriber's spool of a streamed transaction (`repl/apply_stream`) stands for the
+  apply worker's BufFile: not counted yet (left).
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for

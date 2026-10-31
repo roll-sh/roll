@@ -88,6 +88,9 @@ pub struct DbEntry {
     pub sessions: i64,
     pub parallel_workers_to_launch: i64,
     pub parallel_workers_launched: i64,
+    /// Temporary files removed and their bytes (pgstat_report_tempfile).
+    pub temp_files: i64,
+    pub temp_bytes: i64,
     pub stat_reset: Option<i64>,
 }
 
@@ -1210,6 +1213,8 @@ pub struct Unflushed {
     pub funcs: HashMap<u32, FuncCounts>,
     sessions: i64,
     parallel_workers: (i64, i64),
+    /// Temporary files removed and their bytes.
+    temp: (i64, i64),
     xact_commit: i64,
     xact_rollback: i64,
     /// WAL records and bytes, and the transactions that wrote them (one WAL write and
@@ -1318,6 +1323,8 @@ fn flush(s: &mut Shared, u: Unflushed, cat: &crate::catalog::Catalog) {
     s.db.sessions += u.sessions;
     s.db.parallel_workers_to_launch += u.parallel_workers.0;
     s.db.parallel_workers_launched += u.parallel_workers.1;
+    s.db.temp_files += u.temp.0;
+    s.db.temp_bytes += u.temp.1;
     if !s.av_changed.is_empty() {
         note_autovacuum(s, Instant::now());
     }
@@ -1572,6 +1579,7 @@ fn end_xact_counts(
 fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &crate::catalog::Catalog) {
     let mut p = sess.pgstat.borrow_mut();
     p.flush_returned();
+    let temp = sess.temp.take_stats();
     // (The forced flush is absorbed even with nothing to flush.)
     if std::mem::take(&mut p.force_next) {
         force = true;
@@ -1583,6 +1591,7 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
         && p.wal_pending.2 == 0
         && p.sessions == 0
         && p.parallel_workers == (0, 0)
+        && temp == (0, 0)
     {
         return;
     }
@@ -1609,6 +1618,8 @@ fn report(sess: &crate::session::state::SessionState, mut force: bool, cat: &cra
     let (a, b) = std::mem::take(&mut p.parallel_workers);
     u.parallel_workers.0 += a;
     u.parallel_workers.1 += b;
+    u.temp.0 += temp.0;
+    u.temp.1 += temp.1;
     u.xact_commit += std::mem::take(&mut p.xact_commit);
     u.xact_rollback += std::mem::take(&mut p.xact_rollback);
     let (r, by, x) = std::mem::take(&mut p.wal_pending);

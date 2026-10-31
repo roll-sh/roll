@@ -1,0 +1,190 @@
+> create function a132_explain(q text) returns setof text language plpgsql as $$
+> declare ln text;
+> begin
+>   for ln in execute 'explain (analyze, costs off, timing off, summary off, buffers off) ' || q loop
+>     return next regexp_replace(ln, 'Disk: \d+kB', 'Disk: NkB');
+>   end loop;
+> end $$
+-- CREATE FUNCTION
+
+> create table a132s (a int, t text, n numeric)
+-- CREATE TABLE
+
+> insert into a132s select g, md5(g::text), (g % 97) * 1.5 from generate_series(1, 30000) g
+-- INSERT 0 30000
+
+> create table a132i (a int)
+-- CREATE TABLE
+
+> insert into a132i select (g * 7919) % 30011 from generate_series(1, 30000) g
+-- INSERT 0 30000
+
+> analyze a132s
+-- ANALYZE
+
+> analyze a132i
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from a132s order by t
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: t
+  Sort Method: quicksort  Memory: 2641kB
+  ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select a from a132i order by a
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: a
+  Sort Method: quicksort  Memory: 769kB
+  ->  Seq Scan on a132i (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from a132s order by t limit 10
+QUERY PLAN:text
+Limit (actual rows=10.00 loops=1)
+  ->  Sort (actual rows=10.00 loops=1)
+        Sort Key: t
+        Sort Method: top-N heapsort  Memory: 26kB
+        ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> set work_mem = '64kB'
+-- SET
+
+> select a132_explain('select * from a132s order by t')
+a132_explain:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: t
+  Sort Method: external merge  Disk: NkB
+  ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- SELECT 4
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select a from a132i order by a
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: a
+  Sort Method: external merge  Disk: 392kB
+  ->  Seq Scan on a132i (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> select a132_explain('select * from a132s order by n, a desc')
+a132_explain:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: n, a DESC
+  Sort Method: external merge  Disk: NkB
+  ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- SELECT 4
+
+> select md5(string_agg(a::text, ',')) from (select a from a132s order by n) s
+md5:text
+abccc4c53de6a19afbf5a09f0722d8c6
+-- SELECT 1
+
+> select md5(string_agg(a::text, ',')) from (select a, t from a132s order by a % 10) s
+md5:text
+e0f6bc1aeadd29120178edbe390913a3
+-- SELECT 1
+
+> select md5(string_agg(t, ',')) from (select t from a132s order by left(t, 1)) s
+md5:text
+f54e791e60aea1076bbb1bb8189242b7
+-- SELECT 1
+
+> set work_mem = '256kB'
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from a132s order by t
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: t
+  Sort Method: external merge  Disk: 1568kB
+  ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> select md5(string_agg(a::text, ',')) from (select a from a132s order by n) s
+md5:text
+f353bbde2d116ff4f9656a1cd129e37e
+-- SELECT 1
+
+> select md5(string_agg(a::text, ',')) from (select a, t from a132s order by a % 10) s
+md5:text
+d632431d0bae8c1a683a5780764e4d41
+-- SELECT 1
+
+> set work_mem = '1MB'
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from a132s order by t
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: t
+  Sort Method: external merge  Disk: 1568kB
+  ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from a132s order by n
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: n
+  Sort Method: external merge  Disk: 1568kB
+  ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> select md5(string_agg(a::text, ',')) from (select a from a132s order by n) s
+md5:text
+1c1ab5a503593bc3a95c8f3e43a05b80
+-- SELECT 1
+
+> set work_mem = '2MB'
+-- SET
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select * from a132s order by t
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: t
+  Sort Method: external merge  Disk: 1560kB
+  ->  Seq Scan on a132s (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> explain (analyze, costs off, timing off, summary off, buffers off) select a from a132i order by a
+QUERY PLAN:text
+Sort (actual rows=30000.00 loops=1)
+  Sort Key: a
+  Sort Method: quicksort  Memory: 769kB
+  ->  Seq Scan on a132i (actual rows=30000.00 loops=1)
+-- EXPLAIN
+
+> select count(*), sum(a) from (select * from a132s order by t) s
+count:int8 | sum:int8
+30000 | 450015000
+-- SELECT 1
+
+> reset work_mem
+-- RESET
+
+> set work_mem = '64kB'
+-- SET
+
+> set temp_file_limit = '512kB'
+-- SET
+
+> select count(*) from (select * from a132s order by t) s
+ERROR 53400: temporary file size exceeds "temp_file_limit" (512kB)
+
+> reset temp_file_limit
+-- RESET
+
+> reset work_mem
+-- RESET
+
+> drop table a132s, a132i
+-- DROP TABLE
+
+> drop function a132_explain(text)
+-- DROP FUNCTION
+

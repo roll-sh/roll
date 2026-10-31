@@ -2179,6 +2179,13 @@ impl Accum for UserAccum {
 /// One aggregate's state within a group: DISTINCT / ORDER BY inputs are buffered.
 pub struct AggState {
     acc: Box<dyn Accum>,
+    /// What only aggregates with DISTINCT / ORDER BY, ordered-set and hypothetical-set ones
+    /// keep: none for the others (a grouping keeps 24 bytes a state, with many groups).
+    extra: Option<Box<AggExtra>>,
+}
+
+#[derive(Default)]
+struct AggExtra {
     buffered: Option<Vec<(Vec<Value>, Vec<Value>)>>,
     /// A hypothetical-set aggregate's hypothetical row.
     hypothetical: Vec<Value>,
@@ -2188,6 +2195,19 @@ pub struct AggState {
     /// A DISTINCT aggregate whose result doesn't depend on its rows' order (`hash_distinct`):
     /// the values fed so far, each fed once, as they come.
     seen: Option<super::fasthash::HashSet<Value>>,
+}
+
+impl AggState {
+    fn extra(&mut self) -> &mut AggExtra {
+        self.extra.get_or_insert_with(Default::default)
+    }
+
+    /// Fed as its input comes, sorted for it (`AggExtra::presorted`).
+    fn set_presorted(&mut self) {
+        let x = self.extra();
+        x.buffered = None;
+        x.presorted = Some(None);
+    }
 }
 
 /// Whether DISTINCT aggregate `a` can skip the sort Postgres does for it: its result is the
@@ -2285,13 +2305,15 @@ pub fn new_state(call: &AggCall, direct: Vec<Value>) -> Result<AggState> {
         None
     };
     let seen = hash_distinct(call).then(Default::default);
-    Ok(AggState {
-        acc,
-        buffered: if seen.is_some() { None } else { buffered },
-        hypothetical,
-        presorted: None,
-        seen,
-    })
+    let extra = (buffered.is_some() || seen.is_some() || !hypothetical.is_empty()).then(|| {
+        Box::new(AggExtra {
+            buffered: if seen.is_some() { None } else { buffered },
+            hypothetical,
+            presorted: None,
+            seen,
+        })
+    });
+    Ok(AggState { acc, extra })
 }
 
 /// Feed one input row to an aggregate.
@@ -2301,7 +2323,31 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
     {
         return Ok(());
     }
-    if let Some(seen) = &mut st.seen {
+    let Some(x) = st.extra.as_deref_mut() else {
+        // (One argument straight to the transition: no vector per row; a column not even
+        // copied.)
+        if call.args.len() == 1 {
+            if let crate::sql::expr::Expr::Col(i, _) = &call.args[0]
+                && let Some(v) = row.get(*i)
+            {
+                if call.def.skip_nulls && v.is_null() {
+                    return Ok(());
+                }
+                return st.acc.add(std::slice::from_ref(v), ctx);
+            }
+            let v = eval(&call.args[0], row, ctx)?;
+            if call.def.skip_nulls && v.is_null() {
+                return Ok(());
+            }
+            return st.acc.add(std::slice::from_ref(&v), ctx);
+        }
+        let args = eval_all(&call.args, row, ctx)?;
+        if call.def.skip_nulls && args.iter().any(Value::is_null) {
+            return Ok(());
+        }
+        return st.acc.add(&args, ctx);
+    };
+    if let Some(seen) = &mut x.seen {
         let v = eval(&call.args[0], row, ctx)?;
         if (call.def.skip_nulls && v.is_null()) || seen.contains(&v) {
             return Ok(());
@@ -2312,7 +2358,7 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
     }
     // (One argument straight to the transition: no vector per row; a column not even
     // copied.)
-    if call.args.len() == 1 && st.presorted.is_none() && st.buffered.is_none() {
+    if call.args.len() == 1 && x.presorted.is_none() && x.buffered.is_none() {
         if let crate::sql::expr::Expr::Col(i, _) = &call.args[0]
             && let Some(v) = row.get(*i)
         {
@@ -2331,7 +2377,7 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
     if call.def.skip_nulls && args.iter().any(Value::is_null) {
         return Ok(());
     }
-    if let Some(last) = &mut st.presorted {
+    if let Some(last) = &mut x.presorted {
         if call.distinct {
             let colls = nondeterministic_keys(&call.args, ctx);
             if let Some(l) = last
@@ -2343,7 +2389,7 @@ pub fn feed(call: &AggCall, st: &mut AggState, row: &[Value], ctx: &ExecCtx) -> 
         }
         return st.acc.add(&args, ctx);
     }
-    match &mut st.buffered {
+    match &mut x.buffered {
         Some(buf) => {
             let keys = if call.def.kind.is_ordered() {
                 args.clone()
@@ -2420,14 +2466,10 @@ fn hypothetical(
 
 pub fn finish(call: &AggCall, mut st: AggState, ctx: &ExecCtx) -> Result<Value> {
     if call.def.kind == AggKind::Hypothetical {
-        return hypothetical(
-            call,
-            st.buffered.as_deref().unwrap_or_default(),
-            &st.hypothetical,
-            ctx,
-        );
+        let x = st.extra();
+        return hypothetical(call, x.buffered.as_deref().unwrap_or_default(), &x.hypothetical, ctx);
     }
-    if let Some(mut buf) = st.buffered.take() {
+    if let Some(mut buf) = st.extra.as_mut().and_then(|x| x.buffered.take()) {
         // (Sorted as Postgres's tuplesort does: equal keys in its quicksort's order.)
         if call.def.kind == AggKind::OrderedSet {
             let key = call.order_by.first().cloned();
@@ -2600,7 +2642,7 @@ impl AggNode {
     fn group_order(
         &self,
         keys: &[(Vec<Value>, Vec<AggState>)],
-        hashed: &super::pghash::GroupOrder,
+        hashed: &mut super::pghash::GroupOrder,
         ctx: &ExecCtx,
     ) -> Result<Vec<usize>> {
         let n = keys.len();
@@ -2678,16 +2720,58 @@ impl AggNode {
             }
             return Ok(idx);
         }
-        let (est, width) = (e.rows, e.input_width);
+        Ok(hashed.order(self.table_buckets(ctx).unwrap_or(1)))
+    }
+
+    /// The planner's estimate of the groups.
+    fn estimated_groups(&self, ctx: &ExecCtx) -> f64 {
+        self.plan.as_ref().map_or(0.0, |p| super::pghash::agg_estimate(p, ctx).rows)
+    }
+
+    /// nodeAgg's spilling for this HashAggregate: its memory counted from the start, the
+    /// limits from the planner's estimates (hash_agg_set_limits).
+    fn hash_spill(&self, ctx: &ExecCtx) -> Option<super::hashspill::HashSpill> {
+        let plan = self.plan.as_ref()?;
+        let crate::sql::plan::Plan::Agg { input, .. } = &**plan else { return None };
+        let e = super::pghash::agg_estimate(plan, ctx);
         let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(&self.aggs);
         let sizing = super::pghash::AggSizing {
-            input_width: width,
+            input_width: e.input_width,
             num_trans,
             trans_space,
             num_hashes: 1,
-            total_groups: est,
+            total_groups: e.rows,
         };
-        Ok(hashed.order(sizing.nbuckets(est, super::pghash::hash_mem(ctx))))
+        let mem = super::workmem::HashAggMem::new(super::workmem::work_mem(ctx), num_trans, trans_space);
+        // (The columns the aggregation reads; a spilled row keeps only those.)
+        let mut need = Vec::new();
+        let mut all = false;
+        for g in &self.groups {
+            all |= !super::need::mark(g, &mut need);
+        }
+        for a in &self.aggs {
+            for x in a.args.iter().chain(&a.direct).chain(a.filter.iter()).chain(a.order_by.iter().map(|k| &k.expr)) {
+                all |= !super::need::mark(x, &mut need);
+            }
+        }
+        let types = crate::sql::paths::analyzejoins::col_types(input);
+        let need = if all { vec![true; types.len()] } else { need };
+        Some(super::hashspill::HashSpill::new(mem, sizing.entry_size(), e.rows, super::pghash::hash_mem(ctx), need, types))
+    }
+
+    /// The bucket count PostgreSQL's hash table for this grouping is made with (its
+    /// estimated groups in what hash_mem holds).
+    fn table_buckets(&self, ctx: &ExecCtx) -> Option<u64> {
+        let e = super::pghash::agg_estimate(self.plan.as_ref()?, ctx);
+        let (num_trans, trans_space) = crate::sql::paths::parallel::agg_transitions(&self.aggs);
+        let sizing = super::pghash::AggSizing {
+            input_width: e.input_width,
+            num_trans,
+            trans_space,
+            num_hashes: 1,
+            total_groups: e.rows,
+        };
+        Some(sizing.nbuckets(e.rows, super::pghash::hash_mem(ctx)))
     }
 
     /// Whether the input's rows come aggregated in parts by a parallel scan (`partial`,
@@ -2787,8 +2871,11 @@ impl AggNode {
         }
         let colls = nondeterministic_keys(&self.groups, ctx);
         let Some(sets) = self.sets.clone() else {
-            // Plain GROUP BY (or none).
-            let mut index: HashMap<Vec<Value>, usize> = HashMap::default();
+            // Plain GROUP BY (or none). Each group's key is kept once, in `groups`; the index
+            // holds group numbers (and `hkeys` the keys it compares when they're normalised:
+            // nondeterministic collations).
+            let mut index = super::fasthash::KeyIndex::default();
+            let mut hkeys: Vec<Vec<Value>> = Vec::new();
             let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
             // (Keys that group nothing more aren't in the hash table's key.)
             let red = self.redundant_keys(ctx);
@@ -2916,35 +3003,68 @@ impl AggNode {
             // Whether the groups come out in the hash table's order, which the model of it
             // (`hashed`) then follows row by row.
             let hash_order = !self.groups.is_empty() && self.hash_ordered(ctx);
+            // (The table modelled as the rows arrive: no lookups kept.)
+            if hash_order && let Some(nb) = self.table_buckets(ctx) {
+                hashed.size(nb);
+            }
             // A parallel scan below aggregating its rows in parts (`partial`).
-            let parts =
-                presorted_agg.is_none() && trims_only && self.partial_run(&mut input, &colls, hash_order, ctx)?;
-            // A group's first row (key `$key`, its hash key `$hkey`): its index.
+            // A HashAggregate spilling past hash_mem where nodeAgg does (`hashspill`); not
+            // aggregated in parts by a parallel scan when it may.
+            let mut spill = match hash_order && presorted_agg.is_none() {
+                true => self.hash_spill(ctx),
+                false => None,
+            };
+            let may_spill =
+                spill.as_ref().is_some_and(|s| s.entry_size * self.estimated_groups(ctx) > s.mem.mem_limit as f64 / 2.0);
+            let parts = presorted_agg.is_none()
+                && trims_only
+                && !may_spill
+                && self.partial_run(&mut input, &colls, hash_order, ctx)?;
+            if parts {
+                spill = None;
+            }
+            // (A batch of spilled rows being aggregated.)
+            let mut batch: Option<super::hashspill::Batch> = None;
+            let group_types: Vec<T> = self.groups.iter().map(|g| g.ty()).collect();
+            let mut out = Vec::new();
+            // The group of hash key `$hk` (hashing to `$h` in `index`).
+            macro_rules! find_group {
+                ($h:expr, $hk:expr) => {{
+                    let hk: &[Value] = $hk;
+                    index.find($h, |i| if nondet { hkeys[i][..] == *hk } else { groups[i].0[..] == *hk })
+                }};
+            }
+            // A group's first row (key `$key`, its hash key `$hkey` hashing to `$h`): its index.
             macro_rules! new_group {
-                ($key:expr, $hkey:expr) => {{
+                ($h:expr, $key:expr, $hkey:expr) => {{
                     let key: Vec<Value> = $key;
                     let hkey: Vec<Value> = $hkey;
+                    // (The key the table hashes: the normalised one, else the key itself.)
+                    let hk0: &[Value] = if nondet { &hkey } else { &key };
                     if hash_order {
                         ghash.push(if red.iter().any(|r| *r) {
                             let hk: Vec<Value> =
-                                hkey.iter().zip(&red).filter(|(_, r)| !**r).map(|(v, _)| v.clone()).collect();
+                                hk0.iter().zip(&red).filter(|(_, r)| !**r).map(|(v, _)| v.clone()).collect();
                             hashed.hash(&hk)
                         } else {
-                            hashed.hash(&hkey)
+                            hashed.hash(hk0)
                         });
                     }
                     let mut states = self.states(&key, ctx)?;
                     if let Some(p) = presorted_agg {
-                        states[p].buffered = None;
-                        states[p].presorted = Some(None);
+                        states[p].set_presorted();
                     }
                     groups.push((key, states));
-                    index.insert(hkey, groups.len() - 1);
+                    index.insert($h, groups.len() - 1);
+                    if nondet {
+                        hkeys.push(hkey);
+                    }
                     groups.len() - 1
                 }};
             }
             // (The key is made in one vector, copied only for a new group.)
             let mut key: Vec<Value> = Vec::with_capacity(self.groups.len());
+            loop {
             loop {
                 let row = match parts {
                     true => match input.next_item(ctx)? {
@@ -2958,9 +3078,10 @@ impl AggNode {
                             let mut parts = Vec::with_capacity(p.groups.len());
                             for (k, st) in p.groups {
                                 let hk = if nondet { group_key(&k, &colls) } else { k.clone() };
-                                let gi = match index.get(&hk) {
-                                    Some(i) => *i,
-                                    None => new_group!(k, hk),
+                                let h = index.hash(&hk);
+                                let gi = match find_group!(h, &hk) {
+                                    Some(i) => i,
+                                    None => new_group!(h, k, hk),
                                 };
                                 map.push(gi);
                                 parts.push(st);
@@ -2979,9 +3100,15 @@ impl AggNode {
                             continue;
                         }
                     },
-                    false => match input.next(ctx)? {
-                        Some(row) => row,
-                        None => break,
+                    false => match (&mut batch, &mut spill) {
+                        (Some(b), Some(sp)) => match sp.read(b)? {
+                            Some(row) => row,
+                            None => break,
+                        },
+                        _ => match input.next(ctx)? {
+                            Some(row) => row,
+                            None => break,
+                        },
                     },
                 };
                 ctx.check()?;
@@ -2990,17 +3117,36 @@ impl AggNode {
                     key.push(eval(g, &row, ctx)?);
                 }
                 let hkey = if nondet { Some(group_key(&key, &colls)) } else { None };
-                let found = index.get(hkey.as_ref().unwrap_or(&key)).copied();
+                let h = index.hash(hkey.as_ref().unwrap_or(&key));
+                let found = find_group!(h, hkey.as_ref().unwrap_or(&key));
                 let gi = match found {
                     Some(i) => i,
+                    None if spill.as_ref().is_some_and(|s| s.spilling) => {
+                        // Spill mode: the row goes to its partition.
+                        let hk = hkey.as_ref().unwrap_or(&key);
+                        let pg = if red.iter().any(|r| *r) {
+                            let hk: Vec<Value> = hk.iter().zip(&red).filter(|(_, r)| !**r).map(|(v, _)| v.clone()).collect();
+                            hashed.hash(&hk)
+                        } else {
+                            hashed.hash(hk)
+                        };
+                        spill.as_mut().unwrap().spill(pg, &row, ctx)?;
+                        continue;
+                    }
                     None => {
                         let key = key.clone();
-                        let hkey = hkey.unwrap_or_else(|| key.clone());
-                        new_group!(key, hkey)
+                        let hkey = hkey.unwrap_or_default();
+                        new_group!(h, key, hkey)
                     }
                 };
-                if hash_order {
+                // (In spill mode nodeAgg only looks a group up, SH_LOOKUP: the table
+                // doesn't grow.)
+                if hash_order && !(found.is_some() && spill.as_ref().is_some_and(|s| s.spilling)) {
                     hashed.lookup(ghash[gi], gi);
+                }
+                if found.is_none() && let Some(sp) = &mut spill {
+                    let len = super::workmem::minimal_tuple_len(&groups[gi].0, &group_types, ctx);
+                    sp.new_group(len, hashed.slots());
                 }
                 let states = &mut groups[gi].1;
                 for ((a, st), sh) in self.aggs.iter().zip(states.iter_mut()).zip(&share) {
@@ -3014,10 +3160,13 @@ impl AggNode {
                 let states = self.states(&[], ctx)?;
                 groups.push((Vec::new(), states));
             }
-            let order = self.group_order(&groups, &hashed, ctx)?;
+            if let Some(sp) = &mut spill {
+                sp.end_input(batch.is_some())?;
+            }
+            let order = self.group_order(&groups, &mut hashed, ctx)?;
             let mut slots: Vec<Option<(Vec<Value>, Vec<AggState>)>> =
-                groups.into_iter().map(Some).collect();
-            let mut out = Vec::with_capacity(slots.len());
+                std::mem::take(&mut groups).into_iter().map(Some).collect();
+            out.reserve(slots.len());
             for (key, mut states) in order.into_iter().filter_map(|i| slots[i].take()) {
                 copy_shared(&share, &mut states);
                 let mut row = key;
@@ -3025,6 +3174,25 @@ impl AggNode {
                     row.push(finish(a, st, ctx)?);
                 }
                 out.push(row);
+            }
+            // The next batch of spilled rows, aggregated in the emptied table (its size
+            // kept, as ResetTupleHashTable keeps it).
+            let Some(sp) = &mut spill else { break };
+            match sp.next_batch() {
+                Some(b) => {
+                    batch = Some(b);
+                    index = Default::default();
+                    hkeys.clear();
+                    ghash.clear();
+                    hashed.reset();
+                }
+                None => {
+                    if let (Some(instr), Some(plan)) = (ctx.instr.borrow().as_ref(), &self.plan) {
+                        instr.update(Arc::as_ptr(plan) as usize, |s| s.hashagg = Some(sp.stats()));
+                    }
+                    break;
+                }
+            }
             }
             return Ok(out);
         };

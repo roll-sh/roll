@@ -202,6 +202,8 @@ db_counters! {
     db_sessions = 6188 => |d| d.sessions;
     db_parallel_workers_to_launch = 6355 => |d| d.parallel_workers_to_launch;
     db_parallel_workers_launched = 6356 => |d| d.parallel_workers_launched;
+    db_temp_files = 3150 => |d| d.temp_files;
+    db_temp_bytes = 3151 => |d| d.temp_bytes;
 }
 
 /// pg_stat_get_db_numbackends: the backends connected to the database now.

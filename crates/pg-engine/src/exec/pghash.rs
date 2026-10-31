@@ -298,12 +298,19 @@ const SH_MAX_SIZE: u64 = 1 << 32;
 /// simplehash.h's table (SH_STORE_HASH), holding entry ids: where each entry sits is what
 /// matters, as iteration walks the slots.
 pub struct SimpleHash {
-    /// (hash, entry id) per slot.
-    data: Vec<Option<(u32, usize)>>,
+    /// (hash, entry id) per slot, `EMPTY_SLOT` where empty: 8 bytes a slot.
+    data: Vec<(u32, u32)>,
     size: u64,
     mask: u32,
     members: u64,
     grow_threshold: u64,
+}
+
+const EMPTY_SLOT: (u32, u32) = (0, u32::MAX);
+
+/// A slot's entry: (hash, entry id).
+fn slot(e: (u32, u32)) -> Option<(u32, usize)> {
+    (e.1 != u32::MAX).then_some((e.0, e.1 as usize))
 }
 
 fn sh_pow2(n: u64) -> u64 {
@@ -322,7 +329,7 @@ impl SimpleHash {
             grow_threshold: 0,
         };
         t.compute_parameters(size);
-        t.data = vec![None; t.size as usize];
+        t.data = vec![EMPTY_SLOT; t.size as usize];
         t
     }
 
@@ -362,18 +369,18 @@ impl SimpleHash {
         let old = std::mem::take(&mut self.data);
         let oldsize = old.len();
         self.compute_parameters(newsize);
-        self.data = vec![None; self.size as usize];
+        self.data = vec![EMPTY_SLOT; self.size as usize];
         // The first slot that is empty or holds an entry at its optimal position (in the
         // old table): copying from there needs no wraparound handling.
         let old_mask = (oldsize - 1) as u32;
         let mut start = 0;
         for (i, e) in old.iter().enumerate() {
-            match e {
+            match slot(*e) {
                 None => {
                     start = i;
                     break;
                 }
-                Some((h, _)) if (*h & old_mask) as usize == i => {
+                Some((h, _)) if (h & old_mask) as usize == i => {
                     start = i;
                     break;
                 }
@@ -382,12 +389,12 @@ impl SimpleHash {
         }
         let mut copy = start;
         for _ in 0..oldsize {
-            if let Some((h, id)) = old[copy] {
+            if let Some((h, _)) = slot(old[copy]) {
                 let mut cur = self.bucket(h);
-                while self.data[cur as usize].is_some() {
+                while slot(self.data[cur as usize]).is_some() {
                     cur = self.next(cur);
                 }
-                self.data[cur as usize] = Some((h, id));
+                self.data[cur as usize] = old[copy];
             }
             copy += 1;
             if copy >= oldsize {
@@ -407,10 +414,10 @@ impl SimpleHash {
             let mut cur = start;
             let mut insertdist: u32 = 0;
             loop {
-                let Some((chash, cid)) = self.data[cur as usize] else {
+                let Some((chash, cid)) = slot(self.data[cur as usize]) else {
                     if !existing {
                         self.members += 1;
-                        self.data[cur as usize] = Some((hash, id));
+                        self.data[cur as usize] = (hash, id as u32);
                     }
                     return;
                 };
@@ -428,7 +435,7 @@ impl SimpleHash {
                     let mut emptydist: u32 = 0;
                     loop {
                         empty = self.next(empty);
-                        if self.data[empty as usize].is_none() {
+                        if slot(self.data[empty as usize]).is_none() {
                             break;
                         }
                         emptydist += 1;
@@ -446,7 +453,7 @@ impl SimpleHash {
                         m = p;
                     }
                     self.members += 1;
-                    self.data[cur as usize] = Some((hash, id));
+                    self.data[cur as usize] = (hash, id as u32);
                     return;
                 }
                 cur = self.next(cur);
@@ -464,13 +471,13 @@ impl SimpleHash {
     /// The entries in SH_ITERATE's order: backwards from the first empty slot.
     pub fn iteration(&self) -> Vec<usize> {
         let n = self.data.len();
-        let Some(start) = self.data.iter().position(Option::is_none) else {
-            return self.data.iter().rev().filter_map(|e| e.map(|x| x.1)).collect();
+        let Some(start) = self.data.iter().position(|e| slot(*e).is_none()) else {
+            return self.data.iter().rev().filter_map(|e| slot(*e).map(|x| x.1)).collect();
         };
         let mut out = Vec::with_capacity(self.members as usize);
         let mut cur = start;
         for _ in 0..n {
-            if let Some((_, id)) = self.data[cur] {
+            if let Some((_, id)) = slot(self.data[cur]) {
                 out.push(id);
             }
             cur = (cur + n - 1) % n;
@@ -721,12 +728,17 @@ pub(crate) fn hash_mem(ctx: &super::ExecCtx) -> f64 {
     num("work_mem", 4096.0) * num("hash_mem_multiplier", 2.0) * 1024.0
 }
 
-/// Collects a hashed node's groups as their rows arrive, for their output order.
+/// Collects a hashed node's groups as their rows arrive, for their output order: a model
+/// of the node's TupleHashTable (`SimpleHash`, 8 bytes a slot) fed each row's lookup as it
+/// comes once the table's size is known (`size`), the lookups kept until then.
 pub struct GroupOrder {
     types: Vec<DataType>,
     cat: std::sync::Arc<Catalog>,
-    /// Per looked-up row: (hash, group).
+    /// Per looked-up row before the table is sized: (hash, group).
     lookups: Vec<(u32, usize)>,
+    table: Option<SimpleHash>,
+    /// Groups seen (numbered by first appearance): a lookup of a lower one finds it.
+    seen: usize,
 }
 
 impl GroupOrder {
@@ -735,13 +747,26 @@ impl GroupOrder {
             types,
             cat: ctx.catalog(),
             lookups: Vec::new(),
+            table: None,
+            seen: 0,
+        }
+    }
+
+    /// The table is created for `nbuckets` entries (the lookups so far replayed).
+    pub fn size(&mut self, nbuckets: u64) {
+        if self.table.is_some() {
+            return;
+        }
+        self.table = Some(SimpleHash::new(nbuckets.max(1)));
+        for (h, g) in std::mem::take(&mut self.lookups) {
+            self.lookup(h, g);
         }
     }
 
     /// A row of group `group` (numbered by first appearance) with key values `key`.
     pub fn row(&mut self, key: &[Value], group: usize) {
         let h = self.hash(key);
-        self.lookups.push((h, group));
+        self.lookup(h, group);
     }
 
     /// The hash the table keeps key values `key` under.
@@ -751,12 +776,37 @@ impl GroupOrder {
 
     /// A row of group `group` whose key hashes to `hash`.
     pub fn lookup(&mut self, hash: u32, group: usize) {
-        self.lookups.push((hash, group));
+        let Some(t) = &mut self.table else {
+            self.lookups.push((hash, group));
+            return;
+        };
+        let existing = group < self.seen;
+        if !existing {
+            self.seen = group + 1;
+        }
+        t.insert(hash, group, existing);
     }
 
-    /// The groups in the hash table's iteration order, the table created for `nbuckets`.
-    pub fn order(&self, nbuckets: u64) -> Vec<usize> {
-        table_order(nbuckets, &self.lookups)
+    /// The groups in the hash table's iteration order, the table created for `nbuckets`
+    /// (unless `size` made it already).
+    pub fn order(&mut self, nbuckets: u64) -> Vec<usize> {
+        self.size(nbuckets);
+        self.table.as_ref().map(SimpleHash::iteration).unwrap_or_default()
+    }
+
+    /// The table's slots (0 before it is sized).
+    pub fn slots(&self) -> u64 {
+        self.table.as_ref().map_or(0, |t| t.size)
+    }
+
+    /// The table emptied for another batch of groups, its size kept (ResetTupleHashTable).
+    pub fn reset(&mut self) {
+        if let Some(t) = &mut self.table {
+            t.data.fill(EMPTY_SLOT);
+            t.members = 0;
+        }
+        self.lookups.clear();
+        self.seen = 0;
     }
 }
 

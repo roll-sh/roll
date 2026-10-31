@@ -2,8 +2,10 @@
 
 pub mod agg;
 pub mod dml;
+pub mod extsort;
 pub mod fasthash;
 pub mod fastsort;
+pub mod hashspill;
 pub mod merge;
 pub mod kernel;
 pub mod lookup;
@@ -22,10 +24,12 @@ pub mod pgstat;
 pub mod pgsort;
 pub mod search;
 pub mod sizing;
+pub mod spill;
 pub mod replication;
 pub mod toast;
 pub mod trigger;
 pub mod window;
+pub mod workmem;
 
 use crate::catalog::Catalog;
 use crate::catalog::names::CatalogNames;
@@ -364,6 +368,9 @@ pub struct ExecCtx<'a> {
     /// columns of its rows anything above reads (None: all). A scan leaves the others
     /// undecoded (NULL).
     pub need: Cell<Option<Rc<[bool]>>>,
+    /// `need` under EXPLAIN ANALYZE (which reads whole rows): what a Sort counts its
+    /// tuples by all the same (`extsort`), set and taken as `need` is.
+    pub logical_need: Cell<Option<Rc<[bool]>>>,
     /// Planner estimates the executor sizes hash tables by, per plan node.
     pub estimates: RefCell<HashMap<usize, f64>>,
     /// The planner's view of aggregation and grouping nodes (`pghash::agg_estimate`).
@@ -480,6 +487,10 @@ pub struct NodeStats {
     pub merged: [u64; 3],
     /// An Incremental Sort's sorts.
     pub incr: pgsort::IncrStats,
+    /// A Sort's tuplesort_get_stats (its last loop's): the method and its space in kB.
+    pub sort: Option<(extsort::SortMethod, u64)>,
+    /// A HashAggregate's batches, peak memory and disk use in kB (`hashspill`).
+    pub hashagg: Option<(u64, u64, u64)>,
 }
 
 /// Counters per plan node, keyed by the node's address (`Arc::as_ptr`; a scan's filter by its
@@ -712,6 +723,7 @@ impl<'a> ExecCtx<'a> {
             stable_snap: RefCell::new(None),
             sort_bound: Cell::new(None),
             need: Cell::new(None),
+            logical_need: Cell::new(None),
             estimates: RefCell::default(),
             agg_estimates: RefCell::default(),
             exists_hash: RefCell::default(),
@@ -839,6 +851,7 @@ impl<'a> ExecCtx<'a> {
             stable_snap: RefCell::new(self.stable_snap.borrow().clone()),
             sort_bound: Cell::new(None),
             need: Cell::new(None),
+            logical_need: Cell::new(None),
             estimates: RefCell::default(),
             agg_estimates: RefCell::default(),
             exists_hash: RefCell::default(),

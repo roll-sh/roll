@@ -5545,6 +5545,71 @@ doesn't have (the rows are right). pgjdbc's getTables / getImportedKeys / getInd
 5–40x PostgreSQL's per call (Keycloak's Liquibase calls getTables 991 times). For OLTP:
 Grafana's 1,430 COMMITs average 157 µs against 1 µs (`--no-sync`), and Metabase's `SELECT *
 FROM QRTZ_LOCKS ... FOR UPDATE` 6.7 ms against 0.4 ms.
+## Query memory and spilling (round 23, agent 132)
+
+HANDOFF.md, "Query memory and spilling", has what changed: sorts and hash aggregations
+honour work_mem / hash_mem_multiplier and spill where PostgreSQL's would (decided by
+PostgreSQL's own count of their memory), group keys are kept once and group states are
+compact. Release builds over the wire, server pinned to 4 cores, on a machine shared with
+other agents (load 30-40 in the first runs; everything at nice 19 in the later ones), engine
+memory its RSS, PostgreSQL's the container's anon + shmem. PostgreSQL 18.6 is the pinned image
+with its defaults (`work_mem` 4 MB, `shared_buffers` 128 MB) and `max_connections=300`.
+
+### Burst, the sort + grouping mix (`bench burst --mix pl,fn,orm,cat,tpcb,sort,agg`, scale 2)
+
+Agent 111's mix plus a 20,000-row sort under a LIMIT and a 50,000-group grouping of the
+200,000 accounts, 20 s per size, a fresh engine per size. `base` is 57d7da04, `new` this batch
+(on fd250f0b; the two differ also by agent 126's size-model shards, which don't touch this
+mix's peak), run interleaved per size. MB.
+
+| sessions | PostgreSQL peak | base peak | new peak | PostgreSQL ops/s | base ops/s | new ops/s | base / new CPU ms/op |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 172 | 730 | 577 | 170 | 38 | 32 | 67 / 70 |
+| 50 | 415 | 2,784 | 1,603 | 175 | 21 | 21 | 97 / 92 |
+| 100 | 711 | 5,493 | 2,941 | 175 | 32 | 28 | 81 / 80 |
+| 200 | 1,398 | 5,234 | 3,677 | 161 | 20 | 16 | 76 / 93 |
+
+The grouping now holds about 230 bytes a group (key once, 24-byte states, the hash table's
+order model in 8-byte slots, no 16 bytes per input row) instead of about 900. PostgreSQL
+doesn't spill this grouping (50,000 groups fit hash_mem), and the engine doesn't either. What
+is left of the engine's peak is mostly the sequential scan collecting the table's moved rows to
+return them in heap order (`scan.rs` `next_raw`, agent 130's: about 30 MB a session here), and
+the CPU per operation (80 ms against PostgreSQL's 20) is that scan and the grouping's per-row
+work, not memory. The plain mix (without sort and agg) and the `--reconnect 1` variant: peaks
+and ops/s within the run-to-run noise of this machine (plain at 100 sessions 440 / 459 MB,
+1,299 / 924 ops/s, at 50 sessions 975 / 879, no consistent direction across sizes);
+PostgreSQL with `--reconnect 1` at 200 sessions ran out of connection slots ("too many
+clients already") and is left out.
+
+### pgbench (8 clients, prepared, 15 s, scale 1), `base` 41fc8981 (origin) against `new` (this batch on it), alternated 3 times
+
+| | base | new |
+|---|---:|---:|
+| select-only, engine CPU µs / transaction | 53, 51, 52 | 51, 52, 51 |
+| TPC-B, engine CPU µs / transaction | 429, 419, 415 | 422, 433, 414 |
+| RSS after (MB) | 108-144 | 122-148 |
+
+### Spills against PostgreSQL
+
+`SET work_mem = '1MB'` over 200,000 rows of (int, md5 text) (the a132 goldens' shape), the
+engine's EXPLAIN ANALYZE against PostgreSQL's:
+
+| | PostgreSQL | engine |
+|---|---|---|
+| `ORDER BY t` | external merge, Disk: 9208kB | external merge |
+| `GROUP BY t` (200,000 groups) | Batches: 17, Memory Usage: 2073kB, Disk Usage: 14984kB | Batches: 17, Memory Usage: 2073kB, Disk Usage: 9448kB |
+| temp_file_limit = 1MB | ERROR 53400 | ERROR 53400 |
+
+The engine's own spill files are its row encodings (`storage::row`) with a length word,
+written in 256 kB appends and read in 64 kB reads, not compressed (not measured against a
+compressed variant yet). Disk Usage above is the model of PostgreSQL's tapes
+without its preallocation (`ltsGetPreallocBlock` grows a partition's blocks 8 -> 128 at a time,
+and the holes count), hence lower.
+
+Not measured this round, left for the next: TPC-H SF1 before / after (the analytic queries'
+sorts of 2M rows now spill at the default work_mem as PostgreSQL's do; their time and peak
+against base), the difftest process's growth over 150 seeds (agent 118's), and the pgbench
+simple-update peak at 64 clients after 57d7da04 (agent 126's).
 
 ## Where it is still slower, and why
 

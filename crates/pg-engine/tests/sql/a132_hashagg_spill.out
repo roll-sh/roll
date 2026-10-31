@@ -1,0 +1,154 @@
+> create function a132_explain(q text) returns setof text language plpgsql as $$
+> declare ln text;
+> begin
+>   for ln in execute 'explain (analyze, costs off, timing off, summary off, buffers off) ' || q loop
+>     ln := regexp_replace(ln, '(Memory Usage|Disk Usage): \d+kB', '\1: NkB', 'g');
+>     return next ln;
+>   end loop;
+> end $$
+-- CREATE FUNCTION
+
+> create table a132h (a int, b int, t text, n numeric)
+-- CREATE TABLE
+
+> insert into a132h select g, g % 5000, md5((g % 20000)::text), g % 1000 from generate_series(1, 40000) g
+-- INSERT 0 40000
+
+> analyze a132h
+-- ANALYZE
+
+> set max_parallel_workers_per_gather = 0
+-- SET
+
+> set enable_sort = off
+-- SET
+
+> select a132_explain('select b, count(*) from a132h group by b')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 1  Memory Usage: NkB
+  Group Key: b
+HashAggregate (actual rows=5000.00 loops=1)
+-- SELECT 4
+
+> set work_mem = '64kB'
+-- SET
+
+> select a132_explain('select b, count(*) from a132h group by b')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 5  Memory Usage: NkB  Disk Usage: NkB
+  Group Key: b
+HashAggregate (actual rows=5000.00 loops=1)
+-- SELECT 4
+
+> select a132_explain('select t, count(*), sum(a) from a132h group by t')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 85  Memory Usage: NkB  Disk Usage: NkB
+  Group Key: t
+HashAggregate (actual rows=20000.00 loops=1)
+-- SELECT 4
+
+> select a132_explain('select a, count(*) from a132h group by a')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 85  Memory Usage: NkB  Disk Usage: NkB
+  Group Key: a
+HashAggregate (actual rows=40000.00 loops=1)
+-- SELECT 4
+
+> select md5(string_agg(b::text || ':' || c, ',' order by b)) from (select b, count(*) c from a132h group by b) s
+md5:text
+b43386192e679a8f4a27522a67cd8418
+-- SELECT 1
+
+> select md5(string_agg(t || ':' || c || ':' || s, ',' order by t)) from (select t, count(*) c, sum(a) s from a132h group by t) s
+md5:text
+8391ebf145a2f65293f79a167744812b
+-- SELECT 1
+
+> select count(*), sum(a) from (select a from a132h group by a) s
+count:int8 | sum:int8
+40000 | 800020000
+-- SELECT 1
+
+> select md5(string_agg(b::text || ':' || s || ':' || v, ',' order by b)) from (select b, sum(n) s, avg(a) v from a132h group by b) s
+md5:text
+3d07e5129751b9c4c8a074c264fb17fd
+-- SELECT 1
+
+> select count(*) from (select a, b from a132h group by a, b) s
+count:int8
+40000
+-- SELECT 1
+
+> set work_mem = '256kB'
+-- SET
+
+> select a132_explain('select t, count(*), sum(a) from a132h group by t')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 9  Memory Usage: NkB  Disk Usage: NkB
+  Group Key: t
+HashAggregate (actual rows=20000.00 loops=1)
+-- SELECT 4
+
+> select md5(string_agg(t || ':' || c, ',' order by t)) from (select t, count(*) c, sum(a) from a132h group by t) s
+md5:text
+aeeb4f57e57c8b85ca207bee2d042c98
+-- SELECT 1
+
+> set work_mem = '1MB'
+-- SET
+
+> select a132_explain('select t, count(*), sum(a) from a132h group by t')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 5  Memory Usage: NkB  Disk Usage: NkB
+  Group Key: t
+HashAggregate (actual rows=20000.00 loops=1)
+-- SELECT 4
+
+> select a132_explain('select a, count(*) from a132h group by a')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 5  Memory Usage: NkB  Disk Usage: NkB
+  Group Key: a
+HashAggregate (actual rows=40000.00 loops=1)
+-- SELECT 4
+
+> set hash_mem_multiplier = 1
+-- SET
+
+> select a132_explain('select a, count(*) from a132h group by a')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 5  Memory Usage: NkB  Disk Usage: NkB
+  Group Key: a
+HashAggregate (actual rows=40000.00 loops=1)
+-- SELECT 4
+
+> reset hash_mem_multiplier
+-- RESET
+
+> reset work_mem
+-- RESET
+
+> select a132_explain('select t, count(*), sum(a) from a132h group by t')
+a132_explain:text
+  ->  Seq Scan on a132h (actual rows=40000.00 loops=1)
+  Batches: 1  Memory Usage: NkB
+  Group Key: t
+HashAggregate (actual rows=20000.00 loops=1)
+-- SELECT 4
+
+> reset enable_sort
+-- RESET
+
+> drop table a132h
+-- DROP TABLE
+
+> drop function a132_explain(text)
+-- DROP FUNCTION
+

@@ -275,8 +275,9 @@ fn rows(c: &FnCtx, api: Api, showtext: bool) -> Result<SrfIter> {
         // Blocks: those added to the tables written, dirtied and written (the engine has
         // no buffer pool: nothing is hit or read).
         let (sw, lw) = (t.shared_blks_written, t.local_blks_written);
+        let (tr, tw) = (t.temp_blks_read, t.temp_blks_written);
         let v11 = api >= Api::V1_1;
-        let blocks: Vec<i64> = if v11 { vec![0, 0, sw, sw, 0, 0, lw, lw, 0, 0] } else { vec![0, 0, sw, 0, 0, lw, 0, 0] };
+        let blocks: Vec<i64> = if v11 { vec![0, 0, sw, sw, 0, 0, lw, lw, tr, tw] } else { vec![0, 0, sw, 0, 0, lw, tr, tw] };
         v.extend(blocks.into_iter().map(i8));
         let times = [api >= Api::V1_1, api >= Api::V1_11, api >= Api::V1_10].iter().filter(|x| **x).count() * 2;
         v.extend(std::iter::repeat_n(f8(0.0), times));

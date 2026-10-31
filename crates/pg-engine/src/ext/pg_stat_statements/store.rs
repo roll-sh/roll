@@ -41,6 +41,9 @@ pub struct Counters {
     pub wal_bytes: u64,
     pub parallel_workers_to_launch: i64,
     pub parallel_workers_launched: i64,
+    /// Temporary file blocks read and written (spills past work_mem).
+    pub temp_blks_read: i64,
+    pub temp_blks_written: i64,
     /// `usage`: what deallocation keeps the most used by.
     pub usage: f64,
 }
@@ -74,6 +77,8 @@ pub struct Usage {
     pub wal_bytes: u64,
     pub workers_to_launch: i64,
     pub workers_launched: i64,
+    /// (temp_blks_read, temp_blks_written).
+    pub temp_blks: (i64, i64),
 }
 
 #[derive(Default)]
@@ -166,6 +171,8 @@ impl Store {
         c.wal_bytes += usage.wal_bytes;
         c.parallel_workers_to_launch += usage.workers_to_launch;
         c.parallel_workers_launched += usage.workers_launched;
+        c.temp_blks_read += usage.temp_blks.0;
+        c.temp_blks_written += usage.temp_blks.1;
     }
 
     /// `entry_dealloc`: the least used 5% (at least 10) go.

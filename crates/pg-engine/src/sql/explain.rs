@@ -18415,7 +18415,10 @@ impl Render<'_> {
                         .first()
                         .and_then(|k| self.stats(k.key))
                         .map_or(0, |s| s.rows / s.loops.max(1));
-                    let (method, kb, space) = if n.bound.is_some_and(|b| input_rows as f64 > 2.0 * b) {
+                    let (method, kb, space) = if let Some((m, kb)) = self.stats(n.key).and_then(|s| s.sort) {
+                        // (What the executor's tuplesort model counted: exec::extsort.)
+                        (m.name(), kb, if m.on_disk() { "Disk" } else { "Memory" })
+                    } else if n.bound.is_some_and(|b| input_rows as f64 > 2.0 * b) {
                         ("top-N heapsort", self.memory_kb(n, 25), "Memory")
                     } else if spill {
                         ("external merge", (rows * (n.width as u64 + 8)).div_ceil(1024).max(1), "Disk")
@@ -18517,20 +18520,23 @@ impl Render<'_> {
                         self.w.prop("Planned Partitions", &planned.to_string(), true);
                     }
                     if executed {
-                        let kb = self.memory_kb(n, 32);
+                        // (What the executor counted as nodeAgg does, `exec::hashspill`.)
+                        let (batches, kb, disk) =
+                            self.stats(n.key).and_then(|s| s.hashagg).unwrap_or((1, self.memory_kb(n, 32), 0));
+                        let disk_text = if batches > 1 { format!("  Disk Usage: {disk}kB") } else { String::new() };
                         if shown {
                             self.w.prop(
                                 "Planned Partitions",
-                                &format!("{planned}  Batches: 1  Memory Usage: {kb}kB"),
+                                &format!("{planned}  Batches: {batches}  Memory Usage: {kb}kB{disk_text}"),
                                 true,
                             );
                         } else if text {
                             self.w
-                                .prop("Batches", &format!("1  Memory Usage: {kb}kB"), true);
+                                .prop("Batches", &format!("{batches}  Memory Usage: {kb}kB{disk_text}"), true);
                         } else {
-                            self.w.prop("HashAgg Batches", "1", true);
+                            self.w.prop("HashAgg Batches", &batches.to_string(), true);
                             self.w.prop("Peak Memory Usage", &kb.to_string(), true);
-                            self.w.prop("Disk Usage", "0", true);
+                            self.w.prop("Disk Usage", &disk.to_string(), true);
                         }
                     }
                 }

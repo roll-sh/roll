@@ -94,6 +94,39 @@ impl Hasher for FastHasher {
     }
 }
 
+/// Entry numbers by key, the keys kept by the caller: one copy of each key (a grouping's
+/// keys live with its groups), not a map's own. Each entry is its key's hash and number
+/// (16 bytes), so growing never needs the keys.
+#[derive(Default)]
+pub struct KeyIndex {
+    table: hashbrown::HashTable<(u64, u32)>,
+    state: FastState,
+}
+
+impl KeyIndex {
+    pub fn hash<K: std::hash::Hash + ?Sized>(&self, k: &K) -> u64 {
+        self.state.hash_one(k)
+    }
+
+    /// The entry whose key hashes to `hash` and `is` says is the one.
+    pub fn find(&self, hash: u64, is: impl Fn(usize) -> bool) -> Option<usize> {
+        self.table.find(hash, |&(h, i)| h == hash && is(i as usize)).map(|&(_, i)| i as usize)
+    }
+
+    /// Entry `i`, its key hashing to `hash` (not in the index yet).
+    pub fn insert(&mut self, hash: u64, i: usize) {
+        self.table.insert_unique(hash, (hash, i as u32), |&(h, _)| h);
+    }
+
+    pub fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

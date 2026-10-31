@@ -517,6 +517,7 @@ pub mod code {
     pub const TOO_MANY_COLUMNS: &str = "54011";
     pub const CONFIGURATION_LIMIT_EXCEEDED: &str = "53400";
     pub const OUT_OF_MEMORY: &str = "53200";
+    pub const DISK_FULL: &str = "53100";
     pub const RAISE_EXCEPTION: &str = "P0001";
     pub const INTERNAL_ERROR: &str = "XX000";
     pub const DATA_CORRUPTED: &str = "XX001";

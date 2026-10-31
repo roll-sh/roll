@@ -30,6 +30,8 @@ pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
 pub fn open_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx) -> Result<BoxNode> {
     if !ctx.instrumented() {
         ctx.need.set(need.map(Rc::from));
+    } else if matches!(**plan, Plan::Sort { .. }) {
+        ctx.logical_need.set(need.map(Rc::from));
     }
     open(plan, ctx)
 }
@@ -179,7 +181,9 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         Plan::Barrier { input, path: Some(sp), .. } => Box::new(SortNode {
             input: Some(open(input, ctx)?),
             keys: sp.keys.clone(),
-            out: Vec::new().into_iter(),
+            out: Default::default(),
+            types: crate::sql::paths::analyzejoins::col_types(input),
+            mask: None,
             bound: None,
             presorted: 0,
             key: 0,
@@ -362,7 +366,9 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     key: Arc::as_ptr(plan) as usize,
                     input: Some(d),
                     keys: keys.clone(),
-                    out: Vec::new().into_iter(),
+                    out: Default::default(),
+                    types: crate::sql::paths::analyzejoins::col_types(input),
+                    mask: None,
                     bound,
                     need: None,
                     narrow: None,
@@ -374,7 +380,13 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 key: Arc::as_ptr(plan) as usize,
                 input: Some(open_need(input, need.clone(), ctx)?),
                 keys: keys.clone(),
-                out: Vec::new().into_iter(),
+                out: Default::default(),
+                types: crate::sql::paths::analyzejoins::col_types(input),
+                // (Under EXPLAIN ANALYZE, which reads whole rows, the mask the parent meant.)
+                mask: {
+                    let logical = ctx.logical_need.take();
+                    need.clone().or_else(|| nd::add(logical.as_deref().map(<[bool]>::to_vec), nd::keys(keys)))
+                },
                 bound,
                 need: need.map(Box::from),
                 narrow: None,
@@ -2445,7 +2457,8 @@ pub fn sort_rows_bounded(
 /// `sort_rows_bounded` of the input's rows (`bound` > 0), read a row at a time into
 /// tuplesort's bounded sort (`pgsort::Bounded`), so that only the rows that may still be
 /// among the first `bound` are kept: the same rows in the same order.
-fn sort_input_bounded(input: &mut BoxNode, keys: &[SortKey], bound: usize, ctx: &ExecCtx) -> Result<Vec<Row>> {
+/// (Also the rows read, those a parallel scan's heap skipped included.)
+fn sort_input_bounded(input: &mut BoxNode, keys: &[SortKey], bound: usize, ctx: &ExecCtx) -> Result<(Vec<Row>, usize)> {
     let mut f = |a: &(Vec<Value>, Row), b: &(Vec<Value>, Row)| -> Result<Ordering> {
         for (i, k) in keys.iter().enumerate() {
             match compare_values(&a.0[i], &b.0[i], k, ctx)? {
@@ -2459,8 +2472,10 @@ fn sort_input_bounded(input: &mut BoxNode, keys: &[SortKey], bound: usize, ctx: 
     let mut sort = super::pgsort::Bounded::new(bound);
     // (The key vector of a row discarded at once serves the next.)
     let mut spare = Vec::with_capacity(keys.len());
+    let mut n = 0;
     while let Some(r) = input.next(ctx)? {
         ctx.check()?;
+        n += 1;
         let mut key: Vec<Value> = std::mem::take(&mut spare);
         key.clear();
         for k in keys {
@@ -2470,12 +2485,13 @@ fn sort_input_bounded(input: &mut BoxNode, keys: &[SortKey], bound: usize, ctx: 
             spare = k;
         }
     }
-    sort.skip(input.take_skipped());
+    let skipped = input.take_skipped();
+    sort.skip(skipped);
     let sorted = sort.finish(&mut cmp);
     if let Some(e) = cmp.err {
         return Err(e);
     }
-    Ok(sorted.into_iter().map(|(_, r)| r).collect())
+    Ok((sorted.into_iter().map(|(_, r)| r).collect(), n + skipped))
 }
 
 /// An Incremental Sort's rows: the input sorted on the first `presorted` keys already, read
@@ -2565,7 +2581,11 @@ fn missing_sort_support(ty: &crate::types::DataType, ctx: &ExecCtx) -> Option<Er
 struct SortNode {
     input: Option<BoxNode>,
     keys: Vec<SortKey>,
-    out: std::vec::IntoIter<Row>,
+    out: super::extsort::Sorted,
+    /// The input's column types (what tuplesort counts its tuples by), and the columns
+    /// read above (PostgreSQL's plan has the others as NULLs).
+    types: Vec<crate::types::DataType>,
+    mask: Option<Vec<bool>>,
     /// tuplesort_set_bound: the rows a LIMIT above wants.
     bound: Option<usize>,
     /// An Incremental Sort: the leading keys the input is sorted on already.
@@ -2595,6 +2615,11 @@ impl Narrow {
     pub(super) fn of(need: &[bool], width: usize) -> Option<Narrow> {
         let cols: Box<[u32]> = (0..width).filter(|&i| need.get(i).copied().unwrap_or(false)).map(|i| i as u32).collect();
         (width - cols.len() >= 4).then_some(Narrow { cols, width })
+    }
+
+    /// The columns a narrowed row keeps.
+    pub(super) fn kept(&self) -> usize {
+        self.cols.len()
     }
 
     /// Column `i`'s place in a narrowed row.
@@ -2637,33 +2662,26 @@ impl Narrow {
     }
 }
 
-/// A full sort's input rows, narrowed (`Narrow`) when `need` leaves enough columns out.
-#[inline(never)]
-fn read_sort_input(
-    input: &mut BoxNode,
-    need: Option<&[bool]>,
-    keys: &[SortKey],
-    ctx: &ExecCtx,
-) -> Result<(Vec<Row>, Option<(Narrow, Vec<SortKey>)>)> {
-    let mut rows = Vec::new();
-    let mut narrow = None;
-    while let Some(r) = input.next(ctx)? {
-        ctx.check()?;
-        if rows.is_empty() {
-            narrow = need.and_then(|n| Narrow::of(n, r.len())).and_then(|n| {
-                let keys = keys
-                    .iter()
-                    .map(|k| Some(SortKey { expr: n.expr(&k.expr)?, ..k.clone() }))
-                    .collect::<Option<Vec<_>>>()?;
-                Some((n, keys))
-            });
-        }
-        rows.push(match &narrow {
-            Some((n, _)) => n.shrink(r),
-            None => r,
-        });
+/// How a full sort holds rows of `width` columns: narrowed (`Narrow`, its keys over the
+/// narrowed rows) when `need` leaves enough columns out.
+fn narrow_sort(need: Option<&[bool]>, width: usize, keys: &[SortKey]) -> Option<(Narrow, Vec<SortKey>)> {
+    need.and_then(|n| Narrow::of(n, width)).and_then(|n| {
+        let keys = keys
+            .iter()
+            .map(|k| Some(SortKey { expr: n.expr(&k.expr)?, ..k.clone() }))
+            .collect::<Option<Vec<_>>>()?;
+        Some((n, keys))
+    })
+}
+
+impl SortNode {
+    /// The next sorted row, widened back when held narrowed.
+    fn next_out(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        Ok(match (self.out.next(ctx)?, &self.narrow) {
+            (Some(r), Some((n, _))) => Some(n.widen(r)),
+            (r, _) => r,
+        })
     }
-    Ok((rows, narrow))
 }
 
 impl Node for SortNode {
@@ -2687,7 +2705,7 @@ impl Node for SortNode {
             if let Some(e) = self.keys.iter().find_map(|k| missing_sort_support(&k.expr.ty(), ctx)) {
                 return Err(e);
             }
-            self.out = if self.presorted > 0 {
+            self.out = super::extsort::Sorted::Mem(if self.presorted > 0 {
                 incremental_sort_rows(&mut input, &self.keys, self.presorted, self.bound, self.key, ctx)?
             } else {
                 match self.bound.filter(|&b| b > 0) {
@@ -2701,22 +2719,51 @@ impl Node for SortNode {
                         {
                             input.topk_below(super::TopK { col, desc: k.desc, nulls_first: k.nulls_first, k: b });
                         }
-                        sort_input_bounded(&mut input, &self.keys, b, ctx)?
+                        let (rows, n) = sort_input_bounded(&mut input, &self.keys, b, ctx)?;
+                        if let Some(instr) = ctx.instr.borrow().as_ref() {
+                            let st = super::extsort::bounded_stats(&rows, n, b, &self.keys, &self.types, ctx);
+                            instr.update(self.key, |s| s.sort = Some(st));
+                        }
+                        rows
                     }
                     None => {
-                        let (rows, narrow) = read_sort_input(&mut input, self.need.as_deref(), &self.keys, ctx)?;
-                        self.narrow = narrow;
-                        let keys = self.narrow.as_ref().map_or(&self.keys, |(_, k)| k);
-                        sort_rows_bounded(rows, keys, self.bound, ctx)?
+                        // tuplesort: in memory while work_mem holds the rows, else runs on
+                        // disk merged as they're read; the rows held narrowed to the columns
+                        // read (`Narrow`), decided at the first.
+                        let mut sort: Option<super::extsort::ExtSort> = None;
+                        while let Some(r) = input.next(ctx)? {
+                            ctx.check()?;
+                            let s = match &mut sort {
+                                Some(s) => s,
+                                None => {
+                                    self.narrow = narrow_sort(self.need.as_deref(), r.len(), &self.keys);
+                                    sort.insert(super::extsort::ExtSort::new(
+                                        &self.keys,
+                                        self.types.clone(),
+                                        self.mask.clone(),
+                                        self.narrow.as_ref(),
+                                        false,
+                                        ctx,
+                                    ))
+                                }
+                            };
+                            s.put(r, self.narrow.as_ref().map(|(n, _)| n), ctx)?;
+                        }
+                        let sort = sort.unwrap_or_else(|| {
+                            super::extsort::ExtSort::new(&self.keys, self.types.clone(), None, None, false, ctx)
+                        });
+                        let (out, method, kb) = sort.finish(ctx)?;
+                        if let Some(instr) = ctx.instr.borrow().as_ref() {
+                            instr.update(self.key, |s| s.sort = Some((method, kb)));
+                        }
+                        self.out = out;
+                        return self.next_out(ctx);
                     }
                 }
             }
-            .into_iter();
+            .into_iter());
         }
-        Ok(match (self.out.next(), &self.narrow) {
-            (Some(r), Some((n, _))) => Some(n.widen(r)),
-            (r, _) => r,
-        })
+        self.next_out(ctx)
     }
 }
 
