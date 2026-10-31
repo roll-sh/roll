@@ -223,6 +223,8 @@ struct Conn {
     fatal: bool,
     /// pg_terminate_backend was called on this session.
     terminated: Option<Arc<AtomicBool>>,
+    /// The backend's count of messages read (`Engine::read_counter`).
+    reads: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// The socket, for what goes out while a statement runs (`WireSink`).
     live: std::rc::Rc<TcpStream>,
     /// ReadyForQuery went out and no message came since: the session is idle, and its idle
@@ -695,6 +697,7 @@ fn handle(
         partial: None,
         fatal: false,
         terminated: None,
+        reads: None,
         live: std::rc::Rc::new(stream.try_clone()?),
         at_ready: false,
         sent: Vec::new(),
@@ -812,6 +815,7 @@ fn handle(
         pid,
     };
     c.terminated = Some(terminated.clone());
+    c.reads = engine.read_counter(pid);
     if crate::log::active() {
         let files = engine.server_conf().loaded();
         c.pre_session_log = Some((pid, crate::log::Format::from_files(Some(&files))));
@@ -1447,6 +1451,11 @@ fn message_loop(
     loop {
         c.log_sent(Some(s), pid, last_stmt.as_deref());
         let idle = if std::mem::take(&mut c.at_ready) { s.idle_timeout() } else { None };
+        // (What the last message said is out, or parked until Sync: a CancelRequest waiting
+        // on this backend may close its connection now.)
+        if let Some(r) = &c.reads {
+            r.fetch_add(1, Ordering::Release);
+        }
         let msg = match c.read_message_by(idle.as_ref().map(|i| i.0)) {
             Ok(m) => m,
             Err(e) if e.get_ref().is_some_and(|e| e.is::<IdleTimeout>()) => {

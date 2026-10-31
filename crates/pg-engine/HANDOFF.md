@@ -2216,8 +2216,8 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     discarded the request (DoingCommandRead). asyncpg's executemany timeout (its cancel lands
     near a statement boundary every time) committed all 128 rows. pg_sleep now waits on a
     latch the request wakes (`txn::locks::latch_sleep`, `interrupt`). A CancelRequest's
-    connection closes once the backend has acted on it (its flag cleared by the next message
-    read, or the backend no longer running a statement; at most 100 ms:
+    connection closes once the backend has acted on it (a running backend starts reading its
+    next message, `Engine::read_counter`, its error out by then; at most 100 ms:
     `Engine::cancel_request`): Postgrex closes its connection as soon as the cancel's closes and
     needs the canceled statement's error first (its "active client timeout"). Wire test
     `cancel_request_closes_after_the_error`. Knex's cancel with the pool exhausted reads

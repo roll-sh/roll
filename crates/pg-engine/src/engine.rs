@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -215,6 +215,8 @@ struct Backend {
     cancel: Option<Arc<AtomicBool>>,
     socket: Option<TcpStream>,
     terminated: Arc<AtomicBool>,
+    /// Messages the server loop started reading (`read_counter`).
+    reads: Arc<AtomicU64>,
     activity: Activity,
 }
 
@@ -996,6 +998,7 @@ impl Engine {
                 cancel: None,
                 socket,
                 terminated: terminated.clone(),
+                reads: Default::default(),
                 activity,
             },
         );
@@ -1102,33 +1105,34 @@ impl Engine {
     /// closes, and reads the error first). Acted on: the backend read its next message (the
     /// flag cleared), or no longer runs a statement.
     pub fn cancel_request(&self, pid: i32, secret: i32) {
-        let Some(flag) = self.cancel_flag(pid, secret) else {
-            return;
-        };
-        let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
-        while flag.load(Ordering::Relaxed) && std::time::Instant::now() < until {
-            let running = self
-                .backends
-                .lock()
-                .get(&pid)
-                .is_some_and(|b| matches!(b.activity.state.as_str(), "active" | "fastpath function call"));
-            if !running {
-                break;
+        // (Signalled under the lock, with what the backend was doing and how many messages
+        // it had read: the request is acted on once it reads its next one.)
+        let reads = match self.backends.lock().get(&pid) {
+            Some(b) if b.secret == secret => {
+                let Some(c) = b.cancel.as_ref() else { return };
+                c.store(true, Ordering::Relaxed);
+                crate::txn::locks::interrupt(c);
+                if !matches!(b.activity.state.as_str(), "active" | "fastpath function call") {
+                    return;
+                }
+                b.reads.clone()
             }
+            _ => return,
+        };
+        let seen = reads.load(Ordering::Acquire);
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while reads.load(Ordering::Acquire) == seen
+            && std::time::Instant::now() < until
+            && self.backends.lock().contains_key(&pid)
+        {
             std::thread::sleep(std::time::Duration::from_micros(500));
         }
     }
 
-    fn cancel_flag(&self, pid: i32, secret: i32) -> Option<Arc<AtomicBool>> {
-        match self.backends.lock().get(&pid) {
-            Some(b) if b.secret == secret => {
-                let c = b.cancel.as_ref()?;
-                c.store(true, Ordering::Relaxed);
-                crate::txn::locks::interrupt(c);
-                Some(c.clone())
-            }
-            _ => None,
-        }
+    /// The count of messages backend `pid` has started reading (`cancel_request` waits for
+    /// it to move: what the canceled statement said is out by then).
+    pub fn read_counter(&self, pid: i32) -> Option<Arc<AtomicU64>> {
+        self.backends.lock().get(&pid).map(|b| b.reads.clone())
     }
 
     fn terminate(b: &Backend) {
