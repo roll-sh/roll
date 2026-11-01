@@ -270,6 +270,24 @@ fn ranges(
     ranges_from(ix, b, index_prefix(t.oid, ix.id), 0, ctx)
 }
 
+/// A bpchar probe of a char(`pad`) key as the key is stored: without its trailing spaces,
+/// padded to `pad` characters. One longer than that stays trimmed: bytewise it equals no
+/// key (every key is `pad` characters), and a key collation keys both trimmed, so under a
+/// nondeterministic one it finds the keys bpchareq calls equal. Still one search, as in
+/// PostgreSQL.
+pub(super) fn padded(v: Value, pad: Option<usize>) -> Value {
+    let (Some(n), Value::Text(s)) = (pad, &v) else { return v };
+    let t = s.trim_end_matches(' ');
+    let len = t.chars().count();
+    if len >= n {
+        return if t.len() == s.len() { v } else { Value::Text(t.into()) };
+    }
+    let mut out = String::with_capacity(t.len() + n - len);
+    out.push_str(t);
+    out.extend(std::iter::repeat_n(' ', n - len));
+    Value::Text(out.into())
+}
+
 /// `ranges` of the entries starting with `prefix` (the index's, and the key bytes of its
 /// first `col0` columns), `b` bounding the columns after.
 fn ranges_from(ix: &Index, b: &IndexBounds, mut prefix: Vec<u8>, col0: usize, ctx: &ExecCtx) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
@@ -278,6 +296,7 @@ fn ranges_from(ix: &Index, b: &IndexBounds, mut prefix: Vec<u8>, col0: usize, ct
         if v.is_null() {
             return Ok(Vec::new());
         }
+        let v = padded(v, b.pad(col0 + i));
         let c = &ix.columns[col0 + i];
         encode_index_value(&mut prefix, &v, c.desc, c.nulls_first, b.coll(col0 + i));
     }
@@ -289,13 +308,15 @@ fn ranges_from(ix: &Index, b: &IndexBounds, mut prefix: Vec<u8>, col0: usize, ct
         };
         let desc = ix.columns.get(ncol).is_some_and(|c| c.desc);
         let kc = b.coll(ncol);
+        let pad = b.pad(ncol);
         let mut keys: Vec<Vec<u8>> = a
             .items
             .iter()
             .filter(|v| !v.is_null())
+            .map(|v| padded(v.clone(), pad))
             .map(|v| {
                 let mut k = prefix.clone();
-                encode_index_value(&mut k, v, desc, false, kc);
+                encode_index_value(&mut k, &v, desc, false, kc);
                 k
             })
             .collect();

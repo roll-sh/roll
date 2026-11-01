@@ -10,7 +10,7 @@
 
 use crate::catalog::{Index, Table};
 use crate::exec::ExecCtx;
-use crate::sql::binder::optimize::{conjuncts, probe_ok, pseudo_constant};
+use crate::sql::binder::optimize::{bpchar_pad, conjuncts, eq_probe_ok, probe_ok, pseudo_constant};
 use crate::sql::costs::{self, CPU_OPERATOR_COST, CPU_TUPLE_COST, Est, RelSize, VarRef};
 use crate::sql::expr::Expr;
 use crate::sql::func::FuncDef;
@@ -3924,21 +3924,32 @@ fn fill_bounds(ii: &IndexInfo, quals: &[IClause], from: usize, b: &mut IndexBoun
         if cs.iter().any(|c| matches!(&c.expr, Expr::Call(d, ..) if !key_order_op(ii, col, d))) {
             return (col, false);
         }
+        // (A char(n) key's bpchar probe is padded to n: `IndexBounds::pads`.)
+        let pad = |b: &mut IndexBounds, vt: &DataType| {
+            if let Some(n) = bpchar_pad(&kt, vt) {
+                b.pads.resize(b.pads.len().max(col + 1), 0);
+                b.pads[col] = n;
+            }
+        };
         if let Some(v) = cs.iter().find_map(|c| match (&c.kind, &c.value) {
-            (Kind::Op("="), Some(v)) if usable(v) && probe_ok(&kt, &v.ty()) => Some(v.clone()),
+            (Kind::Op("="), Some(v)) if usable(v) && eq_probe_ok(&kt, &v.ty()) => Some(v.clone()),
             _ => None,
         }) {
+            pad(b, &v.ty());
             b.eq.push(v);
             continue;
         }
         if let Some(v) = cs.iter().find_map(|c| match (&c.kind, &c.value) {
             (Kind::Saop("="), Some(v))
-                if usable(v) && v.ty().elem().is_some_and(|e| probe_ok(&kt, e)) =>
+                if usable(v) && v.ty().elem().is_some_and(|e| eq_probe_ok(&kt, e)) =>
             {
                 Some(v.clone())
             }
             _ => None,
         }) {
+            if let Some(e) = v.ty().elem() {
+                pad(b, e);
+            }
             b.any = Some(v);
             return (col, false);
         }

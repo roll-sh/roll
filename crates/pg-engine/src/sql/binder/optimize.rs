@@ -4059,6 +4059,24 @@ pub(crate) fn probe_ok(c: &DataType, v: &DataType) -> bool {
         || matches!((c, v), (T::Numeric(_), T::Numeric(_)))
 }
 
+/// `probe_ok` for an equality (`=`, `= ANY`), which also probes a char(n) key with a bpchar
+/// value: trimmed and padded to n (`IndexBounds::pads`), it finds the entries bpchareq
+/// does. Not a range: padded keys aren't in bpcharcmp's order below the space character,
+/// and an unconstrained bpchar key's equal values differ in their trailing spaces.
+pub(crate) fn eq_probe_ok(c: &DataType, v: &DataType) -> bool {
+    // (citext is keyed by its lowercased text, which equal values share: citext_eq.)
+    let citext = |t: &DataType| matches!(t, DataType::Base(b) if b.ext == crate::ext::types::CITEXT);
+    probe_ok(c, v) || bpchar_pad(c, v).is_some() || (citext(c) && citext(v))
+}
+
+/// The width a bpchar probe of a char(n) key is padded to: n (the typmod less VARHDRSZ).
+pub(crate) fn bpchar_pad(c: &DataType, v: &DataType) -> Option<u32> {
+    match (c, v) {
+        (DataType::Bpchar(m), DataType::Bpchar(_)) if *m > 4 => Some((*m - 4) as u32),
+        _ => None,
+    }
+}
+
 /// A value fixed for the whole scan: no columns of the row, nothing volatile.
 fn scan_constant(e: &Expr) -> bool {
     e.columns().is_empty() && !e.is_volatile() && !matches!(e, Expr::Default(_))
@@ -4092,7 +4110,8 @@ fn col_conds(parts: &[Expr], col: usize, cty: &DataType) -> ColConds {
                 } else {
                     continue;
                 };
-                if !probe_ok(cty, &v.ty()) {
+                let ok = if op == "=" { eq_probe_ok(cty, &v.ty()) } else { probe_ok(cty, &v.ty()) };
+                if !ok {
                     continue;
                 }
                 match op {
@@ -4111,7 +4130,7 @@ fn col_conds(parts: &[Expr], col: usize, cty: &DataType) -> ColConds {
                 all: false,
             } if op.name == "=" && is_col(left) && scan_constant(right) => {
                 if let Some(et) = right.ty().elem()
-                    && probe_ok(cty, et)
+                    && eq_probe_ok(cty, et)
                 {
                     out.any = Some((**right).clone());
                 }
@@ -4152,10 +4171,15 @@ fn choose_index(cat: &Catalog, s: &mut ScanPlan) {
     for ix in index_columns(cat, &s.table) {
         let mut b = IndexBounds::default();
         let mut score = 0;
-        for c in &ix.columns {
+        for (k, c) in ix.columns.iter().enumerate() {
             let IndexKey::Column(col) = c.key else { break };
             let cty = &s.table.columns[col].ty;
             let cc = col_conds(&parts, col, cty);
+            let probe = cc.eq.as_ref().map(Expr::ty).or_else(|| cc.any.as_ref().and_then(|a| a.ty().elem().cloned()));
+            if let Some(n) = probe.and_then(|t| bpchar_pad(cty, &t)) {
+                b.pads.resize(k + 1, 0);
+                b.pads[k] = n;
+            }
             if let Some(v) = cc.eq {
                 b.eq.push(v);
                 score += 10;

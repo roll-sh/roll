@@ -8,7 +8,7 @@ use super::{Ctx, MemProbe, MemSampler, mb, must, run_script, timed};
 
 const LOAD: &str = "
 DROP TABLE IF EXISTS que_jobs, oban_jobs, gw_jobs, sq_ready, items, lookup, shapes,
-  words_gin, words_gist, ts_events, bookings, bookings2, docs, skip_t, pts, boxes, circles, polys, nums;
+  words_gin, words_gist, ts_events, bookings, bookings2, docs, skip_t, pts, boxes, circles, polys, nums, custs, ords;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE TABLE que_jobs (priority smallint NOT NULL DEFAULT 100, run_at timestamptz NOT NULL DEFAULT now(),
@@ -82,6 +82,11 @@ CREATE INDEX polys_p ON polys USING gist (p);
 CREATE TABLE nums (id int, a int);
 INSERT INTO nums SELECT g, (g * 7919) % $ROWS FROM generate_series(1, $SMALL) g;
 CREATE INDEX nums_a ON nums USING gist (a);
+CREATE TABLE custs (cid char(5) PRIMARY KEY, name text);
+INSERT INTO custs SELECT lpad(g::text, 5, 'C'), 'c' || g FROM generate_series(1, 1000) g;
+CREATE TABLE ords (id int PRIMARY KEY, cid char(5), amount int);
+INSERT INTO ords SELECT g, lpad((g % 1000 + 1)::text, 5, 'C'), g % 97 FROM generate_series(1, $SMALL) g;
+CREATE INDEX ords_cid ON ords (cid);
 VACUUM ANALYZE;
 ";
 
@@ -158,6 +163,8 @@ const CASES: &[(&str, &str)] = &[
     ("gist_polygon_knn", "SELECT id FROM polys ORDER BY p <-> point($K % 1000, $K % 977) LIMIT 5"),
     ("btree_gist_knn", "SELECT id FROM nums ORDER BY a <-> $K LIMIT 5"),
     ("trgm_gist_knn", "SELECT id FROM words_gist ORDER BY w <-> md5($K::text) LIMIT 5"),
+    ("char_eq", "SELECT count(*), sum(amount) FROM ords WHERE cid = lpad(($K % 1100)::text, 5, 'C')::char(5)"),
+    ("char_correlated", "SELECT c.cid, (SELECT count(*) FROM ords o WHERE o.cid = c.cid) FROM custs c WHERE c.cid < 'CC1' ORDER BY c.cid"),
     ("brin_range", "SELECT count(*), sum(v) FROM ts_events WHERE ts >= timestamptz '2026-01-01' + $K * interval '1 s' \
       AND ts < timestamptz '2026-01-01' + ($K + 3600) * interval '1 s'"),
     ("booking_insert", "INSERT INTO bookings (room, during) VALUES ($K % 50, tsrange(timestamp '2026-01-01' + $K * interval '1 hour', \

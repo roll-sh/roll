@@ -1,0 +1,122 @@
+> CREATE TABLE a144_edges (id int, c char(3), u bpchar)
+-- CREATE TABLE
+
+> INSERT INTO a144_edges VALUES (1, 'a', 'a'), (2, 'a' || chr(9), 'a '),
+>   (3, 'a' || chr(10), 'a  '), (4, '', ''), (5, NULL, NULL), (6, 'É', 'É ')
+-- INSERT 0 6
+
+> CREATE INDEX ON a144_edges (c DESC)
+-- CREATE INDEX
+
+> CREATE INDEX ON a144_edges (u)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> SELECT id FROM a144_edges WHERE c = ANY (ARRAY['a', 'a ', 'a    ', NULL]::bpchar[]) ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM a144_edges WHERE c = ANY (ARRAY['É', 'É    ', 'Éxxx']::bpchar[]) ORDER BY id
+id:int4
+6
+-- SELECT 1
+
+> SELECT id FROM a144_edges WHERE c = ANY (ARRAY[]::bpchar[]) ORDER BY id
+id:int4
+-- SELECT 0
+
+> SELECT id FROM a144_edges WHERE c = ANY (ARRAY[NULL]::bpchar[]) ORDER BY id
+id:int4
+-- SELECT 0
+
+> SELECT id FROM a144_edges WHERE c = 'axxx ' ORDER BY id
+id:int4
+-- SELECT 0
+
+> SELECT id FROM a144_edges WHERE c < 'a' ORDER BY id
+id:int4
+4
+-- SELECT 1
+
+> SELECT id FROM a144_edges WHERE c > 'a' ORDER BY id
+id:int4
+2
+3
+6
+-- SELECT 3
+
+> SELECT id FROM a144_edges WHERE c BETWEEN 'a' AND 'a ' ORDER BY id
+id:int4
+1
+-- SELECT 1
+
+> SELECT id FROM a144_edges WHERE u = 'a   ' ORDER BY id
+id:int4
+1
+2
+3
+-- SELECT 3
+
+> SELECT id FROM a144_edges WHERE u = ANY (ARRAY['a', 'a  ', NULL]::bpchar[]) ORDER BY id
+id:int4
+1
+2
+3
+-- SELECT 3
+
+> CREATE COLLATION a144_ign (provider = icu, locale = 'und-u-ka-shifted-ks-level1', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE a144_coll (id int, c char(3) COLLATE a144_ign)
+-- CREATE TABLE
+
+> INSERT INTO a144_coll VALUES (1, 'abc'), (2, 'ABC'), (3, 'é'), (4, 'xyz')
+-- INSERT 0 4
+
+> CREATE INDEX ON a144_coll (c)
+-- CREATE INDEX
+
+> SELECT id FROM a144_coll WHERE c = 'a-b-c---' ORDER BY id
+id:int4
+1
+2
+-- SELECT 2
+
+> SELECT id FROM a144_coll WHERE c = ANY (ARRAY['a-b-c---', 'ABC ', 'É---']::bpchar[]) ORDER BY id
+id:int4
+1
+2
+3
+-- SELECT 3
+
+> DROP INDEX a144_coll_c_idx
+-- DROP INDEX
+
+> CREATE INDEX ON a144_coll USING hash (c)
+-- CREATE INDEX
+
+> SELECT id FROM a144_coll WHERE c = 'a-b-c---' ORDER BY id
+id:int4
+1
+2
+-- SELECT 2
+
+> SELECT id FROM a144_coll WHERE c = ANY (ARRAY['a-b-c---', 'ABC ', 'É---']::bpchar[]) ORDER BY id
+id:int4
+1
+2
+3
+-- SELECT 3
+
+> RESET enable_seqscan
+-- RESET
+
+> DROP TABLE a144_edges, a144_coll
+-- DROP TABLE
+
+> DROP COLLATION a144_ign
+-- DROP COLLATION
+

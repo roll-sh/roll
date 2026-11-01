@@ -124,6 +124,10 @@ pub struct IndexBounds {
     pub order: Vec<SortKey>,
     /// Per key column, the collation its entries are keyed under (`BoundIndex::colls`).
     pub colls: Vec<Option<crate::storage::keys::KeyColl>>,
+    /// Per key column, n for a char(n) key probed by `=` / `= ANY` with a bpchar value:
+    /// the probe is trimmed of trailing spaces and padded to n, as the key is stored
+    /// (`scan::padded`). 0 (or past the end): probed as it is.
+    pub pads: Vec<u32>,
     /// A skip scan (PostgreSQL 18's skip arrays): within the range above, each distinct
     /// value of the first key columns read with bounds on the columns after.
     pub skip: Option<Box<SkipScan>>,
@@ -141,6 +145,11 @@ impl IndexBounds {
     /// Key column `i`'s key collation.
     pub fn coll(&self, i: usize) -> Option<&crate::storage::keys::KeyColl> {
         self.colls.get(i).and_then(Option::as_ref)
+    }
+
+    /// Key column `i`'s `pads` width.
+    pub fn pad(&self, i: usize) -> Option<usize> {
+        self.pads.get(i).copied().filter(|n| *n > 0).map(|n| n as usize)
     }
 }
 

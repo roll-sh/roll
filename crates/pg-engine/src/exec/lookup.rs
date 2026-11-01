@@ -57,9 +57,9 @@ pub struct Lookup {
     ts: u64,
     /// The index's key prefix.
     prefix: Vec<u8>,
-    /// Per equality column: its value over the outer row, and how it is encoded (DESC,
-    /// NULLS FIRST, its key collation).
-    keys: Vec<(K, bool, bool, Option<KeyColl>)>,
+    /// Per equality column: its value over the outer row, how it is encoded (DESC, NULLS
+    /// FIRST, its key collation), and the char(n) width a bpchar value is padded to.
+    keys: Vec<(K, bool, bool, Option<KeyColl>, Option<usize>)>,
     decode: Decode,
     /// The inner scan's filter and the join condition, over the joined row's two sides.
     filter: Option<K>,
@@ -138,7 +138,7 @@ impl Lookup {
                 return Ok(None);
             };
             let c = &ix.columns[i];
-            keys.push((k, c.desc, c.nulls_first, b.coll(i).cloned()));
+            keys.push((k, c.desc, c.nulls_first, b.coll(i).cloned(), b.pad(i)));
         }
         let joined = |e: Option<&Expr>, shift: bool| -> Option<Option<K>> {
             match e {
@@ -227,13 +227,15 @@ impl Lookup {
     pub fn rows(&self, l: &[Value], out: &mut Vec<Row>, sc: &mut LookupScratch) -> bool {
         out.clear();
         let mut start = self.prefix.clone();
-        for (k, desc, nulls_first, coll) in &self.keys {
+        for (k, desc, nulls_first, coll, pad) in &self.keys {
             let Some(v) = k.run(l) else { return false };
             if v.is_null() {
                 // (An equality with NULL finds nothing: the scan still counts.)
                 sc.loops += 1;
                 return true;
             }
+            // (A bpchar probe of a char(n) key, padded as the key is stored.)
+            let v = super::scan::padded(v, *pad);
             encode_index_value(&mut start, &v, *desc, *nulls_first, coll.as_ref());
         }
         let found = match sc.cache.get(&start) {

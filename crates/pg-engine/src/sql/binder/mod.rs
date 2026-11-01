@@ -1677,8 +1677,14 @@ impl<'b, 'a> Binder<'b, 'a> {
                 }
             }
             let (sf, st) = (scalar(&from), scalar(to));
+            // (A char(n) constant passed as an unmodified bpchar, an operator's argument,
+            // keeps its type, as coerce_type leaves a value of the target type: EXPLAIN shows
+            // `'AB   '::character(5)`.)
+            let kept_const = matches!(e, Expr::Const(..))
+                && cc != CastContext::Explicit
+                && matches!((sf, st), (DataType::Bpchar(n), DataType::Bpchar(-1)) if *n >= 0);
             if st.typmod() >= 0 && sf.typmod() != st.typmod()
-                || matches!(st, DataType::Bpchar(_)) && sf.typmod() != st.typmod()
+                || matches!(st, DataType::Bpchar(_)) && sf.typmod() != st.typmod() && !kept_const
             {
                 return self.fold_cast(e, from, to.clone(), cc == CastContext::Explicit);
             }
