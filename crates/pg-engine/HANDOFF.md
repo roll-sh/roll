@@ -3473,6 +3473,33 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     After the rebase onto `74a3ad38`, with the IndexScope measure: compile, clippy, goldens,
     the big-table, spill, deep-input, deparse, crash and storage-upgrade tests, and a regress
     subset of the index files.
+- **Write path, round 7** (round 24, agent 148, resumed on `29e882c9`): deferred DELETE
+  tombstones, cached heap measures, and index-build progress.
+  - A DELETE that already defers index entries also defers row and TOAST tombstones.
+    Deferred runs take a journal position of their own, so cursors opened before the
+    statement retain their rows and out-of-line values. Small deletes use the write buffer.
+    The compact row-lock path avoids listing holds when only this transaction owns them.
+  - `txn/unchanged.rs` keeps a large heap's row count, packed pages, xmin bounds, and
+    column layout. VACUUM reuses that measure while the store watches the heap unchanged.
+    COPY into a table TRUNCATEd in the same transaction can supply the first measure.
+    Row writes and new range deletions invalidate the watch. Ordinary index-entry writes
+    and compaction's retirement of range markers preserve it. Linked runs conservatively
+    invalidate every table their key range spans. Layout changes, old snapshots,
+    and unknown TOAST xmin bounds force a scan. Measures are not persisted.
+  - `session/ddl/idxprogress.rs` reports the build phase of CREATE INDEX and REINDEX,
+    including their concurrent forms. It ends the report on success, error, or cancellation.
+    Concurrent builds' preliminary expression checks report progress too. CLUSTER,
+    VACUUM FULL, and materialized-view rewrites suppress CREATE INDEX progress.
+    `heap_blocks_for_build` obtains heap pages without evaluating index expressions before
+    the reported scan. Lock-wait, validation, and older-snapshot phases are not reported yet.
+  - Small btree builds reuse their counted rows and tuples. Parallel builds merge sorted
+    key lists when measuring pages. The already-landed native-method deletion path is
+    preserved: native rebuilds write outside the transaction, so their old records still
+    need per-key deletion. Built-in index storage already uses range deletion on this base.
+  - Tests include `a148_delete_cursor`, `a148_index_progress`, the deferred-delete and
+    unchanged-heap cases in `big_tables`, and `roll-index-progress` for observation from
+    another backend and cancellation. Verification details are in the resumed batch's
+    `tests/regress/STATUS.md` entry. The paused benchmark notes are not verified speedups.
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in

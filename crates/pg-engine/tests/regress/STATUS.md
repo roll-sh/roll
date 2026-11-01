@@ -81,6 +81,43 @@ PGREGRESS_REPORT_DIR=/tmp/report_x CARGO_BUILD_JOBS=2 \
 cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 ```
 
+## Round 24, agent 148 (bulk writes round 7, resumed on `29e882c9`)
+
+Deferred DELETE runs include row and TOAST tombstones and take a journal position after
+earlier cursors' snapshots. VACUUM can reuse an unchanged heap's measure, including a COPY
+measure from a transaction that first TRUNCATEd the table. Retiring a range marker after
+compaction preserves that measure. Index builds report their build phase through
+pg_stat_progress_create_index, including the preliminary concurrent expression checks.
+Heap-page lookup avoids evaluating index expressions before progress starts.
+
+A debug subset of 19 files, including test_setup, matches 3,544/3,544 PostgreSQL 18.6 units,
+with no newly differing units. The files cover COPY, CREATE INDEX, VACUUM, transactions,
+cursors, UPDATE, DELETE, btree and hash indexes, compression, TOAST, and access-method
+utilities. This subset does not update the generated full-suite counts below.
+
+Twelve targeted isolation specs match all 127 permutations and 790 steps. The added
+roll-index-progress spec matches all eight permutations and 60 steps for regular and
+concurrent CREATE INDEX and REINDEX, including cancellation and session reuse.
+Both a148 goldens were re-recorded from PostgreSQL 18.6 without changing their output.
+They pass in-process, over the wire, and in shuffled order. The pgstattuple, pg_visibility,
+and btree_gin contrib tests match 479/479 units.
+
+The million-row saved workload matches PostgreSQL's checked row counts, ID sums, rounded
+value sums, and text lengths after COPY, UPDATE, and DELETE. Repeated VACUUM statistics are
+stable. The heap-page difference, 12,559 versus PostgreSQL's 12,501, also occurs on the
+baseline and is not introduced by this batch. No paused benchmark claim is verified here.
+
+`cargo build -p pg-engine`, the full `cargo test -p pg-engine`, and
+`cargo clippy -p pg-engine` pass. Clippy reports the same ten existing warnings in unchanged
+files. `pnpm test:pg --unit` passes. The Docker phase was not repeated, as instructed by the
+parent. Its baseline run at `3069ca91` passed 12 tests and failed four recovery tests because
+compute-to-host WAL HTTP fetches timed out. The parent also reproduced the network failure
+with a listener bound to all interfaces. Evidence is in
+`~/.cache/pg-engine-sol-resume/postgres-check.log` and that directory's `manifest.json`.
+
+Commands, logs, and private reports are in `~/.cache/a148-resume-t3-44ac8373/`.
+HANDOFF's "Write path, round 7" records the build-progress limits.
+
 ## Round 24, agent 146 (catalog round 9, first batch resumed on `3069ca91`)
 
 REINDEX SCHEMA remembers which work items were tables before it waits for locks. If a lock
