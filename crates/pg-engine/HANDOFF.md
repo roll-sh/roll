@@ -4134,10 +4134,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   recursive reference seeing the clauses' columns (`n` named twice is ambiguous, as in
   analyzeCTE); `(x).f` over a VALUES list's record column fails "record type has not been
   registered" (`ScopeCol::opaque_record`, also through a CTE over VALUES);
-  The proposed pg_stat_get_backend_subxact implementation is held in commit `40f4554f`,
-  outside this integration. It uses the landed proc-slot backend ids but has a known
-  backend-status snapshot difference: after reading a count of 1, ROLLBACK TO reports 0
-  there and 1 in PostgreSQL until pg_stat_clear_snapshot().
+  The initial pg_stat_get_backend_subxact proposal was held in commit `40f4554f` because
+  it returned live counts after ROLLBACK TO. The backend-status recovery below replaces
+  that proposal with PostgreSQL's shared snapshot and sticky overflow semantics.
   COMMENT now records the resolved address directly, including removal of an absent comment
   and constraint comments. Notification reporting is enabled only by difftest's clients;
   existing wire goldens retain their SQL-notice output.
@@ -4149,6 +4148,45 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   no override for the assigned range. Logs and exact commands: `~/.cache/a147-resume/`.
   Those worker checks included the held monitoring commit. The parent integrates the
   round8 fixes without it and runs combined verification in `~/.cache/pg-engine-sol-resume/`.
+- **Backend-status recovery** (2026-11-01, base `f350cef4`):
+  `pg_stat_get_backend_subxact` reads the same raw backend-status snapshot as the other
+  backend accessors, `pg_stat_get_activity`, `pg_stat_get_backend_idset`, database backend
+  counts, and command progress. The first accessor copies every backend, including each
+  backend's subtransaction count, overflow flag, xid, and xmin. The snapshot survives
+  statements and savepoint rollback under every stats_fetch_consistency mode, including
+  `none`. `pg_stat_clear_snapshot()` and top-level transaction cleanup discard it.
+  Utility-only transactions also perform that cleanup.
+
+  Raw metadata is cached before applying the caller's current role privileges. Changing
+  roles can hide or reveal the cached query text. Wait events and parallel leaders remain
+  live, as in PostgreSQL's PGPROC reads. A stats_fetch_consistency assignment defers a
+  reset until the next cumulative-statistics fetch or snapshot-timestamp call. Backend
+  reads do not consume that reset. Assigning the same value does not request a reset.
+  Restoring a changed GUC after savepoint rollback does request one.
+
+  `Txn` retains at most 64 assigned child IDs and publishes the count and overflow flag
+  together through its backend's proc slot. RELEASE retains the IDs. Rollback and error
+  abort remove the affected cached IDs, while subtransaction overflow stays set. A
+  top-level abort or commit resets both fields. After 65 released child writes under a
+  root savepoint, the PostgreSQL sequence is `64/true`, then `0/true` after rollback and
+  explicit clear, then `1/true` after another root write and clear. A fresh transaction
+  reports `0/false`.
+
+  Tests: `tests/backend_status.rs`, PostgreSQL-recorded golden `a147_backend_subxact`,
+  and isolation specs `roll-backend-subxact` and `roll-backend-status`. Reference source
+  is PostgreSQL `REL_18_6`, including backend_status.c, pgstatfuncs.c, pgstat.c, varsup.c,
+  procarray.c, and xact.c. Local recovery and verification evidence is in
+  `/home/meszmate/.cache/subxact-finish/verification.md`.
+  Implementation commit `84c1a627` passes the full pg-engine build and test suite,
+  Clippy, and `pnpm test:pg --unit`. Clippy's 11 warnings are identical to the parent.
+  Parent and corrected builds both match PostgreSQL on all 561 units of test_setup and
+  stats, with identical result rows. The corrected isolation subset matches all 114
+  permutations and 1,199 steps across six specs, including 47 new permutations. The
+  parent's four existing specs match all 67 permutations and 688 steps. These subsets
+  do not change the generated full-suite counts. Full Docker recovery e2e remains
+  intentionally omitted; the parent recorded 12 passes and four compute-to-host WAL
+  HTTP timeouts. No performance improvement is claimed.
+
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
   (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round
