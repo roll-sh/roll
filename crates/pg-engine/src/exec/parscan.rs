@@ -136,6 +136,14 @@ struct Top {
     heap: std::collections::BinaryHeap<TopKey>,
 }
 
+/// Whether the shallow heap slots (including growth capacity) fit the budget.
+pub(super) fn topk_slots_fit(k: usize, budget: usize) -> bool {
+    k.checked_add(1)
+        .and_then(|n| n.checked_next_power_of_two())
+        .and_then(|n| n.max(4).checked_mul(size_of::<TopKey>()))
+        .is_some_and(|bytes| bytes <= budget)
+}
+
 struct TopKey(Value, super::TopK);
 
 impl PartialEq for TopKey {

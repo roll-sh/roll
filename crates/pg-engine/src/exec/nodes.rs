@@ -1930,7 +1930,10 @@ impl ProjectNode {
     fn compute_below(&mut self, ctx: &ExecCtx) -> Result<()> {
         self.tried = true;
         self.moves = project_moves(&self.exprs);
-        let numeric = self.topk.is_some() && self.exprs.iter().all(direct_numeric_col);
+        // Large bounds build worker heaps without discarding rows. Their shallow slots
+        // alone must fit work_mem before enabling numeric column computation.
+        let numeric = self.topk.is_some_and(|t| super::parscan::topk_slots_fit(t.k, super::workmem::work_mem(ctx) as usize))
+            && self.exprs.iter().all(direct_numeric_col);
         let mut kernels = Vec::new();
         let places: Vec<Option<usize>> = self
             .exprs

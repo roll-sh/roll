@@ -578,6 +578,25 @@ fn numeric_topk_matches_serial_inner() {
         }
     }
 
+    // A large LIMIT + OFFSET cannot prune within a worker chunk. Its shallow heap
+    // slots exceed this budget, so numeric projections keep the serial scan path.
+    s.query("SET work_mem = '64kB'").unwrap();
+    for q in [
+        "SELECT id, x FROM nt ORDER BY x DESC LIMIT 1 OFFSET 11999",
+        "SELECT id, x FROM nt ORDER BY x DESC, id LIMIT 1 OFFSET 11999",
+    ] {
+        s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+        let want = out(&mut s, q);
+        assert_eq!(want, ["[Int4(12000), Int4(1)]"], "{q}");
+        s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+        let started = pg_engine::exec::parscan::started();
+        let skipped = pg_engine::exec::parscan::topk_skipped();
+        assert_eq!(out(&mut s, q), want, "{q}");
+        assert_eq!(pg_engine::exec::parscan::started(), started, "large-bound fallback: {q}");
+        assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "large-bound fallback: {q}");
+    }
+    s.query("RESET work_mem").unwrap();
+
     // A non-column projection, secondary expression, or nonnumeric column disqualifies
     // the request. Errors on late, otherwise discardable rows must still be evaluated.
     for q in [
