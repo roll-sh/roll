@@ -2290,6 +2290,7 @@ impl Heap {
         if matches!(p.lps.get(off as usize - 1), Some(Lp::Normal(_) | Lp::Redirect(_))) {
             return false;
         }
+        p.set_all_visible(false, &mut self.visible_pages);
         while p.lps.len() < off as usize {
             p.lps.push(Lp::Dead);
         }
@@ -2373,6 +2374,27 @@ mod tests {
         let slow = h.pages.iter().filter(|p| p.all_visible).count() as u32;
         assert_eq!(h.all_visible_pages(), slow);
         assert_eq!(slow, expected);
+    }
+
+    #[test]
+    fn visible_count_pending_insert_clears_target_page() {
+        for committed in [true, false] {
+            let xids = Xids::new(10, |_| {});
+            let (mut h, _, _) = restored(100, vec![
+                (b"a".to_vec(), 100, Some((0, 1))),
+                (b"b".to_vec(), 100, Some((2, 1))),
+            ]);
+            h.seed_all_visible(u32::MAX);
+            assert_visible_count(&h, 3);
+            let xid = xids.assign();
+            assert!(!h.restore_pending(xid, b"c".to_vec(), Some((100, Some((1, 1))))));
+            assert_eq!(h.tid_of(b"c"), Some((1, 1)));
+            assert_visible_count(&h, 2);
+            assert!(!h.page_all_visible(1));
+            xids.finish(xid, committed);
+            h.vacuum(&Vis::new(&xids), 1, false, Skip::None, false);
+            assert_visible_count(&h, 3);
+        }
     }
 
     #[test]
