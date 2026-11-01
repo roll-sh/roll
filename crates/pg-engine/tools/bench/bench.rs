@@ -819,7 +819,22 @@ impl<'a> FromSql<'a> for WireDate {
 struct WireNumeric(Value);
 impl<'a> FromSql<'a> for WireNumeric {
     fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        // Use the existing exact base-10000 decoder, with no float conversion or tolerance.
+        if raw.len() < 8 { return Err("short OLTP numeric header".into()); }
+        let ndigits = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+        if raw.len() != 8 + ndigits * 2 { return Err("invalid OLTP numeric length".into()); }
+        let weight = i32::from(i16::from_be_bytes([raw[2], raw[3]]));
+        let sign = u16::from_be_bytes([raw[4], raw[5]]);
+        let dscale = i32::from(u16::from_be_bytes([raw[6], raw[7]]));
+        if matches!(sign, 0x0000 | 0x4000) {
+            for (i, digit) in raw[8..].chunks_exact(2).enumerate() {
+                let digit = u16::from_be_bytes([digit[0], digit[1]]);
+                // The decoder rounds to dscale; reject any nonzero decimal places it would discard.
+                let excess = 4 * (i as i32 - weight) - dscale;
+                if excess > 0 && digit % 10_u16.pow(excess.min(4) as u32) != 0 {
+                    return Err("OLTP numeric has nonzero digits beyond its scale".into());
+                }
+            }
+        }
         static CTX: std::sync::OnceLock<pg_engine::types::text::FormatCtx> = std::sync::OnceLock::new();
         Ok(Self(pg_engine::types::binary::decode(raw, &DataType::NUMERIC, CTX.get_or_init(Default::default))?))
     }
@@ -2198,5 +2213,47 @@ mod oltp_validation_tests {
         assert!(ReadCheck::One.check_inproc(&result(&[DataType::Int4], vec![vec![Value::Int4(2)]])).is_err());
         assert!(ReadCheck::One.check_inproc(&result(&[DataType::Int4], vec![vec![Value::Null]])).is_err());
         assert!(ReadCheck::One.check_inproc(&result(&[DataType::Int8], vec![vec![Value::Int8(1)]])).is_err());
+    }
+
+    #[test]
+    fn wire_numeric_checks_scale_and_exact_length_before_decoding() {
+        let encode = |weight: i16, sign: u16, dscale: u16, digits: &[u16]| {
+            [digits.len() as u16, weight as u16, sign, dscale].into_iter()
+                .chain(digits.iter().copied()).flat_map(u16::to_be_bytes).collect::<Vec<_>>()
+        };
+        for sign in [0x0000, 0x4000] {
+            // Preserve zero groups, implicit fractional zeros, and scaled integral values.
+            for (weight, dscale, digits, expected) in [
+                (0, 0, &[7919, 0, 0][..], 7919),
+                (0, 5, &[7919, 0, 0][..], 7919),
+                (1, 2, &[1, 0, 0][..], 10000),
+                (-2, 0, &[0, 0][..], 0),
+            ] {
+                let v = WireNumeric::from_sql(&Type::NUMERIC, &encode(weight, sign, dscale, digits)).unwrap();
+                let expected = if sign == 0x4000 { -expected } else { expected };
+                Expected::Sum(Some(expected)).check_native(1700, &v.0).unwrap();
+            }
+            for (weight, dscale, digits) in [
+                (0, 0, &[7919, 1000][..]), // 7919.1 previously rounded to the expected 7919.
+                (0, 1, &[7919, 100][..]),
+                (0, 2, &[7919, 10][..]),
+                (0, 3, &[7919, 1][..]),
+                (0, 4, &[7919, 0, 1][..]),
+                (-2, 5, &[100][..]),
+            ] {
+                assert!(WireNumeric::from_sql(&Type::NUMERIC, &encode(weight, sign, dscale, digits)).is_err());
+            }
+        }
+        let raw = encode(0, 0, 0, &[7919]);
+        assert!(WireNumeric::from_sql(&Type::NUMERIC, &raw[..raw.len() - 1]).is_err());
+        for extra in [&[0][..], &[0, 0][..]] {
+            let mut trailing = raw.clone();
+            trailing.extend_from_slice(extra);
+            assert!(WireNumeric::from_sql(&Type::NUMERIC, &trailing).is_err());
+        }
+        for sign in [0xC000, 0xD000, 0xF000] {
+            let v = WireNumeric::from_sql(&Type::NUMERIC, &encode(0, sign, 0, &[])).unwrap();
+            assert!(Expected::Sum(Some(0)).check_native(1700, &v.0).is_err());
+        }
     }
 }
