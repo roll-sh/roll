@@ -8,6 +8,24 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Round 24, agent 149 (stored scans): bytewise string predicates compare encoded values
+without row decoding when the kernel has direct column operands. Deterministic ICU
+equality is eligible. ICU ordering and nondeterministic comparisons retain their
+collation, and width-bearing varchar and bpchar casts use the general kernel.
+Deleted SST runs respect snapshots, range ends, and competing merge sources.
+Golden `a149_stored_scans` comes from PostgreSQL 18.6 and matches embedded, wire,
+and shuffled execution. The resumed base is `251924c1`. Verification artifacts are
+in `~/.cache/a149-resume/verification.md`.
+Fresh debug subset runs of base `251924c1` and code commit `99762589` have identical
+rows and hunks: 2,499/2,501 regression units across 16 files, 58/58 bloom units,
+and 7/7 isolation specs with 88/88 permutations and 554/554 steps. Both regression
+differences are Query Identifier lines added by the references' pg_stat_statements
+configuration, in select_distinct 5 and update 34. No new difference appears.
+Build, complete crate tests, Clippy, and `pnpm test:pg --unit` pass. The memory-load
+120 MB bound failed intermittently on both the unchanged base and this batch before
+the final full crate rerun passed. No performance improvement is claimed.
+The generated full-suite counts below remain unchanged.
+
 Round 24, agent 144 (resumed bpchar equality probes): fixed-width char(n) equality and
 ANY probes trim trailing spaces and pad to the key width. Overlong probes remain
 untruncated so nondeterministic collations can still compare them equal. bpchar ranges

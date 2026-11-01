@@ -4802,6 +4802,56 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     successfully. All three reused reference containers were stopped with data retained;
     the temporary psql helper was removed. The worktree has one `target/` directory.
 
+- **Stored scans** (round 24, agent 149):
+  - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons
+    use stored bytes when the operator and collation permit bytewise comparison.
+    Deterministic ICU equality is eligible. ICU ordering and nondeterministic
+    comparisons retain collation-aware evaluation. Bpchar comparisons trim trailing
+    ASCII spaces. Width-bearing varchar and bpchar casts retain the general kernel.
+  - Tombstone runs advance within an SST block only below the next merge source and
+    the scan's end, at the reader's snapshot. Hot-range construction refuses long
+    deleted runs. Heap visibility caches update one transaction slot at a time.
+    Btree scans skip dead entries' keys when the page bound permits it.
+  - Native index cleanup uses range deletions for dropped indexes and retired
+    relfilenodes. Rebuilds delete the active relfilenode's keys individually so their
+    records written outside the transaction remain visible.
+  - `stored_filters` covers casts, collations, NULLs, missing columns, projections,
+    TOAST, updates, deletes, own writes, rollback, and a pinned repeatable-read
+    snapshot through flush and compaction. Storage tests compare scalar and batched
+    scans with a version model across SSTs, memtables, ranges, and pinned snapshots.
+    Parallel scan tests include text comparisons after updates and deletes, plus
+    filtered vector scans.
+  - `stored_filters` disables parallel workers and inline partial aggregation to
+    check `StoredCmps`. Fixed-width casts use the general kernel. The parallel
+    statistics test subtracts setup scans introduced by its UPDATE and DELETE.
+    Earlier failed attempts remain in `~/.cache/a149-resume/`.
+  - Golden `a149_stored_scans` comes from PostgreSQL 18.6 and matches embedded,
+    wire, and shuffled runs. No performance measurement or speedup is claimed.
+  - The initial full crate run stopped at `memory_load::many_sessions_stay_bounded`.
+    The unchanged `251924c1` binary reproduces the 120 MB heap-bound failure.
+    Five alternating exact runs per side failed once each, with overlapping ranges.
+    The bound remains unchanged. `memory-analysis.md` and `memory-*-*.log` record
+    the runs. The final complete crate rerun passes both memory tests. This remains
+    an intermittent baseline test limitation.
+  - Verified code commit `99762589` has the same tree as the source checked below.
+    `cargo build -p pg-engine`, complete `cargo test -p pg-engine --no-fail-fast`
+    (389 passed, 18 ignored), `cargo clippy -p pg-engine`, and `pnpm test:pg --unit`
+    pass. Clippy reports the same ten warnings as the parent baseline.
+  - Fresh PostgreSQL 18.6 debug subset comparisons of `251924c1` and this batch
+    have identical rows and hunks: 2,499/2,501 regression units, 58/58 bloom units,
+    and 7/7 isolation specs, 88/88 permutations, 554/554 steps. The two regression
+    differences are reference-only Query Identifier lines in select_distinct 5 and
+    update 34. Both private references preload pg_stat_statements for bloom.
+    The regression subset covers test_setup, char, name, varchar, text, create_misc,
+    create_index, select, select_into, select_distinct, select_distinct_on,
+    btree_index, hash_index, update, delete, and indexing. TOAST coverage includes
+    all four toast_storage tests and the new PostgreSQL-recorded golden.
+  - Evidence and exact commands are in `~/.cache/a149-resume/verification.md`.
+    Subset results leave the generated full-suite counts unchanged.
+    The Docker e2e phase uses the parent's `3069ca91` baseline evidence instead
+    of a repeat: twelve tests pass and four recovery tests fail on compute-to-host
+    WAL HTTP timeouts. See `~/.cache/pg-engine-sol-resume/postgres-check.log`.
+
 ## Repository layout
 
 - `crates/pg-engine`: the engine.
