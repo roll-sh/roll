@@ -262,6 +262,7 @@ fn has_marks(p: &Plan) -> bool {
         | Plan::Context { input, .. }
         | Plan::With { body: input, .. } => has_marks(input),
         Plan::Join { left, right, .. } => has_marks(left) || has_marks(right),
+        Plan::Foreign(f) => f.outer.is_some() && f.scans.iter().any(|s| has_marks(s)),
         Plan::Append { inputs, inh: Some(_), .. } => inputs.iter().any(|i| has_marks(i)),
         _ => false,
     }
@@ -302,6 +303,21 @@ pub fn level_scans(p: &Plan) -> Vec<Vec<&ScanPlan>> {
                 }
                 if !members.is_empty() {
                     out.push(members);
+                }
+            }
+            // (A foreign join's marks are its bases' copies, in their order; a recheck runs
+            // its outer plan, whose scans take them.)
+            Plan::Foreign(f) => {
+                if let Some(o) = &f.outer {
+                    let mut inner = Vec::new();
+                    go(o, &mut inner);
+                    for s in &f.scans {
+                        if let Plan::Scan(b) = &**s
+                            && let Some(g) = inner.iter().find(|g| g.iter().any(|x| x.rti == b.rti))
+                        {
+                            out.push(g.clone());
+                        }
+                    }
                 }
             }
             _ => {}
@@ -595,8 +611,49 @@ fn key(p: &Plan) -> Option<Keyed> {
                 keys,
             )
         }
+        // A foreign join with an outer plan (a level locking local relations too): every
+        // base's whole row comes back as its mark's copy (ROW_MARK_COPY), placed by the
+        // wrapper; the outer plan returns them alike, for EvalPlanQual.
+        Plan::Foreign(f) if f.outer.is_some() => return key_foreign(f),
         _ => return None,
     })
+}
+
+#[inline(never)]
+fn key_foreign(f: &crate::sql::plan::ForeignRel) -> Option<Keyed> {
+    use crate::sql::plan::FDW_MARK_COL;
+    let (private, out) = f.private.0.with_copy_marks(f)?;
+    let (op, omap, okeys) = key(f.outer.as_deref()?)?;
+    let types = super::analyzejoins::col_types(&op);
+    let base = |k: usize| match f.scans.get(k).map(|s| &**s) {
+        Some(Plan::Scan(s)) => Some(s),
+        _ => None,
+    };
+    let mut keys = Vec::with_capacity(f.scans.len());
+    let mut exprs = Vec::with_capacity(out.len());
+    for (j, &g) in out.iter().enumerate() {
+        if let Some(k) = g.checked_sub(FDW_MARK_COL).filter(|&k| k < f.scans.len()) {
+            let s = base(k)?;
+            let ok = okeys.iter().find(|x| x.rti == s.rti.0)?;
+            exprs.push(Expr::Col(ok.col, DataType::Bytea));
+            keys.push(Key {
+                col: j,
+                tables: vec![s.table.clone()],
+                lock: s.mark,
+                rti: s.rti.0,
+                order: s.lock_order,
+            });
+        } else {
+            let i = omap[f.out.iter().position(|&x| x == g)?];
+            exprs.push(Expr::Col(i, types.get(i).cloned().unwrap_or(DataType::Unknown)));
+        }
+    }
+    let map = f.out.iter().map(|g| out.iter().position(|x| x == g).unwrap_or(0)).collect();
+    let mut fr = f.clone();
+    fr.private = crate::sql::plan::FdwPrivate(private);
+    fr.out = out;
+    fr.outer = Some(Arc::new(Plan::Project { input: Arc::new(op), exprs }));
+    Some((Plan::Foreign(Box::new(fr)), map, keys))
 }
 
 /// The lock of the first locked scan of the level under `p` (through its joins, appends and

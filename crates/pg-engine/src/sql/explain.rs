@@ -12154,7 +12154,15 @@ impl Builder<'_, '_> {
                     e => self.name(e, &names, &aggs).wrapped(),
                 })
                 .collect(),
-            None => f.out.iter().map(|&c| names.get(c).cloned().unwrap_or_else(|| Name::same("?"))).collect(),
+            None => f
+                .out
+                .iter()
+                .map(|&c| match c.checked_sub(super::plan::FDW_MARK_COL).filter(|&k| k < refs.len()) {
+                    // (A base's whole row, its row mark's copy.)
+                    Some(k) => Name::same(&format!("{}.*", refs[k])),
+                    None => names.get(c).cloned().unwrap_or_else(|| Name::same("?")),
+                })
+                .collect(),
         };
         n.fdw_junk = f
             .private
@@ -12180,6 +12188,25 @@ impl Builder<'_, '_> {
             n.fdw_junk.clear();
         }
         n.fdw_junk.extend(marks);
+        // (The outer plan EvalPlanQual rechecks with, its scans named as the join's.)
+        if let Some(o) = &f.outer {
+            let mut named = Vec::new();
+            let mut stack = vec![o];
+            while let Some(p) = stack.pop() {
+                if let Plan::Scan(s) = &**p
+                    && let Some(k) = f.scans.iter().position(|b| matches!(&**b, Plan::Scan(b) if b.rti == s.rti))
+                {
+                    named.push(addr(p));
+                    self.refnames.insert(addr(p), refs[k].clone());
+                }
+                stack.extend(plan_inputs(p));
+            }
+            let child = self.node(o);
+            n.children.push(child.node.child("Outer"));
+            for a in named {
+                self.refnames.remove(&a);
+            }
+        }
         Built::passthrough(n, out)
     }
 

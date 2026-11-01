@@ -35,6 +35,10 @@ pub struct Conns {
     pub xact_got_connection: bool,
     pub cursor_number: u32,
     pub prep_stmt_number: u32,
+    /// Connections scans of a declared cursor got when it was declared (BeginForeignScan
+    /// runs at DECLARE), by the scan's plan node address: its first FETCH uses them as
+    /// they are. Forgotten at the transaction's end.
+    pub begun: std::collections::HashMap<usize, u32>,
 }
 
 /// What a connection is for: its server, user mapping and the user it maps.
@@ -277,6 +281,21 @@ fn begin_remote_xact(e: &mut Entry, ctx: &ExecCtx) -> Result<()> {
     Ok(())
 }
 
+/// The connection of a scan starting (BeginForeignScan): the one its cursor got at DECLARE
+/// (`Conns::begun`, by the scan's plan node address `at`), else GetConnection's.
+pub fn scan_connection(ctx: &ExecCtx, at: usize, m: &Mapping) -> Result<u32> {
+    let got = ctx.sess.remote.borrow_mut().fdw.begun.remove(&at);
+    match got {
+        Some(k) if k == m.mapping.oid => Ok(k),
+        _ => get_connection(ctx, m, false),
+    }
+}
+
+/// Note the connection a declared cursor's scan got (`scan_connection` takes it).
+pub fn note_begun(ctx: &ExecCtx, at: usize, key: u32) {
+    ctx.sess.remote.borrow_mut().fdw.begun.insert(at, key);
+}
+
 /// GetConnection: the cached connection of mapping `m` (made if needed), in a remote
 /// transaction at the local nesting level. Returns its key (the user mapping's oid).
 pub fn get_connection(ctx: &ExecCtx, m: &Mapping, will_prep_stmt: bool) -> Result<u32> {
@@ -477,6 +496,7 @@ pub fn pre_commit(sess: &crate::session::state::SessionState) -> Result<()> {
     }
     st.xact_got_connection = false;
     st.cursor_number = 0;
+    st.begun.clear();
     Ok(())
 }
 
@@ -511,6 +531,7 @@ pub fn abort(sess: &crate::session::state::SessionState) {
     }
     st.xact_got_connection = false;
     st.cursor_number = 0;
+    st.begun.clear();
 }
 
 /// pgfdw_subxact_callback for the subtransaction at `level` ending (commit: RELEASE, else

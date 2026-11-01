@@ -30,6 +30,12 @@ pub trait ForeignRelOps: Send + Sync + 'static {
     fn mark_rows(&self, _fr: &ForeignRel) -> Vec<usize> {
         Vec::new()
     }
+    /// The scan returning every base relation's whole row as its row mark's copy
+    /// (`exec::scan::copy_key`), base k's in `out` column `plan::FDW_MARK_COL + k`: its
+    /// private part and `out` with them placed. None: it can't (no LockRows goes over it).
+    fn with_copy_marks(&self, _fr: &ForeignRel) -> Option<(std::sync::Arc<dyn ForeignRelOps>, Vec<usize>)> {
+        None
+    }
     /// The conditions checked locally on its rows (EXPLAIN's Filter), over the relation's
     /// row.
     fn filter(&self) -> Vec<crate::sql::expr::Expr> {
@@ -57,5 +63,12 @@ pub fn wrapper_of(cat: &Catalog, t: &Table) -> Option<Wrapper> {
 /// Run a Foreign Scan of a join or upper relation.
 #[inline(never)]
 pub fn open(fr: &ForeignRel, ctx: &ExecCtx) -> Result<BoxNode> {
+    // (In an EvalPlanQual recheck, a join with an outer plan runs it over the row marks'
+    // copies its scans return: RecheckForeignScan.)
+    if let Some(o) = &fr.outer
+        && ctx.epq.borrow().is_some()
+    {
+        return crate::exec::nodes::open(o, ctx);
+    }
     fr.private.0.open(fr, ctx)
 }

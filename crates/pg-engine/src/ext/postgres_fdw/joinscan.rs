@@ -27,6 +27,10 @@ pub struct JoinScan {
     /// one ROW there (deparseVar of a whole-row Var), its columns filled from it
     /// (`pushdown::whole_rows`).
     pub whole: Vec<(usize, usize)>,
+    /// Under a LockRows over a level locking local relations too: every base's whole row
+    /// as its row mark's copy (`exec::scan::copy_key`), as (position in `tlist` it goes
+    /// before, base), in base order; the node returns base k's as `FDW_MARK_COL + k`.
+    pub marks: Vec<(usize, usize)>,
 }
 
 impl JoinScan {
@@ -57,17 +61,26 @@ impl JoinScan {
         let q = Sql::new(&cat, fmt, &self.bases);
         let tlist: Vec<Expr> = self.tlist.iter().map(|&g| Expr::Col(g, self.col_type(g))).collect();
         let (lock, rows) = self.row_marks();
-        let whole = self.whole.iter().enumerate().map(|(n, &(at, k))| (at + n, self.whole_row_sql(k))).collect();
+        let whole = self.inserts().into_iter().map(|(at, k, _)| (at, self.whole_row_sql(k))).collect();
         let tail = Tail { order: self.order.clone(), limit: self.limit.clone(), lock, rows, whole, ..Default::default() };
         let sql = q.select(&self.info, Some(&tlist), &self.info.remote_conds, &tail);
         (sql, q.params.take())
+    }
+
+    /// The whole rows the remote SELECT list has besides `tlist`'s columns, in order: (their
+    /// position in the list, base, whether a row mark's copy).
+    fn inserts(&self) -> Vec<(usize, usize, bool)> {
+        let mut v: Vec<(usize, usize, bool)> =
+            self.whole.iter().map(|&(at, k)| (at, k, false)).chain(self.marks.iter().map(|&(at, k)| (at, k, true))).collect();
+        v.sort_by_key(|&(at, _, mark)| (at, mark));
+        v.into_iter().enumerate().map(|(n, (at, k, mark))| (at + n, k, mark)).collect()
     }
 
     /// The base relations whose whole rows the remote query returns (a locking level's
     /// ROW_MARK_COPY marks, every relation's): the locked ones in their clauses' order,
     /// then the others in range table order (preprocess_rowmarks).
     pub fn mark_bases(&self) -> Vec<usize> {
-        if !self.bases.iter().any(|b| b.scan.mark.is_some()) {
+        if !self.marks.is_empty() || !self.bases.iter().any(|b| b.scan.mark.is_some()) {
             return Vec::new();
         }
         let mut order: Vec<usize> = (0..self.bases.len()).collect();
@@ -96,7 +109,7 @@ impl JoinScan {
     /// (`CASE WHEN (rN.*)::text IS NOT NULL THEN ROW(...) END`).
     fn row_marks(&self) -> (String, Vec<String>) {
         let marked = self.mark_bases();
-        if marked.is_empty() {
+        if marked.is_empty() && self.marks.is_empty() {
             return Default::default();
         }
         let alias = |k: usize| format!("r{}", self.bases[k].scan.rtindex.0);
@@ -155,7 +168,7 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
         let (sql, params) = self.sql(ctx);
         let first = &self.bases[0].scan;
         let m = super::scan::mapping_for(&first.table, first.check_as, ctx)?;
-        let key = super::connection::get_connection(ctx, &m, false)?;
+        let key = super::connection::scan_connection(ctx, fr as *const ForeignRel as usize, &m)?;
         // (The row the remote columns go into: one slot per column fetched, then those
         // the node returns that aren't.)
         let mut slots: Vec<usize> = self.tlist.clone();
@@ -173,17 +186,19 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
         }
         let slot = |g: usize| slots.iter().position(|&x| x == g).unwrap_or(usize::MAX);
         let mut types: Vec<Field> = self.tlist.iter().map(|&g| Field::Col(slot(g), self.col_type(g), self.col_context(g))).collect();
-        for (n, &(at, k)) in self.whole.iter().enumerate() {
+        for (at, k, mark) in self.inserts() {
             let b = &self.bases[k];
             let t = &b.scan.table;
             let live: Vec<usize> = (0..t.columns.len()).filter(|&i| !t.columns[i].dropped).collect();
             let rname = b.scan.alias.clone().unwrap_or_else(|| t.name.clone());
-            let field = Field::Whole {
-                slots: live.iter().map(|&i| b.cols.get(i).copied().flatten().map_or(usize::MAX, slot)).collect(),
-                fields: live.iter().map(|&i| (t.columns[i].name.clone(), t.columns[i].ty.clone())).collect(),
-                what: format!("whole-row reference to foreign table \"{rname}\""),
+            let fields = live.iter().map(|&i| (t.columns[i].name.clone(), t.columns[i].ty.clone())).collect();
+            let what = format!("whole-row reference to foreign table \"{rname}\"");
+            let field = if mark {
+                Field::Mark { slot: slot(crate::sql::plan::FDW_MARK_COL + k), oid: t.oid, ncols: t.columns.len(), live, fields, what }
+            } else {
+                Field::Whole { slots: live.iter().map(|&i| b.cols.get(i).copied().flatten().map_or(usize::MAX, slot)).collect(), fields, what }
             };
-            types.insert((at + n).min(types.len()), field);
+            types.insert(at.min(types.len()), field);
         }
         Ok(Box::new(JoinNode {
             cur: super::scan::Cursor::new(key, self.info.opts.fetch_size, sql, params),
@@ -211,6 +226,35 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
         self.mark_bases()
     }
 
+    fn with_copy_marks(&self, fr: &ForeignRel) -> Option<(Arc<dyn crate::ext::fdw::ForeignRelOps>, Vec<usize>)> {
+        // (Not over a sort or LIMIT sent with it, nor relations deparsed as subqueries,
+        // whose rows have no `rN` alias here.)
+        if !self.order.is_empty() || self.limit.is_some() || !self.marks.is_empty() || self.info.lower_subquery != 0 {
+            return None;
+        }
+        // (Each base's after its last column, as its reltarget has its junk last; after the
+        // base before's.)
+        let base_of = |g: usize| self.bases.iter().position(|b| b.cols.contains(&Some(g)));
+        let place = |list: &[usize]| -> Vec<usize> {
+            let mut lo = 0;
+            (0..self.bases.len())
+                .map(|k| {
+                    lo = list.iter().rposition(|&g| base_of(g) == Some(k)).map_or(lo, |i| (i + 1).max(lo));
+                    lo
+                })
+                .collect()
+        };
+        let at = place(&fr.out);
+        let mut out = Vec::with_capacity(fr.out.len() + at.len());
+        for i in 0..=fr.out.len() {
+            out.extend((0..at.len()).filter(|&k| at[k] == i).map(|k| crate::sql::plan::FDW_MARK_COL + k));
+            out.extend(fr.out.get(i));
+        }
+        let mut js = self.clone();
+        js.marks = place(&self.tlist).into_iter().enumerate().map(|(k, p)| (p, k)).collect();
+        Some((Arc::new(js), out))
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -221,6 +265,9 @@ impl crate::ext::fdw::ForeignRelOps for JoinScan {
 enum Field {
     Col(usize, DataType, String),
     Whole { slots: Vec<usize>, fields: Vec<(String, DataType)>, what: String },
+    /// A base relation's whole row kept as its row mark's copy (`exec::scan::copy_key` of
+    /// table `oid`'s `ncols` columns, the `live` ones fetched): NULL for a null-extended row.
+    Mark { slot: usize, oid: u32, ncols: usize, live: Vec<usize>, fields: Vec<(String, DataType)>, what: String },
 }
 
 struct JoinNode {
@@ -241,6 +288,17 @@ impl Node for JoinNode {
                 match f {
                     Field::Col(g, ty, what) => {
                         row[*g] = crate::types::text::parse_value(&s, ty, ctx.fmt()).map_err(|e| e.context(what.clone()))?;
+                    }
+                    Field::Mark { slot, oid, ncols, live, fields, what } => {
+                        if let Value::Record(vals) = crate::types::text::parse_record(&s, fields, ctx.fmt()).map_err(|e| e.context(what.clone()))? {
+                            let mut cols = vec![Value::Null; *ncols];
+                            for (&i, v) in live.iter().zip(vals.iter()) {
+                                cols[i] = v.clone();
+                            }
+                            if let Some(x) = row.get_mut(*slot) {
+                                *x = Value::Bytea(Arc::from(crate::exec::scan::copy_key(*oid, &cols)));
+                            }
+                        }
                     }
                     Field::Whole { slots, fields, what } => {
                         let rec = crate::types::text::parse_record(&s, fields, ctx.fmt()).map_err(|e| e.context(what.clone()))?;

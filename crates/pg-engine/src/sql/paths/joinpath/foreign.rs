@@ -133,12 +133,15 @@ impl Search<'_, '_, '_> {
         }
         self.fdw_tried.push(set);
         // (A locking level with relations a remote query can't lock, local ones: the level's
-        // row marks go up from every relation to its LockRows, so that EvalPlanQual can
-        // recheck a row with the others' copies. A Foreign Scan of a join doesn't return
-        // them, nor has an outer plan to recheck with (fdw_outerpath): the join runs here.)
-        if self.leaves.iter().any(|l| l.scan.as_ref().is_some_and(|(s, _)| s.mark.is_some())) && !self.fdw_lock_level() {
-            return;
-        }
+        // row marks go up from every relation to its LockRows, the join's as its bases'
+        // whole rows, and EvalPlanQual rechecks a row with the local join path the
+        // relation already has (GetExistingLocalJoinPath); without one, no remote join.)
+        let epq = if self.leaves.iter().any(|l| l.scan.as_ref().is_some_and(|(s, _)| s.mark.is_some())) && !self.fdw_lock_level() {
+            let Some(p) = self.local_join_path(ri) else { return };
+            Some(p)
+        } else {
+            None
+        };
         let (oset, iset) = (self.rels[outer].set, self.rels[inner].set);
         let (Some(o), Some(i)) = (self.fdw_rel(oset), self.fdw_rel(iset)) else { return };
         let kind = match (jt, uniq) {
@@ -204,6 +207,10 @@ impl Search<'_, '_, '_> {
             pj::join_ok(&jin)
         };
         let Some(mut info) = info else { return };
+        // (A row-marked join returns its bases' whole rows by their `rN` aliases.)
+        if epq.is_some() && info.lower_subquery != 0 {
+            return;
+        }
         // (Selectivities and costs of the clause lists, by the planner's estimates.)
         let sel_of = |e: &Expr| -> f64 {
             order.iter().find(|&&c| self.clauses[c].expr.same_as(e)).map_or(1.0, |&c| self.clause_sel(&self.clauses[c], None))
@@ -237,7 +244,7 @@ impl Search<'_, '_, '_> {
         let info = SArc::new(info);
         self.fdw_rels.push((set, info.clone()));
         let jp = JP {
-            node: JNode::Foreign { info: info.clone() },
+            node: JNode::Foreign { info: info.clone(), epq },
             rows: info.rows,
             startup: info.startup,
             total: info.total,
@@ -536,7 +543,7 @@ impl Search<'_, '_, '_> {
         let jp = self.rels[ri].paths.iter().chain(&self.rels[ri].param).find(|p| matches!(p.node, JNode::Foreign { .. }));
         let info = self.fdw_rel(full)?;
         let est = jp.cloned().unwrap_or(JP {
-            node: JNode::Foreign { info: info.clone() },
+            node: JNode::Foreign { info: info.clone(), epq: None },
             rows: info.rows,
             startup: info.startup,
             total: info.total,
@@ -546,7 +553,11 @@ impl Search<'_, '_, '_> {
             req: 0,
             set: full,
         });
-        let (plan, out) = self.build_foreign(&info, &est);
+        let epq = match &est.node {
+            JNode::Foreign { epq, .. } => epq.clone(),
+            _ => None,
+        };
+        let (plan, out) = self.build_foreign(&info, &est, epq.as_deref());
         let exprs = layout
             .iter()
             .map(|&g| match out.iter().position(|&x| x == g) {
@@ -558,7 +569,7 @@ impl Search<'_, '_, '_> {
     }
 
     /// The plan of a foreign join path: a Foreign Scan returning the relation's reltarget.
-    pub(super) fn build_foreign(&self, info: &SArc<pj::RelInfo>, p: &JP) -> (Plan, Vec<usize>) {
+    pub(super) fn build_foreign(&self, info: &SArc<pj::RelInfo>, p: &JP, epq: Option<&JP>) -> (Plan, Vec<usize>) {
         // (Its base relations only, renumbered in leaf order.)
         let all = self.fdw_bases(0).unwrap_or_default();
         let keep: Vec<usize> = (0..all.len()).filter(|k| info.relids >> k & 1 == 1).collect();
@@ -579,14 +590,43 @@ impl Search<'_, '_, '_> {
             scans.push(Arc::new(Plan::Scan(Box::new(b.scan.clone()))));
             cols.push(b.cols.clone());
         }
-        let private = crate::ext::postgres_fdw::joinscan::JoinScan { info: info.clone(), bases, tlist, order: Vec::new(), limit: None, whole: Vec::new() };
+        let private = crate::ext::postgres_fdw::joinscan::JoinScan { info: info.clone(), bases, tlist, order: Vec::new(), limit: None, whole: Vec::new(), marks: Vec::new() };
         let fr = crate::sql::plan::ForeignRel {
             scans,
             cols,
             out: out.clone(),
             private: crate::sql::plan::FdwPrivate(SArc::new(private)),
             est: (p.rows, p.startup, p.total, p.width),
+            outer: epq.map(|e| Arc::new(self.epq_plan(e, &out))),
         };
         (Plan::Foreign(Box::new(fr)), out)
+    }
+
+    /// GetExistingLocalJoinPath: the join relation's first unparameterized local join path
+    /// (its list is in cost order), a pushed join on either side replaced by that join's
+    /// own local path.
+    fn local_join_path(&self, ri: usize) -> Option<Rc<JP>> {
+        let mut p = self.rels[ri].paths.iter().find(|p| p.req == 0 && matches!(p.node, JNode::Join { .. }))?.clone();
+        if let JNode::Join { outer, inner, .. } = &mut p.node {
+            for side in [outer, inner] {
+                if let JNode::Foreign { epq: Some(e), .. } = &side.node {
+                    *side = e.clone();
+                }
+            }
+        }
+        Some(Rc::new(p))
+    }
+
+    /// A foreign join's outer plan: its local path's plan returning the columns `out`.
+    fn epq_plan(&self, epq: &JP, out: &[usize]) -> Plan {
+        let (plan, layout) = self.build(epq);
+        let exprs = out
+            .iter()
+            .map(|&g| match layout.iter().position(|&x| x == g) {
+                Some(i) => Expr::Col(i, self.col_type(g)),
+                None => Expr::Const(Value::Null, self.col_type(g)),
+            })
+            .collect();
+        Plan::Project { input: Arc::new(plan), exprs }
     }
 }

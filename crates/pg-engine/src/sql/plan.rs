@@ -255,7 +255,15 @@ pub struct ForeignRel {
     pub private: FdwPrivate,
     /// The planner's estimates of the path (rows, startup and total cost, width).
     pub est: (f64, f64, f64, u32),
+    /// A join's local plan for EvalPlanQual rechecks (fdw_outerpath, from
+    /// GetExistingLocalJoinPath), in a level with row marks: it returns `out`, and a recheck
+    /// runs it over the row marks' copies instead of the remote query. EXPLAIN shows it.
+    pub outer: Option<Arc<Plan>>,
 }
+
+/// A column id of a Foreign Scan's `out` past the relation's own: base `k`'s whole row,
+/// returned as its row mark's copy (ROW_MARK_COPY under a LockRows).
+pub const FDW_MARK_COL: usize = 1 << 29;
 
 /// `ForeignRel::private`. Not part of its Debug text.
 #[derive(Clone)]

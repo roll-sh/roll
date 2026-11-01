@@ -332,6 +332,42 @@ fn make_row(n: &ScanNode, vals: Vec<Option<String>>, ctx: &ExecCtx) -> Result<Ro
     Ok(row)
 }
 
+/// A declared cursor's postgres_fdw scans begin (ExecutorStart at DECLARE runs
+/// BeginForeignScan, GetConnection): their connections are got now, a remote transaction
+/// begun at this nesting level, and kept for the scans' first FETCH
+/// (`connection::scan_connection`), so that a connection broken in between fails there
+/// as PostgreSQL's does, not as one got anew.
+pub fn begin_scans(p: &Arc<crate::sql::plan::Plan>, ctx: &ExecCtx) -> Result<()> {
+    use crate::sql::plan::Plan;
+    let first = |s: &ScanPlan| -> Result<Option<u32>> {
+        if s.table.foreign.is_none() || !is_postgres_fdw(&ctx.catalog(), &s.table) {
+            return Ok(None);
+        }
+        let m = mapping_for(&s.table, s.check_as, ctx)?;
+        connection::get_connection(ctx, &m, false).map(Some)
+    };
+    match &**p {
+        Plan::Scan(s) if s.current_of.is_none() && s.fdw.as_ref().is_none_or(|f| f.direct.is_none()) => {
+            if let Some(k) = first(s)? {
+                connection::note_begun(ctx, &**s as *const ScanPlan as usize, k);
+            }
+        }
+        Plan::Foreign(f) => {
+            if let Some(Plan::Scan(s)) = f.scans.first().map(|s| &**s)
+                && let Some(k) = first(s)?
+            {
+                connection::note_begun(ctx, &**f as *const crate::sql::plan::ForeignRel as usize, k);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    for c in crate::sql::explain::plan_inputs(p) {
+        begin_scans(c, ctx)?;
+    }
+    Ok(())
+}
+
 /// Open a foreign scan (BeginForeignScan + create_cursor).
 pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNode> {
     if s.current_of.is_some() {
@@ -343,7 +379,7 @@ pub fn open(s: &ScanPlan, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<BoxNod
     let cat = ctx.catalog();
     let spec = spec(s, need, &cat, ctx.fmt());
     let m = mapping_for(&s.table, s.check_as, ctx)?;
-    let key = connection::get_connection(ctx, &m, false)?;
+    let key = connection::scan_connection(ctx, s as *const ScanPlan as usize, &m)?;
     Ok(Box::new(ScanNode {
         table: s.table.clone(),
         cur: Cursor::new(key, fetch_size(&cat, &s.table), spec.sql, spec.params),

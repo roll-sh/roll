@@ -253,8 +253,9 @@ enum JNode {
         /// key is one then, and `cols` all pass through (semi_rhs_exprs that aren't Vars).
         exprs: Vec<Expr>,
     },
-    /// A Foreign Scan of a join its wrapper runs remotely.
-    Foreign { info: std::sync::Arc<crate::ext::postgres_fdw::join::RelInfo> },
+    /// A Foreign Scan of a join its wrapper runs remotely; in a level with row marks, the
+    /// local join path EvalPlanQual rechecks with (fdw_outerpath).
+    Foreign { info: std::sync::Arc<crate::ext::postgres_fdw::join::RelInfo>, epq: Option<Rc<JP>> },
     Join {
         method: JoinMethod,
         jt: Jt,
@@ -6548,7 +6549,7 @@ impl Search<'_, '_, '_> {
     fn build_path_node(&self, p: &JP) -> (Plan, Vec<usize>) {
         match &p.node {
             JNode::Pre { plan, layout } => ((**plan).clone(), layout.clone()),
-            JNode::Foreign { info } => self.build_foreign(info, p),
+            JNode::Foreign { info, epq } => self.build_foreign(info, p, epq.as_deref()),
             JNode::Opaque { leaf, merged, sub, .. } => {
                 let l = &self.leaves[*leaf];
                 let mut plan = match sub {
