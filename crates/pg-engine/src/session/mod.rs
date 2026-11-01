@@ -2761,12 +2761,13 @@ impl Session {
             return r;
         }
         let stmt = pt.stmt.clone();
+        let params = pt.params.clone();
         // A SELECT runs only as far as the row count (PortalRunSelect); its executor waits
         // in the portal for the next Execute.
         if max_rows > 0 && matches!(stmt.stmt.as_ref().and_then(inner), Some(NodeEnum::SelectStmt(_))) {
             self.fetch_limit = max_rows;
         }
-        let out = self.execute_with(&stmt, &pt.params, max_rows);
+        let out = self.execute_with(&stmt, &params, max_rows);
         self.fetch_limit = 0;
         pt.lazy = self.suspended.take();
         let out = match out {
