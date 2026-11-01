@@ -1984,6 +1984,9 @@ struct Planner<'c, 'a> {
     group_dirs: std::cell::RefCell<Option<GroupDirs>>,
     /// Planning a join group under a grouping that may go partitionwise.
     pw_agg_join: std::cell::Cell<bool>,
+    /// Planning a join group under a grouping a LIMIT reads (tuple_fraction > 0: the join
+    /// relations consider_startup, the grouping may read their cheapest-to-start sorted path).
+    group_limit: std::cell::Cell<bool>,
     /// How many join groups' partitionwise retries (`joinpath.rs`) enclose the planning: bounded.
     pw_retry: std::cell::Cell<u8>,
     /// Planning a join group's alternative with some of its items joined partitionwise
@@ -2043,6 +2046,7 @@ impl<'c, 'a> Planner<'c, 'a> {
             post_cost: Default::default(),
             group_dirs: Default::default(),
             pw_agg_join: Default::default(),
+            group_limit: Default::default(),
             pw_retry: Default::default(),
             pw_alt: Default::default(),
             join_nested: Default::default(),
@@ -5196,7 +5200,9 @@ impl Planner<'_, '_> {
                     .get_raw("enable_partitionwise_aggregate")
                     .is_some_and(|v| v == "on" || v == "true");
             self.pw_agg_join.set(pw);
+            self.group_limit.set(lim.is_some());
             let done = self.grouped_join(p, needed, &dirs);
+            self.group_limit.set(false);
             self.pw_agg_join.set(false);
             if done {
                 return;

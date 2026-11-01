@@ -7034,11 +7034,30 @@ impl Builder<'_, '_> {
                 let mut n = ExNode::new("ProjectSet");
                 // create_set_projection_path: the most rows a call gives per input row
                 // (its support function's, else prorows); cpu_tuple_cost and the target
-                // list's cost per input row, half a cpu_tuple_cost per added row.
+                // list's cost per input row, half a cpu_tuple_cost per added row. (A
+                // CREATE FUNCTION function's call: its ROWS and COST.)
+                let cat = self.ctx.catalog();
+                let user = |s: &crate::sql::plan::SrfCall| cat.functions.get(&s.func.oid).filter(|f| f.returns_set);
                 let per_row = srfs
                     .iter()
-                    .map(|s| costs::function_rows(s.func.name, &s.args, s.func.srf.is_some()))
+                    .map(|s| match user(s) {
+                        Some(f) => f.prorows() as f64,
+                        None => costs::function_rows(s.func.name, &s.args, s.func.srf.is_some()),
+                    })
                     .fold(1.0f64, f64::max);
+                // (Each call's own cost, its arguments' and a CREATE FUNCTION function's
+                // procost: the target list reads the calls' values.)
+                let user_cost: f64 = srfs
+                    .iter()
+                    .map(|s| {
+                        let call = costs::qual_cost(&Expr::Call(s.func.clone(), s.args.clone(), s.ty.clone()));
+                        let own = costs::qual_cost(&Expr::Call(s.func.clone(), Vec::new(), s.ty.clone()));
+                        match user(s) {
+                            Some(f) => call - own + f.procost() as f64 * costs::CPU_OPERATOR_COST,
+                            None => call,
+                        }
+                    })
+                    .sum();
                 let calls: Vec<Expr> = exprs
                     .iter()
                     .map(|e| {
@@ -7055,7 +7074,7 @@ impl Builder<'_, '_> {
                             .unwrap_or_else(|_| e.clone())
                     })
                     .collect();
-                let per_tuple: f64 = calls.iter().map(costs::qual_cost).sum();
+                let per_tuple: f64 = calls.iter().map(costs::qual_cost).sum::<f64>() + user_cost;
                 let in_rows = c.node.rows;
                 n.rows = costs::clamp_rows(in_rows * per_row);
                 n.startup_cost = c.node.startup_cost;
@@ -13280,7 +13299,7 @@ impl Builder<'_, '_> {
         self.agg_input = saved_input;
         // (The join group's tree sorted on some group keys, `JoinMeta::ord_alt`: an input
         // of the sorted grouping too.)
-        let mut ord_in = if sets.is_none() && !groups.is_empty() { self.ord_alt_node(input, groups, aggs, &c) } else { None };
+        let mut ord_in = if sets.is_none() && !groups.is_empty() { self.ord_alt_nodes(input, groups, aggs, &c) } else { Vec::new() };
         // (A projection computing a key: its target list is the grouping's input target,
         // the keys first in the level's target list's order, make_group_input_target.)
         if self.o.verbose
@@ -13341,7 +13360,7 @@ impl Builder<'_, '_> {
             .sum();
         if gexpr > 0.0 {
             c.node.total_cost += c.node.rows * gexpr;
-            if let Some(a) = &mut ord_in {
+            for a in &mut ord_in {
                 a.total_cost += a.rows * gexpr;
             }
             for pi in part_in.iter_mut().map(|b| &mut **b).chain(part_others.iter_mut()) {
@@ -14338,7 +14357,7 @@ impl Builder<'_, '_> {
             };
             let mut orders: Vec<Vec<(usize, String)>> = vec![base.clone()];
             // The input's order, as far as group keys go (the sorted tree's too).
-            for input_node in std::iter::once(&c.node).chain(ord_in.as_ref()) {
+            for input_node in std::iter::once(&c.node).chain(ord_in.iter()) {
             let mut pre: Vec<(usize, String)> = Vec::new();
             for (oi, o) in input_node.order.iter().enumerate() {
                 let eqs = input_node.order_eq.get(oi).cloned().unwrap_or_default();

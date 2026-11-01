@@ -7335,6 +7335,7 @@ impl Search<'_, '_, '_> {
                         par_alt: Default::default(),
                         par_alt_cost: Default::default(),
                         ord_alt: Default::default(),
+                        ord_alt_start: Default::default(),
                         semi_carried: if kind == JoinKind::Semi {
                             let mut w = 0;
                             for (l, leaf) in self.leaves.iter().enumerate() {
@@ -8936,7 +8937,7 @@ impl Planner<'_, '_> {
             ec: (0..gw).collect(),
             kind,
             rels: Vec::new(),
-            startup: order.is_some_and(|o| matches!(o.limit, Some((c, _)) if c != 0.0)),
+            startup: order.is_some_and(|o| matches!(o.limit, Some((c, _)) if c != 0.0) || (o.hint && self.group_limit.get())),
             order: order.map(|o| Order {
                 keys: o.keys.clone(),
                 complete: o.complete,
@@ -10031,7 +10032,9 @@ impl Planner<'_, '_> {
                 meta.par_alt = crate::sql::plan::FdwAlt(Some(Arc::new(alt)));
                 meta.par_alt_cost = crate::sql::plan::AltCost(cost);
             }
-            meta.ord_alt = crate::sql::plan::FdwAlt(s.ord_alt(&best, &layout).map(Arc::new));
+            let (total, start) = s.ord_alts(&best, &layout);
+            meta.ord_alt = crate::sql::plan::FdwAlt(total.map(Arc::new));
+            meta.ord_alt_start = crate::sql::plan::FdwAlt(start.map(Arc::new));
         }
         // The columns of equalities turned into constants stay needed up to the join.
         let kept: Vec<usize> = match &*p {

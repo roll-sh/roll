@@ -385,32 +385,39 @@ impl Search<'_, '_, '_> {
 
     /// Under a grouping (the `Order` hint): the top relation's cheapest path whose leading
     /// keys are group keys (pathkeys_useful_for_grouping; the rest sorted incrementally, as
-    /// add_paths_to_grouping_rel's sorts), as a plan returning the serial plan's row, when
-    /// it joins otherwise than `best` (`JoinMeta::ord_alt`).
-    pub(super) fn ord_alt(&self, best: &JP, layout: &[usize]) -> Option<Plan> {
-        let o = self.order.as_ref().filter(|o| o.hint)?;
+    /// add_paths_to_grouping_rel's sorts), and under a LIMIT (consider_startup) the cheapest
+    /// such to start, as plans returning the serial plan's row, each when it joins otherwise
+    /// than `best` (`JoinMeta::ord_alt`, `ord_alt_start`).
+    pub(super) fn ord_alts(&self, best: &JP, layout: &[usize]) -> (Option<Plan>, Option<Plan>) {
+        let Some(o) = self.order.as_ref().filter(|o| o.hint) else { return (None, None) };
         let want = self.query_keys();
-        let rel = self.rels.iter().find(|r| r.set == best.set)?;
-        let mut pick: Option<(&JP, f64)> = None;
+        let Some(rel) = self.rels.iter().find(|r| r.set == best.set) else { return (None, None) };
+        // (path, startup, total), sorted as the grouping needs.
+        let mut total: Option<(&JP, f64, f64)> = None;
+        let mut start: Option<(&JP, f64, f64)> = None;
         for p in rel.paths.iter().filter(|p| p.req == 0) {
             let pre = p.keys.iter().take_while(|k| want.contains(k)).count();
             if pre == 0 || (pre < want.len() && !self.g.incremental_sort) {
                 continue;
             }
-            let total = if pre >= want.len() {
-                p.total
+            let (st, tot) = if pre >= want.len() {
+                (p.startup, p.total)
             } else {
-                costs::incremental_sort_cost(p.startup, p.total, p.rows, o.width, p.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT), None).1
+                costs::incremental_sort_cost(p.startup, p.total, p.rows, o.width, p.rows.clamp(1.0, costs::DEFAULT_NUM_DISTINCT), None)
             };
-            if pick.is_none_or(|(_, t)| total < t) {
-                pick = Some((p, total));
+            if total.is_none_or(|(_, _, t)| tot < t) {
+                total = Some((p, st, tot));
+            }
+            if self.startup && start.is_none_or(|(_, s, _)| st < s) {
+                start = Some((p, st, tot));
             }
         }
-        let (p, _) = pick?;
-        if same_tree(p, best) {
-            return None;
-        }
-        self.alt_plan(p, layout)
+        let alt = |x: Option<(&JP, f64, f64)>| x.filter(|(p, ..)| !same_tree(p, best)).and_then(|(p, ..)| self.alt_plan(p, layout));
+        // (The one cheapest to start, when it starts fuzzily sooner than that: add_path keeps it.)
+        let start = start.filter(|(p, s, _)| {
+            total.is_none_or(|(q, ts, _)| !same_tree(p, q) && *s * 1.01 < ts)
+        });
+        (alt(total), alt(start))
     }
 }
 

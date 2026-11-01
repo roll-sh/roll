@@ -424,6 +424,26 @@ opclasses (relpages 11 / 11 / 11 against 9 / 13 / 17) makes a KNN pick another i
 (deep_view_on_2mb_thread) fail on the base already (debug builds; a stored view's parse
 over libpg_query's depth limit).
 
+Second batch (golden `a140_planner_batch2`): **a LIMIT straight over a grouping of a join**
+reads the join's cheapest-to-start sorted path (the join relations consider_startup under the
+LIMIT, add_path keeps the path that starts fuzzily sooner; `JoinMeta::ord_alt_start`):
+`GROUP BY c_custkey, c_name LIMIT 8` over customer x orders is a GroupAggregate over a nested
+loop of the pkey's Index Scan, as PostgreSQL's (agent 143's reproducer). **A set-returning
+call in the select list** costs its own evaluation per input row (cost_qual_eval of the
+target list; built-in calls were free), and a CREATE FUNCTION function's returns its ROWS
+per call at its COST (it was 1 row at no cost: agent 120's server-log item).
+Measured as the first batch: a full run (debug, `a140-rref`) against `results.tsv`, **51,148 /
+51,150, no unit changed**; difftest smoke and the 150-seed pair against the first batch
+(`aa389ace`), identical records (543); isolation as the first batch; every TPC-H result hash
+equal; plancmp 77 / 89 and 81 / 89 serial as the first batch.
+
+Resumed on 2026-11-01 over `29e882c9`: the build, full crate tests, and Clippy pass.
+Re-recording `a140_planner_batch2` from PostgreSQL 18.6 produces identical output.
+The full-suite and differential counts above describe the saved pre-pause runs.
+Combined upstream regression verification follows integration of the resumed batches.
+Logs: `~/.cache/pg-engine-sol-resume/planner-*.log`.
+The executor's group order under a LIMIT remains a separate open item in HANDOFF.
+
 ## Round 23, agent 116 (planner round 7, first batch: plan shapes of ORM and TPC-DS-style queries)
 
 Measured by a full run of the batch (debug build, private reference `a116-rref`) against the

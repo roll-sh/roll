@@ -1235,22 +1235,26 @@ impl Builder<'_, '_> {
 }
 
 impl Builder<'_, '_> {
-    /// A grouping's input along its join group's tree sorted on some of the group keys
-    /// (`JoinMeta::ord_alt`, through the projections over the join), built as
-    /// `main` is: add_paths_to_grouping_rel reads the relation's other paths besides the
+    /// A grouping's inputs along its join group's trees sorted on some of the group keys
+    /// (`JoinMeta::ord_alt`, `ord_alt_start`, through the projections over the join), built
+    /// as `main` is: add_paths_to_grouping_rel reads the relation's other paths besides the
     /// cheapest. Not under ANALYZE (`analyzed_plan` has swapped in the tree shown).
-    pub(super) fn ord_alt_node(&mut self, input: &Arc<Plan>, groups: &[Expr], aggs: &[AggCall], main: &Built) -> Option<ExNode> {
-        fn swapped(p: &Plan) -> Option<Plan> {
+    pub(super) fn ord_alt_nodes(&mut self, input: &Arc<Plan>, groups: &[Expr], aggs: &[AggCall], main: &Built) -> Vec<ExNode> {
+        if self.o.analyze {
+            return Vec::new();
+        }
+        (0..2).filter_map(|i| self.ord_alt_node(input, groups, aggs, main, i)).collect()
+    }
+
+    fn ord_alt_node(&mut self, input: &Arc<Plan>, groups: &[Expr], aggs: &[AggCall], main: &Built, which: usize) -> Option<ExNode> {
+        fn swapped(p: &Plan, which: usize) -> Option<Plan> {
             match p {
-                Plan::Project { input, exprs } => Some(Plan::Project { input: Arc::new(swapped(input)?), exprs: exprs.clone() }),
-                Plan::Join { meta, .. } => meta.ord_alt.0.as_ref().map(|a| (**a).clone()),
+                Plan::Project { input, exprs } => Some(Plan::Project { input: Arc::new(swapped(input, which)?), exprs: exprs.clone() }),
+                Plan::Join { meta, .. } => [&meta.ord_alt, &meta.ord_alt_start][which].0.as_ref().map(|a| (**a).clone()),
                 _ => None,
             }
         }
-        if self.o.analyze {
-            return None;
-        }
-        let alt = Arc::new(swapped(input)?);
+        let alt = Arc::new(swapped(input, which)?);
         self.alt_refnames(input, &alt);
         // (The columns its nodes return: what the grouping reads of it, as of `input`.)
         let over = Plan::Agg { input: alt.clone(), groups: groups.to_vec(), sets: None, aggs: aggs.to_vec() };
@@ -1301,7 +1305,7 @@ pub fn analyzed_plan(
     params: &[crate::types::Value],
 ) -> Option<Arc<Plan>> {
     fn has_alt(p: &Plan) -> bool {
-        matches!(p, Plan::Join { meta, .. } if meta.par_alt.0.is_some() || meta.ord_alt.0.is_some())
+        matches!(p, Plan::Join { meta, .. } if meta.par_alt.0.is_some() || meta.ord_alt.0.is_some() || meta.ord_alt_start.0.is_some())
             || plan_inputs(p).into_iter().any(|c| has_alt(c))
     }
     fn keys(p: &Plan, out: &mut Vec<usize>) {
@@ -1312,7 +1316,7 @@ pub fn analyzed_plan(
     }
     fn swap(p: &mut Plan, shown: &std::collections::HashSet<usize>) -> bool {
         if let Plan::Join { meta, .. } = p {
-            for alt in [meta.par_alt.0.clone(), meta.ord_alt.0.clone()].into_iter().flatten() {
+            for alt in [meta.par_alt.0.clone(), meta.ord_alt.0.clone(), meta.ord_alt_start.0.clone()].into_iter().flatten() {
                 let mut ks = Vec::new();
                 keys(&alt, &mut ks);
                 if ks.iter().any(|k| shown.contains(k)) {

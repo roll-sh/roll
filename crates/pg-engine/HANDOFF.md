@@ -5482,9 +5482,9 @@ them all with the "Fixed in round N" sections describing what was already tried.
      PostgreSQL's insertion build makes 1,011 pages where the model has 610 (scans cost
      0.15..12.90 for 0.28..33.03). An insertion-build model (gistchoose's penalty, the
      picksplit already ported) is the fix; gistchoose breaks penalty ties at random.
-   - Agent 120 (server log): a SQL set-returning function in the select list is estimated at
-     1 row where PostgreSQL estimates its prorows (1,000), the ProjectSet multiplying its
-     input's rows by it.
+   - Agent 120 (server log), a SQL set-returning function in the select list estimated at 1
+     row: done in round 24 (agent 140): a CREATE FUNCTION function's ROWS and COST, and every
+     call's own cost (built-in ones too), in the ProjectSet's estimate.
    - Planning CPU of job-queue fetches (agent 114: Oban 2.3 ms, graphile-worker 1.8 ms to
      plan, PostgreSQL 0.16 / 0.14; this round measured 1.7 ms warm against 0.26). A profile
      (frame pointers, `perf` from a privileged helper) of the Oban fetch's EXPLAIN: binding
@@ -5532,10 +5532,12 @@ them all with the "Fixed in round N" sections describing what was already tried.
    - CTE / UNION ALL Subquery Scans (`cte_window`, `union_channels`), ROLLUP's and EXCEPT's
      strategy choices (`rollup_nation_year`, `except_parts`), a window over a grouped CTE
      (`top_customers_by_year`): `plancmp.py --show <name>` prints both plans.
-   - Round 24 (agent 140) found and left: under a LIMIT straight over a grouping of a join,
-     PostgreSQL's join relations consider_startup and the grouping reads the cheapest-to-start
-     sorted path (`GROUP BY c_custkey, c_name LIMIT 8` over customer x orders: a GroupAggregate
-     over a nested loop of the pkey's Index Scan). VACUUM ANALYZE leaves an index's pg_class
+   - Round 24 (agent 140) found and left (a LIMIT straight over a grouping of a join reading
+     the cheapest-to-start sorted path is done in its second batch, `JoinMeta::ord_alt_start`,
+     in EXPLAIN; the executor still orders such a grouping's rows by the Agg's own estimate,
+     `pghash::agg_estimate`, which doesn't see the LIMIT's choice: hash order where
+     PostgreSQL's rows come sorted, executor's / agent 143):
+     VACUUM ANALYZE leaves an index's pg_class
      row at relpages 1 / reltuples 0 (PostgreSQL: 19 / 6000; storage / statistics). The GiST
      size model of btree_gist's opclasses (no sort support: an insertion build) gives 11 / 11 / 11 pages where PostgreSQL has 9 / 13 / 17
      (agent 139's `ORDER BY a <-> 50000 LIMIT 5` picks the (part, a) index; agent 126's item,
@@ -5553,7 +5555,28 @@ them all with the "Fixed in round N" sections describing what was already tried.
      bpchar for `=` / `= ANY` only (not ranges: bpcharcmp trims first), and in
      `scan::ranges_from` probe a char(n) key with pad(trim_end(v), n) from the column's typmod,
      no range when it is longer than n; a golden with `c = 'AB'`, `c = 'AB   '`, an over-long
-     probe and `= ANY`.
+     probe and `= ANY` (agent 144 owns it now). Agent 138 (difftest round 7 open list,
+     tests/difftest/STATUS.md): FULL JOIN conditions where the engine raises or skips "FULL JOIN
+     is only supported with merge-joinable or hash-joinable join conditions" otherwise than
+     PostgreSQL (which clauses are mergeable / hashable once the join is planned), and
+     `width_bucket('NaN', ...)`: the binder folds `NULL + s.c` before the sub-select is pulled
+     up, PostgreSQL substitutes first, then folds (smoke s12 #52, seed 1926 #43); planner's. A
+     regress subset without create_index (test_setup, window, memoize) differs in 4 units the
+     full suite never runs (the tables lack their indexes, so the plans are Sort + Merge Join
+     and Materialize): memoize 3 and 23, window 394 and 395, on 7c1f72b3 with and without
+     round 24's commits. A merge join doesn't stop reading its outer Sort once the inner side
+     is done (PostgreSQL's Sort shows 21 rows, the engine's 10,000; agent 143), and Sort /
+     Materialize memory figures differ (430kB vs 385kB, 60kB vs 54kB; agent 150). Compare
+     subsets only with the files their tables' indexes come from. Agent 144 (index
+     access): a domain over char(n) compared with bpchar shows `d = 'd7'::bpchar` where
+     PostgreSQL shows `(d)::bpchar = 'd7'::bpchar` (the domain relabel agent 118 found for
+     integer, in Index Cond and Filter alike), and with a btree and a hash index on a char(5)
+     column `c = ANY ('{1,2}')` takes the btree where PostgreSQL takes a Bitmap Index Scan on
+     the hash index (int keys agree: bpchar costing or the hash opclass's matching). Agent 128:
+     at 10,000 tables `pg_class WHERE relkind = 'r'` is estimated at 201 rows where PostgreSQL
+     estimates 10,075 (catalog statistics: pg_class's reltuples / relkind MCVs, or a default
+     selectivity on catalog columns), so pgwatch's table_stats_approx takes a plan that runs
+     past its 30 s timeout.
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't

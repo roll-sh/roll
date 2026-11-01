@@ -491,6 +491,8 @@ pub struct JoinMeta {
     /// path's tree, over this join's row. EXPLAIN's grouping reads it besides this one
     /// (add_paths_to_grouping_rel); the executor runs this tree.
     pub ord_alt: FdwAlt,
+    /// Under a LIMIT (consider_startup): the cheapest-to-start such path, when another tree.
+    pub ord_alt_start: FdwAlt,
 }
 
 /// `JoinMeta::fdw_alt`. Not part of its Debug text.
