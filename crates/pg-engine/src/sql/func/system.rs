@@ -3667,7 +3667,7 @@ pub(super) fn pg_stat_get_progress_info(a: &[Value], c: &FnCtx) -> Result<super:
         _ => return Ok(Box::new(std::iter::empty())),
     };
     let sess = c.exec.sess;
-    if kind.eq_ignore_ascii_case("VACUUM") || kind.eq_ignore_ascii_case("ANALYZE") {
+    if ["VACUUM", "ANALYZE", "CREATE INDEX"].iter().any(|k| kind.eq_ignore_ascii_case(k)) {
         return Ok(Box::new(command_progress(&kind, c).into_iter().map(Ok)));
     }
     let Some(p) = sess.copy_progress.borrow().clone().filter(|_| kind.eq_ignore_ascii_case("COPY"))
@@ -3691,7 +3691,7 @@ pub(super) fn pg_stat_get_progress_info(a: &[Value], c: &FnCtx) -> Result<super:
     Ok(Box::new(std::iter::once(Ok(row))))
 }
 
-/// pg_stat_get_progress_info('VACUUM' / 'ANALYZE'): every backend running that command
+/// pg_stat_get_progress_info('VACUUM' / 'ANALYZE' / 'CREATE INDEX'): every backend running that command
 /// (an autovacuum worker's too); relid and the parameters only where the caller may read
 /// the backend's statistics (HAS_PGSTAT_PERMISSIONS), null otherwise.
 fn command_progress(kind: &str, c: &FnCtx) -> Vec<Vec<Value>> {

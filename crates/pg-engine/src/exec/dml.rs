@@ -2829,7 +2829,7 @@ fn delete_row_with(
     ctx.txn.borrow_mut().row_modified(dkey);
     super::sizing::deleted(t, indexes, dkey, old, ctx)?;
     super::pgstat::count_delete(ctx, t.oid);
-    super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut())?;
+    super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut(), defer)?;
     crate::repl::log::delete(t, old, ctx)?;
     delete_index_entries(t, indexes, old, dkey, defer, ctx)
 }
@@ -3037,7 +3037,7 @@ pub fn update_row_rls(
     let tid = upd.map(|u| u.0);
     super::pgstat::count_update(ctx, t.oid, upd.is_some_and(|u| u.1), false);
     if new_key != dkey {
-        super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut())?;
+        super::toast::delete_row(dkey.to_vec(), Some(old), &mut ctx.txn.borrow_mut(), false)?;
     }
     for (i, bix) in rules.indexes.iter().enumerate() {
         if bix.index.id == 0 || !changed[i] {
@@ -3667,6 +3667,15 @@ impl InsertNode {
             && model_deferrable(&plan, ctx)
             && !ctx.txn.borrow().sink_open())
         .then_some(false);
+        // Such a COPY into a table this transaction emptied (TRUNCATE, then COPY, as pgbench
+        // -i and COPY FREEZE do) measures its rows as they go in: VACUUM finds them as it
+        // left them without reading them (`txn::unchanged`).
+        if sink.is_some() && rules.triggers.is_empty() && ctx.txn.borrow().table_emptied(rules.table.oid)? {
+            let t = &rules.table;
+            let types = t.columns.iter().map(|c| c.ty.clone()).collect();
+            let virt = t.columns.iter().map(|c| c.virtual_gen).collect();
+            ctx.txn.borrow_mut().start_load(t.oid, types, virt);
+        }
         Ok(InsertNode {
             plan,
             source,
@@ -4146,6 +4155,7 @@ impl Node for InsertNode {
                 if let Some(l) = self.copy_load.take() {
                     l.finish(ctx);
                 }
+                ctx.txn.borrow_mut().finish_load();
                 check_statement_rechecks(ctx)?;
                 let rules = &self.plan.rules;
                 // AFTER STATEMENT: UPDATE (ON CONFLICT) before INSERT, as ExecEndPlan fires them.
@@ -5259,7 +5269,9 @@ impl Node for DeleteNode {
                 continue;
             }
             let before = trigger::any(triggers, true, true, tt::DELETE, ctx);
-            match self_modified(&dkey, ctx) {
+            // (A deferring DELETE runs nothing that writes while it runs, and reads each row
+            // once: no row it meets was written by it or by a later command.)
+            match if self.defer_entries { SelfModified::No } else { self_modified(&dkey, ctx) } {
                 SelfModified::No => {}
                 SelfModified::ByThis => continue,
                 // (Found locking the row for its BEFORE triggers: GetTupleForTrigger's.)
@@ -5267,7 +5279,8 @@ impl Node for DeleteNode {
                     return Err(triggered_change(if before { "updated" } else { "deleted" }));
                 }
             }
-            let old: Row = match lock_row(&t, &dkey, RowMark::Update, Wait::Block, Xltw::Delete, ctx)? {
+            let mode = super::scan::lock_mode(RowMark::Update);
+            let old: Row = match super::scan::lock_row_with(&t, &dkey, mode, Wait::Block, Xltw::Delete, !self.defer_entries, ctx)? {
                 Locked::Skip => continue,
                 Locked::Same => match map {
                     Some(map) => member_row(&t, map, &src, &dkey, ctx)?,

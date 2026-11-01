@@ -497,6 +497,8 @@ impl Ddl<'_, '_> {
         self.cat.put_storage(t.clone());
         self.cat.put_index(ix.clone());
         if t.partkey.is_none() {
+            let sess = self.ctx.sess;
+            let _progress = super::idxprogress::command(&sess.index_progress, if s.concurrent { 2 } else { 1 });
             // DefineIndex commits the index before it builds it concurrently: a build
             // that fails leaves it there, INVALID.
             if s.concurrent
@@ -1637,6 +1639,9 @@ impl Ddl<'_, '_> {
         storage: &Arc<Table>,
         bixs: &[crate::sql::plan::BoundIndex],
     ) -> Result<()> {
+        // (Its indexes' rebuilds report no CREATE INDEX progress: reindex_relation's.)
+        let sess = self.ctx.sess;
+        let _progress = super::idxprogress::command(&sess.index_progress, 0);
         let n = v.columns.len();
         let rows: Vec<crate::exec::Row> = if s.skip_data {
             Vec::new()

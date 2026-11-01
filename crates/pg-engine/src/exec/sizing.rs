@@ -4117,6 +4117,19 @@ pub fn heap_blocks(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
     heap_blocks_ensured(t, ctx)
 }
 
+/// An index build needs the heap's pages before it evaluates the index's expressions.
+/// Ensure only the heap here: modelling a missing index would evaluate those expressions
+/// before the build's scan and its progress report.
+pub fn heap_blocks_for_build(t: &Table, ctx: &ExecCtx) -> Result<Option<u32>> {
+    let modelled = ensure(t, &[], ctx)?;
+    let rf = ctx.sess.db.relfiles.of(t.oid).read();
+    Ok(if modelled {
+        rf.heaps.get(&t.oid).map(Heap::nblocks)
+    } else {
+        rf.estimated.get(&t.oid).map(|e| e.pages)
+    })
+}
+
 /// `heap_blocks` when it answers without binding the table's indexes: a table too big to
 /// model has its estimate, a modelled one its heap.
 pub fn heap_blocks_known(t: &Table, cat: &Catalog, db: &Database) -> Option<Option<u32>> {

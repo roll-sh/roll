@@ -24,7 +24,7 @@ use crossbeam_skiplist::SkipMap;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sst::{SstMeta, SstReader, SstWriter, key_ts, user_key};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,6 +37,31 @@ const SPILL_DIR: &str = "spill";
 
 /// Spilled runs linked into their commits as they were (`Store::link_run`; tests check).
 pub static LINKED_RUNS: AtomicU64 = AtomicU64::new(0);
+
+/// The table a key is of, for `Store::untouched`: its first 4 bytes, a range deletion's
+/// marker's those of the range's start.
+fn key_table(k: &[u8]) -> u32 {
+    let k = if rdel::is_marker(k) { &k[rdel::PREFIX.len()..] } else { k };
+    k.get(..4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Invalidate heap measures only for writes to rows or their out-of-line values.
+/// Retiring a range marker after compaction changes no visible row; index-only writes
+/// likewise leave the measured heap alone.
+fn unwatch_written(watched: &mut HashMap<u32, u64>, key: &[u8], value: Option<&[u8]>) {
+    if rdel::is_marker(key) {
+        if let Some(end) = value {
+            let start = &key[rdel::PREFIX.len()..];
+            watched.retain(|table, _| {
+                let rows = keys::index_prefix(*table, 0);
+                let rows_end = keys::prefix_end(&rows);
+                end <= rows.as_slice() || start >= rows_end.as_slice()
+            });
+        }
+    } else if toast::is_row_key(key) || toast::is_value_key(key) {
+        watched.remove(&key_table(key));
+    }
+}
 
 pub fn mvcc_key(user: &[u8], ts: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(user.len() + 8);
@@ -248,6 +273,10 @@ pub struct Store {
     hot: hot::Hot,
     /// Ranges scans found holding no live row (`dead`).
     dead: Arc<dead::DeadRanges>,
+    /// Tables (by the first 4 bytes of their keys) no commit has written since they were
+    /// watched (`watch_untouched`), with the last commit ts assigned then.
+    untouched: parking_lot::Mutex<HashMap<u32, u64>>,
+    untouched_any: AtomicBool,
     /// The last commit that waits for its WAL fsync before it is visible (an asynchronous
     /// commit after it waits for that fsync too: `commit_async`).
     sync_assigned: AtomicU64,
@@ -403,6 +432,8 @@ impl Store {
             closed: AtomicBool::new(false),
             hot: hot::Hot::default(),
             dead: Arc::default(),
+            untouched: Default::default(),
+            untouched_any: AtomicBool::new(false),
             sync_assigned: AtomicU64::new(0),
             wal_writer: AtomicBool::new(false),
             wal_writer_delay: AtomicU64::new(200),
@@ -532,6 +563,69 @@ impl Store {
             blocks += b.saturating_sub(a) + 1;
         }
         blocks.saturating_mul(sst::BLOCK_TARGET) > self.opts.cache.capacity_bytes() / 4
+    }
+
+    /// Watch `table` (the first 4 bytes of its keys): until a commit writes one of its keys
+    /// (or links a run whose keys span it), `untouched` answers the
+    /// last commit ts assigned now. Under the commit lock, with `f` given that ts and run
+    /// there first (the table isn't watched when it says no): every commit up to it is in
+    /// the memtables or files by then, so `changed_since` there sees it.
+    pub fn watch_untouched(&self, table: u32, f: impl FnOnce(u64) -> bool) -> Option<u64> {
+        let _c = self.commit.lock();
+        let ts = self.assigned.load(Ordering::Acquire);
+        if !f(ts) {
+            return None;
+        }
+        self.untouched.lock().insert(table, ts);
+        self.untouched_any.store(true, Ordering::Release);
+        Some(ts)
+    }
+
+    /// The ts `watch_untouched` gave `table`, while no commit has written it since.
+    pub fn untouched(&self, table: u32) -> Option<u64> {
+        if !self.untouched_any.load(Ordering::Acquire) {
+            return None;
+        }
+        self.untouched.lock().get(&table).copied()
+    }
+
+    /// A commit's writes (under the commit lock): the tables they write aren't untouched.
+    fn note_untouched(&self, writes: &[(Vec<u8>, Option<Bytes>)]) {
+        if !self.untouched_any.load(Ordering::Acquire) {
+            return;
+        }
+        let mut u = self.untouched.lock();
+        for (k, v) in writes {
+            unwatch_written(&mut u, k, v.as_deref());
+        }
+        if u.is_empty() {
+            self.untouched_any.store(false, Ordering::Release);
+        }
+    }
+
+    /// Whether a version of a key in [start, end) may have been committed after `ts`: a
+    /// memtable entry there, a file overlapping the range whose newest version is, or a range
+    /// deletion over it. Never false when one was (a file overlapping it in part can say true
+    /// for another range's versions). For VACUUM's skip of a table nothing changed since its
+    /// last measure (`txn::unchanged`).
+    pub fn changed_since(&self, start: &[u8], end: &[u8], ts: u64) -> bool {
+        let v = self.view();
+        if v.rdels.iter().any(|r| r.ts > ts && r.overlaps(start, end)) {
+            return true;
+        }
+        for m in v.memtables() {
+            if m.max_ts.load(Ordering::Acquire) > ts
+                && m.map.range(start.to_vec()..end.to_vec()).any(|e| sst::key_ts(e.key()) > ts)
+            {
+                return true;
+            }
+        }
+        let ssts = v.l0.iter().chain(&v.l1).chain(v.imm.iter().filter_map(|f| match f {
+            Frozen::Sst(s) => Some(s),
+            Frozen::Mem(_) => None,
+        }));
+        ssts.filter(|s| s.meta.last_key.as_slice() >= start && s.meta.first_key.as_slice() < end)
+            .any(|s| s.meta.commit_ts.unwrap_or(s.meta.max_ts) > ts)
     }
 
     /// The value of the newest version of `key` visible at `ts` (None if absent or deleted).
@@ -926,6 +1020,7 @@ impl Store {
             ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
             let view = self.view.read().clone();
             self.apply_hot(ts, &writes, &view);
+            self.note_untouched(&writes);
             let mem = view.mem.clone();
             for (k, v) in writes {
                 mem.insert(mvcc_key(&k, ts), v, ts);
@@ -978,6 +1073,7 @@ impl Store {
             before = self.sync_assigned.load(Ordering::Acquire);
             let view = self.view.read().clone();
             self.apply_hot(ts, &writes, &view);
+            self.note_untouched(&writes);
             let mem = view.mem.clone();
             for (k, v) in writes {
                 mem.insert(mvcc_key(&k, ts), v, ts);
@@ -1065,6 +1161,7 @@ impl Store {
             }
             ts = self.assigned.load(Ordering::Acquire) + 1;
             if ingest {
+                self.note_untouched(&writes);
                 self.ingest_locked(&mut c, ts, writes)?;
                 after(ts);
                 rotate = false;
@@ -1078,6 +1175,7 @@ impl Store {
                 ranged = self.note_rdels(writes.iter().map(|(k, v)| (k.as_slice(), v.as_deref())), ts);
                 let view = self.view.read().clone();
                 self.apply_hot(ts, &writes, &view);
+                self.note_untouched(&writes);
                 let mem = view.mem.clone();
                 for (k, v) in writes {
                     mem.insert(mvcc_key(&k, ts), v, ts);
@@ -1163,6 +1261,14 @@ impl Store {
         // (Its writes don't go through `apply_hot`.)
         self.hot.clear();
         self.dead.note(ts, None);
+        // (The tables it writes aren't untouched: its keys', and those its linked runs span.)
+        let mut untouched = self.untouched_any.load(Ordering::Acquire).then(|| self.untouched.lock());
+        if let Some(u) = untouched.as_mut() {
+            for f in &linked {
+                let (lo, hi) = (key_table(&f.meta.first_key), key_table(&f.meta.last_key));
+                u.retain(|t, _| *t < lo || *t > hi);
+            }
+        }
         self.rotate_locked(c)?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // (Uncompressed: the commit waits for this file, and compaction, in the background,
@@ -1174,6 +1280,9 @@ impl Store {
         let mut add = |w: &mut SstWriter, k: &[u8], v: Option<&[u8]>| {
             if rdel::is_marker(k) {
                 markers.push((k.to_vec(), v.map(<[u8]>::to_vec)));
+            }
+            if let Some(u) = untouched.as_mut() {
+                unwatch_written(u, k, v);
             }
             key.clear();
             key.extend_from_slice(k);
@@ -1205,6 +1314,11 @@ impl Store {
         if let Err(e) = fill() {
             w.abandon();
             return Err(e);
+        }
+        if let Some(u) = untouched.take()
+            && u.is_empty()
+        {
+            self.untouched_any.store(false, Ordering::Release);
         }
         let mut files: Vec<Arc<SstReader>> = Vec::new();
         if w.entries() == 0 {

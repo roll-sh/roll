@@ -1348,6 +1348,30 @@ impl LockManager {
             {
                 s.pids.insert(proc, pid);
             }
+            // (A bulk statement's next row: no hold in the main table, and only this
+            // transaction has compact ones, so nothing can conflict: its compact set takes it
+            // without the holds listed.)
+            if first
+                && compact.is_some()
+                && !s.rows.contains_key(row)
+                && s.bulk.keys().all(|&o| o == owner)
+            {
+                let held = s.bulk.get(&owner).and_then(|b| b.segs.iter().filter_map(|g| g.rows.get(row)).map(|t| untag(t).0).max());
+                if held.is_some_and(|m| m >= mode) {
+                    return Ok(true);
+                }
+                if held.is_none() {
+                    Self::hold_xact(&mut s, holder, owner, proc, xid);
+                    let b = s.bulk.entry(owner).or_insert_with(|| BulkLocks { proc, segs: Vec::new() });
+                    if b.seg(holder, xid).rows.upsert(row, |_| row_tag(mode, false)) {
+                        if let Some(flag) = compact.as_deref_mut() {
+                            *flag = true;
+                        }
+                        COMPACT_HOLDS.fetch_add(1, Ordering::Relaxed);
+                        return Ok(true);
+                    }
+                }
+            }
             let bulk = if s.bulk.is_empty() { Vec::new() } else { s.bulk_row_holds(row) };
             let holds = || s.rows.get(row).map_or(&[][..], |h| h.as_slice()).iter().chain(&bulk);
             if first {

@@ -373,13 +373,16 @@ fn pg_index_column_has_property(a: &[Value], c: &FnCtx) -> Result<Value> {
     indexam_property(c, 0, oid_of(&a[0]), attno, text_arg(&a[2]))
 }
 
-/// pg_indexam_progress_phasename: the name of a build phase (CREATE INDEX progress).
+/// pg_indexam_progress_phasename: the name of a build phase (CREATE INDEX progress), as the
+/// method's ambuildphasename has it (btbuildphasename; the other built-in methods have none).
+/// Registered from pg_proc's row: one function, not two that are ambiguous.
 fn pg_indexam_progress_phasename(a: &[Value], _: &FnCtx) -> Result<Value> {
     let name = match (oid_of(&a[0]), int_arg(&a[1])) {
-        (403, 2) => "building index: scanning table",
-        (403, 3) => "building index: sorting live tuples",
-        (403, 4) => "building index: sorting dead tuples",
-        (403, 5) => "building index: loading tuples in tree",
+        (403, 1) => "initializing",
+        (403, 2) => "scanning table",
+        (403, 3) => "sorting live tuples",
+        (403, 4) => "sorting dead tuples",
+        (403, 5) => "loading tuples in tree",
         _ => return Ok(Value::Null),
     };
     Ok(Value::text(name))

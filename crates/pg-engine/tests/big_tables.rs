@@ -409,7 +409,11 @@ fn index_build_measures_as_analyze() {
 #[test]
 fn deferred_entry_deletes() {
     let dir = tempfile::tempdir().unwrap();
+    // (A 1 MB buffer: a DELETE of more than 16 kB of keys writes them as runs.)
+    pg_engine::storage::set_default_txn_spill_bytes(1 << 20);
     let eng = open(dir.path());
+    pg_engine::storage::set_default_txn_spill_bytes(0);
+    let runs = || pg_engine::txn::DELETE_RUNS.load(Ordering::Relaxed);
     with_max_versions(500, || {
         let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
         run(&mut s, "CREATE TABLE dd (id int PRIMARY KEY, a int, t text);
@@ -436,6 +440,76 @@ fn deferred_entry_deletes() {
         let e = s.query("INSERT INTO dd VALUES (10030, 0, 'dup')").unwrap_err();
         assert!(format!("{e:?}").contains("duplicate key"), "{e:?}");
         run(&mut s, "INSERT INTO dd VALUES (10001, 0, 'ok')");
+        run(&mut s, "UPDATE dd SET t = (SELECT string_agg(md5(g::text), '') FROM generate_series(1, 400) g) WHERE id = 7");
+        // A cursor declared just before a DELETE whose rows and entries go in as runs reads
+        // what its snapshot saw, through the index too; the statements after see them gone.
+        run(&mut s, "SET enable_seqscan = off;\nSET enable_bitmapscan = off;\nBEGIN");
+        let want = rows(&mut s, "SELECT count(*), sum(id) FROM dd WHERE a = 7");
+        let want2 = rows(&mut s, "SELECT id, md5(t) FROM dd WHERE a = 7 ORDER BY id");
+        assert!(want2.len() > 10);
+        run(&mut s, "DECLARE c CURSOR FOR SELECT count(*), sum(id) FROM dd WHERE a = 7;\nDECLARE c2 CURSOR FOR SELECT id, md5(t) FROM dd WHERE a = 7 ORDER BY id");
+        let before = runs();
+        run(&mut s, "DELETE FROM dd WHERE a >= 0");
+        assert!(runs() > before, "the deletes went in as runs");
+        assert_eq!(rows(&mut s, "FETCH ALL FROM c"), want);
+        assert_eq!(rows(&mut s, "FETCH ALL FROM c2"), want2);
+        assert_eq!(rows(&mut s, "SELECT count(*) FROM dd WHERE a = 7"), ["[Int8(0)]"]);
+        run(&mut s, "COMMIT;\nRESET enable_seqscan;\nRESET enable_bitmapscan");
+        assert_eq!(rows(&mut s, "SELECT count(*) FROM dd"), ["[Int8(0)]"]);
+    });
+}
+
+/// VACUUM of a big table nothing changed since its last measure takes that measure again
+/// (`txn::unchanged`) instead of reading the rows: VACUUM's own, or a COPY's into a table its
+/// transaction TRUNCATEd (measured as it went in). The pg_class numbers are a full read's: a
+/// table loaded the same way without the TRUNCATE is read, and gives the same.
+#[test]
+fn vacuum_skips_unchanged_tables() {
+    use pg_engine::txn::unchanged::SKIPS;
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    with_max_versions(500, || {
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        let data: String = (1..=6000).map(|i| format!("{i}\t{}\n", "x".repeat(i % 70))).collect();
+        run(&mut s, "CREATE TABLE vu_a (id int, t text);\nCREATE TABLE vu_b (id int, t text)");
+        let load = |s: &mut Session, t: &str, truncate: bool| -> String {
+            run(s, if truncate { "BEGIN;\nTRUNCATE vu_a" } else { "BEGIN" });
+            let x = rows(s, "SELECT pg_current_xact_id()::text")[0].clone();
+            s.query_copy(&format!("COPY {t} FROM STDIN"), data.as_bytes()).unwrap();
+            run(s, "COMMIT");
+            x.trim_start_matches("[Text(\"").trim_end_matches("\")]").to_string()
+        };
+        let (xa, xb) = (load(&mut s, "vu_a", true), load(&mut s, "vu_b", false));
+        let stats = |s: &mut Session, t: &str, x: &str| {
+            rows(s, &format!("SELECT relpages, reltuples, relallvisible, relfrozenxid::text = '{x}' FROM pg_class WHERE relname = '{t}'"))
+        };
+        let skips = |n| assert_eq!(SKIPS.load(Ordering::Relaxed), n);
+        let base = SKIPS.load(Ordering::Relaxed);
+        run(&mut s, "VACUUM vu_a");
+        skips(base + 1);
+        run(&mut s, "VACUUM vu_b");
+        skips(base + 1);
+        let a = stats(&mut s, "vu_a", &xa);
+        assert_eq!(a, stats(&mut s, "vu_b", &xb));
+        assert!(a[0].ends_with("Bool(true)]"), "{a:?}");
+        // Again: both skip, with the same numbers; an index changes no row.
+        run(&mut s, "CREATE INDEX vu_b_id ON vu_b (id);\nVACUUM vu_a;\nVACUUM vu_b");
+        skips(base + 3);
+        assert_eq!(stats(&mut s, "vu_a", &xa), a);
+        assert_eq!(stats(&mut s, "vu_b", &xb), a);
+        // A change to the rows: read again, then kept again.
+        run(&mut s, "UPDATE vu_b SET t = t || 'y' WHERE id % 7 = 0;\nDELETE FROM vu_a WHERE id % 5 = 0;\nVACUUM vu_a;\nVACUUM vu_b");
+        skips(base + 3);
+        let (a2, b2) = (stats(&mut s, "vu_a", &xa), stats(&mut s, "vu_b", &xb));
+        run(&mut s, "VACUUM vu_a;\nVACUUM vu_b");
+        skips(base + 5);
+        assert_eq!((stats(&mut s, "vu_a", &xa), stats(&mut s, "vu_b", &xb)), (a2, b2));
+        // A second COPY in the TRUNCATE's transaction, or a write after the load in it: read.
+        run(&mut s, "BEGIN;\nTRUNCATE vu_a");
+        s.query_copy("COPY vu_a FROM STDIN", data.as_bytes()).unwrap();
+        run(&mut s, "INSERT INTO vu_a VALUES (0, 'z');\nCOMMIT;\nVACUUM vu_a");
+        skips(base + 5);
+        assert_eq!(rows(&mut s, "SELECT reltuples FROM pg_class WHERE relname = 'vu_a'"), ["[Float4(6001.0)]"]);
     });
 }
 

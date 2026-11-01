@@ -3456,7 +3456,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     journal place `position()`, which a snapshot taken right before the statement (a
     cursor declared just before, with nothing written between) also has, so such a cursor
     could miss rows through an index; the sink's runs take a place of their own
-    (a placeholder journal entry) for this reason. Not reproduced or changed.
+    (a placeholder journal entry) for this reason. (Round 7, agent 148: not reachable while
+    each row's tombstone was journaled before its entries' deletes went in, since that moved
+    `position()` past any earlier snapshot's mark; round 7 defers the tombstones too, so the
+    deletes now take a place of their own as the sink's runs do. `a148_delete_cursor` checks.)
   - Verified at `f4f7485b` (batches 1 and 2 on `57d7da04`; debug unless noted): crate tests
     with `ROLL_TXN_SPILL_BYTES=4096` (failing as on the base: `storage_upgrade_batches`
     `large_table_rekeyed_in_batches`, which fails on `57d7da04` too under the small buffer;

@@ -9,6 +9,7 @@ pub(crate) mod spill;
 pub mod ssi;
 pub mod toast;
 pub mod twophase;
+pub mod unchanged;
 pub mod watch;
 pub mod xids;
 
@@ -37,6 +38,9 @@ pub static TXN_SPILLS: AtomicUsize = AtomicUsize::new(0);
 
 /// Runs written from bulk loads' sinks (`Txn::open_sink`), for tests.
 pub static SINK_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+/// Runs of a statement's deferred deletes (`Txn::defer_entry_delete`), for tests.
+pub static DELETE_RUNS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Isolation {
@@ -105,6 +109,8 @@ pub struct Database {
     pub moved: Mutex<HashMap<Vec<u8>, u64>>,
     /// Writes to tables structures are derived from, logged as they commit (`watch`).
     pub watch: watch::Watch,
+    /// Big tables' measures, for VACUUM to skip those nothing changed since (`unchanged`).
+    pub unchanged: unchanged::Unchanged,
     seqs: Mutex<HashMap<u32, SeqState>>,
     next_txn: AtomicU64,
     /// Open sessions; the engine closes a database once it reaches 0 and stays idle.
@@ -210,6 +216,7 @@ impl Database {
             ssi: Default::default(),
             moved: Mutex::new(HashMap::new()),
             watch: Default::default(),
+            unchanged: Default::default(),
             seqs: Mutex::new(HashMap::new()),
             next_txn: AtomicU64::new(1),
             sessions: AtomicUsize::new(0),
@@ -455,6 +462,8 @@ impl Database {
             gen_fresh: true,
             sink: None,
             stale_segs: Vec::new(),
+            loads: Vec::new(),
+            loading: None,
         }
     }
 
@@ -977,6 +986,19 @@ pub struct Txn {
     /// aren't fresh, since the last spill: the buffer's writes in the others are linked at
     /// commit as a run of their own (`link_fresh_buffer`).
     stale_segs: Vec<[u8; 8]>,
+    /// Loads into tables this transaction emptied, measured as they went in (`note_load`):
+    /// kept at commit for VACUUM (`unchanged`); any other write to the table drops its own.
+    loads: Vec<(u32, Box<unchanged::Load>)>,
+    /// The load running (`start_load`): its table, the table's column types and virtual
+    /// columns (as a measure sizes stored rows), and its measure so far.
+    loading: Option<Box<Loading>>,
+}
+
+struct Loading {
+    table: u32,
+    types: Vec<crate::types::DataType>,
+    virt: Vec<bool>,
+    load: unchanged::Load,
 }
 
 /// A key's table and index ids (its first 8 bytes, zero-padded): what a run's linkable
@@ -986,6 +1008,11 @@ fn seg_of(key: &[u8]) -> [u8; 8] {
     let n = key.len().min(8);
     s[..n].copy_from_slice(&key[..n]);
     s
+}
+
+/// The table (or other relation) a data key is of: its first 4 bytes.
+fn key_table(key: &[u8]) -> u32 {
+    key.get(..4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Fresh writes of a bulk load (`Txn::open_sink`): keys and values back to back in `data`,
@@ -1146,6 +1173,8 @@ impl Txn {
         // (What an earlier statement deferred is the next one's to see.)
         self.flush_entry_deletes()?;
         self.close_sink()?;
+        // (A load the statement didn't finish: a failed COPY.)
+        self.loading = None;
         if self.catalog.is_none() {
             let c = self.db.catalog();
             self.read_catalog = Some(c.clone());
@@ -1409,6 +1438,9 @@ impl Txn {
     /// `fresh`: a key no version of which exists anywhere (`put_fresh`); any other write
     /// keeps the runs around its key from being linked at commit.
     fn record(&mut self, key: Vec<u8>, value: Option<Bytes>, fresh: bool) {
+        if !self.loads.is_empty() {
+            self.drop_load_of(&key);
+        }
         if !fresh {
             if self.gen_fresh {
                 tracing::debug!(key = ?key, "a write that isn't fresh: the buffer's next run won't be linked");
@@ -1539,6 +1571,9 @@ impl Txn {
                 READ_ONLY_SQL_TRANSACTION,
                 "cannot execute this statement in a read-only transaction"
             );
+        }
+        if !self.loads.is_empty() {
+            self.drop_load_of(&start);
         }
         let gone: Vec<Vec<u8>> = self
             .writes
@@ -1771,7 +1806,22 @@ impl Txn {
                 "cannot execute this statement in a read-only transaction"
             );
         }
+        if let Some(l) = &mut self.loading
+            && key_table(&key) == l.table
+        {
+            if crate::storage::toast::is_row_key(&key) {
+                let stored = crate::exec::scan::row_data(&value).ok().and_then(|d| crate::storage::row::stored_tuple_len(d, &l.types, &l.virt));
+                l.load.row(stored, crate::exec::scan::row_xmin(&value).unwrap_or(0));
+            } else {
+                // (An out-of-line value: the TOAST table's xmins aren't kept.)
+                l.load.row_out_of_line();
+            }
+        }
         if let Some(s) = &mut self.sink {
+            if !self.loads.is_empty() {
+                let t = key_table(&key);
+                self.loads.retain(|l| l.0 != t);
+            }
             s.push(&key, &value);
             self.wrote = true;
             if s.data.len() + 12 * s.ents.len() >= self.db.store.txn_spill_bytes() {
@@ -1826,6 +1876,51 @@ impl Txn {
             return Ok(());
         }
         self.flush_sink(true)
+    }
+
+    /// Whether `table` is empty but for what this transaction writes into it from here on: it
+    /// emptied it (a range deletion over the whole table, TRUNCATE's) and wrote nothing into
+    /// it since. No savepoint open (the load could be rolled back alone).
+    pub fn table_emptied(&self, table: u32) -> Result<bool> {
+        let start = crate::storage::keys::index_prefix(table, 0);
+        let end = crate::storage::keys::prefix_end(&crate::storage::keys::index_prefix(table, u32::MAX));
+        let rows_end = crate::storage::keys::prefix_end(&start);
+        if !self.savepoints.is_empty() || !self.rdels.iter().any(|r| r.contains(&start) && r.end.as_slice() >= rows_end.as_slice()) {
+            return Ok(false);
+        }
+        let wrote = self.writes.range::<[u8], _>((Bound::Included(start.as_slice()), Bound::Excluded(end.as_slice()))).next().is_some();
+        Ok(!wrote && self.runs.as_ref().is_none_or(|r| r.scan(&start, &end, LATEST).next().is_none()))
+    }
+
+    /// A load into `table`, which it found emptied (`table_emptied`), measured as its rows
+    /// went in: what VACUUM finds in it, as of this transaction's commit, unless anything else
+    /// writes into it first (`drop_load_of`).
+    pub fn note_load(&mut self, table: u32, load: unchanged::Load) {
+        self.loads.retain(|l| l.0 != table);
+        if self.savepoints.is_empty() {
+            self.loads.push((table, Box::new(load)));
+        }
+    }
+
+    /// A load into `table` begins (COPY into a table it found emptied, `table_emptied`): its
+    /// rows are measured as they go in (`put_fresh`) until `finish_load`.
+    pub fn start_load(&mut self, table: u32, types: Vec<crate::types::DataType>, virt: Vec<bool>) {
+        let load = unchanged::Load::new(unchanged::layout_of(&types, &virt));
+        self.loading = Some(Box::new(Loading { table, types, virt, load }));
+    }
+
+    /// The load is done: what it measured is kept to the commit (`note_load`).
+    pub fn finish_load(&mut self) {
+        if let Some(l) = self.loading.take()
+            && l.load.sized()
+        {
+            self.note_load(l.table, l.load);
+        }
+    }
+
+    fn drop_load_of(&mut self, key: &[u8]) {
+        let t = key_table(key);
+        self.loads.retain(|l| l.0 != t);
     }
 
     /// At the commit of a transaction that spilled: the buffer's writes in tables and indexes
@@ -2048,14 +2143,14 @@ impl Txn {
         Ok(())
     }
 
-    /// `delete` of an index entry by a statement nothing in which can read the index
-    /// through this transaction's writes before it ends (`exec::dml` decides: a DELETE
-    /// without BEFORE ROW triggers or anything volatile, whose own snapshot doesn't see its
-    /// writes): it waits in a list and goes in with the statement's others
-    /// (`flush_entry_deletes`), sorted, as a run of the spilled writes when the transaction
-    /// has written nothing else in those indexes, instead of a buffer write and its undo
-    /// record each. (Postgres's DELETE leaves index entries alone; the engine's go with
-    /// their rows.)
+    /// `delete` of an index entry, or of a row and its out-of-line values, by a statement
+    /// nothing in which can read the table through this transaction's writes before it ends
+    /// (`exec::dml` decides: a DELETE without BEFORE ROW triggers, RETURNING or anything
+    /// volatile, whose own snapshot doesn't see its writes): it waits in a list and goes in
+    /// with the statement's others (`flush_entry_deletes`), sorted, as a run of the spilled
+    /// writes when the transaction has written nothing else in those tables and indexes,
+    /// instead of a buffer write and its undo record each. (Postgres's DELETE leaves index
+    /// entries alone; the engine's go with their rows.)
     pub fn defer_entry_delete(&mut self, key: Vec<u8>) -> Result<()> {
         if self.read_only || !self.savepoints.is_empty() {
             return self.delete(key);
@@ -2079,8 +2174,16 @@ impl Txn {
 
     fn put_entry_deletes(&mut self) -> Result<()> {
         let mut keys = std::mem::take(&mut self.entry_deletes);
-        self.entry_deletes_bytes = 0;
+        let bytes = std::mem::take(&mut self.entry_deletes_bytes);
         if keys.is_empty() {
+            return Ok(());
+        }
+        // (A few go into the buffer: below a megabyte, or a 64th of the buffer's size, a run
+        // isn't worth a file, as the sink's aren't.)
+        if bytes < (self.db.store.txn_spill_bytes() / 64).min(1 << 20) && self.entry_deletes_direct.is_none() {
+            for k in keys {
+                self.delete(k)?;
+            }
             return Ok(());
         }
         sort_by_key_after(&mut keys, 0, |k| k.as_slice());
@@ -2106,10 +2209,16 @@ impl Txn {
             }
             return Ok(());
         }
-        let (cid, ts) = (Some(self.write_cid), self.position() as u64);
+        // (A journal place of their own, as the sink's runs have: no snapshot taken before
+        // sees them, a cursor declared just before the statement included, and every one
+        // after does.)
+        let (cid, ts) = (Some(self.write_cid), self.position() as u64 + 1);
+        self.journal.push((Vec::new(), None));
+        self.derived.clear();
         let dir = self.db.store.spill_dir().join(self.id.to_string());
         let runs = Self::runs_in(&mut self.runs, dir, &self.rdels);
         runs.write(&mut keys.into_iter().map(|k| (k, Ent { v: None, cid, ts })), true)?;
+        DELETE_RUNS.fetch_add(1, Ordering::Relaxed);
         self.wrote = true;
         self.cur_xid();
         Ok(())
@@ -3084,6 +3193,8 @@ impl Txn {
     /// ROLLBACK TO SAVEPOINT: undo writes after it; the savepoint stays.
     pub fn rollback_to(&mut self, name: &str) -> Result<()> {
         self.derived.clear();
+        // (What a load measured may be rolled back.)
+        self.loads.clear();
         let i = self.find_savepoint(name)?;
         if let Some(l) = &mut self.log {
             l.rolled_back();
@@ -3481,6 +3592,11 @@ impl Txn {
             crate::repl::log::committed(&self.db.log, lsn);
         }
         self.finish_xid(result.is_ok());
+        if let Ok(ts) = &result {
+            for (table, load) in self.loads.drain(..) {
+                self.db.unchanged.keep(&self.db.store, table, load.measured(*ts));
+            }
+        }
         if let Ok(ts) = &result
             && !self.moved_out.is_empty()
         {

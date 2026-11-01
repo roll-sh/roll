@@ -218,7 +218,7 @@ pub struct Activity {
 /// written with atomics, so reporting takes no lock.
 #[derive(Debug, Default)]
 pub struct Progress {
-    /// PROGRESS_COMMAND_*: 0 none, 1 VACUUM, 2 ANALYZE.
+    /// PROGRESS_COMMAND_*: 0 none, 1 VACUUM, 2 ANALYZE, 3 CREATE INDEX.
     pub command: std::sync::atomic::AtomicU8,
     pub relid: std::sync::atomic::AtomicU32,
     pub params: [std::sync::atomic::AtomicI64; 20],
@@ -227,6 +227,7 @@ pub struct Progress {
 impl Progress {
     pub const VACUUM: u8 = 1;
     pub const ANALYZE: u8 = 2;
+    pub const CREATE_INDEX: u8 = 3;
 
     /// pgstat_progress_start_command.
     pub fn start(&self, command: u8, relid: u32) {
@@ -255,6 +256,7 @@ impl Progress {
         let kind = match self.command.load(Acquire) {
             Self::VACUUM => "VACUUM",
             Self::ANALYZE => "ANALYZE",
+            Self::CREATE_INDEX => "CREATE INDEX",
             _ => return None,
         };
         Some((kind, self.relid.load(Relaxed), std::array::from_fn(|i| self.params[i].load(Relaxed))))
@@ -355,11 +357,16 @@ pub struct SessionState {
     /// The session is an autovacuum worker's (`autovacuum.rs`): its VACUUM / ANALYZE
     /// report as autovacuum's, and pg_stat_statements doesn't see its commands.
     pub autovacuum: std::cell::Cell<bool>,
-    /// The running VACUUM's / ANALYZE's progress (shared with pg_stat_activity's entry).
+    /// The running VACUUM's / ANALYZE's / CREATE INDEX's progress (shared with
+    /// pg_stat_activity's entry).
     pub progress: Arc<Progress>,
     /// LOG and WARNING messages raised while a statement ran that client_min_messages keeps
     /// from the client, for the server log (written when the statement's messages are).
     pub log_only: RefCell<Vec<crate::error::Error>>,
+    /// What an index build reports in pg_stat_progress_create_index's command
+    /// (PROGRESS_CREATEIDX_COMMAND: 1 CREATE INDEX, 3 REINDEX); 0: builds of a rewrite
+    /// (CLUSTER, VACUUM FULL, REFRESH MATERIALIZED VIEW) that report none.
+    pub index_progress: Cell<i64>,
     /// Cost-based vacuum delay of the running VACUUM / ANALYZE: (cost balance, delay in
     /// ms, cost limit, page-hit cost, whether delays are timed). Delay 0: off.
     pub vacuum_cost: std::cell::Cell<(i64, f64, i64, i64, bool)>,
@@ -573,6 +580,7 @@ impl SessionState {
             autovacuum: std::cell::Cell::new(false),
             progress: Arc::default(),
             log_only: RefCell::new(Vec::new()),
+            index_progress: Cell::new(1),
             vacuum_cost: std::cell::Cell::new((0, 0.0, 200, 1, false)),
             no_snapshot: Default::default(),
             pgstat: RefCell::new(crate::exec::pgstat::Pending::new_session()),
@@ -680,6 +688,7 @@ impl SessionState {
         self.in_use.borrow_mut().clear();
         *self.copy_progress.borrow_mut() = None;
         self.in_vacuum.set(false);
+        self.index_progress.set(1);
         self.on_commit_truncating.set(false);
         self.notice_hold.set(0);
     }
@@ -694,6 +703,7 @@ impl SessionState {
             ("in_use", !self.in_use.borrow().is_empty()),
             ("copy_progress", self.copy_progress.borrow().is_some()),
             ("in_vacuum", self.in_vacuum.get()),
+            ("index_progress", self.index_progress.get() != 1),
             ("on_commit_truncating", self.on_commit_truncating.get()),
             ("notice_hold", self.notice_hold.get() != 0),
         ] {

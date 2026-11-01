@@ -16,7 +16,8 @@ use crate::storage::keys::KeyColl;
 use crate::types::{DataType, Value};
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use super::idxprogress::IndexProgress;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// One participant's index entries: the entry keys back to back in `data`; each entry's
 /// (its key's 8 bytes after the index's prefix, offset, key length | tail length << 16 |
@@ -132,7 +133,13 @@ impl Plan<'_> {
 
     /// Take chunks until none are left, then sort the entries: `check` every so many rows
     /// (the leader's cancel checks), stopping early once `stop` is set (another failed).
-    fn run(&self, chunks: &Mutex<VecDeque<(usize, crate::exec::parscan::Chunk)>>, stop: &AtomicBool, check: &dyn Fn() -> Result<()>) -> Result<Gathered> {
+    fn run(
+        &self,
+        chunks: &Mutex<VecDeque<(usize, crate::exec::parscan::Chunk)>>,
+        stop: &AtomicBool,
+        check: &dyn Fn() -> Result<()>,
+        progress: (&IndexProgress, &AtomicU64),
+    ) -> Result<Gathered> {
         let mut g = Gathered::default();
         loop {
             let next = chunks.lock().unwrap().pop_front();
@@ -144,6 +151,9 @@ impl Plan<'_> {
                         return Ok(g);
                     }
                     check()?;
+                    if i > 0 {
+                        progress.0.scanned_now(progress.1.fetch_add(1024, Ordering::Relaxed) + 1024);
+                    }
                 }
                 let (dkey, bytes) = r?;
                 self.row(&mut g, &mut part, &dkey, &bytes)?;
@@ -151,8 +161,28 @@ impl Plan<'_> {
             g.parts.push((n, part));
         }
         g.entries.sort();
+        // (Each participant's keys sorted here, merged by the leader: `btree_pages_sorted`.)
+        g.keys.sort_unstable();
         Ok(g)
     }
+}
+
+/// Sorted lists merged into one sorted sequence, each item moved out once.
+fn merge_sorted<T: Ord>(lists: Vec<Vec<T>>) -> impl Iterator<Item = T> {
+    let mut its: Vec<std::vec::IntoIter<T>> = lists.into_iter().map(Vec::into_iter).collect();
+    let mut heads: Vec<Option<T>> = its.iter_mut().map(Iterator::next).collect();
+    std::iter::from_fn(move || {
+        let mut min: Option<usize> = None;
+        for (i, h) in heads.iter().enumerate() {
+            if let Some(x) = h
+                && min.is_none_or(|m| heads[m].as_ref().is_some_and(|y| x < y))
+            {
+                min = Some(i);
+            }
+        }
+        let m = min?;
+        std::mem::replace(&mut heads[m], its[m].next())
+    })
 }
 
 /// CREATE INDEX's workers as PostgreSQL's plan_create_index_workers counts them: by the
@@ -202,7 +232,14 @@ impl Drop for Release {
 impl Ddl<'_, '_> {
     /// The parallel build of `ix` over `t` (see the module), with up to `workers` workers:
     /// its measure. None: not for this index (the serial build runs).
-    pub(super) fn build_index_parallel(&self, t: &Table, ix: &Index, bix: &BoundIndex, workers: usize) -> Result<Option<RowMeasure>> {
+    pub(super) fn build_index_parallel(
+        &self,
+        t: &Table,
+        ix: &Index,
+        bix: &BoundIndex,
+        workers: usize,
+        progress: &IndexProgress,
+    ) -> Result<Option<RowMeasure>> {
         let cols: Option<Vec<usize>> = bix.keys.iter().map(|k| if let Expr::Col(i, _) = k { Some(*i) } else { None }).collect();
         let (Some(cols), None) = (cols, &bix.predicate) else {
             return Ok(None);
@@ -259,14 +296,15 @@ impl Ddl<'_, '_> {
         };
         let chunks = Mutex::new(chunks);
         let stop = AtomicBool::new(false);
+        let done = AtomicU64::new(0);
         let gathered: Vec<Result<Gathered>> = std::thread::scope(|s| {
-            let (plan, chunks, stop) = (&plan, &chunks, &stop);
+            let (plan, chunks, stop, report) = (&plan, &chunks, &stop, (progress, &done));
             let handles: Vec<_> = (0..got)
                 .filter_map(|i| {
                     std::thread::Builder::new()
                         .name(format!("roll-build-{i}"))
                         .spawn_scoped(s, move || {
-                            let r = plan.run(chunks, stop, &|| Ok(()));
+                            let r = plan.run(chunks, stop, &|| Ok(()), report);
                             if r.is_err() {
                                 stop.store(true, Ordering::Relaxed);
                             }
@@ -275,7 +313,7 @@ impl Ddl<'_, '_> {
                         .ok()
                 })
                 .collect();
-            let lead = plan.run(chunks, stop, &|| self.ctx.check());
+            let lead = plan.run(chunks, stop, &|| self.ctx.check(), report);
             if lead.is_err() {
                 stop.store(true, Ordering::Relaxed);
             }
@@ -290,7 +328,7 @@ impl Ddl<'_, '_> {
         for g in gathered {
             let g = g?;
             parts.extend(g.parts);
-            keys.extend(g.keys);
+            keys.push(g.keys);
             sorted.push(g.entries);
         }
         if ix.unique {
@@ -299,13 +337,15 @@ impl Ddl<'_, '_> {
         parts.sort_by_key(|p| p.0);
         let rows = parts.iter().map(|p| p.1.rows).sum();
         let live = relsize::heap_pages(parts.into_iter().flat_map(|p| p.1.sizes));
-        let tuples = keys.len();
-        let pages = super::vacuum::btree_pages_of(bix, &plan.ix_types, keys);
+        let tuples = keys.iter().map(Vec::len).sum::<usize>();
+        progress.scanned_all(tuples as u64);
+        let pages = super::vacuum::btree_pages_sorted(bix, &plan.ix_types, merge_sorted(keys), tuples);
         let runs: Vec<(Vec<u8>, Vec<(u32, u32, u32)>)> = sorted
             .into_iter()
             .map(|e| (e.data, e.ents.into_iter().map(|(_, o, l)| (o, l & 0xffff, (l & !CHECKED) >> 16)).collect()))
             .collect();
         self.ctx.txn.borrow_mut().put_index_runs(&start, runs)?;
+        progress.loaded(tuples as u64);
         Ok(Some(RowMeasure::new(rows, live, vec![(ix.oid, pages, tuples as f64)])))
     }
 

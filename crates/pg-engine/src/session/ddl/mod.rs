@@ -43,6 +43,7 @@ mod stored;
 mod tsearch;
 mod vacuum;
 mod parbuild;
+mod idxprogress;
 
 pub(crate) use stored::mentions;
 pub(crate) use table::rowid_sequence;

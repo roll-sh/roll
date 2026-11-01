@@ -4545,6 +4545,20 @@ pub fn lock_row_mode(
     oper: Xltw,
     ctx: &ExecCtx,
 ) -> Result<Locked> {
+    lock_row_with(t, key, mode, wait, oper, true, ctx)
+}
+
+/// `lock_row_mode`; `later`: a later command of this transaction may have written the row
+/// (false for a statement that runs nothing that writes while it runs: not looked for).
+pub fn lock_row_with(
+    t: &Table,
+    key: &[u8],
+    mode: RowLockMode,
+    wait: Wait,
+    oper: Xltw,
+    later: bool,
+    ctx: &ExecCtx,
+) -> Result<Locked> {
     ctx.txn.borrow_mut().output_cid();
     let xact_ctx = xltw_context(oper, &t.name, key, ctx);
     let got = ctx
@@ -4556,7 +4570,8 @@ pub fn lock_row_mode(
     }
     let txn = ctx.txn.borrow();
     // Changed by a later command of this transaction (TM_SelfModified): skipped.
-    if let (Some(w), Some(cid)) = (txn.written_by(key), ctx.command_id())
+    if later
+        && let (Some(w), Some(cid)) = (txn.written_by(key), ctx.command_id())
         && w > cid
     {
         return Ok(Locked::Skip);

@@ -193,11 +193,19 @@ pub fn replace_row(
 
 /// Delete the row stored under `key` (whose values are `old`; None: unknown) with its
 /// out-of-line values.
-pub fn delete_row(key: Vec<u8>, old: Option<&[Value]>, txn: &mut Txn) -> Result<()> {
+/// `defer`: the deletes wait for the statement's end with its index entries'
+/// (`Txn::defer_entry_delete`).
+pub fn delete_row(key: Vec<u8>, old: Option<&[Value]>, txn: &mut Txn, defer: bool) -> Result<()> {
     for (_, id) in current_pointers(&key, old, txn)? {
-        txn.delete(toast::value_key(&key, id))?;
+        match defer {
+            true => txn.defer_entry_delete(toast::value_key(&key, id))?,
+            false => txn.delete(toast::value_key(&key, id))?,
+        }
     }
-    txn.delete(key)
+    match defer {
+        true => txn.defer_entry_delete(key),
+        false => txn.delete(key),
+    }
 }
 
 /// The end of table `table`'s keys: its rows, index entries and out-of-line values.

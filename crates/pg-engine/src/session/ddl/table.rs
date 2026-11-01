@@ -3613,6 +3613,10 @@ impl Ddl<'_, '_> {
         else {
             return Ok(None);
         };
+        let blocks = crate::exec::sizing::heap_blocks_for_build(t, self.ctx)?;
+        let progress = super::idxprogress::IndexProgress::start(self, t, ix, blocks);
+        progress.scanning();
+        let mut scanned = 0;
         // (Unique keys with the data key of the row that had each first: `build_index`.)
         let mut seen = UniqueKeys::default();
         // (Duplicates are keys equal under their collations, a nondeterministic one's too:
@@ -3628,6 +3632,8 @@ impl Ddl<'_, '_> {
         };
         for r in self.scan_rows(t) {
             self.ctx.check()?;
+            scanned += 1;
+            progress.scanned(scanned);
             let (dkey, row) = r?;
             let vals = match index_values(&bix, &row, self) {
                 Ok(Some(v)) => v,
@@ -3672,9 +3678,15 @@ impl Ddl<'_, '_> {
                     .ok_or_else(|| crate::error::internal("index not found"))?
             }
         };
+        // (pg_stat_progress_create_index: the table's blocks as known without modelling it.)
+        let blocks = crate::exec::sizing::heap_blocks_for_build(t, self.ctx)?;
+        let progress = super::idxprogress::IndexProgress::start(self, t, ix, blocks);
         if let Some(r) = crate::ext::index_am::routine_by_name(&self.cat, &ix.method) {
+            progress.scanning();
             return self.build_am_index(r, t, ix, &bix);
         }
+        // (The rows scanned that have entries: the blocks done, then the tuples sorted.)
+        let mut entries = 0u64;
         // Unique keys seen so far, with the data key of the row that had each first (its
         // values are read again for the error).
         let mut seen = UniqueKeys::default();
@@ -3705,6 +3717,8 @@ impl Ddl<'_, '_> {
         let counts = self.ctx;
         let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
             crate::exec::pgstat::count_returned(counts, t.oid, 1);
+            entries += 1;
+            progress.scanned(entries);
             if quad && let Some(v) = vals.first().filter(|v| !v.is_null()) {
                 points += 1;
                 nan |= crate::exec::dml::nan_point(v);
@@ -3741,14 +3755,17 @@ impl Ddl<'_, '_> {
         // (A table too big to model is measured in the same pass: its rows read and its keys
         // computed once.)
         let scope = IndexScope::enter(&bix, self);
+        progress.scanning();
         // (With workers, as max_parallel_maintenance_workers has it: `parbuild`.)
         let parallel = match self.measures_in_build(t, ix) && !quad {
             true => match super::parbuild::index_workers(self, t, crate::exec::sizing::heap_blocks(t, self.ctx)?.unwrap_or(0)) {
                 0 => None,
-                w => self.build_index_parallel(t, ix, &bix, w)?,
+                w => self.build_index_parallel(t, ix, &bix, w, &progress)?,
             },
             false => None,
         };
+        // (A parallel build reports its own scan's end and its load.)
+        let serial = parallel.is_none();
         let measured = if parallel.is_some() {
             parallel
         } else if self.measures_in_build(t, ix) {
@@ -3756,16 +3773,21 @@ impl Ddl<'_, '_> {
         } else {
             None
         };
+        let mut rows = 0usize;
         if measured.is_none() {
             for r in self.scan_rows(t) {
                 self.ctx.check()?;
                 let (dkey, row) = r?;
+                rows += 1;
                 if let Some(vals) = index_values(&bix, &row, self)? {
                     step(&dkey, &vals)?;
                 }
             }
         }
         drop(scope);
+        if serial {
+            progress.scanned_all(entries);
+        }
         if direct.is_some() {
             self.ctx
                 .txn
@@ -3778,7 +3800,11 @@ impl Ddl<'_, '_> {
             }
         }
         drop(seen);
-        self.index_built_from(t, ix, measured)
+        if serial {
+            progress.loaded(entries);
+        }
+        let counted = measured.is_none().then_some((rows, entries as usize));
+        self.index_built_from(t, ix, measured, counted)
     }
 
     pub(super) fn duplicate_key(&self, t: &Table, bix: &BoundIndex, vals: &[Value], name: &str) -> Error {
@@ -9027,6 +9053,9 @@ impl Ddl<'_, '_> {
         if concurrently {
             super::prevent_in_block("REINDEX CONCURRENTLY")?;
         }
+        // (PROGRESS_CREATEIDX_COMMAND_REINDEX / _REINDEX_CONCURRENTLY.)
+        let sess = self.ctx.sess;
+        let _progress = super::idxprogress::command(&sess.index_progress, if concurrently { 4 } else { 3 });
         let verbose = def_elems(&s.params).any(|d| {
             d.defname == "verbose"
                 && !matches!(

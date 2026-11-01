@@ -686,7 +686,8 @@ pub fn external_at(b: &[u8], col: usize) -> bool {
 /// What `relsize::heap_tuple_len` gives the stored row `b` (its encoded values) taken as
 /// `types`, the columns `null` stored as nulls (virtual generated ones), without decoding it.
 /// None when a value's size needs it decoded: anything but nulls, booleans, fixed-size numbers,
-/// dates and timestamps of the column's own type and ASCII text in a text or varchar column;
+/// dates and timestamps of the column's own type and ASCII text in a text, varchar or char(n)
+/// column;
 /// and rows shorter than `types` (they get columns added since).
 pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<usize> {
     use crate::catalog::relsize::{datum_len_at, tuple_header};
@@ -712,13 +713,18 @@ pub fn stored_tuple_len(b: &[u8], types: &[DataType], null: &[bool]) -> Option<u
             DataType::Float8 => fixed(t == tag::FLOAT8, 8)?,
             DataType::Timestamp(_) => fixed(t == tag::TIMESTAMP, 8)?,
             DataType::Timestamptz(_) => fixed(t == tag::TIMESTAMPTZ, 8)?,
-            DataType::Text | DataType::Varchar(_) if t == tag::TEXT => {
+            DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_) if t == tag::TEXT => {
                 let len = get_varint(b, &mut pos).ok()? as usize;
                 if !b.get(pos..pos + len)?.is_ascii() {
                     return None;
                 }
                 pos += len;
-                vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(len)));
+                // (A char(n)'s value is stored padded to n characters: `relsize::varlena_payload`.)
+                let payload = match ty {
+                    DataType::Bpchar(m) if *m > 4 => len.max((*m - 4) as usize),
+                    _ => len,
+                };
+                vals.push((!null.get(i).copied().unwrap_or(false)).then_some(Some(payload)));
                 continue;
             }
             _ => return None,

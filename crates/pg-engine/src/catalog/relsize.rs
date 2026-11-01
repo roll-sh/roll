@@ -539,21 +539,35 @@ pub fn heap_tuple_len(
 /// way INSERT places them: on the last page used while they fit, else on a page the free
 /// space map offers, else on a new page.
 pub fn heap_pages(tuples: impl Iterator<Item = usize>) -> i32 {
-    const MAX_TUPLES: usize = 291;
-    // Per page: (pd_upper - pd_lower, line pointers).
-    let mut pages: Vec<(usize, usize)> = Vec::new();
-    let mut fsm: Vec<FsmPage> = Vec::new();
-    let mut current: Option<usize> = None;
-    let heap_free = |p: (usize, usize)| {
-        if p.1 >= MAX_TUPLES {
-            0
-        } else {
-            p.0.saturating_sub(ITEM_ID)
-        }
-    };
+    let mut p = HeapPacker::default();
     for t in tuples {
+        p.push(t);
+    }
+    p.pages()
+}
+
+/// `heap_pages` a tuple at a time (a load counting its pages as it goes).
+#[derive(Default)]
+pub struct HeapPacker {
+    /// Per page: (pd_upper - pd_lower, line pointers).
+    pages: Vec<(usize, usize)>,
+    fsm: Vec<FsmPage>,
+    current: Option<usize>,
+}
+
+impl HeapPacker {
+    pub fn push(&mut self, t: usize) {
+        const MAX_TUPLES: usize = 291;
+        let heap_free = |p: (usize, usize)| {
+            if p.1 >= MAX_TUPLES {
+                0
+            } else {
+                p.0.saturating_sub(ITEM_ID)
+            }
+        };
+        let (pages, fsm) = (&mut self.pages, &mut self.fsm);
         let len = t - ITEM_ID;
-        let mut target = current;
+        let mut target = self.current;
         while let Some(b) = target {
             let free = heap_free(pages[b]);
             if len <= free {
@@ -576,9 +590,12 @@ pub fn heap_pages(tuples: impl Iterator<Item = usize>) -> i32 {
         });
         pages[b].0 -= len + ITEM_ID;
         pages[b].1 += 1;
-        current = Some(b);
+        self.current = Some(b);
     }
-    pages.len() as i32
+
+    pub fn pages(&self) -> i32 {
+        self.pages.len() as i32
+    }
 }
 
 const FSM_NODES: usize = BLCKSZ - PAGE_HEADER - 4;

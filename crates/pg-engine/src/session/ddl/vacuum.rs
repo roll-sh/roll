@@ -473,6 +473,9 @@ impl Ddl<'_, '_> {
                     let started = std::time::Instant::now();
                     let ms = |s: std::time::Instant| s.elapsed().as_secs_f64() * 1000.0;
                     if vacuum && full {
+                        // (Its indexes' rebuilds report no CREATE INDEX progress.)
+                        let sess = self.ctx.sess;
+                        let _progress = super::idxprogress::command(&sess.index_progress, 0);
                         // PROCESS_MAIN false: only the TOAST table gets new files.
                         if process_main {
                             self.measure_rewritten(&r, None)?;
@@ -789,12 +792,22 @@ impl Ddl<'_, '_> {
             return Ok(());
         }
         // (Index by index, as the rebuilds go: an error is the first index's.)
+        // (Not modelled for it: modelling the indexes would compute their expressions.)
+        let blocks = crate::exec::sizing::heap_blocks_known(t, &self.cat, &self.ctx.sess.db)
+            .flatten()
+            .or_else(|| self.cat.relstats.get(&t.oid).map(|s| s.pages.max(0) as u32));
         for b in &with_exprs {
+            let progress = super::idxprogress::IndexProgress::start(self, t, &b.index, blocks);
+            progress.scanning();
+            let mut n = 0u64;
             for r in self.scan_rows(t) {
                 self.ctx.check()?;
                 let (_, r) = r?;
+                n += 1;
+                progress.scanned(n);
                 super::table::index_values(b, &r, self)?;
             }
+            progress.scanned_all(n);
         }
         Ok(())
     }
@@ -1190,6 +1203,9 @@ impl Ddl<'_, '_> {
     }
 
     fn cluster_rel_inner(&mut self, t: &Arc<Table>, ix: &Index, verbose: bool) -> Result<()> {
+        // (Its indexes' rebuilds report no CREATE INDEX progress: reindex_relation's.)
+        let sess = self.ctx.sess;
+        let _progress = super::idxprogress::command(&sess.index_progress, 0);
         self.mark_clustered(t, Some(ix.oid));
         if verbose {
             let name = format!(
@@ -1265,15 +1281,17 @@ impl Ddl<'_, '_> {
     /// CREATE INDEX measures the new index and its table (an empty table that was never
     /// measured keeps its unknown tuple count).
     pub(super) fn index_built(&mut self, t: &Table, index: &crate::catalog::Index) -> Result<()> {
-        self.index_built_from(t, index, None)
+        self.index_built_from(t, index, None, None)
     }
 
-    /// `index_built`, with the measure the build's own pass took (`measures_in_build`).
+    /// `index_built`, with the measure the build's own pass took (`measures_in_build`), or
+    /// the rows and entries it counted (`counted`).
     pub(super) fn index_built_from(
         &mut self,
         t: &Table,
         index: &crate::catalog::Index,
         measured: Option<RowMeasure>,
+        counted: Option<(usize, usize)>,
     ) -> Result<()> {
         // (Modelling the index's pages evaluates its expressions again: what they say then
         // isn't Postgres's.)
@@ -1282,7 +1300,7 @@ impl Ddl<'_, '_> {
         self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1259, t.oid)?;
         let hold = self.ctx.sess.hold_notices();
         let quiet = self.ctx.notices.borrow().len();
-        let r = self.index_built_measured(t, index, measured);
+        let r = self.index_built_measured(t, index, measured, counted);
         self.ctx.notices.borrow_mut().truncate(quiet);
         drop(hold);
         r
@@ -1293,8 +1311,21 @@ impl Ddl<'_, '_> {
         t: &Table,
         index: &crate::catalog::Index,
         measured: Option<RowMeasure>,
+        counted: Option<(usize, usize)>,
     ) -> Result<()> {
         crate::exec::sizing::index_built(t, index.oid, crate::exec::sizing::models_build(&index.method), self.ctx)?;
+        // (A modelled table and a modelled btree: the measure's pass would count only the
+        // rows and the index's tuples, which the build's pass counted.)
+        let db = &self.ctx.sess.db;
+        let measured = measured.or_else(|| {
+            let (rows, tuples) = counted?;
+            if index.method != "btree" || crate::exec::sizing::is_estimated(t.oid, db) {
+                return None;
+            }
+            let heap = crate::exec::sizing::heap_blocks_known(t, &self.cat, db).flatten()?;
+            let pages = crate::exec::sizing::btree_blocks(t.oid, index.oid, db)?;
+            Some(RowMeasure { rows, modelled: Some(heap as i32), live: heap as i32, indexes: vec![(index.oid, pages as i32, tuples as f64)] })
+        });
         // index_update_stats leaves the table's statistics alone when autovacuum is off
         // for it (a dump restoring statistics before its indexes keeps them).
         let autovacuum_off = t.options.iter().any(|o| {
@@ -1459,6 +1490,15 @@ impl Ddl<'_, '_> {
             self.cat.frozen_xids.get(&t.toast).copied().unwrap_or(crate::txn::xids::FIRST_NORMAL_XID)
         });
         let mut oldest_toast = u64::MAX;
+        // (A VACUUM's measure of the heap alone is kept, and taken again while nothing
+        // changed in the table: `txn::unchanged`.)
+        let whole = frozen.is_some() && ixs.is_empty() && each.is_none() && modelled.is_none();
+        let layout = crate::txn::unchanged::layout_of(&types, &virt_mask);
+        if whole && let Some(m) = self.unchanged_measure(t, layout, frozen, toast_frozen) {
+            return Ok(Some(m));
+        }
+        let (mut xmins, mut may_toast) = ((u64::MAX, 0u64), false);
+        let snap = self.ctx.txn.borrow().snapshot_ts();
         let unpinned = std::collections::HashSet::new();
         let scan = self.ctx.txn.borrow().scan(&start, &crate::storage::keys::prefix_end(&start));
         for r in scan {
@@ -1470,6 +1510,7 @@ impl Ddl<'_, '_> {
                 if x >= old {
                     oldest_xmin = oldest_xmin.min(x);
                 }
+                xmins = (xmins.0.min(x), xmins.1.max(x));
             }
             if let Some(p) = &progress
                 && rows.is_multiple_of(per_page)
@@ -1483,6 +1524,7 @@ impl Ddl<'_, '_> {
                 None => crate::storage::row::stored_tuple_len(crate::exec::scan::row_data(&bytes)?, &types, &virt_mask),
                 Some(_) => None,
             };
+            may_toast |= stored.is_none_or(|len| len > crate::exec::sizing::TOAST_THRESHOLD);
             if let Some(floor) = toast_frozen {
                 let x = crate::exec::scan::row_xmin(&bytes)?;
                 if x >= floor
@@ -1554,6 +1596,11 @@ impl Ddl<'_, '_> {
             Some(n) => (Some(n), n),
             None => (None, relsize::heap_pages(sizes.into_iter())),
         };
+        if whole {
+            let m = crate::txn::unchanged::Measured { ts: snap, armed: 0, layout, rows, live, xmin: xmins, may_toast };
+            let db = &self.ctx.sess.db;
+            db.unchanged.keep(&db.store, t.oid, m);
+        }
         let mut measured = Vec::with_capacity(ixs.len());
         for mut ix in ixs {
             let built = ix
@@ -1572,6 +1619,24 @@ impl Ddl<'_, '_> {
             live,
             indexes: measured,
         }))
+    }
+
+    /// A VACUUM's measure of `t`'s heap without reading it: the one kept from the last
+    /// (`txn::unchanged`), when the rows are sized alike, nothing committed in the table
+    /// since and its xmins tell the oldest past the frozen one (and, with a TOAST table,
+    /// none of its rows can have values out of line).
+    fn unchanged_measure(&self, t: &Table, layout: u64, frozen: Option<u64>, toast_frozen: Option<u64>) -> Option<RowMeasure> {
+        let db = &self.ctx.sess.db;
+        let m = db.unchanged.valid(&db.store, t.oid)?;
+        let snap = self.ctx.txn.borrow().snapshot_ts();
+        if m.layout != layout || snap < m.ts || (toast_frozen.is_some() && m.may_toast) {
+            return None;
+        }
+        let old = frozen?;
+        let oldest = m.oldest_xmin(old)?;
+        self.measured_xmin.set(Some((t.oid, old, oldest, toast_frozen.map(|f| (f, u64::MAX)))));
+        crate::txn::unchanged::SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(RowMeasure::new(m.rows, m.live, Vec::new()))
     }
 
     /// pg_class stats of indexes measured (`measure_rows`).
@@ -1620,13 +1685,36 @@ pub(super) fn btree_pages_of(bix: &crate::sql::plan::BoundIndex, types: &[DataTy
     // compared without reading the key. Unstable: entries equal as (key, size) are
     // interchangeable.)
     keys.sort_unstable();
+    let n = keys.len();
+    btree_pages_sorted(bix, types, keys.into_iter(), n)
+}
+
+/// `btree_pages_of` of keys given in their order (`n` of them): a parallel build's
+/// participants' sorted keys merged, without putting them in one list first.
+pub(super) fn btree_pages_sorted(
+    bix: &crate::sql::plan::BoundIndex,
+    types: &[DataType],
+    keys: impl Iterator<Item = (u128, Vec<u8>, usize)>,
+    n: usize,
+) -> i32 {
     let dedup = !bix.index.unique
         && bix.index.include.is_empty()
         && types.iter().all(relsize::equal_image)
         && bix.colls.iter().flatten().all(|k| k.coll.deterministic);
-    let mut sizes = Vec::with_capacity(keys.len());
-    for group in keys.chunk_by(|a, b| dedup && a.0 == b.0 && a.1 == b.1) {
-        relsize::posting_tuples(group[0].2, group.len(), &mut sizes);
+    let mut sizes = Vec::with_capacity(n);
+    let mut group: Option<((u128, Vec<u8>, usize), usize)> = None;
+    for k in keys {
+        match &mut group {
+            Some((g, count)) if dedup && g.0 == k.0 && g.1 == k.1 => *count += 1,
+            _ => {
+                if let Some((g, count)) = group.replace((k, 1)) {
+                    relsize::posting_tuples(g.2, count, &mut sizes);
+                }
+            }
+        }
+    }
+    if let Some((g, count)) = group {
+        relsize::posting_tuples(g.2, count, &mut sizes);
     }
     relsize::btree_pages(&sizes)
 }
