@@ -2348,7 +2348,7 @@ fn close_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     let name = b.cstr()?.to_string();
     match kind {
         b'S' => s.close_statement(&name),
-        b'P' => s.close_portal(&name),
+        b'P' => s.close_portal(&name)?,
         _ => {
             return Err(Error::new(
                 code::PROTOCOL_VIOLATION,

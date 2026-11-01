@@ -307,6 +307,7 @@ pub fn has_notice_sink() -> bool {
 pub struct ExecCtx<'a> {
     pub txn: &'a RefCell<Txn>,
     pub sess: &'a SessionState,
+    pub(crate) temp_cleanup: Rc<spill::TempCleanup>,
     fmt: FormatCtx,
     pub params: &'a [Value],
     pub search_path: Vec<String>,
@@ -728,6 +729,7 @@ impl<'a> ExecCtx<'a> {
         ExecCtx {
             txn,
             sess,
+            temp_cleanup: Rc::default(),
             fmt,
             params,
             search_path,
@@ -857,6 +859,7 @@ impl<'a> ExecCtx<'a> {
         ExecCtx {
             txn: self.txn,
             sess: self.sess,
+            temp_cleanup: self.temp_cleanup.clone(),
             fmt,
             params,
             search_path: self.search_path.clone(),
@@ -1599,7 +1602,7 @@ impl<'a> ExecCtx<'a> {
 
 /// Run a plan to completion (as a statement of its own when none runs in `ctx`).
 pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<Vec<Row>> {
-    ctx.statement(|| {
+    let run = || ctx.statement(|| {
         let mut node = nodes::open(plan, ctx)?;
         let mut out = Vec::new();
         while let Some(r) = node.next(ctx)? {
@@ -1613,32 +1616,38 @@ pub fn collect(plan: &Arc<Plan>, ctx: &ExecCtx, limit: Option<usize>) -> Result<
             }
         }
         Ok(out)
-    })
+    });
+    // A materialized SQL-function call ends its executor before returning its value.
+    if let crate::sql::plan::Plan::Context { frame, .. } = plan.as_ref() {
+        ctx.temp_cleanup.statement_framed(ctx, frame.clone(), run)
+    } else {
+        ctx.temp_cleanup.run(run)
+    }
 }
 
 /// `collect` of a plan whose rows' columns outside `need` nothing reads (they may be NULL),
 /// each row through `f` as it comes (`nodes::Narrow::shrink`).
 pub fn collect_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx, mut f: impl FnMut(Row) -> Row) -> Result<Vec<Row>> {
-    ctx.statement(|| {
+    ctx.temp_cleanup.run(|| ctx.statement(|| {
         let mut node = nodes::open_need(plan, need, ctx)?;
         let mut out = Vec::new();
         while let Some(r) = node.next(ctx)? {
             out.push(f(r));
         }
         Ok(out)
-    })
+    }))
 }
 
 /// Run a query, handing each row to `f` as the executor returns it (a DestReceiver's
 /// receiveSlot): the rows before an error have been handed over; an error of `f` ends it.
 pub fn run_each(plan: &Arc<Plan>, ctx: &ExecCtx, mut f: impl FnMut(Row) -> Result<()>) -> Result<()> {
-    ctx.statement(|| {
+    ctx.temp_cleanup.run(|| ctx.statement(|| {
         let mut node = nodes::open(plan, ctx)?;
         while let Some(r) = node.next(ctx)? {
             f(r)?;
         }
         Ok(())
-    })
+    }))
 }
 
 impl ExecCtx<'_> {

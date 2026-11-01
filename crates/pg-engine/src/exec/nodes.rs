@@ -587,6 +587,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                         dml: None,
                     }))
                 };
+                ctx.temp_cleanup.register_cte(&state);
                 ctx.ctes.borrow_mut().insert(*id, state);
             }
             if dml.is_empty() {
@@ -4645,7 +4646,7 @@ impl HashJoinNode {
             ctx.check()?;
             outer.push(r);
         }
-        let inner = collect(&self.right_plan, ctx, None)?;
+        let inner = super::collect_need(&self.right_plan, self.inner_cols(), ctx, |r| r)?;
         let sort_keys = self.merge_keys();
         let okeys: Vec<Vec<Value>> = outer
             .iter()
@@ -5423,6 +5424,10 @@ pub struct CteState {
 }
 
 impl CteState {
+    pub(super) fn release(&mut self) {
+        self.node.take();
+    }
+
     /// Start a data-modifying CTE's statement, if it hasn't been.
     fn start(&mut self, ctx: &ExecCtx) -> Result<()> {
         if let Some(p) = self.dml.take() {

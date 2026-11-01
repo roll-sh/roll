@@ -712,6 +712,21 @@ impl Session {
             let _ = self.finish_txn(false);
             return Err(e);
         }
+        if commit && let Err(e) = (|| {
+            let names: Vec<_> = self.portals.keys().cloned().collect();
+            for name in names {
+                self.close_portal(&name)?;
+            }
+            let names: Vec<_> = self.state.cursors.borrow().iter()
+                .filter(|(_, c)| !c.hold).map(|(n, _)| n.clone()).collect();
+            for name in names {
+                self.close_portal(&name)?;
+            }
+            Ok::<(), Error>(())
+        })() {
+            let _ = self.finish_txn(false);
+            return Err(e);
+        }
         // XACT_EVENT_PRE_COMMIT: postgres_fdw's remote transactions commit first (a failure
         // aborts the local one).
         if commit
@@ -2010,7 +2025,7 @@ impl Session {
                 parallel = true;
                 run_as_parallel_worker(ctx, &bq.plan, &mut put)?;
             } else if streams && fetch > 0 {
-                suspended = run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?;
+                suspended = Some(run_suspendable(ctx, &bq.plan, params, fetch, &mut put)?);
             } else if streams {
                 crate::exec::run_each(&bq.plan, ctx, |r| put(r, ctx))?;
             } else {
@@ -2658,6 +2673,9 @@ impl Session {
                 format!("unsupported format code: {f}"),
             ));
         }
+        if portal.is_empty() {
+            self.close_portal(portal)?;
+        }
         self.portals.insert(
             portal.to_string(),
             Portal {
@@ -2891,9 +2909,8 @@ impl Session {
         if done {
             // (Run to its end, it stays there: Execute again returns no rows.)
             pt.run = PortalRun::held(VecDeque::new(), "SELECT 0", !more);
-        } else {
-            pt.lazy = Some(lazy);
         }
+        pt.lazy = Some(lazy);
         let tag = format!("SELECT {count}");
         Ok((Outcome::Done(QueryResult { cols: pt.cols.clone(), rows, tag }), more))
     }
@@ -2941,16 +2958,28 @@ impl Session {
     }
 
     /// Close message on a portal: a bound one, or a cursor.
-    pub fn close_portal(&mut self, name: &str) {
-        if self.portals.remove(name).is_none() {
-            self.state.cursors.borrow_mut().remove(name);
+    pub fn close_portal(&mut self, name: &str) -> Result<()> {
+        if let Some(mut pt) = self.portals.remove(name) {
+            if self.status != TxnStatus::Failed && let Some(lazy) = &mut pt.lazy {
+                lazy.close()?;
+            }
+        } else if let Some(c) = self.state.cursors.borrow_mut().remove(name)
+            && self.status != TxnStatus::Failed
+        {
+            c.close()?;
         }
+        Ok(())
     }
 
     /// Sync: end an implicit transaction; the unnamed portal goes away.
     pub fn sync(&mut self) -> Result<()> {
         self.pipelining = false;
-        self.portals.retain(|n, _| !n.is_empty());
+        if self.status == TxnStatus::Failed {
+            self.portals.remove("");
+        } else if let Err(e) = self.close_portal("") {
+            self.on_error();
+            return Err(e);
+        }
         let r = self.end_batch();
         if self.status == TxnStatus::Idle {
             self.portals.clear();
@@ -3893,8 +3922,8 @@ fn run_as_parallel_worker(
     r
 }
 
-/// An Execute with a row count: as many rows to `put`, the executor returned for the next
-/// one when there are more (PortalRunSelect).
+/// An Execute with a row count: as many rows to `put`, retaining the executor through
+/// portal close, including when it reaches EOF (PortalRunSelect).
 #[inline(never)]
 fn run_suspendable(
     ctx: &ExecCtx,
@@ -3902,10 +3931,11 @@ fn run_suspendable(
     params: &[Value],
     fetch: usize,
     put: &mut dyn FnMut(Row, &ExecCtx) -> Result<()>,
-) -> Result<Option<cursor::Lazy>> {
+) -> Result<cursor::Lazy> {
     let mut lazy = cursor::Lazy::new(ctx, plan.clone(), std::rc::Rc::new(Vec::new()), None, ctx.child(&[]).keep())
         .with_params(params.to_vec());
-    Ok(if lazy.each_row(ctx, fetch, put)? { None } else { Some(lazy) })
+    lazy.each_row(ctx, fetch, put)?;
+    Ok(lazy)
 }
 
 fn in_parallel_worker(ctx: &crate::exec::ExecCtx, plan: &crate::sql::plan::Plan) -> bool {

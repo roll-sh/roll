@@ -1028,11 +1028,13 @@ fn call_sql(ctx: &ExecCtx, f: &Function, args: Vec<Value>) -> Result<Vec<Row>> {
                         });
                         // Each statement of a volatile function is a command of its own.
                         let started = std::time::Instant::now();
-                        let rows = if f.volatility == 'v' {
-                            ctx.new_statement(run)
-                        } else {
-                            ctx.statement(run)
-                        };
+                        let rows = ctx.temp_cleanup.statement(|| {
+                            if f.volatility == 'v' {
+                                ctx.new_statement(run)
+                            } else {
+                                ctx.statement(run)
+                            }
+                        });
                         let instr = ae_instr.map(|(outer, i)| {
                             *ctx.instr.borrow_mut() = outer;
                             i
@@ -2661,13 +2663,14 @@ impl<'c, 'a> Interp<'c, 'a> {
         f: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
         let sess = self.cx().sess;
+        let cleanup = self.cx().temp_cleanup.clone();
         sess.framed(
             Frame::Query {
                 kind,
                 text: text.to_string(),
                 shift,
             },
-            |_| f(self),
+            |_| cleanup.statement(|| f(self)),
         )
     }
 
@@ -4417,9 +4420,9 @@ impl<'c, 'a> Interp<'c, 'a> {
                 }
             };
             if framed_run {
-                sess.framed(frame(), |_| run())
+                sess.framed(frame(), |_| child.temp_cleanup.statement(run))
             } else {
-                run()
+                child.temp_cleanup.statement(run)
             }
         })();
         self.cx()

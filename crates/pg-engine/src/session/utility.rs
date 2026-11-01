@@ -1098,20 +1098,17 @@ impl Session {
 
     pub(super) fn close_cursor(&mut self, s: &pb::ClosePortalStmt) -> Result<QueryResult> {
         if s.portalname.is_empty() {
-            self.state.cursors.borrow_mut().clear();
+            let cursors = std::mem::take(&mut *self.state.cursors.borrow_mut());
+            cursors.into_values().try_for_each(super::cursor::Cursor::close)?;
             return Ok(QueryResult::command("CLOSE CURSOR ALL"));
         }
-        if self
-            .state
-            .cursors
-            .borrow_mut()
-            .remove(&s.portalname)
-            .is_none()
-        {
-            return Err(Error::new(
+        let cursor = self.state.cursors.borrow_mut().remove(&s.portalname);
+        match cursor {
+            Some(c) => c.close()?,
+            None => return Err(Error::new(
                 code::INVALID_CURSOR_NAME,
                 format!("cursor \"{}\" does not exist", s.portalname),
-            ));
+            )),
         }
         Ok(QueryResult::command("CLOSE CURSOR"))
     }

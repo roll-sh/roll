@@ -170,7 +170,6 @@ fn hash_join_batches_clean_up_after_completion_limit_and_error() {
 
 // Reference transcript: a150-resume-t3-864cc5fb/temp-reference.{sql,out} in ~/.cache.
 #[test]
-#[ignore = "hash batch buffers lack fallible teardown after LIMIT; PostgreSQL flushes their tails"]
 fn hash_join_limit_temp_accounting_matches_postgres() {
     let dir = tempfile::tempdir().unwrap();
     let eng = open(dir.path());
@@ -191,7 +190,54 @@ fn hash_join_limit_temp_accounting_matches_postgres() {
         q(&mut s, sql).unwrap();
     }
     let actual = q(&mut s, "SELECT temp_files, temp_bytes FROM pg_stat_database WHERE datname = current_database()").unwrap();
+    assert_eq!(actual, vec![vec![Value::Int8(27), Value::Int8(759192)]]);
+    assert_no_spill_files(dir.path());
+    q(&mut s, "SET temp_file_limit = '224kB'").unwrap();
+    let err = q(&mut s, "SELECT a.id FROM hj a JOIN hj b ON a.id = b.id LIMIT 1").unwrap_err();
+    assert_eq!(err, "53400 temporary file size exceeds \"temp_file_limit\" (224kB)");
+    assert_no_spill_files(dir.path());
+    // Execution already failed: abort discards buffers instead of replacing this error
+    // with the tail flush's configuration-limit error.
+    let err = q(&mut s, "SELECT 1 / (a.id - 14) FROM hj a JOIN hj b ON a.id = b.id LIMIT 1").unwrap_err();
+    assert!(err.starts_with("22012"), "{err}");
+    assert_no_spill_files(dir.path());
+    // EOF on a cursor or suspended protocol portal does not end its executor.
+    // PostgreSQL raises the buffered-tail error at CLOSE or COMMIT, after FETCH succeeds.
+    for fetch in ["FETCH 1 c", "FETCH ALL c"] {
+        q(&mut s, "BEGIN").unwrap();
+        q(&mut s, "DECLARE c CURSOR FOR SELECT a.id FROM hj a JOIN hj b ON a.id = b.id LIMIT 1").unwrap();
+        assert_eq!(int(&mut s, fetch), 14);
+        let err = q(&mut s, "CLOSE c").unwrap_err();
+        assert!(err.starts_with("53400"), "{err}");
+        q(&mut s, "ROLLBACK").unwrap();
+        assert_no_spill_files(dir.path());
+    }
+    q(&mut s, "BEGIN").unwrap();
+    q(&mut s, "DECLARE c CURSOR FOR SELECT a.id FROM hj a JOIN hj b ON a.id = b.id LIMIT 1").unwrap();
+    assert_eq!(int(&mut s, "FETCH 1 c"), 14);
+    assert!(q(&mut s, "COMMIT").unwrap_err().starts_with("53400"));
+    assert_no_spill_files(dir.path());
+    q(&mut s, "BEGIN").unwrap();
+    s.parse_message("spill", "SELECT a.id FROM hj a JOIN hj b ON a.id = b.id LIMIT 1", &[]).unwrap();
+    s.bind_message("p", "spill", Vec::new(), &[], Vec::new()).unwrap();
+    let (_, more) = s.execute_portal("p", 1).unwrap();
+    assert!(more);
+    let (_, more) = s.execute_portal("p", 0).unwrap();
+    assert!(!more);
+    assert_eq!(s.close_portal("p").unwrap_err().code, "53400");
+    q(&mut s, "ROLLBACK").unwrap();
+    assert_no_spill_files(dir.path());
+    q(&mut s, "RESET temp_file_limit").unwrap();
+    let cancel = s.cancel.clone();
+    let err = s.query_each("SELECT a.id FROM hj a JOIN hj b ON a.id = b.id", move |_, row| {
+        if row.is_some() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }).unwrap_err();
+    assert_eq!(err.code, "57014");
+    assert_no_spill_files(dir.path());
+    assert_eq!(int(&mut s, "SELECT count(*) FROM hj a JOIN hj b ON a.id = b.id"), 12000);
     drop(s);
     eng.shutdown();
-    assert_eq!(actual, vec![vec![Value::Int8(27), Value::Int8(759192)]]);
 }

@@ -12,7 +12,7 @@
 
 use crate::error::{Error, Result, code};
 use crate::types::Value;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::rc::Rc;
@@ -70,6 +70,114 @@ impl TempUsage {
     }
 }
 
+/// Buffered accounts outlive nodes that materialize their inputs. Only the executor
+/// owner flushes them on successful shutdown; abort releases the written bytes as-is.
+#[derive(Default)]
+pub(crate) struct TempCleanup {
+    active: Cell<bool>,
+    pending: RefCell<Vec<(TempAcct, u64)>>,
+    ctes: RefCell<Vec<std::rc::Weak<RefCell<super::nodes::CteState>>>>,
+}
+
+impl TempCleanup {
+    pub(crate) fn run<T>(self: &Rc<Self>, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.scoped(false, None, f)
+    }
+
+    /// SPI and SQL-function statements have ExecutorEnd boundaries of their own.
+    pub(crate) fn statement<T>(self: &Rc<Self>, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.scoped(true, None, f)
+    }
+
+    /// Only shutdown needs an added frame: ContextNode frames execution itself.
+    pub(crate) fn statement_framed<T>(
+        self: &Rc<Self>,
+        ctx: &super::ExecCtx,
+        frame: crate::error::Frame,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.scoped(true, Some((ctx, frame)), f)
+    }
+
+    fn scoped<T>(
+        self: &Rc<Self>,
+        statement: bool,
+        frame: Option<(&super::ExecCtx, crate::error::Frame)>,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let outer = self.active.replace(true);
+        let mut scope = TempScope {
+            owner: self.clone(),
+            outer,
+            start: if outer { self.pending.borrow().len() } else { 0 },
+            ctes: if outer { self.ctes.borrow().len() } else { 0 },
+            success: false,
+        };
+        let out = f()?;
+        if statement || !scope.outer {
+            let finish = || self.finish_from(scope.start, scope.ctes);
+            match frame {
+                Some((ctx, frame)) => ctx.sess.framed(frame, |_| finish()),
+                None => finish(),
+            }?;
+        }
+        scope.success = true;
+        Ok(out)
+    }
+
+    pub(crate) fn finish(&self) -> Result<()> {
+        self.finish_from(0, 0)
+    }
+
+    fn finish_from(&self, start: usize, ctes: usize) -> Result<()> {
+        self.release_ctes(ctes);
+        let pending = self.pending.borrow_mut().split_off(start);
+        for (acct, bytes) in pending {
+            acct.pg_size(bytes)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn abort(&self) {
+        self.release_ctes(0);
+        self.pending.borrow_mut().clear();
+    }
+
+    pub(crate) fn register_cte(&self, state: &Rc<RefCell<super::nodes::CteState>>) {
+        self.ctes.borrow_mut().push(Rc::downgrade(state));
+    }
+
+    fn release_ctes(&self, start: usize) {
+        let ctes = self.ctes.borrow_mut().split_off(start);
+        for st in ctes.into_iter().filter_map(|s| s.upgrade()) {
+            st.borrow_mut().release();
+        }
+    }
+
+    /// A portal owns its resources across FETCH/Execute calls, even after EOF.
+    pub(crate) fn portal() -> Rc<Self> {
+        Rc::new(Self { active: Cell::new(true), ..Default::default() })
+    }
+}
+
+struct TempScope {
+    owner: Rc<TempCleanup>,
+    outer: bool,
+    start: usize,
+    ctes: usize,
+    success: bool,
+}
+
+impl Drop for TempScope {
+    fn drop(&mut self) {
+        if !self.success {
+            self.owner.release_ctes(self.ctes);
+            self.owner.pending.borrow_mut().truncate(self.start);
+        }
+        self.owner.active.set(self.outer);
+    }
+}
+
 /// PostgreSQL's account of one temporary file it would have written: its size (what
 /// temp_file_limit caps and pg_stat_statements' blocks count) and its report when it goes
 /// (pg_stat_database's temp_files / temp_bytes, log_temp_files). A node whose engine file
@@ -118,6 +226,14 @@ impl TempAcct {
         self.usage.blks_written.fetch_add(blocks, Ordering::Relaxed);
         self.pg.set(bytes);
         Ok(())
+    }
+
+    /// Transfer an unwritten tail to the executor owner without writing or raising an
+    /// error here. The owner explicitly chooses successful shutdown or abort.
+    pub(crate) fn close_later(self, bytes: u64, owner: &TempCleanup) {
+        if bytes > self.pg.get() {
+            owner.pending.borrow_mut().push((self, bytes));
+        }
     }
 
     /// PostgreSQL read `bytes` of it back (temp blocks read).

@@ -106,11 +106,19 @@ pub struct Lazy {
     /// Casts of its columns to the cursor's.
     coerce: Option<Vec<Expr>>,
     kept: crate::exec::Kept,
+    temp_cleanup: Rc<crate::exec::spill::TempCleanup>,
     /// The transaction as of OPEN: the query doesn't see later writes.
     snap: Rc<crate::txn::Snap>,
 }
 
 impl Lazy {
+    pub(crate) fn close(&mut self) -> Result<()> {
+        self.node.take();
+        self.kept = Default::default();
+        self.done = true;
+        self.temp_cleanup.finish()
+    }
+
     /// Its plan sorts and it hasn't finished: a tuplesort is alive under the portal
     /// (pg_backend_memory_contexts shows its contexts).
     pub fn sorting(&self) -> bool {
@@ -138,6 +146,7 @@ impl Lazy {
             outer,
             coerce,
             kept,
+            temp_cleanup: crate::exec::spill::TempCleanup::portal(),
             snap: ctx.cursor_snapshot(),
         }
     }
@@ -232,9 +241,11 @@ impl Lazy {
             outer,
             coerce,
             kept,
+            temp_cleanup,
             snap,
         } = self;
-        let child = ctx.child(params);
+        let mut child = ctx.child(params);
+        child.temp_cleanup = temp_cleanup.clone();
         child.restore(std::mem::take(kept));
         let mut ex = Exec {
             plan: &*plan,
@@ -250,7 +261,14 @@ impl Lazy {
         let r = child.with_snapshot(snap.clone(), || {
             child.with_outer(outer.clone(), || f(&mut ex, &child))
         });
-        *kept = child.keep();
+        if r.is_err() {
+            ex.node.take();
+            *ex.done = true;
+            drop(child.keep());
+            temp_cleanup.abort();
+        } else {
+            *kept = child.keep();
+        }
         ctx.notices
             .borrow_mut()
             .extend(child.notices.borrow_mut().drain(..));
@@ -396,7 +414,6 @@ impl Exec<'_> {
             Some(r) => Ok(Some(r)),
             None => {
                 *self.done = true;
-                *self.node = None;
                 Ok(None)
             }
         }
@@ -545,6 +562,13 @@ fn backward_err() -> Error {
 }
 
 impl Cursor {
+    pub(crate) fn close(mut self) -> Result<()> {
+        if !self.failed && let Some(lazy) = &mut self.lazy {
+            lazy.close()?;
+        }
+        Ok(())
+    }
+
     /// Open over `rows`; with `key_table`, each row's last column is its storage key.
     pub fn new(
         cols: Vec<OutCol>,
@@ -630,9 +654,9 @@ impl Cursor {
             return f(self, None, ctx);
         };
         let r = lazy.within(ctx, |ex, ctx| f(self, Some(ex), ctx));
-        // Keep the executor while it can produce rows, or evaluates their target list or
-        // qual.
-        self.lazy = (self.projected || lazy.qual.is_some() || !lazy.done).then_some(lazy);
+        // EOF ends fetching, not the portal's executor lifetime (ExecutorEnd is at
+        // CLOSE or commit). Unread hash buffers can still fail when the portal closes.
+        self.lazy = Some(lazy);
         r
     }
 
@@ -1040,7 +1064,9 @@ impl Cursor {
             }
             Ok((rows, keys))
         })?;
-        self.lazy = None;
+        if let Some(mut lazy) = self.lazy.take() {
+            lazy.close()?;
+        }
         self.projected = false;
         self.last = None;
         self.rows = rows;
@@ -1734,15 +1760,13 @@ pub fn spi_cursor_stmt(
         })(),
         N::ClosePortalStmt(s) => {
             if s.portalname.is_empty() {
-                ctx.sess.cursors.borrow_mut().clear();
-                Ok("CLOSE CURSOR ALL".to_string())
-            } else if ctx.sess.cursors.borrow_mut().remove(&s.portalname).is_none() {
-                Err(Error::new(
-                    code::INVALID_CURSOR_NAME,
-                    format!("cursor \"{}\" does not exist", s.portalname),
-                ))
+                let cursors = std::mem::take(&mut *ctx.sess.cursors.borrow_mut());
+                cursors.into_values().try_for_each(Cursor::close).map(|()| "CLOSE CURSOR ALL".to_string())
             } else {
-                Ok("CLOSE CURSOR".to_string())
+                match ctx.sess.cursors.borrow_mut().remove(&s.portalname) {
+                    Some(c) => c.close().map(|()| "CLOSE CURSOR".to_string()),
+                    None => Err(Error::new(code::INVALID_CURSOR_NAME, format!("cursor \"{}\" does not exist", s.portalname))),
+                }
             }
         }
         _ => return None,

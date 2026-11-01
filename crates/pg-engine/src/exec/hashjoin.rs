@@ -32,8 +32,17 @@ pub const OUTER: usize = 1;
 struct BatchFile {
     chunks: Vec<(u64, u64)>,
     buf: Vec<u8>,
-    acct: TempAcct,
+    acct: Option<TempAcct>,
+    cleanup: std::rc::Rc<super::spill::TempCleanup>,
     bytes: u64,
+}
+
+impl Drop for BatchFile {
+    fn drop(&mut self) {
+        if let Some(acct) = self.acct.take() {
+            acct.close_later(self.bytes, &self.cleanup);
+        }
+    }
 }
 
 /// The batch files, inner and outer per batch, in one file of the engine's.
@@ -56,13 +65,14 @@ impl Files {
         let f = self.batches[batch][side].get_or_insert_with(|| BatchFile {
             chunks: Vec::new(),
             buf: Vec::new(),
-            acct: TempAcct::new(ctx),
+            acct: Some(TempAcct::new(ctx)),
+            cleanup: ctx.temp_cleanup.clone(),
             bytes: 0,
         });
         put_tagged_row(&mut f.buf, [hash, tlen as u32], row);
         f.bytes += 4 + tlen as u64;
         // (BufFile writes its buffer out a block at a time.)
-        f.acct.pg_size(f.bytes / BLCKSZ as u64 * BLCKSZ as u64)?;
+        f.acct.as_ref().unwrap().pg_size(f.bytes / BLCKSZ as u64 * BLCKSZ as u64)?;
         if f.buf.len() >= FILE_BUF {
             let file = match &mut self.file {
                 Some(file) => file,
@@ -79,8 +89,8 @@ impl Files {
         let Some(mut f) = self.batches.get_mut(batch).and_then(|b| b[side].take()) else {
             return Ok(None);
         };
-        f.acct.pg_size(f.bytes)?;
-        f.acct.pg_read(f.bytes);
+        f.acct.as_ref().unwrap().pg_size(f.bytes)?;
+        f.acct.as_ref().unwrap().pg_read(f.bytes);
         if !f.buf.is_empty() {
             let file = match &mut self.file {
                 Some(file) => file,
@@ -96,7 +106,7 @@ impl Files {
     fn close(&mut self, batch: usize, side: usize) -> Result<()> {
         if let Some(f) = self.batches.get_mut(batch).and_then(|b| b[side].take()) {
             // BufFileClose flushes even a skipped batch's buffered tail.
-            f.acct.pg_size(f.bytes)?;
+            f.acct.as_ref().unwrap().pg_size(f.bytes)?;
         }
         Ok(())
     }
