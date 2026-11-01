@@ -216,7 +216,23 @@ fn pg_err(e: pg_engine::error::Error) -> String {
 impl Conn for InProc {
     fn simple(&mut self, sql: &str) -> Res<(u64, u64)> {
         let rs = self.s.query(sql).map_err(pg_err)?;
-        Ok((rs.iter().map(|r| r.rows.len() as u64).sum(), 0))
+        let fmt = self.s.format_ctx();
+        let text_ty = pg_engine::types::DataType::Text;
+        let mut rows = 0;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for r in rs {
+            let cols = r.cols.as_deref().unwrap_or(&[]);
+            for row in r.rows {
+                rows += 1;
+                for (i, v) in row.iter().enumerate() {
+                    let ty = cols.get(i).map_or(&text_ty, |c| &c.ty);
+                    let text = (!v.is_null())
+                        .then(|| pg_engine::types::text::format_value(v, ty, &fmt));
+                    text.as_deref().hash(&mut h);
+                }
+            }
+        }
+        Ok((rows, h.finish()))
     }
     fn prepare(&mut self, sql: &str, nparams: usize) -> Res<usize> {
         let name = format!("b{}", self.names.len());
@@ -545,6 +561,8 @@ fn run_clients(
     let mut kv = vec![
         ("clients", clients.to_string()),
         ("tps", format!("{:.0}", n as f64 / elapsed)),
+        ("ops", n.to_string()),
+        ("elapsed_s", format!("{elapsed:.9}")),
         ("mean_ms", format!("{mean:.3}")),
         ("p50_ms", format!("{:.3}", pct(&lat, 0.50))),
         ("p95_ms", format!("{:.3}", pct(&lat, 0.95))),
@@ -552,10 +570,17 @@ fn run_clients(
         ("errors", errors.to_string()),
         ("peak_mem_mb", mb(peak)),
     ];
+    if n == 0 && first_err.is_empty() {
+        first_err = "no successful operations".to_string();
+    }
     if !first_err.is_empty() {
         kv.push(("first_error", first_err.replace(['\t', '\n'], " ")));
     }
     cx.report(workload, case, &kv);
+    assert!(
+        errors == 0 && n > 0,
+        "{workload}/{case}: {errors} errors, {n} successful operations: {first_err}"
+    );
 }
 
 /// Time `f` (seconds).
@@ -567,6 +592,13 @@ fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
 
 fn must<T>(r: Res<T>, what: &str) -> T {
     r.unwrap_or_else(|e| panic!("{what}: {e}"))
+}
+
+fn expect_rows(actual: u64, expected: u64) -> Res<()> {
+    if actual != expected {
+        return Err(format!("expected {expected} rows, got {actual}"));
+    }
+    Ok(())
 }
 
 fn run_script(c: &mut dyn Conn, sql: &str) {
@@ -640,28 +672,32 @@ fn oltp(cx: &Ctx) {
                 let d = r.range(-500, 500);
                 match name {
                     "point_select_simple" => {
-                        c.simple(&format!(
+                        let (n, _) = c.simple(&format!(
                             "SELECT id, owner, balance, note, created FROM accounts WHERE id = {id}"
                         ))?;
+                        expect_rows(n, 1)?;
                     }
                     "range_scan_100" => {
-                        c.exec(ids[0], &[r.range(1, rows - 100)])?;
+                        expect_rows(c.exec(ids[0], &[r.range(1, rows - 100)])?, 100)?;
                     }
                     "secondary_lookup" => {
-                        c.exec(ids[0], &[r.range(0, 49_999)])?;
+                        expect_rows(c.exec(ids[0], &[r.range(0, 49_999)])?, 1)?;
                     }
                     "insert" | "update_indexed" => {
-                        c.exec(ids[0], &[id, d])?;
+                        expect_rows(c.exec(ids[0], &[id, d])?, 1)?;
                     }
                     "upsert" => {
-                        c.exec(ids[0], &[r.range(1, 100_000)])?;
+                        expect_rows(c.exec(ids[0], &[r.range(1, 100_000)])?, 1)?;
                     }
                     "short_txn" => {
                         c.simple("BEGIN")?;
                         let r2 = c
                             .exec(ids[0], &[id, d])
+                            .and_then(|n| expect_rows(n, 1))
                             .and_then(|_| c.exec(ids[1], &[id]))
-                            .and_then(|_| c.exec(ids[2], &[id, d]));
+                            .and_then(|n| expect_rows(n, 1))
+                            .and_then(|_| c.exec(ids[2], &[id, d]))
+                            .and_then(|n| expect_rows(n, 1));
                         match r2 {
                             Ok(_) => {
                                 c.simple("COMMIT")?;
@@ -673,10 +709,10 @@ fn oltp(cx: &Ctx) {
                         }
                     }
                     "select_1" => {
-                        c.exec(ids[0], &[])?;
+                        expect_rows(c.exec(ids[0], &[])?, 1)?;
                     }
                     _ => {
-                        c.exec(ids[0], &[id])?;
+                        expect_rows(c.exec(ids[0], &[id])?, 1)?;
                     }
                 }
                 Ok(())
@@ -713,6 +749,7 @@ fn analytic_load(cx: &Ctx) {
 /// Run named queries `reps` times each; report min / median seconds, rows and a result hash.
 fn run_queries(cx: &Ctx, workload: &str, queries: &[(&str, &str)]) {
     let reps: usize = cx.opt("reps", 3);
+    assert!(reps > 0, "reps must be greater than zero");
     let only: String = cx.opt("only", String::new());
     let timeout: u64 = cx.opt("timeout", 600);
     let mut c = cx.conn();
@@ -723,18 +760,25 @@ fn run_queries(cx: &Ctx, workload: &str, queries: &[(&str, &str)]) {
         }
         let mut times = Vec::new();
         let mut out = (0, 0);
-        let mut error = String::new();
+        let mut error = None;
         let sampler = MemSampler::start(&cx.mem);
         let cpu0 = cx.mem.cpu_secs();
-        for _ in 0..reps {
+        for rep in 0..reps {
             let (r, s) = timed(|| c.simple(sql));
             match r {
                 Ok(r) => {
+                    if rep > 0 && r != out {
+                        error = Some(format!(
+                            "repetition {}: expected rows={} hash={:016x}, got rows={} hash={:016x}",
+                            rep + 1, out.0, out.1, r.0, r.1
+                        ));
+                        break;
+                    }
                     out = r;
                     times.push(s);
                 }
                 Err(e) => {
-                    error = e;
+                    error = Some(e);
                     break;
                 }
             }
@@ -751,25 +795,35 @@ fn run_queries(cx: &Ctx, workload: &str, queries: &[(&str, &str)]) {
             ("peak_mem_mb", mb(peak)),
             ("cpu_s", format!("{cpu:.2}")),
         ];
-        if !error.is_empty() {
+        if let Some(error) = &error {
             kv.push(("error", error.replace(['\t', '\n'], " ")));
         }
         cx.report(workload, name, &kv);
+        if let Some(error) = error {
+            panic!("{workload}/{name}: {error}");
+        }
     }
 }
 
-const ANALYTIC: &[(&str, &str)] = &[
-    ("seq_filter", "SELECT count(*) FROM fact WHERE x > 500 AND s LIKE '%7a%'"),
-    ("sort_float", "SELECT id, x FROM fact ORDER BY x, id OFFSET 1999990"),
-    ("sort_text", "SELECT s FROM fact ORDER BY s OFFSET 1999990"),
-    ("top_n", "SELECT id, x FROM fact ORDER BY x DESC, id LIMIT 100"),
-    ("hash_agg", "SELECT g, count(*), sum(x), avg(y), min(s), max(s) FROM fact GROUP BY g ORDER BY g"),
-    ("count_distinct", "SELECT count(DISTINCT k) FROM fact"),
-    ("hash_join", "SELECT d.name, count(*), sum(f.x) FROM fact f JOIN dim d ON f.k = d.k GROUP BY d.name ORDER BY d.name"),
-    ("window", "SELECT sum(rn), max(cs) FROM (SELECT row_number() OVER (PARTITION BY g ORDER BY id) rn, sum(x) OVER (PARTITION BY g ORDER BY id) cs FROM fact) t"),
-    ("index_range", "SELECT sum(x) FROM fact WHERE id BETWEEN 1000 AND 50000"),
-    ("numeric_sum", "SELECT sum(y), avg(y) FROM fact"),
-];
+fn analytic(cx: &Ctx) {
+    let rows: u64 = cx.opt("rows", 2_000_000);
+    let offset = rows.saturating_sub(10);
+    let sort_float = format!("SELECT id, x FROM fact ORDER BY x, id OFFSET {offset} LIMIT 10");
+    let sort_text = format!("SELECT s FROM fact ORDER BY s OFFSET {offset} LIMIT 10");
+    let queries: &[(&str, &str)] = &[
+        ("seq_filter", "SELECT count(*) FROM fact WHERE x > 500 AND s LIKE '%7a%'"),
+        ("sort_float", &sort_float),
+        ("sort_text", &sort_text),
+        ("top_n", "SELECT id, x FROM fact ORDER BY x DESC, id LIMIT 100"),
+        ("hash_agg", "SELECT g, count(*), sum(x), avg(y), min(s), max(s) FROM fact GROUP BY g ORDER BY g"),
+        ("count_distinct", "SELECT count(DISTINCT k) FROM fact"),
+        ("hash_join", "SELECT d.name, count(*), sum(f.x) FROM fact f JOIN dim d ON f.k = d.k GROUP BY d.name ORDER BY d.name"),
+        ("window", "SELECT sum(rn), max(cs) FROM (SELECT row_number() OVER (PARTITION BY g ORDER BY id) rn, sum(x) OVER (PARTITION BY g ORDER BY id) cs FROM fact) t"),
+        ("index_range", "SELECT sum(x) FROM fact WHERE id BETWEEN 1000 AND 50000"),
+        ("numeric_sum", "SELECT sum(y), avg(y) FROM fact"),
+    ];
+    run_queries(cx, "analytic", queries);
+}
 
 // ---------------------------------------------------------------------------------------------
 // TPC-H
@@ -1486,7 +1540,7 @@ fn main() {
             "oltp-load" => oltp_load(&cx),
             "oltp" => oltp(&cx),
             "analytic-load" => analytic_load(&cx),
-            "analytic" => run_queries(&cx, "analytic", ANALYTIC),
+            "analytic" => analytic(&cx),
             "tpch-load" => tpch_load(&cx),
             "tpch" => run_queries(&cx, "tpch", tpch::QUERIES),
             "bulk" => bulk(&cx),
