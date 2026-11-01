@@ -1374,10 +1374,19 @@ impl Est<'_> {
         let Some((vals, _)) = slot(s, 2, self.fmt) else {
             return -1.0;
         };
-        let mut vals = Arc::unwrap_or_clone(vals);
         let n = vals.len();
         if n < 2 {
             return -1.0;
+        }
+        let mut ends = [None, None];
+        fn at<'a>(vals: &'a [Value], ends: &'a [Option<Value>; 2], i: usize) -> &'a Value {
+            if i == 0 {
+                ends[0].as_ref().unwrap_or(&vals[i])
+            } else if i == vals.len() - 1 {
+                ends[1].as_ref().unwrap_or(&vals[i])
+            } else {
+                &vals[i]
+            }
         }
         // The histogram's end values give way to the column's actual ones.
         let end = |min: bool| self.endpoint.and_then(|f| f(v, min));
@@ -1385,8 +1394,7 @@ impl Est<'_> {
         if n == 2
             && let (Some(a), Some(b)) = (end(true), end(false))
         {
-            vals[0] = a;
-            vals[1] = b;
+            ends = [Some(a), Some(b)];
             have_end = true;
         }
         let lt = |x: &Value| {
@@ -1407,17 +1415,17 @@ impl Est<'_> {
             if probe == 0 && n > 2 {
                 have_end = false;
                 if let Some(a) = end(true) {
-                    vals[0] = a;
+                    ends[0] = Some(a);
                     have_end = true;
                 }
             } else if probe == n - 1 && n > 2 {
                 have_end = false;
                 if let Some(b) = end(false) {
-                    vals[probe] = b;
+                    ends[1] = Some(b);
                     have_end = true;
                 }
             }
-            if lt(&vals[probe]) {
+            if lt(at(&vals, &ends, probe)) {
                 lo = probe + 1;
             } else {
                 hi = probe;
@@ -1439,7 +1447,7 @@ impl Est<'_> {
                     eq_sel = 1.0 / other;
                 }
             }
-            let binfrac = match scalars(c, &vals[i - 1], &vals[i], self.fmt) {
+            let binfrac = match scalars(c, at(&vals, &ends, i - 1), at(&vals, &ends, i), self.fmt) {
                 Some((val, low, high)) => {
                     if high <= low {
                         0.5
@@ -2246,4 +2254,221 @@ pub fn incremental_sort_cost(
     run += CPU_TUPLE_COST * tuples;
     run += 2.0 * CPU_TUPLE_COST * groups;
     (startup, startup + run)
+}
+
+#[cfg(test)]
+mod hist_ineq_tests {
+    use super::*;
+    use crate::catalog::{Column, StatSlot};
+    use std::cell::RefCell;
+
+    fn with_histogram(bounds: &[i32], test: impl FnOnce(&Est<'_>, &VarRef, &ColStats)) {
+        let mut table: Table = serde_json::from_value(serde_json::json!({
+            "oid": 100000, "schema": 2200, "name": "hist", "owner": 10,
+            "columns": [], "constraints": [], "next_index_id": 1
+        }))
+        .unwrap();
+        table.columns.push(Column::new("v", DataType::Int4));
+        let v = VarRef::column(Arc::new(table), 0, 100.0);
+        let s = ColStats {
+            attnum: 1,
+            inherit: false,
+            nullfrac: 0.0,
+            width: 4,
+            distinct: 100.0,
+            slots: vec![StatSlot {
+                kind: 2,
+                op: 97,
+                coll: 0,
+                numbers: None,
+                values: Some((
+                    DataType::Int4,
+                    bounds.iter().map(ToString::to_string).collect(),
+                )),
+                parsed: Default::default(),
+            }],
+        };
+        let mut cat = Catalog::default();
+        cat.colstats.insert(v.table.oid, vec![s]);
+        let fmt = FormatCtx::default();
+        let est = Est {
+            cat: &cat,
+            fmt: &fmt,
+            vars: &|_| None,
+            exprs: &[],
+            endpoint: None,
+            distinct: None,
+            user: None,
+            same_rel: false,
+        };
+        test(&est, &v, &cat.colstats[&v.table.oid][0]);
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn missing_or_short_histograms_do_not_fetch_endpoints() {
+        for bounds in [&[][..], &[10][..]] {
+            with_histogram(bounds, |base, v, s| {
+                let endpoint =
+                    |_: &VarRef, _: bool| -> Option<Value> { panic!("no usable histogram") };
+                let est = Est {
+                    endpoint: Some(&endpoint),
+                    ..*base
+                };
+                let missing = ColStats {
+                    slots: vec![],
+                    ..s.clone()
+                };
+                for stats in [s, &missing] {
+                    for gt in [false, true] {
+                        for eq in [false, true] {
+                            assert_eq!(est.hist_ineq(v, stats, &Value::Int4(10), gt, eq), -1.0);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn cached_histogram_boundaries_keep_equality_and_cutoffs() {
+        for n in [2, 3, 4, 5, 8, 101] {
+            let bounds: Vec<i32> = (0..n).map(|i| i * 10).collect();
+            with_histogram(&bounds, |est, v, s| {
+                let cutoff = 0.01 / (n - 1) as f64;
+                // Expected order: <, <=, >, >=; 100 distinct values.
+                for (c, expected) in [
+                    (i32::MIN, [cutoff, cutoff, 1.0 - cutoff, 1.0 - cutoff]),
+                    (-1, [cutoff, cutoff, 1.0 - cutoff, 1.0 - cutoff]),
+                    (0, [cutoff, 0.01, 0.99, 1.0 - cutoff]),
+                    ((n - 1) * 10, [0.99, 1.0 - cutoff, cutoff, 0.01]),
+                    (
+                        (n - 1) * 10 + 1,
+                        [1.0 - cutoff, 1.0 - cutoff, cutoff, cutoff],
+                    ),
+                    (i32::MAX, [1.0 - cutoff, 1.0 - cutoff, cutoff, cutoff]),
+                ] {
+                    for ((gt, eq), expected) in
+                        [(false, false), (false, true), (true, false), (true, true)]
+                            .into_iter()
+                            .zip(expected)
+                    {
+                        close(est.hist_ineq(v, s, &Value::Int4(c), gt, eq), expected);
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn two_entries_replace_both_endpoints_or_neither() {
+        with_histogram(&[10, 20], |base, v, s| {
+            let cached = slot(s, 2, base.fmt).unwrap().0;
+            for ends in [
+                [None, None],
+                [Some(0), None],
+                [None, Some(30)],
+                [Some(0), Some(30)],
+            ] {
+                let calls = RefCell::new(Vec::new());
+                let endpoint = |_: &VarRef, min: bool| {
+                    calls.borrow_mut().push(min);
+                    ends[usize::from(!min)].map(Value::Int4)
+                };
+                let est = Est {
+                    endpoint: Some(&endpoint),
+                    ..*base
+                };
+                for (c, expected) in [
+                    (i32::MIN, [0.0, 0.0, 1.0, 1.0]),
+                    (0, [0.0, 0.01, 0.99, 1.0]),
+                    (15, [0.495, 0.505, 0.495, 0.505]),
+                    (30, [0.99, 1.0, 0.0, 0.01]),
+                    (i32::MAX, [1.0, 1.0, 0.0, 0.0]),
+                ] {
+                    for ((gt, eq), expected) in
+                        [(false, false), (false, true), (true, false), (true, true)]
+                            .into_iter()
+                            .zip(expected)
+                    {
+                        calls.borrow_mut().clear();
+                        let original = base.hist_ineq(v, s, &Value::Int4(c), gt, eq);
+                        let actual = est.hist_ineq(v, s, &Value::Int4(c), gt, eq);
+                        assert_eq!(*calls.borrow(), [true, false]);
+                        if ends.iter().all(Option::is_some) {
+                            close(actual, expected);
+                        } else {
+                            assert_eq!(actual.to_bits(), original.to_bits());
+                        }
+                        assert_eq!(
+                            base.hist_ineq(v, s, &Value::Int4(c), gt, eq).to_bits(),
+                            original.to_bits()
+                        );
+                    }
+                }
+            }
+            assert_eq!(cached.as_slice(), &[Value::Int4(10), Value::Int4(20)]);
+        });
+    }
+
+    #[test]
+    fn larger_histograms_refresh_only_probed_ends_and_interpolate_them() {
+        for n in [3, 4, 5, 8, 101] {
+            let bounds: Vec<i32> = (1..=n).map(|i| i * 10).collect();
+            with_histogram(&bounds, |base, v, s| {
+                let cached = slot(s, 2, base.fmt).unwrap().0;
+                for available in [false, true] {
+                    let calls = RefCell::new(Vec::new());
+                    let endpoint = |_: &VarRef, min: bool| {
+                        calls.borrow_mut().push(min);
+                        available.then_some(Value::Int4(if min { 0 } else { (n + 1) * 10 }))
+                    };
+                    let est = Est {
+                        endpoint: Some(&endpoint),
+                        ..*base
+                    };
+                    for (c, min, fraction) in [
+                        (i32::MIN, true, 0.0),
+                        (5, true, 0.25 / (n - 1) as f64 + 0.0075),
+                        (n * 10 + 5, false, (n as f64 - 1.25) / (n - 1) as f64),
+                        (i32::MAX, false, 1.0),
+                    ] {
+                        for (gt, eq) in [(false, false), (false, true), (true, false), (true, true)]
+                        {
+                            calls.borrow_mut().clear();
+                            let actual = est.hist_ineq(v, s, &Value::Int4(c), gt, eq);
+                            assert_eq!(*calls.borrow(), [min]);
+                            let h = if c != i32::MIN && c != i32::MAX && gt == eq {
+                                fraction - 0.01
+                            } else {
+                                fraction
+                            };
+                            if available {
+                                close(actual, (if gt { 1.0 - h } else { h }).clamp(0.0, 1.0));
+                            } else {
+                                assert_eq!(
+                                    actual.to_bits(),
+                                    base.hist_ineq(v, s, &Value::Int4(c), gt, eq).to_bits()
+                                );
+                            }
+                            if n >= 5 {
+                                calls.borrow_mut().clear();
+                                let c = Value::Int4(n / 2 * 10 + 5);
+                                assert_eq!(
+                                    est.hist_ineq(v, s, &c, gt, eq).to_bits(),
+                                    base.hist_ineq(v, s, &c, gt, eq).to_bits()
+                                );
+                                assert!(calls.borrow().is_empty());
+                            }
+                        }
+                    }
+                }
+                let expected: Vec<_> = bounds.iter().copied().map(Value::Int4).collect();
+                assert_eq!(cached.as_slice(), expected.as_slice());
+            });
+        }
+    }
 }
