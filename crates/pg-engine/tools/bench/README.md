@@ -56,8 +56,12 @@ before attributing a throughput ceiling to the server.
 
 `suite.sh` runs broader workloads against one target. It rejects command failures,
 missing result records, reported errors and invalid pgbench summaries, and reloads each
-analytic fixture even in-process. It does not compare results across servers or replace
-an alternating comparison. In-process runs require the wire engine to be stopped.
+analytic fixture even in-process. OLTP runs checked reads at both client counts before
+any writes, then reloads before each write case/client count. `OLTP_ROWS` selects the
+fixture size (default 1000000); every OLTP load and run receives that `--rows` value.
+`check_suite.py` uses a stub `RUN` to check invocation/reset ordering and failure logging
+without running benchmarks or services. The suite does not compare results across servers
+or replace an alternating comparison. In-process runs require the wire engine to be stopped.
 
 ## Read-only OLTP comparisons
 
@@ -127,6 +131,10 @@ The `oltp-values-v1` contract is:
   `ceil(n/2) * a + floor(n/2) * b`, or SQL NULL when `n = 0`. There is no float conversion
   or tolerance; zero is distinct from NULL.
 - `select_1`: exactly one non-NULL INT4 value equal to 1.
+
+The secondary lookup validates the aggregate response, not the contributing rows.
+Different owners can have equal count/sum responses, so these aggregate checks cannot
+distinguish those responses or detect a stale response with the same count and sum.
 
 Prepared wire reads check exact column OIDs and decode binary INT4, INT8, TEXT, DATE and
 NUMERIC values. Small DATE/NUMERIC `FromSql` wrappers use the existing exact numeric
