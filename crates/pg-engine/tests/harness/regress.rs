@@ -2813,9 +2813,10 @@ fn write_report(cfg: &Config, results: &[FileResult]) {
 - Files run serially; pg_regress runs most groups in parallel, so tests that look at concurrent sessions behave as in a serial run on both sides.\n\
 - The reference container has no `regress.so`, so `CREATE FUNCTION ... AS :'regresslib'` fails on both sides and later statements using those functions (`widget_in`, `interpt_pp`, `binary_coercible`, `test_canonicalize_path`, ...) error on the reference too. Those units are classed *by design*; where both sides fail identically they count as matching.\n\
 - Server-side files (`COPY ... TO :'filename'`, `pg_read_file`, `lo_export`) are on the host for the engine (in `PGREGRESS_DIR`, allowed with `--allow-server-files`) and in the container for the reference; psql-side files (`\\copy`, `\\o`, `\\lo_import`) are always in the container, so a `\\lo_import` of a file the server wrote reads the reference's copy (and one-line server-side COPYs of a file psql wrote run as `\\copy`).\n\
-- The database is `gxg_regression` (not `regression`); `GRANT ... ON DATABASE regression` and psql's `\\d host.regression.x` patterns are rewritten. When comparing with `expected/*.out` the name is mapped back.\n\
+- The database is `{}`; `GRANT ... ON DATABASE regression` and psql's `\\d host.regression.x` patterns are rewritten. When comparing with `expected/*.out` the name is mapped back.\n\
 - A unit's output includes everything psql printed until the next unit, so one wrong statement in a multi-statement line marks the whole line. Pipeline tests (`\\startpipeline`) print results at `\\endpipeline`, so differences land on that unit.\n\
-- Units after a `\\quit` that the reference reached but the engine did not count as *not reached*; units neither side reached are not counted.\n"
+- Units after a `\\quit` that the reference reached but the engine did not count as *not reached*; units neither side reached are not counted.\n",
+        db_name()
     );
     std::fs::write(cfg.report_dir.join("REPORT.md"), s).unwrap();
     std::fs::write(cfg.report_dir.join("results.tsv"), results_tsv(cfg, results)).unwrap();

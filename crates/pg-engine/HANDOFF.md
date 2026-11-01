@@ -64,8 +64,11 @@ Exact scripts and logs are under `~/.cache/pg-engine-sol-resume/`:
 files identify the tested source. The generated regression report was refreshed from
 that run's saved outputs with the original database and helper configuration.
 `report-refresh-configured.log` supersedes the first report-only refresh, which omitted
-`PGREGRESS_DB`. Generated counts remain unchanged. Both full-run containers are stopped,
-and their reference data is retained.
+`PGREGRESS_DB`. An independent evidence audit found no verification blockers and caught
+a hardcoded database name in the report's measurement limits. The report generator now
+prints the selected database, `regression_sol_combined`, and the saved-output report
+refresh is recorded in `report-refresh-db-provenance.log`. Generated counts remain
+unchanged. Both full-run containers are stopped, and their reference data is retained.
 
 The Docker recovery e2e suite was not repeated under the user's instruction. Its
 baseline at `3069ca91` remains twelve passes and four compute-to-host WAL HTTP timeout
