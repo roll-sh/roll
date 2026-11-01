@@ -218,6 +218,8 @@ struct Backend {
     /// Messages the server loop started reading (`read_counter`).
     reads: Arc<AtomicU64>,
     activity: Activity,
+    /// Its proc array slot, once it has one (`assign_proc`).
+    proc: Option<Arc<crate::txn::procs::Proc>>,
 }
 
 /// The open databases, and those whose store is closing. A database's files aren't opened
@@ -271,6 +273,10 @@ pub struct Engine {
     /// WAL positions and replication slots.
     repl: Arc<crate::repl::Repl>,
     backends: Mutex<HashMap<i32, Backend>>,
+    /// The proc array's slots (virtual transaction ids).
+    procs: Arc<crate::txn::procs::Procs>,
+    /// max_connections and autovacuum_worker_slots (where the launchers' slots are).
+    proc_sizes: (usize, usize),
     next_pid: AtomicI32,
     /// Held while a database's indexes are brought to the current key format.
     index_upgrade: Mutex<()>,
@@ -474,6 +480,8 @@ impl Engine {
         };
         let slots = crate::repl::slot::Slots::open(Some(opts.data_dir.clone()), count("max_replication_slots", 10)?)?;
         let max_wal_senders = count("max_wal_senders", 10)?;
+        let proc_sizes = (count("max_connections", 100)?, count("autovacuum_worker_slots", 16)?);
+        let procs = crate::txn::procs::Procs::new(proc_sizes.0, proc_sizes.1, count("max_worker_processes", 8)?, max_wal_senders);
         let track_commit_ts = match setting("track_commit_timestamp") {
             Some(v) => crate::session::settings::parse_bool(&v)
                 .ok_or_else(|| internal("parameter \"track_commit_timestamp\" requires a Boolean value".to_string()))?,
@@ -535,7 +543,11 @@ impl Engine {
             });
             let repl = Arc::new(crate::repl::Repl::new(wal, slots, crate::repl::origin::Origins::open(Some(origins_dir)), wal_level, max_wal_senders).with_commit_ts(track_commit_ts));
             // One WAL position: the statistics' moves go to the change stream's counter.
-            stats.lock().wal = Some(repl.wal.clone());
+            {
+                let mut s = stats.lock();
+                s.wal = Some(repl.wal.clone());
+                s.start_lsn = s.wal_lsn();
+            }
             Engine {
                 opts,
                 cache,
@@ -552,6 +564,8 @@ impl Engine {
                 repl,
                 index_upgrade: Mutex::new(()),
                 backends: Mutex::new(HashMap::new()),
+                procs,
+                proc_sizes,
                 next_pid: AtomicI32::new(1000 + (std::process::id() as i32 % 1000) * 10),
                 started: crate::types::datetime::Clock::system().now,
                 stopped: AtomicBool::new(false),
@@ -1001,9 +1015,21 @@ impl Engine {
                 terminated: terminated.clone(),
                 reads: Default::default(),
                 activity,
+                proc: None,
             },
         );
         (pid, secret, terminated)
+    }
+
+    /// InitProcess for backend `pid`: a proc array slot of `kind`, its startup transaction
+    /// begun (`Engine::connect` ends it).
+    pub fn assign_proc(&self, pid: i32, kind: crate::txn::procs::ProcKind) -> Arc<crate::txn::procs::Proc> {
+        let p = self.procs.assign(kind, pid);
+        if let Some(b) = self.backends.lock().get_mut(&pid) {
+            b.activity.proc_number = Some(p.number());
+            b.proc = Some(p.clone());
+        }
+        p
     }
 
     pub fn unregister_backend(&self, pid: i32) {
@@ -1073,8 +1099,13 @@ impl Engine {
             (others, db_others)
         };
         session.login(dbname, others, Some((entry.conn_limit, db_others)))?;
-        // CheckMyDatabase: a collation version other than the provider's.
         let mut session = session;
+        if session.state.db.temp_leftovers.load(Ordering::Relaxed) {
+            session.drop_leftover_temp_objects();
+        }
+        // (InitPostgres's transaction commits.)
+        session.state.proc.end();
+        // CheckMyDatabase: a collation version other than the provider's.
         if let Some(w) = entry.locale().version_warning(dbname) {
             session.notices.push(w);
         }
@@ -2039,6 +2070,34 @@ impl Cluster for Engine {
         self.listen.get().copied()
     }
 
+    fn procs(&self) -> &Arc<crate::txn::procs::Procs> {
+        &self.procs
+    }
+
+    fn proc_of(&self, pid: i32) -> Arc<crate::txn::procs::Proc> {
+        let registered = self.backends.lock().get(&pid).map(|b| b.proc.clone());
+        match registered {
+            Some(Some(p)) => p,
+            Some(None) => self.assign_proc(pid, crate::txn::procs::ProcKind::Backend),
+            None => self.procs.assign(crate::txn::procs::ProcKind::Backend, pid),
+        }
+    }
+
+    fn launcher_procs(&self) -> (i32, i32) {
+        self.procs.launcher_numbers(self.proc_sizes.0, self.proc_sizes.1)
+    }
+
+    fn shared_memory(&self) -> Vec<(&'static str, i64)> {
+        // The block cache every database reads through (what shared_buffers' blocks are
+        // for: its capacity, allocated whether filled or not), the proc array's slots and
+        // pg_stat_statements' entries.
+        let mut v = vec![("Buffer Blocks", self.cache.capacity_bytes() as i64), ("PROC", self.procs.memory_bytes() as i64)];
+        if let Some(s) = &self.statements {
+            v.push(("pg_stat_statements", s.memory_bytes() as i64));
+        }
+        v
+    }
+
     fn bootstrap_superuser(&self) -> String {
         self.opts.superuser.clone()
     }
@@ -2100,15 +2159,77 @@ impl Cluster for Engine {
     }
 
     fn activity(&self) -> Vec<Activity> {
-        let mut v: Vec<Activity> = self
-            .backends
-            .lock()
+        let backends = self.backends.lock();
+        let mut v: Vec<Activity> = backends
             .values()
             .filter(|b| b.database != 0)
-            .map(|b| b.activity.clone())
+            .map(|b| {
+                let mut a = b.activity.clone();
+                // A parallel worker does the leader's work (the engine runs it on the
+                // leader's thread): what it waits for is what the leader's work does, and a
+                // leader that doesn't take part waits for its workers.
+                if let Some(l) = a.leader_pid.and_then(|l| backends.get(&l)) {
+                    a.wait = l.activity.wait;
+                    a.backend_xmin = l.activity.backend_xmin;
+                } else if a.gathering == Some(false) {
+                    a.wait = Some(("IPC", "ExecuteGather"));
+                }
+                a
+            })
             .collect();
         v.sort_by_key(|a| a.pid);
         v
+    }
+
+    fn start_parallel_workers(&self, leader: i32, n: usize, max_workers: usize, participating: bool, rels: Arc<[u32]>) -> Vec<i32> {
+        let mut backends = self.backends.lock();
+        let Some(l) = backends.get_mut(&leader) else { return Vec::new() };
+        l.activity.gathering = Some(participating);
+        let (database, la) = (l.database, l.activity.clone());
+        let running = backends.values().filter(|b| b.activity.leader_pid.is_some()).count();
+        let now = crate::types::datetime::Clock::system().now;
+        let mut pids = Vec::new();
+        for _ in 0..n.min(max_workers.saturating_sub(running)) {
+            let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
+            // (ParallelWorkerMain: InitPostgres's transaction, the one restoring the
+            // leader's libraries and settings, then the parallel one.)
+            let Some(proc) = self.procs.try_assign(crate::txn::procs::ProcKind::BgWorker, pid) else { break };
+            proc.end();
+            proc.begin();
+            proc.end();
+            proc.begin();
+            let activity = Activity {
+                pid,
+                database: la.database.clone(),
+                user: la.user.clone(),
+                application_name: la.application_name.clone(),
+                backend_start: now,
+                xact_start: Some(now),
+                query_start: Some(now),
+                state_change: Some(now),
+                state: "active".into(),
+                query: la.query.clone(),
+                backend_type: Some("parallel worker"),
+                proc_number: Some(proc.number()),
+                leader_pid: Some(leader),
+                worker_rels: Some(rels.clone()),
+                ..Activity::default()
+            };
+            let terminated = Arc::new(AtomicBool::new(false));
+            backends.insert(pid, Backend { secret: 0, database, cancel: None, socket: None, terminated, activity, proc: Some(proc), reads: Default::default() });
+            pids.push(pid);
+        }
+        pids
+    }
+
+    fn end_parallel_workers(&self, leader: i32, pids: &[i32]) {
+        let mut backends = self.backends.lock();
+        for p in pids {
+            backends.remove(p);
+        }
+        if let Some(l) = backends.get_mut(&leader) {
+            l.activity.gathering = None;
+        }
     }
 
     fn cancel_backend(&self, pid: i32) -> bool {

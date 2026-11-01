@@ -113,6 +113,37 @@ fn connection_log() {
     assert!(log.contains(&format!("LOG:  connection authenticated: user=\"postgres\" method=trust ({file}:1)")), "{log:?}");
     // (No application_name in libpq's startup packet: none in the line.)
     assert!(log.contains(&"LOG:  connection authorized: user=postgres database=postgres".to_string()), "{log:?}");
+
+    // LOG and WARNING lines a statement raises reach the server log whatever
+    // client_min_messages keeps from the client (the LOG with its STATEMENT: LOG ranks above
+    // log_min_error_statement's error there), as PostgreSQL 18.6's do.
+    let q = "DO $$ BEGIN RAISE LOG 'l1'; RAISE WARNING 'w1'; END $$";
+    let (r, log) = run("postgres", "", "-c client_min_messages=error", q);
+    assert!(r.is_ok(), "{r:?}");
+    let from = log.iter().position(|l| l == "LOG:  l1").unwrap_or_else(|| panic!("{log:?}"));
+    assert_eq!(
+        log[from..log.len().min(from + 5)],
+        [
+            "LOG:  l1",
+            "CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE",
+            &format!("STATEMENT:  {q}"),
+            "WARNING:  w1",
+            "CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE",
+        ]
+    );
+
+    // A sort's spill files, past log_temp_files: their LOG lines with the statement, in the
+    // statement's lines (PostgreSQL's: the generate_series tuplestore's file, then the
+    // sort's).
+    let q = "SELECT count(*) FROM (SELECT g FROM generate_series(1, 100000) g ORDER BY g DESC) s";
+    let (r, log) = run("postgres", "", "-c work_mem=64kB -c log_temp_files=0", q);
+    assert_eq!(r.unwrap(), ["100000"]);
+    let files: Vec<usize> = (0..log.len()).filter(|&i| log[i].starts_with("LOG:  temporary file: path \"base/pgsql_tmp/pgsql_tmp")).collect();
+    assert!(!files.is_empty(), "{log:?}");
+    for i in files {
+        assert!(log[i].contains("\", size "), "{log:?}");
+        assert_eq!(log[i + 1], format!("STATEMENT:  {q}"), "{log:?}");
+    }
     pg_engine::log::set_sink(None);
     engine.shutdown();
 }

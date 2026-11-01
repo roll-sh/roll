@@ -975,6 +975,12 @@ impl<'a> ExecCtx<'a> {
     pub fn notice(&self, e: Error) {
         self.take_input_notices();
         if !self.notice_wanted(e.severity) {
+            // (The server log may still want it: elog's log_min_messages is its own.)
+            // (A session no server drains keeps at most a statement's worth.)
+            let mut l = self.sess.log_only.borrow_mut();
+            if matches!(e.severity, crate::error::Severity::Log | crate::error::Severity::Warning) && crate::log::active() && l.len() < 10_000 {
+                l.push(e.in_frames(&self.sess.frames.borrow()));
+            }
             return;
         }
         let e = e.in_frames(&self.sess.frames.borrow());

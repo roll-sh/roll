@@ -511,10 +511,6 @@ pub fn register(r: &mut Registry) {
         pg_index_column_has_property,
     )
     .stable();
-    r.func(
-        "pg_indexam_progress_phasename",
-        vec![Oid, Int8],
-        Text,
-        pg_indexam_progress_phasename,
-    );
+    // (pg_proc's own row, oid 676: pg_stat_progress_create_index calls it.)
+    r.from_pg(676, Some(pg_indexam_progress_phasename), None);
 }

@@ -1,0 +1,17 @@
+DROP SCHEMA IF EXISTS monitoring_test CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE SCHEMA monitoring_test;
+CREATE TABLE monitoring_test.accounts (id int PRIMARY KEY, owner text NOT NULL, balance numeric, notes text);
+CREATE INDEX accounts_owner ON monitoring_test.accounts (owner);
+INSERT INTO monitoring_test.accounts SELECT g, 'o' || (g % 50), g * 1.5, repeat('n', 2500) FROM generate_series(1, 1000) g;
+CREATE TABLE monitoring_test.ledger (id bigserial PRIMARY KEY, account int REFERENCES monitoring_test.accounts, amount numeric, at timestamptz DEFAULT now());
+INSERT INTO monitoring_test.ledger (account, amount) SELECT 1 + g % 1000, g FROM generate_series(1, 3000) g;
+CREATE VIEW monitoring_test.balances AS SELECT owner, sum(balance) FROM monitoring_test.accounts GROUP BY owner;
+CREATE SEQUENCE monitoring_test.counter;
+SELECT nextval('monitoring_test.counter');
+UPDATE monitoring_test.accounts SET balance = balance + 1 WHERE id % 9 = 0;
+DELETE FROM monitoring_test.ledger WHERE id % 13 = 0;
+ANALYZE monitoring_test.accounts;
+VACUUM monitoring_test.ledger;
+SELECT count(*) FROM monitoring_test.accounts WHERE owner = 'o7';
+SELECT pg_stat_force_next_flush();

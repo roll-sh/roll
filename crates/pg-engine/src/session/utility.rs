@@ -1172,6 +1172,20 @@ impl Session {
     /// Drop the temporary objects of this session's temporary schema, or (`all`) of every
     /// session's (the last session of a database leaving: the others are gone). Quietly, as
     /// RemoveTempRelations deletes (PERFORM_DELETION_QUIETLY): no notices are sent.
+    /// A crashed server's temporary objects in this session's pg_temp_N go before the
+    /// session uses it (in its startup transaction).
+    pub(crate) fn drop_leftover_temp_objects(&mut self) {
+        let own = self.state.temp_schema();
+        let cat = self.state.db.catalog();
+        let left = cat.schema_by_name(&own).is_some_and(|s| cat.tables.values().any(|t| t.temporary && t.schema == s.oid));
+        drop(cat);
+        if left {
+            self.state.definer.borrow_mut().push(crate::catalog::BOOTSTRAP_SUPERUSER_OID);
+            let _ = self.drop_temp_objects(false);
+            self.state.definer.borrow_mut().pop();
+        }
+    }
+
     pub(crate) fn drop_temp_objects(&mut self, all: bool) -> Result<()> {
         let held = self.state.notice_hold.replace(self.state.notice_hold.get() + 1);
         let r = self.drop_temp_objects_quietly(all);

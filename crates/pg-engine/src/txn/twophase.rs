@@ -122,6 +122,11 @@ impl TwoPhase {
         }
     }
 
+    /// The prepared transactions' lock owners and the virtual transaction ids they keep.
+    pub fn vxids(&self) -> Vec<(u64, crate::txn::procs::Vxid)> {
+        self.list.lock().iter().filter_map(|g| g.txn.as_ref().map(|t| (t.id, t.vxid))).collect()
+    }
+
     /// RemoveGXact: the entry goes, the last one taking its place.
     pub fn remove(&self, gid: &str) {
         let mut l = self.list.lock();

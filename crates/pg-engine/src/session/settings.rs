@@ -436,6 +436,21 @@ pub struct Settings {
     pending: Vec<&'static str>,
     /// The `defaults` the client's startup packet gave (source "client").
     client: Vec<String>,
+    /// The client is connected over TCP (not a Unix socket or embedded): the keepalive
+    /// settings at 0 show the socket's own values.
+    pub tcp: bool,
+}
+
+/// The kernel's keepalive values a new TCP socket has (idle, interval, count): what
+/// pq_getkeepalivesidle and friends read with getsockopt when the setting is 0.
+fn os_keepalives() -> [i64; 3] {
+    static K: std::sync::OnceLock<[i64; 3]> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        let read = |f: &str, d: i64| {
+            std::fs::read_to_string(format!("/proc/sys/net/ipv4/{f}")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(d)
+        };
+        [read("tcp_keepalive_time", 7200), read("tcp_keepalive_intvl", 75), read("tcp_keepalive_probes", 9)]
+    })
 }
 
 impl Default for Settings {
@@ -454,6 +469,7 @@ impl Default for Settings {
             argv: Vec::new(),
             pending: Vec::new(),
             client: Vec::new(),
+            tcp: false,
         }
     }
 }
@@ -488,6 +504,9 @@ struct Derived {
     /// written).
     track_counts: bool,
     replica_role: bool,
+    /// stats_fetch_consistency (read for every statistics function call): 0 none, 1 cache,
+    /// 2 snapshot.
+    stats_fetch: u8,
     /// log_statement, log_duration, log_min_duration_statement / _sample ask for statement
     /// or duration lines (else the server skips that work per statement).
     logs_statements: bool,
@@ -1400,6 +1419,11 @@ impl Settings {
                 ),
                 lock_timeout: self.int("lock_timeout"),
                 track_counts: self.get_str("track_counts").is_none_or(|v| v != "off"),
+                stats_fetch: match self.get_str("stats_fetch_consistency") {
+                    Some("none") => 0,
+                    Some("snapshot") => 2,
+                    _ => 1,
+                },
                 replica_role: self.get_str("session_replication_role") == Some("replica"),
                 logs_statements: self.get_str("log_statement").is_some_and(|v| v != "none")
                     || self.bool("log_duration")
@@ -1410,6 +1434,11 @@ impl Settings {
                 workers_alone: !self.bool("parallel_leader_participation"),
             })
         })
+    }
+
+    /// stats_fetch_consistency: 0 none, 1 cache, 2 snapshot.
+    pub fn stats_fetch_consistency(&self) -> u8 {
+        self.derived().stats_fetch
     }
 
     /// Whether `track_counts` is on.
@@ -1782,6 +1811,11 @@ impl Settings {
             // show_archive_command: only while archiving.
             Some(d) if d.name == "archive_command" && self.get_str("archive_mode") == Some("off") => {
                 Ok("(disabled)".into())
+            }
+            // show_tcp_keepalives_*: a TCP connection's socket values (0 on a Unix socket).
+            Some(d) if self.tcp && d.name.starts_with("tcp_keepalives_") && self.get_str(d.name).is_none_or(|v| v == "0") => {
+                let i = ["tcp_keepalives_idle", "tcp_keepalives_interval", "tcp_keepalives_count"].iter().position(|n| *n == d.name);
+                Ok(i.map_or_else(|| "0".to_string(), |i| os_keepalives()[i].to_string()))
             }
             Some(d) => Ok(Self::shown(d, self.get_str(d.name).unwrap_or_default())),
             None => match self

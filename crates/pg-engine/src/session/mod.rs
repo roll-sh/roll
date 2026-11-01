@@ -308,6 +308,9 @@ pub struct Session {
     last_unplanned: Option<Arc<crate::sql::binder::UnplannedDml>>,
     pub portals: HashMap<String, Portal>,
     pub cancel: Arc<AtomicBool>,
+    /// The server's loop clears `cancel` when it waits for the client (else a transaction's
+    /// start does: an embedded caller's cancel ends with the statement it meant).
+    pub reads_clear_cancel: bool,
     /// The running statement's waits are armed (`exec::arm_statement_waits`): its
     /// statement_timeout runs from when it started, across everything it does. Each
     /// statement of a query string and each extended-protocol message starts it afresh.
@@ -446,6 +449,7 @@ impl Session {
             last_unplanned: None,
             portals: HashMap::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            reads_clear_cancel: false,
             waits_armed: false,
             notices: Vec::new(),
             infer_params: false,
@@ -635,9 +639,13 @@ impl Session {
             .txn_opts
             .take()
             .unwrap_or_else(|| self.default_txn_opts());
-        self.cancel.store(false, Ordering::Relaxed);
+        if !self.reads_clear_cancel {
+            self.cancel.store(false, Ordering::Relaxed);
+        }
         let mut txn = self.state.db.begin(iso, ro, self.cancel.clone());
         txn.lock_peer = Some(self.state.lock_owner);
+        txn.vxid = self.state.proc.begin();
+        self.state.proc.set_owner(txn.id);
         self.state.temp_used.set(false);
         let lt = self.state.settings.borrow().lock_timeout();
         if lt > 0 {
@@ -703,6 +711,7 @@ impl Session {
             crate::ext::postgres_fdw::connection::abort(&self.state);
         }
         let txn = self.txn.take();
+        self.state.proc.end();
         self.implicit = false;
         self.status = TxnStatus::Idle;
         self.txn_opts = None;
@@ -1932,18 +1941,10 @@ impl Session {
                 i
             });
             let ae_start = std::time::Instant::now();
-            if count_workers {
-                if crate::sql::paths::parallel::may_gather(&bq.plan, &bq.perms.locks, ctx) {
-                    workers = crate::sql::explain::gather_workers(&bq.plan, ctx) as i64;
-                } else {
-                    debug_assert_eq!(crate::sql::explain::gather_workers(&bq.plan, ctx), 0);
-                }
-            }
-            // (The part below each Gather that only the workers would run: its locks end
-            // with them.)
-            if parallel_workers_alone && !bq.plan.writes() {
-                *ctx.worker_parts.borrow_mut() = crate::exec::parallel_part::worker_parts(&bq.plan, ctx);
-            }
+            // The Gathers' workers (other backends see them while the statement runs); the
+            // part below each Gather that only the workers would run (its locks end with
+            // them).
+            let _launched = crate::exec::parallel_part::start(&bq.plan, &bq.perms.locks, ctx, count_workers, parallel_workers_alone, &mut workers);
             // ExecutorRun begins (past ExecutorStart's permission checks): the RowDescription
             // goes out, so an error from here on follows it.
             let mut feed = sink.as_deref_mut().map(|k| sink::Feed::new(k, &bq.cols));
@@ -3618,6 +3619,11 @@ pub(crate) fn end_txn_midway(ctx: &ExecCtx, commit: bool, chain: bool) -> Result
         let t = ctx.txn.borrow();
         let mut next = ctx.sess.db.begin(iso, ro, t.cancel.clone());
         next.lock_peer = Some(ctx.sess.lock_owner);
+        // (The procedure's next transaction: CommitTransactionCommand, then
+        // StartTransactionCommand.)
+        ctx.sess.proc.end();
+        next.vxid = ctx.sess.proc.begin();
+        ctx.sess.proc.set_owner(next.id);
         next.lock_timeout = t.lock_timeout;
         next.seq_last = t.seq_last.clone();
         next

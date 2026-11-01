@@ -21,11 +21,15 @@ enum LogStmt {
 impl Session {
     /// log_line_prefix's (and csvlog's / jsonlog's) view of this session.
     pub fn log_who(&self) -> Who {
+        self.log_who_with(false)
+    }
+
+    /// `log_who` for an error or warning the last statement raised: in its transaction,
+    /// though the engine logs it after the transaction ended.
+    fn log_who_with(&self, error: bool) -> Who {
         let st = self.state.settings.borrow();
         let conn = self.state.log_conn.borrow();
         let xid = self.txn.as_ref().and_then(|t| t.borrow().xid_if_assigned()).unwrap_or(0);
-        // (pg_locks' virtual transaction ids; a local id of 0 between transactions.)
-        let lxid = self.txn.as_ref().map_or(0, |t| t.borrow().id as u32);
         Who {
             pid: self.state.pid,
             backend_type: conn.backend_type(),
@@ -40,7 +44,12 @@ impl Session {
                 // (Not applied yet while authenticating.)
                 application_name: if *self.log_tag.borrow() == "authentication" { String::new() } else { st.show_value("application_name") },
                 command_tag: self.log_tag.borrow().clone(),
-                vxid: if self.log_exiting.get() { String::new() } else { format!("3/{lxid}") },
+                // (pg_locks' virtual transaction id; a local id of 0 between transactions.)
+                vxid: match self.log_exiting.get() {
+                    true => String::new(),
+                    false if error => self.state.proc.current_or_last().to_string(),
+                    false => self.state.proc.current().to_string(),
+                },
                 xid,
                 query_id: 0,
             }),
@@ -79,6 +88,21 @@ impl Session {
             && let Some(p) = self.portals.get(name)
         {
             self.set_ps(&p.stmt);
+        }
+    }
+
+    /// start_xact_command: a Query, Parse, Bind, Describe or Execute message begins a
+    /// transaction (its virtual transaction id; the engine's own begins when a statement
+    /// needs it and takes the same id).
+    pub fn start_xact_command(&self) {
+        self.state.proc.begin();
+    }
+
+    /// finish_xact_command at the end of a Query or at Sync: outside a transaction block,
+    /// the transaction the messages began is over.
+    pub fn finish_xact_command(&self) {
+        if self.txn.is_none() && self.status == super::TxnStatus::Idle {
+            self.state.proc.end();
         }
     }
 
@@ -124,7 +148,7 @@ impl Session {
         }
         let f = self.log_format();
         if crate::log::wanted(&f, e.severity) {
-            crate::log::write(&f, &self.log_who(), &Message::error(e, statement));
+            crate::log::write(&f, &self.log_who_with(true), &Message::error(e, statement));
         }
     }
 

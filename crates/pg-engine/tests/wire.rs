@@ -3808,15 +3808,21 @@ fn cached_plan_result_change_before_result_formats() {
 fn cancel_request_closes_after_the_error() {
     let s = server(AuthMethod::Trust);
     let mut c = raw::Raw::connect(&s.addr, "postgres");
+    let mut watch = raw::Raw::connect(&s.addr, "postgres");
+    let sleeping = "SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep'";
     for _ in 0..3 {
-        // Two statements in one pipeline: the cancel lands in the first.
+        // Two statements in one pipeline: the cancel lands in the first, once it runs (a
+        // cancel that comes while the backend waits for its client cancels nothing).
         c.parse("", "SELECT pg_sleep(30)");
         c.bind("", "");
         c.execute("", 0);
         c.parse("", "SELECT 1");
         c.bind("", "");
         c.execute("", 0);
-        std::thread::sleep(Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !watch.query(sleeping).contains(&"D 1".to_string()) {
+            assert!(Instant::now() < deadline, "the statement never ran");
+        }
         let start = Instant::now();
         c.cancel(&s.addr);
         assert!(start.elapsed() < Duration::from_secs(5));
@@ -3882,5 +3888,119 @@ fn bound_parameters_of_domains_and_explain() {
         c.execute("", 0);
         assert_eq!(c.sync(), want, "{sql}");
     }
+    s.engine.shutdown();
+}
+
+/// Virtual transaction ids as PostgreSQL 18.6 numbers them (checked against it): a proc
+/// array slot per backend, taken from the head of a free list its backend returns it to the
+/// tail of, and local ids the slot counts on (the startup transaction 1, then one per
+/// transaction, a Parse / Bind / Execute cycle's, VACUUM's per relation). pg_locks, the
+/// temporary schema's name and pg_stat_get_backend_idset show them.
+#[test]
+fn virtual_transaction_ids() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let first = own_vxid(&a).await;
+        let (slot, lxid) = first.split_once('/').unwrap();
+        assert_eq!(lxid, "2", "{first}");
+        assert_eq!(own_vxid(&a).await, format!("{slot}/3"));
+        // A transaction block is one; an extended-protocol cycle (Parse, Bind, Execute,
+        // Sync) is one.
+        a.batch_execute("BEGIN; SELECT 1").await.unwrap();
+        assert_eq!(own_vxid(&a).await, format!("{slot}/4"));
+        a.batch_execute("COMMIT").await.unwrap();
+        a.query("SELECT 1", &[]).await.unwrap();
+        assert_eq!(own_vxid(&a).await, format!("{slot}/7"));
+        // VACUUM of one table: the statement's, the table's, the closing one.
+        a.batch_execute("CREATE TABLE vx (a int)").await.unwrap();
+        a.batch_execute("VACUUM vx").await.unwrap();
+        assert_eq!(own_vxid(&a).await, format!("{slot}/12"));
+        // Another backend takes the next slot; its transactions' locks show its id.
+        let b = s.connect("postgres").await;
+        let n: i32 = slot.parse().unwrap();
+        assert_eq!(own_vxid(&b).await, format!("{}/2", n + 1));
+        b.batch_execute("BEGIN; LOCK TABLE vx").await.unwrap();
+        let seen = "SELECT DISTINCT virtualtransaction FROM pg_locks WHERE relation = 'vx'::regclass";
+        assert_eq!(lines(&a, seen).await.unwrap(), [format!("{}/3", n + 1)]);
+        b.batch_execute("COMMIT").await.unwrap();
+        // pg_stat_get_backend_idset's ids are the slots; the temporary schema is the slot's.
+        let pid = format!("SELECT pg_stat_get_backend_pid({}) = pg_backend_pid()", n + 1);
+        assert_eq!(lines(&b, &pid).await.unwrap(), ["t"]);
+        b.batch_execute("CREATE TEMP TABLE tt (a int)").await.unwrap();
+        let temp = "SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()";
+        assert_eq!(lines(&b, temp).await.unwrap(), [format!("pg_temp_{}", n + 1)]);
+        // A backend leaving puts its slot at the free list's tail: the next one takes a
+        // slot not used yet, and the slot's ids go on when it is used again.
+        drop(b);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let c = s.connect("postgres").await;
+        assert_eq!(own_vxid(&c).await, format!("{}/2", n + 2));
+    });
+    s.engine.shutdown();
+}
+
+/// The session's own virtual transaction id, as pg_locks shows it.
+async fn own_vxid(c: &Client) -> String {
+    let own = "SELECT virtualtransaction FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'virtualxid'";
+    lines(c, own).await.unwrap().remove(0)
+}
+
+/// A parallel query's workers as another session sees them while it runs (checked against
+/// PostgreSQL 18.6): pg_stat_activity's "parallel worker" rows with the leader's pid, query
+/// and wait event, their AccessShareLock and virtual transaction id locks in pg_locks, and
+/// pg_stat_database's parallel worker counts.
+#[test]
+fn parallel_workers_seen_by_others() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE TABLE pw AS SELECT g AS a, repeat('x', 100) AS b FROM generate_series(1, 3000) g; ANALYZE pw;
+             SET parallel_setup_cost = 0; SET parallel_tuple_cost = 0;
+             SET min_parallel_table_scan_size = 0; SET max_parallel_workers_per_gather = 2;
+             SET application_name = 'leader'",
+        )
+        .await
+        .unwrap();
+        let leader = lines(&a, "SELECT pg_backend_pid()").await.unwrap().remove(0);
+        let o = s.connect("postgres").await;
+        let run = tokio::spawn(async move {
+            let r = lines(&a, "SELECT count(*) FROM pw WHERE pg_sleep(0.001) IS NOT NULL").await;
+            (a, r)
+        });
+        let workers = "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'parallel worker'";
+        for _ in 0..200 {
+            if lines(&o, workers).await.unwrap() == ["2"] {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let rows = format!(
+            "SELECT backend_type, leader_pid = {leader}, application_name, state, wait_event, query, client_port \
+             FROM pg_stat_activity WHERE application_name = 'leader' ORDER BY backend_type, pid"
+        );
+        let q = "SELECT count(*) FROM pw WHERE pg_sleep(0.001) IS NOT NULL";
+        assert_eq!(
+            lines(&o, &rows).await.unwrap(),
+            [
+                format!("client backend|NULL|leader|active|PgSleep|{q}|{}", lines(&o, &format!("SELECT client_port FROM pg_stat_activity WHERE pid = {leader}")).await.unwrap()[0]),
+                format!("parallel worker|t|leader|active|PgSleep|{q}|NULL"),
+                format!("parallel worker|t|leader|active|PgSleep|{q}|NULL"),
+            ]
+        );
+        let locks = "SELECT l.locktype, l.relation::regclass, l.mode, l.fastpath, l.virtualtransaction = coalesce(l.virtualxid, l.virtualtransaction) \
+             FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE a.backend_type = 'parallel worker' ORDER BY 1, 2";
+        assert_eq!(
+            lines(&o, locks).await.unwrap(),
+            ["relation|pw|AccessShareLock|t|t", "relation|pw|AccessShareLock|t|t", "virtualxid|NULL|ExclusiveLock|t|t", "virtualxid|NULL|ExclusiveLock|t|t"]
+        );
+        let (a, r) = run.await.unwrap();
+        assert_eq!(r.unwrap(), ["3000"]);
+        assert_eq!(lines(&o, workers).await.unwrap(), ["0"]);
+        a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+        let counts = "SELECT parallel_workers_to_launch, parallel_workers_launched FROM pg_stat_database WHERE datname = 'postgres'";
+        assert_eq!(lines(&o, counts).await.unwrap(), ["2|2"]);
+    });
     s.engine.shutdown();
 }

@@ -20018,29 +20018,18 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
     estimate_in(plan, ctx, false, true)
 }
 
-/// The parallel workers the plan's Gather / Gather Merge nodes plan, as EXPLAIN shows them
-/// (what pg_stat_statements' parallel_workers_to_launch counts; the engine's executor runs
-/// them all, so they are the launched ones too).
-pub fn gather_workers(plan: &Arc<Plan>, ctx: &ExecCtx) -> usize {
-    fn sum(n: &ExNode) -> usize {
-        n.details.iter().map(|d| if let Detail::Workers(w) = d { *w } else { 0 }).sum::<usize>()
-            + n.children.iter().map(sum).sum::<usize>()
-    }
-    let o = estimate_options();
-    let mut b = estimate_builder(plan, ctx, &o);
-    sum(&b.level(plan))
-}
-
-/// The plan nodes under each Gather and Gather Merge of `plan` (the top of the part its
-/// workers run), as EXPLAIN places them.
-pub fn gather_parts(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<usize> {
+/// Each Gather and Gather Merge of `plan`, as EXPLAIN places them: the plan node under it
+/// (the top of the part its workers run; None: none of the executor's) and the workers it
+/// plans (pg_stat_statements' parallel_workers_to_launch; the engine runs them all, so they
+/// are the launched ones too).
+pub fn gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<(Option<usize>, usize)> {
     fn first_key(n: &ExNode) -> Option<usize> {
         n.key.or_else(|| n.children.iter().find_map(first_key))
     }
-    fn walk(n: &ExNode, out: &mut Vec<usize>) {
+    fn walk(n: &ExNode, out: &mut Vec<(Option<usize>, usize)>) {
         if matches!(n.node_type, "Gather" | "Gather Merge") {
-            out.extend(n.children.first().and_then(first_key));
-            return;
+            let workers = n.details.iter().map(|d| if let Detail::Workers(w) = d { *w } else { 0 }).sum();
+            out.push((n.children.first().and_then(first_key), workers));
         }
         n.children.iter().for_each(|c| walk(c, out));
     }

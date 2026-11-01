@@ -51,6 +51,10 @@ esac
 SCRIPT="$HERE/suites/$SUITE.sh"
 [ -f "$SCRIPT" ] || { echo "no suite $SUITE" >&2; exit 2; }
 IMAGE=$(sed -n 's/^# image: *//p' "$SCRIPT" | head -1)
+# (An image whose entrypoint is the client itself, an exporter's: `# entrypoint: sh`.)
+ENTRY=$(sed -n 's/^# entrypoint: *//p' "$SCRIPT" | head -1)
+RUNNER=sh
+[ -z "$ENTRY" ] || RUNNER=
 SRC=$(sed -n 's/^# src: *//p' "$SCRIPT" | head -1)
 if [ -n "$SRC" ]; then
   "$HERE/fetch.sh" "$CACHE/src/$SUITE" "$SRC"
@@ -74,7 +78,7 @@ docker run --rm --network host --cpus="${CLIENTS_CPUS:-4}" --name "${CLIENTS_NAM
   -v "$CACHE:/cache" -v "$HERE:/harness:ro" \
   -e PGHOST=127.0.0.1 -e PGPORT="$PORT" -e PGUSER=postgres -e PGPASSWORD=pw -e PGDATABASE=postgres \
   ${APP_PORT:+-e APP_PORT=$APP_PORT} -e TARGET="$TARGET" -e SRC="/cache/src/$SUITE" -e OUT="/cache/results/$SUITE-$TARGET.d" \
-  -w "/cache/src/$SUITE" "$IMAGE" sh /harness/suites/"$SUITE".sh "$@" > "$OUT.log" 2>&1
+  -w "/cache/src/$SUITE" ${ENTRY:+--entrypoint "$ENTRY"} "$IMAGE" $RUNNER /harness/suites/"$SUITE".sh "$@" > "$OUT.log" 2>&1
 STATUS=$?
 set -e
 python3 -I "$HERE/collect.py" "$OUT.d" > "$OUT.txt"

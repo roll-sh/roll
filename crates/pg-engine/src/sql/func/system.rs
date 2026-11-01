@@ -2238,12 +2238,8 @@ fn pg_is_other_temp_schema(a: &[Value], c: &FnCtx) -> Result<Value> {
     let mine = c.exec.sess.temp_schema();
     let temp = s.name.starts_with("pg_temp_") || s.name.starts_with("pg_toast_temp_");
     Ok(Value::Bool(
-        temp && s.name != mine && s.name != format!("pg_toast_temp_{}", c.exec.sess.pid),
+        temp && s.name != mine && s.name != mine.replacen("pg_temp_", "pg_toast_temp_", 1),
     ))
-}
-
-fn pg_indexam_progress_phasename(_: &[Value], _: &FnCtx) -> Result<Value> {
-    Ok(Value::Null)
 }
 
 /// A range type's constructor (two of the range, three of the multirange): its arguments
@@ -4795,7 +4791,6 @@ pub fn register(r: &mut Registry) {
     .stable();
     r.from_pg(3808, Some(pg_get_function_arg_default), None);
     r.from_pg(2855, Some(pg_is_other_temp_schema), None);
-    r.from_pg(676, Some(pg_indexam_progress_phasename), None);
     r.from_pg(1294, Some(currtid2), None);
     r.func(
         "pg_get_function_result",

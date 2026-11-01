@@ -195,9 +195,7 @@ impl Who {
                 user: s.user.clone(),
                 database: s.database.clone(),
                 command_tag: s.ps.into(),
-                // (InitPostgres's transaction, the backend's first; none before it, while
-                // the startup packet is checked.)
-                vxid: if s.ps.is_empty() { String::new() } else { "3/1".into() },
+                vxid: s.vxid.clone(),
                 ..SessionWho::default()
             }),
             backend_type: match &conn.startup {
@@ -257,6 +255,10 @@ pub struct Startup {
     pub user: String,
     pub database: String,
     pub ps: &'static str,
+    /// Its virtual transaction id once it has a proc array slot (InitPostgres's
+    /// transaction, the backend's first; none before it, while the startup packet is
+    /// checked).
+    pub vxid: String,
 }
 
 impl Conn {

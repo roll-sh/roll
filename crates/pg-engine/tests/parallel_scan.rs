@@ -554,6 +554,8 @@ fn parallel_fetches_match_serial_inner() {
     };
     let workers = |s: &mut Session, n: u32| s.query(&format!("SET max_parallel_workers_per_gather = {n}")).unwrap();
     workers(&mut s, 0);
+    // (The setup's counts: the primary key's build scanned the table once.)
+    let stat_setup = fetch_stats(&mut s);
     let (serial, _) = run(&mut s);
     let stat_serial = fetch_stats(&mut s);
     workers(&mut s, 2);
@@ -574,9 +576,10 @@ fn parallel_fetches_match_serial_inner() {
     let n = |st: &str| -> Vec<i64> {
         st.split("Int8(").skip(1).map(|x| x.split(')').next().unwrap().parse().unwrap()).collect()
     };
-    let (a, b) = (n(&stat_serial), n(&stat_parallel));
+    let (z, a, b) = (n(&stat_setup), n(&stat_serial), n(&stat_parallel));
     assert!(!a.is_empty(), "{stat_serial}");
-    assert_eq!(b, a.iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_serial} {stat_parallel}");
+    let runs = |v: &[i64]| v.iter().zip(&z).map(|(x, z)| x - z).collect::<Vec<_>>();
+    assert_eq!(runs(&b), runs(&a).iter().map(|x| 2 * x).collect::<Vec<_>>(), "{stat_setup} {stat_serial} {stat_parallel}");
 }
 
 /// A bitmap whose quals read only index columns of fixed-width types checks them on the

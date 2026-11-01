@@ -2230,6 +2230,9 @@ fn generate(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out) ->
     generate_raw(table, ctx, only, out)
 }
 
+/// The parameters whose pg_settings.boot_val is NULL.
+const NULL_BOOT_VAL: [&str; 6] = ["config_file", "data_directory", "external_pid_file", "hba_file", "ident_file", "timezone_abbreviations"];
+
 fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out) -> Result<()> {
     use SysTable::*;
     let schema = if table.schema() == PGC {
@@ -5138,8 +5141,10 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
                     r.enumvals.map_or(N, |v| {
                         arr(DataType::Text, v.iter().map(|x| nm(*x)).collect())
                     }),
-                    nm(&r.boot_val),
-                    nm(&r.reset_val),
+                    // (String parameters whose boot value is NULL in guc_tables.c, set at
+                    // start or never: external_pid_file's reset value is NULL too.)
+                    if NULL_BOOT_VAL.contains(&r.name.as_str()) { N } else { nm(&r.boot_val) },
+                    if r.name == "external_pid_file" && r.reset_val.is_empty() { N } else { nm(&r.reset_val) },
                     file.map_or(N, |f| nm(f.0)),
                     file.map_or(N, |f| i4(f.1 as i64)),
                     b(r.pending_restart),

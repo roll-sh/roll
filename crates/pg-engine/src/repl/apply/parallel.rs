@@ -868,7 +868,15 @@ impl Worker<'_> {
         }
         if partial {
             self.pa_write(id, m)?;
-            self.pool.get(id).shared.set_fileset(FileSet::SerializeDone);
+            let shared = self.pool.get(id).shared.clone();
+            let file = shared.with_file(|f| f.as_ref().map(Spool::bytes)).map(|b| (shared.xid(), b));
+            shared.set_fileset(FileSet::SerializeDone);
+            self.pa_xact_finish(id)?;
+            // (The leader's file set's file, gone once the worker applied it.)
+            if let Some((xid, bytes)) = file {
+                self.changes_file_deleted(xid, bytes);
+            }
+            return Ok(());
         }
         self.pa_xact_finish(id)
     }
@@ -895,7 +903,9 @@ impl Worker<'_> {
         match self.pool.action(xid) {
             Action::Serialize => {
                 if top {
-                    self.spools.remove(&xid);
+                    if let Some(sp) = self.spools.remove(&xid) {
+                        self.changes_file_deleted(xid, sp.bytes());
+                    }
                 } else if let Some(sp) = self.spools.get_mut(&xid) {
                     sp.abort_sub(subxid)?;
                 }
@@ -974,7 +984,9 @@ impl Worker<'_> {
         match self.pool.action(xid) {
             Action::Serialize => {
                 let spool = self.spools.remove(&xid).ok_or_else(|| format!("streamed transaction {xid} was not started"))?;
+                let bytes = spool.bytes();
                 self.stream_commit(xid, commit_lsn, end_lsn, ts, spool)?;
+                self.changes_file_deleted(xid, bytes);
             }
             Action::Send(id) | Action::Partial(id) => {
                 let partial = matches!(self.pool.action(xid), Action::Partial(_));
@@ -1012,9 +1024,11 @@ impl Worker<'_> {
         match self.pool.action(xid) {
             Action::Serialize => {
                 let spool = self.spools.remove(&xid).ok_or_else(|| format!("streamed transaction {xid} was not started"))?;
+                let bytes = spool.bytes();
                 self.begin_prepare(prepare_lsn, xid)?;
                 spool.replay(|m| self.apply(m))?;
                 self.prepare(prepare_lsn, end_lsn)?;
+                self.changes_file_deleted(xid, bytes);
             }
             Action::Send(id) | Action::Partial(id) => {
                 let partial = matches!(self.pool.action(xid), Action::Partial(_));

@@ -4889,7 +4889,8 @@ impl<'c, 'a> Interp<'c, 'a> {
             "warning" => 7,
             _ => 8,
         };
-        if rank >= min_rank {
+        // (Below client_min_messages it may still go to the server log: `ExecCtx::notice`.)
+        if rank >= min_rank || (matches!(severity, crate::error::Severity::Log | crate::error::Severity::Warning) && crate::log::active()) {
             e.severity = severity;
             self.cx().notice(e);
         }

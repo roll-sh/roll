@@ -504,3 +504,51 @@ fn table_sync_catches_up_on_its_own_slot() {
     assert_eq!(rows(&mut x.s, "SELECT count(*) FROM pg_subscription_rel"), vec!["[Int8(3)]".to_string()]);
     assert_eq!(rows(&mut x.s, "SELECT count(*) FROM d"), vec!["[Int8(0)]".to_string()]);
 }
+
+/// log_temp_files and pg_stat_database's temp_files / temp_bytes for the subscriber's
+/// changes files of streamed transactions (checked against PostgreSQL 18.6): the apply
+/// worker's spool (streaming = on) and the leader's file of a partially serialized
+/// transaction (streaming = parallel, debug_logical_replication_streaming = immediate),
+/// each reported when it is deleted at the transaction's end, with its message's CONTEXT.
+#[test]
+fn changes_files_logged() {
+    static LOG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    pg_engine::log::set_sink(Some(Arc::new(|s: &str| LOG.lock().unwrap().push_str(s))));
+    for (stream, settings) in [
+        ("on", &[("log_temp_files", "0")][..]),
+        ("parallel", &[("log_temp_files", "0"), ("debug_logical_replication_streaming", "immediate")][..]),
+    ] {
+        let mut x = pair_with(settings);
+        x.both("CREATE TABLE t (id int PRIMARY KEY, v text)");
+        rows(&mut x.p, "CREATE PUBLICATION p FOR TABLE t");
+        x.subscribe("s", "p", &format!("copy_data = false, streaming = {stream}"));
+        rows(&mut x.p, "INSERT INTO t SELECT g, 's' FROM generate_series(1, 2000) g");
+        x.same("SELECT count(*) FROM t");
+        let sub = rows(&mut x.s, "SELECT oid FROM pg_subscription")[0].clone();
+        let sub: String = sub.chars().filter(char::is_ascii_digit).collect();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !LOG.lock().unwrap().contains("LOG:  temporary file: path") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let log = LOG.lock().unwrap().clone();
+        let line = log
+            .lines()
+            .position(|l| l.contains("LOG:  temporary file: path \"base/pgsql_tmp/pgsql_tmp") && l.contains(&format!(".0.fileset/{sub}-")))
+            .unwrap_or_else(|| panic!("no changes file line for {sub} in {log}"));
+        let lines: Vec<&str> = log.lines().collect();
+        assert!(lines[line].contains(".changes.0\", size "), "{}", lines[line]);
+        assert!(
+            lines[line + 1].contains(&format!("CONTEXT:  processing remote data for replication origin \"pg_{sub}\" during message type \"STREAM COMMIT\" in transaction ")),
+            "{}",
+            lines[line + 1]
+        );
+        wait_for(
+            &mut x.s,
+            "SELECT temp_files > 0 AND temp_bytes > 0 FROM pg_stat_database WHERE datname = current_database()",
+            &["[Bool(true)]".to_string()],
+        );
+        rows(&mut x.s, "DROP SUBSCRIPTION s");
+        LOG.lock().unwrap().clear();
+    }
+    pg_engine::log::set_sink(None);
+}

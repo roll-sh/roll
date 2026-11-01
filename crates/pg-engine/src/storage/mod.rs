@@ -8,6 +8,7 @@
 pub mod batch;
 pub mod cache;
 mod dead;
+pub mod fileio;
 mod hot;
 pub mod keys;
 pub mod rdel;
@@ -279,11 +280,11 @@ fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     {
         let mut f = std::fs::File::create(&tmp)?;
         std::io::Write::write_all(&mut f, &data)?;
-        f.sync_all()?;
+        fileio::sync(|| f.sync_all())?;
     }
     std::fs::rename(&tmp, dir.join("MANIFEST"))?;
     if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
+        let _ = fileio::sync(|| d.sync_all());
     }
     Ok(())
 }
@@ -1366,6 +1367,7 @@ impl Store {
             seq,
             if self.opts.sync { wal::PREALLOC } else { 0 },
         )?;
+        fileio::wal_added();
         // The memtable frozen here holds only durable commits (group commits waiting for an
         // fsync of the old file get it now).
         if self.opts.sync {
@@ -1501,7 +1503,9 @@ impl Store {
                     rdels: v.rdels.clone(),
                 });
             }
-            let _ = std::fs::remove_file(wal::wal_path(&self.dir, mem.wal_seq));
+            if std::fs::remove_file(wal::wal_path(&self.dir, mem.wal_seq)).is_ok() {
+                fileio::wal_removed();
+            }
             debug!(dir = %self.dir.display(), id, "flushed memtable");
         }
     }

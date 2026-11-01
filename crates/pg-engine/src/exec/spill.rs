@@ -49,6 +49,15 @@ impl TempUsage {
         (self.files.swap(0, Ordering::Relaxed), self.bytes.swap(0, Ordering::Relaxed))
     }
 
+    /// A temporary file other than a `TempFile` (the subscriber's changes file of a streamed
+    /// transaction, which logs its own line) was removed: counted for pgstat.
+    pub fn count_removed(&self, size: u64) {
+        if size > 0 {
+            self.files.fetch_add(1, Ordering::Relaxed);
+            self.bytes.fetch_add(size as i64, Ordering::Relaxed);
+        }
+    }
+
     /// "temporary file: path ..., size ..." lines due (ReportTemporaryFileUsage's LOG).
     pub fn take_logged(&self) -> Vec<(String, u64)> {
         std::mem::take(&mut *self.logged.lock())

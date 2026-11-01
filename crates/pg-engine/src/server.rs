@@ -414,6 +414,16 @@ impl Conn {
     fn log_sent(&mut self, s: Option<&Session>, pid: i32, statement: Option<&str>) {
         let mut sent = LIVE_SENT.with(|l| std::mem::take(&mut *l.borrow_mut()));
         sent.append(&mut self.sent);
+        if let Some(s) = s {
+            sent.append(&mut s.state.log_only.borrow_mut());
+            // The temporary files the statement removed past log_temp_files
+            // (ReportTemporaryFileUsage's LOG, with the statement).
+            for (path, size) in s.state.temp.take_logged() {
+                let mut e = Error::new("00000", format!("temporary file: path \"{path}\", size {size}"));
+                e.severity = crate::error::Severity::Log;
+                sent.push(e);
+            }
+        }
         for e in sent {
             match s {
                 Some(s) => s.log_error(&e, statement),
@@ -873,14 +883,18 @@ fn handle(
     // (A physical walsender has no database: %d "[unknown]", "database=" at its end.)
     let log_database = if physical { String::new() } else { database.clone() };
     c.log.walsender = c.repl.is_some();
-    c.log.startup = Some(crate::log::Startup { user: user.clone(), database: log_database.clone(), ps: "" });
+    c.log.startup = Some(crate::log::Startup { user: user.clone(), database: log_database.clone(), ps: "", vxid: String::new() });
     // (ProcessStartupPacket's canAcceptConnections: a smart or fast shutdown is under way.)
     if engine.refusing_connections() {
         c.error(&Error::new(code::CANNOT_CONNECT_NOW, "the database system is shutting down").fatal());
         return c.flush();
     }
+    // InitProcess: a walsender's slot comes from the walsenders' list.
+    let kind = if c.repl.is_some() { crate::txn::procs::ProcKind::WalSender } else { crate::txn::procs::ProcKind::Backend };
+    let proc = engine.assign_proc(pid, kind);
     if let Some(s) = c.log.startup.as_mut() {
         s.ps = "authentication";
+        s.vxid = proc.current().to_string();
     }
     let auth_start = std::time::Instant::now();
     let (method, hba_line, hba_raw) = match hba_method(&engine, peer, unix, &user, &database, physical, opts.auth) {
@@ -956,6 +970,8 @@ fn handle(
             return c.flush();
         }
     };
+    s.reads_clear_cancel = true;
+    s.state.settings.borrow_mut().tcp = !unix;
     if method != AuthMethod::Trust {
         s.state.system_user = Some(format!("{}:{user}", method.name()));
     }
@@ -1470,6 +1486,8 @@ fn message_loop(
         if let Some(r) = &c.reads {
             r.fetch_add(1, Ordering::Release);
         }
+        // (Whether this read waits for the client: nothing of the message is buffered.)
+        let waits = c.rd.buffer().is_empty();
         let msg = match c.read_message_by(idle.as_ref().map(|i| i.0)) {
             Ok(m) => m,
             Err(e) if e.get_ref().is_some_and(|e| e.is::<IdleTimeout>()) => {
@@ -1484,9 +1502,13 @@ fn message_loop(
         };
         s.notifications_busy();
         // A cancel that came while the session waited for this message cancels nothing
-        // (ProcessInterrupts ignores QueryCancelPending while DoingCommandRead). (Cleared
-        // before the check: a termination sets `terminated` before the cancel flag.)
-        s.cancel.store(false, Ordering::Relaxed);
+        // (ProcessInterrupts ignores QueryCancelPending while DoingCommandRead, which it
+        // only sees if the read waits); one that came while it worked on the messages before
+        // this one, already buffered, cancels the statement it runs next. (Cleared before
+        // the check: a termination sets `terminated` before the cancel flag.)
+        if waits {
+            s.cancel.store(false, Ordering::Relaxed);
+        }
         if terminated.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -1522,6 +1544,7 @@ fn message_loop(
                     }
                 };
                 start_activity(engine, pid, s, "active", Some(sql.clone()));
+                s.start_xact_command();
                 if let Some(mode) = c.repl
                     && (crate::repl::cmd::is_command(&sql) || mode == crate::repl::walsender::Mode::Physical)
                 {
@@ -1551,6 +1574,7 @@ fn message_loop(
                 }
                 statement_done_activity(engine, pid, s);
                 c.log_sent(Some(s), pid, Some(&sql));
+                s.finish_xact_command();
                 // A FATAL error (the session terminating itself) ends the session.
                 if c.fatal {
                     return c.flush();
@@ -1562,15 +1586,21 @@ fn message_loop(
                 let mut b = Body::new(&body);
                 last_stmt = b.cstr().ok().and_then(|_| b.cstr().ok()).map(str::to_string);
                 extended_activity(engine, pid, s, t, &body);
+                s.start_xact_command();
                 guard(c, s, |c, s| parse_msg(c, s, &body))
             }
             b'B' => {
                 extended_activity(engine, pid, s, t, &body);
+                s.start_xact_command();
                 guard(c, s, |c, s| bind_msg(c, s, &body))
             }
-            b'D' => guard(c, s, |c, s| describe_msg(c, s, &body)),
+            b'D' => {
+                s.start_xact_command();
+                guard(c, s, |c, s| describe_msg(c, s, &body))
+            }
             b'E' => {
                 extended_activity(engine, pid, s, t, &body);
+                s.start_xact_command();
                 guard(c, s, |c, s| execute_msg(c, s, &body))
             }
             b'C' => guard(c, s, |c, s| close_msg(c, s, &body)),
@@ -1583,6 +1613,7 @@ fn message_loop(
                 send_notices(c, s);
                 send_changed(c, s);
                 statement_done_activity(engine, pid, s);
+                s.finish_xact_command();
                 ready_for_query(c, s)?;
                 continue;
             }
@@ -1924,6 +1955,8 @@ fn simple_query(c: &mut Conn, s: &mut Session, sql: &str) -> std::io::Result<()>
     let errors = c.errors;
     let r = simple_batch(c, s, sql, &stmts);
     s.set_batch_len(0);
+    // (finish_xact_command comes before the duration line.)
+    s.finish_xact_command();
     // check_log_duration (not for a statement that failed).
     if c.errors == errors
         && let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), logged)
@@ -2094,8 +2127,15 @@ fn parse_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     if name.is_empty() {
         s.close_statement("");
     }
+    let start = std::time::Instant::now();
     s.parse_message(&name, &sql, &oids)
         .map_err(|e| e.in_chars(&sql))?;
+    // exec_parse_message's duration line.
+    if let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), false) {
+        let what = if name.is_empty() { "<unnamed>" } else { name.as_str() };
+        let text = if with_stmt { format!("duration: {ms} ms  parse {what}: {sql}") } else { format!("duration: {ms} ms") };
+        s.log_message(&text, None);
+    }
     send_notices(c, s);
     c.msg(b'1', |_| {});
     Ok(())
@@ -2125,7 +2165,16 @@ fn bind_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
     for _ in 0..nr {
         result_formats.push(b.i16()?);
     }
+    let start = std::time::Instant::now();
     s.bind_message(&portal, &stmt, params, &formats, result_formats)?;
+    // exec_bind_message's duration line (with the parameters, as errdetail_params).
+    if let Some((ms, with_stmt)) = s.duration_logged(start.elapsed(), false) {
+        if with_stmt && let Some((what, detail, p)) = s.portal_log(&portal) {
+            s.log_message(&format!("duration: {ms} ms  bind {what}: {}", p.sql), detail.as_deref());
+        } else {
+            s.log_message(&format!("duration: {ms} ms"), None);
+        }
+    }
     send_notices(c, s);
     c.msg(b'2', |_| {});
     Ok(())

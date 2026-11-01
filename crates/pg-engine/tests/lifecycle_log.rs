@@ -95,7 +95,7 @@ fn startup_and_shutdown_lines() {
     let log = s.log.lock().unwrap().clone();
     assert!(log[0].starts_with("LOG:  starting PostgreSQL 18.6"), "{log:?}");
     assert_eq!(s.startup_lines().iter().map(|l| strip_numbers(l)).collect::<Vec<_>>(), ["LOG:  database system was shut down"]);
-    s.query("CREATE TABLE t (a int); INSERT INTO t VALUES (1)").unwrap();
+    s.query("CREATE TABLE t (a int); INSERT INTO t VALUES (1); CREATE TABLE w AS SELECT g FROM generate_series(1, 2000) g").unwrap();
 
     // Smart: a session still running is waited for; a new one is refused meanwhile.
     let port = s.port;
@@ -119,6 +119,17 @@ fn startup_and_shutdown_lines() {
     let log = s.log.lock().unwrap().clone();
     let from = log.iter().position(|l| l == want[0]).unwrap();
     assert_eq!(log[from..].iter().map(|l| strip_numbers(l)).collect::<Vec<_>>(), want, "{end:?}");
+    // The first checkpoint since the start: its distance is the WAL written since then, and
+    // what it wrote is the flush's (the table files, the WAL files it made and removed, the
+    // files it synced).
+    let done = log.iter().find(|l| l.starts_with("LOG:  checkpoint complete")).unwrap();
+    let field = |name: &str| -> u64 {
+        let at = done.find(name).unwrap_or_else(|| panic!("{name} in {done}")) + name.len();
+        done[at..].split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap()
+    };
+    assert!(field("wrote ") > 0 && field("sync files=") > 0 && field("distance=") > 0, "{done}");
+    assert_eq!(field("distance="), field("estimate="), "{done}");
+    assert!(done.contains("WAL file(s) added, ") && done.contains(" 0 recycled; write="), "{done}");
 
     // Fast: the session ends with its FATAL first.
     let mut s = start(data.path());

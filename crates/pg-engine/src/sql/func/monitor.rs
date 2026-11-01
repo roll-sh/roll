@@ -86,6 +86,22 @@ fn no_rows(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
     Ok(Box::new(std::iter::empty()))
 }
 
+/// pg_get_shmem_allocations: the cluster's shared structures (`Cluster::shared_memory`) as
+/// one segment's named allocations, each at the cache-line-aligned offset after the one
+/// before (ShmemAllocRaw's CACHELINEALIGN), then the unused rest (none: the engine has no
+/// fixed segment).
+fn shmem_allocations(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let mut off = 0i64;
+    let mut out = Vec::new();
+    for (name, size) in c.exec.sess.cluster.shared_memory() {
+        let allocated = (size + 127) / 128 * 128;
+        out.push(vec![text(name), Value::Int8(off), Value::Int8(size), Value::Int8(allocated)]);
+        off += allocated;
+    }
+    out.push(vec![Value::Null, Value::Int8(off), Value::Int8(0), Value::Int8(0)]);
+    rows(out)
+}
+
 /// pg_stat_get_subscription(subid): the running apply and table synchronization workers
 /// (of every subscription when NULL).
 fn subscription(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
@@ -311,6 +327,12 @@ fn activity(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
 
 /// pg_stat_get_activity's rows (of backend `want`, or all).
 fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
+    numbered_activity_rows(want, c).into_iter().map(|r| r.1).collect()
+}
+
+/// `activity_rows` with each backend's proc array slot number, in their order (the order
+/// of PostgreSQL's backend status array).
+fn numbered_activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<(i32, Vec<Value>)> {
     let cat = c.exec.catalog();
     let me = c.exec.current_user();
     let dbo = c.exec.db_owner();
@@ -367,6 +389,7 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
             row[15] = xid.map_or(Value::Null, |x| Value::Oid(x as u32));
             row[16] = xmin.map_or(Value::Null, |x| Value::Oid(x as u32));
             row[17] = text(b.backend_type.unwrap_or("client backend"));
+            row[29] = b.leader_pid.map_or(Value::Null, Value::Int4);
             if b.backend_type.is_some() {
                 // (No client: address, host name and port are null.)
                 row[14] = Value::Null;
@@ -395,10 +418,13 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
         } else {
             row[5] = text("<insufficient privilege>");
         }
-        out.push(row);
+        out.push((b.proc_number.unwrap_or(i32::MAX), row));
     }
-    // The auxiliary processes: no database, client or query.
+    // The auxiliary processes: no database, client or query. (The launchers in their slots
+    // among the backends', the others' after them.)
     let started = c.exec.sess.cluster.start_time();
+    let launchers = c.exec.sess.cluster.launcher_procs();
+    let procs = c.exec.sess.cluster.procs();
     for (k, (pid, kind, event, superuser)) in AUX_PROCESSES.iter().enumerate() {
         if want.is_some_and(|p| p != *pid as i64) {
             continue;
@@ -421,8 +447,14 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
         } else {
             row[5] = text("<insufficient privilege>");
         }
-        out.push(row);
+        let number = match k {
+            0 => launchers.0,
+            1 => launchers.1,
+            _ => procs.aux_number(k as i32 - 2),
+        };
+        out.push((number, row));
     }
+    out.sort_by_key(|r| r.0);
     out
 }
 
@@ -460,8 +492,8 @@ fn backend_col(a: &[Value], c: &FnCtx, col: usize) -> Result<Value> {
     let Some(i) = a.first().and_then(|v| v.as_i64()) else {
         return Ok(Value::Null);
     };
-    let all = activity_rows(None, c);
-    let Some(row) = all.iter().find(|r| r[1] == Value::Int4(i as i32)) else {
+    let all = numbered_activity_rows(None, c);
+    let Some((_, row)) = all.iter().find(|r| r.0 as i64 == i) else {
         return Ok(if col == 5 {
             text("<backend information not available>")
         } else {
@@ -497,15 +529,9 @@ backend_fns!(
     backend_client_port = 14
 );
 
-/// pg_stat_get_backend_idset: the backends' ids, here their pids (the number a temporary
-/// schema is named by, pg_temp_N).
+/// pg_stat_get_backend_idset: the backends' ids, their proc array slot numbers.
 fn backend_idset(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
-    rows(
-        activity_rows(None, c)
-            .into_iter()
-            .map(|r| vec![r[1].clone()])
-            .collect(),
-    )
+    rows(numbered_activity_rows(None, c).into_iter().map(|r| vec![Value::Int4(r.0)]).collect())
 }
 
 fn wait_events(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
@@ -1078,9 +1104,10 @@ pub fn register(r: &mut Registry) {
     }
     // Server files, shared memory and replication state: nothing to show.
     r.from_pg(3329, None, Some(file_settings));
-    for oid in [6399, 5052, 4100] {
+    for oid in [6399, 4100] {
         r.from_pg(oid, None, Some(no_rows));
     }
+    r.from_pg(5052, None, Some(shmem_allocations));
     r.from_pg(3400, None, Some(pg_config));
     r.from_pg(2282, None, Some(memory_contexts));
     r.from_pg(3401, None, Some(hba_file_rules));

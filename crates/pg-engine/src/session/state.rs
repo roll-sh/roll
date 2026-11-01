@@ -110,6 +110,31 @@ pub trait Cluster: Send + Sync {
     fn listen_addr(&self) -> Option<std::net::SocketAddr> {
         None
     }
+    /// The proc array slots (virtual transaction ids, pg_stat_get_backend_idset).
+    fn procs(&self) -> &Arc<crate::txn::procs::Procs> {
+        crate::txn::procs::Procs::fallback()
+    }
+    /// Backend `pid`'s slot, with its startup transaction begun (a new one for a session
+    /// that isn't a registered backend's).
+    fn proc_of(&self, pid: i32) -> Arc<crate::txn::procs::Proc> {
+        self.procs().assign(crate::txn::procs::ProcKind::Backend, pid)
+    }
+    /// The autovacuum launcher's and the logical replication launcher's slot numbers.
+    fn launcher_procs(&self) -> (i32, i32) {
+        self.procs().launcher_numbers(100, 16)
+    }
+    /// A Gather of backend `leader` launches up to `n` parallel workers (as many as free
+    /// background worker slots and `max_workers` running ones allow), each locking `rels`:
+    /// their pids, until `end_parallel_workers`.
+    fn start_parallel_workers(&self, _leader: i32, _n: usize, _max_workers: usize, _participating: bool, _rels: Arc<[u32]>) -> Vec<i32> {
+        Vec::new()
+    }
+    /// The Gather's workers exit.
+    fn end_parallel_workers(&self, _leader: i32, _pids: &[i32]) {}
+    /// What the cluster's sessions share, by pg_shmem_allocations' names: (name, bytes).
+    fn shared_memory(&self) -> Vec<(&'static str, i64)> {
+        Vec::new()
+    }
     /// The superuser the cluster was bootstrapped with (the default user of outbound
     /// connections, as libpq's is the operating system user the server runs as).
     fn bootstrap_superuser(&self) -> String {
@@ -174,6 +199,15 @@ pub struct Activity {
     pub backend_xmin: Option<u64>,
     /// What it waits for besides locks and its client (`Cluster::set_wait`).
     pub wait: Option<(&'static str, &'static str)>,
+    /// Its proc array slot's number (pg_stat_activity's order, pg_stat_get_backend_idset).
+    pub proc_number: Option<i32>,
+    /// A parallel worker's leader.
+    pub leader_pid: Option<i32>,
+    /// A leader running a Gather's workers: whether it takes part (else it waits for them,
+    /// IPC / ExecuteGather).
+    pub gathering: Option<bool>,
+    /// A parallel worker's relations, each locked AccessShare (fast path) while it runs.
+    pub worker_rels: Option<Arc<[u32]>>,
     /// A background worker's backend_type ("autovacuum worker"; None: a client backend).
     pub backend_type: Option<&'static str>,
     /// The backend's running VACUUM / ANALYZE progress (its session's `progress`).
@@ -287,6 +321,8 @@ pub struct SessionState {
     pub user: String,
     pub user_oid: u32,
     pub pid: i32,
+    /// Its proc array slot (virtual transaction ids).
+    pub proc: Arc<crate::txn::procs::Proc>,
     /// Lock-manager owner id for session-level advisory locks.
     pub lock_owner: u64,
     pub settings: RefCell<Settings>,
@@ -321,6 +357,9 @@ pub struct SessionState {
     pub autovacuum: std::cell::Cell<bool>,
     /// The running VACUUM's / ANALYZE's progress (shared with pg_stat_activity's entry).
     pub progress: Arc<Progress>,
+    /// LOG and WARNING messages raised while a statement ran that client_min_messages keeps
+    /// from the client, for the server log (written when the statement's messages are).
+    pub log_only: RefCell<Vec<crate::error::Error>>,
     /// Cost-based vacuum delay of the running VACUUM / ANALYZE: (cost balance, delay in
     /// ms, cost limit, page-hit cost, whether delays are timed). Delay 0: off.
     pub vacuum_cost: std::cell::Cell<(i64, f64, i64, i64, bool)>,
@@ -505,6 +544,7 @@ impl SessionState {
                 "off"
             },
         );
+        let proc = cluster.proc_of(pid);
         SessionState {
             db,
             cluster,
@@ -512,6 +552,7 @@ impl SessionState {
             user: user.to_string(),
             user_oid,
             pid,
+            proc,
             lock_owner: (1u64 << 63) | pid as u32 as u64,
             settings: RefCell::new(settings),
             rng: Cell::new(prng_seeded(u64::from_le_bytes(seed))),
@@ -528,6 +569,7 @@ impl SessionState {
             in_vacuum: std::cell::Cell::new(false),
             autovacuum: std::cell::Cell::new(false),
             progress: Arc::default(),
+            log_only: RefCell::new(Vec::new()),
             vacuum_cost: std::cell::Cell::new((0, 0.0, 200, 1, false)),
             no_snapshot: Default::default(),
             pgstat: RefCell::new(crate::exec::pgstat::Pending::new_session()),
@@ -845,9 +887,10 @@ impl SessionState {
             .session_search_path(user, self.pid, || self.temp_schema())
     }
 
-    /// Name of this session's schema for temporary tables.
+    /// Name of this session's schema for temporary tables: pg_temp_N for its proc array
+    /// slot (MyProcNumber), so a later backend in the slot uses the schema again.
     pub fn temp_schema(&self) -> String {
-        format!("pg_temp_{}", self.pid)
+        format!("pg_temp_{}", self.proc.number())
     }
 
     /// Release session-level advisory locks (pg_advisory_unlock_all, disconnect).

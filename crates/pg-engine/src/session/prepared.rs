@@ -49,6 +49,7 @@ impl Session {
             }
         };
         let mut t = self.txn.take().unwrap().into_inner();
+        self.state.proc.end();
         t.detach_prepared();
         tp.prepared(&info.gid, t);
         // The rest of a commit's cleanup, as far as the session is concerned (PREPARE acts

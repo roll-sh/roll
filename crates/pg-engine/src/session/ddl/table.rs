@@ -3653,6 +3653,9 @@ impl Ddl<'_, '_> {
 
     /// Fill a new index from the table's rows, checking uniqueness.
     pub(super) fn build_index(&mut self, t: &Table, ix: &Index) -> Result<()> {
+        // (The build reads the table with a sequential scan: pg_stat_*_tables' seq_scan,
+        // last_seq_scan and seq_tup_read count it, as heapam_index_build_range_scan's.)
+        crate::exec::pgstat::count_seqscan(self.ctx, t.oid);
         let ta = Arc::new(t.clone());
         let bix = bound_indexes(&ta, self.ctx)?
             .into_iter()
@@ -3698,7 +3701,9 @@ impl Ddl<'_, '_> {
         // (An SP-GiST quad_point_ops build: the points so far, and whether one has a NaN.)
         let quad = crate::exec::dml::quad_point_index(&bix, self.ctx);
         let (mut points, mut nan) = (0usize, false);
+        let counts = self.ctx;
         let mut step = |dkey: &[u8], vals: &[Value]| -> Result<()> {
+            crate::exec::pgstat::count_returned(counts, t.oid, 1);
             if quad && let Some(v) = vals.first().filter(|v| !v.is_null()) {
                 points += 1;
                 nan |= crate::exec::dml::nan_point(v);
@@ -9365,6 +9370,8 @@ impl Ddl<'_, '_> {
             }
             _ => {}
         }
+        // (ReindexRelationConcurrently's transactions: seven phases, three per index.)
+        let mut ric_phases = true;
         for (table, indexes, toast) in work {
             // reindex_index / ReindexRelationConcurrently: SHARE on the table and ACCESS
             // EXCLUSIVE on its indexes (CONCURRENTLY: SHARE UPDATE EXCLUSIVE on both).
@@ -9400,6 +9407,10 @@ impl Ddl<'_, '_> {
             // for the lockers there are when it begins.
             if concurrently {
                 use crate::txn::locks::LockMode as L;
+                let n = 3 * (indexes.len() + usize::from(toast_rel != 0)) + if std::mem::take(&mut ric_phases) { 6 } else { 0 };
+                for _ in 0..n {
+                    self.ctx.sess.proc.next_transaction();
+                }
                 let rels: Vec<u32> = std::iter::once(table).chain((toast_rel != 0).then_some(toast_rel)).collect();
                 let mut txn = self.ctx.txn.borrow_mut();
                 for _ in 0..2 {

@@ -5657,6 +5657,73 @@ clean restart, then inserts and their ctids before and after a VACUUM:
 
 Base's output at 300,000 rows is identical to head's.
 
+## Monitoring scrapes (round 23, agent 128)
+
+What changed (HANDOFF "Server monitoring and logging, round 4"): statistics reads under
+stats_fetch_consistency = cache stopped copying every cached entry per call (quadratic over
+a scan of pg_stat_*_tables), the consistency setting is derived once, plus the monitoring
+features (proc array, parallel worker rows, checkpoint and temp-file numbers) whose cost is
+below.
+
+Method: release builds; the engine pinned to CPUs 20-23 (`taskset`), the reference
+(PostgreSQL 18.6, the pinned image, pg_stat_statements preloaded, max_connections 200 so
+100 sessions and the exporter fit) to 24-27 (`docker update --cpuset-cpus`); database
+`scale` with 10,000 tables (a primary key each, 50 rows in every hundredth); 100 sessions
+held open on each by `pgbench -c 100 -f idle.sql` (`\sleep 5 s; SELECT 1`);
+prometheus-community postgres_exporter 0.17.1 (default collectors) on each, scraped with
+curl, engine and reference in turn, 4 rounds. CPU: the engine process's utime + stime, the
+reference container's cgroup usage_usec, over the scrape. The machine ran at load 40-55 on
+36 CPUs (other agents' builds), so wall times moved by ±20% between rounds.
+
+| per scrape (4 rounds) | PostgreSQL 18.6 | engine |
+|---|---|---|
+| wall | 6.0-8.1 s | 4.3-5.0 s |
+| server CPU | 3.9-5.9 s | 2.1-2.5 s |
+| series | 280,581 | 280,581 |
+| memory (after the scrapes) | 330 MB (container) | 171 MB RSS, 273 MB peak |
+
+Before the read fix the engine's scrape took 367-514 s (and 304-388 s of CPU): the
+stat_user_tables and statio_user_tables collectors' views, 147 s and 52 s each. A scrape
+every 15 s now costs the engine about 15% of one CPU, PostgreSQL's about 30%; most of
+PostgreSQL's is pg_total_relation_size over every table (5.4 s alone; the engine's 0.8 s).
+
+Views alone, database `scale`, one statement each (psql \timing, same load):
+
+| statement | PostgreSQL | engine before | engine now |
+|---|---|---|---|
+| `count(*) FROM pg_stat_user_tables` | 59 ms | 147 s | 0.9 s |
+| `count(*) FROM pg_statio_user_tables` | 16 ms | 52 s | 1.0-1.1 s |
+| `sum(pg_total_relation_size(relid)) FROM pg_stat_user_tables` | 5,413 ms | 60 s | 0.7-0.8 s |
+| `count(*) FROM pg_stat_user_indexes` | 42 ms | 8.1 s | 0.8 s |
+| `count(*) FROM pg_stat_activity` (100 sessions) | 2.3 ms | 2.3 ms | 7 ms |
+| `count(*) FROM pg_locks` | 0.8 ms | 0.4 ms | 0.8 ms |
+
+The tools' own queries (`tests/clients/suites/monitoring.py`: pgwatch 3.7.0, pg_activity
+3.6.1, pganalyze-collector 0.66.1, Datadog 22.12.0, check_postgres; 193 queries, median of
+three runs each) in database `scale`, total per tool:
+
+| tool | PostgreSQL | engine |
+|---|---|---|
+| pgwatch | 2,859 ms | 36,307 ms (30,006 of it table_stats_approx, at its 30 s timeout) |
+| pganalyze | 534 ms | 87 ms |
+| Datadog | 17 ms | 36 ms |
+| check_postgres | 6 ms | 21 ms |
+| pg_activity | 4.8 ms | 4.9 ms |
+
+pgwatch's table_stats_approx is planned with a hash join inside a correlated sub-select over
+pg_class / pg_index (rows=201 for pg_class's relkind = 'r' where PostgreSQL's estimate is
+10,075): a planner estimate, left to the planner's owner. Its other per-table metrics run
+2-4x PostgreSQL's time (table_stats 878 vs 267 ms, index_stats 732 vs 160 ms).
+
+pgbench (scale 10, 8 clients, 20 s, 6 interleaved rounds per build, client on CPUs 28-31;
+engine CPU per transaction, which load moves less than tps): select-only 260-307 µs base,
+269-316 µs this round (medians 294 / 288); tpcb-like 1,731-2,238 µs base, 1,578-2,192 µs
+(medians 1,795 / 1,816); peak RSS 142-220 MB base, 143-223 MB. No regression beyond the
+noise of a machine at load 50.
+
+Left: pg_stat_user_tables is still 15x PostgreSQL's per row (25 pg_stat_get_* calls per
+row through the evaluator, each cloning the table's entry); pgwatch's table_stats_approx plan.
+
 ## Where it is still slower, and why
 
 In rough order of what it costs users:

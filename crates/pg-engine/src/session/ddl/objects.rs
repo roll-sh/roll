@@ -309,7 +309,9 @@ impl Ddl<'_, '_> {
         )?;
         // DefineIndex's concurrent build waits for the table's writers (WaitForLockers
         // with ShareLock) before it builds and validates.
+        // (Each phase is a transaction of its own: a virtual transaction id each.)
         if s.concurrent {
+            self.ctx.sess.proc.next_transaction();
             self.ctx
                 .txn
                 .borrow_mut()
@@ -521,8 +523,12 @@ impl Ddl<'_, '_> {
                 self.ctx.txn.borrow().set_safe_index_build(safe);
                 let r = self.fold_index_predicate(&t, &ix).and_then(|_| self.build_index(&t, &ix)).and_then(|_| {
                     let mut txn = self.ctx.txn.borrow_mut();
+                    self.ctx.sess.proc.next_transaction();
                     txn.wait_for_lockers(t.oid, crate::txn::locks::LockMode::Share)?;
-                    txn.wait_for_older_snapshots()
+                    txn.wait_for_older_snapshots()?;
+                    // (The last phase marks the index valid.)
+                    self.ctx.sess.proc.next_transaction();
+                    Ok(())
                 });
                 self.ctx.txn.borrow().set_safe_index_build(false);
                 r?;
@@ -5412,6 +5418,9 @@ impl Ddl<'_, '_> {
                         if s.concurrent
                             && let Some(heap) = heap
                         {
+                            // (index_drop's two transactions after the statement's.)
+                            self.ctx.sess.proc.next_transaction();
+                            self.ctx.sess.proc.next_transaction();
                             self.ctx.txn.borrow_mut().wait_for_lockers(
                                 heap,
                                 crate::txn::locks::LockMode::AccessExclusive,

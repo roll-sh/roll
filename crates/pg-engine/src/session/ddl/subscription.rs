@@ -1058,7 +1058,10 @@ impl Ddl<'_, '_> {
                 Ok(()) => self.notice(format!("dropped replication slot \"{s}\" on publisher")),
                 Err(Fail::Interrupt(e)) => return Err(e),
                 Err(Fail::Remote { msg, sqlstate }) if sqlstate.as_deref() == Some("42704") => {
-                    tracing::info!("could not drop replication slot \"{s}\" on publisher: {msg}");
+                    // (ReplicationSlotDropAtPubNode's LOG line: the server log's.)
+                    let mut e = super::super::notice(format!("could not drop replication slot \"{s}\" on publisher: {msg}"));
+                    e.severity = crate::error::Severity::Log;
+                    self.ctx.notice(e);
                 }
                 Err(Fail::Remote { msg, .. }) => {
                     return Err(Error::new(

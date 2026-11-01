@@ -116,6 +116,8 @@ pub struct Fixed {
     pub slru_zeroed: HashMap<String, i64>,
     /// The WAL position the cluster started at (`wal_lsn`).
     pub lsn_base: u64,
+    /// Where this run's WAL began: the first checkpoint's distance counts from it.
+    pub start_lsn: u64,
     /// WAL bytes written since then (as pg_stat_wal's wal_bytes, but never reset).
     pub wal_written: u64,
     /// The last checkpoint: its record's and its redo's WAL positions and its time (None:
@@ -567,15 +569,9 @@ pub fn now() -> i64 {
 use super::ExecCtx;
 
 fn consistency(ctx: &ExecCtx) -> Consistency {
-    match ctx
-        .sess
-        .settings
-        .borrow()
-        .get_raw("stats_fetch_consistency")
-        .as_deref()
-    {
-        Some("none") => Consistency::None,
-        Some("snapshot") => Consistency::Snapshot,
+    match ctx.sess.settings.borrow().stats_fetch_consistency() {
+        0 => Consistency::None,
+        2 => Consistency::Snapshot,
         _ => Consistency::Cache,
     }
 }
@@ -586,8 +582,17 @@ fn counting(ctx: &ExecCtx) -> bool {
 }
 
 /// Run `f` on the shared entries as a reader sees them under stats_fetch_consistency
-/// (building the snapshot or caching the entries `cache_key` names).
-fn read<T>(ctx: &ExecCtx, f: impl Fn(&Shared) -> T, cache: impl FnOnce(&mut Fetched, &Shared)) -> T {
+/// (building the snapshot, or, in cache mode, reading the entry the transaction cached:
+/// `cached` finds it, `cache` copies it from the shared entries and returns it). A cached
+/// entry is read without the shared lock, and only that entry: a scan of pg_stat_*_tables
+/// reads each table's once per column, not every cached one (it copied them all per call,
+/// 147 s over 10,000 tables).
+fn read<T>(
+    ctx: &ExecCtx,
+    f: impl Fn(&Shared) -> T,
+    cached: impl FnOnce(&Fetched) -> Option<T>,
+    cache: impl FnOnce(&mut Fetched, &Shared) -> T,
+) -> T {
     let mode = consistency(ctx);
     let mut p = ctx.sess.pgstat.borrow_mut();
     if p.mode.is_some_and(|m| m != mode) {
@@ -608,24 +613,11 @@ fn read<T>(ctx: &ExecCtx, f: impl Fn(&Shared) -> T, cache: impl FnOnce(&mut Fetc
         }
         Consistency::Cache => {
             p.mode = Some(mode);
+            if let Some(v) = cached(&p.cache) {
+                return v;
+            }
             let shared = shared(&ctx.sess.db);
-            cache(&mut p.cache, &shared);
-            drop(shared);
-            let mut view = Shared::default();
-            for (k, v) in &p.cache.tables {
-                if let Some(e) = v {
-                    view.tables.insert(*k, e.clone());
-                }
-            }
-            for (k, v) in &p.cache.funcs {
-                if let Some(e) = v {
-                    view.funcs.insert(*k, *e);
-                }
-            }
-            if let Some(d) = &p.cache.db {
-                view.db = d.clone();
-            }
-            f(&view)
+            cache(&mut p.cache, &shared)
         }
     }
 }
@@ -635,11 +627,8 @@ pub fn fetch_table(ctx: &ExecCtx, rel: u32) -> Option<TabEntry> {
     read(
         ctx,
         |s| s.tables.get(&rel).cloned(),
-        |c, s| {
-            c.tables
-                .entry(rel)
-                .or_insert_with(|| s.tables.get(&rel).cloned());
-        },
+        |c| c.tables.get(&rel).cloned(),
+        |c, s| c.tables.entry(rel).or_insert_with(|| s.tables.get(&rel).cloned()).clone(),
     )
 }
 
@@ -648,9 +637,8 @@ pub fn fetch_function(ctx: &ExecCtx, func: u32) -> Option<FuncCounts> {
     read(
         ctx,
         |s| s.funcs.get(&func).copied(),
-        |c, s| {
-            c.funcs.entry(func).or_insert_with(|| s.funcs.get(&func).copied());
-        },
+        |c| c.funcs.get(&func).copied(),
+        |c, s| *c.funcs.entry(func).or_insert_with(|| s.funcs.get(&func).copied()),
     )
 }
 
@@ -667,11 +655,8 @@ pub fn fetch_db(ctx: &ExecCtx, db: u32) -> Option<DbEntry> {
     Some(read(
         ctx,
         |s| s.db.clone(),
-        |c, s| {
-            if c.db.is_none() {
-                c.db = Some(s.db.clone());
-            }
-        },
+        |c| c.db.clone(),
+        |c, s| c.db.get_or_insert_with(|| s.db.clone()).clone(),
     ))
 }
 
@@ -691,7 +676,7 @@ pub fn fetch_slru(ctx: &ExecCtx) -> HashMap<String, i64> {
         }
         return p.cache.slru.clone().unwrap_or_default();
     }
-    read(ctx, |s| s.fixed.lock().slru_zeroed.clone(), |_, _| {})
+    read(ctx, |s| s.fixed.lock().slru_zeroed.clone(), |_| None, |_, s| s.fixed.lock().slru_zeroed.clone())
 }
 
 /// The fixed-numbered statistics and other cluster-wide values (no snapshot).
@@ -1059,7 +1044,9 @@ pub fn checkpoint(
     if logging {
         checkpointer_log(format!("checkpoint starting: {flags}"));
     }
+    let io = crate::storage::fileio::FileIo::begin();
     flush()?;
+    let io = io.end();
     let shutdown = flags.starts_with("shutdown");
     let mut s = fixed.lock();
     if !shutdown {
@@ -1067,7 +1054,7 @@ pub fn checkpoint(
     }
     // (A shutdown or end-of-recovery checkpoint's record is its own redo point.)
     let own_redo = shutdown || flags.starts_with("end-of-recovery");
-    let prev_redo = s.checkpoint.map(|(_, redo, _)| redo);
+    let prev_redo = s.checkpoint.map_or(s.start_lsn, |(_, redo, _)| redo);
     let (redo, ckpt) = s.checkpoint_at(now());
     let ckpt = if own_redo { redo } else { ckpt };
     s.checkpoints_performed += 1;
@@ -1080,7 +1067,7 @@ pub fn checkpoint(
         .entry(("checkpointer", "wal", "normal", "writes"))
         .or_default() += 1;
     // UpdateCheckPointDistanceEstimate.
-    let distance = prev_redo.map_or(0, |p| redo.saturating_sub(p));
+    let distance = redo.saturating_sub(prev_redo);
     s.distance_estimate = if s.distance_estimate < distance as f64 {
         distance as f64
     } else {
@@ -1089,20 +1076,29 @@ pub fn checkpoint(
     let estimate = s.distance_estimate;
     drop(s);
     if logging {
-        // (Buffers: the pages the WAL since the last checkpoint stands for, out of
-        // shared_buffers' 16384; the engine has no shared buffers of its own to write.)
-        let bufs = (distance / 8192).min(16384);
-        let ms = started.elapsed().as_millis() as u64;
+        // What the flush did (`storage::fileio`): the table files it wrote, in 8 kB pages
+        // out of shared_buffers' 16384 (the engine writes its memtables, not shared
+        // buffers), the write-ahead log files it made and removed, the data files it
+        // synced. Times in milliseconds, rounded up (TimestampDifferenceMilliseconds).
+        let bufs = io.sst_bytes.div_ceil(8192);
+        let total_us = started.elapsed().as_micros() as u64;
+        let ms = |us: u64| us.div_ceil(1000);
         let secs = |ms: u64| format!("{}.{:03}", ms / 1000, ms % 1000);
         let lsn = |p: u64| format!("{:X}/{:X}", p >> 32, p & 0xffff_ffff);
-        let files = u64::from(bufs > 0);
+        let average = io.sync_us.checked_div(io.syncs).unwrap_or(0);
         checkpointer_log(format!(
-            "checkpoint complete: wrote {bufs} buffers ({:.1}%), wrote 0 SLRU buffers; 0 WAL file(s) added, \
-             0 removed, 0 recycled; write={} s, sync=0.000 s, total={} s; sync files={files}, \
-             longest=0.000 s, average=0.000 s; distance={} kB, estimate={} kB; lsn={}, redo lsn={}",
+            "checkpoint complete: wrote {bufs} buffers ({:.1}%), wrote 0 SLRU buffers; {} WAL file(s) added, \
+             {} removed, 0 recycled; write={} s, sync={} s, total={} s; sync files={}, \
+             longest={} s, average={} s; distance={} kB, estimate={} kB; lsn={}, redo lsn={}",
             bufs as f64 * 100.0 / 16384.0,
-            secs(ms),
-            secs(ms),
+            io.wal_added,
+            io.wal_removed,
+            secs(ms(total_us.saturating_sub(io.sync_us))),
+            secs(ms(io.sync_us)),
+            secs(ms(total_us)),
+            io.syncs,
+            secs(ms(io.longest_us)),
+            secs(ms(average)),
             distance / 1024,
             (estimate / 1024.0) as u64,
             lsn(ckpt),
@@ -1463,6 +1459,13 @@ pub fn unflushed_function(sess: &crate::session::state::SessionState, func: u32)
 }
 
 /// pg_stat_force_next_flush: the backend's next report flushes whatever the interval.
+/// pgstat_report_tempfile: a temporary file of `bytes` bytes was deleted (counted past a
+/// transaction's end: reported now, as pgstat_report_stat would at the next one).
+pub fn count_temp_file(sess: &crate::session::state::SessionState, bytes: i64) {
+    sess.temp.count_removed(bytes.max(0) as u64);
+    report(sess, false, &sess.db.catalog());
+}
+
 pub fn force_next_flush(sess: &crate::session::state::SessionState) {
     sess.pgstat.borrow_mut().force_next = true;
 }

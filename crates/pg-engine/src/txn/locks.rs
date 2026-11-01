@@ -367,7 +367,8 @@ fn describe(tag: &Tag, db: u32) -> String {
     match tag {
         Tag::Relation { db, rel } => format!("relation {rel} of database {db}"),
         Tag::Tuple { db, rel, .. } => format!("tuple of relation {rel} of database {db}"),
-        Tag::Transaction { xid, .. } => format!("transaction {xid}"),
+        Tag::Transaction { xid, .. } if *xid != 0 => format!("transaction {xid}"),
+        Tag::Transaction { id, .. } => format!("virtual transaction {}", super::procs::vxid_of_owner(*id).unwrap_or_default()),
         Tag::Object { db, class, obj, .. } => {
             format!("object {obj} of class {class} of database {db}")
         }
@@ -796,7 +797,7 @@ fn log_wait(s: &State, key: &[u8], proc: u64, mode: LockMode, start: Instant, wh
         Tag::Relation { db, rel } => format!("relation {rel} of database {db}"),
         Tag::Tuple { db, rel, .. } => format!("tuple of relation {rel} of database {db}"),
         Tag::Transaction { xid, .. } if xid != 0 => format!("transaction {xid}"),
-        Tag::Transaction { id, .. } => format!("virtual transaction 3/{}", id as u32),
+        Tag::Transaction { id, .. } => format!("virtual transaction {}", super::procs::vxid_of_owner(id).unwrap_or_default()),
         Tag::Object { db, class, obj, .. } => format!("object {obj} of class {class} of database {db}"),
         Tag::SpecToken { xid, token } => format!("speculative token {token} of transaction {xid}"),
         Tag::ApplyTransaction { db, sub, xid, .. } => format!("remote transaction {xid} of subscription {sub} of database {db}"),

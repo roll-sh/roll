@@ -12,6 +12,20 @@ use super::fasthash::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// A scan of a system catalog (not a system view) the statement runs: the catalog's
+/// sequential scan or its index's scan in pg_stat_sys_tables / _indexes, as a scan of the
+/// relation counts. (The engine's own catalog lookups read no relation: not counted.)
+fn count_catalog_scan(table: crate::catalog::system::SysTable, path: Option<&crate::sql::plan::SysPath>, ctx: &ExecCtx) {
+    use crate::sql::plan::Access;
+    if table.is_view() {
+        return;
+    }
+    match path.and_then(|p| p.scan.index.as_ref().filter(|_| !matches!(p.scan.access, Access::Seq))) {
+        Some((ix, _)) => super::pgstat::count_index_scan(ctx, ix.oid),
+        None => super::pgstat::count_seqscan(ctx, table.oid()),
+    }
+}
+
 /// Start running `plan`.
 pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
     // (Taken first: a mask is for this node alone, whatever happens next.)
@@ -95,6 +109,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
         Plan::Scan(s) => super::scan::open_scan(s, Some(plan), need, ctx)?,
         Plan::SysScan { mark: Some(_), .. } => open_locked_sys_scan(plan, need, ctx)?,
         Plan::SysScan { table, filter, path, .. } => {
+            count_catalog_scan(*table, path.as_deref(), ctx);
             if let Some(rows) = sys_rescan(*table, filter.as_ref(), path.as_deref(), need, ctx)? {
                 return Ok(Box::new(VecNode::new(rows)));
             }

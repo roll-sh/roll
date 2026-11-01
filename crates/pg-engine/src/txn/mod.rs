@@ -4,6 +4,7 @@
 pub(crate) mod catmerge;
 mod bulklocks;
 pub mod locks;
+pub mod procs;
 pub(crate) mod spill;
 pub mod ssi;
 pub mod toast;
@@ -111,6 +112,10 @@ pub struct Database {
     /// Ended sessions still dropping their temporary objects; a new session's login waits
     /// for them, so its first statements don't race their catalog change.
     pub temp_cleanups: AtomicUsize,
+    /// It opened with temporary objects: a crashed server's sessions', which a new session
+    /// in their proc array slot (whose pg_temp_N it is) drops before it starts, as
+    /// InitTempTableNamespace removes them before the namespace is used again.
+    pub temp_leftovers: std::sync::atomic::AtomicBool,
     pub last_active: Mutex<Instant>,
     /// LISTEN / NOTIFY between this database's sessions.
     pub notify: crate::notify::Hub,
@@ -193,6 +198,7 @@ impl Database {
         )));
         catalog.freeze();
         let version = catalog.version;
+        let temp_leftovers = catalog.tables.values().any(|t| t.temporary);
         static INSTANCES: AtomicU64 = AtomicU64::new(1);
         Ok(Arc::new(Database {
             name: name.to_string(),
@@ -208,6 +214,7 @@ impl Database {
             next_txn: AtomicU64::new(1),
             sessions: AtomicUsize::new(0),
             temp_cleanups: AtomicUsize::new(0),
+            temp_leftovers: std::sync::atomic::AtomicBool::new(temp_leftovers),
             last_active: Mutex::new(Instant::now()),
             notify: Default::default(),
             lo_oid: Mutex::new(0),
@@ -417,6 +424,7 @@ impl Database {
             deadline: None,
             txn_deadline: None,
             lock_peer: None,
+            vxid: procs::Vxid::default(),
             wrote: false,
             started: Instant::now(),
             seq_last: HashMap::new(),
@@ -894,6 +902,9 @@ pub struct Txn {
     /// The session's own lock owner (session-level advisory locks), whose locks don't
     /// conflict with this transaction's.
     pub lock_peer: Option<u64>,
+    /// The virtual transaction id its backend gave it (`procs::Proc::begin`; a prepared
+    /// transaction keeps it, as MarkAsPreparingGuts clones it).
+    pub vxid: procs::Vxid,
     wrote: bool,
     pub started: Instant,
     /// currval() per sequence within this session's transaction.

@@ -101,6 +101,13 @@ const USAGE_INIT: f64 = 1.0;
 const DEALLOC_PERCENT: usize = 5;
 
 impl Store {
+    /// What its entries take (and their query texts).
+    pub fn memory_bytes(&self) -> usize {
+        let g = self.inner.lock();
+        g.entries.capacity() * (std::mem::size_of::<Key>() + std::mem::size_of::<Entry>() + 8)
+            + g.entries.values().map(|e| e.query.len()).sum::<usize>()
+    }
+
     pub fn new(now: i64, max: usize) -> Store {
         Store {
             inner: Mutex::new(Inner {

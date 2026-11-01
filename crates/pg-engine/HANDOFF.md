@@ -359,6 +359,129 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     20 s, default logging, a machine at load 35-60, so tps follows run order; engine CPU per
     transaction): select-only 289-294 us base, 286-297 us this batch; tpcb-like 1,609-1,685 us
     base, 1,612-1,671 us; peak RSS 355-364 MB base, 336-387 MB. No regression beyond noise.
+- **Server monitoring and logging, round 4** (round 23, agent 128): checked against a private
+  reference started with the same settings, statement by statement and line by line.
+  - Virtual transaction ids (`txn/procs.rs`): a proc array of PostgreSQL's layout
+    (InitProcGlobal: max_connections client slots, autovacuum_worker_slots + 2 with the
+    launcher's first, max_worker_processes with the logical replication launcher's first,
+    max_wal_senders; the auxiliary processes after MaxBackends). A backend takes the head of
+    its kind's free list after the startup packet (walsenders their own list; autovacuum and
+    apply workers theirs) and its slot goes to the tail when its last holder drops it, so
+    sequential connections take 0, 1, 2, ... and reuse a slot only after the others, as
+    PostgreSQL does; past the free list (the engine doesn't cap sessions at max_connections) a
+    new slot after the auxiliary ones. A slot counts local ids on across its backends (1: the
+    first backend's startup transaction; the next backend's startup takes the next one), one
+    per transaction as start_xact_command / finish_xact_command make them: a Query message,
+    a Parse / Bind / Describe / Execute cycle up to Sync (a Parse with its own Sync is one),
+    a procedure's COMMIT, VACUUM's per relation (the statement's, each table's, its TOAST
+    table's, ANALYZE's in VACUUM ANALYZE, the closing one; a database-wide one counts
+    PostgreSQL 18.6's 68 catalogs and 39 catalog TOAST tables when the role may maintain
+    them), ANALYZE of more than one relation, CREATE / DROP / REINDEX ... CONCURRENTLY's phases
+    (4, 3 and 7 + 3 per index). %v, csvlog / jsonlog vxid, pg_locks' virtualxid /
+    virtualtransaction (another backend's locks show its running id, local id 0 between
+    transactions; a prepared transaction keeps its preparer's; a virtualxid lock is fast-path
+    until someone waits for it), lock waits' and deadlocks' "virtual transaction N/M",
+    pg_stat_get_backend_idset (slot numbers; pg_stat_activity in slot order: clients, the
+    autovacuum launcher and workers, the replication launcher and background workers,
+    walsenders, then the auxiliary processes) and the temporary schema's name (pg_temp_N of
+    the slot) all read it. Statement lines carry the new transaction's id, duration lines of a
+    finished one N/0, errors the transaction they failed in. A crashed server's temporary
+    objects left in a reused pg_temp_N are dropped by the next session in that slot before it
+    starts (InitTempTableNamespace's RemoveTempRelations; `Database::temp_leftovers`).
+    log_duration's parse and bind lines (exec_parse_message / exec_bind_message) were missing.
+  - Parallel workers seen by others (`exec/parallel_part.rs` `start` / `Launched`): a plan
+    whose Gathers plan workers registers them for the statement (the plan's Gathers as
+    EXPLAIN places them, found only when a scan of the plan could be parallel: a relation at
+    least min_parallel_*_scan_size big, an appendrel, a parallel_workers storage parameter;
+    unique-index single-row lookups never are), as many as free background worker slots and
+    max_parallel_workers allow: pg_stat_activity rows of backend_type "parallel worker"
+    with leader_pid, the leader's query, database, user and application_name, client_port
+    NULL, their wait event the leader's work's (a leader with parallel_leader_participation
+    off waits IPC / ExecuteGather), pg_locks' AccessShareLock on the relations the part opens
+    (tables and their indexes) and each worker's own virtualxid (fast-path; ids from a
+    background worker slot: startup, the library state's transaction, the parallel one, so a
+    fresh slot shows N/3), pg_stat_database's parallel_workers_to_launch / _launched (only
+    debug_parallel_query counted them before). Test `tests/wire.rs`
+    `parallel_workers_seen_by_others`, `virtual_transaction_ids`.
+  - Checkpoint lines (`storage/fileio.rs`): "wrote N buffers" are the table files the
+    checkpoint's flush wrote (8 kB pages, of shared_buffers' 16384), "N WAL file(s) added, M
+    removed" the store WAL files it made and retired, write / sync / total and sync files /
+    longest / average its real fsyncs (milliseconds rounded up, as
+    TimestampDifferenceMilliseconds); the first checkpoint after a start measures its
+    distance from where this run's WAL began (`Fixed::start_lsn`), so a shutdown after work
+    no longer reports distance=0. SLRU buffers stay 0 (no SLRUs). Test
+    `tests/lifecycle_log.rs`.
+  - log_temp_files and temp_files / temp_bytes for the subscriber's changes files of
+    streamed transactions (`repl/apply.rs` `changes_file_deleted`): the apply worker's spool
+    (streaming = on) and the leader's file of a partially serialized transaction (streaming =
+    parallel, a full queue or debug_logical_replication_streaming = immediate), each reported
+    when the transaction ends (STREAM COMMIT, STREAM ABORT, STREAM PREPARE), one line per
+    1 GB segment, `temporary file: path "base/pgsql_tmp/pgsql_tmp<pid>.0.fileset/<subid>-<xid>.changes.0", size N`
+    with the message's CONTEXT, counted in pg_stat_database (`pgstat::count_temp_file`). Test
+    `tests/logical_apply.rs` `changes_files_logged`.
+  - Monitoring leftovers: pg_stat_sys_tables / _indexes count the catalog scans statements
+    run (a SysScan: the catalog's seq_scan, or its index's idx_scan, with their last_*_scan);
+    pg_shmem_allocations models the engine's shared memory (Decisions);
+    pg_stat_progress_create_index ran into a duplicate pg_indexam_progress_phasename
+    ("function ... is not unique"); pg_settings' boot_val is NULL for config_file,
+    data_directory, external_pid_file, hba_file, ident_file and timezone_abbreviations
+    (reset_val too for external_pid_file); tcp_keepalives_idle / _interval / _count show the
+    socket's values on a TCP connection (the kernel's, 7200 / 75 / 9 here) as PostgreSQL's
+    show hooks do. pg_ls_logdir / _waldir / _tmpdir / _archive_statusdir / _summariesdir /
+    _logicalmapdir already answered as the reference does on a default cluster (the WAL
+    directory has one segment where PostgreSQL keeps two or three: accepted).
+  - Monitoring tools as client suites (`tests/clients/suites/postgres_exporter.sh`,
+    `monitoring.sh` + `monitoring.py`; `run.sh` takes an `# entrypoint:` header for an image
+    whose entrypoint is the tool): postgres_exporter 0.17.1 with every collector, 817 ids
+    (collectors' success, metric families and their types, label sets) identical; pgwatch
+    3.7.0, pg_activity 3.6.1, pganalyze-collector 0.66.1, Datadog's postgres 22.12.0 and
+    check_postgres, 193 queries taken from their sources, identical (errors, columns, types,
+    NULLs). Scrape cost at 10,000 tables and 100 sessions: BENCH.md "Monitoring scrapes".
+  - Statistics reads under stats_fetch_consistency = cache (the default) copied every entry
+    the transaction had cached into a fresh view on each pg_stat_get_* call, so a scan of
+    pg_stat_user_tables was quadratic: 147 s over 10,000 tables, now 0.9 s
+    (`pgstat::read`: the one cached entry, without the shared lock); the setting is a derived
+    value instead of a string lookup per call.
+  - Index builds count the table's sequential scan (seq_scan, last_seq_scan, seq_tup_read),
+    as heapam_index_build_range_scan's does: a table made with a primary key shows
+    seq_scan 1, as in PostgreSQL.
+  - LOG and WARNING messages a statement raises below client_min_messages still reach the
+    server log, as elog's log_min_messages is its own (RAISE LOG / WARNING, DROP
+    SUBSCRIPTION's "could not drop replication slot ... on publisher" for a sync slot
+    already gone, which went to tracing): kept on the session (`SessionState::log_only`)
+    and written with the statement's other messages, the LOG with its STATEMENT (LOG ranks
+    above log_min_error_statement's error in the server log). Test `tests/connection_log.rs`.
+  - Cancel requests (`server.rs`, `Session::reads_clear_cancel`): a cancel was dropped
+    whenever the backend read its next message or began a transaction, so one that came
+    while it worked through a pipeline's Parse / Bind before the Execute canceled nothing
+    (wire test cancel_request_closes_after_the_error failed about once in 19 runs under
+    load). As in PostgreSQL, only a cancel that comes while the backend waits for its
+    client is ignored (ProcessInterrupts while DoingCommandRead, which only runs when the
+    read waits): the flag is cleared when a read finds nothing buffered; an embedded
+    session's still clears at its transaction's start. The test now waits for the
+    statement to be running (pg_stat_activity's PgSleep) instead of 100 ms: 25 of 25 runs
+    pass.
+  - Left: pg_stat_user_tables over 10,000 tables takes 0.9 s where PostgreSQL takes 0.06 s
+    (the view's 25 function calls per row through the expression evaluator; a whole scrape
+    still costs half PostgreSQL's CPU, BENCH.md); heap / index buffer hits of writes
+    (pg_statio's heap_blks_hit after INSERTs) read 0, an internal number;
+    timed checkpoints ("checkpoint starting: time") aren't logged (the engine flushes on
+    its own schedule); pgwatch's table_stats_approx times out at 10,000 tables because a
+    correlated sub-select over pg_class / pg_index is planned as a hash join per outer row
+    (the planner's catalog estimates: agent 116's); VACUUM's per-relation local ids count
+    relations a role may not vacuum the engine's way (PostgreSQL starts a transaction for a
+    named one before its permission warning).
+  - Verified: crate tests debug and release (deep_input, connection_log, lifecycle_log,
+    server_log, log_collector, wire, logical_apply included), clippy (no new warnings), the
+    difftest smoke, isolation 121 / 122 plus the roll-* specs (134 / 135, 1,742 / 1,743
+    permutations: intra-grant-inplace as before; roll-parallel-worker-locks passes; after
+    the last rebase 134 / 136: reindex-schema fails on the base too, a debug assertion "file
+    numbers of relations that are gone" after REINDEX SCHEMA over a table dropped while it
+    waited, since the catalog round 8 commits), a full
+    regress run (debug, private reference) 51,148 / 51,150 with 0 units changed against
+    results.tsv, pg_contrib auto_explain 12 / 12, pg_stat_statements 1,013 / 1,013,
+    pg_buffercache 38 / 38, pg_visibility 99 / 99, pgstattuple 83 / 83, pg_freespacemap
+    15 / 15. pgbench and scrape costs: BENCH.md "Monitoring scrapes".
 - **Server configuration, authentication rules and the server log** (round 20, agent 80):
   - `src/sysconf.rs`: postgresql.conf is the pinned image's (its 15 settings at their lines,
     the locale lines what initdb chose); postgresql.auto.conf is ALTER SYSTEM's, kept in the
@@ -4955,14 +5078,6 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   the password exchange (auth_start to auth_end). Crash recovery's lines use the engine's
   WAL positions (redo starts at the last clean shutdown's, the WAL resumes where `WalPos`
   persisted ahead) and the start's own CPU and time: accepted internal numbers.
-- **log_temp_files has nothing to log** (round 22, agent 120). PostgreSQL's temporary files
-  are its sorts', hashes' and tuplestores' spills past work_mem; the engine's sorts and
-  hashes don't spill to disk, and its one disk spill, a large transaction's write buffer
-  (`txn::spill`), has no PostgreSQL counterpart (PostgreSQL writes those rows to the
-  relation). So nothing is logged and pg_stat_database's temp_files / temp_bytes stay 0, as
-  for a PostgreSQL run whose work fits work_mem. The subscriber's spool of a streamed
-  transaction (`repl/apply_stream`) does stand for PostgreSQL's apply worker BufFile, which
-  log_temp_files reports at its deletion: not logged yet (left).
 - **A CancelRequest's connection closes when the backend has acted, not after a fork's
   time** (round 24, agent 133). PostgreSQL's postmaster forks a backend for every
   CancelRequest, which reads the packet, signals the target and exits: the client sees the
@@ -4994,7 +5109,44 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   internal differences; methods and batch counts are PostgreSQL's. A large transaction's
   write buffer (`txn::spill`) has no PostgreSQL counterpart and counts as no temporary file.
   The subscriber's spool of a streamed transaction (`repl/apply_stream`) stands for the
-  apply worker's BufFile: not counted yet (left).
+  apply worker's BufFile: counted and logged since round 23, agent 128 (below).
+- **Virtual transaction ids and proc numbers are PostgreSQL's** (round 23, agent 128). The
+  engine keeps a proc array of PostgreSQL's layout and free-list order (`txn/procs.rs`) only
+  for the numbers clients see: %v, pg_locks, lock wait messages, pg_stat_get_backend_idset,
+  pg_stat_activity's order and pg_temp_N. A slot is an atomic counter pair, so a transaction
+  costs two relaxed stores; nothing else in the engine depends on them. Sessions past
+  max_connections (the engine doesn't refuse them) get slots after the auxiliary processes'.
+  Embedded sessions (`SingleCluster`) share one process-wide array.
+- **Parallel workers are shown, not run, per Gather** (round 23, agent 128). The executor
+  runs a Gather's part on the leader's thread (or the scan's own worker threads), so the
+  workers other sessions see are registered entries: for the statement's duration (not each
+  rescan), as many as the plan's Gathers plan and the background worker slots and
+  max_parallel_workers allow, waiting on what the leader's work waits on, holding
+  AccessShareLock on the relations the part opens. Finding the Gathers needs EXPLAIN's
+  estimate, so it is done only when a scan in the plan could be parallel (cheap checks
+  of sizes and storage parameters), or when pg_stat_statements counts workers anyway.
+- **Checkpoint lines report the flush** (round 23, agent 128). "wrote N buffers" is the
+  table-file bytes the checkpoint's flush wrote in 8 kB pages, of shared_buffers' 16384; the
+  WAL files and sync figures are the store's; SLRU buffers are 0. PostgreSQL's numbers
+  mirror its buffer pool, which the engine doesn't have.
+- **log_temp_files covers the subscriber's changes files** (round 23, agent 128; it replaces
+  round 22's "nothing to log"). The apply worker's spool of a streamed transaction and the
+  leader's file of a partially serialized one stand for PostgreSQL's BufFile file sets and
+  are reported as theirs (path, 1 GB segments, at the transaction's end, in
+  pg_stat_database, `TempUsage::count_removed`). Spill files of sorts and hashes (round
+  23, agent 132, above) queue their lines on the session (`TempUsage::take_logged`); the
+  server writes them with the statement's other messages (`Conn::log_sent`), with the
+  STATEMENT, as ReportTemporaryFileUsage's LOG has it. A big transaction's write buffer
+  (`txn::spill`) has no counterpart: not reported.
+- **pg_shmem_allocations shows the engine's shared memory** (round 23, agent 128): "Buffer
+  Blocks" is the block cache every database reads through (its capacity, as shared_buffers'
+  blocks are allocated whether used or not), "PROC" the proc array, "pg_stat_statements"
+  its entries when loaded; then the NULL-named row with size 0 (no fixed segment, nothing
+  unused). No PostgreSQL names for structures the engine doesn't have.
+- **pg_stat_sys_tables counts the catalog scans statements run** (round 23, agent 128):
+  a scan of a system catalog in a query counts as the catalog's sequential scan or its
+  index's scan. The engine's own catalog lookups read no relation and count nothing, so
+  PostgreSQL's syscache-driven idx_scan counts on pg_class and friends stay far higher.
 - **Default table layout is PostgreSQL-exact**: rows under a heap-ordered row id, primary key
   as a separate index, so scans return PG's order and `ctid`s match.
 - **`roll_pk_clustered`** (opt-in storage parameter) keeps rows keyed by the primary key for

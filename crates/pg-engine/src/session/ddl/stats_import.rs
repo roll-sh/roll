@@ -964,22 +964,36 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
     let me = ctx.sess.pid;
     let mut rows: Vec<Vec<Value>> = Vec::new();
     let n = || Value::Null;
-    // (A prepared transaction keeps the virtual transaction id of the backend that prepared
-    // it: MarkAsPreparingGuts clones it.)
-    let vxid = |owner: u64, pid: Option<i32>| {
-        if pid == Some(me) {
-            format!("3/{}", txn.id as u32)
-        } else {
-            format!("3/{}", owner as u32)
-        }
+    // Every lock of a backend shows its running transaction's virtual transaction id (local
+    // id 0 between transactions); a prepared transaction keeps the one of the backend that
+    // prepared it (MarkAsPreparingGuts clones it).
+    let own = txn.vxid.to_string();
+    let running = ctx.sess.cluster.procs().running();
+    let prepared = ctx.sess.db.twophase().vxids();
+    let by_owner = |owner: u64| {
+        running.iter().find(|r| r.1 == owner).map(|r| r.2).or_else(|| prepared.iter().find(|p| p.0 == owner).map(|p| p.1))
+    };
+    let vxid = |owner: u64, pid: Option<i32>| match pid {
+        Some(p) if p == me => own.clone(),
+        Some(p) => running.iter().find(|r| r.0 == p).map_or_else(|| "-1/0".to_string(), |r| r.2.to_string()),
+        None => by_owner(owner).unwrap_or_default().to_string(),
     };
     let now = crate::types::datetime::Clock::system().now;
     // The cluster's locks: this database's, then the other open ones' (a closed database
     // has no sessions).
     let others = ctx.sess.cluster.opened_databases();
-    let locks = ctx.sess.db.locks.snapshot().into_iter().chain(
+    let locks: Vec<_> = ctx.sess.db.locks.snapshot().into_iter().chain(
         others.iter().filter(|d| !Arc::ptr_eq(d, &ctx.sess.db)).flat_map(|d| d.locks.snapshot()),
-    );
+    ).collect();
+    // A virtual transaction id's lock is a fast-path one until another backend waits for it
+    // (VirtualXactLock moves it to the main table).
+    let waited: std::collections::HashSet<u64> = locks
+        .iter()
+        .filter_map(|l| match l.tag {
+            Tag::Transaction { id, xid: 0 } if !l.granted => Some(id),
+            _ => None,
+        })
+        .collect();
     for l in locks {
         // A wait for a transaction that has no id (WaitForOlderSnapshots,
         // WaitForLockers): on its virtual transaction id. (Every transaction holds its own;
@@ -992,7 +1006,7 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
                 ("transactionid", n(), n(), Value::Oid(*xid as u32), n(), n(), n())
             }
             Tag::Transaction { id, .. } if !l.granted || l.pid.is_some_and(|p| p != me) => {
-                vxid_waited = Some(format!("3/{}", *id as u32));
+                vxid_waited = Some(by_owner(*id).unwrap_or_default().to_string());
                 ("virtualxid", n(), n(), n(), n(), n(), n())
             }
             Tag::SpecToken { xid, token } => {
@@ -1048,9 +1062,44 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
             l.pid.map_or(Value::Null, Value::Int4),
             Value::text(l.mode.name()),
             Value::Bool(l.granted),
-            Value::Bool(l.fastpath),
+            Value::Bool(match l.tag {
+                Tag::Transaction { id, xid: 0 } if l.granted => !waited.contains(&id),
+                _ => l.fastpath,
+            }),
             wait_start,
         ]);
+    }
+    // Parallel workers: AccessShareLock on the relations their part opens and their own
+    // virtual transaction ids' locks, all fast-path.
+    let workers: Vec<_> = ctx.sess.cluster.activity().into_iter().filter(|a| a.leader_pid.is_some()).collect();
+    let dbs = if workers.is_empty() { Vec::new() } else { ctx.sess.cluster.databases() };
+    for a in &workers {
+        let Some(v) = running.iter().find(|r| r.0 == a.pid).map(|r| r.2.to_string()) else { continue };
+        let wdb = dbs.iter().find(|d| d.1 == a.database).map_or(db, |d| d.0);
+        let lock = |locktype: &str, relation: Value, vx: Value, mode: &str| {
+            vec![
+                Value::text(locktype),
+                if relation.is_null() { n() } else { Value::Oid(wdb) },
+                relation,
+                n(),
+                n(),
+                vx,
+                n(),
+                n(),
+                n(),
+                n(),
+                Value::text(v.clone()),
+                Value::Int4(a.pid),
+                Value::text(mode),
+                Value::Bool(true),
+                Value::Bool(true),
+                n(),
+            ]
+        };
+        for r in a.worker_rels.iter().flat_map(|r| r.iter()) {
+            rows.push(lock("relation", Value::Oid(*r), n(), "AccessShareLock"));
+        }
+        rows.push(lock("virtualxid", n(), Value::text(v.clone()), "ExclusiveLock"));
     }
     rows.into_iter()
         // Every transaction holds its virtual transaction id's lock (fast-path).
@@ -1060,12 +1109,12 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
             Value::Null,
             Value::Null,
             Value::Null,
-            Value::text(format!("3/{}", txn.id as u32)),
+            Value::text(own.clone()),
             Value::Null,
             Value::Null,
             Value::Null,
             Value::Null,
-            Value::text(format!("3/{}", txn.id as u32)),
+            Value::text(own.clone()),
             Value::Int4(ctx.sess.pid),
             Value::text("ExclusiveLock"),
             Value::Bool(true),
@@ -1089,7 +1138,7 @@ pub(crate) fn relation_lock_rows(ctx: &ExecCtx) -> Vec<Vec<Value>> {
                 Value::Null,
                 Value::Null,
                 Value::Null,
-                Value::text(format!("3/{}", txn.id as u32)),
+                Value::text(own.clone()),
                 Value::Int4(ctx.sess.pid),
                 Value::text("SIReadLock"),
                 Value::Bool(true),

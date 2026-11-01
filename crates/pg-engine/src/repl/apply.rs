@@ -383,6 +383,7 @@ fn open_worker<'a>(
         .map(|d| d.1)
         .ok_or_else(|| format!("database {} of subscription \"{}\" does not exist", sub.dbid, sub.name))?;
     let (pid, _, _) = e.register_backend(None, None);
+    e.assign_proc(pid, crate::txn::procs::ProcKind::BgWorker);
     let backend = Backend { e, workers, pid, relid };
     let msg = |err: Error| err.message;
     let mut sess = e.connect(pid, &dbname, &e.bootstrap_superuser(), &sub.name).map_err(msg)?;
@@ -754,6 +755,28 @@ impl Worker<'_> {
         };
         let msg = crate::log::Message { severity: Some(sev), code, text, detail, hint, context: context.as_deref(), ..Default::default() };
         crate::log::write(&f, &crate::log::Who::aux(self.pid, kind, &self.lines), &msg);
+    }
+
+    /// A streamed transaction's changes file of `bytes` bytes is deleted (stream_cleanup_files,
+    /// BufFileDeleteFileSet): ReportTemporaryFileUsage for each of its 1 GB segments,
+    /// counted in pg_stat_database's temp_files / temp_bytes and logged past
+    /// log_temp_files, named as the worker's file set names it.
+    pub(super) fn changes_file_deleted(&mut self, xid: u32, bytes: u64) {
+        const SEGMENT: u64 = 1 << 30;
+        let limit = self.setting_int("log_temp_files");
+        let mut left = bytes;
+        for seg in 0.. {
+            let size = left.min(SEGMENT);
+            crate::exec::pgstat::count_temp_file(&self.sess.state, size as i64);
+            if limit >= 0 && size >= limit as u64 * 1024 {
+                let path = format!("base/pgsql_tmp/pgsql_tmp{}.0.fileset/{}-{xid}.changes.{seg}", self.pid, self.sub.oid);
+                self.log(Severity::Log, &format!("temporary file: path \"{path}\", size {size}"));
+            }
+            left -= size;
+            if left == 0 {
+                break;
+            }
+        }
     }
 
     /// The worker's background worker type (bgw_type).

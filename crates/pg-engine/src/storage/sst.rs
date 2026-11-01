@@ -367,8 +367,9 @@ impl SstWriter {
             .into_inner()
             .map_err(|e| internal(format!("flush sst: {e}")))?;
         if self.sync {
-            file.sync_all()?;
+            super::fileio::sync(|| file.sync_all())?;
         }
+        super::fileio::wrote_sst(self.offset);
         std::fs::rename(self.path.with_extension("tmp"), &self.path)?;
         Ok(SstMeta {
             id: self.id,

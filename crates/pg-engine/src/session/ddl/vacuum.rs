@@ -319,6 +319,17 @@ impl Ddl<'_, '_> {
         let own_xacts =
             vacuum || super::TOP_LEVEL.with(|t| t.get()) == Some(false);
         let mut mark: Option<usize> = None;
+        // vacuum()'s use_own_xacts, by which each relation is a virtual transaction id of its
+        // own: VACUUM, or ANALYZE outside a transaction block of more than one relation (a
+        // partitioned table's partitions count).
+        let rel_count: usize = targets
+            .iter()
+            .map(|(t, _, recurse)| if *recurse && t.partkey.is_some() { self.cat.inheritors(t.oid).len().max(1) } else { 1 })
+            .sum();
+        // (A database-wide one also processes the system catalogs, PostgreSQL 18.6's 68
+        // tables, 39 with a TOAST table, when the role may: each a transaction of its own.)
+        let catalogs = if rels.is_empty() && self.may_maintain(1259) { (68, 39) } else { (0, 0) };
+        let own_vxids = vacuum || (own_xacts && rel_count + catalogs.0 > 1);
         for (t, cols, recurse) in targets {
             if vacuum && !recurse && t.partkey.is_some() && !rels.is_empty() {
                 self.ctx.notice(crate::session::warning(
@@ -345,6 +356,15 @@ impl Ddl<'_, '_> {
                 // before the next is processed.
                 if own_xacts && let Some(m) = mark.take() {
                     self.ctx.txn.borrow_mut().release_locks_since(m);
+                }
+                // (Each one's transaction is a new virtual transaction id: vacuum_rel's,
+                // then its TOAST table's, then analyze_rel's.)
+                if own_vxids {
+                    let toast = vacuum && !full && process_toast && r.toast != 0;
+                    let n = usize::from(vacuum) + usize::from(toast) + usize::from(vacuum && analyze);
+                    for _ in 0..n.max(1) {
+                        self.ctx.sess.proc.next_transaction();
+                    }
                 }
                 mark = Some(self.ctx.txn.borrow().lock_mark());
                 // A foreign child is sampled by its wrapper.
@@ -558,6 +578,14 @@ impl Ddl<'_, '_> {
         if vacuum && !skip_db {
             let db = self.ctx.sess.db.oid;
             self.ctx.txn.borrow_mut().inplace_lock_catalog_row(1262, db)?;
+        }
+        // (vacuum()'s closing StartTransactionCommand.)
+        if own_vxids {
+            let toast = if vacuum && !full && process_toast { catalogs.1 } else { 0 };
+            let per = usize::from(vacuum) + usize::from(analyze);
+            for _ in 0..catalogs.0 * per + toast + 1 {
+                self.ctx.sess.proc.next_transaction();
+            }
         }
         let stored = analyzed
             .iter()

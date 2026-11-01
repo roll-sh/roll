@@ -1,0 +1,14 @@
+DROP TABLE IF EXISTS public.pw, public.vx;
+DROP SCHEMA IF EXISTS exporter_test CASCADE;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE SCHEMA exporter_test;
+CREATE TABLE exporter_test.items (id int PRIMARY KEY, name text, body text);
+CREATE INDEX items_name ON exporter_test.items (name);
+INSERT INTO exporter_test.items SELECT g, 'n' || g, repeat('b', 3000) FROM generate_series(1, 500) g;
+CREATE TABLE exporter_test.events (at timestamptz DEFAULT now(), kind text);
+INSERT INTO exporter_test.events (kind) SELECT 'k' || (g % 7) FROM generate_series(1, 200) g;
+UPDATE exporter_test.items SET name = name || 'x' WHERE id % 10 = 0;
+DELETE FROM exporter_test.events WHERE kind = 'k1';
+ANALYZE exporter_test.items;
+VACUUM exporter_test.events;
+SELECT count(*) FROM exporter_test.items WHERE name = 'n5';

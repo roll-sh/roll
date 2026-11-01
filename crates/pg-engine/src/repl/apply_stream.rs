@@ -33,6 +33,11 @@ impl Spool {
         Ok(Spool { out: BufWriter::with_capacity(64 << 10, f), len: 0, subxacts: Vec::new() })
     }
 
+    /// The file's size.
+    pub fn bytes(&self) -> u64 {
+        self.len
+    }
+
     /// stream_write_change: a change of (sub)transaction `xid` of top-level `top`.
     pub fn write(&mut self, top: u32, xid: u32, msg: &[u8]) -> Result<(), String> {
         if xid != top && !self.subxacts.iter().any(|s| s.0 == xid) {
