@@ -3734,7 +3734,7 @@ impl ScanNode {
         // (Chunks read rows as stored: the workers read the out-of-line values of the columns
         // they decode, for the rows they keep. Reordered rows come with their values.)
         let toast = if reordered { None } else { txn.scan_snap(&start, &end, &snap).source().cloned() };
-        let scans: Vec<super::parscan::Chunk> = if reordered {
+        let scans: Vec<super::parscan::Source> = if reordered {
             let mut rows = Vec::new();
             for r in txn.scan_snap(&start, &end, &snap) {
                 rows.push(r?);
@@ -3749,7 +3749,7 @@ impl ScanNode {
                 if c.is_empty() {
                     break;
                 }
-                out.push(Box::new(c.into_iter()) as super::parscan::Chunk);
+                out.push(super::parscan::Source::Rows(Box::new(c.into_iter())));
             }
             out
         } else {
@@ -3774,7 +3774,7 @@ impl ScanNode {
                 .windows(2)
                 .map(|w| {
                     let s = txn.scan_snap(&w[0], &w[1], &snap);
-                    super::parscan::chunk(if toast.is_some() { s.raw() } else { s }, bulk)
+                    super::parscan::fill_source(if toast.is_some() { s.raw() } else { s }, bulk)
                 })
                 .collect();
             drop(txn);
@@ -3894,7 +3894,7 @@ impl ScanNode {
         };
         let scans = bounds
             .windows(2)
-            .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk))
+            .map(|w| super::parscan::chunk(IndexChunk::new(txn.scan_snap(&w[0], &w[1], &snap), fetch.clone()), bulk).into())
             .collect();
         drop(txn);
         let d = Decode {
@@ -3965,7 +3965,7 @@ impl ScanNode {
         let per = keys.len().div_ceil(ParScan::chunks(workers)).max(1);
         let scans = (0..keys.len())
             .step_by(per)
-            .map(|i| Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone())) as super::parscan::Chunk)
+            .map(|i| super::parscan::Source::Rows(Box::new(IndexChunk::keyed(keys.clone(), i..(i + per).min(keys.len()), fetch.clone()))))
             .collect();
         let d = Decode {
             need: self.need.as_deref().map(Arc::from),

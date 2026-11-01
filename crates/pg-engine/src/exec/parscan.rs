@@ -9,6 +9,7 @@
 use super::Row;
 use super::kernel::K;
 use crate::error::{Error, Result, internal};
+use crate::storage::batch::{FillRows, RowBatch};
 use crate::txn::TxnScan;
 use crate::types::Value;
 use std::collections::VecDeque;
@@ -191,6 +192,80 @@ impl<I: Iterator> Iterator for Bulk<I> {
 /// `chunk` as a bulk read when `bulk`.
 pub fn chunk<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>> + Send + 'static>(it: I, bulk: bool) -> Chunk {
     if bulk { Box::new(Bulk(it)) } else { Box::new(it) }
+}
+
+/// What a parallel or inline scan's chunk reads: a table's stored rows a batch at a time by
+/// reference (`FillRows`: no key or value made per row), or rows one at a time (an index's
+/// entries with their rows fetched, rows in a list).
+pub enum Source {
+    Fill(Box<dyn FillRows>),
+    Rows(Chunk),
+}
+
+impl From<Chunk> for Source {
+    fn from(c: Chunk) -> Source {
+        Source::Rows(c)
+    }
+}
+
+/// A table's rows in [range) through `FillRows`, as a bulk read when `bulk`.
+pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
+    Source::Fill(if bulk { Box::new(crate::storage::batch::BulkFill(f)) } else { Box::new(f) })
+}
+
+/// Rows a fill asks for at a time.
+const FILL: usize = 256;
+
+/// A chunk's rows by reference, `left` more at most (an inline scan's slice of it), the
+/// batch kept from slice to slice.
+struct Reader<'c> {
+    src: &'c mut Source,
+    batch: &'c mut RowBatch,
+    cur: Option<(Vec<u8>, bytes::Bytes)>,
+    left: usize,
+    /// The chunk has no row left.
+    done: bool,
+}
+
+impl<'c> Reader<'c> {
+    fn new(src: &'c mut Source, batch: &'c mut RowBatch, left: usize) -> Reader<'c> {
+        Reader { src, batch, cur: None, left, done: false }
+    }
+
+    fn next_row(&mut self) -> Option<Result<(&[u8], &[u8])>> {
+        if self.left == 0 {
+            return None;
+        }
+        match &mut *self.src {
+            Source::Fill(f) => {
+                if self.batch.remaining() == 0 {
+                    self.batch.clear();
+                    if let Err(e) = f.fill(self.batch, FILL) {
+                        return Some(Err(e));
+                    }
+                    if self.batch.is_empty() {
+                        self.done = true;
+                        return None;
+                    }
+                }
+                self.left -= 1;
+                let i = self.batch.pos();
+                self.batch.advance();
+                Some(Ok(self.batch.get(i)))
+            }
+            Source::Rows(it) => {
+                let Some(r) = it.next() else {
+                    self.done = true;
+                    return None;
+                };
+                self.left -= 1;
+                Some(r.map(|kv| {
+                    let (k, v) = self.cur.insert(kv);
+                    (&k[..], &v[..])
+                }))
+            }
+        }
+    }
 }
 
 /// A chunk of a secondary index's entries (or a bitmap heap scan's row keys: entries with
@@ -546,13 +621,13 @@ enum Msg {
 }
 
 struct Job {
-    scan: Chunk,
+    scan: Source,
     out: Sender<Msg>,
 }
 
 pub struct ParScan {
     /// Chunks not handed out yet, in key order.
-    pending: VecDeque<Chunk>,
+    pending: VecDeque<Source>,
     /// The handed-out chunks' results, in key order.
     results: VecDeque<Receiver<Msg>>,
     jobs: Option<Sender<Job>>,
@@ -574,10 +649,12 @@ pub struct ParScan {
 /// What an inline scan's chunks run with (a worker's own state, `work`).
 struct Inline {
     /// The chunk being read, a slice at a time (`INLINE_SLICE`).
-    cur: Option<Chunk>,
+    cur: Option<Source>,
     d: Arc<Decode>,
     scratch: super::pipe::Scratch,
     lazy: LazyBuf,
+    /// The chunk's rows read and not taken yet.
+    batch: RowBatch,
 }
 
 thread_local! {
@@ -615,13 +692,14 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
     // (One for the worker's chunks: its lookups' cache lasts.)
     let mut scratch = super::pipe::Scratch::default();
     let mut lazy = LazyBuf::new(&d);
+    let mut batch = RowBatch::default();
     loop {
         let job = match jobs.lock() {
             Ok(rx) => rx.recv(),
             Err(_) => return,
         };
         let Ok(job) = job else { return };
-        if stopped() || !run_job(job, &d, &stopped, &mut scratch, &mut lazy) {
+        if stopped() || !run_job(job, &d, &stopped, &mut scratch, &mut lazy, &mut batch) {
             return;
         }
     }
@@ -630,13 +708,21 @@ fn work(jobs: Arc<Mutex<Receiver<Job>>>, d: Arc<Decode>, stop: Arc<std::sync::at
 /// One chunk of a scan: its rows (or an aggregating scan's parts) sent to the job's `out`,
 /// on a worker or (`ParScan::inline`) the executor's thread. False: nothing reads them
 /// (the scan was dropped).
-fn run_job(Job { scan, out }: Job, d: &Decode, stopped: &dyn Fn() -> bool, scratch: &mut super::pipe::Scratch, lazy: &mut LazyBuf) -> bool {
-    run_rows(scan, out, d, stopped, scratch, lazy)
+fn run_job(
+    Job { mut scan, out }: Job,
+    d: &Decode,
+    stopped: &dyn Fn() -> bool,
+    scratch: &mut super::pipe::Scratch,
+    lazy: &mut LazyBuf,
+    batch: &mut RowBatch,
+) -> bool {
+    batch.clear();
+    run_rows(&mut Reader::new(&mut scan, batch, usize::MAX), out, d, stopped, scratch, lazy)
 }
 
 /// `run_job` over any run of rows (an inline scan's slice of a chunk).
-fn run_rows<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
-    scan: I,
+fn run_rows(
+    scan: &mut Reader<'_>,
     out: Sender<Msg>,
     d: &Decode,
     stopped: &dyn Fn() -> bool,
@@ -656,7 +742,7 @@ fn run_rows<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
         let mut skipped = 0u32;
         // (A row's length before its computed values.)
         let base = d.missing.len() + usize::from(d.with_key);
-        for r in scan {
+        while let Some(r) = scan.next_row() {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
                 return false;
@@ -674,7 +760,7 @@ fn run_rows<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
             let in_place = d.ios.is_none() && d.extra.is_empty() && d.topk.is_none() && d.need_raw.is_none();
             let (row, done) = match (&d.filter, in_place) {
                 (Some(f), true) => {
-                    let made = lazy.read(d, &key, &bytes).and_then(|lz| match f.passes(&lz) {
+                    let made = lazy.read(d, key, bytes).and_then(|lz| match f.passes(&lz) {
                         Some(false) => Ok(None),
                         pass => Ok(Some((lz.into_row()?, pass.is_some()))),
                     });
@@ -689,7 +775,7 @@ fn run_rows<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
                 }
                 _ => {
                     let mask = d.need_raw.as_ref().or(d.need.as_ref());
-                    let made = lazy.splice(&key, &bytes, mask.map(|m| &m[..])).and_then(|b| d.row_with(&key, &b, mask));
+                    let made = lazy.splice(key, bytes, mask.map(|m| &m[..])).and_then(|b| d.row_with(key, &b, mask));
                     let row = match made {
                         Ok(row) => row,
                         Err(e) => {
@@ -712,7 +798,7 @@ fn run_rows<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
             let row = if d.extra.is_empty() {
                 row
             } else {
-                match d.with_extra(&key, &bytes, row, done, lazy) {
+                match d.with_extra(key, bytes, row, done, lazy) {
                     Ok(row) => row,
                     Err(e) => {
                         err = Some(e);
@@ -777,8 +863,8 @@ fn filter_pass<R: super::kernel::Cols + ?Sized>(d: &Decode, row: &R) -> Option<b
 const PART_ROWS: usize = 1 << 16;
 
 /// A chunk aggregated (`partial`): false when nothing receives any more.
-fn work_partial<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
-    scan: I,
+fn work_partial(
+    scan: &mut Reader<'_>,
     out: &Sender<Msg>,
     d: &Decode,
     spec: &super::partial::Spec,
@@ -801,7 +887,7 @@ fn work_partial<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
     // (Rows a part can't take: sent in their place, the part so far first.)
     let mut serial: Vec<(Row, u8, bool)> = Vec::new();
     let mut n = 0usize;
-    for r in scan {
+    while let Some(r) = scan.next_row() {
         n += 1;
         if n.is_multiple_of(4096) && stopped() {
             return false;
@@ -813,7 +899,7 @@ fn work_partial<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
         };
         // (Read in place: a row the filter rejects or the part takes is never made.)
         let row = match &d.ios {
-            None => lazy.read(d, &k, &v).and_then(|lazy| {
+            None => lazy.read(d, k, v).and_then(|lazy| {
                 let pass = filter_pass(d, &lazy);
                 match pass {
                     Some(false) => Ok(None),
@@ -821,7 +907,7 @@ fn work_partial<I: Iterator<Item = Result<(Vec<u8>, bytes::Bytes)>>>(
                     _ => lazy.into_row().map(|row| Some((row, pass))),
                 }
             }),
-            Some(_) => d.row(&k, &v).map(|row| {
+            Some(_) => d.row(k, v).map(|row| {
                 let pass = filter_pass(d, &row);
                 Some((row, pass))
             }),
@@ -892,7 +978,7 @@ pub fn split_keys(lo: &[u8], hi: &[u8], n: usize) -> Vec<Vec<u8>> {
 impl ParScan {
     /// Read the chunks `scans` (consecutive key ranges, in order) with up to `workers`
     /// threads of a pool of `pool` (None: none could start).
-    pub fn start(scans: Vec<Chunk>, workers: usize, pool: usize, d: Decode) -> Option<ParScan> {
+    pub fn start(scans: Vec<Source>, workers: usize, pool: usize, d: Decode) -> Option<ParScan> {
         let reserved = reserve(workers, pool);
         let workers = reserved;
         let (tx, rx) = channel::<Job>();
@@ -940,7 +1026,7 @@ impl ParScan {
     /// The scan run on the executor's thread, a chunk at a time as its rows are asked for:
     /// what workers do with each row (decoding only what is read, filtering by kernels,
     /// aggregating, computing), without threads, for a table too small for them to pay.
-    pub fn start_inline(scans: Vec<Chunk>, d: Decode) -> ParScan {
+    pub fn start_inline(scans: Vec<Source>, d: Decode) -> ParScan {
         INLINE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let lazy = LazyBuf::new(&d);
         ParScan {
@@ -953,7 +1039,7 @@ impl ParScan {
             carry: 0,
             skipped: 0,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            inline: Some(Box::new(Inline { cur: None, d: Arc::new(d), scratch: Default::default(), lazy })),
+            inline: Some(Box::new(Inline { cur: None, d: Arc::new(d), scratch: Default::default(), lazy, batch: RowBatch::default() })),
         }
     }
 
@@ -991,16 +1077,17 @@ impl ParScan {
             {
                 // (A slice of the chunk at a time: what it holds and how long the executor's
                 // thread goes without checking for a cancel stay bounded.)
-                let Inline { cur, d, scratch, lazy } = &mut **i;
+                let Inline { cur, d, scratch, lazy, batch } = &mut **i;
                 if cur.is_none() {
                     *cur = self.pending.pop_front();
+                    batch.clear();
                 }
                 if let Some(c) = cur {
                     let (out, rx) = channel();
                     self.results.push_back(rx);
-                    let mut taken = 0usize;
-                    run_rows(c.by_ref().take(INLINE_SLICE).inspect(|_| taken += 1), out, d, &|| false, scratch, lazy);
-                    if taken < INLINE_SLICE {
+                    let mut rd = Reader::new(c, batch, INLINE_SLICE);
+                    run_rows(&mut rd, out, d, &|| false, scratch, lazy);
+                    if rd.done {
                         *cur = None;
                     }
                 }
@@ -1043,6 +1130,48 @@ impl Drop for ParScan {
         for w in self.workers.drain(..) {
             let _ = w.join();
             ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Rows(std::ops::Range<u32>);
+
+    impl FillRows for Rows {
+        fn fill(&mut self, batch: &mut RowBatch, max: usize) -> Result<()> {
+            for i in self.0.by_ref().take(max) {
+                batch.push_copy(&i.to_be_bytes(), &(i * 3).to_be_bytes());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn row_sources_preserve_rows_across_slices() {
+        for len in [0, 1, FILL - 1, FILL, FILL + 1, INLINE_SLICE - 1, INLINE_SLICE, INLINE_SLICE + 1] {
+            for slice in [1, FILL - 1, FILL, FILL + 1, INLINE_SLICE] {
+                let rows = (0..len as u32).map(|i| Ok((i.to_be_bytes().to_vec(), bytes::Bytes::copy_from_slice(&(i * 3).to_be_bytes()))));
+                for mut source in [fill_source(Rows(0..len as u32), false), Source::Rows(Box::new(rows))] {
+                    let mut batch = RowBatch::default();
+                    let mut seen = 0u32;
+                    loop {
+                        let mut reader = Reader::new(&mut source, &mut batch, slice);
+                        while let Some(row) = reader.next_row() {
+                            let (key, value) = row.unwrap();
+                            assert_eq!(key, seen.to_be_bytes());
+                            assert_eq!(value, (seen * 3).to_be_bytes());
+                            seen += 1;
+                        }
+                        if reader.done {
+                            break;
+                        }
+                    }
+                    assert_eq!(seen as usize, len, "{len} rows in slices of {slice}");
+                }
+            }
         }
     }
 }
