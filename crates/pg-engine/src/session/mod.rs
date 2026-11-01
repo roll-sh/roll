@@ -1642,23 +1642,18 @@ impl Session {
         cursor: bool,
     ) -> Result<Arc<BoundQuery>> {
         self.ensure_txn();
-        let version = self
-            .txn
-            .as_ref()
-            .map(|t| t.borrow().catalog().version)
-            .unwrap_or(0);
+        let cat = self.txn.as_ref().unwrap().borrow().catalog();
+        let version = cat.version;
         let path = self.state.search_path();
-        let who = {
-            let cat = self.txn.as_ref().unwrap().borrow().catalog();
-            (
-                self.state.current_role(&cat),
-                self.state
-                    .settings
-                    .borrow()
-                    .get_str("row_security")
-                    != Some("off"),
-            )
-        };
+        let who = (
+            self.state.current_role(&cat),
+            self.state
+                .settings
+                .borrow()
+                .get_str("row_security")
+                != Some("off"),
+        );
+        drop(cat);
         if !cursor
             && let Some((v, sp, w, b)) = &*p.bound.lock()
             && *v == version
