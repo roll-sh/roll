@@ -3090,7 +3090,8 @@ impl Session {
             K::TransStmtCommitPrepared | K::TransStmtRollbackPrepared => {
                 let commit = kind == K::TransStmtCommitPrepared;
                 let what = if commit { "COMMIT PREPARED" } else { "ROLLBACK PREPARED" };
-                if self.status != TxnStatus::Idle {
+                // (A multi-statement query string is an implicit block too.)
+                if self.in_block() {
                     return Err(Error::new(
                         code::ACTIVE_SQL_TRANSACTION,
                         format!("{what} cannot run inside a transaction block"),

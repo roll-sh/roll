@@ -334,6 +334,12 @@ pub fn work_mem(settings: &crate::session::settings::Settings) -> usize {
         * 1024
 }
 
+/// debug_logical_replication_streaming = immediate: every change goes out at once (streamed,
+/// or spilled when it can't stream).
+pub fn streaming_immediate(settings: &crate::session::settings::Settings) -> bool {
+    settings.get_str("debug_logical_replication_streaming") == Some("immediate")
+}
+
 /// Fold a decoding run's statistics into the slot's.
 pub fn add_stats(r: &Repl, slot: &str, s: &super::slot::SlotStats) {
     let _ = r.slots.update(slot, false, |d| {
@@ -404,6 +410,8 @@ fn get_changes(a: &[Value], c: &FnCtx, confirm: bool, binary: bool) -> Result<Sr
                 two_phase_at: s.data.two_phase_at,
                 fmt: c.exec.fmt().clone(),
                 work_mem: work_mem(&settings),
+                start_at: s.data.confirmed_flush,
+                immediate: streaming_immediate(&settings),
             },
         )?;
         drop(settings);
@@ -442,6 +450,19 @@ fn get_changes(a: &[Value], c: &FnCtx, confirm: bool, binary: bool) -> Result<Sr
         }
         if done {
             end = end.max(if upto_lsn != 0 { upto_lsn.min(end_of_wal) } else { end_of_wal });
+            // (The session's own transaction in progress: what PostgreSQL would stream of it.)
+            let own = if dec.ctx.streaming { super::log::own_records(&c.exec.txn.borrow())? } else { None };
+            if let Some((xid, recs)) = own {
+                dec.in_progress(xid, &recs, end_of_wal, &mut |o| {
+                    let data = if binary {
+                        Value::Bytea(o.data.into())
+                    } else {
+                        Value::Text(String::from_utf8_lossy(&o.data).into_owned().into())
+                    };
+                    out.push(vec![Value::PgLsn(o.lsn), Value::Oid(o.xid as u32), data]);
+                    Ok(())
+                })?;
+            }
         }
         if confirm && end > start {
             let catalog_xmin = db.xids().snapshot(None).xmin;

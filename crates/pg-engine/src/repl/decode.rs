@@ -24,6 +24,9 @@ pub struct Change {
     pub rec: Rec,
     /// A row a table rewrite wrote (`log::rewrite_insert`).
     pub rewrite: bool,
+    /// The aborted subtransaction it belongs to (`log::rolled_back_to`; 0: one that
+    /// commits with the transaction).
+    pub sub: u64,
 }
 
 /// Transaction `m`'s change records, in order, with the positions they took after its
@@ -102,9 +105,10 @@ impl Shared {
     }
 
     /// Change record `v` at `lsn`, decoded.
-    fn change(&self, lsn: u64, v: &[u8]) -> Result<Change> {
+    pub fn change(&self, lsn: u64, v: &[u8]) -> Result<Change> {
+        let (sub, v) = log::aborted_of(v)?;
         let rec = if v.first() == Some(&b'R') { Rec::Rel(self.rel(v)?) } else { log::decode_rec(v)? };
-        Ok(Change { lsn, rewrite: v.first() == Some(&b'W'), rec })
+        Ok(Change { lsn, rewrite: v.first() == Some(&b'W'), rec, sub })
     }
 
     /// Relation description record `b`, decoded: its relation's last one when equal.

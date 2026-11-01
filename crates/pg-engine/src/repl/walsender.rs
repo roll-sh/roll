@@ -475,7 +475,7 @@ fn stream_acquired(
         super::sqlfn::check_plugin_allowed(&plugin, &st)?;
         let fmt = st.format_ctx();
         let t = st.get_str("wal_sender_timeout").and_then(|v| v.parse::<u64>().ok()).unwrap_or(60000);
-        (fmt, super::sqlfn::work_mem(&st), t)
+        (fmt, (super::sqlfn::work_mem(&st), super::sqlfn::streaming_immediate(&st)), t)
     };
     // (A local handle: the decoder borrows it no longer than the row filter borrows `s`.)
     let db = &db.clone();
@@ -489,7 +489,9 @@ fn stream_acquired(
             slot_two_phase: sl.data.two_phase,
             two_phase_at: sl.data.two_phase_at,
             fmt,
-            work_mem,
+            work_mem: work_mem.0,
+            start_at: start.max(sl.data.confirmed_flush),
+            immediate: work_mem.1,
         },
     )?;
     let pid = s.state.pid;

@@ -779,6 +779,8 @@ struct Savepoint {
     /// Ids of subtransactions released into this one (they end as it does).
     committed: Vec<u64>,
     seq_undo_len: usize,
+    /// The change stream's next record number when it was made (`repl::log::rolled_back_to`).
+    log_seq: u32,
 }
 
 /// A deferred constraint trigger event, fired at COMMIT or SET CONSTRAINTS ... IMMEDIATE.
@@ -3175,6 +3177,7 @@ impl Txn {
             xid: 0,
             committed: Vec::new(),
             seq_undo_len: self.seq_undo.len(),
+            log_seq: self.log.as_ref().map_or(0, |l| l.seq),
         });
     }
 
@@ -3196,9 +3199,20 @@ impl Txn {
         // (What a load measured may be rolled back.)
         self.loads.clear();
         let i = self.find_savepoint(name)?;
-        if let Some(l) = &mut self.log {
-            l.rolled_back();
-        }
+        // The change records written since stay, as the aborted subtransactions' (read
+        // before the writes are undone, written again after).
+        let aborted_log = match &self.log {
+            Some(_) => {
+                let xids: Vec<u64> = self.savepoints[i..]
+                    .iter()
+                    .rev()
+                    .flat_map(|sp| sp.committed.iter().copied().chain([sp.xid]))
+                    .filter(|&x| x != 0)
+                    .collect();
+                Some(crate::repl::log::rolled_back_to(self, self.savepoints[i].log_seq, xids)?)
+            }
+            None => None,
+        };
         let target = self.savepoints[i].journal_len;
         if target < self.journal_base {
             // Back past a spill: the runs lose what was written after the savepoint (first,
@@ -3282,6 +3296,9 @@ impl Txn {
             if d.as_ref().is_some_and(|d| d.subid > i) {
                 *d = None;
             }
+        }
+        if let Some(kept) = aborted_log {
+            crate::repl::log::keep_aborted(self, kept)?;
         }
         Ok(())
     }

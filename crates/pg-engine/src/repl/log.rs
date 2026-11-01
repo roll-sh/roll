@@ -114,6 +114,8 @@ pub enum Rec {
     Delete { rel: u32, old: Option<(Vec<Value>, bool)> },
     Truncate { cascade: bool, restart_seqs: bool, rels: Vec<u32> },
     Message { transactional: bool, prefix: String, content: Vec<u8> },
+    /// Subtransactions aborting (ROLLBACK TO), in DecodeAbort's order, and when.
+    Abort { xids: Vec<u64>, time: i64 },
 }
 
 /// A transaction's logging state (in `Txn`).
@@ -130,6 +132,9 @@ pub struct TxnLog {
     pub origin_lsn: u64,
     /// It prepared (PREPARE TRANSACTION): what its commit record repeats.
     pub prepared: Option<Prepared>,
+    /// Where records of another writer than the one before begin: (record number, the
+    /// (sub)transaction id writing from there; the top level's when none).
+    subs: Vec<(u32, u64)>,
 }
 
 /// A prepared transaction's PREPARE, as its COMMIT / ROLLBACK PREPARED record repeats it.
@@ -159,10 +164,109 @@ pub fn commit_marker(xid: u64, log: &TxnLog) -> Marker {
 }
 
 impl TxnLog {
-    /// Back past a savepoint: relation descriptions written since may be gone.
-    pub fn rolled_back(&mut self) {
-        self.rels.clear();
+    /// The (sub)transaction that wrote record `seq` (`top`: the top level).
+    fn writer(&self, seq: u32, top: u64) -> u64 {
+        match self.subs.partition_point(|s| s.0 <= seq) {
+            0 => top,
+            n => self.subs[n - 1].1,
+        }
     }
+
+    fn note_writer(&mut self, cur: u64, top: u64) {
+        if self.subs.last().map_or(top, |s| s.1) != cur {
+            self.subs.push((self.seq, cur));
+        }
+    }
+}
+
+/// The change records ROLLBACK TO keeps (`rolled_back_to`, then `keep_aborted`).
+pub struct Aborted {
+    recs: Vec<(u32, Vec<u8>)>,
+    /// The aborted subtransactions that wrote them, in their abort records' order.
+    xids: Vec<u64>,
+    /// What the records grew by (`TxnLog::bytes`).
+    grow: u64,
+}
+
+/// An aborted subtransaction's change record: `'A' subxid record`.
+const ABORTED: u8 = b'A';
+/// Subtransactions aborting (ROLLBACK TO's abort records): `'a' time n subxid...`.
+const ABORT: u8 = b'a';
+
+/// ROLLBACK TO a savepoint made at record `from`: the records written since, read before the
+/// rollback undoes them. PostgreSQL's WAL keeps an aborted subtransaction's changes (a
+/// decoder may have streamed them before it reads the abort), so they are written again as
+/// the aborted subtransactions' (`keep_aborted`); `xids` are the subtransactions aborting,
+/// innermost first, each after those released into it (DecodeAbort's order).
+pub fn rolled_back_to(txn: &mut crate::txn::Txn, from: u32, xids: Vec<u64>) -> Result<Aborted> {
+    let top = txn.xid_if_assigned().unwrap_or(0);
+    let Some(log) = txn.log.as_ref() else { return Ok(Aborted { recs: Vec::new(), xids: Vec::new(), grow: 0 }) };
+    let mut recs = Vec::new();
+    let mut wrote = Vec::new();
+    let mut grow = 0;
+    for seq in from..log.seq {
+        let Some(v) = txn.get(&change_key(top, seq))? else { continue };
+        if matches!(v.first(), Some(&(ABORTED | ABORT))) {
+            recs.push((seq, v.to_vec()));
+            continue;
+        }
+        let w = log.writer(seq, top);
+        if !wrote.contains(&w) {
+            wrote.push(w);
+        }
+        let mut b = Vec::with_capacity(v.len() + 9);
+        b.push(ABORTED);
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&v);
+        grow += record_size(b.len()) - record_size(v.len());
+        recs.push((seq, b));
+    }
+    let log = txn.log.as_mut().unwrap();
+    // (Relation descriptions written since are an aborted subtransaction's now.)
+    log.rels.clear();
+    log.subs.truncate(log.subs.partition_point(|s| s.0 < from));
+    Ok(Aborted { recs, xids: xids.into_iter().filter(|x| wrote.contains(x)).collect(), grow })
+}
+
+/// The change records transaction `txn` (in progress) wrote so far, with its id.
+pub fn own_records(txn: &crate::txn::Txn) -> Result<Option<(u64, Vec<Bytes>)>> {
+    let (Some(xid), Some(log)) = (txn.xid_if_assigned(), txn.log.as_ref()) else { return Ok(None) };
+    let mut out = Vec::with_capacity(log.seq as usize);
+    for seq in 0..log.seq {
+        if let Some(v) = txn.get(&change_key(xid, seq))? {
+            out.push(v);
+        }
+    }
+    Ok(Some((xid, out)))
+}
+
+/// `rolled_back_to`'s records written again, and an abort record after them.
+pub fn keep_aborted(txn: &mut crate::txn::Txn, a: Aborted) -> Result<()> {
+    if a.recs.is_empty() {
+        return Ok(());
+    }
+    let top = txn.xid_if_assigned().unwrap_or(0);
+    let Some(mut log) = txn.log.take() else { return Ok(()) };
+    let r = (|| {
+        for (seq, v) in a.recs {
+            txn.put_log(change_key(top, seq), v)?;
+        }
+        log.bytes += a.grow;
+        if !a.xids.is_empty() {
+            let mut b = vec![ABORT];
+            b.extend_from_slice(&now().to_be_bytes());
+            put_varint(&mut b, a.xids.len() as u64);
+            for x in &a.xids {
+                b.extend_from_slice(&x.to_be_bytes());
+            }
+            log.bytes += record_size(b.len());
+            txn.put_log(change_key(top, log.seq), b)?;
+            log.seq += 1;
+        }
+        Ok(())
+    })();
+    txn.log = Some(log);
+    r
 }
 
 /// What a commit record says.
@@ -339,12 +443,14 @@ pub fn committed(log: &DbLog, lsn: u64) {
 }
 
 /// Whether changes to `t` are logged (RelationIsLogicallyLogged): a permanent user table.
+/// A table whose rows are logged (a partitioned table has none of its own).
 fn logged(t: &Table) -> bool {
-    !t.temporary
-        && !t.unlogged
-        && t.foreign.is_none()
-        && t.oid >= crate::catalog::FIRST_USER_OID
-        && t.partkey.is_none()
+    logically_logged(t) && t.partkey.is_none()
+}
+
+/// RelationIsLogicallyLogged: a TRUNCATE lists a partitioned table too.
+fn logically_logged(t: &Table) -> bool {
+    !t.temporary && !t.unlogged && t.foreign.is_none() && t.oid >= crate::catalog::FIRST_USER_OID
 }
 
 fn hash_def(t: &Table, cat: &crate::catalog::Catalog) -> u64 {
@@ -454,7 +560,10 @@ fn put(ctx: &ExecCtx, rel: Option<&Table>, body: Vec<u8>) -> Result<()> {
     };
     let mut txn = ctx.txn.borrow_mut();
     let xid = txn.xid();
+    // (A subtransaction's records are its own: GetCurrentTransactionId gives it an id.)
+    let cur = if txn.in_savepoint() { txn.cur_xid() } else { xid };
     let Some(mut log) = txn.log.take() else { return Ok(()) };
+    log.note_writer(cur, xid);
     let r = (|| {
         if let Some((oid, h, rec)) = desc {
             log.bytes += record_size(rec.len());
@@ -610,13 +719,13 @@ pub fn delete(t: &Table, old: &[Value], ctx: &ExecCtx) -> Result<()> {
 pub fn truncate(tables: &[&Table], cascade: bool, restart_seqs: bool, ctx: &ExecCtx) -> Result<()> {
     // (TRUNCATE writes no rows: it takes its transaction id here, as heap_truncate's WAL
     // record does.)
-    if ctx.sess.db.log.capture.load(std::sync::atomic::Ordering::SeqCst) && tables.iter().any(|t| logged(t)) {
+    if ctx.sess.db.log.capture.load(std::sync::atomic::Ordering::SeqCst) && tables.iter().any(|t| logically_logged(t)) {
         ctx.txn.borrow_mut().xid();
     }
     if !capturing(ctx) {
         return Ok(());
     }
-    let tables: Vec<&&Table> = tables.iter().filter(|t| logged(t)).collect();
+    let tables: Vec<&&Table> = tables.iter().filter(|t| logically_logged(t)).collect();
     if tables.is_empty() {
         return Ok(());
     }
@@ -643,6 +752,16 @@ pub fn message_body(prefix: &str, content: &[u8]) -> Vec<u8> {
     b.extend_from_slice(prefix.as_bytes());
     b.extend_from_slice(content);
     b
+}
+
+/// An aborted subtransaction's record (`rolled_back_to`): its id and the record; others
+/// are the top level's (0).
+pub fn aborted_of(b: &[u8]) -> Result<(u64, &[u8])> {
+    if b.first() != Some(&ABORTED) {
+        return Ok((0, b));
+    }
+    let x = b.get(1..9).ok_or_else(|| crate::error::internal("bad change stream record"))?;
+    Ok((u64::from_be_bytes(x.try_into().unwrap()), &b[9..]))
 }
 
 /// A change record, decoded.
@@ -698,6 +817,17 @@ pub fn decode_rec(b: &[u8]) -> Result<Rec> {
             let n = get_varint(b, &mut p)? as usize;
             let prefix = String::from_utf8_lossy(b.get(p..p + n).ok_or_else(bad)?).into_owned();
             Rec::Message { transactional: true, prefix, content: b[p + n..].to_vec() }
+        }
+        Some(&ABORT) => {
+            let mut p = 9;
+            let time = u64::from_be_bytes(b.get(1..9).ok_or_else(bad)?.try_into().unwrap()) as i64;
+            let n = get_varint(b, &mut p)? as usize;
+            let mut xids = Vec::with_capacity(n);
+            for _ in 0..n {
+                xids.push(u64::from_be_bytes(b.get(p..p + 8).ok_or_else(bad)?.try_into().unwrap()));
+                p += 8;
+            }
+            Rec::Abort { xids, time }
         }
         _ => return Err(bad()),
     })

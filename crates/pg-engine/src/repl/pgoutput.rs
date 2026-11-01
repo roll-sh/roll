@@ -48,7 +48,7 @@ pub struct PgOutput {
     entries_catalog: u64,
     /// Relations whose schema went out (per streamed transaction, or outside streaming).
     sent: HashSet<u32>,
-    stream_sent: HashSet<u32>,
+    stream_sent: HashMap<u64, HashSet<u32>>,
     sent_begin: bool,
     in_stream: bool,
 }
@@ -121,9 +121,11 @@ fn split_names(s: &str) -> Option<Vec<String>> {
 }
 
 impl PgOutput {
-    fn xid(&self, b: &mut Vec<u8>, t: &TxnInfo) {
+    /// A streamed message's (sub)transaction id (an aborted subtransaction's changes carry
+    /// its own, so the subscriber can drop them at its Stream Abort).
+    fn xid(&self, b: &mut Vec<u8>, c: &Ctx, t: &TxnInfo) {
         if self.in_stream {
-            i32(b, t.xid as i32);
+            i32(b, if c.sub_xid != 0 { c.sub_xid } else { t.xid } as i32);
         }
     }
 
@@ -187,6 +189,11 @@ impl PgOutput {
         for (p, via) in &pubs {
             // A publication publishing through another ancestor than the one used.
             if as_oid != rel.oid && !p.via_root && *via != as_oid && p.all_tables {
+                continue;
+            }
+            // (A partitioned table's own changes, its TRUNCATE, only through a publication
+            // publishing via the root: its partitions' suffice otherwise.)
+            if t.partkey.is_some() && !p.via_root {
                 continue;
             }
             ins |= p.insert;
@@ -282,7 +289,7 @@ impl PgOutput {
     /// maybe_send_schema: the Relation (and Type) messages before a relation's first change.
     fn schema(&mut self, c: &mut Ctx, t: &TxnInfo, e: &Entry) {
         let rel = &e.as_rel;
-        let set = if self.in_stream { &mut self.stream_sent } else { &mut self.sent };
+        let set = if self.in_stream { self.stream_sent.entry(t.xid).or_default() } else { &mut self.sent };
         if !set.insert(rel.oid) {
             return;
         }
@@ -290,7 +297,7 @@ impl PgOutput {
             let col = &rel.cols[i];
             if col.type_oid >= 10000 {
                 let mut b = vec![b'Y'];
-                self.xid(&mut b, t);
+                self.xid(&mut b, c, t);
                 i32(&mut b, col.type_oid as i32);
                 cstr(&mut b, if col.type_nsp == "pg_catalog" { "" } else { &col.type_nsp });
                 cstr(&mut b, &col.type_name);
@@ -298,7 +305,7 @@ impl PgOutput {
             }
         }
         let mut b = vec![b'R'];
-        self.xid(&mut b, t);
+        self.xid(&mut b, c, t);
         i32(&mut b, rel.oid as i32);
         cstr(&mut b, if rel.nsp == "pg_catalog" { "" } else { &rel.nsp });
         cstr(&mut b, &rel.name);
@@ -441,14 +448,14 @@ impl PgOutput {
         match out {
             Out::Insert(new) => {
                 b.push(b'I');
-                self.xid(&mut b, t);
+                self.xid(&mut b, c, t);
                 i32(&mut b, relid);
                 b.push(b'N');
                 self.tuple(&mut b, c, &e, &new, &[])?;
             }
             Out::Update(old, new, toast) => {
                 b.push(b'U');
-                self.xid(&mut b, t);
+                self.xid(&mut b, c, t);
                 i32(&mut b, relid);
                 if let Some((o, key)) = old {
                     b.push(if key { b'K' } else { b'O' });
@@ -459,7 +466,7 @@ impl PgOutput {
             }
             Out::Delete(o, key) => {
                 b.push(b'D');
-                self.xid(&mut b, t);
+                self.xid(&mut b, c, t);
                 i32(&mut b, relid);
                 b.push(if key { b'K' } else { b'O' });
                 self.tuple(&mut b, c, &e, &o, &[])?;
@@ -492,7 +499,7 @@ impl PgOutput {
             self.schema(c, t, e);
         }
         let mut b = vec![b'T'];
-        self.xid(&mut b, t);
+        self.xid(&mut b, c, t);
         i32(&mut b, ids.len() as i32);
         i8(&mut b, cascade as u8 | ((restart as u8) << 1));
         for id in ids {
@@ -510,8 +517,8 @@ impl PgOutput {
             self.send_begin(c, t);
         }
         let mut b = vec![b'M'];
-        if self.in_stream && transactional && let Some(t) = t {
-            i32(&mut b, t.xid as i32);
+        if transactional && let Some(t) = t {
+            self.xid(&mut b, c, t);
         }
         i8(&mut b, transactional as u8);
         i64(&mut b, lsn as i64);
@@ -726,7 +733,8 @@ impl Plugin for PgOutput {
     }
 
     fn stream_start(&mut self, c: &mut Ctx, t: &TxnInfo) -> Result<()> {
-        let first = !self.in_stream && self.stream_sent.is_empty();
+        let first = !self.stream_sent.contains_key(&t.xid);
+        self.stream_sent.entry(t.xid).or_default();
         self.in_stream = true;
         self.invalidate(c);
         let mut b = vec![b'S'];
@@ -738,35 +746,36 @@ impl Plugin for PgOutput {
 
     fn stream_stop(&mut self, c: &mut Ctx, _t: &TxnInfo) -> Result<()> {
         c.write(vec![b'E']);
+        self.in_stream = false;
         Ok(())
     }
 
-    fn stream_abort(&mut self, c: &mut Ctx, t: &TxnInfo, sub: u64, lsn: u64) -> Result<()> {
+    fn stream_abort(&mut self, c: &mut Ctx, t: &TxnInfo, sub: u64, lsn: u64, time: i64) -> Result<()> {
         let mut b = vec![b'A'];
         i32(&mut b, t.xid as i32);
         i32(&mut b, sub as i32);
         if self.proto >= PARALLEL_PROTO {
             i64(&mut b, lsn as i64);
-            i64(&mut b, t.time);
+            i64(&mut b, time);
         }
         c.write(b);
         if sub == t.xid {
             self.in_stream = false;
-            self.stream_sent.clear();
+            self.stream_sent.remove(&t.xid);
         }
         Ok(())
     }
 
     fn stream_prepare(&mut self, c: &mut Ctx, t: &TxnInfo, lsn: u64) -> Result<()> {
         self.in_stream = false;
-        self.stream_sent.clear();
+        self.stream_sent.remove(&t.xid);
         c.write(Self::gid_msg(b'p', true, &[lsn, t.end_lsn], &[t.time], t));
         Ok(())
     }
 
     fn stream_commit(&mut self, c: &mut Ctx, t: &TxnInfo, lsn: u64) -> Result<()> {
         self.in_stream = false;
-        self.stream_sent.clear();
+        self.stream_sent.remove(&t.xid);
         let mut b = vec![b'c'];
         i32(&mut b, t.xid as i32);
         i8(&mut b, 0);

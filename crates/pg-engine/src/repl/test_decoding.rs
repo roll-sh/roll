@@ -5,6 +5,7 @@ use super::plugin::{Ctx, Plugin, RowChange, Startup, TxnInfo};
 use crate::catalog::quote_ident;
 use crate::error::{Error, Result, code};
 use crate::types::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -13,8 +14,8 @@ pub struct TestDecoding {
     include_timestamp: bool,
     skip_empty_xacts: bool,
     only_local: bool,
-    /// TestDecodingTxnData of the transaction being decoded.
-    xact_wrote_changes: bool,
+    /// TestDecodingTxnData, retained independently for pending streamed transactions.
+    xact_wrote_changes: HashSet<u64>,
     stream_wrote_changes: bool,
 }
 
@@ -106,15 +107,15 @@ impl TestDecoding {
         if self.skip_empty_xacts && !self.stream_wrote_changes {
             self.output_stream_start(c, t);
         }
-        self.xact_wrote_changes = true;
+        self.xact_wrote_changes.insert(t.xid);
         self.stream_wrote_changes = true;
     }
 
     fn begin_lazily(&mut self, c: &mut Ctx, t: &TxnInfo) {
-        if self.skip_empty_xacts && !self.xact_wrote_changes {
+        if self.skip_empty_xacts && !self.xact_wrote_changes.contains(&t.xid) {
             self.output_begin(c, t);
         }
-        self.xact_wrote_changes = true;
+        self.xact_wrote_changes.insert(t.xid);
     }
 }
 
@@ -170,7 +171,7 @@ impl Plugin for TestDecoding {
     }
 
     fn begin(&mut self, c: &mut Ctx, t: &TxnInfo) -> Result<()> {
-        self.xact_wrote_changes = false;
+        self.xact_wrote_changes.remove(&t.xid);
         if !self.skip_empty_xacts {
             self.output_begin(c, t);
         }
@@ -178,7 +179,8 @@ impl Plugin for TestDecoding {
     }
 
     fn commit(&mut self, c: &mut Ctx, t: &TxnInfo, _lsn: u64) -> Result<()> {
-        if self.skip_empty_xacts && !self.xact_wrote_changes {
+        let wrote = self.xact_wrote_changes.remove(&t.xid);
+        if self.skip_empty_xacts && !wrote {
             return Ok(());
         }
         let mut s = if self.include_xids { format!("COMMIT {}", t.xid as u32) } else { "COMMIT".into() };
@@ -262,7 +264,8 @@ impl Plugin for TestDecoding {
     }
 
     fn prepare(&mut self, c: &mut Ctx, t: &TxnInfo, _lsn: u64) -> Result<()> {
-        if self.skip_empty_xacts && !self.xact_wrote_changes {
+        let wrote = self.xact_wrote_changes.remove(&t.xid);
+        if self.skip_empty_xacts && !wrote {
             return Ok(());
         }
         let mut s = format!("PREPARE TRANSACTION {}", crate::sql::func::string::quote_literal_str(&t.gid));
@@ -317,10 +320,10 @@ impl Plugin for TestDecoding {
         Ok(())
     }
 
-    fn stream_abort(&mut self, c: &mut Ctx, t: &TxnInfo, sub_xid: u64, _lsn: u64) -> Result<()> {
-        let wrote = self.xact_wrote_changes;
+    fn stream_abort(&mut self, c: &mut Ctx, t: &TxnInfo, sub_xid: u64, _lsn: u64, _time: i64) -> Result<()> {
+        let wrote = self.xact_wrote_changes.contains(&t.xid);
         if sub_xid == t.xid {
-            self.xact_wrote_changes = false;
+            self.xact_wrote_changes.remove(&t.xid);
         }
         if self.skip_empty_xacts && !wrote {
             return Ok(());
@@ -337,7 +340,8 @@ impl Plugin for TestDecoding {
     }
 
     fn stream_prepare(&mut self, c: &mut Ctx, t: &TxnInfo, _lsn: u64) -> Result<()> {
-        if self.skip_empty_xacts && !self.xact_wrote_changes {
+        let wrote = self.xact_wrote_changes.remove(&t.xid);
+        if self.skip_empty_xacts && !wrote {
             return Ok(());
         }
         let gid = crate::sql::func::string::quote_literal_str(&t.gid);
@@ -352,8 +356,8 @@ impl Plugin for TestDecoding {
     }
 
     fn stream_commit(&mut self, c: &mut Ctx, t: &TxnInfo, _lsn: u64) -> Result<()> {
-        let wrote = self.xact_wrote_changes;
-        self.xact_wrote_changes = false;
+        let wrote = self.xact_wrote_changes.contains(&t.xid);
+        self.xact_wrote_changes.remove(&t.xid);
         if self.skip_empty_xacts && !wrote {
             return Ok(());
         }

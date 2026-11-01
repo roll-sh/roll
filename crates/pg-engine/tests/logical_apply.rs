@@ -552,3 +552,150 @@ fn changes_files_logged() {
     }
     pg_engine::log::set_sink(None);
 }
+
+/// A rolled-back subtransaction's changes stay in the change stream (as PostgreSQL's WAL keeps
+/// them): a transaction outgrowing logical_decoding_work_mem streams what it decoded before
+/// the abort, then "aborting streamed (sub)transaction" (stream.sql, twophase_stream.sql);
+/// non-streamed replay leaves them out; subscribers (streaming = on and parallel) drop them.
+#[test]
+fn aborted_subtransactions_stream() {
+    let mut x = pair();
+    x.both("CREATE TABLE st (data text)");
+    x.both("CREATE TABLE t (id int PRIMARY KEY, v text)");
+    rows(&mut x.p, "CREATE PUBLICATION p FOR TABLE t");
+    let changes = |x: &mut Pair, opts: &str| -> Vec<String> {
+        let sql = format!(
+            "SELECT data FROM pg_logical_slot_get_changes('td', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1'{opts})"
+        );
+        rows(&mut x.p, &sql)
+    };
+    let text = |s: &str| format!("[Text({s:?})]");
+    rows(&mut x.p, "SELECT 'init' FROM pg_create_logical_replication_slot('td', 'test_decoding')");
+    let body = "BEGIN; SAVEPOINT s1; SELECT pg_logical_emit_message(true, 'test', repeat('a', 50)); \
+                INSERT INTO st SELECT repeat('a', 2000) || g FROM generate_series(1, 35) g; TRUNCATE st; \
+                ROLLBACK TO s1; INSERT INTO st SELECT repeat('a', 10) || g FROM generate_series(1, 20) g; COMMIT";
+    rows(&mut x.p, body);
+    let got = changes(&mut x, ", 'stream-changes', '1'");
+    let mut want = vec![
+        "opening a streamed block for transaction",
+        "streaming message: transactional: 1 prefix: test, sz: 50",
+        "closing a streamed block for transaction",
+        "aborting streamed (sub)transaction",
+        "opening a streamed block for transaction",
+    ];
+    want.extend(std::iter::repeat_n("streaming change for transaction", 20));
+    want.extend(["closing a streamed block for transaction", "committing streamed transaction"]);
+    assert_eq!(got, want.iter().map(|s| text(s)).collect::<Vec<_>>());
+    // Not streamed: the rolled-back rows aren't decoded.
+    rows(&mut x.p, body);
+    let got = changes(&mut x, "");
+    assert_eq!(got.len(), 22, "{got:?}");
+    assert!(got[1..21].iter().all(|r| r.starts_with("[Text(\"table public.st: INSERT: data[text]:'aaaaaaaaaa")), "{got:?}");
+    // A relation looked up before streams its rolled-back rows, then aborts them.
+    rows(&mut x.p, "INSERT INTO st VALUES ('x')");
+    rows(
+        &mut x.p,
+        "BEGIN; INSERT INTO st VALUES ('y'); SAVEPOINT a; INSERT INTO st SELECT (SELECT string_agg(md5((g * 100 + i)::text), '') FROM generate_series(1, 55) i) \
+         FROM generate_series(1, 40) g; \
+         ROLLBACK TO a; COMMIT",
+    );
+    let got = changes(&mut x, ", 'stream-changes', '1'");
+    assert_eq!(got.iter().filter(|r| **r == text("aborting streamed (sub)transaction")).count(), 1, "{got:?}");
+    assert_eq!(got.last(), Some(&text("committing streamed transaction")), "{got:?}");
+    rows(&mut x.p, "SELECT pg_drop_replication_slot('td')");
+
+    // Subscribers drop what the abort covers: nested savepoints, a released one rolled back
+    // with its parent, an exception block.
+    for streaming in ["on", "parallel"] {
+        x.subscribe(&format!("s_{streaming}"), "p", &format!("copy_data = false, streaming = {streaming}"));
+        rows(&mut x.p, "INSERT INTO t VALUES (0, 'first')");
+        x.same("SELECT count(*) FROM t");
+        rows(
+            &mut x.p,
+            "BEGIN; INSERT INTO t SELECT g, 'top' FROM generate_series(1, 500) g; \
+             SAVEPOINT a; INSERT INTO t SELECT g, 'a' FROM generate_series(501, 1500) g; \
+             SAVEPOINT b; UPDATE t SET v = 'b' WHERE id < 300; RELEASE b; ROLLBACK TO a; \
+             SAVEPOINT c; DELETE FROM t WHERE id % 5 = 0; SAVEPOINT d; INSERT INTO t SELECT g, 'd' FROM generate_series(2001, 3000) g; \
+             ROLLBACK TO d; RELEASE c; UPDATE t SET v = 'after' WHERE id % 7 = 0; COMMIT",
+        );
+        rows(
+            &mut x.p,
+            "DO $$ BEGIN INSERT INTO t SELECT g, 'do' FROM generate_series(4001, 4500) g; \
+             BEGIN INSERT INTO t SELECT g, 'x' FROM generate_series(5001, 6000) g; PERFORM 1 / 0; \
+             EXCEPTION WHEN division_by_zero THEN NULL; END; END $$",
+        );
+        x.same("SELECT id, v FROM t ORDER BY id");
+        rows(&mut x.s, &format!("DROP SUBSCRIPTION s_{streaming}"));
+        x.both("TRUNCATE t");
+    }
+}
+
+#[test]
+fn prepared_stream_preserves_ordinary_transaction_framing() {
+    let mut x = pair();
+    rows(&mut x.p, "CREATE TABLE t (id int PRIMARY KEY, v text); CREATE PUBLICATION p FOR TABLE t");
+    rows(&mut x.p, "SELECT 'init' FROM pg_create_logical_replication_slot('po', 'pgoutput')");
+    rows(
+        &mut x.p,
+        "BEGIN; INSERT INTO t SELECT g, repeat('x', 100) FROM generate_series(1, 1000) g; PREPARE TRANSACTION 'pending'",
+    );
+    rows(&mut x.p, "INSERT INTO t VALUES (2000, 'between')");
+    let tags = rows(
+        &mut x.p,
+        "SELECT chr(get_byte(data, 0)) FROM pg_logical_slot_get_binary_changes(\
+         'po', NULL, NULL, 'proto_version', '4', 'publication_names', 'p', 'streaming', 'parallel')",
+    );
+    // PostgreSQL 18.6 streams the pending PREPARE, then frames the ordinary commit
+    // independently: Begin, Relation, Insert (without a streamed xid), Commit.
+    assert!(tags.iter().any(|t| t == "[Text(\"S\")]"), "{tags:?}");
+    let tail = &tags[tags.len().saturating_sub(4)..];
+    assert_eq!(tail, &["B", "R", "I", "C"].map(|t| format!("[Text({t:?})]")));
+    rows(&mut x.p, "ROLLBACK PREPARED 'pending'");
+    rows(&mut x.p, "SELECT pg_drop_replication_slot('po')");
+}
+
+#[test]
+fn prepared_stream_without_two_phase_cleans_up() {
+    let mut x = pair();
+    x.both("CREATE TABLE t (id int PRIMARY KEY, v text)");
+    rows(&mut x.p, "CREATE PUBLICATION p FOR TABLE t");
+    for mode in ["on", "parallel"] {
+        x.subscribe("s", "p", &format!("copy_data = false, streaming = {mode}"));
+        rows(&mut x.p, "INSERT INTO t VALUES (0, 'first')");
+        x.same("SELECT id, v FROM t ORDER BY id");
+        rows(
+            &mut x.p,
+            "BEGIN; INSERT INTO t SELECT g, repeat('x', 100) FROM generate_series(1, 1000) g; PREPARE TRANSACTION 'pending'",
+        );
+        wait_for(
+            &mut x.p,
+            "SELECT sent_lsn >= pg_current_wal_lsn() FROM pg_stat_replication",
+            &["[Bool(true)]".into()],
+        );
+        rows(&mut x.p, "INSERT INTO t VALUES (2000, 'between')");
+        x.same("SELECT id, v FROM t ORDER BY id");
+        rows(&mut x.p, "ROLLBACK PREPARED 'pending'");
+        rows(&mut x.p, "INSERT INTO t SELECT g, repeat('y', 100) FROM generate_series(1, 1000) g");
+        x.same("SELECT id, v FROM t ORDER BY id");
+        rows(&mut x.s, "DROP SUBSCRIPTION s");
+        x.both("TRUNCATE t");
+    }
+}
+
+#[test]
+fn finish_prepared_refuses_implicit_blocks() {
+    let mut x = pair();
+    for verb in ["COMMIT", "ROLLBACK"] {
+        for sql in [
+            format!("{verb} PREPARED 'missing'; SELECT 1"),
+            format!("SELECT 1; {verb} PREPARED 'missing'"),
+        ] {
+            let error = x.p.query(&sql).unwrap_err();
+            assert_eq!(error.code, "25001", "{sql}: {error:?}");
+            assert_eq!(error.message, format!("{verb} PREPARED cannot run inside a transaction block"));
+            assert_eq!(rows(&mut x.p, "SELECT 1"), vec!["[Int4(1)]"]);
+        }
+        let error = x.p.query(&format!("{verb} PREPARED 'missing'")).unwrap_err();
+        assert_eq!(error.code, "42704", "{error:?}");
+    }
+}

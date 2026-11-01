@@ -1,0 +1,9 @@
+> COMMIT PREPARED 'a152_nosuch' ; SELECT 1
+ERROR 25001: COMMIT PREPARED cannot run inside a transaction block
+
+> ROLLBACK PREPARED 'a152_nosuch' ; SELECT 1
+ERROR 25001: ROLLBACK PREPARED cannot run inside a transaction block
+
+> COMMIT PREPARED 'a152_nosuch'
+ERROR 42704: prepared transaction with identifier "a152_nosuch" does not exist
+
