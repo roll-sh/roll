@@ -159,7 +159,14 @@ fn start(db: &Database, oid: u32) -> Option<Building<'_>> {
 fn record(db: &Database, cat: &Catalog, t: &Table) -> Option<(Restore, u64)> {
     let v = db.store.get(&key(t.oid), db.store.visible_ts()).ok()??;
     let node = cat.relfilenode(t.oid)?;
-    let r = decode(&v, node, token(cat, t), heap_fillfactor(t))?;
+    let mut r = decode(&v, node, token(cat, t), heap_fillfactor(t))?;
+    // Older tree images omitted NULLS NOT DISTINCT. Refresh both foreground and
+    // background restoration from the catalog that owns the option.
+    for (&oid, tree) in &mut r.btrees {
+        if let Some(ix) = cat.indexes.get(&oid) {
+            tree.opts.nulls_not_distinct = ix.nulls_not_distinct;
+        }
+    }
     Some((r, hash(&v)))
 }
 

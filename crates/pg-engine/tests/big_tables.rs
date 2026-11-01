@@ -571,6 +571,43 @@ fn estimate_kept_across_restart() {
     });
 }
 
+#[test]
+fn estimate_rebuilt_with_higher_model_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = {
+        let eng = open(dir.path());
+        let r = with_max_versions(500, || {
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            run(&mut s, "CREATE TABLE est_upgrade (id int PRIMARY KEY, k int);
+                 INSERT INTO est_upgrade SELECT g, g % 17 FROM generate_series(1, 1200) g;
+                 CREATE INDEX est_upgrade_k ON est_upgrade (k);
+                 DELETE FROM est_upgrade WHERE id % 5 = 0");
+            let result = rows(&mut s, "SELECT id, k FROM est_upgrade ORDER BY id");
+            let oid = s.query("SELECT 'est_upgrade'::regclass::oid").unwrap()[0].rows[0][0].clone();
+            let pg_engine::types::Value::Oid(oid) = oid else { panic!("expected oid") };
+            rows(&mut s, "SELECT pg_relation_size('est_upgrade')");
+            assert!(pg_engine::exec::sizing::is_estimated(oid, &s.state.db));
+            result
+        });
+        eng.shutdown();
+        r
+    };
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    rows(&mut s, "SELECT pg_relation_size('est_upgrade')");
+    let oid = s.query("SELECT 'est_upgrade'::regclass::oid").unwrap()[0].rows[0][0].clone();
+    let pg_engine::types::Value::Oid(oid) = oid else { panic!("expected oid") };
+    assert!(!pg_engine::exec::sizing::is_estimated(oid, &s.state.db));
+    assert_eq!(rows(&mut s, "SELECT id, k FROM est_upgrade ORDER BY id"), before);
+    for q in ["SELECT id FROM est_upgrade ORDER BY id", "SELECT k FROM est_upgrade WHERE k BETWEEN 3 AND 8 ORDER BY k"] {
+        run(&mut s, "SET enable_seqscan = off;\nSET enable_bitmapscan = off");
+        let indexed = rows(&mut s, q);
+        run(&mut s, "RESET enable_seqscan;\nRESET enable_bitmapscan;\nSET enable_indexscan = off;\nSET enable_indexonlyscan = off");
+        assert_eq!(rows(&mut s, q), indexed, "{q}");
+        run(&mut s, "RESET enable_indexscan;\nRESET enable_indexonlyscan");
+    }
+}
+
 /// ANALYZE of a table too big to model, with more pages than its sample takes: only the
 /// sampled pages' rows are read (`Ddl::rowid_blocks`), its tuples estimated from them as
 /// PostgreSQL estimates them, near the count; its pages are the estimate it had; the

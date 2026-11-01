@@ -11,6 +11,8 @@
 use crate::txn::xids::Xids;
 use crate::exec::fasthash::HashMap;
 
+mod lps;
+
 pub const BLCKSZ: usize = 8192;
 pub const PAGE_HEADER: usize = 24;
 pub const ITEM_ID: usize = 4;
@@ -176,8 +178,8 @@ enum Htsv {
     DeleteInProgress,
 }
 
-/// (32 bytes: a model holds one per row version.)
-#[derive(Clone, Debug)]
+/// A row version (32 bytes; a page keeps most in 8, `lps::Lps`).
+#[derive(Clone, Copy, Debug)]
 pub struct Tup {
     pub xmin: u64,
     /// The deleting or updating transaction (0: none).
@@ -229,7 +231,7 @@ fn visible_to_all(t: &Tup, v: &Vis) -> bool {
     t.xmin < crate::txn::xids::FIRST_NORMAL_XID || v.removable(t.xmin)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Lp {
     Unused,
     Dead,
@@ -237,15 +239,9 @@ enum Lp {
     Normal(Tup),
 }
 
-impl Lp {
-    fn used(&self) -> bool {
-        !matches!(self, Lp::Unused)
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 struct Page {
-    lps: Vec<Lp>,
+    lps: lps::Lps,
     /// Bytes of tuple storage (MAXALIGNed).
     used: usize,
     /// PD_PAGE_FULL: an UPDATE found no room here.
@@ -257,6 +253,11 @@ struct Page {
     free_lps: bool,
     /// Never initialized (an all-zeroes page from a bulk extension).
     new: bool,
+    /// The oldest xmin of a version that may settle (`lps::Lps::settle`; u64::MAX: none,
+    /// 0: not known).
+    settle_at: u64,
+    /// In `Heap::left`.
+    queued: bool,
 }
 
 impl Page {
@@ -278,10 +279,7 @@ impl Page {
     /// PageGetHeapFreeSpace.
     fn heap_free(&self) -> usize {
         let space = self.free_space();
-        if space > 0
-            && self.lps.len() >= MAX_HEAP_TUPLES
-            && !(self.free_lps && self.lps.iter().any(|l| !l.used()))
-        {
+        if space > 0 && self.lps.len() >= MAX_HEAP_TUPLES && !(self.free_lps && self.lps.any_unused()) {
             return 0;
         }
         space
@@ -291,9 +289,12 @@ impl Page {
     /// new one at the end.
     fn add(&mut self, t: Tup) -> u16 {
         self.used += maxalign(t.len as usize);
+        if t.xmin >= crate::txn::xids::FIRST_NORMAL_XID {
+            self.settle_at = self.settle_at.min(t.xmin);
+        }
         if self.free_lps {
-            if let Some(i) = self.lps.iter().position(|l| !l.used()) {
-                self.lps[i] = Lp::Normal(t);
+            if let Some(i) = self.lps.first_unused() {
+                self.lps.set(i, Lp::Normal(t));
                 return i as u16 + 1;
             }
             self.free_lps = false;
@@ -302,7 +303,7 @@ impl Page {
         self.lps.len() as u16
     }
 
-    fn tup(&self, off: u16) -> Option<&Tup> {
+    fn tup(&self, off: u16) -> Option<Tup> {
         // (Offset 0 is no line pointer's: a TID asked for can have it.)
         match self.lps.get((off as usize).wrapping_sub(1)) {
             Some(Lp::Normal(t)) => Some(t),
@@ -310,10 +311,15 @@ impl Page {
         }
     }
 
-    fn tup_mut(&mut self, off: u16) -> Option<&mut Tup> {
-        match self.lps.get_mut((off as usize).wrapping_sub(1)) {
-            Some(Lp::Normal(t)) => Some(t),
-            _ => None,
+    /// Change the version at `off` (a normal line pointer's: false otherwise).
+    fn update_tup(&mut self, off: u16, f: impl FnOnce(&mut Tup)) -> bool {
+        self.lps.update((off as usize).wrapping_sub(1), f)
+    }
+
+    /// Its versions settled for everyone take their small form (`lps::Lps::settle`).
+    fn settle(&mut self, v: &Vis) {
+        if self.settle_at < v.horizon {
+            self.settle_at = self.lps.settle(v);
         }
     }
 
@@ -327,18 +333,18 @@ impl Page {
     /// PageRepairFragmentation: storage is already accounted; trailing unused line
     /// pointers go and the free-line-pointer hint is refreshed.
     fn repair(&mut self) {
-        while self.lps.last().is_some_and(|l| !l.used()) {
+        while !self.lps.is_empty() && !self.lps.used(self.lps.len() - 1) {
             self.lps.pop();
         }
-        self.free_lps = self.lps.iter().any(|l| !l.used());
+        self.free_lps = self.lps.any_unused();
     }
 
     /// PageTruncateLinePointerArray (keeps at least the first line pointer).
     fn truncate_lps(&mut self) {
-        while self.lps.len() > 1 && self.lps.last().is_some_and(|l| !l.used()) {
+        while self.lps.len() > 1 && !self.lps.used(self.lps.len() - 1) {
             self.lps.pop();
         }
-        self.free_lps = self.lps.iter().any(|l| !l.used());
+        self.free_lps = self.lps.any_unused();
     }
 }
 
@@ -713,7 +719,24 @@ pub struct VacuumResult {
     /// Dead tuples it had to keep, still visible to a running transaction or a snapshot
     /// (vacrel->recently_dead_tuples).
     pub recently_dead: u32,
+    /// The pages it had when it began, and those it read (the others its visibility map let
+    /// it skip): `live` counts the read ones' tuples (vac_estimate_reltuples' input).
+    pub rel_pages: u32,
+    pub scanned: u32,
 }
+
+/// The pages a VACUUM may skip by the visibility map (lazy_scan_heap's skipwithvm,
+/// aggressive): none (DISABLE_PAGE_SKIPPING), all-visible ones, or only all-frozen ones (an
+/// aggressive VACUUM: FREEZE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skip {
+    None,
+    AllVisible,
+    AllFrozen,
+}
+
+/// heap_vac_scan_next_block skips a run of skippable pages only when it is this long.
+const SKIP_PAGES_THRESHOLD: u32 = 32;
 
 #[derive(Debug, Default)]
 pub struct Heap {
@@ -756,6 +779,8 @@ pub struct Heap {
     /// Bumped when (main, fsm, vm) pages change (`size_sig`, `note_size`).
     pub sizes: SizeGen,
     size_sig: (u32, u32, u32),
+    /// Pages versions went on that may still settle (`settle_left`; `Page::queued`).
+    left: std::collections::VecDeque<u32>,
 }
 
 impl Heap {
@@ -851,10 +876,11 @@ impl Heap {
     /// About the bytes the model holds (pages and their line pointers, the rows, the free
     /// space map's pages, the bookkeeping maps), for memory accounting.
     pub fn bytes(&self) -> usize {
-        let lps: usize = self.pages.iter().map(|p| p.lps.capacity()).sum();
+        let lps: usize = self.pages.iter().map(|p| p.lps.bytes()).sum();
         self.pages.capacity() * size_of::<Page>()
-            + lps * size_of::<Lp>()
+            + lps
             + self.keys.bytes()
+            + self.left.capacity() * size_of::<u32>()
             + self.fsm.pages.len() * (size_of::<FsmPage>() + 16)
             + (self.deleted.len() + self.far_prev.len()) * 24
             + self.pending.values().map(|l| l.capacity() * 20 + 16).sum::<usize>()
@@ -887,7 +913,7 @@ impl Heap {
         self.pages.get(blk as usize).is_some_and(|p| {
             p.all_visible
                 && p.lps.iter().all(|l| match l {
-                    Lp::Normal(t) => t.xmin < crate::txn::xids::FIRST_NORMAL_XID,
+                    Lp::Normal(t) => t.xmin < crate::txn::xids::FIRST_NORMAL_XID && t.xmin != lps::SETTLED_XMIN,
                     _ => true,
                 })
         })
@@ -909,7 +935,7 @@ impl Heap {
     pub fn tuple_stats(&self, v: &Vis) -> (u64, u64, u64, u64, u64) {
         let mut s = (0, 0, 0, 0, 0);
         for p in &self.pages {
-            for l in &p.lps {
+            for l in p.lps.iter() {
                 if let Lp::Normal(t) = l {
                     match t.status(v) {
                         Htsv::Live | Htsv::InsertInProgress | Htsv::DeleteInProgress => {
@@ -997,8 +1023,8 @@ impl Heap {
                 FAR_PREV
             }
         };
-        if let Some(t) = self.pages.get_mut(tid.0 as usize).and_then(|p| p.tup_mut(tid.1)) {
-            t.prev_off = off;
+        if let Some(p) = self.pages.get_mut(tid.0 as usize) {
+            p.update_tup(tid.1, |t| t.prev_off = off);
         }
     }
 
@@ -1006,8 +1032,8 @@ impl Heap {
     /// version is the row's.
     fn keyed(&mut self, key: &[u8], tid: Tid) -> u32 {
         let row = self.keys.insert(key, tid);
-        if let Some(t) = self.pages.get_mut(tid.0 as usize).and_then(|p| p.tup_mut(tid.1)) {
-            t.row = row;
+        if let Some(p) = self.pages.get_mut(tid.0 as usize) {
+            p.update_tup(tid.1, |t| t.row = row);
         }
         row
     }
@@ -1081,14 +1107,14 @@ impl Heap {
     }
 
     /// The tuple at `tid`, if it is a normal one.
-    pub fn tuple(&self, tid: Tid) -> Option<&Tup> {
+    pub fn tuple(&self, tid: Tid) -> Option<Tup> {
         self.pages.get(tid.0 as usize)?.tup(tid.1)
     }
 
     /// Set the raw command id (t_cid) of the tuple at `tid`.
     pub fn set_raw_cid(&mut self, tid: Tid, cid: u32) {
-        if let Some(t) = self.pages.get_mut(tid.0 as usize).and_then(|p| p.tup_mut(tid.1)) {
-            t.cid = cid;
+        if let Some(p) = self.pages.get_mut(tid.0 as usize) {
+            p.update_tup(tid.1, |t| t.cid = cid);
         }
     }
 
@@ -1242,6 +1268,10 @@ impl Heap {
             p.all_visible = false;
         }
         let off = p.add(t);
+        if p.settle_at != u64::MAX && !p.queued {
+            p.queued = true;
+            self.left.push_back(blk);
+        }
         if frozen {
             self.vm_pin(blk);
         }
@@ -1355,11 +1385,11 @@ impl Heap {
         };
         let p = &mut self.pages[b as usize];
         let mut row = super::keymap::NO_ROW;
-        if let Some(t) = p.tup_mut(off) {
+        p.update_tup(off, |t| {
             t.xmax = xid;
             t.hot_updated = false;
             row = t.row;
-        }
+        });
         p.set_prunable(xid);
         p.all_visible = false;
         if row != super::keymap::NO_ROW {
@@ -1414,12 +1444,12 @@ impl Heap {
         self.set_prev((nb, noff), Some((ob, ooff)));
         let op = &mut self.pages[ob as usize];
         let mut old_row = super::keymap::NO_ROW;
-        if let Some(o) = op.tup_mut(ooff) {
+        op.update_tup(ooff, |o| {
             o.xmax = xid;
             o.hot_updated = hot;
             o.next = if hot { noff } else { 0 };
             old_row = o.row;
-        }
+        });
         if !same {
             op.full = true;
         }
@@ -1482,6 +1512,31 @@ impl Heap {
     pub fn prune_opt(&mut self, blk: u32, v: &Vis) {
         if self.prune_wanted(blk, v) {
             self.prune(blk, v, false);
+        } else if let Some(p) = self.pages.get_mut(blk as usize) {
+            p.settle(v);
+        }
+    }
+
+    /// Settle a few of the pages new versions went on (`left`), the first queued first,
+    /// once their versions are settled for everyone: pages nobody reads again (an
+    /// insert-only table's) still take the small form. (Writers call it: a version or two
+    /// written, a page or two settled.)
+    pub fn settle_left(&mut self, v: &Vis) {
+        for _ in 0..2 {
+            let Some(&b) = self.left.front() else { return };
+            let Some(p) = self.pages.get_mut(b as usize) else {
+                self.left.pop_front();
+                continue;
+            };
+            if p.settle_at >= v.horizon && p.settle_at != u64::MAX {
+                return;
+            }
+            self.left.pop_front();
+            p.settle(v);
+            p.queued = p.settle_at != u64::MAX;
+            if p.queued {
+                self.left.push_back(b);
+            }
         }
     }
 
@@ -1514,8 +1569,9 @@ impl Heap {
     /// pointers left, live tuples, all visible).
     fn prune(&mut self, blk: u32, v: &Vis, unused_now: bool) -> (bool, Vec<u16>, usize, bool) {
         self.settle(v);
-        let p = &self.pages[blk as usize];
-        let n = p.lps.len();
+        // (A copy of the line pointers: the page keeps most of them packed.)
+        let lps: Vec<Lp> = self.pages[blk as usize].lps.iter().collect();
+        let n = lps.len();
         let mut htsv: Vec<Option<Htsv>> = vec![None; n + 1];
         let mut processed = vec![false; n + 1];
         // New states: None = unchanged.
@@ -1523,7 +1579,7 @@ impl Heap {
         let mut roots = Vec::new();
         let mut heaponly = Vec::new();
         for off in 1..=n {
-            match &p.lps[off - 1] {
+            match &lps[off - 1] {
                 Lp::Unused => processed[off] = true,
                 Lp::Dead => {
                     processed[off] = true;
@@ -1557,12 +1613,12 @@ impl Heap {
             let mut ndead = 0;
             let mut off = root;
             let mut prior_xmax = 0u64;
-            let is_redirect = matches!(p.lps[root - 1], Lp::Redirect(_));
+            let is_redirect = matches!(lps[root - 1], Lp::Redirect(_));
             loop {
                 if off < 1 || off > n || processed[off] {
                     break;
                 }
-                match &p.lps[off - 1] {
+                match &lps[off - 1] {
                     Lp::Redirect(to) => {
                         if !chain.is_empty() {
                             break;
@@ -1572,7 +1628,7 @@ impl Heap {
                         continue;
                     }
                     Lp::Normal(t) => {
-                        if prior_xmax != 0 && t.xmin != prior_xmax {
+                        if prior_xmax != 0 && t.xmin != prior_xmax && t.xmin != lps::SETTLED_XMIN {
                             break;
                         }
                         chain.push(off);
@@ -1594,11 +1650,11 @@ impl Heap {
                 processed[c] = true;
             }
             if is_redirect && chain.len() < 2 {
-                new[root] = Some(dead_or_unused.clone());
+                new[root] = Some(dead_or_unused);
                 continue;
             }
             let unchanged = |c: usize, prunable: &mut dyn FnMut(u64)| {
-                if let (Some(h), Lp::Normal(t)) = (htsv[c], &p.lps[c - 1])
+                if let (Some(h), Lp::Normal(t)) = (htsv[c], &lps[c - 1])
                     && matches!(h, Htsv::RecentlyDead | Htsv::DeleteInProgress)
                 {
                     prunable(t.xmax);
@@ -1609,7 +1665,7 @@ impl Heap {
                     unchanged(c, &mut prunable);
                 }
             } else if ndead == chain.len() {
-                new[root] = Some(dead_or_unused.clone());
+                new[root] = Some(dead_or_unused);
                 for &c in &chain[1..] {
                     new[c] = Some(Lp::Unused);
                 }
@@ -1630,7 +1686,7 @@ impl Heap {
             processed[off] = true;
             if htsv[off] == Some(Htsv::Dead) {
                 new[off] = Some(Lp::Unused);
-            } else if let (Some(h), Lp::Normal(t)) = (htsv[off], &p.lps[off - 1])
+            } else if let (Some(h), Lp::Normal(t)) = (htsv[off], &lps[off - 1])
                 && matches!(h, Htsv::RecentlyDead | Htsv::DeleteInProgress)
             {
                 prunable(t.xmax);
@@ -1646,20 +1702,21 @@ impl Heap {
         if do_prune {
             for (off, st) in new.into_iter().enumerate().skip(1) {
                 if let Some(st) = st {
-                    if let Lp::Normal(t) = &p.lps[off - 1] {
+                    if let Lp::Normal(t) = lps[off - 1] {
                         p.used -= maxalign(t.len as usize);
                         self.versions -= 1;
                     }
                     if matches!(st, Lp::Unused) {
                         freed.push((blk, off as u16));
                     }
-                    p.lps[off - 1] = st;
+                    p.lps.set(off - 1, st);
                 }
             }
             p.repair();
         }
         self.forget_deleted(&freed);
         let p = &mut self.pages[blk as usize];
+        p.settle(v);
         // What VACUUM needs to know about the page now.
         let mut hastup = false;
         let mut dead = Vec::new();
@@ -1675,7 +1732,7 @@ impl Heap {
                     match t.status(v) {
                         Htsv::Live => {
                             live += 1;
-                            all_visible &= visible_to_all(t, v);
+                            all_visible &= visible_to_all(&t, v);
                         }
                         Htsv::DeleteInProgress => {
                             live += 1;
@@ -1693,10 +1750,29 @@ impl Heap {
     /// Lazy VACUUM: prune every page, then (when there were dead tuples and `nindexes`
     /// indexes to clean, unless that is bypassed) free the dead line pointers, record
     /// free space, mark pages all-visible and truncate empty trailing pages.
-    pub fn vacuum(&mut self, v: &Vis, nindexes: usize, truncate: bool) -> VacuumResult {
+    pub fn vacuum(&mut self, v: &Vis, nindexes: usize, truncate: bool, skip: Skip, freeze: bool) -> VacuumResult {
         self.settle(v);
         let rel_pages = self.pages.len() as u32;
-        let mut res = VacuumResult::default();
+        let mut res = VacuumResult { rel_pages, ..Default::default() };
+        // Which pages it reads: runs of skippable pages long enough are skipped; the last
+        // page is always read (find_next_unskippable_block).
+        let skippable = |h: &Heap, b: u32| match skip {
+            Skip::None => false,
+            Skip::AllVisible => h.page_all_visible(b),
+            Skip::AllFrozen => h.page_all_frozen(b),
+        };
+        let mut scan = vec![true; rel_pages as usize];
+        let mut b = 0;
+        while b < rel_pages {
+            let mut next = b;
+            while next + 1 < rel_pages && skippable(self, next) {
+                next += 1;
+            }
+            if next - b >= SKIP_PAGES_THRESHOLD {
+                scan[b as usize..next as usize].fill(false);
+            }
+            b = next + 1;
+        }
         if rel_pages > 0 {
             self.vm_pin(rel_pages - 1);
         }
@@ -1704,6 +1780,10 @@ impl Heap {
         let mut lpdead_pages = 0u32;
         let mut dead_by_page: Vec<(u32, Vec<u16>)> = Vec::new();
         for b in 0..rel_pages {
+            if !scan[b as usize] {
+                continue;
+            }
+            res.scanned += 1;
             let p = &self.pages[b as usize];
             if p.new {
                 if self.fsm.recorded(b) == 0 {
@@ -1745,18 +1825,31 @@ impl Heap {
                 if !bypass {
                     let p = &mut self.pages[b as usize];
                     for &off in &dead {
-                        p.lps[off as usize - 1] = Lp::Unused;
+                        p.lps.set(off as usize - 1, Lp::Unused);
                         res.dead.push((b, off));
                     }
                     p.truncate_lps();
                     let vis = p.lps.iter().all(|l| match l {
                         Lp::Unused | Lp::Redirect(_) => true,
                         Lp::Dead => false,
-                        Lp::Normal(t) => t.status(v) == Htsv::Live && visible_to_all(t, v),
+                        Lp::Normal(t) => t.status(v) == Htsv::Live && visible_to_all(&t, v),
                     });
                     p.all_visible = vis;
                     let free = p.heap_free();
                     self.fsm.record(b, free);
+                }
+            }
+        }
+        if freeze {
+            for (b, p) in self.pages.iter_mut().enumerate() {
+                if scan[b] {
+                    for i in 0..p.lps.len() {
+                        p.lps.update(i, |t| {
+                            if v.removable(t.xmin) && v.state(t.xmin) == Xs::Committed {
+                                t.xmin = 2;
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -1767,7 +1860,7 @@ impl Heap {
             // count_nondeletable_pages
             while pages > nonempty {
                 let p = &self.pages[pages as usize - 1];
-                if !p.new && p.lps.iter().any(Lp::used) {
+                if !p.new && (0..p.lps.len()).any(|i| p.lps.used(i)) {
                     break;
                 }
                 pages -= 1;
@@ -1788,7 +1881,7 @@ impl Heap {
 
     fn truncate_to(&mut self, pages: u32) {
         for p in &self.pages[pages as usize..] {
-            self.versions -= p.lps.iter().filter(|l| matches!(l, Lp::Normal(_))).count();
+            self.versions -= p.lps.normal();
         }
         self.pages.truncate(pages as usize);
         self.keys.retain(|t| t.0 < pages);
@@ -1804,7 +1897,7 @@ impl Heap {
     pub fn live_tuples(&self, v: &Vis) -> f64 {
         let mut n = 0;
         for p in &self.pages {
-            for lp in &p.lps {
+            for lp in p.lps.iter() {
                 if let Lp::Normal(t) = lp
                     && matches!(t.status(v), Htsv::Live | Htsv::DeleteInProgress)
                 {
@@ -1842,11 +1935,7 @@ impl Heap {
     fn renumber_rows(&mut self, map: &[u32]) {
         let to = |r: u32| map.get(r as usize).copied().unwrap_or(super::keymap::NO_ROW);
         for p in &mut self.pages {
-            for l in &mut p.lps {
-                if let Lp::Normal(t) = l {
-                    t.row = to(t.row);
-                }
-            }
+            p.lps.rows_mut(|r| *r = to(*r));
         }
         for list in self.pending.values_mut() {
             for (row, _, moved) in list.iter_mut() {
@@ -1867,7 +1956,7 @@ impl Heap {
         }
         let mut keep = vec![false; self.keys.rows()];
         for p in &self.pages {
-            for l in &p.lps {
+            for l in p.lps.iter() {
                 if let Lp::Normal(t) = l
                     && let Some(k) = keep.get_mut(t.row as usize)
                 {
@@ -1907,8 +1996,8 @@ impl Heap {
         };
         let mut off = tid.1;
         for _ in 0..=page.lps.len() {
-            match page.lps.get(off as usize - 1) {
-                Some(Lp::Redirect(o)) => off = *o,
+            match page.lps.get((off as usize).wrapping_sub(1)) {
+                Some(Lp::Redirect(o)) => off = o,
                 Some(Lp::Normal(t)) => {
                     if t.status(v) != Htsv::Dead {
                         return false;
@@ -1922,14 +2011,6 @@ impl Heap {
             }
         }
         false
-    }
-
-    pub fn is_dead(&self, tid: Tid, v: &Vis) -> bool {
-        match self.pages.get(tid.0 as usize).and_then(|p| p.lps.get(tid.1 as usize - 1)) {
-            Some(Lp::Normal(t)) => t.status(v) == Htsv::Dead,
-            Some(Lp::Dead) | Some(Lp::Unused) | None => true,
-            Some(Lp::Redirect(_)) => false,
-        }
     }
 }
 
@@ -1960,14 +2041,15 @@ impl Heap {
     /// What `restored` can't tell from the rows, for a heap kept across a clean restart
     /// (`exec::sizing::kept`; `read_shape`): every page's line pointers as they are (unused,
     /// dead, redirects, the dead tuples still taking space, HOT chain links: `is_row` names
-    /// the rows `restored` puts back), its visibility map bit, PD_PAGE_FULL and whether it
+    /// the rows `restored` puts back), its visibility map bits, PD_PAGE_FULL and whether it
     /// has a prunable xid, and the free space map's pages and the visibility map's length.
     /// PostgreSQL's files keep all of it.
     pub fn write_shape(&self, out: &mut Vec<u8>, is_row: &dyn Fn(Tid) -> bool) {
         put_varint(out, self.pages.len() as u64);
         for (b, p) in self.pages.iter().enumerate() {
             put_varint(out, p.lps.len() as u64);
-            let flags = p.all_visible as u64 | (p.full as u64) << 1 | (p.free_lps as u64) << 2 | ((p.prune_xid != 0) as u64) << 3;
+            let flags = p.all_visible as u64 | (p.full as u64) << 1 | (p.free_lps as u64) << 2 | ((p.prune_xid != 0) as u64) << 3
+                | (self.page_all_frozen(b as u32) as u64) << 4;
             put_varint(out, flags);
             for (i, lp) in p.lps.iter().enumerate() {
                 match lp {
@@ -1975,7 +2057,7 @@ impl Heap {
                     Lp::Dead => put_varint(out, 1),
                     Lp::Redirect(o) => {
                         put_varint(out, 2);
-                        put_varint(out, *o as u64);
+                        put_varint(out, o as u64);
                     }
                     Lp::Normal(t) => {
                         let row = is_row((b as u32, i as u16 + 1));
@@ -2034,14 +2116,14 @@ impl Heap {
         for i in 0..n {
             let nlps = get_varint(b)? as usize;
             let flags = get_varint(b)?;
-            let have = self.pages.get(i).map_or(&[][..], |p| &p.lps[..]);
-            if nlps < have.len() || nlps > MAX_HEAP_TUPLES {
+            let have = self.pages.get(i).map(|p| &p.lps);
+            if nlps < have.map_or(0, |l| l.len()) || nlps > MAX_HEAP_TUPLES {
                 return None;
             }
             let mut lps = Vec::with_capacity(nlps);
             for j in 0..nlps {
                 let code = get_varint(b)?;
-                let placed = matches!(have.get(j), Some(Lp::Normal(_)));
+                let placed = have.is_some_and(|l| l.is_normal(j));
                 let links = |b: &mut &[u8]| -> Option<(u8, u16)> { Some((get_varint(b)? as u8 & 3, u16::try_from(get_varint(b)?).ok()?)) };
                 let lp = match code {
                     0 => L::Unused,
@@ -2087,7 +2169,9 @@ impl Heap {
         }
         self.pages.resize_with(n, Page::fresh);
         for (p, (flags, lps)) in self.pages.iter_mut().zip(pages) {
-            p.lps.resize(lps.len(), Lp::Dead);
+            while p.lps.len() < lps.len() {
+                p.lps.push(Lp::Dead);
+            }
             let mut prev = Vec::new();
             for (j, lp) in lps.into_iter().enumerate() {
                 let mut chain = |t: &mut Tup, f: u8, next: u16| {
@@ -2097,16 +2181,19 @@ impl Heap {
                     }
                 };
                 match lp {
-                    L::Unused => p.lps[j] = Lp::Unused,
-                    L::Dead => p.lps[j] = Lp::Dead,
+                    L::Unused => p.lps.set(j, Lp::Unused),
+                    L::Dead => p.lps.set(j, Lp::Dead),
                     L::Redirect(o) => {
-                        p.lps[j] = Lp::Redirect(o);
+                        p.lps.set(j, Lp::Redirect(o));
                         prev.push((o, j as u16 + 1));
                     }
                     L::Row(f, next) => {
-                        if let Lp::Normal(t) = &mut p.lps[j] {
+                        p.lps.update(j, |t| {
                             chain(t, f, next);
-                        }
+                            // Older images have no frozen-page bit. Keep their restored
+                            // rows committed without treating the page as all-frozen.
+                            t.xmin = if flags & 16 != 0 { 2 } else { lps::SETTLED_XMIN };
+                        });
                     }
                     L::Gone(len, f, next) => {
                         // (Dead to everyone: FrozenTransactionId deleted it.)
@@ -2115,15 +2202,13 @@ impl Heap {
                         chain(&mut t, f, next);
                         p.used += maxalign(len as usize);
                         self.versions += 1;
-                        p.lps[j] = Lp::Normal(t);
+                        p.lps.set(j, Lp::Normal(t));
                     }
                 }
             }
             // (Each chain member's way back, as `update` and pruning leave it.)
             for (to, from) in prev {
-                if let Some(Lp::Normal(t)) = p.lps.get_mut(to as usize - 1) {
-                    t.prev_off = from;
-                }
+                p.lps.update((to as usize).wrapping_sub(1), |t| t.prev_off = from);
             }
             p.all_visible = flags & 1 != 0;
             p.full = flags & 2 != 0;
@@ -2152,7 +2237,7 @@ pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> 
     let mut tids = vec![(0, 0); rows.len()];
     let mut rest = Vec::new();
     for (i, (k, len, stored)) in rows.into_iter().enumerate() {
-        match stored.filter(|&tid| h.place_at(tid, Heap::new_tup(len, 0))) {
+        match stored.filter(|&tid| h.place_at(tid, Heap::new_tup(len, lps::SETTLED_XMIN))) {
             Some(tid) => {
                 h.placed(&k, tid);
                 h.keyed(&k, tid);
@@ -2165,7 +2250,7 @@ pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> 
         }
     }
     for (i, k, len) in rest {
-        let tid = h.append(Heap::new_tup(len, 0));
+        let tid = h.append(Heap::new_tup(len, lps::SETTLED_XMIN));
         h.placed(&k, tid);
         h.keyed(&k, tid);
         tids[i] = tid;
@@ -2190,11 +2275,11 @@ impl Heap {
         if matches!(p.lps.get(off as usize - 1), Some(Lp::Normal(_) | Lp::Redirect(_))) {
             return false;
         }
-        if p.lps.len() < off as usize {
-            p.lps.resize(off as usize, Lp::Dead);
+        while p.lps.len() < off as usize {
+            p.lps.push(Lp::Dead);
         }
         p.used += maxalign(t.len as usize);
-        p.lps[off as usize - 1] = Lp::Normal(t);
+        p.lps.set(off as usize - 1, Lp::Normal(t));
         p.new = false;
         self.versions += 1;
         true
@@ -2219,9 +2304,7 @@ impl Heap {
         let old = self.keys.get(&key);
         if let Some((b, off)) = old {
             let p = &mut self.pages[b as usize];
-            if let Some(t) = p.tup_mut(off) {
-                t.xmax = xid;
-            }
+            p.update_tup(off, |t| t.xmax = xid);
             p.set_prunable(xid);
             p.all_visible = false;
         }
@@ -2229,7 +2312,7 @@ impl Heap {
             return false;
         };
         let t = Self::new_tup(len, xid);
-        let tid = match stored.filter(|&tid| self.place_at(tid, t.clone())) {
+        let tid = match stored.filter(|&tid| self.place_at(tid, t)) {
             Some(tid) => tid,
             None => self.append(t),
         };

@@ -135,7 +135,8 @@ fn on_session_thread(f: fn()) {
         .stack_size(64 << 20)
         .spawn(move || {
             pg_engine::stack::set_limit(60 << 20);
-            f()
+            // These 420,000-row fixtures exercise storage-order scans above the limit.
+            pg_engine::exec::sizing::with_max_versions(400_000, f)
         })
         .unwrap()
         .join()

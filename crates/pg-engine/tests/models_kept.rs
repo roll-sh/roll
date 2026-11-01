@@ -26,6 +26,53 @@ fn rows(s: &mut Session, sql: &str) -> Vec<String> {
     r.last().unwrap().rows.iter().map(|row| format!("{row:?}")).collect()
 }
 
+#[test]
+fn vacuum_freeze_keeps_page_state_across_restart() {
+    for (frozen, clean) in [(false, true), (true, true), (false, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let eng = open(dir.path());
+            let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+            exec(&mut s, "CREATE TABLE vf (id int); INSERT INTO vf SELECT generate_series(1, 7458)");
+            s.query(if frozen { "VACUUM (FREEZE, DISABLE_PAGE_SKIPPING) vf" } else { "VACUUM vf" }).unwrap();
+            s.query("INSERT INTO vf VALUES (7459)").unwrap();
+            s.query("VACUUM vf").unwrap();
+            assert_eq!(rows(&mut s, "SELECT reltuples FROM pg_class WHERE relname = 'vf'"), ["[Float4(7458.0)]"]);
+            drop(s);
+            if clean {
+                eng.shutdown();
+            }
+        }
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        s.query("VACUUM (FREEZE) vf").unwrap();
+        let expected = if frozen { "[Float4(7458.0)]" } else { "[Float4(7459.0)]" };
+        assert_eq!(rows(&mut s, "SELECT reltuples FROM pg_class WHERE relname = 'vf'"), [expected], "frozen before restart: {frozen}, clean: {clean}");
+    }
+}
+
+#[test]
+fn nulls_not_distinct_cleanup_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        exec(&mut s, "CREATE TABLE nd (n int, k int, v int); CREATE UNIQUE INDEX nd_i ON nd(n,k) INCLUDE(v) NULLS NOT DISTINCT; INSERT INTO nd SELECT NULL,g,0 FROM generate_series(1,1500)g");
+        drop(s);
+        eng.shutdown();
+    }
+    for _ in 0..2 {
+        let eng = open(dir.path());
+        let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+        for _ in 0..10 {
+            exec(&mut s, "DELETE FROM nd; INSERT INTO nd SELECT NULL,g,1 FROM generate_series(1,1500)g");
+        }
+        assert_eq!(rows(&mut s, "SELECT pg_relation_size('nd_i') = 65536, count(*) = 1500 FROM nd"), ["[Bool(true), Bool(true)]"]);
+        drop(s);
+        eng.shutdown();
+    }
+}
+
 /// Each statement on its own (VACUUM can't run in the implicit block of several).
 fn exec(s: &mut Session, sql: &str) {
     for q in sql.split(';') {

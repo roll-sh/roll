@@ -121,6 +121,7 @@ impl Ddl<'_, '_> {
         }
         vacuum &= s.is_vacuumcmd;
         crate::exec::sizing::set_vacuum_truncate(truncate);
+        crate::exec::sizing::set_vacuum_skip(freeze, skip_pages);
         if full && nworkers > 0 {
             return Err(Error::new(
                 code::FEATURE_NOT_SUPPORTED,
