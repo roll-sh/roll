@@ -536,3 +536,10 @@ each streaming block before ordinary transactions. Filtered prepared transaction
 respect the slot's confirmed position when their commit is decoded in another SQL
 call. The COMMIT/ROLLBACK PREPARED implicit-block SQLSTATE golden was recorded
 from PostgreSQL 18.6, not edited by hand.
+
+The a152 follow-up repeats the full module against parent `36b7a6c6` and the
+corrected batch on fresh pinned PostgreSQL 18.6 references. The result remains
+1,033/1,047 on the parent and 1,038/1,047 on the change, with the same five
+improvements and no newly differing units. All nine gaps listed above remain,
+including the same caught toast assertion. Exact commands, reports, and the
+per-unit comparison are in `/home/meszmate/.cache/a152-r2-t3-c12518e0/verification.md`.

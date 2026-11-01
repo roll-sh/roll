@@ -5830,3 +5830,13 @@ snapshot wait boundary. Reports are in the same evidence directory under
 `iso-{base,change}/report/` and `iso-contrib-{base,change}/report/`.
 The full test_decoding module comparison and its remaining gaps are recorded
 in `tests/contrib/STATUS.md`.
+
+The a152 follow-up at parent `36b7a6c6` repeats the same subset against a fresh
+pinned PostgreSQL 18.6 reference. Parent and corrected a152 each match 2,884/2,884
+units and all 1,456 permutations and 15,927 steps of the six transaction isolation
+specs. Contrib isolation still matches 29/35 steps, with identical twophase_snapshot
+hunks. A deterministic worker regression now reproduces the intermittent initial-copy
+failure on that parent and verifies its catalog merge-base correction, including rows
+and unique READY states after restart. Evidence is in
+`/home/meszmate/.cache/a152-r2-t3-c12518e0/verification.md`. Generated suite counts
+remain unchanged.

@@ -6033,9 +6033,9 @@ ALTER on engine-to-engine replication. Base via_root retains 137 rows after
 partition-root TRUNCATE. The change passes three fresh focused via_root runs,
 including TRUNCATE, but its first complete run had an intermittent initial-copy
 gap: q contained 40 rather than 43 rows, and the table-sync worker retried after
-completion with a missing replication origin. That symptom has not been reproduced
-on the base and is not claimed fixed or proven pre-existing. The apply and
-tablesync implementation is unchanged by this batch. Full live parity remains
+completion with a missing replication origin. The follow-up below reproduces this
+failure on parent `36b7a6c6` and corrects its catalog merge base. The original
+daa881c7 comparisons did not establish that cause. Full live parity remains
 unproven. A first live attempt exhausted the reference's default ten active
 origins. The corrected fixture allows eighty and the interrupted result is retained.
 
@@ -6052,3 +6052,59 @@ completes prepared select-only and TPC-B-like workloads on both base and change,
 with zero failed transactions. The final focused failover check verifies slot
 flags and SQLSTATE 55000 on both binaries. All owned processes and containers
 are stopped, with data retained. The worktree has one 21 GB target directory.
+
+## A152 table synchronization lifecycle correction (2026-11-01)
+
+The initial-copy failure is deterministic on parent `36b7a6c6`, before a152.
+`repl::apply::tablesync::tests::concurrent_copy_completion_keeps_finished_table_ready`
+orders two sync workers at transaction boundaries. q commits its forty copied rows
+between p's statement snapshot and state update, then finishes synchronization
+before p commits. On the parent, p's commit restores a FINISHEDCOPY entry beside
+q's SYNCDONE entry. The leader reads FINISHEDCOPY and skips q's three later inserts,
+leaving forty rows instead of forty-three. A restarted sync worker then finds
+that q's completed worker already removed its origin. This explains both symptoms
+in the preserved first complete change run.
+
+Taking a lock refreshes the catalog a worker reads through `Txn::accept_catalog`.
+`Worker::set_states` previously edited that newer catalog but let `Txn::set_catalog`
+use the older statement snapshot as its first DDL merge base. The merge therefore
+claimed another table's intervening progress as the worker's own change. The fix
+passes the catalog actually edited to `Txn::set_catalog_from`. It preserves the
+other worker's later state when concurrent commits merge.
+
+The test fails on the parent with forty rows and duplicate q state entries. It
+passes with the correction, including all forty-three rows, one READY row per
+table, and the same rows and states after shutdown and reopen. It uses the real
+worker state commits and row-apply path, without sleeps or production test hooks.
+The live via_root scenario also checks unique READY state rows and sync errors.
+Existing corrupted subscribers still need their data resynchronized; this change
+does not reconstruct already-skipped rows.
+
+The follow-up checkout starts at `36b7a6c6`, preserves a149 and the parent's a153,
+and recovers only the three a152 commits before adding this correction. The held
+monitoring commit `40f4554f` remains excluded. The original completed worktree and
+saved evidence are read only. Commands, the red parent test, corrected test, fresh
+PostgreSQL comparisons, and cleanup are recorded in
+`/home/meszmate/.cache/a152-r2-t3-c12518e0/verification.md`.
+
+Build, full crate tests, Clippy, and `pnpm test:pg --unit` pass on the corrected
+source. Clippy reports eleven warnings in unchanged files. The prepared-block
+golden was recorded again from pinned PostgreSQL 18.6 and is unchanged. Fresh
+parent and corrected comparisons each match 2,884/2,884 regression units and
+15,927/15,927 generic isolation steps. Full test_decoding improves from
+1,033/1,047 to 1,038/1,047, with no newly differing units. The nine decoding
+differences and the identical twophase_snapshot isolation gap remain explicit.
+
+The fresh nine-scenario live comparison exits 1 on each binary. The parent differs
+on partition-root TRUNCATE and run_as_owner after ALTER. The corrected batch
+matches eight scenarios, including via_root with forty-three q rows, two unique
+READY state rows, zero sync errors, and an empty root after TRUNCATE. Its only
+remaining difference is the same run_as_owner behavior. The completed q workers
+do not restart or report missing origins. Full live parity is not claimed.
+
+All nine owned containers and both engine processes are stopped, with data and
+logs retained. Ports 53040–53059 are free. The checkout has one 22 GB target
+directory. Shared heavy slots and jobs remain 4 and 2. The full Docker recovery
+suite was not repeated under the user's instruction; its parent baseline remains
+twelve passes and four WAL HTTP timeout failures. Nothing was pushed and no PR
+was created.
