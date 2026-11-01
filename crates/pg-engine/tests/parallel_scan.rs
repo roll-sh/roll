@@ -578,6 +578,17 @@ fn numeric_topk_matches_serial_inner() {
         }
     }
 
+    // A filter kernel leaves an error to the executor even after enough early rows
+    // have filled the heap. The first key cannot hide the late failing row.
+    let q = "SELECT id, x FROM nt WHERE id < 50 OR 1 / (id - 12000) > 0 ORDER BY x DESC, id LIMIT 7";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    assert!(want[0].starts_with("ERROR: division by zero"), "{want:?}");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    assert_eq!(out(&mut s, q), want);
+    assert!(pg_engine::exec::parscan::started() > started, "late filter error used workers");
+
     // A large LIMIT + OFFSET cannot prune within a worker chunk. Its shallow heap
     // slots exceed this budget, so numeric projections keep the serial scan path.
     s.query("SET work_mem = '64kB'").unwrap();
@@ -640,6 +651,25 @@ fn numeric_topk_matches_serial_inner() {
             assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "volatile: {q}");
         }
     }
+    // Older stored rows get their newly added numeric column from the missing value.
+    s.query("ALTER TABLE nt ADD COLUMN added int DEFAULT 42").unwrap();
+    let q = "SELECT id, x, added FROM nt ORDER BY x DESC, added, id LIMIT 7 OFFSET 3";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    assert_eq!(want.len(), 7);
+    assert!(want.iter().all(|r| r.ends_with("Int4(42)]")), "{want:?}");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let skipped = pg_engine::exec::parscan::topk_skipped();
+    assert_eq!(out(&mut s, q), want);
+    assert!(pg_engine::exec::parscan::topk_skipped() > skipped, "added defaults still prune");
+
+    s.query("UPDATE nt SET pad = repeat(pad, 2) WHERE id % 1000 = 0").unwrap();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    assert_eq!(out(&mut s, q), want);
+    assert_eq!(pg_engine::exec::parscan::started(), started, "displaced heap stays serial");
 }
 
 /// Scans whose rows the workers fetch by key: a bitmap heap scan of a few percent of a big

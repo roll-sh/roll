@@ -579,7 +579,7 @@ impl Lazy<'_> {
 
     /// The scan's row (`Decode::row`'s), with the values already read.
     pub(super) fn into_row(self) -> Result<Row> {
-        let mut row = Vec::with_capacity(self.buf.cells.len());
+        let mut row = Vec::with_capacity(self.buf.cells.len() + self.d.extra.len());
         for i in 0..self.buf.cells.len() {
             let v = match self.buf.cells[i].take() {
                 Some(Some(v)) => v,
@@ -754,6 +754,15 @@ fn run_rows(
         let mut skipped = 0u32;
         // (A row's length before its computed values.)
         let base = d.missing.len() + usize::from(d.with_key);
+        // Column-only projections can inspect the first key before making a row.
+        let top_col = if d.ios.is_none() && d.need_raw.is_none() && d.raw.is_empty() && d.extra.iter().all(|k| matches!(k, K::Col(_))) {
+            d.topk.and_then(|t| match d.extra.get(t.col) {
+                Some(K::Col(col)) => Some(*col),
+                _ => None,
+            })
+        } else {
+            None
+        };
         while let Some(r) = scan.next_row() {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
@@ -770,41 +779,75 @@ fn run_rows(
             // (Filtered in place when nothing is computed over the row: a row the filter
             // rejects is never made.)
             let in_place = d.ios.is_none() && d.extra.is_empty() && d.topk.is_none() && d.need_raw.is_none();
-            let (row, done) = match (&d.filter, in_place) {
-                (Some(f), true) => {
-                    let made = lazy.read(d, key, bytes).and_then(|lz| match f.passes(&lz) {
-                        Some(false) => Ok(None),
-                        pass => Ok(Some((lz.into_row()?, pass.is_some()))),
-                    });
-                    match made {
-                        Ok(Some(r)) => r,
-                        Ok(None) => continue,
-                        Err(e) => {
-                            err = Some(e);
-                            break;
-                        }
-                    }
-                }
-                _ => {
-                    let mask = d.need_raw.as_ref().or(d.need.as_ref());
-                    let made = lazy.splice(key, bytes, mask.map(|m| &m[..])).and_then(|b| d.row_with(key, &b, mask));
-                    let row = match made {
-                        Ok(row) => row,
-                        Err(e) => {
-                            err = Some(e);
-                            break;
-                        }
-                    };
+            let mut top_checked = false;
+            let (row, done) = if let Some(col) = top_col {
+                let made = lazy.read(d, key, bytes).and_then(|lz| {
                     let done = match (&d.filter, d.filtered) {
                         (_, false) => true,
-                        (Some(f), true) => match f.passes(&row) {
+                        (Some(f), true) => match f.passes(&lz) {
                             Some(true) => true,
-                            Some(false) => continue,
+                            Some(false) => return Ok(None),
                             None => false,
                         },
                         (None, true) => false,
                     };
-                    (row, done)
+                    if done
+                        && let Some(key) = super::kernel::Cols::col(&lz, col)
+                        && let Some(t) = &mut top
+                    {
+                        top_checked = true;
+                        if t.drops(key) {
+                            skipped += 1;
+                            return Ok(None);
+                        }
+                    }
+                    Ok(Some((lz.into_row()?, done)))
+                });
+                match made {
+                    Ok(Some(r)) => r,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
+                }
+            } else {
+                match (&d.filter, in_place) {
+                    (Some(f), true) => {
+                        let made = lazy.read(d, key, bytes).and_then(|lz| match f.passes(&lz) {
+                            Some(false) => Ok(None),
+                            pass => Ok(Some((lz.into_row()?, pass.is_some()))),
+                        });
+                        match made {
+                            Ok(Some(r)) => r,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                err = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        let mask = d.need_raw.as_ref().or(d.need.as_ref());
+                        let made = lazy.splice(key, bytes, mask.map(|m| &m[..])).and_then(|b| d.row_with(key, &b, mask));
+                        let row = match made {
+                            Ok(row) => row,
+                            Err(e) => {
+                                err = Some(e);
+                                break;
+                            }
+                        };
+                        let done = match (&d.filter, d.filtered) {
+                            (_, false) => true,
+                            (Some(f), true) => match f.passes(&row) {
+                                Some(true) => true,
+                                Some(false) => continue,
+                                None => false,
+                            },
+                            (None, true) => false,
+                        };
+                        (row, done)
+                    }
                 }
             };
             let row = if d.extra.is_empty() {
@@ -820,7 +863,7 @@ fn run_rows(
             };
             // (A row the filter is done with is the sort's: counted, and with its key, kept
             // in the chunk's heap or dropped.)
-            if done && let Some(t) = &mut top {
+            if done && !top_checked && let Some(t) = &mut top {
                 match row.get(base + t.t.col) {
                     Some(key) if t.drops(key) => {
                         skipped += 1;
