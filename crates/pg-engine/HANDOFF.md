@@ -3685,14 +3685,17 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     file. Completed batch reads count flushed tail bytes. Normal completion, LIMIT, an
     expression error, and repeated temp-file-limit errors release physical spill files,
     including their unlinked file descriptors (`tests/query_spill.rs`).
-    **Known gap:** after LIMIT stops probing, batch tails are not flushed into PostgreSQL's
-    accounting. For 12,000 integer keys, a completed join followed by LIMIT 1 reports
-    21 files and 735,296 bytes instead of PostgreSQL's 27 files and 759,192 bytes.
-    `hash_join_limit_temp_accounting_matches_postgres` is an ignored failing reproducer.
-    At `temp_file_limit = '224kB'`, the LIMIT query succeeds where PostgreSQL raises
-    the limit error. Node teardown has no fallible cleanup path for this case;
-    this batch does not add one. Completed joins and explicitly skipped batches
-    match PostgreSQL's temp-file counts in the focused probes.
+    `spill::TempCleanup` owns buffered accounts after their nodes drop. Successful
+    executor shutdown applies fallible tail accounting; abort discards pending tails
+    and preserves the execution error. Materialized subqueries share the statement's
+    owner, while SPI and SQL-function statements finalize before returning to callers.
+    Cursors and suspended portals retain their owner through EOF until CLOSE or commit.
+    The active `hash_join_limit_temp_accounting_matches_postgres` test verifies
+    PostgreSQL's 27 files / 759,192 bytes after the saved completed-join-plus-LIMIT
+    probe, and its 224 kB limit error. It also checks expression-error precedence,
+    cursor/portal close, cancellation and physical file-descriptor cleanup.
+    PostgreSQL-recorded `a150_hashjoin_shutdown` covers nested aggregates, sorts,
+    append, CTEs, joins, holdable cursors and procedural/SQL-function boundaries.
   - `tests/memory_load.rs` compares the build heap for a warm 16,000-row join with 1 kB
     payloads at 64 kB and 64 MB work_mem. The spilling build must stay below 16 MB and
     below half the in-memory build's peak. PostgreSQL's work_mem accounting is not a hard
@@ -3726,6 +3729,21 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     match 63/63 permutations and 400/400 steps on both this change and the base.
     A focused probe matches PostgreSQL's 100 kB temp-file-limit errors and successful
     results after RESET for inner, left, right, full, semi, anti, and reversed semi/anti joins.
+  - Early-completion correction `bf7f5077`, on current parent base `063333c0`:
+    build, full crate tests (400 passed, 18 ignored), Clippy and `pnpm test:pg --unit`
+    pass through heavy.sh. Clippy's ten warning headers match the exact base.
+    All four a150 goldens match embedded, wire and shuffled; three spill tests and
+    four memory tests pass, preserving a145's corrected session bound and template test.
+    PostgreSQL 18.6's saved temp-accounting, skipped-batch and join-limit probes match
+    byte for byte. The exact base reports zero hash-spill bytes and misses the 224 kB error.
+    Fresh base/change regress subsets match 5,188/5,189 units across 17 files, including
+    portals, WITH, LIMIT and subselect. Per-file rows and the sole join unit 368
+    EXPLAIN hunk are identical. Contrib pg_stat_statements/auto_explain matches
+    1,025/1,025 on both binaries; four isolation specs match 63/63 permutations and
+    400/400 steps, with identical reports. Generated full-suite counts remain unchanged.
+    Evidence: `~/.cache/a150-correction-t3-abba384a/HANDOFF.md` and `verification.md`.
+    They retain the fixed duplicate-function-frame failure, an idle-stop-interrupted
+    reference run, and contrib's invalid query-ID-disabled run alongside the valid retries.
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index

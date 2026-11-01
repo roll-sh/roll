@@ -52,11 +52,19 @@ The first pair used contrib's reference settings and is retained as misconfigure
 evidence; the reported pair disables reference query IDs for the main suite.
 This subset leaves all generated full-suite counts below unchanged.
 
-Early LIMIT still drops buffered hash-batch tails without PostgreSQL's final temp
-accounting flush. Physical files close, but `temp_files`, `temp_bytes`, and a late
-`temp_file_limit` error can differ. The ignored failing test
-`hash_join_limit_temp_accounting_matches_postgres` preserves the reproducer.
-See HANDOFF.md, "Query memory, round 2", and the evidence directory's `verification.md`.
+The a150 correction finalizes buffered tails at the executor owner's successful
+shutdown, preserves execution errors on abort, and retains portal resources until
+CLOSE or commit. The previously ignored LIMIT accounting reproducer is active.
+It verifies PostgreSQL's 27 files / 759,192 bytes and the 224 kB limit error.
+The shutdown golden covers nesting, CTEs, cursors and SQL/procedural functions.
+Fresh correction `bf7f5077` and exact current base `063333c0` both match 5,188/5,189
+units across 17 files, adding portals, WITH, LIMIT and subselect to the earlier subset.
+Per-file rows and the sole join unit 368 EXPLAIN hunk are identical. Contrib matches
+1,025/1,025 on both; isolation matches 63/63 permutations and 400/400 steps.
+The corrected full crate suite passes 400 tests with 18 ignored. The generated
+full-suite regression counts remain unchanged.
+Final correction verification is recorded in HANDOFF.md and
+`~/.cache/a150-correction-t3-abba384a/verification.md`.
 
 Round 24, agent 144 (resumed bpchar equality probes): fixed-width char(n) equality and
 ANY probes trim trailing spaces and pad to the key width. Overlong probes remain
