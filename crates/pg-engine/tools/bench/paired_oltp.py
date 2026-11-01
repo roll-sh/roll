@@ -9,14 +9,31 @@ import statistics
 import subprocess
 
 
+VALIDATION_VERSION = 'oltp-values-v1'
+
+
+def validate_rows(rows, cases):
+    if type(rows) is not int or not 1 <= rows <= 2**31 - 1:
+        raise ValueError('rows must be a positive INT4')
+    if 'range_scan_100' in cases and rows < 101:
+        raise ValueError('range_scan_100 requires rows >= 101')
+
+
 def parse(output, name, case, clients):
     lines = [line.split('\t') for line in output.splitlines() if line.startswith('RESULT\t')]
     if len(lines) != 1 or lines[0][1:4] != [name, 'oltp', case]:
         raise ValueError('missing, duplicate or unexpected result')
-    values = dict(field.split('=', 1) for field in lines[0][4:])
+    fields = [field.split('=', 1) for field in lines[0][4:]]
+    values = dict(fields)
+    if len(values) != len(fields):
+        raise ValueError('duplicate result field')
     if values.get('errors') != '0' or 'first_error' in values or int(values['clients']) != clients:
         raise ValueError('client errors or wrong client count')
     ops, elapsed = int(values['ops']), float(values['elapsed_s'])
+    if values.get('validation_version') != VALIDATION_VERSION:
+        raise ValueError('missing or unsupported per-operation validation')
+    if int(values.get('checked_ops', '-1')) != ops:
+        raise ValueError('not every successful operation was value-checked')
     if ops <= 0 or not math.isfinite(elapsed) or elapsed <= 0:
         raise ValueError('no completed work')
     for key in ['tps', 'peak_mem_mb', 'mean_ms', 'p50_ms', 'p95_ms', 'p99_ms']:
@@ -40,7 +57,7 @@ def cpu(probe, ticks):
 
 def fixture(config, target):
     query = "SELECT count(*),sum(id::bigint),sum(owner::bigint),sum(balance::numeric),md5(string_agg(id::text||':'||owner::text||':'||balance::text||':'||note||':'||created::text,',' ORDER BY id)) FROM accounts"
-    return subprocess.check_output(['docker', 'exec', '-e', 'PGPASSWORD=pw', config['psql_container'],
+    return subprocess.check_output(['docker', 'exec', '-e', 'PGPASSWORD=pw', '-e', 'PGDATESTYLE=ISO,YMD', config['psql_container'],
         'psql', '-XAt', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-p', str(target['port']),
         '-U', 'postgres', '-d', config['db'], '-c', query], text=True, timeout=120).strip()
 
@@ -52,8 +69,10 @@ def run(config):
     cases = config['cases']
     if not cases or not set(cases) <= {'point_select', 'point_select_simple', 'range_scan_100', 'secondary_lookup', 'select_1'}:
         raise ValueError('only checked read-only cases are supported')
+    validate_rows(config['rows'], cases)
     out = Path(config['out']); out.mkdir(parents=True, exist_ok=False)
     ticks = int(subprocess.check_output(['getconf', 'CLK_TCK'], text=True)); assert ticks > 0
+    config['validation_version'] = VALIDATION_VERSION
     config['runner_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     config['ticks_per_second'] = ticks
     config['bench_sha256'] = hashlib.sha256(Path(config['bench']).read_bytes()).hexdigest()
@@ -122,10 +141,18 @@ def run(config):
 
 def self_test():
     good = ('RESULT\tx\toltp\tpoint_select\tclients=1\ttps=1000\tops=1000\telapsed_s=1'
-            '\tmean_ms=1\tp50_ms=0.5\tp95_ms=1\tp99_ms=2\terrors=0\tpeak_mem_mb=10\n')
-    parse(good, 'x', 'point_select', 1)
+            '\tvalidation_version=oltp-values-v1\tchecked_ops=1000\tmean_ms=1\tp50_ms=0.5\tp95_ms=1\tp99_ms=2\terrors=0\tpeak_mem_mb=10\n')
+    for case in ['point_select', 'point_select_simple', 'range_scan_100', 'secondary_lookup', 'select_1']:
+        parse(good.replace('point_select', case), 'x', case, 1)
     invalid = [
         '', good + good,
+        good.replace('\tvalidation_version=oltp-values-v1', ''),
+        good.replace('oltp-values-v1', 'oltp-values-v0'),
+        good.replace('\tchecked_ops=1000', ''),
+        good.replace('checked_ops=1000', 'checked_ops=999'),
+        good.replace('checked_ops=1000', 'checked_ops=1001'),
+        good.replace('checked_ops=1000', 'checked_ops=NaN'),
+        good.replace('checked_ops=1000', 'checked_ops=1000\tchecked_ops=999'),
         good.replace('errors=0', 'errors=1'),
         good.replace('ops=1000', 'ops=0'),
         good.replace('elapsed_s=1', 'elapsed_s=nan'),
@@ -140,7 +167,18 @@ def self_test():
         except (ValueError, KeyError):
             continue
         raise AssertionError('negative control accepted')
-    print(f'OLTP benchmark checks: {len(invalid)} negative controls rejected')
+    for rows in [1, 100, 101, 2**31 - 1]:
+        validate_rows(rows, ['point_select'])
+    validate_rows(101, ['range_scan_100'])
+    invalid_rows = [(n, ['point_select']) for n in [0, -1, 2**31, True, '101', 101.0]]
+    invalid_rows += [(n, ['range_scan_100']) for n in [1, 100]]
+    for rows, cases in invalid_rows:
+        try:
+            validate_rows(rows, cases)
+        except ValueError:
+            continue
+        raise AssertionError('invalid fixture size accepted')
+    print(f'OLTP benchmark checks: {len(invalid)} result and {len(invalid_rows)} fixture negative controls rejected')
 
 
 if __name__ == '__main__':
