@@ -953,6 +953,7 @@ fn commands(ctx: &ExecCtx, node: &NodeEnum, tag: &str, before: &Catalog, after: 
                 out.extend(command(after, (POLICY, p.oid, 0), tag));
             }
         }
+        N::CommentStmt(_) => {}
         _ => {
             // Whatever it made: the new object (the first, by oid).
             if let Some(a) = any_new(before, after) {
@@ -961,6 +962,49 @@ fn commands(ctx: &ExecCtx, node: &NodeEnum, tag: &str, before: &Catalog, after: 
         }
     }
     out
+}
+
+/// Collect COMMENT's resolved object even when removing an absent comment changes no row.
+pub(super) fn collect_comment(cat: &Catalog, kind: pb::ObjectType, oid: u32, sub: i32) {
+    use crate::catalog::depend::*;
+    use pb::ObjectType as O;
+    let class = match kind {
+        O::ObjectTable | O::ObjectView | O::ObjectMatview | O::ObjectSequence
+        | O::ObjectIndex | O::ObjectForeignTable | O::ObjectColumn => REL,
+        O::ObjectFunction | O::ObjectProcedure | O::ObjectRoutine | O::ObjectAggregate => PROC,
+        O::ObjectType | O::ObjectDomain => TYPE,
+        O::ObjectTabconstraint | O::ObjectDomconstraint => CONSTRAINT,
+        O::ObjectSchema => NAMESPACE,
+        O::ObjectTrigger => TRIGGER,
+        O::ObjectPolicy => POLICY,
+        O::ObjectRule => REWRITE,
+        O::ObjectExtension => EXTENSION,
+        O::ObjectStatisticExt => STATEXT,
+        O::ObjectCollation => COLLATION,
+        O::ObjectTsconfiguration => TSCONFIG,
+        O::ObjectTsdictionary => TSDICT,
+        O::ObjectTsparser => TSPARSER,
+        O::ObjectTstemplate => TSTEMPLATE,
+        O::ObjectOperator => OPERATOR,
+        O::ObjectPublication => PUBLICATION,
+        O::ObjectSubscription => SUBSCRIPTION,
+        O::ObjectFdw => FDW,
+        O::ObjectForeignServer => SERVER,
+        O::ObjectOpclass => OPCLASS,
+        O::ObjectOpfamily => OPFAMILY,
+        O::ObjectCast => CAST,
+        O::ObjectAccessMethod => AM,
+        O::ObjectLanguage => LANGUAGE,
+        O::ObjectConversion => CONVERSION,
+        O::ObjectTransform => TRANSFORM,
+        O::ObjectLargeobject => 2613,
+        _ => return,
+    };
+    STATES.with_borrow_mut(|s| {
+        if let Some(st) = s.last_mut().filter(|st| st.tag == "COMMENT") {
+            st.commands.extend(command(cat, (class, oid, sub), "COMMENT"));
+        }
+    });
 }
 
 /// The indexes a REINDEX rebuilds (leaf indexes: a partitioned one's partitions').

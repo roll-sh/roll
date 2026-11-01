@@ -511,6 +511,7 @@ impl Binder<'_, '_> {
                 inline,
                 work_filter: None,
                 deferred,
+                values: matches!(inner(q), Some(NodeEnum::SelectStmt(s)) if !s.values_lists.is_empty()),
             });
             if !self.deparse && self.ctes.last().and_then(|l| l.last()).is_some_and(|c| c.inline.is_none()) {
                 self.planned_in_analysis += 1;
@@ -589,11 +590,14 @@ impl Binder<'_, '_> {
             c.name = a.clone();
         }
         let ncols = cols.len();
-        let aux = self.search_cycle_columns(cte, &work_cols)?;
+        let mut aux = self.search_cycle_columns(cte, &work_cols)?;
+        // (With a naming error waiting, the recursive term is analysed as written, its
+        // reference seeing the clauses' columns too, as analyzeCTETargetList adds them.)
+        let deferred = aux.deferred.take();
         work_cols.extend(aux.cols.iter().cloned());
         // The recursive term also passes the working row's SEARCH / CYCLE columns through.
         let rarg_aux;
-        let rarg = if aux.cols.is_empty() {
+        let rarg = if aux.cols.is_empty() || deferred.is_some() {
             rarg
         } else {
             // (analyzeCTE: the UNION's sides must be plain SELECTs.)
@@ -676,6 +680,7 @@ impl Binder<'_, '_> {
             inline: None,
             work_filter,
             deferred: None,
+            values: false,
         });
         // (The recursive term is planned seeing its worktable as ten times the non-recursive
         // term.)
@@ -701,13 +706,15 @@ impl Binder<'_, '_> {
                 loc,
             ));
         }
-        if rcols.len() != cols.len() + aux_cols {
+        if rcols.len() != cols.len() + if deferred.is_some() { 0 } else { aux_cols } {
+            // (transformSetOperationTree points at the recursive term's first target.)
+            let at = target_locations(&s.rarg.as_deref().unwrap().target_list, 1).first().copied().filter(|&l| l >= 0);
             return Err(with_pos(
                 Error::new(
                     code::SYNTAX_ERROR,
                     "each UNION query must have the same number of columns",
                 ),
-                loc,
+                at.unwrap_or(loc),
             ));
         }
         // The recursive term's columns must have the non-recursive term's types.
@@ -808,6 +815,9 @@ impl Binder<'_, '_> {
                     llocs[i],
                 ));
             }
+        }
+        if let Some(e) = deferred {
+            return Err(e);
         }
         // A recursive UNION (not ALL) is done by hashing (generate_recursion_path).
         // (makeSortGroupClauseForSetOp with require_hash: an anonymous record, or an array
@@ -969,13 +979,22 @@ impl Binder<'_, '_> {
             Ok(())
         };
         let record_array = DataType::array_of(DataType::Record);
+        // (analyzeCTE checks the clauses' column names after analysing the query: the first
+        // failure waits in `deferred` for the recursive term's own errors.)
+        let mut deferred: Option<Error> = None;
+        fn defer<T: Default>(d: &mut Option<Error>, r: Result<T>) -> T {
+            r.unwrap_or_else(|e| {
+                d.get_or_insert(e);
+                T::default()
+            })
+        }
         if let Some(search) = &cte.search_clause {
-            let by = lookup(&search.search_col_list, "search", search.location)?;
-            taken(
+            let by = defer(&mut deferred, lookup(&search.search_col_list, "search", search.location));
+            defer(&mut deferred, taken(
                 &search.search_seq_column,
                 "search sequence",
                 search.location,
-            )?;
+            ));
             let ty = if search.search_breadth_first {
                 breadth_row_type(
                     &by.iter().map(|&i| (cols[i].name.clone(), cols[i].ty.clone())).collect::<Vec<_>>(),
@@ -988,9 +1007,9 @@ impl Binder<'_, '_> {
             sc.search = Some((by, search.search_breadth_first));
         }
         if let Some(cycle) = &cte.cycle_clause {
-            let by = lookup(&cycle.cycle_col_list, "cycle", cycle.location)?;
-            taken(&cycle.cycle_mark_column, "cycle mark", cycle.location)?;
-            taken(&cycle.cycle_path_column, "cycle path", cycle.location)?;
+            let by = defer(&mut deferred, lookup(&cycle.cycle_col_list, "cycle", cycle.location));
+            defer(&mut deferred, taken(&cycle.cycle_mark_column, "cycle mark", cycle.location));
+            defer(&mut deferred, taken(&cycle.cycle_path_column, "cycle path", cycle.location));
             let same = |a: &str, b: &str, msg: &str, loc: i32| -> Result<()> {
                 if a == b {
                     return Err(with_pos(
@@ -1000,25 +1019,25 @@ impl Binder<'_, '_> {
                 }
                 Ok(())
             };
-            same(
+            defer(&mut deferred, same(
                 &cycle.cycle_mark_column,
                 &cycle.cycle_path_column,
                 "cycle mark column name and cycle path column name are the same",
                 cycle.location,
-            )?;
+            ));
             if let Some(search) = &cte.search_clause {
-                same(
+                defer(&mut deferred, same(
                     &search.search_seq_column,
                     &cycle.cycle_mark_column,
                     "search sequence column name and cycle mark column name are the same",
                     search.location,
-                )?;
-                same(
+                ));
+                defer(&mut deferred, same(
                     &search.search_seq_column,
                     &cycle.cycle_path_column,
                     "search sequence column name and cycle path column name are the same",
                     search.location,
-                )?;
+                ));
             }
             let (to, default) = match (&cycle.cycle_mark_value, &cycle.cycle_mark_default) {
                 (Some(t), Some(d)) => {
@@ -1066,6 +1085,7 @@ impl Binder<'_, '_> {
             sc.plus = Some(crate::sql::func::resolve_function("int8inc", &[DataType::Int8])?.def);
             sc.names = cols.iter().map(|c| c.name.clone()).collect();
         }
+        sc.deferred = deferred;
         Ok(sc)
     }
 
@@ -2116,11 +2136,23 @@ impl Binder<'_, '_> {
                         _ => "FOR UPDATE",
                     },
                 };
-                return Err(Error::new(
+                let e = Error::new(
                     code::FEATURE_NOT_SUPPORTED,
                     format!("{strength} is not allowed with {what}"),
-                ));
+                );
+                // (A clause pushed down from the query above: applyLockingClause reaches this
+                // subquery after the rest of that query is analysed.)
+                if s.locking_clause.is_empty() {
+                    self.lock_pending.get_or_insert(e);
+                } else {
+                    return Err(e);
+                }
             }
+        }
+        if !s.locking_clause.is_empty()
+            && let Some(e) = self.lock_pending.take()
+        {
+            return Err(e);
         }
 
         // Expressions still in the FROM row's terms.
@@ -3148,6 +3180,9 @@ impl Binder<'_, '_> {
                 )
             {
                 let e = self.bind_expr(val)?;
+                if self.opaque_record(&e) {
+                    return Err(Error::new(code::WRONG_OBJECT_TYPE, "record type has not been registered"));
+                }
                 match e.ty() {
                     DataType::Row(fields) => {
                         for i in 0..fields.len() {
@@ -3314,7 +3349,8 @@ impl Binder<'_, '_> {
             }) else {
                 continue;
             };
-            let cols: Vec<ScopeCol> = r.cols.iter().filter(|c| !c.hidden).cloned().collect();
+            // (A recursive term's SEARCH / CYCLE columns aren't its reference's `p.*`.)
+            let cols: Vec<ScopeCol> = r.cols.iter().filter(|c| !c.hidden && c.attnum != super::AUX_ATTNUM).cloned().collect();
             let items = (self.refs.is_some() && loc >= 0)
                 .then(|| star_items(std::slice::from_ref(r), Some(quals)));
             let row_ref = super::refs::RowRef {
@@ -4087,6 +4123,9 @@ impl Binder<'_, '_> {
                 }
                 let mut rel = derived_rel(&name, &cols, 0);
                 rel.anonymous = alias.is_none();
+                if matches!(inner(rs.subquery.as_deref().unwrap()), Some(NodeEnum::SelectStmt(s)) if !s.values_lists.is_empty()) {
+                    mark_opaque_records(&mut rel);
+                }
                 let mut plan = Arc::try_unwrap(plan).unwrap_or_else(|a| (*a).clone());
                 if alias.is_some() {
                     let info = Arc::new((name.clone(), cols.iter().map(|c| c.name.clone()).collect()));
@@ -4494,7 +4533,10 @@ impl Binder<'_, '_> {
                         for (col, n) in cols.iter_mut().zip(&colnames) {
                             col.name = n.clone();
                         }
-                        let rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
+                        let mut rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
+                        if c.values {
+                            mark_opaque_records(&mut rel);
+                        }
                         let mut q = (**q).clone();
                         self.restamp_rti(&mut q);
                         return Ok((q, rel));
@@ -4535,6 +4577,9 @@ impl Binder<'_, '_> {
                     };
                     let mut rel = derived_rel(alias.as_deref().unwrap_or(&rv.relname), &cols, 0);
                     rel.whole_var = c.aux == 0;
+                    if c.values {
+                        mark_opaque_records(&mut rel);
+                    }
                     let n = rel.cols.len();
                     for col in &mut rel.cols[n - c.aux..] {
                         col.merged = true;
@@ -6310,6 +6355,7 @@ impl Binder<'_, '_> {
                         src: index.map(|j| super::refs::merged_src(j, i)),
                         rowtype_col: None,
                         domain: None,
+                        opaque_record: false,
                     });
                     mark_merged(&mut lscope, n);
                     mark_merged(&mut rscope, n);
@@ -7664,6 +7710,14 @@ struct Cycle {
     ne: Arc<FuncDef>,
 }
 
+/// A VALUES list's columns of an anonymous record type: `(x).f` over them fails as in
+/// PostgreSQL, whose VALUES column is plain `record` (`ScopeCol::opaque_record`).
+fn mark_opaque_records(rel: &mut super::ScopeRel) {
+    for c in &mut rel.cols {
+        c.opaque_record = matches!(c.expr.ty(), DataType::Record) || matches!(c.expr.ty(), DataType::Row(r) if r.oid == 0);
+    }
+}
+
 /// A recursive CTE's SEARCH / CYCLE columns (in that order), and how each term computes them.
 #[derive(Default)]
 struct SearchCycle {
@@ -7676,6 +7730,8 @@ struct SearchCycle {
     plus: Option<Arc<FuncDef>>,
     /// The query's column names (the breadth-first row's fields after its depth).
     names: Vec<String>,
+    /// The clauses' first naming error, raised once the CTE's query is analysed.
+    deferred: Option<Error>,
 }
 
 impl SearchCycle {

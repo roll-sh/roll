@@ -36,6 +36,12 @@ pub fn shared() -> &'static Shared {
     S.get_or_init(|| {
         // (Leaked: the engine lives as long as the process.)
         let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        // Prepared transactions as the reference allows them (round 8's two-phase commits).
+        let max_prepared = out_of(super::admin().simple_query("SHOW max_prepared_transactions").unwrap())
+            .rows
+            .first()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(0);
         let engine = Engine::open(EngineOptions {
             data_dir: dir.path().to_path_buf(),
             cache_bytes: 4 << 20,
@@ -49,7 +55,7 @@ pub fn shared() -> &'static Shared {
             shared_preload_libraries: Vec::new(),
             locale: Default::default(),
             outbound: Vec::new(),
-            max_prepared_transactions: 0,
+            max_prepared_transactions: max_prepared,
             auth_files: Default::default(),
             settings: Vec::new(),
         })
@@ -113,6 +119,7 @@ pub struct Wire {
 
 fn client(addr: &str, db: &str, password: &str) -> PgClient {
     let mut c = PgClient::connect(addr, "postgres", password, db).expect("connect a wire session");
+    c.report_notifications = true;
     for s in SESSION_SETUP {
         c.simple_query(s).unwrap();
     }
@@ -134,7 +141,8 @@ impl Side {
         }
         let mut mon = client(addr, db, password);
         mon.set_timeout(Some(hang)).unwrap();
-        Side { c, pids, waiting: [false; 2], mon, all: format!("{s1_pid},{},{}", pids[0], pids[1]) }
+        // (0: a prepared transaction holding the lock, as pg_blocking_pids reports it.)
+        Side { c, pids, waiting: [false; 2], mon, all: format!("{s1_pid},{},{},0", pids[0], pids[1]) }
     }
 }
 

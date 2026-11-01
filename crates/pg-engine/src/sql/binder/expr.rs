@@ -507,6 +507,11 @@ impl Binder<'_, '_> {
                     return Ok(e);
                 }
                 if let Some(base) = self.find_column(Some(&[schema]), rel, loc)? {
+                    // (A VALUES record column's field: ParseComplexProjection finds no
+                    // descriptor, so the reference is taken for a missing relation's.)
+                    if self.opaque_record(&base) {
+                        return Err(self.missing_rel(rel, loc));
+                    }
                     return self.field_select(base, col, loc);
                 }
                 if self.rel_exists(&[schema, rel]) {
@@ -1356,7 +1361,18 @@ impl Binder<'_, '_> {
         self.note_rowtype_col(col);
     }
 
+    /// A column reference to a VALUES list's record column (`ScopeCol::opaque_record`).
+    pub(crate) fn opaque_record(&self, e: &Expr) -> bool {
+        matches!(e, Expr::Col(..))
+            && self.scope().rels.iter().any(|r| r.cols.iter().any(|c| c.opaque_record && c.expr.same_as(e)))
+    }
+
     fn field_select(&mut self, base: Expr, field: &str, loc: i32) -> Result<Expr> {
+        // A VALUES list's record column: expandRecordVariable can't see into it, and
+        // get_expr_result_tupdesc has no type to describe it by.
+        if self.opaque_record(&base) {
+            return Err(Error::new(code::WRONG_OBJECT_TYPE, "record type has not been registered"));
+        }
         match base.ty() {
             DataType::Row(fields) => match fields.iter().position(|(n, _)| n == field) {
                 Some(i) => {
@@ -1401,7 +1417,7 @@ impl Binder<'_, '_> {
             )),
             t => Err(with_pos(
                 Error::new(
-                    code::UNDEFINED_TABLE,
+                    code::WRONG_OBJECT_TYPE,
                     format!(
                         "column notation .{field} applied to type {}, which is not a composite type",
                         t.display()
@@ -1800,6 +1816,7 @@ impl Binder<'_, '_> {
                 src: None,
                 rowtype_col: None,
                 domain: None,
+                opaque_record: false,
             }],
             table: None,
             key_col: None,
@@ -7032,7 +7049,12 @@ impl Binder<'_, '_> {
         }
         let offset = |b: &mut Self, n: Option<&Node>| -> Result<Expr> {
             let n = n.unwrap();
-            let e = b.in_clause(Clause::WindowFrame, |b| b.bind_expr(n))?;
+            let name = match unit {
+                FrameUnit::Rows => "window ROWS",
+                FrameUnit::Groups => "window GROUPS",
+                _ => "window RANGE",
+            };
+            let e = b.in_clause(Clause::WindowFrame(name), |b| b.bind_expr(n))?;
             let at = super::ast::location(n);
             let (e, construct) = match unit {
                 FrameUnit::Rows => (b.coerce_implicit(e, &DataType::Int8)?, "ROWS"),
@@ -7259,12 +7281,21 @@ impl Binder<'_, '_> {
             .min(cur);
         let target = cur - up;
         let clause = self.levels[target].clause;
-        if !matches!(clause, Clause::Select | Clause::Having | Clause::OrderBy) {
+        // (check_agglevels_and_constraints: a window's PARTITION BY / ORDER BY and DISTINCT
+        // ON take them as aggregates.)
+        if !matches!(clause, Clause::Select | Clause::Having | Clause::OrderBy | Clause::Window | Clause::DistinctOn) {
             return Err(with_pos(
                 Error::new(
                     code::GROUPING_ERROR,
                     format!("grouping operations are not allowed in {}", clause.name()),
                 ),
+                g.location,
+            ));
+        }
+        // In an aggregate's arguments: check_agg_arguments finds it nested.
+        if self.levels[target].st.in_agg {
+            return Err(with_pos(
+                Error::new(code::GROUPING_ERROR, "aggregate function calls cannot be nested"),
                 g.location,
             ));
         }

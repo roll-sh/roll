@@ -333,9 +333,10 @@ struct Pair {
     wire: Option<wire::Wire>,
 }
 
-/// Whether a case needs the shared engine: steps of the wire sessions, round 7's objects.
+/// Whether a case needs the shared engine: steps of the wire sessions, round 7's and 8's
+/// objects (round 8's prepared transactions need the shared engine's setting).
 fn wants_shared<'a>(mut stmts: impl Iterator<Item = &'a str>) -> bool {
-    stmts.any(|s| s.starts_with('\\') || s.contains("r7"))
+    stmts.any(|s| s.starts_with('\\') || s.contains("r7") || s.contains("r8"))
 }
 
 const SESSION_SETUP: &[&str] = &[
@@ -366,7 +367,8 @@ impl Pair {
             ))
             .unwrap();
         assert!(!ev.iter().any(|e| matches!(e, Event::Error(_))), "{ev:?}");
-        let refc = PgClient::connect(&ref_addr(), "postgres", &env("DIFFTEST_PASSWORD", "pw"), db).unwrap();
+        let mut refc = PgClient::connect(&ref_addr(), "postgres", &env("DIFFTEST_PASSWORD", "pw"), db).unwrap();
+        refc.report_notifications = true;
         let mut p = if shared {
             let (eng, pid) = wire::create_db(db);
             Pair { eng, _dir: None, refc, db: db.to_string(), wire: None }.with_wire(pid)
@@ -423,6 +425,17 @@ impl Pair {
 
 impl Drop for Pair {
     fn drop(&mut self) {
+        // Transactions a seed prepared and left (round 8) hold its database: roll them back on
+        // both sides, in the database (ROLLBACK PREPARED runs only there).
+        let left = "SELECT gid FROM pg_prepared_xacts WHERE database = current_database()";
+        let _ = self.refc.simple_query("ROLLBACK");
+        for gid in self.refc.simple_query(left).map(|ev| out_of(ev).rows).unwrap_or_default() {
+            let _ = self.refc.simple_query(&format!("ROLLBACK PREPARED '{gid}'"));
+        }
+        self.engine("ROLLBACK");
+        for gid in self.engine(left).rows {
+            self.engine(&format!("ROLLBACK PREPARED '{gid}'"));
+        }
         if let Some(w) = self.wire.take() {
             let hung = w.hung;
             drop(w);
@@ -680,8 +693,13 @@ impl Runner {
                     self.record(seed, idx, case, Some(&e2), Some(&e), "rows depend on planner settings");
                 }
             }
+            // (Not inside a transaction block: an oracle query only one side runs, failing,
+            // would abort that side's transaction alone. The seed's random draws stay.)
             if rng.chance(self.oracle_share) {
-                self.oracles(&mut pair, &sch, &history, seed, idx, rng.next());
+                let s = rng.next();
+                if pair.eng.status() == pg_engine::session::TxnStatus::Idle {
+                    self.oracles(&mut pair, &sch, &history, seed, idx, s);
+                }
             }
         }
         if !diverged {

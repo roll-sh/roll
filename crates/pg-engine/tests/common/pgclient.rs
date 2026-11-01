@@ -16,6 +16,8 @@ pub struct PgClient {
     buf: BytesMut,
     /// The transaction status of the last ReadyForQuery: `I`, `T` or `E`.
     pub status: u8,
+    /// Report asynchronous notifications as notices for differential comparisons.
+    pub report_notifications: bool,
     /// COPY FROM STDIN's data for the query in flight (`send_query`).
     copy_data: Option<String>,
     /// The result formats of the portal being read (`extended`): one for all, or per column.
@@ -106,6 +108,7 @@ impl PgClient {
             status: b'I',
             copy_data: None,
             timeout: None,
+            report_notifications: false,
             binary_cols: Vec::new(),
             merge: false,
         };
@@ -341,6 +344,14 @@ impl PgClient {
                 Message::EmptyQueryResponse => {}
                 Message::ErrorResponse(e) => events.push(Event::Error(fields(e.fields()))),
                 Message::NoticeResponse(n) => events.push(Event::Notice(fields(n.fields()))),
+                // (A notification, as a notice of its own kind: the channel and payload, not
+                // the sender's pid.)
+                Message::NotificationResponse(n) if self.report_notifications => events.push(Event::Notice(super::Field {
+                    severity: "NOTIFY".into(),
+                    code: "NOTIFY".into(),
+                    message: format!("{}: {}", n.channel().map_err(std::io::Error::other)?, n.message().map_err(std::io::Error::other)?),
+                    ..Default::default()
+                })),
                 Message::CopyInResponse(_) => {
                     let mut out = BytesMut::new();
                     if let Some(d) = &copy_data {

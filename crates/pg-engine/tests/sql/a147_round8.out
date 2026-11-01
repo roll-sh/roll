@@ -1,0 +1,285 @@
+> SELECT sum(v) OVER (ORDER BY v GROUPS BETWEEN CURRENT ROW AND 0 PRECEDING) FROM (VALUES (1)) t(v)
+ERROR 42P20: frame starting from current row cannot have preceding rows (at 63)
+
+> SELECT sum(v) OVER w FROM (VALUES (1)) t(v) WINDOW w AS (ORDER BY v RANGE BETWEEN 1 FOLLOWING AND CURRENT ROW)
+ERROR 42P20: frame starting from following row cannot have preceding rows (at 99)
+
+> SELECT sum(v) OVER (ORDER BY v ROWS UNBOUNDED FOLLOWING) FROM (VALUES (1)) t(v)
+ERROR 42P20: frame start cannot be UNBOUNDED FOLLOWING (at 37)
+
+> SELECT sum(v) OVER (ORDER BY v ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING) FROM (VALUES (1)) t(v)
+ERROR 42P20: frame end cannot be UNBOUNDED PRECEDING (at 61)
+
+> SELECT sum(v) OVER (ORDER BY v ROWS BETWEEN 1 FOLLOWING AND CURRENT ROW) FROM (VALUES (1)) t(v)
+ERROR 42P20: frame starting from following row cannot have preceding rows (at 61)
+
+> SELECT 1::float(0)
+ERROR 22023: precision for type float must be at least 1 bit (at 17)
+
+> SELECT 1::float(60)
+ERROR 22023: precision for type float must be less than 54 bits (at 17)
+
+> CREATE TABLE a147h (a int) PARTITION BY HASH (a)
+-- CREATE TABLE
+
+> CREATE TABLE a147h0 PARTITION OF a147h FOR VALUES WITH (MODULUS 2, MODULUS 2, REMAINDER 0)
+ERROR 42710: modulus for hash partition provided more than once (at 68)
+
+> DROP TABLE a147h
+-- DROP TABLE
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM p WHERE n < 3) SEARCH DEPTH FIRST BY n SET n SELECT * FROM p
+ERROR 42702: column reference "n" is ambiguous (at 53)
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM p WHERE n < 3) CYCLE n SET n USING path SELECT * FROM p
+ERROR 42702: column reference "n" is ambiguous (at 53)
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM p WHERE n < 3 AND ord IS NOT NULL) SEARCH DEPTH FIRST BY n SET ord SELECT * FROM p
+n:int4 | ord:2287
+1 | {(1)}
+2 | {(1),(2)}
+3 | {(1),(2),(3)}
+-- SELECT 3
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT 2 FROM p WHERE false) SEARCH DEPTH FIRST BY n SET n SELECT * FROM p
+ERROR 42601: search sequence column name "n" already used in WITH query column list (at 75)
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT 2 FROM p WHERE false) CYCLE n SET c USING c SELECT * FROM p
+ERROR 42601: cycle mark column name and cycle path column name are the same (at 75)
+
+> WITH RECURSIVE p(n, m) AS (VALUES (1, 2) UNION ALL SELECT n FROM p WHERE false) SEARCH DEPTH FIRST BY m SET m SELECT * FROM p
+ERROR 42601: each UNION query must have the same number of columns (at 59)
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT n, 2 FROM p) SEARCH DEPTH FIRST BY zz SET o SELECT * FROM p
+ERROR 42601: each UNION query must have the same number of columns (at 53)
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT n FROM p WHERE false) CYCLE zz SET c USING path SELECT * FROM p
+ERROR 42601: cycle column "zz" not in WITH query column list (at 75)
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT p.* FROM p WHERE n < 3) CYCLE n SET c USING path SELECT * FROM p
+n:int4 | c:bool | path:2287
+1 | f | {(1)}
+1 | t | {(1),(1)}
+-- SELECT 2
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT * FROM p WHERE n < 3) CYCLE n SET c USING path SELECT * FROM p
+n:int4 | c:bool | path:2287
+1 | f | {(1)}
+1 | t | {(1),(1)}
+-- SELECT 2
+
+> WITH RECURSIVE p(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM p WHERE n < 3) SEARCH BREADTH FIRST BY n SET o SELECT p.* FROM p
+n:int4 | o:record
+1 | (0,1)
+2 | (1,2)
+3 | (2,3)
+-- SELECT 3
+
+> SELECT (x).f1 FROM (VALUES (ROW(1, 2))) v(x)
+ERROR 42809: record type has not been registered
+
+> SELECT (v.x).f1 FROM (VALUES (ROW(1, 2)), (ROW(3, 4))) v(x)
+ERROR 42809: record type has not been registered
+
+> SELECT v.x.f1 FROM (VALUES (ROW(1, 2))) v(x)
+ERROR 42P01: missing FROM-clause entry for table "x" (at 8)
+
+> SELECT x, row_to_json(x) FROM (VALUES (ROW(1, 2))) v(x)
+x:record | row_to_json:json
+(1,2) | {"f1":1,"f2":2}
+-- SELECT 1
+
+> SELECT (x).* FROM (VALUES (ROW(1, 2))) v(x)
+ERROR 42809: record type has not been registered
+
+> SELECT (x).f1 FROM (SELECT ROW(1, 2) AS x) s
+f1:int4
+1
+-- SELECT 1
+
+> WITH w(x) AS (VALUES (ROW(1, 2))) SELECT (x).f1 FROM w
+ERROR 42809: record type has not been registered
+
+> WITH w(x) AS MATERIALIZED (VALUES (ROW(1, 2))) SELECT (x).f1 FROM w
+ERROR 42809: record type has not been registered
+
+> WITH w(x) AS (SELECT ROW(1, 2)) SELECT (x).f1 FROM w
+f1:int4
+1
+-- SELECT 1
+
+> SELECT (x).a FROM (VALUES (1)) v(x)
+ERROR 42809: column notation .a applied to type integer, which is not a composite type (at 9)
+
+> CREATE TABLE a147g (g int, v int)
+-- CREATE TABLE
+
+> INSERT INTO a147g VALUES (1, 1), (2, 2), (2, 5)
+-- INSERT 0 3
+
+> SELECT g, count(*) OVER (PARTITION BY grouping(g)) FROM a147g GROUP BY ROLLUP (g) ORDER BY 1, 2
+g:int4 | count:int8
+1 | 2
+2 | 2
+NULL | 1
+-- SELECT 3
+
+> SELECT g, rank() OVER (ORDER BY grouping(g), g) FROM a147g GROUP BY ROLLUP (g) ORDER BY 1, 2
+g:int4 | rank:int8
+1 | 1
+2 | 2
+NULL | 3
+-- SELECT 3
+
+> SELECT g, sum(grouping(g)) OVER () FROM a147g GROUP BY ROLLUP (g) ORDER BY 1, 2
+g:int4 | sum:int8
+1 | 1
+2 | 1
+NULL | 1
+-- SELECT 3
+
+> SELECT DISTINCT ON (grouping(g)) grouping(g), g FROM a147g GROUP BY ROLLUP (g) ORDER BY grouping(g), g
+grouping:int4 | g:int4
+0 | 1
+1 | NULL
+-- SELECT 2
+
+> SELECT g, sum(grouping(g)) FROM a147g GROUP BY g
+ERROR 42803: aggregate function calls cannot be nested (at 15)
+
+> SELECT g, sum(v) FILTER (WHERE grouping(g) = 0) FROM a147g GROUP BY g
+ERROR 42803: grouping operations are not allowed in FILTER (at 32)
+
+> SELECT count(*) OVER (PARTITION BY grouping(g)) FROM a147g
+ERROR 42803: arguments to GROUPING must be grouping expressions of the associated query level (at 45)
+
+> SELECT sum(v) OVER (ORDER BY g ROWS grouping(g) PRECEDING) FROM a147g GROUP BY g, v
+ERROR 42803: grouping operations are not allowed in window ROWS (at 37)
+
+> DROP TABLE a147g
+-- DROP TABLE
+
+> CREATE TABLE a147c (id int NOT NULL, a text, b int DEFAULT 42, c date)
+-- CREATE TABLE
+
+> COPY a147c FROM STDIN (FORMAT binary, ON_ERROR ignore)
+ERROR 42601: only ON_ERROR STOP is allowed in BINARY mode
+
+> COPY a147c FROM STDIN (FORMAT csv, REJECT_LIMIT 2, ON_ERROR stop)
+ERROR 22023: COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE
+
+> COPY a147c FROM STDIN (REJECT_LIMIT 2)
+ERROR 22023: COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE
+
+> COPY a147c (id, b, a, c) FROM STDIN (FORMAT text, ON_ERROR ignore, DEFAULT '\D')
+>> 1	x	\D	2025-01-01
+ERROR 22P04: unexpected default marker in COPY data
+DETAIL: Column "a" has no default value.
+CONTEXT: COPY a147c, line 1: "1	x	\D	2025-01-01"
+
+> COPY a147c (id, b, a, c) FROM STDIN (FORMAT text, ON_ERROR ignore, DEFAULT '\D')
+>> 1	x	ok	2025-01-01
+>> 2	\D	y	2025-01-02
+NOTICE 00000: 1 row was skipped due to data type incompatibility
+-- COPY 1
+
+> SELECT * FROM a147c
+id:int4 | a:text | b:int4 | c:date
+2 | y | 42 | 2025-01-02
+-- SELECT 1
+
+> DROP TABLE a147c
+-- DROP TABLE
+
+> CREATE TABLE a147e (a int CONSTRAINT a147ck CHECK (a > 0), b text)
+-- CREATE TABLE
+
+> CREATE FUNCTION a147ef() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE NOTICE 'end % %', tg_tag, (SELECT string_agg(command_tag || ':' || object_type || ':' || coalesce(object_identity, '-'), ', ') FROM pg_event_trigger_ddl_commands()); END $$
+-- CREATE FUNCTION
+
+> CREATE EVENT TRIGGER a147et ON ddl_command_end EXECUTE FUNCTION a147ef()
+-- CREATE EVENT TRIGGER
+
+> COMMENT ON TABLE a147e IS NULL
+NOTICE 00000: end COMMENT COMMENT:table:public.a147e
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON TABLE a147e IS 'x'
+NOTICE 00000: end COMMENT COMMENT:table:public.a147e
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON TABLE a147e IS 'x'
+NOTICE 00000: end COMMENT COMMENT:table:public.a147e
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON COLUMN a147e.b IS 'col'
+NOTICE 00000: end COMMENT COMMENT:table column:public.a147e.b
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON COLUMN a147e.b IS NULL
+NOTICE 00000: end COMMENT COMMENT:table column:public.a147e.b
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON COLUMN a147e.b IS NULL
+NOTICE 00000: end COMMENT COMMENT:table column:public.a147e.b
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON CONSTRAINT a147ck ON a147e IS NULL
+NOTICE 00000: end COMMENT COMMENT:table constraint:a147ck on public.a147e
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON CONSTRAINT a147ck ON a147e IS 'check'
+NOTICE 00000: end COMMENT COMMENT:table constraint:a147ck on public.a147e
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON FUNCTION a147ef() IS 'f'
+NOTICE 00000: end COMMENT COMMENT:function:public.a147ef()
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> COMMENT ON SCHEMA public IS NULL
+NOTICE 00000: end COMMENT COMMENT:schema:public
+CONTEXT: PL/pgSQL function a147ef() line 1 at RAISE
+-- COMMENT
+
+> DROP EVENT TRIGGER a147et
+-- DROP EVENT TRIGGER
+
+> DROP FUNCTION a147ef()
+-- DROP FUNCTION
+
+> DROP TABLE a147e
+-- DROP TABLE
+
+> CREATE TABLE a147l (id int, d numeric)
+-- CREATE TABLE
+
+> SELECT 1 FROM (SELECT 1 AS c0 FROM a147l GROUP BY d) s5 JOIN a147nosuch t4 ON true FOR UPDATE
+ERROR 42P01: relation "a147nosuch" does not exist (at 62)
+
+> SELECT 1 FROM (a147l t4 JOIN (SELECT 1 AS c0 FROM a147l GROUP BY d) s5 ON NULL) LEFT JOIN (SELECT 1 AS c0) s8 ON t4.nosuch FOR UPDATE
+ERROR 42703: column t4.nosuch does not exist (at 114)
+
+> SELECT 1 FROM (SELECT 1 AS c0 FROM a147l GROUP BY d) s5 FOR UPDATE
+ERROR 0A000: FOR UPDATE is not allowed with GROUP BY clause
+
+> SELECT 1 FROM (SELECT DISTINCT d FROM a147l) s5, a147l t WHERE t.nosuch FOR SHARE
+ERROR 42703: column t.nosuch does not exist (at 64)
+
+> SELECT count(*) FROM (SELECT 1 AS c0 FROM a147l GROUP BY d) s5 FOR UPDATE
+ERROR 0A000: FOR UPDATE is not allowed with aggregate functions
+
+> SELECT 1 FROM (SELECT 1 AS c0 FROM a147l GROUP BY d) s5 FOR UPDATE OF s5
+ERROR 0A000: FOR UPDATE is not allowed with GROUP BY clause
+
+> DROP TABLE a147l
+-- DROP TABLE
+

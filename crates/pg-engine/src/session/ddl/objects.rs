@@ -4828,6 +4828,7 @@ impl Ddl<'_, '_> {
             }
             m.comment = (!s.comment.is_empty()).then(|| s.comment.clone());
             self.lo_put(oid, &m)?;
+            super::event_trigger::collect_comment(&self.cat, kind, oid, 0);
             return Ok("COMMENT".into());
         }
         let (oid, sub) = match kind {
@@ -4875,6 +4876,7 @@ impl Ddl<'_, '_> {
                         self.cat.set_comment(oid, sub, s.comment.clone());
                     }
                     self.save()?;
+                    super::event_trigger::collect_comment(&self.cat, kind, oid, sub);
                     return Ok("COMMENT".into());
                 }
                 let r = rel(self, relparts)?;
@@ -5198,6 +5200,7 @@ impl Ddl<'_, '_> {
             self.cat.set_comment(oid, sub, s.comment.clone());
         }
         self.save()?;
+        super::event_trigger::collect_comment(&self.cat, kind, oid, sub);
         Ok("COMMENT".into())
     }
 

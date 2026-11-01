@@ -113,7 +113,6 @@ impl CopyFormat {
         let (mut delim, mut null, mut quote, mut escape) = (None, None, None, None);
         let mut seen: Vec<&str> = Vec::new();
         let mut freeze = false;
-        let mut on_error = false;
         for o in opts {
             let Some(NodeEnum::DefElem(d)) = inner(o) else {
                 continue;
@@ -225,7 +224,6 @@ impl CopyFormat {
                             ));
                         }
                     }
-                    on_error = true;
                 }
                 "log_verbosity" => {
                     f.log_verbosity = match sval().to_ascii_lowercase().as_str() {
@@ -393,9 +391,10 @@ impl CopyFormat {
             }
         }
         if f.binary && f.on_error_ignore {
-            return unsupported("only ON_ERROR STOP is allowed in BINARY mode");
+            return Err(Error::new(code::SYNTAX_ERROR, "only ON_ERROR STOP is allowed in BINARY mode"));
         }
-        if f.reject_limit.is_some() && !on_error {
+        // (ON_ERROR stop, written or not, takes no REJECT_LIMIT.)
+        if f.reject_limit.is_some() && !f.on_error_ignore {
             return invalid("COPY REJECT_LIMIT requires ON_ERROR to be set to IGNORE".into());
         }
         f.freeze = freeze;
@@ -1627,6 +1626,16 @@ pub(crate) fn parse_copy_data(
             )
             .context(ctx_line(line, &raw)));
         }
+        // (CopyReadAttributes: a DEFAULT marker for a column without a default fails the line
+        // before any of its fields converts, a soft error ON_ERROR ignore skips or not.)
+        for (field, &col) in rec.iter().zip(&c.target) {
+            let c = &t.columns[col];
+            if field.is_default(f) && c.default.is_none() && c.identity.is_none() && c.domain.is_none() {
+                return Err(Error::new(code::BAD_COPY_FILE_FORMAT, "unexpected default marker in COPY data")
+                    .detail(format!("Column \"{}\" has no default value.", c.name))
+                    .context(ctx_line(line, &raw)));
+            }
+        }
         // (A missing field is found after the ones before it converted: NextCopyFrom.)
         let missing = (rec.len() < c.ncols).then_some(rec.len());
         let mut row = Vec::with_capacity(c.ncols);
@@ -1634,15 +1643,6 @@ pub(crate) fn parse_copy_data(
             let colname = &t.columns[col].name;
             let ty = &t.columns[col].ty;
             if field.is_default(f) {
-                let c = &t.columns[col];
-                if c.default.is_none() && c.identity.is_none() && c.domain.is_none() {
-                    return Err(Error::new(
-                        code::BAD_COPY_FILE_FORMAT,
-                        "unexpected default marker in COPY data",
-                    )
-                    .detail(format!("Column \"{colname}\" has no default value."))
-                    .context(ctx_line(line, &raw)));
-                }
                 row.push(Expr::Default(ty.clone()));
                 continue;
             }

@@ -16,6 +16,8 @@ mod round5;
 mod round6;
 #[path = "round7.rs"]
 mod round7;
+#[path = "round8.rs"]
+mod round8;
 
 /// splitmix64: small, fast and good enough to drive a generator.
 pub struct Rng(u64);
@@ -156,6 +158,8 @@ pub struct Schema {
     pub round6: bool,
     /// Round 7: the `r7*` objects exist (`round7::schema`), and sessions 2 and 3.
     pub round7: bool,
+    /// Round 8: the `r8*` objects exist (`round8::schema`).
+    pub round8: bool,
 }
 
 /// A column visible to an expression: its qualified reference and type.
@@ -236,6 +240,11 @@ pub const R6_SEEDS: u64 = 6000;
 /// generated and identity columns, domains, collations, time zones, numeric edges, roles and
 /// row security, and statements that differ only in their literals.
 pub const R7_SEEDS: u64 = 7000;
+/// The first seed generated with round 8's objects and statements (`round8.rs`), on the shared
+/// engine: PL/pgSQL, triggers of every kind and event triggers, window frames, grouping sets,
+/// SEARCH / CYCLE, SQL/JSON, ranges, text search, large objects, COPY options, LISTEN /
+/// NOTIFY, prepared transactions, spilling queries.
+pub const R8_SEEDS: u64 = 8000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
@@ -2292,6 +2301,10 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
         out.extend(round7::schema(&mut Rng::new(seed ^ 0x7777_7777)));
         s.round7 = true;
     }
+    if seed >= R8_SEEDS {
+        out.extend(round8::schema(&mut Rng::new(seed ^ 0x8888_8888)));
+        s.round8 = true;
+    }
     (s, out)
 }
 
@@ -2433,6 +2446,10 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     });
     while out.len() < n {
         g.alias = 0;
+        if s.round8 && g.rng.chance(0.5) {
+            out.extend(g.round8_stmt());
+            continue;
+        }
         if s.round7 && g.rng.chance(0.45) {
             out.extend(g.round7_stmt());
             continue;

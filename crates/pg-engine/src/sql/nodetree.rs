@@ -1102,6 +1102,7 @@ impl Tree<'_, '_, '_> {
                 src: None,
                 rowtype_col: None,
                 domain: None,
+                opaque_record: false,
             });
             merged_cols.push(NsCol {
                 name: n.clone(),
@@ -1231,6 +1232,7 @@ impl Tree<'_, '_, '_> {
                     src: None,
                     rowtype_col: None,
                     domain: None,
+                    opaque_record: false,
                 });
             }
             scope = Scope { rels: vec![rel] };
@@ -1309,6 +1311,7 @@ impl Tree<'_, '_, '_> {
                     work_filter: None,
                     deferred: None,
                     inline: None,
+                    values: false,
                 });
                 self.q().ctes.push(Cte {
                     name: cte.ctename.clone(),
@@ -1351,6 +1354,7 @@ impl Tree<'_, '_, '_> {
                 work_filter: None,
                 deferred: None,
                 inline: None,
+                values: false,
             });
             self.q().ctes.push(Cte {
                 name: cte.ctename.clone(),

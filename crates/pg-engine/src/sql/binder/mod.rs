@@ -282,6 +282,9 @@ pub struct ScopeCol {
     /// The domain (or array-of-domain) type a subquery / view / CTE / function column is
     /// declared as (a base table's column has its own: `table`, `attnum`).
     pub domain: Option<u32>,
+    /// A record column of a VALUES list: parse analysis doesn't know its fields
+    /// (expandRecordVariable doesn't look into a VALUES RTE), so `(x).f` fails.
+    pub opaque_record: bool,
 }
 
 /// A relation (FROM item) visible to name resolution.
@@ -426,8 +429,8 @@ pub enum Clause {
     MergeWhen,
     /// A window's PARTITION BY / ORDER BY (set-returning functions run below it).
     Window,
-    /// A window frame's offsets.
-    WindowFrame,
+    /// A window frame's offsets ("window ROWS", "window RANGE", "window GROUPS").
+    WindowFrame(&'static str),
     /// An aggregate's FILTER condition.
     Filter,
     /// COPY FROM's WHERE condition.
@@ -467,7 +470,8 @@ impl Clause {
             Clause::PartitionBound => "partition bound",
             Clause::UpdateSet => "UPDATE",
             Clause::MergeWhen => "MERGE WHEN conditions",
-            Clause::Window | Clause::WindowFrame => "window definitions",
+            Clause::Window => "window definitions",
+            Clause::WindowFrame(unit) => unit,
             Clause::Filter => "FILTER",
             Clause::CopyWhere => "COPY FROM WHERE conditions",
             Clause::DistinctOn => "DISTINCT ON",
@@ -486,7 +490,7 @@ impl Clause {
                 | Clause::Having
                 | Clause::OrderBy
                 | Clause::Window
-                | Clause::WindowFrame
+                | Clause::WindowFrame(_)
                 | Clause::DistinctOn
         )
     }
@@ -668,6 +672,8 @@ pub(crate) struct CteDef {
     /// The recursive term's CYCLE check over its work table's row (`NOT is_cycle`): a
     /// restriction of the work table's scan, as the rewritten WHERE clause is.
     pub work_filter: Option<Expr>,
+    /// Its query is a VALUES list (its record columns are opaque: `ScopeCol::opaque_record`).
+    pub values: bool,
 }
 
 pub struct Binder<'b, 'a> {
@@ -726,6 +732,9 @@ pub struct Binder<'b, 'a> {
     /// without a collation): kept with the CTE (`CteDef::deferred`), the statement's only
     /// when something reads the CTE (an unreferenced one is never planned).
     pub(crate) defer_plan: std::cell::RefCell<Vec<Option<crate::error::Error>>>,
+    /// CheckSelectLocking's failure in a FROM subquery a locking clause was pushed into:
+    /// raised by the clause's own level once it is analysed (transformLockingClause runs last).
+    pub(crate) lock_pending: Option<crate::error::Error>,
     /// Privileges the statement needs.
     pub(crate) perms: perms::Perms,
     /// Role relation privileges are checked as (a view's owner inside its query).
@@ -937,6 +946,7 @@ impl<'b, 'a> Binder<'b, 'a> {
             rls_sys: None,
             deparse: false,
             defer_plan: Default::default(),
+            lock_pending: None,
             perms: perms::Perms::default(),
             check_as: None,
             definer: None,
@@ -1221,6 +1231,11 @@ impl<'b, 'a> Binder<'b, 'a> {
         // analysis's errors, a later level's ungrouped column say, come first.)
         self.defer_plan.borrow_mut().push(None);
         let r = crate::stack::guard(|| self.bind_statement_inner(n));
+        // A pushed-down locking clause fails after the rest of parse analysis.
+        let r = match (r, self.lock_pending.take()) {
+            (Ok(_), Some(e)) => Err(e),
+            (r, _) => r,
+        };
         let plan_err = self.defer_plan.borrow_mut().pop().flatten();
         let fold_err = std::mem::replace(&mut self.fold_err, prev).unwrap_or_default();
         let mut a = r?;
@@ -2786,6 +2801,7 @@ pub fn table_rel(t: &Arc<Table>, alias: &str, schema: Option<String>) -> ScopeRe
             src: Some(-1),
             rowtype_col: None,
             domain: c.domain,
+            opaque_record: false,
         })
         .collect();
     ScopeRel {
@@ -2832,6 +2848,7 @@ pub fn derived_rel(alias: &str, cols: &[OutCol], offset: usize) -> ScopeRel {
                 src: None,
                 rowtype_col: None,
                 domain: c.domain,
+                opaque_record: false,
             })
             .collect(),
         table: None,

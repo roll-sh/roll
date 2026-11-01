@@ -366,8 +366,24 @@ pub(crate) fn parse_uncached(sql: &str, options: c_int) -> Result<Vec<RawStmt>> 
                 code::CHARACTER_NOT_IN_REPERTOIRE
             } else if msg == "invalid Unicode escape" && !in_unicode_literal(sql, e.cursorpos) {
                 code::INVALID_ESCAPE_SEQUENCE
-            } else if msg.starts_with("role name \"") && msg.ends_with("is reserved") {
+            } else if msg.starts_with("role name \"") && msg.ends_with("is reserved")
+                || msg.ends_with("cannot be used as a role name here")
+            {
                 code::RESERVED_NAME
+            } else if msg.starts_with("frame start")
+                || msg.starts_with("frame end")
+                || msg.starts_with("frame starting from")
+            {
+                // (gram.y's checks of a window frame's bounds.)
+                code::WINDOWING_ERROR
+            } else if msg.starts_with("column number must be in range")
+                || msg.starts_with("precision for type float must be")
+                || msg.starts_with("unrecognized JSON encoding")
+                || msg.starts_with("unrecognized partitioning strategy")
+            {
+                code::INVALID_PARAMETER_VALUE
+            } else if msg.ends_with("for hash partition provided more than once") {
+                code::DUPLICATE_OBJECT
             } else if msg.contains("is no longer supported")
                 || msg.contains("not supported") && !msg.starts_with("syntax error")
                 || msg.starts_with("only string constants are supported")
