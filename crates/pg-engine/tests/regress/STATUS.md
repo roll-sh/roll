@@ -8,6 +8,19 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Final combined verification (2026-11-01, tested source `f24d3643`): build, focused
+checks, all crate tests (419 passed, 18 ignored, zero failed), Clippy, and
+`pnpm test:pg --unit` pass. The full run matches 51,148/51,150 units with no new
+differences, panics, or engine restarts. Both remaining hunks match the previous
+full run at `daa881c7` exactly. They are `join` 368's verbose EXPLAIN expression and
+`partition_prune` 410's accepted internal EXPLAIN ANALYZE counters. The corrected
+logical-copy lifecycle, early-LIMIT spill accounting, and backend monitoring are
+included. Logs and exact source provenance are in
+`~/.cache/pg-engine-sol-resume/final-f24d3643/` and `combined-f24d3643/`.
+The generated blocks below come from that full run. Docker recovery e2e was not
+repeated under the user's instruction; its baseline remains twelve passes and four
+WAL HTTP timeout failures in `~/.cache/pg-engine-sol-resume/postgres-check.log`.
+
 Round 24, agent 153 (foreign joins and declared cursors): local EPQ rechecks retain
 foreign join copy marks, and cursor connection initialization follows plan preparation.
 Build, full crate tests, Clippy, PostgreSQL units, and recorded golden modes pass at
@@ -246,7 +259,7 @@ logs, baseline comparisons and cleanup are in `~/.cache/a151-resume/verification
 ## Summary
 
 <!-- generated: summary -->
-From the full run of commit `9407d0ee` (debug build of the engine, 2026-10-26 19:15 UTC, reference `a73-ref1`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
+From the full run of commit `f24d364` (debug build of the engine, 2026-11-01 19:09 UTC, reference `t3-d4020b98-regref-f24d3643`; cluster-global objects it had before: none), written by the harness (HANDOFF.md, "Regression suite"); don't edit these numbers by hand.
 
 | | |
 |---|---|

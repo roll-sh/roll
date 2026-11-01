@@ -45,7 +45,34 @@ harness and score in `tests/`:
 
 ## Where it stands
 
-As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 13–14 (STATUS.md):
+The combined resumed batches are verified at `f24d3643` (2026-11-01). Build, focused
+checks, the complete crate suite (419 passed, 18 ignored, zero failed), Clippy, and
+`pnpm test:pg --unit` pass. Clippy reports eleven warnings. The full PostgreSQL 18.6
+regression run matches 51,148/51,150 units across 230 files, with no new differences,
+panics, or engine restarts. The two remaining hunks are identical to the preceding
+full run at `daa881c7`: `join` 368 has a verbose EXPLAIN expression difference, and
+`partition_prune` 410 has the accepted internal EXPLAIN ANALYZE counter difference.
+
+All recovered batches, including the logical-copy race, early-LIMIT spill accounting,
+and corrected backend monitoring, are integrated. The original monitoring commit
+`40f4554f` was superseded by `bf87a342` and `f24d3643`. Remaining contrib, replication,
+FDW error-text, and size-model differences are recorded in the batch sections below.
+No performance improvement is claimed.
+
+Exact scripts and logs are under `~/.cache/pg-engine-sol-resume/`:
+`run-final-f24d3643.sh`, `final-f24d3643/`, and `combined-f24d3643/`. Their `commit.txt`
+files identify the tested source. The generated regression report was refreshed from
+that run's saved outputs with the original database and helper configuration.
+`report-refresh-configured.log` supersedes the first report-only refresh, which omitted
+`PGREGRESS_DB`. Generated counts remain unchanged. Both full-run containers are stopped,
+and their reference data is retained.
+
+The Docker recovery e2e suite was not repeated under the user's instruction. Its
+baseline at `3069ca91` remains twelve passes and four compute-to-host WAL HTTP timeout
+failures, recorded in `~/.cache/pg-engine-sol-resume/postgres-check.log`.
+
+The following earlier snapshot and later batch sections preserve the work's history.
+Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13–14:
 
 - **Regression suite: 51,148 of 51,150 statements match (99.996%).** 2 differ (join 368;
   partition_prune 410). Measured by full runs of `ed6356cc` (round 18, agent 57) against private
@@ -6087,8 +6114,8 @@ Paste this into the new agent, from the repository root on branch
 ```text
 You are continuing work on crates/pg-engine, roll's in-process PostgreSQL engine. The goal is
 1:1 behaviour with PostgreSQL 18.6, measured by PostgreSQL's own regression suite. It is at
-99.19% (50,737 of 51,150 statements). Work autonomously and don't ask questions unless a
-decision is genuinely mine to make.
+99.996% (51,148 of 51,150 units), verified at f24d3643 on 2026-11-01. Work autonomously
+and don't ask questions unless a decision is genuinely mine to make.
 
 First read, in this order: AGENTS.md, crates/pg-engine/HANDOFF.md (setup, testing, machine
 rules, decisions, the prioritized remaining work), and crates/pg-engine/tests/regress/STATUS.md
@@ -6112,7 +6139,8 @@ Then:
 ## A152 logical replication resume (2026-11-01)
 
 The saved a152 batch was recovered through cherry-pick from `5fc8c86e` onto
-`daa881c7`. The partial monitoring commit `40f4554f` remains excluded.
+`daa881c7`. That delivery excluded the partial monitoring commit `40f4554f`.
+The final combined branch includes its corrected replacement, described above.
 `repl/log.rs` retains rolled-back subtransaction records with their abort boundaries.
 The decoder counts those records while it buffers or streams and omits them from
 ordinary replay. Immediate streaming and SQL decoding of the caller's pending
@@ -6199,8 +6227,9 @@ does not reconstruct already-skipped rows.
 
 The follow-up checkout starts at `36b7a6c6`, preserves a149 and the parent's a153,
 and recovers only the three a152 commits before adding this correction. The held
-monitoring commit `40f4554f` remains excluded. The original completed worktree and
-saved evidence are read only. Commands, the red parent test, corrected test, fresh
+monitoring commit `40f4554f` was excluded from that delivery and was later superseded
+by the corrected monitoring integration described above. The original completed
+worktree and saved evidence are read only. Commands, the red parent test, corrected test, fresh
 PostgreSQL comparisons, and cleanup are recorded in
 `/home/meszmate/.cache/a152-r2-t3-c12518e0/verification.md`.
 
