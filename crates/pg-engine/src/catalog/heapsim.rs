@@ -265,6 +265,17 @@ impl Page {
         Page::default()
     }
 
+    fn set_all_visible(&mut self, visible: bool, visible_pages: &mut u32) {
+        if self.all_visible != visible {
+            if visible {
+                *visible_pages += 1;
+            } else {
+                *visible_pages -= 1;
+            }
+            self.all_visible = visible;
+        }
+    }
+
     /// PageGetFreeSpace.
     fn free_space(&self) -> usize {
         if self.new {
@@ -741,6 +752,8 @@ const SKIP_PAGES_THRESHOLD: u32 = 32;
 #[derive(Debug, Default)]
 pub struct Heap {
     pages: Vec<Page>,
+    /// Exactly the number of pages with all_visible set; change bits through the setter.
+    visible_pages: u32,
     keys: super::keymap::KeyMap,
     /// The relation's cached insertion target (smgr_targblock), per session: each
     /// backend keeps its own (sessions are told apart by their threads, a session
@@ -891,14 +904,14 @@ impl Heap {
     }
 
     pub fn all_visible_pages(&self) -> u32 {
-        self.pages.iter().filter(|p| p.all_visible).count() as u32
+        self.visible_pages
     }
 
     /// The visibility map as a database opened afresh finds it: its first `n` pages
     /// all-visible (the catalog's relallvisible; the map isn't kept with the model).
     pub fn seed_all_visible(&mut self, n: u32) {
         for p in self.pages.iter_mut().take(n as usize) {
-            p.all_visible = true;
+            p.set_all_visible(true, &mut self.visible_pages);
         }
     }
 
@@ -922,7 +935,7 @@ impl Heap {
     /// pg_truncate_visibility_map: the map's file goes; no page is marked any more.
     pub fn truncate_vm(&mut self) {
         for p in &mut self.pages {
-            p.all_visible = false;
+            p.set_all_visible(false, &mut self.visible_pages);
         }
         self.vm_blocks = 0;
         self.note_size();
@@ -1128,6 +1141,7 @@ impl Heap {
     fn init_page(&mut self, blk: u32) {
         let p = &mut self.pages[blk as usize];
         if p.new {
+            p.set_all_visible(false, &mut self.visible_pages);
             *p = Page::fresh();
         }
     }
@@ -1263,9 +1277,9 @@ impl Heap {
     fn put(&mut self, blk: u32, t: Tup, frozen: bool) -> Tid {
         let p = &mut self.pages[blk as usize];
         if frozen && p.lps.is_empty() {
-            p.all_visible = true;
+            p.set_all_visible(true, &mut self.visible_pages);
         } else if p.all_visible && !frozen {
-            p.all_visible = false;
+            p.set_all_visible(false, &mut self.visible_pages);
         }
         let off = p.add(t);
         if p.settle_at != u64::MAX && !p.queued {
@@ -1391,7 +1405,7 @@ impl Heap {
             row = t.row;
         });
         p.set_prunable(xid);
-        p.all_visible = false;
+        p.set_all_visible(false, &mut self.visible_pages);
         if row != super::keymap::NO_ROW {
             self.deleted.insert((b, off), row);
         }
@@ -1454,7 +1468,7 @@ impl Heap {
             op.full = true;
         }
         op.set_prunable(xid);
-        op.all_visible = false;
+        op.set_all_visible(false, &mut self.visible_pages);
         let moved = old_key != new_key;
         if moved {
             self.keys.remove(old_key);
@@ -1793,7 +1807,7 @@ impl Heap {
             }
             if p.lps.is_empty() {
                 let p = &mut self.pages[b as usize];
-                p.all_visible = true;
+                p.set_all_visible(true, &mut self.visible_pages);
                 let free = p.heap_free();
                 self.fsm.record(b, free);
                 continue;
@@ -1809,7 +1823,7 @@ impl Heap {
             if hastup {
                 nonempty = b + 1;
             }
-            self.pages[b as usize].all_visible = all_visible;
+            self.pages[b as usize].set_all_visible(all_visible, &mut self.visible_pages);
             if !dead.is_empty() {
                 lpdead_pages += 1;
                 dead_by_page.push((b, dead));
@@ -1834,7 +1848,7 @@ impl Heap {
                         Lp::Dead => false,
                         Lp::Normal(t) => t.status(v) == Htsv::Live && visible_to_all(&t, v),
                     });
-                    p.all_visible = vis;
+                    p.set_all_visible(vis, &mut self.visible_pages);
                     let free = p.heap_free();
                     self.fsm.record(b, free);
                 }
@@ -1880,8 +1894,9 @@ impl Heap {
     }
 
     fn truncate_to(&mut self, pages: u32) {
-        for p in &self.pages[pages as usize..] {
+        for p in &mut self.pages[pages as usize..] {
             self.versions -= p.lps.normal();
+            p.set_all_visible(false, &mut self.visible_pages);
         }
         self.pages.truncate(pages as usize);
         self.keys.retain(|t| t.0 < pages);
@@ -2210,7 +2225,7 @@ impl Heap {
             for (to, from) in prev {
                 p.lps.update((to as usize).wrapping_sub(1), |t| t.prev_off = from);
             }
-            p.all_visible = flags & 1 != 0;
+            p.set_all_visible(flags & 1 != 0, &mut self.visible_pages);
             p.full = flags & 2 != 0;
             p.free_lps = flags & 4 != 0;
             p.prune_xid = if flags & 8 != 0 { crate::txn::xids::FIRST_NORMAL_XID - 1 } else { 0 };
@@ -2306,7 +2321,7 @@ impl Heap {
             let p = &mut self.pages[b as usize];
             p.update_tup(off, |t| t.xmax = xid);
             p.set_prunable(xid);
-            p.all_visible = false;
+            p.set_all_visible(false, &mut self.visible_pages);
         }
         let Some((len, stored)) = new else {
             return false;
@@ -2353,6 +2368,147 @@ const _: () = assert!(size_of::<Lp>() == 32);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_visible_count(h: &Heap, expected: u32) {
+        let slow = h.pages.iter().filter(|p| p.all_visible).count() as u32;
+        assert_eq!(h.all_visible_pages(), slow);
+        assert_eq!(slow, expected);
+    }
+
+    #[test]
+    fn visible_count_follows_writes_and_vacuum() {
+        let xids = Xids::new(10, |_| {});
+        let v = Vis::new(&xids);
+        let mut h = Heap::new(100);
+        assert_visible_count(&h, 0);
+        h.vacuum(&v, 0, true, Skip::None, false);
+        assert_visible_count(&h, 0);
+
+        let mut frozen = InsertMode { frozen: true, ..InsertMode::bulk() };
+        let tids = h.multi_insert((0..20).map(|i| (vec![i], 2000)).collect(), 2, &mut frozen);
+        assert_eq!(h.nblocks(), 5);
+        assert_visible_count(&h, 5);
+        h.seed_all_visible(u32::MAX);
+        h.seed_all_visible(1);
+        assert_visible_count(&h, 5);
+
+        let mut mode = InsertMode::single();
+        h.insert(vec![100], 100, 2, &mut mode);
+        assert_visible_count(&h, 4);
+        h.insert(vec![101], 8, 2, &mut mode);
+        assert_visible_count(&h, 4);
+        let (_, hot) = h.update(&[0], &[0], 100, 2, true, &v);
+        assert!(hot);
+        assert_visible_count(&h, 3);
+        let (moved, hot) = h.update(&[4], &[4], 6000, 2, true, &v);
+        assert!(!hot);
+        assert_ne!(moved.0, tids[4].0);
+        assert_visible_count(&h, 2);
+        h.delete(&[8], 2, &v);
+        assert_visible_count(&h, 1);
+        h.delete(&[9], 2, &v);
+        assert_visible_count(&h, 1);
+
+        let res = h.vacuum(&v, 1, false, Skip::None, false);
+        assert_visible_count(&h, h.nblocks());
+        assert_eq!(res.all_visible, h.all_visible_pages());
+        h.vacuum(&v, 1, false, Skip::AllVisible, false);
+        assert_visible_count(&h, h.nblocks());
+        h.truncate_vm();
+        h.truncate_vm();
+        assert_visible_count(&h, 0);
+        h.vacuum(&v, 1, false, Skip::None, true);
+        assert_visible_count(&h, h.nblocks());
+
+        for key in (0..20).chain([100, 101]) {
+            h.delete(&[key], 2, &v);
+            assert_eq!(h.all_visible_pages(), h.pages.iter().filter(|p| p.all_visible).count() as u32);
+        }
+        let res = h.vacuum(&v, 0, true, Skip::None, false);
+        assert_eq!(res.pages, 0);
+        assert_eq!(h.nblocks(), 0);
+        assert_visible_count(&h, 0);
+    }
+
+    #[test]
+    fn visible_count_survives_bulk_page_initialization() {
+        let mut h = Heap::new(100);
+        let mut mode = InsertMode::bulk();
+        h.multi_place(&[MAX_HEAP_TUPLE_SIZE], 2, &mut mode);
+        h.multi_place(&[MAX_HEAP_TUPLE_SIZE; 2], 2, &mut mode);
+        h.insert_unkeyed(MAX_HEAP_TUPLE_SIZE, 2, &mut mode);
+        assert_eq!(h.nblocks(), 6);
+        assert!(h.pages[4].new);
+        assert_visible_count(&h, 0);
+        h.seed_all_visible(u32::MAX);
+        assert_visible_count(&h, 6);
+        h.insert_unkeyed(MAX_HEAP_TUPLE_SIZE, 2, &mut mode);
+        assert!(!h.pages[4].new);
+        assert_visible_count(&h, 5);
+    }
+
+    #[test]
+    fn visible_count_restores_old_shapes_atomically() {
+        // An old image without frozen-page flags: one row, then two empty pages.
+        let image = [3, 1, 1, 5, 0, 0, 0, 1, 0, 0, 0];
+        let (mut h, _, _) = restored(100, vec![(b"a".to_vec(), 100, Some((0, 1)))]);
+        assert_visible_count(&h, 0);
+        h.seed_all_visible(1);
+        let mut before = Vec::new();
+        h.write_shape(&mut before, &|_| true);
+        for end in 0..image.len() {
+            assert_eq!(h.read_shape(&image[..end]), None);
+            assert_visible_count(&h, 1);
+            let mut after = Vec::new();
+            h.write_shape(&mut after, &|_| true);
+            assert_eq!(after, before);
+        }
+        assert_eq!(h.read_shape(&image), Some(()));
+        assert_eq!(h.nblocks(), 3);
+        assert_visible_count(&h, 2);
+        let mut encoded = Vec::new();
+        h.write_shape(&mut encoded, &|_| true);
+        assert_eq!(encoded, [3, 1, 1, 5, 0, 0, 0, 17, 0, 0, 0]);
+        h.seed_all_visible(u32::MAX);
+        assert_visible_count(&h, 3);
+        assert_eq!(h.read_shape(&image), Some(()));
+        assert_visible_count(&h, 2);
+        h.truncate_vm();
+        assert_eq!(h.read_shape(&image), Some(()));
+        assert_visible_count(&h, 2);
+
+        let mut empty = Heap::new(100);
+        assert_eq!(empty.read_shape(&[0, 0, 0, 0]), Some(()));
+        assert_visible_count(&empty, 0);
+    }
+
+    #[test]
+    fn visible_count_survives_pending_restore_and_rollback() {
+        let xids = Xids::new(10, |_| {});
+        let (mut h, _, _) = restored(100, vec![
+            (b"a".to_vec(), 100, Some((0, 1))),
+            (b"b".to_vec(), 100, Some((2, 1))),
+        ]);
+        h.seed_all_visible(u32::MAX);
+        assert_visible_count(&h, 3);
+        let xid = xids.assign();
+        assert!(!h.restore_pending(xid, b"a".to_vec(), Some((100, Some((4, 2))))));
+        assert_eq!(h.nblocks(), 5);
+        assert_visible_count(&h, 2);
+        assert!(!h.restore_pending(xid, b"b".to_vec(), None));
+        assert_visible_count(&h, 1);
+        assert!(!h.restore_pending(xid, b"b".to_vec(), None));
+        assert_visible_count(&h, 1);
+        xids.finish(xid, false);
+        let v = Vis::new(&xids);
+        h.vacuum(&v, 1, false, Skip::None, false);
+        assert_eq!(h.tid_of(b"a"), Some((0, 1)));
+        assert_eq!(h.tid_of(b"b"), Some((2, 1)));
+        assert_visible_count(&h, 5);
+        h.vacuum(&v, 1, true, Skip::None, false);
+        assert_eq!(h.nblocks(), 3);
+        assert_visible_count(&h, 3);
+    }
 
     /// A TID gives the key of the row its version belongs to: the current version's, an
     /// older version's (its key as it was when the row moved to another key), a deleted

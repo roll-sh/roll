@@ -4279,10 +4279,14 @@ impl ScanNode {
             StatTarget::Fetched(t) => super::pgstat::count_fetched(ctx, t, 1),
         }
         if (self.plan.index.is_some() || self.keys.is_some()) && self.only.is_none() {
-            // Fetching from a heap page may prune it.
-            let b = super::sizing::fetched(self.plan.table.oid, key, self.last_block, ctx);
-            if b.is_some() {
-                self.last_block = b;
+            if super::sizing::fetches_change_nothing(self.plan.table.oid, &ctx.sess.db) {
+                self.last_block = None;
+            } else {
+                // Fetching from a heap page may prune it.
+                let b = super::sizing::fetched(self.plan.table.oid, key, self.last_block, ctx);
+                if b.is_some() {
+                    self.last_block = b;
+                }
             }
         }
         if self.ios {
