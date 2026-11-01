@@ -508,3 +508,31 @@ approximate indexes over bigger tables, against a reference built with `-DIVFFLA
   / launched (`explain::gather_workers`, computed only for a tracked statement); an operator
   whose function is a user SQL function works over `= ANY (ARRAY[...])` (each element's
   comparison ORed, ALL ANDed: there is no function to call per element).
+
+## A152 logical decoding resume (2026-11-01)
+
+The full PostgreSQL 18.6 test_decoding module matches 1,038/1,047 units on this
+resumed batch, compared with 1,033/1,047 at the integration base `daa881c7`, under
+the same logical.conf settings and max_prepared_transactions=5. Five units now
+match: decoding_in_xact 37, stream 12 and 27, twophase_stream 12 and 23. No unit
+became newly different. These are module measurements, not new main-regression
+counts. Reports and the unit comparison are in
+`/home/meszmate/.cache/a152-resume/{regress,contrib-base}/contrib-report/test_decoding/`
+and `contrib-comparison.tsv`.
+
+The nine remaining mismatches occur on both binaries: toast 30, 31, 32, 35 and
+42; stream 16 (TOAST memory accounting); stats 23, 25 and 26 (slot order). The
+oversized index tuple in toast 30 triggers the same caught btsim assertion at
+`src/catalog/btsim.rs:59` on both binaries; the harness's exit 0 does not establish
+full parity. This batch leaves that index/size-model issue outside replication.
+The first attempt used a reference accidentally forced to 20 slots by its startup
+command and is superseded by `contrib-final.log` against a fresh four-slot reference.
+
+Aborted subtransaction records now survive ROLLBACK TO for streaming replay;
+ordinary replay omits them. The decoder handles debug immediate streaming and
+SQL decoding of the caller's pending changes. pgoutput carries subtransaction ids
+and abort timestamps, retains schema state per streamed transaction, and closes
+each streaming block before ordinary transactions. Filtered prepared transactions
+respect the slot's confirmed position when their commit is decoded in another SQL
+call. The COMMIT/ROLLBACK PREPARED implicit-block SQLSTATE golden was recorded
+from PostgreSQL 18.6, not edited by hand.

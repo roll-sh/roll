@@ -5811,3 +5811,22 @@ row vectors retained by concurrent debug assertions. Keeping those reference row
 existing compact RowChunks preserves the comparisons; the corrected test passes 10/10
 fresh runs (+52.4–54.8 MB). HANDOFF.md's OLTP round 4 section records the evidence and the
 profiling limitations. These are independent memory checks, not generated parity counts.
+
+## A152 logical replication resume (2026-11-01)
+
+Fresh PostgreSQL 18.6 subset runs of base `daa881c7` and this logical-decoding
+batch match 2,884/2,884 units. The subset includes test_setup, create_misc,
+create_table, create_index, transactions, replica_identity, publication,
+subscription, and truncate. No unit became newly different. Reports are in
+`/home/meszmate/.cache/a152-resume/{regress-base,regress}/report/`.
+These subset results leave the generated full-suite counts unchanged.
+
+Both binaries also match all 1,456 permutations and 15,927 steps of six targeted
+isolation specs covering savepoint aborts, subtransaction overflow, TRUNCATE,
+and prepared transactions. The three test_decoding isolation specs match two
+permutations and 29/35 steps on both binaries. Their identical
+twophase_snapshot diff reflects slot creation returning before PostgreSQL's
+snapshot wait boundary. Reports are in the same evidence directory under
+`iso-{base,change}/report/` and `iso-contrib-{base,change}/report/`.
+The full test_decoding module comparison and its remaining gaps are recorded
+in `tests/contrib/STATUS.md`.

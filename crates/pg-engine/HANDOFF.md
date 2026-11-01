@@ -1636,13 +1636,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       stops its worker (`Workers::stop_sync`), drops its origin and, unless SYNCDONE, its
       slot (missing_ok), as AlterSubscription_refresh does. Left: the LOG lines for missing
       slots in DROP SUBSCRIPTION / REFRESH go to the engine's tracing, not the server log.
-    - **test_decoding tail** (streaming of rolled-back subtransactions, stream 3,
-      twophase_stream 2, decoding_in_xact 1): not done. It needs a subtransaction's change
-      records to survive its ROLLBACK TO (rewritten as an aborted subtransaction's, with an
-      abort record at the ROLLBACK TO's position) and the decoder to replay
-      ReorderBuffer's memory accounting: stream what was decoded when the transaction
-      outgrew logical_decoding_work_mem, aborted subtransactions included, then "aborting
-      streamed (sub)transaction" at the abort; non-streamed replay skips them.
+    - **test_decoding tail**: a152 subsequently preserves rolled-back subtransaction
+      records and abort boundaries for streaming replay. Ordinary replay skips those
+      records. Its resume validation below records the remaining PostgreSQL differences.
     - **pgbench** (agent 119's two batches had no pgbench check): select-only and tpcb-like CPU
       per transaction and peak RSS at 898ef33a (before 15f967cd) against this round, BENCH.md.
     - Verified (agent 129): crate tests debug and release (incl. deep_input, logical_apply),
@@ -5995,3 +5991,64 @@ Then:
    section to STATUS.md (prose; its numbers come from full runs, HANDOFF "Regression suite"),
    commit with a clear message, and push the branch.
 ```
+
+## A152 logical replication resume (2026-11-01)
+
+The saved a152 batch was recovered through cherry-pick from `5fc8c86e` onto
+`daa881c7`. The partial monitoring commit `40f4554f` remains excluded.
+`repl/log.rs` retains rolled-back subtransaction records with their abort boundaries.
+The decoder counts those records while it buffers or streams and omits them from
+ordinary replay. Immediate streaming and SQL decoding of the caller's pending
+changes use the same replay driver.
+
+pgoutput writes each aborted subtransaction's id and abort timestamp, closes its
+stream block before an ordinary transaction, and tracks sent schemas separately
+for pending transactions. A pending PREPARE streamed without two-phase decoding
+receives a Stream Abort on ROLLBACK PREPARED. COMMIT PREPARED respects the slot's
+confirmed position when another SQL decoding call consumed PREPARE. Partition-root
+TRUNCATE is logged and published through a publication using the root.
+COMMIT PREPARED and ROLLBACK PREPARED reject implicit multi-statement blocks with
+SQLSTATE 25001. Their golden was recorded from PostgreSQL 18.6.
+
+Verification passes for `cargo build -p pg-engine`, the unfiltered
+`cargo test -p pg-engine --no-fail-fast`, `cargo clippy -p pg-engine`, and
+`pnpm test:pg --unit`. Clippy reports ten existing warnings. All sixteen
+logical_apply tests and all three complete golden modes pass. The first full
+test run exposed two new test assertions that were corrected before the clean
+rerun. Its failure log remains in the evidence directory.
+
+The PostgreSQL 18.6 comparisons use frozen base and change debug binaries.
+The main regression subset matches 2,884/2,884 units on both. Six transaction
+isolation specs match all 1,456 permutations and 15,927 steps on both.
+The full test_decoding module improves from 1,033/1,047 to 1,038/1,047,
+with five newly matching units and no newly differing units. Its nine unchanged
+gaps and the identical twophase_snapshot isolation gap are detailed in the
+regress and contrib STATUS prose. No generated full-suite counts changed.
+
+The saved scripts are now in `tools/bench/repl/`. They preserve data, own their
+processes and containers, check workload errors and row digests, join RSS samplers,
+and retain pgbench logs per round. The live nine-scenario comparison fails on both
+binaries. Seven complete scenarios agree. run_as_owner differs identically after
+ALTER on engine-to-engine replication. Base via_root retains 137 rows after
+partition-root TRUNCATE. The change passes three fresh focused via_root runs,
+including TRUNCATE, but its first complete run had an intermittent initial-copy
+gap: q contained 40 rather than 43 rows, and the table-sync worker retried after
+completion with a missing replication origin. That symptom has not been reproduced
+on the base and is not claimed fixed or proven pre-existing. The apply and
+tablesync implementation is unchanged by this batch. Full live parity remains
+unproven. A first live attempt exhausted the reference's default ten active
+origins. The corrected fixture allows eighty and the interrupted result is retained.
+
+Evidence, exact commands, failures, and cleanup are recorded in
+`/home/meszmate/.cache/a152-resume/verification.md`. The small debug tooling runs
+establish no throughput or speedup claim. The control-plane Docker e2e suite was
+not repeated under the user's override. Its parent baseline has twelve passes
+and four compute-to-host WAL HTTP timeouts in
+`/home/meszmate/.cache/pg-engine-sol-resume/postgres-check.log`.
+
+The apply and publisher fan-out scripts pass small checks with both publisher
+types, forty transactions, and identical row digests. The pgbench smoke run
+completes prepared select-only and TPC-B-like workloads on both base and change,
+with zero failed transactions. The final focused failover check verifies slot
+flags and SQLSTATE 55000 on both binaries. All owned processes and containers
+are stopped, with data retained. The worktree has one 21 GB target directory.
