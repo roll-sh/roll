@@ -19417,6 +19417,34 @@ pub fn expr_volatile_deep(e: &Expr) -> bool {
     v
 }
 
+/// Whether running `p` can be seen by itself, apart from its rows and errors: a volatile
+/// function, a function of the user's (it may raise a notice), a data change.
+pub fn plan_observable(p: &Plan) -> bool {
+    fn expr(e: &Expr) -> bool {
+        let mut v = false;
+        e.walk(&mut |x| match x {
+            Expr::Call(d, ..) if d.volatility == 'v' => v = true,
+            Expr::Subquery(s) => v |= s.func.is_some() || plan(&s.plan),
+            _ => {}
+        });
+        v
+    }
+    fn plan(p: &Plan) -> bool {
+        let user = |calls: &[super::plan::SrfCall]| {
+            calls.iter().any(|c| c.body.is_some() || c.func.oid >= 16384 || c.func.volatility == 'v')
+        };
+        let mut es = Vec::new();
+        node_exprs(p, &mut es);
+        match p {
+            _ if es.iter().any(|e| expr(e)) => true,
+            Plan::FunctionScan { calls, .. } | Plan::ProjectSet { srfs: calls, .. } if user(calls) => true,
+            Plan::PlCall { .. } | Plan::Insert(_) | Plan::Update(_) | Plan::Delete(_) | Plan::Merge(_) => true,
+            _ => plan_inputs(p).iter().any(|c| plan(c)),
+        }
+    }
+    plan(p)
+}
+
 fn plan_volatile_by(p: &Plan, vol: &dyn Fn(&Expr) -> bool) -> bool {
     let mut es = Vec::new();
     node_exprs(p, &mut es);

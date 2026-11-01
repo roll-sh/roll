@@ -2308,6 +2308,68 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     the executor's).
   - Base debug builds fail `deep_input` `viewdef 2000` ("stored query: Invalid statement:
     stack depth limit exceeded") before this batch: it happens at 3b55b060 too.
+- **Executor, round 7, batch 1** (round 24, agent 143; BENCH.md "Executor, round 7"):
+  - **Point fetches** (`storage/sst.rs`, `storage/cache.rs`). In TPC-H q20 the row fetches
+    waited on memory, not on instructions: every step of a seek was a cache miss.
+    - `SstReader`'s block index is one buffer of last keys (`BlockIndex`), not a vector per
+      block. `find_block` searches a number per block (`words`: the 8 bytes after the
+      prefix every last key shares) through a sample of every 64th (`top`), and compares
+      keys only among equal numbers. Unit test `block_index_find` checks it against a
+      search over the keys.
+    - A cached block keeps each restart's key as a number (`rwords`: the restart's 4 bytes
+      after the block's common prefix), so `seek`'s binary search reads one array instead
+      of a key per restart in the block's bytes.
+      The scan within the restart interval rebuilds keys only (values and derived index
+      values are left until the entry found).
+    - Entry headers are decoded inline (`head`), and the block cache's map is a hashbrown
+      (foldhash) map.
+    - Tried and dropped: keys sharing their bytes with their restart's key instead of the
+      entry before (random access within an interval). Index entries share far more with
+      their neighbour: TPC-H's cached blocks grew by ~100 MB.
+    - q20 warm, in process: 0.429 / 0.439 s -> 0.360 / 0.374 s (-16%); all 22: user
+      cycles -4.6%, instructions -1.1%, peak +13 / +21 MB (+0.8%: the restart numbers, about
+      4 bytes per 16 entries). Left in q20: the block cache lookup (5.7%, a miss on its map
+      and on the block's Arc), the seek's first touch of the block.
+  - **InitPlans of correlated sub-selects** (`exec/mod.rs` `subquery_rows_here`,
+    `enclosing_cache`): a sub-select whose parameters read only the enclosing queries'
+    rows (PostgreSQL's InitPlan inside a SubPlan, agent 133's EF Core case) runs once per
+    set of enclosing rows, as ExecSetParamPlan does when its parameter changes, not for
+    every row of the scan it sits in. Results are kept with the outer rows (`outer`'s
+    frames, held, compared by address). ANY / ALL sub-selects are SubPlans (rescanned at
+    every call) and keep the old path. Golden `a143_initplan_outer` (a notice per run:
+    PostgreSQL 4, the engine had 1,600).
+  - **Incremental Sort's presorted keys** (`exec/pghash.rs` `presorted_keys`, agent 133):
+    decided once per plan node (a thread-local map of Sort nodes held weakly, 4,096 at
+    most), not by an EXPLAIN tree per execution.
+  - **`EXECUTE p((SELECT ...))`** (`sql/binder` `Clause::ExecuteParam`,
+    `session/utility.rs` `prepared_args`, `session/explain_spi.rs`): EXECUTE's parameters
+    are EXPR_KIND_EXECUTE_PARAMETER: "cannot use subquery in EXECUTE parameter" (0A000),
+    and aggregates, window and set-returning functions "are not allowed in EXECUTE
+    parameters", for EXECUTE, EXPLAIN EXECUTE and CREATE TABLE AS EXECUTE. Golden
+    `a143_execute_param`.
+  - **A hash join's build that can be seen waits for the outer row** (`exec/nodes.rs`
+    `HashJoinNode::build_waits`, `sql/explain.rs` `plan_observable`): when ExecHashJoin
+    reads the outer side first (`JoinMeta::outer_first`, left / anti joins) and the inner
+    side calls a volatile function, a function of the user's (a notice) or changes data, the
+    outer side's first row is read before the build, and the join isn't pipelined into a
+    parallel scan's workers. Other builds still run first (the probes stay in the workers).
+    Golden `a143_hash_build_seen`.
+  - Measured, not changed: tpcb's `_mi_page_malloc_zero` is mimalloc's allocation path for
+    every small allocation (zeroed or not), and dwarf call graphs stop inside it; a build
+    with frame pointers (`RUSTFLAGS=-C force-frame-pointers=yes`, `CFLAGS=-fno-omit-frame-pointer`)
+    is what finds its callers. TPC-H q10 (2.4 s against 0.64): row decoding under the
+    lineitem scan (`skip_value`, `LazyBuf::read`, `decode_value`) leads; no serial hash build
+    shows.
+  - Reviewed: agent 131's kernel depth cap (aa8218a2: `K::run` recurses as deep as
+    `compile`, and And / Or are n-ary, so 256 costs common queries nothing); agent 138's
+    sum(float8) fix (floats go to parts as `Partial::Floats`, `fast_row` takes no floats).
+  - Verified: crate tests debug and release (crash_random seeds 1-30, deep_input), clippy
+    (no warning in the files changed), difftest smoke, isolation 134 / 136 specs with the
+    roll-* ones, 1,749 / 1,751 permutations (intra-grant-inplace and reindex-schema, as on
+    origin), a full regress run on a private reference 51,148 / 51,150 with 0 units changed against results.tsv, pg_dump_tap 14,817 /
+    14,817, every TPC-H SF1 result hash equal to PostgreSQL's (release), pgbench unchanged. Verified
+    at d3c9c8a7 (on 7c1f72b3), then rebased over 7dab0879..c97af248 (query memory, size
+    models, planner): compile, clippy and the targeted tests again.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

@@ -4476,6 +4476,7 @@ impl Binder<'_, '_> {
             Clause::Generated => Some("column generation expression"),
             Clause::PartitionBound => Some("partition bound"),
             Clause::CopyWhere => Some("COPY FROM WHERE condition"),
+            Clause::ExecuteParam => Some("EXECUTE parameter"),
             _ => None,
         };
         if let Some(what) = banned

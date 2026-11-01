@@ -681,7 +681,7 @@ impl Session {
             let mut b = Binder::new(ctx, Vec::new());
             let mut out = Vec::new();
             for (i, (n, t)) in s.params.iter().zip(&types).enumerate() {
-                let e = b.bind_scalar(n, Clause::Other)?;
+                let e = b.bind_scalar(n, Clause::ExecuteParam)?;
                 let given = e.ty();
                 let e = b.coerce_assign(e, t, "parameter").map_err(|err| {
                     if err.code == code::DATATYPE_MISMATCH {

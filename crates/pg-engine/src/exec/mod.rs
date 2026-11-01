@@ -314,6 +314,9 @@ pub struct ExecCtx<'a> {
     outer: RefCell<Vec<Rc<Row>>>,
     case_vals: RefCell<Vec<Value>>,
     subq_cache: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
+    /// Initplans reading the enclosing queries' rows: the rows of each with the outer rows
+    /// they were made for (`outer`'s, kept alive so they are told apart by address).
+    enclosing_cache: RefCell<HashMap<usize, (Vec<Rc<Row>>, Rc<Vec<Row>>)>>,
     pub ctes: RefCell<HashMap<usize, Rc<RefCell<nodes::CteState>>>>,
     pub work: RefCell<HashMap<usize, Rc<Vec<Row>>>>,
     /// Shared with child contexts: a COMMIT inside a procedure starts a new transaction time.
@@ -700,6 +703,7 @@ impl<'a> ExecCtx<'a> {
             outer: RefCell::new(Vec::new()),
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
+            enclosing_cache: RefCell::new(HashMap::default()),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: Rc::new(Cell::new(txn_time)),
@@ -828,6 +832,7 @@ impl<'a> ExecCtx<'a> {
             outer: RefCell::new(Vec::new()),
             case_vals: RefCell::new(Vec::new()),
             subq_cache: RefCell::new(HashMap::default()),
+            enclosing_cache: RefCell::new(HashMap::default()),
             ctes: RefCell::new(HashMap::default()),
             work: RefCell::new(HashMap::default()),
             txn_time: self.txn_time.clone(),
@@ -1184,9 +1189,37 @@ impl<'a> ExecCtx<'a> {
             return Ok(Rc::new(collect(&s.plan, self, limit)?));
         }
         // An initplan reading the enclosing subquery's values (a MIN / MAX over an index
-        // inside a correlated subquery): redone for each of them (its chgParam).
-        if s.params.is_empty() && !self.outer.borrow().is_empty() && reads_enclosing(&s.plan, 0) {
-            return Ok(Rc::new(collect(&s.plan, self, limit)?));
+        // inside a correlated subquery): redone when they change (its chgParam), not for
+        // every row of the scan it is in.
+        // So is one whose parameters read only the enclosing queries' rows (PostgreSQL's
+        // InitPlan of a correlated sub-select).
+        let outer_only = |p: &Expr| {
+            let mut only = true;
+            p.walk(&mut |x| match x {
+                Expr::Col(..) | Expr::Subquery(_) => only = false,
+                Expr::Call(d, ..) if d.volatility == 'v' => only = false,
+                _ => {}
+            });
+            only
+        };
+        // (ANY / ALL sub-selects are SubPlans, rescanned at every call: ExecScanSubPlan.)
+        if !self.outer.borrow().is_empty()
+            && !matches!(s.kind, SubqueryKind::Any | SubqueryKind::All)
+            && (if s.params.is_empty() { reads_enclosing(&s.plan, 0) } else { s.params.iter().all(outer_only) })
+        {
+            let same = |frames: &[Rc<Row>]| {
+                let outer = self.outer.borrow();
+                frames.len() == outer.len() && frames.iter().zip(outer.iter()).all(|(a, b)| Rc::ptr_eq(a, b))
+            };
+            if let Some((frames, rows)) = self.enclosing_cache.borrow().get(&s.id)
+                && same(frames)
+            {
+                return Ok(rows.clone());
+            }
+            let rows = Rc::new(self.run_with_params(s, row, limit)?);
+            let frames = self.outer.borrow().clone();
+            self.enclosing_cache.borrow_mut().insert(s.id, (frames, rows.clone()));
+            return Ok(rows);
         }
         if s.params.is_empty() {
             if let Some(r) = self.subq_cache.borrow().get(&s.id) {
@@ -1199,12 +1232,19 @@ impl<'a> ExecCtx<'a> {
             self.subq_cache.borrow_mut().insert(s.id, rows.clone());
             return Ok(rows);
         }
+        Ok(Rc::new(self.run_with_params(s, row, limit)?))
+    }
+
+    /// The rows of subquery `s` (its parameters, if any, evaluated over `row`).
+    fn run_with_params(&self, s: &Subquery, row: &[Value], limit: Option<usize>) -> Result<Vec<Row>> {
+        if s.params.is_empty() {
+            return collect(&s.plan, self, limit);
+        }
         let mut params = Vec::with_capacity(s.params.len());
         for p in &s.params {
             params.push(eval(p, row, self)?);
         }
-        let rows = self.with_outer(Rc::new(params), || collect(&s.plan, self, limit))?;
-        Ok(Rc::new(rows))
+        self.with_outer(Rc::new(params), || collect(&s.plan, self, limit))
     }
 
     /// An uncorrelated `x = ANY (subquery)` whose `=` compares equal values of one type

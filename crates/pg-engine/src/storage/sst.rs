@@ -396,8 +396,7 @@ pub struct SstReader {
     pub meta: SstMeta,
     file: File,
     path: PathBuf,
-    /// (last key, offset, len)
-    index: Vec<(Vec<u8>, u64, u32)>,
+    index: BlockIndex,
     bloom: Vec<u8>,
     /// Remainders by the bloom filter's bit count.
     bloom_mod: FastMod,
@@ -428,6 +427,12 @@ pub struct Block {
     data: Bytes,
     /// The offset of every `RESTART`th entry.
     restarts: Vec<u32>,
+    /// Each restart's key as a number (as `BlockIndex::words`, of 4 bytes: those after the
+    /// `common` bytes all restarts' keys start with). A seek searches these, not the
+    /// entries: a point read's block is seldom in the CPU's cache, and every restart it
+    /// compared was a miss (three quarters of `seek`).
+    rwords: Vec<u32>,
+    common: usize,
     len: usize,
     last_key: Box<[u8]>,
     /// The version (a key's last 8 bytes) entries flagged `F_TS` end with.
@@ -495,6 +500,25 @@ fn entry_head(b: &[u8], pos: &mut usize) -> Result<(usize, usize, usize)> {
     Ok((shared, unshared, vl))
 }
 
+/// `entry_head` of an entry `Block::decode` wrote, inline: a seek reads up to `RESTART`
+/// of them (the call was a tenth of TPC-H q20).
+#[inline(always)]
+fn head(b: &[u8], pos: &mut usize) -> (usize, usize, usize) {
+    #[inline(always)]
+    fn v(b: &[u8], pos: &mut usize) -> usize {
+        match b[*pos] {
+            x if x < 0x80 => {
+                *pos += 1;
+                x as usize
+            }
+            _ => get_varint_long(b, pos).expect("a checked block") as usize,
+        }
+    }
+    let shared = v(b, pos);
+    let unshared = v(b, pos);
+    (shared, unshared, v(b, pos))
+}
+
 /// `a ++ b` compared with `key`.
 fn cmp_split(a: &[u8], b: &[u8], key: &[u8]) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
@@ -534,8 +558,7 @@ impl Block {
     fn read(&self, pos: &mut BlockPos) {
         let b = &self.data[..];
         let mut p = pos.next as usize;
-        // (`decode` wrote every entry of the block.)
-        let (shared, us, vf) = entry_head(b, &mut p).expect("a checked block");
+        let (shared, us, vf) = head(b, &mut p);
         let unshared = us >> 2;
         pos.shared = shared as u32;
         pos.key.truncate(shared);
@@ -589,27 +612,83 @@ impl Block {
     /// The whole key of restart `r` compared with `key`.
     fn restart_cmp(&self, r: usize, key: &[u8]) -> std::cmp::Ordering {
         let mut p = self.restarts[r] as usize;
-        let (_, us, _) = entry_head(&self.data, &mut p).expect("a checked block");
+        let (_, us, _) = head(&self.data, &mut p);
         let stored = &self.data[p..p + (us >> 2)];
         cmp_split(stored, if us & F_TS != 0 { &self.ts } else { &[] }, key)
+    }
+
+    /// The first restart whose key is >= `key` (`restarts.len()`: none).
+    fn first_restart(&self, key: &[u8]) -> usize {
+        let n = self.restarts.len();
+        if n == 0 {
+            return 0;
+        }
+        let c = self.common;
+        let m = c.min(key.len());
+        // (Restart 0 stores its key's first `common` bytes whole.)
+        let mut p = self.restarts[0] as usize;
+        head(&self.data, &mut p);
+        match key[..m].cmp(&self.data[p..p + m]) {
+            std::cmp::Ordering::Less => return 0,
+            std::cmp::Ordering::Greater => return n,
+            std::cmp::Ordering::Equal if key.len() < c => return 0,
+            std::cmp::Ordering::Equal => {}
+        }
+        let w = (word(&key[c..]) >> 32) as u32;
+        let mut lo = self.rwords.partition_point(|&x| x < w);
+        while lo < n && self.rwords[lo] == w && self.restart_cmp(lo, key).is_lt() {
+            lo += 1;
+        }
+        lo
     }
 
     /// `pos` at the first entry whose key is >= `key` (`len`: none).
     pub fn seek(&self, key: &[u8], pos: &mut BlockPos) {
         // The first restart whose key is >= `key`; the entries from the one before it.
-        let (mut lo, mut hi) = (0, self.restarts.len());
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if self.restart_cmp(mid, key).is_lt() {
-                lo = mid + 1;
-            } else {
-                hi = mid;
+        let lo = self.first_restart(key);
+        let r = lo.saturating_sub(1);
+        if r >= self.restarts.len() {
+            pos.i = self.len;
+            return;
+        }
+        // The keys from the restart's on, the entries' values left alone until the one
+        // found.
+        pos.next = self.restarts[r];
+        pos.key.clear();
+        pos.i = r * RESTART;
+        self.read(pos);
+        if pos.key.as_slice() >= key {
+            return;
+        }
+        let b = &self.data[..];
+        let end = ((r + 1) * RESTART).min(self.len);
+        let mut p = pos.next as usize;
+        for i in pos.i + 1..end {
+            let at = p;
+            let (shared, us, vf) = head(b, &mut p);
+            let unshared = us >> 2;
+            pos.key.truncate(shared);
+            pos.key.extend_from_slice(&b[p..p + unshared]);
+            if us & F_TS != 0 {
+                pos.key.extend_from_slice(&self.ts);
+            }
+            // (`read` makes this key again from the one it has: their first `shared` bytes
+            // are the same.)
+            if pos.key.as_slice() >= key {
+                pos.next = at as u32;
+                pos.i = i;
+                self.read(pos);
+                return;
+            }
+            p += unshared;
+            if us & F_DERIVED == 0 && vf > 0 {
+                p += vf - 1;
             }
         }
-        self.at(lo.saturating_sub(1) * RESTART, pos);
-        while pos.i < self.len && pos.key.as_slice() < key {
-            self.step(pos);
-        }
+        // (The next restart's entry: its key is >= `key`, or the block ends.)
+        pos.next = p as u32;
+        pos.i = end - 1;
+        self.step(pos);
     }
 
     /// The value at `pos` (None: a tombstone).
@@ -642,7 +721,7 @@ impl Block {
 
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
-        self.data.len() + self.restarts.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
+        self.data.len() + self.restarts.capacity() * 4 + self.rwords.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
@@ -683,6 +762,9 @@ impl Block {
         let mut restarts = Vec::with_capacity(raw.len() / 512 + 1);
         let mut out = Vec::with_capacity(raw.len());
         let mut key: Vec<u8> = Vec::new();
+        // (The last restart's key.)
+        // (Every restart's key, and how much of the first one is stored.)
+        let (mut rkeys, mut rends, mut stored0) = (Vec::new(), Vec::new(), 0);
         let mut ts = None;
         let mut derived = false;
         let (mut pos, mut n) = (0, 0usize);
@@ -717,6 +799,11 @@ impl Block {
             }
             let share = if n.is_multiple_of(RESTART) {
                 restarts.push(out.len() as u32);
+                rkeys.extend_from_slice(&key);
+                rends.push(rkeys.len());
+                if n == 0 {
+                    stored0 = ukey;
+                }
                 0
             } else {
                 common.min(ukey)
@@ -732,9 +819,20 @@ impl Block {
         }
         out.shrink_to_fit();
         restarts.shrink_to_fit();
+        let rkey_at = |i: usize| &rkeys[if i == 0 { 0 } else { rends[i - 1] }..rends[i]];
+        let common = match rends.len() {
+            0 => 0,
+            k => {
+                let (a, b) = (rkey_at(0), rkey_at(k - 1));
+                a.iter().zip(b).take_while(|(x, y)| x == y).count().min(stored0)
+            }
+        };
+        let rwords = (0..rends.len()).map(|i| (word(&rkey_at(i)[common..]) >> 32) as u32).collect();
         Ok(Block {
             data: Bytes::from(out),
             restarts,
+            rwords,
+            common,
             len: n,
             last_key: key.as_slice().into(),
             ts: ts.unwrap_or([0xFF; 8]),
@@ -870,18 +968,30 @@ impl SstReader {
         file.read_exact_at(&mut bloom, f(2))?;
         let mut pos = 0;
         let n = get_varint(&index_buf, &mut pos)? as usize;
-        let mut index = Vec::with_capacity(n);
+        let mut index = BlockIndex {
+            keys: Vec::with_capacity(index_buf.len()),
+            ends: Vec::with_capacity(n),
+            at: Vec::with_capacity(n),
+            common: 0,
+            words: Vec::new(),
+            top: Vec::new(),
+        };
         for _ in 0..n {
             let kl = get_varint(&index_buf, &mut pos)? as usize;
-            let mut k = index_buf[pos..pos + kl].to_vec();
+            let k = index_buf.get(pos..pos + kl).ok_or_else(|| internal("bad sst index"))?;
+            let start = index.keys.len();
+            index.keys.extend_from_slice(k);
             if let Some(ts) = meta.commit_ts {
-                set_ts(&mut k, ts);
+                set_ts(&mut index.keys[start..], ts);
             }
             pos += kl;
             let off = get_varint(&index_buf, &mut pos)?;
             let l = get_varint(&index_buf, &mut pos)? as u32;
-            index.push((k, off, l));
+            index.ends.push(index.keys.len() as u32);
+            index.at.push((off, l));
         }
+        index.keys.shrink_to_fit();
+        index.index_words();
         let cache_id = cache.next_file_id();
         Ok(SstReader {
             meta,
@@ -919,13 +1029,12 @@ impl SstReader {
     }
 
     pub fn block_count(&self) -> usize {
-        self.index.len()
+        self.index.at.len()
     }
 
     /// Index of the first block whose last key is >= `key`.
     pub fn find_block(&self, key: &[u8]) -> usize {
-        self.index
-            .partition_point(|(last, _, _)| last.as_slice() < key)
+        self.index.find(key)
     }
 
     pub fn block(&self, i: usize) -> Result<CachedBlock> {
@@ -939,7 +1048,7 @@ impl SstReader {
         if let Some(b) = self.cache.get(self.cache_id, i as u32) {
             return Ok(b);
         }
-        let (_, off, len) = &self.index[i];
+        let (off, len) = &self.index.at[i];
         let mut buf = vec![0u8; *len as usize];
         self.file.read_exact_at(&mut buf, *off)?;
         if buf.len() < 5 {
@@ -982,6 +1091,95 @@ impl SstReader {
     }
 }
 
+/// A file's blocks: each one's last key (one buffer), offset and length. A point read's
+/// `find` searches `words`, one number per block: a search over the keys themselves
+/// (a vector each) missed the cache at every step, a sixth of TPC-H q20's fetches.
+struct BlockIndex {
+    keys: Vec<u8>,
+    ends: Vec<u32>,
+    at: Vec<(u64, u32)>,
+    /// The bytes every last key starts with.
+    common: usize,
+    /// Each last key's 8 bytes after `common`, as a big-endian number (zeros past its
+    /// end): a smaller word is a smaller key; equal words leave it to the keys.
+    words: Vec<u64>,
+    /// Every `TOP`th word: the search starts here (a few cache lines), then reads one run
+    /// of `TOP` words.
+    top: Vec<u64>,
+}
+
+const TOP: usize = 64;
+
+fn word(b: &[u8]) -> u64 {
+    let mut w = [0u8; 8];
+    let n = b.len().min(8);
+    w[..n].copy_from_slice(&b[..n]);
+    u64::from_be_bytes(w)
+}
+
+impl BlockIndex {
+    fn key(&self, i: usize) -> &[u8] {
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        &self.keys[start..self.ends[i] as usize]
+    }
+
+    fn index_words(&mut self) {
+        let n = self.ends.len();
+        if n == 0 {
+            return;
+        }
+        // (Sorted keys: what the first and last share, all share.)
+        let (a, b) = (self.key(0), self.key(n - 1));
+        self.common = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+        let words: Vec<u64> = (0..n).map(|i| word(&self.key(i)[self.common..])).collect();
+        self.top = words.iter().step_by(TOP).copied().collect();
+        self.words = words;
+    }
+
+    /// The first block whose last key is >= `key` (`at.len()`: none).
+    fn find(&self, key: &[u8]) -> usize {
+        let n = self.words.len();
+        if n == 0 {
+            return 0;
+        }
+        let c = self.common;
+        let m = c.min(key.len());
+        match key[..m].cmp(&self.key(0)[..m]) {
+            std::cmp::Ordering::Less => return 0,
+            std::cmp::Ordering::Greater => return n,
+            // (A prefix of what every last key starts with: below them all.)
+            std::cmp::Ordering::Equal if key.len() < c => return 0,
+            std::cmp::Ordering::Equal => {}
+        }
+        let w = word(&key[c..]);
+        // (Sampled word j is words[j * TOP]: the first word >= w is after the last sample
+        // below it and at or before the next.)
+        let j = self.top.partition_point(|&x| x < w);
+        let from = if j == 0 { 0 } else { (j - 1) * TOP + 1 };
+        let to = (j * TOP + 1).min(n);
+        let lo = from + self.words[from..to].partition_point(|&x| x < w);
+        // (Equal words are few but for keys alike in their first 8 bytes past `common`.)
+        let mut hi = lo;
+        while hi < n && self.words[hi] == w {
+            hi += 1;
+            if hi - lo == 8 {
+                hi = lo + self.words[lo..].partition_point(|&x| x == w);
+                break;
+            }
+        }
+        let (mut a, mut b) = (lo, hi);
+        while a < b {
+            let mid = (a + b) / 2;
+            if self.key(mid) < key {
+                a = mid + 1;
+            } else {
+                b = mid;
+            }
+        }
+        a
+    }
+}
+
 impl Drop for SstReader {
     fn drop(&mut self) {
         self.cache.forget_file(self.cache_id);
@@ -994,6 +1192,47 @@ impl Drop for SstReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BlockIndex::find` is the first last key >= the key, as a search over the keys is:
+    /// keys that share long prefixes, differ past the word, are prefixes of each other or
+    /// of the common part, and keys outside the range.
+    #[test]
+    fn block_index_find() {
+        let mut seed = 7u64;
+        let mut rnd = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for case in 0..200 {
+            let pre: Vec<u8> = (0..rnd(6)).map(|_| rnd(3) as u8).collect();
+            let mut keys: Vec<Vec<u8>> = (0..1 + rnd(if case % 3 == 0 { 40 } else { 400 }))
+                .map(|_| {
+                    let mut k = pre.clone();
+                    k.extend((0..rnd(14)).map(|_| if case % 2 == 0 { rnd(3) as u8 } else { rnd(256) as u8 }));
+                    k
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            let mut ix = BlockIndex { keys: Vec::new(), ends: Vec::new(), at: Vec::new(), common: 0, words: Vec::new(), top: Vec::new() };
+            for k in &keys {
+                ix.keys.extend_from_slice(k);
+                ix.ends.push(ix.keys.len() as u32);
+                ix.at.push((0, 0));
+            }
+            ix.index_words();
+            for _ in 0..60 {
+                let mut probe = if rnd(2) == 0 { pre.clone() } else { keys[rnd(keys.len() as u64) as usize].clone() };
+                probe.truncate(rnd(probe.len() as u64 + 1) as usize);
+                probe.extend((0..rnd(12)).map(|_| rnd(4) as u8));
+                let want = keys.partition_point(|k| k.as_slice() < probe.as_slice());
+                assert_eq!(ix.find(&probe), want, "{keys:?} {probe:?}");
+            }
+            for (i, k) in keys.iter().enumerate() {
+                assert_eq!(ix.find(k), i);
+            }
+        }
+    }
 
     /// The bloom filter's bits must not change with how they are computed: files written
     /// before are read with the same bits.
@@ -1112,6 +1351,13 @@ mod tests {
                     assert_eq!(e.seek(&probe), want);
                     if want < ents.len() {
                         assert_eq!(pos.key(), ents[want].0.as_slice());
+                        assert_eq!(b.value_ref(&pos), ents[want].1.as_deref());
+                        // (A cursor goes on from a seek's place.)
+                        let mut next = pos.clone();
+                        b.step(&mut next);
+                        if want + 1 < ents.len() {
+                            assert_eq!(next.key(), ents[want + 1].0.as_slice());
+                        }
                     }
                 }
             }

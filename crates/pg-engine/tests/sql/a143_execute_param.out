@@ -1,0 +1,52 @@
+> PREPARE a143_p(int) AS SELECT $1 + 1 AS r
+-- PREPARE
+
+> EXECUTE a143_p(1)
+r:int4
+2
+-- SELECT 1
+
+> EXECUTE a143_p((SELECT 2))
+ERROR 0A000: cannot use subquery in EXECUTE parameter (at 16)
+
+> EXECUTE a143_p(1 + (SELECT 2))
+ERROR 0A000: cannot use subquery in EXECUTE parameter (at 20)
+
+> EXECUTE a143_p(EXISTS (SELECT 1)::int)
+ERROR 0A000: cannot use subquery in EXECUTE parameter (at 16)
+
+> EXECUTE a143_p(count(*))
+ERROR 42803: aggregate functions are not allowed in EXECUTE parameters (at 16)
+
+> EXECUTE a143_p(row_number() OVER ())
+ERROR 42P20: window functions are not allowed in EXECUTE parameters (at 16)
+
+> EXECUTE a143_p(generate_series(1, 2))
+ERROR 0A000: set-returning functions are not allowed in EXECUTE parameters (at 16)
+
+> EXECUTE a143_p(a143_nosuch)
+ERROR 42703: column "a143_nosuch" does not exist (at 16)
+
+> EXPLAIN (COSTS OFF) EXECUTE a143_p((SELECT 2))
+ERROR 0A000: cannot use subquery in EXECUTE parameter (at 36)
+
+> EXPLAIN (COSTS OFF) EXECUTE a143_p(sum(1))
+ERROR 42803: aggregate functions are not allowed in EXECUTE parameters (at 36)
+
+> CREATE TEMP TABLE a143_t AS EXECUTE a143_p((SELECT 3))
+ERROR 0A000: cannot use subquery in EXECUTE parameter (at 44)
+
+> CREATE TEMP TABLE a143_t AS EXECUTE a143_p(3)
+-- SELECT 1
+
+> SELECT * FROM a143_t
+r:int4
+4
+-- SELECT 1
+
+> DROP TABLE a143_t
+-- DROP TABLE
+
+> DEALLOCATE a143_p
+-- DEALLOCATE
+

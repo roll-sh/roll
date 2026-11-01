@@ -438,6 +438,8 @@ pub enum Clause {
     /// A FROM subquery being bound: its query level's clause (an aggregate of that level
     /// can't be there).
     FromSubselect,
+    /// EXECUTE's parameter values (EXPR_KIND_EXECUTE_PARAMETER).
+    ExecuteParam,
     Other,
 }
 
@@ -472,6 +474,7 @@ impl Clause {
             Clause::Call => "CALL",
             Clause::Policy => "policy expressions",
             Clause::FromSubselect => "FROM clause of their own query level",
+            Clause::ExecuteParam => "EXECUTE parameters",
             Clause::Other => "this context",
         }
     }

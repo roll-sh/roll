@@ -3,7 +3,8 @@
 
 use super::sst::Block;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+// (foldhash: a lookup per block read, SipHash was a fifth of it.)
+use hashbrown::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 

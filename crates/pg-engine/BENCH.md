@@ -1544,6 +1544,55 @@ between rounds (select-only 42.6k / 33.9k base, 34.6k / 39.0k new).
   runs agree, statistics included. `big_tables` `deferred_entry_deletes`: inline over a
   table too big to model.
 
+## Executor, round 7 (round 24, agent 143)
+
+Release builds with line tables. **base** is the branch at `7c1f72b3`; **batch 1** is this
+round's first batch on top of it. One engine per run, PostgreSQL 18.6 the pinned image with
+the bench settings, on the host network. The machine ran at load ~40 of 36 CPUs with every
+job at nice 19, so wall times are loose; user-space instructions and cycles (`perf stat -e
+instructions:u,cycles:u` of the engine process) are the measure.
+
+### TPC-H SF1 (all 22 over the wire; a fresh engine each, a warm-up run, then the measured one)
+
+| | base | batch 1 |
+|---|---|---|
+| user instructions, 10^9 | 427.7, 428.5 | 423.1, 423.8 (-1.1%) |
+| user cycles, 10^9 | 240.9, 240.9 | 232.3, 227.4 (-4.6%) |
+| peak (VmHWM) | 2,128, 2,122 MB | 2,141, 2,144 MB (+0.8%) |
+
+All 22 result hashes equal PostgreSQL's in every run. The peak's growth is the blocks'
+restart numbers (4 bytes per 16 entries, every block of TPC-H's 1.4 GB in the cache).
+
+### q20 (in process, 15 warm runs, interleaved)
+
+| | base | batch 1 |
+|---|---|---|
+| median | 0.429, 0.439 s | 0.360, 0.374 s (-16%) |
+| peak | 1,077 MB | 1,086 MB |
+
+Where q20's fetches went (share of user cycles, warm):
+
+| | base | batch 1 |
+|---|---|---|
+| `find_block` (in `get_versions_with`) + its key compares | ~15% | 5.3% |
+| `Block::seek` / `read` / `entry_head` | 15% | ~13% |
+| `BlockCache::get` | 4.0% | 5.7% |
+
+What is left is memory latency: a point read's block, its restart array and its cache entry
+are seldom in the CPU's cache.
+
+### pgbench (scale 10, `-M prepared`, 8 clients, 15 s after a 5 s warm-up, fresh engine; base, batch 1, batch 1, base)
+
+| | base | batch 1 |
+|---|---|---|
+| select-only: engine CPU ms / 1,000 transactions | 66, 69 | 67, 66 |
+| simple-update | 313, 320 | 312, 322 |
+| tpcb-like | 605, 641 | 597, 619 |
+| peak RSS | 438, 459 MB | 439, 470 MB |
+| TPS select-only / tpcb-like | 83.1k, 79.2k / 9,861, 9,305 | 79.8k, 82.5k / 9,749, 9,751 |
+
+Unchanged (within the spread between rounds of one build).
+
 ## Round 23 (agent 121): executor speed and memory, round 5
 
 Same harness and settings; both servers on cores 28-31, the client on 6-7. **pg** is

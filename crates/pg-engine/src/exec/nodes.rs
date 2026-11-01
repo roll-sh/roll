@@ -4304,6 +4304,14 @@ impl HashJoinNode {
             && (self.outer_first || matches!(self.kind, JoinKind::Left | JoinKind::Anti))
     }
 
+    /// Whether the outer side's first row is read before the build: as ExecHashJoin does
+    /// when that shows, under EXPLAIN ANALYZE (the Hash "never executed") or when the build
+    /// can be seen by itself (a notice, a volatile call). Otherwise the build comes first,
+    /// so the probes can run in a parallel scan's workers.
+    fn build_waits(&self, ctx: &ExecCtx) -> bool {
+        self.reads_outer_first() && (ctx.instrumented() || crate::sql::explain::plan_observable(&self.right_plan))
+    }
+
     /// The build failed with `e`: as ExecHashJoin, which would have read the outer side
     /// first, nothing when that has no row (the inner side never ran), else the error (the
     /// outer side's own first, if it fails).
@@ -4596,12 +4604,10 @@ impl HashJoinNode {
             };
             self.first = Some(l);
         }
-        // ExecHashJoin's first outer row before the build, read here under EXPLAIN ANALYZE
-        // (its Hash shows "never executed" over an empty outer side); otherwise the build
-        // comes first, so the probes can run in a parallel scan's workers, and only its
-        // failure asks whether the outer side has a row.
+        // ExecHashJoin's first outer row before the build (`build_waits`); otherwise only
+        // the build's failure asks whether the outer side has a row.
         let outer_first = self.table.is_none() && self.reads_outer_first();
-        if outer_first && self.first.is_none() && ctx.instrumented() {
+        if outer_first && self.first.is_none() && self.build_waits(ctx) {
             match self.left.next(ctx)? {
                 None => return Ok(None),
                 Some(l) => self.first = Some(l),
@@ -4784,7 +4790,8 @@ impl Node for HashJoinNode {
         spec: Option<Arc<super::partial::Spec>>,
         ctx: &ExecCtx,
     ) -> Result<Option<u8>> {
-        if self.tried || self.table.is_some() {
+        // (A build that waits for the outer side's first row runs in `step`.)
+        if self.tried || self.table.is_some() || self.build_waits(ctx) {
             return Ok(None);
         }
         let with_spec = spec.is_some();

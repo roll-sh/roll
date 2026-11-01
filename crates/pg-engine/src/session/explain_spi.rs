@@ -56,7 +56,7 @@ pub(crate) fn explain(
         };
         let mut b = Binder::new(ctx, Vec::new());
         for (n, t) in e.params.iter().zip(&p.param_types) {
-            let x = b.bind_scalar(n, crate::sql::binder::Clause::Other)?;
+            let x = b.bind_scalar(n, crate::sql::binder::Clause::ExecuteParam)?;
             let x = b.coerce_assign(x, t, "parameter")?;
             values.push(crate::sql::expr::eval(&x, &[], ctx)?);
         }

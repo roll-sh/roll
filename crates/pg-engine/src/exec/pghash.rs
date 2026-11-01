@@ -831,14 +831,32 @@ pub fn presorted_keys(plan: &std::sync::Arc<crate::sql::plan::Plan>, ctx: &super
             _ => break,
         }
     }
-    let key = std::sync::Arc::as_ptr(plan) as usize | 1;
-    if let Some(r) = ctx.estimates.borrow().get(&key) {
-        return *r as usize;
+    let key = std::sync::Arc::as_ptr(plan) as usize;
+    if let Some(r) = PRESORTED.with_borrow(|m| m.get(&key).map(|e| e.1)) {
+        return r;
     }
     let r = crate::sql::explain::estimate(plan, ctx).presorted;
-    ctx.estimates.borrow_mut().insert(key, r as f64);
+    PRESORTED.with_borrow_mut(|m| {
+        if m.len() >= PRESORTED_MAX {
+            m.retain(|_, (w, _)| w.strong_count() > 0);
+            if m.len() >= PRESORTED_MAX {
+                m.clear();
+            }
+        }
+        m.insert(key, (std::sync::Arc::downgrade(plan), r));
+    });
     r
 }
+
+thread_local! {
+    /// `presorted_keys` by Sort node, decided once for a plan, as the planner decides it:
+    /// a kept plan's executions built an EXPLAIN tree each (3-9% of some applications'
+    /// CPU). The node is held weakly, which keeps its memory: no other node is made at
+    /// its address while it is here.
+    static PRESORTED: std::cell::RefCell<std::collections::HashMap<usize, (std::sync::Weak<crate::sql::plan::Plan>, usize)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+const PRESORTED_MAX: usize = 4096;
 
 #[cfg(test)]
 mod tests {
