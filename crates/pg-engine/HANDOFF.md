@@ -3678,9 +3678,9 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - Goldens `a150_hashjoin_spill` and `a150_hashjoin_edges` compare results with PostgreSQL
     18.6 for inner, left, right, full, semi, and anti joins. They cover NULL keys, composite
     keys, mixed integer keys, residual join filters, skew, empty inputs, runtime batch
-    growth, and `temp_file_limit`. The spill golden also compares unordered result digests
-    and EXPLAIN ANALYZE's buckets, batches, and memory. `NodeStats::hashjoin` records the
-    serial executor's counts. Parallel Hash still uses EXPLAIN's model and runs serially.
+    growth, and `temp_file_limit`. The spill golden also compares output digests without
+    ORDER BY and EXPLAIN ANALYZE's buckets, batches, and memory. `NodeStats::hashjoin`
+    records the serial executor's counts. Parallel Hash still uses EXPLAIN's model and runs serially.
   - `spill::TempAcct` separates PostgreSQL's per-file accounting from the engine's physical
     file. Completed batch reads count flushed tail bytes. Normal completion, LIMIT, an
     expression error, and repeated temp-file-limit errors release physical spill files,
@@ -3689,8 +3689,10 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     accounting. For 12,000 integer keys, a completed join followed by LIMIT 1 reports
     21 files and 735,296 bytes instead of PostgreSQL's 27 files and 759,192 bytes.
     `hash_join_limit_temp_accounting_matches_postgres` is an ignored failing reproducer.
-    The same missing teardown flush can delay a temp-file-limit error. Node teardown has
-    no fallible cleanup path for this case; this batch does not add one.
+    At `temp_file_limit = '224kB'`, the LIMIT query succeeds where PostgreSQL raises
+    the limit error. Node teardown has no fallible cleanup path for this case;
+    this batch does not add one. Completed joins and explicitly skipped batches
+    match PostgreSQL's temp-file counts in the focused probes.
   - `tests/memory_load.rs` compares the build heap for a warm 16,000-row join with 1 kB
     payloads at 64 kB and 64 MB work_mem. The spilling build must stay below 16 MB and
     below half the in-memory build's peak. PostgreSQL's work_mem accounting is not a hard
@@ -3709,6 +3711,21 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   - The interrupted debug and TPC-H artifacts remain read-only in `~/.cache/a150`.
     Their timings are not verified measurements of this base. No speedup is claimed.
     Resume evidence and command logs are in `~/.cache/a150-resume-t3-864cc5fb`.
+  - Resumed verification at `48122351`: the three a150 goldens pass in-process, on the
+    wire, and shuffled. Cleanup and allocation tests pass. Fresh debug regression
+    subsets of this change and exact base `251924c1` both match 4,086/4,087 units,
+    with identical result rows and the same existing `join` 368 EXPLAIN difference.
+    Contrib pg_stat_statements and auto_explain match 1,025/1,025 units.
+    These subset results do not replace the generated full-suite regression report.
+    `cargo build -p pg-engine`, full `cargo test -p pg-engine --no-fail-fast`,
+    `cargo clippy -p pg-engine`, and `pnpm test:pg --unit` pass through heavy.sh.
+    Clippy's ten warnings match the base. The full Docker e2e suite was not repeated:
+    the parent baseline has four recovery failures from compute-to-host WAL HTTP
+    timeouts, recorded in `~/.cache/pg-engine-sol-resume/postgres-check.log`.
+    Isolation merge-join, temp-schema-cleanup, multiple-row-versions, and eval-plan-qual
+    match 63/63 permutations and 400/400 steps on both this change and the base.
+    A focused probe matches PostgreSQL's 100 kB temp-file-limit errors and successful
+    results after RESET for inner, left, right, full, semi, anti, and reversed semi/anti joins.
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index
@@ -5556,9 +5573,10 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   nodeAgg's and nodeHash's accounting, aset.c / bump.c blocks), not by
   the engine's own bytes; their temporary files count PostgreSQL's tape sizes
   (temp_file_limit, pg_stat_database temp_files / temp_bytes, pg_stat_statements temp
-  blocks, log_temp_files). Memory and disk numbers in EXPLAIN ANALYZE are the model's: within
-  a few blocks of PostgreSQL's (sort Disk exact for one merge pass, quicksort Memory exact,
-  HashAggregate Memory Usage within 8 kB without by-reference transitions), accepted as
+  blocks, log_temp_files). Hash joins stopped early have the teardown accounting gap
+  described in "Query memory, round 2". Memory and disk numbers in EXPLAIN ANALYZE are
+  the model's: within a few blocks of PostgreSQL's (sort Disk exact for one merge pass,
+  quicksort Memory exact, HashAggregate Memory Usage within 8 kB without by-reference transitions), accepted as
   internal differences; methods and batch counts are PostgreSQL's. A large transaction's
   write buffer (`txn::spill`) has no PostgreSQL counterpart and counts as no temporary file.
   The subscriber's spool of a streamed transaction (`repl/apply_stream`) stands for the

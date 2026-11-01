@@ -37,6 +37,26 @@ Build, complete crate tests, Clippy, and `pnpm test:pg --unit` pass. The memory-
 120 MB bound failed intermittently on both the unchanged base and this batch before
 the final full crate rerun passed. No performance improvement is claimed.
 The generated full-suite counts below remain unchanged.
+Round 24, agent 150 (resumed query memory): serial hash joins spill their build and
+probe batches and report the executor's Hash memory counters. PostgreSQL 18.6 goldens
+cover inner, outer, semi, and anti joins, including NULLs, composite keys, residual
+filters, skew, and batch growth. Fresh debug runs of base `251924c1` and implementation
+`48122351` both match 4,086/4,087 units of test_setup, create_misc, create_table,
+create_index, create_view, join, join_hash, aggregates, incremental_sort, window,
+tuplesort, explain, and memoize. Their result rows and differing hunk are identical.
+The remaining `join` unit 368 EXPLAIN difference already exists on the base.
+Contrib pg_stat_statements and auto_explain match 1,025/1,025 units. The four
+targeted isolation specs match 63/63 permutations and 400/400 steps on both binaries.
+Reports are in `~/.cache/a150-resume-t3-864cc5fb/{regress,baseline-regress}/report/`.
+The first pair used contrib's reference settings and is retained as misconfigured
+evidence; the reported pair disables reference query IDs for the main suite.
+This subset leaves all generated full-suite counts below unchanged.
+
+Early LIMIT still drops buffered hash-batch tails without PostgreSQL's final temp
+accounting flush. Physical files close, but `temp_files`, `temp_bytes`, and a late
+`temp_file_limit` error can differ. The ignored failing test
+`hash_join_limit_temp_accounting_matches_postgres` preserves the reproducer.
+See HANDOFF.md, "Query memory, round 2", and the evidence directory's `verification.md`.
 
 Round 24, agent 144 (resumed bpchar equality probes): fixed-width char(n) equality and
 ANY probes trim trailing spaces and pad to the key width. Overlong probes remain
