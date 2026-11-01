@@ -8,6 +8,18 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Round 24, agent 153 (foreign joins and declared cursors): local EPQ rechecks retain
+foreign join copy marks, and cursor connection initialization follows plan preparation.
+Build, full crate tests, Clippy, PostgreSQL units, and recorded golden modes pass at
+`f350cef4`. The paired contrib subset matches 2,349/2,458 on both base `063333c0` and
+change, with identical differing-unit sets. Existing EXPLAIN units 266/268 and cursor-error
+unit 2024 have changed hunks. Paired isolation matches 4/6 permutations and 27/29 steps
+on each build; both differences are EXPLAIN text. Six native FDW tests include concurrent
+remote-row preservation and the cursor lifecycle reproducer. The report classifier now
+keeps remote SQL connection errors distinct from psql disconnects. Error-message parity
+remains incomplete. Evidence: `~/.cache/a153-parent-resume/verification.md`.
+Generated full-suite counts remain unchanged.
+
 Round 24, agent 149 (stored scans): bytewise string predicates compare encoded values
 without row decoding when the kernel has direct column operands. Deterministic ICU
 equality is eligible. ICU ordering and nondeterministic comparisons retain their

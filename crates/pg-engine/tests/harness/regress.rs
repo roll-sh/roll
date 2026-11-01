@@ -2406,8 +2406,9 @@ fn classify(stmt: &str, r: &[String], e: Option<&[String]>, cfuncs: &[String]) -
         return (Class::ByDesign, "tablespace with a real directory".into());
     }
     if e.iter().any(|l| {
-        l.contains("server closed the connection unexpectedly")
-            || l.contains("connection to server was lost")
+        !l.trim_start().starts_with("ERROR:")
+            && (l.contains("server closed the connection unexpectedly")
+                || l.contains("connection to server was lost"))
     }) {
         return (Class::Aborted, "engine connection lost (crash)".into());
     }
@@ -3067,6 +3068,26 @@ fn short_class(c: Class) -> &'static str {
         Class::KnockOn => "knock-on",
         Class::ByDesign => "by design",
     }
+}
+
+#[test]
+fn classify_remote_connection_error() {
+    let reference = vec!["ERROR:  no connection to the server".to_owned()];
+    let remote_error = vec!["ERROR:  connection to server was lost".to_owned()];
+    let disconnect = vec!["connection to server was lost".to_owned()];
+    let prefixed_disconnect = vec!["psql:queries.sql:1: connection to server was lost".to_owned()];
+    assert!(matches!(
+        classify("FETCH c;", &reference, Some(&remote_error), &[]).0,
+        Class::WrongErrorMessage
+    ));
+    assert!(matches!(
+        classify("FETCH c;", &reference, Some(&disconnect), &[]).0,
+        Class::Aborted
+    ));
+    assert!(matches!(
+        classify("FETCH c;", &reference, Some(&prefixed_disconnect), &[]).0,
+        Class::Aborted
+    ));
 }
 
 #[test]

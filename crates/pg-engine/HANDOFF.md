@@ -5875,6 +5875,36 @@ bound as a ROW() of its columns) (`SELECT x.a, s FROM t x, (... OFFSET 0) s`). (
 over the subquery's own scan it is `s.*` and its `IS NULL` stays whole since round 16, agent
 29.)
 
+## Foreign join rechecks and cursor connections (round 24, agent 153)
+
+Foreign join paths retain a local EvalPlanQual plan and base whole-row copy marks.
+A local locking join can push its foreign join while retaining the rows fetched before
+it waits. DECLARE opens foreign connections before FETCH. Cursor preparation initializes
+foreign scans after cloning targets and quals, so projected and volatile cursor plans
+retain the declared connection through savepoint abort cleanup.
+
+Implementation `36b7a6c6` and cursor correction `f350cef4` pass build, the complete crate
+suite (400 passed, 18 ignored), Clippy, and `pnpm test:pg --unit`. Six fdw_loopback tests
+pass. Reversing the recovered change fails the connection-opening and concurrent EPQ
+checks. The projected/volatile cursor test fails on `36b7a6c6` with SQLSTATE 08000 and
+passes after correction with PostgreSQL's 08006. Golden `a153_fdw_epq` was recorded from
+PostgreSQL 18.6 and passes all three modes.
+
+The final postgres_fdw, dblink, and file_fdw subset matches 2,349/2,458 units, identical
+in counts and differing-unit sets to base `063333c0`. Changed existing hunks are EXPLAIN
+units 266/268 and cursor-error unit 2024. Generic remote error messages and context still
+differ from libpq. The harness now distinguishes an ERROR containing connection-loss text
+from a psql disconnect; the saved output continues through later FETCH results.
+The paired isolation subset matches 4/6 permutations and 27/29 steps on both builds.
+Its two existing differences are EXPLAIN output; the current hunk is limited to projection
+order and corresponding Remote SQL. The separate pushed-join spec matches 2/2 permutations.
+The native concurrency test also asserts pushdown and remote-row preservation.
+
+These subsets do not update full regression counts. Docker recovery e2e retains the
+parent's four baseline WAL-fetch timeouts. No performance improvement is claimed.
+Commands, full reports, earlier failed attempts, and reproducer evidence are preserved in
+`~/.cache/a153-parent-resume/verification.md`.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch
