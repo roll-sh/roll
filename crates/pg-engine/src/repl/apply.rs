@@ -867,7 +867,10 @@ impl Worker<'_> {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let mut c = (*t.borrow().catalog()).clone();
+        // The lock can refresh the catalog past the statement snapshot. Merge from the
+        // version edited here, so another table's progress isn't treated as our change.
+        let from = t.borrow().catalog();
+        let mut c = (*from).clone();
         let rels = c.sub_rels.entry(subid).or_default();
         for (relid, state, lsn) in changes {
             if let Some(r) = rels.iter_mut().find(|r| r.relid == *relid) {
@@ -875,7 +878,7 @@ impl Worker<'_> {
                 r.lsn = *lsn;
             }
         }
-        t.borrow_mut().set_catalog(c).map_err(|e| e.message)?;
+        t.borrow_mut().set_catalog_from(c, &from).map_err(|e| e.message)?;
         for (relid, state, lsn) in changes {
             self.states.insert(*relid, (*state, *lsn));
         }

@@ -246,3 +246,7 @@ impl Worker<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tablesync_tests.rs"]
+mod tests;

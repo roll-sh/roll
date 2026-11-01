@@ -80,6 +80,8 @@ sc_via_root() {
   caught_up $d
   rows_ok=1
   check $d rows "$(rowsums p q ph0 ph1)" || rows_ok=0
+  check $d sync "SELECT count(*), count(DISTINCT srrelid), bool_and(srsubstate = 'r') FROM pg_subscription_rel;
+    SELECT sync_error_count FROM pg_stat_subscription_stats WHERE subid IN (SELECT oid FROM pg_subscription WHERE subdbid = $MYDB)" || rows_ok=0
   on_pubs $d "TRUNCATE p" >/dev/null
   caught_up $d
   check $d truncate "$(rowsums p)"
