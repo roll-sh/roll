@@ -3655,7 +3655,7 @@ impl Ddl<'_, '_> {
 
     /// Remove an index's entries (before it is built again).
     pub(super) fn clear_index_entries(&mut self, t: &Table, ix: &Index) -> Result<()> {
-        self.delete_index_storage(t, ix)
+        self.delete_index_storage(t, ix, false)
     }
 
     /// Fill a new index from the table's rows, checking uniqueness.
@@ -6078,7 +6078,7 @@ impl Ddl<'_, '_> {
     }
 
     fn delete_index_entries(&self, t: &Table, ix: &Index) -> Result<()> {
-        self.delete_index_storage(t, ix)
+        self.delete_index_storage(t, ix, true)
     }
 
     pub(super) fn alter_column_type(

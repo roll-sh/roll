@@ -10,44 +10,55 @@ use crate::storage::keys::{index_prefix, prefix_end};
 use crate::types::Value;
 
 impl Ddl<'_, '_> {
-    /// Delete an index's stored entries in this transaction (DROP, TRUNCATE, a rebuild). An
-    /// index of a native method also has records written outside transactions since this
-    /// transaction's snapshot: those go too.
-    pub(super) fn delete_index_storage(&self, t: &Table, ix: &Index) -> Result<()> {
+    /// Delete an index's stored entries in this transaction: the index dropped (`gone`), or
+    /// cleared before it is built again (TRUNCATE, REINDEX, a rewrite).
+    ///
+    /// One range deletion where it can be (`storage::rdel`): it hides every version written
+    /// before this transaction commits. Entries of a built-in method a rebuild writes go in
+    /// through this transaction, after it. A native method's records are written outside
+    /// transactions, under the index's relfilenode (`AmIndex::of`), a rebuild's before this
+    /// commits: a range deletion keeps off the relfilenode the index is rebuilt under, whose
+    /// records (if it is the old one) go a key at a time, including those written outside
+    /// transactions since this transaction's snapshot.
+    pub(super) fn delete_index_storage(&self, t: &Table, ix: &Index, gone: bool) -> Result<()> {
         if ix.id == 0 {
             return Ok(());
         }
         let start = index_prefix(t.oid, ix.id);
         let end = prefix_end(&start);
-        if crate::ext::index_am::builtin_method(&ix.method) {
-            // (One range deletion, however many entries: `storage::rdel`. Entries a rebuild
-            // writes go in through this transaction, after it. A native method's records are
-            // written outside transactions, a rebuild's before this commits, which a range
-            // deletion would hide: those go a key at a time.)
+        let instance = self.ctx.sess.db.instance;
+        if gone || crate::ext::index_am::builtin_method(&ix.method) {
             self.ctx.txn.borrow_mut().delete_range(start.clone(), end)?;
-            crate::ext::index_am::evict(self.ctx.sess.db.instance, &start);
+            crate::ext::index_am::evict(instance, &start);
             return Ok(());
+        }
+        let node = self.cat.relfilenode(ix.oid).unwrap_or(ix.oid);
+        let mut cur = start.clone();
+        cur.extend_from_slice(&node.to_be_bytes());
+        let cur_end = prefix_end(&cur);
+        {
+            let mut txn = self.ctx.txn.borrow_mut();
+            txn.delete_range(start.clone(), cur.clone())?;
+            txn.delete_range(cur_end.clone(), end)?;
         }
         let mut keys: Vec<Vec<u8>> = self
             .ctx
             .txn
             .borrow()
-            .scan(&start, &end)
+            .scan(&cur, &cur_end)
             .map(|e| e.map(|(k, _)| k))
             .collect::<Result<_>>()?;
-        if !crate::ext::index_am::builtin_method(&ix.method) {
-            let store = &self.ctx.sess.db.store;
-            for e in store.scan(&start, &end, store.visible_ts()) {
-                keys.push(e?.0);
-            }
-            keys.sort_unstable();
-            keys.dedup();
+        let store = &self.ctx.sess.db.store;
+        for e in store.scan(&cur, &cur_end, store.visible_ts()) {
+            keys.push(e?.0);
         }
+        keys.sort_unstable();
+        keys.dedup();
         let mut txn = self.ctx.txn.borrow_mut();
         for k in keys {
             txn.delete(k)?;
         }
-        crate::ext::index_am::evict(self.ctx.sess.db.instance, &start);
+        crate::ext::index_am::evict(instance, &start);
         Ok(())
     }
 
@@ -125,7 +136,7 @@ impl Ddl<'_, '_> {
         let Some(t) = self.cat.index_table(index.table).map(|t| (*t).clone()) else {
             return Ok(());
         };
-        self.delete_index_storage(&t, &index)?;
+        self.delete_index_storage(&t, &index, false)?;
         self.build_index(&t, &index)
     }
 

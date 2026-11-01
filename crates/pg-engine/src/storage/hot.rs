@@ -37,6 +37,8 @@ const RETRY_AFTER: i32 = 4096;
 /// Most keys / bytes a kept range may hold (more: dropped, and tried again later).
 const MAX_KEYS: usize = 2048;
 const MAX_BYTES: usize = 1 << 20;
+/// Most deleted keys a build reads before it refuses the range.
+const MAX_DEAD: usize = 4 * MAX_KEYS;
 /// Most ranges kept per store.
 const MAX_RANGES: usize = 64;
 /// Versions written to a kept range with no scan of it since: it is dropped.
@@ -214,13 +216,20 @@ impl Hot {
         let mut key: Vec<u8> = Vec::new();
         let mut versions: Vec<(u64, Option<Bytes>)> = Vec::new();
         let mut held = 0usize;
+        // (Deleted keys read: a queue's head of 100,000 deleted keys holds no chain, and was
+        // read whole under the commit lock to find the range too big.)
+        let mut dead = 0usize;
         for e in entries {
             let (k, v) = e?;
             let uk = user_key(&k);
             if uk != key.as_slice() {
+                // (A key's newest version first.)
+                if versions.first().is_some_and(|v| v.1.is_none()) {
+                    dead += 1;
+                }
                 flush(&mut c, &key, &mut versions);
                 held = c.bytes;
-                if c.too_big() {
+                if c.too_big() || dead > MAX_DEAD {
                     self.refuse(p);
                     return Ok(());
                 }

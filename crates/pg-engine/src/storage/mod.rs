@@ -2151,6 +2151,36 @@ impl Cursor {
         (n, last)
     }
 
+    /// Past the entries at the head of the current block that `Scan::position` would step
+    /// over one at a time, below `bound` (the other sources' smallest head) and the end:
+    /// older versions of the key decided last (`decided`), and deletions at or before `ts`
+    /// (each key's newest such version: `decided` and `decided_ts` follow them). How many
+    /// deleted keys it passed. (A queue's head of deleted keys, a block at a time.)
+    fn skip_deleted(&mut self, ts: u64, bound: Option<&[u8]>, decided: &mut Vec<u8>, decided_ts: &mut u64) -> u32 {
+        let Cursor::Level { block: Some(b), pos, end, whole, .. } = self else {
+            return 0;
+        };
+        let mut n = 0;
+        while pos.index() < b.len() {
+            let k = pos.key();
+            if (!*whole && !end.is_empty() && k >= end.as_slice()) || bound.is_some_and(|x| k >= x) || k.len() < 8 {
+                break;
+            }
+            let (uk, kts) = (user_key(k), key_ts(k));
+            if uk != decided.as_slice() {
+                if kts > ts || b.value_ref(pos).is_some() {
+                    break;
+                }
+                decided.clear();
+                decided.extend_from_slice(uk);
+                *decided_ts = kts;
+                n += 1;
+            }
+            b.step(pos);
+        }
+        n
+    }
+
     fn advance(&mut self) {
         match self {
             Cursor::Mem { buf, .. } => {
@@ -2478,6 +2508,12 @@ impl Scan {
             if v.is_none() {
                 self.dead_run += 1;
                 self.merge.sources[i].advance();
+                // (The deletions after it in its block that need no other source: a run at
+                // a time. Range deletions don't change them: they hide versions, and these
+                // are hidden already.)
+                let bound = self.merge.bounded.then_some(self.merge.bound.as_slice());
+                let d = self.decided.as_mut().expect("decided");
+                self.dead_run += self.merge.sources[i].skip_deleted(self.ts, bound, d, &mut self.decided_ts);
                 continue;
             }
             if !self.rdels.is_empty()
@@ -3185,6 +3221,63 @@ mod tests {
         let t = s.visible_ts();
         assert_eq!(first(t).as_deref(), Some("q01502"));
         assert_eq!(s.scan_raw(b"q01000", b"q01600", t).count(), 98);
+    }
+
+    #[test]
+    fn deleted_sst_runs_preserve_snapshots_and_merge_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path(), StoreOptions {
+            memtable_bytes: 16 << 20,
+            background: false,
+            sync: false,
+            ..Default::default()
+        }).unwrap();
+        let key = |i: u32| format!("q{i:05}").into_bytes();
+        let mut model: Model = BTreeMap::new();
+        let mut pins = Vec::new();
+        for writes in [
+            (0..2000).map(|i| (key(i), Some(Bytes::from_static(b"old")))).collect::<Vec<_>>(),
+            (0..1700).map(|i| (key(i), None)).collect(),
+            vec![(key(300), Some(Bytes::from_static(b"new"))), (key(700), Some(Bytes::from_static(b"new"))), (key(1700), None)],
+            vec![(key(300), None), (key(699), Some(Bytes::from_static(b"last"))), (key(700), None), (key(1800), Some(Bytes::from_static(b"last")))],
+        ] {
+            let ts = s.commit(writes.clone(), |_| Ok(())).unwrap();
+            for (k, v) in writes {
+                model.entry(k).or_default().push((ts, v));
+            }
+            pins.push(s.pin(ts));
+            // Distinct SSTs hold the old rows, their deletions, then resurrected rows;
+            // the last commit remains in memory until the first check.
+            if pins.len() < 4 {
+                s.flush_memtables().unwrap();
+            }
+        }
+        for stage in ["memtable", "flushed", "compacted"] {
+            if stage == "flushed" {
+                s.flush_memtables().unwrap();
+            } else if stage == "compacted" {
+                s.compact().unwrap();
+            }
+            for pin in &pins {
+                for (start, end) in [(b"q".to_vec(), b"r".to_vec()), (key(300), key(700)), (key(0), key(1699)), (key(1800), b"r".to_vec())] {
+                    let want: Vec<_> = model_at(&model, pin.ts).into_iter().filter(|(k, _)| k >= &start && k < &end).collect();
+                    let got: Vec<_> = s.scan_raw(&start, &end, pin.ts).map(Result::unwrap).collect();
+                    assert_eq!(got, want, "{stage}: iterator at {}", pin.ts);
+                    for size in [1, 31, 1024] {
+                        let mut scan = s.scan_raw(&start, &end, pin.ts);
+                        let mut batch = batch::RowBatch::default();
+                        let mut got = Vec::new();
+                        loop {
+                            scan.fill_batch(&mut batch, size).unwrap();
+                            if batch.is_empty() { break; }
+                            while let Some(row) = batch.take() { got.push(row); }
+                            batch.clear();
+                        }
+                        assert_eq!(got, want, "{stage}: batch {size} at {}", pin.ts);
+                    }
+                }
+            }
+        }
     }
 
     fn scan_all(s: &Store, ts: u64) -> Vec<(String, String)> {

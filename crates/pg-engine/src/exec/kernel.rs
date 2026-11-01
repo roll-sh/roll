@@ -146,28 +146,70 @@ fn pure_call(def: &crate::sql::func::FuncDef, ty: &DataType) -> Option<PureFn> {
     pure(def.imp)
 }
 
-/// A filter of comparisons of numeric columns with constants (`K::NumCmp`), one or ANDed,
-/// run over a stored row's encoded values in place: the columns walked once, each compared
-/// as an exact number (`row::peek_num`), nothing decoded, made or cached. What a row's
+/// A string comparison (=, <>, <, <=, >, >=, bpchar's) called under a collation in which it
+/// compares as the strings' bytes compare: one that sorts bytewise (C, POSIX, a libc locale
+/// here, the builtin provider's: `Collation::cmp` compares bytes), or, for = and <>, any
+/// deterministic one (`Collation::eq`: equal strings are equal bytes). Its pure call, which
+/// compares bytes.
+fn collated_bytes(def: &crate::sql::func::FuncDef, args: &[Expr]) -> Option<PureFn> {
+    let c = def.coll.as_ref()?;
+    let string = |t: &DataType| matches!(t, DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_) | DataType::Name);
+    if def.spread || !args.iter().all(|a| string(&a.ty())) || crate::catalog::partition::comparator_fn(c).is_some() {
+        return None;
+    }
+    let f = pure(def.imp)?;
+    crate::sql::func::ops::str_cmp(f)?;
+    (c.bytewise() || (c.deterministic && crate::sql::func::ops::str_eq_op(def.imp))).then_some(f)
+}
+
+/// A filter of comparisons of columns with constants, one or ANDed, run over a stored row's
+/// encoded values in place: the columns walked once, nothing decoded, made or cached.
+/// Numeric columns (`K::NumCmp`) compare as exact numbers (`row::peek_num`), string ones
+/// (`K::Call` of a string comparison that compares bytes: `ops::str_cmp`, `collated_bytes`)
+/// as their stored bytes (`row::peek_text`), bpchar's without trailing spaces. What a row's
 /// values don't decide this way (a column added since it was stored, a number past an
-/// i128) is left to the kernel.
+/// i128, a value stored out of line) is left to the kernel.
 pub struct StoredCmps {
     /// (column, the constant, the operator's test, whether the column is its first
     /// argument).
-    cmps: Vec<(usize, (i128, u32), fn(std::cmp::Ordering) -> bool, bool)>,
+    cmps: Vec<(usize, Against, fn(std::cmp::Ordering) -> bool, bool)>,
     /// The columns walked: up to the last one compared.
     upto: usize,
 }
 
+/// The constant a stored value is compared with.
+enum Against {
+    Num((i128, u32)),
+    /// A string's bytes; bpchar's (trailing spaces not compared) when true, the constant's
+    /// trimmed already.
+    Text(Box<[u8]>, bool),
+}
+
+/// Scans that made a `StoredCmps` (tests: which filters run over stored bytes).
+pub static STORED_CMPS_SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl StoredCmps {
     pub fn of(k: &K) -> Option<StoredCmps> {
-        let one = |k: &K| {
-            let K::NumCmp { test, args, .. } = k else { return None };
-            match &**args {
-                [K::Col(i), K::Const(c)] => Some((*i, small_num(c)?, *test, true)),
-                [K::Const(c), K::Col(i)] => Some((*i, small_num(c)?, *test, false)),
+        let one = |k: &K| match k {
+            K::NumCmp { test, args, .. } => match &**args {
+                [K::Col(i), K::Const(c)] => Some((*i, Against::Num(small_num(c)?), *test, true)),
+                [K::Const(c), K::Col(i)] => Some((*i, Against::Num(small_num(c)?), *test, false)),
                 _ => None,
+            },
+            K::Call { f, args, .. } => {
+                let (test, bp) = crate::sql::func::ops::str_cmp(*f)?;
+                let text = |c: &Value| match c {
+                    Value::Text(s) if bp => Some(Against::Text(crate::types::text::bpchar_trim(s).as_bytes().into(), true)),
+                    Value::Text(s) => Some(Against::Text(s.as_bytes().into(), false)),
+                    _ => None,
+                };
+                match &**args {
+                    [K::Col(i), K::Const(c)] => Some((*i, text(c)?, test, true)),
+                    [K::Const(c), K::Col(i)] => Some((*i, text(c)?, test, false)),
+                    _ => None,
+                }
             }
+            _ => None,
         };
         let mut cmps: Vec<_> = match k {
             K::And(ks) => ks.iter().map(one).collect::<Option<_>>()?,
@@ -176,13 +218,14 @@ impl StoredCmps {
         // (Pure comparisons: their order changes nothing.)
         cmps.sort_by_key(|c| c.0);
         let upto = cmps.iter().map(|c| c.0 + 1).max()?;
+        STORED_CMPS_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(StoredCmps { cmps, upto })
     }
 
     /// Whether the stored row's values `data` (after its header) pass (None: leave it to
     /// the kernel).
     pub fn passes(&self, data: &[u8]) -> Option<bool> {
-        use crate::storage::{row::{peek_num, skip_value_fast}, sst::get_varint};
+        use crate::storage::{row::{peek_num, peek_text, skip_value_fast}, sst::get_varint};
         let mut pos = 0;
         let n = get_varint(data, &mut pos).ok()? as usize;
         if n < self.upto {
@@ -190,25 +233,41 @@ impl StoredCmps {
         }
         // (The comparisons in column order: the columns walked once.)
         let (mut col, mut pass) = (0, true);
-        for &(i, (y, sy), test, col_first) in &self.cmps {
-            while col < i {
+        for (i, against, test, col_first) in &self.cmps {
+            while col < *i {
                 skip_value_fast(data, &mut pos).ok()?;
                 col += 1;
             }
             // (NULL: the comparison is NULL, and the AND not true; the others still read, as
             // a value one of them can't decide leaves the row to the kernel.)
-            let Some((x, sx)) = peek_num(data, pos)? else {
-                pass = false;
-                continue;
+            let o = match against {
+                Against::Num((y, sy)) => {
+                    let Some((x, sx)) = peek_num(data, pos)? else {
+                        pass = false;
+                        continue;
+                    };
+                    if sx == *sy {
+                        x.cmp(y)
+                    } else {
+                        let s = sx.max(*sy);
+                        let pow = |n: u32| 10i128.checked_pow(n);
+                        x.checked_mul(pow(s - sx)?)?.cmp(&y.checked_mul(pow(s - sy)?)?)
+                    }
+                }
+                Against::Text(y, bp) => {
+                    let Some(mut x) = peek_text(data, pos)? else {
+                        pass = false;
+                        continue;
+                    };
+                    if *bp {
+                        while let [rest @ .., b' '] = x {
+                            x = rest;
+                        }
+                    }
+                    x.cmp(y)
+                }
             };
-            let o = if sx == sy {
-                x.cmp(&y)
-            } else {
-                let s = sx.max(sy);
-                let pow = |n: u32| 10i128.checked_pow(n);
-                x.checked_mul(pow(s - sx)?)?.cmp(&y.checked_mul(pow(s - sy)?)?)
-            };
-            pass &= test(if col_first { o } else { o.reverse() });
+            pass &= test(if *col_first { o } else { o.reverse() });
         }
         Some(pass)
     }
@@ -287,7 +346,7 @@ fn compile_node(e: &Expr) -> Option<K> {
             }
         }
         Expr::Call(def, args, ty) if args.len() == 2 => K::Call {
-            f: pure_call(def, ty)?,
+            f: pure_call(def, ty).or_else(|| collated_bytes(def, args))?,
             args: Box::new([compile(&args[0])?, compile(&args[1])?]),
             strict: def.strict,
             ret: ty.clone(),

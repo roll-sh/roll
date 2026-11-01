@@ -1488,6 +1488,33 @@ pub fn cmp_op(imp: super::FnImpl) -> Option<fn(Ordering) -> bool> {
     table.iter().find(|(f, _)| std::ptr::fn_addr_eq(*f, imp)).map(|(_, t)| *t)
 }
 
+/// The pure comparison `f` is, as the test of an ordering it makes and whether it is
+/// bpchar's (trailing spaces not compared): over two strings, a comparison of their bytes
+/// (`exec::kernel::StoredCmps` runs it over stored strings).
+pub fn str_cmp(f: PureFn) -> Option<(fn(Ordering) -> bool, bool)> {
+    let table: [(PureFn, fn(Ordering) -> bool, bool); 12] = [
+        (p_eq, |o| o == Ordering::Equal, false),
+        (p_ne, |o| o != Ordering::Equal, false),
+        (p_lt, |o| o == Ordering::Less, false),
+        (p_le, |o| o != Ordering::Greater, false),
+        (p_gt, |o| o == Ordering::Greater, false),
+        (p_ge, |o| o != Ordering::Less, false),
+        (p_bp_eq, |o| o == Ordering::Equal, true),
+        (p_bp_ne, |o| o != Ordering::Equal, true),
+        (p_bp_lt, |o| o == Ordering::Less, true),
+        (p_bp_le, |o| o != Ordering::Greater, true),
+        (p_bp_gt, |o| o == Ordering::Greater, true),
+        (p_bp_ge, |o| o != Ordering::Less, true),
+    ];
+    table.iter().find(|(p, ..)| std::ptr::fn_addr_eq(*p, f)).map(|(_, t, bp)| (*t, *bp))
+}
+
+/// Whether `imp` is a string equality or inequality (=, <>, bpchar's): under a deterministic
+/// collation, whether the strings' bytes are equal.
+pub fn str_eq_op(imp: super::FnImpl) -> bool {
+    [op_eq as super::FnImpl, op_ne, bp_eq, bp_ne].iter().any(|f| std::ptr::fn_addr_eq(*f, imp))
+}
+
 /// The pure implementation of built-in `imp`, when it has one.
 pub fn pure(imp: super::FnImpl) -> Option<PureFn> {
     let table: [(super::FnImpl, PureFn); 28] = [

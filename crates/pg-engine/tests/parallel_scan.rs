@@ -79,6 +79,14 @@ const QUERIES: &[&str] = &[
     "SELECT c, count(*), sum(x) FROM big WHERE c IN ('a', 'c') AND c <> 'b' GROUP BY c",
     "SELECT k, count(*) FROM (SELECT (CASE WHEN g < 50 THEN 'x ' ELSE 'x' END)::bpchar k FROM big WHERE id > 1) t GROUP BY k",
     "SELECT count(*), sum(x::int) FROM big WHERE x::int8 > 50 AND id::numeric < 400000.5",
+    // Bytewise string comparisons compiled to kernels, and ICU comparisons that must
+    // retain their collation, including deterministic equality and bpchar padding.
+    "SELECT count(*), sum(id) FROM big WHERE s >= 'a' AND s < 'c'",
+    "SELECT id, c, s FROM big WHERE 'abc' = s ORDER BY id",
+    "SELECT count(*) FROM big WHERE s COLLATE und_d = 'abc'",
+    "SELECT count(*) FROM big WHERE s COLLATE und_d < 'abc'",
+    "SELECT count(*) FROM big WHERE s COLLATE und_ci = 'ABC'",
+    "SELECT count(*), sum(id) FROM big WHERE c = 'b ' AND s > 'a'",
 ];
 
 fn run_all(s: &mut Session) -> Vec<Vec<String>> {
@@ -154,6 +162,11 @@ fn parallel_scans_match_serial_inner() {
          FROM generate_series(1, 420000) i",
     )
     .unwrap();
+    s.query("CREATE COLLATION und_d (provider = icu, locale = 'und')").unwrap();
+    s.query("CREATE COLLATION und_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)").unwrap();
+    s.query("UPDATE big SET s = 'abc' WHERE id % 101 = 0").unwrap();
+    s.query("DELETE FROM big WHERE id % 103 = 0").unwrap();
+    let stat_before = seq_read(&mut s);
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let serial_plans: Vec<&str> = QUERIES.iter().map(|q| grouping(&mut s, q)).collect();
     let before = pg_engine::exec::parscan::started();
@@ -185,7 +198,9 @@ fn parallel_scans_match_serial_inner() {
             .map(|x| x.split(')').next().unwrap().parse().unwrap())
             .collect()
     };
-    let (a, i, b) = (n(&stat_serial), n(&stat_inline), n(&stat_parallel));
+    let baseline = n(&stat_before);
+    let since_setup = |st: &str| n(st).into_iter().zip(&baseline).map(|(n, before)| n - before).collect::<Vec<_>>();
+    let (a, i, b) = (since_setup(&stat_serial), since_setup(&stat_inline), since_setup(&stat_parallel));
     assert_eq!(a.len(), 2, "{stat_serial}");
     // (seq_scan and seq_tup_read: twice and three times the serial run's, less the stats
     // query itself.)
@@ -446,6 +461,8 @@ const MODELLED_QUERIES: &[&str] = &[
     "SELECT id FROM vt ORDER BY v <#> '[1,2,1,2]' LIMIT 5000",
     // Dimensions that differ: the function's error, at the first row.
     "SELECT count(*) FROM vt WHERE v <-> '[1,2,3]' > 0",
+    "SELECT id, v FROM vt WHERE s > 'f' AND g = 2 ORDER BY id",
+    "SELECT count(*) FROM vt WHERE s >= 'a' AND s < 'c' AND v <-> '[1,2,3,4]' > 1",
 ];
 
 #[test]
@@ -464,6 +481,7 @@ fn parallel_scans_of_modelled_heaps_inner() {
          FROM generate_series(1, 70000) i",
     )
     .unwrap();
+    s.query("DELETE FROM vt WHERE id % 1001 = 0").unwrap();
     let run = |s: &mut Session| -> Vec<Vec<String>> { MODELLED_QUERIES.iter().map(|q| out(s, q)).collect() };
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let before = pg_engine::exec::parscan::started();

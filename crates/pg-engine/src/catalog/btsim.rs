@@ -1098,17 +1098,23 @@ impl Btree {
             if from < p.items.len() {
                 lo = None;
             }
-            for it in &mut p.items[from..] {
-                let k = it.key.key_bytes(nkey);
-                if hi.is_some_and(|hi| k >= hi) {
+            let last = p.items.len().saturating_sub(1);
+            // (A page wholly below `hi` needs no comparison per entry. Otherwise an LP_DEAD
+            // entry is passed without looking at its key: entries are in key order, so one
+            // past `hi` shows at the next live entry or the page's last. A queue's head of
+            // 100,000 dead entries cost each scan a key comparison each.)
+            let whole = hi.is_none_or(|hi| p.items.last().is_none_or(|l| l.key.key_bytes(nkey) < hi));
+            for (j, it) in p.items[from..].iter_mut().enumerate() {
+                if !whole && (!it.dead || from + j == last) && hi.is_some_and(|hi| it.key.key_bytes(nkey) >= hi) {
                     return;
                 }
-                if !it.dead
-                    && let Some(seen) = seen.as_deref_mut()
-                {
+                if it.dead {
+                    continue;
+                }
+                if let Some(seen) = seen.as_deref_mut() {
                     seen.extend_from_slice(&it.tids);
                 }
-                if !it.dead && it.tids.iter().all(|t| all_dead(*t)) {
+                if it.tids.iter().all(|t| all_dead(*t)) {
                     it.dead = true;
                 }
             }
@@ -1183,17 +1189,20 @@ impl Btree {
             if from < p.items.len() {
                 lo = None;
             }
-            for it in &p.items[from..] {
-                let k = it.key.key_bytes(nkey);
-                if hi.is_some_and(|hi| k >= hi) {
+            let last = p.items.len().saturating_sub(1);
+            // (As in `kill`: a page below `hi` compared once, LP_DEAD entries without keys.)
+            let whole = hi.is_none_or(|hi| p.items.last().is_none_or(|l| l.key.key_bytes(nkey) < hi));
+            for (j, it) in p.items[from..].iter().enumerate() {
+                if !whole && (!it.dead || from + j == last) && hi.is_some_and(|hi| it.key.key_bytes(nkey) >= hi) {
                     return false;
                 }
-                if !it.dead
-                    && let Some(seen) = seen.as_deref_mut()
-                {
+                if it.dead {
+                    continue;
+                }
+                if let Some(seen) = seen.as_deref_mut() {
                     seen.extend_from_slice(&it.tids);
                 }
-                if !it.dead && it.tids.iter().all(|t| all_dead(*t)) {
+                if it.tids.iter().all(|t| all_dead(*t)) {
                     return true;
                 }
             }

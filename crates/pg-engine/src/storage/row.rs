@@ -577,6 +577,20 @@ pub fn peek_num(b: &[u8], pos: usize) -> Option<Option<(i128, u32)>> {
     }))
 }
 
+/// The string value at `pos` as its stored bytes, in place (Some(None): NULL; None: another
+/// value, one stored out of line among them).
+#[inline]
+pub fn peek_text(b: &[u8], pos: usize) -> Option<Option<&[u8]>> {
+    match *b.get(pos)? {
+        tag::NULL => Some(None),
+        tag::TEXT => {
+            let mut p = pos + 1;
+            take_bytes(b, &mut p).ok().map(Some)
+        }
+        _ => None,
+    }
+}
+
 /// `skip_value` with the common fixed-size values stepped over in place.
 #[inline]
 pub fn skip_value_fast(b: &[u8], pos: &mut usize) -> Result<()> {
@@ -585,6 +599,8 @@ pub fn skip_value_fast(b: &[u8], pos: &mut usize) -> Result<()> {
         Some(&tag::INT2) => 2,
         Some(&(tag::INT4 | tag::FLOAT4 | tag::DATE)) => 4,
         Some(&(tag::INT8 | tag::FLOAT8 | tag::TIMESTAMP | tag::TIMESTAMPTZ)) => 8,
+        // (A string shorter than 128 bytes: its length in one byte.)
+        Some(&tag::TEXT) if b.get(*pos + 1).is_some_and(|&l| l < 0x80) => 1 + b[*pos + 1] as usize,
         _ => return skip_value(b, pos),
     };
     if *pos + 1 + n > b.len() {

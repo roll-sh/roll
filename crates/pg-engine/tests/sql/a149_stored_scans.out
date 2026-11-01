@@ -1,0 +1,257 @@
+> CREATE COLLATION und_d (provider = icu, locale = 'und')
+-- CREATE COLLATION
+
+> CREATE COLLATION und_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)
+-- CREATE COLLATION
+
+> CREATE TABLE scans (a int, e text, c char(6), n name, m numeric)
+-- CREATE TABLE
+
+> INSERT INTO scans SELECT i, CASE WHEN i % 13 = 0 THEN NULL WHEN i % 7 = 0 THEN 'X' || (i % 10) WHEN i % 11 = 0 THEN 'é' || (i % 10) ELSE 'x' || (i % 10) END, 'c' || (i % 4), 'n' || (i % 6), (i % 9) / 4.0 FROM generate_series(1, 3000) i
+-- INSERT 0 3000
+
+> INSERT INTO scans VALUES (3001, repeat('x7', 100), 'c1', 'n1', 1.25), (3003, 'x7 ', '', '', 0)
+-- INSERT 0 2
+
+> SELECT count(*), sum(a) FROM scans WHERE e = 'x7'
+count:int8 | sum:int8
+216 | 324392
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE 'x7' < e
+count:int8 | sum:int8
+650 | 980120
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE e >= 'x2' AND e < 'x8' AND m >= 1.25
+count:int8 | sum:int8
+581 | 873196
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE c = 'c1  '
+count:int8 | sum:int8
+751 | 1127251
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE c < 'c2'
+count:int8 | sum:int8
+1502 | 2256754
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE n >= 'n3'
+count:int8 | sum:int8
+1500 | 2251500
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE e COLLATE "C" < 'x'
+count:int8 | sum:int8
+396 | 594594
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE e COLLATE und_d = 'x7'
+count:int8 | sum:int8
+216 | 324392
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE e COLLATE und_d < 'x7'
+count:int8 | sum:int8
+2002 | 3003471
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE e COLLATE und_ci = 'X7'
+count:int8 | sum:int8
+256 | 383262
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE c COLLATE und_ci = 'C1'
+count:int8 | sum:int8
+751 | 1127251
+-- SELECT 1
+
+> CREATE TABLE unbounded (c bpchar)
+-- CREATE TABLE
+
+> INSERT INTO unbounded SELECT c FROM scans
+-- INSERT 0 3002
+
+> SELECT count(*) FROM unbounded WHERE c = 'c1  '
+count:int8
+751
+-- SELECT 1
+
+> SELECT count(*) FROM unbounded WHERE c < 'c2'
+count:int8
+1502
+-- SELECT 1
+
+> SELECT a, length(e), c FROM scans WHERE a > 3000 ORDER BY a
+a:int4 | length:int4 | c:bpchar
+3001 | 200 | c1    
+3003 | 3 |       
+-- SELECT 2
+
+> CREATE TABLE toast_scans (LIKE scans)
+-- CREATE TABLE
+
+> ALTER TABLE toast_scans ALTER COLUMN e SET STORAGE EXTERNAL
+-- ALTER TABLE
+
+> INSERT INTO toast_scans VALUES (3002, repeat('y', 200000), 'c2', 'n2', NULL)
+-- INSERT 0 1
+
+> SELECT a, length(e), c, n, m FROM toast_scans WHERE e = repeat('y', 200000)
+a:int4 | length:int4 | c:bpchar | n:name | m:numeric
+3002 | 200000 | c2     | n2 | NULL
+-- SELECT 1
+
+> SELECT length(e) FROM toast_scans WHERE a = 3002
+length:int4
+200000
+-- SELECT 1
+
+> ALTER TABLE scans ADD COLUMN added text DEFAULT 'later'
+-- ALTER TABLE
+
+> DELETE FROM scans WHERE a <= 900
+-- DELETE 900
+
+> UPDATE scans SET e = 'changed', added = 'updated' WHERE a % 17 = 0
+-- UPDATE 124
+
+> SELECT count(*), sum(a) FROM scans WHERE e = 'changed'
+count:int8 | sum:int8
+124 | 241366
+-- SELECT 1
+
+> SELECT count(*), sum(a) FROM scans WHERE added = 'later'
+count:int8 | sum:int8
+1978 | 3860688
+-- SELECT 1
+
+> SELECT a, e, c, n, m, added FROM scans WHERE e = 'changed' AND a > 2900 ORDER BY a
+a:int4 | e:text | c:bpchar | n:name | m:numeric | added:text
+2907 | changed | c3     | n3 | 0.00000000000000000000 | updated
+2924 | changed | c0     | n2 | 2.0000000000000000 | updated
+2941 | changed | c1     | n1 | 1.7500000000000000 | updated
+2958 | changed | c2     | n0 | 1.5000000000000000 | updated
+2975 | changed | c3     | n5 | 1.2500000000000000 | updated
+2992 | changed | c0     | n4 | 1.00000000000000000000 | updated
+-- SELECT 6
+
+> BEGIN
+-- BEGIN
+
+> DELETE FROM scans WHERE a % 7 = 0
+-- DELETE 301
+
+> UPDATE scans SET e = 'changed', added = 'own' WHERE a % 11 = 0
+-- UPDATE 164
+
+> INSERT INTO scans (a, e) VALUES (4000, 'changed')
+-- INSERT 0 1
+
+> SELECT count(*), sum(a) FROM scans WHERE e = 'changed'
+count:int8 | sum:int8
+261 | 510290
+-- SELECT 1
+
+> SELECT a, e, c, n, m, added FROM scans WHERE e = 'changed' AND a > 2900 ORDER BY a
+a:int4 | e:text | c:bpchar | n:name | m:numeric | added:text
+2904 | changed | c0     | n0 | 1.5000000000000000 | own
+2907 | changed | c3     | n3 | 0.00000000000000000000 | updated
+2915 | changed | c3     | n5 | 2.0000000000000000 | own
+2924 | changed | c0     | n2 | 2.0000000000000000 | updated
+2937 | changed | c1     | n3 | 0.75000000000000000000 | own
+2941 | changed | c1     | n1 | 1.7500000000000000 | updated
+2948 | changed | c0     | n2 | 1.2500000000000000 | own
+2958 | changed | c2     | n0 | 1.5000000000000000 | updated
+2959 | changed | c3     | n1 | 1.7500000000000000 | own
+2970 | changed | c2     | n0 | 0.00000000000000000000 | own
+2981 | changed | c1     | n5 | 0.50000000000000000000 | own
+2992 | changed | c0     | n4 | 1.00000000000000000000 | own
+4000 | changed | NULL | NULL | NULL | later
+-- SELECT 13
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT count(*), sum(a) FROM scans WHERE e = 'changed'
+count:int8 | sum:int8
+124 | 241366
+-- SELECT 1
+
+> CREATE EXTENSION bloom
+-- CREATE EXTENSION
+
+> CREATE INDEX scans_bl ON scans USING bloom (a)
+-- CREATE INDEX
+
+> SET enable_seqscan = off
+-- SET
+
+> BEGIN
+-- BEGIN
+
+> REINDEX INDEX scans_bl
+-- REINDEX
+
+> SELECT count(*) FROM scans WHERE a = 901
+count:int8
+1
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT count(*) FROM scans WHERE a = 901
+count:int8
+1
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> TRUNCATE scans
+-- TRUNCATE TABLE
+
+> INSERT INTO scans (a, e) VALUES (7, 'new')
+-- INSERT 0 1
+
+> REINDEX INDEX scans_bl
+-- REINDEX
+
+> SELECT a, e FROM scans WHERE a = 7
+a:int4 | e:text
+7 | new
+-- SELECT 1
+
+> COMMIT
+-- COMMIT
+
+> SELECT a, e FROM scans WHERE a = 7
+a:int4 | e:text
+7 | new
+-- SELECT 1
+
+> BEGIN
+-- BEGIN
+
+> DROP INDEX scans_bl
+-- DROP INDEX
+
+> ROLLBACK
+-- ROLLBACK
+
+> SELECT a, e FROM scans WHERE a = 7
+a:int4 | e:text
+7 | new
+-- SELECT 1
+
+> DROP INDEX scans_bl
+-- DROP INDEX
+
+> SELECT a, e FROM scans
+a:int4 | e:text
+7 | new
+-- SELECT 1
+

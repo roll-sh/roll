@@ -133,13 +133,15 @@ impl<'a> Vis<'a> {
         }
         // Ended transactions stay ended: a thread's last answers are kept (direct mapped by
         // xid), so concurrent scans don't all take the xid table's mutex for every row.
+        // A cell per slot avoids copying the whole array on each lookup.
+        type Slot = std::cell::Cell<(u64, u64, bool)>;
         thread_local! {
-            static ENDED: std::cell::Cell<[(u64, u64, bool); 64]> = const { std::cell::Cell::new([(0, 0, false); 64]) };
+            static ENDED: [Slot; 64] = const { [const { std::cell::Cell::new((0, 0, false)) }; 64] };
         }
         let table = self.xids.uid();
         let slot = (x % 64) as usize;
         if let Some(s) = ENDED.with(|c| {
-            let (t, y, aborted) = c.get()[slot];
+            let (t, y, aborted) = c[slot].get();
             (t == table && y == x).then_some(if aborted { Xs::Aborted } else { Xs::Committed })
         }) {
             self.settled.set(Some((x, s)));
@@ -153,11 +155,7 @@ impl<'a> Vis<'a> {
         };
         if st.is_ok() && s != Xs::Running {
             self.settled.set(Some((x, s)));
-            ENDED.with(|c| {
-                let mut a = c.get();
-                a[slot] = (table, x, s == Xs::Aborted);
-                c.set(a);
-            });
+            ENDED.with(|c| c[slot].set((table, x, s == Xs::Aborted)));
         }
         s
     }

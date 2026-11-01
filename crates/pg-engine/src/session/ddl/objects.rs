@@ -6176,7 +6176,7 @@ impl Ddl<'_, '_> {
     }
 
     fn delete_index_rows(&self, t: &Table, ix: &Index) -> Result<()> {
-        self.delete_index_storage(t, ix)
+        self.delete_index_storage(t, ix, true)
     }
 
     /// The schema a DROP SCHEMA names, checked droppable by the current user. None: missing,
