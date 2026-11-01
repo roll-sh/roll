@@ -3891,6 +3891,34 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
   avg's Sxx overflow, `pg_get_object_address` of system catalogs, hexadecimal float input.
   The difftest process's memory growth (agent 118's 201 -> 664 MB) is gone at fd250f0b (~17 MB
   over 150 seeds). Open: tests/difftest/STATUS.md.
+  Round 24, agent 147 (difftest round 8): a grammar for seeds from 8000 on (`difftest/round8.rs`,
+  on round 7's shared engine): PL/pgSQL control flow, exceptions with GET STACKED DIAGNOSTICS,
+  cursors, RETURN QUERY, procedures with transaction control; triggers of every kind with
+  transition tables and deferred constraint triggers, INSTEAD OF and event triggers; window
+  frames with EXCLUDE; grouping sets; SEARCH / CYCLE; SQL/JSON and jsonpath; ranges and
+  multiranges; text search; large objects; COPY's newer options; LISTEN / NOTIFY across
+  sessions (a wire client reports notifications as `NOTIFY` notices); prepared transactions (the
+  shared engine allows as many as the reference); spilling queries. Fixes: gram.y's errors that
+  aren't syntax errors (window frame bounds 42P20, float precision and the others) keep their
+  SQLSTATEs (`sql/parse.rs`); SEARCH / CYCLE naming errors wait for the CTE's analysis, its
+  recursive reference seeing the clauses' columns (`n` named twice is ambiguous, as in
+  analyzeCTE); `(x).f` over a VALUES list's record column fails "record type has not been
+  registered" (`ScopeCol::opaque_record`, also through a CTE over VALUES);
+  The proposed pg_stat_get_backend_subxact implementation is held in commit `40f4554f`,
+  outside this integration. It uses the landed proc-slot backend ids but has a known
+  backend-status snapshot difference: after reading a count of 1, ROLLBACK TO reports 0
+  there and 1 in PostgreSQL until pg_stat_clear_snapshot().
+  COMMENT now records the resolved address directly, including removal of an absent comment
+  and constraint comments. Notification reporting is enabled only by difftest's clients;
+  existing wire goldens retain their SQL-notice output.
+  Resumed verification on `3069ca91`: build, full crate tests, and clippy pass; smoke passes.
+  Round 8's same 150 seeds have 32 unique mismatch cases on the base, 23 on the change,
+  none added and retained output unchanged. Focused regress 4,025/4,025, contrib 251/251,
+  isolation 32/32 permutations match. These subsets do not update generated regression counts.
+  `pnpm test:pg --unit` passes; Docker e2e remains unrun because its random-port harness has
+  no override for the assigned range. Logs and exact commands: `~/.cache/a147-resume/`.
+  Those worker checks included the held monitoring commit. The parent integrates the
+  round8 fixes without it and runs combined verification in `~/.cache/pg-engine-sol-resume/`.
 - **pg_dump, pg_restore, pg_dumpall, psql** (round 17, agent 37): `tests/pg_dump.rs` runs
   PostgreSQL 18.6's own client programs against the engine: its pg_dump TAP tests unmodified
   (`pg_dump_tap`, through stand-ins for its Perl test modules in `tests/pg_dump/perl`), round

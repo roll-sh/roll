@@ -308,6 +308,151 @@ errors in transactions, recursive CTEs with SEARCH / CYCLE, window frames with E
 | round 5, base (0f9f0609, round 5 generator) | 5256–5355 × 100 | 9,697 | crash 2, wrong_rows 39, wrong_state 7, engine_error 14, missing_error 8, wrong_error 28, eval_error 26, notice 7, tag 1 |
 | round 5, batch 2 | 5256–5355 × 100 | 10,064 | wrong_rows 1, wrong_state 2, engine_error 8, missing_error 12, wrong_error 21, eval_error 13, notice 3, tag 1 (110 above error_message in the base, 52 here; 64 gone; none new but 6 past a base divergence; the wrong_rows / wrong_state are the old grammar's, the base's too: DISTINCT ON's physical order, a failing UPDATE condition, ANALYZE's sample) |
 
+## Round 8 grammar (agent 147)
+
+Seeds from `R8_SEEDS` (8000) on add the `r8*` objects (`round8.rs`) to round 7's shared
+engine and sessions; half of the statements are `round8_stmt`'s, each a group that makes,
+uses and drops its own objects (a serial in their names), so a case stands alone:
+
+- **PL/pgSQL**: labelled loops with EXIT / CONTINUE, `FOR ... REVERSE ... BY`, WHILE,
+  `FOREACH ... SLICE`; errors raised (RAISE ... USING ERRCODE / DETAIL / HINT / COLUMN /
+  CONSTRAINT, division by zero, unique violations, ASSERT, jsonpath strict errors) and caught
+  by condition, their fields read back with GET STACKED DIAGNOSTICS; ROW_COUNT, FOUND,
+  `INTO STRICT` and its errors; bound SCROLL cursors with every FETCH / MOVE direction;
+  refcursors returned and fetched; RETURN NEXT / QUERY / QUERY EXECUTE ... USING with OUT
+  parameters (and a mismatched RETURN QUERY); CASE without ELSE; dynamic SQL with format();
+  VARIADIC / DEFAULT parameters and named notation; procedures with COMMIT / ROLLBACK /
+  COMMIT AND CHAIN and INOUT, called in and out of transaction blocks.
+- **Triggers**: BEFORE / AFTER row and statement triggers, UPDATE OF with WHEN, TRUNCATE,
+  transition tables (OLD / NEW TABLE, statement level), a deferred constraint trigger fired
+  at COMMIT or SET CONSTRAINTS, the refused forms (OLD TABLE on INSERT, transition tables on
+  BEFORE); BEFORE triggers that skip, change or fail rows; every firing logged into `r8log`
+  with TG_* and the rows, the log read in order after one-row statements and as a multiset
+  after others; INSTEAD OF triggers on a view; event triggers on ddl_command_start / end,
+  sql_drop and table_rewrite with WHEN TAG, reporting pg_event_trigger_ddl_commands(),
+  pg_event_trigger_dropped_objects() (toast objects left out: their names carry oids) and the
+  rewrite reason.
+- **Window frames**: ROWS / RANGE / GROUPS with every bound, offsets of int, numeric and
+  interval keys, EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS, named windows refined by
+  frames; rows that tie meet only order-insensitive aggregates or value functions of the key;
+  ranking functions over a total order; the frame errors.
+- **GROUPING SETS / CUBE / ROLLUP** (nested, DISTINCT, duplicates, `()`) with GROUPING(),
+  HAVING, sometimes under work_mem 64kB; **SEARCH / CYCLE** over a graph with cycles (depth and
+  breadth first, several BY columns, mark values, UNION and UNION ALL) and their errors.
+- **SQL/JSON**: jsonpath methods (`.datetime()`, `.decimal()`, `.bigint()`, `.keyvalue()`,
+  like_regex, starts with, `**` levels, strict / lax errors) through jsonb_path_*, @?, JSON_VALUE
+  / JSON_QUERY (wrappers, quotes, RETURNING, ON EMPTY / ON ERROR) / JSON_EXISTS over constants
+  (one row per call site: the 18.6 ON ERROR quirk never meets a second row), JSON_TABLE with
+  NESTED paths, ordinality, EXISTS and FORMAT JSON columns, constructors and IS JSON.
+- **Ranges and multiranges**: operators, set operations, range_merge, range_agg /
+  range_intersect_agg, unnest, canonical forms, the input and arithmetic errors, an exclusion
+  constraint. **Text search**: parsers (to_tsquery / plainto / phraseto / websearch), ranking,
+  ts_headline options, tsvector and tsquery functions, the stored vectors and a GIN index.
+- **Large objects** with oids of their own: lo_from_bytea, lo_get / lo_put, descriptors in a
+  transaction (loread, lowrite, lo_lseek, lo_tell, lo_truncate), metadata, owners, grants, the
+  errors. **COPY FROM** with ON_ERROR ignore, LOG_VERBOSITY, REJECT_LIMIT, DEFAULT, HEADER MATCH,
+  FORCE_NULL / FORCE_NOT_NULL, WHERE and FREEZE over rows some of which fail; COPY TO options;
+  option errors.
+- **LISTEN / NOTIFY** across sessions 2 and 3 (session 1 only sends): duplicates folded,
+  notifications of rolled-back transactions and savepoints dropped, payload and channel checks,
+  PREPARE TRANSACTION after NOTIFY. A wire client reports a notification as a notice of code
+  `NOTIFY` (channel and payload, not the sender's pid). **Prepared transactions**: prepared on
+  session 2, its row lock waited for by session 3 and released by COMMIT / ROLLBACK PREPARED
+  from session 1, duplicate and unknown gids, temporary objects. The shared engine allows as
+  many prepared transactions as the reference (`SHOW max_prepared_transactions`; the round 8
+  reference runs with 5), the lock-wait check counts a prepared transaction (pid 0) as a
+  blocker, and a seed's leftover prepared transactions are rolled back before its database is
+  dropped.
+- **Spilling queries**: sorts, hash joins, hash aggregates, set operations, windows, DISTINCT
+  and ordered-set aggregates over `r8big` (2,000-4,000 rows) under work_mem 64kB-256kB, with
+  planner settings, sometimes their EXPLAIN (COSTS OFF); each has a total order.
+
+## Round 8 (agent 147)
+
+Batch 1 (`a147_round8`):
+
+- **gram.y's errors that aren't syntax errors** keep their SQLSTATEs (libpg_query reports
+  every grammar error alike; `sql/parse.rs` maps them back): a window frame's bounds (`GROUPS
+  BETWEEN CURRENT ROW AND 0 PRECEDING`, 42P20), float precision, column numbers, JSON
+  encodings, partitioning strategies (22023), hash partition bounds given twice (42710),
+  reserved role names.
+- **SEARCH / CYCLE naming errors** (`SET n` for a column `n`, BY columns not in the list, mark
+  and path the same) wait for the CTE's analysis as analyzeCTE's do: the recursive term is
+  analysed first, its reference seeing the clauses' columns (so `n` named twice is "column
+  reference is ambiguous", 42702, and a wrong column count is that error, at the recursive
+  term's first target). `p.*` in a recursive term leaves the clauses' columns out.
+- **`(x).f` over a VALUES list's record column** fails "record type has not been registered"
+  (42809), through a CTE over VALUES too, and so does `(x).*` (`ScopeCol::opaque_record`);
+  `v.x.f` is a missing FROM-clause entry, as in PostgreSQL. "column notation .f applied to
+  type ..." is 42809.
+- **pg_stat_get_backend_subxact** is proposed in held commit `40f4554f`, outside this
+  integration. Its backend-status snapshot mismatch remains open below.
+- **GROUPING()** in a window's PARTITION BY / ORDER BY and in DISTINCT ON, as aggregates are;
+  inside an aggregate's arguments it is "aggregate function calls cannot be nested" (an
+  internal error before); in a frame offset the error names "window ROWS / RANGE / GROUPS".
+- **A locking clause's error in a FROM subquery** it reaches (`FOR UPDATE is not allowed with
+  GROUP BY clause`) comes after the rest of the query's analysis (transformLockingClause runs
+  last): a missing relation or column later in the query is reported first (round 7's
+  0A000 vs 42P01).
+- **COPY**: options checked before the data (`REJECT_LIMIT` needs `ON_ERROR ignore`, not just
+  an ON_ERROR; binary with ON_ERROR ignore is 42601), and a DEFAULT marker for a column
+  without a default fails its line before any of its fields converts.
+- **Event triggers**: COMMENT collects its resolved object address for
+  `pg_event_trigger_ddl_commands()` at ddl_command_end. Removing an absent comment still
+  reports the object. Constraint comments are covered too.
+- Harness: round 8's grammar (above); notifications as `NOTIFY` notices; the shared engine's
+  max_prepared_transactions from the reference; prepared transactions rolled back before a
+  seed's database is dropped; engine-only oracle queries no longer run inside a transaction
+  block (one that failed aborted the engine's transaction alone: seeds 8033, 8066).
+  Notification reporting is opt-in on the shared test client, enabled by difftest only.
+  Enabling it globally broke the existing notify and utility wire goldens.
+
+Saved pre-pause runs (debug, 150 statements a seed, private reference; logs in
+`~/.cache/a147/`, not re-measured on the resumed base): round 8 seeds 8000-8149 (23,530 statements, 5,558 queries): wrong_rows 12 -> 11,
+engine_error 5 -> 0, wrong_error 16 -> 0, eval_error 2 -> 0, notice 13 -> 0, tag 4 -> 0,
+missing_error 3, error_message 6, error_detail 22 (against this batch's first engine fixes;
+one new EXPLAIN plan choice, seed 8021, routed). Round 6 seeds 6100-6249 against the base
+(ba2287bf): error_message 14 -> 13, nothing new. Round 7 seeds 7000-7149: wrong_error
+11 -> 10, nothing new. Smoke: no new mismatch. No `lock` or `hang` mismatch: every
+prepared-transaction lock wait, NOTIFY delivery and two-session step agreed.
+
+The pre-pause CPU and memory measurements are not verified performance results for the
+resumed batch. No speedup is claimed.
+
+### Resumed verification on 2026-11-01
+
+Recovered `20fcd197` onto `3069ca91` by cherry-pick. Fresh `cargo build -p pg-engine`,
+`cargo test -p pg-engine --no-fail-fast`, and `cargo clippy -p pg-engine` pass. Clippy retains
+ten warnings outside this batch's edits. The first full test run failed the notify and utility
+wire goldens because the recovered client exposed notifications globally. Making that behavior
+opt-in for difftest fixed both files; the full rerun passed. Both `a147_` goldens were recorded
+from PostgreSQL 18.6 and match in-process, over the wire, and in shuffled order.
+These worker checks included the separate monitoring commit `40f4554f`. The parent holds
+that commit because of the snapshot mismatch below. Only `a147_round8` is included here;
+combined verification after excluding monitoring is recorded in `~/.cache/pg-engine-sol-resume/`.
+
+Smoke passes. Seeds 8000-8149, 150 statements per seed, run with the same harness on the
+current base and change: 23,530 statements and 5,558 queries each. The base has 32 unique
+mismatch cases, the change 23. No case was added, and retained cases have identical output.
+The base's engine_error 4, wrong_error 59, eval_error 2, and notice 13 disappear. Remaining
+counts are unchanged: wrong_rows 10, missing_error 3, error_message 6, error_detail 22.
+The saved seed 8021 plan mismatch is absent on both this base and the change. These are
+correctness comparisons; no timing or memory improvement is claimed.
+
+Focused upstream runs against private PostgreSQL 18.6 references match 4,025/4,025 regression
+units, 251/251 contrib units (auto_explain, file_fdw, spi), and 32/32 isolation permutations
+across create-trigger, async-notify, and prepared-transactions-cic (225/225 steps).
+These are subsets. Generated regression counts remain untouched. The saved pre-pause full
+regression run also completed: `~/.cache/a147/pgr1/run.log` and its report record
+51,148/51,150 with no changed units on that older tree.
+
+`pnpm test:pg --unit` passes. The Docker e2e portion remains unrun: its harness binds random
+ports without an override, which cannot honor this batch's assigned-port restriction.
+Logs, command files, exit codes, comparison binaries, and the backend-status snapshot
+reproducer are in `~/.cache/a147-resume/`. The separate subtransaction commit still reports
+live counts after ROLLBACK TO where PostgreSQL retains its snapshot; the probe records
+1 then 0 here, 1 then 1 in PostgreSQL, and 0 in both after pg_stat_clear_snapshot().
+
 ## Round 7 grammar (agent 138)
 
 Seeds from `R7_SEEDS` (7000) on run on one engine for the whole process (`difftest/wire.rs`:
@@ -975,6 +1120,52 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
 
 ## Open
 
+- **Round 8 seeds, found, not fixed** (agent 147; routed, reproducers below):
+  - Planner (agent 140), under a small work_mem (seeds 8018, 8023, 8026, 8035, 8049, 8130):
+    `SET work_mem = '64kB'` over `r8big (id int PRIMARY KEY, k int, s text)` filled with
+    `SELECT i, (i * 7919) % 97, md5(i::text) FROM generate_series(1, 3020) i` and analysed:
+    `EXPLAIN (COSTS OFF) SELECT DISTINCT k, length(s) FROM r8big ORDER BY k, length(s)` is a
+    Unique over a Sort in the engine, a Sort over a HashAggregate in PostgreSQL; likewise
+    `SELECT k, s FROM r8big UNION SELECT k + 1, s FROM r8big WHERE id < 100 ORDER BY s, k LIMIT 7`,
+    `... EXCEPT ... ORDER BY id DESC LIMIT 34` and `GROUP BY k HAVING count(*) > 36 ORDER BY k`
+    with an ordered `array_agg`: the choice between hashing (which spills) and sorting under a
+    small work_mem. Results agree. The saved seed 8021 bitmap-scan case no
+    longer differs on the resumed base or change.
+  - Planner (agent 140): join order decides evaluation (round 7's `width_bucket('NaN', ...)`
+    case, seed 7041 #130): `WITH w1 AS (SELECT array_length(array_remove(NULL,
+    width_bucket(s2.v2, 0, 10, 4)), 1) AS c0, 1 AS c1 FROM (VALUES ('2000-10-28', false, 'NaN'),
+    ('infinity', true, 2.50), (NULL, NULL, 3)) s2 (v0, v1, v2)) SELECT 1 FROM (w1 t5 LEFT JOIN
+    unnest('{}'::int4[]) WITH ORDINALITY s6 (u, o) ON t5.c0 = s6.u), (SELECT max(t8.b) AS c0
+    FROM t0 t8 CROSS JOIN w1 t9 WHERE JSON_EXISTS(NULL, 'strict $.a.b') GROUP BY t8.d) s7`
+    (`t0 (id int4 PRIMARY KEY, a text, b timestamp, c int4, d text)`, two rows): PostgreSQL's
+    Nested Loop has the t5 join outer (it reads w1 and fails 2201G), the engine's has s7 outer
+    (empty: w1 is never read). EXPLAIN also shows `JSON_EXISTS(NULL::text, ...)` where
+    PostgreSQL shows `NULL::jsonb`, and PostgreSQL keeps the Subquery Scan on s7.
+  - Planner (agent 140): round 7's FULL JOIN decisions (seed 7051 #66, 8022 #67): a FULL JOIN
+    without mergeable clauses inside a view read by a sub-select under `WHERE false`
+    (`CREATE VIEW v1 AS SELECT ... FROM t0 t1 FULL JOIN t2 ON t1.id IN (t1.id, 1)`, then
+    `... JOIN (SELECT ... FROM (t0 t7 JOIN v1 t8 ON ...) WHERE ...) s6 WHERE false) s5 ...
+    WHERE (jsonb_array_length('{"a": 2.50}') & t2.c1) <> 7`): PostgreSQL fails folding the
+    outer WHERE (22023) and never plans the FULL JOIN; the engine plans it first (0A000). The
+    level-by-level FULL JOIN check (round 6's item).
+  - Executor (agent 143), round 4's class (seed 8064 #85): a `RETURN QUERY` whose columns don't
+    match fails in the engine where PostgreSQL never calls the function.
+  - Protocol (agent 145): binary arrays of a domain carry the base type's oid (round 7's item,
+    seen again at seeds 8032, 8132: `\x2 rf=1` with `SELECT $1::r7pos[]`).
+  - Catalog (agent 146): `pg_control_system()` and the other `pg_control_*` functions are
+    registered as set-returning (they aren't: proretset false), so `VALUES
+    (pg_control_system())` fails "set-returning functions are not allowed in VALUES" where
+    PostgreSQL accepts it.
+  - Monitoring (agent 128, held commit `40f4554f`): its proposed `pg_stat_get_backend_subxact` reads the backend's live count;
+    PostgreSQL's comes from the backend status snapshot taken at the transaction's first
+    statistics call (after `ROLLBACK TO` a savepoint whose xid was counted, PostgreSQL still
+    reports it). The resumed implementation uses the proc-slot backend ids
+    already used by `pg_stat_get_backend_idset`, not pids. The snapshot mismatch remains;
+    the new function is isolated in its own commit.
+  - Not emulated: after a row ON_ERROR ignore skipped, PostgreSQL's CONTEXT of a later line's
+    DEFAULT-marker error names the skipped row's column and a stale value (`line 2, column b:
+    "D"`); the engine's is the line's text.
+
 - **Round 7 seeds, found, not fixed** (agent 138; routed):
   - Protocol (agent 136): an array of a domain sent in binary carries the base type's oid as
     its element type where array_send writes the domain's (`CREATE DOMAIN d AS int CHECK
@@ -987,16 +1178,17 @@ in round 4, as were the other two leftovers here (int4range @> d, array_agg of a
   - Not reproduced as a difftest mismatch but failing on fd250f0b itself: `deep_input`'s
     `viewdef 2000` (debug build) is "stored query: Invalid statement: stack depth limit
     exceeded" where it was `2000|12036` (both deep_input tests, base and this batch alike).
-  - Left in this area: `(x).f` over a VALUES column of type record resolves where PostgreSQL
-    fails ("record type has not been registered": expandRecordVariable doesn't look into a
-    VALUES RTE; the binder's scope columns don't say where they come from);
-    `pg_stat_get_backend_subxact(bid)` (oid 6107, per-backend subtransaction counts) is
-    missing.
+    Both variants pass in the resumed full crate run.
+  - `(x).f` over a VALUES column of type record is fixed in round 8.
+    `pg_stat_get_backend_subxact(bid)` remains missing here. Its proposed implementation
+    is held in `40f4554f` because of the backend-status snapshot limitation listed above.
   - The rest of round 7's 150 seeds are earlier rounds' open classes: FULL JOIN decisions
-    (0A000 vs 22023 / 42P01, 3 + 3), a regular expression under a nondeterministic
-    collation over an empty table (round 4), string hashing under a nondeterministic
-    collation (round 4), `width_bucket('NaN', ...)` in a sub-select PostgreSQL evaluates and
-    the engine doesn't (2, eval_error), a CASE / division folding order (1).
+    (0A000 vs 22023 / 42P01, 3 + 3; round 8 fixed the 42P01 ones: a locking clause's error
+    in a subquery now waits for the query's analysis, and routed the 22023 one), a regular
+    expression under a nondeterministic collation over an empty table (round 4), string
+    hashing under a nondeterministic collation (round 4), `width_bucket('NaN', ...)` in a
+    sub-select PostgreSQL evaluates and the engine doesn't (2, eval_error; join order, routed
+    in round 8), a CASE / division folding order (1).
 
 - **Round 6 seeds, found, not fixed** (agent 118):
   - Memory: the difftest process (one engine per seed, in-process, debug) ends 50 seeds
