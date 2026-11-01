@@ -619,7 +619,7 @@ impl JoinTable {
     }
 
     /// The table of `nb` buckets with `seq`'s rows pushed onto their chains in order.
-    fn flat(nb: u32, seq: impl Iterator<Item = (usize, u32)>) -> JoinTable {
+    pub(crate) fn flat(nb: u32, seq: impl Iterator<Item = (usize, u32)>) -> JoinTable {
         let seq: Vec<(u32, u32)> = seq.map(|(row, h)| (row as u32, h & (nb - 1))).collect();
         let mut starts = vec![0u32; nb as usize + 1];
         for &(_, b) in &seq {
@@ -669,9 +669,20 @@ impl JoinTable {
         self.bucket((h & (self.nbuckets - 1)) as usize).iter().rev().map(|&i| i as usize)
     }
 
-    /// Every tuple, bucket by bucket (ExecScanHashTableForUnmatched's order).
+    /// Every tuple, bucket by bucket (ExecScanHashTableForUnmatched's order), then the
+    /// skew buckets' (`with_skew`).
     pub fn scan(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..self.nbuckets as usize).flat_map(|b| self.bucket(b).iter().rev().map(|&i| i as usize))
+        (0..self.starts.len() - 1).flat_map(|b| self.bucket(b).iter().rev().map(|&i| i as usize))
+    }
+
+    /// The skew buckets' chains (each head first, in the order the buckets were made)
+    /// after the table's buckets.
+    pub(crate) fn with_skew(mut self, chains: Vec<Vec<usize>>) -> JoinTable {
+        for c in chains {
+            self.items.extend(c.iter().rev().map(|&i| i as u32));
+            self.starts.push(self.items.len() as u32);
+        }
+        self
     }
 }
 

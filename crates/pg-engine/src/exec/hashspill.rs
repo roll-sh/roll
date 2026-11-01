@@ -54,8 +54,9 @@ struct Part {
     buf: Vec<u8>,
     ntuples: u64,
     hll: Hll,
-    /// PostgreSQL's bytes on its tape.
+    /// PostgreSQL's bytes on its tape, and the tape's blocks.
     pg: i64,
+    tape: workmem::Tape,
 }
 
 /// A partition's rows, read back as a batch: its chunks in order.
@@ -65,6 +66,7 @@ pub struct Batch {
     used_bits: u32,
     input_card: f64,
     pg: i64,
+    tape: workmem::Tape,
 }
 
 pub struct HashSpill {
@@ -87,8 +89,8 @@ pub struct HashSpill {
     /// their types.
     need: Vec<bool>,
     types: Vec<DataType>,
-    /// The disk high-water mark (blocks of the tapes alive).
-    live_pg: i64,
+    /// The node's tape set (its block numbers: the file's size), and the most of it.
+    tapes: workmem::TapeSet,
     pub disk_peak: i64,
 }
 
@@ -109,7 +111,7 @@ impl HashSpill {
             hash_mem,
             need,
             types,
-            live_pg: 0,
+            tapes: workmem::TapeSet::default(),
             disk_peak: 0,
         };
         s.set_limits();
@@ -168,33 +170,40 @@ impl HashSpill {
             self.shift = 32 - self.used_bits - bits;
             self.mask = if self.shift < 32 { ((n as u32) - 1) << self.shift } else { 0 };
             self.parts = (0..n)
-                .map(|_| Part { chunks: Vec::new(), buf: Vec::new(), ntuples: 0, hll: Hll::default(), pg: 0 })
+                .map(|_| Part {
+                    chunks: Vec::new(),
+                    buf: Vec::new(),
+                    ntuples: 0,
+                    hll: Hll::default(),
+                    pg: 0,
+                    tape: workmem::Tape::default(),
+                })
                 .collect();
             if self.file.is_none() {
                 self.file = Some(TempFile::create(ctx)?);
             }
         }
         let p = if self.shift < 32 { ((hash & self.mask) >> self.shift) as usize } else { 0 };
+        // (Columns past the mask's end aren't read either.)
         let masked: Row = row
             .iter()
             .enumerate()
-            .map(|(i, v)| if self.need.get(i).copied().unwrap_or(true) { v.clone() } else { Value::Null })
+            .map(|(i, v)| if self.need.get(i).copied().unwrap_or(false) { v.clone() } else { Value::Null })
             .collect();
         let pg = 4 + workmem::minimal_tuple_len(&masked, &self.types, ctx);
         let part = &mut self.parts[p];
         part.ntuples += 1;
         part.hll.add(crate::catalog::hashidx::hash_uint32(hash));
         part.pg += pg;
-        super::spill::put_row(&mut part.buf, &masked);
+        super::spill::put_tagged_row(&mut part.buf, [pg as u32, 0], &masked);
+        self.tapes.write(&mut part.tape, pg);
         let file = self.file.as_mut().unwrap();
         if part.buf.len() >= PART_BUF {
             let c = file.append(&part.buf)?;
             part.chunks.push(c);
             part.buf.clear();
         }
-        self.live_pg += pg;
-        let blocks = self.live_pg / workmem::TAPE_BLOCK_DATA;
-        file.pg_size((blocks * workmem::BLCKSZ) as u64)
+        file.pg_size((self.tapes.written * workmem::BLCKSZ) as u64)
     }
 
     /// The input (or a batch) ended: its partitions become batches (hashagg_spill_finish)
@@ -210,12 +219,14 @@ impl HashSpill {
                 let c = self.file.as_mut().unwrap().append(&part.buf)?;
                 part.chunks.push(c);
             }
+            self.tapes.rewind(&mut part.tape);
             self.batches.push(Batch {
                 chunks: part.chunks.into(),
                 cur: None,
                 used_bits,
                 input_card: part.hll.estimate(),
                 pg: part.pg,
+                tape: part.tape,
             });
             self.batches_used += 1;
         }
@@ -223,7 +234,7 @@ impl HashSpill {
         if let Some(e) = self.mem.update(buffers) {
             self.entry_size = e;
         }
-        let blocks: i64 = self.batches.iter().map(|b| (b.pg + workmem::TAPE_BLOCK_DATA - 1) / workmem::TAPE_BLOCK_DATA).sum();
+        let blocks = self.tapes.written;
         self.disk_peak = self.disk_peak.max(blocks * workmem::BLCKSZ / 1024);
         if let Some(f) = &self.file {
             f.pg_size((blocks * workmem::BLCKSZ) as u64)?;
@@ -237,7 +248,6 @@ impl HashSpill {
         let b = self.batches.pop()?;
         self.used_bits = b.used_bits;
         self.input_card = b.input_card;
-        self.live_pg = self.batches.iter().map(|b| b.pg).sum();
         self.set_limits();
         self.mem.reset();
         if let Some(f) = &self.file {
@@ -246,12 +256,13 @@ impl HashSpill {
         Some(b)
     }
 
-    /// The next row of batch `b`.
+    /// The next row of batch `b` (its tape's blocks freed as they are read).
     pub fn read(&mut self, b: &mut Batch) -> Result<Option<Row>> {
         loop {
             if let Some(r) = &mut b.cur
-                && let Some(row) = r.read_row()?
+                && let Some(([pg, _], row)) = r.read_tagged_row()?
             {
+                self.tapes.read(&mut b.tape, pg as i64);
                 return Ok(Some(row));
             }
             let Some((s, e)) = b.chunks.pop_front() else { return Ok(None) };

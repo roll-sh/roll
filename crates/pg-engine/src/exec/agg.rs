@@ -2742,7 +2742,11 @@ impl AggNode {
             num_hashes: 1,
             total_groups: e.rows,
         };
-        let mem = super::workmem::HashAggMem::new(super::workmem::work_mem(ctx), num_trans, trans_space);
+        let mem = super::workmem::HashAggMem::new(
+            super::workmem::work_mem(ctx),
+            num_trans,
+            crate::sql::paths::parallel::agg_state_chunks(&self.aggs),
+        );
         // (The columns the aggregation reads; a spilled row keeps only those.)
         let mut need = Vec::new();
         let mut all = false;

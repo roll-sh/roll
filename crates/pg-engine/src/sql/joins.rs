@@ -412,16 +412,25 @@ pub fn hash_table_size(ntuples: f64, width: u32, g: &JoinGucs) -> (u32, u32) {
 /// ExecChooseHashTableSize: (buckets, batches, space_allowed: the bytes the table may use,
 /// doubled with each halving of the batches).
 pub fn hash_table_space(ntuples: f64, width: u32, g: &JoinGucs) -> (u32, u32, f64) {
+    let (nb, nbatch, space, _) = choose_hash_table_size(ntuples, width, (g.work_mem * g.hash_mem_multiplier * 1024.0).floor(), true);
+    (nb, nbatch, space)
+}
+
+/// ExecChooseHashTableSize with hash_mem `hash_bytes` and whether the skew optimization may
+/// be used (the planner's costing assumes it; the executor's Hash has it only for a single
+/// clause over an outer column, create_hashjoin_plan's skewTable): (buckets, batches,
+/// space_allowed, the skew table's MCVs).
+pub fn choose_hash_table_size(ntuples: f64, width: u32, hash_bytes: f64, useskew: bool) -> (u32, u32, f64, u32) {
     let ntuples = if ntuples <= 0.0 { 1000.0 } else { ntuples };
     let maxalign = |n: usize| n.div_ceil(8) * 8;
     // HJTUPLE_OVERHEAD + MAXALIGN(SizeofMinimalTupleHeader) + MAXALIGN(width).
     let tupsize = (16 + 16 + maxalign(width as usize)) as f64;
     let inner_bytes = ntuples * tupsize;
-    let mut hash_bytes = (g.work_mem * g.hash_mem_multiplier * 1024.0).floor();
+    let mut hash_bytes = hash_bytes;
     let mut space_allowed = hash_bytes;
     // The skew table's share (SKEW_HASH_MEM_PERCENT = 2).
     let bytes_per_mcv = tupsize + 8.0 * 8.0 + 4.0 + 16.0;
-    let mut skew_mcvs = (hash_bytes / bytes_per_mcv).floor();
+    let mut skew_mcvs = if useskew { (hash_bytes / bytes_per_mcv).floor() } else { 0.0 };
     skew_mcvs = (skew_mcvs * 2.0 / 100.0).floor();
     if skew_mcvs > 0.0 {
         hash_bytes -= skew_mcvs * bytes_per_mcv;
@@ -467,7 +476,7 @@ pub fn hash_table_space(ntuples: f64, width: u32, g: &JoinGucs) -> (u32, u32, f6
         space_allowed *= 2.0;
         nbatch /= 2;
     }
-    (nbuckets as u32, nbatch as u32, space_allowed)
+    (nbuckets as u32, nbatch as u32, space_allowed, skew_mcvs as u32)
 }
 
 /// estimate_hash_bucket_stats: (mcv frequency, bucket size fraction) of the inner key.

@@ -29,7 +29,12 @@ fn count_catalog_scan(table: crate::catalog::system::SysTable, path: Option<&cra
 /// Start running `plan`.
 pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
     // (Taken first: a mask is for this node alone, whatever happens next.)
-    let need = ctx.need.take();
+    let mut need = ctx.need.take();
+    // (Under EXPLAIN ANALYZE a join is told what its parent reads all the same: its
+    // sides' Sorts count their tuples by it.)
+    if need.is_none() && matches!(**plan, Plan::Join { .. } | Plan::Project { .. } | Plan::Filter { .. }) {
+        need = ctx.logical_need.take();
+    }
     let mut node = crate::stack::guard(|| open_node(plan, need.as_deref(), ctx))?;
     if !ctx.worker_parts.borrow().is_empty() && ctx.worker_parts.borrow().contains(&(Arc::as_ptr(plan) as usize)) {
         node = super::parallel_part::WorkerPart::wrap(node);
@@ -44,7 +49,7 @@ pub fn open(plan: &Arc<Plan>, ctx: &ExecCtx) -> Result<BoxNode> {
 pub fn open_need(plan: &Arc<Plan>, need: Option<Vec<bool>>, ctx: &ExecCtx) -> Result<BoxNode> {
     if !ctx.instrumented() {
         ctx.need.set(need.map(Rc::from));
-    } else if matches!(**plan, Plan::Sort { .. }) {
+    } else if matches!(**plan, Plan::Sort { .. } | Plan::Join { .. } | Plan::Project { .. } | Plan::Filter { .. }) {
         ctx.logical_need.set(need.map(Rc::from));
     }
     open(plan, ctx)
@@ -318,7 +323,23 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
             pred: pred.clone(),
         }),
         Plan::Project { input, exprs } => Box::new(ProjectNode {
-            input: open_need(input, nd::of(exprs), ctx)?,
+            // (An output nothing reads that is a plain column needs no input column: it
+            // evaluates to whatever is there, without effects. Every other is evaluated as
+            // ever, its columns read.)
+            input: open_need(
+                input,
+                match need {
+                    Some(m) => nd::of(
+                        exprs
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, e)| m.get(*i).copied().unwrap_or(false) || !matches!(e, Expr::Col(..)))
+                            .map(|(_, e)| e),
+                    ),
+                    None => nd::of(exprs),
+                },
+                ctx,
+            )?,
             exprs: exprs.clone(),
             computed: None,
             tried: false,
@@ -481,6 +502,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                     out: None,
                     anti: *kind == JoinKind::Anti,
                     nbuckets: meta.hash_buckets,
+                    est: meta.hash_inner,
                 })
             } else if let Some((lk, rk)) = hash
                 && params.is_empty()
@@ -488,6 +510,7 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 Box::new(HashJoinNode::new(
                     *kind,
                     open_need(left, nd::join_left(need, *nleft, lk, cond.as_ref()), ctx)?,
+                    left.clone(),
                     right.clone(),
                     lk.clone(),
                     rk.clone(),
@@ -3941,10 +3964,38 @@ impl NestLoopNode {
         }
         if self.right.is_none() {
             let rows = self.collect_right(ctx)?;
+            self.material_stats(&rows, ctx);
             self.right_matched = vec![false; rows.len()];
             self.right = Some(Rc::new(rows));
         }
         Ok(self.right.clone().unwrap())
+    }
+
+    /// EXPLAIN ANALYZE: what a Materialize over the inner side would have held, its
+    /// tuplestore's tuples of the columns the join reads (`workmem::StoreMem`).
+    fn material_stats(&self, rows: &[Row], ctx: &ExecCtx) {
+        let Some(instr) = ctx.instr.borrow().clone() else { return };
+        let cols: Option<Vec<bool>> =
+            self.keep.as_ref().map(|k| (self.nleft..self.nleft + self.nright).map(|i| k.get(i).copied().unwrap_or(false)).collect());
+        let types = crate::sql::paths::analyzejoins::col_types(&self.right_plan);
+        let mut m = super::workmem::StoreMem::new(super::workmem::work_mem(ctx), false);
+        let mut held: Vec<i64> = Vec::new();
+        for r in rows {
+            let len = super::workmem::minimal_tuple_len_cols(r, &types, cols.as_deref(), ctx);
+            if m.disk.is_none() {
+                held.push(len);
+            }
+            if m.put(len) {
+                for l in held.drain(..) {
+                    m.dumped(l);
+                }
+            }
+        }
+        let (disk, bytes) = m.stats();
+        instr.update(Arc::as_ptr(&self.right_plan) as usize, |s| {
+            let (d0, b0) = s.material.unwrap_or_default();
+            s.material = Some((d0 || disk, b0.max(bytes as u64)));
+        });
     }
 }
 
@@ -4193,6 +4244,59 @@ fn normed(k: Vec<Value>, norms: &[super::pipe::Norm]) -> Vec<Value> {
         .collect()
 }
 
+/// EXPLAIN ANALYZE's view of a hash join's inner rows: how they bunch on their keys (which
+/// batching can't split) and each column's values as a tuple stores them (what the ones the
+/// table keeps take decides a batch's size), for the model of a Hash it didn't run.
+struct InnerStats {
+    counts: HashMap<String, u64>,
+    bytes: [u64; 32],
+    rows: u64,
+    types: Vec<crate::types::DataType>,
+}
+
+impl InnerStats {
+    fn new(plan: &Plan) -> InnerStats {
+        let types = crate::sql::paths::analyzejoins::col_types(plan);
+        InnerStats { counts: HashMap::default(), bytes: [0; 32], rows: 0, types }
+    }
+
+    fn add(&mut self, r: &[Value], keys: &[Expr], ctx: &ExecCtx) -> Result<()> {
+        let k = eval_all(keys, r, ctx)?;
+        *self.counts.entry(format!("{k:?}")).or_default() += 1;
+        let text = |v: &Value, ty: &crate::types::DataType| crate::types::text::format_value(v, ty, ctx.fmt());
+        for ((v, ty), b) in r.iter().zip(&self.types).zip(self.bytes.iter_mut()) {
+            if !v.is_null() {
+                *b += crate::catalog::relsize::datum_bytes(0, v, ty, &text) as u64;
+            }
+        }
+        self.rows += 1;
+        Ok(())
+    }
+
+    fn record(self, plan: &Arc<Plan>, ctx: &ExecCtx) {
+        let Some(instr) = ctx.instr.borrow().clone() else { return };
+        let max = self.counts.values().copied().max().unwrap_or(0);
+        // (The bunching and the values' sizes under the inner relation's own nodes too, below a merge
+        // join's Sort and the projection over its scan: EXPLAIN's plan may hash that
+        // relation where this one merges, its node keyed by the scan.)
+        let mut keys = vec![Arc::as_ptr(plan) as usize];
+        let mut p: &Plan = plan;
+        while let Plan::Sort { input, .. } | Plan::Project { input, .. } = p {
+            keys.push(Arc::as_ptr(input) as usize);
+            p = input;
+        }
+        for k in keys {
+            instr.update(k, |s| {
+                s.hash_max_group = s.hash_max_group.max(max);
+                s.hash_rows += self.rows;
+                for (a, b) in s.hash_col_bytes.iter_mut().zip(self.bytes) {
+                    *a += b;
+                }
+            });
+        }
+    }
+}
+
 /// Hash join on equality keys; the right side is the build side. A merge join runs this
 /// way too (its matches in the inner side's order).
 struct HashJoinNode {
@@ -4241,6 +4345,61 @@ struct HashJoinNode {
     /// such a join); `merge_ended` once an outer row passes them.
     merge_end: Option<Option<(Vec<SortKey>, Vec<Value>)>>,
     merge_ended: bool,
+    /// The planner's estimate of the inner side (rows, width), which sizes PostgreSQL's
+    /// table: a planned hash join's table is modelled (`hashjoin`), and batched past
+    /// hash_mem.
+    inner_est: Option<(f64, u32)>,
+    /// The inner columns read above the join (its output), apart from its keys and
+    /// condition: they come first in the Hash's tuple (the relation's reltarget lists the
+    /// target list's columns before the join clauses').
+    above: Option<Box<[bool]>>,
+    left_plan: Arc<Plan>,
+    batching: Option<Box<Batching>>,
+}
+
+/// The column a hash join's one outer key is, if any (create_hashjoin_plan's skew column:
+/// a Var, under a RelabelType or not).
+fn skew_column(keys: &[Expr]) -> Option<usize> {
+    match keys {
+        [Expr::Col(i, _)] => Some(*i),
+        [Expr::Relabel(x, _)] => match &**x {
+            Expr::Col(i, _) => Some(*i),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The skew column's MCVs as ExecHashBuildSkewHash reads them from pg_statistic: (hash
+/// value, frequency), most common first; none when it isn't a table's column.
+fn skew_mcvs(outer: &Plan, keys: &[Expr], ctx: &ExecCtx) -> Vec<(u32, f32)> {
+    let Some(col) = skew_column(keys) else { return Vec::new() };
+    let Some((scan, c, _)) = crate::sql::explain::pwagg::origin(outer, col) else { return Vec::new() };
+    let cat = ctx.catalog();
+    let Some(st) = crate::sql::costs::col_stats(&cat, scan.table.oid, c) else { return Vec::new() };
+    let Some(sl) = st.slots.iter().find(|s| s.kind == 1) else { return Vec::new() };
+    let (Some(nums), Some((ty, vals))) = (&sl.numbers, &sl.values) else { return Vec::new() };
+    let Some(values) = crate::sql::costs::slot_values(sl, ty, vals, ctx.fmt()) else { return Vec::new() };
+    let kty = keys[0].ty();
+    values.iter().zip(nums).map(|(v, &f)| (super::pghash::hash32(v, &kty, Some(&cat)), f)).collect()
+}
+
+/// A hash join's table as PostgreSQL's (`hashjoin::HashTable`) and what its batches need.
+struct Batching {
+    hj: super::hashjoin::HashTable,
+    /// The inner rows' keys (over narrowed rows) and how a batch's rows are kept
+    /// (`Built::narrowed` places, or the columns `Built::compact` keeps).
+    rkeys: Vec<Expr>,
+    places: Option<Box<[u32]>>,
+    compact: Option<Vec<bool>>,
+    /// The batch's outer file being probed.
+    outer: Option<super::hashjoin::BatchReader>,
+    /// The outer columns the join reads (the others go to batch files as NULL), the outer
+    /// row's types, and the outer keys' types.
+    ocols: Option<Vec<bool>>,
+    otypes: Vec<crate::types::DataType>,
+    oktypes: Vec<crate::types::DataType>,
+    cat: Arc<crate::catalog::Catalog>,
 }
 
 /// What a join's output needs copied: `need` and the columns its condition reads.
@@ -4260,6 +4419,7 @@ impl HashJoinNode {
     fn new(
         kind: JoinKind,
         left: BoxNode,
+        left_plan: Arc<Plan>,
         right_plan: Arc<Plan>,
         lkeys: Vec<Expr>,
         rkeys: Vec<Expr>,
@@ -4272,6 +4432,7 @@ impl HashJoinNode {
         let (lnorm, rnorm) = super::pipe::norms(&lkeys, &rkeys);
         HashJoinNode {
             keep: join_keep(need, cond.as_ref(), nleft + nright),
+            above: need.map(|n| (nleft..nleft + nright).map(|i| n.get(i).copied().unwrap_or(false)).collect()),
             lnorm,
             rnorm,
             level: super::pipe::ALL,
@@ -4299,6 +4460,9 @@ impl HashJoinNode {
             outer_first: meta.outer_first,
             merge_end: None,
             merge_ended: false,
+            inner_est: meta.hash_inner.filter(|_| meta.method != Some(crate::sql::plan::JoinMethod::Merge)),
+            left_plan,
+            batching: None,
         }
     }
 
@@ -4333,52 +4497,24 @@ impl HashJoinNode {
         if self.table.is_some() {
             return Ok(());
         }
+        if let Some(est) = self.inner_est {
+            return self.build_hashed(est, ctx);
+        }
         // (The inner columns the output and condition read, and the keys': the inner rows are
         // read with only those, the keys over them.)
         let narrow = self.inner_narrow(ctx);
         let rows = match &narrow {
             Some((n, need, _)) => super::collect_need(&self.right_plan, Some(need.clone()), ctx, |r| n.shrink(r))?,
-            None => collect(&self.right_plan, ctx, None)?,
+            // (Still told the columns read: a Sort below counts its tuples by them.)
+            None => super::collect_need(&self.right_plan, self.inner_cols(), ctx, |r| r)?,
         };
         // (EXPLAIN ANALYZE: how the rows bunch on their keys, which batching can't split.)
-        if let Some(instr) = ctx.instr.borrow().clone() {
-            let mut counts: HashMap<String, u64> = HashMap::default();
+        if ctx.instr.borrow().is_some() {
+            let mut st = InnerStats::new(&self.right_plan);
             for r in &rows {
-                let k = eval_all(&self.rkeys, r, ctx)?;
-                *counts.entry(format!("{k:?}")).or_default() += 1;
+                st.add(r, &self.rkeys, ctx)?;
             }
-            let max = counts.values().copied().max().unwrap_or(0);
-            // (Each column's values as a tuple stores them: what the ones the table keeps
-            // take decides a batch's size.)
-            let types = crate::sql::paths::analyzejoins::col_types(&self.right_plan);
-            let text = |v: &Value, ty: &crate::types::DataType| crate::types::text::format_value(v, ty, ctx.fmt());
-            let mut bytes = [0u64; 32];
-            for r in &rows {
-                for ((v, ty), b) in r.iter().zip(&types).zip(bytes.iter_mut()) {
-                    if !v.is_null() {
-                        *b += crate::catalog::relsize::datum_bytes(0, v, ty, &text) as u64;
-                    }
-                }
-            }
-            let key = Arc::as_ptr(&self.right_plan) as usize;
-            // (The bunching and the values' sizes under the inner relation's own nodes too, below a merge
-            // join's Sort and the projection over its scan: EXPLAIN's plan may hash that
-            // relation where this one merges, its node keyed by the scan.)
-            let mut keys = vec![key];
-            let mut p: &Plan = &self.right_plan;
-            while let Plan::Sort { input, .. } | Plan::Project { input, .. } = p {
-                keys.push(Arc::as_ptr(input) as usize);
-                p = input;
-            }
-            for k in keys {
-                instr.update(k, |s| {
-                    s.hash_max_group = s.hash_max_group.max(max);
-                    s.hash_rows += rows.len() as u64;
-                    for (a, b) in s.hash_col_bytes.iter_mut().zip(bytes) {
-                        *a += b;
-                    }
-                });
-            }
+            st.record(&self.right_plan, ctx);
         }
         let keep = matches!(self.kind, JoinKind::Right | JoinKind::Full);
         // (A merge join meets equal inner rows in their (sorted) order.)
@@ -4409,14 +4545,33 @@ impl HashJoinNode {
         if ctx.instrumented() {
             return None;
         }
-        let mut inner = self.keep.as_ref()?.get(self.nleft..).map(<[bool]>::to_vec).unwrap_or_default();
+        let inner = self.inner_cols()?;
+        let n = Narrow::of(&inner, self.nright)?;
+        let keys = self.rkeys.iter().map(|e| n.expr(e)).collect::<Option<Vec<_>>>()?;
+        Some((n, inner, keys))
+    }
+
+    /// The inner columns the join's output, its condition and its keys read (None: all). A
+    /// semi or anti join returns its outer rows only: its condition and keys'.
+    fn inner_cols(&self) -> Option<Vec<bool>> {
+        let mut inner = match &self.keep {
+            Some(k) => k.get(self.nleft..).map(<[bool]>::to_vec).unwrap_or_default(),
+            None if matches!(self.kind, JoinKind::Semi | JoinKind::Anti) => {
+                let mut m = Vec::new();
+                if let Some(c) = &self.cond
+                    && !super::need::mark(c, &mut m)
+                {
+                    return None;
+                }
+                m.get(self.nleft..).map(<[bool]>::to_vec).unwrap_or_default()
+            }
+            None => return None,
+        };
         inner.resize(self.nright.max(inner.len()), false);
         if !self.rkeys.iter().all(|e| super::need::mark(e, &mut inner)) {
             return None;
         }
-        let n = Narrow::of(&inner, self.nright)?;
-        let keys = self.rkeys.iter().map(|e| n.expr(e)).collect::<Option<Vec<_>>>()?;
-        Some((n, inner, keys))
+        Some(inner)
     }
 
     /// Whether an outer row of keys `k` ends an inner or semi merge join, as ExecMergeJoin
@@ -4575,6 +4730,198 @@ impl HashJoinNode {
 }
 
 impl HashJoinNode {
+    /// A planned hash join's build: the inner rows go into PostgreSQL's table as its Hash
+    /// puts them there (`hashjoin::HashTable`), into batches past hash_mem.
+    fn build_hashed(&mut self, est: (f64, u32), ctx: &ExecCtx) -> Result<()> {
+        let narrow = self.inner_narrow(ctx);
+        let cols = self.inner_cols();
+        let types = crate::sql::paths::analyzejoins::col_types(&self.right_plan);
+        // (The Hash's tuple has the columns of its target list: a narrowed row's all.)
+        let (ttypes, tcols) = match &narrow {
+            Some((_, need, _)) => (types.iter().zip(need).filter(|(_, k)| **k).map(|(t, _)| t.clone()).collect(), None),
+            None => (types.clone(), cols.clone()),
+        };
+        // (The tuple's columns in the Hash's target list order, as places in the rows read.)
+        let order: Vec<usize> = {
+            let inner = |c: usize| cols.as_ref().is_none_or(|m| m.get(c).copied().unwrap_or(false));
+            let up = |c: usize| self.above.as_ref().is_none_or(|m| m.get(c).copied().unwrap_or(false));
+            let first = (0..types.len()).filter(|&c| inner(c) && up(c));
+            let rest = (0..types.len()).filter(|&c| inner(c) && !up(c));
+            first
+                .chain(rest)
+                .map(|c| narrow.as_ref().map_or(Some(c), |(n, ..)| n.place(c)))
+                .collect::<Option<Vec<usize>>>()
+                .unwrap_or_default()
+        };
+        let rkeys = narrow.as_ref().map_or_else(|| self.rkeys.clone(), |(_, _, k)| k.clone());
+        let ktypes = key_types(&rkeys);
+        let keep_nulls = matches!(self.kind, JoinKind::Right | JoinKind::Full);
+        // (create_hashjoin_plan's skew column: one clause, over an outer column.)
+        let useskew = skew_column(&self.lkeys).is_some_and(|c| crate::sql::explain::pwagg::origin(&self.left_plan, c).is_some());
+        let mut hj = super::hashjoin::HashTable::new(est.0, est.1, useskew, ctx);
+        if useskew && hj.wants_skew() {
+            hj.build_skew(&skew_mcvs(&self.left_plan, &self.lkeys, ctx));
+        }
+        let mut st = ctx.instr.borrow().is_some().then(|| InnerStats::new(&self.right_plan));
+        let cat = ctx.catalog();
+        let need = narrow.as_ref().map_or_else(|| tcols.clone(), |(_, n, _)| Some(n.clone()));
+        ctx.statement(|| {
+            let mut node = open_need(&self.right_plan, need, ctx)?;
+            while let Some(r) = node.next(ctx)? {
+                let r = match &narrow {
+                    Some((n, ..)) => n.shrink(r),
+                    None => r,
+                };
+                if let Some(st) = &mut st {
+                    st.add(&r, &self.rkeys, ctx)?;
+                }
+                let k = eval_all(&rkeys, &r, ctx)?;
+                if !keep_nulls && k.iter().any(Value::is_null) {
+                    continue;
+                }
+                let h = super::pghash::combine(&k, &ktypes, Some(&cat));
+                let tlen = super::workmem::minimal_tuple_len_order(&r, &ttypes, &order, ctx);
+                hj.build_insert(r, h, tlen, ctx)?;
+            }
+            Ok(())
+        })?;
+        if let Some(st) = st {
+            st.record(&self.right_plan, ctx);
+        }
+        hj.finish_build();
+        let (places, compact) = match &narrow {
+            Some((n, ..)) => (Some(n.places()), None),
+            None => (None, cols),
+        };
+        let ocols = self.keep.as_ref().and_then(|k| {
+            let mut o = k.get(..self.nleft)?.to_vec();
+            self.lkeys.iter().all(|e| super::need::mark(e, &mut o)).then_some(o)
+        });
+        self.batching = Some(Box::new(Batching {
+            hj,
+            rkeys,
+            places,
+            compact,
+            outer: None,
+            ocols,
+            otypes: Vec::new(),
+            oktypes: key_types(&self.lkeys),
+            cat,
+        }));
+        self.load_batch(ctx)
+    }
+
+    /// The batch's table, of the rows PostgreSQL's table holds now.
+    fn load_batch(&mut self, ctx: &ExecCtx) -> Result<()> {
+        let b = self.batching.as_mut().unwrap();
+        let (rows, table) = b.hj.take_batch();
+        let mut by_key = Vec::with_capacity(rows.len());
+        for (i, r) in rows.iter().enumerate() {
+            let k = eval_all(&b.rkeys, r, ctx)?;
+            if !k.iter().any(Value::is_null) {
+                by_key.push((normed(k, &self.rnorm), i));
+            }
+        }
+        let mut built = super::pipe::Built::new(rows, by_key, table, false);
+        if let Some(p) = &b.places {
+            built.narrowed(p.clone());
+        } else if let Some(c) = &b.compact {
+            built.compact(c);
+        }
+        self.matched = vec![false; built.rows.len()];
+        self.table = Some(Arc::new(built));
+        if let Some(instr) = ctx.instr.borrow().clone() {
+            let s = b.hj.stats();
+            instr.update(Arc::as_ptr(&self.right_plan) as usize, |x| x.hashjoin = Some(super::HashStats::accum(x.hashjoin, s)));
+        }
+        Ok(())
+    }
+
+    /// The next outer row of the batch running (ExecHashJoinOuterGetTuple), those of later
+    /// batches put in their outer files on the way.
+    fn next_outer(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
+        let Some(b) = self.batching.as_mut().filter(|b| b.hj.batched()) else {
+            return match self.first.take() {
+                Some(r) => Ok(Some(r)),
+                None => self.left.next(ctx),
+            };
+        };
+        let fill_outer = matches!(self.kind, JoinKind::Left | JoinKind::Full | JoinKind::Anti);
+        loop {
+            let (row, hash, tlen) = if b.hj.curbatch == 0 {
+                let r = match self.first.take() {
+                    Some(r) => r,
+                    None => match self.left.next(ctx)? {
+                        Some(r) => r,
+                        None => return Ok(None),
+                    },
+                };
+                let k = eval_all(&self.lkeys, &r, ctx)?;
+                if !fill_outer && k.iter().any(Value::is_null) {
+                    continue;
+                }
+                (r, super::pghash::combine(&k, &b.oktypes, Some(&b.cat)), None)
+            } else {
+                let Some(rd) = b.outer.as_mut() else { return Ok(None) };
+                match b.hj.read(rd)? {
+                    Some((h, len, r)) => (r, h, Some(len as i64)),
+                    None => return Ok(None),
+                }
+            };
+            let batch = b.hj.batch_of(hash);
+            // (A skew bucket's outer rows are batch 0's, whatever their batch.)
+            if batch == b.hj.curbatch || b.hj.skew_bucket(hash).is_some() {
+                return Ok(Some(row));
+            }
+            ctx.check()?;
+            let row: Row = match &b.ocols {
+                Some(c) => row
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| if c.get(i).copied().unwrap_or(true) { v } else { Value::Null })
+                    .collect(),
+                None => row,
+            };
+            let tlen = match tlen {
+                Some(l) => l,
+                None => {
+                    if b.otypes.is_empty() {
+                        b.otypes = crate::sql::paths::analyzejoins::col_types(&self.left_plan);
+                    }
+                    super::workmem::minimal_tuple_len_cols(&row, &b.otypes, b.ocols.as_deref(), ctx)
+                }
+            };
+            b.hj.save_outer(batch, hash, &row, tlen, ctx)?;
+        }
+    }
+
+    /// The batch's outer rows are done: the next batch with work loaded (ExecHashJoinNewBatch),
+    /// false when none is left.
+    fn next_batch(&mut self, ctx: &ExecCtx) -> Result<bool> {
+        let Some(b) = self.batching.as_mut().filter(|b| b.hj.batched()) else { return Ok(false) };
+        let fill_outer = matches!(self.kind, JoinKind::Left | JoinKind::Full | JoinKind::Anti);
+        let fill_inner = matches!(self.kind, JoinKind::Right | JoinKind::Full);
+        b.outer = None;
+        // (The batch's rows go before the next one's come.)
+        self.table = Some(Arc::new(super::pipe::Built::new(Vec::new(), Vec::new(), super::pghash::JoinTable::flat(1, std::iter::empty()), false)));
+        let Some(outer) = b.hj.new_batch(fill_outer, fill_inner, ctx)? else { return Ok(false) };
+        b.outer = outer;
+        self.cur = None;
+        self.unmatched_right = None;
+        self.load_batch(ctx)?;
+        Ok(true)
+    }
+
+    /// No inner row at all (ExecHashJoin's totalTuples == 0).
+    fn inner_empty(&self) -> bool {
+        match &self.batching {
+            Some(b) => b.hj.total_tuples == 0,
+            None => self.table.as_ref().is_some_and(|t| t.rows.is_empty()),
+        }
+    }
+}
+
+impl HashJoinNode {
     /// This join's probe as a stage a parallel scan's workers run (`pipe`), when it can
     /// be one: a hash join (not a merge join's, not one returning unmatched inner rows)
     /// whose outer keys and condition compile to kernels. Builds the table.
@@ -4611,6 +4958,10 @@ impl HashJoinNode {
             return Ok(None);
         }
         self.build(ctx)?;
+        // (A table in batches is probed here, a batch at a time.)
+        if self.batching.as_ref().is_some_and(|b| b.hj.batched()) {
+            return Ok(None);
+        }
         let built = self.table.clone().unwrap();
         // (An empty table that leaves the outer side unread: `step` returns at once.)
         if built.rows.is_empty() && matches!(self.kind, JoinKind::Inner | JoinKind::Semi | JoinKind::Right) {
@@ -4683,7 +5034,7 @@ impl HashJoinNode {
             && self.cur.is_none()
             && self.unmatched_right.is_none()
             && matches!(self.kind, JoinKind::Inner | JoinKind::Semi | JoinKind::Right)
-            && self.table.as_ref().is_some_and(|t| t.rows.is_empty())
+            && self.inner_empty()
         {
             return Ok(None);
         }
@@ -4694,6 +5045,7 @@ impl HashJoinNode {
             if !self.merge
                 && matches!(self.kind, JoinKind::Inner | JoinKind::Semi)
                 && self.level == super::pipe::ALL
+                && !self.batching.as_ref().is_some_and(|b| b.hj.batched())
                 && let [Expr::Col(k, _)] = &self.lkeys[..]
                 && let [rkey] = &self.rkeys[..]
                 && let Some(t) = &self.table
@@ -4725,13 +5077,21 @@ impl HashJoinNode {
                         return Ok(Some(Item::Row(out, level)));
                     }
                 }
+                if self.next_batch(ctx)? {
+                    continue;
+                }
                 return Ok(None);
             }
             if self.cur.is_none() {
                 if self.merge_ended {
                     return Ok(None);
                 }
+                let batched = self.batching.as_ref().is_some_and(|b| b.hj.batched());
                 let next = match self.first.take() {
+                    first if batched => {
+                        self.first = first;
+                        self.next_outer(ctx)?
+                    }
                     Some(r) => Some(r),
                     None if level != super::pipe::ALL => match self.left.next_item(ctx)? {
                         None => None,
@@ -4780,6 +5140,9 @@ impl HashJoinNode {
                                 t.table.scan().collect()
                             };
                             self.unmatched_right = Some(order.into_iter());
+                            continue;
+                        }
+                        if self.next_batch(ctx)? {
                             continue;
                         }
                         return Ok(None);
@@ -4886,41 +5249,154 @@ struct RightSemiNode {
     out: Option<std::vec::IntoIter<Row>>,
     anti: bool,
     nbuckets: Option<u32>,
+    /// The planner's estimate of the hashed (left) side: PostgreSQL's table, in batches
+    /// past hash_mem (`hashjoin`).
+    est: Option<(f64, u32)>,
 }
 
 impl RightSemiNode {
+    /// The join as ExecHashJoin runs it with PostgreSQL's table: the left rows hashed into
+    /// batches, the right rows probing batch 0 as they come and the later batches from
+    /// their files; a semi join's left row out at its first match, an anti join's
+    /// unmatched ones after each batch, bucket by bucket.
+    fn run_batched(&self, est: (f64, u32), ctx: &ExecCtx) -> Result<Vec<Row>> {
+        let (lnorm, rnorm) = super::pipe::norms(&self.lkeys, &self.rkeys);
+        let ltypes = crate::sql::paths::analyzejoins::col_types(&self.left);
+        let (lk, rk) = (key_types(&self.lkeys), key_types(&self.rkeys));
+        let cat = ctx.catalog();
+        let useskew = skew_column(&self.rkeys).is_some_and(|c| crate::sql::explain::pwagg::origin(&self.right, c).is_some());
+        let mut hj = super::hashjoin::HashTable::new(est.0, est.1, useskew, ctx);
+        if useskew && hj.wants_skew() {
+            hj.build_skew(&skew_mcvs(&self.right, &self.rkeys, ctx));
+        }
+        ctx.statement(|| {
+            let mut node = open(&self.left, ctx)?;
+            while let Some(r) = node.next(ctx)? {
+                let k = eval_all(&self.lkeys, &r, ctx)?;
+                if !self.anti && k.iter().any(Value::is_null) {
+                    continue;
+                }
+                let h = super::pghash::combine(&k, &lk, Some(&cat));
+                let tlen = super::workmem::minimal_tuple_len_cols(&r, &ltypes, None, ctx);
+                hj.build_insert(r, h, tlen, ctx)?;
+            }
+            Ok(())
+        })?;
+        hj.finish_build();
+        let mut out = Vec::new();
+        if hj.total_tuples == 0 {
+            return Ok(out);
+        }
+        let mut right = open(&self.right, ctx)?;
+        let mut rtypes = Vec::new();
+        let mut probe: Option<super::hashjoin::BatchReader> = None;
+        loop {
+            let (rows, table) = hj.take_batch();
+            let mut by_key = Vec::with_capacity(rows.len());
+            for (i, r) in rows.iter().enumerate() {
+                let k = eval_all(&self.lkeys, r, ctx)?;
+                if !k.iter().any(Value::is_null) {
+                    by_key.push((normed(k, &lnorm), i));
+                }
+            }
+            let built = super::pipe::Built::new(rows, by_key, table, false);
+            if let Some(instr) = ctx.instr.borrow().clone() {
+                let s = hj.stats();
+                instr.update(Arc::as_ptr(&self.left) as usize, |x| x.hashjoin = Some(super::HashStats::accum(x.hashjoin, s)));
+            }
+            let mut emitted = vec![false; built.rows.len()];
+            loop {
+                let (r, h) = if hj.curbatch == 0 {
+                    let Some(r) = right.next(ctx)? else { break };
+                    let k = eval_all(&self.rkeys, &r, ctx)?;
+                    if k.iter().any(Value::is_null) {
+                        continue;
+                    }
+                    (r, super::pghash::combine(&k, &rk, Some(&cat)))
+                } else {
+                    let Some(rd) = probe.as_mut() else { break };
+                    match hj.read(rd)? {
+                        Some((h, _, r)) => (r, h),
+                        None => break,
+                    }
+                };
+                ctx.check()?;
+                let b = hj.batch_of(h);
+                if b != hj.curbatch && hj.skew_bucket(h).is_none() {
+                    if rtypes.is_empty() {
+                        rtypes = crate::sql::paths::analyzejoins::col_types(&self.right);
+                    }
+                    let tlen = super::workmem::minimal_tuple_len_cols(&r, &rtypes, None, ctx);
+                    hj.save_outer(b, h, &r, tlen, ctx)?;
+                    continue;
+                }
+                self.probe(&built, &mut emitted, &r, &rnorm, &mut out, ctx)?;
+            }
+            if self.anti {
+                for j in built.table.scan() {
+                    if !emitted[j] {
+                        out.push(built.rows[j].clone());
+                    }
+                }
+            }
+            drop(built);
+            // ExecHashJoinNewBatch closes the previous outer file before loading another
+            // inner batch, so its bytes no longer count against temp_file_limit.
+            drop(probe.take());
+            match hj.new_batch(false, self.anti, ctx)? {
+                Some(p) => probe = p,
+                None => return Ok(out),
+            }
+        }
+    }
+
+    /// A right row's matches among the hashed rows (`emitted`: matched already).
+    fn probe(
+        &self,
+        built: &super::pipe::Built,
+        emitted: &mut [bool],
+        r: &[Value],
+        rnorm: &[super::pipe::Norm],
+        out: &mut Vec<Row>,
+        ctx: &ExecCtx,
+    ) -> Result<()> {
+        let k = normed(eval_all(&self.rkeys, r, ctx)?, rnorm);
+        let span = built.lookup(&k);
+        for c in 0..span.1 {
+            let j = built.cand(span, c);
+            if emitted[j] {
+                continue;
+            }
+            if let Some(c) = &self.cond
+                && !eval_bool(c, &concat_rows(&built.rows[j], r), ctx)?
+            {
+                continue;
+            }
+            emitted[j] = true;
+            if !self.anti {
+                out.push(built.rows[j].clone());
+            }
+        }
+        Ok(())
+    }
     fn run(&self, ctx: &ExecCtx) -> Result<Vec<Row>> {
+        if let Some(est) = self.est {
+            return self.run_batched(est, ctx);
+        }
         let rows = collect(&self.left, ctx, None)?;
         let (lnorm, rnorm) = super::pipe::norms(&self.lkeys, &self.rkeys);
         let built = build_hash(rows, &self.lkeys, &lnorm, self.nbuckets, self.anti, false, ctx)?;
-        let rows = &built.rows;
-        let mut emitted = vec![false; rows.len()];
+        let mut emitted = vec![false; built.rows.len()];
         let mut out = Vec::new();
         let mut right = open(&self.right, ctx)?;
         while let Some(r) = right.next(ctx)? {
             ctx.check()?;
-            let k = normed(eval_all(&self.rkeys, &r, ctx)?, &rnorm);
-            let span = built.lookup(&k);
-            for c in 0..span.1 {
-                let j = built.cand(span, c);
-                if emitted[j] {
-                    continue;
-                }
-                if let Some(c) = &self.cond
-                    && !eval_bool(c, &concat_rows(&rows[j], &r), ctx)?
-                {
-                    continue;
-                }
-                emitted[j] = true;
-                if !self.anti {
-                    out.push(rows[j].clone());
-                }
-            }
+            self.probe(&built, &mut emitted, &r, &rnorm, &mut out, ctx)?;
         }
         if self.anti {
             for j in built.table.scan() {
                 if !emitted[j] {
-                    out.push(rows[j].clone());
+                    out.push(built.rows[j].clone());
                 }
             }
         }

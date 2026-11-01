@@ -565,6 +565,7 @@ fn claim_build(db: u64, t: u32) -> Option<BuildClaim> {
     while s.contains(&key) {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
+            BUILD_WAITS_EXPIRED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return None;
         }
         s = BUILDING.1.wait_timeout(s, left).unwrap_or_else(|e| e.into_inner()).0;
@@ -572,6 +573,14 @@ fn claim_build(db: u64, t: u32) -> Option<BuildClaim> {
     s.push(key);
     BUILDING_HERE.with(|b| b.set(true));
     Some(BuildClaim(key))
+}
+
+/// Waits for another session's build that gave up after 10 s (and built a copy of their own).
+static BUILD_WAITS_EXPIRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many waits for another session's model build gave up so far (tests/memory_load.rs).
+pub fn build_waits_expired() -> u64 {
+    BUILD_WAITS_EXPIRED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether values read from table `t` (of the running statement's database) may be

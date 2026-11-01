@@ -408,6 +408,9 @@ pub struct JoinMeta {
     /// A hash join's bucket count as ExecChooseHashTableSize picks it from the inner
     /// side's estimated rows and width (the executor's table follows it).
     pub hash_buckets: Option<u32>,
+    /// And the inner side's estimated rows and width it sized the table from (the
+    /// executor's ExecChooseHashTableSize: its batches and memory, `exec::hashjoin`).
+    pub hash_inner: Option<(f64, u32)>,
     /// A hash join reads its outer side's first row before it builds the hash table
     /// (ExecHashJoin: the outer path's startup cost is below the Hash's total, its inner
     /// path's): over an empty outer side the inner side never runs.

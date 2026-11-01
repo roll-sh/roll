@@ -8,7 +8,7 @@
 mod parallel;
 mod overexplain;
 pub use parallel::analyzed_plan;
-mod pwagg;
+pub(crate) mod pwagg;
 
 use super::binder::ast::{const_str, inner, with_pos};
 use super::expr::{Expr, Subquery, SubqueryKind};
@@ -18280,6 +18280,15 @@ impl Render<'_> {
             });
         }
         let s = self.stats(n.key)?;
+        // (A Hash's rows are the tuples it put in its table: not those of a NULL key it
+        // dropped, partialTuples.)
+        if n.node_type == "Hash"
+            && !n.parallel_aware
+            && s.loops == 1
+            && let Some(h) = s.hashjoin
+        {
+            return Some(NodeStats { rows: h.tuples, ..s });
+        }
         match mat {
             Some(0) => None,
             Some(r) if r > s.loops => Some(NodeStats {
@@ -18588,11 +18597,17 @@ impl Render<'_> {
                 }
                 Detail::HashInfo if executed => {
                     let st = self.stats(n.key).unwrap_or_default();
+                    // (A serial Hash the executor ran as PostgreSQL's: its own numbers.)
+                    let ran = st.hashjoin.filter(|_| !n.parallel_aware).map(|h| {
+                        (h.nbuckets as u64, h.nbuckets_original as u64, h.nbatch as u64, h.nbatch_original as u64, h.space_peak.div_ceil(1024))
+                    });
+                    let (nb, nb0, nbatch, nbatch0, kb) = if let Some(r) = ran {
+                        r
+                    } else {
                     // (Per loop of the join, all the processes' rows together.)
                     let raw = self.instr.and_then(|i| n.key.and_then(|k| i.get(k))).unwrap_or_default();
                     let loops = raw.loops.max(1);
                     let rows = raw.rows / loops;
-                    let _ = &st;
                     // ExecChooseHashTableSize over the estimate (a Parallel Hash's: all the
                     // processes' rows, in their combined memory), then the batches the
                     // rows it got needed (ExecHashIncreaseNumBatches: doubling while the
@@ -18664,8 +18679,10 @@ impl Render<'_> {
                         regrown_buckets.unwrap_or(nb0 as u64)
                     };
                     let kb = self.memory_kb(n, 9);
+                    (nb, nb0 as u64, nbatch, nbatch0 as u64, kb)
+                    };
                     if text {
-                        let v = if nb != nb0 as u64 || nbatch != nbatch0 as u64 {
+                        let v = if nb != nb0 || nbatch != nbatch0 {
                             format!(
                                 "{nb} (originally {nb0})  Batches: {nbatch} (originally {nbatch0})  Memory Usage: {kb}kB"
                             )
@@ -18676,9 +18693,9 @@ impl Render<'_> {
                     } else {
                         for (k, v) in [
                             ("Hash Buckets", nb),
-                            ("Original Hash Buckets", nb0 as u64),
+                            ("Original Hash Buckets", nb0),
                             ("Hash Batches", nbatch),
-                            ("Original Hash Batches", nbatch0 as u64),
+                            ("Original Hash Batches", nbatch0),
                             ("Peak Memory Usage", kb),
                         ] {
                             self.w.prop(k, &v.to_string(), true);
@@ -18789,6 +18806,9 @@ impl Render<'_> {
             } else {
                 17.max(bytes / 1024 + 9)
             };
+            // (A Materialize the executor counted as PostgreSQL's tuplestore.)
+            let ran = (n.node_type == "Materialize").then(|| self.stats(n.key).and_then(|s| s.material)).flatten();
+            let (disk, kb) = ran.map_or((disk, kb), |(d, b)| (d, b.div_ceil(1024)));
             let kind = if disk { "Disk" } else { "Memory" };
             if text {
                 self.w.prop("Storage", &format!("{kind}  Maximum Storage: {kb}kB"), true);

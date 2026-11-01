@@ -36,8 +36,9 @@ pub struct TempUsage {
     /// pg_stat_statements' temp blocks written and read, for the running statement.
     pub blks_written: AtomicI64,
     pub blks_read: AtomicI64,
-    /// Names files (pgsql_tmp<pid>.<n>).
+    /// Names files (pgsql_tmp<pid>.<n>), and the engine's files that stand for none.
     counter: AtomicU64,
+    raw: AtomicU64,
     /// Files removed that log_temp_files wants logged: (path, size). The server log
     /// (agent 128's) takes them after each statement (`take_logged`).
     logged: parking_lot::Mutex<Vec<(String, u64)>>,
@@ -69,45 +70,105 @@ impl TempUsage {
     }
 }
 
-/// A temporary file of rows.
-pub struct TempFile {
-    file: Rc<File>,
-    /// Bytes on disk (`buf` not yet).
-    flushed: u64,
-    buf: Vec<u8>,
+/// PostgreSQL's account of one temporary file it would have written: its size (what
+/// temp_file_limit caps and pg_stat_statements' blocks count) and its report when it goes
+/// (pg_stat_database's temp_files / temp_bytes, log_temp_files). A node whose engine file
+/// stands for several of PostgreSQL's (a hash join's batch files) keeps one per file.
+pub struct TempAcct {
     usage: Arc<TempUsage>,
-    /// PostgreSQL's size of the file this stands for, and the settings it is checked and
-    /// logged against.
     pg: Cell<u64>,
     limit_kb: i64,
     log_kb: i64,
     path: String,
 }
 
-impl TempFile {
-    pub fn create(ctx: &super::ExecCtx) -> Result<TempFile> {
-        let dir = ctx.sess.db.store.spill_dir().join("tmp");
-        let io = |e: std::io::Error| Error::new(code::INTERNAL_ERROR, format!("could not create temporary file: {e}"));
-        std::fs::create_dir_all(&dir).map_err(io)?;
+impl TempAcct {
+    /// A file PostgreSQL opens now (OpenTemporaryFile: the next pgsql_tmp<pid>.<n>).
+    pub fn new(ctx: &super::ExecCtx) -> TempAcct {
         let usage = ctx.sess.temp.clone();
         let n = usage.counter.fetch_add(1, Ordering::Relaxed);
-        let name = format!("pgsql_tmp{}.{n}", ctx.sess.pid);
-        let p = dir.join(format!("{name}.{}", std::process::id()));
-        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&p).map_err(io)?;
-        let _ = std::fs::remove_file(&p);
         let setting = |n: &str, d: i64| {
             ctx.sess.settings.borrow().get_raw(n).and_then(|v| v.parse::<i64>().ok()).unwrap_or(d)
         };
-        Ok(TempFile {
-            file: Rc::new(file),
-            flushed: 0,
-            buf: Vec::new(),
+        TempAcct {
             usage,
             pg: Cell::new(0),
             limit_kb: setting("temp_file_limit", -1),
             log_kb: setting("log_temp_files", -1),
-            path: format!("base/pgsql_tmp/{name}"),
-        })
+            path: format!("base/pgsql_tmp/pgsql_tmp{}.{n}", ctx.sess.pid),
+        }
+    }
+
+    /// PostgreSQL's file has grown to `bytes` (FileWrite past its end): an error past
+    /// temp_file_limit, and pg_stat_statements' blocks written.
+    pub fn pg_size(&self, bytes: u64) -> Result<()> {
+        let old = self.pg.get();
+        if bytes <= old {
+            return Ok(());
+        }
+        let total = self.usage.live.load(Ordering::Relaxed) + bytes - old;
+        if self.limit_kb >= 0 && total > self.limit_kb as u64 * 1024 {
+            return Err(Error::new(
+                code::CONFIGURATION_LIMIT_EXCEEDED,
+                format!("temporary file size exceeds \"temp_file_limit\" ({}kB)", self.limit_kb),
+            ));
+        }
+        self.usage.live.fetch_add(bytes - old, Ordering::Relaxed);
+        let blocks = bytes.div_ceil(8192) as i64 - old.div_ceil(8192) as i64;
+        self.usage.blks_written.fetch_add(blocks, Ordering::Relaxed);
+        self.pg.set(bytes);
+        Ok(())
+    }
+
+    /// PostgreSQL read `bytes` of it back (temp blocks read).
+    pub fn pg_read(&self, bytes: u64) {
+        self.usage.blks_read.fetch_add(bytes.div_ceil(8192) as i64, Ordering::Relaxed);
+    }
+}
+
+impl Drop for TempAcct {
+    fn drop(&mut self) {
+        // FileClose of a temporary file: ReportTemporaryFileUsage.
+        let size = self.pg.get();
+        self.usage.live.fetch_sub(size, Ordering::Relaxed);
+        if size > 0 {
+            self.usage.files.fetch_add(1, Ordering::Relaxed);
+            self.usage.bytes.fetch_add(size as i64, Ordering::Relaxed);
+        }
+        if self.log_kb >= 0 && (size / 1024) as i64 >= self.log_kb {
+            self.usage.logged.lock().push((std::mem::take(&mut self.path), size));
+        }
+    }
+}
+
+/// A temporary file of rows.
+pub struct TempFile {
+    file: Rc<File>,
+    /// Bytes on disk (`buf` not yet).
+    flushed: u64,
+    buf: Vec<u8>,
+    /// The file of PostgreSQL's it stands for (None: its node keeps the accounts,
+    /// `TempAcct`).
+    acct: Option<TempAcct>,
+}
+
+impl TempFile {
+    pub fn create(ctx: &super::ExecCtx) -> Result<TempFile> {
+        let mut f = Self::create_raw(ctx)?;
+        f.acct = Some(TempAcct::new(ctx));
+        Ok(f)
+    }
+
+    /// A file that stands for none of PostgreSQL's by itself.
+    pub fn create_raw(ctx: &super::ExecCtx) -> Result<TempFile> {
+        let dir = ctx.sess.db.store.spill_dir().join("tmp");
+        let io = |e: std::io::Error| Error::new(code::INTERNAL_ERROR, format!("could not create temporary file: {e}"));
+        std::fs::create_dir_all(&dir).map_err(io)?;
+        let n = ctx.sess.temp.raw.fetch_add(1, Ordering::Relaxed);
+        let p = dir.join(format!("e{}.{n}.{}", ctx.sess.pid, std::process::id()));
+        let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&p).map_err(io)?;
+        let _ = std::fs::remove_file(&p);
+        Ok(TempFile { file: Rc::new(file), flushed: 0, buf: Vec::new(), acct: None })
     }
 
     /// Where the next row goes.
@@ -153,44 +214,15 @@ impl TempFile {
         Ok(RowReader { file: self.file.clone(), pos: start, end, buf: Vec::new(), at: 0 })
     }
 
-    /// PostgreSQL's file has grown to `bytes` (FileWrite past its end): an error past
-    /// temp_file_limit, and pg_stat_statements' blocks written.
+    /// PostgreSQL's file has grown to `bytes` (`TempAcct::pg_size`).
     pub fn pg_size(&self, bytes: u64) -> Result<()> {
-        let old = self.pg.get();
-        if bytes <= old {
-            return Ok(());
-        }
-        let total = self.usage.live.load(Ordering::Relaxed) + bytes - old;
-        if self.limit_kb >= 0 && total > self.limit_kb as u64 * 1024 {
-            return Err(Error::new(
-                code::CONFIGURATION_LIMIT_EXCEEDED,
-                format!("temporary file size exceeds \"temp_file_limit\" ({}kB)", self.limit_kb),
-            ));
-        }
-        self.usage.live.fetch_add(bytes - old, Ordering::Relaxed);
-        let blocks = bytes.div_ceil(8192) as i64 - old.div_ceil(8192) as i64;
-        self.usage.blks_written.fetch_add(blocks, Ordering::Relaxed);
-        self.pg.set(bytes);
-        Ok(())
+        self.acct.as_ref().map_or(Ok(()), |a| a.pg_size(bytes))
     }
 
-    /// PostgreSQL read `bytes` of it back (temp blocks read).
+    /// PostgreSQL read `bytes` of it back.
     pub fn pg_read(&self, bytes: u64) {
-        self.usage.blks_read.fetch_add(bytes.div_ceil(8192) as i64, Ordering::Relaxed);
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        // FileClose of a temporary file: ReportTemporaryFileUsage.
-        let size = self.pg.get();
-        self.usage.live.fetch_sub(size, Ordering::Relaxed);
-        if size > 0 {
-            self.usage.files.fetch_add(1, Ordering::Relaxed);
-            self.usage.bytes.fetch_add(size as i64, Ordering::Relaxed);
-        }
-        if self.log_kb >= 0 && (size / 1024) as i64 >= self.log_kb {
-            self.usage.logged.lock().push((std::mem::take(&mut self.path), size));
+        if let Some(a) = &self.acct {
+            a.pg_read(bytes);
         }
     }
 }
@@ -204,6 +236,14 @@ pub fn put_row(buf: &mut Vec<u8>, row: &[Value]) {
     buf[start..start + 4].copy_from_slice(&n.to_le_bytes());
 }
 
+/// A row with two words in front (a hash join's batch files: its hash value and its
+/// MinimalTuple's length).
+pub fn put_tagged_row(buf: &mut Vec<u8>, tag: [u32; 2], row: &[Value]) {
+    buf.extend_from_slice(&tag[0].to_le_bytes());
+    buf.extend_from_slice(&tag[1].to_le_bytes());
+    put_row(buf, row);
+}
+
 /// Rows of a temporary file, read in order.
 pub struct RowReader {
     file: Rc<File>,
@@ -214,6 +254,13 @@ pub struct RowReader {
 }
 
 impl RowReader {
+    /// A row `put_tagged_row` wrote.
+    pub fn read_tagged_row(&mut self) -> Result<Option<([u32; 2], Vec<Value>)>> {
+        let Some(t) = self.take(8)? else { return Ok(None) };
+        let tag = [u32::from_le_bytes(t[..4].try_into().unwrap()), u32::from_le_bytes(t[4..].try_into().unwrap())];
+        let row = self.read_row()?.ok_or_else(|| Error::new(code::INTERNAL_ERROR, "temporary file ended early"))?;
+        Ok(Some((tag, row)))
+    }
     pub fn read_row(&mut self) -> Result<Option<Vec<Value>>> {
         let Some(len) = self.take(4)?.map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize) else {
             return Ok(None);

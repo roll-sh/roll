@@ -70,7 +70,7 @@ fn inh_append(p: &Arc<Plan>) -> Option<&Arc<Plan>> {
 
 /// The table column a join's output column `k` is, and whether an outer join may null
 /// it.
-fn origin(p: &Plan, k: usize) -> Option<(&ScanPlan, usize, bool)> {
+pub(crate) fn origin(p: &Plan, k: usize) -> Option<(&ScanPlan, usize, bool)> {
     match p {
         Plan::Scan(s) => Some((s, k, false)),
         Plan::Project { input, exprs } => match exprs.get(k)? {

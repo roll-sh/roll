@@ -629,6 +629,59 @@ pub fn agg_transitions(aggs: &[crate::sql::plan::AggCall]) -> (usize, f64) {
     (n, space)
 }
 
+/// What a group's by-reference transition states allocate when the group starts, as
+/// aset.c chunks (with their headers): the states `agg_transitions` counts, each as its
+/// transition function makes it (makeNumericAggState and its sum accumulators' digit
+/// arrays, an Int128AggState, the initial value's copied array, initArrayResult's
+/// ArrayBuildState, makeStringInfo). What grows afterwards with the values isn't counted.
+pub fn agg_state_chunks(aggs: &[crate::sql::plan::AggCall]) -> Vec<i64> {
+    let mut calls: Vec<(u32, String)> = Vec::new();
+    let mut states: Vec<(u32, String)> = Vec::new();
+    let mut out = Vec::new();
+    for a in aggs {
+        let inputs = format!("{:?}|{:?}|{}|{:?}|{:?}", a.args, a.filter, a.distinct, a.order_by, a.direct);
+        let oid = a.def.sig.oid;
+        if calls.contains(&(oid, inputs.clone())) {
+            continue;
+        }
+        calls.push((oid, inputs.clone()));
+        let trans = if a.user.is_none() { agg_transfn(oid) } else { None };
+        if let Some((t, false)) = trans
+            && t != 0
+        {
+            if states.contains(&(t, inputs.clone())) {
+                continue;
+            }
+            states.push((t, inputs));
+        }
+        // (A NumericAggState is 144 bytes; each sum accumulator holds a positive and a
+        // negative digit array, a few NBASE digits for everyday values.)
+        let digits = 2 * (16 + 8);
+        match trans.map(|(t, _)| t) {
+            // numeric_avg_accum (sum, avg of numeric).
+            Some(2858) => out.extend([256 + 8, digits]),
+            // numeric_accum, int8_accum (stddev, variance): sumX and sumX2.
+            Some(1833 | 1836) => out.extend([256 + 8, digits, digits]),
+            // int8_avg_accum, int2_accum, int4_accum (an Int128AggState), interval_avg_accum,
+            // int2/int4_avg_accum's {0,0} and float4/float8_accum's {0,0,0} copied.
+            Some(2746 | 1834 | 1835 | 1843 | 1962 | 1963 | 208 | 222) => out.push(64 + 8),
+            // float8_regr_accum's {0,0,0,0,0,0}.
+            Some(2806) => out.push(128 + 8),
+            // array_agg: its ArrayBuildState with 8 values' and nulls' room.
+            Some(2333 | 4051) => out.extend([64 + 8, 64 + 8, 8 + 8]),
+            // string_agg, json(b)_agg and the like: a StringInfo of 1 kB.
+            Some(3535 | 3543 | 3173 | 3180 | 6275 | 6277 | 6278 | 6279) => out.extend([32 + 8, 1024 + 8]),
+            _ => {
+                let s = agg_trans_space(oid);
+                if s > 0.0 {
+                    out.push(crate::exec::workmem::aset_chunk(s as i64));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Which part of the aggregation a node does (AggSplit): all of it, the workers' partial
 /// states (serialized for the Gather), or the states combined and finalized.
 #[derive(Clone, Copy, PartialEq, Eq)]

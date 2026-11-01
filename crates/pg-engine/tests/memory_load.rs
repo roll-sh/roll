@@ -257,12 +257,46 @@ fn many_sessions_stay_bounded() {
     });
     let over = (peak - connected) as f64 / MB;
     eprintln!(
-        "{n} sessions, {} operations: heap {:.1} MB connected, peak +{over:.1} MB",
+        "{n} sessions, {} operations: heap {:.1} MB connected, peak +{over:.1} MB, model waits given up {}",
         ops.load(Relaxed),
-        connected as f64 / MB
+        connected as f64 / MB,
+        pg_engine::exec::sizing::build_waits_expired()
     );
     // Measured at 100 sessions (round 22, release build): +93 MB; with every session building
     // its own models of the tables, +640 MB (and 120 operations instead of 3,570).
     let bound = 40.0 + 0.8 * n as f64;
     assert!(over <= bound, "{n} sessions peaked at +{over:.1} MB of heap (bound {bound:.0} MB)");
+}
+
+#[test]
+fn hash_join_spilling_bounds_the_build_heap() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = common::engine_session(common::open_store(dir.path()), "hash_memory");
+    for sql in [
+        "CREATE TABLE hm (id int, pad text)",
+        "INSERT INTO hm SELECT g, repeat(md5(g::text), 32) FROM generate_series(1, 16000) g",
+        "ANALYZE hm",
+        "SET max_parallel_workers_per_gather = 0",
+        "SET enable_mergejoin = off",
+        "SET enable_nestloop = off",
+        "SET work_mem = '64kB'",
+    ] {
+        s.query(sql).unwrap();
+    }
+    let sql = "SELECT sum(length(a.pad) + length(b.pad)) FROM hm a JOIN hm b ON a.id = b.id";
+    // Warm table models, parsed plans and the storage cache before either measurement.
+    let expected = s.query(sql).unwrap().pop().unwrap().rows;
+    let mut peak = |work_mem: &str| {
+        s.query(&format!("SET work_mem = '{work_mem}'")).unwrap();
+        let before = CUR.load(Relaxed);
+        PEAK.store(before, Relaxed);
+        assert_eq!(s.query(sql).unwrap().pop().unwrap().rows, expected);
+        PEAK.load(Relaxed).saturating_sub(before)
+    };
+    let spilled = peak("64kB");
+    let memory = peak("64MB");
+    eprintln!("hash join heap above warm baseline: spilled {} bytes, in memory {} bytes", spilled, memory);
+    assert!(spilled < 16 << 20, "spilled build used {spilled} bytes");
+    assert!(memory > spilled * 2, "spilling did not bound the build: {spilled} vs {memory}");
 }

@@ -56,10 +56,41 @@ pub fn minimal_tuple_len_of(row: &[Value], types: &[DataType], mask: Option<&[bo
     // (SizeofMinimalTupleHeader 15, the bitmap, MAXALIGNed at MINIMAL_TUPLE_OFFSET 8.)
     let bitmap = if has_null { types.len().div_ceil(8) as i64 } else { 0 };
     let hoff = maxalign(15 + bitmap + 8) - 8;
+    hoff + data_len(row.iter().zip(types).enumerate().filter(|(i, _)| kept(*i)).map(|(_, p)| p), ctx)
+}
+
+/// The t_len of a MinimalTuple of the columns `cols` marks only (None: all): a tuple of a
+/// node's target list, the other columns not in it at all (a Hash's input, CP_SMALL_TLIST).
+pub fn minimal_tuple_len_cols(row: &[Value], types: &[DataType], cols: Option<&[bool]>, ctx: &super::ExecCtx) -> i64 {
+    let kept = |i: usize| cols.is_none_or(|m| m.get(i).copied().unwrap_or(false));
+    let mut natts = 0usize;
+    let mut has_null = false;
+    for (i, v) in row.iter().enumerate() {
+        if kept(i) {
+            natts += 1;
+            has_null |= v.is_null();
+        }
+    }
+    let bitmap = if has_null { natts.div_ceil(8) as i64 } else { 0 };
+    let hoff = maxalign(15 + bitmap + 8) - 8;
+    hoff + data_len(row.iter().zip(types).enumerate().filter(|(i, _)| kept(*i)).map(|(_, p)| p), ctx)
+}
+
+/// The t_len of a MinimalTuple of the row's columns `order` lists, in that order (a target
+/// list's columns aren't in the table's order: alignment padding follows theirs).
+pub fn minimal_tuple_len_order(row: &[Value], types: &[DataType], order: &[usize], ctx: &super::ExecCtx) -> i64 {
+    let has_null = order.iter().any(|&i| row[i].is_null());
+    let bitmap = if has_null { order.len().div_ceil(8) as i64 } else { 0 };
+    let hoff = maxalign(15 + bitmap + 8) - 8;
+    hoff + data_len(order.iter().map(|&i| (&row[i], &types[i])), ctx)
+}
+
+/// The values' bytes as a heap tuple lays them out (NULLs take none).
+fn data_len<'a>(vals: impl Iterator<Item = (&'a Value, &'a DataType)>, ctx: &super::ExecCtx) -> i64 {
     let mut off: i64 = 0;
     let text = |v: &Value, ty: &DataType| crate::types::text::format_value(v, ty, ctx.fmt());
-    for (i, (v, ty)) in row.iter().zip(types).enumerate() {
-        if v.is_null() || !kept(i) {
+    for (v, ty) in vals {
+        if v.is_null() {
             continue;
         }
         off += match (v, ty) {
@@ -74,7 +105,7 @@ pub fn minimal_tuple_len_of(row: &[Value], types: &[DataType], mask: Option<&[bo
             _ => crate::catalog::relsize::datum_bytes(off as usize, v, ty, &text) as i64,
         };
     }
-    hoff + off
+    off
 }
 
 fn align(off: i64, a: i64) -> i64 {
@@ -175,9 +206,190 @@ impl SortMem {
     }
 }
 
+/// A logical tape set's block numbers as logtape.c hands them out with preallocation (a
+/// hash aggregation's): each tape takes block numbers in runs of 8 doubling to 128, the
+/// lowest free ones first; a block read back is freed at once; the file is as big as its
+/// highest block written (LogicalTapeSetBlocks, what "Disk Usage" shows).
+#[derive(Debug, Default)]
+pub struct TapeSet {
+    allocated: i64,
+    free: std::collections::BinaryHeap<std::cmp::Reverse<i64>>,
+    /// nBlocksWritten.
+    pub written: i64,
+}
+
+/// One tape of a `TapeSet`.
+#[derive(Debug, Default)]
+pub struct Tape {
+    /// The preallocated block numbers, the next one last, and the list's size.
+    prealloc: Vec<i64>,
+    size: usize,
+    /// The block being filled and its bytes.
+    cur: Option<i64>,
+    used: i64,
+    /// Its blocks, in order, and how many have been read (and freed).
+    blocks: Vec<i64>,
+    read: usize,
+    consumed: i64,
+}
+
+impl TapeSet {
+    fn free_block(&mut self) -> i64 {
+        match self.free.pop() {
+            Some(std::cmp::Reverse(b)) => b,
+            None => {
+                self.allocated += 1;
+                self.allocated - 1
+            }
+        }
+    }
+
+    fn next_block(&mut self, t: &mut Tape) -> i64 {
+        if t.prealloc.is_empty() {
+            t.size = if t.size == 0 { 8 } else { (t.size * 2).min(128) };
+            let mut v: Vec<i64> = (0..t.size).map(|_| self.free_block()).collect();
+            v.reverse();
+            t.prealloc = v;
+        }
+        t.prealloc.pop().unwrap()
+    }
+
+    fn write_block(&mut self, t: &mut Tape, b: i64) {
+        self.written = self.written.max(b + 1);
+        t.blocks.push(b);
+    }
+
+    /// `n` bytes written to tape `t` (LogicalTapeWrite: a full block goes out when more
+    /// comes).
+    pub fn write(&mut self, t: &mut Tape, n: i64) {
+        if t.cur.is_none() {
+            t.cur = Some(self.next_block(t));
+        }
+        t.used += n;
+        while t.used > TAPE_BLOCK_DATA {
+            let next = self.next_block(t);
+            let cur = t.cur.replace(next).unwrap();
+            self.write_block(t, cur);
+            t.used -= TAPE_BLOCK_DATA;
+        }
+    }
+
+    /// LogicalTapeRewindForRead: the last block written, the unused preallocated numbers
+    /// freed.
+    pub fn rewind(&mut self, t: &mut Tape) {
+        if let Some(c) = t.cur.take()
+            && t.used > 0
+        {
+            self.write_block(t, c);
+        }
+        for b in t.prealloc.drain(..) {
+            self.free.push(std::cmp::Reverse(b));
+        }
+        t.size = 0;
+    }
+
+    /// `n` bytes read back from tape `t`: each block freed as it is read into the buffer.
+    pub fn read(&mut self, t: &mut Tape, n: i64) {
+        while t.read < t.blocks.len() && t.consumed + n > t.read as i64 * TAPE_BLOCK_DATA {
+            self.free.push(std::cmp::Reverse(t.blocks[t.read]));
+            t.read += 1;
+        }
+        t.consumed += n;
+    }
+}
+
 /// The memtuples array's chunk space.
 fn array_space(n: usize) -> i64 {
     aset_chunk(n as i64 * SORT_TUPLE)
+}
+
+/// A tuplestore's memory as tuplestore.c counts it (USEMEM of each tuple's generation
+/// chunk and of its pointer array, grow_memtuples), and where it goes to a file: what
+/// EXPLAIN ANALYZE's "Storage: Memory / Disk  Maximum Storage" shows (tuplestore_get_stats).
+#[derive(Clone, Debug)]
+pub struct StoreMem {
+    allowed: i64,
+    avail: i64,
+    memtupsize: usize,
+    count: usize,
+    grow: bool,
+    /// On disk (TSS_WRITEFILE): the file's bytes.
+    pub disk: Option<i64>,
+    max_space: i64,
+    /// A trailing length word per tuple (EXEC_FLAG_BACKWARD).
+    backward: bool,
+}
+
+impl StoreMem {
+    pub fn new(allowed: i64, backward: bool) -> StoreMem {
+        // (Its first array: 2048 pointers, over ALLOCSET_SEPARATE_THRESHOLD.)
+        let memtupsize = 2048;
+        StoreMem {
+            allowed,
+            avail: allowed - aset_chunk(memtupsize as i64 * 8),
+            memtupsize,
+            count: 0,
+            grow: true,
+            disk: None,
+            max_space: 0,
+            backward,
+        }
+    }
+
+    /// A tuple of t_len `tlen` is stored (tuplestore_puttuple): true when this one moved
+    /// the store to its file.
+    pub fn put(&mut self, tlen: i64) -> bool {
+        if let Some(d) = &mut self.disk {
+            *d += tlen - MINIMAL_TUPLE_DATA_OFFSET + 4 + if self.backward { 4 } else { 0 };
+            return false;
+        }
+        // (A generation context's chunk: MAXALIGNed with its header.)
+        self.avail -= maxalign(tlen) + CHUNK_HDR;
+        if self.count + 1 >= self.memtupsize {
+            self.grow_memtuples();
+        }
+        self.count += 1;
+        if self.count < self.memtupsize && self.avail >= 0 {
+            return false;
+        }
+        self.max_space = self.max_space.max(self.allowed - self.avail);
+        self.disk = Some(0);
+        true
+    }
+
+    /// The tuples held so far go to the file (dumptuples): their t_lens.
+    pub fn dumped(&mut self, tlen: i64) {
+        if let Some(d) = &mut self.disk {
+            *d += tlen - MINIMAL_TUPLE_DATA_OFFSET + 4 + if self.backward { 4 } else { 0 };
+        }
+    }
+
+    fn grow_memtuples(&mut self) {
+        if !self.grow {
+            return;
+        }
+        let size = self.memtupsize;
+        let used = self.allowed - self.avail;
+        let new = if used <= self.avail {
+            size * 2
+        } else {
+            self.grow = false;
+            (size as f64 * (self.allowed as f64 / used as f64)) as usize
+        };
+        if new <= size || self.avail < (new - size) as i64 * 8 {
+            return;
+        }
+        self.avail += aset_chunk(size as i64 * 8) - aset_chunk(new as i64 * 8);
+        self.memtupsize = new;
+    }
+
+    /// tuplestore_get_stats: (on disk, maximum bytes).
+    pub fn stats(&self) -> (bool, i64) {
+        match self.disk {
+            Some(d) => (true, self.max_space.max(d)),
+            None => (false, self.max_space.max(self.allowed - self.avail)),
+        }
+    }
 }
 
 /// Logical tape blocks of tapes holding `bytes` each (their runs back to back): what
@@ -254,10 +466,10 @@ pub struct HashAggMem {
     pub meta: i64,
     pub entries: Blocks,
     pub tvals: Blocks,
-    /// MAXALIGN(numtrans * sizeof(AggStatePerGroupData)), and a group's by-reference
-    /// transition space (0: by value).
+    /// MAXALIGN(numtrans * sizeof(AggStatePerGroupData)), and the chunks a group's
+    /// by-reference transition states take (`agg_state_chunks`; none: by value).
     pub additional: i64,
-    pub trans_space: i64,
+    pub trans_chunks: Vec<i64>,
     pub ngroups: u64,
     pub mem_limit: i64,
     pub ngroups_limit: u64,
@@ -266,7 +478,7 @@ pub struct HashAggMem {
 }
 
 impl HashAggMem {
-    pub fn new(work_mem: i64, num_trans: usize, trans_space: f64) -> HashAggMem {
+    pub fn new(work_mem: i64, num_trans: usize, trans_chunks: Vec<i64>) -> HashAggMem {
         // (The table context's blocks: work_mem / 16 rounded down to a power of two,
         // between 8 kB and 8 MB.)
         let w = (work_mem / 16).max(1) as u64;
@@ -277,7 +489,7 @@ impl HashAggMem {
             entries: Blocks::bump(max),
             tvals: Blocks::aset(max),
             additional: maxalign(16 * num_trans as i64),
-            trans_space: trans_space as i64,
+            trans_chunks,
             ngroups: 0,
             mem_limit: i64::MAX,
             ngroups_limit: u64::MAX,
@@ -299,8 +511,8 @@ impl HashAggMem {
     /// now (hash_agg_check_limits, after the group is counted).
     pub fn new_group(&mut self, tuple_len: i64) -> bool {
         self.entries.alloc(maxalign(tuple_len + self.additional));
-        if self.trans_space > 0 {
-            self.tvals.alloc(aset_chunk(self.trans_space));
+        for &c in &self.trans_chunks {
+            self.tvals.alloc(c);
         }
         self.ngroups += 1;
         self.total() > self.mem_limit || self.ngroups > self.ngroups_limit

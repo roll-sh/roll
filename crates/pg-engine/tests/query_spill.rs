@@ -64,6 +64,18 @@ fn temp_files(dir: &std::path::Path) -> usize {
     n
 }
 
+
+fn assert_no_spill_files(dir: &std::path::Path) {
+    assert_eq!(temp_files(dir), 0);
+    // Unlinked files still hold disk space until the descriptor closes.
+    #[cfg(target_os = "linux")]
+    for e in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+        if let Ok(p) = std::fs::read_link(e.path()) {
+            assert!(!(p.starts_with(dir) && p.to_string_lossy().contains("spill/tmp/")), "open spill file: {}", p.display());
+        }
+    }
+}
+
 const QUERIES: &[&str] = &[
     "SELECT md5(string_agg(a::text, ',')) FROM (SELECT a FROM sp ORDER BY t, a) s",
     "SELECT md5(string_agg(a::text, ',')) FROM (SELECT a FROM sp ORDER BY n, a DESC) s",
@@ -112,4 +124,74 @@ fn spills_match_memory_and_clean_up() {
     assert!(files >= 5, "temp_files {files}");
     drop(s);
     eng.shutdown();
+}
+
+#[test]
+fn hash_join_batches_clean_up_after_completion_limit_and_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE EXTENSION pg_stat_statements",
+        "CREATE TABLE hj (id int, t text)",
+        "INSERT INTO hj SELECT g, md5(g::text) FROM generate_series(1, 12000) g",
+        "ANALYZE hj",
+        "SET max_parallel_workers_per_gather = 0",
+        "SET enable_mergejoin = off",
+        "SET enable_nestloop = off",
+        "SET work_mem = '64kB'",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let sql = "SELECT count(*) FROM hj a JOIN hj b ON a.id = b.id";
+    assert_eq!(int(&mut s, sql), 12000);
+    assert_eq!(temp_files(dir.path()), 0);
+    assert_no_spill_files(dir.path());
+    assert!(int(&mut s, "SELECT sum(temp_blks_written)::int8 FROM pg_stat_statements WHERE query LIKE '%FROM hj%'") > 0);
+    q(&mut s, "SELECT a.id FROM hj a JOIN hj b ON a.id = b.id LIMIT 1").unwrap();
+    assert_no_spill_files(dir.path());
+    let err = q(&mut s, "SELECT sum(1 / (a.id - 11000)) FROM hj a JOIN hj b ON a.id = b.id").unwrap_err();
+    assert!(err.starts_with("22012"), "{err}");
+    assert_no_spill_files(dir.path());
+    q(&mut s, "SET temp_file_limit = '100kB'").unwrap();
+    for _ in 0..2 {
+        let err = q(&mut s, sql).unwrap_err();
+        assert!(err.starts_with("53400") && err.contains("temp_file_limit"), "{err}");
+        assert_no_spill_files(dir.path());
+    }
+    q(&mut s, "RESET temp_file_limit").unwrap();
+    assert_eq!(int(&mut s, sql), 12000);
+    assert_no_spill_files(dir.path());
+    q(&mut s, "SELECT pg_stat_force_next_flush()").unwrap();
+    assert!(int(&mut s, "SELECT temp_files FROM pg_stat_database WHERE datname = current_database()") > 0);
+    drop(s);
+    eng.shutdown();
+}
+
+// Reference transcript: a150-resume-t3-864cc5fb/temp-reference.{sql,out} in ~/.cache.
+#[test]
+#[ignore = "hash batch buffers lack fallible teardown after LIMIT; PostgreSQL flushes their tails"]
+fn hash_join_limit_temp_accounting_matches_postgres() {
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "postgres").unwrap();
+    for sql in [
+        "CREATE TABLE hj (id int, t text)",
+        "INSERT INTO hj SELECT g, md5(g::text) FROM generate_series(1, 12000) g",
+        "ANALYZE hj",
+        "SET max_parallel_workers_per_gather = 0",
+        "SET enable_mergejoin = off",
+        "SET enable_nestloop = off",
+        "SET work_mem = '64kB'",
+        "SELECT count(*) FROM hj a JOIN hj b ON a.id = b.id",
+        "SELECT a.id FROM hj a JOIN hj b ON a.id = b.id LIMIT 1",
+        "SELECT pg_stat_force_next_flush()",
+        "SELECT pg_stat_clear_snapshot()",
+    ] {
+        q(&mut s, sql).unwrap();
+    }
+    let actual = q(&mut s, "SELECT temp_files, temp_bytes FROM pg_stat_database WHERE datname = current_database()").unwrap();
+    drop(s);
+    eng.shutdown();
+    assert_eq!(actual, vec![vec![Value::Int8(27), Value::Int8(759192)]]);
 }

@@ -5,6 +5,7 @@ pub mod dml;
 pub mod extsort;
 pub mod fasthash;
 pub mod fastsort;
+pub mod hashjoin;
 pub mod hashspill;
 pub mod merge;
 pub mod kernel;
@@ -494,6 +495,37 @@ pub struct NodeStats {
     pub sort: Option<(extsort::SortMethod, u64)>,
     /// A HashAggregate's batches, peak memory and disk use in kB (`hashspill`).
     pub hashagg: Option<(u64, u64, u64)>,
+    /// A serial hash join's Hash (`hashjoin`): the most of each over its loops.
+    pub hashjoin: Option<HashStats>,
+    /// A Materialize's tuplestore (`workmem::StoreMem`): on disk, and its maximum bytes.
+    pub material: Option<(bool, u64)>,
+}
+
+/// A Hash node's HashInstrumentation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HashStats {
+    pub nbuckets: u32,
+    pub nbuckets_original: u32,
+    pub nbatch: u32,
+    pub nbatch_original: u32,
+    pub space_peak: u64,
+    /// The tuples hashed (partialTuples: the Hash node's rows).
+    pub tuples: u64,
+}
+
+impl HashStats {
+    /// ExecHashAccumInstrumentation.
+    pub fn accum(a: Option<HashStats>, b: HashStats) -> HashStats {
+        let a = a.unwrap_or_default();
+        HashStats {
+            nbuckets: a.nbuckets.max(b.nbuckets),
+            nbuckets_original: a.nbuckets_original.max(b.nbuckets_original),
+            nbatch: a.nbatch.max(b.nbatch),
+            nbatch_original: a.nbatch_original.max(b.nbatch_original),
+            space_peak: a.space_peak.max(b.space_peak),
+            tuples: a.tuples.max(b.tuples),
+        }
+    }
 }
 
 /// Counters per plan node, keyed by the node's address (`Arc::as_ptr`; a scan's filter by its

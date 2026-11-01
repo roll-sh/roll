@@ -3661,12 +3661,54 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     and memoize 3, 23 differ on origin's head as well (08fef0f0's plans and merge-join reads),
     nothing else; contrib pg_stat_statements + auto_explain 1,025 / 1,025; pgbench unchanged
     (BENCH).
-  - Not spilling yet (in memory as before): Hash Join batches (EXPLAIN models them,
-    `explain.rs` HashInfo), Materialize / CTE / tuplestores, window partitions, Memoize (has
+  - Not spilling yet (in memory as before): Materialize / CTE / tuplestores, window partitions, Memoize (has
     its own bound), set operations, recursive unions, grouping sets (`hashed_sets`),
     DISTINCT without aggregates (`hashed_distinct`), array_agg / string_agg states. Disk sizes
     of sorts merged in several passes are a block or few under PostgreSQL's (its
     intermediate merges' allocation isn't modelled).
+- **Query memory, round 2** (round 24, agent 150):
+  - Planned serial hash joins use `exec/hashjoin.rs` for the build table and its batches.
+    `JoinMeta::hash_inner` supplies the row and width estimates for
+    `joins::choose_hash_table_size`. The executor counts the Hash target list's
+    MinimalTuples, grows buckets and batches as nodeHash does, and writes later inner
+    and outer batches to a temporary file. Dense chunks determine bucket-chain order.
+    The skew table uses the outer column's most common values and removes buckets when
+    they exceed its share of memory. `HashJoinNode` probes one batch at a time.
+    `RightSemiNode` also batches its hashed side, but still collects its output rows.
+  - Goldens `a150_hashjoin_spill` and `a150_hashjoin_edges` compare results with PostgreSQL
+    18.6 for inner, left, right, full, semi, and anti joins. They cover NULL keys, composite
+    keys, mixed integer keys, residual join filters, skew, empty inputs, runtime batch
+    growth, and `temp_file_limit`. The spill golden also compares unordered result digests
+    and EXPLAIN ANALYZE's buckets, batches, and memory. `NodeStats::hashjoin` records the
+    serial executor's counts. Parallel Hash still uses EXPLAIN's model and runs serially.
+  - `spill::TempAcct` separates PostgreSQL's per-file accounting from the engine's physical
+    file. Completed batch reads count flushed tail bytes. Normal completion, LIMIT, an
+    expression error, and repeated temp-file-limit errors release physical spill files,
+    including their unlinked file descriptors (`tests/query_spill.rs`).
+    **Known gap:** after LIMIT stops probing, batch tails are not flushed into PostgreSQL's
+    accounting. For 12,000 integer keys, a completed join followed by LIMIT 1 reports
+    21 files and 735,296 bytes instead of PostgreSQL's 27 files and 759,192 bytes.
+    `hash_join_limit_temp_accounting_matches_postgres` is an ignored failing reproducer.
+    The same missing teardown flush can delay a temp-file-limit error. Node teardown has
+    no fallible cleanup path for this case; this batch does not add one.
+  - `tests/memory_load.rs` compares the build heap for a warm 16,000-row join with 1 kB
+    payloads at 64 kB and 64 MB work_mem. The spilling build must stay below 16 MB and
+    below half the in-memory build's peak. PostgreSQL's work_mem accounting is not a hard
+    bound on Rust allocations. Unsplittable keys can exceed the budget, as in PostgreSQL.
+  - A nested loop's Materialize counts its tuples through `workmem::StoreMem`, including
+    generation chunks, pointer-array growth, and the modeled transition to disk.
+    `a150_workmem_explain` compares its storage figures and merge-input sort memory with
+    PostgreSQL 18.6. Materialize rows themselves still stay in memory.
+    Joins, Project, and Filter pass their logical column requirements under EXPLAIN ANALYZE.
+    Sort and Hash accounting then uses the columns PostgreSQL's target lists retain.
+  - HashAggregate counts the initial allocation chunks of by-reference transition states
+    through `paths::parallel::agg_state_chunks`. These remain estimates: numeric digit
+    arrays and variable-length aggregate states can grow beyond their initial chunks.
+    `workmem::TapeSet` models logical-tape preallocation, block reuse, and the highest block
+    written for Disk Usage. Columns outside the aggregate's spill mask are stored as NULL.
+  - The interrupted debug and TPC-H artifacts remain read-only in `~/.cache/a150`.
+    Their timings are not verified measurements of this base. No speedup is claimed.
+    Resume evidence and command logs are in `~/.cache/a150-resume-t3-864cc5fb`.
 - **OLTP round 1** (round 22, agent 105; BENCH.md "OLTP round 1"): pgbench and web-app
   transactions.
   - *Hot relation ranges* (`storage/hot.rs`): a relation's key range (8-byte table / index
@@ -5508,9 +5550,10 @@ definitions (from PostgreSQL 18.6's `information_schema.sql`) takes and risks:
   is the exception, not modelled). point_ops and range_ops keep PostgreSQL's queue order
   over their modelled trees. A serializable KNN scan of these classes takes the index
   relation's SIRead lock rather than page locks.
-- **Where a node spills** (round 23, agent 132): sorts and hash aggregations spill where
-  PostgreSQL's would, decided by PostgreSQL's count of their memory (`exec/workmem.rs`:
-  MinimalTuple sizes, tuplesort's and nodeAgg's accounting, aset.c / bump.c blocks), not by
+- **Where a node spills** (round 23, agent 132; hash joins round 24, agent 150): sorts, hash
+  aggregations and hash joins spill where PostgreSQL's would, decided by PostgreSQL's count of
+  their memory (`exec/workmem.rs`, `exec/hashjoin.rs`: MinimalTuple sizes, tuplesort's,
+  nodeAgg's and nodeHash's accounting, aset.c / bump.c blocks), not by
   the engine's own bytes; their temporary files count PostgreSQL's tape sizes
   (temp_file_limit, pg_stat_database temp_files / temp_bytes, pg_stat_statements temp
   blocks, log_temp_files). Memory and disk numbers in EXPLAIN ANALYZE are the model's: within
