@@ -651,6 +651,20 @@ fn numeric_topk_matches_serial_inner() {
             assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "volatile: {q}");
         }
     }
+    // Enough rows per chunk to exercise the decoder fallback on a long run of ties.
+    s.query("CREATE TABLE nt_ties AS SELECT i AS id, 1 AS x, repeat(md5(i::text), 2) AS pad FROM generate_series(1, 120000) i").unwrap();
+    s.query("VACUUM ANALYZE nt_ties").unwrap();
+    let q = "SELECT id, x FROM nt_ties ORDER BY x, id DESC LIMIT 7";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let want = out(&mut s, q);
+    assert_eq!(want, (119994..=120000).rev().map(|i| format!("[Int4({i}), Int4(1)]")).collect::<Vec<_>>());
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    let skipped = pg_engine::exec::parscan::topk_skipped();
+    assert_eq!(out(&mut s, q), want);
+    assert!(pg_engine::exec::parscan::started() > started, "tied scan used workers");
+    assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "all first-key ties survived");
+
     // Older stored rows get their newly added numeric column from the missing value.
     s.query("ALTER TABLE nt ADD COLUMN added int DEFAULT 42").unwrap();
     let q = "SELECT id, x, added FROM nt ORDER BY x DESC, added, id LIMIT 7 OFFSET 3";

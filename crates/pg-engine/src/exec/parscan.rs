@@ -755,7 +755,7 @@ fn run_rows(
         // (A row's length before its computed values.)
         let base = d.missing.len() + usize::from(d.with_key);
         // Column-only projections can inspect the first key before making a row.
-        let top_col = if d.ios.is_none() && d.need_raw.is_none() && d.raw.is_empty() && d.extra.iter().all(|k| matches!(k, K::Col(_))) {
+        let mut top_col = if d.ios.is_none() && d.need_raw.is_none() && d.raw.is_empty() && d.extra.iter().all(|k| matches!(k, K::Col(_))) {
             d.topk.and_then(|t| match d.extra.get(t.col) {
                 Some(K::Col(col)) => Some(*col),
                 _ => None,
@@ -763,6 +763,7 @@ fn run_rows(
         } else {
             None
         };
+        let mut consecutive_kept = 0;
         while let Some(r) = scan.next_row() {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
@@ -797,8 +798,15 @@ fn run_rows(
                     {
                         top_checked = true;
                         if t.drops(key) {
+                            consecutive_kept = 0;
                             skipped += 1;
                             return Ok(None);
+                        }
+                        consecutive_kept += 1;
+                        if consecutive_kept >= BATCH {
+                            // A full batch without a discard: normal decoding costs less
+                            // when first keys tie or keep improving. Keep the same heap.
+                            top_col = None;
                         }
                     }
                     Ok(Some((lz.into_row()?, done)))
