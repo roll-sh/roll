@@ -1,0 +1,58 @@
+{
+  "source": "7f35a185a6669ce4cf36b09076fddb110a3c5ad1",
+  "profile": "release",
+  "gates": {
+    "build": "0",
+    "test": "0",
+    "clippy": "0",
+    "pg-unit": "0"
+  },
+  "crate_tests": {
+    "passed": 426,
+    "failed": 0,
+    "ignored": 18,
+    "completed_targets": 60
+  },
+  "regression": {
+    "files": 230,
+    "units": 51150,
+    "matched": 51148,
+    "panics": 0,
+    "non_ok_engine_statuses": 0,
+    "added_differences": 0,
+    "hunks_byte_identical": true,
+    "differing_units": {
+      "join": "368:wrong EXPLAIN",
+      "partition_prune": "410:wrong result"
+    }
+  },
+  "hunk_sha256": {
+    "join.diff": "7b49aa146d880fef2ecf912473019b5203677a17ed12d0a33c628d750581a9ac",
+    "partition_prune.diff": "3767438870d7e391d51ba7e4d3193fddfff042d70a0a7495ea8ebf50ecc0c65b"
+  },
+  "clippy_summaries": [
+    "warning: `pg-engine` (lib) generated 11 warnings (run `cargo clippy --fix --lib -p pg-engine -- ` to apply 8 suggestions)",
+    "warning: `pg-engine` (lib test) generated 14 warnings (11 duplicates) (run `cargo clippy --fix --lib -p pg-engine --tests -- ` to apply 3 suggestions)",
+    "warning: `pg-engine` (test \"difftest\") generated 1 warning (run `cargo clippy --fix --test \"difftest\" -p pg-engine -- ` to apply 1 suggestion)"
+  ],
+  "clippy_warnings_from_unchanged_files": true,
+  "rust_tree_matches_measured_source": true,
+  "pg_unit_tail": [
+    "",
+    "running 0 tests",
+    "",
+    "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "",
+    "     Running unittests src/main.rs (target/debug/deps/rolld-a6f5c88189841da0)",
+    "",
+    "running 0 tests",
+    "",
+    "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "",
+    "postgres: all green"
+  ],
+  "portable_sample_counts": {
+    "analytic.tsv": 120,
+    "oltp.tsv": 240
+  }
+}

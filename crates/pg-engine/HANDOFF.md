@@ -45,6 +45,43 @@ harness and score in `tests/`:
 
 ## Where it stands
 
+The current measured Rust source is `7f35a185`, from the 2026-11-01 performance campaign.
+The release build, full release crate suite (426 passed, 18 ignored, zero failed),
+all-target Clippy, and `pnpm test:pg --unit` pass. Clippy reports eleven library warnings
+and four additional test warnings, all in files unchanged by the campaign.
+
+Independent full release regression runs of baseline `0b950a11` and candidate `7f35a185`
+both match 51,148/51,150 units across 230 files. Result rows and difference files are
+identical, with zero panics or failed engine invocations. Only `join` 368 and the accepted
+internal EXPLAIN ANALYZE counter difference at `partition_prune` 410 remain. The historical
+generated debug report is unchanged. Portable verification and measurement records are in
+`tools/bench/results/2026-11-01/`.
+
+The 2M-row top-N query improves from 0.5495 to 0.0807 seconds against the original engine,
+with server CPU falling from 0.55 to 0.28 seconds. Tuned PostgreSQL takes 0.0811 seconds,
+with overlapping timing and CPU ranges. The 200k-row speedup uses more CPU, and process
+RSS increases in the original-to-final comparison. There is no broad speed or memory
+advantage over PostgreSQL. [BENCH.md](BENCH.md) records all ranges, controls, and limits.
+Checked eight-client range reads improve from 7,496 to 8,347 operations per second at
+`9ed57ecd`; that fetch code is unchanged in the final source. PostgreSQL still leads OLTP.
+
+Raw evidence, frozen binaries, saved fixtures, and exact commands are in
+`~/.cache/pg-engine-perf-20261101/`. Final scripts are `run-final-gates-7f35a185.sh` and
+`run-final-regress-release-{baseline,current}.sh`. The rerunnable
+`audit-final-evidence.py` checks gate statuses, result rows, exact difference files,
+binary hashes, and that Rust sources still match the measured commit. All campaign
+services are stopped, and saved data is retained. The Docker recovery waiver below
+continues to apply.
+
+The next performance target is OLTP CPU per operation. The checked eight-client range
+workload fills all four assigned server CPUs. Existing profiles point to allocation,
+catalog access, and expression work. Prepared queries already reuse analyzed plans.
+Profile prepared point reads and ranges separately before selecting another change, and
+preserve catalog refreshes after lock waits. The evidence directory's `NEXT-OLTP.md`
+records the current observations and next experiment.
+
+### Earlier recovered-batch snapshot
+
 The combined resumed batches are verified at `f24d3643` (2026-11-01). Build, focused
 checks, the complete crate suite (419 passed, 18 ignored, zero failed), Clippy, and
 `pnpm test:pg --unit` pass. Clippy reports eleven warnings. The full PostgreSQL 18.6

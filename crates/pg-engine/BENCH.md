@@ -1,10 +1,126 @@
 # pg-engine benchmarks
 
-The engine against PostgreSQL 18.6 on identical workloads: over the wire for both (a fair
-comparison: same client, same protocol), and the engine in-process as roll embeds it. The
-harness is `tools/bench/`; this file has the method, the latest numbers and what is still
-slower and why. Correctness stays first: every optimisation below kept `cargo test -p
-pg-engine`, clippy and a full regression run unit for unit (see "Verification").
+The current checked measurements compare release engine builds and PostgreSQL 18.6 over
+the wire. Older rounds below are historical records, with their original methods and
+limits. Their results have not been reverified on the current source.
+
+## Checked scan and index measurements (2026-11-01)
+
+Source `7f35a185` makes the 2M-row top-N query 6.8 times faster than engine baseline
+`0b950a11`, with about half the server CPU. Against tuned PostgreSQL, latency and CPU
+ranges overlap. PostgreSQL still leads the checked OLTP workloads.
+
+Each comparison has one warmup pair and five recorded pairs, with endpoint order reversed
+each round. The checked client receives and hashes every returned value inside the query
+timer. Every top-N sample returns the same 100 rows and hash on both endpoints.
+
+### Top-N latency, CPU, and memory
+
+The query is `SELECT id, x FROM fact ORDER BY x DESC, id LIMIT 100`. Times below are
+medians, with the five-sample range in parentheses. CPU is total server CPU per query.
+Both servers have four assigned CPUs, 28 through 31. Clients use CPUs 32 through 35.
+
+| Rows | Comparison | Before, seconds | After, seconds | Server CPU before / after, seconds |
+|---|---|---|---|---|
+| 200,000 | Original engine to `7f35a185` | 0.0747 (0.0644–0.0806) | 0.0320 (0.0288–0.0322) | 0.07 / 0.12 |
+| 2,000,000 | Original engine to `7f35a185` | 0.5495 (0.5434–0.5770) | 0.0807 (0.0796–0.0911) | 0.55 / 0.28 |
+| 200,000 | Tuned PostgreSQL to `7f35a185` | 0.0351 (0.0331–0.0371) | 0.0331 (0.0287–0.0339) | 0.06 / 0.12 |
+| 2,000,000 | Tuned PostgreSQL to `7f35a185` | 0.0811 (0.0738–0.0907) | 0.0807 (0.0795–0.0825) | 0.30 / 0.28 |
+
+PostgreSQL uses `max_parallel_workers_per_gather=3`. Its large-fixture plan launches
+three workers, with four participants scanning all 2M rows. Its small-fixture plan uses
+one worker. The engine uses its private scan pool within the same four assigned CPUs.
+The large-fixture CPU ranges are 0.28–0.34 seconds for PostgreSQL and 0.28–0.29 seconds
+for the engine. These measurements establish parity on this query, with no demonstrated
+advantage over tuned PostgreSQL. An earlier comparison against PostgreSQL's two-worker
+default is superseded by this tuned comparison.
+
+The 200k-row engine latency improvement costs additional CPU. The original-to-final
+comparison also raises median process RSS from 98.8 to 104.0 MB at 200k rows and from
+449.4 to 467.6 MB at 2M rows. These are whole-process sampled peaks, including retained
+caches and allocator state. The later PostgreSQL comparison has different process
+history: engine RSS is 718.0 MB at 200k and 1,106.9 MB at 2M, while PostgreSQL's cgroup
+`anon + shmem` is 349.0 and 353.4 MB. Those memory measures exclude filesystem cache
+differently. There is no memory-efficiency claim against PostgreSQL.
+
+Profiles identified row decoding, allocation, and executor projection as the original
+top-N costs. Workers now retain all first-key ties but discard strictly losing numeric
+keys before materializing complete rows. The executor still sorts all surviving keys.
+The path requires direct numeric projections, respects `work_mem`, and falls back when
+lazy decoding keeps 512 consecutive rows. Inline keys avoid general lazy-column buffers.
+Filtered and external-value rows keep the existing decoding path.
+
+Dedicated 2M-row controls compare `7f35a185` with the preceding implementation at
+`9ed57ecd`. Tied first keys measure 0.3614 to 0.3627 seconds, with CPU 1.06 to 1.07
+seconds. Continuously improving input measures 0.7300 to 0.7122 seconds, with CPU 2.01
+to 2.03 seconds. Timing and CPU ranges overlap in both controls. Median RSS changes
+from 386.6 to 385.3 MB and from 687.4 to 684.5 MB, respectively. Complete fixture
+checksums agree with independent Python generation over every row.
+
+### Indexed reads
+
+On 200k accounts with eight clients, the clean-table 100-row range scan rises from
+7,496 operations per second (7,455–7,650) to 8,347 (8,292–8,356). Server CPU falls from
+531 microseconds per operation (520–534) to 476 (474–478). All operations have checked
+cardinalities, report zero errors, and leave the complete fixture checksum unchanged.
+These are five alternating two-second samples after a warmup pair. Server CPU includes
+connection and statement setup, divided by each invocation's exact successful count.
+At 8,347 operations per second, 476 microseconds per operation consumes about 3.97 CPU
+seconds per second, filling the four assigned server CPUs. Client CPU remains below its
+four-CPU allocation. This workload is limited by server CPU.
+
+The indexed-read source is `9ed57ecd`. Its heap-fetch and visibility-counter code is
+unchanged in `7f35a185`. The optimization avoids redundant heap location and pruning
+work on fully visible modeled heaps, using an exact constant-time visible-page count.
+The dirty-table repeat has overlapping timing and CPU ranges. Both engines' actual
+visibility maps contain 1,469 visible pages out of 1,471, despite stale catalog estimates
+of 1,471. Point-query gains are smaller, and secondary lookup is neutral.
+
+A separate checked baseline comparison gives PostgreSQL 37,421 range operations per
+second at eight clients, against the original engine's 7,500. This is a separate run,
+not a paired comparison with the final source. PostgreSQL's OLTP lead remains substantial.
+Profiles place remaining engine cost in allocation, catalog access, and expression
+execution. Reducing those costs is the next measured target.
+
+### Evidence and verification
+
+The portable [analytic samples](tools/bench/results/2026-11-01/analytic.tsv),
+[OLTP samples](tools/bench/results/2026-11-01/oltp.tsv), and
+[manifest](tools/bench/results/2026-11-01/manifest.json) record every measured round,
+source revision, binary hash, and resource configuration. The manifest identifies the
+pinned PostgreSQL 18.6 image. Both endpoints use host networking and durable settings.
+The [runner instructions](tools/bench/README.md) describe checks and resource accounting.
+
+Raw logs, configurations, plans, independent fixture checks, profiles, and frozen
+binaries are retained in `~/.cache/pg-engine-perf-20261101/`. Client CPU measurements
+and server profiles rule out client saturation for the profiled top-N path. Separate
+cancellation checks on both final engine and PostgreSQL produce SQLSTATE 57014 at a
+40 ms timeout, then successfully execute another query on the same connection.
+Live negative controls reject prepare failure, empty point results, and analytic errors.
+
+Final checks pass on frozen Rust source `7f35a185`: the three-target release build,
+full release crate suite (426 passed, 18 ignored, zero failed), all-target Clippy, and
+`pnpm test:pg --unit`. Clippy retains eleven library warnings and four additional test
+warnings, all in files unchanged by this campaign.
+
+Fresh full release regression runs of both `0b950a11` and `7f35a185` match
+51,148/51,150 units across 230 files. Their result rows and difference files are identical,
+with zero panics or failed engine invocations. The remaining differences are `join` 368
+and the accepted internal counter difference in `partition_prune` 410. The portable
+[verification summary](tools/bench/results/2026-11-01/verification.json) includes counts
+and difference-file hashes. Historical generated regression reports remain unchanged.
+The exact scripts and complete gate logs are in the evidence directory above, under
+`run-final-gates-7f35a185.sh`, `final-gates-7f35a185/`, and
+`final-regress-{baseline-0b950a11,7f35a185}-release/`.
+
+Docker recovery e2e remains waived under the user's instruction. Its retained baseline
+has twelve passes and four WAL HTTP timeout failures. All campaign services are stopped,
+and their data and logs are retained.
+
+## Historical benchmark record
+
+The following sections retain earlier measurements and their original interpretations.
+Use the checked campaign above for claims about the current scan and index changes.
 
 ## Harness
 
