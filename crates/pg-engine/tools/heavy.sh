@@ -10,6 +10,10 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 LOCK=${HEAVY_LOCK:-/tmp/pg-engine-heavy.lock}
+# Hold the worktree lock before taking a machine slot or pruning Cargo's live caches.
+mkdir -p "$ROOT/target" || exit $?
+exec 9>"$ROOT/target/.heavy.lock"
+flock -x 9 || exit $?
 slots() { cat "$LOCK.slots" 2>/dev/null || echo "${HEAVY_SLOTS:-1}"; }
 # Full debuginfo makes every test binary ~400 MB and a worktree's target ~15 GB; line tables
 # keep backtraces and gdb stacks readable at a fraction of that. Set it to override.
