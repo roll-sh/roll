@@ -4540,11 +4540,47 @@ pub fn main_blocks_known(oid: u32, cat: &Catalog, db: &Database) -> Option<u64> 
     }
 }
 
+/// pg_toast_2609 and pg_toast_2396: pg_description's and pg_shdescription's TOAST tables.
+const PG_DESCRIPTION_TOAST: u32 = 2834;
+const PG_SHDESCRIPTION_TOAST: u32 = 2846;
+
+/// The pages the comments of pg_description (or of pg_shdescription: `shared`) take in its
+/// TOAST table: a row over TOAST_TUPLE_THRESHOLD has its description compressed, and moved
+/// out of line in TOAST_MAX_CHUNK_SIZE chunks when it still doesn't fit (about four chunks to
+/// a page).
+fn description_toast_pages(cat: &crate::catalog::Catalog, shared: bool, ctx: &ExecCtx) -> u32 {
+    // (The row's other columns and header, with the text's.)
+    const ROW: usize = 24 + 16 + 4;
+    const THRESHOLD: usize = 2032;
+    let dbs: Vec<u32> = ctx.sess.cluster.databases().iter().map(|d| d.0).collect();
+    let mut chunks = 0;
+    for (oid, _, text) in cat.comments_in_order() {
+        if text.len() + ROW <= THRESHOLD || cat.shared_class_of(oid, &dbs).is_some() != shared {
+            continue;
+        }
+        let stored = match crate::catalog::pglz::compressed_len(text.as_bytes()) {
+            Some(c) if c + ROW <= THRESHOLD => continue,
+            Some(c) => c,
+            None => text.len(),
+        };
+        chunks += stored.div_ceil(TOAST_CHUNK);
+    }
+    chunks.div_ceil(4) as u32
+}
+
 fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>> {
     let cat = ctx.catalog();
     let Some(rel) = rel_of(&cat, oid) else {
         // A system relation: its size in a fresh database.
         if let Some((main, fsm, vm)) = crate::catalog::sys_sizes::sys_size(oid) {
+            // (pg_description's and pg_shdescription's TOAST tables hold the comments too
+            // long for their rows: test_decoding's rewrite test checks they have pages.)
+            let main = match oid {
+                PG_DESCRIPTION_TOAST | PG_SHDESCRIPTION_TOAST if fork == Fork::Main => {
+                    main.max(description_toast_pages(&cat, oid == PG_SHDESCRIPTION_TOAST, ctx))
+                }
+                _ => main,
+            };
             return Ok(Some(match fork {
                 Fork::Main => main,
                 Fork::Fsm => fsm,

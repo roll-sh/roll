@@ -2426,6 +2426,7 @@ impl Ddl<'_, '_> {
                                 opclass: 0,
                                 collation: None,
                                 stattarget: None,
+                                storage: None,
                                 opclass_options: Vec::new(),
                             })
                             .collect(),
@@ -5635,7 +5636,23 @@ impl Ddl<'_, '_> {
                         c.storage = storage_kind(
                             cmd.def.as_deref().and_then(ast::sval).unwrap_or(""),
                             &c.ty,
-                        )?
+                        )?;
+                        // (Its plain index columns take it too, as SetIndexStorageProperties
+                        // gives them: an override an UPDATE of pg_attribute set goes.)
+                        use crate::catalog::IndexKey;
+                        for o in t.indexes.iter().chain(&t.pkey_index) {
+                            if let Some(x) = self.cat.indexes.get(o)
+                                && x.columns.iter().any(|k| k.storage.is_some() && matches!(k.key, IndexKey::Column(j) if j == i))
+                            {
+                                let mut x = (**x).clone();
+                                for k in &mut x.columns {
+                                    if matches!(k.key, IndexKey::Column(j) if j == i) {
+                                        k.storage = None;
+                                    }
+                                }
+                                self.cat.put_index(x);
+                            }
+                        }
                     }
                     A::AtSetCompression => {
                         let name = cmd
@@ -9372,6 +9389,9 @@ impl Ddl<'_, '_> {
         }
         // (ReindexRelationConcurrently's transactions: seven phases, three per index.)
         let mut ric_phases = true;
+        // (The tables among them: a materialized view's storage is never in `tables`.)
+        let heaps: std::collections::HashSet<u32> =
+            work.iter().map(|w| w.0).filter(|o| self.cat.tables.contains_key(o)).collect();
         for (table, indexes, toast) in work {
             // reindex_index / ReindexRelationConcurrently: SHARE on the table and ACCESS
             // EXCLUSIVE on its indexes (CONCURRENTLY: SHARE UPDATE EXCLUSIVE on both).
@@ -9381,10 +9401,14 @@ impl Ddl<'_, '_> {
                 (lockmode::SHARE, lockmode::ACCESS_EXCLUSIVE)
             };
             self.note_lock(table, heap_mode)?;
-            // (ReindexMultipleTables: a table dropped while we waited for it is skipped.)
-            if !self.ctx.sess.db.catalog().tables.contains_key(&table)
+            // (ReindexMultipleTables: a table dropped while we waited for it is skipped. An
+            // earlier table's lock may have taken the drop into the command's catalog
+            // already, `refresh_after_locks`: it's gone from there too, and its indexes must
+            // not get new file numbers.)
+            if heaps.contains(&table)
+                && !self.ctx.sess.db.catalog().tables.contains_key(&table)
                 && self.ctx.txn.borrow().catalog_base().is_none_or(|b| b.tables.contains_key(&table))
-                && self.cat.tables.get(&table).is_some_and(|t| !t.temporary)
+                && self.cat.tables.get(&table).is_none_or(|t| !t.temporary)
             {
                 continue;
             }

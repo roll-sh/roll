@@ -831,6 +831,7 @@ impl Ddl<'_, '_> {
                 opclass,
                 collation,
                 stattarget: None,
+                storage: None,
                 opclass_options,
             });
             key_types.push(key_ty);

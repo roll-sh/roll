@@ -119,6 +119,7 @@ fn read_sys_indexes(t: SysTable) -> Vec<Arc<Index>> {
                     opclass: 0,
                     collation: None,
                     stattarget: None,
+                    storage: None,
                     opclass_options: Vec::new(),
                 })
                 .collect(),

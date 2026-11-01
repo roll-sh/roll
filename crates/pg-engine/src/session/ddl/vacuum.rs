@@ -975,6 +975,19 @@ impl Ddl<'_, '_> {
             None if self.is_superuser() && builtin_toast_index(rv, &s.indexname) => {
                 return Ok("CLUSTER".into());
             }
+            // A system catalog (test_decoding's rewrite test clusters pg_class by its oid
+            // index): its rows are generated in order, so nothing to rewrite; what
+            // cluster_rel checks first still fails as it does.
+            None if !rv.relname.is_empty()
+                && let Some(st) = crate::catalog::system::SysTable::lookup(
+                    Self::rv_schema(rv),
+                    &rv.relname,
+                    self.search_path(),
+                )
+                && !st.is_view() =>
+            {
+                return self.cluster_system(st, &s.indexname);
+            }
             None => {
                 return Err(crate::catalog::no_such_relation(
                     Self::rv_schema(rv),
@@ -1045,6 +1058,57 @@ impl Ddl<'_, '_> {
                 .filter(|&p| p != 0);
         }
         false
+    }
+
+    /// CLUSTER of system catalog `st` (by index `index`, or none): cluster()'s and
+    /// cluster_rel's checks, then nothing to rewrite (a catalog's rows are generated).
+    fn cluster_system(&mut self, st: crate::catalog::system::SysTable, index: &str) -> Result<String> {
+        use crate::catalog::static_rows::{oid_at, rows};
+        use crate::catalog::system::SysTable;
+        if !self.is_superuser()
+            && !self.cat.has_privs_of_role(self.me(), crate::catalog::acl::PG_MAINTAIN, self.db_owner())
+        {
+            return Err(Error::new(
+                code::INSUFFICIENT_PRIVILEGE,
+                format!("permission denied for table {}", st.name()),
+            ));
+        }
+        let class = rows(SysTable::PgClass);
+        let row = |oid: u32| class.iter().find(|r| oid_at(r, 0) == oid);
+        let name_of = |r: &[Value]| match &r[1] {
+            Value::Text(n) => n.to_string(),
+            v => v.as_str().unwrap_or_default().to_string(),
+        };
+        // (The index is looked for by name in the catalog's schema first.)
+        let ix = if index.is_empty() {
+            None
+        } else {
+            let found = class.iter().find(|r| {
+                oid_at(r, 2) == st.schema() && matches!(r.get(17), Some(Value::Char(b'i'))) && name_of(r) == index
+            });
+            Some(found.map(|r| oid_at(r, 0)).ok_or_else(|| {
+                Error::new(
+                    code::UNDEFINED_OBJECT,
+                    format!("index \"{index}\" for table \"{}\" does not exist", st.name()),
+                )
+            })?)
+        };
+        if row(st.oid()).is_some_and(|r| matches!(r.get(15), Some(Value::Bool(true)))) {
+            return Err(Error::new(code::FEATURE_NOT_SUPPORTED, "cannot cluster a shared catalog"));
+        }
+        let Some(ix) = ix else {
+            return Err(Error::new(
+                code::UNDEFINED_OBJECT,
+                format!("there is no previously clustered index for table \"{}\"", st.name()),
+            ));
+        };
+        if !rows(SysTable::PgIndex).iter().any(|r| oid_at(r, 0) == ix && oid_at(r, 1) == st.oid()) {
+            return Err(Error::new(
+                code::WRONG_OBJECT_TYPE,
+                format!("\"{index}\" is not an index for table \"{}\"", st.name()),
+            ));
+        }
+        Ok("CLUSTER".into())
     }
 
     fn clustered_index(&self, t: &Table) -> Option<Arc<Index>> {

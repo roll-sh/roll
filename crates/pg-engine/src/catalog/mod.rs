@@ -405,6 +405,10 @@ pub struct IndexColumn {
     /// ALTER INDEX ... ALTER COLUMN n SET STATISTICS (expression columns).
     #[serde(default, skip_serializing_if = "compact::none")]
     pub stattarget: Option<i16>,
+    /// attstorage an UPDATE of pg_attribute gave the index column (None: its table
+    /// column's, which ALTER TABLE ... SET STORAGE puts back).
+    #[serde(default, skip_serializing_if = "compact::none")]
+    pub storage: Option<char>,
     /// Operator class options (`tsvector_ops (siglen = 100)`), as `name=value`
     /// (pg_attribute.attoptions of the index column).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

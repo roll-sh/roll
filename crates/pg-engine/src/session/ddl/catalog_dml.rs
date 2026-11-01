@@ -323,6 +323,9 @@ impl Ddl<'_, '_> {
     /// relations' columns, so a relation's rows move together (`Catalog::rel_oid_edits`);
     /// moving some of them, or onto oids another relation's rows show, isn't supported.
     fn update_pg_attribute(&mut self, s: &pb::UpdateStmt) -> Result<String> {
+        if let Some(node) = attstorage_update_query(s) {
+            return self.update_attstorage(&node);
+        }
         let node = attribute_update_query(s)?;
         let rows = {
             let child = self.ctx.child(self.ctx.params);
@@ -377,6 +380,55 @@ impl Ddl<'_, '_> {
         self.save()?;
         Ok(format!("UPDATE {updated}"))
     }
+
+    /// UPDATE pg_attribute SET attstorage = ... by a superuser (test_decoding's toast test
+    /// gives a primary key's column EXTENDED storage apart from its table's column, "not
+    /// doable via DDL"): a table column's storage, or an index column's own
+    /// (`IndexColumn::storage`). System columns' rows keep theirs.
+    fn update_attstorage(&mut self, node: &pb::Node) -> Result<String> {
+        let rows = {
+            let child = self.ctx.child(self.ctx.params);
+            let mut b = Binder::new(&child, Vec::new());
+            let bq = b.bind_statement(node)?;
+            crate::exec::collect(&bq.plan, &child, None)?
+        };
+        let mut updated = 0;
+        for r in &rows {
+            let (Value::Oid(shown), Some(num)) = (&r[0], r[1].as_i64()) else {
+                continue;
+            };
+            let ch = match &r[2] {
+                Value::Null => {
+                    return Err(Error::new(
+                        code::NOT_NULL_VIOLATION,
+                        "null value in column \"attstorage\" of relation \"pg_attribute\" violates not-null constraint",
+                    )
+                    .table("pg_catalog", "pg_attribute")
+                    .column("attstorage"));
+                }
+                v => v.as_str().and_then(|s| s.chars().next()).unwrap_or('\0'),
+            };
+            updated += 1;
+            let rel = self.cat.rel_oid_edits.rel_of(false, *shown);
+            let at = num as usize;
+            if num <= 0 {
+                continue;
+            }
+            if let Some(t) = self.cat.tables.get(&rel).filter(|t| at <= t.columns.len()) {
+                let mut t = (**t).clone();
+                t.columns[at - 1].storage = Some(ch);
+                self.cat.put_storage(t);
+            } else if let Some(x) = self.cat.indexes.get(&rel).filter(|x| at <= x.columns.len()) {
+                let mut x = (**x).clone();
+                x.columns[at - 1].storage = Some(ch);
+                self.cat.put_index(x);
+            } else if !(self.cat.indexes.contains_key(&rel) || self.cat.tables.contains_key(&rel)) {
+                return Err(crate::error::unsupported("UPDATE of pg_attribute.attstorage of this relation"));
+            }
+        }
+        self.save()?;
+        Ok(format!("UPDATE {updated}"))
+    }
 }
 
 /// Whether a pg_class row shows `oid`: a relation's own oid not renumbered away, or one a
@@ -404,9 +456,37 @@ fn is_relation(cat: &crate::catalog::Catalog, oid: u32) -> bool {
             .any(|r| crate::catalog::static_rows::oid_at(r, 0) == oid)
 }
 
+/// UPDATE pg_attribute SET attstorage = <v> WHERE <w> as the query it runs (None for other
+/// updates): the attrelid and attnum of the rows `w` picks, and `v` (as text).
+pub(crate) fn attstorage_update_query(s: &pb::UpdateStmt) -> Option<pb::Node> {
+    let [t] = &s.target_list[..] else {
+        return None;
+    };
+    let Some(NodeEnum::ResTarget(rt)) = inner(t) else {
+        return None;
+    };
+    if rt.name != "attstorage" || !rt.indirection.is_empty() {
+        return None;
+    }
+    let sel = pb::SelectStmt {
+        target_list: vec![
+            target(col("attrelid")),
+            target(col("attnum")),
+            target(cast(rt.val.as_deref()?.clone(), "text")),
+        ],
+        from_clause: vec![mk(NodeEnum::RangeVar(s.relation.clone()?))],
+        where_clause: s.where_clause.clone(),
+        ..Default::default()
+    };
+    Some(mk(NodeEnum::SelectStmt(Box::new(sel))))
+}
+
 /// UPDATE pg_attribute SET attrelid = <v> WHERE <w> as the query it runs: every row's
 /// attrelid, whether `w` holds for it, and `v` where it does.
 pub(crate) fn attribute_update_query(s: &pb::UpdateStmt) -> Result<pb::Node> {
+    if let Some(q) = attstorage_update_query(s) {
+        return Ok(q);
+    }
     let mut val = None;
     for t in &s.target_list {
         let Some(NodeEnum::ResTarget(rt)) = inner(t) else {

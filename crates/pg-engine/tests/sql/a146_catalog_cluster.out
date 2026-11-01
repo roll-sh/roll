@@ -1,0 +1,89 @@
+> CLUSTER pg_class USING pg_class_oid_index
+-- CLUSTER
+
+> BEGIN
+-- BEGIN
+
+> CLUSTER pg_class USING pg_class_oid_index
+-- CLUSTER
+
+> CLUSTER pg_class USING pg_class_oid_index
+-- CLUSTER
+
+> ROLLBACK
+-- ROLLBACK
+
+> CLUSTER pg_catalog.pg_type USING pg_type_oid_index
+-- CLUSTER
+
+> CLUSTER pg_database USING pg_database_oid_index
+ERROR 0A000: cannot cluster a shared catalog
+
+> CLUSTER pg_class USING pg_type_oid_index
+ERROR 42809: "pg_type_oid_index" is not an index for table "pg_class"
+
+> CLUSTER pg_class USING a146_no_such_index
+ERROR 42704: index "a146_no_such_index" for table "pg_class" does not exist
+
+> CLUSTER pg_class USING pg_class_relname_nsp_index
+-- CLUSTER
+
+> CREATE ROLE a146_cluster_role
+-- CREATE ROLE
+
+> SET ROLE a146_cluster_role
+-- SET
+
+> CLUSTER pg_class USING pg_class_oid_index
+ERROR 42501: permission denied for table pg_class
+
+> RESET ROLE
+-- RESET
+
+> DROP ROLE a146_cluster_role
+-- DROP ROLE
+
+> SELECT pg_relation_size((SELECT reltoastrelid FROM pg_class WHERE oid = 'pg_description'::regclass)) > 0
+?column?:bool
+f
+-- SELECT 1
+
+> CREATE TABLE a146_commented (a int)
+-- CREATE TABLE
+
+> DO $$ BEGIN
+>   EXECUTE format('COMMENT ON TABLE a146_commented IS %L',
+>     (SELECT repeat(string_agg(to_char(g.i, 'FM0000'), ''), 50) FROM generate_series(1, 500) g(i)));
+> END $$
+-- DO
+
+> SELECT pg_relation_size((SELECT reltoastrelid FROM pg_class WHERE oid = 'pg_description'::regclass)) > 0
+?column?:bool
+t
+-- SELECT 1
+
+> CREATE ROLE a146_commented_role
+-- CREATE ROLE
+
+> DO $$ BEGIN
+>   EXECUTE format('COMMENT ON ROLE a146_commented_role IS %L',
+>     (SELECT repeat(string_agg(to_char(g.i, 'FM0000'), ''), 50) FROM generate_series(1, 500) g(i)));
+> END $$
+-- DO
+
+> SELECT pg_relation_size((SELECT reltoastrelid FROM pg_class WHERE oid = 'pg_shdescription'::regclass)) > 0
+?column?:bool
+t
+-- SELECT 1
+
+> SELECT length(obj_description('a146_commented'::regclass, 'pg_class'))
+length:int4
+100000
+-- SELECT 1
+
+> DROP ROLE a146_commented_role
+-- DROP ROLE
+
+> DROP TABLE a146_commented
+-- DROP TABLE
+

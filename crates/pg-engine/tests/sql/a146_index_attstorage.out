@@ -1,0 +1,96 @@
+> CREATE TABLE a146_ts (id serial UNIQUE NOT NULL, k text PRIMARY KEY, c text, n int)
+-- CREATE TABLE
+
+> CREATE INDEX a146_ts_kc ON a146_ts (n, c, lower(c))
+-- CREATE INDEX
+
+> ALTER TABLE a146_ts ALTER COLUMN k SET STORAGE EXTERNAL
+-- ALTER TABLE
+
+> ALTER TABLE a146_ts ALTER COLUMN c SET STORAGE EXTERNAL
+-- ALTER TABLE
+
+> SELECT attrelid::regclass, attnum, attname, attstorage FROM pg_attribute
+>   WHERE attrelid IN ('a146_ts_pkey'::regclass, 'a146_ts_kc'::regclass) ORDER BY 1, 2
+attrelid:regclass | attnum:int2 | attname:name | attstorage:char
+a146_ts_pkey | 1 | k | e
+a146_ts_kc | 1 | n | p
+a146_ts_kc | 2 | c | e
+a146_ts_kc | 3 | lower | x
+-- SELECT 4
+
+> UPDATE pg_attribute SET attstorage = 'x' WHERE attrelid = 'a146_ts_pkey'::regclass AND attname = 'k'
+-- UPDATE 1
+
+> UPDATE pg_attribute SET attstorage = 'm' WHERE attrelid = 'a146_ts_kc'::regclass AND attnum > 1
+-- UPDATE 2
+
+> SELECT attrelid::regclass, attnum, attname, attstorage FROM pg_attribute
+>   WHERE attrelid IN ('a146_ts_pkey'::regclass, 'a146_ts_kc'::regclass) ORDER BY 1, 2
+attrelid:regclass | attnum:int2 | attname:name | attstorage:char
+a146_ts_pkey | 1 | k | x
+a146_ts_kc | 1 | n | p
+a146_ts_kc | 2 | c | m
+a146_ts_kc | 3 | lower | m
+-- SELECT 4
+
+> SELECT attname, attstorage FROM pg_attribute WHERE attrelid = 'a146_ts'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attstorage:char
+id | p
+k | e
+c | e
+n | p
+-- SELECT 4
+
+> INSERT INTO a146_ts (k) VALUES (repeat('9876543210', 6000))
+-- INSERT 0 1
+
+> SELECT pg_column_size(k) > 2^15 FROM a146_ts
+?column?:bool
+t
+-- SELECT 1
+
+> ALTER TABLE a146_ts ALTER COLUMN k SET STORAGE MAIN
+-- ALTER TABLE
+
+> ALTER TABLE a146_ts ALTER COLUMN c SET STORAGE EXTENDED
+-- ALTER TABLE
+
+> SELECT attrelid::regclass, attnum, attname, attstorage FROM pg_attribute
+>   WHERE attrelid IN ('a146_ts_pkey'::regclass, 'a146_ts_kc'::regclass) ORDER BY 1, 2
+attrelid:regclass | attnum:int2 | attname:name | attstorage:char
+a146_ts_pkey | 1 | k | m
+a146_ts_kc | 1 | n | p
+a146_ts_kc | 2 | c | x
+a146_ts_kc | 3 | lower | m
+-- SELECT 4
+
+> UPDATE pg_attribute SET attstorage = 'p' WHERE attrelid = 'a146_ts'::regclass AND attname = 'n'
+-- UPDATE 1
+
+> UPDATE pg_attribute SET attstorage = 'x' WHERE attrelid = 'a146_ts_pkey'::regclass AND attnum = 99
+-- UPDATE 0
+
+> SELECT attname, attstorage FROM pg_attribute WHERE attrelid = 'a146_ts'::regclass AND attnum > 0 ORDER BY attnum
+attname:name | attstorage:char
+id | p
+k | m
+c | x
+n | p
+-- SELECT 4
+
+> REINDEX TABLE a146_ts
+-- REINDEX
+
+> SELECT attrelid::regclass, attnum, attname, attstorage FROM pg_attribute
+>   WHERE attrelid IN ('a146_ts_pkey'::regclass, 'a146_ts_kc'::regclass) ORDER BY 1, 2
+attrelid:regclass | attnum:int2 | attname:name | attstorage:char
+a146_ts_pkey | 1 | k | m
+a146_ts_kc | 1 | n | p
+a146_ts_kc | 2 | c | x
+a146_ts_kc | 3 | lower | m
+-- SELECT 4
+
+> DROP TABLE a146_ts
+-- DROP TABLE
+

@@ -5407,6 +5407,58 @@ regression database identical before and after. Then rebased onto 74a3ad38 and `
 with the deep-text and kernel-depth changes: `cargo test -p pg-engine` in debug again
 (deep_input with the new `viewcols 2000`, deparse_identity), clippy, the isolation specs.
 
+## Catalog round 9 (round 24, agent 146)
+
+### First batch: REINDEX SCHEMA after a concurrent DROP, test_decoding's catalog cases
+
+HANDOFF.md "Catalog round 9" describes the changes. The following pgbench results are
+historical records from the paused run. They have not been reverified on the resumed base.
+The two builds include different upstream commits, so these numbers do not establish this
+batch's performance effect. No speedup or regression is claimed for the resumed batch.
+
+The saved run used scale 10, 4 clients, 5,000 transactions each, `--no-sync`, release builds
+at nice 19, and 2 interleaved rounds. Its base was `aa8218a2`, with batch 1 on `15a77038`:
+
+| | base | batch 1 |
+|---|---|---|
+| `-S` tps | 33,542 / 33,597 | 34,058 / 29,457 |
+| `-S` engine CPU per 1,000 transactions | 85 / 88 ms | 103 / 134 ms |
+| `-N` tps | 9,318 / 9,088 | 8,682 / 8,948 |
+| `-N` engine CPU per 1,000 transactions | 330 / 309 ms | 337 / 334 ms |
+| peak RSS | 385-396 MB | 390-482 MB |
+
+(`-S`'s second batch-1 round ran during a build; the transaction paths batch 1 touches none
+of are the base's plus the upstream commits between the bases.)
+
+test_decoding (`pg_contrib`, its temp-config reference): 1,031 → 1,038 / 1,047 units; toast
+53 / 53 and rewrite 64 / 64 now.
+
+### Verification (round 24, agent 146, first batch)
+
+The paused run recorded the following checks on `15a77038`. These are historical results,
+not verification of the resumed commit: `cargo test -p pg-engine` debug (every binary; `memory_load`'s
+`many_sessions_stay_bounded` peaked at 121.6 MB against its 120 MB bound once and passed
+alone) and release (every binary), clippy (nothing new), the regression suite in full (debug,
+private reference): 51,148 / 51,150, no unit changed against `results.tsv`; isolation 121 /
+122 specs (1,647 / 1,648 permutations: intra-grant-inplace) and the 14 roll-* specs;
+`pg_dump_tap`; the difftest smoke. Then rebased onto `d22006b9` (size models round 3 and
+others; `sizing.rs`, `vacuum.rs`, `table.rs`'s REINDEX CONCURRENTLY phases): clippy, the
+crate's lib tests, goldens, catalog_format, catalog_storage, memory_load, ddl_scaling, the
+three reindex isolation specs. The toast golden's key is 60 kB: c97af248's btree keys hold up
+to 64 kB (HANDOFF).
+
+### Resume verification on `3069ca91` (2026-11-01)
+
+No performance benchmark was rerun. The historical table above does not verify the batch's
+performance on this base. Fresh debug build, full crate tests, and clippy pass. The reindex
+isolation specs match 68/68 permutations, followed by ten successful repetitions of both
+`reindex-schema` permutations. The base reproduces the dropped-table assertion.
+The selected regression files match 1,347/1,347 units on both builds. test_decoding improves
+1,025 to 1,033 of 1,047 units, with no newly differing units; both builds retain the 100 kB
+btree-key assertion. `pnpm test:pg --unit` passes; its Docker e2e phase remains unrun because
+it uses random published ports outside the batch's assigned range. Full commands and evidence
+are in `~/.cache/a146-resume-t3-35e763e4/`.
+
 ## OLTP round 3 (round 23, agent 136)
 
 HANDOFF.md, "OLTP round 3", has what changed: extended-protocol statements bound once per

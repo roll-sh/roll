@@ -70,6 +70,26 @@ PGREGRESS_REPORT_DIR=/tmp/report_x CARGO_BUILD_JOBS=2 \
 cargo test -p pg-engine --test pg_regress -- --ignored --nocapture
 ```
 
+## Round 24, agent 146 (catalog round 9, first batch resumed on `3069ca91`)
+
+REINDEX SCHEMA remembers which work items were tables before it waits for locks. If a lock
+refresh already removed a concurrently dropped table, REINDEX skips that table's indexes.
+The unchanged base reproduces the debug assertion "file numbers of relations that are gone"
+in `reindex-schema`. The batch matches all 68 permutations of the three reindex specs, plus
+both schema permutations in ten additional runs.
+
+A debug subset run of `create_table,create_index,cluster,comments`, with test_setup, matches
+1,347/1,347 units on both the base and the batch. No unit changes. This is a subset comparison;
+the generated full-suite counts below remain unchanged. Both new `a146_` goldens were
+re-recorded from PostgreSQL 18.6 without changing their saved output.
+
+The full crate tests and build pass. Clippy passes with warnings in unchanged files.
+test_decoding improves from 1,025/1,047 to 1,033/1,047 units, with no newly differing units.
+The oversized-key assertion in toast occurs on both builds and remains outside this batch.
+`pnpm test:pg --unit` passes; the Docker e2e phase remains unrun because it publishes random
+ports outside the assigned range. Commands, logs, reports, and unit comparisons are saved in
+`~/.cache/a146-resume-t3-35e763e4/`. HANDOFF's "Catalog round 9" records the remaining limits.
+
 ## Summary
 
 <!-- generated: summary -->

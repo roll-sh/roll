@@ -1299,6 +1299,7 @@ fn rel_columns(
                     .then(|| &t.columns[a as usize - 1])
                     .filter(|c| c.ty == ty)
                     .and_then(|c| c.storage);
+                let storage = ix.columns.get(i).and_then(|c| c.storage).or(storage);
                 let opts = ix
                     .columns
                     .get(i)

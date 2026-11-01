@@ -2920,6 +2920,52 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     attstorage` of an index column fails ("not supported yet": index columns' storage
     follows their table's column; it needs a per-index override, cleared by ALTER TABLE
     ... SET STORAGE as ATExecSetStorage does).
+- **Catalog round 9, first batch** (round 24, agent 146; BENCH.md "Catalog round 9"):
+  - Isolation `reindex-schema` failed in debug builds since 41fc8981 ("internal engine error:
+    file numbers of relations that are gone", `ddl/mod.rs`'s debug check): REINDEX SCHEMA's
+    first table waited for its lock, `refresh_after_locks` then took another session's DROP
+    of a later table into the command's catalog, and the later table's skip ("a table dropped
+    while we waited is skipped") required the command's catalog to still have it, so its
+    indexes got new file numbers after it was gone (a stale `filenodes` entry stored in a
+    release build). The skip now holds for a table gone from the command's catalog too
+    (`session/ddl/table.rs`, the tables among the work: a materialized view's storage isn't
+    one). The spec passes 9 of 9 runs (it failed about one run in two).
+  - test_decoding's catalog cases (1,029 → 1,038 / 1,047): `UPDATE pg_attribute SET
+    attstorage` of table and index columns (`catalog_dml.rs` `update_attstorage`; an index
+    column's own storage is `IndexColumn::storage`, which ALTER TABLE ... SET STORAGE clears
+    for that column's plain index columns as SetIndexStorageProperties sets them); CLUSTER of
+    a system catalog (`vacuum.rs` `cluster_system`: cluster()'s and cluster_rel's checks,
+    then nothing to rewrite); pg_description's and pg_shdescription's TOAST tables have the
+    pages of comments too long for their rows (`exec/sizing.rs` `description_toast_pages`,
+    pglz's size of each). What test_decoding still differs in isn't the catalog's: streaming
+    of rolled-back subtransactions (stream 3), plan choices (stats 3, ddl / stats' slot
+    order), and the toast test's 100 kB index key, below. Goldens `a146_index_attstorage`,
+    `a146_catalog_cluster`.
+  - **Resume verification on `3069ca91` (2026-11-01):** the manifest's `2cde5af8` was
+    cherry-picked without conflicts. Fresh debug `cargo build -p pg-engine`, the full
+    `cargo test -p pg-engine --no-fail-fast`, and `cargo clippy -p pg-engine --all-targets`
+    pass. Clippy reports warnings in unchanged files. Both `a146_` goldens were re-recorded
+    from the pinned PostgreSQL 18.6 reference and remain byte-identical. The three reindex
+    isolation specs match 68/68 permutations; ten further `reindex-schema` runs match both
+    permutations every time. The same three specs on the unchanged base match 67/68,
+    reproducing the dropped-table assertion in the non-concurrent permutation.
+    The regression subset `create_table,create_index,cluster,comments`, including test_setup,
+    matches 1,347/1,347 units on both builds. test_decoding improves 1,025 to 1,033 of 1,047
+    units, with no newly differing units: rewrite 57 to 64/64 and toast 47 to 48/53.
+    Both builds hit `btsim::Key::wrap`'s assertion on toast's 100 kB key, so its five
+    differing units remain, alongside nine other baseline differences.
+    `pnpm test:pg --unit` passes. The Docker e2e phase remains unrun because its random
+    published ports cannot be restricted to this batch's assigned 52920 through 52939 range.
+    Every heavy check used `tools/heavy.sh`, two build jobs, line-tables-only debug info,
+    and a disk-backed TMPDIR. Commands, logs, baseline comparisons, and reports are in
+    `~/.cache/a146-resume-t3-35e763e4/`. No fresh performance claim or generated suite count
+    is made from these subset runs.
+  - Found, not this batch's (reported): the engine has no index row size check (PostgreSQL's
+    "index row requires 100024 bytes, maximum size is 8191" and btree's "index row size ...
+    exceeds btree version 4 maximum 2704"); and since c97af248 a btree key over 64 kB trips
+    `btsim::Key::wrap`'s length check (u16 attribute ends): a debug build panics, a release
+    build mis-sizes the key. test_decoding's toast test inserts such a key (a 100 kB text
+    with EXTENDED storage in its primary key).
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
