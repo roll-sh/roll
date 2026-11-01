@@ -1868,24 +1868,24 @@ fn tid_keys(s: &ScanPlan, quals: &[crate::sql::expr::Expr], ctx: &ExecCtx) -> Re
     let Some(found) = super::sizing::tid_row_keys(&s.table, &tids, ctx) else {
         return Ok(None);
     };
-    // Every TID must be the one its row shows, as the statement's snapshot reads the row: the
-    // model is a guide, the stored row the truth. A TID without such a row (none there, an
-    // older version, one the model places elsewhere) takes the full scan, which finds
-    // whatever row shows it.
-    if found.len() != tids.len() {
-        return Ok(None);
-    }
+    // The model names the row of every version at a TID (`Heap::key_at`, older versions
+    // too): a TID with none is no tuple's (heap_fetch finds nothing), and each row named is
+    // read as the statement's snapshot reads it. Its row is the TID's when the version it
+    // shows is at that TID; another version shows when the TID's isn't visible. So the
+    // rows fetched are as many as the TIDs, never the table's.
     let mut sorted: Vec<Vec<u8>> = found.iter().map(|(_, k)| k.clone()).collect();
     sorted.sort_unstable();
+    sorted.dedup();
     let rows = fetch_rows(&sorted, ctx)?;
-    for (tid, key) in &found {
-        let Ok(i) = sorted.binary_search(key) else { return Ok(None) };
-        let shown = rows[i].as_deref().map(|b| stored_tid(b).map_or_else(|| ctid_of(key), |(b, o)| Value::Tid(b, o)));
-        if shown != Some(Value::Tid(tid.0, tid.1)) {
-            return Ok(None);
+    let mut keys = Vec::with_capacity(found.len());
+    for (tid, key) in found {
+        let Ok(i) = sorted.binary_search(&key) else { continue };
+        let shown = rows[i].as_deref().map(|b| stored_tid(b).map_or_else(|| ctid_of(&key), |(b, o)| Value::Tid(b, o)));
+        if shown == Some(Value::Tid(tid.0, tid.1)) {
+            keys.push(key);
         }
     }
-    Ok(Some(found.into_iter().map(|(_, k)| k).collect()))
+    Ok(Some(keys))
 }
 
 /// An index scan with an equality on its first column under that column's nondeterministic

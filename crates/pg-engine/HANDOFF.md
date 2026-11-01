@@ -2370,6 +2370,45 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
     14,817, every TPC-H SF1 result hash equal to PostgreSQL's (release), pgbench unchanged. Verified
     at d3c9c8a7 (on 7c1f72b3), then rebased over 7dab0879..c97af248 (query memory, size
     models, planner): compile, clippy and the targeted tests again.
+- **Executor, round 7, batch 2** (round 24, agent 143, resumed on `29e882c9`):
+  - Sequential scan chunks pass stored rows through `FillRows` and `RowBatch`, for both
+    parallel workers and inline scans. `Reader` keeps unread rows between inline slices.
+    Index fetches and reordered rows retain their row iterator path.
+  - Inner and semi merge joins stop reading outer rows after their keys pass the last
+    matchable inner row. Sort direction and null order come from the merge keys. Left,
+    right, full, and anti joins retain their existing behavior.
+  - TID lookups on modeled heaps fetch each named row once. They retain only versions
+    whose visible TID matches the requested TID. Missing and stale
+    TIDs return no row without falling back to a table scan.
+  - Cached SST blocks pack each restart's search word and offset into one `u64` array.
+    The persisted SST format is unchanged.
+  - Goldens `a143_merge_end` and `a143_tid_versions` were re-recorded from PostgreSQL
+    18.6. Added coverage checks descending merge inputs with nulls first and last, plus
+    duplicate, null, and stale TIDs. A unit test checks row order and completeness across
+    partial fills and inline slices, including empty inputs and boundaries on either side
+    of 256 and 65,536 rows.
+  - Merge joins still collect the inner input eagerly. Inner-side consumption and
+    EXPLAIN ANALYZE counts retain their existing differences.
+  - Verified after recovery: `cargo build -p pg-engine`, the full crate tests with
+    387 passing and 18 ignored, and `cargo clippy -p pg-engine`. The ten Clippy warnings
+    match the parent baseline and affect unchanged files. `pnpm test:pg --unit` passes.
+  - The 12-file regress subset matches 2,960/2,961 units on both this batch and the
+    preserved `3069ca91` baseline binary. Every per-file result and the join unit 368
+    EXPLAIN difference match. Contrib btree_gin and bloom match 355/355 units. Seven
+    isolation specs match all 70 permutations and 449 steps. An additional SQL probe
+    mixing old and current versions of the same row with duplicate and null TIDs gives
+    byte-identical PostgreSQL and engine output.
+  - Every heavy check used `tools/heavy.sh`, two build jobs, line-tables-only debug info,
+    and a disk-backed TMPDIR. The first regress compile lost its incremental cache when
+    two limiter invocations overlapped in this worktree. The completed retry is recorded
+    separately. Logs, commands, probes, and baseline comparisons are in
+    `~/.cache/a143-resume-t3-c6f6ba1b/`.
+  - The Docker e2e phase follows the parent's baseline evidence at `3069ca91`,
+    `~/.cache/pg-engine-sol-resume/postgres-check.log`: 12 pass and four recovery tests
+    fail because compute-to-host WAL HTTP fetches time out. It was not repeated here.
+    All four containers started for this batch are stopped, with saved data retained.
+  - The interrupted baseline benchmark was not resumed. This batch makes no verified
+    performance claim. The earlier batch's measurements above remain historical.
 - **Deep input** (round 19, agent 63; `src/stack.rs`, `tests/deep_input.rs`): the engine no
   longer overflows the stack of the thread that runs it, however deep the input nests. A
   host's 2 MB thread or a test harness thread is safe. Before, 400 `+` terms aborted the

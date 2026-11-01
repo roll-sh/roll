@@ -425,13 +425,12 @@ const RESTART: usize = 16;
 /// makes the value field the length of the key's tail the value ends with.
 pub struct Block {
     data: Bytes,
-    /// The offset of every `RESTART`th entry.
-    restarts: Vec<u32>,
-    /// Each restart's key as a number (as `BlockIndex::words`, of 4 bytes: those after the
-    /// `common` bytes all restarts' keys start with). A seek searches these, not the
+    /// Every `RESTART`th entry: its key as a number in the high 32 bits (as
+    /// `BlockIndex::words`, of 4 bytes: those after the `common` bytes all restarts' keys
+    /// start with), its offset in the low ones. A seek searches the numbers, not the
     /// entries: a point read's block is seldom in the CPU's cache, and every restart it
     /// compared was a miss (three quarters of `seek`).
-    rwords: Vec<u32>,
+    restarts: Vec<u64>,
     common: usize,
     len: usize,
     last_key: Box<[u8]>,
@@ -591,7 +590,7 @@ impl Block {
             return;
         }
         let r = i / RESTART;
-        pos.next = self.restarts[r];
+        pos.next = self.restarts[r] as u32;
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -611,7 +610,7 @@ impl Block {
 
     /// The whole key of restart `r` compared with `key`.
     fn restart_cmp(&self, r: usize, key: &[u8]) -> std::cmp::Ordering {
-        let mut p = self.restarts[r] as usize;
+        let mut p = self.restarts[r] as u32 as usize;
         let (_, us, _) = head(&self.data, &mut p);
         let stored = &self.data[p..p + (us >> 2)];
         cmp_split(stored, if us & F_TS != 0 { &self.ts } else { &[] }, key)
@@ -626,7 +625,7 @@ impl Block {
         let c = self.common;
         let m = c.min(key.len());
         // (Restart 0 stores its key's first `common` bytes whole.)
-        let mut p = self.restarts[0] as usize;
+        let mut p = self.restarts[0] as u32 as usize;
         head(&self.data, &mut p);
         match key[..m].cmp(&self.data[p..p + m]) {
             std::cmp::Ordering::Less => return 0,
@@ -635,8 +634,9 @@ impl Block {
             std::cmp::Ordering::Equal => {}
         }
         let w = (word(&key[c..]) >> 32) as u32;
-        let mut lo = self.rwords.partition_point(|&x| x < w);
-        while lo < n && self.rwords[lo] == w && self.restart_cmp(lo, key).is_lt() {
+        let word_of = |r: u64| (r >> 32) as u32;
+        let mut lo = self.restarts.partition_point(|&x| word_of(x) < w);
+        while lo < n && word_of(self.restarts[lo]) == w && self.restart_cmp(lo, key).is_lt() {
             lo += 1;
         }
         lo
@@ -653,7 +653,7 @@ impl Block {
         }
         // The keys from the restart's on, the entries' values left alone until the one
         // found.
-        pos.next = self.restarts[r];
+        pos.next = self.restarts[r] as u32;
         pos.key.clear();
         pos.i = r * RESTART;
         self.read(pos);
@@ -721,7 +721,7 @@ impl Block {
 
     /// The bytes it holds (what the block cache counts).
     pub fn mem_bytes(&self) -> usize {
-        self.data.len() + self.restarts.capacity() * 4 + self.rwords.capacity() * 4 + self.last_key.len() + std::mem::size_of::<Block>()
+        self.data.len() + self.restarts.capacity() * 8 + self.last_key.len() + std::mem::size_of::<Block>()
     }
 
     /// Every entry with its key whole, for readers that go backwards or read a block once.
@@ -759,7 +759,7 @@ impl Block {
     /// share a prefix there).
     fn decode(raw: Bytes) -> Result<Block> {
         let bad = || internal("bad sst block");
-        let mut restarts = Vec::with_capacity(raw.len() / 512 + 1);
+        let mut restarts: Vec<u64> = Vec::with_capacity(raw.len() / 512 + 1);
         let mut out = Vec::with_capacity(raw.len());
         let mut key: Vec<u8> = Vec::new();
         // (The last restart's key.)
@@ -798,7 +798,7 @@ impl Block {
                 derived = true;
             }
             let share = if n.is_multiple_of(RESTART) {
-                restarts.push(out.len() as u32);
+                restarts.push(out.len() as u64);
                 rkeys.extend_from_slice(&key);
                 rends.push(rkeys.len());
                 if n == 0 {
@@ -827,11 +827,12 @@ impl Block {
                 a.iter().zip(b).take_while(|(x, y)| x == y).count().min(stored0)
             }
         };
-        let rwords = (0..rends.len()).map(|i| (word(&rkey_at(i)[common..]) >> 32) as u32).collect();
+        for (i, r) in restarts.iter_mut().enumerate() {
+            *r |= word(&rkey_at(i)[common..]) >> 32 << 32;
+        }
         Ok(Block {
             data: Bytes::from(out),
             restarts,
-            rwords,
             common,
             len: n,
             last_key: key.as_slice().into(),

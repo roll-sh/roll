@@ -1,0 +1,102 @@
+> CREATE TABLE a143_t (id int, v text)
+-- CREATE TABLE
+
+> INSERT INTO a143_t SELECT g, 'v' || g FROM generate_series(1, 400) g
+-- INSERT 0 400
+
+> SELECT ctid, id FROM a143_t WHERE id IN (1, 2, 3) ORDER BY id
+ctid:27 | id:int4
+(0,1) | 1
+(0,2) | 2
+(0,3) | 3
+-- SELECT 3
+
+> UPDATE a143_t SET v = 'w1' WHERE id = 1
+-- UPDATE 1
+
+> SELECT ctid, id, v FROM a143_t WHERE id = 1
+ctid:27 | id:int4 | v:text
+(2,13) | 1 | w1
+-- SELECT 1
+
+> SELECT id, v FROM a143_t WHERE ctid = '(0,1)'
+id:int4 | v:text
+-- SELECT 0
+
+> SELECT id, v FROM a143_t WHERE ctid = (SELECT ctid FROM a143_t WHERE id = 1)
+id:int4 | v:text
+1 | w1
+-- SELECT 1
+
+> SELECT id, v FROM a143_t WHERE ctid = '(0,999)'
+id:int4 | v:text
+-- SELECT 0
+
+> SELECT id, v FROM a143_t WHERE ctid = '(9999,1)'
+id:int4 | v:text
+-- SELECT 0
+
+> SELECT ctid, id, v FROM a143_t WHERE ctid = ANY (ARRAY['(0,1)', '(0,2)', '(0,3)', '(0,999)']::tid[]) ORDER BY ctid
+ctid:27 | id:int4 | v:text
+(0,2) | 2 | v2
+(0,3) | 3 | v3
+-- SELECT 2
+
+> SELECT ctid, id FROM a143_t WHERE ctid = ANY (ARRAY['(0,1)', '(0,1)', '(0,3)', '(0,3)', NULL, '(0,999)']::tid[]) ORDER BY ctid
+ctid:27 | id:int4
+(0,3) | 3
+-- SELECT 1
+
+> DELETE FROM a143_t WHERE id = 2
+-- DELETE 1
+
+> SELECT id FROM a143_t WHERE ctid = '(0,2)'
+id:int4
+-- SELECT 0
+
+> SELECT id FROM a143_t WHERE ctid = '(0,2)' OR ctid = '(0,3)'
+id:int4
+3
+-- SELECT 1
+
+> VACUUM a143_t
+-- VACUUM
+
+> SELECT id FROM a143_t WHERE ctid = '(0,1)' OR ctid = '(0,2)' OR ctid = '(0,3)'
+id:int4
+3
+-- SELECT 1
+
+> INSERT INTO a143_t VALUES (1000, 'reused')
+-- INSERT 0 1
+
+> SELECT ctid, id FROM a143_t WHERE id = 1000
+ctid:27 | id:int4
+(0,1) | 1000
+-- SELECT 1
+
+> SELECT id, v FROM a143_t WHERE ctid IN ('(0,1)', '(0,2)')
+id:int4 | v:text
+1000 | reused
+-- SELECT 1
+
+> EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+>   SELECT id FROM a143_t WHERE ctid = ANY (ARRAY['(0,1)', '(0,3)', '(5,1)']::tid[])
+QUERY PLAN:text
+Seq Scan on a143_t (actual rows=2.00 loops=1)
+  Filter: (ctid = ANY ('{"(0,1)","(0,3)","(5,1)"}'::tid[]))
+  Rows Removed by Filter: 398
+-- EXPLAIN
+
+> UPDATE a143_t SET v = 'by tid' WHERE ctid = '(0,3)' RETURNING id, v
+id:int4 | v:text
+3 | by tid
+-- UPDATE 1
+
+> UPDATE a143_t SET v = 'stale' WHERE ctid = '(0,3)' RETURNING id, v
+id:int4 | v:text
+-- UPDATE 0
+
+> DROP TABLE a143_t
+-- DROP TABLE
+

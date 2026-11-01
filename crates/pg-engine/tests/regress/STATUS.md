@@ -101,6 +101,30 @@ The oversized-key assertion in toast occurs on both builds and remains outside t
 ports outside the assigned range. Commands, logs, reports, and unit comparisons are saved in
 `~/.cache/a146-resume-t3-35e763e4/`. HANDOFF's "Catalog round 9" records the remaining limits.
 
+## Round 24, agent 143 (executor round 7, second batch resumed on `29e882c9`)
+
+Scan chunks use row batches in both parallel workers and inline execution. Inner and semi
+merge joins stop after their last matchable key, respecting descending and null order.
+TID lookups on modeled heaps filter stale versions without a table scan. Cached SST
+restart words and offsets share one array without changing the file format.
+
+A debug subset of create_table, create_misc, create_index, create_view, join, memoize, tid,
+tidscan, tidrangescan, bitmapops, and select_parallel, plus test_setup, matches 2,960/2,961
+units. The same subset on the preserved `3069ca91` baseline binary has identical per-file
+counts and the identical join unit 368 EXPLAIN difference. No unit changes. This comparison
+uses private references and reports under `~/.cache/a143-resume-t3-c6f6ba1b/` and leaves the
+generated full-suite counts unchanged.
+
+The btree_gin and bloom contrib subset matches 355/355 units. Seven targeted isolation
+specs match all 70 permutations and 449 steps. Both a143 batch goldens were re-recorded
+from PostgreSQL 18.6, preserving their previous output and adding boundary cases.
+
+The full crate tests pass with 387 passing and 18 ignored. Build, Clippy, and
+`pnpm test:pg --unit` pass. Clippy's ten warnings match the parent baseline in unchanged
+files. The Docker e2e phase uses the parent's `3069ca91` result, with four recovery failures
+caused by compute-to-host WAL HTTP timeouts. It was not repeated in this worktree.
+No benchmark result is claimed for this batch.
+
 ## Summary
 
 <!-- generated: summary -->

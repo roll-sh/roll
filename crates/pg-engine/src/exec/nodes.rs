@@ -4236,6 +4236,11 @@ struct HashJoinNode {
     restricted: bool,
     /// ExecHashJoin reads an outer row before building (`JoinMeta::outer_first`).
     outer_first: bool,
+    /// An inner or semi merge join's end (ExecMergeJoin's MJ_ENDINNER): the merge order's
+    /// keys and the last inner row's keys that can match (None: not known yet, or not
+    /// such a join); `merge_ended` once an outer row passes them.
+    merge_end: Option<Option<(Vec<SortKey>, Vec<Value>)>>,
+    merge_ended: bool,
 }
 
 /// What a join's output needs copied: `need` and the columns its condition reads.
@@ -4292,6 +4297,8 @@ impl HashJoinNode {
             first: None,
             kbuf: Vec::new(),
             outer_first: meta.outer_first,
+            merge_end: None,
+            merge_ended: false,
         }
     }
 
@@ -4412,18 +4419,46 @@ impl HashJoinNode {
         Some((n, inner, keys))
     }
 
-    /// A Merge Right / Full Join (nodeMergejoin.c): both inputs sorted on the keys, walked
-    /// together; an inner row nothing matched comes out when the walk passes it.
-    fn merge_outer(&mut self, ctx: &ExecCtx) -> Result<Vec<Row>> {
-        let mut outer = Vec::new();
-        while let Some(r) = self.left.next(ctx)? {
-            ctx.check()?;
-            outer.push(r);
+    /// Whether an outer row of keys `k` ends an inner or semi merge join, as ExecMergeJoin
+    /// ends it having read that row: a null first key sorting last (MJEVAL_ENDOFJOIN), or
+    /// keys past every inner row that can match (the inner side runs out, MJ_ENDINNER).
+    /// The outer rows after it are never read.
+    fn merge_passed(&mut self, k: &[Value], ctx: &ExecCtx) -> Result<bool> {
+        if self.merge_end.is_none() {
+            let keys = self.merge_keys();
+            let t = self.table.as_ref().unwrap();
+            let mut last = None;
+            for j in (0..t.rows.len()).rev() {
+                let ik = normed(eval_all(&self.rkeys, &t.inner(j).to_row(), ctx)?, &self.rnorm);
+                if !ik.iter().any(Value::is_null) {
+                    last = Some(ik);
+                    break;
+                }
+            }
+            self.merge_end = Some(last.map(|l| (keys, l)));
         }
-        let inner = collect(&self.right_plan, ctx, None)?;
-        // The keys' order: the inner input's sort, when it is a Sort (else ascending).
-        let sort_keys: Vec<SortKey> = self
-            .rkeys
+        let Some(Some((keys, last))) = &self.merge_end else {
+            return Ok(false);
+        };
+        if k.first().is_some_and(Value::is_null) && !keys[0].nulls_first {
+            return Ok(true);
+        }
+        if k.iter().any(Value::is_null) {
+            return Ok(false);
+        }
+        for (i, sk) in keys.iter().enumerate() {
+            match compare_values(&k[i], &last[i], sk, ctx)? {
+                Ordering::Equal => {}
+                o => return Ok(o == Ordering::Greater),
+            }
+        }
+        Ok(false)
+    }
+
+    /// A merge join's keys in its inputs' order: the inner input's sort, when it is a Sort
+    /// (else ascending).
+    fn merge_keys(&self) -> Vec<SortKey> {
+        self.rkeys
             .iter()
             .enumerate()
             .map(|(i, k)| {
@@ -4444,7 +4479,19 @@ impl HashJoinNode {
                     using: None,
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    /// A Merge Right / Full Join (nodeMergejoin.c): both inputs sorted on the keys, walked
+    /// together; an inner row nothing matched comes out when the walk passes it.
+    fn merge_outer(&mut self, ctx: &ExecCtx) -> Result<Vec<Row>> {
+        let mut outer = Vec::new();
+        while let Some(r) = self.left.next(ctx)? {
+            ctx.check()?;
+            outer.push(r);
+        }
+        let inner = collect(&self.right_plan, ctx, None)?;
+        let sort_keys = self.merge_keys();
         let okeys: Vec<Vec<Value>> = outer
             .iter()
             .map(|r| eval_all(&self.lkeys, r, ctx).map(|k| normed(k, &self.lnorm)))
@@ -4681,6 +4728,9 @@ impl HashJoinNode {
                 return Ok(None);
             }
             if self.cur.is_none() {
+                if self.merge_ended {
+                    return Ok(None);
+                }
                 let next = match self.first.take() {
                     Some(r) => Some(r),
                     None if level != super::pipe::ALL => match self.left.next_item(ctx)? {
@@ -4700,6 +4750,14 @@ impl HashJoinNode {
                         k.clear();
                         for (e, n) in self.lkeys.iter().zip(&self.lnorm) {
                             k.push(super::pipe::norm(eval(e, &l, ctx)?, *n));
+                        }
+                        if self.merge
+                            && matches!(self.kind, JoinKind::Inner | JoinKind::Semi)
+                            && self.merge_passed(&k, ctx)?
+                        {
+                            self.kbuf = k;
+                            self.merge_ended = true;
+                            return Ok(None);
                         }
                         let span = self.table.as_ref().unwrap().lookup(&k);
                         self.kbuf = k;
