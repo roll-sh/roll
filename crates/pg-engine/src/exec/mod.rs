@@ -66,13 +66,15 @@ pub struct Computed {
 }
 
 /// What a bounded sort wants of the rows below it (`Node::topk_below`): its bound, and its
-/// one key, a column compared by the type's order (no USING operator).
+/// first key, a column compared by the type's order (no USING operator).
 #[derive(Clone, Copy, Debug)]
 pub struct TopK {
     pub col: usize,
     pub desc: bool,
     pub nulls_first: bool,
     pub k: usize,
+    /// Equal first keys may win on a later sort key, so must reach the full sort.
+    pub keep_ties: bool,
 }
 
 impl TopK {

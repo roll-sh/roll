@@ -507,6 +507,122 @@ fn parallel_scans_of_modelled_heaps_inner() {
     assert_eq!(after, out(&mut s, "SELECT id FROM vt WHERE g = 1 AND id % 1000 = 0 LIMIT 3"));
 }
 
+#[test]
+fn numeric_topk_matches_serial() {
+    on_session_thread(numeric_topk_matches_serial_inner);
+}
+
+fn numeric_topk_matches_serial_inner() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    // Padding puts this small, modelled fixture above the 8 MB worker threshold.
+    s.query(
+        "CREATE TABLE nt (id int, x int, tied int, h smallint, b bigint, f real, d double precision, n numeric, pad text); \
+         INSERT INTO nt SELECT i, 12001 - i, 1, (i % 3)::smallint, i::bigint, \
+         (CASE i % 6 WHEN 0 THEN NULL WHEN 1 THEN 'NaN' WHEN 2 THEN '-0' WHEN 3 THEN '0' WHEN 4 THEN '-1' ELSE '1' END)::real, \
+         (CASE i % 6 WHEN 0 THEN NULL WHEN 1 THEN 'NaN' WHEN 2 THEN '-0' WHEN 3 THEN '0' WHEN 4 THEN '-1' ELSE '1' END)::double precision, \
+         (CASE WHEN i % 2 = 0 THEN '3.00' ELSE '3' END)::numeric, repeat(md5(i::text), 32) \
+         FROM generate_series(1, 12000) i; CREATE SEQUENCE nt_seq",
+    )
+    .unwrap();
+    s.query("VACUUM ANALYZE nt").unwrap();
+    let queries = [
+        ("SELECT id, x FROM nt ORDER BY x DESC, id LIMIT 7 OFFSET 3", true),
+        ("SELECT x, id, x FROM nt ORDER BY x DESC, id LIMIT 7", true),
+        ("SELECT id, h FROM nt ORDER BY h DESC, id DESC LIMIT 7", true),
+        ("SELECT id, b FROM nt ORDER BY b, id LIMIT 7", true),
+        ("SELECT id, f FROM nt ORDER BY f DESC NULLS LAST, id DESC LIMIT 7", true),
+        ("SELECT id, d FROM nt ORDER BY d NULLS FIRST, id DESC LIMIT 7", true),
+        // All first keys tie: the last rows must still win the second comparison.
+        ("SELECT id, tied FROM nt ORDER BY tied, id DESC LIMIT 7", false),
+        ("SELECT id, n FROM nt ORDER BY n DESC, id DESC LIMIT 7", false),
+        ("SELECT id, f FROM nt WHERE f = 'NaN'::real ORDER BY f, id DESC LIMIT 3", false),
+        ("SELECT id, d FROM nt WHERE d = 0 ORDER BY d, id DESC LIMIT 3", false),
+        ("SELECT id, d FROM nt WHERE d IS NULL ORDER BY d, id DESC LIMIT 3", false),
+        // The existing single-key request also uses numeric column kernels.
+        ("SELECT id, x FROM nt ORDER BY x DESC LIMIT 7", true),
+    ];
+    let mut serial = Vec::new();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    for (q, _) in &queries {
+        let rows = out(&mut s, q);
+        assert!(!rows.is_empty() && !rows[0].starts_with("ERROR:"), "{q}: {rows:?}");
+        serial.push(rows);
+    }
+    assert_eq!(pg_engine::exec::parscan::started(), started);
+    assert_eq!(serial[0], out(&mut s, "SELECT i, 12001 - i FROM generate_series(4, 10) i"));
+    assert_eq!(serial[6], out(&mut s, "SELECT i, 1 FROM generate_series(12000, 11994, -1) i"));
+    for (rows, ids) in [
+        (&serial[7], vec![12000, 11999, 11998, 11997, 11996, 11995, 11994]),
+        (&serial[8], vec![11995, 11989, 11983]),
+        (&serial[9], vec![11997, 11996, 11991]),
+        (&serial[10], vec![12000, 11994, 11988]),
+    ] {
+        assert_eq!(rows.len(), ids.len());
+        for (row, id) in rows.iter().zip(ids) {
+            assert!(row.starts_with(&format!("[Int4({id}),")), "late secondary winner: {row}");
+        }
+    }
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    for ((q, prunes), want) in queries.iter().zip(&serial) {
+        let started = pg_engine::exec::parscan::started();
+        let skipped = pg_engine::exec::parscan::topk_skipped();
+        assert_eq!(&out(&mut s, q), want, "{q}");
+        assert!(pg_engine::exec::parscan::started() > started, "workers ran: {q}");
+        if *prunes {
+            assert!(pg_engine::exec::parscan::topk_skipped() > skipped, "workers pruned: {q}");
+        } else {
+            assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "first-key ties survived: {q}");
+        }
+    }
+
+    // A non-column projection, secondary expression, or nonnumeric column disqualifies
+    // the request. Errors on late, otherwise discardable rows must still be evaluated.
+    for q in [
+        "SELECT id, x, 1 / (id - 12000) FROM nt ORDER BY x DESC, id LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x DESC, 1 / (id - 12000) LIMIT 7",
+        "SELECT id, x, pad FROM nt ORDER BY x DESC, id LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x + 0 DESC, id LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x DESC, pad COLLATE \"C\" LIMIT 7",
+    ] {
+        s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+        let want = out(&mut s, q);
+        if q.contains("1 / (id - 12000)") {
+            assert!(want[0].starts_with("ERROR: division by zero"), "{q}: {want:?}");
+        } else {
+            assert_eq!(want.len(), 7, "{q}: {want:?}");
+        }
+        s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+        let skipped = pg_engine::exec::parscan::topk_skipped();
+        assert_eq!(out(&mut s, q), want, "{q}");
+        assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "ineligible: {q}");
+    }
+
+    // Sorting by the volatile output keeps it below the sort. Count every evaluation,
+    // including rows the first key alone could otherwise have discarded.
+    for q in [
+        "SELECT id, x, nextval('nt_seq') AS v FROM nt ORDER BY x DESC, id, v LIMIT 7",
+        "SELECT id, x FROM nt ORDER BY x DESC, nextval('nt_seq') LIMIT 7",
+    ] {
+        let mut serial = None;
+        for workers in [0, 2] {
+            s.query(&format!("SET max_parallel_workers_per_gather = {workers}; SELECT setval('nt_seq', 1, false)")).unwrap();
+            let skipped = pg_engine::exec::parscan::topk_skipped();
+            let rows = out(&mut s, q);
+            assert_eq!(rows.len(), 7, "{q}: {rows:?}");
+            if let Some(want) = &serial {
+                assert_eq!(&rows, want, "{q}");
+            } else {
+                serial = Some(rows);
+            }
+            assert_eq!(out(&mut s, "SELECT currval('nt_seq')"), ["[Int8(12000)]"], "{q}");
+            assert_eq!(pg_engine::exec::parscan::topk_skipped(), skipped, "volatile: {q}");
+        }
+    }
+}
+
 /// Scans whose rows the workers fetch by key: a bitmap heap scan of a few percent of a big
 /// table (plain, filtered, aggregated, under a hash join, failing at a late row), and full
 /// primary-key index scans read in index order by the executor's thread (a merge join's

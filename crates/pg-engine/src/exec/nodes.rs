@@ -1918,18 +1918,29 @@ fn project_moving(exprs: &[Expr], moves: &[u32], mut r: Row, ctx: &ExecCtx) -> R
     Ok(out)
 }
 
+/// A direct column whose built-in ordering can be used by a worker's first-key heap.
+fn direct_numeric_col(e: &Expr) -> bool {
+    use crate::types::DataType::{Float4, Float8, Int2, Int4, Int8, Numeric};
+    matches!(e, Expr::Col(_, Int2 | Int4 | Int8 | Float4 | Float8 | Numeric(_)))
+}
+
 impl ProjectNode {
-    /// Hand the expressions worth computing off the executor's thread (pgvector distances:
-    /// their kernels are most of a row's work) to a parallel scan below, when there is one.
+    /// Hand pgvector distances, or a bounded sort's whole numeric column projection, to
+    /// a parallel scan below, when there is one.
     fn compute_below(&mut self, ctx: &ExecCtx) -> Result<()> {
         self.tried = true;
         self.moves = project_moves(&self.exprs);
+        let numeric = self.topk.is_some() && self.exprs.iter().all(direct_numeric_col);
         let mut kernels = Vec::new();
         let places: Vec<Option<usize>> = self
             .exprs
             .iter()
             .map(|e| match super::kernel::compile(e) {
                 Some(k @ super::kernel::K::Dist(..)) => {
+                    kernels.push(k);
+                    Some(kernels.len() - 1)
+                }
+                Some(k @ super::kernel::K::Col(_)) if numeric => {
                     kernels.push(k);
                     Some(kernels.len() - 1)
                 }
@@ -2088,7 +2099,7 @@ impl Node for ProjectNode {
     }
 
     fn topk_below(&mut self, t: super::TopK) -> bool {
-        if self.tried {
+        if self.tried || (t.keep_ties && !self.exprs.iter().all(direct_numeric_col)) {
             return false;
         }
         self.topk = Some(t);
@@ -2749,14 +2760,15 @@ impl Node for SortNode {
             } else {
                 match self.bound.filter(|&b| b > 0) {
                     Some(b) => {
-                        // (One key of the input's columns, in its type's order: the rows a
-                        // parallel scan below can tell its bounded heap would discard may
-                        // stay there.)
-                        if let [k] = self.keys.as_slice()
+                        // A numeric multikey sort can prune by its first key only when
+                        // ties still reach the full sort for the remaining comparisons.
+                        let keep_ties = self.keys.len() > 1;
+                        if let Some(k) = self.keys.first()
                             && k.using.is_none()
                             && let Expr::Col(col, _) = k.expr
+                            && (!keep_ties || self.keys.iter().all(|k| k.using.is_none() && direct_numeric_col(&k.expr)))
                         {
-                            input.topk_below(super::TopK { col, desc: k.desc, nulls_first: k.nulls_first, k: b });
+                            input.topk_below(super::TopK { col, desc: k.desc, nulls_first: k.nulls_first, k: b, keep_ties });
                         }
                         let (rows, n) = sort_input_bounded(&mut input, &self.keys, b, ctx)?;
                         if let Some(instr) = ctx.instr.borrow().as_ref() {

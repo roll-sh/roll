@@ -159,9 +159,13 @@ impl Top {
     /// Whether the scan's row with key `key` can be dropped (else it is kept in the heap).
     fn drops(&mut self, key: &Value) -> bool {
         self.seen += 1;
-        if self.seen > 2 * self.t.k
+        if self.seen > self.t.k.saturating_mul(2)
             && self.heap.len() == self.t.k
-            && self.heap.peek().is_some_and(|top| self.t.cmp(key, &top.0) != std::cmp::Ordering::Less)
+            && self.heap.peek().is_some_and(|top| match self.t.cmp(key, &top.0) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Equal => !self.t.keep_ties,
+                std::cmp::Ordering::Less => false,
+            })
         {
             return true;
         }
@@ -1137,6 +1141,55 @@ impl Drop for ParScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_key_pruning_preserves_two_key_tuplesort() {
+        use crate::exec::pgsort::{Bounded, Cmp, tuplesort};
+        use crate::types::Numeric;
+
+        let numbers = |values: &[&str]| values.iter().map(|v| Value::numeric(v.parse::<Numeric>().unwrap())).collect::<Vec<_>>();
+        let keys = [
+            vec![Value::Null, Value::Int4(-1), Value::Int4(0), Value::Int4(1)],
+            vec![Value::Null, Value::Float8(f64::NAN), Value::Float8(-0.0), Value::Float8(0.0), Value::Float8(-1.0), Value::Float8(1.0)],
+            numbers(&["-1", "0", "0.00", "3", "3.00", "NaN"]),
+            // Every first key ties; late rows win by the second key.
+            vec![Value::Null],
+            vec![Value::Float8(f64::NAN)],
+            vec![Value::Float8(-0.0), Value::Float8(0.0)],
+            numbers(&["3", "3.00"]),
+        ];
+        let mut skipped = 0;
+        for values in keys {
+            let items: Vec<_> = (0..257).map(|i| (values[(i * 37) % values.len()].clone(), i)).collect();
+            for desc in [false, true] {
+                for nulls_first in [false, true] {
+                    for bound in [1, 3, 7, 17, usize::MAX] {
+                        let t = crate::exec::TopK { col: 0, desc, nulls_first, k: bound, keep_ties: true };
+                        for chunk in [1, 7, 19, 128, 257] {
+                            let mut f = |a: &(Value, usize), b: &(Value, usize)| Ok(t.cmp(&a.0, &b.0).then_with(|| b.1.cmp(&a.1)));
+                            let want = tuplesort(items.clone(), Some(bound), &mut Cmp::new(&mut f));
+                            let mut sort = Bounded::new(bound);
+                            let mut cmp = Cmp::new(&mut f);
+                            for part in items.chunks(chunk) {
+                                let mut top = Top { t, seen: 0, heap: std::collections::BinaryHeap::new() };
+                                for row in part {
+                                    if top.drops(&row.0) {
+                                        skipped += 1;
+                                        sort.skip(1);
+                                    } else {
+                                        sort.put(row.clone(), &mut cmp);
+                                    }
+                                }
+                            }
+                            let got: Vec<_> = sort.finish(&mut cmp).into_iter().map(|r| r.1).collect();
+                            assert_eq!(got, want.into_iter().map(|r| r.1).collect::<Vec<_>>(), "{t:?}, chunks of {chunk}, keys {values:?}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(skipped > 0, "the comparison exercised first-key pruning");
+    }
 
     struct Rows(std::ops::Range<u32>);
 
