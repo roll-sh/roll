@@ -2165,6 +2165,7 @@ impl Cluster for Engine {
             .filter(|b| b.database != 0)
             .map(|b| {
                 let mut a = b.activity.clone();
+                a.backend_subxacts = b.proc.as_ref().map_or((0, false), |p| p.subxacts());
                 // A parallel worker does the leader's work (the engine runs it on the
                 // leader's thread): what it waits for is what the leader's work does, and a
                 // leader that doesn't take part waits for its workers.

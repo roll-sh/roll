@@ -650,6 +650,7 @@ impl Session {
         let mut txn = self.state.db.begin(iso, ro, self.cancel.clone());
         txn.lock_peer = Some(self.state.lock_owner);
         txn.vxid = self.state.proc.begin();
+        txn.backend_proc = Some(self.state.proc.clone());
         self.state.proc.set_owner(txn.id);
         self.state.temp_used.set(false);
         let lt = self.state.settings.borrow().lock_timeout();
@@ -799,6 +800,7 @@ impl Session {
             .settings
             .borrow_mut()
             .end_transaction(commit && r.is_ok());
+        crate::exec::pgstat::clear_snapshot(&self.state);
         self.state.db.touch();
         r
     }
@@ -934,6 +936,9 @@ impl Session {
     pub fn end_batch(&mut self) -> Result<()> {
         if self.implicit && self.status == TxnStatus::Idle {
             self.finish_txn(true)?;
+        } else if self.status == TxnStatus::Idle {
+            // Utility-only transactions (such as SET) need statistics cleanup too.
+            crate::exec::pgstat::clear_snapshot(&self.state);
         }
         Ok(())
     }
@@ -3701,6 +3706,7 @@ pub(crate) fn end_txn_midway(ctx: &ExecCtx, commit: bool, chain: bool) -> Result
         // StartTransactionCommand.)
         ctx.sess.proc.end();
         next.vxid = ctx.sess.proc.begin();
+        next.backend_proc = Some(ctx.sess.proc.clone());
         ctx.sess.proc.set_owner(next.id);
         next.lock_timeout = t.lock_timeout;
         next.seq_last = t.seq_last.clone();
@@ -3730,6 +3736,7 @@ pub(crate) fn end_txn_midway(ctx: &ExecCtx, commit: bool, chain: bool) -> Result
         .settings
         .borrow_mut()
         .end_transaction(commit && r.is_ok());
+    crate::exec::pgstat::clear_snapshot(ctx.sess);
     txn_settings(ctx.sess, iso, ro);
     // Cursors end with the transaction, except holdable ones and those a loop is reading.
     ctx.sess

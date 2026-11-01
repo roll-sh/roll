@@ -3662,6 +3662,7 @@ fn hash_partition_check(a: &[Value], c: &FnCtx, variadic: Option<&T>) -> Result<
 /// pg_stat_get_progress_info: this backend's running command of the kind asked for (only
 /// COPY is reported).
 pub(super) fn pg_stat_get_progress_info(a: &[Value], c: &FnCtx) -> Result<super::SrfIter> {
+    drop(super::monitor::backend_status(c));
     let kind = match &a[0] {
         Value::Text(t) => t.to_string(),
         _ => return Ok(Box::new(std::iter::empty())),
@@ -3699,23 +3700,16 @@ fn command_progress(kind: &str, c: &FnCtx) -> Vec<Vec<Value>> {
     let cat = c.exec.catalog();
     let (me, dbo) = (c.exec.current_user(), c.exec.db_owner());
     let all_stats = cat.has_privs_of_role(me, 3375, dbo);
-    let dbs = sess.cluster.databases();
-    let mut seen_me = false;
-    let mut entries: Vec<(i32, Option<u32>, Option<u32>, std::sync::Arc<crate::session::state::Progress>)> = Vec::new();
-    for b in sess.cluster.activity() {
-        let Some(p) = b.progress.clone() else { continue };
-        seen_me |= b.pid == sess.pid;
-        let role = cat.role_by_name(&b.user).map(|r| r.oid);
-        let db = dbs.iter().find(|d| d.1 == b.database).map(|d| d.0);
-        entries.push((b.pid, db, role, p));
-    }
-    // (A cluster without a backend list: this session's own.)
-    if !seen_me {
-        entries.push((sess.pid, Some(sess.database_oid()), Some(me), sess.progress.clone()));
+    let backends = super::monitor::backend_status(c);
+    let mut entries: Vec<_> = backends.iter()
+        .filter_map(|b| b.progress.map(|p| (b.activity.pid, b.dbid, b.userid, p)))
+        .collect();
+    if backends.is_empty() && let Some(p) = sess.progress.read() {
+        entries.push((sess.pid, Some(sess.database_oid()), Some(me), p));
     }
     let mut out = Vec::new();
-    for (pid, db, role, p) in entries {
-        let Some((_, relid, params)) = p.read().filter(|r| r.0.eq_ignore_ascii_case(kind)) else { continue };
+    for (pid, db, role, (command, relid, params)) in entries {
+        if !command.eq_ignore_ascii_case(kind) { continue; }
         let mut row = vec![Value::Int4(pid), db.map_or(Value::Null, Value::Oid)];
         if all_stats || role.is_some_and(|r| cat.has_privs_of_role(me, r, dbo)) {
             row.push(Value::Oid(relid));

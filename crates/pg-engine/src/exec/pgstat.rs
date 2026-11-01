@@ -469,6 +469,17 @@ struct Fetched {
     slru: Option<HashMap<String, i64>>,
 }
 
+/// Raw backend metadata, before applying the reader's current privileges. Wait events
+/// and parallel leaders come from the live process, as in pg_stat_get_activity.
+#[derive(Clone, Debug)]
+pub(crate) struct BackendStatus {
+    pub activity: crate::session::state::Activity,
+    pub dbid: Option<u32>,
+    pub userid: Option<u32>,
+    pub query_id: Option<i64>,
+    pub progress: Option<(&'static str, u32, [i64; 20])>,
+}
+
 /// A backend's pending (not yet flushed) counts, and its view of the shared ones.
 #[derive(Debug, Default)]
 pub struct Pending {
@@ -503,11 +514,11 @@ pub struct Pending {
     pending_since: Option<Instant>,
     /// Counts are kept unflushed in `Shared::unflushed`.
     parked: bool,
-    /// The mode of the cache or snapshot held.
-    mode: Option<Consistency>,
     /// A snapshot (snapshot mode, with its time) or the entries read (cache mode).
     snapshot: Option<(i64, Box<Shared>)>,
     cache: Fetched,
+    pub(crate) backends: Option<Vec<BackendStatus>>,
+    consistency_generation: u64,
 }
 
 impl Pending {
@@ -533,18 +544,37 @@ impl Pending {
 
     /// pgstat_clear_snapshot.
     pub fn clear_snapshot(&mut self) {
-        self.mode = None;
+        self.backends = None;
         self.snapshot = None;
         self.cache = Fetched::default();
     }
 
-    /// The snapshot's time (snapshot mode), after a change of mode drops what was held.
-    pub fn snapshot_timestamp(&mut self, mode: Consistency) -> Option<i64> {
-        if self.mode.is_some_and(|m| m != mode) {
+    /// GUC assignments invalidate both snapshots on the next cumulative fetch, even if
+    /// no cumulative entry has been fetched yet. Backend-status reads do not consume it.
+    fn prepare_snapshot(&mut self, generation: u64) {
+        if self.consistency_generation != generation {
             self.clear_snapshot();
+            self.consistency_generation = generation;
         }
+    }
+
+    /// The snapshot's time (snapshot mode), after a change of mode drops what was held.
+    pub fn snapshot_timestamp(&mut self, generation: u64) -> Option<i64> {
+        self.prepare_snapshot(generation);
         self.snapshot.as_ref().map(|(ts, _)| *ts)
     }
+}
+
+/// Explicit pg_stat_clear_snapshot also consumes a pending GUC-triggered clear.
+pub fn clear_snapshot(sess: &crate::session::state::SessionState) {
+    let mut p = sess.pgstat.borrow_mut();
+    p.clear_snapshot();
+    p.consistency_generation = sess.settings.borrow().stats_fetch_generation();
+}
+
+/// Apply a deferred GUC reset before fetching cumulative backend/fixed statistics.
+pub(crate) fn prepare_snapshot(ctx: &ExecCtx) {
+    ctx.sess.pgstat.borrow_mut().prepare_snapshot(ctx.sess.settings.borrow().stats_fetch_generation());
 }
 
 /// The shared catalogs, their TOAST tables and indexes (relisshared): their counts are
@@ -595,9 +625,7 @@ fn read<T>(
 ) -> T {
     let mode = consistency(ctx);
     let mut p = ctx.sess.pgstat.borrow_mut();
-    if p.mode.is_some_and(|m| m != mode) {
-        p.clear_snapshot();
-    }
+    p.prepare_snapshot(ctx.sess.settings.borrow().stats_fetch_generation());
     match mode {
         Consistency::None => f(&shared(&ctx.sess.db)),
         Consistency::Snapshot => {
@@ -607,12 +635,10 @@ fn read<T>(
                 let copy = s.fixed.lock().clone();
                 s.fixed = std::sync::Arc::new(parking_lot::Mutex::new(copy));
                 p.snapshot = Some((now(), Box::new(s)));
-                p.mode = Some(mode);
             }
             f(&p.snapshot.as_ref().unwrap().1)
         }
         Consistency::Cache => {
-            p.mode = Some(mode);
             if let Some(v) = cached(&p.cache) {
                 return v;
             }
@@ -644,6 +670,7 @@ pub fn fetch_function(ctx: &ExecCtx, func: u32) -> Option<FuncCounts> {
 
 /// The database's entry as the reader sees it (database 0: shared relations').
 pub fn fetch_db(ctx: &ExecCtx, db: u32) -> Option<DbEntry> {
+    prepare_snapshot(ctx);
     let mine = ctx.sess.db.oid;
     if db != mine && db != 0 {
         // Another database's: as its entry is now (one without an entry counts nothing).
@@ -667,10 +694,7 @@ pub fn fetch_slru(ctx: &ExecCtx) -> HashMap<String, i64> {
     let mode = consistency(ctx);
     if mode == Consistency::Cache {
         let mut p = ctx.sess.pgstat.borrow_mut();
-        if p.mode.is_some_and(|m| m != mode) {
-            p.clear_snapshot();
-        }
-        p.mode = Some(mode);
+        p.prepare_snapshot(ctx.sess.settings.borrow().stats_fetch_generation());
         if p.cache.slru.is_none() {
             p.cache.slru = Some(shared(&ctx.sess.db).fixed.lock().slru_zeroed.clone());
         }
@@ -681,6 +705,7 @@ pub fn fetch_slru(ctx: &ExecCtx) -> HashMap<String, i64> {
 
 /// The fixed-numbered statistics and other cluster-wide values (no snapshot).
 pub fn with_shared<T>(ctx: &ExecCtx, f: impl FnOnce(&mut Fixed) -> T) -> T {
+    prepare_snapshot(ctx);
     flush_io(ctx.sess);
     let fixed = shared(&ctx.sess.db).fixed.clone();
     f(&mut fixed.lock())
@@ -1185,6 +1210,7 @@ pub fn reset_shared(ctx: &ExecCtx, target: &str) {
 /// When the fixed-numbered statistics were last reset: at first, when the statistics
 /// started (the server's start).
 pub fn reset_time(ctx: &ExecCtx, target: &str) -> Option<i64> {
+    prepare_snapshot(ctx);
     let start = ctx.sess.cluster.start_time();
     Some(*fixed(&ctx.sess.db).lock().resets.entry(target.to_string()).or_insert(start))
 }
@@ -1572,6 +1598,7 @@ fn end_xact_counts(
         }
         drop(s);
         p.clear_snapshot();
+        p.consistency_generation = sess.settings.borrow().stats_fetch_generation();
     }
     report(sess, false, cat);
 }

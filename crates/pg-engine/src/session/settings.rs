@@ -421,6 +421,8 @@ pub struct Settings {
     /// What every statement derives from the settings, built on first use and dropped when
     /// a value changes (see `touched`).
     derived: DerivedCache,
+    /// Effective stats_fetch_consistency and its assignment generation.
+    stats_fetch: (u8, u64),
     /// The values `start_transaction` replaced (of `TXN_START`'s parameters), and its nest
     /// level: the GUC stack entries its SET LOCALs make, until something needs them there
     /// (`stack_txn_start`).
@@ -464,6 +466,7 @@ impl Default for Settings {
             reserved: Vec::new(),
             changed: Vec::new(),
             derived: DerivedCache::default(),
+            stats_fetch: (1, 0),
             txn_start: None,
             file: crate::sysconf::Loaded::empty(),
             argv: Vec::new(),
@@ -1441,6 +1444,22 @@ impl Settings {
         self.derived().stats_fetch
     }
 
+    /// Changes of stats_fetch_consistency defer snapshot clearing until a cumulative read.
+    pub fn stats_fetch_generation(&self) -> u64 {
+        self.stats_fetch.1
+    }
+
+    fn stats_fetch_assigned(&mut self) {
+        let mode = match self.get_str("stats_fetch_consistency") {
+            Some("none") => 0,
+            Some("snapshot") => 2,
+            _ => 1,
+        };
+        if self.stats_fetch.0 != mode {
+            self.stats_fetch = (mode, self.stats_fetch.1 + 1);
+        }
+    }
+
     /// Whether `track_counts` is on.
     pub fn track_counts(&self) -> bool {
         self.derived().track_counts
@@ -1474,6 +1493,7 @@ impl Settings {
             self.defaults.insert(canon.clone(), v);
         }
         self.touched(&canon);
+        self.stats_fetch_assigned();
         Ok(())
     }
 
@@ -1502,6 +1522,7 @@ impl Settings {
             self.touched(canon);
             self.config.insert(canon.to_string(), value);
         }
+        self.stats_fetch_assigned();
     }
 
     /// A value of the server's command line (`roll-engine --max-prepared-transactions`,
@@ -1516,6 +1537,7 @@ impl Settings {
                 self.argv.push(d.name);
             }
         }
+        self.stats_fetch_assigned();
     }
 
     /// A value the server sets as it starts, keeping the parameter's own source (hba_file's
@@ -1525,6 +1547,7 @@ impl Settings {
             self.touched(d.name);
             self.config.insert(d.name.to_string(), value.to_string());
         }
+        self.stats_fetch_assigned();
     }
 
     /// The configuration files' values this session has (`sysconf::Loaded::generation`).
@@ -1575,6 +1598,7 @@ impl Settings {
                 self.changed.push(n.to_string());
             }
         }
+        self.stats_fetch_assigned();
     }
 
     /// postmaster parameters found changed in the files (show_all_file_settings).
@@ -1642,6 +1666,7 @@ impl Settings {
                 self.values.remove(&canon);
             }
         }
+        self.stats_fetch_assigned();
     }
 
     /// check_client_encoding: an encoding with conversions to and from the database's
@@ -1668,6 +1693,7 @@ impl Settings {
         let canon = canonical_name(name);
         self.touched(&canon);
         self.values.insert(canon, value.to_string());
+        self.stats_fetch_assigned();
     }
 
     /// A module reserves its prefix (`MarkGUCPrefixReserved`): placeholders under it go, with
@@ -1947,6 +1973,7 @@ impl Settings {
         if REPORTED.contains(&canon.as_str()) {
             self.changed.push(canon);
         }
+        self.stats_fetch_assigned();
         Ok(())
     }
 
@@ -2109,6 +2136,7 @@ impl Settings {
                     self.values.remove(&name);
                 }
             }
+            self.stats_fetch_assigned();
             if reported && before.as_ref() != self.values.get(&name) {
                 self.changed.push(name);
             }
@@ -2141,6 +2169,7 @@ impl Settings {
         if REPORTED.contains(&canon.as_str()) {
             self.changed.push(canon);
         }
+        self.stats_fetch_assigned();
         Ok(())
     }
 
@@ -2228,6 +2257,7 @@ impl Settings {
                 self.values.insert(n, String::new());
             }
         }
+        self.stats_fetch_assigned();
     }
 
     /// Transaction end: undo SET LOCAL, and on abort undo every SET made in the transaction.

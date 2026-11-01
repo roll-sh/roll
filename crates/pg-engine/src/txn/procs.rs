@@ -47,6 +47,8 @@ struct Slot {
     owner: AtomicU64,
     /// The last transaction's local id (what an error raised in it is logged with).
     last_lxid: AtomicU32,
+    /// PGPROC subxid count (low 7 bits) and sticky overflow (bit 7), published together.
+    subxacts: AtomicU32,
 }
 
 /// The slots of one cluster.
@@ -185,6 +187,7 @@ impl Slot {
             lxid: AtomicU32::new(0),
             owner: AtomicU64::new(0),
             last_lxid: AtomicU32::new(0),
+            subxacts: AtomicU32::new(0),
         }
     }
 
@@ -205,6 +208,15 @@ pub struct Proc {
 impl Proc {
     pub fn number(&self) -> i32 {
         self.slot.number
+    }
+
+    pub fn subxacts(&self) -> (usize, bool) {
+        let status = self.slot.subxacts.load(Relaxed);
+        ((status & 127) as usize, status & 128 != 0)
+    }
+
+    pub fn set_subxacts(&self, (count, overflowed): (usize, bool)) {
+        self.slot.subxacts.store(count as u32 | (u32::from(overflowed) << 7), Relaxed);
     }
 
     /// The running transaction's id (local id 0 between transactions).
@@ -251,6 +263,7 @@ impl Proc {
 
     /// The transaction ended (ProcArrayEndTransaction).
     pub fn end(&self) {
+        self.set_subxacts((0, false));
         self.slot.lxid.store(0, Relaxed);
         self.slot.owner.store(0, Relaxed);
     }

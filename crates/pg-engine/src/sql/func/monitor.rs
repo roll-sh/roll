@@ -170,10 +170,25 @@ fn wal(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
 fn recovery_prefetch(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     rows(vec![reset_row(6248, 0, "recovery_prefetch", c)])
 }
+/// PID lookup precedes the backend-status read for backend I/O and WAL statistics.
+fn backend_cumulative_snapshot(a: &[Value], c: &FnCtx) {
+    let Some(pid) = a.first().and_then(|v| v.as_i64()) else { return };
+    let auxiliary = AUX_PROCESSES.iter().find(|p| i64::from(p.0) == pid);
+    if pid == i64::from(c.exec.sess.pid) || auxiliary.is_some()
+        || c.exec.sess.cluster.activity().iter().any(|b| i64::from(b.pid) == pid)
+    {
+        drop(backend_status(c));
+        if auxiliary.is_none_or(|p| matches!(p.1, "walwriter" | "logical replication launcher")) {
+            crate::exec::pgstat::prepare_snapshot(c.exec);
+        }
+    }
+}
+
 /// pg_stat_get_backend_wal(pid): this backend's WAL (no row for any other).
 fn backend_wal(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    backend_cumulative_snapshot(a, c);
     if a.first().and_then(|v| v.as_i64()) != Some(c.exec.sess.pid as i64) {
-        return rows(Vec::new());
+        return rows(vec![vec![Value::Null; 5]]);
     }
     let sig = builtin_proc_sigs()
         .iter()
@@ -287,6 +302,7 @@ fn io_rows(
 
 /// pg_stat_get_backend_io(pid): this backend's I/O (no rows for any other).
 fn backend_io(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    backend_cumulative_snapshot(a, c);
     let pid = a.first().and_then(|v| v.as_i64());
     if pid != Some(c.exec.sess.pid as i64) {
         return rows(Vec::new());
@@ -330,46 +346,88 @@ fn activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<Vec<Value>> {
     numbered_activity_rows(want, c).into_iter().map(|r| r.1).collect()
 }
 
+/// Copy raw backend metadata once, independent of stats_fetch_consistency. Filtering and
+/// privilege masking happen after this shared snapshot, never while constructing it.
+pub(super) fn backend_status<'a>(c: &'a FnCtx<'_>) -> std::cell::Ref<'a, Vec<crate::exec::pgstat::BackendStatus>> {
+    if c.exec.sess.pgstat.borrow().backends.is_none() {
+        let cat = c.exec.catalog();
+        let dbs = c.exec.sess.cluster.databases();
+        let mut backends = Vec::new();
+        for mut b in c.exec.sess.cluster.activity() {
+            let mut query_id = None;
+            if b.pid == c.exec.sess.pid {
+                let t = c.exec.txn.borrow();
+                b.xact_start = Some(c.exec.txn_time());
+                b.backend_xid = t.xid_if_assigned();
+                b.backend_xmin = t.snapshot_xmin();
+                b.backend_subxacts = t.subxact_status();
+                let settings = c.exec.sess.settings.borrow();
+                let on = |n: &str, v: &[&str]| settings.show(n).is_ok_and(|s| v.contains(&s.as_str()));
+                let auto = c.exec.sess.cluster.statements().is_some() && on("compute_query_id", &["auto"]);
+                if (auto || on("compute_query_id", &["on", "regress"])) && on("track_activities", &["on"]) {
+                    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                    for byte in b.query.bytes() {
+                        h = (h ^ byte as u64).wrapping_mul(0x0100_0000_01b3);
+                    }
+                    query_id = Some(h as i64);
+                }
+            }
+            backends.push(crate::exec::pgstat::BackendStatus {
+                dbid: dbs.iter().find(|d| d.1 == b.database).map(|d| d.0),
+                userid: cat.role_by_name(&b.user).map(|r| r.oid),
+                query_id,
+                progress: b.progress.as_ref().and_then(|p| p.read()),
+                activity: b,
+            });
+        }
+        c.exec.sess.pgstat.borrow_mut().backends = Some(backends);
+    }
+    std::cell::Ref::map(c.exec.sess.pgstat.borrow(), |p| p.backends.as_ref().unwrap())
+}
+
 /// `activity_rows` with each backend's proc array slot number, in their order (the order
 /// of PostgreSQL's backend status array).
 fn numbered_activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<(i32, Vec<Value>)> {
     let cat = c.exec.catalog();
     let me = c.exec.current_user();
     let dbo = c.exec.db_owner();
-    let dbs = c.exec.sess.cluster.databases();
     let all_stats = cat.has_privs_of_role(me, READ_ALL_STATS, dbo);
     let waits = lock_waits(c);
     let mut out = Vec::new();
-    for b in c.exec.sess.cluster.activity() {
+    let live = c.exec.sess.cluster.activity();
+    for status in backend_status(c).iter() {
+        let b = &status.activity;
         if want.is_some_and(|p| p != b.pid as i64) {
             continue;
         }
-        let role = cat.role_by_name(&b.user).map(|r| r.oid);
+        let role = status.userid;
         let mut row = vec![Value::Null; 31];
-        row[0] = dbs
-            .iter()
-            .find(|d| d.1 == b.database)
-            .map_or(Value::Null, |d| Value::Oid(d.0));
+        row[0] = status.dbid.map_or(Value::Null, Value::Oid);
         row[1] = Value::Int4(b.pid);
         row[2] = role.map_or(Value::Null, Value::Oid);
         row[3] = text(b.application_name.as_str());
+        // PostgreSQL exposes transaction IDs even when query text is masked.
+        row[15] = b.backend_xid.map_or(Value::Null, |x| Value::Oid(x as u32));
+        row[16] = b.backend_xmin.map_or(Value::Null, |x| Value::Oid(x as u32));
         if all_stats || role.is_some_and(|r| cat.has_privs_of_role(me, r, dbo)) {
             row[4] = text(b.state.as_str());
             row[5] = text(b.query.as_str());
             let me_now = b.pid == c.exec.sess.pid;
-            // An idle backend waits for its client; an active one, maybe for a lock.
-            let wait = if b.state.starts_with("idle") {
-                Some(("Client", "ClientRead"))
-            } else {
-                waits.get(&b.pid).map(|t| ("Lock", *t)).or(b.wait)
-            };
+            // PGPROC wait events and parallel leaders stay live even when the activity
+            // text/state and transaction fields come from LocalPgBackendStatus.
+            let current = live.iter().find(|a| a.pid == b.pid);
+            let wait = current.and_then(|a| {
+                if a.state.starts_with("idle") {
+                    Some(("Client", "ClientRead"))
+                } else {
+                    waits.get(&a.pid).map(|t| ("Lock", *t)).or(a.wait)
+                }
+            });
             if let Some((t, e)) = wait.filter(|_| !me_now) {
                 row[6] = text(t);
                 row[7] = text(e);
             }
-            // (The backend's own row is as it is now, mid-statement.)
-            let xact_start = if me_now { Some(c.exec.txn_time()) } else { b.xact_start };
-            row[8] = xact_start.map_or(Value::Null, Value::Timestamptz);
+            row[8] = b.xact_start.map_or(Value::Null, Value::Timestamptz);
             row[9] = b.query_start.map_or(Value::Null, Value::Timestamptz);
             row[10] = Value::Timestamptz(b.backend_start);
             row[11] = b.state_change.or(b.query_start).map_or(Value::Null, Value::Timestamptz);
@@ -380,37 +438,13 @@ fn numbered_activity_rows(want: Option<i64>, c: &FnCtx) -> Vec<(i32, Vec<Value>)
                 }
                 None => row[14] = Value::Int4(-1),
             }
-            let (xid, xmin) = if me_now {
-                let t = c.exec.txn.borrow();
-                (t.xid_if_assigned(), t.snapshot_xmin())
-            } else {
-                (b.backend_xid, b.backend_xmin)
-            };
-            row[15] = xid.map_or(Value::Null, |x| Value::Oid(x as u32));
-            row[16] = xmin.map_or(Value::Null, |x| Value::Oid(x as u32));
             row[17] = text(b.backend_type.unwrap_or("client backend"));
-            row[29] = b.leader_pid.map_or(Value::Null, Value::Int4);
+            row[29] = current.and_then(|a| a.leader_pid).map_or(Value::Null, Value::Int4);
             if b.backend_type.is_some() {
                 // (No client: address, host name and port are null.)
                 row[14] = Value::Null;
             }
-            // query_id: this session's, when compute_query_id computes it and the query is
-            // reported (a hash of the query text stands in for Postgres's jumble).
-            if b.pid == c.exec.sess.pid {
-                let settings = c.exec.sess.settings.borrow();
-                let on = |n: &str, v: &[&str]| {
-                    settings.show(n).is_ok_and(|s| v.contains(&s.as_str()))
-                };
-                // (auto: on when a preloaded module needs it, as pg_stat_statements does.)
-                let auto = c.exec.sess.cluster.statements().is_some() && on("compute_query_id", &["auto"]);
-                if (auto || on("compute_query_id", &["on", "regress"])) && on("track_activities", &["on"]) {
-                    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-                    for byte in b.query.bytes() {
-                        h = (h ^ byte as u64).wrapping_mul(0x0100_0000_01b3);
-                    }
-                    row[30] = Value::Int8(h as i64);
-                }
-            }
+            row[30] = status.query_id.map_or(Value::Null, Value::Int8);
             row[18] = Value::Bool(false);
             row[25] = Value::Bool(false);
             row[27] = Value::Bool(false);
@@ -528,6 +562,30 @@ backend_fns!(
     backend_client_addr = 12,
     backend_client_port = 14
 );
+
+/// pg_stat_get_backend_subxact(bid): a backend's cached subtransaction ids (PGPROC keeps 64,
+/// then marks the cache overflowed); NULLs for no such backend.
+fn backend_subxact(a: &[Value], c: &FnCtx) -> Result<SrfIter> {
+    let Some(bid) = a.first().and_then(|v| v.as_i64()) else {
+        return rows(vec![vec![Value::Null, Value::Null]]);
+    };
+    let status = backend_status(c);
+    let subxacts = status.iter().find(|s| s.activity.proc_number.map(i64::from) == Some(bid))
+        .map(|s| s.activity.backend_subxacts);
+    // Auxiliary entries have no transaction but participate in the same backend idset.
+    let subxacts = subxacts.or_else(|| {
+        let sess = c.exec.sess;
+        let launchers = sess.cluster.launcher_procs();
+        let procs = sess.cluster.procs();
+        (bid == i64::from(launchers.0) || bid == i64::from(launchers.1)
+            || (0..6).any(|i| bid == i64::from(procs.aux_number(i))))
+            .then_some((0, false))
+    });
+    rows(vec![match subxacts {
+        Some((n, overflowed)) => vec![Value::Int4(n as i32), Value::Bool(overflowed)],
+        None => vec![Value::Null, Value::Null],
+    }])
+}
 
 /// pg_stat_get_backend_idset: the backends' ids, their proc array slot numbers.
 fn backend_idset(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
@@ -1060,6 +1118,7 @@ pub fn register(r: &mut Registry) {
     r.from_pg(6386, None, Some(backend_io));
     r.from_pg(3318, None, Some(super::system::pg_stat_get_progress_info));
     r.from_pg(6118, None, Some(subscription));
+    r.from_pg(6107, None, Some(backend_subxact));
     let backend: [(&str, FnImpl); 11] = [
         ("dbid", backend_dbid),
         ("pid", backend_pid),

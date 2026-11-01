@@ -194,9 +194,11 @@ pub struct Activity {
     pub state: String,
     pub query: String,
     /// The transaction's id and its snapshot's xmin, as of the backend's last report (its
-    /// own row reads them live).
+    /// own row supplies them when taking the backend-status snapshot).
     pub backend_xid: Option<u64>,
     pub backend_xmin: Option<u64>,
+    /// PGPROC's cached subtransaction count and sticky overflow flag.
+    pub backend_subxacts: (usize, bool),
     /// What it waits for besides locks and its client (`Cluster::set_wait`).
     pub wait: Option<(&'static str, &'static str)>,
     /// Its proc array slot's number (pg_stat_activity's order, pg_stat_get_backend_idset).

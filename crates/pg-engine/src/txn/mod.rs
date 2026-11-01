@@ -412,6 +412,8 @@ impl Database {
             pg_cid_used: false,
             combos: Vec::new(),
             sub_committed: Vec::new(),
+            subxid_cache: Vec::new(),
+            subxid_overflowed: false,
             catalog: None,
             catalog_base: None,
             catalog_base_cat: None,
@@ -432,6 +434,7 @@ impl Database {
             txn_deadline: None,
             lock_peer: None,
             vxid: procs::Vxid::default(),
+            backend_proc: None,
             wrote: false,
             started: Instant::now(),
             seq_last: HashMap::new(),
@@ -872,6 +875,9 @@ pub struct Txn {
     combos: Vec<(u32, u32)>,
     /// Ids of subtransactions released into the top level (committed with it).
     sub_committed: Vec<u64>,
+    /// PGPROC caches the first 64 assigned subxids; overflow survives subtransaction abort.
+    subxid_cache: Vec<u64>,
+    subxid_overflowed: bool,
     catalog: Option<Arc<Catalog>>,
     /// Catalog version this transaction's DDL started from.
     catalog_base: Option<u64>,
@@ -916,6 +922,7 @@ pub struct Txn {
     /// The virtual transaction id its backend gave it (`procs::Proc::begin`; a prepared
     /// transaction keeps it, as MarkAsPreparingGuts clones it).
     pub vxid: procs::Vxid,
+    pub backend_proc: Option<Arc<procs::Proc>>,
     wrote: bool,
     pub started: Instant,
     /// currval() per sequence within this session's transaction.
@@ -1699,9 +1706,15 @@ impl Txn {
         for sp in &mut self.savepoints {
             if sp.xid == 0 {
                 sp.xid = xids.assign_sub();
+                if self.subxid_cache.len() < 64 {
+                    self.subxid_cache.push(sp.xid);
+                } else {
+                    self.subxid_overflowed = true;
+                }
             }
             cur = sp.xid;
         }
+        self.report_subxacts();
         cur
     }
 
@@ -1734,6 +1747,9 @@ impl Txn {
 
     /// Record how the transaction ended (its subtransactions' ids end with it).
     fn finish_xid(&mut self, committed: bool) {
+        self.subxid_cache.clear();
+        self.subxid_overflowed = false;
+        self.report_subxacts();
         let undo = std::mem::take(&mut self.seq_undo);
         let renewed = std::mem::take(&mut self.new_storage);
         if !committed {
@@ -1795,6 +1811,17 @@ impl Txn {
             .chain(self.savepoints.iter().flat_map(|sp| sp.committed.iter().copied().chain([sp.xid])))
             .filter(|&x| x != 0)
             .collect()
+    }
+
+    fn report_subxacts(&self) {
+        if let Some(p) = &self.backend_proc {
+            p.set_subxacts(self.subxact_status());
+        }
+    }
+
+    /// PGPROC's cached subtransaction count and sticky overflow flag.
+    pub fn subxact_status(&self) -> (usize, bool) {
+        (self.subxid_cache.len(), self.subxid_overflowed)
     }
 
     /// `put` of a key no version of which exists anywhere, in the store or among this
@@ -3274,6 +3301,8 @@ impl Txn {
             .flat_map(|sp| std::mem::take(&mut sp.committed).into_iter().chain([sp.xid]))
             .filter(|&x| x != 0)
             .collect();
+        self.subxid_cache.retain(|x| !aborted.contains(x));
+        self.report_subxacts();
         for x in aborted {
             xids.finish(x, false);
         }
@@ -3690,11 +3719,18 @@ impl Txn {
     pub fn release_aborted_locks(&mut self) {
         match self.savepoints.len().checked_sub(1) {
             Some(i) => {
-                let journal_len = self.savepoints[i].lock_journal_len;
+                let sp = &self.savepoints[i];
+                self.subxid_cache.retain(|x| *x != sp.xid && !sp.committed.contains(x));
+                let journal_len = sp.lock_journal_len;
                 self.release_locks_above(i, journal_len);
             }
-            None => self.release_locks(),
+            None => {
+                self.subxid_cache.clear();
+                self.subxid_overflowed = false;
+                self.release_locks();
+            }
         }
+        self.report_subxacts();
     }
 
     fn release_locks(&mut self) {

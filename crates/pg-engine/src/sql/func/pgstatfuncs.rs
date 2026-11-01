@@ -206,20 +206,17 @@ db_counters! {
     db_temp_bytes = 3151 => |d| d.temp_bytes;
 }
 
-/// pg_stat_get_db_numbackends: the backends connected to the database now.
+/// pg_stat_get_db_numbackends shares the backend-status snapshot, including membership.
 fn db_numbackends(a: &[Value], c: &FnCtx) -> Result<Value> {
     let oid = oid_arg(&a[0]);
-    // (Database 0's: the auxiliary processes, which have none.)
-    if oid == 0 {
-        return Ok(Value::Int4(super::monitor::AUX_PROCESSES.len() as i32));
-    }
-    let cluster = &c.exec.sess.cluster;
-    let Some((_, name, _)) = cluster.databases().into_iter().find(|d| d.0 == oid) else {
-        return Ok(Value::Int4(0));
+    let backends = super::monitor::backend_status(c);
+    let n = if oid == 0 {
+        super::monitor::AUX_PROCESSES.len()
+    } else {
+        backends.iter().filter(|b| b.dbid == Some(oid)).count()
     };
-    let n = cluster.activity().iter().filter(|b| b.database == name).count();
-    // (A cluster that lists no backends still has this one.)
-    let n = if n == 0 && name == c.exec.sess.database { 1 } else { n };
+    // Embedded clusters do not list their backend.
+    let n = if backends.is_empty() && oid == c.exec.sess.database_oid() { 1 } else { n };
     Ok(Value::Int4(n as i32))
 }
 
@@ -228,23 +225,12 @@ fn db_stat_reset_time(a: &[Value], c: &FnCtx) -> Result<Value> {
 }
 
 fn snapshot_timestamp(_: &[Value], c: &FnCtx) -> Result<Value> {
-    let mode = match c
-        .exec
-        .sess
-        .settings
-        .borrow()
-        .get_raw("stats_fetch_consistency")
-        .as_deref()
-    {
-        Some("none") => pgstat::Consistency::None,
-        Some("snapshot") => pgstat::Consistency::Snapshot,
-        _ => pgstat::Consistency::Cache,
-    };
-    Ok(ts(c.exec.sess.pgstat.borrow_mut().snapshot_timestamp(mode)))
+    let generation = c.exec.sess.settings.borrow().stats_fetch_generation();
+    Ok(ts(c.exec.sess.pgstat.borrow_mut().snapshot_timestamp(generation)))
 }
 
 fn clear_snapshot(_: &[Value], c: &FnCtx) -> Result<Value> {
-    c.exec.sess.pgstat.borrow_mut().clear_snapshot();
+    pgstat::clear_snapshot(c.exec.sess);
     Ok(Value::Null)
 }
 
