@@ -5905,6 +5905,67 @@ parent's four baseline WAL-fetch timeouts. No performance improvement is claimed
 Commands, full reports, earlier failed attempts, and reproducer evidence are preserved in
 `~/.cache/a153-parent-resume/verification.md`.
 
+## Compact heap and btree size models (round 24, agent 151)
+
+Settled heap versions use 8-byte line-pointer slots. Versions still needed by a snapshot,
+with pending changes, or with fields outside the packed ranges retain full tuple metadata.
+Btree leaves pack keys and posting-list TIDs in page buffers. Reconstruction decodes rows
+individually and restores heap order. The normal model limit rises from 400,000 to `1 << 40`
+versions. Saved estimates retain their limiting threshold, so a higher limit can model them
+again. No speedup is claimed.
+
+VACUUM uses the 32-page skipping threshold and estimates tuples from scanned pages and
+previous density. FREEZE scans committed pages even after restart. Clean images retain the
+all-frozen page bit; older images remain readable and conservatively restore rows as
+committed. FREEZE with DISABLE_PAGE_SKIPPING freezes eligible tuples on all scanned pages.
+
+Resumption also fixed compact-model defects. Legal pages with 32 NULL key
+attributes exceeded 64 KiB in the packed encoding and overflowed 16-bit offsets. Offsets
+now use u32, with garbage compaction. UNIQUE NULLS NOT DISTINCT must still check dead
+duplicates for NULL keys. Its option now reaches the model and refreshes from the catalog
+when loading older images, through the shared record loader for both foreground and
+background restoration. NULL detection uses tag bytes, since numeric zero, NaN and infinities
+also have one-byte encodings. The PostgreSQL-recorded `a151_size_models` golden covers these
+cases, ordinary nullable unique keys, posting lists, INCLUDE, VACUUM options, ANALYZE and
+empty relations. Allocation, snapshot, restart and raised-limit checks cover the model
+representation.
+
+At `6d3be027`, `cargo build -p pg-engine`, the full crate tests and Clippy pass. Clippy
+retains ten baseline warnings. The final targeted regress subset compares 2,926 units in
+eleven files on both base `251924c1` and this batch. Both match 2,925 units, with only a
+reference Query Identifier line differing in update unit 34 when pg_stat_statements is
+preloaded. Complete hunks match after replacing only the identifier digits. Earlier runs
+without that preload matched 2,926/2,926 on both builds. Isolation matches 7/7 specs,
+31/31 permutations and 160/160 steps. pgstattuple matches 83/83 and amcheck 204/204.
+pageinspect matches 102/291 on both builds with identical differing-unit sets. No new
+panic or differing unit appears. These are subsets; generated full-suite counts are unchanged.
+
+`pnpm test:pg --unit` passes. The parent's Docker e2e attempt at `3069ca91` had 12 passing
+and four recovery tests failing because compute-to-host WAL HTTP fetches time out. That
+baseline network failure was not rerun here. The 420,000-row parallel-scan fixtures now
+select their intended 400,000 model limit explicitly; all seven cases pass, including the
+80,000-row modelled fixture.
+
+The higher limit changes parallel-path eligibility. The existing lookup worker rejects
+nonunique lookups on modelled heaps (`exec/lookup.rs`), so some workloads use a serial
+fallback after promotion. This batch does not extend those worker paths or claim a
+throughput benefit.
+
+The 450,001-row probe matches PostgreSQL's physical sizes and sampled CTIDs beyond the
+old limit. A 60,000-row mixed workload matches across restart, VACUUM and later writes.
+Existing base differences remain: REINDEX can retain old model sizes, and ANALYZE can
+report index relpages/reltuples as 1/0. These model issues are already present on
+base `251924c1`; full diagnostic SQL and both outputs are saved. Earlier failed checks,
+including a subscription sync deadline and worker-path assertions that assumed the old
+model limit, remain recorded in `~/.cache/a151-resume/verification.md`.
+
+Commands, logs, reports and preserved probe data are in `~/.cache/a151-resume/`. Every heavy
+check ran sequentially through `tools/heavy.sh`, with two jobs, line-tables-only debug and
+a disk-backed TMPDIR. For integration, preserve a149's `Vis::state` cache in `heapsim.rs`
+and combine a148 and a150 changes in `sizing.rs` and `vacuum.rs`. This batch changes
+`Heap::tuple` to return copied `Tup`, replaces `Page::lps`, and removes unused `Heap::is_dead`
+and `Btree::entries`. Recheck the affected scan and model behavior after integration.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch

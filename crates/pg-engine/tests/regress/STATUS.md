@@ -192,6 +192,29 @@ files. The Docker e2e phase uses the parent's `3069ca91` result, with four recov
 caused by compute-to-host WAL HTTP timeouts. It was not repeated in this worktree.
 No benchmark result is claimed for this batch.
 
+## Round 24, agent 151 (compact heap and btree size models)
+
+Heap line pointers and btree leaf items use packed storage. VACUUM follows PostgreSQL's
+page-skipping and tuple-density rules, with FREEZE state preserved across clean restarts.
+Legal wide NULL keys and NULLS NOT DISTINCT churn have PostgreSQL-recorded coverage.
+The final build, full crate tests and Clippy pass. Clippy retains ten baseline warnings.
+
+The final base/batch subset compares 2,926 units in test_setup, create_misc, create_index,
+index_including, btree_index, update, delete, vacuum, dbsize, indexing and stats. Both match
+2,925 units. The sole difference is a reference-only Query Identifier line in update 34
+with pg_stat_statements preloaded for contrib tests. Complete hunks match after replacing
+only the identifier digits. Earlier no-preload runs matched all 2,926 units on both builds.
+Isolation matches 7/7 specs, 31/31 permutations and 160/160 steps. pgstattuple matches
+83/83 and amcheck 204/204. pageinspect matches 102/291 on both builds, with all 189 differing
+units already present on base. Reports and exact baseline comparisons are retained.
+
+These are subset results. The generated full-suite counts below remain unchanged.
+`pnpm test:pg --unit` passes. The parent Docker e2e attempt at `3069ca91` had 12 passing
+and four recovery tests failing because compute-to-host WAL HTTP requests time out. That
+baseline network failure was not rerun here. Earlier failed checks and known base REINDEX
+and ANALYZE size-model differences remain documented, with no speedup claim. Exact commands,
+logs, baseline comparisons and cleanup are in `~/.cache/a151-resume/verification.md`.
+
 ## Summary
 
 <!-- generated: summary -->
