@@ -415,6 +415,23 @@ impl Decode {
         Ok(row)
     }
 
+    /// One inline stored column (the caller excludes external and index-only rows).
+    fn inline_col(&self, bytes: &[u8], col: usize) -> Result<Value> {
+        let data = super::scan::row_data(bytes)?;
+        let mut pos = 0;
+        let stored = crate::storage::sst::get_varint(data, &mut pos)? as usize;
+        if self.need.as_ref().is_some_and(|n| !n.get(col).copied().unwrap_or(false)) {
+            return Ok(Value::Null);
+        }
+        if col >= stored {
+            return Ok(self.missing.get(col).cloned().flatten().unwrap_or(Value::Null));
+        }
+        for _ in 0..col {
+            crate::storage::row::skip_value(data, &mut pos)?;
+        }
+        crate::storage::row::decode_value(data, &mut pos)
+    }
+
     /// `row` with the values of `extra` after its columns and the columns `drop` NULL
     /// (`done`: the filter is done with it, so nothing else reads them), when the kernels
     /// give them all; else the row as `row` makes it (the executor's thread evaluates them).
@@ -782,35 +799,41 @@ fn run_rows(
             let in_place = d.ios.is_none() && d.extra.is_empty() && d.topk.is_none() && d.need_raw.is_none();
             let mut top_checked = false;
             let (row, done) = if let Some(col) = top_col {
-                let made = lazy.read(d, key, bytes).and_then(|lz| {
-                    let done = match (&d.filter, d.filtered) {
-                        (_, false) => true,
-                        (Some(f), true) => match f.passes(&lz) {
-                            Some(true) => true,
-                            Some(false) => return Ok(None),
-                            None => false,
-                        },
-                        (None, true) => false,
-                    };
-                    if done
-                        && let Some(key) = super::kernel::Cols::col(&lz, col)
-                        && let Some(t) = &mut top
-                    {
+                let made = if !d.filtered && col < d.missing.len() && !crate::storage::toast::has_external(bytes) {
+                    d.inline_col(bytes, col).and_then(|value| {
                         top_checked = true;
-                        if t.drops(key) {
+                        if top.as_mut().is_some_and(|t| t.drops(&value)) {
                             consecutive_kept = 0;
                             skipped += 1;
                             return Ok(None);
                         }
-                        consecutive_kept += 1;
-                        if consecutive_kept >= BATCH {
-                            // A full batch without a discard: normal decoding costs less
-                            // when first keys tie or keep improving. Keep the same heap.
-                            top_col = None;
+                        Ok(Some((d.row_with(key, bytes, d.need.as_ref())?, true)))
+                    })
+                } else {
+                    lazy.read(d, key, bytes).and_then(|lz| {
+                        let done = match (&d.filter, d.filtered) {
+                            (_, false) => true,
+                            (Some(f), true) => match f.passes(&lz) {
+                                Some(true) => true,
+                                Some(false) => return Ok(None),
+                                None => false,
+                            },
+                            (None, true) => false,
+                        };
+                        if done
+                            && let Some(key) = super::kernel::Cols::col(&lz, col)
+                            && let Some(t) = &mut top
+                        {
+                            top_checked = true;
+                            if t.drops(key) {
+                                consecutive_kept = 0;
+                                skipped += 1;
+                                return Ok(None);
+                            }
                         }
-                    }
-                    Ok(Some((lz.into_row()?, done)))
-                });
+                        Ok(Some((lz.into_row()?, done)))
+                    })
+                };
                 match made {
                     Ok(Some(r)) => r,
                     Ok(None) => continue,
@@ -858,6 +881,14 @@ fn run_rows(
                     }
                 }
             };
+            if top_checked {
+                consecutive_kept += 1;
+                if consecutive_kept >= BATCH {
+                    // A full batch without a discard: normal decoding costs less
+                    // when first keys tie or keep improving. Keep the same heap.
+                    top_col = None;
+                }
+            }
             let row = if d.extra.is_empty() {
                 row
             } else {

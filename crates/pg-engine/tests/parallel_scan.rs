@@ -677,6 +677,18 @@ fn numeric_topk_matches_serial_inner() {
     assert_eq!(out(&mut s, q), want);
     assert!(pg_engine::exec::parscan::topk_skipped() > skipped, "added defaults still prune");
 
+    s.query("INSERT INTO nt VALUES (12001, 0, 1, 1, 12001, 0, 0, 3, repeat(md5('new'), 32), 100)").unwrap();
+    s.query("VACUUM ANALYZE nt").unwrap();
+    let defaults = "SELECT id, added FROM nt ORDER BY added DESC, id DESC LIMIT 7";
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let rows = out(&mut s, defaults);
+    assert_eq!(rows[0], "[Int4(12001), Int4(100)]");
+    assert!(rows[1..].iter().all(|r| r.ends_with("Int4(42)]")), "{rows:?}");
+    s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let started = pg_engine::exec::parscan::started();
+    assert_eq!(out(&mut s, defaults), rows);
+    assert!(pg_engine::exec::parscan::started() > started, "missing first-key values used workers");
+
     s.query("UPDATE nt SET pad = repeat(pad, 2) WHERE id % 1000 = 0").unwrap();
     s.query("SET max_parallel_workers_per_gather = 0").unwrap();
     let want = out(&mut s, q);
