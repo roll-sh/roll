@@ -2250,55 +2250,32 @@ pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
     rf.heaps.get(&table).is_none_or(|h| h.all_visible_pages() >= h.nblocks())
 }
 
-/// An index or bitmap heap scan fetches a row of `table` (by data key): the page it is on
-/// may be pruned when the scan moves to it (heapam_index_fetch_tuple). Returns the page,
-/// so the caller can tell when it moves (None: not modelled).
+/// An index or bitmap heap fetch: prune when reaching a different heap page.
+/// All-visible heaps need no lookup. None means no block was visited.
 pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Option<u32> {
-    fetched_batch(table, &[key], last, ctx)?.pop().flatten()
-}
-
-/// `fetched` for rows fetched one after another (`last`: the page the scan was on before
-/// the first): each one's page (None: not found), one lock and one horizon for the batch.
-/// None when the table isn't modelled.
-pub fn fetched_batch(table: u32, keys: &[&[u8]], last: Option<u32>, ctx: &ExecCtx) -> Option<Vec<Option<u32>>> {
     let db = &ctx.sess.db;
     let xids = db.xids();
     let v = vis_for(&xids, table, ctx);
-    let mut out = Vec::with_capacity(keys.len());
-    let mut last = last;
-    // (Under the shard's read lock until a page heap_page_prune_opt would prune: concurrent
-    // index scans don't serialize on it. From there on, under the write lock.)
     {
         let rf = db.relfiles.of(table).read();
         let heap = rf.heaps.get(&table)?;
-        for key in keys {
-            let blk = heap.locate(key, &v).map(|t| t.0);
-            if let Some(b) = blk
-                && last != Some(b)
-            {
-                if heap.prune_wanted(b, &v) {
-                    break;
-                }
-                last = Some(b);
-            }
-            out.push(blk);
+        if heap.all_visible_pages() >= heap.nblocks() {
+            return None;
+        }
+        let blk = heap.locate(key, &v).map(|t| t.0);
+        if blk.is_none_or(|b| last == Some(b) || !heap.prune_wanted(b, &v)) {
+            return blk;
         }
     }
-    if out.len() < keys.len() {
-        let mut rf = db.relfiles.of(table).write();
-        let heap = rf.heaps.get_mut(&table)?;
-        for key in &keys[out.len()..] {
-            let blk = heap.locate(key, &v).map(|t| t.0);
-            if let Some(b) = blk
-                && last != Some(b)
-            {
-                heap.prune_opt(b, &v);
-                last = Some(b);
-            }
-            out.push(blk);
-        }
+    // A page that needs pruning is located again under the write lock: another
+    // backend may have changed its tuple after the read lock was released.
+    let mut rf = db.relfiles.of(table).write();
+    let heap = rf.heaps.get_mut(&table)?;
+    let blk = heap.locate(key, &v)?.0;
+    if last != Some(blk) {
+        heap.prune_opt(blk, &v);
     }
-    Some(out)
+    Some(blk)
 }
 
 /// An index scan of btree `index` over storage key ranges `ranges` (each key starting
