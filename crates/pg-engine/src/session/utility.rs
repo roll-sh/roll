@@ -1043,10 +1043,6 @@ impl Session {
                 Some((plan, _)) => Arc::new(plan.clone()),
                 None => bq.plan.clone(),
             };
-            // (ExecutorStart: postgres_fdw's scans get their connections now.)
-            if !ctx.catalog().servers.is_empty() {
-                crate::ext::postgres_fdw::scan::begin_scans(&plan, ctx)?;
-            }
             let lazy = crate::session::cursor::Lazy::new(
                 ctx,
                 plan,
@@ -1055,7 +1051,7 @@ impl Session {
                 ctx.child(&[]).keep(),
             )
             .with_params(params.to_vec())
-            .for_cursor();
+            .for_cursor(ctx)?;
             Ok(Cursor::new_lazy(
                 bq.cols.clone(),
                 lazy,

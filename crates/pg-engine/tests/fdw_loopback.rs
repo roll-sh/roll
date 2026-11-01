@@ -9,7 +9,7 @@ use pg_engine::server::{AuthMethod, ServerOptions};
 use pg_engine::session::Session;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn open(data: &Path) -> Arc<Engine> {
     Engine::open(EngineOptions {
@@ -166,4 +166,101 @@ fn whole_rows_and_locks_in_joins() {
     assert_eq!(e.context.as_deref(), Some("whole-row reference to foreign table \"x\""));
     let plan = run(&mut s, "EXPLAIN (COSTS OFF) SELECT l.i FROM l, f4, f5 WHERE l.i = f4.c1 AND f4.c1 = f5.c1 FOR UPDATE OF l");
     assert_eq!(plan.first().map(String::as_str), Some(r#"[Text("LockRows")]"#), "{plan:#?}");
+}
+
+#[test]
+fn recheck_keeps_pushed_join_rows() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    for q in [
+        "CREATE TABLE l (i int PRIMARY KEY, v text)",
+        "CREATE TABLE t1 (i int, v text)",
+        "CREATE TABLE t2 (i int, v text)",
+        "INSERT INTO l SELECT i, 'local' FROM generate_series(1, 1000) i",
+        "INSERT INTO t1 SELECT i, 'a' || i FROM generate_series(1, 100) i",
+        "INSERT INTO t2 SELECT i, 'b' || i FROM generate_series(1, 100) i",
+        "CREATE FOREIGN TABLE f1 (i int, v text) SERVER loopback OPTIONS (table_name 't1')",
+        "CREATE FOREIGN TABLE f2 (i int, v text) SERVER loopback OPTIONS (table_name 't2')",
+        "ANALYZE l",
+        "BEGIN",
+        "UPDATE l SET v = 'updated'",
+    ] {
+        run(&mut s, q);
+    }
+    let e = engine.clone();
+    let reader = std::thread::spawn(move || {
+        let mut r = e.connect(2, "postgres", "postgres", "t").unwrap();
+        run(&mut r, "SET enable_nestloop = off");
+        run(&mut r, "SET enable_hashjoin = off");
+        let q = "SELECT l.i, l.v, f1.i, f1.v, f2.v FROM l, f1, f2 WHERE f1.i = f2.i AND l.i = f1.i AND f1.i < 30 AND f2.i < 30 FOR UPDATE OF l";
+        let plan = run(&mut r, &format!("EXPLAIN (VERBOSE, COSTS OFF) {q}"));
+        (plan, run(&mut r, q))
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !s.state.db.locks.snapshot().iter().any(|l| l.pid == Some(2) && !l.granted) {
+        assert!(Instant::now() < deadline, "reader never waited for the local row");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    run(&mut s, "UPDATE t1 SET v = 'changed' WHERE i <= 3");
+    run(&mut s, "DELETE FROM t2 WHERE i <= 3");
+    run(&mut s, "COMMIT");
+    let (plan, mut rows) = reader.join().unwrap();
+    assert!(plan.iter().any(|l| l.contains("Relations:") && l.contains("f1") && l.contains("f2")), "{plan:#?}");
+    rows.sort();
+    let mut expected: Vec<_> = (1..30).map(|i| format!(r#"[Int4({i}), Text("updated"), Int4({i}), Text("a{i}"), Text("b{i}")]"#)).collect();
+    expected.sort();
+    assert_eq!(rows, expected);
+}
+
+#[test]
+fn declare_opens_foreign_connections_before_fetch() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    for q in [
+        "CREATE TABLE t (i int)",
+        "INSERT INTO t VALUES (1)",
+        "CREATE FOREIGN TABLE ft (i int) SERVER loopback OPTIONS (table_name 't')",
+        "BEGIN",
+        "DECLARE c CURSOR FOR SELECT * FROM ft",
+    ] {
+        run(&mut s, q);
+    }
+    assert_eq!(run(&mut s, "SELECT server_name, used_in_xact FROM postgres_fdw_get_connections()"), vec![r#"[Text("loopback"), Bool(true)]"#]);
+    run(&mut s, "ALTER SERVER loopback OPTIONS (SET dbname 'missing_database')");
+    assert_eq!(run(&mut s, "FETCH ALL FROM c"), vec!["[Int4(1)]"]);
+    run(&mut s, "ROLLBACK");
+    run(&mut s, "BEGIN");
+    run(&mut s, "ALTER SERVER loopback OPTIONS (SET dbname 'missing_database')");
+    let e = s.query("DECLARE bad CURSOR FOR SELECT * FROM ft").expect_err("DECLARE must connect");
+    assert_eq!(e.code, "08001");
+    run(&mut s, "ROLLBACK");
+    run(&mut s, "BEGIN");
+    run(&mut s, "DECLARE good CURSOR FOR SELECT * FROM ft");
+    assert_eq!(run(&mut s, "FETCH ALL FROM good"), vec!["[Int4(1)]"]);
+    run(&mut s, "COMMIT");
+}
+
+#[test]
+fn declared_cursor_uses_its_broken_connection() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    for q in [
+        "CREATE TABLE t (i int)",
+        "INSERT INTO t VALUES (1)",
+        "CREATE FOREIGN TABLE ft (i int) SERVER loopback OPTIONS (table_name 't')",
+        "BEGIN",
+        "DECLARE c CURSOR FOR SELECT i + 1 FROM ft WHERE random() >= 0",
+        "SAVEPOINT s",
+        "SELECT pg_terminate_backend(remote_backend_pid, 10000) FROM postgres_fdw_get_connections()",
+        "ROLLBACK TO s",
+    ] {
+        run(&mut s, q);
+    }
+    s.query("SELECT * FROM ft").expect_err("new scans cannot reuse the broken transaction");
+    run(&mut s, "ROLLBACK TO s");
+    run(&mut s, "RELEASE s");
+    let e = s.query("FETCH ALL FROM c").expect_err("the cursor's remote connection was terminated");
+    assert_eq!(e.code, "08006", "{e:?}");
+    assert!(e.context.as_deref().is_some_and(|c| c.contains("remote SQL command:")), "{e:?}");
+    run(&mut s, "ROLLBACK");
 }

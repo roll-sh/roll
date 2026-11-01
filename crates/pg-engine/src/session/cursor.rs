@@ -151,28 +151,33 @@ impl Lazy {
     /// Evaluating the query's target list each time a row is passed (as the executor does
     /// scanning back and forth); a query that writes runs to completion at the first fetch
     /// instead.
-    pub fn for_cursor(mut self) -> Lazy {
+    pub fn for_cursor(mut self, ctx: &ExecCtx) -> Result<Lazy> {
         if self.plan.writes() {
             self.fill = true;
-            return self;
-        }
-        let (plan, exprs) = match split_target(&self.plan) {
-            Some((plan, exprs)) => (plan, Some(exprs)),
-            None => ((*self.plan).clone(), None),
-        };
-        if let Some((scan, qual, limit)) = split_qual(&plan, false) {
-            self.qual = Some(qual);
-            self.qual_limit = limit;
-            self.project = exprs;
-            self.plan = Arc::new(scan);
-        } else if let Some(exprs) = exprs {
-            if let Plan::Limit { limit, .. } = &plan {
-                self.window = limit.clone();
+        } else {
+            let (plan, exprs) = match split_target(&self.plan) {
+                Some((plan, exprs)) => (plan, Some(exprs)),
+                None => ((*self.plan).clone(), None),
+            };
+            if let Some((scan, qual, limit)) = split_qual(&plan, false) {
+                self.qual = Some(qual);
+                self.qual_limit = limit;
+                self.project = exprs;
+                self.plan = Arc::new(scan);
+            } else if let Some(exprs) = exprs {
+                if let Plan::Limit { limit, .. } = &plan {
+                    self.window = limit.clone();
+                }
+                self.project = Some(exprs);
+                self.plan = Arc::new(plan);
             }
-            self.project = Some(exprs);
-            self.plan = Arc::new(plan);
         }
-        self
+        // Foreign scans remember their connections by plan address. Initialize after
+        // splitting the target and qual, which can clone the scan retained for FETCH.
+        if !ctx.catalog().servers.is_empty() {
+            crate::ext::postgres_fdw::scan::begin_scans(&self.plan, ctx)?;
+        }
+        Ok(self)
     }
 
     /// The query's next rows, at most `n` (0: the rest), appended to `out` as they are made
@@ -1693,7 +1698,7 @@ pub fn spi_cursor_stmt(
             };
             let lazy = Lazy::new(ctx, plan, Rc::new(Vec::new()), None, ctx.child(&[]).keep())
                 .with_params(params.iter().map(|p| p.0.clone()).collect())
-                .for_cursor();
+                .for_cursor(ctx)?;
             let mut c = Cursor::new_lazy(
                 bq.cols.clone(),
                 lazy,

@@ -4761,7 +4761,7 @@ impl<'c, 'a> Interp<'c, 'a> {
                 self.cx().child(&[]).keep(),
             )
             .with_params(vals.clone())
-            .for_cursor();
+            .for_cursor(&self.cx())?;
             Ok((Ok(lazy), cols, table, sql.clone(), backward))
         })();
         self.cx()
@@ -4833,7 +4833,7 @@ impl<'c, 'a> Interp<'c, 'a> {
             coerce.clone(),
             self.cx().child(&[]).keep(),
         )
-        .for_cursor();
+        .for_cursor(&self.cx())?;
         Ok((Ok(lazy), cols, table, q.text.clone(), backward))
     }
 
