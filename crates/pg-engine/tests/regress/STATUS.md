@@ -8,6 +8,17 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Round 24, agent 144 (resumed bpchar equality probes): fixed-width char(n) equality and
+ANY probes trim trailing spaces and pad to the key width. Overlong probes remain
+untruncated so nondeterministic collations can still compare them equal. bpchar ranges
+and unconstrained bpchar keys retain their unbounded scans. Goldens `a144_bpchar_probe`
+and `a144_bpchar_edges` match PostgreSQL 18.6, including wire and shuffled runs.
+Fresh debug subset runs of base `3069ca91` and implementation `b4084459` match all 1,924
+units of test_setup, char, name, varchar, text, create_misc, create_index, btree_index,
+hash_index, and indexing. The result rows are identical, with no newly differing units.
+Reports are in `~/.cache/a144-resume/{regress,baseline-regress}/report/`.
+This subset does not update the generated full-suite counts below.
+
 Round 20, agent 82 (recursive functions, deep views, regex frames; HANDOFF "Deep input"):
 recursive SQL functions run, inlined as inline_function inlines them (never into their own
 inlined body) and otherwise called with their body planned per call, their depth limited by

@@ -4564,6 +4564,58 @@ As of commit `e890fb0` (2026-10-21), plus server-side files (below) and rounds 1
       pre-created mode 666), all unchanged.
     - After rebasing onto 74a3ad38, which changed scan.rs (agent 135): clippy, goldens,
       deep_input, deparse_identity, wire, memory_load.
+- **Index access at index cost, round 5** (round 24, agent 144; BENCH.md "Index access,
+  round 5"):
+  - Fixed-width char(n) equalities bound btree and hash scans. Previously `c = 'ZZZZZ'`
+    read every index entry because `probe_ok` had no bpchar equality case.
+    `eq_probe_ok` admits bpchar equality and ANY probes only when the key has a width.
+    `IndexBounds::pads` carries that width to `scan::padded` and nested-loop lookups.
+    They trim trailing ASCII spaces and pad short probes to n characters. Overlong
+    probes remain untruncated. Bytewise they match no stored char(n) key, but a
+    nondeterministic collation can still make them equal to a shorter key.
+  - bpchar ranges remain unbounded. Padded byte order differs from bpchar comparison
+    order for characters below space. Unconstrained bpchar equality also remains
+    unbounded because equal stored values can have different trailing spaces.
+    citext equality uses its existing canonical index encoding.
+  - Implicit coercion of a char(n) constant to unconstrained bpchar preserves its
+    typmod, so EXPLAIN retains `::character(n)`.
+  - Goldens `a144_bpchar_probe` and `a144_bpchar_edges` cover trailing spaces,
+    overlong and Unicode probes, ANY duplicates and NULLs, control-character ranges,
+    unconstrained bpchar, collations, hash and DESC indexes, prepared statements,
+    correlated and nested-loop probes, own writes, domains, type changes, name, and citext.
+    `tools/bench/access.rs` adds fixed-width customer and order workloads.
+  - Resumed on `3069ca91` from preserved commits `6f32fb65` and `637c9a35`.
+    Verification logs and private suite reports are in `~/.cache/a144-resume/`.
+    The older full-suite report in `~/.cache/a144/pgr1/report/` describes `6f32fb6`,
+    not this base. Generated regression counts remain unchanged by this subset work.
+  - Verification of the resumed implementation: `cargo build -p pg-engine`, full
+    `cargo test -p pg-engine --no-fail-fast`, and `cargo clippy -p pg-engine` passed.
+    Clippy reports the same ten warnings as the saved run. Both bpchar goldens
+    were recorded from PostgreSQL 18.6 and pass embedded, wire, and shuffled comparisons.
+  - Fresh base and change runs of char, name, varchar, text, create_misc, create_index,
+    btree_index, hash_index, and indexing match 1,924 of 1,924 units. citext matches
+    544 of 544; btree_gist matches 613 of 616 on both builds, with identical macaddr,
+    macaddr8, and bytea hunks. Four isolation specs match 28 of 29 permutations on both
+    builds. reindex-schema's REINDEX after a concurrent DROP raises the same internal
+    file-number error on the base. These are existing differences, not passing checks.
+    `~/.cache/a144-resume/compare.py` compares their saved results and hunks.
+  - `pnpm test:pg` completed its build, clippy, and unit steps, then failed four of 16
+    Docker e2e tests. Recovery WAL downloads to the Docker host gateway timed out.
+    The same command on fresh base `3069ca91` also failed the same four tests with
+    the same gateway timeout: point_in_time_branches, restore_in_place_keeps_the_endpoint,
+    retention_removes_old_history, and survives_losing_the_local_disk. Neither run skipped.
+    No firewall setting changed. Logs are `logs/test-pg.log` and
+    `logs/baseline-test-pg.log` under the resume directory.
+  - Two existing planner differences reproduce on base and change in
+    `planner-caveats.sql`: EXPLAIN omits the domain-to-bpchar cast on a domain key, and
+    ANY chooses btree where PostgreSQL chooses hash when both indexes exist.
+    The char(n) constant's typmod now matches PostgreSQL even in the domain example.
+    `logs/caveats-{current,baseline}.diff` records the remaining differences.
+    No fresh performance claim is made. BENCH.md retains the workload descriptions
+    and identifies the older measurement logs as historical.
+  - After the base comparison, the implementation source was restored and rebuilt
+    successfully. All three reused reference containers were stopped with data retained;
+    the temporary psql helper was removed. The worktree has one `target/` directory.
 
 ## Repository layout
 

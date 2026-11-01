@@ -4499,6 +4499,21 @@ at nice 19; tps and the engine's CPU ms per transaction):
   6,040 (0.71 / 0.62 / 0.59).
 - Level, within the noise. Peak RSS: after 417 / 428 / 439 MB, before 411 / 421 / 437 MB.
 
+## Index access, round 5 (round 24, agent 144)
+
+`tools/bench/access.rs` adds `char_eq` and `char_correlated`. Their `custs` and `ords`
+tables reproduce fixed-width customer keys and correlated order counts. The equality
+probe now trims trailing spaces and pads to the indexed char(n) width before encoding
+an index bound. bpchar ranges and unconstrained bpchar keys still scan without those
+bounds because their stored bytes do not preserve bpchar comparison semantics.
+
+The paused batch left benchmark logs in `~/.cache/a144/`, including `acc-52888.log`,
+`acc-52889.log`, and `pgb-*.log`. Those runs used older bases and are historical evidence,
+not a verified performance comparison on the resumed base `3069ca91`. The resumed batch
+makes no timing or memory claim. A new comparison must build that base and the final
+change with the same profile, data, cache settings, and workload, check results and errors,
+and interleave repeated runs through `tools/heavy.sh`.
+
 ## XML: the tree, input checks and building (round 21, agent 107)
 
 `tools/bench/xml.sh` measures every XML entry point against the reference on one document
