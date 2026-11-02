@@ -1,0 +1,24 @@
+{
+  "command": [
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/heavy.sh",
+    "timeout",
+    "--kill-after=90",
+    "600",
+    "python3",
+    "-I",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/measure.py",
+    "--out",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/dirty-diagnostic-r1",
+    "--candidate-dir",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/candidate-bin",
+    "--monitor",
+    "--preflight-only",
+    "--port0",
+    "53742",
+    "--control",
+    "dirty"
+  ],
+  "exit": 0,
+  "started_unix": 1793655223.8625557,
+  "ended_unix": 1793655243.8702142
+}

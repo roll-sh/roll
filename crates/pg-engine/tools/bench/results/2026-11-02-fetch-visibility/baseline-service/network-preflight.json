@@ -1,0 +1,32 @@
+{
+  "at_utc": "2026-11-02T10:47:24.054956+00:00",
+  "command": [
+    "docker",
+    "run",
+    "--rm",
+    "--name",
+    "t3-d4020b98-service-netcheck",
+    "--label",
+    "agent.worktree=t3-d4020b98",
+    "--network",
+    "roll",
+    "--memory",
+    "64m",
+    "--memory-swap",
+    "64m",
+    "--cpus",
+    "0.25",
+    "--add-host",
+    "host.docker.internal:host-gateway",
+    "--entrypoint",
+    "sh",
+    "postgres:18-alpine",
+    "-c",
+    "for host in host.docker.internal 172.18.0.1; do echo \"$host\"; wget -T 3 -S -O /dev/null \"http://$host:53410/frame.json\"; done"
+  ],
+  "exit": 1,
+  "stdout": "host.docker.internal\n172.18.0.1\n",
+  "stderr": "Connecting to host.docker.internal:53410 (172.17.0.1:53410)\nwget: download timed out\nConnecting to 172.18.0.1:53410 (172.18.0.1:53410)\nwget: download timed out\n",
+  "host_listener": "0.0.0.0:53410; local health checked separately",
+  "scope": "Transport diagnostic; no firewall configuration read or changed"
+}

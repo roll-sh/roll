@@ -1,0 +1,8 @@
+{
+  "at_utc": "2026-11-02T21:36:04.363369+00:00",
+  "live_absent": true,
+  "removed_owned_paths": [
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/swap-diagnostic-r1/baseline-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/swap-diagnostic-r1/candidate-data"
+  ]
+}

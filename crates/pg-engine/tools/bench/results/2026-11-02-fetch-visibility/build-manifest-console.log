@@ -1,0 +1,30 @@
+{
+  "at_utc": "2026-11-02T21:33:00.380799+00:00",
+  "source": "a39915dc0255196c365a4fd6ddf970560a9cc8de+7b0b5ae964fd22cd0f071b21f56ccc5ad9c3b25a460bda89a226d58f2b0dcb70",
+  "source_identity_kind": "HEAD plus SHA256 of tracked binary diff covering both modified files",
+  "source_sha256": {
+    "crates/pg-engine/src/exec/sizing.rs": "454f63a131cc3fad616722a2db2bb385d4d9f5f241dfb83498eb2621069c1aaa",
+    "crates/pg-engine/tests/wire.rs": "cc9a9248bf17b80d670d8cbb8b7cf12cc565f0bdcdb08eaf91413cc0d588475e"
+  },
+  "binary_sha256": "c49d23877cad7858c07a2185b3bd1be24aa08a79f1891121e9db4a0aa12ef18b",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "build_command": [
+    "cargo",
+    "build",
+    "-p",
+    "pg-engine",
+    "--release",
+    "--bin",
+    "roll-engine",
+    "--example",
+    "bench",
+    "--example",
+    "scan_bench"
+  ],
+  "environment": {
+    "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only"
+  },
+  "dependency_fingerprint_matches_baseline": true,
+  "dependency_count": 46,
+  "release_build_log_sha256": "2fec55d15e46933fbe65d3ca066e12346f9b61d64a0dfcad2c0b0591e14e713e"
+}

@@ -1,0 +1,16 @@
+{
+  "workspace_fmt_exit": 1,
+  "qualification": "Existing baseline formatting differences remain; comparison ignores file paths and shifted line numbers only. No formatter edits made.",
+  "changed_files": [
+    {
+      "file": "crates/pg-engine/src/exec/sizing.rs",
+      "source_sha256": "454f63a131cc3fad616722a2db2bb385d4d9f5f241dfb83498eb2621069c1aaa",
+      "baseline_and_candidate_complaints_equal_ignoring_shifted_line_numbers": true
+    },
+    {
+      "file": "crates/pg-engine/tests/wire.rs",
+      "source_sha256": "cc9a9248bf17b80d670d8cbb8b7cf12cc565f0bdcdb08eaf91413cc0d588475e",
+      "baseline_and_candidate_complaints_equal_ignoring_shifted_line_numbers": true
+    }
+  ]
+}

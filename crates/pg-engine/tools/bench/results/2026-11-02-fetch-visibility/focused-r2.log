@@ -1,0 +1,9 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.53s
+     Running tests/wire.rs (target/debug/deps/wire-09043cc026d6835f)
+
+running 1 test
+test index_fetches_follow_visibility_changes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.33s
+

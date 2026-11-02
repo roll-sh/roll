@@ -1,0 +1,70 @@
+[
+  {
+    "name": "full-crate",
+    "exit": 0,
+    "execution_evidence": {
+      "exit_code": 0,
+      "tool_session_id": 20874,
+      "evidence": "exec session completion observed with write_stdin",
+      "recorded_at_utc": "2026-11-02T21:33:38.293Z"
+    },
+    "log": "tests-r1.log",
+    "log_sha256": "91bce4c3ede688849e9a34a72f6ef8cedae845072567f6d2ddb4353775d01f1e",
+    "source_sha256": {
+      "crates/pg-engine/src/exec/sizing.rs": "454f63a131cc3fad616722a2db2bb385d4d9f5f241dfb83498eb2621069c1aaa",
+      "crates/pg-engine/tests/wire.rs": "2d6b63ee2998c4f70e1a85084eb9319da80930c3ed6f6a872f35d6bae8f72ee0"
+    },
+    "coverage_note": "Full-crate compiled earlier wire test; current-wire rerun covers second-session plan assertions."
+  },
+  {
+    "name": "clippy-all-targets",
+    "exit": 0,
+    "execution_evidence": {
+      "exit_code": 0,
+      "tool_session_id": 20290,
+      "evidence": "exec session completion observed with write_stdin",
+      "recorded_at_utc": "2026-11-02T21:33:38.298Z"
+    },
+    "log": "clippy-r1.log",
+    "log_sha256": "653d99d86584dc903596315fec9a4c57383f51b38db9c46c82d2805fc2accd37",
+    "source_sha256": {
+      "crates/pg-engine/src/exec/sizing.rs": "454f63a131cc3fad616722a2db2bb385d4d9f5f241dfb83498eb2621069c1aaa",
+      "crates/pg-engine/tests/wire.rs": "cc9a9248bf17b80d670d8cbb8b7cf12cc565f0bdcdb08eaf91413cc0d588475e"
+    },
+    "coverage_note": "Current source hashes; release production only depends on sizing.rs."
+  },
+  {
+    "name": "release-build",
+    "exit": 0,
+    "execution_evidence": {
+      "exit_code": 0,
+      "tool_session_id": 53171,
+      "evidence": "exec session completion observed with write_stdin",
+      "recorded_at_utc": "2026-11-02T21:33:38.298Z"
+    },
+    "log": "release-build-r1.log",
+    "log_sha256": "2fec55d15e46933fbe65d3ca066e12346f9b61d64a0dfcad2c0b0591e14e713e",
+    "source_sha256": {
+      "crates/pg-engine/src/exec/sizing.rs": "454f63a131cc3fad616722a2db2bb385d4d9f5f241dfb83498eb2621069c1aaa",
+      "crates/pg-engine/tests/wire.rs": "cc9a9248bf17b80d670d8cbb8b7cf12cc565f0bdcdb08eaf91413cc0d588475e"
+    },
+    "coverage_note": "Current source hashes; release production only depends on sizing.rs."
+  },
+  {
+    "name": "current-wire",
+    "exit": 0,
+    "execution_evidence": {
+      "exit_code": 0,
+      "tool_session_id": 74769,
+      "evidence": "exec session completion observed with write_stdin",
+      "recorded_at_utc": "2026-11-02T21:33:38.298Z"
+    },
+    "log": "current-wire-r1.log",
+    "log_sha256": "0de02ad3072840af4aa75095fd8339cdeea9e66c191ed1ccf57d37347d5f6bfe",
+    "source_sha256": {
+      "crates/pg-engine/src/exec/sizing.rs": "454f63a131cc3fad616722a2db2bb385d4d9f5f241dfb83498eb2621069c1aaa",
+      "crates/pg-engine/tests/wire.rs": "cc9a9248bf17b80d670d8cbb8b7cf12cc565f0bdcdb08eaf91413cc0d588475e"
+    },
+    "coverage_note": "Current source hashes; release production only depends on sizing.rs."
+  }
+]

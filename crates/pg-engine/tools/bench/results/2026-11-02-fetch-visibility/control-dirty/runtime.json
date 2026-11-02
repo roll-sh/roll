@@ -1,0 +1,63 @@
+{
+  "at_utc": "2026-11-02T21:55:23.506208+00:00",
+  "source": "a39915dc0255196c365a4fd6ddf970560a9cc8de+7b0b5ae964fd22cd0f071b21f56ccc5ad9c3b25a460bda89a226d58f2b0dcb70",
+  "source_sha256": {
+    "crates/pg-engine/src/exec/sizing.rs": "454f63a131cc3fad616722a2db2bb385d4d9f5f241dfb83498eb2621069c1aaa",
+    "crates/pg-engine/tests/wire.rs": "cc9a9248bf17b80d670d8cbb8b7cf12cc565f0bdcdb08eaf91413cc0d588475e"
+  },
+  "load": "4.48 5.94 5.25 2/2793 2921657\n",
+  "engines": {
+    "baseline": {
+      "pid": 2918608,
+      "port": 53704,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/control-dirty/baseline-data --listen 127.0.0.1:53704 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 -c autovacuum=off ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n",
+      "nice": 19
+    },
+    "candidate": {
+      "pid": 2920168,
+      "port": 53705,
+      "sha256": "c49d23877cad7858c07a2185b3bd1be24aa08a79f1891121e9db4a0aa12ef18b",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/candidate-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/control-dirty/candidate-data --listen 127.0.0.1:53705 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 -c autovacuum=off ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n",
+      "nice": 19
+    }
+  },
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "fallback_phase": true,
+  "control_phase": "dirty",
+  "slots_swapped": false,
+  "fetch_visibility_phase": "dirty"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "test-rest-of-workspace",
+  "command": [
+    "cargo",
+    "test",
+    "--workspace",
+    "--exclude",
+    "pg-engine"
+  ],
+  "exit": 0,
+  "started_unix": 1793658163.7994235,
+  "ended_unix": 1793658169.1627197
+}

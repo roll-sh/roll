@@ -2254,14 +2254,16 @@ pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
 /// All-visible heaps need no lookup. None means no block was visited.
 pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Option<u32> {
     let db = &ctx.sess.db;
-    let xids = db.xids();
-    let v = vis_for(&xids, table, ctx);
+    let xids;
+    let v;
     {
         let rf = db.relfiles.of(table).read();
         let heap = rf.heaps.get(&table)?;
         if heap.all_visible_pages() >= heap.nblocks() {
             return None;
         }
+        xids = db.xids();
+        v = vis_for(&xids, table, ctx);
         let blk = heap.locate(key, &v).map(|t| t.0);
         if blk.is_none_or(|b| last == Some(b) || !heap.prune_wanted(b, &v)) {
             return blk;

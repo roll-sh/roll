@@ -1,0 +1,25 @@
+{
+  "baseline_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "visibility_columns": [
+    "heap_pages",
+    "all_visible",
+    "all_frozen"
+  ],
+  "before": [
+    [
+      "1471",
+      "1471",
+      "0"
+    ]
+  ],
+  "after": [
+    [
+      "1471",
+      "1471",
+      "0"
+    ]
+  ],
+  "all_visible_fast_path_relevant": true,
+  "original_fixture_unchanged": true,
+  "production_edited": false
+}

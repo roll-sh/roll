@@ -2432,6 +2432,50 @@ fn pruning_horizons_follow_snapshots() {
     s.engine.shutdown();
 }
 
+/// Ordinary index fetches preserve a pinned snapshot when VACUUM's visibility map changes.
+#[test]
+fn index_fetches_follow_visibility_changes() {
+    let s = server(AuthMethod::ScramSha256);
+    runtime().block_on(async {
+        let a = s.connect("postgres").await;
+        let b = s.connect("postgres").await;
+        a.batch_execute(
+            "CREATE EXTENSION pg_visibility; \
+             CREATE TABLE fetch_vis(id int primary key, payload text) WITH (autovacuum_enabled = off); \
+             INSERT INTO fetch_vis VALUES (1, 'old'), (2, 'two'); \
+             SET enable_seqscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off",
+        )
+        .await
+        .unwrap();
+        a.batch_execute("VACUUM fetch_vis").await.unwrap();
+        let query = "SELECT payload FROM fetch_vis WHERE id BETWEEN 1 AND 2 ORDER BY id";
+        let visible = "SELECT all_visible > 0 FROM pg_visibility_map_summary('fetch_vis'::regclass)";
+        let plan = lines(&a, &format!("EXPLAIN (COSTS OFF) {query}")).await.unwrap();
+        assert!(plan.iter().any(|line| line.contains("Index Scan using fetch_vis_pkey")), "{plan:?}");
+        assert_eq!(lines(&a, visible).await.unwrap(), ["t"]);
+        assert_eq!(lines(&a, query).await.unwrap(), ["old", "two"]);
+        b.batch_execute(
+            "SET enable_seqscan = off; SET enable_bitmapscan = off; SET enable_indexonlyscan = off; \
+             BEGIN ISOLATION LEVEL REPEATABLE READ",
+        )
+        .await
+        .unwrap();
+        let pinned_plan = lines(&b, &format!("EXPLAIN (COSTS OFF) {query}")).await.unwrap();
+        assert!(pinned_plan.iter().any(|line| line.contains("Index Scan using fetch_vis_pkey")), "{pinned_plan:?}");
+        assert_eq!(lines(&b, query).await.unwrap(), ["old", "two"]);
+        a.batch_execute("UPDATE fetch_vis SET payload = 'new' WHERE id = 1").await.unwrap();
+        assert_eq!(lines(&a, visible).await.unwrap(), ["f"]);
+        assert_eq!(lines(&a, query).await.unwrap(), ["new", "two"]);
+        a.batch_execute("VACUUM fetch_vis").await.unwrap();
+        assert_eq!(lines(&b, query).await.unwrap(), ["old", "two"]);
+        b.batch_execute("COMMIT").await.unwrap();
+        a.batch_execute("VACUUM fetch_vis").await.unwrap();
+        assert_eq!(lines(&a, visible).await.unwrap(), ["t"]);
+        assert_eq!(lines(&a, query).await.unwrap(), ["new", "two"]);
+    });
+    s.engine.shutdown();
+}
+
 /// Wait until session `pid` waits for a lock (as isolationtester does).
 async fn until_blocked(c: &Client, pid: &str) {
     let q = format!("SELECT EXISTS (SELECT FROM pg_locks WHERE pid = {pid} AND NOT granted)");

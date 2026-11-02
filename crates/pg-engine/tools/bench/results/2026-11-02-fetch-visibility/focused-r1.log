@@ -1,0 +1,19 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 50s
+     Running tests/wire.rs (target/debug/deps/wire-09043cc026d6835f)
+
+running 1 test
+
+thread 'index_fetches_follow_visibility_changes' (1595483) panicked at crates/pg-engine/tests/wire.rs:2449:10:
+called `Result::unwrap()` on an `Err` value: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: Some(Error), code: SqlState(E25001), message: "VACUUM cannot run inside a transaction block", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: Some("pg-engine"), line: Some(0), routine: Some("") }) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test index_fetches_follow_visibility_changes ... FAILED
+
+failures:
+
+failures:
+    index_fetches_follow_visibility_changes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 67 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p pg-engine --test wire`

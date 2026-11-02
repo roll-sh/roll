@@ -1,0 +1,17 @@
+{
+  "pid": 3025557,
+  "pgid": 3025557,
+  "command": [
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/heavy.sh",
+    "python3",
+    "-I",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/measure.py",
+    "--out",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/fetch-confirmation-p1",
+    "--candidate-dir",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/candidate-bin",
+    "--swap-slots",
+    "--port0",
+    "53706"
+  ]
+}

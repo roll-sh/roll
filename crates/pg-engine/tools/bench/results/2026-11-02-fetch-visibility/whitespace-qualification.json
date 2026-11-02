@@ -1,0 +1,21 @@
+{
+  "all_staged_exit": 2,
+  "source_only_exit": 0,
+  "source_only_output": "",
+  "preserved_raw_evidence_findings": {
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/baseline-regression/REPORT.md": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/baseline-regression/results.tsv": 228,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/candidate-source/tracked.patch": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/current-wire-r1.log": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/focused-r2.log": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/full-regress-fetch-p1/regress.log": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/full-regress-fetch-p1/report/REPORT.md": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/full-regress-fetch-p1/report/hunks/join.diff": 4,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/full-regress-fetch-p1/report/hunks/partition_prune.diff": 3,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/full-regress-fetch-p1/report/results.tsv": 228,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/source-gates/test-rest-of-workspace.log": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/source-r1.patch": 1,
+    "crates/pg-engine/tools/bench/results/2026-11-02-fetch-visibility/tests-r1.log": 1
+  },
+  "qualification": "Raw TSV empty final fields, captured logs, reports and historical patches retain original whitespace. No archived bytes or frozen files edited to silence Git whitespace checks."
+}

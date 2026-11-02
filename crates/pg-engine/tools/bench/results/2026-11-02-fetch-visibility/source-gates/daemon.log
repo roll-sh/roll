@@ -1,0 +1,15 @@
+2026-11-02T22:23:48.227833Z  INFO rolld: durable storage storage=file:///home/meszmate/worktrees/roll/t3-d4020b98/target/tmp/rolld-service-3396014/objects
+2026-11-02T22:23:48.228255Z  INFO rolld: control API listening addr=127.0.0.1:46845
+2026-11-02T22:23:48.230015Z  INFO pg_proxy: postgres proxy listening addr=127.0.0.1:34023
+2026-11-02T22:24:03.641597Z  INFO pg_control::control: compute started endpoint="ep_zdraabmrea4d" ms=15400
+2026-11-02T22:24:03.727230Z  INFO pg_storage::receiver: WAL streaming started branch=br_6wyphqr4fytq timeline=1 start=0/1000000 fresh=true
+2026-11-02T22:24:04.871463Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_6wyphqr4fytq flushed=0/2003498
+2026-11-02T22:24:04.916204Z  WARN pg_control::history: base backup failed branch=br_6wyphqr4fytq error=pg_basebackup failed (exit status: 137):  None
+2026-11-02T22:24:05.254847Z  INFO pg_control::control: compute suspended endpoint="ep_zdraabmrea4d"
+2026-11-02T22:24:05.970228Z  INFO pg_control::control: compute started endpoint="ep_zdraabmrea4d" ms=712
+2026-11-02T22:24:06.041477Z  INFO pg_storage::receiver: WAL streaming started branch=br_6wyphqr4fytq timeline=1 start=0/2000000 fresh=false
+2026-11-02T22:24:06.281066Z  INFO rolld: durable storage storage=file:///home/meszmate/worktrees/roll/t3-d4020b98/target/tmp/rolld-service-3396014/objects
+2026-11-02T22:24:06.368034Z  INFO rolld: control API listening addr=127.0.0.1:46845
+2026-11-02T22:24:06.369785Z  INFO pg_proxy: postgres proxy listening addr=127.0.0.1:34023
+2026-11-02T22:24:06.498144Z  INFO pg_storage::receiver: WAL streaming started branch=br_6wyphqr4fytq timeline=1 start=0/2000000 fresh=false
+2026-11-02T22:24:07.731789Z  INFO pg_control::history: base backup stored branch="br_6wyphqr4fytq" start=0/5000028 end=0/6000000 bytes=3917565 ms=1232

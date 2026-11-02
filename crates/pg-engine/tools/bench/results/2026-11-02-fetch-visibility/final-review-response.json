@@ -1,0 +1,13 @@
+{
+  "review": "final-review-r1.json",
+  "responses": [
+    "Keep source acceptance false and label the change retained under the existing explicit recovery waiver, never accepted. Frozen performance and aggregate source decisions remain unchanged.",
+    "Export the premise row at 20:42:55Z, not just later rows.",
+    "Identify all five post-frame reporting/cleanup/audit scripts in README, verifier and post-frame-artifacts.json. Identify source-r1.patch as superseded by candidate-source/tracked.patch.",
+    "Keep the full-crate older-test/current-wire distinction explicit in README and pretrial records.",
+    "Explain throughput and CPU/query as a coupled result, including the small increase in utilized cores. Do not claim a proven mutex mechanism.",
+    "Name frozen integer-throughput statistics and exact operations/elapsed recomputation separately. No memory-savings claim.",
+    "Retain and explain the benign regression teardown kill message, with independent PID-absence evidence."
+  ],
+  "review_limit": "R1 did not read the relevant parent transcript because its one read began at the oldest page. R2 will receive exact positions and the portable export."
+}

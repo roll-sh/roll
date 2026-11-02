@@ -1,0 +1,18 @@
+{
+  "timed_attempts": 0,
+  "state": "draft",
+  "test_command": "cargo test -p pg-engine",
+  "focused_test": "index_fetches_follow_visibility_changes",
+  "focused_r1_exit": 101,
+  "focused_r1_cause": "VACUUM inside implicit transaction in test setup",
+  "focused_r2_exit": 0,
+  "pretrial_review_task": "fetched-fast-path-pretrial-review-20261102-r1",
+  "pending": [
+    "dirty and swapped untimed diagnostics",
+    "final frame preparation",
+    "timing",
+    "full remaining source acceptance gates"
+  ],
+  "source_review": "No production blockers; test/control/tool corrections made prospectively",
+  "test_progress": "Full crate, all-target Clippy, current full wire, matched release all exit0"
+}

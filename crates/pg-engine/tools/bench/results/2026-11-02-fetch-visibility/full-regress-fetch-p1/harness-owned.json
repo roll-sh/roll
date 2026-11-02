@@ -1,0 +1,14 @@
+{
+  "pid": 3555623,
+  "pgid": 3555623,
+  "command": [
+    "timeout",
+    "--kill-after=30",
+    "10800",
+    "/home/meszmate/worktrees/roll/t3-d4020b98/target/release/deps/pg_regress-fd39d3793202ae64",
+    "pg_regress",
+    "--exact",
+    "--ignored",
+    "--nocapture"
+  ]
+}

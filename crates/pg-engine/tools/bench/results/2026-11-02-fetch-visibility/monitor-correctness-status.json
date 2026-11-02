@@ -1,0 +1,19 @@
+{
+  "command": [
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/heavy.sh",
+    "python3",
+    "-I",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/measure.py",
+    "--out",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/monitor-correctness",
+    "--candidate-dir",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/candidate-bin",
+    "--preflight-only",
+    "--monitor",
+    "--port0",
+    "53700"
+  ],
+  "exit": 0,
+  "started_unix": 1793655416.2575257,
+  "ended_unix": 1793655432.264465
+}

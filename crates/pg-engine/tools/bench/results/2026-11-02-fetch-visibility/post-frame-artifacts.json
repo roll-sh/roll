@@ -1,0 +1,12 @@
+{
+  "scripts_sha256": {
+    "qualify_source_gates.py": "63ae7120b18d59575c10f09f7b7ffb70b161657782bf03630206fe2b7b956af2",
+    "cleanup_measurements.py": "e05896d3a086a026277a394b5e7439b0c0b05c786111a29a63f2a922051189da",
+    "cleanup_source_gates.py": "f1466cbd4757b511c16a3e15e00c98f5e3e0910de1e9f7dd94308c03db9ae8df",
+    "verify.py": "2c63634862af561fc64d19f24b7c0d673817e806abc525a9c69911ac08b0493a",
+    "export_checkpoint.py": "9d694ca5cc9cd4f5ea02e4fcb55dce505acc81feac7474a753e51b9a5e03e7e5"
+  },
+  "scope": "Written after the frame for reporting, cleanup and offline audit; not prospective gates.",
+  "superseded_patch": "source-r1.patch",
+  "trial_patch": "candidate-source/tracked.patch"
+}

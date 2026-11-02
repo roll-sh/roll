@@ -1,0 +1,10 @@
+{
+  "name": "build",
+  "command": [
+    "cargo",
+    "build"
+  ],
+  "exit": 0,
+  "started_unix": 1793658056.1111524,
+  "ended_unix": 1793658161.0486302
+}

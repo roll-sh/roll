@@ -1,0 +1,73 @@
+{
+  "passes": true,
+  "baseline_log_sha256": "17614b121910d1fa8b18be41383f42d669ab17e0ba0432345fecc311b6f0d558",
+  "baseline_commit": "5b32046d",
+  "warning_count": 16,
+  "warnings": [
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs"
+    ],
+    [
+      "float has excessive precision",
+      "crates/pg-engine/src/sql/func/math.rs"
+    ],
+    [
+      "items after a test module",
+      "crates/pg-engine/src/types/json.rs"
+    ],
+    [
+      "items after a test module",
+      "crates/pg-engine/src/types/text.rs"
+    ],
+    [
+      "length comparison to zero",
+      "crates/pg-engine/src/sql/binder/expr.rs"
+    ],
+    [
+      "manual implementation of `.is_multiple_of()`",
+      "crates/pg-engine/src/catalog/btsim/leaf.rs"
+    ],
+    [
+      "the `Err`-variant returned from this function is very large",
+      "crates/pg-engine/src/sql/binder/optimize.rs"
+    ],
+    [
+      "the borrowed expression implements the required traits",
+      "crates/pg-engine/src/sql/explain.rs"
+    ],
+    [
+      "the loop variable `j` is used to index `rkeys`",
+      "crates/pg-engine/src/sql/paths/joinpath/partitionwise.rs"
+    ],
+    [
+      "this `if` statement can be collapsed",
+      "crates/pg-engine/src/sql/explain.rs"
+    ],
+    [
+      "this loop could be written as a `while let` loop",
+      "crates/pg-engine/src/sql/binder/fold.rs"
+    ],
+    [
+      "useless use of `format!`",
+      "crates/pg-engine/tests/difftest/round8.rs"
+    ],
+    [
+      "using `chunks_exact` with a constant chunk size",
+      "crates/pg-engine/tools/bench/bench.rs"
+    ]
+  ],
+  "limit": "Existing warnings permitted only with same count, messages and source paths as retained all-target baseline."
+}

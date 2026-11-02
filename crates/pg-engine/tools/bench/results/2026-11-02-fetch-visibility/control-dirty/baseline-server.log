@@ -1,0 +1,10 @@
+2026-11-02 21:55:12.520 UTC [2918608] LOG:  starting PostgreSQL 18.6 (roll) on x86_64-pc-linux-gnu, compiled by rustc, 64-bit
+2026-11-02 21:55:12.520 UTC [2918608] LOG:  listening on IPv4 address "127.0.0.1", port 53704
+2026-11-02 21:55:12.520 UTC [32] LOG:  database system was shut down at 2026-11-02 01:31:03 UTC
+2026-11-02 21:55:12.520 UTC [2918608] LOG:  database system is ready to accept connections
+2026-11-02 22:01:32.274 UTC [2918608] LOG:  received smart shutdown request
+2026-11-02 22:01:32.274 UTC [2918608] LOG:  background worker "logical replication launcher" (PID 35) exited with exit code 1
+2026-11-02 22:01:32.274 UTC [30] LOG:  shutting down
+2026-11-02 22:01:32.274 UTC [30] LOG:  checkpoint starting: shutdown immediate
+2026-11-02 22:01:32.375 UTC [30] LOG:  checkpoint complete: wrote 313 buffers (1.9%), wrote 0 SLRU buffers; 2 WAL file(s) added, 0 removed, 0 recycled; write=0.100 s, sync=0.002 s, total=0.102 s; sync files=7, longest=0.002 s, average=0.001 s; distance=11523 kB, estimate=11523 kB; lsn=0/57DBC0B4, redo lsn=0/57DBC0B4
+2026-11-02 22:01:32.375 UTC [2918608] LOG:  database system is shut down

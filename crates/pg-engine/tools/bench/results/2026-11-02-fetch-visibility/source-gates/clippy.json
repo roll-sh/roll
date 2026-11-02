@@ -1,0 +1,10 @@
+{
+  "name": "clippy",
+  "command": [
+    "cargo",
+    "clippy"
+  ],
+  "exit": 0,
+  "started_unix": 1793658171.9136775,
+  "ended_unix": 1793658219.471333
+}

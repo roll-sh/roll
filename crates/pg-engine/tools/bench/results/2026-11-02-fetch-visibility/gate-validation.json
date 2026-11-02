@@ -1,0 +1,38 @@
+[
+  {
+    "case": "real retained full release baseline",
+    "passes": true
+  },
+  {
+    "case": "missing baseline section",
+    "correctly_rejected": true
+  },
+  {
+    "case": "report says new regression",
+    "correctly_rejected": true
+  },
+  {
+    "case": "subset report",
+    "correctly_rejected": true
+  },
+  {
+    "case": "mismatched build profile",
+    "correctly_rejected": true
+  },
+  {
+    "case": "TSV regression despite zero headline",
+    "correctly_rejected": true
+  },
+  {
+    "case": "changed compared unit count",
+    "correctly_rejected": true
+  },
+  {
+    "case": "omitted file",
+    "correctly_rejected": true
+  },
+  {
+    "case": "additional Clippy warning",
+    "correctly_rejected": true
+  }
+]

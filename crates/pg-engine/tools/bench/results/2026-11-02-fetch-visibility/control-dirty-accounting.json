@@ -1,0 +1,81 @@
+{
+  "run": "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/control-dirty",
+  "rounds": 5,
+  "seconds": 15,
+  "invocations_including_warmups": 24,
+  "checked_operations_including_warmups": 2667725,
+  "errors": 0,
+  "range8": {
+    "baseline_tps": {
+      "median": 8077.0,
+      "min": 7986.0,
+      "max": 8095.0
+    },
+    "candidate_tps": {
+      "median": 8119.0,
+      "min": 8023.0,
+      "max": 8142.0
+    },
+    "throughput_gain_pct": 0.5199950476662127,
+    "gap": 42.0,
+    "largest_full_spread": 119.0,
+    "baseline_cpu_us_per_op": {
+      "median": 491.4785622910908,
+      "min": 490.1411698815622,
+      "max": 496.5734843615659
+    },
+    "candidate_cpu_us_per_op": {
+      "median": 489.0249793271712,
+      "min": 488.4236453201971,
+      "max": 494.8899044453677
+    },
+    "cpu_change_pct": -0.4992248191827309
+  },
+  "point1": {
+    "baseline_tps": {
+      "median": 6722.0,
+      "min": 6671.0,
+      "max": 6762.0
+    },
+    "candidate_tps": {
+      "median": 6761.0,
+      "min": 6730.0,
+      "max": 6844.0
+    },
+    "throughput_gain_pct": 0.5801844689080631,
+    "gap": 39.0,
+    "largest_full_spread": 114.0,
+    "baseline_cpu_us_per_op": {
+      "median": 113.08514120763004,
+      "min": 111.85482671426476,
+      "max": 113.31388145009768
+    },
+    "candidate_cpu_us_per_op": {
+      "median": 111.74725805339011,
+      "min": 109.97253121895143,
+      "max": 113.01617488287293
+    },
+    "cpu_change_pct": -1.1830759903138088
+  },
+  "cores": {
+    "point_select:1:baseline": {
+      "server_cores": 0.7559734768217587,
+      "client_cores": 0.26251418974215585
+    },
+    "range_scan_100:8:baseline": {
+      "server_cores": 3.9668891020506174,
+      "client_cores": 0.76278641052533
+    },
+    "point_select:1:candidate": {
+      "server_cores": 0.7559679990178362,
+      "client_cores": 0.26351651171407403
+    },
+    "range_scan_100:8:candidate": {
+      "server_cores": 3.970322571779091,
+      "client_cores": 0.7667649272260056
+    }
+  },
+  "descriptive_unpaired_spread_check": false,
+  "point_control_in_this_run": true,
+  "limit": "This audits saved measurements, not source correctness, host isolation, or product acceptance."
+}

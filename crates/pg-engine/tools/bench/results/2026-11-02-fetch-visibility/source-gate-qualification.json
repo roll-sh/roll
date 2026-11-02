@@ -1,0 +1,19 @@
+{
+  "all_source_gates_pass": false,
+  "performance_checks_pass": true,
+  "fresh_service_exit": 101,
+  "control_plane_passed": 12,
+  "control_plane_failed": 4,
+  "failed_tests": [
+    "point_in_time_branches",
+    "restore_in_place_keeps_the_endpoint",
+    "retention_removes_old_history",
+    "survives_losing_the_local_disk"
+  ],
+  "failure_signature_matches_retained_baseline": true,
+  "fresh_log_sha256": "ffb746fa9c8c93612b041dadb295d3d1b9185bf2c3f75be540f920caa930d764",
+  "baseline_log_sha256": "e8e61eca6945fe3994eed6e09ff9640c7ffd7786ea790dec545a0b96d787476e",
+  "acceptance_document_sha256": "629f433ade41e2424cf7ec057d812617a0fff7c490d3c6c9f92cf1c9730079cf",
+  "scope": "Existing official-PostgreSQL compute-to-host WAL-route gap; recovery unverified. This records a waiver already documented before this experiment, not a passing gate or an amendment to the frozen performance rules.",
+  "decision": "Independent review and explicit bounded-engine decision still required."
+}

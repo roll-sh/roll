@@ -1,0 +1,13 @@
+{
+  "name": "clippy-all-targets",
+  "command": [
+    "cargo",
+    "clippy",
+    "-p",
+    "pg-engine",
+    "--all-targets"
+  ],
+  "exit": 0,
+  "started_unix": 1793658222.1918583,
+  "ended_unix": 1793658222.5039442
+}

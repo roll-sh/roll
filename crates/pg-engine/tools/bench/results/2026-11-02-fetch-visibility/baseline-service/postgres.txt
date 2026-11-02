@@ -1,0 +1,147 @@
+$ scripts/test-postgres.sh --force
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+    Checking rolld v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/rolld)
+    Checking pg-control v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-control)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.82s
+   Compiling rolld v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/rolld)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running unittests src/lib.rs (target/debug/deps/pg_control-a16c6e00e254d8b1)
+
+running 11 tests
+test history::tests::latest_takes_newest_on_current_timeline ... ok
+test history::tests::no_history_file_means_no_ancestors ... ok
+test compute::tests::pgdata_is_a_subdirectory_for_every_version ... ok
+test history::tests::point_needs_base_that_ends_before_it ... ok
+test history::tests::skips_bases_from_an_abandoned_future ... ok
+test reconciler::tests::steps_clamp_to_range ... ok
+test store::tests::branch_and_endpoint_roundtrip ... ok
+test store::tests::bases_newest_first ... ok
+test store::tests::lsn_index_resolves_times ... ok
+test store::tests::migrates_a_version_zero_database ... ok
+test store::tests::record_flush_tracks_position ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_proxy-1a9a43652799ec3d)
+
+running 3 tests
+test protocol::tests::endpoint_option_forms ... ok
+test protocol::tests::cancel_roundtrip ... ok
+test protocol::tests::startup_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_storage-13e93ab534b12e61)
+
+running 10 tests
+test lsn::tests::lsn_roundtrip ... ok
+test lsn::tests::segment_names ... ok
+test objects::tests::keys ... ok
+test objects::tests::put_get_list_delete ... ok
+test objects::tests::zstd_upload_sees_raw_bytes ... ok
+test receiver::tests::history_files_are_served ... ok
+test receiver::tests::segments_complete_upload_and_serve ... ok
+test receiver::tests::spool_sweep_uploads_leftovers ... ok
+test receiver::tests::status_update_layout ... ok
+test objects::tests::streaming_upload_and_download ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running unittests src/main.rs (target/debug/deps/roll-4dddcc6a3633d7cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/rolld-927c52f572f8e779)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling rolld v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/rolld)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.37s
+     Running tests/service.rs (target/debug/deps/service-3040915330a26662)
+
+running 1 test
+test serves_requests_and_adopts_compute_after_restart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.29s
+
+   Compiling pg-control v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-control)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.18s
+     Running tests/e2e.rs (target/debug/deps/e2e-36e5b95b94029555)
+
+running 16 tests
+test eviction_and_rehydrate ... ok
+test branches_are_isolated_copies ... ok
+test live_resize_keeps_sessions ... ok
+test http_api ... ok
+test many_concurrent_connections ... ok
+test point_in_time_branches ... FAILED
+test postgres_16 ... ok
+test postgres_17 ... ok
+test proxy_errors ... ok
+test proxy_speaks_postgres ... ok
+test restore_in_place_keeps_the_endpoint ... FAILED
+test retention_removes_old_history ... FAILED
+test read_replicas has been running for over 60 seconds
+test scale_to_zero_and_wake_on_connect ... ok
+test survives_losing_the_local_disk ... FAILED
+test usage_and_metering ... ok
+test read_replicas ... ok
+
+failures:
+
+---- point_in_time_branches stdout ----
+2026-11-02T11:09:39.651151Z  INFO pg_control::control: compute started endpoint="ep_4bxamzzkvxea" ms=15351
+2026-11-02T11:09:39.735601Z  INFO pg_storage::receiver: WAL streaming started branch=br_e22kaayqaa83 timeline=1 start=0/1000000 fresh=true
+2026-11-02T11:09:41.214452Z  INFO pg_control::history: base backup stored branch="br_e22kaayqaa83" start=0/2000028 end=0/3000000 bytes=3915027 ms=1478
+
+thread 'point_in_time_branches' (1536205) panicked at crates/pg-control/tests/e2e.rs:182:17:
+compute WAL preflight expected HTTP 403 for a wrong token, got: wget: download timed out
+; check container-to-daemon routing before recovery
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-02T11:09:47.187835Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_e22kaayqaa83 flushed=0/3000000
+
+---- restore_in_place_keeps_the_endpoint stdout ----
+2026-11-02T11:10:45.036460Z  INFO pg_control::control: compute started endpoint="ep_ugkzubs3u3p2" ms=15349
+2026-11-02T11:10:45.125091Z  INFO pg_storage::receiver: WAL streaming started branch=br_rpgjs8c6em5n timeline=1 start=0/1000000 fresh=true
+2026-11-02T11:10:46.406290Z  INFO pg_control::history: base backup stored branch="br_rpgjs8c6em5n" start=0/2000028 end=0/3000000 bytes=3915083 ms=1280
+
+thread 'restore_in_place_keeps_the_endpoint' (1562557) panicked at crates/pg-control/tests/e2e.rs:182:17:
+compute WAL preflight expected HTTP 403 for a wrong token, got: wget: download timed out
+; check container-to-daemon routing before recovery
+2026-11-02T11:10:52.612441Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_rpgjs8c6em5n flushed=0/3000000
+
+---- retention_removes_old_history stdout ----
+2026-11-02T11:11:07.507366Z  INFO pg_control::control: compute started endpoint="ep_m9xs7zrt55h9" ms=14195
+2026-11-02T11:11:07.583452Z  INFO pg_storage::receiver: WAL streaming started branch=br_hbupsb8mupp2 timeline=1 start=0/1000000 fresh=true
+2026-11-02T11:11:08.977422Z  INFO pg_control::history: base backup stored branch="br_hbupsb8mupp2" start=0/2000028 end=0/3000000 bytes=3915025 ms=1393
+
+thread 'retention_removes_old_history' (1572184) panicked at crates/pg-control/tests/e2e.rs:182:17:
+compute WAL preflight expected HTTP 403 for a wrong token, got: wget: download timed out
+; check container-to-daemon routing before recovery
+2026-11-02T11:11:15.181979Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_hbupsb8mupp2 flushed=0/3000000
+
+---- survives_losing_the_local_disk stdout ----
+2026-11-02T11:11:54.926550Z  INFO pg_control::control: compute started endpoint="ep_p7u33v5feuez" ms=14338
+2026-11-02T11:11:55.057891Z  INFO pg_storage::receiver: WAL streaming started branch=br_r6qnyfh7vvyn timeline=1 start=0/1000000 fresh=true
+2026-11-02T11:11:56.387129Z  INFO pg_control::history: base backup stored branch="br_r6qnyfh7vvyn" start=0/2000028 end=0/3000000 bytes=3915369 ms=1328
+
+thread 'survives_losing_the_local_disk' (1590880) panicked at crates/pg-control/tests/e2e.rs:182:17:
+compute WAL preflight expected HTTP 403 for a wrong token, got: wget: download timed out
+; check container-to-daemon routing before recovery
+2026-11-02T11:12:02.512273Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_r6qnyfh7vvyn flushed=0/3000000
+
+
+failures:
+    point_in_time_branches
+    restore_in_place_keeps_the_endpoint
+    retention_removes_old_history
+    survives_losing_the_local_disk
+
+test result: FAILED. 12 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 397.56s
+
+error: test failed, to rerun pass `-p pg-control --test e2e`
+[ELIFECYCLE] Command failed with exit code 101.

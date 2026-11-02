@@ -1,0 +1,14 @@
+{
+  "at_unix": 1793659425.0787477,
+  "exit": 0,
+  "command": [
+    "python3",
+    "-I",
+    "<independent tmp copy>/verify.py"
+  ],
+  "cwd": "/tmp",
+  "stdout": "{\n  \"files\": 566,\n  \"frozen_inputs_rehashed_offline\": 693,\n  \"frozen_binaries_omitted\": 5,\n  \"performance_checks_pass\": true,\n  \"invocations\": 128,\n  \"checked_operations\": 19178971,\n  \"errors\": 0,\n  \"regression_new_differences\": 0,\n  \"full_source_acceptance\": false,\n  \"service_failures\": [\n    \"point_in_time_branches\",\n    \"restore_in_place_keeps_the_endpoint\",\n    \"retention_removes_old_history\",\n    \"survives_losing_the_local_disk\"\n  ],\n  \"product_acceptance\": false,\n  \"post_frame_audit_scripts\": [\n    \"cleanup_measurements.py\",\n    \"cleanup_source_gates.py\",\n    \"export_checkpoint.py\",\n    \"qualify_source_gates.py\",\n    \"verify.py\"\n  ],\n  \"limit\": \"Audits saved records only. Does not rerun binaries/tests, verify current live state, rehash omitted binaries/databases, or establish PostgreSQL replacement.\"\n}\n",
+  "stderr": "",
+  "export_manifest_sha256": "a19a59768ce0f81736c6049e2c866572fb82e611b0649758a2127f2933d41fa4",
+  "scope": "Portable copy verified outside workspace before final evidence additions; manifest is a snapshot, not the later final seal."
+}

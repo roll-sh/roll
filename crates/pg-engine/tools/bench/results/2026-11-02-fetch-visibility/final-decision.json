@@ -1,0 +1,17 @@
+{
+  "action": "retain_under_existing_recovery_waiver",
+  "performance_checks_pass": true,
+  "full_source_acceptance": false,
+  "product_acceptance": false,
+  "existing_recovery_waiver_explicit": true,
+  "waiver_source": "crates/pg-engine/ACCEPTANCE.md, committed before this experiment",
+  "reason": "Both prospective range blocks and the dirty control pass; engine correctness, build, test, Clippy and full regression checks pass with zero new differences. Fresh official-PostgreSQL service verification reproduces four known WAL-route timeout failures and remains failed. Retain only this bounded engine change under the existing documented recovery waiver; do not call the source batch accepted.",
+  "independent_review": "final-review-r1.json",
+  "portable_and_transcript_review": "final-review-r2.json",
+  "preserved_frozen_decision": "performance-decision.json remains source_checks_pending with source_acceptance false; its historical value is not edited.",
+  "open_gaps": [
+    "Point-in-time branching, restore-in-place, retention and local-disk-loss recovery unverified",
+    "Existing join and partition_prune regression differences",
+    "Full PostgreSQL replacement acceptance remains open"
+  ]
+}

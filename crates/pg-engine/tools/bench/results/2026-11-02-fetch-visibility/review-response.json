@@ -1,0 +1,27 @@
+{
+  "production_verdict": "no blockers",
+  "actions": {
+    "1-arm-bias": "Adopt two-sided dirty range and point median guard [.97,1.02] before freeze; does not establish full stability.",
+    "2-dirty-preflight": "Untimed monitor/preflight-only dirty diagnostic required before frame.",
+    "3-pinned-test": "Apply settings to second session and assert its Index Scan in repeatable-read; current-wire rerun required.",
+    "4-gates": "Require full-crate, all-target Clippy, current-wire, release build exit records before frame; add all-target Clippy to acceptance pipeline.",
+    "5-frame": "Pending build, diagnostics and frame; save review.",
+    "scope": "Optional detached catalog cache fill may be skipped. Dirty digest scan prunes pages first; timing covers non-visible lookup, not guaranteed write-lock pruning."
+  },
+  "other_checks": "workspace format failure baseline-qualified; no formatter edits; review saw changing draft tools, final frame hashes authoritative.",
+  "additional_draft_hardening": [
+    "Dedicated 180s socket timeout for 200k-row setup UPDATE; does not alter measurement duration.",
+    "Untimed monitor diagnostics run unchanged runner.fixture and check full deterministic digest on both sides.",
+    "Pin package.json and scripts/test-postgres.sh as well as Cargo sources.",
+    "Current second-session Index Scan assertion awaits current-wire-r1 run."
+  ],
+  "round2": {
+    "blocker-regression": "Independent TSV and mandatory report comparator checks full/release, identical files/units, zero newly differing, clean completion; 9 positive/negative gate checks pass.",
+    "slot-proof": "Evaluator compares actual port ordering to flag; untimed swapped diagnostic required.",
+    "diagnostics": "Frame verifies phase, swap, heap states and candidate binary hash.",
+    "pretrial-records": "record_pretrial.py ties actual tool-completion exits to log hashes and source hashes; full-crate earlier wire version qualified, current-wire mandatory.",
+    "warnings": "Current all-target Clippy has same 16 warnings (count, message, source path) as retained clean 5b32046d all-target log; acceptance rechecks.",
+    "decision-reason": "Failed control or confirmation phase named explicitly.",
+    "risk": "Strict dirty upper guard and two passing blocks conservative; rejection does not prove regression/no effect; swap cannot remove layout or block drift."
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "pid": 1508034,
+  "argv": [
+    "taskset",
+    "-c",
+    "28-31",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+    "--data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/fixture-observation/data",
+    "--listen",
+    "127.0.0.1:53680",
+    "--password",
+    "pw",
+    "--cache-mb",
+    "2048",
+    "-c",
+    "autovacuum=off"
+  ]
+}

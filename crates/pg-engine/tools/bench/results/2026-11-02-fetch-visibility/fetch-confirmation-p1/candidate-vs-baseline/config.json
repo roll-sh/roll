@@ -1,0 +1,50 @@
+{
+  "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+  "out": "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/fetch-confirmation-p1/candidate-vs-baseline",
+  "db": "perf_oltp20261102_clean_200000",
+  "rows": 200000,
+  "rounds": 12,
+  "seconds": 20,
+  "client_cpus": "32-35",
+  "cases": {
+    "range_scan_100": [
+      8
+    ],
+    "point_select": [
+      1
+    ]
+  },
+  "psql_container": "9ae77e0a19d6c30c3cf6e8193ad16cd90ea9554f2541bd23c8e5a6d5eb27fd63",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "runtime_provenance": "runtime.json",
+  "targets": [
+    {
+      "name": "candidate",
+      "port": 53706,
+      "probe": {
+        "pid": 3026853
+      },
+      "source": "a39915dc0255196c365a4fd6ddf970560a9cc8de+7b0b5ae964fd22cd0f071b21f56ccc5ad9c3b25a460bda89a226d58f2b0dcb70",
+      "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/candidate-bin/roll-engine",
+      "actual_executable_sha256": "c49d23877cad7858c07a2185b3bd1be24aa08a79f1891121e9db4a0aa12ef18b"
+    },
+    {
+      "name": "baseline",
+      "port": 53707,
+      "probe": {
+        "pid": 3028072
+      },
+      "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+      "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "actual_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+    }
+  ],
+  "validation_version": "oltp-values-v1",
+  "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+  "ticks_per_second": 100,
+  "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "source_commit": "a39915dc0255196c365a4fd6ddf970560a9cc8de",
+  "load_at_start": "4.09 5.74 5.50 2/2800 3029963",
+  "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+  "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+}

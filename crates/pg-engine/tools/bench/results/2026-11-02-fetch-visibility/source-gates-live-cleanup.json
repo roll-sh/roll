@@ -1,0 +1,21 @@
+{
+  "at_unix": 1793659062.760386,
+  "regression_pids_absent": [
+    3555680,
+    3555623
+  ],
+  "regression_container_ids_absent": [
+    "a1203a3c6e19d3b304e6adc66073405af27b12a3e4d5bfeeb659e7bd8c663cec",
+    "70622eea0243db98e601b8573cdade5d6e6d9317a3923e872c668e3b454915ca"
+  ],
+  "regression_port_binds": 53720,
+  "service_test_pid_absent": 3396014,
+  "service_state_removed": true,
+  "worktree_service_containers": [],
+  "frame_inputs_unchanged": 698,
+  "removed_private_paths": [
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/full-regress-fetch-p1/pgr/enginedata",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/full-regress-fetch-p1/pgr/roll-engine.bin"
+  ],
+  "limit": "Observed after gates; no claim about unrelated containers, old service state, or future live state."
+}

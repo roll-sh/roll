@@ -1,0 +1,42 @@
+{
+  "at_unix": 1793658125.2176507,
+  "owned_pids_absent": [
+    2615503,
+    2616754,
+    2621921,
+    2623145,
+    2918608,
+    2920168,
+    3026853,
+    3028072
+  ],
+  "owned_helper_ids_absent": [
+    "851b68fba7c7c8a9bd4b800f6b58036ad98f8e7176094ebacc6f95f87c7607cc",
+    "d2df6b0be60b671ceb0d70d31b3bfe99bab7c455dac22e625c25723af701b5f1",
+    "92ffe0deb795907ce7e2a7f78049e26df27c0cf2e28cea01b5648f060bd255ef",
+    "9ae77e0a19d6c30c3cf6e8193ad16cd90ea9554f2541bd23c8e5a6d5eb27fd63"
+  ],
+  "ports_bind": [
+    53700,
+    53701,
+    53702,
+    53703,
+    53704,
+    53705,
+    53706,
+    53707
+  ],
+  "removed_owned_paths": [
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/monitor-correctness/baseline-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/monitor-correctness/candidate-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/fetch-primary-p1/baseline-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/fetch-primary-p1/candidate-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/control-dirty/baseline-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/control-dirty/candidate-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/fetch-confirmation-p1/baseline-data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/fetch-confirmation-p1/candidate-data"
+  ],
+  "source_fixture_unchanged_across_all_phases": true,
+  "frame_still_matches": true,
+  "scope": "Live observation after timing; does not cover unrelated containers or later source-gate resources."
+}

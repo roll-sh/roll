@@ -1,0 +1,18 @@
+{
+  "pid": 2917040,
+  "pgid": 2917040,
+  "command": [
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/heavy.sh",
+    "python3",
+    "-I",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/measure.py",
+    "--out",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/control-dirty",
+    "--candidate-dir",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/candidate-bin",
+    "--control",
+    "dirty",
+    "--port0",
+    "53704"
+  ]
+}

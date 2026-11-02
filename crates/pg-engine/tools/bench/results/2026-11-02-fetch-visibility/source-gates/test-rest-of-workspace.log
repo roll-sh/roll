@@ -1,0 +1,141 @@
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling pg-control v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-control)
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling pg-icu v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-icu)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.14s
+     Running unittests src/lib.rs (target/debug/deps/pg_control-a16c6e00e254d8b1)
+
+running 11 tests
+test history::tests::latest_takes_newest_on_current_timeline ... ok
+test history::tests::no_history_file_means_no_ancestors ... ok
+test compute::tests::pgdata_is_a_subdirectory_for_every_version ... ok
+test history::tests::point_needs_base_that_ends_before_it ... ok
+test history::tests::skips_bases_from_an_abandoned_future ... ok
+test reconciler::tests::steps_clamp_to_range ... ok
+test store::tests::bases_newest_first ... ok
+test store::tests::branch_and_endpoint_roundtrip ... ok
+test store::tests::lsn_index_resolves_times ... ok
+test store::tests::migrates_a_version_zero_database ... ok
+test store::tests::record_flush_tracks_position ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/e2e.rs (target/debug/deps/e2e-36e5b95b94029555)
+
+running 16 tests
+test eviction_and_rehydrate ... ok
+test branches_are_isolated_copies ... ok
+test live_resize_keeps_sessions ... ok
+test http_api ... ok
+test point_in_time_branches ... ok
+test many_concurrent_connections ... ok
+test postgres_16 ... ok
+test postgres_17 ... ok
+test proxy_errors ... ok
+test proxy_speaks_postgres ... ok
+test read_replicas ... ok
+test restore_in_place_keeps_the_endpoint ... ok
+test retention_removes_old_history ... ok
+test scale_to_zero_and_wake_on_connect ... ok
+test survives_losing_the_local_disk ... ok
+test usage_and_metering ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_icu-b447f76b0d319452)
+
+running 1 test
+test tests::basics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_proxy-1a9a43652799ec3d)
+
+running 3 tests
+test protocol::tests::endpoint_option_forms ... ok
+test protocol::tests::cancel_roundtrip ... ok
+test protocol::tests::startup_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_snowball-6e478085145f7fb5)
+
+running 1 test
+test tests::english ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/oracle.rs (target/debug/deps/oracle-cc498ae9dcad48f0)
+
+running 1 test
+test oracle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_storage-13e93ab534b12e61)
+
+running 10 tests
+test lsn::tests::lsn_roundtrip ... ok
+test lsn::tests::segment_names ... ok
+test objects::tests::keys ... ok
+test objects::tests::put_get_list_delete ... ok
+test objects::tests::zstd_upload_sees_raw_bytes ... ok
+test receiver::tests::history_files_are_served ... ok
+test receiver::tests::segments_complete_upload_and_serve ... ok
+test receiver::tests::spool_sweep_uploads_leftovers ... ok
+test receiver::tests::status_update_layout ... ok
+test objects::tests::streaming_upload_and_download ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+
+     Running unittests src/main.rs (target/debug/deps/roll-4dddcc6a3633d7cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/rolld-927c52f572f8e779)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/service.rs (target/debug/deps/service-3040915330a26662)
+
+running 1 test
+test serves_requests_and_adopts_compute_after_restart ... ignored, requires Docker and postgres:18-alpine; run with ROLL_E2E=1
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pg_control
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pg_icu
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pg_proxy
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pg_snowball
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pg_storage
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

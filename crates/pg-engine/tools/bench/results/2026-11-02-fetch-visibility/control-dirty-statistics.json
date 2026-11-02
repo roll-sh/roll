@@ -1,0 +1,249 @@
+{
+  "utilization_per_sample": [
+    {
+      "round": 1,
+      "name": "baseline",
+      "case": "range_scan_100",
+      "client_cores": 0.7719926887679249,
+      "fraction_of_four_client_cpus": 0.19299817219198123,
+      "server_cores": 3.971685256917562
+    },
+    {
+      "round": 1,
+      "name": "candidate",
+      "case": "range_scan_100",
+      "client_cores": 0.7608538592814719,
+      "fraction_of_four_client_cpus": 0.19021346482036797,
+      "server_cores": 3.970322571779091
+    },
+    {
+      "round": 2,
+      "name": "baseline",
+      "case": "range_scan_100",
+      "client_cores": 0.7600746625580738,
+      "fraction_of_four_client_cpus": 0.19001866563951844,
+      "server_cores": 3.9654737353714564
+    },
+    {
+      "round": 2,
+      "name": "candidate",
+      "case": "range_scan_100",
+      "client_cores": 0.7725396829443941,
+      "fraction_of_four_client_cpus": 0.19313492073609853,
+      "server_cores": 3.981609416591943
+    },
+    {
+      "round": 3,
+      "name": "baseline",
+      "case": "range_scan_100",
+      "client_cores": 0.76278641052533,
+      "fraction_of_four_client_cpus": 0.1906966026313325,
+      "server_cores": 3.9696531115982
+    },
+    {
+      "round": 3,
+      "name": "candidate",
+      "case": "range_scan_100",
+      "client_cores": 0.7667649272260056,
+      "fraction_of_four_client_cpus": 0.1916912318065014,
+      "server_cores": 3.970193724750234
+    },
+    {
+      "round": 4,
+      "name": "baseline",
+      "case": "range_scan_100",
+      "client_cores": 0.7617416131356078,
+      "fraction_of_four_client_cpus": 0.19043540328390196,
+      "server_cores": 3.9656300950134953
+    },
+    {
+      "round": 4,
+      "name": "candidate",
+      "case": "range_scan_100",
+      "client_cores": 0.7624972747584469,
+      "fraction_of_four_client_cpus": 0.19062431868961172,
+      "server_cores": 3.9708219838496084
+    },
+    {
+      "round": 5,
+      "name": "baseline",
+      "case": "range_scan_100",
+      "client_cores": 0.7679440019445318,
+      "fraction_of_four_client_cpus": 0.19198600048613296,
+      "server_cores": 3.9668891020506174
+    },
+    {
+      "round": 5,
+      "name": "candidate",
+      "case": "range_scan_100",
+      "client_cores": 0.7711091738257987,
+      "fraction_of_four_client_cpus": 0.19277729345644967,
+      "server_cores": 3.9654938351140676
+    },
+    {
+      "round": 1,
+      "name": "baseline",
+      "case": "point_select",
+      "client_cores": 0.2577095849642559,
+      "fraction_of_four_client_cpus": 0.06442739624106397,
+      "server_cores": 0.7599714491899362
+    },
+    {
+      "round": 1,
+      "name": "candidate",
+      "case": "point_select",
+      "client_cores": 0.258389609456175,
+      "fraction_of_four_client_cpus": 0.06459740236404375,
+      "server_cores": 0.7619701455017177
+    },
+    {
+      "round": 2,
+      "name": "baseline",
+      "case": "point_select",
+      "client_cores": 0.2632450248063433,
+      "fraction_of_four_client_cpus": 0.06581125620158583,
+      "server_cores": 0.7539752483497523
+    },
+    {
+      "round": 2,
+      "name": "candidate",
+      "case": "point_select",
+      "client_cores": 0.2660587168270018,
+      "fraction_of_four_client_cpus": 0.06651467920675044,
+      "server_cores": 0.7526436118882518
+    },
+    {
+      "round": 3,
+      "name": "baseline",
+      "case": "point_select",
+      "client_cores": 0.2546644008981415,
+      "fraction_of_four_client_cpus": 0.06366610022453538,
+      "server_cores": 0.7653058889539527
+    },
+    {
+      "round": 3,
+      "name": "candidate",
+      "case": "point_select",
+      "client_cores": 0.26351651171407403,
+      "fraction_of_four_client_cpus": 0.06587912792851851,
+      "server_cores": 0.7559679990178362
+    },
+    {
+      "round": 4,
+      "name": "baseline",
+      "case": "point_select",
+      "client_cores": 0.2653304208925137,
+      "fraction_of_four_client_cpus": 0.06633260522312842,
+      "server_cores": 0.7519688842795393
+    },
+    {
+      "round": 4,
+      "name": "candidate",
+      "case": "point_select",
+      "client_cores": 0.2568281907958749,
+      "fraction_of_four_client_cpus": 0.06420704769896872,
+      "server_cores": 0.760648079419486
+    },
+    {
+      "round": 5,
+      "name": "baseline",
+      "case": "point_select",
+      "client_cores": 0.26251418974215585,
+      "fraction_of_four_client_cpus": 0.06562854743553896,
+      "server_cores": 0.7559734768217587
+    },
+    {
+      "round": 5,
+      "name": "candidate",
+      "case": "point_select",
+      "client_cores": 0.26490274060569596,
+      "fraction_of_four_client_cpus": 0.06622568515142399,
+      "server_cores": 0.7526397907025578
+    }
+  ],
+  "server_limiter_check_passes": true,
+  "phase": "dirty",
+  "paired": {
+    "range_scan_100": {
+      "ratios": {
+        "tps": [
+          0.9911056207535516,
+          1.0171143035602748,
+          0.9983904915191284,
+          1.0175306786877034,
+          1.0032126529099221
+        ],
+        "cpu": [
+          1.0086351308627222,
+          0.9872238009291636,
+          1.0017056412056828,
+          0.9841106493991028,
+          0.9964958573837409
+        ],
+        "p99_ms": [
+          0.9904880066170388,
+          0.9627659574468086,
+          0.9830508474576272,
+          0.9428455614106201,
+          0.9726821192052981
+        ],
+        "peak_mem_mb": [
+          1.0128205128205128,
+          1.3502024291497976,
+          0.8877005347593584,
+          0.8920377867746289,
+          0.8845374746792708
+        ]
+      },
+      "median_ratios": {
+        "tps": 1.0032126529099221,
+        "cpu": 0.9964958573837409,
+        "p99_ms": 0.9726821192052981,
+        "peak_mem_mb": 0.8920377867746289
+      }
+    },
+    "point_select": {
+      "ratios": {
+        "tps": [
+          1.0061011904761905,
+          1.0181493603094318,
+          1.0004436557231589,
+          1.0010412018444146,
+          1.0133413281367112
+        ],
+        "cpu": [
+          0.9966600617485458,
+          0.9805057538097118,
+          0.987415514780298,
+          1.0103826379488734,
+          0.9824846199664223
+        ],
+        "p99_ms": [
+          0.9940119760479041,
+          0.9880239520958084,
+          0.9970059880239521,
+          0.9940298507462687,
+          0.9708454810495627
+        ],
+        "peak_mem_mb": [
+          1.0054347826086958,
+          0.9273097826086957,
+          0.8847457627118644,
+          0.8865489130434784,
+          0.8845108695652174
+        ]
+      },
+      "median_ratios": {
+        "tps": 1.0061011904761905,
+        "cpu": 0.987415514780298,
+        "p99_ms": 0.9940119760479041,
+        "peak_mem_mb": 0.8865489130434784
+      }
+    }
+  },
+  "one_sided_exact_signed_rank_p": 0.21875,
+  "hodges_lehmann_gain_pct": 0.42312357901236514,
+  "memory_and_tail_guards_pass": true,
+  "performance_rule_passes": true,
+  "limit": "Source gates, accounting/identity audit, and dirty-heap control remain separate prerequisites. CPU/op under saturation is not independent of throughput."
+}

@@ -1,0 +1,70 @@
+[
+  {
+    "name": "build",
+    "command": [
+      "cargo",
+      "build"
+    ],
+    "exit": 0,
+    "started_unix": 1793658056.1111524,
+    "ended_unix": 1793658161.0486302
+  },
+  {
+    "name": "test-rest-of-workspace",
+    "command": [
+      "cargo",
+      "test",
+      "--workspace",
+      "--exclude",
+      "pg-engine"
+    ],
+    "exit": 0,
+    "started_unix": 1793658163.7994235,
+    "ended_unix": 1793658169.1627197
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy"
+    ],
+    "exit": 0,
+    "started_unix": 1793658171.9136775,
+    "ended_unix": 1793658219.471333
+  },
+  {
+    "name": "clippy-all-targets",
+    "command": [
+      "cargo",
+      "clippy",
+      "-p",
+      "pg-engine",
+      "--all-targets"
+    ],
+    "exit": 0,
+    "started_unix": 1793658222.1918583,
+    "ended_unix": 1793658222.5039442
+  },
+  {
+    "name": "postgres",
+    "command": [
+      "pnpm",
+      "test:pg",
+      "--force"
+    ],
+    "exit": 101,
+    "started_unix": 1793658225.3481753,
+    "ended_unix": 1793658644.486316
+  },
+  {
+    "name": "regression",
+    "command": [
+      "python3",
+      "-I",
+      "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/run_regress.py"
+    ],
+    "exit": 0,
+    "started_unix": 1793658647.2264688,
+    "ended_unix": 1793658934.5318613
+  }
+]

@@ -1,0 +1,9 @@
+{
+  "passes": true,
+  "newly_differing_units": 0,
+  "files": 230,
+  "units": 51150,
+  "builds": "release/release",
+  "schedules": "full/full",
+  "comparison": "retained historical baseline; zero newly differing units; existing differences not product compatibility acceptance"
+}

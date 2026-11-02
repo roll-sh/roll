@@ -1,0 +1,6 @@
+{
+  "action": "source_checks_pending",
+  "performance_checks_pass": true,
+  "source_acceptance": false,
+  "reason": "primary, dirty control and swapped-slot confirmation passed"
+}

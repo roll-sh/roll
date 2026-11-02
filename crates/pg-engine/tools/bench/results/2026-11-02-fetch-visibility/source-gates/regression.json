@@ -1,0 +1,11 @@
+{
+  "name": "regression",
+  "command": [
+    "python3",
+    "-I",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/fetched-fast-path/run_regress.py"
+  ],
+  "exit": 0,
+  "started_unix": 1793658647.2264688,
+  "ended_unix": 1793658934.5318613
+}
