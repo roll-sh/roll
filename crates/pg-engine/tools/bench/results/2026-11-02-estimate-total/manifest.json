@@ -1,0 +1,38 @@
+{
+  "outcome": "rejected; both production changes reverted",
+  "published_parent": "c1a1d2d20ae27b64d847594434f16c15d33fada1",
+  "candidate_source": "1713aa40fcd7282de3990c38e1fe3cfc28604301",
+  "candidate_commits": [
+    "f4155ed6",
+    "1713aa40"
+  ],
+  "revert_commits": [
+    "e8425dea",
+    "7cdbee00"
+  ],
+  "restored_source_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "baseline_engine_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "candidate_engine_sha256": "81e690c510d8e46cbdb5106d8dad58820b3542cb57cf0552e30b815b26b8ffde",
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "invocations": 24,
+  "checked_operations": 1879306,
+  "evidence": {
+    "acceptance_rule": "HYPOTHESIS.md",
+    "comparison": "candidate-vs-baseline/summary.json",
+    "decision": "audited-decision.json",
+    "runtime": "runtime.json",
+    "candidate_build": "candidate-binary.json",
+    "source_restoration": "source-restoration.json",
+    "restored_build": "restored-build.json",
+    "cleanup": "cleanup.json",
+    "live_cleanup": "final-live-cleanup.json",
+    "build_control_mismatch": "bin-only-restored-build.json"
+  },
+  "candidate_verification": "Focused release SQL-driven bitwise cost test and release build passed. Full candidate gates and regression were not run after performance rejection.",
+  "measurement_limits": "Warm 200,000-row read workload, five alternating ten-second measured pairs plus warmup. Small observed negative range signal; point ranges overlap. No general zero-benefit, estimator CPU attribution, memory advantage, or production-mode claim.",
+  "export_policy": "Executable bytes, fixture directories and temporary build files are retained locally and omitted. Captured absolute paths preserve historical cache provenance; evidence paths in this manifest are export-relative.",
+  "audit_limits": "verify.py regenerates the fixture expectation and recomputes summaries from raw client/resource records. Build exits, original fixture-file equality, binary hashes, source equality and cleanup are recorded evidence, not independently rerun by the portable audit. Omitted executable bytes cannot be rehashed from this export.",
+  "build_control_limit": "Candidate selected --bin roll-engine only; baseline also selected --example bench --example scan_bench. Different Cargo dependency fingerprints were confirmed by rebuilding reverted source with the candidate command. The comparison does not isolate source changes; rejection records failure to establish the required gain, not a source-only negative effect."
+}

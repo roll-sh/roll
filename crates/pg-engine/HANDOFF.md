@@ -112,11 +112,24 @@ stack limits, not estimator self time or an optimization result. Records and aud
 are in `tools/bench/results/2026-11-02-planning-cpu/`. Services are stopped and the
 profiler's memory/swap caps are restored to 512 MiB.
 
-The next isolated candidate shares needed-column masks in `estimate_builder` and
-returns only the root total for session costing, avoiding discarded estimate-result
-extraction. It must retain the full builder and all existing cost formulas. It has
-not been compiled, integrated or measured. Broad formatting suppression remains
-deferred because some rendered strings affect ordering and subplan semantics.
+The total-only extraction candidate `1713aa40` was tested and rejected. Its focused
+release SQL bitwise test and release build pass, with matching live plans/results
+and counters. Five alternating ten-second pairs give range8 baseline/candidate
+8,871/8,820 operations/s and 445.22/447.22 microseconds of server CPU per operation.
+The small negative throughput signal fails the required gain gate; point1 ranges
+overlap. Candidate and baseline builds selected different Cargo targets and have
+different dependency fingerprints, so the source-only performance effect is
+unresolved. All 24 invocations check 1,879,306 operations without errors. Reverts
+`e8425dea` and `7cdbee00` restore the verified histogram source. A release rebuild
+with the baseline Cargo targets restores its exact engine hash `5cfc7904…e51ffd1`.
+Full candidate gates
+and regression were not run after the failed performance gate. Records are in
+`tools/bench/results/2026-11-02-estimate-total/`. Services are stopped, data retained.
+Broad formatting suppression remains deferred because some rendered strings affect
+ordering and subplan semantics. Future work must target a measured substantial
+component inside binding/costing rather than infer gains from their total ancestry.
+Future comparisons must select matching Cargo targets and verify dependency
+fingerprints alongside source and executable identities.
 
 The next performance target is repeated custom-query planning and costing. An exact
 named extended-protocol probe shows both servers choose custom plans for all twenty

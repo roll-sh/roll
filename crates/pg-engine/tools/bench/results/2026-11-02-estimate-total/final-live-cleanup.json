@@ -1,0 +1,20 @@
+{
+  "at_utc": "2026-11-02T03:15:00.631650+00:00",
+  "engines": [
+    {
+      "name": "baseline",
+      "pid": 1340671,
+      "pid_absent": true,
+      "port": 53340,
+      "connection_refused": true
+    },
+    {
+      "name": "candidate",
+      "pid": 1341778,
+      "pid_absent": true,
+      "port": 53341,
+      "connection_refused": true
+    }
+  ],
+  "helper_absent": true
+}

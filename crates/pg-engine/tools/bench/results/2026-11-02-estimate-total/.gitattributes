@@ -1,0 +1,3 @@
+# Preserve hashed evidence bytes across checkout settings.
+* -text
+*.log -whitespace

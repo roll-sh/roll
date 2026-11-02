@@ -177,6 +177,29 @@ engines are stopped and the profiler is restored to its stopped 512 MiB caps.
 Details, decoded stacks, scripts, limits, and a portable audit are in
 [the CPU ancestry diagnostic](tools/bench/results/2026-11-02-planning-cpu/README.md).
 
+### Rejected total-only cost extraction experiment
+
+Candidate `1713aa40` shared needed-column masks and skipped discarded metadata
+extraction after the existing cost builder. Its SQL-driven bitwise cost test and
+release build pass; live settings, plans, parameterized results and counters match.
+Five alternating ten-second pairs give range8 throughput of 8,871 (8,859–8,888)
+operations/s for baseline and 8,820 (8,741–8,842) for the candidate, a small negative
+signal of 0.575%. Server CPU is 445.22 versus 447.22 microseconds per operation.
+The median gap of 51 operations/s is below the candidate's full spread of 101,
+while throughput ranges do not overlap. Point1 ranges overlap. No memory advantage
+or broader regression is established. The candidate selected only the engine in
+Cargo; the baseline also selected benchmark examples. Restoration exposed different
+dependency fingerprints, so this comparison cannot isolate the source changes.
+
+The candidate fails the required gain threshold and was reverted at `e8425dea`
+and `7cdbee00`. All 24 invocations, including warmup, check their 1,879,306 operations
+with zero errors; fixture digests match. Full candidate gates and regression were
+not run after performance rejection. Restored production source matches the verified
+histogram baseline, and the matched-target rebuild restores its exact binary hash.
+All experiment services are stopped and saved data is retained.
+Records and portable audit are in
+[the total-only experiment](tools/bench/results/2026-11-02-estimate-total/README.md).
+
 ## Checked scan and index measurements (2026-11-01)
 
 Source `7f35a185` makes the 2M-row top-N query 6.8 times faster than engine baseline

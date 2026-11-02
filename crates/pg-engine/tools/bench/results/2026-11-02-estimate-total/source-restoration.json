@@ -1,0 +1,9 @@
+{
+  "at_utc": "2026-11-02T03:03:02.647463+00:00",
+  "candidate_source": "1713aa40fcd7282de3990c38e1fe3cfc28604301",
+  "restored_head": "7cdbee001d3e2753e19975993a8b62c3083f4817",
+  "src_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "published_src_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "production_diff_empty": true,
+  "decision": "Reject under predeclared performance gate; range8 median -0.575%, CPU higher. This is not proof of zero benefit from the omitted work in every context."
+}
