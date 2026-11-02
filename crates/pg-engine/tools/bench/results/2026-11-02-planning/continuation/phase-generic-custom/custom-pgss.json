@@ -1,0 +1,27 @@
+{
+  "columns": [
+    "queryid",
+    "query",
+    "plans",
+    "calls",
+    "total_plan_time_ms",
+    "total_exec_time_ms_inclusive",
+    "rows"
+  ],
+  "raw": [
+    "-2539990638511162338",
+    "SELECT id, balance FROM accounts WHERE id BETWEEN $1 AND $1 + $2 ORDER BY id",
+    "118291",
+    "118291",
+    "19006.381547000583",
+    "44382.01486299974",
+    "11829100"
+  ],
+  "includes_warmup": true,
+  "checked_ops": 118291,
+  "planning_elapsed_us_per_call": 160.6747896881469,
+  "inclusive_elapsed_us_per_call": 375.1935046875903,
+  "remaining_elapsed_us_per_call": 214.51871499944338,
+  "planning_fraction_of_inclusive_elapsed": 0.4282451259968768,
+  "limits": "Elapsed/instrumented; not CPU share; excludes Parse/Describe; no root-cost attribution."
+}

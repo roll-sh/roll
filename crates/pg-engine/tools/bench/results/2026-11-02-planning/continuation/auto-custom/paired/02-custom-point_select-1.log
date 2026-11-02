@@ -1,0 +1,1 @@
+RESULT	custom	oltp	point_select	clients=1	tps=6702	ops=67019	elapsed_s=10.000453568	mean_ms=0.149	p50_ms=0.136	p95_ms=0.214	p99_ms=0.338	errors=0	peak_mem_mb=107.6	validation_version=oltp-values-v1	checked_ops=67019

@@ -1,0 +1,1 @@
+RESULT	generic	oltp	range_scan_100	clients=8	tps=12888	ops=128896	elapsed_s=10.001084112	mean_ms=0.620	p50_ms=0.571	p95_ms=1.115	p99_ms=1.560	errors=0	peak_mem_mb=110.1	validation_version=oltp-values-v1	checked_ops=128896

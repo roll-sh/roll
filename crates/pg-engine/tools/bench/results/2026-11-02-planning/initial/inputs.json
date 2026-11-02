@@ -1,0 +1,21 @@
+{
+  "at_utc": "2026-11-02T01:47:36.387449+00:00",
+  "hashes": {
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/paired_oltp.py": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tests/clients/wire.py": "ecb0dde8aa6bda441a642a11a71f6ea5cfc1d1d8b79a8a74e8653b37e61e698b"
+  },
+  "server_source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "engine_production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "parent_head": "1a53dc93d689e22a806855296c50cd1dbe918c38",
+  "parent_status": "",
+  "fixture": "/home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/baseline-data",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "client_source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+  "load": "1.90 2.21 2.91 1/2750 249063\n",
+  "online_cpus": 36,
+  "client_affinity": "32-35",
+  "server_affinity": "28-31",
+  "psql_image": "postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+}

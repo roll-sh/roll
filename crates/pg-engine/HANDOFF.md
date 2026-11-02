@@ -87,6 +87,19 @@ were run; its additional SQL-activation test remains isolated and uncompiled.
 The restored production source is identical to verified `90b5525f`.
 Records are in `tools/bench/results/2026-11-02-btree-selectivity/`.
 
+The planning-mode diagnostic now confirms a large mode-sensitive range cost.
+Five alternating ten-second pairs give range8 auto/generic medians of 8,810/12,765
+operations/s, with 448.28/303.14 microseconds of server CPU per operation. Auto and
+forced-custom controls overlap. A separate instrumented one-client pass records
+custom planning elapsed time of 160.67 microseconds within 375.19 microseconds of
+inclusive execution. These are overlapping elapsed timers, not CPU shares, and
+Param/Const bounds and folding differ across modes. No production setting or engine
+code changed. All 84 completed invocations and 4,802,187 operations are checked.
+The initial safe bind failure and successful continuation remain explicit in
+`tools/bench/results/2026-11-02-planning/README.md`. Its portable audit passes.
+All owned diagnostic services are stopped, with fixtures retained. Next, collect
+CPU stacks that distinguish custom binding from repeated root-cost estimation.
+
 The next performance target is repeated custom-query planning and costing. An exact
 named extended-protocol probe shows both servers choose custom plans for all twenty
 ordered range executions, while point reads switch to generic after five executions.

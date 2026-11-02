@@ -128,6 +128,34 @@ identical to the previously verified `90b5525f`.
 Portable records are in `tools/bench/results/2026-11-02-btree-selectivity/`.
 All experiment services are stopped and fixture data is retained.
 
+### Planning-mode diagnostic
+
+A separate diagnostic keeps the verified histogram engine and checked client fixed.
+Five alternating ten-second pairs give eight-client range throughput of 8,810
+(8,787–8,883) operations/s in auto mode and 12,765 (12,705–12,888) with forced
+generic plans. Server CPU falls from 448.28 to 303.14 microseconds per operation.
+Both modes use approximately four server cores; client use is about 0.84 and 1.19
+cores. Auto and forced-custom range controls overlap. Point auto/generic controls
+also overlap, and no memory advantage is established.
+
+A separate one-client instrumented phase pass records custom planning elapsed time
+of 160.67 microseconds per call within 375.19 microseconds of inclusive execution.
+Generic records 0.67 within 234.13 microseconds. Execution includes planning, so the
+two timers must not be added. These are elapsed times with instrumentation overhead,
+not CPU shares. Planning-span counts reconcile with every checked operation,
+including warmup; they do not count actual rebuilds. Parse/Describe is outside the
+spans, and no result isolates `plan_cost_estimate`.
+
+Plans preserve scan structure, direction, and projection, but Param/Const bounds
+and folding differ. The mode delta therefore includes possible executor differences.
+This is a diagnostic, with no engine change, PostgreSQL comparison, or production
+mode recommendation. All 84 completed invocations have zero errors and 4,802,187
+checked operations. The initial run completed one block before a safe reused-port
+bind failure; a continuation completed the other two blocks on distinct ports.
+All owned processes and helpers are stopped, with data retained.
+Portable records and the read-only audit are in
+[the planning diagnostic](tools/bench/results/2026-11-02-planning/README.md).
+
 ## Checked scan and index measurements (2026-11-01)
 
 Source `7f35a185` makes the 2M-row top-N query 6.8 times faster than engine baseline

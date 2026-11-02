@@ -1,0 +1,4 @@
+# Preserve hashed evidence bytes across checkout line-ending settings.
+* -text
+# Captured output is retained byte for byte.
+*.log -whitespace

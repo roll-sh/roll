@@ -1,0 +1,27 @@
+[
+  {
+    "pid": 372052,
+    "stopped": true,
+    "exit": 0
+  },
+  {
+    "pid": 373459,
+    "stopped": true,
+    "exit": 0
+  },
+  {
+    "pid": 470527,
+    "stopped": true,
+    "exit": 0
+  },
+  {
+    "pid": 472224,
+    "stopped": true,
+    "exit": 0
+  },
+  {
+    "helper_id": "ae28ce54f35ce13859d40f62db23521731ca10000ec983f0729d72f33b451c6a",
+    "remove_exit": 0,
+    "stderr": ""
+  }
+]
