@@ -2120,6 +2120,218 @@ fn array_len(e: &Expr) -> f64 {
     }
 }
 
+#[cfg(test)]
+mod btcost_tests {
+    use super::*;
+    use crate::engine::{Engine, EngineOptions};
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static RECOMPUTE: Cell<bool> = const { Cell::new(false) };
+        pub(super) static REUSED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn bits(c: &AmCost) -> ([u64; 5], Option<u32>) {
+        (
+            [
+                c.startup.to_bits(),
+                c.total.to_bits(),
+                c.sel.to_bits(),
+                c.correlation.to_bits(),
+                c.pages.to_bits(),
+            ],
+            c.disabled,
+        )
+    }
+
+    fn compare(p: &Planner<'_, '_>, rel: &Rel, ii: &IndexInfo, qs: &[IClause], reuse: bool) {
+        for loops in [1.0, 7.0] {
+            REUSED.set(false);
+            let cached = p.btcost(rel, ii, qs, loops);
+            assert_eq!(REUSED.get(), reuse, "{qs:?}");
+            RECOMPUTE.set(true);
+            let raw = p.btcost(rel, ii, qs, loops);
+            RECOMPUTE.set(false);
+            assert_eq!(bits(&cached), bits(&raw), "{qs:?}");
+        }
+    }
+
+    fn integer(ty: &DataType, n: i64) -> Expr {
+        let v = match ty {
+            DataType::Int2 => Value::Int2(n.try_into().unwrap()),
+            DataType::Int4 => Value::Int4(n.try_into().unwrap()),
+            DataType::Int8 => Value::Int8(n),
+            _ => unreachable!(),
+        };
+        Expr::Const(v, ty.clone())
+    }
+
+    fn clause(ii: &IndexInfo, op: &'static str, value: Expr, reversed: bool) -> IClause {
+        let key = ii.keys[0].clone();
+        let d = crate::sql::func::resolve_binop(op, &key.ty(), &value.ty())
+            .unwrap()
+            .def;
+        let args = if reversed {
+            vec![value, key]
+        } else {
+            vec![key, value]
+        };
+        match_clause(ii, 0, 0, &Expr::Call(d, args, DataType::Bool), None).unwrap()
+    }
+
+    #[test]
+    fn integer_btree_selectivity_reuse_is_bitwise_equal() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(EngineOptions {
+            data_dir: dir.path().to_path_buf(),
+            sync: false,
+            cache_bytes: 4 << 20,
+            memtable_bytes: 1 << 20,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut session = engine.connect(1, "postgres", "postgres", "btcost").unwrap();
+        for (name, sqlty) in [
+            ("cost2", "smallint"),
+            ("cost4", "integer"),
+            ("cost8", "bigint"),
+        ] {
+            session
+                .query(&format!(
+                    "CREATE TABLE {name} (id {sqlty} PRIMARY KEY, other integer)"
+                ))
+                .unwrap();
+            for state in 0..4 {
+                if state == 1 {
+                    session
+                        .query(&format!(
+                            "INSERT INTO {name} SELECT g, g FROM generate_series(0, 100) g"
+                        ))
+                        .unwrap();
+                } else if state == 2 {
+                    session.query(&format!("ANALYZE {name}")).unwrap();
+                } else if state == 3 {
+                    session
+                        .query(&format!(
+                            "CREATE STATISTICS {name}_ext ON id, other FROM {name}"
+                        ))
+                        .unwrap();
+                    session.query(&format!("ANALYZE {name}")).unwrap();
+                }
+                session
+                    .apply_step(|ctx| {
+                        let p = Planner::new(ctx);
+                        let table = p
+                            .cat
+                            .tables
+                            .values()
+                            .find(|t| t.name == name)
+                            .unwrap()
+                            .clone();
+                        let (size, allvisfrac) = rel_size(&table, ctx);
+                        let ii = index_infos(ctx, &table, size.tuples).remove(0);
+                        let rel = Rel {
+                            table,
+                            size,
+                            allvisfrac,
+                            quals: Vec::new(),
+                            rows: 0.0,
+                            qual_cost: 0.0,
+                            qual_startup: 0.0,
+                            needed: vec![true, true],
+                            other: false,
+                            indexes: vec![ii.clone()],
+                            loop_count: 1.0,
+                            exprs: Vec::new(),
+                            booleq: None,
+                            written: Arc::default(),
+                            acl: Arc::new((true, vec![true, true])),
+                            hidden: Arc::default(),
+                            params: Arc::default(),
+                        };
+                        let ty = &ii.keys[0].ty();
+                        let reuse = state != 3;
+                        let edges = match ty {
+                            DataType::Int2 => (i16::MIN as i64, i16::MAX as i64),
+                            DataType::Int4 => (i32::MIN as i64, i32::MAX as i64),
+                            DataType::Int8 => (i64::MIN, i64::MAX),
+                            _ => unreachable!(),
+                        };
+                        for (lo, hi) in [(10, 20), (20, 10), (-100, -1), (101, 200), edges] {
+                            let qs = [
+                                clause(&ii, ">=", integer(ty, lo), false),
+                                clause(&ii, "<=", integer(ty, hi), false),
+                            ];
+                            compare(&p, &rel, &ii, &qs, reuse);
+                            compare(&p, &rel, &ii, &[qs[1].clone(), qs[0].clone()], reuse);
+                            let reversed = [
+                                clause(&ii, "<=", integer(ty, lo), true),
+                                clause(&ii, ">=", integer(ty, hi), true),
+                            ];
+                            compare(&p, &rel, &ii, &reversed, reuse);
+                        }
+                        compare(&p, &rel, &ii, &[], reuse);
+                        let eq = clause(&ii, "=", integer(ty, 10), false);
+                        compare(&p, &rel, &ii, &[eq.clone()], false);
+                        let qs = [
+                            clause(&ii, ">=", integer(ty, 10), false),
+                            clause(&ii, "<=", integer(ty, 20), false),
+                        ];
+                        let mut explicit = ii.clone();
+                        Arc::make_mut(&mut explicit.ix).columns[0].opclass =
+                            crate::catalog::system::default_opclass(403, ty);
+                        compare(&p, &rel, &explicit, &qs, reuse);
+                        let mut nonunique = ii.clone();
+                        let ix = Arc::make_mut(&mut nonunique.ix);
+                        ix.unique = false;
+                        ix.primary = false;
+                        compare(&p, &rel, &nonunique, &[eq.clone()], reuse);
+                        let mut partial = ii.clone();
+                        partial.pred.push(eq.expr);
+                        Arc::make_mut(&mut partial.ix).predicate = Some("id = 10".into());
+                        compare(&p, &rel, &partial, &qs, false);
+                        let mut multi = ii.clone();
+                        multi.keys.push(Expr::Col(1, DataType::Int4));
+                        let mut col = multi.ix.columns[0].clone();
+                        col.key = crate::catalog::IndexKey::Column(1);
+                        Arc::make_mut(&mut multi.ix).columns.push(col);
+                        compare(&p, &rel, &multi, &qs, false);
+                        let mut custom = ii.clone();
+                        Arc::make_mut(&mut custom.ix).columns[0].opclass = u32::MAX;
+                        compare(&p, &rel, &custom, &qs, false);
+                        let mut user = qs.clone();
+                        if let Expr::Call(d, ..) = &mut user[0].expr {
+                            Arc::make_mut(d).oid = u32::MAX;
+                        }
+                        compare(&p, &rel, &ii, &user, false);
+                        for value in [
+                            Expr::Param(0, ty.clone()),
+                            Expr::Outer(1, 0, ty.clone()),
+                            Expr::Const(Value::Null, ty.clone()),
+                        ] {
+                            compare(&p, &rel, &ii, &[clause(&ii, ">=", value, false)], false);
+                        }
+                        let array = Expr::ArrayOp {
+                            left: Box::new(ii.keys[0].clone()),
+                            right: Box::new(Expr::Array(
+                                vec![integer(ty, 10), integer(ty, 20)],
+                                DataType::Array(Box::new(ty.clone())),
+                            )),
+                            op: crate::sql::func::resolve_binop("=", ty, ty).unwrap().def,
+                            all: false,
+                        };
+                        let array = match_clause(&ii, 0, 0, &array, None).unwrap();
+                        compare(&p, &rel, &ii, &[array], false);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        }
+        drop(session);
+        engine.shutdown();
+    }
+}
+
 /// What amcostestimate reports.
 struct AmCost {
     startup: f64,
@@ -2231,15 +2443,8 @@ impl Planner<'_, '_> {
         num_sa_scans: f64,
         loop_count: f64,
         orderbys: usize,
+        known_index_sel: Option<f64>,
     ) -> (AmCost, f64) {
-        let mut selq: Vec<Expr> = Vec::new();
-        let qexprs = qual_exprs(quals);
-        for p in &ii.pred {
-            if !implied_by(std::slice::from_ref(p), &qexprs) {
-                selq.push(p.clone());
-            }
-        }
-        selq.extend(qexprs.iter().cloned());
         let mut num_sa_scans = num_sa_scans;
         if num_sa_scans < 1.0 {
             num_sa_scans = 1.0;
@@ -2252,7 +2457,17 @@ impl Planner<'_, '_> {
                 }
             }
         }
-        let sel = self.sel(rel, &selq);
+        let sel = known_index_sel.unwrap_or_else(|| {
+            let mut selq: Vec<Expr> = Vec::new();
+            let qexprs = qual_exprs(quals);
+            for p in &ii.pred {
+                if !implied_by(std::slice::from_ref(p), &qexprs) {
+                    selq.push(p.clone());
+                }
+            }
+            selq.extend(qexprs.iter().cloned());
+            self.sel(rel, &selq)
+        });
         let mut tuples = num_index_tuples;
         if tuples <= 0.0 {
             tuples = (sel * rel.size.tuples / num_sa_scans).round_ties_even();
@@ -2390,6 +2605,7 @@ impl Planner<'_, '_> {
                 skip.push(q.expr.clone());
             }
         }
+        let mut known_index_sel = None;
         let num_index_tuples = if (ii.ix.unique || ii.ix.primary)
             && indexcol + 1 == nkey
             && eq_here
@@ -2406,12 +2622,72 @@ impl Planner<'_, '_> {
             }
             sq.extend(bound.iter().cloned());
             let s = self.sel(rel, &sq);
+            if bound.len() == quals.len()
+                && ii.pred.is_empty()
+                && ii.ix.predicate.is_none()
+                && ii.ix.columns.len() == 1
+                && rel.params.is_empty()
+                && !cat_has_statistics(&self.cat, rel.table.oid)
+                && let [Expr::Col(col, ty)] = ii.keys.as_slice()
+                && matches!(ty, DataType::Int2 | DataType::Int4 | DataType::Int8)
+                && rel.table.columns.get(*col).is_some_and(|c| c.ty == *ty)
+                && matches!(ii.ix.columns[0].key, crate::catalog::IndexKey::Column(c) if c == *col)
+                && matches!((ty, match ii.ix.columns[0].opclass {
+                    0 => self.cat.default_opclass(403, ty),
+                    oid => oid,
+                }), (DataType::Int2, 1979) | (DataType::Int4, 1978) | (DataType::Int8, 3124))
+                && costs::col_stats(&self.cat, rel.table.oid, *col).is_none_or(|s| {
+                    s.slots.iter().filter(|s| matches!(s.kind, 1 | 2)).all(|s| {
+                        s.values.as_ref().is_none_or(|(t, _)| t == ty)
+                    })
+                })
+                && quals.iter().all(|q| {
+                    let Expr::Call(d, args, DataType::Bool) = &q.expr else { return false };
+                    let [Expr::Col(c, t), Expr::Const(value, ct)] = args.as_slice() else { return false };
+                    let ops = &crate::sql::func::registry().binops;
+                    q.col == 0
+                        && !q.lossy
+                        && matches!(&q.kind, Kind::Op(op) if *op == d.name && btree_op(op))
+                        && d.volatility == 'i'
+                        && d.coll.is_none()
+                        && matches!(d.args.as_slice(), [a, b] if a == ty && b == ty)
+                        && c == col && t == ty && ct == ty
+                        && matches!(value, Value::Int2(_) | Value::Int4(_) | Value::Int8(_))
+                        && ops.get(d.name).into_iter().flatten()
+                            .chain(ops.get(commute(d.name)).into_iter().flatten())
+                            .any(|b| b.oid == d.oid && b.args == d.args
+                                && std::ptr::fn_addr_eq(b.imp, d.imp))
+                })
+            {
+                // Both lists contain every index qual, in the same order. Integer
+                // statistics use pure parsing/comparisons; endpoint() memoizes even
+                // misses, so another sel() cannot observe fresher endpoints. Keep the
+                // raw selectivity, before any tuple arithmetic or clamping.
+                known_index_sel = Some(s);
+                #[cfg(test)]
+                {
+                    assert_eq!(s.to_bits(), self.sel(rel, &sq).to_bits());
+                    if btcost_tests::RECOMPUTE.get() {
+                        known_index_sel = None;
+                    } else {
+                        btcost_tests::REUSED.set(true);
+                    }
+                }
+            }
             let t = s * rel.size.tuples;
             num_sa_scans = num_sa_scans.min((ii.pages * 0.3333333).ceil()).max(1.0);
             (t / num_sa_scans).round_ties_even()
         };
-        let (mut c, num_sa_scans) =
-            self.generic(rel, ii, quals, num_index_tuples, num_sa_scans, loop_count, 0);
+        let (mut c, num_sa_scans) = self.generic(
+            rel,
+            ii,
+            quals,
+            num_index_tuples,
+            num_sa_scans,
+            loop_count,
+            0,
+            known_index_sel,
+        );
         if ii.tuples > 1.0 {
             let d = (ii.tuples.ln() / 2f64.ln()).ceil() * CPU_OPERATOR_COST;
             c.startup += d;
@@ -2434,7 +2710,8 @@ impl Planner<'_, '_> {
         loop_count: f64,
         orderbys: usize,
     ) -> AmCost {
-        let (mut c, num_sa_scans) = self.generic(rel, ii, quals, 0.0, 0.0, loop_count, orderbys);
+        let (mut c, num_sa_scans) =
+            self.generic(rel, ii, quals, 0.0, 0.0, loop_count, orderbys, None);
         let height = if ii.pages > 1.0 {
             (ii.pages.ln() / 100f64.ln()) as i32
         } else {
@@ -2501,7 +2778,10 @@ impl Planner<'_, '_> {
     ) -> AmCost {
         match ii.am {
             Am::Btree => self.btcost(rel, ii, quals, loop_count),
-            Am::Hash | Am::Gin => self.generic(rel, ii, quals, 0.0, 0.0, loop_count, 0).0,
+            Am::Hash | Am::Gin => {
+                self.generic(rel, ii, quals, 0.0, 0.0, loop_count, 0, None)
+                    .0
+            }
             Am::Gist | Am::Spgist => self.gistcost(rel, ii, quals, loop_count, orderbys),
             Am::Brin => self.brincost(rel, ii, quals, loop_count),
             Am::Native(n) => self.native_cost(n.0, rel, ii, quals, loop_count, orderbys),
@@ -2519,13 +2799,15 @@ impl Planner<'_, '_> {
         orderbys: usize,
     ) -> AmCost {
         let Some(t) = self.ctx.catalog().index_table(ii.ix.table) else {
-            return self.generic(rel, ii, quals, 0.0, 0.0, loop_count, orderbys).0;
+            return self
+                .generic(rel, ii, quals, 0.0, 0.0, loop_count, orderbys, None)
+                .0;
         };
         let keys: Vec<Expr> = ii.keys.clone();
         let am = crate::ext::index_am::AmIndex::of(&self.ctx.catalog(), &t, &ii.ix, &keys, self.ctx);
         r.load(self.ctx);
         let tuples = r.am.cost_index_tuples(&am, ii.tuples).unwrap_or(0.0);
-        let (c, _) = self.generic(rel, ii, quals, tuples, 0.0, loop_count, orderbys);
+        let (c, _) = self.generic(rel, ii, quals, tuples, 0.0, loop_count, orderbys, None);
         let input = crate::ext::index_am::CostInput {
             has_orderbys: orderbys > 0,
             startup: c.startup,
