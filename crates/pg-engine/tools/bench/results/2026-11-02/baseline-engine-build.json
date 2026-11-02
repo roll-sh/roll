@@ -1,0 +1,10 @@
+{
+  "source": "7f35a185a6669ce4cf36b09076fddb110a3c5ad1",
+  "build_command": "cargo build --release -p pg-engine --bin roll-engine --example bench --example scan_bench",
+  "frozen_at": "2026-11-01T22:30:19.399031+00:00",
+  "files": {
+    "roll-engine": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349",
+    "bench": "875f53c8d065c85a890f6a421f04c5dfcd2aa6b7699f5dbb230d7058b7bfe1b4",
+    "scan_bench": "f71d70990e977a2c0c3c9b2f39e640ff610a5f5f589e43c479f126ee37049721"
+  }
+}

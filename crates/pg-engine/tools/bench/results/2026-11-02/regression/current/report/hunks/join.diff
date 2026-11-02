@@ -1,0 +1,21 @@
+# join: 924/925 units match; first 1 differing units (- reference, + engine)
+
+@@ unit 368 (sql line 1479) [wrong EXPLAIN] EXPLAIN plan text differs
+  -- Test PHV that winds up in a Result node, despite having nonempty nullingrels
+  explain (verbose, costs off)
+  select table_catalog, table_name
+  from int4_tbl t1
+    inner join (int8_tbl t2
+                left join information_schema.column_udt_usage on null)
+    on null;
++                               QUERY PLAN                               
++ -----------------------------------------------------------------------
+-                                                     QUERY PLAN                                                     
+- -------------------------------------------------------------------------------------------------------------------
+   Result
++    Output: column_udt_usage.table_catalog, column_udt_usage.table_name
+-    Output: (current_database())::information_schema.sql_identifier, (c.relname)::information_schema.sql_identifier
+     One-Time Filter: false
+  (3 rows)
+  
+

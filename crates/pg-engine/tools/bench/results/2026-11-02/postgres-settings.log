@@ -1,0 +1,15 @@
+fsync|on|
+full_page_writes|on|
+hash_mem_multiplier|2|
+maintenance_work_mem|262144|kB
+max_connections|100|
+max_parallel_workers|8|
+max_parallel_workers_per_gather|2|
+parallel_setup_cost|1000|
+parallel_tuple_cost|0.1|
+plan_cache_mode|auto|
+shared_buffers|262144|8kB
+synchronous_commit|on|
+work_mem|4096|kB
+PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+C|C

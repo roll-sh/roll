@@ -1,0 +1,1 @@
+RESULT	borrows	oltp	range_scan_100	clients=1	tps=1976	ops=5930	elapsed_s=3.000397936	mean_ms=0.505	p50_ms=0.479	p95_ms=0.639	p99_ms=1.014	errors=0	peak_mem_mb=104.4	validation_version=oltp-values-v1	checked_ops=5930

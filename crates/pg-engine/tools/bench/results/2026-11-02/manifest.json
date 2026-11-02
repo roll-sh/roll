@@ -1,0 +1,89 @@
+{
+  "source": "752515b7d537e55b250442a5c8f639d31b4c0a06",
+  "rust_tree_identical_to": "7f35a185",
+  "started_at_utc": "2026-11-01T23:15:28.346603+00:00",
+  "binary_sha256": {
+    "bench": "875f53c8d065c85a890f6a421f04c5dfcd2aa6b7699f5dbb230d7058b7bfe1b4",
+    "scan_bench": "f71d70990e977a2c0c3c9b2f39e640ff610a5f5f589e43c479f126ee37049721",
+    "roll-engine": "108b0eca2730201a3d12973eed7c55237388c1781effc0c302929d43d1a36349"
+  },
+  "server_cpus": "28-31",
+  "client_cpus": "32-35",
+  "port": 53110,
+  "agents": [
+    "sol-oltp-allocations-20261102-r1",
+    "sol-oltp-catalog-20261102-r1",
+    "sol-oltp-bench_checks-20261102-r1"
+  ],
+  "campaign": "checked-prepared-reads-and-histogram-borrowing",
+  "checked_baseline_source": "55fe2f7b",
+  "current_source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "production_candidate": "histogram only",
+  "checked_client_manifest": "checked-client/manifest.json",
+  "baseline_comparison": "checked-baseline-vs-pg/summary.json",
+  "plan_choice_probe": "plan-choice-results.json",
+  "live_negative_controls": "live-negative-results.json",
+  "independent_fixture": "independent-fixture.json",
+  "services": {
+    "baseline_port": 53110,
+    "borrows_port": 53111,
+    "postgres_port": 53100,
+    "profiler_memory_limit_mb": 512,
+    "state": "stopped; data retained"
+  },
+  "histogram_candidate": "6ed69147",
+  "status": "Verified: histogram-only production change accepted; all gates pass; full regression identical to release baseline; services stopped; publication pending",
+  "rejected_experiment": {
+    "source": "37e71d81",
+    "evidence": "borrows-vs-baseline/summary.json",
+    "reverts": [
+      "ab374af3",
+      "5b32046d"
+    ],
+    "reason": "median improvements smaller than run-to-run variation",
+    "qualification": "Point8 improved all five pairs by median0.68%; rejected under conservative observed-spread threshold, not proof of zero benefit"
+  },
+  "final_client_manifest": "final-client/manifest.json",
+  "final_live_negative_controls": "final-live-negative-results.json",
+  "completed_comparisons": [
+    "borrows-vs-baseline",
+    "checked-baseline-vs-pg",
+    "final-dirty-vs-baseline",
+    "final-vs-pg",
+    "histogram-vs-baseline",
+    "point-control-vs-baseline",
+    "restarted-dirty-vs-baseline"
+  ],
+  "completed_controls": [
+    "read-values-tests.log",
+    "final-client-build-tests.log",
+    "live-negative-results.json",
+    "final-live-negative-results.json",
+    "plan-choice-results.json",
+    "independent-fixture.json"
+  ],
+  "runtime_observation": "runtime-latest.json",
+  "artifact_audit": "completed-evidence-audit.json",
+  "production_candidate_manifest": "histogram-bin/manifest.json",
+  "primary_range8": {
+    "before_ops_s": 8419,
+    "after_ops_s": 8829,
+    "before_server_cpu_us_per_op": 469.38694740174765,
+    "after_server_cpu_us_per_op": 446.1288984425085
+  },
+  "completed_at_utc": "2026-11-02T00:47:15.463124+00:00",
+  "final_verification": "final-verification.json",
+  "cleanup": [
+    "performance-cleanup.json",
+    "final-cleanup.json"
+  ],
+  "runtime_observation_note": "Historical comparisons retain incomplete provenance. Later comparisons use immutable runtime records or preserved per-comparison observations. runtime-latest.json reflects the last restart and must not replace earlier observations.",
+  "historical_provenance_limits": [
+    "Initial comparison uses unguarded client55fe2f7b; later client89e863fc includes malformed-NUMERIC guard; hashes differ.",
+    "Historical build metadata lacks complete compiler invocation/environment and clean-tree attestation.",
+    "Historical plan-choice and negative-control records lack executable hashes, timestamps and script hashes.",
+    "Initial PostgreSQL comparison lacks exact executable/image and observed CPU budget snapshot."
+  ],
+  "artifact_reference_base": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102",
+  "artifact_reference_note": "Relative artifact references in this campaign manifest use the original cache layout. In the portable export, comparison records are under raw/<comparison>/, client/server manifests are flattened as <name>-manifest.json, and comparisons.json embeds configs/summaries/runtime observations."
+}

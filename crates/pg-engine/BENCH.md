@@ -4,6 +4,103 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Checked OLTP histogram campaign (2026-11-02)
+
+Borrowing cached inequality histograms improves the 200k-account, eight-client
+100-row range workload by 4.9% against `7f35a185`. The measured source is `5b32046d`.
+It keeps the histogram's shared values and stores refreshed endpoints locally,
+preserving custom-plan choice, estimates, callback order and interpolation.
+
+Five alternating three-second samples per endpoint follow an unreported warmup pair.
+The same frozen release client checks every returned ID and value inside the timer.
+Both complete fixture digests match independent Python generation before and after
+measurement. The workload is `SELECT id, balance FROM accounts WHERE id BETWEEN $1
+AND $1 + 99 ORDER BY id`, with a named prepared statement and binary INT4 parameters.
+
+| Eight-client range reads | Baseline | Histogram change |
+| --- | --- | --- |
+| Fresh fixture, operations/s | 8,419 (8,312–8,499) | 8,829 (8,643–8,836) |
+| Server CPU, microseconds/operation | 469 (465–476) | 446 (446–455) |
+| Process RSS, MB | 123.5 (123.5–124.6) | 105.8 (105.8–107.0) |
+| Partially visible fixture, operations/s | 7,679 (7,671–7,756) | 8,066 (7,979–8,100) |
+| Server CPU, microseconds/operation | 517 (513–518) | 492 (489–498) |
+| Process RSS, MB | 117.0 (116.9–118.2) | 149.0 (115.3–165.6) |
+
+The fresh fixture has 1,471/1,471 all-visible pages; the partially visible fixture
+has 1,470/1,471. The initial processes had different warmup histories. RSS changes
+direction across the controls, so those samples establish no memory advantage.
+After restarting both processes with matched warmups, baseline RSS is 101.8 MB
+(101.1–102.7) and changed RSS is 103.1 MB (102.0–103.4). The earlier large gap
+does not reproduce. Throughput remains higher: 7,748 (7,731–7,782) to 7,957
+(7,910–8,063) operations/s; CPU falls from 513 to 499 microseconds per operation.
+
+One-client range throughput rises from 1,924 (1,907–1,938) to 2,022
+(1,983–2,056) operations/s. A short point-read comparison had a small negative
+signal. Five longer ten-second pairs reverse its direction: 34,087
+(33,778–34,193) to 34,366 (34,029–34,461) operations/s. No point-read speedup
+is claimed. Secondary lookup ranges overlap.
+
+At 8,829 operations/s and 446 microseconds of server CPU per operation, the engine
+uses about 3.94 CPU seconds per second across its four assigned CPUs. Client CPU
+is about 98 microseconds per operation, below one CPU in aggregate. This workload
+is limited by server CPU. A separate diagnostic profile has 729 samples and zero
+lost samples; allocation, expression copying and heap-fetch bookkeeping remain
+active. It does not assign all clone samples to one request phase.
+
+PostgreSQL still leads this OLTP workload. A final comparison using the same checked
+client gives the changed engine 8,786 (8,766–8,969) range operations/s against
+PostgreSQL's 37,765 (37,428–38,162). Server CPU is 447 versus 92.5 microseconds
+per operation. These are another five alternating pairs. PostgreSQL completes this workload
+about 4.3 times faster.
+
+Both endpoints use four server CPUs, separate client CPUs, host networking, durable
+settings, C locale, 4 MB work memory, hash multiplier 2 and 256 MB maintenance memory.
+The engine cache is configured to 2,048 MB; PostgreSQL shared buffers are 2,048 MB.
+PostgreSQL has an 8 GB cgroup limit. Process RSS and PostgreSQL cgroup anon+shmem
+measure different memory components. Runtime records preserve the pinned image,
+executable hashes, CPU affinities and resource limits.
+
+The client validates all point fields, every ordered range pair, and exact secondary
+count/sum results, including NULL and type checks. Six Rust tests, parser controls,
+and sixteen live wrong-value controls cover the validation path. Equal secondary
+aggregates cannot identify their contributing rows. The initial baseline comparison
+used client `55fe2f7b`; subsequent comparisons used `89e863fc`, which also rejects
+malformed NUMERIC payloads whose fractional digits would otherwise be rounded away.
+Both binary hashes are retained. The broad suite now checks reads before writes and
+reloads each write case/client fixture.
+
+Portal-parameter and catalog-handle borrow experiments were reverted. Their median
+gains are smaller than the observed run spreads under the conservative acceptance
+rule. Eight-client point reads did show a consistent 0.68% signal in that experiment;
+rejecting it does not prove zero benefit. No stored-TID pruning shortcut or broader
+range-plan cache was added.
+
+The portable samples and comparison records are in `tools/bench/results/2026-11-02/`.
+Raw commands, complete logs, frozen binaries, profiles and saved fixtures remain in
+`~/.cache/pg-engine-perf-20261101/oltp-20261102/`.
+
+
+### Verification and limits
+
+The matched release build, complete crate suite (430 passed, 18 ignored, zero failed),
+all-target Clippy, and `pnpm test:pg --unit` pass. Clippy retains eleven library
+warnings, three additional library-test warnings, and one differential-test warning.
+It also reports one new benchmark style warning, `chunks_exact_to_as_chunks`.
+The full release regression matches 51,148/51,150 units across 230 files, with no
+new differences or panics. Result rows and both remaining hunks are identical to
+release baseline `7f35a185`. The generated historical debug report is unchanged.
+Docker recovery e2e remains waived under the existing instruction, retaining its
+baseline of twelve passes and four WAL HTTP timeouts.
+
+The exported records include a read-only `verify.py`, raw measurement records,
+fixture digests, runtime observations, gate logs, and both regression reports.
+Historical build provenance lacks a complete compiler environment and clean-tree
+attestation. The initial PostgreSQL comparison lacks an observed runtime CPU-budget
+snapshot and exact image identity. The plan-choice and wrong-value probe records
+lack complete execution identities. Those gaps remain historical limits; later
+runtime snapshots do not fill them retroactively. All campaign services are stopped,
+and their saved data is retained.
+
 ## Checked scan and index measurements (2026-11-01)
 
 Source `7f35a185` makes the 2M-row top-N query 6.8 times faster than engine baseline

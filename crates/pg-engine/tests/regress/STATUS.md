@@ -8,6 +8,16 @@ file sees the catalogs the files before it left, as `pg_regress` gives them. The
 them (HANDOFF.md, "Regression suite"): edit only the prose by hand. `REPORT.md` and
 `results.tsv` next to this file are that run's report.
 
+Release performance verification (2026-11-02, tested source `5b32046d`): the
+histogram-borrowing change passes build, all crate tests (430 passed, 18 ignored,
+zero failed), Clippy, and PostgreSQL units. The full release run matches
+51,148/51,150 units across 230 files with zero panics or failed engine invocations.
+Its result rows and both remaining difference files are identical to the release
+baseline at `7f35a185`. Portable gate logs and both reports are in
+`../../tools/bench/results/2026-11-02/`; the read-only `verify.py` checks the export.
+The generated historical blocks below are unchanged. Docker recovery e2e retains
+the existing waiver and baseline described below.
+
 Final combined verification (2026-11-01, tested source `f24d3643`): build, focused
 checks, all crate tests (419 passed, 18 ignored, zero failed), Clippy, and
 `pnpm test:pg --unit` pass. The full run matches 51,148/51,150 units with no new

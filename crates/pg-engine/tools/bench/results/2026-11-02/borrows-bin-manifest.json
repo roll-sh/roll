@@ -1,0 +1,8 @@
+{
+  "source": "89e863fce5c92ca95c581d7daa578ddf80c9a83e",
+  "production_source": "37e71d81",
+  "production_tree": "24576ce15b1865e7e9bd6cbd0d212a9667894e63",
+  "binary_sha256": "5151fb51339693ff7f9375600347a93b6ad35bea2db28020a4c9abb285af5c6a",
+  "build_command": "cargo build --release -p pg-engine --bin roll-engine --example bench --example scan_bench",
+  "build_log": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/borrows-matched-release.log"
+}

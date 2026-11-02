@@ -1,0 +1,1 @@
+RESULT	histogram	oltp	secondary_lookup	clients=8	tps=24544	ops=73654	elapsed_s=3.000835790	mean_ms=0.325	p50_ms=0.310	p95_ms=0.523	p99_ms=0.793	errors=0	peak_mem_mb=106.1	validation_version=oltp-values-v1	checked_ops=73654

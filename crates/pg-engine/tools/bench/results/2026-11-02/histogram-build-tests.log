@@ -1,0 +1,14 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `release` profile [optimized + debuginfo] target(s) in 6m 51s
+     Running unittests src/lib.rs (target/release/deps/pg_engine-731620949f5ac500)
+
+running 4 tests
+test sql::costs::hist_ineq_tests::cached_histogram_boundaries_keep_equality_and_cutoffs ... ok
+test sql::costs::hist_ineq_tests::larger_histograms_refresh_only_probed_ends_and_interpolate_them ... ok
+test sql::costs::hist_ineq_tests::missing_or_short_histograms_do_not_fetch_endpoints ... ok
+test sql::costs::hist_ineq_tests::two_entries_replace_both_endpoints_or_neither ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 171 filtered out; finished in 0.00s
+
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `release` profile [optimized + debuginfo] target(s) in 7m 02s

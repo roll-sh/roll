@@ -45,40 +45,63 @@ harness and score in `tests/`:
 
 ## Where it stands
 
-The current measured Rust source is `7f35a185`, from the 2026-11-01 performance campaign.
-The release build, full release crate suite (426 passed, 18 ignored, zero failed),
-all-target Clippy, and `pnpm test:pg --unit` pass. Clippy reports eleven library warnings
-and four additional test warnings, all in files unchanged by the campaign.
+The current measured Rust source is `5b32046d`, from the 2026-11-02 OLTP campaign.
+The release build, full release crate suite (430 passed, 18 ignored, zero failed),
+all-target Clippy, and `pnpm test:pg --unit` pass. Clippy has eleven library warnings,
+three additional library-test warnings, one differential-test warning, and one new
+benchmark style warning. The full release regression matches 51,148/51,150 units
+across 230 files, with zero panics or failed engine invocations. Result rows and
+both remaining difference files are identical to release baseline `7f35a185`.
+They remain `join` 368 and the accepted internal EXPLAIN ANALYZE counter difference
+at `partition_prune` 410. The historical generated debug report is unchanged.
 
-Independent full release regression runs of baseline `0b950a11` and candidate `7f35a185`
-both match 51,148/51,150 units across 230 files. Result rows and difference files are
-identical, with zero panics or failed engine invocations. Only `join` 368 and the accepted
-internal EXPLAIN ANALYZE counter difference at `partition_prune` 410 remain. The historical
-generated debug report is unchanged. Portable verification and measurement records are in
-`tools/bench/results/2026-11-01/`.
+Borrowing cached inequality histograms is the only new production change. The
+200k-account, eight-client ordered range workload improves from 8,419 to 8,829
+operations/s, with server CPU falling from 469 to 446 microseconds per operation.
+Five alternating pairs, partially visible fixtures, and a matched-restart control
+support the range improvement. There is no demonstrated memory advantage.
+PostgreSQL still runs that range workload about 4.3 times faster. Portal-parameter
+and catalog-handle borrow experiments were reverted under the conservative
+acceptance rule. Their gains did not exceed the observed run spreads.
 
-The 2M-row top-N query improves from 0.5495 to 0.0807 seconds against the original engine,
-with server CPU falling from 0.55 to 0.28 seconds. Tuned PostgreSQL takes 0.0811 seconds,
-with overlapping timing and CPU ranges. The 200k-row speedup uses more CPU, and process
-RSS increases in the original-to-final comparison. There is no broad speed or memory
-advantage over PostgreSQL. [BENCH.md](BENCH.md) records all ranges, controls, and limits.
-Checked eight-client range reads improve from 7,496 to 8,347 operations per second at
-`9ed57ecd`; that fetch code is unchanged in the final source. PostgreSQL still leads OLTP.
+Timed reads now check returned values and types, with exact ordered range checks
+and point-field checks. Secondary count/sum checks cannot distinguish every set of
+contributing rows. The runner rejects missing validation and mismatched checked
+operation counts. The broad suite checks all reads before writes and reloads each
+write case/client fixture. [BENCH.md](BENCH.md) records the measurements and limits.
+Portable records, raw samples, and a read-only audit are in
+`tools/bench/results/2026-11-02/`.
 
-Raw evidence, frozen binaries, saved fixtures, and exact commands are in
-`~/.cache/pg-engine-perf-20261101/`. Final scripts are `run-final-gates-7f35a185.sh` and
-`run-final-regress-release-{baseline,current}.sh`. The rerunnable
-`audit-final-evidence.py` checks gate statuses, result rows, exact difference files,
-binary hashes, and that Rust sources still match the measured commit. All campaign
-services are stopped, and saved data is retained. The Docker recovery waiver below
-continues to apply.
+Raw evidence, frozen binaries, profiles, saved fixtures, and exact commands are in
+`~/.cache/pg-engine-perf-20261101/oltp-20261102/`. Final scripts are
+`run-final-gates.sh` and `run-final-regress.sh`; `audit-final.py` checks gate statuses,
+regression rows, exact hunks, binary hashes, and measured-source identity.
+All campaign services are stopped, and data is retained. The Docker recovery waiver
+below continues to apply. Historical provenance gaps remain explicit in BENCH.md.
 
-The next performance target is OLTP CPU per operation. The checked eight-client range
-workload fills all four assigned server CPUs. Existing profiles point to allocation,
-catalog access, and expression work. Prepared queries already reuse analyzed plans.
-Profile prepared point reads and ranges separately before selecting another change, and
-preserve catalog refreshes after lock waits. The evidence directory's `NEXT-OLTP.md`
-records the current observations and next experiment.
+The next performance target is repeated custom-query planning and costing. An exact
+named extended-protocol probe shows both servers choose custom plans for all twenty
+ordered range executions, while point reads switch to generic after five executions.
+The range's `$1 + 99` folds during fresh analysis, so substituting parameters into a
+cached analyzed tree alone does not preserve estimates. `plan_cost_estimate` also
+reconstructs selected-path estimates through `explain::estimate` and
+`paths::describe_need`. Reusing those estimates needs proof that projection, sort,
+parallel adjustments, and planning charges remain identical. Do not broaden range
+plan reuse from one observed plan match. Preserve catalog refreshes after lock waits,
+heap pruning horizons, and LP_DEAD handling. The evidence directory's `NEXT-OLTP.md`
+records the source findings and proof gaps.
+
+### Previous scan and index campaign
+
+The 2026-11-01 campaign at `7f35a185` passed its release build, 426 crate tests,
+Clippy, PostgreSQL units, and a full regression identical to its baseline.
+The 2M-row top-N query improved from 0.5495 to 0.0807 seconds against original
+engine `0b950a11`, with server CPU falling from 0.55 to 0.28 seconds.
+Tuned PostgreSQL took 0.0811 seconds, with overlapping latency and CPU ranges.
+The 200k-row speedup used more CPU, and process RSS increased in the
+original-to-final comparison. Portable records remain in
+`tools/bench/results/2026-11-01/`; raw evidence remains in
+`~/.cache/pg-engine-perf-20261101/`.
 
 ### Earlier recovered-batch snapshot
 

@@ -1,0 +1,1 @@
+RESULT	postgres	oltp	range_scan_100	clients=1	tps=4185	ops=12556	elapsed_s=3.000404968	mean_ms=0.238	p50_ms=0.224	p95_ms=0.332	p99_ms=0.450	errors=0	peak_mem_mb=126.5	validation_version=oltp-values-v1	checked_ops=12556

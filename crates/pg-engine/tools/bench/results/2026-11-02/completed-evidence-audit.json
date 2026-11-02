@@ -1,0 +1,44 @@
+{
+  "borrows-vs-baseline": {
+    "invocations": 60,
+    "checked_operations_including_warmup": 2722288,
+    "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "source_at_start": "89e863fce5c92ca95c581d7daa578ddf80c9a83e"
+  },
+  "checked-baseline-vs-pg": {
+    "invocations": 96,
+    "checked_operations_including_warmup": 7787719,
+    "client_sha256": "05740676c01a181dd8681388fac37c8ba255d8cd049ea8539a389022c4bc012b",
+    "source_at_start": "55fe2f7ba8fb618f58c305de9a0a211db7b121a0"
+  },
+  "final-dirty-vs-baseline": {
+    "invocations": 24,
+    "checked_operations_including_warmup": 1486636,
+    "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+  },
+  "final-vs-pg": {
+    "invocations": 60,
+    "checked_operations_including_warmup": 5742293,
+    "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+  },
+  "histogram-vs-baseline": {
+    "invocations": 60,
+    "checked_operations_including_warmup": 2736901,
+    "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+  },
+  "point-control-vs-baseline": {
+    "invocations": 12,
+    "checked_operations_including_warmup": 4101470,
+    "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+  },
+  "restarted-dirty-vs-baseline": {
+    "invocations": 12,
+    "checked_operations_including_warmup": 283225,
+    "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "source_at_start": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+  }
+}

@@ -1,0 +1,5 @@
+RESULT	postgres	oltp	secondary_lookup	clients=1	tps=12260	ops=12266	elapsed_s=1.000450461	mean_ms=0.081	p50_ms=0.080	p95_ms=0.111	p99_ms=0.139	errors=21	peak_mem_mb=0.0	validation_version=oltp-values-v1	checked_ops=12266	first_error=OLTP column 1: expected Sum(Some(4791))
+
+thread 'main' (2408843) panicked at crates/pg-engine/tools/bench/bench.rs:629:5:
+oltp/secondary_lookup: 21 errors, 12266 successful operations: OLTP column 1: expected Sum(Some(4791))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,3 @@
+# Preserve captured output bytes and empty final TSV fields.
+*.log -whitespace
+regression/** -whitespace

@@ -1,0 +1,1 @@
+RESULT	borrows	oltp	secondary_lookup	clients=8	tps=24482	ops=73481	elapsed_s=3.001370607	mean_ms=0.326	p50_ms=0.311	p95_ms=0.517	p99_ms=0.810	errors=0	peak_mem_mb=106.0	validation_version=oltp-values-v1	checked_ops=73481

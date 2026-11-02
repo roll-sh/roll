@@ -1,0 +1,1 @@
+RESULT	postgres	oltp	point_select	clients=1	tps=10174	ops=30526	elapsed_s=3.000426639	mean_ms=0.098	p50_ms=0.092	p95_ms=0.138	p99_ms=0.201	errors=0	peak_mem_mb=110.9	validation_version=oltp-values-v1	checked_ops=30526

@@ -1,0 +1,30 @@
+{
+  "command": [
+    "taskset",
+    "-c",
+    "32-35",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+    "--target",
+    "wire",
+    "--label",
+    "postgres",
+    "--port",
+    "53100",
+    "--db",
+    "perf_oltp20261102_clean_200000",
+    "--mem-cgroup",
+    "/sys/fs/cgroup/system.slice/docker-0999a52ae0a37c31df9591a40951dd62fe654c1c6f942b3ed2ce5ac0b29fdca0.scope",
+    "oltp",
+    "--rows",
+    "200000",
+    "--only",
+    "point_select",
+    "--clients",
+    "1",
+    "--secs",
+    "3"
+  ],
+  "exit": 0,
+  "server_cpu_s": 1.9060099999999807,
+  "client_cpu_s": 1.1949840000000052
+}

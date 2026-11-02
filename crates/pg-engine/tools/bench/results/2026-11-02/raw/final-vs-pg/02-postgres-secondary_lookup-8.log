@@ -1,0 +1,1 @@
+RESULT	postgres	oltp	secondary_lookup	clients=8	tps=86466	ops=259781	elapsed_s=3.004418017	mean_ms=0.092	p50_ms=0.091	p95_ms=0.137	p99_ms=0.197	errors=0	peak_mem_mb=136.9	validation_version=oltp-values-v1	checked_ops=259781

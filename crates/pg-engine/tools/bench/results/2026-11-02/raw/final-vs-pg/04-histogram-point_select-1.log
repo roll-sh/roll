@@ -1,0 +1,1 @@
+RESULT	histogram	oltp	point_select	clients=1	tps=6844	ops=20536	elapsed_s=3.000399226	mean_ms=0.145	p50_ms=0.136	p95_ms=0.192	p99_ms=0.327	errors=0	peak_mem_mb=104.7	validation_version=oltp-values-v1	checked_ops=20536
