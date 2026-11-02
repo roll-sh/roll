@@ -18950,6 +18950,8 @@ fn estimate_options() -> Options {
 /// A builder making `plan`'s estimates.
 fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Options) -> Builder<'c, 'a> {
     let (refnames, _) = assign_refnames(plan);
+    let needed = needed_masks(plan);
+    let shown = shown_subqueries(plan, &needed);
     Builder {
         ctx,
         o,
@@ -18964,7 +18966,7 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
         inits: Vec::new(),
         params: &[],
         ctes: HashMap::new(),
-        needed: needed_masks(plan),
+        needed,
         num_exec: None,
         top: 0,
         par: super::paths::parallel::ParCfg::read(ctx).enabled(),
@@ -19000,7 +19002,7 @@ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Optio
         agg_input: None,
         unique_sides: Default::default(),
         plain_distinct: None,
-        shown: shown_subqueries(plan, &needed_masks(plan)),
+        shown,
         rowmarks: Default::default(),
         rowmark_junk: Default::default(),
         copy_marks: Default::default(),
