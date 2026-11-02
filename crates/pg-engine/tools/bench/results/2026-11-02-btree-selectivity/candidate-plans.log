@@ -1,0 +1,271 @@
+fsync|on|
+full_page_writes|on|
+hash_mem_multiplier|2|
+maintenance_work_mem|262144|kB
+max_connections|100|
+max_parallel_workers|8|
+max_parallel_workers_per_gather|2|
+parallel_setup_cost|1000|
+parallel_tuple_cost|0.1|
+plan_cache_mode|auto|
+shared_buffers|16384|8kB
+synchronous_commit|on|
+work_mem|4096|kB
+PostgreSQL 18.6 (roll) on x86_64-pc-linux-gnu, compiled by rustc, 64-bit
+C|C
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 10.24,
+      "Plan Rows": 91,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "((id >= 50000) AND (id <= 50099))"
+    }
+  }
+]
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 10.47,
+      "Plan Rows": 91,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "((id >= 50000) AND (id <= 50099))"
+    }
+  }
+]
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 13.20,
+      "Total Cost": 13.43,
+      "Plan Rows": 91,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Sort Key": ["balance"],
+      "Plans": [
+        {
+          "Node Type": "Index Scan",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Scan Direction": "Forward",
+          "Index Name": "accounts_pkey",
+          "Relation Name": "accounts",
+          "Alias": "accounts",
+          "Startup Cost": 0.42,
+          "Total Cost": 10.24,
+          "Plan Rows": 91,
+          "Plan Width": 12,
+          "Disabled": false,
+          "Index Cond": "((id >= 50000) AND (id <= 50099))"
+        }
+      ]
+    }
+  }
+]
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 8.44,
+      "Plan Rows": 1,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "((id >= '-100'::integer) AND (id <= '-1'::integer))"
+    }
+  }
+]
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 8.44,
+      "Plan Rows": 1,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "((id >= 50099) AND (id <= 50000))"
+    }
+  }
+]
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 9.44,
+      "Plan Rows": 51,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "((id >= 199950) AND (id <= 200049))"
+    }
+  }
+]
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 8.44,
+      "Plan Rows": 1,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "(id = 50000)"
+    }
+  }
+]
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 12.88,
+      "Plan Rows": 2,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "(id = ANY ('{50000,50099}'::integer[]))"
+    }
+  }
+]
+PREPARE
+SET
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 43.42,
+      "Plan Rows": 1000,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "((id >= $1) AND (id <= ($1 + 99)))"
+    }
+  }
+]
+SET
+[
+  {
+    "Plan": {
+      "Node Type": "Index Scan",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Scan Direction": "Forward",
+      "Index Name": "accounts_pkey",
+      "Relation Name": "accounts",
+      "Alias": "accounts",
+      "Startup Cost": 0.42,
+      "Total Cost": 10.24,
+      "Plan Rows": 91,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Index Cond": "((id >= 50000) AND (id <= 50099))"
+    }
+  }
+]
+DEALLOCATE
+SET
+SET
+SET
+[
+  {
+    "Plan": {
+      "Node Type": "Gather Merge",
+      "Parallel Aware": false,
+      "Async Capable": false,
+      "Startup Cost": 7919.04,
+      "Total Cost": 8820.21,
+      "Plan Rows": 100458,
+      "Plan Width": 12,
+      "Disabled": false,
+      "Workers Planned": 1,
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Parent Relationship": "Outer",
+          "Parallel Aware": false,
+          "Async Capable": false,
+          "Startup Cost": 7919.03,
+          "Total Cost": 8066.77,
+          "Plan Rows": 59093,
+          "Plan Width": 12,
+          "Disabled": false,
+          "Sort Key": ["balance"],
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Parallel Aware": true,
+              "Async Capable": false,
+              "Relation Name": "accounts",
+              "Alias": "accounts",
+              "Startup Cost": 0.00,
+              "Total Cost": 3235.71,
+              "Plan Rows": 59093,
+              "Plan Width": 12,
+              "Disabled": false,
+              "Filter": "((id >= 50000) AND (id <= 150000))"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

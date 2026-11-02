@@ -1,0 +1,24 @@
+{
+  "at_utc": "2026-11-02T01:31:03.665610+00:00",
+  "engines": [
+    {
+      "name": "baseline",
+      "pid": 3995749,
+      "stopped": true,
+      "data_retained": true
+    },
+    {
+      "name": "candidate",
+      "pid": 4030004,
+      "stopped": true,
+      "data_retained": true
+    }
+  ],
+  "postgres_helper_stopped": true,
+  "data_retained": true,
+  "listeners": {
+    "53100": "",
+    "53210": "",
+    "53211": ""
+  }
+}

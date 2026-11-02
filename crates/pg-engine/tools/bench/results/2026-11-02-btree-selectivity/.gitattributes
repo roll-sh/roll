@@ -1,0 +1,2 @@
+# Captured output is retained byte for byte.
+*.log -whitespace

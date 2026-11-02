@@ -1,0 +1,17 @@
+{
+  "at_utc": "2026-11-02T01:31:03.766079+00:00",
+  "candidate_source": "8b33053bf42d9c993d92e38d75a73131c1cea26f",
+  "baseline_source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "revert": "2d6375d17b6cb406fdb49de8ac05642c1f3f9986",
+  "status": "rejected under conservative observed-spread acceptance rule; a small positive range signal is not ruled out",
+  "production_matches_published_90b5525f": true,
+  "evidence": [
+    "audited-candidate-vs-baseline.json",
+    "audited-long-control-vs-baseline.json"
+  ],
+  "gate_limits": [
+    "Candidate release build and one bitwise library test passed. Full candidate crate suite, Clippy, regression and PG units were not run because the performance acceptance gate failed.",
+    "SQL activation and function-identity negative additions at isolated c5d4854a were not compiled, run or integrated. No real-SQL fast-path activation claim is made.",
+    "Restored production source is identical to previously verified and published90b5525f; this batch adds no accepted engine changes."
+  ]
+}

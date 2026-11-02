@@ -101,6 +101,33 @@ lack complete execution identities. Those gaps remain historical limits; later
 runtime snapshots do not fill them retroactively. All campaign services are stopped,
 and their saved data is retained.
 
+### Rejected btree selectivity experiment
+
+Candidate `8b33053b` reuses a complete integer btree boundary selectivity within
+one costing call. The bitwise library test and release build pass. Settings,
+EXPLAIN output, prepared-plan counts, and checked query results match baseline.
+The candidate was reverted at `2d6375d1` under the same conservative acceptance rule.
+
+The short range8 comparison rises from 8,829 to 8,967 operations/s. Five longer
+ten-second pairs give 8,863 (8,777–8,884) for baseline and 8,992 (8,861–9,016)
+for the candidate, a 1.5% median increase. Server CPU falls from 445.1 to 438.9
+microseconds per operation. The 129 operations/s gap remains below the candidate's
+155 operations/s full spread. This is a small positive signal that did not clear
+the acceptance threshold, rather than proof of zero benefit.
+
+The one-client point-read median drops 3.4% in the short run and 0.8% in the longer
+control. Both gaps remain within the observed spreads, and longer-run CPU is slightly
+lower for the candidate. No stable point-read regression is established.
+All 84 invocations, including warmups, complete with zero errors and
+`checked_ops == ops`; fixtures remain unchanged. The additional real-SQL activation
+test remains uncompiled in its isolated worktree, so this campaign makes no claim
+that the real SQL path's reuse was independently observed. Full candidate gates
+were not run after the performance gate failed. The restored production source is
+identical to the previously verified `90b5525f`.
+
+Portable records are in `tools/bench/results/2026-11-02-btree-selectivity/`.
+All experiment services are stopped and fixture data is retained.
+
 ## Checked scan and index measurements (2026-11-01)
 
 Source `7f35a185` makes the 2M-row top-N query 6.8 times faster than engine baseline

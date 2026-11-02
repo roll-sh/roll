@@ -79,6 +79,14 @@ regression rows, exact hunks, binary hashes, and measured-source identity.
 All campaign services are stopped, and data is retained. The Docker recovery waiver
 below continues to apply. Historical provenance gaps remain explicit in BENCH.md.
 
+The later btree-selectivity trial at `8b33053b` was reverted at `2d6375d1`.
+Short and longer controls show about a 1.5% range-throughput signal, below the
+conservative observed-spread threshold. The point-read control establishes no
+stable regression. Only the candidate's release build and bitwise library test
+were run; its additional SQL-activation test remains isolated and uncompiled.
+The restored production source is identical to verified `90b5525f`.
+Records are in `tools/bench/results/2026-11-02-btree-selectivity/`.
+
 The next performance target is repeated custom-query planning and costing. An exact
 named extended-protocol probe shows both servers choose custom plans for all twenty
 ordered range executions, while point reads switch to generic after five executions.

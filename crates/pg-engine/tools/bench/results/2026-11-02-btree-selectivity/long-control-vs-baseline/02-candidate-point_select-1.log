@@ -1,0 +1,1 @@
+RESULT	candidate	oltp	point_select	clients=1	tps=6729	ops=67298	elapsed_s=10.000553000	mean_ms=0.148	p50_ms=0.135	p95_ms=0.213	p99_ms=0.340	errors=0	peak_mem_mb=113.4	validation_version=oltp-values-v1	checked_ops=67298

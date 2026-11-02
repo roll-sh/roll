@@ -1,0 +1,56 @@
+{
+  "at_utc": "2026-11-02T01:21:06.266851+00:00",
+  "source": "8b33053bf42d9c993d92e38d75a73131c1cea26f",
+  "production_tree": "cb125cca86a2b7abcae272bbea71b5e069e75538",
+  "git_status": "",
+  "load": "1.53 2.86 2.84 15/2800 4032264",
+  "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "engines": {
+    "baseline": {
+      "pid": 3995749,
+      "port": 53210,
+      "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/baseline-data --listen 127.0.0.1:53210 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-915af586.scope\n"
+    },
+    "candidate": {
+      "pid": 4030004,
+      "port": 53211,
+      "exe": "/home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/candidate-bin/roll-engine",
+      "sha256": "fd84ff22765c8fe1803f115440309407ec81a18b32b6002919e36124eb91f83c",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/btree-selectivity/candidate-data --listen 127.0.0.1:53211 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-915af586.scope\n"
+    }
+  },
+  "psql_helper": "sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873"
+}

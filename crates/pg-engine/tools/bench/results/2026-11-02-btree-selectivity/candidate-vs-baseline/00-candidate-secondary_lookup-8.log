@@ -1,0 +1,1 @@
+RESULT	candidate	oltp	secondary_lookup	clients=8	tps=24226	ops=72708	elapsed_s=3.001239575	mean_ms=0.330	p50_ms=0.313	p95_ms=0.529	p99_ms=0.808	errors=0	peak_mem_mb=117.1	validation_version=oltp-values-v1	checked_ops=72708
