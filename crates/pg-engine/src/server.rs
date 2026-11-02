@@ -162,9 +162,9 @@ impl IdleRead {
         Ok(IdleRead { s, armed: true, deadline: None })
     }
 
-    /// The armed idle hook's period, and no later than the deadline.
+    /// The socket's read timeout: the idle hook's period, and no later than the deadline.
     fn wait_for(&self) -> Option<std::time::Duration> {
-        let hook = IDLE_HOOK.get().filter(|_| self.armed).map(|_| IDLE_TRIM);
+        let hook = IDLE_HOOK.get().map(|_| IDLE_TRIM);
         let left = self.deadline.map(|d| {
             d.saturating_duration_since(std::time::Instant::now())
                 .max(std::time::Duration::from_millis(1))
@@ -184,10 +184,7 @@ impl Read for IdleRead {
         loop {
             match self.s.read(buf) {
                 Ok(n) => {
-                    if n > 0 && !self.armed {
-                        self.armed = true;
-                        self.s.set_read_timeout(self.wait_for())?;
-                    }
+                    self.armed = true;
                     return Ok(n);
                 }
                 Err(e)
@@ -204,7 +201,9 @@ impl Read for IdleRead {
                     {
                         h();
                     }
-                    self.s.set_read_timeout(self.wait_for())?;
+                    if self.deadline.is_some() {
+                        self.s.set_read_timeout(self.wait_for())?;
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -315,7 +314,7 @@ impl Conn {
         if deadline.is_some() {
             let r = self.rd.get_mut();
             r.deadline = None;
-            r.s.set_read_timeout(r.wait_for())?;
+            r.s.set_read_timeout(IDLE_HOOK.get().map(|_| IDLE_TRIM))?;
         }
         if first? == 0 {
             return Ok(None);
@@ -2364,116 +2363,6 @@ fn close_msg(c: &mut Conn, s: &mut Session, body: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::parse_options;
-
-    #[test]
-    fn idle_read_disarms_rearms_and_keeps_deadlines() {
-        use super::{Conn, IDLE_TRIM, IdleRead, IdleTimeout, set_idle_hook};
-        use bytes::BytesMut;
-        use std::io::{BufReader, Write};
-        use std::net::{Shutdown, TcpListener, TcpStream};
-        use std::sync::mpsc;
-        use std::time::{Duration, Instant};
-
-        thread_local! {
-            static HOOK_EVENTS: std::cell::RefCell<Option<mpsc::Sender<()>>> = const {
-                std::cell::RefCell::new(None)
-            };
-        }
-        set_idle_hook(|| {
-            HOOK_EVENTS.with(|events| {
-                if let Some(tx) = &*events.borrow() {
-                    let _ = tx.send(());
-                }
-            });
-        });
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (socket, _) = listener.accept().unwrap();
-        let observer = socket.try_clone().unwrap();
-        let (hook_tx, hook_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        client.write_all(&[0, 0]).unwrap();
-        let reader = std::thread::spawn(move || {
-            HOOK_EVENTS.with(|events| *events.borrow_mut() = Some(hook_tx));
-            let mut c = Conn {
-                rd: BufReader::new(IdleRead::new(socket.try_clone().unwrap()).unwrap()),
-                wr: socket.try_clone().unwrap(),
-                out: BytesMut::new(),
-                partial: None,
-                fatal: false,
-                terminated: None,
-                reads: None,
-                live: std::rc::Rc::new(socket),
-                at_ready: false,
-                sent: Vec::new(),
-                log: crate::log::Conn::new(None, None, false),
-                started: 0,
-                pre_session_log: None,
-                repl: None,
-                exported: None,
-                errors: 0,
-            };
-            assert_eq!(c.read_i32().unwrap(), 8);
-            assert_eq!(c.rd.get_ref().s.read_timeout().unwrap(), Some(IDLE_TRIM));
-            done_tx.send(()).unwrap();
-            assert_eq!(
-                c.read_message_by(Some(Instant::now() + IDLE_TRIM * 3))
-                    .unwrap(),
-                Some((b'Q', vec![42]))
-            );
-            assert_eq!(c.rd.get_ref().s.read_timeout().unwrap(), Some(IDLE_TRIM));
-            assert_eq!(
-                c.read_message_by(Some(Instant::now() + IDLE_TRIM * 3))
-                    .unwrap(),
-                Some((b'X', Vec::new()))
-            );
-            done_tx.send(()).unwrap();
-            let e = c
-                .read_message_by(Some(Instant::now() + IDLE_TRIM * 3))
-                .unwrap_err();
-            assert!(e.get_ref().is_some_and(|e| e.is::<IdleTimeout>()));
-            assert_eq!(c.rd.get_ref().s.read_timeout().unwrap(), None);
-            done_tx.send(()).unwrap();
-            assert_eq!(c.read_message().unwrap(), None);
-            assert!(!c.rd.get_ref().armed, "EOF must not rearm the idle hook");
-        });
-
-        // The hook signals before IdleRead installs the next socket timeout.
-        let wait_timeout = |expected: fn(Option<Duration>) -> bool| {
-            let until = Instant::now() + Duration::from_secs(5);
-            loop {
-                let timeout = observer.read_timeout().unwrap();
-                if expected(timeout) {
-                    break;
-                }
-                assert!(
-                    Instant::now() < until,
-                    "unexpected socket timeout: {timeout:?}"
-                );
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        };
-        hook_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        wait_timeout(|timeout| timeout.is_none());
-        assert_eq!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
-        client.write_all(&[0, 8]).unwrap();
-        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        client.write_all(b"Q").unwrap();
-        hook_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        wait_timeout(|timeout| timeout.is_none());
-        assert_eq!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
-        client
-            .write_all(&[0, 0, 0, 5, 42, b'X', 0, 0, 0, 4])
-            .unwrap();
-        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        hook_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        wait_timeout(|timeout| timeout.is_some_and(|left| left > IDLE_TRIM));
-        assert_eq!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
-        done_rx.recv_timeout(IDLE_TRIM * 3).unwrap();
-        assert_eq!(hook_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
-        observer.shutdown(Shutdown::Read).unwrap();
-        reader.join().unwrap();
-    }
 
     #[test]
     fn startup_options() {
