@@ -1,0 +1,17 @@
+heavy.sh: incremental 3G, 722G free, cleared target/debug/incremental
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 42s
+     Running unittests src/lib.rs (target/debug/deps/pg_engine-bc518221d668f0bf)
+
+running 2 tests
+test session::gather_proof_tests::cheap_scan_proof_and_parallel_fallbacks ... ok
+MODE auto: generic=0 custom=20
+DECLINED MODE auto: (false, 0)
+MODE force_custom_plan: generic=0 custom=20
+DECLINED MODE force_custom_plan: (false, 0)
+MODE force_generic_plan: generic=20 custom=0
+DECLINED MODE force_generic_plan: (false, 0)
+test session::gather_proof_tests::retained_range_admission_and_results ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 175 filtered out; finished in 2.17s
+

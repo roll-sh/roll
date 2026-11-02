@@ -1,0 +1,1 @@
+RESULT	baseline	oltp	range_scan_100	clients=8	tps=7707	ops=154155	elapsed_s=20.001075218	mean_ms=1.037	p50_ms=0.931	p95_ms=1.923	p99_ms=3.019	errors=0	peak_mem_mb=115.6	validation_version=oltp-values-v1	checked_ops=154155

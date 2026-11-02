@@ -1,0 +1,6 @@
+{
+  "action": "reject",
+  "performance_checks_pass": false,
+  "source_acceptance": false,
+  "reason": "fallback control failed"
+}

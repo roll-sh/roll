@@ -1,0 +1,128 @@
+{
+  "samples": [
+    {
+      "round": 0,
+      "name": "baseline",
+      "checked_queries": 138,
+      "checked_rows": 552000,
+      "elapsed_s": 10.012007414014079,
+      "server_cpu_s": 0.74,
+      "client_cpu_s": 4.024740000000001
+    },
+    {
+      "round": 0,
+      "name": "candidate",
+      "checked_queries": 138,
+      "checked_rows": 552000,
+      "elapsed_s": 10.028512044926174,
+      "server_cpu_s": 0.75,
+      "client_cpu_s": 4.034321
+    },
+    {
+      "round": 1,
+      "name": "candidate",
+      "checked_queries": 139,
+      "checked_rows": 556000,
+      "elapsed_s": 10.045744726085104,
+      "server_cpu_s": 0.74,
+      "client_cpu_s": 4.029644000000001
+    },
+    {
+      "round": 1,
+      "name": "baseline",
+      "checked_queries": 137,
+      "checked_rows": 548000,
+      "elapsed_s": 10.022319476003759,
+      "server_cpu_s": 0.72,
+      "client_cpu_s": 4.051869999999999
+    },
+    {
+      "round": 2,
+      "name": "baseline",
+      "checked_queries": 139,
+      "checked_rows": 556000,
+      "elapsed_s": 10.056717250030488,
+      "server_cpu_s": 0.77,
+      "client_cpu_s": 3.9770449999999995
+    },
+    {
+      "round": 2,
+      "name": "candidate",
+      "checked_queries": 138,
+      "checked_rows": 552000,
+      "elapsed_s": 10.061929599032737,
+      "server_cpu_s": 0.7699999999999998,
+      "client_cpu_s": 4.051668999999999
+    },
+    {
+      "round": 3,
+      "name": "candidate",
+      "checked_queries": 138,
+      "checked_rows": 552000,
+      "elapsed_s": 10.026523787993938,
+      "server_cpu_s": 0.73,
+      "client_cpu_s": 4.026340999999995
+    },
+    {
+      "round": 3,
+      "name": "baseline",
+      "checked_queries": 138,
+      "checked_rows": 552000,
+      "elapsed_s": 10.000087669002824,
+      "server_cpu_s": 0.7199999999999998,
+      "client_cpu_s": 3.9945319999999933
+    },
+    {
+      "round": 4,
+      "name": "baseline",
+      "checked_queries": 139,
+      "checked_rows": 556000,
+      "elapsed_s": 10.05296126101166,
+      "server_cpu_s": 0.7400000000000002,
+      "client_cpu_s": 4.022755999999994
+    },
+    {
+      "round": 4,
+      "name": "candidate",
+      "checked_queries": 138,
+      "checked_rows": 552000,
+      "elapsed_s": 10.066906148917042,
+      "server_cpu_s": 0.73,
+      "client_cpu_s": 4.033925999999997
+    },
+    {
+      "round": 5,
+      "name": "candidate",
+      "checked_queries": 137,
+      "checked_rows": 548000,
+      "elapsed_s": 10.065090853022411,
+      "server_cpu_s": 0.7599999999999998,
+      "client_cpu_s": 4.081511999999997
+    },
+    {
+      "round": 5,
+      "name": "baseline",
+      "checked_queries": 136,
+      "checked_rows": 544000,
+      "elapsed_s": 10.001638201996684,
+      "server_cpu_s": 0.7300000000000004,
+      "client_cpu_s": 4.062936999999998
+    }
+  ],
+  "cpu_ratios": [
+    1.0129896083133494,
+    1.007246376811594,
+    1.0138888888888893,
+    0.9936349392871129,
+    1.0334966503349656
+  ],
+  "latency_ratios": [
+    0.9879151887152867,
+    1.0077684278464063,
+    1.0026435887230327,
+    1.0086435708774077,
+    0.9989986474997975
+  ],
+  "passes": true,
+  "limit": "One-client checked full Seq scan under forced parallel costs. May be client-limited; no superiority claim. Separate from primary and declined-range statistics."
+}

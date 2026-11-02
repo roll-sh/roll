@@ -1,0 +1,80 @@
+{
+  "baseline": [
+    {
+      "Plan": {
+        "Node Type": "Gather",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Startup Cost": 0.0,
+        "Total Cost": 38.67,
+        "Plan Rows": 4000,
+        "Plan Width": 12,
+        "Disabled": false,
+        "Output": [
+          "id",
+          "balance"
+        ],
+        "Workers Planned": 2,
+        "Plans": [
+          {
+            "Node Type": "Seq Scan",
+            "Parent Relationship": "Outer",
+            "Parallel Aware": true,
+            "Async Capable": false,
+            "Relation Name": "gather_control_rows",
+            "Schema": "public",
+            "Alias": "gather_control_rows",
+            "Startup Cost": 0.0,
+            "Total Cost": 38.67,
+            "Plan Rows": 1667,
+            "Plan Width": 12,
+            "Disabled": false,
+            "Output": [
+              "id",
+              "balance"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "candidate": [
+    {
+      "Plan": {
+        "Node Type": "Gather",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Startup Cost": 0.0,
+        "Total Cost": 38.67,
+        "Plan Rows": 4000,
+        "Plan Width": 12,
+        "Disabled": false,
+        "Output": [
+          "id",
+          "balance"
+        ],
+        "Workers Planned": 2,
+        "Plans": [
+          {
+            "Node Type": "Seq Scan",
+            "Parent Relationship": "Outer",
+            "Parallel Aware": true,
+            "Async Capable": false,
+            "Relation Name": "gather_control_rows",
+            "Schema": "public",
+            "Alias": "gather_control_rows",
+            "Startup Cost": 0.0,
+            "Total Cost": 38.67,
+            "Plan Rows": 1667,
+            "Plan Width": 12,
+            "Disabled": false,
+            "Output": [
+              "id",
+              "balance"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

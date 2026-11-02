@@ -1,0 +1,27 @@
+[
+  {
+    "path": "target/release/examples/bench",
+    "sha256": "14d7eaf35ed542cf906f1674de67e02a891bc0bd4c7044072d127f71a173d13e",
+    "quarantined_as": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/rejected-target-entrypoints/examples-bench"
+  },
+  {
+    "path": "target/release/examples/scan_bench",
+    "sha256": "a114867ade1a0e8264c1479eb6106c56bd079a83154a3bacb0d8ff6786d9086f",
+    "quarantined_as": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/rejected-target-entrypoints/examples-scan_bench"
+  },
+  {
+    "path": "target/release/roll-engine.d",
+    "sha256": "4ab6381ac4ba2b0ff69f2aef4b8261770f0a69f4807c949af76219bfa0f2bd53",
+    "quarantined_as": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/rejected-target-entrypoints/roll-engine.d"
+  },
+  {
+    "path": "target/release/examples/bench.d",
+    "sha256": "f256669b18a4120540a5eb5abbea5a8bd7d6eaa2f882f013e87566f2040fed41",
+    "quarantined_as": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/rejected-target-entrypoints/examples-bench.d"
+  },
+  {
+    "path": "target/release/examples/scan_bench.d",
+    "sha256": "f7bba6dc4d3514cba17186e85cf3fe4fa5124c4cf5f5b3a6486266474750684a",
+    "quarantined_as": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/rejected-target-entrypoints/examples-scan_bench.d"
+  }
+]

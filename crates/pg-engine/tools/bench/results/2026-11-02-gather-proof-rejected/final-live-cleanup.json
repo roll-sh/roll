@@ -1,0 +1,95 @@
+{
+  "at": "2026-11-02T18:46:26.561159+00:00",
+  "phases": [
+    {
+      "name": "monitor-correctness",
+      "checks": [
+        {
+          "pid": 2849041,
+          "absent": true
+        },
+        {
+          "pid": 2850254,
+          "absent": true
+        },
+        {
+          "helper_id": "ef7724358a105d29ce88dfd95bec2e1d6c67f96b36d0d792576d3f6f84ef286d",
+          "absent": true
+        }
+      ],
+      "removed_private_copies": [
+        "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/monitor-correctness/baseline-data",
+        "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/monitor-correctness/candidate-data"
+      ]
+    },
+    {
+      "name": "proof-primary-p1",
+      "checks": [
+        {
+          "pid": 2854858,
+          "absent": true
+        },
+        {
+          "pid": 2856127,
+          "absent": true
+        },
+        {
+          "helper_id": "fde544ab0289667893baadc29ee72c59d1ed5177414bf3e33fb65dc852feaa02",
+          "absent": true
+        }
+      ],
+      "removed_private_copies": [
+        "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-primary-p1/baseline-data",
+        "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-primary-p1/candidate-data"
+      ]
+    },
+    {
+      "name": "proof-declined-p1",
+      "checks": [
+        {
+          "pid": 3244852,
+          "absent": true
+        },
+        {
+          "pid": 3246045,
+          "absent": true
+        },
+        {
+          "helper_id": "7c399b7cfc5344162140abc71d7f914635e7fac75f503eb29335724639aa516f",
+          "absent": true
+        }
+      ],
+      "removed_private_copies": [
+        "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-declined-p1/baseline-data",
+        "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-declined-p1/candidate-data"
+      ]
+    }
+  ],
+  "ports": [
+    {
+      "port": 53530,
+      "bindable": true
+    },
+    {
+      "port": 53531,
+      "bindable": true
+    },
+    {
+      "port": 53532,
+      "bindable": true
+    },
+    {
+      "port": 53533,
+      "bindable": true
+    },
+    {
+      "port": 53534,
+      "bindable": true
+    },
+    {
+      "port": 53535,
+      "bindable": true
+    }
+  ],
+  "owned_docker_list": "813b04eed73f t3-d4020b98-perf-profiler\n0999a52ae0a3 t3-d4020b98-perf-pg\n"
+}

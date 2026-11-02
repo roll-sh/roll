@@ -1,0 +1,33 @@
+{
+  "source": "61a87d6fc54623f0da95d6301a21c6587a1943ed+no-gather-proof-wip",
+  "binary_sha256": "1d47d9f5996b3578d5dcbcfdb68c153d57c43d8ea65cc3612f42ad78d19fcd43",
+  "source_sha256": {
+    "crates/pg-engine/src/session/gather_proof_tests.rs": "b64490b3667b64f0254303ef694b42b2f28e996cafae3d4b536f0f7532ad41b1",
+    "crates/pg-engine/src/sql/explain/gather_proof.rs": "c56c3e884fb0a6f8b7c3a4240b31a2ae05018bca844d7a6a07b11350681876cf",
+    "crates/pg-engine/src/sql/explain.rs": "c58856537190e374a4fb308cbd8e1462e4aa9c9d9860e557ac5ade142b2c40b9",
+    "crates/pg-engine/src/sql/literals.rs": "284ae126d0a4d8e990f54dce0615642a1f45c47ac5c72d85e138d592c2c3c5a1",
+    "crates/pg-engine/src/session/mod.rs": "0e5becee54f80869275478f750fe0e0f1ccf762bb417a0ea845f3c22eec66ef3"
+  },
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "build_command": [
+    "cargo",
+    "build",
+    "-p",
+    "pg-engine",
+    "--release",
+    "--bin",
+    "roll-engine",
+    "--example",
+    "bench",
+    "--example",
+    "scan_bench"
+  ],
+  "environment": {
+    "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only"
+  },
+  "dependency_fingerprint_matches_baseline": true,
+  "matching_fingerprint_paths": [
+    "target/release/.fingerprint/pg-engine-b90198ef267a1eed/lib-pg_engine.json"
+  ],
+  "dependency_count": 46
+}

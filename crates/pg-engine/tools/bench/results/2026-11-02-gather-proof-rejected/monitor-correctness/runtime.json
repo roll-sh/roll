@@ -1,0 +1,63 @@
+{
+  "at_utc": "2026-11-02T18:16:44.630292+00:00",
+  "source": "61a87d6fc54623f0da95d6301a21c6587a1943ed+no-gather-proof-wip",
+  "source_sha256": {
+    "crates/pg-engine/src/session/gather_proof_tests.rs": "b64490b3667b64f0254303ef694b42b2f28e996cafae3d4b536f0f7532ad41b1",
+    "crates/pg-engine/src/sql/explain/gather_proof.rs": "c56c3e884fb0a6f8b7c3a4240b31a2ae05018bca844d7a6a07b11350681876cf",
+    "crates/pg-engine/src/sql/explain.rs": "c58856537190e374a4fb308cbd8e1462e4aa9c9d9860e557ac5ade142b2c40b9",
+    "crates/pg-engine/src/sql/literals.rs": "284ae126d0a4d8e990f54dce0615642a1f45c47ac5c72d85e138d592c2c3c5a1",
+    "crates/pg-engine/src/session/mod.rs": "0e5becee54f80869275478f750fe0e0f1ccf762bb417a0ea845f3c22eec66ef3"
+  },
+  "load": "2.26 2.65 3.70 2/2954 2851177\n",
+  "engines": {
+    "baseline": {
+      "pid": 2849041,
+      "port": 53530,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/monitor-correctness/baseline-data --listen 127.0.0.1:53530 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track_planning=on ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n",
+      "nice": 19
+    },
+    "candidate": {
+      "pid": 2850254,
+      "port": 53531,
+      "sha256": "1d47d9f5996b3578d5dcbcfdb68c153d57c43d8ea65cc3612f42ad78d19fcd43",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/candidate-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/monitor-correctness/candidate-data --listen 127.0.0.1:53531 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track_planning=on ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n",
+      "nice": 19
+    }
+  },
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "declined_proof_phase": false
+}

@@ -1,0 +1,29 @@
+{
+  "pid": 3244852,
+  "argv": [
+    "taskset",
+    "-c",
+    "28-31",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+    "--data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-declined-p1/baseline-data",
+    "--listen",
+    "127.0.0.1:53534",
+    "--password",
+    "pw",
+    "--cache-mb",
+    "2048",
+    "-c",
+    "maintenance_work_mem=256MB",
+    "-c",
+    "max_connections=100",
+    "-c",
+    "parallel_setup_cost=0",
+    "-c",
+    "parallel_tuple_cost=0",
+    "-c",
+    "min_parallel_table_scan_size=0",
+    "-c",
+    "min_parallel_index_scan_size=0"
+  ]
+}
