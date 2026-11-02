@@ -1,0 +1,109 @@
+Loaded Prisma config from prisma.config.ts.
+
+prisma:warn Prisma failed to detect the libssl/openssl version to use, and may not work as expected. Defaulting to "openssl-1.1.x".
+Please manually install OpenSSL via `apt-get update -y && apt-get install -y openssl` and try installing Prisma again. If you're running Prisma on Docker, add this command to your Dockerfile, or switch to an image that already has OpenSSL installed.
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        Int       @id @default(autoincrement())
+  email     String    @unique @db.VarChar(120)
+  name      String?
+  role      Role      @default(USER)
+  balance   Decimal   @default(0) @db.Decimal(12, 2)
+  big       BigInt    @default(0)
+  ratio     Float?
+  active    Boolean   @default(true)
+  blob      Bytes?
+  meta      Json?
+  tags      String[]
+  scores    Int[]
+  uid       String    @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ip        String?   @db.Inet
+  born      DateTime? @db.Date
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @updatedAt
+  posts     Post[]    @relation("author")
+  edited    Post[]    @relation("editor")
+  profile   Profile?
+
+  @@index([name(sort: Desc)])
+  @@index([meta], type: Gin)
+  @@map("users")
+}
+
+model Profile {
+  id     Int    @id @default(autoincrement())
+  bio    String @default("")
+  userId Int    @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Post {
+  id         String    @id @default(uuid())
+  title      String
+  body       String?
+  views      Int       @default(0)
+  published  Boolean   @default(false)
+  authorId   Int
+  editorId   Int?
+  categoryId Int?
+  author     User      @relation("author", fields: [authorId], references: [id], onDelete: Cascade)
+  category   Category? @relation(fields: [categoryId], references: [id])
+  editor     User?     @relation("editor", fields: [editorId], references: [id])
+  tags       Tag[]     @relation("PostToTag")
+
+  @@unique([authorId, title])
+  @@index([published, views(sort: Desc)])
+}
+
+model Tag {
+  name  String @id
+  posts Post[] @relation("PostToTag")
+}
+
+model Category {
+  id       Int        @id @default(autoincrement())
+  name     String
+  parentId Int?
+  parent   Category?  @relation("tree", fields: [parentId], references: [id])
+  children Category[] @relation("tree")
+  posts    Post[]
+}
+
+model Pair {
+  a     Int
+  b     Int
+  label String    @db.Char(4)
+  at    DateTime? @db.Time(3)
+
+  @@id([a, b])
+  @@index([label], type: Hash)
+}
+
+enum Role {
+  USER
+  ADMIN
+
+  @@map("role")
+}
+
+
+// *** WARNING ***
+// 
+// These fields were enriched with `@map` information taken from the previous Prisma schema:
+//   - Model: "Profile", field: "userId"
+// 
+// These models were enriched with `@@map` information taken from the previous Prisma schema:
+//   - "User"
+// 
+// These enums were enriched with `@@map` information taken from the previous Prisma schema:
+//   - "Role"
+// 
+

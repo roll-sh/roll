@@ -1,0 +1,9 @@
+model Pair {
+  a     Int
+  b     Int
+  label String    @db.Char(4)
+  at    DateTime? @db.Time(3)
+
+  @@id([a, b])
+  @@index([label], type: Hash)
+}

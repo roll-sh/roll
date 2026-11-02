@@ -1,0 +1,353 @@
+$ scripts/test-postgres.sh --force
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/pg_control-a16c6e00e254d8b1)
+
+running 11 tests
+test history::tests::latest_takes_newest_on_current_timeline ... ok
+test compute::tests::pgdata_is_a_subdirectory_for_every_version ... ok
+test history::tests::no_history_file_means_no_ancestors ... ok
+test history::tests::point_needs_base_that_ends_before_it ... ok
+test history::tests::skips_bases_from_an_abandoned_future ... ok
+test reconciler::tests::steps_clamp_to_range ... ok
+test store::tests::bases_newest_first ... ok
+test store::tests::branch_and_endpoint_roundtrip ... ok
+test store::tests::lsn_index_resolves_times ... ok
+test store::tests::migrates_a_version_zero_database ... ok
+test store::tests::record_flush_tracks_position ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_proxy-1a9a43652799ec3d)
+
+running 3 tests
+test protocol::tests::endpoint_option_forms ... ok
+test protocol::tests::cancel_roundtrip ... ok
+test protocol::tests::startup_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_storage-13e93ab534b12e61)
+
+running 10 tests
+test lsn::tests::lsn_roundtrip ... ok
+test lsn::tests::segment_names ... ok
+test objects::tests::keys ... ok
+test objects::tests::put_get_list_delete ... ok
+test objects::tests::zstd_upload_sees_raw_bytes ... ok
+test receiver::tests::history_files_are_served ... ok
+test receiver::tests::segments_complete_upload_and_serve ... ok
+test receiver::tests::spool_sweep_uploads_leftovers ... ok
+test receiver::tests::status_update_layout ... ok
+test objects::tests::streaming_upload_and_download ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running unittests src/main.rs (target/debug/deps/roll-4dddcc6a3633d7cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/rolld-a6f5c88189841da0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/e2e.rs (target/debug/deps/e2e-36e5b95b94029555)
+
+running 16 tests
+test branches_are_isolated_copies ... ok
+test eviction_and_rehydrate ... ok
+test http_api ... ok
+test live_resize_keeps_sessions ... ok
+test many_concurrent_connections ... ok
+test postgres_16 ... ok
+test point_in_time_branches has been running for over 60 seconds
+test postgres_17 ... ok
+test proxy_errors ... ok
+test proxy_speaks_postgres ... ok
+test point_in_time_branches ... FAILED
+test read_replicas has been running for over 60 seconds
+test restore_in_place_keeps_the_endpoint has been running for over 60 seconds
+test restore_in_place_keeps_the_endpoint ... FAILED
+test retention_removes_old_history has been running for over 60 seconds
+test read_replicas ... ok
+test scale_to_zero_and_wake_on_connect ... ok
+test survives_losing_the_local_disk has been running for over 60 seconds
+test retention_removes_old_history ... FAILED
+test usage_and_metering ... ok
+test survives_losing_the_local_disk ... FAILED
+
+failures:
+
+---- point_in_time_branches stdout ----
+2026-11-02T07:49:12.275964Z  INFO pg_control::control: compute started endpoint="ep_re5k7f9dxs4s" ms=14936
+2026-11-02T07:49:12.408033Z  INFO pg_storage::receiver: WAL streaming started branch=br_kcyb5yhs6tu4 timeline=1 start=0/1000000 fresh=true
+2026-11-02T07:49:13.754580Z  INFO pg_control::history: base backup stored branch="br_kcyb5yhs6tu4" start=0/2000028 end=0/3000000 bytes=3915255 ms=1345
+2026-11-02T07:49:22.727181Z  INFO pg_control::history: restored base image source="br_kcyb5yhs6tu4" base=base_kjn3tn6sig6n kind=online point=Some((1, Lsn(67108864))) recover=true bytes=3915255 ms=725
+2026-11-02T07:51:38.153154Z  WARN pg_control::control: compute failed to start endpoint="ep_5gtwvnchgiqj" error=compute roll-ep_5gtwvnchgiqj exited:
+2026-11-02 07:51:14.072 UTC [1007] FATAL:  the database system is starting up
+2026-11-02 07:51:14.861 UTC [1014] FATAL:  the database system is starting up
+2026-11-02 07:51:15.670 UTC [1021] FATAL:  the database system is starting up
+2026-11-02 07:51:16.467 UTC [1028] FATAL:  the database system is starting up
+2026-11-02 07:51:17.262 UTC [1035] FATAL:  the database system is starting up
+2026-11-02 07:51:18.062 UTC [1042] FATAL:  the database system is starting up
+2026-11-02 07:51:18.871 UTC [1049] FATAL:  the database system is starting up
+2026-11-02 07:51:19.668 UTC [1056] FATAL:  the database system is starting up
+2026-11-02 07:51:20.355 UTC [1063] FATAL:  the database system is starting up
+2026-11-02 07:51:21.162 UTC [1070] FATAL:  the database system is starting up
+2026-11-02 07:51:21.968 UTC [1077] FATAL:  the database system is starting up
+2026-11-02 07:51:22.763 UTC [1084] FATAL:  the database system is starting up
+2026-11-02 07:51:23.568 UTC [1091] FATAL:  the database system is starting up
+2026-11-02 07:51:24.371 UTC [1098] FATAL:  the database system is starting up
+2026-11-02 07:51:25.061 UTC [1104] FATAL:  the database system is starting up
+2026-11-02 07:51:25.856 UTC [1111] FATAL:  the database system is starting up
+2026-11-02 07:51:26.750 UTC [1118] FATAL:  the database system is starting up
+2026-11-02 07:51:27.650 UTC [1125] FATAL:  the database system is starting up
+2026-11-02 07:51:28.465 UTC [1132] FATAL:  the database system is starting up
+2026-11-02 07:51:29.150 UTC [1139] FATAL:  the database system is starting up
+2026-11-02 07:51:29.960 UTC [1146] FATAL:  the database system is starting up
+2026-11-02 07:51:30.766 UTC [1153] FATAL:  the database system is starting up
+2026-11-02 07:51:31.650 UTC [1160] FATAL:  the database system is starting up
+2026-11-02 07:51:32.453 UTC [1167] FATAL:  the database system is starting up
+2026-11-02 07:51:33.350 UTC [1174] FATAL:  the database system is starting up
+2026-11-02 07:51:34.170 UTC [1181] FATAL:  the database system is starting up
+2026-11-02 07:51:35.050 UTC [1188] FATAL:  the database system is starting up
+2026-11-02 07:51:35.852 UTC [1195] FATAL:  the database system is starting up
+2026-11-02 07:51:36.670 UTC [1202] FATAL:  the database system is starting up
+2026-11-02 07:51:37.472 UTC [1209] FATAL:  the database system is starting up
+wget: can't connect to remote host (172.17.0.1): Operation timed out
+2026-11-02 07:51:37.614 UTC [23] LOG:  invalid checkpoint record
+2026-11-02 07:51:37.614 UTC [23] FATAL:  could not locate required checkpoint record at 0/2000080
+2026-11-02 07:51:37.614 UTC [23] HINT:  If you are restoring from a backup, touch "/var/lib/postgresql/18/docker/recovery.signal" or "/var/lib/postgresql/18/docker/standby.signal" and add required recovery options.
+	If you are not restoring from a backup, try removing the file "/var/lib/postgresql/18/docker/backup_label".
+	Be careful: removing "/var/lib/postgresql/18/docker/backup_label" will result in a corrupt cluster if restoring from a backup.
+2026-11-02 07:51:37.619 UTC [1] LOG:  startup process (PID 23) exited with exit code 1
+2026-11-02 07:51:37.619 UTC [1] LOG:  terminating any other active server processes
+2026-11-02 07:51:37.621 UTC [1] LOG:  shutting down due to startup process failure
+2026-11-02 07:51:37.626 UTC [1] LOG:  database system is shut down
+
+
+thread 'point_in_time_branches' (1657208) panicked at crates/pg-control/tests/e2e.rs:136:89:
+connect ep_5gtwvnchgiqj: Error { kind: Db, cause: Some(DbError { severity: "FATAL", parsed_severity: Some(Fatal), code: SqlState(E57P03), message: "endpoint ep_5gtwvnchgiqj could not start: compute roll-ep_5gtwvnchgiqj exited:\n2026-11-02 07:51:14.072 UTC [1007] FATAL:  the database system is starting up\n2026-11-02 07:51:14.861 UTC [1014] FATAL:  the database system is starting up\n2026-11-02 07:51:15.670 UTC [1021] FATAL:  the database system is starting up\n2026-11-02 07:51:16.467 UTC [1028] FATAL:  the database system is starting up\n2026-11-02 07:51:17.262 UTC [1035] FATAL:  the database system is starting up\n2026-11-02 07:51:18.062 UTC [1042] FATAL:  the database system is starting up\n2026-11-02 07:51:18.871 UTC [1049] FATAL:  the database system is starting up\n2026-11-02 07:51:19.668 UTC [1056] FATAL:  the database system is starting up\n2026-11-02 07:51:20.355 UTC [1063] FATAL:  the database system is starting up\n2026-11-02 07:51:21.162 UTC [1070] FATAL:  the database system is starting up\n2026-11-02 07:51:21.968 UTC [1077] FATAL:  the database system is starting up\n2026-11-02 07:51:22.763 UTC [1084] FATAL:  the database system is starting up\n2026-11-02 07:51:23.568 UTC [1091] FATAL:  the database system is starting up\n2026-11-02 07:51:24.371 UTC [1098] FATAL:  the database system is starting up\n2026-11-02 07:51:25.061 UTC [1104] FATAL:  the database system is starting up\n2026-11-02 07:51:25.856 UTC [1111] FATAL:  the database system is starting up\n2026-11-02 07:51:26.750 UTC [1118] FATAL:  the database system is starting up\n2026-11-02 07:51:27.650 UTC [1125] FATAL:  the database system is starting up\n2026-11-02 07:51:28.465 UTC [1132] FATAL:  the database system is starting up\n2026-11-02 07:51:29.150 UTC [1139] FATAL:  the database system is starting up\n2026-11-02 07:51:29.960 UTC [1146] FATAL:  the database system is starting up\n2026-11-02 07:51:30.766 UTC [1153] FATAL:  the database system is starting up\n2026-11-02 07:51:31.650 UTC [1160] FATAL:  the database system is starting up\n2026-11-02 07:51:32.453 UTC [1167] FATAL:  the database system is starting up\n2026-11-02 07:51:33.350 UTC [1174] FATAL:  the database system is starting up\n2026-11-02 07:51:34.170 UTC [1181] FATAL:  the database system is starting up\n2026-11-02 07:51:35.050 UTC [1188] FATAL:  the database system is starting up\n2026-11-02 07:51:35.852 UTC [1195] FATAL:  the database system is starting up\n2026-11-02 07:51:36.670 UTC [1202] FATAL:  the database system is starting up\n2026-11-02 07:51:37.472 UTC [1209] FATAL:  the database system is starting up\nwget: can't connect to remote host (172.17.0.1): Operation timed out\n2026-11-02 07:51:37.614 UTC [23] LOG:  invalid checkpoint record\n2026-11-02 07:51:37.614 UTC [23] FATAL:  could not locate required checkpoint record at 0/2000080\n2026-11-02 07:51:37.614 UTC [23] HINT:  If you are restoring from a backup, touch \"/var/lib/postgresql/18/docker/recovery.signal\" or \"/var/lib/postgresql/18/docker/standby.signal\" and add required recovery options.\n\tIf you are not restoring from a backup, try removing the file \"/var/lib/postgresql/18/docker/backup_label\".\n\tBe careful: removing \"/var/lib/postgresql/18/docker/backup_label\" will result in a corrupt cluster if restoring from a backup.\n2026-11-02 07:51:37.619 UTC [1] LOG:  startup process (PID 23) exited with exit code 1\n2026-11-02 07:51:37.619 UTC [1] LOG:  terminating any other active server processes\n2026-11-02 07:51:37.621 UTC [1] LOG:  shutting down due to startup process failure\n2026-11-02 07:51:37.626 UTC [1] LOG:  database system is shut down\n", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-02T07:51:38.314142Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_kcyb5yhs6tu4 flushed=0/5019808
+
+---- restore_in_place_keeps_the_endpoint stdout ----
+2026-11-02T07:51:54.250770Z  INFO pg_control::control: compute started endpoint="ep_vp2qsbktfh6w" ms=15291
+2026-11-02T07:51:54.346830Z  INFO pg_storage::receiver: WAL streaming started branch=br_yb5ehdqhiq48 timeline=1 start=0/1000000 fresh=true
+2026-11-02T07:51:55.732508Z  INFO pg_control::history: base backup stored branch="br_yb5ehdqhiq48" start=0/2000028 end=0/3000000 bytes=3915157 ms=1385
+2026-11-02T07:52:04.262438Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_yb5ehdqhiq48 flushed=0/50000A0
+2026-11-02T07:52:04.672192Z  INFO pg_control::control: compute suspended endpoint="ep_vp2qsbktfh6w"
+2026-11-02T07:52:05.416362Z  INFO pg_control::history: restored base image source="br_yb5ehdqhiq48" base=base_w65nnnkxjqqi kind=online point=Some((1, Lsn(67108864))) recover=true bytes=3915157 ms=650
+2026-11-02T07:54:21.939674Z  WARN pg_control::control: compute failed to start endpoint="ep_vp2qsbktfh6w" error=compute roll-ep_vp2qsbktfh6w exited:
+2026-11-02 07:53:57.679 UTC [1007] FATAL:  the database system is starting up
+2026-11-02 07:53:58.491 UTC [1014] FATAL:  the database system is starting up
+2026-11-02 07:53:59.271 UTC [1021] FATAL:  the database system is starting up
+2026-11-02 07:54:00.084 UTC [1028] FATAL:  the database system is starting up
+2026-11-02 07:54:00.890 UTC [1035] FATAL:  the database system is starting up
+2026-11-02 07:54:01.786 UTC [1042] FATAL:  the database system is starting up
+2026-11-02 07:54:02.576 UTC [1049] FATAL:  the database system is starting up
+2026-11-02 07:54:03.468 UTC [1056] FATAL:  the database system is starting up
+2026-11-02 07:54:04.276 UTC [1063] FATAL:  the database system is starting up
+2026-11-02 07:54:05.086 UTC [1070] FATAL:  the database system is starting up
+2026-11-02 07:54:05.778 UTC [1077] FATAL:  the database system is starting up
+2026-11-02 07:54:06.666 UTC [1084] FATAL:  the database system is starting up
+2026-11-02 07:54:07.487 UTC [1091] FATAL:  the database system is starting up
+2026-11-02 07:54:08.367 UTC [1098] FATAL:  the database system is starting up
+2026-11-02 07:54:08.979 UTC [1105] FATAL:  the database system is starting up
+2026-11-02 07:54:09.867 UTC [1112] FATAL:  the database system is starting up
+2026-11-02 07:54:10.676 UTC [1119] FATAL:  the database system is starting up
+2026-11-02 07:54:11.570 UTC [1126] FATAL:  the database system is starting up
+2026-11-02 07:54:12.290 UTC [1133] FATAL:  the database system is starting up
+2026-11-02 07:54:13.092 UTC [1140] FATAL:  the database system is starting up
+2026-11-02 07:54:13.967 UTC [1147] FATAL:  the database system is starting up
+2026-11-02 07:54:14.774 UTC [1154] FATAL:  the database system is starting up
+2026-11-02 07:54:15.578 UTC [1161] FATAL:  the database system is starting up
+2026-11-02 07:54:16.388 UTC [1168] FATAL:  the database system is starting up
+2026-11-02 07:54:17.268 UTC [1175] FATAL:  the database system is starting up
+2026-11-02 07:54:18.084 UTC [1182] FATAL:  the database system is starting up
+2026-11-02 07:54:18.967 UTC [1189] FATAL:  the database system is starting up
+2026-11-02 07:54:19.789 UTC [1196] FATAL:  the database system is starting up
+2026-11-02 07:54:20.570 UTC [1203] FATAL:  the database system is starting up
+2026-11-02 07:54:21.281 UTC [1210] FATAL:  the database system is starting up
+wget: can't connect to remote host (172.17.0.1): Operation timed out
+2026-11-02 07:54:21.454 UTC [25] LOG:  invalid checkpoint record
+2026-11-02 07:54:21.454 UTC [25] FATAL:  could not locate required checkpoint record at 0/2000080
+2026-11-02 07:54:21.454 UTC [25] HINT:  If you are restoring from a backup, touch "/var/lib/postgresql/18/docker/recovery.signal" or "/var/lib/postgresql/18/docker/standby.signal" and add required recovery options.
+	If you are not restoring from a backup, try removing the file "/var/lib/postgresql/18/docker/backup_label".
+	Be careful: removing "/var/lib/postgresql/18/docker/backup_label" will result in a corrupt cluster if restoring from a backup.
+2026-11-02 07:54:21.459 UTC [1] LOG:  startup process (PID 25) exited with exit code 1
+2026-11-02 07:54:21.459 UTC [1] LOG:  terminating any other active server processes
+2026-11-02 07:54:21.460 UTC [1] LOG:  shutting down due to startup process failure
+2026-11-02 07:54:21.464 UTC [1] LOG:  database system is shut down
+
+
+thread 'restore_in_place_keeps_the_endpoint' (1720235) panicked at crates/pg-control/tests/e2e.rs:508:100:
+called `Result::unwrap()` on an `Err` value: Internal(compute roll-ep_vp2qsbktfh6w exited:
+2026-11-02 07:53:57.679 UTC [1007] FATAL:  the database system is starting up
+2026-11-02 07:53:58.491 UTC [1014] FATAL:  the database system is starting up
+2026-11-02 07:53:59.271 UTC [1021] FATAL:  the database system is starting up
+2026-11-02 07:54:00.084 UTC [1028] FATAL:  the database system is starting up
+2026-11-02 07:54:00.890 UTC [1035] FATAL:  the database system is starting up
+2026-11-02 07:54:01.786 UTC [1042] FATAL:  the database system is starting up
+2026-11-02 07:54:02.576 UTC [1049] FATAL:  the database system is starting up
+2026-11-02 07:54:03.468 UTC [1056] FATAL:  the database system is starting up
+2026-11-02 07:54:04.276 UTC [1063] FATAL:  the database system is starting up
+2026-11-02 07:54:05.086 UTC [1070] FATAL:  the database system is starting up
+2026-11-02 07:54:05.778 UTC [1077] FATAL:  the database system is starting up
+2026-11-02 07:54:06.666 UTC [1084] FATAL:  the database system is starting up
+2026-11-02 07:54:07.487 UTC [1091] FATAL:  the database system is starting up
+2026-11-02 07:54:08.367 UTC [1098] FATAL:  the database system is starting up
+2026-11-02 07:54:08.979 UTC [1105] FATAL:  the database system is starting up
+2026-11-02 07:54:09.867 UTC [1112] FATAL:  the database system is starting up
+2026-11-02 07:54:10.676 UTC [1119] FATAL:  the database system is starting up
+2026-11-02 07:54:11.570 UTC [1126] FATAL:  the database system is starting up
+2026-11-02 07:54:12.290 UTC [1133] FATAL:  the database system is starting up
+2026-11-02 07:54:13.092 UTC [1140] FATAL:  the database system is starting up
+2026-11-02 07:54:13.967 UTC [1147] FATAL:  the database system is starting up
+2026-11-02 07:54:14.774 UTC [1154] FATAL:  the database system is starting up
+2026-11-02 07:54:15.578 UTC [1161] FATAL:  the database system is starting up
+2026-11-02 07:54:16.388 UTC [1168] FATAL:  the database system is starting up
+2026-11-02 07:54:17.268 UTC [1175] FATAL:  the database system is starting up
+2026-11-02 07:54:18.084 UTC [1182] FATAL:  the database system is starting up
+2026-11-02 07:54:18.967 UTC [1189] FATAL:  the database system is starting up
+2026-11-02 07:54:19.789 UTC [1196] FATAL:  the database system is starting up
+2026-11-02 07:54:20.570 UTC [1203] FATAL:  the database system is starting up
+2026-11-02 07:54:21.281 UTC [1210] FATAL:  the database system is starting up
+wget: can't connect to remote host (172.17.0.1): Operation timed out
+2026-11-02 07:54:21.454 UTC [25] LOG:  invalid checkpoint record
+2026-11-02 07:54:21.454 UTC [25] FATAL:  could not locate required checkpoint record at 0/2000080
+2026-11-02 07:54:21.454 UTC [25] HINT:  If you are restoring from a backup, touch "/var/lib/postgresql/18/docker/recovery.signal" or "/var/lib/postgresql/18/docker/standby.signal" and add required recovery options.
+	If you are not restoring from a backup, try removing the file "/var/lib/postgresql/18/docker/backup_label".
+	Be careful: removing "/var/lib/postgresql/18/docker/backup_label" will result in a corrupt cluster if restoring from a backup.
+2026-11-02 07:54:21.459 UTC [1] LOG:  startup process (PID 25) exited with exit code 1
+2026-11-02 07:54:21.459 UTC [1] LOG:  terminating any other active server processes
+2026-11-02 07:54:21.460 UTC [1] LOG:  shutting down due to startup process failure
+2026-11-02 07:54:21.464 UTC [1] LOG:  database system is shut down
+)
+
+---- retention_removes_old_history stdout ----
+2026-11-02T07:54:36.749493Z  INFO pg_control::control: compute started endpoint="ep_m2kaieiy6uzs" ms=14410
+2026-11-02T07:54:36.874100Z  INFO pg_storage::receiver: WAL streaming started branch=br_buph3h2vk7xa timeline=1 start=0/1000000 fresh=true
+2026-11-02T07:54:38.393999Z  INFO pg_control::history: base backup stored branch="br_buph3h2vk7xa" start=0/2000028 end=0/3000000 bytes=3915213 ms=1519
+2026-11-02T07:54:41.692988Z  INFO pg_control::history: base backup stored branch="br_buph3h2vk7xa" start=0/4000028 end=0/5000000 bytes=3947979 ms=1356
+2026-11-02T07:54:45.005560Z  INFO pg_control::history: base backup stored branch="br_buph3h2vk7xa" start=0/6000028 end=0/7000000 bytes=3985121 ms=1443
+2026-11-02T07:54:49.196173Z  INFO pg_control::history: base backup stored branch="br_buph3h2vk7xa" start=0/8000028 end=0/9000000 bytes=4014721 ms=1354
+2026-11-02T07:54:51.043855Z  INFO pg_control::history: restored base image source="br_buph3h2vk7xa" base=base_wysabvqxi2ns kind=online point=None recover=true bytes=4014721 ms=728
+2026-11-02T07:59:23.029380Z  WARN pg_control::control: compute failed to start endpoint="ep_cmmicif2ayvk" error=compute roll-ep_cmmicif2ayvk exited:
+2026-11-02 07:58:58.465 UTC [2197] FATAL:  the database system is starting up
+2026-11-02 07:58:59.143 UTC [2203] FATAL:  the database system is starting up
+2026-11-02 07:59:00.043 UTC [2210] FATAL:  the database system is starting up
+2026-11-02 07:59:00.860 UTC [2217] FATAL:  the database system is starting up
+2026-11-02 07:59:01.660 UTC [2224] FATAL:  the database system is starting up
+2026-11-02 07:59:02.358 UTC [2231] FATAL:  the database system is starting up
+2026-11-02 07:59:03.164 UTC [2238] FATAL:  the database system is starting up
+2026-11-02 07:59:03.965 UTC [2245] FATAL:  the database system is starting up
+2026-11-02 07:59:04.756 UTC [2252] FATAL:  the database system is starting up
+2026-11-02 07:59:05.555 UTC [2259] FATAL:  the database system is starting up
+2026-11-02 07:59:06.443 UTC [2266] FATAL:  the database system is starting up
+2026-11-02 07:59:07.266 UTC [2273] FATAL:  the database system is starting up
+2026-11-02 07:59:08.056 UTC [2280] FATAL:  the database system is starting up
+2026-11-02 07:59:08.858 UTC [2287] FATAL:  the database system is starting up
+2026-11-02 07:59:09.655 UTC [2294] FATAL:  the database system is starting up
+2026-11-02 07:59:10.443 UTC [2301] FATAL:  the database system is starting up
+2026-11-02 07:59:11.257 UTC [2308] FATAL:  the database system is starting up
+2026-11-02 07:59:12.062 UTC [2315] FATAL:  the database system is starting up
+2026-11-02 07:59:12.862 UTC [2322] FATAL:  the database system is starting up
+2026-11-02 07:59:13.663 UTC [2329] FATAL:  the database system is starting up
+2026-11-02 07:59:14.463 UTC [2336] FATAL:  the database system is starting up
+2026-11-02 07:59:15.256 UTC [2344] FATAL:  the database system is starting up
+2026-11-02 07:59:16.063 UTC [2351] FATAL:  the database system is starting up
+2026-11-02 07:59:16.862 UTC [2358] FATAL:  the database system is starting up
+2026-11-02 07:59:17.652 UTC [2365] FATAL:  the database system is starting up
+2026-11-02 07:59:18.465 UTC [2372] FATAL:  the database system is starting up
+2026-11-02 07:59:19.260 UTC [2379] FATAL:  the database system is starting up
+2026-11-02 07:59:20.058 UTC [2386] FATAL:  the database system is starting up
+2026-11-02 07:59:20.866 UTC [2393] FATAL:  the database system is starting up
+2026-11-02 07:59:21.758 UTC [2400] FATAL:  the database system is starting up
+wget: can't connect to remote host (172.17.0.1): Operation timed out
+2026-11-02 07:59:22.510 UTC [25] LOG:  invalid checkpoint record
+2026-11-02 07:59:22.510 UTC [25] FATAL:  could not locate required checkpoint record at 0/8000080
+2026-11-02 07:59:22.510 UTC [25] HINT:  If you are restoring from a backup, touch "/var/lib/postgresql/18/docker/recovery.signal" or "/var/lib/postgresql/18/docker/standby.signal" and add required recovery options.
+	If you are not restoring from a backup, try removing the file "/var/lib/postgresql/18/docker/backup_label".
+	Be careful: removing "/var/lib/postgresql/18/docker/backup_label" will result in a corrupt cluster if restoring from a backup.
+2026-11-02 07:59:22.545 UTC [1] LOG:  startup process (PID 25) exited with exit code 1
+2026-11-02 07:59:22.545 UTC [1] LOG:  terminating any other active server processes
+2026-11-02 07:59:22.546 UTC [1] LOG:  shutting down due to startup process failure
+2026-11-02 07:59:22.645 UTC [1] LOG:  database system is shut down
+
+
+thread 'retention_removes_old_history' (1783444) panicked at crates/pg-control/tests/e2e.rs:136:89:
+connect ep_cmmicif2ayvk: Error { kind: Db, cause: Some(DbError { severity: "FATAL", parsed_severity: Some(Fatal), code: SqlState(E57P03), message: "endpoint ep_cmmicif2ayvk could not start: compute roll-ep_cmmicif2ayvk exited:\n2026-11-02 07:58:58.465 UTC [2197] FATAL:  the database system is starting up\n2026-11-02 07:58:59.143 UTC [2203] FATAL:  the database system is starting up\n2026-11-02 07:59:00.043 UTC [2210] FATAL:  the database system is starting up\n2026-11-02 07:59:00.860 UTC [2217] FATAL:  the database system is starting up\n2026-11-02 07:59:01.660 UTC [2224] FATAL:  the database system is starting up\n2026-11-02 07:59:02.358 UTC [2231] FATAL:  the database system is starting up\n2026-11-02 07:59:03.164 UTC [2238] FATAL:  the database system is starting up\n2026-11-02 07:59:03.965 UTC [2245] FATAL:  the database system is starting up\n2026-11-02 07:59:04.756 UTC [2252] FATAL:  the database system is starting up\n2026-11-02 07:59:05.555 UTC [2259] FATAL:  the database system is starting up\n2026-11-02 07:59:06.443 UTC [2266] FATAL:  the database system is starting up\n2026-11-02 07:59:07.266 UTC [2273] FATAL:  the database system is starting up\n2026-11-02 07:59:08.056 UTC [2280] FATAL:  the database system is starting up\n2026-11-02 07:59:08.858 UTC [2287] FATAL:  the database system is starting up\n2026-11-02 07:59:09.655 UTC [2294] FATAL:  the database system is starting up\n2026-11-02 07:59:10.443 UTC [2301] FATAL:  the database system is starting up\n2026-11-02 07:59:11.257 UTC [2308] FATAL:  the database system is starting up\n2026-11-02 07:59:12.062 UTC [2315] FATAL:  the database system is starting up\n2026-11-02 07:59:12.862 UTC [2322] FATAL:  the database system is starting up\n2026-11-02 07:59:13.663 UTC [2329] FATAL:  the database system is starting up\n2026-11-02 07:59:14.463 UTC [2336] FATAL:  the database system is starting up\n2026-11-02 07:59:15.256 UTC [2344] FATAL:  the database system is starting up\n2026-11-02 07:59:16.063 UTC [2351] FATAL:  the database system is starting up\n2026-11-02 07:59:16.862 UTC [2358] FATAL:  the database system is starting up\n2026-11-02 07:59:17.652 UTC [2365] FATAL:  the database system is starting up\n2026-11-02 07:59:18.465 UTC [2372] FATAL:  the database system is starting up\n2026-11-02 07:59:19.260 UTC [2379] FATAL:  the database system is starting up\n2026-11-02 07:59:20.058 UTC [2386] FATAL:  the database system is starting up\n2026-11-02 07:59:20.866 UTC [2393] FATAL:  the database system is starting up\n2026-11-02 07:59:21.758 UTC [2400] FATAL:  the database system is starting up\nwget: can't connect to remote host (172.17.0.1): Operation timed out\n2026-11-02 07:59:22.510 UTC [25] LOG:  invalid checkpoint record\n2026-11-02 07:59:22.510 UTC [25] FATAL:  could not locate required checkpoint record at 0/8000080\n2026-11-02 07:59:22.510 UTC [25] HINT:  If you are restoring from a backup, touch \"/var/lib/postgresql/18/docker/recovery.signal\" or \"/var/lib/postgresql/18/docker/standby.signal\" and add required recovery options.\n\tIf you are not restoring from a backup, try removing the file \"/var/lib/postgresql/18/docker/backup_label\".\n\tBe careful: removing \"/var/lib/postgresql/18/docker/backup_label\" will result in a corrupt cluster if restoring from a backup.\n2026-11-02 07:59:22.545 UTC [1] LOG:  startup process (PID 25) exited with exit code 1\n2026-11-02 07:59:22.545 UTC [1] LOG:  terminating any other active server processes\n2026-11-02 07:59:22.546 UTC [1] LOG:  shutting down due to startup process failure\n2026-11-02 07:59:22.645 UTC [1] LOG:  database system is shut down\n", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+2026-11-02T07:59:23.155138Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_buph3h2vk7xa flushed=0/903B700
+
+---- survives_losing_the_local_disk stdout ----
+2026-11-02T07:56:14.960774Z  INFO pg_control::control: compute started endpoint="ep_zh6p3fwj4b8x" ms=15053
+2026-11-02T07:56:15.031300Z  INFO pg_storage::receiver: WAL streaming started branch=br_dimb25hr9k86 timeline=1 start=0/1000000 fresh=true
+2026-11-02T07:56:16.546057Z  INFO pg_control::history: base backup stored branch="br_dimb25hr9k86" start=0/2000028 end=0/3000000 bytes=3915093 ms=1514
+2026-11-02T07:56:17.301749Z  INFO pg_storage::receiver: WAL streaming stopped branch=br_dimb25hr9k86 flushed=0/305D400
+2026-11-02T07:56:17.780825Z  INFO pg_control::control: compute suspended endpoint="ep_zh6p3fwj4b8x"
+2026-11-02T07:56:17.825231Z  INFO pg_control::history: no local data; restoring from object storage branch=br_dimb25hr9k86
+2026-11-02T07:56:18.540723Z  INFO pg_control::history: restored base image source="br_dimb25hr9k86" base=base_nmtkgk29k84x kind=online point=None recover=true bytes=3915093 ms=715
+2026-11-02T08:00:49.136006Z  WARN pg_control::control: compute failed to start endpoint="ep_zh6p3fwj4b8x" error=compute roll-ep_zh6p3fwj4b8x exited:
+2026-11-02 08:00:25.060 UTC [2170] FATAL:  the database system is starting up
+2026-11-02 08:00:25.761 UTC [2177] FATAL:  the database system is starting up
+2026-11-02 08:00:26.566 UTC [2184] FATAL:  the database system is starting up
+2026-11-02 08:00:27.367 UTC [2191] FATAL:  the database system is starting up
+2026-11-02 08:00:28.244 UTC [2198] FATAL:  the database system is starting up
+2026-11-02 08:00:28.966 UTC [2205] FATAL:  the database system is starting up
+2026-11-02 08:00:29.767 UTC [2212] FATAL:  the database system is starting up
+2026-11-02 08:00:30.564 UTC [2219] FATAL:  the database system is starting up
+2026-11-02 08:00:31.365 UTC [2226] FATAL:  the database system is starting up
+2026-11-02 08:00:32.162 UTC [2233] FATAL:  the database system is starting up
+2026-11-02 08:00:33.044 UTC [2240] FATAL:  the database system is starting up
+2026-11-02 08:00:33.864 UTC [2247] FATAL:  the database system is starting up
+2026-11-02 08:00:34.657 UTC [2253] FATAL:  the database system is starting up
+2026-11-02 08:00:35.459 UTC [2260] FATAL:  the database system is starting up
+2026-11-02 08:00:36.267 UTC [2267] FATAL:  the database system is starting up
+2026-11-02 08:00:37.144 UTC [2274] FATAL:  the database system is starting up
+2026-11-02 08:00:37.964 UTC [2281] FATAL:  the database system is starting up
+2026-11-02 08:00:38.753 UTC [2288] FATAL:  the database system is starting up
+2026-11-02 08:00:39.563 UTC [2295] FATAL:  the database system is starting up
+2026-11-02 08:00:40.444 UTC [2302] FATAL:  the database system is starting up
+2026-11-02 08:00:41.259 UTC [2309] FATAL:  the database system is starting up
+2026-11-02 08:00:42.055 UTC [2316] FATAL:  the database system is starting up
+2026-11-02 08:00:42.858 UTC [2323] FATAL:  the database system is starting up
+2026-11-02 08:00:43.667 UTC [2330] FATAL:  the database system is starting up
+2026-11-02 08:00:44.350 UTC [2337] FATAL:  the database system is starting up
+2026-11-02 08:00:45.163 UTC [2344] FATAL:  the database system is starting up
+2026-11-02 08:00:45.944 UTC [2351] FATAL:  the database system is starting up
+2026-11-02 08:00:46.844 UTC [2358] FATAL:  the database system is starting up
+2026-11-02 08:00:47.644 UTC [2365] FATAL:  the database system is starting up
+2026-11-02 08:00:48.465 UTC [2372] FATAL:  the database system is starting up
+wget: can't connect to remote host (172.17.0.1): Operation timed out
+2026-11-02 08:00:48.530 UTC [25] LOG:  invalid checkpoint record
+2026-11-02 08:00:48.530 UTC [25] FATAL:  could not locate required checkpoint record at 0/2000080
+2026-11-02 08:00:48.530 UTC [25] HINT:  If you are restoring from a backup, touch "/var/lib/postgresql/18/docker/recovery.signal" or "/var/lib/postgresql/18/docker/standby.signal" and add required recovery options.
+	If you are not restoring from a backup, try removing the file "/var/lib/postgresql/18/docker/backup_label".
+	Be careful: removing "/var/lib/postgresql/18/docker/backup_label" will result in a corrupt cluster if restoring from a backup.
+2026-11-02 08:00:48.547 UTC [1] LOG:  startup process (PID 25) exited with exit code 1
+2026-11-02 08:00:48.547 UTC [1] LOG:  terminating any other active server processes
+2026-11-02 08:00:48.548 UTC [1] LOG:  shutting down due to startup process failure
+2026-11-02 08:00:48.553 UTC [1] LOG:  database system is shut down
+
+
+thread 'survives_losing_the_local_disk' (1821980) panicked at crates/pg-control/tests/e2e.rs:136:89:
+connect ep_zh6p3fwj4b8x: Error { kind: Db, cause: Some(DbError { severity: "FATAL", parsed_severity: Some(Fatal), code: SqlState(E57P03), message: "endpoint ep_zh6p3fwj4b8x could not start: compute roll-ep_zh6p3fwj4b8x exited:\n2026-11-02 08:00:25.060 UTC [2170] FATAL:  the database system is starting up\n2026-11-02 08:00:25.761 UTC [2177] FATAL:  the database system is starting up\n2026-11-02 08:00:26.566 UTC [2184] FATAL:  the database system is starting up\n2026-11-02 08:00:27.367 UTC [2191] FATAL:  the database system is starting up\n2026-11-02 08:00:28.244 UTC [2198] FATAL:  the database system is starting up\n2026-11-02 08:00:28.966 UTC [2205] FATAL:  the database system is starting up\n2026-11-02 08:00:29.767 UTC [2212] FATAL:  the database system is starting up\n2026-11-02 08:00:30.564 UTC [2219] FATAL:  the database system is starting up\n2026-11-02 08:00:31.365 UTC [2226] FATAL:  the database system is starting up\n2026-11-02 08:00:32.162 UTC [2233] FATAL:  the database system is starting up\n2026-11-02 08:00:33.044 UTC [2240] FATAL:  the database system is starting up\n2026-11-02 08:00:33.864 UTC [2247] FATAL:  the database system is starting up\n2026-11-02 08:00:34.657 UTC [2253] FATAL:  the database system is starting up\n2026-11-02 08:00:35.459 UTC [2260] FATAL:  the database system is starting up\n2026-11-02 08:00:36.267 UTC [2267] FATAL:  the database system is starting up\n2026-11-02 08:00:37.144 UTC [2274] FATAL:  the database system is starting up\n2026-11-02 08:00:37.964 UTC [2281] FATAL:  the database system is starting up\n2026-11-02 08:00:38.753 UTC [2288] FATAL:  the database system is starting up\n2026-11-02 08:00:39.563 UTC [2295] FATAL:  the database system is starting up\n2026-11-02 08:00:40.444 UTC [2302] FATAL:  the database system is starting up\n2026-11-02 08:00:41.259 UTC [2309] FATAL:  the database system is starting up\n2026-11-02 08:00:42.055 UTC [2316] FATAL:  the database system is starting up\n2026-11-02 08:00:42.858 UTC [2323] FATAL:  the database system is starting up\n2026-11-02 08:00:43.667 UTC [2330] FATAL:  the database system is starting up\n2026-11-02 08:00:44.350 UTC [2337] FATAL:  the database system is starting up\n2026-11-02 08:00:45.163 UTC [2344] FATAL:  the database system is starting up\n2026-11-02 08:00:45.944 UTC [2351] FATAL:  the database system is starting up\n2026-11-02 08:00:46.844 UTC [2358] FATAL:  the database system is starting up\n2026-11-02 08:00:47.644 UTC [2365] FATAL:  the database system is starting up\n2026-11-02 08:00:48.465 UTC [2372] FATAL:  the database system is starting up\nwget: can't connect to remote host (172.17.0.1): Operation timed out\n2026-11-02 08:00:48.530 UTC [25] LOG:  invalid checkpoint record\n2026-11-02 08:00:48.530 UTC [25] FATAL:  could not locate required checkpoint record at 0/2000080\n2026-11-02 08:00:48.530 UTC [25] HINT:  If you are restoring from a backup, touch \"/var/lib/postgresql/18/docker/recovery.signal\" or \"/var/lib/postgresql/18/docker/standby.signal\" and add required recovery options.\n\tIf you are not restoring from a backup, try removing the file \"/var/lib/postgresql/18/docker/backup_label\".\n\tBe careful: removing \"/var/lib/postgresql/18/docker/backup_label\" will result in a corrupt cluster if restoring from a backup.\n2026-11-02 08:00:48.547 UTC [1] LOG:  startup process (PID 25) exited with exit code 1\n2026-11-02 08:00:48.547 UTC [1] LOG:  terminating any other active server processes\n2026-11-02 08:00:48.548 UTC [1] LOG:  shutting down due to startup process failure\n2026-11-02 08:00:48.553 UTC [1] LOG:  database system is shut down\n", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+
+failures:
+    point_in_time_branches
+    restore_in_place_keeps_the_endpoint
+    retention_removes_old_history
+    survives_losing_the_local_disk
+
+test result: FAILED. 12 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 755.04s
+
+error: test failed, to rerun pass `-p pg-control --test e2e`
+[ELIFECYCLE] Command failed with exit code 101.

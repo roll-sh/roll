@@ -1,0 +1,1090 @@
+{
+  "before": {
+    "monotonic_ns": 482993260765147,
+    "cpu": {
+      "usage_usec": 1964376,
+      "user_usec": 998695,
+      "system_usec": 965680,
+      "nice_usec": 0,
+      "nr_periods": 47,
+      "nr_throttled": 0,
+      "throttled_usec": 0,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory": {
+      "anon": 108871680,
+      "file": 70287360,
+      "kernel": 22409216,
+      "kernel_stack": 1196032,
+      "pagetables": 10522624,
+      "sec_pagetables": 0,
+      "percpu": 57304,
+      "sock": 0,
+      "vmalloc": 16384,
+      "shmem": 26898432,
+      "zswap": 0,
+      "zswapped": 0,
+      "file_mapped": 19619840,
+      "file_dirty": 16384,
+      "file_writeback": 0,
+      "swapcached": 0,
+      "anon_thp": 0,
+      "file_thp": 0,
+      "shmem_thp": 0,
+      "inactive_anon": 0,
+      "active_anon": 135770112,
+      "inactive_file": 43388928,
+      "active_file": 0,
+      "unevictable": 0,
+      "slab_reclaimable": 4872288,
+      "slab_unreclaimable": 5133616,
+      "slab": 10005904,
+      "workingset_refault_anon": 0,
+      "workingset_refault_file": 0,
+      "workingset_activate_anon": 0,
+      "workingset_activate_file": 0,
+      "workingset_restore_anon": 0,
+      "workingset_restore_file": 0,
+      "workingset_nodereclaim": 0,
+      "pgdemote_kswapd": 0,
+      "pgdemote_direct": 0,
+      "pgdemote_khugepaged": 0,
+      "pgpromote_success": 0,
+      "pgscan": 0,
+      "pgsteal": 0,
+      "pgscan_kswapd": 0,
+      "pgscan_direct": 0,
+      "pgscan_khugepaged": 0,
+      "pgsteal_kswapd": 0,
+      "pgsteal_direct": 0,
+      "pgsteal_khugepaged": 0,
+      "pgfault": 181268,
+      "pgmajfault": 0,
+      "pgrefill": 0,
+      "pgactivate": 0,
+      "pgdeactivate": 0,
+      "pglazyfree": 0,
+      "pglazyfreed": 0,
+      "swpin_zero": 0,
+      "swpout_zero": 0,
+      "zswpin": 0,
+      "zswpout": 0,
+      "zswpwb": 0,
+      "thp_fault_alloc": 5,
+      "thp_collapse_alloc": 0,
+      "thp_swpout": 0,
+      "thp_swpout_fallback": 0,
+      "numa_pages_migrated": 0,
+      "numa_pte_updates": 0,
+      "numa_hint_faults": 0
+    },
+    "memory_current": 201568256,
+    "memory_swap_current": 0,
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "io_stat": "259:1 rbytes=4096 wbytes=23719936 rios=1 wios=686 dbytes=0 dios=0\n259:0 rbytes=0 wbytes=24186880 rios=0 wios=653 dbytes=0 dios=0\n9:2 rbytes=4096 wbytes=47906816 rios=1 wios=2296 dbytes=0 dios=0\n",
+    "threads": {
+      "455778": {
+        "name": "postgres",
+        "start_ticks": 48294764,
+        "voluntary": 145,
+        "involuntary": 7
+      },
+      "456297": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 282,
+        "involuntary": 0
+      },
+      "456298": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "456299": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 1,
+        "involuntary": 1
+      },
+      "456300": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 1,
+        "involuntary": 1
+      },
+      "456301": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 17,
+        "involuntary": 0
+      },
+      "456303": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 123,
+        "involuntary": 0
+      },
+      "456304": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 5,
+        "involuntary": 0
+      },
+      "456305": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 1,
+        "involuntary": 1
+      },
+      "463837": {
+        "name": "postgres",
+        "start_ticks": 48297789,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "463839": {
+        "name": "postgres",
+        "start_ticks": 48297790,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463842": {
+        "name": "postgres",
+        "start_ticks": 48297792,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463843": {
+        "name": "postgres",
+        "start_ticks": 48297793,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463845": {
+        "name": "postgres",
+        "start_ticks": 48297795,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463848": {
+        "name": "postgres",
+        "start_ticks": 48297797,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463849": {
+        "name": "postgres",
+        "start_ticks": 48297799,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463851": {
+        "name": "postgres",
+        "start_ticks": 48297800,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463911": {
+        "name": "postgres",
+        "start_ticks": 48297802,
+        "voluntary": 6,
+        "involuntary": 2
+      },
+      "464067": {
+        "name": "postgres",
+        "start_ticks": 48297804,
+        "voluntary": 6,
+        "involuntary": 4
+      },
+      "464095": {
+        "name": "postgres",
+        "start_ticks": 48297806,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464105": {
+        "name": "postgres",
+        "start_ticks": 48297808,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464112": {
+        "name": "postgres",
+        "start_ticks": 48297809,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464120": {
+        "name": "postgres",
+        "start_ticks": 48297810,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464123": {
+        "name": "postgres",
+        "start_ticks": 48297811,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464127": {
+        "name": "postgres",
+        "start_ticks": 48297812,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464131": {
+        "name": "postgres",
+        "start_ticks": 48297813,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464133": {
+        "name": "postgres",
+        "start_ticks": 48297814,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464134": {
+        "name": "postgres",
+        "start_ticks": 48297815,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464136": {
+        "name": "postgres",
+        "start_ticks": 48297817,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464138": {
+        "name": "postgres",
+        "start_ticks": 48297818,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464139": {
+        "name": "postgres",
+        "start_ticks": 48297820,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464141": {
+        "name": "postgres",
+        "start_ticks": 48297821,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464143": {
+        "name": "postgres",
+        "start_ticks": 48297823,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464144": {
+        "name": "postgres",
+        "start_ticks": 48297825,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464146": {
+        "name": "postgres",
+        "start_ticks": 48297826,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464147": {
+        "name": "postgres",
+        "start_ticks": 48297828,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464148": {
+        "name": "postgres",
+        "start_ticks": 48297830,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464149": {
+        "name": "postgres",
+        "start_ticks": 48297831,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464150": {
+        "name": "postgres",
+        "start_ticks": 48297833,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464151": {
+        "name": "postgres",
+        "start_ticks": 48297835,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464152": {
+        "name": "postgres",
+        "start_ticks": 48297836,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464153": {
+        "name": "postgres",
+        "start_ticks": 48297838,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464154": {
+        "name": "postgres",
+        "start_ticks": 48297840,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464155": {
+        "name": "postgres",
+        "start_ticks": 48297841,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464157": {
+        "name": "postgres",
+        "start_ticks": 48297843,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464158": {
+        "name": "postgres",
+        "start_ticks": 48297845,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464159": {
+        "name": "postgres",
+        "start_ticks": 48297846,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464160": {
+        "name": "postgres",
+        "start_ticks": 48297848,
+        "voluntary": 6,
+        "involuntary": 2
+      },
+      "464161": {
+        "name": "postgres",
+        "start_ticks": 48297850,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464162": {
+        "name": "postgres",
+        "start_ticks": 48297851,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464163": {
+        "name": "postgres",
+        "start_ticks": 48297853,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464164": {
+        "name": "postgres",
+        "start_ticks": 48297855,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464165": {
+        "name": "postgres",
+        "start_ticks": 48297856,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464166": {
+        "name": "postgres",
+        "start_ticks": 48297858,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464167": {
+        "name": "postgres",
+        "start_ticks": 48297860,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464168": {
+        "name": "postgres",
+        "start_ticks": 48297861,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464169": {
+        "name": "postgres",
+        "start_ticks": 48297863,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464170": {
+        "name": "postgres",
+        "start_ticks": 48297865,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464171": {
+        "name": "postgres",
+        "start_ticks": 48297866,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464173": {
+        "name": "postgres",
+        "start_ticks": 48297868,
+        "voluntary": 6,
+        "involuntary": 2
+      },
+      "464174": {
+        "name": "postgres",
+        "start_ticks": 48297870,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464175": {
+        "name": "postgres",
+        "start_ticks": 48297871,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464176": {
+        "name": "postgres",
+        "start_ticks": 48297873,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464177": {
+        "name": "postgres",
+        "start_ticks": 48297875,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464178": {
+        "name": "postgres",
+        "start_ticks": 48297876,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464179": {
+        "name": "postgres",
+        "start_ticks": 48297878,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464180": {
+        "name": "postgres",
+        "start_ticks": 48297880,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464181": {
+        "name": "postgres",
+        "start_ticks": 48297881,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464182": {
+        "name": "postgres",
+        "start_ticks": 48297883,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464183": {
+        "name": "postgres",
+        "start_ticks": 48297884,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464184": {
+        "name": "postgres",
+        "start_ticks": 48297886,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464185": {
+        "name": "postgres",
+        "start_ticks": 48297888,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464186": {
+        "name": "postgres",
+        "start_ticks": 48297889,
+        "voluntary": 6,
+        "involuntary": 0
+      }
+    },
+    "snapshot_finished_ns": 482993275247914
+  },
+  "after": {
+    "monotonic_ns": 482998275770004,
+    "cpu": {
+      "usage_usec": 1965173,
+      "user_usec": 999100,
+      "system_usec": 966072,
+      "nice_usec": 0,
+      "nr_periods": 47,
+      "nr_throttled": 0,
+      "throttled_usec": 0,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory": {
+      "anon": 108871680,
+      "file": 70287360,
+      "kernel": 22409216,
+      "kernel_stack": 1196032,
+      "pagetables": 10522624,
+      "sec_pagetables": 0,
+      "percpu": 57304,
+      "sock": 0,
+      "vmalloc": 16384,
+      "shmem": 26898432,
+      "zswap": 0,
+      "zswapped": 0,
+      "file_mapped": 19619840,
+      "file_dirty": 4096,
+      "file_writeback": 0,
+      "swapcached": 0,
+      "anon_thp": 0,
+      "file_thp": 0,
+      "shmem_thp": 0,
+      "inactive_anon": 0,
+      "active_anon": 135770112,
+      "inactive_file": 43388928,
+      "active_file": 0,
+      "unevictable": 0,
+      "slab_reclaimable": 4872288,
+      "slab_unreclaimable": 5133616,
+      "slab": 10005904,
+      "workingset_refault_anon": 0,
+      "workingset_refault_file": 0,
+      "workingset_activate_anon": 0,
+      "workingset_activate_file": 0,
+      "workingset_restore_anon": 0,
+      "workingset_restore_file": 0,
+      "workingset_nodereclaim": 0,
+      "pgdemote_kswapd": 0,
+      "pgdemote_direct": 0,
+      "pgdemote_khugepaged": 0,
+      "pgpromote_success": 0,
+      "pgscan": 0,
+      "pgsteal": 0,
+      "pgscan_kswapd": 0,
+      "pgscan_direct": 0,
+      "pgscan_khugepaged": 0,
+      "pgsteal_kswapd": 0,
+      "pgsteal_direct": 0,
+      "pgsteal_khugepaged": 0,
+      "pgfault": 181268,
+      "pgmajfault": 0,
+      "pgrefill": 0,
+      "pgactivate": 0,
+      "pgdeactivate": 0,
+      "pglazyfree": 0,
+      "pglazyfreed": 0,
+      "swpin_zero": 0,
+      "swpout_zero": 0,
+      "zswpin": 0,
+      "zswpout": 0,
+      "zswpwb": 0,
+      "thp_fault_alloc": 5,
+      "thp_collapse_alloc": 0,
+      "thp_swpout": 0,
+      "thp_swpout_fallback": 0,
+      "numa_pages_migrated": 0,
+      "numa_pte_updates": 0,
+      "numa_hint_faults": 0
+    },
+    "memory_current": 201568256,
+    "memory_swap_current": 0,
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "io_stat": "259:1 rbytes=4096 wbytes=23719936 rios=1 wios=686 dbytes=0 dios=0\n259:0 rbytes=0 wbytes=24186880 rios=0 wios=653 dbytes=0 dios=0\n9:2 rbytes=4096 wbytes=47906816 rios=1 wios=2296 dbytes=0 dios=0\n",
+    "threads": {
+      "455778": {
+        "name": "postgres",
+        "start_ticks": 48294764,
+        "voluntary": 145,
+        "involuntary": 7
+      },
+      "456297": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 282,
+        "involuntary": 0
+      },
+      "456298": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "456299": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 1,
+        "involuntary": 1
+      },
+      "456300": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 1,
+        "involuntary": 1
+      },
+      "456301": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 17,
+        "involuntary": 0
+      },
+      "456303": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 148,
+        "involuntary": 0
+      },
+      "456304": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 5,
+        "involuntary": 0
+      },
+      "456305": {
+        "name": "postgres",
+        "start_ticks": 48294889,
+        "voluntary": 1,
+        "involuntary": 1
+      },
+      "463837": {
+        "name": "postgres",
+        "start_ticks": 48297789,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "463839": {
+        "name": "postgres",
+        "start_ticks": 48297790,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463842": {
+        "name": "postgres",
+        "start_ticks": 48297792,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463843": {
+        "name": "postgres",
+        "start_ticks": 48297793,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463845": {
+        "name": "postgres",
+        "start_ticks": 48297795,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463848": {
+        "name": "postgres",
+        "start_ticks": 48297797,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463849": {
+        "name": "postgres",
+        "start_ticks": 48297799,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463851": {
+        "name": "postgres",
+        "start_ticks": 48297800,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "463911": {
+        "name": "postgres",
+        "start_ticks": 48297802,
+        "voluntary": 6,
+        "involuntary": 2
+      },
+      "464067": {
+        "name": "postgres",
+        "start_ticks": 48297804,
+        "voluntary": 6,
+        "involuntary": 4
+      },
+      "464095": {
+        "name": "postgres",
+        "start_ticks": 48297806,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464105": {
+        "name": "postgres",
+        "start_ticks": 48297808,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464112": {
+        "name": "postgres",
+        "start_ticks": 48297809,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464120": {
+        "name": "postgres",
+        "start_ticks": 48297810,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464123": {
+        "name": "postgres",
+        "start_ticks": 48297811,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464127": {
+        "name": "postgres",
+        "start_ticks": 48297812,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464131": {
+        "name": "postgres",
+        "start_ticks": 48297813,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464133": {
+        "name": "postgres",
+        "start_ticks": 48297814,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464134": {
+        "name": "postgres",
+        "start_ticks": 48297815,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464136": {
+        "name": "postgres",
+        "start_ticks": 48297817,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464138": {
+        "name": "postgres",
+        "start_ticks": 48297818,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464139": {
+        "name": "postgres",
+        "start_ticks": 48297820,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464141": {
+        "name": "postgres",
+        "start_ticks": 48297821,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464143": {
+        "name": "postgres",
+        "start_ticks": 48297823,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464144": {
+        "name": "postgres",
+        "start_ticks": 48297825,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464146": {
+        "name": "postgres",
+        "start_ticks": 48297826,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464147": {
+        "name": "postgres",
+        "start_ticks": 48297828,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464148": {
+        "name": "postgres",
+        "start_ticks": 48297830,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464149": {
+        "name": "postgres",
+        "start_ticks": 48297831,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464150": {
+        "name": "postgres",
+        "start_ticks": 48297833,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464151": {
+        "name": "postgres",
+        "start_ticks": 48297835,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464152": {
+        "name": "postgres",
+        "start_ticks": 48297836,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464153": {
+        "name": "postgres",
+        "start_ticks": 48297838,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464154": {
+        "name": "postgres",
+        "start_ticks": 48297840,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464155": {
+        "name": "postgres",
+        "start_ticks": 48297841,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464157": {
+        "name": "postgres",
+        "start_ticks": 48297843,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464158": {
+        "name": "postgres",
+        "start_ticks": 48297845,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464159": {
+        "name": "postgres",
+        "start_ticks": 48297846,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464160": {
+        "name": "postgres",
+        "start_ticks": 48297848,
+        "voluntary": 6,
+        "involuntary": 2
+      },
+      "464161": {
+        "name": "postgres",
+        "start_ticks": 48297850,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464162": {
+        "name": "postgres",
+        "start_ticks": 48297851,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464163": {
+        "name": "postgres",
+        "start_ticks": 48297853,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464164": {
+        "name": "postgres",
+        "start_ticks": 48297855,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464165": {
+        "name": "postgres",
+        "start_ticks": 48297856,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464166": {
+        "name": "postgres",
+        "start_ticks": 48297858,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464167": {
+        "name": "postgres",
+        "start_ticks": 48297860,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464168": {
+        "name": "postgres",
+        "start_ticks": 48297861,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464169": {
+        "name": "postgres",
+        "start_ticks": 48297863,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464170": {
+        "name": "postgres",
+        "start_ticks": 48297865,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464171": {
+        "name": "postgres",
+        "start_ticks": 48297866,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464173": {
+        "name": "postgres",
+        "start_ticks": 48297868,
+        "voluntary": 6,
+        "involuntary": 2
+      },
+      "464174": {
+        "name": "postgres",
+        "start_ticks": 48297870,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464175": {
+        "name": "postgres",
+        "start_ticks": 48297871,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464176": {
+        "name": "postgres",
+        "start_ticks": 48297873,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464177": {
+        "name": "postgres",
+        "start_ticks": 48297875,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464178": {
+        "name": "postgres",
+        "start_ticks": 48297876,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464179": {
+        "name": "postgres",
+        "start_ticks": 48297878,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464180": {
+        "name": "postgres",
+        "start_ticks": 48297880,
+        "voluntary": 6,
+        "involuntary": 1
+      },
+      "464181": {
+        "name": "postgres",
+        "start_ticks": 48297881,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464182": {
+        "name": "postgres",
+        "start_ticks": 48297883,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464183": {
+        "name": "postgres",
+        "start_ticks": 48297884,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464184": {
+        "name": "postgres",
+        "start_ticks": 48297886,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464185": {
+        "name": "postgres",
+        "start_ticks": 48297888,
+        "voluntary": 6,
+        "involuntary": 0
+      },
+      "464186": {
+        "name": "postgres",
+        "start_ticks": 48297889,
+        "voluntary": 6,
+        "involuntary": 0
+      }
+    },
+    "snapshot_finished_ns": 482998290701102
+  },
+  "elapsed_s": 5.015004857,
+  "cpu_us": 797,
+  "block_io_delta": {
+    "rbytes": 0,
+    "wbytes": 0,
+    "rios": 0,
+    "wios": 0
+  },
+  "cpu_us_per_s": 158.92307639294475,
+  "voluntary_switches_surviving_threads_per_s": 4.985040037419848,
+  "surviving_threads": 73,
+  "removed_threads": 0,
+  "added_threads": 0,
+  "thread_ids_unchanged": true,
+  "memory_anon_shmem_mib": 129.48046875,
+  "memory_current_mib": 192.23046875,
+  "phase": "connected",
+  "round": 0,
+  "warmup": true,
+  "target": "postgres",
+  "connections_held": 64,
+  "minimum_seconds_since_fixture_query": 3
+}

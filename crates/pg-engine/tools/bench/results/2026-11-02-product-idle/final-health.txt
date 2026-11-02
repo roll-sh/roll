@@ -1,0 +1,41 @@
+== ai-server  up 5 days, 15 hours, 38 minutes
+load: 2.76 2.71 3.01 on 36 threads
+pressure cpu    avg10=0.00 avg60=0.23 avg300=2.30
+pressure io     avg10=0.24 avg60=0.06 avg300=0.01
+pressure memory avg10=0.00 avg60=0.00 avg300=0.00
+
+               total        used        free      shared  buff/cache   available
+Mem:           125Gi        17Gi       2.0Gi       380Mi       108Gi       108Gi
+Swap:           15Gi        15Gi        41Mi
+
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/md2        1.8T  952G  701G  58% /
+
+== top memory by process name
+   8.2 GB    5 x node
+   1.4 GB    4 x node-MainThread
+   1.2 GB    2 x codex
+   1.1 GB  132 x postgres
+   1.0 GB    1 x dockerd
+   0.5 GB    2 x claude
+   0.4 GB   26 x bun
+   0.2 GB   17 x containerd-shim
+
+== top cpu
+%CPU COMMAND
+ 300 runc:[2:INIT]
+ 200 pg_isready
+ 200 pg_isready
+ 200 pg_isready
+ 179 bun
+
+== docker
+TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          118       32        30.98GB   20.92GB (67%)
+Containers      150       17        7.266GB   6.681GB (91%)
+Local Volumes   147       140       24.55GB   147.8MB (0%)
+Build Cache     362       0         39.79GB   31.52GB
+running containers: 17
+
+== cleanup timer
+Mon 2026-11-02 09:17:00 CET 13min Mon 2026-11-02 06:17:55 CET 2h 45min ago cleanup-builds.timer cleanup-builds.service

@@ -1,0 +1,8 @@
+model pair {
+  a        Int
+  b        Int
+  v        String?
+  pair_ref pair_ref[]
+
+  @@id([a, b])
+}

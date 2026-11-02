@@ -1,0 +1,9 @@
+warning "workspace-aggregator-d94a776e-18ee-41fa-b19e-aae128e1b252 > pg > @cloudflare/vitest-pool-workers@0.8.23" has unmet peer dependency "@vitest/runner@2.0.x - 3.1.x".
+warning "workspace-aggregator-d94a776e-18ee-41fa-b19e-aae128e1b252 > pg > @cloudflare/vitest-pool-workers@0.8.23" has unmet peer dependency "@vitest/snapshot@2.0.x - 3.1.x".
+warning Ignored scripts due to flag.
+creating test dataset
+created test dataset
+71
+FAIL pg/test/integration/client/ssl-tests.js
+FAIL pg/test/integration/gh-issues/130-tests.js
+FAIL pg/test/integration/gh-issues/2085-tests.js

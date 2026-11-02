@@ -14,12 +14,13 @@ ownership and failover require additional architecture and fault tests.
 
 | Area | Required observable behavior | Current evidence and open work |
 | --- | --- | --- |
-| Queries and protocol | Matching results, types, errors, notices, transaction state, cancellation, authentication, catalogs, and prepared statements on unchanged application tests. | Release source `5b32046d` matches 51,148/51,150 upstream units. One EXPLAIN expression and one internal-counter difference remain. This is not full compatibility. |
+| Queries and protocol | Matching results, types, errors, notices, transaction state, cancellation, authentication, TLS, catalogs, and prepared statements on unchanged application tests. | Release source `5b32046d` matches 51,148/51,150 upstream units. One EXPLAIN expression and one internal-counter difference remain. Both the direct engine and proxy currently decline TLS negotiation. This is not full compatibility. |
 | Concurrency | Matching locking, isolation, deadlock, timeout, rollback, sequence, and crash behavior. | Isolation status records 121/122 specs but its named full-run prose refers to an older 120/122 run. Reconcile provenance and rerun before acceptance. |
-| Existing applications | Zero engine-only failures for pinned driver/ORM suites and real application migrations, including schema changes and connection pools. | Historical suites cover many drivers; selected Gitea and Supabase Auth tests match. Coverage and versions are bounded. Full ActiveRecord coverage remains open. |
+| Existing applications | Zero engine-only failures for pinned driver/ORM suites and real application migrations, including schema changes and connection pools. | Fresh node-postgres 8.16.0 results match across 149 IDs, with 146 passes and three shared failures. Prisma 7.10.1 matches across 47 passing migration, introspection, and client checks. These direct-server plaintext tests use the frozen verified baseline. Full ActiveRecord coverage remains open. |
 | Extensions and operations | Existing extension and backup/replication workflows work, or the endpoint uses upstream PostgreSQL to provide them. | Arbitrary PostgreSQL C extensions and physical PostgreSQL WAL/base-backup workflows are not supported by the custom engine. These are replacement blockers, not resolved by the SQL regression score. |
 | Active efficiency | Checked work at matching durability and resource limits. A claimed gain must reproduce with CPU, memory, storage, I/O, and generator utilization recorded. | PostgreSQL is about 4.3 times faster on the published warm 200k-row range workload. The accepted histogram optimization improves the engine, not its standing against all PostgreSQL workloads. |
-| Idle resources | Measure disconnected, connected-idle, released, and suspended states separately. Preserve session state and wake correctly. | Existing idle benchmark measures memory and connection time. CPU, I/O, repeated wakeups, and release behavior need a new lifecycle measurement. Open pools currently prevent control-plane suspension. |
+| Idle resources | Measure disconnected, connected-idle, released, and suspended states separately. Preserve session state and wake correctly. | The lifecycle probe has a short baseline diagnostic and five measured connected-idle windows. Removing repeated connection timers lowers idle CPU, but the candidate was reverted after a repeated active-workload regression. Engine block I/O is unavailable in the measured cgroup. Whole-stack idle cost and suspension remain unverified. Open pools prevent control-plane suspension. |
+| Durability and recovery | Recover acknowledged writes within the promised failure model, with matching data and a measured recovery time. | Fresh full Docker verification records 12 passes and four recovery failures with compute-to-host WAL HTTP timeouts. Point-in-time branching, restore-in-place, retention, and local-disk-loss recovery fail. This gate remains open; clean-suspension tests also do not establish abrupt-host-loss safety. |
 | Distribution | Explicit placement, one writer, fencing, bounded recovery, replication lag, and fault behavior under node/network/storage loss. | Local Docker placement and PostgreSQL replicas exist. Cross-node ownership, automatic fenced failover, sharding, and distributed atomic commit are not established. |
 | Cost | Report an explicit workload, host/storage prices, utilization, retained storage, object requests, replication traffic, and shared-service allocation. | Pricing constants alone do not establish measured cost per tenant or successful operation. |
 
@@ -66,6 +67,9 @@ and delayed object upload do not establish zero-loss host failure.
    Keep actual session deadlines, fragmented protocol reads, cancellation,
    shutdown, memory release, and wake/reuse behavior. Measure scheduling and CPU
    before and after. Reject an unverified resource claim.
+   The first implementation, `735f44ac`, was reverted at `b6711d98`: the longer
+   active control records lower range throughput and higher CPU per operation.
+   Preserve that result before selecting another implementation.
 3. Reproduce known compatibility gaps with pinned references and repair them in
    independent batches. Select a real migration test as well as upstream suites.
 4. Measure whole-stack suspension and recovery with existing PostgreSQL computes.
@@ -84,6 +88,7 @@ while any required area above remains unverified.
 
 ## Evidence
 
+- [Rejected idle trial and fresh migration checks](tools/bench/results/2026-11-02-product-idle/README.md).
 - [Current engine handoff](HANDOFF.md).
 - [Measured active workloads](BENCH.md).
 - [Regression status](tests/regress/STATUS.md).

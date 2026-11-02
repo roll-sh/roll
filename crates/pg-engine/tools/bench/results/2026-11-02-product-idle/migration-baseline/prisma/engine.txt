@@ -1,0 +1,149 @@
+PASS Async iterator::can async iterate and then do a query afterwards
+PASS Async iterator::can async iterate multiple times with a pool
+PASS Async iterator::can break out of iteration early
+PASS Async iterator::can read with delays
+PASS Async iterator::only returns rows on first iteration
+PASS Async iterator::supports breaking with low watermark
+PASS Async iterator::works
+PASS client options::uses custom types from client config
+PASS close::can close a finished cursor a promise
+PASS close::can close a finished cursor without a callback
+PASS close::closes cursor early
+PASS close::emits close
+PASS close::is a no-op to "close" the cursor before submitting it
+PASS close::works with callback style
+PASS concat::concats correctly
+PASS cursor using promises::read multiple times
+PASS cursor using promises::reject with error
+PASS cursor using promises::resolve with result
+PASS cursor::callback with error
+PASS cursor::emits error events
+PASS cursor::emits row events
+PASS cursor::emits row events when cursor is closed manually
+PASS cursor::end before reading to end
+PASS cursor::fetch 6 when asking for 10
+PASS cursor::normalizes parameter values
+PASS cursor::read a partial chunk of data
+PASS cursor::read huge result
+PASS cursor::read return length 0 past the end
+PASS cursor::returns result along with rows
+PASS cursor::returns rowCount on insert
+PASS early close::can be closed early
+PASS early close::can destroy stream while reading
+PASS early close::can destroy stream while reading an error
+PASS early close::does not crash when destroying the stream before its submitted
+PASS early close::does not crash when destroying the stream immediately after calling read
+PASS early close::emits an error when calling destroy with an error
+PASS empty-query::continues to function after stream
+PASS empty-query::handles empty query
+PASS end semantics race condition::works
+PASS error handling::can continue after error
+PASS error handling::errors queued reads
+PASS error recovery::does not crash when closing a connection with a queued stream
+PASS error recovery::handles an error on a stream after a plain text non-stream error
+PASS error recovery::recovers from a streaming error in a transaction
+PASS error recovery::should work after cancelling query
+PASS error recovery::should work if used after syntax error
+PASS error recovery::should work if used after timeout error
+PASS error::continues to function after stream
+PASS error::receives error on stream
+PASS fast reader::works
+PASS instant::instant
+PASS passing options::passes custom types
+PASS passing options::passes row mode array
+PASS pauses::pauses
+PASS pg/test/integration/client/api-tests.js
+PASS pg/test/integration/client/appname-tests.js
+PASS pg/test/integration/client/array-tests.js
+PASS pg/test/integration/client/async-stack-trace-tests.js
+PASS pg/test/integration/client/big-simple-query-tests.js
+PASS pg/test/integration/client/configuration-tests.js
+PASS pg/test/integration/client/connection-parameter-tests.js
+PASS pg/test/integration/client/connection-timeout-tests.js
+PASS pg/test/integration/client/custom-types-tests.js
+PASS pg/test/integration/client/empty-query-tests.js
+PASS pg/test/integration/client/error-handling-tests.js
+PASS pg/test/integration/client/field-name-escape-tests.js
+PASS pg/test/integration/client/huge-numeric-tests.js
+PASS pg/test/integration/client/idle_in_transaction_session_timeout-tests.js
+PASS pg/test/integration/client/json-type-parsing-tests.js
+PASS pg/test/integration/client/multiple-results-tests.js
+PASS pg/test/integration/client/network-partition-tests.js
+PASS pg/test/integration/client/no-data-tests.js
+PASS pg/test/integration/client/no-row-result-tests.js
+PASS pg/test/integration/client/notice-tests.js
+PASS pg/test/integration/client/parse-int-8-tests.js
+PASS pg/test/integration/client/prepared-statement-tests.js
+PASS pg/test/integration/client/promise-api-tests.js
+PASS pg/test/integration/client/query-as-promise-tests.js
+PASS pg/test/integration/client/query-column-names-tests.js
+PASS pg/test/integration/client/query-error-handling-prepared-statement-tests.js
+PASS pg/test/integration/client/query-error-handling-tests.js
+PASS pg/test/integration/client/quick-disconnect-tests.js
+PASS pg/test/integration/client/result-metadata-tests.js
+PASS pg/test/integration/client/results-as-array-tests.js
+PASS pg/test/integration/client/row-description-on-results-tests.js
+PASS pg/test/integration/client/sasl-scram-tests.js
+PASS pg/test/integration/client/simple-query-tests.js
+FAIL pg/test/integration/client/ssl-tests.js
+PASS pg/test/integration/client/statement_timeout-tests.js
+PASS pg/test/integration/client/timezone-tests.js
+PASS pg/test/integration/client/transaction-tests.js
+PASS pg/test/integration/client/type-coercion-tests.js
+PASS pg/test/integration/client/type-parser-override-tests.js
+PASS pg/test/integration/connection-pool/connection-pool-size-tests.js
+PASS pg/test/integration/connection-pool/error-tests.js
+PASS pg/test/integration/connection-pool/idle-timeout-tests.js
+PASS pg/test/integration/connection-pool/native-instance-tests.js
+PASS pg/test/integration/connection-pool/tls-tests.js
+PASS pg/test/integration/connection-pool/yield-support-tests.js
+PASS pg/test/integration/domain-tests.js
+PASS pg/test/integration/gh-issues/1105-tests.js
+FAIL pg/test/integration/gh-issues/130-tests.js
+PASS pg/test/integration/gh-issues/131-tests.js
+PASS pg/test/integration/gh-issues/1382-tests.js
+PASS pg/test/integration/gh-issues/1542-tests.js
+PASS pg/test/integration/gh-issues/1854-tests.js
+PASS pg/test/integration/gh-issues/199-tests.js
+PASS pg/test/integration/gh-issues/1992-tests.js
+PASS pg/test/integration/gh-issues/2056-tests.js
+PASS pg/test/integration/gh-issues/2064-tests.js
+PASS pg/test/integration/gh-issues/2079-tests.js
+FAIL pg/test/integration/gh-issues/2085-tests.js
+PASS pg/test/integration/gh-issues/2108-tests.js
+PASS pg/test/integration/gh-issues/2303-tests.js
+PASS pg/test/integration/gh-issues/2307-tests.js
+PASS pg/test/integration/gh-issues/2416-tests.js
+PASS pg/test/integration/gh-issues/2556-tests.js
+PASS pg/test/integration/gh-issues/2627-tests.js
+PASS pg/test/integration/gh-issues/2716-tests.js
+PASS pg/test/integration/gh-issues/3062-tests.js
+PASS pg/test/integration/gh-issues/3174-tests.js
+PASS pg/test/integration/gh-issues/507-tests.js
+PASS pg/test/integration/gh-issues/600-tests.js
+PASS pg/test/integration/gh-issues/675-tests.js
+PASS pg/test/integration/gh-issues/699-tests.js
+PASS pg/test/integration/gh-issues/787-tests.js
+PASS pg/test/integration/gh-issues/882-tests.js
+PASS pg/test/integration/gh-issues/981-tests.js
+PASS pool::can close multiple times on a pool
+PASS pool::closes cursor early, saturated pool
+PASS pool::closes cursor early, single pool query
+PASS pool::closes exhausted cursor, saturated pool
+PASS pool::closes exhausted cursor, single pool query
+PASS proper cleanup::can issue multiple cursors on one client
+PASS queries with no data::handles empty query
+PASS queries with no data::handles queries that return no data
+PASS query config passed to result::passes rowMode to result
+PASS query config passed to result::passes types to result
+PASS read callback does not fire sync::does not fire error callback sync
+PASS read callback does not fire sync::does not fire result sync after finished
+PASS slow reader::works
+PASS stream config options::defaults to 100 for highWaterMark
+PASS stream config options::sets readable.highWaterMark based on batch size
+PASS stream config options::sets readable.highWaterMark based on highWaterMark config
+PASS stream tester timestamp::should not warn about max listeners
+PASS stream tester::passes stream spec
+PASS transactions::can execute multiple statements in a transaction
+PASS transactions::can execute multiple statements in a transaction if ending cursor early
+PASS transactions::can execute multiple statements in a transaction if no data

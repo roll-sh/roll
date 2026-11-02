@@ -1,0 +1,4 @@
+model Tag {
+  name  String @id
+  posts Post[] @relation("PostToTag")
+}

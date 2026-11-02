@@ -1,0 +1,65 @@
+{
+  "baseline": {
+    "cancel_then_extended": [
+      "1",
+      "2",
+      "T int4:23/4/-1/f1",
+      "D 00000001",
+      "C SELECT 1",
+      "Z I"
+    ],
+    "terminate": "E S='FATAL' C='57P01' M='terminating connection due to administrator command'",
+    "idle_session_timeout": "E S='FATAL' C='57P05' M='terminating connection due to idle-session timeout'",
+    "idle_in_transaction_session_timeout": "E S='FATAL' C='25P03' M='terminating connection due to idle-in-transaction timeout'",
+    "transaction_timeout": "E S='FATAL' C='25P04' M='terminating connection due to transaction timeout'",
+    "fragmented_query": [
+      "T ?column?:23/4/-1/f0",
+      "D '1'",
+      "C SELECT 1",
+      "Z I"
+    ],
+    "negative_fixture_rejected": true
+  },
+  "candidate": {
+    "cancel_then_extended": [
+      "1",
+      "2",
+      "T int4:23/4/-1/f1",
+      "D 00000001",
+      "C SELECT 1",
+      "Z I"
+    ],
+    "terminate": "E S='FATAL' C='57P01' M='terminating connection due to administrator command'",
+    "idle_session_timeout": "E S='FATAL' C='57P05' M='terminating connection due to idle-session timeout'",
+    "idle_in_transaction_session_timeout": "E S='FATAL' C='25P03' M='terminating connection due to idle-in-transaction timeout'",
+    "transaction_timeout": "E S='FATAL' C='25P04' M='terminating connection due to transaction timeout'",
+    "fragmented_query": [
+      "T ?column?:23/4/-1/f0",
+      "D '1'",
+      "C SELECT 1",
+      "Z I"
+    ],
+    "negative_fixture_rejected": true
+  },
+  "postgres": {
+    "cancel_then_extended": [
+      "1",
+      "2",
+      "T int4:23/4/-1/f1",
+      "D 00000001",
+      "C SELECT 1",
+      "Z I"
+    ],
+    "terminate": "E S='FATAL' C='57P01' M='terminating connection due to administrator command'",
+    "idle_session_timeout": "E S='FATAL' C='57P05' M='terminating connection due to idle-session timeout'",
+    "idle_in_transaction_session_timeout": "E S='FATAL' C='25P03' M='terminating connection due to idle-in-transaction timeout'",
+    "transaction_timeout": "E S='FATAL' C='25P04' M='terminating connection due to transaction timeout'",
+    "fragmented_query": [
+      "T ?column?:23/4/-1/f0",
+      "D '1'",
+      "C SELECT 1",
+      "Z I"
+    ],
+    "negative_fixture_rejected": true
+  }
+}

@@ -1,0 +1,173 @@
+The files belonging to this database system will be owned by user "postgres".
+This user must also own the server process.
+
+The database cluster will be initialized with locale "C".
+The default text search configuration will be set to "english".
+
+Data page checksums are enabled.
+
+fixing permissions on existing directory /var/lib/postgresql/18/docker ... ok
+creating subdirectories ... ok
+selecting dynamic shared memory implementation ... posix
+selecting default "max_connections" ... 100
+selecting default "shared_buffers" ... 128MB
+selecting default time zone ... UTC
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/postgresql/18/docker -l logfile start
+
+waiting for server to start....2026-11-02 07:17:54.630 UTC [52] LOG:  starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-11-02 07:17:54.631 UTC [52] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-02 07:17:54.634 UTC [58] LOG:  database system was shut down at 2026-11-02 07:17:54 UTC
+2026-11-02 07:17:54.638 UTC [52] LOG:  database system is ready to accept connections
+ done
+server started
+
+/usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
+
+waiting for server to shut down....2026-11-02 07:17:54.739 UTC [52] LOG:  received fast shutdown request
+2026-11-02 07:17:54.739 UTC [52] LOG:  aborting any active transactions
+2026-11-02 07:17:54.744 UTC [52] LOG:  background worker "logical replication launcher" (PID 61) exited with exit code 1
+2026-11-02 07:17:54.748 UTC [56] LOG:  shutting down
+2026-11-02 07:17:54.749 UTC [56] LOG:  checkpoint starting: shutdown immediate
+2026-11-02 07:17:54.751 UTC [56] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/1765F10, redo lsn=0/1765F10
+2026-11-02 07:17:54.763 UTC [52] LOG:  database system is shut down
+ done
+server stopped
+
+PostgreSQL init process complete; ready for start up.
+
+sh: locale: not found
+2026-11-02 07:17:54.258 UTC [46] WARNING:  no usable system locales were found
+initdb: warning: enabling "trust" authentication for local connections
+initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-11-02 07:17:54.869 UTC [1] LOG:  starting PostgreSQL 18.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+2026-11-02 07:17:54.870 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-11-02 07:17:54.870 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-11-02 07:17:54.870 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-02 07:17:54.874 UTC [72] LOG:  database system was shut down at 2026-11-02 07:17:54 UTC
+2026-11-02 07:17:54.877 UTC [1] LOG:  database system is ready to accept connections
+2026-11-02 07:19:05.506 UTC [91] FATAL:  password authentication failed for user "sfalsdkf"
+2026-11-02 07:19:05.506 UTC [91] DETAIL:  Role "sfalsdkf" does not exist.
+	Connection matched file "/var/lib/postgresql/18/docker/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-02 07:19:05.509 UTC [90] ERROR:  relation "leiwlisejlse" does not exist at character 20
+2026-11-02 07:19:05.509 UTC [90] STATEMENT:  SELECT OISDJF FROM LEIWLISEJLSE
+2026-11-02 07:19:05.978 UTC [103] ERROR:  relation "nonexistent" does not exist at character 18
+2026-11-02 07:19:05.978 UTC [103] STATEMENT:  SELECT test from nonexistent
+2026-11-02 07:19:05.993 UTC [104] ERROR:  relation "nonexistent" does not exist at character 18
+2026-11-02 07:19:05.993 UTC [104] STATEMENT:  SELECT test from nonexistent
+2026-11-02 07:19:09.051 UTC [120] ERROR:  relation "bang" does not exist at character 15
+2026-11-02 07:19:09.051 UTC [120] STATEMENT:  select * from bang where name = $1
+2026-11-02 07:19:09.077 UTC [121] ERROR:  invalid input syntax for type integer: "asldkfjasdf"
+2026-11-02 07:19:09.077 UTC [121] CONTEXT:  unnamed portal parameter $1 = '...'
+2026-11-02 07:19:09.077 UTC [121] STATEMENT:  select * from boom where age = $1
+2026-11-02 07:19:09.093 UTC [122] FATAL:  password authentication failed for user "asldkfjsadlfkj"
+2026-11-02 07:19:09.093 UTC [122] DETAIL:  Role "asldkfjsadlfkj" does not exist.
+	Connection matched file "/var/lib/postgresql/18/docker/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-02 07:19:09.134 UTC [124] FATAL:  password authentication failed for user "very invalid username"
+2026-11-02 07:19:09.134 UTC [124] DETAIL:  Role "very invalid username" does not exist.
+	Connection matched file "/var/lib/postgresql/18/docker/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-02 07:19:09.151 UTC [125] FATAL:  password authentication failed for user "very invalid username"
+2026-11-02 07:19:09.151 UTC [125] DETAIL:  Role "very invalid username" does not exist.
+	Connection matched file "/var/lib/postgresql/18/docker/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-02 07:19:09.160 UTC [126] FATAL:  password authentication failed for user "asldkfjsadlfkj"
+2026-11-02 07:19:09.160 UTC [126] DETAIL:  Role "asldkfjsadlfkj" does not exist.
+	Connection matched file "/var/lib/postgresql/18/docker/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-02 07:19:09.175 UTC [127] ERROR:  relation "yodas_dsflsd" does not exist at character 19
+2026-11-02 07:19:09.175 UTC [127] STATEMENT:  select eeeee from yodas_dsflsd where pixistix = 'zoiks!!!'
+2026-11-02 07:19:09.796 UTC [139] ERROR:  cannot insert multiple commands into a prepared statement
+2026-11-02 07:19:09.796 UTC [139] STATEMENT:  SELECT 'foo'::text as name; SELECT 'bar'::text as baz
+2026-11-02 07:19:11.065 UTC [155] ERROR:  syntax error at or near "ALKJSDF" at character 1
+2026-11-02 07:19:11.065 UTC [155] STATEMENT:  ALKJSDF
+2026-11-02 07:19:11.330 UTC [159] FATAL:  terminating connection due to administrator command
+2026-11-02 07:19:11.330 UTC [159] STATEMENT:  select pg_sleep($1)
+2026-11-02 07:19:11.421 UTC [162] ERROR:  null value in column "a" of relation "column_err_test" violates not-null constraint
+2026-11-02 07:19:11.421 UTC [162] DETAIL:  Failing row contains (null).
+2026-11-02 07:19:11.421 UTC [162] STATEMENT:  INSERT INTO column_err_test(a) VALUES (NULL)
+2026-11-02 07:19:11.422 UTC [163] ERROR:  duplicate key value violates unique constraint "constraint_err_test_pkey"
+2026-11-02 07:19:11.422 UTC [163] DETAIL:  Key (a)=(1) already exists.
+2026-11-02 07:19:11.422 UTC [163] STATEMENT:  INSERT INTO constraint_err_test(a) VALUES (1)
+2026-11-02 07:19:11.742 UTC [161] ERROR:  canceling statement due to user request
+2026-11-02 07:19:11.742 UTC [161] STATEMENT:  select pg_sleep(10)
+2026-11-02 07:19:11.833 UTC [165] LOG:  invalid length of startup packet
+2026-11-02 07:19:12.532 UTC [179] ERROR:  canceling statement due to statement timeout
+2026-11-02 07:19:12.532 UTC [179] STATEMENT:  SELECT pg_sleep( 1 )
+2026-11-02 07:19:13.750 UTC [224] FATAL:  terminating connection due to administrator command
+2026-11-02 07:19:13.770 UTC [226] FATAL:  terminating connection due to administrator command
+2026-11-02 07:19:13.770 UTC [226] STATEMENT:  SELECT pg_terminate_backend(pg_backend_pid())
+2026-11-02 07:19:13.792 UTC [227] FATAL:  terminating connection due to administrator command
+2026-11-02 07:19:13.792 UTC [227] STATEMENT:  SELECT pg_terminate_backend(pg_backend_pid())
+2026-11-02 07:19:14.279 UTC [231] ERROR:  column "lkdsjdslkfj" does not exist at character 8
+2026-11-02 07:19:14.279 UTC [231] STATEMENT:  SELECT LKDSJDSLKFJ
+2026-11-02 07:19:14.400 UTC [234] ERROR:  column "sldkjflskdjf" does not exist at character 8
+2026-11-02 07:19:14.400 UTC [234] STATEMENT:  SELECT SLDKJFLSKDJF
+2026-11-02 07:19:16.509 UTC [241] LOG:  unexpected EOF on client connection with an open transaction
+2026-11-02 07:19:18.567 UTC [251] ERROR:  invalid input syntax for type integer: "one"
+2026-11-02 07:19:18.567 UTC [251] CONTEXT:  unnamed portal parameter $1 = '...'
+2026-11-02 07:19:18.567 UTC [251] STATEMENT:  insert into foo values($1,$2)
+2026-11-02 07:19:18.568 UTC [251] ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2026-11-02 07:19:18.568 UTC [251] STATEMENT:  insert into bar values($1,$2)
+2026-11-02 07:19:18.586 UTC [252] ERROR:  invalid input syntax for type integer: "brian"
+2026-11-02 07:19:18.586 UTC [252] CONTEXT:  unnamed portal parameter $1 = '...'
+2026-11-02 07:19:18.586 UTC [252] STATEMENT:  SELECT $1::int as name
+2026-11-02 07:19:19.702 UTC [262] ERROR:  syntax error at or near "asdfdffsdf" at character 1
+2026-11-02 07:19:19.702 UTC [262] STATEMENT:  asdfdffsdf
+2026-11-02 07:19:19.719 UTC [263] ERROR:  syntax error at or near "asdfdffsdf" at character 1
+2026-11-02 07:19:19.719 UTC [263] STATEMENT:  asdfdffsdf
+2026-11-02 07:19:19.735 UTC [264] ERROR:  syntax error at or near "asdfdffsdf" at character 1
+2026-11-02 07:19:19.735 UTC [264] STATEMENT:  asdfdffsdf
+2026-11-02 07:19:19.811 UTC [268] LOG:  unexpected EOF on client connection with an open transaction
+2026-11-02 07:19:19.827 UTC [269] ERROR:  column "asdfasdf" does not exist at character 8
+2026-11-02 07:19:19.827 UTC [269] STATEMENT:  select asdfasdf
+2026-11-02 07:19:20.224 UTC [274] LOG:  unexpected EOF on client connection with an open transaction
+2026-11-02 07:19:20.271 UTC [277] ERROR:  column "asdfasdf" does not exist at character 8
+2026-11-02 07:19:20.271 UTC [277] STATEMENT:  select asdfasdf
+2026-11-02 07:19:20.456 UTC [286] LOG:  unexpected EOF on client connection with an open transaction
+2026-11-02 07:19:20.471 UTC [287] ERROR:  column "asdfasdf" does not exist at character 8
+2026-11-02 07:19:20.471 UTC [287] STATEMENT:  select asdfasdf
+2026-11-02 07:19:25.063 UTC [303] ERROR:  relation "basdfasdf" does not exist at character 29
+2026-11-02 07:19:25.063 UTC [303] STATEMENT:  SELECT * from  pg_sleep(1), basdfasdf;
+2026-11-02 07:19:25.271 UTC [307] ERROR:  relation "asdf" does not exist at character 15
+2026-11-02 07:19:25.271 UTC [307] STATEMENT:  SELECT * FROM asdf num
+2026-11-02 07:19:25.306 UTC [308] ERROR:  date/time field value out of range: "1793603965306"
+2026-11-02 07:19:25.306 UTC [308] HINT:  Perhaps you need a different "DateStyle" setting.
+2026-11-02 07:19:25.306 UTC [308] CONTEXT:  portal "C_24" parameter $1 = '...'
+2026-11-02 07:19:25.306 UTC [308] STATEMENT:  INSERT INTO frobnicators ("updated") VALUES ($1) RETURNING "id"
+2026-11-02 07:19:25.327 UTC [309] ERROR:  relation "goose" does not exist at character 15
+2026-11-02 07:19:25.327 UTC [309] STATEMENT:  SELECT * FROM goose;
+2026-11-02 07:19:25.328 UTC [309] ERROR:  relation "duck" does not exist at character 15
+2026-11-02 07:19:25.328 UTC [309] STATEMENT:  SELECT * FROM duck
+2026-11-02 07:19:25.352 UTC [310] ERROR:  relation "goose" does not exist at character 15
+2026-11-02 07:19:25.352 UTC [310] STATEMENT:  SELECT * FROM goose;
+2026-11-02 07:19:25.775 UTC [311] ERROR:  canceling statement due to statement timeout
+2026-11-02 07:19:25.942 UTC [313] ERROR:  canceling statement due to user request
+2026-11-02 07:19:25.942 UTC [313] STATEMENT:  SELECT pg_sleep(10);
+2026-11-02 07:20:04.294 UTC [329] ERROR:  table "_prisma_migrations" does not exist
+2026-11-02 07:20:04.294 UTC [329] STATEMENT:  DROP TABLE _prisma_migrations
+2026-11-02 07:20:06.423 UTC [333] ERROR:  table "_prisma_migrations" does not exist
+2026-11-02 07:20:06.423 UTC [333] STATEMENT:  DROP TABLE _prisma_migrations
+2026-11-02 07:20:07.459 UTC [336] ERROR:  table "_prisma_migrations" does not exist
+2026-11-02 07:20:07.459 UTC [336] STATEMENT:  DROP TABLE _prisma_migrations
+2026-11-02 07:20:07.589 UTC [337] ERROR:  table "_prisma_migrations" does not exist
+2026-11-02 07:20:07.589 UTC [337] STATEMENT:  DROP TABLE _prisma_migrations
+2026-11-02 07:20:10.742 UTC [343] ERROR:  table "_prisma_migrations" does not exist
+2026-11-02 07:20:10.742 UTC [343] STATEMENT:  DROP TABLE _prisma_migrations
+2026-11-02 07:20:10.963 UTC [344] ERROR:  table "_prisma_migrations" does not exist
+2026-11-02 07:20:10.963 UTC [344] STATEMENT:  DROP TABLE _prisma_migrations
+2026-11-02 07:20:13.159 UTC [347] ERROR:  table "_prisma_migrations" does not exist
+2026-11-02 07:20:13.159 UTC [347] STATEMENT:  DROP TABLE _prisma_migrations
+2026-11-02 07:20:16.005 UTC [350] ERROR:  duplicate key value violates unique constraint "users_email_key"
+2026-11-02 07:20:16.005 UTC [350] DETAIL:  Key (email)=(f@x.io) already exists.
+2026-11-02 07:20:16.005 UTC [350] STATEMENT:  INSERT INTO "public"."users" ("email","role","balance","big","active","createdAt","updatedAt") VALUES ($1,CAST($2::text AS "public"."role"),$3,$4,$5,$6,$7) RETURNING "public"."users"."id", "public"."users"."email", "public"."users"."name", "public"."users"."role"::text, "public"."users"."balance", "public"."users"."big", "public"."users"."ratio", "public"."users"."active", "public"."users"."blob", "public"."users"."meta", "public"."users"."tags", "public"."users"."scores", "public"."users"."uid", "public"."users"."ip", "public"."users"."born", "public"."users"."createdAt", "public"."users"."updatedAt"
+2026-11-02 07:20:16.046 UTC [350] ERROR:  duplicate key value violates unique constraint "users_email_key"
+2026-11-02 07:20:16.046 UTC [350] DETAIL:  Key (email)=(a@x.io) already exists.
+2026-11-02 07:20:16.046 UTC [350] STATEMENT:  INSERT INTO "public"."users" ("email","role","balance","big","active","createdAt","updatedAt") VALUES ($1,CAST($2::text AS "public"."role"),$3,$4,$5,$6,$7) RETURNING "public"."users"."id", "public"."users"."email", "public"."users"."name", "public"."users"."role"::text, "public"."users"."balance", "public"."users"."big", "public"."users"."ratio", "public"."users"."active", "public"."users"."blob", "public"."users"."meta", "public"."users"."tags", "public"."users"."scores", "public"."users"."uid", "public"."users"."ip", "public"."users"."born", "public"."users"."createdAt", "public"."users"."updatedAt"
+2026-11-02 07:20:16.072 UTC [351] ERROR:  insert or update on table "Post" violates foreign key constraint "Post_authorId_fkey"
+2026-11-02 07:20:16.072 UTC [351] DETAIL:  Key (authorId)=(999) is not present in table "users".
+2026-11-02 07:20:16.072 UTC [351] STATEMENT:  INSERT INTO "public"."Post" ("id","title","views","rating","published","authorId") VALUES ($1,$2,$3,$4,$5,$6) RETURNING "public"."Post"."id", "public"."Post"."title", "public"."Post"."body", "public"."Post"."views", "public"."Post"."rating", "public"."Post"."published", "public"."Post"."authorId", "public"."Post"."editorId", "public"."Post"."categoryId"

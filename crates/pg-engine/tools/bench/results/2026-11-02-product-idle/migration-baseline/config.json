@@ -1,0 +1,41 @@
+{
+  "out": "/home/meszmate/.cache/pg-engine-product-20261102/migration-baseline/observations",
+  "db": "bench_idle_20261102t071752z",
+  "rounds": 1,
+  "seconds": 5,
+  "sessions": 64,
+  "settle_seconds": 5,
+  "release_seconds": 15,
+  "phases": [
+    "disconnected",
+    "connected",
+    "released"
+  ],
+  "targets": [
+    {
+      "name": "engine",
+      "port": 53360,
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/t3-d4020b98-idle-engine-20261102T071752Z.service",
+      "kind": "engine",
+      "leader_pid": 1142809,
+      "leader_start_ticks": 48559838,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+    },
+    {
+      "name": "postgres",
+      "port": 53361,
+      "cgroup": "/sys/fs/cgroup/system.slice/docker-2c90425bf86003813ac49b0c0f11f0721d27c3a13b88aa9812dd4874c8147579.scope",
+      "kind": "postgres",
+      "leader_pid": 1143151,
+      "leader_start_ticks": 48559979,
+      "image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5"
+    }
+  ],
+  "diagnostic_only": true,
+  "server_cpus": [
+    28,
+    29,
+    30,
+    31
+  ]
+}

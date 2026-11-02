@@ -6,6 +6,29 @@ own test suite, run once against the engine and once against PostgreSQL 18.6 (th
 that fails on PostgreSQL too (no SSL, no replication, no max_prepared_transactions, a missing
 contrib module in the image) is the environment's.
 
+## Fresh migration checks, 2026-11-02
+
+The frozen verified histogram baseline, SHA-256 `5cfc7904…e51ffd1`, runs the existing
+node-postgres 8.16.0 and Prisma 7.10.1 suites against a fresh PostgreSQL 18.6.
+Production source restored at `b6711d98` matches that baseline. The idle timer
+candidate was rejected separately for an active-workload regression.
+
+node-postgres matches all 149 recorded IDs: 146 passes and three shared failures.
+The IDs include integration files and cursor/stream test cases. The SSL cases lack
+a TLS-enabled endpoint, and issue 130 lacks `psql` in the client image. These
+failures leave coverage open. There are zero engine-only failures in this run.
+
+Prisma matches all 47 passing recorded checks, including two schema migrations,
+reset, schema diffs, introspection blocks, generated client operations,
+transactions, and error mapping. These are the repository CLI/client checks, not
+Prisma's full upstream engine suite or a full application migration.
+
+Both runs use direct plaintext server connections. The source suites and adapters
+are unchanged. This does not certify TLS, a deployed proxy, or other client versions.
+The [portable evidence](../../tools/bench/results/2026-11-02-product-idle/README.md)
+retains commands, image and lockfile identities, raw results, and cleanup.
+Do not combine these two suites with historical subsets into a new full-suite score.
+
 ## Running
 
 ```sh

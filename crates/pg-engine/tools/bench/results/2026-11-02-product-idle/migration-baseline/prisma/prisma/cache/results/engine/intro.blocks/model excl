@@ -1,0 +1,4 @@
+model excl {
+  id Int                    @id
+  c  Unsupported("circle")?
+}

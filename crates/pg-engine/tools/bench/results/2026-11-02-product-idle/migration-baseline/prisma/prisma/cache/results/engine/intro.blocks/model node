@@ -1,0 +1,7 @@
+model node {
+  id         Int     @id
+  parent_id  Int?
+  label      String?
+  node       node?   @relation("nodeTonode", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  other_node node[]  @relation("nodeTonode")
+}

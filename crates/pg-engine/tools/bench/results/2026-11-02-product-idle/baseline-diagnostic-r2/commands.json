@@ -1,0 +1,130 @@
+[
+  {
+    "argv": [
+      "systemd-run",
+      "--user",
+      "--wait",
+      "--pipe",
+      "--quiet",
+      "--collect",
+      "--unit",
+      "t3-d4020b98-idle-baseline-20261102T063115Z",
+      "-p",
+      "MemoryMax=512M",
+      "-p",
+      "MemorySwapMax=0",
+      "-p",
+      "AllowedCPUs=28-31",
+      "-p",
+      "CPUQuota=400%",
+      "-p",
+      "TimeoutStopSec=30",
+      "taskset",
+      "-c",
+      "28-31",
+      "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "--data",
+      "/home/meszmate/.cache/pg-engine-product-20261102/baseline-diagnostic-r2/baseline-data",
+      "--listen",
+      "127.0.0.1:53360",
+      "--password",
+      "pw",
+      "--cache-mb",
+      "64",
+      "--plan-cache-mb",
+      "36",
+      "--idle-close-secs",
+      "5"
+    ]
+  },
+  {
+    "at": "2026-11-02T06:31:16.380744+00:00",
+    "argv": [
+      "systemctl",
+      "--user",
+      "show",
+      "t3-d4020b98-idle-baseline-20261102T063115Z",
+      "--property=MainPID",
+      "--value"
+    ]
+  },
+  {
+    "at": "2026-11-02T06:31:17.169909+00:00",
+    "argv": [
+      "docker",
+      "run",
+      "-d",
+      "--name",
+      "t3-d4020b98-idle-pg-20261102T063115Z",
+      "--label",
+      "agent.worktree=t3-d4020b98",
+      "--label",
+      "agent.task=product-idle",
+      "--memory=512m",
+      "--memory-swap=512m",
+      "--cpuset-cpus=28-31",
+      "--cpus=4",
+      "-p",
+      "127.0.0.1:53361:5432",
+      "-e",
+      "POSTGRES_PASSWORD=pw",
+      "-e",
+      "POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8",
+      "--mount",
+      "type=bind,src=/home/meszmate/.cache/pg-engine-product-20261102/baseline-diagnostic-r2/pg-data,dst=/var/lib/postgresql",
+      "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+      "postgres",
+      "-c",
+      "shared_buffers=64MB",
+      "-c",
+      "max_connections=100",
+      "-c",
+      "jit=off",
+      "-c",
+      "fsync=on",
+      "-c",
+      "synchronous_commit=on",
+      "-c",
+      "full_page_writes=on"
+    ]
+  },
+  {
+    "at": "2026-11-02T06:31:17.482672+00:00",
+    "argv": [
+      "docker",
+      "inspect",
+      "b8a8a811b7cb89bbaf68c602c5b8b69745423aa9a17a94e1ad29874007089749"
+    ]
+  },
+  {
+    "at": "2026-11-02T06:31:17.524802+00:00",
+    "argv": [
+      "docker",
+      "inspect",
+      "b8a8a811b7cb89bbaf68c602c5b8b69745423aa9a17a94e1ad29874007089749",
+      "--format",
+      "{{.State.Pid}}"
+    ]
+  },
+  {
+    "at": "2026-11-02T06:31:17.563241+00:00",
+    "argv": [
+      "docker",
+      "exec",
+      "b8a8a811b7cb89bbaf68c602c5b8b69745423aa9a17a94e1ad29874007089749",
+      "sha256sum",
+      "/usr/local/bin/postgres"
+    ]
+  },
+  {
+    "at": "2026-11-02T06:31:18.839897+00:00",
+    "argv": [
+      "findmnt",
+      "-T",
+      "/home/meszmate/.cache/pg-engine-product-20261102/baseline-diagnostic-r2",
+      "--json",
+      "-o",
+      "SOURCE,FSTYPE,TARGET"
+    ]
+  }
+]

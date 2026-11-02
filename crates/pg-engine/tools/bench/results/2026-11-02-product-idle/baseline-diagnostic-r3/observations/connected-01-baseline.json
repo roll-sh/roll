@@ -1,0 +1,1061 @@
+{
+  "before": {
+    "monotonic_ns": 483009612434034,
+    "cpu": {
+      "usage_usec": 433587,
+      "user_usec": 286331,
+      "system_usec": 147256,
+      "nice_usec": 0,
+      "nr_periods": 66,
+      "nr_throttled": 0,
+      "throttled_usec": 0,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory": {
+      "anon": 36982784,
+      "file": 1114112,
+      "kernel": 3420160,
+      "kernel_stack": 1146880,
+      "pagetables": 1191936,
+      "sec_pagetables": 0,
+      "percpu": 608,
+      "sock": 0,
+      "vmalloc": 0,
+      "shmem": 0,
+      "zswap": 0,
+      "zswapped": 0,
+      "file_mapped": 0,
+      "file_dirty": 0,
+      "file_writeback": 0,
+      "swapcached": 0,
+      "anon_thp": 4194304,
+      "file_thp": 0,
+      "shmem_thp": 0,
+      "inactive_anon": 0,
+      "active_anon": 36966400,
+      "inactive_file": 1114112,
+      "active_file": 16384,
+      "unevictable": 0,
+      "slab_reclaimable": 152896,
+      "slab_unreclaimable": 913464,
+      "slab": 1066360,
+      "workingset_refault_anon": 0,
+      "workingset_refault_file": 0,
+      "workingset_activate_anon": 0,
+      "workingset_activate_file": 0,
+      "workingset_restore_anon": 0,
+      "workingset_restore_file": 0,
+      "workingset_nodereclaim": 0,
+      "pgdemote_kswapd": 0,
+      "pgdemote_direct": 0,
+      "pgdemote_khugepaged": 0,
+      "pgpromote_success": 0,
+      "pgscan": 0,
+      "pgsteal": 0,
+      "pgscan_kswapd": 0,
+      "pgscan_direct": 0,
+      "pgscan_khugepaged": 0,
+      "pgsteal_kswapd": 0,
+      "pgsteal_direct": 0,
+      "pgsteal_khugepaged": 0,
+      "pgfault": 14249,
+      "pgmajfault": 0,
+      "pgrefill": 0,
+      "pgactivate": 0,
+      "pgdeactivate": 0,
+      "pglazyfree": 0,
+      "pglazyfreed": 0,
+      "swpin_zero": 0,
+      "swpout_zero": 0,
+      "zswpin": 0,
+      "zswpout": 0,
+      "zswpwb": 0,
+      "thp_fault_alloc": 2,
+      "thp_collapse_alloc": 0,
+      "thp_swpout": 0,
+      "thp_swpout_fallback": 0,
+      "numa_pages_migrated": 0,
+      "numa_pte_updates": 0,
+      "numa_hint_faults": 0
+    },
+    "memory_current": 41517056,
+    "memory_swap_current": 0,
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "io_stat": null,
+    "threads": {
+      "455185": {
+        "name": "roll-engine",
+        "start_ticks": 48294619,
+        "voluntary": 102,
+        "involuntary": 2
+      },
+      "455186": {
+        "name": "roll-trim",
+        "start_ticks": 48294626,
+        "voluntary": 64,
+        "involuntary": 0
+      },
+      "455364": {
+        "name": "roll-idle",
+        "start_ticks": 48294629,
+        "voluntary": 89,
+        "involuntary": 0
+      },
+      "455366": {
+        "name": "roll-sub-launch",
+        "start_ticks": 48294629,
+        "voluntary": 23,
+        "involuntary": 0
+      },
+      "455368": {
+        "name": "roll-autovacuum",
+        "start_ticks": 48294629,
+        "voluntary": 8,
+        "involuntary": 0
+      },
+      "455369": {
+        "name": "roll-engine",
+        "start_ticks": 48294629,
+        "voluntary": 1,
+        "involuntary": 0
+      },
+      "455374": {
+        "name": "roll-log",
+        "start_ticks": 48294629,
+        "voluntary": 1,
+        "involuntary": 0
+      },
+      "463743": {
+        "name": "roll-conn",
+        "start_ticks": 48297736,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463744": {
+        "name": "roll-conn",
+        "start_ticks": 48297737,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463746": {
+        "name": "roll-conn",
+        "start_ticks": 48297738,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463747": {
+        "name": "roll-conn",
+        "start_ticks": 48297738,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463748": {
+        "name": "roll-conn",
+        "start_ticks": 48297739,
+        "voluntary": 22,
+        "involuntary": 1
+      },
+      "463749": {
+        "name": "roll-conn",
+        "start_ticks": 48297740,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463751": {
+        "name": "roll-conn",
+        "start_ticks": 48297740,
+        "voluntary": 22,
+        "involuntary": 1
+      },
+      "463752": {
+        "name": "roll-conn",
+        "start_ticks": 48297741,
+        "voluntary": 23,
+        "involuntary": 0
+      },
+      "463762": {
+        "name": "roll-conn",
+        "start_ticks": 48297746,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463763": {
+        "name": "roll-conn",
+        "start_ticks": 48297747,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463765": {
+        "name": "roll-conn",
+        "start_ticks": 48297748,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463766": {
+        "name": "roll-conn",
+        "start_ticks": 48297749,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463767": {
+        "name": "roll-conn",
+        "start_ticks": 48297749,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463768": {
+        "name": "roll-conn",
+        "start_ticks": 48297750,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463770": {
+        "name": "roll-conn",
+        "start_ticks": 48297751,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463771": {
+        "name": "roll-conn",
+        "start_ticks": 48297751,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463772": {
+        "name": "roll-conn",
+        "start_ticks": 48297752,
+        "voluntary": 23,
+        "involuntary": 0
+      },
+      "463775": {
+        "name": "roll-conn",
+        "start_ticks": 48297757,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463777": {
+        "name": "roll-conn",
+        "start_ticks": 48297758,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463778": {
+        "name": "roll-conn",
+        "start_ticks": 48297759,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463780": {
+        "name": "roll-conn",
+        "start_ticks": 48297759,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463781": {
+        "name": "roll-conn",
+        "start_ticks": 48297760,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463782": {
+        "name": "roll-conn",
+        "start_ticks": 48297761,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463784": {
+        "name": "roll-conn",
+        "start_ticks": 48297761,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463785": {
+        "name": "roll-conn",
+        "start_ticks": 48297762,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463787": {
+        "name": "roll-conn",
+        "start_ticks": 48297762,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463788": {
+        "name": "roll-conn",
+        "start_ticks": 48297763,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463790": {
+        "name": "roll-conn",
+        "start_ticks": 48297764,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463791": {
+        "name": "roll-conn",
+        "start_ticks": 48297764,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463792": {
+        "name": "roll-conn",
+        "start_ticks": 48297765,
+        "voluntary": 21,
+        "involuntary": 1
+      },
+      "463793": {
+        "name": "roll-conn",
+        "start_ticks": 48297765,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463794": {
+        "name": "roll-conn",
+        "start_ticks": 48297766,
+        "voluntary": 22,
+        "involuntary": 1
+      },
+      "463795": {
+        "name": "roll-conn",
+        "start_ticks": 48297766,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463797": {
+        "name": "roll-conn",
+        "start_ticks": 48297767,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463798": {
+        "name": "roll-conn",
+        "start_ticks": 48297767,
+        "voluntary": 23,
+        "involuntary": 0
+      },
+      "463801": {
+        "name": "roll-conn",
+        "start_ticks": 48297772,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463803": {
+        "name": "roll-conn",
+        "start_ticks": 48297773,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463804": {
+        "name": "roll-conn",
+        "start_ticks": 48297774,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463805": {
+        "name": "roll-conn",
+        "start_ticks": 48297774,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463807": {
+        "name": "roll-conn",
+        "start_ticks": 48297775,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463808": {
+        "name": "roll-conn",
+        "start_ticks": 48297776,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463809": {
+        "name": "roll-conn",
+        "start_ticks": 48297776,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463810": {
+        "name": "roll-conn",
+        "start_ticks": 48297777,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463812": {
+        "name": "roll-conn",
+        "start_ticks": 48297777,
+        "voluntary": 21,
+        "involuntary": 1
+      },
+      "463813": {
+        "name": "roll-conn",
+        "start_ticks": 48297778,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463814": {
+        "name": "roll-conn",
+        "start_ticks": 48297779,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463815": {
+        "name": "roll-conn",
+        "start_ticks": 48297779,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463817": {
+        "name": "roll-conn",
+        "start_ticks": 48297780,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463818": {
+        "name": "roll-conn",
+        "start_ticks": 48297780,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463819": {
+        "name": "roll-conn",
+        "start_ticks": 48297781,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463820": {
+        "name": "roll-conn",
+        "start_ticks": 48297781,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463821": {
+        "name": "roll-conn",
+        "start_ticks": 48297782,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463823": {
+        "name": "roll-conn",
+        "start_ticks": 48297782,
+        "voluntary": 21,
+        "involuntary": 0
+      },
+      "463824": {
+        "name": "roll-conn",
+        "start_ticks": 48297783,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463825": {
+        "name": "roll-conn",
+        "start_ticks": 48297783,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463826": {
+        "name": "roll-conn",
+        "start_ticks": 48297784,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463827": {
+        "name": "roll-conn",
+        "start_ticks": 48297784,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463829": {
+        "name": "roll-conn",
+        "start_ticks": 48297785,
+        "voluntary": 22,
+        "involuntary": 1
+      },
+      "463830": {
+        "name": "roll-conn",
+        "start_ticks": 48297785,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463831": {
+        "name": "roll-conn",
+        "start_ticks": 48297786,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463832": {
+        "name": "roll-conn",
+        "start_ticks": 48297786,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463834": {
+        "name": "roll-conn",
+        "start_ticks": 48297787,
+        "voluntary": 22,
+        "involuntary": 0
+      },
+      "463835": {
+        "name": "roll-conn",
+        "start_ticks": 48297787,
+        "voluntary": 22,
+        "involuntary": 2
+      },
+      "463836": {
+        "name": "roll-conn",
+        "start_ticks": 48297788,
+        "voluntary": 22,
+        "involuntary": 0
+      }
+    },
+    "snapshot_finished_ns": 483009626438810
+  },
+  "after": {
+    "monotonic_ns": 483014626882681,
+    "cpu": {
+      "usage_usec": 435902,
+      "user_usec": 287860,
+      "system_usec": 148042,
+      "nice_usec": 0,
+      "nr_periods": 70,
+      "nr_throttled": 0,
+      "throttled_usec": 0,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "memory": {
+      "anon": 36982784,
+      "file": 1114112,
+      "kernel": 3420160,
+      "kernel_stack": 1146880,
+      "pagetables": 1191936,
+      "sec_pagetables": 0,
+      "percpu": 608,
+      "sock": 0,
+      "vmalloc": 0,
+      "shmem": 0,
+      "zswap": 0,
+      "zswapped": 0,
+      "file_mapped": 0,
+      "file_dirty": 0,
+      "file_writeback": 0,
+      "swapcached": 0,
+      "anon_thp": 4194304,
+      "file_thp": 0,
+      "shmem_thp": 0,
+      "inactive_anon": 0,
+      "active_anon": 36966400,
+      "inactive_file": 1114112,
+      "active_file": 16384,
+      "unevictable": 0,
+      "slab_reclaimable": 152896,
+      "slab_unreclaimable": 913464,
+      "slab": 1066360,
+      "workingset_refault_anon": 0,
+      "workingset_refault_file": 0,
+      "workingset_activate_anon": 0,
+      "workingset_activate_file": 0,
+      "workingset_restore_anon": 0,
+      "workingset_restore_file": 0,
+      "workingset_nodereclaim": 0,
+      "pgdemote_kswapd": 0,
+      "pgdemote_direct": 0,
+      "pgdemote_khugepaged": 0,
+      "pgpromote_success": 0,
+      "pgscan": 0,
+      "pgsteal": 0,
+      "pgscan_kswapd": 0,
+      "pgscan_direct": 0,
+      "pgscan_khugepaged": 0,
+      "pgsteal_kswapd": 0,
+      "pgsteal_direct": 0,
+      "pgsteal_khugepaged": 0,
+      "pgfault": 14249,
+      "pgmajfault": 0,
+      "pgrefill": 0,
+      "pgactivate": 0,
+      "pgdeactivate": 0,
+      "pglazyfree": 0,
+      "pglazyfreed": 0,
+      "swpin_zero": 0,
+      "swpout_zero": 0,
+      "zswpin": 0,
+      "zswpout": 0,
+      "zswpwb": 0,
+      "thp_fault_alloc": 2,
+      "thp_collapse_alloc": 0,
+      "thp_swpout": 0,
+      "thp_swpout_fallback": 0,
+      "numa_pages_migrated": 0,
+      "numa_pte_updates": 0,
+      "numa_hint_faults": 0
+    },
+    "memory_current": 41517056,
+    "memory_swap_current": 0,
+    "memory_events": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "io_stat": null,
+    "threads": {
+      "455185": {
+        "name": "roll-engine",
+        "start_ticks": 48294619,
+        "voluntary": 102,
+        "involuntary": 2
+      },
+      "455186": {
+        "name": "roll-trim",
+        "start_ticks": 48294626,
+        "voluntary": 69,
+        "involuntary": 0
+      },
+      "455364": {
+        "name": "roll-idle",
+        "start_ticks": 48294629,
+        "voluntary": 93,
+        "involuntary": 0
+      },
+      "455366": {
+        "name": "roll-sub-launch",
+        "start_ticks": 48294629,
+        "voluntary": 23,
+        "involuntary": 0
+      },
+      "455368": {
+        "name": "roll-autovacuum",
+        "start_ticks": 48294629,
+        "voluntary": 8,
+        "involuntary": 0
+      },
+      "455369": {
+        "name": "roll-engine",
+        "start_ticks": 48294629,
+        "voluntary": 1,
+        "involuntary": 0
+      },
+      "455374": {
+        "name": "roll-log",
+        "start_ticks": 48294629,
+        "voluntary": 1,
+        "involuntary": 0
+      },
+      "463743": {
+        "name": "roll-conn",
+        "start_ticks": 48297736,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463744": {
+        "name": "roll-conn",
+        "start_ticks": 48297737,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463746": {
+        "name": "roll-conn",
+        "start_ticks": 48297738,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463747": {
+        "name": "roll-conn",
+        "start_ticks": 48297738,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463748": {
+        "name": "roll-conn",
+        "start_ticks": 48297739,
+        "voluntary": 24,
+        "involuntary": 1
+      },
+      "463749": {
+        "name": "roll-conn",
+        "start_ticks": 48297740,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463751": {
+        "name": "roll-conn",
+        "start_ticks": 48297740,
+        "voluntary": 24,
+        "involuntary": 1
+      },
+      "463752": {
+        "name": "roll-conn",
+        "start_ticks": 48297741,
+        "voluntary": 25,
+        "involuntary": 0
+      },
+      "463762": {
+        "name": "roll-conn",
+        "start_ticks": 48297746,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463763": {
+        "name": "roll-conn",
+        "start_ticks": 48297747,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463765": {
+        "name": "roll-conn",
+        "start_ticks": 48297748,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463766": {
+        "name": "roll-conn",
+        "start_ticks": 48297749,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463767": {
+        "name": "roll-conn",
+        "start_ticks": 48297749,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463768": {
+        "name": "roll-conn",
+        "start_ticks": 48297750,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463770": {
+        "name": "roll-conn",
+        "start_ticks": 48297751,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463771": {
+        "name": "roll-conn",
+        "start_ticks": 48297751,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463772": {
+        "name": "roll-conn",
+        "start_ticks": 48297752,
+        "voluntary": 25,
+        "involuntary": 0
+      },
+      "463775": {
+        "name": "roll-conn",
+        "start_ticks": 48297757,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463777": {
+        "name": "roll-conn",
+        "start_ticks": 48297758,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463778": {
+        "name": "roll-conn",
+        "start_ticks": 48297759,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463780": {
+        "name": "roll-conn",
+        "start_ticks": 48297759,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463781": {
+        "name": "roll-conn",
+        "start_ticks": 48297760,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463782": {
+        "name": "roll-conn",
+        "start_ticks": 48297761,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463784": {
+        "name": "roll-conn",
+        "start_ticks": 48297761,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463785": {
+        "name": "roll-conn",
+        "start_ticks": 48297762,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463787": {
+        "name": "roll-conn",
+        "start_ticks": 48297762,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463788": {
+        "name": "roll-conn",
+        "start_ticks": 48297763,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463790": {
+        "name": "roll-conn",
+        "start_ticks": 48297764,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463791": {
+        "name": "roll-conn",
+        "start_ticks": 48297764,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463792": {
+        "name": "roll-conn",
+        "start_ticks": 48297765,
+        "voluntary": 23,
+        "involuntary": 1
+      },
+      "463793": {
+        "name": "roll-conn",
+        "start_ticks": 48297765,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463794": {
+        "name": "roll-conn",
+        "start_ticks": 48297766,
+        "voluntary": 24,
+        "involuntary": 1
+      },
+      "463795": {
+        "name": "roll-conn",
+        "start_ticks": 48297766,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463797": {
+        "name": "roll-conn",
+        "start_ticks": 48297767,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463798": {
+        "name": "roll-conn",
+        "start_ticks": 48297767,
+        "voluntary": 25,
+        "involuntary": 0
+      },
+      "463801": {
+        "name": "roll-conn",
+        "start_ticks": 48297772,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463803": {
+        "name": "roll-conn",
+        "start_ticks": 48297773,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463804": {
+        "name": "roll-conn",
+        "start_ticks": 48297774,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463805": {
+        "name": "roll-conn",
+        "start_ticks": 48297774,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463807": {
+        "name": "roll-conn",
+        "start_ticks": 48297775,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463808": {
+        "name": "roll-conn",
+        "start_ticks": 48297776,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463809": {
+        "name": "roll-conn",
+        "start_ticks": 48297776,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463810": {
+        "name": "roll-conn",
+        "start_ticks": 48297777,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463812": {
+        "name": "roll-conn",
+        "start_ticks": 48297777,
+        "voluntary": 23,
+        "involuntary": 1
+      },
+      "463813": {
+        "name": "roll-conn",
+        "start_ticks": 48297778,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463814": {
+        "name": "roll-conn",
+        "start_ticks": 48297779,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463815": {
+        "name": "roll-conn",
+        "start_ticks": 48297779,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463817": {
+        "name": "roll-conn",
+        "start_ticks": 48297780,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463818": {
+        "name": "roll-conn",
+        "start_ticks": 48297780,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463819": {
+        "name": "roll-conn",
+        "start_ticks": 48297781,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463820": {
+        "name": "roll-conn",
+        "start_ticks": 48297781,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463821": {
+        "name": "roll-conn",
+        "start_ticks": 48297782,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463823": {
+        "name": "roll-conn",
+        "start_ticks": 48297782,
+        "voluntary": 23,
+        "involuntary": 0
+      },
+      "463824": {
+        "name": "roll-conn",
+        "start_ticks": 48297783,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463825": {
+        "name": "roll-conn",
+        "start_ticks": 48297783,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463826": {
+        "name": "roll-conn",
+        "start_ticks": 48297784,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463827": {
+        "name": "roll-conn",
+        "start_ticks": 48297784,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463829": {
+        "name": "roll-conn",
+        "start_ticks": 48297785,
+        "voluntary": 24,
+        "involuntary": 1
+      },
+      "463830": {
+        "name": "roll-conn",
+        "start_ticks": 48297785,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463831": {
+        "name": "roll-conn",
+        "start_ticks": 48297786,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463832": {
+        "name": "roll-conn",
+        "start_ticks": 48297786,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463834": {
+        "name": "roll-conn",
+        "start_ticks": 48297787,
+        "voluntary": 24,
+        "involuntary": 0
+      },
+      "463835": {
+        "name": "roll-conn",
+        "start_ticks": 48297787,
+        "voluntary": 24,
+        "involuntary": 2
+      },
+      "463836": {
+        "name": "roll-conn",
+        "start_ticks": 48297788,
+        "voluntary": 24,
+        "involuntary": 0
+      }
+    },
+    "snapshot_finished_ns": 483014641440211
+  },
+  "elapsed_s": 5.014448647,
+  "cpu_us": 2315,
+  "block_io_delta": null,
+  "cpu_us_per_s": 461.66591044560755,
+  "voluntary_switches_surviving_threads_per_s": 27.32104955984805,
+  "surviving_threads": 71,
+  "removed_threads": 0,
+  "added_threads": 0,
+  "thread_ids_unchanged": true,
+  "memory_anon_shmem_mib": 35.26953125,
+  "memory_current_mib": 39.59375,
+  "phase": "connected",
+  "round": 1,
+  "warmup": false,
+  "target": "baseline",
+  "connections_held": 64,
+  "minimum_seconds_since_fixture_query": 3
+}

@@ -1,0 +1,6 @@
+model pair_ref {
+  id   Int   @id
+  pa   Int?
+  pb   Int?
+  pair pair? @relation(fields: [pa, pb], references: [a, b], onDelete: NoAction, onUpdate: NoAction)
+}

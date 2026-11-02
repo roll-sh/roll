@@ -1,0 +1,179 @@
+[
+  {
+    "argv": [
+      "systemd-run",
+      "--user",
+      "--wait",
+      "--pipe",
+      "--quiet",
+      "--collect",
+      "--unit",
+      "t3-d4020b98-idle-baseline-20261102T070051Z",
+      "-p",
+      "MemoryMax=512M",
+      "-p",
+      "MemorySwapMax=0",
+      "-p",
+      "AllowedCPUs=28-31",
+      "-p",
+      "CPUQuota=400%",
+      "-p",
+      "TimeoutStopSec=30",
+      "taskset",
+      "-c",
+      "28-31",
+      "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "--data",
+      "/home/meszmate/.cache/pg-engine-product-20261102/candidate-vs-baseline-idle/baseline-data",
+      "--listen",
+      "127.0.0.1:53360",
+      "--password",
+      "pw",
+      "--cache-mb",
+      "64",
+      "--plan-cache-mb",
+      "36",
+      "--idle-close-secs",
+      "5"
+    ]
+  },
+  {
+    "at": "2026-11-02T07:00:51.693235+00:00",
+    "argv": [
+      "systemctl",
+      "--user",
+      "show",
+      "t3-d4020b98-idle-baseline-20261102T070051Z",
+      "--property=MainPID",
+      "--value"
+    ]
+  },
+  {
+    "argv": [
+      "systemd-run",
+      "--user",
+      "--wait",
+      "--pipe",
+      "--quiet",
+      "--collect",
+      "--unit",
+      "t3-d4020b98-idle-candidate-20261102T070051Z",
+      "-p",
+      "MemoryMax=512M",
+      "-p",
+      "MemorySwapMax=0",
+      "-p",
+      "AllowedCPUs=28-31",
+      "-p",
+      "CPUQuota=400%",
+      "-p",
+      "TimeoutStopSec=30",
+      "taskset",
+      "-c",
+      "28-31",
+      "/home/meszmate/.cache/pg-engine-product-20261102/candidate-bin/roll-engine",
+      "--data",
+      "/home/meszmate/.cache/pg-engine-product-20261102/candidate-vs-baseline-idle/candidate-data",
+      "--listen",
+      "127.0.0.1:53361",
+      "--password",
+      "pw",
+      "--cache-mb",
+      "64",
+      "--plan-cache-mb",
+      "36",
+      "--idle-close-secs",
+      "5"
+    ]
+  },
+  {
+    "at": "2026-11-02T07:00:52.982058+00:00",
+    "argv": [
+      "systemctl",
+      "--user",
+      "show",
+      "t3-d4020b98-idle-candidate-20261102T070051Z",
+      "--property=MainPID",
+      "--value"
+    ]
+  },
+  {
+    "at": "2026-11-02T07:00:53.745282+00:00",
+    "argv": [
+      "docker",
+      "run",
+      "-d",
+      "--name",
+      "t3-d4020b98-idle-pg-20261102T070051Z",
+      "--label",
+      "agent.worktree=t3-d4020b98",
+      "--label",
+      "agent.task=product-idle",
+      "--memory=512m",
+      "--memory-swap=512m",
+      "--cpuset-cpus=28-31",
+      "--cpus=4",
+      "-p",
+      "127.0.0.1:53362:5432",
+      "-e",
+      "POSTGRES_PASSWORD=pw",
+      "-e",
+      "POSTGRES_INITDB_ARGS=--locale=C --encoding=UTF8",
+      "--mount",
+      "type=bind,src=/home/meszmate/.cache/pg-engine-product-20261102/candidate-vs-baseline-idle/pg-data,dst=/var/lib/postgresql",
+      "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+      "postgres",
+      "-c",
+      "shared_buffers=64MB",
+      "-c",
+      "max_connections=100",
+      "-c",
+      "jit=off",
+      "-c",
+      "fsync=on",
+      "-c",
+      "synchronous_commit=on",
+      "-c",
+      "full_page_writes=on"
+    ]
+  },
+  {
+    "at": "2026-11-02T07:00:54.063532+00:00",
+    "argv": [
+      "docker",
+      "inspect",
+      "324764fa81beacc2e9bbeeae6c324cb1574a4ec15355c20dc965ff2647e4f13b"
+    ]
+  },
+  {
+    "at": "2026-11-02T07:00:54.108695+00:00",
+    "argv": [
+      "docker",
+      "inspect",
+      "324764fa81beacc2e9bbeeae6c324cb1574a4ec15355c20dc965ff2647e4f13b",
+      "--format",
+      "{{.State.Pid}}"
+    ]
+  },
+  {
+    "at": "2026-11-02T07:00:54.154045+00:00",
+    "argv": [
+      "docker",
+      "exec",
+      "324764fa81beacc2e9bbeeae6c324cb1574a4ec15355c20dc965ff2647e4f13b",
+      "sha256sum",
+      "/usr/local/bin/postgres"
+    ]
+  },
+  {
+    "at": "2026-11-02T07:00:55.395535+00:00",
+    "argv": [
+      "findmnt",
+      "-T",
+      "/home/meszmate/.cache/pg-engine-product-20261102/candidate-vs-baseline-idle",
+      "--json",
+      "-o",
+      "SOURCE,FSTYPE,TARGET"
+    ]
+  }
+]

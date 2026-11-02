@@ -1,0 +1,39 @@
+<testsuite name="Mocha Tests" tests="37" failures="0" errors="0" skipped="0" timestamp="Mon, 02 Nov 2026 07:19:20 GMT" time="1.059">
+<testcase classname="close" name="can close a finished cursor without a callback" file="/cache/src/nodepg/packages/pg-cursor/test/close.js" time="0.004"/>
+<testcase classname="close" name="can close a finished cursor a promise" file="/cache/src/nodepg/packages/pg-cursor/test/close.js" time="0.003"/>
+<testcase classname="close" name="closes cursor early" file="/cache/src/nodepg/packages/pg-cursor/test/close.js" time="0.003"/>
+<testcase classname="close" name="works with callback style" file="/cache/src/nodepg/packages/pg-cursor/test/close.js" time="0.005"/>
+<testcase classname="close" name="is a no-op to &#x22;close&#x22; the cursor before submitting it" file="/cache/src/nodepg/packages/pg-cursor/test/close.js" time="0"/>
+<testcase classname="error handling" name="can continue after error" file="/cache/src/nodepg/packages/pg-cursor/test/error-handling.js" time="0.017"/>
+<testcase classname="error handling" name="errors queued reads" file="/cache/src/nodepg/packages/pg-cursor/test/error-handling.js" time="0.016"/>
+<testcase classname="read callback does not fire sync" name="does not fire error callback sync" file="/cache/src/nodepg/packages/pg-cursor/test/error-handling.js" time="0.015"/>
+<testcase classname="read callback does not fire sync" name="does not fire result sync after finished" file="/cache/src/nodepg/packages/pg-cursor/test/error-handling.js" time="0.019"/>
+<testcase classname="proper cleanup" name="can issue multiple cursors on one client" file="/cache/src/nodepg/packages/pg-cursor/test/error-handling.js" time="0.02"/>
+<testcase classname="cursor" name="fetch 6 when asking for 10" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.003"/>
+<testcase classname="cursor" name="end before reading to end" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.002"/>
+<testcase classname="cursor" name="callback with error" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.001"/>
+<testcase classname="cursor" name="read a partial chunk of data" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.004"/>
+<testcase classname="cursor" name="read return length 0 past the end" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.003"/>
+<testcase classname="cursor" name="read huge result" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.31"/>
+<testcase classname="cursor" name="normalizes parameter values" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.003"/>
+<testcase classname="cursor" name="returns result along with rows" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.003"/>
+<testcase classname="cursor" name="emits row events" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.002"/>
+<testcase classname="cursor" name="emits row events when cursor is closed manually" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.002"/>
+<testcase classname="cursor" name="emits error events" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.002"/>
+<testcase classname="cursor" name="returns rowCount on insert" file="/cache/src/nodepg/packages/pg-cursor/test/index.js" time="0.007"/>
+<testcase classname="queries with no data" name="handles queries that return no data" file="/cache/src/nodepg/packages/pg-cursor/test/no-data-handling.js" time="0.005"/>
+<testcase classname="queries with no data" name="handles empty query" file="/cache/src/nodepg/packages/pg-cursor/test/no-data-handling.js" time="0.001"/>
+<testcase classname="pool" name="closes cursor early, single pool query" file="/cache/src/nodepg/packages/pg-cursor/test/pool.js" time="0.019"/>
+<testcase classname="pool" name="closes cursor early, saturated pool" file="/cache/src/nodepg/packages/pg-cursor/test/pool.js" time="0.025"/>
+<testcase classname="pool" name="closes exhausted cursor, single pool query" file="/cache/src/nodepg/packages/pg-cursor/test/pool.js" time="0.017"/>
+<testcase classname="pool" name="closes exhausted cursor, saturated pool" file="/cache/src/nodepg/packages/pg-cursor/test/pool.js" time="0.025"/>
+<testcase classname="pool" name="can close multiple times on a pool" file="/cache/src/nodepg/packages/pg-cursor/test/pool.js" time="0.018"/>
+<testcase classname="cursor using promises" name="resolve with result" file="/cache/src/nodepg/packages/pg-cursor/test/promises.js" time="0.002"/>
+<testcase classname="cursor using promises" name="reject with error" file="/cache/src/nodepg/packages/pg-cursor/test/promises.js" time="0.001"/>
+<testcase classname="cursor using promises" name="read multiple times" file="/cache/src/nodepg/packages/pg-cursor/test/promises.js" time="0.003"/>
+<testcase classname="query config passed to result" name="passes rowMode to result" file="/cache/src/nodepg/packages/pg-cursor/test/query-config.js" time="0.017"/>
+<testcase classname="query config passed to result" name="passes types to result" file="/cache/src/nodepg/packages/pg-cursor/test/query-config.js" time="0.017"/>
+<testcase classname="transactions" name="can execute multiple statements in a transaction" file="/cache/src/nodepg/packages/pg-cursor/test/transactions.js" time="0.033"/>
+<testcase classname="transactions" name="can execute multiple statements in a transaction if ending cursor early" file="/cache/src/nodepg/packages/pg-cursor/test/transactions.js" time="0.033"/>
+<testcase classname="transactions" name="can execute multiple statements in a transaction if no data" file="/cache/src/nodepg/packages/pg-cursor/test/transactions.js" time="0.032"/>
+</testsuite>

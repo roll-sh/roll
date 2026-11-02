@@ -1,0 +1,8 @@
+{
+  "baseline_source": "8115f5aff8f235cea56710803c179ecad4634054",
+  "candidate_source": "735f44ac3cfd40317f93f758b33beda34e49278e",
+  "restored_source": "b6711d98393e94a1b1eba03d7a729ecda7f9889e",
+  "candidate_patch_sha256": "b52d9663f0dab66e0d3dee2d827fbeee3d34dbabe160adb121062ac1f4c0ed68",
+  "manifest_diff_empty": true,
+  "production_diff_empty": true
+}

@@ -1,0 +1,14 @@
+2026-11-02 07:00:51.291 UTC [876015] LOG:  starting PostgreSQL 18.6 (roll) on x86_64-pc-linux-gnu, compiled by rustc, 64-bit
+2026-11-02 07:00:51.291 UTC [876015] LOG:  listening on IPv4 address "127.0.0.1", port 53360
+2026-11-02 07:00:51.291 UTC [32] LOG:  database system was shut down at 2026-11-02 07:00:51 UTC
+2026-11-02 07:00:51.291 UTC [876015] LOG:  database system is ready to accept connections
+2026-11-02 07:05:42.791 UTC [1219] FATAL:  terminating connection due to administrator command
+2026-11-02 07:05:46.834 UTC [1220] FATAL:  terminating connection due to idle-session timeout
+2026-11-02 07:05:50.862 UTC [1221] FATAL:  terminating connection due to idle-in-transaction timeout
+2026-11-02 07:05:54.894 UTC [1222] FATAL:  terminating connection due to transaction timeout
+2026-11-02 07:06:40.490 UTC [876015] LOG:  received smart shutdown request
+2026-11-02 07:06:40.490 UTC [876015] LOG:  background worker "logical replication launcher" (PID 35) exited with exit code 1
+2026-11-02 07:06:40.490 UTC [30] LOG:  shutting down
+2026-11-02 07:06:40.490 UTC [30] LOG:  checkpoint starting: shutdown immediate
+2026-11-02 07:06:40.492 UTC [30] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.000 s, total=0.002 s; sync files=0, longest=0.000 s, average=0.000 s; distance=6 kB, estimate=6 kB; lsn=0/10018CA, redo lsn=0/10018CA
+2026-11-02 07:06:40.492 UTC [876015] LOG:  database system is shut down

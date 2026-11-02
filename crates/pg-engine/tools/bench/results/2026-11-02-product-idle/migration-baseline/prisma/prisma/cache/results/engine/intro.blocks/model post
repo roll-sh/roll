@@ -1,0 +1,13 @@
+model post {
+  id                              Int        @id @default(autoincrement())
+  author_id                       BigInt
+  editor_id                       BigInt?
+  title                           String
+  body                            String?
+  published                       Boolean?   @default(false)
+  account_post_author_idToaccount account    @relation("post_author_idToaccount", fields: [author_id], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  account_post_editor_idToaccount account?   @relation("post_editor_idToaccount", fields: [editor_id], references: [id], onUpdate: NoAction)
+  post_tag                        post_tag[]
+
+  @@unique([author_id, title], map: "post_author_title")
+}

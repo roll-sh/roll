@@ -1,0 +1,17 @@
+Loaded Prisma config from prisma.config.ts.
+
+prisma:warn Prisma failed to detect the libssl/openssl version to use, and may not work as expected. Defaulting to "openssl-1.1.x".
+Please manually install OpenSSL via `apt-get update -y && apt-get install -y openssl` and try installing Prisma again. If you're running Prisma on Docker, add this command to your Dockerfile, or switch to an image that already has OpenSSL installed.
+Prisma schema loaded from prisma/schema.prisma.
+Datasource "db": PostgreSQL database "a51_prisma", schema "public" at "127.0.0.1:53361"
+
+Applying migration `20261102072007_init`
+
+The following migration(s) have been created and applied from new schema changes:
+
+prisma/migrations/
+  └─ 20261102072007_init/
+    └─ migration.sql
+
+Your database is now in sync with your schema.
+

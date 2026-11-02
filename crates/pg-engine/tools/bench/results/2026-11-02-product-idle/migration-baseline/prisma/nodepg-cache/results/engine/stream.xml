@@ -1,0 +1,40 @@
+<testsuite name="Mocha Tests" tests="38" failures="0" errors="0" skipped="0" timestamp="Mon, 02 Nov 2026 07:18:59 GMT" time="5.561">
+<testcase classname="Async iterator" name="works" file="/cache/src/nodepg/packages/pg-query-stream/test/async-iterator.ts" time="0.022"/>
+<testcase classname="Async iterator" name="can async iterate and then do a query afterwards" file="/cache/src/nodepg/packages/pg-query-stream/test/async-iterator.ts" time="0.007"/>
+<testcase classname="Async iterator" name="can async iterate multiple times with a pool" file="/cache/src/nodepg/packages/pg-query-stream/test/async-iterator.ts" time="0.008"/>
+<testcase classname="Async iterator" name="can break out of iteration early" file="/cache/src/nodepg/packages/pg-query-stream/test/async-iterator.ts" time="0.008"/>
+<testcase classname="Async iterator" name="only returns rows on first iteration" file="/cache/src/nodepg/packages/pg-query-stream/test/async-iterator.ts" time="0.005"/>
+<testcase classname="Async iterator" name="can read with delays" file="/cache/src/nodepg/packages/pg-query-stream/test/async-iterator.ts" time="0.264"/>
+<testcase classname="Async iterator" name="supports breaking with low watermark" file="/cache/src/nodepg/packages/pg-query-stream/test/async-iterator.ts" time="0.015"/>
+<testcase classname="client options" name="uses custom types from client config" file="/cache/src/nodepg/packages/pg-query-stream/test/client-options.ts" time="0.012"/>
+<testcase classname="close" name="emits close" file="/cache/src/nodepg/packages/pg-query-stream/test/close.ts" time="0.003"/>
+<testcase classname="early close" name="can be closed early" file="/cache/src/nodepg/packages/pg-query-stream/test/close.ts" time="0.002"/>
+<testcase classname="early close" name="can destroy stream while reading" file="/cache/src/nodepg/packages/pg-query-stream/test/close.ts" time="1.003"/>
+<testcase classname="early close" name="emits an error when calling destroy with an error" file="/cache/src/nodepg/packages/pg-query-stream/test/close.ts" time="1.003"/>
+<testcase classname="early close" name="can destroy stream while reading an error" file="/cache/src/nodepg/packages/pg-query-stream/test/close.ts" time="0.117"/>
+<testcase classname="early close" name="does not crash when destroying the stream immediately after calling read" file="/cache/src/nodepg/packages/pg-query-stream/test/close.ts" time="0.002"/>
+<testcase classname="early close" name="does not crash when destroying the stream before its submitted" file="/cache/src/nodepg/packages/pg-query-stream/test/close.ts" time="0"/>
+<testcase classname="concat" name="concats correctly" file="/cache/src/nodepg/packages/pg-query-stream/test/concat.ts" time="0.006"/>
+<testcase classname="stream config options" name="sets readable.highWaterMark based on batch size" file="/cache/src/nodepg/packages/pg-query-stream/test/config.ts" time="0"/>
+<testcase classname="stream config options" name="sets readable.highWaterMark based on highWaterMark config" file="/cache/src/nodepg/packages/pg-query-stream/test/config.ts" time="0"/>
+<testcase classname="stream config options" name="defaults to 100 for highWaterMark" file="/cache/src/nodepg/packages/pg-query-stream/test/config.ts" time="0"/>
+<testcase classname="empty-query" name="handles empty query" file="/cache/src/nodepg/packages/pg-query-stream/test/empty-query.ts" time="0.002"/>
+<testcase classname="empty-query" name="continues to function after stream" file="/cache/src/nodepg/packages/pg-query-stream/test/empty-query.ts" time="0.001"/>
+<testcase classname="error" name="receives error on stream" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.002"/>
+<testcase classname="error" name="continues to function after stream" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.001"/>
+<testcase classname="error recovery" name="recovers from a streaming error in a transaction" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.016"/>
+<testcase classname="error recovery" name="handles an error on a stream after a plain text non-stream error" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.013"/>
+<testcase classname="error recovery" name="does not crash when closing a connection with a queued stream" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.011"/>
+<testcase classname="error recovery" name="should work if used after timeout error" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.415"/>
+<testcase classname="error recovery" name="should work if used after syntax error" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.022"/>
+<testcase classname="error recovery" name="should work after cancelling query" file="/cache/src/nodepg/packages/pg-query-stream/test/error.ts" time="0.124"/>
+<testcase classname="fast reader" name="works" file="/cache/src/nodepg/packages/pg-query-stream/test/fast-reader.ts" time="0.004"/>
+<testcase classname="instant" name="instant" file="/cache/src/nodepg/packages/pg-query-stream/test/instant.ts" time="1.003"/>
+<testcase classname="end semantics race condition" name="works" file="/cache/src/nodepg/packages/pg-query-stream/test/issue-3.ts" time="0.013"/>
+<testcase classname="passing options" name="passes row mode array" file="/cache/src/nodepg/packages/pg-query-stream/test/passing-options.ts" time="0.002"/>
+<testcase classname="passing options" name="passes custom types" file="/cache/src/nodepg/packages/pg-query-stream/test/passing-options.ts" time="0.002"/>
+<testcase classname="pauses" name="pauses" file="/cache/src/nodepg/packages/pg-query-stream/test/pauses.ts" time="0.246"/>
+<testcase classname="slow reader" name="works" file="/cache/src/nodepg/packages/pg-query-stream/test/slow-reader.ts" time="1.055"/>
+<testcase classname="stream tester timestamp" name="should not warn about max listeners" file="/cache/src/nodepg/packages/pg-query-stream/test/stream-tester-timestamp.ts" time="0.005"/>
+<testcase classname="stream tester" name="passes stream spec" file="/cache/src/nodepg/packages/pg-query-stream/test/stream-tester.ts" time="0.003"/>
+</testsuite>

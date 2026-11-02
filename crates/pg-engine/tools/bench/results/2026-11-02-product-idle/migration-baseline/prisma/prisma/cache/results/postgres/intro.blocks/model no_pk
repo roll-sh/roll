@@ -1,0 +1,6 @@
+model no_pk {
+  a Int?
+  b String?
+
+  @@ignore
+}

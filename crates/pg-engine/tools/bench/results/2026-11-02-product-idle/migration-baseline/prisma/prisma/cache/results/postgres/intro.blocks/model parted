@@ -1,0 +1,6 @@
+model parted {
+  id Int?
+  k  DateTime? @db.Date
+
+  @@ignore
+}

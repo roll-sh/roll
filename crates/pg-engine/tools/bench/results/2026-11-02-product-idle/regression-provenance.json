@@ -1,0 +1,9 @@
+{
+  "at_utc": "2026-11-02T07:45:32.702960+00:00",
+  "fresh_regression_started": false,
+  "queued_supervisor_cancelled": true,
+  "reason": "Restored production source and executable are identical to the previously fully measured baseline; no candidate production change was accepted",
+  "reused_report": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-regress-5b32046d-release/report",
+  "reused_source": "5b32046d",
+  "baseline_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+}

@@ -1,0 +1,80 @@
+{
+  "at_utc": "2026-11-02T08:03:11.890851+00:00",
+  "engines_and_e2e": [
+    {
+      "pid": 876015,
+      "absent": true
+    },
+    {
+      "pid": 876302,
+      "absent": true
+    },
+    {
+      "pid": 977698,
+      "absent": true
+    },
+    {
+      "pid": 978833,
+      "absent": true
+    },
+    {
+      "pid": 1061093,
+      "absent": true
+    },
+    {
+      "pid": 1062203,
+      "absent": true
+    },
+    {
+      "pid": 1142809,
+      "absent": true
+    },
+    {
+      "pid": 1639338,
+      "absent": true
+    }
+  ],
+  "containers": [
+    {
+      "container": "2c90425bf86003813ac49b0c0f11f0721d27c3a13b88aa9812dd4874c8147579",
+      "absent": true
+    },
+    {
+      "container": "324764fa81beacc2e9bbeeae6c324cb1574a4ec15355c20dc965ff2647e4f13b",
+      "absent": true
+    },
+    {
+      "container": "756353ccf113cd8d6f60573b2b7e9bd6457a3d281bd0cf901ff905bf21c0c2aa",
+      "absent": true
+    },
+    {
+      "container": "de5bef75816982037e169d255794f29843d0e31554f80bb1a2c90125ea9e02c3",
+      "absent": true
+    }
+  ],
+  "ports": [
+    {
+      "port": 53360,
+      "connection_refused": true
+    },
+    {
+      "port": 53361,
+      "connection_refused": true
+    },
+    {
+      "port": 53362,
+      "connection_refused": true
+    },
+    {
+      "port": 53370,
+      "connection_refused": true
+    },
+    {
+      "port": 53371,
+      "connection_refused": true
+    }
+  ],
+  "e2e_owned_prefix": "/home/meszmate/worktrees/roll/t3-d4020b98/target/tmp/e2e-1639338-",
+  "e2e_remaining_containers": [],
+  "data_retained": true
+}

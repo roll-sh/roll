@@ -1,0 +1,270 @@
+{
+  "decision": "reject and revert",
+  "reason": "Repeated active range regression exceeds both full throughput spreads in longer confirmation; idle behavior improves but active efficiency requirement fails",
+  "candidate_source": "735f44ac3cfd40317f93f758b33beda34e49278e",
+  "candidate_sha256": "9c45c0677b86e9b415c34fbaf47e5358b829816248bbc2ecb0cf9fc750b14aa3",
+  "baseline_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "experiments": {
+    "active-control": {
+      "invocations": 24,
+      "checked_operations": 1870150,
+      "throughput_change_pct": -0.8166042871725065,
+      "server_cpu_change_pct": 0.8782022658045507,
+      "median_gap_ops_per_s": -72.0,
+      "max_full_spread_ops_per_s": 100.0,
+      "summary": {
+        "range_scan_100": {
+          "8": {
+            "candidate": {
+              "tps": {
+                "median": 8745.0,
+                "min": 8692.0,
+                "max": 8792.0
+              },
+              "p50_ms": {
+                "median": 0.869,
+                "min": 0.864,
+                "max": 0.873
+              },
+              "p95_ms": {
+                "median": 1.487,
+                "min": 1.469,
+                "max": 1.488
+              },
+              "p99_ms": {
+                "median": 2.22,
+                "min": 2.217,
+                "max": 2.231
+              },
+              "server_cpu_us_per_op": {
+                "median": 451.26106144101675,
+                "min": 449.5417017308436,
+                "max": 454.6918493639145
+              },
+              "client_cpu_us_per_op": {
+                "median": 94.36909939838121,
+                "min": 93.54312325152955,
+                "max": 94.84462534013214
+              },
+              "peak_mem_mb": {
+                "median": 111.6,
+                "min": 111.3,
+                "max": 112.5
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 8817.0,
+                "min": 8809.0,
+                "max": 8852.0
+              },
+              "p50_ms": {
+                "median": 0.859,
+                "min": 0.856,
+                "max": 0.859
+              },
+              "p95_ms": {
+                "median": 1.486,
+                "min": 1.476,
+                "max": 1.5
+              },
+              "p99_ms": {
+                "median": 2.228,
+                "min": 2.2,
+                "max": 2.239
+              },
+              "server_cpu_us_per_op": {
+                "median": 447.33257661748013,
+                "min": 446.2994758720407,
+                "max": 448.39946459765423
+              },
+              "client_cpu_us_per_op": {
+                "median": 94.3171396140749,
+                "min": 93.97041613952642,
+                "max": 95.42361906489909
+              },
+              "peak_mem_mb": {
+                "median": 109.1,
+                "min": 109.0,
+                "max": 110.8
+              },
+              "samples": 5
+            }
+          }
+        },
+        "point_select": {
+          "1": {
+            "candidate": {
+              "tps": {
+                "median": 6777.0,
+                "min": 6737.0,
+                "max": 6816.0
+              },
+              "p50_ms": {
+                "median": 0.136,
+                "min": 0.136,
+                "max": 0.138
+              },
+              "p95_ms": {
+                "median": 0.194,
+                "min": 0.181,
+                "max": 0.206
+              },
+              "p99_ms": {
+                "median": 0.337,
+                "min": 0.332,
+                "max": 0.349
+              },
+              "server_cpu_us_per_op": {
+                "median": 110.78656989437687,
+                "min": 110.41752546964254,
+                "max": 112.06269573864918
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.29204283944051,
+                "min": 39.07021931512115,
+                "max": 39.70751133619942
+              },
+              "peak_mem_mb": {
+                "median": 110.6,
+                "min": 110.4,
+                "max": 110.8
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 6823.0,
+                "min": 6745.0,
+                "max": 6981.0
+              },
+              "p50_ms": {
+                "median": 0.135,
+                "min": 0.134,
+                "max": 0.136
+              },
+              "p95_ms": {
+                "median": 0.2,
+                "min": 0.171,
+                "max": 0.209
+              },
+              "p99_ms": {
+                "median": 0.335,
+                "min": 0.327,
+                "max": 0.345
+              },
+              "server_cpu_us_per_op": {
+                "median": 110.51019361268656,
+                "min": 106.56430382285114,
+                "max": 111.3301807077108
+              },
+              "client_cpu_us_per_op": {
+                "median": 39.27183520488734,
+                "min": 38.83387783676576,
+                "max": 39.75271654535522
+              },
+              "peak_mem_mb": {
+                "median": 108.1,
+                "min": 107.9,
+                "max": 108.6
+              },
+              "samples": 5
+            }
+          }
+        }
+      }
+    },
+    "active-control-r2": {
+      "invocations": 12,
+      "checked_operations": 2120016,
+      "throughput_change_pct": -0.9467989179440917,
+      "server_cpu_change_pct": 1.167905195530139,
+      "median_gap_ops_per_s": -84.0,
+      "max_full_spread_ops_per_s": 47.0,
+      "summary": {
+        "range_scan_100": {
+          "8": {
+            "candidate": {
+              "tps": {
+                "median": 8788.0,
+                "min": 8772.0,
+                "max": 8808.0
+              },
+              "p50_ms": {
+                "median": 0.866,
+                "min": 0.863,
+                "max": 0.868
+              },
+              "p95_ms": {
+                "median": 1.47,
+                "min": 1.465,
+                "max": 1.474
+              },
+              "p99_ms": {
+                "median": 2.197,
+                "min": 2.187,
+                "max": 2.217
+              },
+              "server_cpu_us_per_op": {
+                "median": 450.2761959483674,
+                "min": 448.8150986235277,
+                "max": 450.6971686242805
+              },
+              "client_cpu_us_per_op": {
+                "median": 93.90023196566685,
+                "min": 93.08629487725274,
+                "max": 94.44001616952954
+              },
+              "peak_mem_mb": {
+                "median": 112.5,
+                "min": 111.8,
+                "max": 112.7
+              },
+              "samples": 5
+            },
+            "baseline": {
+              "tps": {
+                "median": 8872.0,
+                "min": 8854.0,
+                "max": 8901.0
+              },
+              "p50_ms": {
+                "median": 0.854,
+                "min": 0.851,
+                "max": 0.856
+              },
+              "p95_ms": {
+                "median": 1.499,
+                "min": 1.489,
+                "max": 1.502
+              },
+              "p99_ms": {
+                "median": 2.223,
+                "min": 2.211,
+                "max": 2.225
+              },
+              "server_cpu_us_per_op": {
+                "median": 445.0781056285643,
+                "min": 443.41090496492143,
+                "max": 446.0681072596173
+              },
+              "client_cpu_us_per_op": {
+                "median": 93.70181193994452,
+                "min": 92.90591757186345,
+                "max": 94.71158069752683
+              },
+              "peak_mem_mb": {
+                "median": 112.0,
+                "min": 111.5,
+                "max": 112.9
+              },
+              "samples": 5
+            }
+          }
+        }
+      }
+    }
+  },
+  "source_cause": "Unresolved. Matching dependency fingerprints removes the previous target-selection mismatch, but these measurements do not isolate a function or establish universal regression."
+}

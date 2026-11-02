@@ -1,0 +1,58 @@
+{
+  "baseline": {
+    "pid": 306565,
+    "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+    "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-product-20261102/baseline-diagnostic/baseline-data --listen 127.0.0.1:53360 --password pw --cache-mb 64 --plan-cache-mb 36 --idle-close-secs 5 ",
+    "affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35
+    ],
+    "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/t3-d4020b98-idle-baseline-20261102T062359Z.service"
+  },
+  "postgres": {
+    "pid": 306899,
+    "cgroup": "/sys/fs/cgroup/system.slice/docker-6a0576fe742a228cbca2c0df920cd63ea1dbd861fba9641aef83eca9182662c5.scope",
+    "image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+    "affinity": [
+      28,
+      29,
+      30,
+      31
+    ]
+  }
+}

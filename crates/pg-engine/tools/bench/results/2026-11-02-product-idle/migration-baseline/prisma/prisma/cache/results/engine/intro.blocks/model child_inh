@@ -1,0 +1,7 @@
+model child_inh {
+  a     Int?
+  b     String?
+  extra String?
+
+  @@ignore
+}

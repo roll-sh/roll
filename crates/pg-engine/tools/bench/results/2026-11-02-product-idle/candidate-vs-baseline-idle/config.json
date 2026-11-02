@@ -1,0 +1,48 @@
+{
+  "out": "/home/meszmate/.cache/pg-engine-product-20261102/candidate-vs-baseline-idle/observations",
+  "db": "bench_idle_20261102t070051z",
+  "rounds": 5,
+  "seconds": 10.0,
+  "sessions": 64,
+  "settle_seconds": 5,
+  "release_seconds": 15,
+  "phases": [
+    "connected"
+  ],
+  "targets": [
+    {
+      "name": "baseline",
+      "port": 53360,
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/t3-d4020b98-idle-baseline-20261102T070051Z.service",
+      "kind": "engine",
+      "leader_pid": 876015,
+      "leader_start_ticks": 48457730,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+    },
+    {
+      "name": "candidate",
+      "port": 53361,
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/t3-d4020b98-idle-candidate-20261102T070051Z.service",
+      "kind": "engine",
+      "leader_pid": 876302,
+      "leader_start_ticks": 48457860,
+      "sha256": "9c45c0677b86e9b415c34fbaf47e5358b829816248bbc2ecb0cf9fc750b14aa3"
+    },
+    {
+      "name": "postgres",
+      "port": 53362,
+      "cgroup": "/sys/fs/cgroup/system.slice/docker-324764fa81beacc2e9bbeeae6c324cb1574a4ec15355c20dc965ff2647e4f13b.scope",
+      "kind": "postgres",
+      "leader_pid": 876634,
+      "leader_start_ticks": 48458001,
+      "image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5"
+    }
+  ],
+  "diagnostic_only": false,
+  "server_cpus": [
+    28,
+    29,
+    30,
+    31
+  ]
+}

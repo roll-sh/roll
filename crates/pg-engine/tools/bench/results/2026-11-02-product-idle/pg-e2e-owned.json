@@ -1,0 +1,6 @@
+{
+  "at_utc": "2026-11-02T07:50:21.904241+00:00",
+  "test_pid": 1639338,
+  "home_prefix": "/home/meszmate/worktrees/roll/t3-d4020b98/target/tmp/e2e-1639338-",
+  "command": "ROLL_E2E_BIND=0.0.0.0 ROLL_E2E_THREADS=2 pnpm test:pg --force"
+}

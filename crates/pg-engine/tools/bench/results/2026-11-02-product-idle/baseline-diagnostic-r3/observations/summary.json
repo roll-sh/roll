@@ -1,0 +1,201 @@
+{
+  "disconnected": {
+    "baseline": {
+      "time_weighted_cpu_us_per_s": 72.55956589166861,
+      "switch_claim_valid_without_churn": true,
+      "thread_churn_windows": 0,
+      "added_threads_total": 0,
+      "removed_threads_total": 0,
+      "block_io_totals": null,
+      "cpu_us_per_s": {
+        "median": 72.55956589166861,
+        "min": 72.55956589166861,
+        "max": 72.55956589166861
+      },
+      "voluntary_switches_surviving_threads_per_s": {
+        "median": 1.798997501446329,
+        "min": 1.798997501446329,
+        "max": 1.798997501446329
+      },
+      "memory_anon_shmem_mib": {
+        "median": 19.0703125,
+        "min": 19.0703125,
+        "max": 19.0703125
+      },
+      "memory_current_mib": {
+        "median": 19.70703125,
+        "min": 19.70703125,
+        "max": 19.70703125
+      }
+    },
+    "postgres": {
+      "time_weighted_cpu_us_per_s": 148.50662966434174,
+      "switch_claim_valid_without_churn": true,
+      "thread_churn_windows": 0,
+      "added_threads_total": 0,
+      "removed_threads_total": 0,
+      "block_io_totals": {
+        "rbytes": 0,
+        "wbytes": 4792320,
+        "rios": 0,
+        "wios": 517
+      },
+      "cpu_us_per_s": {
+        "median": 148.50662966434174,
+        "min": 148.50662966434174,
+        "max": 148.50662966434174
+      },
+      "voluntary_switches_surviving_threads_per_s": {
+        "median": 2.5983663332926548,
+        "min": 2.5983663332926548,
+        "max": 2.5983663332926548
+      },
+      "memory_anon_shmem_mib": {
+        "median": 30.66796875,
+        "min": 30.66796875,
+        "max": 30.66796875
+      },
+      "memory_current_mib": {
+        "median": 78.609375,
+        "min": 78.609375,
+        "max": 78.609375
+      }
+    }
+  },
+  "connected": {
+    "baseline": {
+      "time_weighted_cpu_us_per_s": 461.66591044560755,
+      "switch_claim_valid_without_churn": true,
+      "thread_churn_windows": 0,
+      "added_threads_total": 0,
+      "removed_threads_total": 0,
+      "block_io_totals": null,
+      "cpu_us_per_s": {
+        "median": 461.66591044560755,
+        "min": 461.66591044560755,
+        "max": 461.66591044560755
+      },
+      "voluntary_switches_surviving_threads_per_s": {
+        "median": 27.32104955984805,
+        "min": 27.32104955984805,
+        "max": 27.32104955984805
+      },
+      "memory_anon_shmem_mib": {
+        "median": 35.26953125,
+        "min": 35.26953125,
+        "max": 35.26953125
+      },
+      "memory_current_mib": {
+        "median": 39.59375,
+        "min": 39.59375,
+        "max": 39.59375
+      }
+    },
+    "postgres": {
+      "time_weighted_cpu_us_per_s": 9.372408790698874,
+      "switch_claim_valid_without_churn": true,
+      "thread_churn_windows": 0,
+      "added_threads_total": 0,
+      "removed_threads_total": 0,
+      "block_io_totals": {
+        "rbytes": 0,
+        "wbytes": 0,
+        "rios": 0,
+        "wios": 0
+      },
+      "cpu_us_per_s": {
+        "median": 9.372408790698874,
+        "min": 9.372408790698874,
+        "max": 9.372408790698874
+      },
+      "voluntary_switches_surviving_threads_per_s": {
+        "median": 0.19941295299359305,
+        "min": 0.19941295299359305,
+        "max": 0.19941295299359305
+      },
+      "memory_anon_shmem_mib": {
+        "median": 129.625,
+        "min": 129.625,
+        "max": 129.625
+      },
+      "memory_current_mib": {
+        "median": 192.41796875,
+        "min": 192.41796875,
+        "max": 192.41796875
+      }
+    }
+  },
+  "released": {
+    "baseline": {
+      "time_weighted_cpu_us_per_s": 67.36363372885874,
+      "switch_claim_valid_without_churn": true,
+      "thread_churn_windows": 0,
+      "added_threads_total": 0,
+      "removed_threads_total": 0,
+      "block_io_totals": null,
+      "cpu_us_per_s": {
+        "median": 67.36363372885874,
+        "min": 67.36363372885874,
+        "max": 67.36363372885874
+      },
+      "voluntary_switches_surviving_threads_per_s": {
+        "median": 1.7990287939457825,
+        "min": 1.7990287939457825,
+        "max": 1.7990287939457825
+      },
+      "memory_anon_shmem_mib": {
+        "median": 21.09375,
+        "min": 21.09375,
+        "max": 21.09375
+      },
+      "memory_current_mib": {
+        "median": 22.3359375,
+        "min": 22.3359375,
+        "max": 22.3359375
+      }
+    },
+    "postgres": {
+      "time_weighted_cpu_us_per_s": 7.3939820513176,
+      "switch_claim_valid_without_churn": true,
+      "thread_churn_windows": 0,
+      "added_threads_total": 0,
+      "removed_threads_total": 0,
+      "block_io_totals": {
+        "rbytes": 0,
+        "wbytes": 0,
+        "rios": 0,
+        "wios": 0
+      },
+      "cpu_us_per_s": {
+        "median": 7.3939820513176,
+        "min": 7.3939820513176,
+        "max": 7.3939820513176
+      },
+      "voluntary_switches_surviving_threads_per_s": {
+        "median": 0.19983735273831352,
+        "min": 0.19983735273831352,
+        "max": 0.19983735273831352
+      },
+      "memory_anon_shmem_mib": {
+        "median": 30.90234375,
+        "min": 30.90234375,
+        "max": 30.90234375
+      },
+      "memory_current_mib": {
+        "median": 78.921875,
+        "min": 78.921875,
+        "max": 78.921875
+      }
+    }
+  },
+  "per_connection_increment_estimates_mib": {
+    "baseline": {
+      "memory_anon_shmem_mib": 0.25311279296875,
+      "memory_current_mib": 0.31072998046875
+    },
+    "postgres": {
+      "memory_anon_shmem_mib": 1.54620361328125,
+      "memory_current_mib": 1.77825927734375
+    }
+  }
+}

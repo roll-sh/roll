@@ -1,0 +1,12 @@
+{
+  "runner_sha256": "3cb8c87c991f6907a9a30a021f1839570cf1986a1ca74745457aa0950d6900e6",
+  "wire_sha256": "ecb0dde8aa6bda441a642a11a71f6ea5cfc1d1d8b79a8a74e8653b37e61e698b",
+  "load_at_start": "1.41 1.60 1.81 1/2825 456316",
+  "client_affinity": [
+    32,
+    33,
+    34,
+    35
+  ],
+  "cpu_accounting_unit": "microseconds; zero observed is not zero actual CPU"
+}

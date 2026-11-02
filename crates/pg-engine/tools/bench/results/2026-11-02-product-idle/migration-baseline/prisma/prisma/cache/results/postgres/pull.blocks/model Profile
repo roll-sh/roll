@@ -1,0 +1,6 @@
+model Profile {
+  id     Int    @id @default(autoincrement())
+  bio    String @default("")
+  userId Int    @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}

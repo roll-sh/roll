@@ -1,0 +1,27 @@
+{
+  "baseline": {
+    "pid": 418252,
+    "exe": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+    "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-product-20261102/baseline-diagnostic-r2/baseline-data --listen 127.0.0.1:53360 --password pw --cache-mb 64 --plan-cache-mb 36 --idle-close-secs 5 ",
+    "affinity": [
+      28,
+      29,
+      30,
+      31
+    ],
+    "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/t3-d4020b98-idle-baseline-20261102T063115Z.service"
+  },
+  "postgres": {
+    "pid": 418583,
+    "cgroup": "/sys/fs/cgroup/system.slice/docker-b8a8a811b7cb89bbaf68c602c5b8b69745423aa9a17a94e1ad29874007089749.scope",
+    "image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+    "affinity": [
+      28,
+      29,
+      30,
+      31
+    ],
+    "binary_sha256": "51b088c1df230893fc90182ce286d5e7caa5020ce9c01158dab462e1ec4b619a"
+  }
+}

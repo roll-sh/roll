@@ -45,6 +45,26 @@ harness and score in `tests/`:
 
 ## Where it stands
 
+The 2026-11-02 product continuation rejects idle timer candidate `735f44ac` and
+restores the baseline at `b6711d98`. The rebuilt engine is byte-identical to the
+verified `5cfc7904…e51ffd1` binary. Idle connection polling decreases, but a longer
+active range control records 0.947% lower throughput and 1.168% higher CPU per
+operation, so the candidate is not accepted. Fresh unchanged node-postgres 8.16.0
+outcomes match across 149 IDs, including three shared failures; Prisma 7.10.1
+matches across 47 passing migration, introspection, and client checks. These are
+direct plaintext checks, not TLS or deployed-proxy verification.
+
+Fresh restored-source release tests pass with 430 passed and 18 ignored, and
+all-target Clippy passes with existing warnings. `pnpm test:pg --force` passes its
+24 unit tests but exits 101: Docker e2e has 12 passes and four failures in
+point-in-time branching, restore-in-place, retention, and local-disk-loss recovery.
+The failure logs show compute-to-host WAL HTTP timeouts and missing checkpoint
+records. Recovery acceptance remains open. The full regression report below is
+reused baseline evidence, not a fresh run after restoration. The source and binary
+match that baseline. [Evidence and scope](tools/bench/results/2026-11-02-product-idle/README.md)
+retain the rejection, raw records, gate failures, and cleanup. Full compatibility,
+near-zero whole-stack idle cost, cheap operation, and distribution remain unverified.
+
 The current measured Rust source is `5b32046d`, from the 2026-11-02 OLTP campaign.
 The release build, full release crate suite (430 passed, 18 ignored, zero failed),
 all-target Clippy, and `pnpm test:pg --unit` pass. Clippy has eleven library warnings,

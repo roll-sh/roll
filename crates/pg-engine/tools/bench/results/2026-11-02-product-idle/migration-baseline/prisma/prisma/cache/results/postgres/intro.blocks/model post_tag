@@ -1,0 +1,8 @@
+model post_tag {
+  post_id  Int
+  tag_name String
+  post     post   @relation(fields: [post_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tag      tag    @relation(fields: [tag_name], references: [name], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([post_id, tag_name])
+}

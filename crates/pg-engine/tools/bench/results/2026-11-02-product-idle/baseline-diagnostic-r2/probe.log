@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/idle.py", line 330, in <module>
+    run(json.loads(args.config.read_text()))
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/idle.py", line 208, in run
+    validate(config)
+    ~~~~~~~~^^^^^^^^
+  File "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/idle.py", line 190, in validate
+    raise ValueError('missing cgroup v2 accounting file: ' + name)
+ValueError: missing cgroup v2 accounting file: io.stat

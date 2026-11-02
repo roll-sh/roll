@@ -1,0 +1,9 @@
+{
+  "filesystems": [
+    {
+      "source": "/dev/md2",
+      "fstype": "ext4",
+      "target": "/"
+    }
+  ]
+}

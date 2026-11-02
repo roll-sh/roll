@@ -1,0 +1,58 @@
+== test/integration/client/ssl-tests.js
+    at Object.onceWrapper (node:events:634:26)
+    at Socket.emit (node:events:519:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+    at Readable.push (node:internal/streams/readable:392:5)
+    at TCP.onStreamRead (node:internal/stream_base_commons:189:23)
+Message: The expression evaluated to a falsy value:
+
+  assert(!err)
+
+AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+
+  assert(!err)
+
+    at Client.<anonymous> (/cache/src/nodepg/packages/pg/test/test-helper.js:174:9)
+    at Client._connectionCallback (/cache/src/nodepg/packages/pg/test/test-helper.js:40:16)
+    at Client._handleErrorWhileConnecting (/cache/src/nodepg/packages/pg/lib/client.js:336:19)
+    at Client._handleErrorEvent (/cache/src/nodepg/packages/pg/lib/client.js:346:19)
+    at Connection.emit (node:events:519:28)
+    at Socket.<anonymous> (/cache/src/nodepg/packages/pg/lib/connection.js:76:23)
+    at Object.onceWrapper (node:events:634:26)
+    at Socket.emit (node:events:519:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+
+== test/integration/gh-issues/130-tests.js
+130-tests.jsMessage: ifError got unwanted exception: Command failed: psql -h 127.0.0.1 -p 53360 -U postgres -c "select pg_terminate_backend(9246)" template1
+/bin/sh: 1: psql: not found
+
+AssertionError [ERR_ASSERTION]: ifError got unwanted exception: Command failed: psql -h 127.0.0.1 -p 53360 -U postgres -c "select pg_terminate_backend(9246)" template1
+/bin/sh: 1: psql: not found
+
+    at /cache/src/nodepg/packages/pg/test/integration/gh-issues/130-tests.js:25:16
+    at /cache/src/nodepg/packages/pg/test/test-helper.js:48:16
+    at ChildProcess.exithandler (node:child_process:424:5)
+    at genericNodeError (node:internal/errors:983:15)
+    at wrappedFn (node:internal/errors:537:14)
+    at ChildProcess.exithandler (node:child_process:417:12)
+    at ChildProcess.emit (node:events:519:28)
+    at maybeClose (node:internal/child_process:1101:16)
+    at Socket.<anonymous> (node:internal/child_process:456:11)
+    at Socket.emit (node:events:519:28)
+    at Pipe.<anonymous> (node:net:347:12)
+
+== test/integration/gh-issues/2085-tests.js
+2085-tests.js
+  it should connect over ssl FAILED!
+
+Error: The server does not support SSL connections
+    at Socket.<anonymous> (/cache/src/nodepg/packages/pg/lib/connection.js:76:37)
+    at Object.onceWrapper (node:events:634:26)
+    at Socket.emit (node:events:519:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+    at Readable.push (node:internal/streams/readable:392:5)
+    at TCP.onStreamRead (node:internal/stream_base_commons:189:23)
+

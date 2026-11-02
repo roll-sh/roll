@@ -1,0 +1,42 @@
+{
+  "baseline": {
+    "connection_surviving_thread_switches_per_s": {
+      "median": 31.949630053556255,
+      "min": 31.94867672877587,
+      "max": 31.95228031419032
+    },
+    "time_weighted_cpu_us_per_s": 636.4717607352433,
+    "cpu_us": 31873,
+    "elapsed_s": 50.07763418,
+    "stable_threads": true,
+    "no_pressure_or_throttle_delta": true
+  },
+  "candidate": {
+    "connection_surviving_thread_switches_per_s": {
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "time_weighted_cpu_us_per_s": 69.51374792765154,
+    "cpu_us": 3481,
+    "elapsed_s": 50.076425222000005,
+    "stable_threads": true,
+    "no_pressure_or_throttle_delta": true
+  },
+  "postgres": {
+    "connection_surviving_thread_switches_per_s": null,
+    "time_weighted_cpu_us_per_s": 918.7131189990998,
+    "cpu_us": 46005,
+    "elapsed_s": 50.075479547,
+    "stable_threads": true,
+    "no_pressure_or_throttle_delta": true
+  },
+  "result": "Narrow idle hypothesis passes; broader source and active gates pending",
+  "limits": [
+    "Connection switches use surviving threads, not every scheduler wakeup",
+    "Short settled direct-server windows only",
+    "Engine block I/O controller absent; no zero-write claim",
+    "No suspended tenant, proxy, control-plane or operating-cost certification",
+    "PostgreSQL background CPU varies; no general superiority claim"
+  ]
+}

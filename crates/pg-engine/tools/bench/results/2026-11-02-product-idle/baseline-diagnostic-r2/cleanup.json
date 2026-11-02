@@ -1,0 +1,27 @@
+[
+  {
+    "unit": "t3-d4020b98-idle-baseline-20261102T063115Z",
+    "pid": 418252,
+    "stop_exit": 0,
+    "wrapper_exit": 0,
+    "pid_absent": true
+  },
+  {
+    "container": "b8a8a811b7cb89bbaf68c602c5b8b69745423aa9a17a94e1ad29874007089749",
+    "stop_exit": 0,
+    "state": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-11-02T06:31:17.260929125Z",
+      "FinishedAt": "2026-11-02T06:31:19.086441694Z"
+    },
+    "remove_exit": 0
+  }
+]

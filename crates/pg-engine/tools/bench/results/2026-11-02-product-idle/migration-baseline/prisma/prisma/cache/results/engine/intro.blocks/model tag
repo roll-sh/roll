@@ -1,0 +1,4 @@
+model tag {
+  name     String     @id
+  post_tag post_tag[]
+}

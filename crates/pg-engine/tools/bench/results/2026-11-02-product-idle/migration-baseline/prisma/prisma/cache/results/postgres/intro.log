@@ -1,0 +1,193 @@
+Loaded Prisma config from prisma.config.ts.
+
+prisma:warn Prisma failed to detect the libssl/openssl version to use, and may not work as expected. Defaulting to "openssl-1.1.x".
+Please manually install OpenSSL via `apt-get update -y && apt-get install -y openssl` and try installing Prisma again. If you're running Prisma on Docker, add this command to your Dockerfile, or switch to an image that already has OpenSSL installed.
+generator client {
+  provider        = "prisma-client"
+  output          = "../generated/prisma"
+  previewFeatures = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains an index with non-default null sort order and requires additional setup for migrations. Visit https://pris.ly/d/default-index-null-ordering for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model account {
+  id                           BigInt                   @id @default(autoincrement())
+  email                        String                   @unique @db.Citext
+  name                         String                   @default("anon") @db.VarChar(80)
+  mood                         mood                     @default(ok)
+  score                        Decimal?                 @db.Decimal(10, 2)
+  ratio                        Float?
+  small                        Int?                     @default(1) @db.SmallInt
+  flag                         Boolean                  @default(false)
+  born                         DateTime?                @db.Date
+  wake                         DateTime?                @db.Time(3)
+  created                      DateTime                 @default(now()) @db.Timestamptz(6)
+  updated                      DateTime?
+  tags                         String[]                 @default([])
+  nums                         Int[]
+  meta                         Json?                    @default("{\"a\": 1}")
+  raw                          Json?                    @db.Json
+  blob                         Bytes?
+  uid                          String                   @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ip                           String?                  @db.Inet
+  bits                         String?                  @db.Bit(4)
+  vbits                        String?                  @db.VarBit(8)
+  ch                           String?                  @db.Char(3)
+  x                            String?                  @db.Xml
+  money_col                    Decimal?                 @db.Money
+  iv                           Unsupported("interval")?
+  ticket                       Int                      @default(autoincrement())
+  gen                          Int?                     @default(dbgenerated("(small * 2)"))
+  ident                        Int                      @default(autoincrement())
+  post_post_author_idToaccount post[]                   @relation("post_author_idToaccount")
+  post_post_editor_idToaccount post[]                   @relation("post_editor_idToaccount")
+
+  @@unique([name, born], map: "account_name_born")
+  @@index([uid], map: "account_hash", type: Hash)
+  @@index([meta(ops: JsonbPathOps)], map: "account_meta_gin", type: Gin)
+  @@index([name(sort: Desc)])
+  @@index([born], map: "account_partial", where: raw("flag"))
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model child_inh {
+  a     Int?
+  b     String?
+  extra String?
+
+  @@ignore
+}
+
+/// This table contains exclusion constraints and requires additional setup for migrations. Visit https://pris.ly/d/exclusion-constraints for more info.
+model excl {
+  id Int                    @id
+  c  Unsupported("circle")?
+}
+
+/// This table has subclasses and requires additional setup for migrations. Visit https://pris.ly/d/table-inheritance for more info.
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model no_pk {
+  a Int?
+  b String?
+
+  @@ignore
+}
+
+model node {
+  id         Int     @id
+  parent_id  Int?
+  label      String?
+  node       node?   @relation("nodeTonode", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  other_node node[]  @relation("nodeTonode")
+}
+
+model pair {
+  a        Int
+  b        Int
+  v        String?
+  pair_ref pair_ref[]
+
+  @@id([a, b])
+}
+
+/// This model has constraints using non-default deferring rules and requires additional setup for migrations. Visit https://pris.ly/d/constraint-deferring for more info.
+model pair_ref {
+  id   Int   @id
+  pa   Int?
+  pb   Int?
+  pair pair? @relation(fields: [pa, pb], references: [a, b], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// This table is a partition table and requires additional setup for migrations. Visit https://pris.ly/d/partition-tables for more info.
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model parted {
+  id Int?
+  k  DateTime? @db.Date
+
+  @@ignore
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model post {
+  id                              Int        @id @default(autoincrement())
+  author_id                       BigInt
+  editor_id                       BigInt?
+  title                           String
+  body                            String?
+  published                       Boolean?   @default(false)
+  account_post_author_idToaccount account    @relation("post_author_idToaccount", fields: [author_id], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  account_post_editor_idToaccount account?   @relation("post_editor_idToaccount", fields: [editor_id], references: [id], onUpdate: NoAction)
+  post_tag                        post_tag[]
+
+  @@unique([author_id, title], map: "post_author_title")
+}
+
+model post_tag {
+  post_id  Int
+  tag_name String
+  post     post   @relation(fields: [post_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  tag      tag    @relation(fields: [tag_name], references: [name], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([post_id, tag_name])
+}
+
+model tag {
+  name     String     @id
+  post_tag post_tag[]
+}
+
+enum mood {
+  sad
+  ok
+  happy
+}
+
+
+// *** WARNING ***
+// 
+// The following models were ignored as they do not have a valid unique identifier or id. This is currently not supported by Prisma Client:
+//   - "child_inh"
+//   - "no_pk"
+//   - "parted"
+// 
+// These fields are not supported by Prisma Client, because Prisma currently does not support their types:
+//   - Model: "account", field: "iv", original data type: "interval"
+//   - Model: "excl", field: "c", original data type: "circle"
+// 
+// These tables are partition tables, which are not yet fully supported:
+//   - "parted"
+// 
+// These tables are inherited tables, which are not yet fully supported:
+//   - "no_pk"
+// 
+// These index columns are having a non-default null sort order, which is not yet fully supported. Read more: https://pris.ly/d/non-default-index-null-ordering
+//   - Index: "account_name_idx", column: "name"
+// 
+// These tables contain row level security, which is not yet fully supported. Read more: https://pris.ly/d/row-level-security
+//   - "post"
+// 
+// These constraints are not supported by Prisma Client, because Prisma currently does not fully support check constraints. Read more: https://pris.ly/d/check-constraints
+//   - Model: "account", constraint: "account_score_check"
+//   - Model: "post", constraint: "post_title_len"
+// 
+// These constraints are not supported by Prisma Client, because Prisma currently does not fully support exclusion constraints. Read more: https://pris.ly/d/exclusion-constraints
+//   - Model: "excl", constraint: "excl_c_excl"
+// 
+// These primary key, foreign key or unique constraints are using non-default deferring in the database, which is not yet fully supported. Read more: https://pris.ly/d/constraint-deferring
+//   - Model: "pair_ref", constraint: "pair_ref_pa_pb_fkey"
+// 
+// These objects have comments defined in the database, which is not yet fully supported. Read more: https://pris.ly/d/database-comments
+//   - Type: "model", name: "account"
+//   - Type: "field", name: "account.email"
+// 
+// These indexes are not supported by Prisma Client, because Prisma currently does not fully support expression indexes. Read more: https://pris.ly/d/expression-indexes
+//   - Model: "account", constraint: "account_lower_idx"
+// 
+

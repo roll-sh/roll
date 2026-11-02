@@ -1,0 +1,8 @@
+{
+  "at_utc": "2026-11-02T07:27:28.149887+00:00",
+  "source": "b6711d98393e94a1b1eba03d7a729ecda7f9889e",
+  "binary_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "baseline_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "binary_identical_to_verified_baseline": true,
+  "build_command": "cargo build --release -p pg-engine --bin roll-engine --example bench --example scan_bench"
+}

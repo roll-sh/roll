@@ -1,0 +1,9 @@
+{
+  "at_utc": "2026-11-02T06:57:47.083959+00:00",
+  "source": "735f44ac3cfd40317f93f758b33beda34e49278e",
+  "production_tree": "9eefb46b2675a290d84ff6538b516abe141d3c96",
+  "binary_sha256": "9c45c0677b86e9b415c34fbaf47e5358b829816248bbc2ecb0cf9fc750b14aa3",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "build_command": "cargo build --release -p pg-engine --bin roll-engine --example bench --example scan_bench",
+  "git_status": ""
+}

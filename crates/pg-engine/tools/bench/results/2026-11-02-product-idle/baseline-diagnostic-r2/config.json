@@ -1,0 +1,41 @@
+{
+  "out": "/home/meszmate/.cache/pg-engine-product-20261102/baseline-diagnostic-r2/observations",
+  "db": "bench_idle_20261102t063115z",
+  "rounds": 1,
+  "seconds": 5,
+  "sessions": 64,
+  "settle_seconds": 3,
+  "release_seconds": 8,
+  "phases": [
+    "disconnected",
+    "connected",
+    "released"
+  ],
+  "targets": [
+    {
+      "name": "baseline",
+      "port": 53360,
+      "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/t3-d4020b98-idle-baseline-20261102T063115Z.service",
+      "kind": "engine",
+      "leader_pid": 418252,
+      "leader_start_ticks": 48280199,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+    },
+    {
+      "name": "postgres",
+      "port": 53361,
+      "cgroup": "/sys/fs/cgroup/system.slice/docker-b8a8a811b7cb89bbaf68c602c5b8b69745423aa9a17a94e1ad29874007089749.scope",
+      "kind": "postgres",
+      "leader_pid": 418583,
+      "leader_start_ticks": 48280343,
+      "image": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5"
+    }
+  ],
+  "diagnostic_only": true,
+  "server_cpus": [
+    28,
+    29,
+    30,
+    31
+  ]
+}
