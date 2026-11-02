@@ -1,0 +1,54 @@
+   Compiling smallvec v1.16.3
+   Compiling tracing v0.1.44
+   Compiling parking_lot_core v0.9.12
+   Compiling serde_core v1.0.229
+   Compiling parking_lot v0.12.5
+   Compiling tokio v1.53.3
+   Compiling serde v1.0.229
+   Compiling indexmap v2.14.2
+   Compiling serde_json v1.0.154
+   Compiling tokio-util v0.7.20
+   Compiling h2 v0.4.20
+   Compiling icu_normalizer v2.3.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling tower v0.5.3
+   Compiling hyper v1.12.0
+   Compiling hyper-util v0.1.21
+   Compiling chrono v0.4.45
+   Compiling url v2.5.8
+   Compiling getrandom v0.4.3
+   Compiling tokio-rustls v0.26.6
+   Compiling petgraph v0.7.1
+   Compiling tempfile v3.27.0
+   Compiling clang-sys v1.9.1
+   Compiling hyper-rustls v0.27.10
+   Compiling tower-http v0.6.11
+   Compiling prost-build v0.13.5
+   Compiling bindgen v0.66.1
+   Compiling reqwest v0.13.5
+   Compiling psm v0.1.32
+   Compiling serde_urlencoded v0.7.1
+   Compiling libmimalloc-sys v0.1.49
+   Compiling crc-fast v1.10.0
+   Compiling pg_query v18.0.0 (https://github.com/pganalyze/pg_query.rs?rev=ad0c87ed59c84ec6b42c970bb42d7985b7b5878b#ad0c87ed)
+   Compiling quick-xml v0.41.0
+   Compiling stacker v0.1.25
+   Compiling axum-core v0.5.6
+   Compiling object_store v0.14.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling pg-proxy v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-proxy)
+   Compiling hashlink v0.12.2
+   Compiling serde_path_to_error v0.1.20
+   Compiling rusqlite v0.40.2
+   Compiling axum v0.8.9
+   Compiling tokio-postgres v0.7.18
+   Compiling pg-storage v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-storage)
+   Compiling mimalloc v0.1.52
+   Compiling chrono-tz v0.10.4
+   Compiling tower-http v0.7.1
+   Compiling pg-control v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-control)
+   Compiling rolld v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/rolld)
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+   Compiling roll-cli v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/roll-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 34s

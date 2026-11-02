@@ -70,8 +70,11 @@ Replace `answerFor` with a real model call; the UI only depends on the `{ steps,
 
 ## Postgres
 
-Serverless Postgres: real, unmodified Postgres (16, 17 or 18) as the compute engine, so every query,
-extension, driver and ORM works. The serverless layer around it is written in Rust.
+Serverless Postgres uses unmodified PostgreSQL 16, 17 or 18 as the compute engine.
+The Rust service layer handles routing and compute lifecycle. Its TLS, recovery,
+and distribution requirements are separate from SQL compatibility. The custom
+`pg-engine` is a separate implementation and is not used by `rolld`.
+See [running and verifying rolld](crates/rolld/README.md).
 
 ```sh
 cargo run -p rolld                      # API on :7070, Postgres proxy on :55432 (needs Docker)
@@ -125,7 +128,7 @@ against S3 (SeaweedFS). To point the e2e tests at S3 locally, set `ROLL_E2E_S3_B
 
 | feature | status |
 | --- | --- |
-| Full Postgres compatibility (16/17/18, extensions, `pg_stat_statements`) | ✅ |
+| PostgreSQL computes (16/17/18, extensions, `pg_stat_statements`) | Official engine; service compatibility remains bounded |
 | Scale to zero, wake on connect | ✅ |
 | Live autoscaling (CPU and memory, no restart) | ✅ |
 | Branching (instant CoW / online) | ✅ (full copies; not yet page-level shared storage) |
@@ -134,14 +137,15 @@ against S3 (SeaweedFS). To point the e2e tests at S3 locally, set `ROLL_E2E_S3_B
 | TLS + SNI routing (`ep-xxx.region.roll.sh`) | next |
 | Connection pooling (transaction mode) | next |
 | Bottomless storage: WAL safekeeper + base images on S3, idle branches evicted | ✅ (no pageserver yet: a cold branch restores whole) |
-| Point-in-time restore, branch from any timestamp or LSN, restore in place | ✅ |
+| Point-in-time restore, branch from any timestamp or LSN, restore in place | Implemented; four recovery checks fail on ai-server |
 | Read replicas (keep serving while the primary sleeps) | ✅ |
 | AWS deployment (EC2/ECS Graviton, EBS → S3) | next |
 | Schema-change workflows: deploy requests, safe migrations, revert | later (PlanetScale) |
 | Horizontal sharding (Vitess-style) | later |
 | Query insights | later (`pg_stat_statements` is already loaded) |
 
-"Faster and cheaper than regular Postgres" comes from several places: computes run only while used,
-they are sized to the load, they run on Graviton, the settings are tuned (`jit=off`, SSD costs, WAL
-compression), and pooling comes next. The query engine itself is stock Postgres; that is what keeps it
-100% compatible.
+Suspension and live sizing aim to reduce compute cost for intermittent workloads.
+They do not establish faster queries or lower total operating cost than PostgreSQL.
+Those claims require matched workload and whole-service measurements. The custom
+engine's current [compatibility and efficiency requirements](crates/pg-engine/ACCEPTANCE.md)
+remain open.

@@ -1,0 +1,38 @@
+{
+  "baseline": "b119df4d",
+  "production_runtime_changed": false,
+  "workspace_build_exit": 0,
+  "workspace_test": "interrupted, exit -15; not passed",
+  "workspace_clippy_exit": 0,
+  "workspace_clippy_warnings": "11 existing pg-engine warnings",
+  "service_crates_all_target_clippy_exit": 0,
+  "service_unit_passes": 24,
+  "actual_daemon_test": "passed",
+  "control_e2e": {
+    "passed": 12,
+    "failed": 4,
+    "exit": 101
+  },
+  "failures": [
+    "point_in_time_branches",
+    "restore_in_place_keeps_the_endpoint",
+    "retention_removes_old_history",
+    "survives_losing_the_local_disk"
+  ],
+  "failure_boundary": "wrong-token WAL-route preflight timed out before recovery; successful fetch and recovery unverified",
+  "replicas": "read_replicas passed without additional route preflight",
+  "source_sha256": {
+    "Cargo.lock": "15f5b6d765011edb943489916193fdf61526529d90b39ef64e7cedf46584a45d",
+    "README.md": "b7322bd4cc8e33c218371191202080154dba937e7a9177b86190c8d040150f93",
+    "crates/pg-control/tests/e2e.rs": "f5ebb56b211973b1e815f85d7b280ff057176905e17ad5f2f53dcdea92d1307c",
+    "crates/pg-engine/ACCEPTANCE.md": "629f433ade41e2424cf7ec057d812617a0fff7c490d3c6c9f92cf1c9730079cf",
+    "crates/rolld/Cargo.toml": "6b68eb459dfd238acfd3329f72cb83ea4906c0eed86a03ae32144800d2c37e32",
+    "crates/rolld/tests/service.rs": "4474b2ee4ee2ccaf54309e31f08fe5170e4b788e4dfeaaeb24949a5d65e1e956",
+    "scripts/test-postgres.sh": "fd25a6998629e91ec2a93886710d8b18d2e932e9159b9f57817530851cb72c3a",
+    "crates/rolld/README.md": "8c79d9eaa84805c90a63f5355935f05f9fa8135ec9ebc63271102c4736efa386"
+  },
+  "binary_sha256": {
+    "target/debug/rolld": "2a11afd07385e50a6426292ab6917061d4e20aaeada087b550b85b1a084fa16b"
+  },
+  "product_accepted": false
+}

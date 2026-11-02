@@ -39,6 +39,9 @@ if [[ $unit_only == 0 ]]; then
   for v in 16 17 18; do
     docker image inspect "postgres:$v-alpine" >/dev/null 2>&1 || docker pull -q "postgres:$v-alpine"
   done
+  if [[ ${#args[@]} == 0 ]]; then
+    ROLL_E2E=1 cargo test -p rolld --test service -- --ignored
+  fi
   ROLL_E2E=1 cargo test -p pg-control --test e2e -- --test-threads="${ROLL_E2E_THREADS:-4}" ${args[@]+"${args[@]}"}
 fi
 

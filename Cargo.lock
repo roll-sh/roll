@@ -2351,7 +2351,10 @@ dependencies = [
  "pg-control",
  "pg-proxy",
  "pg-storage",
+ "reqwest",
+ "serde_json",
  "tokio",
+ "tokio-postgres",
  "tracing",
  "tracing-subscriber",
 ]

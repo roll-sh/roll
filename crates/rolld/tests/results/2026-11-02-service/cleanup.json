@@ -1,0 +1,16 @@
+{
+  "at_utc": "2026-11-02T11:17:26.270656+00:00",
+  "pids_absent": [
+    1509370,
+    1509377,
+    1517829,
+    918432
+  ],
+  "owned_compute_containers_remaining": 0,
+  "service_ports_connect_ex": {
+    "37281": 111,
+    "34433": 111
+  },
+  "successful_service_state_removed": true,
+  "scope": "Current run and prior manually owned service home; other worktrees untouched"
+}

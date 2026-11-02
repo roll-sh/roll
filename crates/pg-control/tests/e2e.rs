@@ -159,6 +159,31 @@ impl Harness {
         .await;
     }
 
+    /// Exercise the restore path from the compute, including authentication and exact WAL bytes.
+    async fn check_wal_route(&self, db: &Db) {
+        let base = self.control.store.bases(&db.branch.id).unwrap().into_iter().next().expect("base image");
+        self.wait_for_flush(&db.branch.id, Lsn(base.end_lsn)).await;
+        let file = pg_storage::lsn::segment_file(base.timeline, Lsn(base.start_lsn).segno());
+        let expected = self.control.wal_file(&db.branch.id, &file).await.unwrap().expect("base WAL");
+        let name = container_name(&db.ep.id);
+        for (token, allowed) in [("invalid-token", false), (self.control.config.internal_token.as_str(), true)] {
+            let url = format!("{}/internal/wal/{}/{file}?token={token}", self.control.config.internal_url, db.branch.id);
+            let mut command = tokio::process::Command::new("docker");
+            command.args(["exec", &name, "wget", "-q", "-T", "5", "-O", "-", &url]).kill_on_drop(true);
+            let out = tokio::time::timeout(Duration::from_secs(10), command.output())
+                .await
+                .expect("compute WAL preflight exceeded 10s; check ROLL_E2E_BIND and the configured internal URL")
+                .expect("run compute WAL preflight");
+            let error = String::from_utf8_lossy(&out.stderr).replace(&self.control.config.internal_token, "[redacted]");
+            if allowed {
+                assert!(out.status.success(), "compute cannot fetch WAL from the configured internal URL: {error}; check container-to-daemon routing before recovery");
+                assert!(out.stdout.as_slice() == expected.as_ref(), "compute fetched different WAL bytes");
+            } else {
+                assert!(!out.status.success() && error.contains("403"), "compute WAL preflight expected HTTP 403 for a wrong token, got: {error}; check container-to-daemon routing before recovery");
+            }
+        }
+    }
+
     async fn get(&self, path: &str) -> (u16, Value) {
         let r = self.http.get(format!("{}{path}", self.api)).send().await.unwrap();
         (r.status().as_u16(), r.json().await.unwrap_or(Value::Null))
@@ -449,6 +474,7 @@ async fn branches_are_isolated_copies() {
 async fn point_in_time_branches() {
     let h = harness!();
     let db = h.project(None).await;
+    h.check_wal_route(&db).await;
     let c = h.connect(&db, &db.ep.id).await;
     seed(&c, 1000).await;
     let before_lsn = flush(&h, &c, &db.branch.id).await;
@@ -494,6 +520,7 @@ async fn point_in_time_branches() {
 async fn restore_in_place_keeps_the_endpoint() {
     let h = harness!();
     let db = h.project(None).await;
+    h.check_wal_route(&db).await;
     let c = h.connect(&db, &db.ep.id).await;
     seed(&c, 300).await;
     flush(&h, &c, &db.branch.id).await;
@@ -573,6 +600,7 @@ async fn eviction_and_rehydrate() {
 async fn survives_losing_the_local_disk() {
     let h = harness!();
     let db = h.project(None).await;
+    h.check_wal_route(&db).await;
     let c = h.connect(&db, &db.ep.id).await;
     // Written after the first base: only the WAL in object storage has it.
     seed(&c, 1500).await;
@@ -644,6 +672,7 @@ async fn read_replicas() {
 async fn retention_removes_old_history() {
     let h = harness!();
     let db = h.project(None).await;
+    h.check_wal_route(&db).await;
     let c = h.connect(&db, &db.ep.id).await;
     for round in 0..3 {
         seed(&c, 1000 * (round + 1)).await;

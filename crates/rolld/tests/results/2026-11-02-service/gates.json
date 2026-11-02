@@ -1,0 +1,47 @@
+[
+  {
+    "name": "build",
+    "command": [
+      "cargo",
+      "build"
+    ],
+    "started_utc": "2026-11-02T10:43:34.831236+00:00",
+    "finished_utc": "2026-11-02T10:46:09.306654+00:00",
+    "exit": 0,
+    "log": "build.txt"
+  },
+  {
+    "name": "test",
+    "command": [
+      "cargo",
+      "test"
+    ],
+    "started_utc": "2026-11-02T10:46:09.307255+00:00",
+    "finished_utc": "2026-11-02T11:06:53.611060+00:00",
+    "exit": -15,
+    "log": "test-interrupted.txt"
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy"
+    ],
+    "started_utc": "2026-11-02T11:06:53.611698+00:00",
+    "finished_utc": "2026-11-02T11:08:13.192215+00:00",
+    "exit": 0,
+    "log": "clippy.txt"
+  },
+  {
+    "name": "postgres",
+    "command": [
+      "pnpm",
+      "test:pg",
+      "--force"
+    ],
+    "started_utc": "2026-11-02T11:08:13.192886+00:00",
+    "finished_utc": "2026-11-02T11:15:18.699877+00:00",
+    "exit": 101,
+    "log": "postgres.txt"
+  }
+]

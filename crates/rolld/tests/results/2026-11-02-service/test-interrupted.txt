@@ -1,0 +1,467 @@
+   Compiling tempfile v3.27.0
+   Compiling bindgen v0.66.1
+   Compiling prost-build v0.13.5
+   Compiling tower-http v0.6.11
+   Compiling reqwest v0.13.5
+   Compiling pg_query v18.0.0 (https://github.com/pganalyze/pg_query.rs?rev=ad0c87ed59c84ec6b42c970bb42d7985b7b5878b#ad0c87ed)
+   Compiling nix v0.31.3
+   Compiling object_store v0.14.2
+   Compiling pg-storage v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-storage)
+   Compiling rusqlite v0.40.2
+   Compiling tower-http v0.7.1
+   Compiling pg-control v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-control)
+   Compiling rolld v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/rolld)
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+   Compiling roll-cli v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/roll-cli)
+   Compiling pg-snowball v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-snowball)
+   Compiling pg-icu v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-icu)
+   Compiling pg-proxy v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-proxy)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 14s
+     Running unittests src/lib.rs (target/debug/deps/pg_control-c5e4a4967d5c6dda)
+
+running 11 tests
+test history::tests::latest_takes_newest_on_current_timeline ... ok
+test compute::tests::pgdata_is_a_subdirectory_for_every_version ... ok
+test history::tests::no_history_file_means_no_ancestors ... ok
+test history::tests::point_needs_base_that_ends_before_it ... ok
+test history::tests::skips_bases_from_an_abandoned_future ... ok
+test reconciler::tests::steps_clamp_to_range ... ok
+test store::tests::bases_newest_first ... ok
+test store::tests::branch_and_endpoint_roundtrip ... ok
+test store::tests::lsn_index_resolves_times ... ok
+test store::tests::migrates_a_version_zero_database ... ok
+test store::tests::record_flush_tracks_position ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/e2e.rs (target/debug/deps/e2e-8613da861f2b2e97)
+
+running 16 tests
+test eviction_and_rehydrate ... ok
+test branches_are_isolated_copies ... ok
+test http_api ... ok
+test live_resize_keeps_sessions ... ok
+test many_concurrent_connections ... ok
+test point_in_time_branches ... ok
+test postgres_17 ... ok
+test postgres_16 ... ok
+test proxy_errors ... ok
+test proxy_speaks_postgres ... ok
+test read_replicas ... ok
+test restore_in_place_keeps_the_endpoint ... ok
+test retention_removes_old_history ... ok
+test scale_to_zero_and_wake_on_connect ... ok
+test survives_losing_the_local_disk ... ok
+test usage_and_metering ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/pg_engine-17d10659d653c07e)
+
+running 175 tests
+test auth::tests::rfc7677_vector ... ok
+test catalog::btsim::tests::null_keys_follow_tags_not_encoding_length ... ok
+test catalog::btsim::tests::packed_tree_keeps_large_null_keys_across_restart ... ok
+test catalog::btsim::tests::qsort_matches_sorted ... ok
+test catalog::btsim::tests::size_watch_follows_pages ... ok
+test catalog::ginsim::tests::posting_list_sizes ... ok
+test catalog::hashidx::sim_tests::grows_like_postgres ... ok
+test catalog::hashidx::tests::hashes_match_postgres ... ok
+test catalog::heapsim::lps::tests::line_pointers_read_back ... ok
+test catalog::heapsim::lps::tests::settling_waits_for_snapshots_and_preserves_tuple_fields ... ok
+test catalog::heapsim::tests::key_at_answers_every_version ... ok
+test catalog::heapsim::tests::size_watch_follows_forks ... ok
+test catalog::heapsim::tests::visible_count_follows_writes_and_vacuum ... ok
+test catalog::heapsim::tests::visible_count_pending_insert_clears_target_page ... ok
+test catalog::heapsim::tests::visible_count_restores_old_shapes_atomically ... ok
+test catalog::heapsim::tests::visible_count_survives_bulk_page_initialization ... ok
+test catalog::heapsim::tests::visible_count_survives_pending_restore_and_rollback ... ok
+test catalog::keymap::tests::matches_a_hash_map ... ok
+test catalog::pglz::tests::repeats_compress ... ok
+test catalog::pmap::tests::behaves_as_a_btreemap ... ok
+test catalog::pmap::tests::phash_behaves_as_a_hashmap ... ok
+test catalog::relindex::tests::words_match_mentions ... ok
+test catalog::relsize::tests::small_numeric_digits_match_text ... ok
+test exec::fasthash::tests::row_keys_spread ... ok
+test exec::fastsort::tests::encodings_order_as_compare_values ... ok
+test exec::fastsort::tests::ties_between_different_rows_are_left_to_postgres_order ... ok
+test exec::heaporder::tests::displaced_rows_are_outside_the_longest_run ... ok
+test exec::parscan::tests::first_key_pruning_preserves_two_key_tuplesort ... ok
+test exec::parscan::tests::row_sources_preserve_rows_across_slices ... ok
+test exec::pghash::tests::agg_buckets_follow_postgres ... ok
+test exec::pghash::tests::matches_postgres ... ok
+test exec::pgsort::tests::skipped_items_change_nothing ... ok
+test exec::pgsort::tests::ties_like_postgres ... ok
+test exec::pipe::tests::keys_of_both_sides_hash_alike ... ok
+test exec::pipe::tests::single_integer_keys ... ok
+test ext::cube::parse::tests::shapes ... ok
+test ext::fuzzystrmatch::daitch_mokotoff::tests::dm_vectors ... ok
+test ext::fuzzystrmatch::dmetaphone::tests::dmetaphone_vectors ... ok
+test ext::fuzzystrmatch::metaphone::tests::metaphone_vectors ... ok
+test ext::fuzzystrmatch::tests::levenshtein_vectors ... ok
+test ext::fuzzystrmatch::tests::soundex_vectors ... ok
+test ext::hstore::convert::tests::json_numbers ... ok
+test ext::hstore::tests::errors ... ok
+test ext::hstore::tests::layout_and_order ... ok
+test ext::hstore::tests::parse_and_print ... ok
+test ext::intarray::query::tests::round_trips ... ok
+test ext::isn::tables::tests::tables_parse ... ok
+test ext::isn::tests::isn_vectors ... ok
+test ext::ltree::tests::io ... ok
+test ext::pg_stat_statements::normalize::tests::constants_become_parameters ... ok
+test ext::pg_stat_statements::normalize::tests::grouping_ignores_constants_and_aliases ... ok
+test ext::pg_stat_statements::normalize::tests::list_types_follow_the_column ... ok
+test ext::pg_stat_statements::normalize::tests::lists_squash ... ok
+test ext::pgcrypto::cipher::tests::aes_fips197 ... ok
+test ext::pgcrypto::cipher::tests::reference_outputs ... ok
+test ext::pgcrypto::crypt::tests::gen_salt_shapes ... ok
+test ext::pgcrypto::crypt::tests::md5_crypt_vectors ... ok
+test ext::pgcrypto::crypt::tests::sha_crypt_vectors ... ok
+test ext::pgcrypto::crypt_bf::tests::known_hashes ... ok
+test ext::pgcrypto::crypt_des::tests::known_hashes ... ok
+test ext::pgcrypto::digest::tests::digests_match_reference ... ok
+test ext::pgcrypto::digest::tests::rfc4231_hmac_sha256 ... ok
+test ext::pgcrypto::pgp::tests::gnupg_messages ... ok
+test ext::pgcrypto::pgp::tests::round_trips ... ok
+test ext::seg::parse::tests::round_trips ... ok
+test ext::seg::restore::tests::digits ... ok
+test ext::tests::pgcrypto_paths ... ok
+test ext::tests::symbols_of_scripts ... ok
+test ext::uuid_ossp::tests::name_based_vectors ... ok
+test ext::vector::hnsw::mem::tests::aset_sizes ... ok
+test ext::vector::hnsw::mem::tests::tidhash_set ... ok
+test ext::vector::hnsw::pheap::tests::orders_like_a_heap ... ok
+test ext::vector::tests::binary_errors ... ok
+test ext::vector::tests::binary_round_trip ... ok
+test ext::vector::tests::four_row_kernels_match ... ok
+test ext::vector::tests::halves ... ok
+test ext::vector::tests::kernel_speed ... ignored
+test ext::vector::tests::keys_order_as_cmp ... ok
+test ext::vector::tests::reference_fixture ... ignored
+test ext::vector::tests::strtof_prefixes ... ok
+test ext::xslt::html::tests::detection_needs_an_html_root_first ... ok
+test ext::xslt::html::tests::latin1_as_string ... ok
+test ext::xslt::html::tests::reference_cases ... ok
+test ext::xslt::html::tests::xhtml_is_always_indented ... ok
+test ext::xslt::number::tests::format_number_matches_libxslt ... ok
+test ext::xslt::number::tests::helpers ... ok
+test ext::xslt::number::tests::xsl_number_matches_libxslt ... ok
+test hba::tests::hba_rules ... ok
+test lru::tests::bounded_by_bytes_and_keeps_used_entries ... ok
+test remote::outbound::tests::entries ... ok
+test repl::apply::tablesync::tests::concurrent_copy_completion_keeps_finished_table_ready ... ok
+test repl::cmd::tests::parses_the_commands_clients_send ... ok
+test repl::lsn::tests::positions_increase_and_persist_ahead ... ok
+test repl::pgoutput::tests::publication_names ... ok
+test server::tests::startup_options ... ok
+test server_files::tests::canonicalize ... ok
+test server_files::tests::prefix ... ok
+test session::ddl::tsearch::tests::support_functions_are_the_builtin_ones ... ok
+test session::settings::tests::local_and_rollback ... ok
+test session::settings::tests::units ... ok
+test sort::tests::sorts ... ok
+test sql::costs::hist_ineq_tests::cached_histogram_boundaries_keep_equality_and_cutoffs ... ok
+test sql::costs::hist_ineq_tests::larger_histograms_refresh_only_probed_ends_and_interpolate_them ... ok
+test sql::costs::hist_ineq_tests::missing_or_short_histograms_do_not_fetch_endpoints ... ok
+test sql::costs::hist_ineq_tests::two_entries_replace_both_endpoints_or_neither ... ok
+test sql::func::formatting::tests::numbers ... ok
+test sql::literals::tests::keys_leave_out_literals ... ok
+test sql::literals::tests::templates_parse_as_the_parser_does ... ok
+test sql::parse::tests::syntax_error_position ... ok
+test sql::scs::tests::continuation_lines ... ok
+test sql::scs::tests::parser_positions_are_chars ... ok
+test sql::scs::tests::quoted_body_positions ... ok
+test sql::scs::tests::rewrite_keeps_positions ... ok
+test sql::srvlit::tests::escapes_become_server_characters ... ok
+test storage::batch::tests::rows_by_reference_and_owned ... ok
+test storage::dead::tests::cut_keys_compare_conservatively ... ok
+test storage::dead::tests::hints_hold_until_a_commit_writes_into_them ... ok
+test storage::hot::tests::whole_and_covering_ranges ... ok
+test storage::keys::tests::index_values_decode ... ok
+test storage::keys::tests::order_matches_values ... ok
+test storage::row::tests::numerics_roundtrip ... ok
+test storage::row::tests::roundtrip ... ok
+test storage::sst::tests::block_index_find ... ok
+test storage::sst::tests::block_positions ... ok
+test storage::sst::tests::fast_mod_is_rem ... ok
+test storage::tests::async_commits_visible_then_durable ... ok
+test storage::tests::compaction_leaves_other_files ... ok
+test storage::tests::deleted_sst_runs_preserve_snapshots_and_merge_bounds ... ok
+test storage::tests::flush_compact_reopen ... ok
+test storage::tests::hot_ranges_match_the_store ... ok
+test storage::tests::ingested_commits_and_crash_recovery ... ok
+test storage::tests::mvcc_reads ... ok
+test storage::tests::range_deletions_and_crash_recovery ... ok
+test storage::tests::reverse_scan_matches_forward ... ok
+test storage::tests::scans_step_over_deleted_runs_once ... ok
+test storage::tests::snapshots_survive_compaction ... ok
+test txn::bulklocks::tests::keyset_matches_a_map ... ok
+test txn::bulklocks::tests::keyset_payloads ... ok
+test txn::procs::tests::slots_are_reused_in_order_and_keep_counting ... ok
+test txn::tests::sort_by_key_after_sorts_as_the_keys ... ok
+test types::binary::tests::numeric_roundtrip ... ok
+test types::cast::tests::common ... ok
+test types::cast::tests::contexts ... ok
+test types::cast::tests::contexts_match_pg_cast ... ok
+test types::cast::tests::values ... ok
+test types::datetime::tests::arithmetic ... ok
+test types::datetime::tests::dates ... ok
+test types::datetime::tests::intervals ... ok
+test types::datetime::tests::timestamps ... ok
+test types::decint::tests::arithmetic_matches_a_binary_big_integer ... ok
+test types::decint::tests::primitive_conversions ... ok
+test types::decint::tests::rounding_by_powers_of_ten ... ok
+test types::enum_serde_tests::enum_array_oid_round_trips_and_defaults ... ok
+test types::hash::tests::matches_postgres ... ok
+test types::json::tests::containment ... ok
+test types::json::tests::roundtrip ... ok
+test types::jsonpath::tests::canonical_text ... ok
+test types::jsonpath::tests::keyvalue_offsets ... ok
+test types::jsonpath::tests::syntax_errors ... ok
+test types::mbconv::server::tests::codes_keep_byte_order_and_round_trip ... ok
+test types::mbconv::server::tests::single_byte_text_is_its_bytes ... ok
+test types::numeric::tests::arithmetic_scales ... ok
+test types::numeric::tests::from_float ... ok
+test types::numeric::tests::ordering ... ok
+test types::numeric::tests::parse_and_print ... ok
+test types::numeric::tests::rounding ... ok
+test types::numeric::tests::small_fast_paths_match_bigint ... ok
+test types::numeric::tests::typmod ... ok
+test types::text::tests::arrays ... ok
+test types::text::tests::floats ... ok
+test types::text::tests::ints ... ok
+test types::text::tests::misc ... ok
+test types::text::tests::shortest_digits_match_reference ... ok
+test types::tz::tests::loads_zones ... ok
+test catalog::btsim::leaf::tests::items_read_back ... ok
+
+test result: ok. 173 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 20.14s
+
+     Running unittests src/bin/roll-engine.rs (target/debug/deps/roll_engine-7aa04100623b8582)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/app_concurrency.rs (target/debug/deps/app_concurrency-b1c47c4df2daf977)
+
+running 7 tests
+test against_reference ... ignored
+test advisory_lock_leader_election ... ok
+test exclusion_on_conflict_never_deadlocks ... ok
+test notifications_in_commit_order ... ok
+test job_queue_skip_locked ... ok
+test upsert_storm_loses_nothing ... ok
+test serializable_transfers_retried has been running for over 60 seconds
+test serializable_transfers_retried ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 109.19s
+
+     Running tests/autovacuum.rs (target/debug/deps/autovacuum-3a0f05a3cf07c37f)
+
+running 6 tests
+test an_analyze_that_waits_keeps_what_it_did_before ... ok
+test index_builds_and_truncates_that_wait_see_the_statistics ... ok
+test loaded_tables_are_vacuumed_and_analyzed ... ok
+test nothing_changed_nothing_runs ... ok
+test a_conflicting_lock_cancels_the_worker ... ok
+test storage_parameters_and_settings_are_respected ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.53s
+
+     Running tests/autovacuum_log.rs (target/debug/deps/autovacuum_log-e9ea9c362e7126ce)
+
+running 1 test
+test autovacuum_log_lines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.68s
+
+     Running tests/backend_status.rs (target/debug/deps/backend_status-0557cb61d47ca4e5)
+
+running 1 test
+test backend_snapshot_lifecycle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/big_tables.rs (target/debug/deps/big_tables-ca86d32e963214e3)
+
+running 14 tests
+test copy_past_the_model ... ok
+test analyze_samples_pages_of_big_tables ... ok
+test deferred_entry_deletes ... ok
+test copy_through_the_sink ... ok
+test estimate_kept_across_restart ... ok
+test estimate_rebuilt_with_higher_model_limit ... ok
+test heap_pages_kept_across_restart ... ok
+test index_build_measures_as_analyze ... ok
+test index_only_scans_from_entries ... ok
+test measured_sizes_from_stored_rows ... ok
+test deferred_model_matches ... ok
+test toast_locks_past_the_model ... ok
+test vacuum_skips_unchanged_tables ... ok
+test parallel_index_builds ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.10s
+
+     Running tests/catalog_format.rs (target/debug/deps/catalog_format-040bc7c1f79e2c81)
+
+running 3 tests
+test comments_upgrade_from_header_and_downgrade ... ok
+test records_leave_defaults_out_and_downgrade_whole ... ok
+test comment_writes_dont_grow_with_the_comments ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+
+     Running tests/catalog_storage.rs (target/debug/deps/catalog_storage-e92adb5050454a82)
+
+running 6 tests
+test catalog_without_shutdown_is_replayed ... ok
+test catalog_survives_restarts_and_rollbacks ... ok
+test ddl_writes_dont_grow_with_the_catalog ... ok
+test legacy_catalog_is_rewritten_as_records ... ok
+test merged_concurrent_ddl_is_stored ... ok
+test group_committed_ddl_keeps_every_change ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.95s
+
+     Running tests/compact_locks.rs (target/debug/deps/compact_locks-b90348a81d2991c5)
+
+running 4 tests
+test compact_key_share_and_savepoints ... ok
+test compact_locks_prepare_and_finish ... ok
+test compact_row_locks_conflict_as_any ... ok
+test compact_unique_keys_wait_for_their_writer ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.11s
+
+     Running tests/connection_log.rs (target/debug/deps/connection_log-6b5aca529d270589)
+
+running 1 test
+test connection_log ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.89s
+
+     Running tests/crash_async_commit.rs (target/debug/deps/crash_async_commit-a69be4bf5125222d)
+
+running 2 tests
+test crash_async_child ... ok
+test kill_during_async_commits ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
+
+     Running tests/crash_bulk.rs (target/debug/deps/crash_bulk-d13455ad42ec46e0)
+
+running 2 tests
+test crash_child ... ok
+test kill_during_big_copy_and_update ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.41s
+
+     Running tests/crash_ctids.rs (target/debug/deps/crash_ctids-eeb581e817ab0011)
+
+running 6 tests
+test crash_ctids_child ... ok
+test ctids_survive_a_restart ... ok
+test old_duplicate_ctids_repaired_once ... ok
+test prepared_ctids_survive_a_restart ... ok
+test vacuum_full_after_rolled_back_updates ... ok
+test ctids_survive_a_crash ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.00s
+
+     Running tests/crash_random.rs (target/debug/deps/crash_random-730b5959e761a2dc)
+
+running 2 tests
+test crash_random_child ... ok
+test random_crashes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.33s
+
+     Running tests/crash_unlogged.rs (target/debug/deps/crash_unlogged-d2e2e3f5bd31fb69)
+
+running 4 tests
+test crash_unlogged_child ... ok
+test crash_unlogged_prepared_child ... ok
+test prepared_writes_to_unlogged_tables_lost_in_a_crash ... ok
+test unlogged_relations_reset_after_a_crash ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running tests/ddl_scaling.rs (target/debug/deps/ddl_scaling-75aed49d9984d043)
+
+running 6 tests
+test ddl_copies_of_the_catalog_dont_grow_with_it ... ok
+test more_catalogs_after_ddl_are_spliced_or_kept ... ok
+test catalog_rescans_dont_grow_with_the_catalog ... ok
+test racing_create_and_drop_keep_catalog_counts ... ok
+test whole_catalogs_after_ddl_are_spliced ... ok
+test racing_ddl_commits_dont_grow_with_the_catalog ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.80s
+
+     Running tests/deep_input.rs (target/debug/deps/deep_input-6f05c5e96c6d3718)
+
+running 3 tests
+test deep_input_on_2mb_thread has been running for over 60 seconds
+test deep_input_on_test_thread has been running for over 60 seconds
+test deep_input_on_test_thread ... ok
+test deep_input_record ... ok
+test deep_input_on_2mb_thread ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 81.83s
+
+     Running tests/deparse_identity.rs (target/debug/deps/deparse_identity-7a5a9b84983bd914)
+
+running 4 tests
+test deep_chain_deparses_on_a_small_thread ... ok
+test deep_view_on_2mb_thread ... ok
+test regress_sql_deparses_as_before ... ok
+test goldens_and_corpus_deparse_as_before ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.05s
+
+     Running tests/difftest.rs (target/debug/deps/difftest-d89d73fcf2573f51)
+
+running 5 tests
+test probe ... ignored
+test reduce ... ignored
+test replay_case ... ignored
+test run ... ignored
+test smoke ... ignored
+
+test result: ok. 0 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/drop_storage.rs (target/debug/deps/drop_storage-fad741c958f696e8)
+
+running 2 tests
+test native_index_drops_keep_rebuilt_records ... ok
+test drops_delete_every_record ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.99s
+
+     Running tests/fdw_loopback.rs (target/debug/deps/fdw_loopback-400d85153aada8cb)
+
+running 6 tests
+test declared_cursor_uses_its_broken_connection ... ok
+test declare_opens_foreign_connections_before_fetch ... ok
+test direct_members ... ok
+test recheck_keeps_pushed_join_rows ... ok
+test whole_rows_and_locks_in_joins ... ok
+test recheck_keeps_foreign_rows ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+     Running tests/fdw_traffic.rs (target/debug/deps/fdw_traffic-005fd978de60b046)
+
+running 1 test
+test loopback_traffic ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/golden.rs (target/debug/deps/golden-d33b2fc895bd08a5)
+
+running 3 tests
+test golden has been running for over 60 seconds
+test golden_shuffled has been running for over 60 seconds
+test golden_shuffled ... ok
+test golden_wire has been running for over 60 seconds
