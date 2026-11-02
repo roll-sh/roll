@@ -1,0 +1,31 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+error[E0277]: `sql::costs::VarRef` doesn't implement `Debug`
+   --> crates/pg-engine/src/sql/explain/display.rs:80:17
+    |
+ 79 |                   "{:?}",
+    |                    ---- required by this formatting parameter
+ 80 | /                 n.cols
+ 81 | |                     .iter()
+ 82 | |                     .map(|c| (c.width, &c.var, c.distinct, c.groups))
+ 83 | |                     .collect::<Vec<_>>()
+    | |________________________________________^ `sql::costs::VarRef` cannot be formatted using `{:?}` because it doesn't implement `Debug`
+    |
+    = help: the trait `Debug` is not implemented for `sql::costs::VarRef`
+help: the trait `Debug` is conditionally implemented for `Vec<T, A>`
+   --> /rustc/58cf8f9c35b355199727627d07ae34a4e2846d67/library/alloc/src/vec/mod.rs:4376:8
+    |
+    = note: unsatisfied requirement introduced here: `(u32, &std::option::Option<sql::costs::VarRef>, std::option::Option<f64>, std::option::Option<f64>): Debug`
+    = note: required for `std::option::Option<sql::costs::VarRef>` to implement `Debug`
+    = note: 3 redundant requirements hidden
+    = note: required for `Vec<(u32, &Option<VarRef>, Option<f64>, Option<f64>)>` to implement `Debug`
+    = note: the full name for the type has been written to '/home/meszmate/worktrees/roll/t3-d4020b98/target/debug/deps/pg_engine-bc518221d668f0bf.long-type-5630154016671936831.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+help: consider annotating `sql::costs::VarRef` with `#[derive(Debug)]`
+   --> crates/pg-engine/src/sql/costs.rs:269:1
+    |
+269 + #[derive(Debug)]
+270 | pub struct VarRef {
+    |
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `pg-engine` (lib test) due to 1 previous error

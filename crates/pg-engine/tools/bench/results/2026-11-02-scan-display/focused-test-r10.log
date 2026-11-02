@@ -1,0 +1,10 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.52s
+     Running unittests src/lib.rs (target/debug/deps/pg_engine-bc518221d668f0bf)
+
+running 2 tests
+test sql::explain::display::tests::scalar_policy_requires_actual_builtins_and_rejects_semantic_wrappers ... ok
+test session::tests::scalar_scan_display_preserves_estimates_and_subplans ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 175 filtered out; finished in 1.46s
+

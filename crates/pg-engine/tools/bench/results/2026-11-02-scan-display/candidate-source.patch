@@ -1,0 +1,246 @@
+diff --git a/crates/pg-engine/src/session/mod.rs b/crates/pg-engine/src/session/mod.rs
+index 5664206b..793aac0a 100644
+--- a/crates/pg-engine/src/session/mod.rs
++++ b/crates/pg-engine/src/session/mod.rs
+@@ -18,6 +18,8 @@ pub(crate) mod litplan;
+ mod prepared;
+ pub mod sink;
+ mod utility;
++#[cfg(test)]
++mod tests;
+ pub(crate) use utility::{LIST_QUOTE, split_guc_list};
+ pub(crate) use utility::set_value;
+ pub(crate) use utility::routine_set;
+diff --git a/crates/pg-engine/src/sql/explain.rs b/crates/pg-engine/src/sql/explain.rs
+index 75d50d26..77eb2c6c 100644
+--- a/crates/pg-engine/src/sql/explain.rs
++++ b/crates/pg-engine/src/sql/explain.rs
+@@ -5,6 +5,9 @@
+ //! subqueries become numbered SubPlan / InitPlan sections. ANALYZE reads the per-node
+ //! counters the executor keeps in `ExecCtx::instr`.
+ 
++mod display;
++#[cfg(test)]
++pub(crate) use display::assert_same_estimate;
+ mod parallel;
+ mod overexplain;
+ pub use parallel::analyzed_plan;
+@@ -704,6 +707,8 @@ impl Built {
+ struct Builder<'c, 'a> {
+     ctx: &'c ExecCtx<'a>,
+     o: &'c Options,
++    /// Render scan conditions; estimates may omit only display-only scalar text.
++    scan_conditions: bool,
+     /// More than one relation in the statement: upper expressions qualify columns.
+     prefix: bool,
+     /// Scan node address → its (unique) reference name.
+@@ -12299,49 +12304,53 @@ impl Builder<'_, '_> {
+         n.rows = d.rows;
+         n.disabled = d.disabled;
+         if !d.index_conds.is_empty() {
+-            // (An index-only scan shows its conditions over the index's columns, an index
+-            // scan its original ones.)
+-            let only = matches!(s.access, Access::Index { only: true, .. });
+-            let plain: Vec<usize> = s
+-                .index
+-                .as_ref()
+-                .filter(|_| only)
+-                .map(|(ix, _)| {
+-                    ix.columns
+-                        .iter()
+-                        .filter_map(|c| match c.key {
+-                            crate::catalog::IndexKey::Column(i) => Some(i),
+-                            _ => None,
+-                        })
+-                        .collect()
+-                })
+-                .unwrap_or_default();
+-            let keys = self.ios_expr_keys(s);
+-            // (setrefs: an index scan shows indexqualorig, fixed for NUM_EXEC_QUAL and
+-            // initialized; an index-only scan its indexqual, fixed for one run and not
+-            // initialized under EXPLAIN alone, while its recheckqual, the same quals as
+-            // written, is fixed for NUM_EXEC_QUAL and initialized: its SubPlans are the ones
+-            // attached.)
+-            let saved = (self.num_exec, self.detach);
+-            if only && d.index_conds.iter().any(|e| has_subselect(&self.inline_sub_params(e).unwrap_or_else(|| e.clone()))) {
+-                self.num_exec = Some(n.rows * 2.0);
+-                for e in &d.index_conds {
+-                    let _ = self.show(e, names, Cx::Scan);
+-                }
+-            }
+-            self.num_exec = Some(if only { 1.0 } else { n.rows * 2.0 });
+-            self.detach = only && !self.o.analyze;
+-            let texts = d
+-                .index_conds
+-                .iter()
+-                .map(|e| {
+-                    let text = self.index_cond(e, names, &plain);
+-                    self.paren_index_exprs(text, e, &keys, names)
+-                })
+-                .collect();
+-            (self.num_exec, self.detach) = saved;
+-            n.details
+-                .push(Detail::Text("Index Cond", and_text(texts).unwrap_or_default()));
++            let text = if self.scan_conditions || !d.index_conds.iter().all(display::scalar_condition) {
++                // (An index-only scan shows its conditions over the index's columns, an index
++                // scan its original ones.)
++                let only = matches!(s.access, Access::Index { only: true, .. });
++                let plain: Vec<usize> = s
++                    .index
++                    .as_ref()
++                    .filter(|_| only)
++                    .map(|(ix, _)| {
++                        ix.columns
++                            .iter()
++                            .filter_map(|c| match c.key {
++                                crate::catalog::IndexKey::Column(i) => Some(i),
++                                _ => None,
++                            })
++                            .collect()
++                    })
++                    .unwrap_or_default();
++                let keys = self.ios_expr_keys(s);
++                // (setrefs: an index scan shows indexqualorig, fixed for NUM_EXEC_QUAL and
++                // initialized; an index-only scan its indexqual, fixed for one run and not
++                // initialized under EXPLAIN alone, while its recheckqual, the same quals as
++                // written, is fixed for NUM_EXEC_QUAL and initialized: its SubPlans are the ones
++                // attached.)
++                let saved = (self.num_exec, self.detach);
++                if only && d.index_conds.iter().any(|e| has_subselect(&self.inline_sub_params(e).unwrap_or_else(|| e.clone()))) {
++                    self.num_exec = Some(n.rows * 2.0);
++                    for e in &d.index_conds {
++                        let _ = self.show(e, names, Cx::Scan);
++                    }
++                }
++                self.num_exec = Some(if only { 1.0 } else { n.rows * 2.0 });
++                self.detach = only && !self.o.analyze;
++                let texts = d
++                    .index_conds
++                    .iter()
++                    .map(|e| {
++                        let text = self.index_cond(e, names, &plain);
++                        self.paren_index_exprs(text, e, &keys, names)
++                    })
++                    .collect();
++                (self.num_exec, self.detach) = saved;
++                and_text(texts).unwrap_or_default()
++            } else {
++                String::new()
++            };
++            n.details.push(Detail::Text("Index Cond", text));
+             n.details
+                 .push(Detail::Removed("Rows Removed by Index Recheck", Vec::new()));
+         }
+@@ -12377,30 +12386,36 @@ impl Builder<'_, '_> {
+         }
+         if !d.recheck.is_empty() {
+             // (bitmapqualorig: fixed for NUM_EXEC_QUAL, initialized.)
+-            let saved = self.num_exec.replace(n.rows * 2.0);
+-            let texts = d
+-                .recheck
+-                .iter()
+-                .map(|e| self.show(e, names, Cx::Scan))
+-                .collect();
+-            self.num_exec = saved;
+-            n.details.push(Detail::Text(
+-                "Recheck Cond",
+-                and_text(texts).unwrap_or_default(),
+-            ));
++            let text = if self.scan_conditions || !d.recheck.iter().all(display::scalar_condition) {
++                let saved = self.num_exec.replace(n.rows * 2.0);
++                let texts = d
++                    .recheck
++                    .iter()
++                    .map(|e| self.show(e, names, Cx::Scan))
++                    .collect();
++                self.num_exec = saved;
++                and_text(texts).unwrap_or_default()
++            } else {
++                String::new()
++            };
++            n.details.push(Detail::Text("Recheck Cond", text));
+             n.details
+                 .push(Detail::Removed("Rows Removed by Index Recheck", Vec::new()));
+         }
+         if !d.filter.is_empty() {
+-            let saved = self.num_exec.replace(n.rows * 2.0);
+-            let texts = d
+-                .filter
+-                .iter()
+-                .map(|e| self.show(e, names, Cx::Scan))
+-                .collect();
+-            self.num_exec = saved;
+-            n.details
+-                .push(Detail::Text("Filter", and_text(texts).unwrap_or_default()));
++            let text = if self.scan_conditions || !d.filter.iter().all(display::scalar_condition) {
++                let saved = self.num_exec.replace(n.rows * 2.0);
++                let texts = d
++                    .filter
++                    .iter()
++                    .map(|e| self.show(e, names, Cx::Scan))
++                    .collect();
++                self.num_exec = saved;
++                and_text(texts).unwrap_or_default()
++            } else {
++                String::new()
++            };
++            n.details.push(Detail::Text("Filter", text));
+             n.details.push(Detail::Removed(
+                 "Rows Removed by Filter",
+                 vec![Removed::Scan(scan_addr(s))],
+@@ -18951,6 +18966,7 @@ fn estimate_options() -> Options {
+ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Options) -> Builder<'c, 'a> {
+     let (refnames, _) = assign_refnames(plan);
+     Builder {
++        scan_conditions: false,
+         ctx,
+         o,
+         prefix: true,
+@@ -19560,6 +19576,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
+     let groups = |p: &Arc<Plan>| {
+         let (refnames, _) = assign_refnames(p);
+         let mut b = Builder {
++            scan_conditions: true,
+             ctx,
+             o: &o,
+             prefix: true,
+@@ -19660,6 +19677,7 @@ pub fn set_group_estimates(
+     };
+     let (refnames, _) = assign_refnames(input);
+     let mut b = Builder {
++        scan_conditions: true,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -19838,6 +19856,7 @@ pub fn agg_redundant_keys(
+     };
+     let (refnames, _) = assign_refnames(input);
+     let mut b = Builder {
++        scan_conditions: true,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -19927,6 +19946,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
+     };
+     let (refnames, _) = assign_refnames(plan);
+     let mut b = Builder {
++        scan_conditions: true,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -20044,6 +20064,7 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
+     };
+     let (refnames, _) = assign_refnames(plan);
+     let mut b = Builder {
++        scan_conditions: true,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -21214,6 +21235,7 @@ fn explained_tree(plan: &Arc<Plan>, hidden_rtes: usize, o: &Options, ctx: &ExecC
+     let excluded = excluded_rte(plan) as usize;
+     let names_before = refnames.clone();
+     let mut b = Builder {
++        scan_conditions: true,
+         ctx,
+         o,
+         // (An inheritance tree's parent is a range table entry besides its members.)

@@ -1,0 +1,21 @@
+{
+  "exit": 0,
+  "binary_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "binary_matches_verified_baseline": true,
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "-p",
+    "pg-engine",
+    "--bin",
+    "roll-engine",
+    "--example",
+    "bench",
+    "--example",
+    "scan_bench"
+  ],
+  "release_debug": "line-tables-only",
+  "log": "restored-build.log",
+  "baseline_validation": "Prior identical-source/identical-binary tests and full regression reused; no fresh suite in this rejected-candidate batch."
+}

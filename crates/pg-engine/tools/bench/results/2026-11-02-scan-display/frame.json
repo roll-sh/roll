@@ -1,0 +1,11 @@
+{
+  "at_utc": "2026-11-02T13:36:36.505046+00:00",
+  "baseline": "0cb59031ecbf0048cb44482cec591706d368bdf1",
+  "engine_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "baseline_engine_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "goal": "Improve checked active wire workload and CPU per operation while preserving PostgreSQL behavior, then compare to a tuned PostgreSQL reference. No universal superiority claim.",
+  "hypothesis": "Suppressing only safe scalar display conditions in estimate builders reduces repeated cloning/deparsing during root costing and Gather discovery. Existing cost formulas and semantic rendering paths remain.",
+  "acceptance": "Five alternating measured pairs plus warmup, identical frozen fixture/binary dependency selections, checked results and plans/counters, range8 throughput gain exceeds full observed spreads and CPU/op decreases, point1 no measured regression. Then source/regression gates and fresh tuned PostgreSQL comparison.",
+  "review_task": "scan-display-design-review-20261102-r1",
+  "rejected_premise": "Removing discarded extraction or recurring idle timers alone improves the active range limiter; both prior experiments failed. Recovered profiles instead show repeated full estimate tree construction for Gather discovery."
+}

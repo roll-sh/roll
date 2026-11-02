@@ -1,0 +1,50 @@
+[
+  {
+    "run": "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r4",
+    "rounds": 5,
+    "seconds": 60,
+    "invocations_including_warmups": 12,
+    "checked_operations_including_warmups": 6312210,
+    "errors": 0,
+    "range8": {
+      "baseline_tps": {
+        "median": 8684.0,
+        "min": 8470.0,
+        "max": 8788.0
+      },
+      "candidate_tps": {
+        "median": 9015.0,
+        "min": 8730.0,
+        "max": 9228.0
+      },
+      "throughput_gain_pct": 3.8116075541225243,
+      "gap": 331.0,
+      "largest_full_spread": 498.0,
+      "baseline_cpu_us_per_op": {
+        "median": 454.8027966015496,
+        "min": 449.49492074155467,
+        "max": 464.4358791227168
+      },
+      "candidate_cpu_us_per_op": {
+        "median": 437.30878370259467,
+        "min": 427.77571079219337,
+        "max": 450.5883880230009
+      },
+      "cpu_change_pct": -3.846505129184885
+    },
+    "point1": null,
+    "cores": {
+      "range_scan_100:8:baseline": {
+        "server_cores": 3.9475430192241086,
+        "client_cores": 0.8157523849847779
+      },
+      "range_scan_100:8:candidate": {
+        "server_cores": 3.9425218682204224,
+        "client_cores": 0.8420314373460756
+      }
+    },
+    "declared_performance_rule_passes": false,
+    "point_control_in_this_run": false,
+    "limit": "This audits saved measurements, not source correctness, host isolation, or product acceptance."
+  }
+]

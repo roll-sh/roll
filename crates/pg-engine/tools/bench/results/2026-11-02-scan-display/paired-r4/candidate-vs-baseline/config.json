@@ -1,0 +1,47 @@
+{
+  "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+  "out": "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r4/candidate-vs-baseline",
+  "db": "perf_oltp20261102_clean_200000",
+  "rows": 200000,
+  "rounds": 5,
+  "seconds": 60,
+  "client_cpus": "32-35",
+  "cases": {
+    "range_scan_100": [
+      8
+    ]
+  },
+  "psql_container": "1d08fbd9b28a5ef9e029a24ab29a88780130435947461f9f029e0effc1e4c85f",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "runtime_provenance": "runtime.json",
+  "targets": [
+    {
+      "name": "baseline",
+      "port": 53460,
+      "probe": {
+        "pid": 1628901
+      },
+      "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+      "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "actual_executable_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1"
+    },
+    {
+      "name": "candidate",
+      "port": 53461,
+      "probe": {
+        "pid": 1634134
+      },
+      "source": "0cb59031ecbf0048cb44482cec591706d368bdf1+scan-display-candidate",
+      "actual_executable": "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/candidate-bin/roll-engine",
+      "actual_executable_sha256": "e76ca598b57840c1ba9acbe0d74c268dd505781e3a0bd12bc3a37060a3af9cfe"
+    }
+  ],
+  "validation_version": "oltp-values-v1",
+  "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+  "ticks_per_second": 100,
+  "bench_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "source_commit": "0cb59031ecbf0048cb44482cec591706d368bdf1",
+  "load_at_start": "10.14 8.56 7.06 7/3145 1640413",
+  "client_cpu_measure": "RUSAGE_CHILDREN user + system per invocation",
+  "server_cpu_measure": "user + system process ticks or cgroup usage per complete client invocation, including setup"
+}

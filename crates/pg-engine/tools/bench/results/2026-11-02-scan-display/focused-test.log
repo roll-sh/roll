@@ -1,0 +1,23 @@
+heavy.sh: incremental 7G, 717G free, cleared target/debug/incremental
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 44s
+     Running unittests src/lib.rs (target/debug/deps/pg_engine-bc518221d668f0bf)
+
+running 1 test
+
+thread '<unnamed>' (381455) panicked at crates/pg-engine/src/session/tests.rs:66:96:
+called `Result::unwrap()` on an `Err` value: Error { code: "42P02", message: "there is no parameter $1", detail: None, hint: None, position: Some(43), severity: Error, context: None, objects: None, stacked: false }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'session::tests::scalar_scan_display_preserves_estimates_and_subplans' (381454) panicked at crates/pg-engine/src/session/tests.rs:82:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test session::tests::scalar_scan_display_preserves_estimates_and_subplans ... FAILED
+
+failures:
+
+failures:
+    session::tests::scalar_scan_display_preserves_estimates_and_subplans
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 176 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p pg-engine --lib`

@@ -1,0 +1,24 @@
+{
+  "locked_at_utc": "2026-11-02T15:05:08.561139+00:00",
+  "design": "P1:12 alternating pairs +1 discarded warmup pair;30s each;range8+point1;no noise-based retries",
+  "failure_action": "Revert candidate; only one zero-sample harness relaunch permitted",
+  "source_sha256": {
+    "crates/pg-engine/src/sql/explain.rs": "e381d9cce2d630925730abe612a38c26e005480c817cf307fc8bff2fbd44084e",
+    "crates/pg-engine/src/sql/explain/display.rs": "51bd2ad951cde2c66c7d85e5394772efedfeae3bb8dbef474b4bd57c2268a1cd",
+    "crates/pg-engine/src/session/mod.rs": "c0fbd00a9d91da54e0b8483064fdf87508b012984d265f152edabc7e62ca80a2",
+    "crates/pg-engine/src/session/tests.rs": "7f2cf3a79be48e8620e18a9374a8009e34277e98e46ff67f54082be63c960bcf"
+  },
+  "tool_sha256": {
+    "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/measure.py": "72d065f2c00ba98130ed3cde3ea1e1fe935d027940e379c866dc6c756a8857e8",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/p1_statistics.py": "7adb51e1cf1f3556c884db99d655b179c216a35455dae5059ca9434f7e7dee85",
+    "crates/pg-engine/tools/bench/results/2026-11-02-scan-display/HYPOTHESIS-P1.md": "dc9f4c9b9208719e615b0feee6d69875ad3b35bcf8f2b29983a1cc7cf10805e0"
+  },
+  "binary_manifest": "candidate-final-bin/manifest.json (freeze completed release build before launching)",
+  "gate": {
+    "signed_rank_p_max": 0.01,
+    "hodges_lehmann_gain_min": 0.02,
+    "median_range_cpu_ratio_below": 1,
+    "median_point_throughput_ratio_min": 0.98
+  },
+  "correctness_commitment": "Full build/test/Clippy,Postgres script and matched regression/golden checks required before accepting source; known unrelated recovery failures remain open."
+}

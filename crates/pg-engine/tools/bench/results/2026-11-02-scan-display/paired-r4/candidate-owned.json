@@ -1,0 +1,21 @@
+{
+  "pid": 1634134,
+  "argv": [
+    "taskset",
+    "-c",
+    "28-31",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/candidate-bin/roll-engine",
+    "--data",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r4/candidate-data",
+    "--listen",
+    "127.0.0.1:53461",
+    "--password",
+    "pw",
+    "--cache-mb",
+    "2048",
+    "-c",
+    "maintenance_work_mem=256MB",
+    "-c",
+    "max_connections=100"
+  ]
+}

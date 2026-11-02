@@ -1,0 +1,82 @@
+[
+  {
+    "run": "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r1",
+    "rounds": 5,
+    "seconds": 10,
+    "invocations_including_warmups": 24,
+    "checked_operations_including_warmups": 1692664,
+    "errors": 0,
+    "range8": {
+      "baseline_tps": {
+        "median": 7931.0,
+        "min": 7788.0,
+        "max": 8072.0
+      },
+      "candidate_tps": {
+        "median": 8327.0,
+        "min": 7977.0,
+        "max": 8898.0
+      },
+      "throughput_gain_pct": 4.993065187239944,
+      "gap": 396.0,
+      "largest_full_spread": 921.0,
+      "baseline_cpu_us_per_op": {
+        "median": 494.10578074765175,
+        "min": 484.4423524748549,
+        "max": 503.2721673296552
+      },
+      "candidate_cpu_us_per_op": {
+        "median": 463.1141635848421,
+        "min": 444.10482312221853,
+        "max": 489.6787697243911
+      },
+      "cpu_change_pct": -6.272263626609453
+    },
+    "point1": {
+      "baseline_tps": {
+        "median": 4936.0,
+        "min": 4823.0,
+        "max": 6703.0
+      },
+      "candidate_tps": {
+        "median": 5783.0,
+        "min": 5019.0,
+        "max": 6969.0
+      },
+      "throughput_gain_pct": 17.159643435980552,
+      "gap": 847.0,
+      "largest_full_spread": 1950.0,
+      "baseline_cpu_us_per_op": {
+        "median": 160.04537995583513,
+        "min": 112.62269160774503,
+        "max": 164.81466124885955
+      },
+      "candidate_cpu_us_per_op": {
+        "median": 127.03954646017738,
+        "min": 107.32477222182392,
+        "max": 157.19949791795315
+      },
+      "cpu_change_pct": -20.622796799736285
+    },
+    "cores": {
+      "point_select:1:baseline": {
+        "server_cores": 0.7899621718714356,
+        "client_cores": 0.210624814020156
+      },
+      "range_scan_100:8:baseline": {
+        "server_cores": 3.918531288014809,
+        "client_cores": 0.7587024121174456
+      },
+      "point_select:1:candidate": {
+        "server_cores": 0.7479648696608001,
+        "client_cores": 0.23598085065748944
+      },
+      "range_scan_100:8:candidate": {
+        "server_cores": 3.912489955680658,
+        "client_cores": 0.8332928102988459
+      }
+    },
+    "declared_performance_rule_passes": false,
+    "limit": "This audits saved measurements, not source correctness, host isolation, or product acceptance."
+  }
+]

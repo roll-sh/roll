@@ -1,0 +1,23 @@
+{
+  "at_utc": "2026-11-02T14:25:02.624470+00:00",
+  "ps": [
+    "    PID PSR %CPU COMMAND         COMMAND",
+    "1341016  26  183 bun             bun test ./src/features/website-builder/website-builder.router.test.ts",
+    "1220479  28  122 roll-engine     /home/meszmate/.cache/pg-engine-perf-20261102/scan-display/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r1/candidate-data --listen 127.0.0.1:53441 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+    "1219180  29  101 roll-engine     /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r1/baseline-data --listen 127.0.0.1:53440 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100",
+    "1341075  32 85.7 bench           /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench --target wire --label baseline --port 53440 --db perf_oltp20261102_clean_200000 --mem-pid 1219180 oltp --rows 200000 --only range_scan_100 --clients 8 --secs 10",
+    "1341747  22 80.0 python3         python3 -",
+    "1339314  35 46.1 bun             bun test ./src/features/website-builder/website-builder.domain-connection.server.test.ts",
+    "1340381  26 35.6 bun             bun test ./src/features/website-builder/website-builder.publishing.server.test.ts",
+    "1341613  18 33.3 python3         /usr/bin/python3 /home/work/worktrees/AI-Acquisition-Platform/t3-136367c4/scripts/agents/interrogate prepare --repo /tmp/tmpgv06s990/repo --base a92e5903f6486b0a894df5e73fe067a8d5f7dc4e --no-fetch --correctness 3 --ticket-file /tmp/tmpgv06s990/ticket.md --body-file /tmp/tmpgv06s990/body.md",
+    "1341671  22 25.0 bash            /bin/bash -c python3 - <<'PY' import subprocess,json,datetime from pathlib import Path p=Path('/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r1/shared-host-observation.json') p.write_text(json.dumps({'at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'ps':subprocess.check_output(['ps','-eo','pid,psr,pcpu,comm,args','--sort=-pcpu'],text=True).splitlines()[:16],'load':Path('/proc/loadavg').read_text(),'note':'Unrelated bun test processes appeared during measurement. They are not owned and were not stopped. Interleaving alone may not remove drift; confirmation required.'},indent=2)+'\\n') PY",
+    "   1534  16  6.8 dockerd         /usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock",
+    "   1919  14  6.8 node-MainThread /home/meszmate/.t3/runtime/versions/0.1.2/t3 serve",
+    "   1459  26  5.7 containerd      /usr/bin/containerd",
+    "1336990   9  4.1 python3         python3 scripts/agents/tests/interrogate_families.test.py",
+    "   1082  21  3.7 tailscaled      /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=41641",
+    "1216771  32  3.5 python3         python3 /home/meszmate/.cache/pg-engine-perf-20261102/scan-display/measure.py --out /home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r1 --seconds 10 --rounds 5"
+  ],
+  "load": "12.65 8.96 6.08 12/3141 1341870\n",
+  "note": "Unrelated bun test processes appeared during measurement. They are not owned and were not stopped. Interleaving alone may not remove drift; confirmation required."
+}

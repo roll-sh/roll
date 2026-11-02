@@ -1,0 +1,15 @@
+{
+  "restored_to": "0cb59031ecbf0048cb44482cec591706d368bdf1",
+  "baseline_source": "5b32046d",
+  "runtime_source_diff_to_baseline": "",
+  "restored_tracked": [
+    "crates/pg-engine/src/session/mod.rs",
+    "crates/pg-engine/src/sql/explain.rs"
+  ],
+  "removed_owned_untracked": [
+    "crates/pg-engine/src/session/tests.rs",
+    "crates/pg-engine/src/sql/explain/display.rs"
+  ],
+  "source_archive": "source-p1",
+  "reason": "Locked P1 rule failed; p=0.101806640625 > 0.01. No noise-based rerun."
+}

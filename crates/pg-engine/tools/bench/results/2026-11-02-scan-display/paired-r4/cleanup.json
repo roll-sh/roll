@@ -1,0 +1,19 @@
+[
+  {
+    "name": "baseline",
+    "pid": 1628901,
+    "exit": 0,
+    "stopped": true
+  },
+  {
+    "name": "candidate",
+    "pid": 1634134,
+    "exit": 0,
+    "stopped": true
+  },
+  {
+    "helper_id": "1d08fbd9b28a5ef9e029a24ab29a88780130435947461f9f029e0effc1e4c85f",
+    "remove_exit": 0,
+    "stderr": ""
+  }
+]

@@ -1,0 +1,23 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.37s
+     Running unittests src/lib.rs (target/debug/deps/pg_engine-bc518221d668f0bf)
+
+running 2 tests
+test sql::explain::display::tests::scalar_policy_requires_actual_builtins_and_rejects_semantic_wrappers ... ok
+
+thread '<unnamed>' (1965552) panicked at crates/pg-engine/src/session/tests.rs:140:21:
+missing Parallel Index Scan: ["Index Scan using cost_parallel_pkey on cost_parallel", "Index Scan using cost_parallel_pkey on cost_parallel", "Index Scan using cost_parallel_pkey on cost_parallel"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'session::tests::scalar_scan_display_preserves_estimates_and_subplans' (1965550) panicked at crates/pg-engine/src/session/tests.rs:152:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test session::tests::scalar_scan_display_preserves_estimates_and_subplans ... FAILED
+
+failures:
+
+failures:
+    session::tests::scalar_scan_display_preserves_estimates_and_subplans
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 175 filtered out; finished in 1.22s
+
+error: test failed, to rerun pass `-p pg-engine --lib`

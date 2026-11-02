@@ -1,0 +1,420 @@
+{
+  "original_trials": [
+    {
+      "run": "paired-r1",
+      "rounds": 5,
+      "seconds": 10,
+      "invocations_including_warmups": 24,
+      "checked_operations_including_warmups": 1692664,
+      "errors": 0,
+      "range8": {
+        "baseline_tps": {
+          "median": 7931.0,
+          "min": 7788.0,
+          "max": 8072.0
+        },
+        "candidate_tps": {
+          "median": 8327.0,
+          "min": 7977.0,
+          "max": 8898.0
+        },
+        "throughput_gain_pct": 4.993065187239944,
+        "gap": 396.0,
+        "largest_full_spread": 921.0,
+        "baseline_cpu_us_per_op": {
+          "median": 494.10578074765175,
+          "min": 484.4423524748549,
+          "max": 503.2721673296552
+        },
+        "candidate_cpu_us_per_op": {
+          "median": 463.1141635848421,
+          "min": 444.10482312221853,
+          "max": 489.6787697243911
+        },
+        "cpu_change_pct": -6.272263626609453
+      },
+      "point1": {
+        "baseline_tps": {
+          "median": 4936.0,
+          "min": 4823.0,
+          "max": 6703.0
+        },
+        "candidate_tps": {
+          "median": 5783.0,
+          "min": 5019.0,
+          "max": 6969.0
+        },
+        "throughput_gain_pct": 17.159643435980552,
+        "gap": 847.0,
+        "largest_full_spread": 1950.0,
+        "baseline_cpu_us_per_op": {
+          "median": 160.04537995583513,
+          "min": 112.62269160774503,
+          "max": 164.81466124885955
+        },
+        "candidate_cpu_us_per_op": {
+          "median": 127.03954646017738,
+          "min": 107.32477222182392,
+          "max": 157.19949791795315
+        },
+        "cpu_change_pct": -20.622796799736285
+      },
+      "cores": {
+        "point_select:1:baseline": {
+          "server_cores": 0.7899621718714356,
+          "client_cores": 0.210624814020156
+        },
+        "range_scan_100:8:baseline": {
+          "server_cores": 3.918531288014809,
+          "client_cores": 0.7587024121174456
+        },
+        "point_select:1:candidate": {
+          "server_cores": 0.7479648696608001,
+          "client_cores": 0.23598085065748944
+        },
+        "range_scan_100:8:candidate": {
+          "server_cores": 3.912489955680658,
+          "client_cores": 0.8332928102988459
+        }
+      },
+      "declared_performance_rule_passes": false,
+      "point_control_in_this_run": true,
+      "limit": "This audits saved measurements, not source correctness, host isolation, or product acceptance."
+    },
+    {
+      "run": "paired-r3",
+      "rounds": 5,
+      "seconds": 20,
+      "invocations_including_warmups": 24,
+      "checked_operations_including_warmups": 3711264,
+      "errors": 0,
+      "range8": {
+        "baseline_tps": {
+          "median": 8358.0,
+          "min": 7899.0,
+          "max": 8870.0
+        },
+        "candidate_tps": {
+          "median": 9142.0,
+          "min": 8124.0,
+          "max": 9187.0
+        },
+        "throughput_gain_pct": 9.380234505862646,
+        "gap": 784.0,
+        "largest_full_spread": 1063.0,
+        "baseline_cpu_us_per_op": {
+          "median": 471.2511664632835,
+          "min": 445.7934548570013,
+          "max": 491.4328394108376
+        },
+        "candidate_cpu_us_per_op": {
+          "median": 431.8293683347005,
+          "min": 430.14965986394543,
+          "max": 480.36923076923114
+        },
+        "cpu_change_pct": -8.365347596790384
+      },
+      "point1": {
+        "baseline_tps": {
+          "median": 6637.0,
+          "min": 6165.0,
+          "max": 6772.0
+        },
+        "candidate_tps": {
+          "median": 6875.0,
+          "min": 6478.0,
+          "max": 7211.0
+        },
+        "throughput_gain_pct": 3.58595751092361,
+        "gap": 238.0,
+        "largest_full_spread": 733.0,
+        "baseline_cpu_us_per_op": {
+          "median": 115.40141916627742,
+          "min": 110.82479935616766,
+          "max": 125.05778448212928
+        },
+        "candidate_cpu_us_per_op": {
+          "median": 109.25341048803274,
+          "min": 102.47237128555008,
+          "max": 114.38803942605294
+        },
+        "cpu_change_pct": -5.327498329449698
+      },
+      "cores": {
+        "point_select:1:baseline": {
+          "server_cores": 0.7604622429735919,
+          "client_cores": 0.25245237748179694
+        },
+        "range_scan_100:8:baseline": {
+          "server_cores": 3.9387207864466824,
+          "client_cores": 0.7866732332065023
+        },
+        "point_select:1:candidate": {
+          "server_cores": 0.7409742944161675,
+          "client_cores": 0.27036977314195293
+        },
+        "range_scan_100:8:candidate": {
+          "server_cores": 3.946180372214937,
+          "client_cores": 0.85755659896214
+        }
+      },
+      "declared_performance_rule_passes": false,
+      "point_control_in_this_run": true,
+      "limit": "This audits saved measurements, not source correctness, host isolation, or product acceptance."
+    },
+    {
+      "run": "paired-r4",
+      "rounds": 5,
+      "seconds": 60,
+      "invocations_including_warmups": 12,
+      "checked_operations_including_warmups": 6312210,
+      "errors": 0,
+      "range8": {
+        "baseline_tps": {
+          "median": 8684.0,
+          "min": 8470.0,
+          "max": 8788.0
+        },
+        "candidate_tps": {
+          "median": 9015.0,
+          "min": 8730.0,
+          "max": 9228.0
+        },
+        "throughput_gain_pct": 3.8116075541225243,
+        "gap": 331.0,
+        "largest_full_spread": 498.0,
+        "baseline_cpu_us_per_op": {
+          "median": 454.8027966015496,
+          "min": 449.49492074155467,
+          "max": 464.4358791227168
+        },
+        "candidate_cpu_us_per_op": {
+          "median": 437.30878370259467,
+          "min": 427.77571079219337,
+          "max": 450.5883880230009
+        },
+        "cpu_change_pct": -3.846505129184885
+      },
+      "point1": null,
+      "cores": {
+        "range_scan_100:8:baseline": {
+          "server_cores": 3.9475430192241086,
+          "client_cores": 0.8157523849847779
+        },
+        "range_scan_100:8:candidate": {
+          "server_cores": 3.9425218682204224,
+          "client_cores": 0.8420314373460756
+        }
+      },
+      "declared_performance_rule_passes": false,
+      "point_control_in_this_run": false,
+      "limit": "This audits saved measurements, not source correctness, host isolation, or product acceptance."
+    }
+  ],
+  "p1_accounting": {
+    "run": "paired-p1",
+    "rounds": 12,
+    "seconds": 30,
+    "invocations_including_warmups": 52,
+    "checked_operations_including_warmups": 10878578,
+    "errors": 0,
+    "range8": {
+      "baseline_tps": {
+        "median": 7916.5,
+        "min": 7022.0,
+        "max": 8755.0
+      },
+      "candidate_tps": {
+        "median": 8039.5,
+        "min": 7117.0,
+        "max": 9089.0
+      },
+      "throughput_gain_pct": 1.553716920356218,
+      "gap": 123.0,
+      "largest_full_spread": 1972.0,
+      "baseline_cpu_us_per_op": {
+        "median": 493.93549462131,
+        "min": 451.3110254057572,
+        "max": 551.283511809828
+      },
+      "candidate_cpu_us_per_op": {
+        "median": 488.12440013740576,
+        "min": 434.39514738996195,
+        "max": 541.4215594439653
+      },
+      "cpu_change_pct": -1.1764885389254132
+    },
+    "point1": {
+      "baseline_tps": {
+        "median": 5888.5,
+        "min": 4045.0,
+        "max": 6822.0
+      },
+      "candidate_tps": {
+        "median": 6243.0,
+        "min": 5000.0,
+        "max": 7172.0
+      },
+      "throughput_gain_pct": 6.020208881718604,
+      "gap": 354.5,
+      "largest_full_spread": 2777.0,
+      "baseline_cpu_us_per_op": {
+        "median": 129.8898424176249,
+        "min": 110.27184428071654,
+        "max": 191.56614593632588
+      },
+      "candidate_cpu_us_per_op": {
+        "median": 120.13246672090526,
+        "min": 103.36397691042102,
+        "max": 157.19161644712233
+      },
+      "cpu_change_pct": -7.512039059488185
+    },
+    "cores": {
+      "point_select:1:baseline": {
+        "server_cores": 0.7636493210665622,
+        "client_cores": 0.23608710399652433
+      },
+      "range_scan_100:8:baseline": {
+        "server_cores": 3.9098663520547614,
+        "client_cores": 0.7557539199109768
+      },
+      "point_select:1:candidate": {
+        "server_cores": 0.7533103027999144,
+        "client_cores": 0.24186499471123554
+      },
+      "range_scan_100:8:candidate": {
+        "server_cores": 3.924478967441255,
+        "client_cores": 0.7793212025702433
+      }
+    },
+    "declared_performance_rule_passes": false,
+    "point_control_in_this_run": true,
+    "limit": "This audits saved measurements, not source correctness, host isolation, or product acceptance."
+  },
+  "p1_statistics": {
+    "range_log_ratios": [
+      0.014641549992948187,
+      0.10422698139351326,
+      -0.06923009127219389,
+      -0.1347951714910329,
+      0.12363529414529335,
+      0.061296803638575065,
+      0.04932222057996151,
+      0.1412097563674445,
+      0.1305024902076409,
+      -0.04274207191322236,
+      0.007729507082267391,
+      0.02470654181597649
+    ],
+    "range_ratios": [
+      1.0147492625368733,
+      1.1098523421588595,
+      0.933111954459203,
+      0.8738948919449901,
+      1.131603093459169,
+      1.0632144332736537,
+      1.05055880787653,
+      1.1516661919681002,
+      1.1394007772345494,
+      0.9581584941853495,
+      1.0077594568380213,
+      1.0250142775556825
+    ],
+    "one_sided_exact_signed_rank_p": 0.101806640625,
+    "hodges_lehmann_gain_pct": 3.717648921437871,
+    "median_range_cpu_ratio": 0.9623195898825936,
+    "point_ratios": [
+      0.8671928620452986,
+      0.8735289736332489,
+      1.230597014925373,
+      0.93098613491198,
+      1.220053238686779,
+      1.1211968398050092,
+      1.2978986402966626,
+      1.4708361055666446,
+      1.1401191818328233,
+      1.012965964343598,
+      0.9542656112576957,
+      1.0598492685089405
+    ],
+    "median_point_throughput_ratio": 1.0905230541569748,
+    "p1_statistical_rule_passes": false,
+    "limit": "The full accounting/identity audit and source/regression gates remain separate requirements."
+  },
+  "source_gate_results": [],
+  "decision": {
+    "p1_performance_rule_passes": false,
+    "candidate_accepted": false,
+    "product_accepted": false,
+    "action": "reverted",
+    "reason": "Locked final paired test gives p=0.101806640625, exceeding the required 0.01. No noise-based retry.",
+    "candidate_full_gates": "Skipped after performance rejection; prepared full regression was never executed.",
+    "restored_validation": "Runtime source matches previously verified baseline; matching release rebuild is recorded separately. Prior baseline tests and regression reused.",
+    "postgresql_comparison": "No fresh comparison in this rejected-candidate batch.",
+    "product_limits": "No full compatibility, service performance, recovery, cost or distribution acceptance. rolld uses official PostgreSQL."
+  },
+  "restored_build": {
+    "exit": 0,
+    "binary_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "binary_matches_verified_baseline": true,
+    "command": [
+      "cargo",
+      "build",
+      "--release",
+      "-p",
+      "pg-engine",
+      "--bin",
+      "roll-engine",
+      "--example",
+      "bench",
+      "--example",
+      "scan_bench"
+    ],
+    "release_debug": "line-tables-only",
+    "log": "restored-build.log",
+    "baseline_validation": "Prior identical-source/identical-binary tests and full regression reused; no fresh suite in this rejected-candidate batch."
+  },
+  "restored_clippy": {
+    "exit": 0,
+    "command": [
+      "cargo",
+      "clippy"
+    ],
+    "source": "0cb59031 restored runtime source",
+    "log": "restored-clippy.log",
+    "warnings": "11 existing pg-engine lib warnings",
+    "scope": "Fresh dev-profile workspace Clippy after release restoration; not candidate validation."
+  },
+  "captured_final_cleanup": {
+    "pids": [
+      {
+        "pid": 2375347,
+        "absent": true
+      },
+      {
+        "pid": 2376692,
+        "absent": true
+      }
+    ],
+    "ports": [
+      {
+        "port": 53470,
+        "bind_available": true
+      },
+      {
+        "port": 53471,
+        "bind_available": true
+      }
+    ],
+    "containers": [
+      {
+        "id": "764f0ff0dd14cebde1eeeaa7d3fe9f216e113cbcf64eece8db067a191c721376",
+        "absent": true,
+        "inspect_stderr": "error: no such object: 764f0ff0dd14cebde1eeeaa7d3fe9f216e113cbcf64eece8db067a191c721376\n"
+      }
+    ],
+    "initial_audit_error": "Docker absence error used lowercase; first case-sensitive assertion failed before writing a record."
+  },
+  "limits": "Recomputes saved records. No services, workloads, original ELF files or fixture databases are rerun or rehashed."
+}

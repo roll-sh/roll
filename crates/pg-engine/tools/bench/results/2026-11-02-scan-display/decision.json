@@ -1,0 +1,11 @@
+{
+  "p1_performance_rule_passes": false,
+  "candidate_accepted": false,
+  "product_accepted": false,
+  "action": "reverted",
+  "reason": "Locked final paired test gives p=0.101806640625, exceeding the required 0.01. No noise-based retry.",
+  "candidate_full_gates": "Skipped after performance rejection; prepared full regression was never executed.",
+  "restored_validation": "Runtime source matches previously verified baseline; matching release rebuild is recorded separately. Prior baseline tests and regression reused.",
+  "postgresql_comparison": "No fresh comparison in this rejected-candidate batch.",
+  "product_limits": "No full compatibility, service performance, recovery, cost or distribution acceptance. rolld uses official PostgreSQL."
+}

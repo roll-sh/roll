@@ -1,0 +1,25 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.26s
+     Running unittests src/lib.rs (target/debug/deps/pg_engine-bc518221d668f0bf)
+
+running 2 tests
+test sql::explain::display::tests::scalar_policy_requires_actual_builtins_and_rejects_semantic_wrappers ... ok
+
+thread '<unnamed>' (767377) panicked at crates/pg-engine/src/sql/explain/display.rs:179:9:
+assertion `left == right` failed
+  left: "ExNode { junk_keys: [], rel_order: [], cols: [4], order: [], order_eq: [], unique_keys: None, pw_full: false, win_calls: [], out_names: [], inner_cached: false, node_type: \"Seq Scan\", strategy: None, partial_mode: None, operation: None, relationship: None, subplan_name: None, title: \"Seq Scan on cost_rows a\", target: [(\"Relation Name\", \"cost_rows\", false), (\"Alias\", \"a\", false)], rows: 104.0, width: 4, startup_cost: 0.0, total_cost: 335.4, output: [], details: [Text(\"Filter\", \"((ANY (id = (hashed SubPlan 2).col1)) OR (v > 5))\"), Removed(\"Rows Removed by Filter\", [Scan(140078346081040)])], key: Some(140078347133328), disabled: false, initplans: [], minmax_init: false, charged: false, exists_init: false, rank: 0, arm: 0, children: [], subplans: [ExNode { junk_keys: [], rel_order: [], cols: [4], order: [], order_eq: [], unique_keys: None, pw_full: false, win_calls: [], out_names: [], inner_cached: false, node_type: \"Seq Scan\", strategy: None, partial_mode: None, operation: None, relationship: Some(\"SubPlan\"), subplan_name: Some(\"SubPlan 2\"), title: \"Seq Scan on cost_rows b\", target: [(\"Relation Name\", \"cost_rows\", false), (\"Alias\", \"b\", false)], rows: 128.0, width: 4, startup_cost: 0.0, total_cost: 2.2800000000000002, output: [], details: [], key: Some(140078347073440), disabled: false, initplans: [], minmax_init: false, charged: false, exists_init: false, rank: 0, arm: 0, children: [], subplans: [], parallel_aware: false, workers: 0, par_safe: true, alt: None, partial: None, partials: [], presort: None, hash_cols: [], wanted_order: [], safe_alt: None, bound: None, presorted_groups: None, fixed_tlist: false, physical: [], fdw_junk: [], qual_tuples: None }], parallel_aware: false, workers: 0, par_safe: false, alt: None, partial: None, partials: [], presort: None, hash_cols: [], wanted_order: [], safe_alt: None, bound: None, presorted_groups: None, fixed_tlist: false, physical: [], fdw_junk: [], qual_tuples: None }"
+ right: "ExNode { junk_keys: [], rel_order: [], cols: [4], order: [], order_eq: [], unique_keys: None, pw_full: false, win_calls: [], out_names: [], inner_cached: false, node_type: \"Seq Scan\", strategy: None, partial_mode: None, operation: None, relationship: None, subplan_name: None, title: \"Seq Scan on cost_rows a\", target: [(\"Relation Name\", \"cost_rows\", false), (\"Alias\", \"a\", false)], rows: 104.0, width: 4, startup_cost: 0.0, total_cost: 335.4, output: [], details: [Text(\"Filter\", \"((ANY (id = (hashed SubPlan 2).col1)) OR (v > 5))\"), Removed(\"Rows Removed by Filter\", [Scan(140078346081040)])], key: Some(140078347133328), disabled: false, initplans: [], minmax_init: false, charged: false, exists_init: false, rank: 0, arm: 0, children: [], subplans: [ExNode { junk_keys: [], rel_order: [], cols: [4], order: [], order_eq: [], unique_keys: None, pw_full: false, win_calls: [], out_names: [], inner_cached: false, node_type: \"Seq Scan\", strategy: None, partial_mode: None, operation: None, relationship: Some(\"SubPlan\"), subplan_name: Some(\"SubPlan 2\"), title: \"Seq Scan on cost_rows b\", target: [(\"Relation Name\", \"cost_rows\", false), (\"Alias\", \"b\", false)], rows: 128.0, width: 4, startup_cost: 0.0, total_cost: 2.2800000000000002, output: [], details: [], key: Some(140078347080992), disabled: false, initplans: [], minmax_init: false, charged: false, exists_init: false, rank: 0, arm: 0, children: [], subplans: [], parallel_aware: false, workers: 0, par_safe: true, alt: None, partial: None, partials: [], presort: None, hash_cols: [], wanted_order: [], safe_alt: None, bound: None, presorted_groups: None, fixed_tlist: false, physical: [], fdw_junk: [], qual_tuples: None }], parallel_aware: false, workers: 0, par_safe: false, alt: None, partial: None, partials: [], presort: None, hash_cols: [], wanted_order: [], safe_alt: None, bound: None, presorted_groups: None, fixed_tlist: false, physical: [], fdw_junk: [], qual_tuples: None }"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'session::tests::scalar_scan_display_preserves_estimates_and_subplans' (767375) panicked at crates/pg-engine/src/session/tests.rs:94:10:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+test session::tests::scalar_scan_display_preserves_estimates_and_subplans ... FAILED
+
+failures:
+
+failures:
+    session::tests::scalar_scan_display_preserves_estimates_and_subplans
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 175 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `-p pg-engine --lib`

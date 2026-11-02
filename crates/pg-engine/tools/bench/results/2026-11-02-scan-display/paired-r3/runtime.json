@@ -1,0 +1,59 @@
+{
+  "at_utc": "2026-11-02T14:29:18.358995+00:00",
+  "source": "0cb59031ecbf0048cb44482cec591706d368bdf1+scan-display-candidate",
+  "source_sha256": {
+    "crates/pg-engine/src/sql/explain.rs": "e381d9cce2d630925730abe612a38c26e005480c817cf307fc8bff2fbd44084e",
+    "crates/pg-engine/src/sql/explain/display.rs": "f8b22ad68e16f5e251e67e642d322389c9721f6aa766f2fb92af436b9c507b38",
+    "crates/pg-engine/src/session/mod.rs": "c0fbd00a9d91da54e0b8483064fdf87508b012984d265f152edabc7e62ca80a2",
+    "crates/pg-engine/src/session/tests.rs": "d4e116d87fcfdf9022a7d33d3799cd40abbe6aa5325b7c9d70a8cc1266cfec3a"
+  },
+  "load": "2.99 6.20 5.71 1/3019 1439509\n",
+  "engines": {
+    "baseline": {
+      "pid": 1437362,
+      "port": 53450,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r3/baseline-data --listen 127.0.0.1:53450 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n"
+    },
+    "candidate": {
+      "pid": 1438592,
+      "port": 53451,
+      "sha256": "e76ca598b57840c1ba9acbe0d74c268dd505781e3a0bd12bc3a37060a3af9cfe",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/candidate-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261102/scan-display/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/scan-display/paired-r3/candidate-data --listen 127.0.0.1:53451 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n"
+    }
+  },
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f"
+}

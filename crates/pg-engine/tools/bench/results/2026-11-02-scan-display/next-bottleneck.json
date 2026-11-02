@@ -1,0 +1,1952 @@
+{
+  "captures": [
+    {
+      "label": "0-auto-8",
+      "input_sha256": "6e71e238965f1444dc22d88c6a3f02b99510a0a407938d07f2f260c8262fdd65",
+      "samples": 3835,
+      "period_weight": 78265305105,
+      "recovered_ancestry_fraction": {
+        "heap_fetch_size_model": 0.05528031290743155,
+        "root_costing": 0.19191655801825294,
+        "custom_binding": 0.1760104302477184,
+        "explain_expression_display": 0.04563233376792699,
+        "execution_gather_discovery": 0.16688396349413298
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.10221642764015645
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.05136897001303781
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.03624511082138201
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.03259452411994785
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.023728813559322035
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.02138200782268579
+        },
+        {
+          "symbol": "<pg_engine::txn::Txn>::catalog",
+          "sample_weight_fraction": 0.017992177314211214
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.013298565840938721
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.013298565840938721
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::vis_for",
+          "sample_weight_fraction": 0.011473272490221642
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.010169491525423728
+        },
+        {
+          "symbol": "<pg_engine::catalog::pmap::PMap<u64>>::get",
+          "sample_weight_fraction": 0.008604954367666232
+        },
+        {
+          "symbol": "pg_engine::storage::row::decode_row_need_spare",
+          "sample_weight_fraction": 0.008083441981747066
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::read",
+          "sample_weight_fraction": 0.008083441981747066
+        },
+        {
+          "symbol": "mi_malloc_aligned",
+          "sample_weight_fraction": 0.007301173402868318
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.0070404172099087356
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::seek",
+          "sample_weight_fraction": 0.00651890482398957
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk",
+          "sample_weight_fraction": 0.005997392438070404
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::hist_ineq",
+          "sample_weight_fraction": 0.005997392438070404
+        },
+        {
+          "symbol": "<alloc::vec::Vec<pg_engine::sql::expr::Expr> as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.005997392438070404
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_indexed",
+          "sample_weight_fraction": 0.005736636245110821
+        },
+        {
+          "symbol": "<pg_engine::sql::paths::Planner>::rel",
+          "sample_weight_fraction": 0.005736636245110821
+        },
+        {
+          "symbol": "pg_engine::server::put_data_row",
+          "sample_weight_fraction": 0.005736636245110821
+        },
+        {
+          "symbol": "pg_engine::exec::nodes::project_moving",
+          "sample_weight_fraction": 0.005215123859191656
+        },
+        {
+          "symbol": "<pg_engine::storage::Cursor>::take",
+          "sample_weight_fraction": 0.004954367666232073
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.988787483702738
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.905606258148631
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.9053455019556714
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.9040417209908735
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.9037809647979139
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.9006518904823989
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.8996088657105606
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.8977835723598435
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.7908735332464146
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.6297262059973925
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.6166883963494133
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.6151238591916558
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.611212516297262
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::planned_as",
+          "sample_weight_fraction": 0.3770534550195567
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.3335071707953064
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.3316818774445893
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.31629726205997394
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.30247718383311606
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.2951760104302477
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.29465449804432853
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.2920469361147327
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.27640156453715775
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::plan_cost",
+          "sample_weight_fraction": 0.19191655801825294
+        },
+        {
+          "symbol": "pg_engine::session::plan_cost_estimate",
+          "sample_weight_fraction": 0.18904823989569752
+        },
+        {
+          "symbol": "pg_engine::sql::explain::estimate_in",
+          "sample_weight_fraction": 0.18878748370273793
+        }
+      ]
+    },
+    {
+      "label": "0-custom-1",
+      "input_sha256": "013c092c284b3c1ab1fd6f117b39dff5822f1a32f27c8dbe3c842b09a174ca7d",
+      "samples": 805,
+      "period_weight": 16428571215,
+      "recovered_ancestry_fraction": {
+        "custom_binding": 0.17142857142857143,
+        "execution_gather_discovery": 0.14285714285714285,
+        "explain_expression_display": 0.04720496894409938,
+        "heap_fetch_size_model": 0.018633540372670808,
+        "root_costing": 0.19751552795031055
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.12546583850931678
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.06335403726708075
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.02981366459627329
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.02608695652173913
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.01987577639751553
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::read",
+          "sample_weight_fraction": 0.014906832298136646
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.013664596273291925
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.012422360248447204
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.011180124223602485
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.009937888198757764
+        },
+        {
+          "symbol": "<pg_engine::catalog::btsim::leaf::Leaf>::get",
+          "sample_weight_fraction": 0.008695652173913044
+        },
+        {
+          "symbol": "<pg_engine::storage::Cursor>::head",
+          "sample_weight_fraction": 0.008695652173913044
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.007453416149068323
+        },
+        {
+          "symbol": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>",
+          "sample_weight_fraction": 0.007453416149068323
+        },
+        {
+          "symbol": "pg_engine::exec::nodes::project_moving",
+          "sample_weight_fraction": 0.007453416149068323
+        },
+        {
+          "symbol": "<pg_engine::storage::Cursor>::take",
+          "sample_weight_fraction": 0.007453416149068323
+        },
+        {
+          "symbol": "<pg_engine::catalog::pmap::PMap<u64>>::get",
+          "sample_weight_fraction": 0.007453416149068323
+        },
+        {
+          "symbol": "<pg_engine::txn::Txn>::catalog",
+          "sample_weight_fraction": 0.007453416149068323
+        },
+        {
+          "symbol": "pg_engine::types::binary::encode",
+          "sample_weight_fraction": 0.006211180124223602
+        },
+        {
+          "symbol": "<alloc::vec::Vec<pg_engine::sql::expr::Expr> as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.006211180124223602
+        },
+        {
+          "symbol": "<pg_engine::txn::TxnScan as core::iter::traits::iterator::Iterator>::next",
+          "sample_weight_fraction": 0.006211180124223602
+        },
+        {
+          "symbol": "<alloc::string::String as core::fmt::Write>::write_str",
+          "sample_weight_fraction": 0.006211180124223602
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.006211180124223602
+        },
+        {
+          "symbol": "__rustc::__rust_dealloc",
+          "sample_weight_fraction": 0.006211180124223602
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.006211180124223602
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.991304347826087
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.8782608695652174
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.8732919254658386
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.8732919254658386
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.8695652173913043
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.8683229813664596
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.8645962732919255
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.8645962732919255
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.8136645962732919
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.6496894409937888
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.6472049689440994
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.6459627329192547
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.639751552795031
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::planned_as",
+          "sample_weight_fraction": 0.37267080745341613
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.3267080745341615
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.3242236024844721
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.2993788819875776
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.2919254658385093
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.2795031055900621
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.27701863354037265
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.27577639751552796
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.26211180124223604
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::plan_cost",
+          "sample_weight_fraction": 0.19751552795031055
+        },
+        {
+          "symbol": "pg_engine::session::plan_cost_estimate",
+          "sample_weight_fraction": 0.1937888198757764
+        },
+        {
+          "symbol": "pg_engine::sql::explain::estimate_in",
+          "sample_weight_fraction": 0.1937888198757764
+        }
+      ]
+    },
+    {
+      "label": "0-generic-1",
+      "input_sha256": "7077527a1920747f743bf5c0082d9fa9a4142ca02256d4ccccbc6ce0646eff27",
+      "samples": 742,
+      "period_weight": 15142856946,
+      "recovered_ancestry_fraction": {
+        "heap_fetch_size_model": 0.02830188679245283,
+        "execution_gather_discovery": 0.330188679245283,
+        "explain_expression_display": 0.04986522911051213
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.1347708894878706
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.05390835579514825
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.04716981132075472
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.03234501347708895
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.016172506738544475
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.016172506738544475
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::read",
+          "sample_weight_fraction": 0.014824797843665768
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.013477088948787063
+        },
+        {
+          "symbol": "<pg_engine::types::DataType as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.012129380053908356
+        },
+        {
+          "symbol": "pg_engine::server::put_data_row",
+          "sample_weight_fraction": 0.012129380053908356
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.01078167115902965
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.01078167115902965
+        },
+        {
+          "symbol": "core::fmt::write",
+          "sample_weight_fraction": 0.01078167115902965
+        },
+        {
+          "symbol": "<pg_engine::storage::Cursor>::take",
+          "sample_weight_fraction": 0.01078167115902965
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_indexed",
+          "sample_weight_fraction": 0.009433962264150943
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.009433962264150943
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.009433962264150943
+        },
+        {
+          "symbol": "<pg_engine::txn::Txn>::catalog",
+          "sample_weight_fraction": 0.009433962264150943
+        },
+        {
+          "symbol": "__rustc::__rust_alloc",
+          "sample_weight_fraction": 0.008086253369272238
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.008086253369272238
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::vis_for",
+          "sample_weight_fraction": 0.008086253369272238
+        },
+        {
+          "symbol": "<pg_engine::storage::Merge>::min",
+          "sample_weight_fraction": 0.008086253369272238
+        },
+        {
+          "symbol": "<bytes::bytes_mut::BytesMut as bytes::buf::buf_mut::BufMut>::put_slice",
+          "sample_weight_fraction": 0.008086253369272238
+        },
+        {
+          "symbol": "mi_malloc_aligned",
+          "sample_weight_fraction": 0.008086253369272238
+        },
+        {
+          "symbol": "pg_engine::storage::row::decode_value",
+          "sample_weight_fraction": 0.008086253369272238
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.9986522911051213
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.876010781671159
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.8679245283018868
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.866576819407008
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.862533692722372
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.8598382749326146
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.8584905660377359
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.839622641509434
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.8369272237196765
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.7398921832884097
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.7250673854447439
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.7250673854447439
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.7250673854447439
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.46495956873315364
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.4636118598382749
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.408355795148248
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.3975741239892183
+        },
+        {
+          "symbol": "pg_engine::exec::parallel_part::start",
+          "sample_weight_fraction": 0.330188679245283
+        },
+        {
+          "symbol": "pg_engine::sql::explain::gathers",
+          "sample_weight_fraction": 0.32075471698113206
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.2776280323450135
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.25336927223719674
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.25202156334231807
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.238544474393531
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.23450134770889489
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_entry",
+          "sample_weight_fraction": 0.18733153638814015
+        }
+      ]
+    },
+    {
+      "label": "1-auto-8",
+      "input_sha256": "7fd3930363b777a054dade8ce0e6d4884fbb8e5da15c1c4d394f05984fb221a4",
+      "samples": 3840,
+      "period_weight": 78367345920,
+      "recovered_ancestry_fraction": {
+        "heap_fetch_size_model": 0.06380208333333333,
+        "execution_gather_discovery": 0.15703125,
+        "explain_expression_display": 0.040625,
+        "root_costing": 0.20546875,
+        "custom_binding": 0.17239583333333333
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.10416666666666667
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.05677083333333333
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.04244791666666667
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.030208333333333334
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.023958333333333335
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.022135416666666668
+        },
+        {
+          "symbol": "<pg_engine::txn::Txn>::catalog",
+          "sample_weight_fraction": 0.021614583333333333
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.01875
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.012760416666666666
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::vis_for",
+          "sample_weight_fraction": 0.011979166666666667
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.008333333333333333
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::read",
+          "sample_weight_fraction": 0.007552083333333333
+        },
+        {
+          "symbol": "mi_malloc_aligned",
+          "sample_weight_fraction": 0.007552083333333333
+        },
+        {
+          "symbol": "<pg_engine::catalog::pmap::PMap<u64>>::get",
+          "sample_weight_fraction": 0.007291666666666667
+        },
+        {
+          "symbol": "pg_engine::storage::row::decode_row_need_spare",
+          "sample_weight_fraction": 0.007291666666666667
+        },
+        {
+          "symbol": "mi_theap_umalloc",
+          "sample_weight_fraction": 0.00703125
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::clauses",
+          "sample_weight_fraction": 0.00625
+        },
+        {
+          "symbol": "<pg_engine::sql::paths::Planner>::rel",
+          "sample_weight_fraction": 0.00625
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk",
+          "sample_weight_fraction": 0.00625
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.00546875
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.00546875
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::hist_ineq",
+          "sample_weight_fraction": 0.00546875
+        },
+        {
+          "symbol": "pg_engine::exec::nodes::project_moving",
+          "sample_weight_fraction": 0.005208333333333333
+        },
+        {
+          "symbol": "<pg_engine::storage::Scan>::position",
+          "sample_weight_fraction": 0.005208333333333333
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::seek",
+          "sample_weight_fraction": 0.005208333333333333
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.9893229166666667
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.9098958333333333
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.9088541666666666
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.9078125
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.9075520833333334
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.9044270833333333
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.903125
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.9013020833333333
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.7838541666666666
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.6434895833333333
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.6296875
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.6294270833333333
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.62421875
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::planned_as",
+          "sample_weight_fraction": 0.38255208333333335
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.3424479166666667
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.3416666666666667
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.31875
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.31145833333333334
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.30130208333333336
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.2947916666666667
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.29401041666666666
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.28098958333333335
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::plan_cost",
+          "sample_weight_fraction": 0.20546875
+        },
+        {
+          "symbol": "pg_engine::session::plan_cost_estimate",
+          "sample_weight_fraction": 0.19817708333333334
+        },
+        {
+          "symbol": "pg_engine::sql::explain::estimate_in",
+          "sample_weight_fraction": 0.19791666666666666
+        }
+      ]
+    },
+    {
+      "label": "1-custom-1",
+      "input_sha256": "4a58a4a705f67a14a0765b7352713a299c856669021d932f3fcfc61594e960a0",
+      "samples": 807,
+      "period_weight": 16469387541,
+      "recovered_ancestry_fraction": {
+        "root_costing": 0.18463444857496902,
+        "custom_binding": 0.19206939281288724,
+        "execution_gather_discovery": 0.15489467162329615,
+        "explain_expression_display": 0.04337050805452292,
+        "heap_fetch_size_model": 0.022304832713754646
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.13135068153655513
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.06939281288723669
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.024783147459727387
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.022304832713754646
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.01858736059479554
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.01734820322180917
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.01486988847583643
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::read",
+          "sample_weight_fraction": 0.011152416356877323
+        },
+        {
+          "symbol": "<pg_engine::catalog::pmap::PMap<u64>>::get",
+          "sample_weight_fraction": 0.009913258983890954
+        },
+        {
+          "symbol": "mi_malloc_aligned",
+          "sample_weight_fraction": 0.009913258983890954
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::hist_ineq",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "pg_engine::sql::explain::assign_refnames_skip",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "<alloc::vec::Vec<pg_engine::sql::expr::Expr> as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::seek",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "mi_theap_umalloc",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::vis_for",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "__rustc::__rust_alloc",
+          "sample_weight_fraction": 0.007434944237918215
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::clauses",
+          "sample_weight_fraction": 0.006195786864931847
+        },
+        {
+          "symbol": "<pg_engine::types::value::Value as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.006195786864931847
+        },
+        {
+          "symbol": "pg_engine::server::put_data_row",
+          "sample_weight_fraction": 0.006195786864931847
+        },
+        {
+          "symbol": "<alloc::vec::Vec<pg_engine::types::value::Value>>::resize",
+          "sample_weight_fraction": 0.006195786864931847
+        },
+        {
+          "symbol": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+          "sample_weight_fraction": 0.006195786864931847
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.990086741016109
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.9021065675340768
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.895910780669145
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.8946716232961586
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.8934324659231723
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.8934324659231723
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.8934324659231723
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.8934324659231723
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.8228004956629492
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.6802973977695167
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.6641883519206939
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.6604708798017348
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.6567534076827757
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::planned_as",
+          "sample_weight_fraction": 0.38166047087980176
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.33209417596034696
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.3271375464684015
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.29120198265179675
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.2812887236679058
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.27633209417596033
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.25154894671623296
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.2503097893432466
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.23543990086741015
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::bound_custom",
+          "sample_weight_fraction": 0.19206939281288724
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::plan_cost",
+          "sample_weight_fraction": 0.18463444857496902
+        },
+        {
+          "symbol": "pg_engine::session::plan_cost_estimate",
+          "sample_weight_fraction": 0.17843866171003717
+        }
+      ]
+    },
+    {
+      "label": "1-generic-1",
+      "input_sha256": "fe358786001fa2496827b3a660cc6d631420498c4cc80c3aff490569aa7aa2ff",
+      "samples": 740,
+      "period_weight": 15102040620,
+      "recovered_ancestry_fraction": {
+        "execution_gather_discovery": 0.34459459459459457,
+        "explain_expression_display": 0.032432432432432434,
+        "heap_fetch_size_model": 0.025675675675675677
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.14189189189189189
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.06891891891891892
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.0472972972972973
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.031081081081081083
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.02972972972972973
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.013513513513513514
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.013513513513513514
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.012162162162162163
+        },
+        {
+          "symbol": "<pg_engine::storage::Cursor>::head",
+          "sample_weight_fraction": 0.012162162162162163
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.010810810810810811
+        },
+        {
+          "symbol": "pg_engine::exec::nodes::project_moving",
+          "sample_weight_fraction": 0.010810810810810811
+        },
+        {
+          "symbol": "<alloc::vec::Vec<pg_engine::sql::expr::Expr> as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.00945945945945946
+        },
+        {
+          "symbol": "pg_engine::server::put_data_row",
+          "sample_weight_fraction": 0.00945945945945946
+        },
+        {
+          "symbol": "<pg_engine::catalog::btsim::KeyBytes>::len_of",
+          "sample_weight_fraction": 0.00945945945945946
+        },
+        {
+          "symbol": "<pg_engine::sql::paths::Planner>::rel",
+          "sample_weight_fraction": 0.00945945945945946
+        },
+        {
+          "symbol": "_mi_theap_malloc_zero",
+          "sample_weight_fraction": 0.00945945945945946
+        },
+        {
+          "symbol": "core::fmt::write",
+          "sample_weight_fraction": 0.008108108108108109
+        },
+        {
+          "symbol": "pg_engine::storage::row::decode_row_need_spare",
+          "sample_weight_fraction": 0.008108108108108109
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.006756756756756757
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::types::value::Value>",
+          "sample_weight_fraction": 0.006756756756756757
+        },
+        {
+          "symbol": "mi_malloc_aligned",
+          "sample_weight_fraction": 0.006756756756756757
+        },
+        {
+          "symbol": "<pg_engine::catalog::heapsim::Heap>::chain_dead",
+          "sample_weight_fraction": 0.006756756756756757
+        },
+        {
+          "symbol": "pg_engine::sql::expr::same_shape",
+          "sample_weight_fraction": 0.006756756756756757
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::clauses",
+          "sample_weight_fraction": 0.006756756756756757
+        },
+        {
+          "symbol": "<pg_engine::catalog::pmap::PMap<u64>>::get",
+          "sample_weight_fraction": 0.006756756756756757
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.9986486486486487
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.8621621621621621
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.8621621621621621
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.8581081081081081
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.8567567567567568
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.8527027027027027
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.8513513513513513
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.8472972972972973
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.8405405405405405
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.7013513513513514
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.6932432432432433
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.6932432432432433
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.6932432432432433
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.4554054054054054
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.4554054054054054
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.4
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.3837837837837838
+        },
+        {
+          "symbol": "pg_engine::exec::parallel_part::start",
+          "sample_weight_fraction": 0.34459459459459457
+        },
+        {
+          "symbol": "pg_engine::sql::explain::gathers",
+          "sample_weight_fraction": 0.33783783783783783
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.3013513513513513
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.2810810810810811
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.2810810810810811
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.2716216216216216
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.23243243243243245
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_entry",
+          "sample_weight_fraction": 0.17027027027027028
+        }
+      ]
+    },
+    {
+      "label": "2-auto-8",
+      "input_sha256": "0f5d58d50d79c9f937142eaee57a43f984ae23ba3b6963c7f6cd73a78d25a439",
+      "samples": 3837,
+      "period_weight": 78306121431,
+      "recovered_ancestry_fraction": {
+        "explain_expression_display": 0.04586916862131874,
+        "root_costing": 0.1957258274693771,
+        "custom_binding": 0.17696116757883765,
+        "execution_gather_discovery": 0.15142038050560333,
+        "heap_fetch_size_model": 0.06254886630179828
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.10216314829293718
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.05420901746155851
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.040917383372426376
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.025280166796976804
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.023455824863174355
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.0218921032056294
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.019546520719311962
+        },
+        {
+          "symbol": "<pg_engine::txn::Txn>::catalog",
+          "sample_weight_fraction": 0.015115976022934585
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::vis_for",
+          "sample_weight_fraction": 0.013291634089132134
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.013031013812874642
+        },
+        {
+          "symbol": "<pg_engine::catalog::pmap::PMap<u64>>::get",
+          "sample_weight_fraction": 0.009121709669012249
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.009121709669012249
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::read",
+          "sample_weight_fraction": 0.00833984884023977
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::hist_ineq",
+          "sample_weight_fraction": 0.007036747458952306
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::clauses",
+          "sample_weight_fraction": 0.006776127182694814
+        },
+        {
+          "symbol": "mi_malloc_aligned",
+          "sample_weight_fraction": 0.006515506906437321
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.006515506906437321
+        },
+        {
+          "symbol": "<alloc::raw_vec::RawVecInner>::finish_grow",
+          "sample_weight_fraction": 0.006254886630179828
+        },
+        {
+          "symbol": "pg_engine::storage::row::decode_row_need_spare",
+          "sample_weight_fraction": 0.006254886630179828
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::seek",
+          "sample_weight_fraction": 0.005733646077664843
+        },
+        {
+          "symbol": "pg_engine::server::put_data_row",
+          "sample_weight_fraction": 0.005733646077664843
+        },
+        {
+          "symbol": "<pg_engine::types::value::Value>::cmp_total",
+          "sample_weight_fraction": 0.00547302580140735
+        },
+        {
+          "symbol": "_mi_theap_malloc_zero",
+          "sample_weight_fraction": 0.00547302580140735
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk",
+          "sample_weight_fraction": 0.00547302580140735
+        },
+        {
+          "symbol": "<pg_engine::sql::paths::Planner>::rel",
+          "sample_weight_fraction": 0.005212405525149857
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.9898358092259578
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.9087829033098775
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.90852228303362
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.90852228303362
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.9082616627573625
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.9056554599947876
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.9046129788897577
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.9017461558509252
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.7961949439666406
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.6531144123012771
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.6419077404222049
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.6393015376596299
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.63408913213448
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::planned_as",
+          "sample_weight_fraction": 0.3820693249934845
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.3505342715663279
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.34688558769872296
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.3166536356528538
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.30466510294500915
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.29971331769611675
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.27808183476674486
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.27782121449048736
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.26400833984884026
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::plan_cost",
+          "sample_weight_fraction": 0.1957258274693771
+        },
+        {
+          "symbol": "pg_engine::session::plan_cost_estimate",
+          "sample_weight_fraction": 0.19077404222048475
+        },
+        {
+          "symbol": "pg_engine::sql::explain::estimate_in",
+          "sample_weight_fraction": 0.18999218139171228
+        }
+      ]
+    },
+    {
+      "label": "2-custom-1",
+      "input_sha256": "fbc1ac32b7ad4ed199c13bf45af018099f7d326144af0e1381c4c8a2e8051db0",
+      "samples": 808,
+      "period_weight": 16489795704,
+      "recovered_ancestry_fraction": {
+        "root_costing": 0.19801980198019803,
+        "execution_gather_discovery": 0.13613861386138615,
+        "heap_fetch_size_model": 0.01608910891089109,
+        "explain_expression_display": 0.04084158415841584,
+        "custom_binding": 0.2042079207920792
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.1188118811881188
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.0655940594059406
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.034653465346534656
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.02599009900990099
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.023514851485148515
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.02103960396039604
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.01608910891089109
+        },
+        {
+          "symbol": "<pg_engine::sql::paths::Planner>::rel",
+          "sample_weight_fraction": 0.012376237623762377
+        },
+        {
+          "symbol": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
+          "sample_weight_fraction": 0.012376237623762377
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.009900990099009901
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.009900990099009901
+        },
+        {
+          "symbol": "pg_engine::sql::paths::match_quals",
+          "sample_weight_fraction": 0.009900990099009901
+        },
+        {
+          "symbol": "<pg_engine::sql::costs::Est>::hist_ineq",
+          "sample_weight_fraction": 0.008663366336633664
+        },
+        {
+          "symbol": "pg_engine::server::put_data_row",
+          "sample_weight_fraction": 0.008663366336633664
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk_here",
+          "sample_weight_fraction": 0.008663366336633664
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::types::DataType>",
+          "sample_weight_fraction": 0.008663366336633664
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr>::walk",
+          "sample_weight_fraction": 0.008663366336633664
+        },
+        {
+          "symbol": "<pg_engine::txn::Txn>::catalog",
+          "sample_weight_fraction": 0.007425742574257425
+        },
+        {
+          "symbol": "mi_theap_umalloc",
+          "sample_weight_fraction": 0.007425742574257425
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::seek",
+          "sample_weight_fraction": 0.007425742574257425
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::types::value::Value>",
+          "sample_weight_fraction": 0.007425742574257425
+        },
+        {
+          "symbol": "pg_engine::exec::nodes::project_moving",
+          "sample_weight_fraction": 0.007425742574257425
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone",
+          "sample_weight_fraction": 0.007425742574257425
+        },
+        {
+          "symbol": "<pg_engine::catalog::pmap::PMap<u64>>::get",
+          "sample_weight_fraction": 0.007425742574257425
+        },
+        {
+          "symbol": "<pg_engine::sql::binder::Binder>::bind_simple_select",
+          "sample_weight_fraction": 0.007425742574257425
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.9913366336633663
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.8861386138613861
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.8824257425742574
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.8824257425742574
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.879950495049505
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.879950495049505
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.8762376237623762
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.8762376237623762
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.806930693069307
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.6448019801980198
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.6373762376237624
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.6373762376237624
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.6324257425742574
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::planned_as",
+          "sample_weight_fraction": 0.40717821782178215
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.31064356435643564
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.3094059405940594
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.2896039603960396
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.2784653465346535
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.26732673267326734
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.2660891089108911
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.2636138613861386
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.24752475247524752
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::bound_custom",
+          "sample_weight_fraction": 0.2042079207920792
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::plan_cost",
+          "sample_weight_fraction": 0.19801980198019803
+        },
+        {
+          "symbol": "pg_engine::session::plan_cost_estimate",
+          "sample_weight_fraction": 0.19183168316831684
+        }
+      ]
+    },
+    {
+      "label": "2-generic-1",
+      "input_sha256": "1f36ce908d0076188e3364b4feec18d778a9efe9ef48f2a1dae9625087ed21a7",
+      "samples": 743,
+      "period_weight": 15163265109,
+      "recovered_ancestry_fraction": {
+        "execution_gather_discovery": 0.34320323014804843,
+        "heap_fetch_size_model": 0.02557200538358008,
+        "explain_expression_display": 0.04845222072678331
+      },
+      "top_self": [
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.12516823687752354
+        },
+        {
+          "symbol": "_mi_page_malloc_zero",
+          "sample_weight_fraction": 0.07133243606998654
+        },
+        {
+          "symbol": "pg_engine::sql::expr::eval_here",
+          "sample_weight_fraction": 0.04845222072678331
+        },
+        {
+          "symbol": "mi_free",
+          "sample_weight_fraction": 0.029609690444145357
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>",
+          "sample_weight_fraction": 0.02288021534320323
+        },
+        {
+          "symbol": "pg_engine::storage::row::decode_row_need_spare",
+          "sample_weight_fraction": 0.013458950201884253
+        },
+        {
+          "symbol": "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}",
+          "sample_weight_fraction": 0.013458950201884253
+        },
+        {
+          "symbol": "<pg_engine::txn::Txn>::catalog",
+          "sample_weight_fraction": 0.012113055181695828
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::fetched",
+          "sample_weight_fraction": 0.010767160161507403
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.010767160161507403
+        },
+        {
+          "symbol": "mi_theap_malloc_aligned",
+          "sample_weight_fraction": 0.010767160161507403
+        },
+        {
+          "symbol": "pg_engine::exec::sizing::vis_for",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "pg_engine::server::put_data_row",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::seek",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "pg_engine::exec::nodes::project_moving",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "mi_theap_umalloc",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "_mi_theap_malloc_zero",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "<pg_engine::storage::sst::Block>::read",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "<pg_engine::sql::paths::Planner>::rel",
+          "sample_weight_fraction": 0.009421265141318977
+        },
+        {
+          "symbol": "__rustc::__rust_no_alloc_shim_is_unstable_v2",
+          "sample_weight_fraction": 0.008075370121130552
+        },
+        {
+          "symbol": "<pg_engine::storage::Cursor>::head",
+          "sample_weight_fraction": 0.008075370121130552
+        },
+        {
+          "symbol": "core::fmt::write",
+          "sample_weight_fraction": 0.008075370121130552
+        },
+        {
+          "symbol": "<pg_engine::exec::pgstat::Pending>::tab",
+          "sample_weight_fraction": 0.008075370121130552
+        },
+        {
+          "symbol": "core::ptr::drop_glue::<pg_engine::types::value::Value>",
+          "sample_weight_fraction": 0.008075370121130552
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_indexed",
+          "sample_weight_fraction": 0.006729475100942127
+        }
+      ],
+      "top_inclusive": [
+        {
+          "symbol": "pg_engine::server::message_loop",
+          "sample_weight_fraction": 0.9986541049798116
+        },
+        {
+          "symbol": "pg_engine::server::handle",
+          "sample_weight_fraction": 0.8586810228802153
+        },
+        {
+          "symbol": "pg_engine::exec::streaming_notices::<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::streamed<core::result::Result<(pg_engine::session::Outcome, bool), pg_engine::error::Error>, pg_engine::server::execute_msg::{closure#3}>::{closure#0}>",
+          "sample_weight_fraction": 0.8559892328398385
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with",
+          "sample_weight_fraction": 0.8546433378196501
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_portal_here",
+          "sample_weight_fraction": 0.8546433378196501
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_with_inner",
+          "sample_weight_fraction": 0.8546433378196501
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::execute_statement",
+          "sample_weight_fraction": 0.8519515477792732
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::dispatch",
+          "sample_weight_fraction": 0.845222072678331
+        },
+        {
+          "symbol": "<pg_engine::session::Session>::run_query",
+          "sample_weight_fraction": 0.8438761776581427
+        },
+        {
+          "symbol": "<unresolved>",
+          "sample_weight_fraction": 0.7200538358008075
+        },
+        {
+          "symbol": "<std::sys::thread::unix::Thread>::new::thread_start",
+          "sample_weight_fraction": 0.7039030955585465
+        },
+        {
+          "symbol": "std::sys::backtrace::__rust_begin_short_backtrace::<pg_engine::server::serve::{closure#0}, ()>",
+          "sample_weight_fraction": 0.7039030955585465
+        },
+        {
+          "symbol": "<std::thread::lifecycle::spawn_unchecked<pg_engine::server::serve::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}",
+          "sample_weight_fraction": 0.7039030955585465
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>",
+          "sample_weight_fraction": 0.4508748317631225
+        },
+        {
+          "symbol": "pg_engine::exec::run_each::<<pg_engine::session::Session>::run_query::{closure#2}::{closure#4}>::{closure#0}::{closure#0}",
+          "sample_weight_fraction": 0.44818304172274565
+        },
+        {
+          "symbol": "<pg_engine::exec::nodes::ProjectNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.40915208613728127
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next",
+          "sample_weight_fraction": 0.3916554508748318
+        },
+        {
+          "symbol": "pg_engine::exec::parallel_part::start",
+          "sample_weight_fraction": 0.34320323014804843
+        },
+        {
+          "symbol": "pg_engine::sql::explain::gathers",
+          "sample_weight_fraction": 0.3351278600269179
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::level_in",
+          "sample_weight_fraction": 0.29475100942126514
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::node",
+          "sample_weight_fraction": 0.2732166890982503
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::convert",
+          "sample_weight_fraction": 0.2732166890982503
+        },
+        {
+          "symbol": "<pg_engine::sql::explain::Builder>::scan",
+          "sample_weight_fraction": 0.2543741588156124
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_raw_ref",
+          "sample_weight_fraction": 0.22611036339165544
+        },
+        {
+          "symbol": "<pg_engine::exec::scan::ScanNode>::next_entry",
+          "sample_weight_fraction": 0.1695827725437416
+        }
+      ]
+    }
+  ],
+  "limits": "Reanalysis of retained profiles, not a fresh capture or speedup experiment. Inclusive ancestry categories overlap and finite stacks can omit ancestors. Do not add categories or treat them as removable CPU. Original maps/ELF/CFI validation is recorded in the planning-cpu checkpoint."
+}

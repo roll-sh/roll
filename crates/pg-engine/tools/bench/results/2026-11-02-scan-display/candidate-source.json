@@ -1,0 +1,24 @@
+{
+  "at_utc": "2026-11-02T14:10:47.404228+00:00",
+  "head": "0cb59031ecbf0048cb44482cec591706d368bdf1",
+  "source_sha256": {
+    "crates/pg-engine/src/sql/explain.rs": "e381d9cce2d630925730abe612a38c26e005480c817cf307fc8bff2fbd44084e",
+    "crates/pg-engine/src/sql/explain/display.rs": "f8b22ad68e16f5e251e67e642d322389c9721f6aa766f2fb92af436b9c507b38",
+    "crates/pg-engine/src/session/mod.rs": "c0fbd00a9d91da54e0b8483064fdf87508b012984d265f152edabc7e62ca80a2",
+    "crates/pg-engine/src/session/tests.rs": "d4e116d87fcfdf9022a7d33d3799cd40abbe6aa5325b7c9d70a8cc1266cfec3a"
+  },
+  "build_command": [
+    "cargo",
+    "build",
+    "--release",
+    "-p",
+    "pg-engine",
+    "--bin",
+    "roll-engine",
+    "--example",
+    "bench",
+    "--example",
+    "scan_bench"
+  ],
+  "git_status": " M crates/pg-engine/src/session/mod.rs\n M crates/pg-engine/src/sql/explain.rs\n?? crates/pg-engine/src/session/tests.rs\n?? crates/pg-engine/src/sql/explain/display.rs\n?? crates/pg-engine/tools/bench/results/2026-11-02-scan-display/\n"
+}

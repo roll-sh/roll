@@ -1,0 +1,12 @@
+{
+  "review": "evidence-review-r1.json",
+  "responses": {
+    "first_failed_log": "Include focused-test.log in export; keep all failures.",
+    "postseal_clippy": "Export command status and log; log completion now.",
+    "verifier_scope": "Add captured final cleanup predicates, restoration record and decision-trail checks; still cannot rehash omitted binaries.",
+    "frame_timing": "Source/tool rule locked15:05; final binary manifest15:12 before launch; launch row15:17 was delayed. No claim binary hash was in earlier frame.",
+    "patch_scope": "Tracked patch plus four complete frozen source files; no claim patch alone is complete.",
+    "reviewer_family_correction": "Reviewer incorrectly identifies main thread as Claude. Actual parent is codex/gpt-6.1-sol; this review is claudeAgent/claude-opus-5-5. Runtime orchestration catalog and parent T3 thread metadata confirm provider/model. This is a cross-provider review. Preserve original erroneous reviewer text unchanged.",
+    "transcript_scope": "Reviewer r1 explicitly did not inspect transcript. A new round will audit the relevant decision stretches against the captured summarized timeline, with49 truncated items disclosed."
+  }
+}

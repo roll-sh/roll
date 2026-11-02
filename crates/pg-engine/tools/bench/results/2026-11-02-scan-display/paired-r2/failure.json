@@ -1,0 +1,6 @@
+{
+  "error": "OSError: [Errno 98] Address already in use",
+  "location": "measure.py bind preflight, before either server started",
+  "observations": 0,
+  "followup": "Use configurable port0=53450 in paired-r3; no listeners remained on old ports after cleanup."
+}

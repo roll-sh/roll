@@ -1,0 +1,30 @@
+{
+  "command": [
+    "taskset",
+    "-c",
+    "32-35",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+    "--target",
+    "wire",
+    "--label",
+    "baseline",
+    "--port",
+    "53470",
+    "--db",
+    "perf_oltp20261102_clean_200000",
+    "--mem-pid",
+    "2375347",
+    "oltp",
+    "--rows",
+    "200000",
+    "--only",
+    "range_scan_100",
+    "--clients",
+    "8",
+    "--secs",
+    "30"
+  ],
+  "exit": 0,
+  "server_cpu_s": 117.67999999999998,
+  "client_cpu_s": 22.952178000000004
+}

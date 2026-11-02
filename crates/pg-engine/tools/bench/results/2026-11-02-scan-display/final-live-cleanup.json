@@ -1,0 +1,30 @@
+{
+  "pids": [
+    {
+      "pid": 2375347,
+      "absent": true
+    },
+    {
+      "pid": 2376692,
+      "absent": true
+    }
+  ],
+  "ports": [
+    {
+      "port": 53470,
+      "bind_available": true
+    },
+    {
+      "port": 53471,
+      "bind_available": true
+    }
+  ],
+  "containers": [
+    {
+      "id": "764f0ff0dd14cebde1eeeaa7d3fe9f216e113cbcf64eece8db067a191c721376",
+      "absent": true,
+      "inspect_stderr": "error: no such object: 764f0ff0dd14cebde1eeeaa7d3fe9f216e113cbcf64eece8db067a191c721376\n"
+    }
+  ],
+  "initial_audit_error": "Docker absence error used lowercase; first case-sensitive assertion failed before writing a record."
+}

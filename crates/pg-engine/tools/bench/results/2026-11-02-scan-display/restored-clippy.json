@@ -1,0 +1,11 @@
+{
+  "exit": 0,
+  "command": [
+    "cargo",
+    "clippy"
+  ],
+  "source": "0cb59031 restored runtime source",
+  "log": "restored-clippy.log",
+  "warnings": "11 existing pg-engine lib warnings",
+  "scope": "Fresh dev-profile workspace Clippy after release restoration; not candidate validation."
+}
