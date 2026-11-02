@@ -1,0 +1,19 @@
+{
+  "retained_probe_removed": true,
+  "private_copy_removed": true,
+  "source_fixture_unchanged": true,
+  "executions": 480,
+  "checked_rows": 24240,
+  "phases": [
+    "primary",
+    "positive1",
+    "zero0",
+    "refused_extended_stats"
+  ],
+  "modes": [
+    "auto",
+    "custom",
+    "generic"
+  ],
+  "permanent_test_sha256": "49dd5480242c417cf204940784a7cc0ac1e2384ffc3d6b6701ab5cd84a1abada"
+}

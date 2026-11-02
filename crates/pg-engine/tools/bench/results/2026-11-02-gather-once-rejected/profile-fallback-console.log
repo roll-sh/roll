@@ -1,0 +1,13 @@
+Captured baseline 00-range_scan_100-8
+Captured candidate 00-range_scan_100-8
+Captured baseline 00-point_select-1
+Captured candidate 00-point_select-1
+Captured candidate 01-range_scan_100-8
+Captured baseline 01-range_scan_100-8
+Captured candidate 01-point_select-1
+Captured baseline 01-point_select-1
+Captured baseline 02-range_scan_100-8
+Captured candidate 02-range_scan_100-8
+Captured baseline 02-point_select-1
+Captured candidate 02-point_select-1
+Cleaned up owned engines/data and stopped/restored profiler budget

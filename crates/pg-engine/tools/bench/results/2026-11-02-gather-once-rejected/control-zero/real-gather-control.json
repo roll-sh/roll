@@ -1,0 +1,128 @@
+{
+  "samples": [
+    {
+      "round": 0,
+      "name": "baseline",
+      "checked_queries": 278,
+      "checked_rows": 1112000,
+      "elapsed_s": 20.036566524999216,
+      "server_cpu_s": 1.52,
+      "client_cpu_s": 7.936167
+    },
+    {
+      "round": 0,
+      "name": "candidate",
+      "checked_queries": 279,
+      "checked_rows": 1116000,
+      "elapsed_s": 20.04916643491015,
+      "server_cpu_s": 1.54,
+      "client_cpu_s": 7.857225
+    },
+    {
+      "round": 1,
+      "name": "candidate",
+      "checked_queries": 276,
+      "checked_rows": 1104000,
+      "elapsed_s": 20.074053713004105,
+      "server_cpu_s": 1.5499999999999998,
+      "client_cpu_s": 8.020146
+    },
+    {
+      "round": 1,
+      "name": "baseline",
+      "checked_queries": 275,
+      "checked_rows": 1100000,
+      "elapsed_s": 20.004903085064143,
+      "server_cpu_s": 1.46,
+      "client_cpu_s": 8.084499999999997
+    },
+    {
+      "round": 2,
+      "name": "baseline",
+      "checked_queries": 276,
+      "checked_rows": 1104000,
+      "elapsed_s": 20.042927514994517,
+      "server_cpu_s": 1.4899999999999998,
+      "client_cpu_s": 8.025140999999998
+    },
+    {
+      "round": 2,
+      "name": "candidate",
+      "checked_queries": 276,
+      "checked_rows": 1104000,
+      "elapsed_s": 20.05428643594496,
+      "server_cpu_s": 1.5699999999999998,
+      "client_cpu_s": 7.994786999999996
+    },
+    {
+      "round": 3,
+      "name": "candidate",
+      "checked_queries": 273,
+      "checked_rows": 1092000,
+      "elapsed_s": 20.013077770010568,
+      "server_cpu_s": 1.5100000000000007,
+      "client_cpu_s": 8.060166000000002
+    },
+    {
+      "round": 3,
+      "name": "baseline",
+      "checked_queries": 277,
+      "checked_rows": 1108000,
+      "elapsed_s": 20.067347585922107,
+      "server_cpu_s": 1.4700000000000006,
+      "client_cpu_s": 8.003788000000005
+    },
+    {
+      "round": 4,
+      "name": "baseline",
+      "checked_queries": 275,
+      "checked_rows": 1100000,
+      "elapsed_s": 20.04534356005024,
+      "server_cpu_s": 1.4799999999999995,
+      "client_cpu_s": 8.085643000000006
+    },
+    {
+      "round": 4,
+      "name": "candidate",
+      "checked_queries": 275,
+      "checked_rows": 1100000,
+      "elapsed_s": 20.03600738302339,
+      "server_cpu_s": 1.5099999999999998,
+      "client_cpu_s": 8.078608999999998
+    },
+    {
+      "round": 5,
+      "name": "candidate",
+      "checked_queries": 276,
+      "checked_rows": 1104000,
+      "elapsed_s": 20.051609456073493,
+      "server_cpu_s": 1.5299999999999994,
+      "client_cpu_s": 8.017465000000003
+    },
+    {
+      "round": 5,
+      "name": "baseline",
+      "checked_queries": 278,
+      "checked_rows": 1112000,
+      "elapsed_s": 20.052915923995897,
+      "server_cpu_s": 1.5100000000000007,
+      "client_cpu_s": 7.948386999999993
+    }
+  ],
+  "cpu_ratios": [
+    1.0577972999801468,
+    1.0536912751677854,
+    1.0422615932820014,
+    1.0202702702702704,
+    1.0205873884249919
+  ],
+  "latency_ratios": [
+    0.9998209713531172,
+    1.0005667296327816,
+    1.0119080058679106,
+    0.9995342470934018,
+    1.0071807536829553
+  ],
+  "passes": true,
+  "limit": "One-client checked full Seq scan under forced parallel costs. May be client-limited; no superiority claim. Separate from primary and declined-range statistics."
+}

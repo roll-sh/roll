@@ -1,0 +1,2 @@
+[ perf record: Woken up 183 times to write data ]
+[ perf record: Captured and wrote 46.034 MB /home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/00-point_select-1.data (736 samples) ]

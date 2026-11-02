@@ -1,0 +1,18 @@
+{
+  "pid": 105398,
+  "pgid": 105398,
+  "command": [
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/heavy.sh",
+    "python3",
+    "-I",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/gather-once/measure.py",
+    "--out",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/gather-once/monitor-correctness",
+    "--candidate-dir",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/gather-once/candidate-bin",
+    "--preflight-only",
+    "--monitor",
+    "--port0",
+    "53600"
+  ]
+}

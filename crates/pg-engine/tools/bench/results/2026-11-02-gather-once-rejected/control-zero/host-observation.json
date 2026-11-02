@@ -1,0 +1,5 @@
+{
+  "errors": [],
+  "stopped": true,
+  "scope": "Descriptive host CPU and frequency observation; not exclusive CPU ownership or profiling; starts before server launch and warmup."
+}

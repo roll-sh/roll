@@ -1,0 +1,38 @@
+{
+  "bench": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench",
+  "out": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-once/monitor-correctness/candidate-vs-baseline",
+  "db": "perf_oltp20261102_clean_200000",
+  "rows": 200000,
+  "rounds": 12,
+  "seconds": 20,
+  "client_cpus": "32-35",
+  "cases": {
+    "range_scan_100": [
+      8
+    ],
+    "point_select": [
+      1
+    ]
+  },
+  "psql_container": "7c02db7d9ff4dfc1797bd21d8c9a553bd6edf90d8eaec1673a3313b07f2d72f6",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "runtime_provenance": "runtime.json",
+  "targets": [
+    {
+      "name": "baseline",
+      "port": 53600,
+      "probe": {
+        "pid": 107002
+      },
+      "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33"
+    },
+    {
+      "name": "candidate",
+      "port": 53601,
+      "probe": {
+        "pid": 108216
+      },
+      "source": "ba093583867d75057d48865af2365525708f5dd1+6166b3c7a09d23216661ac68e0ca7c70570e15ce96cbf00c5777ffdb3cd975e1"
+    }
+  ]
+}

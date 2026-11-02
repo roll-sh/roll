@@ -1,0 +1,66 @@
+{
+  "at_utc": "2026-11-02T19:27:21.737795+00:00",
+  "source": "ba093583867d75057d48865af2365525708f5dd1+6166b3c7a09d23216661ac68e0ca7c70570e15ce96cbf00c5777ffdb3cd975e1",
+  "source_sha256": {
+    "crates/pg-engine/src/session/mod.rs": "b07ff4a4b0df5e93b670554824129916f1a9042f0174c7506a9c87e21b7d58d0",
+    "crates/pg-engine/src/session/gather_proof_tests.rs": "89bdd608db2d37b6d9033bc2f3d38de57b5f27ca1b95e65cd2a214a1b65e2cec",
+    "crates/pg-engine/src/sql/explain.rs": "d3a513fd5f0a2747f12019429081eca5f8cda7db3c66356770f8c5a45b54ade3",
+    "crates/pg-engine/src/sql/explain/gather_proof.rs": "81d958006eb495b13b77804d7b8c5ea020f303acc6ef2a34c246a9c8670d0a0c",
+    "crates/pg-engine/src/sql/literals.rs": "60e3477a6bcfddd21f5d9236e128faeb105db5d487d814d34b2fcf986751272a",
+    "crates/pg-engine/src/sql/paths.rs": "0b9bc8cc1e297763c5da868eee738022fbce7bcf9b0b7511d3226d4ac566d803",
+    "crates/pg-engine/src/sql/paths/parallel.rs": "92d982d732e86ab238b47e609ee29cf029964757368e826701cb8fb6d9e7f1ec"
+  },
+  "load": "6.34 6.97 5.39 1/3068 115324\n",
+  "engines": {
+    "baseline": {
+      "pid": 113237,
+      "port": 53602,
+      "sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/gather-once/proof-primary-p1/baseline-data --listen 127.0.0.1:53602 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n",
+      "nice": 19
+    },
+    "candidate": {
+      "pid": 114438,
+      "port": 53603,
+      "sha256": "8563c53a6152a843cefbb37aca43d2e6161a48526bcdb1e29d0a406bf1831196",
+      "executable": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-once/candidate-bin/roll-engine",
+      "cmdline": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-once/candidate-bin/roll-engine --data /home/meszmate/.cache/pg-engine-perf-20261102/gather-once/proof-primary-p1/candidate-data --listen 127.0.0.1:53603 --password pw --cache-mb 2048 -c maintenance_work_mem=256MB -c max_connections=100 ",
+      "affinity": [
+        28,
+        29,
+        30,
+        31
+      ],
+      "thread_affinities": [
+        [
+          28,
+          29,
+          30,
+          31
+        ]
+      ],
+      "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-t3code.slice/app-t3code-agents.slice/app-t3code-agents-a94ce8a31299.slice/t3code-codex-7e39f3e6.scope\n",
+      "nice": 19
+    }
+  },
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "declined_proof_phase": false,
+  "control_phase": null
+}

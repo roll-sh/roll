@@ -1,0 +1,149 @@
+{
+  "limits": "Inclusive ancestry overlaps. Finite snapshots and inlining obscure frames. Fractions are diagnostic weights, not removable CPU or phase time per operation. Whole-client CPU and sample-window work differ. No accepted gain.",
+  "workloads": {
+    "range_scan_100": {
+      "baseline": {
+        "samples": 11540,
+        "total_period": 235510201020,
+        "inclusive_fraction": {
+          "gathers": 0.2037261698440208,
+          "serial_describe": 0.17157712305025996,
+          "relation_model": 0.11351819757365685,
+          "partial_paths": 0.18630849220103987,
+          "builder_scan": 0.37677642980935877,
+          "endpoint_reads": 0.01317157712305026,
+          "probe": 0.0
+        },
+        "top_leaf_fraction": {
+          "[unresolved]": 0.0987001733102253,
+          "_mi_page_malloc_zero": 0.045060658578856154,
+          "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}": 0.03864818024263431,
+          "pg_engine::exec::sizing::fetched": 0.029462738301559793,
+          "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>": 0.025043327556325823,
+          "mi_free": 0.022790294627383016,
+          "<pg_engine::txn::Txn>::catalog": 0.022616984402079723,
+          "pg_engine::sql::expr::eval_here": 0.019410745233968803,
+          "mi_theap_malloc_aligned": 0.013431542461005199,
+          "pg_engine::exec::sizing::vis_for": 0.010138648180242635,
+          "<pg_engine::sql::costs::Est>::clauses": 0.009185441941074523,
+          "<alloc::vec::Vec<pg_engine::sql::expr::Expr> as core::clone::Clone>::clone": 0.00875216637781629,
+          "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next": 0.008665511265164644,
+          "<pg_engine::sql::costs::Est>::hist_ineq": 0.00805892547660312,
+          "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone": 0.007538994800693241,
+          "<pg_engine::sql::paths::Planner>::rel": 0.007452339688041595,
+          "<pg_engine::storage::sst::Block>::read": 0.007279029462738302,
+          "core::fmt::write": 0.007019064124783362,
+          "pg_engine::server::put_data_row": 0.006932409012131715,
+          "mi_malloc_aligned": 0.00658578856152513
+        }
+      },
+      "candidate": {
+        "samples": 11551,
+        "total_period": 235734690813,
+        "inclusive_fraction": {
+          "gathers": 0.20509046835771794,
+          "serial_describe": 0.1726257466885984,
+          "relation_model": 0.11609384468877154,
+          "partial_paths": 0.1870833694052463,
+          "builder_scan": 0.38368972383343436,
+          "endpoint_reads": 0.01246645312094191,
+          "probe": 0.00025971777335295646
+        },
+        "top_leaf_fraction": {
+          "[unresolved]": 0.09756731018959397,
+          "_mi_page_malloc_zero": 0.04856722361700286,
+          "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}": 0.04190113410094364,
+          "pg_engine::exec::sizing::fetched": 0.02701064842870747,
+          "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>": 0.025625486970825038,
+          "mi_free": 0.023547744784001384,
+          "<pg_engine::txn::Txn>::catalog": 0.022335728508354254,
+          "pg_engine::sql::expr::eval_here": 0.0200848411392953,
+          "mi_theap_malloc_aligned": 0.012812743485412519,
+          "<pg_engine::sql::costs::Est>::hist_ineq": 0.012206735347588954,
+          "<pg_engine::sql::costs::Est>::clauses": 0.01004242056964765,
+          "<alloc::vec::Vec<pg_engine::sql::expr::Expr> as core::clone::Clone>::clone": 0.008916976885118172,
+          "<pg_engine::exec::scan::ScanNode as pg_engine::exec::Node>::next": 0.00883040429400052,
+          "pg_engine::exec::sizing::vis_for": 0.008657259111765216,
+          "<pg_engine::catalog::pmap::PMap<u64>>::get": 0.007618388018353389,
+          "mi_malloc_aligned": 0.007358670245000433,
+          "core::fmt::write": 0.007012379880529824,
+          "<pg_engine::storage::sst::Block>::read": 0.007012379880529824,
+          "<pg_engine::sql::expr::Expr>::walk": 0.006666089516059215,
+          "<pg_engine::sql::paths::Planner>::rel": 0.006492944333823912
+        }
+      }
+    },
+    "point_select": {
+      "baseline": {
+        "samples": 2234,
+        "total_period": 45591836142,
+        "inclusive_fraction": {
+          "gathers": 0.42256042972247093,
+          "serial_describe": 0.12444046553267682,
+          "relation_model": 0.10966875559534467,
+          "partial_paths": 0.1414503133393017,
+          "builder_scan": 0.3594449418084154,
+          "endpoint_reads": 0.0,
+          "probe": 0.0
+        },
+        "top_leaf_fraction": {
+          "[unresolved]": 0.20501342882721577,
+          "_mi_page_malloc_zero": 0.049239033124440466,
+          "mi_free": 0.03312444046553268,
+          "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}": 0.018800358102059087,
+          "pg_engine::session::settings::find_any": 0.01477170993733214,
+          "mi_malloc_aligned": 0.01342882721575649,
+          "mi_theap_malloc_aligned": 0.012981199641897942,
+          "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>": 0.010743061772605193,
+          "<pg_engine::session::settings::Settings>::get_str::{closure#0}": 0.009400179051029543,
+          "<pg_engine::txn::Txn>::catalog": 0.008952551477170993,
+          "<pg_engine::sql::paths::Planner>::rel": 0.008057296329453895,
+          "<pg_engine::catalog::btsim::leaf::Leaf>::get": 0.008057296329453895,
+          "<pg_engine::sql::expr::Expr>::walk": 0.008057296329453895,
+          "<pg_engine::catalog::pmap::PMap<u64>>::get": 0.007609668755595345,
+          "__rustc::__rust_alloc": 0.007162041181736795,
+          "pg_engine::server::message_loop": 0.007162041181736795,
+          "pg_engine::sql::explain::assign_refnames_skip": 0.006266786034019696,
+          "<pg_engine::session::Session>::run_query": 0.005371530886302597,
+          "alloc::fmt::format::format_inner": 0.004923903312444047,
+          "__rustc::__rust_no_alloc_shim_is_unstable_v2": 0.004923903312444047
+        }
+      },
+      "candidate": {
+        "samples": 2253,
+        "total_period": 45979591239,
+        "inclusive_fraction": {
+          "gathers": 0.4332001775410564,
+          "serial_describe": 0.12738570794496226,
+          "relation_model": 0.11362627607634265,
+          "partial_paths": 0.14602751886373724,
+          "builder_scan": 0.3586329338659565,
+          "endpoint_reads": 0.0,
+          "probe": 0.0004438526409232135
+        },
+        "top_leaf_fraction": {
+          "[unresolved]": 0.18153573013759433,
+          "_mi_page_malloc_zero": 0.04749223257878384,
+          "mi_free": 0.02885042166000888,
+          "<pg_engine::sql::expr::Expr as core::clone::Clone>::clone::{closure#0}": 0.018197958277851752,
+          "mi_theap_malloc_aligned": 0.011984021304926764,
+          "pg_engine::session::settings::find_any": 0.010652463382157125,
+          "core::ptr::drop_glue::<pg_engine::sql::expr::Expr>": 0.009320905459387484,
+          "<pg_engine::session::Session>::run_query": 0.009320905459387484,
+          "pg_engine::sql::explain::assign_refnames_skip": 0.00887705281846427,
+          "mi_malloc_aligned": 0.007989347536617843,
+          "<pg_engine::storage::sst::Block>::seek": 0.007101642254771416,
+          "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write": 0.007101642254771416,
+          "<pg_engine::session::settings::Settings>::get_str::{closure#0}": 0.007101642254771416,
+          "<pg_engine::catalog::pmap::PMap<u64>>::get": 0.006213936972924989,
+          "__rustc::__rust_dealloc": 0.006213936972924989,
+          "<pg_engine::catalog::btsim::leaf::Leaf>::get": 0.006213936972924989,
+          "<pg_engine::txn::Txn>::catalog": 0.006213936972924989,
+          "<pg_engine::sql::paths::Planner>::rel": 0.006213936972924989,
+          "pg_engine::server::message_loop": 0.006213936972924989,
+          "<pg_engine::storage::sst::SstReader>::find_block": 0.006213936972924989
+        }
+      }
+    }
+  }
+}

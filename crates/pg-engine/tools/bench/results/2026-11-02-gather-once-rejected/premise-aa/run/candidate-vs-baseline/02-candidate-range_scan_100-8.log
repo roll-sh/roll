@@ -1,0 +1,1 @@
+RESULT	candidate	oltp	range_scan_100	clients=8	tps=7387	ops=110809	elapsed_s=15.001490280	mean_ms=1.082	p50_ms=1.036	p95_ms=1.771	p99_ms=2.601	errors=0	peak_mem_mb=110.4	validation_version=oltp-values-v1	checked_ops=110809

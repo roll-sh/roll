@@ -1,0 +1,247 @@
+diff --git a/crates/pg-engine/src/session/mod.rs b/crates/pg-engine/src/session/mod.rs
+index 5664206b..a672cbd7 100644
+--- a/crates/pg-engine/src/session/mod.rs
++++ b/crates/pg-engine/src/session/mod.rs
+@@ -2,6 +2,8 @@
+ //! cursors. The wire server drives it message by message; tests drive it directly.
+ 
+ pub mod copy;
++#[cfg(test)]
++mod gather_proof_tests;
+ mod createdb;
+ pub mod current;
+ pub mod cursor;
+diff --git a/crates/pg-engine/src/sql/explain.rs b/crates/pg-engine/src/sql/explain.rs
+index 75d50d26..465300ce 100644
+--- a/crates/pg-engine/src/sql/explain.rs
++++ b/crates/pg-engine/src/sql/explain.rs
+@@ -5,8 +5,9 @@
+ //! subqueries become numbered SubPlan / InitPlan sections. ANALYZE reads the per-node
+ //! counters the executor keeps in `ExecCtx::instr`.
+ 
+-mod parallel;
++mod gather_proof;
+ mod overexplain;
++mod parallel;
+ pub use parallel::analyzed_plan;
+ pub(crate) mod pwagg;
+ 
+@@ -702,6 +703,8 @@ impl Built {
+ }
+ 
+ struct Builder<'c, 'a> {
++    /// Execution Gather discovery may omit proven losing partial paths for one leaf.
++    gather_probe: Option<gather_proof::Probe>,
+     ctx: &'c ExecCtx<'a>,
+     o: &'c Options,
+     /// More than one relation in the statement: upper expressions qualify columns.
+@@ -11650,6 +11653,9 @@ impl Builder<'_, '_> {
+                 .filter(|e| e.columns().is_empty() && !super::paths::expr_volatile_deep(e) && !in_phv(e))
+                 .cloned()
+                 .collect();
++            let prune_partials = self.gather_probe.as_mut().is_some_and(|probe| {
++                probe.prune(p, s, &d, self.ctx, self.par.as_ref(), self.member_scan)
++            });
+             let mut n = self.planned_scan(p, s, d, &names);
+             n.rel_order = s.reltarget.0.iter().filter_map(|&c| names.get(c)).map(|nm| self.pick(nm, Cx::Output)).collect();
+             n.width = width;
+@@ -11662,7 +11668,9 @@ impl Builder<'_, '_> {
+             n.cols = cols;
+             n.key = Some(addr(p));
+             n.subplans.append(&mut self.pending);
+-            if gating.is_empty() && s.mark.is_none() {
++            if prune_partials {
++                n.par_safe = true;
++            } else if gating.is_empty() && s.mark.is_none() {
+                 match self.partial_scans(p, s, &names, &n) {
+                     Some((pn, _)) if pn.node_type.is_empty() => n.par_safe = true,
+                     Some((pn, others)) => {
+@@ -18951,6 +18959,7 @@ fn estimate_options() -> Options {
+ fn estimate_builder<'c, 'a>(plan: &Arc<Plan>, ctx: &'c ExecCtx<'a>, o: &'c Options) -> Builder<'c, 'a> {
+     let (refnames, _) = assign_refnames(plan);
+     Builder {
++        gather_probe: None,
+         ctx,
+         o,
+         prefix: true,
+@@ -19560,6 +19569,7 @@ pub fn setop_shape(left: &Arc<Plan>, right: &Arc<Plan>, intersect: bool, ctx: &E
+     let groups = |p: &Arc<Plan>| {
+         let (refnames, _) = assign_refnames(p);
+         let mut b = Builder {
++            gather_probe: None,
+             ctx,
+             o: &o,
+             prefix: true,
+@@ -19660,6 +19670,7 @@ pub fn set_group_estimates(
+     };
+     let (refnames, _) = assign_refnames(input);
+     let mut b = Builder {
++        gather_probe: None,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -19838,6 +19849,7 @@ pub fn agg_redundant_keys(
+     };
+     let (refnames, _) = assign_refnames(input);
+     let mut b = Builder {
++        gather_probe: None,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -19927,6 +19939,7 @@ pub fn sets_sorted(plan: &Arc<Plan>, ctx: &ExecCtx) -> bool {
+     };
+     let (refnames, _) = assign_refnames(plan);
+     let mut b = Builder {
++        gather_probe: None,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -20044,6 +20057,7 @@ fn level_node(plan: &Arc<Plan>, ctx: &ExecCtx) -> ExNode {
+     };
+     let (refnames, _) = assign_refnames(plan);
+     let mut b = Builder {
++        gather_probe: None,
+         ctx,
+         o: &o,
+         prefix: true,
+@@ -20117,6 +20131,18 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
+ /// plans (pg_stat_statements' parallel_workers_to_launch; the engine runs them all, so they
+ /// are the launched ones too).
+ pub fn gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<(Option<usize>, usize)> {
++    let o = estimate_options();
++    let mut b = estimate_builder(plan, ctx, &o);
++    b.gather_probe = gather_proof::Probe::for_root(plan);
++    let root = b.level(plan);
++    #[cfg(debug_assertions)]
++    if let Some(probe) = &b.gather_probe {
++        probe.check_root(&root);
++    }
++    gather_sites(&root)
++}
++
++fn gather_sites(root: &ExNode) -> Vec<(Option<usize>, usize)> {
+     fn first_key(n: &ExNode) -> Option<usize> {
+         n.key.or_else(|| n.children.iter().find_map(first_key))
+     }
+@@ -20127,13 +20153,29 @@ pub fn gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<(Option<usize>, usize)> {
+         }
+         n.children.iter().for_each(|c| walk(c, out));
+     }
+-    let o = estimate_options();
+-    let mut b = estimate_builder(plan, ctx, &o);
+     let mut out = Vec::new();
+-    walk(&b.level(plan), &mut out);
++    walk(root, &mut out);
+     out
+ }
+ 
++#[cfg(test)]
++pub(crate) type GatherComparison = (
++    super::paths::test_counts::Counts,
++    Vec<(Option<usize>, usize)>,
++    super::paths::test_counts::Counts,
++);
++
++#[cfg(test)]
++pub(crate) fn gather_comparison(plan: &Arc<Plan>, ctx: &ExecCtx) -> GatherComparison {
++    let (optimized, counts) = super::paths::test_counts::record(|| gathers(plan, ctx));
++    let (original, original_counts) = super::paths::test_counts::record(|| {
++        let o = estimate_options();
++        gather_sites(&estimate_builder(plan, ctx, &o).level(plan))
++    });
++    assert_eq!(optimized, original, "Gather sites/workers changed");
++    (counts, original, original_counts)
++}
++
+ /// `estimate` of a sub-select's plan (a level of its own): every `Outer(d, ..)` in it is a
+ /// value of an enclosing level, so a sub-select of it reading only those is an InitPlan its
+ /// top node pays for once (SS_charge_for_initplans), not a SubPlan run per row.
+@@ -21214,6 +21256,7 @@ fn explained_tree(plan: &Arc<Plan>, hidden_rtes: usize, o: &Options, ctx: &ExecC
+     let excluded = excluded_rte(plan) as usize;
+     let names_before = refnames.clone();
+     let mut b = Builder {
++        gather_probe: None,
+         ctx,
+         o,
+         // (An inheritance tree's parent is a range table entry besides its members.)
+diff --git a/crates/pg-engine/src/sql/literals.rs b/crates/pg-engine/src/sql/literals.rs
+index 201c9f5e..00432a69 100644
+--- a/crates/pg-engine/src/sql/literals.rs
++++ b/crates/pg-engine/src/sql/literals.rs
+@@ -401,6 +401,11 @@ thread_local! {
+     static READS: RefCell<Option<Vec<SizeRead>>> = const { RefCell::new(None) };
+ }
+ 
++/// Whether a caller is collecting planner dependencies.
++pub(crate) fn is_recording() -> bool {
++    READS.with_borrow(Option::is_some)
++}
++
+ /// Note what the planner read, while `recording`.
+ pub fn note_read(r: impl FnOnce() -> SizeRead) {
+     READS.with(|x| {
+diff --git a/crates/pg-engine/src/sql/paths.rs b/crates/pg-engine/src/sql/paths.rs
+index 6ab2725e..2218b924 100644
+--- a/crates/pg-engine/src/sql/paths.rs
++++ b/crates/pg-engine/src/sql/paths.rs
+@@ -3620,6 +3620,8 @@ fn limit_costs(p: &Path, count: f64, offset: f64) -> (f64, f64) {
+ 
+ impl Planner<'_, '_> {
+     fn rel(&self, s: &ScanPlan, needed: &[bool]) -> Option<Rel> {
++        #[cfg(test)]
++        test_counts::note(|n| n.relations += 1);
+         let t = s.table.clone();
+         let (size, allvisfrac) = rel_size(&t, self.ctx);
+         let mut quals = Vec::new();
+@@ -4481,6 +4483,8 @@ fn bitmap_indexquals(q: &BitmapQual) -> Vec<Expr> {
+ 
+ /// EXPLAIN's view of a planned scan (None: not planned by cost).
+ pub fn describe(ctx: &ExecCtx, s: &ScanPlan) -> Option<ScanDesc> {
++    #[cfg(test)]
++    test_counts::note(|n| n.serial += 1);
+     describe_with(ctx, s, None)
+ }
+ 
+@@ -7119,3 +7123,29 @@ pub(crate) fn lateral_memo_keys(right: &Plan, params: &[Expr]) -> Vec<Expr> {
+     }
+     keys
+ }
++
++#[cfg(test)]
++pub(crate) mod test_counts {
++    use std::cell::Cell;
++    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++    pub(crate) struct Counts {
++        pub serial: usize,
++        pub relations: usize,
++        pub partials: usize,
++        pub attempted: usize,
++        pub proved: usize,
++    }
++    thread_local! { static COUNTS: Cell<Counts> = Cell::new(Counts::default()); }
++    pub(crate) fn note(f: impl FnOnce(&mut Counts)) {
++        COUNTS.with(|c| {
++            let mut n = c.get();
++            f(&mut n);
++            c.set(n);
++        });
++    }
++    pub(crate) fn record<T>(f: impl FnOnce() -> T) -> (T, Counts) {
++        let outer = COUNTS.replace(Counts::default());
++        let value = f();
++        (value, COUNTS.replace(outer))
++    }
++}
+diff --git a/crates/pg-engine/src/sql/paths/parallel.rs b/crates/pg-engine/src/sql/paths/parallel.rs
+index e7024607..b1868e54 100644
+--- a/crates/pg-engine/src/sql/paths/parallel.rs
++++ b/crates/pg-engine/src/sql/paths/parallel.rs
+@@ -323,6 +323,8 @@ pub fn partial_scans(
+     needed: &[bool],
+     member: bool,
+ ) -> Option<Option<(PartialScan, Vec<PartialScan>)>> {
++    #[cfg(test)]
++    super::test_counts::note(|n| n.partials += 1);
+     let cfg = ParCfg::read(ctx);
+     if cfg.max_workers == 0
+         || s.table.temporary

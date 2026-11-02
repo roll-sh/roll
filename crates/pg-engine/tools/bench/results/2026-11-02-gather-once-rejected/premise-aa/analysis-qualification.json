@@ -1,0 +1,26 @@
+{
+  "at_utc": "2026-11-02T20:27:37.361825+00:00",
+  "supersedes": "analysis.json comparison_instability_observed=false as a prospective calibration finding, and trail row142 inside3pct finding",
+  "reason": "Analyzer was written after data and not frozen; prospective rule did not specify median aggregation. Do not choose the interpretation after observing data.",
+  "median_ratios_are_exploratory_descriptions": true,
+  "outside_individual_pairs": [
+    {
+      "case": "range_scan_100",
+      "pair": 2,
+      "ratio": 1.0480987514188422
+    },
+    {
+      "case": "range_scan_100",
+      "pair": 4,
+      "ratio": 1.0359026963657678
+    },
+    {
+      "case": "point_select",
+      "pair": 4,
+      "ratio": 1.0579336427711878
+    }
+  ],
+  "calibration_pass_claim_withdrawn": true,
+  "conditioning_limit": "A/A omitted the preceding CREATE/INSERT/ANALYZE/Gather/DROP workload used by control-zero; it cannot rule out that state interaction",
+  "original_rejections_unchanged": true
+}

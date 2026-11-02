@@ -1,0 +1,30 @@
+{
+  "benchmark_executed": false,
+  "tests": [
+    {
+      "synthetic_phase": null,
+      "saved_rejected_trial_numeric_data": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-primary-p1",
+      "performance_gate": true,
+      "wrong_phase_rejected": true
+    },
+    {
+      "synthetic_phase": "zero",
+      "saved_rejected_trial_numeric_data": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-declined-p1",
+      "performance_gate": false,
+      "wrong_phase_rejected": true
+    },
+    {
+      "synthetic_phase": "positive",
+      "saved_rejected_trial_numeric_data": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-declined-p1",
+      "performance_gate": false,
+      "wrong_phase_rejected": true
+    },
+    {
+      "synthetic_phase": "refused",
+      "saved_rejected_trial_numeric_data": "/home/meszmate/.cache/pg-engine-perf-20261102/gather-lifecycle/proof-declined-p1",
+      "performance_gate": false,
+      "wrong_phase_rejected": true
+    }
+  ],
+  "scope": "Synthetic metadata against prior saved raw results; not a new experiment or evidence for this candidate."
+}

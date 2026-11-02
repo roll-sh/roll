@@ -1,0 +1,10 @@
+{
+  "files": 448,
+  "action": "rejected and reverted",
+  "trial_invocations": 76,
+  "trial_checked_operations": 10654921,
+  "actual_gather_checked_rows": 13256000,
+  "baseline_AA_checked_operations": 2476096,
+  "full_source_acceptance": false,
+  "limit": "Checks durable records only; cannot recheck live processes or original binaries, recover omitted raw perf data, or independently prove each frozen source invariant."
+}

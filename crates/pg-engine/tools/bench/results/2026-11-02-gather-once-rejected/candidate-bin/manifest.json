@@ -1,0 +1,38 @@
+{
+  "at_utc": "2026-11-02T19:25:02.941781+00:00",
+  "source": "ba093583867d75057d48865af2365525708f5dd1+6166b3c7a09d23216661ac68e0ca7c70570e15ce96cbf00c5777ffdb3cd975e1",
+  "source_identity_kind": "HEAD plus SHA256 of sorted seven-file hash map",
+  "binary_sha256": "8563c53a6152a843cefbb37aca43d2e6161a48526bcdb1e29d0a406bf1831196",
+  "source_sha256": {
+    "crates/pg-engine/src/session/mod.rs": "b07ff4a4b0df5e93b670554824129916f1a9042f0174c7506a9c87e21b7d58d0",
+    "crates/pg-engine/src/session/gather_proof_tests.rs": "89bdd608db2d37b6d9033bc2f3d38de57b5f27ca1b95e65cd2a214a1b65e2cec",
+    "crates/pg-engine/src/sql/explain.rs": "d3a513fd5f0a2747f12019429081eca5f8cda7db3c66356770f8c5a45b54ade3",
+    "crates/pg-engine/src/sql/explain/gather_proof.rs": "81d958006eb495b13b77804d7b8c5ea020f303acc6ef2a34c246a9c8670d0a0c",
+    "crates/pg-engine/src/sql/literals.rs": "60e3477a6bcfddd21f5d9236e128faeb105db5d487d814d34b2fcf986751272a",
+    "crates/pg-engine/src/sql/paths.rs": "0b9bc8cc1e297763c5da868eee738022fbce7bcf9b0b7511d3226d4ac566d803",
+    "crates/pg-engine/src/sql/paths/parallel.rs": "92d982d732e86ab238b47e609ee29cf029964757368e826701cb8fb6d9e7f1ec"
+  },
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "build_command": [
+    "cargo",
+    "build",
+    "-p",
+    "pg-engine",
+    "--release",
+    "--bin",
+    "roll-engine",
+    "--example",
+    "bench",
+    "--example",
+    "scan_bench"
+  ],
+  "environment": {
+    "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only"
+  },
+  "dependency_fingerprint_matches_baseline": true,
+  "matching_fingerprint_paths": [
+    "/home/meszmate/worktrees/roll/t3-d4020b98/target/release/.fingerprint/pg-engine-b90198ef267a1eed/lib-pg_engine.json"
+  ],
+  "dependency_count": 46,
+  "release_build_log_sha256": "f4f773f570370e7ce4a874f107f78f754ced535746071be5a0376bcb69322129"
+}

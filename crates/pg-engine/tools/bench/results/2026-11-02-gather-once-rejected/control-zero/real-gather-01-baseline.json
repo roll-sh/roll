@@ -1,0 +1,9 @@
+{
+  "round": 1,
+  "name": "baseline",
+  "checked_queries": 275,
+  "checked_rows": 1100000,
+  "elapsed_s": 20.004903085064143,
+  "server_cpu_s": 1.46,
+  "client_cpu_s": 8.084499999999997
+}

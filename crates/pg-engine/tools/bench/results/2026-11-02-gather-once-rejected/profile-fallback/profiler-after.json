@@ -1,0 +1,223 @@
+{
+  "Id": "813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca",
+  "Created": "2026-11-01T19:51:34.286700209Z",
+  "Path": "sleep",
+  "Args": [
+    "infinity"
+  ],
+  "State": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 143,
+    "Error": "",
+    "StartedAt": "2026-11-02T20:07:49.389005646Z",
+    "FinishedAt": "2026-11-02T20:14:05.719685185Z"
+  },
+  "Image": "sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f",
+  "ResolvConfPath": "/var/lib/docker/containers/813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca/resolv.conf",
+  "HostnamePath": "/var/lib/docker/containers/813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca/hostname",
+  "HostsPath": "/var/lib/docker/containers/813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca/hosts",
+  "LogPath": "/var/lib/docker/containers/813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca/813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca-json.log",
+  "Name": "/t3-d4020b98-perf-profiler",
+  "RestartCount": 0,
+  "Driver": "overlayfs",
+  "Platform": "linux",
+  "MountLabel": "",
+  "ProcessLabel": "",
+  "AppArmorProfile": "unconfined",
+  "ExecIDs": null,
+  "HostConfig": {
+    "Binds": [
+      "/home/meszmate/worktrees/roll/t3-d4020b98/target:/home/meszmate/worktrees/roll/t3-d4020b98/target:ro",
+      "/home/meszmate/.cache/pg-engine-perf-20261101:/home/meszmate/.cache/pg-engine-perf-20261101",
+      "/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:ro",
+      "/lib64:/lib64:ro"
+    ],
+    "ContainerIDFile": "",
+    "LogConfig": {
+      "Type": "json-file",
+      "Config": {}
+    },
+    "NetworkMode": "bridge",
+    "PortBindings": {},
+    "RestartPolicy": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "AutoRemove": false,
+    "VolumeDriver": "",
+    "VolumesFrom": null,
+    "ConsoleSize": [
+      0,
+      0
+    ],
+    "CapAdd": null,
+    "CapDrop": null,
+    "CgroupnsMode": "private",
+    "Dns": null,
+    "DnsOptions": [],
+    "DnsSearch": [],
+    "ExtraHosts": null,
+    "GroupAdd": null,
+    "IpcMode": "private",
+    "Cgroup": "",
+    "Links": null,
+    "OomScoreAdj": 0,
+    "PidMode": "host",
+    "Privileged": true,
+    "PublishAllPorts": false,
+    "ReadonlyRootfs": false,
+    "SecurityOpt": [
+      "label=disable"
+    ],
+    "UTSMode": "",
+    "UsernsMode": "",
+    "ShmSize": 67108864,
+    "Runtime": "runc",
+    "Isolation": "",
+    "CpuShares": 0,
+    "Memory": 536870912,
+    "NanoCpus": 0,
+    "CgroupParent": "",
+    "BlkioWeight": 0,
+    "BlkioWeightDevice": [],
+    "BlkioDeviceReadBps": [],
+    "BlkioDeviceWriteBps": [],
+    "BlkioDeviceReadIOps": [],
+    "BlkioDeviceWriteIOps": [],
+    "CpuPeriod": 0,
+    "CpuQuota": 0,
+    "CpuRealtimePeriod": 0,
+    "CpuRealtimeRuntime": 0,
+    "CpusetCpus": "",
+    "CpusetMems": "",
+    "Devices": [],
+    "DeviceCgroupRules": null,
+    "DeviceRequests": null,
+    "MemoryReservation": 0,
+    "MemorySwap": 536870912,
+    "MemorySwappiness": null,
+    "OomKillDisable": null,
+    "PidsLimit": null,
+    "Ulimits": null,
+    "CpuCount": 0,
+    "CpuPercent": 0,
+    "IOMaximumIOps": 0,
+    "IOMaximumBandwidth": 0,
+    "MaskedPaths": null,
+    "ReadonlyPaths": null
+  },
+  "Storage": {
+    "RootFS": {
+      "Snapshot": {
+        "Name": "overlayfs"
+      }
+    }
+  },
+  "Mounts": [
+    {
+      "Type": "bind",
+      "Source": "/lib64",
+      "Destination": "/lib64",
+      "Mode": "ro",
+      "RW": false,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "bind",
+      "Source": "/lib/x86_64-linux-gnu",
+      "Destination": "/lib/x86_64-linux-gnu",
+      "Mode": "ro",
+      "RW": false,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "bind",
+      "Source": "/home/meszmate/.cache/pg-engine-perf-20261101",
+      "Destination": "/home/meszmate/.cache/pg-engine-perf-20261101",
+      "Mode": "",
+      "RW": true,
+      "Propagation": "rprivate"
+    },
+    {
+      "Type": "bind",
+      "Source": "/home/meszmate/worktrees/roll/t3-d4020b98/target",
+      "Destination": "/home/meszmate/worktrees/roll/t3-d4020b98/target",
+      "Mode": "ro",
+      "RW": false,
+      "Propagation": "rprivate"
+    }
+  ],
+  "Config": {
+    "Hostname": "813b04eed73f",
+    "Domainname": "",
+    "User": "",
+    "AttachStdin": false,
+    "AttachStdout": false,
+    "AttachStderr": false,
+    "Tty": false,
+    "OpenStdin": false,
+    "StdinOnce": false,
+    "Env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ],
+    "Cmd": [
+      "sleep",
+      "infinity"
+    ],
+    "Image": "alpine:3.22",
+    "Volumes": null,
+    "WorkingDir": "/",
+    "Entrypoint": null,
+    "Labels": {
+      "agent.worktree": "t3-d4020b98"
+    }
+  },
+  "NetworkSettings": {
+    "SandboxID": "",
+    "SandboxKey": "",
+    "Ports": {},
+    "Networks": {
+      "bridge": {
+        "IPAMConfig": null,
+        "Links": null,
+        "Aliases": null,
+        "DriverOpts": null,
+        "GwPriority": 0,
+        "NetworkID": "76d3aee3220a38972b6656769bff6ef1316b91bdd34ca9f669ccd1a38d03a4f2",
+        "EndpointID": "",
+        "Gateway": "",
+        "IPAddress": "",
+        "MacAddress": "",
+        "IPPrefixLen": 0,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "DNSNames": null
+      }
+    }
+  },
+  "ImageManifestDescriptor": {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:dc92f017beea8e7f43263073d717f7bc011228c95d5312e440deb4d035bb4eec",
+    "size": 1022,
+    "annotations": {
+      "com.docker.official-images.bashbrew.arch": "amd64",
+      "org.opencontainers.image.base.name": "scratch",
+      "org.opencontainers.image.created": "2026-10-21T20:47:05Z",
+      "org.opencontainers.image.revision": "0f41d588b1c2b004dfc99868bbe7ce4d37b99790",
+      "org.opencontainers.image.source": "https://github.com/alpinelinux/docker-alpine.git#0f41d588b1c2b004dfc99868bbe7ce4d37b99790:x86_64",
+      "org.opencontainers.image.url": "https://hub.docker.com/_/alpine",
+      "org.opencontainers.image.version": "3.22.7"
+    },
+    "platform": {
+      "architecture": "amd64",
+      "os": "linux"
+    }
+  }
+}

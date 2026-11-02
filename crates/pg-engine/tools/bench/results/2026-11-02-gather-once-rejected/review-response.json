@@ -1,0 +1,14 @@
+{
+  "at_utc": "2026-11-02T20:30:10.968109+00:00",
+  "review": "rejection-review-r1.json",
+  "corrections": {
+    "AA_rule": "Original analysis retained; prospective median-pass claim withdrawn in analysis-qualification.json; three individual pairs outside band; omission of earlier Gather state disclosed",
+    "target_quarantine": "Only convenience copies initially quarantined; fresh matched baseline build replaced hashed binaries and rlib; resulting engine SHA exactly5cfc7904",
+    "cause": "No third production fix started; profile fractions do not identify slowdown source",
+    "tests": "Call counts are test-build observations, not release instrumentation; builtin-identity and parallel-unsafe guard tests remain required if design is reused",
+    "Gather": "Five CPU ratios above one and client-limited wall times disclosed; plain EXPLAIN is not launch observation",
+    "trail": "Appended correction, profile/decode/tools and fresh-build records; earlier timestamps preserved append-only",
+    "disk": "Regenerable perf replays deleted, raw originals and classified stacks retained locally"
+  },
+  "limits": "Reviewer audited durable scratch and partial transcript, not the subsequently created export/verifier. No source acceptance."
+}

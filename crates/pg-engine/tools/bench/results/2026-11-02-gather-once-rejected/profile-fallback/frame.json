@@ -1,0 +1,14 @@
+{
+  "at_utc": "2026-11-02T20:07:51.220402+00:00",
+  "purpose": "Separate comparative CPU ancestry for zero-setup declined proof. No acceptance or profiled speed claim. Three counterbalanced captures per workload/arm;49Hz20s window inside30s checked invocation.",
+  "inputs": {
+    "/home/meszmate/.cache/pg-engine-perf-20261102/gather-once/profile_fallback.py": "005f5b4a0e12a71d2ae0ee04e5a1a3959760aab8a4b8cc7f331fb8e6eb902803",
+    "/home/meszmate/.cache/pg-engine-perf-20261102/planning-diagnostic/diagnose.py": "c4cab2124d78f7e37e4f2ea0934995d6af967d709ead9361fb57be99aa7d59d7",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/normalize-maps.py": "52a201ba6dd7abcbba390dbe6cff99549bb5c7aeca90bbabb58fad478b116428",
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/paired_oltp.py": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tests/clients/wire.py": "ecb0dde8aa6bda441a642a11a71f6ea5cfc1d1d8b79a8a74e8653b37e61e698b",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/roll-engine": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/candidate/roll-engine": "8563c53a6152a843cefbb37aca43d2e6161a48526bcdb1e29d0a406bf1831196"
+  }
+}

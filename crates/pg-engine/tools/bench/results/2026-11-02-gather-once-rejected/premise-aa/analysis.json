@@ -1,0 +1,31 @@
+{
+  "kind": "baseline AA diagnostic only",
+  "rejected_candidate_acceptance_evidence": false,
+  "ratios": {
+    "range_scan_100": {
+      "paired_ratios": [
+        1.004863301787592,
+        1.0480987514188422,
+        0.9945896014779625,
+        1.0359026963657678,
+        1.015267175572519
+      ],
+      "median": 1.015267175572519,
+      "outside_three_percent_band": false
+    },
+    "point_select": {
+      "paired_ratios": [
+        1.0097342398022249,
+        1.0216647662485747,
+        0.9943890274314214,
+        1.0579336427711878,
+        1.0221107103653755
+      ],
+      "median": 1.0216647662485747,
+      "outside_three_percent_band": false
+    }
+  },
+  "checked_operations": 2476096,
+  "invocations": 24,
+  "comparison_instability_observed": false
+}

@@ -1,0 +1,14 @@
+[
+  {
+    "arm": "baseline",
+    "pid": 975166,
+    "exit": 0,
+    "stopped": true
+  },
+  {
+    "arm": "candidate",
+    "pid": 976633,
+    "exit": 0,
+    "stopped": true
+  }
+]

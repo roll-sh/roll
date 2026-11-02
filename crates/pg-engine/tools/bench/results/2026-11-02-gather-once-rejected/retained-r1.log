@@ -1,0 +1,34 @@
+   Compiling pg-engine v0.1.0 (/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 40.83s
+     Running unittests src/lib.rs (target/debug/deps/pg_engine-bc518221d668f0bf)
+
+running 1 test
+retained phase=primary mode=auto rows=100 counts=Counts { serial: 1, relations: 1, partials: 0, attempted: 1, proved: 1 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=primary mode=auto rows=1 counts=Counts { serial: 1, relations: 1, partials: 0, attempted: 1, proved: 1 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=primary mode=force_custom_plan rows=100 counts=Counts { serial: 1, relations: 1, partials: 0, attempted: 1, proved: 1 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=primary mode=force_custom_plan rows=1 counts=Counts { serial: 1, relations: 1, partials: 0, attempted: 1, proved: 1 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=primary mode=force_generic_plan rows=100 counts=Counts { serial: 1, relations: 1, partials: 0, attempted: 1, proved: 1 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=primary mode=force_generic_plan rows=1 counts=Counts { serial: 1, relations: 1, partials: 0, attempted: 1, proved: 1 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=positive mode=auto rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=positive mode=auto rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=positive mode=force_custom_plan rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=positive mode=force_custom_plan rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=positive mode=force_generic_plan rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=positive mode=force_generic_plan rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=zero mode=auto rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=zero mode=auto rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=zero mode=force_custom_plan rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=zero mode=force_custom_plan rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=zero mode=force_generic_plan rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=zero mode=force_generic_plan rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=refused mode=auto rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=refused mode=auto rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=refused mode=force_custom_plan rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=refused mode=force_custom_plan rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained phase=refused mode=force_generic_plan rows=100 counts=Counts { serial: 1, relations: 4, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 4, partials: 1, attempted: 0, proved: 0 }
+retained phase=refused mode=force_generic_plan rows=1 counts=Counts { serial: 1, relations: 3, partials: 1, attempted: 1, proved: 0 } original=Counts { serial: 1, relations: 3, partials: 1, attempted: 0, proved: 0 }
+retained-checked executions=480 rows=24240
+test session::gather_proof_tests::retained_gather_once_probe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 176 filtered out; finished in 5.89s
+

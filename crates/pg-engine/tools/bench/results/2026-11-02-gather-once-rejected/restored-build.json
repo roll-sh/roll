@@ -1,0 +1,33 @@
+{
+  "at_utc": "2026-11-02T20:27:32.415767+00:00",
+  "binary_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "build_exit": 0,
+  "engine_diff": "",
+  "source_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "baseline_source_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "command": [
+    "cargo",
+    "build",
+    "-p",
+    "pg-engine",
+    "--release",
+    "--bin",
+    "roll-engine",
+    "--example",
+    "bench",
+    "--example",
+    "scan_bench"
+  ],
+  "environment": {
+    "CARGO_PROFILE_RELEASE_DEBUG": "line-tables-only"
+  },
+  "build_log": "restored-release-build-r1.log",
+  "entrypoints_sha256": {
+    "target/release/roll-engine": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "target/release/deps/roll_engine-f80624e2a0166d50": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "target/release/examples/bench": "1021ce1e749f0508846fb0196ad56e630f10b1b28704a5de9ff058388abd1d2f",
+    "target/release/examples/bench-4edc62d11fce5de5": "1021ce1e749f0508846fb0196ad56e630f10b1b28704a5de9ff058388abd1d2f",
+    "target/release/examples/scan_bench": "173404586fd93268047f9ce33f7b25b3513ad440f52d4703ab5286bf3ef40dda",
+    "target/release/examples/scan_bench-98e75de311e6161e": "173404586fd93268047f9ce33f7b25b3513ad440f52d4703ab5286bf3ef40dda"
+  }
+}

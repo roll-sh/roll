@@ -1,0 +1,13 @@
+00-point_select-1 736 {'execution_and_row_output': 19.7, 'other_session_and_wire': 79.21, 'other_planning': 1.09}
+00-range_scan_100-8 3845 {'execution_and_row_output': 28.3, 'other_session_and_wire': 30.64, 'custom_binding': 15.06, 'root_costing': 24.94, 'unresolved_or_background': 0.62, 'other_planning': 0.44}
+01-point_select-1 745 {'other_session_and_wire': 80.4, 'execution_and_row_output': 17.85, 'other_planning': 1.74}
+01-range_scan_100-8 3845 {'other_session_and_wire': 30.64, 'execution_and_row_output': 29.78, 'root_costing': 23.62, 'custom_binding': 14.88, 'other_planning': 0.57, 'unresolved_or_background': 0.52}
+02-point_select-1 753 {'execution_and_row_output': 17.53, 'other_session_and_wire': 81.01, 'other_planning': 1.46}
+02-range_scan_100-8 3850 {'custom_binding': 15.27, 'execution_and_row_output': 28.88, 'root_costing': 23.14, 'other_planning': 0.68, 'other_session_and_wire': 31.17, 'unresolved_or_background': 0.86}
+00-point_select-1 754 {'other_session_and_wire': 81.96, 'execution_and_row_output': 16.71, 'other_planning': 1.33}
+00-range_scan_100-8 3848 {'other_session_and_wire': 31.37, 'custom_binding': 14.53, 'root_costing': 24.3, 'execution_and_row_output': 28.35, 'other_planning': 0.57, 'unresolved_or_background': 0.88}
+01-point_select-1 747 {'other_session_and_wire': 83.0, 'execution_and_row_output': 15.66, 'other_planning': 1.34}
+01-range_scan_100-8 3852 {'other_session_and_wire': 31.67, 'root_costing': 24.33, 'execution_and_row_output': 27.62, 'other_planning': 0.7, 'custom_binding': 15.21, 'unresolved_or_background': 0.47}
+02-point_select-1 752 {'execution_and_row_output': 17.95, 'other_session_and_wire': 80.72, 'other_planning': 1.33}
+02-range_scan_100-8 3851 {'other_session_and_wire': 30.82, 'root_costing': 25.29, 'execution_and_row_output': 28.3, 'custom_binding': 14.31, 'other_planning': 0.7, 'unresolved_or_background': 0.57}
+Offline decode complete; no workloads run

@@ -1,0 +1,67 @@
+{
+  "at_utc": "2026-11-02T20:29:41.777324+00:00",
+  "removed_regenerable_replays": [
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/01-point_select-1-replay.data",
+      "bytes": 48916958,
+      "sha256": "c6153f74d5d03a39ff29d31638c5721999c361ff8686f71f73dce1e3a52c8148"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/01-range_scan_100-8-replay.data",
+      "bytes": 252074094,
+      "sha256": "b99778eb2c1d61dd9ede394e2c951cb44f1da17b8ee5fefe7ae357c6c8f5dde6"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/02-range_scan_100-8-replay.data",
+      "bytes": 252401790,
+      "sha256": "6d4694214b4fe3b8a9b27ecc5e974226db5acb5296176409dbbc6a52ec901f31"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/00-point_select-1-replay.data",
+      "bytes": 48327210,
+      "sha256": "c14a811aabd6a28843221abc6b423f1199ca55f578bf5a429a320d6918103147"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/00-range_scan_100-8-replay.data",
+      "bytes": 252074510,
+      "sha256": "2c5de6251537e6c2aa0d4128cab085e7c042247607fab160c03b9b08e760b31b"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/baseline/02-point_select-1-replay.data",
+      "bytes": 49441234,
+      "sha256": "4054069d907476635a95f226e52f085418ddd1b4a5d781e50bb6925799ca4418"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/candidate/01-point_select-1-replay.data",
+      "bytes": 49048094,
+      "sha256": "b3d50e229158e52d965213be2ab9e9385bd50edf10a1812364a550ea2b91f6a3"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/candidate/01-range_scan_100-8-replay.data",
+      "bytes": 252532918,
+      "sha256": "c1b4d7cc1e339aebf9a8df0139809b56e8f6d36498e5a2383661ff7161dc7453"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/candidate/02-range_scan_100-8-replay.data",
+      "bytes": 252467334,
+      "sha256": "a4d61e5e3567f7841d4996f937d8ec05e79b839ddef5e0827ccf6c1d0b7eca38"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/candidate/00-point_select-1-replay.data",
+      "bytes": 49506890,
+      "sha256": "83061a980419b93c170687569a38ad0b8f4421b5abf2f6615a92dc95ad5fe666"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/candidate/00-range_scan_100-8-replay.data",
+      "bytes": 252271158,
+      "sha256": "71c6852bd21ef073c0849d559ba7239d815240a9fd67c927d52be183113038a5"
+    },
+    {
+      "path": "/home/meszmate/.cache/pg-engine-perf-20261101/gather-fallback-20261102/candidate/02-point_select-1-replay.data",
+      "bytes": 49375750,
+      "sha256": "1fb4bc18a32bd247efaf8cbec0bf061f2dd4db5f13308ffca85a3bdfce6bf1fe"
+    }
+  ],
+  "raw_originals_preserved": true,
+  "bytes_removed": 1808437940
+}

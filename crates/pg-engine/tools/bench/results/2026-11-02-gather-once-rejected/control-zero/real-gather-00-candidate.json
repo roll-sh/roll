@@ -1,0 +1,9 @@
+{
+  "round": 0,
+  "name": "candidate",
+  "checked_queries": 279,
+  "checked_rows": 1116000,
+  "elapsed_s": 20.04916643491015,
+  "server_cpu_s": 1.54,
+  "client_cpu_s": 7.857225
+}

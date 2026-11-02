@@ -1,0 +1,29 @@
+{
+  "pgss": [
+    [
+      "SELECT id, balance FROM accounts WHERE id BETWEEN $1 AND $1 + $2 ORDER BY id",
+      "20",
+      "2000",
+      "0",
+      "0"
+    ],
+    [
+      "SELECT id, owner, balance, note, created FROM accounts WHERE id = $1",
+      "20",
+      "20",
+      "0",
+      "0"
+    ]
+  ],
+  "transaction_locks": [
+    [
+      "AccessShareLock",
+      "t"
+    ]
+  ],
+  "locks_after_rollback": [
+    [
+      "0"
+    ]
+  ]
+}

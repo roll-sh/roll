@@ -1,0 +1,505 @@
+{
+  "limit": "Uses original cache log mtimes minus client-reported elapsed duration, not dedicated invocation timestamps. Frequency snapshots are not actual cycle counts and cannot correct or rescue a result. No causal attribution.",
+  "phases": {
+    "proof-primary-p1": {
+      "range_scan_100": {
+        "median_frequency_ratio": 1.0018635971142797,
+        "pairs": [
+          {
+            "round": 1,
+            "baseline": {
+              "mean_reported_server_khz": 4211760.680555556,
+              "observations": 18,
+              "tps": 8891.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4221963.416666667,
+              "observations": 18,
+              "tps": 9545.0
+            },
+            "candidate_frequency_ratio": 1.0024224396600248
+          },
+          {
+            "round": 2,
+            "baseline": {
+              "mean_reported_server_khz": 4112463.013888889,
+              "observations": 18,
+              "tps": 8745.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4144934.138888889,
+              "observations": 18,
+              "tps": 9538.0
+            },
+            "candidate_frequency_ratio": 1.0078957852971167
+          },
+          {
+            "round": 3,
+            "baseline": {
+              "mean_reported_server_khz": 4232749.069444444,
+              "observations": 18,
+              "tps": 8813.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4168636.486111111,
+              "observations": 18,
+              "tps": 9587.0
+            },
+            "candidate_frequency_ratio": 0.9848532047892582
+          },
+          {
+            "round": 4,
+            "baseline": {
+              "mean_reported_server_khz": 4196980.944444444,
+              "observations": 18,
+              "tps": 8828.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4229826.25,
+              "observations": 18,
+              "tps": 9705.0
+            },
+            "candidate_frequency_ratio": 1.0078259363076292
+          },
+          {
+            "round": 5,
+            "baseline": {
+              "mean_reported_server_khz": 4026031.5555555555,
+              "observations": 18,
+              "tps": 7909.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4214311.319444444,
+              "observations": 18,
+              "tps": 9612.0
+            },
+            "candidate_frequency_ratio": 1.0467655956717676
+          },
+          {
+            "round": 6,
+            "baseline": {
+              "mean_reported_server_khz": 4030999.5694444445,
+              "observations": 18,
+              "tps": 8279.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 3912617.9444444445,
+              "observations": 18,
+              "tps": 8577.0
+            },
+            "candidate_frequency_ratio": 0.9706321911077963
+          },
+          {
+            "round": 7,
+            "baseline": {
+              "mean_reported_server_khz": 3854291.5416666665,
+              "observations": 18,
+              "tps": 7738.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 3792972.6944444445,
+              "observations": 18,
+              "tps": 8368.0
+            },
+            "candidate_frequency_ratio": 0.9840907605044048
+          },
+          {
+            "round": 8,
+            "baseline": {
+              "mean_reported_server_khz": 4034846.5555555555,
+              "observations": 18,
+              "tps": 8380.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4192235,
+              "observations": 18,
+              "tps": 9578.0
+            },
+            "candidate_frequency_ratio": 1.039007293654758
+          },
+          {
+            "round": 9,
+            "baseline": {
+              "mean_reported_server_khz": 4194828.458333333,
+              "observations": 18,
+              "tps": 8868.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4191707.2916666665,
+              "observations": 18,
+              "tps": 9609.0
+            },
+            "candidate_frequency_ratio": 0.9992559489147963
+          },
+          {
+            "round": 10,
+            "baseline": {
+              "mean_reported_server_khz": 4220376.527777778,
+              "observations": 18,
+              "tps": 8894.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4225883.083333333,
+              "observations": 18,
+              "tps": 9536.0
+            },
+            "candidate_frequency_ratio": 1.0013047545685347
+          },
+          {
+            "round": 11,
+            "baseline": {
+              "mean_reported_server_khz": 4164713.1805555555,
+              "observations": 18,
+              "tps": 8884.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4146462.277777778,
+              "observations": 18,
+              "tps": 9565.0
+            },
+            "candidate_frequency_ratio": 0.9956177287638946
+          },
+          {
+            "round": 12,
+            "baseline": {
+              "mean_reported_server_khz": 4140343.986111111,
+              "observations": 18,
+              "tps": 8836.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4164785.9166666665,
+              "observations": 18,
+              "tps": 9630.0
+            },
+            "candidate_frequency_ratio": 1.0059033574595606
+          }
+        ]
+      },
+      "point_select": {
+        "median_frequency_ratio": 1.0000626165398891,
+        "pairs": [
+          {
+            "round": 1,
+            "baseline": {
+              "mean_reported_server_khz": 2008879.0972222222,
+              "observations": 18,
+              "tps": 6331.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2011565,
+              "observations": 18,
+              "tps": 7833.0
+            },
+            "candidate_frequency_ratio": 1.0013370156429482
+          },
+          {
+            "round": 2,
+            "baseline": {
+              "mean_reported_server_khz": 2027344.4166666667,
+              "observations": 18,
+              "tps": 6638.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2066180.6666666667,
+              "observations": 18,
+              "tps": 7679.0
+            },
+            "candidate_frequency_ratio": 1.019156217207461
+          },
+          {
+            "round": 3,
+            "baseline": {
+              "mean_reported_server_khz": 2182307.097222222,
+              "observations": 18,
+              "tps": 6661.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2090741.3194444445,
+              "observations": 18,
+              "tps": 7834.0
+            },
+            "candidate_frequency_ratio": 0.9580417541168572
+          },
+          {
+            "round": 4,
+            "baseline": {
+              "mean_reported_server_khz": 2127452.7916666665,
+              "observations": 18,
+              "tps": 6722.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2048948.8055555555,
+              "observations": 18,
+              "tps": 7799.0
+            },
+            "candidate_frequency_ratio": 0.9630995402489706
+          },
+          {
+            "round": 5,
+            "baseline": {
+              "mean_reported_server_khz": 2363452.125,
+              "observations": 18,
+              "tps": 6352.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2079910.2777777778,
+              "observations": 18,
+              "tps": 7990.0
+            },
+            "candidate_frequency_ratio": 0.8800306364478517
+          },
+          {
+            "round": 6,
+            "baseline": {
+              "mean_reported_server_khz": 1982994.111111111,
+              "observations": 18,
+              "tps": 6387.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2169153.861111111,
+              "observations": 18,
+              "tps": 5546.0
+            },
+            "candidate_frequency_ratio": 1.0938781153997936
+          },
+          {
+            "round": 7,
+            "baseline": {
+              "mean_reported_server_khz": 2163069.4583333335,
+              "observations": 18,
+              "tps": 5448.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2356246.777777778,
+              "observations": 18,
+              "tps": 5471.0
+            },
+            "candidate_frequency_ratio": 1.0893070348250813
+          },
+          {
+            "round": 8,
+            "baseline": {
+              "mean_reported_server_khz": 2067530.6323529412,
+              "observations": 17,
+              "tps": 6633.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2127209.527777778,
+              "observations": 18,
+              "tps": 7783.0
+            },
+            "candidate_frequency_ratio": 1.0288648180060673
+          },
+          {
+            "round": 9,
+            "baseline": {
+              "mean_reported_server_khz": 2068439.2777777778,
+              "observations": 18,
+              "tps": 6717.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2104179.0555555555,
+              "observations": 18,
+              "tps": 7923.0
+            },
+            "candidate_frequency_ratio": 1.0172786207271092
+          },
+          {
+            "round": 10,
+            "baseline": {
+              "mean_reported_server_khz": 2155807.763888889,
+              "observations": 18,
+              "tps": 6743.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2033723.3333333333,
+              "observations": 18,
+              "tps": 7810.0
+            },
+            "candidate_frequency_ratio": 0.9433695190264432
+          },
+          {
+            "round": 11,
+            "baseline": {
+              "mean_reported_server_khz": 2068130.9305555555,
+              "observations": 18,
+              "tps": 6708.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2065624.8055555555,
+              "observations": 18,
+              "tps": 7667.0
+            },
+            "candidate_frequency_ratio": 0.9987882174368299
+          },
+          {
+            "round": 12,
+            "baseline": {
+              "mean_reported_server_khz": 2070239.763888889,
+              "observations": 18,
+              "tps": 6692.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2051911.6527777778,
+              "observations": 18,
+              "tps": 7748.0
+            },
+            "candidate_frequency_ratio": 0.9911468654835021
+          }
+        ]
+      }
+    },
+    "control-zero": {
+      "range_scan_100": {
+        "median_frequency_ratio": 0.9867705664445987,
+        "pairs": [
+          {
+            "round": 1,
+            "baseline": {
+              "mean_reported_server_khz": 4224186.615384615,
+              "observations": 13,
+              "tps": 7745.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4168303.019230769,
+              "observations": 13,
+              "tps": 7624.0
+            },
+            "candidate_frequency_ratio": 0.9867705664445987
+          },
+          {
+            "round": 2,
+            "baseline": {
+              "mean_reported_server_khz": 4194573.416666667,
+              "observations": 12,
+              "tps": 7777.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 4038079.3846153845,
+              "observations": 13,
+              "tps": 7374.0
+            },
+            "candidate_frequency_ratio": 0.9626913117244602
+          },
+          {
+            "round": 3,
+            "baseline": {
+              "mean_reported_server_khz": 3834198.096153846,
+              "observations": 13,
+              "tps": 6770.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 3823639.5576923075,
+              "observations": 13,
+              "tps": 6416.0
+            },
+            "candidate_frequency_ratio": 0.9972462198882917
+          },
+          {
+            "round": 4,
+            "baseline": {
+              "mean_reported_server_khz": 3965909.076923077,
+              "observations": 13,
+              "tps": 7196.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 3805547.980769231,
+              "observations": 13,
+              "tps": 6659.0
+            },
+            "candidate_frequency_ratio": 0.9595651102827952
+          },
+          {
+            "round": 5,
+            "baseline": {
+              "mean_reported_server_khz": 3827326.980769231,
+              "observations": 13,
+              "tps": 6852.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 3846668.8846153845,
+              "observations": 13,
+              "tps": 6682.0
+            },
+            "candidate_frequency_ratio": 1.005053632455063
+          }
+        ]
+      },
+      "point_select": {
+        "median_frequency_ratio": 1.0273039673556823,
+        "pairs": [
+          {
+            "round": 1,
+            "baseline": {
+              "mean_reported_server_khz": 2022404.0384615385,
+              "observations": 13,
+              "tps": 6618.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2077623.6923076923,
+              "observations": 13,
+              "tps": 6551.0
+            },
+            "candidate_frequency_ratio": 1.0273039673556823
+          },
+          {
+            "round": 2,
+            "baseline": {
+              "mean_reported_server_khz": 2111380.846153846,
+              "observations": 13,
+              "tps": 6501.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2303626.3653846155,
+              "observations": 13,
+              "tps": 5679.0
+            },
+            "candidate_frequency_ratio": 1.091052033355787
+          },
+          {
+            "round": 3,
+            "baseline": {
+              "mean_reported_server_khz": 2111346.3653846155,
+              "observations": 13,
+              "tps": 6253.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2301243.7884615385,
+              "observations": 13,
+              "tps": 5577.0
+            },
+            "candidate_frequency_ratio": 1.0899413882015185
+          },
+          {
+            "round": 4,
+            "baseline": {
+              "mean_reported_server_khz": 2478086.5384615385,
+              "observations": 13,
+              "tps": 5168.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2235855.4615384615,
+              "observations": 13,
+              "tps": 4936.0
+            },
+            "candidate_frequency_ratio": 0.9022507595422957
+          },
+          {
+            "round": 5,
+            "baseline": {
+              "mean_reported_server_khz": 2439340.6346153845,
+              "observations": 13,
+              "tps": 4829.0
+            },
+            "candidate": {
+              "mean_reported_server_khz": 2237187,
+              "observations": 13,
+              "tps": 4584.0
+            },
+            "candidate_frequency_ratio": 0.917127755038911
+          }
+        ]
+      }
+    }
+  }
+}
