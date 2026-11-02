@@ -1,5 +1,8 @@
 # Checked comparisons
 
+The broader product requirements and known gaps are recorded in
+[PostgreSQL replacement acceptance](../../ACCEPTANCE.md).
+
 Build both server revisions in release mode with the same Cargo targets and feature set.
 Copy each server binary aside before rebuilding, and record its source commit, command
 and SHA-256. Use the same checked client binary for both endpoints.
@@ -177,3 +180,46 @@ for every new measurement. Old cardinality-only results are not validated retroa
 Validation is inside operation latency/throughput timing. Compare the recorded client
 CPU per operation as well as server CPU, and check whether the client limits throughput;
 no performance claim follows from the validator change alone.
+
+## Idle lifecycle observations
+
+`idle.py` observes existing dedicated Linux servers through cgroup v2 accounting.
+It creates a checked 100-row fixture in a database named `bench_idle_<unique suffix>`.
+It measures disconnected-after-use, connected-idle, and released states, retains
+64 connections by default in the capture configuration, checks every fixture value
+and type before and after each connected window, and sends Terminate on release.
+The runner leaves its table in the dedicated database and never stops servers.
+The caller owns server startup, binary/image provenance, and cleanup.
+
+Pass a JSON configuration with `out`, `db`, `rounds`, `seconds`, `sessions`,
+`settle_seconds`, `release_seconds`, `server_cpus`, `phases`, and `targets`.
+Each target requires `name`, `port`, `kind` (`engine` or `postgres`), `cgroup`,
+`leader_pid`, and `leader_start_ticks` from `/proc/<pid>/stat` field 22. Optional
+`user` and `password` default to `postgres` and the local fixture password `pw`.
+Use unique cgroups containing only the intended servers; namespace backend PIDs
+are checked against PostgreSQL cgroup members, and engine arguments against its
+listener. Record independent supervisor identities and binary/image hashes.
+
+The runner rejects overlapping groups, changed leader identities, unequal CPU
+quotas/weights or memory/swap caps, and mismatched thread affinity. Comparison runs
+require at least five measured rounds after warmup, ten-second windows, and
+three-second settling. `diagnostic_only: true` permits shorter observations;
+these do not establish an acceptance result. For example:
+
+```sh
+python3 crates/pg-engine/tools/bench/idle.py /absolute/path/to/idle-config.json
+```
+
+CPU is cgroup microseconds. Summaries include time-weighted CPU, min/max windows,
+memory.current, anon/shmem, swap and memory-event snapshots, raw memory.stat,
+thread churn, and block I/O when the controller is available. Missing I/O data is
+reported as null. It cannot establish zero writes. Surviving-thread voluntary
+context switches are a lower bound; windows with thread churn are marked invalid
+for a stable-thread switch claim. Per-connection memory differences are descriptive
+estimates between phases. They include phase drift.
+
+These are direct-server observations. They exclude proxy/control-plane overhead
+and kernel work charged outside the server cgroups. Repeated checks interrupt long
+idle periods, and the short windows may miss checkpoints, autovacuum, compaction,
+or upload cycles. A near-zero observation does not certify zero CPU, zero operating
+cost, transparent suspension with live sessions, or distributed recovery.
