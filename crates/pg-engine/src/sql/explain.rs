@@ -20114,6 +20114,13 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
     estimate_in(plan, ctx, false, true)
 }
 
+/// The statement's total cost, including its InitPlans, without extracting other estimates.
+pub(crate) fn estimate_total(plan: &Arc<Plan>, ctx: &ExecCtx) -> f64 {
+    let o = estimate_options();
+    let mut b = estimate_builder(plan, ctx, &o);
+    b.level(plan).total_cost
+}
+
 /// Each Gather and Gather Merge of `plan`, as EXPLAIN places them: the plan node under it
 /// (the top of the part its workers run; None: none of the executor's) and the workers it
 /// plans (pg_stat_statements' parallel_workers_to_launch; the engine runs them all, so they

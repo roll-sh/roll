@@ -18,6 +18,8 @@ pub(crate) mod litplan;
 mod prepared;
 pub mod sink;
 mod utility;
+#[cfg(test)]
+mod tests;
 pub(crate) use utility::{LIST_QUOTE, split_guc_list};
 pub(crate) use utility::set_value;
 pub(crate) use utility::routine_set;
@@ -3973,7 +3975,7 @@ pub(crate) fn plan_cost_estimate(
     hidden_rtes: usize,
     planning: bool,
 ) -> f64 {
-    let total = crate::sql::explain::estimate(plan, ctx).total;
+    let total = crate::sql::explain::estimate_total(plan, ctx);
     if planning {
         total + 2.5 * (range_entries(plan) + hidden_rtes + 1) as f64
     } else {
