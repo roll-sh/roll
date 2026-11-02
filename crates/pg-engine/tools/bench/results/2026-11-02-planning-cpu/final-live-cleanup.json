@@ -1,0 +1,32 @@
+{
+  "at_utc": "2026-11-02T02:33:22.463369+00:00",
+  "engines": [
+    {
+      "mode": "custom",
+      "pid": 841933,
+      "pid_absent": true,
+      "port": 53332,
+      "connection_refused": true
+    },
+    {
+      "mode": "generic",
+      "pid": 843317,
+      "pid_absent": true,
+      "port": 53333,
+      "connection_refused": true
+    },
+    {
+      "mode": "auto",
+      "pid": 844692,
+      "pid_absent": true,
+      "port": 53334,
+      "connection_refused": true
+    }
+  ],
+  "profiler": {
+    "id": "813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca",
+    "running": false,
+    "memory": 536870912,
+    "swap": 536870912
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "warning": "Synthetic replay offsets; original perf.data unchanged. Decoded symbol names may be shifted. Validate raw addresses against original ELF/maps before attribution.",
+  "original_sha256": "7067bd383995093aa74d82b492b981ce616e028dea7487980c3a5daaf5989dcb",
+  "replay_sha256": "49996bdc51c6bd71515fdf50994831ab00ebe1fb08e893ad99c1e15c93919b48",
+  "changes": [
+    {
+      "record_offset": 30352,
+      "original_pgoff": "0x1b52000",
+      "replay_pgoff": "0x1b53000"
+    },
+    {
+      "record_offset": 30536,
+      "original_pgoff": "0x4210000",
+      "replay_pgoff": "0x4212000"
+    },
+    {
+      "record_offset": 30720,
+      "original_pgoff": "0x452e000",
+      "replay_pgoff": "0x4531000"
+    }
+  ]
+}

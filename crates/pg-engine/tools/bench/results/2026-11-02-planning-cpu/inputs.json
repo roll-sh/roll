@@ -1,0 +1,16 @@
+{
+  "at_utc": "2026-11-02T02:25:41.172194+00:00",
+  "source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "hashes": {
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+    "/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/final-client/bench": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tools/bench/paired_oltp.py": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+    "/home/meszmate/worktrees/roll/t3-d4020b98/crates/pg-engine/tests/clients/wire.py": "ecb0dde8aa6bda441a642a11a71f6ea5cfc1d1d8b79a8a74e8653b37e61e698b"
+  },
+  "head": "fdee626e7de5247d671d7dd2df105f5d06d09525",
+  "status": "",
+  "load": "3.35 2.33 2.51 1/2739 841230\n",
+  "claim": "Steady-state sampled planning ancestry only; no optimization or profiled throughput claim.",
+  "limits": "Synthetic replay fixes libdw PIE offset; raw IPs must be symbolized against original maps/ELF. Finite stack snapshots still truncate. Whole-invocation ops differ from the sample window."
+}

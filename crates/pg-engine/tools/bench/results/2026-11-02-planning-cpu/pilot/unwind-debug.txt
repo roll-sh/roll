@@ -1,0 +1,1975 @@
+build id event received for /home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine: b5e86c6d9879479b961a952916f376a15023d703 [20]
+build id event received for [vdso]: 58f6cca7261ccb170ec3a2687edbb098a15ca54a [20]
+build id event received for /usr/lib/x86_64-linux-gnu/libc.so.6: 5e5b51f4c39af9ac589408c1dc432ba390a273cc [20]
+build id event received for [kernel.kallsyms]: ef9850aafd8a56c78865146f72dee4ddd57561b1 [20]
+overlapping maps:
+ ffffffffc003a980-ffffffffc003b980 0 bpf_trampoline_6442509166
+ ffffffffc003abd8-ffffffffc003ad1a 0 bpf_prog_a42d275341448247_sd_devices
+overlapping maps:
+ ffffffffc003a980-ffffffffc003b980 0 bpf_trampoline_6442509166
+ ffffffffc003ad48-ffffffffc003ad8b 0 bpf_prog_6deef7357e7b4530_sd_fw_ingress
+unwind: _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths8ScanDescEBH_:ip = 0x5559dac4fd32 (0x324fd32)
+unwind: access_mem addr 0x7f65429afdc8, val 5559dacd339e, offset 8
+unwind: access_mem addr 0x7f65429afdd0, val 7f65429b1250, offset 16
+unwind: access_mem addr 0x7f65429afdd8, val 7f65429aec20, offset 24
+unwind: access_mem addr 0x7f65429afde0, val 20002080a88, offset 32
+unwind: access_mem addr 0x7f65429afde8, val 7f65429b76e0, offset 40
+unwind: access_mem 0x200021f1c00 not inside range 0x7f65429afdc0-0x7f65429bfcb8
+unwind: access_mem 0x200021f1c08 not inside range 0x7f65429afdc0-0x7f65429bfcb8
+roll-conn  683149 [029] 467466.369677:   20408163 cpu-clock: 
+Looking at the vmlinux_path (8 entries long)
+overlapping maps:
+ ffffffffc003a674-ffffffffc003a6b7 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+ ffffffffc0000000-ffffffffff000000 7fffc0004000 [kernel.kallsyms]
+ ffffffffc0000000-ffffffffc003a674 7fffc0004000 [kernel.kallsyms]
+ ffffffffc003a6b7-ffffffffff000000 7fffc003e6b7 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc003a814-ffffffffc003a949 0 bpf_prog_e8932b6bae2b9745_restrict_filesystems
+ ffffffffc003a6b7-ffffffffff000000 7fffc003e6b7 [kernel.kallsyms]
+ ffffffffc003a6b7-ffffffffc003a814 7fffc003e6b7 [kernel.kallsyms]
+ ffffffffc003a949-ffffffffff000000 7fffc003e949 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc003d668-ffffffffc003d777 0 bpf_prog_ee0e253c78993a24_sd_devices
+ ffffffffc003a949-ffffffffff000000 7fffc003e949 [kernel.kallsyms]
+ ffffffffc003a949-ffffffffc003d668 7fffc003e949 [kernel.kallsyms]
+ ffffffffc003d777-ffffffffff000000 7fffc0041777 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc003d7ac-ffffffffc003d7ef 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+ ffffffffc003d777-ffffffffff000000 7fffc0041777 [kernel.kallsyms]
+ ffffffffc003d777-ffffffffc003d7ac 7fffc0041777 [kernel.kallsyms]
+ ffffffffc003d7ef-ffffffffff000000 7fffc00417ef [kernel.kallsyms]
+overlapping maps:
+ ffffffffc003d830-ffffffffc003d873 0 bpf_prog_6deef7357e7b4530_sd_fw_ingress
+ ffffffffc003d7ef-ffffffffff000000 7fffc00417ef [kernel.kallsyms]
+ ffffffffc003d7ef-ffffffffc003d830 7fffc00417ef [kernel.kallsyms]
+ ffffffffc003d873-ffffffffff000000 7fffc0041873 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0045d5c-ffffffffc0045f28 0 bpf_prog_6ceaf4d6095cca93_sd_devices
+ ffffffffc003d873-ffffffffff000000 7fffc0041873 [kernel.kallsyms]
+ ffffffffc003d873-ffffffffc0045d5c 7fffc0041873 [kernel.kallsyms]
+ ffffffffc0045f28-ffffffffff000000 7fffc0049f28 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0045f60-ffffffffc0045fa3 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+ ffffffffc0045f28-ffffffffff000000 7fffc0049f28 [kernel.kallsyms]
+ ffffffffc0045f28-ffffffffc0045f60 7fffc0049f28 [kernel.kallsyms]
+ ffffffffc0045fa3-ffffffffff000000 7fffc0049fa3 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0045fe0-ffffffffc0046023 0 bpf_prog_6deef7357e7b4530_sd_fw_ingress
+ ffffffffc0045fa3-ffffffffff000000 7fffc0049fa3 [kernel.kallsyms]
+ ffffffffc0045fa3-ffffffffc0045fe0 7fffc0049fa3 [kernel.kallsyms]
+ ffffffffc0046023-ffffffffff000000 7fffc004a023 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0049594-ffffffffc00496c7 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc0046023-ffffffffff000000 7fffc004a023 [kernel.kallsyms]
+ ffffffffc0046023-ffffffffc0049594 7fffc004a023 [kernel.kallsyms]
+ ffffffffc00496c7-ffffffffff000000 7fffc004d6c7 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0049730-ffffffffc00498a1 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc00496c7-ffffffffff000000 7fffc004d6c7 [kernel.kallsyms]
+ ffffffffc00496c7-ffffffffc0049730 7fffc004d6c7 [kernel.kallsyms]
+ ffffffffc00498a1-ffffffffff000000 7fffc004d8a1 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc00498e0-ffffffffc0049a13 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc00498a1-ffffffffff000000 7fffc004d8a1 [kernel.kallsyms]
+ ffffffffc00498a1-ffffffffc00498e0 7fffc004d8a1 [kernel.kallsyms]
+ ffffffffc0049a13-ffffffffff000000 7fffc004da13 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0049aac-ffffffffc0049c1d 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc0049a13-ffffffffff000000 7fffc004da13 [kernel.kallsyms]
+ ffffffffc0049a13-ffffffffc0049aac 7fffc004da13 [kernel.kallsyms]
+ ffffffffc0049c1d-ffffffffff000000 7fffc004dc1d [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004dab8-ffffffffc004daed 0 bpf_prog_3918c82a5f4c0360
+ ffffffffc0049c1d-ffffffffff000000 7fffc004dc1d [kernel.kallsyms]
+ ffffffffc0049c1d-ffffffffc004dab8 7fffc004dc1d [kernel.kallsyms]
+ ffffffffc004daed-ffffffffff000000 7fffc0051aed [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004dfd4-ffffffffc004e107 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004daed-ffffffffff000000 7fffc0051aed [kernel.kallsyms]
+ ffffffffc004daed-ffffffffc004dfd4 7fffc0051aed [kernel.kallsyms]
+ ffffffffc004e107-ffffffffff000000 7fffc0052107 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004e1a4-ffffffffc004e2d7 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004e107-ffffffffff000000 7fffc0052107 [kernel.kallsyms]
+ ffffffffc004e107-ffffffffc004e1a4 7fffc0052107 [kernel.kallsyms]
+ ffffffffc004e2d7-ffffffffff000000 7fffc00522d7 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004e4d0-ffffffffc004e641 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004e2d7-ffffffffff000000 7fffc00522d7 [kernel.kallsyms]
+ ffffffffc004e2d7-ffffffffc004e4d0 7fffc00522d7 [kernel.kallsyms]
+ ffffffffc004e641-ffffffffff000000 7fffc0052641 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004e6bc-ffffffffc004e82d 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004e641-ffffffffff000000 7fffc0052641 [kernel.kallsyms]
+ ffffffffc004e641-ffffffffc004e6bc 7fffc0052641 [kernel.kallsyms]
+ ffffffffc004e82d-ffffffffff000000 7fffc005282d [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004e860-ffffffffc004e993 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004e82d-ffffffffff000000 7fffc005282d [kernel.kallsyms]
+ ffffffffc004e82d-ffffffffc004e860 7fffc005282d [kernel.kallsyms]
+ ffffffffc004e993-ffffffffff000000 7fffc0052993 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004e9f0-ffffffffc004eb23 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004e993-ffffffffff000000 7fffc0052993 [kernel.kallsyms]
+ ffffffffc004e993-ffffffffc004e9f0 7fffc0052993 [kernel.kallsyms]
+ ffffffffc004eb23-ffffffffff000000 7fffc0052b23 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004eb58-ffffffffc004ecc9 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004eb23-ffffffffff000000 7fffc0052b23 [kernel.kallsyms]
+ ffffffffc004eb23-ffffffffc004eb58 7fffc0052b23 [kernel.kallsyms]
+ ffffffffc004ecc9-ffffffffff000000 7fffc0052cc9 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004ed28-ffffffffc004ee99 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004ecc9-ffffffffff000000 7fffc0052cc9 [kernel.kallsyms]
+ ffffffffc004ecc9-ffffffffc004ed28 7fffc0052cc9 [kernel.kallsyms]
+ ffffffffc004ee99-ffffffffff000000 7fffc0052e99 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004eecc-ffffffffc004efff 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004ee99-ffffffffff000000 7fffc0052e99 [kernel.kallsyms]
+ ffffffffc004ee99-ffffffffc004eecc 7fffc0052e99 [kernel.kallsyms]
+ ffffffffc004efff-ffffffffff000000 7fffc0052fff [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004f050-ffffffffc004f1c1 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004efff-ffffffffff000000 7fffc0052fff [kernel.kallsyms]
+ ffffffffc004efff-ffffffffc004f050 7fffc0052fff [kernel.kallsyms]
+ ffffffffc004f1c1-ffffffffff000000 7fffc00531c1 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004f264-ffffffffc004f3d5 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004f1c1-ffffffffff000000 7fffc00531c1 [kernel.kallsyms]
+ ffffffffc004f1c1-ffffffffc004f264 7fffc00531c1 [kernel.kallsyms]
+ ffffffffc004f3d5-ffffffffff000000 7fffc00533d5 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004f42c-ffffffffc004f55f 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004f3d5-ffffffffff000000 7fffc00533d5 [kernel.kallsyms]
+ ffffffffc004f3d5-ffffffffc004f42c 7fffc00533d5 [kernel.kallsyms]
+ ffffffffc004f55f-ffffffffff000000 7fffc005355f [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004f760-ffffffffc004f893 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004f55f-ffffffffff000000 7fffc005355f [kernel.kallsyms]
+ ffffffffc004f55f-ffffffffc004f760 7fffc005355f [kernel.kallsyms]
+ ffffffffc004f893-ffffffffff000000 7fffc0053893 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004f8cc-ffffffffc004fa3d 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004f893-ffffffffff000000 7fffc0053893 [kernel.kallsyms]
+ ffffffffc004f893-ffffffffc004f8cc 7fffc0053893 [kernel.kallsyms]
+ ffffffffc004fa3d-ffffffffff000000 7fffc0053a3d [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004fa94-ffffffffc004fbc7 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004fa3d-ffffffffff000000 7fffc0053a3d [kernel.kallsyms]
+ ffffffffc004fa3d-ffffffffc004fa94 7fffc0053a3d [kernel.kallsyms]
+ ffffffffc004fbc7-ffffffffff000000 7fffc0053bc7 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004fc0c-ffffffffc004fd7d 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004fbc7-ffffffffff000000 7fffc0053bc7 [kernel.kallsyms]
+ ffffffffc004fbc7-ffffffffc004fc0c 7fffc0053bc7 [kernel.kallsyms]
+ ffffffffc004fd7d-ffffffffff000000 7fffc0053d7d [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004fdd4-ffffffffc004ff07 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc004fd7d-ffffffffff000000 7fffc0053d7d [kernel.kallsyms]
+ ffffffffc004fd7d-ffffffffc004fdd4 7fffc0053d7d [kernel.kallsyms]
+ ffffffffc004ff07-ffffffffff000000 7fffc0053f07 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc004ff54-ffffffffc00500c5 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc004ff07-ffffffffff000000 7fffc0053f07 [kernel.kallsyms]
+ ffffffffc004ff07-ffffffffc004ff54 7fffc0053f07 [kernel.kallsyms]
+ ffffffffc00500c5-ffffffffff000000 7fffc00540c5 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc005011c-ffffffffc005024f 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc00500c5-ffffffffff000000 7fffc00540c5 [kernel.kallsyms]
+ ffffffffc00500c5-ffffffffc005011c 7fffc00540c5 [kernel.kallsyms]
+ ffffffffc005024f-ffffffffff000000 7fffc005424f [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0050a68-ffffffffc0050b9b 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc005024f-ffffffffff000000 7fffc005424f [kernel.kallsyms]
+ ffffffffc005024f-ffffffffc0050a68 7fffc005424f [kernel.kallsyms]
+ ffffffffc0050b9b-ffffffffff000000 7fffc0054b9b [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0050f2c-ffffffffc005109d 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc0050b9b-ffffffffff000000 7fffc0054b9b [kernel.kallsyms]
+ ffffffffc0050b9b-ffffffffc0050f2c 7fffc0054b9b [kernel.kallsyms]
+ ffffffffc005109d-ffffffffff000000 7fffc005509d [kernel.kallsyms]
+overlapping maps:
+ ffffffffc00510f8-ffffffffc005122b 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc005109d-ffffffffff000000 7fffc005509d [kernel.kallsyms]
+ ffffffffc005109d-ffffffffc00510f8 7fffc005509d [kernel.kallsyms]
+ ffffffffc005122b-ffffffffff000000 7fffc005522b [kernel.kallsyms]
+overlapping maps:
+ ffffffffc005124c-ffffffffc00513bd 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc005122b-ffffffffff000000 7fffc005522b [kernel.kallsyms]
+ ffffffffc005122b-ffffffffc005124c 7fffc005522b [kernel.kallsyms]
+ ffffffffc00513bd-ffffffffff000000 7fffc00553bd [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0051420-ffffffffc0051591 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc00513bd-ffffffffff000000 7fffc00553bd [kernel.kallsyms]
+ ffffffffc00513bd-ffffffffc0051420 7fffc00553bd [kernel.kallsyms]
+ ffffffffc0051591-ffffffffff000000 7fffc0055591 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0051a14-ffffffffc0051a57 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+ ffffffffc0051591-ffffffffff000000 7fffc0055591 [kernel.kallsyms]
+ ffffffffc0051591-ffffffffc0051a14 7fffc0055591 [kernel.kallsyms]
+ ffffffffc0051a57-ffffffffff000000 7fffc0055a57 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0051aa8-ffffffffc0051aeb 0 bpf_prog_6deef7357e7b4530_sd_fw_ingress
+ ffffffffc0051a57-ffffffffff000000 7fffc0055a57 [kernel.kallsyms]
+ ffffffffc0051a57-ffffffffc0051aa8 7fffc0055a57 [kernel.kallsyms]
+ ffffffffc0051aeb-ffffffffff000000 7fffc0055aeb [kernel.kallsyms]
+overlapping maps:
+ ffffffffc005298c-ffffffffc0052abf 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc0051aeb-ffffffffff000000 7fffc0055aeb [kernel.kallsyms]
+ ffffffffc0051aeb-ffffffffc005298c 7fffc0055aeb [kernel.kallsyms]
+ ffffffffc0052abf-ffffffffff000000 7fffc0056abf [kernel.kallsyms]
+overlapping maps:
+ ffffffffc0052b24-ffffffffc0052c95 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc0052abf-ffffffffff000000 7fffc0056abf [kernel.kallsyms]
+ ffffffffc0052abf-ffffffffc0052b24 7fffc0056abf [kernel.kallsyms]
+ ffffffffc0052c95-ffffffffff000000 7fffc0056c95 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc005a288-ffffffffc005a3bb 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc0052c95-ffffffffff000000 7fffc0056c95 [kernel.kallsyms]
+ ffffffffc0052c95-ffffffffc005a288 7fffc0056c95 [kernel.kallsyms]
+ ffffffffc005a3bb-ffffffffff000000 7fffc005e3bb [kernel.kallsyms]
+overlapping maps:
+ ffffffffc005a418-ffffffffc005a589 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc005a3bb-ffffffffff000000 7fffc005e3bb [kernel.kallsyms]
+ ffffffffc005a3bb-ffffffffc005a418 7fffc005e3bb [kernel.kallsyms]
+ ffffffffc005a589-ffffffffff000000 7fffc005e589 [kernel.kallsyms]
+overlapping maps:
+ ffffffffc005d2e8-ffffffffc005d41b 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+ ffffffffc005a589-ffffffffff000000 7fffc005e589 [kernel.kallsyms]
+ ffffffffc005a589-ffffffffc005d2e8 7fffc005e589 [kernel.kallsyms]
+ ffffffffc005d41b-ffffffffff000000 7fffc006141b [kernel.kallsyms]
+overlapping maps:
+ ffffffffc005d474-ffffffffc005d5e5 0 bpf_prog_ab4bc4523b7fe6b4
+ ffffffffc005d41b-ffffffffff000000 7fffc006141b [kernel.kallsyms]
+ ffffffffc005d41b-ffffffffc005d474 7fffc006141b [kernel.kallsyms]
+ ffffffffc005d5e5-ffffffffff000000 7fffc00615e5 [kernel.kallsyms]
+Using /proc/kcore for kernel data
+Using /proc/kallsyms for symbols
+	    5559dac4fd32 _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths8ScanDescEBH_+0x2 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder8optimize4sort:ip = 0x5559dabd99c2 (0x31d99c2)
+unwind: access_mem addr 0x7f65429b2a68, val 7f65429b7f50, offset 744
+unwind: access_mem addr 0x7f65429b2a90, val 2, offset 784
+unwind: access_mem addr 0x7f65429b2a70, val 60, offset 752
+unwind: access_mem addr 0x7f65429b2a78, val 5559db47cc70, offset 760
+unwind: access_mem addr 0x7f65429b2a80, val 20003515ff0, offset 768
+unwind: access_mem addr 0x7f65429b2a88, val 7f65429b2ab0, offset 776
+unwind: access_mem addr 0x7f65429b2a98, val 2000235ff00, offset 792
+unwind: no map for 2
+unwind: access_mem 0x2 not inside range 0x7f65429b2780-0x7f65429c2678
+unwind: no map for a
+unwind: access_mem 0xa not inside range 0x7f65429b2780-0x7f65429c2678
+roll-conn  683149 [029] 467466.395135:   20408163 cpu-clock: 
+	    5559dabd99c2 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder8optimize4sort+0x72 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  683149 [029] 467466.419531:   20408163 cpu-clock: 
+	    5559dab38060 _RNvNtNtCs70fpZ3uE4FG_9pg_engine7storage4keys18encode_index_value+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine7storage4keys18encode_index_value:ip = 0x5559dab38060 (0x3138060)
+unwind: access_mem addr 0x7f65429b5240, val 8, offset 168
+unwind: access_mem addr 0x7f65429b5268, val 20002902e60, offset 208
+unwind: access_mem addr 0x7f65429b5248, val 0, offset 176
+unwind: access_mem addr 0x7f65429b5250, val 7f65429b5538, offset 184
+unwind: access_mem addr 0x7f65429b5258, val 7f65429b51ae, offset 192
+unwind: access_mem addr 0x7f65429b5260, val 7f65429b51ad, offset 200
+unwind: access_mem addr 0x7f65429b5270, val 7f65429b52a8, offset 216
+unwind: access_mem 0x20002902e60 not inside range 0x7f65429b5198-0x7f65429c5090
+unwind: access_mem 0x20002902e68 not inside range 0x7f65429b5198-0x7f65429c5090
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr10same_shape.llvm.6191902062211276960:ip = 0x5559db536c2d (0x3b36c2d)
+unwind: access_mem addr 0x7f65429b0f38, val 8, offset 568
+unwind: access_mem addr 0x7f65429b0f60, val 5, offset 608
+unwind: access_mem addr 0x7f65429b0f40, val 0, offset 576
+unwind: access_mem addr 0x7f65429b0f48, val 0, offset 584
+unwind: access_mem addr 0x7f65429b0f50, val 8, offset 592
+unwind: access_mem addr 0x7f65429b0f58, val 0, offset 600
+unwind: access_mem addr 0x7f65429b0f68, val 20006022a80, offset 616
+unwind: no map for 5
+unwind: access_mem 0x5 not inside range 0x7f65429b0d00-0x7f65429c0bf8
+unwind: no map for d
+unwind: access_mem 0xd not inside range 0x7f65429b0d00-0x7f65429c0bf8
+roll-conn  683149 [029] 467466.444637:   20408163 cpu-clock: 
+	    5559db536c2d _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr10same_shape.llvm.6191902062211276960+0x4d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: '':ip = 0x7f654377e845 (0x172845)
+unwind: access_mem addr 0x7f65429b6868, val 5559da37dd10, offset 0
+unwind: access_mem addr 0x7f65429b6aa8, val 7f65429b6bd8, offset 576
+unwind: access_mem addr 0x7f65429b6ad0, val 20001550680, offset 616
+unwind: access_mem addr 0x7f65429b6ab0, val 7f65429b6bd0, offset 584
+unwind: access_mem addr 0x7f65429b6ab8, val 0, offset 592
+unwind: access_mem addr 0x7f65429b6ac0, val 0, offset 600
+unwind: access_mem addr 0x7f65429b6ac8, val 0, offset 608
+unwind: access_mem addr 0x7f65429b6ad8, val 5559da3b93da, offset 624
+unwind: _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_5Block4read.llvm.13803518463564608849:ip = 0x5559da37dd0f (0x297dd0f)
+unwind: access_mem addr 0x7f65429b6c48, val 7f65429b6dc0, offset 992
+unwind: access_mem addr 0x7f65429b6c70, val 3, offset 1032
+unwind: access_mem addr 0x7f65429b6c50, val 0, offset 1000
+unwind: access_mem addr 0x7f65429b6c58, val 550000000000, offset 1008
+unwind: access_mem addr 0x7f65429b6c60, val 4, offset 1016
+unwind: access_mem addr 0x7f65429b6c68, val 200020a4a10, offset 1024
+unwind: access_mem addr 0x7f65429b6c78, val 7f65429b6cf0, offset 1040
+unwind: _RNvMs3_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_9SstReader10find_block:ip = 0x5559da3b93d9 (0x29b93d9)
+unwind: no map for 3
+unwind: access_mem 0x3 not inside range 0x7f65429b6868-0x7f65429c6760
+unwind: no map for b
+unwind: access_mem 0xb not inside range 0x7f65429b6868-0x7f65429c6760
+unwind: mi_theap_umalloc:ip = 0x5559d9615064 (0x1c15064)
+unwind: access_mem addr 0x7f65429aedd8, val 7f65429aee40, offset 48
+unwind: access_mem addr 0x7f65429aee00, val 2, offset 88
+unwind: access_mem addr 0x7f65429aede0, val 1, offset 56
+unwind: access_mem addr 0x7f65429aede8, val 2000200eb00, offset 64
+unwind: access_mem addr 0x7f65429aedf0, val 10, offset 72
+unwind: access_mem addr 0x7f65429aedf8, val 1, offset 80
+unwind: access_mem addr 0x7f65429aee08, val 5559d9c9cecf, offset 96
+roll-conn  683149 [029] 467466.469548:   20408163 cpu-clock: 
+	    7f654377e845 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559da37dd0f copy_nonoverlapping<u8>+0x17f (inlined)
+	    5559da37dd0f append_elements_unreserved<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f append_elements<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f spec_extend<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f extend_from_slice<u8, alloc::alloc::Global>+0x17f (inlined)
+	    5559da37dd0f extend_short+0x17f (inlined)
+	    5559da37dd0f _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_5Block4read.llvm.13803518463564608849+0x17f (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da3b93d9 compare<u8>+0x389 (inlined)
+	    5559da3b93d9 chaining_lt<u8>+0x389 (inlined)
+	    5559da3b93d9 __chaining_lt<u8>+0x389 (inlined)
+	    5559da3b93d9 lt<u8>+0x389 (inlined)
+	    5559da3b93d9 lt<[u8], [u8]>+0x389 (inlined)
+	    5559da3b93d9 find+0x389 (inlined)
+	    5559da3b93d9 _RNvMs3_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_9SstReader10find_block+0x389 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: no map for 2
+unwind: access_mem 0x2 not inside range 0x7f65429aeda8-0x7f65429beca0
+unwind: no map for a
+unwind: access_mem 0xa not inside range 0x7f65429aeda8-0x7f65429beca0
+unwind: _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs70fpZ3uE4FG_9pg_engine.llvm.10145509653624036794:ip = 0x5559d9c9cece (0x229cece)
+unwind: no map for 2
+unwind: access_mem 0x2 not inside range 0x7f65429aeda8-0x7f65429beca0
+unwind: no map for a
+unwind: access_mem 0xa not inside range 0x7f65429aeda8-0x7f65429beca0
+roll-conn  683149 [029] 467466.494557:   20408163 cpu-clock: 
+	    5559d9615064 mi_page_malloc_zero+0x34 (inlined)
+	    5559d9615064 mi_theap_malloc_small_zero_nonnull+0x34 (inlined)
+	    5559d9615064 _mi_theap_malloc_zero_ex+0x34 (inlined)
+	    5559d9615064 mi_theap_umalloc+0x34 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559d9c9cece realloc_nonnull+0x5e (inlined)
+	    5559d9c9cece grow_impl_runtime+0x5e (inlined)
+	    5559d9c9cece grow_impl+0x5e (inlined)
+	    5559d9c9cece grow+0x5e (inlined)
+	    5559d9c9cece _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs70fpZ3uE4FG_9pg_engine.llvm.10145509653624036794+0x5e (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs2_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_3Txn10finish_xid.llvm.3627021269933051864:ip = 0x5559dafdd485 (0x35dd485)
+unwind: access_mem addr 0x7f65429b9dd8, val 7f65429b9fa0, offset 568
+unwind: access_mem addr 0x7f65429b9e00, val 0, offset 608
+unwind: access_mem addr 0x7f65429b9de0, val 7f65429ba7a0, offset 576
+unwind: access_mem addr 0x7f65429b9de8, val 5559daff0a50, offset 584
+unwind: access_mem addr 0x7f65429b9df0, val 0, offset 592
+unwind: access_mem addr 0x7f65429b9df8, val 7f65429bbd00, offset 600
+unwind: access_mem addr 0x7f65429b9e08, val 429b9e01, offset 616
+unwind: '':ip = 0x429b9e00 (0x0)
+unwind: _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4Expr9walk_here:ip = 0x5559db47e3b1 (0x3a7e3b1)
+unwind: access_mem addr 0x7f65429b4810, val 7f65429b4c08, offset 80
+unwind: access_mem addr 0x7f65429b4818, val 20003514d80, offset 88
+unwind: access_mem addr 0x7f65429b4820, val 7f65429b4800, offset 96
+unwind: access_mem addr 0x7f65429b4828, val 10, offset 104
+unwind: access_mem 0x200020a0e10 not inside range 0x7f65429b47c0-0x7f65429c46b8
+unwind: access_mem 0x200020a0e18 not inside range 0x7f65429b47c0-0x7f65429c46b8
+unwind: '':ip = 0xf (0x0)
+unwind: access_mem 0x200020a0e10 not inside range 0x7f65429b47c0-0x7f65429c46b8
+unwind: access_mem 0x200020a0e18 not inside range 0x7f65429b47c0-0x7f65429c46b8
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here:ip = 0x5559db540f3c (0x3b40f3c)
+unwind: access_mem addr 0x7f65429b61f8, val 20002332280, offset 5896
+unwind: access_mem addr 0x7f65429b6220, val 5, offset 5936
+unwind: access_mem addr 0x7f65429b6200, val c0, offset 5904
+unwind: access_mem addr 0x7f65429b6208, val 7f65429c5440, offset 5912
+unwind: access_mem addr 0x7f65429b6210, val 200020d99c0, offset 5920
+unwind: access_mem addr 0x7f65429b6218, val 7f65429b8aa0, offset 5928
+unwind: access_mem addr 0x7f65429b6228, val 5559db53f53c, offset 5944
+unwind: access_mem addr 0x7f65429b7938, val 7f65429b7b00, offset 11848
+unwind: access_mem addr 0x7f65429b7960, val 7f65429b7977, offset 11888
+unwind: access_mem addr 0x7f65429b7940, val 200020d99c0, offset 11856
+unwind: access_mem addr 0x7f65429b7948, val 20007dcd810, offset 11864
+unwind: access_mem addr 0x7f65429b7950, val 7f65429b8aa0, offset 11872
+unwind: access_mem addr 0x7f65429b7958, val 5, offset 11880
+unwind: access_mem addr 0x7f65429b7968, val 5559db53e054, offset 11896
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here:ip = 0x5559db53f53b (0x3b3f53b)
+unwind: access_mem addr 0x7f65429b7a38, val 2, offset 12104
+unwind: access_mem addr 0x7f65429b7a60, val 11, offset 12144
+unwind: access_mem addr 0x7f65429b7a40, val 7f65429c2258, offset 12112
+roll-conn  683149 [029] 467466.519456:   20408163 cpu-clock: 
+	    5559dafdd485 unlock_shared+0x365 (inlined)
+	    5559dafdd485 drop<parking_lot::raw_rwlock::RawRwLock, alloc::sync::Arc<pg_engine::txn::xids::Xids, alloc::alloc::Global>>+0x365 (inlined)
+	    5559dafdd485 drop_glue<lock_api::rwlock::RwLockReadGuard<parking_lot::raw_rwlock::RawRwLock, alloc::sync::Arc<pg_engine::txn::xids::Xids, alloc::alloc::Global>>>+0x365 (inlined)
+	    5559dafdd485 xids+0x365 (inlined)
+	    5559dafdd485 _RNvMs2_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_3Txn10finish_xid.llvm.3627021269933051864+0x365 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	        429b9e00 [unknown] ([unknown])
+
+roll-conn  683149 [029] 467466.544627:   20408163 cpu-clock: 
+	    5559db47e3b1 _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4Expr9walk_here+0x31 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               f [unknown] ([unknown])
+
+unwind: access_mem addr 0x7f65429b7a48, val 7f65429c3001, offset 12120
+unwind: access_mem addr 0x7f65429b7a50, val 2000152f190, offset 12128
+unwind: access_mem addr 0x7f65429b7a58, val 5559db7e3c18, offset 12136
+unwind: access_mem addr 0x7f65429b7a68, val 7f65429b8aa0, offset 12152
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_bool:ip = 0x5559db53e053 (0x3b3e053)
+unwind: no map for 11
+unwind: access_mem 0x11 not inside range 0x7f65429b4af0-0x7f65429c49e8
+unwind: no map for 19
+unwind: access_mem 0x19 not inside range 0x7f65429b4af0-0x7f65429c49e8
+roll-conn  683149 [029] 467466.569258:   20408163 cpu-clock: 
+	    5559db540f3c _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x2e0c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53f53b {closure#0}+0x140b (inlined)
+	    5559db53f53b guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x140b (inlined)
+	    5559db53f53b eval+0x140b (inlined)
+	    5559db53f53b _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x140b (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53e053 {closure#0}+0x83 (inlined)
+	    5559db53e053 guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x83 (inlined)
+	    5559db53e053 eval+0x83 (inlined)
+	    5559db53e053 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_bool+0x83 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here:ip = 0x5559db5408b5 (0x3b408b5)
+unwind: access_mem addr 0x7f65429b61f8, val 200023313e0, offset 5896
+unwind: access_mem addr 0x7f65429b6220, val 5, offset 5936
+unwind: access_mem addr 0x7f65429b6200, val 60, offset 5904
+unwind: access_mem addr 0x7f65429b6208, val 7f65429c5440, offset 5912
+unwind: access_mem addr 0x7f65429b6210, val 200020d4380, offset 5920
+unwind: access_mem addr 0x7f65429b6218, val 7f65429b8aa0, offset 5928
+unwind: access_mem addr 0x7f65429b6228, val 5559db53f53c, offset 5944
+unwind: access_mem addr 0x7f65429b7938, val 7f65429b7b00, offset 11848
+unwind: access_mem addr 0x7f65429b7960, val 7f65429b7977, offset 11888
+unwind: access_mem addr 0x7f65429b7940, val 200020d4380, offset 11856
+unwind: access_mem addr 0x7f65429b7948, val 20002902310, offset 11864
+unwind: access_mem addr 0x7f65429b7950, val 7f65429b8aa0, offset 11872
+unwind: access_mem addr 0x7f65429b7958, val 5, offset 11880
+unwind: access_mem addr 0x7f65429b7968, val 5559db53e054, offset 11896
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here:ip = 0x5559db53f53b (0x3b3f53b)
+unwind: access_mem addr 0x7f65429b7a38, val 2, offset 12104
+unwind: access_mem addr 0x7f65429b7a60, val 11, offset 12144
+unwind: access_mem addr 0x7f65429b7a40, val 7f65429c2258, offset 12112
+unwind: access_mem addr 0x7f65429b7a48, val 7f65429c3001, offset 12120
+unwind: access_mem addr 0x7f65429b7a50, val 2000152ea90, offset 12128
+unwind: access_mem addr 0x7f65429b7a58, val 5559db7e3c18, offset 12136
+unwind: access_mem addr 0x7f65429b7a68, val 7f65429b8aa0, offset 12152
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_bool:ip = 0x5559db53e053 (0x3b3e053)
+unwind: no map for 11
+unwind: access_mem 0x11 not inside range 0x7f65429b4af0-0x7f65429c49e8
+unwind: no map for 19
+unwind: access_mem 0x19 not inside range 0x7f65429b4af0-0x7f65429c49e8
+roll-conn  683149 [029] 467466.594245:   20408163 cpu-clock: 
+	    5559db5408b5 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x2785 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53f53b {closure#0}+0x140b (inlined)
+	    5559db53f53b guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x140b (inlined)
+	    5559db53f53b eval+0x140b (inlined)
+	    5559db53f53b _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0x140b (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db53e053 {closure#0}+0x83 (inlined)
+	    5559db53e053 guard<pg_engine::types::value::Value, pg_engine::sql::expr::eval::{closure_env#0}>+0x83 (inlined)
+	    5559db53e053 eval+0x83 (inlined)
+	    5559db53e053 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_bool+0x83 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs5_NtCs8ZKwes1zzDd_3std4timeNtB5_10SystemTime3now:ip = 0x5559dbbca2b8 (0x41ca2b8)
+unwind: access_mem addr 0x7f65429c59a8, val 0, offset 54096
+unwind: access_mem addr 0x7f65429c59d0, val 0, offset 54136
+unwind: access_mem addr 0x7f65429c59b0, val 0, offset 54104
+unwind: access_mem addr 0x7f65429c59b8, val 73168643943f26f2, offset 54112
+unwind: access_mem addr 0x7f65429c59c0, val a1cc2e2fbca9bc6e, offset 54120
+unwind: access_mem addr 0x7f65429c59c8, val 1, offset 54128
+unwind: access_mem addr 0x7f65429c59d8, val 0, offset 54144
+roll-conn  683149 [029] 467466.619302:   20408163 cpu-clock: 
+	    5559dbbca2b8 _RNvMNtNtNtCs8ZKwes1zzDd_3std3sys4time4unixNtB2_10SystemTime3now+0x0 (inlined)
+	    5559dbbca2b8 _RNvMs5_NtCs8ZKwes1zzDd_3std4timeNtB5_10SystemTime3now+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths9IndexInfoEBH_.llvm.4838799075968597823:ip = 0x5559d98d655c (0x1ed655c)
+unwind: access_mem addr 0x7f65429ae938, val 20002028ec0, offset 8
+unwind: access_mem addr 0x7f65429ae940, val 20002028ec0, offset 16
+unwind: access_mem addr 0x7f65429ae948, val 7f65429aecf0, offset 24
+unwind: access_mem addr 0x7f65429ae950, val 0, offset 32
+unwind: access_mem addr 0x7f65429ae958, val 1, offset 40
+unwind: no map for 1
+unwind: access_mem 0x1 not inside range 0x7f65429ae930-0x7f65429be828
+unwind: no map for 9
+unwind: access_mem 0x9 not inside range 0x7f65429ae930-0x7f65429be828
+unwind: '':ip = 0x0 (0x0)
+unwind: no map for 1
+unwind: access_mem 0x1 not inside range 0x7f65429ae930-0x7f65429be828
+unwind: no map for 9
+unwind: access_mem 0x9 not inside range 0x7f65429ae930-0x7f65429be828
+roll-conn  683149 [029] 467466.644415:   20408163 cpu-clock: 
+	    5559d98d655c drop<pg_engine::catalog::Index, alloc::alloc::Global>+0x1c (inlined)
+	    5559d98d655c drop_glue<alloc::sync::Arc<pg_engine::catalog::Index, alloc::alloc::Global>>+0x1c (inlined)
+	    5559d98d655c _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths9IndexInfoEBH_.llvm.4838799075968597823+0x1c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _mi_page_malloc_zero:ip = 0x5559d9614ebc (0x1c14ebc)
+unwind: access_mem 0x20002352798 not inside range 0x7f65429b5708-0x7f65429c5600
+unwind: access_mem 0x200023527c0 not inside range 0x7f65429b5708-0x7f65429c5600
+unwind: access_mem 0x200023527a0 not inside range 0x7f65429b5708-0x7f65429c5600
+unwind: access_mem 0x200023527a8 not inside range 0x7f65429b5708-0x7f65429c5600
+unwind: access_mem 0x200023527b0 not inside range 0x7f65429b5708-0x7f65429c5600
+unwind: access_mem 0x200023527b8 not inside range 0x7f65429b5708-0x7f65429c5600
+unwind: access_mem 0x200023527c8 not inside range 0x7f65429b5708-0x7f65429c5600
+roll-conn  683149 [029] 467466.669485:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RINvMs1_NtCs3BTM885nGDo_9hashbrown3mapINtB6_7HashMapjINtNtCsgFX3jaOk65H_5alloc3vec3VecbENtNtNtCs8ZKwes1zzDd_3std4hash6random11RandomStateE3getjECs70fpZ3uE4FG_9pg_engine:ip = 0x5559dac384a0 (0x32384a0)
+unwind: access_mem addr 0x7f65429b2b10, val 7f65429b0e50, offset 24
+unwind: access_mem addr 0x7f65429b2b38, val 8, offset 64
+unwind: access_mem addr 0x7f65429b2b18, val 0, offset 32
+unwind: access_mem addr 0x7f65429b2b20, val ffffffffffffff00, offset 40
+unwind: access_mem addr 0x7f65429b2b28, val 0, offset 48
+unwind: access_mem addr 0x7f65429b2b30, val 0, offset 56
+unwind: access_mem addr 0x7f65429b2b40, val 0, offset 72
+roll-conn  683149 [029] 467466.694298:   20408163 cpu-clock: 
+	    5559dac384a0 is_empty<(usize, alloc::vec::Vec<bool, alloc::alloc::Global>), alloc::alloc::Global>+0x0 (inlined)
+	    5559dac384a0 _RINvMs1_NtCs3BTM885nGDo_9hashbrown3mapINtB6_7HashMapjINtNtCsgFX3jaOk65H_5alloc3vec3VecbENtNtNtCs8ZKwes1zzDd_3std4hash6random11RandomStateE3getjECs70fpZ3uE4FG_9pg_engine+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: '':ip = 0x7f65436a672e (0x9a72e)
+unwind: access_mem addr 0x7f65429bd498, val 7f654369b388, offset 0
+unwind: access_mem addr 0x7f65429bd4b0, val 7f65429c0398, offset 24
+unwind: access_mem addr 0x7f65429bd4b8, val 7f654369b3cd, offset 32
+unwind: '':ip = 0x7f654369b387 (0x8f387)
+unwind: access_mem addr 0x7f65429bd4d8, val 7f654371def7, offset 64
+unwind: '':ip = 0x7f654369b3cc (0x8f3cc)
+unwind: access_mem addr 0x7f65429bd4f8, val 5559dbbc1454, offset 96
+unwind: recv:ip = 0x7f654371def6 (0x111ef6)
+unwind: access_mem addr 0x7f65429bd500, val 7f65429c0398, offset 104
+unwind: _RNvXs_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB4_9TcpStreamNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read:ip = 0x5559dbbc1453 (0x41c1453)
+unwind: access_mem addr 0x7f65429bd510, val 7f65429bd790, offset 120
+unwind: access_mem addr 0x7f65429bd518, val 5559d9865c22, offset 128
+roll-conn  683149 [029] 467466.719377:   20408163 cpu-clock: 
+	ffffffffb3d07c48 tcp_recvmsg_locked+0x4b8 ([kernel.kallsyms])
+	ffffffffb3d08f37 tcp_recvmsg+0x87 ([kernel.kallsyms])
+	ffffffffb3d49994 inet_recvmsg+0x54 ([kernel.kallsyms])
+	ffffffffb3c01287 sock_recvmsg+0x97 ([kernel.kallsyms])
+	ffffffffb3c04112 __sys_recvfrom+0xc2 ([kernel.kallsyms])
+	ffffffffb3c041c4 __x64_sys_recvfrom+0x24 ([kernel.kallsyms])
+	ffffffffb3ef7267 do_syscall_64+0x87 ([kernel.kallsyms])
+	ffffffffb400012f entry_SYSCALL_64_after_hwframe+0x76 ([kernel.kallsyms])
+	    7f65436a672e [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b387 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b3cc [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654371def6 recv+0x16 (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbc1453 _RNvMNtNtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socket4unixNtB2_6Socket15recv_with_flags+0x13 (inlined)
+	    5559dbbc1453 _RNvMNtNtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socket4unixNtB2_6Socket4read+0x13 (inlined)
+	    5559dbbc1453 _RNvMsa_NtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socketNtB5_9UdpSocket4recv+0x13 (inlined)
+	    5559dbbc1453 _RNvXs_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB4_9TcpStreamNtNtNtCsgFX3jaOk65H_5alloc2io4read4Read4read+0x13 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine7storage3row12decode_value:ip = 0x5559dab2f91d (0x312f91d)
+unwind: access_mem addr 0x7f65429b71e8, val 0, offset 296
+unwind: access_mem addr 0x7f65429b7210, val 200020b86a0, offset 336
+unwind: access_mem addr 0x7f65429b71f0, val 200020b86a0, offset 304
+unwind: access_mem addr 0x7f65429b71f8, val 11, offset 312
+unwind: access_mem addr 0x7f65429b7200, val 20002231a10, offset 320
+unwind: access_mem addr 0x7f65429b7208, val 1a, offset 328
+unwind: access_mem addr 0x7f65429b7218, val 11, offset 344
+unwind: access_mem 0x200020b86a0 not inside range 0x7f65429b70c0-0x7f65429c6fb8
+unwind: access_mem 0x200020b86a8 not inside range 0x7f65429b70c0-0x7f65429c6fb8
+unwind: '':ip = 0x10 (0x0)
+unwind: access_mem 0x200020b86a0 not inside range 0x7f65429b70c0-0x7f65429c6fb8
+unwind: access_mem 0x200020b86a8 not inside range 0x7f65429b70c0-0x7f65429c6fb8
+roll-conn  683149 [029] 467466.744337:   20408163 cpu-clock: 
+	    5559dab2f91d _RNvNtNtCs70fpZ3uE4FG_9pg_engine7storage3row12decode_value+0x3d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              10 [unknown] ([unknown])
+
+unwind: _mi_page_malloc_zero:ip = 0x5559d9614ebc (0x1c14ebc)
+unwind: access_mem 0x200076c38b8 not inside range 0x7f65429b7ed8-0x7f65429c7000
+unwind: access_mem 0x200076c38e0 not inside range 0x7f65429b7ed8-0x7f65429c7000
+unwind: access_mem 0x200076c38c0 not inside range 0x7f65429b7ed8-0x7f65429c7000
+unwind: access_mem 0x200076c38c8 not inside range 0x7f65429b7ed8-0x7f65429c7000
+unwind: access_mem 0x200076c38d0 not inside range 0x7f65429b7ed8-0x7f65429c7000
+unwind: access_mem 0x200076c38d8 not inside range 0x7f65429b7ed8-0x7f65429c7000
+unwind: access_mem 0x200076c38e8 not inside range 0x7f65429b7ed8-0x7f65429c7000
+roll-conn  683149 [030] 467466.786986:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvXs2_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4ExprNtNtCskADBYZwJmSU_4core3fmt5Debug3fmt:ip = 0x5559db57eb1c (0x3b7eb1c)
+unwind: access_mem addr 0x7f65429b38f8, val 0, offset 168
+unwind: access_mem addr 0x7f65429b3920, val 7f65429b3988, offset 208
+unwind: access_mem addr 0x7f65429b3900, val 7f65429b3970, offset 176
+unwind: access_mem addr 0x7f65429b3908, val 5559dbc0320a, offset 184
+unwind: access_mem addr 0x7f65429b3910, val 0, offset 192
+unwind: access_mem addr 0x7f65429b3918, val 5559dbbfc500, offset 200
+unwind: access_mem addr 0x7f65429b3928, val 5559dbf21448, offset 216
+unwind: access_mem addr 0x7f65429b3988, val 0, offset 312
+unwind: access_mem addr 0x7f65429b3990, val 1, offset 320
+unwind: '':ip = 0x5559dbf21447 (0x4520447)
+unwind: '':ip = 0x0 (0x0)
+roll-conn  683149 [030] 467466.811604:   20408163 cpu-clock: 
+	    5559db57eb1c _RNvXs2_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4ExprNtNtCskADBYZwJmSU_4core3fmt5Debug3fmt+0x2c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbf21447 [unknown] (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: mi_free:ip = 0x5559d9612eb0 (0x1c12eb0)
+unwind: access_mem 0x200021f1400 not inside range 0x7f65429b6b28-0x7f65429c6a20
+unwind: access_mem 0x200021f1410 not inside range 0x7f65429b6b28-0x7f65429c6a20
+unwind: access_mem 0x200021f1408 not inside range 0x7f65429b6b28-0x7f65429c6a20
+unwind: access_mem 0x200021f1418 not inside range 0x7f65429b6b28-0x7f65429c6a20
+roll-conn  683149 [030] 467466.836272:   20408163 cpu-clock: 
+	    5559d9612eb0 _mi_page_map_at+0x0 (inlined)
+	    5559d9612eb0 _mi_unchecked_ptr_page+0x0 (inlined)
+	    5559d9612eb0 _mi_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_validate_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_free+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvXsa_NtCs70fpZ3uE4FG_9pg_engine6serverNtB5_8WireSinkNtNtNtB7_7session4sink7RowSink3row:ip = 0x5559d986c14c (0x1e6c14c)
+unwind: access_mem addr 0x7f65429b83b8, val 20002460f00, offset 632
+unwind: access_mem addr 0x7f65429b83e0, val 3, offset 672
+unwind: access_mem addr 0x7f65429b83c0, val ffffffffffffffff, offset 640
+unwind: access_mem addr 0x7f65429b83c8, val 2, offset 648
+unwind: access_mem addr 0x7f65429b83d0, val 20002302400, offset 656
+unwind: access_mem addr 0x7f65429b83d8, val 2, offset 664
+unwind: access_mem addr 0x7f65429b83e8, val 7f65429b8310, offset 680
+unwind: no map for 3
+unwind: access_mem 0x3 not inside range 0x7f65429b8140-0x7f65429c7000
+unwind: no map for b
+unwind: access_mem 0xb not inside range 0x7f65429b8140-0x7f65429c7000
+unwind: _RNvNtNtCskADBYZwJmSU_4core3str8converts9from_utf8:ip = 0x5559dbc04271 (0x4204271)
+unwind: access_mem addr 0x7f65429bd440, val 7f65429bd510, offset 0
+unwind: access_mem addr 0x7f65429bd448, val 20000409a10, offset 8
+unwind: access_mem addr 0x7f65429bd510, val 7f65429bd790, offset 208
+unwind: access_mem addr 0x7f65429bd518, val 1647d9865c22, offset 216
+roll-conn  683149 [030] 467466.861286:   20408163 cpu-clock: 
+	    5559d986c14c _RNvXsa_NtCs70fpZ3uE4FG_9pg_engine6serverNtB5_8WireSinkNtNtNtB7_7session4sink7RowSink3row+0xcc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  683149 [030] 467466.886398:   20408163 cpu-clock: 
+	    5559dbc04271 _RNvNtNtCskADBYZwJmSU_4core3str8converts9from_utf8+0x1f1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  683149 [030] 467466.911258:   20408163 cpu-clock: 
+	    5559db4828dd _RNvMs2_NtNtCs70fpZ3uE4FG_9pg_engine7catalog5btsimNtB5_8KeyBytes6len_of.llvm.6191902062211276960+0x2d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db0906cd _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing11mark_passed.llvm.3627021269933051864+0x2cd (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              10 [unknown] ([unknown])
+
+unwind: _RNvMs2_NtNtCs70fpZ3uE4FG_9pg_engine7catalog5btsimNtB5_8KeyBytes6len_of.llvm.6191902062211276960:ip = 0x5559db4828dd (0x3a828dd)
+unwind: access_mem addr 0x7f65429b73c8, val 5559db053e90, offset 200
+unwind: access_mem addr 0x7f65429b73f0, val 20002330dd8, offset 240
+unwind: access_mem addr 0x7f65429b73d0, val 7f65429b7468, offset 208
+unwind: access_mem addr 0x7f65429b73d8, val 20002480f28, offset 216
+unwind: access_mem addr 0x7f65429b73e0, val 7f65429b7550, offset 224
+unwind: access_mem addr 0x7f65429b73e8, val 5559dbd4b5b8, offset 232
+unwind: access_mem addr 0x7f65429b73f8, val 5559db0906ce, offset 248
+unwind: access_mem addr 0x7f65429b79b8, val 5559db47cdb9, offset 1720
+unwind: access_mem addr 0x7f65429b79e0, val 200020b0dc0, offset 1760
+unwind: access_mem addr 0x7f65429b79c0, val 20000391680, offset 1728
+unwind: access_mem addr 0x7f65429b79c8, val dbdb9be8, offset 1736
+unwind: access_mem addr 0x7f65429b79d0, val 5005, offset 1744
+unwind: access_mem addr 0x7f65429b79d8, val 0, offset 1752
+unwind: access_mem addr 0x7f65429b79e8, val 11, offset 1768
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing11mark_passed.llvm.3627021269933051864:ip = 0x5559db0906cd (0x36906cd)
+unwind: access_mem 0x200020b0dc0 not inside range 0x7f65429b7300-0x7f65429c7000
+unwind: access_mem 0x200020b0dc8 not inside range 0x7f65429b7300-0x7f65429c7000
+unwind: '':ip = 0x10 (0x0)
+unwind: access_mem 0x200020b0dc0 not inside range 0x7f65429b7300-0x7f65429c7000
+unwind: access_mem 0x200020b0dc8 not inside range 0x7f65429b7300-0x7f65429c7000
+unwind: '':ip = 0x7f65436a672e (0x9a72e)
+unwind: access_mem addr 0x7f65429bd428, val 7f654369b388, offset 0
+unwind: access_mem addr 0x7f65429bd440, val aa7, offset 24
+unwind: access_mem addr 0x7f65429bd448, val 7f654369b3cd, offset 32
+unwind: '':ip = 0x7f654369b387 (0x8f387)
+unwind: access_mem addr 0x7f65429bd468, val 7f654371df77, offset 64
+unwind: '':ip = 0x7f654369b3cc (0x8f3cc)
+unwind: access_mem addr 0x7f65429bd488, val 5559dbbc14c4, offset 96
+unwind: __send:ip = 0x7f654371df76 (0x111f76)
+unwind: access_mem addr 0x7f65429bd490, val aa7, offset 104
+unwind: _RNvXs0_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB5_9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write5write:ip = 0x5559dbbc14c3 (0x41c14c3)
+unwind: access_mem addr 0x7f65429bd4a0, val 0, offset 120
+unwind: access_mem addr 0x7f65429bd4a8, val 5559da6f88e5, offset 128
+unwind: '':ip = 0xaa6 (0x0)
+unwind: access_mem addr 0x7f65429bd4b0, val 0, offset 136
+unwind: access_mem addr 0x7f65429bd4b8, val 8, offset 144
+unwind: _RNvYNtNtNtCs8ZKwes1zzDd_3std3net3tcp9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write9write_allCs70fpZ3uE4FG_9pg_engine:ip = 0x5559da6f88e4 (0x2cf88e4)
+unwind: '':ip = 0x7 (0x0)
+roll-conn  683149 [030] 467466.936242:   20408163 cpu-clock: 
+	ffffffffb3c07f3a sock_def_readable+0x2a ([kernel.kallsyms])
+	ffffffffb3d16020 tcp_data_queue+0x980 ([kernel.kallsyms])
+	ffffffffb3d16b54 tcp_rcv_established+0x254 ([kernel.kallsyms])
+	ffffffffb3d27c15 tcp_v4_do_rcv+0x165 ([kernel.kallsyms])
+	ffffffffb3d2a231 tcp_v4_rcv+0xff1 ([kernel.kallsyms])
+	ffffffffb3cef172 ip_protocol_deliver_rcu+0x32 ([kernel.kallsyms])
+	ffffffffb3cef346 ip_local_deliver_finish+0x76 ([kernel.kallsyms])
+	ffffffffb3cef3e8 ip_local_deliver+0x68 ([kernel.kallsyms])
+	ffffffffb3c38027 __netif_receive_skb_one_core+0x87 ([kernel.kallsyms])
+	ffffffffb3c382f7 process_backlog+0x87 ([kernel.kallsyms])
+	ffffffffb3c390a8 __napi_poll+0x28 ([kernel.kallsyms])
+	ffffffffb3c39826 net_rx_action+0x336 ([kernel.kallsyms])
+	ffffffffb32cb21f handle_softirqs+0xcf ([kernel.kallsyms])
+	ffffffffb32cae9b do_softirq.part.0+0x3b ([kernel.kallsyms])
+	ffffffffb32cb500 __local_bh_enable_ip+0x60 ([kernel.kallsyms])
+	ffffffffb3c356e2 __dev_queue_xmit+0x422 ([kernel.kallsyms])
+	ffffffffb3cf34cc ip_finish_output2+0x2bc ([kernel.kallsyms])
+	ffffffffb3cf4614 ip_output+0x64 ([kernel.kallsyms])
+	ffffffffb3cf5f00 __ip_queue_xmit+0x190 ([kernel.kallsyms])
+	ffffffffb3d1c1f9 __tcp_transmit_skb+0xac9 ([kernel.kallsyms])
+	ffffffffb3d1db01 tcp_write_xmit+0x4f1 ([kernel.kallsyms])
+	ffffffffb3d1ece6 __tcp_push_pending_frames+0x36 ([kernel.kallsyms])
+	ffffffffb3d066d4 tcp_sendmsg_locked+0xc24 ([kernel.kallsyms])
+	ffffffffb3d0694b tcp_sendmsg+0x2b ([kernel.kallsyms])
+	ffffffffb3c03f2e __sys_sendto+0x1ce ([kernel.kallsyms])
+	ffffffffb3c03f74 __x64_sys_sendto+0x24 ([kernel.kallsyms])
+	ffffffffb3ef7267 do_syscall_64+0x87 ([kernel.kallsyms])
+	ffffffffb400012f entry_SYSCALL_64_after_hwframe+0x76 ([kernel.kallsyms])
+	    7f65436a672e [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b387 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b3cc [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654371df76 __send+0x16 (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbc14c3 _RNvMsa_NtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socketNtB5_9UdpSocket4send+0x13 (inlined)
+	    5559dbbc14c3 _RNvXs0_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB5_9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write5write+0x13 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	             aa6 [unknown] ([unknown])
+	    5559da6f88e4 _RNvYNtNtNtCs8ZKwes1zzDd_3std3net3tcp9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write9write_allCs70fpZ3uE4FG_9pg_engine+0x74 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               7 [unknown] ([unknown])
+
+unwind: _RINvYNtNtNtCs8ZKwes1zzDd_3std4hash6random11RandomStateNtNtCskADBYZwJmSU_4core4hash11BuildHasher8hash_oneRlECs70fpZ3uE4FG_9pg_engine:ip = 0x5559dac6c69c (0x326c69c)
+unwind: access_mem addr 0x7f65429b79a8, val 5559db0b6652, offset 88
+unwind: access_mem addr 0x7f65429b79b0, val 20001520101, offset 96
+unwind: access_mem addr 0x7f65429b79b8, val 5559db47cdb9, offset 104
+unwind: access_mem addr 0x7f65429b8e38, val 5559d7efc610, offset 5352
+unwind: access_mem addr 0x7f65429b8e60, val 0, offset 5392
+unwind: access_mem addr 0x7f65429b8e40, val 0, offset 5360
+unwind: access_mem addr 0x7f65429b8e48, val 0, offset 5368
+unwind: access_mem addr 0x7f65429b8e50, val 0, offset 5376
+unwind: access_mem addr 0x7f65429b8e58, val 239cb20086e062ef, offset 5384
+unwind: access_mem addr 0x7f65429b8e68, val 5559d7efc610, offset 5400
+unwind: _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4Expr4walk:ip = 0x5559db47cdb8 (0x3a7cdb8)
+roll-conn  683149 [030] 467466.961240:   20408163 cpu-clock: 
+	    5559dac6c69c write+0x5c (inlined)
+	    5559dac6c69c write+0x5c (inlined)
+	    5559dac6c69c write_u32<std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c write_i32<std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c hash<std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c hash<i32, std::hash::random::DefaultHasher>+0x5c (inlined)
+	    5559dac6c69c _RINvYNtNtNtCs8ZKwes1zzDd_3std4hash6random11RandomStateNtNtCskADBYZwJmSU_4core4hash11BuildHasher8hash_oneRmECs70fpZ3uE4FG_9pg_engine+0x5c (inlined)
+	    5559db47cdb8 grow<(), pg_engine::sql::expr::{impl#3}::walk::{closure_env#0}>+0x148 (inlined)
+	    5559db47cdb8 _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4Expr4walk+0x148 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_5Block4read.llvm.13803518463564608849:ip = 0x5559da37db90 (0x297db90)
+unwind: access_mem addr 0x7f65429b6770, val 2, offset 568
+unwind: access_mem addr 0x7f65429b6798, val 200020b1520, offset 608
+unwind: access_mem addr 0x7f65429b6778, val 4, offset 576
+unwind: access_mem addr 0x7f65429b6780, val 200020a4800, offset 584
+unwind: access_mem addr 0x7f65429b6788, val 5559db6b6fc6, offset 592
+unwind: access_mem addr 0x7f65429b6790, val 1a, offset 600
+unwind: access_mem addr 0x7f65429b67a0, val 77, offset 616
+unwind: access_mem 0x200020b1520 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: access_mem 0x200020b1528 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: '':ip = 0x76 (0x0)
+unwind: access_mem 0x200020b1520 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: access_mem 0x200020b1528 not inside range 0x7f65429b6538-0x7f65429c6430
+roll-conn  683149 [030] 467466.986237:   20408163 cpu-clock: 
+	    5559da37db90 as_slice+0x0 (inlined)
+	    5559da37db90 deref+0x0 (inlined)
+	    5559da37db90 _RNvMs1_NtNtCs70fpZ3uE4FG_9pg_engine7storage3sstNtB5_5Block4read.llvm.13803518463564608849+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              76 [unknown] ([unknown])
+
+unwind: _mi_page_malloc_zero:ip = 0x5559d9614ebc (0x1c14ebc)
+unwind: no map for ffffffffffffffe9
+unwind: access_mem 0xffffffffffffffe9 not inside range 0x7f65429b6488-0x7f65429c6380
+unwind: no map for 11
+unwind: access_mem 0x11 not inside range 0x7f65429b6488-0x7f65429c6380
+unwind: no map for fffffffffffffff1
+unwind: access_mem 0xfffffffffffffff1 not inside range 0x7f65429b6488-0x7f65429c6380
+unwind: no map for 1
+unwind: access_mem 0x1 not inside range 0x7f65429b6488-0x7f65429c6380
+unwind: no map for 9
+unwind: access_mem 0x9 not inside range 0x7f65429b6488-0x7f65429c6380
+unwind: no map for 19
+unwind: access_mem 0x19 not inside range 0x7f65429b6488-0x7f65429c6380
+roll-conn  683149 [030] 467467.011307:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here:ip = 0x5559db53eff8 (0x3b3eff8)
+unwind: access_mem addr 0x7f65429b3468, val 2000235e7c0, offset 184
+unwind: access_mem addr 0x7f65429b3490, val 8, offset 224
+unwind: access_mem addr 0x7f65429b3470, val 277e100000003, offset 192
+unwind: access_mem addr 0x7f65429b3478, val 8, offset 200
+unwind: access_mem addr 0x7f65429b3480, val 0, offset 208
+unwind: access_mem addr 0x7f65429b3488, val 0, offset 216
+unwind: access_mem addr 0x7f65429b3498, val 7f65429b7110, offset 232
+unwind: no map for 8
+unwind: access_mem 0x8 not inside range 0x7f65429b33b0-0x7f65429c32a8
+unwind: no map for 10
+unwind: access_mem 0x10 not inside range 0x7f65429b33b0-0x7f65429c32a8
+roll-conn  683149 [030] 467467.036273:   20408163 cpu-clock: 
+	    5559db53eff8 ok_or_else<pg_engine::types::value::Value, pg_engine::error::Error, pg_engine::sql::expr::eval_here::{closure_env#0}>+0xec8 (inlined)
+	    5559db53eff8 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0xec8 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder4exprNtB4_6Binder10bind_param:ip = 0x5559db3e623a (0x39e623a)
+unwind: access_mem addr 0x7f65429b05b8, val 5559d7f19134, offset 3928
+unwind: access_mem addr 0x7f65429b05e0, val 20002302200, offset 3968
+unwind: access_mem addr 0x7f65429b05c0, val 7f65429b0620, offset 3936
+unwind: access_mem addr 0x7f65429b05c8, val 5559dbbfbf71, offset 3944
+unwind: access_mem addr 0x7f65429b05d0, val 1f, offset 3952
+unwind: access_mem addr 0x7f65429b05d8, val 5559d9606f95, offset 3960
+unwind: access_mem addr 0x7f65429b05e8, val c0, offset 3976
+unwind: access_mem 0x20002302200 not inside range 0x7f65429af660-0x7f65429bf558
+unwind: access_mem 0x20002302208 not inside range 0x7f65429af660-0x7f65429bf558
+unwind: '':ip = 0xbf (0x0)
+unwind: access_mem 0x20002302200 not inside range 0x7f65429af660-0x7f65429bf558
+unwind: access_mem 0x20002302208 not inside range 0x7f65429af660-0x7f65429bf558
+roll-conn  683149 [030] 467467.061367:   20408163 cpu-clock: 
+	    5559db3e623a get<pg_engine::types::value::Value>+0x29a (inlined)
+	    5559db3e623a get<pg_engine::types::value::Value, usize>+0x29a (inlined)
+	    5559db3e623a param+0x29a (inlined)
+	    5559db3e623a _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder4exprNtB4_6Binder10bind_param+0x29a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	              bf [unknown] ([unknown])
+
+unwind: _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder8optimize17reduce_null_tests:ip = 0x5559dabd53a1 (0x31d53a1)
+unwind: access_mem addr 0x7f65429b1b18, val ffffffffffffffff, offset 1096
+unwind: access_mem addr 0x7f65429b1b40, val 7f6500000000, offset 1136
+unwind: access_mem addr 0x7f65429b1b20, val 22, offset 1104
+unwind: access_mem addr 0x7f65429b1b28, val 7f65429b05d8, offset 1112
+unwind: access_mem addr 0x7f65429b1b30, val 0, offset 1120
+unwind: access_mem addr 0x7f65429b1b38, val 1800000001, offset 1128
+unwind: access_mem addr 0x7f65429b1b48, val 5559ffffffff, offset 1144
+unwind: no map for 7f6500000000
+unwind: access_mem 0x7f6500000000 not inside range 0x7f65429b16d0-0x7f65429c15c8
+unwind: no map for 7f6500000008
+unwind: access_mem 0x7f6500000008 not inside range 0x7f65429b16d0-0x7f65429c15c8
+unwind: '':ip = 0x5559fffffffe (0x0)
+unwind: no map for 7f6500000000
+unwind: access_mem 0x7f6500000000 not inside range 0x7f65429b16d0-0x7f65429c15c8
+unwind: no map for 7f6500000008
+unwind: access_mem 0x7f6500000008 not inside range 0x7f65429b16d0-0x7f65429c15c8
+roll-conn  683149 [030] 467467.086423:   20408163 cpu-clock: 
+	    5559dabd53a1 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder8optimize17reduce_null_tests+0x1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559fffffffe [unknown] ([unknown])
+
+unwind: _RNvXsa_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNodeNtB7_4Node4next:ip = 0x5559db7e3653 (0x3de3653)
+unwind: access_mem addr 0x7f65429b8008, val 7f65429b8388, offset 1448
+unwind: access_mem addr 0x7f65429b8030, val 7f65429b8aa0, offset 1488
+unwind: access_mem addr 0x7f65429b8010, val 7f65429b8aa0, offset 1456
+unwind: access_mem addr 0x7f65429b8018, val 2, offset 1464
+unwind: access_mem addr 0x7f65429b8020, val 7f65429b8930, offset 1472
+unwind: access_mem addr 0x7f65429b8028, val 20003515300, offset 1480
+unwind: access_mem addr 0x7f65429b8038, val 5559db7e7e77, offset 1496
+unwind: access_mem addr 0x7f65429b8078, val 2, offset 1560
+unwind: access_mem addr 0x7f65429b8080, val 731686439456fdeb, offset 1568
+unwind: access_mem addr 0x7f65429b8088, val 5559dbbfc246, offset 1576
+unwind: access_mem addr 0x7f65429b8090, val 30, offset 1584
+unwind: access_mem addr 0x7f65429b8098, val 2, offset 1592
+unwind: _RNvXsd_NtNtCs70fpZ3uE4FG_9pg_engine4exec5nodesNtB5_11ProjectNodeNtB7_4Node4next:ip = 0x5559db7e7e76 (0x3de7e76)
+unwind: access_mem addr 0x7f65429b8aa0, val 3, offset 4160
+unwind: access_mem addr 0x7f65429b8aa8, val 200024600f0, offset 4168
+unwind: '':ip = 0x1 (0x0)
+unwind: no map for 3
+unwind: access_mem 0x3 not inside range 0x7f65429b7a60-0x7f65429c7000
+unwind: no map for b
+unwind: access_mem 0xb not inside range 0x7f65429b7a60-0x7f65429c7000
+unwind: mi_bin:ip = 0x5559d9601c7a (0x1c01c7a)
+unwind: access_mem addr 0x7f65429ae390, val 0, offset 8
+unwind: access_mem addr 0x7f65429ae398, val 180, offset 16
+unwind: access_mem addr 0x7f65429ae3a0, val 7f65429ae3f0, offset 24
+unwind: access_mem addr 0x7f65429ae3a0, val 7f65429ae3f0, offset 24
+unwind: access_mem addr 0x7f65429ae3a8, val 5559d961348c, offset 32
+roll-conn  683149 [030] 467467.111536:   20408163 cpu-clock: 
+	    5559db7e3653 branch<alloc::vec::Vec<pg_engine::types::value::Value, alloc::alloc::Global>, pg_engine::error::Error>+0x18f3 (inlined)
+	    5559db7e3653 emit+0x18f3 (inlined)
+	    5559db7e3653 _RNvXsa_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNodeNtB7_4Node4next+0x18f3 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db7e7e76 _RNvXsd_NtNtCs70fpZ3uE4FG_9pg_engine4exec5nodesNtB5_11ProjectNodeNtB7_4Node4next+0x36 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+roll-conn  683149 [031] 467467.139459:   20408163 cpu-clock: 
+	    5559d9601c7a mi_bin+0x4a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: mi_free:ip = 0x5559d9612ed1 (0x1c12ed1)
+unwind: no map for fffffffffffffff1
+unwind: access_mem 0xfffffffffffffff1 not inside range 0x7f65429af978-0x7f65429bf870
+unwind: no map for 1
+unwind: access_mem 0x1 not inside range 0x7f65429af978-0x7f65429bf870
+unwind: no map for 9
+unwind: access_mem 0x9 not inside range 0x7f65429af978-0x7f65429bf870
+roll-conn  683149 [029] 467467.173266:   20408163 cpu-clock: 
+	    5559d9612ed1 _mi_unchecked_ptr_page+0x21 (inlined)
+	    5559d9612ed1 _mi_ptr_page+0x21 (inlined)
+	    5559d9612ed1 mi_validate_ptr_page+0x21 (inlined)
+	    5559d9612ed1 mi_free+0x21 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head:ip = 0x5559db010a10 (0x3610a10)
+unwind: access_mem addr 0x7f65429b69b0, val 0, offset 1576
+unwind: access_mem addr 0x7f65429b69d8, val 7f65429c2260, offset 1616
+unwind: access_mem addr 0x7f65429b69b8, val e4, offset 1584
+unwind: access_mem addr 0x7f65429b69c0, val 0, offset 1592
+unwind: access_mem addr 0x7f65429b69c8, val 0, offset 1600
+unwind: access_mem addr 0x7f65429b69d0, val 200021f0c00, offset 1608
+unwind: access_mem addr 0x7f65429b69e0, val 200020b9740, offset 1624
+unwind: access_mem addr 0x7f65429c2260, val 0, offset 48856
+unwind: access_mem addr 0x7f65429c2268, val 33da4760, offset 48864
+roll-conn  683149 [029] 467467.196192:   20408163 cpu-clock: 
+	    5559db010a10 _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprEBH_.llvm.4838799075968597823:ip = 0x5559d98cf341 (0x1ecf341)
+unwind: access_mem addr 0x7f65429b0650, val ffffffffffffffff, offset 8
+unwind: access_mem addr 0x7f65429b0658, val 5559d9ab590d, offset 16
+unwind: access_mem addr 0x7f65429b0660, val 7f65429b0750, offset 24
+unwind: access_mem addr 0x7f65429b0668, val 0, offset 32
+unwind: access_mem addr 0x7f65429b0670, val 20002903018, offset 40
+roll-conn  683149 [029] 467467.219235:   20408163 cpu-clock: 
+	    5559d98cf341 _RINvNtCskADBYZwJmSU_4core3ptr9drop_glueNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprEBH_.llvm.4838799075968597823+0x4f1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: mi_free:ip = 0x5559d9612efa (0x1c12efa)
+unwind: access_mem addr 0x7f65429ae260, val 41086a0000000000, offset 1208
+unwind: access_mem addr 0x7f65429ae270, val 0, offset 1224
+unwind: access_mem addr 0x7f65429ae268, val 0, offset 1216
+unwind: access_mem addr 0x7f65429ae278, val 5559da9f9f89, offset 1232
+unwind: access_mem addr 0x7f65429ae340, val 200023500c0, offset 1432
+unwind: access_mem addr 0x7f65429ae348, val 4081380000000000, offset 1440
+unwind: _RNvMNtNtCs70fpZ3uE4FG_9pg_engine3sql5costsNtB2_6VarRef9ndistinct:ip = 0x5559da9f9f88 (0x2ff9f88)
+unwind: '':ip = 0x408137ffffffffff (0x0)
+roll-conn  683149 [029] 467467.243792:   20408163 cpu-clock: 
+	    5559d9612efa mi_free+0x4a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da9f9f88 round_ties_even+0x338 (inlined)
+	    5559da9f9f88 round_ties_even+0x338 (inlined)
+	    5559da9f9f88 clamp_rows+0x338 (inlined)
+	    5559da9f9f88 _RNvMNtNtCs70fpZ3uE4FG_9pg_engine3sql5costsNtB2_6VarRef9ndistinct+0x338 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	408137ffffffffff [unknown] ([unknown])
+
+unwind: '':ip = 0x7f654377e823 (0x172823)
+unwind: access_mem addr 0x7f65429b7dc8, val 5559dbb4e332, offset 0
+unwind: access_mem addr 0x7f65429b7dd0, val 0, offset 8
+unwind: access_mem addr 0x7f65429b7dd8, val 200021f08d8, offset 16
+unwind: _RNvXs2_NtCs13iv4QpFrNm_5bytes9bytes_mutNtB5_8BytesMutNtNtNtB7_3buf7buf_mut6BufMut9put_slice:ip = 0x5559dbb4e331 (0x414e331)
+unwind: access_mem addr 0x7f65429b8728, val 7f65429b8930, offset 2400
+unwind: access_mem addr 0x7f65429b8730, val 7f65429b88f0, offset 2408
+roll-conn  683149 [029] 467467.268517:   20408163 cpu-clock: 
+	    7f654377e823 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbb4e331 copy_nonoverlapping<u8>+0x51 (inlined)
+	    5559dbb4e331 extend_from_slice+0x51 (inlined)
+	    5559dbb4e331 _RNvXs2_NtCs13iv4QpFrNm_5bytes9bytes_mutNtB5_8BytesMutNtNtNtB7_3buf7buf_mut6BufMut9put_slice+0x51 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvXs_NtNtCsgFX3jaOk65H_5alloc3vec21spec_from_iter_nestedINtB6_3VecTjjjEEINtB4_18SpecFromIterNestedB13_INtNtNtNtCskADBYZwJmSU_4core4iter8adapters3map3MapINtNtB1I_9enumerate9EnumerateINtNtNtB1M_5slice4iter4IterNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths7IClauseEENCNvMsf_B3n_NtB3n_7Planner13index_path_obs_0EE9from_iterB3r_:ip = 0x5559d9a57add (0x2057add)
+unwind: access_mem addr 0x7f65429b4800, val 2000223e1f0, offset 48
+unwind: access_mem addr 0x7f65429b4808, val 7f65429b48f8, offset 56
+unwind: access_mem addr 0x7f65429b4810, val 1, offset 64
+unwind: access_mem addr 0x7f65429b4818, val 2, offset 72
+unwind: access_mem addr 0x7f65429b4820, val 0, offset 80
+unwind: access_mem addr 0x7f65429b4828, val 5559daaaf882, offset 88
+unwind: access_mem addr 0x7f65429b48a8, val 0, offset 216
+unwind: access_mem addr 0x7f65429b48b0, val ffffffff, offset 224
+unwind: access_mem addr 0x7f65429b48b8, val 0, offset 232
+unwind: access_mem addr 0x7f65429b48c0, val 1fe9f00000003, offset 240
+unwind: access_mem addr 0x7f65429b48c8, val 200076c2840, offset 248
+unwind: _RNvMsf_NtNtCs70fpZ3uE4FG_9pg_engine3sql5pathsNtB5_7Planner13index_path_ob:ip = 0x5559daaaf881 (0x30af881)
+unwind: access_mem 0x200020a1da0 not inside range 0x7f65429b47d0-0x7f65429c46c8
+unwind: access_mem 0x200020a1da8 not inside range 0x7f65429b47d0-0x7f65429c46c8
+roll-conn  683149 [029] 467467.293617:   20408163 cpu-clock: 
+	    5559d9a57add _RNvXs_NtNtCsgFX3jaOk65H_5alloc3vec21spec_from_iter_nestedINtB6_3VecTjjjEEINtB4_18SpecFromIterNestedB13_INtNtNtNtCskADBYZwJmSU_4core4iter8adapters3map3MapINtNtB1I_9enumerate9EnumerateINtNtNtB1M_5slice4iter4IterNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths7IClauseEENCNvMsf_B3n_NtB3n_7Planner13index_path_obs_0EE9from_iterB3r_+0x9d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559daaaf881 from_iter<(usize, usize, usize), core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>+0xf1 (inlined)
+	    5559daaaf881 from_iter<(usize, usize, usize), core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>+0xf1 (inlined)
+	    5559daaaf881 collect<core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>, alloc::vec::Vec<(usize, usize, usize), alloc::alloc::Global>>+0xf1 (inlined)
+	    5559daaaf881 _RNvMsf_NtNtCs70fpZ3uE4FG_9pg_engine3sql5pathsNtB5_7Planner13index_path_ob+0xf1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: '':ip = 0x7f654377e7cf (0x1727cf)
+unwind: access_mem addr 0x7f65429b6028, val 5559db0846f6, offset 0
+unwind: access_mem addr 0x7f65429b6030, val 4, offset 8
+unwind: _RNvNtCs70fpZ3uE4FG_9pg_engine7storage7sources:ip = 0x5559db0846f5 (0x36846f5)
+unwind: access_mem 0x200015c00d0 not inside range 0x7f65429b6028-0x7f65429c5f20
+unwind: access_mem 0x200015c00d8 not inside range 0x7f65429b6028-0x7f65429c5f20
+unwind: '':ip = 0x3 (0x0)
+unwind: access_mem 0x200015c00d0 not inside range 0x7f65429b6028-0x7f65429c5f20
+unwind: access_mem 0x200015c00d8 not inside range 0x7f65429b6028-0x7f65429c5f20
+roll-conn  683149 [029] 467467.318345:   20408163 cpu-clock: 
+	    7f654377e7cf [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db0846f5 write<pg_engine::storage::Cursor>+0x3e5 (inlined)
+	    5559db0846f5 push_mut<pg_engine::storage::Cursor, alloc::alloc::Global>+0x3e5 (inlined)
+	    5559db0846f5 push<pg_engine::storage::Cursor, alloc::alloc::Global>+0x3e5 (inlined)
+	    5559db0846f5 _RNvNtCs70fpZ3uE4FG_9pg_engine7storage7sources+0x3e5 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               3 [unknown] ([unknown])
+
+unwind: _RNvMs5_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNode9iter_next:ip = 0x5559db6d4dfc (0x3cd4dfc)
+unwind: access_mem addr 0x7f65429b7428, val 200022331e0, offset 360
+unwind: access_mem addr 0x7f65429b7450, val 500e00000010, offset 400
+unwind: access_mem addr 0x7f65429b7430, val 1a, offset 368
+unwind: access_mem addr 0x7f65429b7438, val 11, offset 376
+unwind: access_mem addr 0x7f65429b7440, val 200020bc840, offset 384
+unwind: access_mem addr 0x7f65429b7448, val 11, offset 392
+unwind: access_mem addr 0x7f65429b7458, val 7f65429b7550, offset 408
+unwind: no map for 500e00000010
+unwind: access_mem 0x500e00000010 not inside range 0x7f65429b72c0-0x7f65429c7000
+unwind: no map for 500e00000018
+unwind: access_mem 0x500e00000018 not inside range 0x7f65429b72c0-0x7f65429c7000
+roll-conn  683149 [029] 467467.343263:   20408163 cpu-clock: 
+	    5559db6d4dfc as_ref<alloc::boxed::Box<pg_engine::exec::scan::Skip, alloc::alloc::Global>>+0x1c (inlined)
+	    5559db6d4dfc _RNvMs5_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNode9iter_next+0x1c (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _mi_page_malloc_zero:ip = 0x5559d9614ebc (0x1c14ebc)
+unwind: no map for ffffffffffffffd9
+unwind: access_mem 0xffffffffffffffd9 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: no map for 1
+unwind: access_mem 0x1 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: no map for ffffffffffffffe1
+unwind: access_mem 0xffffffffffffffe1 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: no map for ffffffffffffffe9
+unwind: access_mem 0xffffffffffffffe9 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: no map for fffffffffffffff1
+unwind: access_mem 0xfffffffffffffff1 not inside range 0x7f65429b6538-0x7f65429c6430
+unwind: no map for 9
+unwind: access_mem 0x9 not inside range 0x7f65429b6538-0x7f65429c6430
+roll-conn  683149 [029] 467467.368188:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql7explain8parallelNtB4_7Builder14sorted_partial:ip = 0x5559dac9edc6 (0x329edc6)
+unwind: access_mem addr 0x7f65429b6988, val 0, offset 6152
+unwind: access_mem addr 0x7f65429b69b0, val 8, offset 6192
+unwind: access_mem addr 0x7f65429b6990, val 0, offset 6160
+unwind: access_mem addr 0x7f65429b6998, val 8, offset 6168
+unwind: access_mem addr 0x7f65429b69a0, val 0, offset 6176
+unwind: access_mem addr 0x7f65429b69a8, val 0, offset 6184
+unwind: access_mem addr 0x7f65429b69b8, val 0, offset 6200
+roll-conn  683149 [029] 467467.393006:   20408163 cpu-clock: 
+	    5559dac9edc6 add<pg_engine::sql::explain::Detail>+0xa86 (inlined)
+	    5559dac9edc6 push_mut<pg_engine::sql::explain::Detail, alloc::alloc::Global>+0xa86 (inlined)
+	    5559dac9edc6 push<pg_engine::sql::explain::Detail, alloc::alloc::Global>+0xa86 (inlined)
+	    5559dac9edc6 _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql7explain8parallelNtB4_7Builder14sorted_partial+0xa86 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: '':ip = 0x7f654377e20b (0x17220b)
+unwind: access_mem addr 0x7f65429b6d58, val 5559db010a8e, offset 0
+unwind: access_mem addr 0x7f65429b7388, val 5559d961348c, offset 1584
+unwind: access_mem addr 0x7f65429b73b0, val 7f65429b7538, offset 1624
+unwind: access_mem addr 0x7f65429b7390, val 0, offset 1592
+unwind: access_mem addr 0x7f65429b7398, val 0, offset 1600
+unwind: access_mem addr 0x7f65429b73a0, val 2000200c100, offset 1608
+unwind: access_mem addr 0x7f65429b73a8, val 7f65429b8aa0, offset 1616
+unwind: access_mem addr 0x7f65429b73b8, val 7f65429b7610, offset 1632
+unwind: _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head:ip = 0x5559db010a8d (0x3610a8d)
+unwind: access_mem addr 0x7f65429b7538, val 22, offset 2016
+unwind: access_mem addr 0x7f65429b7540, val 2000223ba60, offset 2024
+roll-conn  683149 [029] 467467.417722:   20408163 cpu-clock: 
+	    7f654377e20b [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db010a8d compare<u8>+0x7d (inlined)
+	    5559db010a8d chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d __chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<[u8], [u8]>+0x7d (inlined)
+	    5559db010a8d _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head+0x7d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing7fetched:ip = 0x5559db0b66a1 (0x36b66a1)
+unwind: access_mem addr 0x7f65429b7e88, val 3ff0000000000000, offset 1240
+unwind: access_mem addr 0x7f65429b7eb0, val 200020dbb70, offset 1280
+unwind: access_mem addr 0x7f65429b7e90, val 4058800000000000, offset 1248
+unwind: access_mem addr 0x7f65429b7e98, val 200076c2840, offset 1256
+unwind: access_mem addr 0x7f65429b7ea0, val 0, offset 1264
+unwind: access_mem addr 0x7f65429b7ea8, val 200020dbb60, offset 1272
+unwind: access_mem addr 0x7f65429b7eb8, val 5559dbcf26b8, offset 1288
+unwind: access_mem 0x200020dbb70 not inside range 0x7f65429b79b0-0x7f65429c7000
+unwind: access_mem 0x200020dbb78 not inside range 0x7f65429b79b0-0x7f65429c7000
+unwind: '':ip = 0x5559dbcf26b7 (0x42f16b7)
+unwind: access_mem 0x200020dbb70 not inside range 0x7f65429b79b0-0x7f65429c7000
+unwind: access_mem 0x200020dbb78 not inside range 0x7f65429b79b0-0x7f65429c7000
+roll-conn  683149 [029] 467467.442476:   20408163 cpu-clock: 
+	    5559db0b66a1 sub<(u32, pg_engine::catalog::heapsim::Heap)>+0x1a1 (inlined)
+	    5559db0b66a1 from_base_index<(u32, pg_engine::catalog::heapsim::Heap)>+0x1a1 (inlined)
+	    5559db0b66a1 bucket<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global>+0x1a1 (inlined)
+	    5559db0b66a1 {closure#0}<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<u32, u32, pg_engine::catalog::heapsim::Heap>>+0x1a1 (inlined)
+	    5559db0b66a1 find_inner+0x1a1 (inlined)
+	    5559db0b66a1 find<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<u32, u32, pg_engine::catalog::heapsim::Heap>>+0x1a1 (inlined)
+	    5559db0b66a1 get<(u32, pg_engine::catalog::heapsim::Heap), alloc::alloc::Global, hashbrown::map::equivalent_key::{closure_env#0}<u32, u32, pg_engine::catalog::heapsim::Heap>>+0x1a1 (inlined)
+	    5559db0b66a1 get<u32, pg_engine::catalog::heapsim::Heap, std::hash::random::RandomState, alloc::alloc::Global, u32>+0x1a1 (inlined)
+	    5559db0b66a1 get<u32, pg_engine::catalog::heapsim::Heap, std::hash::random::RandomState, alloc::alloc::Global, u32>+0x1a1 (inlined)
+	    5559db0b66a1 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing7fetched+0x1a1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbcf26b7 [unknown] (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: '':ip = 0x7f654377e819 (0x172819)
+unwind: access_mem addr 0x7f65429b4408, val 5559dbbfc535, offset 0
+unwind: access_mem addr 0x7f65429b4408, val 5559dbbfc535, offset 0
+unwind: access_mem addr 0x7f65429b4430, val 7f65429b44a0, offset 40
+unwind: access_mem addr 0x7f65429b4410, val 7f65429b44b8, offset 8
+unwind: access_mem addr 0x7f65429b4418, val 7f65429b44b0, offset 16
+unwind: access_mem addr 0x7f65429b4420, val 7f65429b4510, offset 24
+unwind: access_mem addr 0x7f65429b4428, val 5559dbc7c2c8, offset 32
+unwind: access_mem addr 0x7f65429b4438, val 5559dbc0042f, offset 48
+unwind: _RNvXsZ_NtCsgFX3jaOk65H_5alloc6stringNtB5_6StringNtNtCskADBYZwJmSU_4core3fmt5Write9write_str:ip = 0x5559dbbfc534 (0x41fc534)
+unwind: access_mem addr 0x7f65429b4478, val 1, offset 112
+unwind: access_mem addr 0x7f65429b44a0, val 5559dbc003e0, offset 152
+unwind: access_mem addr 0x7f65429b4480, val 5559dbc7c2c8, offset 120
+unwind: access_mem addr 0x7f65429b4488, val 200076c2f20, offset 128
+unwind: access_mem addr 0x7f65429b4490, val 7f65429b44b8, offset 136
+unwind: access_mem addr 0x7f65429b4498, val 7f65429b44b0, offset 144
+unwind: access_mem addr 0x7f65429b44a8, val 5559d99e7bb3, offset 160
+unwind: _RNvMs6_NtNtCskADBYZwJmSU_4core3fmt8buildersNtB5_9DebugList5entry:ip = 0x5559dbc0042e (0x420042e)
+unwind: access_mem addr 0x7f65429b45f8, val 7f65429b4720, offset 496
+unwind: access_mem addr 0x7f65429b4620, val 7f65429b4690, offset 536
+unwind: access_mem addr 0x7f65429b4600, val 5559d7f1a61f, offset 504
+unwind: access_mem addr 0x7f65429b4608, val 5559d7f1a61e, offset 512
+unwind: access_mem addr 0x7f65429b4610, val 7f65429b46a8, offset 520
+unwind: access_mem addr 0x7f65429b4618, val 0, offset 528
+unwind: access_mem addr 0x7f65429b4628, val 5559dbc0320a, offset 544
+unwind: _RNvXs1g_NtCskADBYZwJmSU_4core3fmtRINtNtCsgFX3jaOk65H_5alloc3vec3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtB6_5Debug3fmtB19_:ip = 0x5559d99e7bb2 (0x1fe7bb2)
+unwind: access_mem addr 0x7f65429b4668, val 7f65429b4748, offset 608
+unwind: access_mem addr 0x7f65429b4690, val 7f65429b46f0, offset 648
+unwind: access_mem addr 0x7f65429b4670, val 0, offset 616
+unwind: access_mem addr 0x7f65429b4678, val 200020a1560, offset 624
+unwind: access_mem addr 0x7f65429b4680, val 7f65429b4720, offset 632
+unwind: access_mem addr 0x7f65429b4688, val 5559d7f1a61e, offset 640
+unwind: access_mem addr 0x7f65429b4698, val 5559dbbfbf71, offset 656
+unwind: _RNvNtCskADBYZwJmSU_4core3fmt5write:ip = 0x5559dbc03209 (0x4203209)
+unwind: access_mem addr 0x7f65429b46c8, val 7f65429b48f8, offset 704
+unwind: access_mem addr 0x7f65429b46f0, val 7f65429b4720, offset 744
+unwind: access_mem addr 0x7f65429b46d0, val c0, offset 712
+unwind: access_mem addr 0x7f65429b46d8, val 200020a1560, offset 720
+unwind: access_mem addr 0x7f65429b46e0, val 200076c0d20, offset 728
+unwind: access_mem addr 0x7f65429b46e8, val 0, offset 736
+unwind: access_mem addr 0x7f65429b46f8, val 5559d9b1185e, offset 752
+unwind: _RNvNvNtCsgFX3jaOk65H_5alloc3fmt6format12format_inner:ip = 0x5559dbbfbf70 (0x41fbf70)
+unwind: access_mem addr 0x7f65429b4938, val 3fba045f443a72d3, offset 1328
+unwind: access_mem addr 0x7f65429b4960, val 6, offset 1368
+unwind: access_mem addr 0x7f65429b4940, val 0, offset 1336
+unwind: access_mem addr 0x7f65429b4948, val 5559daaf882b, offset 1344
+unwind: access_mem addr 0x7f65429b4950, val 0, offset 1352
+unwind: access_mem addr 0x7f65429b4958, val 1, offset 1360
+unwind: access_mem addr 0x7f65429b4968, val 2, offset 1376
+unwind: _RINvXs0_NtNtNtCskADBYZwJmSU_4core4iter8adapters3mapINtB6_3MapINtNtB8_9enumerate9EnumerateINtNtNtBc_5slice4iter4IterNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths7IClauseEENCNvMsf_B1R_NtB1R_7Planner13index_path_obs_0ENtNtNtBa_6traits8iterator8Iterator4folduNCINvNvB3m_8for_each4callTjjjENCINvMsk_NtCsgFX3jaOk65H_5alloc3vecINtB4D_3VecB4p_E14extend_trustedBN_E0E0EB1V_:ip = 0x5559d9b1185d (0x211185d)
+unwind: no map for 6
+unwind: access_mem 0x6 not inside range 0x7f65429b4408-0x7f65429c4300
+unwind: no map for e
+unwind: access_mem 0xe not inside range 0x7f65429b4408-0x7f65429c4300
+unwind: '':ip = 0x1 (0x0)
+unwind: no map for 6
+unwind: access_mem 0x6 not inside range 0x7f65429b4408-0x7f65429c4300
+unwind: no map for e
+unwind: access_mem 0xe not inside range 0x7f65429b4408-0x7f65429c4300
+unwind: _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs70fpZ3uE4FG_9pg_engine:ip = 0x5559d9c44a84 (0x2244a84)
+unwind: access_mem addr 0x7f65429af838, val 200020802a8, offset 8
+unwind: access_mem addr 0x7f65429af840, val 8, offset 16
+unwind: access_mem addr 0x7f65429af848, val 7f65429afc88, offset 24
+unwind: access_mem addr 0x7f65429af850, val 200076c4660, offset 32
+unwind: access_mem addr 0x7f65429af858, val 5559da1ace06, offset 40
+unwind: access_mem addr 0x7f65429af888, val 2, offset 88
+unwind: access_mem addr 0x7f65429af8a0, val 0, offset 112
+unwind: access_mem addr 0x7f65429af890, val 0, offset 96
+unwind: access_mem addr 0x7f65429af898, val 8, offset 104
+unwind: access_mem addr 0x7f65429af8a8, val 7f65429afc88, offset 120
+unwind: _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser5binop:ip = 0x5559da1ace05 (0x27ace05)
+roll-conn  683149 [029] 467467.467456:   20408163 cpu-clock: 
+	    7f654377e819 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbfc534 _RINvNtCskADBYZwJmSU_4core3ptr19copy_nonoverlappinghECsgFX3jaOk65H_5alloc+0x34 (inlined)
+	    5559dbbfc534 _RNvMs_NtCsgFX3jaOk65H_5alloc3vecINtB4_3VechE26append_elements_unreservedB6_+0x34 (inlined)
+	    5559dbbfc534 _RNvMs_NtCsgFX3jaOk65H_5alloc3vecINtB4_3VechE15append_elementsB6_+0x34 (inlined)
+	    5559dbbfc534 _RNvXs2_NtNtCsgFX3jaOk65H_5alloc3vec11spec_extendINtB7_3VechEINtB5_10SpecExtendRhINtNtNtCskADBYZwJmSU_4core5slice4iter4IterhEE11spec_extendB9_+0x34 (inlined)
+	    5559dbbfc534 _RNvMs1_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VechE17extend_from_sliceB7_+0x34 (inlined)
+	    5559dbbfc534 _RNvMNtCsgFX3jaOk65H_5alloc6stringNtB2_6String8push_str+0x34 (inlined)
+	    5559dbbfc534 _RNvXsZ_NtCsgFX3jaOk65H_5alloc6stringNtB5_6StringNtNtCskADBYZwJmSU_4core3fmt5Write9write_str+0x34 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbc0042e _RNvMsa_NtCskADBYZwJmSU_4core3fmtNtB5_9Formatter9write_str+0x4e (inlined)
+	    5559dbc0042e _RNCNvMs4_NtNtCskADBYZwJmSU_4core3fmt8buildersNtB7_10DebugInner5entry0Bb_+0x4e (inlined)
+	    5559dbc0042e _RINvMNtCskADBYZwJmSU_4core6resultINtB3_6ResultuNtNtB5_3fmt5ErrorE8and_thenuNCNvMs4_NtBL_8buildersNtB1j_10DebugInner5entry0EB5_+0x4e (inlined)
+	    5559dbc0042e _RNvMs4_NtNtCskADBYZwJmSU_4core3fmt8buildersNtB5_10DebugInner5entry+0x4e (inlined)
+	    5559dbc0042e _RNvMs5_NtNtCskADBYZwJmSU_4core3fmt8buildersNtB5_8DebugSet5entry+0x4e (inlined)
+	    5559d99e7bb2 entries<&pg_engine::sql::expr::Expr, core::slice::iter::Iter<pg_engine::sql::expr::Expr>>+0x62 (inlined)
+	    5559d99e7bb2 fmt<pg_engine::sql::expr::Expr>+0x62 (inlined)
+	    5559d99e7bb2 fmt<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0x62 (inlined)
+	    5559d99e7bb2 _RNvXs1g_NtCskADBYZwJmSU_4core3fmtRINtNtCsgFX3jaOk65H_5alloc3vec3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtB6_5Debug3fmtB19_+0x62 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbc03209 _RNvMNtNtCskADBYZwJmSU_4core3fmt2rtNtB2_8Argument3fmt+0x169 (inlined)
+	    5559dbc03209 _RNvNtCskADBYZwJmSU_4core3fmt5write+0x169 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbbfbf70 _RNvXs_NvNtNtCskADBYZwJmSU_4core3fmt5Write9write_fmtQNtNtCsgFX3jaOk65H_5alloc6string6StringNtB4_12SpecWriteFmt14spec_write_fmtBS_+0x130 (inlined)
+	    5559dbbfbf70 _RNvYNtNtCsgFX3jaOk65H_5alloc6string6StringNtNtCskADBYZwJmSU_4core3fmt5Write9write_fmtB6_+0x130 (inlined)
+	    5559dbbfbf70 _RNvNvNtCsgFX3jaOk65H_5alloc3fmt6format12format_inner+0x130 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559d9b1185d {closure#0}+0x1bd (inlined)
+	    5559d9b1185d map_or_else<&str, alloc::string::String, alloc::fmt::format::{closure_env#0}, fn(&str) -> alloc::string::String>+0x1bd (inlined)
+	    5559d9b1185d format+0x1bd (inlined)
+	    5559d9b1185d same_text+0x1bd (inlined)
+	    5559d9b1185d same_as+0x1bd (inlined)
+	    5559d9b1185d {closure#0}+0x1bd (inlined)
+	    5559d9b1185d position<pg_engine::sql::expr::Expr, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure#0}::{closure_env#0}>+0x1bd (inlined)
+	    5559d9b1185d {closure#0}+0x1bd (inlined)
+	    5559d9b1185d {closure#1}+0x1bd (inlined)
+	    5559d9b1185d {closure#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>+0x1bd (inlined)
+	    5559d9b1185d {closure#0}<&pg_engine::sql::paths::IClause, (), core::iter::adapters::map::map_fold::{closure_env#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>>+0x1bd (inlined)
+	    5559d9b1185d fold<pg_engine::sql::paths::IClause, (), core::iter::adapters::enumerate::{impl#1}::fold::enumerate::{closure_env#0}<&pg_engine::sql::paths::IClause, (), core::iter::adapters::map::map_fold::{closure_env#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>>>+0x1bd (inlined)
+	    5559d9b1185d fold<core::slice::iter::Iter<pg_engine::sql::paths::IClause>, (), core::iter::adapters::map::map_fold::{closure_env#0}<(usize, &pg_engine::sql::paths::IClause), (usize, usize, usize), (), pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<(usize, usize, usize), alloc::vec::{impl#22}::extend_trusted::{closure_env#0}<(usize, usize, usize), alloc::alloc::Global, core::iter::adapters::map::Map<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<pg_engine::sql::paths::IClause>>, pg_engine::sql::paths::{impl#17}::index_path_ob::{closure_env#1}>>>>>+0x1bd (inlined)
+	    5559d9b1185d _RINvXs0_NtNtNtCskADBYZwJmSU_4core4iter8adapters3mapINtB6_3MapINtNtB8_9enumerate9EnumerateINtNtNtBc_5slice4iter4IterNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths7IClauseEENCNvMsf_B1R_NtB1R_7Planner13index_path_obs_0ENtNtNtBa_6traits8iterator8Iterator4folduNCINvNvB3m_8for_each4callTjjjENCINvMsk_NtCsgFX3jaOk65H_5alloc3vecINtB4D_3VecB4p_E14extend_trustedBN_E0E0EB1V_+0x1bd (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+unwind: _RNvNtCs13iv4QpFrNm_5bytes5bytes11shared_drop.llvm.17419890484745586752:ip = 0x5559dbb4c989 (0x414c989)
+unwind: access_mem addr 0x7f65429b7ac8, val ffffffffffffffff, offset 136
+unwind: access_mem addr 0x7f65429b7af0, val 3ff0000000000000, offset 176
+unwind: access_mem addr 0x7f65429b7ad0, val 0, offset 144
+unwind: access_mem addr 0x7f65429b7ad8, val 7f65429b0eb0, offset 152
+unwind: access_mem addr 0x7f65429b7ae0, val ffffffffffffffff, offset 160
+unwind: access_mem addr 0x7f65429b7ae8, val 3ff0000000000000, offset 168
+unwind: access_mem addr 0x7f65429b7af8, val 1, offset 184
+unwind: no map for 3ff0000000000000
+unwind: access_mem 0x3ff0000000000000 not inside range 0x7f65429b7a40-0x7f65429c7000
+unwind: no map for 3ff0000000000008
+unwind: access_mem 0x3ff0000000000008 not inside range 0x7f65429b7a40-0x7f65429c7000
+unwind: '':ip = 0x0 (0x0)
+unwind: no map for 3ff0000000000000
+unwind: access_mem 0x3ff0000000000000 not inside range 0x7f65429b7a40-0x7f65429c7000
+unwind: no map for 3ff0000000000008
+unwind: access_mem 0x3ff0000000000008 not inside range 0x7f65429b7a40-0x7f65429c7000
+roll-conn  683149 [029] 467467.492395:   20408163 cpu-clock: 
+	    5559d9c44a84 branch<core::ptr::non_null::NonNull<[u8]>, alloc::collections::TryReserveError>+0x64 (inlined)
+	    5559d9c44a84 grow_amortized<alloc::alloc::Global>+0x64 (inlined)
+	    5559d9c44a84 _RINvNvMs2_NtCsgFX3jaOk65H_5alloc7raw_vecINtB8_11RawVecInnerpE7reserve21do_reserve_and_handleNtNtBa_5alloc6GlobalECs70fpZ3uE4FG_9pg_engine+0x64 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da1ace05 reserve<alloc::alloc::Global>+0x415 (inlined)
+	    5559da1ace05 reserve<u8, alloc::alloc::Global>+0x415 (inlined)
+	    5559da1ace05 reserve<u8, alloc::alloc::Global>+0x415 (inlined)
+	    5559da1ace05 reserve+0x415 (inlined)
+	    5559da1ace05 push+0x415 (inlined)
+	    5559da1ace05 open+0x415 (inlined)
+	    5559da1ace05 _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser5binop+0x415 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  683149 [029] 467467.517441:   20408163 cpu-clock: 
+	    5559dbb4c989 release_shared+0x9 (inlined)
+	    5559dbb4c989 _RNvNtCs13iv4QpFrNm_5bytes5bytes11shared_drop.llvm.17419890484745586752+0x9 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser9expr_here:ip = 0x5559da1b8d32 (0x27b8d32)
+unwind: access_mem addr 0x7f65429afae8, val 7f65429aff48, offset 792
+unwind: access_mem addr 0x7f65429afb10, val 200076c2ae0, offset 832
+unwind: access_mem addr 0x7f65429afaf0, val 2, offset 800
+unwind: access_mem addr 0x7f65429afaf8, val 7f65429c5440, offset 808
+unwind: access_mem addr 0x7f65429afb00, val 0, offset 816
+unwind: access_mem addr 0x7f65429afb08, val 5559d808b071, offset 824
+unwind: access_mem addr 0x7f65429afb18, val 5559da1acb17, offset 840
+unwind: access_mem addr 0x7f65429afb48, val 2, offset 888
+unwind: access_mem addr 0x7f65429afb60, val 7f65429afb26, offset 912
+unwind: access_mem addr 0x7f65429afb50, val 7f65429aff48, offset 896
+unwind: access_mem addr 0x7f65429afb58, val 200076c2ae0, offset 904
+unwind: access_mem addr 0x7f65429afb68, val 7f65429aff48, offset 920
+unwind: _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser5binop:ip = 0x5559da1acb16 (0x27acb16)
+unwind: access_mem addr 0x7f65429afb26, val 7f65429afb270001, offset 854
+unwind: access_mem addr 0x7f65429afb2e, val 200076c2b400000, offset 862
+roll-conn  683149 [029] 467467.542321:   20408163 cpu-clock: 
+	    5559da1b8d32 reserve<alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 reserve<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 reserve<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 append_elements<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 spec_extend<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 extend_from_slice<u8, alloc::alloc::Global>+0x48f2 (inlined)
+	    5559da1b8d32 push_str+0x48f2 (inlined)
+	    5559da1b8d32 _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser9expr_here+0x48f2 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da1acb16 {closure#0}+0x126 (inlined)
+	    5559da1acb16 grow<core::option::Option<()>, pg_engine::sql::ruleutils::{impl#1}::expr::{closure_env#0}>+0x126 (inlined)
+	    5559da1acb16 expr+0x126 (inlined)
+	    5559da1acb16 paren+0x126 (inlined)
+	    5559da1acb16 _RNvMs_NtNtCs70fpZ3uE4FG_9pg_engine3sql9ruleutilsNtB4_8Deparser5binop+0x126 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvXsf_NtNtCs70fpZ3uE4FG_9pg_engine5types5valueNtB5_5ValueNtNtCskADBYZwJmSU_4core5clone5Clone5clone.llvm.4838799075968597823:ip = 0x5559d9aa6780 (0x20a6780)
+unwind: access_mem addr 0x7f65429b7900, val 200020ba560, offset 872
+unwind: access_mem addr 0x7f65429b7928, val 20007f66bfd, offset 912
+unwind: access_mem addr 0x7f65429b7908, val 11, offset 880
+unwind: access_mem addr 0x7f65429b7910, val 16f2, offset 888
+unwind: access_mem addr 0x7f65429b7918, val 2000152ee00, offset 896
+unwind: access_mem addr 0x7f65429b7920, val 11, offset 904
+unwind: access_mem addr 0x7f65429b7930, val 7f65429b8aa0, offset 920
+unwind: access_mem 0x20007f66bfd not inside range 0x7f65429b7598-0x7f65429c7000
+unwind: access_mem 0x20007f66c05 not inside range 0x7f65429b7598-0x7f65429c7000
+roll-conn  683149 [029] 467467.567315:   20408163 cpu-clock: 
+	    5559d9aa6780 _RNvXsf_NtNtCs70fpZ3uE4FG_9pg_engine5types5valueNtB5_5ValueNtNtCskADBYZwJmSU_4core5clone5Clone5clone.llvm.4838799075968597823+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _mi_page_malloc_zero:ip = 0x5559d9614ebc (0x1c14ebc)
+unwind: access_mem 0x200020bcad8 not inside range 0x7f65429b75d8-0x7f65429c7000
+unwind: access_mem 0x200020bcb00 not inside range 0x7f65429b75d8-0x7f65429c7000
+unwind: access_mem 0x200020bcae0 not inside range 0x7f65429b75d8-0x7f65429c7000
+unwind: access_mem 0x200020bcae8 not inside range 0x7f65429b75d8-0x7f65429c7000
+unwind: access_mem 0x200020bcaf0 not inside range 0x7f65429b75d8-0x7f65429c7000
+unwind: access_mem 0x200020bcaf8 not inside range 0x7f65429b75d8-0x7f65429c7000
+unwind: access_mem 0x200020bcb08 not inside range 0x7f65429b75d8-0x7f65429c7000
+roll-conn  683149 [029] 467467.592216:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtNtCskADBYZwJmSU_4core5clone5Clone5cloneBL_:ip = 0x5559d9a709bc (0x20709bc)
+unwind: access_mem addr 0x7f65429aefe8, val 7f65429af0c0, offset 424
+unwind: access_mem addr 0x7f65429af010, val 7f65429af020, offset 464
+unwind: access_mem addr 0x7f65429aeff0, val 7f65429c5440, offset 432
+unwind: access_mem addr 0x7f65429aeff8, val 2, offset 440
+unwind: access_mem addr 0x7f65429af000, val 200023328e0, offset 448
+unwind: access_mem addr 0x7f65429af008, val 200076c0460, offset 456
+unwind: access_mem addr 0x7f65429af018, val 5559db59163f, offset 472
+unwind: access_mem addr 0x7f65429af020, val 0, offset 480
+unwind: _RNvXs_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB4_4ExprNtNtCskADBYZwJmSU_4core5clone5Clone5clone:ip = 0x5559db59163e (0x3b9163e)
+roll-conn  683149 [029] 467467.617221:   20408163 cpu-clock: 
+	    5559d9a709bc write<pg_engine::sql::expr::Expr>+0xac (inlined)
+	    5559d9a709bc to_vec<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xac (inlined)
+	    5559d9a709bc to_vec_in<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xac (inlined)
+	    5559d9a709bc _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtNtCskADBYZwJmSU_4core5clone5Clone5cloneBL_+0xac (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db59163e grow<pg_engine::sql::expr::Expr, pg_engine::sql::expr::{impl#1}::clone::{closure_env#0}>+0x12e (inlined)
+	    5559db59163e _RNvXs_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB4_4ExprNtNtCskADBYZwJmSU_4core5clone5Clone5clone+0x12e (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtCs70fpZ3uE4FG_9pg_engine7catalog19is_col_name_keyword:ip = 0x5559db082c1f (0x3682c1f)
+unwind: access_mem addr 0x7f65429b14f0, val 0, offset 72
+unwind: access_mem addr 0x7f65429b1518, val 20002080060, offset 112
+unwind: access_mem addr 0x7f65429b14f8, val 7f65429b1618, offset 80
+unwind: access_mem addr 0x7f65429b1500, val 5559db081e30, offset 88
+unwind: access_mem addr 0x7f65429b1508, val 8, offset 96
+unwind: access_mem addr 0x7f65429b1510, val 7, offset 104
+unwind: access_mem addr 0x7f65429b1520, val 20002080a70, offset 120
+unwind: access_mem 0x20002080060 not inside range 0x7f65429b14a8-0x7f65429c13a0
+unwind: access_mem 0x20002080068 not inside range 0x7f65429b14a8-0x7f65429c13a0
+roll-conn  683149 [030] 467467.646552:   20408163 cpu-clock: 
+	    5559db082c1f equal_same_length<u8, u8>+0xef (inlined)
+	    5559db082c1f eq<u8, u8>+0xef (inlined)
+	    5559db082c1f eq<[u8], [u8]>+0xef (inlined)
+	    5559db082c1f eq+0xef (inlined)
+	    5559db082c1f _RNvNtCs70fpZ3uE4FG_9pg_engine7catalog19is_col_name_keyword+0xef (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: '':ip = 0x7f654377e7f7 (0x1727f7)
+unwind: access_mem addr 0x7f65429b7dc8, val 5559dbb4e332, offset 0
+unwind: access_mem addr 0x7f65429b7dd0, val 0, offset 8
+unwind: access_mem addr 0x7f65429b7dd8, val 200021f13d8, offset 16
+unwind: _RNvXs2_NtCs13iv4QpFrNm_5bytes9bytes_mutNtB5_8BytesMutNtNtNtB7_3buf7buf_mut6BufMut9put_slice:ip = 0x5559dbb4e331 (0x414e331)
+roll-conn  683149 [030] 467467.672396:   20408163 cpu-clock: 
+	    7f654377e7f7 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbb4e331 copy_nonoverlapping<u8>+0x51 (inlined)
+	    5559dbb4e331 extend_from_slice+0x51 (inlined)
+	    5559dbb4e331 _RNvXs2_NtCs13iv4QpFrNm_5bytes9bytes_mutNtB5_8BytesMutNtNtNtB7_3buf7buf_mut6BufMut9put_slice+0x51 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs7_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNode8full_row:ip = 0x5559db6d81f5 (0x3cd81f5)
+unwind: access_mem addr 0x7f65429b8068, val 2, offset 1784
+unwind: access_mem addr 0x7f65429b8090, val 30, offset 1824
+unwind: access_mem addr 0x7f65429b8070, val 200020bb3c0, offset 1792
+unwind: access_mem addr 0x7f65429b8078, val 2, offset 1800
+unwind: access_mem addr 0x7f65429b8080, val 73168643945b0b59, offset 1808
+unwind: access_mem addr 0x7f65429b8088, val 5559dbbfc246, offset 1816
+unwind: access_mem addr 0x7f65429b8098, val 2, offset 1832
+unwind: no map for 30
+unwind: access_mem 0x30 not inside range 0x7f65429b7970-0x7f65429c7000
+unwind: no map for 38
+unwind: access_mem 0x38 not inside range 0x7f65429b7970-0x7f65429c7000
+unwind: '':ip = 0x1 (0x0)
+unwind: no map for 30
+unwind: access_mem 0x30 not inside range 0x7f65429b7970-0x7f65429c7000
+unwind: no map for 38
+unwind: access_mem 0x38 not inside range 0x7f65429b7970-0x7f65429c7000
+roll-conn  683149 [030] 467467.696673:   20408163 cpu-clock: 
+	    5559db6d81f5 deref<pg_engine::sql::plan::ScanPlan>+0x65 (inlined)
+	    5559db6d81f5 _RNvMs7_NtNtCs70fpZ3uE4FG_9pg_engine4exec4scanNtB5_8ScanNode8full_row+0x65 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+unwind: _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4func3ops5op_ge.llvm.8273478932343937147:ip = 0x5559dae21c81 (0x3421c81)
+unwind: access_mem addr 0x7f65429b4ae8, val 5559db540d78, offset 8
+unwind: access_mem addr 0x7f65429b4b10, val 7f65429b8aa0, offset 48
+unwind: access_mem addr 0x7f65429b4af0, val 20000000002, offset 16
+unwind: access_mem addr 0x7f65429b4af8, val 555900000000, offset 24
+unwind: access_mem addr 0x7f65429b4b00, val 1429b4d90, offset 32
+unwind: access_mem addr 0x7f65429b4b08, val 7f65429b6fb0, offset 40
+unwind: access_mem addr 0x7f65429b4b18, val 20002331220, offset 56
+unwind: access_mem addr 0x7f65429b8aa0, val 3, offset 16320
+unwind: access_mem addr 0x7f65429b8aa8, val 20002460f50, offset 16328
+roll-conn  683149 [030] 467467.721676:   20408163 cpu-clock: 
+	    5559dae21c81 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4func3ops5op_ge.llvm.8273478932343937147+0x1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs70fpZ3uE4FG_9pg_engine.llvm.10145509653624036794:ip = 0x5559d9c9cee1 (0x229cee1)
+unwind: access_mem addr 0x7f65429b6c60, val 0, offset 0
+unwind: access_mem addr 0x7f65429b6c68, val 7f65429b6e80, offset 8
+unwind: access_mem addr 0x7f65429b6c70, val 200021f0200, offset 16
+unwind: access_mem addr 0x7f65429b6c78, val 4, offset 24
+unwind: no map for 2
+unwind: access_mem 0x2 not inside range 0x7f65429b6c60-0x7f65429c6b58
+unwind: no map for a
+unwind: access_mem 0xa not inside range 0x7f65429b6c60-0x7f65429c6b58
+unwind: '':ip = 0x3 (0x0)
+unwind: no map for 2
+unwind: access_mem 0x2 not inside range 0x7f65429b6c60-0x7f65429c6b58
+unwind: no map for a
+unwind: access_mem 0xa not inside range 0x7f65429b6c60-0x7f65429c6b58
+roll-conn  683149 [030] 467467.746677:   20408163 cpu-clock: 
+	    5559d9c9cee1 alloc+0x71 (inlined)
+	    5559d9c9cee1 alloc_impl_runtime+0x71 (inlined)
+	    5559d9c9cee1 alloc_impl+0x71 (inlined)
+	    5559d9c9cee1 allocate+0x71 (inlined)
+	    5559d9c9cee1 _RNvMs5_NtCsgFX3jaOk65H_5alloc7raw_vecNtB5_11RawVecInner11finish_growCs70fpZ3uE4FG_9pg_engine.llvm.10145509653624036794+0x71 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               3 [unknown] ([unknown])
+
+unwind: _RNvMs4_NtNtCs70fpZ3uE4FG_9pg_engine3sql6binderNtB5_6Binder3new:ip = 0x5559db496267 (0x3a96267)
+unwind: access_mem addr 0x7f65429b0b38, val 0, offset 168
+unwind: access_mem addr 0x7f65429b0b60, val 0, offset 208
+unwind: access_mem addr 0x7f65429b0b40, val 0, offset 176
+unwind: access_mem addr 0x7f65429b0b48, val 0, offset 184
+unwind: access_mem addr 0x7f65429b0b50, val 0, offset 192
+unwind: access_mem addr 0x7f65429b0b58, val 0, offset 200
+unwind: access_mem addr 0x7f65429b0b68, val 0, offset 216
+roll-conn  683149 [030] 467467.771595:   20408163 cpu-clock: 
+	    5559db496267 _RNvMs4_NtNtCs70fpZ3uE4FG_9pg_engine3sql6binderNtB5_6Binder3new+0x527 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RINvMs1_NtCs3BTM885nGDo_9hashbrown3mapINtB6_7HashMapINtNtCsgFX3jaOk65H_5alloc3vec3VechENtNtNtCs70fpZ3uE4FG_9pg_engine3txn5locks5EntryNtNtNtB1t_4exec8fasthash9FastStateE7get_mutBO_EB1t_:ip = 0x5559d963bbd0 (0x1c3bbd0)
+unwind: access_mem addr 0x7f65429b9b50, val 2000200cae0, offset 88
+unwind: access_mem addr 0x7f65429b9b78, val 4, offset 128
+unwind: access_mem addr 0x7f65429b9b58, val 10, offset 96
+unwind: access_mem addr 0x7f65429b9b60, val 20000250ce0, offset 104
+unwind: access_mem addr 0x7f65429b9b68, val 5559db2273c5, offset 112
+unwind: access_mem addr 0x7f65429b9b70, val 3, offset 120
+unwind: access_mem addr 0x7f65429b9b80, val 2f20, offset 136
+unwind: no map for 4
+unwind: access_mem 0x4 not inside range 0x7f65429b9af8-0x7f65429c7000
+unwind: no map for c
+unwind: access_mem 0xc not inside range 0x7f65429b9af8-0x7f65429c7000
+unwind: '':ip = 0x2f1f (0x0)
+unwind: no map for 4
+unwind: access_mem 0x4 not inside range 0x7f65429b9af8-0x7f65429c7000
+unwind: no map for c
+unwind: access_mem 0xc not inside range 0x7f65429b9af8-0x7f65429c7000
+roll-conn  683149 [030] 467467.796610:   20408163 cpu-clock: 
+	    5559d963bbd0 is_empty<(alloc::vec::Vec<u8, alloc::alloc::Global>, pg_engine::txn::locks::Entry), alloc::alloc::Global>+0x0 (inlined)
+	    5559d963bbd0 _RINvMs1_NtCs3BTM885nGDo_9hashbrown3mapINtB6_7HashMapINtNtCsgFX3jaOk65H_5alloc3vec3VechENtNtNtCs70fpZ3uE4FG_9pg_engine3txn5locks5EntryNtNtNtB1t_4exec8fasthash9FastStateE7get_mutBO_EB1t_+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	            2f1f [unknown] ([unknown])
+
+unwind: mi_free:ip = 0x5559d9612ec5 (0x1c12ec5)
+unwind: access_mem 0x2000152f880 not inside range 0x7f65429b7a58-0x7f65429c7000
+unwind: access_mem 0x2000152f890 not inside range 0x7f65429b7a58-0x7f65429c7000
+unwind: access_mem 0x2000152f888 not inside range 0x7f65429b7a58-0x7f65429c7000
+unwind: access_mem 0x2000152f898 not inside range 0x7f65429b7a58-0x7f65429c7000
+roll-conn  683149 [030] 467467.821623:   20408163 cpu-clock: 
+	    5559d9612ec5 _mi_page_map_index+0x15 (inlined)
+	    5559d9612ec5 _mi_unchecked_ptr_page+0x15 (inlined)
+	    5559d9612ec5 _mi_ptr_page+0x15 (inlined)
+	    5559d9612ec5 mi_validate_ptr_page+0x15 (inlined)
+	    5559d9612ec5 mi_free+0x15 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths8parallel13func_parallel:ip = 0x5559dab8c750 (0x318c750)
+unwind: access_mem addr 0x7f65429afd60, val 20002361f88, offset 1416
+unwind: access_mem addr 0x7f65429afd88, val 200021f1b00, offset 1456
+unwind: access_mem addr 0x7f65429afd68, val 0, offset 1424
+unwind: access_mem addr 0x7f65429afd70, val 7f65429c5440, offset 1432
+unwind: access_mem addr 0x7f65429afd78, val 20002362680, offset 1440
+unwind: access_mem addr 0x7f65429afd80, val 20002362680, offset 1448
+unwind: access_mem addr 0x7f65429afd90, val 7f65429afda0, offset 1464
+unwind: access_mem 0x200021f1b00 not inside range 0x7f65429af7d8-0x7f65429bf6d0
+unwind: access_mem 0x200021f1b08 not inside range 0x7f65429af7d8-0x7f65429bf6d0
+roll-conn  683149 [030] 467467.846735:   20408163 cpu-clock: 
+	    5559dab8c750 _RNvNtNtNtCs70fpZ3uE4FG_9pg_engine3sql5paths8parallel13func_parallel+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: '':ip = 0x7f65436a672e (0x9a72e)
+unwind: access_mem addr 0x7f65429bd428, val 7f654369b388, offset 0
+unwind: access_mem addr 0x7f65429bd440, val aa7, offset 24
+unwind: access_mem addr 0x7f65429bd448, val 7f654369b3cd, offset 32
+unwind: '':ip = 0x7f654369b387 (0x8f387)
+unwind: access_mem addr 0x7f65429bd468, val 7f654371df77, offset 64
+unwind: '':ip = 0x7f654369b3cc (0x8f3cc)
+unwind: access_mem addr 0x7f65429bd488, val 5559dbbc14c4, offset 96
+unwind: __send:ip = 0x7f654371df76 (0x111f76)
+unwind: access_mem addr 0x7f65429bd490, val aa7, offset 104
+unwind: _RNvXs0_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB5_9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write5write:ip = 0x5559dbbc14c3 (0x41c14c3)
+unwind: access_mem addr 0x7f65429bd4a0, val 0, offset 120
+unwind: access_mem addr 0x7f65429bd4a8, val 5559da6f88e5, offset 128
+unwind: '':ip = 0xaa6 (0x0)
+unwind: access_mem addr 0x7f65429bd4b0, val 0, offset 136
+unwind: access_mem addr 0x7f65429bd4b8, val 8, offset 144
+unwind: _RNvYNtNtNtCs8ZKwes1zzDd_3std3net3tcp9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write9write_allCs70fpZ3uE4FG_9pg_engine:ip = 0x5559da6f88e4 (0x2cf88e4)
+unwind: '':ip = 0x7 (0x0)
+roll-conn  683149 [030] 467467.871569:   20408163 cpu-clock: 
+	ffffffffb3e9f32a rep_movs_alternative+0x4a ([kernel.kallsyms])
+	ffffffffb389493c _copy_from_iter+0xcc ([kernel.kallsyms])
+	ffffffffb3d05e2f tcp_sendmsg_locked+0x37f ([kernel.kallsyms])
+	ffffffffb3d0694b tcp_sendmsg+0x2b ([kernel.kallsyms])
+	ffffffffb3c03f2e __sys_sendto+0x1ce ([kernel.kallsyms])
+	ffffffffb3c03f74 __x64_sys_sendto+0x24 ([kernel.kallsyms])
+	ffffffffb3ef7267 do_syscall_64+0x87 ([kernel.kallsyms])
+	ffffffffb400012f entry_SYSCALL_64_after_hwframe+0x76 ([kernel.kallsyms])
+	    7f65436a672e [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b387 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654369b3cc [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    7f654371df76 __send+0x16 (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559dbbc14c3 _RNvMsa_NtNtNtNtCs8ZKwes1zzDd_3std3sys3net10connection6socketNtB5_9UdpSocket4send+0x13 (inlined)
+	    5559dbbc14c3 _RNvXs0_NtNtCs8ZKwes1zzDd_3std3net3tcpNtB5_9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write5write+0x13 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	             aa6 [unknown] ([unknown])
+	    5559da6f88e4 _RNvYNtNtNtCs8ZKwes1zzDd_3std3net3tcp9TcpStreamNtNtNtCskADBYZwJmSU_4core2io5write5Write9write_allCs70fpZ3uE4FG_9pg_engine+0x74 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               7 [unknown] ([unknown])
+
+unwind: _RNvMs_NtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder6selectNtB6_6Binder18bind_simple_select:ip = 0x5559db4e8e6a (0x3ae8e6a)
+unwind: access_mem addr 0x7f65429b4748, val 0, offset 7832
+unwind: access_mem addr 0x7f65429b4770, val 7f65429b5c30, offset 7872
+unwind: access_mem addr 0x7f65429b4750, val 7f65429b50af, offset 7840
+unwind: access_mem addr 0x7f65429b4758, val 7f65429b7278, offset 7848
+unwind: access_mem addr 0x7f65429b4760, val 20003588fc0, offset 7856
+unwind: access_mem addr 0x7f65429b4768, val 7f65429b71f0, offset 7864
+unwind: access_mem addr 0x7f65429b4778, val 5559db50246a, offset 7880
+unwind: access_mem addr 0x7f65429b4fb8, val 5559dba6e8fa, offset 9992
+unwind: access_mem addr 0x7f65429b4fe0, val 3, offset 10032
+unwind: access_mem addr 0x7f65429b4fc0, val 0, offset 10000
+unwind: access_mem addr 0x7f65429b4fc8, val 20002332100, offset 10008
+unwind: access_mem addr 0x7f65429b4fd0, val 180, offset 10016
+unwind: access_mem addr 0x7f65429b4fd8, val 8, offset 10024
+unwind: access_mem addr 0x7f65429b4fe8, val 5559dba2a6be, offset 10040
+unwind: _RNvMs_NtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder6selectNtB6_6Binder21bind_select_stmt_here:ip = 0x5559db502469 (0x3b02469)
+unwind: access_mem addr 0x7f65429b5048, val 20007dcc048, offset 10136
+unwind: access_mem addr 0x7f65429b5070, val 7f65429b50af, offset 10176
+unwind: access_mem addr 0x7f65429b5050, val 20007dcc048, offset 10144
+unwind: access_mem addr 0x7f65429b5058, val 7f65429b78f0, offset 10152
+unwind: access_mem addr 0x7f65429b5060, val 7f65429b71f0, offset 10160
+unwind: access_mem addr 0x7f65429b5068, val 7f65429b5c30, offset 10168
+unwind: access_mem addr 0x7f65429b5078, val 7f65429b7278, offset 10184
+unwind: _RNvMNtCsjOBibkc8uvf_8pg_query9node_enumNtNtNtB4_8protobuf4node4Node5nodes:ip = 0x5559dba2a6bd (0x402a6bd)
+unwind: access_mem addr 0x7f65429b50af, val 7f65429b50af00, offset 10239
+unwind: access_mem addr 0x7f65429b50b7, val 7f65429b724000, offset 10247
+roll-conn  683149 [030] 467467.896511:   20408163 cpu-clock: 
+	    5559db4e8e6a _RNvMs_NtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder6selectNtB6_6Binder18bind_simple_select+0xae5a (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db502469 _RNvMs_NtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder6selectNtB6_6Binder21bind_select_stmt_here+0x399 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dba2a6bd dealloc_nonnull+0x251d (inlined)
+	    5559dba2a6bd deallocate_impl_runtime+0x251d (inlined)
+	    5559dba2a6bd deallocate_impl+0x251d (inlined)
+	    5559dba2a6bd deallocate+0x251d (inlined)
+	    5559dba2a6bd deallocate<alloc::alloc::Global>+0x251d (inlined)
+	    5559dba2a6bd drop<(pg_query::node_ref::NodeRef, i32, pg_query::node_enum::Context, bool), alloc::alloc::Global>+0x251d (inlined)
+	    5559dba2a6bd drop_glue<alloc::raw_vec::RawVec<(pg_query::node_ref::NodeRef, i32, pg_query::node_enum::Context, bool), alloc::alloc::Global>>+0x251d (inlined)
+	    5559dba2a6bd drop_glue<alloc::collections::vec_deque::VecDeque<(pg_query::node_ref::NodeRef, i32, pg_query::node_enum::Context, bool), alloc::alloc::Global>>+0x251d (inlined)
+	    5559dba2a6bd _RNvMNtCsjOBibkc8uvf_8pg_query9node_enumNtNtNtB4_8protobuf4node4Node5nodes+0x251d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here:ip = 0x5559db53efa2 (0x3b3efa2)
+unwind: access_mem addr 0x7f65429b3548, val 0, offset 408
+unwind: access_mem addr 0x7f65429b3570, val 3fdae147ae147ae1, offset 448
+unwind: access_mem addr 0x7f65429b3550, val 7f6500000000, offset 416
+unwind: access_mem addr 0x7f65429b3558, val 0, offset 424
+unwind: access_mem addr 0x7f65429b3560, val 3ff0000000000000, offset 432
+unwind: access_mem addr 0x7f65429b3568, val 405b400000000000, offset 440
+unwind: access_mem addr 0x7f65429b3578, val 4025333333333333, offset 456
+unwind: no map for 3fdae147ae147ae1
+unwind: access_mem 0x3fdae147ae147ae1 not inside range 0x7f65429b33b0-0x7f65429c32a8
+unwind: no map for 3fdae147ae147ae9
+unwind: access_mem 0x3fdae147ae147ae9 not inside range 0x7f65429b33b0-0x7f65429c32a8
+unwind: '':ip = 0x4025333333333332 (0x0)
+unwind: no map for 3fdae147ae147ae1
+unwind: access_mem 0x3fdae147ae147ae1 not inside range 0x7f65429b33b0-0x7f65429c32a8
+unwind: no map for 3fdae147ae147ae9
+unwind: access_mem 0x3fdae147ae147ae9 not inside range 0x7f65429b33b0-0x7f65429c32a8
+roll-conn  683149 [030] 467467.921516:   20408163 cpu-clock: 
+	    5559db53efa2 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr9eval_here+0xe72 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	4025333333333332 [unknown] ([unknown])
+
+unwind: '':ip = 0x7f654377e221 (0x172221)
+unwind: access_mem addr 0x7f65429b6ac8, val 5559db728318, offset 0
+unwind: access_mem addr 0x7f65429b6b48, val 7f65429b7420, offset 128
+unwind: access_mem addr 0x7f65429b6b70, val 0, offset 168
+unwind: access_mem addr 0x7f65429b6b50, val 200020bbac0, offset 136
+unwind: access_mem addr 0x7f65429b6b58, val 11, offset 144
+unwind: access_mem addr 0x7f65429b6b60, val 200020bbac0, offset 152
+unwind: access_mem addr 0x7f65429b6b68, val 11, offset 160
+unwind: access_mem addr 0x7f65429b6b78, val 8, offset 176
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan10fetch_rows:ip = 0x5559db728317 (0x3d28317)
+unwind: '':ip = 0x7 (0x0)
+roll-conn  683149 [030] 467467.946456:   20408163 cpu-clock: 
+	    7f654377e221 [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db728317 compare<u8>+0x5e7 (inlined)
+	    5559db728317 chaining_lt<u8>+0x5e7 (inlined)
+	    5559db728317 __chaining_lt<u8>+0x5e7 (inlined)
+	    5559db728317 lt<u8>+0x5e7 (inlined)
+	    5559db728317 lt<[u8], [u8]>+0x5e7 (inlined)
+	    5559db728317 {closure#2}+0x5e7 (inlined)
+	    5559db728317 next_if<core::slice::iter::Iter<alloc::vec::Vec<u8, alloc::alloc::Global>>, pg_engine::exec::scan::fetch_dense::{closure_env#2}>+0x5e7 (inlined)
+	    5559db728317 fetch_dense+0x5e7 (inlined)
+	    5559db728317 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan10fetch_rows+0x5e7 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               7 [unknown] ([unknown])
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan12open_scan_as:ip = 0x5559db736a26 (0x3d36a26)
+unwind: access_mem addr 0x7f65429b5558, val 8000000000000002, offset 2760
+unwind: access_mem addr 0x7f65429b5580, val 0, offset 2800
+unwind: access_mem addr 0x7f65429b5560, val 200022f0200, offset 2768
+unwind: access_mem addr 0x7f65429b5568, val 20002902d80, offset 2776
+unwind: access_mem addr 0x7f65429b5570, val 8000000000000002, offset 2784
+unwind: access_mem addr 0x7f65429b5578, val 7f65429b8aa0, offset 2792
+unwind: access_mem addr 0x7f65429b5588, val 5559db7463ff, offset 2808
+unwind: access_mem addr 0x7f65429b6688, val ffffffffffffffff, offset 7160
+unwind: access_mem addr 0x7f65429b66b0, val 7f65429b8aa0, offset 7200
+unwind: access_mem addr 0x7f65429b6690, val 8, offset 7168
+unwind: access_mem addr 0x7f65429b6698, val 7f65429b76c0, offset 7176
+unwind: access_mem addr 0x7f65429b66a0, val 7f65429b73ff, offset 7184
+unwind: access_mem addr 0x7f65429b66a8, val 200021f1500, offset 7192
+unwind: access_mem addr 0x7f65429b66b8, val 3, offset 7208
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan9open_scan:ip = 0x5559db7463fe (0x3d463fe)
+unwind: access_mem addr 0x7f65429b8aa0, val 3, offset 16400
+unwind: access_mem addr 0x7f65429b8aa8, val 20002460d70, offset 16408
+unwind: '':ip = 0x2 (0x0)
+unwind: no map for 3
+unwind: access_mem 0x3 not inside range 0x7f65429b4a90-0x7f65429c4988
+unwind: no map for b
+unwind: access_mem 0xb not inside range 0x7f65429b4a90-0x7f65429c4988
+roll-conn  683149 [030] 467467.971566:   20408163 cpu-clock: 
+	    5559db736a26 alloc+0x21f6 (inlined)
+	    5559db736a26 alloc_impl_runtime+0x21f6 (inlined)
+	    5559db736a26 alloc_impl+0x21f6 (inlined)
+	    5559db736a26 allocate+0x21f6 (inlined)
+	    5559db736a26 box_new_uninit+0x21f6 (inlined)
+	    5559db736a26 new<pg_engine::exec::scan::ScanNode>+0x21f6 (inlined)
+	    5559db736a26 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan12open_scan_as+0x21f6 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db7463fe _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec4scan9open_scan+0x156e (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               2 [unknown] ([unknown])
+
+unwind: _mi_page_malloc_zero:ip = 0x5559d9614ebc (0x1c14ebc)
+unwind: no map for ffffffffffffffd9
+unwind: access_mem 0xffffffffffffffd9 not inside range 0x7f65429b6e48-0x7f65429c6d40
+unwind: no map for 1
+unwind: access_mem 0x1 not inside range 0x7f65429b6e48-0x7f65429c6d40
+unwind: no map for ffffffffffffffe1
+unwind: access_mem 0xffffffffffffffe1 not inside range 0x7f65429b6e48-0x7f65429c6d40
+unwind: no map for ffffffffffffffe9
+unwind: access_mem 0xffffffffffffffe9 not inside range 0x7f65429b6e48-0x7f65429c6d40
+unwind: no map for fffffffffffffff1
+unwind: access_mem 0xfffffffffffffff1 not inside range 0x7f65429b6e48-0x7f65429c6d40
+unwind: no map for 9
+unwind: access_mem 0x9 not inside range 0x7f65429b6e48-0x7f65429c6d40
+roll-conn  683149 [030] 467467.996521:   20408163 cpu-clock: 
+	    5559d9614ebc mi_page_malloc_zero+0xc (inlined)
+	    5559d9614ebc _mi_page_malloc_zero+0xc (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs2_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_3Txn6commit:ip = 0x5559daff3722 (0x35f3722)
+unwind: access_mem addr 0x7f65429ba4d8, val 7f65429bbd00, offset 1768
+unwind: access_mem addr 0x7f65429ba500, val 0, offset 1808
+unwind: access_mem addr 0x7f65429ba4e0, val 7f65429c30f0, offset 1776
+unwind: access_mem addr 0x7f65429ba4e8, val 7f65429bbfa0, offset 1784
+unwind: access_mem addr 0x7f65429ba4f0, val 7f65429ba7a0, offset 1792
+unwind: access_mem addr 0x7f65429ba4f8, val 0, offset 1800
+unwind: access_mem addr 0x7f65429ba508, val 5559da6d6b5e, offset 1816
+unwind: access_mem addr 0x7f65429bac18, val 20001f11400, offset 3624
+unwind: access_mem addr 0x7f65429bac40, val 205c00000003, offset 3664
+unwind: access_mem addr 0x7f65429bac20, val 20001f11400, offset 3632
+unwind: access_mem addr 0x7f65429bac28, val 20002301200, offset 3640
+unwind: access_mem addr 0x7f65429bac30, val 0, offset 3648
+unwind: access_mem addr 0x7f65429bac38, val 0, offset 3656
+unwind: access_mem addr 0x7f65429bac48, val 200021088e0, offset 3672
+unwind: _RNvXs4_NtCs70fpZ3uE4FG_9pg_engine6engineNtB5_6EngineNtNtNtB7_7session5state7Cluster6commit:ip = 0x5559da6d6b5d (0x2cd6b5d)
+unwind: no map for 205c00000003
+unwind: access_mem 0x205c00000003 not inside range 0x7f65429b9df0-0x7f65429c7000
+unwind: no map for 205c0000000b
+unwind: access_mem 0x205c0000000b not inside range 0x7f65429b9df0-0x7f65429c7000
+roll-conn  683149 [030] 467468.021543:   20408163 cpu-clock: 
+	    5559daff3722 _RNvMs2_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_3Txn6commit+0x2d82 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559da6d6b5d _RNvXs4_NtCs70fpZ3uE4FG_9pg_engine6engineNtB5_6EngineNtNtNtB7_7session5state7Cluster6commit+0x8d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMs5_NtNtCs70fpZ3uE4FG_9pg_engine7session8settingsNtB5_8Settings17start_transaction:ip = 0x5559db223b70 (0x3823b70)
+unwind: access_mem addr 0x7f65429b9f50, val ffffffffffffffff, offset 664
+unwind: access_mem addr 0x7f65429b9f78, val 0, offset 704
+unwind: access_mem addr 0x7f65429b9f58, val ffffffff, offset 672
+unwind: access_mem addr 0x7f65429b9f60, val 20001f15000, offset 680
+unwind: access_mem addr 0x7f65429b9f68, val 5559d7efc610, offset 688
+unwind: access_mem addr 0x7f65429b9f70, val 0, offset 696
+unwind: access_mem addr 0x7f65429b9f80, val 0, offset 712
+unwind: '':ip = 0x7f654377e23d (0x17223d)
+unwind: access_mem addr 0x7f65429b6c58, val 5559db010a8e, offset 0
+unwind: access_mem addr 0x7f65429b7288, val 49234c090551002e, offset 1584
+unwind: access_mem addr 0x7f65429b72b0, val 7f65429b7268, offset 1624
+unwind: access_mem addr 0x7f65429b7290, val 606060600000003, offset 1592
+unwind: access_mem addr 0x7f65429b7298, val 606060606060606, offset 1600
+unwind: access_mem addr 0x7f65429b72a0, val 2000152f950, offset 1608
+unwind: access_mem addr 0x7f65429b72a8, val 7f65429b7278, offset 1616
+unwind: access_mem addr 0x7f65429b72b8, val 0, offset 1632
+unwind: _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head:ip = 0x5559db010a8d (0x3610a8d)
+roll-conn  683149 [030] 467468.046564:   20408163 cpu-clock: 
+	    5559db223b70 _RNvMs5_NtNtCs70fpZ3uE4FG_9pg_engine7session8settingsNtB5_8Settings17start_transaction+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+roll-conn  683149 [030] 467468.071417:   20408163 cpu-clock: 
+	    7f654377e23d [unknown] (/usr/lib/x86_64-linux-gnu/libc.so.6)
+	    5559db010a8d compare<u8>+0x7d (inlined)
+	    5559db010a8d chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d __chaining_lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<u8>+0x7d (inlined)
+	    5559db010a8d lt<[u8], [u8]>+0x7d (inlined)
+	    5559db010a8d _RNvMs5_NtCs70fpZ3uE4FG_9pg_engine7storageNtB5_6Cursor4head+0x7d (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMsa_NtCskADBYZwJmSU_4core3fmtNtB5_9Formatter12pad_integral:ip = 0x5559dbc00ed1 (0x4200ed1)
+unwind: access_mem addr 0x7f65429af4a8, val 7f65429af598, offset 72
+unwind: access_mem addr 0x7f65429af4d0, val 7f65429af500, offset 112
+unwind: access_mem addr 0x7f65429af4b0, val 5559d7f2f2ad, offset 80
+unwind: access_mem addr 0x7f65429af4b8, val 5559d7f2f2ac, offset 88
+unwind: access_mem addr 0x7f65429af4c0, val 7f65429af8d8, offset 96
+unwind: access_mem addr 0x7f65429af4c8, val 0, offset 104
+unwind: access_mem addr 0x7f65429af4d8, val 5559dbc0d693, offset 120
+unwind: access_mem addr 0x7f65429af4e8, val 7f65429af598, offset 136
+unwind: access_mem addr 0x7f65429af500, val 7f65429af570, offset 160
+unwind: access_mem addr 0x7f65429af4f0, val 30005559d7f2f2ab, offset 144
+unwind: access_mem addr 0x7f65429af4f8, val 7f65429af598, offset 152
+unwind: access_mem addr 0x7f65429af508, val 5559dbc0320a, offset 168
+unwind: _RNvXsd_NtNtNtCskADBYZwJmSU_4core3fmt3num3impyNtB9_7Display3fmt:ip = 0x5559dbc0d692 (0x420d692)
+unwind: access_mem addr 0x7f65429af548, val 7f65429af6b8, offset 232
+unwind: access_mem addr 0x7f65429af570, val 7f65429af6a0, offset 272
+unwind: access_mem addr 0x7f65429af550, val 200076c0d80, offset 240
+unwind: access_mem addr 0x7f65429af558, val c0, offset 248
+unwind: access_mem addr 0x7f65429af560, val 7f65429af710, offset 256
+unwind: access_mem addr 0x7f65429af568, val 7f65429af6b0, offset 264
+unwind: access_mem addr 0x7f65429af578, val 5559db57f69c, offset 280
+unwind: _RNvNtCskADBYZwJmSU_4core3fmt5write:ip = 0x5559dbc03209 (0x4203209)
+unwind: access_mem addr 0x7f65429af580, val 200076c0d48, offset 288
+unwind: access_mem addr 0x7f65429af588, val 200076c3f90, offset 296
+unwind: access_mem addr 0x7f65429af590, val 4, offset 304
+unwind: access_mem addr 0x7f65429af598, val 7f65429af580, offset 312
+unwind: _RNvXs2_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4ExprNtNtCskADBYZwJmSU_4core3fmt5Debug3fmt:ip = 0x5559db57f69b (0x3b7f69b)
+unwind: access_mem addr 0x7f65429af6a0, val 5559dbc003e0, offset 576
+unwind: access_mem addr 0x7f65429af6a8, val 5559d99e7bb3, offset 584
+roll-conn  683149 [030] 467468.096519:   20408163 cpu-clock: 
+	    5559dbc00ed1 _RNvMsa_NtCskADBYZwJmSU_4core3fmtNtB5_9Formatter12pad_integral+0xa1 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbc0d692 _RNvXsi_NtNtNtCskADBYZwJmSU_4core3fmt3num3impjNtB9_7Display3fmt+0x102 (inlined)
+	    5559dbc03209 _RNvMNtNtCskADBYZwJmSU_4core3fmt2rtNtB2_8Argument3fmt+0x169 (inlined)
+	    5559dbc03209 _RNvNtCskADBYZwJmSU_4core3fmt5write+0x169 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559db57f69b write_fmt+0xbab (inlined)
+	    5559db57f69b _RNvXs2_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB5_4ExprNtNtCskADBYZwJmSU_4core3fmt5Debug3fmt+0xbab (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql5costs9col_stats:ip = 0x5559daae4db0 (0x30e4db0)
+unwind: access_mem addr 0x7f65429b4288, val 7f65429b4380, offset 24
+unwind: access_mem addr 0x7f65429b42b0, val 7f65429b44c0, offset 64
+unwind: access_mem addr 0x7f65429b4290, val 4, offset 32
+unwind: access_mem addr 0x7f65429b4298, val 5559db578de1, offset 40
+unwind: access_mem addr 0x7f65429b42a0, val 555900000001, offset 48
+unwind: access_mem addr 0x7f65429b42a8, val 5559dbdac780, offset 56
+unwind: access_mem addr 0x7f65429b42b8, val 7f65429b4380, offset 72
+unwind: access_mem addr 0x7f65429b44c0, val c2800000003, offset 592
+unwind: access_mem addr 0x7f65429b44c8, val 5559dbbfc535, offset 600
+roll-conn  683149 [030] 467468.121558:   20408163 cpu-clock: 
+	    5559daae4db0 cmp+0x130 (inlined)
+	    5559daae4db0 find_key_index<alloc::collections::btree::node::marker::Immut, u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, alloc::collections::btree::node::marker::LeafOrInternal, u32>+0x130 (inlined)
+	    5559daae4db0 search_node<alloc::collections::btree::node::marker::Immut, u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, alloc::collections::btree::node::marker::LeafOrInternal, u32>+0x130 (inlined)
+	    5559daae4db0 search_tree<alloc::collections::btree::node::marker::Immut, u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, u32>+0x130 (inlined)
+	    5559daae4db0 get<u32, alloc::vec::Vec<pg_engine::catalog::ColStats, alloc::alloc::Global>, alloc::alloc::Global, u32>+0x130 (inlined)
+	    5559daae4db0 _RNvNtNtCs70fpZ3uE4FG_9pg_engine3sql5costs9col_stats+0x130 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing7fetched:ip = 0x5559db0b6630 (0x36b6630)
+unwind: access_mem addr 0x7f65429b7e88, val 5559d96134b6, offset 1240
+unwind: access_mem addr 0x7f65429b7eb0, val 2, offset 1280
+unwind: access_mem addr 0x7f65429b7e90, val 4059400000000000, offset 1248
+unwind: access_mem addr 0x7f65429b7e98, val 0, offset 1256
+unwind: access_mem addr 0x7f65429b7ea0, val 0, offset 1264
+unwind: access_mem addr 0x7f65429b7ea8, val 2, offset 1272
+unwind: access_mem addr 0x7f65429b7eb8, val 5559dbcf26b8, offset 1288
+unwind: no map for 2
+unwind: access_mem 0x2 not inside range 0x7f65429b79b0-0x7f65429c7000
+unwind: no map for a
+unwind: access_mem 0xa not inside range 0x7f65429b79b0-0x7f65429c7000
+unwind: '':ip = 0x5559dbcf26b7 (0x42f16b7)
+unwind: no map for 2
+unwind: access_mem 0x2 not inside range 0x7f65429b79b0-0x7f65429c7000
+unwind: no map for a
+unwind: access_mem 0xa not inside range 0x7f65429b79b0-0x7f65429c7000
+roll-conn  683149 [030] 467468.146175:   20408163 cpu-clock: 
+	    5559db0b6630 lock_shared+0x130 (inlined)
+	    5559db0b6630 read<parking_lot::raw_rwlock::RawRwLock, pg_engine::exec::sizing::RelFiles>+0x130 (inlined)
+	    5559db0b6630 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec6sizing7fetched+0x130 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbcf26b7 [unknown] (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtNtCskADBYZwJmSU_4core5clone5Clone5cloneBL_:ip = 0x5559d9a709e7 (0x20709e7)
+unwind: access_mem addr 0x7f65429b4708, val 7f65429b4a00, offset 424
+unwind: access_mem addr 0x7f65429b4730, val 20006022d00, offset 464
+unwind: access_mem addr 0x7f65429b4710, val 200020164e8, offset 432
+unwind: access_mem addr 0x7f65429b4718, val 5559db3a11b6, offset 440
+unwind: access_mem addr 0x7f65429b4720, val 0, offset 448
+unwind: access_mem addr 0x7f65429b4728, val 4, offset 456
+unwind: access_mem addr 0x7f65429b4738, val 1, offset 472
+unwind: access_mem 0x20006022d00 not inside range 0x7f65429b4560-0x7f65429c4458
+unwind: access_mem 0x20006022d08 not inside range 0x7f65429b4560-0x7f65429c4458
+unwind: '':ip = 0x0 (0x0)
+unwind: access_mem 0x20006022d00 not inside range 0x7f65429b4560-0x7f65429c4458
+unwind: access_mem 0x20006022d08 not inside range 0x7f65429b4560-0x7f65429c4458
+roll-conn  683149 [030] 467468.171039:   20408163 cpu-clock: 
+	    5559d9a709e7 write<pg_engine::sql::expr::Expr>+0xd7 (inlined)
+	    5559d9a709e7 to_vec<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xd7 (inlined)
+	    5559d9a709e7 to_vec_in<pg_engine::sql::expr::Expr, alloc::alloc::Global>+0xd7 (inlined)
+	    5559d9a709e7 _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VecNtNtNtCs70fpZ3uE4FG_9pg_engine3sql4expr4ExprENtNtCskADBYZwJmSU_4core5clone5Clone5cloneBL_+0xd7 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvXs7_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_5LowerNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next:ip = 0x5559db0e57f9 (0x36e57f9)
+unwind: access_mem addr 0x7f65429b7ab8, val 8, offset 2312
+unwind: access_mem addr 0x7f65429b7ae0, val ffffffffffffffff, offset 2352
+unwind: access_mem addr 0x7f65429b7ac0, val 5005, offset 2320
+unwind: access_mem addr 0x7f65429b7ac8, val ffffffffffffffff, offset 2328
+unwind: access_mem addr 0x7f65429b7ad0, val 0, offset 2336
+unwind: access_mem addr 0x7f65429b7ad8, val 7f65429b0eb0, offset 2344
+unwind: access_mem addr 0x7f65429b7ae8, val 3ff0000000000000, offset 2360
+unwind: no map for 7
+unwind: access_mem 0x7 not inside range 0x7f65429b71b0-0x7f65429c7000
+unwind: '':ip = 0x3fefffffffffffff (0x0)
+unwind: no map for 7
+unwind: access_mem 0x7 not inside range 0x7f65429b71b0-0x7f65429c7000
+roll-conn  683149 [029] 467468.208494:   20408163 cpu-clock: 
+	    5559db0e57f9 _RNvXs7_NtCs70fpZ3uE4FG_9pg_engine3txnNtB5_5LowerNtNtNtNtCskADBYZwJmSU_4core4iter6traits8iterator8Iterator4next+0x9 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	3fefffffffffffff [unknown] ([unknown])
+
+unwind: _RNCNvXs_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB6_4ExprNtNtCskADBYZwJmSU_4core5clone5Clone5clone0Ba_.llvm.6191902062211276960:ip = 0x5559db3a0e04 (0x39a0e04)
+unwind: access_mem addr 0x7f65429b4cd8, val 2, offset 8
+unwind: access_mem addr 0x7f65429b4ce0, val 20002015ac0, offset 16
+unwind: access_mem addr 0x7f65429b4ce8, val 20002331080, offset 24
+unwind: access_mem addr 0x7f65429b4cf0, val 0, offset 32
+unwind: access_mem addr 0x7f65429b4cf8, val 0, offset 40
+roll-conn  683149 [029] 467468.243416:   20408163 cpu-clock: 
+	    5559db3a0e04 clone<pg_engine::sql::func::FuncDef, alloc::alloc::Global>+0x524 (inlined)
+	    5559db3a0e04 _RNCNvXs_NtNtCs70fpZ3uE4FG_9pg_engine3sql4exprNtB6_4ExprNtNtCskADBYZwJmSU_4core5clone5Clone5clone0Ba_.llvm.6191902062211276960+0x524 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: mi_free:ip = 0x5559d9612eb0 (0x1c12eb0)
+unwind: access_mem 0x2000152ea80 not inside range 0x7f65429b7a58-0x7f65429c7000
+unwind: access_mem 0x2000152ea90 not inside range 0x7f65429b7a58-0x7f65429c7000
+unwind: access_mem 0x2000152ea88 not inside range 0x7f65429b7a58-0x7f65429c7000
+unwind: access_mem 0x2000152ea98 not inside range 0x7f65429b7a58-0x7f65429c7000
+roll-conn  683149 [030] 467468.255236:   20408163 cpu-clock: 
+	    5559d9612eb0 _mi_page_map_at+0x0 (inlined)
+	    5559d9612eb0 _mi_unchecked_ptr_page+0x0 (inlined)
+	    5559d9612eb0 _mi_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_validate_ptr_page+0x0 (inlined)
+	    5559d9612eb0 mi_free+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNCNCINvNtCs70fpZ3uE4FG_9pg_engine4exec8run_eachNCNCNvMs3_NtB8_7sessionNtBU_7Session9run_querys0_0s2_0E00B8_:ip = 0x5559d9faf983 (0x25af983)
+unwind: access_mem addr 0x7f65429b8370, val 20002302ec0, offset 16
+unwind: access_mem addr 0x7f65429b8378, val 2, offset 24
+unwind: access_mem addr 0x7f65429b8728, val 7f65429b8930, offset 968
+unwind: access_mem addr 0x7f65429b8730, val 7f65429b88f0, offset 976
+unwind: '':ip = 0x1 (0x0)
+unwind: access_mem addr 0x7f65429b8930, val 2000223b550, offset 1488
+unwind: access_mem addr 0x7f65429b8938, val 5559dbc1eb90, offset 1496
+roll-conn  683149 [031] 467468.278076:   20408163 cpu-clock: 
+	    5559d9faf983 branch<(), pg_engine::error::Error>+0x163 (inlined)
+	    5559d9faf983 _RNCNCINvNtCs70fpZ3uE4FG_9pg_engine4exec8run_eachNCNCNvMs3_NtB8_7sessionNtBU_7Session9run_querys0_0s2_0E00B8_+0x163 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+unwind: _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec5nodes14project_moving:ip = 0x5559db74fd17 (0x3d4fd17)
+unwind: access_mem addr 0x7f65429b8058, val 200020808c0, offset 376
+unwind: access_mem addr 0x7f65429b8080, val 73168643945f7d85, offset 416
+unwind: access_mem addr 0x7f65429b8060, val 1, offset 384
+unwind: access_mem addr 0x7f65429b8068, val 2, offset 392
+unwind: access_mem addr 0x7f65429b8070, val 200020b67a0, offset 400
+unwind: access_mem addr 0x7f65429b8078, val 2, offset 408
+unwind: access_mem addr 0x7f65429b8088, val 5559dbbfc246, offset 424
+unwind: no map for 73168643945f7d5d
+unwind: access_mem 0x73168643945f7d5d not inside range 0x7f65429b7ee0-0x7f65429c7000
+unwind: no map for 73168643945f7d85
+unwind: access_mem 0x73168643945f7d85 not inside range 0x7f65429b7ee0-0x7f65429c7000
+unwind: no map for 73168643945f7d65
+unwind: access_mem 0x73168643945f7d65 not inside range 0x7f65429b7ee0-0x7f65429c7000
+unwind: no map for 73168643945f7d6d
+unwind: access_mem 0x73168643945f7d6d not inside range 0x7f65429b7ee0-0x7f65429c7000
+unwind: no map for 73168643945f7d75
+unwind: access_mem 0x73168643945f7d75 not inside range 0x7f65429b7ee0-0x7f65429c7000
+unwind: no map for 73168643945f7d7d
+unwind: access_mem 0x73168643945f7d7d not inside range 0x7f65429b7ee0-0x7f65429c7000
+unwind: no map for 73168643945f7d8d
+unwind: access_mem 0x73168643945f7d8d not inside range 0x7f65429b7ee0-0x7f65429c7000
+unwind: _RNvXs4_NtCsgFX3jaOk65H_5alloc6stringNtB5_6StringNtNtCskADBYZwJmSU_4core5clone5Clone5clone:ip = 0x5559dbbfc245 (0x41fc245)
+roll-conn  683149 [031] 467468.300731:   20408163 cpu-clock: 
+	    5559db74fd17 write<pg_engine::types::value::Value>+0xe7 (inlined)
+	    5559db74fd17 push_mut<pg_engine::types::value::Value, alloc::alloc::Global>+0xe7 (inlined)
+	    5559db74fd17 push<pg_engine::types::value::Value, alloc::alloc::Global>+0xe7 (inlined)
+	    5559db74fd17 _RNvNtNtCs70fpZ3uE4FG_9pg_engine4exec5nodes14project_moving+0xe7 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	    5559dbbfc245 _RINvNtCskADBYZwJmSU_4core3ptr19copy_nonoverlappinghECsgFX3jaOk65H_5alloc+0x45 (inlined)
+	    5559dbbfc245 _RNvMNtNtCskADBYZwJmSU_4core3ptr9const_ptrPh22copy_to_nonoverlappingCsgFX3jaOk65H_5alloc+0x45 (inlined)
+	    5559dbbfc245 _RINvXs_NvMNtCsgFX3jaOk65H_5alloc5sliceSp9to_vec_inhNtB5_10ConvertVec6to_vecNtNtBa_5alloc6GlobalEBa_+0x45 (inlined)
+	    5559dbbfc245 _RINvMNtCsgFX3jaOk65H_5alloc5sliceSh9to_vec_inNtNtB5_5alloc6GlobalEB5_+0x45 (inlined)
+	    5559dbbfc245 _RNvXsb_NtCsgFX3jaOk65H_5alloc3vecINtB5_3VechENtNtCskADBYZwJmSU_4core5clone5Clone5cloneB7_+0x45 (inlined)
+	    5559dbbfc245 _RNvXs4_NtCsgFX3jaOk65H_5alloc6stringNtB5_6StringNtNtCskADBYZwJmSU_4core5clone5Clone5clone+0x45 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+unwind: _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder4exprNtB4_6Binder9bind_expr:ip = 0x5559db44c070 (0x3a4c070)
+unwind: access_mem addr 0x7f65429af220, val 3, offset 2520
+unwind: access_mem addr 0x7f65429af248, val 0, offset 2560
+unwind: access_mem addr 0x7f65429af228, val 2, offset 2528
+unwind: access_mem addr 0x7f65429af230, val 5559d7f1a61e, offset 2536
+unwind: access_mem addr 0x7f65429af238, val 0, offset 2544
+unwind: access_mem addr 0x7f65429af240, val 10, offset 2552
+unwind: access_mem addr 0x7f65429af250, val 2, offset 2568
+unwind: '':ip = 0x1 (0x0)
+roll-conn  683149 [031] 467468.323175:   20408163 cpu-clock: 
+	    5559db44c070 _RNvMNtNtNtCs70fpZ3uE4FG_9pg_engine3sql6binder4exprNtB4_6Binder9bind_expr+0x0 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+	               1 [unknown] ([unknown])
+
+unwind: _RNvMs3_NtCs70fpZ3uE4FG_9pg_engine4execNtB5_7ExecCtx8db_owner:ip = 0x5559d9fd31a0 (0x25d31a0)
+unwind: access_mem addr 0x7f65429aff58, val 1, offset 1224
+unwind: access_mem addr 0x7f65429aff80, val 1, offset 1264
+unwind: access_mem addr 0x7f65429aff60, val 41086a0000000000, offset 1232
+unwind: access_mem addr 0x7f65429aff68, val 0, offset 1240
+unwind: access_mem addr 0x7f65429aff70, val 7f65429afbb7, offset 1248
+unwind: access_mem addr 0x7f65429aff78, val 5559dac660d7, offset 1256
+unwind: access_mem addr 0x7f65429aff88, val 200020167e0, offset 1272
+unwind: no map for 1
+unwind: access_mem 0x1 not inside range 0x7f65429afa90-0x7f65429bf988
+unwind: no map for 9
+unwind: access_mem 0x9 not inside range 0x7f65429afa90-0x7f65429bf988
+roll-conn  683149 [031] 467468.346844:   20408163 cpu-clock: 
+	    5559d9fd31a0 get<isize>+0x10 (inlined)
+	    5559d9fd31a0 new+0x10 (inlined)
+	    5559d9fd31a0 try_borrow<pg_engine::txn::Txn>+0x10 (inlined)
+	    5559d9fd31a0 borrow<pg_engine::txn::Txn>+0x10 (inlined)
+	    5559d9fd31a0 catalog+0x10 (inlined)
+	    5559d9fd31a0 _RNvMs3_NtCs70fpZ3uE4FG_9pg_engine4execNtB5_7ExecCtx8db_owner+0x10 (/home/meszmate/.cache/pg-engine-perf-20261101/oltp-20261102/histogram-bin/roll-engine)
+
+Kernel and module maps:
+Map: ffff896200001000-ffff89620009e000 96200005000 [kernel.kallsyms]
+Map: ffff896200100000-ffff896245cfe000 96200104000 [kernel.kallsyms]
+Map: ffff896245cff000-ffff89624aedd000 96245d03000 [kernel.kallsyms]
+Map: ffff89624e553000-ffff896250000000 9624e557000 [kernel.kallsyms]
+Map: ffff896300000000-ffff8982a0000000 96300004000 [kernel.kallsyms]
+Map: ffffcdcbc0000000-ffffedcbbfffffff 4dcbc0004000 [kernel.kallsyms]
+Map: fffff9bf00000000-fffff9bf00003000 79bf00004000 [kernel.kallsyms]
+Map: fffff9bf00004000-fffff9bf01174000 79bf00008000 [kernel.kallsyms]
+Map: fffff9bf01395000-fffff9bf01400000 79bf01399000 [kernel.kallsyms]
+Map: fffff9bf04000000-fffff9bf82800000 79bf04004000 [kernel.kallsyms]
+Map: ffffffffb3200000-ffffffffb5e30000 7fffb3204000 [kernel.kallsyms]
+Map: ffffffffc0000000-ffffffffc003a674 7fffc0004000 [kernel.kallsyms]
+Map: ffffffffc003a674-ffffffffc003a6b7 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+Map: ffffffffc003a6b7-ffffffffc003a814 7fffc003e6b7 [kernel.kallsyms]
+Map: ffffffffc003a814-ffffffffc003a949 0 bpf_prog_e8932b6bae2b9745_restrict_filesystems
+Map: ffffffffc003a949-ffffffffc003d668 7fffc003e949 [kernel.kallsyms]
+Map: ffffffffc003d668-ffffffffc003d777 0 bpf_prog_ee0e253c78993a24_sd_devices
+Map: ffffffffc003d777-ffffffffc003d7ac 7fffc0041777 [kernel.kallsyms]
+Map: ffffffffc003d7ac-ffffffffc003d7ef 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+Map: ffffffffc003d7ef-ffffffffc003d830 7fffc00417ef [kernel.kallsyms]
+Map: ffffffffc003d830-ffffffffc003d873 0 bpf_prog_6deef7357e7b4530_sd_fw_ingress
+Map: ffffffffc003d873-ffffffffc0045d5c 7fffc0041873 [kernel.kallsyms]
+Map: ffffffffc0045d5c-ffffffffc0045f28 0 bpf_prog_6ceaf4d6095cca93_sd_devices
+Map: ffffffffc0045f28-ffffffffc0045f60 7fffc0049f28 [kernel.kallsyms]
+Map: ffffffffc0045f60-ffffffffc0045fa3 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+Map: ffffffffc0045fa3-ffffffffc0045fe0 7fffc0049fa3 [kernel.kallsyms]
+Map: ffffffffc0045fe0-ffffffffc0046023 0 bpf_prog_6deef7357e7b4530_sd_fw_ingress
+Map: ffffffffc0046023-ffffffffc0049594 7fffc004a023 [kernel.kallsyms]
+Map: ffffffffc0049594-ffffffffc00496c7 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc00496c7-ffffffffc0049730 7fffc004d6c7 [kernel.kallsyms]
+Map: ffffffffc0049730-ffffffffc00498a1 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc00498a1-ffffffffc00498e0 7fffc004d8a1 [kernel.kallsyms]
+Map: ffffffffc00498e0-ffffffffc0049a13 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc0049a13-ffffffffc0049aac 7fffc004da13 [kernel.kallsyms]
+Map: ffffffffc0049aac-ffffffffc0049c1d 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc0049c1d-ffffffffc004dab8 7fffc004dc1d [kernel.kallsyms]
+Map: ffffffffc004dab8-ffffffffc004daed 0 bpf_prog_3918c82a5f4c0360
+Map: ffffffffc004daed-ffffffffc004dfd4 7fffc0051aed [kernel.kallsyms]
+Map: ffffffffc004dfd4-ffffffffc004e107 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004e107-ffffffffc004e1a4 7fffc0052107 [kernel.kallsyms]
+Map: ffffffffc004e1a4-ffffffffc004e2d7 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004e2d7-ffffffffc004e4d0 7fffc00522d7 [kernel.kallsyms]
+Map: ffffffffc004e4d0-ffffffffc004e641 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004e641-ffffffffc004e6bc 7fffc0052641 [kernel.kallsyms]
+Map: ffffffffc004e6bc-ffffffffc004e82d 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004e82d-ffffffffc004e860 7fffc005282d [kernel.kallsyms]
+Map: ffffffffc004e860-ffffffffc004e993 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004e993-ffffffffc004e9f0 7fffc0052993 [kernel.kallsyms]
+Map: ffffffffc004e9f0-ffffffffc004eb23 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004eb23-ffffffffc004eb58 7fffc0052b23 [kernel.kallsyms]
+Map: ffffffffc004eb58-ffffffffc004ecc9 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004ecc9-ffffffffc004ed28 7fffc0052cc9 [kernel.kallsyms]
+Map: ffffffffc004ed28-ffffffffc004ee99 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004ee99-ffffffffc004eecc 7fffc0052e99 [kernel.kallsyms]
+Map: ffffffffc004eecc-ffffffffc004efff 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004efff-ffffffffc004f050 7fffc0052fff [kernel.kallsyms]
+Map: ffffffffc004f050-ffffffffc004f1c1 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004f1c1-ffffffffc004f264 7fffc00531c1 [kernel.kallsyms]
+Map: ffffffffc004f264-ffffffffc004f3d5 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004f3d5-ffffffffc004f42c 7fffc00533d5 [kernel.kallsyms]
+Map: ffffffffc004f42c-ffffffffc004f55f 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004f55f-ffffffffc004f760 7fffc005355f [kernel.kallsyms]
+Map: ffffffffc004f760-ffffffffc004f893 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004f893-ffffffffc004f8cc 7fffc0053893 [kernel.kallsyms]
+Map: ffffffffc004f8cc-ffffffffc004fa3d 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004fa3d-ffffffffc004fa94 7fffc0053a3d [kernel.kallsyms]
+Map: ffffffffc004fa94-ffffffffc004fbc7 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004fbc7-ffffffffc004fc0c 7fffc0053bc7 [kernel.kallsyms]
+Map: ffffffffc004fc0c-ffffffffc004fd7d 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc004fd7d-ffffffffc004fdd4 7fffc0053d7d [kernel.kallsyms]
+Map: ffffffffc004fdd4-ffffffffc004ff07 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc004ff07-ffffffffc004ff54 7fffc0053f07 [kernel.kallsyms]
+Map: ffffffffc004ff54-ffffffffc00500c5 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc00500c5-ffffffffc005011c 7fffc00540c5 [kernel.kallsyms]
+Map: ffffffffc005011c-ffffffffc005024f 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc005024f-ffffffffc0050a68 7fffc005424f [kernel.kallsyms]
+Map: ffffffffc0050a68-ffffffffc0050b9b 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc0050b9b-ffffffffc0050f2c 7fffc0054b9b [kernel.kallsyms]
+Map: ffffffffc0050f2c-ffffffffc005109d 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc005109d-ffffffffc00510f8 7fffc005509d [kernel.kallsyms]
+Map: ffffffffc00510f8-ffffffffc005122b 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc005122b-ffffffffc005124c 7fffc005522b [kernel.kallsyms]
+Map: ffffffffc005124c-ffffffffc00513bd 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc00513bd-ffffffffc0051420 7fffc00553bd [kernel.kallsyms]
+Map: ffffffffc0051420-ffffffffc0051591 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc0051591-ffffffffc0051a14 7fffc0055591 [kernel.kallsyms]
+Map: ffffffffc0051a14-ffffffffc0051a57 0 bpf_prog_6deef7357e7b4530_sd_fw_egress
+Map: ffffffffc0051a57-ffffffffc0051aa8 7fffc0055a57 [kernel.kallsyms]
+Map: ffffffffc0051aa8-ffffffffc0051aeb 0 bpf_prog_6deef7357e7b4530_sd_fw_ingress
+Map: ffffffffc0051aeb-ffffffffc005298c 7fffc0055aeb [kernel.kallsyms]
+Map: ffffffffc005298c-ffffffffc0052abf 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc0052abf-ffffffffc0052b24 7fffc0056abf [kernel.kallsyms]
+Map: ffffffffc0052b24-ffffffffc0052c95 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc0052c95-ffffffffc005a288 7fffc0056c95 [kernel.kallsyms]
+Map: ffffffffc005a288-ffffffffc005a3bb 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc005a3bb-ffffffffc005a418 7fffc005e3bb [kernel.kallsyms]
+Map: ffffffffc005a418-ffffffffc005a589 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc005a589-ffffffffc005d2e8 7fffc005e589 [kernel.kallsyms]
+Map: ffffffffc005d2e8-ffffffffc005d41b 0 bpf_prog_81dfab3bd7eb416a_sd_devices
+Map: ffffffffc005d41b-ffffffffc005d474 7fffc006141b [kernel.kallsyms]
+Map: ffffffffc005d474-ffffffffc005d5e5 0 bpf_prog_ab4bc4523b7fe6b4
+Map: ffffffffc005d5e5-ffffffffff000000 7fffc00615e5 [kernel.kallsyms]

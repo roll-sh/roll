@@ -100,6 +100,24 @@ The initial safe bind failure and successful continuation remain explicit in
 All owned diagnostic services are stopped, with fixtures retained. Next, collect
 CPU stacks that distinguish custom binding from repeated root-cost estimation.
 
+CPU attribution now supports investigating both custom binding and the later root
+costing path. Three auto/eight-client profiles recover cost-wrapper/estimator
+ancestry in 19.19–20.55% of recorded server CPU-clock sample weight and custom-binding
+ancestry in 17.24–17.70%. A perf/libdw PIE relocation error required documented
+synthetic mapping replay; original samples remain unchanged and symbolization uses
+the original ELF. Independent audits verified the correction and completed records.
+All nine profiles have zero lost samples, and all twelve invocations check their
+1,360,591 operations. These are sampled inclusive ancestry observations with finite
+stack limits, not estimator self time or an optimization result. Records and audit
+are in `tools/bench/results/2026-11-02-planning-cpu/`. Services are stopped and the
+profiler's memory/swap caps are restored to 512 MiB.
+
+The next isolated candidate shares needed-column masks in `estimate_builder` and
+returns only the root total for session costing, avoiding discarded estimate-result
+extraction. It must retain the full builder and all existing cost formulas. It has
+not been compiled, integrated or measured. Broad formatting suppression remains
+deferred because some rendered strings affect ordering and subplan semantics.
+
 The next performance target is repeated custom-query planning and costing. An exact
 named extended-protocol probe shows both servers choose custom plans for all twenty
 ordered range executions, while point reads switch to generic after five executions.

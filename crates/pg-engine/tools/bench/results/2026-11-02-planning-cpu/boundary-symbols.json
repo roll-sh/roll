@@ -1,0 +1,22 @@
+[
+  {
+    "start": 43552672,
+    "size": 10784,
+    "symbol": "<pg_engine::session::Session>::planned_as"
+  },
+  {
+    "start": 43566128,
+    "size": 4638,
+    "symbol": "<pg_engine::session::Session>::bound_custom"
+  },
+  {
+    "start": 43714160,
+    "size": 1594,
+    "symbol": "<pg_engine::session::Session>::plan_cost"
+  },
+  {
+    "start": 44523936,
+    "size": 260,
+    "symbol": "pg_engine::session::plan_cost_estimate"
+  }
+]

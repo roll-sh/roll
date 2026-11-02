@@ -1,0 +1,12 @@
+{
+  "engine": {
+    "pid": 681470,
+    "exit": 0
+  },
+  "profiler": {
+    "id": "813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca",
+    "running": false,
+    "memory": 536870912,
+    "swap": 536870912
+  }
+}

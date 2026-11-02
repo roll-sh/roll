@@ -1,0 +1,26 @@
+[
+  {
+    "mode": "custom",
+    "pid": 841933,
+    "exit": 0,
+    "stopped": true
+  },
+  {
+    "mode": "generic",
+    "pid": 843317,
+    "exit": 0,
+    "stopped": true
+  },
+  {
+    "mode": "auto",
+    "pid": 844692,
+    "exit": 0,
+    "stopped": true
+  },
+  {
+    "profiler": "813b04eed73f713bd8abc2346601ebb0308ac9518b9f7fe11cbbab0902bc24ca",
+    "running": false,
+    "memory": 536870912,
+    "swap": 536870912
+  }
+]

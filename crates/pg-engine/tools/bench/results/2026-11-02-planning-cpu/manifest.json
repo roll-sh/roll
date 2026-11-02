@@ -1,0 +1,18 @@
+{
+  "diagnostic_only": true,
+  "parent_head": "fdee626e7de5247d671d7dd2df105f5d06d09525",
+  "engine_source": "5b32046dee8c9908e2bb25c892ff60df54c33b33",
+  "production_tree": "bfaf631ee83440b27a036b7de1be253636a241df",
+  "engine_sha256": "5cfc79043a50d0ac228bdac3c66deb5fcf0dd34d73add389bf2773237e51ffd1",
+  "client_sha256": "9f5b02222402fd5b09772088ce704054299339bb80723f1ef15fd915fb0b8e28",
+  "runner_sha256": "03542748e7c220c3d15e3221b4951bc7fec0834710ae50ee9b0154ea464ac46c",
+  "expected_fixture": "200000|20000100000|4999900000|9999900000|ac8ccd2a44331a8aa083be3b8e06ee5f",
+  "capture_directory": "/home/meszmate/.cache/pg-engine-perf-20261101/planning-cpu/capture-20261102T022538Z",
+  "invocations": 12,
+  "checked_operations": 1360591,
+  "captures": 9,
+  "samples": 16157,
+  "export_policy": "Original/replay perf.data files, executable bytes, fixture data and large per-frame classified JSON are retained locally and omitted. Export includes raw decoded IP stacks, exact scripts/commands, replay hashes/patch records, classification summaries, runtime identities and checked logs. Captured absolute paths preserve cache provenance.",
+  "audit_limits": "Portable verify.py recomputes decoded ancestry weights and checks recorded loss/IP-validation facts. Without original perf.data or ELF bytes it cannot independently revalidate CFI, sample payload preservation, executable identity or raw-to-decoded matching. Those were checked locally and independently reviewed. Binary symbol ranges and load biases are recorded inputs.",
+  "measurement_limits": "Three diagnostic captures per condition, not a speedup experiment. Planning ancestry is an inclusive sampled lower bound under finite-stack truncation. Do not pool CPU sampling fractions with PGSS elapsed fractions or compute phase microseconds per operation from whole-client operation counts. Replay-generated symbol labels are shifted; only raw IPs resolved through original maps and original ELF are used."
+}

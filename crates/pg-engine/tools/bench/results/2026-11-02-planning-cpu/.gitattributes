@@ -1,0 +1,9 @@
+# Preserve hashed evidence bytes across checkout settings.
+* -text
+*.log -whitespace
+# These text files are immutable profiler output.
+*-stacks.txt -whitespace
+*-header.txt -whitespace
+pilot/*-debug.txt -whitespace
+pilot/stacks.txt -whitespace
+engine-program-headers.txt -whitespace

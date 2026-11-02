@@ -156,6 +156,27 @@ All owned processes and helpers are stopped, with data retained.
 Portable records and the read-only audit are in
 [the planning diagnostic](tools/bench/results/2026-11-02-planning/README.md).
 
+### CPU ancestry after correcting profile decoding
+
+Three twenty-second auto/eight-client range profiles recover inclusive
+`plan_cost`/`plan_cost_estimate` ancestry in 19.19–20.55% of server CPU-clock sample
+weight, and `bound_custom` ancestry in 17.24–17.70%. The nine captures across auto,
+forced-custom and forced-generic modes contain 16,157 samples with zero losses.
+All twelve client invocations complete 1,360,591 checked operations without errors.
+
+A pilot exposed a one-page PIE relocation error in perf 6.15's libdw decoding.
+A documented synthetic mapping replay recovers raw caller IPs; attribution uses
+the original ELF and original mappings, preserving the captured sample bytes.
+Independent CFI/call-site and full-record audits support this correction.
+
+The cost bucket includes wrapper and descendant work. Finite stacks can omit
+ancestors, and recovered weights are not statistical population lower bounds.
+These are diagnostic observations, with no speedup or removable-cost prediction.
+The sampled windows differ from whole-invocation operation accounting. All owned
+engines are stopped and the profiler is restored to its stopped 512 MiB caps.
+Details, decoded stacks, scripts, limits, and a portable audit are in
+[the CPU ancestry diagnostic](tools/bench/results/2026-11-02-planning-cpu/README.md).
+
 ## Checked scan and index measurements (2026-11-01)
 
 Source `7f35a185` makes the 2M-row top-N query 6.8 times faster than engine baseline
