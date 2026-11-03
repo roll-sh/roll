@@ -4886,6 +4886,92 @@ buffer grown by doubling, then (its room taken at once) 407 / 404, 403 / 450 MB.
 changed by a 8-byte prefix test per non-fresh write (`stale_segs`); the spread is the loaded
 machine's (the last pair ran beside another agent's build).
 
+## Bulk writes, round 7 (round 24, agent 148)
+
+HANDOFF.md's "Write path, round 7" has what changed. Engine against PostgreSQL 18.6 for this
+area, at the end of the round (`bd7ba755`, `--profile dist`, both servers in containers on the
+same four cores, the same CPU weight and slice, `tools/bench/run.sh ENGINE_DOCKER=1`; each
+side's CPU and bytes written from its process / cgroup; medians of three interleaved rounds;
+1M rows, the bulk steps as rounds 4-6 run them, autovacuum off for both tables so each
+VACUUM does its own work):
+
+| step | PostgreSQL wall / CPU (s) | engine wall / CPU (s) | wall ratio | CPU ratio | written MB (PG / engine) |
+|---|---|---|---|---|---|
+| COPY in | 0.94 / 0.80 | 1.65 / 1.50 | 1.75 | 1.87 | 93 / 66 |
+| CREATE INDEX | 0.45 / 0.72 | 0.84 / 1.31 | 1.85 | 1.82 | 16 / 39 |
+| CREATE UNIQUE INDEX | 0.33 / 0.38 | 0.48 / 0.83 | 1.46 | 2.20 | 40 / 48 |
+| COPY out | 0.50 / 0.39 | 0.82 / 1.15 | 1.64 | 2.93 | 0 / 12 |
+| INSERT … SELECT | 0.77 / 0.64 | 1.96 / 1.83 | 2.54 | 2.85 | 184 / 66 |
+| UPDATE half | 4.38 / 4.37 | 2.09 / 3.44 | **0.48** | **0.79** | 322 / 73 |
+| DELETE a quarter | 0.29 / 0.21 | 0.78 / 1.34 | 2.65 | 6.23 | 30 / 17 |
+| VACUUM | 0.35 / 0.33 | 0.42 / 0.35 | 1.21 | 1.06 | 14 / 1 |
+| ANALYZE | 0.23 / 0.13 | 0.39 / 0.30 | 1.68 | 2.24 | 0 / 0 |
+| count(*) after | 0.15 / 0.12 | 0.23 / 0.35 | 1.54 | 3.02 | 0 / 0 |
+| TRUNCATE (bulk2) | 0.13 / 0.04 | 0.12 / 0.01 | **0.88** | **0.29** | 0 / 0 |
+| DROP TABLE | 0.15 / 0.05 | 0.12 / 0.12 | **0.77** | 2.45 | 0 / 2 |
+
+Total CPU over the twelve steps 12.5 s against 8.2 s (1.53x; round 6 measured 28 s against
+14 s on the host). Peak memory: the engine container's 455-465 MB against PostgreSQL's
+953-954 MB (0.48x). Written over the steps: 314 MB against 699 MB (0.45x). The engine wins
+UPDATE, TRUNCATE and DROP; everything else is still 1.5-3x PostgreSQL's CPU, DELETE 6x.
+
+### Round 6's two regressions, settled
+
+Base `331d6948` (`e66eaede^`) against round 6's head `15a77038`, release builds with frame
+pointers, one engine at a time on the host, niced; instructions are user-space (`perf stat -e
+instructions:u` of the engine process, every thread), CPU the process's utime + stime.
+
+INSERT … SELECT (the 1M-row step), three interleaved runs each:
+
+| | instructions (G) | CPU (s) | wall (s) |
+|---|---|---|---|
+| base | 12.65 / 12.67 / 12.49 | 1.89 / 1.84 / 1.82 | 2.24 / 2.10 / 1.97 |
+| round 6 | 12.82 / 12.80 / 12.78 | 1.90 / 1.75 / 1.96 | 2.05 / 1.87 / 2.10 |
+
++1.2% instructions, the same CPU: no 15-30%; round 6's walls were the machine's.
+
+pgbench tpcb-like (scale 10, 8 clients × 1,500 transactions, prepared), eight interleaved runs
+each: CPU per transaction 0.591 ms base, 0.588 ms round 6; instructions per transaction 918k
+base, 926k round 6 (+0.9%). Diffing instruction profiles (`perf record -e instructions:u -c
+100000`, 12,000 transactions each) spreads the 0.11 G over inlining changes (`eval_bool` and
+`Value::clone` no longer inlined, `set_activity` split out of `start_activity`) and the scans of
+tables loaded differently (round 6's pgbench -i links the COPY's runs); `Txn::record`, where
+round 6's one check per write is, is 6.5 M of 10.78 G (0.06%). Select-only measured 232k /
+241k instructions per transaction in four pairs, but the profiled pair had round 6 6.5% lower:
+the difference is block decompression (zstd, block decode), which moves with how the tables'
+files lie. No regression in either; nothing to fix. The one real difference was peak memory:
+pgbench -i -s 10 peaked at 506-531 MB against 385-436 MB, in the primary keys' parallel builds
+(fixed below).
+
+### Batch 1 (deferred tombstones, kept measures, CREATE INDEX progress)
+
+On round 6's head (`15a77038`, model limit 400,000), release, host, instructions as above,
+two interleaved runs each: DELETE of a quarter of 1M rows 9.0 -> 7.6 G instructions, 1.9 ->
+1.5 s CPU (tombstones in the deferred run, the bulk lock fast path, no self-modification
+reads); VACUUM of the table again with nothing changed 2.6 G -> 0.001 G (0.33 s -> 0.01 s
+CPU, the same pg_class numbers); pgbench -i -s 10's peak RSS 520-542 -> 446-469 MB (the
+parallel build's keys merged instead of concatenated); tpcb-like 920 / 931k -> 917 / 929k
+instructions per transaction (two runs of each, four rounds), select-only within its noise.
+Small btree builds (tenk1's shape) no longer read the table a second time after the build, and
+DROP INDEX is one range deletion; their new cost wasn't measured.
+
+### Batch 2 (held COPY rows)
+
+On `8115f5af` (the model limit then at `1 << 40`, so every 1M-row table was modelled), release,
+host, two interleaved runs: COPY in 33.8 -> 15.3 G instructions and 248 -> 67 MB written;
+INSERT … SELECT 31.7 -> 15.2 G and 249 -> 68 MB; VACUUM 18.7-20.0 -> 7.1 G; pgbench -i -s 10
+51.4 -> 35.8 G; tpcb-like unchanged (1,543 / 1,560k against 1,546 / 1,567k per transaction).
+The rows were stored without TIDs, read back and rewritten with them (`stamp_tids`, 34% of
+the COPY); now each is stored once. With the limit back at 400,000 (`18bb3d49`), a 1M-row
+COPY holds and places its first 400,000 rows and stores the rest as they come.
+
+### Left
+
+DELETE's per-row cost (6x: row lock, index values and entry keys per row, the deferred run's
+sort and write; PostgreSQL leaves its index entries for VACUUM), COPY in and INSERT … SELECT
+(the InsertNode frame per row, parsing, the per-row size model), COPY out and count(*) (the
+scan path), CREATE INDEX (the entries' sort and run, the measure), ANALYZE.
+
 ## Native deparser (round 21, agent 93)
 
 `ast::deparse_expr` / `deparse_stmt` (views, rules, defaults, checks, index expressions,

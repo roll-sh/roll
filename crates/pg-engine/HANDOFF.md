@@ -3817,6 +3817,32 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     unchanged-heap cases in `big_tables`, and `roll-index-progress` for observation from
     another backend and cancellation. Verification details are in the resumed batch's
     `tests/regress/STATUS.md` entry. The paused benchmark notes are not verified speedups.
+    BENCH.md "Bulk writes, round 7" has the measured numbers since, with round 6's two
+    regressions settled (neither was real) and the engine against PostgreSQL in containers.
+  - **Held COPY rows** (`Txn::hold_rows`, `store_held_rows`, `end_hold`; `CopyLoad::start`'s
+    `held`): a COPY under the sink's conditions (multi-insert, a table keyed by row ids, plain
+    non-unique btree indexes, `model_deferrable`) holds each row's stored bytes in the
+    transaction (`put_fresh`) until its multi-insert batch is placed in the heap model
+    (`CopyLoad::model`), then stores each once with its TID (`scan::with_tid`) through the sink,
+    which writes linkable runs for it (`sink_runs_ok`). Before, the rows were stored without
+    TIDs and `stamp_tids` read each back and rewrote it (34% of a modelled COPY). Holding stops
+    when the table passes the model's size (`stop_holding`: the rest have no TIDs). INSERT …
+    SELECT no longer defers modelling past its first 10,000 rows (`deferred_inserts`): each row
+    is placed as it goes in and stored once with its TID. Anything new that reads a held
+    load's table mid-COPY must keep to the sink's rule or end the hold.
+  - **COPY's unique violations at PostgreSQL's flush** (`InsertNode::insert_copied`,
+    `copy_buf` / `copy_err`): in a multi-insert COPY a unique or exclusion violation is
+    raised where CopyMultiInsertBufferFlush would find it, after the buffer's other rows (1,000,
+    or 65,535 bytes of lines) are read and their defaults evaluated: sequences and volatile
+    defaults advance as PostgreSQL's (agent 156's r9c finding). Other errors stay at their row.
+    Golden `a148_copy_buffer`.
+  - **VACUUM's frozen-xid pass** over a modelled table keeps the rows' xmin bounds
+    (`txn::unchanged` with layout 0, so `unchanged_measure` never takes it for the heap's
+    numbers); a later VACUUM with the table unchanged since takes them instead of reading every
+    row (`big_tables` `vacuum_keeps_xmins_of_unchanged_tables`).
+  - **Index builds' table read** decodes only the columns the index's keys, predicate and
+    INCLUDE columns read (`Ddl::scan_rows_need`), for every built-in method (agent 144's BRIN
+    profile: decoding every column was 15%).
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
