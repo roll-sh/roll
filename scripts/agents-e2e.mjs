@@ -304,7 +304,8 @@ async function main() {
     check(sp.text.includes('name="robots" content="noindex, nofollow"'), "the share page isn't indexed");
     const og = /property="og:image" content="([^"]+)"/.exec(sp.text)?.[1];
     check(og, "the share page has a preview image");
-    const img = await fetch(og.replace(/^https?:\/\/[^/]+/, WEB));
+    check(og.startsWith(`${WEB}/`), `the preview image is on the host the page was asked on: ${og}`);
+    const img = await fetch(og);
     check(img.status === 200 && img.headers.get("content-type") === "image/png", `preview image: ${img.status} ${img.headers.get("content-type")}`);
     check((await img.arrayBuffer()).byteLength > 1000, "the preview image has content");
     const missing = await page("/agents/s/shr_000000000000000000000000");
