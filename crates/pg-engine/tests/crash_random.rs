@@ -421,6 +421,21 @@ fn settle(s: &mut Session, dir: &Path, seed: u64) -> Model {
     replay(seed, &log)
 }
 
+/// What differs between the rows read and those expected (both sorted): the first few of
+/// each side's own, and what the table holds by each scan, for the failure message.
+fn row_diff(s: &mut Session, table: &str, got: &[String], want: &[String]) -> String {
+    let (g, w): (std::collections::BTreeSet<&String>, std::collections::BTreeSet<&String>) = (got.iter().collect(), want.iter().collect());
+    let missing: Vec<&&String> = w.difference(&g).take(5).collect();
+    let extra: Vec<&&String> = g.difference(&w).take(5).collect();
+    let mut out = format!("missing {missing:?}, unexpected {extra:?}");
+    for how in ["enable_seqscan = off; SET enable_bitmapscan = off", "enable_indexscan = off; SET enable_indexonlyscan = off; SET enable_bitmapscan = off"] {
+        let _ = s.query(&format!("SET {how}"));
+        out += &format!("; with {how}: {}", texts(s, &format!("SELECT count(*), sum(id) FROM {table} WHERE id > -1")).join(","));
+        let _ = s.query("RESET enable_seqscan; RESET enable_indexscan; RESET enable_indexonlyscan; RESET enable_bitmapscan");
+    }
+    out + &format!("; ctids of {table}: {}", texts(s, &format!("SELECT count(*), count(DISTINCT ctid) FROM {table}")).join(","))
+}
+
 /// The invariants, with `what` in the failure messages.
 fn check(s: &mut Session, seed: u64, m: &Model, what: &str) {
     let what = format!("seed {seed}: {what}");
@@ -435,9 +450,15 @@ fn check(s: &mut Session, seed: u64, m: &Model, what: &str) {
     ] {
         s.query(set).unwrap();
         let got = texts(s, "SELECT id, v, w, u FROM a WHERE id > -1 ORDER BY id");
-        assert!(got == want_a, "{what}: a by {how}: {} rows, {na} expected", got.len());
+        if got != want_a {
+            let d = row_diff(s, "a", &got, &want_a);
+            panic!("{what}: a by {how}: {} rows, {na} expected: {d}", got.len());
+        }
         let got = texts(s, "SELECT id, a_id, x FROM b WHERE id > -1 ORDER BY id");
-        assert!(got == want_b, "{what}: b by {how}: {} rows, {nb} expected", got.len());
+        if got != want_b {
+            let d = row_diff(s, "b", &got, &want_b);
+            panic!("{what}: b by {how}: {} rows, {nb} expected: {d}", got.len());
+        }
         let q = |s: &mut Session, sql: &str| one(s, sql);
         assert_eq!(q(s, "SELECT count(*), coalesce(sum(v), 0) FROM a WHERE v >= 0"), format!("Int8({na})|Int8({sum_a})"), "{what}: a_v by {how}");
         assert_eq!(q(s, "SELECT count(*) FROM a WHERE u > -1"), format!("Int8({na})"), "{what}: a_u_key by {how}");
