@@ -4,16 +4,40 @@ import { HorizonMark, RollMark } from "@roll/brand";
 import { Check, KeyRound, Laptop } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { agentsApi, type MintedMachine } from "@/lib/agents-api";
+import { agentsApi, type MintedMachine, type PendingLogin } from "@/lib/agents-api";
 import { ApiError, codeApi, type Owner } from "@/lib/code-api";
 import { ROLL_API } from "@/lib/roll-api";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 
-/** Shell lines that write `~/.config/roll/agent.json` (what `roll agent login` keeps) and start the daemon. */
-function savedConfig(m: MintedMachine, owner: string, masked: boolean): string {
+/** What the CLI talks to when it isn't told (`roll --api`, `ROLL_API_URL`). */
+const CLI_DEFAULT_API = "http://127.0.0.1:7070";
+
+/** `--api <this roll>` when the CLI wouldn't find it on its own. */
+export function apiFlag(api: string = ROLL_API): string {
+  const a = api.replace(/\/+$/, "");
+  return a === CLI_DEFAULT_API || !/^https?:\/\//.test(a) ? "" : ` --api ${a}`;
+}
+
+/** Save a minted machine token where `roll agent login` keeps its login, then start the daemon. */
+export function tokenLogin(m: MintedMachine, masked: boolean, api: string = ROLL_API): string {
   const token = masked ? `${m.token.slice(0, 8)}…` : m.token;
-  const json = JSON.stringify({ api: ROLL_API, machine: m.machine.id, owner, name: m.machine.name, token });
-  return `mkdir -p ~/.config/roll && (umask 077 && cat > ~/.config/roll/agent.json) <<'JSON'\n${json}\nJSON\nroll agent up`;
+  return `roll agent login${apiFlag(api)} --machine-token ${token}\nroll agent up`;
+}
+
+/** The install line, from this web app (it serves `/install.sh`). */
+function useInstallLine(): string {
+  const [origin, setOrigin] = useState("https://roll.sh");
+  useEffect(() => setOrigin(window.location.origin), []);
+  return `curl -fsSL ${origin}/install.sh | sh`;
+}
+
+const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows", freebsd: "FreeBSD" };
+
+/** "ada-mbp (macOS)": what a pending login says it is. */
+export function machineLabel(p: Pick<PendingLogin, "name" | "hostname" | "os">): string {
+  const who = p.hostname?.replace(/\.local$/, "") || p.name;
+  const os = p.os ? (OS_NAMES[p.os] ?? p.os) : null;
+  return os ? `${who} (${os})` : who;
 }
 
 /** Owners the signed-in caller can connect machines to: itself, or every owner for the admin. */
@@ -62,9 +86,25 @@ function Approve({ code }: { code: string }) {
   const [name, setName] = useState("");
   const [state, setState] = useState<"ready" | "approving" | "approved" | "denied" | "gone">("ready");
   const [error, setError] = useState<string | null>(null);
+  // Which machine asks, looked up before anyone approves (null while it loads, or if it can't be).
+  const [pending, setPending] = useState<PendingLogin | null>(null);
   useEffect(() => {
     if (owners?.length && !owner) setOwner(owners[0]);
   }, [owners, owner]);
+  useEffect(() => {
+    if (!owner) return;
+    let live = true;
+    agentsApi
+      .pendingLogin(owner, code)
+      .then((p) => live && setPending(p))
+      .catch((e: unknown) => {
+        // 404: nothing is waiting with this code; other failures leave the approval as it was.
+        if (live && e instanceof ApiError && e.status === 404) setState("gone");
+      });
+    return () => {
+      live = false;
+    };
+  }, [owner, code]);
 
   const act = async (approve: boolean) => {
     setState(approve ? "approving" : "ready");
@@ -116,7 +156,7 @@ function Approve({ code }: { code: string }) {
     );
 
   return (
-    <Panel title="A machine wants to connect">
+    <Panel title={pending ? `Approve ${machineLabel(pending)}?` : "A machine wants to connect"}>
       <div className="space-y-4 px-5 py-4">
         <div className="flex items-center gap-3">
           <Laptop className="size-5 text-muted" />
@@ -137,7 +177,13 @@ function Approve({ code }: { code: string }) {
           </label>
           <label className="block space-y-1">
             <span className="text-[12px] text-subtle">Name (optional)</span>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="its hostname" aria-label="Machine name" className={`${input} w-full`} />
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={pending?.name ?? "its hostname"}
+              aria-label="Machine name"
+              className={`${input} w-full`}
+            />
           </label>
         </div>
         <div className="flex gap-2">
@@ -167,7 +213,7 @@ function AddMachine() {
     if (owners?.length && !owner) setOwner(owners[0]);
   }, [owners, owner]);
 
-  const steps = ["curl -fsSL https://roll.sh/install.sh | sh", "roll agent login", "roll agent up"];
+  const steps = [useInstallLine(), `roll agent login${apiFlag()}`, "roll agent up"];
   return (
     <>
       <Panel title="On the machine">
@@ -220,13 +266,14 @@ function AddMachine() {
               <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{minted.token}</code>
               <CopyButton id="token" text={minted.token} copied={copied} onCopy={copy} />
             </div>
-            <p className="text-muted">
-              On the machine, save it where <code className="font-mono">roll agent login</code> would, then start the daemon:
-            </p>
+            <p className="text-muted">On the machine, sign in with it (no code to confirm), then start the daemon:</p>
             <div className="flex items-start gap-1 rounded-lg border border-line bg-bg px-3 py-2">
-              <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-[11.5px] leading-relaxed">{savedConfig(minted, owner, true)}</pre>
-              <CopyButton id="cmd" text={savedConfig(minted, owner, false)} copied={copied} onCopy={copy} />
+              <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-[11.5px] leading-relaxed">{tokenLogin(minted, true)}</pre>
+              <CopyButton id="cmd" text={tokenLogin(minted, false)} copied={copied} onCopy={copy} />
             </div>
+            <p className="text-[12px] text-subtle">
+              Scripts and containers can set <code className="font-mono">ROLL_AGENT_TOKEN</code> instead of passing the flag.
+            </p>
           </div>
         ) : (
           <form
