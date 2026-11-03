@@ -85,7 +85,11 @@ if [[ $unit_only == 0 ]]; then
   # golang-migrate, cassandra-stress, scylla-bench, the references' cqlsh) and the Python, Java,
   # Go and Node drivers, against the image built from this tree unless ROLL_NOSQL_IMAGE names one.
   if [[ -z ${ROLL_NOSQL_IMAGE:-} ]]; then
-    deploy/nosql/build-local.sh --tag roll/nosql:test
+    if [[ -n ${ROLL_NOSQL_IMAGE_RUNTIME:-} ]]; then
+      deploy/nosql/pack-image.sh "${CARGO_TARGET_DIR:-target}/debug" "$ROLL_NOSQL_IMAGE_RUNTIME" roll/nosql:test
+    else
+      deploy/nosql/build-local.sh --tag roll/nosql:test
+    fi
     export ROLL_NOSQL_IMAGE=roll/nosql:test
   fi
   for c in "${started[@]}"; do

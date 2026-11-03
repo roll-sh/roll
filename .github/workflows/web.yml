@@ -20,6 +20,11 @@ concurrency:
   group: web-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -32,6 +37,8 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm --filter dashboard test

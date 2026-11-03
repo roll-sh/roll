@@ -21,6 +21,11 @@ concurrency:
   group: tasks-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   # SQLite and the log store in memory.
   sqlite:
@@ -32,6 +37,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: scripts/test-tasks.sh --force --unit
 
   # The log store on S3 (MinIO) and DynamoDB Local.
@@ -44,6 +51,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Pull images
         run: |
           docker pull -q amazon/dynamodb-local & docker pull -q chrislusf/seaweedfs &

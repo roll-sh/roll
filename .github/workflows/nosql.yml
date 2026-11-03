@@ -24,6 +24,11 @@ concurrency:
   group: nosql-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   unit:
     runs-on: ubuntu-latest
@@ -33,16 +38,23 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: scripts/test-nosql.sh --force --unit
 
   references:
-    runs-on: ubuntu-latest
+    # The packed host binaries and the image must use the same libc.
+    runs-on: ubuntu-24.04
+    env:
+      ROLL_NOSQL_IMAGE_RUNTIME: ubuntu:24.04
     # Includes building the roll/nosql image and its image, tool and driver suites.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: sudo sysctl -w fs.aio-max-nr=1048576
       - run: docker pull -q scylladb/scylla:2026.3.3 && docker pull -q cassandra:5.0.9
       - name: Differential, driver and cqlsh tests against ScyllaDB and Cassandra
@@ -58,6 +70,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       # Fails on a test that passes on the reference, fails on roll and is not a listed known
       # failure (or when roll panics or exits). Listed tests that pass now are printed for pruning.
       - name: ScyllaDB cqlpy suite against roll (scylla dialect)
@@ -100,6 +114,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: S3 object store (SeaweedFS)
         run: |
           docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3

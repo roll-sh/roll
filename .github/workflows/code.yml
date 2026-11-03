@@ -1,0 +1,49 @@
+name: code
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/code-*/**"
+      - "crates/pg-storage/**"
+      - "crates/rolld/**"
+      - "crates/roll-cli/**"
+      - "apps/dashboard/**"
+      - "packages/brand/**"
+      - "deploy/code/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "pnpm-lock.yaml"
+      - "scripts/test-code.sh"
+      - ".github/workflows/code.yml"
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: code-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:code --force

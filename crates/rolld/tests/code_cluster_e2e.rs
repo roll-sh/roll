@@ -624,11 +624,14 @@ async fn push_op(w: &World, home: &Path, dir: &Path, repo: &str, op: &str, sprea
         if attempt == 1 {
             w.stat(Kind::Push, |s| s.retried += 1);
         }
-        assert!(git(home, dir, &["reset", "-q", "--hard", &base]).await.ok);
+        let result = git(home, dir, &["reset", "-q", "--hard", &base]).await;
+        assert!(result.ok, "git {:?} in {}: {}", ["reset", "-q", "--hard", &base], dir.display(), result.out);
         std::fs::create_dir_all(dir.join("git")).unwrap();
         std::fs::write(dir.join(&path), format!("{op} attempt {attempt}\n")).unwrap();
-        assert!(git(home, dir, &["add", "-A"]).await.ok);
-        assert!(git(home, dir, &["commit", "-qm", &message]).await.ok);
+        let result = git(home, dir, &["add", "-A"]).await;
+        assert!(result.ok, "git {:?} in {}: {}", ["add", "-A"], dir.display(), result.out);
+        let result = git(home, dir, &["commit", "-qm", &message]).await;
+        assert!(result.ok, "git {:?} in {}: {}", ["commit", "-qm", &message], dir.display(), result.out);
         let node = (spread + attempt) % 3;
         let url = w.env.git_url(node, repo);
         let sent = Instant::now();

@@ -6,6 +6,10 @@ queue transition, every review rule and blocker, and every mode, command, error 
 roll's reviewer. `pnpm test:code` runs all of them: about 430 Rust tests across the code crates and
 `roll-cli`, and about 440 vitest tests for the dashboard (node and jsdom).
 
+GitHub Actions runs this suite in `.github/workflows/code.yml`, selected by `ci.yml` for
+pull requests and merge groups that touch code or its shared dependencies. The queue suite
+runs only queue tests; the code cluster test runs here, once per CI run.
+
 `crates/code-control/tests/coverage_map.rs` keeps this map honest. It fails when a route the
 routers declare, an MCP tool or an event kind has no row here naming a test, or when a test named
 here doesn't exist. `roll-cli`'s `every_code_command_is_in_the_coverage_map` does the same for

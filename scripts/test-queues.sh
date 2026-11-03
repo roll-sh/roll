@@ -31,11 +31,14 @@ fi
 
 CRATES=()
 for c in "${MQ[@]}"; do CRATES+=(-p "$(basename "$c")"); done
+MQ_CRATES=("${CRATES[@]}")
 CRATES+=(-p rolld -p roll-cli)
 
 cargo build "${CRATES[@]}"
 cargo clippy "${CRATES[@]}" --all-targets -- -D warnings
-cargo test "${CRATES[@]}" ${args[@]+"${args[@]}"}
+cargo test "${MQ_CRATES[@]}" ${args[@]+"${args[@]}"}
+cargo test -p rolld --bin rolld ${args[@]+"${args[@]}"}
+cargo test -p roll-cli --bin roll ${args[@]+"${args[@]}"}
 
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then
@@ -43,7 +46,8 @@ if [[ $unit_only == 0 ]]; then
     exit 1
   fi
   # Docker-backed tests skip themselves unless ROLL_E2E=1.
-  ROLL_E2E=1 cargo test "${CRATES[@]}" -- --test-threads="${ROLL_E2E_THREADS:-4}" ${args[@]+"${args[@]}"}
+  ROLL_E2E=1 cargo test "${MQ_CRATES[@]}" -- --test-threads="${ROLL_E2E_THREADS:-4}" ${args[@]+"${args[@]}"}
+  ROLL_E2E=1 cargo test -p rolld --test queues_cluster_e2e -- --test-threads=1 ${args[@]+"${args[@]}"}
   if [[ -x scripts/test-queues-clients.sh ]]; then
     scripts/test-queues-clients.sh
   fi

@@ -14,6 +14,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
+      code: ${{ steps.diff.outputs.code }}
       postgres: ${{ steps.diff.outputs.postgres }}
       queues: ${{ steps.diff.outputs.queues }}
       nosql: ${{ steps.diff.outputs.nosql }}
@@ -33,6 +34,7 @@ jobs:
           files=$(git diff --name-only "$BASE" HEAD)
           echo "$files"
           match() { if grep -qE "$2" <<< "$files"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
+          match code '^(crates/(code-[a-z]+|pg-storage|rolld|roll-cli)/|apps/dashboard/|packages/brand/|deploy/code/|Cargo\.(toml|lock)$|pnpm-lock\.yaml$|scripts/test-code\.sh$|\.github/workflows/(code|ci)\.yml$)'
           match postgres '^(crates/(pg-proxy|pg-storage|pg-control|rolld|roll-cli)/|Cargo\.(toml|lock)$|scripts/test-postgres\.sh$|\.github/workflows/(postgres|ci)\.yml$)'
           match queues '^(crates/(mq-[a-z0-9-]+|rolld|roll-cli)/|tests/queues/|deploy/queues/|Cargo\.(toml|lock)$|scripts/test-queues(-clients)?\.sh$|\.github/workflows/(queues|ci)\.yml$)'
           match nosql '^(crates/(nosql-[a-z-]+|pg-storage|redis-lua|rolld|roll-cli)/|deploy/nosql/|Cargo\.(toml|lock)$|scripts/(test-nosql\.sh|nosql-conformance|nosql-bench)|\.github/workflows/(nosql|ci)\.yml$)'
@@ -41,6 +43,11 @@ jobs:
           match stream '^(crates/(stream-log|stream-broker|pg-storage|rolld|roll-cli)/|vendor/kafka-protocol/|Cargo\.(toml|lock)$|scripts/test-stream\.sh$|\.github/workflows/(stream|ci)\.yml$)'
           match tasks '^(crates/(tasks|rolld|roll-cli)/|deploy/aws/|Cargo\.(toml|lock)$|scripts/test-tasks\.sh$|\.github/workflows/(tasks|ci)\.yml$)'
           match web '^(apps/|packages/|crates/s3-[a-z]+/|package\.json$|pnpm-(lock|workspace)\.yaml$|\.github/workflows/(web|ci)\.yml$)'
+
+  code:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/code.yml
 
   postgres:
     needs: changes
@@ -83,7 +90,7 @@ jobs:
     uses: ./.github/workflows/web.yml
 
   ci:
-    needs: [changes, nosql, postgres, queues, redis, storage, stream, tasks, web]
+    needs: [changes, code, nosql, postgres, queues, redis, storage, stream, tasks, web]
     if: always()
     runs-on: ubuntu-latest
     steps:
