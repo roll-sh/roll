@@ -600,6 +600,8 @@ GET /v1/code/agents/connect    the daemon's WebSocket (Authorization: Bearer rlm
        delta, command → reply, ping/pong (every 20 s; 60 s of silence closes). Frames up to 16 MiB.
        Close codes: 4400 protocol error (wrong version, no hello), 4401 revoked (stop, don't retry),
        4409 replaced by a newer link of the same machine, 1012 reconnect (the owner moved nodes).
+DELETE /v1/code/agents/connect → 204   a machine revokes itself with its own token (`roll agent logout`):
+       the same as DELETE …/machines/{machine}; 401 for any other token.
 ```
 
 In a cluster every `/v1/code/agents/{owner}/…` request and every machine link of the owner run on the

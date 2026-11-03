@@ -565,4 +565,7 @@ async fn agents_routes_follow_the_auth_matrix() {
     // The link: only machine tokens.
     assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, acme).await, denied);
     assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, None).await, denied);
+    for who_token in [Some(ADMIN), acme, agent, other, None] {
+        assert_eq!(call(a, "DELETE", "/v1/code/agents/connect", None, who_token).await, denied, "{who_token:?}");
+    }
 }

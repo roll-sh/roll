@@ -325,6 +325,25 @@ async fn machines_are_managed_by_the_owner_and_revoking_closes_the_link() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_can_revoke_itself() {
+    let w = world().await;
+    let (id, minted) = w.machine("box").await;
+    let (_other, other_token) = w.machine("other").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    // Only machine tokens, and only their own machine.
+    for bad in [w.owner.as_str(), "rlm_nope"] {
+        assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(bad)).await.0, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(&minted)).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(d.recv_or_close().await.unwrap_err(), Some(4401));
+    assert_eq!(w.a.req("DELETE", "/v1/code/agents/connect", None, Some(&minted)).await.0, StatusCode::UNAUTHORIZED);
+    let (_, list) = w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await;
+    let ids: Vec<&str> = list.as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert!(!ids.contains(&id.as_str()) && ids.len() == 1, "{list}");
+    Daemon::connect(&w.url, &other_token).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_link_refuses_other_tokens_and_protocols() {
     let w = world().await;
     let (_, minted) = w.machine("box").await;

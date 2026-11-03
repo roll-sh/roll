@@ -165,6 +165,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `POST /v1/code/agents/{owner}/login/approve` | 204, 400, 401, 403, 404 | `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/login/deny` | 204, 401, 403, 404 | `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `GET /v1/code/agents/connect` | 101, 400, 401; closes 4400 (protocol), 4401 (revoked), 4409 (replaced) | `agents.rs::the_link_refuses_other_tokens_and_protocols`, `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `agents.rs::records_are_mirrored_into_state_and_events`, `routes.rs::agents_routes_follow_the_auth_matrix`, `agent-host/tests/relay.rs::daemon_and_relay_end_to_end` |
+| `DELETE /v1/code/agents/connect` | 204, 401 | `agents.rs::a_machine_can_revoke_itself`, `routes.rs::agents_routes_follow_the_auth_matrix`, `roll-cli/tests/agent.rs::login_up_status_and_logout` |
 | `GET /v1/code/agents/{owner}/machines` | 200, 401, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/machines` | 201, 400, 401, 403, 404, 422 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `PATCH /v1/code/agents/{owner}/machines/{machine}` | 200, 400, 401, 403, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `routes.rs::agents_routes_follow_the_auth_matrix` |
@@ -382,6 +383,18 @@ included), 2 a conflict to rebase, 3 `work claim` with nothing to claim.
 | `roll code jobs` | none, stage and groups; unknown change exit 1 | `roll-cli/tests/code.rs::webhooks_statuses_blame_jobs_and_tokens`, `roll-cli/tests/code.rs::ai_reviewer_commands`, `roll-cli/tests/code.rs::reviewer_webhook_and_thread_edges` |
 | `roll code search` | literal, `--regex`, `-n`, `--case`, `--path`, `@rev`; bad regex, unknown rev or repo exit 1 | `roll-cli/tests/code.rs::ai_reviewer_commands`, `roll-cli/tests/code.rs::reviewer_webhook_and_thread_edges` |
 | exit codes | usage errors exit 1 (not clap's 2, which means a conflict), `--help` 0, API down exit 1 with "is rolld running?" | `roll-cli/tests/code.rs::repo_land_and_usage_edges` |
+
+## CLI (`roll agent`, `roll-cli/tests/agent.rs`)
+
+The real binary against code-control's relay on a free port; the daemon's Codex points at a
+binary that doesn't exist, so no provider runs.
+
+| Command | Covered | Tests |
+| --- | --- | --- |
+| `roll agent login` | prints the code and the dashboard URL, polls until approved, writes `agent.json` 0600 (api, machine, owner, name, token); `--json`; denied: exit 1, nothing written | `roll-cli/tests/agent.rs::login_up_status_and_logout`, `roll-cli/tests/agent.rs::a_denied_login_fails` |
+| `roll agent up` | opens the daemon, connects (online, `hello` info with providers), answers commands from the API, Ctrl-C stops it cleanly (exit 0, offline); a revoked machine stops it with exit 1 and "roll agent login" | `roll-cli/tests/agent.rs::login_up_status_and_logout`, `roll-cli/tests/agent.rs::a_revoked_machine_stops_up_with_a_clear_error` |
+| `roll agent status` | not logged in (exit 1), accepted (`--json`), revoked (exit 1) | `roll-cli/tests/agent.rs::login_up_status_and_logout`, `roll-cli/tests/agent.rs::a_revoked_machine_stops_up_with_a_clear_error` |
+| `roll agent logout` | revokes the machine with its own token (`DELETE /v1/code/agents/connect`) and deletes the file | `roll-cli/tests/agent.rs::login_up_status_and_logout` |
 
 ## Merge queue (`code-control/tests/queue.rs`, fake runner)
 

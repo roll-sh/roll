@@ -1,3 +1,4 @@
+mod agent;
 mod code;
 mod stream;
 mod tasks;
@@ -37,6 +38,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run coding agents on this machine and drive them from roll (`login`, `up`, `status`, `logout`).
+    #[command(subcommand)]
+    Agent(agent::Agent),
     /// Source control for agents: repos, changes, work items, landing.
     #[command(subcommand)]
     Code(code::Code),
@@ -343,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
     let api = Api { base: cli.api.trim_end_matches('/').to_string(), http: reqwest::Client::new(), key: cli.api_key, headers: Vec::new() };
     let cmd = match cli.cmd {
         Cmd::Db(cmd) => cmd,
+        Cmd::Agent(cmd) => return agent::run(&api.base, cli.json, cmd).await,
         Cmd::Code(cmd) => {
             // `--token` on the command line wins; otherwise ROLL_CODE_TOKEN (not the tasks token).
             let token = if token_flag { cli.token } else { std::env::var("ROLL_CODE_TOKEN").ok() };

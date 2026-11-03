@@ -32,7 +32,7 @@ pub fn routes() -> Router<Arc<Code>> {
     Router::new()
         .route("/v1/code/agents/login", post(login))
         .route("/v1/code/agents/login/poll", post(poll))
-        .route("/v1/code/agents/connect", get(connect))
+        .route("/v1/code/agents/connect", get(connect).delete(disconnect))
         .route("/v1/code/agents/{owner}/login/approve", post(approve))
         .route("/v1/code/agents/{owner}/login/deny", post(deny))
         .route("/v1/code/agents/{owner}/machines", get(list_machines).post(add_machine))
@@ -203,23 +203,26 @@ async fn rename_machine(State(code): S, caller: Caller, Path((owner, machine)): 
 /// Revoke a machine: its token stops working and its link closes now.
 async fn revoke_machine(State(code): S, caller: Caller, Path((owner, machine)): Path<(String, String)>) -> Result<StatusCode> {
     let o = manageable(&code, &caller, &owner)?;
-    let hub = code.agents.hub(&o.id);
-    let _order = hub.order.lock().await;
-    let cursor = store::revoke_machine(code.db.sql(), &o.id, &machine)?.ok_or_else(|| Error::NotFound(format!("machine {machine}")))?;
-    code.agents.kick(&machine);
-    let _ = hub.events.send(Arc::new(StreamEvent::MachineRemoved { cursor, machine: agent_proto::MachineId(machine) }));
+    if !revoke(&code, &o.id, &machine).await? {
+        return Err(Error::NotFound(format!("machine {machine}")));
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Revoke a live machine of an owner; false if there's none.
+async fn revoke(code: &Code, owner_id: &str, machine: &str) -> Result<bool> {
+    let hub = code.agents.hub(owner_id);
+    let _order = hub.order.lock().await;
+    let Some(cursor) = store::revoke_machine(code.db.sql(), owner_id, machine)? else { return Ok(false) };
+    code.agents.kick(machine);
+    let _ = hub.events.send(Arc::new(StreamEvent::MachineRemoved { cursor, machine: agent_proto::MachineId(machine.into()) }));
+    Ok(true)
 }
 
 // ── the daemon's link ──
 
-/// `GET /v1/code/agents/connect`: a daemon's WebSocket. Only a machine token (`rlm_…`) opens it,
-/// looked up on every connect.
-async fn connect(
-    State(code): S,
-    headers: axum::http::HeaderMap,
-    ws: std::result::Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
-) -> Result<Response> {
+/// The live machine whose token (`rlm_…`) the request carries, looked up every time.
+fn machine_of(code: &Code, headers: &axum::http::HeaderMap) -> Result<store::MachineRow> {
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -230,9 +233,25 @@ async fn connect(
         Some(t) if t.starts_with("rlm_") => store::machine_by_token(code.db.sql(), &hash_token(t))?,
         _ => None,
     };
-    let Some(machine) = machine else { return Err(Error::Unauthorized) };
+    machine.ok_or(Error::Unauthorized)
+}
+
+/// `GET /v1/code/agents/connect`: a daemon's WebSocket. Only a machine token opens it.
+async fn connect(
+    State(code): S,
+    headers: axum::http::HeaderMap,
+    ws: std::result::Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Result<Response> {
+    let machine = machine_of(&code, &headers)?;
     let ws = ws.map_err(|e| Error::Invalid(format!("expected a WebSocket upgrade: {e}")))?;
     Ok(ws.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).on_upgrade(move |socket| super::link::serve(code, machine, socket)).into_response())
+}
+
+/// `DELETE /v1/code/agents/connect`: a machine revokes itself (`roll agent logout`).
+async fn disconnect(State(code): S, headers: axum::http::HeaderMap) -> Result<StatusCode> {
+    let machine = machine_of(&code, &headers)?;
+    revoke(&code, &machine.owner_id, &machine.id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── state and events ──

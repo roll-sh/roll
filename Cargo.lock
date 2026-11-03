@@ -6126,6 +6126,8 @@ dependencies = [
 name = "roll-cli"
 version = "0.1.0"
 dependencies = [
+ "agent-host",
+ "agent-proto",
  "anyhow",
  "aws-sdk-s3",
  "axum",
@@ -6150,6 +6152,7 @@ dependencies = [
  "s3-control",
  "s3-server",
  "s3-store",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
