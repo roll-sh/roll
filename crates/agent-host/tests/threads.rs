@@ -694,6 +694,40 @@ async fn projects_are_unique_by_path_and_removal_deletes_their_threads() {
     assert!(!w.home.join("worktrees").join(w.project.as_str()).exists());
 }
 
+/// A clone that fails on the way (here the repository isn't there yet) keeps no receipt: the
+/// same command id runs again and clones. A refusal (the path is taken) is the id's answer.
+#[tokio::test]
+async fn a_failed_clone_runs_again_with_the_same_id_and_a_refusal_does_not() {
+    use agent_host::Daemon;
+    let w = World::new(vec![FakeProvider::new("codex")]).await;
+    let src = tempfile::tempdir().unwrap();
+    let url = src.path().join("app.git");
+    let dest = tempfile::tempdir().unwrap();
+    let target = dest.path().join("app");
+    let repo = RepoRef { owner: "acme".into(), repo: "app".into() };
+    let grant = || CodeGrant { repo: repo.clone(), url: url.to_string_lossy().into(), token: "rlg_t".into(), write: false, expires_at: u64::MAX };
+    let add = Command::ProjectAdd { path: target.to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
+
+    let first = w.host.run_granted("clone-1".into(), "owner".into(), add.clone(), Some(grant())).await;
+    assert!(is_err(&first, ErrorCode::Internal), "{first:?}");
+    assert!(!target.exists());
+    git_repo(src.path());
+    sh(src.path(), &["clone", "-q", "--bare", ".", "app.git"]);
+    let again = w.host.run_granted("clone-1".into(), "owner".into(), add, Some(grant())).await;
+    assert!(matches!(again, Reply::Created { .. }), "{again:?}");
+    assert!(target.join("README.md").exists());
+
+    // A refusal is the id's answer for good.
+    let taken = dest.path().join("taken");
+    std::fs::create_dir_all(&taken).unwrap();
+    std::fs::write(taken.join("mine.txt"), "x").unwrap();
+    let add = Command::ProjectAdd { path: taken.to_string_lossy().into(), name: None, clone: Some(repo.clone()) };
+    let refused = w.host.run_granted("clone-2".into(), "owner".into(), add.clone(), Some(grant())).await;
+    assert!(is_err(&refused, ErrorCode::Invalid), "{refused:?}");
+    std::fs::remove_file(taken.join("mine.txt")).unwrap();
+    assert_eq!(w.host.run_granted("clone-2".into(), "owner".into(), add, Some(grant())).await, refused);
+}
+
 #[tokio::test]
 async fn archive_and_unarchive() {
     let fake = FakeProvider::new("codex");

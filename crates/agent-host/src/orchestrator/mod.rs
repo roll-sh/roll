@@ -78,6 +78,18 @@ impl From<anyhow::Error> for Fail {
 pub(crate) type Res<T> = Result<T, Fail>;
 
 impl Fail {
+    /// A clone's or publish's failure: a refusal is `invalid`; a network failure
+    /// ([`crate::git::Network`]) is `internal` and [`Fail::is_transient`].
+    pub(crate) fn git(e: anyhow::Error) -> Fail {
+        if e.downcast_ref::<crate::git::Network>().is_some() { Fail::Internal(e) } else { Fail::Invalid(format!("{e:#}")) }
+    }
+
+    /// Nothing was kept and trying again may work: no receipt is stored, so a retry with the same
+    /// command id runs again (a clone or push that failed on the network).
+    fn is_transient(&self) -> bool {
+        matches!(self, Fail::Internal(e) if e.downcast_ref::<crate::git::Network>().is_some())
+    }
+
     fn into_reply(self) -> Reply {
         let (code, message) = match self {
             Fail::NotFound(m) => (ErrorCode::NotFound, m),
@@ -473,7 +485,7 @@ impl Host {
             let grant = grant
                 .filter(|g| &g.repo == repo)
                 .ok_or_else(|| Fail::Invalid(format!("cloning {}/{} needs access granted by the relay", repo.owner, repo.repo)))?;
-            crate::git::clone_into(&grant, &path).await.map_err(|e| Fail::Invalid(format!("{e:#}")))?;
+            crate::git::clone_into(&grant, &path).await.map_err(Fail::git)?;
         }
         let path = tokio::fs::canonicalize(&path)
             .await
@@ -600,13 +612,16 @@ impl crate::Daemon for Host {
             let _held = gate.lock().await;
             match self.store.receipt(&id) {
                 Ok(Some(reply)) => reply,
-                Ok(None) => {
-                    let reply = self.execute(&by, command, grant).await.unwrap_or_else(Fail::into_reply);
-                    if let Err(e) = self.store.put_receipt(&id, &reply, now()) {
-                        tracing::warn!("storing the receipt of command {id}: {e:#}");
+                Ok(None) => match self.execute(&by, command, grant).await {
+                    Err(fail) if fail.is_transient() => fail.into_reply(),
+                    done => {
+                        let reply = done.unwrap_or_else(Fail::into_reply);
+                        if let Err(e) = self.store.put_receipt(&id, &reply, now()) {
+                            tracing::warn!("storing the receipt of command {id}: {e:#}");
+                        }
+                        reply
                     }
-                    reply
-                }
+                },
                 Err(e) => Fail::Internal(e).into_reply(),
             }
         };

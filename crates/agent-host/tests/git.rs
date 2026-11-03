@@ -193,3 +193,177 @@ async fn non_git_directories_have_no_git() {
     assert!(git::root(dir.path()).await.is_none());
     assert!(git::info(dir.path()).await.is_none());
 }
+
+/// A project in a subdirectory of a repository: its checkpoints' diffs, its status and its
+/// rollbacks cover only its own files. The user's edits elsewhere in the repo are left alone.
+#[tokio::test]
+async fn a_project_in_a_subdirectory_only_diffs_and_rolls_back_its_own_files() {
+    let repo = repo();
+    let p = repo.path();
+    let sub = p.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("s.txt"), "sub one\n").unwrap();
+    sh(p, &["add", "."]);
+    sh(p, &["commit", "-qm", "sub"]);
+    let base = git::capture(&sub, "refs/roll/checkpoints/t/0", "base").await.unwrap();
+
+    // The agent works in sub/; meanwhile the user edits, adds and deletes files outside it.
+    std::fs::write(sub.join("s.txt"), "agent\n").unwrap();
+    std::fs::write(sub.join("new.txt"), "agent new\n").unwrap();
+    std::fs::write(p.join("a.txt"), "user edit\n").unwrap();
+    std::fs::write(p.join("user-new.txt"), "user\n").unwrap();
+    std::fs::remove_file(p.join("b.txt")).unwrap();
+    let one = git::capture(&sub, "refs/roll/checkpoints/t/1", "run 1").await.unwrap();
+
+    let diff = git::diff(&sub, &base, &one, git::DIFF_CAP).await.unwrap();
+    let files: Vec<_> = diff.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(files, vec!["sub/new.txt", "sub/s.txt"]);
+    assert_eq!(diff.stat.files, 2);
+    assert_eq!(git::stat(&sub, &base, &one).await.unwrap().files, 2);
+    let now = git::working_tree(&sub).await.unwrap();
+    assert_eq!(git::diff(&sub, &base, &now, git::DIFF_CAP).await.unwrap().files.len(), 2);
+    let mut status: Vec<_> = git::status(&sub).await.unwrap().files.into_iter().map(|f| f.path).collect();
+    status.sort();
+    assert_eq!(status, vec!["sub/new.txt", "sub/s.txt"]);
+
+    git::restore(&sub, &base).await.unwrap();
+    assert_eq!(std::fs::read_to_string(sub.join("s.txt")).unwrap(), "sub one\n");
+    assert!(!sub.join("new.txt").exists());
+    assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "user edit\n", "the user's edit outside the project");
+    assert_eq!(std::fs::read_to_string(p.join("user-new.txt")).unwrap(), "user\n");
+    assert!(!p.join("b.txt").exists(), "the user's deletion outside the project");
+
+    // Rolling back to a checkpoint the project directory wasn't in yet empties it.
+    let later = p.join("later");
+    std::fs::create_dir_all(&later).unwrap();
+    let empty = git::capture(&later, "refs/roll/checkpoints/u/0", "base").await.unwrap();
+    std::fs::write(later.join("x.txt"), "x\n").unwrap();
+    git::restore(&later, &empty).await.unwrap();
+    assert!(!later.join("x.txt").exists());
+    assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "user edit\n");
+}
+
+fn grant(url: &str) -> agent_proto::CodeGrant {
+    agent_proto::CodeGrant {
+        repo: agent_proto::RepoRef { owner: "acme".into(), repo: "app".into() },
+        url: url.into(),
+        token: "rlg_the_grant_secret".into(),
+        write: true,
+        expires_at: u64::MAX,
+    }
+}
+
+/// A hook that appends its environment to `out`, so a test sees whether it ran and what it saw.
+fn hook(dir: &Path, name: &str, out: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\nenv >> '{}'\n", out.display())).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// git that carries a grant runs no hooks (the repo's or the user's), so nothing a hook starts
+/// can read the grant from git's environment. Without a grant the same hook runs.
+#[tokio::test]
+async fn pushes_with_a_grant_run_no_hooks() {
+    let repo = repo();
+    let p = repo.path();
+    let remote = tempfile::tempdir().unwrap();
+    sh(remote.path(), &["init", "-q", "--bare"]);
+    sh(p, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    let out = tempfile::tempdir().unwrap();
+    let captured = out.path().join("env");
+    hook(&p.join(".git/hooks"), "pre-push", &captured);
+    let data = tempfile::tempdir().unwrap();
+    let wt = data.path().join("wt");
+    git::worktree_add(p, &wt, "roll/feature", &git::head(p).await.unwrap().unwrap()).await.unwrap();
+    std::fs::write(wt.join("feature.txt"), "done\n").unwrap();
+
+    let g = grant(remote.path().to_str().unwrap());
+    let published = git::publish(&wt, "roll/feature", "Add the feature", Some(&g)).await.unwrap();
+    assert_eq!(sh(remote.path(), &["rev-parse", "refs/heads/roll/feature"]).trim(), published.commit);
+    assert!(!captured.exists(), "pre-push ran with the grant: {}", std::fs::read_to_string(&captured).unwrap_or_default());
+
+    std::fs::write(wt.join("more.txt"), "more\n").unwrap();
+    git::publish(&wt, "roll/feature", "More", None).await.unwrap();
+    assert!(captured.exists(), "the hook is real: it runs on a push without a grant");
+}
+
+/// The clone half of [`clones_with_a_grant_run_no_hooks`]: runs only in the child that test
+/// starts with `GIT_TEMPLATE_DIR` set (hooks every new repository gets).
+#[tokio::test]
+async fn clone_with_template_hooks() {
+    let Ok(out) = std::env::var("ROLL_TEST_HOOK_OUT") else { return };
+    let src = std::env::var("ROLL_TEST_HOOK_SRC").unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    git::clone_into(&grant(&src), &dest.path().join("app")).await.unwrap();
+    assert!(dest.path().join("app/a.txt").exists());
+    assert!(!Path::new(&out).exists(), "a hook ran in the clone: {}", std::fs::read_to_string(&out).unwrap_or_default());
+}
+
+#[test]
+fn clones_with_a_grant_run_no_hooks() {
+    let src = repo();
+    let out = tempfile::tempdir().unwrap();
+    let captured = out.path().join("env");
+    let template = tempfile::tempdir().unwrap();
+    hook(&template.path().join("hooks"), "post-checkout", &captured);
+    // The template's hook is real: a plain clone runs it.
+    let plain = tempfile::tempdir().unwrap();
+    let status = Command::new("git")
+        .args(["clone", "-q", src.path().to_str().unwrap(), "plain"])
+        .current_dir(plain.path())
+        .env("GIT_TEMPLATE_DIR", template.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(captured.exists());
+    std::fs::remove_file(&captured).unwrap();
+
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "clone_with_template_hooks", "--nocapture"])
+        .env("GIT_TEMPLATE_DIR", template.path())
+        .env("ROLL_TEST_HOOK_OUT", &captured)
+        .env("ROLL_TEST_HOOK_SRC", src.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&child.stdout);
+    assert!(child.status.success() && text.contains("1 passed"), "{text}{}", String::from_utf8_lossy(&child.stderr));
+}
+
+/// A clone that fails (here: a server that never answers, given up after the idle timeout)
+/// leaves nothing at the target, and a half-made clone left there earlier isn't taken as one.
+#[tokio::test]
+async fn failed_clones_leave_nothing_and_half_made_ones_are_refused() {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let url = format!("http://{}/acme/app.git", listener.local_addr().unwrap());
+    let dest = tempfile::tempdir().unwrap();
+    let target = dest.path().join("app");
+    let started = std::time::Instant::now();
+    let err = git::clone_into_within(&grant(&url), &target, std::time::Duration::from_secs(2)).await.unwrap_err();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "{err:#}");
+    assert!(!target.exists(), "{err:#}");
+    assert_eq!(std::fs::read_dir(dest.path()).unwrap().count(), 0, "no temporary clone is left behind");
+    drop(listener);
+
+    // What a clone killed half-way leaves: a repository with the remote and nothing fetched.
+    let src = repo();
+    let src_url = src.path().to_str().unwrap();
+    sh(dest.path(), &["init", "-q", "app"]);
+    sh(&target, &["remote", "add", "origin", src_url]);
+    let err = git::clone_into(&grant(src_url), &target).await.unwrap_err();
+    assert!(format!("{err:#}").contains("isn't a complete clone"), "{err:#}");
+
+    // A finished clone is kept as it is.
+    let done = dest.path().join("done");
+    git::clone_into(&grant(src_url), &done).await.unwrap();
+    std::fs::write(done.join("mine.txt"), "kept\n").unwrap();
+    git::clone_into(&grant(src_url), &done).await.unwrap();
+    assert!(done.join("mine.txt").exists());
+    // An empty repository clones too (nothing to check out yet), and is kept the second time.
+    let empty = tempfile::tempdir().unwrap();
+    sh(empty.path(), &["init", "-q", "--bare"]);
+    let fresh = dest.path().join("fresh");
+    git::clone_into(&grant(empty.path().to_str().unwrap()), &fresh).await.unwrap();
+    git::clone_into(&grant(empty.path().to_str().unwrap()), &fresh).await.unwrap();
+}

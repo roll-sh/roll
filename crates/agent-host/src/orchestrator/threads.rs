@@ -486,7 +486,7 @@ impl Host {
         };
         let published = git::publish(Path::new(&worktree.path), &worktree.branch, message, to.as_ref())
             .await
-            .map_err(|e| Fail::Invalid(format!("{e:#}")))?;
+            .map_err(Fail::git)?;
         Ok(Reply::Published(published))
     }
 }

@@ -94,7 +94,10 @@ Machine            a daemon (hostname, os, providers and their auth state, onlin
   snapshots the worktree into a commit under `refs/roll/checkpoints/<thread>/<ordinal>` using a
   private index (`GIT_INDEX_FILE`), never touching the user's index or HEAD. The diff of run N is
   checkpoint N-1 → N. `checkpoint.rollback` restores the tree of a checkpoint and marks later
-  runs `rolled_back` (and rolls back the provider thread where the provider can).
+  runs `rolled_back` (and rolls back the provider thread where the provider can). A project in a
+  subdirectory of a repository owns only that directory: its diffs, `git.status` and rollbacks
+  cover the files under it, and a rollback never touches a file outside it (the user's edits
+  elsewhere in the repo stay as they are).
 - **Native rollback** (T3's `CheckpointRollbackService`), in one of two ways a provider declares
   (`Provider::rollback_style`). Codex drops the turns in its live thread (`thread/rollback`) and
   keeps it that way. Claude's session file keeps every turn, so the conversation is resumed at
@@ -290,7 +293,9 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
   on an open daemon, like review app tokens. It is looked up on every git request (never cached),
   so revoking the machine ends it at once. The daemon passes it to git in the environment of that
   one process (`GIT_CONFIG_*` `http.extraHeader`), never in a remote URL, a config file or the
-  command line, and forgets it after.
+  command line, and forgets it after. That process runs no hooks (`core.hooksPath=/dev/null`: not
+  the repo's, the user's or a clone template's) and no fsmonitor, so nothing it would start can
+  read the grant.
   - The repo must be the machine's owner's. A grant never exceeds the command's sender: a clone
     needs read access, a publish needs `check_write` (`owns`), and nothing in it ever needs
     `manages`. A machine of an owner can't reach another owner's repos, public or not.
@@ -301,9 +306,16 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
 - **Cloning.** `project.add {path, clone: {owner, repo}}` clones into `path` (absolute), into
   `<clone dir>/<owner>/<repo>` when `path` is empty, or under the clone dir when it is relative
   (`..` refused). The clone dir is `[code] clone_dir` in the daemon's config, else `~/roll`. An
-  existing checkout of the same repo at the path is kept; any other non-empty directory is
-  refused. The project records `repo`. The command's 30 s reply wait may run out on a big clone;
-  the daemon finishes anyway and a retry with the same id gets its receipt.
+  existing complete checkout of the same repo at the path is kept; any other non-empty directory
+  is refused. The clone is made in a temporary directory next to the path and moved into place
+  once complete, so a failed or killed clone leaves nothing there. It goes on as long as git
+  reports progress (two minutes without any give up). The project records `repo`. The command's
+  30 s reply wait may run out on a big clone; the daemon finishes anyway and a retry with the
+  same id gets its receipt. A clone or push that fails on the way (the network, the server, no
+  progress) is `internal` and leaves no receipt, so a retry with the same id runs again; a
+  refusal (the path is taken, no grant) is that id's answer for good.
+- Projects report `git.remote` without credentials, a query or a fragment
+  (`https://ada:ghp_…@github.com/ada/app.git` is `https://github.com/ada/app.git`).
 - **Starting a repo from the canvas.** `POST /v1/code/agents/{owner}/machines/{machine}/projects
   {id, repo: {name, description?, visibility?}, path?, name?}` creates the repo through
   `POST /v1/code/repos` on the caller's behalf (a 409 means a retry, or a repo of that name: it is

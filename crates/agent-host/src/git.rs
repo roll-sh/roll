@@ -26,8 +26,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub const DIFF_CAP: usize = 4 << 20;
 /// What we read of any other git output.
 const OUTPUT_CAP: usize = 16 << 20;
+/// What we keep of stderr (its end: that's where git says what went wrong).
 const STDERR_CAP: usize = 64 << 10;
+/// Local git work (checkpoints, diffs, status) is done in this or is broken.
 const TIMEOUT: Duration = Duration::from_secs(120);
+/// Network git (clone, push) goes on as long as it makes progress: it is given up after this long
+/// without a byte of progress output, however long it has run.
+pub const NETWORK_IDLE: Duration = Duration::from_secs(120);
 
 /// Who checkpoint commits (and publish commits, when the user has no identity) are by.
 const ROLL_NAME: &str = "roll";
@@ -48,6 +53,10 @@ struct Git<'a> {
     stdin: Option<Vec<u8>>,
     cap: usize,
     allow_fail: bool,
+    /// Give up after this long without output (network work) instead of after [`TIMEOUT`].
+    idle: Option<Duration>,
+    /// Run no hooks and no fsmonitor: nothing git would start may see this invocation's env.
+    sealed: bool,
 }
 
 fn git<'a>(cwd: &'a Path, args: &[&str]) -> Git<'a> {
@@ -58,6 +67,8 @@ fn git<'a>(cwd: &'a Path, args: &[&str]) -> Git<'a> {
         stdin: None,
         cap: OUTPUT_CAP,
         allow_fail: false,
+        idle: None,
+        sealed: false,
     }
 }
 
@@ -76,13 +87,28 @@ impl Git<'_> {
         self.env("GIT_INDEX_FILE", index.as_os_str())
     }
 
+    /// Limits the command to its working directory (`-- .`): a project in a subdirectory of a
+    /// repository sees only its own files.
+    fn only_here(self) -> Self {
+        self.arg("--").arg(".")
+    }
+
     /// Sends `Authorization: Bearer <token>` on this invocation's HTTP requests. The token goes
     /// in this one process's environment (`GIT_CONFIG_*`), never in a config file, a remote URL
-    /// or the command line.
-    fn bearer(self, token: &str) -> Self {
+    /// or the command line, and the invocation runs no hooks (`core.hooksPath=/dev/null`: not the
+    /// repo's, the user's or a template's) and no fsmonitor, so nothing but git and its own
+    /// transport helper sees that environment.
+    fn bearer(mut self, token: &str) -> Self {
+        self.sealed = true;
         self.env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "http.extraHeader")
             .env("GIT_CONFIG_VALUE_0", format!("Authorization: Bearer {token}"))
+    }
+
+    /// Network work: it goes on while `--progress` output comes, and ends after `idle` without.
+    fn patient(mut self, idle: Duration) -> Self {
+        self.idle = Some(idle);
+        self
     }
 
     fn roll_identity(self) -> Self {
@@ -118,15 +144,22 @@ impl Git<'_> {
 
     async fn exec(self) -> anyhow::Result<Option<Output>> {
         let mut cmd = tokio::process::Command::new("git");
-        cmd.arg("-c").arg("core.quotepath=false").args(&self.args).current_dir(self.cwd);
+        cmd.arg("-c").arg("core.quotepath=false");
+        if self.sealed {
+            cmd.args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]);
+        }
+        cmd.args(&self.args).current_dir(self.cwd);
         cmd.env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE");
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
         cmd.stdin(if self.stdin.is_some() { Stdio::piped() } else { Stdio::null() });
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        // Its own process group, so giving up also stops the transport helpers it started.
+        cmd.process_group(0);
         let what = || format!("git {}", self.args.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "));
         let mut child = cmd.spawn().with_context(|| format!("starting {}", what()))?;
+        let pid = child.id();
         let stdin = child.stdin.take();
         let input = self.stdin.clone();
         let feed = async move {
@@ -138,13 +171,26 @@ impl Git<'_> {
         let mut stdout = child.stdout.take().expect("piped");
         let mut stderr = child.stderr.take().expect("piped");
         let cap = self.cap;
+        let heard = std::sync::Mutex::new(tokio::time::Instant::now());
         let read_out = async {
             let mut buf = Vec::new();
             (&mut stdout).take(cap as u64 + 1).read_to_end(&mut buf).await.map(|_| buf)
         };
         let read_err = async {
-            let mut buf = Vec::new();
-            let _ = (&mut stderr).take(STDERR_CAP as u64).read_to_end(&mut buf).await;
+            // The tail: progress output can run long, and the error comes last.
+            let (mut buf, mut chunk) = (Vec::new(), vec![0u8; 8192]);
+            while let Ok(n) = stderr.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                *heard.lock().unwrap() = tokio::time::Instant::now();
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > 2 * STDERR_CAP {
+                    buf.drain(..buf.len() - STDERR_CAP);
+                }
+            }
+            let cut = buf.len().saturating_sub(STDERR_CAP);
+            buf.drain(..cut);
             buf
         };
         let work = async {
@@ -158,8 +204,33 @@ impl Git<'_> {
             let status = child.wait().await?;
             anyhow::Ok((status, out, err, truncated))
         };
-        let (status, stdout, stderr, truncated) =
-            tokio::time::timeout(TIMEOUT, work).await.with_context(|| format!("{} timed out", what()))??;
+        let watchdog = async {
+            match self.idle {
+                None => tokio::time::sleep(TIMEOUT).await,
+                Some(idle) => loop {
+                    let deadline = *heard.lock().unwrap() + idle;
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::time::sleep_until(deadline).await;
+                },
+            }
+        };
+        let ended = tokio::select! {
+            r = work => Some(r),
+            () = watchdog => None,
+        };
+        let Some(ended) = ended else {
+            if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 0) {
+                // SAFETY: plain syscall; `pid` leads its own group (`process_group(0)`).
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+            }
+            match self.idle {
+                None => bail!("{} timed out after {} s", what(), TIMEOUT.as_secs()),
+                Some(idle) => bail!("{} timed out: no progress for {} s", what(), idle.as_secs()),
+            }
+        };
+        let (status, stdout, stderr, truncated) = ended?;
         if !status.success() && !truncated {
             if self.allow_fail {
                 return Ok(None);
@@ -203,9 +274,23 @@ pub async fn info(dir: &Path) -> Option<GitInfo> {
         .await
         .ok()
         .flatten()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        .map(|o| public_remote(String::from_utf8_lossy(&o.stdout).trim()));
     let dirty = git(dir, &["status", "--porcelain"]).cap(1).run().await.map(|o| !o.stdout.is_empty()).unwrap_or(false);
     Some(GitInfo { branch, head, remote, dirty })
+}
+
+/// A remote URL as the canvas may show it (it is mirrored, and shares can copy it): without
+/// credentials (`https://user:token@host/…`, `ssh://user:pass@host/…`), a query or a fragment.
+/// scp-like `git@host:path` has no password and stays; so do local paths.
+pub fn public_remote(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{path}")
 }
 
 /// `roll/<slug>`, with `-2`, `-3`, … when the branch exists.
@@ -270,11 +355,15 @@ impl Drop for PrivateIndex {
 }
 
 impl PrivateIndex {
-    async fn of_working_tree(dir: &Path) -> anyhow::Result<PrivateIndex> {
+    /// A path for an index in `dir`'s git directory (nothing is written yet).
+    async fn new(dir: &Path) -> anyhow::Result<PrivateIndex> {
         let git_dir = PathBuf::from(git(dir, &["rev-parse", "--absolute-git-dir"]).text().await?);
+        Ok(PrivateIndex { path: git_dir.join(format!("roll-index-{:016x}", rand::random::<u64>())) })
+    }
+
+    async fn of_working_tree(dir: &Path) -> anyhow::Result<PrivateIndex> {
         let user_index = PathBuf::from(git(dir, &["rev-parse", "--path-format=absolute", "--git-path", "index"]).text().await?);
-        let path = git_dir.join(format!("roll-index-{:016x}", rand::random::<u64>()));
-        let index = PrivateIndex { path };
+        let index = PrivateIndex::new(dir).await?;
         let config = ["-c", "core.splitIndex=false", "-c", "splitIndex.sharedIndexExpire=never"];
         if copy_keeping_mtime(&user_index, &index.path).await? {
             // A copy of the user's index lets `add` skip hashing files that haven't changed;
@@ -326,12 +415,33 @@ pub async fn capture(dir: &Path, refname: &str, message: &str) -> anyhow::Result
     Ok(commit)
 }
 
-/// Makes the working tree match `commit`'s tree: changed and deleted files come back, files the
-/// commit doesn't have are removed, ignored files stay. The user's index and HEAD don't move.
+/// Makes `dir` match `commit`'s tree there: changed and deleted files come back, files the commit
+/// doesn't have are removed, ignored files stay. Only `dir` is touched: when it is a
+/// subdirectory of the repository (a project in `sub/`), every file outside it stays as it is
+/// now. The user's index and HEAD don't move.
 pub async fn restore(dir: &Path, commit: &str) -> anyhow::Result<()> {
     let index = PrivateIndex::of_working_tree(dir).await?;
     let root = root(dir).await.context("not a git work tree")?;
-    git(&root, &["read-tree", "--reset", "-u"]).arg(format!("{commit}^{{tree}}")).index(&index.path).run().await?;
+    let prefix = prefix(dir).await?;
+    let target = if prefix.is_empty() {
+        format!("{commit}^{{tree}}")
+    } else {
+        // The working tree as it is now, with only `prefix` taken from the commit.
+        let mixed = PrivateIndex::new(dir).await?;
+        let now = index.write_tree(dir).await?;
+        git(&root, &["read-tree", &now]).index(&mixed.path).run().await?;
+        git(&root, &["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--"]).arg(format!(":(literal){prefix}")).index(&mixed.path).run().await?;
+        let there = format!("{commit}:{}", prefix.trim_end_matches('/'));
+        // (`rev:path` takes the rest as the path, so the type is asked separately.)
+        let kind = git(&root, &["cat-file", "-t"]).arg(&there).try_run().await?;
+        if kind.is_some_and(|o| o.stdout.starts_with(b"tree")) {
+            git(&root, &["read-tree"]).arg(format!("--prefix={prefix}")).arg(&there).index(&mixed.path).run().await?;
+        }
+        mixed.write_tree(&root).await?
+    };
+    // Outside `prefix` the index already holds the target (the files as they are), so only
+    // `prefix` changes on disk.
+    git(&root, &["read-tree", "--reset", "-u"]).arg(target).index(&index.path).run().await?;
     Ok(())
 }
 
@@ -353,23 +463,23 @@ pub async fn delete_refs(dir: &Path, prefix: &str) -> anyhow::Result<()> {
 
 const DIFF_FLAGS: &[&str] = &["--no-color", "--no-ext-diff", "--no-textconv", "-M"];
 
-/// Lines added and removed between two commits or trees.
+/// Lines added and removed in `dir` between two commits or trees (paths are the repository's).
 pub async fn stat(dir: &Path, from: &str, to: &str) -> anyhow::Result<DiffStat> {
-    let out = git(dir, &["diff", "--numstat", "-z"]).arg("-M").arg(from).arg(to).run().await?;
+    let out = git(dir, &["diff", "--numstat", "-z"]).arg("-M").arg(from).arg(to).only_here().run().await?;
     Ok(parse_numstat(&out.stdout))
 }
 
-/// The unified diff between two commits or trees, per file, cut at `cap` bytes of patch
+/// The unified diff in `dir` between two commits or trees, per file, cut at `cap` bytes of patch
 /// (files that don't fit are left out and `truncated` is set; `stat` is always complete).
 pub async fn diff(dir: &Path, from: &str, to: &str, cap: usize) -> anyhow::Result<Diff> {
     let stat = stat(dir, from, to).await?;
-    let names = git(dir, &["diff", "--name-status", "-z"]).arg("-M").arg(from).arg(to).run().await?;
+    let names = git(dir, &["diff", "--name-status", "-z"]).arg("-M").arg(from).arg(to).only_here().run().await?;
     let entries = parse_name_status(&names.stdout);
     let mut patch = git(dir, &["diff"]).cap(cap);
     for flag in DIFF_FLAGS {
         patch = patch.arg(flag);
     }
-    let patch = patch.arg(from).arg(to).run().await?;
+    let patch = patch.arg(from).arg(to).only_here().run().await?;
     let chunks = split_patch(&patch.stdout, patch.truncated);
     let truncated = chunks.len() < entries.len();
     let files = entries
@@ -443,9 +553,10 @@ fn parse_numstat(out: &[u8]) -> DiffStat {
     stat
 }
 
-/// The branch, how far it is from its upstream, and the changed files (untracked included).
+/// The branch, how far it is from its upstream, and the changed files in `dir` (untracked
+/// included).
 pub async fn status(dir: &Path) -> anyhow::Result<GitStatus> {
-    let out = git(dir, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]).run().await?;
+    let out = git(dir, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"]).only_here().run().await?;
     Ok(parse_status(&out.stdout))
 }
 
@@ -509,38 +620,105 @@ pub async fn publish(dir: &Path, branch: &str, message: &str, to: Option<&CodeGr
     }
     let commit = head(dir).await?.context("nothing to publish: the branch has no commits")?;
     let refspec = format!("HEAD:refs/heads/{branch}");
-    match to {
-        Some(grant) => git(dir, &["push", "--quiet", "--", &grant.url, &refspec]).bearer(&grant.token).run().await?,
-        None => git(dir, &["push", "--quiet", "-u", "origin", &refspec]).run().await?,
+    let push = match to {
+        Some(grant) => git(dir, &["push", "--progress", "--", &grant.url, &refspec]).bearer(&grant.token),
+        None => git(dir, &["push", "--progress", "-u", "origin", &refspec]),
     };
+    push.patient(NETWORK_IDLE).run().await.map_err(|e| anyhow::Error::new(Network(e)))?;
     Ok(Published { branch: branch.to_string(), commit, change: None, url: None, landing: None })
 }
 
+/// A clone or push that failed on the way (the network, the server, no progress for
+/// [`NETWORK_IDLE`]): nothing was kept, and trying again may work. Commands that end this way
+/// leave no receipt, so a retry with the same command id runs again.
+#[derive(Debug, thiserror::Error)]
+#[error("{0:#}")]
+pub struct Network(pub anyhow::Error);
+
+/// Git config set on a clone once it is complete (roll clones into a temporary directory and
+/// moves it into place only then): an empty repository's clone has no HEAD to tell it by.
+const CLONED_KEY: &str = "roll.cloned";
+
+/// Whether `dir` is a complete clone of `url`: its origin is `url`, and it has a HEAD commit or
+/// roll finished cloning it.
+async fn complete_clone(dir: &Path, url: &str) -> bool {
+    if root(dir).await.is_none() || git(dir, &["remote", "get-url", "origin"]).text().await.ok().as_deref() != Some(url) {
+        return false;
+    }
+    matches!(head(dir).await, Ok(Some(_))) || git(dir, &["config", "--local", "--get", CLONED_KEY]).try_run().await.ok().flatten().is_some()
+}
+
 /// Clones a roll code repository into `dir` (absent or empty) with a grant's token. The remote
-/// is left without credentials. A checkout of the same repository already at `dir` is kept.
+/// is left without credentials. A complete checkout of the same repository already at `dir` is
+/// kept. A clone goes on while git reports progress ([`NETWORK_IDLE`] without any ends it).
 pub async fn clone_into(grant: &CodeGrant, dir: &Path) -> anyhow::Result<()> {
+    clone_into_within(grant, dir, NETWORK_IDLE).await
+}
+
+/// [`clone_into`], giving up after `idle` without progress. The clone is made in a temporary
+/// directory next to `dir` and moved into place once it is complete, so a clone that fails or
+/// is killed leaves nothing at `dir` (and its temporary directory is removed).
+pub async fn clone_into_within(grant: &CodeGrant, dir: &Path, idle: Duration) -> anyhow::Result<()> {
+    let what = || format!("{}/{}", grant.repo.owner, grant.repo.repo);
     match tokio::fs::read_dir(dir).await {
         Ok(mut entries) => {
             if entries.next_entry().await?.is_none() {
                 // Empty: clone into it.
-            } else if root(dir).await.is_some() && git(dir, &["remote", "get-url", "origin"]).text().await.ok().as_deref() == Some(grant.url.as_str()) {
+            } else if complete_clone(dir, &grant.url).await {
                 return Ok(());
+            } else if root(dir).await.is_some() && git(dir, &["remote", "get-url", "origin"]).text().await.ok().as_deref() == Some(grant.url.as_str()) {
+                bail!("{} isn't a complete clone of {} (an earlier clone stopped half-way): remove it and try again", dir.display(), what());
             } else {
-                bail!("{} already exists and isn't a clone of {}/{}", dir.display(), grant.repo.owner, grant.repo.repo);
+                bail!("{} already exists and isn't a clone of {}", dir.display(), what());
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
     }
     let parent = dir.parent().context("can't clone into the root directory")?;
+    let name = dir.file_name().context("can't clone into the root directory")?.to_string_lossy();
     tokio::fs::create_dir_all(parent).await.with_context(|| format!("creating {}", parent.display()))?;
-    git(parent, &["clone", "--quiet", "--", &grant.url]).arg(dir).bearer(&grant.token).run().await?;
-    Ok(())
+    let temp = parent.join(format!(".{name}.roll-clone-{:016x}", rand::random::<u64>()));
+    let made = async {
+        git(parent, &["clone", "--progress", "--", &grant.url])
+            .arg(&temp)
+            .bearer(&grant.token)
+            .patient(idle)
+            .run()
+            .await
+            .map_err(|e| anyhow::Error::new(Network(e)))?;
+        git(&temp, &["config", "--local", CLONED_KEY, "true"]).run().await?;
+        // Over `dir` when it is an empty directory (rename replaces one), else to a new name.
+        tokio::fs::rename(&temp, dir).await.with_context(|| format!("moving the clone to {}", dir.display()))
+    };
+    let made = made.await;
+    if made.is_err() {
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+    made
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remotes_lose_their_credentials() {
+        for (remote, shown) in [
+            ("https://ada:ghp_secret@github.com/ada/app.git", "https://github.com/ada/app.git"),
+            ("https://ghp_secret@github.com/ada/app.git", "https://github.com/ada/app.git"),
+            ("http://x-access-token:tok@host:8080/a/b?token=t#frag", "http://host:8080/a/b"),
+            ("ssh://git:pw@host.example/a.git", "ssh://host.example/a.git"),
+            ("https://user:p%40ss@host/a", "https://host/a"),
+            ("https://host/a.git?private_token=x", "https://host/a.git"),
+            ("https://host", "https://host"),
+            ("https://u:p@host", "https://host"),
+            ("git@github.com:ada/app.git", "git@github.com:ada/app.git"),
+            ("/srv/git/app.git", "/srv/git/app.git"),
+        ] {
+            assert_eq!(public_remote(remote), shown, "{remote}");
+        }
+    }
 
     #[test]
     fn slugs() {
