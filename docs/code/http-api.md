@@ -548,7 +548,10 @@ times in these shapes are **milliseconds** (`Millis`), unlike the rest of this A
 POST /v1/code/agents/login {name?, hostname?, os? /* what the machine says about itself, one line, ≤ 64 */}
        → DeviceLogin {device_code /* rld_… */, user_code /* "BCDF-GHJK" */,
        verification_uri /* {web}/dashboard/agents/connect?code=… */, interval: 5, expires_in: 900}
-       No caller needed. 503 (Retry-After) while 10,000 logins are waiting; 400 a non-string field.
+       No caller needed. 429 (Retry-After) while 20 logins from the client's address (an IPv6 address's
+       /64; `X-Forwarded-For` only with trust_forwarded_for, as for event streams) are waiting; when
+       10,000 are waiting in all, the oldest pending login of the address with the most goes to make
+       room (never a refusal for everyone). 400 a non-string field.
 POST /v1/code/agents/login/poll {device_code} → LoginPoll
        {status: "pending"} | {status: "approved", token /* rlm_…, handed out once */, machine /* mch_… */, owner}
        | {status: "denied"} | {status: "expired"} /* also for an unknown code and after the token was handed out */

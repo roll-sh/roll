@@ -137,18 +137,37 @@ fn machine_detail(v: Option<&Value>, what: &str) -> Result<Option<String>> {
     }
 }
 
-async fn login(State(code): S, Body(b): Body) -> Result<Json<agent_proto::DeviceLogin>> {
+/// Who started a login, for its per-client cap: the client's address as event streams count it
+/// (`X-Forwarded-For` only when the operator trusts the proxy; another node's verified client in
+/// a cluster), with an IPv6 address's /64 standing for it (one host often has a whole /64).
+fn login_client(code: &Code, parts: &Parts) -> String {
+    let key = crate::api::stream_key(code, &Caller::Anonymous, parts);
+    match key.strip_prefix("ip:").and_then(|ip| ip.parse::<std::net::IpAddr>().ok()) {
+        Some(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("ip:{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        Some(std::net::IpAddr::V6(v6)) => format!("ip:{}", v6.to_ipv4_mapped().map_or_else(|| v6.to_string(), |v4| v4.to_string())),
+        _ => key,
+    }
+}
+
+async fn login(State(code): S, parts: Parts, Body(b): Body) -> Result<Response> {
     let name = machine_name(b.get("name"), "machine")?;
     let hostname = machine_detail(b.get("hostname"), "hostname")?;
     let os = machine_detail(b.get("os"), "os")?;
     let m = store::LoginMachine { name: &name, hostname: hostname.as_deref(), os: os.as_deref() };
+    let client = login_client(&code, &parts);
     for _ in 0..8 {
         let device_code = format!("rld_{}", random_hex(32));
         let user_code = new_user_code();
-        match store::create_login(code.db.sql(), &hash_token(&device_code), &user_code, &m)? {
-            store::NewLogin::Created => return Ok(Json(store::login_response(device_code, user_code, &code.config.web_url))),
+        match store::create_login(code.db.sql(), &hash_token(&device_code), &user_code, &m, &client, store::LOGIN_CAPS)? {
+            store::NewLogin::Created => return Ok(Json(store::login_response(device_code, user_code, &code.config.web_url)).into_response()),
             store::NewLogin::CodeTaken => continue,
-            store::NewLogin::Full => return Err(Error::Unavailable("too many logins are waiting; try again shortly".into())),
+            store::NewLogin::Busy => {
+                let msg = format!("{} logins from this address are waiting for approval; finish or let one expire first", store::MAX_PENDING_PER_CLIENT);
+                return Ok(*crate::streams::too_many(&msg));
+            }
         }
     }
     Err(Error::Unavailable("couldn't pick a free login code; try again".into()))

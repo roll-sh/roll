@@ -255,7 +255,10 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
   hostname and OS) returns a `device_code` and a short `user_code`; the user opens
   `/dashboard/agents/connect?code=…` (signed in), which looks the login up and asks "Approve
   ada-mbp (macOS)?"; the CLI's poll then receives a machine token `rlm_…` and stores it in
-  `~/.config/roll/agent.json` (0600). The dashboard can also mint one directly ("Add machine"),
+  `~/.config/roll/agent.json` (0600). Anyone may start a login, so at most 20 wait per client
+  address (an IPv6 /64; 429 past that), and when 10,000 wait in all the oldest pending one of the
+  address with the most makes room: a flood from one address, or many, never locks out a user
+  whose login is the only one from theirs. The dashboard can also mint one directly ("Add machine"),
   which `roll agent login --machine-token rlm_…` (or `ROLL_AGENT_TOKEN`) saves the same way after
   asking roll which machine it is (`GET /v1/code/agents/connect` without an upgrade).
 - Installing: `curl -fsSL https://roll.sh/install.sh | sh` (`apps/dashboard/public/install.sh`)

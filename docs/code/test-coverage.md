@@ -160,7 +160,7 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 
 | Route | Statuses | Tests |
 | --- | --- | --- |
-| `POST /v1/code/agents/login` | 200, 400, 503; `hostname` and `os` kept for the lookup | `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `agents.rs::pending_logins_say_which_machine_asks`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/login` | 200, 400, 429 (per client address, IPv6 /64), a full table evicting the noisiest client's oldest; `hostname` and `os` kept for the lookup | `agents.rs::logins_are_capped_per_client_and_a_full_table_never_locks_others_out`, `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `agents.rs::pending_logins_say_which_machine_asks`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/login/poll` | 200 (`pending`, `approved` once, `denied`, `expired`), 400 | `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/login/approve` | 204, 400, 401, 403, 404 | `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
 | `POST /v1/code/agents/{owner}/login/deny` | 204, 401, 403, 404 | `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
@@ -949,6 +949,7 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 | agent tokens drove everything on a machine: terminals running any command, `fs.list /`, approving their own requests (`accept_for_session`), adding projects, full_access threads | `code-control/src/agents/policy.rs::agents_drive_threads_but_never_reach_past_them`, `routes.rs::agents_routes_follow_the_auth_matrix`, `mcp.rs::agent_tools_drive_a_machine_like_their_routes`, `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 | public shares kept a project's remote with its credentials and its private repo, homes after a scheme or a flag (`file:///home/me`, `-I/home/me`), and tokens in tool inputs and outputs | `agents.rs::shares_freeze_a_redacted_copy_for_anyone_with_the_link`, `code-control/src/agents/share.rs::credentials_are_redacted`, `code-control/src/agents/share.rs::home_directories_become_tilde` |
 | a publish grant pushed anything in its repo: `main`, a tag `v9`, another branch | `routes.rs::agent_grants_follow_the_auth_matrix` (real git: main, another branch, a tag, an atomic push and a delete refused; the thread's branch pushed; on main a 400) |
+| 10,000 anonymous `POST /v1/code/agents/login`s blocked every login for 15 minutes | `agents.rs::logins_are_capped_per_client_and_a_full_table_never_locks_others_out` |
 
 ## Other regressions
 

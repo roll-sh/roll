@@ -222,6 +222,57 @@ async fn denied_and_unknown_logins() {
     assert_eq!(list, json!([]));
 }
 
+/// `POST /v1/code/agents/login` from a client address (as `rolld` serves it, with ConnectInfo).
+async fn login_from(w: &World, addr: &str) -> (StatusCode, Value) {
+    let mut req = Request::post("/v1/code/agents/login").header("content-type", "application/json").body(Body::from(json!({ "name": "m" }).to_string())).unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(addr.parse::<std::net::SocketAddr>().unwrap()));
+    let r = w.a.send(req).await;
+    let status = r.status();
+    let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// Anyone may start a login, so pending logins are capped per client address (an IPv6 /64 is
+/// one client) and a full table makes room from the noisiest client instead of refusing
+/// everyone: one client (or many) can't lock the others out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn logins_are_capped_per_client_and_a_full_table_never_locks_others_out() {
+    use code_control::agents::store::{self, LoginCaps, LoginMachine, MAX_PENDING_PER_CLIENT, NewLogin};
+    let w = world().await;
+    for i in 0..MAX_PENDING_PER_CLIENT {
+        let (s, v) = login_from(&w, &format!("10.9.0.1:{}", 1000 + i)).await;
+        assert_eq!(s, StatusCode::OK, "{i}: {v}");
+    }
+    let (s, v) = login_from(&w, "10.9.0.1:9").await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("from this address"), "{v}");
+    assert_eq!(login_from(&w, "10.9.0.2:9").await.0, StatusCode::OK, "another address");
+    for i in 0..MAX_PENDING_PER_CLIENT {
+        assert_eq!(login_from(&w, &format!("[2001:db8::{:x}]:1", i + 1)).await.0, StatusCode::OK);
+    }
+    assert_eq!(login_from(&w, "[2001:db8::ffff]:1").await.0, StatusCode::TOO_MANY_REQUESTS, "the same /64");
+    assert_eq!(login_from(&w, "[2001:db8:0:1::1]:1").await.0, StatusCode::OK, "another /64");
+
+    // A full table: the oldest login of the client with the most waiting goes.
+    let db = w.a.code.db.sql();
+    db.execute("DELETE FROM agent_logins", ()).unwrap();
+    let caps = LoginCaps { per_client: 5, total: 6 };
+    let m = LoginMachine { name: "m", hostname: None, os: None };
+    let add = |n: &str, client: &str| store::create_login(db, &format!("hash-{n}"), &format!("CODE-{n}"), &m, client, caps).unwrap();
+    for n in ["A1", "A2", "A3", "A4"] {
+        assert!(matches!(add(n, "ip:a"), NewLogin::Created));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(matches!(add("B1", "ip:b"), NewLogin::Created));
+    assert!(matches!(add("A5", "ip:a"), NewLogin::Created));
+    assert!(matches!(add("A6", "ip:a"), NewLogin::Busy), "a's own cap");
+    assert!(matches!(add("C1", "ip:c"), NewLogin::Created), "full, and still not refused");
+    let left = |code: &str| store::pending_login(db, code).unwrap().is_some();
+    assert!(!left("CODE-A1") && left("CODE-A2") && left("CODE-B1") && left("CODE-C1"));
+    assert!(matches!(add("D1", "ip:d"), NewLogin::Created));
+    assert!(!left("CODE-A2") && left("CODE-B1") && left("CODE-C1") && left("CODE-D1"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn machines_are_managed_by_the_owner_and_revoking_closes_the_link() {
     let w = world().await;

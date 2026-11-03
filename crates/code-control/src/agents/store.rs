@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS agent_logins (
     expires_at INTEGER NOT NULL,
     -- What `roll agent login` said about the machine (shown before approving).
     hostname TEXT,
-    os TEXT
+    os TEXT,
+    -- Who started it (`ip:<address>`, an IPv6 address's /64): pending logins are capped per
+    -- client, and a full table makes room from the noisiest one.
+    client TEXT
 );
 CREATE TABLE IF NOT EXISTS agent_entities (
     owner_id TEXT NOT NULL,
@@ -98,6 +101,8 @@ pub const LOGIN_TTL_S: i64 = 15 * 60;
 pub const LOGIN_INTERVAL_S: u32 = 5;
 /// Device logins waiting at once, for everyone: `POST login` needs no token.
 pub const MAX_PENDING_LOGINS: i64 = 10_000;
+/// Device logins one client (address) may have waiting at once.
+pub const MAX_PENDING_PER_CLIENT: i64 = 20;
 /// Machines one owner may have.
 pub const MAX_MACHINES: i64 = 200;
 /// Rows one catch-up query reads.
@@ -256,9 +261,20 @@ pub enum NewLogin {
     Created,
     /// The user code is taken: make another.
     CodeTaken,
-    /// Too many logins waiting.
-    Full,
+    /// This client has [`LoginCaps::per_client`] logins waiting.
+    Busy,
 }
+
+/// How many device logins may wait: per client, and in all. A full table never refuses a new
+/// login: the oldest pending one of the client with the most waiting makes room, so one noisy
+/// client (or many) can't lock everyone else out.
+#[derive(Clone, Copy, Debug)]
+pub struct LoginCaps {
+    pub per_client: i64,
+    pub total: i64,
+}
+
+pub const LOGIN_CAPS: LoginCaps = LoginCaps { per_client: MAX_PENDING_PER_CLIENT, total: MAX_PENDING_LOGINS };
 
 /// What a machine says about itself when it starts a login.
 pub struct LoginMachine<'a> {
@@ -267,18 +283,42 @@ pub struct LoginMachine<'a> {
     pub os: Option<&'a str>,
 }
 
-pub fn create_login(db: &code_sql::Db, device_hash: &str, user_code: &str, m: &LoginMachine<'_>) -> code_sql::Result<NewLogin> {
+/// Start a device login for `client` (who asked: [`super::api`]'s client key), within `caps`.
+pub fn create_login(db: &code_sql::Db, device_hash: &str, user_code: &str, m: &LoginMachine<'_>, client: &str, caps: LoginCaps) -> code_sql::Result<NewLogin> {
     let now = code_sql::now_ms();
     db.write(|c| {
         // Expired logins go here (anyone may start one, so they're bounded and swept).
         c.execute("DELETE FROM agent_logins WHERE expires_at < ?", [now])?;
+        let mine: i64 = c.query_row("SELECT COUNT(*) FROM agent_logins WHERE status = 'pending' AND client = ?", [client], |r| r.get(0))?;
+        if mine >= caps.per_client {
+            return Ok(NewLogin::Busy);
+        }
         let n: i64 = c.query_row("SELECT COUNT(*) FROM agent_logins", (), |r| r.get(0))?;
-        if n >= MAX_PENDING_LOGINS {
-            return Ok(NewLogin::Full);
+        if n >= caps.total {
+            // Room from the client with the most logins waiting: its oldest one goes.
+            let noisiest: Option<String> = c
+                .query_row(
+                    "SELECT COALESCE(client, '') FROM agent_logins WHERE status = 'pending' GROUP BY COALESCE(client, '') ORDER BY COUNT(*) DESC, MIN(created_at) LIMIT 1",
+                    (),
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let oldest = |sql: &str, p: Vec<code_sql::Value>| c.query_row(sql, p, |r| r.get::<_, String>(0)).optional();
+            let victim = match noisiest {
+                Some(k) => oldest(
+                    "SELECT device_hash FROM agent_logins WHERE status = 'pending' AND COALESCE(client, '') = ? ORDER BY created_at, device_hash LIMIT 1",
+                    vec![code_sql::Value::Text(k)],
+                )?,
+                // Nothing pending: decided logins the CLI hasn't picked up yet.
+                None => oldest("SELECT device_hash FROM agent_logins ORDER BY created_at, device_hash LIMIT 1", vec![])?,
+            };
+            if let Some(v) = victim {
+                c.execute("DELETE FROM agent_logins WHERE device_hash = ?", [v])?;
+            }
         }
         let added = c.execute(
-            "INSERT INTO agent_logins (device_hash, user_code, status, name, created_at, expires_at, hostname, os) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-            params![device_hash, user_code, m.name, now, now + LOGIN_TTL_S * 1000, m.hostname, m.os],
+            "INSERT INTO agent_logins (device_hash, user_code, status, name, created_at, expires_at, hostname, os, client) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            params![device_hash, user_code, m.name, now, now + LOGIN_TTL_S * 1000, m.hostname, m.os, client],
         )?;
         Ok(if added == 1 { NewLogin::Created } else { NewLogin::CodeTaken })
     })
