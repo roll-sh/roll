@@ -1406,20 +1406,61 @@ fn entries_with(
     Ok(out)
 }
 
+thread_local! {
+    /// Tables this thread found modelled (by database instance and table), with a watch on
+    /// the heap's model and each btree's: `ensure`'s fast path, no shard lock while they are
+    /// alive (a model dropped, replaced or detached retires its watch).
+    static MODELLED: std::cell::RefCell<HashMap<(u64, u32), (heapsim::SizeWatch, Vec<(u32, heapsim::SizeWatch)>)>> =
+        Default::default();
+}
+
+/// Whether this thread saw table `t`'s heap and its btree `indexes` modelled, and those
+/// models are still there.
+fn known_modelled(db: &Database, t: u32, indexes: &[BoundIndex]) -> bool {
+    MODELLED.with(|m| {
+        m.borrow().get(&(db.instance, t)).is_some_and(|(heap, btrees)| {
+            heap.alive()
+                && indexes
+                    .iter()
+                    .filter(|b| b.index.method == "btree")
+                    .all(|b| btrees.iter().any(|(o, w)| *o == b.index.oid && w.alive()))
+        })
+    })
+}
+
 /// Make sure the table's heap and btree indexes are modelled, laying out those that
 /// aren't from the rows there now. False when the table is too big to model.
 fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     let db = &ctx.sess.db;
+    if known_modelled(db, t.oid, indexes) {
+        return Ok(true);
+    }
     let wanted = || -> Option<(bool, Vec<&BoundIndex>)> {
         let rf = db.relfiles.of(t.oid).read();
         if rf.untracked.contains(&t.oid) {
             return None;
         }
-        let missing = indexes
+        let missing: Vec<&BoundIndex> = indexes
             .iter()
             .filter(|b| b.index.method == "btree" && !rf.btrees.contains_key(&b.index.oid))
             .collect();
-        Some((!rf.heaps.contains_key(&t.oid), missing))
+        let heap = rf.heaps.get(&t.oid);
+        if let Some(h) = heap
+            && missing.is_empty()
+        {
+            let btrees = indexes
+                .iter()
+                .filter_map(|b| Some((b.index.oid, rf.btrees.get(&b.index.oid)?.sizes.watch())))
+                .collect();
+            MODELLED.with(|m| {
+                let mut m = m.borrow_mut();
+                if m.len() >= 4096 {
+                    m.retain(|_, (h, _)| h.alive());
+                }
+                m.insert((db.instance, t.oid), (h.sizes.watch(), btrees));
+            });
+        }
+        Some((heap.is_none(), missing))
     };
     let Some((heap_missing, missing)) = wanted() else { return Ok(false) };
     if !heap_missing && missing.is_empty() {
@@ -2168,10 +2209,16 @@ pub fn updated(
         let Some(heap) = heaps.get_mut(&t.oid) else {
             return Ok(None);
         };
-        mark_cmax(heap, old_key, &v, ctx);
         let cid = ctx.txn.borrow_mut().output_cid();
-        let r = heap.update(old_key, new_key, len, xid, hot_ok, &v);
-        heap.set_raw_cid(r.0, cid);
+        // (The old version's command id as mark_cmax sets it, within the update's lookup.)
+        let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
+            Ok(mut txn) => {
+                let here = txn.is_current_xid(o.xmin);
+                txn.adjust_cmax(o.cid, here)
+            }
+            Err(_) => o.cid,
+        };
+        let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut cmax);
         heap.settle_left(&v);
         big = heap.versions() > max_versions();
         r

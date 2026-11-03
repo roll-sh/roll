@@ -85,6 +85,11 @@ impl SizeWatch {
     pub fn holds(&self) -> bool {
         self.cell.load(std::sync::atomic::Ordering::Acquire) == self.seen
     }
+    /// Whether the model is still there (not dropped, replaced or detached), whatever its
+    /// sizes did since.
+    pub fn alive(&self) -> bool {
+        self.cell.load(std::sync::atomic::Ordering::Acquire) != u64::MAX
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1441,8 +1446,25 @@ impl Heap {
         hot: bool,
         v: &Vis,
     ) -> (Tid, bool) {
+        self.update_cid(old_key, new_key, len, (xid, 0), hot, v, &mut |t| t.cid)
+    }
+
+    /// `update`, the new version's raw command id `cid` and the old one's becoming
+    /// `cmax(old version)` (HeapTupleHeaderAdjustCmax), in one lookup of the row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_cid(
+        &mut self,
+        old_key: &[u8],
+        new_key: &[u8],
+        len: usize,
+        (xid, cid): (u64, u32),
+        hot: bool,
+        v: &Vis,
+        cmax: &mut dyn FnMut(&Tup) -> u32,
+    ) -> (Tid, bool) {
         let Some((ob, ooff)) = self.locate(old_key, v) else {
             let tid = self.insert(new_key.to_vec(), len, xid, &mut InsertMode::single());
+            self.set_raw_cid(tid, cid);
             return (tid, false);
         };
         // (No pruning here: heap_update leaves that to the scans that read the page.)
@@ -1456,11 +1478,13 @@ impl Heap {
         let hot = same && hot;
         let mut t = Self::new_tup(len, xid);
         t.heap_only = hot;
+        t.cid = cid;
         let (_, noff) = self.put(nb, t, false);
         self.set_prev((nb, noff), Some((ob, ooff)));
         let op = &mut self.pages[ob as usize];
         let mut old_row = super::keymap::NO_ROW;
         op.update_tup(ooff, |o| {
+            o.cid = cmax(o);
             o.xmax = xid;
             o.hot_updated = hot;
             o.next = if hot { noff } else { 0 };
