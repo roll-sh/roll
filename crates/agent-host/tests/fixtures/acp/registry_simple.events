@@ -1,0 +1,16 @@
+{"native_thread":"grok-replay-session-1"}
+{"model":"grok-build"}
+{"item":{"body":{"text":"","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"thought:1:1","text":"I should "}}
+{"item":{"body":{"text":"I should ","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"thought:1:1","text":"answer exactly."}}
+{"item":{"body":{"text":"I should answer exactly.","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"I should answer exactly.","type":"reasoning"},"id":"thought:1:1","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:2","text":"fixture simple "}}
+{"item":{"body":{"text":"fixture simple ","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:2","text":"ok"}}
+{"item":{"body":{"text":"fixture simple ok","type":"message"},"id":"msg:1:2","parent":null,"status":"running"}}
+{"item":{"body":{"text":"fixture simple ok","type":"message"},"id":"msg:1:2","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

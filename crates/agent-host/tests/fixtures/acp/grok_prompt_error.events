@@ -1,0 +1,19 @@
+{"native_thread":"00000000-0000-4000-8000-000000000001"}
+{"model":"grok-4.7"}
+{"turn_ended":{"failed":"session/prompt: Internal error: API error (status 400 Bad Request): invalid_request_error: grok prompt error fixture (-32603)"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":"gro"}}
+{"item":{"body":{"text":"gro","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":"k"}}
+{"item":{"body":{"text":"grok","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":" prompt"}}
+{"item":{"body":{"text":"grok prompt","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":" error"}}
+{"item":{"body":{"text":"grok prompt error","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":" fixture"}}
+{"item":{"body":{"text":"grok prompt error fixture","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:2:1","text":" recovered"}}
+{"item":{"body":{"text":"grok prompt error fixture recovered","type":"message"},"id":"msg:2:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"grok prompt error fixture recovered","type":"message"},"id":"msg:2:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

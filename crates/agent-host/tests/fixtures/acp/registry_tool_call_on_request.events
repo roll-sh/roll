@@ -1,0 +1,11 @@
+{"native_thread":"grok-replay-session-1"}
+{"model":"grok-build"}
+{"item":{"body":{"input":{"command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt"},"kind":"command","name":"execute","title":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt","type":"tool"},"id":"write-probe","parent":null,"status":"running"}}
+{"request":{"body":{"action":"command","command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt","cwd":"<workspace>","decisions":["accept","accept_for_session","decline","cancel"],"input":{"command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt"},"title":"Run `printf 'codex app-server approval fixture' > .codex-probe-write-action.txt`","tool":"execute","type":"approval"},"id":"1001","item":"write-probe"}}
+{"item":{"body":{"exit_code":0,"input":{"command":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt"},"kind":"command","name":"execute","title":"printf 'codex app-server approval fixture' > .codex-probe-write-action.txt","type":"tool"},"id":"write-probe","parent":null,"status":"completed"}}
+{"item":{"body":{"text":"","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"text_delta":{"item":"msg:1:1","text":"Created the requested probe file."}}
+{"item":{"body":{"text":"Created the requested probe file.","type":"message"},"id":"msg:1:1","parent":null,"status":"running"}}
+{"item":{"body":{"text":"Created the requested probe file.","type":"message"},"id":"msg:1:1","parent":null,"status":"completed"}}
+{"turn_ended":"completed"}
+{"exited":null}

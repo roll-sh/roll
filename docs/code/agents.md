@@ -145,7 +145,14 @@ completed, native thread ref). The orchestrator owns ids and turns those events 
   allow/deny, `interrupt`, `set_permission_mode`), the same protocol Anthropic's Agent SDKs
   speak. Subagents come from `parent_tool_use_id`; questions from `AskUserQuestion`.
 - **ACP**: any Agent Client Protocol agent (`session/new`, `session/prompt`,
-  `session/request_permission`, `session/update`), configured in the daemon's config.
+  `session/request_permission`, `session/update`), configured in the daemon's config
+  (`acp::known_agents()` lists how Gemini CLI, OpenCode, Grok, Kiro, fx and others start).
+  `initialize` offers ACP v2 with v1's fields alongside, as T3 does; resuming is `session/load`
+  or `session/resume`. ACP has no runtime modes of its own: roll answers permission requests
+  itself where the thread's mode allows (reads always, edits inside the workspace in
+  `auto_edit`, everything in `full_access`) and asks otherwise. The agent may call roll's
+  `fs/*` and `terminal/*`, confined to the thread's directory; writes and terminals need the
+  mode or an approval of the same kind in that turn.
 
 **Auth is the user's own.** The daemon runs the provider CLIs installed on the machine with the
 logins already there, exactly as T3 Code and Conductor do; roll never reads, copies or relays a
