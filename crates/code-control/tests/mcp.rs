@@ -12,13 +12,19 @@ use serde_json::{Value, json};
 const MCP: &str = "/v1/code/mcp";
 
 /// The tools docs/code/mcp.md lists.
-const TOOLS: [&str; 22] = [
+const TOOLS: [&str; 28] = [
     "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "create_change", "revise_change", "land", "get_change",
     "list_changes", "claim_work", "heartbeat_work", "release_work", "complete_work", "list_work", "create_work", "comment", "review", "queue_status",
-    "request_ai_review",
+    "request_ai_review", "list_agent_machines", "list_agent_threads", "create_agent_thread", "send_agent_message", "respond_agent_request",
+    "interrupt_agent_thread",
 ];
+/// The agents tools (not repo-scoped: `agent_tools_drive_a_machine_like_their_routes`).
+const AGENT_TOOLS: usize = 6;
 /// The ones that only read (`readOnlyHint`).
-const READ_ONLY: [&str; 11] = ["search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status"];
+const READ_ONLY: [&str; 13] = [
+    "search_code", "read_file", "list_tree", "log", "blame", "get_changeset", "compare", "get_change", "list_changes", "list_work", "queue_status",
+    "list_agent_machines", "list_agent_threads",
+];
 
 struct Client<'a> {
     a: &'a App,
@@ -971,7 +977,7 @@ async fn every_tool_is_authorized_like_its_route() {
                     _ => assert!(text.starts_with("not found"), "{ctx}"),
                 }
             }
-            assert_eq!(seen.len(), TOOLS.len(), "every tool is checked");
+            assert_eq!(seen.len(), TOOLS.len() - AGENT_TOOLS, "every repo tool is checked");
         }
     }
 }
@@ -1096,4 +1102,99 @@ async fn sessions_work_through_any_node() {
     da.session = None;
     da.initialize("2025-11-25").await;
     assert_eq!(da.rpc("ping", json!({})).await["result"], json!({}), "a new one works");
+}
+
+/// The agents tools against a connected test daemon: an agent token lists machines and threads
+/// (with the requests waiting) and drives threads, each tool sending the command its route
+/// takes, with the agent as `by`. A daemon's error is a result, not a failure; the routes'
+/// refusals (another owner, no token, an unknown machine) are failures with their words.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_tools_drive_a_machine_like_their_routes() {
+    use agent_proto::{Command, DaemonFrame, Decision, ErrorCode, RelayFrame, Reply, ReplyError, Response, Stamped};
+    use common::daemon::Daemon;
+    let a = app(Some("root"));
+    let root = Some("root");
+    let mut tokens = Vec::new();
+    for (owner, name) in [("acme", "agent:bot"), ("eve", "t")] {
+        a.req("POST", "/v1/code/owners", Some(json!({ "name": owner, "kind": "org" })), root).await;
+        let (_, t) = a.req("POST", &format!("/v1/code/owners/{owner}/tokens"), Some(json!({ "name": name })), root).await;
+        tokens.push(t["token"].as_str().unwrap().to_string());
+    }
+    let (_, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), root).await;
+    let (mid, minted) = (m["machine"]["id"].as_str().unwrap().to_string(), m["token"].as_str().unwrap().to_string());
+    let url = a.serve().await;
+    let (mut d, _) = Daemon::connect(&url, &minted).await;
+    let entity = |v: Value| -> agent_proto::Entity { serde_json::from_value(v).unwrap() };
+    let thread = json!({
+        "kind": "thread", "id": "thr_a", "project": "prj_1", "title": "fix it", "provider": "codex", "model": null,
+        "runtime_mode": "full_access", "interaction_mode": "default", "cwd": "/x", "status": "waiting",
+        "run_count": 1, "pending_requests": 1, "created_at": 1, "updated_at": 1
+    });
+    let request = json!({
+        "kind": "request", "id": "req_1", "thread": "thr_a", "run": "run_1", "node": "nod_1", "status": "pending", "created_at": 1,
+        "body": { "type": "approval", "action": "command", "title": "Run `cargo test`", "decisions": ["accept", "decline"] }
+    });
+    let items = vec![
+        Stamped { seq: 1, entity: entity(json!({ "kind": "project", "id": "prj_1", "name": "api", "path": "/x", "created_at": 1, "updated_at": 1 })) },
+        Stamped { seq: 2, entity: entity(thread) },
+        Stamped { seq: 3, entity: entity(request) },
+    ];
+    d.upsert(items).await;
+    // The daemon: records each command, answers interrupts with `conflict`, the rest `created`.
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(f) = d.recv().await {
+            if let RelayFrame::Command { id, by, command } = f {
+                let result = match &command {
+                    Command::RunInterrupt { .. } => Reply::Error(ReplyError { code: ErrorCode::Conflict, message: "nothing to interrupt".into() }),
+                    _ => Reply::Created { id: "thr_new".into() },
+                };
+                let _ = seen_tx.send((id.clone(), by, command));
+                d.send(&DaemonFrame::Reply { id, result }).await;
+            }
+        }
+    });
+
+    let mut c = Client::new(&a, Some(&tokens[0]));
+    c.initialize("2025-11-25").await;
+    let machines = c.tool("list_agent_machines", json!({ "owner": "acme" })).await;
+    assert_eq!((machines["items"][0]["id"].as_str(), machines["items"][0]["online"].as_bool()), (Some(mid.as_str()), Some(true)), "{machines}");
+    let listed = c.tool("list_agent_threads", json!({ "owner": "acme", "machine": "box" })).await;
+    assert_eq!((listed["threads"][0]["id"].as_str(), listed["threads"][0]["project_name"].as_str()), (Some("thr_a"), Some("api")), "{listed}");
+    assert_eq!((listed["threads"][0]["machine"].as_str(), listed["requests"][0]["id"].as_str()), (Some(mid.as_str()), Some("req_1")), "{listed}");
+
+    let created = c.tool("create_agent_thread", json!({ "owner": "acme", "machine": mid, "project": "prj_1", "provider": "claude", "prompt": "hi", "worktree": true, "id": "k1" })).await;
+    assert_eq!(created, json!({ "type": "created", "id": "thr_new" }));
+    let (id, by, cmd) = seen.recv().await.unwrap();
+    assert_eq!((id.as_str(), by.as_str()), ("k1", "agent:bot"));
+    assert!(matches!(cmd, Command::ThreadCreate { ref provider, ref prompt, worktree: true, .. } if provider.as_str() == "claude" && prompt.as_deref() == Some("hi")), "{cmd:?}");
+
+    c.tool("send_agent_message", json!({ "owner": "acme", "machine": "box", "thread": "thr_a", "text": "go on", "mode": "steer" })).await;
+    let (id, _, cmd) = seen.recv().await.unwrap();
+    assert!(id.starts_with("cmd_"), "a fresh id: {id}");
+    assert!(matches!(cmd, Command::MessageSend { ref text, mode: agent_proto::SendMode::Steer, .. } if text == "go on"), "{cmd:?}");
+
+    c.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1", "decision": "decline", "message": "not now" })).await;
+    let (_, _, cmd) = seen.recv().await.unwrap();
+    assert_eq!(cmd, Command::RequestRespond { request: agent_proto::RequestId("req_1".into()), response: Response::Decision { decision: Decision::Decline, message: Some("not now".into()) } });
+    c.tool("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_2", "answers": { "q1": "yes" } })).await;
+    assert!(matches!(seen.recv().await.unwrap().2, Command::RequestRespond { response: Response::Answers { .. }, .. }));
+    assert!(c.tool_err("respond_agent_request", json!({ "owner": "acme", "machine": "box", "request": "req_1" })).await.contains("decision"));
+
+    // The daemon's error is a result.
+    let interrupted = c.tool("interrupt_agent_thread", json!({ "owner": "acme", "machine": "box", "thread": "thr_a" })).await;
+    assert_eq!((interrupted["type"].as_str(), interrupted["code"].as_str()), (Some("error"), Some("conflict")), "{interrupted}");
+    assert!(matches!(seen.recv().await.unwrap().2, Command::RunInterrupt { .. }));
+
+    // The routes' refusals are failures.
+    assert!(c.tool_err("send_agent_message", json!({ "owner": "acme", "machine": "nope", "thread": "thr_a", "text": "x" })).await.starts_with("not found"));
+    let mut eve = Client::new(&a, Some(&tokens[1]));
+    eve.initialize("2025-11-25").await;
+    assert!(eve.tool_err("list_agent_machines", json!({ "owner": "acme" })).await.starts_with("not found"));
+    let err = eve.tool_err("interrupt_agent_thread", json!({ "owner": "acme", "machine": mid, "thread": "thr_a" })).await;
+    assert!(err.starts_with("not allowed"), "{err}");
+    let mut anon = Client::new(&a, None);
+    anon.initialize("2025-11-25").await;
+    assert!(anon.tool_err("interrupt_agent_thread", json!({ "owner": "acme", "machine": mid, "thread": "thr_a" })).await.contains("this needs a token"));
+    assert!(seen.try_recv().is_err(), "refused calls send nothing");
 }

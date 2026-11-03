@@ -4,15 +4,14 @@
 
 mod common;
 
-use agent_proto::{DaemonFrame, Entity, MachineInfo, RelayFrame, Reply, Stamped, StreamEvent};
+use agent_proto::{DaemonFrame, Entity, RelayFrame, Reply, Stamped, StreamEvent};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::daemon::{Daemon, dial, info};
 use common::{App, app};
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use serde_json::{Value, json};
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 const ADMIN: &str = "admin-secret";
 
@@ -59,10 +58,6 @@ impl World {
     }
 }
 
-fn info() -> MachineInfo {
-    MachineInfo { hostname: "box".into(), os: "linux".into(), arch: "x86_64".into(), version: "0.1.0".into(), home: "/home/me".into(), providers: vec![] }
-}
-
 fn entity(v: Value) -> Entity {
     serde_json::from_value(v).unwrap()
 }
@@ -88,71 +83,6 @@ fn node(id: &str, thread: &str, text: &str) -> Entity {
 
 fn stamped(seq: u64, entity: Entity) -> Stamped {
     Stamped { seq, entity }
-}
-
-/// A daemon speaking the relay protocol over a real WebSocket.
-struct Daemon {
-    ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-}
-
-async fn dial(url: &str, bearer: &str) -> Result<Daemon, tokio_tungstenite::tungstenite::Error> {
-    let mut req = format!("{}/v1/code/agents/connect", url.replace("http://", "ws://")).into_client_request().unwrap();
-    req.headers_mut().insert("authorization", format!("Bearer {bearer}").parse().unwrap());
-    let (ws, _) = tokio_tungstenite::connect_async(req).await?;
-    Ok(Daemon { ws })
-}
-
-impl Daemon {
-    /// Connect and say hello: the welcome's `resume_from`.
-    async fn connect(url: &str, bearer: &str) -> (Daemon, u64) {
-        let mut d = dial(url, bearer).await.unwrap();
-        d.send(&DaemonFrame::Hello { protocol: agent_proto::PROTOCOL, info: info() }).await;
-        match d.recv().await {
-            Some(RelayFrame::Welcome { resume_from, owner, .. }) => {
-                assert_eq!(owner, "acme");
-                (d, resume_from)
-            }
-            other => panic!("expected welcome, got {other:?}"),
-        }
-    }
-
-    async fn send(&mut self, f: &DaemonFrame) {
-        self.ws.send(Message::text(serde_json::to_string(f).unwrap())).await.unwrap();
-    }
-
-    /// The next relay frame (pings answered), or `None` once closed.
-    async fn recv(&mut self) -> Option<RelayFrame> {
-        self.recv_or_close().await.ok()
-    }
-
-    /// The next relay frame, or the close code.
-    async fn recv_or_close(&mut self) -> Result<RelayFrame, Option<u16>> {
-        loop {
-            let m = tokio::time::timeout(Duration::from_secs(10), self.ws.next()).await.expect("a frame within 10 s");
-            match m {
-                Some(Ok(Message::Text(t))) => {
-                    let f: RelayFrame = serde_json::from_str(t.as_str()).unwrap();
-                    if f == RelayFrame::Ping {
-                        self.send(&DaemonFrame::Pong).await;
-                        continue;
-                    }
-                    return Ok(f);
-                }
-                Some(Ok(Message::Close(c))) => return Err(c.map(|c| u16::from(c.code))),
-                Some(Ok(_)) => continue,
-                Some(Err(_)) | None => return Err(None),
-            }
-        }
-    }
-
-    /// Send records and wait for their ack.
-    async fn upsert(&mut self, items: Vec<Stamped>) -> u64 {
-        self.send(&DaemonFrame::Entities { items }).await;
-        match self.recv().await {
-            Some(RelayFrame::Ack { seq }) => seq,
-            other => panic!("expected ack, got {other:?}"),
-        }
-    }
 }
 
 /// An SSE stream read from the router.

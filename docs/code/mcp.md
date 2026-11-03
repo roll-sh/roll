@@ -63,6 +63,18 @@ Repos are `"owner/repo"`. Changes are `"chg_…"` or `"owner/repo#N"`, and work 
 | `review` | approve, request changes or comment, with inline comments | `POST /changes/{id}/reviews` |
 | `queue_status` | the merge queue | `GET /repos/{r}/queue` |
 | `request_ai_review` | ask roll's reviewer for a review | `POST /changes/{id}/ai-review` |
+| `list_agent_machines` | the owner's machines running `roll agent up` (online, providers) | `GET /agents/{owner}/machines` |
+| `list_agent_threads` | agent threads (with their machine and project name) and the requests waiting for an answer | `GET /agents/{owner}/state` |
+| `create_agent_thread` | start a coding agent in a project on a machine | `POST /agents/{owner}/machines/{m}/commands` (`thread.create`) |
+| `send_agent_message` | message a thread: start a run, queue after it, or steer it | `POST …/commands` (`message.send`) |
+| `respond_agent_request` | answer an approval (`decision`) or questions (`answers`) | `POST …/commands` (`request.respond`) |
+| `interrupt_agent_thread` | stop a thread's running turn | `POST …/commands` (`run.interrupt`) |
+
+The agents tools (docs/code/agents.md) take `owner`, and a `machine` by id (`mch_…`) or name.
+Commands take an optional `id`, the idempotency key (a fresh one by default). Whatever the
+daemon answers is a result, its errors too (`{type: "error", code, message}`: the thread is busy,
+the machine is offline or didn't answer in 30 s); only the route refusing is a tool failure.
+Agent tokens may use them all: agents can orchestrate agents.
 
 `tools/list` returns each tool's JSON Schema. Every schema is closed (`additionalProperties: false`).
 

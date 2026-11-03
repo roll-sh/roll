@@ -283,6 +283,12 @@ envelope `{event, delivery, webhook, repo{id, full_name, default_branch, visibil
 | `review` | approve with inline comments, request_changes, comment; reviewer from `X-Roll-Agent` / `X-Roll-User`; missing/bad verdict, bad comments, malformed/unknown change; another owner: comment allowed, approve "not allowed"; auth | `mcp.rs::every_tool_end_to_end`, `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `queue_status` | post_merge; queue repo (depth, urgent first) → same JSON as `GET /queue`; missing repo; repo errors; auth | `mcp.rs::every_tool_end_to_end`, `mcp.rs::land_outcomes_queued_branches_and_errors`, `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::protocol_edges`, `mcp.rs::every_tool_is_authorized_like_its_route` |
 | `request_ai_review` | queued job (mode, full) visible in `GET /ai-jobs`; bad mode, malformed/unknown change; auth | `mcp.rs::every_tool_end_to_end`, `mcp.rs::tools_map_onto_their_routes`, `mcp.rs::tool_argument_errors`, `mcp.rs::every_tool_is_authorized_like_its_route` |
+| `list_agent_machines` | the owner's machines with `online`; another owner "not found" | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
+| `list_agent_threads` | threads of a machine (by name) with their machine and project name, and the pending requests | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
+| `create_agent_thread` | `thread.create` (provider, prompt, worktree) sent with the given id and the agent as `by`; the daemon's reply | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
+| `send_agent_message` | `message.send` (steer) with a fresh id; an unknown machine name "not found" | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
+| `respond_agent_request` | a decision with a message, answers; neither is a failure | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
+| `interrupt_agent_thread` | `run.interrupt`; the daemon's `conflict` is a result, not a failure; another owner "not allowed", anonymous "needs a token", nothing sent | `mcp.rs::agent_tools_drive_a_machine_like_their_routes` |
 
 ### Protocol
 
