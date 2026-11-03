@@ -34,9 +34,22 @@ pub mod kept;
 /// it (`with_max_versions`) to take the estimates' paths.
 const MAX_VERSIONS: usize = 400_000;
 
+/// `MAX_VERSIONS`, or the operator's `ROLL_MODEL_MAX_VERSIONS` (a higher limit models bigger
+/// tables, at the cost above; the size models' measurements compare limits with one binary).
+fn default_max_versions() -> usize {
+    static N: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        std::env::var("ROLL_MODEL_MAX_VERSIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(MAX_VERSIONS)
+    });
+    *N
+}
+
 thread_local! {
-    /// `MAX_VERSIONS` on this thread (`with_max_versions`).
-    static MAX_VERSIONS_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_VERSIONS) };
+    /// The limit on this thread (`with_max_versions`; 0: `default_max_versions`).
+    static MAX_VERSIONS_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Run `f` with tables of more than `n` row versions too big to model, on this thread (so a
@@ -48,7 +61,10 @@ pub fn with_max_versions<R>(n: usize, f: impl FnOnce() -> R) -> R {
 }
 
 fn max_versions() -> usize {
-    MAX_VERSIONS_HERE.with(|m| m.get())
+    match MAX_VERSIONS_HERE.with(|m| m.get()) {
+        0 => default_max_versions(),
+        n => n,
+    }
 }
 
 thread_local! {

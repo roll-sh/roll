@@ -7005,9 +7005,9 @@ cheaper and its read side lock-free.
   Measured again on this round's tree with only the limit lifted (BENCH.md's table): COPY
   1.8 -> 2.7 s, primary key 0.8 -> 1.7 s, CREATE INDEX 0.9 -> 1.7 s, DELETE 1.0 -> 1.4 s,
   first statement 0.02 -> 0.31 s, simple-update +27% CPU, tpcb-like +15%, pgbench's peak
-  memory 250-290 -> 470 MB. Before any future lift, re-run that whole table (its scripts:
-  `bulk.sh`, `ddl2.sh`, `liftcmp.sh`, in `~/.cache/a151/scripts` while it lasts; describe
-  them in BENCH.md when you re-create them) with peak memory, and lift only when every row
+  memory 250-290 -> 470 MB. Before any future lift, re-run that whole table (since round 5
+  `tools/bench/sizing/liftcmp.sh`, which replaces 151's deleted `bulk.sh`, `ddl2.sh` and
+  `liftcmp.sh`; BENCH.md "Size models, round 5") with peak memory, and lift only when every row
   is at or below the 400k column. What a big model still costs: the per-row upkeep of
   writes to it (`sizing::updated` / `inserted_with` / `deleted`: locate, update, settle,
   btree insert), the kept record's layout at open (`kept::lay_out`, `heapsim::restored`:

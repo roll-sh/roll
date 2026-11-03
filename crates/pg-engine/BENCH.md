@@ -7372,7 +7372,7 @@ primary key, live allocations after the first statement): 46.9 MB (round 3) -> 3
 (round 3: 0.29-0.35 s).
 
 **Page counts against PostgreSQL 18.6** (round 2's mixed workload with mw1's row count as a
-parameter, script `~/.cache/a151/scripts/mw.py` as described in round 2: pages per fork and
+parameter, script `tools/bench/sizing/mw.py` since round 5, as described in round 2: pages per fork and
 four EXPLAINs before and after a clean restart, 300 inserts into each table with their
 ctids, VACUUM of both, the same report, 500 more inserts and an UPDATE of every 97th row with
 their ctids, the report again): at 60,000 and at 300,000 rows everything matches PostgreSQL,
