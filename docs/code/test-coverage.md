@@ -933,6 +933,17 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | worktrees on `roll/<slug>` (unique names), checkpoints inside them, removal keeps the branch, checkpoint refs deleted | `agent-host/tests/git.rs::worktrees_get_their_own_branch_and_removal_keeps_it` |
 | git status (porcelain v2: branch, ahead/behind, renames, untracked) and project info; non-git directories | `agent-host/tests/git.rs::status_reports_branch_and_changes`, `agent-host/tests/git.rs::non_git_directories_have_no_git`, `agent-host/src/git.rs` tests |
 | publish: commit on the thread branch and push it to `origin`; refuses another branch | `agent-host/tests/git.rs::publish_commits_and_pushes_the_thread_branch` |
+| a prompt: title from it, run → node tree → completed, usage, base and run checkpoints, deltas live between upserts, session cwd | `agent-host/tests/orchestrator.rs::a_prompt_runs_streams_items_and_completes_with_checkpoints` |
+| provider items become nodes (parents mapped, ordinals), thread activity, the completion barrier closes open nodes | `agent-host/tests/orchestrator.rs::items_become_a_node_tree_with_activity` |
+| streaming nodes are upserted at most every 500 ms and when they complete | `agent-host/tests/orchestrator.rs::streaming_nodes_are_upserted_at_most_every_500ms_and_on_completion` |
+| queue behind a running run, unqueue, the queue drains after completion | `agent-host/tests/orchestrator.rs::messages_queue_behind_a_running_run_and_can_be_unqueued` |
+| steer natively; without native steering, interrupt and restart the same run with the input | `agent-host/tests/orchestrator.rs::steering_goes_into_the_turn_when_the_provider_can`, `agent-host/tests/orchestrator.rs::steering_without_native_support_interrupts_and_restarts_the_same_run` |
+| interrupt: run interrupted, thread idle, queue held; idle interrupt is fine | `agent-host/tests/orchestrator.rs::interrupting_stops_the_run_and_holds_the_queue` |
+| approvals: `waiting` thread and run, request node, decisions checked, answered once (`resolved_by`), back to running; withdrawn requests cancelled | `agent-host/tests/orchestrator.rs::approvals_wait_and_are_answered_once`, `agent-host/tests/orchestrator.rs::a_withdrawn_request_is_cancelled` |
+| command ids are idempotent (concurrent duplicates, retries, errors, across a restart) | `agent-host/tests/orchestrator.rs::command_ids_are_idempotent`, `agent-host/tests/orchestrator.rs::a_restart_interrupts_runs_cancels_requests_and_resumes_the_native_thread` |
+| restart recovery: running runs interrupted, pending requests cancelled, thread idle, the native thread resumed | `agent-host/tests/orchestrator.rs::a_restart_interrupts_runs_cancels_requests_and_resumes_the_native_thread` |
+| a provider that won't start or exits mid-run fails the run and sets the thread's error; the next message recovers | `agent-host/tests/orchestrator.rs::a_provider_that_wont_start_fails_the_run`, `agent-host/tests/orchestrator.rs::a_session_that_exits_mid_run_fails_it` |
+| `since`/`subscribe`: broadcasts in seq order, replay has each record once at its newest broadcast, paging | `agent-host/tests/orchestrator.rs::replay_and_subscribe_agree_and_never_repeat_a_record` |
 
 ## Measurements
 

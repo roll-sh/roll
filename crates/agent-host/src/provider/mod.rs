@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 pub mod acp;
 pub mod claude;
 pub mod codex;
+pub mod fake;
 
 /// A provider's entry in the daemon config. Every adapter is built from one:
 /// `codex::Codex::new(cfg)`, `claude::Claude::new(cfg)`, `acp::Acp::new(name, cfg)`.

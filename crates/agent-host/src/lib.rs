@@ -9,9 +9,13 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 pub mod config;
+pub mod fs;
 pub mod git;
+pub mod orchestrator;
 pub mod provider;
 pub mod store;
+
+pub use orchestrator::Host;
 
 /// Something the daemon has to tell the relay, as it happens.
 #[derive(Clone, Debug)]
