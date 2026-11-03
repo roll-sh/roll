@@ -1846,6 +1846,8 @@ fn main() {
             "vector" => vector_bench(&cx),
             "access-load" => access::load(&cx),
             "access" => access::run(&cx),
+            "access-builds-load" => access::builds_load(&cx),
+            "access-builds" => access::builds(&cx),
             "burst-load" => burst::load(&cx),
             "burst" => burst::run(&cx),
             "ddl" => ddl(&cx),
