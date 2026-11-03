@@ -217,6 +217,7 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the Docker preview tests
     - 40,000 merges in release
     - 2,000 changes through the merge queue
+  - After touching roll code agents (`agent-*` crates, `code-control/src/agents`, `roll agent`, the canvas), run `pnpm test:agents` (skips itself when nothing relevant changed; real `rolld` + `roll agent up` with fake providers, end to end).
   - Every feature gets a test. `docs/code/test-coverage.md` maps features to tests; update it
     when you add either. `code-control/tests/coverage_map.rs` and `roll-cli`'s
     `every_code_command_is_in_the_coverage_map` fail when a route, MCP tool, event or `roll code`

@@ -9,7 +9,7 @@ import { cacheLife } from "next/cache";
 import { connection } from "next/server";
 import { cache } from "react";
 import { shareD, type Share } from "./agents-api";
-import { shareStats } from "./agents-replay";
+import { providerLabel, shareStats } from "./agents-replay";
 import { SERVER_API } from "./code-server";
 import { decode } from "./decode";
 
@@ -25,15 +25,6 @@ export const getShare = cache(async (id: string): Promise<Share | null> => {
   await connection();
   return fetchShare(id);
 });
-
-const PROVIDERS: Record<string, string> = { claude: "Claude Code", codex: "Codex" };
-
-/** "Claude Code", "Codex", "Gemini" (from `acp:gemini`). */
-export function providerLabel(id: string): string {
-  if (PROVIDERS[id]) return PROVIDERS[id];
-  const name = id.startsWith("acp:") ? id.slice(4) : id;
-  return name.charAt(0).toUpperCase() + name.slice(1);
-}
 
 export interface ShareCard {
   title: string;

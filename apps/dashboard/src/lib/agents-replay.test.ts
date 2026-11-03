@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Entity, Share } from "./agents-api";
-import { frameAt, MAX_GAP, realAt, replayAt, SHARE_MACHINE, shareStats, step, timeline } from "./agents-replay";
+import { frameAt, MAX_GAP, providerLabel, realAt, replayAt, SHARE_MACHINE, shareStats, step, timeline } from "./agents-replay";
 import { nodeTree, runsOf } from "./agents-store";
 import { share, T0 } from "@/test/agents";
 
@@ -72,6 +72,12 @@ describe("replaying a share", () => {
     const d = frameAt(s, tl, at(700), { stream: false });
     expect(d.nodes.get("thr_1")!.get("nod_m")!.value.body).toEqual({ type: "message", text: "0123456789" });
     expect(d.threads.get("thr_1")!.value.status).toBe("running");
+  });
+
+  it("names the providers the threads ran on", () => {
+    const providers = frameAt(s, tl, at(9000)).machines.get(SHARE_MACHINE)!.value.info!.providers;
+    expect(providers.map((p) => [p.id, p.name, p.models.map((m) => m.id)])).toEqual([["claude", "Claude Code", ["claude-opus-5-5"]]]);
+    expect([providerLabel("codex"), providerLabel("acp:gemini")]).toEqual(["Codex", "Gemini"]);
   });
 
   it("counts what happened", () => {

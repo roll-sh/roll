@@ -1082,6 +1082,25 @@ login tests drive a fake `roll` process (`apps/desktop/test/fake-roll.mjs`).
 | child approvals are requests on the child (not the parent), end a sync wait with `pending_request`, the node waits; answered on the canvas the task finishes; a timed-out wait leaves the task running | `agent-host/tests/mcp.rs::child_approvals_are_requests_on_the_child_and_end_a_sync_wait` |
 | delegation limits: unknown provider or model, mode escalation, `max_children`, delegating without a running turn; narrowed modes; worktree children from the caller's HEAD; `task_send` follow-ups run in the same child and wake again | `agent-host/tests/mcp.rs::limits_providers_models_modes_worktrees_and_follow_ups`, `agent-host/src/orchestrator/tasks.rs` tests, `agent-host/src/config.rs` tests |
 
+## Agents end to end (`pnpm test:agents`, `scripts/agents-e2e.mjs`)
+
+The real `rolld --code-only` and `roll` on free ports with a throwaway home; the daemon offers
+only the scripted fake providers (`ROLL_AGENT_FAKE=1`).
+
+| Step | Checked |
+| --- | --- |
+| `roll agent login` | the pending lookup shows its name, hostname and OS; approved through the API; `agent.json` saved |
+| `roll agent up` | online with the `fake` and `echo` providers |
+| project add, thread create | replies `created`; the thread reaches the snapshot |
+| a streamed run | text deltas on `/events?threads=…&after=…`, the approval request pending, nothing written before it's answered |
+| the approval answered | the run completes with a checkpoint (stat 1 file, +1), the checkpoint record, the file in the project |
+| `diff.get` of the run | `ROLL_DEMO.md` added with the prompt |
+| a reconnect with `?after=` and a newer `Last-Event-ID` | resumes after the newer |
+| a share | the link on the web app, read anonymously (`no-store`), every record kind, the edit, no home directory |
+| the dashboard (`next build`, `next start`) | `/dashboard/agents` 200 with its title; the share page 200 titled after the thread, OpenGraph and `noindex`; its preview image a PNG; a missing share 404 |
+| `roll agent logout` | `up` stops (exit 1, "roll agent login"), the machine is gone, the share stays |
+| `install.sh` (`scripts/test-agents.sh`) | from a local release: this machine's asset, checksum checked, installed and runs; a wrong checksum installs nothing |
+
 ## Agents (providers)
 
 Each adapter runs against a fake provider process that replays recorded protocol transcripts;
@@ -1198,3 +1217,8 @@ written in the tests.
   daemon). It's type-checked and its decisions are the tested modules above, but a window can't
   start on the dev server (no GTK; Xvfb alone isn't enough). Packaging is checked by building the
   Linux AppImage and deb (`pnpm --filter @roll/desktop dist --linux`).
+- **The CLI release workflow** (`.github/workflows/release-cli.yml`) runs only on a `cli-v*` tag;
+  its builds are smoke-tested in the workflow itself (`roll --version`, `roll agent --help`), and
+  the install script is tested against a local release by `pnpm test:agents`.
+- **Share pages in a browser**: the replay is tested in jsdom (`share.test.tsx`) and the page and
+  preview image over HTTP (`pnpm test:agents`); how it looks was checked by hand.

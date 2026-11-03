@@ -21,6 +21,7 @@ import {
   type Machine,
   type Mirrored,
   type Node,
+  type ProviderInfo,
   type Request,
   type Run,
   type Share,
@@ -108,13 +109,43 @@ export function step(tl: Timeline, ms: number, dir: 1 | -1): number {
   return 0;
 }
 
+const PROVIDERS: Record<string, string> = { claude: "Claude Code", codex: "Codex" };
+
+/** "Claude Code", "Codex", "Gemini" (from `acp:gemini`). */
+export function providerLabel(id: string): string {
+  if (PROVIDERS[id]) return PROVIDERS[id];
+  const name = id.startsWith("acp:") ? id.slice(4) : id;
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/** The providers a share's threads ran on, as the canvas names them (shares don't carry the machine's). */
+function shareProviders(share: Share): ProviderInfo[] {
+  const models = new Map<string, Set<string>>();
+  for (const e of share.entities) {
+    if (e.kind !== "thread" && e.kind !== "run") continue;
+    const m = models.get(e.provider) ?? new Set<string>();
+    if (e.model) m.add(e.model);
+    models.set(e.provider, m);
+  }
+  return [...models].map(([id, ms]) => ({
+    id,
+    name: providerLabel(id),
+    installed: true,
+    version: null,
+    auth: "ready",
+    detail: null,
+    models: [...ms].map((m) => ({ id: m, name: m, default: false, efforts: [] })),
+    capabilities: { steer: false, fork: false, rollback: false, plan_mode: false, images: false, subagents: false, mode_switch: false },
+  }));
+}
+
 /** The machine a share's records hang off on the canvas. */
 export function shareMachine(share: Share): Machine {
   return {
     id: SHARE_MACHINE,
     name: share.machine.name,
     online: false,
-    info: { hostname: share.machine.name, os: share.machine.os ?? "", arch: "", version: "", home: "~", providers: [] },
+    info: { hostname: share.machine.name, os: share.machine.os ?? "", arch: "", version: "", home: "~", providers: shareProviders(share) },
     sandbox: null,
     created_at: share.created_at,
     last_seen: null,
