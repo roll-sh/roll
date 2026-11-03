@@ -6,6 +6,7 @@
 //! of a key has the newest one.
 
 pub mod batch;
+pub mod cols;
 pub mod cache;
 mod dead;
 pub mod fileio;

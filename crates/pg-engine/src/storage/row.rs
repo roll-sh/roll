@@ -9,7 +9,7 @@ use crate::types::{DataType, Interval, Value};
 use crate::types::decint::DecInt;
 use std::sync::Arc;
 
-mod tag {
+pub(crate) mod tag {
     pub const NULL: u8 = 0;
     pub const FALSE: u8 = 1;
     pub const TRUE: u8 = 2;

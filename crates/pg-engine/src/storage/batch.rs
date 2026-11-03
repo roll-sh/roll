@@ -94,6 +94,20 @@ impl RowBatch {
         (k, v)
     }
 
+    /// Row `i`'s value with the buffer holding it and where in it (None: a copied value, in
+    /// the batch's own buffer, valid until it is cleared).
+    pub fn value_in(&self, i: usize) -> (&[u8], Option<(&Bytes, usize)>) {
+        let e = self.ents[i];
+        let (o, l) = (e.off as usize, e.len as usize);
+        match e.buf {
+            OWN => (&self.own[o..o + l], None),
+            b => {
+                let buf = &self.bufs[b as usize];
+                (&buf[o..o + l], Some((buf, o)))
+            }
+        }
+    }
+
     /// The last row's key.
     pub fn last_key(&self) -> Option<&[u8]> {
         let n = self.ents.len();
