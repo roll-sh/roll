@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { Published } from "./agents-api";
 import { AgentsClient } from "./agents-client";
 import { DemoOwner } from "./agents-demo";
 import { busyThreads, pendingRequests, runsOf } from "./agents-store";
@@ -50,6 +51,40 @@ describe("agents demo", () => {
     const fork = await client.run<{ type: "created"; id: string }>("mch_demo_ada", { type: "thread.fork", thread: "thr_demo_json" }, "created");
     await until("the fork", () => client.data.threads.get(fork.id)?.value.lineage?.parent === "thr_demo_json");
     expect(await client.send("mch_nope", { type: "provider.refresh" })).toMatchObject({ type: "error", code: "machine_offline" });
+    release();
+  });
+
+  it("rents sandboxes that boot into machines, and follows a published change to landed", async () => {
+    demo = new DemoOwner(0.01, false);
+    const client = new AgentsClient("demo", demo, (fn) => queueMicrotask(fn));
+    const release = client.hold();
+    const services = demo.services();
+    const list = await services.sandboxes.list("demo");
+    expect(list.sizes[0]).toMatchObject({ name: "standard", monthly_cents: 2000 });
+    expect(list.sandboxes.map((s) => s.machine)).toEqual(["mch_demo_box"]);
+
+    const { sandbox, machine } = await services.sandboxes.create("demo", { name: "scratch", env: { ANTHROPIC_API_KEY: "sk-test" } });
+    expect(sandbox.status).toBe("creating");
+    await until("the sandbox machine", () => client.data.machines.get(machine.id)?.value.sandbox?.status === "creating");
+    await until("it to boot", () => client.data.machines.get(machine.id)?.value.online === true);
+    const providers = client.data.machines.get(machine.id)!.value.info!.providers;
+    // The key it was given logs Claude in; Codex waits for a login.
+    expect(providers.map((p) => [p.id, p.auth])).toEqual([
+      ["claude", "ready"],
+      ["codex", "missing"],
+    ]);
+    await services.sandboxes.stop("demo", sandbox.id);
+    expect(client.data.machines.get(machine.id)?.value.online).toBe(false);
+    await services.sandboxes.remove("demo", sandbox.id);
+    await until("the machine to go", () => !client.data.machines.has(machine.id));
+
+    const published = await client.run<{ type: "published" } & Published>("mch_demo_ada", { type: "thread.publish", thread: "thr_demo_json", message: "Add --json", land: true }, "published");
+    expect(published.landing).toMatchObject({ status: "queued" });
+    await until("the change to land", () => client.data.threads.get("thr_demo_json")?.value.change?.status === "landed");
+
+    const work = await services.takeWork("demo", "thr_demo_fork", { work: "acme/roll#77" });
+    expect(work).toMatchObject({ repo: "acme/roll", number: 77 });
+    await until("the work on the thread", () => client.data.threads.get("thr_demo_fork")?.value.work?.number === 77);
     release();
   });
 });

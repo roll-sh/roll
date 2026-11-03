@@ -80,7 +80,7 @@ export function ShareButton({ thread }: { thread: Thread }) {
         <Share2 className="size-3.5" />
       </button>
       {open && (
-        <div role="dialog" aria-label="Share this thread" className="rise absolute top-9 right-0 z-20 w-80 space-y-3 rounded-xl border border-line bg-panel p-3.5 text-left text-[12.5px]">
+        <div role="dialog" aria-label="Share this thread" className="rise z-20 space-y-3 rounded-xl border border-line bg-panel p-3.5 text-left text-[12.5px] max-sm:fixed max-sm:inset-x-3 max-sm:top-28 sm:absolute sm:top-9 sm:right-0 sm:w-80">
           <p className="font-medium text-fg">Share a read-only replay</p>
           <p className="leading-relaxed text-muted">
             Anyone with the link can replay this thread as it is now. Later work doesn&apos;t show; terminals and images stay out, and home folders read <code className="font-mono">~</code>.

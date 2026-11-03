@@ -431,6 +431,24 @@ the node. Positions are laid out automatically and remembered when dragged. One 
 (canvas 2D + `requestAnimationFrame`, paused offscreen) draws edges, pulses and the dot field;
 node cards are DOM, positioned by the same world transform.
 
+- **Getting started.** An owner with no machines sees the globe (`RollMark`) and the two ways in
+  side by side, the same as "Add machine" on the canvas: connect your computer (install,
+  `roll agent login`, `roll agent up`) or rent a sandbox (sizes and prices from
+  `GET …/sandboxes`, optional provider keys). A new sandbox is on the canvas at once and pulses
+  while it boots. A sandbox's card shows its size, status, price and this month's usage, with
+  start, stop and delete, and puts logging a provider in first (a terminal on the canvas running
+  the device login). A machine with no projects offers adding one (a folder, a clone of one of the
+  owner's roll code repos, or a new repo); a project with no threads offers starting one. Offline
+  machines are dimmed with when they were last seen.
+- **roll code.** Thread cards and sessions show `Thread.change` (a chip linking to the change)
+  and `Thread.work`. Publishing shows what landing did as a result, never an error; a thread
+  outside a worktree is offered a fork into one first, and new threads in a roll code project
+  start in a worktree.
+- **Phones.** Below 640 px an opened thread is a full-screen sheet sized to the visible viewport
+  (the composer stays above the keyboard), one at a time; the oldest waiting request sits at the
+  bottom of the canvas, answerable with one tap; fitting the canvas keeps cards readable (at least
+  55 %) and starts at the machines.
+
 ## Desktop app
 
 `apps/desktop` (`@roll/desktop`) is a thin Electron shell, like T3 Code's desktop app around its

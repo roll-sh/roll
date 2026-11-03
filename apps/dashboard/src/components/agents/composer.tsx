@@ -89,7 +89,8 @@ export function Composer({
   const [effort, setEffort] = useState<string | null>(thread?.effort ?? null);
   const [runtime, setRuntime] = useState<RuntimeMode>(thread?.runtime_mode ?? "auto_edit");
   const [plan, setPlan] = useState<InteractionMode>(thread?.interaction_mode ?? "default");
-  const [worktree, setWorktree] = useState(false);
+  // A roll code project publishes threads as changes, which needs a worktree: on by default there.
+  const [worktree, setWorktree] = useState(mode.kind === "new" && !!mode.project.repo);
   const [sendMode, setSendMode] = useState<SendMode>("queue");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

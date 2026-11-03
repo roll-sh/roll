@@ -122,7 +122,8 @@ export const AgentsCanvas = forwardRef<
       const r = bounds(positions, sizeOf);
       const { w, h } = e.viewport;
       if (!r || !w || !h) return;
-      e.setView(fitView(r, w, h, 64, 1), animate);
+      // On a phone, readable cards beat seeing everything: pan from the machines on.
+      e.setView(w < 640 ? fitView(r, w, h, 24, 1, 0.55) : fitView(r, w, h, 64, 1), animate);
     },
     [positions, sizeOf],
   );
@@ -172,8 +173,8 @@ export const AgentsCanvas = forwardRef<
       const s = sizeOf(key);
       const { w, h } = e.viewport;
       const nk = k ?? Math.max(e.view.k, 0.85);
-      // Keep tall cards' tops in view.
-      const cy = s.h * nk > h - 80 ? p.y + (h - 80) / 2 / nk : p.y + s.h / 2;
+      // Keep tall cards' tops in view, below the canvas toolbar.
+      const cy = s.h * nk > h - 96 ? p.y + (h / 2 - 64) / nk : p.y + s.h / 2;
       e.setView({ k: nk, x: w / 2 - (p.x + s.w / 2) * nk, y: h / 2 - cy * nk }, true);
     },
     [positions, sizeOf],

@@ -3,6 +3,8 @@
 import { createContext, useContext, useEffect, useRef, useSyncExternalStore } from "react";
 import type { MachineId, Thread } from "@/lib/agents-api";
 import type { AgentsClient, AgentsSnapshot } from "@/lib/agents-client";
+import type { AgentsServices } from "@/lib/agents-services";
+import type { SandboxesState } from "./sandbox";
 import { useMarkState } from "../mark-state";
 
 /** The client's state, re-rendering on every batch. */
@@ -36,6 +38,12 @@ export interface AgentsCtx {
   readOnly?: boolean;
   /** What time it is on the canvas (a replay's clock), for "working for 12 s". Default: now. */
   now?: number;
+  /** Sandboxes, repos and work items (unset in a share's replay). */
+  services?: AgentsServices;
+  /** The owner's sandboxes by machine, and this month's usage (loaded by the canvas). */
+  sandboxes?: SandboxesState;
+  /** A phone-sized screen: sessions open full screen instead of in place. */
+  phone?: boolean;
 }
 
 export const AgentsContext = createContext<AgentsCtx | null>(null);

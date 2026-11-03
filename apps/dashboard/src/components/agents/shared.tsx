@@ -80,10 +80,13 @@ export function ProviderGlyph({ className = "size-3.5" }: { className?: string }
   return <Bot className={className} />;
 }
 
-/** The command that logs a provider in, run in a terminal on the machine. */
-export function loginCommand(p: ProviderInfo): string {
+/**
+ * The command that logs a provider in, run in a terminal on the machine. A sandbox has no browser,
+ * so it gets the device flows (print a URL, take a code) that work from any screen.
+ */
+export function loginCommand(p: ProviderInfo, sandbox = false): string {
   if (p.id === "claude") return "claude /login";
-  if (p.id === "codex") return "codex login";
+  if (p.id === "codex") return sandbox ? "codex login --device-auth" : "codex login";
   if (p.id.startsWith("acp:")) return `${p.id.slice(4)} auth login`;
   return `${p.id} login`;
 }
@@ -99,4 +102,16 @@ export function elapsed(ms: number) {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ${s % 60}s`;
   return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** "just now", "5 min ago", "3 h ago", "2 days ago". */
+export function ago(at: number, now = Date.now()) {
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 45) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.round(h / 24);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
 }

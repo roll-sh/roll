@@ -91,12 +91,12 @@ function RollingFor({ client }: { client: AgentsClient }) {
   const title = (thread: string) => snap.data.threads.get(thread)?.value.title ?? thread;
 
   return (
-    <div className="relative" ref={panel}>
+    <div className="relative shrink-0" ref={panel}>
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] transition ${
+        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] whitespace-nowrap transition ${
           count || requests.length ? "border-accent/40 text-fg" : "border-line text-muted hover:border-line-2 hover:text-fg"
         }`}
         title="What your agents are doing"
@@ -111,14 +111,14 @@ function RollingFor({ client }: { client: AgentsClient }) {
         )}
       </button>
       {open && (
-        <div role="dialog" aria-label="Rolling" className="rise absolute top-full right-0 z-40 mt-2 w-[380px] overflow-hidden rounded-xl border border-line bg-panel">
+        <div role="dialog" aria-label="Rolling" className="rise z-40 overflow-hidden rounded-xl border border-line bg-panel max-sm:fixed max-sm:inset-x-2 max-sm:top-14 sm:absolute sm:top-full sm:right-0 sm:mt-2 sm:w-[380px]">
           <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
             <p className="text-[13px] font-medium">{count ? `${count} rolling` : "Nothing running"}</p>
             <button onClick={() => setOpen(false)} aria-label="Close" className="text-subtle hover:text-fg">
               <X className="size-3.5" />
             </button>
           </div>
-          <div className="max-h-[70vh] overflow-y-auto">
+          <div className="max-h-[70vh] overflow-y-auto overscroll-contain">
             {requests.length > 0 && (
               <section aria-label="Waiting for you" className="border-b border-line">
                 <p className="px-4 pt-3 text-[11px] tracking-wide text-subtle uppercase">Waiting for you</p>

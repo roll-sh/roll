@@ -4,6 +4,7 @@ import {
   Archive,
   ArchiveRestore,
   ArrowDown,
+  ClipboardList,
   FileDiff as DiffIcon,
   GitBranch,
   Minimize2,
@@ -15,10 +16,11 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Checkpoint, Diff, Machine, Published, Request, Run, Thread } from "@/lib/agents-api";
+import type { Checkpoint, Diff, Machine, Request, Run, Thread } from "@/lib/agents-api";
 import { checkpointsOf, nodeTree, providersFor, runsOf } from "@/lib/agents-store";
 import { DiffViewer } from "../code/diff";
-import { btn, input, primary } from "../ui";
+import { btn, input } from "../ui";
+import { ChangeChip, PublishForm, TakeWorkForm, WorkChip } from "./change";
 import { Composer } from "./composer";
 import { Card } from "./nodes";
 import { toFileDiff } from "./request-card";
@@ -35,13 +37,14 @@ export const SESSION_H = 760;
  * A thread opened in place: transcript, composer, diff and actions, as one canvas card. Read-only
  * (a share's replay), it's the transcript alone.
  */
-export function ThreadSession({ thread, machine }: { thread: Thread; machine: Machine | undefined }) {
+export function ThreadSession({ thread, machine, fullscreen = false }: { thread: Thread; machine: Machine | undefined; fullscreen?: boolean }) {
   const { client, setExpanded, focus, readOnly = false, now: clock } = useAgents();
   const data = client.data;
   const providers = providersFor(data, machine?.id);
   const runs = runsOf(data, thread.id);
   const checkpoints = checkpointsOf(data, thread.id);
-  const loaded = data.detail.has(thread.id) && data.nodes.has(thread.id);
+  // A thread with no runs has no nodes to wait for (a fresh fork).
+  const loaded = data.detail.has(thread.id) && (data.nodes.has(thread.id) || thread.run_count === 0);
   const requests = useMemo(() => {
     const m = new Map<string, Request>();
     for (const r of data.requests.values()) if (r.value.thread === thread.id) m.set(r.value.id, r.value);
@@ -65,8 +68,8 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
       firstDiff.current = false;
       return;
     }
-    focus(`t:${thread.id}`);
-  }, [diffOpen, focus, thread.id]);
+    if (!fullscreen) focus(`t:${thread.id}`);
+  }, [diffOpen, focus, thread.id, fullscreen]);
   const [error, setError] = useState<string | null>(null);
   const run = async (fn: () => Promise<unknown>) => {
     setError(null);
@@ -109,15 +112,17 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
   const cpByRun = new Map(checkpoints.filter((c) => c.run).map((c) => [c.run!, c]));
   const project = data.projects.get(thread.project)?.value;
   const model = modelName(providers, thread.provider, thread.model);
-  const lastStat = runs.length ? runs[runs.length - 1].stat : null;
+  const lastStat = runs.findLast((r) => r.status !== "rolled_back")?.stat ?? null;
   const width = diffFor !== undefined ? SESSION_W + SESSION_DIFF_W : SESSION_W;
+  // Full screen (a phone): the diff takes the transcript's place instead of sitting beside it.
+  const diffOnly = fullscreen && diffFor !== undefined && !readOnly;
 
-  return (
-    <Card width={width} tone={thread.status === "error" ? "error" : busy ? "busy" : undefined} label={`Thread ${thread.title}`} className="flex flex-col overflow-hidden">
-      <div style={{ height: SESSION_H }} className="flex min-h-0 flex-col">
+  const body = (
+      <div style={fullscreen ? undefined : { height: SESSION_H }} className={`flex min-h-0 flex-col ${fullscreen ? "h-full" : ""}`}>
         <Header
           thread={thread}
           machine={machine}
+          compact={fullscreen}
           readOnly={readOnly}
           onClose={() => setExpanded(thread.id, false)}
           onDiff={() => setDiffFor((d) => (d === undefined ? null : undefined))}
@@ -139,7 +144,7 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
           <Stat stat={lastStat} />
         </Header>
         <div className="flex min-h-0 flex-1">
-          <div className="relative flex min-w-0 flex-1 flex-col" data-nodrag>
+          <div className={`relative min-w-0 flex-1 flex-col ${diffOnly ? "hidden" : "flex"}`} data-nodrag>
             <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 cursor-auto overflow-y-auto px-5 py-4 select-text" data-scroll>
               {!loaded ? (
                 <EmptyTranscript>
@@ -168,11 +173,11 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
             )}
           </div>
           {diffFor !== undefined && !readOnly && (
-            <DiffPane thread={thread} machine={machine} runs={runs} run={diffFor} onRun={setDiffFor} onClose={() => setDiffFor(undefined)} />
+            <DiffPane thread={thread} machine={machine} runs={runs} run={diffFor} onRun={setDiffFor} onClose={() => setDiffFor(undefined)} full={fullscreen} />
           )}
         </div>
         {!readOnly && (
-          <div className="border-t border-line px-4 pt-3 pb-4" data-nodrag>
+          <div className={`border-t border-line px-4 pt-3 ${fullscreen ? "pb-[max(0.75rem,env(safe-area-inset-bottom))]" : "pb-4"} ${diffOnly ? "hidden" : ""}`} data-nodrag>
             {thread.queued.length > 0 && (
               <ul className="mb-2 space-y-1" aria-label="Queued messages">
                 {thread.queued.map((q) => (
@@ -204,6 +209,16 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
           </div>
         )}
       </div>
+  );
+  if (fullscreen)
+    return (
+      <div role="dialog" aria-modal="true" aria-label={`Thread ${thread.title}`} className="flex h-full flex-col bg-panel text-[13px]">
+        {body}
+      </div>
+    );
+  return (
+    <Card width={width} tone={thread.status === "error" ? "error" : busy ? "busy" : undefined} label={`Thread ${thread.title}`} className="flex flex-col overflow-hidden">
+      {body}
     </Card>
   );
 }
@@ -211,6 +226,7 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
 function Header({
   thread,
   machine,
+  compact,
   readOnly,
   onClose,
   onDiff,
@@ -220,6 +236,8 @@ function Header({
 }: {
   thread: Thread;
   machine: Machine | undefined;
+  /** A phone: the actions wrap onto their own row under the title. */
+  compact: boolean;
   readOnly: boolean;
   onClose: () => void;
   onDiff: () => void;
@@ -227,10 +245,10 @@ function Header({
   setError: (e: string | null) => void;
   children: React.ReactNode;
 }) {
-  const { client, setExpanded, demo } = useAgents();
+  const { client, setExpanded, demo, owner, services } = useAgents();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [publishing, setPublishing] = useState(false);
+  const [panel, setPanel] = useState<"publish" | "work" | null>(null);
   const mid = machine?.id;
   const project = client.data.projects.get(thread.project)?.value;
   const busy = thread.status === "starting" || thread.status === "running" || thread.status === "waiting";
@@ -241,7 +259,7 @@ function Header({
 
   return (
     <div className="border-b border-line" data-drag>
-      <div className="flex items-center gap-2 px-4 pt-3">
+      <div className={`flex items-center gap-2 px-4 pt-3 ${compact ? "flex-wrap" : ""}`}>
         <StatusDot status={thread.status} />
         {renaming !== null ? (
           <form
@@ -269,7 +287,7 @@ function Header({
           </h2>
         )}
         <span className="shrink-0 text-[11.5px] text-subtle">{threadStatusLabel[thread.status]}</span>
-        <div className="flex shrink-0 items-center gap-0.5 text-subtle">
+        <div className={`flex items-center gap-0.5 text-subtle ${compact ? "order-last -mx-1 w-full overflow-x-auto pb-0.5" : "shrink-0"}`}>
           {!readOnly && (
             <>
               {!demo && <ShareButton thread={thread} />}
@@ -299,8 +317,18 @@ function Header({
                 <Split className="size-3.5" />
               </IconButton>
               {project?.repo && (
-                <IconButton label="Publish as a roll code change" disabled={!machine?.online || busy} onClick={() => setPublishing((p) => !p)} active={publishing}>
+                <IconButton
+                  label="Publish as a roll code change"
+                  disabled={!machine?.online || busy}
+                  onClick={() => setPanel((p) => (p === "publish" ? null : "publish"))}
+                  active={panel === "publish"}
+                >
                   <Upload className="size-3.5" />
+                </IconButton>
+              )}
+              {services && !thread.work && (
+                <IconButton label="Take a work item" onClick={() => setPanel((p) => (p === "work" ? null : "work"))} active={panel === "work"}>
+                  <ClipboardList className="size-3.5" />
                 </IconButton>
               )}
               <IconButton
@@ -331,13 +359,36 @@ function Header({
               )}
             </>
           )}
-          <IconButton label="Close (Esc)" onClick={onClose}>
-            <Minimize2 className="size-3.5" />
-          </IconButton>
+          {!compact && (
+            <IconButton label="Close (Esc)" onClick={onClose}>
+              <Minimize2 className="size-3.5" />
+            </IconButton>
+          )}
         </div>
+        {compact && (
+          <IconButton label="Close" onClick={onClose}>
+            <X className="size-4" />
+          </IconButton>
+        )}
       </div>
-      <div className="flex items-center gap-3 px-4 pt-1 pb-2.5 pl-[30px] text-[11.5px] text-subtle">{children}</div>
-      {publishing && machine && <Publish thread={thread} machine={machine} onDone={() => setPublishing(false)} />}
+      <div className={`flex items-center gap-3 px-4 pt-1 pb-2.5 text-[11.5px] text-subtle ${compact ? "overflow-x-auto whitespace-nowrap" : "pl-[30px]"}`}>{children}</div>
+      {(thread.change || thread.work) && (
+        <div className={`flex min-w-0 items-center gap-3 px-4 pb-2.5 ${compact ? "" : "pl-[30px]"}`}>
+          {thread.change && <ChangeChip change={thread.change} />}
+          {thread.change?.detail && <span className="min-w-0 truncate text-[11.5px] text-subtle">{thread.change.detail}</span>}
+          {thread.work && (
+            <WorkChip
+              work={thread.work}
+              className="min-w-0 flex-1"
+              onRelease={readOnly || !services ? undefined : () => act(() => services.releaseWork(owner, thread.id))}
+            />
+          )}
+        </div>
+      )}
+      {panel === "publish" && machine && <PublishForm thread={thread} machine={machine} onDone={() => setPanel(null)} />}
+      {panel === "work" && !thread.work && (
+        <TakeWorkForm thread={thread} repo={project?.repo ? `${project.repo.owner}/${project.repo.repo}` : null} onDone={() => setPanel(null)} />
+      )}
     </div>
   );
 }
@@ -357,56 +408,6 @@ function IconButton({ label, onClick, disabled, active, children }: { label: str
   );
 }
 
-function Publish({ thread, machine, onDone }: { thread: Thread; machine: Machine; onDone: () => void }) {
-  const { client } = useAgents();
-  const [message, setMessage] = useState(thread.title);
-  const [land, setLand] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<Published | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  if (done)
-    return (
-      <p className="flex items-center gap-2 border-t border-line px-4 py-2.5 text-[12.5px]" data-nodrag>
-        Published <span className="font-mono text-muted">{done.branch}</span>
-        {done.url && (
-          <a href={done.url} className="text-accent hover:underline">
-            change {done.change}
-          </a>
-        )}
-        <button onClick={onDone} className="ml-auto text-subtle hover:text-fg" aria-label="Close">
-          <X className="size-3.5" />
-        </button>
-      </p>
-    );
-  return (
-    <form
-      data-nodrag
-      className="flex items-center gap-2 border-t border-line px-4 py-2.5"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        setBusy(true);
-        setError(null);
-        try {
-          setDone(await client.run<{ type: "published" } & Published>(machine.id, { type: "thread.publish", thread: thread.id, message, land }, "published"));
-        } catch (err) {
-          setError(err instanceof Error ? err.message : String(err));
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      <input value={message} onChange={(e) => setMessage(e.target.value)} aria-label="Commit message" className={`${input} min-w-0 flex-1`} />
-      <label className="flex items-center gap-1.5 text-[12px] text-muted">
-        <input type="checkbox" checked={land} onChange={(e) => setLand(e.target.checked)} className="accent-[var(--accent)]" /> and land
-      </label>
-      <button type="submit" disabled={busy || !message.trim()} className={primary}>
-        {busy ? <span className="shimmer">Publishing…</span> : "Publish"}
-      </button>
-      {error && <span className="text-[12px] text-danger">{error}</span>}
-    </form>
-  );
-}
-
 /** The diff of one run (checkpoint before → after) or of the whole thread. */
 function DiffPane({
   thread,
@@ -415,6 +416,7 @@ function DiffPane({
   run,
   onRun,
   onClose,
+  full = false,
 }: {
   thread: Thread;
   machine: Machine | undefined;
@@ -422,6 +424,8 @@ function DiffPane({
   run: string | null;
   onRun: (r: string | null) => void;
   onClose: () => void;
+  /** Take the whole width (a phone). */
+  full?: boolean;
 }) {
   const { client } = useAgents();
   const [diff, setDiff] = useState<Diff | null>(null);
@@ -445,9 +449,9 @@ function DiffPane({
   }, [client, machine?.id, thread.id, version]);
 
   return (
-    <div className="flex w-[600px] shrink-0 flex-col border-l border-line" data-nodrag>
+    <div className={`flex shrink-0 flex-col ${full ? "w-full" : "w-[600px] border-l border-line"}`} data-nodrag>
       <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-        <select value={run ?? ""} onChange={(e) => onRun(e.target.value || null)} aria-label="Diff of" className={`${input} py-1 text-[12px]`}>
+        <select value={run ?? ""} onChange={(e) => onRun(e.target.value || null)} aria-label="Diff of" className={`${input} min-w-0 py-1 text-[12px]`}>
           <option value="">Whole thread</option>
           {runs
             .filter((r) => r.status !== "rolled_back")

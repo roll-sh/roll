@@ -131,9 +131,16 @@ export const MAX_ZOOM = 2;
 export const clampZoom = (k: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, k));
 
 /** The view that shows `r` inside a `vw`×`vh` viewport with `pad` around it, at most at `maxK`. */
-export function fitView(r: Rect, vw: number, vh: number, pad = 48, maxK = 1): View {
-  const k = clampZoom(Math.min(maxK, (vw - pad * 2) / Math.max(1, r.w), (vh - pad * 2) / Math.max(1, r.h)));
-  return { k, x: vw / 2 - (r.x + r.w / 2) * k, y: vh / 2 - (r.y + r.h / 2) * k };
+/**
+ * The view that shows `r` whole, at most `maxK`. With `minK` (a phone, where everything at once
+ * would be unreadable) it never zooms out past that; what doesn't fit then starts at the top left,
+ * where the machines are.
+ */
+export function fitView(r: Rect, vw: number, vh: number, pad = 48, maxK = 1, minK = 0): View {
+  const k = clampZoom(Math.max(minK, Math.min(maxK, (vw - pad * 2) / Math.max(1, r.w), (vh - pad * 2) / Math.max(1, r.h))));
+  const x = r.w * k > vw - pad * 2 ? pad - r.x * k : vw / 2 - (r.x + r.w / 2) * k;
+  const y = r.h * k > vh - pad * 2 ? pad - r.y * k : vh / 2 - (r.y + r.h / 2) * k;
+  return { k, x, y };
 }
 
 /** Zoom to `k` keeping the world point under screen point (sx, sy) where it is. */

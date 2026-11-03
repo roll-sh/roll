@@ -8,12 +8,25 @@ import { FileDiffView } from "../code/diff";
 import { btn, input, primary } from "../ui";
 
 /** An agent's file change in the shape the code diff component takes. */
+/**
+ * The hunks of a unified diff, without git's header lines (`diff --git`, `index`, `new file mode`,
+ * `---`/`+++`): the diff viewer reads a patch from its first `@@`. `null` when there's no hunk
+ * (a mode change, a binary file).
+ */
+export function hunks(diff: string | null): string | null {
+  if (diff === null) return null;
+  if (diff.startsWith("@@")) return diff;
+  const at = diff.indexOf("\n@@");
+  return at < 0 ? null : diff.slice(at + 1);
+}
+
 export function toFileDiff(f: FileChange): FileDiff {
   let additions = 0;
   let deletions = 0;
-  for (const l of (f.diff ?? "").split("\n")) {
-    if (l.startsWith("+") && !l.startsWith("+++")) additions++;
-    else if (l.startsWith("-") && !l.startsWith("---")) deletions++;
+  const patch = hunks(f.diff);
+  for (const l of (patch ?? "").split("\n")) {
+    if (l.startsWith("+")) additions++;
+    else if (l.startsWith("-")) deletions++;
   }
   return {
     path: f.path,
@@ -24,7 +37,7 @@ export function toFileDiff(f: FileChange): FileDiff {
     binary: false,
     additions,
     deletions,
-    patch: f.diff,
+    patch,
   };
 }
 

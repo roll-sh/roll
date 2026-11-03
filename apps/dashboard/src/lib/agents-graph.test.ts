@@ -107,3 +107,25 @@ describe("agents layout", () => {
     expect((350 - z.y) / z.k).toBeCloseTo((350 - v.y) / v.k);
   });
 });
+
+describe("sandboxes and phones on the canvas", () => {
+  it("a sandbox pulses while it boots, and not once it runs", () => {
+    const sb = (status: "creating" | "running") => machine({ id: "mch_s", name: "sandbox", online: status === "running", info: null, sandbox: { backend: "docker", size: "standard", status, monthly_cents: 2000 } });
+    let d = applyEvents(emptyData(), [{ type: "machine", cursor: 1, machine: sb("creating") }]);
+    expect(deriveGraph(d).nodes.get(keyOf.machine("mch_s"))?.busy).toBe(true);
+    d = applyEvents(d, [{ type: "machine", cursor: 2, machine: sb("running") }]);
+    expect(deriveGraph(d).nodes.get(keyOf.machine("mch_s"))?.busy).toBe(false);
+  });
+
+  it("a phone's fit stays readable and starts at the machines (top left)", () => {
+    const wide = { x: 0, y: 0, w: 3000, h: 400 };
+    const desk = fitView(wide, 1200, 800, 64, 1);
+    expect(desk.k).toBeCloseTo((1200 - 128) / 3000);
+    expect(desk.x + (wide.w / 2) * desk.k).toBeCloseTo(600);
+    const phone = fitView(wide, 390, 700, 24, 1, 0.55);
+    expect(phone.k).toBe(0.55);
+    expect(phone.x).toBe(24);
+    // What fits vertically stays centred.
+    expect(phone.y + (wide.h / 2) * phone.k).toBeCloseTo(350);
+  });
+});

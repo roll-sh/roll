@@ -66,7 +66,8 @@ export function deriveGraph(data: AgentsData, opts: GraphOptions = {}): Graph {
   };
 
   const machines = [...data.machines.values()].map((r) => r.value).sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  for (const m of machines) add({ key: keyOf.machine(m.id), kind: "machine", id: m.id, machine: m.id, parent: null, busy: false, relation: null });
+  // A sandbox pulses while it boots.
+  for (const m of machines) add({ key: keyOf.machine(m.id), kind: "machine", id: m.id, machine: m.id, parent: null, busy: m.sandbox?.status === "creating", relation: null });
 
   const projects = [...data.projects.values()].sort((a, b) => a.value.name.localeCompare(b.value.name) || a.value.id.localeCompare(b.value.id));
   for (const r of projects) {

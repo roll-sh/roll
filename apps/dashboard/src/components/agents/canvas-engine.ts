@@ -289,7 +289,11 @@ export class CanvasEngine {
         return;
       }
     }
-    const onCard = !!(e.target as HTMLElement).closest("[data-card]");
+    const target = e.target as HTMLElement;
+    // Controls over the canvas (the toolbar, zoom, dialogs) keep their clicks: capturing the
+    // pointer for a pan would send the click to the canvas instead.
+    if (e.button !== 1 && target.closest("button, a, input, textarea, select, label, [role=dialog], [data-nodrag]")) return;
+    const onCard = !!target.closest("[data-card]");
     if (!(e.button === 1 || ((e.button === 0 && !onCard) || (this.space && e.button === 0)))) return;
     if (e.button === 1 || this.space) e.preventDefault();
     this.pan = { id: e.pointerId, x: p.x, y: p.y, moved: 0 };

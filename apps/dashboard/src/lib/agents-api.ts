@@ -1082,6 +1082,26 @@ export function expectOk<R extends Reply>(reply: Reply, ...types: R["type"][]): 
 
 // ── the relay API ──
 
+/** `POST …/machines/{machine}/projects`: a new roll code repo, cloned onto the machine. */
+export interface NewRepoProject {
+  /** The idempotency key. */
+  id: string;
+  repo: { name: string; description?: string; visibility?: "public" | "private" };
+  path?: string;
+  name?: string;
+}
+
+/** `POST …/threads/{thread}/work`: a given item (`wi_…` or `owner/repo#N`), or the next of `repo`. */
+export type TakeWork = { work: string } | { repo: string; labels?: string[] };
+
+/** What a thread took (the work item, as roll code's API answers it; only what the canvas reads). */
+export interface WorkItemRef {
+  id: string;
+  repo: string;
+  number: number;
+  title: string;
+}
+
 /** A machine minted from the dashboard ("Add machine"): its token is shown once. */
 export interface MintedMachine {
   machine: Machine;
@@ -1194,6 +1214,19 @@ export function createAgentsApi(
     },
     /** A share by its link: no sign-in needed. */
     share: async (id: string) => decode(shareD, await call("GET", `/v1/code/agents/shares/${enc(id)}`)),
+    /**
+     * Create a roll code repo and clone it onto the machine as a project, in one step. `id` is the
+     * idempotency key (a retry answers the same). Answers the daemon's reply (`created` = project).
+     */
+    createProject: async (owner: string, machine: MachineId, req: NewRepoProject) =>
+      decode(replyD, await call("POST", `${ag(owner)}/machines/${enc(machine)}/projects`, req)),
+    /** The thread takes a work item (`work`), or claims the next open one of `repo`; `null`: none to claim (204). */
+    takeWork: async (owner: string, thread: ThreadId, req: TakeWork) =>
+      (await call("POST", `${ag(owner)}/threads/${enc(thread)}/work`, req)) as WorkItemRef | null,
+    /** The thread lets go of its work item (the claim stays the claimant's). */
+    releaseWork: async (owner: string, thread: ThreadId) => {
+      await call("DELETE", `${ag(owner)}/threads/${enc(thread)}/work`);
+    },
   };
 }
 

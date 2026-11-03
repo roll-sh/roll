@@ -7,6 +7,8 @@
 
 import type {
   Approval,
+  ChangeStatus,
+  Landing,
   Checkpoint,
   Command,
   DiffStat,
@@ -33,6 +35,9 @@ import type {
   Todo,
 } from "./agents-api";
 import type { AgentsTransport } from "./agents-client";
+import type { AgentsServices, RepoChoice } from "./agents-services";
+import { ApiError } from "./code-api";
+import type { Sandbox, SandboxSize } from "./sandboxes-api";
 
 // ── the cast ──
 
@@ -75,6 +80,19 @@ const gemini: ProviderInfo = {
   models: [{ id: "gemini-3-pro", name: "Gemini 3 Pro", default: true, efforts: [] }],
   capabilities: { steer: false, fork: false, rollback: false, plan_mode: false, images: true, subagents: false, mode_switch: false },
 };
+
+const DEMO_SIZES: SandboxSize[] = [
+  { name: "standard", cpu: 2, memory_gb: 4, disk_gb: 20, monthly_cents: 2000 },
+  { name: "large", cpu: 4, memory_gb: 8, disk_gb: 40, monthly_cents: 4000 },
+  { name: "xl", cpu: 8, memory_gb: 16, disk_gb: 80, monthly_cents: 8000 },
+];
+
+const DEMO_REPOS: RepoChoice[] = [
+  { owner: "acme", name: "roll", full_name: "acme/roll", description: "keep the code rolling", visibility: "public", updated_at: 1_762_000_000 },
+  { owner: "acme", name: "web", full_name: "acme/web", description: "The marketing site", visibility: "private", updated_at: 1_761_900_000 },
+  { owner: "acme", name: "infra", full_name: "acme/infra", description: null, visibility: "private", updated_at: 1_761_800_000 },
+  { owner: "acme", name: "docs", full_name: "acme/docs", description: "Guides and the API reference", visibility: "public", updated_at: 1_761_700_000 },
+];
 
 const MBP = "mch_demo_ada";
 const BOX = "mch_demo_box";
@@ -467,6 +485,137 @@ export class DemoOwner implements AgentsTransport {
     });
   }
 
+  // ── services: sandboxes, repos, work items (what `agents-services.ts` asks the API for) ──
+
+  private sandboxes = new Map<string, Sandbox>();
+
+  private sandboxMachine(s: Sandbox, patch: Partial<Machine>) {
+    const m = this.machines.get(s.machine);
+    if (!m) return;
+    const next: Machine = { ...m, ...patch, sandbox: { backend: s.backend, size: s.size.name, status: s.status, monthly_cents: s.size.monthly_cents } };
+    this.machines.set(m.id, next);
+    this.emit({ type: "machine", cursor: ++this.cursor, machine: next });
+  }
+
+  private setSandbox(sid: string, patch: Partial<Sandbox>, machine: Partial<Machine> = {}) {
+    const s = this.sandboxes.get(sid);
+    if (!s) return undefined;
+    const next = { ...s, ...patch, updated_at: now() };
+    this.sandboxes.set(sid, next);
+    this.sandboxMachine(next, machine);
+    return next;
+  }
+
+  /** The demo's answers to `AgentsServices`, in memory like everything else here. */
+  services(): AgentsServices {
+    const owner = this;
+    const sandbox = (sid: string) => {
+      const s = owner.sandboxes.get(sid);
+      if (!s) throw new ApiError("no such sandbox", 404, null);
+      return s;
+    };
+    return {
+      sandboxes: {
+        async list() {
+          owner.start();
+          return { sandboxes: [...owner.sandboxes.values()].filter((s) => s.desired !== "deleted"), sizes: DEMO_SIZES, max: 5, backend: "agent37" };
+        },
+        async create(_o, req = {}) {
+          owner.start();
+          if ([...owner.sandboxes.values()].filter((s) => s.desired !== "deleted").length >= 5) throw new ApiError("at the limit of 5 sandboxes", 422, null);
+          const size = DEMO_SIZES.find((z) => z.name === req.size) ?? DEMO_SIZES[0];
+          const sid = id("sbx_");
+          const mid = id("mch_");
+          const name = req.name?.trim() || `sandbox-${owner.sandboxes.size + 1}`;
+          const s: Sandbox = { id: sid, name, machine: mid, backend: "agent37", size, status: "creating", desired: "running", error: null, created_at: now(), updated_at: now() };
+          owner.sandboxes.set(sid, s);
+          owner.machines.set(mid, { id: mid, name, online: false, info: null, sandbox: null, created_at: now(), last_seen: null });
+          owner.sandboxMachine(s, {});
+          const keys = new Set(Object.keys(req.env ?? {}));
+          // It boots for a few seconds, then connects like any machine.
+          owner.after(4500, () =>
+            owner.setSandbox(
+              sid,
+              { status: "running" },
+              {
+                online: true,
+                last_seen: now(),
+                info: {
+                  hostname: name,
+                  os: "linux",
+                  arch: "x86_64",
+                  version: "0.1.0",
+                  home: "/home/roll",
+                  providers: [claude(keys.has("ANTHROPIC_API_KEY") ? "ready" : "missing"), codex(keys.has("OPENAI_API_KEY") ? "ready" : "missing")],
+                },
+              },
+            ),
+          );
+          return { sandbox: s, machine: owner.machines.get(mid)! };
+        },
+        async start(_o, sid) {
+          sandbox(sid);
+          owner.after(1500, () => owner.setSandbox(sid, {}, { online: true, last_seen: now() }));
+          return owner.setSandbox(sid, { status: "running", desired: "running" })!;
+        },
+        async stop(_o, sid) {
+          sandbox(sid);
+          return owner.setSandbox(sid, { status: "stopped", desired: "stopped" }, { online: false, last_seen: now() })!;
+        },
+        async remove(_o, sid) {
+          const s = sandbox(sid);
+          owner.setSandbox(sid, { status: "deleting", desired: "deleted" }, { online: false });
+          owner.after(1500, () => {
+            owner.machines.delete(s.machine);
+            owner.emit({ type: "machine_removed", cursor: ++owner.cursor, machine: s.machine });
+          });
+          return owner.sandboxes.get(sid)!;
+        },
+        async usage(_o, month) {
+          const rows = [...owner.sandboxes.values()].map((s) => {
+            const hours = s.status === "running" ? Math.max(0.01, (now() - s.created_at) / 3_600_000) : 0;
+            return {
+              sandbox: s.id,
+              name: s.name,
+              size: s.size.name,
+              monthly_cents: s.size.monthly_cents,
+              running_ms: Math.round(hours * 3_600_000),
+              running_hours: hours,
+              price_usd: (hours * s.size.monthly_cents) / 100 / 730,
+            };
+          });
+          const sum = (f: (r: (typeof rows)[number]) => number) => rows.reduce((a, r) => a + f(r), 0);
+          return {
+            owner: "demo",
+            month: month ?? new Date().toISOString().slice(0, 7),
+            sandboxes: rows,
+            totals: { running_ms: sum((r) => r.running_ms), running_hours: sum((r) => r.running_hours), price_usd: sum((r) => r.price_usd) },
+          };
+        },
+      },
+      async repos() {
+        return DEMO_REPOS;
+      },
+      async createProject(_o, machine, req) {
+        await owner.sleep(600);
+        const home = owner.machines.get(machine)?.info?.home ?? "/home/roll";
+        return owner.command(machine, req.id, { type: "project.add", path: req.path || `${home}/roll/acme/${req.repo.name}`, name: req.name, clone: { owner: "acme", repo: req.repo.name } });
+      },
+      async takeWork(_o, thread, req) {
+        if (!owner.thread(thread)) throw new ApiError("no such thread", 404, null);
+        const given = "work" in req ? req.work : null;
+        const repo = given?.includes("#") ? given.split("#")[0] : "repo" in req ? req.repo : "acme/roll";
+        const number = given?.includes("#") ? Number(given.split("#")[1]) : 60 + (seq % 20);
+        const item = { id: `wi_demo${number}`, repo, number, title: given ? "Make `roll agent status` show sandboxes" : "Speed up the lander's conflict check" };
+        owner.patchThread(thread, { work: item });
+        return item;
+      },
+      async releaseWork(_o, thread) {
+        owner.patchThread(thread, { work: null });
+      },
+    };
+  }
+
   // ── seed ──
 
   private start() {
@@ -487,9 +636,21 @@ export class DemoOwner implements AgentsTransport {
       name: "build-box",
       online: true,
       info: { hostname: "build-box", os: "linux", arch: "x86_64", version: "0.1.0", home: "/home/roll", providers: [codex(), claude("missing")] },
-      sandbox: { backend: "agent37", size: "4cpu-8gb", status: "running", monthly_cents: 2000 },
+      sandbox: { backend: "agent37", size: "standard", status: "running", monthly_cents: 2000 },
       created_at: t0,
       last_seen: now(),
+    });
+    this.sandboxes.set("sbx_demo_box", {
+      id: "sbx_demo_box",
+      name: "build-box",
+      machine: BOX,
+      backend: "agent37",
+      size: DEMO_SIZES[0],
+      status: "running",
+      desired: "running",
+      error: null,
+      created_at: t0 - 6 * 86_400_000,
+      updated_at: t0,
     });
     this.cursor = 2;
 
@@ -537,6 +698,8 @@ export class DemoOwner implements AgentsTransport {
     // A finished thread with history, and a fork of it.
     const done = base("thr_demo_json", "prj_demo_roll", "Add --json to roll code status", "codex", "gpt-5.5-codex", {
       created_at: t0 + 1000,
+      change: { repo: "acme/roll", number: 41, status: "ready", url: "/acme/roll/changes/41", detail: "All 3 checks passed" },
+      work: { id: "wi_demo38", repo: "acme/roll", number: 38, title: "roll code status --json" },
       worktree: { path: "/Users/ada/.local/share/roll/agent/worktrees/prj_demo_roll/thr_demo_json", branch: "roll/add-json-to-status", base: "f35f34cf" },
     });
     this.put("thread", done, MBP);
@@ -930,8 +1093,22 @@ export class DemoOwner implements AgentsTransport {
         }
         return { type: "ok" };
       }
-      case "thread.publish":
-        return { type: "published", branch: this.thread(c.thread)?.worktree?.branch ?? "roll/demo", commit: "4b825dc6", change: 42, url: "/acme/roll/changes/42", landing: null };
+      case "thread.publish": {
+        const t = this.thread(c.thread);
+        const repo = t && this.get<Project>("project", t.project)?.repo;
+        if (!repo) return { type: "published", branch: t?.worktree?.branch ?? "roll/demo", commit: "4b825dc6", change: null, url: null, landing: null };
+        const number = t.change?.number ?? 42 + (seq % 50);
+        const url = `/${repo.owner}/${repo.repo}/changes/${number}`;
+        const change = (status: ChangeStatus, detail: string | null) =>
+          this.patchThread(c.thread, { change: { repo: `${repo.owner}/${repo.repo}`, number, status, url, detail } });
+        change("checking", "2 of 3 checks running");
+        if (c.land) {
+          this.after(2500, () => change("queued", "1st in the merge queue"));
+          this.after(6000, () => change("landed", null));
+        } else this.after(4000, () => change("ready", "All 3 checks passed"));
+        const landing: Landing | null = c.land ? { status: "queued", message: "Queued: it lands once its batch passes the checks.", blockers: [] } : null;
+        return { type: "published", branch: t.worktree?.branch ?? `roll/${slug(t.title)}`, commit: "4b825dc6", change: number, url, landing };
+      }
       case "diff.get": {
         const runs = c.run ? [c.run] : [...this.records.values()].filter((m) => m.entity.kind === "run" && m.entity.thread === c.thread).map((m) => m.entity.id);
         const files = runs.flatMap((r) => this.filesOf(r));
