@@ -250,14 +250,16 @@ impl SqliteStore {
 
     /// Copy up to `pages` more pages. Writes made meanwhile reach the copy too, so when the
     /// copy completes it is exactly the current state; at that instant the recorded changes
-    /// are cut and returned: the snapshot is the state after them.
-    pub fn snapshot_step(&self, pages: i32) -> Result<Option<Vec<u8>>> {
+    /// are cut and returned: the snapshot is the state after them. `on_cut` advances the log
+    /// batch while the database lock still excludes writes.
+    pub fn snapshot_step(&self, pages: i32, on_cut: impl FnOnce()) -> Result<Option<Vec<u8>>> {
         let mut db = self.db();
         let Some(backup) = db.backup.as_ref() else { anyhow::bail!("no snapshot in progress") };
         match backup.step(pages)? {
             StepResult::Done => {
                 db.backup = None;
                 db.snapshot = None;
+                on_cut();
                 Ok(Some(db.cut()?))
             }
             StepResult::More | StepResult::Busy | StepResult::Locked => Ok(None),

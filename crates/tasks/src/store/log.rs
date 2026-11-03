@@ -735,6 +735,12 @@ impl Log {
     }
 
     /// Commit the sections as entry `seq`. `Ok(Some(bytes))` if an entry was written.
+    fn cut_batch(&self) -> u64 {
+        self.urgent.store(false, Ordering::SeqCst);
+        self.changed.store(false, Ordering::SeqCst);
+        self.open_batch.fetch_add(1, Ordering::SeqCst)
+    }
+
     async fn commit(&self, seq: u64, sections: &[Section], batch: u64) -> std::result::Result<Option<u64>, String> {
         if sections.is_empty() {
             self.durable.send_modify(|d| d.batch = d.batch.max(batch));
@@ -971,11 +977,13 @@ async fn committer(log: Arc<Log>, mut next_seq: u64, mut wal: VecDeque<(u64, u64
         // Copy a snapshot a few milliseconds at a time (its tenant pauses for one step at a
         // time); between steps, commit only what someone waits for, at the usual pace.
         let mut copied = None;
+        let mut snapshot_batch = None;
         if let Some((t, _)) = &copying {
+            let mut on_cut = || snapshot_batch = Some(log.cut_batch());
             let budget = Instant::now();
-            let mut step = t.db.snapshot_step(cfg.snapshot_step_pages);
+            let mut step = t.db.snapshot_step(cfg.snapshot_step_pages, &mut on_cut);
             while matches!(step, Ok(None)) && budget.elapsed() < Duration::from_millis(4) {
-                step = t.db.snapshot_step(cfg.snapshot_step_pages);
+                step = t.db.snapshot_step(cfg.snapshot_step_pages, &mut on_cut);
             }
             match step {
                 Ok(Some(changes)) => copied = Some(changes),
@@ -1003,12 +1011,9 @@ async fn committer(log: Arc<Log>, mut next_seq: u64, mut wal: VecDeque<(u64, u64
             }
         }
         last_start = Instant::now();
-        log.urgent.store(false, Ordering::SeqCst);
-        log.changed.store(false, Ordering::SeqCst);
-
-        // Every cut gets a fresh batch number first, so a writer that reads the old number
-        // after writing is covered by this cut.
-        let batch = log.open_batch.fetch_add(1, Ordering::SeqCst);
+        // A completed snapshot already advanced the batch under its database lock. Writers
+        // after that cut belong to the next commit, even if they arrive before this loop ends.
+        let batch = snapshot_batch.unwrap_or_else(|| log.cut_batch());
         let mut sections = Vec::new();
         let tenants: Vec<Arc<Tenant>> = {
             let mut ops = log.ops.lock().unwrap();
@@ -1028,6 +1033,10 @@ async fn committer(log: Arc<Log>, mut next_seq: u64, mut wal: VecDeque<(u64, u64
         }
         let mut failed = None;
         for t in &tenants {
+            if snapshot.as_ref().is_some_and(|(copied, _)| copied.id == t.id) {
+                // The snapshot excludes writes after its cut; leave them for the next entry.
+                continue;
+            }
             if t.dirty.swap(false, Ordering::SeqCst) {
                 match t.db.cut() {
                     Ok(c) if !c.is_empty() => sections.push(Section { tenant: t.id.clone(), op: Op::Changes, data: c }),
@@ -1509,6 +1518,38 @@ mod tests {
             assert_eq!(get(&b, "big", &format!("k{i}")).await, Some(i));
         }
         b.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_during_snapshots_survive_reopening() {
+        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(objects.clone(), dir.path());
+        cfg.snapshot_commits = 2;
+        cfg.snapshot_step_pages = 1;
+        let store = LogStore::open(cfg).await.unwrap();
+        let mut writers = tokio::task::JoinSet::new();
+        for writer in 0..8 {
+            let store = store.clone();
+            writers.spawn(async move {
+                for n in 0..200 {
+                    store.doc_put("q", &format!("{writer}-{n}"), &json!({ "n": n, "pad": "x".repeat(300) }), Expect::Any).await.unwrap();
+                }
+            });
+        }
+        while let Some(result) = writers.join_next().await {
+            result.unwrap();
+        }
+        assert!(store.stats().snapshots > 0);
+        store.close().await;
+        let restored_dir = tempfile::tempdir().unwrap();
+        let restored = LogStore::open(config(objects, restored_dir.path())).await.unwrap();
+        for writer in 0..8 {
+            for n in 0..200 {
+                assert_eq!(get(&restored, "q", &format!("{writer}-{n}")).await, Some(n), "lost {writer}-{n}");
+            }
+        }
+        restored.close().await;
     }
 
     #[tokio::test]
