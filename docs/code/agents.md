@@ -151,7 +151,11 @@ relay ↔ daemon   ping / pong                            every 20 s; 60 s silen
 
 A command id is the client's idempotency key: a daemon that already ran a command id replies
 with the stored result instead of running it again (T3's command receipts). A reply comes after
-the records its command wrote, so a client that has the reply finds them in `/state`. The daemon
+the records its command wrote, so a client that has the reply finds them in `/state`: the daemon
+holds it until it has sent every record up to its newest `seq` as of the command's end, also while
+a replay is still catching up. A frame the daemon can't read (a newer relay's frame type or
+command, or garbage) is skipped and the link stays up; a command among them gets an `invalid`
+reply. The daemon
 reconnects with jittered backoff (1 s doubling to 30 s). The relay's close codes say what to do:
 4401 the token was revoked and 4400 the protocol isn't spoken (stop, with a clear error), 4409
 another daemon took the machine's link over (stop), 1012 the owner's agents moved to another

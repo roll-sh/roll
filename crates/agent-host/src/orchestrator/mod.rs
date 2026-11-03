@@ -583,6 +583,10 @@ impl crate::Daemon for Host {
         self.out.subscribe()
     }
 
+    async fn last_seq(&self) -> anyhow::Result<u64> {
+        self.store.last_seq()
+    }
+
     async fn run(&self, id: String, by: String, command: Command) -> Reply {
         self.run_granted(id, by, command, None).await
     }

@@ -6,7 +6,11 @@
 //!   is taken before `hello`, so nothing falls between replay and live; a record broadcast while
 //!   replaying is skipped (the replay reads it from the store), and one the replay already sent
 //!   is skipped live (its `seq` is at most the newest sent).
-//! - Commands run concurrently ([`Daemon::run`]); replies go back in whatever order they finish.
+//! - Commands run concurrently ([`Daemon::run`]); replies go back in whatever order they finish,
+//!   each once every record up to [`Daemon::last_seq`] as of its end is on the link (a command
+//!   that finishes mid-replay waits for the replay to get there).
+//! - A frame that doesn't parse (a newer relay's, or garbage) is skipped and the link stays up; a
+//!   command among them gets an `invalid` reply.
 //! - The relay pings every 20 s; 60 s without any frame from it drops the link. Links reconnect
 //!   with jittered backoff (1 s doubling to 30 s, reset by a welcome).
 //! - A refused token (401, or close code 4401) stops the link with [`LinkError::Revoked`]; so do
@@ -180,13 +184,44 @@ fn frame(f: &DaemonFrame) -> Message {
     Message::text(serde_json::to_string(f).unwrap_or_default())
 }
 
+/// What came from the relay.
+// Moved once per frame, never stored: boxing the frame would buy nothing.
+#[allow(clippy::large_enum_variant)]
+enum In {
+    Frame(RelayFrame),
+    /// A text frame this daemon doesn't understand: skipped, the link stays up. `command` is its
+    /// id when it looks like a command, which gets an `invalid` reply.
+    Unreadable { command: Option<String> },
+    /// Anything else (binary frames, pongs): ignored.
+    Nothing,
+}
+
+/// One text frame: a frame this daemon speaks, or one it skips (a newer relay's frame type or
+/// command, or garbage).
+fn parse(text: &str) -> In {
+    match serde_json::from_str(text) {
+        Ok(f) => In::Frame(f),
+        Err(e) => {
+            let v: Option<serde_json::Value> = serde_json::from_str(text).ok();
+            let command = v
+                .as_ref()
+                .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("command"))
+                .and_then(|v| v.get("id")?.as_str())
+                .filter(|id| !id.is_empty() && id.len() <= 128)
+                .map(str::to_string);
+            tracing::warn!("skipping a frame from the relay that doesn't parse: {e}");
+            In::Unreadable { command }
+        }
+    }
+}
+
 /// The next relay frame. `Err` ends the session.
-async fn recv(ws: &mut Ws) -> Result<Option<RelayFrame>, End> {
+async fn recv(ws: &mut Ws) -> Result<In, End> {
     let retry = |error: String| End::Retry { error, welcomed: false };
     match ws.next().await {
         None => Err(retry("the relay closed the connection".into())),
         Some(Err(e)) => Err(retry(format!("the connection broke: {e}"))),
-        Some(Ok(Message::Text(t))) => serde_json::from_str(t.as_str()).map(Some).map_err(|e| retry(format!("a frame the relay sent doesn't parse: {e}"))),
+        Some(Ok(Message::Text(t))) => Ok(parse(t.as_str())),
         Some(Ok(Message::Close(c))) => {
             let (code, reason) = c.map(|c| (u16::from(c.code), c.reason.to_string())).unwrap_or((1005, String::new()));
             Err(match code {
@@ -196,7 +231,7 @@ async fn recv(ws: &mut Ws) -> Result<Option<RelayFrame>, End> {
                 _ => retry(format!("the relay closed the link ({code} {reason})")),
             })
         }
-        Some(Ok(_)) => Ok(None),
+        Some(Ok(_)) => Ok(In::Nothing),
     }
 }
 
@@ -219,11 +254,11 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
         match tokio::time::timeout(WELCOME_WAIT, recv(&mut ws)).await {
             Err(_) => return retry("no welcome from the relay".into(), false),
             Ok(Err(e)) => return e,
-            Ok(Ok(Some(RelayFrame::Welcome { machine, owner, resume_from }))) => {
+            Ok(Ok(In::Frame(RelayFrame::Welcome { machine, owner, resume_from }))) => {
                 let _ = events.send(LinkEvent::Connected { machine: machine.0, owner, resume_from });
                 break resume_from;
             }
-            Ok(Ok(Some(RelayFrame::Ping))) => {
+            Ok(Ok(In::Frame(RelayFrame::Ping))) => {
                 let _ = ws.send(frame(&DaemonFrame::Pong)).await;
             }
             Ok(Ok(_)) => {}
@@ -231,7 +266,9 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
     };
     let mut out = Out { replay: Some(resume_from), sent: resume_from };
     let mut acked = resume_from;
-    let (reply_tx, mut replies) = mpsc::unbounded_channel::<(String, Reply)>();
+    let (reply_tx, mut replies) = mpsc::unbounded_channel::<(String, Reply, u64)>();
+    // Replies waiting for the records their command wrote: (the seq to have sent, id, reply).
+    let mut held: Vec<(u64, String, Reply)> = Vec::new();
     let mut heard = tokio::time::Instant::now();
     loop {
         // Replay a batch whenever nothing else is ready.
@@ -254,6 +291,14 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                 out.replay = None;
             }
         }
+        // A reply goes once every record up to its command's last write is on the link.
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut held).into_iter().partition(|(upto, ..)| *upto <= out.sent);
+        held = waiting;
+        for (_, id, result) in ready {
+            if let Err(e) = ws.send(frame(&DaemonFrame::Reply { id, result })).await {
+                return retry(format!("sending a reply: {e}"), true);
+            }
+        }
         let replaying = out.replay.is_some();
         tokio::select! {
             biased;
@@ -264,26 +309,43 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                         End::Retry { error, .. } => retry(error, true),
                         stop => stop,
                     },
-                    Ok(None) => {}
-                    Ok(Some(RelayFrame::Ack { seq })) => acked = acked.max(seq),
-                    Ok(Some(RelayFrame::Ping)) => {
+                    Ok(In::Nothing | In::Unreadable { command: None }) => {}
+                    Ok(In::Unreadable { command: Some(id) }) => {
+                        let result = Reply::Error(agent_proto::ReplyError {
+                            code: agent_proto::ErrorCode::Invalid,
+                            message: "this machine's roll doesn't understand that command; update it".into(),
+                        });
+                        if let Err(e) = ws.send(frame(&DaemonFrame::Reply { id, result })).await {
+                            return retry(format!("sending a reply: {e}"), true);
+                        }
+                    }
+                    Ok(In::Frame(RelayFrame::Ack { seq })) => acked = acked.max(seq),
+                    Ok(In::Frame(RelayFrame::Ping)) => {
                         if let Err(e) = ws.send(frame(&DaemonFrame::Pong)).await {
                             return retry(format!("answering a ping: {e}"), true);
                         }
                     }
-                    Ok(Some(RelayFrame::Command { id, by, command, grant })) => {
+                    Ok(In::Frame(RelayFrame::Command { id, by, command, grant })) => {
                         let (tx, daemon) = (reply_tx.clone(), daemon.clone());
                         tokio::spawn(async move {
                             let result = daemon.run_granted(id.clone(), by, command, grant.map(|g| *g)).await;
-                            let _ = tx.send((id, result));
+                            // Read once the command is done: its records are at or below it.
+                            let upto = daemon.last_seq().await.unwrap_or_else(|e| {
+                                tracing::warn!("reading the newest seq: {e:#}");
+                                0
+                            });
+                            let _ = tx.send((id, result, upto));
                         });
                     }
-                    Ok(Some(RelayFrame::Welcome { .. })) => {}
+                    Ok(In::Frame(RelayFrame::Welcome { .. })) => {}
                 }
             }
-            Some((id, result)) = replies.recv() => {
+            Some((id, result, upto)) = replies.recv() => {
                 // A command's records were broadcast before its reply: what is queued goes
-                // first, so a client that has the reply finds them on the relay.
+                // first, and the reply waits in `held` until the replay or the live records reach
+                // `upto` (the top of the loop sends it), so a client that has the reply finds
+                // them on the relay.
+                held.push((upto, id, result));
                 let mut items = Vec::new();
                 for _ in 0..live.len() {
                     match live.try_recv() {
@@ -314,9 +376,6 @@ async fn session(daemon: &Arc<dyn Daemon>, mut ws: Ws, events: &mpsc::UnboundedS
                     if let Err(e) = ws.send(frame(&DaemonFrame::Entities { items: chunk })).await {
                         return retry(format!("sending records: {e}"), true);
                     }
-                }
-                if let Err(e) = ws.send(frame(&DaemonFrame::Reply { id, result })).await {
-                    return retry(format!("sending a reply: {e}"), true);
                 }
             }
             ev = live.recv() => match ev {

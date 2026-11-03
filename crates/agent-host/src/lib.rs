@@ -44,6 +44,11 @@ pub trait Daemon: Send + Sync + 'static {
     /// resubscribe and replay from its last acknowledged `seq`.
     fn subscribe(&self) -> broadcast::Receiver<Outbound>;
 
+    /// The newest `seq` written. Every record at or below it has already been broadcast, so a
+    /// command's reply waits until the link has sent everything up to the `last_seq` read after
+    /// the command finished.
+    async fn last_seq(&self) -> anyhow::Result<u64>;
+
     /// Run a command. `id` is the client's idempotency key: a second call with the same id
     /// returns the first call's reply without running anything. `by` is who sent it.
     async fn run(&self, id: String, by: String, command: Command) -> Reply;

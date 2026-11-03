@@ -57,6 +57,8 @@ impl Daemon for Fake {
     }
 
     async fn since(&self, after: u64, limit: usize) -> anyhow::Result<Vec<Stamped>> {
+        // A store read takes a moment, so a replay of thousands of records takes a while.
+        tokio::time::sleep(Duration::from_millis(10)).await;
         let mut v: Vec<Stamped> = self.records.lock().values().filter(|s| s.seq > after).cloned().collect();
         v.sort_by_key(|s| s.seq);
         v.truncate(limit);
@@ -67,7 +69,12 @@ impl Daemon for Fake {
         self.tx.subscribe()
     }
 
-    /// `thread.archive` of `slow` takes 300 ms; every command answers `Created {by}` once per id.
+    async fn last_seq(&self) -> anyhow::Result<u64> {
+        Ok(self.seq.load(Ordering::SeqCst))
+    }
+
+    /// `thread.archive` of `slow` takes 300 ms, of `write` writes a project (`Created {seq}`);
+    /// every other command answers `Created {by}`; once per id.
     async fn run(&self, id: String, by: String, command: Command) -> Reply {
         if let Some(r) = self.receipts.lock().get(&id) {
             return r.clone();
@@ -76,7 +83,11 @@ impl Daemon for Fake {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
         self.runs.fetch_add(1, Ordering::SeqCst);
-        let r = Reply::Created { id: by };
+        let r = if matches!(&command, Command::ThreadArchive { thread } if thread.as_str() == "write") {
+            Reply::Created { id: self.upsert(&format!("prj_{id}"), "written").to_string() }
+        } else {
+            Reply::Created { id: by }
+        };
         self.receipts.lock().insert(id, r.clone());
         r
     }
@@ -227,6 +238,60 @@ async fn the_link_speaks_the_protocol() {
     let res = tokio::time::timeout(Duration::from_secs(5), task).await.expect("stopped").unwrap();
     assert!(matches!(res, Err(LinkError::Revoked)), "{res:?}");
     drop(stop);
+}
+
+/// A command that finishes while a big backlog is still being replayed answers only after the
+/// replay has sent the record it wrote (the reply used to overtake the replay).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replies_wait_for_their_records_during_a_replay() {
+    let daemon = Fake::new();
+    for i in 1..=5000 {
+        daemon.upsert(&format!("prj_{i}"), "x");
+    }
+    let (url, mut links) = scripted("rlm_good").await;
+    let (_task, _events, _stop) = start(daemon.clone(), &url, "rlm_good");
+    let mut ws = links.recv().await.unwrap();
+    welcome(&mut ws, 0).await;
+    send(&mut ws, &RelayFrame::Command { id: "w1".into(), by: "acme".into(), command: archive("write"), grant: None }).await;
+    let mut sent = std::collections::BTreeSet::new();
+    let written = loop {
+        match next(&mut ws).await {
+            DaemonFrame::Entities { items } => sent.extend(items.iter().map(|s| s.seq)),
+            DaemonFrame::Reply { id, result: Reply::Created { id: seq } } if id == "w1" => break seq.parse::<u64>().unwrap(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert!(written > 5000);
+    let missing: Vec<u64> = (1..=written).filter(|s| !sent.contains(s)).collect();
+    assert!(missing.is_empty(), "the reply came before {} of the records up to {written} (first {:?})", missing.len(), missing.first());
+}
+
+/// A frame the daemon can't read (garbage, a newer relay's frame, a command it doesn't know) is
+/// skipped: the link stays up, and an unknown command gets an `invalid` reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreadable_frames_are_skipped() {
+    let daemon = Fake::new();
+    let (url, mut links) = scripted("rlm_good").await;
+    let (_task, mut events, _stop) = start(daemon.clone(), &url, "rlm_good");
+    let mut ws = links.recv().await.unwrap();
+    welcome(&mut ws, 0).await;
+    for text in ["not json", r#"{"type":"from_the_future","x":1}"#, r#"{"type":"command","id":"u1","by":"acme","command":{"type":"thread.teleport"}}"#] {
+        ws.send(Message::text(text)).await.unwrap();
+    }
+    match next(&mut ws).await {
+        DaemonFrame::Reply { id, result: Reply::Error(e) } => {
+            assert_eq!((id.as_str(), e.code), ("u1", agent_proto::ErrorCode::Invalid));
+        }
+        other => panic!("{other:?}"),
+    }
+    // Still the same link: commands and pings work.
+    send(&mut ws, &RelayFrame::Command { id: "c1".into(), by: "acme".into(), command: archive("fast"), grant: None }).await;
+    assert!(matches!(next(&mut ws).await, DaemonFrame::Reply { id, .. } if id == "c1"));
+    send(&mut ws, &RelayFrame::Ping).await;
+    assert_eq!(next(&mut ws).await, DaemonFrame::Pong);
+    while let Ok(e) = events.try_recv() {
+        assert!(!matches!(e, LinkEvent::Disconnected { .. }), "{e:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
