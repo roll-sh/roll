@@ -6119,7 +6119,16 @@ them all with the "Fixed in round N" sections describing what was already tried.
      at 10,000 tables `pg_class WHERE relkind = 'r'` is estimated at 201 rows where PostgreSQL
      estimates 10,075 (catalog statistics: pg_class's reltuples / relkind MCVs, or a default
      selectivity on catalog columns), so pgwatch's table_stats_approx takes a plan that runs
-     past its 30 s timeout.
+     past its 30 s timeout. Measured (agent 140, 2,000 tables, 8,415 pg_class rows, 2,068 of
+     kind 'r'): PostgreSQL estimates 937 before ANALYZE (initdb's pg_statistic of pg_class,
+     scaled) and 2,068 after `ANALYZE pg_class` (autovacuum does it after mass DDL); the engine
+     42 (1/200: no statistics for a catalog column), and `ANALYZE pg_class` neither stores
+     statistics nor updates the catalog's own pg_class row (reltuples 415 / relpages 14).
+     Fix: ANALYZE (and autovacuum's analyze) of a system catalog computing `colstats` for its
+     oid from `catalog::system::rows` (MCVs and distinct counts of relkind, relnamespace,
+     contype, typtype, prokind ...), stored like a table's; the planner reads them through
+     `costs::col_stats` unchanged. `VarRef` / `Est` have no ExecCtx, so computing them at
+     plan time instead needs a per-catalog-version cache the 22 `VarRef` constructions reach.
 
 Smaller known differences that don't fail a unit today (round 14, agent 11 fixed the DISTINCT
 `((a + 1))` Sort output listed here before): a pulled-up one-row VALUES' constants aren't
