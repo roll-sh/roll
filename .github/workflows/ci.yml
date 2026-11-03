@@ -27,7 +27,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          cache-workspace-crates: true
       # Git framing/packs, reviewer schemas/pricing/key sealing, RESP and S3 auth/parsing.
       - run: cargo test --locked -p code-git -p code-review -p redis-proto -p s3-proto --lib
 
