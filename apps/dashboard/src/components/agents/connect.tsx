@@ -6,7 +6,15 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { agentsApi, type MintedMachine } from "@/lib/agents-api";
 import { ApiError, codeApi, type Owner } from "@/lib/code-api";
+import { ROLL_API } from "@/lib/roll-api";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
+
+/** Shell lines that write `~/.config/roll/agent.json` (what `roll agent login` keeps) and start the daemon. */
+function savedConfig(m: MintedMachine, owner: string, masked: boolean): string {
+  const token = masked ? `${m.token.slice(0, 8)}…` : m.token;
+  const json = JSON.stringify({ api: ROLL_API, machine: m.machine.id, owner, name: m.machine.name, token });
+  return `mkdir -p ~/.config/roll && (umask 077 && cat > ~/.config/roll/agent.json) <<'JSON'\n${json}\nJSON\nroll agent up`;
+}
 
 /** Owners the signed-in caller can connect machines to: itself, or every owner for the admin. */
 function useOwners() {
@@ -212,10 +220,12 @@ function AddMachine() {
               <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{minted.token}</code>
               <CopyButton id="token" text={minted.token} copied={copied} onCopy={copy} />
             </div>
-            <p className="text-muted">On the machine:</p>
-            <div className="flex items-center gap-1 rounded-lg border border-line bg-bg px-3 py-2">
-              <code className="min-w-0 flex-1 truncate font-mono text-[12px]">roll agent login --token {minted.token.slice(0, 8)}… && roll agent up</code>
-              <CopyButton id="cmd" text={`roll agent login --token ${minted.token} && roll agent up`} copied={copied} onCopy={copy} />
+            <p className="text-muted">
+              On the machine, save it where <code className="font-mono">roll agent login</code> would, then start the daemon:
+            </p>
+            <div className="flex items-start gap-1 rounded-lg border border-line bg-bg px-3 py-2">
+              <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-[11.5px] leading-relaxed">{savedConfig(minted, owner, true)}</pre>
+              <CopyButton id="cmd" text={savedConfig(minted, owner, false)} copied={copied} onCopy={copy} />
             </div>
           </div>
         ) : (
