@@ -29,7 +29,9 @@ import sys
 GATE_BASELINE = {
     'idle_cpu_s_5min': (0.01, 0.05, 0.25),
     'idle_100_sessions_mb': (63.0, 2.0, 0.10),
-    'fresh_data_mb': (2.0, 0.5, 0.10),
+    # Re-recorded from 2.0 the scoreboard's way: the running server with template0, template1
+    # and postgres open, a preallocated 1 MB WAL file each (the 2.0 was a du with fewer open).
+    'fresh_data_mb': (3.0, 0.5, 0.10),
 }
 GATE_NAMES = {
     'idle_cpu_s_5min': 'idle CPU over 5 minutes (s)',

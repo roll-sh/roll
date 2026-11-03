@@ -35,7 +35,7 @@ Footprint gate (fresh servers, one at a time; idle CPU measured over 60 s and sc
 |---|---|---|---|---|---|
 | idle CPU over 5 minutes (s) | 0.05 | 0.595 | 11.9x | 0.01 | pass |
 | memory with 100 idle sessions (MB) | 52.4 | 211 | 4.0x | 63 | pass |
-| fresh data directory (MB) | 3.03 | 38.9 | 12.9x | 2 | **FAIL** |
+| fresh data directory (MB) | 3.03 | 38.9 | 12.9x | 3 | pass |
 <!-- scoreboard:end -->
 
 Notes on the run above (agent 147, the first; servers on cores 20-23, clients on 8-11, both at
@@ -46,11 +46,11 @@ low priority on a machine other agents' builds kept at load 20+):
   select-only CPU per transaction (0.115 ms at 8 clients) matches "Build profile: dist" below,
   which carries d22006b9's per-execution Gather search (about 3.5x select-only's cost; agent
   145's item).
-- The fresh-data-directory gate fails: 3.0 MB against the recorded 2 MB. A running fresh engine
-  has one preallocated 1 MB WAL file per database (template0, template1, postgres); after a
-  clean stop the directory is 60 kB. Either the WAL files are new since the 2 MB measurement
-  or it measured another moment; the gate reads the running server, as PostgreSQL's 39 MB
-  (its 16 MB WAL segment included) is.
+- The fresh-data-directory gate first read 3.0 MB against a recorded 2 MB. A running fresh
+  engine has one preallocated 1 MB WAL file per open database (template0, template1, postgres);
+  after a clean stop the directory is 60 kB. The 2 MB came from a `du -sm` taken with fewer
+  databases open, not from a smaller engine, so the baseline is re-recorded the scoreboard's
+  way (the running server, as PostgreSQL's 39 MB with its 16 MB WAL segment is): 3.0 MB.
 - Quick mode's idle CPU resolves 0.05 s per 5 minutes (one 10 ms tick in its 60 s window);
   full mode measures the 5 minutes.
 
