@@ -1236,7 +1236,8 @@ async fn agent_tools_work_in_roll_code_like_their_routes() {
             seq: 2,
             entity: entity(json!({
                 "kind": "thread", "id": "thr_a", "project": "prj_1", "title": "fix it", "provider": "codex", "model": null,
-                "runtime_mode": "full_access", "interaction_mode": "default", "cwd": "/x", "status": "idle",
+                "runtime_mode": "full_access", "interaction_mode": "default", "cwd": "/x-t", "status": "idle",
+                "worktree": { "path": "/x-t", "branch": "roll/fix-it", "base": "abc" },
                 "run_count": 1, "pending_requests": 0, "created_at": 1, "updated_at": 1
             })),
         },

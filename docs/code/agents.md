@@ -314,14 +314,21 @@ that change (checks, reviews, the merge queue, landing) shows on the thread. The
   `clone`, `thread.publish` in a roll code project), the relay mints a **grant** and sends it in
   that command's frame (`RelayFrame::Command.grant`, `agent_proto::CodeGrant`): a token
   (`rlg_…`, kept as sha256 in `agent_grants`) for that one repository and that machine, valid ten
-  minutes. It opens git smart HTTP for that repo only (fetch; push only when `write`), acts as
-  `agent:<machine name>` (the pusher of the push), and is refused by every API route (401), even
+  minutes. It opens git smart HTTP for that repo only, acts as `agent:<machine name>` (the pusher
+  of the push), and is refused by every API route (401), even
   on an open daemon, like review app tokens. It is looked up on every git request (never cached),
   so revoking the machine ends it at once. The daemon passes it to git in the environment of that
   one process (`GIT_CONFIG_*` `http.extraHeader`), never in a remote URL, a config file or the
   command line, and forgets it after. That process runs no hooks (`core.hooksPath=/dev/null`: not
   the repo's, the user's or a clone template's) and no fsmonitor, so nothing it would start can
   read the grant.
+  - What it may push is one ref. A clone's grant only fetches. A publish's grant pushes
+    `refs/heads/<the thread's worktree branch>` (as the relay mirrors the thread), create or
+    update, nothing else: not the default branch, another branch or a tag, and never a delete.
+    That one ref is all roll code needs: pushing a branch opens or revises its change. The git
+    adapter checks every ref of a push against the grant (`git.rs`, `receive`; an atomic push
+    with a ref outside it pushes nothing). A thread without a worktree gets no grant, and one
+    whose branch is the repo's default branch is refused (400).
   - The repo must be the machine's owner's. A grant never exceeds the command's sender: a clone
     needs read access, a publish needs `check_write` (`owns`), and nothing in it ever needs
     `manages`. A machine of an owner can't reach another owner's repos, public or not.

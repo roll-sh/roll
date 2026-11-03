@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS agent_grants (
     repo_id TEXT NOT NULL,
     -- 1: it may push.
     can_push INTEGER NOT NULL,
+    -- The one ref it may push (refs/heads/<the thread's branch>); NULL: none.
+    push_ref TEXT,
     -- Unix ms.
     expires_at INTEGER NOT NULL
 );
@@ -537,16 +539,19 @@ pub struct GrantRow {
     pub owner_id: String,
     pub repo_id: String,
     pub push: bool,
+    /// The one ref it may push to (create or update, never delete).
+    pub push_ref: Option<String>,
 }
 
-/// Store a grant (made by the caller); expired ones go here.
-pub fn insert_grant(db: &code_sql::Db, hash: &str, machine_id: &str, repo_id: &str, push: bool, expires_at: i64) -> code_sql::Result<()> {
+/// Store a grant (made by the caller); expired ones go here. `push_ref` is the one ref it may
+/// push; without one it only fetches.
+pub fn insert_grant(db: &code_sql::Db, hash: &str, machine_id: &str, repo_id: &str, push_ref: Option<&str>, expires_at: i64) -> code_sql::Result<()> {
     let now = code_sql::now_ms();
     db.write(|c| {
         c.execute("DELETE FROM agent_grants WHERE expires_at < ?", [now])?;
         c.execute(
-            "INSERT INTO agent_grants (token_hash, machine_id, repo_id, can_push, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (token_hash) DO NOTHING",
-            params![hash, machine_id, repo_id, push, expires_at],
+            "INSERT INTO agent_grants (token_hash, machine_id, repo_id, can_push, push_ref, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (token_hash) DO NOTHING",
+            params![hash, machine_id, repo_id, push_ref.is_some(), push_ref, expires_at],
         )?;
         Ok(())
     })
@@ -555,10 +560,14 @@ pub fn insert_grant(db: &code_sql::Db, hash: &str, machine_id: &str, repo_id: &s
 /// The grant a token is, while it hasn't expired and its machine isn't revoked.
 pub fn grant_by_token(db: &code_sql::Db, hash: &str) -> code_sql::Result<Option<GrantRow>> {
     db.query_row(
-        "SELECT g.machine_id, m.name, m.owner_id, g.repo_id, g.can_push FROM agent_grants g JOIN agent_machines m ON m.id = g.machine_id \
+        "SELECT g.machine_id, m.name, m.owner_id, g.repo_id, g.push_ref FROM agent_grants g JOIN agent_machines m ON m.id = g.machine_id \
          WHERE g.token_hash = ? AND g.expires_at >= ? AND m.revoked_at IS NULL",
         params![hash, code_sql::now_ms()],
-        |r| Ok(GrantRow { machine_id: r.get(0)?, machine_name: r.get(1)?, owner_id: r.get(2)?, repo_id: r.get(3)?, push: r.get(4)? }),
+        |r| {
+            // A grant from before grants named their ref pushes nothing.
+            let push_ref: Option<String> = r.get(4)?;
+            Ok(GrantRow { machine_id: r.get(0)?, machine_name: r.get(1)?, owner_id: r.get(2)?, repo_id: r.get(3)?, push: push_ref.is_some(), push_ref })
+        },
     )
     .optional()
 }

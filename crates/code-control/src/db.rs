@@ -408,6 +408,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("agent_machines", "sandbox", "TEXT"),
     // Agents databases from before work item claims were kept alive.
     ("agent_links", "claimant", "TEXT"),
+    // Agents databases from before grants named the one ref they push.
+    ("agent_grants", "push_ref", "TEXT"),
 ];
 
 impl Db {

@@ -948,6 +948,7 @@ Every code-control test runs on SQLite, and on Postgres with `ROLL_CODE_TEST_DAT
 | a secret shown once (owner token, review-app credentials, webhook secret) shown again after navigating back to a page Next kept in `<Activity>` | `connect-agent.test.tsx`, `owner.test.tsx`, `webhooks.test.tsx` (dashboard) |
 | agent tokens drove everything on a machine: terminals running any command, `fs.list /`, approving their own requests (`accept_for_session`), adding projects, full_access threads | `code-control/src/agents/policy.rs::agents_drive_threads_but_never_reach_past_them`, `routes.rs::agents_routes_follow_the_auth_matrix`, `mcp.rs::agent_tools_drive_a_machine_like_their_routes`, `mcp.rs::agent_tools_work_in_roll_code_like_their_routes` |
 | public shares kept a project's remote with its credentials and its private repo, homes after a scheme or a flag (`file:///home/me`, `-I/home/me`), and tokens in tool inputs and outputs | `agents.rs::shares_freeze_a_redacted_copy_for_anyone_with_the_link`, `code-control/src/agents/share.rs::credentials_are_redacted`, `code-control/src/agents/share.rs::home_directories_become_tilde` |
+| a publish grant pushed anything in its repo: `main`, a tag `v9`, another branch | `routes.rs::agent_grants_follow_the_auth_matrix` (real git: main, another branch, a tag, an atomic push and a delete refused; the thread's branch pushed; on main a 400) |
 
 ## Other regressions
 

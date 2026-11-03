@@ -609,7 +609,9 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        Commands on a roll code repo (docs/code/agents.md, "Agents in roll code"): `project.add` with
        `clone: {owner, repo}` and `thread.publish` in a project that is a roll code repo carry a grant
        for that repo to the daemon. The repo must be the machine's owner's (400 otherwise, 404 when it
-       doesn't exist or the caller can't read it); publishing needs write access to it (403).
+       doesn't exist or the caller can't read it); publishing needs write access to it (403). A
+       clone's grant only fetches; a publish's pushes only the thread's worktree branch (400 when that
+       is the repo's default branch; a thread without a worktree gets none).
        `thread.publish` answers Published {branch, commit, change: number | null /* the branch's open
        change */, url: string | null, landing?: Landing /* with land: true */};
        Landing = {status: "landed" | "queued" | "blocked" | "conflict" | "failed", message, blockers: string[]}:
@@ -795,7 +797,8 @@ The browser calls `/v1/code/*` directly: reads, SSE and raw blob links. Allow an
 - Review app tokens (`rla_…`) are always the app, even on an open daemon: they read the repos the
   app is installed on (private ones too) and review their changes, nothing else.
 - Agent machine grants (`rlg_…`, minted by the relay inside a command; see Agents) are always
-  scoped too: git for one repo, as `agent:<machine name>`, never the API (401).
+  scoped too: git for one repo, as `agent:<machine name>`, pushing at most one ref (the thread's
+  branch: never the default branch, a tag or a delete), never the API (401).
 - When `auth.required` is true, the dashboard shows a sign-in button. It keeps the token in
   localStorage, sends it as `Bearer`, and opens the prompt on any 401. The event stream uses
   `fetch`, not `EventSource`, so it can send the header too.

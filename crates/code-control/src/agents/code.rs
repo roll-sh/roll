@@ -137,30 +137,42 @@ fn granted_repo(code: &Code, caller: &Caller, m: &MachineRow, asked: &RepoRef, p
     Ok(r)
 }
 
-fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push: bool) -> Result<CodeGrant> {
+fn mint(code: &Code, m: &MachineRow, r: &RepoRow, asked: &RepoRef, push_ref: Option<&str>) -> Result<CodeGrant> {
     let mut b = [0u8; 24];
     getrandom::fill(&mut b).expect("system randomness");
     let token = format!("{GRANT_PREFIX}{}", hex::encode(b));
     let expires_at = code_sql::now_ms() + GRANT_TTL.as_millis() as i64;
-    store::insert_grant(code.db.sql(), &hash_token(&token), &m.id, &r.id, push, expires_at)?;
-    Ok(CodeGrant { repo: asked.clone(), url: code.clone_url(r), token, write: push, expires_at: expires_at.max(0) as u64 })
+    store::insert_grant(code.db.sql(), &hash_token(&token), &m.id, &r.id, push_ref, expires_at)?;
+    Ok(CodeGrant { repo: asked.clone(), url: code.clone_url(r), token, write: push_ref.is_some(), expires_at: expires_at.max(0) as u64 })
 }
 
-/// The repo a command works on and the grant for it, when it needs one.
+/// The repo a command works on and the grant for it, when it needs one. A clone's grant only
+/// fetches; a publish's pushes the thread's own branch (`refs/heads/<worktree branch>`) and
+/// nothing else: never the default branch, another branch or a tag (`git.rs` checks each ref).
 pub(super) fn grant_for(code: &Code, caller: &Caller, m: &MachineRow, command: &Command) -> Result<Option<(CodeGrant, RepoRow)>> {
-    let (asked, push) = match command {
-        Command::ProjectAdd { clone: Some(repo), .. } => (repo.clone(), false),
+    let (asked, branch) = match command {
+        Command::ProjectAdd { clone: Some(repo), .. } => (repo.clone(), None),
         Command::ThreadPublish { thread, .. } => {
             let Some(agent_proto::Entity::Thread(t)) = store::mirrored(code.db.sql(), &m.id, EntityKind::Thread, thread.as_str())? else { return Ok(None) };
+            // Only a thread in its own worktree publishes (the daemon refuses the rest).
+            let Some(w) = t.worktree else { return Ok(None) };
             match store::mirrored(code.db.sql(), &m.id, EntityKind::Project, t.project.as_str())? {
-                Some(agent_proto::Entity::Project(agent_proto::Project { repo: Some(repo), .. })) => (repo, true),
+                Some(agent_proto::Entity::Project(agent_proto::Project { repo: Some(repo), .. })) => (repo, Some(w.branch)),
                 _ => return Ok(None),
             }
         }
         _ => return Ok(None),
     };
-    let r = granted_repo(code, caller, m, &asked, push)?;
-    Ok(Some((mint(code, m, &r, &asked, push)?, r)))
+    let r = granted_repo(code, caller, m, &asked, branch.is_some())?;
+    let push_ref = match branch {
+        Some(b) if b.trim().is_empty() || b.starts_with("refs/") => return Err(Error::Invalid(format!("the thread's branch {b:?} can't be published"))),
+        Some(b) if b == r.default_branch => {
+            return Err(Error::Invalid(format!("the thread works on {}'s default branch {b}: only a branch of its own is published", r.full_name())));
+        }
+        Some(b) => Some(code_store::full_ref(&b)),
+        None => None,
+    };
+    Ok(Some((mint(code, m, &r, &asked, push_ref.as_deref())?, r)))
 }
 
 // ── a thread's change ──

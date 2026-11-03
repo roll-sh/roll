@@ -676,6 +676,10 @@ async fn granted(a: &App, d: &mut common::daemon::Daemon, mid: &str, command: Va
     grant.map(|g| *g)
 }
 
+fn command_path(mid: &str) -> String {
+    format!("/v1/code/agents/acme/machines/{mid}/commands")
+}
+
 /// `GET /git/acme/{repo}.git/info/refs?service=…` with a bearer token: git's first request.
 async fn git_refs(a: &App, repo: &str, service: &str, token: &str) -> StatusCode {
     let req = Request::get(format!("/git/acme/{repo}.git/info/refs?service={service}")).header("authorization", format!("Bearer {token}")).body(Body::empty()).unwrap();
@@ -683,7 +687,7 @@ async fn git_refs(a: &App, repo: &str, service: &str, token: &str) -> StatusCode
 }
 
 /// A machine's grant (minted by the relay for one command) opens git for its one repo, pushes
-/// only when the command's sender may write, never opens the API, and ends when it expires or
+/// only when the command's sender may write and then only the thread's own branch, never opens the API, and ends when it expires or
 /// the machine is revoked. The routes that start repos and give threads work are the commands'.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_grants_follow_the_auth_matrix() {
@@ -702,10 +706,19 @@ async fn agent_grants_follow_the_auth_matrix() {
     .unwrap();
     let thread: Entity = serde_json::from_value(json!({
         "kind": "thread", "id": "thr_1", "project": "prj_1", "title": "t", "provider": "codex", "model": null, "runtime_mode": "full_access",
-        "interaction_mode": "default", "cwd": "/src/priv", "status": "idle", "run_count": 0, "pending_requests": 0, "created_at": 1, "updated_at": 1
+        "interaction_mode": "default", "cwd": "/src/priv-t", "worktree": { "path": "/src/priv-t", "branch": "roll/t", "base": "abc" },
+        "status": "idle", "run_count": 0, "pending_requests": 0, "created_at": 1, "updated_at": 1
     }))
     .unwrap();
-    d.upsert(vec![Stamped { seq: 1, entity: project }, Stamped { seq: 2, entity: thread }]).await;
+    // Threads that can't be published as a branch of their own: no worktree, or on main.
+    let mut on_main = thread.clone();
+    let mut no_worktree = thread.clone();
+    if let (Entity::Thread(m), Entity::Thread(n)) = (&mut on_main, &mut no_worktree) {
+        (m.id, n.id) = (agent_proto::ThreadId("thr_main".into()), agent_proto::ThreadId("thr_here".into()));
+        m.worktree.as_mut().unwrap().branch = "main".into();
+        n.worktree = None;
+    }
+    d.upsert(vec![Stamped { seq: 1, entity: project }, Stamped { seq: 2, entity: thread }, Stamped { seq: 3, entity: on_main }, Stamped { seq: 4, entity: no_worktree }]).await;
     let publish = json!({ "type": "thread.publish", "thread": "thr_1", "message": "m" });
 
     // Publishing, by the owner or its agent: a grant that pushes to acme/priv and nothing else.
@@ -722,6 +735,46 @@ async fn agent_grants_follow_the_auth_matrix() {
         }
         push = g.token;
     }
+    // A publish grant pushes the thread's branch and nothing else: not main, another branch or a
+    // tag, never a delete, and an atomic push with any of those pushes nothing.
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let remote = format!("{url}/git/acme/priv.git");
+    let header = format!("http.extraHeader=Authorization: Bearer {push}");
+    let with_grant = |args: &[&str]| {
+        let mut all = vec!["-c", header.as_str()];
+        all.extend_from_slice(args);
+        common::git_raw(home.path(), work.path(), &all)
+    };
+    assert!(with_grant(&["clone", "-q", &remote, "."]).status.success());
+    let main_before = common::git(home.path(), work.path(), &["rev-parse", "origin/main"]);
+    common::write(work.path(), "agent.txt", "work\n");
+    common::git(home.path(), work.path(), &["add", "-A"]);
+    common::git(home.path(), work.path(), &["commit", "-q", "-m", "agent work"]);
+    for refspec in ["HEAD:refs/heads/main", "HEAD:refs/heads/elsewhere", "HEAD:refs/tags/v9"] {
+        let out = with_grant(&["push", &remote, refspec]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("only pushes refs/heads/roll/t"), "{refspec}: {err}");
+    }
+    let out = with_grant(&["push", "--atomic", &remote, "HEAD:refs/heads/roll/t", "HEAD:refs/heads/main"]);
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = with_grant(&["push", &remote, "HEAD:refs/heads/roll/t"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = with_grant(&["push", &remote, ":refs/heads/roll/t"]);
+    assert!(!out.status.success(), "a delete: {}", String::from_utf8_lossy(&out.stderr));
+    let refs = String::from_utf8(with_grant(&["ls-remote", &remote]).stdout).unwrap();
+    assert!(refs.contains("refs/heads/roll/t") && !refs.contains("elsewhere") && !refs.contains("refs/tags/v9"), "{refs}");
+    assert!(refs.lines().any(|l| l == format!("{}\trefs/heads/main", main_before.trim())), "main moved: {refs}");
+    for thread in ["thr_main", "thr_here"] {
+        let body = json!({ "id": format!("c-{thread}"), "command": { "type": "thread.publish", "thread": thread, "message": "m" } });
+        let want = if thread == "thr_main" { StatusCode::BAD_REQUEST } else { StatusCode::OK };
+        if want == StatusCode::OK {
+            assert!(granted(a, &mut d, &mid, body["command"].clone(), &w.acme).await.is_none(), "no worktree: no grant");
+        } else {
+            assert_eq!(call(a, "POST", &command_path(&mid), Some(&body), Some(&w.acme)).await, want, "{thread}");
+        }
+    }
+
     // Cloning: fetch only.
     let clone = json!({ "type": "project.add", "path": "", "clone": { "owner": "acme", "repo": "pub" } });
     let g = granted(a, &mut d, &mid, clone, &w.acme).await.expect("a grant");
@@ -733,7 +786,7 @@ async fn agent_grants_follow_the_auth_matrix() {
     // Only the machine owner's own repos, and ones that exist.
     let (s, v) = a.req("POST", "/v1/code/repos", Some(json!({ "owner": "other", "name": "theirs" })), Some(ADMIN)).await;
     assert_eq!(s, StatusCode::CREATED, "{v}");
-    let command = format!("/v1/code/agents/acme/machines/{mid}/commands");
+    let command = command_path(&mid);
     for (repo, want) in [("other/theirs", StatusCode::BAD_REQUEST), ("acme/nope", NOT_FOUND)] {
         let (owner, name) = repo.split_once('/').unwrap();
         let body = json!({ "id": "c-refused", "command": { "type": "project.add", "path": "", "clone": { "owner": owner, "repo": name } } });
@@ -743,7 +796,7 @@ async fn agent_grants_follow_the_auth_matrix() {
     let priv_id = a.req("GET", "/v1/code/repos/acme/priv", None, Some(ADMIN)).await.1["id"].as_str().unwrap().to_string();
     let expired = "rlg_0000000000000000000000000000000000000000000000ff";
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(expired.as_bytes()));
-    code_control::agents::store::insert_grant(a.code.db.sql(), &hash, &mid, &priv_id, true, 1).unwrap();
+    code_control::agents::store::insert_grant(a.code.db.sql(), &hash, &mid, &priv_id, Some("refs/heads/roll/t"), 1).unwrap();
     for t in [expired, "rlg_nope"] {
         assert_eq!(git_refs(a, "priv", "git-upload-pack", t).await, UNAUTHORIZED, "{t}");
     }
