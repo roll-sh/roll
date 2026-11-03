@@ -1,0 +1,24 @@
+[
+  {
+    "type": "welcome",
+    "machine": "mch_fedcba0987654321",
+    "owner": "acme",
+    "resume_from": 40
+  },
+  {
+    "type": "ack",
+    "seq": 41
+  },
+  {
+    "type": "command",
+    "id": "cmd_1",
+    "by": "acme",
+    "command": {
+      "type": "run.interrupt",
+      "thread": "thr_a1b2c3d4e5f60718"
+    }
+  },
+  {
+    "type": "ping"
+  }
+]

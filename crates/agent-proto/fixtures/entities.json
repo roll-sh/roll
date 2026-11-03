@@ -1,0 +1,344 @@
+[
+  {
+    "kind": "project",
+    "id": "prj_1234567890abcdef",
+    "name": "roll",
+    "path": "/home/ada/roll",
+    "repo": {
+      "owner": "acme",
+      "repo": "roll"
+    },
+    "git": {
+      "branch": "main",
+      "head": "f35f34cf",
+      "remote": null,
+      "dirty": true
+    },
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000
+  },
+  {
+    "kind": "thread",
+    "id": "thr_a1b2c3d4e5f60718",
+    "project": "prj_1234567890abcdef",
+    "title": "Fix the flaky queue test",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "runtime_mode": "auto_edit",
+    "interaction_mode": "default",
+    "cwd": "/home/ada/.local/share/roll/agent/worktrees/prj_1234567890abcdef/thr_a1b2c3d4e5f60718",
+    "worktree": {
+      "path": "/home/ada/.local/share/roll/agent/worktrees/prj_1234567890abcdef/thr_a1b2c3d4e5f60718",
+      "branch": "roll/fix-the-flaky-queue-test",
+      "base": "f35f34cf"
+    },
+    "status": "waiting",
+    "lineage": {
+      "parent": "thr_0000000000000001",
+      "relation": "fork",
+      "root": "thr_0000000000000001",
+      "from_run": "run_0011223344556677"
+    },
+    "active_run": "run_0011223344556677",
+    "queued": [
+      {
+        "id": "q1",
+        "text": "then run clippy",
+        "at": 1762000000000
+      }
+    ],
+    "run_count": 3,
+    "pending_requests": 1,
+    "activity": "Waiting to run `cargo test`",
+    "usage": {
+      "input_tokens": 12000,
+      "output_tokens": 3400,
+      "cached_tokens": 9000,
+      "cost_usd": 0.42
+    },
+    "created_at": 1762000000000,
+    "updated_at": 1762000000000
+  },
+  {
+    "kind": "run",
+    "id": "run_0011223344556677",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "ordinal": 3,
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "status": "waiting",
+    "prompt": "The queue test fails one time in ten. Find out why.",
+    "attachments": [
+      {
+        "name": "trace.png",
+        "mime": "image/png",
+        "data": "iVBORw0KGgo="
+      }
+    ],
+    "steers": [
+      "it only fails on Postgres"
+    ],
+    "requested_at": 1762000000000,
+    "started_at": 1762000000020,
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000001",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 1,
+    "status": "completed",
+    "started_at": 1762000000001,
+    "completed_at": 1762000000100,
+    "body": {
+      "type": "message",
+      "text": "Looking at the test."
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000002",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 2,
+    "status": "completed",
+    "started_at": 1762000000002,
+    "completed_at": 1762000000100,
+    "body": {
+      "type": "reasoning",
+      "text": "The lease expires…"
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000003",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 3,
+    "status": "completed",
+    "started_at": 1762000000003,
+    "completed_at": 1762000000100,
+    "body": {
+      "type": "plan",
+      "text": "1. Reproduce\n2. Fix"
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000004",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 4,
+    "status": "running",
+    "started_at": 1762000000004,
+    "body": {
+      "type": "todos",
+      "items": [
+        {
+          "text": "Reproduce",
+          "status": "completed"
+        },
+        {
+          "text": "Fix",
+          "status": "in_progress"
+        },
+        {
+          "text": "Test",
+          "status": "pending"
+        }
+      ]
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000005",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 5,
+    "status": "completed",
+    "started_at": 1762000000005,
+    "completed_at": 1762000000100,
+    "body": {
+      "type": "tool",
+      "name": "Edit",
+      "kind": "edit",
+      "title": "crates/code-control/src/queue.rs",
+      "input": {
+        "file_path": "crates/code-control/src/queue.rs",
+        "new_string": "b",
+        "old_string": "a"
+      },
+      "files": [
+        {
+          "path": "crates/code-control/src/queue.rs",
+          "change": "modify",
+          "diff": "@@ -1 +1 @@\n-a\n+b\n"
+        }
+      ]
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000006",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 6,
+    "status": "running",
+    "started_at": 1762000000006,
+    "body": {
+      "type": "subagent",
+      "agent": "Explore",
+      "prompt": "Find every caller of claim()"
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000007",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "parent": "nod_0000000000000006",
+    "ordinal": 7,
+    "status": "completed",
+    "started_at": 1762000000007,
+    "completed_at": 1762000000100,
+    "body": {
+      "type": "tool",
+      "name": "Bash",
+      "kind": "command",
+      "title": "rg claim\\(",
+      "input": {
+        "command": "rg 'claim\\('"
+      },
+      "output": "src/queue.rs:12: claim(",
+      "exit_code": 0
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000008",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 8,
+    "status": "waiting",
+    "started_at": 1762000000008,
+    "body": {
+      "type": "request",
+      "request": "req_8899aabbccddeeff"
+    }
+  },
+  {
+    "kind": "node",
+    "id": "nod_0000000000000009",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 9,
+    "status": "completed",
+    "started_at": 1762000000009,
+    "completed_at": 1762000000100,
+    "body": {
+      "type": "system",
+      "text": "Context compacted"
+    }
+  },
+  {
+    "kind": "request",
+    "id": "req_8899aabbccddeeff",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "node": "nod_0000000000000008",
+    "status": "pending",
+    "body": {
+      "type": "approval",
+      "action": "command",
+      "title": "Run `cargo test -p code-control`",
+      "command": "cargo test -p code-control",
+      "cwd": "/home/ada/roll",
+      "reason": "Check the fix",
+      "tool": "Bash",
+      "input": {
+        "command": "cargo test -p code-control"
+      },
+      "decisions": [
+        "accept",
+        "accept_for_session",
+        "decline",
+        "cancel"
+      ]
+    },
+    "created_at": 1762000000000
+  },
+  {
+    "kind": "request",
+    "id": "req_0000000000000002",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "node": "nod_000000000000000a",
+    "status": "resolved",
+    "body": {
+      "type": "questions",
+      "questions": [
+        {
+          "id": "db",
+          "header": "Database",
+          "question": "Which database should the test use?",
+          "options": [
+            {
+              "label": "SQLite",
+              "description": "Fast"
+            },
+            {
+              "label": "Postgres"
+            }
+          ],
+          "multi": false
+        }
+      ]
+    },
+    "created_at": 1762000000000,
+    "resolved_at": 1762000000005,
+    "resolved_by": "ada",
+    "response": {
+      "type": "answers",
+      "answers": {
+        "db": "Postgres"
+      }
+    }
+  },
+  {
+    "kind": "checkpoint",
+    "id": "chk_0f0f0f0f0f0f0f0f",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677",
+    "ordinal": 3,
+    "commit": "9fceb02d0ae598e95dc970b74767f19372d61af8",
+    "stat": {
+      "files": 2,
+      "additions": 14,
+      "deletions": 3
+    },
+    "created_at": 1762000000000
+  },
+  {
+    "kind": "terminal",
+    "id": "trm_7777777777777777",
+    "project": "prj_1234567890abcdef",
+    "cwd": "/home/ada/roll",
+    "title": "claude /login",
+    "status": "running",
+    "cols": 120,
+    "rows": 32,
+    "created_at": 1762000000000
+  },
+  {
+    "kind": "removed",
+    "entity": "node",
+    "id": "nod_0000000000000009",
+    "thread": "thr_a1b2c3d4e5f60718"
+  }
+]

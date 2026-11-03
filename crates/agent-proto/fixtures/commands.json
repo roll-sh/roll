@@ -1,0 +1,132 @@
+[
+  {
+    "type": "project.add",
+    "path": "/home/ada/roll",
+    "clone": {
+      "owner": "acme",
+      "repo": "roll"
+    }
+  },
+  {
+    "type": "project.remove",
+    "project": "prj_1234567890abcdef"
+  },
+  {
+    "type": "thread.create",
+    "project": "prj_1234567890abcdef",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "effort": "high",
+    "runtime_mode": "full_access",
+    "interaction_mode": "plan",
+    "worktree": true,
+    "prompt": "Add a --json flag to roll code status"
+  },
+  {
+    "type": "thread.configure",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "title": "Renamed",
+    "provider": "acp:gemini",
+    "runtime_mode": "ask"
+  },
+  {
+    "type": "thread.fork",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "at": "run_0011223344556677",
+    "worktree": true
+  },
+  {
+    "type": "thread.archive",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.unarchive",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "thread.delete",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "message.send",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "text": "also update the docs",
+    "mode": "steer"
+  },
+  {
+    "type": "message.unqueue",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "q1"
+  },
+  {
+    "type": "run.interrupt",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "request.respond",
+    "request": "req_8899aabbccddeeff",
+    "response": {
+      "type": "decision",
+      "decision": "decline",
+      "message": "use the fake runner"
+    }
+  },
+  {
+    "type": "checkpoint.rollback",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "checkpoint": "chk_0f0f0f0f0f0f0f0f"
+  },
+  {
+    "type": "thread.publish",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "message": "Fix the flaky queue test",
+    "land": true
+  },
+  {
+    "type": "terminal.open",
+    "project": "prj_1234567890abcdef",
+    "command": "claude /login",
+    "cols": 120,
+    "rows": 32
+  },
+  {
+    "type": "terminal.input",
+    "terminal": "trm_7777777777777777",
+    "data": "bHMK"
+  },
+  {
+    "type": "terminal.resize",
+    "terminal": "trm_7777777777777777",
+    "cols": 100,
+    "rows": 30
+  },
+  {
+    "type": "terminal.close",
+    "terminal": "trm_7777777777777777"
+  },
+  {
+    "type": "provider.refresh"
+  },
+  {
+    "type": "diff.get",
+    "thread": "thr_a1b2c3d4e5f60718",
+    "run": "run_0011223344556677"
+  },
+  {
+    "type": "fs.list",
+    "path": "/home/ada"
+  },
+  {
+    "type": "fs.read",
+    "project": "prj_1234567890abcdef",
+    "path": "README.md"
+  },
+  {
+    "type": "git.status",
+    "thread": "thr_a1b2c3d4e5f60718"
+  },
+  {
+    "type": "terminal.scrollback",
+    "terminal": "trm_7777777777777777"
+  }
+]
