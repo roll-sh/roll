@@ -143,9 +143,13 @@ async fn login(api: &str, json_out: bool, name: Option<String>) -> anyhow::Resul
 /// The providers the daemon's config describes: Codex and Claude Code (ACP agents once their
 /// adapter lands).
 fn providers(config: &agent_host::config::Config) -> Vec<Arc<dyn Provider>> {
-    use agent_host::provider::{claude::Claude, codex::Codex};
+    use agent_host::provider::{acp, claude::Claude, codex::Codex};
     use agent_proto::ProviderId;
-    vec![Arc::new(Codex::new(config.provider(&ProviderId::codex()))), Arc::new(Claude::new(config.provider(&ProviderId::claude())))]
+    let mut all: Vec<Arc<dyn Provider>> =
+        vec![Arc::new(Codex::new(config.provider(&ProviderId::codex()))), Arc::new(Claude::new(config.provider(&ProviderId::claude())))];
+    // ACP agents: the configured ones, and any known agent installed here.
+    all.extend(acp::agents(&config.acp).into_iter().map(|a| Arc::new(acp::Acp::new(a.name, a.config)) as Arc<dyn Provider>));
+    all
 }
 
 async fn up() -> anyhow::Result<()> {

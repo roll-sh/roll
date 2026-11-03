@@ -242,6 +242,18 @@ pub fn installed_agents() -> Vec<AcpAgent> {
     known_agents().into_iter().filter(|a| a.config.binary.as_deref().and_then(which).is_some()).collect()
 }
 
+/// The ACP agents a daemon offers: everything in `config.toml`'s `[[acp]]`, then the known
+/// agents found on `PATH` that the config doesn't already name.
+pub fn agents(configured: &[AcpAgent]) -> Vec<AcpAgent> {
+    merge(configured, installed_agents())
+}
+
+fn merge(configured: &[AcpAgent], discovered: Vec<AcpAgent>) -> Vec<AcpAgent> {
+    let mut all = configured.to_vec();
+    all.extend(discovered.into_iter().filter(|d| !configured.iter().any(|c| c.name == d.name)));
+    all
+}
+
 /// The display name of a known agent.
 pub fn known_title(name: &str) -> Option<&'static str> {
     KNOWN.iter().find(|k| k.name == name).map(|k| k.title)
@@ -250,6 +262,18 @@ pub fn known_title(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_agents_win_over_discovered_ones() {
+        let agent = |name: &str, bin: &str| AcpAgent {
+            name: name.into(),
+            config: ProviderConfig { binary: Some(PathBuf::from(bin)), ..ProviderConfig::default() },
+        };
+        let configured = [agent("gemini", "/opt/gemini"), agent("mine", "/opt/mine")];
+        let all = merge(&configured, vec![agent("gemini", "gemini"), agent("goose", "goose")]);
+        let got: Vec<_> = all.iter().map(|a| (a.name.as_str(), a.config.binary.as_deref().unwrap().to_str().unwrap())).collect();
+        assert_eq!(got, [("gemini", "/opt/gemini"), ("mine", "/opt/mine"), ("goose", "goose")]);
+    }
 
     #[test]
     fn known_agents_are_valid_config_entries() {
