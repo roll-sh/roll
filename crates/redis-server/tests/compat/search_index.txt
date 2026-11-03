@@ -109,6 +109,8 @@ HSET f:4 t d
 HSET f:2 num 0
 HSET f:3 extra yes
 !mask total_indexing_time FT.INFO fi
+# An empty keyspace prevents the initial background scan racing the writes below.
+FLUSHALL
 FT.CREATE fk ON HASH FILTER "startswith(@__key, 'k:a')" SCHEMA t TEXT
 HSET k:a1 t x
 HSET k:b1 t y
@@ -117,6 +119,7 @@ HSET k:a2 __key k:b t z
 RENAME k:a1 k:b2
 RENAME k:b1 k:a3
 !mask total_indexing_time FT.INFO fk
+FLUSHALL
 FT.CREATE fe ON HASH PREFIX 1 e: FILTER "exists(@t)" SCHEMA t TEXT
 HSET e:1 t a
 HSET e:2 u a
