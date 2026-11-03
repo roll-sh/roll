@@ -246,6 +246,41 @@ The product should feel alive: dots react to the cursor and the marks "think". E
     - the cluster (several nodes in one process: routing, takeover, joining, draining):
       `code-control/tests/cluster.rs`
     - two nodes racing on one control database: `code-control/tests/concurrency.rs`
+- **Agents (roll code agents: the agent harness on a canvas):**
+  - The design is in `docs/code/agents.md`. It works like T3 Code (MIT; behavioural reference
+    for threads, runs, the execution-node tree, requests, checkpoints, forks, handoffs and
+    delegation), with every backend piece in Rust and the UI on a canvas in the dashboard.
+  - `crates/agent-proto` is the wire (no I/O). `crates/agent-host` is the daemon behind
+    `roll agent up` (orchestrator, SQLite store, git worktrees and checkpoints, PTYs, the
+    orchestrator MCP, the relay link, and the providers in `provider/{codex,claude,acp}`).
+    `crates/code-control/src/agents/` is the relay and `/v1/code/agents` (machines, device login,
+    the mirror, SSE, commands, grants, sandboxes, shares). `apps/dashboard` has the canvas at
+    `/dashboard/agents`; `apps/desktop` is the Electron shell around it.
+  - The daemon owns the truth for its machine; the relay only mirrors full records (upserts keyed
+    by id, newest `seq` wins) and forwards commands. Never make the relay decide thread state.
+  - Change a wire type in `agent-proto`, then regenerate the fixtures
+    (`ROLL_FIXTURES=write cargo test -p agent-proto`) and mirror it in
+    `apps/dashboard/src/lib/agents-api.ts`; the fixture tests on both sides fail until they agree.
+  - Command ids are idempotency keys: a daemon never runs one twice. Commands that write records
+    reply only after those records are stored.
+  - Adapters own no roll ids: they turn the provider's native protocol into `ProviderEvent`s and
+    are tested by replaying recorded transcripts through a fake binary. No test calls a real model
+    or needs a provider login.
+  - The daemon runs the user's own installed provider CLIs with their own logins. Never read, copy,
+    relay or pool a provider credential (no subscription proxying); API keys and base URLs come
+    only from the daemon config or a sandbox's sealed env.
+  - Machine tokens (`rlm_…`) only open the relay link; code access is a per-command, one-repo,
+    short-lived grant (`rlg_…`). Both are looked up on every use, never cached.
+  - Checkpoints use a private `GIT_INDEX_FILE` under `refs/roll/checkpoints/`: never touch the
+    user's index, HEAD or working files outside a rollback the user asked for.
+  - Canvas motion follows the rules above: one canvas engine, calm accent pulses only on busy
+    work, reduced motion honoured.
+  - After touching anything agents-related, run `pnpm test:agents` (it skips itself when nothing
+    relevant changed; `--unit` skips the end-to-end run). New tests go in
+    `agent-host/tests/{orchestrator,threads,git,terminal,mcp,relay,codex,claude,acp}.rs`,
+    `code-control/tests/{agents,agents_code}.rs` (+ `routes.rs` for the auth matrix),
+    `roll-cli/tests/agent.rs`, `apps/dashboard/src/**/agents-*.test.ts(x)` and
+    `apps/desktop/test/`; map them in `docs/code/test-coverage.md`.
 - **Storage (S3-compatible):**
   - `crates/s3-proto` is the wire protocol with no I/O: SigV4, SigV4a and SigV2 (headers, presigned, aws-chunked with trailers, POST policies), SSE headers, XML, checksums, ranges and conditionals, S3 error codes.
   - `crates/s3-store` is the metadata (SQLite plus a durable log in object storage), branching, refcounts, trash, lifecycle, keys, metering, the blob backend (`aws-sdk-s3` or a local directory) and the GC/scrub jobs. It has no HTTP.
