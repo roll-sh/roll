@@ -393,6 +393,14 @@ fn describe(tag: &Tag, db: u32) -> String {
     }
 }
 
+/// One backend's exclusion constraint entries in progress (`State::excl`): (lock key, row
+/// key, writer), and the length at which its ended ones are dropped next.
+#[derive(Default)]
+struct ExclList {
+    entries: Vec<(Vec<u8>, Vec<u8>, KeyHolder)>,
+    prune_at: usize,
+}
+
 /// A granted hold: one owner's (a transaction's or a session's) hold of one mode.
 #[derive(Clone, Debug)]
 struct Hold {
@@ -575,9 +583,11 @@ struct State {
     /// Transactions' compact row and unique-key locks (`bulklocks`), by transaction: what
     /// `rows` and the unique keys of `locks` would otherwise hold for them.
     bulk: crate::exec::fasthash::HashMap<u64, BulkLocks>,
-    /// Exclusion constraints' entries in progress, by constraint: their lock (`EXCL_ENTRY`),
-    /// row key and writer. An entry whose lock is no longer held is gone (dropped lazily).
-    excl: HashMap<u32, Vec<(Vec<u8>, Vec<u8>, KeyHolder)>>,
+    /// Exclusion constraints' entries in progress, by constraint and writing backend: their
+    /// lock (`EXCL_ENTRY`), row key and writer. An entry whose lock is no longer held is gone
+    /// (dropped lazily). By backend, so a check reads only the other backends' entries: a
+    /// statement's own thousands of new rows used to be filtered for each of them.
+    excl: HashMap<u32, HashMap<u64, ExclList>>,
     /// Autovacuum workers' backends, with what cancels each one's work.
     autovacuum: HashMap<u64, std::sync::Arc<AtomicBool>>,
     /// Relation keys with a strong lock held or awaited, counted in `strong` (the fast path's
@@ -1512,8 +1522,16 @@ impl LockManager {
     /// taken by `owner`, stands for it until its writer `kh` ends.
     pub fn add_excl_entry(&self, con: u32, key: &[u8], row: &[u8], owner: u64, kh: KeyHolder) {
         let mut s = self.state.lock();
-        if s.locks.get(key).is_some_and(|e| e.holds.iter().any(|h| h.owner == owner)) {
-            s.excl.entry(con).or_default().push((key.to_vec(), row.to_vec(), kh));
+        let Some(proc) = s.locks.get(key).and_then(|e| e.holds.iter().find(|h| h.owner == owner)).map(|h| h.proc) else {
+            return;
+        };
+        let State { locks, excl, .. } = &mut *s;
+        let list = excl.entry(con).or_default().entry(proc).or_default();
+        list.entries.push((key.to_vec(), row.to_vec(), kh));
+        // (Its ended entries dropped as the list doubles: amortized, not per entry.)
+        if list.entries.len() >= list.prune_at {
+            list.entries.retain(|(k, _, _)| locks.get(k).is_some_and(|e| !e.holds.is_empty()));
+            list.prune_at = (list.entries.len() * 2).max(64);
         }
     }
 
@@ -1521,9 +1539,14 @@ impl LockManager {
     /// stands for its (sub)transaction from now on.
     pub fn settle_excl_entry(&self, con: u32, key: &[u8]) {
         let mut s = self.state.lock();
-        if let Some(list) = s.excl.get_mut(&con) {
-            for (_, _, kh) in list.iter_mut().filter(|(k, _, _)| k == key) {
-                kh.token = None;
+        let procs: Vec<u64> = s.locks.get(key).map(|e| e.holds.iter().map(|h| h.proc).collect()).unwrap_or_default();
+        if let Some(by) = s.excl.get_mut(&con) {
+            for p in procs {
+                let Some(list) = by.get_mut(&p) else { continue };
+                // (The entry just added is the last one, or near it.)
+                for (_, _, kh) in list.entries.iter_mut().rev().filter(|(k, _, _)| k == key) {
+                    kh.token = None;
+                }
             }
         }
     }
@@ -1533,14 +1556,22 @@ impl LockManager {
     pub fn excl_entries(&self, con: u32, proc: u64) -> Vec<(Vec<u8>, KeyHolder)> {
         let mut s = self.state.lock();
         let State { locks, excl, .. } = &mut *s;
-        let Some(list) = excl.get_mut(&con) else { return Vec::new() };
-        list.retain(|(k, _, _)| locks.get(k).is_some_and(|e| !e.holds.is_empty()));
-        let out = list
-            .iter()
-            .filter(|(k, _, _)| locks.get(k).is_some_and(|e| e.holds.iter().any(|h| h.proc != proc)))
-            .map(|(_, row, kh)| (row.clone(), kh.clone()))
-            .collect();
-        if list.is_empty() {
+        let Some(by) = excl.get_mut(&con) else { return Vec::new() };
+        let mut out = Vec::new();
+        by.retain(|p, list| {
+            if *p == proc {
+                return true;
+            }
+            list.entries.retain(|(k, _, _)| locks.get(k).is_some_and(|e| !e.holds.is_empty()));
+            out.extend(
+                list.entries
+                    .iter()
+                    .filter(|(k, _, _)| locks.get(k).is_some_and(|e| e.holds.iter().any(|h| h.proc != proc)))
+                    .map(|(_, row, kh)| (row.clone(), kh.clone())),
+            );
+            !list.entries.is_empty()
+        });
+        if by.is_empty() {
             excl.remove(&con);
         }
         out

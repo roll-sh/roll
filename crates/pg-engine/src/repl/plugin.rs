@@ -134,20 +134,47 @@ pub fn load(name: &str) -> Result<Box<dyn Plugin>> {
 const CHANGE_SIZE: usize = 80;
 const TUPLE_SIZE: usize = 24;
 
-/// ReorderBufferChangeSize: what a change counts against logical_decoding_work_mem.
-fn change_size(rec: &Rec, rels: &HashMap<u32, Arc<RelDesc>>, fmt: &crate::types::text::FormatCtx) -> usize {
-    let tuple = |rel: u32, row: &[Value]| -> usize {
+/// ReorderBufferChangeSize: what a change counts against logical_decoding_work_mem. A row
+/// heap_insert TOASTs counts as stored, plus a change per chunk of each value it moves out of
+/// line (the chunks' inserts into the TOAST table come first in PostgreSQL's WAL).
+fn change_size(
+    rec: &Rec,
+    rels: &HashMap<u32, Arc<RelDesc>>,
+    fmt: &crate::types::text::FormatCtx,
+    cat: &crate::catalog::Catalog,
+) -> usize {
+    use crate::exec::sizing;
+    let tuple = |rel: u32, row: &[Value], unchanged: &[usize]| -> usize {
         let Some(d) = rels.get(&rel) else { return TUPLE_SIZE + 24 };
         let types: Vec<crate::types::DataType> = d.cols.iter().map(|c| c.ty.clone()).collect();
         let n = types.len().min(row.len());
         let text = |v: &Value, ty: &crate::types::DataType| crate::types::text::format_value(v, ty, fmt);
-        TUPLE_SIZE + crate::catalog::relsize::heap_tuple_len(&types[..n], &row[..n], &text)
+        let len = crate::catalog::relsize::heap_tuple_len(&types[..n], &row[..n], &text);
+        if len <= 2032 {
+            return TUPLE_SIZE + len;
+        }
+        let pinned = unchanged.iter().copied().collect();
+        let Some((len, exts)) = cat.tables.get(&rel).and_then(|t| sizing::decoded_toast(t, &types[..n], &row[..n], &pinned, &text))
+        else {
+            return TUPLE_SIZE + len;
+        };
+        let chunks: usize = exts
+            .iter()
+            .map(|&b| {
+                let (full, rest) = (b / sizing::TOAST_CHUNK_BYTES, b % sizing::TOAST_CHUNK_BYTES);
+                let one = |c: usize| CHANGE_SIZE + TUPLE_SIZE + sizing::toast_chunk_tuple_len(c);
+                full * one(sizing::TOAST_CHUNK_BYTES) + if rest > 0 { one(rest) } else { 0 }
+            })
+            .sum();
+        TUPLE_SIZE + len + chunks
     };
     CHANGE_SIZE
         + match rec {
-            Rec::Insert { rel, new } => tuple(*rel, new),
-            Rec::Update { rel, old, new, .. } => tuple(*rel, new) + old.as_ref().map_or(0, |o| tuple(*rel, &o.0)),
-            Rec::Delete { rel, old } => old.as_ref().map_or(0, |o| tuple(*rel, &o.0)),
+            Rec::Insert { rel, new } => tuple(*rel, new, &[]),
+            Rec::Update { rel, old, new, unchanged_toast } => {
+                tuple(*rel, new, unchanged_toast) + old.as_ref().map_or(0, |o| tuple(*rel, &o.0, &[]))
+            }
+            Rec::Delete { rel, old } => old.as_ref().map_or(0, |o| tuple(*rel, &o.0, &[])),
             Rec::Message { prefix, content, .. } => prefix.len() + 1 + content.len(),
             Rec::Truncate { rels, .. } => 4 * rels.len(),
             Rec::Rel(_) | Rec::Abort { .. } => 0,
@@ -407,6 +434,7 @@ impl<'a> Decoder<'a> {
         let store = self.ctx.db.store.clone();
         let mut size = 0usize;
         let mut subs: HashMap<u64, usize> = HashMap::new();
+        let cat = self.ctx.db.catalog();
         for c in decode::changes(&store, &self.ctx.db.log.decoded, m) {
             let c = c?;
             match &c.rec {
@@ -422,7 +450,7 @@ impl<'a> Decoder<'a> {
                 }
                 _ => {}
             }
-            let sz = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt);
+            let sz = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt, &cat);
             size += sz;
             if c.sub != 0 {
                 *subs.entry(c.sub).or_default() += sz;
@@ -499,6 +527,7 @@ impl<'a> Decoder<'a> {
             return Ok(());
         }
         let mut st = Replay { mute: resume, ..Replay::default() };
+        let cat = self.ctx.db.catalog();
         for c in changes {
             let c = c?;
             match &c.rec {
@@ -530,7 +559,7 @@ impl<'a> Decoder<'a> {
             if c.sub != 0 && st.dropped.contains(&c.sub) {
                 continue;
             }
-            let sz = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt);
+            let sz = change_size(&c.rec, &self.ctx.rels, &self.ctx.fmt, &cat);
             st.mem += sz;
             if c.sub != 0 {
                 *st.sub_mem.entry(c.sub).or_default() += sz;

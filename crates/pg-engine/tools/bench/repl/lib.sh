@@ -192,5 +192,15 @@ wait_confirmed() {
   log "slot $2 never confirmed $3"; return 1
 }
 
+# wait_confirmed_all PORT LSN: until every slot of the publisher confirmed LSN (polled
+# every 0.5 s).
+wait_confirmed_all() {
+  for _ in $(seq 7200); do
+    [ "$(q "$1" postgres "SELECT bool_and(confirmed_flush_lsn >= '$2') FROM pg_replication_slots")" = t ] && return 0
+    sleep 0.5
+  done
+  log "slots of $1 never confirmed $2"; return 1
+}
+
 now() { date +%s.%N; }
 since() { awk -v a="$1" -v b="$(now)" 'BEGIN {printf "%.2f", b - a}'; }

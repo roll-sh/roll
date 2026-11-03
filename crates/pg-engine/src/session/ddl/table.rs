@@ -3775,7 +3775,11 @@ impl Ddl<'_, '_> {
         };
         let mut rows = 0usize;
         if measured.is_none() {
-            for r in self.scan_rows(t) {
+            // (Only the columns its keys, predicate and INCLUDE columns read are decoded.)
+            let mut cols = std::collections::HashSet::new();
+            crate::exec::sizing::index_columns(&bix, &mut cols);
+            let need = (0..t.columns.len()).map(|i| cols.contains(&i)).collect();
+            for r in self.scan_rows_need(t, need) {
                 self.ctx.check()?;
                 let (dkey, row) = r?;
                 rows += 1;

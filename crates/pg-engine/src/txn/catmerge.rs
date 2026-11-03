@@ -88,6 +88,15 @@ pub fn merge(base: &Catalog, mine: &Catalog, cur: &Catalog) -> Result<Catalog> {
         if persist::same_record(mine, cur, tag, oid) {
             continue;
         }
+        // Statistics both changed: VACUUM and ANALYZE process each relation in a transaction
+        // of their own and let its lock go before the next (vacuum's use_own_xacts), so what
+        // another session's VACUUM or ANALYZE (an autovacuum worker's) committed for it since
+        // came after ours did in PostgreSQL, and overwrote it: the current catalog's stays.
+        // (They failed the commit as a concurrent schema change: partition_aggregate's ANALYZE
+        // of a partitioned table racing autovacuum's ANALYZE of a partition.)
+        if persist::STATS_TAGS.contains(&tag) {
+            continue;
+        }
         let j = |c: &Catalog| persist::record_json(c, tag, oid);
         let v = merge_opt(j(base)?.as_ref(), j(mine)?.as_ref(), j(cur)?.as_ref())?
             .map(|m| serde_json::to_vec(&m).map(Bytes::from).map_err(internal))
@@ -326,4 +335,30 @@ fn unique_names(c: &Catalog) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::RelStats;
+
+    /// Two VACUUMs' or ANALYZEs' statistics of one relation: the one committed last (`cur`'s)
+    /// stays, as PostgreSQL's later per-relation transaction overwrote the earlier; what only
+    /// one changed is merged as before.
+    #[test]
+    fn racing_statistics_keep_the_later_commit() {
+        let stats = |tuples: f64| RelStats { pages: tuples as i32, tuples, allvisible: 0, allfrozen: 0 };
+        let mut base = Catalog::bootstrap("postgres");
+        base.relstats.insert(70_000, stats(1.0));
+        let (mut mine, mut cur) = (base.clone(), base.clone());
+        mine.relstats.insert(70_000, stats(10.0));
+        mine.relstats.insert(70_001, stats(5.0));
+        mine.frozen_xids.insert(70_000, 7);
+        cur.relstats.insert(70_000, stats(20.0));
+        cur.frozen_xids.insert(70_000, 9);
+        let out = merge(&base, &mine, &cur).expect("statistics merge without a conflict");
+        assert_eq!(out.relstats.get(&70_000).map(|s| s.tuples), Some(20.0));
+        assert_eq!(out.relstats.get(&70_001).map(|s| s.tuples), Some(5.0));
+        assert_eq!(out.frozen_xids.get(&70_000), Some(&9));
+    }
 }

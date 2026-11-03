@@ -18,6 +18,8 @@ mod round6;
 mod round7;
 #[path = "round8.rs"]
 mod round8;
+#[path = "round9.rs"]
+mod round9;
 
 /// splitmix64: small, fast and good enough to drive a generator.
 pub struct Rng(u64);
@@ -160,6 +162,8 @@ pub struct Schema {
     pub round7: bool,
     /// Round 8: the `r8*` objects exist (`round8::schema`).
     pub round8: bool,
+    /// Round 9: the `r9*` objects exist (`round9::schema`).
+    pub round9: bool,
 }
 
 /// A column visible to an expression: its qualified reference and type.
@@ -245,6 +249,11 @@ pub const R7_SEEDS: u64 = 7000;
 /// SEARCH / CYCLE, SQL/JSON, ranges, text search, large objects, COPY options, LISTEN /
 /// NOTIFY, prepared transactions, spilling queries.
 pub const R8_SEEDS: u64 = 8000;
+/// The first seed generated with round 9's objects and statements (`round9.rs`), on the shared
+/// engine: prepared statements across the custom-to-generic plan switch, batch execution's
+/// edges, COPY into keyed, partitioned and triggered tables, index builds of every access
+/// method, range reads, and statistics after ANALYZE.
+pub const R9_SEEDS: u64 = 9000;
 
 const TEXTS: &[&str] = &[
     "a", "b", "A", "B", "ab", "abc", "", " x", "x ", "é", "Z", "a%", "a_b", "10", "9", "ß",
@@ -2305,6 +2314,10 @@ pub fn schema(seed: u64) -> (Schema, Vec<String>) {
         out.extend(round8::schema(&mut Rng::new(seed ^ 0x8888_8888)));
         s.round8 = true;
     }
+    if seed >= R9_SEEDS {
+        out.extend(round9::schema(&mut Rng::new(seed ^ 0x9999_9999)));
+        s.round9 = true;
+    }
     (s, out)
 }
 
@@ -2446,6 +2459,10 @@ pub fn statements(seed: u64, s: &Schema, n: usize) -> Vec<Stmt> {
     });
     while out.len() < n {
         g.alias = 0;
+        if s.round9 && g.rng.chance(0.55) {
+            out.extend(g.round9_stmt());
+            continue;
+        }
         if s.round8 && g.rng.chance(0.5) {
             out.extend(g.round8_stmt());
             continue;

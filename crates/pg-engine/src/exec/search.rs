@@ -1117,11 +1117,12 @@ pub fn nearest(
                 Geo::Point(p) => ((p.x, p.y), true),
                 _ => return Ok(None),
             },
-            // (btree_gist's distances of these are numbers; of timestamps, intervals.)
+            // (btree_gist's distances of these are numbers; of timestamps, intervals, which
+            // `nearest::Dist` orders by their span in microseconds, the timestamps' unit.)
             (Kind::Scalar, v) if fits(&sh.tys[i], v) => match v {
                 Value::Int2(x) => ((*x as f64, 0.0), false),
                 Value::Int4(x) | Value::Date(x) => ((*x as f64, 0.0), false),
-                Value::Int8(x) => ((*x as f64, 0.0), false),
+                Value::Int8(x) | Value::Timestamp(x) | Value::Timestamptz(x) => ((*x as f64, 0.0), false),
                 Value::Float4(x) => ((*x as f64, 0.0), true),
                 Value::Float8(x) => ((*x, 0.0), true),
                 _ => return Ok(None),

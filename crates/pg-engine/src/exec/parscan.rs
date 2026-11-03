@@ -92,6 +92,8 @@ pub struct Decode {
     pub need: Option<Arc<[bool]>>,
     /// Per column, the value of a row stored before it was added.
     pub missing: Vec<Option<Value>>,
+    /// Per column, its declared type (`storage::cols::decode_cols` decodes by it).
+    pub types: Vec<crate::types::DataType>,
     /// The row's storage key goes after its columns.
     pub with_key: bool,
     /// The filter as a kernel (None: none, or one the executor's thread evaluates).
@@ -228,6 +230,128 @@ pub fn fill_source<F: FillRows + 'static>(f: F, bulk: bool) -> Source {
 /// Rows a fill asks for at a time.
 const FILL: usize = 256;
 
+/// A scan's batch kernels (`vector`) over a fill's rows decoded as columns
+/// (`storage::cols`): the filter's outcome per row, and the bottom hash join probe's lookup
+/// (`pipe::Probe::int_key_col`). A row they can't decide (`odd`: a value its column's
+/// vector can't hold, one out of line; or a filter outcome `Out`) goes through the row path.
+struct Pre<'a> {
+    plan: super::vector::AggPlan,
+    probe: Option<&'a super::pipe::Probe>,
+    types: &'a [crate::types::DataType],
+    missing: Vec<Value>,
+    cols: crate::storage::cols::ColBatch,
+    odd: Vec<bool>,
+    sel: Vec<u32>,
+    tri: Vec<super::vector::Tri>,
+    /// Rows decoded, and of them the ones the batch did (dropped or aggregated): the rest
+    /// are decoded again by the row path, so a chunk where the batch does too few stops
+    /// using it (`worth`).
+    seen: u64,
+    done: u64,
+    /// `worth` said no: `run_rows` reads on without it.
+    off: bool,
+}
+
+impl<'a> Pre<'a> {
+    /// `n` more rows decoded, `done` of them done by the batch; false: the batch did under
+    /// a quarter of the chunk's rows so far (past 2,048 of them): not worth decoding.
+    fn worth(&mut self, n: usize, done: u64) -> bool {
+        self.seen += n as u64;
+        self.done += done;
+        VECTOR_ROWS.fetch_add(done, std::sync::atomic::Ordering::Relaxed);
+        self.seen < 2048 || self.done * 4 >= self.seen
+    }
+
+    /// For an aggregating scan (`spec`: its aggregates too, where no join is between), or
+    /// a scan whose rows are made (None: when a filter or a probe can drop rows). None:
+    /// nothing a batch kernel does.
+    fn new(d: &'a Decode, spec: Option<&super::partial::Spec>) -> Option<Pre<'a>> {
+        if !vectors()
+            || d.ios.is_some()
+            || !d.raw.is_empty()
+            || d.topk.is_some()
+            || (spec.is_some() && !d.extra.is_empty())
+            || (d.filtered && d.filter.is_none())
+        {
+            return None;
+        }
+        let probe = match d.stages.first().map(|s| &**s) {
+            Some(super::pipe::Stage::Hash(p)) => p.int_key_col().map(|c| (c, p)),
+            _ => None,
+        };
+        if !d.stages.is_empty() && probe.is_none() && (spec.is_some() || d.filter.is_none()) {
+            return None;
+        }
+        if spec.is_none() && probe.is_none() && d.filter.is_none() {
+            return None;
+        }
+        let plan = super::vector::AggPlan::compile(&d.types, d.filter.as_ref(), d.filtered, spec, probe.map(|p| p.0))?;
+        Some(Pre {
+            plan,
+            probe: probe.map(|p| p.1),
+            types: &d.types,
+            missing: d.missing.iter().map(|m| m.clone().unwrap_or(Value::Null)).collect(),
+            cols: Default::default(),
+            odd: Vec::new(),
+            sel: Vec::new(),
+            tri: Vec::new(),
+            seen: 0,
+            done: 0,
+            off: false,
+        })
+    }
+
+    /// Rows `rows` of `b` decoded, `odd` and `tri` (by row of the run) filled.
+    fn decode(&mut self, b: &RowBatch, rows: std::ops::Range<usize>) {
+        use super::vector::Tri;
+        let n = rows.len();
+        self.odd.clear();
+        self.odd.resize(n, true);
+        // (A batch that doesn't decode: all its rows to the row path, which raises the error
+        // at its row.)
+        if crate::storage::cols::decode_cols(b, rows, &self.plan.need, self.types, &self.missing, &mut self.cols).is_ok() {
+            self.odd.fill(false);
+            for r in &self.cols.ext {
+                self.odd[*r as usize] = true;
+            }
+            for c in self.cols.cols.iter().flatten() {
+                for (r, _) in &c.odd {
+                    self.odd[*r as usize] = true;
+                }
+            }
+        }
+        self.sel.clear();
+        self.sel.extend((0..n as u32).filter(|r| !self.odd[*r as usize]));
+        self.tri.clear();
+        self.tri.resize(n, Tri::T);
+        if let Some(f) = &self.plan.filter {
+            f.eval(&self.cols, &self.sel, &mut self.tri);
+        }
+    }
+
+    /// Whether decoded row `r` gives nothing: the filter rejects it, or the probe finds no
+    /// candidate for it.
+    #[inline]
+    fn drops(&self, r: usize) -> bool {
+        use super::vector::Tri;
+        !self.odd[r]
+            && match self.tri[r] {
+                Tri::F | Tri::N => true,
+                Tri::T => self.probe.is_some_and(|p| self.plan.misses(p, &self.cols, r)),
+                Tri::Out => false,
+            }
+    }
+
+    /// The rows of `rows` it drops, into `skip` (`Reader::next_row_with`).
+    fn mark(&mut self, b: &RowBatch, rows: std::ops::Range<usize>, skip: &mut Vec<bool>) {
+        self.decode(b, rows.clone());
+        skip.clear();
+        skip.extend((0..rows.len()).map(|r| self.drops(r)));
+        let n = skip.iter().filter(|s| **s).count();
+        self.off = !self.worth(rows.len(), n as u64);
+    }
+}
+
 /// A chunk's rows by reference, `left` more at most (an inline scan's slice of it), the
 /// batch kept from slice to slice.
 struct Reader<'c> {
@@ -237,21 +361,62 @@ struct Reader<'c> {
     left: usize,
     /// The chunk has no row left.
     done: bool,
+    /// Which rows of `batch` from `skip_from` on a `Pre` drops.
+    skip: Vec<bool>,
+    skip_from: usize,
 }
 
 impl<'c> Reader<'c> {
     fn new(src: &'c mut Source, batch: &'c mut RowBatch, left: usize) -> Reader<'c> {
-        Reader { src, batch, cur: None, left, done: false }
+        Reader { src, batch, cur: None, left, done: false, skip: Vec::new(), skip_from: 0 }
+    }
+
+    /// Whether the rows come a batch at a time (`next_run`).
+    fn fills(&self) -> bool {
+        matches!(self.src, Source::Fill(_))
+    }
+
+    /// The next run of a fill's rows, as positions in `batch` (all of the batch's left, up
+    /// to `left`), the cursor past them. None: no row left, or a source of single rows.
+    fn next_run(&mut self) -> Option<Result<std::ops::Range<usize>>> {
+        let Source::Fill(f) = &mut *self.src else { return None };
+        if self.left == 0 || self.done {
+            return None;
+        }
+        if self.batch.remaining() == 0 {
+            self.batch.clear();
+            if let Err(e) = f.fill(self.batch, FILL) {
+                return Some(Err(e));
+            }
+            if self.batch.is_empty() {
+                self.done = true;
+                return None;
+            }
+        }
+        let start = self.batch.pos();
+        let n = self.batch.remaining().min(self.left);
+        self.left -= n;
+        for _ in 0..n {
+            self.batch.advance();
+        }
+        Some(Ok(start..start + n))
     }
 
     fn next_row(&mut self) -> Option<Result<(&[u8], &[u8])>> {
+        self.next_row_with(None, &mut 0)
+    }
+
+    /// `next_row`, a fill's rows first offered a batch at a time to `pre` (`Pre`): the
+    /// rows it drops are passed over, counted in `skipped`.
+    fn next_row_with(&mut self, mut pre: Option<&mut Pre<'_>>, skipped: &mut u32) -> Option<Result<(&[u8], &[u8])>> {
         if self.left == 0 {
             return None;
         }
         match &mut *self.src {
-            Source::Fill(f) => {
+            Source::Fill(f) => loop {
                 if self.batch.remaining() == 0 {
                     self.batch.clear();
+                    self.skip.clear();
                     if let Err(e) = f.fill(self.batch, FILL) {
                         return Some(Err(e));
                     }
@@ -260,11 +425,27 @@ impl<'c> Reader<'c> {
                         return None;
                     }
                 }
-                self.left -= 1;
                 let i = self.batch.pos();
+                if let Some(pre) = pre.as_deref_mut() {
+                    if !(self.skip_from..self.skip_from + self.skip.len()).contains(&i) {
+                        self.skip.clear();
+                        self.skip_from = i;
+                        pre.mark(self.batch, i..self.batch.len(), &mut self.skip);
+                    }
+                    if self.skip[i - self.skip_from] {
+                        self.batch.advance();
+                        self.left -= 1;
+                        *skipped += 1;
+                        if self.left == 0 {
+                            return None;
+                        }
+                        continue;
+                    }
+                }
+                self.left -= 1;
                 self.batch.advance();
-                Some(Ok(self.batch.get(i)))
-            }
+                return Some(Ok(self.batch.get(i)));
+            },
             Source::Rows(it) => {
                 let Some(r) = it.next() else {
                     self.done = true;
@@ -781,12 +962,18 @@ fn run_rows(
             None
         };
         let mut consecutive_kept = 0;
-        while let Some(r) = scan.next_row() {
+        // (Rows a batch filter or probe drops before they're made: `Pre`.)
+        let mut pre = match scan.fills() {
+            true => Pre::new(d, None),
+            false => None,
+        };
+        let mut dropped = 0u32;
+        while let Some(r) = scan.next_row_with(pre.as_mut().filter(|p| !p.off), &mut dropped) {
             n = n.wrapping_add(1);
             if n % 1024 == 1023 && stopped() {
                 return false;
             }
-            read += 1;
+            read += 1 + std::mem::take(&mut dropped);
             let (key, bytes) = match r {
                 Ok(kv) => kv,
                 Err(e) => {
@@ -927,6 +1114,7 @@ fn run_rows(
         if !batch.is_empty() && out.send(Msg::Rows(batch)).is_err() {
             return false;
         }
+        read += dropped;
         // (The chunk's lookups counted before its end is.)
         scratch.flush(&d.stages);
         let _ = out.send(match err {
@@ -981,7 +1169,64 @@ fn work_partial(
     // (Rows a part can't take: sent in their place, the part so far first.)
     let mut serial: Vec<(Row, u8, bool)> = Vec::new();
     let mut n = 0usize;
-    while let Some(r) = scan.next_row() {
+    // (A fill's rows a batch at a time as columns, when the filter and aggregates have
+    // batch kernels, or below hash joins the bottom one's probe: `vector`. A row they can't
+    // do goes through the row path in its place.)
+    let mut pre = match scan.fills() {
+        true => Pre::new(d, Some(spec)),
+        false => None,
+    };
+    let mut pre_off = false;
+    loop {
+        if pre_off {
+            pre = None;
+        }
+        if let Some(pre) = &mut pre {
+            let run = match scan.next_run() {
+                Some(Ok(run)) => run,
+                Some(Err(e)) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
+                None => break,
+            };
+            n += run.len();
+            if n % 4096 < run.len() && stopped() {
+                return false;
+            }
+            pre.decode(scan.batch, run.clone());
+            let pa_run = run.len();
+            let mut taken = 0;
+            for (r, i) in run.enumerate() {
+                use super::vector::Tri;
+                read += 1;
+                if pre.drops(r) {
+                    taken += 1;
+                    continue;
+                }
+                let aggregated = !pre.odd[r]
+                    && pre.tri[r] == Tri::T
+                    && pre.plan.probe.is_none()
+                    && pa.batch_row(&pre.plan, &pre.cols, r);
+                if aggregated {
+                    taken += 1;
+                } else {
+                    let (k, v) = scan.batch.get(i);
+                    if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+                        return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
+                    }
+                }
+                if !serial.is_empty() {
+                    if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
+                        return false;
+                    }
+                } else if pa.rows() >= PART_ROWS && !send_part(&mut pa, &mut read) {
+                    return false;
+                }
+            }
+            if !pre.worth(pa_run, taken) {
+                pre_off = true;
+            }
+            continue;
+        }
+        let Some(r) = scan.next_row() else { break };
         n += 1;
         if n.is_multiple_of(4096) && stopped() {
             return false;
@@ -991,44 +1236,8 @@ fn work_partial(
             Ok(e) => e,
             Err(e) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
         };
-        // (Read in place: a row the filter rejects or the part takes is never made.)
-        let row = match &d.ios {
-            None => lazy.read(d, k, v).and_then(|lazy| {
-                let pass = filter_pass(d, &lazy);
-                match pass {
-                    Some(false) => Ok(None),
-                    Some(true) if d.stages.is_empty() && pa.row(&lazy) => Ok(None),
-                    _ => lazy.into_row().map(|row| Some((row, pass))),
-                }
-            }),
-            Some(_) => d.row(k, v).map(|row| {
-                let pass = filter_pass(d, &row);
-                Some((row, pass))
-            }),
-        };
-        let (row, pass) = match row {
-            Ok(Some(r)) => r,
-            Ok(None) => continue,
-            Err(e) => return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok(),
-        };
-        match pass {
-            Some(false) => continue,
-            None => serial.push((row, 0, false)),
-            Some(true) if d.stages.is_empty() => {
-                // (One read in place was offered to the part already.)
-                if d.ios.is_none() || !pa.row(&row) {
-                    serial.push((row, 0, true));
-                }
-            }
-            Some(true) => {
-                // (Each joined row in order: aggregated while nothing went to the serial
-                // path before it, else after it, in its place.)
-                super::pipe::run_stages(&d.stages, 0, row, scratch, &mut |r, lvl| {
-                    if !serial.is_empty() || lvl != top || !pa.row(&r) {
-                        serial.push((r.into_row(), lvl, true));
-                    }
-                });
-            }
+        if let Err(e) = partial_row(d, &mut pa, &mut serial, scratch, lazy, top, k, v) {
+            return send_part(&mut pa, &mut read) && out.send(Msg::Err(e)).is_ok();
         }
         if !serial.is_empty() {
             if !send_part(&mut pa, &mut read) || out.send(Msg::Seg(Seg::Rows(std::mem::take(&mut serial)))).is_err() {
@@ -1040,6 +1249,84 @@ fn work_partial(
     }
     scratch.flush(&d.stages);
     send_part(&mut pa, &mut read) && out.send(Msg::Done(0, 0)).is_ok()
+}
+
+/// Whether aggregating scans read fills as column batches (`vector`; tests compare both).
+fn vectors() -> bool {
+    NO_VECTORS.load(std::sync::atomic::Ordering::Relaxed) == 0
+}
+
+/// Callers of `without_vectors` running (process-wide: the workers read it too; both paths
+/// give the same results, so other statements running meanwhile see no difference).
+static NO_VECTORS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Runs `f` with aggregating scans reading row by row (tests: the column path against the
+/// row path).
+#[doc(hidden)]
+pub fn without_vectors<R>(f: impl FnOnce() -> R) -> R {
+    struct Off;
+    impl Drop for Off {
+        fn drop(&mut self) {
+            NO_VECTORS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    NO_VECTORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _off = Off;
+    f()
+}
+
+/// Rows aggregated through column batches (`vector`; tests: which path ran).
+pub static VECTOR_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One stored row of an aggregating scan through the row path: read in place, filtered,
+/// aggregated or queued in `serial` (with the joins' rows it makes), in order.
+#[allow(clippy::too_many_arguments)]
+fn partial_row(
+    d: &Decode,
+    pa: &mut super::partial::Partials,
+    serial: &mut Vec<(Row, u8, bool)>,
+    scratch: &mut super::pipe::Scratch,
+    lazy: &mut LazyBuf,
+    top: u8,
+    k: &[u8],
+    v: &[u8],
+) -> Result<()> {
+    // (Read in place: a row the filter rejects or the part takes is never made.)
+    let row = match &d.ios {
+        None => lazy.read(d, k, v).and_then(|lazy| {
+            let pass = filter_pass(d, &lazy);
+            match pass {
+                Some(false) => Ok(None),
+                Some(true) if d.stages.is_empty() && pa.row(&lazy) => Ok(None),
+                _ => lazy.into_row().map(|row| Some((row, pass))),
+            }
+        }),
+        Some(_) => d.row(k, v).map(|row| {
+            let pass = filter_pass(d, &row);
+            Some((row, pass))
+        }),
+    };
+    let Some((row, pass)) = row? else { return Ok(()) };
+    match pass {
+        Some(false) => {}
+        None => serial.push((row, 0, false)),
+        Some(true) if d.stages.is_empty() => {
+            // (One read in place was offered to the part already.)
+            if d.ios.is_none() || !pa.row(&row) {
+                serial.push((row, 0, true));
+            }
+        }
+        Some(true) => {
+            // (Each joined row in order: aggregated while nothing went to the serial
+            // path before it, else after it, in its place.)
+            super::pipe::run_stages(&d.stages, 0, row, scratch, &mut |r, lvl| {
+                if !serial.is_empty() || lvl != top || !pa.row(&r) {
+                    serial.push((r.into_row(), lvl, true));
+                }
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Keys cutting [lo, hi] into `n` ranges of about equal width (as numbers over the bytes

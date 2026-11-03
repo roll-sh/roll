@@ -27,10 +27,12 @@ pub mod gistlog;
 pub mod kept;
 
 /// Tables with more row versions than this aren't modelled (their sizes are estimated).
-/// Packed line pointers (`heapsim::lps`) and leaf buffers (`btsim::leaf`) let larger tables
-/// retain the models rather than switching to estimates at 400,000 versions. Tests lower
-/// this limit (`with_max_versions`) to take the estimates' paths.
-const MAX_VERSIONS: usize = 1 << 40;
+/// Packed line pointers (`heapsim::lps`) and leaf buffers (`btsim::leaf`) make a modelled
+/// row cost well under PostgreSQL's page bytes for it, but keeping a big table's model
+/// costs its bulk writes (COPY, DELETE, CREATE INDEX) a model update per row: the limit
+/// stays at 400,000 versions until those are cheaper than the estimates' paths. Tests lower
+/// it (`with_max_versions`) to take the estimates' paths.
+const MAX_VERSIONS: usize = 400_000;
 
 thread_local! {
     /// `MAX_VERSIONS` on this thread (`with_max_versions`).
@@ -1114,6 +1116,33 @@ pub fn external_columns(t: &Table, row: &[Value], ctx: &ExecCtx) -> Option<Vec<b
     Some(st.iter().map(|s| *s == St::External).collect())
 }
 
+/// A row of `t` heap_insert TOASTs, as logical decoding holds it (ReorderBufferChangeSize):
+/// the tuple's length as stored and each out-of-line value's size (its TOAST_MAX_CHUNK_SIZE
+/// chunks are changes of their own). `pinned`: columns already out of line (an UPDATE's
+/// unchanged ones). None without a TOAST table.
+pub fn decoded_toast(
+    t: &Table,
+    types: &[DataType],
+    row: &[Value],
+    pinned: &HashSet<usize>,
+    text: &dyn Fn(&Value, &DataType) -> String,
+) -> Option<(usize, Vec<usize>)> {
+    if t.toast == 0 || row.len() > t.columns.len() {
+        return None;
+    }
+    let (len, exts, _, _) = toast_layout_full(t, types, row, pinned, text, false);
+    Some((len, exts.iter().map(|e| e.bytes).collect()))
+}
+
+/// The t_len of a TOAST table's chunk tuple of `bytes` (chunk_id, chunk_seq, chunk_data).
+pub fn toast_chunk_tuple_len(bytes: usize) -> usize {
+    // (A 23-byte header aligned, oid, int4, then the bytea: a 1-byte header when short.)
+    32 + if bytes < 127 { bytes + 1 } else { bytes + 4 }
+}
+
+/// TOAST_MAX_CHUNK_SIZE.
+pub const TOAST_CHUNK_BYTES: usize = TOAST_CHUNK;
+
 /// How a column's value of `row` is stored in `t` (pg_column_size / pg_column_compression):
 /// None when it is stored as it is, else its stored size (a compressed varlena's, or an
 /// out-of-line value's extsize) and its compression method when compressed.
@@ -1311,15 +1340,33 @@ pub fn btree_key(t: &Table, bix: &BoundIndex, vals: Vec<Value>, row: &[Value], c
 }
 
 /// The pages a sorted build (CREATE INDEX, REINDEX) of btree index `bix` over these keys
-/// gives, in the rows' order (their TIDs only order equal keys): `Btree::build`'s layout,
-/// with the index's fillfactor and deduplication, as the model has it for the indexes it
-/// holds. None for an index that isn't a btree.
-pub fn btree_build_blocks(bix: &BoundIndex, keys: Vec<Key>) -> Option<u32> {
+/// (each with its row's key) gives, in the rows' order (their TIDs only order equal keys):
+/// `Btree::build`'s layout, with the index's fillfactor and deduplication, as the model has
+/// it for the indexes it holds. None for an index that isn't a btree. On a modelled heap
+/// the build is the index's model from then on (entries at their rows' TIDs, as `ensure`
+/// would build it): the rows aren't read again for it.
+pub fn btree_build_blocks(t: &Table, bix: &BoundIndex, keys: Vec<(Key, Vec<u8>)>, db: &Database) -> Option<u32> {
     let opts = btree_opts(bix)?;
+    let oid = bix.index.oid;
+    let mut rf = db.relfiles.of(t.oid).write();
+    let real: Option<Vec<(Key, Tid)>> = rf.heaps.get(&t.oid).and_then(|h| {
+        let mut out = Vec::with_capacity(keys.len());
+        for (k, row) in &keys {
+            out.push((k.clone(), h.tid_of(row)?));
+        }
+        Some(out)
+    });
+    if let Some(entries) = real {
+        let tree = Btree::build(opts, entries);
+        let n = tree.nblocks();
+        rf.btrees.insert(oid, tree);
+        return Some(n);
+    }
+    drop(rf);
     let entries = keys
         .into_iter()
         .enumerate()
-        .map(|(i, k)| (k, ((i / 291) as u32, (i % 291) as u16 + 1)))
+        .map(|(i, (k, _))| (k, ((i / 291) as u32, (i % 291) as u16 + 1)))
         .collect();
     Some(Btree::build(opts, entries).nblocks())
 }
@@ -1359,20 +1406,61 @@ fn entries_with(
     Ok(out)
 }
 
+thread_local! {
+    /// Tables this thread found modelled (by database instance and table), with a watch on
+    /// the heap's model and each btree's: `ensure`'s fast path, no shard lock while they are
+    /// alive (a model dropped, replaced or detached retires its watch).
+    static MODELLED: std::cell::RefCell<HashMap<(u64, u32), (heapsim::SizeWatch, Vec<(u32, heapsim::SizeWatch)>)>> =
+        Default::default();
+}
+
+/// Whether this thread saw table `t`'s heap and its btree `indexes` modelled, and those
+/// models are still there.
+fn known_modelled(db: &Database, t: u32, indexes: &[BoundIndex]) -> bool {
+    MODELLED.with(|m| {
+        m.borrow().get(&(db.instance, t)).is_some_and(|(heap, btrees)| {
+            heap.alive()
+                && indexes
+                    .iter()
+                    .filter(|b| b.index.method == "btree")
+                    .all(|b| btrees.iter().any(|(o, w)| *o == b.index.oid && w.alive()))
+        })
+    })
+}
+
 /// Make sure the table's heap and btree indexes are modelled, laying out those that
 /// aren't from the rows there now. False when the table is too big to model.
 fn ensure(t: &Table, indexes: &[BoundIndex], ctx: &ExecCtx) -> Result<bool> {
     let db = &ctx.sess.db;
+    if known_modelled(db, t.oid, indexes) {
+        return Ok(true);
+    }
     let wanted = || -> Option<(bool, Vec<&BoundIndex>)> {
         let rf = db.relfiles.of(t.oid).read();
         if rf.untracked.contains(&t.oid) {
             return None;
         }
-        let missing = indexes
+        let missing: Vec<&BoundIndex> = indexes
             .iter()
             .filter(|b| b.index.method == "btree" && !rf.btrees.contains_key(&b.index.oid))
             .collect();
-        Some((!rf.heaps.contains_key(&t.oid), missing))
+        let heap = rf.heaps.get(&t.oid);
+        if let Some(h) = heap
+            && missing.is_empty()
+        {
+            let btrees = indexes
+                .iter()
+                .filter_map(|b| Some((b.index.oid, rf.btrees.get(&b.index.oid)?.sizes.watch())))
+                .collect();
+            MODELLED.with(|m| {
+                let mut m = m.borrow_mut();
+                if m.len() >= 4096 {
+                    m.retain(|_, (h, _)| h.alive());
+                }
+                m.insert((db.instance, t.oid), (h.sizes.watch(), btrees));
+            });
+        }
+        Some((heap.is_none(), missing))
     };
     let Some((heap_missing, missing)) = wanted() else { return Ok(false) };
     if !heap_missing && missing.is_empty() {
@@ -2121,10 +2209,16 @@ pub fn updated(
         let Some(heap) = heaps.get_mut(&t.oid) else {
             return Ok(None);
         };
-        mark_cmax(heap, old_key, &v, ctx);
         let cid = ctx.txn.borrow_mut().output_cid();
-        let r = heap.update(old_key, new_key, len, xid, hot_ok, &v);
-        heap.set_raw_cid(r.0, cid);
+        // (The old version's command id as mark_cmax sets it, within the update's lookup.)
+        let mut cmax = |o: &heapsim::Tup| match ctx.txn.try_borrow_mut() {
+            Ok(mut txn) => {
+                let here = txn.is_current_xid(o.xmin);
+                txn.adjust_cmax(o.cid, here)
+            }
+            Err(_) => o.cid,
+        };
+        let r = heap.update_cid(old_key, new_key, len, (xid, cid), hot_ok, &v, &mut cmax);
         heap.settle_left(&v);
         big = heap.versions() > max_versions();
         r
@@ -2250,14 +2344,134 @@ pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
     rf.heaps.get(&table).is_none_or(|h| h.all_visible_pages() >= h.nblocks())
 }
 
+/// What an index or bitmap heap scan needs to note its fetches (`Fetcher::fetched`),
+/// taken once per scan: whether the relation is a temporary one (its pruning horizon), and
+/// a watch on every page being all-visible, when they are (nothing to prune then: no lock,
+/// no lookup).
+pub struct Fetcher {
+    table: u32,
+    db: Arc<Database>,
+    xids: Arc<Xids>,
+    /// A temporary relation's: its transaction's id (`vis_for`).
+    temp: Option<Option<u64>>,
+    visible: Option<heapsim::VisWatch>,
+    /// The heap's prune hints, and whether rows' stored TIDs are the model's.
+    hints: (Arc<heapsim::PruneHints>, bool),
+    last: Option<u32>,
+}
+
+impl Fetcher {
+    /// None when the table's heap isn't modelled.
+    pub fn new(table: u32, ctx: &ExecCtx) -> Option<Fetcher> {
+        let db = ctx.sess.db.clone();
+        let (visible, hints) = {
+            let rf = db.relfiles.of(table).read();
+            let h = rf.heaps.get(&table)?;
+            (h.visibility_watch(), h.prune_hints())
+        };
+        let cat = ctx.catalog();
+        let rel = cat.tables.get(&table).or_else(|| cat.toast_owner(table).map(|(o, _)| o));
+        let temp = rel
+            .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+            .then(|| ctx.txn.borrow().xid_if_assigned());
+        Some(Fetcher { table, xids: db.xids(), db, temp, visible, hints, last: None })
+    }
+
+    fn vis(&self) -> Vis<'_> {
+        match self.temp {
+            Some(own) => Vis::temp(&self.xids, own),
+            None => Vis::new(&self.xids),
+        }
+    }
+
+    /// The row under `key` was fetched (heap_page_prune_opt on reaching another page).
+    pub fn fetched(&mut self, key: &[u8]) {
+        self.last = self.fetch(key);
+    }
+
+    /// `fetched`, with the TID the row was stored with (`scan::stored_tid`): its page is
+    /// known without a lookup, and its prune hint says without the model's lock whether
+    /// reaching it can prune it.
+    pub fn fetched_at(&mut self, key: &[u8], tid: Option<Tid>) {
+        if self.visible.as_ref().is_some_and(heapsim::VisWatch::holds) {
+            return;
+        }
+        let Some((blk, _)) = tid.filter(|_| self.hints.1) else {
+            return self.fetched(key);
+        };
+        if self.last == Some(blk) {
+            return;
+        }
+        let horizon = match self.temp {
+            Some(own) => self.xids.temp_horizon(own),
+            None => self.xids.horizon(),
+        };
+        match self.hints.0.may_prune(blk, horizon) {
+            Some(false) => self.last = Some(blk),
+            Some(true) => {
+                let v = self.vis();
+                let mut rf = self.db.relfiles.of(self.table).write();
+                if let Some(heap) = rf.heaps.get_mut(&self.table) {
+                    heap.prune_opt(blk, &v);
+                }
+                self.last = Some(blk);
+            }
+            None => {
+                // (The hints were replaced: the heap's new ones, then this row again.)
+                let hints = self.db.relfiles.of(self.table).read().heaps.get(&self.table).map(heapsim::Heap::prune_hints);
+                match hints {
+                    Some(h) if h.0.may_prune(blk, horizon).is_some() => {
+                        self.hints = h;
+                        self.fetched_at(key, tid);
+                    }
+                    _ => self.fetched(key),
+                }
+            }
+        }
+    }
+
+    /// `fetched` for rows handed out together, in row order (nothing between them writes).
+    pub fn fetched_run<'k>(&mut self, keys: impl Iterator<Item = &'k [u8]>) {
+        for k in keys {
+            self.fetched(k);
+        }
+    }
+
+    fn fetch(&mut self, key: &[u8]) -> Option<u32> {
+        if self.visible.as_ref().is_some_and(heapsim::VisWatch::holds) {
+            return self.last;
+        }
+        self.visible = None;
+        let v = self.vis();
+        {
+            let rf = self.db.relfiles.of(self.table).read();
+            let heap = rf.heaps.get(&self.table)?;
+            if heap.all_visible_pages() >= heap.nblocks() {
+                return None;
+            }
+            let blk = heap.locate(key, &v).map(|t| t.0);
+            if blk.is_none_or(|b| self.last == Some(b) || !heap.prune_wanted(b, &v)) {
+                return blk;
+            }
+        }
+        let mut rf = self.db.relfiles.of(self.table).write();
+        let heap = rf.heaps.get_mut(&self.table)?;
+        let blk = heap.locate(key, &v)?.0;
+        if self.last != Some(blk) {
+            heap.prune_opt(blk, &v);
+        }
+        Some(blk)
+    }
+}
+
 /// An index or bitmap heap fetch: prune when reaching a different heap page.
-/// All-visible heaps need no lookup. None means no block was visited.
+/// All-visible heaps need no lookup. None means no block was visited. (A scan fetching many
+/// rows holds a `Fetcher`.)
 pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Option<u32> {
     let db = &ctx.sess.db;
     {
         let rf = db.relfiles.of(table).read();
         let heap = rf.heaps.get(&table)?;
-        // (Before the visibility horizon is read: an all-visible heap needs neither.)
         if heap.all_visible_pages() >= heap.nblocks() {
             return None;
         }
@@ -2368,6 +2582,9 @@ pub struct Kills {
     at: Option<Vec<u8>>,
     since: usize,
     every: usize,
+    /// Every heap page all-visible when the scan began, if it was found so: no entry can
+    /// be dead while that holds, so there is nothing to mark.
+    visible: Option<crate::catalog::heapsim::VisWatch>,
 }
 
 impl Kills {
@@ -2376,10 +2593,15 @@ impl Kills {
     pub fn new(table: u32, index: u32, prefix: &[u8], ranges: &[(Vec<u8>, Vec<u8>)], rev: bool, ctx: &ExecCtx) -> Option<Kills> {
         // (Without waiting behind the shard's writers: an index found modelled or not
         // decided yet gets its marks, and marking an index that isn't modelled does nothing.)
-        if is_estimated(table, &ctx.sess.db)
-            || ctx.sess.db.relfiles.of(table).try_read().is_some_and(|rf| !rf.btrees.contains_key(&index))
-        {
+        if is_estimated(table, &ctx.sess.db) {
             return None;
+        }
+        let mut visible = None;
+        if let Some(rf) = ctx.sess.db.relfiles.of(table).try_read() {
+            if !rf.btrees.contains_key(&index) {
+                return None;
+            }
+            visible = rf.heaps.get(&table).and_then(Heap::visibility_watch);
         }
         let cat = ctx.catalog();
         let temp = cat
@@ -2389,7 +2611,7 @@ impl Kills {
             .then(|| ctx.txn.borrow().xid_if_assigned());
         let strip = |k: &[u8]| k.strip_prefix(prefix).map(<[u8]>::to_vec);
         let ranges = ranges.iter().map(|(lo, hi)| (strip(lo), strip(hi))).collect();
-        let mut k = Kills { db: ctx.sess.db.clone(), table, index, prefix: prefix.to_vec(), temp, rev, ranges, from: None, at: None, since: 0, every: 1 };
+        let mut k = Kills { db: ctx.sess.db.clone(), table, index, prefix: prefix.to_vec(), temp, rev, ranges, from: None, at: None, since: 0, every: 1, visible };
         k.from = k.start();
         Some(k)
     }
@@ -2412,6 +2634,9 @@ impl Kills {
     /// A row whose entry's key columns are `key` (a storage key, the index's prefix first)
     /// comes out: the entries before it were passed.
     pub fn passed(&mut self, key: &[u8]) {
+        if self.visible.as_ref().is_some_and(crate::catalog::heapsim::VisWatch::holds) {
+            return;
+        }
         let Some(k) = key.strip_prefix(&self.prefix[..]).map(<[u8]>::to_vec) else { return };
         // Ranges the scan has gone past.
         while let Some((lo, hi)) = self.ranges.front() {
@@ -2446,10 +2671,23 @@ impl Kills {
         }
     }
 
+    /// A skip scan read up to entry `at` (a storage key) and goes on at `to`, the entries in
+    /// between unread: the ones read are marked now, and marking resumes at `to`. Without
+    /// it, the next row's marking would walk every entry the scan sought past.
+    pub fn sought(&mut self, at: &[u8], to: &[u8]) {
+        let (Some(a), Some(t)) = (at.strip_prefix(&self.prefix[..]), to.strip_prefix(&self.prefix[..])) else { return };
+        let r = if self.rev { (Some(a.to_vec()), self.from.take()) } else { (self.from.take(), Some(a.to_vec())) };
+        self.mark(r);
+        self.from = Some(t.to_vec());
+    }
+
     fn mark(&self, (lo, hi): (Option<Vec<u8>>, Option<Vec<u8>>)) {
         if let (Some(l), Some(h)) = (&lo, &hi)
             && l >= h
         {
+            return;
+        }
+        if self.visible.as_ref().is_some_and(crate::catalog::heapsim::VisWatch::holds) {
             return;
         }
         let xids = self.db.xids();
@@ -3882,7 +4120,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         indexes: Vec::new(),
     };
     if !res.dead.is_empty() {
-        let dead: HashSet<Tid> = res.dead.iter().copied().collect();
+        let dead: crate::exec::fasthash::HashSet<Tid> = res.dead.iter().copied().collect();
         for bix in &indexes {
             if let Some(bt) = btrees.get_mut(&bix.index.oid) {
                 bt.bulk_delete(&dead);
@@ -3904,7 +4142,7 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         if !r.dead.is_empty()
             && let Some(bt) = btrees.get_mut(&(t.toast + 1))
         {
-            bt.bulk_delete(&r.dead.iter().copied().collect());
+            bt.bulk_delete(&r.dead.iter().copied().collect::<crate::exec::fasthash::HashSet<_>>());
         }
     }
     drop(rf);
@@ -3990,14 +4228,11 @@ pub fn btree_leaf_pages(
     Some(out)
 }
 
-/// For each storage key in `starts` (with the index's key prefix), the leaf page of btree
-/// `index` a scan starting there reads first (`Btree::scan_leaf`): starts sharing a leaf
-/// are read without a new descent (a skip scan's "Index Searches"). None when the index
-/// isn't modelled.
-pub fn btree_leaf_for(table: u32, index: u32, prefix: &[u8], starts: &[Vec<u8>], db: &Database) -> Option<Vec<Option<u32>>> {
+/// `f` over the size model of btree `index` of `table` (a skip scan's "Index Searches",
+/// `skipcount`), under the models' read lock. None when the index isn't modelled.
+pub fn with_btree<R>(table: u32, index: u32, db: &Database, f: impl FnOnce(&crate::catalog::btsim::Btree) -> R) -> Option<R> {
     let rf = db.relfiles.of(table).read();
-    let bt = rf.btrees.get(&index)?;
-    Some(starts.iter().map(|k| bt.scan_leaf(k.strip_prefix(prefix)?)).collect())
+    rf.btrees.get(&index).map(f)
 }
 
 /// The index pages a row's new entries go to: (index, leaf page; None when the index
@@ -4255,10 +4490,17 @@ pub struct CopyLoad {
     db: Arc<Database>,
     key: (u32, u64),
     toast: u32,
+    /// The rows are held until their batch is placed (`Txn::hold_rows`): stored once, with
+    /// their TIDs, as each batch goes in; none wait for the statement's end.
+    held: std::cell::Cell<bool>,
+    /// Storing held rows failed: the load's error.
+    failed: std::cell::RefCell<Option<crate::error::Error>>,
 }
 
 impl CopyLoad {
-    pub fn start(t: &Table, multi: bool, freeze: bool, ctx: &ExecCtx) -> CopyLoad {
+    /// `held`: the caller holds the rows in the transaction (`Txn::hold_rows`) and nothing
+    /// reads them before the load ends.
+    pub fn start(t: &Table, multi: bool, freeze: bool, held: bool, ctx: &ExecCtx) -> CopyLoad {
         let txn = ctx.txn.borrow();
         // A table new in this transaction isn't worth looking up free space in.
         let use_fsm = !txn.storage_new_in_txn(t.oid);
@@ -4267,18 +4509,25 @@ impl CopyLoad {
             frozen: freeze,
             ..InsertMode::bulk()
         };
-        let defer = multi.then(|| Defer {
+        // (Not for a table past the model's size: its rows get no TIDs.)
+        let held = held && multi && !ctx.sess.db.relfiles.of(t.oid).read().untracked.contains(&t.oid);
+        let defer = (multi && !held).then(|| Defer {
             multi: true,
             ..Default::default()
         });
-        Self::register(t, mode, multi.then(Batch::default), defer, txn.id, ctx)
+        let load = Self::register(t, mode, multi.then(Batch::default), defer, txn.id, ctx);
+        load.held.set(held);
+        load
     }
 
     /// An INSERT … SELECT nothing can read the table's model during (`InsertNode`): single
-    /// inserts, those past its first `DEFER_AFTER` rows modelled when it ends.
+    /// inserts, each placed as it goes in, so its row is stored once with its TID. (Those
+    /// past its first `DEFER_AFTER` rows used to wait for its end, for a load that might
+    /// take the table past the model's size; that has no size now, and stamping their TIDs
+    /// afterwards read and wrote every row again.)
     pub fn deferred_inserts(t: &Table, ctx: &ExecCtx) -> CopyLoad {
         let id = ctx.txn.borrow().id;
-        Self::register(t, InsertMode::single(), None, Some(Defer::default()), id, ctx)
+        Self::register(t, InsertMode::single(), None, None, id, ctx)
     }
 
     fn register(
@@ -4296,19 +4545,38 @@ impl CopyLoad {
             db,
             key,
             toast: t.toast,
+            held: Default::default(),
+            failed: Default::default(),
         }
     }
 
     /// Whether the rows stored from now on are left alone until `finish`: past the model's
     /// size, or waiting to be modelled then (their TIDs stamped only then, if at all).
+    /// The rows are held until their batch is placed (`start`'s `held`).
+    pub fn held(&self) -> bool {
+        self.held.get()
+    }
+
+    /// The table went past the model's size: its rows get no TIDs, and aren't held.
+    fn stop_holding(&self, ctx: &ExecCtx) {
+        if self.held.replace(false)
+            && let Err(e) = ctx.txn.borrow_mut().end_hold()
+        {
+            *self.failed.borrow_mut() = Some(e);
+        }
+    }
+
     pub fn rows_wait(&self) -> bool {
+        if self.held.get() {
+            return true;
+        }
         let rf = self.db.relfiles.of(self.key.0).read();
         rf.untracked.contains(&self.key.0)
             || rf.bulk.get(&self.key).and_then(|b| b.defer.as_ref()).is_some_and(|d| d.deferring())
     }
 
     /// A line was read and its row stored (or skipped): the buffer is flushed once full.
-    pub fn row_done(&self, line_len: usize, ctx: &ExecCtx) {
+    pub fn row_done(&self, line_len: usize, ctx: &ExecCtx) -> Result<()> {
         let full = {
             let mut rf = self.db.relfiles.of(self.key.0).write();
             match rf.bulk.get_mut(&self.key).and_then(|b| b.batch.as_mut()) {
@@ -4322,6 +4590,7 @@ impl CopyLoad {
         if full {
             self.flush(ctx);
         }
+        self.failed.take().map_or(Ok(()), Err)
     }
 
     fn flush(&self, ctx: &ExecCtx) {
@@ -4338,6 +4607,8 @@ impl CopyLoad {
         let rows = std::mem::take(&mut batch.rows);
         batch.bytes = 0;
         let Some(heap) = heaps.get_mut(&self.key.0) else {
+            drop(rf);
+            self.stop_holding(ctx);
             return;
         };
         if rows.is_empty() {
@@ -4423,9 +4694,18 @@ impl CopyLoad {
             let big = heaps.get(&table).is_some_and(|h| h.versions() > max_versions());
             drop(rf);
             let Some(ctx) = ctx else { continue };
-            let _ = stamp_tids(&keys, &tids, ctx);
+            if self.held.get() {
+                // (Stored once, now, with them: `Txn::hold_rows`.)
+                if let Err(e) = ctx.txn.borrow_mut().store_held_rows(&keys, &tids) {
+                    *self.failed.borrow_mut() = Some(e);
+                    return;
+                }
+            } else {
+                let _ = stamp_tids(&keys, &tids, ctx);
+            }
             if big && let Some(t) = ctx.catalog().tables.get(&table) {
                 untrack(&self.db, t, None);
+                self.stop_holding(ctx);
                 return;
             }
         }
@@ -4443,11 +4723,12 @@ impl CopyLoad {
     }
 
     /// The statement is done: the buffer goes in, then the rows waiting.
-    pub fn finish(&self, ctx: &ExecCtx) {
+    pub fn finish(&self, ctx: &ExecCtx) -> Result<()> {
         self.flush(ctx);
         if let Some((batches, multi, xid, cid)) = self.take_deferred() {
             self.model(batches, multi, xid, cid, Some(ctx));
         }
+        self.failed.take().map_or(Ok(()), Err)
     }
 }
 

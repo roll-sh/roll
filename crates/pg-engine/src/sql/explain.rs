@@ -1922,6 +1922,12 @@ fn needed_masks_of(root: &Plan) -> HashMap<usize, Vec<bool>> {
         {
             go(alt, needed.clone(), whole, out);
         }
+        // (A foreign join's outer plan returns its scan's columns, all read.)
+        if let Plan::Foreign(f) = p
+            && let Some(o) = &f.outer
+        {
+            go(o, vec![true; super::binder::plan_width(o)], whole, out);
+        }
         out.insert(addr(p), needed);
         let mut es = Vec::new();
         node_exprs(p, &mut es);
@@ -12159,7 +12165,7 @@ impl Builder<'_, '_> {
                 .iter()
                 .map(|&c| match c.checked_sub(super::plan::FDW_MARK_COL).filter(|&k| k < refs.len()) {
                     // (A base's whole row, its row mark's copy.)
-                    Some(k) => Name::same(&format!("{}.*", refs[k])),
+                    Some(k) => Name::same(format!("{}.*", refs[k])),
                     None => names.get(c).cloned().unwrap_or_else(|| Name::same("?")),
                 })
                 .collect(),
@@ -20117,21 +20123,61 @@ pub fn estimate(plan: &Arc<Plan>, ctx: &ExecCtx) -> PlanEstimate {
 /// plans (pg_stat_statements' parallel_workers_to_launch; the engine runs them all, so they
 /// are the launched ones too).
 pub fn gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> Vec<(Option<usize>, usize)> {
+    total_and_gathers(plan, ctx).1
+}
+
+/// `estimate`'s total and `gathers` from one tree (a custom plan needs its cost and its
+/// Gathers both).
+pub fn total_and_gathers(plan: &Arc<Plan>, ctx: &ExecCtx) -> (f64, Vec<(Option<usize>, usize)>) {
+    let o = estimate_options();
+    let mut b = estimate_builder(plan, ctx, &o);
+    // A Gather or Gather Merge costs at least parallel_setup_cost: a plan whose every node
+    // costs less serially (with add_path's 1% fuzz) has none, and its serial tree, which
+    // considers no partial paths, is its tree. (Not under debug_parallel_query.)
+    if let Some(setup) = b.par.as_ref().map(|p| p.setup_cost)
+        && !crate::sql::paths::parallel::debug_parallel_query(ctx)
+    {
+        b.par = None;
+        let n = b.level(plan);
+        if max_node_cost(&n) * 1.02 < setup {
+            // (Debug builds: the tree with partial paths considered is the same plan.)
+            #[cfg(debug_assertions)]
+            {
+                let mut full = estimate_builder(plan, ctx, &o);
+                let f = full.level(plan);
+                let mut found = Vec::new();
+                gather_nodes(&f, &mut found);
+                assert!(found.is_empty() && f.total_cost == n.total_cost, "serial bound of {plan:?}");
+            }
+            return (n.total_cost, Vec::new());
+        }
+        b = estimate_builder(plan, ctx, &o);
+    }
+    let n = b.level(plan);
+    let mut out = Vec::new();
+    gather_nodes(&n, &mut out);
+    (n.total_cost, out)
+}
+
+/// The highest total cost of any node of `n`'s tree.
+fn max_node_cost(n: &ExNode) -> f64 {
+    n.children
+        .iter()
+        .chain(&n.initplans)
+        .chain(&n.subplans)
+        .map(max_node_cost)
+        .fold(n.total_cost, f64::max)
+}
+
+fn gather_nodes(n: &ExNode, out: &mut Vec<(Option<usize>, usize)>) {
     fn first_key(n: &ExNode) -> Option<usize> {
         n.key.or_else(|| n.children.iter().find_map(first_key))
     }
-    fn walk(n: &ExNode, out: &mut Vec<(Option<usize>, usize)>) {
-        if matches!(n.node_type, "Gather" | "Gather Merge") {
-            let workers = n.details.iter().map(|d| if let Detail::Workers(w) = d { *w } else { 0 }).sum();
-            out.push((n.children.first().and_then(first_key), workers));
-        }
-        n.children.iter().for_each(|c| walk(c, out));
+    if matches!(n.node_type, "Gather" | "Gather Merge") {
+        let workers = n.details.iter().map(|d| if let Detail::Workers(w) = d { *w } else { 0 }).sum();
+        out.push((n.children.first().and_then(first_key), workers));
     }
-    let o = estimate_options();
-    let mut b = estimate_builder(plan, ctx, &o);
-    let mut out = Vec::new();
-    walk(&b.level(plan), &mut out);
-    out
+    n.children.iter().for_each(|c| gather_nodes(c, out));
 }
 
 /// `estimate` of a sub-select's plan (a level of its own): every `Outer(d, ..)` in it is a

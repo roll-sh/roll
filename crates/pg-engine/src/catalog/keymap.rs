@@ -17,8 +17,9 @@ pub const NO_ROW: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug)]
 struct Row {
-    /// Where the key's length and bytes start in the arena (`part` counts 4 GB parts of it:
-    /// arenas past one are rare enough to spend two bytes on rather than widen every row).
+    /// Where the key's length and bytes start in the arena (`part` counts 4 GB parts of it,
+    /// below `PRESENT`: arenas past one are rare enough to spend two bytes on rather than
+    /// widen every row).
     at: u32,
     part: u16,
     off: u16,
@@ -26,6 +27,18 @@ struct Row {
 }
 
 const PART: usize = 1 << 32;
+/// `Row::part`'s bit for a row whose key is present (in the hash table).
+const PRESENT: u16 = 1 << 15;
+
+impl Row {
+    fn new(pos: usize, tid: Tid) -> Row {
+        Row { at: (pos % PART) as u32, part: (pos / PART) as u16 | PRESENT, off: tid.1, blk: tid.0 }
+    }
+
+    fn present(&self) -> bool {
+        self.part & PRESENT != 0
+    }
+}
 
 #[derive(Default)]
 pub struct KeyMap {
@@ -34,6 +47,14 @@ pub struct KeyMap {
     rows: Vec<Row>,
     arena: Vec<u8>,
     state: FastState,
+    /// The row last found or added: lookups in key order (a scan's rows, rows loaded in key
+    /// order) find the next row's key right after it, without the hash table's random reads.
+    cursor: std::sync::atomic::AtomicU32,
+    /// The greatest key ever added: a key past it is new, added without a probe.
+    max_key: Vec<u8>,
+    /// Rows `..asc` have ascending keys (rows added in key order: a load, a model laid out
+    /// from rows in key order): a lookup past the cursor's key searches forward from it.
+    asc: u32,
 }
 
 impl std::fmt::Debug for KeyMap {
@@ -43,7 +64,7 @@ impl std::fmt::Debug for KeyMap {
 }
 
 fn key_at<'a>(arena: &'a [u8], r: &Row) -> &'a [u8] {
-    let mut b = &arena[r.part as usize * PART + r.at as usize..];
+    let mut b = &arena[(r.part & !PRESENT) as usize * PART + r.at as usize..];
     let n = get_varint(&mut b).unwrap_or(0) as usize;
     &b[..n]
 }
@@ -77,8 +98,50 @@ impl KeyMap {
 
     /// The row under `key`.
     pub fn find(&self, key: &[u8]) -> Option<u32> {
+        use std::sync::atomic::Ordering::Relaxed;
         let (rows, arena) = (&self.rows, &self.arena);
-        self.table.find(self.hash(key), |&r| key_at(arena, &rows[r as usize]) == key).copied()
+        let cur = self.cursor.load(Relaxed);
+        let c = cur.wrapping_add(1);
+        if let Some(r) = rows.get(c as usize)
+            && r.present()
+            && key_at(arena, r) == key
+        {
+            self.cursor.store(c, Relaxed);
+            return Some(c);
+        }
+        if let Some(r) = self.forward(cur, key) {
+            self.cursor.store(r, Relaxed);
+            return Some(r);
+        }
+        let found = self.table.find(self.hash(key), |&r| key_at(arena, &rows[r as usize]) == key).copied();
+        if let Some(r) = found {
+            self.cursor.store(r, Relaxed);
+        }
+        found
+    }
+
+    /// The row under `key` found by searching forward from row `cur` within the ascending
+    /// rows (`asc`): galloping, then halving. None: not there (or not present: the hash table
+    /// has the key's row, if any).
+    fn forward(&self, cur: u32, key: &[u8]) -> Option<u32> {
+        let (rows, arena) = (&self.rows, &self.arena);
+        let end = self.asc as usize;
+        let cur = cur as usize;
+        if cur >= end || key_at(arena, &rows[cur]) >= key {
+            return None;
+        }
+        // (Rows cur+1..; the first whose key is at least `key`.)
+        let (mut lo, mut step) = (cur + 1, 1);
+        let mut hi = lo;
+        while hi < end && key_at(arena, &rows[hi]) < key {
+            lo = hi + 1;
+            hi = (hi + step).min(end);
+            step *= 2;
+        }
+        let hi = hi.min(end);
+        let at = lo + rows[lo..hi].partition_point(|r| key_at(arena, r) < key);
+        let r = rows.get(at).filter(|_| at < end)?;
+        (r.present() && key_at(arena, r) == key).then_some(at as u32)
     }
 
     /// The TID of the current version of the row under `key`.
@@ -101,6 +164,13 @@ impl KeyMap {
     /// under it). Returns the row.
     pub fn insert(&mut self, key: &[u8], tid: Tid) -> u32 {
         let h = self.hash(key);
+        // (A key past every key added so far is new: no probe for it, only its slot.)
+        if self.rows.is_empty() || key > self.max_key.as_slice() {
+            let row = self.push_row(key, tid);
+            let (rows, arena, state) = (&self.rows, &self.arena, &self.state);
+            self.table.insert_unique(h, row, |&r| state.hash_one(key_at(arena, &rows[r as usize])));
+            return row;
+        }
         let (rows, arena, state) = (&self.rows, &self.arena, &self.state);
         let entry = self.table.entry(
             h,
@@ -112,23 +182,32 @@ impl KeyMap {
                 let row = *e.get();
                 let r = &mut self.rows[row as usize];
                 (r.blk, r.off) = tid;
+                self.cursor.store(row, std::sync::atomic::Ordering::Relaxed);
                 row
             }
             hashbrown::hash_table::Entry::Vacant(e) => {
                 let row = u32::try_from(self.rows.len()).ok().filter(|&n| n != NO_ROW).expect("rows");
                 e.insert(row);
-                let pos = self.arena.len();
-                self.rows.push(Row {
-                    at: (pos % PART) as u32,
-                    part: (pos / PART) as u16,
-                    off: tid.1,
-                    blk: tid.0,
-                });
-                put_varint(&mut self.arena, key.len() as u64);
-                self.arena.extend_from_slice(key);
-                row
+                self.push_row(key, tid)
             }
         }
+    }
+
+    /// A new row for `key` (present), its key's bytes in the arena.
+    fn push_row(&mut self, key: &[u8], tid: Tid) -> u32 {
+        let row = u32::try_from(self.rows.len()).ok().filter(|&n| n != NO_ROW).expect("rows");
+        self.rows.push(Row::new(self.arena.len(), tid));
+        put_varint(&mut self.arena, key.len() as u64);
+        self.arena.extend_from_slice(key);
+        if key > self.max_key.as_slice() || row == 0 {
+            if self.asc == row {
+                self.asc = row + 1;
+            }
+            self.max_key.clear();
+            self.max_key.extend_from_slice(key);
+        }
+        self.cursor.store(row, std::sync::atomic::Ordering::Relaxed);
+        row
     }
 
     /// No row is under `key` any more (its row keeps the key's bytes). Returns its row.
@@ -136,6 +215,7 @@ impl KeyMap {
         let h = self.hash(key);
         let (rows, arena) = (&self.rows, &self.arena);
         let (row, _) = self.table.find_entry(h, |&r| key_at(arena, &rows[r as usize]) == key).ok()?.remove();
+        self.rows[row as usize].part &= !PRESENT;
         Some(row)
     }
 
@@ -150,6 +230,7 @@ impl KeyMap {
         match self.table.find_entry(h, |&x| x == row) {
             Ok(e) => {
                 e.remove();
+                self.rows[row as usize].part &= !PRESENT;
                 true
             }
             Err(_) => false,
@@ -158,8 +239,15 @@ impl KeyMap {
 
     /// Keep the keys whose current versions' TIDs `keep` accepts.
     pub fn retain(&mut self, mut keep: impl FnMut(Tid) -> bool) {
-        let rows = &self.rows;
-        self.table.retain(|&mut r| keep((rows[r as usize].blk, rows[r as usize].off)));
+        let rows = &mut self.rows;
+        self.table.retain(|&mut r| {
+            let row = &mut rows[r as usize];
+            let kept = keep((row.blk, row.off));
+            if !kept {
+                row.part &= !PRESENT;
+            }
+            kept
+        });
     }
 
     /// Every key present, its row and its current version's TID, in no particular order.
@@ -186,6 +274,7 @@ impl KeyMap {
         }
         let mut rows = Vec::with_capacity(self.table.len());
         let mut arena = Vec::new();
+        let mut asc = 0;
         for (i, r) in self.rows.iter().enumerate() {
             if map[i] == NO_ROW && !keep.get(i).copied().unwrap_or(false) {
                 continue;
@@ -195,13 +284,19 @@ impl KeyMap {
             put_varint(&mut arena, k.len() as u64);
             arena.extend_from_slice(k);
             map[i] = rows.len() as u32;
-            rows.push(Row { at: (pos % PART) as u32, part: (pos / PART) as u16, ..*r });
+            // (Rows kept from the ascending ones still ascend.)
+            if i < self.asc as usize {
+                asc = rows.len() as u32 + 1;
+            }
+            rows.push(Row { at: (pos % PART) as u32, part: (pos / PART) as u16 | (r.part & PRESENT), ..*r });
         }
         for r in self.table.iter_mut() {
             *r = map[*r as usize];
         }
         self.rows = rows;
         self.arena = arena;
+        self.asc = asc;
+        self.cursor.store(0, std::sync::atomic::Ordering::Relaxed);
         map
     }
 
@@ -257,5 +352,41 @@ mod tests {
         a.sort();
         b.sort();
         assert_eq!(a, b);
+    }
+
+    /// Keys loaded in key order are found by their forward searches as the hash table finds
+    /// them: lookups in order with gaps, removed keys (and keys added again under new rows),
+    /// out-of-order lookups, and after a compaction.
+    #[test]
+    fn ascending_rows_found_forward() {
+        let key = |i: u32| format!("k{i:08}").into_bytes();
+        let mut m = KeyMap::default();
+        let mut r = std::collections::HashMap::new();
+        for i in 0..50_000u32 {
+            m.insert(&key(i), (i, 1));
+            r.insert(key(i), (i, 1));
+        }
+        assert_eq!(m.asc, 50_000);
+        for i in (0..50_000).step_by(10) {
+            assert_eq!(m.remove(&key(i)).is_some(), r.remove(&key(i)).is_some());
+        }
+        for i in (0..50_000).step_by(30) {
+            m.insert(&key(i), (i, 2));
+            r.insert(key(i), (i, 2));
+        }
+        let check = |m: &KeyMap, r: &std::collections::HashMap<Vec<u8>, Tid>| {
+            for step in [1, 3, 7, 10, 997] {
+                for i in (0..50_010u32).step_by(step) {
+                    assert_eq!(m.get(&key(i)), r.get(&key(i)).copied(), "key {i} step {step}");
+                }
+            }
+            for i in (0..50_000u32).rev().step_by(13) {
+                assert_eq!(m.get(&key(i)), r.get(&key(i)).copied());
+            }
+        };
+        check(&m, &r);
+        let keep = vec![false; m.rows()];
+        let _ = m.compact(&keep);
+        check(&m, &r);
     }
 }

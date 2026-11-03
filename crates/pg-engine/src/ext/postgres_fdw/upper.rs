@@ -53,9 +53,9 @@ impl crate::ext::fdw::ForeignRelOps for UpperScan {
         let (sql, params) = self.sql(ctx);
         let first = &self.input.bases[0].scan;
         let m = super::scan::mapping_for(&first.table, first.check_as, ctx)?;
-        let key = super::connection::scan_connection(ctx, fr as *const ForeignRel as usize, &m)?;
+        let (key, number) = super::connection::scan_connection(ctx, fr as *const ForeignRel as usize, &m)?;
         Ok(Box::new(UpperNode {
-            cur: super::scan::Cursor::new(key, self.input.info.opts.fetch_size, sql, params),
+            cur: super::scan::Cursor::new(key, self.input.info.opts.fetch_size, sql, params).numbered(number),
             types: self.tlist.iter().map(|e| e.ty()).collect(),
             // (conversion_error_callback: a plain column names itself, anything else its
             // place in the remote select list.)

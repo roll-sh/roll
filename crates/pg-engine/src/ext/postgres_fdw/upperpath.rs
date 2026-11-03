@@ -63,7 +63,7 @@ fn rel_below(cat: &Catalog, fmt: &FormatCtx, p: &Plan) -> Option<(JoinScan, Vec<
             let info = super::join::plain_base(cat, s, spec.remote);
             let types = crate::sql::paths::analyzejoins::col_types(p);
             let cols = (0..n).map(|i| Expr::Col(i, types.get(i).cloned().unwrap_or(crate::types::DataType::Unknown))).collect();
-            Some((JoinScan { info: Arc::new(info), bases: vec![base], tlist: Vec::new(), order: Vec::new(), limit: None, whole: Vec::new(), marks: Vec::new() }, cols))
+            Some((JoinScan { info: Arc::new(info), bases: vec![base], tlist: Vec::new(), order: Vec::new(), limit: None, whole: Vec::new(), marks: Vec::new(), top: Vec::new() }, cols))
         }
         _ => None,
     }

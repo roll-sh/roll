@@ -1351,6 +1351,21 @@ fn range_binary_format() {
 fn domain_array_binary_element_type() {
     let s = server(AuthMethod::Trust);
     runtime().block_on(async {
+        // array_recv's header, a field at a time (checked against PostgreSQL 18.6): too many
+        // dimensions, a negative number of them, bad flags, a header cut short.
+        let c = s.connect("postgres").await;
+        let st = c.prepare("SELECT $1::int4[]").await.unwrap();
+        for (bytes, code) in [
+            ("000000070000000000000017", "54000"),
+            ("ffffffff0000000000000017", "22P03"),
+            ("000000010000000200000017", "22P03"),
+            ("00000001", "08P01"),
+        ] {
+            let e = c.query_one(&st, &[&hex(bytes)]).await.unwrap_err();
+            assert_eq!(e.code().map(|c| c.code()), Some(code), "{bytes}: {e:?}");
+        }
+    });
+    runtime().block_on(async {
         let c = s.connect("postgres").await;
         c.batch_execute("CREATE DOMAIN wire_posint AS int CHECK (VALUE > 0)").await.unwrap();
         let d: u32 = c.query_one("SELECT 'wire_posint'::regtype::oid", &[]).await.unwrap().get(0);
@@ -4023,6 +4038,14 @@ fn parallel_workers_seen_by_others() {
         a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
         let counts = "SELECT parallel_workers_to_launch, parallel_workers_launched FROM pg_stat_database WHERE datname = 'postgres'";
         assert_eq!(lines(&o, counts).await.unwrap(), ["2|2"]);
+        // A prepared statement's plan launches its workers at every execution (its Gathers
+        // found once: `BoundQuery::gathers`).
+        let st = a.prepare(q).await.unwrap();
+        for _ in 0..2 {
+            assert_eq!(a.query_one(&st, &[]).await.unwrap().get::<_, i64>(0), 3000);
+        }
+        a.batch_execute("SELECT pg_stat_force_next_flush()").await.unwrap();
+        assert_eq!(lines(&o, counts).await.unwrap(), ["6|6"]);
     });
     s.engine.shutdown();
 }

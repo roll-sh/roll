@@ -1,6 +1,7 @@
 # Checked comparisons
 
 Build both server revisions in release mode with the same Cargo targets and feature set.
+Against PostgreSQL, build the engine with `--profile dist` (see HANDOFF.md, Conventions).
 Copy each server binary aside before rebuilding, and record its source commit, command
 and SHA-256. Use the same checked client binary for both endpoints.
 

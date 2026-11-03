@@ -610,12 +610,20 @@ impl Session {
                     if !is_select_into && !b.cols.is_empty() {
                         p.plans.lock().cols = Some(b.cols.iter().map(|c| c.ty.clone()).collect());
                     }
+                    // (PrepareQuery's fixed_result: a later analysis with other result
+                    // columns, names included, fails.)
+                    if !is_select_into {
+                        p.plans.lock().fixed_result = Some(super::result_row(&b.cols));
+                    }
                     b.params.clone()
                 }
                 Err(e) => {
                     let (params, cols) = self.analyzed_params(&stmt, &p.param_types, e)?;
                     if !is_select_into && !cols.is_empty() {
                         p.plans.lock().cols = Some(cols.iter().map(|c| c.ty.clone()).collect());
+                    }
+                    if !is_select_into {
+                        p.plans.lock().fixed_result = Some(super::result_row(&cols));
                     }
                     params
                 }
@@ -624,6 +632,7 @@ impl Session {
         let p = Arc::new(p);
         self.state.prepared_sql.borrow_mut().insert(s.name.clone(), p.clone());
         self.prepared.insert(s.name.clone(), p);
+        self.prepared_listed = false;
         self.prepared_meta
             .insert(s.name.clone(), (text.to_string(), Self::now(), true));
         Ok(QueryResult::command("PREPARE"))
@@ -712,10 +721,12 @@ impl Session {
     pub(super) fn deallocate_stmt(&mut self, s: &pb::DeallocateStmt) -> Result<QueryResult> {
         if s.isall || s.name.is_empty() {
             self.prepared.retain(|n, _| n.is_empty());
+            self.prepared_listed = false;
             self.state.prepared_sql.borrow_mut().clear();
             return Ok(QueryResult::command("DEALLOCATE ALL"));
         }
         self.state.prepared_sql.borrow_mut().remove(&s.name);
+        self.prepared_listed = false;
         if self.prepared.remove(&s.name).is_none() {
             return Err(Error::new(
                 code::INVALID_SQL_STATEMENT_NAME,
@@ -1130,6 +1141,7 @@ impl Session {
                 self.set_role("session_authorization", None, false, false, "RESET")?;
                 self.state.settings.borrow_mut().reset_all();
                 self.prepared.retain(|n, _| n.is_empty());
+                self.prepared_listed = false;
                 self.state.prepared_sql.borrow_mut().clear();
                 self.state.cursors.borrow_mut().clear();
                 self.state.listen_actions.borrow_mut().clear();

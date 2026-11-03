@@ -495,10 +495,6 @@ fn pg_split_walfile_name(a: &[Value], _: &FnCtx) -> Result<SrfIter> {
     ]))))
 }
 
-fn one_row(row: Vec<Value>) -> Result<SrfIter> {
-    Ok(Box::new(std::iter::once(Ok(row))))
-}
-
 /// The last checkpoint: its record's and redo's positions and its time (the one the
 /// cluster started from until there is another: at its WAL's start, the server's start).
 fn last_checkpoint(c: &FnCtx) -> (u64, u64, i64) {
@@ -511,9 +507,10 @@ fn last_checkpoint(c: &FnCtx) -> (u64, u64, i64) {
 }
 
 /// pg_control_*: the control file's fields, for this server. (It is written at each
-/// checkpoint.)
-fn pg_control_system(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
-    one_row(vec![
+/// checkpoint.) Each returns one composite value of its OUT columns, not a set (proretset is
+/// false): `VALUES (pg_control_system())` and the other places sets aren't allowed take it.
+fn pg_control_system(_: &[Value], c: &FnCtx) -> Result<Value> {
+    record(vec![
         Value::Int4(1800),
         Value::Int4(202506291),
         Value::Int8(7_000_000_000_000_000_001),
@@ -521,11 +518,11 @@ fn pg_control_system(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     ])
 }
 
-fn pg_control_checkpoint(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
+fn pg_control_checkpoint(_: &[Value], c: &FnCtx) -> Result<Value> {
     let (ckpt, redo, time) = last_checkpoint(c);
     let xids = c.exec.sess.db.xids();
     let next_oid = c.exec.catalog().oids.as_ref().map_or(16384, |g| g.peek());
-    one_row(vec![
+    record(vec![
         Value::PgLsn(ckpt),
         Value::PgLsn(redo),
         Value::text(wal_file_name(1, redo / WAL_SEGMENT_SIZE)),
@@ -547,8 +544,8 @@ fn pg_control_checkpoint(_: &[Value], c: &FnCtx) -> Result<SrfIter> {
     ])
 }
 
-fn pg_control_init(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
-    one_row(vec![
+fn pg_control_init(_: &[Value], _: &FnCtx) -> Result<Value> {
+    record(vec![
         Value::Int4(8),
         Value::Int4(8192),
         Value::Int4(131072),
@@ -564,14 +561,25 @@ fn pg_control_init(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
     ])
 }
 
-fn pg_control_recovery(_: &[Value], _: &FnCtx) -> Result<SrfIter> {
-    one_row(vec![
+fn pg_control_recovery(_: &[Value], _: &FnCtx) -> Result<Value> {
+    record(vec![
         Value::PgLsn(0),
         Value::Int4(0),
         Value::PgLsn(0),
         Value::PgLsn(0),
         Value::Bool(false),
     ])
+}
+
+fn record(fields: Vec<Value>) -> Result<Value> {
+    Ok(Value::Record(std::sync::Arc::new(fields)))
+}
+
+/// A built-in function's OUT columns (pg_proc's) as its composite result type.
+fn out_row(oid: u32) -> DataType {
+    let sig = crate::catalog::system::builtin_proc_sigs().iter().find(|s| s.oid == oid);
+    let cols = sig.map_or(&[][..], |s| &s.out[..]);
+    DataType::row(cols.iter().map(|(n, t)| (n.clone(), DataType::from_oid(*t).unwrap_or(DataType::Unknown))).collect())
 }
 
 /// gist_translate_cmptype_common(cmptype): the GiST strategy number of a CompareType.
@@ -867,10 +875,14 @@ pub fn register(r: &mut Registry) {
     r.from_pg(2851, Some(pg_walfile_name), None);
     r.from_pg(2850, None, Some(pg_walfile_name_offset));
     r.from_pg(6213, None, Some(pg_split_walfile_name));
-    r.from_pg(3441, None, Some(pg_control_system));
-    r.from_pg(3442, None, Some(pg_control_checkpoint));
-    r.from_pg(3443, None, Some(pg_control_recovery));
-    r.from_pg(3444, None, Some(pg_control_init));
+    for (oid, name, imp) in [
+        (3441, "pg_control_system", pg_control_system as super::FnImpl),
+        (3442, "pg_control_checkpoint", pg_control_checkpoint),
+        (3443, "pg_control_recovery", pg_control_recovery),
+        (3444, "pg_control_init", pg_control_init),
+    ] {
+        r.func(name, vec![], out_row(oid), imp).volatile();
+    }
     r.from_pg(6347, Some(gist_translate_cmptype_common), None);
     r.from_pg(6316, Some(pg_column_toast_chunk_id), None);
     r.from_pg(2856, None, Some(pg_timezone_names));

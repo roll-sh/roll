@@ -3606,6 +3606,12 @@ pub struct InsertNode {
     last_table: u32,
     /// COPY: the line number and text of the row being inserted.
     copy_line: (usize, String),
+    /// COPY's multi-insert buffer as PostgreSQL fills it (rows, line bytes since its last
+    /// flush), and a unique or exclusion violation found in it: raised when the buffer would
+    /// be flushed (CopyMultiInsertBufferFlush inserts the index entries then), after the rest
+    /// of its lines are read and their defaults evaluated.
+    copy_buf: (usize, usize),
+    copy_err: Option<Error>,
     /// COPY FROM's bulk insert into the table's modelled heap.
     copy_load: Option<super::sizing::CopyLoad>,
     /// COPY's fresh writes through the transaction's sink (`Txn::open_sink`): None, not
@@ -3648,25 +3654,27 @@ impl InsertNode {
         }
         let source = super::nodes::open(&plan.source, ctx)?;
         let last_table = plan.rules.table.oid;
-        let copy_load = match &plan.copy {
-            Some(c) if !rules.view && rules.table.partkey.is_none() => {
-                Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, ctx))
-            }
-            None if model_deferrable(&plan, ctx) => {
+        let copied = plan.copy.as_ref().filter(|_| !rules.view && rules.table.partkey.is_none());
+        // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
+        // rule, no RETURNING, RLS or unique / exclusion check, plain btree indexes; AFTER
+        // triggers fire once the sink is closed) writes them through the sink, each row once
+        // with its TID: held until its multi-insert batch is placed (`Txn::hold_rows`).
+        let bulk = copied.is_some_and(|c| c.multi)
+            && rules.table.has_rowid()
+            && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
+            && model_deferrable(&plan, ctx)
+            && !ctx.txn.borrow().sink_open();
+        let copy_load = match copied {
+            Some(c) => Some(super::sizing::CopyLoad::start(&rules.table, c.multi, c.freeze, bulk, ctx)),
+            None if plan.copy.is_none() && model_deferrable(&plan, ctx) => {
                 Some(super::sizing::CopyLoad::deferred_inserts(&rules.table, ctx))
             }
             _ => None,
         };
-        // A COPY whose rows and entries nothing reads before it ends (COPY's multi-insert
-        // rule, no RETURNING, RLS or unique / exclusion check, plain btree indexes; AFTER
-        // triggers fire once the sink is closed) writes them through the sink.
-        let sink = (plan.copy.as_ref().is_some_and(|c| c.multi)
-            && copy_load.is_some()
-            && rules.table.has_rowid()
-            && rules.indexes.iter().all(|b| b.index.method == "btree" && !checks_rows(b))
-            && model_deferrable(&plan, ctx)
-            && !ctx.txn.borrow().sink_open())
-        .then_some(false);
+        if copy_load.as_ref().is_some_and(|l| l.held()) {
+            ctx.txn.borrow_mut().hold_rows(rules.table.oid);
+        }
+        let sink = bulk.then_some(false);
         // Such a COPY into a table this transaction emptied (TRUNCATE, then COPY, as pgbench
         // -i and COPY FREEZE do) measures its rows as they go in: VACUUM finds them as it
         // left them without reading them (`txn::unchanged`).
@@ -3685,6 +3693,8 @@ impl InsertNode {
             routed_after: Vec::new(),
             last_table,
             copy_line: (0, String::new()),
+            copy_buf: (0, 0),
+            copy_err: None,
             copy_load,
             sink,
             virtual_slot: false,
@@ -3841,10 +3851,15 @@ impl InsertNode {
         ctx: &ExecCtx,
     ) -> Result<Option<(Row, Vec<u8>, Option<Row>)>> {
         // (The sink opens once the rows stored are left alone until the load ends; its writes
-        // go to runs once the table is past the model's size: nothing stamps them then.)
+        // go to runs once the table is past the model's size, or when its rows are held and
+        // so stored with their TIDs: nothing stamps them then.)
         match self.sink {
             Some(false) if self.copy_load.as_ref().is_some_and(|l| l.rows_wait()) => {
-                self.sink = ctx.txn.borrow_mut().open_sink().then_some(true);
+                let mut txn = ctx.txn.borrow_mut();
+                self.sink = txn.open_sink().then_some(true);
+                if self.sink.is_some() && self.copy_load.as_ref().is_some_and(|l| l.held()) {
+                    txn.sink_runs_ok();
+                }
             }
             Some(true)
                 if ctx.processed.get().is_multiple_of(1024)
@@ -3866,11 +3881,13 @@ impl InsertNode {
             });
             f.len() - 1
         };
+        let mut at_flush = false;
         let r = self.insert(src, ctx).map_err(|e| {
             if c.multi
                 && !e.stacked
                 && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION)
             {
+                at_flush = true;
                 frames.borrow_mut()[n] = Frame::Copy {
                     table: c.table.clone(),
                     line,
@@ -3880,8 +3897,29 @@ impl InsertNode {
             e.in_frames(&frames.borrow())
         });
         frames.borrow_mut().truncate(n);
+        // (A unique or exclusion violation waits for the buffer's flush; the rows after it go
+        // in as before, the statement failing anyway.)
+        let r = match r {
+            Err(e) if at_flush => {
+                self.copy_err.get_or_insert(e);
+                Ok(None)
+            }
+            r => r,
+        };
         if let Some(l) = &self.copy_load {
-            l.row_done(raw_len, ctx);
+            let done = l.row_done(raw_len, ctx);
+            if r.is_ok() {
+                done?;
+            }
+        }
+        if c.multi && r.is_ok() {
+            self.copy_buf = (self.copy_buf.0 + 1, self.copy_buf.1 + raw_len);
+            if self.copy_buf.0 >= super::sizing::COPY_TUPLES || self.copy_buf.1 >= super::sizing::COPY_BYTES {
+                self.copy_buf = (0, 0);
+                if let Some(e) = self.copy_err.take() {
+                    return Err(e);
+                }
+            }
         }
         r
     }
@@ -4133,6 +4171,10 @@ impl Node for InsertNode {
                 None => self.source.next(ctx)?,
             };
             let Some(src) = next else {
+                // (The last buffer's flush.)
+                if let Some(e) = self.copy_err.take() {
+                    return Err(e);
+                }
                 self.done = true;
                 // (ExecPendingInserts: a batch of remote INSERTs not full yet. COPY's
                 // CopyMultiInsertBufferFlush names only the relation: relname_only.)
@@ -4144,16 +4186,24 @@ impl Node for InsertNode {
                     }
                     None => e,
                 })?;
+                // (Held rows go in with their last batch's TIDs, through the sink while it's
+                // open.)
+                if let Some(l) = self.copy_load.as_ref().filter(|l| l.held()) {
+                    l.finish(ctx)?;
+                    ctx.txn.borrow_mut().end_hold()?;
+                }
                 if self.sink == Some(true) {
                     self.sink = None;
                     let mut txn = ctx.txn.borrow_mut();
-                    if super::sizing::is_estimated(self.plan.rules.table.oid, &ctx.sess.db) {
+                    if super::sizing::is_estimated(self.plan.rules.table.oid, &ctx.sess.db)
+                        || self.copy_load.as_ref().is_some_and(|l| l.held())
+                    {
                         txn.sink_runs_ok();
                     }
                     txn.close_sink()?;
                 }
                 if let Some(l) = self.copy_load.take() {
-                    l.finish(ctx);
+                    l.finish(ctx)?;
                 }
                 ctx.txn.borrow_mut().finish_load();
                 check_statement_rechecks(ctx)?;

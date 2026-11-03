@@ -36,26 +36,26 @@ fn o(s: impl Into<String>) -> Stmt {
 /// A literal: as SQL text, and as a parameter (its type's oid, 0 when the server is to infer
 /// it, its text, and its binary form when the generator knows it).
 #[derive(Clone)]
-struct Lit {
-    sql: String,
+pub(super) struct Lit {
+    pub(super) sql: String,
     oid: u32,
     text: Option<String>,
     bin: Option<Vec<u8>>,
 }
 
-fn lit(sql: &str, oid: u32, text: Option<&str>, bin: Option<Vec<u8>>) -> Lit {
+pub(super) fn lit(sql: &str, oid: u32, text: Option<&str>, bin: Option<Vec<u8>>) -> Lit {
     Lit { sql: sql.into(), oid, text: text.map(String::from), bin }
 }
-fn int4(v: i32) -> Lit {
+pub(super) fn int4(v: i32) -> Lit {
     lit(&v.to_string(), 23, Some(&v.to_string()), Some(v.to_be_bytes().to_vec()))
 }
-fn int8(v: i64) -> Lit {
+pub(super) fn int8(v: i64) -> Lit {
     lit(&v.to_string(), 20, Some(&v.to_string()), Some(v.to_be_bytes().to_vec()))
 }
-fn text(v: &str) -> Lit {
+pub(super) fn text(v: &str) -> Lit {
     lit(&format!("'{}'", v.replace('\'', "''")), 25, Some(v), Some(v.as_bytes().to_vec()))
 }
-fn null(oid: u32) -> Lit {
+pub(super) fn null(oid: u32) -> Lit {
     lit("NULL", oid, None, None)
 }
 
@@ -101,7 +101,7 @@ fn numeric_bin(v: &str) -> Vec<u8> {
     }
     out
 }
-fn numeric(v: &str) -> Lit {
+pub(super) fn numeric(v: &str) -> Lit {
     let sql = if v.parse::<f64>().is_ok() && !v.contains(['N', 'I']) { v.to_string() } else { format!("'{v}'") };
     lit(&sql, 1700, Some(v), Some(numeric_bin(v)))
 }
@@ -361,7 +361,7 @@ fn instance(rng: &mut Rng, tpl: &str) -> (String, String, Vec<Lit>) {
 }
 
 /// An extended-protocol step on session `s`: parameters typed or not, text or binary.
-fn ext_step(rng: &mut Rng, s: u8, name: &str, sql: Option<&str>, params: &[Lit], describe: bool) -> String {
+pub(super) fn ext_step(rng: &mut Rng, s: u8, name: &str, sql: Option<&str>, params: &[Lit], describe: bool) -> String {
     let typed = rng.chance(0.6);
     let mut head = format!("\\x{s}");
     if !name.is_empty() {

@@ -621,10 +621,33 @@ fn message_name(kind: u8) -> Option<&'static str> {
     })
 }
 
+/// apply_error_callback's CONTEXT of a message: kept as its parts (a message's errors and
+/// log lines are rare; the text is made only for them).
+#[derive(Clone, Copy)]
+pub(super) struct ErrCtx {
+    origin: u32,
+    name: &'static str,
+    xid: u32,
+    finish: u64,
+}
+
+impl ErrCtx {
+    pub(super) fn text(&self) -> String {
+        let mut s = format!("processing remote data for replication origin \"pg_{}\" during message type \"{}\"", self.origin, self.name);
+        if self.xid != 0 {
+            s.push_str(&format!(" in transaction {}", self.xid));
+            if self.finish != 0 {
+                s.push_str(&format!(", finished at {}", lsn(self.finish)));
+            }
+        }
+        s
+    }
+}
+
 impl Worker<'_> {
     /// apply_error_callback's CONTEXT for message `m` (set_apply_error_context_xact's
     /// transaction and finish position).
-    pub(super) fn message_context(&self, m: &[u8]) -> Option<String> {
+    pub(super) fn message_context(&self, m: &[u8]) -> Option<ErrCtx> {
         let kind = *m.first()?;
         let name = message_name(kind)?;
         let mut r = Reader { b: m, at: 1 };
@@ -662,14 +685,7 @@ impl Worker<'_> {
                 (None, None) => (0, 0),
             },
         };
-        let mut s = format!("processing remote data for replication origin \"pg_{}\" during message type \"{name}\"", self.sub.oid);
-        if xid != 0 {
-            s.push_str(&format!(" in transaction {xid}"));
-            if finish != 0 {
-                s.push_str(&format!(", finished at {}", lsn(finish)));
-            }
-        }
-        Some(s)
+        Some(ErrCtx { origin: self.sub.oid, name, xid, finish })
     }
 }
 

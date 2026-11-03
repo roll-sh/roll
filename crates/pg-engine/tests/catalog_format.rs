@@ -138,9 +138,11 @@ fn comment_writes_dont_grow_with_the_comments() {
     engine.shutdown();
 }
 
-/// The stored record of table `name` (its JSON), and the bytes of all records.
+/// The stored record of table `name` (its JSON), and the bytes of all the objects' records
+/// (format 4's index records, tags from 128 on, which a downgrade deletes, left out).
 fn table_record(engine: &Engine, name: &str) -> (String, usize) {
     let all = engine.catalog_record_bytes_for_test("postgres").unwrap();
+    let all: Vec<_> = all.into_iter().filter(|(k, _)| k.get(8).is_some_and(|t| *t < 128)).collect();
     let bytes = all.iter().map(|(k, v)| k.len() + v.len()).sum();
     let needle = format!("\"name\":\"{name}\"");
     let rec = all
@@ -182,5 +184,65 @@ fn records_leave_defaults_out_and_downgrade_whole() {
     let (rec, again) = table_record(&engine, "wide");
     assert!(!rec.contains("\"dropped\""), "{rec}");
     assert_eq!(again, compact);
+    engine.shutdown();
+}
+
+/// Catalog format 4 (round 24, agent 146): a data directory a format-3 build made and
+/// stopped (`tests/data/catalog_format3.tar.gz`: tables with defaults, checks, inheritance,
+/// partitions, a foreign key, an expression index, a view, a materialized view, a sequence,
+/// a function, a composite type and its users, row security, comments, statistics, a
+/// truncated partition's file number, and 300 more tables, enough for the tables' and
+/// indexes' maps to be read on demand once upgraded) opens; its catalog is rewritten with its
+/// indexes, and opened again it reads alike, through DDL and more opens.
+#[test]
+fn a_format_3_data_directory_opens_and_upgrades() {
+    let dir = tempfile::tempdir().unwrap();
+    let tgz = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/catalog_format3.tar.gz");
+    let st = std::process::Command::new("tar").arg("xzf").arg(tgz).arg("-C").arg(dir.path()).status().unwrap();
+    assert!(st.success());
+    let reads = [
+        "SELECT relkind, count(*) FROM pg_class WHERE relnamespace = 's1'::regnamespace GROUP BY 1 ORDER BY 1",
+        "SELECT * FROM s1.parent ORDER BY id",
+        "SELECT * FROM s1.v ORDER BY id",
+        "SELECT * FROM s1.mv ORDER BY id",
+        "SELECT * FROM s1.part ORDER BY k",
+        "SELECT p, length(big) FROM s1.ref",
+        "SELECT s1.f(41), last_value FROM s1.seq",
+        "SELECT inhrelid::regclass::text FROM pg_inherits WHERE inhparent IN ('s1.parent'::regclass, 's1.part'::regclass) ORDER BY 1",
+        "SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint WHERE connamespace = 's1'::regnamespace AND conrelid IN ('s1.parent'::regclass, 's1.ref'::regclass, 's1.child'::regclass) ORDER BY 1, 3",
+        "SELECT pg_get_indexdef('s1.ref_lower'::regclass), pg_get_viewdef('s1.v'::regclass)",
+        "SELECT obj_description('s1.parent'::regclass, 'pg_class'), col_description('s1.parent'::regclass, 2)",
+        "SELECT polname, pg_get_expr(polqual, polrelid) FROM pg_policy WHERE polrelid = 's1.ref'::regclass",
+        "SELECT a.attname, pg_get_expr(d.adbin, d.adrelid) FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 's1.t150'::regclass",
+        "SELECT count(*), count(DISTINCT c.reltype), sum(c.relnatts) FROM pg_class c WHERE c.relnamespace = 's1'::regnamespace",
+        "SELECT attrelid::regclass::text, attname FROM pg_attribute WHERE atttypid = 's1.pair'::regtype OR atttypid = 's1.pair[]'::regtype ORDER BY 1, 2",
+        "SELECT pg_relation_filenode('s1.part1') <> 's1.part1'::regclass::oid",
+    ];
+    let read_all = |s: &mut Session| reads.iter().map(|q| rows(s, q)).collect::<Vec<_>>();
+    let engine = open(dir.path());
+    let first = {
+        let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+        read_all(&mut s)
+    };
+    assert_eq!(first[0].len(), 7, "{:?}", first[0]);
+    assert!(first[0][5].contains("305"), "{:?}", first[0]);
+    assert_eq!(first[1].len(), 3, "{:?}", first[1]);
+    assert!(first[12][0].contains("d150"), "{:?}", first[12]);
+    engine.shutdown();
+    drop(engine);
+
+    // Opened in format 4: the same, then DDL over relations read on demand.
+    let engine = open(dir.path());
+    let mut s = engine.connect(2, "postgres", "postgres", "t").unwrap();
+    assert_eq!(read_all(&mut s), first);
+    run(&mut s, "CREATE TABLE s1.t301 (id int PRIMARY KEY);\nDROP TABLE s1.t7;\nALTER TABLE s1.t8 RENAME TO t8r;\nCREATE TABLE s1.child2 () INHERITS (s1.parent);\nINSERT INTO s1.child2 VALUES (4, 'd', 4.5)");
+    let names = "SELECT to_regclass('s1.t7') IS NULL, to_regclass('s1.t8r') IS NOT NULL, to_regclass('s1.t8') IS NULL, (SELECT count(*) FROM s1.parent), (SELECT count(*) FROM pg_inherits WHERE inhparent = 's1.parent'::regclass)";
+    let after = (read_all(&mut s), rows(&mut s, names));
+    assert_eq!(after.1, ["[Bool(true), Bool(true), Bool(true), Int8(4), Int8(2)]"]);
+    engine.shutdown();
+    drop(engine);
+    let engine = open(dir.path());
+    let mut s = engine.connect(3, "postgres", "postgres", "t").unwrap();
+    assert_eq!((read_all(&mut s), rows(&mut s, names)), after);
     engine.shutdown();
 }

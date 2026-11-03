@@ -513,6 +513,32 @@ fn vacuum_skips_unchanged_tables() {
     });
 }
 
+/// VACUUM of a modelled table nothing changed in since the last reads no row for its frozen
+/// xid: it takes the xmins that read kept (`txn::unchanged`), and gives the same relfrozenxid.
+#[test]
+fn vacuum_keeps_xmins_of_unchanged_tables() {
+    use pg_engine::txn::unchanged::XMIN_SKIPS;
+    let dir = tempfile::tempdir().unwrap();
+    let eng = open(dir.path());
+    let mut s = eng.connect(1, "postgres", "postgres", "t").unwrap();
+    run(&mut s, "CREATE TABLE vx (id int, t text);\nINSERT INTO vx SELECT g, 'v' || g FROM generate_series(1, 3000) g");
+    let q = "SELECT relfrozenxid::text, (SELECT relfrozenxid::text FROM pg_class WHERE oid = c.reltoastrelid) FROM pg_class c WHERE relname = 'vx'";
+    let n = || XMIN_SKIPS.load(Ordering::Relaxed);
+    // (Other tests' VACUUMs count too: only increases are checked.)
+    run(&mut s, "VACUUM vx");
+    let first = rows(&mut s, q);
+    let base = n();
+    run(&mut s, "VACUUM vx");
+    assert!(n() > base);
+    assert_eq!(rows(&mut s, q), first);
+    run(&mut s, "UPDATE vx SET t = t || 'x' WHERE id % 10 = 0;\nVACUUM vx");
+    let third = rows(&mut s, q);
+    let base = n();
+    run(&mut s, "VACUUM vx");
+    assert!(n() > base);
+    assert_eq!(rows(&mut s, q), third);
+}
+
 /// A modelled table keeps its pages across a restart (`heapsim::restored`: each row back at
 /// the TID it was stored with): the planner's page counts and pg_relation_size are what they
 /// were, with rows deleted from the middle of it.

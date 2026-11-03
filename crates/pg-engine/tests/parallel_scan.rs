@@ -295,8 +295,13 @@ fn parallel_joins_match_serial_inner() {
     assert_eq!(pg_engine::exec::parscan::pipelined(), before, "no parallel scan with 0 workers");
     let stat_serial = seq_read(&mut s);
     s.query("SET max_parallel_workers_per_gather = 2").unwrap();
+    let vrows = pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
     let parallel = run(&mut s);
     assert!(pg_engine::exec::parscan::pipelined() > before, "join probes ran in the workers");
+    assert!(
+        pg_engine::exec::parscan::VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > vrows,
+        "probes looked up from column batches"
+    );
     let stat_parallel = seq_read(&mut s);
     let parallel_plans: Vec<&str> = JOIN_QUERIES.iter().map(|q| grouping(&mut s, q)).collect();
     for (i, ((q, a), b)) in JOIN_QUERIES.iter().zip(&serial).zip(&parallel).enumerate() {
@@ -316,6 +321,11 @@ fn parallel_joins_match_serial_inner() {
     assert!(serial[13][0].starts_with("ERROR: integer out of range"), "{:?}", serial[13]);
     assert!(serial[14][0].starts_with("ERROR: division by zero"), "{:?}", serial[14]);
     assert!(serial[0].len() > 300, "{:?}", serial[0].len());
+    // Probes looked up from column batches (`exec::vector`) give what the row path gives.
+    let rows = pg_engine::exec::parscan::without_vectors(|| run(&mut s));
+    for ((q, a), b) in JOIN_QUERIES.iter().zip(&rows).zip(&parallel) {
+        assert_eq!(a, b, "{q}: column batches");
+    }
 }
 
 #[test]
@@ -846,4 +856,77 @@ fn bitmap_quals_on_entries_inner() {
         assert!(a[0][0].contains("Int8("), "{:?}", a[0]);
     }
     s.query("ROLLBACK").unwrap();
+}
+
+/// Aggregations over column batches (`exec::vector`, `storage::cols`): rows decoded a batch
+/// at a time as columns, filtered and aggregated by batch kernels, and the rows they can't
+/// do (numerics past an i128 or NaN, columns added since a row
+/// was stored, sums past an i128, filters left to `eval`) through the row path in their
+/// place. Every query gives what the row path gives: the groups in the same order.
+const VECTOR_QUERIES: &[&str] = &[
+    "SELECT count(*), sum(a), sum(b), sum(x), avg(a), count(t), sum(big), count(ok) FROM v",
+    "SELECT a, count(*), sum(x), sum(z), count(z) FROM v GROUP BY a",
+    "SELECT t, count(*), sum(b) FROM v WHERE d >= '2024-03-01' AND ok GROUP BY t",
+    "SELECT c, count(*), sum(id) FROM v WHERE c <> 'cd' GROUP BY c",
+    "SELECT d, ok, count(*), sum(a) FROM v WHERE t IN ('k1', 'k2', NULL) OR a IS NULL GROUP BY d, ok",
+    "SELECT count(*), sum(x * 2.5 - x), sum(x * x) FROM v WHERE NOT ok OR x > 100",
+    "SELECT count(*), sum(x * x * x * x * x * x * x * x * x * x * x) FROM v WHERE x > 160",
+    "SELECT a, sum(b) FROM v WHERE z = 5 GROUP BY a",
+    "SELECT count(*), sum(a) FROM v WHERE t > 'k3' AND length(t) > 0",
+    "SELECT count(*), sum(id) FROM v WHERE c = 'ab  ' AND f < 300.5",
+    "SELECT ok, count(*) FROM v WHERE ok IS NOT NULL AND (c = 'cd' OR t IS NULL) GROUP BY ok",
+    "SELECT count(*), sum(big), sum(x) FROM v WHERE big > 500",
+    "SELECT t, count(*) FROM v WHERE t NOT IN ('k1', 'k5') GROUP BY t",
+];
+
+#[test]
+fn vector_batches_match_rows() {
+    // (Past the heap model's limit: read in storage order, a fill at a time.)
+    on_session_thread(vector_batches_match_rows_inner);
+}
+
+fn vector_batches_match_rows_inner() {
+    pg_engine::exec::sizing::with_max_versions(10_000, vector_batches_body)
+}
+
+fn vector_batches_body() {
+    use pg_engine::exec::parscan::{VECTOR_ROWS, without_vectors};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open(dir.path());
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    s.query(
+        "CREATE TABLE v (id int, a int2, b int8, x numeric(20, 4), t text, c char(4), d date, ok bool, big numeric, f float8)",
+    )
+    .unwrap();
+    s.query(
+        "INSERT INTO v SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE i % 7 END, i::bigint * 1000003, (i % 500) / 3.0, \
+         CASE WHEN i % 17 = 0 THEN NULL ELSE 'k' || (i % 40) END, \
+         CASE i % 3 WHEN 0 THEN 'ab' WHEN 1 THEN 'ab  ' ELSE 'cd' END, date '2024-01-01' + i % 400, \
+         CASE WHEN i % 19 = 0 THEN NULL ELSE i % 5 = 0 END, \
+         CASE WHEN i % 1000 = 0 THEN 1e40 WHEN i % 997 = 0 THEN 'NaN' ELSE i END, i / 7.0 \
+         FROM generate_series(1, 30000) i",
+    )
+    .unwrap();
+    s.query("ALTER TABLE v ADD COLUMN z int DEFAULT 5").unwrap();
+    s.query(
+        "INSERT INTO v SELECT i, i % 7, i, i / 4.0, 'k' || (i % 40), 'ab', date '2024-02-01', true, i, i, i % 9 \
+         FROM generate_series(30001, 40000) i",
+    )
+    .unwrap();
+    s.query("UPDATE v SET t = 'u' || id, x = x + 1 WHERE id % 211 = 0").unwrap();
+    s.query("DELETE FROM v WHERE id % 307 = 0").unwrap();
+    s.query("SET max_parallel_workers_per_gather = 0").unwrap();
+    let run = |s: &mut Session| VECTOR_QUERIES.iter().map(|q| out(s, q)).collect::<Vec<_>>();
+    let rows = without_vectors(|| run(&mut s));
+    let before = VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let batched = run(&mut s);
+    assert!(VECTOR_ROWS.load(std::sync::atomic::Ordering::Relaxed) > before, "rows went through column batches");
+    for ((q, a), b) in VECTOR_QUERIES.iter().zip(&rows).zip(&batched) {
+        assert_eq!(a, b, "{q}");
+    }
+    // The serial plan's rows (no inline scan) agree too.
+    let serial = pg_engine::exec::parscan::without_serial_inline(|| run(&mut s));
+    for ((q, a), b) in VECTOR_QUERIES.iter().zip(&serial).zip(&batched) {
+        assert_eq!(a, b, "{q}: serial");
+    }
 }

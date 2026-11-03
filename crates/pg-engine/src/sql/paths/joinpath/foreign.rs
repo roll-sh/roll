@@ -590,7 +590,9 @@ impl Search<'_, '_, '_> {
             scans.push(Arc::new(Plan::Scan(Box::new(b.scan.clone()))));
             cols.push(b.cols.clone());
         }
-        let private = crate::ext::postgres_fdw::joinscan::JoinScan { info: info.clone(), bases, tlist, order: Vec::new(), limit: None, whole: Vec::new(), marks: Vec::new() };
+        let full = (1u32 << self.leaves.len()) - 1;
+        let top = out.iter().copied().filter(|&g| self.needed_above(g, full)).collect();
+        let private = crate::ext::postgres_fdw::joinscan::JoinScan { info: info.clone(), bases, tlist, order: Vec::new(), limit: None, whole: Vec::new(), marks: Vec::new(), top };
         let fr = crate::sql::plan::ForeignRel {
             scans,
             cols,

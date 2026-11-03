@@ -79,3 +79,10 @@ icu_casemap = "2.3"
 icu_locale_core = "2.3"
 icu_provider = "2.3"
 icu_segmenter = "2.3"
+
+# Shipping and benchmark build: whole-program optimisation. Slow to build, so tests and
+# day-to-day work use `release`.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

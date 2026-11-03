@@ -264,3 +264,56 @@ fn declared_cursor_uses_its_broken_connection() {
     assert!(e.context.as_deref().is_some_and(|c| c.contains("remote SQL command:")), "{e:?}");
     run(&mut s, "ROLLBACK");
 }
+
+/// A locking level with a local relation joins its foreign ones remotely (one remote query
+/// returning each relation's whole row as its mark's copy), with the local join path as the
+/// Foreign Scan's outer plan; an EvalPlanQual recheck after a concurrent update of the local
+/// row runs that plan over the copies (it sends nothing: checked with the remote client's
+/// writes traced, round 6).
+#[test]
+fn pushed_join_rechecks_with_outer_plan() {
+    let (_data, engine) = loopback();
+    let mut s = engine.connect(1, "postgres", "postgres", "t").unwrap();
+    for q in [
+        "CREATE TABLE l (i int, v text)",
+        "CREATE TABLE t1 (i int, v text)",
+        "CREATE TABLE t2 (i int, w text)",
+        "CREATE FOREIGN TABLE ft1 (i int, v text) SERVER loopback OPTIONS (table_name 't1')",
+        "CREATE FOREIGN TABLE ft2 (i int, w text) SERVER loopback OPTIONS (table_name 't2')",
+        "INSERT INTO l VALUES (123, 'foo'), (456, 'bar')",
+        "INSERT INTO t1 SELECT i, to_char(i, 'FM0000') FROM generate_series(1, 1000) i",
+        "INSERT INTO t2 SELECT i, 'w' || i FROM generate_series(1, 1000, 3) i",
+        "ANALYZE l",
+        "ANALYZE ft1",
+        "ANALYZE ft2",
+    ] {
+        run(&mut s, q);
+    }
+    run(&mut s, "BEGIN");
+    run(&mut s, "UPDATE l SET v = v || 'x' WHERE i = 123");
+    let e = engine.clone();
+    let reader = std::thread::spawn(move || {
+        let mut r = e.connect(2, "postgres", "postgres", "t").unwrap();
+        run(&mut r, "SET enable_nestloop = off");
+        run(&mut r, "SET enable_hashjoin = off");
+        let q = "SELECT l.i, l.v, ft1.v, ft2.w FROM l, ft1, ft2 WHERE ft1.i = ft2.i AND ft1.i BETWEEN l.i AND l.i + 5 AND l.i = 123 FOR UPDATE OF l";
+        let plan = run(&mut r, &format!("EXPLAIN (VERBOSE, COSTS OFF) {q}"));
+        let rows = run(&mut r, q);
+        (plan, rows)
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    run(&mut s, "COMMIT");
+    let (plan, mut rows) = reader.join().unwrap();
+    let text = plan.join("\n");
+    assert!(text.contains("Relations: (public.ft1) INNER JOIN (public.ft2)"), "{plan:#?}");
+    assert!(text.contains("Output: ft1.v, ft1.*, ft1.i, ft2.w, ft2.*"), "{plan:#?}");
+    assert!(text.contains("->  Merge Join"), "{plan:#?}");
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            r#"[Int4(123), Text("foox"), Text("0124"), Text("w124")]"#,
+            r#"[Int4(123), Text("foox"), Text("0127"), Text("w127")]"#,
+        ]
+    );
+}

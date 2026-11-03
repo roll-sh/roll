@@ -15,7 +15,7 @@ pub type SequenceMap = super::pmap::IndexedMap<Arc<Sequence>, SeqIx>;
 /// How many rows a map's relations give pg_class, pg_attribute and pg_attrdef
 /// (`system::row_count`, what the planner's estimate of a catalog scan reads), kept as
 /// entries come and go.
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RelRows {
     pub class: i64,
     pub attribute: i64,
@@ -239,7 +239,7 @@ fn bump(m: &mut PHash<(u32, String), u32>, k: (u32, String), up: bool) {
 
 // (Changed in place: a copy of the set taken out and put back would share its chunks with
 // the map's, and copy them on every change.)
-fn set_member<K: std::hash::Hash + Eq + Clone>(m: &mut PHash<K, Counts>, k: K, member: u32, up: bool) {
+fn set_member<K: super::pmap::Key>(m: &mut PHash<K, Counts>, k: K, member: u32, up: bool) {
     match m.get_mut(&k) {
         Some(c) => {
             if up {
@@ -685,7 +685,7 @@ mod tests {
 /// object lookups ask for; each scanned every function, 10,000 user functions included).
 #[derive(Clone, Default)]
 pub struct FuncIx {
-    named: PHash<String, Counts>,
+    pub(super) named: PHash<String, Counts>,
 }
 
 impl FuncIx {

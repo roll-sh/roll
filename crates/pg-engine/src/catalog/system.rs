@@ -2106,6 +2106,8 @@ fn rows_generated_chunked(
     part: &dyn Fn(&Row) -> super::sysrows::PartKey,
 ) -> Result<Vec<Arc<RowChunk>>> {
     GENERATED.with(|c| c.set(c.get() + 1));
+    // (Every relation is read: the stored maps' groups at once, on several threads.)
+    ctx.catalog().read_relations();
     let mut out = Out::chunked(part);
     generate(table, ctx, None, &mut out)?;
     Ok(out.into_chunks())
@@ -4691,9 +4693,9 @@ fn generate_raw(table: SysTable, ctx: &ExecCtx, only: Option<u32>, out: &mut Out
             }
         }
         PgPreparedStatements => {
-            for (name, text, at, params, result, from_sql, generic, custom) in
-                ctx.sess.prepared_list.borrow().iter()
-            {
+            for (name, text, at, from_sql, p) in ctx.sess.prepared_list.borrow().iter() {
+                let (params, result, generic, custom) = p.listing();
+                let (params, generic, custom) = (&params, &generic, &custom);
                 let types = |ts: &[DataType]| {
                     arr(
                         DataType::Regtype,

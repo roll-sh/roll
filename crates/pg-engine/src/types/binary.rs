@@ -1073,20 +1073,30 @@ pub fn decode(b: &[u8], ty: &DataType, ctx: &FormatCtx) -> Result<Value> {
 }
 
 fn decode_array(mut b: &[u8], elem: &DataType, ctx: &FormatCtx) -> Result<Value> {
-    if b.len() < 12 {
-        bail!(
-            PROTOCOL_VIOLATION,
-            "insufficient data left in message"
-        );
-    }
-    let ndim = b.get_i32();
-    let _has_nulls = b.get_i32();
-    let _elem_oid = b.get_u32();
-    if !(0..=6).contains(&ndim) {
+    // (array_recv: the header read a field at a time, each checked as it is read.)
+    let int = |b: &mut &[u8]| -> Result<i32> {
+        if b.len() < 4 {
+            bail!(PROTOCOL_VIOLATION, "insufficient data left in message");
+        }
+        Ok(b.get_i32())
+    };
+    let ndim = int(&mut b)?;
+    let flags = int(&mut b)?;
+    let _elem_oid = int(&mut b)?;
+    if ndim < 0 {
         bail!(
             INVALID_BINARY_REPRESENTATION,
             "invalid number of dimensions: {ndim}"
         );
+    }
+    if ndim > 6 {
+        bail!(
+            PROGRAM_LIMIT_EXCEEDED,
+            "number of array dimensions ({ndim}) exceeds the maximum allowed (6)"
+        );
+    }
+    if flags != 0 && flags != 1 {
+        bail!(INVALID_BINARY_REPRESENTATION, "invalid array flags");
     }
     let mut dims = Vec::new();
     for _ in 0..ndim {

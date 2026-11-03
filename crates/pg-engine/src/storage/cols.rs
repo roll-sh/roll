@@ -1,79 +1,87 @@
-//! Columns decoded from a batch of stored rows (`decode_cols`): the values a scan's
-//! filters, projections and aggregates read, a typed vector per column instead of a
-//! `Vec<Value>` per row. Strings stay in the blocks holding them (a span of a buffer the
-//! batch references once), numbers are read in place (`row::peek_num`'s encoding).
+//! Stored rows as columns (`ColBatch`): a batch of a scan's rows decoded column by column,
+//! so the executor filters and aggregates them in loops over typed vectors (`exec::vector`)
+//! instead of making a `Vec<Value>` per row.
 //!
-//! A stored row is a header (xmin, maybe a TID), a value count, then tagged values
-//! (`row::tag`); there is no columnar layout, so each row is walked once up to the last
-//! column needed. A value a column's typed vector can't hold (a numeric past an i128, a
-//! value of an unexpected tag) goes to the column's `odd` list; a row with values stored
-//! out of line is listed in `ext` with its columns left NULL, for the scan to read whole
-//! (`toast`) if a filter keeps it.
+//! The interface is agent 149's (HANDOFF "Executor: batch execution"). This body is the
+//! executor's stub until 149's typed decode lands under the same signatures.
+
 use super::batch::RowBatch;
-use super::row::{self, tag};
+use super::row::{ROW_HEADER, ROW_HEADER_EXT, ROW_HEADER_TID, ROW_HEADER_TID_EXT, tag};
 use super::sst::get_varint;
 use crate::error::Result;
 use crate::types::{DataType, Value};
 use bytes::Bytes;
 
-/// A column's values, by row.
+/// A column's values, one slot per row (a NULL's or an odd row's slot holds a default).
+#[derive(Debug)]
 pub enum ColData {
-    /// int2, int4 (widened).
+    /// int2, int4.
     I32(Vec<i32>),
-    /// int8.
     I64(Vec<i64>),
-    /// float4 (widened), float8.
+    /// float4, float8.
     F64(Vec<f64>),
-    /// numeric: unscaled value and scale.
+    /// Finite numerics that fit an i128: (unscaled, scale).
     Num(Vec<(i128, u32)>),
     Bool(Vec<bool>),
-    /// date: days from 2000-01-01.
     Date(Vec<i32>),
-    /// text, varchar, bpchar, name, bytea: (buffer, start, end) of the bytes in
+    /// text, varchar, bpchar (padded as stored), name, bytea: (buf, start, end) into
     /// `ColBatch::bufs`.
     Bytes(Vec<(u32, u32, u32)>),
-    /// Every other type.
+    /// Other types.
     Values(Vec<Value>),
 }
 
+/// One column of a batch.
+#[derive(Debug)]
 pub struct Col {
     pub data: ColData,
-    /// NULL rows (a NULL's slot in `data` holds a default).
     pub nulls: Vec<bool>,
-    /// Rows whose value `data` doesn't hold, with it (their slots hold a default).
+    /// Rows whose value the typed vector can't hold (a numeric past i128, another tag, a
+    /// column the row was stored without), in row order: their slot holds a default.
     pub odd: Vec<(u32, Value)>,
 }
 
-/// Columns of up to a batch of rows (`decode_cols`); the buffers are kept from batch to
-/// batch.
-#[derive(Default)]
+/// A batch of a scan's rows as columns.
+#[derive(Debug, Default)]
 pub struct ColBatch {
     pub len: usize,
-    /// By column of the table; None: not needed.
+    /// By table column; None: not needed.
     pub cols: Vec<Option<Col>>,
-    /// The buffers `ColData::Bytes` spans are in (blocks referenced once per batch, and one
-    /// buffer of copied values).
     pub bufs: Vec<Bytes>,
-    /// Rows with values stored out of line (their needed columns NULL here).
+    /// Rows with values stored out of line, in order: their needed columns are NULL here.
     pub ext: Vec<u32>,
-    copied: Vec<u8>,
+    own: Vec<u8>,
 }
 
 fn data_for(ty: &DataType) -> ColData {
-    use DataType as T;
     match ty {
-        T::Int2 | T::Int4 => ColData::I32(Vec::new()),
-        T::Int8 => ColData::I64(Vec::new()),
-        T::Float4 | T::Float8 => ColData::F64(Vec::new()),
-        T::Numeric(_) => ColData::Num(Vec::new()),
-        T::Bool => ColData::Bool(Vec::new()),
-        T::Date => ColData::Date(Vec::new()),
-        T::Text | T::Varchar(_) | T::Bpchar(_) | T::Name | T::Bytea => ColData::Bytes(Vec::new()),
+        DataType::Int2 | DataType::Int4 => ColData::I32(Vec::new()),
+        DataType::Int8 => ColData::I64(Vec::new()),
+        DataType::Float4 | DataType::Float8 => ColData::F64(Vec::new()),
+        DataType::Numeric(_) => ColData::Num(Vec::new()),
+        DataType::Bool => ColData::Bool(Vec::new()),
+        DataType::Date => ColData::Date(Vec::new()),
+        DataType::Text | DataType::Varchar(_) | DataType::Bpchar(_) | DataType::Name | DataType::Bytea => {
+            ColData::Bytes(Vec::new())
+        }
         _ => ColData::Values(Vec::new()),
     }
 }
 
 impl ColData {
+    fn kind(&self) -> u8 {
+        match self {
+            ColData::I32(_) => 0,
+            ColData::I64(_) => 1,
+            ColData::F64(_) => 2,
+            ColData::Num(_) => 3,
+            ColData::Bool(_) => 4,
+            ColData::Date(_) => 5,
+            ColData::Bytes(_) => 6,
+            ColData::Values(_) => 7,
+        }
+    }
+
     fn clear(&mut self) {
         match self {
             ColData::I32(v) | ColData::Date(v) => v.clear(),
@@ -86,7 +94,6 @@ impl ColData {
         }
     }
 
-    /// A slot holding no value of its own (a NULL's, an odd value's).
     fn push_default(&mut self) {
         match self {
             ColData::I32(v) | ColData::Date(v) => v.push(0),
@@ -101,13 +108,25 @@ impl ColData {
 }
 
 impl Col {
-    /// Row `i`'s value as a `Value` (what a row-at-a-time consumer reads).
+    /// Row `i`'s bytes (`ColData::Bytes`; empty otherwise).
+    #[inline]
+    pub fn bytes<'b>(&self, b: &'b ColBatch, i: usize) -> &'b [u8] {
+        match &self.data {
+            ColData::Bytes(v) => {
+                let (buf, s, e) = v[i];
+                &b.bufs[buf as usize][s as usize..e as usize]
+            }
+            _ => &[],
+        }
+    }
+
+    /// Row `i`'s value, as the row path decodes it for a column of type `ty`.
     pub fn value(&self, b: &ColBatch, i: usize, ty: &DataType) -> Result<Value> {
+        if let Ok(k) = self.odd.binary_search_by_key(&(i as u32), |o| o.0) {
+            return Ok(self.odd[k].1.clone());
+        }
         if self.nulls[i] {
             return Ok(Value::Null);
-        }
-        if let Some((_, v)) = self.odd.iter().find(|(r, _)| *r as usize == i) {
-            return Ok(v.clone());
         }
         Ok(match &self.data {
             ColData::I32(v) if matches!(ty, DataType::Int2) => Value::Int2(v[i] as i16),
@@ -115,55 +134,72 @@ impl Col {
             ColData::I64(v) => Value::Int8(v[i]),
             ColData::F64(v) if matches!(ty, DataType::Float4) => Value::Float4(v[i] as f32),
             ColData::F64(v) => Value::Float8(v[i]),
-            ColData::Num(v) => {
-                let (n, s) = v[i];
-                Value::numeric(crate::types::numeric::Numeric::from_parts(crate::types::decint::DecInt::from_signed_bytes_le(&n.to_le_bytes()), s))
-            }
+            ColData::Num(v) => Value::numeric(crate::types::numeric::Numeric::from_parts(
+                crate::types::decint::DecInt::from(v[i].0),
+                v[i].1,
+            )),
             ColData::Bool(v) => Value::Bool(v[i]),
             ColData::Date(v) => Value::Date(v[i]),
             ColData::Bytes(_) if matches!(ty, DataType::Bytea) => Value::bytea(self.bytes(b, i).to_vec()),
-            ColData::Bytes(_) => Value::Text(
-                std::str::from_utf8(self.bytes(b, i)).map_err(|_| crate::error::internal("invalid UTF-8 in stored row"))?.into(),
+            ColData::Bytes(_) => Value::text(
+                std::str::from_utf8(self.bytes(b, i)).map_err(|_| crate::error::internal("invalid UTF-8 in stored row"))?,
             ),
             ColData::Values(v) => v[i].clone(),
         })
     }
-
-    /// Row `i`'s bytes of a `Bytes` column (empty for a NULL or another column).
-    pub fn bytes<'b>(&self, b: &'b ColBatch, i: usize) -> &'b [u8] {
-        match &self.data {
-            ColData::Bytes(v) => {
-                let (buf, s, e) = v[i];
-                b.bufs.get(buf as usize).map_or(&[][..], |x| &x[s as usize..e as usize])
-            }
-            _ => &[],
-        }
-    }
 }
 
-/// A copied value's span until the batch's copies become a buffer.
-const COPIED: u32 = u32::MAX;
-
-/// The values after a stored row's header (None: not a row), and whether it has values
-/// stored out of line.
-fn row_values(bytes: &[u8]) -> Option<(&[u8], bool)> {
-    let (n, ext) = match *bytes.first()? {
-        row::ROW_HEADER => (1, false),
-        row::ROW_HEADER_EXT => (1, true),
-        row::ROW_HEADER_TID => (3, false),
-        row::ROW_HEADER_TID_EXT => (3, true),
+/// The stored row's encoded values, after its header.
+#[inline]
+fn row_values(bytes: &[u8]) -> Option<&[u8]> {
+    let n = match *bytes.first()? {
+        ROW_HEADER | ROW_HEADER_EXT => 1,
+        ROW_HEADER_TID | ROW_HEADER_TID_EXT => 3,
         _ => return None,
     };
     let mut pos = 1;
     for _ in 0..n {
         pos += bytes.get(pos..)?.iter().position(|b| *b < 0x80)? + 1;
     }
-    Some((bytes.get(pos..)?, ext))
+    bytes.get(pos..)
 }
 
-/// Rows `rows` of `batch` decoded into `out`: the columns `need` marks (by column of the
-/// table, of types `types`; a row stored before a column was added has its `missing`
-/// value). `out`'s vectors are reused.
+/// The value at `data[pos]` into `col`'s typed slot (false: it doesn't fit: odd).
+#[inline]
+fn push_typed(col: &mut Col, own: &mut Vec<u8>, data: &[u8], pos: usize) -> bool {
+    let t = data[pos];
+    let le = |n: usize| data.get(pos + 1..pos + 1 + n);
+    match (&mut col.data, t) {
+        (ColData::I32(v), tag::INT4) => v.push(i32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+        (ColData::I32(v), tag::INT2) => v.push(i16::from_le_bytes(le(2).and_then(|x| x.try_into().ok()).unwrap_or_default()) as i32),
+        (ColData::Date(v), tag::DATE) => v.push(i32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+        (ColData::I64(v), tag::INT8) => v.push(i64::from_le_bytes(le(8).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+        (ColData::F64(v), tag::FLOAT8) => v.push(f64::from_le_bytes(le(8).and_then(|x| x.try_into().ok()).unwrap_or_default())),
+        (ColData::F64(v), tag::FLOAT4) => v.push(f32::from_le_bytes(le(4).and_then(|x| x.try_into().ok()).unwrap_or_default()) as f64),
+        (ColData::Bool(v), tag::TRUE | tag::FALSE) => v.push(t == tag::TRUE),
+        (ColData::Num(v), tag::NUMERIC) => match super::row::peek_num(data, pos) {
+            Some(Some(n)) => v.push(n),
+            _ => return false,
+        },
+        (ColData::Bytes(v), tag::TEXT | tag::BYTEA) => {
+            let mut p = pos + 1;
+            let Ok(n) = get_varint(data, &mut p) else { return false };
+            let Some(x) = data.get(p..p + n as usize) else { return false };
+            let s = own.len() as u32;
+            own.extend_from_slice(x);
+            v.push((0, s, own.len() as u32));
+        }
+        (ColData::Values(v), _) => match super::row::decode_value(data, &mut pos.clone()) {
+            Ok(x) => v.push(x),
+            Err(_) => return false,
+        },
+        _ => return false,
+    }
+    true
+}
+
+/// Rows `rows` of `batch` as columns into `out`: the columns `need` marks, decoded as
+/// `types` declares them, a column a row was stored without as `missing`'s value.
 pub fn decode_cols(
     batch: &RowBatch,
     rows: std::ops::Range<usize>,
@@ -172,153 +208,70 @@ pub fn decode_cols(
     missing: &[Value],
     out: &mut ColBatch,
 ) -> Result<()> {
-    out.len = 0;
-    out.bufs.clear();
-    out.ext.clear();
-    out.copied.clear();
-    out.cols.resize_with(types.len(), || None);
-    for (i, c) in out.cols.iter_mut().enumerate() {
-        if !need.get(i).copied().unwrap_or(false) {
-            *c = None;
+    let ncols = need.len().min(types.len());
+    out.cols.resize_with(ncols.max(out.cols.len()), || None);
+    for (c, slot) in out.cols.iter_mut().enumerate() {
+        if c >= ncols || !need[c] {
+            *slot = None;
             continue;
         }
-        let c = c.get_or_insert_with(|| Col { data: data_for(&types[i]), nulls: Vec::new(), odd: Vec::new() });
-        c.data.clear();
-        c.nulls.clear();
-        c.odd.clear();
+        let want = data_for(&types[c]);
+        match slot {
+            Some(col) if col.data.kind() == want.kind() => {
+                col.data.clear();
+                col.nulls.clear();
+                col.odd.clear();
+            }
+            _ => *slot = Some(Col { data: want, nulls: Vec::new(), odd: Vec::new() }),
+        }
     }
-    let last = need.iter().rposition(|n| *n).map_or(0, |l| l + 1).min(types.len());
-    for r in rows {
-        let (bytes, buf) = batch.value_in(r);
-        let Some((data, ext)) = row_values(bytes) else {
-            return Err(crate::error::internal("invalid stored row"));
-        };
-        let at = out.len as u32;
-        out.len += 1;
+    out.len = rows.len();
+    out.bufs.clear();
+    out.ext.clear();
+    out.own.clear();
+    let upto = need.iter().take(ncols).rposition(|b| *b).map_or(0, |c| c + 1);
+    for (r, i) in rows.enumerate() {
+        let (_, bytes) = batch.get(i);
+        let ext = matches!(bytes.first(), Some(&(ROW_HEADER_EXT | ROW_HEADER_TID_EXT)));
+        if ext {
+            out.ext.push(r as u32);
+        }
+        let data = row_values(bytes).ok_or_else(|| crate::error::internal("stored row without a header"))?;
         let mut pos = 0;
         let n = get_varint(data, &mut pos)? as usize;
-        // (The buffer holding the row, referenced once while consecutive rows share it.)
-        let buf_ix = match buf {
-            Some((b, off)) => {
-                if out.bufs.last().is_none_or(|l| l.as_ptr() != b.as_ptr() || l.len() != b.len()) {
-                    out.bufs.push(b.clone());
-                }
-                Some((out.bufs.len() as u32 - 1, off + (bytes.len() - data.len())))
+        for c in 0..upto {
+            let present = c < n;
+            let at = pos;
+            if present && c + 1 < upto {
+                super::row::skip_value_fast(data, &mut pos)?;
             }
-            None => None,
-        };
-        if ext {
-            out.ext.push(at);
-        }
-        for col in 0..last {
-            decode_one(out, col, n, at, ext, buf_ix, data, &mut pos, missing)?;
+            let Some(col) = out.cols[c].as_mut() else { continue };
+            if ext || (present && data.get(at) == Some(&tag::NULL)) {
+                col.nulls.push(true);
+                col.data.push_default();
+                continue;
+            }
+            if !present || !push_typed(col, &mut out.own, data, at) {
+                let v = match present {
+                    true => super::row::decode_value(data, &mut at.clone())?,
+                    false => missing.get(c).cloned().unwrap_or(Value::Null),
+                };
+                col.nulls.push(v.is_null());
+                col.data.push_default();
+                col.odd.push((r as u32, v));
+                continue;
+            }
+            col.nulls.push(false);
         }
     }
-    if !out.copied.is_empty() {
-        let ix = out.bufs.len() as u32;
-        out.bufs.push(Bytes::copy_from_slice(&out.copied));
-        for c in out.cols.iter_mut().flatten() {
-            if let ColData::Bytes(v) = &mut c.data {
-                for s in v.iter_mut().filter(|s| s.0 == COPIED) {
-                    s.0 = ix;
-                }
-            }
-        }
-    }
+    out.bufs.push(Bytes::from(std::mem::take(&mut out.own)));
     Ok(())
-}
-
-/// Column `col` of a row (`n` values, at `pos` in `data`) into `out`, `pos` past it.
-#[allow(clippy::too_many_arguments)]
-fn decode_one(
-    out: &mut ColBatch,
-    col: usize,
-    n: usize,
-    at: u32,
-    ext: bool,
-    buf_ix: Option<(u32, usize)>,
-    data: &[u8],
-    pos: &mut usize,
-    missing: &[Value],
-) -> Result<()> {
-    let Some(c) = out.cols[col].as_mut() else {
-        if col < n {
-            row::skip_value_fast(data, pos)?;
-        }
-        return Ok(());
-    };
-    if col >= n {
-        // (Stored before the column was added.)
-        let m = missing.get(col).cloned().unwrap_or(Value::Null);
-        c.nulls.push(m.is_null());
-        c.data.push_default();
-        if !m.is_null() {
-            c.odd.push((at, m));
-        }
-        return Ok(());
-    }
-    let p0 = *pos;
-    let t = data[p0];
-    if t == tag::NULL || ext {
-        c.nulls.push(true);
-        c.data.push_default();
-        return row::skip_value_fast(data, pos);
-    }
-    c.nulls.push(false);
-    let fixed = |n: usize| data.get(p0 + 1..p0 + 1 + n);
-    let done = match (&mut c.data, t) {
-        (ColData::I32(v), tag::INT2) => fixed(2).map(|b| v.push(i16::from_le_bytes([b[0], b[1]]) as i32)),
-        (ColData::I32(v), tag::INT4) | (ColData::Date(v), tag::DATE) => {
-            fixed(4).map(|b| v.push(i32::from_le_bytes([b[0], b[1], b[2], b[3]])))
-        }
-        (ColData::I64(v), tag::INT8) => fixed(8).map(|b| v.push(i64::from_le_bytes(b.try_into().unwrap()))),
-        (ColData::F64(v), tag::FLOAT8) => fixed(8).map(|b| v.push(f64::from_le_bytes(b.try_into().unwrap()))),
-        (ColData::F64(v), tag::FLOAT4) => fixed(4).map(|b| v.push(f32::from_le_bytes(b.try_into().unwrap()) as f64)),
-        (ColData::Bool(v), tag::TRUE | tag::FALSE) => {
-            v.push(t == tag::TRUE);
-            Some(())
-        }
-        (ColData::Num(v), tag::NUMERIC) => match row::peek_num(data, p0) {
-            Some(Some(x)) => {
-                v.push(x);
-                Some(())
-            }
-            _ => None,
-        },
-        (ColData::Bytes(v), tag::TEXT | tag::BYTEA) => {
-            let mut p = p0 + 1;
-            let len = get_varint(data, &mut p)? as usize;
-            let s = data.get(p..p + len).ok_or_else(|| crate::error::internal("truncated row"))?;
-            match buf_ix {
-                Some((b, off)) => v.push((b, (off + p) as u32, (off + p + len) as u32)),
-                None => {
-                    let st = out.copied.len() as u32;
-                    out.copied.extend_from_slice(s);
-                    v.push((COPIED, st, out.copied.len() as u32));
-                }
-            }
-            Some(())
-        }
-        (ColData::Values(v), _) => {
-            let mut p = p0;
-            v.push(row::decode_value(data, &mut p)?);
-            Some(())
-        }
-        _ => None,
-    };
-    if done.is_none() {
-        // (A value the typed vector doesn't hold.)
-        let mut p = p0;
-        let v = row::decode_value(data, &mut p)?;
-        c.data.push_default();
-        c.odd.push((at, v));
-    }
-    row::skip_value_fast(data, pos)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::row;
     use crate::types::numeric::Numeric;
 
     /// Every column decoded gives what `decode_row` gives, in and out of block buffers,

@@ -67,6 +67,14 @@ pub struct BoundQuery {
     pub hidden_rtes: usize,
     /// Parameters cast to a domain: (parameter, domain).
     pub param_domains: Vec<(usize, u32)>,
+    /// The plan's Gathers, found the first time it runs (`exec::parallel_part::start`), as
+    /// PostgreSQL's plan has them: a plan kept for many executions builds its EXPLAIN tree
+    /// once, not per execution. With the plan they are of (held, so its address can't be
+    /// another plan's).
+    pub gathers: std::sync::OnceLock<(Arc<Plan>, Arc<[crate::exec::parallel_part::Gather]>)>,
+    /// Its EXPLAIN total cost, found with the Gathers when a plan choice needs it
+    /// (`Session::plan_cost`), with the plan it is of.
+    pub cost: std::sync::OnceLock<(Arc<Plan>, f64)>,
 }
 
 /// A statement after parse analysis (`Binder::analyze_statement`), its top query level not
@@ -136,6 +144,8 @@ impl Analyzed {
             perms: Arc::new(perms),
             hidden_rtes,
             param_domains: self.param_domains.clone(),
+            gathers: Default::default(),
+            cost: Default::default(),
         })
     }
 
@@ -151,6 +161,8 @@ impl Analyzed {
             perms: Arc::new(self.perms),
             hidden_rtes,
             param_domains: self.param_domains,
+            gathers: Default::default(),
+            cost: Default::default(),
         })
     }
 

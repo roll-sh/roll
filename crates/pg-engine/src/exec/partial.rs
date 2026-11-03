@@ -266,6 +266,10 @@ pub struct Partials<'a> {
     /// place. `vals` holds a row's numbers (None: NULL).
     fast: bool,
     vals: Vec<Option<(i128, u32)>>,
+    /// Groups by their key columns' bytes (`batch_row`; `index` decides on a miss), and a
+    /// row's key as such bytes.
+    bidx: hashbrown::HashMap<Box<[u8]>, u32, super::fasthash::FastState>,
+    bkey: Vec<u8>,
 }
 
 /// A kernel's value over `row`: a column's or constant's in place, else the next of the
@@ -358,6 +362,8 @@ impl<'a> Partials<'a> {
                         && matches!(p, Partial::Count(_) | Partial::SumInt(_) | Partial::AvgInt(..) | Partial::SumNum(_))
                 }),
             vals: Vec::with_capacity(spec.aggs.len()),
+            bidx: Default::default(),
+            bkey: Vec::new(),
         }
     }
 
@@ -551,12 +557,154 @@ impl<'a> Partials<'a> {
         self.part.rows
     }
 
+    /// Row `r` of the column batch `b` (one that passed the filter, not odd) aggregated by
+    /// `plan` (`vector::AggPlan`, compiled from this spec), as `row` would aggregate it
+    /// (true), or nothing changed (false: the caller hands the row to `row`, in its place).
+    pub fn batch_row(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> bool {
+        use super::vector::AggArg;
+        self.vals.clear();
+        for (arg, (_, skip, _)) in plan.args.iter().zip(&self.spec.aggs) {
+            let v = match arg {
+                // (count(*)'s: a non-NULL stand-in.)
+                AggArg::Star => Some((1, 0)),
+                AggArg::Count(c) => (!b.cols[*c].as_ref().is_none_or(|c| c.nulls[r])).then_some((1, 0)),
+                AggArg::Num(n) => match n.at(b, r) {
+                    Some(v) => v,
+                    None => return false,
+                },
+            };
+            // (A NULL an aggregate doesn't skip: `row` adds it as only it can.)
+            if v.is_none() && !*skip {
+                return false;
+            }
+            self.vals.push(v);
+        }
+        let g = match plan.keys.is_empty() {
+            true => (!self.part.groups.is_empty()).then_some(0),
+            false => {
+                if !self.batch_key(plan, b, r) {
+                    return false;
+                }
+                match self.bidx.get(&self.bkey[..]) {
+                    Some(g) => Some(*g as usize),
+                    None => match self.batch_values(plan, b, r) {
+                        Some((key, _)) => self.index.get(&key[..]).map(|g| *g as usize),
+                        None => return false,
+                    },
+                }
+            }
+        };
+        // (Checked before anything changes, as `row` does.)
+        for (i, v) in self.vals.iter().enumerate() {
+            let Some((x, sc)) = *v else { continue };
+            let st = match g {
+                Some(g) => &self.part.groups[g].1[i],
+                None => &self.spec.aggs[i].2,
+            };
+            match st {
+                Partial::SumInt(s) => {
+                    let Some(x) = i64::try_from(x).ok().filter(|_| sc == 0) else { return false };
+                    if s.unwrap_or(0).checked_add(x).is_none() {
+                        return false;
+                    }
+                }
+                Partial::AvgInt(..) if sc != 0 || i64::try_from(x).is_err() => return false,
+                _ => {}
+            }
+        }
+        let g = match g {
+            Some(g) => g,
+            None => {
+                let states = self.spec.aggs.iter().map(|(_, _, p)| p.clone()).collect();
+                let g = self.part.groups.len();
+                if plan.keys.is_empty() {
+                    self.part.groups.push((Vec::new(), states));
+                } else {
+                    let Some((key, own)) = self.batch_values(plan, b, r) else { return false };
+                    self.part.groups.push((own, states));
+                    self.index.insert(key.into_boxed_slice(), g as u32);
+                }
+                g
+            }
+        };
+        if !plan.keys.is_empty() && !self.bidx.contains_key(&self.bkey[..]) {
+            self.bidx.insert(self.bkey.as_slice().into(), g as u32);
+        }
+        for (st, v) in self.part.groups[g].1.iter_mut().zip(&self.vals) {
+            let Some((x, sc)) = *v else { continue };
+            match st {
+                Partial::Count(n) => *n += 1,
+                Partial::SumInt(s) => *s = Some(s.unwrap_or(0) + x as i64),
+                Partial::AvgInt(sum, n) => {
+                    *sum += x;
+                    *n += 1;
+                }
+                Partial::SumNum(sn) => sn.add_wide(x, sc),
+                _ => {}
+            }
+        }
+        if self.spec.seq {
+            self.part.seq.push(g as u32);
+        }
+        self.part.rows += 1;
+        true
+    }
+
+    /// Row `r`'s group key as bytes into `bkey` (bpchar keys trimmed): each value's kind
+    /// and its bytes, so equal bytes are equal keys (false: a key of a kind it doesn't
+    /// take).
+    fn batch_key(&mut self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> bool {
+        use crate::storage::cols::ColData as D;
+        let k = &mut self.bkey;
+        k.clear();
+        for (c, trim) in plan.keys.iter().zip(&self.spec.trim) {
+            let Some(col) = &b.cols[*c] else { return false };
+            if col.nulls[r] {
+                k.push(0);
+                continue;
+            }
+            match &col.data {
+                D::I32(v) => k.extend(std::iter::once(2).chain(v[r].to_le_bytes())),
+                D::I64(v) => k.extend(std::iter::once(3).chain(v[r].to_le_bytes())),
+                D::Date(v) => k.extend(std::iter::once(4).chain(v[r].to_le_bytes())),
+                D::Bool(v) => k.extend([7, v[r] as u8]),
+                D::Bytes(_) => {
+                    let mut t = col.bytes(b, r);
+                    if *trim {
+                        while let [rest @ .., b' '] = t {
+                            t = rest;
+                        }
+                    }
+                    k.push(8);
+                    k.extend((t.len() as u32).to_le_bytes());
+                    k.extend_from_slice(t);
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// Row `r`'s group key as values: as groups compare it (bpchar keys trimmed) and the
+    /// group's own (its first row's values). None: a value it doesn't make.
+    fn batch_values(&self, plan: &super::vector::AggPlan, b: &crate::storage::cols::ColBatch, r: usize) -> Option<(Vec<Value>, Vec<Value>)> {
+        let mut key = Vec::with_capacity(plan.keys.len());
+        let mut own = Vec::with_capacity(plan.keys.len());
+        for ((c, trim), ty) in plan.keys.iter().zip(&self.spec.trim).zip(&plan.key_types) {
+            let v = b.cols[*c].as_ref()?.value(b, r, ty).ok()?;
+            key.push(if *trim { trimmed(v.clone()) } else { v.clone() });
+            own.push(v);
+        }
+        Some((key, own))
+    }
+
     /// The part so far (the next one starts empty).
     pub fn take(&mut self) -> Option<Part> {
         if self.part.read == 0 && self.part.rows == 0 {
             return None;
         }
         self.index.clear();
+        self.bidx.clear();
         Some(std::mem::replace(&mut self.part, Part { groups: Vec::new(), seq: Vec::new(), read: 0, rows: 0 }))
     }
 }
