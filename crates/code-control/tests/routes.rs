@@ -499,11 +499,12 @@ async fn github_webhook_statuses() {
     assert_eq!(a.send(hook("ping", "d-3", ping, SECRET)).await.status(), OK, "a redelivery");
 }
 
-/// The agents routes (`agents/api.rs`) for every kind of caller. Reads (machines, state, events)
-/// are the owner's tokens' (agents included) and 404 to everyone else; commands are the owner's
-/// tokens' too, 403/401 for others; managing machines and approving logins is the owner's, not
-/// its agents'. Starting and polling a login look at no caller; bad tokens, machine tokens
-/// included, are 401 everywhere else.
+/// The agents routes (`agents/api.rs`, `agents/share.rs`) for every kind of caller. Reads
+/// (machines, state, events, shares) are the owner's tokens' (agents included) and 404 to
+/// everyone else; commands are the owner's tokens' too, 403/401 for others; managing machines,
+/// looking up and approving logins, and making and revoking shares is the owner's, not its
+/// agents'. Starting and polling a login and reading a share by its link look at no caller; bad
+/// tokens, machine tokens included, are 401 everywhere else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_routes_follow_the_auth_matrix() {
     let w = world().await;
@@ -514,7 +515,7 @@ async fn agents_routes_follow_the_auth_matrix() {
     let machine = m["token"].as_str().unwrap().to_string();
     let base = "/v1/code/agents/acme";
     let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" } });
-    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events")];
+    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events"), format!("{base}/shares")];
     let command = format!("{base}/machines/{mid}/commands");
     let manages = [
         ("POST", format!("{base}/machines")),
@@ -522,6 +523,9 @@ async fn agents_routes_follow_the_auth_matrix() {
         ("DELETE", format!("{base}/machines/{mid}")),
         ("POST", format!("{base}/login/approve")),
         ("POST", format!("{base}/login/deny")),
+        ("GET", format!("{base}/login/BCDF-GHJK")),
+        ("POST", format!("{base}/threads/thr_x/shares")),
+        ("DELETE", format!("{base}/shares/shr_x")),
     ];
     let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
     let denied = StatusCode::UNAUTHORIZED;
@@ -551,18 +555,23 @@ async fn agents_routes_follow_the_auth_matrix() {
         }
         assert_eq!(call(a, "POST", "/v1/code/agents/login", None, Some(bad)).await, OK);
         assert_eq!(call(a, "POST", "/v1/code/agents/login/poll", Some(&json!({ "device_code": "rld_x" })), Some(bad)).await, OK);
+        assert_eq!(call(a, "GET", "/v1/code/agents/shares/shr_x", None, Some(bad)).await, NOT_FOUND);
     }
-    // The owner manages (an unknown login code is a 404 after the check).
+    for who_token in [Some(ADMIN), acme, agent, other, app_in, None] {
+        assert_eq!(call(a, "GET", "/v1/code/agents/shares/shr_x", None, who_token).await, NOT_FOUND, "{who_token:?}");
+    }
+    // The owner manages (an unknown login code, thread or share is a 404 after the check).
     for (m, p) in &manages {
         let want = match (*m, p.as_str()) {
             ("POST", p) if p.ends_with("/machines") => StatusCode::CREATED,
             ("PATCH", _) => OK,
-            ("DELETE", _) => StatusCode::NO_CONTENT,
+            ("DELETE", p) if p.contains("/machines/") => StatusCode::NO_CONTENT,
             _ => NOT_FOUND,
         };
         assert_eq!(call(a, m, p, Some(&body), acme).await, want, "owner: {m} {p}");
     }
-    // The link: only machine tokens.
+    // The link: only machine tokens (without an upgrade, the token's machine).
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, Some(&machine)).await, denied, "revoked by the owner above");
     assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, acme).await, denied);
     assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, None).await, denied);
     for who_token in [Some(ADMIN), acme, agent, other, None] {

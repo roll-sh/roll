@@ -10,6 +10,7 @@
 
 pub mod api;
 mod link;
+pub mod share;
 pub mod store;
 
 use crate::Code;

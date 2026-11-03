@@ -1189,3 +1189,80 @@ pub enum LoginPoll {
     Expired,
     Denied,
 }
+
+/// `GET /v1/code/agents/{owner}/login/{user_code}`: a device login waiting for approval, so the
+/// dashboard can say which machine asks before anyone approves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLogin {
+    pub user_code: String,
+    /// The name it asked for (`roll agent login --name`, or its hostname).
+    pub name: String,
+    /// What `roll agent login` said about the machine, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// `std::env::consts::OS` of the CLI (`macos`, `linux`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    pub created_at: Millis,
+    pub expires_at: Millis,
+}
+
+/// `GET /v1/code/agents/connect` without a WebSocket upgrade: the machine a token opens
+/// (`roll agent login --machine-token`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MachineLogin {
+    pub machine: Machine,
+    pub owner: String,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shares
+// ---------------------------------------------------------------------------------------------
+
+/// A read-only copy of a thread (and, with `subtree`, the subagent threads it delegated to) for a
+/// public link (`/agents/s/<id>`). Frozen when it was made: later work doesn't show. Terminals,
+/// attachments' bytes and home directories (`~`) are left out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Share {
+    /// `shr_…`.
+    pub id: String,
+    pub owner: String,
+    pub title: String,
+    /// The shared thread (the root of the copy).
+    pub thread: ThreadId,
+    pub subtree: bool,
+    pub machine: SharedMachine,
+    pub created_at: Millis,
+    /// The project, threads, runs, nodes, requests and checkpoints, as they were.
+    pub entities: Vec<Entity>,
+    /// Tool outputs and large diffs were shortened to fit.
+    #[serde(default)]
+    pub trimmed: bool,
+}
+
+/// What a share says about the machine its thread ran on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedMachine {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+}
+
+/// A share as its owner lists it (`GET /v1/code/agents/{owner}/shares`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareSummary {
+    pub id: String,
+    pub title: String,
+    pub thread: ThreadId,
+    pub subtree: bool,
+    /// The public page.
+    pub url: String,
+    /// Threads and runs in the copy.
+    pub threads: u32,
+    pub runs: u32,
+    /// Size of the copy (JSON).
+    pub bytes: u64,
+    pub created_at: Millis,
+    /// Who made it (the owner's name or `admin`).
+    pub created_by: String,
+}

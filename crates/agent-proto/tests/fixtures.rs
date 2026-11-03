@@ -574,6 +574,43 @@ fn fixtures() {
             expires_in: 600,
         }],
     );
+    check(
+        "pending_logins",
+        vec![
+            PendingLogin { user_code: "WXYZ-2345".into(), name: "ada-mbp".into(), hostname: Some("ada-mbp.local".into()), os: Some("macos".into()), created_at: T, expires_at: T + 900_000 },
+            PendingLogin { user_code: "BCDF-GHJK".into(), name: "machine".into(), hostname: None, os: None, created_at: T, expires_at: T + 900_000 },
+        ],
+    );
+    check("machine_logins", vec![MachineLogin { machine: machine(), owner: "acme".into() }]);
+    check(
+        "shares",
+        vec![Share {
+            id: "shr_0123456789abcdef01234567".into(),
+            owner: "acme".into(),
+            title: "Fix the flaky queue test".into(),
+            thread: thr(),
+            subtree: true,
+            machine: SharedMachine { name: "ada-mbp".into(), os: Some("macos".into()) },
+            created_at: T,
+            entities: entities().into_iter().filter(|e| !matches!(e, Entity::Terminal(_) | Entity::Removed(_))).collect(),
+            trimmed: false,
+        }],
+    );
+    check(
+        "share_summaries",
+        vec![ShareSummary {
+            id: "shr_0123456789abcdef01234567".into(),
+            title: "Fix the flaky queue test".into(),
+            thread: thr(),
+            subtree: false,
+            url: "https://roll.sh/agents/s/shr_0123456789abcdef01234567".into(),
+            threads: 1,
+            runs: 2,
+            bytes: 18_432,
+            created_at: T,
+            created_by: "acme".into(),
+        }],
+    );
 }
 
 #[test]

@@ -12,6 +12,7 @@ export const RESERVED_NAMES = [
   "icon.svg",
   "favicon.ico",
   "_next",
+  "install.sh",
   // Next.js and web conventions.
   "api",
   "robots.txt",
@@ -95,6 +96,7 @@ export const RESERVED_NAMES = [
   "observability",
   "previews",
   "agents",
+  "shares",
   // roll itself.
   "roll",
   "rollsh",

@@ -545,15 +545,18 @@ commands to them. The wire types are `agent_proto` (Rust) and `apps/dashboard/sr
 times in these shapes are **milliseconds** (`Millis`), unlike the rest of this API.
 
 ```
-POST /v1/code/agents/login {name?} → DeviceLogin {device_code /* rld_… */, user_code /* "BCDF-GHJK" */,
+POST /v1/code/agents/login {name?, hostname?, os? /* what the machine says about itself, one line, ≤ 64 */}
+       → DeviceLogin {device_code /* rld_… */, user_code /* "BCDF-GHJK" */,
        verification_uri /* {web}/dashboard/agents/connect?code=… */, interval: 5, expires_in: 900}
-       No caller needed. 503 (Retry-After) while 10,000 logins are waiting.
+       No caller needed. 503 (Retry-After) while 10,000 logins are waiting; 400 a non-string field.
 POST /v1/code/agents/login/poll {device_code} → LoginPoll
        {status: "pending"} | {status: "approved", token /* rlm_…, handed out once */, machine /* mch_… */, owner}
        | {status: "denied"} | {status: "expired"} /* also for an unknown code and after the token was handed out */
+GET  /v1/code/agents/{owner}/login/{user_code} → PendingLogin {user_code, name, hostname?, os?, created_at, expires_at}
+       which machine asks, shown before approving ("Approve ada-mbp (macOS)?")
 POST /v1/code/agents/{owner}/login/approve {user_code /* any case, dash optional */, name?} → 204
 POST /v1/code/agents/{owner}/login/deny {user_code} → 204
-       Both need Code::manages (the owner or admin, not agent tokens); 404 when no pending login has the code.
+       All three need Code::manages (the owner or admin, not agent tokens); 404 when no pending login has the code.
 
 GET    /v1/code/agents/{owner}/machines → [Machine]   oldest first; owner's tokens (agents too), else 404
 POST   /v1/code/agents/{owner}/machines {name?} → 201 {machine: Machine, token /* rlm_…, shown once */}
@@ -582,6 +585,8 @@ GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events na
        only ascend. Without either, only what happens from now on. `entity` events include tombstones
        ({kind: "removed", entity, id, thread?}). Text and output deltas only for the listed threads;
        terminal deltas always. Deltas are never replayed. Stream limits as for repo events (429).
+       With both `?after=` and Last-Event-ID (the canvas sends both on a reconnect) the stream resumes
+       after the newer; a Last-Event-ID that isn't a number is ignored, an `after` that isn't is a 400.
 
 POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
        Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
@@ -595,7 +600,8 @@ POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, com
        machine_offline 503 (not connected), timeout 504 (no reply in time).
 
 GET /v1/code/agents/connect    the daemon's WebSocket (Authorization: Bearer rlm_…; only machine tokens,
-       looked up on every connect: 401 otherwise, 400 without an upgrade). Text frames of
+       looked up on every connect: 401 otherwise). Without an upgrade: 200 MachineLogin {machine: Machine,
+       owner}, the machine the token opens (`roll agent login --machine-token`). Text frames of
        DaemonFrame / RelayFrame JSON: hello → welcome {machine, owner, resume_from}, entities → ack,
        delta, command → reply, ping/pong (every 20 s; 60 s of silence closes). Frames up to 16 MiB.
        Close codes: 4400 protocol error (wrong version, no hello), 4401 revoked (stop, don't retry),
@@ -603,6 +609,31 @@ GET /v1/code/agents/connect    the daemon's WebSocket (Authorization: Bearer rlm
 DELETE /v1/code/agents/connect → 204   a machine revokes itself with its own token (`roll agent logout`):
        the same as DELETE …/machines/{machine}; 401 for any other token.
 ```
+
+**Shares** are read-only copies of a thread behind a public link, `{web}/agents/s/<id>`
+(docs/code/agents.md, "Shares").
+
+```
+POST   /v1/code/agents/{owner}/threads/{thread}/shares {subtree?: bool} → 201 ShareSummary
+       Freezes the thread's records from the mirror (with `subtree`, the subagent threads it delegated to,
+       recursively, at most 64 threads; forks are separate threads and stay out). Terminals, attachments'
+       bytes and queued messages are left out; the machine's home directory and any /home/<user>,
+       /Users/<user> or /root starting a path become `~` in every string. Over 4 MiB, tool outputs and
+       diffs are cut to their ends (`trimmed: true`); still over is a 422, as is a 501st share.
+       Code::manages; 404 when the mirror has no such thread.
+GET    /v1/code/agents/{owner}/shares → [ShareSummary]   newest first; owner's tokens (agents too), else 404
+DELETE /v1/code/agents/{owner}/shares/{id} → 204          Code::manages; the link stops working at once
+GET    /v1/code/agents/shares/{id} → Share               no caller needed; `Cache-Control: no-store`; 404 unknown
+
+ShareSummary = {id /* shr_ + 24 hex */, title, thread, subtree, url /* {web}/agents/s/<id> */, threads, runs,
+                bytes, created_at, created_by}
+Share = {id, owner, title, thread, subtree, machine: {name, os?}, created_at, trimmed,
+         entities: [Entity] /* project, threads, then runs, requests, checkpoints and nodes as they happened */}
+```
+
+A share is a copy: later work on the thread, revoking its machine or deleting the thread leave it as
+it was. `shares` (like `login`) is a reserved owner name, so `/v1/code/agents/shares/…` never names an
+owner, and it isn't routed by owner in a cluster.
 
 In a cluster every `/v1/code/agents/{owner}/…` request and every machine link of the owner run on the
 node holding the lease `agents:<owner id>` (docs/code/cluster.md).

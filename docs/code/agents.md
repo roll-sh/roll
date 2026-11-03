@@ -36,7 +36,7 @@ sidebar app.
 - **`crates/code-control/src/agents/`**: the relay and the `/v1/code/agents` API, machines and
   machine tokens, device login, sandboxes and shares.
 - **`apps/dashboard`**: the canvas at `/dashboard/agents`, the "rolling" popover in the header,
-  public shares at `/agents/s/<id>`.
+  public shares at `/agents/s/<id>` (`src/app/agents/s/[id]`, replayed by `lib/agents-replay.ts`).
 - **`apps/desktop`**: the desktop app (Electron): the canvas in a window, plus this machine's
   daemon, a tray and notifications (see "Desktop app").
 
@@ -222,6 +222,17 @@ server (`docs/orchestration-v2/orchestrator-mcp-server.md` there), ported in
 - Commands need `Code::owns` on the owner (agent tokens may drive threads, so agents can
   orchestrate agents); adding, renaming or revoking machines, sandboxes and shares need
   `Code::manages`.
+
+## Shares
+
+The owner can share a thread as a read-only link, `https://roll.sh/agents/s/<id>`: "the agent IDE
+people will share". Sharing freezes a copy of the thread's records from the relay's mirror (and,
+optionally, of the subagent threads it delegated to), so the link shows the run as it was, not
+what happens after. Terminals, attachments' bytes and queued messages are left out, and home
+directories are written `~`. The page is the canvas in read-only mode with **replay**: a timeline
+rebuilt from the records' timestamps (threads appear, nodes start, text streams, the accent pulse
+while a run is going), a play button and speed, and the final frame at once with reduced motion.
+Revoking a share removes it; nothing else does. Routes are in docs/code/http-api.md ("Shares").
 
 ## Sandboxes
 

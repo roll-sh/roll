@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS agent_logins (
     name TEXT NOT NULL,
     owner_id TEXT,
     created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    -- What `roll agent login` said about the machine (shown before approving).
+    hostname TEXT,
+    os TEXT
 );
 CREATE TABLE IF NOT EXISTS agent_entities (
     owner_id TEXT NOT NULL,
@@ -102,6 +105,10 @@ fn take_cursors(c: &Conn<'_>, owner_id: &str, n: u64) -> code_sql::Result<u64> {
     c.execute("UPDATE agent_cursors SET cursor = cursor + ? WHERE owner_id = ?", params![n as i64, owner_id])?;
     let end: i64 = c.query_row("SELECT cursor FROM agent_cursors WHERE owner_id = ?", [owner_id], |r| r.get(0))?;
     Ok(end as u64 + 1 - n)
+}
+
+pub fn owner_name(db: &code_sql::Db, owner_id: &str) -> code_sql::Result<Option<String>> {
+    db.query_row("SELECT name FROM owners WHERE id = ?", [owner_id], |r| r.get(0)).optional()
 }
 
 pub fn owner_cursor(db: &code_sql::Db, owner_id: &str) -> code_sql::Result<u64> {
@@ -211,7 +218,14 @@ pub enum NewLogin {
     Full,
 }
 
-pub fn create_login(db: &code_sql::Db, device_hash: &str, user_code: &str, name: &str) -> code_sql::Result<NewLogin> {
+/// What a machine says about itself when it starts a login.
+pub struct LoginMachine<'a> {
+    pub name: &'a str,
+    pub hostname: Option<&'a str>,
+    pub os: Option<&'a str>,
+}
+
+pub fn create_login(db: &code_sql::Db, device_hash: &str, user_code: &str, m: &LoginMachine<'_>) -> code_sql::Result<NewLogin> {
     let now = code_sql::now_ms();
     db.write(|c| {
         // Expired logins go here (anyone may start one, so they're bounded and swept).
@@ -221,11 +235,31 @@ pub fn create_login(db: &code_sql::Db, device_hash: &str, user_code: &str, name:
             return Ok(NewLogin::Full);
         }
         let added = c.execute(
-            "INSERT INTO agent_logins (device_hash, user_code, status, name, created_at, expires_at) VALUES (?, ?, 'pending', ?, ?, ?) ON CONFLICT DO NOTHING",
-            params![device_hash, user_code, name, now, now + LOGIN_TTL_S * 1000],
+            "INSERT INTO agent_logins (device_hash, user_code, status, name, created_at, expires_at, hostname, os) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            params![device_hash, user_code, m.name, now, now + LOGIN_TTL_S * 1000, m.hostname, m.os],
         )?;
         Ok(if added == 1 { NewLogin::Created } else { NewLogin::CodeTaken })
     })
+}
+
+/// A login still waiting for approval, by its user code.
+pub fn pending_login(db: &code_sql::Db, user_code: &str) -> code_sql::Result<Option<agent_proto::PendingLogin>> {
+    let now = code_sql::now_ms();
+    db.query_row(
+        "SELECT user_code, name, hostname, os, created_at, expires_at FROM agent_logins WHERE user_code = ? AND status = 'pending' AND expires_at >= ?",
+        params![user_code, now],
+        |r| {
+            Ok(agent_proto::PendingLogin {
+                user_code: r.get(0)?,
+                name: r.get(1)?,
+                hostname: r.get(2)?,
+                os: r.get(3)?,
+                created_at: r.get::<_, i64>(4)?.max(0) as u64,
+                expires_at: r.get::<_, i64>(5)?.max(0) as u64,
+            })
+        },
+    )
+    .optional()
 }
 
 /// Approve (`owner_id` set) or deny a pending login by its user code. False if there's no such

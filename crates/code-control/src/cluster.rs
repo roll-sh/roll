@@ -599,8 +599,8 @@ fn classify(path: &str) -> Option<Target> {
         ["v1", "code", "changes", id, ..] => Target::Change(decode(id)),
         ["v1", "code", "threads", id, ..] => Target::Thread(decode(id)),
         ["v1", "code", "work", id, ..] => Target::Work(decode(id)),
-        // `login/poll` is global (and `login` a reserved owner name).
-        ["v1", "code", "agents", owner, _, ..] if *owner != "login" => Target::Agents(decode(owner)),
+        // `login/poll` and `shares/{id}` are global (`login` and `shares` are reserved owner names).
+        ["v1", "code", "agents", owner, _, ..] if !matches!(*owner, "login" | "shares") => Target::Agents(decode(owner)),
         ["git", owner, repo, ..] => {
             let repo = decode(repo);
             Target::Repo(decode(owner), repo.strip_suffix(".git").unwrap_or(&repo).to_string())
@@ -846,11 +846,13 @@ mod tests {
         assert_eq!(classify("/v1/code/work/wi_1/heartbeat"), Some(Target::Work("wi_1".into())));
         assert_eq!(classify("/v1/code/agents/acme/events"), Some(Target::Agents("acme".into())));
         assert_eq!(classify("/v1/code/agents/acme/machines/mch_1/commands"), Some(Target::Agents("acme".into())));
+        assert_eq!(classify("/v1/code/agents/acme/shares/shr_1"), Some(Target::Agents("acme".into())));
         for global in [
             "/v1/code",
             "/v1/code/agents/login",
             "/v1/code/agents/login/poll",
             "/v1/code/agents/connect",
+            "/v1/code/agents/shares/shr_1",
             "/v1/code/agents//state",
             "/v1/code/repos",
             "/v1/code/repos/acme",

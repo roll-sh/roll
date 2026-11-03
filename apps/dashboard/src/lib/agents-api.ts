@@ -540,6 +540,56 @@ export type LoginPoll =
   | { status: "expired" }
   | { status: "denied" };
 
+/** A device login waiting for approval: which machine asks. */
+export interface PendingLogin {
+  user_code: string;
+  name: string;
+  hostname: string | null;
+  /** `macos`, `linux`, … (Rust's `std::env::consts::OS`). */
+  os: string | null;
+  created_at: Millis;
+  expires_at: Millis;
+}
+
+/** The machine a machine token opens (`GET /v1/code/agents/connect` without an upgrade). */
+export interface MachineLogin {
+  machine: Machine;
+  owner: string;
+}
+
+// ── shares ──
+
+export interface SharedMachine {
+  name: string;
+  os: string | null;
+}
+
+/** A frozen, read-only copy of a thread (and its subagent threads) behind a public link. */
+export interface Share {
+  id: string;
+  owner: string;
+  title: string;
+  thread: ThreadId;
+  subtree: boolean;
+  machine: SharedMachine;
+  created_at: Millis;
+  entities: Entity[];
+  trimmed: boolean;
+}
+
+export interface ShareSummary {
+  id: string;
+  title: string;
+  thread: ThreadId;
+  subtree: boolean;
+  url: string;
+  threads: number;
+  runs: number;
+  bytes: number;
+  created_at: Millis;
+  created_by: string;
+}
+
 // ── decoders ──
 
 const vec = <T>(d: Decoder<T>) => withDefault(array(d), () => []);
@@ -892,6 +942,42 @@ export const loginPollD: Decoder<LoginPoll> = tagged("status", {
   denied: obj<object>({}),
 } satisfies Record<LoginPoll["status"], Decoder<object>>);
 
+export const pendingLoginD = obj<PendingLogin>({
+  user_code: str,
+  name: str,
+  hostname: opt(str),
+  os: opt(str),
+  created_at: int,
+  expires_at: int,
+});
+
+export const machineLoginD = obj<MachineLogin>({ machine: machineD, owner: str });
+
+export const shareD = obj<Share>({
+  id: str,
+  owner: str,
+  title: str,
+  thread: str,
+  subtree: bool,
+  machine: obj<SharedMachine>({ name: str, os: opt(str) }),
+  created_at: int,
+  entities: array(entityD),
+  trimmed: withDefault(bool, () => false),
+});
+
+export const shareSummaryD = obj<ShareSummary>({
+  id: str,
+  title: str,
+  thread: str,
+  subtree: bool,
+  url: str,
+  threads: int,
+  runs: int,
+  bytes: int,
+  created_at: int,
+  created_by: str,
+});
+
 // ── helpers ──
 
 export const isBusy = (s: ThreadStatus) => s === "starting" || s === "running" || s === "waiting";
@@ -1034,6 +1120,17 @@ export function createAgentsApi(
     denyLogin: async (owner: string, userCode: string) => {
       await call("POST", `${ag(owner)}/login/deny`, { user_code: userCode });
     },
+    /** Which machine a pending `roll agent login` is (404: none is waiting with the code). */
+    pendingLogin: async (owner: string, userCode: string) => decode(pendingLoginD, await call("GET", `${ag(owner)}/login/${enc(userCode)}`)),
+    /** Freeze a read-only copy of a thread for a public link; `subtree` adds its subagent threads. */
+    createShare: async (owner: string, thread: ThreadId, subtree = false) =>
+      decode(shareSummaryD, await call("POST", `${ag(owner)}/threads/${enc(thread)}/shares`, { subtree })),
+    shares: async (owner: string) => decode(array(shareSummaryD), await call("GET", `${ag(owner)}/shares`)),
+    revokeShare: async (owner: string, id: string) => {
+      await call("DELETE", `${ag(owner)}/shares/${enc(id)}`);
+    },
+    /** A share by its link: no sign-in needed. */
+    share: async (id: string) => decode(shareD, await call("GET", `/v1/code/agents/shares/${enc(id)}`)),
   };
 }
 

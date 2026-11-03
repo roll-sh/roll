@@ -1,6 +1,7 @@
 //! `/v1/code/agents`: device login, machines, the daemon link, the state snapshot, the event
 //! stream and commands (docs/code/http-api.md, "Agents").
 
+use super::share;
 use super::store::{self, Filter};
 use crate::api::{Body, Q, stream_key};
 use crate::model::Owner;
@@ -12,7 +13,7 @@ use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,20 +34,25 @@ pub fn routes() -> Router<Arc<Code>> {
         .route("/v1/code/agents/login", post(login))
         .route("/v1/code/agents/login/poll", post(poll))
         .route("/v1/code/agents/connect", get(connect).delete(disconnect))
+        .route("/v1/code/agents/shares/{id}", get(share::public))
         .route("/v1/code/agents/{owner}/login/approve", post(approve))
         .route("/v1/code/agents/{owner}/login/deny", post(deny))
+        .route("/v1/code/agents/{owner}/login/{user_code}", get(pending_login))
         .route("/v1/code/agents/{owner}/machines", get(list_machines).post(add_machine))
         .route("/v1/code/agents/{owner}/machines/{machine}", patch(rename_machine).delete(revoke_machine))
         .route("/v1/code/agents/{owner}/machines/{machine}/commands", post(command))
         .route("/v1/code/agents/{owner}/state", get(state))
         .route("/v1/code/agents/{owner}/events", get(events))
+        .route("/v1/code/agents/{owner}/threads/{thread}/shares", post(share::create))
+        .route("/v1/code/agents/{owner}/shares", get(share::list))
+        .route("/v1/code/agents/{owner}/shares/{id}", delete(share::revoke))
 }
 
 // ── who may do what ──
 
 /// Reading an owner's agents (machines, state, events): the owner's tokens, agents included.
 /// Everyone else gets a 404, so they don't learn what's there.
-fn readable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
+pub(super) fn readable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
     let o = code.owner_or_404(owner)?;
     if !Code::owns(caller, &o.id) {
         return Err(Error::NotFound(format!("owner {owner}")));
@@ -65,7 +71,7 @@ fn drivable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
 }
 
 /// Adding, renaming and revoking machines: the owner, not its agents.
-fn manageable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
+pub(super) fn manageable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
     let o = code.owner_or_404(owner)?;
     match caller {
         _ if Code::manages(caller, &o.id) => Ok(o),
@@ -88,7 +94,7 @@ fn machine_name(v: Option<&Value>, default: &str) -> Result<String> {
     Ok(name)
 }
 
-fn random_hex(bytes: usize) -> String {
+pub(super) fn random_hex(bytes: usize) -> String {
     let mut b = vec![0u8; bytes];
     getrandom::fill(&mut b).expect("system randomness");
     hex::encode(b)
@@ -116,12 +122,24 @@ fn normalize_user_code(s: &str) -> String {
 
 // ── device login ──
 
+/// An optional one-line field of what a machine says about itself (at most 64 characters).
+fn machine_detail(v: Option<&Value>, what: &str) -> Result<Option<String>> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(_)) => Ok(machine_name(v, "").ok()),
+        Some(_) => Err(Error::Invalid(format!("{what} must be a string"))),
+    }
+}
+
 async fn login(State(code): S, Body(b): Body) -> Result<Json<agent_proto::DeviceLogin>> {
     let name = machine_name(b.get("name"), "machine")?;
+    let hostname = machine_detail(b.get("hostname"), "hostname")?;
+    let os = machine_detail(b.get("os"), "os")?;
+    let m = store::LoginMachine { name: &name, hostname: hostname.as_deref(), os: os.as_deref() };
     for _ in 0..8 {
         let device_code = format!("rld_{}", random_hex(32));
         let user_code = new_user_code();
-        match store::create_login(code.db.sql(), &hash_token(&device_code), &user_code, &name)? {
+        match store::create_login(code.db.sql(), &hash_token(&device_code), &user_code, &m)? {
             store::NewLogin::Created => return Ok(Json(store::login_response(device_code, user_code, &code.config.web_url))),
             store::NewLogin::CodeTaken => continue,
             store::NewLogin::Full => return Err(Error::Unavailable("too many logins are waiting; try again shortly".into())),
@@ -144,6 +162,13 @@ async fn poll(State(code): S, Body(b): Body) -> Result<Json<LoginPoll>> {
         code.publish_machine(&m);
     }
     Ok(Json(poll))
+}
+
+/// `GET …/login/{user_code}`: which machine a pending login is, before approving it.
+async fn pending_login(State(code): S, caller: Caller, Path((owner, user_code)): Path<(String, String)>) -> Result<Json<agent_proto::PendingLogin>> {
+    manageable(&code, &caller, &owner)?;
+    let user_code = normalize_user_code(&user_code);
+    store::pending_login(code.db.sql(), &user_code)?.map(Json).ok_or_else(|| Error::NotFound(format!("login {user_code} (it may have expired)")))
 }
 
 async fn approve(State(code): S, caller: Caller, Path(owner): Path<String>, Body(b): Body) -> Result<StatusCode> {
@@ -236,14 +261,18 @@ fn machine_of(code: &Code, headers: &axum::http::HeaderMap) -> Result<store::Mac
     machine.ok_or(Error::Unauthorized)
 }
 
-/// `GET /v1/code/agents/connect`: a daemon's WebSocket. Only a machine token opens it.
+/// `GET /v1/code/agents/connect`: a daemon's WebSocket. Only a machine token opens it. Without
+/// an upgrade it says which machine the token is (`roll agent login --machine-token`).
 async fn connect(
     State(code): S,
     headers: axum::http::HeaderMap,
     ws: std::result::Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Result<Response> {
     let machine = machine_of(&code, &headers)?;
-    let ws = ws.map_err(|e| Error::Invalid(format!("expected a WebSocket upgrade: {e}")))?;
+    let Ok(ws) = ws else {
+        let owner = store::owner_name(code.db.sql(), &machine.owner_id)?.ok_or_else(|| Error::NotFound("the machine's owner".into()))?;
+        return Ok(Json(agent_proto::MachineLogin { machine: code.machine_json(&machine), owner }).into_response());
+    };
     Ok(ws.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).on_upgrade(move |socket| super::link::serve(code, machine, socket)).into_response())
 }
 
@@ -396,8 +425,11 @@ impl Stream {
 async fn events(State(code): S, caller: Caller, parts: Parts, Path(owner): Path<String>, Q(q): Q<ThreadsQuery>) -> Result<Response> {
     let o = readable(&code, &caller, &owner)?;
     let filter = filter(q.threads.as_deref())?;
+    // Both carry "the newest cursor this client has": resume after the newer of the two (a
+    // reconnecting EventSource sends a fresh Last-Event-ID with the URL it first opened). A
+    // Last-Event-ID that isn't a cursor is ignored: browsers may send an empty one.
     let last = parts.headers.get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
-    let after = last.or(q.after);
+    let after = last.max(q.after);
     let permit = match code.stream_permit(stream_key(&code, &caller, &parts)) {
         Ok(p) => p,
         Err(resp) => return Ok(*resp),

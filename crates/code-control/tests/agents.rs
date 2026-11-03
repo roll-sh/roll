@@ -281,10 +281,11 @@ async fn the_link_refuses_other_tokens_and_protocols() {
         let err = dial(&w.url, bad).await.err().expect("refused");
         assert!(err.to_string().contains("401"), "{bad}: {err}");
     }
-    // A plain GET (no upgrade) with a good token is a JSON 400.
+    // A plain GET (no upgrade) says which machine the token is (`roll agent login --machine-token`).
     let (s, v) = w.a.req("GET", "/v1/code/agents/connect", None, Some(&minted)).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
-    assert!(v["error"].is_string());
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let who: agent_proto::MachineLogin = serde_json::from_value(v).unwrap();
+    assert_eq!((who.owner.as_str(), who.machine.name.as_str(), who.machine.online), ("acme", "box", false));
     // Another protocol version.
     let mut d = dial(&w.url, &minted).await.unwrap();
     d.send(&DaemonFrame::Hello { protocol: agent_proto::PROTOCOL + 1, info: info() }).await;
@@ -484,4 +485,259 @@ async fn commands_go_to_the_daemon_and_come_back() {
     assert_eq!(w.req("POST", &path, Some(json!({ "id": "c7", "command": { "type": "nope" } })), &w.owner).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(w.req("POST", &path, Some(json!({ "id": "", "command": { "type": "provider.refresh" } })), &w.owner).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(w.req("POST", "/v1/code/agents/acme/machines/mch_nope/commands", Some(cmd("c8")), &w.owner).await.0, StatusCode::NOT_FOUND);
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_logins_say_which_machine_asks() {
+    let w = world().await;
+    let (s, login) = w.a.req("POST", "/v1/code/agents/login", Some(json!({ "name": "ada's laptop", "hostname": "ada-mbp.local\n", "os": "macos" })), None).await;
+    assert_eq!(s, StatusCode::OK, "{login}");
+    let code = login["user_code"].as_str().unwrap().to_string();
+    // Typed any way: lowercase, without the dash.
+    let path = format!("/v1/code/agents/acme/login/{}", code.to_lowercase().replace('-', ""));
+    let (s, p) = w.req("GET", &path, None, &w.owner).await;
+    assert_eq!(s, StatusCode::OK, "{p}");
+    let p: agent_proto::PendingLogin = serde_json::from_value(p).unwrap();
+    assert_eq!((p.user_code.as_str(), p.name.as_str(), p.hostname.as_deref(), p.os.as_deref()), (code.as_str(), "ada's laptop", Some("ada-mbp.local"), Some("macos")));
+    assert_eq!(p.expires_at - p.created_at, 900_000);
+    // Only those who could approve it.
+    for (who, want) in [(Some(w.agent.as_str()), StatusCode::FORBIDDEN), (Some(w.other.as_str()), StatusCode::FORBIDDEN), (None, StatusCode::UNAUTHORIZED)] {
+        assert_eq!(w.a.req("GET", &path, None, who).await.0, want);
+    }
+    assert_eq!(w.req("GET", "/v1/code/agents/acme/login/BCDF-GHJK", None, &w.owner).await.0, StatusCode::NOT_FOUND);
+    // Without hostname and os (an older CLI); a non-string is refused.
+    let (_, bare) = w.a.req("POST", "/v1/code/agents/login", None, None).await;
+    let (_, p) = w.req("GET", &format!("/v1/code/agents/acme/login/{}", bare["user_code"].as_str().unwrap()), None, &w.owner).await;
+    assert_eq!((p["name"].as_str(), p.get("hostname"), p.get("os")), (Some("machine"), None, None), "{p}");
+    assert_eq!(w.a.req("POST", "/v1/code/agents/login", Some(json!({ "hostname": 7 })), None).await.0, StatusCode::BAD_REQUEST);
+    // Once decided, it isn't pending.
+    assert_eq!(w.req("POST", "/v1/code/agents/acme/login/approve", Some(json!({ "user_code": code })), &w.owner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.req("GET", &path, None, &w.owner).await.0, StatusCode::NOT_FOUND);
+}
+
+/// The canvas reconnects with both `?after=` (the URL it first opened) and `Last-Event-ID`
+/// (the newest cursor it applied): the stream resumes after the newer, whichever carries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn events_resume_after_the_newer_of_after_and_last_event_id() {
+    let w = world().await;
+    let (_, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    d.upsert(vec![stamped(1, project("prj_1", "x"))]).await;
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    let first = state["cursor"].as_u64().unwrap();
+    d.upsert(vec![stamped(2, thread("thr_a", "a"))]).await;
+    let (_, state) = w.req("GET", "/v1/code/agents/acme/state", None, &w.owner).await;
+    let second = state["cursor"].as_u64().unwrap();
+    d.upsert(vec![stamped(3, thread("thr_b", "b"))]).await;
+    assert!(first < second);
+
+    let ids = |v: &[Entity]| v.iter().map(|e| e.id().to_string()).collect::<Vec<_>>();
+    for (query, header, want) in [
+        (Some(first), Some(second), vec!["thr_b"]),
+        (Some(second), Some(first), vec!["thr_b"]),
+        (Some(first), None, vec!["thr_a", "thr_b"]),
+        (None, Some(first), vec!["thr_a", "thr_b"]),
+        (Some(second), Some(second), vec!["thr_b"]),
+    ] {
+        let path = match query {
+            Some(q) => format!("/v1/code/agents/acme/events?after={q}"),
+            None => "/v1/code/agents/acme/events".into(),
+        };
+        let mut ev = Events::open(&w.a, &path, &w.owner, header).await;
+        let mut got = Vec::new();
+        for _ in 0..want.len() {
+            got.push(ev.entity().await.1);
+        }
+        assert_eq!(ids(&got), want, "after={query:?} Last-Event-ID={header:?}");
+        ev.quiet(150).await;
+    }
+    // A Last-Event-ID that isn't a cursor is ignored (the query still counts).
+    let resp = w
+        .a
+        .send(Request::get(format!("/v1/code/agents/acme/events?after={second}")).header("authorization", format!("Bearer {}", w.owner)).header("last-event-id", "").body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut ev = Events { body: resp.into_body().into_data_stream(), buf: String::new() };
+    assert_eq!(ev.entity().await.1.id(), "thr_b");
+    // A query that isn't a cursor is a 400.
+    assert_eq!(w.req("GET", "/v1/code/agents/acme/events?after=x", None, &w.owner).await.0, StatusCode::BAD_REQUEST);
+}
+
+fn subthread(id: &str, parent: &str, relation: &str, at: u64) -> Entity {
+    let mut v = serde_json::to_value(thread(id, id)).unwrap();
+    v["lineage"] = json!({ "parent": parent, "relation": relation, "root": "thr_a" });
+    v["created_at"] = json!(at);
+    entity(v)
+}
+
+/// What a machine mirrored for `thr_a`: a project and thread under the home directory, a subagent
+/// tree (`thr_sub` → `thr_grand`), a fork, a run with an image, nodes, a request, a checkpoint
+/// and a terminal.
+fn share_world() -> Vec<Stamped> {
+    let mut proj = serde_json::to_value(project("prj_1", "x")).unwrap();
+    proj["path"] = json!("/home/me/src/x");
+    let mut root = serde_json::to_value(thread("thr_a", "Fix /home/me/src/x")).unwrap();
+    root["cwd"] = json!("/home/me/src/x");
+    root["queued"] = json!([{ "id": "q1", "text": "later", "at": 5 }]);
+    let run = entity(json!({
+        "kind": "run", "id": "run_1", "thread": "thr_a", "ordinal": 1, "provider": "codex", "model": null, "status": "completed",
+        "prompt": "look at this", "attachments": [{ "name": "shot.png", "mime": "image/png", "data": "aGVsbG8=" }],
+        "requested_at": 10, "started_at": 11, "completed_at": 30
+    }));
+    let tool = entity(json!({
+        "kind": "node", "id": "nod_t", "thread": "thr_a", "run": "run_1", "ordinal": 2, "status": "completed", "started_at": 12, "completed_at": 14,
+        "body": { "type": "tool", "name": "Bash", "kind": "command", "title": "ls /home/me", "input": { "command": "ls /home/me/src" }, "output": "/home/me/src/x\n", "exit_code": 0 }
+    }));
+    let request = entity(json!({
+        "kind": "request", "id": "req_1", "thread": "thr_a", "run": "run_1", "node": "nod_r", "status": "resolved", "created_at": 15, "resolved_at": 16,
+        "body": { "type": "approval", "action": "command", "title": "Run `cargo test`", "decisions": ["accept", "decline"] },
+        "response": { "type": "decision", "decision": "accept" }
+    }));
+    let checkpoint = entity(json!({ "kind": "checkpoint", "id": "chk_1", "thread": "thr_a", "run": "run_1", "ordinal": 1, "commit": "abc", "stat": { "files": 1, "additions": 2, "deletions": 0 }, "created_at": 30 }));
+    let terminal = entity(json!({ "kind": "terminal", "id": "trm_1", "thread": "thr_a", "cwd": "/home/me", "title": "zsh", "status": "running", "cols": 80, "rows": 24, "created_at": 1 }));
+    let mut sub_node = serde_json::to_value(node("nod_s", "thr_sub", "child work")).unwrap();
+    sub_node["run"] = json!("run_s");
+    let items = vec![
+        entity(proj),
+        entity(root),
+        subthread("thr_sub", "thr_a", "subagent", 20),
+        subthread("thr_grand", "thr_sub", "subagent", 21),
+        subthread("thr_fork", "thr_a", "fork", 22),
+        run,
+        node("nod_m", "thr_a", "edited /home/me/src/x/lib.rs"),
+        tool,
+        request,
+        checkpoint,
+        terminal,
+        entity(sub_node),
+        node("nod_f", "thr_fork", "fork work"),
+    ];
+    items.into_iter().enumerate().map(|(i, e)| stamped(i as u64 + 1, e)).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shares_freeze_a_redacted_copy_for_anyone_with_the_link() {
+    let w = world().await;
+    let (_, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    d.upsert(share_world()).await;
+    let create = "/v1/code/agents/acme/threads/thr_a/shares";
+
+    // Sharing is the owner's: not its agents, not other owners, not anonymous.
+    for (who, want) in [(Some(w.agent.as_str()), StatusCode::FORBIDDEN), (Some(w.other.as_str()), StatusCode::FORBIDDEN), (None, StatusCode::UNAUTHORIZED)] {
+        assert_eq!(w.a.req("POST", create, None, who).await.0, want);
+    }
+    assert_eq!(w.req("POST", "/v1/code/agents/acme/threads/thr_nope/shares", None, &w.owner).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("POST", create, Some(json!({ "subtree": "yes" })), &w.owner).await.0, StatusCode::BAD_REQUEST);
+
+    let (s, one) = w.req("POST", create, None, &w.owner).await;
+    assert_eq!(s, StatusCode::CREATED, "{one}");
+    let one: agent_proto::ShareSummary = serde_json::from_value(one).unwrap();
+    assert!(one.id.starts_with("shr_") && one.id.len() == 28, "{}", one.id);
+    assert_eq!(one.url, format!("https://roll.sh/agents/s/{}", one.id));
+    assert_eq!((one.threads, one.runs, one.subtree, one.created_by.as_str(), one.title.as_str()), (1, 1, false, "acme", "Fix ~/src/x"));
+
+    // Anyone with the link reads it, never cached.
+    let resp = w.a.send(Request::get(format!("/v1/code/agents/shares/{}", one.id)).body(Body::empty()).unwrap()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+    let raw = String::from_utf8(axum::body::to_bytes(resp.into_body(), 1 << 24).await.unwrap().to_vec()).unwrap();
+    assert!(!raw.contains("/home/me"), "a home directory is in the share: {raw}");
+    let share: agent_proto::Share = serde_json::from_str(&raw).unwrap();
+    assert_eq!((share.owner.as_str(), share.machine.name.as_str(), share.machine.os.as_deref(), share.thread.as_str()), ("acme", "box", Some("linux"), "thr_a"));
+    let ids: Vec<&str> = share.entities.iter().map(|e| e.id()).collect();
+    assert_eq!(ids, ["prj_1", "thr_a", "run_1", "req_1", "chk_1", "nod_m", "nod_t"], "no terminal, no other thread");
+    for e in &share.entities {
+        match e {
+            Entity::Project(p) => assert_eq!(p.path, "~/src/x"),
+            Entity::Thread(t) => assert!(t.cwd == "~/src/x" && t.queued.is_empty(), "{t:?}"),
+            Entity::Run(r) => assert_eq!((r.attachments[0].name.as_str(), r.attachments[0].data.as_str()), ("shot.png", "")),
+            Entity::Node(n) => match &n.body {
+                agent_proto::NodeBody::Message { text } => assert_eq!(text, "edited ~/src/x/lib.rs"),
+                agent_proto::NodeBody::Tool(t) => assert_eq!((t.title.as_str(), t.input["command"].as_str(), t.output.as_deref()), ("ls ~", Some("ls ~/src"), Some("~/src/x\n"))),
+                other => panic!("{other:?}"),
+            },
+            _ => {}
+        }
+    }
+
+    // With the subagent subtree: children and grandchildren, not forks.
+    let (s, all) = w.req("POST", create, Some(json!({ "subtree": true })), &w.owner).await;
+    assert_eq!(s, StatusCode::CREATED, "{all}");
+    assert_eq!((all["threads"].as_u64(), all["subtree"].as_bool()), (Some(3), Some(true)));
+    let (_, tree) = w.a.req("GET", &format!("/v1/code/agents/shares/{}", all["id"].as_str().unwrap()), None, None).await;
+    let tree: agent_proto::Share = serde_json::from_value(tree).unwrap();
+    let threads: Vec<&str> = tree.entities.iter().filter(|e| matches!(e, Entity::Thread(_))).map(|e| e.id()).collect();
+    assert_eq!(threads, ["thr_a", "thr_sub", "thr_grand"]);
+    assert!(tree.entities.iter().any(|e| e.id() == "nod_s") && !tree.entities.iter().any(|e| e.id() == "nod_f"));
+
+    // Frozen: later work on the thread doesn't reach it.
+    d.upsert(vec![stamped(50, thread("thr_a", "renamed"))]).await;
+    let (_, again) = w.a.req("GET", &format!("/v1/code/agents/shares/{}", one.id), None, None).await;
+    assert_eq!(again["title"], "Fix ~/src/x");
+
+    // Listed newest first, for the owner's tokens; 404 to everyone else.
+    let (s, list) = w.req("GET", "/v1/code/agents/acme/shares", None, &w.agent).await;
+    assert_eq!(s, StatusCode::OK);
+    let list: Vec<agent_proto::ShareSummary> = serde_json::from_value(list).unwrap();
+    assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [all["id"].as_str().unwrap(), one.id.as_str()]);
+    assert_eq!(w.req("GET", "/v1/code/agents/acme/shares", None, &w.other).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("GET", "/v1/code/agents/other/shares", None, &w.other).await.1, json!([]));
+
+    // Revoking: the owner's; the link is gone at once.
+    let del = format!("/v1/code/agents/acme/shares/{}", one.id);
+    assert_eq!(w.req("DELETE", &del, None, &w.agent).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(w.req("DELETE", &format!("/v1/code/agents/other/shares/{}", one.id), None, &w.other).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("DELETE", &del, None, &w.owner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.a.req("GET", &format!("/v1/code/agents/shares/{}", one.id), None, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.req("DELETE", &del, None, &w.owner).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(w.a.req("GET", "/v1/code/agents/shares/shr_nope", None, None).await.0, StatusCode::NOT_FOUND);
+
+    // A revoked machine's shares stay: they're copies.
+    let (_, machines) = w.req("GET", "/v1/code/agents/acme/machines", None, &w.owner).await;
+    let mid = machines[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(w.req("DELETE", &format!("/v1/code/agents/acme/machines/{mid}"), None, &w.owner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.a.req("GET", &format!("/v1/code/agents/shares/{}", all["id"].as_str().unwrap()), None, None).await.0, StatusCode::OK);
+    assert_eq!(w.req("POST", create, None, &w.owner).await.0, StatusCode::NOT_FOUND, "its records are gone from the mirror");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn large_shares_are_trimmed_to_fit_or_refused() {
+    let w = world().await;
+    let (_, minted) = w.machine("box").await;
+    let (mut d, _) = Daemon::connect(&w.url, &minted).await;
+    // 80 commands with 64 KiB of output each: over 4 MiB until the outputs are cut.
+    let mut items = vec![stamped(1, project("prj_1", "x")), stamped(2, thread("thr_a", "a"))];
+    let out = "x".repeat(64 << 10);
+    for i in 0..80u64 {
+        items.push(stamped(
+            3 + i,
+            entity(json!({
+                "kind": "node", "id": format!("nod_{i}"), "thread": "thr_a", "run": "run_1", "ordinal": i, "status": "completed", "started_at": i,
+                "body": { "type": "tool", "name": "Bash", "kind": "command", "title": "yes", "output": out }
+            })),
+        ));
+    }
+    d.upsert(items).await;
+    let (s, v) = w.req("POST", "/v1/code/agents/acme/threads/thr_a/shares", None, &w.owner).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert!(v["bytes"].as_u64().unwrap() < 1 << 20, "{v}");
+    let (_, share) = w.a.req("GET", &format!("/v1/code/agents/shares/{}", v["id"].as_str().unwrap()), None, None).await;
+    assert_eq!(share["trimmed"], true);
+    let output = share["entities"][2]["body"]["output"].as_str().unwrap();
+    assert!(output.len() < 5000 && output.contains("bytes left out of this share"), "{}", output.len());
+
+    // Messages aren't cut: too much of them is refused.
+    let text = "y".repeat(1 << 20);
+    let msgs = (0..5u64).map(|i| stamped(200 + i, entity(json!({
+        "kind": "node", "id": format!("nod_m{i}"), "thread": "thr_b", "run": "run_2", "ordinal": i, "status": "completed", "started_at": i,
+        "body": { "type": "message", "text": text }
+    }))));
+    let mut items = vec![stamped(199, thread("thr_b", "b"))];
+    items.extend(msgs);
+    d.upsert(items).await;
+    let (s, v) = w.req("POST", "/v1/code/agents/acme/threads/thr_b/shares", None, &w.owner).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("too large to share"), "{v}");
 }
