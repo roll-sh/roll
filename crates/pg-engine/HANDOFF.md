@@ -5349,6 +5349,13 @@ container name: pick your own).
 
 ## Machine rules (learned the hard way)
 
+- **Never hold unpushed work.** Sessions end without warning and worktrees get cleaned up.
+  Push each verified batch to the shared branch right away, and in between back up work in
+  progress with `tools/wip-push.sh <agent>` (for example `a148`) after every meaningful step.
+  It snapshots commits, uncommitted and untracked files to origin's `wip/<agent>` as a
+  fast-forward (no force, nothing touched locally) and does nothing when nothing changed.
+  A resumed or replacement agent starts from `origin/wip/<agent>` when it is ahead of the
+  shared branch. Delete your `wip/` branch once its work has landed.
 - **Limit concurrent builds, not agents.** Six builds at once (each building, running a debug
   engine and driving Docker) ran a machine out of RAM. Any number of agents can read,
   edit and probe PostgreSQL; the heavy part is capped by `tools/heavy.sh`.
