@@ -8,6 +8,7 @@ import { codeApi } from "@/lib/code-api";
 import { clientFor, DEMO_OWNER, FOCUS_EVENT, setActiveClient, type AgentsClient } from "@/lib/agents-client";
 import { DemoOwner } from "@/lib/agents-demo";
 import { deriveGraph, type GraphNode } from "@/lib/agents-graph";
+import { useDesktop } from "@/lib/desktop";
 import type { Size } from "@/lib/agents-layout";
 import { btn, primary } from "../ui";
 import { AgentsCanvas, type CanvasHandle } from "./agents-canvas";
@@ -138,6 +139,8 @@ function Canvas({ client, demo, focusParam }: { client: AgentsClient; demo: bool
     },
     [setExpanded],
   );
+  // The desktop app's tray, badge and notifications (a no-op in a browser).
+  useDesktop(demo ? null : data, focus);
 
   useEffect(() => {
     const on = (e: Event) => focus(String((e as CustomEvent).detail));
