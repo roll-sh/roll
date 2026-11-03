@@ -2344,18 +2344,143 @@ pub fn fetches_change_nothing(table: u32, db: &Database) -> bool {
     rf.heaps.get(&table).is_none_or(|h| h.all_visible_pages() >= h.nblocks())
 }
 
+/// What an index or bitmap heap scan needs to note its fetches (`Fetcher::fetched`),
+/// taken once per scan: whether the relation is a temporary one (its pruning horizon), and
+/// a watch on every page being all-visible, when they are (nothing to prune then: no lock,
+/// no lookup).
+pub struct Fetcher {
+    table: u32,
+    db: Arc<Database>,
+    xids: Arc<Xids>,
+    /// A temporary relation's: its transaction's id (`vis_for`).
+    temp: Option<Option<u64>>,
+    visible: Option<heapsim::VisWatch>,
+    /// The heap's prune hints, and whether rows' stored TIDs are the model's.
+    hints: (Arc<heapsim::PruneHints>, bool),
+    last: Option<u32>,
+}
+
+impl Fetcher {
+    /// None when the table's heap isn't modelled.
+    pub fn new(table: u32, ctx: &ExecCtx) -> Option<Fetcher> {
+        let db = ctx.sess.db.clone();
+        let (visible, hints) = {
+            let rf = db.relfiles.of(table).read();
+            let h = rf.heaps.get(&table)?;
+            (h.visibility_watch(), h.prune_hints())
+        };
+        let cat = ctx.catalog();
+        let rel = cat.tables.get(&table).or_else(|| cat.toast_owner(table).map(|(o, _)| o));
+        let temp = rel
+            .is_some_and(|t| cat.schema_name(t.schema).starts_with("pg_temp"))
+            .then(|| ctx.txn.borrow().xid_if_assigned());
+        Some(Fetcher { table, xids: db.xids(), db, temp, visible, hints, last: None })
+    }
+
+    fn vis(&self) -> Vis<'_> {
+        match self.temp {
+            Some(own) => Vis::temp(&self.xids, own),
+            None => Vis::new(&self.xids),
+        }
+    }
+
+    /// The row under `key` was fetched (heap_page_prune_opt on reaching another page).
+    pub fn fetched(&mut self, key: &[u8]) {
+        self.last = self.fetch(key);
+    }
+
+    /// `fetched`, with the TID the row was stored with (`scan::stored_tid`): its page is
+    /// known without a lookup, and its prune hint says without the model's lock whether
+    /// reaching it can prune it.
+    pub fn fetched_at(&mut self, key: &[u8], tid: Option<Tid>) {
+        if self.visible.as_ref().is_some_and(heapsim::VisWatch::holds) {
+            return;
+        }
+        let Some((blk, _)) = tid.filter(|_| self.hints.1) else {
+            return self.fetched(key);
+        };
+        if self.last == Some(blk) {
+            return;
+        }
+        let horizon = match self.temp {
+            Some(own) => self.xids.temp_horizon(own),
+            None => self.xids.horizon(),
+        };
+        match self.hints.0.may_prune(blk, horizon) {
+            Some(false) => self.last = Some(blk),
+            Some(true) => {
+                let v = self.vis();
+                let mut rf = self.db.relfiles.of(self.table).write();
+                if let Some(heap) = rf.heaps.get_mut(&self.table) {
+                    heap.prune_opt(blk, &v);
+                }
+                self.last = Some(blk);
+            }
+            None => {
+                // (The hints were replaced: the heap's new ones, then this row again.)
+                let hints = self.db.relfiles.of(self.table).read().heaps.get(&self.table).map(heapsim::Heap::prune_hints);
+                match hints {
+                    Some(h) if h.0.may_prune(blk, horizon).is_some() => {
+                        self.hints = h;
+                        self.fetched_at(key, tid);
+                    }
+                    _ => self.fetched(key),
+                }
+            }
+        }
+    }
+
+    /// `fetched` for rows handed out together, in row order (nothing between them writes).
+    pub fn fetched_run<'k>(&mut self, keys: impl Iterator<Item = &'k [u8]>) {
+        for k in keys {
+            self.fetched(k);
+        }
+    }
+
+    fn fetch(&mut self, key: &[u8]) -> Option<u32> {
+        if self.visible.as_ref().is_some_and(heapsim::VisWatch::holds) {
+            return self.last;
+        }
+        self.visible = None;
+        let v = self.vis();
+        {
+            let rf = self.db.relfiles.of(self.table).read();
+            let heap = rf.heaps.get(&self.table)?;
+            if heap.all_visible_pages() >= heap.nblocks() {
+                return None;
+            }
+            let blk = heap.locate(key, &v).map(|t| t.0);
+            if blk.is_none_or(|b| self.last == Some(b) || !heap.prune_wanted(b, &v)) {
+                return blk;
+            }
+        }
+        let mut rf = self.db.relfiles.of(self.table).write();
+        let heap = rf.heaps.get_mut(&self.table)?;
+        let blk = heap.locate(key, &v)?.0;
+        if self.last != Some(blk) {
+            heap.prune_opt(blk, &v);
+        }
+        Some(blk)
+    }
+}
+
 /// An index or bitmap heap fetch: prune when reaching a different heap page.
-/// All-visible heaps need no lookup. None means no block was visited.
+/// All-visible heaps need no lookup. None means no block was visited. (A scan fetching many
+/// rows holds a `Fetcher`.)
 pub fn fetched(table: u32, key: &[u8], last: Option<u32>, ctx: &ExecCtx) -> Option<u32> {
     let db = &ctx.sess.db;
-    let xids = db.xids();
-    let v = vis_for(&xids, table, ctx);
     {
         let rf = db.relfiles.of(table).read();
         let heap = rf.heaps.get(&table)?;
         if heap.all_visible_pages() >= heap.nblocks() {
             return None;
         }
+    }
+    let xids = db.xids();
+    let v = vis_for(&xids, table, ctx);
+    {
+        let rf = db.relfiles.of(table).read();
+        let heap = rf.heaps.get(&table)?;
         let blk = heap.locate(key, &v).map(|t| t.0);
         if blk.is_none_or(|b| last == Some(b) || !heap.prune_wanted(b, &v)) {
             return blk;
@@ -2457,6 +2582,9 @@ pub struct Kills {
     at: Option<Vec<u8>>,
     since: usize,
     every: usize,
+    /// Every heap page all-visible when the scan began, if it was found so: no entry can
+    /// be dead while that holds, so there is nothing to mark.
+    visible: Option<crate::catalog::heapsim::VisWatch>,
 }
 
 impl Kills {
@@ -2465,10 +2593,15 @@ impl Kills {
     pub fn new(table: u32, index: u32, prefix: &[u8], ranges: &[(Vec<u8>, Vec<u8>)], rev: bool, ctx: &ExecCtx) -> Option<Kills> {
         // (Without waiting behind the shard's writers: an index found modelled or not
         // decided yet gets its marks, and marking an index that isn't modelled does nothing.)
-        if is_estimated(table, &ctx.sess.db)
-            || ctx.sess.db.relfiles.of(table).try_read().is_some_and(|rf| !rf.btrees.contains_key(&index))
-        {
+        if is_estimated(table, &ctx.sess.db) {
             return None;
+        }
+        let mut visible = None;
+        if let Some(rf) = ctx.sess.db.relfiles.of(table).try_read() {
+            if !rf.btrees.contains_key(&index) {
+                return None;
+            }
+            visible = rf.heaps.get(&table).and_then(Heap::visibility_watch);
         }
         let cat = ctx.catalog();
         let temp = cat
@@ -2478,7 +2611,7 @@ impl Kills {
             .then(|| ctx.txn.borrow().xid_if_assigned());
         let strip = |k: &[u8]| k.strip_prefix(prefix).map(<[u8]>::to_vec);
         let ranges = ranges.iter().map(|(lo, hi)| (strip(lo), strip(hi))).collect();
-        let mut k = Kills { db: ctx.sess.db.clone(), table, index, prefix: prefix.to_vec(), temp, rev, ranges, from: None, at: None, since: 0, every: 1 };
+        let mut k = Kills { db: ctx.sess.db.clone(), table, index, prefix: prefix.to_vec(), temp, rev, ranges, from: None, at: None, since: 0, every: 1, visible };
         k.from = k.start();
         Some(k)
     }
@@ -2501,6 +2634,9 @@ impl Kills {
     /// A row whose entry's key columns are `key` (a storage key, the index's prefix first)
     /// comes out: the entries before it were passed.
     pub fn passed(&mut self, key: &[u8]) {
+        if self.visible.as_ref().is_some_and(crate::catalog::heapsim::VisWatch::holds) {
+            return;
+        }
         let Some(k) = key.strip_prefix(&self.prefix[..]).map(<[u8]>::to_vec) else { return };
         // Ranges the scan has gone past.
         while let Some((lo, hi)) = self.ranges.front() {
@@ -2549,6 +2685,9 @@ impl Kills {
         if let (Some(l), Some(h)) = (&lo, &hi)
             && l >= h
         {
+            return;
+        }
+        if self.visible.as_ref().is_some_and(crate::catalog::heapsim::VisWatch::holds) {
             return;
         }
         let xids = self.db.xids();

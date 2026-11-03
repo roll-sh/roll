@@ -270,12 +270,15 @@ impl Page {
         Page::default()
     }
 
-    fn set_all_visible(&mut self, visible: bool, visible_pages: &mut u32) {
+    fn set_all_visible(&mut self, visible: bool, visible_pages: &mut VisPages) {
+        if !visible {
+            visible_pages.changed();
+        }
         if self.all_visible != visible {
             if visible {
-                *visible_pages += 1;
+                visible_pages.n += 1;
             } else {
-                *visible_pages -= 1;
+                visible_pages.n -= 1;
             }
             self.all_visible = visible;
         }
@@ -754,11 +757,81 @@ pub enum Skip {
 /// heap_vac_scan_next_block skips a run of skippable pages only when it is this long.
 const SKIP_PAGES_THRESHOLD: u32 = 32;
 
+/// A heap's all-visible pages (exactly the pages with all_visible set; bits change through
+/// `Page::set_all_visible`), and a counter bumped whenever a page may stop being
+/// all-visible or gets a tuple: a reader that found every page all-visible knows it still
+/// holds while the counter stays (`VisWatch`), without the model's lock.
+#[derive(Debug, Default)]
+struct VisPages {
+    n: u32,
+    changes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl VisPages {
+    fn changed(&self) {
+        self.changes.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Every page of a heap all-visible, as it was found (`Heap::visibility_watch`).
+#[derive(Clone, Debug)]
+pub struct VisWatch {
+    changes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    seen: u64,
+    model: SizeWatch,
+}
+
+impl VisWatch {
+    /// Whether every page is still all-visible (no tuple added, no page's bit cleared, the
+    /// model still there): one atomic load each, no lock.
+    pub fn holds(&self) -> bool {
+        self.changes.load(std::sync::atomic::Ordering::Acquire) == self.seen && self.model.alive()
+    }
+}
+
+/// Per page, what heap_page_prune_opt's tests need without the model's lock: the page's
+/// prune xid when the page is full enough for a prune once that xid is removable, else 0.
+/// Kept by the heap's writers under its shard's lock (`Heap::publish_page`); readers holding
+/// these (`Heap::prune_hints`) take the lock only for a page that may be pruned. Replaced
+/// when the heap outgrows them, and retired when the heap goes: take the heap's again then.
+#[derive(Debug, Default)]
+pub struct PruneHints {
+    slots: Box<[std::sync::atomic::AtomicU64]>,
+    retired: std::sync::atomic::AtomicBool,
+}
+
+impl PruneHints {
+    /// Whether page `blk` may need pruning for a reader whose horizon is `horizon` (true:
+    /// ask the model). None: these hints were replaced or the heap is gone.
+    pub fn may_prune(&self, blk: u32, horizon: u64) -> Option<bool> {
+        use std::sync::atomic::Ordering::Acquire;
+        if self.retired.load(Acquire) {
+            return None;
+        }
+        Some(self.slots.get(blk as usize).is_none_or(|h| {
+            let x = h.load(Acquire);
+            x != 0 && x < horizon
+        }))
+    }
+}
+
+/// A heap's own `PruneHints`: retired when the heap lets them go (replaced, or the heap
+/// dropped), so readers holding them come back to the heap.
+#[derive(Debug, Default)]
+struct HintsHandle(std::sync::Arc<PruneHints>);
+
+impl Drop for HintsHandle {
+    fn drop(&mut self) {
+        self.0.retired.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Heap {
     pages: Vec<Page>,
-    /// Exactly the number of pages with all_visible set; change bits through the setter.
-    visible_pages: u32,
+    visible_pages: VisPages,
+    /// `PruneHints` of its pages.
+    hints: HintsHandle,
     keys: super::keymap::KeyMap,
     /// The relation's cached insertion target (smgr_targblock), per session: each
     /// backend keeps its own (sessions are told apart by their threads, a session
@@ -909,7 +982,47 @@ impl Heap {
     }
 
     pub fn all_visible_pages(&self) -> u32 {
-        self.visible_pages
+        self.visible_pages.n
+    }
+
+    /// The pages' prune hints, and whether the TIDs stored with rows are the model's (a
+    /// reader can then name a row's page by its stored TID).
+    pub fn prune_hints(&self) -> (std::sync::Arc<PruneHints>, bool) {
+        (self.hints.0.clone(), !self.unstamped)
+    }
+
+    /// Publish page `blk`'s prune hint (`PruneHints`), growing the hints to cover it.
+    fn publish_page(&mut self, blk: u32) {
+        use std::sync::atomic::{AtomicU64, Ordering::Release};
+        let Some(p) = self.pages.get(blk as usize) else { return };
+        let minfree = self.save_free().max(BLCKSZ / 10);
+        let h = if p.prune_xid != 0 && (p.full || p.heap_free() < minfree) { p.prune_xid } else { 0 };
+        if blk as usize >= self.hints.0.slots.len() {
+            let n = (blk as usize + 1).max(self.pages.len()).next_power_of_two().max(64);
+            let old = &self.hints.0.slots;
+            let slots: Box<[AtomicU64]> = (0..n)
+                .map(|i| AtomicU64::new(old.get(i).map_or(0, |x| x.load(std::sync::atomic::Ordering::Relaxed))))
+                .collect();
+            // (The old ones are retired as they go.)
+            self.hints = HintsHandle(std::sync::Arc::new(PruneHints { slots, retired: Default::default() }));
+        }
+        self.hints.0.slots[blk as usize].store(h, Release);
+    }
+
+    /// Every page's prune hint published again (after a pass over the pages).
+    fn publish_pages(&mut self) {
+        for b in 0..self.pages.len() as u32 {
+            self.publish_page(b);
+        }
+    }
+
+    /// A watch on every page being all-visible, when they are now.
+    pub fn visibility_watch(&self) -> Option<VisWatch> {
+        (self.visible_pages.n >= self.nblocks()).then(|| VisWatch {
+            seen: self.visible_pages.changes.load(std::sync::atomic::Ordering::Acquire),
+            changes: self.visible_pages.changes.clone(),
+            model: self.sizes.watch(),
+        })
     }
 
     /// The visibility map as a database opened afresh finds it: its first `n` pages
@@ -1287,10 +1400,12 @@ impl Heap {
             p.set_all_visible(false, &mut self.visible_pages);
         }
         let off = p.add(t);
+        self.visible_pages.changed();
         if p.settle_at != u64::MAX && !p.queued {
             p.queued = true;
             self.left.push_back(blk);
         }
+        self.publish_page(blk);
         if frozen {
             self.vm_pin(blk);
         }
@@ -1416,6 +1531,7 @@ impl Heap {
         if row != super::keymap::NO_ROW {
             self.deleted.insert((b, off), row);
         }
+        self.publish_page(b);
     }
 
     /// Line pointers `freed` are unused now: a deleted row's key that still names one of
@@ -1495,6 +1611,7 @@ impl Heap {
         }
         op.set_prunable(xid);
         op.set_all_visible(false, &mut self.visible_pages);
+        self.publish_page(ob);
         let moved = old_key != new_key;
         if moved {
             self.keys.remove(old_key);
@@ -1784,6 +1901,7 @@ impl Heap {
             }
         }
         let all_visible = all_visible && dead.is_empty();
+        self.publish_page(blk);
         (hastup, dead, live, all_visible)
     }
 
@@ -1914,6 +2032,7 @@ impl Heap {
         self.forget_deleted(&freed);
         res.dead = freed;
         res.pages = pages;
+        self.publish_pages();
         res.all_visible = self.all_visible_pages();
         self.note_size();
         res
@@ -2035,6 +2154,10 @@ impl Heap {
         let Some(page) = self.pages.get(tid.0 as usize) else {
             return true;
         };
+        // (An all-visible page has no dead tuple, nor dead line pointer.)
+        if page.all_visible {
+            return false;
+        }
         let mut off = tid.1;
         for _ in 0..=page.lps.len() {
             match page.lps.get((off as usize).wrapping_sub(1)) {
@@ -2259,6 +2382,7 @@ impl Heap {
         }
         self.vm_blocks = vm_blocks;
         self.fsm = Fsm { blocks: fsm_blocks, pages: fsm };
+        self.publish_pages();
         self.note_size();
         Some(())
     }
@@ -2349,6 +2473,7 @@ impl Heap {
             p.update_tup(off, |t| t.xmax = xid);
             p.set_prunable(xid);
             p.set_all_visible(false, &mut self.visible_pages);
+            self.publish_page(b);
         }
         let Some((len, stored)) = new else {
             return false;
@@ -2420,6 +2545,52 @@ mod tests {
             xids.finish(xid, committed);
             h.vacuum(&Vis::new(&xids), 1, false, Skip::None, false);
             assert_visible_count(&h, 3);
+        }
+    }
+
+    /// The lock-free reader state agrees with the model through writes, pruning and VACUUM:
+    /// a page heap_page_prune_opt would prune is never hinted as needing nothing, and a
+    /// watch on every page being all-visible holds only while they are.
+    #[test]
+    fn prune_hints_and_visibility_watch_follow_the_model() {
+        let xids = Xids::new(10, |_| {});
+        let v = Vis::new(&xids);
+        let mut h = Heap::new(90);
+        let mut mode = InsertMode::single();
+        let mut x = 11u64;
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut watch = None;
+        for i in 0..6000u32 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            match (x >> 33) % 10 {
+                0..=3 => {
+                    let k = i.to_be_bytes().to_vec();
+                    h.insert(k.clone(), 40 + (x >> 50) as usize % 400, 2, &mut mode);
+                    keys.push(k);
+                }
+                4..=6 if !keys.is_empty() => {
+                    let k = keys[(x >> 20) as usize % keys.len()].clone();
+                    h.update(&k, &k, 40 + (x >> 45) as usize % 600, 2, (x >> 10).is_multiple_of(2), &v);
+                }
+                7 if !keys.is_empty() => {
+                    let k = keys.swap_remove((x >> 20) as usize % keys.len());
+                    h.delete(&k, 2, &v);
+                }
+                8 => h.prune_opt((x >> 24) as u32 % h.nblocks().max(1), &v),
+                _ if i % 500 == 0 => {
+                    h.vacuum(&v, 1, false, Skip::AllVisible, false);
+                    watch = h.visibility_watch();
+                }
+                _ => {}
+            }
+            for b in 0..h.nblocks() {
+                if h.prune_wanted(b, &v) {
+                    assert_eq!(h.hints.0.may_prune(b, v.horizon), Some(true), "page {b} at {i}");
+                }
+            }
+            if watch.as_ref().is_some_and(VisWatch::holds) {
+                assert!(h.all_visible_pages() >= h.nblocks(), "watch held at {i}");
+            }
         }
     }
 
