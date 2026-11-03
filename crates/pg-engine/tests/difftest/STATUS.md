@@ -357,11 +357,14 @@ Each guard run pairs origin's head with the previous verified head: the smoke, t
 6100-6249, 7000-7149 and 8000-8149 (150 statements a seed) in one process per side. Partition
 the seeds the same way on both sides: the runner writes a case file only for a mismatch
 signature's first occurrence, so case file names depend on the seeds run before. Compare the
-logs' `[class] seed N #i` lines instead.
+logs' `[class] seed N #i` lines instead. Both sides need the same grammar: after a change to
+the generator, take a base commit that has it. `tools/difftest-guard.sh <base> <head>` does
+all of it (round 9's seeds too with `GUARD_SEEDS`).
 
 | run | base / head | statements | new on head | gone on head |
 |---|---|---|---|---|
 | 2026-11-03 | `251924c1` / `ed0c85fe` (release) | 70,215 | 0 | 37 lines: round 7's binary domain-array element oid (seeds 7024, 7087-7145, 8032, 8132), Bind's result-format check before the custom plan (7063, 08P01 vs 22003) |
+| 2026-11-03, `tools/difftest-guard.sh`, rounds 6-9 | `847fbdba` / `1f676b8a` | 93,717 | 3 lines, one case (seed 9014 #82: a generic plan's Index Only Scan where PostgreSQL has a Bitmap Heap Scan), not reproducible from its reduced case on either binary: background VACUUM timing (both servers' autovacuum visits a seed's tables at random points), so round 9's tables no longer autovacuum | 6: agent 145's result-type check (0A000, seeds 9060, 9061, 9067, 9090) and binary array dimensions (54000, seed 9073) |
 
 ## Round 9 (agent 156)
 
@@ -380,11 +383,12 @@ Routed through the coordinator 2026-11-03.
 - **Parameter types (agent 145).** `PREPARE p AS SELECT id FROM r9s WHERE id BETWEEN $1 AND
   $1 + $2` fails 42725 "operator is not unique: unknown + unknown"; PostgreSQL types `$1` from
   BETWEEN first. Also over the protocol (an untyped Parse).
-- **Result type (agent 145).** `PREPARE p AS SELECT * FROM r9w WHERE a >= $1`, executed, then
-  `ALTER TABLE r9w RENAME COLUMN b TO bb`: PostgreSQL's next EXECUTE fails 0A000 "cached plan
-  must not change result type", the engine returns the new column name.
-- **Binary arrays (agent 145).** A binary int4[] parameter whose header is garbage: 08P01 or
-  22P03 where PostgreSQL reports 54000 "number of array dimensions (N) exceeds the maximum
+- **Result type (agent 145; fixed by `1f676b8a`, gone from seeds 9060, 9061, 9067, 9090).**
+  `PREPARE p AS SELECT * FROM r9w WHERE a >= $1`, executed, then `ALTER TABLE r9w RENAME COLUMN b
+  TO bb`: PostgreSQL's next EXECUTE fails 0A000 "cached plan must not change result type", the
+  engine returned the new column name.
+- **Binary arrays (agent 145; fixed by `1f676b8a`, gone from seed 9073).** A binary int4[]
+  parameter whose header is garbage: 08P01 or 22P03 where PostgreSQL reports 54000 "number of array dimensions (N) exceeds the maximum
   allowed (6)".
 - **COPY's buffered rows (agent 148).** PostgreSQL checks unique keys when it flushes 1,000
   buffered rows; the engine row by row. `CREATE TABLE r9c (id int PRIMARY KEY, a int, b text,

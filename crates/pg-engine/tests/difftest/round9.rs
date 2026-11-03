@@ -19,7 +19,9 @@
 //!   (the sample is the table: deterministic), per-column targets, extended statistics, and the
 //!   planner's row estimates read off EXPLAIN.
 //!
-//! Objects are named `r9*`; a group's own objects carry a serial so a case stands alone.
+//! Objects are named `r9*`; a group's own objects carry a serial so a case stands alone. Their
+//! tables don't autovacuum: a background VACUUM, whenever either server's runs, sets pages
+//! all-visible and so changes plans (index-only scans) and statistics.
 //! Steps whose order of execution matters (EXECUTE, session steps) are `Other` statements, so
 //! a reduced case keeps them in its setup.
 
@@ -43,7 +45,7 @@ pub fn schema(rng: &mut Rng) -> Vec<String> {
     let m = rng.range(1500, 3000);
     let n = rng.range(2000, 4000);
     let mut out: Vec<String> = vec![
-        "CREATE TABLE r9s (id int PRIMARY KEY, g int NOT NULL, v int, t text, x numeric(12, 4))".into(),
+        "CREATE TABLE r9s (id int PRIMARY KEY, g int NOT NULL, v int, t text, x numeric(12, 4)) WITH (autovacuum_enabled = off)".into(),
         format!(
             "INSERT INTO r9s SELECT i, CASE WHEN i % 50 = 0 THEN 2 + i % 7 ELSE 1 END, \
              CASE WHEN i % 13 = 0 THEN NULL ELSE (i * 37) % 101 - 50 END, \
@@ -53,7 +55,7 @@ pub fn schema(rng: &mut Rng) -> Vec<String> {
         "CREATE INDEX r9s_gv ON r9s (g, v)".into(),
         "CREATE INDEX r9s_t ON r9s (t)".into(),
         "CREATE TABLE r9n (id int PRIMARY KEY, a int, b bigint, c smallint, n numeric(20, 6), m numeric, \
-         f float8, t text, tc text COLLATE \"C\", ti text COLLATE \"en-x-icu\", z int)"
+         f float8, t text, tc text COLLATE \"C\", ti text COLLATE \"en-x-icu\", z int) WITH (autovacuum_enabled = off)"
             .into(),
         format!(
             "INSERT INTO r9n SELECT i, \
@@ -307,26 +309,26 @@ fn copy(rng: &mut Rng, k: u64) -> Vec<Stmt> {
     let serial = if rng.chance(0.3) { ", s serial" } else { "" };
     match shape {
         0 => {
-            out.push(o(format!("CREATE TABLE {t} (id int PRIMARY KEY, a int, b text{serial})")));
+            out.push(o(format!("CREATE TABLE {t} (id int PRIMARY KEY, a int, b text{serial}) WITH (autovacuum_enabled = off)")));
             if rng.chance(0.5) {
                 out.push(o(format!("CREATE UNIQUE INDEX {t}_b ON {t} (b)")));
             }
         }
         1 => {
             out.push(o(format!("CREATE TABLE {t} (id int, a int, b text{serial}) PARTITION BY RANGE (id)")));
-            out.push(o(format!("CREATE TABLE {t}_1 PARTITION OF {t} FOR VALUES FROM (MINVALUE) TO (500)")));
-            out.push(o(format!("CREATE TABLE {t}_2 PARTITION OF {t} FOR VALUES FROM (500) TO (1500)")));
+            out.push(o(format!("CREATE TABLE {t}_1 PARTITION OF {t} FOR VALUES FROM (MINVALUE) TO (500) WITH (autovacuum_enabled = off)")));
+            out.push(o(format!("CREATE TABLE {t}_2 PARTITION OF {t} FOR VALUES FROM (500) TO (1500) WITH (autovacuum_enabled = off)")));
             out.push(o(if rng.chance(0.5) {
-                format!("CREATE TABLE {t}_3 PARTITION OF {t} DEFAULT")
+                format!("CREATE TABLE {t}_3 PARTITION OF {t} DEFAULT WITH (autovacuum_enabled = off)")
             } else {
-                format!("CREATE TABLE {t}_3 PARTITION OF {t} FOR VALUES FROM (1500) TO (2600)")
+                format!("CREATE TABLE {t}_3 PARTITION OF {t} FOR VALUES FROM (1500) TO (2600) WITH (autovacuum_enabled = off)")
             }));
             if rng.chance(0.6) {
                 out.push(o(format!("CREATE UNIQUE INDEX {t}_id ON {t} (id)")));
             }
         }
         _ => {
-            out.push(o(format!("CREATE TABLE {t} (id int PRIMARY KEY, a int, b text{serial})")));
+            out.push(o(format!("CREATE TABLE {t} (id int PRIMARY KEY, a int, b text{serial}) WITH (autovacuum_enabled = off)")));
             out.push(o(format!("CREATE TABLE {t}log (n serial, op text, id int, b text)")));
             let fail = if rng.chance(0.3) { "IF NEW.a = 13 THEN RAISE EXCEPTION 'r9 bad %', NEW.id; END IF;" } else { "" };
             out.push(o(format!(
@@ -446,10 +448,10 @@ fn indexes(rng: &mut Rng, k: u64) -> Vec<Stmt> {
     let cols = "id int, a int, t text, arr int[], j jsonb, r int4range, p point";
     if part {
         out.push(o(format!("CREATE TABLE {t} ({cols}) PARTITION BY RANGE (id)")));
-        out.push(o(format!("CREATE TABLE {t}_1 PARTITION OF {t} FOR VALUES FROM (MINVALUE) TO (1000)")));
-        out.push(o(format!("CREATE TABLE {t}_2 PARTITION OF {t} FOR VALUES FROM (1000) TO (MAXVALUE)")));
+        out.push(o(format!("CREATE TABLE {t}_1 PARTITION OF {t} FOR VALUES FROM (MINVALUE) TO (1000) WITH (autovacuum_enabled = off)")));
+        out.push(o(format!("CREATE TABLE {t}_2 PARTITION OF {t} FOR VALUES FROM (1000) TO (MAXVALUE) WITH (autovacuum_enabled = off)")));
     } else {
-        out.push(o(format!("CREATE TABLE {t} ({cols})")));
+        out.push(o(format!("CREATE TABLE {t} ({cols}) WITH (autovacuum_enabled = off)")));
     }
     let fill = format!(
         "INSERT INTO {t} SELECT i, CASE WHEN i % 23 = 0 THEN NULL ELSE (i * 31) % 97 END, \
@@ -609,7 +611,7 @@ fn stats(rng: &mut Rng, k: u64) -> Vec<Stmt> {
     let t = format!("r9a{k}");
     let n = rng.range(50, 6000);
     let mut out = vec![
-        o(format!("CREATE TABLE {t} (id int, g int, u int, s text, f float8, d date, nul int, b bool, arr int[], tv text)")),
+        o(format!("CREATE TABLE {t} (id int, g int, u int, s text, f float8, d date, nul int, b bool, arr int[], tv text) WITH (autovacuum_enabled = off)")),
         o(format!(
             "INSERT INTO {t} SELECT i, CASE WHEN i % 10 < 6 THEN 1 WHEN i % 10 < 9 THEN 2 + i % 3 ELSE i % 40 END, (i * 7) % {n}, \
              CASE i % 4 WHEN 0 THEN 'common' ELSE 'v' || (i % 200) END, (i % 1000) / 8.0, date '2024-01-01' + i % 400, \
