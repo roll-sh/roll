@@ -4,6 +4,30 @@ The current checked measurements compare release engine builds and PostgreSQL 18
 the wire. Older rounds below are historical records, with their original methods and
 limits. Their results have not been reverified on the current source.
 
+## Build profile: dist (2026-11-03)
+
+`--profile dist` (root `Cargo.toml`: `release` with `lto = "fat"` and `codegen-units = 1`)
+against `release`, same source (`8115f5af`), one build after the other with 2 cargo jobs:
+`release` 10 min, `dist` 18 min; `roll-engine` 86 MB, 68 MB. pgbench scale 10, `-M prepared`,
+8 clients (`-j 4`), 15 s after a 5 s warm-up, `--cache-mb 2048`, the engine on cores 24-27
+at nice 19, pgbench in the pinned PostgreSQL image on cores 30-33. Three rounds of release,
+dist, dist, release, a fresh engine process per run on the same data. CPU per transaction is
+the engine's utime + stime over the timed run (`/proc`; `perf` isn't installed on this
+machine). The machine ran at load 25-27 from other agents' builds, so single runs move a lot:
+medians of six runs.
+
+| workload | release CPU / txn | dist CPU / txn | change | mean tps release / dist |
+|---|---|---|---|---|
+| select-only | 0.184 ms | 0.150 ms | -19% | 18.6k / 25.7k |
+| tpcb-like | 0.944 ms | 0.736 ms | -22% | 2.6k / 3.6k |
+| range (`aid BETWEEN :id AND :id + 99 ORDER BY aid`) | 0.872 ms | 0.705 ms | -19% | 4.0k / 4.9k |
+
+Peak RSS (VmHWM) 345-409 MB dist, 364-422 MB release. Both builds include d22006b9's
+per-execution Gather search, which makes select-only's absolute numbers about 3.5x those
+before it (agent 145 is fixing it); the ratio between the builds is what this measures.
+Profile-guided optimisation on top is not tried yet (it needs `llvm-tools` and a training
+run).
+
 ## Checked OLTP histogram campaign (2026-11-02)
 
 Borrowing cached inequality histograms improves the 200k-account, eight-client

@@ -5387,6 +5387,11 @@ Prefix scratch objects, and drop scratch databases and roles afterwards.
 
 ## Conventions
 
+- **Builds for comparisons with PostgreSQL use `--profile dist`** (root `Cargo.toml`: release
+  with fat LTO and one codegen unit). It costs 15-25% less CPU per transaction than `release`
+  (BENCH.md "Build profile: dist"), so a `release` engine understates the engine against
+  PostgreSQL. It takes about twice as long to build, so tests and before/after comparisons of
+  two engine revisions stay on `release` (both sides on the same profile).
 - Follow `AGENTS.md`: Rust edition 2024, dependencies in the root `[workspace.dependencies]`,
   match the surrounding style and comment density, don't run `cargo fmt` on others' files.
 - Stored data must stay loadable. Format changes need a migration: see
