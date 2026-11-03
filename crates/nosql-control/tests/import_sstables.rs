@@ -206,6 +206,17 @@ async fn fixtures_import_exactly() {
     for (fmt, dialect) in FORMATS {
         let dir = tempfile::tempdir().unwrap();
         extract(fmt, dir.path());
+        // Keep archived deletions through reads and compaction while testing older writes.
+        // Only retention changes; the imported SSTable bytes and timestamps stay intact.
+        let deletes = std::fs::read_dir(dir.path().join(KS))
+            .unwrap()
+            .map(|d| d.unwrap().path())
+            .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("deletes-"))
+            .unwrap();
+        let schema = deletes.join("snapshots").join(KS).join("schema.cql");
+        let cql = std::fs::read_to_string(&schema).unwrap();
+        assert_eq!(cql.matches("gc_grace_seconds = 864000").count(), 1, "{fmt}: fixture retention changed");
+        std::fs::write(schema, cql.replace("gc_grace_seconds = 864000", "gc_grace_seconds = 2147483647")).unwrap();
         let (db, done) = import(&e, &format!("fx-{fmt}"), dialect, &format!("file://{}", dir.path().display())).await;
         assert_eq!(done["state"], "done", "{fmt}: {done}");
         assert_eq!((done["tables_total"].as_i64(), done["tables_done"].as_i64()), (Some(TABLES.len() as i64), Some(TABLES.len() as i64)), "{fmt}: {done}");

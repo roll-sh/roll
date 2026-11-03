@@ -91,6 +91,20 @@ trap cleanup EXIT
 mkdir -p "$work/suite" "$work/out" "$work/data"
 curl -fsSL "https://github.com/ceph/s3-tests/archive/$S3TESTS_COMMIT.tar.gz" | tar -xz -C "$work/suite" --strip-components=1
 
+# HEAD's expiration is relative to the version's LastModified, not the wall clock after
+# tagging it. The pinned helper otherwise loses a day when those requests cross a second.
+python3 - "$work/suite/s3tests/functional/test_s3.py" <<'PYTHON'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+needle = "    expiration = dateutil.parser.parse(m.group(1))\n"
+assert source.count(needle) == 1, "the pinned expiration helper changed"
+source = source.replace(needle, needle + "    start_time = response.get('LastModified', start_time).replace(tzinfo=None)\n")
+path.write_text(source)
+PYTHON
+
 image="roll-s3-tests:$(shasum -a 256 tests/s3-conformance/Dockerfile | cut -c1-12)"
 docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" tests/s3-conformance >/dev/null
 
