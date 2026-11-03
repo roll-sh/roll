@@ -4331,6 +4331,47 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     parent's `3069ca91` baseline passed 12 cases and failed four WAL-recovery cases because
     compute-to-host HTTP fetches timed out (`~/.cache/pg-engine-sol-resume/postgres-check.log`).
     All four containers used for this verification are stopped, with their data retained.
+  - *A plan's Gathers once per bound plan* (`BoundQuery::gathers`, `exec::parallel_part::start`):
+    since d22006b9 every execution built the plan's EXPLAIN tree to start its parallel
+    workers whenever a relation passed min_parallel_table_scan_size (40% of pgbench
+    select-only's CPU); they are found at the plan's first execution and kept with it (an
+    Arc of the plan, so a freed plan's address can't match).
+  - *A custom plan's cost* (`Session::plan_cost`, `BoundQuery::cost`,
+    `explain::total_and_gathers`): one estimate tree gives the cost and the Gathers. A Gather
+    costs at least parallel_setup_cost, so when every node of the serial tree costs less (1%
+    fuzz) and debug_parallel_query is off, the serial tree is the plan's: no partial paths
+    considered (`paths::parallel::debug_parallel_query`; debug builds build the full tree too
+    and assert it). Left: the tree itself (13% of a range read's CPU with a custom plan per
+    Execute; the planner keeps no final path cost, agent 155's HANDOFF item 11), and
+    re-analysis per custom plan (21%; the binder decides constness while it binds:
+    planning an `Analyzed` with the values substituted is agent 155's next item).
+  - *Commits waiting for another's WAL fsync sleep* (`storage::Store::wait_durable`,
+    `durable_wait`): one commit fsyncs under `sync_lock`; the others wait on a condvar until
+    `durable` advances or that fsync ends (`wake_durable`, after the lock is let go: a commit
+    appended after the fsync began syncs next), where they queued on the mutex spinning
+    (`sched_yield`, 3.5% of the context switches at 32 clients). pgbench simple-update -M
+    prepared, release, two interleaved rounds: 8 clients 0.32-0.40 -> 0.30-0.31 ms CPU per
+    transaction, 32 clients 0.40-0.60 -> 0.31-0.32 and 2,169-8,570 -> 11,978-12,079 tps;
+    tpcb-like unchanged (its hot rows wait instead).
+  - *pg_prepared_statements* (`Session::sync_lists`, `Prepared::listing`): the session's list
+    is rebuilt only when a statement is added or dropped (`prepared_listed`), and plan counts
+    and result types are read as the view is: every statement rebuilt it with a copy of every
+    entry.
+  - *SQL PREPARE's fixed result* (`utility::prepare_stmt`): EXECUTE after a result column's
+    rename or type change fails with 0A000, as PrepareQuery's fixed_result does (golden
+    a145_prepare_result_type). *array_recv's header* (`types::binary::decode_array`): read a
+    field at a time (54000 past 6 dimensions, 22P03 for a negative count or bad flags, 08P01
+    when cut short). Both from agent 156's difftest round 9.
+  - Measured (BENCH.md "OLTP, round 4", dist engine and PostgreSQL in containers): select-only
+    0.61-0.98 of PostgreSQL's CPU per transaction on every protocol; tpcb-like simple and
+    extended 0.70-0.81, prepared 1.28-1.39; simple-update 0.76-1.63; the 100-row primary-key
+    range read 2.3-3.8x (executor 47%, agent 149; custom planning 36%). Off-CPU at 32 clients:
+    the size models' locks 26% of the switches (agent 151), the WAL fsync 8.6%, lock_row 8%
+    (real waits on hot rows).
+  - Not mine, found while verifying: REINDEX SCHEMA meeting a concurrent DROP failed with
+    "file numbers of relations that are gone" (29e882c9 fixes it); partition_aggregate's
+    ANALYZE meeting autovacuum's ("concurrent schema change") is the catalog merge of two
+    statistics writes PostgreSQL serializes on ShareUpdateExclusiveLock (agent 146).
 - The full crate test suite (`cargo test -p pg-engine`) passes: unit tests, 350+ golden
   files in engine and wire mode, the wire tests (including a concurrency stress test), the
   storage-format and layout tests.

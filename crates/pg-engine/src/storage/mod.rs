@@ -264,6 +264,9 @@ pub struct Store {
     durable: AtomicU64,
     /// Held by the commit fsyncing the WAL for every commit appended so far.
     sync_lock: Mutex<()>,
+    /// Commits waiting for another's fsync sleep here (`wait_durable`), woken when
+    /// `durable` advances (`made_durable`): they used to queue on `sync_lock`, spinning.
+    durable_wait: (Mutex<()>, parking_lot::Condvar),
     next_id: AtomicU64,
     snapshots: Mutex<BTreeMap<u64, usize>>,
     bg: Mutex<()>,
@@ -425,6 +428,7 @@ impl Store {
             assigned: AtomicU64::new(last_ts),
             durable: AtomicU64::new(last_ts),
             sync_lock: Mutex::new(()),
+            durable_wait: (Mutex::new(()), parking_lot::Condvar::new()),
             next_id: AtomicU64::new(next_id),
             snapshots: Mutex::new(BTreeMap::new()),
             bg: Mutex::new(()),
@@ -959,7 +963,16 @@ impl Store {
     /// appended so far when no other commit is doing it.
     fn wait_durable(&self, ts: u64) -> Result<()> {
         while self.durable.load(Ordering::Acquire) < ts {
-            let _g = self.sync_lock.lock();
+            // Another commit is fsyncing: sleep until it is done (it may cover this one),
+            // then sync if it didn't.
+            let Some(_g) = self.sync_lock.try_lock() else {
+                let mut w = self.durable_wait.0.lock();
+                while self.durable.load(Ordering::Acquire) < ts && self.sync_lock.is_locked() {
+                    // (A bound on the sleep: a store closed meanwhile wakes no one.)
+                    self.durable_wait.1.wait_for(&mut w, std::time::Duration::from_millis(50));
+                }
+                continue;
+            };
             if self.durable.load(Ordering::Acquire) >= ts {
                 break;
             }
@@ -971,9 +984,15 @@ impl Store {
                 // The commits are in the memtable already and can't be taken back: the
                 // store stops (Postgres PANICs on a failed WAL fsync).
                 self.closed.store(true, Ordering::Release);
+                drop(_g);
+                self.wake_durable();
                 return Err(e.into());
             }
-            self.made_durable(upto);
+            self.durable.fetch_max(upto, Ordering::AcqRel);
+            self.visible.fetch_max(upto, Ordering::AcqRel);
+            // (Woken once the fsync is over: a commit appended after `upto` syncs next.)
+            drop(_g);
+            self.wake_durable();
         }
         Ok(())
     }
@@ -982,6 +1001,13 @@ impl Store {
     fn made_durable(&self, upto: u64) {
         self.durable.fetch_max(upto, Ordering::AcqRel);
         self.visible.fetch_max(upto, Ordering::AcqRel);
+        self.wake_durable();
+    }
+
+    /// Wake the commits sleeping in `wait_durable` (`durable` advanced, or the fsync ended).
+    fn wake_durable(&self) {
+        let _w = self.durable_wait.0.lock();
+        self.durable_wait.1.notify_all();
     }
 
     /// `commit_with` for a commit that publishes a new catalog, group-committed as `commit`

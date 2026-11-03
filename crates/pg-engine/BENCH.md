@@ -6351,6 +6351,87 @@ order (new ran after base in every round, so it often paid for base's writes: th
   0.060 ms against PostgreSQL's 0.099 with fsync, so a row-writing commit isn't Grafana's
   157 µs average (its migrations' DDL commits are the likely cause, not measured here).
 
+## OLTP, round 4 (round 24, agent 145)
+
+HANDOFF.md, "OLTP round 4", has what changed. Three pushes: the batch of shapes, shared and
+watched kept plans and PL/pgSQL custom plans as the generic plan (ef3831c2); a plan's Gathers
+found once per bound plan (a6a8b7ec); a custom plan's cost and Gathers from one estimate tree,
+the serial tree below parallel_setup_cost, pg_prepared_statements read as the view is
+(e8663d91).
+
+### Against PostgreSQL (container on both sides, dist build)
+
+Engine `dist` at e8663d91 in a container of the pinned debian image, PostgreSQL 18.6 in its
+own (shared_buffers 2 GB), both on cores 24-27 at nice 19, pgbench 18.6 in a third container on
+28-31; scale 10, 10 s per run after a 4 s select-only warm-up, fresh data per binary and
+round, two interleaved rounds. CPU ms per transaction from /proc of the engine's process and
+PostgreSQL's cgroup; each cell the range over the rounds; ratio = engine / PostgreSQL CPU per
+transaction (mean of the rounds; below 1: the engine uses less). The machine ran at load 25-35
+(other agents' builds): PostgreSQL's own runs moved by up to 2x between rounds (tpcb-like
+simple 2,337-5,684 tps), so read the ratios as +-25%.
+
+| workload | mode | clients | engine tps | PostgreSQL tps | engine ms | PostgreSQL ms | ratio |
+|---|---|---:|---:|---:|---:|---:|---:|
+| select-only | simple | 8 | 68,253-77,884 | 40,305-44,352 | 0.047-0.051 | 0.077-0.084 | 0.61 |
+| select-only | simple | 32 | 62,110-87,717 | 42,162-49,045 | 0.045-0.064 | 0.081-0.094 | 0.62 |
+| select-only | extended | 8 | 52,744-61,636 | 37,692-39,118 | 0.055-0.068 | 0.085-0.095 | 0.68 |
+| select-only | extended | 32 | 54,997-55,922 | 37,913-42,045 | 0.071-0.072 | 0.093-0.104 | 0.73 |
+| select-only | prepared | 8 | 59,899-66,776 | 46,211-62,591 | 0.051-0.053 | 0.048-0.058 | 0.98 |
+| select-only | prepared | 32 | 69,690-72,469 | 49,358-71,512 | 0.055-0.057 | 0.055-0.077 | 0.85 |
+| tpcb-like | simple | 8 | 5,433-5,661 | 2,337-5,684 | 0.512-0.570 | 0.488-0.855 | 0.81 |
+| tpcb-like | simple | 32 | 5,353-6,596 | 3,274-5,621 | 0.539-0.636 | 0.672-0.952 | 0.72 |
+| tpcb-like | extended | 8 | 4,975-5,771 | 2,346-5,533 | 0.487-0.570 | 0.565-0.954 | 0.70 |
+| tpcb-like | extended | 32 | 4,652-5,410 | 2,712-5,941 | 0.607-0.748 | 0.652-1.062 | 0.79 |
+| tpcb-like | prepared | 8 | 5,703-5,940 | 6,848-8,594 | 0.460-0.530 | 0.305-0.408 | 1.39 |
+| tpcb-like | prepared | 32 | 4,943-6,532 | 7,916-8,676 | 0.510-0.583 | 0.382-0.474 | 1.28 |
+| simple-update | simple | 8 | 8,593-9,756 | 4,023-10,298 | 0.296-0.316 | 0.308-0.501 | 0.76 |
+| simple-update | simple | 32 | 8,632-8,680 | 8,583-11,035 | 0.433-0.434 | 0.356-0.388 | 1.17 |
+| simple-update | extended | 8 | 4,734-8,983 | 8,195-9,223 | 0.332-0.536 | 0.334-0.372 | 1.23 |
+| simple-update | extended | 32 | 4,356-8,945 | 10,428-10,591 | 0.412-0.698 | 0.368-0.378 | 1.49 |
+| simple-update | prepared | 8 | 7,196-10,581 | 13,460-13,727 | 0.258-0.381 | 0.195-0.197 | 1.63 |
+| simple-update | prepared | 32 | 10,970-13,581 | 9,159-15,453 | 0.268-0.335 | 0.241-0.337 | 1.04 |
+| 100-row pk range | simple | 8 | 8,569-11,354 | 22,848-28,412 | 0.345-0.452 | 0.125-0.160 | 2.80 |
+| 100-row pk range | simple | 32 | 7,497-10,238 | 26,236-27,244 | 0.390-0.518 | 0.146-0.152 | 3.05 |
+| 100-row pk range | extended | 8 | 8,196-11,160 | 19,371-25,763 | 0.353-0.477 | 0.149-0.197 | 2.40 |
+| 100-row pk range | extended | 32 | 8,080-9,163 | 16,865-22,584 | 0.437-0.495 | 0.176-0.234 | 2.27 |
+| 100-row pk range | prepared | 8 | 8,715-9,895 | 25,698-29,709 | 0.393-0.448 | 0.122-0.137 | 3.25 |
+| 100-row pk range | prepared | 32 | 7,989-8,932 | 31,112-31,490 | 0.448-0.500 | 0.126-0.127 | 3.75 |
+
+Peak memory over the matrix: engine VmHWM 425-465 MB; PostgreSQL's cgroup memory.peak 774 MB
+(shared_buffers 2 GB, cumulative).
+
+- **select-only**: ahead on every protocol (0.61-0.98). The range read (`SELECT sum(abalance)
+  ... WHERE aid BETWEEN :aid AND :aid + 99`) is the gap: 2.3-3.8x the CPU. Its profile
+  (release, 8 clients, prepared, after e8663d91): the executor 47% (the aggregate over a
+  100-row index scan, agent 149's), the custom plan made on every Execute 36% (re-analysis
+  with the values as constants 21%, the serial cost tree 13%). PostgreSQL makes a custom plan
+  for every Execute here too (8 of 8, checked), from its analyzed tree: planning the engine's
+  `Analyzed` with the values substituted is agent 155's next planner item (the binder decides
+  constness while it binds).
+- **tpcb-like / simple-update prepared**: 1.0-1.6x. Off-CPU at 32 clients (sched_switch,
+  release at f6654266): the size models' locks 26% of the connection threads' context
+  switches (agent 151, landing), the WAL fsync 8.6% (fdatasync, and commits spinning on the
+  sync mutex while another fsyncs), lock_row 8% (waits for the hot branches / tellers rows
+  that PostgreSQL waits for too).
+
+### The fixes, before and after (release, 8 clients, host engine, interleaved)
+
+- **Gathers per bound plan** (a6a8b7ec): since d22006b9 every execution built its plan's
+  EXPLAIN tree to start parallel workers when a relation passed min_parallel_table_scan_size
+  (40% of select-only's CPU). select-only prepared 0.127-0.137 -> 0.053-0.063 ms per
+  transaction, simple 0.139-0.144 -> 0.053-0.064, tpcb-like prepared 0.67-0.87 -> 0.49-0.58.
+- **One estimate tree per custom plan, serial below parallel_setup_cost** (e8663d91): the
+  range read prepared 0.58 -> 0.36 profile samples per transaction (the Gathers tree gone, the
+  cost tree without partial paths); tpcb-like and select-only unchanged (1,419-1,489 /
+  133-140 thousand instructions per transaction either side).
+- **Commits sleep while another fsyncs** (storage `wait_durable`): simple-update prepared, 8
+  clients 0.32-0.40 -> 0.30-0.31 ms per transaction, 32 clients 0.40-0.60 -> 0.31-0.32 ms and
+  2,169-8,570 -> 11,978-12,079 tps (PostgreSQL in the container table: 9,159-15,453);
+  tpcb-like unchanged.
+- **memory_load** (`many_sessions_stay_bounded`, 100 sessions, release): +50.2 MB of heap at
+  this round's first batch, +57.0 at d22006b9, +61.7 / +62.4 at 74a3ad38 / b0c4238b (bound
+  120); debug builds vary 82-126 MB run to run on any of them.
+
 ## Application CPU (round 24, agent 133)
 
 Server CPU of the application suites (tests/clients, STATUS.md "Round 7"), profiled with perf
