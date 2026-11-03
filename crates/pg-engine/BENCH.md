@@ -3668,6 +3668,64 @@ reference) 51,148 / 51,150 with 0 units changed against `results.tsv`, pg_dump_t
 14,817, contrib pgvector 915 / 915 (own reference, `OPTFLAGS=""`), pgvector_equality 480 /
 480 (own seeded reference), bloom 58, pg_trgm 261, btree_gist 613 / 616, cube 316 (unchanged).
 
+## Scan cost, round 3 (round 24, agent 149)
+
+What changed (HANDOFF "Stored scans" and "Scan cost, round 3, batch 2"): the queue table's
+deleted head no longer costs every scan (btree model, heap visibility cache, hot-range
+builds, tombstone runs), string comparisons run over stored bytes, index scans' rows are
+checked by the filter's kernel over stored bytes, index entries come a batch at a time.
+
+Method: release builds of the engine on both sides of each comparison, interleaved rounds
+on one data directory; in-process timings from `examples/q.rs` (`Q_TIME=1`); instructions
+from `perf stat -e instructions:u` (wire: the engine process, or PostgreSQL's container
+cgroup, over the measured run). The machine was at load 10-30 throughout (nice 19 for every
+run), so wall times vary by about 20%; instruction counts are what to compare.
+**Ratio to PostgreSQL** (lower is better) is given for each workload.
+
+### Queue table (200,000 rows, the first 100,000 deleted; in process, ms per statement)
+
+| statement | before round 2 (`15a77038`) | round 2 (`4ccdc99c`) | now (`7abb7d5d`) | PostgreSQL 18.6 | now / PG |
+|---|---|---|---|---|---|
+| first `min(hid)` | 52-69 | 45-60 | 30-48 | 10.7-11.7 | 2.8-4.1x |
+| later `min(hid)` | 24-44 | 7-9 | 0.77-1.07 | 0.31-0.57 | ~2x |
+| `DELETE ... WHERE hid = (SELECT min(hid) ...)`, settled | 230-390 | 8-92 | 1.4-5 | 0.35-0.71 | 3-7x |
+
+There was no first-scan regression in round 2: before it, the first scan measured 52-69 ms
+too; round 2's "11-42 ms before" were later scans. The first scan's cost now is reading and
+decompressing the blocks the bulk DELETE's compaction wrote (60% of it) and the btree
+model's LP_DEAD marking (PostgreSQL's first scan also marks them). The DELETE settles at
+1.4-5 ms after the first few; the first few after the bulk delete take 20-60 ms while the
+background compaction rewrites the deleted range.
+
+### Text filters (`count(*) FROM w WHERE e = 'x7'`, 500,000 rows, in process, serial)
+
+Instructions per row: 2,061 before (`daa881c7`), 1,385 now (-33%): the comparison runs over
+the stored bytes (`StoredCmps`), no value decoded.
+
+### Primary-key range reads (`SELECT id, balance FROM accounts WHERE id BETWEEN $1 AND $1 + 99 ORDER BY id`, 8 clients, 200,000 rows, prepared, over the wire)
+
+| | base (`8115f5af`) | this batch | PostgreSQL 18.6 | this batch / PG |
+|---|---|---|---|---|
+| instructions per op (k) | 1,936-1,947 | 1,748 | 396 | 4.4x |
+| server CPU µs per op | 499-505 | 456-458 | 182-209 (an earlier, busier hour) | |
+| ops/s | 7,666-7,675 | 8,506-8,609 | | |
+| peak RSS MB | 104-110 | 103-109 | | |
+
+Where the engine's CPU goes (profile of the base build): planning a custom plan every
+Execute 37% and the Gathers' EXPLAIN tree 17% (agent 145's: the plan cache), the scan 29%
+(index entries 12%, row fetch 6%, the heap model per row 6%, the qual checked again 3.5%,
+decode 3%), the wire about 8%. This batch took the scan to 22%: the qual over stored bytes,
+entries a batch at a time, fewer allocations per row.
+
+### Other workloads (this batch against base `8115f5af`, release, interleaved)
+
+pgbench scale 10, 8 clients, prepared, 20 s (engine CPU ms per transaction, peak RSS MB):
+select-only base 0.151 / 0.165, new 0.151 / 0.161 (peak 309-361 / 307-308); tpcb-like base
+1.213 / 1.243, new 1.226 / 1.097 (295-298 / 297-307): unchanged within the noise. TPC-H SF1
+(one run of the 22 queries, `--cache-mb 2048`): every result hash equal to PostgreSQL's;
+engine CPU base 122 / 116 s, new 111 s, PostgreSQL 46 s (**2.4x**); peak RSS base 4,298 /
+4,330 MB, new 4,058 MB.
+
 ## Scan cost, round 2 (round 23, agent 130)
 
 What changed (HANDOFF "Scan cost, round 2"): storage hands rows to the scan node a batch at a

@@ -5421,6 +5421,43 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     The Docker e2e phase uses the parent's `3069ca91` baseline evidence instead
     of a repeat: twelve tests pass and four recovery tests fail on compute-to-host
     WAL HTTP timeouts. See `~/.cache/pg-engine-sol-resume/postgres-check.log`.
+- **Scan cost, round 3, batch 2: column batches, index scans' rows** (round 24, agent 149;
+  BENCH.md "Scan cost, round 3"):
+  - Column batches (`storage/cols.rs`, for the executor's batch execution, agents 143/154,
+    HANDOFF "Executor: batch execution, the next step"): the interface agreed between the
+    scan and the executor, `decode_cols(&RowBatch, rows, need, types, missing, &mut
+    ColBatch)`, a typed vector per needed column (`need` / `types` by table column, the key
+    not among them), NULLs in `nulls`, values a typed vector can't hold in the column's
+    sparse ascending `odd`, rows with out-of-line values in ascending `ext` (their columns
+    NULL: read the row whole if kept). Agent 154's implementation (86c04b88) is the one in
+    the tree; this batch adds its test against `decode_row` (`columns_match_decoded_rows`:
+    every type class, NULLs, odd values, columns added since, rows in and out of block
+    buffers, skipped columns) and `RowBatch::value_in`.
+  - Index scans' rows (`exec/scan.rs` `filter_kernel`): the plan's filter (an index scan's
+    conditions checked again on each fetched row) runs as its kernel, over the stored values
+    first (`StoredCmps`, the row not an index entry, no out-of-line values), else over the
+    row, else `eval`; at the same place in `emit` as before (after SSI's fetch locks).
+    `StoredCmps::of` counts in `kernel::STORED_CMPS_SCANS` for index scans now too.
+  - Index entries are read a batch at a time (`next_indexed`: `TxnScan::fill_batch` into
+    `erb` for a forward range not under a skip scan); a run of one entry (a unique index's)
+    allocates nothing more (`next_raw`), and `next_entry` cuts the entry key in place.
+  - Left (the range read's scan share, 22% of its CPU): the rows' fetch (`fetch_rows` /
+    `fetch_dense`, a resolving scan one row at a time with a key allocated per row: a raw
+    batch where no row has values out of line), the per-row model costs (`fetched`,
+    `Kills::passed`: agent 151's `Fetcher`, 5973e109), decode into a `Vec<Value>` per row
+    and the projection's second one. Planning (52% of the range read's CPU) is agent 145's
+    / 155's.
+  - Verified (debug engine, on top of 8115f5af; rebased onto 5973e109 with only a compile,
+    clippy and the targeted tests after): crate tests debug and release (60 / 60 binaries,
+    deep_input included), crash_random seeds 1-30, spill tests with
+    `ROLL_TXN_SPILL_BYTES=4096` (txn_spill, toast_storage, drop_storage, heap_order_scan,
+    stored_filters), clippy (no warning in these files), difftest smoke, isolation with the
+    roll-* specs 138 / 139, 1,805 / 1,806 permutations (intra-grant-inplace as before), a full
+    regress run on a private reference 51,148 / 51,150 with 0 units changed against
+    results.tsv, pg_dump_tap 14,817 / 14,817, contrib bloom 58, pg_trgm 261, btree_gist
+    613 / 616, cube 316, pgvector 915 / 915 (own reference, `OPTFLAGS=""`), pgvector_equality
+    480 / 480, every TPC-H SF1 hash equal to PostgreSQL's, pgbench unchanged
+    (BENCH.md).
 
 ## Repository layout
 
