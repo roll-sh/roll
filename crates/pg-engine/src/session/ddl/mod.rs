@@ -1411,6 +1411,15 @@ impl<'c, 'a> Ddl<'c, 'a> {
         TableRows {
             scan: self.ctx.txn.borrow().scan(&start, &end),
             table: Arc::new(t.clone()),
+            need: None,
+        }
+    }
+
+    /// `scan_rows` decoding only the columns `need` marks (the others NULL).
+    fn scan_rows_need(&self, t: &Table, need: Vec<bool>) -> TableRows {
+        TableRows {
+            need: Some(need),
+            ..self.scan_rows(t)
         }
     }
 
@@ -1483,6 +1492,7 @@ impl<'c, 'a> Ddl<'c, 'a> {
 pub(super) struct TableRows {
     scan: crate::txn::TxnScan,
     table: Arc<Table>,
+    need: Option<Vec<bool>>,
 }
 
 impl Iterator for TableRows {
@@ -1491,7 +1501,10 @@ impl Iterator for TableRows {
     fn next(&mut self) -> Option<Self::Item> {
         let r = self.scan.next()?;
         Some(r.and_then(|(k, v)| {
-            let row = decode_table_row(&self.table, &v)?;
+            let row = match &self.need {
+                Some(need) => crate::exec::scan::decode_table_row_need(&self.table, &v, need)?,
+                None => decode_table_row(&self.table, &v)?,
+            };
             Ok((k, row))
         }))
     }
