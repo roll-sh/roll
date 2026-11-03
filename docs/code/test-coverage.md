@@ -927,6 +927,12 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | store: one record per `(kind, id)` at its newest `seq`, `since` paging, tombstones replay | `agent-host/tests/store.rs::records_appear_once_at_their_newest_seq`, `agent-host/tests/store.rs::tombstones_replace_records_and_replay` |
 | store: seq counter, command receipts and thread state survive a reopen; receipts prune | `agent-host/tests/store.rs::survives_reopen_with_receipts_and_thread_state` |
 | config: `[providers.*]` and `[[acp]]` agents, bad names and unknown keys refused | `agent-host/src/config.rs` tests |
+| git checkpoints: the whole working tree (untracked in, ignored out) under `refs/roll/checkpoints/…`, parent HEAD; the user's index, staging and HEAD untouched; no private index left | `agent-host/tests/git.rs::checkpoints_include_untracked_files_and_leave_the_users_index_alone` |
+| git diffs: checkpoint → checkpoint and checkpoint → working tree, per-file unified diffs with kinds and stat; the 4 MiB cap drops whole files and sets `truncated` | `agent-host/tests/git.rs::diffs_between_checkpoints_and_to_the_working_tree`, `agent-host/tests/git.rs::big_diffs_are_cut_whole_files_at_a_time` |
+| git rollback: modified and deleted files come back, new files go, ignored files stay, the user's index is untouched | `agent-host/tests/git.rs::rollback_makes_the_files_match_a_checkpoint` |
+| worktrees on `roll/<slug>` (unique names), checkpoints inside them, removal keeps the branch, checkpoint refs deleted | `agent-host/tests/git.rs::worktrees_get_their_own_branch_and_removal_keeps_it` |
+| git status (porcelain v2: branch, ahead/behind, renames, untracked) and project info; non-git directories | `agent-host/tests/git.rs::status_reports_branch_and_changes`, `agent-host/tests/git.rs::non_git_directories_have_no_git`, `agent-host/src/git.rs` tests |
+| publish: commit on the thread branch and push it to `origin`; refuses another branch | `agent-host/tests/git.rs::publish_commits_and_pushes_the_thread_branch` |
 
 ## Measurements
 

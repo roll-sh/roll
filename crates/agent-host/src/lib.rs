@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 pub mod config;
+pub mod git;
 pub mod provider;
 pub mod store;
 
