@@ -903,6 +903,8 @@ pub struct Heap {
     size_sig: (u32, u32, u32),
     /// Pages versions went on that may still settle (`settle_left`; `Page::queued`).
     left: std::collections::VecDeque<u32>,
+    /// Versions written and rows deleted or rekeyed so far (`writes`).
+    writes: u64,
 }
 
 impl Heap {
@@ -1010,6 +1012,12 @@ impl Heap {
 
     pub fn versions(&self) -> usize {
         self.versions
+    }
+
+    /// A count that moves with every version written and every row deleted or rekeyed:
+    /// what a pass over the rows saw is still the model's while it holds.
+    pub fn writes(&self) -> u64 {
+        self.writes
     }
 
     pub fn all_visible_pages(&self) -> u32 {
@@ -1207,11 +1215,17 @@ impl Heap {
     }
 
     pub fn locate(&self, key: &[u8], v: &Vis) -> Option<Tid> {
-        let mut tid = self.keys.get(key)?;
+        self.locate_row(key, v).map(|(_, tid)| tid)
+    }
+
+    /// `locate`, and the row under `key`.
+    fn locate_row(&self, key: &[u8], v: &Vis) -> Option<(u32, Tid)> {
+        let row = self.keys.find(key)?;
+        let mut tid = self.keys.tid(row);
         loop {
             let t = self.pages.get(tid.0 as usize)?.tup(tid.1)?;
             if v.state(t.xmin) != Xs::Aborted {
-                return Some(tid);
+                return Some((row, tid));
             }
             tid = self.prev_of(tid)?;
         }
@@ -1441,6 +1455,7 @@ impl Heap {
             self.vm_pin(blk);
         }
         self.versions += 1;
+        self.writes += 1;
         (blk, off)
     }
 
@@ -1547,6 +1562,7 @@ impl Heap {
 
     /// heap_delete.
     pub fn delete(&mut self, key: &[u8], xid: u64, v: &Vis) {
+        self.writes += 1;
         let Some((b, off)) = self.locate(key, v) else {
             return;
         };
@@ -1609,7 +1625,7 @@ impl Heap {
         v: &Vis,
         cmax: &mut dyn FnMut(&Tup) -> u32,
     ) -> (Tid, bool) {
-        let Some((ob, ooff)) = self.locate(old_key, v) else {
+        let Some((krow, (ob, ooff))) = self.locate_row(old_key, v) else {
             let tid = self.insert(new_key.to_vec(), len, xid, &mut InsertMode::single());
             self.set_raw_cid(tid, cid);
             return (tid, false);
@@ -1623,9 +1639,14 @@ impl Heap {
             (nb, nb == ob)
         };
         let hot = same && hot;
+        let moved = old_key != new_key;
         let mut t = Self::new_tup(len, xid);
         t.heap_only = hot;
         t.cid = cid;
+        // (The key stays: its row, found above, is the new version's.)
+        if !moved {
+            t.row = krow;
+        }
         let (_, noff) = self.put(nb, t, false);
         self.set_prev((nb, noff), Some((ob, ooff)));
         let op = &mut self.pages[ob as usize];
@@ -1643,12 +1664,14 @@ impl Heap {
         op.set_prunable(xid);
         op.set_all_visible(false, &mut self.visible_pages);
         self.publish_page(ob);
-        let moved = old_key != new_key;
-        if moved {
-            self.keys.remove(old_key);
-        }
         self.disordered = true;
-        let row = self.keyed(new_key, (nb, noff));
+        let row = if moved {
+            self.keys.remove(old_key);
+            self.keyed(new_key, (nb, noff))
+        } else {
+            self.keys.set_tid(krow, (nb, noff));
+            krow
+        };
         if xid >= crate::txn::xids::FIRST_NORMAL_XID {
             self.pending
                 .entry(xid)
@@ -2101,6 +2124,7 @@ impl Heap {
 
     /// Rows stored under new keys (old, new); rows not listed are forgotten.
     pub fn rekey(&mut self, pairs: &[(Vec<u8>, Vec<u8>)]) {
+        self.writes += 1;
         let mut keys = super::keymap::KeyMap::default();
         keys.reserve(pairs.len(), pairs.iter().map(|(_, n)| n.len()).sum());
         let mut map = vec![super::keymap::NO_ROW; self.keys.rows()];
@@ -2427,21 +2451,33 @@ impl Heap {
 /// restored models existed), goes where a rewrite would put it. Returns whether any row's
 /// place differs from its stored TID, and each row's place (in the order given).
 pub fn restored(fillfactor: usize, rows: Vec<(Vec<u8>, usize, Option<Tid>)>) -> (Heap, bool, Vec<Tid>) {
+    let bytes = rows.iter().map(|r| r.0.len()).sum();
+    restored_from(fillfactor, rows.len(), bytes, rows.iter().map(|(k, len, tid)| (&k[..], *len, *tid)))
+}
+
+/// `restored` of `n` rows whose keys take `bytes` in all, borrowed (a kept record's,
+/// decoded without a copy of each key: `sizing::kept`).
+pub fn restored_from<'k>(
+    fillfactor: usize,
+    n: usize,
+    bytes: usize,
+    rows: impl Iterator<Item = (&'k [u8], usize, Option<Tid>)>,
+) -> (Heap, bool, Vec<Tid>) {
     let mut h = Heap::new(fillfactor);
-    h.keys.reserve(rows.len(), rows.iter().map(|r| r.0.len()).sum());
+    h.keys.reserve(n, bytes);
     let mut moved = false;
-    let mut tids = vec![(0, 0); rows.len()];
+    let mut tids = vec![(0, 0); n];
     let mut rest = Vec::new();
-    for (i, (k, len, stored)) in rows.into_iter().enumerate() {
+    for (i, (k, len, stored)) in rows.enumerate() {
         match stored.filter(|&tid| h.place_at(tid, Heap::new_tup(len, lps::SETTLED_XMIN))) {
             Some(tid) => {
-                h.placed(&k, tid);
-                h.keyed(&k, tid);
+                h.placed(k, tid);
+                h.keyed(k, tid);
                 tids[i] = tid;
             }
             None => {
                 moved |= stored.is_some();
-                rest.push((i, k, len));
+                rest.push((i, k.to_vec(), len));
             }
         }
     }
