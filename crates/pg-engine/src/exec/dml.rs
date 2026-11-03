@@ -3606,6 +3606,12 @@ pub struct InsertNode {
     last_table: u32,
     /// COPY: the line number and text of the row being inserted.
     copy_line: (usize, String),
+    /// COPY's multi-insert buffer as PostgreSQL fills it (rows, line bytes since its last
+    /// flush), and a unique or exclusion violation found in it: raised when the buffer would
+    /// be flushed (CopyMultiInsertBufferFlush inserts the index entries then), after the rest
+    /// of its lines are read and their defaults evaluated.
+    copy_buf: (usize, usize),
+    copy_err: Option<Error>,
     /// COPY FROM's bulk insert into the table's modelled heap.
     copy_load: Option<super::sizing::CopyLoad>,
     /// COPY's fresh writes through the transaction's sink (`Txn::open_sink`): None, not
@@ -3687,6 +3693,8 @@ impl InsertNode {
             routed_after: Vec::new(),
             last_table,
             copy_line: (0, String::new()),
+            copy_buf: (0, 0),
+            copy_err: None,
             copy_load,
             sink,
             virtual_slot: false,
@@ -3873,11 +3881,13 @@ impl InsertNode {
             });
             f.len() - 1
         };
+        let mut at_flush = false;
         let r = self.insert(src, ctx).map_err(|e| {
             if c.multi
                 && !e.stacked
                 && (e.code == code::UNIQUE_VIOLATION || e.code == code::EXCLUSION_VIOLATION)
             {
+                at_flush = true;
                 frames.borrow_mut()[n] = Frame::Copy {
                     table: c.table.clone(),
                     line,
@@ -3887,10 +3897,28 @@ impl InsertNode {
             e.in_frames(&frames.borrow())
         });
         frames.borrow_mut().truncate(n);
+        // (A unique or exclusion violation waits for the buffer's flush; the rows after it go
+        // in as before, the statement failing anyway.)
+        let r = match r {
+            Err(e) if at_flush => {
+                self.copy_err.get_or_insert(e);
+                Ok(None)
+            }
+            r => r,
+        };
         if let Some(l) = &self.copy_load {
             let done = l.row_done(raw_len, ctx);
             if r.is_ok() {
                 done?;
+            }
+        }
+        if c.multi && r.is_ok() {
+            self.copy_buf = (self.copy_buf.0 + 1, self.copy_buf.1 + raw_len);
+            if self.copy_buf.0 >= super::sizing::COPY_TUPLES || self.copy_buf.1 >= super::sizing::COPY_BYTES {
+                self.copy_buf = (0, 0);
+                if let Some(e) = self.copy_err.take() {
+                    return Err(e);
+                }
             }
         }
         r
@@ -4143,6 +4171,10 @@ impl Node for InsertNode {
                 None => self.source.next(ctx)?,
             };
             let Some(src) = next else {
+                // (The last buffer's flush.)
+                if let Some(e) = self.copy_err.take() {
+                    return Err(e);
+                }
                 self.done = true;
                 // (ExecPendingInserts: a batch of remote INSERTs not full yet. COPY's
                 // CopyMultiInsertBufferFlush names only the relation: relname_only.)
