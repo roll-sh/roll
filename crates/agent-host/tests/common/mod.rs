@@ -106,7 +106,7 @@ impl World {
         self.run(Command::MessageSend { thread: thread.clone(), text: text.into(), attachments: Vec::new(), mode }).await
     }
 
-    pub async fn state(&self) -> State {
+    pub async fn state(&self) -> Records {
         state(&self.host).await
     }
 
@@ -115,7 +115,7 @@ impl World {
         wait(&self.host, |s| s.thread(id).filter(|t| pred(t)).cloned(), "the thread").await
     }
 
-    pub async fn wait<T>(&self, what: &str, f: impl Fn(&State) -> Option<T>) -> T {
+    pub async fn wait<T>(&self, what: &str, f: impl Fn(&Records) -> Option<T>) -> T {
         wait(&self.host, f, what).await
     }
 }
@@ -126,12 +126,12 @@ pub async fn run(host: &Arc<Host>, command: Command) -> Reply {
 }
 
 /// Every live record, by `(kind, id)`, and the raw replay.
-pub struct State {
+pub struct Records {
     pub replay: Vec<Stamped>,
     pub live: HashMap<(EntityKind, String), Entity>,
 }
 
-impl State {
+impl Records {
     pub fn thread(&self, id: &ThreadId) -> Option<&Thread> {
         match self.live.get(&(EntityKind::Thread, id.0.clone())) {
             Some(Entity::Thread(t)) => Some(t),
@@ -189,17 +189,17 @@ impl State {
     }
 }
 
-pub async fn state(host: &Arc<Host>) -> State {
+pub async fn state(host: &Arc<Host>) -> Records {
     let replay = host.since(0, usize::MAX).await.unwrap();
     let live = replay
         .iter()
         .filter(|s| !matches!(s.entity, Entity::Removed(_)))
         .map(|s| ((s.entity.kind(), s.entity.id().to_string()), s.entity.clone()))
         .collect();
-    State { replay, live }
+    Records { replay, live }
 }
 
-pub async fn wait<T>(host: &Arc<Host>, f: impl Fn(&State) -> Option<T>, what: &str) -> T {
+pub async fn wait<T>(host: &Arc<Host>, f: impl Fn(&Records) -> Option<T>, what: &str) -> T {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(v) = f(&state(host).await) {

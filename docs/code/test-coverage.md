@@ -975,6 +975,10 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | projects unique by path, git info, `clone` not yet, removal deletes threads and worktrees | `agent-host/tests/threads.rs::projects_are_unique_by_path_and_removal_deletes_their_threads` |
 | archive/unarchive; the first message names an untitled thread | `agent-host/tests/threads.rs::archive_and_unarchive` |
 | handoff selection (newest and first items within budget), activity lines, tool output cut in the middle | `agent-host/src/orchestrator/handoff.rs` tests, `agent-host/src/orchestrator/runs.rs` tests |
+| terminals: a real PTY in the project, input round trip, output as base64 deltas, scrollback, size and resize, exit code, input after exit refused, bad base64 refused, close removes the record | `agent-host/tests/terminal.rs::a_terminal_echoes_input_keeps_scrollback_resizes_and_exits` |
+| closing a terminal hangs up its login shell (`SIGHUP` reaches it) and the exit doesn't bring the record back | `agent-host/tests/terminal.rs::closing_hangs_up_a_login_shell` |
+| thread terminals run in the thread's directory and are closed and removed with the thread | `agent-host/tests/terminal.rs::thread_terminals_run_in_the_thread_and_go_with_it` |
+| the scrollback ring keeps the newest 256 KiB | `agent-host/src/terminal.rs` tests |
 
 ## Measurements
 

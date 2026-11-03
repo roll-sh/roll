@@ -18,6 +18,7 @@
 mod handoff;
 mod queries;
 mod runs;
+mod terminals;
 mod threads;
 
 use crate::Outbound;
@@ -48,6 +49,7 @@ pub struct Host {
     inflight: std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     /// Serializes project add/remove (path uniqueness, cascading deletes).
     projects: AsyncMutex<()>,
+    terminals: std::sync::Mutex<HashMap<TerminalId, Arc<terminals::LiveTerminal>>>,
 }
 
 /// Why a command failed; becomes `Reply::Error`.
@@ -166,6 +168,7 @@ impl Host {
             threads: std::sync::Mutex::new(HashMap::new()),
             inflight: std::sync::Mutex::new(HashMap::new()),
             projects: AsyncMutex::new(()),
+            terminals: std::sync::Mutex::new(HashMap::new()),
         });
         host.recover()?;
         Ok(host)
@@ -362,11 +365,13 @@ impl Host {
             Command::RequestRespond { request, response } => self.request_respond(by, &request, response).await,
             Command::CheckpointRollback { thread, checkpoint } => self.checkpoint_rollback(&thread, &checkpoint).await,
             Command::ThreadPublish { thread, message, land: _ } => self.thread_publish(&thread, &message).await,
-            Command::TerminalOpen { .. }
-            | Command::TerminalInput { .. }
-            | Command::TerminalResize { .. }
-            | Command::TerminalClose { .. }
-            | Command::TerminalScrollback { .. } => Err(Fail::Invalid("terminals are not available yet".into())),
+            Command::TerminalOpen { project, thread, command, cols, rows } => {
+                self.terminal_open(project, thread, command, cols, rows).await
+            }
+            Command::TerminalInput { terminal, data } => self.terminal_input(&terminal, &data).await,
+            Command::TerminalResize { terminal, cols, rows } => self.terminal_resize(&terminal, cols, rows).await,
+            Command::TerminalClose { terminal } => self.terminal_close(&terminal).await,
+            Command::TerminalScrollback { terminal } => self.terminal_scrollback(&terminal).await,
             Command::ProviderRefresh {} => {
                 let info = machine_info(&self.providers).await;
                 *self.info.lock().unwrap() = info.clone();
@@ -434,7 +439,9 @@ impl Host {
             }
         }
         let _ = std::fs::remove_dir(self.config.worktrees().join(project.id.as_str()));
-        self.put(vec![Entity::Removed(Removed { entity: EntityKind::Project, id: project.id.0, thread: None })])?;
+        let mut tombstones = self.close_terminals(|t| t.project.as_ref() == Some(&project.id))?;
+        tombstones.push(Entity::Removed(Removed { entity: EntityKind::Project, id: project.id.0, thread: None }));
+        self.put(tombstones)?;
         Ok(Reply::Ok)
     }
 

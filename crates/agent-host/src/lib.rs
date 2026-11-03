@@ -14,6 +14,7 @@ pub mod git;
 pub mod orchestrator;
 pub mod provider;
 pub mod store;
+pub mod terminal;
 
 pub use orchestrator::Host;
 

@@ -261,8 +261,8 @@ impl Host {
                 tracing::warn!("deleting the checkpoints of {id}: {e:#}");
             }
         }
-        let mut tombstones = Vec::new();
-        for kind in [EntityKind::Node, EntityKind::Request, EntityKind::Checkpoint, EntityKind::Run, EntityKind::Terminal] {
+        let mut tombstones = self.close_terminals(|t| t.thread.as_ref() == Some(id))?;
+        for kind in [EntityKind::Node, EntityKind::Request, EntityKind::Checkpoint, EntityKind::Run] {
             for entity in self.store.of_thread(id, kind)? {
                 tombstones.push(Entity::Removed(Removed { entity: kind, id: entity.id().to_string(), thread: Some(id.clone()) }));
             }
