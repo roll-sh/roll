@@ -1905,6 +1905,49 @@ are seldom in the CPU's cache.
 
 Unchanged (within the spread between rounds of one build).
 
+### Batch 2 (measured on its pre-push build `6ce5d037`, before the recovery's additions)
+
+Instructions per row, in process (`scan_bench sql`, compacted, 1M rows; a run of 3 reps
+minus one with none, `perf stat -e instructions:u`). **base** is `7c1f72b3`; nothing in
+batch 1 touches these paths.
+
+| query | base w0 | batch 2 w0 | base w2 | batch 2 w2 |
+|---|---|---|---|---|
+| `count(*) FROM n` | 458 | 458 | 1,355 | **883** |
+| `sum(b) FROM n` | 1,679 | **1,201** | 1,669 | **1,206** |
+| `count(*) FROM n WHERE b = 7` | 1,642 | 1,630 | 2,132 | 1,911 |
+| `sum(h) FROM w` | 2,436 | **1,958** | 2,465 | **1,967** |
+| `sum(b) FROM m` | 1,762 | **1,285** | 1,764 | **1,285** |
+
+Serial `sum(b)` is 81 ns of CPU a row on this machine. PostgreSQL's sequential scan plus
+`sum` is 60-80 ns, so the engine is at about 1.0-1.3x PostgreSQL here, against about 1.8x
+before. The serial filtered `count(*)` runs through `ScanNode` (`count_rest`), not
+`parscan`, so it is unchanged.
+
+TID scans, 100,000 rows, pgbench `-M prepared -c 1`, 5 s, TPS:
+
+| | base (`7c1f72b3`) | batch 2 |
+|---|---|---|
+| `ctid = '(5,7)'` (a live row) | 4,749 | 14,407 |
+| `ctid = '(0,1)'` (an older version) | 14.4 | **15,561** |
+| `ctid = '(9999,1)'` (no tuple) | 14.4 | **14,875** |
+| `UPDATE ... WHERE ctid = (SELECT ctid ... WHERE id = :id)` | 3,322 | 5,583 |
+
+Batch 2 makes the older-version and missing-TID rows. Agent 142's per-TID `keys_at`
+(c97af248, in between) makes the live-row and UPDATE rows.
+
+TPC-H SF1 on batch 2, over the wire: all 22 result hashes equal PostgreSQL's. The 22 queries
+take 24.2 s on the engine against 12.2 s on PostgreSQL (wall, one run each, at load ~40),
+so the **engine/PostgreSQL ratio is about 2.0x**. Peak is 2,002 MB against PostgreSQL's
+1.6 GB. q20 takes 0.47 s against 0.12 s.
+
+Full verification of `6ce5d037`, before the recovery's additions:
+- crate tests in debug and release (crash_random seeds 1-30), with clippy showing no new warning;
+- the difftest smoke;
+- isolation: 134 / 136 specs and 1,749 / 1,751 permutations, as on origin;
+- regress, on a private reference: 51,148 / 51,150 with 0 units changed;
+- pg_dump_tap: 14,817 / 14,817.
+
 ## Round 23 (agent 121): executor speed and memory, round 5
 
 Same harness and settings; both servers on cores 28-31, the client on 6-7. **pg** is
