@@ -6221,6 +6221,53 @@ and combine a148 and a150 changes in `sizing.rs` and `vacuum.rs`. This batch cha
 `Heap::tuple` to return copied `Tup`, replaces `Page::lps`, and removes unused `Heap::is_dead`
 and `Btree::entries`. Recheck the affected scan and model behavior after integration.
 
+## Executor: batch execution, the next step (round 24, agent 143)
+
+The user's goal is to beat PostgreSQL everywhere. TPC-H SF1 is still about 2x PostgreSQL
+(BENCH.md "Executor, round 7": 24.2 s against 12.2 s; peak 2.0 GB against 1.6 GB). What is
+left is mostly the per-row cost above the scan. q10's profile is led by row decoding:
+`skip_value`, `LazyBuf::read`, `decode_value`, `Lazy::into_row`, `Value` clones. Serial
+`sum()` is at PostgreSQL's per-row CPU already, but every operator above a scan still makes
+a `Vec<Value>` per row and walks `Expr` per row.
+
+**Interface, agreed with agent 149 (storage scans) on 2026-11-03.**
+- 149 owns `storage/cols.rs` (new, pub): `ColBatch { len, cols: Vec<Col> }`.
+  - `Col` is one of I32, I64, F64, Num (i128 digits + scale), Bool or Date, each with a null
+    bitmap.
+  - Text, bytea and bpchar are `Bytes`: (buf, off, len) into the RowBatch's block buffers,
+    each buffer held once per batch, so the column stays valid after a refill.
+  - Every other type is `Values`.
+  - A value a typed column can't hold goes to that column's sparse side list (row -> Value)
+    rather than demoting the column. That covers a NULL tag, NUMERIC_DEC past i128,
+    EXTERNAL, and missing trailing columns (`Decode.missing`).
+  - Out-of-line values: a `has_ext` bitmap, resolved per row (`resolve(row)`) only for rows
+    a filter keeps.
+  - Signature: about `row::decode_cols(&RowBatch, need, types, &mut ColBatch)`. It walks
+    each row once, up to the last needed column (`skip_value_fast`, `peek_num`,
+    `peek_text`).
+  - The serial ScanNode builds its ColBatch from what `next_raw_ref` / `pass_run` yield
+    (heap order, pruning). parscan chunks decode their RowBatch directly.
+- The executor's side:
+  1. `parscan::run_rows` / `work_partial` over ColBatch, against a stub `decode_cols` that
+     returns `Values` per row until 149's typed decode lands under the same signature.
+  2. Kernels over columns with a selection vector (`kernel::K::run_batch`). Filters narrow
+     the selection; projections make new columns.
+  3. `partial::Partials` over columns: today's `fast_row` counts and sums become loops over
+     I32 / I64 / Num columns, and grouped hash aggregation hashes key columns a batch at a
+     time.
+  4. Hash-join probes over a key column (`pipe::Built::lookup` per batch), emitting
+     (outer, inner) index pairs.
+  5. Expressions compiled once per plan node, not per open. Cache them by the
+     `Arc<Plan>` held weakly, as `pghash::presorted_keys` does, and keep `eval` as the
+     fallback.
+  6. Then ScanNode's serial path, then the operators above it (Sort keys, Agg, Window
+     inputs), each keeping row order and errors exactly. An error a row would raise must
+     still come out at that row: a batch evaluates a failing expression for the rows
+     before it only, in order.
+- Measure each step with `examples/scan_bench.rs` (instructions a row), TPC-H SF1 (all 22
+  hashes, user instructions, peak) and pgbench. The footprint lead (idle CPU, idle sessions,
+  fresh data directory) must not get worse, and caches stay under `--memory-budget-mb`.
+
 ## Starting prompt for the next agent
 
 Paste this into the new agent, from the repository root on branch
