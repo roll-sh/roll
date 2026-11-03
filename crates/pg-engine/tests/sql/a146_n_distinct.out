@@ -1,0 +1,62 @@
+> CREATE TABLE a146_nd (u int, v int, w int)
+-- CREATE TABLE
+
+> INSERT INTO a146_nd SELECT g % 3000, g, g % 7 FROM generate_series(1, 30000) g
+-- INSERT 0 30000
+
+> ALTER TABLE a146_nd ALTER COLUMN u SET (n_distinct = 50)
+-- ALTER TABLE
+
+> ALTER TABLE a146_nd ALTER COLUMN v SET (n_distinct = -0.5)
+-- ALTER TABLE
+
+> ANALYZE a146_nd
+-- ANALYZE
+
+> SELECT attname, inherited, n_distinct FROM pg_stats WHERE tablename = 'a146_nd' AND NOT (attname = 'v' AND inherited) ORDER BY 1, 2
+attname:name | inherited:bool | n_distinct:float4
+u | f | 50
+v | f | -0.5
+w | f | 7
+-- SELECT 3
+
+> CREATE TABLE a146_nd_c () INHERITS (a146_nd)
+-- CREATE TABLE
+
+> INSERT INTO a146_nd_c SELECT g % 10, g, 1 FROM generate_series(1, 100) g
+-- INSERT 0 100
+
+> ALTER TABLE a146_nd ALTER COLUMN u SET (n_distinct_inherited = 7)
+-- ALTER TABLE
+
+> ANALYZE a146_nd
+-- ANALYZE
+
+> SELECT attname, inherited, n_distinct FROM pg_stats WHERE tablename = 'a146_nd' AND NOT (attname = 'v' AND inherited) ORDER BY 1, 2
+attname:name | inherited:bool | n_distinct:float4
+u | f | 50
+u | t | 7
+v | f | -0.5
+w | f | 7
+w | t | 7
+-- SELECT 5
+
+> ALTER TABLE a146_nd ALTER COLUMN u RESET (n_distinct)
+-- ALTER TABLE
+
+> ANALYZE a146_nd
+-- ANALYZE
+
+> SELECT attname, inherited, n_distinct FROM pg_stats WHERE tablename = 'a146_nd' AND NOT (attname = 'v' AND inherited) ORDER BY 1, 2
+attname:name | inherited:bool | n_distinct:float4
+u | f | 3000
+u | t | 7
+v | f | -0.5
+w | f | 7
+w | t | 7
+-- SELECT 5
+
+> DROP TABLE a146_nd CASCADE
+NOTICE 00000: drop cascades to table a146_nd_c
+-- DROP TABLE
+

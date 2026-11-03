@@ -1,0 +1,112 @@
+> CREATE TABLE a144_cic (id int, k int)
+-- CREATE TABLE
+
+> INSERT INTO a144_cic SELECT g, g % 50 FROM generate_series(1, 200) g
+-- INSERT 0 200
+
+> CREATE UNIQUE INDEX CONCURRENTLY a144_cic_k ON a144_cic (k)
+ERROR 23505: could not create unique index "a144_cic_k"
+DETAIL: Key (k)=(1) is duplicated.
+OBJECTS: schema=public table=a144_cic constraint=a144_cic_k
+
+> SELECT c.relname, i.indisvalid, i.indisready, i.indislive
+>   FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'a144_cic'::regclass ORDER BY 1
+relname:name | indisvalid:bool | indisready:bool | indislive:bool
+a144_cic_k | f | f | t
+-- SELECT 1
+
+> INSERT INTO a144_cic VALUES (201, 1)
+-- INSERT 0 1
+
+> SELECT count(*) FROM a144_cic
+count:int8
+201
+-- SELECT 1
+
+> DELETE FROM a144_cic WHERE id > 50
+-- DELETE 151
+
+> REINDEX INDEX a144_cic_k
+-- REINDEX
+
+> SELECT c.relname, i.indisvalid, i.indisready, i.indislive
+>   FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'a144_cic'::regclass ORDER BY 1
+relname:name | indisvalid:bool | indisready:bool | indislive:bool
+a144_cic_k | t | t | t
+-- SELECT 1
+
+> INSERT INTO a144_cic VALUES (300, 1)
+ERROR 23505: duplicate key value violates unique constraint "a144_cic_k"
+DETAIL: Key (k)=(1) already exists.
+OBJECTS: schema=public table=a144_cic constraint=a144_cic_k
+
+> INSERT INTO a144_cic VALUES (301, 51)
+-- INSERT 0 1
+
+> CREATE INDEX CONCURRENTLY a144_cic_id ON a144_cic (id)
+-- CREATE INDEX
+
+> CREATE INDEX a144_cic_both ON a144_cic (k, id)
+-- CREATE INDEX
+
+> SELECT c.relname, i.indisvalid, i.indisready, i.indislive
+>   FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'a144_cic'::regclass ORDER BY 1
+relname:name | indisvalid:bool | indisready:bool | indislive:bool
+a144_cic_both | t | t | t
+a144_cic_id | t | t | t
+a144_cic_k | t | t | t
+-- SELECT 3
+
+> DROP TABLE a144_cic
+-- DROP TABLE
+
+> CREATE TABLE a144_cic2 (k int)
+-- CREATE TABLE
+
+> INSERT INTO a144_cic2 SELECT g FROM generate_series(1, 20) g
+-- INSERT 0 20
+
+> CREATE UNIQUE INDEX a144_cic2_k ON a144_cic2 (k)
+-- CREATE INDEX
+
+> ALTER INDEX a144_cic2_k ALTER COLUMN 1 SET STATISTICS 100
+ERROR 0A000: cannot alter statistics on non-expression column "k" of index "a144_cic2_k"
+HINT: Alter statistics on table column instead.
+
+> DROP INDEX a144_cic2_k
+-- DROP INDEX
+
+> CREATE INDEX a144_cic2_plain ON a144_cic2 (k)
+-- CREATE INDEX
+
+> INSERT INTO a144_cic2 VALUES (1)
+-- INSERT 0 1
+
+> CREATE UNIQUE INDEX CONCURRENTLY a144_cic2_u ON a144_cic2 (k)
+ERROR 23505: could not create unique index "a144_cic2_u"
+DETAIL: Key (k)=(1) is duplicated.
+OBJECTS: schema=public table=a144_cic2 constraint=a144_cic2_u
+
+> SELECT c.relname, i.indisvalid, i.indisready
+>   FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'a144_cic2'::regclass ORDER BY 1
+relname:name | indisvalid:bool | indisready:bool
+a144_cic2_plain | t | t
+a144_cic2_u | f | f
+-- SELECT 2
+
+> DELETE FROM a144_cic2 WHERE ctid = (SELECT max(ctid) FROM a144_cic2 WHERE k = 1)
+-- DELETE 1
+
+> REINDEX INDEX CONCURRENTLY a144_cic2_u
+-- REINDEX
+
+> SELECT c.relname, i.indisvalid, i.indisready
+>   FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'a144_cic2'::regclass ORDER BY 1
+relname:name | indisvalid:bool | indisready:bool
+a144_cic2_plain | t | t
+a144_cic2_u | t | t
+-- SELECT 2
+
+> DROP TABLE a144_cic2
+-- DROP TABLE
+

@@ -276,9 +276,18 @@ impl Ddl<'_, '_> {
                 .map(|r| r.get(col).unwrap_or(&Value::Null))
                 .collect();
             if let Some(st) = self.column_stats(tg, &values, total as f64, &fmt)? {
+                // (do_analyze_rel: the column's n_distinct, or n_distinct_inherited for the
+                // inheritance tree's statistics, set by ALTER COLUMN ... SET, stands for what
+                // the sample gave.)
+                let opt = if inherit { "n_distinct_inherited=" } else { "n_distinct=" };
+                let set = (t.columns.get(col).into_iter())
+                    .flat_map(|c| c.options.iter())
+                    .find_map(|o| o.strip_prefix(opt)?.parse::<f64>().ok())
+                    .filter(|d| *d != 0.0);
                 computed.push(ColStats {
                     attnum: tg.attnum,
                     inherit,
+                    distinct: set.map_or(st.distinct, |d| d as f32),
                     ..st
                 });
             }

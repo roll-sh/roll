@@ -16,6 +16,7 @@ pub mod jsonbin;
 pub mod lz4;
 pub mod persist;
 pub mod stored_ix;
+pub mod stat_views;
 pub mod pmap;
 pub mod relindex;
 pub mod pglz;
@@ -447,6 +448,11 @@ pub struct Index {
     /// REPLICA IDENTITY USING INDEX chose it (pg_index.indisreplident).
     #[serde(default, skip_serializing_if = "compact::falsy")]
     pub replident: bool,
+    /// A concurrent build failed before the index was ready for inserts (pg_index.indisready
+    /// false: index_concurrently_build's failure leaves it so). Invalid indexes aren't kept up
+    /// either way (`bound_indexes`); this is what pg_index shows.
+    #[serde(default, skip_serializing_if = "compact::falsy")]
+    pub not_ready: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

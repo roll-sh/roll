@@ -3314,14 +3314,31 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     another session's (an autovacuum worker's) commit for it came later in PostgreSQL and
     overwrote it; the merge failed the commit as a concurrent schema change
     (partition_aggregate, agent 145).
-  - Left: on the current branch the database's first transaction still parses every table
-    on the connection's thread after the open (100,000 tables: 0.6 s and 470 MB; the open
-    itself is 25-35 ms), being located; entries' size (`Column` 240 bytes, `Table` 440) isn't
-    shrunk; a first query that
+  - Left: entries' size (`Column` 240 bytes, `Table` 440) isn't shrunk; a first query that
     reads every relation pays what the open used to (psql's `\dt` first 150-190 ms against
     78-95 at 10,000 tables; the store scans and parses, now on first use); colstats and
     triggers are still read at the open (BTreeMaps); a closed database's catalog read after
     its store's files are gone would panic (no such reader is known).
+- **Catalog round 9, third batch** (round 24, agent 146; BENCH.md "Catalog round 9, third
+  batch"):
+  - The first connection's parse of every table at 100,000 tables was `Database::open`'s
+    `temp_leftovers` (d22006b9), a scan of every table for a temporary one. The tables
+    map's index counts them now (`RelRows::temporary`, in the header; a header from before
+    it reads -1 and is counted once at the open and stored again, `persist::header_writes`).
+    `PMap::contains_key` doesn't parse a chunk (pgstat's first prune after an open asks it of
+    every relation with statistics). First connection at 100,000 tables 0.60 s / 1.4 s CPU /
+    573 MB → 31-36 ms / 0.04 s / 56 MB (PostgreSQL 21-24 ms).
+  - pg_stat_all_tables, pg_stat_user_tables and pg_stat_sys_tables are generated in one pass
+    (`catalog/stat_views.rs`): each relation's statistics entry read once (`pgstat::fetch_table`,
+    as the functions read it, every stats_fetch_consistency), its indexes' from pg_index's
+    sources (the built-in rows, `Catalog::indexes`, TOAST indexes), pg_class's columns read in
+    place from its kept rows; in relation oid order, as the definition's grouping sorted them.
+    Their SQL definitions ran 25 functions a row through a grouped join of pg_class and
+    pg_index. pg_stat_all_indexes and the statio views still run their definitions.
+  - ANALYZE stores a column's n_distinct (n_distinct_inherited for the inheritance tree's
+    statistics) set by ALTER COLUMN ... SET in place of the sample's, as do_analyze_rel does
+    (`analyze.rs`; agent 156: DISTINCT estimated at 3,231 against 50). Golden
+    `a146_n_distinct`.
 - **Client libraries** (round 17, agent 38; round 18, agent 51): drivers' and ORMs' own test
   suites against the engine and against PostgreSQL 18.6, test by test: `tests/clients/`
   (runner, per-suite scripts, `STATUS.md` with the per-suite counts and every difference
@@ -3817,6 +3834,32 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     unchanged-heap cases in `big_tables`, and `roll-index-progress` for observation from
     another backend and cancellation. Verification details are in the resumed batch's
     `tests/regress/STATUS.md` entry. The paused benchmark notes are not verified speedups.
+    BENCH.md "Bulk writes, round 7" has the measured numbers since, with round 6's two
+    regressions settled (neither was real) and the engine against PostgreSQL in containers.
+  - **Held COPY rows** (`Txn::hold_rows`, `store_held_rows`, `end_hold`; `CopyLoad::start`'s
+    `held`): a COPY under the sink's conditions (multi-insert, a table keyed by row ids, plain
+    non-unique btree indexes, `model_deferrable`) holds each row's stored bytes in the
+    transaction (`put_fresh`) until its multi-insert batch is placed in the heap model
+    (`CopyLoad::model`), then stores each once with its TID (`scan::with_tid`) through the sink,
+    which writes linkable runs for it (`sink_runs_ok`). Before, the rows were stored without
+    TIDs and `stamp_tids` read each back and rewrote it (34% of a modelled COPY). Holding stops
+    when the table passes the model's size (`stop_holding`: the rest have no TIDs). INSERT …
+    SELECT no longer defers modelling past its first 10,000 rows (`deferred_inserts`): each row
+    is placed as it goes in and stored once with its TID. Anything new that reads a held
+    load's table mid-COPY must keep to the sink's rule or end the hold.
+  - **COPY's unique violations at PostgreSQL's flush** (`InsertNode::insert_copied`,
+    `copy_buf` / `copy_err`): in a multi-insert COPY a unique or exclusion violation is
+    raised where CopyMultiInsertBufferFlush would find it, after the buffer's other rows (1,000,
+    or 65,535 bytes of lines) are read and their defaults evaluated: sequences and volatile
+    defaults advance as PostgreSQL's (agent 156's r9c finding). Other errors stay at their row.
+    Golden `a148_copy_buffer`.
+  - **VACUUM's frozen-xid pass** over a modelled table keeps the rows' xmin bounds
+    (`txn::unchanged` with layout 0, so `unchanged_measure` never takes it for the heap's
+    numbers); a later VACUUM with the table unchanged since takes them instead of reading every
+    row (`big_tables` `vacuum_keeps_xmins_of_unchanged_tables`).
+  - **Index builds' table read** decodes only the columns the index's keys, predicate and
+    INCLUDE columns read (`Ddl::scan_rows_need`), for every built-in method (agent 144's BRIN
+    profile: decoding every column was 15%).
 - **Result rows stream** (round 19, agent 65): a top-level SELECT's rows go to the client as
   the executor returns them, as PostgreSQL's printtup sends a DataRow per row. A
   `session::RowSink` (`session/sink.rs`, PostgreSQL's DestReceiver) takes them in
@@ -4075,6 +4118,21 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
     `compile_generic`'s key per evaluation; a DO block keeps them for its run. The wire
     writes text, integer, boolean and oid results without a String each
     (`server::put_text_fast`).
+  - *Window partitions streamed* (`exec/window.rs` `streamed_partitions`, `sort_keys_for`;
+    nodes.rs `Plan::Window`): calls with one window that has partition keys (compared
+    bytewise) read their input a partition at a time when it is sorted on the partition
+    and order keys (a Sort below, or one the executor puts there: over a table scan, the
+    Sort PostgreSQL has under its WindowAgg runs as a SortNode, within work_mem and spilling
+    as tuplesort does); each partition is computed alone, as nothing is sorted. The analytic
+    set's `window` (2M rows, 1,000 partitions): 1,290 -> 283 MB peak, 4.0-8.6 -> 3.2 s
+    (PostgreSQL 1.76 s), rows hashed equal. Several windows, partitions under a
+    nondeterministic collation and other inputs (joins, index scans) still go whole.
+    Verified: regress subset create_index, window, groupingsets, partition_aggregate,
+    select_distinct, aggregates, memoize 2,271 / 2,271 with 0 units changed against
+    `results.tsv`; lib, golden (in-process, wire, shuffled), wire, kept_plans,
+    session_state tests; clippy (no warning in the changed files). The WindowAgg's
+    `Storage` line is still the old estimate from rows and width (PostgreSQL trims its
+    tuplestore: 17 kB where the estimate says Disk 46,875 kB): left.
   - Left for the burst (with their owners): size-model upkeep on reads (151), planning of
     simple-protocol statements kept plans don't cover and the EXPLAIN estimates of plans
     seen once (145, 140), a SQL function's plan opened per call, cores left idle at 200
@@ -5371,6 +5429,42 @@ Earlier snapshot at `e890fb0` (2026-10-21), plus server-side files and rounds 13
       the engine is now 3x faster); timestamptz KNN `ORDER BY ts <-> c LIMIT 5` over
       100,000 rows 145 -> 0.24 ms (CPU 151 -> 6); skip scan 23 -> 17 ms (unsolved, above).
       Peak RSS 452 -> 448 MB.
+  - Batch 3 (agent 144):
+    - pg_index.indisready after a failed concurrent build (agent 156's difftest finding): a
+      CREATE INDEX CONCURRENTLY or REINDEX CONCURRENTLY whose build fails leaves its index
+      INVALID and not ready, as index_concurrently_build's failure does in PostgreSQL
+      (`Index::not_ready`, stored only when set; a REINDEX that succeeds clears it). The
+      engine never kept invalid indexes up for inserts; only the flag pg_index shows was
+      wrong. Golden `a144_cic_ready`.
+    - Native index access methods' builds (`build_am_index`: pgvector's hnsw / ivfflat,
+      bloom) decode only the columns the index reads (`sizing::index_columns`), as agent
+      148's serial build pass does for the built-in ones.
+    - Verified, on `fbe8f7a1`: crate tests in debug and release; clippy (nothing in the
+      files touched); the a144 goldens; a full regress run (debug, private reference)
+      51,148 / 51,150 with 0 units changed; isolation with the roll-* specs 1,805
+      permutations matching (intra-grant-inplace, as before); pg_dump_tap 14,817 / 14,817;
+      difftest smoke; contrib btree_gist 613 / 616, pg_trgm 261, cube 316, bloom 58, hstore
+      309, intarray 182, citext 544, pgvector 803 / 915 against `a89-pgvector` (expected
+      output 14 / 14), all unchanged.
+  - Left after round 5 (agent 144):
+    - Skip scans over modelled tables (under 400,000 versions since 18bb3d49) still pay
+      LP_DEAD bookkeeping in `Kills::done` / `Kills::passed` beyond what `Kills::sought`
+      removed. Re-measure after agent 151's all-visible shortcut in `chain_dead` / `Kills`
+      (5973e109), then trace the ranges `Kills::mark` gets (a gated eprintln is the
+      quickest way; the patch is in `~/.cache/a144/trace.patch` while it exists).
+    - Agent 154's finding: an index-only `count(*)` over TPC-H's lineitem (6M rows) takes
+      about 50 s on a fresh engine, a heap-model lookup and a point read per entry. Index-only
+      scans of a big settled table should skip the per-entry heap check, through 151's
+      `VisWatch` / all-visible fast path or an all-visible answer per range from the store.
+    - CREATE INDEX trails PostgreSQL 2-18x (BENCH round 5); re-measure on top of agent 148's
+      build pass that decodes only the index's columns (1f676b8a) and 151's model work.
+    - The access suite's GIN (gin_array 4.9x, gin_jsonb_exists 5.3x) and GiST KNN (box
+      4.7x, polygon 4.3x, circle 3.9x) cases. Profile with a frame-pointer build
+      (`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only RUSTFLAGS="-C force-frame-pointers=yes"`
+      in a target directory of its own); flat profiles of release builds can't unwind.
+    - btree_gist KNN over time and interval columns (not placed by the grid), the GiST size
+      model for classes without sort support (agent 103's box case, 610 pages against
+      1,011), and the SP-GiST quad NaN after a later split.
 
 - **Stored scans** (round 24, agent 149):
   - Recovered `eb44c2c9` and `78f4186f` onto `251924c1`. String comparisons

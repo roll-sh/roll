@@ -20,6 +20,14 @@ pub struct WindowNode {
     out: std::vec::IntoIter<Row>,
     /// The sort keys the input is already in (a Sort below), as `key_repr`s.
     presorted: Vec<String>,
+    /// Read a partition at a time (`streamed_partitions`): its keys, and the next
+    /// partition's first row, read past the one before.
+    stream: Option<Vec<NeedKey>>,
+    pending: Option<Row>,
+    started: bool,
+    /// The Sort the executor put under it (`sort_keys_for`): kept while its node runs, which
+    /// is counted by its address.
+    sort: Option<std::sync::Arc<crate::sql::plan::Plan>>,
 }
 
 impl WindowNode {
@@ -29,7 +37,17 @@ impl WindowNode {
             calls,
             out: Vec::new().into_iter(),
             presorted: Vec::new(),
+            stream: None,
+            pending: None,
+            started: false,
+            sort: None,
         }
+    }
+
+    /// It reads the output of `sort`, a Sort the executor made for it.
+    pub fn holding(mut self, sort: std::sync::Arc<crate::sql::plan::Plan>) -> Self {
+        self.sort = Some(sort);
+        self
     }
 
     /// The input is sorted on `keys` (a Sort right below).
@@ -44,29 +62,167 @@ impl WindowNode {
 
 impl Node for WindowNode {
     fn next(&mut self, ctx: &ExecCtx) -> Result<Option<Row>> {
-        if let Some(mut input) = self.input.take() {
-            let mut rows = Vec::new();
-            while let Some(r) = input.next(ctx)? {
-                ctx.check()?;
-                rows.push(r);
-            }
-            let n = rows.len();
-            // (Row i's results at i * k.., one array for all rows.)
-            let k = self.calls.len();
-            let mut results: Vec<Value> = vec![Value::Null; n * k];
-            let order = run_windows(&self.calls, &rows, &mut results, &self.presorted, ctx)?;
-            let mut out = Vec::with_capacity(n);
-            let mut rows: Vec<Option<Row>> = rows.into_iter().map(Some).collect();
-            for i in order {
-                let mut r = rows[i].take().unwrap();
-                r.reserve_exact(k);
-                r.extend(results[i * k..(i + 1) * k].iter_mut().map(|v| std::mem::replace(v, Value::Null)));
-                out.push(r);
-            }
-            self.out = out.into_iter();
+        if !self.started {
+            self.started = true;
+            self.stream = streamed_partitions(&self.calls, &self.presorted, ctx);
         }
-        Ok(self.out.next())
+        loop {
+            if let Some(r) = self.out.next() {
+                return Ok(Some(r));
+            }
+            let Some(input) = self.input.as_mut() else { return Ok(None) };
+            // The whole input, or (streamed) the next partition: its rows until one whose
+            // partition keys differ, kept for the next.
+            let mut rows = Vec::new();
+            match &self.stream {
+                None => {
+                    while let Some(r) = input.next(ctx)? {
+                        ctx.check()?;
+                        rows.push(r);
+                    }
+                    self.input = None;
+                }
+                Some(keys) => {
+                    let first = match self.pending.take() {
+                        Some(r) => r,
+                        None => match input.next(ctx)? {
+                            Some(r) => r,
+                            None => {
+                                self.input = None;
+                                return Ok(None);
+                            }
+                        },
+                    };
+                    let part: Vec<Value> = keys.iter().map(|k| eval(&k.key.expr, &first, ctx)).collect::<Result<_>>()?;
+                    rows.push(first);
+                    loop {
+                        let Some(r) = input.next(ctx)? else {
+                            self.input = None;
+                            break;
+                        };
+                        ctx.check()?;
+                        let mut same = true;
+                        for (k, v) in keys.iter().zip(&part) {
+                            if cmp_need(&eval(&k.key.expr, &r, ctx)?, v, k, ctx)? != Ordering::Equal {
+                                same = false;
+                                break;
+                            }
+                        }
+                        if !same {
+                            self.pending = Some(r);
+                            break;
+                        }
+                        rows.push(r);
+                    }
+                }
+            }
+            self.out = self.compute(rows, ctx)?.into_iter();
+        }
     }
+}
+
+impl WindowNode {
+    /// The calls' results for `rows`, appended to them, in the order they come out.
+    fn compute(&self, rows: Vec<Row>, ctx: &ExecCtx) -> Result<Vec<Row>> {
+        let n = rows.len();
+        // (Row i's results at i * k.., one array for all rows.)
+        let k = self.calls.len();
+        let mut results: Vec<Value> = vec![Value::Null; n * k];
+        let order = run_windows(&self.calls, &rows, &mut results, &self.presorted, ctx)?;
+        let mut out = Vec::with_capacity(n);
+        let mut rows: Vec<Option<Row>> = rows.into_iter().map(Some).collect();
+        for i in order {
+            let mut r = rows[i].take().unwrap();
+            r.reserve_exact(k);
+            r.extend(results[i * k..(i + 1) * k].iter_mut().map(|v| std::mem::replace(v, Value::Null)));
+            out.push(r);
+        }
+        Ok(out)
+    }
+}
+
+/// The keys of the Sort PostgreSQL puts under its WindowAgg (partition keys, then order
+/// keys), when the calls have one window with partition keys compared bytewise: the
+/// executor then sorts its input as a Sort node does (work_mem, spilling where tuplesort
+/// would) and reads it a partition at a time (`streamed_partitions`).
+pub(super) fn sort_keys_for(calls: &[WindowCall], ctx: &ExecCtx) -> Option<Vec<SortKey>> {
+    let keys = window_keys(calls, ctx)?.0;
+    if keys.iter().any(|k| k.coll.is_some()) {
+        return None;
+    }
+    let mut out: Vec<SortKey> = keys.into_iter().map(|k| k.key).collect();
+    let mut seen: Vec<String> = out.iter().map(|k| key_repr(&k.expr, k.desc, k.nulls_first)).collect();
+    for k in calls[0].order_by.iter().filter(|k| !crate::sql::binder::optimize::pseudo_constant(&k.expr)) {
+        let r = key_repr(&k.expr, k.desc, k.nulls_first);
+        if !seen.contains(&r) {
+            seen.push(r);
+            out.push(k.clone());
+        }
+    }
+    Some(out)
+}
+
+/// The partition keys to read the input a partition at a time by, when that computes what
+/// the whole input would (as WindowAgg reads its input): every call has one window (the
+/// same partitioning, ordering and frame), it has partition keys, and the input is sorted
+/// on its partition and order keys already, so nothing is sorted and each partition's
+/// results are its own. None: the whole input at once.
+fn streamed_partitions(calls: &[WindowCall], presorted: &[String], ctx: &ExecCtx) -> Option<Vec<NeedKey>> {
+    let (keys, need) = window_keys(calls, ctx)?;
+    if presorted.len() < need.len() || presorted[..need.len()] != need[..] {
+        return None;
+    }
+    Some(keys)
+}
+
+/// The calls' one window's partition keys (as `NeedKey`s) and the `key_repr`s of what its
+/// input must be sorted on (partition keys, then order keys); None when the calls have
+/// several windows or the window no partition keys.
+fn window_keys(calls: &[WindowCall], ctx: &ExecCtx) -> Option<(Vec<NeedKey>, Vec<String>)> {
+    use crate::sql::binder::optimize::pseudo_constant;
+    let first = calls.first()?;
+    let spec = |c: &WindowCall| {
+        let part: Vec<String> = c.partition_by.iter().filter(|e| !pseudo_constant(e)).map(|e| key_repr(e, false, false)).collect();
+        let order: Vec<String> = c.order_by.iter().map(|k| key_repr(&k.expr, k.desc, k.nulls_first)).collect();
+        format!("{part:?}{order:?}{:?}", c.frame)
+    };
+    let s0 = spec(first);
+    if calls.iter().any(|c| spec(c) != s0) {
+        return None;
+    }
+    let part_exprs: Vec<crate::sql::expr::Expr> = first.partition_by.iter().filter(|e| !pseudo_constant(e)).cloned().collect();
+    if part_exprs.is_empty() {
+        return None;
+    }
+    let mut need: Vec<String> = Vec::new();
+    for e in &part_exprs {
+        let r = key_repr(e, false, false);
+        if !need.contains(&r) {
+            need.push(r);
+        }
+    }
+    let nparts = need.len();
+    for k in first.order_by.iter().filter(|k| !pseudo_constant(&k.expr)) {
+        let r = key_repr(&k.expr, k.desc, k.nulls_first);
+        if !need.contains(&r) {
+            need.push(r);
+        }
+    }
+    let colls = partition_collations(&part_exprs, ctx);
+    let mut keys: Vec<NeedKey> = Vec::new();
+    for (e, coll) in part_exprs.into_iter().zip(colls) {
+        let repr = key_repr(&e, false, false);
+        if keys.iter().any(|k| k.repr == repr) {
+            continue;
+        }
+        keys.push(NeedKey {
+            key: SortKey { expr: e, desc: false, nulls_first: false, using: None },
+            coll,
+            repr,
+        });
+    }
+    debug_assert_eq!(keys.len(), nparts);
+    Some((keys, need))
 }
 
 /// A sort key as the window planning compares them.

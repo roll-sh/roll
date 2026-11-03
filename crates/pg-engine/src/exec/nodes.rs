@@ -388,6 +388,23 @@ fn open_node(plan: &Arc<Plan>, need: Option<&[bool]>, ctx: &ExecCtx) -> Result<B
                 }
                 nd::add(need.map(<[bool]>::to_vec), ex)
             })();
+            // (Over a table scan, the Sort PostgreSQL has below its WindowAgg runs as one,
+            // within work_mem, and the window reads it a partition at a time.)
+            let over_scan = {
+                let mut p: &Plan = input;
+                loop {
+                    match p {
+                        Plan::Project { input, .. } | Plan::Filter { input, .. } => p = input,
+                        Plan::Scan(s) => break s.index.is_none() && !matches!(s.access, crate::sql::plan::Access::Index { .. }),
+                        _ => break false,
+                    }
+                }
+            };
+            if over_scan && let Some(keys) = super::window::sort_keys_for(calls, ctx) {
+                let sort = Arc::new(Plan::Sort { input: input.clone(), keys: keys.clone() });
+                let node = super::window::WindowNode::new(open_need(&sort, need, ctx)?, calls.clone());
+                return Ok(Box::new(node.presorted(&keys).holding(sort)));
+            }
             let node = super::window::WindowNode::new(open_need(input, need, ctx)?, calls.clone());
             Box::new(match &**input {
                 Plan::Sort { keys, .. } => node.presorted(keys),
