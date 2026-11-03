@@ -4135,11 +4135,23 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         allvisible: res.all_visible as i32,
         indexes: Vec::new(),
     };
-    if !res.dead.is_empty() {
+    // (A deleted btree page's safexid: ReadNextFullTransactionId when it went.)
+    let next_xid = xids.next();
+    let removable = |x: u64| v.removable(x);
+    if res.dead.is_empty() {
+        // btvacuumcleanup's scan, for an index with deleted pages waiting.
+        for bix in &indexes {
+            if let Some(bt) = btrees.get_mut(&bix.index.oid)
+                && bt.needs_cleanup()
+            {
+                bt.vacuum_scan(None, &removable, next_xid);
+            }
+        }
+    } else {
         let dead: crate::exec::fasthash::HashSet<Tid> = res.dead.iter().copied().collect();
         for bix in &indexes {
             if let Some(bt) = btrees.get_mut(&bix.index.oid) {
-                bt.bulk_delete(&dead);
+                bt.vacuum_scan(Some(&dead), &removable, next_xid);
                 // (btbulkdelete's count of what is left; clamped to the heap's surviving
                 // tuples when VACUUM read every page: btvacuumcleanup.)
                 let mut tuples = bt.tuples as f64;
@@ -4155,10 +4167,13 @@ pub fn vacuum(t: &Table, ctx: &ExecCtx) -> Result<Option<Vacuumed>> {
         && let Some(th) = heaps.get_mut(&t.toast)
     {
         let r = th.vacuum(&v, 1, truncate("toast.vacuum_truncate"), skip, freeze);
-        if !r.dead.is_empty()
-            && let Some(bt) = btrees.get_mut(&(t.toast + 1))
-        {
-            bt.bulk_delete(&r.dead.iter().copied().collect::<crate::exec::fasthash::HashSet<_>>());
+        if let Some(bt) = btrees.get_mut(&(t.toast + 1)) {
+            if !r.dead.is_empty() {
+                let dead = r.dead.iter().copied().collect::<crate::exec::fasthash::HashSet<_>>();
+                bt.vacuum_scan(Some(&dead), &removable, next_xid);
+            } else if bt.needs_cleanup() {
+                bt.vacuum_scan(None, &removable, next_xid);
+            }
         }
     }
     drop(rf);
@@ -5071,17 +5086,24 @@ fn fork_blocks_bound(oid: u32, fork: Fork, ctx: &ExecCtx) -> Result<Option<u64>>
             }
             match fork {
                 Fork::Init => return Ok(Some(unlogged as u64)),
-                Fork::Fsm | Fork::Vm => return Ok(Some(0)),
-                Fork::Main => {}
+                Fork::Vm => return Ok(Some(0)),
+                Fork::Fsm | Fork::Main => {}
             }
             if !ensure(&t, &indexes, ctx)? {
+                if fork == Fork::Fsm {
+                    return Ok(Some(0));
+                }
                 // A table too big to model: its index as last measured (CREATE INDEX,
                 // VACUUM, ANALYZE: `btree_build_blocks`).
                 let pages = ctx.catalog().relstats.get(&ix).map_or(1, |s| s.pages.max(1) as u64);
                 return Ok(Some(pages));
             }
             let rf = ctx.sess.db.relfiles.of(t.oid).read();
-            rf.btrees.get(&ix).map_or(1, |b| b.nblocks()) as u64
+            match fork {
+                // (VACUUM records the deleted pages it finds recyclable: `Btree::vacuum_scan`.)
+                Fork::Fsm => rf.btrees.get(&ix).map_or(0, |b| b.fsm_blocks()) as u64,
+                _ => rf.btrees.get(&ix).map_or(1, |b| b.nblocks()) as u64,
+            }
         }
         Rel::Toast(t, is_index) => {
             let rf = ctx.sess.db.relfiles.of(t.oid).read();

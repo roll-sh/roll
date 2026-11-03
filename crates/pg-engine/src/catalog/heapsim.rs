@@ -168,7 +168,7 @@ impl<'a> Vis<'a> {
     }
 
     /// GlobalVisTestIsRemovableXid.
-    fn removable(&self, x: u64) -> bool {
+    pub fn removable(&self, x: u64) -> bool {
         x < self.horizon
     }
 }
@@ -537,14 +537,45 @@ impl FsmPage {
     }
 }
 
+/// A free space map (a heap's; a btree's too, `btsim`).
 #[derive(Clone, Debug, Default)]
-struct Fsm {
+pub(crate) struct Fsm {
     /// The fork's length in pages.
     blocks: u32,
     pages: HashMap<u32, FsmPage>,
 }
 
 impl Fsm {
+    /// The fork's length in pages.
+    pub(crate) fn blocks(&self) -> u32 {
+        self.blocks
+    }
+
+    /// Whether page `blk` is recorded with free space.
+    pub(crate) fn records_free(&self, blk: u32) -> bool {
+        let (a, slot) = fsm_location(blk);
+        self.pages.get(&fsm_physical(a)).is_some_and(|p| p.get(slot) > 0)
+    }
+
+    /// RecordFreeIndexPage: an index page free for reuse.
+    pub(crate) fn record_free_index_page(&mut self, blk: u32) {
+        self.record(blk, BLCKSZ - 1);
+    }
+
+    /// GetFreeIndexPage: a page recorded free (half a page asked for, as the index access
+    /// methods ask), recorded used now (RecordUsedIndexPage).
+    pub(crate) fn get_free_index_page(&mut self) -> Option<u32> {
+        let blk = self.search(needed_cat(BLCKSZ / 2))?;
+        self.record(blk, 0);
+        Some(blk)
+    }
+
+    /// FreeSpaceMapVacuum: the upper levels brought up to date, so searches find what the
+    /// bottom level records.
+    pub(crate) fn vacuum_all(&mut self) {
+        self.vacuum_range(0, u32::MAX);
+    }
+
     fn page(&mut self, a: FsmAddr, extend: bool) -> Option<&mut FsmPage> {
         let blk = fsm_physical(a);
         if blk >= self.blocks {
