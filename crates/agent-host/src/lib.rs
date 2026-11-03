@@ -8,7 +8,9 @@ use agent_proto::{Command, Delta, MachineInfo, Reply, Stamped};
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 
+pub mod config;
 pub mod provider;
+pub mod store;
 
 /// Something the daemon has to tell the relay, as it happens.
 #[derive(Clone, Debug)]

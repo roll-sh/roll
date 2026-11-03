@@ -920,6 +920,14 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 | review apps: token and secret shown once after Register and after Rotate, the reloaded list never shows them, "I've saved them" clears them, gone after an `<Activity>` hide and show and after unmount | `src/components/code/owner.test.tsx` (`ReviewApps: credentials are shown once`) |
 | repo webhooks: generated secret shown once after adding (create request body checked), the reloaded list never shows it, "I've saved it" clears it, a secret the user typed is never shown back, gone after an `<Activity>` hide and show and after unmount | `src/components/code/webhooks.test.tsx` (`WebhooksPanel: a generated secret is shown once`) |
 
+## Agents (daemon) (`crates/agent-host`)
+
+| Behaviour | Tests |
+| --- | --- |
+| store: one record per `(kind, id)` at its newest `seq`, `since` paging, tombstones replay | `agent-host/tests/store.rs::records_appear_once_at_their_newest_seq`, `agent-host/tests/store.rs::tombstones_replace_records_and_replay` |
+| store: seq counter, command receipts and thread state survive a reopen; receipts prune | `agent-host/tests/store.rs::survives_reopen_with_receipts_and_thread_state` |
+| config: `[providers.*]` and `[[acp]]` agents, bad names and unknown keys refused | `agent-host/src/config.rs` tests |
+
 ## Measurements
 
 | What | Test | Result |

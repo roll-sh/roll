@@ -50,11 +50,17 @@ dependencies = [
  "agent-proto",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
+ "hex",
+ "libc",
+ "rand 0.8.8",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
 ]
 
