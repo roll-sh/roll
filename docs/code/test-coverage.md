@@ -983,7 +983,8 @@ jsdom (`vitest.config.mts` projects `node` and `dom`, setup in `src/test/`).
 ## Agents (providers)
 
 Each adapter runs against a fake provider process that replays recorded protocol transcripts;
-scenario events are compared with golden files (`ROLL_FIXTURES=write` regenerates them).
+scenario events are compared with golden files (Codex; `ROLL_FIXTURES=write` regenerates them) or
+with the expected events written in the test (Claude).
 
 ### Codex (`agent-host/tests/codex.rs`, transcripts in `agent-host/tests/fixtures/codex/`)
 
@@ -1013,6 +1014,27 @@ T3 Code's Codex replay fixtures (MIT) and sessions recorded from codex-cli 0.164
 | relay link: a 401 at the upgrade stops it (`roll agent login` again) and `check` says so; nobody listening: jittered backoff 1 s → 2 s …, shutdown stops it | `agent-host/tests/relay.rs::refused_tokens_and_shutdown` |
 | relay link end to end with code-control's relay on a real port: 600 records mirrored into `/state` and onto the event stream, a command round trip (receipt on a repeat), live changes, a daemon restart with changes meanwhile resumes from the relay's `seq` with every change exactly once in cursor order, revoking the machine stops the link | `agent-host/tests/relay.rs::daemon_and_relay_end_to_end` |
 | `wss://` URLs and TLS roots | `agent-host/src/relay.rs` tests |
+
+### Claude Code (`agent-host/tests/claude.rs`, transcripts in `agent-host/tests/fixtures/claude/`)
+
+T3 Code's Claude replay fixtures (MIT), the raw stdio of Claude Code 2.1.310, and hand-written
+transcripts. The test binary is the fake `claude` too: it checks every line the adapter writes.
+
+| Feature | Tests |
+| --- | --- |
+| Launch flags as the SDKs pass them (stream-json both ways, partial messages, stdio permission prompts, permission mode, model, effort incl. ultracode and ultrathink, summarized adaptive thinking, setting sources, `--mcp-config`, `--append-system-prompt`, `--session-id`), environment (`CLAUDE_CODE_ENTRYPOINT`, no `CLAUDECODE`, config and session env) | `agent-host/tests/claude.rs::real_cli_streams_text_and_reasoning`, `agent-host/tests/claude.rs::launch_flags_follow_the_session_config`, `agent-host/src/provider/claude/models.rs::efforts_compile_like_t3` |
+| `initialize`, a turn, streamed text and reasoning (`stream_event` → `TextDelta`), per-turn usage and cost (from the CLI's running total) | `agent-host/tests/claude.rs::replays_a_simple_answer`, `agent-host/tests/claude.rs::replays_turns_in_one_session`, `agent-host/tests/claude.rs::real_cli_streams_text_and_reasoning` |
+| `--resume` from `SessionConfig.resume`; `system/init` → `NativeThread`, `Model` | `agent-host/tests/claude.rs::real_cli_approval_interrupt_and_steer`, `agent-host/tests/claude.rs::replays_a_simple_answer` |
+| Steering (`priority: "now"`): the aborted request's result doesn't end the turn, its partial output is interrupted | `agent-host/tests/claude.rs::steering_joins_the_running_turn`, `agent-host/tests/claude.rs::real_cli_approval_interrupt_and_steer` |
+| `interrupt`: the result, or the CLI's exit, ends the turn interrupted; open tools interrupted | `agent-host/tests/claude.rs::interrupt_before_output_ends_the_turn`, `agent-host/tests/claude.rs::interrupt_mid_tool_interrupts_the_tool`, `agent-host/tests/claude.rs::real_cli_approval_interrupt_and_steer` |
+| Rollback: restart at the last message of the newest kept turn (`--resume-session-at`), only turns this session ran; `set_permission_mode`; the replaced process's exit isn't reported | `agent-host/tests/claude.rs::rollback_resumes_at_the_kept_turn` |
+| Items: messages, reasoning, Bash (stdout/stderr, exit code), Read, MCP tools, Write/Edit with diffs (from the input, then the CLI's `structuredPatch`), TodoWrite → todos, Agent → subagents with their own tools under them and their answer | `agent-host/tests/claude.rs::read_tools_complete_with_output`, `agent-host/tests/claude.rs::bash_reports_output_and_exit`, `agent-host/tests/claude.rs::command_output_keeps_escapes`, `agent-host/tests/claude.rs::mcp_tools_are_mcp_items`, `agent-host/tests/claude.rs::subagents_hang_their_work_off_the_agent_call`, `agent-host/tests/claude.rs::todos_edits_and_notices`, `agent-host/src/provider/claude/diff.rs::small_edit_in_a_snippet`, `agent-host/src/provider/claude/diff.rs::far_apart_changes_make_two_hunks`, `agent-host/src/provider/claude/diff.rs::structured_patch_renders_hunks`, `agent-host/src/provider/claude/translate.rs::exit_codes_and_output_caps`, `agent-host/src/provider/claude/translate.rs::paths_are_relative_to_the_session` |
+| `can_use_tool` → command, file-change and tool approvals with Claude's reason; allow, allow for the session (Claude's suggestions, session-scoped), deny and cancel answers; `control_cancel_request` withdraws | `agent-host/tests/claude.rs::declined_write_is_an_approval_with_a_diff`, `agent-host/tests/claude.rs::approved_command_runs`, `agent-host/tests/claude.rs::real_cli_approval_interrupt_and_steer`, `agent-host/tests/claude.rs::todos_edits_and_notices` |
+| AskUserQuestion → questions answered through `updatedInput.answers`; ExitPlanMode → a plan item and a `plan` approval that leaves plan mode for the thread's runtime mode | `agent-host/tests/claude.rs::questions_and_plan_approval` |
+| Compaction, API retries and failed hooks → system items | `agent-host/tests/claude.rs::todos_edits_and_notices` |
+| Error results fail the turn with Claude's reason | `agent-host/tests/claude.rs::error_results_fail_the_turn` |
+| `info()`: version, models for that version, login from the `initialize` account (no model call); not installed | `agent-host/tests/claude.rs::info_reports_version_login_and_models`, `agent-host/tests/claude.rs::info_without_the_cli`, `agent-host/src/provider/claude.rs::auth_follows_the_account`, `agent-host/src/provider/claude/models.rs::models_follow_the_installed_version` |
+| Robustness: a crash fails the turn and exits with the stderr tail; bounded lines; image and PDF attachments only | `agent-host/tests/claude.rs::crash_fails_the_turn_with_stderr`, `agent-host/tests/claude.rs::launch_flags_follow_the_session_config`, `agent-host/src/provider/claude.rs::long_lines_are_skipped` |
 
 ## Measurements
 
