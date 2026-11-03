@@ -2289,7 +2289,7 @@ const RB_MAX: usize = 256;
 /// them, read together (`Txn::get_many_snap`). Without a statement snapshot, one at a time
 /// through the transaction's writes as they are now.
 pub(super) fn fetch_rows(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Vec<Option<bytes::Bytes>>> {
-    if let Some(rows) = fetch_dense(keys, ctx)? {
+    if let Some(rows) = fetch_dense(keys, false, ctx)? {
         return Ok(rows);
     }
     let txn = ctx.txn.borrow();
@@ -2323,8 +2323,10 @@ fn get_sorted(txn: &crate::txn::Txn, keys: &[Vec<u8>], s: &crate::txn::Snap, res
 /// `fetch_rows` of ascending keys of one integer key column (a rowid table's, or an integer
 /// primary key's) close together, as an index's entries in its table's own order fetch them
 /// (an index made after its table's rows, a bulk load's): one range read, its rows matched
-/// to the keys, instead of a lookup each. None: not such keys.
-fn fetch_dense(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
+/// to the keys, instead of a lookup each. None: not such keys. `raw`: read as stored, a batch
+/// at a time; None also when a row has values stored out of line (`fetch_rows` puts them
+/// back).
+fn fetch_dense(keys: &[Vec<u8>], raw: bool, ctx: &ExecCtx) -> Result<Option<Vec<Option<bytes::Bytes>>>> {
     let id = |k: &[u8]| -> Option<i64> {
         let mut pos = 8;
         match crate::storage::keys::decode_index_value(k, &mut pos, &crate::types::DataType::Int8, false)? {
@@ -2349,6 +2351,36 @@ fn fetch_dense(keys: &[Vec<u8>], ctx: &ExecCtx) -> Result<Option<Vec<Option<byte
     };
     let mut out = Vec::with_capacity(keys.len());
     let mut want = keys.iter().peekable();
+    if raw {
+        // (Rows as stored, a batch at a time by reference: no key made per row.)
+        let mut it = it.raw();
+        let mut b = crate::storage::batch::RowBatch::default();
+        while want.peek().is_some() {
+            b.clear();
+            it.fill_batch(&mut b, keys.len() - out.len())?;
+            if b.is_empty() {
+                break;
+            }
+            for i in 0..b.len() {
+                let k = b.get(i).0;
+                while want.next_if(|w| w.as_slice() < k).is_some() {
+                    out.push(None);
+                }
+                if want.next_if(|w| w.as_slice() == k).is_some() {
+                    // (A row with values stored out of line: they're put back after all.)
+                    if crate::storage::toast::has_external(b.get(i).1) {
+                        return Ok(None);
+                    }
+                    out.push(Some(b.value_bytes(i)));
+                }
+                if want.peek().is_none() {
+                    break;
+                }
+            }
+        }
+        out.resize(keys.len(), None);
+        return Ok(Some(out));
+    }
     for r in it {
         let (k, v) = r?;
         while want.next_if(|w| w.as_slice() < k.as_slice()).is_some() {
@@ -3234,6 +3266,13 @@ impl ScanNode {
             .snapshot()
             .filter(|_| self.plan.mark.is_none() && !self.plan.sys && super::sizing::tracked(self.plan.table.oid))
         else {
+            // (Keys close together: one range read a batch at a time, the rows as stored when
+            // none has values out of line.)
+            if ctx.snapshot().is_some()
+                && let Some(rows) = fetch_dense(keys, true, ctx)?
+            {
+                return Ok(rows);
+            }
             return fetch_rows(keys, ctx);
         };
         let txn = ctx.txn.borrow();
