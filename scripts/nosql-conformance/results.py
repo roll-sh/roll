@@ -6,8 +6,19 @@ target doesn't have. Loaded with `-p results` (PYTHONPATH=/runner in the runner 
 """
 
 import os
+import pytest
 
 _results = {}
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    outcome = yield
+    if fixturedef.argname == "cql" and os.environ.get("ROLL_CONFORMANCE_SERVER_TIMESTAMPS") == "1":
+        # Cassandra's Paxos clock has millisecond precision. Client timestamps can
+        # outrun it, making mixed ordinary/conditional writes race on both servers.
+        # Explicit USING TIMESTAMP statements still exercise timestamp semantics.
+        outcome.get_result().use_client_timestamp = False
 
 
 def _record(nodeid, result):

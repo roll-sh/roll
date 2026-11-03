@@ -295,3 +295,13 @@ CONFIG REWRITE extra
 !sort CONFIG GET MAXMEMORY Hz maxmemory
 !sort CONFIG GET slaveof replicaof REPLICAOF
 !sort CONFIG GET hz *hz* nosuch
+
+# Redis 8.10.3 replication compression settings.
+!sort CONFIG GET repl-compression repl-compression-max-latency
+CONFIG SET repl-compression 1
+CONFIG SET repl-compression-max-latency 0
+CONFIG GET repl-compression-max-latency
+CONFIG SET repl-compression-max-latency -1
+CONFIG SET repl-compression-max-latency 2147483648
+CONFIG SET repl-compression-max-latency abc
+CONFIG SET repl-compression-max-latency 100

@@ -41,7 +41,7 @@ if [[ $unit_only == 0 ]]; then
     echo "redis: Docker is not running; start it or pass --unit" >&2
     exit 1
   fi
-  docker image inspect "${ROLL_COMPAT_IMAGE:-redis:8-alpine}" >/dev/null 2>&1 || docker pull -q "${ROLL_COMPAT_IMAGE:-redis:8-alpine}"
+  docker image inspect "${ROLL_COMPAT_IMAGE:-redis:8.10.3-alpine}" >/dev/null 2>&1 || docker pull -q "${ROLL_COMPAT_IMAGE:-redis:8.10.3-alpine}"
   ROLL_COMPAT_REQUIRED=1 cargo test -p redis-server --test compat
   # Redis' replication protocol against real Redis (its own container).
   ROLL_COMPAT_REQUIRED=1 cargo test -p redis-server --test redis_repl

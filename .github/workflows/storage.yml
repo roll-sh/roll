@@ -1,46 +1,32 @@
 name: storage
 
-# Runs only when storage-related code changes.
+# Extended validation, run manually when needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/s3-proto/**"
-      - "crates/s3-select/**"
-      - "crates/s3-image/**"
-      - "crates/s3-store/**"
-      - "crates/s3-server/**"
-      - "crates/s3-control/**"
-      - "crates/s3-api/**"
-      - "crates/pg-storage/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-storage.sh"
-      - "scripts/test-storage-aws.sh"
-      - "scripts/test-storage-cdn.sh"
-      - "apps/cdn-worker/**"
-      - "scripts/test-s3-conformance.sh"
-      - "tests/s3-conformance/**"
-      - ".github/workflows/storage.yml"
   workflow_dispatch:
-  # Pull requests and the merge queue run this through ci.yml.
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
   workflow_call:
 
 concurrency:
   group: storage-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: scripts/test-storage.sh --force --unit
 
   tools:
@@ -50,6 +36,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: |
           docker pull -q amazon/aws-cli
           docker pull -q rclone/rclone
@@ -64,6 +52,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: docker pull -q localstack/localstack:4.9
       - name: SSE-KMS, notifications, replication and Object Lambda against LocalStack
         run: scripts/test-storage-aws.sh --force
@@ -75,6 +65,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
         with:
@@ -92,6 +84,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: ceph/s3-tests against roll storage (compared with tests/s3-conformance/expected.txt)
         run: scripts/test-s3-conformance.sh --force
       - name: Results
@@ -109,6 +103,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: docker pull -q localstack/localstack:4.9
       - name: ceph/s3-tests against roll storage on LocalStack S3 and KMS (SSE-KMS, SSE-S3 at rest)
         run: scripts/test-s3-conformance.sh --force --backend localstack
@@ -133,6 +129,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: S3 object store (SeaweedFS)
         run: |
           # Current SeaweedFS images refuse signed requests without configured identities.

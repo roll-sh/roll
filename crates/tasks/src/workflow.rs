@@ -1141,7 +1141,9 @@ pub(crate) async fn invoke(t: &Arc<Tasks>, cell: &Arc<Mutex<Message>>) -> anyhow
             && let Some(m) = t.store.msg_get(other).await?
             && !m.state.is_final()
         {
-            return Ok(Done::Skip("superseded".into()));
+            // The successor is durable before apply_ops publishes its id in the run. A
+            // worker that reaches it during that gap must keep it available for the handoff.
+            return Ok(Done::Deferred(t.config.poll_ms));
         }
         let v = run.version;
         run.invocation = Some(c.id.clone());
@@ -1473,6 +1475,15 @@ pub(crate) async fn timer(t: &Arc<Tasks>, m: &Message) -> anyhow::Result<Done> {
     let Some(run) = t.store.run_get(run_id).await? else { return Ok(Done::Skip("run not found".into())) };
     if run.status.is_final() {
         return Ok(Done::Skip("run finished".into()));
+    }
+    if matches!(kind, TimerKind::Sleep | TimerKind::WaitTimeout | TimerKind::InvokeTimeout)
+        && run.invocation.is_some()
+        && !run.pending.iter().any(|p| &p.step_id == step_id)
+        && !t.store.steps(run_id).await?.iter().any(|s| &s.id == step_id)
+    {
+        // apply_ops persists the timer before publishing its pending operation. Keep
+        // the timer available until that invocation publishes or finishes.
+        return Ok(Done::Deferred(t.config.poll_ms));
     }
     match kind {
         TimerKind::Sleep | TimerKind::WaitTimeout => {

@@ -1,52 +1,50 @@
 name: queues
 
-# Runs only when roll queues code changes.
+# Extended validation, run manually when needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/mq-*/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "tests/queues/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-queues.sh"
-      - "scripts/test-queues-clients.sh"
-      - "deploy/queues/**"
-      - ".github/workflows/queues.yml"
   workflow_dispatch:
-  # Pull requests and the merge queue run this through ci.yml.
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
   workflow_call:
 
 concurrency:
   group: queues-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   deploy-template:
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - run: pipx run cfn-lint deploy/queues/aws/roll-queues.yaml
 
   unit:
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: scripts/test-queues.sh --force --unit
 
   e2e:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/test-queues.sh --force
+        with:
+          cache-on-failure: true
+      - run: scripts/test-queues.sh --force --e2e-only

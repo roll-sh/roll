@@ -1902,7 +1902,7 @@ fn truncate(s: &str, n: usize) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fuzz_diff() {
     let Ok(ref_addr) = std::env::var("ROLL_FUZZ_REDIS") else {
-        eprintln!("fuzz: skipped (set ROLL_FUZZ_REDIS=host:port to a throwaway redis:8-alpine)");
+        eprintln!("fuzz: skipped (set ROLL_FUZZ_REDIS=host:port to a throwaway redis:8.10.3-alpine)");
         return;
     };
     let env_u64 = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);

@@ -312,12 +312,14 @@ fi
 
 run_pytest() { # <name> <pytest args...>
   local name=$1; shift
+  local server_timestamps=0
+  [[ ${roll:-$reference} == cassandra ]] && server_timestamps=1
   runner_name=nosql-conformance-run-$$
   rm -f "$RUN/out/results-$name.txt"
   wait_memory
   docker run --rm --name "$runner_name" --memory "$RUNNER_MEMORY" "${runner_net[@]}" "${env_args[@]}" "${mounts[@]}" \
     -v "$PWD/$src:/scylladb:ro" -v "$RUN/out:/out" -w /scylladb/test \
-    -e ROLL_CONFORMANCE_RESULTS="/out/results-$name.txt" -e PYTHONPATH=/runner:/scylladb \
+    -e ROLL_CONFORMANCE_RESULTS="/out/results-$name.txt" -e ROLL_CONFORMANCE_SERVER_TIMESTAMPS="$server_timestamps" -e PYTHONPATH=/runner:/scylladb \
     "$RUNNER_IMAGE" python -m pytest "$@" > "$RUN/out/pytest-$name.log" 2>&1
 }
 run_late() { # each disruptive test in its own process, so one that kills the server can't hide another
@@ -346,6 +348,9 @@ runner_name=''
 [[ -f $RUN/out/results-main.txt ]] || { tail -40 "$RUN/out/pytest-main.log" >&2; echo "nosql-conformance: no results (pytest exit $code)" >&2; exit 1; }
 cat "$RUN/out"/results-main.txt ${late:+"$RUN/out"/results-late.txt} 2>/dev/null | LC_ALL=C sort > "$results"
 cat "$RUN/out"/pytest-main.log ${late:+"$RUN/out"/pytest-late.log} > "$RUN/out/pytest.log" 2>/dev/null || true
+# CI runs several dialects and suites in sequence; retain each one's diagnostics.
+cp "$RUN/out/pytest.log" "$RUN/out/pytest-$suite-$label.log"
+[[ -n $roll_pid ]] && cp "$RUN/out/roll.log" "$RUN/out/roll-$suite-$label.log"
 [[ -n $junit ]] && cp "$RUN/out/junit.xml" "$junit"
 grep -E '^(=+ )?[0-9]+ (passed|failed|skipped|error)|in [0-9.]+s' "$RUN/out/pytest.log" | tail -2
 echo "nosql-conformance: $suite on $label: $(awk '{print $NF}' "$results" | sort | uniq -c | awk '{printf "%s %s  ", $2, $1}')total $(wc -l < "$results"), ${elapsed}s"

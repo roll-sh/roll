@@ -1,38 +1,32 @@
 name: redis
 
-# Runs only when Redis-related code changes.
+# Extended validation, run manually when needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/redis-proto/**"
-      - "crates/redis-lua/**"
-      - "crates/redis-engine/**"
-      - "crates/redis-server/**"
-      - "crates/redis-control/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-redis.sh"
-      - ".github/workflows/redis.yml"
   workflow_dispatch:
-  # Pull requests and the merge queue run this through ci.yml.
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
   workflow_call:
 
 concurrency:
   group: redis-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: scripts/test-redis.sh --force --unit
 
   compat:
@@ -42,7 +36,9 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: docker pull -q redis:8-alpine
+        with:
+          cache-on-failure: true
+      - run: docker pull -q redis:8.10.3-alpine
       - name: Differential compatibility with Redis 8
         run: ROLL_COMPAT_REQUIRED=1 cargo test -p redis-server --test compat
 
@@ -59,6 +55,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: S3 object store (SeaweedFS)
         run: |
           docker run -d --name seaweed -p 8333:8333 chrislusf/seaweedfs server -s3

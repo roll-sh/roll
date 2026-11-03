@@ -368,12 +368,12 @@ FT.CURSOR READ vx {$c}
 FT.CURSOR READ vx {$c}
 !delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.DROPINDEX vx
-FT.CREATE jx ON JSON PREFIX 1 j: SCHEMA $.t AS t TEXT $.n AS n NUMERIC
+FT.CREATE jx ON JSON PREFIX 1 j: SCHEMA $.t AS t TEXT $.n AS n NUMERIC SORTABLE
 JSON.SET j:1 $ "{\"t\":\"hello\",\"n\":1}"
 JSON.SET j:2 $ "{\"t\":\"hello there\",\"n\":2}"
 JSON.SET j:3 $ "{\"t\":\"world\",\"n\":3}"
-_FT.DEBUG FT.SEARCH jx * TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
-_FT.DEBUG FT.SEARCH jx * RETURN 1 t DIALECT 3 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+_FT.DEBUG FT.SEARCH jx * SORTBY n ASC TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
+_FT.DEBUG FT.SEARCH jx * SORTBY n ASC RETURN 1 t DIALECT 3 TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 _FT.DEBUG FT.AGGREGATE jx * LOAD 2 @t @n SORTBY 2 @n DESC TIMEOUT_AFTER_N 2 DEBUG_PARAMS_COUNT 2
 !delta search_coord_*,search_shard_*,search_total_queries_processed,search_total_query_commands INFO search_queries search_warnings_and_errors search_coordinator_warnings_and_errors
 FT.DROPINDEX jx

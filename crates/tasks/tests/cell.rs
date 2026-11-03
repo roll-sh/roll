@@ -133,8 +133,19 @@ async fn a_crashed_leader_is_replaced_and_nothing_acknowledged_is_lost() {
     a.stop.send(Stop::Crash).unwrap();
     assert_eq!(a.done.await.unwrap().unwrap(), Exit::Stopped);
 
-    // Sent while nobody leads: held by the proxy, then served by the new leader.
-    let during = publish(&http, &proxy, json!({ "url": recv.url("/during"), "body": "x" })).await;
+    // A proxy may still have the crashed leader cached. Retry an ambiguous response with
+    // the same dedup key, so neither a lost response nor the retry creates a second message.
+    let body = json!({ "url": recv.url("/during"), "body": "x", "dedup_id": "during-failover" });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let during = loop {
+        let (status, reply) = call(&http, &proxy, reqwest::Method::POST, "/publish", Some(body.clone())).await;
+        if status.is_success() {
+            break reply["message_id"].as_str().unwrap().to_string();
+        }
+        assert!(matches!(status, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE), "publish: {status} {reply}");
+        assert!(std::time::Instant::now() < deadline, "failover publish: {status} {reply}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     let second = wait_leader(&*objects, Some("node-a")).await;
     assert_eq!(second.node, b.id);
     assert!(second.epoch > first.epoch);

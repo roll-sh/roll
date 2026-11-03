@@ -1,36 +1,32 @@
 name: postgres
 
-# Runs only when Postgres-related code changes.
+# Extended validation, run manually when needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/pg-proxy/**"
-      - "crates/pg-storage/**"
-      - "crates/pg-control/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-postgres.sh"
-      - ".github/workflows/postgres.yml"
   workflow_dispatch:
-  # Pull requests and the merge queue run this through ci.yml.
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
   workflow_call:
 
 concurrency:
   group: postgres-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: scripts/test-postgres.sh --force --unit
 
   e2e:
@@ -45,6 +41,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Pull Postgres images
         run: for v in 16 17 18; do docker pull -q postgres:$v-alpine & done; wait
       - name: Local object store

@@ -622,9 +622,111 @@ async fn workflows_survive_a_worker_crash() {
     env.post("/events", json!(events)).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     b.worker.take().unwrap().kill();
-    eventually(15_000, "all pipelines", || async {
-        env.runs("pipeline").await.iter().filter(|r| r["status"] == "completed").count() == 10
-    })
-    .await;
+    let deadline = now_ms() + 15_000;
+    loop {
+        let runs = env.runs("pipeline").await;
+        if runs.iter().filter(|r| r["status"] == "completed").count() == 10 {
+            break;
+        }
+        assert!(runs.iter().all(|r| r["status"] != "failed"), "pipeline failed: {runs:#?}");
+        if now_ms() >= deadline {
+            for run in &runs {
+                if let Some(id) = run["invocation"].as_str() {
+                    eprintln!("invocation {id}: {:#?}", env.message(id).await);
+                }
+            }
+            panic!("pipelines did not recover: {runs:#?}");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(env.runs("pipeline").await.iter().all(|r| r["output"] == 3));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sleep_timer_waits_for_pending_publication() {
+    use tasks::model::{MsgState, PendingOp, RunStatus, Target, TimerKind};
+    use tasks::store::Expect;
+
+    let env = env().await;
+    env.shutdown().await;
+    let app = MockApp::start("timer-handoff").await;
+    app.function(json!({ "id": "timer-handoff" }), |_| Ok(json!(3)));
+    app.sync(&env).await;
+    let reply = env.post("/functions/timer-handoff/invoke", json!({ "data": {} })).await;
+    let id = run_id(&reply);
+    let mut run = env.store.run_get(&id).await.unwrap().unwrap();
+    let mut invocation = env.store.msg_get(run.invocation.as_ref().unwrap()).await.unwrap().unwrap();
+    invocation.state = MsgState::Active;
+    invocation.due_at = now_ms() + 60_000;
+    assert!(env.store.msg_update(&invocation, invocation.version).await.unwrap());
+
+    let mut timer = invocation.clone();
+    timer.id = tasks::ids::new_id("msg");
+    timer.target = Target::Timer { run_id: id.clone(), step_id: "pause".into(), kind: TimerKind::Sleep };
+    timer.state = MsgState::Pending;
+    timer.due_at = now_ms();
+    timer.attempts = 0;
+    env.store.msg_insert(&timer, b"").await.unwrap();
+    let mut worker = env.node(|_| {}).await;
+    eventually(5000, "the early sleep timer to be polled", || async {
+        let m = env.store.msg_get(&timer.id).await.unwrap().unwrap();
+        m.deferrals > 0 || m.state.is_final()
+    }).await;
+    let held = env.store.msg_get(&timer.id).await.unwrap().unwrap();
+    assert_eq!(held.state, MsgState::Pending, "an early timer must survive pending publication");
+    assert_eq!(held.attempts, 0);
+
+    run.pending.push(PendingOp { step_id: "pause".into(), op: "sleep".into(), until: Some(timer.due_at), target: None, key: None, child_run: None });
+    run.invocation = None;
+    run.status = RunStatus::Waiting;
+    assert!(env.store.run_put(&run, Expect::Version(run.version)).await.unwrap());
+    let finished = env.wait_run(&id, 5000).await;
+    assert_eq!(finished["status"], "completed");
+    assert_eq!(finished["output"], 3);
+    assert!(env.store.steps(&id).await.unwrap().iter().any(|s| s.id == "pause"));
+    worker.worker.take().unwrap().shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn next_invocation_waits_for_the_run_pointer() {
+    use tasks::model::MsgState;
+    use tasks::store::Expect;
+
+    let env = env().await;
+    env.shutdown().await;
+    let app = MockApp::start("handoff").await;
+    app.function(json!({ "id": "handoff" }), |_| Ok(json!(3)));
+    app.sync(&env).await;
+    let reply = env.post("/functions/handoff/invoke", json!({ "data": {} })).await;
+    let id = run_id(&reply);
+    let mut run = env.store.run_get(&id).await.unwrap().unwrap();
+    let mut previous = env.store.msg_get(run.invocation.as_ref().unwrap()).await.unwrap().unwrap();
+    previous.state = MsgState::Active;
+    previous.due_at = now_ms() + 60_000;
+    assert!(env.store.msg_update(&previous, previous.version).await.unwrap());
+
+    // apply_ops enqueues its successor before publishing the successor's id in the run.
+    let mut next = previous.clone();
+    next.id = tasks::ids::new_id("msg");
+    next.state = MsgState::Pending;
+    next.due_at = now_ms();
+    next.attempts = 0;
+    env.store.msg_insert(&next, b"").await.unwrap();
+    let mut worker = env.node(|_| {}).await;
+    eventually(5000, "the successor to be polled", || async {
+        let m = env.store.msg_get(&next.id).await.unwrap().unwrap();
+        m.deferrals > 0 || m.state.is_final()
+    }).await;
+    let held = env.store.msg_get(&next.id).await.unwrap().unwrap();
+    assert_eq!(held.state, MsgState::Pending, "the successor must survive the publication gap");
+    assert_eq!(held.attempts, 0, "waiting does not consume a delivery attempt");
+    assert!(env.store.attempts(&next.id).await.unwrap().is_empty());
+    assert!(app.calls("handoff").is_empty(), "only the published invocation may run");
+
+    run.invocation = Some(next.id.clone());
+    assert!(env.store.run_put(&run, Expect::Version(run.version)).await.unwrap());
+    let finished = env.wait_run(&id, 5000).await;
+    assert_eq!(finished["status"], "completed");
+    assert_eq!(finished["output"], 3);
+    worker.worker.take().unwrap().shutdown().await;
 }

@@ -6,6 +6,7 @@
 #
 # Only runs when something tasks-related changed since the last green run. `--force` runs
 # regardless; `--unit` skips the Docker run. Extra args go to cargo test (e.g. a test name).
+# `--e2e-only` runs the external suites without repeating the separate CI unit job.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,26 +14,35 @@ PATHS=(crates/tasks crates/rolld crates/roll-cli Cargo.toml Cargo.lock
        scripts/test-tasks.sh .github/workflows/tasks.yml deploy/aws)
 STAMP=target/.test-tasks.hash
 
-force=0 unit_only=0 args=()
+force=0 unit_only=0 e2e_only=0 args=()
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --unit) unit_only=1 ;;
+    --e2e-only) e2e_only=1 ;;
     *) args+=("$a") ;;
   esac
 done
 
+if [[ $unit_only == 1 && $e2e_only == 1 ]]; then
+  echo "--unit and --e2e-only are mutually exclusive" >&2
+  exit 2
+fi
+
 hash=$(find "${PATHS[@]}" -type f -not -path '*/target/*' 2>/dev/null | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
-if [[ $force == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
+if [[ $force == 0 && $e2e_only == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
   echo "tasks: no changes since the last green run; skipping (--force to run anyway)"
   exit 0
 fi
 
-cargo build -p tasks -p roll-cli
-cargo build -p tasks --features lambda
-cargo clippy -p tasks -p roll-cli --all-targets --features lambda -- -D warnings
-cargo test -p tasks ${args[@]+"${args[@]}"}
-ROLL_TASKS_E2E_LOG=memory:// cargo test -p tasks --tests ${args[@]+"${args[@]}"}
+# CI runs the unit job separately; keep the default local command comprehensive.
+if [[ $e2e_only == 0 ]]; then
+  cargo build -p tasks -p roll-cli
+  cargo build -p tasks --features lambda
+  cargo clippy -p tasks -p roll-cli --all-targets --features lambda -- -D warnings
+  cargo test -p tasks ${args[@]+"${args[@]}"}
+  ROLL_TASKS_E2E_LOG=memory:// cargo test -p tasks --tests ${args[@]+"${args[@]}"}
+fi
 
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then
@@ -82,7 +92,7 @@ if [[ $unit_only == 0 ]]; then
 fi
 
 # Only a full run counts as green.
-if [[ $unit_only == 0 && ${#args[@]} == 0 ]]; then
+if [[ $unit_only == 0 && $e2e_only == 0 && ${#args[@]} == 0 ]]; then
   mkdir -p target && echo "$hash" > "$STAMP"
 fi
 echo "tasks: all green"

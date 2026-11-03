@@ -6,6 +6,7 @@
 # Only runs when something queues-related changed since the last green run (the mq-* crates,
 # rolld, the CLI, the workspace manifest/lockfile, the client matrix, the deploy image and
 # template, this script or the CI workflow). `--force` runs regardless; `--unit` skips Docker. Extra args go to `cargo test`.
+# `--e2e-only` runs the external suites without repeating the separate CI unit job.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,28 +15,40 @@ PATHS=("${MQ[@]}" crates/rolld crates/roll-cli tests/queues deploy/queues Cargo.
        scripts/test-queues.sh scripts/test-queues-clients.sh .github/workflows/queues.yml)
 STAMP=target/.test-queues.hash
 
-force=0 unit_only=0 args=()
+force=0 unit_only=0 e2e_only=0 args=()
 for a in "$@"; do
   case "$a" in
     --force) force=1 ;;
     --unit) unit_only=1 ;;
+    --e2e-only) e2e_only=1 ;;
     *) args+=("$a") ;;
   esac
 done
 
+if [[ $unit_only == 1 && $e2e_only == 1 ]]; then
+  echo "--unit and --e2e-only are mutually exclusive" >&2
+  exit 2
+fi
+
 hash=$(find "${PATHS[@]}" -type f -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
-if [[ $force == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
+if [[ $force == 0 && $e2e_only == 0 && -f $STAMP && "$(cat "$STAMP")" == "$hash" ]]; then
   echo "queues: no changes since the last green run; skipping (--force to run anyway)"
   exit 0
 fi
 
 CRATES=()
 for c in "${MQ[@]}"; do CRATES+=(-p "$(basename "$c")"); done
+MQ_CRATES=("${CRATES[@]}")
 CRATES+=(-p rolld -p roll-cli)
 
 cargo build "${CRATES[@]}"
-cargo clippy "${CRATES[@]}" --all-targets -- -D warnings
-cargo test "${CRATES[@]}" ${args[@]+"${args[@]}"}
+# CI runs the unit job separately; keep the default local command comprehensive.
+if [[ $e2e_only == 0 ]]; then
+  cargo clippy "${CRATES[@]}" --all-targets -- -D warnings
+  cargo test "${MQ_CRATES[@]}" ${args[@]+"${args[@]}"}
+  cargo test -p rolld --bin rolld ${args[@]+"${args[@]}"}
+  cargo test -p roll-cli --bin roll ${args[@]+"${args[@]}"}
+fi
 
 if [[ $unit_only == 0 ]]; then
   if ! docker info >/dev/null 2>&1; then
@@ -43,14 +56,15 @@ if [[ $unit_only == 0 ]]; then
     exit 1
   fi
   # Docker-backed tests skip themselves unless ROLL_E2E=1.
-  ROLL_E2E=1 cargo test "${CRATES[@]}" -- --test-threads="${ROLL_E2E_THREADS:-4}" ${args[@]+"${args[@]}"}
+  ROLL_E2E=1 cargo test "${MQ_CRATES[@]}" -- --test-threads="${ROLL_E2E_THREADS:-4}" ${args[@]+"${args[@]}"}
+  ROLL_E2E=1 cargo test -p rolld --test queues_cluster_e2e -- --test-threads=1 ${args[@]+"${args[@]}"}
   if [[ -x scripts/test-queues-clients.sh ]]; then
     scripts/test-queues-clients.sh
   fi
 fi
 
 # Only a full run counts as green.
-if [[ $unit_only == 0 && ${#args[@]} == 0 ]]; then
+if [[ $unit_only == 0 && $e2e_only == 0 && ${#args[@]} == 0 ]]; then
   mkdir -p target && echo "$hash" > "$STAMP"
 fi
 echo "queues: all green"

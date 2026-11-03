@@ -23,8 +23,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"
 tower = { version = "0.5", features = ["util"] }
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -133,16 +133,32 @@ redis-engine = { path = "crates/redis-engine" }
 redis-server = { path = "crates/redis-server" }
 redis-control = { path = "crates/redis-control" }
 
+# roll code.
+diffy = "0.5"
+serde_yaml_ng = "0.10"
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
+code-sql = { path = "crates/code-sql" }
+code-cluster = { path = "crates/code-cluster" }
+code-store = { path = "crates/code-store" }
+code-git = { path = "crates/code-git" }
+code-github = { path = "crates/code-github" }
+code-control = { path = "crates/code-control" }
+code-preview = { path = "crates/code-preview" }
+code-index = { path = "crates/code-index" }
+code-review = { path = "crates/code-review" }
+aes-gcm = "0.10"
+toml = "1"
+http-body-util = "0.1"
+http-body = "1"
+comrak = { version = "0.56", default-features = false }
+ammonia = "4"
 # roll storage (S3-compatible object storage).
 quick-xml = "0.41"
 crc-fast = "1"
 httpdate = "1"
-http-body-util = "0.1"
-http-body = "1"
 ipnet = "2"
 # SigV4a (ECDSA P-256), and the local backend's at-rest encryption for SSE-C.
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
-aes-gcm = "0.10"
 # STS web identity: RS256/ES256 JWT signatures (verification only).
 ring = "0.17"
 # Tests only: RSA keys to sign web identity tokens with, and the STS client.

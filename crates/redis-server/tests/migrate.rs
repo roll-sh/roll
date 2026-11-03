@@ -1,5 +1,5 @@
 //! MIGRATE between two roll servers; every reply is what Redis 8.10.2 answers in the same
-//! situation (recorded with two `redis:8-alpine` containers).
+//! situation (recorded with two `redis:8.10.3-alpine` containers).
 
 use redis_engine::{Config, Reply};
 use redis_server::client::RespClient;

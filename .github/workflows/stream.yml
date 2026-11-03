@@ -1,27 +1,19 @@
 name: stream
 
-# Runs only when stream-related code changes.
+# Extended validation, run manually when needed.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/stream-log/**"
-      - "crates/stream-broker/**"
-      - "vendor/kafka-protocol/**"
-      - "crates/pg-storage/**"
-      - "crates/rolld/**"
-      - "crates/roll-cli/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/test-stream.sh"
-      - ".github/workflows/stream.yml"
   workflow_dispatch:
-  # Pull requests and the merge queue run this through ci.yml.
+  # Extended suites run on demand; ci.yml is the two-minute merge gate.
   workflow_call:
 
 concurrency:
   group: stream-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
 
 jobs:
   unit:
@@ -33,6 +25,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       # librdkafka is built from source for the client tests; it includes the curl headers on Linux.
       - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
       - run: scripts/test-stream.sh --force --unit
@@ -49,6 +43,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libsasl2-dev
       - name: Pull the Kafka image
         run: docker pull -q apache/kafka:4.1.0
