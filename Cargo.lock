@@ -1542,6 +1542,7 @@ dependencies = [
 name = "code-control"
 version = "0.1.0"
 dependencies = [
+ "agent-proto",
  "ammonia",
  "anyhow",
  "async-trait",
@@ -1578,6 +1579,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "toml",
  "tower",
  "tower-http 0.7.1",

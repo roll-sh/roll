@@ -79,9 +79,11 @@ last 10 s and are renewed every 2 s with one statement per node (`UPDATE … WHE
   | `/v1/code/changes/{id}/…` | the change's repo |
   | `/v1/code/threads/{id}/…` | the thread's repo |
   | `/v1/code/work/{id}/…` | the work item's repo |
+  | `/v1/code/agents/{owner}/…` (machines, state, events, commands, login approval) | the lease `agents:<owner id>` (see below) |
+  | `/v1/code/agents/connect` (a daemon's WebSocket) | the lease `agents:<owner id>` of the machine token's owner |
   | MCP tool calls (`/v1/code/mcp`) | the routes they call, routed as above (MCP calls the API router in process) |
   | preview hosts (`chg-<id>.<preview domain>`) | the change's repo |
-  | everything else: info, health, names, owners, tokens, the repo list and creating repos, pricing, review apps, GitHub setup, installations and webhooks | runs on the node that got it |
+  | everything else: info, health, names, owners, tokens, the repo list and creating repos, pricing, review apps, GitHub setup, installations and webhooks, starting and polling an agent login | runs on the node that got it |
 
   A name or id that doesn't exist runs where it arrived (its 404). The owner holds a guard for
   as long as the response body is being sent, so a handoff waits for a clone to finish; an event
@@ -172,6 +174,25 @@ over the internal events route, in order per repo, and dropped after a few secon
 take them (like an event sent while nobody listens). Nothing durable depends on them: webhook
 deliveries are queued before `emit` returns, queue and GitHub work is in the database (kicks only
 make it start sooner), and reviewer jobs are rows the owner's runner polls.
+
+## An owner's agents
+
+roll code agents (docs/code/agents.md) keep live state per owner: the WebSocket links of its
+machines, the channel its event streams read, and commands waiting for a daemon's reply. All of
+it lives on one node, the holder of the lease `agents:<owner id>`, taken like a repo's: every
+`/v1/code/agents/{owner}/…` request and every link of the owner's machines is routed there (the
+link by its machine token, looked up on each connect). So commands, `online` and event streams
+work through any node, and the cursor order the streams rely on is kept by one writer.
+
+- The mirror itself (machines, records, cursors) is in control.db, so a new holder serves
+  snapshots and catch-ups at once; only links and live streams move.
+- When the lease moves (rebalancing, draining, a dead node's lease expiring), the old holder closes
+  the owner's links with close code 1012 and its event streams end like a repo's; daemons
+  reconnect (jittered backoff) and land on the new holder, which resumes them from the mirror's
+  newest `seq`, and browsers reconnect with `Last-Event-ID`. A command in flight holds the lease's
+  guard like any request, so the handoff waits for its reply (30 s at most).
+- The lease isn't released as idle while any of the owner's machines is connected to its holder.
+- Tested by `cluster.rs::an_owners_agents_follow_their_lease`.
 
 ## Work that isn't per repo
 

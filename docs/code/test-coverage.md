@@ -156,6 +156,23 @@ thing but not do it, 404 one who can't see it (docs/code/http-api.md).
 | `PUT /v1/code/owners/{owner}/billing` | 200, 400, 401, 403, 404 | `reviewer.rs::owner_reviewer_routes_answer_every_status`, `reviewer.rs::pricing_caps_allowances_and_byok` |
 | `GET /v1/code/owners/{owner}/usage` | 200, 400, 404 | `reviewer.rs::owner_reviewer_routes_answer_every_status`, `reviewer.rs::reviews_a_change_automatically_with_the_right_request`, `reviewer.rs::pricing_caps_allowances_and_byok` |
 
+### Agents (`agents/api.rs`, docs/code/agents.md)
+
+| Route | Statuses | Tests |
+| --- | --- | --- |
+| `POST /v1/code/agents/login` | 200, 400, 503 | `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/login/poll` | 200 (`pending`, `approved` once, `denied`, `expired`), 400 | `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/login/approve` | 204, 400, 401, 403, 404 | `agents.rs::device_login_hands_out_a_machine_token_once`, `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/login/deny` | 204, 401, 403, 404 | `agents.rs::denied_and_unknown_logins`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/connect` | 101, 400, 401; closes 4400 (protocol), 4401 (revoked), 4409 (replaced) | `agents.rs::the_link_refuses_other_tokens_and_protocols`, `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `agents.rs::records_are_mirrored_into_state_and_events`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/machines` | 200, 401, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/machines` | 201, 400, 401, 403, 404, 422 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `PATCH /v1/code/agents/{owner}/machines/{machine}` | 200, 400, 401, 403, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `DELETE /v1/code/agents/{owner}/machines/{machine}` | 204, 401, 403, 404 | `agents.rs::machines_are_managed_by_the_owner_and_revoking_closes_the_link`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `POST /v1/code/agents/{owner}/machines/{machine}/commands` | the daemon's `Reply`: 200; errors 400, 404, 409, 422, 502, 503 (`machine_offline`), 504 (`timeout`); 401, 403 | `agents.rs::commands_go_to_the_daemon_and_come_back`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/state` | 200, 400, 401, 404 | `agents.rs::records_are_mirrored_into_state_and_events`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+| `GET /v1/code/agents/{owner}/events` | 200 (SSE; `Last-Event-ID` / `?after=` catch up), 400, 401, 404, 429 | `agents.rs::records_are_mirrored_into_state_and_events`, `agents.rs::streams_and_daemons_resume_without_loss_or_duplicates`, `routes.rs::agents_routes_follow_the_auth_matrix` |
+
 ### Behaviours across routes
 
 | Behaviour | Tests |
@@ -786,6 +803,7 @@ directory, with `ClusterConfig::for_tests` timings (docs/code/cluster.md).
 | draining (SIGTERM) moves every repo off the node before it leaves, the health check fails meanwhile, and requests through the others never fail | `cluster.rs::draining_moves_every_repo_off_a_node_before_it_leaves` |
 | a rename keeps the repo on its owner; the old name answers 301 and git follows it, through any node | `cluster.rs::renaming_a_repo_keeps_its_owner` |
 | an event stream ends as soon as its repo starts moving, without holding the move up | `cluster.rs::an_event_stream_ends_when_its_repo_moves` |
+| an owner's agents run on the holder of `agents:<owner id>`: a machine's link through another node lands there, commands and event streams through a third node reach it; when the lease moves the link closes with 1012 and reconnects to the new holder, resuming from the mirror | `cluster.rs::an_owners_agents_follow_their_lease`, `code-control/src/cluster.rs::repo_scoped_paths_are_classified` |
 | health: 200 with the node's id while it holds its leases, 503 while it can't reach the database, 200 again after | `cluster.rs::health_follows_each_node` |
 | a landing on one node reaches a webhook within well under the 5 s poll when the forwarder runs on another node (Postgres `NOTIFY` in the landing's transaction; in-process on SQLite) | `cluster.rs::landings_on_one_node_wake_the_forwarder_on_another`, `code-sql/tests/backends.rs::listen_wakes_on_notify`, `code-sql/tests/backends.rs::listen_wakes_on_notify_after_commit_in_one_process` |
 | losing a repo drops its code index; deleting one (through a non-owner) removes the owner's index and deletes its lease row, which nobody takes back; a 404 takes no lease | `cluster.rs::moving_or_deleting_a_repo_leaves_no_index_or_lease_behind` |

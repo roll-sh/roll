@@ -397,7 +397,7 @@ impl Code {
         let repos = match self.cluster() {
             // In a cluster, the repos this node owns; the rest start on their owners, and a repo
             // taken over later starts when it's taken.
-            Some(c) => c.owned().into_iter().map(|(k, _)| k).filter(|k| !k.starts_with("singleton:")).collect(),
+            Some(c) => c.owned().into_iter().map(|(k, _)| k).filter(|k| crate::cluster::is_repo_key(k)).collect(),
             None => self.db.queued_repos()?,
         };
         for repo_id in repos {

@@ -1,0 +1,469 @@
+//! `/v1/code/agents`: device login, machines, the daemon link, the state snapshot, the event
+//! stream and commands (docs/code/http-api.md, "Agents").
+
+use super::store::{self, Filter};
+use crate::api::{Body, Q, stream_key};
+use crate::model::Owner;
+use crate::{Caller, Code, Error, Result, hash_token};
+use agent_proto::{CommandRequest, ErrorCode, LoginPoll, Mirrored, Reply, State as Snapshot, StreamEvent};
+use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::{Path, State};
+use axum::http::request::Parts;
+use axum::http::{StatusCode, header};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, patch, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::broadcast;
+
+type S = State<Arc<Code>>;
+
+/// Largest frame a daemon may send (an entities batch, a diff reply).
+pub const MAX_FRAME: usize = 16 << 20;
+/// Threads one client may ask detail for.
+const MAX_THREADS: usize = 200;
+
+pub fn routes() -> Router<Arc<Code>> {
+    Router::new()
+        .route("/v1/code/agents/login", post(login))
+        .route("/v1/code/agents/login/poll", post(poll))
+        .route("/v1/code/agents/connect", get(connect))
+        .route("/v1/code/agents/{owner}/login/approve", post(approve))
+        .route("/v1/code/agents/{owner}/login/deny", post(deny))
+        .route("/v1/code/agents/{owner}/machines", get(list_machines).post(add_machine))
+        .route("/v1/code/agents/{owner}/machines/{machine}", patch(rename_machine).delete(revoke_machine))
+        .route("/v1/code/agents/{owner}/machines/{machine}/commands", post(command))
+        .route("/v1/code/agents/{owner}/state", get(state))
+        .route("/v1/code/agents/{owner}/events", get(events))
+}
+
+// ── who may do what ──
+
+/// Reading an owner's agents (machines, state, events): the owner's tokens, agents included.
+/// Everyone else gets a 404, so they don't learn what's there.
+fn readable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
+    let o = code.owner_or_404(owner)?;
+    if !Code::owns(caller, &o.id) {
+        return Err(Error::NotFound(format!("owner {owner}")));
+    }
+    Ok(o)
+}
+
+/// Driving an owner's agents (commands): the owner's tokens, agents included.
+fn drivable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
+    let o = code.owner_or_404(owner)?;
+    match caller {
+        _ if Code::owns(caller, &o.id) => Ok(o),
+        Caller::Anonymous => Err(Error::Unauthorized),
+        _ => Err(Error::Forbidden(format!("not allowed to drive {owner}'s agents"))),
+    }
+}
+
+/// Adding, renaming and revoking machines: the owner, not its agents.
+fn manageable(code: &Code, caller: &Caller, owner: &str) -> Result<Owner> {
+    let o = code.owner_or_404(owner)?;
+    match caller {
+        _ if Code::manages(caller, &o.id) => Ok(o),
+        Caller::Anonymous => Err(Error::Unauthorized),
+        c if c.agent().is_some() => Err(Error::Forbidden(format!("agent tokens can't manage {owner}'s machines"))),
+        _ => Err(Error::Forbidden(format!("not allowed to manage {owner}'s machines"))),
+    }
+}
+
+/// A machine name: trimmed, one line, at most 64 characters.
+fn machine_name(v: Option<&Value>, default: &str) -> Result<String> {
+    let name = match v {
+        None | Some(Value::Null) => default.to_string(),
+        Some(Value::String(s)) => s.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(64).collect(),
+        Some(_) => return Err(Error::Invalid("name must be a string".into())),
+    };
+    if name.is_empty() {
+        return Err(Error::Invalid("name can't be empty".into()));
+    }
+    Ok(name)
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut b = vec![0u8; bytes];
+    getrandom::fill(&mut b).expect("system randomness");
+    hex::encode(b)
+}
+
+/// A machine token: `rlm_` and 48 hex characters.
+fn new_machine_token() -> String {
+    format!("rlm_{}", random_hex(24))
+}
+
+/// `XXXX-XXXX` from letters that can't spell words or be confused with each other.
+fn new_user_code() -> String {
+    const ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).expect("system randomness");
+    let s: String = b.iter().map(|x| ALPHABET[(*x as usize) % ALPHABET.len()] as char).collect();
+    format!("{}-{}", &s[..4], &s[4..])
+}
+
+/// A user code as typed: any case, with or without the dash.
+fn normalize_user_code(s: &str) -> String {
+    let s: String = s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_uppercase()).collect();
+    if s.len() == 8 { format!("{}-{}", &s[..4], &s[4..]) } else { s }
+}
+
+// ── device login ──
+
+async fn login(State(code): S, Body(b): Body) -> Result<Json<agent_proto::DeviceLogin>> {
+    let name = machine_name(b.get("name"), "machine")?;
+    for _ in 0..8 {
+        let device_code = format!("rld_{}", random_hex(32));
+        let user_code = new_user_code();
+        match store::create_login(code.db.sql(), &hash_token(&device_code), &user_code, &name)? {
+            store::NewLogin::Created => return Ok(Json(store::login_response(device_code, user_code, &code.config.web_url))),
+            store::NewLogin::CodeTaken => continue,
+            store::NewLogin::Full => return Err(Error::Unavailable("too many logins are waiting; try again shortly".into())),
+        }
+    }
+    Err(Error::Unavailable("couldn't pick a free login code; try again".into()))
+}
+
+async fn poll(State(code): S, Body(b): Body) -> Result<Json<LoginPoll>> {
+    let device_code = b.get("device_code").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| Error::Invalid("device_code is required".into()))?;
+    let minted = new_machine_token();
+    let machine_id = crate::new_id("mch");
+    let (mut poll, added) = store::poll_login(code.db.sql(), &hash_token(device_code), &machine_id, &hash_token(&minted))?;
+    if let LoginPoll::Approved { token: t, .. } = &mut poll {
+        *t = minted;
+    }
+    if let Some(m) = added {
+        let hub = code.agents.hub(&m.owner_id);
+        let _order = hub.order.lock().await;
+        code.publish_machine(&m);
+    }
+    Ok(Json(poll))
+}
+
+async fn approve(State(code): S, caller: Caller, Path(owner): Path<String>, Body(b): Body) -> Result<StatusCode> {
+    decide(&code, &caller, &owner, &b, true)
+}
+
+async fn deny(State(code): S, caller: Caller, Path(owner): Path<String>, Body(b): Body) -> Result<StatusCode> {
+    decide(&code, &caller, &owner, &b, false)
+}
+
+fn decide(code: &Code, caller: &Caller, owner: &str, b: &Value, approve: bool) -> Result<StatusCode> {
+    let o = manageable(code, caller, owner)?;
+    let user_code = b.get("user_code").and_then(Value::as_str).map(normalize_user_code).filter(|s| !s.is_empty()).ok_or_else(|| Error::Invalid("user_code is required".into()))?;
+    let name = match b.get("name") {
+        None | Some(Value::Null) => None,
+        v => Some(machine_name(v, "machine")?),
+    };
+    if !store::decide_login(code.db.sql(), &user_code, &o.id, approve, name.as_deref())? {
+        return Err(Error::NotFound(format!("login {user_code} (it may have expired)")));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── machines ──
+
+async fn list_machines(State(code): S, caller: Caller, Path(owner): Path<String>) -> Result<Json<Vec<agent_proto::Machine>>> {
+    let o = readable(&code, &caller, &owner)?;
+    Ok(Json(store::machines(code.db.sql(), &o.id)?.iter().map(|m| code.machine_json(m)).collect()))
+}
+
+/// "Add machine" in the dashboard: a machine and its token, at once (sandboxes and scripts).
+async fn add_machine(State(code): S, caller: Caller, Path(owner): Path<String>, Body(b): Body) -> Result<(StatusCode, Json<Value>)> {
+    let o = manageable(&code, &caller, &owner)?;
+    let name = machine_name(b.get("name"), "machine")?;
+    let minted = new_machine_token();
+    let hub = code.agents.hub(&o.id);
+    let _order = hub.order.lock().await;
+    match store::add_machine(code.db.sql(), &crate::new_id("mch"), &o.id, &name, &hash_token(&minted))? {
+        Some(m) => {
+            code.publish_machine(&m);
+            Ok((StatusCode::CREATED, Json(json!({ "machine": code.machine_json(&m), "token": minted }))))
+        }
+        None => Err(Error::Unprocessable(format!("{owner} has {} machines; remove one first", store::MAX_MACHINES))),
+    }
+}
+
+async fn rename_machine(State(code): S, caller: Caller, Path((owner, machine)): Path<(String, String)>, Body(b): Body) -> Result<Json<agent_proto::Machine>> {
+    let o = manageable(&code, &caller, &owner)?;
+    let name = machine_name(Some(b.get("name").unwrap_or(&Value::Null)).filter(|v| !v.is_null()), "")?;
+    let hub = code.agents.hub(&o.id);
+    let _order = hub.order.lock().await;
+    let m = store::rename_machine(code.db.sql(), &o.id, &machine, &name)?.ok_or_else(|| Error::NotFound(format!("machine {machine}")))?;
+    code.publish_machine(&m);
+    Ok(Json(code.machine_json(&m)))
+}
+
+/// Revoke a machine: its token stops working and its link closes now.
+async fn revoke_machine(State(code): S, caller: Caller, Path((owner, machine)): Path<(String, String)>) -> Result<StatusCode> {
+    let o = manageable(&code, &caller, &owner)?;
+    let hub = code.agents.hub(&o.id);
+    let _order = hub.order.lock().await;
+    let cursor = store::revoke_machine(code.db.sql(), &o.id, &machine)?.ok_or_else(|| Error::NotFound(format!("machine {machine}")))?;
+    code.agents.kick(&machine);
+    let _ = hub.events.send(Arc::new(StreamEvent::MachineRemoved { cursor, machine: agent_proto::MachineId(machine) }));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── the daemon's link ──
+
+/// `GET /v1/code/agents/connect`: a daemon's WebSocket. Only a machine token (`rlm_…`) opens it,
+/// looked up on every connect.
+async fn connect(
+    State(code): S,
+    headers: axum::http::HeaderMap,
+    ws: std::result::Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
+) -> Result<Response> {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, t)| t.trim());
+    let machine = match bearer {
+        Some(t) if t.starts_with("rlm_") => store::machine_by_token(code.db.sql(), &hash_token(t))?,
+        _ => None,
+    };
+    let Some(machine) = machine else { return Err(Error::Unauthorized) };
+    let ws = ws.map_err(|e| Error::Invalid(format!("expected a WebSocket upgrade: {e}")))?;
+    Ok(ws.max_message_size(MAX_FRAME).max_frame_size(MAX_FRAME).on_upgrade(move |socket| super::link::serve(code, machine, socket)).into_response())
+}
+
+// ── state and events ──
+
+#[derive(Deserialize)]
+struct ThreadsQuery {
+    threads: Option<String>,
+    /// Stream what changed after this cursor (the snapshot's), like `Last-Event-ID`.
+    after: Option<u64>,
+}
+
+fn filter(threads: Option<&str>) -> Result<Filter> {
+    let threads: Vec<String> = threads.unwrap_or("").split(',').map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).collect();
+    if threads.len() > MAX_THREADS {
+        return Err(Error::Invalid(format!("at most {MAX_THREADS} threads")));
+    }
+    Ok(Filter { threads })
+}
+
+async fn state(State(code): S, caller: Caller, Path(owner): Path<String>, Q(q): Q<ThreadsQuery>) -> Result<Json<Snapshot>> {
+    let o = readable(&code, &caller, &owner)?;
+    let filter = filter(q.threads.as_deref())?;
+    // The cursor first: anything newer that the snapshot also caught comes again on the stream,
+    // which is harmless (upserts).
+    let cursor = store::owner_cursor(code.db.sql(), &o.id)?;
+    let machines = store::machines(code.db.sql(), &o.id)?.iter().map(|m| code.machine_json(m)).collect();
+    let entities = store::snapshot(code.db.sql(), &o.id, &filter)?;
+    Ok(Json(Snapshot { cursor, machines, entities }))
+}
+
+/// Where a stream is.
+struct Stream {
+    code: Arc<Code>,
+    owner_id: String,
+    filter: Filter,
+    rx: broadcast::Receiver<Arc<StreamEvent>>,
+    /// The newest cursor sent (or skipped as already known).
+    high: u64,
+    /// Read the table after `high` before going on live.
+    catch_up: bool,
+    backlog: VecDeque<StreamEvent>,
+    _permit: crate::streams::Permit,
+}
+
+fn cursor_of(ev: &StreamEvent) -> Option<u64> {
+    match ev {
+        StreamEvent::Entity(m) => Some(m.cursor),
+        StreamEvent::Machine { cursor, .. } | StreamEvent::MachineRemoved { cursor, .. } => Some(*cursor),
+        StreamEvent::Delta { .. } => None,
+    }
+}
+
+fn kind_of(ev: &StreamEvent) -> &'static str {
+    match ev {
+        StreamEvent::Entity(_) => "entity",
+        StreamEvent::Machine { .. } => "machine",
+        StreamEvent::MachineRemoved { .. } => "machine_removed",
+        StreamEvent::Delta { .. } => "delta",
+    }
+}
+
+impl Stream {
+    fn wants(&self, ev: &StreamEvent) -> bool {
+        match ev {
+            StreamEvent::Entity(m) => self.filter.wants(&m.entity),
+            StreamEvent::Machine { .. } | StreamEvent::MachineRemoved { .. } => true,
+            StreamEvent::Delta { delta, .. } => match delta {
+                agent_proto::Delta::Text { thread, .. } | agent_proto::Delta::Output { thread, .. } => self.filter.threads.iter().any(|t| t == thread.as_str()),
+                agent_proto::Delta::Terminal { .. } => true,
+            },
+        }
+    }
+
+    /// One page of what changed after `high`, from the table, into the backlog.
+    fn read_page(&mut self) -> Result<()> {
+        let db = self.code.db.sql();
+        let (entities, more_entities) = store::entities_after(db, &self.owner_id, self.high, &self.filter)?;
+        let machines = store::machines_after(db, &self.owner_id, self.high)?;
+        let more_machines = machines.len() as i64 == store::PAGE;
+        let mut evs: Vec<StreamEvent> = entities.into_iter().map(|m: Mirrored| StreamEvent::Entity(Box::new(m))).collect();
+        for m in &machines {
+            evs.push(if m.revoked {
+                StreamEvent::MachineRemoved { cursor: m.cursor, machine: agent_proto::MachineId(m.id.clone()) }
+            } else {
+                StreamEvent::Machine { cursor: m.cursor, machine: self.code.machine_json(m) }
+            });
+        }
+        evs.sort_by_key(|e| cursor_of(e).unwrap_or(0));
+        // A full page ends where its last row is; the other table's rows past it come next time.
+        let limit = [more_entities, more_machines.then(|| machines.last().map_or(0, |m| m.cursor))].into_iter().flatten().min();
+        let mut high = self.high;
+        for ev in evs {
+            let c = cursor_of(&ev).unwrap_or(0);
+            if limit.is_some_and(|l| c > l) {
+                break;
+            }
+            high = high.max(c);
+            self.backlog.push_back(ev);
+        }
+        if let Some(l) = limit {
+            high = high.max(l);
+        }
+        self.high = high;
+        self.catch_up = limit.is_some();
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Option<StreamEvent> {
+        loop {
+            if let Some(ev) = self.backlog.pop_front() {
+                return Some(ev);
+            }
+            if self.catch_up {
+                if let Err(e) = self.read_page() {
+                    tracing::warn!(error = %e, "agents event stream: catching up");
+                    return None;
+                }
+                continue;
+            }
+            match self.rx.recv().await {
+                Ok(ev) => {
+                    if let Some(c) = cursor_of(&ev) {
+                        if c <= self.high {
+                            continue;
+                        }
+                        self.high = c;
+                    }
+                    if self.wants(&ev) {
+                        return Some((*ev).clone());
+                    }
+                }
+                // Missed some: the table has every durable one (deltas are only smoothness).
+                Err(broadcast::error::RecvError::Lagged(_)) => self.catch_up = true,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
+/// `GET /v1/code/agents/{owner}/events`: SSE. Durable events carry their cursor as `id:`; a
+/// reconnect with `Last-Event-ID` (or `?after=`) first gets everything after it from the table.
+async fn events(State(code): S, caller: Caller, parts: Parts, Path(owner): Path<String>, Q(q): Q<ThreadsQuery>) -> Result<Response> {
+    let o = readable(&code, &caller, &owner)?;
+    let filter = filter(q.threads.as_deref())?;
+    let last = parts.headers.get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+    let after = last.or(q.after);
+    let permit = match code.stream_permit(stream_key(&code, &caller, &parts)) {
+        Ok(p) => p,
+        Err(resp) => return Ok(*resp),
+    };
+    let rx = code.agents.hub(&o.id).events.subscribe();
+    let high = match after {
+        Some(a) => a,
+        None => store::owner_cursor(code.db.sql(), &o.id)?,
+    };
+    let s = Stream { code: code.clone(), owner_id: o.id, filter, rx, high, catch_up: after.is_some(), backlog: VecDeque::new(), _permit: permit };
+    let stream = futures::stream::unfold(s, |mut s| async move {
+        let ev = s.next().await?;
+        let mut sse = SseEvent::default().event(kind_of(&ev)).data(serde_json::to_string(&ev).unwrap_or_default());
+        if let Some(c) = cursor_of(&ev) {
+            sse = sse.id(c.to_string());
+        }
+        Some((Ok::<_, std::convert::Infallible>(sse), s))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))).into_response())
+}
+
+// ── commands ──
+
+/// `POST …/machines/{machine}/commands`: forward a command to the daemon and answer its reply.
+/// A daemon's error, the machine being offline or not answering are `Reply::Error`s too, with
+/// a status to match and `error` set.
+async fn command(State(code): S, caller: Caller, Path((owner, machine)): Path<(String, String)>, Body(b): Body) -> Result<Response> {
+    let o = drivable(&code, &caller, &owner)?;
+    let req: CommandRequest = serde_json::from_value(b).map_err(|e| Error::Invalid(format!("invalid command: {e}")))?;
+    if req.id.trim().is_empty() || req.id.len() > 128 {
+        return Err(Error::Invalid("id must be 1 to 128 characters".into()));
+    }
+    match store::machine(code.db.sql(), &machine)? {
+        Some(m) if m.owner_id == o.id && !m.revoked => {}
+        _ => return Err(Error::NotFound(format!("machine {machine}"))),
+    }
+    let by = match caller.agent() {
+        Some(a) => format!("agent:{a}"),
+        None => caller.identity().unwrap_or_else(|| "anonymous".into()),
+    };
+    let timeout = code.agents.command_timeout();
+    let reply = code.agents.command(&machine, req.id, by, req.command, timeout).await;
+    Ok(reply_response(reply))
+}
+
+pub(crate) fn reply_status(reply: &Reply) -> StatusCode {
+    match reply {
+        Reply::Error(e) => match e.code {
+            ErrorCode::NotFound => StatusCode::NOT_FOUND,
+            ErrorCode::Invalid => StatusCode::BAD_REQUEST,
+            ErrorCode::Conflict => StatusCode::CONFLICT,
+            ErrorCode::Provider => StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::MachineOffline => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            ErrorCode::Internal => StatusCode::BAD_GATEWAY,
+        },
+        _ => StatusCode::OK,
+    }
+}
+
+fn reply_response(reply: Reply) -> Response {
+    let status = reply_status(&reply);
+    let mut body = serde_json::to_value(&reply).unwrap_or(Value::Null);
+    if let Reply::Error(e) = &reply {
+        body["error"] = json!(e.message);
+    }
+    (status, Json(body)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_codes() {
+        let c = new_user_code();
+        assert_eq!(c.len(), 9);
+        assert_eq!(normalize_user_code(&c.to_lowercase().replace('-', "")), c);
+        assert_eq!(normalize_user_code(" bcdf-ghjk "), "BCDF-GHJK");
+    }
+
+    #[test]
+    fn statuses() {
+        assert_eq!(reply_status(&Reply::Ok), StatusCode::OK);
+        assert_eq!(reply_status(&super::super::error(ErrorCode::MachineOffline, "x")), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply_status(&super::super::error(ErrorCode::Timeout, "x")), StatusCode::GATEWAY_TIMEOUT);
+    }
+}

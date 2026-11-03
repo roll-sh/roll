@@ -2,6 +2,7 @@
 //! feed and the HTTP API (`/v1/code`, `/git`). Code itself lives in code-store; the git wire
 //! protocol is code-git. See docs/code/architecture.md and docs/code/http-api.md.
 
+pub mod agents;
 pub mod ai;
 pub mod api;
 pub mod broken;
@@ -409,6 +410,8 @@ pub struct Code {
     pub(crate) duties: cluster::Duties,
     /// One memory budget for every git request this node serves.
     pub git_budget: code_git::MemoryBudget,
+    /// roll code agents: connected machines, live event channels, commands in flight.
+    pub agents: agents::Agents,
 }
 
 /// The databases a [`Code`] runs on: code-store's, code-control's, and the cluster's tables
@@ -508,6 +511,7 @@ impl Code {
             cluster: std::sync::OnceLock::new(),
             duties: cluster::Duties::default(),
             git_budget,
+            agents: agents::Agents::default(),
         });
         code.clean_worktrees();
         code.clean_indexes();

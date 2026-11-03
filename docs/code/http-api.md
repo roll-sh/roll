@@ -537,6 +537,74 @@ GET    /v1/code/repos/{owner}/{repo}/statuses/{rev} → {changeset, git_commit, 
   (`$BUILDKITE_COMMIT`) and GitHub Actions-style runners (`$GITHUB_SHA`) all expose the commit.
   To trigger CI from roll, add a webhook for `push` (branches) and `landed` (main).
 
+## Agents
+
+roll code agents (docs/code/agents.md): machines running `roll agent up` connect out to the relay,
+which mirrors their records so the canvas loads a snapshot and streams what changes, and forwards
+commands to them. The wire types are `agent_proto` (Rust) and `apps/dashboard/src/lib/agents-api.ts`;
+times in these shapes are **milliseconds** (`Millis`), unlike the rest of this API.
+
+```
+POST /v1/code/agents/login {name?} → DeviceLogin {device_code /* rld_… */, user_code /* "BCDF-GHJK" */,
+       verification_uri /* {web}/dashboard/agents/connect?code=… */, interval: 5, expires_in: 900}
+       No caller needed. 503 (Retry-After) while 10,000 logins are waiting.
+POST /v1/code/agents/login/poll {device_code} → LoginPoll
+       {status: "pending"} | {status: "approved", token /* rlm_…, handed out once */, machine /* mch_… */, owner}
+       | {status: "denied"} | {status: "expired"} /* also for an unknown code and after the token was handed out */
+POST /v1/code/agents/{owner}/login/approve {user_code /* any case, dash optional */, name?} → 204
+POST /v1/code/agents/{owner}/login/deny {user_code} → 204
+       Both need Code::manages (the owner or admin, not agent tokens); 404 when no pending login has the code.
+
+GET    /v1/code/agents/{owner}/machines → [Machine]   oldest first; owner's tokens (agents too), else 404
+POST   /v1/code/agents/{owner}/machines {name?} → 201 {machine: Machine, token /* rlm_…, shown once */}
+       ("Add machine", sandboxes); 422 past 200 machines
+PATCH  /v1/code/agents/{owner}/machines/{machine} {name} → Machine
+DELETE /v1/code/agents/{owner}/machines/{machine} → 204: the token stops working, the live link closes now
+       (close code 4401), the machine's mirrored records are dropped, and streams get machine_removed.
+       POST, PATCH and DELETE need Code::manages: 401 anonymous, 403 agent tokens and other owners.
+
+Machine = {id, name, online: bool /* its link is up */, info?: MachineInfo /* from its last hello */,
+           sandbox?: SandboxInfo, created_at, last_seen?}
+           A name is trimmed, one line, 1–64 characters.
+
+GET /v1/code/agents/{owner}/state?threads=thr_a,thr_b → State {cursor, machines: [Machine], entities: [Mirrored]}
+       Mirrored = {cursor, machine, entity: Entity}. The shell (projects, threads, runs, requests,
+       terminals) always; detail (nodes, checkpoints) only for the listed threads (at most 200).
+       Tombstones aren't in the snapshot. Owner's tokens (agents too), else 404.
+GET /v1/code/agents/{owner}/events?threads=…&after=<cursor> → SSE, events named by their `type`:
+       event: entity           id: <cursor>   data: {type: "entity", cursor, machine, entity}
+       event: machine          id: <cursor>   data: {type: "machine", cursor, machine: Machine}
+       event: machine_removed  id: <cursor>   data: {type: "machine_removed", cursor, machine: mch_…}
+       event: delta            (no id)        data: {type: "delta", machine, delta: Delta}
+       Load /state, then open /events?after=<state.cursor>: a snapshot plus everything with a newer
+       cursor is complete. A reconnect with Last-Event-ID (EventSource sends it) first gets what
+       changed since, from the mirror (each record once, at its newest), then goes on live; cursors
+       only ascend. Without either, only what happens from now on. `entity` events include tombstones
+       ({kind: "removed", entity, id, thread?}). Text and output deltas only for the listed threads;
+       terminal deltas always. Deltas are never replayed. Stream limits as for repo events (429).
+
+POST /v1/code/agents/{owner}/machines/{machine}/commands CommandRequest {id, command: Command} → Reply
+       Forwarded to the machine's daemon; waits up to 30 s for its reply. `id` (1–128 characters) is
+       the idempotency key: retrying with the same id never runs the command twice (the daemon keeps
+       receipts), a retry while the first waits shares its reply, and a link that drops and comes back
+       within the wait gets the command again. Owner's tokens, agent tokens too (401 anonymous, 403
+       others; 404 an unknown or revoked machine). The daemon is told who sent it: the owner's name,
+       `agent:<name>`, or `admin`.
+       200 with the Reply, or Reply.Error {type: "error", code, message, error /* = message */} with
+       not_found 404, invalid 400, conflict 409, provider 422, internal 502,
+       machine_offline 503 (not connected), timeout 504 (no reply in time).
+
+GET /v1/code/agents/connect    the daemon's WebSocket (Authorization: Bearer rlm_…; only machine tokens,
+       looked up on every connect: 401 otherwise, 400 without an upgrade). Text frames of
+       DaemonFrame / RelayFrame JSON: hello → welcome {machine, owner, resume_from}, entities → ack,
+       delta, command → reply, ping/pong (every 20 s; 60 s of silence closes). Frames up to 16 MiB.
+       Close codes: 4400 protocol error (wrong version, no hello), 4401 revoked (stop, don't retry),
+       4409 replaced by a newer link of the same machine, 1012 reconnect (the owner moved nodes).
+```
+
+In a cluster every `/v1/code/agents/{owner}/…` request and every machine link of the owner run on the
+node holding the lease `agents:<owner id>` (docs/code/cluster.md).
+
 ## MCP
 
 `/v1/code/mcp` is an MCP server (Streamable HTTP, JSON-RPC 2.0) whose tools call this API on the

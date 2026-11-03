@@ -10,7 +10,9 @@
 //!   (`/v1/code/changes/{id}/…`, `/v1/code/threads/{id}/…`, `/v1/code/work/{id}/…`) is
 //!   dispatched by the repo's id, so a rename keeps its owner. The guard of a local request
 //!   lives as long as its response body (git packs, event streams); an event stream ends when
-//!   the repo starts moving, and its client reconnects to the new owner.
+//!   the repo starts moving, and its client reconnects to the new owner. An owner's agents
+//!   (`/v1/code/agents/{owner}/…` and its machines' links) are routed the same way by the lease
+//!   `agents:<owner id>`; losing it closes the links so daemons reconnect to the new holder.
 //! - **Duties**: on `Acquired`, the node forgets what it cached about the repo and resumes its
 //!   work from the database (merge queue, reviewer jobs, GitHub import or mirror, the code index;
 //!   code-preview's checks and previews through [`Code::subscribe_ownership`]). On `Lost` it
@@ -135,17 +137,31 @@ async fn follow_ownership(code: Weak<Code>, mut rx: mpsc::UnboundedReceiver<Owne
     while let Some(ev) = rx.recv().await {
         let Some(code) = code.upgrade() else { return };
         match ev {
-            Ownership::Acquired { key, epoch } if !key.starts_with("singleton:") => {
+            // An owner's agents moved away: its daemons reconnect, and land on the new node.
+            Ownership::Lost { key } if key.starts_with(AGENTS_KEY) => {
+                tracing::debug!(key = %key, "gave an owner's agents up");
+                code.agents.kick_owner(&key[AGENTS_KEY.len()..]);
+            }
+            Ownership::Acquired { key, epoch } if is_repo_key(&key) => {
                 tracing::debug!(repo = %key, epoch, "took a repo");
                 code.acquired(&key);
             }
-            Ownership::Lost { key } if !key.starts_with("singleton:") => {
+            Ownership::Lost { key } if is_repo_key(&key) => {
                 tracing::debug!(repo = %key, "gave a repo up");
                 code.lost(&key);
             }
             _ => {}
         }
     }
+}
+
+/// The lease of an owner's agents (`agents:<owner id>`): its `/v1/code/agents/{owner}/…` requests
+/// and its machines' links run on the node holding it.
+pub(crate) const AGENTS_KEY: &str = "agents:";
+
+/// Whether a lease key is a repo's (not a singleton's or an owner's agents).
+pub(crate) fn is_repo_key(key: &str) -> bool {
+    !key.starts_with("singleton:") && !key.starts_with(AGENTS_KEY)
 }
 
 impl Code {
@@ -193,6 +209,10 @@ impl Code {
     /// jobs, checks queued or running, previews running, promised webhook events, or a GitHub
     /// connection (its mirror). On any doubt (an error), busy.
     pub(crate) fn repo_busy(&self, repo_id: &str) -> bool {
+        // An owner's agents stay while any of its machines is connected here.
+        if let Some(owner) = repo_id.strip_prefix(AGENTS_KEY) {
+            return self.agents.connected_owners().iter().any(|o| o == owner);
+        }
         let r = match self.db.repo_by_id(repo_id) {
             Ok(Some(r)) => r,
             // Deleted: nothing to keep.
@@ -256,7 +276,7 @@ impl Code {
         let mut watchers = self.duties.watchers.lock();
         if let Some(c) = self.cluster() {
             for (k, _) in c.owned() {
-                if !k.starts_with("singleton:") {
+                if is_repo_key(&k) {
                     let _ = tx.send(RepoOwnership::Acquired(k));
                 }
             }
@@ -377,7 +397,7 @@ impl Code {
     /// Reviewer jobs that may run now, of the repos this node owns.
     pub(crate) fn due_ai_jobs_here(&self, n: usize) -> Result<Vec<crate::ai::store::Job>> {
         let Some(c) = self.cluster() else { return Ok(self.db.due_ai_jobs(n)?) };
-        let repos: Vec<String> = c.owned().into_iter().map(|(k, _)| k).filter(|k| !k.starts_with("singleton:")).collect();
+        let repos: Vec<String> = c.owned().into_iter().map(|(k, _)| k).filter(|k| is_repo_key(k)).collect();
         let mut out = Vec::new();
         for chunk in repos.chunks(200) {
             let marks = vec!["?"; chunk.len()].join(", ");
@@ -408,7 +428,7 @@ impl Code {
     /// Jobs of the repos this node owns whose claim lapsed (their node stopped renewing it).
     pub(crate) fn requeue_lapsed_ai_jobs_here(&self) -> Result<usize> {
         let Some(c) = self.cluster() else { return Ok(self.db.requeue_lapsed_ai_jobs(None)?) };
-        let repos: Vec<String> = c.owned().into_iter().map(|(k, _)| k).filter(|k| !k.starts_with("singleton:")).collect();
+        let repos: Vec<String> = c.owned().into_iter().map(|(k, _)| k).filter(|k| is_repo_key(k)).collect();
         if repos.is_empty() {
             return Ok(0);
         }
@@ -519,7 +539,19 @@ impl Code {
             Target::Change(id) => one("SELECT repo_id FROM changes WHERE id = ?", id),
             Target::Thread(id) => one("SELECT repo_id FROM review_threads WHERE id = ?", id),
             Target::Work(id) => one("SELECT repo_id FROM work_items WHERE id = ?", id),
+            Target::Agents(owner) => self.db.owner(owner).ok().flatten().map(|o| format!("{AGENTS_KEY}{}", o.id)),
         }
+    }
+
+    /// A daemon's link (`GET /v1/code/agents/connect`) runs where its owner's agents are: the
+    /// machine token says whose it is (looked up, like every connect).
+    fn agent_link_key(&self, req: &Request) -> Option<String> {
+        if req.uri().path() != "/v1/code/agents/connect" {
+            return None;
+        }
+        let bearer = req.headers().get(header::AUTHORIZATION)?.to_str().ok()?.split_once(' ')?.1.trim();
+        let m = crate::agents::store::machine_by_token(self.db.sql(), &crate::hash_token(bearer)).ok().flatten()?;
+        Some(format!("{AGENTS_KEY}{}", m.owner_id))
     }
 
     /// `GET /v1/code/health`: whether this node can serve (the database answers; in a cluster,
@@ -530,7 +562,7 @@ impl Code {
         let database = matches!(db, Ok(Ok(Ok(_))));
         let draining = self.duties.draining.load(std::sync::atomic::Ordering::SeqCst);
         let cluster = self.cluster().map(|c| {
-            let repos = c.owned().iter().filter(|(k, _)| !k.starts_with("singleton:")).count();
+            let repos = c.owned().iter().filter(|(k, _)| is_repo_key(k)).count();
             json!({ "node": c.node_id(), "healthy": c.is_healthy(), "draining": draining, "nodes": c.nodes().len(), "repos": repos })
         });
         let ok = database && !draining && self.cluster().is_none_or(|c| c.is_healthy());
@@ -551,6 +583,8 @@ enum Target {
     Change(String),
     Thread(String),
     Work(String),
+    /// An owner's agents (`/v1/code/agents/{owner}/…`).
+    Agents(String),
 }
 
 fn decode(s: &str) -> String {
@@ -565,6 +599,8 @@ fn classify(path: &str) -> Option<Target> {
         ["v1", "code", "changes", id, ..] => Target::Change(decode(id)),
         ["v1", "code", "threads", id, ..] => Target::Thread(decode(id)),
         ["v1", "code", "work", id, ..] => Target::Work(decode(id)),
+        // `login/poll` is global (and `login` a reserved owner name).
+        ["v1", "code", "agents", owner, _, ..] if *owner != "login" => Target::Agents(decode(owner)),
         ["git", owner, repo, ..] => {
             let repo = decode(repo);
             Target::Repo(decode(owner), repo.strip_suffix(".git").unwrap_or(&repo).to_string())
@@ -573,7 +609,7 @@ fn classify(path: &str) -> Option<Target> {
     };
     match &t {
         Target::Repo(o, r) if o.is_empty() || r.is_empty() => None,
-        Target::Change(id) | Target::Thread(id) | Target::Work(id) if id.is_empty() => None,
+        Target::Change(id) | Target::Thread(id) | Target::Work(id) | Target::Agents(id) if id.is_empty() => None,
         _ => Some(t),
     }
 }
@@ -589,7 +625,8 @@ fn classify(path: &str) -> Option<Target> {
 /// is moving belongs (views of the live nodes converge within a heartbeat).
 pub(crate) async fn route(State(code): State<Arc<Code>>, req: Request, next: Next) -> Response {
     let Some(cluster) = code.cluster().cloned() else { return next.run(req).await };
-    let Some(key) = classify(req.uri().path()).and_then(|t| code.route_key(&t)) else { return next.run(req).await };
+    let key = code.agent_link_key(&req).or_else(|| classify(req.uri().path()).and_then(|t| code.route_key(&t)));
+    let Some(key) = key else { return next.run(req).await };
     if let Some(from) = req.extensions().get::<code_cluster::Forwarded>().map(|f| f.node.clone()) {
         // Never send a request back where it came from: the two nodes disagree about the repo
         // right now. Unavailable makes the first node try again shortly.
@@ -807,8 +844,14 @@ mod tests {
         assert_eq!(classify("/v1/code/changes/chg_1"), Some(Target::Change("chg_1".into())));
         assert_eq!(classify("/v1/code/threads/th_1/resolve"), Some(Target::Thread("th_1".into())));
         assert_eq!(classify("/v1/code/work/wi_1/heartbeat"), Some(Target::Work("wi_1".into())));
+        assert_eq!(classify("/v1/code/agents/acme/events"), Some(Target::Agents("acme".into())));
+        assert_eq!(classify("/v1/code/agents/acme/machines/mch_1/commands"), Some(Target::Agents("acme".into())));
         for global in [
             "/v1/code",
+            "/v1/code/agents/login",
+            "/v1/code/agents/login/poll",
+            "/v1/code/agents/connect",
+            "/v1/code/agents//state",
             "/v1/code/repos",
             "/v1/code/repos/acme",
             "/v1/code/repos//x",

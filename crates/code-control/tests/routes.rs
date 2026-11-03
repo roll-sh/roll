@@ -498,3 +498,71 @@ async fn github_webhook_statuses() {
     assert_eq!(a.send(hook("ping", "d-3", ping, SECRET)).await.status(), OK);
     assert_eq!(a.send(hook("ping", "d-3", ping, SECRET)).await.status(), OK, "a redelivery");
 }
+
+/// The agents routes (`agents/api.rs`) for every kind of caller. Reads (machines, state, events)
+/// are the owner's tokens' (agents included) and 404 to everyone else; commands are the owner's
+/// tokens' too, 403/401 for others; managing machines and approving logins is the owner's, not
+/// its agents'. Starting and polling a login look at no caller; bad tokens, machine tokens
+/// included, are 401 everywhere else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agents_routes_follow_the_auth_matrix() {
+    let w = world().await;
+    let a = &w.a;
+    let (s, m) = a.req("POST", "/v1/code/agents/acme/machines", Some(json!({ "name": "box" })), Some(ADMIN)).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let mid = m["machine"]["id"].as_str().unwrap().to_string();
+    let machine = m["token"].as_str().unwrap().to_string();
+    let base = "/v1/code/agents/acme";
+    let body = json!({ "name": "x", "user_code": "BCDF-GHJK", "id": "c1", "command": { "type": "provider.refresh" } });
+    let reads = [format!("{base}/machines"), format!("{base}/state"), format!("{base}/events")];
+    let command = format!("{base}/machines/{mid}/commands");
+    let manages = [
+        ("POST", format!("{base}/machines")),
+        ("PATCH", format!("{base}/machines/{mid}")),
+        ("DELETE", format!("{base}/machines/{mid}")),
+        ("POST", format!("{base}/login/approve")),
+        ("POST", format!("{base}/login/deny")),
+    ];
+    let (acme, agent, other, app_in) = (Some(w.acme.as_str()), Some(w.agent.as_str()), Some(w.other.as_str()), Some(w.app_in.as_str()));
+    let denied = StatusCode::UNAUTHORIZED;
+    for (who, who_token, read, drive) in [
+        ("admin", Some(ADMIN), OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("owner", acme, OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("agent", agent, OK, StatusCode::SERVICE_UNAVAILABLE),
+        ("review app", app_in, NOT_FOUND, FORBIDDEN),
+        ("another owner", other, NOT_FOUND, FORBIDDEN),
+        ("anonymous", None, NOT_FOUND, denied),
+    ] {
+        for p in &reads {
+            assert_eq!(call(a, "GET", p, None, who_token).await, read, "{who}: GET {p}");
+        }
+        // The machine isn't connected: allowed callers get its `machine_offline`.
+        assert_eq!(call(a, "POST", &command, Some(&body), who_token).await, drive, "{who}: POST {command}");
+    }
+    for (who, who_token, want) in [("agent", agent, FORBIDDEN), ("review app", app_in, FORBIDDEN), ("another owner", other, FORBIDDEN), ("anonymous", None, denied)] {
+        for (m, p) in &manages {
+            assert_eq!(call(a, m, p, Some(&body), who_token).await, want, "{who}: {m} {p}");
+        }
+    }
+    for bad in ["rlc_0000", "rla_0000", "hunter2", w.revoked.as_str(), machine.as_str()] {
+        let all = reads.iter().map(|p| ("GET", p.clone())).chain([("POST", command.clone())]).chain(manages.iter().cloned());
+        for (m, p) in all {
+            assert_eq!(call(a, m, &p, Some(&body), Some(bad)).await, denied, "{bad}: {m} {p}");
+        }
+        assert_eq!(call(a, "POST", "/v1/code/agents/login", None, Some(bad)).await, OK);
+        assert_eq!(call(a, "POST", "/v1/code/agents/login/poll", Some(&json!({ "device_code": "rld_x" })), Some(bad)).await, OK);
+    }
+    // The owner manages (an unknown login code is a 404 after the check).
+    for (m, p) in &manages {
+        let want = match (*m, p.as_str()) {
+            ("POST", p) if p.ends_with("/machines") => StatusCode::CREATED,
+            ("PATCH", _) => OK,
+            ("DELETE", _) => StatusCode::NO_CONTENT,
+            _ => NOT_FOUND,
+        };
+        assert_eq!(call(a, m, p, Some(&body), acme).await, want, "owner: {m} {p}");
+    }
+    // The link: only machine tokens.
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, acme).await, denied);
+    assert_eq!(call(a, "GET", "/v1/code/agents/connect", None, None).await, denied);
+}
