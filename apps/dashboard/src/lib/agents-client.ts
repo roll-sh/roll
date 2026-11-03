@@ -41,12 +41,14 @@ export function httpTransport(owner: string, api: AgentsApi = agentsApi): Agents
   return {
     state: (threads) => api.state(owner, threads),
     stream: (threads, after, on, onOpen) =>
-      streamSse(api.eventsUrl(owner, threads), {
+      // `after=` and Last-Event-ID carry the same cursor: the newest this client has applied.
+      streamSse(() => api.eventsUrl(owner, threads, after()), {
         headers: () => {
           const c = after();
           return { ...api.authHeaders(), ...(c > 0 ? { "last-event-id": String(c) } : {}) };
         },
         onOpen,
+        fetch: api.fetch,
         onEvent: (e) => {
           let ev: StreamEvent;
           try {

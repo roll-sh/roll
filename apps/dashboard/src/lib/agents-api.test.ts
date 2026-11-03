@@ -17,7 +17,9 @@ import {
   type Command,
   type CommandType,
   type Entity,
+  type StreamEvent,
 } from "./agents-api";
+import { httpTransport } from "./agents-client";
 import { decode, type Decoder } from "./decode";
 
 const DIR = join(__dirname, "..", "..", "..", "..", "crates", "agent-proto", "fixtures");
@@ -155,7 +157,57 @@ describe("agents api", () => {
 
   it("asks for the detail of the threads it follows", () => {
     const api = createAgentsApi("http://roll.test");
-    expect(api.eventsUrl("acme", ["thr_a", "thr_b"])).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a,thr_b");
+    expect(api.eventsUrl("acme", ["thr_a", "thr_b"], 42)).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a,thr_b&after=42");
     expect(api.eventsUrl("acme")).toBe("http://roll.test/v1/code/agents/acme/events");
+  });
+
+  it("approves and denies device logins for an owner", async () => {
+    const calls: [string, unknown][] = [];
+    const api = createAgentsApi("http://roll.test", undefined, undefined, (async (url: string, init?: RequestInit) => {
+      calls.push([url, init?.body ? JSON.parse(String(init.body)) : null]);
+      return new Response(null, { status: 204 });
+    }) as typeof fetch);
+    await api.approveLogin("acme", "WXYZ-2345", "ada-mbp");
+    await api.denyLogin("acme", "BCDF-GHJK");
+    expect(calls).toEqual([
+      ["http://roll.test/v1/code/agents/acme/login/approve", { user_code: "WXYZ-2345", name: "ada-mbp" }],
+      ["http://roll.test/v1/code/agents/acme/login/deny", { user_code: "BCDF-GHJK" }],
+    ]);
+  });
+
+  it("streams events over HTTP and resumes after the newest cursor", async () => {
+    const stream = load("stream.json") as StreamEvent[];
+    const urls: string[] = [];
+    const lastIds: (string | undefined)[] = [];
+    let n = 0;
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      urls.push(url);
+      lastIds.push((init?.headers as Record<string, string>)["last-event-id"]);
+      if (n++ > 0) return new Promise<Response>(() => {});
+      const body = stream
+        .map((e) => `event: ${e.type}\n${"cursor" in e ? `id: ${e.cursor}\n` : ""}data: ${JSON.stringify(e)}\n\n`)
+        .concat("event: entity\nid: 99\ndata: {\"type\":\"entity\",\"kind\":\"galaxy\"}\n\n")
+        .join("");
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+    const api = createAgentsApi("http://roll.test", "rlc_x", undefined, fetcher);
+    let cursor = 5;
+    const seen: (string | number | null)[] = [];
+    const stop = httpTransport("acme", api).stream(
+      ["thr_a"],
+      () => cursor,
+      (ev, id) => {
+        seen.push(ev.type, id);
+        if (id !== null) cursor = id;
+      },
+      () => {},
+    );
+    await vi.waitFor(() => expect(urls).toHaveLength(2), { timeout: 3000 });
+    stop();
+    // Every known event decoded (the unknown one dropped), ids are cursors, deltas have none.
+    expect(seen).toEqual(["entity", 7, "machine", 8, "machine_removed", 9, "delta", null]);
+    expect(urls[0]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=5");
+    expect(urls[1]).toBe("http://roll.test/v1/code/agents/acme/events?threads=thr_a&after=9");
+    expect(lastIds).toEqual(["5", "9"]);
   });
 });

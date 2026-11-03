@@ -32,7 +32,7 @@ export const SESSION_H = 760;
 
 /** A thread opened in place: transcript, composer, diff and actions, as one canvas card. */
 export function ThreadSession({ thread, machine }: { thread: Thread; machine: Machine | undefined }) {
-  const { client, setExpanded } = useAgents();
+  const { client, setExpanded, focus } = useAgents();
   const data = client.data;
   const providers = providersFor(data, machine?.id);
   const runs = runsOf(data, thread.id);
@@ -52,6 +52,16 @@ export function ThreadSession({ thread, machine }: { thread: Thread; machine: Ma
   }, [busy]);
 
   const [diffFor, setDiffFor] = useState<string | null | undefined>(undefined);
+  // The card widens or narrows with the diff: bring all of it back into view.
+  const diffOpen = diffFor !== undefined;
+  const firstDiff = useRef(true);
+  useEffect(() => {
+    if (firstDiff.current) {
+      firstDiff.current = false;
+      return;
+    }
+    focus(`t:${thread.id}`);
+  }, [diffOpen, focus, thread.id]);
   const [error, setError] = useState<string | null>(null);
   const run = async (fn: () => Promise<unknown>) => {
     setError(null);

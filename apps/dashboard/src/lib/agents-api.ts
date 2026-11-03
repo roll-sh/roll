@@ -939,20 +939,15 @@ export interface MintedMachine {
   token: string;
 }
 
-/** A device login waiting for the signed-in user (what `/dashboard/agents/connect` shows). */
-export interface PendingLogin {
-  user_code: string;
-  /** What the CLI said about the machine, when it said. */
-  hostname: string | null;
-  os: string | null;
-  expires_at: Millis;
-}
-
-const pendingLoginD = obj<PendingLogin>({ user_code: str, hostname: opt(str), os: opt(str), expires_at: int });
-
 const enc = encodeURIComponent;
 const ag = (owner: string) => `/v1/code/agents/${enc(owner)}`;
-const threadsQs = (threads: readonly string[]) => (threads.length ? `?threads=${threads.map(enc).join(",")}` : "");
+const query = (q: Record<string, string | undefined>) => {
+  const parts = Object.entries(q)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}=${v}`);
+  return parts.length ? `?${parts.join("&")}` : "";
+};
+const threadsParam = (threads: readonly string[]) => (threads.length ? threads.map(enc).join(",") : undefined);
 
 /** Network failures and 5xx/408/429 are worth retrying with the same command id. */
 function retryable(e: unknown) {
@@ -1001,8 +996,13 @@ export function createAgentsApi(
 
   return {
     authHeaders,
-    state: async (owner: string, threads: readonly string[] = []) => decode(stateD, await call("GET", `${ag(owner)}/state${threadsQs(threads)}`)),
-    eventsUrl: (owner: string, threads: readonly string[] = []) => `${base}${ag(owner)}/events${threadsQs(threads)}`,
+    /** The fetch this client uses (the event stream follows it too). */
+    fetch: doFetch,
+    state: async (owner: string, threads: readonly string[] = []) =>
+      decode(stateD, await call("GET", `${ag(owner)}/state${query({ threads: threadsParam(threads) })}`)),
+    /** The event stream after `after` (a snapshot's cursor); reconnects also send Last-Event-ID. */
+    eventsUrl: (owner: string, threads: readonly string[] = [], after?: number) =>
+      `${base}${ag(owner)}/events${query({ threads: threadsParam(threads), after: after ? String(after) : undefined })}`,
     /**
      * Run a command on a machine. The request id is the idempotency key, so a dropped connection
      * or a 5xx is retried with the same id (the daemon replays its stored reply).
@@ -1017,8 +1017,9 @@ export function createAgentsApi(
         }
       }
     },
-    addMachine: async (owner: string, name: string) => {
-      const r = (await call("POST", `${ag(owner)}/machines`, { name })) as { machine: unknown; token: string };
+    machines: async (owner: string) => decode(array(machineD), await call("GET", `${ag(owner)}/machines`)),
+    addMachine: async (owner: string, name?: string) => {
+      const r = (await call("POST", `${ag(owner)}/machines`, name ? { name } : {})) as { machine: unknown; token: string };
       return { machine: decode(machineD, r.machine), token: str(r.token, "token", { strict: false }) } satisfies MintedMachine;
     },
     renameMachine: async (owner: string, machine: MachineId, name: string) =>
@@ -1026,12 +1027,12 @@ export function createAgentsApi(
     removeMachine: async (owner: string, machine: MachineId) => {
       await call("DELETE", `${ag(owner)}/machines/${enc(machine)}`);
     },
-    pendingLogin: async (code: string) => decode(pendingLoginD, await call("GET", `/v1/code/agents/login/${enc(code)}`)),
-    approveLogin: async (code: string, owner: string) => {
-      await call("POST", `/v1/code/agents/login/${enc(code)}/approve`, { owner });
+    /** Approve `roll agent login`'s code for `owner` (404: no pending login has it). */
+    approveLogin: async (owner: string, userCode: string, name?: string) => {
+      await call("POST", `${ag(owner)}/login/approve`, { user_code: userCode, ...(name ? { name } : {}) });
     },
-    denyLogin: async (code: string) => {
-      await call("POST", `/v1/code/agents/login/${enc(code)}/deny`);
+    denyLogin: async (owner: string, userCode: string) => {
+      await call("POST", `${ag(owner)}/login/deny`, { user_code: userCode });
     },
   };
 }

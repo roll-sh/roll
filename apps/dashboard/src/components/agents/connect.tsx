@@ -4,8 +4,8 @@ import { HorizonMark, RollMark } from "@roll/brand";
 import { Check, KeyRound, Laptop } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { agentsApi, type MintedMachine, type PendingLogin } from "@/lib/agents-api";
-import { codeApi, type Owner } from "@/lib/code-api";
+import { agentsApi, type MintedMachine } from "@/lib/agents-api";
+import { ApiError, codeApi, type Owner } from "@/lib/code-api";
 import { btn, CopyButton, ErrorNote, input, Panel, primary, useCopy } from "../ui";
 
 /** Owners the signed-in caller can connect machines to: itself, or every owner for the admin. */
@@ -50,41 +50,36 @@ export function ConnectAgents({ code }: { code?: string }) {
 
 function Approve({ code }: { code: string }) {
   const { owners, error: ownersError } = useOwners();
-  const [pending, setPending] = useState<PendingLogin | null>(null);
   const [owner, setOwner] = useState<string>("");
-  const [state, setState] = useState<"loading" | "ready" | "approving" | "approved" | "denied" | "gone">("loading");
+  const [name, setName] = useState("");
+  const [state, setState] = useState<"ready" | "approving" | "approved" | "denied" | "gone">("ready");
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    agentsApi
-      .pendingLogin(code)
-      .then((p) => {
-        if (!live) return;
-        setPending(p);
-        setState("ready");
-      })
-      .catch((e: Error & { status?: number }) => {
-        if (!live) return;
-        if (e.status === 404 || e.status === 410) setState("gone");
-        else {
-          setError(e.message);
-          setState("ready");
-        }
-      });
-    return () => {
-      live = false;
-    };
-  }, [code]);
   useEffect(() => {
     if (owners?.length && !owner) setOwner(owners[0]);
   }, [owners, owner]);
 
+  const act = async (approve: boolean) => {
+    setState(approve ? "approving" : "ready");
+    setError(null);
+    try {
+      if (approve) await agentsApi.approveLogin(owner, code, name.trim() || undefined);
+      else await agentsApi.denyLogin(owner, code);
+      setState(approve ? "approved" : "denied");
+    } catch (e) {
+      // 404: no login is waiting with this code (it expired, or was used).
+      if (e instanceof ApiError && e.status === 404) setState("gone");
+      else {
+        setError(e instanceof Error ? e.message : String(e));
+        setState("ready");
+      }
+    }
+  };
+
   if (state === "gone")
     return (
-      <Panel title="This code has expired">
+      <Panel title="This code isn't waiting any more">
         <p className="px-5 py-4 text-[13px] text-muted">
-          Codes last ten minutes. Run <code className="font-mono text-fg">roll agent login</code> again on the machine.
+          It expired or was already used. Run <code className="font-mono text-fg">roll agent login</code> again on the machine.
         </p>
       </Panel>
     );
@@ -95,8 +90,8 @@ function Approve({ code }: { code: string }) {
           <RollMark size={56} state="success" />
           <div className="space-y-2 text-[13px]">
             <p>
-              <span className="font-medium">{pending?.hostname ?? "The machine"}</span> is signed in to <span className="font-mono">{owner}</span>. Start it with{" "}
-              <code className="font-mono">roll agent up</code> and it appears on the canvas.
+              The machine is signed in to <span className="font-mono">{owner}</span>. Start it with <code className="font-mono">roll agent up</code> and it appears on the
+              canvas.
             </p>
             <Link href={`/dashboard/agents?owner=${encodeURIComponent(owner)}`} className="text-accent hover:underline">
               Open the canvas
@@ -117,53 +112,31 @@ function Approve({ code }: { code: string }) {
       <div className="space-y-4 px-5 py-4">
         <div className="flex items-center gap-3">
           <Laptop className="size-5 text-muted" />
-          <div className="text-[13px]">
-            <p className="font-medium">{pending?.hostname ?? (state === "loading" ? <span className="shimmer">Looking up the code…</span> : "Unknown machine")}</p>
-            {pending?.os && <p className="text-subtle">{pending.os}</p>}
-          </div>
-          <span className="ml-auto rounded-lg border border-line px-3 py-1.5 font-mono text-[15px] tracking-[0.12em]">{code}</span>
+          <p className="text-[13px] text-muted">
+            Check that this code matches the one <code className="font-mono">roll agent login</code> printed.
+          </p>
+          <span className="ml-auto shrink-0 rounded-lg border border-line px-3 py-1.5 font-mono text-[15px] tracking-[0.12em]">{code}</span>
         </div>
-        <p className="text-[13px] text-muted">
-          Check that this code matches the one <code className="font-mono">roll agent login</code> printed. The machine will run agents as the owner you pick, with that owner&apos;s projects and threads.
-        </p>
-        <label className="block space-y-1">
-          <span className="text-[12px] text-subtle">Owner</span>
-          <select value={owner} onChange={(e) => setOwner(e.target.value)} className={`${input} w-full`} disabled={!owners?.length}>
-            {(owners ?? []).map((o) => (
-              <option key={o}>{o}</option>
-            ))}
-          </select>
-        </label>
+        <p className="text-[13px] text-muted">The machine runs agents for the owner you pick, with that owner&apos;s projects and threads.</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block space-y-1">
+            <span className="text-[12px] text-subtle">Owner</span>
+            <select value={owner} onChange={(e) => setOwner(e.target.value)} className={`${input} w-full`} disabled={!owners?.length} aria-label="Owner">
+              {(owners ?? []).map((o) => (
+                <option key={o}>{o}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block space-y-1">
+            <span className="text-[12px] text-subtle">Name (optional)</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="its hostname" aria-label="Machine name" className={`${input} w-full`} />
+          </label>
+        </div>
         <div className="flex gap-2">
-          <button
-            className={primary}
-            disabled={!owner || state !== "ready"}
-            onClick={async () => {
-              setState("approving");
-              setError(null);
-              try {
-                await agentsApi.approveLogin(code, owner);
-                setState("approved");
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-                setState("ready");
-              }
-            }}
-          >
+          <button className={primary} disabled={!owner || state !== "ready"} onClick={() => void act(true)}>
             {state === "approving" ? <span className="shimmer">Connecting…</span> : "Connect machine"}
           </button>
-          <button
-            className={btn}
-            disabled={state !== "ready"}
-            onClick={async () => {
-              try {
-                await agentsApi.denyLogin(code);
-                setState("denied");
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-              }
-            }}
-          >
+          <button className={btn} disabled={!owner || state !== "ready"} onClick={() => void act(false)}>
             Deny
           </button>
         </div>
