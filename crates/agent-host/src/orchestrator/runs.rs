@@ -850,6 +850,13 @@ impl Host {
             return Err(Fail::Conflict("the provider session ended".into()));
         };
         session.respond(&provider_id, &response).await.map_err(|e| Fail::Provider(format!("{e:#}")))?;
+        // Accepting a plan takes the session out of plan mode (Claude switches itself); the
+        // thread follows, so the next run doesn't put it back.
+        let leaves_plan = matches!(
+            (&request.body, &response),
+            (RequestBody::Approval(a), Response::Decision { decision: Decision::Accept | Decision::AcceptForSession, .. })
+                if a.action == ApprovalAction::Plan
+        );
         let at = now();
         let mut batch = Vec::new();
         if let Some((_, record)) = active.requests.get_mut(id) {
@@ -866,6 +873,14 @@ impl Host {
         }
         active.by_provider.remove(&provider_id);
         batch.extend(self.settle_waiting(rt));
+        if leaves_plan && rt.thread.interaction_mode == InteractionMode::Plan {
+            rt.thread.interaction_mode = InteractionMode::Default;
+            if let Some(live) = rt.live.as_mut() {
+                live.interaction = InteractionMode::Default;
+            }
+            rt.thread.updated_at = at;
+            batch.push(Entity::Thread(rt.thread.clone()));
+        }
         self.put(batch)?;
         Ok(Reply::Ok)
     }

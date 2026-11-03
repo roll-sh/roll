@@ -448,3 +448,59 @@ async fn replay_and_subscribe_agree_and_never_repeat_a_record() {
     let rest = w.host.since(first.last().unwrap().seq, usize::MAX).await.unwrap();
     assert_eq!(first.len() + rest.len(), replay.len());
 }
+
+#[tokio::test]
+async fn accepting_a_plan_leaves_plan_mode() {
+    let fake = FakeProvider::with("claude", Capabilities { mode_switch: true, plan_mode: true, ..Capabilities::default() }, Script::Manual);
+    let w = World::new(vec![fake.clone()]).await;
+    let Reply::Created { id } = w
+        .run(Command::ThreadCreate {
+            project: w.project.clone(),
+            provider: ProviderId::claude(),
+            model: None,
+            effort: None,
+            runtime_mode: RuntimeMode::AutoEdit,
+            interaction_mode: InteractionMode::Plan,
+            worktree: false,
+            title: None,
+            prompt: Some("plan the refactor".into()),
+            attachments: Vec::new(),
+        })
+        .await
+    else {
+        panic!("thread.create failed")
+    };
+    let thread = ThreadId(id);
+    let session = fake.session(0).await;
+    assert_eq!(session.config.interaction_mode, InteractionMode::Plan);
+    session.wait_calls(|c| c.len() == 1).await;
+    session.emit(ProviderEvent::Request {
+        id: "plan-1".into(),
+        item: None,
+        body: RequestBody::Approval(Approval {
+            action: ApprovalAction::Plan,
+            title: "Carry out the plan".into(),
+            command: None,
+            cwd: None,
+            files: Vec::new(),
+            reason: None,
+            tool: Some("ExitPlanMode".into()),
+            input: serde_json::Value::Null,
+            decisions: vec![Decision::Accept, Decision::Decline],
+        }),
+    });
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Waiting).await;
+    let request = w.state().await.requests(&thread).pop().unwrap();
+    let accept = Command::RequestRespond { request: request.id, response: Response::Decision { decision: Decision::Accept, message: None } };
+    assert_eq!(w.run(accept).await, Reply::Ok);
+    let t = w.wait_thread(&thread, |t| t.interaction_mode == InteractionMode::Default).await;
+    assert_eq!(t.runtime_mode, RuntimeMode::AutoEdit);
+    session.emit(ProviderEvent::TurnEnded(TurnEnd::Completed));
+    w.wait_thread(&thread, |t| t.status == ThreadStatus::Idle).await;
+
+    // The next run reuses the session as is: it already left plan mode on its own.
+    w.run(Command::MessageSend { thread: thread.clone(), text: "go".into(), attachments: Vec::new(), mode: SendMode::Queue }).await;
+    let calls = session.wait_calls(|c| sends(c).len() == 2).await;
+    assert!(!calls.iter().any(|c| matches!(c, Call::SetModes(..))), "{calls:?}");
+    assert_eq!(fake.sessions().len(), 1);
+}
