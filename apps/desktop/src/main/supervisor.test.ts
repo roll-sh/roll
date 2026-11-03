@@ -60,10 +60,11 @@ describe("Supervisor (with a fake roll binary)", () => {
   const calls = () => readFileSync(join(dir, "calls"), "utf8").trim().split("\n");
 
   it("restarts a crashing daemon with doubling, capped delays", async () => {
-    const { states, sup } = make({ FAKE_ROLL_EXIT: "1" });
+    // A frozen clock: `at - now` is exactly the delay chosen (a real clock can tick in between).
+    const { states, sup } = make({ FAKE_ROLL_EXIT: "1" }, { now: () => 0 });
     sup.start();
     await until(() => states.filter((s) => s.state.kind === "restarting").length >= 5);
-    const restarts = states.flatMap(({ state, t }) => (state.kind === "restarting" ? [{ attempt: state.attempt, delay: state.at - t, why: state.lastExit }] : []));
+    const restarts = states.flatMap(({ state }) => (state.kind === "restarting" ? [{ attempt: state.attempt, delay: state.at, why: state.lastExit }] : []));
     expect(restarts.slice(0, 5).map((r) => r.attempt)).toEqual([1, 2, 3, 4, 5]);
     expect(restarts.slice(0, 5).map((r) => r.delay)).toEqual([40, 80, 160, 160, 160]);
     expect(restarts[0].why).toBe("exited with code 1");
