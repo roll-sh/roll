@@ -1149,7 +1149,7 @@ pub struct State {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
     /// A record changed (SSE `id:` is its cursor).
-    Entity(Mirrored),
+    Entity(Box<Mirrored>),
     /// A machine was added, renamed, connected or disconnected (SSE `id:` is its cursor).
     Machine { cursor: u64, machine: Machine },
     /// A machine was revoked.

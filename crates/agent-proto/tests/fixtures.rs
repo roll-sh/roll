@@ -487,7 +487,7 @@ fn machine() -> Machine {
 
 fn stream() -> Vec<StreamEvent> {
     vec![
-        StreamEvent::Entity(Mirrored { cursor: 7, machine: mch(), entity: Entity::Thread(thread()) }),
+        StreamEvent::Entity(Box::new(Mirrored { cursor: 7, machine: mch(), entity: Entity::Thread(thread()) })),
         StreamEvent::Machine { cursor: 8, machine: machine() },
         StreamEvent::MachineRemoved { cursor: 9, machine: mch() },
         StreamEvent::Delta { machine: mch(), delta: deltas().remove(1) },

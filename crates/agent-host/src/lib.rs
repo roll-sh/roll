@@ -4,4 +4,37 @@
 //! owns the files, keeps every record in an SQLite store stamped with a `seq`, and mirrors them
 //! to the relay over one outbound WebSocket.
 
+use agent_proto::{Command, Delta, MachineInfo, Reply, Stamped};
+use async_trait::async_trait;
+use tokio::sync::broadcast;
+
 pub mod provider;
+
+/// Something the daemon has to tell the relay, as it happens.
+#[derive(Clone, Debug)]
+pub enum Outbound {
+    Entity(Box<Stamped>),
+    Delta(Delta),
+    /// `MachineInfo` changed (after `provider.refresh`): send `hello` again.
+    Info(MachineInfo),
+}
+
+/// What the relay link needs from the daemon. The orchestrator implements it; the relay link
+/// (`relay.rs`) only talks to this, so each side is tested on its own.
+#[async_trait]
+pub trait Daemon: Send + Sync + 'static {
+    async fn info(&self) -> MachineInfo;
+
+    /// Stored records with `seq > after`, oldest first, at most `limit`. Each record appears
+    /// once, at its newest `seq`.
+    async fn since(&self, after: u64, limit: usize) -> anyhow::Result<Vec<Stamped>>;
+
+    /// Everything from now on. Subscribe before calling `since` so nothing falls in between;
+    /// duplicates are harmless (the relay keeps the newest `seq`). A lagged receiver must
+    /// resubscribe and replay from its last acknowledged `seq`.
+    fn subscribe(&self) -> broadcast::Receiver<Outbound>;
+
+    /// Run a command. `id` is the client's idempotency key: a second call with the same id
+    /// returns the first call's reply without running anything. `by` is who sent it.
+    async fn run(&self, id: String, by: String, command: Command) -> Reply;
+}
